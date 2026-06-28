@@ -36,41 +36,58 @@ continues to apply to that component.
 
 Vendored native components:
 
-- LSPlant: LGPL-3.0, see `srx_core/vendor/lsplant/LICENSE.LSPlant`.
-- DexBuilder: LGPL-3.0, see `srx_core/vendor/lsplant/external/dex_builder/LICENSE.DexBuilder`.
-- parallel_hashmap: Apache-2.0, see `srx_core/vendor/lsplant/external/dex_builder/external/parallel_hashmap/LICENSE.parallel_hashmap`.
+- LSPlant: LGPL-3.0, https://github.com/LSPosed/LSPlant, see `srx_core/vendor/lsplant/LICENSE.LSPlant`.
+- DexBuilder: LGPL-3.0, https://github.com/LSPosed/DexBuilder, see `srx_core/vendor/lsplant/external/dex_builder/LICENSE.DexBuilder`. File-level AGPL-3.0-or-later and Apache-2.0 notices in `dex_builder.*` are retained.
+- Android dex slicer files from AOSP: Apache-2.0 notices are retained in `srx_core/vendor/lsplant/external/dex_builder/slicer/` and `srx_core/vendor/lsplant/external/dex_builder/include/slicer/`.
+- parallel_hashmap: Apache-2.0, https://github.com/greg7mdp/parallel-hashmap, see `srx_core/vendor/lsplant/external/dex_builder/external/parallel_hashmap/LICENSE.parallel_hashmap`.
 
-Rust dependencies:
+Rust direct dependencies:
 
-- libc
-- jni-sys
-- serde
-- serde_json
-- once_cell
-- log
-- srx_hook
-- srx_inline_hook
+- libc: MIT OR Apache-2.0.
+- jni-sys: MIT OR Apache-2.0.
+- serde: MIT OR Apache-2.0.
+- serde_json: MIT OR Apache-2.0.
+- once_cell: MIT OR Apache-2.0.
+- log: MIT OR Apache-2.0.
+- srx_hook: MIT, https://github.com/Kindness-Kismet/srx_hook.
+- srx_inline_hook: related Kindness-Kismet source dependency, https://github.com/Kindness-Kismet/srx_inline_hook. No separate upstream license file was detected when this notice was written.
 
-Android/Kotlin dependencies:
+Rust transitive dependencies currently pulled by the above crates include:
 
-- Android Gradle Plugin
-- Kotlin and Compose compiler/plugin
-- AndroidX Core, Activity, Lifecycle, Compose UI, Compose Foundation, Compose Material Icons, and Material 3
-- Material Kolor
-- Miuix UI, icons, preference, and blur modules
-- kotlinx.coroutines
-- Gson
-- HiddenApiBypass
-- Backdrop
-- Capsule
+- aho-corasick: Unlicense OR MIT.
+- bitflags: MIT OR Apache-2.0.
+- itoa: MIT OR Apache-2.0.
+- jni-sys-macros: MIT OR Apache-2.0.
+- memchr: Unlicense OR MIT.
+- proc-macro2: MIT OR Apache-2.0.
+- quote: MIT OR Apache-2.0.
+- regex, regex-automata, and regex-syntax: MIT OR Apache-2.0.
+- serde_core and serde_derive: MIT OR Apache-2.0.
+- syn: MIT OR Apache-2.0.
+- unicode-ident: (MIT OR Apache-2.0) AND Unicode-3.0.
+- zmij: MIT.
+
+Android/Kotlin direct dependencies:
+
+- Android Gradle Plugin: Apache-2.0.
+- Kotlin Gradle plugin and Compose compiler/plugin: Apache-2.0.
+- AndroidX Core, Activity, Lifecycle, Compose UI, Compose Foundation, Compose Material Icons, and Material 3: Apache-2.0.
+- Material Kolor: MIT, https://github.com/jordond/materialkolor.
+- Miuix UI, icons, preference, and blur modules: Apache-2.0, https://github.com/compose-miuix-ui/miuix.
+- kotlinx.coroutines: Apache-2.0.
+- Gson: Apache-2.0.
+- HiddenApiBypass: Apache-2.0, https://github.com/LSPosed/AndroidHiddenApiBypass.
+- Backdrop: Apache-2.0.
+- Capsule: Apache-2.0.
+- JUnit 4: EPL-1.0.
 
 Build and packaging tools:
 
-- Gradle
-- Android SDK / NDK / build-tools
-- CMake
-- Ninja
-- Rust toolchain and Cargo
+- Gradle: Apache-2.0.
+- Android SDK / NDK / build-tools: Android SDK license and component-specific notices.
+- CMake: BSD-3-Clause.
+- Ninja: Apache-2.0.
+- Rust toolchain and Cargo: MIT OR Apache-2.0.
 
 4. Trademarks and names
 
