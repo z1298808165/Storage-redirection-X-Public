@@ -66,6 +66,7 @@ fn build_lsplant_bridge(target_arch: &str, is_debug_build: bool) {
         panic!("unsupported Android arch for LSPlant: {target_arch}");
     };
 
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let build_dir = out_dir.join("lsplant_cmake").join(abi);
     let install_dir = out_dir.join("lsplant_install").join(abi);
@@ -76,8 +77,9 @@ fn build_lsplant_bridge(target_arch: &str, is_debug_build: bool) {
 
     let mut configure = Command::new("cmake");
     configure
+        .current_dir(&manifest_dir)
         .arg("-S")
-        .arg("native")
+        .arg(manifest_dir.join("native"))
         .arg("-B")
         .arg(&build_dir)
         .arg("-G")
@@ -102,6 +104,7 @@ fn build_lsplant_bridge(target_arch: &str, is_debug_build: bool) {
 
     let mut build = Command::new("cmake");
     build
+        .current_dir(&manifest_dir)
         .arg("--build")
         .arg(&build_dir)
         .arg("--target")
