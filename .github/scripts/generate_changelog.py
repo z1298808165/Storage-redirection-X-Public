@@ -13,6 +13,10 @@ from pathlib import Path
 MAX_PATCH_CHARS = 180_000
 MAX_SECTION_ITEMS = 8
 GENERIC_SUMMARIES = {"CI", "ci", "更新", "修复", "调整", "优化", "文档", "测试"}
+AUTO_MANIFEST_PREFIXES = (
+    "CI：更新更新清单",
+    "发布：更新更新清单",
+)
 CLASSIFICATION_PATCH_EXCLUDED_PREFIXES = (
     ".github/",
     "docs/",
@@ -22,6 +26,7 @@ CLASSIFICATION_PATCH_EXCLUDED_FILES = {
     "AGENTS.md",
     "CONTRIBUTING.md",
     "README.md",
+    "update.json",
 }
 
 
@@ -114,6 +119,8 @@ def commit_infos(previous: str, current: str) -> list[CommitInfo]:
             continue
         sha = parts[0][:7]
         subject = parts[1].strip()
+        if is_auto_manifest_subject(subject):
+            continue
         body = parts[2].strip() if len(parts) > 2 else ""
         summary = summarize_commit_text(subject)
         commits.append(
@@ -126,6 +133,10 @@ def commit_infos(previous: str, current: str) -> list[CommitInfo]:
             )
         )
     return commits
+
+
+def is_auto_manifest_subject(subject: str) -> bool:
+    return subject.startswith(AUTO_MANIFEST_PREFIXES)
 
 
 def commit_lines(commits: list[CommitInfo]) -> list[str]:
