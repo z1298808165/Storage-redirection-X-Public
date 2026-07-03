@@ -34,7 +34,7 @@ me.fakerqu.test.storageredirection.TEST_CASE
 当前完整设备侧通过标准是：
 
 - `basic/all` 通过。
-- 当前模块应跑完 scenario 1-27；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
+- 当前模块应跑完 scenario 1-28；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 
 下面 PowerShell 示例默认先设置目标设备序列号：
@@ -126,9 +126,9 @@ adb -s $Serial shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_
 只跑部分场景时可以用 PowerShell 参数或环境变量：
 
 ```powershell
-.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll -Scenarios 9,17,19,22,23,24,26
+.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll -Scenarios 9,17,19,22,23,24,26,28
 
-$env:SRT_SCENARIOS = "9,17,19,22,23,24,26"
+$env:SRT_SCENARIOS = "9,17,19,22,23,24,26,28"
 .\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll
 Remove-Item Env:SRT_SCENARIOS
 ```
@@ -144,7 +144,7 @@ ANDROID_SERIAL=<serial> bash .github/scripts/run-storage-redirect-scenarios.sh
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-27。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-28。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，排查状态污染时使用。 |
 | `RUN_FUSE_DAEMON_SCENARIOS=0/1` | 强制跳过或强制运行 FUSE daemon 专属场景；默认自动探测模块是否支持。 |
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
@@ -182,6 +182,7 @@ ANDROID_SERIAL=<serial> bash .github/scripts/run-storage-redirect-scenarios.sh
 | 25 | 启用文件监控且 FUSE daemon 开启时，普通应用直写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 26 | 启用文件监控且 FUSE daemon 关闭时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 27 | 启用文件监控且 FUSE daemon 开启时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
+| 28 | 启用 `read_only_paths=["Pictures/SrtReadOnlyMedia"]`，预置真实图片并扫描进 MediaStore，验证测试 APP 通过 MediaStore 查询仍能看到只读真实路径下的图片行。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 
@@ -212,6 +213,7 @@ mediastore_query_video
 mediastore_query_audio
 mediastore_query_file
 mediastore_query_download
+mediastore_query_read_only_image
 mediastore_query_path_image
 mediastore_query_path_video
 mediastore_query_path_audio
@@ -302,12 +304,12 @@ adb -s $Serial shell am start-foreground-service -n me.fakerqu.test.storageredir
 | `file_path` | 文件读、写、删、创建、重命名源路径等用例的目标路径。 |
 | `target_file_path` | `file_rename` / `file_rename_denied` 的目标路径。 |
 | `file_dir` | 目录列表和 mkdir 类用例的目标目录。 |
-| `file_name` | MediaStore 创建用例的文件名，或 `mediastore_query_path_*` 用例用于定位目标行的文件名。 |
+| `file_name` | MediaStore 创建用例的文件名，或 `mediastore_query_path_*` / `mediastore_query_read_only_image` 用例用于定位目标行的文件名。 |
 | `relative_path` | MediaStore 创建用例写入的相对目录，例如 `Download/SrtMonitor`；未传入时使用媒体类型默认目录。 |
 | `keep_pending` | MediaStore 创建用例是否保留 `IS_PENDING=1`；支持 `1`、`true`、`yes`，用于创建后立即由同一测试 APP 继续读写 URI。 |
 | `payload` | 写入内容。 |
 | `expected_payload` | 读回校验内容。 |
-| `expected_path` | `file_readlink` 的期望链接目标，或 `mediastore_query_path_*` 的期望 cursor `DATA` 路径。 |
+| `expected_path` | `file_readlink` 的期望链接目标，或 `mediastore_query_path_*` / `mediastore_query_read_only_image` 的期望 cursor `DATA` 路径。 |
 | `length` | `file_truncate` / `file_ftruncate` 的目标长度。 |
 | `mode` | `file_access`、`file_chmod`、`file_fchmod` 的访问模式或权限模式；支持十进制、`0600` 八进制和 `0o600` 八进制写法。 |
 

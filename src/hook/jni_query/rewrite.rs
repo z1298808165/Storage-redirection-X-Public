@@ -405,6 +405,9 @@ pub(crate) fn should_hide_cursor_storage_path_for_caller(
     if writer::is_path_allowed_by_caller_real_paths(&resolved_path, &caller_package, caller_uid) {
         return log("allowed", &resolved_path, &caller_package, "", false);
     }
+    if writer::is_path_read_only_by_caller_paths(&resolved_path, &caller_package, caller_uid) {
+        return log("read_only", &resolved_path, &caller_package, "", false);
+    }
 
     let redirect_target =
         writer::resolve_system_writer_redirect_target(&caller_package, caller_uid, user_id, false);
@@ -1704,6 +1707,53 @@ mod tests {
         assert!(is_redirect_enabled_for_caller_uid(caller_uid));
         assert!(should_hide_cursor_storage_path_for_caller(
             "/storage/emulated/0/DCIM/Camera/photo.jpg",
+            caller_uid,
+        ));
+
+        runtime.set_current_caller_package(&previous_package);
+        runtime.set_current_caller_uid(previous_uid);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
+    }
+
+    #[test]
+    fn cursor_visibility_keeps_read_only_real_path_rows() {
+        let config = SettingsHub::instance();
+        let caller_package = "com.aliyun.tongyi";
+        let caller_uid = 10232;
+        let runtime = InterceptHub::instance();
+        let previous_package = runtime.get_current_caller_package();
+        let previous_uid = runtime.get_current_caller_uid();
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([(
+            caller_package.to_string(),
+            caller_uid,
+        )]));
+
+        assert!(is_redirect_enabled_for_caller_uid(caller_uid));
+        assert!(!should_hide_cursor_storage_path_for_caller(
+            "/storage/emulated/0/Pictures/CoolMarket/20260615-143714-92a3f2.png",
             caller_uid,
         ));
 
