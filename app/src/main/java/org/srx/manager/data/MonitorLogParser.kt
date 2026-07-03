@@ -4,6 +4,7 @@ import org.srx.manager.root.isSafePackageName
 
 internal fun parseMonitorLogEntries(
     raw: String,
+    filters: FileMonitorFilters? = null,
     labelResolver: (String) -> String = { it },
 ): List<LogEntry> {
     val labelCache = mutableMapOf<String, String>()
@@ -13,6 +14,7 @@ internal fun parseMonitorLogEntries(
         .mapNotNull { parseMonitorLogLine(it, labelCache, labelResolver) }
         .filterNot { it.path.substringAfterLast('/').matches(TempJsLogPathRegex) }
         .filterNot { it.isMediaStorePendingIntermediateRecord() }
+        .filterNot { filters != null && it.matchesMonitorFilters(filters) }
         .toList()
         .coalesceMonitorLogEntries()
         .asReversed()
@@ -64,6 +66,7 @@ private fun parseMonitorLogLine(
         identifyReliability = identifyReliability,
         source = source,
         resultGroup = resultGroup,
+        filterOperation = op,
         isModuleWebUiExport = isModuleExport,
     )
 }
@@ -370,6 +373,73 @@ private fun String.normalizedMonitorOperation(): String =
     lowercase().removeSuffix(":create").removeSuffix(":write").removeSuffix(":read").let {
         if (it == "open" || it == "openat" || it == "openat2" || it == "provider_open" || it == "create" || it == "fuse_create" || it == "export") "create" else it
     }
+
+private fun LogEntry.matchesMonitorFilters(filters: FileMonitorFilters): Boolean {
+    val operationMatched = filters.excludedOperations.any { rule ->
+        monitorOperationFilterMatches(rule, filterOperation.ifBlank { operation })
+    }
+    if (operationMatched) return true
+
+    val paths = listOf(path, landingPath, fromPath, backendPath)
+    return filters.excludedPaths.any { rule ->
+        paths.any { path -> monitorPathFilterMatches(rule, path) }
+    }
+}
+
+private fun monitorOperationFilterMatches(rule: String, operation: String): Boolean {
+    val pattern = rule.trim().lowercase()
+    val value = operation.trim().lowercase()
+    if (pattern.isBlank() || value.isBlank() || '/' in pattern) return false
+    return wildcardMatches(pattern, value)
+}
+
+private fun monitorPathFilterMatches(rule: String, path: String): Boolean {
+    val pattern = SrxConfigNormalizer.sanitizeMonitorFilterPath(rule, allowLegacyAbsolute = true)
+    if (pattern.isBlank()) return false
+    val relative = monitorFilterRelativePath(path)
+    if (relative.isBlank()) return false
+    if (!pattern.hasMonitorWildcard()) {
+        return relative == pattern || relative.startsWith("$pattern/")
+    }
+    if (wildcardMatches(pattern, relative)) return true
+    return pattern.removeSuffix("/**").takeIf { it != pattern }?.let { base ->
+        wildcardMatches(base, relative)
+    } == true
+}
+
+private fun monitorFilterRelativePath(path: String): String {
+    var value = normalizeMonitorLogPath(path)
+        .replace('\\', '/')
+        .replace(Regex("/+"), "/")
+        .removeSuffix("/")
+    if (value.isBlank()) return ""
+    value = value.replace(Regex("^/sdcard(?=/|$)"), "/storage/emulated/0")
+    value = value.replace(Regex("^/storage/self/primary(?=/|$)"), "/storage/emulated/0")
+    value = value.replace(Regex("^/data/media/(\\d+)(?=/|$)")) { match ->
+        "/storage/emulated/${match.groupValues[1]}"
+    }
+    val match = Regex("^/storage/emulated/\\d+/(.+)$").find(value) ?: return ""
+    val relative = match.groupValues[1].trim('/')
+    if (relative.isBlank() || relative.split('/').any { it == "." || it == ".." }) return ""
+    return relative
+}
+
+private fun String.hasMonitorWildcard(): Boolean = '*' in this || '?' in this
+
+private fun wildcardMatches(pattern: String, value: String): Boolean {
+    val regex = buildString {
+        append('^')
+        pattern.forEach { ch ->
+            when (ch) {
+                '*' -> append(".*")
+                '?' -> append('.')
+                else -> append(Regex.escape(ch.toString()))
+            }
+        }
+        append('$')
+    }.toRegex()
+    return regex.matches(value)
+}
 
 private fun Sequence<String>.takeLastCompat(count: Int): Sequence<String> =
     toList().takeLast(count).asSequence()

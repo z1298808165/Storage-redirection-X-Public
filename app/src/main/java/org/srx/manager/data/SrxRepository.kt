@@ -236,7 +236,8 @@ class SrxRepository(
 
     suspend fun readLogs(): List<LogEntry> {
         val raw = fileStore.readTail(FileMonitorLogPath, LogPreviewTailLines)
-        return withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, ::resolveLogPackageLabel) }
+        val filters = readFileMonitorFilters()
+        return withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, filters, ::resolveLogPackageLabel) }
     }
 
     suspend fun clearLogs(): Boolean {
@@ -586,7 +587,7 @@ class SrxRepository(
     private suspend fun readEffectiveEvents(): Int {
         val stats = readFile(StatsPath).trim().toIntOrNull()
         if (stats != null && stats >= 0) return stats
-        return parseMonitorLogEntries(readFile(FileMonitorLogPath)).count { it.ok }
+        return parseMonitorLogEntries(readFile(FileMonitorLogPath), filters = readFileMonitorFilters()).count { it.ok }
     }
 
     private fun resolveLogPackageLabel(packageName: String): String {

@@ -3810,8 +3810,12 @@
     if (!pullRefresh) viewer.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>加载日志...</span></div>';
     try {
       await Api.ensureLogCollectors?.();
-      const content = await Api.readFile(FILE_MONITOR_LOG);
-      displayLogs(content);
+      const [content, filters] = await Promise.all([
+        Api.readFile(FILE_MONITOR_LOG),
+        Api.readMonitorFilters({ force: true }).catch(() => State.monitorFilters || null)
+      ]);
+      if (filters) State.monitorFilters = filters;
+      displayLogs(content, filters);
     }
     catch {
       if (pullRefresh) {
@@ -3823,10 +3827,10 @@
     }
   }
 
-  function displayLogs(raw) {
+  function displayLogs(raw, filters) {
     const viewer = $('#logViewer'), infoEl = $('#logInfo');
     if (!raw || !raw.trim()) { State.logEntries = []; viewer.innerHTML = '<div class="log-empty">暂无文件操作记录</div>'; if (infoEl) infoEl.textContent = ''; return; }
-    State.logEntries = parseMonitorLogEntries(raw).reverse();
+    State.logEntries = parseMonitorLogEntries(raw, { filters }).reverse();
     renderLogCards();
   }
 
@@ -3834,7 +3838,8 @@
     if (!raw || !raw.trim()) return [];
     const lines = raw.trim().split('\n').filter(Boolean);
     if (options?.hydratePackages !== false) hydrateLogPackageInfo(lines);
-    const entries = lines.slice(-500).map(parseLogLine).filter(Boolean);
+    const filters = normalizeLogMonitorFilters(options?.filters || State.monitorFilters);
+    const entries = lines.slice(-500).map(parseLogLine).filter(Boolean).filter(entry => !shouldFilterMonitorLogEntry(entry, filters));
     const mappingPaths = collectMappingPaths(entries);
     return coalesceLogEntries(entries, mappingPaths);
   }
@@ -3947,7 +3952,64 @@
     if (extras.identify_reliability) meta.push('可靠性 ' + formatReliability(extras.identify_reliability));
     const summaryText = meta.join(' · ');
     const searchText = [appName, pkg, processPkg, callerPkg, watchPkg, operationLabel, action, sourceText, statusText, displayPath, sourcePath, backendPath, line].join(' ').toLowerCase();
-    return { raw: line, timestamp, timeText, processPkg, callerPkg, watchPkg, pkg, appName, operationLabel, action, summaryText, path: displayPath, originalPath: path, fromPath, landingPath, sourcePath, backendPath, status, statusText, meta, extras, searchText, isModuleWebUiExport };
+    return { raw: line, timestamp, timeText, processPkg, callerPkg, watchPkg, pkg, appName, operationLabel, filterOperation: syscallOp, action, summaryText, path: displayPath, originalPath: path, fromPath, landingPath, sourcePath, backendPath, status, statusText, meta, extras, searchText, isModuleWebUiExport };
+  }
+
+  function normalizeLogMonitorFilters(filters) {
+    if (!filters || typeof filters !== 'object') return { excluded_paths: [], excluded_operations: [] };
+    return {
+      excluded_paths: normalizeMonitorFilterPathList(filters.excluded_paths || []),
+      excluded_operations: normalizeMonitorFilterOperationList(filters.excluded_operations || [])
+    };
+  }
+
+  function shouldFilterMonitorLogEntry(entry, filters) {
+    if (!entry || !filters) return false;
+    const op = String(entry.filterOperation || entry.operationLabel || '').trim().toLowerCase();
+    if (op && filters.excluded_operations.some(rule => monitorOperationFilterMatches(rule, op))) return true;
+    const paths = [entry.originalPath, entry.landingPath, entry.sourcePath, entry.fromPath, entry.backendPath, entry.path];
+    return filters.excluded_paths.some(rule => paths.some(path => monitorPathFilterMatches(rule, path)));
+  }
+
+  function monitorOperationFilterMatches(rule, operation) {
+    const pattern = String(rule || '').trim().toLowerCase();
+    const value = String(operation || '').trim().toLowerCase();
+    if (!pattern || !value || pattern.includes('/')) return false;
+    return wildcardMatches(pattern, value);
+  }
+
+  function monitorPathFilterMatches(rule, path) {
+    const result = validateMonitorFilterPath(rule, { allowLegacyAbsolute: true });
+    if (!result.valid) return false;
+    const pattern = result.value;
+    const relative = monitorFilterRelativeLogPath(path);
+    if (!relative) return false;
+    if (!hasMonitorWildcard(pattern)) return relative === pattern || relative.startsWith(pattern + '/');
+    if (wildcardMatches(pattern, relative)) return true;
+    if (pattern.endsWith('/**')) return wildcardMatches(pattern.slice(0, -3), relative);
+    return false;
+  }
+
+  function monitorFilterRelativeLogPath(path) {
+    let value = normalizeLogLandingPath(path).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+    if (!value) return '';
+    value = value.replace(/^\/sdcard(?=\/|$)/, '/storage/emulated/0');
+    value = value.replace(/^\/storage\/self\/primary(?=\/|$)/, '/storage/emulated/0');
+    value = value.replace(/^\/data\/media\/(\d+)(?=\/|$)/, '/storage/emulated/$1');
+    const match = value.match(/^\/storage\/emulated\/\d+\/(.+)$/);
+    if (!match) return '';
+    const relative = match[1].replace(/^\/+|\/+$/g, '');
+    if (!relative || relative.split('/').some(part => part === '.' || part === '..')) return '';
+    return relative;
+  }
+
+  function hasMonitorWildcard(pattern) {
+    return /[*?]/.test(String(pattern || ''));
+  }
+
+  function wildcardMatches(pattern, value) {
+    const escaped = String(pattern || '').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp('^' + escaped + '$').test(String(value || ''));
   }
 
   function coalesceLogEntries(entries, mappingPaths = emptyMappingPaths()) {

@@ -604,4 +604,27 @@ class MonitorLogParserTest {
         assertEquals("/storage/emulated/0/Download/DLManager/thumbs", entry.fromPath)
         assertEquals("path_mapping", entry.source)
     }
+
+    @Test
+    fun parserAppliesMonitorPathFiltersToBackendPath() {
+        val raw = "2026-07-03 12:30:41|com.android.mtp,com.android.providers.downloads,com.android.providers.media,com.android.soundpicker|" +
+            "com.android.providers.downloads|MKDIR|/storage/emulated/0/.xlDownload|" +
+            "ret=0|errno=0|identify_method=java_stack|identify_reliability=medium|op=mkdir|" +
+            "backend=/data/media/0/Android/data/com.android.providers.downloads/sdcard/.xlDownload|" +
+            "from=/storage/emulated/0/.xlDownload|source=sandbox_path"
+
+        val entries = parseMonitorLogEntries(raw, filters = FileMonitorFilters(excludedPaths = listOf("Android/data")))
+
+        assertTrue(entries.isEmpty())
+    }
+
+    @Test
+    fun parserAppliesMonitorOperationFiltersWhenDisplayingExistingLogs() {
+        val raw = "2026-07-03 12:30:41|com.example.app|com.example.app|OPEN|" +
+            "/storage/emulated/0/Download/a.txt|ret=10|errno=0|op=open|op_filter=open:read"
+
+        val entries = parseMonitorLogEntries(raw, filters = FileMonitorFilters(excludedPaths = emptyList()))
+
+        assertTrue(entries.isEmpty())
+    }
 }

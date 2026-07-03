@@ -144,6 +144,7 @@ data class LogEntry(
     val identifyReliability: String = "",
     val source: String = "",
     val resultGroup: String = "",
+    val filterOperation: String = "",
     val isModuleWebUiExport: Boolean = false,
 )
 
