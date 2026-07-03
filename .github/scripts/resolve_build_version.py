@@ -92,21 +92,61 @@ def is_worktree_dirty() -> bool:
     return bool(run_git(["status", "--porcelain"], check=False))
 
 
+def published_manifest_build_count(current_version: str) -> int | None:
+    manifest_path = Path("update.json")
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    beta = manifest.get("beta")
+    if not isinstance(beta, dict):
+        return None
+    version = beta.get("version")
+    if not isinstance(version, str):
+        return None
+    match = re.fullmatch(re.escape(current_version) + r"-ci\.(\d+)", version)
+    return int(match.group(1)) if match else None
+
+
+def latest_ci_manifest_commit(current_version: str) -> str | None:
+    commits_text = run_git(["rev-list", "--first-parent", "HEAD"], check=False)
+    for commit in [line for line in commits_text.splitlines() if line]:
+        subject = run_git(["log", "-1", "--pretty=%s", commit])
+        if subject.startswith(f"CI：更新更新清单 {current_version}-ci."):
+            return commit
+    return None
+
+
+def count_non_auto_commits(range_expr: str) -> int:
+    commits_text = run_git(["rev-list", "--first-parent", "--reverse", range_expr], check=False)
+    commits = [line for line in commits_text.splitlines() if line]
+    return sum(1 for commit in commits if not is_auto_manifest_commit(commit))
+
+
 def resolve_build_count(current_version: str, include_dirty: bool) -> int:
     head_version = current_head_version()
     start = None if head_version != current_version else version_start_commit(current_version)
-    count = 0
+    offset = BUILD_COUNT_OFFSETS.get(current_version, 0)
+    historical_count = 0
     if start:
-        commits_text = run_git(["rev-list", "--first-parent", "--reverse", f"{start}^..HEAD"], check=False)
-        commits = [line for line in commits_text.splitlines() if line]
-        count = sum(1 for commit in commits if not is_auto_manifest_commit(commit))
+        historical_count = count_non_auto_commits(f"{start}..HEAD")
+
+    manifest_count = published_manifest_build_count(current_version)
+    count = historical_count
+    if manifest_count is not None:
+        last_manifest_commit = latest_ci_manifest_commit(current_version)
+        if last_manifest_commit:
+            pending_count = count_non_auto_commits(f"{last_manifest_commit}..HEAD")
+            count = max(manifest_count - offset, 0) + pending_count
 
     if include_dirty and is_worktree_dirty():
         if head_version != current_version:
             count = 0
         count += 1
 
-    return max(count, 1) + BUILD_COUNT_OFFSETS.get(current_version, 0)
+    return max(count, 1) + offset
 
 
 def version_code(base_version: str, build_count: int, release: bool) -> int:
