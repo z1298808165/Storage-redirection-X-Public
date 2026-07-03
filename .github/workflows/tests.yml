@@ -1,0 +1,116 @@
+name: 端到端测试
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_TARGET: google_apis
+  ANDROID_ARCH: x86_64
+  TEST_REPO: https://github.com/Kindness-Kismet/StorageRedirectTest.git
+
+jobs:
+  tests:
+    name: Android API ${{ matrix.api-level }} 端到端
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ANDROID_API_LEVEL: ${{ matrix.api-level }}
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [33, 35, 36]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 配置 Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: 配置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: 配置 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 安装主机编译工具
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: 安装 NDK 和 CMake
+        shell: bash
+        run: |
+          (yes | sdkmanager --licenses > /dev/null) || true
+          ndk_version="29.0.14206865"
+          latest_cmake_pkg=$(sdkmanager --list | tr -d '\r' | grep -oE 'cmake;[0-9][0-9.]+' | sort -Vu | tail -n 1)
+          sdkmanager "ndk;${ndk_version}" "${latest_cmake_pkg}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ndk_version}" >> "${GITHUB_ENV}"
+
+      - name: 构建 SRX 模块（x86_64）
+        run: python scripts/build.py build-zygisk --abi x86_64
+
+      - name: 拉取并编译测试 APK
+        run: bash .github/tests/build-test-app.sh
+
+      - name: 启用 KVM 权限
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            sudo sh -c 'echo KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=kvm\" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: 准备脚本权限
+        run: chmod +x .github/tests/*.sh
+
+      - name: 运行模拟器端到端测试
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: ${{ env.ANDROID_TARGET }}
+          arch: ${{ env.ANDROID_ARCH }}
+          profile: pixel_7
+          disk-size: 4096M
+          heap-size: 1024M
+          disable-animations: true
+          emulator-boot-timeout: 1500
+          script: |
+            set -eu
+            adb wait-for-device
+            adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+            bash .github/tests/install-module.sh
+            bash .github/tests/run-all.sh
+
+      - name: 上传测试产物
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tests-api${{ matrix.api-level }}-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            scenario-*-result.txt
+            media-health.txt
+            build/zygisk/*.zip

@@ -3,6 +3,9 @@ build/
 !scripts/src/build/
 !scripts/src/build/*.rs
 
+# e2e 测试拉取的测试仓源码
+test_app/
+
 # IDE
 .idea/
 .vscode/
