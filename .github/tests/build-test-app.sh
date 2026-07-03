@@ -7,8 +7,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 TEST_REPO="${TEST_REPO:-https://github.com/Kindness-Kismet/StorageRedirectTest.git}"
-TEST_REF="${TEST_REF:-main}"
+TEST_REF="${TEST_REF:-}"
 TEST_APP_DIR="${REPO_ROOT}/test_app"
+
+if [ -z "$TEST_REF" ]; then
+  TEST_REF="$(git ls-remote --symref "$TEST_REPO" HEAD | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')"
+fi
+TEST_REF="${TEST_REF:-master}"
 
 rm -rf "$TEST_APP_DIR"
 git clone --depth 1 --branch "$TEST_REF" "$TEST_REPO" "$TEST_APP_DIR"
