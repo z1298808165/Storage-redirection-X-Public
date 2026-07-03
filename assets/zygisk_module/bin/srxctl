@@ -1,0 +1,304 @@
+#!/system/bin/sh
+
+MODDIR="/data/adb/modules/storage.redirect.x"
+CONFIG_DIR="$MODDIR/config"
+APPS_DIR="$CONFIG_DIR/apps"
+LOGS_DIR="$MODDIR/logs"
+RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
+DAEMON_PID_FILE="$LOGS_DIR/.srx_daemon.pid"
+BOOT_OK_FILE="$MODDIR/.boot_ok"
+BOOT_PENDING_FILE="$MODDIR/.boot_pending"
+
+log_ctl() {
+  log -p i -t SRXCTL "$*" 2>/dev/null
+}
+
+stop_pid_file() {
+  pid_file="$1"
+  [ -f "$pid_file" ] || return 0
+  pid=$(cat "$pid_file" 2>/dev/null)
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    wait_until_dead "$pid" 4 25000 || kill -9 "$pid" 2>/dev/null
+  fi
+  rm -f "$pid_file"
+}
+
+wait_until_dead() {
+  pid="$1"
+  attempts="${2:-10}"
+  delay_us="${3:-100000}"
+  [ -n "$pid" ] || return 0
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    usleep "$delay_us" 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+stop_collectors() {
+  for pid_file in \
+    "$LOGS_DIR/.monitor_collector.pid" \
+    "$LOGS_DIR/.config_event_collector.pid" \
+    "$LOGS_DIR/.package_event_collector.pid" \
+    "$LOGS_DIR/.running_collector.pid" \
+    "$LOGS_DIR/.media_state_collector.pid" \
+    "$LOGS_DIR/.app_status_collector.pid" \
+    "$LOGS_DIR/.app_status_snapshot.pid" \
+    "$LOGS_DIR/.stats_collector.pid"; do
+    stop_pid_file "$pid_file"
+  done
+}
+
+configured_packages() {
+  [ -d "$APPS_DIR" ] || return 0
+  for config_file in "$APPS_DIR"/*.json; do
+    [ -f "$config_file" ] || continue
+    basename "$config_file" .json
+  done
+}
+
+media_provider_packages() {
+  pm list packages 2>/dev/null | sed -n 's/^package://p' | grep -E '^(com\.android\.providers\.media|com\.android\.providers\.media\.module|com\.google\.android\.providers\.media\.module)$'
+}
+
+protected_package() {
+  case "$1" in
+    com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+force_stop_package() {
+  package_name="$1"
+  [ -n "$package_name" ] || return 0
+  if protected_package "$package_name"; then
+    log_ctl "skip protected package: $package_name"
+    return 0
+  fi
+  am force-stop "$package_name" >/dev/null 2>&1 || true
+}
+
+force_stop_configured_packages() {
+  jobs=0
+  for package_name in $(configured_packages); do
+    if protected_package "$package_name"; then
+      log_ctl "skip protected package: $package_name"
+      continue
+    fi
+    am force-stop "$package_name" >/dev/null 2>&1 &
+    jobs=$((jobs + 1))
+    if [ "$jobs" -ge 8 ]; then
+      wait
+      jobs=0
+    fi
+  done
+  wait
+}
+
+kill_package_processes() {
+  package_name="$1"
+  [ -n "$package_name" ] || return 0
+  pids=$(pidof "$package_name" 2>/dev/null)
+  [ -n "$pids" ] || return 0
+  for pid in $pids; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait_until_dead "$pid" 4 25000 || kill -9 "$pid" 2>/dev/null || true
+  done
+}
+
+media_provider_pids() {
+  pidof com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media 2>/dev/null
+}
+
+wake_media_provider() {
+  content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 &
+  content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 &
+}
+
+wait_for_media_provider_start() {
+  attempts="${1:-50}"
+  delay_us="${2:-100000}"
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    if media_provider_pids >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$i" -eq 0 ] || [ $((i % 10)) -eq 0 ]; then
+      wake_media_provider
+    fi
+    usleep "$delay_us" 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+restart_media_provider() {
+  for package_name in \
+    com.android.providers.media.module \
+    com.google.android.providers.media.module \
+    com.android.providers.media; do
+    pids=$(pidof "$package_name" 2>/dev/null)
+    [ -n "$pids" ] || continue
+    for pid in $pids; do
+      kill -9 "$pid" 2>/dev/null || true
+    done
+  done
+  # Pull MediaProvider back up through public providers after old processes exit.
+  if wait_for_media_provider_start 50 100000; then
+    log_ctl "media provider restart requested"
+  else
+    log_ctl "media provider restart requested but pid not confirmed"
+  fi
+  start_collectors_if_needed
+}
+
+is_process_alive() {
+  pid="$1"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+is_pid_file_alive() {
+  pid_file="$1"
+  [ -f "$pid_file" ] || return 1
+  pid=$(cat "$pid_file" 2>/dev/null)
+  is_process_alive "$pid"
+}
+
+is_verbose_logging_enabled() {
+  [ -f "$CONFIG_DIR/global.json" ] || return 1
+  grep -Eq '"verbose_logging_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
+}
+
+is_file_monitor_enabled() {
+  [ -f "$CONFIG_DIR/global.json" ] || return 1
+  grep -Eq '"file_monitor_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
+}
+
+is_runtime_disabled() {
+  [ -f "$RUNTIME_DISABLE_FILE" ] || [ -f "$MODDIR/disable" ]
+}
+
+sync_monitor_collector_now() {
+  mkdir -p "$LOGS_DIR"
+
+  if ! is_file_monitor_enabled; then
+    stop_pid_file "$LOGS_DIR/.monitor_collector.pid"
+    return 0
+  fi
+
+  is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid" && return 0
+
+  service_dir="$MODDIR/service.d"
+  if [ -r "$service_dir/common.sh" ] && [ -r "$service_dir/log_collectors.sh" ]; then
+    FILE_MONITOR_LOG_FILE="$LOGS_DIR/file_monitor.log"
+    PACKAGE_EVENT_LOG_FILE="$LOGS_DIR/package_events.log"
+    RECENT_SOURCE_HINT_FILE="$LOGS_DIR/.recent_source_hint"
+    RECENT_PATH_CALLER_HINT_FILE="$LOGS_DIR/.recent_path_caller_hint"
+    MAX_MONITOR_LOG_BYTES=1048576
+    MAX_PACKAGE_EVENT_LOG_BYTES=524288
+    LOG_ROTATE_BACKUPS=2
+    MONITOR_COLLECTOR_PID_FILE="$LOGS_DIR/.monitor_collector.pid"
+    CONFIG_EVENT_COLLECTOR_PID_FILE="$LOGS_DIR/.config_event_collector.pid"
+    PACKAGE_EVENT_COLLECTOR_PID_FILE="$LOGS_DIR/.package_event_collector.pid"
+    . "$service_dir/common.sh"
+    . "$service_dir/log_collectors.sh"
+    sync_monitor_collector
+  fi
+}
+
+is_monitor_collector_state_ok() {
+  if is_file_monitor_enabled; then
+    is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid"
+    return $?
+  fi
+  ! is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid"
+}
+
+start_collectors_if_needed() {
+  if is_runtime_disabled; then
+    stop_pid_file "$LOGS_DIR/.monitor_collector.pid"
+    return 0
+  fi
+
+  sync_monitor_collector_now
+
+  if is_pid_file_alive "$LOGS_DIR/.config_event_collector.pid" \
+    && is_pid_file_alive "$LOGS_DIR/.package_event_collector.pid"; then
+    if is_monitor_collector_state_ok \
+      && { ! is_verbose_logging_enabled \
+      || { is_pid_file_alive "$LOGS_DIR/.running_collector.pid" \
+        && is_pid_file_alive "$LOGS_DIR/.media_state_collector.pid" \
+        && is_pid_file_alive "$LOGS_DIR/.app_status_collector.pid" \
+        && is_pid_file_alive "$LOGS_DIR/.app_status_snapshot.pid" \
+        && is_pid_file_alive "$LOGS_DIR/.stats_collector.pid"; }; }; then
+      return 0
+    fi
+  fi
+
+  if [ -r "$MODDIR/service.sh" ]; then
+    sh "$MODDIR/service.sh" >/dev/null 2>&1 &
+    log_ctl "service collectors restart requested"
+  fi
+}
+
+stop_runtime() {
+  mkdir -p "$LOGS_DIR" "$CONFIG_DIR" "$APPS_DIR"
+  touch "$RUNTIME_DISABLE_FILE"
+  chmod 644 "$RUNTIME_DISABLE_FILE" 2>/dev/null
+  printf '{"runtime_disabled":true}\n' > "$CONFIG_DIR/runtime_state.json"
+  chmod 644 "$CONFIG_DIR/runtime_state.json" 2>/dev/null
+
+  stop_pid_file "$DAEMON_PID_FILE"
+  pkill -x srx_daemon >/dev/null 2>&1 || true
+  stop_collectors
+
+  force_stop_configured_packages
+  restart_media_provider
+  log_ctl "runtime stopped"
+}
+
+start_runtime() {
+  rm -f "$RUNTIME_DISABLE_FILE"
+  mkdir -p "$LOGS_DIR" "$CONFIG_DIR" "$APPS_DIR"
+  printf '{"runtime_disabled":false}\n' > "$CONFIG_DIR/runtime_state.json"
+  chmod 644 "$CONFIG_DIR/runtime_state.json" 2>/dev/null
+  if [ -r "$MODDIR/service.sh" ]; then
+    sh "$MODDIR/service.sh" >/dev/null 2>&1 &
+  fi
+  force_stop_configured_packages
+  restart_media_provider
+  log_ctl "runtime started"
+}
+
+status_runtime() {
+  if [ -f "$RUNTIME_DISABLE_FILE" ]; then
+    echo disabled
+  elif [ -f "$MODDIR/disable" ]; then
+    echo disabled
+  else
+    boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    boot_ok=$(cat "$BOOT_OK_FILE" 2>/dev/null)
+    if [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ -f "$LOGS_DIR/boot_${boot_id}.marker" ]; }; then
+      echo enabled
+    else
+      echo reboot_required
+    fi
+  fi
+}
+
+case "$1" in
+  stop) stop_runtime ;;
+  start) start_runtime ;;
+  restart) stop_runtime; start_runtime ;;
+  restart-media|media-restart) restart_media_provider ;;
+  ensure-collectors) start_collectors_if_needed ;;
+  status|"") status_runtime ;;
+  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|status}" >&2; exit 2 ;;
+esac

@@ -1,0 +1,120 @@
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const repoRoot = path.resolve(__dirname, '..');
+const appJsPath = path.join(repoRoot, 'assets/zygisk_module/webroot/js/app.js');
+const fixtureDir = path.join(repoRoot, 'docs/config-fixtures');
+
+function readJson(name) {
+  return JSON.parse(fs.readFileSync(path.join(fixtureDir, name), 'utf8'));
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((out, key) => {
+      out[key] = stable(value[key]);
+      return out;
+    }, {});
+  }
+  return value;
+}
+
+function assertDeepEqual(actual, expected, label) {
+  const actualText = JSON.stringify(stable(actual));
+  const expectedText = JSON.stringify(stable(expected));
+  if (actualText !== expectedText) {
+    throw new Error(`${label} mismatch\nactual:   ${actualText}\nexpected: ${expectedText}`);
+  }
+}
+
+const sandbox = {
+  console,
+  setTimeout: () => 0,
+  clearTimeout: () => {},
+  localStorage: { getItem: () => null, setItem: () => {} },
+  window: {
+    __SRX_ENABLE_TEST_EXPORTS__: true,
+    App: {},
+    matchMedia: () => ({ matches: false }),
+    addEventListener: () => {},
+    history: { pushState: () => {}, replaceState: () => {} },
+    location: { hash: '' }
+  },
+  document: {
+    readyState: 'loading',
+    addEventListener: () => {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    createElement: () => ({ textContent: '', innerHTML: '' }),
+    documentElement: { setAttribute: () => {} }
+  }
+};
+sandbox.window.window = sandbox.window;
+sandbox.window.document = sandbox.document;
+sandbox.globalThis = sandbox;
+
+vm.runInNewContext(fs.readFileSync(appJsPath, 'utf8'), sandbox, { filename: appJsPath });
+
+const webui = sandbox.window.__SRX_WEBUI_TEST__;
+if (!webui) throw new Error('WebUI test exports were not initialized');
+
+const rawApp = readJson('app-profile-normalization-input.json');
+const normalizedApp = readJson('app-profile-normalization-output.json');
+
+const normalizedResult = webui.normalizeBackupAppConfig('com.example', rawApp);
+if (!normalizedResult.config) {
+  throw new Error(`raw app fixture was rejected: ${normalizedResult.warnings.join('; ')}`);
+}
+assertDeepEqual(normalizedResult.config, normalizedApp, 'app-profile-normalization-input');
+
+const result = webui.normalizeBackupAppConfig('com.example', normalizedApp);
+if (!result.config) {
+  throw new Error(`normalized app fixture was rejected: ${result.warnings.join('; ')}`);
+}
+assertDeepEqual(result.config, normalizedApp, 'app-profile-normalization-output');
+
+const selfPackageResult = webui.normalizeBackupAppConfig('com.storage.redirect.x', normalizedApp);
+if (!selfPackageResult.config) {
+  throw new Error(`self package app config was rejected: ${selfPackageResult.warnings.join('; ')}`);
+}
+
+assertDeepEqual(
+  webui.normalizeBackupUiPreferences({
+    predictive_back: true,
+    floating_bottom_bar: false,
+    liquid_glass: true,
+    blur_effect: false,
+    dynamic_color: true,
+    accent_color: 0xFF2196F3,
+    color_style: 'vibrant',
+    color_spec: 'Spec2021',
+    theme_mode: 'dark',
+    page_scale: 1.25,
+    auto_check_updates: false,
+    update_channel: 'Beta'
+  }),
+  {
+    predictive_back: true,
+    floating_bottom_bar: false,
+    liquid_glass: true,
+    blur_effect: false,
+    dynamic_color: true,
+    accent_color: -14575885,
+    color_style: 'Vibrant',
+    color_spec: 'Spec2021',
+    theme_mode: 'Dark',
+    page_scale: 1.1,
+    auto_check_updates: false,
+    update_channel: 'Beta'
+  },
+  'backup-ui-preferences'
+);
+assertDeepEqual(
+  webui.normalizeBackupUiPreferences({ update_channel: 'BadChannel', color_style: 'BadStyle', accent_color: 4294967296 }),
+  null,
+  'backup-ui-preferences-invalid-values'
+);
+
+console.log('WebUI config fixtures verified');

@@ -1,0 +1,78 @@
+Storage Redirect X Core License and Notices
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This repository contains SRX Core, a modified distribution of Storage Redirect X
+code derived from:
+
+https://github.com/Kindness-Kismet/Storage-redirection-X-Public
+
+Unless a file or a third-party notice states otherwise, the SRX Core source code
+in this repository is licensed under the GNU General Public License, version 3
+or any later version published by the Free Software Foundation
+(GPL-3.0-or-later).
+
+Copyright (c) 2026 Kindness-Kismet
+Modifications copyright (c) 2026 SRX Core contributors
+
+You may use, copy, study, modify, and distribute this project under the terms of
+GPL-3.0-or-later. If you distribute modified versions or binaries, provide the
+corresponding source code for the covered work and keep the same license
+obligations.
+
+The full GPL-3.0 license text is available at:
+
+https://www.gnu.org/licenses/gpl-3.0.html
+
+Third-party components keep their own upstream licenses and notices. If a
+third-party license grants different rights or imposes additional obligations,
+that license continues to apply to that component.
+
+Vendored native components:
+
+- LSPlant: LGPL-3.0, https://github.com/LSPosed/LSPlant,
+  see vendor/lsplant/LICENSE.LSPlant.
+- DexBuilder: LGPL-3.0, https://github.com/LSPosed/DexBuilder,
+  see vendor/lsplant/external/dex_builder/LICENSE.DexBuilder.
+- Android dex slicer files from AOSP: Apache-2.0 notices are retained in
+  vendor/lsplant/external/dex_builder/slicer/ and
+  vendor/lsplant/external/dex_builder/include/slicer/.
+- parallel_hashmap: Apache-2.0, https://github.com/greg7mdp/parallel-hashmap,
+  see vendor/lsplant/external/dex_builder/external/parallel_hashmap/LICENSE.parallel_hashmap.
+- fuser-android: MIT, see vendor/fuser-android/LICENSE.md.
+
+Rust direct dependencies:
+
+- libc: MIT OR Apache-2.0.
+- jni-sys: MIT OR Apache-2.0.
+- serde: MIT OR Apache-2.0.
+- serde_json: MIT OR Apache-2.0.
+- once_cell: MIT OR Apache-2.0.
+- log: MIT OR Apache-2.0.
+- fuser: MIT.
+- srx_hook: MIT, https://github.com/Kindness-Kismet/srx_hook.
+- srx_inline_hook: https://github.com/Kindness-Kismet/srx_inline_hook.
+
+Android/Kotlin direct dependencies:
+
+- Android Gradle Plugin: Apache-2.0.
+- Kotlin Gradle plugin and Compose compiler/plugin: Apache-2.0.
+- AndroidX and Jetpack Compose components: Apache-2.0.
+- Miuix UI and related modules: Apache-2.0,
+  https://github.com/compose-miuix-ui/miuix.
+- AppIconLoader: Apache-2.0, https://github.com/zhanghai/AppIconLoader.
+- HiddenApiBypass: Apache-2.0, https://github.com/LSPosed/AndroidHiddenApiBypass.
+- kotlinx.coroutines and kotlinx.serialization: Apache-2.0.
+
+Build and packaging tools:
+
+- Gradle: Apache-2.0.
+- Android SDK, NDK, and build tools: Android SDK license and component-specific
+  notices.
+- CMake: BSD-3-Clause.
+- Ninja: Apache-2.0.
+- Rust toolchain and Cargo: MIT OR Apache-2.0.
+
+This license does not grant trademark rights to the Storage Redirect X name,
+project icon, or maintainer identity. Public forks and redistributed builds
+should clearly mark themselves as modified or unofficial when applicable.

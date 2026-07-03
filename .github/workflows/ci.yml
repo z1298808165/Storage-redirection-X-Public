@@ -1,0 +1,362 @@
+name: CI Build
+
+on:
+  pull_request:
+    branches: [SRX-R]
+  push:
+    branches: [SRX-R]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  prepare:
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare CI version
+        id: version
+        run: |
+          python .github/scripts/resolve_build_version.py --format github >> "$GITHUB_OUTPUT"
+
+  create-ci-release:
+    if: github.event_name == 'push'
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      ci_tag: ${{ steps.release.outputs.ci_tag }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate Chinese changelog
+        run: |
+          mkdir -p build
+          python .github/scripts/generate_changelog.py \
+            --mode ci \
+            --version "$VERSION" \
+            --output build/CHANGELOG.md
+
+      - name: Create CI build release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="ci-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup_ci_release() {
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes >/dev/null 2>&1 || true
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+          }
+          trap cleanup_ci_release ERR
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CI Build $VERSION" \
+            --notes-file build/CHANGELOG.md \
+            --prerelease \
+            --latest=false
+
+          trap - ERR
+          echo "ci_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  module:
+    needs:
+      - prepare
+      - create-ci-release
+    if: always() && needs.prepare.result == 'success' && (github.event_name != 'push' || needs.create-ci-release.result == 'success')
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify WebUI config fixtures
+        run: node scripts/verify-webui-config-fixtures.js
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android
+
+      - name: Run build script tests
+        run: |
+          mkdir -p build
+          rustc --edition=2024 --test build.rs -o build/build-script-tests
+          ./build/build-script-tests
+
+      - name: Install CMake and Ninja
+        run: |
+          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build
+          fi
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          printf '[target.aarch64-linux-android]\nlinker = "aarch64-linux-android29-clang"\n\n[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Restore Cargo build cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-aarch64-
+
+      - name: Build Rust test binaries
+        run: cargo test --target aarch64-linux-android --no-run
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Build module binaries
+        run: |
+          cargo build --target aarch64-linux-android --release
+          mkdir -p build/module-bin
+          cp target/aarch64-linux-android/release/libsrx_core.so build/module-bin/libsrx_core.so
+          cp target/aarch64-linux-android/release/srx_daemon build/module-bin/srx_daemon
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Verify Hooker.dex
+        run: |
+          HOOKER_DEX="$(find target/aarch64-linux-android/release/build -path '*/out/Hooker.dex' -type f -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+          test -n "$HOOKER_DEX"
+          test "$(stat -c%s "$HOOKER_DEX")" -ge 1024
+
+      - name: Package module directory
+        run: |
+          bash .github/scripts/package_module.sh \
+            "$VERSION" "$VERSION_CODE" \
+            build/module-bin/libsrx_core.so build/module-bin/srx_daemon \
+            "$GITHUB_WORKSPACE/build/storage.redirect.x-v${VERSION}"
+
+      - name: Verify CI module directory
+        run: |
+          test -f "build/storage.redirect.x-v${VERSION}/module.prop"
+          test -f "build/storage.redirect.x-v${VERSION}/LICENSE"
+          test -f "build/storage.redirect.x-v${VERSION}/COPYING"
+          test -f "build/storage.redirect.x-v${VERSION}/zygisk/arm64-v8a.so"
+          test -f "build/storage.redirect.x-v${VERSION}/webroot/index.html"
+          grep -q '^webui=1$' "build/storage.redirect.x-v${VERSION}/module.prop"
+          grep -q 'GPL-3.0-or-later' "build/storage.redirect.x-v${VERSION}/LICENSE"
+          grep -q 'GNU GENERAL PUBLIC LICENSE' "build/storage.redirect.x-v${VERSION}/COPYING"
+          test -f "build/storage.redirect.x-v${VERSION}/service.d/debug_collectors.sh"
+          test ! -f "build/storage.redirect.x-v${VERSION}/CHANGELOG.md"
+          ! find "build/storage.redirect.x-v${VERSION}" -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path '*/META-INF/*' -o -path '*/bin/srxctl' \) -exec grep -Il $'\r' {} + | grep .
+
+      - name: Upload module CI release asset
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
+        run: |
+          mkdir -p build/assets
+          (
+            cd "build/storage.redirect.x-v${VERSION}"
+            zip -r "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" .
+          )
+          test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
+          gh release upload "$CI_TAG" \
+            "build/assets/storage.redirect.x-v${VERSION}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  app:
+    needs:
+      - prepare
+      - create-ci-release
+    if: always() && needs.prepare.result == 'success' && (github.event_name != 'push' || needs.create-ci-release.result == 'success')
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6.1.0
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+
+      - name: Prepare Android app signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SRX_APP_SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            mkdir -p keystore
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/srx-manager-release.jks
+          fi
+
+      - name: Run manager unit tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest
+
+      - name: Build release app APK
+        env:
+          SRX_APP_SIGNING_STORE_FILE: keystore/srx-manager-release.jks
+          SRX_APP_SIGNING_STORE_PASSWORD: ${{ secrets.SRX_APP_SIGNING_STORE_PASSWORD }}
+          SRX_APP_SIGNING_KEY_ALIAS: ${{ secrets.SRX_APP_SIGNING_KEY_ALIAS }}
+          SRX_APP_SIGNING_KEY_PASSWORD: ${{ secrets.SRX_APP_SIGNING_KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace :app:assembleRelease
+          if [ -n "${SRX_APP_SIGNING_STORE_PASSWORD:-}" ]; then
+            APK="app/build/outputs/apk/release/app-release.apk"
+          else
+            APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          fi
+          test -f "$APK"
+          mkdir -p build/app
+          cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
+
+      - name: Upload manager APK CI release asset
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
+        run: |
+          test -f "build/app/storage-redirect-x-manager-v${VERSION}.apk"
+          gh release upload "$CI_TAG" \
+            "build/app/storage-redirect-x-manager-v${VERSION}.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  verify-ci-release:
+    if: github.event_name == 'push'
+    needs:
+      - prepare
+      - create-ci-release
+      - module
+      - app
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
+    steps:
+      - name: Verify CI build assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$CI_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[].name' > release-assets.txt
+          grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
+          grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
+
+  update-manifest:
+    if: github.event_name == 'push'
+    needs:
+      - prepare
+      - create-ci-release
+      - module
+      - app
+      - verify-ci-release
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Update beta manifest entry
+        run: |
+          python .github/scripts/update_manifest.py \
+            --channel beta \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" \
+            --tag "$CI_TAG" \
+            --title "CI Build $VERSION" \
+            --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
+            --module-asset "storage.redirect.x-v${VERSION}.zip"
+
+      - name: Commit update manifest
+        run: |
+          if git diff --quiet -- update.json; then
+            echo "update.json already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git commit -m "CI：更新更新清单 $VERSION"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+  cleanup-ci-release:
+    if: github.event_name == 'push' && always() && needs.create-ci-release.result == 'success' && (needs.module.result != 'success' || needs.app.result != 'success' || needs.verify-ci-release.result != 'success')
+    needs:
+      - create-ci-release
+      - module
+      - app
+      - verify-ci-release
+    runs-on: ubuntu-latest
+    env:
+      CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
+    steps:
+      - name: Delete incomplete CI build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$CI_TAG"
+          gh release delete "$CI_TAG" --repo "$GITHUB_REPOSITORY" --yes || true
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$CI_TAG" || true

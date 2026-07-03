@@ -1,0 +1,319 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  prepare:
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      release_branch: ${{ steps.version.outputs.release_branch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare release version
+        id: version
+        run: |
+          VERSION_DATA="$(python .github/scripts/resolve_build_version.py --release --format github)"
+          printf '%s\n' "$VERSION_DATA" >> "$GITHUB_OUTPUT"
+          VERSION="$(printf '%s\n' "$VERSION_DATA" | awk -F= '$1 == "version" { print $2 }')"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "tag version $TAG_VERSION does not match Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
+          if git log -1 --pretty=%B | grep -Eiq '\[(skip ci|ci skip|no ci)\]'; then
+            echo "release tag must not point to a skip-ci commit" >&2
+            exit 1
+          fi
+          RELEASE_BRANCH="$(git branch -r --contains "$GITHUB_SHA" | sed 's#^[ *]*origin/##' | grep -Fx 'SRX-R' | head -n 1)"
+          if [ -z "$RELEASE_BRANCH" ]; then
+            echo "release tag must point to a commit reachable from SRX-R" >&2
+            exit 1
+          fi
+          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
+
+  module:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      SRX_RELEASE_BRANCH: ${{ needs.prepare.outputs.release_branch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify WebUI config fixtures
+        run: node scripts/verify-webui-config-fixtures.js
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: aarch64-linux-android
+
+      - name: Run build script tests
+        run: |
+          mkdir -p build
+          rustc --edition=2024 --test build.rs -o build/build-script-tests
+          ./build/build-script-tests
+
+      - name: Install CMake and Ninja
+        run: |
+          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build
+          fi
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          printf '[target.aarch64-linux-android]\nlinker = "aarch64-linux-android29-clang"\n\n[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Restore Cargo build cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-aarch64-
+
+      - name: Build Rust test binaries
+        run: cargo test --target aarch64-linux-android --no-run
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Build module binaries
+        run: |
+          cargo build --target aarch64-linux-android --release
+          mkdir -p build/module-bin
+          cp target/aarch64-linux-android/release/libsrx_core.so build/module-bin/libsrx_core.so
+          cp target/aarch64-linux-android/release/srx_daemon build/module-bin/srx_daemon
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Verify Hooker.dex
+        run: |
+          HOOKER_DEX="$(find target/aarch64-linux-android/release/build -path '*/out/Hooker.dex' -type f -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+          test -n "$HOOKER_DEX"
+          test "$(stat -c%s "$HOOKER_DEX")" -ge 1024
+
+      - name: Package module
+        run: |
+          mkdir -p build/assets
+          bash .github/scripts/package_module.sh \
+            "$VERSION" "$VERSION_CODE" \
+            build/module-bin/libsrx_core.so build/module-bin/srx_daemon \
+            "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip"
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'module.prop'
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'LICENSE'
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'COPYING'
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'zygisk/arm64-v8a.so'
+          unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" module.prop | grep -q '^webui=1$'
+          unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" LICENSE | grep -q 'GPL-3.0-or-later'
+          unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" COPYING | grep -q 'GNU GENERAL PUBLIC LICENSE'
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'webroot/index.html'
+          unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'debug_collectors.sh'
+          ! unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'CHANGELOG.md'
+          ! unzip -Z1 "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -E '(^|/)([^/]+\.sh|[^/]+\.prop|[^/]+\.rule|srxctl)$|^META-INF/' | while IFS= read -r entry; do unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" "$entry" | grep -q $'\r' && printf '%s\n' "$entry"; done | grep .
+
+      - name: Upload module artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: storage.redirect.x-v${{ env.VERSION }}.zip
+          path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
+          if-no-files-found: error
+
+  app:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      SRX_RELEASE_BRANCH: ${{ needs.prepare.outputs.release_branch }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6.1.0
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+
+      - name: Prepare Android app signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SRX_APP_SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          mkdir -p keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/srx-manager-release.jks
+
+      - name: Run manager unit tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest
+
+      - name: Build release app APK
+        env:
+          SRX_APP_SIGNING_STORE_FILE: keystore/srx-manager-release.jks
+          SRX_APP_SIGNING_STORE_PASSWORD: ${{ secrets.SRX_APP_SIGNING_STORE_PASSWORD }}
+          SRX_APP_SIGNING_KEY_ALIAS: ${{ secrets.SRX_APP_SIGNING_KEY_ALIAS }}
+          SRX_APP_SIGNING_KEY_PASSWORD: ${{ secrets.SRX_APP_SIGNING_KEY_PASSWORD }}
+        run: |
+          test -n "$SRX_APP_SIGNING_STORE_PASSWORD"
+          test -n "$SRX_APP_SIGNING_KEY_ALIAS"
+          test -n "$SRX_APP_SIGNING_KEY_PASSWORD"
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace :app:assembleRelease
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          mkdir -p build/app
+          cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
+
+      - name: Upload manager APK artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: storage-redirect-x-manager-v${{ env.VERSION }}.apk
+          path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - prepare
+      - module
+      - app
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate Chinese changelog
+        run: |
+          mkdir -p build
+          python .github/scripts/generate_changelog.py \
+            --mode release \
+            --version "$VERSION" \
+            --output build/changelog.md
+          RELEASE_NOTES="docs/release-notes/v${VERSION}.md"
+          if [ -f "$RELEASE_NOTES" ]; then
+            cp "$RELEASE_NOTES" build/changelog.md
+          fi
+
+      - name: Download release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/downloads
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "storage.redirect.x-v${VERSION}.zip" \
+            --dir build/downloads
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "storage-redirect-x-manager-v${VERSION}.apk" \
+            --dir build/downloads
+
+      - name: Verify downloaded release artifacts
+        run: |
+          test -f "build/downloads/storage.redirect.x-v${VERSION}.zip"
+          test -f "build/downloads/storage-redirect-x-manager-v${VERSION}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Storage Redirect X v${{ env.VERSION }}
+          body_path: build/changelog.md
+          fail_on_unmatched_files: true
+          files: |
+            build/downloads/storage.redirect.x-v${{ env.VERSION }}.zip
+            build/downloads/storage-redirect-x-manager-v${{ env.VERSION }}.apk
+          draft: false
+          prerelease: false
+
+      - name: Verify GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${VERSION}"
+          gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[].name' > release-assets.txt
+          grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
+          grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
+
+      - name: Update stable manifest entry
+        run: |
+          RELEASE_BRANCH="${{ needs.prepare.outputs.release_branch }}"
+          git fetch origin "$RELEASE_BRANCH"
+          git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
+          python .github/scripts/update_manifest.py \
+            --channel stable \
+            --repository "$GITHUB_REPOSITORY" \
+            --version "$VERSION" \
+            --tag "v${VERSION}" \
+            --title "Storage Redirect X v${VERSION}" \
+            --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
+            --module-asset "storage.redirect.x-v${VERSION}.zip"
+
+          if git diff --quiet -- update.json; then
+            echo "update.json already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git commit -m "发布：更新更新清单 v${VERSION}"
+          git push origin "HEAD:${RELEASE_BRANCH}"

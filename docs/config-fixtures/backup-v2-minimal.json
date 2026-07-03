@@ -1,0 +1,33 @@
+{
+  "magic": "storage.redirect.x.backup",
+  "schema": 2,
+  "module": {
+    "id": "storage.redirect.x",
+    "version": "1.2.52"
+  },
+  "createdAt": "2026-06-04T00:00:00Z",
+  "summary": {
+    "appCount": 0,
+    "userCount": 0
+  },
+  "integrity": {
+    "algorithm": "SHA-256",
+    "value": "7b9b005291e0900e83411d64d33efdaa3b0faaa641094cbb3c89216a68cbb901"
+  },
+  "data": {
+    "global": {
+      "file_monitor_enabled": false,
+      "fuse_fix_enabled": true,
+      "fuse_daemon_redirect_enabled": false,
+      "verbose_logging_enabled": false,
+      "auto_enable_redirect_for_new_apps": false,
+      "auto_enable_new_apps_template_id": "",
+      "app_config_auto_save": false
+    },
+    "apps": {},
+    "templates": [],
+    "ui": {
+      "predictive_back": false
+    }
+  }
+}

@@ -1,0 +1,83 @@
+# Rust 构建产物
+/target/
+/.gradle/
+
+# 本地构建与工具链输出
+/.cargo/config.toml
+/.cargo/config
+/local.properties
+/keystore.properties
+/signing.properties
+/cmake-build-*/
+/build/
+/app/build/
+/dist/
+/out/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.rlib
+*.rmeta
+
+# Android/Java 临时产物
+*.class
+*.dex
+!assets/zygisk_module/bin/list_apps.dex
+*.apk
+*.aab
+*.ap_
+*.idsig
+*.keystore
+*.jks
+*.iml
+
+# 日志、缓存、临时文件
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.pid
+*.stackdump
+.cache/
+.tmp/
+tmp/
+temp/
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 隐私配置与凭据
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.secrets
+secrets/
+private/
+credentials/
+*.pem
+*.key
+*.p8
+*.p12
+*.crt
+*.cer
+*.mobileprovision
+/tmp_logs/
+
+# 本地发布说明与个人流程笔记
+/docs/release-notes/
+/docs/release-workflow.md
+/docs/version-calculation-verification.md

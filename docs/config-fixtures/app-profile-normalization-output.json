@@ -1,0 +1,27 @@
+{
+  "users": {
+    "10": {
+      "enabled": false,
+      "mapping_mode_only": true,
+      "allowed_real_paths": [
+        "!Download/Legacy",
+        "Movies/Public",
+        "!Movies/Public/tmp",
+        "!Pictures/Blocked"
+      ],
+      "excluded_real_paths": [],
+      "sandboxed_paths": [
+        ".xlDownload",
+        "Android/media/App"
+      ],
+      "read_only_paths": [
+        "Documents/ReadOnly",
+        "Movies/*"
+      ],
+      "path_mappings": {
+        "Cache": "Android/media/com.example/cache",
+        "DCIM/App": "Pictures/App"
+      }
+    }
+  }
+}

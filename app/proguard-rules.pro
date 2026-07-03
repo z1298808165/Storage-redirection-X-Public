@@ -1,0 +1,2 @@
+-keep class org.srx.manager.** { *; }
+-keep class kotlinx.serialization.** { *; }

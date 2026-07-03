@@ -1,0 +1,233 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=overlays-content">
+  <link rel="stylesheet" href="/internal/insets.css">
+  <script>
+    (function() {
+      try {
+        var stored = localStorage.getItem('srx_theme') || 'light';
+        var resolved = stored === 'system'
+          ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : stored;
+        document.documentElement.setAttribute('data-theme', resolved);
+        var ui = JSON.parse(localStorage.getItem('srx_theme_ui') || '{}');
+        var pageScale = Number(ui.pageScale);
+        if (Number.isFinite(pageScale)) {
+          pageScale = Math.max(0.8, Math.min(1.1, pageScale));
+          var basePaddingX = Math.max(14, Math.min(24, window.innerWidth * 0.04));
+          document.documentElement.style.setProperty('--srx-page-scale', String(pageScale));
+          document.documentElement.style.setProperty('--srx-page-padding-x', (basePaddingX / pageScale) + 'px');
+          document.documentElement.style.setProperty('--srx-page-padding-top', (18 / pageScale) + 'px');
+          document.documentElement.style.setProperty('--srx-page-padding-bottom', (10 / pageScale) + 'px');
+        }
+      } catch (_) {}
+    })();
+  </script>
+  <title>Storage Redirect X</title>
+  <link rel="stylesheet" href="css/miuix.css">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <div class="page active" id="page-dashboard">
+      <div class="page-header dashboard-header">
+        <div class="page-header-text">
+          <h1 class="page-title">概览</h1>
+        </div>
+        <div class="dashboard-version" id="moduleVersionDisplay">--</div>
+      </div>
+      <div class="dashboard-status" id="statusCards">
+        <section class="status-card module-status-card" aria-label="模块状态">
+          <div class="module-logo-circle" aria-hidden="true">
+            <img class="module-logo-img" src="logo.png" alt="">
+          </div>
+          <div class="module-status-title">存储重定向X</div>
+          <button class="module-power-btn" id="modulePowerBtn" type="button">--</button>
+          <div class="module-feature-row" aria-label="功能状态">
+            <span class="module-feature-chip" id="monitorStatusChip">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>文件监控</span>
+            </span>
+            <span class="module-feature-chip" id="fuseFixStatusChip">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>FuseFixer</span>
+            </span>
+            <span class="module-feature-chip" id="verboseLogStatusChip">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>详细日志</span>
+            </span>
+          </div>
+          <div class="module-stat-divider"></div>
+          <div class="module-status-metrics">
+            <div class="module-status-metric">
+              <span class="status-card-value" id="statAppCount">--</span>
+              <span class="status-card-label">已启用应用</span>
+            </div>
+            <div class="module-status-metric">
+              <span class="status-card-value" id="statEnabledAppCount">--</span>
+              <span class="status-card-label">生效次数</span>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="section">
+        <h2 class="section-title">快速入口</h2>
+        <div class="action-list" id="quickActions"></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-apps">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h1 class="page-title">应用管理</h1>
+        </div>
+      </div>
+      <div class="search-bar">
+        <div class="search-input-wrapper">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="appSearchInput" class="search-input" placeholder="搜索应用名称或包名..." autocomplete="off" inputmode="search" enterkeyhint="search">
+          <button class="search-clear hidden" id="appSearchClear">×</button>
+        </div>
+        <div class="filter-row">
+          <div class="filter-group" id="appFilterGroup">
+            <span class="filter-indicator"></span>
+            <button class="filter-chip active" data-filter="all">用户</button>
+            <button class="filter-chip" data-filter="system">系统</button>
+            <button class="filter-chip" data-filter="configured">已配置</button>
+          </div>
+          <div class="app-user-switcher" id="appUserSwitcher"></div>
+        </div>
+      </div>
+      <div class="pull-refresh" id="appPullRefresh">
+        <div class="pull-refresh-indicator" aria-live="polite">
+          <span class="pull-refresh-spinner" aria-hidden="true"></span>
+          <span class="pull-refresh-text">下拉刷新</span>
+        </div>
+        <div class="app-list pull-refresh-scroller" id="appList">
+          <div class="loading-state"><div class="spinner"></div><span>加载应用列表...</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="page-app-config">
+      <div class="page-header app-config-header miuix-blur">
+        <button class="icon-btn icon-btn-back" id="appConfigBack" type="button" aria-label="返回" title="返回"><span class="icon icon-arrow-left" aria-hidden="true"></span></button>
+        <div class="page-header-text">
+          <h1 class="page-title" id="configAppName">应用配置</h1>
+        </div>
+        <div class="app-config-header-actions">
+          <button class="icon-btn icon-btn-primary app-config-action-btn app-config-template-btn" id="appConfigTemplate" type="button" aria-label="配置模板" title="配置模板" disabled><span class="icon icon-template" aria-hidden="true"></span></button>
+          <button class="icon-btn icon-btn-danger app-config-action-btn app-config-delete-btn" id="appConfigDelete" type="button" aria-label="删除配置" title="删除配置" disabled><span class="icon icon-trash" aria-hidden="true"></span></button>
+          <button class="icon-btn icon-btn-primary app-config-action-btn app-config-save-btn" id="appConfigSave" type="button" aria-label="保存配置" title="保存配置" disabled><span class="icon icon-save" aria-hidden="true"></span></button>
+        </div>
+      </div>
+      <div class="config-content" id="appConfigContent">
+        <div class="loading-state"><div class="spinner"></div><span>加载配置...</span></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-settings">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h1 class="page-title">设置</h1>
+        </div>
+        <button class="icon-btn icon-btn-sm log-export-btn" id="logExportBtn" type="button" aria-label="导出日志包" title="导出日志包"><span class="icon icon-file" aria-hidden="true"></span></button>
+      </div>
+      <div class="settings-content" id="settingsContent">
+        <div class="loading-state"><div class="spinner"></div><span>加载配置...</span></div>
+      </div>
+    </div>
+
+    <div class="page" id="page-logs">
+      <div class="page-header">
+        <div class="page-header-text">
+          <h1 class="page-title">文件监视</h1>
+        </div>
+        <div class="log-header-actions">
+          <button class="icon-btn icon-btn-sm icon-btn-primary" id="logFilter" type="button" aria-label="文件监视过滤" title="过滤"><span class="icon icon-filter" aria-hidden="true"></span></button>
+          <button class="icon-btn icon-btn-sm icon-btn-danger" id="logClear" type="button" aria-label="清空文件监视记录" title="清空"><span class="icon icon-trash" aria-hidden="true"></span></button>
+        </div>
+      </div>
+      <div class="log-search search-input-wrapper">
+        <span class="search-icon">⌕</span>
+        <input type="text" id="logSearchInput" class="search-input" placeholder="搜索应用名、包名或路径" autocomplete="off" inputmode="search" enterkeyhint="search">
+        <button class="search-clear hidden" id="logSearchClear">×</button>
+      </div>
+      <div class="log-toolbar">
+        <span class="log-info" id="logInfo"></span>
+      </div>
+      <div class="pull-refresh" id="logPullRefresh">
+        <div class="pull-refresh-indicator" aria-live="polite">
+          <span class="pull-refresh-spinner" aria-hidden="true"></span>
+          <span class="pull-refresh-text">下拉刷新</span>
+        </div>
+        <div class="log-card-list pull-refresh-scroller" id="logViewer">
+          <div class="loading-state"><div class="spinner"></div><span>加载日志...</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page update-page" id="page-update">
+      <div class="page-header update-header">
+        <button class="icon-btn icon-btn-back" id="updateBack" type="button" aria-label="返回" title="返回"><span class="icon icon-arrow-left" aria-hidden="true"></span></button>
+        <div class="page-header-text">
+          <h1 class="page-title">检查更新</h1>
+        </div>
+      </div>
+      <div class="update-content" id="updateContent">
+        <div class="loading-state"><div class="spinner"></div><span>加载更新设置...</span></div>
+      </div>
+    </div>
+
+    <div class="page about-page" id="page-about">
+      <div class="page-header about-header">
+        <button class="icon-btn icon-btn-back" id="aboutBack" type="button" aria-label="返回" title="返回"><span class="icon icon-arrow-left" aria-hidden="true"></span></button>
+        <div class="page-header-text">
+          <h1 class="page-title">关于</h1>
+        </div>
+      </div>
+      <div class="about-section">
+        <h2 class="about-title">开源协议引用</h2>
+        <div class="license-list" id="licenseList"></div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="bottom-nav miuix-floating-container miuix-blur" id="bottomNav" data-miuix-ui="floating-container" data-miuix-blur="realtime">
+    <span class="nav-indicator"></span>
+    <button class="nav-item active" data-page="dashboard">
+      <span class="nav-icon icon icon-nav-dashboard" aria-hidden="true"></span>
+      <span class="nav-label">概览</span>
+    </button>
+    <button class="nav-item" data-page="apps">
+      <span class="nav-icon icon icon-nav-apps" aria-hidden="true"></span>
+      <span class="nav-label">应用</span>
+    </button>
+    <button class="nav-item" data-page="logs">
+      <span class="nav-icon icon icon-nav-logs" aria-hidden="true"></span>
+      <span class="nav-label">监视</span>
+    </button>
+    <button class="nav-item" data-page="settings">
+      <span class="nav-icon icon icon-nav-settings" aria-hidden="true"></span>
+      <span class="nav-label">设置</span>
+    </button>
+  </nav>
+
+  <div class="toast-container" id="toastContainer"></div>
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal-sheet" id="modalContent"></div>
+  </div>
+  <div class="dialog-overlay hidden" id="dialogOverlay">
+    <div class="dialog-box" id="dialogBox">
+      <div class="dialog-body" id="dialogBody"></div>
+      <div class="dialog-actions" id="dialogActions"></div>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/theme.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

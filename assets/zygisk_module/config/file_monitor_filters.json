@@ -1,0 +1,23 @@
+{
+  "excluded_paths": [
+    "Android/data"
+  ],
+  "excluded_operations": [
+    "open:read",
+    "open*:read",
+    "provider_open:read",
+    "rename*",
+    "unlink*",
+    "delete*",
+    "rmdir*",
+    "link*",
+    "symlink*",
+    "truncate*",
+    "ftruncate*",
+    "chmod*",
+    "fchmod*",
+    "utimens*",
+    "futimens*",
+    "attrib*"
+  ]
+}

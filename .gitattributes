@@ -1,0 +1,25 @@
+/.gitattributes text eol=lf
+.githooks/* text eol=lf
+*.sh text eol=lf
+*.prop text eol=lf
+*.rule text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.java text eol=lf
+*.kt text eol=lf
+*.kts text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.ps1 text eol=lf
+/LICENSE text eol=lf
+/COPYING text eol=lf
+assets/zygisk_module/bin/srxctl text eol=lf
+assets/zygisk_module/META-INF/** text eol=lf
+*.dex binary
+*.png binary
+*.zip binary

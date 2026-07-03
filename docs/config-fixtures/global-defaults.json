@@ -1,0 +1,9 @@
+{
+  "file_monitor_enabled": false,
+  "fuse_fix_enabled": true,
+  "fuse_daemon_redirect_enabled": false,
+  "verbose_logging_enabled": false,
+  "auto_enable_redirect_for_new_apps": false,
+  "auto_enable_new_apps_template_id": "",
+  "app_config_auto_save": false
+}
