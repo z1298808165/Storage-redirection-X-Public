@@ -19,15 +19,23 @@ env:
 
 jobs:
   tests:
-    name: Android ${{ matrix.api-level }}
+    name: Android ${{ matrix.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      ANDROID_API_LEVEL: ${{ matrix.api-level }}
+      ANDROID_API_LEVEL: ${{ matrix.api }}
     strategy:
       fail-fast: false
       matrix:
-        api-level: [33, 34, 35, 36]
+        include:
+          - api: 33
+            version: 13
+          - api: 34
+            version: 14
+          - api: 35
+            version: 15
+          - api: 36
+            version: 16
 
     steps:
       - name: 检出代码
@@ -88,7 +96,7 @@ jobs:
       - name: 运行模拟器端到端测试
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
-          api-level: ${{ matrix.api-level }}
+          api-level: ${{ matrix.api }}
           target: ${{ env.ANDROID_TARGET }}
           arch: ${{ env.ANDROID_ARCH }}
           profile: pixel_7
@@ -107,7 +115,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: tests-api${{ matrix.api-level }}-artifacts
+          name: tests-android${{ matrix.version }}-artifacts
           if-no-files-found: ignore
           retention-days: 14
           path: |
