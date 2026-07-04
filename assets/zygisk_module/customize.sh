@@ -173,9 +173,23 @@ verify_abi() {
   fi
 }
 
-print_progress 40 "verify native libraries"
+verify_logd_bin() {
+  abi="$1"
+  logd_file="$MODPATH/bin/$abi/srx_logd"
+
+  if [ ! -f "$logd_file" ]; then
+    if [ "$abi" = "$PRIMARY_ARCH" ]; then
+      ui_print "error: missing $abi log daemon path=$logd_file"
+      safe_cleanup_modpath
+      exit 1
+    fi
+  fi
+}
+
+print_progress 40 "verify module binaries"
 for abi in $KEEP_ARCHES; do
   verify_abi "$abi"
+  verify_logd_bin "$abi"
 done
 
 print_progress 50 "prune unused libraries"
@@ -188,6 +202,17 @@ for so_file in "$MODPATH"/zygisk/*.so; do
   fi
 done
 
+if [ -d "$MODPATH/bin" ]; then
+  for bin_dir in "$MODPATH"/bin/*; do
+    if [ -d "$bin_dir" ]; then
+      abi=$(basename "$bin_dir")
+      if ! contains_abi "$abi"; then
+        rm -rf "$bin_dir"
+      fi
+    fi
+  done
+fi
+
 print_progress 60 "restore config"
 restore_existing_config
 
@@ -198,6 +223,9 @@ print_progress 70 "set permissions"
 set_perm_recursive $MODPATH 0 0 0755 0644
 if [ -d "$MODPATH/zygisk" ]; then
   set_perm_recursive $MODPATH/zygisk 0 0 0755 0644
+fi
+if [ -d "$MODPATH/bin" ]; then
+  set_perm_recursive $MODPATH/bin 0 0 0755 0755
 fi
 
 # Magisk/KernelSU 启动脚本需要可执行权限
@@ -225,7 +253,7 @@ EOF
     chmod 644 "$MODPATH/config/global.json"
 fi
 
-# 创建日志目录和文件（供日志采集器落盘）
+# 创建日志目录和文件，供私有日志守护进程写入
 print_progress 90 "create logs dir"
 mkdir -p "$MODPATH/logs"
 chmod 777 "$MODPATH/logs"
@@ -233,10 +261,12 @@ touch "$MODPATH/logs/running.log"
 touch "$MODPATH/logs/file_monitor.log"
 touch "$MODPATH/logs/media_provider_state.log"
 touch "$MODPATH/logs/app_status.log"
+touch "$MODPATH/stats"
 chmod 666 "$MODPATH/logs/running.log"
 chmod 666 "$MODPATH/logs/file_monitor.log"
 chmod 666 "$MODPATH/logs/media_provider_state.log"
 chmod 666 "$MODPATH/logs/app_status.log"
+chmod 666 "$MODPATH/stats"
 
 print_progress 100 "install done"
 ui_print "-- config=$MODPATH/config"

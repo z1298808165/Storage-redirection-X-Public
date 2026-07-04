@@ -26,6 +26,7 @@ MODULE_UPDATE_JSON = "https://raw.githubusercontent.com/Kindness-Kismet/Storage-
 MODULE_RELEASE_BASE_URL = "https://raw.githubusercontent.com/Kindness-Kismet/Storage-redirection-X-Public/main"
 MODULE_CHANGELOG_URL = "https://raw.githubusercontent.com/Kindness-Kismet/Storage-redirection-X-Public/main/CHANGELOG.md"
 CORE_SO_NAME = "libsrx_core.so"
+LOGD_BIN_NAME = "srx_logd"
 ANDROID_LINK_API_LEVEL = "29"
 APK_OUTPUT_DIR = Path("build/apk")
 MODULE_OUTPUT_DIR = Path("build/zygisk")
@@ -245,38 +246,52 @@ def build_rust_module(console: Console, project_root: Path, rust_root: Path, lib
             "CARGO_PROFILE_RELEASE_DEBUG": "true",
         })
 
-    result = run_process(console, "cargo", ["build", "-p", "srx_core", "--release", "--target", target], cwd=project_root, env=env)
+    result = run_process(console, "cargo", ["build", "-p", "srx_core", "--release", "--target", target, "--lib", "--bin", LOGD_BIN_NAME], cwd=project_root, env=env)
     if result.returncode != 0:
         fail(f"Rust build failed abi={abi}")
 
     built_so = project_root / "target" / target / "release" / CORE_SO_NAME
     if not built_so.exists():
         fail(f"Rust output not found: {built_so}")
+    built_logd = project_root / "target" / target / "release" / LOGD_BIN_NAME
+    if not built_logd.exists():
+        fail(f"Rust output not found: {built_logd}")
     abi_output = libs_output_dir / abi
     abi_output.mkdir(parents=True, exist_ok=True)
     shutil.copy2(built_so, abi_output / CORE_SO_NAME)
-    console.ok(f"Rust build done abi={abi} so={CORE_SO_NAME}")
+    shutil.copy2(built_logd, abi_output / LOGD_BIN_NAME)
+    console.ok(f"Rust build done abi={abi} so={CORE_SO_NAME} bin={LOGD_BIN_NAME}")
 
 
 def strip_and_hash(console: Console, libs_output_dir: Path, abi: str, ndk_path: Path, debug: bool) -> None:
+    strip_name = "llvm-strip.exe" if os.name == "nt" else "llvm-strip"
+    llvm_strip = ndk_path / "toolchains" / "llvm" / "prebuilt" / ndk_prebuilt_dir() / "bin" / strip_name
     so_file = libs_output_dir / abi / CORE_SO_NAME
     if not so_file.exists():
         console.info(f"skip missing abi={abi} so={CORE_SO_NAME}")
         return
     if debug:
         console.info(f"skip strip (debug) abi={abi} so={CORE_SO_NAME}")
-    else:
-        strip_name = "llvm-strip.exe" if os.name == "nt" else "llvm-strip"
-        llvm_strip = ndk_path / "toolchains" / "llvm" / "prebuilt" / ndk_prebuilt_dir() / "bin" / strip_name
-        if llvm_strip.exists():
-            result = run_process(console, llvm_strip, ["--strip-all", str(so_file)])
-            if result.returncode == 0:
-                console.ok(f"stripped abi={abi} so={CORE_SO_NAME}")
-            else:
-                console.info(f"strip failed abi={abi} so={CORE_SO_NAME}")
+    elif llvm_strip.exists():
+        result = run_process(console, llvm_strip, ["--strip-all", str(so_file)])
+        if result.returncode == 0:
+            console.ok(f"stripped abi={abi} so={CORE_SO_NAME}")
+        else:
+            console.info(f"strip failed abi={abi} so={CORE_SO_NAME}")
     digest = hashlib.sha256(so_file.read_bytes()).hexdigest()
     so_file.with_suffix(".so.sha256").write_text(digest, encoding="utf-8")
     console.ok(f"sha256 abi={abi} so={CORE_SO_NAME} hash={digest[:16]}...")
+    logd_file = libs_output_dir / abi / LOGD_BIN_NAME
+    if not logd_file.exists():
+        fail(f"missing {abi} log daemon output: {logd_file}")
+    if debug:
+        console.info(f"skip strip (debug) abi={abi} bin={LOGD_BIN_NAME}")
+    elif llvm_strip.exists():
+        result = run_process(console, llvm_strip, ["--strip-all", str(logd_file)])
+        if result.returncode == 0:
+            console.ok(f"stripped abi={abi} bin={LOGD_BIN_NAME}")
+        else:
+            console.info(f"strip failed abi={abi} bin={LOGD_BIN_NAME}")
 
 
 def copy_dir_recursive(source: Path, destination: Path) -> None:
@@ -308,7 +323,7 @@ def package_module(console: Console, project_root: Path, module_assets_root: Pat
     (temp_dir / "module.prop").write_text(module_prop, encoding="utf-8")
     (temp_dir / "module_version.txt").write_text(f"{version.name}\n", encoding="utf-8")
 
-    for name in ("customize.sh", "post-fs-data.sh", "service.sh", "sepolicy.rule", "uninstall.sh"):
+    for name in ("action.sh", "customize.sh", "post-fs-data.sh", "service.sh", "sepolicy.rule", "uninstall.sh"):
         src = module_assets_root / name
         if not src.exists():
             fail(f"missing module template: {name}")
@@ -318,6 +333,7 @@ def package_module(console: Console, project_root: Path, module_assets_root: Pat
 
     zygisk_dir = temp_dir / "zygisk"
     zygisk_dir.mkdir(parents=True, exist_ok=True)
+    bin_root = temp_dir / "bin"
     for abi in abis:
         core_so = libs_output_dir / abi / CORE_SO_NAME
         core_sha = core_so.with_suffix(".so.sha256")
@@ -327,6 +343,13 @@ def package_module(console: Console, project_root: Path, module_assets_root: Pat
         if core_sha.exists():
             shutil.copy2(core_sha, zygisk_dir / f"{abi}.so.sha256")
         console.ok(f"added core lib abi={abi}")
+        logd_bin = libs_output_dir / abi / LOGD_BIN_NAME
+        if not logd_bin.exists():
+            fail(f"missing {abi} log daemon output: {logd_bin}")
+        abi_bin_dir = bin_root / abi
+        abi_bin_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(logd_bin, abi_bin_dir / LOGD_BIN_NAME)
+        console.ok(f"added log daemon abi={abi}")
 
     suffix = abis[0] if len(abis) == 1 else "zygisk"
     zip_name = f"{APP_NAME}_v{version.name}-{suffix}.zip"

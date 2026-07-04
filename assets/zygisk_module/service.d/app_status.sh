@@ -1,7 +1,7 @@
 append_app_status_output() {
   now_text="$1"
   while IFS= read -r line; do
-    printf '%s %s\n' "$now_text" "$line" >> "$APP_STATUS_LOG_FILE"
+    printf '%s %s\n' "$now_text" "$line"
   done
 }
 
@@ -24,52 +24,52 @@ append_package_raw_state() {
   package_name="$2"
   config_file="$3"
 
-  echo "$now_text -- package begin $package_name" >> "$APP_STATUS_LOG_FILE"
-  echo "$now_text -- config $config_file" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- package begin %s\n' "$now_text" "$package_name"
+  printf '%s -- config %s\n' "$now_text" "$config_file"
   sed 's/^/  /' "$config_file" 2>/dev/null | append_app_status_output "$now_text"
 
-  echo "$now_text -- cmd package list packages -U | grep $package_name" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- cmd package list packages -U | grep %s\n' "$now_text" "$package_name"
   cmd package list packages -U 2>/dev/null |
     grep -F "package:$package_name " |
     append_app_status_output "$now_text"
 
-  echo "$now_text -- pidof $package_name" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- pidof %s\n' "$now_text" "$package_name"
   pidof "$package_name" 2>/dev/null |
     append_app_status_output "$now_text"
 
-  echo "$now_text -- ps -A -o PID,NAME | grep $package_name" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- ps -A -o PID,NAME | grep %s\n' "$now_text" "$package_name"
   ps -A -o PID,NAME 2>/dev/null | awk -v target="$package_name" '
     NR == 1 { print; next }
     NF >= 2 && ($2 == target || index($2, target ":") == 1) { print }
   ' | append_app_status_output "$now_text"
 
   for pid in $(get_package_pids "$package_name"); do
-    echo "$now_text -- /proc/$pid/cmdline" >> "$APP_STATUS_LOG_FILE"
+    printf '%s -- /proc/%s/cmdline\n' "$now_text" "$pid"
     tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
       append_app_status_output "$now_text"
 
-    echo "$now_text -- /proc/$pid/status" >> "$APP_STATUS_LOG_FILE"
+    printf '%s -- /proc/%s/status\n' "$now_text" "$pid"
     sed 's/^/  /' "/proc/$pid/status" 2>/dev/null |
       append_app_status_output "$now_text"
 
-    echo "$now_text -- /proc/$pid/fd" >> "$APP_STATUS_LOG_FILE"
+    printf '%s -- /proc/%s/fd\n' "$now_text" "$pid"
     ls -l "/proc/$pid/fd" 2>/dev/null |
       head -n 80 |
       append_app_status_output "$now_text"
 
-    echo "$now_text -- /proc/$pid/mountinfo storage" >> "$APP_STATUS_LOG_FILE"
+    printf '%s -- /proc/%s/mountinfo storage\n' "$now_text" "$pid"
     grep -E ' /storage| /mnt/user| /mnt/media_rw| /sdcard' "/proc/$pid/mountinfo" 2>/dev/null |
       head -n 80 |
       append_app_status_output "$now_text"
   done
 
-  echo "$now_text -- package end $package_name" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- package end %s\n' "$now_text" "$package_name"
 }
 
 append_app_status_snapshot() {
   now_text=$(date '+%m/%d %H:%M:%S' 2>/dev/null)
   now_text=${now_text:-unknown}
-  echo "$now_text -- app_status snapshot begin" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- app_status snapshot begin\n' "$now_text"
   for config_file in "$APPS_CONFIG_DIR"/*.json; do
     [ -f "$config_file" ] || continue
     package_name=$(basename "$config_file" .json)
@@ -77,28 +77,13 @@ append_app_status_snapshot() {
     is_effective_package_config "$package_name" || continue
     append_package_raw_state "$now_text" "$package_name" "$config_file"
   done
-  echo "$now_text -- app_status snapshot end" >> "$APP_STATUS_LOG_FILE"
+  printf '%s -- app_status snapshot end\n' "$now_text"
 }
 
 start_app_status_snapshot_collector() {
   (
-    line_count=$(get_line_count "$APP_STATUS_LOG_FILE")
     while true; do
-      before_count=$(get_line_count "$APP_STATUS_LOG_FILE")
-      append_app_status_snapshot
-      after_count=$(get_line_count "$APP_STATUS_LOG_FILE")
-      added_lines=$((after_count - before_count))
-      if [ "$added_lines" -gt 0 ]; then
-        line_count=$((line_count + added_lines))
-      fi
-      if [ "$line_count" -gt "$MAX_APP_STATUS_LOG_LINES" ]; then
-        drop_lines=$((line_count - MAX_APP_STATUS_LOG_LINES + APP_STATUS_TRIM_BATCH_LINES))
-        if [ "$drop_lines" -gt "$line_count" ]; then
-          drop_lines="$line_count"
-        fi
-        trim_log_file_drop_head "$APP_STATUS_LOG_FILE" "$drop_lines"
-        line_count=$((line_count - drop_lines))
-      fi
+      append_app_status_snapshot | emit_private_log_stream "AppStatus"
       sleep 30
     done
   ) &

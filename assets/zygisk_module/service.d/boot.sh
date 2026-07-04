@@ -15,7 +15,7 @@ boot_guard_wait() {
       fi
       rm -f "$BOOT_PENDING_FILE"
       refresh_uid_map
-      start_log_collectors
+      start_diagnostics_workers
       return 0
     fi
     i=$((i + 1))
@@ -23,6 +23,6 @@ boot_guard_wait() {
   done
 
   refresh_uid_map
-  start_log_collectors
+  start_diagnostics_workers
   return 0
 }

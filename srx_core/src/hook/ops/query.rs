@@ -5,6 +5,7 @@ use libc::{c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SYSTEM_WRITER_QUERY_BYPASS_COUNT: AtomicU64 = AtomicU64::new(0);
+const SYSTEM_WRITER_QUERY_BYPASS_LOG_STEP: u64 = 4096;
 
 fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool {
     if !policy::is_system_writer_package(&hub.get_package_name()) {
@@ -12,7 +13,7 @@ fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool 
     }
 
     let count = SYSTEM_WRITER_QUERY_BYPASS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if count == 1 || count.is_multiple_of(512) {
+    if count == 1 || count.is_multiple_of(SYSTEM_WRITER_QUERY_BYPASS_LOG_STEP) {
         log::debug!(
             "query bypass system_writer pkg={} op={} n={}",
             hub.get_package_name(),

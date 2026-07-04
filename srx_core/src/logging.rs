@@ -1,7 +1,11 @@
-use libc::{c_char, c_int};
+use libc::{
+    AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK, c_char, c_int, c_void, close, sendto,
+    sockaddr, sockaddr_un, socket,
+};
 use log::{Level as LogLevel, LevelFilter, Log, Metadata, Record};
 use std::ffi::CString;
-use std::sync::Once;
+use std::mem;
+use std::sync::{Once, OnceLock};
 
 const LOG_LEVEL_VERBOSE: i32 = 0;
 const LOG_LEVEL_DEBUG: i32 = 1;
@@ -13,6 +17,7 @@ const CURRENT_LOG_LEVEL: i32 = LOG_LEVEL_DEBUG;
 const DEFAULT_LOG_TAG: &str = "StorageRedirect";
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const STATS_LOG_TAG: &str = "Stats";
+const PRIVATE_LOG_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 
 const ANDROID_LOG_VERBOSE: i32 = 2;
 const ANDROID_LOG_DEBUG: i32 = 3;
@@ -32,14 +37,68 @@ pub enum Level {
 
 static LOG_INIT: Once = Once::new();
 static LOG_ADAPTER: LogAdapter = LogAdapter;
+static PRIVATE_LOG_SOCKET: OnceLock<Option<PrivateLogSocket>> = OnceLock::new();
 
 struct LogAdapter;
+
+struct PrivateLogSocket {
+    fd: c_int,
+    addr: sockaddr_un,
+    addr_len: libc::socklen_t,
+}
 
 pub struct Logger;
 
 impl Logger {
     pub fn init(_package_name: Option<&str>) {
         ensure_log_adapter();
+    }
+}
+
+impl PrivateLogSocket {
+    fn new() -> Option<Self> {
+        let fd = unsafe { socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) };
+        if fd < 0 {
+            return None;
+        }
+
+        let mut addr: sockaddr_un = unsafe { mem::zeroed() };
+        addr.sun_family = AF_UNIX as _;
+        if PRIVATE_LOG_SOCKET_NAME.len() + 1 > addr.sun_path.len() {
+            unsafe {
+                close(fd);
+            }
+            return None;
+        }
+        addr.sun_path[0] = 0;
+        for (index, byte) in PRIVATE_LOG_SOCKET_NAME.iter().enumerate() {
+            addr.sun_path[index + 1] = *byte as _;
+        }
+
+        Some(Self {
+            fd,
+            addr,
+            addr_len: sockaddr_un_len(PRIVATE_LOG_SOCKET_NAME.len() + 1),
+        })
+    }
+
+    fn send(&self, level: Level, tag: &str, message: &str) {
+        let message = sanitize_transport_message(message);
+        if message.is_empty() {
+            return;
+        }
+
+        let packet = format!("{}\t{}\t{}", level_to_code(level), tag, message);
+        unsafe {
+            let _ = sendto(
+                self.fd,
+                packet.as_ptr() as *const c_void,
+                packet.len(),
+                0,
+                &self.addr as *const _ as *const sockaddr,
+                self.addr_len,
+            );
+        }
     }
 }
 
@@ -189,8 +248,40 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
         return;
     }
 
+    if let Some(socket) = private_log_socket() {
+        socket.send(level, tag, message);
+    }
+
+    if !should_write_android_log(level) {
+        return;
+    }
+
     let priority = level_to_priority(level);
     android_log(priority, tag, message);
+}
+
+fn private_log_socket() -> Option<&'static PrivateLogSocket> {
+    PRIVATE_LOG_SOCKET
+        .get_or_init(PrivateLogSocket::new)
+        .as_ref()
+}
+
+fn should_write_android_log(level: Level) -> bool {
+    matches!(level, Level::Warn | Level::Error)
+}
+
+fn sanitize_transport_message(message: &str) -> String {
+    if !message.contains(['\n', '\r', '\t']) {
+        return message.to_string();
+    }
+
+    message
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\t' => ' ',
+            _ => ch,
+        })
+        .collect()
 }
 
 fn map_log_level(level: LogLevel) -> Level {
@@ -225,6 +316,10 @@ fn resolve_record_tag(target: &str) -> &str {
     DEFAULT_LOG_TAG
 }
 
+fn sockaddr_un_len(path_len: usize) -> libc::socklen_t {
+    (mem::size_of::<libc::sa_family_t>() + path_len) as libc::socklen_t
+}
+
 fn level_to_priority(level: Level) -> i32 {
     match level {
         Level::Verbose => ANDROID_LOG_VERBOSE,
@@ -242,6 +337,16 @@ fn level_to_text(level: Level) -> &'static str {
         Level::Info => "Info",
         Level::Warn => "Warn",
         Level::Error => "Error",
+    }
+}
+
+fn level_to_code(level: Level) -> char {
+    match level {
+        Level::Verbose => 'V',
+        Level::Debug => 'D',
+        Level::Info => 'I',
+        Level::Warn => 'W',
+        Level::Error => 'E',
     }
 }
 

@@ -1,11 +1,11 @@
 #!/system/bin/sh
 
 MODDIR="/data/adb/modules/storage.redirect.x"
-RUNNING_COLLECTOR_PID_FILE="$MODDIR/logs/.running_collector.pid"
-MONITOR_COLLECTOR_PID_FILE="$MODDIR/logs/.monitor_collector.pid"
+LOGD_PID_FILE="$MODDIR/logs/.logd.pid"
 MEDIA_STATE_COLLECTOR_PID_FILE="$MODDIR/logs/.media_state_collector.pid"
-APP_STATUS_COLLECTOR_PID_FILE="$MODDIR/logs/.app_status_collector.pid"
 APP_STATUS_SNAPSHOT_PID_FILE="$MODDIR/logs/.app_status_snapshot.pid"
+CONFIG_EVENT_COLLECTOR_PID_FILE="$MODDIR/logs/.config_event_collector.pid"
+PACKAGE_EVENT_COLLECTOR_PID_FILE="$MODDIR/logs/.package_event_collector.pid"
 
 stop_background_process() {
   target_pid="$1"
@@ -33,11 +33,11 @@ stop_collector_by_pid_file() {
   rm -f "$pid_file"
 }
 
-stop_collector_by_pid_file "$RUNNING_COLLECTOR_PID_FILE"
-stop_collector_by_pid_file "$MONITOR_COLLECTOR_PID_FILE"
+stop_collector_by_pid_file "$LOGD_PID_FILE"
 stop_collector_by_pid_file "$MEDIA_STATE_COLLECTOR_PID_FILE"
-stop_collector_by_pid_file "$APP_STATUS_COLLECTOR_PID_FILE"
 stop_collector_by_pid_file "$APP_STATUS_SNAPSHOT_PID_FILE"
+stop_collector_by_pid_file "$CONFIG_EVENT_COLLECTOR_PID_FILE"
+stop_collector_by_pid_file "$PACKAGE_EVENT_COLLECTOR_PID_FILE"
 
 # 清理统计/临时文件
 rm -f /data/local/tmp/storage.redirect.x_stats 2>/dev/null

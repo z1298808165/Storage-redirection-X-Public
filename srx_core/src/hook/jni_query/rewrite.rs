@@ -1,11 +1,15 @@
 use super::super::stats::InterceptHub;
-use super::types::{FILE_SCHEME_PREFIX, SAMPLE_LOG_INITIAL, SAMPLE_LOG_INTERVAL, STORAGE_PREFIXES};
+use super::types::{FILE_SCHEME_PREFIX, STORAGE_PREFIXES};
 use crate::config::SettingsHub;
 use crate::redirect::{policy, process_redirect_path};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-static REWRITE_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
+const ROW_SUMMARY_LOG_STEP: u32 = 4096;
+static THUMBNAIL_FILTER_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+static EMPTY_TARGET_FILTER_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+static MISSING_TARGET_FILTER_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
+static REWRITE_ROW_LOG_COUNT: AtomicU32 = AtomicU32::new(0);
 
 // 路径命中重定向且目标不存在时返回空字符串，避免展示无效媒体行
 pub(crate) fn rewrite_cursor_storage_path_for_caller(
@@ -148,7 +152,7 @@ fn path_exists_by_syscall(path: &str) -> bool {
     ret == 0
 }
 
-// 前 SAMPLE_LOG_INITIAL 条全量输出，之后每 SAMPLE_LOG_INTERVAL 条采样一次
+// 高并发查询只保留摘要样本，避免 running.log 被游标重写刷满
 pub(super) fn sample_row_log(
     reason: &str,
     before: &str,
@@ -156,37 +160,49 @@ pub(super) fn sample_row_log(
     has_file_scheme: bool,
     is_filter: bool,
 ) {
-    let index = REWRITE_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if index >= SAMPLE_LOG_INITIAL
-        && !(index - SAMPLE_LOG_INITIAL).is_multiple_of(SAMPLE_LOG_INTERVAL)
-    {
+    let count = row_reason_counter(reason, is_filter).fetch_add(1, Ordering::Relaxed) + 1;
+    if !should_log_row_summary(count) {
         return;
     }
 
     let hub = InterceptHub::instance();
     if is_filter {
         log::debug!(
-            "row filter reason={} caller={} uid={} path={} target={} file_scheme={} n={}",
+            "row summary filter reason={} caller={} uid={} count={} sample_path={} sample_target={} file_scheme={}",
             reason,
             hub.get_current_caller_package(),
             hub.get_current_caller_uid(),
+            count,
             before,
             if after.is_empty() { "empty" } else { after },
-            has_file_scheme,
-            index + 1
+            has_file_scheme
         );
     } else {
         log::debug!(
-            "row rewrite reason={} caller={} uid={} from={} to={} file_scheme={} n={}",
+            "row summary rewrite reason={} caller={} uid={} count={} sample_from={} sample_to={} file_scheme={}",
             reason,
             hub.get_current_caller_package(),
             hub.get_current_caller_uid(),
+            count,
             before,
             after,
-            has_file_scheme,
-            index + 1
+            has_file_scheme
         );
     }
+}
+
+fn row_reason_counter(reason: &str, is_filter: bool) -> &'static AtomicU32 {
+    match (is_filter, reason) {
+        (true, "thumbnails") => &THUMBNAIL_FILTER_LOG_COUNT,
+        (true, "empty_target") => &EMPTY_TARGET_FILTER_LOG_COUNT,
+        (true, "missing_target") => &MISSING_TARGET_FILTER_LOG_COUNT,
+        (false, _) => &REWRITE_ROW_LOG_COUNT,
+        (true, _) => &MISSING_TARGET_FILTER_LOG_COUNT,
+    }
+}
+
+fn should_log_row_summary(count: u32) -> bool {
+    count == 1 || count.is_multiple_of(ROW_SUMMARY_LOG_STEP)
 }
 
 fn split_storage_path(text: &str) -> Option<(&str, bool)> {

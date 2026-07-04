@@ -9,6 +9,12 @@ pub const ANDROID_APP_UID_START: i32 = 10000;
 const DATA_MEDIA_PREFIX: &str = "/data/media/";
 const STORAGE_PREFIX: &str = "/storage/emulated/";
 
+pub enum CallerRealPathMatch {
+    None,
+    Excluded,
+    Allowed,
+}
+
 pub fn data_media_to_storage_path(path: &str) -> String {
     if !paths::starts_with(path, DATA_MEDIA_PREFIX) {
         return path.to_string();
@@ -55,46 +61,35 @@ pub fn map_path_by_caller_mappings(path: &str, mappings: &[PathMapping]) -> Stri
     String::new()
 }
 
-pub fn is_path_allowed_by_caller_real_paths(
+pub fn classify_path_by_caller_real_paths(
     resolved_path: &str,
     caller_package: &str,
     caller_uid: i32,
-) -> bool {
+) -> CallerRealPathMatch {
     if resolved_path.is_empty() {
-        return false;
+        return CallerRealPathMatch::None;
     }
 
-    let allowed_paths = get_caller_allowed_real_paths(caller_package, caller_uid);
-    for allowed in allowed_paths {
-        if allowed.is_empty() {
-            continue;
+    CALLER_ALLOWED_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let config_version = SettingsHub::instance().config_version();
+        if !(cache.package_name == caller_package
+            && cache.caller_uid == caller_uid
+            && cache.config_version == config_version
+            && cache.is_loaded)
+        {
+            cache.config_version = config_version;
+            refresh_caller_real_paths_cache(&mut cache, caller_package, caller_uid);
         }
-        if paths::matches(&allowed, resolved_path, true) {
-            return true;
-        }
-    }
-    false
-}
 
-pub fn is_path_excluded_by_caller_real_paths(
-    resolved_path: &str,
-    caller_package: &str,
-    caller_uid: i32,
-) -> bool {
-    if resolved_path.is_empty() {
-        return false;
-    }
-
-    let excluded_paths = get_caller_excluded_real_paths(caller_package, caller_uid);
-    for excluded in excluded_paths {
-        if excluded.is_empty() {
-            continue;
+        if matches_any_real_path(&cache.excluded_real_paths, resolved_path) {
+            return CallerRealPathMatch::Excluded;
         }
-        if paths::matches(&excluded, resolved_path, true) {
-            return true;
+        if matches_any_real_path(&cache.allowed_real_paths, resolved_path) {
+            return CallerRealPathMatch::Allowed;
         }
-    }
-    false
+        CallerRealPathMatch::None
+    })
 }
 
 // 无映射命中时的 fallback：原路 → redirect_target
@@ -139,42 +134,35 @@ pub fn resolve_system_writer_redirect_target(
     caller_uid: i32,
     user_id: i32,
     is_caller_from_inferred_mapping: bool,
+    enabled_in_memory: bool,
+    enabled_in_raw: bool,
 ) -> String {
     if caller_package.is_empty() || user_id < 0 {
         return String::new();
     }
 
-    let target = get_caller_default_redirect_target(caller_package, caller_uid);
-    if !target.is_empty() {
-        return target;
-    }
-
-    let config = SettingsHub::instance();
-    let raw_enabled = config.is_user_enabled_in_raw_config(caller_package, user_id);
-    if !is_caller_from_inferred_mapping && !raw_enabled {
+    if !enabled_in_memory && !is_caller_from_inferred_mapping && !enabled_in_raw {
         return String::new();
     }
 
-    let mut target = format!(
-        "/storage/emulated/{}/Android/data/{}/sdcard",
-        user_id, caller_package
-    );
-    target = paths::resolve_user_path(&paths::normalize(&target), user_id);
-    if target.is_empty() || paths::has_unsafe_segments(&target) {
+    let target = get_caller_default_redirect_target(caller_package, user_id);
+    if target.is_empty() {
         return String::new();
     }
 
-    log::debug!(
-        "writer force default caller={} uid={} reason={} target={}",
-        caller_package,
-        caller_uid,
-        if is_caller_from_inferred_mapping {
-            "inferred"
-        } else {
-            "config"
-        },
-        target
-    );
+    if !enabled_in_memory {
+        log::debug!(
+            "writer force default caller={} uid={} reason={} target={}",
+            caller_package,
+            caller_uid,
+            if is_caller_from_inferred_mapping {
+                "inferred"
+            } else {
+                "config"
+            },
+            target
+        );
+    }
     target
 }
 
@@ -204,18 +192,15 @@ pub fn maybe_override_system_writer_caller_by_path(
     }
 
     let config = SettingsHub::instance();
-    let inferred =
-        config.resolve_redirect_package_by_path_for_user(*effective_caller_uid, normalized_path);
-    if inferred.is_empty() {
+    if !effective_caller_package.is_empty()
+        && config.should_redirect(effective_caller_package, *effective_caller_uid)
+    {
         return;
     }
 
-    let mut should_replace = effective_caller_package.is_empty();
-    if !should_replace && !config.should_redirect(effective_caller_package, *effective_caller_uid) {
-        should_replace = true;
-    }
-
-    if !should_replace {
+    let inferred =
+        config.resolve_redirect_package_by_path_for_user(*effective_caller_uid, normalized_path);
+    if inferred.is_empty() {
         return;
     }
 
@@ -375,32 +360,21 @@ fn build_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMappi
     mappings
 }
 
-fn get_caller_default_redirect_target(caller_package: &str, caller_uid: i32) -> String {
+fn get_caller_default_redirect_target(caller_package: &str, user_id: i32) -> String {
     CALLER_TARGET_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let config_version = SettingsHub::instance().config_version();
-        if cache.package_name == caller_package
-            && cache.caller_uid == caller_uid
-            && cache.config_version == config_version
-        {
+        if cache.package_name == caller_package && cache.user_id == user_id {
             return cache.redirect_target.clone();
         }
 
         cache.package_name = caller_package.to_string();
-        cache.caller_uid = caller_uid;
-        cache.config_version = config_version;
+        cache.user_id = user_id;
         cache.redirect_target.clear();
 
-        if caller_package.is_empty() || caller_uid < ANDROID_APP_UID_START {
+        if caller_package.is_empty() || user_id < 0 {
             return cache.redirect_target.clone();
         }
 
-        let config = SettingsHub::instance();
-        if !config.should_redirect(caller_package, caller_uid) {
-            return cache.redirect_target.clone();
-        }
-
-        let user_id = platform::user_id_from_uid(caller_uid);
         let target = format!(
             "/storage/emulated/{}/Android/data/{}/sdcard",
             user_id, caller_package
@@ -413,40 +387,10 @@ fn get_caller_default_redirect_target(caller_package: &str, caller_uid: i32) -> 
     })
 }
 
-fn get_caller_allowed_real_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    CALLER_ALLOWED_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let config_version = SettingsHub::instance().config_version();
-        if cache.package_name == caller_package
-            && cache.caller_uid == caller_uid
-            && cache.config_version == config_version
-            && cache.is_loaded
-        {
-            return cache.allowed_real_paths.clone();
-        }
-
-        cache.config_version = config_version;
-        refresh_caller_real_paths_cache(&mut cache, caller_package, caller_uid);
-        cache.allowed_real_paths.clone()
-    })
-}
-
-fn get_caller_excluded_real_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    CALLER_ALLOWED_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let config_version = SettingsHub::instance().config_version();
-        if cache.package_name == caller_package
-            && cache.caller_uid == caller_uid
-            && cache.config_version == config_version
-            && cache.is_loaded
-        {
-            return cache.excluded_real_paths.clone();
-        }
-
-        cache.config_version = config_version;
-        refresh_caller_real_paths_cache(&mut cache, caller_package, caller_uid);
-        cache.excluded_real_paths.clone()
-    })
+fn matches_any_real_path(path_list: &[String], resolved_path: &str) -> bool {
+    path_list
+        .iter()
+        .any(|path| !path.is_empty() && paths::matches(path, resolved_path, true))
 }
 
 fn refresh_caller_real_paths_cache(
@@ -469,9 +413,9 @@ fn refresh_caller_real_paths_cache(
     cache.excluded_real_paths = config.get_excluded_real_paths(caller_package, caller_uid);
 }
 
-// 首次和每 256 次输出一次
+// 热路径仅保留稀疏样本，避免系统代写查询刷满 running.log
 fn should_log_every_step(count: u64) -> bool {
-    count == 1 || count.is_multiple_of(256)
+    count == 1 || count.is_multiple_of(4096)
 }
 
 struct CallerMappingCache {
@@ -483,8 +427,7 @@ struct CallerMappingCache {
 
 struct CallerTargetCache {
     package_name: String,
-    caller_uid: i32,
-    config_version: u64,
+    user_id: i32,
     redirect_target: String,
 }
 
@@ -506,8 +449,7 @@ thread_local! {
     }) };
     static CALLER_TARGET_CACHE: RefCell<CallerTargetCache> = const { RefCell::new(CallerTargetCache {
         package_name: String::new(),
-        caller_uid: -1,
-        config_version: 0,
+        user_id: -1,
         redirect_target: String::new(),
     }) };
     static CALLER_ALLOWED_CACHE: RefCell<CallerAllowedCache> = const { RefCell::new(CallerAllowedCache {

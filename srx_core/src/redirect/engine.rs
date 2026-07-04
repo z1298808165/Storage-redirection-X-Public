@@ -9,9 +9,13 @@ use crate::platform::paths;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const WRITER_ALLOWED_LOG_STEP: u64 = 256;
-const REDIRECT_SLOW_MS: i64 = 5;
-const REDIRECT_SAMPLE_STEP: u64 = 2048;
+const WRITER_DEFAULT_REDIRECT_LOG_STEP: u64 = 4096;
+const WRITER_REDIRECT_PHASE_SLOW_MS: i64 = 10;
+const WRITER_REDIRECT_TOTAL_SLOW_MS: i64 = 100;
+const REDIRECT_SLOW_MS: i64 = 10;
+const REDIRECT_SAMPLE_STEP: u64 = 8192;
 static WRITER_ALLOWED_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static WRITER_DEFAULT_REDIRECT_COUNT: AtomicU64 = AtomicU64::new(0);
 static REDIRECT_DECISION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
@@ -183,7 +187,11 @@ pub fn process_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDeci
     let enable_started_ms = paths::monotonic_ms();
     let config = SettingsHub::instance();
     let enabled_in_memory = config.should_redirect(&effective_caller_package, effective_caller_uid);
-    let enabled_in_raw = config.is_user_enabled_in_raw_config(&effective_caller_package, user_id);
+    let enabled_in_raw = if enabled_in_memory {
+        false
+    } else {
+        config.is_user_enabled_in_raw_config(&effective_caller_package, user_id)
+    };
     let enable_ms = paths::monotonic_ms().saturating_sub(enable_started_ms);
     if !enabled_in_memory && !enabled_in_raw {
         writer::log_system_writer_redirect_disabled(
@@ -328,55 +336,54 @@ pub fn process_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDeci
     }
 
     let allow_started_ms = paths::monotonic_ms();
-    let is_path_excluded = writer::is_path_excluded_by_caller_real_paths(
-        &resolved_path,
-        &effective_caller_package,
-        effective_caller_uid,
-    );
-    if is_path_excluded {
-        log::debug!(
-            "writer: excl hit caller={} uid={} path={}",
-            effective_caller_package,
-            effective_caller_uid,
-            resolved_path
-        );
-    } else if writer::is_path_allowed_by_caller_real_paths(
+    match writer::classify_path_by_caller_real_paths(
         &resolved_path,
         &effective_caller_package,
         effective_caller_uid,
     ) {
-        let allow_ms = paths::monotonic_ms().saturating_sub(allow_started_ms);
-        let allowed_count = WRITER_ALLOWED_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if should_log_step(allowed_count, WRITER_ALLOWED_LOG_STEP) {
+        writer::CallerRealPathMatch::Excluded => {
             log::debug!(
-                "writer: real allow caller={} uid={} path={} n={}",
+                "writer: excl hit caller={} uid={} path={}",
                 effective_caller_package,
                 effective_caller_uid,
-                resolved_path,
-                allowed_count
+                resolved_path
             );
         }
-        let decision = RedirectDecision {
-            action: RedirectAction::Allow,
-            new_path: String::new(),
-        };
-        log_writer_redirect_perf(&WriterRedirectPerf {
-            package_name: &package_name,
-            exit_reason: "allowed",
-            caller_package: &effective_caller_package,
-            path: pathname,
-            normalized_path: &normalized_path,
-            reload_ms,
-            caller_ms,
-            enable_ms,
-            mapping_ms,
-            allow_ms,
-            fallback_ms: 0,
-            total_ms: paths::monotonic_ms().saturating_sub(perf_started_ms),
-            decision: &decision,
-        });
-        log_thumbnail_decision("allowed", &decision);
-        return decision;
+        writer::CallerRealPathMatch::Allowed => {
+            let allow_ms = paths::monotonic_ms().saturating_sub(allow_started_ms);
+            let allowed_count = WRITER_ALLOWED_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if should_log_step(allowed_count, WRITER_ALLOWED_LOG_STEP) {
+                log::debug!(
+                    "writer: real allow caller={} uid={} path={} n={}",
+                    effective_caller_package,
+                    effective_caller_uid,
+                    resolved_path,
+                    allowed_count
+                );
+            }
+            let decision = RedirectDecision {
+                action: RedirectAction::Allow,
+                new_path: String::new(),
+            };
+            log_writer_redirect_perf(&WriterRedirectPerf {
+                package_name: &package_name,
+                exit_reason: "allowed",
+                caller_package: &effective_caller_package,
+                path: pathname,
+                normalized_path: &normalized_path,
+                reload_ms,
+                caller_ms,
+                enable_ms,
+                mapping_ms,
+                allow_ms,
+                fallback_ms: 0,
+                total_ms: paths::monotonic_ms().saturating_sub(perf_started_ms),
+                decision: &decision,
+            });
+            log_thumbnail_decision("allowed", &decision);
+            return decision;
+        }
+        writer::CallerRealPathMatch::None => {}
     }
     let allow_ms = paths::monotonic_ms().saturating_sub(allow_started_ms);
 
@@ -386,6 +393,8 @@ pub fn process_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDeci
         effective_caller_uid,
         user_id,
         is_caller_from_inferred,
+        enabled_in_memory,
+        enabled_in_raw,
     );
     if redirect_target.is_empty() {
         writer::log_system_writer_redirect_disabled(
@@ -449,12 +458,11 @@ pub fn process_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDeci
     } else {
         fallback_path
     };
-    log::debug!(
-        "writer: default redirect caller={} uid={} from={} to={}",
-        effective_caller_package,
+    log_writer_default_redirect_summary(
+        &effective_caller_package,
         effective_caller_uid,
-        resolved_path,
-        new_path
+        &resolved_path,
+        &new_path,
     );
     let fallback_ms = paths::monotonic_ms().saturating_sub(fallback_started_ms);
     let decision = RedirectDecision {
@@ -484,6 +492,26 @@ pub fn record_redirect_hit(hub: &InterceptHub, op_name: &str, from_path: &str, t
     log::trace!("{}: {} -> {}", op_name, from_path, to_path);
     hub.increment_total_redirected();
     hub.increment_global_redirect_count();
+}
+
+fn log_writer_default_redirect_summary(
+    caller_package: &str,
+    caller_uid: i32,
+    from_path: &str,
+    to_path: &str,
+) {
+    let count = WRITER_DEFAULT_REDIRECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !should_log_step(count, WRITER_DEFAULT_REDIRECT_LOG_STEP) {
+        return;
+    }
+    log::debug!(
+        "writer summary default_redirect caller={} uid={} count={} sample_from={} sample_to={}",
+        caller_package,
+        caller_uid,
+        count,
+        from_path,
+        to_path
+    );
 }
 
 struct WriterRedirectPerf<'a> {
@@ -529,7 +557,7 @@ fn log_redirect_perf(
 }
 
 fn log_writer_redirect_perf(perf: &WriterRedirectPerf<'_>) {
-    if !should_log_redirect_perf(perf.total_ms) {
+    if !should_log_writer_redirect_perf(perf) {
         return;
     }
     log::info!(
@@ -549,6 +577,22 @@ fn log_writer_redirect_perf(perf: &WriterRedirectPerf<'_>) {
         perf.fallback_ms,
         perf.total_ms
     );
+}
+
+fn should_log_writer_redirect_perf(perf: &WriterRedirectPerf<'_>) -> bool {
+    if perf.total_ms >= WRITER_REDIRECT_TOTAL_SLOW_MS {
+        return true;
+    }
+    if perf.reload_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+        || perf.caller_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+        || perf.enable_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+        || perf.mapping_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+        || perf.allow_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+        || perf.fallback_ms >= WRITER_REDIRECT_PHASE_SLOW_MS
+    {
+        return true;
+    }
+    false
 }
 
 fn should_log_redirect_perf(total_ms: i64) -> bool {

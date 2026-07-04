@@ -5,6 +5,7 @@ MODDIR=${0%/*}
 LOGS_DIR="$MODDIR/logs"
 CONFIG_DIR="$MODDIR/config"
 SYSTEM_WRITER_UIDS_FILE="$CONFIG_DIR/system_writer_uids.list"
+STATS_FILE="$MODDIR/stats"
 BOOT_PENDING_FILE="$MODDIR/.boot_pending"
 BOOT_OK_FILE="$MODDIR/.boot_ok"
 LOGS_CTX="u:object_r:shell_data_file:s0"
@@ -12,6 +13,11 @@ LOGS_CTX="u:object_r:shell_data_file:s0"
 mkdir -p "$LOGS_DIR"
 chmod 755 "$LOGS_DIR"
 mkdir -p "$CONFIG_DIR"
+touch "$STATS_FILE"
+chmod 666 "$STATS_FILE"
+if [ ! -s "$STATS_FILE" ]; then
+  echo "0" > "$STATS_FILE"
+fi
 
 boot_id=""
 if [ -r /proc/sys/kernel/random/boot_id ]; then
@@ -54,6 +60,7 @@ fi
 
 if command -v chcon >/dev/null 2>&1; then
   chcon -R "$LOGS_CTX" "$LOGS_DIR" 2>/dev/null
+  chcon "$LOGS_CTX" "$STATS_FILE" 2>/dev/null
 fi
 
 # 构建全量包名到 UID 映射，供系统代写按调用方识别配置使用。

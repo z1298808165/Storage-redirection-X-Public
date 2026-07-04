@@ -76,6 +76,9 @@ pub fn matches(rule_path: &str, target_path: &str, is_recursive: bool) -> bool {
     if rule_path.is_empty() || target_path.is_empty() {
         return false;
     }
+    if !rule_path.contains('*') && !rule_path.contains('?') {
+        return match_plain_path(rule_path, target_path, is_recursive);
+    }
 
     let rule_segments: Vec<&str> = rule_path.split('/').filter(|s| !s.is_empty()).collect();
     let target_segments: Vec<&str> = target_path.split('/').filter(|s| !s.is_empty()).collect();
@@ -141,6 +144,23 @@ fn match_segment_pattern(pattern: &str, text: &str) -> bool {
     }
 
     pattern_idx == pattern_chars.len()
+}
+
+fn match_plain_path(rule_path: &str, target_path: &str, is_recursive: bool) -> bool {
+    if rule_path == target_path {
+        return true;
+    }
+    if !is_recursive {
+        return false;
+    }
+
+    if rule_path == "/" {
+        return target_path.starts_with('/');
+    }
+
+    target_path
+        .strip_prefix(rule_path)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 // 存在 . 或 .. 段视为不安全

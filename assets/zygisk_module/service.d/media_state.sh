@@ -7,7 +7,7 @@ get_media_provider_pid() {
 append_media_state_output() {
   now_text="$1"
   while IFS= read -r line; do
-    printf '%s %s\n' "$now_text" "$line" >> "$MEDIA_STATE_LOG_FILE"
+    printf '%s %s\n' "$now_text" "$line"
   done
 }
 
@@ -17,11 +17,11 @@ should_write_media_detail() {
   last_sec=$(cat "$MEDIA_STATE_DETAIL_TS_FILE" 2>/dev/null)
   last_sec=${last_sec:-0}
 
-  if [ "$reason" = "pid_change" ] || [ "$reason" = "state_D" ]; then
+  if [ "$reason" = "pid_change" ] || [ "$reason" = "state_D" ] || [ "$reason" = "rss_high" ] || [ "$reason" = "threads_high" ]; then
     echo "$now_sec" > "$MEDIA_STATE_DETAIL_TS_FILE"
     return 0
   fi
-  if [ $((now_sec - last_sec)) -ge 300 ]; then
+  if [ "$last_sec" -gt 0 ] && [ $((now_sec - last_sec)) -ge 300 ]; then
     echo "$now_sec" > "$MEDIA_STATE_DETAIL_TS_FILE"
     return 0
   fi
@@ -39,49 +39,49 @@ append_media_proc_detail() {
   pid="$2"
   reason="$3"
 
-  echo "$now_text -- media detail begin pid=$pid reason=$reason" >> "$MEDIA_STATE_LOG_FILE"
-  echo "$now_text -- /proc/$pid/cmdline" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- media detail begin pid=%s reason=%s\n' "$now_text" "$pid" "$reason"
+  printf '%s -- /proc/%s/cmdline\n' "$now_text" "$pid"
   tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- /proc/$pid/status" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- /proc/%s/status\n' "$now_text" "$pid"
   sed 's/^/  /' "/proc/$pid/status" 2>/dev/null |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- /proc/$pid/task/*/status" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- /proc/%s/task/*/status\n' "$now_text" "$pid"
   for status_file in "/proc/$pid"/task/*/status; do
     [ -r "$status_file" ] || continue
     tid=${status_file%/status}
     tid=${tid##*/}
-    echo "$now_text ---- task $tid status" >> "$MEDIA_STATE_LOG_FILE"
+    printf '%s ---- task %s status\n' "$now_text" "$tid"
     sed 's/^/  /' "$status_file" 2>/dev/null |
       append_media_state_output "$now_text"
   done
 
-  echo "$now_text -- /proc/$pid/fd" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- /proc/%s/fd\n' "$now_text" "$pid"
   ls -l "/proc/$pid/fd" 2>/dev/null |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- /proc/$pid/mountinfo storage" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- /proc/%s/mountinfo storage\n' "$now_text" "$pid"
   grep -E ' /storage| /mnt/user| /mnt/media_rw| /sdcard|storage.redirect.x' "/proc/$pid/mountinfo" 2>/dev/null |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- dumpsys meminfo $pid" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- dumpsys meminfo %s\n' "$now_text" "$pid"
   dumpsys meminfo "$pid" 2>/dev/null |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- recent media logcat" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- recent media logcat\n' "$now_text"
   logcat -d -t 120 -v threadtime 2>/dev/null |
     grep -E 'MediaProvider|MediaProviderWrapper|FuseDaemon|ExternalStorage|StorageRedirect|FileMonitorOp|SQLite|CursorWindow|binder' |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- recent oom/fuse dmesg" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- recent oom/fuse dmesg\n' "$now_text"
   dmesg 2>/dev/null |
     tail -n 300 |
     grep -Ei 'oom|lowmem|killed process|fuse|media' |
     append_media_state_output "$now_text"
 
-  echo "$now_text -- media detail end pid=$pid" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- media detail end pid=%s\n' "$now_text" "$pid"
 }
 
 append_media_state_snapshot() {
@@ -89,31 +89,31 @@ append_media_state_snapshot() {
   now_text=${now_text:-unknown}
   pid_list=$(get_media_provider_pid | sort -u)
 
-  echo "$now_text -- media_state snapshot begin" >> "$MEDIA_STATE_LOG_FILE"
-  echo "$now_text -- pidof media providers" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- media_state snapshot begin\n' "$now_text"
+  printf '%s -- pidof media providers\n' "$now_text"
   {
     pidof com.google.android.providers.media.module 2>/dev/null
     pidof com.android.providers.media.module 2>/dev/null
     pidof com.android.providers.media 2>/dev/null
   } | append_media_state_output "$now_text"
 
-  echo "$now_text -- ps -A -o PID,USER,ARGS media" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- ps -A -o PID,USER,ARGS media\n' "$now_text"
   ps -A -o PID,USER,ARGS 2>/dev/null |
     awk 'NR == 1 || $0 ~ /providers\.media|android\.process\.media/' |
     append_media_state_output "$now_text"
 
   if [ -z "$pid_list" ]; then
-    echo "$now_text -- media provider missing" >> "$MEDIA_STATE_LOG_FILE"
+    printf '%s -- media provider missing\n' "$now_text"
   else
     last_pid=$(cat "$MEDIA_STATE_LAST_PID_FILE" 2>/dev/null)
     for pid in $pid_list; do
       status_file="/proc/$pid/status"
       if [ ! -r "$status_file" ]; then
-        echo "$now_text -- media process gone pid=$pid" >> "$MEDIA_STATE_LOG_FILE"
+        printf '%s -- media process gone pid=%s\n' "$now_text" "$pid"
         continue
       fi
 
-      echo "$now_text -- /proc/$pid/status summary" >> "$MEDIA_STATE_LOG_FILE"
+      printf '%s -- /proc/%s/status summary\n' "$now_text" "$pid"
       grep -E '^(Name|State|Pid|PPid|Threads|VmRSS|VmSize):' "$status_file" 2>/dev/null |
         sed 's/^/  /' |
         append_media_state_output "$now_text"
@@ -139,28 +139,13 @@ append_media_state_snapshot() {
     done
   fi
 
-  echo "$now_text -- media_state snapshot end" >> "$MEDIA_STATE_LOG_FILE"
+  printf '%s -- media_state snapshot end\n' "$now_text"
 }
 
 start_media_state_collector() {
   (
-    line_count=$(get_line_count "$MEDIA_STATE_LOG_FILE")
     while true; do
-      before_count=$(get_line_count "$MEDIA_STATE_LOG_FILE")
-      append_media_state_snapshot
-      after_count=$(get_line_count "$MEDIA_STATE_LOG_FILE")
-      added_lines=$((after_count - before_count))
-      if [ "$added_lines" -gt 0 ]; then
-        line_count=$((line_count + added_lines))
-      fi
-      if [ "$line_count" -gt "$MAX_MEDIA_STATE_LOG_LINES" ]; then
-        drop_lines=$((line_count - MAX_MEDIA_STATE_LOG_LINES + MEDIA_STATE_TRIM_BATCH_LINES))
-        if [ "$drop_lines" -gt "$line_count" ]; then
-          drop_lines="$line_count"
-        fi
-        trim_log_file_drop_head "$MEDIA_STATE_LOG_FILE" "$drop_lines"
-        line_count=$((line_count - drop_lines))
-      fi
+      append_media_state_snapshot | emit_private_log_stream "MediaState"
       sleep 30
     done
   ) &

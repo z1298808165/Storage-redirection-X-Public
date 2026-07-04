@@ -43,3 +43,10 @@ allow appdomain shell_data_file file append
 allow appdomain shell_data_file file getattr
 allow appdomain shell_data_file file create
 allow appdomain shell_data_file file unlink
+
+allow zygote su unix_dgram_socket sendto
+allow appdomain su unix_dgram_socket sendto
+allow mediaprovider su unix_dgram_socket sendto
+allow mediaprovider_app su unix_dgram_socket sendto
+allow system_server su unix_dgram_socket sendto
+allow su su unix_dgram_socket sendto

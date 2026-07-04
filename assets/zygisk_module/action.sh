@@ -3,6 +3,53 @@
 
 MODDIR="/data/adb/modules/storage.redirect.x"
 LOGDIR="$MODDIR/logs"
+STATS_FILE="$MODDIR/stats"
+
+resolve_action_primary_arch() {
+  arch=$(getprop ro.product.cpu.abi 2>/dev/null)
+  if [ -z "$arch" ]; then
+    arch=$(getprop ro.product.cpu.abilist64 2>/dev/null | awk -F',' '{print $1}')
+  fi
+  if [ -z "$arch" ]; then
+    arch=$(getprop ro.product.cpu.abilist 2>/dev/null | awk -F',' '{print $1}')
+  fi
+
+  case "$arch" in
+    arm64-v8a|aarch64)
+      echo "arm64-v8a"
+      ;;
+    x86_64|x86-64)
+      echo "x86_64"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+resolve_action_logd_bin() {
+  primary_arch=$(resolve_action_primary_arch)
+  if [ -z "$primary_arch" ]; then
+    return 1
+  fi
+  logd_bin="$MODDIR/bin/$primary_arch/srx_logd"
+  [ -x "$logd_bin" ] || return 1
+  echo "$logd_bin"
+}
+
+send_logd_control() {
+  command="$1"
+  logd_bin=$(resolve_action_logd_bin) || return 1
+  "$logd_bin" control "$command" >/dev/null 2>&1
+}
+
+clear_logs_via_logd() {
+  send_logd_control "clear-all"
+}
+
+flush_logs_via_logd() {
+  send_logd_control "flush-all"
+}
 
 case "$1" in
   "Reload Redirect")
@@ -55,6 +102,7 @@ case "$1" in
     echo ""
 
     if [ -f "$LOGDIR/running.log" ]; then
+      flush_logs_via_logd >/dev/null 2>&1
       tail -n 100 "$LOGDIR/running.log"
     else
       echo "error: missing log file path=$LOGDIR/running.log"
@@ -73,13 +121,11 @@ case "$1" in
     echo ""
 
     if [ -d "$LOGDIR" ]; then
-      log_count=$(ls -1 "$LOGDIR"/*.log 2>/dev/null | wc -l)
-      rm -f "$LOGDIR"/*.log 2>/dev/null
-
-      if [ $? -eq 0 ]; then
-        echo "Cleared log files: count=$log_count"
+      if clear_logs_via_logd; then
+        echo "Cleared log files: count=4"
+        echo "Stats reset: ok"
       else
-        echo "error: clear logs failed"
+        echo "error: clear via srx_logd failed"
       fi
     else
       echo "error: missing logs dir path=$LOGDIR"
