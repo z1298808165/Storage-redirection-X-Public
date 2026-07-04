@@ -50,3 +50,9 @@ allow mediaprovider su unix_dgram_socket sendto
 allow mediaprovider_app su unix_dgram_socket sendto
 allow system_server su unix_dgram_socket sendto
 allow su su unix_dgram_socket sendto
+allow zygote ksu unix_dgram_socket sendto
+allow appdomain ksu unix_dgram_socket sendto
+allow mediaprovider ksu unix_dgram_socket sendto
+allow mediaprovider_app ksu unix_dgram_socket sendto
+allow system_server ksu unix_dgram_socket sendto
+allow ksu ksu unix_dgram_socket sendto

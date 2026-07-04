@@ -261,9 +261,19 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
 }
 
 fn private_log_socket() -> Option<&'static PrivateLogSocket> {
+    // zygote 阶段禁止创建私有 socket，避免子进程继承未完成的日志通道
+    if PRIVATE_LOG_SOCKET.get().is_none() && is_zygote_selinux_context() {
+        return None;
+    }
     PRIVATE_LOG_SOCKET
         .get_or_init(PrivateLogSocket::new)
         .as_ref()
+}
+
+fn is_zygote_selinux_context() -> bool {
+    std::fs::read_to_string("/proc/self/attr/current")
+        .map(|context| context.contains("zygote"))
+        .unwrap_or(false)
 }
 
 fn should_write_android_log(level: Level) -> bool {
