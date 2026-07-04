@@ -372,13 +372,26 @@ pub(crate) fn should_hide_cursor_storage_path_for_caller(
 
     let mappings = writer::get_caller_mappings(&caller_package, caller_uid);
     if writer::is_path_in_caller_mapping_request(&resolved_path, &mappings) {
-        return log(
-            "mapping_request",
-            &resolved_path,
-            &caller_package,
-            "",
-            false,
-        );
+        if is_media_store_pending_path(&resolved_path) {
+            return log(
+                "mapping_request_pending",
+                &resolved_path,
+                &caller_package,
+                "",
+                false,
+            );
+        }
+        let mapped_path = writer::map_path_by_caller_mappings(&resolved_path, &mappings);
+        if mapping_target_path_exists(&mapped_path) {
+            return log(
+                "mapping_request_target_exists",
+                &resolved_path,
+                &caller_package,
+                &mapped_path,
+                false,
+            );
+        }
+        return log("mapping_request", &resolved_path, &caller_package, "", true);
     }
     let mapped_path = writer::map_path_by_caller_mappings(&resolved_path, &mappings);
     if !mapped_path.is_empty() && mapped_path != resolved_path {
@@ -587,9 +600,9 @@ where
             return Some(String::new());
         }
         // Download 场景常见 "先写入后可见"：若在 pending 阶段直接隐藏行，
-        // caller 可能拿不到可写 URI，导致保存失败。
-        // IS_PENDING: 原始路径也不存在 → 极可能是 pending 文件 → 保留行
-        if !path_exists_by_syscall(path_text) {
+        // caller 可能拿不到可写 URI，导致保存失败。只保留 MediaStore
+        // .pending-* 临时文件，避免普通已删除媒体行继续出现在相册里。
+        if is_media_store_pending_path(path_text) && !path_exists_by_syscall(path_text) {
             let display_path = to_public_storage_path(&decision.new_path);
             let rewritten = if has_file_scheme {
                 format!("{}{}", FILE_SCHEME_PREFIX, display_path)
@@ -743,7 +756,7 @@ fn rewrite_cursor_storage_path_for_mapping_view(
     if can_hide_rows
         && !mapping_view_path_exists_for_caller(&display_path, caller_package, caller_uid)
     {
-        if !path_exists_by_syscall(path_text) {
+        if is_media_store_pending_path(path_text) && !path_exists_by_syscall(path_text) {
             let rewritten = if has_file_scheme {
                 format!("{}{}", FILE_SCHEME_PREFIX, display_path)
             } else {
@@ -846,6 +859,12 @@ fn mapping_view_path_exists_for_caller(
     }
     path_exists_by_syscall(&mapped)
         || path_exists_by_syscall(&writer::storage_to_data_media_path(&mapped))
+}
+
+fn mapping_target_path_exists(mapped_path: &str) -> bool {
+    !mapped_path.is_empty()
+        && (path_exists_by_syscall(mapped_path)
+            || path_exists_by_syscall(&writer::storage_to_data_media_path(mapped_path)))
 }
 
 fn resolve_caller_package_for_media_placeholder(
@@ -1375,6 +1394,14 @@ fn is_probe_path(path: &str) -> bool {
     path.ends_with("/.srx_probe") || path.ends_with("/.srx_probe/")
 }
 
+fn is_media_store_pending_path(path: &str) -> bool {
+    let path_text = path.strip_prefix(FILE_SCHEME_PREFIX).unwrap_or(path);
+    path_text
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with(".pending-"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1887,6 +1914,162 @@ mod tests {
         });
 
         assert_eq!(rewritten.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn hides_missing_mapping_view_rows_after_target_file_is_deleted() {
+        let config = SettingsHub::instance();
+        let caller_package = "com.example.mediaapp";
+        let caller_uid = 10123;
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: Vec::new(),
+                        path_mappings: vec![PathMapping::new(
+                            "/storage/emulated/0/Pictures/MappedAlbum".to_string(),
+                            "/storage/emulated/0/DCIM/MappedAlbum".to_string(),
+                        )],
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([(
+            caller_package.to_string(),
+            caller_uid,
+        )]));
+
+        let rewritten = rewrite_cursor_storage_path_for_mapping_view(
+            "/storage/emulated/0/DCIM/MappedAlbum/srx_missing_photo.jpg",
+            "/storage/emulated/0/DCIM/MappedAlbum/srx_missing_photo.jpg",
+            false,
+            caller_package,
+            caller_uid,
+            true,
+        );
+
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
+
+        assert_eq!(rewritten.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn keeps_missing_pending_mapping_view_rows_for_media_store_writes() {
+        let config = SettingsHub::instance();
+        let caller_package = "com.example.mediaapp";
+        let caller_uid = 10123;
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: Vec::new(),
+                        path_mappings: vec![PathMapping::new(
+                            "/storage/emulated/0/Pictures/MappedAlbum".to_string(),
+                            "/storage/emulated/0/DCIM/MappedAlbum".to_string(),
+                        )],
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([(
+            caller_package.to_string(),
+            caller_uid,
+        )]));
+
+        let rewritten = rewrite_cursor_storage_path_for_mapping_view(
+            "/storage/emulated/0/DCIM/MappedAlbum/.pending-77-photo.jpg",
+            "/storage/emulated/0/DCIM/MappedAlbum/.pending-77-photo.jpg",
+            false,
+            caller_package,
+            caller_uid,
+            true,
+        );
+
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
+
+        assert_eq!(
+            rewritten.as_deref(),
+            Some("/storage/emulated/0/Pictures/MappedAlbum/.pending-77-photo.jpg")
+        );
+    }
+
+    #[test]
+    fn cursor_visibility_hides_real_files_under_mapping_request_path() {
+        let config = SettingsHub::instance();
+        let caller_package = "com.example.mediaapp";
+        let caller_uid = 10123;
+        let runtime = InterceptHub::instance();
+        let previous_package = runtime.get_current_caller_package();
+        let previous_uid = runtime.get_current_caller_uid();
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: Vec::new(),
+                        path_mappings: vec![PathMapping::new(
+                            "/storage/emulated/0/Pictures".to_string(),
+                            "/storage/emulated/0/DCIM".to_string(),
+                        )],
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([(
+            caller_package.to_string(),
+            caller_uid,
+        )]));
+
+        assert!(should_hide_cursor_storage_path_for_caller(
+            "/storage/emulated/0/Pictures/MappedAlbum/photo.jpg",
+            caller_uid,
+        ));
+        assert!(!should_hide_cursor_storage_path_for_caller(
+            "/storage/emulated/0/Pictures/MappedAlbum/.pending-77-photo.jpg",
+            caller_uid,
+        ));
+
+        runtime.set_current_caller_package(&previous_package);
+        runtime.set_current_caller_uid(previous_uid);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
     }
 
     #[test]

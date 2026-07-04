@@ -3889,12 +3889,20 @@ public class Hooker {
               logFilter("filter_visibility", id, callerUid);
               continue;
             }
+            if (!allowMissingMappedTarget &&
+                !isMediaStorePendingPath(path) &&
+                !storagePathExistsForCaller(path, callerUid)) {
+              logFilter("filter_missing_plain", id, callerUid);
+              continue;
+            }
             if (rewritten != null && !rewritten.equals(path)) {
               if (!allowMissingMappedTarget) {
                 boolean rewrittenExists =
                     storagePathExistsForCaller(rewritten, callerUid);
+                boolean mappingViewRewrite =
+                    isMappingViewRewrite(path, rewritten, callerUid);
                 if (!rewrittenExists &&
-                    !isMappingViewRewrite(path, rewritten, callerUid)) {
+                    (!mappingViewRewrite || !isMediaStorePendingPath(path))) {
                   logFilter("filter_missing_rewrite", id, callerUid);
                   continue;
                 }
@@ -4296,6 +4304,15 @@ public class Hooker {
       String normalizedLeft = normalizeComparableStoragePath(left, callerUid);
       String normalizedRight = normalizeComparableStoragePath(right, callerUid);
       return normalizedLeft != null && normalizedLeft.equals(normalizedRight);
+    }
+
+    private static boolean isMediaStorePendingPath(String path) {
+      if (path == null || path.length() == 0)
+        return false;
+      String value = path.startsWith("file://") ? path.substring("file://".length()) : path;
+      int slash = value.lastIndexOf('/');
+      String name = slash >= 0 ? value.substring(slash + 1) : value;
+      return name.startsWith(".pending-");
     }
 
     private static String normalizeComparableStoragePath(String path,
