@@ -6,6 +6,13 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const ROUTER_SLOW_MS: i64 = 5;
+const REDIRECT_LOG_STEP: u64 = 4096;
+
+// 首次与每 step 次命中才打样本，避免热路径刷满 running.log
+#[inline]
+fn should_log_step(count: u64, step: u64) -> bool {
+    count == 1 || count.is_multiple_of(step)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RedirectAction {
@@ -326,8 +333,10 @@ impl PathRouter {
                 generate_redirected_path(&state.storage_root, &state.redirect_target, &resolved);
             let allow_ms = paths::monotonic_ms().saturating_sub(allow_started_ms);
             if redirected != resolved {
-                self.stats.redirected.fetch_add(1, Ordering::Relaxed);
-                log::debug!("excl redirect {} -> {}", resolved, redirected);
+                let hit = self.stats.redirected.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_step(hit, REDIRECT_LOG_STEP) {
+                    log::debug!("excl redirect count={} {} -> {}", hit, resolved, redirected);
+                }
                 let decision = RedirectDecision {
                     action: RedirectAction::Redirect,
                     new_path: redirected,
@@ -397,8 +406,10 @@ impl PathRouter {
             return decision;
         }
 
-        self.stats.redirected.fetch_add(1, Ordering::Relaxed);
-        log::debug!("redirect {} -> {}", resolved, redirected);
+        let hit = self.stats.redirected.fetch_add(1, Ordering::Relaxed) + 1;
+        if should_log_step(hit, REDIRECT_LOG_STEP) {
+            log::debug!("redirect count={} {} -> {}", hit, resolved, redirected);
+        }
         let decision = RedirectDecision {
             action: RedirectAction::Redirect,
             new_path: redirected,

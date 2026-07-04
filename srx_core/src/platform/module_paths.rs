@@ -5,5 +5,3 @@ pub const SHARED_CONFIG_DIR: &str = "/dev/srx_config";
 pub const SYSTEM_WRITER_UIDS_FILE: &str =
     "/data/adb/modules/storage.redirect.x/config/system_writer_uids.list";
 pub const LOG_DIR: &str = "/data/adb/modules/storage.redirect.x/logs";
-
-pub const MODULE_STATS_FILE: &str = "/data/adb/modules/storage.redirect.x/stats";
