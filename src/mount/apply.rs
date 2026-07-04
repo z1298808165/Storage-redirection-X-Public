@@ -511,8 +511,8 @@ impl MountPlanner {
                     continue;
                 }
                 if !fs::is_directory(&sandboxed_path) {
-                    log::info!(
-                        "sandbox mount target missing, creation will be redirected by hook: {}",
+                    log::warn!(
+                        "sandbox mount target missing, skip namespace bind to avoid public placeholder: {}",
                         sandboxed_path
                     );
                     continue;
@@ -735,7 +735,7 @@ impl MountPlanner {
                 continue;
             };
             let mut is_exclude_restored = false;
-            let _ = self.bind_mount_with_storage_aliases(
+            let _ = self.bind_overlay_mount_with_storage_aliases(
                 &source_path,
                 &excluded_child,
                 true,

@@ -5,13 +5,14 @@ mod sys;
 
 use super::companion_request::CompanionMountRequest;
 use super::mount_timing;
+use crate::config::SettingsHub;
 use crate::fuse_redirect::{
     FuseRedirectConfig, mount_blocking_with_ready, scoped_mount_roots_for_hybrid_rules,
 };
 use crate::mount::MountPlanner;
 use crate::mount_status_marker::write_mount_status_marker;
-use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
+use crate::platform::{self, paths::monotonic_ms};
 use diagnostics::log_child_diagnostics;
 use libc::{
     AF_UNIX, CLONE_NEWNS, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SO_RCVTIMEO, SOCK_DGRAM,
@@ -26,9 +27,25 @@ const FUSE_READY_TIMEOUT_SEC: i64 = 1;
 // 等待目标进程就绪后在子进程中执行挂载
 pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool {
     let started_ms = monotonic_ms();
+    if !is_redirect_enabled_for_request(request) {
+        log::warn!(
+            "companion mount denied redirect disabled pkg={} uid={} pid={}",
+            request.package_name,
+            request.uid,
+            request.pid
+        );
+        let marker_started_ms = monotonic_ms();
+        let marker_ok =
+            write_mount_status_marker(&request.app_data_dir, request.pid, request.uid, false);
+        let marker_ms = monotonic_ms().saturating_sub(marker_started_ms);
+        log_companion_mount_perf(request, false, marker_ok, 0, 0, marker_ms, started_ms);
+        return false;
+    }
     let wait_started_ms = monotonic_ms();
-    let is_ready = wait_for_process(
+    let user_id = platform::user_id_from_uid(request.uid);
+    let is_ready = wait_for_process_ready(
         request.pid,
+        user_id,
         mount_timing::COMPANION_PROCESS_READY_TIMEOUT_MS,
     );
     let wait_ms = monotonic_ms().saturating_sub(wait_started_ms);
@@ -46,6 +63,21 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
         request, is_success, marker_ok, wait_ms, mount_ms, marker_ms, started_ms,
     );
     is_success
+}
+
+fn is_redirect_enabled_for_request(request: &CompanionMountRequest) -> bool {
+    let config = SettingsHub::instance();
+    if !config.init(None) {
+        log::warn!(
+            "companion mount config init failed pkg={} uid={} pid={}",
+            request.package_name,
+            request.uid,
+            request.pid
+        );
+        return false;
+    }
+    config.reload_if_changed();
+    config.should_redirect(&request.package_name, request.uid)
 }
 
 fn log_companion_mount_perf(
@@ -140,55 +172,21 @@ fn set_mount_namespace(pid: i32) -> bool {
     true
 }
 
-// 轮询目标进程 SELinux 上下文，等待脱离 zygote 状态
-fn wait_for_process(pid: i32, timeout_ms: i32) -> bool {
+fn wait_for_process_ready(pid: i32, user_id: i32, timeout_ms: i32) -> bool {
     let poll_interval_us = 5 * 1000;
     let timeout_us = timeout_ms * 1000;
     let mut elapsed_us = 0;
-    let attr_path = format!("/proc/{}/attr/current", pid);
-    let mut last_context = String::new();
-
-    let Ok(c_path) = std::ffi::CString::new(attr_path.clone()) else {
-        log::warn!("attr path invalid pid={}", pid);
-        return false;
-    };
 
     while elapsed_us < timeout_us {
-        let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-        if fd < 0 {
-            let errno = last_errno();
-            log::warn!(
-                "attr open failed pid={} errno={} {}",
+        if is_process_context_ready(pid) {
+            let is_storage_mount_ready = is_process_storage_mount_ready(pid, user_id);
+            log::debug!(
+                "proc ready pid={} wait_us={} storage_mount={}",
                 pid,
-                errno,
-                errno_text(errno)
+                elapsed_us,
+                is_storage_mount_ready
             );
-            return false;
-        }
-        let file = UniqueFd::new(fd);
-        let mut buf = [0u8; 256];
-        let n = unsafe { read(file.get(), buf.as_mut_ptr() as *mut c_void, buf.len() - 1) };
-        if n < 0 {
-            let errno = last_errno();
-            log::warn!(
-                "attr read failed pid={} errno={} {}",
-                pid,
-                errno,
-                errno_text(errno)
-            );
-            return false;
-        }
-        if n > 0 {
-            if let Ok(text) = std::str::from_utf8(&buf[..n as usize]) {
-                let context = text.trim().to_string();
-                last_context = context.clone();
-                if !context.contains("zygote") {
-                    log::debug!("proc ctx ready pid={} ctx={}", pid, context);
-                    return true;
-                }
-            } else {
-                log::warn!("attr not utf8 pid={} bytes={}", pid, n);
-            }
+            return true;
         }
 
         unsafe { libc::usleep(poll_interval_us as u32) };
@@ -196,15 +194,83 @@ fn wait_for_process(pid: i32, timeout_ms: i32) -> bool {
     }
 
     log::warn!(
-        "proc ctx timeout pid={} ms={} last={}",
+        "proc ready timeout pid={} ms={} ctx=false storage_mount=false",
         pid,
-        timeout_ms,
-        if last_context.is_empty() {
-            "<empty>"
-        } else {
-            &last_context
-        }
+        timeout_ms
     );
+    false
+}
+
+// 轮询目标进程 SELinux 上下文，等待脱离 zygote 状态
+fn is_process_context_ready(pid: i32) -> bool {
+    let attr_path = format!("/proc/{}/attr/current", pid);
+
+    let Ok(c_path) = std::ffi::CString::new(attr_path.clone()) else {
+        log::warn!("attr path invalid pid={}", pid);
+        return false;
+    };
+
+    let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
+    if fd < 0 {
+        let errno = last_errno();
+        log::warn!(
+            "attr open failed pid={} errno={} {}",
+            pid,
+            errno,
+            errno_text(errno)
+        );
+        return false;
+    }
+    let file = UniqueFd::new(fd);
+    let mut buf = [0u8; 256];
+    let n = unsafe { read(file.get(), buf.as_mut_ptr() as *mut c_void, buf.len() - 1) };
+    if n < 0 {
+        let errno = last_errno();
+        log::warn!(
+            "attr read failed pid={} errno={} {}",
+            pid,
+            errno,
+            errno_text(errno)
+        );
+        return false;
+    }
+    if n == 0 {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(&buf[..n as usize]) else {
+        log::warn!("attr not utf8 pid={} bytes={}", pid, n);
+        return false;
+    };
+    let context = text.trim();
+    if context.contains("zygote") {
+        return false;
+    }
+    log::debug!("proc ctx ready pid={} ctx={}", pid, context);
+    true
+}
+
+fn is_process_storage_mount_ready(pid: i32, user_id: i32) -> bool {
+    let path = format!("/proc/{}/mountinfo", pid);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        let errno = last_errno();
+        log::warn!(
+            "mountinfo read failed pid={} errno={} {}",
+            pid,
+            errno,
+            errno_text(errno)
+        );
+        return false;
+    };
+    let storage_user = format!(" /storage/emulated/{user_id} ");
+    let mnt_user = format!(" /mnt/user/{user_id}/emulated/{user_id} ");
+    let has_storage = content
+        .lines()
+        .any(|line| line.contains(" /storage/emulated ") || line.contains(&storage_user));
+    let has_mnt_user = content.lines().any(|line| line.contains(&mnt_user));
+    if has_storage && has_mnt_user {
+        log::debug!("proc storage mount ready pid={} user={}", pid, user_id);
+        return true;
+    }
     false
 }
 

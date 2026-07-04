@@ -1,4 +1,4 @@
-pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 60;
+pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 140;
 pub(crate) const POST_MOUNT_STATUS_POLL_DELAY_US: u32 = 50 * 1000;
 pub(crate) const POST_SPECIALIZE_SLOW_MS: i64 = 20;
 

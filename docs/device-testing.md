@@ -111,7 +111,7 @@ adb -s $Serial shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_
 
 ## 运行完整回归
 
-优先在测试 APP 仓库根目录使用 `StorageRedirectTest` 的 PowerShell 场景脚本。脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。
+优先在测试 APP 仓库根目录使用 `StorageRedirectTest` 的 PowerShell 场景脚本。脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。脚本结束时会按白名单清理测试 APP 结果目录、`srt_file_tests`、场景固定目录、随机 `srt_*` 媒体文件、固定测试媒体文件以及 MediaProvider 可能留下的 `.pending-<数字>-srt_*` / `.trashed-<数字>-srt_*` 临时名和同名冲突 ` (数字)` 后缀；不会递归删除整个公共媒体目录。
 
 ```powershell
 .\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial

@@ -529,16 +529,20 @@ impl RuntimeFlow {
         }
 
         if !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge {
-            self.deferred_mount_payload = payload;
+            let send_started_ms = monotonic_ms();
+            self.is_mount_request_sent =
+                send_companion_request_payload(self.api.as_ref(), &payload);
+            let send_ms = monotonic_ms().saturating_sub(send_started_ms);
             log::info!(
-                "mount request deferred to post pkg={} payload={} map_only={}",
+                "mount request sent pre pkg={} sent={} payload={} map_only={}",
                 self.package_name,
+                self.is_mount_request_sent,
                 payload_bytes,
                 is_mapping_mode_only
             );
             log_specialize_perf(&SpecializePerf {
                 package_name: &self.package_name,
-                exit_reason: "post_mount_deferred",
+                exit_reason: "mount_request_pre",
                 pid: self.app_pid,
                 uid: self.app_uid,
                 app_count: config.get_app_count(),
@@ -558,7 +562,7 @@ impl RuntimeFlow {
                 enabled_scan_ms,
                 route_ms,
                 payload_ms,
-                send_ms: 0,
+                send_ms,
                 total_ms: monotonic_ms().saturating_sub(perf_started_ms),
             });
             return;

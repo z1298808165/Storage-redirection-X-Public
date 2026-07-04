@@ -338,8 +338,27 @@ impl MountPlanner {
     }
 
     pub(super) fn bind_mount(&self, source: &str, target: &str, is_recursive: bool) -> bool {
+        self.bind_mount_inner(source, target, is_recursive, true)
+    }
+
+    pub(super) fn bind_mount_overlay(
+        &self,
+        source: &str,
+        target: &str,
+        is_recursive: bool,
+    ) -> bool {
+        self.bind_mount_inner(source, target, is_recursive, false)
+    }
+
+    fn bind_mount_inner(
+        &self,
+        source: &str,
+        target: &str,
+        is_recursive: bool,
+        allow_same_inode_shortcut: bool,
+    ) -> bool {
         let use_recursive = self.should_use_recursive_bind(source, target, is_recursive);
-        if paths_have_same_inode(source, target) {
+        if allow_same_inode_shortcut && paths_have_same_inode(source, target) {
             if self.remount_bind_read_write(target, use_recursive) {
                 self.record_mounted_target(target);
                 log::debug!("bind skip existing src={} dst={}", source, target);

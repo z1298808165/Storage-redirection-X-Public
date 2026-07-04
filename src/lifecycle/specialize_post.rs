@@ -131,13 +131,13 @@ fn wait_for_mount_status(
     let mut last_errno_code = 0;
     let mount_started_ms = monotonic_ms();
 
-    if !is_mount_request_sent {
-        log::warn!("mount req not sent, skip wait");
-        return;
-    }
     if app_data_dir.is_empty() || app_pid <= 0 {
         log::warn!("mount ctx invalid, skip wait");
         return;
+    }
+
+    if !is_mount_request_sent {
+        log::warn!("mount req not sent, wait daemon marker fallback");
     }
 
     let marker_path = format!("{}/.srx_mount_status_{}", app_data_dir, app_pid);

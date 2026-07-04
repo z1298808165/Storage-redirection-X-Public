@@ -106,40 +106,18 @@ impl MountPlanner {
                 self.ensure_shared_mapping_parent_chain(&target_source);
             }
 
-            if should_create_missing_request_path {
-                if !self.ensure_directory_exists(&mapping.request_path, should_chown_current_dirs) {
-                    let Some(current_relative) =
-                        paths::relative_child_path(&mapping.request_path, storage_path)
-                    else {
-                        continue;
-                    };
-                    let current_fallback = if should_chown_current_dirs {
-                        paths::join(&self.redirect_target, current_relative)
-                    } else {
-                        paths::join(
-                            &paths::data_media_user_root_for_user(self.user_id),
-                            current_relative,
-                        )
-                    };
-                    let current_fallback = self.normalize_path(&current_fallback);
-                    if !self.ensure_directory_exists(&current_fallback, should_chown_current_dirs) {
-                        log::warn!("mkdir map current failed: {}", mapping.request_path);
-                        continue;
-                    }
-                }
-            } else if !fs::is_directory(&mapping.request_path) {
-                // Map-only must not materialize the virtual request path in
-                // public storage. The hook path mapper will redirect later
-                // mkdir/open calls to the configured target.
-                log::info!(
-                    "map mount target missing, creation will be redirected by hook: {}",
-                    mapping.request_path
-                );
+            if !self.ensure_mapping_request_mount_point(
+                &mapping.request_path,
+                storage_path,
+                should_chown_current_dirs,
+                should_create_missing_request_path,
+            ) {
+                log::warn!("map mount point unavailable: {}", mapping.request_path);
                 continue;
             }
 
             let mut is_current_path_mounted = false;
-            let _ = self.bind_mount_with_storage_aliases(
+            let _ = self.bind_overlay_mount_with_storage_aliases(
                 &target_source,
                 &mapping.request_path,
                 true,
@@ -160,14 +138,6 @@ impl MountPlanner {
                     excluded_real_paths,
                     storage_path,
                 ) {
-                    if self.is_file_monitor_enabled {
-                        log::info!(
-                            "map readonly mount skipped for recordable media-fuse denial {} -> {}",
-                            mapping.request_path,
-                            mapping.final_path
-                        );
-                        continue;
-                    }
                     let mut is_read_only_mounted = false;
                     let _ = self.bind_read_only_mount_with_storage_aliases(
                         &target_source,
@@ -225,6 +195,50 @@ impl MountPlanner {
             return None;
         }
         Some((target_data_media, true))
+    }
+
+    fn ensure_mapping_request_mount_point(
+        &self,
+        request_path: &str,
+        storage_path: &str,
+        should_chown_current_dirs: bool,
+        should_prefer_redirect_fallback: bool,
+    ) -> bool {
+        if !should_prefer_redirect_fallback {
+            return fs::is_directory(request_path);
+        }
+
+        let uid = if should_chown_current_dirs {
+            self.app_uid
+        } else {
+            -1
+        };
+        if fs::create_directory(request_path, uid) {
+            return true;
+        }
+
+        let Some(current_relative) = paths::relative_child_path(request_path, storage_path) else {
+            return false;
+        };
+        let current_fallback = if should_prefer_redirect_fallback {
+            paths::join(&self.redirect_target, current_relative)
+        } else {
+            paths::join(
+                &paths::data_media_user_root_for_user(self.user_id),
+                current_relative,
+            )
+        };
+        let current_fallback = self.normalize_path(&current_fallback);
+        if self.ensure_directory_exists(&current_fallback, should_chown_current_dirs) {
+            log::warn!(
+                "map mount point prepared via backend fallback request={} backend={}",
+                request_path,
+                current_fallback
+            );
+            return true;
+        }
+
+        false
     }
 
     pub(super) fn is_mapping_read_only(
@@ -425,6 +439,34 @@ mod tests {
             &[],
             "/storage/emulated/0",
         ));
+    }
+
+    #[test]
+    fn map_only_missing_request_path_is_not_materialized_in_public_storage() {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!(
+            "srx_map_mount_point_{}_{}",
+            std::process::id(),
+            millis
+        ));
+        let storage = root.join("storage");
+        std::fs::create_dir_all(&storage).expect("create storage root");
+        let storage_path = storage.to_string_lossy().replace('\\', "/");
+        let request_path = format!("{storage_path}/Download/MissingRequest");
+
+        let planner = MountPlanner::new("com.example", 10123, "", "/data/local/tmp/srx", false);
+        assert!(!planner.ensure_mapping_request_mount_point(
+            &request_path,
+            &storage_path,
+            false,
+            false,
+        ));
+        assert!(!std::path::Path::new(&request_path).exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
