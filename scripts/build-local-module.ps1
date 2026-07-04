@@ -11,6 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$BuildVersionBaselinePath = Join-Path $RepoRoot ".github\build-version-baseline.json"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 function Write-Step {
@@ -225,6 +226,76 @@ function Test-LegacyCiVersionCodeOverride {
     return $BaseVersion -eq "1.2.57"
 }
 
+function Get-BuildCountBaseline {
+    param([string]$BaseVersion)
+
+    if (-not (Test-Path -LiteralPath $BuildVersionBaselinePath)) {
+        return $null
+    }
+
+    try {
+        $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $baseline.buildCounts) {
+            return $null
+        }
+        $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
+        if ($null -eq $property) {
+            return $null
+        }
+        return [int]$property.Value
+    } catch {
+        return $null
+    }
+}
+
+function Update-BuildCountBaseline {
+    param(
+        [string]$BaseVersion,
+        [int]$BuildCount
+    )
+
+    if ($BuildCount -lt 1) {
+        Fail "构建次数必须为正数，当前为: $BuildCount"
+    }
+
+    if (Test-Path -LiteralPath $BuildVersionBaselinePath) {
+        try {
+            $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            $baseline = [pscustomobject]@{}
+        }
+    } else {
+        $baseline = [pscustomobject]@{}
+    }
+
+    if ($null -eq $baseline.PSObject.Properties["buildCounts"]) {
+        $baseline | Add-Member -NotePropertyName "buildCounts" -NotePropertyValue ([pscustomobject]@{})
+    }
+
+    $previous = 0
+    $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
+    if ($null -ne $property) {
+        $previous = [int]$property.Value
+    }
+    $next = [Math]::Max($previous, $BuildCount)
+    if ($null -eq $property) {
+        $baseline.buildCounts | Add-Member -NotePropertyName $BaseVersion -NotePropertyValue $next
+    } else {
+        $property.Value = $next
+    }
+
+    $orderedCounts = [ordered]@{}
+    $baseline.buildCounts.PSObject.Properties.Name | Sort-Object { [version]$_ } | ForEach-Object {
+        $orderedCounts[$_] = [int]$baseline.buildCounts.PSObject.Properties[$_].Value
+    }
+    $orderedBaseline = [ordered]@{
+        schema = 1
+        buildCounts = $orderedCounts
+    }
+    $json = $orderedBaseline | ConvertTo-Json -Depth 5 -Compress
+    Write-Utf8LfFile -Path $BuildVersionBaselinePath -Content ($json + "`n")
+}
+
 function Resolve-LocalVersion {
     param([string]$BaseVersion)
 
@@ -244,7 +315,7 @@ function Resolve-LocalVersion {
     }
     $count = 0
     if (-not [string]::IsNullOrWhiteSpace($start)) {
-        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start^..HEAD") -AllowFailure
+        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start..HEAD") -AllowFailure
         foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
             if (-not (Test-AutoManifestCommit -Commit $commit.Trim())) {
                 $count++
@@ -260,6 +331,10 @@ function Resolve-LocalVersion {
     }
 
     $buildCount = [Math]::Max($count, 1) + (Get-BuildCountOffset -BaseVersion $BaseVersion)
+    $baselineCount = Get-BuildCountBaseline -BaseVersion $BaseVersion
+    if ($null -ne $baselineCount) {
+        $buildCount = [Math]::Max($buildCount, $baselineCount + 1)
+    }
     if ((-not (Test-LegacyCiVersionCodeOverride -BaseVersion $BaseVersion)) -and $buildCount -gt 99) {
         Fail "当前版本的 CI 构建次数必须在 1 到 99 之间。请先提升 Cargo.toml 版本。"
     }
@@ -608,6 +683,9 @@ try {
 
     Write-Step "验证模块 zip"
     Test-ModuleZip -ZipPath $zipPath
+    if ($Version -match "^$([regex]::Escape($baseVersion))-ci\.(\d+)$") {
+        Update-BuildCountBaseline -BaseVersion $baseVersion -BuildCount ([int]$Matches[1])
+    }
     Write-Host "模块 zip 已就绪: $zipPath" -ForegroundColor Green
 
     if ($NoAdb) {

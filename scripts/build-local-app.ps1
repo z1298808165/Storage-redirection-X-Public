@@ -11,6 +11,18 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$BuildVersionBaselinePath = Join-Path $RepoRoot ".github\build-version-baseline.json"
+
+function Write-Utf8LfFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $lf = $Content.Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($Path, $lf, $utf8NoBom)
+}
 
 function Write-Step {
     param([string]$Message)
@@ -188,7 +200,10 @@ function Test-AutoManifestCommit {
         return $false
     }
 
-    return $subject.StartsWith("CI：更新更新清单") -or $subject.StartsWith("发布：更新更新清单")
+    $fullWidthColon = [char]0xFF1A
+    $updateManifest = -join @([char]0x66F4, [char]0x65B0, [char]0x66F4, [char]0x65B0, [char]0x6E05, [char]0x5355)
+    $release = -join @([char]0x53D1, [char]0x5E03)
+    return $subject.StartsWith("CI$fullWidthColon$updateManifest") -or $subject.StartsWith("$release$fullWidthColon$updateManifest")
 }
 
 function Test-WorktreeDirty {
@@ -212,6 +227,76 @@ function Test-LegacyCiVersionCodeOverride {
     return $BaseVersion -eq "1.2.57"
 }
 
+function Get-BuildCountBaseline {
+    param([string]$BaseVersion)
+
+    if (-not (Test-Path -LiteralPath $BuildVersionBaselinePath)) {
+        return $null
+    }
+
+    try {
+        $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $baseline.buildCounts) {
+            return $null
+        }
+        $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
+        if ($null -eq $property) {
+            return $null
+        }
+        return [int]$property.Value
+    } catch {
+        return $null
+    }
+}
+
+function Update-BuildCountBaseline {
+    param(
+        [string]$BaseVersion,
+        [int]$BuildCount
+    )
+
+    if ($BuildCount -lt 1) {
+        Fail "Build count must be positive, got: $BuildCount"
+    }
+
+    if (Test-Path -LiteralPath $BuildVersionBaselinePath) {
+        try {
+            $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            $baseline = [pscustomobject]@{}
+        }
+    } else {
+        $baseline = [pscustomobject]@{}
+    }
+
+    if ($null -eq $baseline.PSObject.Properties["buildCounts"]) {
+        $baseline | Add-Member -NotePropertyName "buildCounts" -NotePropertyValue ([pscustomobject]@{})
+    }
+
+    $previous = 0
+    $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
+    if ($null -ne $property) {
+        $previous = [int]$property.Value
+    }
+    $next = [Math]::Max($previous, $BuildCount)
+    if ($null -eq $property) {
+        $baseline.buildCounts | Add-Member -NotePropertyName $BaseVersion -NotePropertyValue $next
+    } else {
+        $property.Value = $next
+    }
+
+    $orderedCounts = [ordered]@{}
+    $baseline.buildCounts.PSObject.Properties.Name | Sort-Object { [version]$_ } | ForEach-Object {
+        $orderedCounts[$_] = [int]$baseline.buildCounts.PSObject.Properties[$_].Value
+    }
+    $orderedBaseline = [ordered]@{
+        schema = 1
+        buildCounts = $orderedCounts
+    }
+    $json = $orderedBaseline | ConvertTo-Json -Depth 5 -Compress
+    Write-Utf8LfFile -Path $BuildVersionBaselinePath -Content ($json + "`n")
+}
+
 function Resolve-LocalVersion {
     param([string]$BaseVersion)
 
@@ -231,7 +316,7 @@ function Resolve-LocalVersion {
     }
     $count = 0
     if (-not [string]::IsNullOrWhiteSpace($start)) {
-        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start^..HEAD") -AllowFailure
+        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start..HEAD") -AllowFailure
         foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
             if (-not (Test-AutoManifestCommit -Commit $commit.Trim())) {
                 $count++
@@ -247,6 +332,10 @@ function Resolve-LocalVersion {
     }
 
     $buildCount = [Math]::Max($count, 1) + (Get-BuildCountOffset -BaseVersion $BaseVersion)
+    $baselineCount = Get-BuildCountBaseline -BaseVersion $BaseVersion
+    if ($null -ne $baselineCount) {
+        $buildCount = [Math]::Max($buildCount, $baselineCount + 1)
+    }
     if ((-not (Test-LegacyCiVersionCodeOverride -BaseVersion $BaseVersion)) -and $buildCount -gt 99) {
         Fail "CI build count must be between 1 and 99. Bump Cargo.toml version before continuing."
     }
@@ -416,6 +505,9 @@ try {
     Remove-LocalFile -Path $apkPath -ExpectedParent $outputRoot
     Copy-Item -LiteralPath $sourceApk -Destination $apkPath -Force
     Test-ReleaseApk -ApkPath $apkPath
+    if ($Version -match "^$([regex]::Escape($baseVersion))-ci\.(\d+)$") {
+        Update-BuildCountBaseline -BaseVersion $baseVersion -BuildCount ([int]$Matches[1])
+    }
     Write-Host "Release APK ready: $apkPath" -ForegroundColor Green
 
     if ($NoAdb) {

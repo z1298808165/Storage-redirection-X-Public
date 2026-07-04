@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 
+BUILD_VERSION_BASELINE_PATH = Path(".github/build-version-baseline.json")
 AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
     "发布：更新更新清单",
@@ -31,6 +32,8 @@ def run_git(args: list[str], check: bool = True) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return result.stdout.strip()
 
@@ -110,6 +113,65 @@ def published_manifest_build_count(current_version: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def read_build_count_baseline(current_version: str) -> int | None:
+    if not BUILD_VERSION_BASELINE_PATH.exists():
+        return None
+    try:
+        baseline = json.loads(BUILD_VERSION_BASELINE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    build_counts = baseline.get("buildCounts")
+    if not isinstance(build_counts, dict):
+        return None
+    count = build_counts.get(current_version)
+    if isinstance(count, int) and count > 0:
+        return count
+    if isinstance(count, str) and count.isdigit():
+        return int(count)
+    return None
+
+
+def write_build_count_baseline(base_version: str, build_count: int) -> None:
+    if build_count < 1:
+        raise SystemExit(f"Build count must be positive, got: {build_count}")
+    data: dict[str, object]
+    if BUILD_VERSION_BASELINE_PATH.exists():
+        try:
+            loaded = json.loads(BUILD_VERSION_BASELINE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        data = loaded if isinstance(loaded, dict) else {}
+    else:
+        data = {}
+
+    build_counts = data.get("buildCounts")
+    if not isinstance(build_counts, dict):
+        build_counts = {}
+    previous = build_counts.get(base_version)
+    previous_count = previous if isinstance(previous, int) else 0
+    if isinstance(previous, str) and previous.isdigit():
+        previous_count = int(previous)
+    build_counts[base_version] = max(previous_count, build_count)
+
+    ordered_counts = {
+        version: build_counts[version]
+        for version in sorted(build_counts, key=lambda item: tuple(int(part) for part in item.split(".") if part.isdigit()))
+    }
+    data = {
+        "schema": 1,
+        "buildCounts": ordered_counts,
+    }
+    BUILD_VERSION_BASELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BUILD_VERSION_BASELINE_PATH.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def parse_ci_version(version: str) -> tuple[str, int]:
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)-ci\.(\d+)", version)
+    if not match:
+        raise SystemExit(f"CI version must look like MAJOR.MINOR.PATCH-ci.N, got: {version}")
+    return match.group(1), int(match.group(2))
+
+
 def latest_ci_manifest_commit(current_version: str) -> str | None:
     commits_text = run_git(["rev-list", "--first-parent", "HEAD"], check=False)
     for commit in [line for line in commits_text.splitlines() if line]:
@@ -146,7 +208,12 @@ def resolve_build_count(current_version: str, include_dirty: bool) -> int:
             count = 0
         count += 1
 
-    return max(count, 1) + offset
+    resolved_count = max(count, 1) + offset
+    baseline_count = read_build_count_baseline(current_version)
+    if baseline_count is not None:
+        resolved_count = max(resolved_count, baseline_count + 1)
+
+    return resolved_count
 
 
 def version_code(base_version: str, build_count: int, release: bool) -> int:
@@ -165,8 +232,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--include-dirty", action="store_true", help="count local uncommitted changes as the next build")
     parser.add_argument("--release", action="store_true", help="resolve release version without ci suffix")
+    parser.add_argument("--record-version", help="record a resolved MAJOR.MINOR.PATCH-ci.N as the next build baseline")
     parser.add_argument("--format", choices=("json", "github"), default="json")
     args = parser.parse_args()
+
+    if args.record_version:
+        base_version, build_count = parse_ci_version(args.record_version)
+        write_build_count_baseline(base_version, build_count)
+        return
 
     base_version = read_current_cargo_version()
     build_count = resolve_build_count(base_version, include_dirty=args.include_dirty)

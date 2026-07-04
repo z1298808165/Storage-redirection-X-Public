@@ -329,16 +329,17 @@ jobs:
             --title "CI Build $VERSION" \
             --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
             --module-asset "storage.redirect.x-v${VERSION}.zip"
+          python .github/scripts/resolve_build_version.py --record-version "$VERSION"
 
-      - name: Commit update manifest
+      - name: Commit update manifest and build baseline
         run: |
-          if git diff --quiet -- update.json; then
-            echo "update.json already up to date"
+          if git diff --quiet -- update.json .github/build-version-baseline.json; then
+            echo "update.json and build-version baseline already up to date"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add update.json
+          git add update.json .github/build-version-baseline.json
           git commit -m "CI：更新更新清单 $VERSION"
           git push origin "HEAD:${GITHUB_REF_NAME}"
 
