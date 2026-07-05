@@ -344,18 +344,7 @@ jobs:
           heap-size: 1024M
           disable-animations: true
           emulator-boot-timeout: 1500
-          script: |
-            set -eu
-            adb wait-for-device
-            adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
-            TEST_APP_APK="$(find tests/storage-redirect-test/app/build/outputs/apk/debug -maxdepth 1 -name '*-debug.apk' -print -quit)"
-            test -n "$TEST_APP_APK"
-            MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
-              APP_APK="$TEST_APP_APK" \
-              bash .github/tests/install-storage-redirect-module.sh
-            adb install -r "$TEST_APP_APK"
-            adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
-            bash .github/tests/run-storage-redirect-scenarios.sh
+          script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts
         if: always()
