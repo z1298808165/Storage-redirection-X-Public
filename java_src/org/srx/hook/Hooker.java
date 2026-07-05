@@ -2031,13 +2031,12 @@ public class Hooker {
     if (values == null)
       return false;
     String mimeType = values.getAsString("mime_type");
-    boolean mediaMime = false;
     if (mimeType != null) {
       String lower = mimeType.toLowerCase(Locale.ROOT);
-      mediaMime = lower.startsWith("image/") || lower.startsWith("video/");
-      if (!mediaMime && !"application/octet-stream".equals(lower)) {
-        return false;
-      }
+      if (lower.startsWith("image/") || lower.startsWith("video/") ||
+          "application/octet-stream".equals(lower))
+        return true;
+      return false;
     }
     String displayName = firstString(values, "_display_name", "display_name");
     if (displayName == null || displayName.length() == 0)

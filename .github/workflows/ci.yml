@@ -351,6 +351,8 @@ jobs:
           path: |
             build/test-flow/assets/*.zip
             scenario-*-result.txt
+            test-flow-logcat.txt
+            test-flow-module-state.txt
             media-health.txt
             tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
             tests/storage-redirect-test/app/build/reports/

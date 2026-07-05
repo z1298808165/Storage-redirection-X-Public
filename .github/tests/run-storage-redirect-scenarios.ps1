@@ -813,7 +813,7 @@ function Invoke-RegularMonitorScenario {
     $ok = $true
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-allow-write" "$MonitorBaseRoot/$allowFile" "$MonitorBaseRoot/$allowFile" "$PrivateMonitorBaseRoot/$allowFile" $true) -and $ok
     if ([int]$Scenario -eq 25) {
-        $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot $false) -and $ok
+        $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile") -and $ok
     $ok = (Invoke-FileMonitorWriteDeniedCase $Scenario "regular-read-only-denied" "$MonitorLockedRoot/$lockedFile") -and $ok
@@ -826,7 +826,7 @@ function Invoke-MediaStoreMonitorScenario {
     $ok = $true
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
     if ([int]$Scenario -eq 27) {
-        $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot $false) -and $ok
+        $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-mapped-create" "Download/SrtMonitorMap" $MonitorMapTarget) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreDeniedCase $Scenario "media-read-only-denied" "Download/SrtMonitorLocked" $MonitorLockedRoot) -and $ok
