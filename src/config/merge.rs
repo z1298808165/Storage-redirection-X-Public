@@ -414,12 +414,38 @@ fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> 
 
 fn read_only_rule_matches_path(read_only_paths: &[String], normalized: &str) -> bool {
     let (included, excluded) = paths::split_exclusion_rules(read_only_paths);
+    let pending_display_path = media_store_pending_display_path(normalized);
     included
         .iter()
-        .any(|rule| paths::matches(rule, normalized, true))
+        .any(|rule| read_only_rule_matches(rule, normalized, pending_display_path.as_deref()))
         && !excluded
             .iter()
-            .any(|rule| paths::matches(rule, normalized, true))
+            .any(|rule| read_only_rule_matches(rule, normalized, pending_display_path.as_deref()))
+}
+
+fn read_only_rule_matches(
+    rule: &str,
+    normalized: &str,
+    pending_display_path: Option<&str>,
+) -> bool {
+    paths::matches(rule, normalized, true)
+        || pending_display_path.is_some_and(|display_path| paths::matches(rule, display_path, true))
+}
+
+fn media_store_pending_display_path(path: &str) -> Option<String> {
+    let slash = path.rfind('/')?;
+    let file_name = &path[slash + 1..];
+    let pending_tail = file_name.strip_prefix(".pending-")?;
+    let display_name_start = pending_tail.find('-')? + 1;
+    if display_name_start >= pending_tail.len() {
+        return None;
+    }
+
+    Some(format!(
+        "{}/{}",
+        path[..slash].trim_end_matches('/'),
+        &pending_tail[display_name_start..]
+    ))
 }
 
 fn prefer_download_provider_match(packages: &[String]) -> Option<&str> {
@@ -1150,6 +1176,40 @@ mod tests {
         let excluded = hub.resolve_read_only_package_by_path_for_user(
             0,
             "/storage/emulated/0/Download/SrtMonitorLocked/Writable/srt.bin",
+        );
+
+        let mut state = hub.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.apps = previous_apps;
+        state.is_loaded = previous_loaded;
+
+        assert_eq!(locked, "me.fakerqu.test.storageredirect");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn read_only_resolution_matches_mediastore_pending_display_names() {
+        let hub = SettingsHub::instance();
+        let mut state = hub.state.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_apps = state.apps.clone();
+        let previous_loaded = state.is_loaded;
+
+        state.apps.clear();
+        state.is_loaded = true;
+        state.apps.insert(
+            "me.fakerqu.test.storageredirect".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(0, enabled_read_only_profile())]),
+            },
+        );
+        drop(state);
+
+        let locked = hub.resolve_read_only_package_by_path_for_user(
+            0,
+            "/storage/emulated/0/Download/SrtMonitorLocked/.pending-1783044790-srt_monitor_media-read-only-denied.bin",
+        );
+        let excluded = hub.resolve_read_only_package_by_path_for_user(
+            0,
+            "/storage/emulated/0/Download/SrtMonitorLocked/Writable/.pending-1783044791-srt_monitor_media-read-only-excluded.bin",
         );
 
         let mut state = hub.state.lock().unwrap_or_else(|err| err.into_inner());
