@@ -843,8 +843,12 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     }
 
     let suffix = &canonical_path[storage_root.len()..];
-    let mut alias_roots = Vec::with_capacity(12);
+    let mut alias_roots = Vec::with_capacity(13);
     append_unique_target(&mut alias_roots, storage_root);
+    append_unique_target(
+        &mut alias_roots,
+        paths::data_media_user_root_for_user(user_id),
+    );
     append_unique_target(&mut alias_roots, "/storage/self/primary".to_string());
     if user_id == 0 {
         append_unique_target(&mut alias_roots, "/storage/emulated/legacy".to_string());

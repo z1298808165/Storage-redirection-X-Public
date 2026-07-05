@@ -25,8 +25,12 @@ impl MountPlanner {
         }
 
         let suffix = &canonical_path[storage_root.len()..];
-        let mut alias_roots: Vec<String> = Vec::with_capacity(12);
+        let mut alias_roots: Vec<String> = Vec::with_capacity(13);
         append_unique(&mut alias_roots, storage_root.clone());
+        append_unique(
+            &mut alias_roots,
+            paths::data_media_user_root_for_user(self.user_id),
+        );
         append_unique(&mut alias_roots, "/storage/self/primary".to_string());
         if self.user_id == 0 {
             append_unique(&mut alias_roots, "/storage/emulated/legacy".to_string());
@@ -306,5 +310,20 @@ fn append_unique(list: &mut Vec<String>, value: String) {
     }
     if !list.iter().any(|item| item == &value) {
         list.push(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MountPlanner;
+
+    #[test]
+    fn storage_aliases_include_data_media_backend_for_lower_fs_writers() {
+        let planner = MountPlanner::new("com.example.app", 10123, "", "/data/local/tmp/srx", false);
+
+        let aliases = planner.expand_storage_alias_paths("/storage/emulated/0/Download/Locked");
+
+        assert!(aliases.contains(&"/storage/emulated/0/Download/Locked".to_string()));
+        assert!(aliases.contains(&"/data/media/0/Download/Locked".to_string()));
     }
 }
