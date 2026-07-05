@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 static REWRITE_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 static VISIBILITY_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
+const READ_ONLY_DENIED_SENTINEL_PREFIX: &str = "__SRX_READ_ONLY_DENIED__:";
 
 // MediaProvider cursor rows can hit this path very frequently. Keep inotify as
 // the fast path, and use a throttled fingerprint check so missed watcher events
@@ -264,12 +265,22 @@ pub(crate) fn resolve_download_media_placeholder_path_for_caller(
     if caller_package.is_empty() {
         return None;
     }
+    let source =
+        download_media_placeholder_source(original_path, relative_path, display_name, user_id)?;
+    if let Some(denied) = download_media_placeholder_read_only_denial(&source, caller_uid) {
+        sample_row_log(
+            "deny_download_media_placeholder_read_only",
+            &source.path,
+            &denied,
+            false,
+            true,
+        );
+        return Some(denied);
+    }
     let mappings = writer::get_caller_mappings(&caller_package, caller_uid);
     if mappings.is_empty() {
         return None;
     }
-    let source =
-        download_media_placeholder_source(original_path, relative_path, display_name, user_id)?;
     let mapped = resolve_placeholder_path_by_mappings(&source, video, &mappings, user_id)?;
     sample_row_log(
         "rewrite_download_media_placeholder",
@@ -279,6 +290,51 @@ pub(crate) fn resolve_download_media_placeholder_path_for_caller(
         false,
     );
     Some(mapped)
+}
+
+#[cfg(test)]
+fn is_read_only_denied_media_placeholder(path: &str) -> bool {
+    path.starts_with(READ_ONLY_DENIED_SENTINEL_PREFIX)
+}
+
+#[cfg(test)]
+fn read_only_denied_media_placeholder_path(path: &str) -> &str {
+    path.strip_prefix(READ_ONLY_DENIED_SENTINEL_PREFIX)
+        .unwrap_or(path)
+}
+
+fn download_media_placeholder_read_only_denial(
+    source: &DownloadMediaPlaceholderSource,
+    caller_uid: i32,
+) -> Option<String> {
+    let hub = InterceptHub::instance();
+    let previous_package = hub.get_current_caller_package();
+    let previous_uid = hub.get_current_caller_uid();
+    let (caller_package, effective_uid) = resolve_storage_caller_context(caller_uid, &source.path);
+    if caller_package.is_empty() {
+        return None;
+    }
+    if effective_uid < 0 {
+        return None;
+    }
+    hub.set_current_caller_package(&caller_package);
+    hub.set_current_caller_uid(effective_uid);
+    let _explicit_caller = crate::hook::enter_explicit_caller_decision();
+    let decision = process_write_redirect_path(hub, &source.path);
+    hub.set_current_caller_package(&previous_package);
+    hub.set_current_caller_uid(previous_uid);
+    if decision.is_denied() {
+        let denied_path = if decision.new_path.is_empty() {
+            source.path.as_str()
+        } else {
+            decision.new_path.as_str()
+        };
+        return Some(format!(
+            "{}{}",
+            READ_ONLY_DENIED_SENTINEL_PREFIX, denied_path
+        ));
+    }
+    None
 }
 
 pub(crate) fn rewrite_media_store_bucket_id_for_caller(
@@ -1848,6 +1904,75 @@ mod tests {
             resolve_placeholder_path_by_mappings(&source, false, &mappings, 0).as_deref(),
             Some("/storage/emulated/0/Download/third-party/AppBucket/File_1")
         );
+    }
+
+    #[test]
+    fn download_media_placeholder_denies_read_only_target_before_insert() {
+        let config = SettingsHub::instance();
+        let caller_package = "me.fakerqu.test.storageredirect";
+        let caller_uid = 10366;
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec![
+                            "/storage/emulated/0/Download/SrtMonitorLocked".to_string(),
+                            "!/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string(),
+                        ],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([(
+            caller_package.to_string(),
+            caller_uid,
+        )]));
+        let runtime = InterceptHub::instance();
+        let previous_package = runtime.get_current_caller_package();
+        let previous_uid = runtime.get_current_caller_uid();
+        runtime.clear_current_caller();
+        runtime.set_current_caller_uid(caller_uid);
+
+        let denied = resolve_download_media_placeholder_path_for_caller(
+            "",
+            "Download/SrtMonitorLocked",
+            "srt_monitor_media-read-only-denied.bin",
+            false,
+            caller_uid,
+        );
+        let excluded = resolve_download_media_placeholder_path_for_caller(
+            "",
+            "Download/SrtMonitorLocked/Writable",
+            "srt_monitor_media-read-only-excluded.bin",
+            false,
+            caller_uid,
+        );
+
+        runtime.set_current_caller_package(&previous_package);
+        runtime.set_current_caller_uid(previous_uid);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
+
+        let denied = denied.expect("read-only placeholder should be denied");
+        assert!(is_read_only_denied_media_placeholder(&denied));
+        assert_eq!(
+            read_only_denied_media_placeholder_path(&denied),
+            "/storage/emulated/0/Download/SrtMonitorLocked/srt_monitor_media-read-only-denied.bin"
+        );
+        assert!(excluded.is_none());
     }
 
     #[test]

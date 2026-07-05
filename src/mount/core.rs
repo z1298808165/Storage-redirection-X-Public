@@ -155,6 +155,10 @@ impl MountPlanner {
         true
     }
 
+    pub(super) fn ensure_app_writable_directory_chain(&self, path: &str, owner_uid: i32) {
+        self.ensure_writable_directory_chain(path, owner_uid);
+    }
+
     pub(super) fn ensure_real_public_directory_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: real public mkdir skipped empty path");

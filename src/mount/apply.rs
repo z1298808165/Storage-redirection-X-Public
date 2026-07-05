@@ -189,12 +189,14 @@ impl MountPlanner {
         if !self.ensure_writable_mapped_directory(&resolved_target, self.app_uid) {
             log::warn!("fix redirect root perm failed: {}", resolved_target);
         }
+        self.ensure_app_writable_directory_chain(&resolved_target, self.app_uid);
 
         let redirect_android_path = paths::join(&resolved_target, "Android");
         if !self.ensure_directory_exists(&redirect_android_path, true) {
             log::error!("mkdir android placeholder failed");
             return false;
         }
+        self.ensure_app_writable_directory_chain(&redirect_android_path, self.app_uid);
 
         let mut is_storage_redirect_applied = false;
         if !self.bind_mount_with_storage_aliases(

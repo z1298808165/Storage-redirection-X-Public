@@ -27,6 +27,8 @@ import java.util.regex.Pattern;
 
 public class Hooker {
   private static final String HIDDEN_ROW_SENTINEL = "\u001FSRX_HIDDEN_ROW";
+  private static final String READ_ONLY_DENIED_SENTINEL_PREFIX =
+      "__SRX_READ_ONLY_DENIED__:";
   private static final int ANDROID_USER_ID_OFFSET = 100000;
   private static final int ANDROID_APP_UID_START = 10000;
   private static final String[] PUBLIC_MEDIA_ROOTS = {
@@ -1701,7 +1703,8 @@ public class Hooker {
   private static MutationPatchResult patchMediaStoreValues(Object[] rawArgs,
                                                           Object[] actualArgs,
                                                           int callerUid,
-                                                          String mutationMethod) {
+                                                          String mutationMethod)
+      throws FileNotFoundException {
     if (actualArgs == null || actualArgs.length == 0)
       return new MutationPatchResult(false, false);
     boolean patchedAny = false;
@@ -1763,7 +1766,8 @@ public class Hooker {
   private static ContentValuesPatch patchContentValues(ContentValues values,
                                                        int callerUid,
                                                        android.net.Uri mutationUri,
-                                                       boolean insertLike) {
+                                                       boolean insertLike)
+      throws FileNotFoundException {
     if (values == null || values.size() == 0)
       return new ContentValuesPatch(values, null, false);
 
@@ -1928,7 +1932,7 @@ public class Hooker {
 
   private static DownloadMediaPathPatch rewriteDownloadMediaPlaceholderPath(
       String originalPath, ContentValues values, int callerUid,
-      android.net.Uri mutationUri) {
+      android.net.Uri mutationUri) throws FileNotFoundException {
     if (!isDownloadsCollectionUri(mutationUri) ||
         !isLikelyDownloadMediaPlaceholder(values))
       return null;
@@ -1942,6 +1946,7 @@ public class Hooker {
                                                 parts.fileName,
                                                 "video".equals(collection),
                                                 callerUid);
+    throwIfReadOnlyDeniedMediaPlaceholder(mappedPath);
     if (mappedPath == null || mappedPath.length() == 0)
       return null;
     String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
@@ -1957,7 +1962,8 @@ public class Hooker {
 
   private static DownloadMediaPathPatch rewriteDownloadMediaPlaceholderRelativePath(
       String relativePath, String displayName, ContentValues values,
-      int callerUid, android.net.Uri mutationUri) {
+      int callerUid, android.net.Uri mutationUri)
+      throws FileNotFoundException {
     if (!isDownloadsCollectionUri(mutationUri) ||
         !isLikelyDownloadMediaPlaceholder(values))
       return null;
@@ -1972,6 +1978,7 @@ public class Hooker {
                                                 parts.fileName,
                                                 "video".equals(collection),
                                                 callerUid);
+    throwIfReadOnlyDeniedMediaPlaceholder(mappedPath);
     if (mappedPath == null || mappedPath.length() == 0)
       return null;
     String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
@@ -1996,6 +2003,14 @@ public class Hooker {
     } catch (Throwable ignored) {
       return null;
     }
+  }
+
+  private static void throwIfReadOnlyDeniedMediaPlaceholder(String path)
+      throws FileNotFoundException {
+    if (path == null || !path.startsWith(READ_ONLY_DENIED_SENTINEL_PREFIX))
+      return;
+    String deniedPath = path.substring(READ_ONLY_DENIED_SENTINEL_PREFIX.length());
+    throw readOnlyOpenException(deniedPath);
   }
 
   private static boolean isDownloadsCollectionUri(android.net.Uri uri) {
