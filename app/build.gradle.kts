@@ -282,7 +282,15 @@ val hasReleaseSigningValues = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
-if (hasReleaseSigningValues && releaseStoreFile?.isFile != true) {
+
+fun isReleaseSigningTaskRequested(): Boolean = gradle.startParameter.taskNames.any { taskName ->
+    val normalized = taskName.substringAfterLast(':').lowercase()
+    normalized == "assemblerelease" ||
+        normalized == "bundlerelease" ||
+        normalized.startsWith("package") && normalized.endsWith("release")
+}
+
+if (hasReleaseSigningValues && releaseStoreFile?.isFile != true && isReleaseSigningTaskRequested()) {
     throw GradleException("Configured SRX release signing keystore does not exist.")
 }
 val hasReleaseSigning = hasReleaseSigningValues && releaseStoreFile?.isFile == true
@@ -424,25 +432,24 @@ val syncDebugUnitTestClasspathForArgfile by tasks.registering(Sync::class) {
     }
 }
 
-val testDebugUnitTestManagerDataSafeClasspath by tasks.registering(Test::class) {
-    description = "Runs manager data unit tests from an ASCII classpath for Java argfile compatibility."
+val testDebugUnitTestSafeClasspath by tasks.registering(Test::class) {
+    description = "Runs manager unit tests from an ASCII classpath for Java argfile compatibility."
     dependsOn(syncDebugUnitTestClasspathForArgfile)
 
     testClassesDirs = files(safeDebugUnitTestClasses)
-    include("org/srx/manager/data/*Test.class")
+    include("org/srx/manager/**/*Test.class")
     classpath = files(
         safeDebugUnitTestClasses,
         safeDebugUnitTestRuntime.resolve("app-classes.jar"),
         safeDebugUnitTestRuntime.resolve("R.jar"),
         safeDebugUnitTestJavaRes,
-        configurations.named("debugUnitTestRuntimeClasspath"),
-    )
+    ) + tasks.named<Test>("testDebugUnitTest").get().classpath
 }
 
 tasks.withType<Test>().configureEach {
     if (name == "testDebugUnitTest") {
-        dependsOn(testDebugUnitTestManagerDataSafeClasspath)
-        exclude("org/srx/manager/data/*Test.class")
+        dependsOn(testDebugUnitTestSafeClasspath)
+        exclude("org/srx/manager/**/*Test.class")
         failOnNoDiscoveredTests = false
     }
 }

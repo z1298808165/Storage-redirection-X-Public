@@ -35,3 +35,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "StorageRedirectX"
 include(":app")
+include(":storageRedirectTestMediaFileApi")
+project(":storageRedirectTestMediaFileApi").projectDir = file("tests/storage-redirect-test/media-file-api")
+include(":storageRedirectTestApp")
+project(":storageRedirectTestApp").projectDir = file("tests/storage-redirect-test/app")

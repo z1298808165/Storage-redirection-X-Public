@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">TestStorageRedirect</string>
+    <string name="test_service_channel_name">Storage redirect tests</string>
+    <string name="test_service_notification_title">Running storage redirect tests</string>
+    <string name="test_service_notification_text">Automated test in progress…</string>
+</resources>

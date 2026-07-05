@@ -454,3 +454,7 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 - [运行时配置说明](docs/runtime-configuration.md)
 - [上游 Hook 依赖说明](docs/upstream-hook-dependencies.md)
 - [设备侧测试说明](docs/device-testing.md)
+
+## 测试流
+
+设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。合并 PR 时建议把 `Test-flow required gate` 配成必需检查。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。

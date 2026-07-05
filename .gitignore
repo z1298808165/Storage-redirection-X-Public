@@ -11,6 +11,8 @@
 /cmake-build-*/
 /build/
 /app/build/
+/tests/storage-redirect-test/app/build/
+/tests/storage-redirect-test/media-file-api/build/
 /dist/
 /out/
 *.o
@@ -76,6 +78,8 @@ credentials/
 *.cer
 *.mobileprovision
 /tmp_logs/
+scenario-*-result.txt
+media-health.txt
 
 # 本地发布说明与个人流程笔记
 /docs/release-notes/

@@ -52,6 +52,36 @@ keyPassword=<key 密码>
 .\gradlew.bat --no-daemon --console=plain :app:assembleRelease
 ```
 
+### 集成测试流构建
+
+测试流 APP 已集成在本仓库 `tests/storage-redirect-test/`，Gradle 模块名为 `:storageRedirectTestApp` 和 `:storageRedirectTestMediaFileApi`。构建并运行测试 APP 单元测试：
+
+```powershell
+.\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
+```
+
+需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行 1-29 号设备侧场景：
+
+```bash
+bash scripts/verify-test-flow.sh
+```
+
+Windows PowerShell 环境没有可用 Bash 时使用同等入口：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```
+
+默认目标是 `aarch64-linux-android` / `arm64-v8a`。如果使用 x86_64 模拟器测试，可以设置：
+
+```powershell
+$env:SRX_TEST_TARGET_TRIPLE = "x86_64-linux-android"
+$env:SRX_TEST_MODULE_ABI = "x86_64"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```
+
+调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 只有在测试流全部通过后才会继续发布资产或创建正式 Release。
+
 ### 版本号规则
 
 `Cargo.toml` 中的 `[package].version` 是当前目标基础版本。提交前需要进入下一轮测试时，先手动修改 `Cargo.toml` 版本并提交；CI 不再自动把补丁号加 1。

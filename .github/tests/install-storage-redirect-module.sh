@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+set -eu
+
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL="*"
+
+MODULE_ZIP="${MODULE_ZIP:-$(find build/test-flow -maxdepth 2 -name '*x86_64*.zip' -print -quit 2>/dev/null || true)}"
+if [ -z "$MODULE_ZIP" ]; then
+  MODULE_ZIP="$(find core -maxdepth 1 -name '*x86_64.zip' -print -quit 2>/dev/null || true)"
+fi
+if [ -z "$MODULE_ZIP" ]; then
+  echo "No Storage Redirect X x86_64 module zip was found."
+  exit 1
+fi
+
+APP_ID="${APP_ID:-me.fakerqu.test.storageredirect}"
+APP_APK="${APP_APK:-$(find tests/storage-redirect-test/app/build/outputs/apk/debug -maxdepth 1 -name '*-debug.apk' -print -quit 2>/dev/null || true)}"
+ROOT_AVD_DIR="$RUNNER_TEMP/rootAVD"
+rm -rf "$ROOT_AVD_DIR"
+mkdir -p "$ROOT_AVD_DIR"
+mkdir -p "$ROOT_AVD_DIR/Apps"
+cp .github/vendor/rootAVD/rootAVD.sh "$ROOT_AVD_DIR/rootAVD.sh"
+cp .github/vendor/rootAVD/rootAVD.bat "$ROOT_AVD_DIR/rootAVD.bat"
+chmod +x "$ROOT_AVD_DIR/rootAVD.sh"
+
+MAGISK_JSON="${MAGISK_JSON:-https://raw.githubusercontent.com/topjohnwu/magisk-files/master/stable.json}"
+MAGISK_URL="$(python3 - <<PY
+import json
+import urllib.request
+
+with urllib.request.urlopen("$MAGISK_JSON", timeout=30) as response:
+    print(json.load(response)["magisk"]["link"])
+PY
+)"
+curl -fsSL "$MAGISK_URL" -o "$ROOT_AVD_DIR/Magisk.zip"
+
+RAMDISK_REL="system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}/ramdisk.img"
+RAMDISK="$ANDROID_HOME/$RAMDISK_REL"
+if [ ! -f "$RAMDISK" ]; then
+  echo "No ramdisk.img found at expected Android SDK system image path."
+  exit 1
+fi
+
+wait_for_boot() {
+  local timeout_seconds="${1:-300}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local boot_completed=""
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    boot_completed="$(timeout 10s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+    if [ "$boot_completed" = "1" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "Timed out waiting for emulator boot."
+  adb devices -l || true
+  if [ -n "${EMULATOR_LOG:-}" ] && [ -f "$EMULATOR_LOG" ]; then
+    echo "=== emulator log tail ==="
+    tail -200 "$EMULATOR_LOG" || true
+  fi
+  return 1
+}
+
+wait_for_emulator_shutdown() {
+  local timeout_seconds="${1:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! adb devices | grep -q '^emulator-'; then
+      return 0
+    fi
+    adb emu kill >/dev/null 2>&1 || true
+    sleep 2
+  done
+
+  echo "Timed out waiting for previous emulator shutdown."
+  adb devices -l || true
+  return 1
+}
+
+start_emulator() {
+  local avd_name="${AVD_NAME:-test}"
+  local emulator_port="${EMULATOR_PORT:-5554}"
+  local ramdisk_args=()
+  EMULATOR_LOG="${RUNNER_TEMP:-/tmp}/rooted-emulator.log"
+
+  if [ -n "${PATCHED_RAMDISK:-}" ] && [ -f "$PATCHED_RAMDISK" ]; then
+    ramdisk_args=(-ramdisk "$PATCHED_RAMDISK")
+  fi
+
+  nohup "$ANDROID_HOME/emulator/emulator" -port "$emulator_port" -avd "$avd_name" "${ramdisk_args[@]}" -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim >"$EMULATOR_LOG" 2>&1 &
+  sleep 5
+  if [ -f "$EMULATOR_LOG" ]; then
+    tail -80 "$EMULATOR_LOG" || true
+  fi
+}
+
+adb_root() {
+  local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
+  local quoted
+  quoted="$(printf '%s' "$command" | sed "s/'/'\\\\''/g")"
+  adb shell "su 0 sh -c '$quoted'" || adb shell "su -c '$quoted'"
+}
+
+adb_su() {
+  local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
+  adb_root "$1" || adb shell magisk su -c "$command" || adb shell /system/bin/magisk su -c "$command" || adb shell /debug_ramdisk/magisk su -c "$command"
+}
+
+adb_write_file() {
+  local path="$1"
+  local content="$2"
+  local encoded
+  encoded="$(printf '%s' "$content" | base64 | tr -d '\n')"
+  adb_root "printf '%s' '$encoded' | base64 -d > '$path'"
+}
+
+adb_magisk() {
+  local args="$1"
+  adb_root "magisk_bin=''; for bin in /data/adb/magisk/magisk /debug_ramdisk/magisk /sbin/magisk /system/bin/magisk magisk; do if [ -x \"\$bin\" ]; then magisk_bin=\"\$bin\"; break; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then magisk_bin=\"\$found\"; break; fi; done; [ -n \"\$magisk_bin\" ] && \"\$magisk_bin\" $args"
+}
+
+grant_magisk_shell() {
+  adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('root_access',3);\"" >/dev/null 2>&1 || true
+  adb_magisk "--sqlite \"REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(2000,2,0,1,0);\"" >/dev/null 2>&1 || true
+}
+
+install_storage_redirect_module() {
+  adb push "$MODULE_ZIP" /data/local/tmp/storage-redirect-x.zip
+
+  if adb_root 'magisk --install-module /data/local/tmp/storage-redirect-x.zip'; then
+    adb_root 'rm -f /data/local/tmp/storage-redirect-x.zip' >/dev/null 2>&1 || true
+    return
+  fi
+
+  echo "Magisk module install failed."
+  adb_root 'id; command -v magisk || true; magisk -V || true; ls -la /data/adb; ls -la /data/adb/magisk; ls -la /data/adb/modules; ls -la /data/adb/modules_update' || true
+  adb logcat -d -t 300 | grep -Ei 'magisk|zygisk|avc: denied|storage.redirect' || true
+  exit 1
+}
+
+install_test_app_before_module_boot() {
+  if [ ! -f "$APP_APK" ]; then
+    echo "No test APK found at $APP_APK."
+    exit 1
+  fi
+
+  adb install -r "$APP_APK"
+}
+
+seed_storage_redirect_config() {
+  local config_content='{"users":{"0":{"enabled":true}}}'
+
+  for module_dir in /data/adb/modules_update/storage.redirect.x /data/adb/modules/storage.redirect.x; do
+    if adb_root "[ -d '$module_dir' ]"; then
+      adb_root "mkdir -p '$module_dir/config/apps'"
+      adb_write_file "$module_dir/config/apps/${APP_ID}.json" "$config_content"
+      adb_root "chmod 644 '$module_dir/config/apps/${APP_ID}.json'"
+    fi
+  done
+}
+
+verify_storage_redirect_module_loaded() {
+  adb_su "test -d /data/adb/modules/storage.redirect.x && test ! -e /data/adb/modules/storage.redirect.x/disable"
+  adb_su "grep -q ' /dev/srx_config ' /proc/mounts"
+  adb_su "ls -la /data/adb/modules/storage.redirect.x/logs; ls -la /dev/srx_config"
+}
+
+install_test_app_before_module_boot
+
+if ! ROOTAVD_NONINTERACTIVE=1 ROOTAVD_MAGISK_CHOICE=1 "$ROOT_AVD_DIR/rootAVD.sh" "$RAMDISK_REL"; then
+  echo "rootAVD failed to patch the emulator ramdisk."
+  exit 1
+fi
+
+AVD_DIR="${HOME}/.android/avd/${AVD_NAME:-test}.avd"
+PATCHED_RAMDISK="$ANDROID_HOME/$RAMDISK_REL"
+if [ -d "$AVD_DIR" ] && [ -f "$PATCHED_RAMDISK" ]; then
+  echo "Copying patched ramdisk into $AVD_DIR"
+  cp "$PATCHED_RAMDISK" "$AVD_DIR/ramdisk.img"
+fi
+
+wait_for_emulator_shutdown 90
+adb kill-server >/dev/null 2>&1 || true
+start_emulator
+wait_for_boot 300
+
+echo "Waiting for Magisk to initialize..."
+
+magisk_ready_attempts="${MAGISK_READY_ATTEMPTS:-3}"
+for i in $(seq 1 "$magisk_ready_attempts"); do
+  echo "Attempt $i/$magisk_ready_attempts: Checking Magisk root availability..."
+  grant_magisk_shell
+  if adb_magisk '-V' >/dev/null 2>&1 && adb_root 'id' >/dev/null 2>&1; then
+    echo "Magisk root is available."
+    break
+  fi
+  if [ "$i" -eq "$magisk_ready_attempts" ]; then
+    echo "Magisk root is not available after rootAVD."
+    adb shell getprop | grep -i magisk || true
+    adb shell which su || true
+    adb shell which magisk || true
+    adb_root 'id; ls -la /data/adb; ls -la /data/adb/magisk; find /data/adb -maxdepth 3 \( -name magisk -o -name magisk64 -o -name su \); ls -la /debug_ramdisk; find /debug_ramdisk -maxdepth 3 \( -name magisk -o -name su \)' || true
+    adb shell ls -la /debug_ramdisk || true
+    adb shell ls -la /dev | grep -i magisk || true
+    adb shell find / -maxdepth 3 -name su -o -name magisk 2>/dev/null || true
+    adb logcat -d -t 300 | grep -Ei 'magisk|magiskinit|init-ld|avc: denied|init:' || true
+    adb shell ls -la /system/bin/su || true
+    adb shell ls -la /system/bin/magisk || true
+    adb shell ls -la /sbin || true
+    exit 1
+  fi
+  echo "Magisk not ready yet, waiting 10s..."
+  sleep 10
+done
+
+adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
+install_storage_redirect_module
+seed_storage_redirect_config
+adb reboot
+wait_for_boot 300
+
+if ! adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | grep -q 1; then
+  echo "Zygisk is not enabled after reboot."
+  exit 1
+fi
+
+verify_storage_redirect_module_loaded

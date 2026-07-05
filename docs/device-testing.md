@@ -1,10 +1,9 @@
 # 设备侧测试说明
-
 **重要：设备侧排障时请在设置页打开“详细日志”。**
 
 CI Build 和正式 Release 都会产出单个模块 zip：`storage.redirect.x-v<version>.zip`。默认只保留文件监视记录；打开“详细日志”后，会立即启用 Rust、Java、Stats 和诊断采集日志，关闭后立即停止相关记录。
 
-设备侧回归测试需要配合独立测试 APP 仓库 [`StorageRedirectTest`](https://github.com/z1298808165/StorageRedirectTest)。测试仓库由执行者自行放置；本文只说明需要在哪个仓库中执行命令，不假设本地源码目录。
+设备侧回归测试流已经集成在本仓库内，测试 APP 源码位于 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。测试 APP 来自 `https://github.com/z1298808165/StorageRedirectTest`，合入本仓库后随核心代码一起审查、构建和运行，不再在 CI 或推送流程里动态拉取外部测试项目。
 
 测试 APP 包名：
 
@@ -20,34 +19,77 @@ me.fakerqu.test.storageredirection.TEST_CASE
 
 ## 总体流程
 
-设备侧回归默认以设备上当前已安装的 Storage Redirect X 模块为被测对象。除非用户明确要求编译/刷入本地模块，或明确说明要验证当前本地 `srx_core` 模块产物，否则不要自动构建模块、刷入模块或因此重启设备。
+普通本地排障可以只针对设备当前已安装的 Storage Redirect X 模块运行测试 APP 和场景脚本；需要在本地预检或复现 GitHub Actions 失败时，再使用完整验证脚本验证当前工作区产物。
 
-推荐按下面顺序验证：
+完整验证脚本有可用 Bash 时使用：
 
-1. 确认设备在线、root 可用，并记录当前模块版本。
-2. 在 `StorageRedirectTest` 构建并安装测试 APP。
-3. 运行 `StorageRedirectTest` 的场景脚本。
-4. 查看摘要、失败项、模块日志和测试 APP 结果文件。
+```bash
+bash scripts/verify-test-flow.sh
+```
 
-如果用户明确要求验证本地 `srx_core` 模块产物，则先构建并刷入本地模块 zip，重启设备后确认模块版本已生效，然后继续执行测试 APP 和场景脚本步骤。
-
-当前完整设备侧通过标准是：
-
-- `basic/all` 通过。
-- 当前模块应跑完 scenario 1-28；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
-- 脚本最后输出 `ALL_SCENARIOS_PASSED`。
-
-下面 PowerShell 示例默认先设置目标设备序列号：
+Windows PowerShell 环境可以使用同等入口：
 
 ```powershell
-$Serial = "<serial>"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```
+
+该脚本默认会：
+
+1. 解析当前本地测试版本号。
+2. 构建 Android 目标 Rust 测试二进制和 release 模块二进制。
+3. 打包测试用模块 zip。
+4. 运行管理 APP 单元测试、测试 APP 单元测试，并构建测试 APP debug APK。
+5. 将刚构建的模块 zip 刷入在线 root 测试设备，重启并确认模块启用。
+6. 安装本仓库内置测试 APP。
+7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
+
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。PR 合并建议在分支保护中要求 `Test-flow required gate` 通过；CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，不删除、不撤销提交，由后续提交修复。
+
+完整设备侧通过标准是：
+
+- `basic/all` 通过。
+- 当前模块跑完 scenario 1-29；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
+- 脚本最后输出 `ALL_SCENARIOS_PASSED`。
+- 场景脚本退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider。
+
+## 本地完整验证
+
+默认面向 arm64 真机或 arm64 模拟器：
+
+```powershell
+adb devices
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```
+
+Bash 可用时也可以直接运行 `bash scripts/verify-test-flow.sh`。
+
+如果测试设备是 x86_64 模拟器，可切换目标：
+
+```powershell
+$env:SRX_TEST_TARGET_TRIPLE = "x86_64-linux-android"
+$env:SRX_TEST_MODULE_ABI = "x86_64"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:SRX_TEST_TARGET_TRIPLE
+Remove-Item Env:SRX_TEST_MODULE_ABI
+```
+
+完整验证脚本默认会刷入当前构建模块并重启设备。只在本地定位测试 APP 或脚本问题时，才临时跳过模块刷入或设备场景：
+
+```powershell
+# 只验证构建和测试 APK，不跑设备场景。
+$env:RUN_DEVICE_SCENARIOS = "0"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:RUN_DEVICE_SCENARIOS
+
+# 使用设备上已安装模块跑场景。
+$env:SRX_TEST_INSTALL_MODULE = "0"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:SRX_TEST_INSTALL_MODULE
 ```
 
 ## 构建并刷入模块
 
-这是可选步骤，仅在用户明确要求编译/刷入本地模块，或明确说明要验证当前本地 `srx_core` 模块产物时执行。普通设备侧回归不应默认执行这一节。
-
-Windows PowerShell 下推荐在本仓库根目录使用脚本。脚本会编译 Android release 目标、生成可刷入 zip、校验 zip 条目和 LF 换行；如不传 `-NoAdb`，还会询问是否通过 `ksud module install` 刷入并重启。
+单独构建模块 zip 时，Windows PowerShell 下推荐在本仓库根目录使用脚本。脚本会编译 Android release 目标、生成可刷入 zip、校验 zip 条目和 LF 换行；如不传 `-NoAdb`，还会询问是否通过 `ksud module install` 刷入并重启。
 
 ```powershell
 # 构建模块 zip，可按提示刷入设备
@@ -72,27 +114,15 @@ adb -s $Serial shell 'while [ x$(getprop sys.boot_completed) != x1 ]; do sleep 1
 adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/module.prop'"
 ```
 
-如果安装 CI artifact 中的模块 zip，流程相同：
-
-```powershell
-adb -s $Serial push storage.redirect.x-v<version>.zip /data/local/tmp/srx-ci.zip
-adb -s $Serial shell "su -c 'rm -rf /data/adb/modules_update/storage.redirect.x'"
-adb -s $Serial shell "su -c '/data/adb/ksu/bin/ksud module install /data/local/tmp/srx-ci.zip'"
-adb -s $Serial reboot
-adb -s $Serial wait-for-device
-adb -s $Serial shell 'while [ x$(getprop sys.boot_completed) != x1 ]; do sleep 1; done; echo booted'
-adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/module.prop'"
-```
-
 刷入前建议额外确认 zip 至少包含 `module.prop`、`zygisk/arm64-v8a.so`、`bin/srx_daemon`、`service.d/debug_collectors.sh`、`service.d/media_state.sh`、`service.d/app_status.sh`，并且 zip entry 使用 `/` 而不是 `\`。
 
 ## 构建并安装测试 APP
 
-`StorageRedirectTest` 已在仓库内优先配置国内下载源。Windows 下建议在测试 APP 仓库根目录直接使用 Gradle Wrapper：
+测试 APP 已作为主 Gradle build 的独立模块接入。Windows 下在本仓库根目录执行：
 
 ```powershell
-.\gradlew.bat --no-daemon :app:testDebugUnitTest :media-file-api:testDebugUnitTest :app:assembleDebug --console=plain --stacktrace
-adb -s $Serial install -r app\build\outputs\apk\debug\app-debug.apk
+.\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
+adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debug\storageRedirectTestApp-debug.apk
 ```
 
 授予测试 APP 必要权限：
@@ -111,32 +141,34 @@ adb -s $Serial shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_
 
 ## 运行完整回归
 
-优先在测试 APP 仓库根目录使用 `StorageRedirectTest` 的 PowerShell 场景脚本。脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。脚本结束时会按白名单清理测试 APP 结果目录、`srt_file_tests`、场景固定目录、随机 `srt_*` 媒体文件、固定测试媒体文件以及 MediaProvider 可能留下的 `.pending-<数字>-srt_*` / `.trashed-<数字>-srt_*` 临时名和同名冲突 ` (数字)` 后缀；不会递归删除整个公共媒体目录。
+完整回归优先使用本仓库内置脚本。bash 版是 CI 使用的主入口：
+
+```bash
+ANDROID_SERIAL=<serial> bash .github/tests/run-storage-redirect-scenarios.sh
+```
+
+Windows PowerShell 也可以运行同等语义的脚本：
 
 ```powershell
-.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial
+.\.github\tests\run-storage-redirect-scenarios.ps1 -Serial $Serial
 ```
+
+脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。脚本结束时会按白名单清理测试 APP 结果目录、`srt_file_tests`、场景固定目录、随机 `srt_*` 媒体文件、固定测试媒体文件以及 MediaProvider 可能留下的 `.pending-<数字>-srt_*` / `.trashed-<数字>-srt_*` 临时名和同名冲突 ` (数字)` 后缀；不会递归删除整个公共媒体目录。
 
 如果只想跳过 `basic/all`，只跑场景脚本：
 
 ```powershell
-.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll
+.\.github\tests\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll
 ```
 
 只跑部分场景时可以用 PowerShell 参数或环境变量：
 
 ```powershell
-.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll -Scenarios 9,17,19,22,23,24,26,28
+.\.github\tests\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll -Scenarios 9,17,19,22,23,24,26,28
 
 $env:SRT_SCENARIOS = "9,17,19,22,23,24,26,28"
-.\.github\scripts\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll
+.\.github\tests\run-storage-redirect-scenarios.ps1 -Serial $Serial -SkipBasicAll
 Remove-Item Env:SRT_SCENARIOS
-```
-
-在 Git Bash、WSL、Linux 或 macOS 下，也可以在测试 APP 仓库根目录使用 bash 版脚本：
-
-```bash
-ANDROID_SERIAL=<serial> bash .github/scripts/run-storage-redirect-scenarios.sh
 ```
 
 常用调试开关：
@@ -144,8 +176,8 @@ ANDROID_SERIAL=<serial> bash .github/scripts/run-storage-redirect-scenarios.sh
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-28。 |
-| `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，排查状态污染时使用。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-29。 |
+| `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `RUN_FUSE_DAEMON_SCENARIOS=0/1` | 强制跳过或强制运行 FUSE daemon 专属场景；默认自动探测模块是否支持。 |
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
@@ -183,9 +215,9 @@ ANDROID_SERIAL=<serial> bash .github/scripts/run-storage-redirect-scenarios.sh
 | 26 | 启用文件监控且 FUSE daemon 关闭时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 27 | 启用文件监控且 FUSE daemon 开启时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 28 | 启用 `read_only_paths=["Pictures/SrtReadOnlyMedia"]`，预置真实图片并扫描进 MediaStore，验证测试 APP 通过 MediaStore 查询仍能看到只读真实路径下的图片行。 |
+| 29 | 配置热更新：测试 APP 已运行时，先验证默认重定向写入应用私有空间，再不重启应用改为 `path_mappings`，要求同一进程后续写入切换到映射后的真实目录。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
-
 ## 手动运行用例
 
 最小配置表示为测试 APP 开启完整隔离：

@@ -224,12 +224,176 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  test-flow:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      ANDROID_TARGET: google_apis
+      ANDROID_ARCH: x86_64
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+      ANDROID_API_LEVEL: ${{ matrix.api }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 31
+            version: 12
+          - api: 33
+            version: 13
+          - api: 34
+            version: 14
+          - api: 35
+            version: 15
+          - api: 36
+            version: 16
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6.1.0
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-linux-android
+
+      - name: Install CMake and Ninja
+        run: |
+          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build
+          fi
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Restore Cargo test-flow cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-x86_64-
+
+      - name: Build x86_64 module zip and test app
+        run: |
+          chmod +x ./gradlew .github/tests/*.sh .github/scripts/package_module.sh
+          mkdir -p build/test-flow/module-bin build/test-flow/assets
+          cargo test --target "$TARGET_TRIPLE" --no-run
+          cargo build --target "$TARGET_TRIPLE" --release
+          cp "target/${TARGET_TRIPLE}/release/libsrx_core.so" build/test-flow/module-bin/libsrx_core.so
+          cp "target/${TARGET_TRIPLE}/release/srx_daemon" build/test-flow/module-bin/srx_daemon
+          bash .github/scripts/package_module.sh \
+            "$VERSION" "$VERSION_CODE" \
+            build/test-flow/module-bin/libsrx_core.so \
+            build/test-flow/module-bin/srx_daemon \
+            "build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
+            "$MODULE_ABI"
+          ./gradlew --no-daemon --console=plain --stacktrace \
+            :storageRedirectTestApp:testDebugUnitTest \
+            :storageRedirectTestMediaFileApi:testDebugUnitTest \
+            :storageRedirectTestApp:assembleDebug
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Enable KVM permissions
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            sudo sh -c 'echo KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=kvm\" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+      - name: Run Android test-flow scenarios
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: ${{ matrix.api }}
+          target: ${{ env.ANDROID_TARGET }}
+          arch: ${{ env.ANDROID_ARCH }}
+          profile: pixel_7
+          disk-size: 4096M
+          heap-size: 1024M
+          disable-animations: true
+          emulator-boot-timeout: 1500
+          script: |
+            set -eu
+            adb wait-for-device
+            adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+            TEST_APP_APK="$(find tests/storage-redirect-test/app/build/outputs/apk/debug -maxdepth 1 -name '*-debug.apk' -print -quit)"
+            test -n "$TEST_APP_APK"
+            MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
+              APP_APK="$TEST_APP_APK" \
+              bash .github/tests/install-storage-redirect-module.sh
+            adb install -r "$TEST_APP_APK"
+            adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
+            bash .github/tests/run-storage-redirect-scenarios.sh
+
+      - name: Upload test-flow artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-test-flow-android${{ matrix.version }}-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            build/test-flow/assets/*.zip
+            scenario-*-result.txt
+            media-health.txt
+            tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
+            tests/storage-redirect-test/app/build/reports/
+            tests/storage-redirect-test/media-file-api/build/reports/
+
+  test-flow-required:
+    name: Test-flow required gate
+    needs:
+      - prepare
+      - test-flow
+    if: always() && needs.prepare.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all test-flow matrix jobs to pass
+        run: |
+          if [ "${{ needs.test-flow.result }}" != "success" ]; then
+            echo "test-flow matrix result: ${{ needs.test-flow.result }}" >&2
+            exit 1
+          fi
+
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - prepare
       - module
       - app
+      - test-flow-required
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
