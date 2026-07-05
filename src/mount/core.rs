@@ -80,8 +80,7 @@ impl MountPlanner {
             log::debug!("mount dir: skip public storage root mkdir path={}", path);
             return true;
         };
-        let uid = if should_chown { self.app_uid } else { -1 };
-        if !fs::create_directory(&metadata_path, uid) {
+        if !fs::create_directory(&metadata_path, -1) {
             log::warn!(
                 "mount dir: mkdir failed path={} metadata_path={}",
                 path,
@@ -300,7 +299,9 @@ impl MountPlanner {
                 break;
             }
 
-            if fs::is_directory(&current) {
+            if fs::is_directory(&current)
+                && should_apply_app_writable_metadata(&current, self.user_id)
+            {
                 let _ = self.ensure_writable_mapped_directory(&current, owner_uid);
             }
 
@@ -705,6 +706,26 @@ fn is_android_private_storage_path(path: &str, storage_root: &str) -> bool {
         || relative.starts_with("Android/obb/")
 }
 
+fn should_apply_app_writable_metadata(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        if path.starts_with("/data/media/") || path == "/data/media" {
+            return false;
+        }
+        return true;
+    };
+
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    if parts.next() != Some("Android") {
+        return true;
+    }
+
+    match parts.next() {
+        Some("data" | "media" | "obb") => parts.next().is_some(),
+        _ => true,
+    }
+}
+
 fn is_data_media_shared_public_directory(path: &str, user_id: i32) -> bool {
     let root = paths::data_media_user_root_for_user(user_id);
     let Some(relative) = paths::relative_child_path(path, &root) else {
@@ -1054,6 +1075,34 @@ mod tests {
         ));
         assert!(!is_data_media_shared_public_directory(
             "/data/media/10/Pictures",
+            0
+        ));
+    }
+
+    #[test]
+    fn app_writable_metadata_starts_at_android_private_package_root() {
+        assert!(should_apply_app_writable_metadata(
+            "/data/media/0/Download/SrtProbe",
+            0
+        ));
+        assert!(!should_apply_app_writable_metadata(
+            "/data/media/0/Android",
+            0
+        ));
+        assert!(!should_apply_app_writable_metadata(
+            "/data/media/0/Android/data",
+            0
+        ));
+        assert!(should_apply_app_writable_metadata(
+            "/data/media/0/Android/data/com.example.app",
+            0
+        ));
+        assert!(should_apply_app_writable_metadata(
+            "/data/media/0/Android/data/com.example.app/sdcard/Download",
+            0
+        ));
+        assert!(!should_apply_app_writable_metadata(
+            "/data/media/10/Android/data/com.example.app",
             0
         ));
     }

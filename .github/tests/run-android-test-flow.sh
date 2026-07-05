@@ -18,6 +18,5 @@ MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.
   APP_APK="$TEST_APP_APK" \
   bash .github/tests/install-storage-redirect-module.sh
 
-adb install -r "$TEST_APP_APK"
 adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
 bash .github/tests/run-storage-redirect-scenarios.sh
