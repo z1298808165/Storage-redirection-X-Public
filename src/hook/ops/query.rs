@@ -700,7 +700,7 @@ unsafe fn reverse_readlink_result_if_visible(
 
     let display_bytes = display_path.as_bytes();
     let copy_len = display_bytes.len();
-    std::ptr::copy_nonoverlapping(display_bytes.as_ptr(), buf, copy_len);
+    std::ptr::copy_nonoverlapping(display_bytes.as_ptr(), buf.cast::<u8>(), copy_len);
     *buf.add(copy_len) = 0;
     copy_len as isize
 }
