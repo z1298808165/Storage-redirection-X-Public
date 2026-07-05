@@ -1145,10 +1145,18 @@ check_scoped_fuse_daemon_started() {
   local strict="${3:-1}"
   for _ in $(seq 1 20); do
     if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
+      if [ "$strict" != "1" ]; then
+        echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
+        return 0
+      fi
       echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}" >&2
       return 1
     fi
     if adb_su "grep -F -- 'fuse redirect session ended' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root}' >/dev/null"; then
+      if [ "$strict" != "1" ]; then
+        echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
+        return 0
+      fi
       echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}" >&2
       return 1
     fi

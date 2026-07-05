@@ -13,6 +13,7 @@ enum PackagePathMatchMode {
     RedirectOwner,
     EnabledOwner,
     MappingRequestOwner,
+    ReadOnlyOwner,
     MonitorOwner,
 }
 
@@ -224,6 +225,20 @@ impl SettingsHub {
         )
     }
 
+    pub fn resolve_read_only_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if !state.is_loaded || user_id < 0 || path.is_empty() {
+            return String::new();
+        }
+
+        resolve_package_by_path_in_apps(
+            &state.apps,
+            user_id,
+            path,
+            PackagePathMatchMode::ReadOnlyOwner,
+        )
+    }
+
     pub fn resolve_monitor_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if !state.is_loaded || user_id < 0 || path.is_empty() {
@@ -351,6 +366,21 @@ fn resolve_package_by_path_in_apps(
                 );
             }
         }
+
+        if matches!(mode, PackagePathMatchMode::ReadOnlyOwner)
+            && read_only_rule_matches_path(&user.read_only_paths, &normalized)
+        {
+            let (included, _) = paths::split_exclusion_rules(&user.read_only_paths);
+            for rule in included {
+                update_matched_packages(
+                    &mut matched_packages,
+                    &mut matched_prefix_len,
+                    package_name,
+                    &rule,
+                    &normalized,
+                );
+            }
+        }
     }
 
     if matched_packages.len() == 1 {
@@ -369,13 +399,27 @@ fn should_match_mapping_target_for_mode(
     match mode {
         PackagePathMatchMode::RedirectOwner => false,
         PackagePathMatchMode::MappingRequestOwner => false,
+        PackagePathMatchMode::ReadOnlyOwner => false,
         PackagePathMatchMode::EnabledOwner => true,
         PackagePathMatchMode::MonitorOwner => is_specific_storage_owner_hint(user_id, final_path),
     }
 }
 
 fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> bool {
-    !matches!(mode, PackagePathMatchMode::MappingRequestOwner)
+    !matches!(
+        mode,
+        PackagePathMatchMode::MappingRequestOwner | PackagePathMatchMode::ReadOnlyOwner
+    )
+}
+
+fn read_only_rule_matches_path(read_only_paths: &[String], normalized: &str) -> bool {
+    let (included, excluded) = paths::split_exclusion_rules(read_only_paths);
+    included
+        .iter()
+        .any(|rule| paths::matches(rule, normalized, true))
+        && !excluded
+            .iter()
+            .any(|rule| paths::matches(rule, normalized, true))
 }
 
 fn prefer_download_provider_match(packages: &[String]) -> Option<&str> {
@@ -429,6 +473,21 @@ mod tests {
             excluded_real_paths: Vec::new(),
             sandboxed_paths: Vec::new(),
             read_only_paths: Vec::new(),
+            path_mappings: Vec::new(),
+        }
+    }
+
+    fn enabled_read_only_profile() -> UserProfile {
+        UserProfile {
+            is_enabled: true,
+            is_mapping_mode_only: false,
+            allowed_real_paths: Vec::new(),
+            excluded_real_paths: Vec::new(),
+            sandboxed_paths: Vec::new(),
+            read_only_paths: vec![
+                "/storage/emulated/0/Download/SrtMonitorLocked".to_string(),
+                "!/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string(),
+            ],
             path_mappings: Vec::new(),
         }
     }
@@ -1065,6 +1124,40 @@ mod tests {
         assert!(enabled_profile.is_none());
         assert!(resolved_enabled.is_empty());
         assert!(resolved_redirect.is_empty());
+    }
+
+    #[test]
+    fn read_only_resolution_respects_exclusions() {
+        let hub = SettingsHub::instance();
+        let mut state = hub.state.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_apps = state.apps.clone();
+        let previous_loaded = state.is_loaded;
+
+        state.apps.clear();
+        state.is_loaded = true;
+        state.apps.insert(
+            "me.fakerqu.test.storageredirect".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(0, enabled_read_only_profile())]),
+            },
+        );
+        drop(state);
+
+        let locked = hub.resolve_read_only_package_by_path_for_user(
+            0,
+            "/storage/emulated/0/Download/SrtMonitorLocked/srt.bin",
+        );
+        let excluded = hub.resolve_read_only_package_by_path_for_user(
+            0,
+            "/storage/emulated/0/Download/SrtMonitorLocked/Writable/srt.bin",
+        );
+
+        let mut state = hub.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.apps = previous_apps;
+        state.is_loaded = previous_loaded;
+
+        assert_eq!(locked, "me.fakerqu.test.storageredirect");
+        assert!(excluded.is_empty());
     }
 
     #[test]

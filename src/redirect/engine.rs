@@ -7,8 +7,9 @@ mod trace;
 use self::caller::has_external_writer_caller_signal;
 use self::caller::{
     SystemWriterCallerContext, SystemWriterCallerSignal,
-    has_system_writer_mapping_request_owner_hint, has_system_writer_recent_public_caller_hint,
-    is_media_provider_internal_without_caller, resolve_system_writer_caller_context,
+    has_system_writer_mapping_request_owner_hint, has_system_writer_read_only_owner_hint,
+    has_system_writer_recent_public_caller_hint, is_media_provider_internal_without_caller,
+    resolve_system_writer_caller_context,
 };
 use self::policy::{
     SystemWriterPolicyRequest, process_system_writer_policy, resolve_system_writer_enablement,
@@ -353,6 +354,9 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
     let has_anonymous_redirect_owner_hint = has_anonymous_caller
         && (has_anonymous_private_owner_hint
             || has_anonymous_mapping_request_owner_hint
+            || (is_write_operation
+                && redirect_policy::is_media_provider_package(&package_name)
+                && has_system_writer_read_only_owner_hint(user_id, &normalized_path))
             || (is_write_operation
                 && redirect_policy::is_media_provider_package(&package_name)
                 && has_system_writer_recent_public_caller_hint(user_id, &normalized_path)));
@@ -2586,6 +2590,62 @@ mod tests {
             read_only.new_path,
             "/storage/emulated/0/Download/SrtMonitorLocked/.pending-1783044790-srt_monitor_media-read-only-denied.bin"
         );
+    }
+
+    #[test]
+    fn anonymous_media_writer_denies_read_only_path_without_recent_hint() {
+        let _guard = lock_app_router_test();
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let previous_uid = redirect_policy::replace_test_uid_cache(HashMap::from([(
+            "me.fakerqu.test.storageredirect".to_string(),
+            10366,
+        )]));
+        let hub = SettingsHub::instance();
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([(
+            "me.fakerqu.test.storageredirect".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: vec![
+                            "/storage/emulated/0/Download/SrtMonitor".to_string(),
+                        ],
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec![
+                            "/storage/emulated/0/Download/SrtMonitorLocked".to_string(),
+                            "!/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string(),
+                        ],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+
+        let read_only = anonymous_media_writer_decision(
+            "/storage/emulated/0/Download/SrtMonitorLocked/srt_monitor_media-read-only-denied.bin",
+        );
+        let excluded = anonymous_media_writer_decision(
+            "/storage/emulated/0/Download/SrtMonitorLocked/Writable/srt_monitor_media-read-only-excluded.bin",
+        );
+
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        redirect_policy::restore_test_uid_cache(
+            previous_uid.0,
+            previous_uid.1,
+            previous_uid.2,
+            previous_uid.3,
+        );
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert!(read_only.is_denied());
+        assert_eq!(
+            read_only.new_path,
+            "/storage/emulated/0/Download/SrtMonitorLocked/srt_monitor_media-read-only-denied.bin"
+        );
+        assert!(!excluded.is_denied());
     }
 
     #[test]

@@ -256,15 +256,6 @@ pub(crate) fn resolve_download_media_placeholder_path_for_caller(
     if user_id < 0 {
         return None;
     }
-    let caller_package = resolve_caller_package_for_media_placeholder(
-        caller_uid,
-        original_path,
-        relative_path,
-        display_name,
-    );
-    if caller_package.is_empty() {
-        return None;
-    }
     let source =
         download_media_placeholder_source(original_path, relative_path, display_name, user_id)?;
     if let Some(denied) = download_media_placeholder_read_only_denial(&source, caller_uid) {
@@ -276,6 +267,15 @@ pub(crate) fn resolve_download_media_placeholder_path_for_caller(
             true,
         );
         return Some(denied);
+    }
+    let caller_package = resolve_caller_package_for_media_placeholder(
+        caller_uid,
+        original_path,
+        relative_path,
+        display_name,
+    );
+    if caller_package.is_empty() {
+        return None;
     }
     let mappings = writer::get_caller_mappings(&caller_package, caller_uid);
     if mappings.is_empty() {
@@ -310,7 +310,8 @@ fn download_media_placeholder_read_only_denial(
     let hub = InterceptHub::instance();
     let previous_package = hub.get_current_caller_package();
     let previous_uid = hub.get_current_caller_uid();
-    let (caller_package, effective_uid) = resolve_storage_caller_context(caller_uid, &source.path);
+    let (caller_package, effective_uid) =
+        resolve_media_placeholder_write_caller_context(caller_uid, &source.path);
     if caller_package.is_empty() {
         return None;
     }
@@ -335,6 +336,55 @@ fn download_media_placeholder_read_only_denial(
         ));
     }
     None
+}
+
+fn resolve_media_placeholder_write_caller_context(
+    caller_uid: i32,
+    path_text: &str,
+) -> (String, i32) {
+    let user_id = platform::user_id_from_uid(caller_uid);
+    let system_writer = is_system_writer_uid(caller_uid);
+    if system_writer {
+        if let Some(context) = resolve_read_only_path_owner_context(user_id, caller_uid, path_text)
+        {
+            return context;
+        }
+        if let Some(context) =
+            resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
+        {
+            return context;
+        }
+    }
+
+    let context = resolve_storage_caller_context(caller_uid, path_text);
+    if !context.0.is_empty() {
+        return context;
+    }
+
+    if let Some(context) = resolve_read_only_path_owner_context(user_id, caller_uid, path_text) {
+        return context;
+    }
+    context
+}
+
+fn resolve_read_only_path_owner_context(
+    user_id: i32,
+    caller_uid: i32,
+    path_text: &str,
+) -> Option<(String, i32)> {
+    if user_id < 0 || path_text.is_empty() {
+        return None;
+    }
+    let inferred =
+        SettingsHub::instance().resolve_read_only_package_by_path_for_user(user_id, path_text);
+    if inferred.is_empty() {
+        return None;
+    }
+    let inferred_uid = policy::get_fresh_uid_for_package(&inferred);
+    if inferred_uid >= writer::ANDROID_APP_UID_START {
+        return Some((inferred, inferred_uid));
+    }
+    Some((inferred, caller_uid))
 }
 
 pub(crate) fn rewrite_media_store_bucket_id_for_caller(
@@ -1973,6 +2023,68 @@ mod tests {
             "/storage/emulated/0/Download/SrtMonitorLocked/srt_monitor_media-read-only-denied.bin"
         );
         assert!(excluded.is_none());
+    }
+
+    #[test]
+    fn download_media_placeholder_infers_read_only_owner_for_media_provider_uid() {
+        let config = SettingsHub::instance();
+        let caller_package = "me.fakerqu.test.storageredirect";
+        let caller_uid = 10366;
+        let media_uid = 10217;
+        let (previous_apps, previous_loaded) = config.replace_test_apps(HashMap::from([(
+            caller_package.to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec![
+                            "/storage/emulated/0/Download/SrtMonitorLocked".to_string(),
+                            "!/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string(),
+                        ],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([
+            (caller_package.to_string(), caller_uid),
+            ("com.android.providers.media.module".to_string(), media_uid),
+        ]));
+        let runtime = InterceptHub::instance();
+        let previous_package = runtime.get_current_caller_package();
+        let previous_uid = runtime.get_current_caller_uid();
+        runtime.clear_current_caller();
+        runtime.set_current_caller_uid(media_uid);
+
+        let denied = resolve_download_media_placeholder_path_for_caller(
+            "",
+            "Download/SrtMonitorLocked",
+            "srt_monitor_media-read-only-denied.bin",
+            false,
+            media_uid,
+        );
+
+        runtime.set_current_caller_package(&previous_package);
+        runtime.set_current_caller_uid(previous_uid);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        config.restore_test_apps(previous_apps, previous_loaded);
+
+        let denied = denied.expect("media provider placeholder should be denied");
+        assert!(is_read_only_denied_media_placeholder(&denied));
+        assert_eq!(
+            read_only_denied_media_placeholder_path(&denied),
+            "/storage/emulated/0/Download/SrtMonitorLocked/srt_monitor_media-read-only-denied.bin"
+        );
     }
 
     #[test]
