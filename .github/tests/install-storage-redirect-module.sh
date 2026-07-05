@@ -188,14 +188,15 @@ install_test_app_before_module_boot() {
   adb shell appops set "$APP_ID" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
 }
 
-seed_storage_redirect_config() {
-  local config_content='{"users":{"0":{"enabled":true}}}'
+seed_storage_redirect_test_environment() {
+  local global_config_content='{"file_monitor_enabled":false,"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":false,"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":true}'
 
   for module_dir in /data/adb/modules_update/storage.redirect.x /data/adb/modules/storage.redirect.x; do
     if adb_root "[ -d '$module_dir' ]"; then
       adb_root "mkdir -p '$module_dir/config/apps'"
-      adb_write_file "$module_dir/config/apps/${APP_ID}.json" "$config_content"
-      adb_root "chmod 644 '$module_dir/config/apps/${APP_ID}.json'"
+      adb_write_file "$module_dir/config/global.json" "$global_config_content"
+      adb_root "chmod 644 '$module_dir/config/global.json'"
+      adb_root "rm -f '$module_dir/config/apps/${APP_ID}.json'"
     fi
   done
 }
@@ -268,7 +269,7 @@ done
 
 adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
 install_storage_redirect_module
-seed_storage_redirect_config
+seed_storage_redirect_test_environment
 adb reboot
 wait_for_boot 420
 wait_for_root_shell 120

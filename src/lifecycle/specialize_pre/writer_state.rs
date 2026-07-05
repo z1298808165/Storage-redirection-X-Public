@@ -64,7 +64,8 @@ pub(super) fn resolve_system_writer_context(
     if !*should_monitor && context.is_media_provider && is_file_monitor_enabled {
         *should_monitor = true;
     }
-    context.should_install_fuse_fix = context.is_media_provider;
+    context.should_install_fuse_fix = context.is_media_provider
+        && (is_file_monitor_enabled || context.has_merged_writer_mappings || has_enabled_apps);
 
     if context.has_merged_writer_mappings {
         log::info!(
@@ -279,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn media_provider_without_enabled_apps_installs_fuse_fix_without_redirect() {
+    fn media_provider_without_enabled_apps_bypasses_fuse_fix_and_redirect() {
         let config = SettingsHub::new();
         let config_dir = temp_config_dir("empty_raw");
         std::fs::create_dir_all(config_dir.join("apps")).expect("create temp apps dir");
@@ -301,7 +302,7 @@ mod tests {
 
         assert!(context.is_system_writer);
         assert!(context.is_media_provider);
-        assert!(context.should_install_fuse_fix);
+        assert!(!context.should_install_fuse_fix);
         assert!(!should_redirect);
         assert!(!should_monitor);
         assert!(!is_hook_redirect);
@@ -310,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn media_provider_installs_media_fuse_compat_when_zero_width_fuse_fix_disabled() {
+    fn media_provider_without_enabled_apps_bypasses_fuse_fix_when_zero_width_fix_disabled() {
         let config = SettingsHub::new();
         let config_dir = temp_config_dir("fuse_fix_disabled");
         std::fs::create_dir_all(config_dir.join("apps")).expect("create temp apps dir");
@@ -333,7 +334,7 @@ mod tests {
 
         assert!(context.is_system_writer);
         assert!(context.is_media_provider);
-        assert!(context.should_install_fuse_fix);
+        assert!(!context.should_install_fuse_fix);
         assert!(!should_redirect);
         assert!(!should_monitor);
         assert!(!is_hook_redirect);
