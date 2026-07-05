@@ -659,8 +659,7 @@ impl MountPlanner {
                 continue;
             }
             if is_covered_by_scoped_fuse_mount(&path, scoped_fuse_roots) {
-                log::info!("skip readonly mount (handled by scoped fuse): {}", path);
-                continue;
+                log::info!("readonly mount kept with scoped fuse fallback: {}", path);
             }
             let is_redundant = effective_paths
                 .iter()

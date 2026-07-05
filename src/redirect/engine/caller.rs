@@ -233,8 +233,15 @@ pub(super) fn resolve_system_writer_caller_context(
         );
     }
 
+    let has_external_caller_signal = has_external_writer_caller_signal(
+        package_name,
+        self_uid,
+        &effective_caller_package,
+        effective_caller_uid,
+    );
+
     if effective_caller_package.is_empty()
-        && !has_explicit_caller_signal
+        && !has_external_caller_signal
         && !crate::hook::is_path_owner_inference_disabled()
         && redirect_policy::is_media_provider_package(package_name)
         && let Some(path_identity) =
@@ -255,8 +262,11 @@ pub(super) fn resolve_system_writer_caller_context(
         is_caller_from_inferred = true;
     }
 
-    if effective_caller_package.is_empty()
-        && !has_explicit_caller_signal
+    let can_override_with_read_only_owner = !has_external_caller_signal
+        && (effective_caller_package.is_empty()
+            || effective_caller_package == package_name
+            || redirect_policy::is_system_writer_package(&effective_caller_package));
+    if can_override_with_read_only_owner
         && !crate::hook::is_path_owner_inference_disabled()
         && redirect_policy::is_media_provider_package(package_name)
     {
@@ -752,5 +762,67 @@ mod tests {
 
         assert_eq!(caller_package, "com.tencent.mm");
         assert!(is_inferred);
+    }
+
+    #[test]
+    fn media_provider_self_signal_does_not_block_read_only_owner_inference() {
+        let _guard = lock_caller_test();
+        let hub = SettingsHub::instance();
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([(
+            "me.fakerqu.test.storageredirect".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec![
+                            "/storage/emulated/0/Download/SrtMonitorLocked".to_string(),
+                        ],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = redirect_policy::replace_test_uid_cache(HashMap::from([(
+            "me.fakerqu.test.storageredirect".to_string(),
+            10192,
+        )]));
+
+        let self_uid = 10217;
+        let result = resolve_system_writer_caller_context(
+            InterceptHub::instance(),
+            SystemWriterCallerResolveRequest {
+                package_name: "com.android.providers.media.module",
+                self_uid,
+                is_shared_uid: false,
+                normalized_path: "/storage/emulated/0/Download/SrtMonitorLocked/.pending-1783893109-srt_monitor_27_media-read-only-denied.bin",
+                is_write_operation: true,
+                has_explicit_caller_signal: true,
+                can_infer_caller_by_path: true,
+                effective_caller_uid: self_uid,
+                original_caller_uid: self_uid,
+                effective_caller_package: "com.android.providers.media.module".to_string(),
+                user_id: 0,
+            },
+        );
+
+        redirect_policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        hub.restore_test_apps(previous_apps, previous_loaded);
+
+        assert_eq!(
+            result.effective_caller_package,
+            "me.fakerqu.test.storageredirect"
+        );
+        assert_eq!(result.effective_caller_uid, 10192);
+        assert!(result.is_caller_from_inferred);
     }
 }
