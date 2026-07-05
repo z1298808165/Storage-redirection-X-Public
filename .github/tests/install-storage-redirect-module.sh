@@ -101,14 +101,6 @@ start_emulator() {
   fi
 }
 
-cold_restart_emulator() {
-  adb emu kill >/dev/null 2>&1 || true
-  wait_for_emulator_shutdown 90
-  adb kill-server >/dev/null 2>&1 || true
-  start_emulator
-  wait_for_boot "${1:-300}"
-}
-
 adb_root() {
   local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
   local quoted
@@ -272,7 +264,8 @@ done
 adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
 install_storage_redirect_module
 seed_storage_redirect_config
-cold_restart_emulator 420
+adb reboot
+wait_for_boot 420
 wait_for_root_shell 120
 assert_installed_module_files /data/adb/modules/storage.redirect.x
 

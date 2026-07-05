@@ -238,8 +238,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - api: 31
-            version: 12
           - api: 33
             version: 13
           - api: 34
