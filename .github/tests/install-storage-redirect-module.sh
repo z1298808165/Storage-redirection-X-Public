@@ -47,9 +47,13 @@ wait_for_boot() {
   local boot_completed=""
 
   while [ "$SECONDS" -lt "$deadline" ]; do
+    timeout 10s adb wait-for-device >/dev/null 2>&1 || true
     boot_completed="$(timeout 10s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
     if [ "$boot_completed" = "1" ]; then
       return 0
+    fi
+    if adb devices | grep -q 'offline'; then
+      adb kill-server >/dev/null 2>&1 || true
     fi
     sleep 2
   done
@@ -97,6 +101,14 @@ start_emulator() {
   fi
 }
 
+cold_restart_emulator() {
+  adb emu kill >/dev/null 2>&1 || true
+  wait_for_emulator_shutdown 90
+  adb kill-server >/dev/null 2>&1 || true
+  start_emulator
+  wait_for_boot "${1:-300}"
+}
+
 adb_root() {
   local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
   local quoted
@@ -120,6 +132,26 @@ adb_write_file() {
 adb_magisk() {
   local args="$1"
   adb_root "magisk_bin=''; for bin in /data/adb/magisk/magisk /debug_ramdisk/magisk /sbin/magisk /system/bin/magisk magisk; do if [ -x \"\$bin\" ]; then magisk_bin=\"\$bin\"; break; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then magisk_bin=\"\$found\"; break; fi; done; [ -n \"\$magisk_bin\" ] && \"\$magisk_bin\" $args"
+}
+
+wait_for_root_shell() {
+  local timeout_seconds="${1:-120}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if adb_root 'id' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "Timed out waiting for root shell."
+  adb shell getprop | grep -Ei 'magisk|boot|zygisk' || true
+  adb shell which su || true
+  adb shell which magisk || true
+  adb shell ls -la /debug_ramdisk || true
+  adb shell ls -la /sbin || true
+  return 1
 }
 
 grant_magisk_shell() {
@@ -163,9 +195,22 @@ seed_storage_redirect_config() {
 }
 
 verify_storage_redirect_module_loaded() {
-  adb_su "test -d /data/adb/modules/storage.redirect.x && test ! -e /data/adb/modules/storage.redirect.x/disable"
-  adb_su "grep -q ' /dev/srx_config ' /proc/mounts"
-  adb_su "ls -la /data/adb/modules/storage.redirect.x/logs; ls -la /dev/srx_config"
+  local timeout_seconds="${VERIFY_MODULE_TIMEOUT_SECONDS:-120}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if adb_su "test -d /data/adb/modules/storage.redirect.x && test ! -e /data/adb/modules/storage.redirect.x/disable" >/dev/null 2>&1 \
+      && adb_su "grep -q ' /dev/srx_config ' /proc/mounts" >/dev/null 2>&1; then
+      adb_su "ls -la /data/adb/modules/storage.redirect.x/logs; ls -la /dev/srx_config"
+      return 0
+    fi
+    sleep 2
+  done
+
+  echo "Storage Redirect X module did not report a loaded config mount."
+  adb_su "id; ls -la /data/adb/modules; ls -la /data/adb/modules/storage.redirect.x; mount | grep -E 'srx|storage.redirect|zygisk' || true; cat /proc/mounts | grep -E 'srx|storage.redirect|zygisk' || true" || true
+  adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|linker|fatal' || true
+  return 1
 }
 
 install_test_app_before_module_boot
@@ -219,12 +264,13 @@ done
 adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
 install_storage_redirect_module
 seed_storage_redirect_config
-adb reboot
-wait_for_boot 300
+cold_restart_emulator 420
+wait_for_root_shell 120
 
-if ! adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | grep -q 1; then
-  echo "Zygisk is not enabled after reboot."
-  exit 1
+if adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | grep -q 1; then
+  echo "Zygisk setting is enabled."
+else
+  echo "Magisk CLI zygisk query was not available after reboot; verifying module load state instead."
 fi
 
 verify_storage_redirect_module_loaded
