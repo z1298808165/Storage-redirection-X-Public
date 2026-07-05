@@ -1394,9 +1394,13 @@ impl RedirectPolicy {
     }
 
     fn matches_any(&self, rules: &[String], storage_path: &str) -> bool {
-        rules
-            .iter()
-            .any(|rule| paths::matches(rule, storage_path, true))
+        let pending_display_path = media_store_pending_display_path(storage_path);
+        rules.iter().any(|rule| {
+            paths::matches(rule, storage_path, true)
+                || pending_display_path
+                    .as_deref()
+                    .is_some_and(|display_path| paths::matches(rule, display_path, true))
+        })
     }
 
     fn has_real_child_rule(&self, storage_path: &str) -> bool {
@@ -1584,6 +1588,22 @@ impl RedirectPolicy {
         };
         !is_android_app_private_relative_path(relative)
     }
+}
+
+fn media_store_pending_display_path(path: &str) -> Option<String> {
+    let slash = path.rfind('/')?;
+    let file_name = &path[slash + 1..];
+    let pending_tail = file_name.strip_prefix(".pending-")?;
+    let display_name_start = pending_tail.find('-')? + 1;
+    if display_name_start >= pending_tail.len() {
+        return None;
+    }
+
+    Some(format!(
+        "{}/{}",
+        path[..slash].trim_end_matches('/'),
+        &pending_tail[display_name_start..]
+    ))
 }
 
 fn build_monitor_timestamp() -> String {
@@ -2661,6 +2681,44 @@ mod tests {
 
         assert!(matches!(decision.kind, BackendKind::Real));
         assert!(!decision.is_read_only);
+    }
+
+    #[test]
+    fn scoped_fuse_read_only_matches_mediastore_pending_display_names() {
+        let policy = RedirectPolicy::new(FuseRedirectConfig {
+            package_name: "me.fakerqu.test.storageredirect".to_string(),
+            uid: 10288,
+            app_data_dir: "/data/user/0/me.fakerqu.test.storageredirect".to_string(),
+            redirect_target:
+                "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+                    .to_string(),
+            mount_root: Some("/storage/emulated/0/Download/SrtMonitorLocked".to_string()),
+            is_file_monitor_enabled: true,
+            allowed_real_paths: Vec::new(),
+            excluded_real_paths: Vec::new(),
+            sandboxed_paths: Vec::new(),
+            read_only_paths: vec![
+                "Download/SrtMonitorLocked".to_string(),
+                "!Download/SrtMonitorLocked/Writable".to_string(),
+            ],
+            path_mappings: Vec::new(),
+            is_mapping_mode_only: false,
+        })
+        .expect("policy");
+
+        let locked = policy.backend_decision(
+            "/storage/emulated/0/Download/SrtMonitorLocked/.pending-1783286547515-srt_monitor_27_media-read-only-denied.bin",
+            OperationKind::Write,
+        );
+        let excluded = policy.backend_decision(
+            "/storage/emulated/0/Download/SrtMonitorLocked/Writable/.pending-1783286547516-srt_monitor_27_media-read-only-excluded.bin",
+            OperationKind::Write,
+        );
+
+        assert!(matches!(locked.kind, BackendKind::Real));
+        assert!(locked.is_read_only);
+        assert!(matches!(excluded.kind, BackendKind::Real));
+        assert!(!excluded.is_read_only);
     }
 
     #[test]
