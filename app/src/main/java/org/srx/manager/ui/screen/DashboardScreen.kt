@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +41,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -144,6 +147,7 @@ private fun moduleStatusUi(status: ModuleStatus): StatusUi = when (status) {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ModuleStatusCard(
     status: ModuleStatus,
     globalConfig: GlobalConfig,
@@ -190,8 +194,9 @@ private fun ModuleStatusCard(
                 enabled = canToggle,
                 onClick = { onToggleModule(status != ModuleStatus.Enabled) },
             )
-            Row(
+            FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 FeatureChip("文件监控", globalConfig.fileMonitorEnabled, Modifier.widthIn(min = 98.dp))
@@ -237,6 +242,8 @@ private fun ModuleStatusPill(
         lineHeight = 16.sp,
         fontWeight = FontWeight.Black,
         textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 
@@ -308,7 +315,14 @@ private fun FeatureChip(label: String, enabled: Boolean, modifier: Modifier) {
     ) {
         Box(Modifier.size(8.dp).clip(CircleShape).background(color))
         Spacer(Modifier.width(8.dp))
-        Text(label, color = if (enabled) color else MiuixTheme.colorScheme.onSurfaceVariantSummary, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+        Text(
+            label,
+            color = if (enabled) color else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

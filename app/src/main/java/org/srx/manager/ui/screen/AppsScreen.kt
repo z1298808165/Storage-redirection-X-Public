@@ -448,5 +448,7 @@ private fun StatusPill(app: InstalledApp) {
         color = color,
         fontWeight = FontWeight.SemiBold,
         fontSize = 12.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }

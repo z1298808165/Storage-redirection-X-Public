@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.srx.manager.CenteredDialog
@@ -84,7 +85,14 @@ private fun BackupActionButton(
     ) {
         Icon(icon, contentDescription = text, tint = tint, modifier = Modifier.size(17.dp))
         Spacer(Modifier.width(8.dp))
-        Text(text, color = tint, fontSize = 13.sp, fontWeight = FontWeight.Black, maxLines = 1)
+        Text(
+            text,
+            color = tint,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Black,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
