@@ -140,7 +140,7 @@ jobs:
           mkdir -p build/assets
           (
             cd "build/storage.redirect.x-v${VERSION}"
-            zip -r "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" .
+            zip -0 -r "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" .
           )
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 

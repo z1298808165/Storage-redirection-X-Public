@@ -165,7 +165,7 @@ function New-ModulePackage {
         $root = (Resolve-Path -LiteralPath $packageDir).Path
         Get-ChildItem -LiteralPath $packageDir -Recurse -File | ForEach-Object {
             $relativePath = $_.FullName.Substring($root.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
-            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::NoCompression)
             $entryStream = $entry.Open()
             $fileStream = [System.IO.File]::OpenRead($_.FullName)
             try { $fileStream.CopyTo($entryStream) } finally { $fileStream.Dispose(); $entryStream.Dispose() }
@@ -252,7 +252,7 @@ try {
         Invoke-Checked -FilePath "adb" -Arguments @("shell", "while [ `"`$(getprop sys.boot_completed)`" != `"1`" ]; do sleep 2; done")
     }
 
-    Invoke-AdbSu "id; test -d /data/adb/modules/storage.redirect.x; test ! -e /data/adb/modules/storage.redirect.x/disable; cat /data/adb/modules/storage.redirect.x/module.prop" | Out-Null
+    Invoke-AdbSu "id; test -d /data/adb/modules/storage.redirect.x; test ! -e /data/adb/modules/storage.redirect.x/disable; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/$ModuleAbi.so; do test -s /data/adb/modules/storage.redirect.x/`$file || exit 1; done; cat /data/adb/modules/storage.redirect.x/module.prop" | Out-Null
 
     Write-Step "Install test APK"
     Invoke-Checked -FilePath "adb" -Arguments @("install", "-r", $testAppApk)

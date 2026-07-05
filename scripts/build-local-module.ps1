@@ -467,7 +467,7 @@ function Build-ModuleZip {
         $pkgRoot = (Resolve-Path -LiteralPath $PackageDir).Path
         Get-ChildItem -LiteralPath $PackageDir -Recurse -File | ForEach-Object {
             $relativePath = $_.FullName.Substring($pkgRoot.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
-            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::Optimal)
+            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::NoCompression)
             $entryStream = $entry.Open()
             $fileStream = [System.IO.File]::OpenRead($_.FullName)
             try {

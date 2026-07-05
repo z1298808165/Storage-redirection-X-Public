@@ -159,10 +159,18 @@ grant_magisk_shell() {
   adb_magisk "--sqlite \"REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(2000,2,0,1,0);\"" >/dev/null 2>&1 || true
 }
 
+assert_installed_module_files() {
+  local module_dir="$1"
+  local module_abi="${MODULE_ABI:-x86_64}"
+  local check_script='module_dir="$1"; module_abi="$2"; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/$module_abi.so; do if [ ! -s "$module_dir/$file" ]; then echo "Installed module file is empty or missing: $module_dir/$file"; ls -la "$module_dir"; exit 1; fi; done'
+  adb_root "sh -c '$(printf '%s' "$check_script" | sed "s/'/'\\''/g")' sh '$module_dir' '$module_abi'"
+}
+
 install_storage_redirect_module() {
   adb push "$MODULE_ZIP" /data/local/tmp/storage-redirect-x.zip
 
   if adb_root 'magisk --install-module /data/local/tmp/storage-redirect-x.zip'; then
+    assert_installed_module_files /data/adb/modules_update/storage.redirect.x
     adb_root 'rm -f /data/local/tmp/storage-redirect-x.zip' >/dev/null 2>&1 || true
     return
   fi
@@ -266,6 +274,7 @@ install_storage_redirect_module
 seed_storage_redirect_config
 cold_restart_emulator 420
 wait_for_root_shell 120
+assert_installed_module_files /data/adb/modules/storage.redirect.x
 
 if adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | grep -q 1; then
   echo "Zygisk setting is enabled."

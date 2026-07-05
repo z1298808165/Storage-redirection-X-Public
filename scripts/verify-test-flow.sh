@@ -106,7 +106,7 @@ if [ "$INSTALL_MODULE" != "0" ]; then
   adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
 fi
 
-adb_su "id; test -d /data/adb/modules/storage.redirect.x; test ! -e /data/adb/modules/storage.redirect.x/disable; cat /data/adb/modules/storage.redirect.x/module.prop" >/dev/null
+adb_su "id; test -d /data/adb/modules/storage.redirect.x; test ! -e /data/adb/modules/storage.redirect.x/disable; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/${MODULE_ABI}.so; do test -s /data/adb/modules/storage.redirect.x/\$file || exit 1; done; cat /data/adb/modules/storage.redirect.x/module.prop" >/dev/null
 
 echo "==> Install test APK"
 adb install -r "$TEST_APP_APK"

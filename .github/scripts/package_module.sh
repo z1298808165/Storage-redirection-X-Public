@@ -59,7 +59,7 @@ if [[ "$OUTPUT_PATH" == *.zip ]]; then
   mkdir -p "$(dirname "$OUTPUT_ABS_PATH")"
   (
     cd "$MODULE_DIR"
-    zip -r "$OUTPUT_ABS_PATH" .
+    zip -0 -r "$OUTPUT_ABS_PATH" .
   )
 else
   build_module_dir "$OUTPUT_PATH"

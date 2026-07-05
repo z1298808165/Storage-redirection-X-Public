@@ -75,6 +75,14 @@ backup_existing_config
 print_progress 20 "extract module files"
 unzip -o "$ZIPFILE" -d "$MODPATH" >&2
 
+for required_file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING; do
+  if [ ! -s "$MODPATH/$required_file" ]; then
+    ui_print "error: extracted file is empty or missing: $required_file"
+    safe_cleanup_modpath
+    exit 1
+  fi
+done
+
 # 获取设备架构
 ARCH=$(getprop ro.product.cpu.abi 2>/dev/null)
 if [ -z "$ARCH" ]; then

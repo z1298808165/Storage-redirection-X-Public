@@ -476,7 +476,7 @@ adb -s $Serial shell "su -c 'find /data/adb/modules -maxdepth 1 -inum <inode> -e
 
 ### `ksud module install` 报目录或缺少 arm64-v8a.so
 
-不要用目录安装模块，也不要用 PowerShell `Compress-Archive` 直接打包。应使用 `scripts/build-local-module.ps1` 生成 zip，再安装：
+不要用目录安装模块，也不要用 PowerShell `Compress-Archive` 直接打包。应使用 `scripts/build-local-module.ps1` 生成 store/no compression zip，再安装，避免设备侧安装器在部分环境中把脚本条目解成 0 字节：
 
 ```powershell
 adb -s $Serial push build\storage.redirect.x-v<version>.zip /data/local/tmp/storage.redirect.x-local.zip
