@@ -39,7 +39,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 2. 构建 Android 目标 Rust 测试二进制和 release 模块二进制。
 3. 打包测试用模块 zip。
 4. 运行管理 APP 单元测试、测试 APP 单元测试，并构建测试 APP debug APK。
-5. 将刚构建的模块 zip 刷入在线 root 测试设备，重启并确认模块启用。
+5. 将刚构建的模块 zip 刷入在线 root 测试设备，重启并确认模块启用、启动脚本完成、`srx_daemon` 存活。
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
@@ -51,6 +51,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 - 当前模块跑完 scenario 1-29；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - 场景脚本退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider。
+
+本项目不使用参考实现中的 `/dev/srx_config` 共享挂载作为模块加载信号。配置目录固定为 `/data/adb/modules/storage.redirect.x/config`，运行期通过 inotify 和指纹轮询热更新；安装阶段只验证模块目录未禁用、关键文件存在、当前 boot 的 `.boot_ok` 或 `logs/boot_<boot_id>.marker` 已写入，以及 `srx_daemon` 正在运行。具体重定向、挂载和配置热更新是否生效由后续场景，尤其是 scenario 29，进行端到端验证。
 
 ## 本地完整验证
 
@@ -431,6 +433,7 @@ adb -s $Serial pull /data/anr/trace_XX trace_storage_redirect.txt
    ```powershell
    adb -s $Serial shell "su -c 'ps -A | grep srx_daemon'"
    adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/module.prop'"
+   adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/.boot_ok 2>/dev/null || true; ls /data/adb/modules/storage.redirect.x/logs/boot_*.marker 2>/dev/null | tail -1 || true'"
    ```
 
 3. 临时删除测试 APP 配置，判断是否是模块 hook 影响 APP 启动：

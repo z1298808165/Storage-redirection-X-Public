@@ -90,6 +90,10 @@ adb_su() {
   adb shell "su 0 sh -c '$quoted'" || adb shell "su -c '$quoted'"
 }
 
+verify_module_runtime_state() {
+  adb_su "id; module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); test -d \"\$module_dir\"; test ! -e \"\$module_dir/disable\"; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/${MODULE_ABI}.so; do test -s \"\$module_dir/\$file\" || exit 1; done; test -d \"\$module_dir/config/apps\"; test -d \"\$logs_dir\"; { [ -z \"\$boot_id\" ] || [ \"\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true)\" = \"\$boot_id\" ] || test -f \"\$logs_dir/boot_\${boot_id}.marker\"; }; { [ -n \"\$daemon_pid\" ] && kill -0 \"\$daemon_pid\" 2>/dev/null || pidof srx_daemon >/dev/null 2>&1; }; cat \"\$module_dir/module.prop\"" >/dev/null
+}
+
 if [ "$INSTALL_MODULE" != "0" ]; then
   echo "==> Install freshly built module zip and reboot test device"
   remote_zip="/data/local/tmp/storage.redirect.x-test-flow.zip"
@@ -106,7 +110,7 @@ if [ "$INSTALL_MODULE" != "0" ]; then
   adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
 fi
 
-adb_su "id; test -d /data/adb/modules/storage.redirect.x; test ! -e /data/adb/modules/storage.redirect.x/disable; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/${MODULE_ABI}.so; do test -s /data/adb/modules/storage.redirect.x/\$file || exit 1; done; cat /data/adb/modules/storage.redirect.x/module.prop" >/dev/null
+verify_module_runtime_state
 
 echo "==> Install test APK"
 adb install -r "$TEST_APP_APK"
