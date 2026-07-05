@@ -103,7 +103,9 @@ impl MountPlanner {
         depth: usize,
         repaired_count: &mut usize,
     ) {
-        if depth >= REDIRECT_DIR_REPAIR_MAX_DEPTH || *repaired_count >= REDIRECT_DIR_REPAIR_MAX_COUNT {
+        if depth >= REDIRECT_DIR_REPAIR_MAX_DEPTH
+            || *repaired_count >= REDIRECT_DIR_REPAIR_MAX_COUNT
+        {
             return;
         }
 
