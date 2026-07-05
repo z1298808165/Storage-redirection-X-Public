@@ -525,6 +525,13 @@ remove_random_physical_media_files() {
 }
 
 restart_media_provider() {
+  local sdk
+  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
+    echo "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator" >&2
+    return 0
+  fi
+
   adb shell am force-stop com.android.providers.media.module >/dev/null 2>&1 || true
   adb shell am force-stop com.google.android.providers.media.module >/dev/null 2>&1 || true
   adb_su "pkill -f com.android.providers.media.module 2>/dev/null || true; pkill -f com.google.android.providers.media.module 2>/dev/null || true" >/dev/null 2>&1 || true
