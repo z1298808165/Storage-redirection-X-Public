@@ -1563,7 +1563,12 @@ run_scenario() {
       targets_prepared_before_start=1
       ;;
   esac
-  echo "step 2/7: 重启测试应用"
+  if [ "$targets_prepared_before_start" -eq 0 ]; then
+    echo "step 2/7: 清理并预置测试目标"
+    clean_targets
+    targets_prepared_before_start=1
+  fi
+  echo "step 3/7: 重启测试应用"
   adb shell am force-stop "$APP_ID" >/dev/null || true
   adb logcat -c >/dev/null 2>&1 || true
   adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
@@ -1575,12 +1580,9 @@ run_scenario() {
   if ! wait_app_mount_confirmed "scenario-${scenario}" "$expect_mount"; then
     sleep_ms "$SRT_APP_LAUNCH_SETTLE_MS"
   fi
-  echo "step 3/7: 等待共享存储可用"
+  echo "step 4/7: 等待共享存储可用"
   wait_storage_ready "scenario-${scenario}"
-  echo "step 4/7: 清理测试目标"
-  if [ "$targets_prepared_before_start" -eq 0 ]; then
-    clean_targets
-  fi
+  clean_results
   case "$scenario" in
     9)
       echo "step 5/7: 预置只读路径并执行拒绝类用例"
