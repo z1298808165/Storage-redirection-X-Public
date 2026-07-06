@@ -4,6 +4,7 @@ use libc::{
     CLONE_NEWNS, MNT_DETACH, MS_BIND, MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, chmod, chown,
     mount, readlink, stat as c_stat, umount2, unshare,
 };
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +13,7 @@ const MEDIA_RW_GID: u32 = 1023;
 const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
 const REAL_PUBLIC_DIR_MODE: libc::mode_t = 0o2771;
 const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
+const ALLOWED_REAL_TREE_METADATA_LIMIT: usize = 256;
 const BIND_SUCCESS_LOG_STEP: u64 = 128;
 const BIND_VERIFY_PASS_LOG_STEP: u64 = 256;
 static BIND_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -191,6 +193,60 @@ impl MountPlanner {
         }
 
         true
+    }
+
+    pub(super) fn ensure_allowed_real_existing_directory_tree_writable(
+        &self,
+        path: &str,
+        owner_uid: i32,
+        excluded_real_paths: &[String],
+    ) {
+        if owner_uid < 0 {
+            return;
+        }
+        let Some(root) = self.metadata_operations_path(path) else {
+            return;
+        };
+        if !is_data_media_shared_public_directory(&root, self.user_id) || !fs::is_directory(&root) {
+            return;
+        }
+
+        let mut visited = 0usize;
+        let mut pending = VecDeque::from([root]);
+        while let Some(current) = pending.pop_front() {
+            if visited >= ALLOWED_REAL_TREE_METADATA_LIMIT {
+                log::warn!(
+                    "mount dir: allowed real metadata scan limit reached root={} limit={}",
+                    path,
+                    ALLOWED_REAL_TREE_METADATA_LIMIT
+                );
+                break;
+            }
+            visited += 1;
+
+            if allowed_real_metadata_path_is_excluded(&current, excluded_real_paths) {
+                continue;
+            }
+            if fs::is_directory(&current) {
+                fix_allowed_real_directory_metadata(&current, owner_uid);
+            }
+
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let child = entry.path().to_string_lossy().replace('\\', "/");
+                if !child.is_empty() {
+                    pending.push_back(child);
+                }
+            }
+        }
     }
 
     fn fix_allowed_real_directory_metadata_chain(&self, path: &str, owner_uid: i32) {
@@ -858,6 +914,16 @@ fn should_apply_allowed_real_writable_metadata(path: &str, original: &str, user_
     path == original || relative.split('/').filter(|part| !part.is_empty()).count() >= 2
 }
 
+fn allowed_real_metadata_path_is_excluded(path: &str, excluded_real_paths: &[String]) -> bool {
+    if excluded_real_paths.is_empty() {
+        return false;
+    }
+    let storage_path = paths::data_media_to_storage_path(path);
+    excluded_real_paths
+        .iter()
+        .any(|excluded| paths::matches(excluded, &storage_path, true))
+}
+
 fn parent_preserving_backend_alias(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
@@ -1202,6 +1268,27 @@ mod tests {
             "/data/media/0/Android/data/com.example.app",
             "/data/media/0/Android/data/com.example.app",
             0
+        ));
+    }
+
+    #[test]
+    fn allowed_real_tree_metadata_respects_excluded_rules() {
+        let excluded = vec![
+            "/storage/emulated/0/Download/SrtAllow/tmp".to_string(),
+            "/storage/emulated/0/Download/*.part".to_string(),
+        ];
+
+        assert!(allowed_real_metadata_path_is_excluded(
+            "/data/media/0/Download/SrtAllow/tmp",
+            &excluded,
+        ));
+        assert!(allowed_real_metadata_path_is_excluded(
+            "/data/media/0/Download/SrtAllow/tmp/nested",
+            &excluded,
+        ));
+        assert!(!allowed_real_metadata_path_is_excluded(
+            "/data/media/0/Download/SrtProbe",
+            &excluded,
         ));
     }
 }

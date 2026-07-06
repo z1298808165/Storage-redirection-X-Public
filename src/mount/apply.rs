@@ -288,6 +288,11 @@ impl MountPlanner {
                         log::warn!("real path missing and mkdir failed: {}", real_source);
                         continue;
                     }
+                    self.ensure_allowed_real_existing_directory_tree_writable(
+                        &real_source,
+                        self.app_uid,
+                        excluded_real_paths,
+                    );
 
                     let _ = self.bind_mount_with_storage_aliases(
                         &real_source,
