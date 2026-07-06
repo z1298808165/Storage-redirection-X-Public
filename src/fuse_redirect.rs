@@ -177,14 +177,32 @@ pub fn scoped_mount_roots_for_wildcard_rules<'a>(
             continue;
         }
         let prefix = paths::concrete_prefix_before_wildcard(&resolved);
-        let root = if prefix.is_empty() || !paths::is_child(&prefix, &storage_root) {
-            storage_root.clone()
-        } else {
-            prefix
-        };
+        let root = scoped_mount_root_for_wildcard_prefix(&prefix, &storage_root);
         roots.push(root);
     }
     compact_scoped_mount_roots(roots, &storage_root)
+}
+
+fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> String {
+    if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
+        return storage_root.to_string();
+    }
+    if let Some(top_level) = top_level_storage_child(prefix, storage_root) {
+        if should_promote_scoped_media_mount_root(&top_level, storage_root) {
+            return top_level;
+        }
+    }
+    prefix.to_string()
+}
+
+fn should_promote_scoped_media_mount_root(top_level: &str, storage_root: &str) -> bool {
+    let Some(relative) = paths::relative_child_path(top_level, storage_root) else {
+        return false;
+    };
+    matches!(
+        relative.to_ascii_lowercase().as_str(),
+        "dcim" | "pictures" | "movies" | "music"
+    )
 }
 
 pub fn scoped_mount_roots_for_hybrid_rules(
@@ -2517,7 +2535,23 @@ mod tests {
             roots,
             vec![
                 "/storage/emulated/0/Download".to_string(),
-                "/storage/emulated/0/Pictures/Camera".to_string(),
+                "/storage/emulated/0/Pictures".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_mount_roots_promote_media_top_level_for_nested_wildcards() {
+        let roots = scoped_mount_roots_for_wildcard_rules(
+            10000,
+            ["DCIM/SrtFuseQQ/SrtAllowed*", "Download/SrtFuseQ?/Media"],
+        );
+
+        assert_eq!(
+            roots,
+            vec![
+                "/storage/emulated/0/DCIM".to_string(),
+                "/storage/emulated/0/Download".to_string(),
             ]
         );
     }

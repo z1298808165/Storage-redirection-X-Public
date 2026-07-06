@@ -258,9 +258,9 @@ impl MountPlanner {
             }
 
             for allowed_path in effective_paths {
-                if is_scoped_fuse_mount_root(&allowed_path, scoped_fuse_roots) {
+                if is_covered_by_scoped_fuse_mount(&allowed_path, scoped_fuse_roots) {
                     log::info!(
-                        "skip allow mount root (handled by scoped fuse): {}",
+                        "skip allow mount path (handled by scoped fuse): {}",
                         allowed_path
                     );
                     continue;
@@ -1017,6 +1017,7 @@ fn is_covered_by_scoped_fuse_mount(path: &str, scoped_fuse_roots: &[String]) -> 
         .any(|root| paths::eq_ignore_case(path, root) || paths::is_child(path, root))
 }
 
+#[cfg(test)]
 fn is_scoped_fuse_mount_root(path: &str, scoped_fuse_roots: &[String]) -> bool {
     scoped_fuse_roots
         .iter()
