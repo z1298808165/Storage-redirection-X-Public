@@ -201,10 +201,6 @@ impl MountPlanner {
     pub fn take_mounted_targets(&mut self) -> Vec<String> {
         std::mem::take(&mut *self.mounted_targets.borrow_mut())
     }
-
-    pub fn real_storage_anchor(&self) -> Option<String> {
-        self.real_storage_anchor.clone()
-    }
 }
 
 #[cfg(test)]
