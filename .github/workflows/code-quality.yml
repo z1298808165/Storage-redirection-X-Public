@@ -1,0 +1,97 @@
+name: 代码质量
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  quality:
+    name: 格式化与静态检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 检查 GitHub Actions 语法
+        uses: rhysd/actionlint@v1
+
+      - name: 配置 Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: 配置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: 配置 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-linux-android
+
+      - name: 配置 Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: 缓存 Cargo 依赖
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-quality-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: 配置 Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 安装主机编译工具
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: 安装 NDK 和 CMake
+        shell: bash
+        run: |
+          (yes | sdkmanager --licenses > /dev/null) || true
+          ndk_version="29.0.14206865"
+          latest_cmake_pkg=$(sdkmanager --list | tr -d "\r" | grep -oE "cmake;[0-9][0-9.]+" | sort -Vu | tail -n 1)
+          sdkmanager "ndk;${ndk_version}" "${latest_cmake_pkg}"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ndk_version}" >> "${GITHUB_ENV}"
+
+      - name: 检查 Python 语法
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m compileall -q scripts
+
+      - name: 检查 Rust 格式化
+        run: cargo fmt --all --check
+
+      - name: 执行 Clippy
+        run: cargo clippy --manifest-path srx_core/Cargo.toml --target aarch64-linux-android -- -D warnings
+
+      - name: 执行 Android Lint
+        shell: bash
+        run: |
+          chmod +x ./android/gradlew
+          ./android/gradlew -p ./android :app:lintDebug
