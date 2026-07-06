@@ -5,7 +5,8 @@ use libc::{MNT_DETACH, umount2};
 use std::ffi::CString;
 
 impl MountPlanner {
-    fn prepare_real_storage_anchor(&self, storage_path: &str) -> Option<String> {
+    fn prepare_real_storage_anchor(&mut self, storage_path: &str) -> Option<String> {
+        self.real_storage_anchor = None;
         let real_storage_anchor_root = module_paths::REAL_STORAGE_TMP_DIR;
         let real_storage_anchor = paths::join(real_storage_anchor_root, &self.user_id.to_string());
         if self.storage_root_is_already_redirected(storage_path) {
@@ -16,6 +17,7 @@ impl MountPlanner {
                     storage_path,
                     real_storage_anchor
                 );
+                self.real_storage_anchor = Some(real_storage_anchor.clone());
                 return Some(real_storage_anchor);
             }
             log::warn!(
@@ -25,10 +27,12 @@ impl MountPlanner {
                 real_storage_anchor,
                 self.redirect_target
             );
-            return self.bind_data_media_real_storage_anchor(
+            let anchor = self.bind_data_media_real_storage_anchor(
                 real_storage_anchor_root,
                 &real_storage_anchor,
             );
+            self.real_storage_anchor = anchor.clone();
+            return anchor;
         }
 
         if !self.ensure_directory_exists(real_storage_anchor_root, false)
@@ -47,6 +51,7 @@ impl MountPlanner {
                     source_candidate,
                     real_storage_anchor
                 );
+                self.real_storage_anchor = Some(real_storage_anchor.clone());
                 return Some(real_storage_anchor);
             }
         }

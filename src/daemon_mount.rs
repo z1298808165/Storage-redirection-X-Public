@@ -326,7 +326,7 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
             }
         }
         let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, &fuse_roots) {
+            match start_scoped_fuse_services(request, &fuse_roots, planner.real_storage_anchor()) {
                 Some(children) => children,
                 None => {
                     log::warn!(
@@ -409,6 +409,7 @@ fn apply_mount_namespace_fallback(planner: &mut MountPlanner, request: &MountReq
 fn start_scoped_fuse_services(
     request: &MountRequest,
     roots: &[String],
+    real_root_override: Option<String>,
 ) -> Option<Vec<FuseMountState>> {
     if roots.is_empty() {
         return Some(Vec::new());
@@ -416,7 +417,7 @@ fn start_scoped_fuse_services(
 
     let mut states = Vec::with_capacity(roots.len());
     for root in roots {
-        match start_fuse_service_for_root(request, &root) {
+        match start_fuse_service_for_root(request, &root, real_root_override.clone()) {
             Some(state) => states.push(state),
             None => {
                 for state in &states {
@@ -445,7 +446,11 @@ fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
     )
 }
 
-fn start_fuse_service_for_root(request: &MountRequest, mount_root: &str) -> Option<FuseMountState> {
+fn start_fuse_service_for_root(
+    request: &MountRequest,
+    mount_root: &str,
+    real_root_override: Option<String>,
+) -> Option<FuseMountState> {
     let mut ready_sockets = [0; 2];
     if unsafe { socketpair(AF_UNIX, SOCK_DGRAM, 0, ready_sockets.as_mut_ptr()) } != 0 {
         log_errno("daemon fuse ready socketpair failed");
@@ -467,7 +472,7 @@ fn start_fuse_service_for_root(request: &MountRequest, mount_root: &str) -> Opti
             close(ready_sockets[0]);
         }
         let ok = mount_blocking_with_ready(
-            fuse_config_from_request(request, Some(mount_root.to_string())),
+            fuse_config_from_request(request, Some(mount_root.to_string()), real_root_override),
             Some(ready_sockets[1]),
         );
         unsafe { libc::_exit(if ok { 0 } else { 1 }) };
@@ -917,6 +922,7 @@ struct FuseMountState {
 fn fuse_config_from_request(
     request: &MountRequest,
     mount_root: Option<String>,
+    real_root_override: Option<String>,
 ) -> FuseRedirectConfig {
     FuseRedirectConfig {
         package_name: request.package_name.clone(),
@@ -924,6 +930,7 @@ fn fuse_config_from_request(
         app_data_dir: request.app_data_dir.clone(),
         redirect_target: request.redirect_target.clone(),
         mount_root,
+        real_root_override,
         is_file_monitor_enabled: request.is_file_monitor_enabled,
         allowed_real_paths: request.allowed_real_paths.clone(),
         excluded_real_paths: request.excluded_real_paths.clone(),

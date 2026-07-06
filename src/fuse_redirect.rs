@@ -1,5 +1,5 @@
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
-use crate::platform::{fs, paths};
+use crate::platform::{fs, module_paths, paths};
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
     INodeNo, InitFlags, KernelConfig, MountOption, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
@@ -39,6 +39,7 @@ pub struct FuseRedirectConfig {
     pub app_data_dir: String,
     pub redirect_target: String,
     pub mount_root: Option<String>,
+    pub real_root_override: Option<String>,
     pub is_file_monitor_enabled: bool,
     pub allowed_real_paths: Vec<String>,
     pub excluded_real_paths: Vec<String>,
@@ -1233,7 +1234,7 @@ impl RedirectPolicy {
             .unwrap_or("")
             .trim_matches('/')
             .to_string();
-        let real_root = PathBuf::from(paths::data_media_user_root_for_user(user_id));
+        let real_root = real_backend_root_for_config(&config, user_id);
         let redirect_storage = paths::resolve_user_path(
             &paths::resolve_placeholders(
                 &paths::normalize(&config.redirect_target),
@@ -1581,13 +1582,31 @@ impl RedirectPolicy {
 
     fn is_shared_public_backend_path(&self, path: &Path) -> bool {
         let path = path.to_string_lossy();
-        let Some(relative) =
+        let relative =
             paths::relative_child_path(&path, &paths::data_media_user_root_for_user(self.user_id))
-        else {
+                .or_else(|| {
+                    paths::relative_child_path(&path, &real_storage_anchor_for_user(self.user_id))
+                });
+        let Some(relative) = relative else {
             return false;
         };
         !is_android_app_private_relative_path(relative)
     }
+}
+
+fn real_backend_root_for_config(config: &FuseRedirectConfig, user_id: i32) -> PathBuf {
+    if let Some(root) = config.real_root_override.as_deref() {
+        let normalized = paths::normalize(root);
+        if paths::eq_ignore_case(&normalized, &real_storage_anchor_for_user(user_id)) {
+            return PathBuf::from(normalized);
+        }
+        log::warn!("fuse real root override ignored: {}", root);
+    }
+    PathBuf::from(paths::data_media_user_root_for_user(user_id))
+}
+
+fn real_storage_anchor_for_user(user_id: i32) -> String {
+    paths::join(module_paths::REAL_STORAGE_TMP_DIR, &user_id.to_string())
 }
 
 fn media_store_pending_display_path(path: &str) -> Option<String> {
@@ -2604,6 +2623,7 @@ mod tests {
             redirect_target: "/storage/emulated/0/Android/data/com.tencent.mobileqq/sdcard"
                 .to_string(),
             mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: false,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2629,6 +2649,7 @@ mod tests {
             redirect_target: "/storage/emulated/0/Android/data/com.tencent.mobileqq/sdcard"
                 .to_string(),
             mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: false,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: vec!["Download/第三方下载/QQ".to_string()],
@@ -2661,6 +2682,7 @@ mod tests {
                 "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
                     .to_string(),
             mount_root: Some("/storage/emulated/0/Download/SrtMonitorLocked".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: true,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2693,6 +2715,7 @@ mod tests {
                 "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
                     .to_string(),
             mount_root: Some("/storage/emulated/0/Download/SrtMonitorLocked".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: true,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2730,6 +2753,7 @@ mod tests {
             redirect_target: "/storage/emulated/0/Android/data/com.tencent.mobileqq/sdcard"
                 .to_string(),
             mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: true,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2784,6 +2808,7 @@ mod tests {
                 "/storage/emulated/0/Android/data/idm.internet.download.manager.plus/sdcard"
                     .to_string(),
             mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: true,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2809,6 +2834,47 @@ mod tests {
     }
 
     #[test]
+    fn real_backend_override_routes_allowed_paths_through_anchor() {
+        let policy = RedirectPolicy::new(FuseRedirectConfig {
+            package_name: "me.fakerqu.test.storageredirect".to_string(),
+            uid: 10288,
+            app_data_dir: "/data/user/0/me.fakerqu.test.storageredirect".to_string(),
+            redirect_target:
+                "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+                    .to_string(),
+            mount_root: Some("/storage/emulated/0/DCIM/SrtFuseQQ".to_string()),
+            real_root_override: Some(
+                "/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string(),
+            ),
+            is_file_monitor_enabled: false,
+            allowed_real_paths: vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()],
+            excluded_real_paths: Vec::new(),
+            sandboxed_paths: Vec::new(),
+            read_only_paths: Vec::new(),
+            path_mappings: Vec::new(),
+            is_mapping_mode_only: false,
+        })
+        .expect("policy");
+
+        let allowed_backend = policy
+            .backend_for_relative("SrtAllowedAlpha/srt_ci_probe.txt", OperationKind::Write)
+            .expect("allowed backend");
+        assert_eq!(
+            allowed_backend.path.to_string_lossy(),
+            "/data/adb/modules/storage.redirect.x/tmp/real_storage/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt"
+        );
+        assert!(allowed_backend.is_shared_public_backend);
+
+        let miss_backend = policy
+            .backend_for_relative("SrtOther/srt_ci_probe.txt", OperationKind::Write)
+            .expect("miss backend");
+        assert_eq!(
+            miss_backend.path.to_string_lossy(),
+            "/data/media/0/Android/data/me.fakerqu.test.storageredirect/sdcard/DCIM/SrtFuseQQ/SrtOther/srt_ci_probe.txt"
+        );
+    }
+
+    #[test]
     fn path_mappings_skip_android_private_targets() {
         let policy = RedirectPolicy::new(FuseRedirectConfig {
             package_name: "com.example".to_string(),
@@ -2816,6 +2882,7 @@ mod tests {
             app_data_dir: "/data/user/0/com.example".to_string(),
             redirect_target: "/storage/emulated/0/Android/data/com.example/sdcard".to_string(),
             mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: true,
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
@@ -2878,6 +2945,7 @@ mod tests {
                 "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
                     .to_string(),
             mount_root: Some("/storage/emulated/0/DCIM/SrtFuseQQ".to_string()),
+            real_root_override: None,
             is_file_monitor_enabled: false,
             allowed_real_paths: allowed,
             excluded_real_paths: Vec::new(),

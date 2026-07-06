@@ -20,6 +20,7 @@ pub struct MountPlanner {
     redirect_target: String,
     mounted_targets: RefCell<Vec<String>>,
     is_file_monitor_enabled: bool,
+    real_storage_anchor: Option<String>,
 }
 
 #[derive(Copy, Clone)]
@@ -189,6 +190,7 @@ impl MountPlanner {
             redirect_target: paths::normalize(redirect_target),
             mounted_targets: RefCell::new(Vec::new()),
             is_file_monitor_enabled: false,
+            real_storage_anchor: None,
         }
     }
 
@@ -198,6 +200,10 @@ impl MountPlanner {
 
     pub fn take_mounted_targets(&mut self) -> Vec<String> {
         std::mem::take(&mut *self.mounted_targets.borrow_mut())
+    }
+
+    pub fn real_storage_anchor(&self) -> Option<String> {
+        self.real_storage_anchor.clone()
     }
 }
 
