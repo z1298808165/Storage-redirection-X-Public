@@ -104,6 +104,14 @@ impl MountPlanner {
             if !is_primary_target && !path_exists(&target) {
                 continue;
             }
+            if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::debug!(
+                    "alias: skip self-shadowing bind src={} dst={}",
+                    source,
+                    target
+                );
+                continue;
+            }
 
             if !self.bind_mount(source, &target, is_recursive) {
                 if is_primary_target {
@@ -172,6 +180,14 @@ impl MountPlanner {
         for target in alias_targets {
             let is_primary_target = target == primary_target;
             if !is_primary_target && !path_exists(&target) {
+                continue;
+            }
+            if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::debug!(
+                    "alias: skip self-shadowing overlay src={} dst={}",
+                    source,
+                    target
+                );
                 continue;
             }
 
@@ -244,6 +260,14 @@ impl MountPlanner {
             if !is_primary_target && !path_exists(&target) {
                 continue;
             }
+            if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::debug!(
+                    "alias: skip self-shadowing readonly src={} dst={}",
+                    source,
+                    target
+                );
+                continue;
+            }
 
             if !self.bind_mount_read_only(source, &target, is_recursive) {
                 if is_primary_target {
@@ -313,9 +337,13 @@ fn append_unique(list: &mut Vec<String>, value: String) {
     }
 }
 
+fn should_skip_self_shadowing_alias(source: &str, target: &str) -> bool {
+    !paths::eq_ignore_case(source, target) && paths::is_child(source, target)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MountPlanner;
+    use super::{MountPlanner, should_skip_self_shadowing_alias};
 
     #[test]
     fn storage_aliases_include_data_media_backend_for_lower_fs_writers() {
@@ -325,5 +353,21 @@ mod tests {
 
         assert!(aliases.contains(&"/storage/emulated/0/Download/Locked".to_string()));
         assert!(aliases.contains(&"/data/media/0/Download/Locked".to_string()));
+    }
+
+    #[test]
+    fn storage_alias_bind_skips_private_backend_parent_shadowing() {
+        assert!(should_skip_self_shadowing_alias(
+            "/data/media/0/Android/data/com.example.app/sdcard",
+            "/data/media/0"
+        ));
+        assert!(!should_skip_self_shadowing_alias(
+            "/data/media/0/Android/data/com.example.app/sdcard",
+            "/storage/emulated/0"
+        ));
+        assert!(!should_skip_self_shadowing_alias(
+            "/data/media/0/Download/SrtAllow",
+            "/data/media/0/Download/SrtAllow"
+        ));
     }
 }
