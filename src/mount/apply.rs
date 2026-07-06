@@ -967,11 +967,11 @@ fn build_mapping_source_roots(
     data_media_root: &str,
 ) -> Vec<String> {
     let mut roots = Vec::with_capacity(2);
+    roots.push(data_media_root.to_string());
     if let Some(anchor) = real_storage_anchor {
-        roots.push(anchor.clone());
-    }
-    if !roots.iter().any(|root| root == data_media_root) {
-        roots.push(data_media_root.to_string());
+        if !roots.iter().any(|root| root == anchor) {
+            roots.push(anchor.clone());
+        }
     }
     roots
 }
@@ -1261,15 +1261,15 @@ mod tests {
     }
 
     #[test]
-    fn mapping_source_roots_keep_backend_fallback_after_anchor() {
+    fn mapping_source_roots_prefer_app_writable_backend_before_anchor() {
         assert_eq!(
             build_mapping_source_roots(
                 &Some("/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string()),
                 "/data/media/0"
             ),
             vec![
-                "/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string(),
                 "/data/media/0".to_string(),
+                "/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string(),
             ]
         );
         assert_eq!(
