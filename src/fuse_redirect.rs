@@ -187,7 +187,23 @@ fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> St
     if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
         return storage_root.to_string();
     }
+    if should_promote_media_wildcard_to_storage_root(prefix, storage_root) {
+        return storage_root.to_string();
+    }
     prefix.to_string()
+}
+
+fn should_promote_media_wildcard_to_storage_root(prefix: &str, storage_root: &str) -> bool {
+    let Some(top_level) = top_level_storage_child(prefix, storage_root) else {
+        return false;
+    };
+    let Some(relative) = paths::relative_child_path(&top_level, storage_root) else {
+        return false;
+    };
+    matches!(
+        relative.to_ascii_lowercase().as_str(),
+        "dcim" | "pictures" | "movies" | "music"
+    )
 }
 
 pub fn scoped_mount_roots_for_hybrid_rules(
@@ -2516,29 +2532,17 @@ mod tests {
                 "Pictures/Camera/IMG_????.jpg",
             ],
         );
-        assert_eq!(
-            roots,
-            vec![
-                "/storage/emulated/0/Download".to_string(),
-                "/storage/emulated/0/Pictures".to_string(),
-            ]
-        );
+        assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
     }
 
     #[test]
-    fn scoped_mount_roots_use_nearest_parent_for_nested_wildcards() {
+    fn scoped_mount_roots_promote_media_wildcards_to_storage_root() {
         let roots = scoped_mount_roots_for_wildcard_rules(
             10000,
             ["DCIM/SrtFuseQQ/SrtAllowed*", "Download/SrtFuseQ?/Media"],
         );
 
-        assert_eq!(
-            roots,
-            vec![
-                "/storage/emulated/0/DCIM/SrtFuseQQ".to_string(),
-                "/storage/emulated/0/Download".to_string(),
-            ]
-        );
+        assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
     }
 
     #[test]
