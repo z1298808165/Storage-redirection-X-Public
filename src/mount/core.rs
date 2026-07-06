@@ -770,6 +770,10 @@ impl MountPlanner {
         paths::is_same_or_child(path, &self.real_storage_anchor_root())
     }
 
+    pub(crate) fn real_storage_anchor(&self) -> Option<String> {
+        self.real_storage_anchor.clone()
+    }
+
     fn real_storage_anchor_root(&self) -> String {
         paths::join(
             module_paths::REAL_STORAGE_TMP_DIR,

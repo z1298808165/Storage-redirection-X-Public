@@ -326,7 +326,7 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
             }
         }
         let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, &fuse_roots, None) {
+            match start_scoped_fuse_services(request, &fuse_roots, planner.real_storage_anchor()) {
                 Some(children) => children,
                 None => {
                     log::warn!(
