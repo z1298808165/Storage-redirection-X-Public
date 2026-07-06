@@ -94,12 +94,13 @@ pub fn mount_blocking_with_ready(
     mount_options.clone_fd = true;
 
     log::info!(
-        "fuse redirect mount start pkg={} uid={} user={} mp={} rel={} map_only={} allow={} excl={} sandbox={} ro={} map={}",
+        "fuse redirect mount start pkg={} uid={} user={} mp={} rel={} real={} map_only={} allow={} excl={} sandbox={} ro={} map={}",
         fs.policy.package_name,
         fs.policy.uid,
         user_id,
         mount_point,
         fs.policy.mount_rel,
+        fs.policy.real_root.display(),
         fs.policy.is_mapping_mode_only,
         fs.policy.allowed_real_paths.len(),
         fs.policy.excluded_real_paths.len(),
@@ -811,6 +812,12 @@ impl Filesystem for FuseRedirectFs {
         ) {
             Ok(file) => file,
             Err(errno) => {
+                log::warn!(
+                    "fuse create backend open failed rel={} backend={} errno={:?}",
+                    rel,
+                    backend.path.display(),
+                    errno
+                );
                 reply.error(errno);
                 return;
             }

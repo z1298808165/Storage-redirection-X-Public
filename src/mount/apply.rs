@@ -9,6 +9,14 @@ impl MountPlanner {
         self.real_storage_anchor = None;
         let real_storage_anchor_root = module_paths::REAL_STORAGE_TMP_DIR;
         let real_storage_anchor = paths::join(real_storage_anchor_root, &self.user_id.to_string());
+
+        if let Some(anchor) =
+            self.bind_data_media_real_storage_anchor(real_storage_anchor_root, &real_storage_anchor)
+        {
+            self.real_storage_anchor = Some(anchor.clone());
+            return Some(anchor);
+        }
+
         if self.storage_root_is_already_redirected(storage_path) {
             if self.real_storage_anchor_is_usable(&real_storage_anchor) {
                 log::info!(
@@ -250,6 +258,14 @@ impl MountPlanner {
             }
 
             for allowed_path in effective_paths {
+                if is_scoped_fuse_mount_root(&allowed_path, scoped_fuse_roots) {
+                    log::info!(
+                        "skip allow mount root (handled by scoped fuse): {}",
+                        allowed_path
+                    );
+                    continue;
+                }
+
                 let Some(relative) = paths::relative_child_path(&allowed_path, &storage_path)
                 else {
                     continue;
@@ -985,6 +1001,12 @@ fn is_covered_by_scoped_fuse_mount(path: &str, scoped_fuse_roots: &[String]) -> 
         .any(|root| paths::eq_ignore_case(path, root) || paths::is_child(path, root))
 }
 
+fn is_scoped_fuse_mount_root(path: &str, scoped_fuse_roots: &[String]) -> bool {
+    scoped_fuse_roots
+        .iter()
+        .any(|root| paths::eq_ignore_case(path, root))
+}
+
 fn mount_source_for_target(target: &str) -> Option<String> {
     let content = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     mount_source_for_target_from_mountinfo(&content, target)
@@ -1070,8 +1092,9 @@ fn unescape_mountinfo_field(value: &str) -> String {
 mod tests {
     use super::{
         MountPlanner, build_mapping_source_roots, is_covered_by_scoped_fuse_mount,
-        mount_source_for_target_from_mountinfo, mountinfo_root_matches_data_backend,
-        namespace_mappings_outside_scoped_fuse, path_shadows_mapping_request,
+        is_scoped_fuse_mount_root, mount_source_for_target_from_mountinfo,
+        mountinfo_root_matches_data_backend, namespace_mappings_outside_scoped_fuse,
+        path_shadows_mapping_request,
     };
     use crate::domain::PathMapping;
 
@@ -1173,6 +1196,27 @@ mod tests {
         ));
         assert!(!is_covered_by_scoped_fuse_mount(
             "/storage/emulated/0/Download/SrtMonitor",
+            &roots
+        ));
+    }
+
+    #[test]
+    fn scoped_fuse_mount_root_is_distinct_from_covered_child() {
+        let roots = vec![
+            "/storage/emulated/0/Download".to_string(),
+            "/storage/emulated/0/DCIM/SrtFuseQQ".to_string(),
+        ];
+
+        assert!(is_scoped_fuse_mount_root(
+            "/storage/emulated/0/DCIM/SrtFuseQQ",
+            &roots
+        ));
+        assert!(!is_scoped_fuse_mount_root(
+            "/storage/emulated/0/Download/SrtFusePlain",
+            &roots
+        ));
+        assert!(is_covered_by_scoped_fuse_mount(
+            "/storage/emulated/0/Download/SrtFusePlain",
             &roots
         ));
     }
