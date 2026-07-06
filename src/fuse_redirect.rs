@@ -434,7 +434,13 @@ impl FuseRedirectFs {
 
     fn attr_for_backend(&self, ino: INodeNo, backend: &BackendPath) -> Result<FileAttr, Errno> {
         let metadata = std::fs::symlink_metadata(&backend.path).map_err(errno_from_io)?;
-        Ok(file_attr_from_metadata(ino, metadata))
+        let mut attr = file_attr_from_metadata(ino, metadata);
+        if backend.is_shared_public_backend && attr.kind == FileType::Directory {
+            attr.uid = self.policy.uid as u32;
+            attr.gid = MEDIA_RW_GID;
+            attr.perm = SHARED_PUBLIC_DIR_MODE as u16;
+        }
+        Ok(attr)
     }
 
     fn visible_attr_for_backend(

@@ -290,7 +290,7 @@ impl MountPlanner {
                 }
 
                 for real_source in source_candidates {
-                    if !self.ensure_real_public_directory_exists(&real_source) {
+                    if !self.ensure_real_public_directory_exists(&real_source, self.app_uid) {
                         log::warn!("real path missing and mkdir failed: {}", real_source);
                         continue;
                     }

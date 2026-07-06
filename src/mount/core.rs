@@ -11,6 +11,7 @@ const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
 const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
 const REAL_PUBLIC_DIR_MODE: libc::mode_t = 0o2771;
+const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
 const BIND_SUCCESS_LOG_STEP: u64 = 128;
 const BIND_VERIFY_PASS_LOG_STEP: u64 = 256;
 static BIND_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -159,7 +160,7 @@ impl MountPlanner {
         self.ensure_writable_directory_chain(path, owner_uid);
     }
 
-    pub(super) fn ensure_real_public_directory_exists(&self, path: &str) -> bool {
+    pub(super) fn ensure_real_public_directory_exists(&self, path: &str, owner_uid: i32) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: real public mkdir skipped empty path");
             return false;
@@ -186,9 +187,36 @@ impl MountPlanner {
 
         if should_fix_public_metadata {
             self.fix_real_public_directory_metadata_chain(&metadata_path);
+            self.fix_allowed_real_directory_metadata_chain(&metadata_path, owner_uid);
         }
 
         true
+    }
+
+    fn fix_allowed_real_directory_metadata_chain(&self, path: &str, owner_uid: i32) {
+        if owner_uid < 0 {
+            return;
+        }
+        let root = paths::data_media_user_root_for_user(self.user_id);
+        let original = path.to_string();
+        let mut current = original.clone();
+        while !current.is_empty() {
+            if current == root {
+                break;
+            }
+
+            if should_apply_allowed_real_writable_metadata(&current, &original, self.user_id)
+                && fs::is_directory(&current)
+            {
+                fix_allowed_real_directory_metadata(&current, owner_uid);
+            }
+
+            let parent = parent_preserving_backend_alias(&current);
+            if parent.is_empty() || parent == "/" || parent == current {
+                break;
+            }
+            current = parent;
+        }
     }
 
     fn fix_real_public_directory_metadata_chain(&self, path: &str) {
@@ -793,6 +821,43 @@ fn fix_real_public_directory_metadata(path: &str) {
     }
 }
 
+fn fix_allowed_real_directory_metadata(path: &str, owner_uid: i32) {
+    let Ok(c_path) = CString::new(path) else {
+        return;
+    };
+
+    let ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+    if ret != 0 {
+        log::warn!(
+            "mount dir: allowed real chown failed errno={} {} path={}",
+            last_errno(),
+            errno_text(),
+            path
+        );
+    }
+
+    let ret = unsafe { chmod(c_path.as_ptr(), ALLOWED_REAL_DIR_MODE) };
+    if ret != 0 {
+        log::warn!(
+            "mount dir: allowed real chmod failed errno={} {} path={}",
+            last_errno(),
+            errno_text(),
+            path
+        );
+    }
+}
+
+fn should_apply_allowed_real_writable_metadata(path: &str, original: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        return false;
+    };
+    if relative.is_empty() || is_android_app_private_relative_path(relative) {
+        return false;
+    }
+    path == original || relative.split('/').filter(|part| !part.is_empty()).count() >= 2
+}
+
 fn parent_preserving_backend_alias(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "/" {
@@ -1107,6 +1172,35 @@ mod tests {
         ));
         assert!(!should_apply_app_writable_metadata(
             "/data/media/10/Android/data/com.example.app",
+            0
+        ));
+    }
+
+    #[test]
+    fn allowed_real_metadata_skips_storage_root_and_top_level_dirs() {
+        assert!(should_apply_allowed_real_writable_metadata(
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha/Deep",
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha/Deep",
+            0
+        ));
+        assert!(should_apply_allowed_real_writable_metadata(
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha",
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha/Deep",
+            0
+        ));
+        assert!(!should_apply_allowed_real_writable_metadata(
+            "/data/media/0/Download",
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha/Deep",
+            0
+        ));
+        assert!(!should_apply_allowed_real_writable_metadata(
+            "/data/media/0",
+            "/data/media/0/Download/SrtMountNsAllow/TeamAlpha/Deep",
+            0
+        ));
+        assert!(!should_apply_allowed_real_writable_metadata(
+            "/data/media/0/Android/data/com.example.app",
+            "/data/media/0/Android/data/com.example.app",
             0
         ));
     }
