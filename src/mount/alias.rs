@@ -132,6 +132,7 @@ impl MountPlanner {
                             }
                             return true;
                         }
+                        PrimaryMountFailure::ContinueAliases => {}
                     }
                 }
 
@@ -210,6 +211,7 @@ impl MountPlanner {
                             }
                             return true;
                         }
+                        PrimaryMountFailure::ContinueAliases => {}
                     }
                 }
 
@@ -288,6 +290,7 @@ impl MountPlanner {
                             }
                             return true;
                         }
+                        PrimaryMountFailure::ContinueAliases => {}
                     }
                 }
 

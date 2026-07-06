@@ -27,6 +27,7 @@ pub struct MountPlanner {
 enum PrimaryMountFailure {
     AbortAll,
     StopCurrentTarget,
+    ContinueAliases,
 }
 
 const MAX_WILDCARD_MOUNT_MATCHES: usize = 128;
