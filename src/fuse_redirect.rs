@@ -2860,4 +2860,44 @@ mod tests {
             "/storage/emulated/0/Pictures"
         ));
     }
+
+    #[test]
+    fn scoped_fuse_wildcard_miss_under_mount_root_redirects() {
+        let allowed = vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()];
+        let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
+        assert_eq!(
+            roots,
+            vec!["/storage/emulated/0/DCIM/SrtFuseQQ".to_string()]
+        );
+
+        let policy = RedirectPolicy::new(FuseRedirectConfig {
+            package_name: "me.fakerqu.test.storageredirect".to_string(),
+            uid: 10288,
+            app_data_dir: "/data/user/0/me.fakerqu.test.storageredirect".to_string(),
+            redirect_target:
+                "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+                    .to_string(),
+            mount_root: Some("/storage/emulated/0/DCIM/SrtFuseQQ".to_string()),
+            is_file_monitor_enabled: false,
+            allowed_real_paths: allowed,
+            excluded_real_paths: Vec::new(),
+            sandboxed_paths: Vec::new(),
+            read_only_paths: Vec::new(),
+            path_mappings: Vec::new(),
+            is_mapping_mode_only: false,
+        })
+        .expect("policy");
+
+        let allowed_decision = policy.backend_decision(
+            "/storage/emulated/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt",
+            OperationKind::Write,
+        );
+        assert!(matches!(allowed_decision.kind, BackendKind::Real));
+
+        let miss_decision = policy.backend_decision(
+            "/storage/emulated/0/DCIM/SrtFuseQQ/SrtOther/srt_ci_probe.txt",
+            OperationKind::Write,
+        );
+        assert!(matches!(miss_decision.kind, BackendKind::Redirect));
+    }
 }
