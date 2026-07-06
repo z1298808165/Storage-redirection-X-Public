@@ -277,17 +277,11 @@ impl MountPlanner {
                 }
 
                 let mut is_restored_allowed_path = false;
-                let mut source_candidates = Vec::with_capacity(2);
-                if let Some(anchor) = &real_storage_anchor {
-                    source_candidates.push(paths::join(anchor, relative));
-                }
-                let backend_source = paths::join(&data_media_root, relative);
-                if !source_candidates
-                    .iter()
-                    .any(|path| paths::eq_ignore_case(path, &backend_source))
-                {
-                    source_candidates.push(backend_source);
-                }
+                let source_candidates = build_allowed_real_source_candidates(
+                    &real_storage_anchor,
+                    &data_media_root,
+                    relative,
+                );
 
                 for real_source in source_candidates {
                     if !self.ensure_real_public_directory_exists(&real_source, self.app_uid) {
@@ -976,6 +970,23 @@ fn build_mapping_source_roots(
     roots
 }
 
+fn build_allowed_real_source_candidates(
+    real_storage_anchor: &Option<String>,
+    data_media_root: &str,
+    relative: &str,
+) -> Vec<String> {
+    let backend_source = paths::join(data_media_root, relative);
+    let mut candidates = Vec::with_capacity(2);
+    candidates.push(backend_source.clone());
+    if let Some(anchor) = real_storage_anchor {
+        let anchor_source = paths::join(anchor, relative);
+        if !paths::eq_ignore_case(&anchor_source, &backend_source) {
+            candidates.push(anchor_source);
+        }
+    }
+    candidates
+}
+
 fn namespace_mappings_outside_scoped_fuse(
     resolved_mappings: &[PathMapping],
     scoped_fuse_roots: &[String],
@@ -1091,10 +1102,10 @@ fn unescape_mountinfo_field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MountPlanner, build_mapping_source_roots, is_covered_by_scoped_fuse_mount,
-        is_scoped_fuse_mount_root, mount_source_for_target_from_mountinfo,
-        mountinfo_root_matches_data_backend, namespace_mappings_outside_scoped_fuse,
-        path_shadows_mapping_request,
+        MountPlanner, build_allowed_real_source_candidates, build_mapping_source_roots,
+        is_covered_by_scoped_fuse_mount, is_scoped_fuse_mount_root,
+        mount_source_for_target_from_mountinfo, mountinfo_root_matches_data_backend,
+        namespace_mappings_outside_scoped_fuse, path_shadows_mapping_request,
     };
     use crate::domain::PathMapping;
 
@@ -1275,6 +1286,25 @@ mod tests {
         assert_eq!(
             build_mapping_source_roots(&None, "/data/media/0"),
             vec!["/data/media/0".to_string()]
+        );
+    }
+
+    #[test]
+    fn allowed_real_source_candidates_prefer_data_media_before_anchor() {
+        assert_eq!(
+            build_allowed_real_source_candidates(
+                &Some("/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string()),
+                "/data/media/0",
+                "Download",
+            ),
+            vec![
+                "/data/media/0/Download".to_string(),
+                "/data/adb/modules/storage.redirect.x/tmp/real_storage/0/Download".to_string(),
+            ]
+        );
+        assert_eq!(
+            build_allowed_real_source_candidates(&None, "/data/media/0", "Download"),
+            vec!["/data/media/0/Download".to_string()]
         );
     }
 }
