@@ -177,23 +177,24 @@ pub fn scoped_mount_roots_for_wildcard_rules<'a>(
             continue;
         }
         let prefix = paths::concrete_prefix_before_wildcard(&resolved);
-        let root = scoped_mount_root_for_wildcard_prefix(&prefix, &storage_root);
-        roots.push(root);
+        if let Some(root) = scoped_mount_root_for_wildcard_prefix(&prefix, &storage_root) {
+            roots.push(root);
+        }
     }
     compact_scoped_mount_roots(roots, &storage_root)
 }
 
-fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> String {
+fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> Option<String> {
     if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
-        return storage_root.to_string();
+        return Some(storage_root.to_string());
     }
-    if should_promote_media_wildcard_to_storage_root(prefix, storage_root) {
-        return storage_root.to_string();
+    if should_leave_media_wildcard_to_namespace_mount(prefix, storage_root) {
+        return None;
     }
-    prefix.to_string()
+    Some(prefix.to_string())
 }
 
-fn should_promote_media_wildcard_to_storage_root(prefix: &str, storage_root: &str) -> bool {
+fn should_leave_media_wildcard_to_namespace_mount(prefix: &str, storage_root: &str) -> bool {
     let Some(top_level) = top_level_storage_child(prefix, storage_root) else {
         return false;
     };
@@ -2532,17 +2533,17 @@ mod tests {
                 "Pictures/Camera/IMG_????.jpg",
             ],
         );
-        assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
+        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
     }
 
     #[test]
-    fn scoped_mount_roots_promote_media_wildcards_to_storage_root() {
+    fn scoped_mount_roots_leave_media_wildcards_to_namespace_mount() {
         let roots = scoped_mount_roots_for_wildcard_rules(
             10000,
             ["DCIM/SrtFuseQQ/SrtAllowed*", "Download/SrtFuseQ?/Media"],
         );
 
-        assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
+        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
     }
 
     #[test]
@@ -2557,10 +2558,10 @@ mod tests {
             10000,
             [
                 "Download/A*",
-                "Pictures/A*",
-                "Movies/A*",
-                "Music/A*",
                 "Documents/A*",
+                "Alarms/A*",
+                "Notifications/A*",
+                "Podcasts/A*",
             ],
         );
         assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
@@ -2968,10 +2969,7 @@ mod tests {
     fn scoped_fuse_wildcard_miss_under_mount_root_redirects() {
         let allowed = vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()];
         let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
-        assert_eq!(
-            roots,
-            vec!["/storage/emulated/0/DCIM/SrtFuseQQ".to_string()]
-        );
+        assert!(roots.is_empty());
 
         let policy = RedirectPolicy::new(FuseRedirectConfig {
             package_name: "me.fakerqu.test.storageredirect".to_string(),

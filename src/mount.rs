@@ -40,44 +40,83 @@ pub(super) fn concrete_mount_fallback_parent(
     paths::wildcard_mount_fallback_parent(resolved_path, storage_path)
 }
 
-pub(super) fn concrete_wildcard_mount_matches(
+#[cfg(test)]
+fn concrete_wildcard_mount_matches(resolved_path: &str, storage_path: &str) -> Vec<String> {
+    concrete_wildcard_mount_matches_for_roots(
+        resolved_path,
+        storage_path,
+        &[storage_path.to_string()],
+    )
+}
+
+fn concrete_wildcard_mount_matches_for_roots(
     resolved_path: &str,
     storage_path: &str,
+    scan_roots: &[String],
 ) -> Vec<String> {
     let normalized = paths::normalize(resolved_path);
     if normalized.is_empty() || !paths::contains_wildcards(&normalized) {
         return Vec::new();
     }
 
-    let scan_root = paths::concrete_prefix_before_wildcard(&normalized);
-    if scan_root.is_empty()
-        || (!paths::eq_ignore_case(&scan_root, storage_path)
-            && !paths::is_child(&scan_root, storage_path))
-    {
+    let Some(relative_rule) = paths::relative_child_path(&normalized, storage_path) else {
         return Vec::new();
+    };
+
+    let mut matches = Vec::new();
+    for scan_root in scan_roots {
+        let source_rule = paths::join(scan_root, relative_rule);
+        append_concrete_wildcard_mount_matches_from_root(
+            &source_rule,
+            storage_path,
+            scan_root,
+            &mut matches,
+        );
+    }
+
+    paths::sort_dedup_paths_case_insensitive(&mut matches);
+    matches
+}
+
+fn append_concrete_wildcard_mount_matches_from_root(
+    source_rule: &str,
+    storage_path: &str,
+    scan_storage_root: &str,
+    matches: &mut Vec<String>,
+) {
+    let scan_root = paths::concrete_prefix_before_wildcard(source_rule);
+    if scan_root.is_empty()
+        || (!paths::eq_ignore_case(&scan_root, scan_storage_root)
+            && !paths::is_child(&scan_root, scan_storage_root))
+    {
+        return;
     }
     if !std::path::Path::new(&scan_root).is_dir() {
-        return Vec::new();
+        return;
     }
 
     let root_depth = path_segment_count(&scan_root);
-    let rule_depth = path_segment_count(&normalized);
+    let rule_depth = path_segment_count(source_rule);
     if rule_depth <= root_depth {
-        return Vec::new();
+        return;
     }
 
-    let mut matches = Vec::new();
+    let mut source_matches = Vec::new();
     let mut scanned_dirs = 0usize;
     scan_wildcard_mount_matches(
         &scan_root,
         rule_depth - root_depth,
-        &normalized,
-        storage_path,
-        &mut matches,
+        source_rule,
+        scan_storage_root,
+        &mut source_matches,
         &mut scanned_dirs,
     );
-    paths::sort_dedup_paths_case_insensitive(&mut matches);
-    matches
+    for source_match in source_matches {
+        let Some(relative) = paths::relative_child_path(&source_match, scan_storage_root) else {
+            continue;
+        };
+        matches.push(paths::join(storage_path, relative));
+    }
 }
 
 fn scan_wildcard_mount_matches(
@@ -202,11 +241,34 @@ impl MountPlanner {
     pub fn take_mounted_targets(&mut self) -> Vec<String> {
         std::mem::take(&mut *self.mounted_targets.borrow_mut())
     }
+
+    pub(super) fn concrete_wildcard_mount_matches(
+        &self,
+        resolved_path: &str,
+        storage_path: &str,
+    ) -> Vec<String> {
+        let mut scan_roots = vec![
+            storage_path.to_string(),
+            paths::data_media_user_root_for_user(self.user_id),
+        ];
+        if let Some(anchor) = &self.real_storage_anchor {
+            if !scan_roots
+                .iter()
+                .any(|root| paths::eq_ignore_case(root, anchor))
+            {
+                scan_roots.push(anchor.clone());
+            }
+        }
+        concrete_wildcard_mount_matches_for_roots(resolved_path, storage_path, &scan_roots)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{concrete_mount_fallback_parent, concrete_wildcard_mount_matches};
+    use super::{
+        concrete_mount_fallback_parent, concrete_wildcard_mount_matches,
+        concrete_wildcard_mount_matches_for_roots,
+    };
     use std::fs;
 
     #[test]
@@ -263,6 +325,31 @@ mod tests {
             ]
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wildcard_mount_matches_map_backend_roots_to_storage_paths() {
+        let storage_root = temp_storage_root("wildcard_storage_root");
+        let backend_root = temp_storage_root("wildcard_backend_root");
+        fs::create_dir_all(backend_root.join("DCIM/SrtFuseQQ/SrtAllowedAlpha"))
+            .expect("create backend allow dir");
+        fs::create_dir_all(backend_root.join("DCIM/SrtFuseQQ/SrtOther"))
+            .expect("create backend miss dir");
+
+        let storage = storage_root.to_string_lossy().replace('\\', "/");
+        let backend = backend_root.to_string_lossy().replace('\\', "/");
+        let matches = concrete_wildcard_mount_matches_for_roots(
+            &format!("{storage}/DCIM/SrtFuseQQ/SrtAllowed*"),
+            &storage,
+            &[backend.clone()],
+        );
+
+        assert_eq!(
+            matches,
+            vec![format!("{storage}/DCIM/SrtFuseQQ/SrtAllowedAlpha")]
+        );
+        let _ = fs::remove_dir_all(storage_root);
+        let _ = fs::remove_dir_all(backend_root);
     }
 
     fn temp_storage_root(name: &str) -> std::path::PathBuf {

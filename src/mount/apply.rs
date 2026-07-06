@@ -1,4 +1,4 @@
-use super::{MountPlanner, concrete_mount_fallback_parent, concrete_wildcard_mount_matches};
+use super::{MountPlanner, concrete_mount_fallback_parent};
 use crate::domain::PathMapping;
 use crate::platform::{fs, module_paths, paths};
 use libc::{MNT_DETACH, umount2};
@@ -484,7 +484,8 @@ impl MountPlanner {
                     continue;
                 };
                 if paths::contains_wildcards(&resolved) {
-                    let matched_paths = concrete_wildcard_mount_matches(&resolved, &storage_path);
+                    let matched_paths =
+                        self.concrete_wildcard_mount_matches(&resolved, &storage_path);
                     if !matched_paths.is_empty() {
                         log::warn!(
                             "fallback sandbox wildcard to concrete matches: {} -> {} dirs",
@@ -823,7 +824,7 @@ impl MountPlanner {
                 continue;
             };
             if paths::contains_wildcards(&resolved) {
-                let matched_paths = concrete_wildcard_mount_matches(&resolved, storage_path);
+                let matched_paths = self.concrete_wildcard_mount_matches(&resolved, storage_path);
                 if !matched_paths.is_empty() {
                     log::warn!(
                         "fallback {} wildcard to concrete matches: {} -> {} dirs",
@@ -870,7 +871,7 @@ impl MountPlanner {
                 continue;
             };
             if paths::contains_wildcards(&resolved) {
-                let matched_paths = concrete_wildcard_mount_matches(&resolved, storage_path);
+                let matched_paths = self.concrete_wildcard_mount_matches(&resolved, storage_path);
                 if !matched_paths.is_empty() {
                     log::warn!(
                         "fallback exclude wildcard to concrete matches: {} -> {} dirs",
