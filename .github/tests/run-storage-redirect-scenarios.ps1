@@ -329,11 +329,11 @@ function Apply-ScenarioConfig {
 }
 
 function Clear-Results {
-    Invoke-Su "rm -rf '$ResultDir' '$InternalResultDir' '$BackendResultDir' '$SandboxResultDir'" | Out-Null
+    Invoke-Su "rm -rf '$ResultDir' '$InternalResultDir' '$BackendResultDir' '$SandboxResultDir'; find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result' -type d -prune -exec rm -rf {} + 2>/dev/null || true" | Out-Null
 }
 
 function Get-LatestResult {
-    $path = Invoke-Su "ls -t '$ResultDir'/result_*.txt '$InternalResultDir'/result_*.txt '$BackendResultDir'/result_*.txt '$SandboxResultDir'/result_*.txt 2>/dev/null | head -1"
+    $path = Invoke-Su "extra=\`$(find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result/result_*.txt' -type f 2>/dev/null); ls -t '$ResultDir'/result_*.txt '$InternalResultDir'/result_*.txt '$BackendResultDir'/result_*.txt '$SandboxResultDir'/result_*.txt \`$extra 2>/dev/null | head -1"
     $path | Where-Object { $_ -and $_.Trim().Length -gt 0 } | Select-Object -First 1
 }
 
@@ -344,7 +344,7 @@ function Wait-ServiceResult {
     $command = @"
 deadline=`$(date +%s); deadline=`$((deadline + $TimeoutSeconds));
 while [ `$(date +%s) -lt `$deadline ]; do
-  for file in '$ResultDir/result_current.txt' '$InternalResultDir/result_current.txt' '$BackendResultDir/result_current.txt' '$SandboxResultDir/result_current.txt'; do
+  for file in '$ResultDir/result_current.txt' '$InternalResultDir/result_current.txt' '$BackendResultDir/result_current.txt' '$SandboxResultDir/result_current.txt' `$(find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do
     if [ -s "`$file" ]; then
       printf '%s\n' "__SRT_RESULT_PATH__=`$file"
       cat "`$file"

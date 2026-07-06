@@ -43,14 +43,14 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。PR 合并建议在分支保护中要求 `Test-flow required gate` 通过；CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，不删除、不撤销提交，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。PR 合并建议在分支保护中要求 `Test-flow required gate` 通过；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器与 5 个场景组组合成并行矩阵运行。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，不删除、不撤销提交，由后续提交修复。
 
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
 - 当前模块跑完 scenario 1-29；如果显式设置 `RUN_FUSE_DAEMON_SCENARIOS=0` 或验证旧模块不支持 `fuse_daemon_redirect_enabled`，脚本会跳过 FUSE daemon 专属场景。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
-- 场景脚本退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider。
+- 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
 
 本项目不使用参考实现中的 `/dev/srx_config` 共享挂载作为模块加载信号。配置目录固定为 `/data/adb/modules/storage.redirect.x/config`，运行期通过 inotify 和指纹轮询热更新；安装阶段只验证模块目录未禁用、关键文件存在、当前 boot 的 `.boot_ok` 或 `logs/boot_<boot_id>.marker` 已写入，以及 `srx_daemon` 正在运行。具体重定向、挂载和配置热更新是否生效由后续场景，尤其是 scenario 29，进行端到端验证。
 
@@ -155,7 +155,7 @@ Windows PowerShell 也可以运行同等语义的脚本：
 .\.github\tests\run-storage-redirect-scenarios.ps1 -Serial $Serial
 ```
 
-脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。脚本结束时会按白名单清理测试 APP 结果目录、`srt_file_tests`、场景固定目录、随机 `srt_*` 媒体文件、固定测试媒体文件以及 MediaProvider 可能留下的 `.pending-<数字>-srt_*` / `.trashed-<数字>-srt_*` 临时名和同名冲突 ` (数字)` 后缀；不会递归删除整个公共媒体目录。
+脚本会写入不同 SRX 配置、启动测试 APP、隔离每个服务用例、清理结果目录，并在失败时抓取模块日志和相关 logcat。默认脚本结束时会按白名单清理测试 APP 结果目录、`srt_file_tests`、场景固定目录、随机 `srt_*` 媒体文件、固定测试媒体文件以及 MediaProvider 可能留下的 `.pending-<数字>-srt_*` / `.trashed-<数字>-srt_*` 临时名和同名冲突 ` (数字)` 后缀；不会递归删除整个公共媒体目录。CI/Release 的临时模拟器会跳过最终清理，本地手动运行默认仍保留最终清理，便于同一设备反复执行。
 
 如果只想跳过 `basic/all`，只跑场景脚本：
 
@@ -180,9 +180,14 @@ Remove-Item Env:SRT_SCENARIOS
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
 | `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-29。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
+| `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前分片。CI/Release 默认开启，便于尽快暴露首个失败点。 |
+| `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
+| `SRT_SKIP_FINAL_CLEANUP=1` | 跳过脚本退出前的最终白名单清理。仅用于 CI/Release 临时模拟器；本地复用设备时通常不要开启。 |
 | `RUN_FUSE_DAEMON_SCENARIOS=0/1` | 强制跳过或强制运行 FUSE daemon 专属场景；默认自动探测模块是否支持。 |
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
+
+CI/Release 的 5 个场景组为：`core=1,2,3,4,5,6,7,8,14,15,29`，`rules=9,10,11,12,13,28`，`fuse=16,17,18,19`，`mountns=20,21,22`，`monitor=23,24,25,26,27`。这些分片只改变执行并行度，不减少覆盖范围；scenario 1-29 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
 
 完整脚本覆盖以下场景：
 

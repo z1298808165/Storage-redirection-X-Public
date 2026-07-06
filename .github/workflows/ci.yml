@@ -220,32 +220,18 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  test-flow:
+  test-flow-build:
+    name: Build test-flow runtime
     needs:
       - prepare
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
-      ANDROID_TARGET: google_apis
-      ANDROID_ARCH: x86_64
       TARGET_TRIPLE: x86_64-linux-android
       MODULE_ABI: x86_64
-      ANDROID_API_LEVEL: ${{ matrix.api }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - api: 33
-            version: 13
-          - api: 34
-            version: 14
-          - api: 35
-            version: 15
-          - api: 36
-            version: 16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -319,6 +305,74 @@ jobs:
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
+      - name: Upload test-flow runtime
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-flow-runtime-v${{ env.VERSION }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            build/test-flow/assets/*.zip
+            tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
+            tests/storage-redirect-test/app/build/reports/
+            tests/storage-redirect-test/media-file-api/build/reports/
+
+  test-flow:
+    name: Test-flow Android ${{ matrix.android.version }} / ${{ matrix.shard.name }}
+    needs:
+      - prepare
+      - test-flow-build
+    if: always() && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      ANDROID_TARGET: google_apis
+      ANDROID_ARCH: x86_64
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+      ANDROID_API_LEVEL: ${{ matrix.android.api }}
+      SRT_SCENARIOS: ${{ matrix.shard.scenarios }}
+      SRT_FAIL_FAST: 1
+      SRT_SKIP_FINAL_CLEANUP: 1
+      SRT_SCENARIO_TIMEOUT_SECONDS: 300
+    strategy:
+      fail-fast: true
+      matrix:
+        android:
+          - api: 33
+            version: 13
+          - api: 34
+            version: 14
+          - api: 35
+            version: 15
+          - api: 36
+            version: 16
+        shard:
+          - name: core
+            scenarios: "1,2,3,4,5,6,7,8,14,15,29"
+          - name: rules
+            scenarios: "9,10,11,12,13,28"
+          - name: fuse
+            scenarios: "16,17,18,19"
+          - name: mountns
+            scenarios: "20,21,22"
+          - name: monitor
+            scenarios: "23,24,25,26,27"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download test-flow runtime
+        uses: actions/download-artifact@v6
+        with:
+          name: test-flow-runtime-v${{ env.VERSION }}
+          path: .
+
       - name: Enable KVM permissions
         run: |
           set -euo pipefail
@@ -331,7 +385,7 @@ jobs:
       - name: Run Android test-flow scenarios
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
-          api-level: ${{ matrix.api }}
+          api-level: ${{ matrix.android.api }}
           target: ${{ env.ANDROID_TARGET }}
           arch: ${{ env.ANDROID_ARCH }}
           profile: pixel_7
@@ -345,18 +399,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: test-flow-android${{ matrix.version }}-artifacts
+          name: test-flow-android${{ matrix.android.version }}-${{ matrix.shard.name }}-artifacts
           if-no-files-found: ignore
           retention-days: 14
           path: |
-            build/test-flow/assets/*.zip
             scenario-*-result.txt
             test-flow-logcat.txt
             test-flow-module-state.txt
             media-health.txt
-            tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
-            tests/storage-redirect-test/app/build/reports/
-            tests/storage-redirect-test/media-file-api/build/reports/
 
   test-flow-required:
     name: Test-flow required gate

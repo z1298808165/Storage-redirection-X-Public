@@ -19,4 +19,7 @@ MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.
   bash .github/tests/install-storage-redirect-module.sh
 
 adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
+export SRT_SKIP_FINAL_CLEANUP=1
+export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
+export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
 bash .github/tests/run-storage-redirect-scenarios.sh
