@@ -103,6 +103,10 @@ impl MountPlanner {
                 continue;
             };
             if should_fix_target_permissions {
+                if !self.ensure_writable_mapped_directory(&target_source, self.app_uid) {
+                    log::warn!("map target permission fix failed: {}", target_source);
+                    continue;
+                }
                 self.ensure_shared_mapping_parent_chain(&target_source);
             }
 
@@ -175,7 +179,9 @@ impl MountPlanner {
         for root in target_source_roots {
             let candidate = paths::join(root, target_relative);
             if fs::is_directory(&candidate) {
-                return Some((candidate, false));
+                let should_fix_permissions =
+                    mapping_target_source_needs_app_writable_metadata(&candidate, self.user_id);
+                return Some((candidate, should_fix_permissions));
             }
         }
 
@@ -353,9 +359,13 @@ impl MountPlanner {
     }
 }
 
+fn mapping_target_source_needs_app_writable_metadata(source: &str, user_id: i32) -> bool {
+    paths::is_same_or_child(source, &paths::data_media_user_root_for_user(user_id))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MountPlanner;
+    use super::{MountPlanner, mapping_target_source_needs_app_writable_metadata};
     use crate::domain::PathMapping;
 
     #[test]
@@ -438,6 +448,22 @@ mod tests {
             &["/storage/emulated/0/Download/QQ".to_string()],
             &[],
             "/storage/emulated/0",
+        ));
+    }
+
+    #[test]
+    fn existing_data_media_mapping_target_is_app_writable() {
+        assert!(mapping_target_source_needs_app_writable_metadata(
+            "/data/media/0/Download/Test",
+            0,
+        ));
+        assert!(!mapping_target_source_needs_app_writable_metadata(
+            "/data/adb/modules/storage.redirect.x/tmp/real_storage/0/Download/Test",
+            0,
+        ));
+        assert!(!mapping_target_source_needs_app_writable_metadata(
+            "/data/media/10/Download/Test",
+            0,
         ));
     }
 
