@@ -43,7 +43,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。PR 合并建议在分支保护中要求 `Test-flow required gate` 通过；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器与 5 个场景组组合成并行矩阵运行。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，不删除、不撤销提交，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。PR 合并建议在分支保护中要求 `Test-flow required gate` 通过；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-29。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，不删除、不撤销提交，由后续提交修复。
 
 完整设备侧通过标准是：
 
@@ -180,14 +180,14 @@ Remove-Item Env:SRT_SCENARIOS
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
 | `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-29。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
-| `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前分片。CI/Release 默认开启，便于尽快暴露首个失败点。 |
+| `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
 | `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
 | `SRT_SKIP_FINAL_CLEANUP=1` | 跳过脚本退出前的最终白名单清理。仅用于 CI/Release 临时模拟器；本地复用设备时通常不要开启。 |
 | `RUN_FUSE_DAEMON_SCENARIOS=0/1` | 强制跳过或强制运行 FUSE daemon 专属场景；默认自动探测模块是否支持。 |
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 的 5 个场景组为：`core=1,2,3,4,5,6,7,8,14,15,29`，`rules=9,10,11,12,13,28`，`fuse=16,17,18,19`，`mountns=20,21,22`，`monitor=23,24,25,26,27`。这些分片只改变执行并行度，不减少覆盖范围；scenario 1-29 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-29，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-29 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
 
 完整脚本覆盖以下场景：
 

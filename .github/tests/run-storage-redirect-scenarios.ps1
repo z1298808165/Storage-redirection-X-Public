@@ -1117,7 +1117,7 @@ function Invoke-MediaStoreReadOnlyQueryScenario {
     param([int]$Scenario)
     $logicalPath = "$ReadOnlyMediaRoot/$ReadOnlyImageFile"
     $privatePath = "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
-    $ok = Set-ReadOnlyMediaImage
+    $ok = Wait-MediaStoreReadOnlyImage
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-query" "mediastore_query_read_only_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_query_read_only_image\]").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "read-only-media-real" $logicalPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "read-only-media-private" $privatePath) -and $ok
@@ -1423,6 +1423,7 @@ function Invoke-Scenario {
     if ($Scenario -eq 9) { Set-ReadOnlySeed }
     if ($Scenario -eq 10) { Set-MappedReadOnlyTargets }
     if ($Scenario -eq 21) { Set-MountNamespaceReadOnlySeed }
+    if ($Scenario -eq 28) { Set-ReadOnlyMediaImage }
     Restart-App "scenario-$Scenario" ($Scenario -ne 1)
     $before = $script:Failures.Count
     $ok = switch ($Scenario) {

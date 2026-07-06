@@ -41,6 +41,7 @@ READ_ONLY_PAYLOAD="storage-redirect-test:file:readonly"
 READ_ONLY_IMAGE_B64="/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYxLjE5LjEwMAD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABLAAEBAAAAAAAAAAAAAAAAAAAACAEBAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAABEBAAAAAAAAAAAAAAAAAAAAAP/AABEIAAIAAgMBIgACEQADEQD/2gAMAwEAAhEDEQA/AJ/AB//Z"
 
 READ_ONLY_ROOT="${REAL_ROOT}/Download/SrtReadOnly"
+BACKEND_READ_ONLY_ROOT="${BACKEND_ROOT}/Download/SrtReadOnly"
 READ_ONLY_MEDIA_ROOT="${REAL_ROOT}/Pictures/SrtReadOnlyMedia"
 PRIVATE_READ_ONLY_MEDIA_ROOT="${PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia"
 MAPPED_READ_ONLY_REQUEST="${REAL_ROOT}/Download/SrtMapRO"
@@ -996,7 +997,7 @@ check_file_location() {
 }
 
 seed_read_only_targets() {
-  adb_su "mkdir -p '$READ_ONLY_ROOT'; rm -f '$READ_ONLY_ROOT/write_denied.txt' '$READ_ONLY_ROOT/renamed.txt' '$READ_ONLY_ROOT/$READ_ONLY_HARDLINK' '$READ_ONLY_ROOT/$READ_ONLY_SYMLINK'; rm -rf '$READ_ONLY_ROOT/newdir'; printf '%s' '$READ_ONLY_PAYLOAD' > '$READ_ONLY_ROOT/$READ_ONLY_FILE'; chmod -R 777 '$READ_ONLY_ROOT' 2>/dev/null || true" >/dev/null
+  adb_su "mkdir -p '$BACKEND_READ_ONLY_ROOT'; rm -f '$BACKEND_READ_ONLY_ROOT/write_denied.txt' '$BACKEND_READ_ONLY_ROOT/renamed.txt' '$BACKEND_READ_ONLY_ROOT/$READ_ONLY_HARDLINK' '$BACKEND_READ_ONLY_ROOT/$READ_ONLY_SYMLINK'; rm -rf '$BACKEND_READ_ONLY_ROOT/newdir'; printf '%s' '$READ_ONLY_PAYLOAD' > '$BACKEND_READ_ONLY_ROOT/$READ_ONLY_FILE'; chmod -R 777 '$BACKEND_READ_ONLY_ROOT' 2>/dev/null || true" >/dev/null
 }
 
 check_read_only_artifacts() {
@@ -1010,7 +1011,6 @@ check_read_only_artifacts() {
 
 run_read_only_scenario() {
   local scenario="$1"
-  seed_read_only_targets
   run_service_case "$scenario" "read-only-read" "file_read" '^PASS \[file_read\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" --es expected_payload "$READ_ONLY_PAYLOAD" &&
     run_service_case "$scenario" "read-only-stat" "file_stat" '^PASS \[file_stat\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" &&
     run_service_case "$scenario" "read-only-access" "file_access" '^PASS \[file_access\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" &&
@@ -1057,7 +1057,7 @@ run_mediastore_read_only_query_scenario() {
   local scenario="$1"
   local logical_path="$READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
   local private_path="$PRIVATE_READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
-  prepare_read_only_media_image &&
+  wait_mediastore_read_only_image &&
     run_service_case "$scenario" "read-only-image-query" "mediastore_query_read_only_image" '^PASS \[mediastore_query_read_only_image\]' --es file_name "$READ_ONLY_IMAGE_FILE" --es expected_path "$logical_path" &&
     check_file_exists "read-only-media-real" "$logical_path" &&
     check_file_missing "read-only-media-private" "$private_path"
@@ -1571,6 +1571,18 @@ run_scenario() {
     wait_config_applied "scenario-${scenario}"
   fi
   case "$scenario" in
+    9)
+      echo "step 2/7: 清理并预置只读源文件"
+      clean_targets
+      seed_read_only_targets
+      targets_prepared_before_start=1
+      ;;
+    28)
+      echo "step 2/7: 清理并预置只读媒体源文件"
+      clean_targets
+      prepare_read_only_media_image
+      targets_prepared_before_start=1
+      ;;
     20|21|22)
       echo "step 2/7: 清理并预置 mount namespace 回退目标"
       clean_targets
@@ -1602,7 +1614,7 @@ run_scenario() {
   clean_results
   case "$scenario" in
     9)
-      echo "step 5/7: 预置只读路径并执行拒绝类用例"
+      echo "step 5/7: 执行只读路径读取和拒绝类用例"
       run_read_only_scenario "$scenario"
       ;;
     10)
@@ -1699,7 +1711,7 @@ adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
 fail=0
 build_scenario_list
 
-export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS ADB_ROOT_MODE
+export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS ADB_ROOT_MODE
 export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
 
 for scenario in "${scenarios[@]}"; do
