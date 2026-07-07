@@ -84,7 +84,7 @@ fn append_concrete_wildcard_mount_matches_from_root(
     scan_storage_root: &str,
     matches: &mut Vec<String>,
 ) {
-    let scan_root = paths::concrete_prefix_before_wildcard(source_rule);
+    let scan_root = concrete_prefix_before_wildcard_preserving_alias(source_rule);
     if scan_root.is_empty()
         || (!paths::eq_ignore_case(&scan_root, scan_storage_root)
             && !paths::is_child(&scan_root, scan_storage_root))
@@ -195,7 +195,57 @@ fn wildcard_prefix_matches(rule_path: &str, candidate_path: &str) -> bool {
 }
 
 fn normalize_host_path(path: impl AsRef<std::path::Path>) -> String {
-    paths::normalize(&path.as_ref().to_string_lossy().replace('\\', "/"))
+    normalize_mount_scan_path(&path.as_ref().to_string_lossy().replace('\\', "/"))
+}
+
+fn concrete_prefix_before_wildcard_preserving_alias(path: &str) -> String {
+    let normalized = normalize_mount_scan_path(path);
+    if normalized.is_empty() || !paths::contains_wildcards(&normalized) {
+        return normalized;
+    }
+
+    let mut kept = Vec::new();
+    for segment in normalized.split('/').filter(|segment| !segment.is_empty()) {
+        if paths::contains_wildcards(segment) {
+            break;
+        }
+        kept.push(segment);
+    }
+    if kept.is_empty() {
+        return String::new();
+    }
+
+    let prefix = kept.join("/");
+    if normalized.starts_with('/') {
+        format!("/{prefix}")
+    } else {
+        prefix
+    }
+}
+
+fn normalize_mount_scan_path(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::with_capacity(path.len());
+    let mut is_last_slash = false;
+    for ch in path.chars() {
+        if ch == '/' {
+            if !is_last_slash {
+                result.push('/');
+                is_last_slash = true;
+            }
+        } else {
+            result.push(ch);
+            is_last_slash = false;
+        }
+    }
+
+    if result.len() > 1 && result.ends_with('/') {
+        result.pop();
+    }
+    result
 }
 
 fn path_segment_count(path: &str) -> usize {
@@ -247,27 +297,40 @@ impl MountPlanner {
         resolved_path: &str,
         storage_path: &str,
     ) -> Vec<String> {
-        let mut scan_roots = vec![
-            storage_path.to_string(),
+        let mut scan_roots = Vec::with_capacity(4);
+        append_unique_scan_root(&mut scan_roots, storage_path.to_string());
+        append_unique_scan_root(
+            &mut scan_roots,
             paths::data_media_user_root_for_user(self.user_id),
-        ];
+        );
+        append_unique_scan_root(
+            &mut scan_roots,
+            self.to_data_media_backend_path(&self.redirect_target),
+        );
         if let Some(anchor) = &self.real_storage_anchor {
-            if !scan_roots
-                .iter()
-                .any(|root| paths::eq_ignore_case(root, anchor))
-            {
-                scan_roots.push(anchor.clone());
-            }
+            append_unique_scan_root(&mut scan_roots, anchor.clone());
         }
         concrete_wildcard_mount_matches_for_roots(resolved_path, storage_path, &scan_roots)
     }
 }
 
+fn append_unique_scan_root(scan_roots: &mut Vec<String>, root: String) {
+    if root.is_empty()
+        || scan_roots
+            .iter()
+            .any(|existing| paths::eq_ignore_case(existing, &root))
+    {
+        return;
+    }
+    scan_roots.push(root);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        concrete_mount_fallback_parent, concrete_wildcard_mount_matches,
-        concrete_wildcard_mount_matches_for_roots,
+        concrete_mount_fallback_parent, concrete_prefix_before_wildcard_preserving_alias,
+        concrete_wildcard_mount_matches, concrete_wildcard_mount_matches_for_roots,
+        normalize_mount_scan_path,
     };
     use std::fs;
 
@@ -350,6 +413,20 @@ mod tests {
         );
         let _ = fs::remove_dir_all(storage_root);
         let _ = fs::remove_dir_all(backend_root);
+    }
+
+    #[test]
+    fn wildcard_scan_preserves_data_media_backend_aliases() {
+        assert_eq!(
+            concrete_prefix_before_wildcard_preserving_alias(
+                "/data/media/0/DCIM/SrtFuseQQ/SrtAllowed*",
+            ),
+            "/data/media/0/DCIM/SrtFuseQQ"
+        );
+        assert_eq!(
+            normalize_mount_scan_path("//data/media/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/"),
+            "/data/media/0/DCIM/SrtFuseQQ/SrtAllowedAlpha"
+        );
     }
 
     fn temp_storage_root(name: &str) -> std::path::PathBuf {
