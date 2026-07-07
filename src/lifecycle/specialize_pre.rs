@@ -79,6 +79,7 @@ impl RuntimeFlow {
         self.is_mount_applied = false;
         self.deferred_mount_payload.clear();
         self.is_system_writer_hook_redirect = false;
+        self.should_install_app_redirect_hook = false;
         self.is_system_writer_boot_lite = false;
         self.is_file_monitor_ui = false;
         self.should_install_fuse_fix = false;
@@ -435,6 +436,17 @@ impl RuntimeFlow {
 
         let is_fuse_daemon_redirect_enabled = config.is_fuse_daemon_redirect_enabled();
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
+        self.should_install_app_redirect_hook = self.should_redirect
+            && !is_system_writer
+            && is_fuse_daemon_redirect_enabled
+            && allowed_paths_need_app_redirect_hook(&allowed_real_paths, user_id);
+        if self.should_install_app_redirect_hook {
+            self.should_keep_module_loaded = true;
+            log::info!(
+                "app redirect hook enabled pkg={} reason=media_allowed_write",
+                self.package_name
+            );
+        }
 
         if self.is_system_writer_hook_redirect {
             log::info!("writer skip companion mount (per-caller hook)");
@@ -835,6 +847,32 @@ fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
     if unsafe { libc::unlink(c_path.as_ptr()) } == 0 {
         log::info!("old marker cleared {}", marker_path);
     }
+}
+
+fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: i32) -> bool {
+    let storage_root = platform::paths::storage_user_root_for_user(user_id);
+    allowed_real_paths.iter().any(|path| {
+        let raw = path.trim_start();
+        if raw.is_empty() || raw.starts_with('!') {
+            return false;
+        }
+        let mut resolved =
+            platform::paths::resolve_user_path(&platform::paths::normalize(raw), user_id);
+        if !platform::paths::is_absolute(&resolved) {
+            resolved = platform::paths::normalize(&platform::paths::join(&storage_root, &resolved));
+        }
+        media_allowed_write_hook_path(&resolved, &storage_root)
+    })
+}
+
+fn media_allowed_write_hook_path(path: &str, storage_root: &str) -> bool {
+    let Some(relative) = platform::paths::relative_child_path(path, storage_root) else {
+        return false;
+    };
+    let Some(first) = relative.split('/').find(|part| !part.is_empty()) else {
+        return false;
+    };
+    matches!(first, "DCIM" | "Pictures" | "Movies")
 }
 
 #[cfg(test)]

@@ -51,7 +51,8 @@ impl RuntimeFlow {
         }
 
         let hook_started_ms = monotonic_ms();
-        let is_redirect_via_hook = self.should_redirect && self.is_system_writer_hook_redirect;
+        let is_redirect_via_hook = self.should_redirect
+            && (self.is_system_writer_hook_redirect || self.should_install_app_redirect_hook);
         let is_plt_hook_active = if self.should_install_fuse_fix && !is_redirect_via_hook {
             install_media_runtime_hook(&self.package_name, self.should_monitor)
         } else if should_install_process_plt_hook(self, is_redirect_via_hook) {
@@ -117,6 +118,7 @@ fn should_install_process_plt_hook(flow: &RuntimeFlow, is_redirect_via_hook: boo
     }
 
     policy::is_system_writer_package(&flow.package_name)
+        || flow.should_install_app_redirect_hook
         || (flow.should_monitor && policy::is_saf_native_monitor_bridge_package(&flow.package_name))
 }
 
@@ -314,6 +316,15 @@ mod tests {
         flow.should_redirect = true;
 
         assert!(!should_install_process_plt_hook(&flow, false));
+    }
+
+    #[test]
+    fn ordinary_app_media_write_fallback_installs_redirect_hook() {
+        let mut flow = flow_for("com.tencent.mobileqq", 10123);
+        flow.should_redirect = true;
+        flow.should_install_app_redirect_hook = true;
+
+        assert!(should_install_process_plt_hook(&flow, true));
     }
 
     #[test]

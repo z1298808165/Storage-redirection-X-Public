@@ -181,6 +181,29 @@ fn process_app_mount_namespace_redirect(
             );
             return decision;
         }
+        if is_write_operation
+            && router.is_path_allowed_real(&resolved_path)
+            && allowed_media_write_needs_backend_redirect(&resolved_path, user_id)
+        {
+            let backend_path = writer::storage_to_data_media_path(&resolved_path);
+            if !backend_path.is_empty() && backend_path != resolved_path {
+                let decision = RedirectDecision {
+                    action: RedirectAction::Redirect,
+                    new_path: backend_path,
+                    is_mapping: false,
+                };
+                log_redirect_perf(
+                    "app",
+                    package_name,
+                    "allowed_media_backend",
+                    pathname,
+                    &resolved_path,
+                    perf_started_ms,
+                    &decision,
+                );
+                return decision;
+            }
+        }
         if !(router.is_path_excluded(&resolved_path) || router.is_path_sandboxed(&resolved_path)) {
             let decision = RedirectDecision {
                 action: RedirectAction::Allow,
@@ -240,6 +263,17 @@ fn process_app_mount_namespace_redirect(
         &decision,
     );
     decision
+}
+
+fn allowed_media_write_needs_backend_redirect(resolved_path: &str, user_id: i32) -> bool {
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(resolved_path, &storage_root) else {
+        return false;
+    };
+    let Some(first) = relative.split('/').find(|part| !part.is_empty()) else {
+        return false;
+    };
+    matches!(first, "DCIM" | "Pictures" | "Movies")
 }
 
 // 根据进程身份决策路径重定向，系统代写进程使用按调用方映射
@@ -3003,6 +3037,44 @@ mod tests {
             decision.new_path,
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/sdcard/Android/.android_lq"
         );
+    }
+
+    #[test]
+    fn app_router_allowed_media_write_redirects_to_backend() {
+        let _guard = lock_app_router_test();
+        configure_app_router(
+            "org.srx.testapp",
+            10123,
+            &["/storage/emulated/0/DCIM/SrtFuseQQ/SrtAllowed*".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+
+        let decision = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt",
+            true,
+            paths::monotonic_ms(),
+        );
+
+        assert!(decision.is_redirect());
+        assert_eq!(
+            decision.new_path,
+            "/data/media/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt"
+        );
+
+        let download = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/Download/SrtFusePlain/srt_ci_probe.txt",
+            true,
+            paths::monotonic_ms(),
+        );
+        assert!(!download.is_redirect());
     }
 
     #[test]
