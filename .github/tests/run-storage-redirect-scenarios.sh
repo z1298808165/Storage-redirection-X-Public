@@ -1162,32 +1162,40 @@ check_scoped_fuse_daemon_started() {
   local scenario="$1"
   local mount_root="$2"
   local strict="${3:-1}"
+  local saw_fallback=0
+  local saw_session_failed=0
   for _ in $(seq 1 20); do
-    if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
-      if [ "$strict" != "1" ]; then
-        echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
-        return 0
-      fi
-      echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}" >&2
-      return 1
-    fi
-    if adb_su "grep -F -- 'fuse redirect session ended' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root}' >/dev/null"; then
-      if [ "$strict" != "1" ]; then
-        echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
-        return 0
-      fi
-      echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}" >&2
-      return 1
-    fi
     if adb_su "grep -F -- 'fuse redirect mount start pkg=${APP_ID}' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root}' >/dev/null"; then
       echo "scoped_fuse_started scenario=${scenario} root=${mount_root}"
       return 0
     fi
+    if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
+      saw_fallback=1
+    fi
+    if adb_su "grep -F -- 'fuse redirect session ended' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root}' >/dev/null"; then
+      saw_session_failed=1
+    fi
     sleep_ms "$SRT_RESULT_POLL_MS"
   done
   if [ "$strict" != "1" ]; then
+    if [ "$saw_fallback" = "1" ]; then
+      echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
+      return 0
+    fi
+    if [ "$saw_session_failed" = "1" ]; then
+      echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
+      return 0
+    fi
     echo "scoped_fuse_start_log_not_observed scenario=${scenario} root=${mount_root}; continuing with behavioral checks" >&2
     return 0
+  fi
+  if [ "$saw_fallback" = "1" ]; then
+    echo "scoped_fuse_fallback scenario=${scenario} root=${mount_root}" >&2
+    return 1
+  fi
+  if [ "$saw_session_failed" = "1" ]; then
+    echo "scoped_fuse_session_failed scenario=${scenario} root=${mount_root}" >&2
+    return 1
   fi
   echo "scoped_fuse_missing scenario=${scenario} root=${mount_root}" >&2
   adb_su "grep -F -- '${APP_ID}' '$LOG_PATH' 2>/dev/null | tail -80 || true" | sed 's/^/fuse_tail: /'
