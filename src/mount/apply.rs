@@ -656,7 +656,6 @@ impl MountPlanner {
         ));
         paths::sort_dedup_paths_case_insensitive(&mut excluded_rules);
         let mut effective_paths: Vec<String> = Vec::with_capacity(resolved_paths.len());
-        let mut restored_excluded_children: Vec<String> = Vec::new();
         for path in resolved_paths {
             if path_shadows_mapping_request(&path, path_mappings) {
                 log::warn!(
@@ -690,7 +689,29 @@ impl MountPlanner {
             }
         }
 
+        let restored_excluded_children = collect_restored_read_only_excluded_children(
+            &effective_paths,
+            &excluded_rules,
+            path_mappings,
+            scoped_fuse_roots,
+        );
+        for excluded_child in &restored_excluded_children {
+            let Some(relative) = paths::relative_child_path(excluded_child, storage_path) else {
+                continue;
+            };
+            let Some(source_path) = self.resolve_read_only_source(relative, source_roots) else {
+                continue;
+            };
+            if !self.ensure_writable_mapped_directory(&source_path, self.app_uid) {
+                log::warn!(
+                    "readonly exclude source metadata pre-fix failed: {}",
+                    source_path
+                );
+            }
+        }
+
         let mut is_any_mounted = false;
+        let mut mounted_read_only_paths: Vec<String> = Vec::with_capacity(effective_paths.len());
         for read_only_path in &effective_paths {
             let Some(relative) = paths::relative_child_path(read_only_path, storage_path) else {
                 continue;
@@ -720,28 +741,19 @@ impl MountPlanner {
             if is_read_only_mounted {
                 is_any_mounted = true;
                 log::info!("readonly {} -> {}", read_only_path, source_path);
-                restored_excluded_children.extend(
-                    excluded_rules
-                        .iter()
-                        .filter(|excluded| {
-                            !paths::contains_wildcards(excluded)
-                                && paths::is_child(excluded, read_only_path)
-                        })
-                        .cloned(),
-                );
+                mounted_read_only_paths.push(read_only_path.clone());
             }
         }
-        paths::sort_dedup_paths_longest_first_case_insensitive(&mut restored_excluded_children);
+        let restored_excluded_children = collect_restored_read_only_excluded_children(
+            &mounted_read_only_paths,
+            &excluded_rules,
+            path_mappings,
+            scoped_fuse_roots,
+        );
         for excluded_child in restored_excluded_children {
             let Some(relative) = paths::relative_child_path(&excluded_child, storage_path) else {
                 continue;
             };
-            if path_overlaps_mapping_request(&excluded_child, path_mappings) {
-                continue;
-            }
-            if is_covered_by_scoped_fuse_mount(&excluded_child, scoped_fuse_roots) {
-                continue;
-            }
             if !self.ensure_directory_exists(&excluded_child, false) {
                 log::warn!(
                     "readonly exclude restore target mkdir failed: {}",
@@ -756,12 +768,6 @@ impl MountPlanner {
                 );
                 continue;
             };
-            if !self.ensure_writable_mapped_directory(&source_path, self.app_uid) {
-                log::warn!(
-                    "readonly exclude source metadata fix failed: {}",
-                    source_path
-                );
-            }
             let mut is_exclude_restored = false;
             let _ = self.bind_read_write_mount_with_storage_aliases(
                 &source_path,
@@ -968,6 +974,30 @@ fn path_shadows_mapping_request(path: &str, path_mappings: &[PathMapping]) -> bo
         .any(|mapping| paths::is_same_or_child(&mapping.request_path, path))
 }
 
+fn collect_restored_read_only_excluded_children(
+    read_only_paths: &[String],
+    excluded_rules: &[String],
+    path_mappings: &[PathMapping],
+    scoped_fuse_roots: &[String],
+) -> Vec<String> {
+    let mut restored_children: Vec<String> = Vec::new();
+    for read_only_path in read_only_paths {
+        restored_children.extend(
+            excluded_rules
+                .iter()
+                .filter(|excluded| {
+                    !paths::contains_wildcards(excluded)
+                        && paths::is_child(excluded, read_only_path)
+                        && !path_overlaps_mapping_request(excluded, path_mappings)
+                        && !is_covered_by_scoped_fuse_mount(excluded, scoped_fuse_roots)
+                })
+                .cloned(),
+        );
+    }
+    paths::sort_dedup_paths_longest_first_case_insensitive(&mut restored_children);
+    restored_children
+}
+
 fn build_mapping_source_roots(
     real_storage_anchor: &Option<String>,
     data_media_root: &str,
@@ -1116,9 +1146,10 @@ fn unescape_mountinfo_field(value: &str) -> String {
 mod tests {
     use super::{
         MountPlanner, build_allowed_real_source_candidates, build_mapping_source_roots,
-        is_covered_by_scoped_fuse_mount, is_scoped_fuse_mount_root,
-        mount_source_for_target_from_mountinfo, mountinfo_root_matches_data_backend,
-        namespace_mappings_outside_scoped_fuse, path_shadows_mapping_request,
+        collect_restored_read_only_excluded_children, is_covered_by_scoped_fuse_mount,
+        is_scoped_fuse_mount_root, mount_source_for_target_from_mountinfo,
+        mountinfo_root_matches_data_backend, namespace_mappings_outside_scoped_fuse,
+        path_shadows_mapping_request,
     };
     use crate::domain::PathMapping;
 
@@ -1222,6 +1253,33 @@ mod tests {
             "/storage/emulated/0/Download/SrtMonitor",
             &roots
         ));
+    }
+
+    #[test]
+    fn read_only_excluded_children_are_collected_before_parent_mount() {
+        let read_only_paths = vec!["/storage/emulated/0/Download/SrtMonitorLocked".to_string()];
+        let excluded_rules = vec![
+            "/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string(),
+            "/storage/emulated/0/Download/SrtMonitorLocked/*.tmp".to_string(),
+            "/storage/emulated/0/Download/SrtMonitorLocked/Mapped".to_string(),
+            "/storage/emulated/0/Download/SrtMonitorLocked/Fuse".to_string(),
+        ];
+        let mappings = vec![PathMapping::new(
+            "/storage/emulated/0/Download/SrtMonitorLocked/Mapped".to_string(),
+            "/storage/emulated/0/Download/SrtOther".to_string(),
+        )];
+        let scoped_fuse_roots =
+            vec!["/storage/emulated/0/Download/SrtMonitorLocked/Fuse".to_string()];
+
+        assert_eq!(
+            collect_restored_read_only_excluded_children(
+                &read_only_paths,
+                &excluded_rules,
+                &mappings,
+                &scoped_fuse_roots,
+            ),
+            vec!["/storage/emulated/0/Download/SrtMonitorLocked/Writable".to_string()]
+        );
     }
 
     #[test]
