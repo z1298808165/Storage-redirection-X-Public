@@ -33,6 +33,7 @@ const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
 const FLUSH_THRESHOLD: i32 = 32;
 const FLUSH_INTERVAL_MS: i64 = 2000;
 const LATE_HOOK_REFRESH_INTERVAL_MS: i64 = 1000;
+const JIT_CACHE_MEMFD_PREFIX: &str = "/memfd:jit-cache";
 
 pub struct InterceptHub {
     package_name: RwLock<String>,
@@ -556,15 +557,23 @@ fn is_ignorable_refresh_failure(
         return false;
     }
     if profile_name == "app-write" {
-        return matches!(
+        if matches!(
             refresh_errno,
             srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
-        ) && refresh_errors.iter().all(|err| {
-            matches!(
-                err.errno,
-                srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
-            )
-        });
+        ) {
+            return refresh_errors.iter().all(|err| {
+                matches!(
+                    err.errno,
+                    srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
+                )
+            });
+        }
+
+        return refresh_errno == srx_hook::SrxHookErrno::SetProt
+            && refresh_errors.iter().all(|err| {
+                err.errno == srx_hook::SrxHookErrno::SetProt
+                    && is_deleted_jit_memfd_module(&err.module_path)
+            });
     }
     if refresh_errno != srx_hook::SrxHookErrno::Format {
         return false;
@@ -573,6 +582,12 @@ fn is_ignorable_refresh_failure(
         err.errno == srx_hook::SrxHookErrno::Format
             && err.module_path.ends_with(SQLITE_MODULE_BASENAME)
     })
+}
+
+fn is_deleted_jit_memfd_module(module_path: &str) -> bool {
+    module_path
+        .strip_prefix(JIT_CACHE_MEMFD_PREFIX)
+        .is_some_and(|suffix| suffix.starts_with(' ') && suffix.contains("(deleted)"))
 }
 
 fn select_hook_profile(
@@ -689,6 +704,94 @@ fn is_hook_sensitive_render_module(lower_pathname: &str) -> bool {
         && (lower_pathname.contains("/egl/")
             || lower_pathname.contains("/hw/vulkan.")
             || lower_pathname.contains("/libllvm-"))
+}
+
+#[cfg(test)]
+mod refresh_failure_tests {
+    use super::*;
+
+    fn refresh_error(module_path: &str, errno: srx_hook::SrxHookErrno) -> srx_hook::RefreshError {
+        srx_hook::RefreshError {
+            module_path: module_path.to_string(),
+            errno,
+        }
+    }
+
+    #[test]
+    fn app_write_ignores_deleted_jit_memfd_setprot_failures() {
+        let errors = vec![
+            refresh_error(
+                "/memfd:jit-cache (deleted)",
+                srx_hook::SrxHookErrno::SetProt,
+            ),
+            refresh_error(
+                "/memfd:jit-cache 123 (deleted)",
+                srx_hook::SrxHookErrno::SetProt,
+            ),
+        ];
+
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &errors,
+            "app-write"
+        ));
+    }
+
+    #[test]
+    fn app_write_keeps_setprot_failures_for_real_libraries_fatal() {
+        let errors = vec![refresh_error(
+            "/apex/com.android.runtime/lib64/bionic/libc.so",
+            srx_hook::SrxHookErrno::SetProt,
+        )];
+
+        assert!(!is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &errors,
+            "app-write"
+        ));
+    }
+
+    #[test]
+    fn app_write_keeps_existing_readelf_format_tolerance() {
+        let errors = vec![
+            refresh_error(
+                "/memfd:jit-cache (deleted)",
+                srx_hook::SrxHookErrno::ReadElf,
+            ),
+            refresh_error("/bad/module", srx_hook::SrxHookErrno::Format),
+        ];
+
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::ReadElf,
+            &errors,
+            "app-write"
+        ));
+    }
+
+    #[test]
+    fn app_write_requires_deleted_jit_memfd_for_setprot_tolerance() {
+        let errors = vec![refresh_error(
+            "/memfd:jit-cache",
+            srx_hook::SrxHookErrno::SetProt,
+        )];
+
+        assert!(!is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &errors,
+            "app-write"
+        ));
+
+        let similarly_named_errors = vec![refresh_error(
+            "/memfd:jit-cache-test (deleted)",
+            srx_hook::SrxHookErrno::SetProt,
+        )];
+
+        assert!(!is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &similarly_named_errors,
+            "app-write"
+        ));
+    }
 }
 
 #[cfg(test)]
