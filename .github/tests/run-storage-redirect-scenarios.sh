@@ -719,7 +719,10 @@ scenario_from_label() {
 label_expects_mount() {
   local scenario
   scenario="$(scenario_from_label "$1")"
-  [ "$scenario" != "1" ]
+  case "$scenario" in
+    ""|1|23) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 expected_mount_paths_for_label() {
@@ -924,7 +927,7 @@ run_service_case() {
     echo "service_start_unexpected scenario=${scenario} label=${label} test_case=${test_case}"
     printf '%s\n' "$start_output" | sed 's/^/service_start: /'
   fi
-  if [ "$scenario" != "1" ]; then
+  if label_expects_mount "scenario-${scenario}-${label}-service"; then
     ensure_current_app_mount_confirmed "scenario-${scenario}-${label}-service" || return 1
   fi
 
