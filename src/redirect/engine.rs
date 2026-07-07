@@ -211,15 +211,11 @@ fn process_app_mount_namespace_redirect(
             let redirect_target = router.redirect_target();
             let fallback_path =
                 writer::map_path_by_caller_fallback(&resolved_path, &redirect_target, user_id);
-            if !fallback_path.is_empty() && fallback_path != resolved_path {
+            let backend_path = writer::storage_to_data_media_path(&fallback_path);
+            if !backend_path.is_empty() && backend_path != resolved_path {
                 let decision = RedirectDecision {
                     action: RedirectAction::Redirect,
-                    new_path: resolve_system_writer_output_path(
-                        &normalized_path,
-                        &fallback_path,
-                        is_data_media,
-                        package_name,
-                    ),
+                    new_path: backend_path,
                     is_mapping: false,
                 };
                 log_redirect_perf(
@@ -3193,7 +3189,7 @@ mod tests {
         assert!(!direct_target_read.is_mapping);
         assert_eq!(
             direct_target_read.new_path,
-            "/storage/emulated/0/Android/data/org.srx.testapp/sdcard/Download/Test"
+            "/data/media/0/Android/data/org.srx.testapp/sdcard/Download/Test"
         );
     }
 
