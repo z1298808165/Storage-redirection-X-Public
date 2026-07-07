@@ -98,6 +98,7 @@ SRT_FRESH_APP_PER_CASE="${SRT_FRESH_APP_PER_CASE:-1}"
 SRT_RESULT_POLL_MS="${SRT_RESULT_POLL_MS:-150}"
 SRT_APP_LAUNCH_SETTLE_MS="${SRT_APP_LAUNCH_SETTLE_MS:-800}"
 SRT_MOUNT_CONFIRM_TIMEOUT_MS="${SRT_MOUNT_CONFIRM_TIMEOUT_MS:-15000}"
+SRT_APP_MOUNT_CONFIRM_RETRIES="${SRT_APP_MOUNT_CONFIRM_RETRIES:-3}"
 SRT_CONFIG_APPLY_TIMEOUT_MS="${SRT_CONFIG_APPLY_TIMEOUT_MS:-30000}"
 SRT_SERVICE_CASE_SETTLE_MS="${SRT_SERVICE_CASE_SETTLE_MS:-50}"
 SRT_FILE_MONITOR_ENABLED="${SRT_FILE_MONITOR_ENABLED:-0}"
@@ -694,8 +695,14 @@ wait_app_mount_confirmed() {
   local timeout_seconds=$(((SRT_MOUNT_CONFIRM_TIMEOUT_MS + 999) / 1000))
   local output
   if output="$(adb_su "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; marker=\"marker ok path=/data/user/0/$APP_ID/.srx_mount_status_\$pid\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
-    LAST_MOUNT_CONFIRMED_PID="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
-    return 0
+    local confirmed_pid
+    confirmed_pid="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
+    if [ -n "$confirmed_pid" ] && app_mountinfo_has_expected_paths "$label" "$confirmed_pid"; then
+      LAST_MOUNT_CONFIRMED_PID="$confirmed_pid"
+      return 0
+    fi
+    echo "mount confirm missing expected mountinfo: $label pid=${confirmed_pid:-missing}"
+    return 1
   fi
   if grep -Fq "pid_not_found" <<<"$output"; then
     echo "mount confirm skipped: app pid not found for $label"
@@ -705,11 +712,55 @@ wait_app_mount_confirmed() {
   return 1
 }
 
+scenario_from_label() {
+  sed -n 's/.*scenario-\([0-9][0-9]*\).*/\1/p' <<<"$1" | head -1
+}
+
+label_expects_mount() {
+  local scenario
+  scenario="$(scenario_from_label "$1")"
+  [ "$scenario" != "1" ]
+}
+
+expected_mount_paths_for_label() {
+  local scenario
+  scenario="$(scenario_from_label "$1")"
+  case "$scenario" in
+    3)
+      printf '%s\n' "${REAL_ROOT}/Download/SrtProbe"
+      ;;
+    4)
+      printf '%s\n' "${REAL_ROOT}/Download" "${REAL_ROOT}/Download/SrtProbe"
+      ;;
+  esac
+}
+
+app_mountinfo_has_expected_paths() {
+  local label="$1"
+  local pid="$2"
+  local expected path command output
+  expected="$(expected_mount_paths_for_label "$label")"
+  [ -z "$expected" ] && return 0
+  [ -n "$pid" ] || return 1
+
+  command="pid='$pid'; "
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    command="${command}grep -Fq ' ${path} ' \"/proc/\$pid/mountinfo\" || { echo missing=${path}; exit 1; }; "
+  done <<<"$expected"
+
+  if output="$(adb_su "$command")"; then
+    return 0
+  fi
+  printf '%s\n' "$output" | sed "s/^/mountinfo_check ${label}: /"
+  return 1
+}
+
 ensure_current_app_mount_confirmed() {
   local label="$1"
   local current_pid
   current_pid="$(app_pid)"
-  if [ -n "$current_pid" ] && [ "$current_pid" = "${LAST_MOUNT_CONFIRMED_PID:-}" ]; then
+  if [ -n "$current_pid" ] && [ "$current_pid" = "${LAST_MOUNT_CONFIRMED_PID:-}" ] && app_mountinfo_has_expected_paths "$label" "$current_pid"; then
     return 0
   fi
   echo "mount confirm refresh: ${label} before=${LAST_MOUNT_CONFIRMED_PID:-none} after=${current_pid:-missing}"
@@ -750,15 +801,40 @@ prepare_service_case() {
     1|true|TRUE|yes|YES) ;;
     *) return 0 ;;
   esac
-  adb shell am force-stop "$APP_ID" >/dev/null || true
-  sleep 0.5
-  adb logcat -c >/dev/null 2>&1 || true
-  adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
-  adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
-  if ! wait_app_mount_confirmed "$label" 1; then
-    sleep_ms "$SRT_APP_LAUNCH_SETTLE_MS"
+  local expect_mount=0
+  if label_expects_mount "$label"; then
+    expect_mount=1
   fi
-  wait_storage_ready "$label" 30 >/dev/null
+  start_app_and_confirm_mount "$label" "$expect_mount" || return 1
+  wait_storage_ready "$label" 30 >/dev/null || return 1
+}
+
+start_app_and_confirm_mount() {
+  local label="$1"
+  local expect_mount="${2:-1}"
+  local attempt max_attempts
+  max_attempts="$SRT_APP_MOUNT_CONFIRM_RETRIES"
+  case "$max_attempts" in
+    ''|*[!0-9]*) max_attempts=1 ;;
+  esac
+  [ "$max_attempts" -gt 0 ] || max_attempts=1
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    LAST_MOUNT_CONFIRMED_PID=""
+    adb shell am force-stop "$APP_ID" >/dev/null || true
+    sleep 0.5
+    adb logcat -c >/dev/null 2>&1 || true
+    adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
+    adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
+    if wait_app_mount_confirmed "$label" "$expect_mount"; then
+      return 0
+    fi
+    echo "mount confirm retry: ${label} attempt=${attempt}/${max_attempts}"
+    sleep_ms "$SRT_APP_LAUNCH_SETTLE_MS"
+  done
+
+  echo "mount confirm failed: ${label} attempts=${max_attempts}"
+  return 1
 }
 
 wait_storage_ready() {
@@ -835,7 +911,7 @@ run_service_case() {
   shift 4
   local output_file="scenario-${scenario}-${label}-result.txt"
 
-  prepare_service_case "scenario-${scenario}-${label}"
+  prepare_service_case "scenario-${scenario}-${label}" || return 1
   sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
   clean_results
   local start_output
@@ -1590,7 +1666,7 @@ capture_test_flow_artifacts() {
     adb shell "pidof '$APP_ID' 2>/dev/null || true"
     for pid in $(adb shell "pidof '$APP_ID' 2>/dev/null" | tr -d '\r'); do
       echo "--- /proc/${pid}/mountinfo ---"
-      adb_su "cat '/proc/${pid}/mountinfo' 2>/dev/null | grep -E 'SrtMonitor|/storage|/mnt/runtime|/mnt/user|/mnt/installer|/mnt/androidwritable|/mnt/pass_through|fuse|srx' || true"
+      adb_su "cat '/proc/${pid}/mountinfo' 2>/dev/null | grep -E 'SrtProbe|Download/Test|SrtMonitor|/storage|/mnt/runtime|/mnt/user|/mnt/installer|/mnt/androidwritable|/mnt/pass_through|fuse|srx' || true"
     done
   } >test-flow-app-mountinfo.txt 2>/dev/null || true
 }
@@ -1650,16 +1726,11 @@ run_scenario() {
   fi
   echo "step 3/7: 重启测试应用"
   adb shell am force-stop "$APP_ID" >/dev/null || true
-  adb logcat -c >/dev/null 2>&1 || true
-  adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
-  adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
   local expect_mount=1
   if [ "$scenario" = "1" ]; then
     expect_mount=0
   fi
-  if ! wait_app_mount_confirmed "scenario-${scenario}" "$expect_mount"; then
-    sleep_ms "$SRT_APP_LAUNCH_SETTLE_MS"
-  fi
+  start_app_and_confirm_mount "scenario-${scenario}" "$expect_mount" || return 1
   echo "step 4/7: 等待共享存储可用"
   wait_storage_ready "scenario-${scenario}"
   clean_results
@@ -1762,8 +1833,8 @@ adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
 fail=0
 build_scenario_list
 
-export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
+export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
+export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
 
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"
