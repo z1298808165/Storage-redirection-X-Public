@@ -145,9 +145,11 @@ fn process_app_mount_namespace_redirect(
         if !mapped_path.is_empty() && mapped_path != resolved_path {
             let decision = RedirectDecision {
                 action: RedirectAction::Redirect,
-                new_path: resolve_app_mount_namespace_mapping_output_path(
+                new_path: resolve_system_writer_output_path(
+                    &normalized_path,
                     &mapped_path,
                     is_data_media,
+                    package_name,
                 ),
                 is_mapping: true,
             };
@@ -194,6 +196,29 @@ fn process_app_mount_namespace_redirect(
                     "app",
                     package_name,
                     "allowed_media_backend",
+                    pathname,
+                    &resolved_path,
+                    perf_started_ms,
+                    &decision,
+                );
+                return decision;
+            }
+        }
+        if !is_write_operation
+            && router.is_path_mapping_target(&resolved_path)
+            && !router.is_path_allowed_real(&resolved_path)
+        {
+            let runtime_path = storage_to_default_runtime_path(&resolved_path, user_id);
+            if !runtime_path.is_empty() && runtime_path != resolved_path {
+                let decision = RedirectDecision {
+                    action: RedirectAction::Redirect,
+                    new_path: runtime_path,
+                    is_mapping: false,
+                };
+                log_redirect_perf(
+                    "app",
+                    package_name,
+                    "mapping_target_read",
                     pathname,
                     &resolved_path,
                     perf_started_ms,
@@ -274,20 +299,18 @@ fn allowed_media_write_needs_backend_redirect(resolved_path: &str, user_id: i32)
     matches!(first, "DCIM" | "Pictures" | "Movies")
 }
 
-fn resolve_app_mount_namespace_mapping_output_path(
-    mapped_path: &str,
-    is_data_media_input: bool,
-) -> String {
-    if is_data_media_input {
-        return writer::storage_to_data_media_path(mapped_path);
+fn storage_to_default_runtime_path(resolved_path: &str, user_id: i32) -> String {
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(resolved_path, &storage_root) else {
+        return String::new();
+    };
+    if relative.is_empty() {
+        return String::new();
     }
-
-    let backend_path = writer::storage_to_data_media_path(mapped_path);
-    if backend_path.is_empty() {
-        mapped_path.to_string()
-    } else {
-        backend_path
-    }
+    paths::join(
+        &format!("/mnt/runtime/default/emulated/{}", user_id),
+        relative,
+    )
 }
 
 // 根据进程身份决策路径重定向，系统代写进程使用按调用方映射
@@ -3120,8 +3143,17 @@ mod tests {
         assert!(decision.is_mapping);
         assert_eq!(
             decision.new_path,
-            "/data/media/0/Download/Test/srt_ci_probe.txt"
+            "/storage/emulated/0/Download/Test/srt_ci_probe.txt"
         );
+
+        let direct_target_read = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/Download/Test",
+            false,
+            paths::monotonic_ms(),
+        );
+        assert!(!direct_target_read.is_redirect());
     }
 
     #[test]
@@ -3153,7 +3185,7 @@ mod tests {
         assert!(mapped_write.is_mapping);
         assert_eq!(
             mapped_write.new_path,
-            "/data/media/0/Download/Test/srt_ci_probe.txt"
+            "/storage/emulated/0/Download/Test/srt_ci_probe.txt"
         );
 
         let direct_target_read = process_app_mount_namespace_redirect(
@@ -3164,7 +3196,12 @@ mod tests {
             paths::monotonic_ms(),
         );
 
-        assert!(!direct_target_read.is_redirect());
+        assert!(direct_target_read.is_redirect());
+        assert!(!direct_target_read.is_mapping);
+        assert_eq!(
+            direct_target_read.new_path,
+            "/mnt/runtime/default/emulated/0/Download/Test"
+        );
     }
 
     #[test]

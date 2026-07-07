@@ -199,6 +199,17 @@ impl PathRouter {
         writer::map_path_by_caller_mappings(resolved_path, &state.path_mappings)
     }
 
+    pub fn is_path_mapping_target(&self, resolved_path: &str) -> bool {
+        if resolved_path.is_empty() {
+            return false;
+        }
+        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        state
+            .path_mappings
+            .iter()
+            .any(|mapping| paths::is_same_or_child(resolved_path, &mapping.final_path))
+    }
+
     pub fn read_only_check_path(&self, resolved_path: &str) -> String {
         if resolved_path.is_empty() {
             return String::new();
