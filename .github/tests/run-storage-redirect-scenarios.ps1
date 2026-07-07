@@ -45,6 +45,7 @@ $FuseStarMediaFile = "srt_fuse_star_media.bin"
 $FuseStarMissMediaFile = "srt_fuse_star_miss_media.bin"
 $FuseQMarkMediaFile = "srt_fuse_qmark_media.bin"
 $FuseQMarkMissMediaFile = "srt_fuse_qmark_miss_media.bin"
+$FuseDcimMediaFile = "srt_fuse_dcim_media.jpg"
 $ReadOnlyHardlink = "hardlink.txt"
 $ReadOnlySymlink = "symlink.txt"
 $ReadOnlyImageFile = "srt_read_only_media.jpg"
@@ -622,6 +623,7 @@ function Remove-MediaStoreRowsByPattern {
 function Remove-RandomMediaStoreRows {
     $escapedAppId = [regex]::Escape($AppId)
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_image_\d+( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/", "_data=.*/Pictures/", "_data=.*/Android/data/$escapedAppId/sdcard/Pictures/")
+    Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_fuse_dcim_media( \(\d+\))?\.jpg(,|$)") @("relative_path=DCIM/SrtFuseQQ/", "_data=.*/DCIM/SrtFuseQQ/", "_data=.*/Android/data/$escapedAppId/sdcard/DCIM/SrtFuseQQ/")
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=srt_read_only_media( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/SrtReadOnlyMedia/", "_data=.*/Pictures/SrtReadOnlyMedia/", "_data=.*/Android/data/$escapedAppId/sdcard/Pictures/SrtReadOnlyMedia/")
     Remove-MediaStoreRowsByPattern "content://media/external/video/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_video_\d+( \(\d+\))?\.mp4(,|$)") @("relative_path=Movies/", "_data=.*/Movies/", "_data=.*/Android/data/$escapedAppId/sdcard/Movies/")
     Remove-MediaStoreRowsByPattern "content://media/external/audio/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_audio_\d+( \(\d+\))?\.mp3(,|$)") @("relative_path=Music/", "_data=.*/Music/", "_data=.*/Android/data/$escapedAppId/sdcard/Music/")
@@ -632,6 +634,7 @@ function Remove-RandomMediaStoreRows {
 
 function Remove-RandomPhysicalMediaFiles {
     Invoke-Su "find '$BackendRoot/Pictures' '$BackendPrivateRoot/Pictures' -maxdepth 1 -type f \( -name 'srt_image_[0-9]*.jpg' -o -name '.pending-*srt_image_[0-9]*.jpg' -o -name '.trashed-*srt_image_[0-9]*.jpg' \) -delete 2>/dev/null || true" | Out-Null
+    Invoke-Su "find '$BackendRoot/DCIM/SrtFuseQQ' '$BackendPrivateRoot/DCIM/SrtFuseQQ' -type f \( -name 'srt_fuse_dcim_media*.jpg' -o -name '.pending-*srt_fuse_dcim_media*.jpg' -o -name '.trashed-*srt_fuse_dcim_media*.jpg' \) -delete 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
     Invoke-Su "find '$BackendRoot/Movies' '$BackendPrivateRoot/Movies' -maxdepth 1 -type f \( -name 'srt_video_[0-9]*.mp4' -o -name '.pending-*srt_video_[0-9]*.mp4' -o -name '.trashed-*srt_video_[0-9]*.mp4' \) -delete 2>/dev/null || true" | Out-Null
     Invoke-Su "find '$BackendRoot/Music' '$BackendPrivateRoot/Music' -maxdepth 1 -type f \( -name 'srt_audio_[0-9]*.mp3' -o -name '.pending-*srt_audio_[0-9]*.mp3' -o -name '.trashed-*srt_audio_[0-9]*.mp3' \) -delete 2>/dev/null || true" | Out-Null
@@ -1014,6 +1017,13 @@ function Invoke-MediaStoreDownloadCreateCase {
     Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_download" $extras "^PASS \[mediastore_create_download\]"
 }
 
+function Invoke-MediaStoreImageCreateCase {
+    param([int]$Scenario, [string]$Label, [string]$FileName, [string]$RelativePath = "")
+    $extras = @{ file_name = $FileName }
+    if ($RelativePath) { $extras.relative_path = $RelativePath }
+    Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_image" $extras "^PASS \[mediastore_create_image\]"
+}
+
 function Invoke-MediaStoreDownloadCreateDeniedCase {
     param([int]$Scenario, [string]$Label, [string]$FileName, [string]$RelativePath = "")
     $extras = @{ file_name = $FileName }
@@ -1242,10 +1252,10 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     param([int]$Scenario)
     $plainPath = "$FusePlainRoot/$TestFile"
     $plainPrivate = "$PrivateFusePlainRoot/$TestFile"
-    $wildcardPath = "$FuseDcimAllowedRoot/$TestFile"
-    $wildcardPrivate = "$PrivateFuseDcimAllowedRoot/$TestFile"
-    $otherPath = "$FuseDcimOtherRoot/$TestFile"
-    $otherPrivate = "$PrivateFuseDcimOtherRoot/$TestFile"
+    $wildcardPath = "$FuseDcimAllowedRoot/$FuseDcimMediaFile"
+    $wildcardPrivate = "$PrivateFuseDcimAllowedRoot/$FuseDcimMediaFile"
+    $otherPath = "$FuseDcimOtherRoot/$FuseDcimMediaFile"
+    $otherPrivate = "$PrivateFuseDcimOtherRoot/$FuseDcimMediaFile"
     $qmarkPath = "$FuseQMarkRoot/Media/$TestFile"
     $qmarkPrivate = "$PrivateFuseQMarkRoot/Media/$TestFile"
     $qmarkMissPath = "$FuseQMarkMissRoot/Media/$TestFile"
@@ -1263,10 +1273,10 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     $ok = (Invoke-WriteCase $Scenario "plain-allow-write" $plainPath $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-plain-real" $plainPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-plain-private" $plainPrivate) -and $ok
-    $ok = (Invoke-WriteCase $Scenario "wildcard-allow-write" $wildcardPath $Payload).Ok -and $ok
+    $ok = (Invoke-MediaStoreImageCreateCase $Scenario "wildcard-allow-image-create" $FuseDcimMediaFile "DCIM/SrtFuseQQ/SrtAllowedAlpha").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-wildcard-real" $wildcardPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-wildcard-private" $wildcardPrivate) -and $ok
-    $ok = (Invoke-WriteCase $Scenario "wildcard-other-write" $otherPath $Payload).Ok -and $ok
+    $ok = (Invoke-MediaStoreImageCreateCase $Scenario "wildcard-other-image-create" $FuseDcimMediaFile "DCIM/SrtFuseQQ/SrtOther").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-wildcard-other-private" $otherPrivate) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-wildcard-other-real" $otherPath) -and $ok
     $ok = (Invoke-WriteCase $Scenario "qmark-allow-write" $qmarkPath $Payload).Ok -and $ok
