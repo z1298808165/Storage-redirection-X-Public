@@ -188,7 +188,22 @@ fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> Op
     if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
         return Some(storage_root.to_string());
     }
+    if let Some(root) = public_collection_mount_root(prefix, storage_root) {
+        return Some(root);
+    }
     Some(prefix.to_string())
+}
+
+fn public_collection_mount_root(prefix: &str, storage_root: &str) -> Option<String> {
+    let rel = paths::relative_child_path(prefix, storage_root)?;
+    let first = rel.split('/').find(|part| !part.is_empty())?;
+    match first {
+        "Alarms" | "Audiobooks" | "DCIM" | "Documents" | "Download" | "Movies" | "Music"
+        | "Notifications" | "Pictures" | "Podcasts" | "Recordings" | "Ringtones" => {
+            Some(paths::join(storage_root, first))
+        }
+        _ => None,
+    }
 }
 
 pub fn scoped_mount_roots_for_hybrid_rules(
@@ -2521,7 +2536,7 @@ mod tests {
             roots,
             vec![
                 "/storage/emulated/0/Download".to_string(),
-                "/storage/emulated/0/Pictures/Camera".to_string(),
+                "/storage/emulated/0/Pictures".to_string(),
             ]
         );
     }
@@ -2536,8 +2551,8 @@ mod tests {
         assert_eq!(
             roots,
             vec![
+                "/storage/emulated/0/DCIM".to_string(),
                 "/storage/emulated/0/Download".to_string(),
-                "/storage/emulated/0/DCIM/SrtFuseQQ".to_string(),
             ]
         );
     }
@@ -2875,7 +2890,7 @@ mod tests {
             redirect_target:
                 "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
                     .to_string(),
-            mount_root: Some("/storage/emulated/0/DCIM/SrtFuseQQ".to_string()),
+            mount_root: Some("/storage/emulated/0/DCIM".to_string()),
             real_root_override: Some(
                 "/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string(),
             ),
@@ -2890,7 +2905,10 @@ mod tests {
         .expect("policy");
 
         let allowed_backend = policy
-            .backend_for_relative("SrtAllowedAlpha/srt_ci_probe.txt", OperationKind::Write)
+            .backend_for_relative(
+                "SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt",
+                OperationKind::Write,
+            )
             .expect("allowed backend");
         assert_eq!(
             allowed_backend.path.to_string_lossy(),
@@ -2899,7 +2917,7 @@ mod tests {
         assert!(allowed_backend.is_shared_public_backend);
 
         let miss_backend = policy
-            .backend_for_relative("SrtOther/srt_ci_probe.txt", OperationKind::Write)
+            .backend_for_relative("SrtFuseQQ/SrtOther/srt_ci_probe.txt", OperationKind::Write)
             .expect("miss backend");
         assert_eq!(
             miss_backend.path.to_string_lossy(),
@@ -2965,10 +2983,7 @@ mod tests {
     fn scoped_fuse_wildcard_miss_under_mount_root_redirects() {
         let allowed = vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()];
         let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
-        assert_eq!(
-            roots,
-            vec!["/storage/emulated/0/DCIM/SrtFuseQQ".to_string()]
-        );
+        assert_eq!(roots, vec!["/storage/emulated/0/DCIM".to_string()]);
 
         let policy = RedirectPolicy::new(FuseRedirectConfig {
             package_name: "me.fakerqu.test.storageredirect".to_string(),
@@ -2977,7 +2992,7 @@ mod tests {
             redirect_target:
                 "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
                     .to_string(),
-            mount_root: Some("/storage/emulated/0/DCIM/SrtFuseQQ".to_string()),
+            mount_root: Some("/storage/emulated/0/DCIM".to_string()),
             real_root_override: None,
             is_file_monitor_enabled: false,
             allowed_real_paths: allowed,
@@ -3000,5 +3015,24 @@ mod tests {
             OperationKind::Write,
         );
         assert!(matches!(miss_decision.kind, BackendKind::Redirect));
+
+        let allowed_backend = policy
+            .backend_for_relative(
+                "SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt",
+                OperationKind::Write,
+            )
+            .expect("allowed backend");
+        assert_eq!(
+            allowed_backend.path.to_string_lossy(),
+            "/data/media/0/DCIM/SrtFuseQQ/SrtAllowedAlpha/srt_ci_probe.txt"
+        );
+
+        let miss_backend = policy
+            .backend_for_relative("SrtFuseQQ/SrtOther/srt_ci_probe.txt", OperationKind::Write)
+            .expect("miss backend");
+        assert_eq!(
+            miss_backend.path.to_string_lossy(),
+            "/data/media/0/Android/data/me.fakerqu.test.storageredirect/sdcard/DCIM/SrtFuseQQ/SrtOther/srt_ci_probe.txt"
+        );
     }
 }
