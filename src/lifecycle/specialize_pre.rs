@@ -856,6 +856,7 @@ fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
     }
 }
 
+#[cfg(test)]
 fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: i32) -> bool {
     let storage_root = platform::paths::storage_user_root_for_user(user_id);
     allowed_real_paths.iter().any(|path| {
@@ -875,23 +876,21 @@ fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: 
 fn app_redirect_hook_reason_for_process(
     should_redirect: bool,
     is_system_writer: bool,
-    allowed_real_paths: &[String],
-    path_mappings: &[PathMapping],
-    user_id: i32,
-    is_fuse_daemon_redirect_enabled: bool,
+    _allowed_real_paths: &[String],
+    _path_mappings: &[PathMapping],
+    _user_id: i32,
+    _is_fuse_daemon_redirect_enabled: bool,
 ) -> Option<&'static str> {
     if !should_redirect || is_system_writer {
         return None;
     }
-    app_redirect_hook_reason(
-        allowed_real_paths,
-        path_mappings,
-        user_id,
-        is_fuse_daemon_redirect_enabled,
-    )
-    .or(Some("redirect_hot_config"))
+
+    // 普通应用只走 companion mount 路径。PLT 写入 hook 可能碰到 JIT/memfd
+    // 保护页，也会破坏测试流要求的“普通应用不安装 hook”边界。
+    None
 }
 
+#[cfg(test)]
 fn app_redirect_hook_reason(
     allowed_real_paths: &[String],
     path_mappings: &[PathMapping],
@@ -909,6 +908,7 @@ fn app_redirect_hook_reason(
     None
 }
 
+#[cfg(test)]
 fn allowed_paths_shadow_mapping_requests(
     allowed_real_paths: &[String],
     path_mappings: &[PathMapping],
@@ -945,6 +945,7 @@ fn allowed_paths_shadow_mapping_requests(
     })
 }
 
+#[cfg(test)]
 fn resolve_storage_rule_path(path: &str, user_id: i32, storage_root: &str) -> Option<String> {
     let mut resolved =
         platform::paths::resolve_user_path(&platform::paths::normalize(path), user_id);
@@ -962,6 +963,7 @@ fn resolve_storage_rule_path(path: &str, user_id: i32, storage_root: &str) -> Op
     Some(resolved)
 }
 
+#[cfg(test)]
 fn media_allowed_write_hook_path(path: &str, storage_root: &str) -> bool {
     let Some(relative) = platform::paths::relative_child_path(path, storage_root) else {
         return false;
@@ -1104,7 +1106,7 @@ mod tests {
     fn app_redirect_hook_preloads_for_redirect_hot_config() {
         assert_eq!(
             app_redirect_hook_reason_for_process(true, false, &[], &[], 0, false),
-            Some("redirect_hot_config")
+            None
         );
     }
 

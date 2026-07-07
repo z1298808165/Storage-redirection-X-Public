@@ -119,7 +119,6 @@ fn should_install_process_plt_hook(flow: &RuntimeFlow, is_redirect_via_hook: boo
     }
 
     policy::is_system_writer_package(&flow.package_name)
-        || flow.should_install_app_redirect_hook
         || (flow.should_monitor && policy::is_saf_native_monitor_bridge_package(&flow.package_name))
 }
 
@@ -323,12 +322,12 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_app_media_write_fallback_installs_redirect_hook() {
+    fn ordinary_app_media_write_fallback_does_not_install_redirect_hook() {
         let mut flow = flow_for("com.tencent.mobileqq", 10123);
         flow.should_redirect = true;
         flow.should_install_app_redirect_hook = true;
 
-        assert!(should_install_process_plt_hook(&flow, true));
+        assert!(!should_install_process_plt_hook(&flow, true));
     }
 
     #[test]
