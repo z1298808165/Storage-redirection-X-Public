@@ -3078,6 +3078,39 @@ mod tests {
     }
 
     #[test]
+    fn app_router_mapping_takes_priority_over_allowed_parent() {
+        let _guard = lock_app_router_test();
+        configure_app_router(
+            "org.srx.testapp",
+            10123,
+            &["/storage/emulated/0/Download".to_string()],
+            &[],
+            &[],
+            &[],
+            &[PathMapping::new(
+                "/storage/emulated/0/Download/SrtProbe".to_string(),
+                "/storage/emulated/0/Download/Test".to_string(),
+            )],
+            false,
+        );
+
+        let decision = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/Download/SrtProbe/srt_ci_probe.txt",
+            true,
+            paths::monotonic_ms(),
+        );
+
+        assert!(decision.is_redirect());
+        assert!(decision.is_mapping);
+        assert_eq!(
+            decision.new_path,
+            "/storage/emulated/0/Download/Test/srt_ci_probe.txt"
+        );
+    }
+
+    #[test]
     fn app_router_read_only_write_is_denied_but_read_uses_mount_namespace() {
         let _guard = lock_app_router_test();
         configure_app_router(

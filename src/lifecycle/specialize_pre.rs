@@ -18,6 +18,7 @@ use writer_state::{
 };
 
 use crate::config::{SettingsHub, watcher};
+use crate::domain::PathMapping;
 use crate::java_hook;
 use crate::logging::Logger;
 use crate::monitor::AuditTrail;
@@ -436,15 +437,20 @@ impl RuntimeFlow {
 
         let is_fuse_daemon_redirect_enabled = config.is_fuse_daemon_redirect_enabled();
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
-        self.should_install_app_redirect_hook = self.should_redirect
-            && !is_system_writer
-            && is_fuse_daemon_redirect_enabled
-            && allowed_paths_need_app_redirect_hook(&allowed_real_paths, user_id);
+        let app_redirect_hook_reason = app_redirect_hook_reason(
+            &allowed_real_paths,
+            &path_mappings,
+            user_id,
+            is_fuse_daemon_redirect_enabled,
+        );
+        self.should_install_app_redirect_hook =
+            self.should_redirect && !is_system_writer && app_redirect_hook_reason.is_some();
         if self.should_install_app_redirect_hook {
             self.should_keep_module_loaded = true;
             log::info!(
-                "app redirect hook enabled pkg={} reason=media_allowed_write",
-                self.package_name
+                "app redirect hook enabled pkg={} reason={}",
+                self.package_name,
+                app_redirect_hook_reason.unwrap_or("unknown")
             );
         }
 
@@ -865,6 +871,76 @@ fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: 
     })
 }
 
+fn app_redirect_hook_reason(
+    allowed_real_paths: &[String],
+    path_mappings: &[PathMapping],
+    user_id: i32,
+    is_fuse_daemon_redirect_enabled: bool,
+) -> Option<&'static str> {
+    if is_fuse_daemon_redirect_enabled
+        && allowed_paths_need_app_redirect_hook(allowed_real_paths, user_id)
+    {
+        return Some("media_allowed_write");
+    }
+    if allowed_paths_shadow_mapping_requests(allowed_real_paths, path_mappings, user_id) {
+        return Some("mapping_shadowed_by_allow");
+    }
+    None
+}
+
+fn allowed_paths_shadow_mapping_requests(
+    allowed_real_paths: &[String],
+    path_mappings: &[PathMapping],
+    user_id: i32,
+) -> bool {
+    if allowed_real_paths.is_empty() || path_mappings.is_empty() {
+        return false;
+    }
+
+    let storage_root = platform::paths::storage_user_root_for_user(user_id);
+    let mapping_requests: Vec<String> = path_mappings
+        .iter()
+        .filter_map(|mapping| {
+            resolve_storage_rule_path(&mapping.request_path, user_id, &storage_root)
+        })
+        .collect();
+    if mapping_requests.is_empty() {
+        return false;
+    }
+
+    allowed_real_paths.iter().any(|path| {
+        let raw = path.trim_start();
+        if raw.is_empty() || raw.starts_with('!') {
+            return false;
+        }
+        let Some(allowed_path) = resolve_storage_rule_path(raw, user_id, &storage_root) else {
+            return false;
+        };
+        mapping_requests.iter().any(|request_path| {
+            platform::paths::matches(&allowed_path, request_path, true)
+                || (!platform::paths::contains_wildcards(&allowed_path)
+                    && platform::paths::is_same_or_child(request_path, &allowed_path))
+        })
+    })
+}
+
+fn resolve_storage_rule_path(path: &str, user_id: i32, storage_root: &str) -> Option<String> {
+    let mut resolved =
+        platform::paths::resolve_user_path(&platform::paths::normalize(path), user_id);
+    if resolved.is_empty() || platform::paths::has_unsafe_segments(&resolved) {
+        return None;
+    }
+    if !platform::paths::is_absolute(&resolved) {
+        resolved = platform::paths::normalize(&platform::paths::join(storage_root, &resolved));
+    }
+    if !platform::paths::is_child(&resolved, storage_root)
+        && !platform::paths::eq_ignore_case(&resolved, storage_root)
+    {
+        return None;
+    }
+    Some(resolved)
+}
+
 fn media_allowed_write_hook_path(path: &str, storage_root: &str) -> bool {
     let Some(relative) = platform::paths::relative_child_path(path, storage_root) else {
         return false;
@@ -878,7 +954,6 @@ fn media_allowed_write_hook_path(path: &str, storage_root: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::PathMapping;
     use writer_state::should_defer_media_boot_extras_for_state;
 
     fn writer_context(is_media_provider: bool) -> SystemWriterContext {
@@ -984,6 +1059,49 @@ mod tests {
             "com.android.providers.downloads",
             "com.android.providers.downloads"
         ));
+    }
+
+    #[test]
+    fn app_redirect_hook_covers_mapping_shadowed_by_allowed_parent() {
+        let mappings = vec![PathMapping::new(
+            "Download/SrtProbe".to_string(),
+            "Download/Test".to_string(),
+        )];
+
+        assert_eq!(
+            app_redirect_hook_reason(&["Download".to_string()], &mappings, 0, false),
+            Some("mapping_shadowed_by_allow")
+        );
+        assert!(allowed_paths_shadow_mapping_requests(
+            &["Download".to_string()],
+            &mappings,
+            0
+        ));
+    }
+
+    #[test]
+    fn app_redirect_hook_ignores_unrelated_allow_and_exclusions() {
+        let mappings = vec![PathMapping::new(
+            "Download/SrtProbe".to_string(),
+            "Download/Test".to_string(),
+        )];
+
+        assert_eq!(
+            app_redirect_hook_reason(&["Pictures".to_string()], &mappings, 0, false),
+            None
+        );
+        assert_eq!(
+            app_redirect_hook_reason(&["!Download".to_string()], &mappings, 0, false),
+            None
+        );
+    }
+
+    #[test]
+    fn app_redirect_hook_keeps_media_allowed_reason_when_fuse_enabled() {
+        assert_eq!(
+            app_redirect_hook_reason(&["DCIM/SrtFuseQQ/SrtAllowed*".to_string()], &[], 0, true,),
+            Some("media_allowed_write")
+        );
     }
 
     #[test]

@@ -570,6 +570,18 @@ fn resolve_open_redirect_path(
 
     // 系统代写进程仅对写入操作重定向，读取探测保持原路径避免触发 MediaProvider 路径校验。
     if !should_redirect_open_operation(hub, is_system_writer, flags) {
+        if hub.is_app_write_only() && !is_system_writer && !monitor::has_write_intent_flags(flags) {
+            let mapping_read_result = process_redirect_path_for_read_fallback(hub, from_path);
+            if mapping_read_result.is_redirect() && mapping_read_result.is_mapping {
+                diagnostic::log_diag_redirect_decision(
+                    hub,
+                    op_name,
+                    from_path,
+                    &mapping_read_result,
+                );
+                return mapping_read_result;
+            }
+        }
         return allow_redirect_decision();
     }
 
