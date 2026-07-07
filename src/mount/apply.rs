@@ -756,6 +756,12 @@ impl MountPlanner {
                 );
                 continue;
             };
+            if !self.ensure_writable_mapped_directory(&source_path, self.app_uid) {
+                log::warn!(
+                    "readonly exclude source metadata fix failed: {}",
+                    source_path
+                );
+            }
             let mut is_exclude_restored = false;
             let _ = self.bind_read_write_mount_with_storage_aliases(
                 &source_path,
