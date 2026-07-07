@@ -728,16 +728,32 @@ impl MountPlanner {
             };
 
             let mut is_read_only_mounted = false;
-            let _ = self.bind_read_only_mount_with_storage_aliases(
-                &source_path,
-                read_only_path,
-                true,
-                super::PrimaryMountFailure::StopCurrentTarget,
-                Some("readonly primary mount failed"),
-                Some("readonly alias mount failed"),
-                Some("readonly alias ok"),
-                Some(&mut is_read_only_mounted),
-            );
+            let preserve_data_media_backend = restored_excluded_children
+                .iter()
+                .any(|excluded_child| paths::is_child(excluded_child, read_only_path));
+            if preserve_data_media_backend {
+                let _ = self.bind_read_only_mount_with_storage_aliases_preserving_backend(
+                    &source_path,
+                    read_only_path,
+                    true,
+                    super::PrimaryMountFailure::StopCurrentTarget,
+                    Some("readonly primary mount failed"),
+                    Some("readonly alias mount failed"),
+                    Some("readonly alias ok"),
+                    Some(&mut is_read_only_mounted),
+                );
+            } else {
+                let _ = self.bind_read_only_mount_with_storage_aliases(
+                    &source_path,
+                    read_only_path,
+                    true,
+                    super::PrimaryMountFailure::StopCurrentTarget,
+                    Some("readonly primary mount failed"),
+                    Some("readonly alias mount failed"),
+                    Some("readonly alias ok"),
+                    Some(&mut is_read_only_mounted),
+                );
+            }
             if is_read_only_mounted {
                 is_any_mounted = true;
                 log::info!("readonly {} -> {}", read_only_path, source_path);

@@ -393,6 +393,7 @@ jobs:
           retention-days: 14
           path: |
             scenario-*-result.txt
+            test-flow-app-mountinfo.txt
             test-flow-logcat.txt
             test-flow-module-state.txt
             media-health.txt
