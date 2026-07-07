@@ -732,7 +732,7 @@ impl MountPlanner {
                 .iter()
                 .any(|excluded_child| paths::is_child(excluded_child, read_only_path));
             if preserve_data_media_backend {
-                let _ = self.bind_read_only_mount_with_storage_aliases_preserving_backend(
+                let _ = self.bind_read_write_mount_with_storage_aliases(
                     &source_path,
                     read_only_path,
                     true,
@@ -742,6 +742,9 @@ impl MountPlanner {
                     Some("readonly alias ok"),
                     Some(&mut is_read_only_mounted),
                 );
+                if is_read_only_mounted {
+                    let _ = self.ensure_read_only_directory_metadata(read_only_path);
+                }
             } else {
                 let _ = self.bind_read_only_mount_with_storage_aliases(
                     &source_path,

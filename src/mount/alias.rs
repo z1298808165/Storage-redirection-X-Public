@@ -337,71 +337,12 @@ impl MountPlanner {
         alias_success_log: Option<&str>,
         is_any_mounted_out: Option<&mut bool>,
     ) -> bool {
-        self.bind_read_only_mount_with_storage_aliases_inner(
-            source,
-            primary_target,
-            is_recursive,
-            primary_failure_mode,
-            primary_failure_log,
-            alias_failure_log,
-            alias_success_log,
-            is_any_mounted_out,
-            false,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn bind_read_only_mount_with_storage_aliases_preserving_backend(
-        &self,
-        source: &str,
-        primary_target: &str,
-        is_recursive: bool,
-        primary_failure_mode: PrimaryMountFailure,
-        primary_failure_log: Option<&str>,
-        alias_failure_log: Option<&str>,
-        alias_success_log: Option<&str>,
-        is_any_mounted_out: Option<&mut bool>,
-    ) -> bool {
-        self.bind_read_only_mount_with_storage_aliases_inner(
-            source,
-            primary_target,
-            is_recursive,
-            primary_failure_mode,
-            primary_failure_log,
-            alias_failure_log,
-            alias_success_log,
-            is_any_mounted_out,
-            true,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn bind_read_only_mount_with_storage_aliases_inner(
-        &self,
-        source: &str,
-        primary_target: &str,
-        is_recursive: bool,
-        primary_failure_mode: PrimaryMountFailure,
-        primary_failure_log: Option<&str>,
-        alias_failure_log: Option<&str>,
-        alias_success_log: Option<&str>,
-        is_any_mounted_out: Option<&mut bool>,
-        preserve_data_media_backend: bool,
-    ) -> bool {
         let mut is_any_mounted = false;
         let alias_targets = self.expand_storage_alias_paths(primary_target);
 
         for target in alias_targets {
             let is_primary_target = target == primary_target;
             if !is_primary_target && !path_exists(&target) {
-                continue;
-            }
-            if preserve_data_media_backend && is_data_media_backend_alias(&target, self.user_id) {
-                log::debug!(
-                    "alias: skip backend readonly alias src={} dst={}",
-                    source,
-                    target
-                );
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
@@ -464,11 +405,6 @@ impl MountPlanner {
     }
 }
 
-fn is_data_media_backend_alias(path: &str, user_id: i32) -> bool {
-    let root = paths::data_media_user_root_for_user(user_id);
-    paths::is_same_or_child(path, &root)
-}
-
 fn path_exists(path: &str) -> bool {
     let Ok(c_path) = CString::new(path) else {
         return false;
@@ -493,7 +429,7 @@ fn should_skip_self_shadowing_alias(source: &str, target: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MountPlanner, is_data_media_backend_alias, should_skip_self_shadowing_alias};
+    use super::{MountPlanner, should_skip_self_shadowing_alias};
 
     #[test]
     fn storage_aliases_include_data_media_backend_for_lower_fs_writers() {
@@ -519,30 +455,6 @@ mod tests {
         assert!(!should_skip_self_shadowing_alias(
             "/data/media/0/Download/SrtAllow",
             "/data/media/0/Download/SrtAllow"
-        ));
-    }
-
-    #[test]
-    fn readonly_backend_preservation_only_skips_data_media_alias() {
-        assert!(is_data_media_backend_alias(
-            "/data/media/0/Download/SrtMonitorLocked",
-            0,
-        ));
-        assert!(is_data_media_backend_alias(
-            "/data/media/0/Download/SrtMonitorLocked/Writable",
-            0,
-        ));
-        assert!(!is_data_media_backend_alias(
-            "/storage/emulated/0/Download/SrtMonitorLocked",
-            0,
-        ));
-        assert!(!is_data_media_backend_alias(
-            "/mnt/runtime/full/emulated/0/Download/SrtMonitorLocked",
-            0,
-        ));
-        assert!(!is_data_media_backend_alias(
-            "/data/media/10/Download/SrtMonitorLocked",
-            0,
         ));
     }
 }
