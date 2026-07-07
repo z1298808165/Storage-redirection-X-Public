@@ -439,6 +439,37 @@ impl MountPlanner {
         self.bind_mount_inner(source, target, is_recursive, false)
     }
 
+    pub(super) fn bind_mount_read_write_overlay(
+        &self,
+        source: &str,
+        target: &str,
+        is_recursive: bool,
+    ) -> bool {
+        let use_recursive = self.should_use_recursive_bind(source, target, is_recursive);
+        if !self.bind_mount_overlay(source, target, use_recursive) {
+            return false;
+        }
+
+        if self.remount_bind_read_write(target, use_recursive) {
+            log::info!("readwrite bind ok src={} dst={}", source, target);
+            return true;
+        }
+
+        let Ok(c_target) = CString::new(target) else {
+            return false;
+        };
+        let ret = unsafe { umount2(c_target.as_ptr(), MNT_DETACH) };
+        if ret != 0 {
+            log::warn!(
+                "readwrite bind cleanup failed dst={} errno={} {}",
+                target,
+                last_errno(),
+                errno_text()
+            );
+        }
+        false
+    }
+
     fn bind_mount_inner(
         &self,
         source: &str,

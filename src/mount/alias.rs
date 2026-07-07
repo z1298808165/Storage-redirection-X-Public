@@ -243,6 +243,85 @@ impl MountPlanner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(super) fn bind_read_write_mount_with_storage_aliases(
+        &self,
+        source: &str,
+        primary_target: &str,
+        is_recursive: bool,
+        primary_failure_mode: PrimaryMountFailure,
+        primary_failure_log: Option<&str>,
+        alias_failure_log: Option<&str>,
+        alias_success_log: Option<&str>,
+        is_any_mounted_out: Option<&mut bool>,
+    ) -> bool {
+        let mut is_any_mounted = false;
+        let alias_targets = self.expand_storage_alias_paths(primary_target);
+
+        for target in alias_targets {
+            let is_primary_target = target == primary_target;
+            if !is_primary_target && !path_exists(&target) {
+                continue;
+            }
+            if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::debug!(
+                    "alias: skip self-shadowing readwrite src={} dst={}",
+                    source,
+                    target
+                );
+                continue;
+            }
+
+            if !self.bind_mount_read_write_overlay(source, &target, is_recursive) {
+                if is_primary_target {
+                    if let Some(log_text) = primary_failure_log {
+                        log::warn!("alias: {} dst={}", log_text, target);
+                    }
+
+                    match primary_failure_mode {
+                        PrimaryMountFailure::AbortAll => {
+                            if let Some(out) = is_any_mounted_out {
+                                *out = is_any_mounted;
+                            }
+                            return false;
+                        }
+                        PrimaryMountFailure::StopCurrentTarget => {
+                            if let Some(out) = is_any_mounted_out {
+                                *out = is_any_mounted;
+                            }
+                            return true;
+                        }
+                        PrimaryMountFailure::ContinueAliases => {}
+                    }
+                }
+
+                if let Some(log_text) = alias_failure_log {
+                    log::warn!("alias: {} src={} dst={}", log_text, source, target);
+                }
+                continue;
+            }
+
+            is_any_mounted = true;
+            if !is_primary_target && let Some(log_text) = alias_success_log {
+                let alias_ok_count = ALIAS_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_step(alias_ok_count, ALIAS_SUCCESS_LOG_STEP) {
+                    log::debug!(
+                        "alias: {} src={} dst={} n={}",
+                        log_text,
+                        source,
+                        target,
+                        alias_ok_count
+                    );
+                }
+            }
+        }
+
+        if let Some(out) = is_any_mounted_out {
+            *out = is_any_mounted;
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn bind_read_only_mount_with_storage_aliases(
         &self,
         source: &str,

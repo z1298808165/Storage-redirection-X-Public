@@ -757,7 +757,7 @@ impl MountPlanner {
                 continue;
             };
             let mut is_exclude_restored = false;
-            let _ = self.bind_overlay_mount_with_storage_aliases(
+            let _ = self.bind_read_write_mount_with_storage_aliases(
                 &source_path,
                 &excluded_child,
                 true,
