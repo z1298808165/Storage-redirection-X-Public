@@ -4,9 +4,10 @@ use super::super::monitor;
 use super::super::runtime;
 use super::super::stats::InterceptHub;
 use super::path_prepare::{PreparedPath, prepare_relevant_path};
+use crate::platform::paths;
 use crate::redirect::{
-    RedirectAction, RedirectDecision, policy, process_redirect_path, process_write_redirect_path,
-    record_redirect_hit,
+    PathRouter, RedirectAction, RedirectDecision, policy, process_redirect_path,
+    process_write_redirect_path, record_redirect_hit,
 };
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t};
 use std::borrow::Cow;
@@ -572,7 +573,9 @@ fn resolve_open_redirect_path(
     if !should_redirect_open_operation(hub, is_system_writer, flags) {
         if hub.is_app_write_only() && !is_system_writer && !monitor::has_write_intent_flags(flags) {
             let mapping_read_result = process_redirect_path_for_read_fallback(hub, from_path);
-            if mapping_read_result.is_redirect() && mapping_read_result.is_mapping {
+            if mapping_read_result.is_redirect()
+                && should_allow_app_write_read_redirect(from_path, &mapping_read_result)
+            {
                 diagnostic::log_diag_redirect_decision(
                     hub,
                     op_name,
@@ -595,6 +598,20 @@ fn resolve_open_redirect_path(
         record_redirect_hit(hub, op_name, from_path, &redirect_result.new_path);
     }
     redirect_result
+}
+
+fn should_allow_app_write_read_redirect(
+    from_path: &str,
+    redirect_result: &RedirectDecision,
+) -> bool {
+    redirect_result.is_mapping || is_unallowed_mapping_target_read(from_path)
+}
+
+fn is_unallowed_mapping_target_read(from_path: &str) -> bool {
+    let normalized_path = paths::data_media_to_storage_path(&paths::normalize(from_path));
+    let router = PathRouter::instance();
+    router.is_path_mapping_target(&normalized_path)
+        && !router.is_path_allowed_real(&normalized_path)
 }
 
 fn should_retry_system_writer_read_fallback(
