@@ -32,6 +32,7 @@ const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
 ];
 const FLUSH_THRESHOLD: i32 = 32;
 const FLUSH_INTERVAL_MS: i64 = 2000;
+const LATE_HOOK_REFRESH_INTERVAL_MS: i64 = 1000;
 
 pub struct InterceptHub {
     package_name: RwLock<String>,
@@ -45,6 +46,7 @@ pub struct InterceptHub {
     stats: AtomicStats,
     pending_redirect_count: AtomicI32,
     last_flush_ms: AtomicI64,
+    last_late_hook_refresh_ms: AtomicI64,
 }
 
 #[derive(Default)]
@@ -405,6 +407,50 @@ impl InterceptHub {
         true
     }
 
+    pub fn refresh_hooks_after_late_load(&self, reason: &str) {
+        if !self.is_hooks_installed()
+            || !self.is_app_write_only.load(Ordering::Relaxed)
+            || context::ReentryGuard::is_reentrant()
+        {
+            return;
+        }
+
+        let now_ms = crate::platform::paths::monotonic_ms();
+        let last_ms = self.last_late_hook_refresh_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) < LATE_HOOK_REFRESH_INTERVAL_MS {
+            return;
+        }
+        if self
+            .last_late_hook_refresh_ms
+            .compare_exchange(last_ms, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let _guard = context::ReentryGuard::enter();
+        let (refresh_errno, refresh_errors) = srx_hook::refresh();
+        if refresh_errno.is_ok() {
+            log::info!("hook late refresh ok reason={}", reason);
+            return;
+        }
+        if is_ignorable_refresh_failure(refresh_errno, &refresh_errors, "app-write") {
+            log::warn!(
+                "hook late refresh degraded reason={} err={:?} errors_count={}",
+                reason,
+                refresh_errno,
+                refresh_errors.len()
+            );
+            return;
+        }
+        log::warn!(
+            "hook late refresh failed reason={} err={:?} errors_count={}",
+            reason,
+            refresh_errno,
+            refresh_errors.len()
+        );
+    }
+
     // 按阈值或时间双触发刷盘，避免频繁写入
     pub fn increment_global_redirect_count(&self) {
         if !crate::logging::is_debug_logging_enabled() {
@@ -593,6 +639,7 @@ static INTERCEPT_HUB: InterceptHub = InterceptHub {
     stats: AtomicStats::new(),
     pending_redirect_count: AtomicI32::new(0),
     last_flush_ms: AtomicI64::new(0),
+    last_late_hook_refresh_ms: AtomicI64::new(0),
 };
 
 unsafe extern "C" fn hook_caller_allow_filter(

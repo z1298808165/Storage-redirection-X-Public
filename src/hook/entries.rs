@@ -45,6 +45,8 @@ const PROFILE_READ_RUNTIME: HookProfileSet =
         .with(HookProfile::SystemWriterBootLite);
 const PROFILE_BINDER_WRITER: HookProfileSet =
     HookProfileSet::from_profile(HookProfile::SystemWriter).with(HookProfile::SystemWriterBootLite);
+const PROFILE_LATE_LOAD_REFRESH: HookProfileSet =
+    HookProfileSet::from_profile(HookProfile::AppWrite);
 
 pub struct HookEntry {
     pub symbol: &'static str,
@@ -337,6 +339,18 @@ pub fn build_hook_entries() -> Vec<HookEntry> {
             profiles: PROFILE_READ_RUNTIME,
         },
         HookEntry {
+            symbol: "dlopen",
+            new_func: super::ops::dlopen::hooked_dlopen as *mut _,
+            is_optional: true,
+            profiles: PROFILE_LATE_LOAD_REFRESH,
+        },
+        HookEntry {
+            symbol: "android_dlopen_ext",
+            new_func: super::ops::dlopen::hooked_android_dlopen_ext as *mut _,
+            is_optional: true,
+            profiles: PROFILE_LATE_LOAD_REFRESH,
+        },
+        HookEntry {
             symbol: "_ZN7android14IPCThreadState20clearCallingIdentityEv",
             new_func: super::ops::binder::hooked_clear_calling_identity as *mut _,
             is_optional: true,
@@ -389,7 +403,7 @@ mod tests {
         );
         assert_eq!(
             count_hooks_for_profile(HookProfileSet::from_profile(HookProfile::AppWrite)),
-            8
+            10
         );
         assert_eq!(
             count_hooks_for_profile(
@@ -429,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn app_write_profile_only_hooks_open_family() {
+    fn app_write_profile_hooks_open_family_and_late_load_refresh() {
         assert_eq!(
             selected_symbols(HookProfileSet::from_profile(HookProfile::AppWrite)),
             vec![
@@ -440,7 +454,9 @@ mod tests {
                 "openat2",
                 "openat64",
                 "__openat_2",
-                "creat"
+                "creat",
+                "dlopen",
+                "android_dlopen_ext"
             ]
         );
     }

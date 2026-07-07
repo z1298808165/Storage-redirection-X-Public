@@ -437,14 +437,15 @@ impl RuntimeFlow {
 
         let is_fuse_daemon_redirect_enabled = config.is_fuse_daemon_redirect_enabled();
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
-        let app_redirect_hook_reason = app_redirect_hook_reason(
+        let app_redirect_hook_reason = app_redirect_hook_reason_for_process(
+            self.should_redirect,
+            is_system_writer,
             &allowed_real_paths,
             &path_mappings,
             user_id,
             is_fuse_daemon_redirect_enabled,
         );
-        self.should_install_app_redirect_hook =
-            self.should_redirect && !is_system_writer && app_redirect_hook_reason.is_some();
+        self.should_install_app_redirect_hook = app_redirect_hook_reason.is_some();
         if self.should_install_app_redirect_hook {
             self.should_keep_module_loaded = true;
             log::info!(
@@ -871,6 +872,26 @@ fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: 
     })
 }
 
+fn app_redirect_hook_reason_for_process(
+    should_redirect: bool,
+    is_system_writer: bool,
+    allowed_real_paths: &[String],
+    path_mappings: &[PathMapping],
+    user_id: i32,
+    is_fuse_daemon_redirect_enabled: bool,
+) -> Option<&'static str> {
+    if !should_redirect || is_system_writer {
+        return None;
+    }
+    app_redirect_hook_reason(
+        allowed_real_paths,
+        path_mappings,
+        user_id,
+        is_fuse_daemon_redirect_enabled,
+    )
+    .or(Some("redirect_hot_config"))
+}
+
 fn app_redirect_hook_reason(
     allowed_real_paths: &[String],
     path_mappings: &[PathMapping],
@@ -1077,6 +1098,26 @@ mod tests {
             &mappings,
             0
         ));
+    }
+
+    #[test]
+    fn app_redirect_hook_preloads_for_redirect_hot_config() {
+        assert_eq!(
+            app_redirect_hook_reason_for_process(true, false, &[], &[], 0, false),
+            Some("redirect_hot_config")
+        );
+    }
+
+    #[test]
+    fn app_redirect_hook_skips_disabled_and_system_writer_processes() {
+        assert_eq!(
+            app_redirect_hook_reason_for_process(false, false, &[], &[], 0, false),
+            None
+        );
+        assert_eq!(
+            app_redirect_hook_reason_for_process(true, true, &[], &[], 0, false),
+            None
+        );
     }
 
     #[test]
