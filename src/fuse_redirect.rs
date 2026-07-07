@@ -219,10 +219,7 @@ pub fn scoped_mount_roots_for_hybrid_rules(
 ) -> Vec<String> {
     let user_id = crate::platform::user_id_from_uid(uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
-    let scoped_allowed_rules = allowed_real_paths
-        .iter()
-        .filter(|rule| !allowed_wildcard_should_use_namespace_restore(rule, user_id, &storage_root))
-        .map(String::as_str);
+    let scoped_allowed_rules = allowed_real_paths.iter().map(String::as_str);
     let mut roots = scoped_mount_roots_for_wildcard_rules(
         uid,
         scoped_allowed_rules
@@ -267,36 +264,6 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     }
 
     compact_scoped_mount_roots(roots, &storage_root)
-}
-
-fn allowed_wildcard_should_use_namespace_restore(
-    rule: &str,
-    user_id: i32,
-    storage_root: &str,
-) -> bool {
-    let raw = rule.trim_start();
-    if raw.starts_with('!') {
-        return false;
-    }
-    let mut resolved = paths::resolve_user_path(&paths::normalize(raw), user_id);
-    if resolved.is_empty()
-        || paths::has_unsafe_segments(&resolved)
-        || !paths::contains_wildcards(&resolved)
-    {
-        return false;
-    }
-    if !paths::is_absolute(&resolved) {
-        resolved = paths::normalize(&paths::join(storage_root, &resolved));
-    }
-    if !paths::is_child(&resolved, storage_root) {
-        return false;
-    }
-
-    let prefix = paths::concrete_prefix_before_wildcard(&resolved);
-    let Some(collection) = public_collection_name(&prefix, storage_root) else {
-        return false;
-    };
-    matches!(collection, "DCIM" | "Pictures" | "Movies")
 }
 
 fn resolve_scoped_path_mappings(
@@ -2592,14 +2559,20 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_allowed_media_wildcard_uses_namespace_restore() {
+    fn hybrid_allowed_media_wildcards_use_scoped_fuse_roots() {
         let allowed = vec![
             "DCIM/SrtFuseQQ/SrtAllowed*".to_string(),
             "Download/SrtFuseQ?/Media".to_string(),
         ];
         let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
 
-        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
+        assert_eq!(
+            roots,
+            vec![
+                "/storage/emulated/0/DCIM".to_string(),
+                "/storage/emulated/0/Download".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2967,6 +2940,53 @@ mod tests {
         assert_eq!(
             miss_backend.path.to_string_lossy(),
             "/data/media/0/Android/data/me.fakerqu.test.storageredirect/sdcard/DCIM/SrtFuseQQ/SrtOther/srt_ci_probe.txt"
+        );
+    }
+
+    #[test]
+    fn scoped_fuse_qmark_directory_allow_writes_real_backend() {
+        let policy = RedirectPolicy::new(FuseRedirectConfig {
+            package_name: "me.fakerqu.test.storageredirect".to_string(),
+            uid: 10288,
+            app_data_dir: "/data/user/0/me.fakerqu.test.storageredirect".to_string(),
+            redirect_target:
+                "/storage/emulated/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+                    .to_string(),
+            mount_root: Some("/storage/emulated/0/Download".to_string()),
+            real_root_override: Some(
+                "/data/adb/modules/storage.redirect.x/tmp/real_storage/0".to_string(),
+            ),
+            is_file_monitor_enabled: false,
+            allowed_real_paths: vec!["Download/SrtFuseQ?/Media".to_string()],
+            excluded_real_paths: Vec::new(),
+            sandboxed_paths: Vec::new(),
+            read_only_paths: Vec::new(),
+            path_mappings: Vec::new(),
+            is_mapping_mode_only: false,
+        })
+        .expect("policy");
+
+        let allowed_backend = policy
+            .backend_for_relative(
+                "SrtFuseQb/Media/srt_fuse_qmark_media.bin",
+                OperationKind::Write,
+            )
+            .expect("allowed backend");
+        assert_eq!(
+            allowed_backend.path.to_string_lossy(),
+            "/data/adb/modules/storage.redirect.x/tmp/real_storage/0/Download/SrtFuseQb/Media/srt_fuse_qmark_media.bin"
+        );
+        assert!(allowed_backend.is_shared_public_backend);
+
+        let miss_backend = policy
+            .backend_for_relative(
+                "SrtFuseQab/Media/srt_fuse_qmark_miss_media.bin",
+                OperationKind::Write,
+            )
+            .expect("miss backend");
+        assert_eq!(
+            miss_backend.path.to_string_lossy(),
+            "/data/media/0/Android/data/me.fakerqu.test.storageredirect/sdcard/Download/SrtFuseQab/Media/srt_fuse_qmark_miss_media.bin"
         );
     }
 
