@@ -80,7 +80,9 @@ fn maybe_retry_system_writer_backend_open<F>(
 where
     F: FnOnce(&CString) -> c_int,
 {
-    if initial_result >= 0 || initial_errno != libc::ENOENT || !monitor::has_write_intent_flags(flags)
+    if initial_result >= 0
+        || initial_errno != libc::ENOENT
+        || !monitor::has_write_intent_flags(flags)
     {
         return initial_result;
     }
