@@ -780,6 +780,18 @@ impl MountPlanner {
                 Some(&mut is_exclude_restored),
             );
             if is_exclude_restored {
+                if !self.ensure_writable_mapped_directory(&source_path, self.app_uid) {
+                    log::warn!(
+                        "readonly exclude source metadata post-fix failed: {}",
+                        source_path
+                    );
+                }
+                if !self.ensure_writable_mapped_directory(&excluded_child, self.app_uid) {
+                    log::warn!(
+                        "readonly exclude target metadata post-fix failed: {}",
+                        excluded_child
+                    );
+                }
                 log::info!("readonly exclude restored {}", excluded_child);
             }
         }
