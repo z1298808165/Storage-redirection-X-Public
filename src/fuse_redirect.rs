@@ -195,13 +195,15 @@ fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> Op
 }
 
 fn public_collection_mount_root(prefix: &str, storage_root: &str) -> Option<String> {
+    public_collection_name(prefix, storage_root).map(|first| paths::join(storage_root, first))
+}
+
+fn public_collection_name<'a>(prefix: &'a str, storage_root: &str) -> Option<&'a str> {
     let rel = paths::relative_child_path(prefix, storage_root)?;
     let first = rel.split('/').find(|part| !part.is_empty())?;
     match first {
         "Alarms" | "Audiobooks" | "DCIM" | "Documents" | "Download" | "Movies" | "Music"
-        | "Notifications" | "Pictures" | "Podcasts" | "Recordings" | "Ringtones" => {
-            Some(paths::join(storage_root, first))
-        }
+        | "Notifications" | "Pictures" | "Podcasts" | "Recordings" | "Ringtones" => Some(first),
         _ => None,
     }
 }
@@ -217,14 +219,16 @@ pub fn scoped_mount_roots_for_hybrid_rules(
 ) -> Vec<String> {
     let user_id = crate::platform::user_id_from_uid(uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
+    let scoped_allowed_rules = allowed_real_paths
+        .iter()
+        .filter(|rule| !allowed_wildcard_should_use_namespace_restore(rule, user_id, &storage_root))
+        .map(String::as_str);
     let mut roots = scoped_mount_roots_for_wildcard_rules(
         uid,
-        allowed_real_paths
-            .iter()
-            .chain(excluded_real_paths.iter())
-            .chain(sandboxed_paths.iter())
-            .chain(read_only_paths.iter())
-            .map(String::as_str),
+        scoped_allowed_rules
+            .chain(excluded_real_paths.iter().map(String::as_str))
+            .chain(sandboxed_paths.iter().map(String::as_str))
+            .chain(read_only_paths.iter().map(String::as_str)),
     );
 
     if is_mapping_mode_only {
@@ -263,6 +267,36 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     }
 
     compact_scoped_mount_roots(roots, &storage_root)
+}
+
+fn allowed_wildcard_should_use_namespace_restore(
+    rule: &str,
+    user_id: i32,
+    storage_root: &str,
+) -> bool {
+    let raw = rule.trim_start();
+    if raw.starts_with('!') {
+        return false;
+    }
+    let mut resolved = paths::resolve_user_path(&paths::normalize(raw), user_id);
+    if resolved.is_empty()
+        || paths::has_unsafe_segments(&resolved)
+        || !paths::contains_wildcards(&resolved)
+    {
+        return false;
+    }
+    if !paths::is_absolute(&resolved) {
+        resolved = paths::normalize(&paths::join(storage_root, &resolved));
+    }
+    if !paths::is_child(&resolved, storage_root) {
+        return false;
+    }
+
+    let prefix = paths::concrete_prefix_before_wildcard(&resolved);
+    let Some(collection) = public_collection_name(&prefix, storage_root) else {
+        return false;
+    };
+    matches!(collection, "DCIM" | "Pictures" | "Movies")
 }
 
 fn resolve_scoped_path_mappings(
@@ -2558,6 +2592,17 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_allowed_media_wildcard_uses_namespace_restore() {
+        let allowed = vec![
+            "DCIM/SrtFuseQQ/SrtAllowed*".to_string(),
+            "Download/SrtFuseQ?/Media".to_string(),
+        ];
+        let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
+
+        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
+    }
+
+    #[test]
     fn scoped_mount_roots_fall_back_to_storage_root_for_first_segment_wildcard() {
         let roots = scoped_mount_roots_for_wildcard_rules(10000, ["*/secret"]);
         assert_eq!(roots, vec!["/storage/emulated/0".to_string()]);
@@ -2983,7 +3028,7 @@ mod tests {
     fn scoped_fuse_wildcard_miss_under_mount_root_redirects() {
         let allowed = vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()];
         let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
-        assert_eq!(roots, vec!["/storage/emulated/0/DCIM".to_string()]);
+        assert!(roots.is_empty());
 
         let policy = RedirectPolicy::new(FuseRedirectConfig {
             package_name: "me.fakerqu.test.storageredirect".to_string(),

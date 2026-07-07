@@ -89,9 +89,21 @@ fn append_concrete_wildcard_mount_matches_from_root(
         || (!paths::eq_ignore_case(&scan_root, scan_storage_root)
             && !paths::is_child(&scan_root, scan_storage_root))
     {
+        log::debug!(
+            "wildcard scan skip root outside storage source={} scan_root={} storage={}",
+            source_rule,
+            scan_root,
+            scan_storage_root
+        );
         return;
     }
     if !std::path::Path::new(&scan_root).is_dir() {
+        log::debug!(
+            "wildcard scan skip missing root source={} scan_root={} storage={}",
+            source_rule,
+            scan_root,
+            scan_storage_root
+        );
         return;
     }
 
@@ -110,6 +122,14 @@ fn append_concrete_wildcard_mount_matches_from_root(
         scan_storage_root,
         &mut source_matches,
         &mut scanned_dirs,
+    );
+    log::debug!(
+        "wildcard scan root done source={} scan_root={} storage={} matches={} scanned={}",
+        source_rule,
+        scan_root,
+        scan_storage_root,
+        source_matches.len(),
+        scanned_dirs
     );
     for source_match in source_matches {
         let Some(relative) = paths::relative_child_path(&source_match, scan_storage_root) else {
