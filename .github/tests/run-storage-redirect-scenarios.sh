@@ -1565,6 +1565,14 @@ print_diagnostics() {
 capture_test_flow_artifacts() {
   adb logcat -d >test-flow-logcat.txt 2>/dev/null || true
   adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true; done" >test-flow-module-state.txt 2>/dev/null || true
+  {
+    echo "===app_pids==="
+    adb shell "pidof '$APP_ID' 2>/dev/null || true"
+    for pid in $(adb shell "pidof '$APP_ID' 2>/dev/null" | tr -d '\r'); do
+      echo "--- /proc/${pid}/mountinfo ---"
+      adb_su "cat '/proc/${pid}/mountinfo' 2>/dev/null | grep -E 'SrtMonitor|/storage|/mnt/runtime|/mnt/user|/mnt/installer|/mnt/androidwritable|/mnt/pass_through|fuse|srx' || true"
+    done
+  } >test-flow-app-mountinfo.txt 2>/dev/null || true
 }
 
 run_standard_scenario() {

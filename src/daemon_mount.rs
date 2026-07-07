@@ -876,6 +876,10 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     );
     append_unique_target(
         &mut alias_roots,
+        format!("/mnt/runtime/full/emulated/{}", user_str),
+    );
+    append_unique_target(
+        &mut alias_roots,
         format!("/mnt/installer/{}/emulated/{}", user_str, user_str),
     );
     append_unique_target(
@@ -1202,5 +1206,12 @@ mod tests {
             parse_mountinfo_target(line).as_deref(),
             Some("/storage/emulated/0/My Docs")
         );
+    }
+
+    #[test]
+    fn daemon_storage_aliases_include_runtime_full_view() {
+        let aliases = expand_storage_alias_paths_for_user("/storage/emulated/0/Download/Locked", 0);
+
+        assert!(aliases.contains(&"/mnt/runtime/full/emulated/0/Download/Locked".to_string()));
     }
 }

@@ -54,6 +54,10 @@ impl MountPlanner {
         );
         append_unique(
             &mut alias_roots,
+            format!("/mnt/runtime/full/emulated/{}", user_str),
+        );
+        append_unique(
+            &mut alias_roots,
             format!("/mnt/installer/{}/emulated/{}", user_str, user_str),
         );
         append_unique(
@@ -435,6 +439,7 @@ mod tests {
 
         assert!(aliases.contains(&"/storage/emulated/0/Download/Locked".to_string()));
         assert!(aliases.contains(&"/data/media/0/Download/Locked".to_string()));
+        assert!(aliases.contains(&"/mnt/runtime/full/emulated/0/Download/Locked".to_string()));
     }
 
     #[test]
