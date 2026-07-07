@@ -188,23 +188,7 @@ fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> Op
     if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
         return Some(storage_root.to_string());
     }
-    if should_leave_media_wildcard_to_namespace_mount(prefix, storage_root) {
-        return None;
-    }
     Some(prefix.to_string())
-}
-
-fn should_leave_media_wildcard_to_namespace_mount(prefix: &str, storage_root: &str) -> bool {
-    let Some(top_level) = top_level_storage_child(prefix, storage_root) else {
-        return false;
-    };
-    let Some(relative) = paths::relative_child_path(&top_level, storage_root) else {
-        return false;
-    };
-    matches!(
-        relative.to_ascii_lowercase().as_str(),
-        "dcim" | "pictures" | "movies" | "music"
-    )
 }
 
 pub fn scoped_mount_roots_for_hybrid_rules(
@@ -2533,17 +2517,29 @@ mod tests {
                 "Pictures/Camera/IMG_????.jpg",
             ],
         );
-        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
+        assert_eq!(
+            roots,
+            vec![
+                "/storage/emulated/0/Download".to_string(),
+                "/storage/emulated/0/Pictures/Camera".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn scoped_mount_roots_leave_media_wildcards_to_namespace_mount() {
+    fn scoped_mount_roots_include_media_wildcard_parents() {
         let roots = scoped_mount_roots_for_wildcard_rules(
             10000,
             ["DCIM/SrtFuseQQ/SrtAllowed*", "Download/SrtFuseQ?/Media"],
         );
 
-        assert_eq!(roots, vec!["/storage/emulated/0/Download".to_string()]);
+        assert_eq!(
+            roots,
+            vec![
+                "/storage/emulated/0/Download".to_string(),
+                "/storage/emulated/0/DCIM/SrtFuseQQ".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2969,7 +2965,10 @@ mod tests {
     fn scoped_fuse_wildcard_miss_under_mount_root_redirects() {
         let allowed = vec!["DCIM/SrtFuseQQ/SrtAllowed*".to_string()];
         let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
-        assert!(roots.is_empty());
+        assert_eq!(
+            roots,
+            vec!["/storage/emulated/0/DCIM/SrtFuseQQ".to_string()]
+        );
 
         let policy = RedirectPolicy::new(FuseRedirectConfig {
             package_name: "me.fakerqu.test.storageredirect".to_string(),
