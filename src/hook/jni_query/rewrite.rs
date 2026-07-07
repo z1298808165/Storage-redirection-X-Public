@@ -1088,6 +1088,12 @@ fn configured_placeholder_candidate_paths(
         }
         let request_len = request_relative.len();
         let is_download_request = relative_path_is_under(&request_relative, "Download");
+        if is_download_request {
+            if relative_path_is_under(&source.relative_path, &request_relative) {
+                push_unique_candidate(&mut candidates, source.path.clone(), 120, request_len);
+            }
+            continue;
+        }
         let request_keeps_suffix = !download_suffix.is_empty()
             && relative_ends_with_suffix(&request_relative, download_suffix);
         if !download_suffix.is_empty() && !request_keeps_suffix {
@@ -1109,13 +1115,7 @@ fn configured_placeholder_candidate_paths(
         push_unique_candidate(
             &mut candidates,
             request_path,
-            if is_download_request {
-                100
-            } else if request_keeps_suffix {
-                320
-            } else {
-                200
-            },
+            if request_keeps_suffix { 320 } else { 200 },
             request_len,
         );
     }
@@ -1953,6 +1953,24 @@ mod tests {
         assert_eq!(
             resolve_placeholder_path_by_mappings(&source, false, &mappings, 0).as_deref(),
             Some("/storage/emulated/0/Download/third-party/AppBucket/File_1")
+        );
+    }
+
+    #[test]
+    fn download_media_placeholder_ignores_unrelated_download_mapping() {
+        let source = DownloadMediaPlaceholderSource {
+            path: "/storage/emulated/0/Download/SrtMonitorLocked/Writable/File_1".to_string(),
+            relative_path: "Download/SrtMonitorLocked/Writable".to_string(),
+            file_name: "File_1".to_string(),
+        };
+        let mappings = vec![PathMapping::new(
+            "/storage/emulated/0/Download/SrtMonitorMap".to_string(),
+            "/storage/emulated/0/Download/SrtMonitorMapped".to_string(),
+        )];
+
+        assert_eq!(
+            resolve_placeholder_path_by_mappings(&source, false, &mappings, 0).as_deref(),
+            None
         );
     }
 
