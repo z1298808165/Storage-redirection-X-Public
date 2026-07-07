@@ -145,11 +145,9 @@ fn process_app_mount_namespace_redirect(
         if !mapped_path.is_empty() && mapped_path != resolved_path {
             let decision = RedirectDecision {
                 action: RedirectAction::Redirect,
-                new_path: resolve_system_writer_output_path(
-                    &normalized_path,
+                new_path: resolve_app_mount_namespace_mapping_output_path(
                     &mapped_path,
                     is_data_media,
-                    package_name,
                 ),
                 is_mapping: true,
             };
@@ -274,6 +272,22 @@ fn allowed_media_write_needs_backend_redirect(resolved_path: &str, user_id: i32)
         return false;
     };
     matches!(first, "DCIM" | "Pictures" | "Movies")
+}
+
+fn resolve_app_mount_namespace_mapping_output_path(
+    mapped_path: &str,
+    is_data_media_input: bool,
+) -> String {
+    if is_data_media_input {
+        return writer::storage_to_data_media_path(mapped_path);
+    }
+
+    let backend_path = writer::storage_to_data_media_path(mapped_path);
+    if backend_path.is_empty() {
+        mapped_path.to_string()
+    } else {
+        backend_path
+    }
 }
 
 // 根据进程身份决策路径重定向，系统代写进程使用按调用方映射
@@ -3106,8 +3120,51 @@ mod tests {
         assert!(decision.is_mapping);
         assert_eq!(
             decision.new_path,
-            "/storage/emulated/0/Download/Test/srt_ci_probe.txt"
+            "/data/media/0/Download/Test/srt_ci_probe.txt"
         );
+    }
+
+    #[test]
+    fn app_router_mapping_uses_real_backend_without_exposing_direct_target() {
+        let _guard = lock_app_router_test();
+        configure_app_router(
+            "org.srx.testapp",
+            10123,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[PathMapping::new(
+                "/storage/emulated/0/Download/SrtProbe".to_string(),
+                "/storage/emulated/0/Download/Test".to_string(),
+            )],
+            false,
+        );
+
+        let mapped_write = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/Download/SrtProbe/srt_ci_probe.txt",
+            true,
+            paths::monotonic_ms(),
+        );
+
+        assert!(mapped_write.is_redirect());
+        assert!(mapped_write.is_mapping);
+        assert_eq!(
+            mapped_write.new_path,
+            "/data/media/0/Download/Test/srt_ci_probe.txt"
+        );
+
+        let direct_target_read = process_app_mount_namespace_redirect(
+            "org.srx.testapp",
+            10123,
+            "/storage/emulated/0/Download/Test",
+            false,
+            paths::monotonic_ms(),
+        );
+
+        assert!(!direct_target_read.is_redirect());
     }
 
     #[test]
