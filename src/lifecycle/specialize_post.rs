@@ -61,6 +61,7 @@ impl RuntimeFlow {
                 self.should_monitor,
                 is_redirect_via_hook,
                 self.is_system_writer_boot_lite,
+                self.should_install_app_redirect_hook,
             )
         } else {
             log::info!(
@@ -236,6 +237,7 @@ fn install_plt_hook(
     should_monitor: bool,
     is_redirect_via_hook: bool,
     is_boot_lite: bool,
+    is_app_write_redirect: bool,
 ) -> bool {
     let is_monitor_only = !is_redirect_via_hook;
     let should_install = should_monitor || is_redirect_via_hook;
@@ -257,7 +259,9 @@ fn install_plt_hook(
     );
 
     let hub = InterceptHub::instance();
-    if is_boot_lite {
+    if is_app_write_redirect {
+        hub.init_app_write_redirect(package_name, should_monitor);
+    } else if is_boot_lite {
         hub.init_boot_lite(package_name, should_monitor);
     } else {
         hub.init(package_name, is_monitor_only, should_monitor);

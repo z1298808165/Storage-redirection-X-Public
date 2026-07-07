@@ -39,6 +39,7 @@ pub struct InterceptHub {
     is_hooks_installed: AtomicBool,
     is_fuse_fix_only: AtomicBool,
     is_boot_lite: AtomicBool,
+    is_app_write_only: AtomicBool,
     is_monitor_only: AtomicBool,
     is_monitor_enabled: AtomicBool,
     stats: AtomicStats,
@@ -104,6 +105,7 @@ impl InterceptHub {
             .store(is_monitor_only, Ordering::Relaxed);
         self.is_monitor_enabled
             .store(is_monitor_enabled, Ordering::Relaxed);
+        self.is_app_write_only.store(false, Ordering::Relaxed);
 
         log::info!(
             "hook manager init pkg={} redirect={} monitor={}",
@@ -129,6 +131,19 @@ impl InterceptHub {
         true
     }
 
+    pub fn init_app_write_redirect(&self, package_name: &str, is_monitor_enabled: bool) -> bool {
+        if !self.init(package_name, false, is_monitor_enabled) {
+            return false;
+        }
+        self.is_app_write_only.store(true, Ordering::Relaxed);
+        log::info!(
+            "hook manager app-write pkg={} monitor={}",
+            self.get_package_name(),
+            is_monitor_enabled
+        );
+        true
+    }
+
     pub fn init_boot_lite(&self, package_name: &str, is_monitor_enabled: bool) -> bool {
         if !self.init(package_name, false, is_monitor_enabled) {
             return false;
@@ -144,6 +159,10 @@ impl InterceptHub {
 
     pub fn is_monitor_enabled(&self) -> bool {
         self.is_monitor_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn is_app_write_only(&self) -> bool {
+        self.is_app_write_only.load(Ordering::Relaxed)
     }
 
     pub fn refresh_monitor_runtime_config(&self) {
@@ -254,6 +273,7 @@ impl InterceptHub {
             self.is_monitor_only(),
             self.is_fuse_fix_only.load(Ordering::Relaxed),
             self.is_boot_lite.load(Ordering::Relaxed),
+            self.is_app_write_only.load(Ordering::Relaxed),
         );
 
         let selected_hook_count = count_hooks_for_profile(active_profiles);
@@ -357,7 +377,7 @@ impl InterceptHub {
             );
         }
         if !refresh_errno.is_ok() {
-            if is_ignorable_refresh_failure(refresh_errno, &refresh_errors) {
+            if is_ignorable_refresh_failure(refresh_errno, &refresh_errors, profile_name) {
                 log::warn!(
                     "hook refresh degraded err={:?} errors_count={} profile={} pkg={}, keep hooks with ignored module failures",
                     refresh_errno,
@@ -484,9 +504,21 @@ impl InterceptHub {
 fn is_ignorable_refresh_failure(
     refresh_errno: srx_hook::SrxHookErrno,
     refresh_errors: &[srx_hook::RefreshError],
+    profile_name: &str,
 ) -> bool {
     if refresh_errors.is_empty() {
         return false;
+    }
+    if profile_name == "app-write" {
+        return matches!(
+            refresh_errno,
+            srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
+        ) && refresh_errors.iter().all(|err| {
+            matches!(
+                err.errno,
+                srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
+            )
+        });
     }
     if refresh_errno != srx_hook::SrxHookErrno::Format {
         return false;
@@ -502,7 +534,14 @@ fn select_hook_profile(
     is_monitor_only: bool,
     is_fuse_fix_only: bool,
     is_boot_lite: bool,
+    is_app_write_only: bool,
 ) -> (HookProfileSet, &'static str) {
+    if is_app_write_only {
+        return (
+            HookProfileSet::from_profile(HookProfile::AppWrite),
+            "app-write",
+        );
+    }
     if is_fuse_fix_only && is_monitor_only {
         return (
             HookProfileSet::from_profile(HookProfile::Monitor).with(HookProfile::FuseFix),
@@ -548,6 +587,7 @@ static INTERCEPT_HUB: InterceptHub = InterceptHub {
     is_hooks_installed: AtomicBool::new(false),
     is_fuse_fix_only: AtomicBool::new(false),
     is_boot_lite: AtomicBool::new(false),
+    is_app_write_only: AtomicBool::new(false),
     is_monitor_only: AtomicBool::new(false),
     is_monitor_enabled: AtomicBool::new(false),
     stats: AtomicStats::new(),

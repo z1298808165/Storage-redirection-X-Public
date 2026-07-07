@@ -5,6 +5,7 @@ pub enum HookProfile {
     SystemWriter = 1 << 2,
     FuseFix = 1 << 3,
     SystemWriterBootLite = 1 << 4,
+    AppWrite = 1 << 5,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,7 @@ const PROFILE_RW_MONITORED: HookProfileSet = HookProfileSet::from_profile(HookPr
     .with(HookProfile::Monitor)
     .with(HookProfile::SystemWriter)
     .with(HookProfile::SystemWriterBootLite);
+const PROFILE_OPEN_MONITORED: HookProfileSet = PROFILE_RW_MONITORED.with(HookProfile::AppWrite);
 const PROFILE_FULL_WRITER: HookProfileSet = HookProfileSet::from_profile(HookProfile::Full)
     .with(HookProfile::SystemWriter)
     .with(HookProfile::SystemWriterBootLite);
@@ -68,49 +70,49 @@ pub fn build_hook_entries() -> Vec<HookEntry> {
             symbol: "open",
             new_func: super::ops::open::hooked_open as *mut _,
             is_optional: false,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "open64",
             new_func: super::ops::open::hooked_open as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "__open_2",
             new_func: super::ops::open::hooked_open as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "openat",
             new_func: super::ops::open::hooked_openat as *mut _,
             is_optional: false,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "openat2",
             new_func: super::ops::open::hooked_openat2 as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "openat64",
             new_func: super::ops::open::hooked_openat as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "__openat_2",
             new_func: super::ops::open::hooked_openat as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "creat",
             new_func: super::ops::open::hooked_creat as *mut _,
             is_optional: true,
-            profiles: PROFILE_RW_MONITORED,
+            profiles: PROFILE_OPEN_MONITORED,
         },
         HookEntry {
             symbol: "stat",
@@ -386,6 +388,10 @@ mod tests {
             44
         );
         assert_eq!(
+            count_hooks_for_profile(HookProfileSet::from_profile(HookProfile::AppWrite)),
+            8
+        );
+        assert_eq!(
             count_hooks_for_profile(
                 HookProfileSet::from_profile(HookProfile::Monitor).with(HookProfile::FuseFix)
             ),
@@ -419,6 +425,23 @@ mod tests {
         assert_eq!(
             selected_symbols(HookProfileSet::from_profile(HookProfile::FuseFix)),
             vec!["read"]
+        );
+    }
+
+    #[test]
+    fn app_write_profile_only_hooks_open_family() {
+        assert_eq!(
+            selected_symbols(HookProfileSet::from_profile(HookProfile::AppWrite)),
+            vec![
+                "open",
+                "open64",
+                "__open_2",
+                "openat",
+                "openat2",
+                "openat64",
+                "__openat_2",
+                "creat"
+            ]
         );
     }
 }

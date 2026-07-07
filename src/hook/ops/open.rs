@@ -505,14 +505,23 @@ fn should_redirect_open_operation(
     is_system_writer: bool,
     flags: c_int,
 ) -> bool {
-    should_redirect_open_operation_for_mode(hub.is_monitor_only(), is_system_writer, flags)
+    should_redirect_open_operation_for_mode(
+        hub.is_monitor_only(),
+        hub.is_app_write_only(),
+        is_system_writer,
+        flags,
+    )
 }
 
 fn should_redirect_open_operation_for_mode(
     is_monitor_only: bool,
+    is_app_write_only: bool,
     is_system_writer: bool,
     flags: c_int,
 ) -> bool {
+    if is_app_write_only && !is_system_writer {
+        return monitor::has_write_intent_flags(flags);
+    }
     if is_system_writer {
         return monitor::has_write_intent_flags(flags);
     }
@@ -926,11 +935,13 @@ mod tests {
     fn monitor_only_system_writer_open_redirects_write_intent_only() {
         assert!(should_redirect_open_operation_for_mode(
             true,
+            false,
             true,
             libc::O_WRONLY | libc::O_CREAT
         ));
         assert!(!should_redirect_open_operation_for_mode(
             true,
+            false,
             true,
             libc::O_RDONLY
         ));
@@ -941,10 +952,28 @@ mod tests {
         assert!(!should_redirect_open_operation_for_mode(
             true,
             false,
+            false,
             libc::O_WRONLY | libc::O_CREAT
         ));
         assert!(should_redirect_open_operation_for_mode(
             false,
+            false,
+            false,
+            libc::O_RDONLY
+        ));
+    }
+
+    #[test]
+    fn app_write_only_redirects_write_intent_only() {
+        assert!(should_redirect_open_operation_for_mode(
+            false,
+            true,
+            false,
+            libc::O_WRONLY | libc::O_CREAT
+        ));
+        assert!(!should_redirect_open_operation_for_mode(
+            false,
+            true,
             false,
             libc::O_RDONLY
         ));
