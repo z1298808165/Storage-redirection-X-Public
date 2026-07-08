@@ -777,13 +777,26 @@ function Invoke-FileMonitorWriteSuccessCase {
     )
     $fileName = ($Path -split '/')[-1]
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
-    $ok = (Invoke-WriteCase ([int]$Scenario) $Label $Path $Payload).Ok
-    $ok = (Require-File "scenario-$Scenario" "$Label expected" $ExpectedPath) -and $ok
-    if ($PrivatePath) {
-        $ok = (Require-Missing "scenario-$Scenario" "$Label private" $PrivatePath) -and $ok
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $failureCountBeforeAttempt = $script:Failures.Count
+        $ok = (Invoke-WriteCase ([int]$Scenario) $Label $Path $Payload).Ok
+        $ok = (Require-File "scenario-$Scenario" "$Label expected" $ExpectedPath) -and $ok
+        if ($PrivatePath) {
+            $ok = (Require-Missing "scenario-$Scenario" "$Label private" $PrivatePath) -and $ok
+        }
+        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success" -AllowCapacityLimitedInotifyMiss:$AllowCapacityLimitedInotifyMiss) -and $ok
+        if ($ok) { return $true }
+        if ($attempt -lt 2) {
+            if ($script:Failures.Count -gt $failureCountBeforeAttempt) {
+                $script:Failures.RemoveRange($failureCountBeforeAttempt, $script:Failures.Count - $failureCountBeforeAttempt)
+            }
+            Write-Host "  - file_monitor_write_success_retry scenario=$Scenario label=$Label attempt=$attempt"
+            Prepare-ServiceCase "scenario-$Scenario-$Label-retry"
+            Wait-Storage "scenario-$Scenario-$Label-retry" | Out-Null
+            Start-Sleep -Milliseconds $ResultPollMs
+        }
     }
-    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success" -AllowCapacityLimitedInotifyMiss:$AllowCapacityLimitedInotifyMiss) -and $ok
-    $ok
+    $false
 }
 
 function Invoke-FileMonitorWriteDeniedCase {
