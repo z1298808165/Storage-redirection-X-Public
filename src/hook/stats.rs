@@ -557,16 +557,8 @@ fn is_ignorable_refresh_failure(
         return false;
     }
     if profile_name == "app-write" {
-        if matches!(
-            refresh_errno,
-            srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
-        ) {
-            return refresh_errors.iter().all(|err| {
-                matches!(
-                    err.errno,
-                    srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
-                )
-            });
+        if is_module_parse_refresh_failure(refresh_errno, refresh_errors) {
+            return true;
         }
 
         return refresh_errno == srx_hook::SrxHookErrno::SetProt
@@ -575,12 +567,32 @@ fn is_ignorable_refresh_failure(
                     && is_deleted_jit_memfd_module(&err.module_path)
             });
     }
+    if profile_name.starts_with("system-writer")
+        && is_module_parse_refresh_failure(refresh_errno, refresh_errors)
+    {
+        return true;
+    }
     if refresh_errno != srx_hook::SrxHookErrno::Format {
         return false;
     }
     refresh_errors.iter().all(|err| {
         err.errno == srx_hook::SrxHookErrno::Format
             && err.module_path.ends_with(SQLITE_MODULE_BASENAME)
+    })
+}
+
+fn is_module_parse_refresh_failure(
+    refresh_errno: srx_hook::SrxHookErrno,
+    refresh_errors: &[srx_hook::RefreshError],
+) -> bool {
+    matches!(
+        refresh_errno,
+        srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
+    ) && refresh_errors.iter().all(|err| {
+        matches!(
+            err.errno,
+            srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
+        )
     })
 }
 
@@ -765,6 +777,50 @@ mod refresh_failure_tests {
             srx_hook::SrxHookErrno::ReadElf,
             &errors,
             "app-write"
+        ));
+    }
+
+    #[test]
+    fn system_writer_ignores_readelf_format_module_parse_failures() {
+        let errors = vec![
+            refresh_error(
+                "/apex/com.android.art/lib64/libandroidio.so",
+                srx_hook::SrxHookErrno::Format,
+            ),
+            refresh_error(
+                "/system/lib64/libvndksupport.so",
+                srx_hook::SrxHookErrno::ReadElf,
+            ),
+        ];
+
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::Format,
+            &errors,
+            "system-writer"
+        ));
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::ReadElf,
+            &errors,
+            "system-writer-monitor"
+        ));
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::Format,
+            &errors,
+            "system-writer-boot-lite"
+        ));
+    }
+
+    #[test]
+    fn system_writer_keeps_setprot_failures_fatal() {
+        let errors = vec![refresh_error(
+            "/apex/com.android.runtime/lib64/bionic/libc.so",
+            srx_hook::SrxHookErrno::SetProt,
+        )];
+
+        assert!(!is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &errors,
+            "system-writer"
         ));
     }
 
