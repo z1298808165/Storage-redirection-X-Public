@@ -251,8 +251,18 @@ impl RuntimeFlow {
 
         let should_defer_media_boot_extras =
             self.defer_media_boot_extras_if_needed(&writer_context);
+        let should_install_media_provider_java_hook = should_install_java_hook_for_writer(
+            &writer_context,
+            self.is_system_writer_hook_redirect,
+            self.should_monitor,
+            should_defer_media_boot_extras,
+        );
+        if should_install_media_provider_java_hook {
+            self.should_keep_module_loaded = true;
+        }
 
-        if !self.should_redirect && !self.should_monitor {
+        if !self.should_redirect && !self.should_monitor && !should_install_media_provider_java_hook
+        {
             if !self.should_keep_module_loaded {
                 // 模块即将 dlclose，post 阶段不再做任何事，避免在转译进程里触碰匿名段
                 self.should_skip_post_work = true;
@@ -293,12 +303,7 @@ impl RuntimeFlow {
 
         // MediaProvider 的重定向 Java hook 仍在 pre 阶段安装；SAF 来源识别
         // 走 native 文件监视路径，避免在系统 provider 内加载 LSPlant。
-        if should_install_java_hook_for_writer(
-            &writer_context,
-            self.is_system_writer_hook_redirect,
-            self.should_monitor,
-            should_defer_media_boot_extras,
-        ) {
+        if should_install_media_provider_java_hook {
             install_java_hook(self.env);
         } else if (writer_context.is_system_writer || writer_context.is_monitor_bridge)
             && !writer_context.is_media_provider

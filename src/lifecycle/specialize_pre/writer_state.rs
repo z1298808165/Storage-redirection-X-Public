@@ -310,6 +310,42 @@ mod tests {
     }
 
     #[test]
+    fn media_provider_without_enabled_apps_still_installs_java_hook() {
+        let config = SettingsHub::new();
+        let config_dir = temp_config_dir("empty_java_hook");
+        std::fs::create_dir_all(config_dir.join("apps")).expect("create temp apps dir");
+        config.replace_test_config_dir(config_dir.to_string_lossy().into_owned());
+        config.replace_test_apps(HashMap::new());
+        config.replace_test_file_monitor_enabled(false);
+
+        let mut should_redirect = false;
+        let mut should_monitor = config.should_monitor("com.android.providers.media.module", 10305);
+        let mut is_hook_redirect = false;
+        let context = resolve_system_writer_context(
+            "com.android.providers.media.module",
+            10305,
+            &config,
+            &mut should_redirect,
+            &mut should_monitor,
+            &mut is_hook_redirect,
+        );
+
+        assert!(context.is_system_writer);
+        assert!(context.is_media_provider);
+        assert!(!should_redirect);
+        assert!(!should_monitor);
+        assert!(!is_hook_redirect);
+        assert!(should_install_java_hook_for_writer(
+            &context,
+            is_hook_redirect,
+            should_monitor,
+            false
+        ));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
     fn media_provider_without_enabled_apps_bypasses_fuse_fix_when_zero_width_fix_disabled() {
         let config = SettingsHub::new();
         let config_dir = temp_config_dir("fuse_fix_disabled");
