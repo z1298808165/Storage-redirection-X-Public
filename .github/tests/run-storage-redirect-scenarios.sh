@@ -558,7 +558,7 @@ remove_random_physical_media_files() {
 restart_media_provider() {
   local sdk
   sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
+  if [ -n "$sdk" ] && [ "$sdk" -le 33 ]; then
     echo "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator" >&2
     return 0
   fi
@@ -1124,6 +1124,8 @@ run_mediastore_image_relative_data_create_case() {
   local label="$2"
   local file_name="$3"
   local relative_data_dir="$4"
+  wait_storage_ready "scenario-${scenario}-${label}-mediastore-relative-storage" 30 >/dev/null || return 1
+  wait_media_provider_ready "scenario-${scenario}-${label}-mediastore-relative-provider" 60 >/dev/null || return 1
   run_service_case "$scenario" "$label" "mediastore_create_image_relative_data" '^PASS \[mediastore_create_image_relative_data\]' --es file_name "$file_name" --es relative_path "$relative_data_dir"
 }
 
@@ -1589,6 +1591,9 @@ run_file_monitor_regular_scenario() {
 
 run_file_monitor_mediastore_scenario() {
   local scenario="$1"
+  restart_media_provider
+  wait_storage_ready "scenario-${scenario}-mediastore-storage" 60 >/dev/null || return 1
+  wait_media_provider_ready "scenario-${scenario}-mediastore-provider" 120 >/dev/null || return 1
   run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
     { [ "$scenario" != "27" ] || check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT"; } &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" &&

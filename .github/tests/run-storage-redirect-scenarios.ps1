@@ -650,6 +650,13 @@ function Remove-RandomPhysicalMediaFiles {
 }
 
 function Restart-MediaProvider {
+    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
+    $sdk = 0
+    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 33) {
+        Write-Warning "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator"
+        return
+    }
+
     Invoke-Adb @("shell", "am", "force-stop", "com.android.providers.media.module") | Out-Null
     Invoke-Adb @("shell", "am", "force-stop", "com.google.android.providers.media.module") | Out-Null
     Invoke-Su "pkill -f com.android.providers.media.module 2>/dev/null || true; pkill -f com.google.android.providers.media.module 2>/dev/null || true" | Out-Null
@@ -846,6 +853,9 @@ function Invoke-RegularMonitorScenario {
 
 function Invoke-MediaStoreMonitorScenario {
     param([string]$Scenario)
+    Restart-MediaProvider
+    if (-not (Wait-Storage "scenario-$Scenario-mediastore-storage")) { return $false }
+    if (-not (Wait-MediaProviderReady "scenario-$Scenario-mediastore-provider")) { return $false }
     $ok = $true
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
     if ([int]$Scenario -eq 27) {
@@ -1046,6 +1056,8 @@ function Invoke-MediaStoreImageCreateCase {
 
 function Invoke-MediaStoreImageRelativeDataCreateCase {
     param([int]$Scenario, [string]$Label, [string]$FileName, [string]$RelativeDataDir)
+    if (-not (Wait-Storage "scenario-$Scenario-$Label-mediastore-relative-storage")) { return $false }
+    if (-not (Wait-MediaProviderReady "scenario-$Scenario-$Label-mediastore-relative-provider")) { return $false }
     Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_image_relative_data" @{ file_name = $FileName; relative_path = $RelativeDataDir } "^PASS \[mediastore_create_image_relative_data\]"
 }
 
