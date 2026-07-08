@@ -109,14 +109,16 @@ pub(super) fn should_install_java_hook_for_writer(
     context: &SystemWriterContext,
     is_system_writer_hook_redirect: bool,
     _should_monitor: bool,
-    should_defer_media_boot_extras: bool,
+    _should_defer_media_boot_extras: bool,
 ) -> bool {
     // MediaProvider 的 ContentValues 路径补丁需要 Java hook；FUSE/文件监视
-    // 支撑路径也要覆盖已经运行的 MediaProvider 进程。
+    // 支撑路径也要覆盖已经运行的 MediaProvider 进程。boot-lite 只推迟
+    // native/FUSE extras；Java ContentValues mutation 必须预装，否则
+    // Android 13 上无法安全重启的旧 MediaProvider 会永远缺失相对 _data 补丁。
     let should_hook_media_provider = context.is_system_writer
         && context.is_media_provider
         && (is_system_writer_hook_redirect || context.should_install_fuse_fix);
-    should_hook_media_provider && !should_defer_media_boot_extras
+    should_hook_media_provider
 }
 
 pub(super) fn mark_media_hook_deferred() {

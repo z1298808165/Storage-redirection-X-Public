@@ -1032,8 +1032,8 @@ mod tests {
             false,
         ));
 
-        // defer 时不安装
-        assert!(!should_install_java_hook_for_writer(
+        // boot-lite/defer 只推迟 native extras，Java ContentValues mutation 仍需预装。
+        assert!(should_install_java_hook_for_writer(
             &writer_context(true),
             true,
             false,
