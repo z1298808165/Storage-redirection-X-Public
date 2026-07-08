@@ -536,7 +536,9 @@ function Test-MediaProviderQueryReady {
     }
     if ($text -match "Error while accessing provider:media" -or
         $text -match "Volume external_primary not found" -or
-        $text -match "IllegalArgumentException") {
+        $text -match "IllegalArgumentException" -or
+        $text -match "Unknown URL" -or
+        $text -match "Unsupported Uri") {
         return $false
     }
     return $true
@@ -547,6 +549,11 @@ function Wait-MediaProviderReady {
 
     $deadline = (Get-Date).AddSeconds(120)
     $uris = @(
+        "content://media/external_primary/images/media",
+        "content://media/external_primary/video/media",
+        "content://media/external_primary/audio/media",
+        "content://media/external_primary/file",
+        "content://media/external_primary/downloads",
         "content://media/external/images/media",
         "content://media/external/video/media",
         "content://media/external/audio/media",

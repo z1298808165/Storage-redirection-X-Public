@@ -866,7 +866,7 @@ media_provider_query_ready() {
   local uri="$1"
   local output
   output="$(adb shell content query --uri "$uri" --projection _id --where '_id=-1' 2>&1 || true)"
-  if grep -Eq 'Error while accessing provider:media|Volume external_primary not found|IllegalArgumentException' <<<"$output"; then
+  if grep -Eq 'Error while accessing provider:media|Volume external_primary not found|IllegalArgumentException|Unknown URL|Unsupported Uri' <<<"$output"; then
     return 1
   fi
   return 0
@@ -877,6 +877,11 @@ wait_media_provider_ready() {
   local timeout_seconds="${2:-120}"
   local deadline=$((SECONDS + timeout_seconds))
   local uris=(
+    "content://media/external_primary/images/media"
+    "content://media/external_primary/video/media"
+    "content://media/external_primary/audio/media"
+    "content://media/external_primary/file"
+    "content://media/external_primary/downloads"
     "content://media/external/images/media"
     "content://media/external/video/media"
     "content://media/external/audio/media"
@@ -1695,6 +1700,8 @@ run_config_hot_reload_scenario() {
 }
 
 check_health() {
+  wait_storage_ready "health" 30 >/dev/null || return 1
+  wait_media_provider_ready "health" 60 >/dev/null || return 1
   adb shell "count=\$(ps -A | grep -c 'com.google.android.providers.media.module' || true); echo media_count=\$count; ps -A | grep 'com.google.android.providers.media.module' || true; pid=\$(pidof com.google.android.providers.media.module 2>/dev/null || true); echo media_pid=\$pid; if [ -n \"\$pid\" ]; then echo threads=\$(ls /proc/\$pid/task 2>/dev/null | wc -l); ps -A -o PID,RSS,NAME | grep 'com.google.android.providers.media.module' || true; fi" | tee media-health.txt
   local count
   count="$(sed -n 's/^media_count=//p' media-health.txt | tail -1)"
