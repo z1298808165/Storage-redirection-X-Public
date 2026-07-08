@@ -153,6 +153,7 @@ class TestService : Service() {
     }
 
     private fun writeResultFile(file: File, results: List<TestResult>) {
+        file.parentFile?.mkdirs()
         file.bufferedWriter().use { writer ->
             results.forEach { result ->
                 writer.write(result.toLogLine())
@@ -163,6 +164,7 @@ class TestService : Service() {
     }
 
     private fun writeCurrentResultFile(resultDir: File, results: List<TestResult>) {
+        resultDir.mkdirs()
         val file = File(resultDir, RESULT_CURRENT_FILE)
         val temp = File(resultDir, "$RESULT_CURRENT_FILE.tmp")
         if (temp.exists()) temp.delete()
