@@ -22,6 +22,7 @@ enum class TestCase(val id: String) {
     MEDIASTORE_QUERY_PATH_DOWNLOAD("mediastore_query_path_download"),
 
     MEDIASTORE_CREATE_IMAGE("mediastore_create_image"),
+    MEDIASTORE_CREATE_IMAGE_RELATIVE_DATA("mediastore_create_image_relative_data"),
     MEDIASTORE_CREATE_VIDEO("mediastore_create_video"),
     MEDIASTORE_CREATE_AUDIO("mediastore_create_audio"),
     MEDIASTORE_CREATE_FILE("mediastore_create_file"),
@@ -81,7 +82,7 @@ enum class TestCase(val id: String) {
     FILE_SYMLINK_DENIED("file_symlink_denied");
 
     fun getMediaType(): IMediaStoreApi.MediaType? = when (this) {
-        MEDIASTORE_QUERY_IMAGE, MEDIASTORE_QUERY_READ_ONLY_IMAGE, MEDIASTORE_QUERY_PATH_IMAGE, MEDIASTORE_CREATE_IMAGE, MEDIASTORE_CREATE_IMAGE_DENIED, MEDIASTORE_READ_IMAGE,
+        MEDIASTORE_QUERY_IMAGE, MEDIASTORE_QUERY_READ_ONLY_IMAGE, MEDIASTORE_QUERY_PATH_IMAGE, MEDIASTORE_CREATE_IMAGE, MEDIASTORE_CREATE_IMAGE_RELATIVE_DATA, MEDIASTORE_CREATE_IMAGE_DENIED, MEDIASTORE_READ_IMAGE,
         MEDIASTORE_WRITE_IMAGE, MEDIASTORE_DELETE_IMAGE, MEDIASTORE_THUMBNAIL_IMAGE ->
             IMediaStoreApi.MediaType.IMAGE
 
@@ -146,6 +147,7 @@ enum class TestCase(val id: String) {
             MEDIASTORE_QUERY_PATH_DOWNLOAD -> mediaStore.queryDownloadPath(args)
 
             MEDIASTORE_CREATE_IMAGE -> mediaStore.createImage(args)
+            MEDIASTORE_CREATE_IMAGE_RELATIVE_DATA -> mediaStore.createImageRelativeData(args)
             MEDIASTORE_CREATE_VIDEO -> mediaStore.createVideo(args)
             MEDIASTORE_CREATE_AUDIO -> mediaStore.createAudio(args)
             MEDIASTORE_CREATE_FILE -> mediaStore.createFile(args)

@@ -7,12 +7,27 @@ use crate::redirect::{
     RedirectAction, RedirectDecision, policy, process_redirect_path, process_write_redirect_path,
     writer,
 };
+use std::borrow::Cow;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 static REWRITE_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 static VISIBILITY_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 const READ_ONLY_DENIED_SENTINEL_PREFIX: &str = "__SRX_READ_ONLY_DENIED__:";
+const MEDIASTORE_RELATIVE_ROOTS: [&str; 12] = [
+    "Alarms",
+    "Audiobooks",
+    "DCIM",
+    "Documents",
+    "Download",
+    "Movies",
+    "Music",
+    "Notifications",
+    "Pictures",
+    "Podcasts",
+    "Recordings",
+    "Ringtones",
+];
 
 // MediaProvider cursor rows can hit this path very frequently. Keep inotify as
 // the fast path, and use a throttled fingerprint check so missed watcher events
@@ -182,7 +197,17 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     if caller_uid < 0 {
         return None;
     }
-    let (path_text, has_file_scheme) = split_media_store_value_path(original_text)?;
+    let (path_value, has_file_scheme, normalized_from_relative) =
+        if let Some((path_text, has_file_scheme)) = split_media_store_value_path(original_text) {
+            (Cow::Borrowed(path_text), has_file_scheme, false)
+        } else if let Some(normalized) =
+            normalize_media_store_relative_value_path(original_text, caller_uid)
+        {
+            (Cow::Owned(normalized), false, true)
+        } else {
+            return None;
+        };
+    let path_text = path_value.as_ref();
     let (caller_package, effective_uid) = resolve_storage_caller_context(caller_uid, path_text);
     if caller_package.is_empty() {
         return None;
@@ -222,6 +247,9 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     hub.set_current_caller_package(&previous_package);
     hub.set_current_caller_uid(previous_uid);
     if !decision.is_redirect() || decision.new_path.is_empty() {
+        if normalized_from_relative {
+            return Some(path_text.to_string());
+        }
         return None;
     }
     if decision.is_mapping {
@@ -1489,6 +1517,35 @@ fn split_media_store_value_path(text: &str) -> Option<(&str, bool)> {
     None
 }
 
+fn normalize_media_store_relative_value_path(text: &str, caller_uid: i32) -> Option<String> {
+    if text.is_empty()
+        || text.starts_with('/')
+        || text.starts_with(FILE_SCHEME_PREFIX)
+        || text.contains('\\')
+    {
+        return None;
+    }
+    let mut segments = text.split('/');
+    let root = segments.next()?;
+    if !MEDIASTORE_RELATIVE_ROOTS.contains(&root) {
+        return None;
+    }
+    if segments.clone().next().is_none() {
+        return None;
+    }
+    if segments
+        .clone()
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    let user_id = platform::user_id_from_uid(caller_uid);
+    if user_id < 0 {
+        return None;
+    }
+    Some(format!("/storage/emulated/{}/{}", user_id, text))
+}
+
 fn is_media_store_value_path(path: &str) -> bool {
     STORAGE_PREFIXES
         .iter()
@@ -2153,6 +2210,33 @@ mod tests {
             )
             .as_deref(),
             Some("file:///storage/emulated/0/Download/Nnngram/app.apk")
+        );
+    }
+
+    #[test]
+    fn normalizes_safe_media_store_relative_data_values() {
+        assert_eq!(
+            normalize_media_store_relative_value_path("Pictures/Nnngram/photo.jpg", 10312)
+                .as_deref(),
+            Some("/storage/emulated/0/Pictures/Nnngram/photo.jpg")
+        );
+        assert_eq!(
+            normalize_media_store_relative_value_path("DCIM/Camera/photo.jpg", 110312).as_deref(),
+            Some("/storage/emulated/1/DCIM/Camera/photo.jpg")
+        );
+        assert!(
+            normalize_media_store_relative_value_path("Pictures/../photo.jpg", 10312).is_none()
+        );
+        assert!(normalize_media_store_relative_value_path("Pictures\\photo.jpg", 10312).is_none());
+        assert!(
+            normalize_media_store_relative_value_path("Android/data/app/file.jpg", 10312).is_none()
+        );
+        assert!(
+            normalize_media_store_relative_value_path(
+                "/storage/emulated/0/Pictures/photo.jpg",
+                10312
+            )
+            .is_none()
         );
     }
 

@@ -172,6 +172,78 @@ class MediaStoreApiImpl(private val context: Context) : IMediaStoreApi {
         return uri
     }
 
+    override fun createMediaWithRelativeData(
+        mediaType: IMediaStoreApi.MediaType,
+        volumeType: IMediaStoreApi.VolumeType,
+        relativeDataPath: String,
+        content: ByteArray,
+        keepPending: Boolean
+    ): Uri? {
+        val normalizedData = normalizeRelativeDataPath(relativeDataPath) ?: return null
+        if (content.isEmpty()) return null
+        val collectionUri = resolveCollectionUri(mediaType, volumeType)
+        val fileName = normalizedData.substringAfterLast('/')
+        if (fileName.isBlank()) return null
+        val relativePath = normalizedData.substringBeforeLast('/', missingDelimiterValue = "")
+            .takeIf { it.isNotBlank() }
+            ?.let { "$it/" }
+            ?: return null
+        deleteExistingMediaRows(collectionUri, relativePath, fileName)
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            put(MediaStore.MediaColumns.MIME_TYPE, guessMimeType(fileName, mediaType))
+            put(MediaStore.MediaColumns.DATA, normalizedData)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+            if (mediaType == IMediaStoreApi.MediaType.FILE) {
+                put(
+                    MediaStore.Files.FileColumns.MEDIA_TYPE,
+                    MediaStore.Files.FileColumns.MEDIA_TYPE_NONE
+                )
+            }
+        }
+        val uri = try {
+            context.contentResolver.insert(collectionUri, values)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        val written = try {
+            context.contentResolver.openFileDescriptor(uri, "w")?.use { fd ->
+                ParcelFileDescriptor.AutoCloseOutputStream(fd).use { stream ->
+                    stream.write(content)
+                    stream.flush()
+                }
+                true
+            } ?: false
+        } catch (_: Exception) {
+            false
+        }
+        if (!written) {
+            try {
+                context.contentResolver.delete(uri, null, null)
+            } catch (_: Exception) {
+            }
+            return null
+        }
+        if (!keepPending) {
+            val publishedValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+                put(MediaStore.MediaColumns.SIZE, content.size.toLong())
+            }
+            return try {
+                context.contentResolver.update(uri, publishedValues, null, null)
+                uri
+            } catch (_: Exception) {
+                try {
+                    context.contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                }
+                deleteExistingMediaRows(collectionUri, relativePath, fileName)
+                null
+            }
+        }
+        return uri
+    }
+
     private fun deleteExistingMediaRows(collectionUri: Uri, relativePath: String, fileName: String) {
         val normalizedRelative = relativePath.trim('/')
         val publicSuffix = "/$normalizedRelative/$fileName"
@@ -304,6 +376,17 @@ class MediaStoreApiImpl(private val context: Context) : IMediaStoreApi {
             ?.trim()
             .orEmpty()
         return cleaned.takeIf { it.isNotBlank() }?.let { "$it/" }
+    }
+
+    private fun normalizeRelativeDataPath(path: String?): String? {
+        val cleaned = path
+            ?.replace('\\', '/')
+            ?.split('/')
+            ?.filter { it.isNotBlank() && it != "." && it != ".." }
+            ?.joinToString("/")
+            ?.trim()
+            .orEmpty()
+        return cleaned.takeIf { it.isNotBlank() && !it.startsWith('/') }
     }
 
     private fun guessMimeType(fileName: String, mediaType: IMediaStoreApi.MediaType): String {

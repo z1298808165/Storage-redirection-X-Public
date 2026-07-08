@@ -62,6 +62,14 @@ interface IMediaStoreApi {
         keepPending: Boolean = false
     ): Uri?
 
+    fun createMediaWithRelativeData(
+        mediaType: MediaType,
+        volumeType: VolumeType,
+        relativeDataPath: String,
+        content: ByteArray,
+        keepPending: Boolean = false
+    ): Uri?
+
     /**
      * 删除 MediaStore 中的指定条目（含底层文件）。
      * @param uri 条目的 content URI（如 [createMedia] 的返回值，或由集合 URI + `_ID` 拼接）

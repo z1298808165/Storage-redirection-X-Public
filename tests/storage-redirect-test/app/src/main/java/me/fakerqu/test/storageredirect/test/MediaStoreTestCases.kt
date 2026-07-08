@@ -48,6 +48,9 @@ class MediaStoreTestCases(context: Context) {
     fun createImage(args: TestCaseArgs): TestResult =
         create(TestCase.MEDIASTORE_CREATE_IMAGE, IMediaStoreApi.MediaType.IMAGE, args)
 
+    fun createImageRelativeData(args: TestCaseArgs): TestResult =
+        createRelativeData(TestCase.MEDIASTORE_CREATE_IMAGE_RELATIVE_DATA, IMediaStoreApi.MediaType.IMAGE, args)
+
     fun createImageDenied(args: TestCaseArgs): TestResult =
         createDenied(TestCase.MEDIASTORE_CREATE_IMAGE_DENIED, IMediaStoreApi.MediaType.IMAGE, args)
 
@@ -216,6 +219,41 @@ class MediaStoreTestCases(context: Context) {
                 "uri" to uri.toString(),
                 "fileName" to fileName,
                 "relativePath" to args.relativePath.orEmpty(),
+            ),
+        )
+    }
+
+    private fun createRelativeData(
+        testCase: TestCase,
+        mediaType: IMediaStoreApi.MediaType,
+        args: TestCaseArgs,
+    ): TestResult = testCase.measure {
+        val payload = args.payloadOr(TestFixtures.initialPayload(mediaType))
+        val relativePath = args.relativePath
+            ?: return@measure testCase.fail(
+                message = "missing required parameter: ${TestCaseArgs.EXTRA_RELATIVE_PATH}",
+                metadata = mapOf("hint" to "pass relative _data path via --es ${TestCaseArgs.EXTRA_RELATIVE_PATH}"),
+            )
+        val fileName = args.fileName ?: relativePath.substringAfterLast("/")
+        val relativeDataPath = if (relativePath.endsWith("/$fileName")) {
+            relativePath
+        } else {
+            "${relativePath.trimEnd('/')}/$fileName"
+        }
+        val uri = api.createMediaWithRelativeData(
+            mediaType,
+            volume,
+            relativeDataPath,
+            payload,
+            args.keepPending,
+        )
+            ?: return@measure testCase.fail("createMediaWithRelativeData returned null")
+        testCase.pass(
+            message = "create with relative DATA succeeded",
+            metadata = mapOf(
+                "uri" to uri.toString(),
+                "fileName" to fileName,
+                "relativeDataPath" to relativeDataPath,
             ),
         )
     }
