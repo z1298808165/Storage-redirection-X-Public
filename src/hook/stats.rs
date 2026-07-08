@@ -312,7 +312,7 @@ impl InterceptHub {
         let mut hook_list: Vec<&'static str> = Vec::new();
         let mut optional_missing: Vec<&'static str> = Vec::new();
         let mut required_failed: Vec<&'static str> = Vec::new();
-        let caller_allow_filter = if profile_name.starts_with("system-writer") {
+        let caller_allow_filter = if should_use_bridge_caller_filter(profile_name) {
             system_writer_hook_caller_allow_filter
         } else {
             hook_caller_allow_filter
@@ -594,7 +594,7 @@ fn is_ignorable_refresh_failure(
                     && is_deleted_jit_memfd_module(&err.module_path)
             });
     }
-    if profile_name.starts_with("system-writer")
+    if should_use_bridge_caller_filter(profile_name)
         && is_module_parse_refresh_failure(refresh_errno, refresh_errors)
     {
         return true;
@@ -621,6 +621,12 @@ fn is_module_parse_refresh_failure(
             srx_hook::SrxHookErrno::ReadElf | srx_hook::SrxHookErrno::Format
         )
     })
+}
+
+fn should_use_bridge_caller_filter(profile_name: &str) -> bool {
+    profile_name.starts_with("system-writer")
+        || profile_name == "monitor"
+        || profile_name == "media-runtime"
 }
 
 fn is_deleted_jit_memfd_module(module_path: &str) -> bool {
@@ -888,6 +894,31 @@ mod refresh_failure_tests {
     }
 
     #[test]
+    fn monitor_bridge_ignores_readelf_format_module_parse_failures() {
+        let errors = vec![
+            refresh_error(
+                "/apex/com.android.art/lib64/libandroidio.so",
+                srx_hook::SrxHookErrno::Format,
+            ),
+            refresh_error(
+                "/system/lib64/libvndksupport.so",
+                srx_hook::SrxHookErrno::ReadElf,
+            ),
+        ];
+
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::Format,
+            &errors,
+            "monitor"
+        ));
+        assert!(is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::ReadElf,
+            &errors,
+            "media-runtime"
+        ));
+    }
+
+    #[test]
     fn system_writer_keeps_setprot_failures_fatal() {
         let errors = vec![refresh_error(
             "/apex/com.android.runtime/lib64/bionic/libc.so",
@@ -898,6 +929,11 @@ mod refresh_failure_tests {
             srx_hook::SrxHookErrno::SetProt,
             &errors,
             "system-writer"
+        ));
+        assert!(!is_ignorable_refresh_failure(
+            srx_hook::SrxHookErrno::SetProt,
+            &errors,
+            "monitor"
         ));
     }
 
@@ -978,6 +1014,15 @@ mod caller_filter_tests {
         assert!(should_hook_caller_module(
             "/apex/com.android.art/lib64/libandroidio.so"
         ));
+    }
+
+    #[test]
+    fn bridge_profiles_use_strict_caller_filter() {
+        assert!(should_use_bridge_caller_filter("system-writer"));
+        assert!(should_use_bridge_caller_filter("system-writer-monitor"));
+        assert!(should_use_bridge_caller_filter("monitor"));
+        assert!(should_use_bridge_caller_filter("media-runtime"));
+        assert!(!should_use_bridge_caller_filter("app-write"));
     }
 
     #[test]
