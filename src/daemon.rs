@@ -12,6 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 const RECONCILE_INTERVAL_MS: u64 = 1000;
+const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
@@ -49,6 +50,7 @@ pub fn main_entry() -> i32 {
 
     let mut last_version = 0;
     let mut last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
+    let mut last_periodic_reconcile_ms = crate::platform::paths::monotonic_ms();
     let mut round: usize = 0;
     let mut pending_full_reconcile = false;
     let mut file_monitor = RegularAppMonitor::new();
@@ -60,11 +62,13 @@ pub fn main_entry() -> i32 {
         let before = config.config_version();
         let did_reload = reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
         let current = config.config_version();
+        let periodic_reconcile = should_periodic_reconcile(&mut last_periodic_reconcile_ms);
         let should_reconcile = round < INITIAL_RECONCILE_ROUNDS
             || did_reload
             || current != last_version
             || current != before
-            || pending_full_reconcile;
+            || pending_full_reconcile
+            || periodic_reconcile;
         if should_reconcile {
             policy::refresh_shared_uid_cache();
             let mode = if pending_full_reconcile {
@@ -84,6 +88,19 @@ pub fn main_entry() -> i32 {
         round = round.saturating_add(1);
         thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
     }
+}
+
+fn should_periodic_reconcile(last_reconcile_ms: &mut i64) -> bool {
+    let now_ms = crate::platform::paths::monotonic_ms();
+    should_periodic_reconcile_at(last_reconcile_ms, now_ms)
+}
+
+fn should_periodic_reconcile_at(last_reconcile_ms: &mut i64, now_ms: i64) -> bool {
+    if now_ms.saturating_sub(*last_reconcile_ms) < PERIODIC_RECONCILE_INTERVAL_MS {
+        return false;
+    }
+    *last_reconcile_ms = now_ms;
+    true
 }
 
 fn should_prewarm_reconcile(
@@ -247,6 +264,16 @@ mod tests {
         assert!(should_prewarm_reconcile(5, false, 2, 1, 2));
         assert!(should_prewarm_reconcile(5, false, 2, 2, 1));
         assert!(!should_prewarm_reconcile(5, false, 2, 2, 2));
+    }
+
+    #[test]
+    fn periodic_reconcile_runs_after_interval() {
+        let mut last_reconcile_ms = 0;
+        assert!(!should_periodic_reconcile_at(&mut last_reconcile_ms, 2_999));
+        assert!(should_periodic_reconcile_at(&mut last_reconcile_ms, 3_000));
+        assert_eq!(last_reconcile_ms, 3_000);
+        assert!(!should_periodic_reconcile_at(&mut last_reconcile_ms, 5_999));
+        assert!(should_periodic_reconcile_at(&mut last_reconcile_ms, 6_000));
     }
 
     fn plan(operation: MountOperation, has_mount_state: bool) -> ReconcilePlan {
