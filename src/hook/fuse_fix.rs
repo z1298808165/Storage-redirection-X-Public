@@ -148,6 +148,14 @@ fn install_target_if_enabled() {
         INSTALL_ATTEMPTED.store(true, Ordering::Relaxed);
         return;
     }
+    if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level()) {
+        if !INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel) {
+            log::warn!(
+                "fuse fix native hooks skipped on Android 14 x86_64; Java media mutation remains active"
+            );
+        }
+        return;
+    }
     if !enabled {
         if !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
             log::info!(
@@ -244,6 +252,10 @@ fn find_first_plt_slot(elf: &ElfImg, symbol: &str) -> *mut c_void {
         .next()
         .map(|slot| slot as *mut c_void)
         .unwrap_or(std::ptr::null_mut())
+}
+
+fn should_skip_native_fuse_fix_for_platform(api_level: i32) -> bool {
+    cfg!(target_arch = "x86_64") && api_level == 34
 }
 
 fn register_compare_hooks_once() {
@@ -422,4 +434,23 @@ fn patch_plt_slot(slot: usize, replacement: usize) -> bool {
         );
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_14_x86_64_skips_native_fuse_fix() {
+        assert_eq!(
+            should_skip_native_fuse_fix_for_platform(34),
+            cfg!(target_arch = "x86_64")
+        );
+    }
+
+    #[test]
+    fn other_android_versions_keep_native_fuse_fix_available() {
+        assert!(!should_skip_native_fuse_fix_for_platform(33));
+        assert!(!should_skip_native_fuse_fix_for_platform(35));
+    }
 }

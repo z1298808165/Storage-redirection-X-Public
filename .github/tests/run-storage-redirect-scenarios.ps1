@@ -659,7 +659,7 @@ function Remove-RandomPhysicalMediaFiles {
 function Restart-MediaProvider {
     $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
     $sdk = 0
-    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 33) {
+    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) {
         Write-Warning "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator"
         return
     }
