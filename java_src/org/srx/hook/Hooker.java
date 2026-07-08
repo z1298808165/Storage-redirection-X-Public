@@ -1800,6 +1800,7 @@ public class Hooker {
         if (mappedPath != null && !mappedPath.equals(originalPath)) {
           patched = copyIfNeeded(patched, values);
           patched.put(dataKey, mappedPath);
+          patchRelativePathFromDataIfMissing(patched, mappedPath, callerUid);
         }
       }
     }
@@ -2767,6 +2768,21 @@ public class Hooker {
       values.put("primary_directory", primary);
     if (values.containsKey("secondary_directory"))
       values.put("secondary_directory", secondary);
+  }
+
+  private static void patchRelativePathFromDataIfMissing(ContentValues values,
+                                                         String dataPath,
+                                                         int callerUid) {
+    if (values == null || dataPath == null || dataPath.length() == 0)
+      return;
+    String current = values.getAsString("relative_path");
+    if (current != null && current.length() > 0)
+      return;
+    String relative = relativePathFromStoragePath(dataPath, callerUid);
+    if (relative == null || relative.length() == 0)
+      return;
+    values.put("relative_path", relative);
+    patchDirectoryColumns(values, relative);
   }
 
   private static String relativePathFromDirectoryColumns(ContentValues values) {
