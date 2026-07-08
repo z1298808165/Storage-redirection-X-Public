@@ -624,9 +624,7 @@ fn is_module_parse_refresh_failure(
 }
 
 fn should_use_bridge_caller_filter(profile_name: &str) -> bool {
-    profile_name.starts_with("system-writer")
-        || profile_name == "monitor"
-        || profile_name == "media-runtime"
+    profile_name.starts_with("system-writer") || profile_name == "monitor"
 }
 
 fn is_deleted_jit_memfd_module(module_path: &str) -> bool {
@@ -911,11 +909,6 @@ mod refresh_failure_tests {
             &errors,
             "monitor"
         ));
-        assert!(is_ignorable_refresh_failure(
-            srx_hook::SrxHookErrno::ReadElf,
-            &errors,
-            "media-runtime"
-        ));
     }
 
     #[test]
@@ -1021,7 +1014,7 @@ mod caller_filter_tests {
         assert!(should_use_bridge_caller_filter("system-writer"));
         assert!(should_use_bridge_caller_filter("system-writer-monitor"));
         assert!(should_use_bridge_caller_filter("monitor"));
-        assert!(should_use_bridge_caller_filter("media-runtime"));
+        assert!(!should_use_bridge_caller_filter("media-runtime"));
         assert!(!should_use_bridge_caller_filter("app-write"));
     }
 
