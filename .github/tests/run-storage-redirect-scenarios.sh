@@ -558,7 +558,7 @@ remove_random_physical_media_files() {
 restart_media_provider() {
   local sdk
   sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 33 ]; then
+  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
     echo "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator" >&2
     return 0
   fi
