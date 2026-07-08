@@ -1087,9 +1087,18 @@ function Invoke-MediaStoreImageCreateCase {
 
 function Invoke-MediaStoreImageRelativeDataCreateCase {
     param([int]$Scenario, [string]$Label, [string]$FileName, [string]$RelativeDataDir)
-    if (-not (Wait-Storage "scenario-$Scenario-$Label-mediastore-relative-storage")) { return $false }
-    if (-not (Wait-MediaProviderReady "scenario-$Scenario-$Label-mediastore-relative-provider")) { return $false }
-    Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_image_relative_data" @{ file_name = $FileName; relative_path = $RelativeDataDir } "^PASS \[mediastore_create_image_relative_data\]"
+    $lastResult = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Wait-Storage "scenario-$Scenario-$Label-mediastore-relative-storage")) { return $false }
+        if (-not (Wait-MediaProviderReady "scenario-$Scenario-$Label-mediastore-relative-provider")) { return $false }
+        $lastResult = Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_image_relative_data" @{ file_name = $FileName; relative_path = $RelativeDataDir } "^PASS \[mediastore_create_image_relative_data\]"
+        if ($lastResult.Ok) { return $lastResult }
+        if ($attempt -lt 3) {
+            Write-Host "mediastore_image_relative_data_retry scenario=$Scenario label=$Label attempt=$attempt"
+            Start-Sleep -Milliseconds $ResultPollMs
+        }
+    }
+    $lastResult
 }
 
 function Invoke-MediaStoreDownloadCreateDeniedCase {

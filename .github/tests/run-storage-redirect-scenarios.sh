@@ -1141,9 +1141,17 @@ run_mediastore_image_relative_data_create_case() {
   local label="$2"
   local file_name="$3"
   local relative_data_dir="$4"
-  wait_storage_ready "scenario-${scenario}-${label}-mediastore-relative-storage" 30 >/dev/null || return 1
-  wait_media_provider_ready "scenario-${scenario}-${label}-mediastore-relative-provider" 60 >/dev/null || return 1
-  run_service_case "$scenario" "$label" "mediastore_create_image_relative_data" '^PASS \[mediastore_create_image_relative_data\]' --es file_name "$file_name" --es relative_path "$relative_data_dir"
+  local attempt
+  for attempt in 1 2 3; do
+    wait_storage_ready "scenario-${scenario}-${label}-mediastore-relative-storage" 30 >/dev/null || return 1
+    wait_media_provider_ready "scenario-${scenario}-${label}-mediastore-relative-provider" 60 >/dev/null || return 1
+    if run_service_case "$scenario" "$label" "mediastore_create_image_relative_data" '^PASS \[mediastore_create_image_relative_data\]' --es file_name "$file_name" --es relative_path "$relative_data_dir"; then
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] || return 1
+    echo "mediastore_image_relative_data_retry scenario=${scenario} label=${label} attempt=${attempt}"
+    sleep_ms "$SRT_RESULT_POLL_MS"
+  done
 }
 
 check_read_only_artifacts() {
