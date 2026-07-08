@@ -3784,6 +3784,8 @@
   }
 
   async function restartMediaProviderWithLoading() {
+    const confirmed = await confirmAction('快速重启会结束 MediaProvider 进程并触发系统重新拉起，期间媒体访问可能短暂不可用。是否继续？');
+    if (!confirmed) return;
     const loading = Theme.showLoadingDialog('正在快速重启 MediaProvider...');
     try {
       const ok = await Api.restartMediaProvider();

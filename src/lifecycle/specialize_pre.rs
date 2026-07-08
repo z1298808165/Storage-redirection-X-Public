@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn java_hook_installs_only_for_real_media_provider_context() {
-        // Java hook 只在重定向模式下安装（is_system_writer_hook_redirect=true）
+        // Java hook covers MediaProvider ContentValues path patches.
         assert!(should_install_java_hook_for_writer(
             &writer_context(true),
             true,
@@ -1011,8 +1011,8 @@ mod tests {
             false,
         ));
 
-        // 监控模式不安装 Java hook（避免 Android 16 LSPlant SIGBUS 问题）
-        assert!(!should_install_java_hook_for_writer(
+        // FUSE/monitor support also needs MediaProvider mutation hooks.
+        assert!(should_install_java_hook_for_writer(
             &writer_context(true),
             false,
             true,

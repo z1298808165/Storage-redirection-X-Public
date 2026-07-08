@@ -111,12 +111,11 @@ pub(super) fn should_install_java_hook_for_writer(
     _should_monitor: bool,
     should_defer_media_boot_extras: bool,
 ) -> bool {
-    // Java hook 只在重定向模式下需要（用于路径重写等）。
-    // 监控模式只需要 native PLT hook 来记录操作，不需要 Java hook。
-    // 在 Android 16 上，LSPlant 在 fork 子进程时有 SIGBUS 问题，
-    // 而监控模式不需要 Java hook 功能，所以移除 should_monitor 条件。
-    let should_hook_media_provider =
-        context.is_system_writer && context.is_media_provider && is_system_writer_hook_redirect;
+    // MediaProvider 的 ContentValues 路径补丁需要 Java hook；即使当前
+    // 只有 FUSE/文件监视启用，也要覆盖已经运行的 MediaProvider 进程。
+    let should_hook_media_provider = context.is_system_writer
+        && context.is_media_provider
+        && (is_system_writer_hook_redirect || context.should_install_fuse_fix);
     should_hook_media_provider && !should_defer_media_boot_extras
 }
 

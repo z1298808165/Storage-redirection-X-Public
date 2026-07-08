@@ -80,6 +80,7 @@ internal fun DashboardScreen(
     onOpenUpdate: () -> Unit,
 ) {
     var pendingModuleToggle by remember { mutableStateOf<Boolean?>(null) }
+    var pendingMediaProviderRestart by remember { mutableStateOf(false) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -113,7 +114,12 @@ internal fun DashboardScreen(
                 insideMargin = PaddingValues(0.dp),
                 cornerRadius = 28.dp,
             ) {
-                ActionRow("快速重启 MediaProvider", "清除媒体进程缓存并重新加载模块 hook", MiuixIcons.Refresh, onRestartMediaProvider)
+                ActionRow(
+                    "快速重启 MediaProvider",
+                    "清除媒体进程缓存并重新加载模块 hook",
+                    MiuixIcons.Refresh,
+                    { pendingMediaProviderRestart = true },
+                )
                 ActionRow("检查更新", "检查可用的新版本", MiuixIcons.Update, onOpenUpdate)
                 ActionRow("关于与开源协议", "查看模块来源、依赖项目与开源协议", MiuixIcons.Info, onOpenAbout)
             }
@@ -127,6 +133,16 @@ internal fun DashboardScreen(
             onConfirm = {
                 pendingModuleToggle = null
                 onToggleModule(enable)
+            },
+        )
+    }
+    if (pendingMediaProviderRestart) {
+        RestartMediaProviderConfirmDialog(
+            show = true,
+            onDismiss = { pendingMediaProviderRestart = false },
+            onConfirm = {
+                pendingMediaProviderRestart = false
+                onRestartMediaProvider()
             },
         )
     }
@@ -270,6 +286,41 @@ private fun ModuleToggleConfirmDialog(
         ) {
             Text(
                 text = message,
+                modifier = Modifier.fillMaxWidth(),
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 15.sp,
+                lineHeight = 22.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
+                GlassTextButton("确认", onConfirm, modifier = Modifier.weight(1f), primary = true)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RestartMediaProviderConfirmDialog(
+    show: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    CenteredDialog(
+        show = show,
+        onDismiss = onDismiss,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(22.dp),
+        ) {
+            Text(
+                text = "快速重启会结束 MediaProvider 进程并触发系统重新拉起，期间媒体访问可能短暂不可用。是否继续？",
                 modifier = Modifier.fillMaxWidth(),
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 fontSize = 15.sp,
