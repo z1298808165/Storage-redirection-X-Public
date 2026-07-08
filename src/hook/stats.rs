@@ -779,6 +779,7 @@ fn is_hook_sensitive_render_module(lower_pathname: &str) -> bool {
         || (basename.starts_with("vulkan.") && basename.ends_with(".so"))
         || basename.starts_with("libegl_")
         || basename.starts_with("libgles")
+        || (basename.starts_with("android.hardware.graphics.common@") && basename.ends_with(".so"))
         || basename.contains("adreno")
         || basename.contains("mali")
         || basename.contains("powervr")
@@ -937,6 +938,12 @@ mod caller_filter_tests {
         ));
         assert!(!should_hook_caller_module(
             "/vendor/lib64/egl/libGLES_mali.so"
+        ));
+        assert!(!should_hook_caller_module(
+            "/apex/com.android.vndk.v34/lib64/android.hardware.graphics.common@1.2.so"
+        ));
+        assert!(!should_hook_caller_module(
+            "/system/lib64/android.hardware.graphics.common@1.0.so"
         ));
         assert!(!should_hook_caller_module("/system/lib64/libvulkan.so"));
         assert!(!should_hook_caller_module("libsrx_core.so"));

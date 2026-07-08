@@ -1,0 +1,101 @@
+name: 代码质量
+
+on:
+  push:
+    branches: [SRX-R]
+  pull_request:
+    branches: [SRX-R]
+  workflow_dispatch:
+
+concurrency:
+  group: code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONDONTWRITEBYTECODE: '1'
+  RUST_BACKTRACE: '1'
+
+jobs:
+  quality:
+    name: 格式化与静态检查
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check GitHub Actions syntax
+        uses: rhysd/actionlint@v1
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-linux-android
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-quality-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          restore-keys: |
+            cargo-quality-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6.1.0
+
+      - name: Install Android build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          sdkmanager 'platforms;android-37.0' 'build-tools;35.0.0' 'ndk;30.0.14904198'
+          printf 'ANDROID_NDK_HOME=%s/ndk/30.0.14904198\n' $ANDROID_HOME >> $GITHUB_ENV
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [target.aarch64-linux-android]
+          linker = 'aarch64-linux-android29-clang'
+          EOF
+          printf '%s/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin\n' $ANDROID_HOME >> $GITHUB_PATH
+
+      - name: Check Python syntax
+        run: python -B -m compileall -q scripts .github/scripts
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --target aarch64-linux-android -- -D warnings
+        env:
+          CXXFLAGS: '-Wno-error=unused-but-set-variable'
+
+      - name: Run Android Lint
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --console=plain --stacktrace :app:lintDebug
