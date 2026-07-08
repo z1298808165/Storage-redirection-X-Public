@@ -32,7 +32,9 @@ public class Hooker {
   private static final int ANDROID_USER_ID_OFFSET = 100000;
   private static final int ANDROID_APP_UID_START = 10000;
   private static final String[] PUBLIC_MEDIA_ROOTS = {
-      "DCIM", "Pictures", "Movies", "Download", "Documents", "Music"
+      "Alarms", "Audiobooks", "DCIM", "Documents", "Download", "Movies",
+      "Music", "Notifications", "Pictures", "Podcasts", "Recordings",
+      "Ringtones"
   };
   private static final ArrayList<Hooker> HOOKS = new ArrayList<>();
   private static final HashSet<String> HOOKED_QUERY_CLASSES = new HashSet<>();
@@ -2622,6 +2624,8 @@ public class Hooker {
       return result;
     }
     String fallback = mediaStoreDisplayPath(path, callerUid);
+    if (fallback == null)
+      fallback = normalizeMediaStoreRelativeValuePath(path, callerUid);
     logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
     return fallback;
   }
@@ -2674,6 +2678,35 @@ public class Hooker {
     if (relative.length() > 0)
       displayPath = displayPath + "/" + relative;
     return hasFileScheme ? "file://" + displayPath : displayPath;
+  }
+
+  private static String normalizeMediaStoreRelativeValuePath(String path,
+                                                            int callerUid) {
+    if (path == null || path.length() == 0 || path.startsWith("/") ||
+        path.startsWith("file://") || path.indexOf('\\') >= 0)
+      return null;
+    String[] segments = path.split("/", -1);
+    if (segments.length < 2 || !isPublicMediaRoot(segments[0]))
+      return null;
+    for (int i = 0; i < segments.length; i++) {
+      String segment = segments[i];
+      if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment))
+        return null;
+    }
+    int userId = userIdFromUid(callerUid);
+    if (userId < 0)
+      return null;
+    return "/storage/emulated/" + userId + "/" + path;
+  }
+
+  private static boolean isPublicMediaRoot(String root) {
+    if (root == null)
+      return false;
+    for (int i = 0; i < PUBLIC_MEDIA_ROOTS.length; i++) {
+      if (PUBLIC_MEDIA_ROOTS[i].equals(root))
+        return true;
+    }
+    return false;
   }
 
   private static String buildMediaStoreProbePath(String relativePath,
