@@ -34,6 +34,28 @@ const FLUSH_THRESHOLD: i32 = 32;
 const FLUSH_INTERVAL_MS: i64 = 2000;
 const LATE_HOOK_REFRESH_INTERVAL_MS: i64 = 1000;
 const JIT_CACHE_MEMFD_PREFIX: &str = "/memfd:jit-cache";
+const UNSTABLE_CALLER_MODULE_BASENAMES: &[&str] = &[
+    "android.hardware.camera.common@1.0.so",
+    "android.hardware.common.fmq-v1-ndk.so",
+    "android.hardware.configstore-utils.so",
+    "android.hardware.media@1.0.so",
+    "android.hidl.safe_union@1.0.so",
+    "libandroid_net.so",
+    "libandroid_runtime_lazy.so",
+    "libandroidio.so",
+    "libasyncio.so",
+    "libcodec2.so",
+    "libdl.so",
+    "libdl_android.so",
+    "libetc1.so",
+    "libhardware.so",
+    "libhidlallocatorutils.so",
+    "libnativebridge_lazy.so",
+    "libnativeloader_lazy.so",
+    "libpackagelistparser.so",
+    "libstats_jni.so",
+    "libvndksupport.so",
+];
 
 pub struct InterceptHub {
     package_name: RwLock<String>,
@@ -290,6 +312,11 @@ impl InterceptHub {
         let mut hook_list: Vec<&'static str> = Vec::new();
         let mut optional_missing: Vec<&'static str> = Vec::new();
         let mut required_failed: Vec<&'static str> = Vec::new();
+        let caller_allow_filter = if profile_name.starts_with("system-writer") {
+            system_writer_hook_caller_allow_filter
+        } else {
+            hook_caller_allow_filter
+        };
 
         for entry in entries {
             if !is_hook_enabled(active_profiles, entry.profiles) {
@@ -297,7 +324,7 @@ impl InterceptHub {
             }
 
             let stub = srx_hook::hook_partial(
-                hook_caller_allow_filter,
+                caller_allow_filter,
                 std::ptr::null_mut(),
                 None,
                 entry.symbol,
@@ -680,20 +707,69 @@ unsafe extern "C" fn hook_caller_allow_filter(
     should_hook_caller_module(&path)
 }
 
+unsafe extern "C" fn system_writer_hook_caller_allow_filter(
+    caller_path_name: *const c_char,
+    _arg: *mut c_void,
+) -> bool {
+    if caller_path_name.is_null() {
+        return false;
+    }
+    let path = unsafe { CStr::from_ptr(caller_path_name) }.to_string_lossy();
+    should_hook_system_writer_caller_module(&path)
+}
+
 fn should_hook_caller_module(pathname: &str) -> bool {
     if pathname.is_empty() || pathname.starts_with('[') {
         return false;
     }
 
     let lower = pathname.to_ascii_lowercase();
-    if lower.ends_with("libsrx_core.so") || lower.ends_with("libsrx_hook.so") {
-        return false;
-    }
-    if lower.ends_with("libsqlite.so") {
+    if is_runtime_generated_or_java_artifact(&lower) {
         return false;
     }
 
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if lower.ends_with("libsrx_core.so") || lower.ends_with("libsrx_hook.so") {
+        return false;
+    }
+    if basename == "libsqlite.so" {
+        return false;
+    }
     !is_hook_sensitive_render_module(&lower)
+}
+
+fn should_hook_system_writer_caller_module(pathname: &str) -> bool {
+    if !should_hook_caller_module(pathname) {
+        return false;
+    }
+
+    let lower = pathname.to_ascii_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    !UNSTABLE_CALLER_MODULE_BASENAMES.contains(&basename)
+}
+
+fn is_runtime_generated_or_java_artifact(lower_pathname: &str) -> bool {
+    if lower_pathname.starts_with("/memfd:") {
+        return true;
+    }
+    if lower_pathname.contains(" (deleted)") {
+        return true;
+    }
+    if is_java_artifact_module(lower_pathname) {
+        return true;
+    }
+
+    false
+}
+
+fn is_java_artifact_module(lower_pathname: &str) -> bool {
+    if lower_pathname.contains(".apk!/") {
+        return false;
+    }
+
+    [".apk", ".jar", ".dex", ".odex", ".oat", ".art", ".vdex"]
+        .iter()
+        .any(|suffix| lower_pathname.ends_with(suffix))
 }
 
 fn is_hook_sensitive_render_module(lower_pathname: &str) -> bool {
@@ -865,6 +941,36 @@ mod caller_filter_tests {
         assert!(!should_hook_caller_module("/system/lib64/libvulkan.so"));
         assert!(!should_hook_caller_module("libsrx_core.so"));
         assert!(!should_hook_caller_module("libsqlite.so"));
+    }
+
+    #[test]
+    fn caller_filter_skips_jit_and_java_artifacts() {
+        assert!(!should_hook_caller_module("/memfd:jit-cache (deleted)"));
+        assert!(!should_hook_caller_module(
+            "/apex/com.android.mediaprovider/priv-app/MediaProviderGoogle.apk"
+        ));
+        assert!(!should_hook_caller_module(
+            "/system/framework/framework.jar"
+        ));
+    }
+
+    #[test]
+    fn system_writer_filter_skips_unstable_helper_modules() {
+        assert!(!should_hook_system_writer_caller_module(
+            "/memfd:jit-cache (deleted)"
+        ));
+        assert!(!should_hook_system_writer_caller_module(
+            "/apex/com.android.art/lib64/libandroidio.so"
+        ));
+        assert!(!should_hook_system_writer_caller_module(
+            "/system/lib64/libnativeloader_lazy.so"
+        ));
+        assert!(!should_hook_system_writer_caller_module(
+            "/system/lib64/android.hardware.camera.common@1.0.so"
+        ));
+        assert!(should_hook_caller_module(
+            "/apex/com.android.art/lib64/libandroidio.so"
+        ));
     }
 
     #[test]
