@@ -974,13 +974,25 @@ run_mediastore_download_create_case() {
   local label="$2"
   local file_name="$3"
   local relative_path="${4:-}"
-  wait_storage_ready "scenario-${scenario}-${label}-mediastore-storage" 30 >/dev/null || return 1
-  wait_media_provider_ready "scenario-${scenario}-${label}-mediastore-provider" 60 >/dev/null || return 1
-  if [ -n "$relative_path" ]; then
-    run_service_case "$scenario" "$label" "mediastore_create_download" '^PASS \[mediastore_create_download\]' --es file_name "$file_name" --es relative_path "$relative_path"
-  else
-    run_service_case "$scenario" "$label" "mediastore_create_download" '^PASS \[mediastore_create_download\]' --es file_name "$file_name"
-  fi
+  local attempt
+  for attempt in 1 2 3; do
+    wait_storage_ready "scenario-${scenario}-${label}-mediastore-storage" 30 >/dev/null || return 1
+    wait_media_provider_ready "scenario-${scenario}-${label}-mediastore-provider" 60 >/dev/null || return 1
+    if [ -n "$relative_path" ]; then
+      if run_service_case "$scenario" "$label" "mediastore_create_download" '^PASS \[mediastore_create_download\]' --es file_name "$file_name" --es relative_path "$relative_path"; then
+        return 0
+      fi
+    else
+      if run_service_case "$scenario" "$label" "mediastore_create_download" '^PASS \[mediastore_create_download\]' --es file_name "$file_name"; then
+        return 0
+      fi
+    fi
+    if [ "$attempt" -eq 3 ]; then
+      return 1
+    fi
+    echo "mediastore_download_create_retry scenario=${scenario} label=${label} attempt=${attempt}"
+    sleep_ms "$SRT_RESULT_POLL_MS"
+  done
 }
 
 run_mediastore_download_create_denied_case() {

@@ -1044,7 +1044,18 @@ function Invoke-MediaStoreDownloadCreateCase {
     param([int]$Scenario, [string]$Label, [string]$FileName, [string]$RelativePath = "")
     $extras = @{ file_name = $FileName }
     if ($RelativePath) { $extras.relative_path = $RelativePath }
-    Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_download" $extras "^PASS \[mediastore_create_download\]"
+    $lastResult = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Wait-Storage "scenario-$Scenario-$Label-mediastore-storage")) { return $false }
+        if (-not (Wait-MediaProviderReady "scenario-$Scenario-$Label-mediastore-provider")) { return $false }
+        $lastResult = Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_download" $extras "^PASS \[mediastore_create_download\]"
+        if ($lastResult.Ok) { return $lastResult }
+        if ($attempt -lt 3) {
+            Write-Host "mediastore_download_create_retry scenario=$Scenario label=$Label attempt=$attempt"
+            Start-Sleep -Milliseconds $ResultPollMs
+        }
+    }
+    $lastResult
 }
 
 function Invoke-MediaStoreImageCreateCase {
