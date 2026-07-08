@@ -26,6 +26,7 @@ static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 enum ReconcileMode {
     Prewarm,
     Full,
+    MissingOnly,
 }
 
 pub fn main_entry() -> i32 {
@@ -77,6 +78,8 @@ pub fn main_entry() -> i32 {
             } else if should_prewarm_reconcile(round, did_reload, current, last_version, before) {
                 pending_full_reconcile = true;
                 ReconcileMode::Prewarm
+            } else if periodic_reconcile {
+                ReconcileMode::MissingOnly
             } else {
                 ReconcileMode::Full
             };
@@ -164,6 +167,10 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) {
             deferred += 1;
             continue;
         }
+        if mode == ReconcileMode::MissingOnly && !plan.should_run_in_missing_only() {
+            skipped += 1;
+            continue;
+        }
         match plan.request.operation {
             MountOperation::Reload => {
                 if execute_mount_request(&plan.request) {
@@ -211,6 +218,10 @@ impl ReconcilePlan {
         self.request.operation == MountOperation::Reload || self.has_mount_state
     }
 
+    fn should_run_in_missing_only(&self) -> bool {
+        self.request.operation == MountOperation::Reload && !self.has_mount_state
+    }
+
     fn priority(&self) -> u8 {
         match (self.request.operation, self.has_mount_state) {
             (MountOperation::Reload, false) => 0,
@@ -234,6 +245,17 @@ mod tests {
         assert!(reload.should_run_in_prewarm());
         assert!(disable_with_state.should_run_in_prewarm());
         assert!(!disable_without_state.should_run_in_prewarm());
+    }
+
+    #[test]
+    fn missing_only_runs_only_new_reload() {
+        let reload_without_state = plan(MountOperation::Reload, false);
+        let reload_with_state = plan(MountOperation::Reload, true);
+        let disable_with_state = plan(MountOperation::Disable, true);
+
+        assert!(reload_without_state.should_run_in_missing_only());
+        assert!(!reload_with_state.should_run_in_missing_only());
+        assert!(!disable_with_state.should_run_in_missing_only());
     }
 
     #[test]
