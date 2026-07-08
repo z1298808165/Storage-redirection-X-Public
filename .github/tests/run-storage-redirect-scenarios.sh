@@ -1730,7 +1730,7 @@ run_scenario() {
   echo "step 3/7: 重启测试应用"
   adb shell am force-stop "$APP_ID" >/dev/null || true
   local expect_mount=1
-  if [ "$scenario" = "1" ]; then
+  if ! label_expects_mount "scenario-${scenario}"; then
     expect_mount=0
   fi
   start_app_and_confirm_mount "scenario-${scenario}" "$expect_mount" || return 1
