@@ -1040,8 +1040,8 @@ mod tests {
             true,
         ));
 
-        // 既不重定向也不监控时不安装
-        assert!(!should_install_java_hook_for_writer(
+        // MediaProvider 即使当前未命中配置，也预装 Java mutation hook。
+        assert!(should_install_java_hook_for_writer(
             &writer_context(true),
             false,
             false,
