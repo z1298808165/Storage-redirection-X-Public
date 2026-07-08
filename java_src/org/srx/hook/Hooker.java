@@ -2617,6 +2617,15 @@ public class Hooker {
     } catch (Throwable ignored) {
     }
     if (rewritten != null) {
+      if (rewritten.equals(path)) {
+        String unchangedFallback = mediaStoreDisplayPath(path, callerUid);
+        if (unchangedFallback == null)
+          unchangedFallback = normalizeMediaStoreRelativeValuePath(path, callerUid);
+        if (unchangedFallback != null && !unchangedFallback.equals(path)) {
+          logDebug("rwVals unchanged_native path=" + path + " fallback=" + unchangedFallback);
+          return unchangedFallback;
+        }
+      }
       ensureSandboxParentDir(rewritten);
       String displayPath = mediaStoreDisplayPath(rewritten, callerUid);
       String result = displayPath != null ? displayPath : rewritten;
