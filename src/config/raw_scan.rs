@@ -413,6 +413,9 @@ fn lookup_cached_entry(
                 if entry.config_version != config_version {
                     return None;
                 }
+                if !entry.has_config {
+                    return None;
+                }
                 if now_ms.saturating_sub(entry.cached_at_ms) > RAW_CACHE_TTL_MS {
                     return None;
                 }
@@ -643,6 +646,38 @@ mod tests {
 
         assert!(hub.has_any_enabled_user_profile_in_raw_config(0));
         assert!(!hub.has_any_enabled_user_profile_in_raw_config(10));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn missing_raw_config_is_not_cached_after_file_creation() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "srx_raw_scan_missing_refresh_{}_{}",
+            std::process::id(),
+            current_time_ms()
+        ));
+        let apps_dir = config_dir.join("apps");
+        std::fs::create_dir_all(&apps_dir).expect("create apps dir");
+
+        let hub = SettingsHub::new();
+        hub.replace_test_config_dir(config_dir.to_string_lossy().into_owned());
+
+        assert!(!hub.has_enabled_user_profile_in_raw_config("com.example.created", 0));
+
+        std::fs::write(
+            apps_dir.join("com.example.created.json"),
+            r#"{
+                "users": {
+                    "0": {
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .expect("write created config");
+
+        assert!(hub.has_enabled_user_profile_in_raw_config("com.example.created", 0));
 
         let _ = std::fs::remove_dir_all(config_dir);
     }

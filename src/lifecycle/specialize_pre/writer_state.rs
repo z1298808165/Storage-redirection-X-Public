@@ -111,8 +111,8 @@ pub(super) fn should_install_java_hook_for_writer(
     _should_monitor: bool,
     should_defer_media_boot_extras: bool,
 ) -> bool {
-    // MediaProvider 的 ContentValues 路径补丁需要 Java hook；即使当前
-    // 只有 FUSE/文件监视启用，也要覆盖已经运行的 MediaProvider 进程。
+    // MediaProvider 的 ContentValues 路径补丁需要 Java hook；FUSE/文件监视
+    // 支撑路径也要覆盖已经运行的 MediaProvider 进程。
     let should_hook_media_provider = context.is_system_writer
         && context.is_media_provider
         && (is_system_writer_hook_redirect || context.should_install_fuse_fix);
@@ -310,10 +310,22 @@ mod tests {
     }
 
     #[test]
-    fn media_provider_without_enabled_apps_still_installs_java_hook() {
+    fn media_provider_with_raw_enabled_app_installs_java_hook() {
         let config = SettingsHub::new();
-        let config_dir = temp_config_dir("empty_java_hook");
-        std::fs::create_dir_all(config_dir.join("apps")).expect("create temp apps dir");
+        let config_dir = temp_config_dir("raw_java_hook");
+        let apps_dir = config_dir.join("apps");
+        std::fs::create_dir_all(&apps_dir).expect("create temp apps dir");
+        std::fs::write(
+            apps_dir.join("org.srx.rawhook.json"),
+            r#"{
+                "users": {
+                    "0": {
+                        "enabled": true
+                    }
+                }
+            }"#,
+        )
+        .expect("write raw enabled config");
         config.replace_test_config_dir(config_dir.to_string_lossy().into_owned());
         config.replace_test_apps(HashMap::new());
         config.replace_test_file_monitor_enabled(false);
@@ -332,9 +344,10 @@ mod tests {
 
         assert!(context.is_system_writer);
         assert!(context.is_media_provider);
-        assert!(!should_redirect);
+        assert!(context.should_install_fuse_fix);
+        assert!(should_redirect);
         assert!(!should_monitor);
-        assert!(!is_hook_redirect);
+        assert!(is_hook_redirect);
         assert!(should_install_java_hook_for_writer(
             &context,
             is_hook_redirect,
