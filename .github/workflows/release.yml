@@ -390,7 +390,7 @@ jobs:
           heap-size: 1024M
           disable-animations: true
           emulator-boot-timeout: 1500
-          emulator-options: -no-window -gpu off -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts
