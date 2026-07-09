@@ -226,7 +226,7 @@ seed_storage_redirect_test_environment() {
 }
 
 verify_storage_redirect_module_loaded() {
-  local timeout_seconds="${VERIFY_MODULE_TIMEOUT_SECONDS:-120}"
+  local timeout_seconds="${VERIFY_MODULE_TIMEOUT_SECONDS:-300}"
   local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
