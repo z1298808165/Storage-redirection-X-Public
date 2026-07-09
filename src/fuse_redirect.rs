@@ -238,6 +238,14 @@ pub fn scoped_mount_roots_for_hybrid_rules(
         }
     }
 
+    for allowed_path in allowed_real_paths {
+        let allowed_root =
+            resolve_concrete_scoped_rule_parent(allowed_path, user_id, &storage_root);
+        if !allowed_root.is_empty() {
+            roots.push(allowed_root);
+        }
+    }
+
     let normalized_read_only_paths = normalize_rule_list(read_only_paths.to_vec(), user_id);
     let (read_only_includes, read_only_excludes) =
         paths::split_exclusion_rules(&normalized_read_only_paths);
@@ -2572,6 +2580,17 @@ mod tests {
                 "/storage/emulated/0/DCIM".to_string(),
                 "/storage/emulated/0/Download".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn hybrid_allowed_concrete_paths_use_scoped_fuse_roots() {
+        let allowed = vec!["Download/SrtMonitor".to_string()];
+        let roots = scoped_mount_roots_for_hybrid_rules(10288, &allowed, &[], &[], &[], &[], false);
+
+        assert_eq!(
+            roots,
+            vec!["/storage/emulated/0/Download/SrtMonitor".to_string()]
         );
     }
 
