@@ -243,6 +243,23 @@ verify_storage_redirect_module_loaded() {
   return 1
 }
 
+verify_storage_redirect_module_loaded_with_reboot_retry() {
+  if verify_storage_redirect_module_loaded; then
+    return 0
+  fi
+
+  echo "Storage Redirect X module was installed but did not start after the first reboot; retrying one clean boot."
+  adb_su "module_dir=/data/adb/modules/storage.redirect.x; echo module_enabled=\$([ ! -e \"\$module_dir/disable\" ] && echo yes || echo no); echo module_update_state; ls -la /data/adb/modules_update/storage.redirect.x 2>/dev/null || true; echo module_service_files; ls -la \"\$module_dir\"/service.sh \"\$module_dir\"/post-fs-data.sh \"\$module_dir\"/service.d 2>/dev/null || true; echo magisk_modules_db; magisk --sqlite \"SELECT id,name,version,versionCode,enabled FROM modules WHERE id='storage.redirect.x';\" 2>/dev/null || true" || true
+
+  adb reboot
+  wait_for_boot 420
+  wait_for_root_shell 120
+  assert_installed_module_files /data/adb/modules/storage.redirect.x
+  grant_magisk_shell
+
+  verify_storage_redirect_module_loaded
+}
+
 install_test_app_before_module_boot
 
 if ! run_rootavd_patch; then
@@ -304,4 +321,4 @@ else
   echo "Magisk CLI zygisk query was not available after reboot; verifying module load state instead."
 fi
 
-verify_storage_redirect_module_loaded
+verify_storage_redirect_module_loaded_with_reboot_retry

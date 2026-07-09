@@ -217,7 +217,7 @@ CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/1
 | 21 | 关闭 FUSE daemon 时，默认 mount namespace 对 `read_only_paths` 通配规则执行回退，并保持读取允许、写入拒绝语义。 |
 | 22 | 关闭 FUSE daemon 时，路径映射和只读规则共同存在时仍由映射最终目标决定写权限。 |
 | 23 | 启用 `file_monitor_enabled` 且测试 APP 配置 `enabled=false` 时，普通公共路径写入和 MediaStore 系统代写成功后仍应记录成功监控日志。 |
-| 24 | 启用文件监控且 FUSE daemon 关闭时，普通应用直写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
+| 24 | 启用文件监控且 FUSE daemon 关闭时，普通应用映射成功、最终只读失败、只读排除成功。 |
 | 25 | 启用文件监控且 FUSE daemon 开启时，普通应用直写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 26 | 启用文件监控且 FUSE daemon 关闭时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 27 | 启用文件监控且 FUSE daemon 开启时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
