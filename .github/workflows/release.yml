@@ -70,6 +70,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
@@ -180,6 +182,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
@@ -252,6 +256,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
