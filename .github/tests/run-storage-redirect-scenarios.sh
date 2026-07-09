@@ -1543,6 +1543,7 @@ run_file_monitor_write_success_case() {
   local private_path="${5:-}"
   local allow_capacity_limited_miss="${6:-0}"
   local require_monitor_record="${7:-1}"
+  local monitor_skip_reason="${8:-ordinary-app-disabled-direct-write}"
   local file_name
   local attempt
   file_name="$(basename "$path")"
@@ -1554,7 +1555,7 @@ run_file_monitor_write_success_case() {
       { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path"; } &&
       { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name" "$allow_capacity_limited_miss"; }; then
       if [ "$require_monitor_record" != "1" ]; then
-        echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=ordinary-app-disabled-direct-write"
+        echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=${monitor_skip_reason}"
       fi
       return 0
     fi
@@ -1669,7 +1670,11 @@ run_file_monitor_regular_scenario() {
 
   run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" &&
     run_file_monitor_write_denied_case "$scenario" "regular-read-only-denied" "$MONITOR_LOCKED_ROOT/$locked_file" "$MONITOR_LOCKED_ROOT/$locked_file" &&
-    run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file"
+    if [ "$scenario" = "24" ]; then
+      run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file" 1 0 "ordinary-app-mount-namespace-read-only-exclusion"
+    else
+      run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file"
+    fi
 }
 
 run_file_monitor_mediastore_scenario() {

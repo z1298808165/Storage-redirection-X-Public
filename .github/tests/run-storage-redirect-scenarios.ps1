@@ -787,7 +787,8 @@ function Invoke-FileMonitorWriteSuccessCase {
         [string]$ExpectedPath,
         [string]$PrivatePath = "",
         [bool]$AllowCapacityLimitedInotifyMiss = $false,
-        [bool]$RequireMonitorRecord = $true
+        [bool]$RequireMonitorRecord = $true,
+        [string]$MonitorSkipReason = "ordinary-app-disabled-direct-write"
     )
     $fileName = ($Path -split '/')[-1]
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
@@ -801,7 +802,7 @@ function Invoke-FileMonitorWriteSuccessCase {
         if ($RequireMonitorRecord) {
             $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success" -AllowCapacityLimitedInotifyMiss:$AllowCapacityLimitedInotifyMiss) -and $ok
         } else {
-            Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=ordinary-app-disabled-direct-write"
+            Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=$MonitorSkipReason"
         }
         if ($ok) { return $true }
         if ($attempt -lt 2) {
@@ -926,7 +927,11 @@ function Invoke-RegularMonitorScenario {
     }
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile") -and $ok
     $ok = (Invoke-FileMonitorWriteDeniedCase $Scenario "regular-read-only-denied" "$MonitorLockedRoot/$lockedFile") -and $ok
-    $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile") -and $ok
+    if ([int]$Scenario -eq 24) {
+        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile" $true $false "ordinary-app-mount-namespace-read-only-exclusion") -and $ok
+    } else {
+        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile") -and $ok
+    }
     $ok
 }
 
