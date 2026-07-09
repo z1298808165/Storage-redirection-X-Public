@@ -363,10 +363,9 @@ jobs:
           fetch-depth: 0
 
       - name: Download test-flow runtime
-        uses: actions/download-artifact@v8.0.1
-        with:
-          name: test-flow-runtime-v${{ env.VERSION }}
-          path: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v${{ env.VERSION }}" --dir .
 
       - name: Enable KVM permissions
         run: |
@@ -388,6 +387,7 @@ jobs:
           heap-size: 1024M
           disable-animations: true
           emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts
