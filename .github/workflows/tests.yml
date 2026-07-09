@@ -60,6 +60,8 @@ jobs:
 
       - name: 配置 Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          packages: platform-tools
 
       - name: 配置 Gradle
         uses: gradle/actions/setup-gradle@v6.2.0

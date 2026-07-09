@@ -165,6 +165,8 @@ jobs:
 
       - name: 配置 Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          packages: platform-tools
 
       - name: 安装主机编译工具
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
