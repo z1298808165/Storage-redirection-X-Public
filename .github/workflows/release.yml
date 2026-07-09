@@ -406,6 +406,11 @@ jobs:
             sudo udevadm trigger --name-match=kvm
           fi
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
       - name: Prime Android emulator package
         run: |
           set -euo pipefail
