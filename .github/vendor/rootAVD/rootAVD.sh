@@ -449,7 +449,14 @@ install_apps() {
 	for f in $FILES; do
 		echo "[*] Trying to install $f"
 		ADBECHO=""
+		local install_attempts=0
 		while [[ "$ADBECHO" != *"Success"* ]]; do
+			install_attempts=$((install_attempts + 1))
+			if [[ "$install_attempts" -gt 12 ]]; then
+				echo "[!] Failed to install $f after $((install_attempts - 1)) attempts"
+				echo "$ADBECHO" | while read I; do echo "[*] $I"; done
+				return 1
+			fi
 			ADBECHO=$(adb install -r -d "$f" 2>&1)
 			if [[ "$ADBECHO" == *"INSTALL_FAILED_UPDATE_INCOMPATIBLE"* ]]; then
 				echo "$ADBECHO" | while read I; do echo "[*] $I"; done
@@ -463,7 +470,13 @@ install_apps() {
 						break
 					fi
 					Package=$I
-				done
+					done
+			fi
+			if [[ "$ADBECHO" == *"device offline"* || "$ADBECHO" == *"no devices/emulators found"* ]]; then
+				adb kill-server >/dev/null 2>&1 || true
+				sleep 5
+			else
+				sleep 2
 			fi
 		done
 		echo "$ADBECHO" | while read I; do echo "[*] $I"; done

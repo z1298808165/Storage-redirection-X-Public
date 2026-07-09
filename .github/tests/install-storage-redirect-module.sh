@@ -148,6 +148,28 @@ wait_for_root_shell() {
   return 1
 }
 
+run_rootavd_patch() {
+  local attempts="${ROOTAVD_PATCH_ATTEMPTS:-2}"
+  local timeout_seconds="${ROOTAVD_PATCH_TIMEOUT_SECONDS:-600}"
+  local attempt
+
+  for attempt in $(seq 1 "$attempts"); do
+    echo "Running rootAVD patch attempt $attempt/$attempts..."
+    if timeout --foreground "${timeout_seconds}s" env ROOTAVD_NONINTERACTIVE=1 ROOTAVD_MAGISK_CHOICE=1 "$ROOT_AVD_DIR/rootAVD.sh" "$RAMDISK_REL"; then
+      return 0
+    fi
+    echo "rootAVD patch attempt $attempt failed or timed out."
+    adb devices -l || true
+    adb kill-server >/dev/null 2>&1 || true
+    if [ "$attempt" -lt "$attempts" ]; then
+      wait_for_boot 180 || true
+    fi
+  done
+
+  echo "rootAVD failed to patch the emulator ramdisk after $attempts attempt(s)."
+  return 1
+}
+
 grant_magisk_shell() {
   adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('root_access',3);\"" >/dev/null 2>&1 || true
   adb_magisk "--sqlite \"REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(2000,2,0,1,0);\"" >/dev/null 2>&1 || true
@@ -223,8 +245,7 @@ verify_storage_redirect_module_loaded() {
 
 install_test_app_before_module_boot
 
-if ! ROOTAVD_NONINTERACTIVE=1 ROOTAVD_MAGISK_CHOICE=1 "$ROOT_AVD_DIR/rootAVD.sh" "$RAMDISK_REL"; then
-  echo "rootAVD failed to patch the emulator ramdisk."
+if ! run_rootavd_patch; then
   exit 1
 fi
 
