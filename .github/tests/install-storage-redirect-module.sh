@@ -23,8 +23,9 @@ cp .github/vendor/rootAVD/rootAVD.sh "$ROOT_AVD_DIR/rootAVD.sh"
 cp .github/vendor/rootAVD/rootAVD.bat "$ROOT_AVD_DIR/rootAVD.bat"
 chmod +x "$ROOT_AVD_DIR/rootAVD.sh"
 
-MAGISK_JSON="${MAGISK_JSON:-https://raw.githubusercontent.com/topjohnwu/magisk-files/master/stable.json}"
-MAGISK_URL="$(python3 - <<PY
+MAGISK_URL="${MAGISK_URL:-https://github.com/topjohnwu/Magisk/releases/download/v29.0/Magisk-v29.0.apk}"
+if [ -n "${MAGISK_JSON:-}" ]; then
+  MAGISK_URL="$(python3 - <<PY
 import json
 import urllib.request
 
@@ -32,7 +33,8 @@ with urllib.request.urlopen("$MAGISK_JSON", timeout=30) as response:
     print(json.load(response)["magisk"]["link"])
 PY
 )"
-curl -fsSL "$MAGISK_URL" -o "$ROOT_AVD_DIR/Magisk.zip"
+fi
+curl -fL --retry 5 --retry-delay 5 --retry-all-errors "$MAGISK_URL" -o "$ROOT_AVD_DIR/Magisk.zip"
 
 RAMDISK_REL="system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}/ramdisk.img"
 RAMDISK="$ANDROID_HOME/$RAMDISK_REL"
