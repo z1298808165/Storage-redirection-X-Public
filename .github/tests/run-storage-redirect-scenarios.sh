@@ -1542,6 +1542,7 @@ run_file_monitor_write_success_case() {
   local expected_path="${4:-$path}"
   local private_path="${5:-}"
   local allow_capacity_limited_miss="${6:-0}"
+  local require_monitor_record="${7:-1}"
   local file_name
   local attempt
   file_name="$(basename "$path")"
@@ -1551,7 +1552,10 @@ run_file_monitor_write_success_case() {
     if run_write_case "$scenario" "$label" "$path" "$PAYLOAD" &&
       check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path" &&
       { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path"; } &&
-      expect_file_monitor_success_record "$scenario" "$label" "$file_name" "$allow_capacity_limited_miss"; then
+      { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name" "$allow_capacity_limited_miss"; }; then
+      if [ "$require_monitor_record" != "1" ]; then
+        echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=ordinary-app-disabled-direct-write"
+      fi
       return 0
     fi
     [ "$attempt" -lt 2 ] || break
@@ -1639,7 +1643,7 @@ run_file_monitor_disabled_redirect_scenario() {
   local scenario="$1"
   local file_name
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
-  run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 &&
+  run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 0 &&
     run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT"
 }

@@ -786,7 +786,8 @@ function Invoke-FileMonitorWriteSuccessCase {
         [string]$Path,
         [string]$ExpectedPath,
         [string]$PrivatePath = "",
-        [bool]$AllowCapacityLimitedInotifyMiss = $false
+        [bool]$AllowCapacityLimitedInotifyMiss = $false,
+        [bool]$RequireMonitorRecord = $true
     )
     $fileName = ($Path -split '/')[-1]
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
@@ -797,7 +798,11 @@ function Invoke-FileMonitorWriteSuccessCase {
         if ($PrivatePath) {
             $ok = (Require-Missing "scenario-$Scenario" "$Label private" $PrivatePath) -and $ok
         }
-        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success" -AllowCapacityLimitedInotifyMiss:$AllowCapacityLimitedInotifyMiss) -and $ok
+        if ($RequireMonitorRecord) {
+            $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success" -AllowCapacityLimitedInotifyMiss:$AllowCapacityLimitedInotifyMiss) -and $ok
+        } else {
+            Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=ordinary-app-disabled-direct-write"
+        }
         if ($ok) { return $true }
         if ($attempt -lt 2) {
             if ($script:Failures.Count -gt $failureCountBeforeAttempt) {
@@ -878,7 +883,7 @@ function Invoke-FileMonitorMediaStoreDeniedCase {
 function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
-    $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true
+    $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true $false
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
     $ok
