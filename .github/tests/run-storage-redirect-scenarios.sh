@@ -662,6 +662,7 @@ expect_no_read_only_failure_record() {
   local file_name="$3"
   if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' >/dev/null"; then
     echo "file_monitor unexpected read-only failure: scenario=${scenario} label=${label} file=${file_name}" >&2
+    adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' || true" | sed 's/^/monitor_read_only_hit: /' >&2
     return 1
   fi
 }
@@ -1768,7 +1769,7 @@ print_diagnostics() {
 
 capture_test_flow_artifacts() {
   adb logcat -d >test-flow-logcat.txt 2>/dev/null || true
-  adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true; done" >test-flow-module-state.txt 2>/dev/null || true
+  adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; if [ \"\$log\" = file_monitor.log ]; then tail -1000 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true; else tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true; fi; done" >test-flow-module-state.txt 2>/dev/null || true
   {
     echo "===app_pids==="
     adb shell "pidof '$APP_ID' 2>/dev/null || true"

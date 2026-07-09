@@ -772,6 +772,7 @@ function Test-NoReadOnlyFailureRecord {
     foreach ($line in $lines) {
         if ($line -match "ret=-1" -and $line -match "deny_reason=read_only_rule") {
             $script:Failures.Add("scenario-$Scenario/$Label unexpected read-only failure file=$FileName")
+            Write-Warning "monitor_read_only_hit: $line"
             return $false
         }
     }

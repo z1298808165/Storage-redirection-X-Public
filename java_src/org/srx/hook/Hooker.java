@@ -1604,6 +1604,33 @@ public class Hooker {
     }
   }
 
+  private static void rememberMediaStoreMutationPathHint(
+      String path, ContentValues values, int callerUid) {
+    String hintPath = mediaStoreMutationHintPath(path, values, callerUid);
+    if (hintPath == null || hintPath.length() == 0) return;
+    rememberProviderOpenPath(hintPath, callerUid);
+  }
+
+  private static String mediaStoreMutationHintPath(
+      String path, ContentValues values, int callerUid) {
+    if (path == null || path.length() == 0 || callerUid < ANDROID_APP_UID_START) return null;
+    String value = path.trim();
+    if (value.startsWith("file://")) value = value.substring("file://".length());
+    if (value.startsWith("/storage/emulated/") || value.startsWith("/data/media/")) return value;
+    String relative = normalizeRelativePathValue(value);
+    if (relative.length() == 0 || hasUnsafeRelativePathSegment(relative)) return null;
+    int slash = relative.indexOf('/');
+    String root = slash >= 0 ? relative.substring(0, slash) : relative;
+    if (!isPublicMediaRoot(root)) return null;
+    if (slash < 0 && values != null) {
+      String displayName = firstString(values, "_display_name", "display_name");
+      if (displayName != null && displayName.length() > 0) relative = relative + "/" + displayName;
+    }
+    int userId = userIdFromUid(callerUid);
+    if (userId < 0) return null;
+    return "/storage/emulated/" + userId + "/" + relative;
+  }
+
   private static String packageNameForUid(int uid) {
     if (uid < ANDROID_APP_UID_START) return "";
     try {
@@ -1736,6 +1763,7 @@ public class Hooker {
         values.containsKey("_data") ? "_data" : values.containsKey("data") ? "data" : null;
     if (dataKey != null) {
       String originalPath = values.getAsString(dataKey);
+      rememberMediaStoreMutationPathHint(originalPath, values, callerUid);
       DownloadMediaPathPatch mediaPatch =
           insertLike
               ? rewriteDownloadPlaceholderPath(
@@ -1785,6 +1813,7 @@ public class Hooker {
     if (relativePath != null && relativePath.length() > 0) {
       String displayName = firstString(relativeSource, "_display_name", "display_name");
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+      rememberMediaStoreMutationPathHint(probePath, relativeSource, callerUid);
       String mappedPath = rewriteStoragePathForValues(probePath, callerUid);
       String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
       if (mappedRelative != null

@@ -75,7 +75,16 @@ jobs:
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
-          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          for attempt in 1 2 3; do
+            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            sleep $((attempt * 10))
+          done
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
       - name: Install Rust nightly toolchain
@@ -187,7 +196,16 @@ jobs:
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
-          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          for attempt in 1 2 3; do
+            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            sleep $((attempt * 10))
+          done
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
       - name: Prepare Android app signing
@@ -261,7 +279,16 @@ jobs:
 
       - name: Install Android SDK build-tools, platform and NDK
         run: |
-          sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"
+          for attempt in 1 2 3; do
+            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            sleep $((attempt * 10))
+          done
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
       - name: Install Rust nightly toolchain

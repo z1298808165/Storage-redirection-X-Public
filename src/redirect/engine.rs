@@ -2709,6 +2709,78 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_media_writer_uses_recent_public_caller_before_read_only_owner() {
+        let _guard = lock_app_router_test();
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let previous_uid = redirect_policy::replace_test_uid_cache(HashMap::from([
+            ("xyz.nextalone.nnngram".to_string(), 10174),
+            ("com.aliyun.tongyi".to_string(), 10340),
+        ]));
+        let hub = SettingsHub::instance();
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([
+            (
+                "xyz.nextalone.nnngram".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: Vec::new(),
+                            path_mappings: Vec::new(),
+                        },
+                    )]),
+                },
+            ),
+            (
+                "com.aliyun.tongyi".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: Vec::new(),
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                            path_mappings: Vec::new(),
+                        },
+                    )]),
+                },
+            ),
+        ]));
+
+        let was_monitor_enabled = AuditTrail::instance().is_enabled();
+        AuditTrail::instance().set_enabled(true);
+        AuditTrail::instance().init("com.android.providers.media.module", 10226);
+        AuditTrail::instance().record_provider_open_path(
+            "/storage/emulated/0/Pictures/Nnngram/photo.jpg",
+            10174,
+            "xyz.nextalone.nnngram",
+        );
+
+        let decision =
+            anonymous_media_writer_decision("/storage/emulated/0/Pictures/Nnngram/photo.jpg");
+
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        redirect_policy::restore_test_uid_cache(
+            previous_uid.0,
+            previous_uid.1,
+            previous_uid.2,
+            previous_uid.3,
+        );
+        AuditTrail::instance().set_enabled(was_monitor_enabled);
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert!(!decision.is_denied());
+        assert!(!decision.is_redirect());
+    }
+
+    #[test]
     fn media_writer_external_uid_redirects_root_hidden_file_to_caller_sandbox() {
         let hub = SettingsHub::instance();
         let package_name = "com.coolapk.market";
