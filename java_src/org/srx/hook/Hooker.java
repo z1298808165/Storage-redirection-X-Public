@@ -2692,10 +2692,13 @@ public class Hooker {
 
   private static String normalizeMediaStoreRelativeValuePath(String path,
                                                             int callerUid) {
-    if (path == null || path.length() == 0 || path.startsWith("/") ||
-        path.startsWith("file://") || path.indexOf('\\') >= 0)
+    if (path == null || path.length() == 0 || path.startsWith("file://") ||
+        path.indexOf('\\') >= 0)
       return null;
-    String[] segments = path.split("/", -1);
+    String relative = path.startsWith("/") ? path.substring(1) : path;
+    if (relative.length() == 0 || relative.startsWith("/"))
+      return null;
+    String[] segments = relative.split("/", -1);
     if (segments.length < 2 || !isPublicMediaRoot(segments[0]))
       return null;
     for (int i = 0; i < segments.length; i++) {
@@ -2706,7 +2709,7 @@ public class Hooker {
     int userId = userIdFromUid(callerUid);
     if (userId < 0)
       return null;
-    return "/storage/emulated/" + userId + "/" + path;
+    return "/storage/emulated/" + userId + "/" + relative;
   }
 
   private static boolean isPublicMediaRoot(String root) {

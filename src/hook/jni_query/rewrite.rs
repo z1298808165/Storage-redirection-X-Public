@@ -1518,14 +1518,14 @@ fn split_media_store_value_path(text: &str) -> Option<(&str, bool)> {
 }
 
 fn normalize_media_store_relative_value_path(text: &str, caller_uid: i32) -> Option<String> {
-    if text.is_empty()
-        || text.starts_with('/')
-        || text.starts_with(FILE_SCHEME_PREFIX)
-        || text.contains('\\')
-    {
+    if text.is_empty() || text.starts_with(FILE_SCHEME_PREFIX) || text.contains('\\') {
         return None;
     }
-    let mut segments = text.split('/');
+    let relative = text.strip_prefix('/').unwrap_or(text);
+    if relative.is_empty() || relative.starts_with('/') {
+        return None;
+    }
+    let mut segments = relative.split('/');
     let root = segments.next()?;
     if !MEDIASTORE_RELATIVE_ROOTS.contains(&root) {
         return None;
@@ -1543,7 +1543,7 @@ fn normalize_media_store_relative_value_path(text: &str, caller_uid: i32) -> Opt
     if user_id < 0 {
         return None;
     }
-    Some(format!("/storage/emulated/{}/{}", user_id, text))
+    Some(format!("/storage/emulated/{}/{}", user_id, relative))
 }
 
 fn is_media_store_value_path(path: &str) -> bool {
@@ -2221,6 +2221,11 @@ mod tests {
             Some("/storage/emulated/0/Pictures/Nnngram/photo.jpg")
         );
         assert_eq!(
+            normalize_media_store_relative_value_path("/Pictures/Nnngram/photo.jpg", 10312)
+                .as_deref(),
+            Some("/storage/emulated/0/Pictures/Nnngram/photo.jpg")
+        );
+        assert_eq!(
             normalize_media_store_relative_value_path("DCIM/Camera/photo.jpg", 110312).as_deref(),
             Some("/storage/emulated/1/DCIM/Camera/photo.jpg")
         );
@@ -2231,6 +2236,7 @@ mod tests {
         assert!(
             normalize_media_store_relative_value_path("Android/data/app/file.jpg", 10312).is_none()
         );
+        assert!(normalize_media_store_relative_value_path("//Pictures/photo.jpg", 10312).is_none());
         assert!(
             normalize_media_store_relative_value_path(
                 "/storage/emulated/0/Pictures/photo.jpg",
