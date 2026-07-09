@@ -20,10 +20,13 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       changelog_base64: ${{ steps.changelog.outputs.changelog_base64 }}
+      should_release: ${{ steps.release.outputs.should_release }}
 
     steps:
       - name: 检出代码
         uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: 读取版本号
         id: version
@@ -31,6 +34,59 @@ jobs:
         run: |
           version=$(grep '^appVersionName=' android/gradle.properties | cut -d= -f2 | tr -d '[:space:]')
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: 判定正式版构建条件
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CURRENT_REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "${EVENT_NAME}" != "push" ] || [ "${CURRENT_REF}" != "refs/heads/main" ]; then
+            echo "非 main 分支 push，跳过正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -z "${BEFORE_SHA}" ] || [ "${BEFORE_SHA}" = "${zero_sha}" ]; then
+            echo "无法读取上次提交，跳过自动正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${BEFORE_SHA}:android/gradle.properties" 2>/dev/null; then
+            echo "无法读取上次版本号，跳过自动正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          previous_version=$(git show "${BEFORE_SHA}:android/gradle.properties" | grep '^appVersionName=' | cut -d= -f2 | tr -d '[:space:]')
+          if [ -z "${previous_version}" ]; then
+            echo "上次版本号为空，跳过自动正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [ "${previous_version}" = "${VERSION}" ]; then
+            echo "版本号未变化 (${VERSION})，跳过正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          tag="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
+            echo "标签 ${tag} 已存在，跳过正式发布"
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "版本号变化: ${previous_version} -> ${VERSION}"
+          echo "should_release=true" >> "${GITHUB_OUTPUT}"
 
       - name: 读取并展示更新日志
         id: changelog
@@ -169,7 +225,7 @@ jobs:
   auto-release:
     name: 自动触发正式版
     needs: [prepare, verify, e2e]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -186,16 +242,8 @@ jobs:
 
           version="${{ needs.prepare.outputs.version }}"
           tag="v${version}"
-          latest_tag="$(git tag -l 'v*' --sort=-version:refname | head -n 1)"
-
           if git rev-parse -q --verify "refs/tags/${tag}" > /dev/null; then
             echo "标签 ${tag} 已存在，跳过正式发布"
-            echo "should_release=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          if [ -n "${latest_tag}" ] && [ "${latest_tag}" = "${tag}" ]; then
-            echo "版本号未更新，跳过正式发布"
             echo "should_release=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
