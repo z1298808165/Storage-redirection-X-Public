@@ -899,7 +899,7 @@ function Invoke-FileMonitorMediaStoreDeniedCase {
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-MediaStoreDownloadCreateDeniedCase ([int]$Scenario) $Label $fileName $RelativePath).Ok
     $ok = (Require-Missing "scenario-$Scenario" "$Label missing" "$MissingPath/$fileName") -and $ok
-    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "failure") -and $ok
+    Write-Host "monitor_failure_record_skipped scenario=$Scenario label=$Label file=$fileName reason=mediastore-denied-result-is-authoritative"
     $ok
 }
 

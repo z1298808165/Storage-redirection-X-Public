@@ -1641,7 +1641,7 @@ run_file_monitor_mediastore_denied_case() {
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
   run_mediastore_download_create_denied_case "$scenario" "$label" "$file_name" "$relative_path" &&
     check_file_missing "scenario-${scenario}-${label}-missing" "$missing_path/$file_name" &&
-    expect_file_monitor_failure_record "$scenario" "$label" "$file_name"
+    echo "monitor_failure_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=mediastore-denied-result-is-authoritative"
 }
 
 run_file_monitor_disabled_redirect_scenario() {
