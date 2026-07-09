@@ -1662,19 +1662,15 @@ run_file_monitor_regular_scenario() {
   writable_file="$(monitor_file_name "$scenario" "regular_writable")"
 
   if [ "$scenario" = "25" ]; then
-    run_file_monitor_write_success_case "$scenario" "regular-allow-write" "$MONITOR_BASE_ROOT/$allow_file" "$MONITOR_BASE_ROOT/$allow_file" "$PRIVATE_MONITOR_BASE_ROOT/$allow_file" 1 || return 1
+    run_file_monitor_write_success_case "$scenario" "regular-allow-write" "$MONITOR_BASE_ROOT/$allow_file" "$MONITOR_BASE_ROOT/$allow_file" "$PRIVATE_MONITOR_BASE_ROOT/$allow_file" 1 0 "ordinary-app-scoped-fuse-direct-write" || return 1
     check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT" || return 1
   else
     echo "regular_allow_write_skipped scenario=${scenario} reason=mount-namespace-allowed-real-direct-write-is-platform-permission-sensitive"
   fi
 
-  run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" &&
+  run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" "" 0 0 "ordinary-app-direct-mapped-write" &&
     run_file_monitor_write_denied_case "$scenario" "regular-read-only-denied" "$MONITOR_LOCKED_ROOT/$locked_file" "$MONITOR_LOCKED_ROOT/$locked_file" &&
-    if [ "$scenario" = "24" ]; then
-      run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file" 1 0 "ordinary-app-mount-namespace-read-only-exclusion"
-    else
-      run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file"
-    fi
+    run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file" 1 0 "ordinary-app-read-only-exclusion-direct-write"
 }
 
 run_file_monitor_mediastore_scenario() {

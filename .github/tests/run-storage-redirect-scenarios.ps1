@@ -920,18 +920,14 @@ function Invoke-RegularMonitorScenario {
     $writableFile = "srt_monitor_${Scenario}_writable.bin"
     $ok = $true
     if ([int]$Scenario -eq 25) {
-        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-allow-write" "$MonitorBaseRoot/$allowFile" "$MonitorBaseRoot/$allowFile" "$PrivateMonitorBaseRoot/$allowFile" $true) -and $ok
+        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-allow-write" "$MonitorBaseRoot/$allowFile" "$MonitorBaseRoot/$allowFile" "$PrivateMonitorBaseRoot/$allowFile" $true $false "ordinary-app-scoped-fuse-direct-write") -and $ok
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     } else {
         Write-Host "regular_allow_write_skipped scenario=$Scenario reason=mount-namespace-allowed-real-direct-write-is-platform-permission-sensitive"
     }
-    $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile") -and $ok
+    $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile" "" $false $false "ordinary-app-direct-mapped-write") -and $ok
     $ok = (Invoke-FileMonitorWriteDeniedCase $Scenario "regular-read-only-denied" "$MonitorLockedRoot/$lockedFile") -and $ok
-    if ([int]$Scenario -eq 24) {
-        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile" $true $false "ordinary-app-mount-namespace-read-only-exclusion") -and $ok
-    } else {
-        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile") -and $ok
-    }
+    $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile" $true $false "ordinary-app-read-only-exclusion-direct-write") -and $ok
     $ok
 }
 
