@@ -614,15 +614,18 @@ wait_file_monitor_log_line() {
   local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
+    local matches
     case "$expected" in
       success)
-        if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -Fv -- 'ret=-1' | grep -Fv -- 'op=close_write' >/dev/null"; then
+        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -Fv -- 'ret=-1' | grep -Fv -- 'op=close_write' || true")"
+        if [ -n "$matches" ]; then
           echo "monitor_log_found scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
           return 0
         fi
         ;;
       failure)
-        if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' >/dev/null"; then
+        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' || true")"
+        if [ -n "$matches" ]; then
           echo "monitor_log_found scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
           return 0
         fi
@@ -660,9 +663,11 @@ expect_no_read_only_failure_record() {
   local scenario="$1"
   local label="$2"
   local file_name="$3"
-  if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' >/dev/null"; then
+  local matches
+  matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' || true")"
+  if [ -n "$matches" ]; then
     echo "file_monitor unexpected read-only failure: scenario=${scenario} label=${label} file=${file_name}" >&2
-    adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' || true" | sed 's/^/monitor_read_only_hit: /' >&2
+    printf '%s\n' "$matches" | sed 's/^/monitor_read_only_hit: /' >&2
     return 1
   fi
 }
