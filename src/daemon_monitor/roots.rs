@@ -75,7 +75,7 @@ fn build_default_watch_root(
         )
     } else {
         (
-            paths::storage_to_data_media_for_user(&context.storage_root, spec.user_id)?,
+            paths::data_media_user_root_for_user(spec.user_id),
             "public_root",
         )
     };

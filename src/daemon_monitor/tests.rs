@@ -361,6 +361,29 @@ fn builds_watch_roots_for_redirect_allowed_and_mapping_sources() {
 }
 
 #[test]
+fn disabled_profile_public_root_watches_storage_root() {
+    let spec = MonitorAppSpec {
+        package_name: "org.srx.disabled".to_string(),
+        user_id: 0,
+        is_enabled: false,
+        is_mapping_mode_only: false,
+        allowed_real_paths: Vec::new(),
+        excluded_real_paths: Vec::new(),
+        sandboxed_paths: Vec::new(),
+        read_only_paths: Vec::new(),
+        path_mappings: Vec::new(),
+    };
+
+    let roots = build_watch_roots(&spec);
+
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].source, "public_root");
+    assert_eq!(roots[0].backend_root, "/data/media/0");
+    assert_eq!(roots[0].display_root, "/storage/emulated/0");
+    assert_eq!(roots[0].record_display_root, "/storage/emulated/0");
+}
+
+#[test]
 fn build_watch_roots_skips_path_mapping_android_private_targets() {
     let spec = MonitorAppSpec {
         package_name: "org.srx.demo".to_string(),
