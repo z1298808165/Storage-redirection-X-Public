@@ -941,7 +941,7 @@ function Invoke-MediaStoreMonitorScenario {
     if ([int]$Scenario -eq 27) {
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-relative-data-create" "Pictures/SrtRelativeData" $MonitorRelativeDataRoot $PrivateMonitorRelativeDataRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-relative-data-create" "Pictures/SrtRelativeData" $MonitorRelativeDataRoot $PrivateMonitorRelativeDataRoot $false) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-mapped-create" "Download/SrtMonitorMap" $MonitorMapTarget) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreDeniedCase $Scenario "media-read-only-denied" "Download/SrtMonitorLocked" $MonitorLockedRoot) -and $ok
