@@ -726,6 +726,7 @@ impl MountPlanner {
                 log::warn!("readonly source missing: {}", read_only_path);
                 continue;
             };
+            self.ensure_read_only_tree_accessible(&source_path);
 
             let mut is_read_only_mounted = false;
             let preserve_data_media_backend = restored_excluded_children

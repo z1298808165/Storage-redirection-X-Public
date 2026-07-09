@@ -1222,6 +1222,9 @@ function Invoke-MediaStoreReadOnlyQueryScenario {
     $privatePath = "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
     $ok = Wait-MediaStoreReadOnlyImage
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-query" "mediastore_query_read_only_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_query_read_only_image\]").Ok -and $ok
+    $list = Invoke-ServiceCase "scenario-$Scenario" "read-only-image-list" "file_list_dir" @{ file_dir = $ReadOnlyMediaRoot } "^PASS \[file_list_dir\]"
+    $ok = $list.Ok -and (Test-Path "scenario-$Scenario-read-only-image-list-result.txt") -and ((Get-Content "scenario-$Scenario-read-only-image-list-result.txt" -Raw) -match "entries=.*$([regex]::Escape($ReadOnlyImageFile))") -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-file-read" "file_read" @{ file_path = $logicalPath } "^PASS \[file_read\]").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "read-only-media-real" $logicalPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "read-only-media-private" $privatePath) -and $ok
     $ok

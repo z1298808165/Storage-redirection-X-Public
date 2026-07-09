@@ -15,6 +15,7 @@ const READ_ONLY_DIR_MODE: libc::mode_t = 0o555;
 const REAL_PUBLIC_DIR_MODE: libc::mode_t = 0o2771;
 const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
 const ALLOWED_REAL_TREE_METADATA_LIMIT: usize = 256;
+const READ_ONLY_TREE_METADATA_LIMIT: usize = 512;
 const BIND_SUCCESS_LOG_STEP: u64 = 128;
 const BIND_VERIFY_PASS_LOG_STEP: u64 = 256;
 static BIND_SUCCESS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -184,6 +185,46 @@ impl MountPlanner {
             metadata_path
         );
         true
+    }
+
+    pub(super) fn ensure_read_only_tree_accessible(&self, path: &str) {
+        let Some(root) = self.metadata_operations_path(path) else {
+            return;
+        };
+        if !is_data_media_shared_public_directory(&root, self.user_id) || !fs::is_directory(&root) {
+            return;
+        }
+
+        let mut visited = 0usize;
+        let mut pending = VecDeque::from([root.clone()]);
+        while let Some(current) = pending.pop_front() {
+            if visited >= READ_ONLY_TREE_METADATA_LIMIT {
+                log::warn!(
+                    "mount dir: readonly metadata scan limit reached root={} limit={}",
+                    path,
+                    READ_ONLY_TREE_METADATA_LIMIT
+                );
+                break;
+            }
+            visited += 1;
+
+            fix_read_only_public_metadata(&current);
+
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let child = entry.path().to_string_lossy().replace('\\', "/");
+                if child.is_empty() {
+                    continue;
+                }
+                if entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false) {
+                    pending.push_back(child);
+                } else {
+                    fix_read_only_public_metadata(&child);
+                }
+            }
+        }
     }
 
     pub(super) fn ensure_app_writable_directory_chain(&self, path: &str, owner_uid: i32) {
@@ -962,6 +1003,46 @@ fn fix_allowed_real_directory_metadata(path: &str, owner_uid: i32) {
             last_errno(),
             errno_text(),
             path
+        );
+    }
+}
+
+fn fix_read_only_public_metadata(path: &str) {
+    let Ok(c_path) = CString::new(path) else {
+        return;
+    };
+
+    let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
+    let ret = unsafe { c_stat(c_path.as_ptr(), st.as_mut_ptr()) };
+    if ret != 0 {
+        log::warn!(
+            "mount dir: readonly public stat failed errno={} {} path={}",
+            last_errno(),
+            errno_text(),
+            path
+        );
+        return;
+    }
+    let st = unsafe { st.assume_init() };
+    let mode = (st.st_mode as libc::mode_t) & 0o7777;
+    let required = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        0o0555
+    } else {
+        0o0444
+    };
+    let fixed_mode = mode | required;
+    if fixed_mode == mode {
+        return;
+    }
+
+    let ret = unsafe { chmod(c_path.as_ptr(), fixed_mode) };
+    if ret != 0 {
+        log::warn!(
+            "mount dir: readonly public chmod failed errno={} {} path={} mode={:o}",
+            last_errno(),
+            errno_text(),
+            path,
+            fixed_mode
         );
     }
 }
