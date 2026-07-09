@@ -295,19 +295,19 @@ apply_config() {
       ;;
     24)
       write_global_config "$(test_global_config false true)"
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","Pictures/SrtRelativeData","Pictures/Nnngram"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     25)
       write_global_config "$(test_global_config true true)"
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","Pictures/SrtRelativeData","Pictures/Nnngram"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     26)
       write_global_config "$(test_global_config false true)"
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","Pictures/SrtRelativeData","Pictures/Nnngram"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     27)
       write_global_config "$(test_global_config true true)"
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","Pictures/SrtRelativeData","Pictures/Nnngram"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     28)
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}'
@@ -1607,7 +1607,8 @@ run_file_monitor_disabled_redirect_scenario() {
   local file_name
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
   run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 &&
-    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT"
+    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT"
 }
 
 run_file_monitor_regular_scenario() {
