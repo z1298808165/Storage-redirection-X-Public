@@ -656,6 +656,16 @@ expect_file_monitor_failure_record() {
   wait_file_monitor_log_line "$scenario" "$label" "$file_name" "failure" "$timeout_seconds"
 }
 
+expect_no_read_only_failure_record() {
+  local scenario="$1"
+  local label="$2"
+  local file_name="$3"
+  if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' >/dev/null"; then
+    echo "file_monitor unexpected read-only failure: scenario=${scenario} label=${label} file=${file_name}" >&2
+    return 1
+  fi
+}
+
 cleanup_test_artifacts() {
   local status=$?
   if [ "${cleanup_done:-0}" -eq 1 ]; then
@@ -1599,6 +1609,7 @@ run_file_monitor_mediastore_relative_data_success_case() {
   run_mediastore_image_relative_data_create_case "$scenario" "$label" "$file_name" "$relative_data_dir" &&
     check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
+    expect_no_read_only_failure_record "$scenario" "$label" "$file_name" &&
     expect_file_monitor_success_record "$scenario" "$label" "$file_name"
 }
 

@@ -56,10 +56,21 @@ pub fn record_read_only_fuse_operation(
         return false;
     }
 
-    let Some(caller_package) = resolve_read_only_caller_package(caller_uid, &probe_paths)
-        .or_else(|| infer_read_only_caller_package_by_path(caller_uid, &probe_paths))
-    else {
-        return false;
+    let caller_package = if let Some(caller_package) =
+        resolve_read_only_caller_package(caller_uid, &probe_paths)
+    {
+        caller_package
+    } else if let Some(recent) = resolve_recent_read_only_owner(caller_uid, &probe_paths) {
+        let Some(caller_package) = recent else {
+            return false;
+        };
+        caller_package
+    } else {
+        let Some(caller_package) = infer_read_only_caller_package_by_path(caller_uid, &probe_paths)
+        else {
+            return false;
+        };
+        caller_package
     };
 
     let Some(kind) = kind_from_code(kind_code) else {
@@ -768,6 +779,61 @@ fn resolve_read_only_caller_package(caller_uid: i32, paths: &[&String; 2]) -> Op
     })
 }
 
+fn resolve_recent_read_only_owner(caller_uid: i32, paths: &[&String; 2]) -> Option<Option<String>> {
+    for path in paths {
+        if path.is_empty() {
+            continue;
+        }
+        let user_id = paths::extract_user_id_from_storage_path(path);
+        if user_id < 0 {
+            continue;
+        }
+        let Some(identity) = crate::monitor::infer_recent_path_caller_identity(path, user_id)
+        else {
+            continue;
+        };
+        if policy::is_system_writer_package(&identity.package_name) {
+            continue;
+        }
+        let package_uid = policy::get_fresh_uid_for_package(&identity.package_name);
+        if caller_uid >= writer::ANDROID_APP_UID_START
+            && !is_system_writer_uid(caller_uid)
+            && package_uid != caller_uid
+        {
+            continue;
+        }
+        let effective_uid = if package_uid >= writer::ANDROID_APP_UID_START {
+            package_uid
+        } else if caller_uid >= writer::ANDROID_APP_UID_START {
+            caller_uid
+        } else {
+            user_id
+                .saturating_mul(platform::ANDROID_USER_ID_OFFSET)
+                .saturating_add(writer::ANDROID_APP_UID_START)
+        };
+        if SettingsHub::instance().should_redirect(&identity.package_name, effective_uid)
+            && paths.iter().any(|probe| {
+                !probe.is_empty()
+                    && writer::is_path_or_mapped_target_read_only_by_caller_paths(
+                        probe,
+                        &identity.package_name,
+                        effective_uid,
+                    )
+            })
+        {
+            return Some(Some(identity.package_name));
+        }
+        log::debug!(
+            "media fuse readonly skip recent caller={} uid={} path={}",
+            identity.package_name,
+            effective_uid,
+            path
+        );
+        return Some(None);
+    }
+    None
+}
+
 fn infer_read_only_caller_package_by_path(caller_uid: i32, paths: &[&String; 2]) -> Option<String> {
     if crate::hook::is_path_owner_inference_disabled() {
         return None;
@@ -794,7 +860,10 @@ fn infer_read_only_caller_package_by_path(caller_uid: i32, paths: &[&String; 2])
             continue;
         }
         let package_uid = policy::get_uid_for_package(&package_name);
-        if caller_uid >= writer::ANDROID_APP_UID_START && package_uid != caller_uid {
+        if caller_uid >= writer::ANDROID_APP_UID_START
+            && !is_system_writer_uid(caller_uid)
+            && package_uid != caller_uid
+        {
             continue;
         }
         let effective_uid = if package_uid >= writer::ANDROID_APP_UID_START {
@@ -825,6 +894,14 @@ fn infer_read_only_caller_package_by_path(caller_uid: i32, paths: &[&String; 2])
         }
     }
     None
+}
+
+fn is_system_writer_uid(uid: i32) -> bool {
+    uid >= 0
+        && (policy::is_shared_uid_process(uid)
+            || policy::get_packages_for_uid(uid)
+                .iter()
+                .any(|package_name| policy::is_system_writer_package(package_name)))
 }
 
 fn kind_from_code(kind_code: i32) -> Option<OpKind> {
@@ -906,6 +983,156 @@ mod tests {
 
         assert_eq!(read_only_audit_user_id(&[&empty, &path]), 10);
         assert_eq!(read_only_audit_user_id(&[&empty, &empty]), -1);
+    }
+
+    #[test]
+    fn provider_open_read_only_skips_other_app_rule() {
+        use crate::config::{AppProfile, UserProfile};
+        use crate::domain::PathMapping;
+        use std::collections::HashMap;
+
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let hub = SettingsHub::instance();
+        let previous_monitor = hub.replace_test_file_monitor_enabled(true);
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([
+            (
+                "com.aliyun.tongyi".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: Vec::new(),
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: vec![
+                                "/storage/emulated/0/DCIM".to_string(),
+                                "/storage/emulated/0/Pictures".to_string(),
+                            ],
+                            path_mappings: Vec::new(),
+                        },
+                    )]),
+                },
+            ),
+            (
+                "xyz.nextalone.nnngram".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: vec![
+                                "/storage/emulated/0/DCIM".to_string(),
+                                "/storage/emulated/0/Pictures".to_string(),
+                            ],
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: Vec::new(),
+                            path_mappings: vec![PathMapping::new(
+                                "/storage/emulated/0/Download/Nnngram".to_string(),
+                                "/storage/emulated/0/Download/第三方下载/Nnngram".to_string(),
+                            )],
+                        },
+                    )]),
+                },
+            ),
+        ]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([
+            ("com.aliyun.tongyi".to_string(), 10340),
+            ("xyz.nextalone.nnngram".to_string(), 10312),
+            ("com.android.providers.media.module".to_string(), 10217),
+        ]));
+        let was_monitor_enabled = AuditTrail::instance().is_enabled();
+        AuditTrail::instance().set_enabled(true);
+        AuditTrail::instance().init("com.android.providers.media.module", 10217);
+
+        let path = "/storage/emulated/0/Pictures/Nnngram/IMG_20260709_222730_377.jpg";
+        AuditTrail::instance().record_provider_open_path(path, 10312, "xyz.nextalone.nnngram");
+
+        let denied = record_read_only_fuse_operation(
+            FUSE_KIND_OPEN,
+            "openFile",
+            "open:write",
+            path,
+            "",
+            10217,
+            0x28002,
+        );
+
+        AuditTrail::instance().set_enabled(was_monitor_enabled);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        hub.restore_test_file_monitor_enabled(previous_monitor.0, previous_monitor.1);
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert!(!denied);
+    }
+
+    #[test]
+    fn provider_open_read_only_denies_recent_read_only_caller() {
+        use crate::config::{AppProfile, UserProfile};
+        use std::collections::HashMap;
+
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let hub = SettingsHub::instance();
+        let previous_monitor = hub.replace_test_file_monitor_enabled(true);
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([(
+            "com.aliyun.tongyi".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([
+            ("com.aliyun.tongyi".to_string(), 10340),
+            ("com.android.providers.media.module".to_string(), 10217),
+        ]));
+        let was_monitor_enabled = AuditTrail::instance().is_enabled();
+        AuditTrail::instance().set_enabled(true);
+        AuditTrail::instance().init("com.android.providers.media.module", 10217);
+
+        let path = "/storage/emulated/0/Pictures/Tongyi/photo.jpg";
+        AuditTrail::instance().record_provider_open_path(path, 10340, "com.aliyun.tongyi");
+
+        let denied = record_read_only_fuse_operation(
+            FUSE_KIND_OPEN,
+            "openFile",
+            "open:write",
+            path,
+            "",
+            10217,
+            0x28002,
+        );
+
+        AuditTrail::instance().set_enabled(was_monitor_enabled);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        hub.restore_test_file_monitor_enabled(previous_monitor.0, previous_monitor.1);
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert!(denied);
     }
 
     #[test]

@@ -766,6 +766,18 @@ function New-MonitorFileName {
     "srt_monitor_${Scenario}_${Label}.bin" -replace '[^A-Za-z0-9_.-]', '_'
 }
 
+function Test-NoReadOnlyFailureRecord {
+    param([string]$Scenario, [string]$Label, [string]$FileName)
+    $lines = @(Invoke-Su "grep -F -- '$FileName' '$FileMonitorLogPath' 2>/dev/null || true")
+    foreach ($line in $lines) {
+        if ($line -match "ret=-1" -and $line -match "deny_reason=read_only_rule") {
+            $script:Failures.Add("scenario-$Scenario/$Label unexpected read-only failure file=$FileName")
+            return $false
+        }
+    }
+    $true
+}
+
 function Invoke-FileMonitorWriteSuccessCase {
     param(
         [string]$Scenario,
@@ -847,6 +859,7 @@ function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
     if ($PrivatePath) {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
+    $ok = (Test-NoReadOnlyFailureRecord $Scenario $Label $fileName) -and $ok
     $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
     $ok
 }
