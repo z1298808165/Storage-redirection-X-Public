@@ -65,6 +65,8 @@ pub fn record_read_only_fuse_operation(
             return false;
         };
         caller_package
+    } else if is_system_writer_uid(caller_uid) {
+        return false;
     } else {
         let Some(caller_package) = infer_read_only_caller_package_by_path(caller_uid, &probe_paths)
         else {
@@ -1133,6 +1135,63 @@ mod tests {
         crate::monitor::clear_recent_private_owner_hint_for_tests();
 
         assert!(denied);
+    }
+
+    #[test]
+    fn provider_open_read_only_without_recent_caller_does_not_infer_owner() {
+        use crate::config::{AppProfile, UserProfile};
+        use std::collections::HashMap;
+
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let hub = SettingsHub::instance();
+        let previous_monitor = hub.replace_test_file_monitor_enabled(true);
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([(
+            "com.aliyun.tongyi".to_string(),
+            AppProfile {
+                user_profiles: HashMap::from([(
+                    0,
+                    UserProfile {
+                        is_enabled: true,
+                        is_mapping_mode_only: false,
+                        allowed_real_paths: Vec::new(),
+                        excluded_real_paths: Vec::new(),
+                        sandboxed_paths: Vec::new(),
+                        read_only_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                        path_mappings: Vec::new(),
+                    },
+                )]),
+            },
+        )]));
+        let previous_uid_cache = policy::replace_test_uid_cache(HashMap::from([
+            ("com.aliyun.tongyi".to_string(), 10340),
+            ("com.android.providers.media.module".to_string(), 10217),
+        ]));
+        let was_monitor_enabled = AuditTrail::instance().is_enabled();
+        AuditTrail::instance().set_enabled(true);
+        AuditTrail::instance().init("com.android.providers.media.module", 10217);
+
+        let denied = record_read_only_fuse_operation(
+            FUSE_KIND_OPEN,
+            "openFile",
+            "open:write",
+            "/storage/emulated/0/Pictures/Nnngram/photo.jpg",
+            "",
+            10217,
+            0x28002,
+        );
+
+        AuditTrail::instance().set_enabled(was_monitor_enabled);
+        policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        hub.restore_test_file_monitor_enabled(previous_monitor.0, previous_monitor.1);
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert!(!denied);
     }
 
     #[test]
