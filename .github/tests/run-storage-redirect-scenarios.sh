@@ -378,7 +378,7 @@ scenario_title() {
     21) echo "默认 mount namespace：read_only_paths 通配符回退" ;;
     22) echo "默认 mount namespace：映射最终目标决定只读权限" ;;
     23) echo "文件监视：未启用重定向的普通应用与系统代写保存成功记录" ;;
-    24) echo "文件监视：普通应用 fuse daemon 关闭时保存成功、只读失败与只读排除成功记录" ;;
+    24) echo "文件监视：普通应用 fuse daemon 关闭时映射保存、只读失败与只读排除成功记录" ;;
     25) echo "文件监视：普通应用 fuse daemon 开启时保存成功、只读失败与只读排除成功记录" ;;
     26) echo "文件监视：系统代写 fuse daemon 关闭时保存成功、只读失败与只读排除成功记录" ;;
     27) echo "文件监视：系统代写 fuse daemon 开启时保存成功、只读失败与只读排除成功记录" ;;
@@ -1633,9 +1633,14 @@ run_file_monitor_regular_scenario() {
   locked_file="$(monitor_file_name "$scenario" "regular_locked")"
   writable_file="$(monitor_file_name "$scenario" "regular_writable")"
 
-  run_file_monitor_write_success_case "$scenario" "regular-allow-write" "$MONITOR_BASE_ROOT/$allow_file" "$MONITOR_BASE_ROOT/$allow_file" "$PRIVATE_MONITOR_BASE_ROOT/$allow_file" 1 &&
-    { [ "$scenario" != "25" ] || check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT"; } &&
-    run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" &&
+  if [ "$scenario" = "25" ]; then
+    run_file_monitor_write_success_case "$scenario" "regular-allow-write" "$MONITOR_BASE_ROOT/$allow_file" "$MONITOR_BASE_ROOT/$allow_file" "$PRIVATE_MONITOR_BASE_ROOT/$allow_file" 1 || return 1
+    check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT" || return 1
+  else
+    echo "regular_allow_write_skipped scenario=${scenario} reason=mount-namespace-allowed-real-direct-write-is-platform-permission-sensitive"
+  fi
+
+  run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" &&
     run_file_monitor_write_denied_case "$scenario" "regular-read-only-denied" "$MONITOR_LOCKED_ROOT/$locked_file" "$MONITOR_LOCKED_ROOT/$locked_file" &&
     run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file"
 }

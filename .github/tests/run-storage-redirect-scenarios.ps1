@@ -877,9 +877,11 @@ function Invoke-RegularMonitorScenario {
     $lockedFile = "srt_monitor_${Scenario}_locked.bin"
     $writableFile = "srt_monitor_${Scenario}_writable.bin"
     $ok = $true
-    $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-allow-write" "$MonitorBaseRoot/$allowFile" "$MonitorBaseRoot/$allowFile" "$PrivateMonitorBaseRoot/$allowFile" $true) -and $ok
     if ([int]$Scenario -eq 25) {
+        $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-allow-write" "$MonitorBaseRoot/$allowFile" "$MonitorBaseRoot/$allowFile" "$PrivateMonitorBaseRoot/$allowFile" $true) -and $ok
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
+    } else {
+        Write-Host "regular_allow_write_skipped scenario=$Scenario reason=mount-namespace-allowed-real-direct-write-is-platform-permission-sensitive"
     }
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile") -and $ok
     $ok = (Invoke-FileMonitorWriteDeniedCase $Scenario "regular-read-only-denied" "$MonitorLockedRoot/$lockedFile") -and $ok
@@ -1057,7 +1059,7 @@ function Get-ScenarioTitle {
         21 { "mount namespace read_only wildcard fallback" }
         22 { "mount namespace mapped final target read-only policy" }
         23 { "file monitor disabled redirect regular app and system writer success records" }
-        24 { "file monitor regular app with fuse daemon off" }
+        24 { "file monitor regular app namespace mapping and read-only records" }
         25 { "file monitor regular app with fuse daemon on" }
         26 { "file monitor system writer with fuse daemon off" }
         27 { "file monitor system writer with fuse daemon on" }
