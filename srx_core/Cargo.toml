@@ -1,6 +1,6 @@
 [package]
 name = "srx_core"
-version = "1.2.51"
+version = "1.2.52"
 edition = "2024"
 
 [lib]
