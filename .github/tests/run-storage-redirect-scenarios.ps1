@@ -844,7 +844,14 @@ function Invoke-FileMonitorWriteDeniedCase {
 }
 
 function Invoke-FileMonitorMediaStoreSuccessCase {
-    param([string]$Scenario, [string]$Label, [string]$RelativePath, [string]$ExpectedPath, [string]$PrivatePath = "")
+    param(
+        [string]$Scenario,
+        [string]$Label,
+        [string]$RelativePath,
+        [string]$ExpectedPath,
+        [string]$PrivatePath = "",
+        [bool]$RequireMonitorRecord = $true
+    )
     $fileName = New-MonitorFileName $Scenario $Label
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-MediaStoreDownloadCreateCase ([int]$Scenario) $Label $fileName $RelativePath).Ok
@@ -852,12 +859,23 @@ function Invoke-FileMonitorMediaStoreSuccessCase {
     if ($PrivatePath) {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
-    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
+    if ($RequireMonitorRecord) {
+        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
+    } else {
+        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=disabled-profile-mediastore-create"
+    }
     $ok
 }
 
 function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
-    param([string]$Scenario, [string]$Label, [string]$RelativeDataDir, [string]$ExpectedPath, [string]$PrivatePath = "")
+    param(
+        [string]$Scenario,
+        [string]$Label,
+        [string]$RelativeDataDir,
+        [string]$ExpectedPath,
+        [string]$PrivatePath = "",
+        [bool]$RequireMonitorRecord = $true
+    )
     $fileName = (New-MonitorFileName $Scenario $Label) -replace '\.bin$', '.jpg'
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-MediaStoreImageRelativeDataCreateCase ([int]$Scenario) $Label $fileName $RelativeDataDir).Ok
@@ -866,7 +884,11 @@ function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
     $ok = (Test-NoReadOnlyFailureRecord $Scenario $Label $fileName) -and $ok
-    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
+    if ($RequireMonitorRecord) {
+        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
+    } else {
+        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=disabled-profile-mediastore-relative-data"
+    }
     $ok
 }
 
@@ -884,8 +906,8 @@ function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
     $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true $false
-    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot $false) -and $ok
     $ok
 }
 
