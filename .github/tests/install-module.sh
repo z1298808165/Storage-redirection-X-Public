@@ -119,14 +119,24 @@ seed_config() {
   done
 }
 
+reset_boot_guard_state() {
+  for dir in /data/adb/modules_update/${MODULE_ID} ${MODULE_DIR}; do
+    adb_root "[ -d '$dir' ] && rm -f '$dir/disable' '$dir/.boot_pending' '$dir/.boot_ok' || true" >/dev/null
+  done
+}
+
 check_loaded() {
   adb_root "test -d ${MODULE_DIR} && test ! -e ${MODULE_DIR}/disable" >/dev/null 2>&1 &&
     adb_root "grep -q ' /dev/srx_config ' /proc/mounts" >/dev/null 2>&1
 }
 
+is_module_disabled() {
+  adb_root "test -e ${MODULE_DIR}/disable" >/dev/null 2>&1
+}
+
 print_module_diagnostics() {
   echo "=== SRX 模块诊断 ==="
-  adb_root "echo ===module_dir===; ls -la ${MODULE_DIR} 2>&1 || true; echo ===logs===; ls -la ${MODULE_DIR}/logs 2>&1 || true; echo ===config===; ls -la ${MODULE_DIR}/config 2>&1 || true; echo ===mounts===; grep -E 'srx_config|storage.redirect|zygisk|magisk' /proc/mounts || true; echo ===running_log===; tail -80 ${MODULE_DIR}/logs/running.log 2>&1 || true"
+  adb_root "echo ===modules_update===; ls -la /data/adb/modules_update/${MODULE_ID} 2>&1 || true; echo ===module_dir===; ls -la ${MODULE_DIR} 2>&1 || true; echo ===boot_guard===; cat ${MODULE_DIR}/.boot_pending ${MODULE_DIR}/.boot_ok 2>&1 || true; echo ===logs===; ls -la ${MODULE_DIR}/logs 2>&1 || true; echo ===config===; ls -la ${MODULE_DIR}/config 2>&1 || true; echo ===mounts===; grep -E 'srx_config|storage.redirect|zygisk|magisk' /proc/mounts || true; echo ===running_log===; tail -80 ${MODULE_DIR}/logs/running.log 2>&1 || true"
   adb_root "echo ===magisk===; magisk -V 2>&1 || true" || true
   adb_magisk '--sqlite "SELECT key,value FROM settings;"' | grep -E 'zygisk|root_access' || true
   adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|AndroidRuntime|FATAL EXCEPTION' || true
@@ -149,6 +159,18 @@ wait_for_module_loaded() {
   echo "SRX 模块加载验证超时。"
   print_module_diagnostics
   return 1
+}
+
+recover_disabled_module_once() {
+  if ! is_module_disabled; then
+    return 0
+  fi
+
+  echo "SRX 模块被启动保护禁用，清理状态后重启重试一次。"
+  print_module_diagnostics
+  reset_boot_guard_state
+  adb reboot
+  wait_for_boot 300
 }
 # 安装测试 APK
 if [ ! -f "$APP_APK" ]; then
@@ -194,8 +216,10 @@ done
 adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
 install_module
 seed_config
+reset_boot_guard_state
 adb reboot
 wait_for_boot 300
+recover_disabled_module_once
 
 if ! adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | grep -q 1; then
   echo "重启后 Zygisk 未启用。"
