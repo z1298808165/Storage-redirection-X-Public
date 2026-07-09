@@ -13,44 +13,53 @@ fun BackdropEffectScope.lens(
     depthEffect: Boolean = false,
     chromaticAberration: Float = 0f,
 ) {
-    if (!isRuntimeShaderSupported()) return
-    if (refractionHeight <= 0f || refractionAmount <= 0f) return
-    if (padding < refractionAmount) padding = refractionAmount
-    val radii = roundedRectCornerRadii() ?: return
-    val dispersion = chromaticAberration > 0f
-    val sf = downscaleFactor.coerceAtLeast(1).toFloat()
-    runtimeShaderEffect(
-        key = if (dispersion) "SrxLiquidGlassLensDispersion" else "SrxLiquidGlassLens",
-        shaderString = if (dispersion) RoundedRectRefractionWithDispersionShader else RoundedRectRefractionShader,
-        uniformShaderName = "content",
-    ) {
-        setFloatUniform("size", size.width / sf, size.height / sf)
-        setFloatUniform("offset", -padding / sf, -padding / sf)
-        setFloatUniform("cornerRadii", FloatArray(radii.size) { radii[it] / sf })
-        setFloatUniform("refractionHeight", refractionHeight / sf)
-        setFloatUniform("refractionAmount", -refractionAmount / sf)
-        setFloatUniform("depthEffect", if (depthEffect) 1f else 0f)
-        if (dispersion) setFloatUniform("chromaticAberration", chromaticAberration)
-    }
+  if (!isRuntimeShaderSupported()) return
+  if (refractionHeight <= 0f || refractionAmount <= 0f) return
+  if (padding < refractionAmount) padding = refractionAmount
+  val radii = roundedRectCornerRadii() ?: return
+  val dispersion = chromaticAberration > 0f
+  val sf = downscaleFactor.coerceAtLeast(1).toFloat()
+  runtimeShaderEffect(
+      key = if (dispersion) "SrxLiquidGlassLensDispersion" else "SrxLiquidGlassLens",
+      shaderString =
+          if (dispersion) RoundedRectRefractionWithDispersionShader
+          else RoundedRectRefractionShader,
+      uniformShaderName = "content",
+  ) {
+    setFloatUniform("size", size.width / sf, size.height / sf)
+    setFloatUniform("offset", -padding / sf, -padding / sf)
+    setFloatUniform("cornerRadii", FloatArray(radii.size) { radii[it] / sf })
+    setFloatUniform("refractionHeight", refractionHeight / sf)
+    setFloatUniform("refractionAmount", -refractionAmount / sf)
+    setFloatUniform("depthEffect", if (depthEffect) 1f else 0f)
+    if (dispersion) setFloatUniform("chromaticAberration", chromaticAberration)
+  }
 }
 
 private fun BackdropEffectScope.roundedRectCornerRadii(): FloatArray? {
-    val cornerShape = shape as? CornerBasedShape ?: return null
-    val maxRadius = size.minDimension / 2f
-    val isLtr = layoutDirection == LayoutDirection.Ltr
-    val topLeft = if (isLtr) cornerShape.topStart.toPx(size, this) else cornerShape.topEnd.toPx(size, this)
-    val topRight = if (isLtr) cornerShape.topEnd.toPx(size, this) else cornerShape.topStart.toPx(size, this)
-    val bottomRight = if (isLtr) cornerShape.bottomEnd.toPx(size, this) else cornerShape.bottomStart.toPx(size, this)
-    val bottomLeft = if (isLtr) cornerShape.bottomStart.toPx(size, this) else cornerShape.bottomEnd.toPx(size, this)
-    return floatArrayOf(
-        topLeft.fastCoerceAtMost(maxRadius),
-        topRight.fastCoerceAtMost(maxRadius),
-        bottomRight.fastCoerceAtMost(maxRadius),
-        bottomLeft.fastCoerceAtMost(maxRadius),
-    )
+  val cornerShape = shape as? CornerBasedShape ?: return null
+  val maxRadius = size.minDimension / 2f
+  val isLtr = layoutDirection == LayoutDirection.Ltr
+  val topLeft =
+      if (isLtr) cornerShape.topStart.toPx(size, this) else cornerShape.topEnd.toPx(size, this)
+  val topRight =
+      if (isLtr) cornerShape.topEnd.toPx(size, this) else cornerShape.topStart.toPx(size, this)
+  val bottomRight =
+      if (isLtr) cornerShape.bottomEnd.toPx(size, this)
+      else cornerShape.bottomStart.toPx(size, this)
+  val bottomLeft =
+      if (isLtr) cornerShape.bottomStart.toPx(size, this)
+      else cornerShape.bottomEnd.toPx(size, this)
+  return floatArrayOf(
+      topLeft.fastCoerceAtMost(maxRadius),
+      topRight.fastCoerceAtMost(maxRadius),
+      bottomRight.fastCoerceAtMost(maxRadius),
+      bottomLeft.fastCoerceAtMost(maxRadius),
+  )
 }
 
-private const val RoundedRectSdf = """
+private const val RoundedRectSdf =
+    """
 float radiusAt(float2 coord, float4 radii) {
     if (coord.x >= 0.0) {
         if (coord.y <= 0.0) return radii.y;
@@ -77,7 +86,8 @@ float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {
 }
 """
 
-private const val RoundedRectRefractionShader = """
+private const val RoundedRectRefractionShader =
+    """
 uniform shader content;
 uniform float2 size;
 uniform float2 offset;
@@ -101,7 +111,8 @@ half4 main(float2 coord) {
 }
 """
 
-private const val RoundedRectRefractionWithDispersionShader = """
+private const val RoundedRectRefractionWithDispersionShader =
+    """
 uniform shader content;
 uniform float2 size;
 uniform float2 offset;

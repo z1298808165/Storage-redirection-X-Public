@@ -22,18 +22,20 @@ internal fun Modifier.bgEffectDraw(
     playing: Boolean,
     colorStage: () -> Float,
     alpha: () -> Float,
-): Modifier = this then BgEffectElement(
-    painter,
-    preset,
-    deviceType,
-    isDarkTheme,
-    surface,
-    effectBackground,
-    isFullSize,
-    playing,
-    colorStage,
-    alpha,
-)
+): Modifier =
+    this then
+        BgEffectElement(
+            painter,
+            preset,
+            deviceType,
+            isDarkTheme,
+            surface,
+            effectBackground,
+            isFullSize,
+            playing,
+            colorStage,
+            alpha,
+        )
 
 private data class BgEffectElement(
     val painter: BgEffectPainter,
@@ -47,7 +49,22 @@ private data class BgEffectElement(
     val colorStage: () -> Float,
     val alpha: () -> Float,
 ) : ModifierNodeElement<BgEffectNode>() {
-    override fun create(): BgEffectNode = BgEffectNode(
+  override fun create(): BgEffectNode =
+      BgEffectNode(
+          painter,
+          preset,
+          deviceType,
+          isDarkTheme,
+          surface,
+          effectBackground,
+          isFullSize,
+          playing,
+          colorStage,
+          alpha,
+      )
+
+  override fun update(node: BgEffectNode) {
+    node.update(
         painter,
         preset,
         deviceType,
@@ -59,10 +76,7 @@ private data class BgEffectElement(
         colorStage,
         alpha,
     )
-
-    override fun update(node: BgEffectNode) {
-        node.update(painter, preset, deviceType, isDarkTheme, surface, effectBackground, isFullSize, playing, colorStage, alpha)
-    }
+  }
 }
 
 private class BgEffectNode(
@@ -77,82 +91,85 @@ private class BgEffectNode(
     private var colorStage: () -> Float,
     private var alpha: () -> Float,
 ) : Modifier.Node(), DrawModifierNode {
-    private var animationJob: Job? = null
-    private var animTime = 0f
-    private var startOffset = 0f
+  private var animationJob: Job? = null
+  private var animTime = 0f
+  private var startOffset = 0f
 
-    override fun onAttach() {
-        if (playing) startAnimation()
-    }
+  override fun onAttach() {
+    if (playing) startAnimation()
+  }
 
-    override fun onDetach() {
+  override fun onDetach() {
+    animationJob?.cancel()
+    animationJob = null
+  }
+
+  fun update(
+      painter: BgEffectPainter,
+      preset: BgEffectConfig.Config,
+      deviceType: DeviceType,
+      isDarkTheme: Boolean,
+      surface: Color,
+      effectBackground: Boolean,
+      isFullSize: Boolean,
+      playing: Boolean,
+      colorStage: () -> Float,
+      alpha: () -> Float,
+  ) {
+    this.painter = painter
+    this.preset = preset
+    this.deviceType = deviceType
+    this.isDarkTheme = isDarkTheme
+    this.surface = surface
+    this.effectBackground = effectBackground
+    this.isFullSize = isFullSize
+    this.colorStage = colorStage
+    this.alpha = alpha
+    if (this.playing != playing) {
+      this.playing = playing
+      if (playing) {
+        startAnimation()
+      } else {
         animationJob?.cancel()
         animationJob = null
+      }
     }
+    invalidateDraw()
+  }
 
-    fun update(
-        painter: BgEffectPainter,
-        preset: BgEffectConfig.Config,
-        deviceType: DeviceType,
-        isDarkTheme: Boolean,
-        surface: Color,
-        effectBackground: Boolean,
-        isFullSize: Boolean,
-        playing: Boolean,
-        colorStage: () -> Float,
-        alpha: () -> Float,
-    ) {
-        this.painter = painter
-        this.preset = preset
-        this.deviceType = deviceType
-        this.isDarkTheme = isDarkTheme
-        this.surface = surface
-        this.effectBackground = effectBackground
-        this.isFullSize = isFullSize
-        this.colorStage = colorStage
-        this.alpha = alpha
-        if (this.playing != playing) {
-            this.playing = playing
-            if (playing) startAnimation() else {
-                animationJob?.cancel()
-                animationJob = null
-            }
+  private fun startAnimation() {
+    animationJob?.cancel()
+    startOffset = animTime
+    animationJob =
+        coroutineScope.launch {
+          val minDeltaNanos = 1_000_000_000L / 60L
+          val origin = withFrameNanos { it }
+          var lastEmit = origin
+          while (isActive) {
+            val now = withFrameNanos { it }
+            if (now - lastEmit < minDeltaNanos) continue
+            lastEmit = now
+            animTime = startOffset + (now - origin) / 1_000_000_000f
+            invalidateDraw()
+          }
         }
-        invalidateDraw()
-    }
+  }
 
-    private fun startAnimation() {
-        animationJob?.cancel()
-        startOffset = animTime
-        animationJob = coroutineScope.launch {
-            val minDeltaNanos = 1_000_000_000L / 60L
-            val origin = withFrameNanos { it }
-            var lastEmit = origin
-            while (isActive) {
-                val now = withFrameNanos { it }
-                if (now - lastEmit < minDeltaNanos) continue
-                lastEmit = now
-                animTime = startOffset + (now - origin) / 1_000_000_000f
-                invalidateDraw()
-            }
-        }
+  override fun ContentDrawScope.draw() {
+    drawRect(surface)
+    if (effectBackground) {
+      val alphaValue = alpha()
+      if (alphaValue > 0f) {
+        val drawHeight = if (isFullSize) size.height * 0.8f else size.height * 0.5f
+        painter.updateResolution(size.width, size.height)
+        painter.updateBoundIfNeeded(drawHeight, size.height, size.width)
+        painter.updatePresetIfNeeded(deviceType, isDarkTheme)
+        painter.updateColors(preset, colorStage())
+        painter.updateAnimTime(animTime)
+        painter.updatePointsAnim(animTime, preset)
+        drawRect(painter.brush, alpha = alphaValue)
+      }
     }
-
-    override fun ContentDrawScope.draw() {
-        drawRect(surface)
-        if (effectBackground) {
-            val alphaValue = alpha()
-            if (alphaValue > 0f) {
-                val drawHeight = if (isFullSize) size.height * 0.8f else size.height * 0.5f
-                painter.updateResolution(size.width, size.height)
-                painter.updateBoundIfNeeded(drawHeight, size.height, size.width)
-                painter.updatePresetIfNeeded(deviceType, isDarkTheme)
-                painter.updateColors(preset, colorStage())
-                painter.updateAnimTime(animTime)
-                painter.updatePointsAnim(animTime, preset)
-                drawRect(painter.brush, alpha = alphaValue)
-            }
-        }
-        drawContent()
-    }
+    drawContent()
+  }
 }

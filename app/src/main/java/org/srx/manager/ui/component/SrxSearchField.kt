@@ -41,69 +41,73 @@ fun SrxSearchField(
     label: String,
     modifier: Modifier = Modifier,
 ) {
-    val colors = MiuixTheme.colorScheme
-    val dark = isSrxDarkTheme()
-    val liquid = isSrxLiquidGlassEnabled()
-    val backgroundColor = if (!liquid) {
+  val colors = MiuixTheme.colorScheme
+  val dark = isSrxDarkTheme()
+  val liquid = isSrxLiquidGlassEnabled()
+  val backgroundColor =
+      if (!liquid) {
         colors.surfaceContainerHigh
-    } else if (dark) {
+      } else if (dark) {
         colors.surfaceContainerHigh.copy(alpha = 0.74f)
-    } else {
+      } else {
         colors.surface.copy(alpha = 0.84f)
-    }
-    BasicTextField(
-        value = query,
-        onValueChange = onQueryChange,
-        singleLine = true,
-        textStyle = TextStyle(
-            fontWeight = FontWeight.Medium,
-            fontSize = 14.sp,
-            color = colors.onSurface,
-        ),
-        cursorBrush = SolidColor(colors.primary),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = 50.dp)
-            .background(
-                backgroundColor,
-                CircleShape,
-            ),
-        decorationBox = { inner ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = MiuixIcons.Basic.Search,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .size(42.dp)
-                        .padding(start = 16.dp, end = 8.dp),
-                    tint = colors.onSurfaceVariantSummary,
-                )
-                Box(modifier = Modifier.weight(1f)) {
-                    if (query.isBlank()) {
-                        Text(text = label, color = colors.onSurfaceVariantSummary, fontSize = 14.sp)
-                    }
-                    inner()
-                }
-                AnimatedVisibility(
-                    visible = query.isNotEmpty(),
-                    enter = fadeIn() + scaleIn(),
-                    exit = fadeOut() + scaleOut(),
-                ) {
-                    Icon(
-                        imageVector = MiuixIcons.Basic.SearchCleanup,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(42.dp)
-                            .padding(start = 8.dp, end = 16.dp)
-                            .clickable(interactionSource = null, indication = null) { onQueryChange("") },
-                        tint = colors.onSurface,
-                    )
-                }
+      }
+  BasicTextField(
+      value = query,
+      onValueChange = onQueryChange,
+      singleLine = true,
+      textStyle =
+          TextStyle(
+              fontWeight = FontWeight.Medium,
+              fontSize = 14.sp,
+              color = colors.onSurface,
+          ),
+      cursorBrush = SolidColor(colors.primary),
+      keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+      modifier =
+          modifier
+              .fillMaxWidth()
+              .heightIn(min = 50.dp)
+              .background(
+                  backgroundColor,
+                  CircleShape,
+              ),
+      decorationBox = { inner ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(
+              imageVector = MiuixIcons.Basic.Search,
+              contentDescription = null,
+              modifier = Modifier.size(42.dp).padding(start = 16.dp, end = 8.dp),
+              tint = colors.onSurfaceVariantSummary,
+          )
+          Box(modifier = Modifier.weight(1f)) {
+            if (query.isBlank()) {
+              Text(text = label, color = colors.onSurfaceVariantSummary, fontSize = 14.sp)
             }
-        },
-    )
+            inner()
+          }
+          AnimatedVisibility(
+              visible = query.isNotEmpty(),
+              enter = fadeIn() + scaleIn(),
+              exit = fadeOut() + scaleOut(),
+          ) {
+            Icon(
+                imageVector = MiuixIcons.Basic.SearchCleanup,
+                contentDescription = null,
+                modifier =
+                    Modifier.size(42.dp).padding(start = 8.dp, end = 16.dp).clickable(
+                        interactionSource = null,
+                        indication = null,
+                    ) {
+                      onQueryChange("")
+                    },
+                tint = colors.onSurface,
+            )
+          }
+        }
+      },
+  )
 }

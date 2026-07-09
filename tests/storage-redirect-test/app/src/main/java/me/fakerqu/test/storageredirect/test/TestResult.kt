@@ -8,22 +8,22 @@ data class TestResult(
     val error: String? = null,
     val metadata: Map<String, String> = emptyMap(),
 ) {
-    fun toLogLine(): String = buildString {
-        append(if (passed) "PASS" else "FAIL")
-        append(" [")
-        append(testCase.id)
-        append("] ")
-        append(message)
-        append(" (")
-        append(durationMs)
-        append("ms)")
-        if (metadata.isNotEmpty()) {
-            append(" ")
-            append(metadata.entries.joinToString(", ") { "${it.key}=${it.value}" })
-        }
-        error?.let {
-            append(" error=")
-            append(it.lineSequence().first())
-        }
+  fun toLogLine(): String = buildString {
+    append(if (passed) "PASS" else "FAIL")
+    append(" [")
+    append(testCase.id)
+    append("] ")
+    append(message)
+    append(" (")
+    append(durationMs)
+    append("ms)")
+    if (metadata.isNotEmpty()) {
+      append(" ")
+      append(metadata.entries.joinToString(", ") { "${it.key}=${it.value}" })
     }
+    error?.let {
+      append(" error=")
+      append(it.lineSequence().first())
+    }
+  }
 }

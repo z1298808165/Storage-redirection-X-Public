@@ -7,11 +7,11 @@ import androidx.core.content.ContextCompat
 import me.fakerqu.test.storageredirect.TestService
 import me.fakerqu.test.storageredirect.test.TestCaseArgs
 
-
 /**
  * 接收外部测试广播并启动 [TestService] 在后台执行用例。
  *
  * 示例：
+ *
  * ```
  * # 先 create，从 log 或 metadata 取得 uri，再 read
  * adb shell am broadcast -a me.fakerqu.test.storageredirection.TEST_CASE \
@@ -28,29 +28,42 @@ import me.fakerqu.test.storageredirect.test.TestCaseArgs
  *   --es payload "hello"
  * ```
  */
-
 class TestCaseReceiver : BroadcastReceiver() {
+  override fun onReceive(
+      context: Context,
+      intent: Intent?,
+  ) {
+    if (intent?.action != ACTION_TEST_CASE) return
+    val serviceIntent = TestService.createIntent(context, intent)
+    ContextCompat.startForegroundService(context, serviceIntent)
+  }
 
-    override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != ACTION_TEST_CASE) return
-        val serviceIntent = TestService.createIntent(context, intent)
-        ContextCompat.startForegroundService(context, serviceIntent)
-    }
+  companion object {
+    const val ACTION_TEST_CASE = "me.fakerqu.test.storageredirection.TEST_CASE"
 
-    companion object {
-        const val ACTION_TEST_CASE = "me.fakerqu.test.storageredirection.TEST_CASE"
+    /** 用例 id，见 [me.fakerqu.test.storageredirect.test.TestCase] */
+    const val EXTRA_TEST_CASE = "test_case"
 
-        /** 用例 id，见 [me.fakerqu.test.storageredirect.test.TestCase] */
-        const val EXTRA_TEST_CASE = "test_case"
+    /** 与 [TestCaseArgs] 中 EXTRA_* 同名，通过广播 --es 传入 */
+    val EXTRA_MEDIA_URI: String
+      get() = TestCaseArgs.EXTRA_MEDIA_URI
 
-        /** 与 [TestCaseArgs] 中 EXTRA_* 同名，通过广播 --es 传入 */
-        val EXTRA_MEDIA_URI: String get() = TestCaseArgs.EXTRA_MEDIA_URI
-        val EXTRA_FILE_PATH: String get() = TestCaseArgs.EXTRA_FILE_PATH
-        val EXTRA_FILE_DIR: String get() = TestCaseArgs.EXTRA_FILE_DIR
-        val EXTRA_FILE_NAME: String get() = TestCaseArgs.EXTRA_FILE_NAME
-        val EXTRA_RELATIVE_PATH: String get() = TestCaseArgs.EXTRA_RELATIVE_PATH
-        val EXTRA_PAYLOAD: String get() = TestCaseArgs.EXTRA_PAYLOAD
-        val EXTRA_EXPECTED_PAYLOAD: String get() = TestCaseArgs.EXTRA_EXPECTED_PAYLOAD
-    }
+    val EXTRA_FILE_PATH: String
+      get() = TestCaseArgs.EXTRA_FILE_PATH
+
+    val EXTRA_FILE_DIR: String
+      get() = TestCaseArgs.EXTRA_FILE_DIR
+
+    val EXTRA_FILE_NAME: String
+      get() = TestCaseArgs.EXTRA_FILE_NAME
+
+    val EXTRA_RELATIVE_PATH: String
+      get() = TestCaseArgs.EXTRA_RELATIVE_PATH
+
+    val EXTRA_PAYLOAD: String
+      get() = TestCaseArgs.EXTRA_PAYLOAD
+
+    val EXTRA_EXPECTED_PAYLOAD: String
+      get() = TestCaseArgs.EXTRA_EXPECTED_PAYLOAD
+  }
 }
-

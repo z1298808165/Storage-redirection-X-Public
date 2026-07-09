@@ -3,16 +3,9 @@
     "0": {
       "enabled": true,
       "mapping_mode_only": false,
-      "allowed_real_paths": [
-        "Download/Public",
-        "!Download/Public/tmp"
-      ],
-      "sandboxed_paths": [
-        ".xlDownload"
-      ],
-      "read_only_paths": [
-        "Documents/MyApp"
-      ],
+      "allowed_real_paths": ["Download/Public", "!Download/Public/tmp"],
+      "sandboxed_paths": [".xlDownload"],
+      "read_only_paths": ["Documents/MyApp"],
       "path_mappings": {
         "DCIM/MyApp": "Pictures/MyApp",
         "Download/Cache": "Android/media/com.example/cache"

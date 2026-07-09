@@ -33,48 +33,51 @@ internal fun CompactSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
     showDivider: Boolean = true,
 ) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
+  Column(Modifier.fillMaxWidth()) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth()
                 .heightIn(min = 64.dp)
                 .clickable { onCheckedChange(!checked) }
                 .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    text = title,
-                    fontSize = 16.sp,
-                    lineHeight = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = summary,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                )
-            }
-            Switch(
-                checked = checked,
-                onCheckedChange = onCheckedChange,
-            )
-        }
-        if (showDivider) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp)
-                    .height(1.dp)
-                    .background(MiuixTheme.colorScheme.onSurface.copy(alpha = if (isSrxDarkTheme()) 0.035f else 0.045f)),
-            )
-        }
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      Column(
+          modifier = Modifier.weight(1f),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+      ) {
+        Text(
+            text = title,
+            fontSize = 16.sp,
+            lineHeight = 20.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = summary,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+        )
+      }
+      Switch(
+          checked = checked,
+          onCheckedChange = onCheckedChange,
+      )
     }
+    if (showDivider) {
+      Box(
+          Modifier.fillMaxWidth()
+              .padding(start = 16.dp)
+              .height(1.dp)
+              .background(
+                  MiuixTheme.colorScheme.onSurface.copy(
+                      alpha = if (isSrxDarkTheme()) 0.035f else 0.045f
+                  )
+              ),
+      )
+    }
+  }
 }

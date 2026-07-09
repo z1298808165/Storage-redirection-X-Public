@@ -22,20 +22,14 @@ const val BackupMaxBytes = 8 * 1024 * 1024
 
 @Serializable
 data class GlobalConfig(
-    @SerialName("file_monitor_enabled")
-    val fileMonitorEnabled: Boolean = false,
-    @SerialName("fuse_fix_enabled")
-    val fuseFixEnabled: Boolean = true,
-    @SerialName("fuse_daemon_redirect_enabled")
-    val fuseDaemonRedirectEnabled: Boolean = false,
-    @SerialName("verbose_logging_enabled")
-    val verboseLoggingEnabled: Boolean = false,
+    @SerialName("file_monitor_enabled") val fileMonitorEnabled: Boolean = false,
+    @SerialName("fuse_fix_enabled") val fuseFixEnabled: Boolean = true,
+    @SerialName("fuse_daemon_redirect_enabled") val fuseDaemonRedirectEnabled: Boolean = false,
+    @SerialName("verbose_logging_enabled") val verboseLoggingEnabled: Boolean = false,
     @SerialName("auto_enable_redirect_for_new_apps")
     val autoEnableRedirectForNewApps: Boolean = false,
-    @SerialName("auto_enable_new_apps_template_id")
-    val autoEnableNewAppsTemplateId: String = "",
-    @SerialName("app_config_auto_save")
-    val appConfigAutoSave: Boolean = false,
+    @SerialName("auto_enable_new_apps_template_id") val autoEnableNewAppsTemplateId: String = "",
+    @SerialName("app_config_auto_save") val appConfigAutoSave: Boolean = false,
 )
 
 @Serializable
@@ -57,57 +51,51 @@ data class ConfigTemplateStore(
 
 @Serializable
 data class FileMonitorFilters(
-    @SerialName("excluded_paths")
-    val excludedPaths: List<String> = listOf("Android/data"),
+    @SerialName("excluded_paths") val excludedPaths: List<String> = listOf("Android/data"),
     @SerialName("excluded_operations")
-    val excludedOperations: List<String> = listOf(
-        "open:read",
-        "open*:read",
-        "provider_open:read",
-        "rename*",
-        "unlink*",
-        "delete*",
-        "rmdir*",
-        "link*",
-        "symlink*",
-        "truncate*",
-        "ftruncate*",
-        "chmod*",
-        "fchmod*",
-        "utimens*",
-        "futimens*",
-        "attrib*",
-    ),
+    val excludedOperations: List<String> =
+        listOf(
+            "open:read",
+            "open*:read",
+            "provider_open:read",
+            "rename*",
+            "unlink*",
+            "delete*",
+            "rmdir*",
+            "link*",
+            "symlink*",
+            "truncate*",
+            "ftruncate*",
+            "chmod*",
+            "fchmod*",
+            "utimens*",
+            "futimens*",
+            "attrib*",
+        ),
 )
 
 @Serializable
 data class UserProfile(
     val enabled: Boolean = true,
-    @SerialName("mapping_mode_only")
-    val mappingModeOnly: Boolean = false,
-    @SerialName("allowed_real_paths")
-    val allowedRealPaths: List<String> = emptyList(),
-    @SerialName("excluded_real_paths")
-    val excludedRealPaths: List<String> = emptyList(),
-    @SerialName("sandboxed_paths")
-    val sandboxedPaths: List<String> = emptyList(),
-    @SerialName("read_only_paths")
-    val readOnlyPaths: List<String> = emptyList(),
-    @SerialName("path_mappings")
-    val pathMappings: Map<String, String> = emptyMap(),
+    @SerialName("mapping_mode_only") val mappingModeOnly: Boolean = false,
+    @SerialName("allowed_real_paths") val allowedRealPaths: List<String> = emptyList(),
+    @SerialName("excluded_real_paths") val excludedRealPaths: List<String> = emptyList(),
+    @SerialName("sandboxed_paths") val sandboxedPaths: List<String> = emptyList(),
+    @SerialName("read_only_paths") val readOnlyPaths: List<String> = emptyList(),
+    @SerialName("path_mappings") val pathMappings: Map<String, String> = emptyMap(),
 )
 
 enum class ModuleStatus {
-    Enabled,
-    Disabled,
-    RebootRequired,
-    Unknown,
+  Enabled,
+  Disabled,
+  RebootRequired,
+  Unknown,
 }
 
 enum class AppFilter {
-    User,
-    System,
-    Configured,
+  User,
+  System,
+  Configured,
 }
 
 data class InstalledApp(
@@ -118,10 +106,14 @@ data class InstalledApp(
     val config: AppConfig?,
     val isInstalled: Boolean = appInfo != null,
 ) {
-    val isConfigured: Boolean get() = config != null
-    val isMissing: Boolean get() = isConfigured && !isInstalled
-    val isEnabled: Boolean
-        get() = isInstalled && config?.users?.values?.any { it.enabled } == true
+  val isConfigured: Boolean
+    get() = config != null
+
+  val isMissing: Boolean
+    get() = isConfigured && !isInstalled
+
+  val isEnabled: Boolean
+    get() = isInstalled && config?.users?.values?.any { it.enabled } == true
 }
 
 data class LogEntry(
@@ -190,35 +182,22 @@ data class BackupData(
     val global: GlobalConfig = GlobalConfig(),
     val apps: Map<String, AppConfig> = emptyMap(),
     val templates: List<ConfigTemplate> = emptyList(),
-    @SerialName("monitor_filters")
-    val monitorFilters: FileMonitorFilters = FileMonitorFilters(),
+    @SerialName("monitor_filters") val monitorFilters: FileMonitorFilters = FileMonitorFilters(),
     val ui: BackupUiPreferences? = null,
 )
 
 @Serializable
 data class BackupUiPreferences(
-    @SerialName("predictive_back")
-    val predictiveBack: Boolean? = null,
-    @SerialName("floating_bottom_bar")
-    val floatingBottomBar: Boolean? = null,
-    @SerialName("liquid_glass")
-    val liquidGlass: Boolean? = null,
-    @SerialName("blur_effect")
-    val blurEffect: Boolean? = null,
-    @SerialName("dynamic_color")
-    val dynamicColor: Boolean? = null,
-    @SerialName("accent_color")
-    val accentColor: Int? = null,
-    @SerialName("color_style")
-    val colorStyle: UiColorStyle? = null,
-    @SerialName("color_spec")
-    val colorSpec: UiColorSpec? = null,
-    @SerialName("theme_mode")
-    val themeMode: UiThemeMode? = null,
-    @SerialName("page_scale")
-    val pageScale: Float? = null,
-    @SerialName("auto_check_updates")
-    val autoCheckUpdates: Boolean? = null,
-    @SerialName("update_channel")
-    val updateChannel: UpdateChannel? = null,
+    @SerialName("predictive_back") val predictiveBack: Boolean? = null,
+    @SerialName("floating_bottom_bar") val floatingBottomBar: Boolean? = null,
+    @SerialName("liquid_glass") val liquidGlass: Boolean? = null,
+    @SerialName("blur_effect") val blurEffect: Boolean? = null,
+    @SerialName("dynamic_color") val dynamicColor: Boolean? = null,
+    @SerialName("accent_color") val accentColor: Int? = null,
+    @SerialName("color_style") val colorStyle: UiColorStyle? = null,
+    @SerialName("color_spec") val colorSpec: UiColorSpec? = null,
+    @SerialName("theme_mode") val themeMode: UiThemeMode? = null,
+    @SerialName("page_scale") val pageScale: Float? = null,
+    @SerialName("auto_check_updates") val autoCheckUpdates: Boolean? = null,
+    @SerialName("update_channel") val updateChannel: UpdateChannel? = null,
 )

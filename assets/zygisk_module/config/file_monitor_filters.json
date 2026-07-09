@@ -1,7 +1,5 @@
 {
-  "excluded_paths": [
-    "Android/data"
-  ],
+  "excluded_paths": ["Android/data"],
   "excluded_operations": [
     "open:read",
     "open*:read",

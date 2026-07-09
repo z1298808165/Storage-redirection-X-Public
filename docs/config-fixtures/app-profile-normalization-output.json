@@ -10,14 +10,8 @@
         "!Pictures/Blocked"
       ],
       "excluded_real_paths": [],
-      "sandboxed_paths": [
-        ".xlDownload",
-        "Android/media/App"
-      ],
-      "read_only_paths": [
-        "Documents/ReadOnly",
-        "Movies/*"
-      ],
+      "sandboxed_paths": [".xlDownload", "Android/media/App"],
+      "read_only_paths": ["Documents/ReadOnly", "Movies/*"],
       "path_mappings": {
         "Cache": "Android/media/com.example/cache",
         "DCIM/App": "Pictures/App"

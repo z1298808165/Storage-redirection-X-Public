@@ -35,24 +35,29 @@ fun SrxTheme(
     blurEffect: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    val context = LocalContext.current
-    val systemDark = isSystemInDarkTheme()
-    val dark = when (themeMode) {
+  val context = LocalContext.current
+  val systemDark = isSystemInDarkTheme()
+  val dark =
+      when (themeMode) {
         UiThemeMode.Light -> false
         UiThemeMode.Dark -> true
         UiThemeMode.System -> systemDark
-    }
-    val colorSchemeMode = when (themeMode) {
+      }
+  val colorSchemeMode =
+      when (themeMode) {
         UiThemeMode.Light -> if (dynamicColor) ColorSchemeMode.MonetLight else ColorSchemeMode.Light
         UiThemeMode.Dark -> if (dynamicColor) ColorSchemeMode.MonetDark else ColorSchemeMode.Dark
-        UiThemeMode.System -> if (dynamicColor) ColorSchemeMode.MonetSystem else ColorSchemeMode.System
-    }
-    val keyColor = when {
+        UiThemeMode.System ->
+            if (dynamicColor) ColorSchemeMode.MonetSystem else ColorSchemeMode.System
+      }
+  val keyColor =
+      when {
         dynamicColor && accentColor == 0 -> null
         dynamicColor && accentColor != 0 -> Color(accentColor)
         else -> Color(0xFF8EA8F8)
-    }
-    val paletteStyle = when (colorStyle) {
+      }
+  val paletteStyle =
+      when (colorStyle) {
         UiColorStyle.TonalSpot -> ThemePaletteStyle.TonalSpot
         UiColorStyle.Neutral -> ThemePaletteStyle.Neutral
         UiColorStyle.Vibrant -> ThemePaletteStyle.Vibrant
@@ -62,12 +67,14 @@ fun SrxTheme(
         UiColorStyle.Monochrome -> ThemePaletteStyle.Monochrome
         UiColorStyle.Fidelity -> ThemePaletteStyle.Fidelity
         UiColorStyle.Content -> ThemePaletteStyle.Content
-    }
-    val themeColorSpec = when (colorSpec) {
+      }
+  val themeColorSpec =
+      when (colorSpec) {
         UiColorSpec.Spec2021 -> ThemeColorSpec.Spec2021
         UiColorSpec.Spec2025 -> ThemeColorSpec.Spec2025
-    }
-    val controller = remember(colorSchemeMode, keyColor, dark, paletteStyle, themeColorSpec) {
+      }
+  val controller =
+      remember(colorSchemeMode, keyColor, dark, paletteStyle, themeColorSpec) {
         ThemeController(
             colorSchemeMode = colorSchemeMode,
             keyColor = keyColor,
@@ -75,33 +82,27 @@ fun SrxTheme(
             paletteStyle = paletteStyle,
             colorSpec = themeColorSpec,
         )
+      }
+  MiuixTheme(controller = controller) {
+    LaunchedEffect(dark) {
+      val window = (context as? Activity)?.window ?: return@LaunchedEffect
+      WindowInsetsControllerCompat(window, window.decorView).apply {
+        isAppearanceLightStatusBars = !dark
+        isAppearanceLightNavigationBars = !dark
+      }
     }
-    MiuixTheme(controller = controller) {
-        LaunchedEffect(dark) {
-            val window = (context as? Activity)?.window ?: return@LaunchedEffect
-            WindowInsetsControllerCompat(window, window.decorView).apply {
-                isAppearanceLightStatusBars = !dark
-                isAppearanceLightNavigationBars = !dark
-            }
-        }
-        CompositionLocalProvider(
-            LocalSrxDarkTheme provides dark,
-            LocalSrxLiquidGlass provides liquidGlass,
-            LocalSrxBlurEffect provides blurEffect,
-        ) {
-            content()
-        }
+    CompositionLocalProvider(
+        LocalSrxDarkTheme provides dark,
+        LocalSrxLiquidGlass provides liquidGlass,
+        LocalSrxBlurEffect provides blurEffect,
+    ) {
+      content()
     }
+  }
 }
 
-@Composable
-@ReadOnlyComposable
-fun isSrxDarkTheme(): Boolean = LocalSrxDarkTheme.current
+@Composable @ReadOnlyComposable fun isSrxDarkTheme(): Boolean = LocalSrxDarkTheme.current
 
-@Composable
-@ReadOnlyComposable
-fun isSrxLiquidGlassEnabled(): Boolean = LocalSrxLiquidGlass.current
+@Composable @ReadOnlyComposable fun isSrxLiquidGlassEnabled(): Boolean = LocalSrxLiquidGlass.current
 
-@Composable
-@ReadOnlyComposable
-fun isSrxBlurEffectEnabled(): Boolean = LocalSrxBlurEffect.current
+@Composable @ReadOnlyComposable fun isSrxBlurEffectEnabled(): Boolean = LocalSrxBlurEffect.current

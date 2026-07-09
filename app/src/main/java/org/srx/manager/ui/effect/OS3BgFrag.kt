@@ -1,6 +1,7 @@
 package org.srx.manager.ui.effect
 
-internal const val OS3_BG_FRAG = """
+internal const val OS3_BG_FRAG =
+    """
     uniform vec2 uResolution;
     uniform float uAnimTime;
     uniform vec4 uBound;

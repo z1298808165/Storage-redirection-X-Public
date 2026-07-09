@@ -13,20 +13,9 @@
         "Movies/../Bad",
         "storage/emulated"
       ],
-      "excluded_real_paths": [
-        "!Pictures/Blocked",
-        "Download/Legacy"
-      ],
-      "sandboxed_paths": [
-        "/sdcard/.xlDownload",
-        "Android/media/App",
-        "Bad/../Path"
-      ],
-      "read_only_paths": [
-        "/storage/emulated/10/Documents/ReadOnly",
-        "Movies/*",
-        "Download/Legacy"
-      ],
+      "excluded_real_paths": ["!Pictures/Blocked", "Download/Legacy"],
+      "sandboxed_paths": ["/sdcard/.xlDownload", "Android/media/App", "Bad/../Path"],
+      "read_only_paths": ["/storage/emulated/10/Documents/ReadOnly", "Movies/*", "Download/Legacy"],
       "path_mappings": {
         "/storage/emulated/10/DCIM/App": "/data/media/10/Pictures/App",
         "Cache": "Android/media/com.example/cache",

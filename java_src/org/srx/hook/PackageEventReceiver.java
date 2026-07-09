@@ -97,32 +97,35 @@ public final class PackageEventReceiver extends BroadcastReceiver {
     if (!RETRY_SCHEDULED.compareAndSet(false, true)) {
       return;
     }
-    Thread thread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        for (int attempt = 1; attempt <= MAX_INSTALL_RETRY_COUNT; attempt++) {
-          try {
-            Thread.sleep(INSTALL_RETRY_DELAY_MS);
-          } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-            RETRY_SCHEDULED.set(false);
-            return;
-          }
-          if (INSTALLED.get()) {
-            RETRY_SCHEDULED.set(false);
-            return;
-          }
-          boolean logFailure = attempt == 1 || attempt % 15 == 0;
-          if (tryInstall(logFailure)) {
-            RETRY_SCHEDULED.set(false);
-            Log.i(TAG, "receiver installed after retry attempt=" + attempt);
-            return;
-          }
-        }
-        RETRY_SCHEDULED.set(false);
-        Log.w(TAG, "install retry exhausted");
-      }
-    }, "SrxPackageEventRetry");
+    Thread thread =
+        new Thread(
+            new Runnable() {
+              @Override
+              public void run() {
+                for (int attempt = 1; attempt <= MAX_INSTALL_RETRY_COUNT; attempt++) {
+                  try {
+                    Thread.sleep(INSTALL_RETRY_DELAY_MS);
+                  } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    RETRY_SCHEDULED.set(false);
+                    return;
+                  }
+                  if (INSTALLED.get()) {
+                    RETRY_SCHEDULED.set(false);
+                    return;
+                  }
+                  boolean logFailure = attempt == 1 || attempt % 15 == 0;
+                  if (tryInstall(logFailure)) {
+                    RETRY_SCHEDULED.set(false);
+                    Log.i(TAG, "receiver installed after retry attempt=" + attempt);
+                    return;
+                  }
+                }
+                RETRY_SCHEDULED.set(false);
+                Log.w(TAG, "install retry exhausted");
+              }
+            },
+            "SrxPackageEventRetry");
     thread.setDaemon(true);
     thread.start();
   }
@@ -152,39 +155,46 @@ public final class PackageEventReceiver extends BroadcastReceiver {
     // Keep a second delayed event for ADD/REPLACE so shell-side validation can
     // see the settled PackageManager state even on slower devices.
     if ("added".equals(action) || "replaced".equals(action)) {
-      Runnable delayedAppend = new Runnable() {
-        @Override
-        public void run() {
-          appendEventAsync(buildLine(action, userId, uid, replacing, packageName));
-        }
-      };
+      Runnable delayedAppend =
+          new Runnable() {
+            @Override
+            public void run() {
+              appendEventAsync(buildLine(action, userId, uid, replacing, packageName));
+            }
+          };
       Handler handler = mainHandler();
       if (handler != null) {
         handler.postDelayed(delayedAppend, 2500L);
       } else {
-        new Thread(new Runnable() {
-          @Override
-          public void run() {
-            try {
-              Thread.sleep(2500L);
-            } catch (InterruptedException ignored) {
-              Thread.currentThread().interrupt();
-              return;
-            }
-            delayedAppend.run();
-          }
-        }, "SrxPackageEventDelay").start();
+        new Thread(
+                new Runnable() {
+                  @Override
+                  public void run() {
+                    try {
+                      Thread.sleep(2500L);
+                    } catch (InterruptedException ignored) {
+                      Thread.currentThread().interrupt();
+                      return;
+                    }
+                    delayedAppend.run();
+                  }
+                },
+                "SrxPackageEventDelay")
+            .start();
       }
     }
   }
 
   private static void appendEventAsync(final String line) {
-    Thread thread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        appendEvent(line);
-      }
-    }, "SrxPackageEventWriter");
+    Thread thread =
+        new Thread(
+            new Runnable() {
+              @Override
+              public void run() {
+                appendEvent(line);
+              }
+            },
+            "SrxPackageEventWriter");
     thread.setDaemon(true);
     thread.start();
   }
@@ -210,14 +220,15 @@ public final class PackageEventReceiver extends BroadcastReceiver {
       Field allField = userHandleClass.getDeclaredField("ALL");
       allField.setAccessible(true);
       Object allUsers = allField.get(null);
-      Method method = Context.class.getMethod(
-          "registerReceiverAsUser",
-          BroadcastReceiver.class,
-          userHandleClass,
-          IntentFilter.class,
-          String.class,
-          Handler.class,
-          int.class);
+      Method method =
+          Context.class.getMethod(
+              "registerReceiverAsUser",
+              BroadcastReceiver.class,
+              userHandleClass,
+              IntentFilter.class,
+              String.class,
+              Handler.class,
+              int.class);
       method.invoke(context, receiver, allUsers, filter, null, mainHandler(), RECEIVER_EXPORTED);
       return true;
     } catch (Throwable ignored) {
@@ -228,13 +239,14 @@ public final class PackageEventReceiver extends BroadcastReceiver {
       Field allField = userHandleClass.getDeclaredField("ALL");
       allField.setAccessible(true);
       Object allUsers = allField.get(null);
-      Method method = Context.class.getMethod(
-          "registerReceiverAsUser",
-          BroadcastReceiver.class,
-          userHandleClass,
-          IntentFilter.class,
-          String.class,
-          Handler.class);
+      Method method =
+          Context.class.getMethod(
+              "registerReceiverAsUser",
+              BroadcastReceiver.class,
+              userHandleClass,
+              IntentFilter.class,
+              String.class,
+              Handler.class);
       method.invoke(context, receiver, allUsers, filter, null, mainHandler());
       return true;
     } catch (Throwable t) {
@@ -246,11 +258,9 @@ public final class PackageEventReceiver extends BroadcastReceiver {
   private static void registerForCurrentUser(
       Context context, BroadcastReceiver receiver, IntentFilter filter) {
     try {
-      Method method = Context.class.getMethod(
-          "registerReceiver",
-          BroadcastReceiver.class,
-          IntentFilter.class,
-          int.class);
+      Method method =
+          Context.class.getMethod(
+              "registerReceiver", BroadcastReceiver.class, IntentFilter.class, int.class);
       method.invoke(context, receiver, filter, RECEIVER_EXPORTED);
       return;
     } catch (Throwable ignored) {
@@ -270,13 +280,13 @@ public final class PackageEventReceiver extends BroadcastReceiver {
         getSystemContext.setAccessible(true);
         Object context = getSystemContext.invoke(thread);
         if (context instanceof Context) {
-          return (Context)context;
+          return (Context) context;
         }
       }
 
       Object app = invokeStatic(activityThreadClass, "currentApplication");
       if (app instanceof Context) {
-        return (Context)app;
+        return (Context) app;
       }
     } catch (Throwable t) {
       Log.w(TAG, "getSystemContext failed", t);
@@ -300,7 +310,7 @@ public final class PackageEventReceiver extends BroadcastReceiver {
       method.setAccessible(true);
       Object value = method.invoke(this);
       if (value instanceof Integer) {
-        int id = ((Integer)value).intValue();
+        int id = ((Integer) value).intValue();
         if (id >= 0) {
           return id;
         }
@@ -336,10 +346,13 @@ public final class PackageEventReceiver extends BroadcastReceiver {
     }
     for (int i = 0; i < packageName.length(); i++) {
       char c = packageName.charAt(i);
-      boolean ok = (c >= 'a' && c <= 'z') ||
-          (c >= 'A' && c <= 'Z') ||
-          (c >= '0' && c <= '9') ||
-          c == '_' || c == '.' || c == '-';
+      boolean ok =
+          (c >= 'a' && c <= 'z')
+              || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9')
+              || c == '_'
+              || c == '.'
+              || c == '-';
       if (!ok) {
         return false;
       }
@@ -349,13 +362,19 @@ public final class PackageEventReceiver extends BroadcastReceiver {
 
   private static String buildLine(
       String action, int userId, int uid, boolean replacing, String packageName) {
-    return EVENT_PREFIX + "|" +
-        action.toLowerCase(Locale.ROOT) + "|" +
-        userId + "|" +
-        uid + "|" +
-        (replacing ? "1" : "0") + "|" +
-        packageName + "|" +
-        System.currentTimeMillis();
+    return EVENT_PREFIX
+        + "|"
+        + action.toLowerCase(Locale.ROOT)
+        + "|"
+        + userId
+        + "|"
+        + uid
+        + "|"
+        + (replacing ? "1" : "0")
+        + "|"
+        + packageName
+        + "|"
+        + System.currentTimeMillis();
   }
 
   private static void appendEvent(String line) {

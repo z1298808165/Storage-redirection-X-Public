@@ -10,15 +10,11 @@ import me.fakerqu.test.storageredirect.ui.screen.MediaStoreScreen
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: MediaAccessViewModel by viewModels()
+  private val viewModel: MediaAccessViewModel by viewModels()
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent {
-            MiuixTheme {
-                MediaStoreScreen(viewModel)
-            }
-        }
-    }
+  override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    enableEdgeToEdge()
+    setContent { MiuixTheme { MediaStoreScreen(viewModel) } }
+  }
 }

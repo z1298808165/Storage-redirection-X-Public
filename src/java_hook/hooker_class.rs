@@ -35,8 +35,8 @@ const STORAGE_PATH_EXISTS_NAME: &[u8] = b"storagePathExistsBySyscall\0";
 const STORAGE_PATH_EXISTS_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
 const REWRITE_MEDIA_STORE_PATH_NAME: &[u8] = b"rewriteMediaStorePath\0";
 const REWRITE_MEDIA_STORE_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
-const RESOLVE_DOWNLOAD_PLACEHOLDER_PATH_NAME: &[u8] = b"resolveDownloadMediaPlaceholderPath\0";
-const RESOLVE_DOWNLOAD_PLACEHOLDER_PATH_SIG: &[u8] =
+const RESOLVE_DOWNLOAD_PLACEHOLDER_NAME: &[u8] = b"resolveDownloadPlaceholder\0";
+const RESOLVE_DOWNLOAD_PLACEHOLDER_SIG: &[u8] =
     b"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZI)Ljava/lang/String;\0";
 const REWRITE_BUCKET_ID_NAME: &[u8] = b"rewriteMediaStoreBucketId\0";
 const REWRITE_BUCKET_ID_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
@@ -47,8 +47,8 @@ const RECORD_PROVIDER_OPEN_PATH_SIG: &[u8] = b"(Ljava/lang/String;ILjava/lang/St
 const RECORD_READ_ONLY_FUSE_OPERATION_NAME: &[u8] = b"recordReadOnlyFuseOperation\0";
 const RECORD_READ_ONLY_FUSE_OPERATION_SIG: &[u8] =
     b"(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)Z\0";
-const SHOULD_ALLOW_PUBLIC_MAPPING_TARGET_NAME: &[u8] = b"shouldAllowPublicMappingTargetAccess\0";
-const SHOULD_ALLOW_PUBLIC_MAPPING_TARGET_SIG: &[u8] = b"(Ljava/lang/String;I)Z\0";
+const ALLOW_PUBLIC_MAPPING_TARGET_NAME: &[u8] = b"allowsPublicMappingTarget\0";
+const ALLOW_PUBLIC_MAPPING_TARGET_SIG: &[u8] = b"(Ljava/lang/String;I)Z\0";
 const CAPTURE_BINDER_CALLER_NAME: &[u8] = b"captureBinderCaller\0";
 const CAPTURE_BINDER_CALLER_SIG: &[u8] = b"(II)V\0";
 const ENTER_CALLER_SCOPE_NAME: &[u8] = b"enterCallerScope\0";
@@ -111,9 +111,9 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             fnPtr: rewrite_media_store_path as *mut _,
         },
         JNINativeMethod {
-            name: RESOLVE_DOWNLOAD_PLACEHOLDER_PATH_NAME.as_ptr() as *mut _,
-            signature: RESOLVE_DOWNLOAD_PLACEHOLDER_PATH_SIG.as_ptr() as *mut _,
-            fnPtr: resolve_download_media_placeholder_path as *mut _,
+            name: RESOLVE_DOWNLOAD_PLACEHOLDER_NAME.as_ptr() as *mut _,
+            signature: RESOLVE_DOWNLOAD_PLACEHOLDER_SIG.as_ptr() as *mut _,
+            fnPtr: resolve_download_placeholder as *mut _,
         },
         JNINativeMethod {
             name: REWRITE_BUCKET_ID_NAME.as_ptr() as *mut _,
@@ -136,9 +136,9 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             fnPtr: record_read_only_fuse_operation as *mut _,
         },
         JNINativeMethod {
-            name: SHOULD_ALLOW_PUBLIC_MAPPING_TARGET_NAME.as_ptr() as *mut _,
-            signature: SHOULD_ALLOW_PUBLIC_MAPPING_TARGET_SIG.as_ptr() as *mut _,
-            fnPtr: should_allow_public_mapping_target as *mut _,
+            name: ALLOW_PUBLIC_MAPPING_TARGET_NAME.as_ptr() as *mut _,
+            signature: ALLOW_PUBLIC_MAPPING_TARGET_SIG.as_ptr() as *mut _,
+            fnPtr: allows_public_mapping_target as *mut _,
         },
         JNINativeMethod {
             name: CAPTURE_BINDER_CALLER_NAME.as_ptr() as *mut _,
@@ -383,7 +383,7 @@ unsafe extern "C" fn rewrite_media_store_path(
     new_jstring_utf8(env, &rewritten)
 }
 
-unsafe extern "C" fn resolve_download_media_placeholder_path(
+unsafe extern "C" fn resolve_download_placeholder(
     env: *mut JNIEnv,
     _class: jclass,
     original_path: jstring,
@@ -525,7 +525,7 @@ unsafe extern "C" fn record_read_only_fuse_operation(
     }
 }
 
-unsafe extern "C" fn should_allow_public_mapping_target(
+unsafe extern "C" fn allows_public_mapping_target(
     env: *mut JNIEnv,
     _class: jclass,
     path: jstring,

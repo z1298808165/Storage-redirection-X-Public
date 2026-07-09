@@ -27,7 +27,8 @@ use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use log::{debug, error};
+use log::debug;
+use log::error;
 use nix::fcntl::FcntlArg;
 use nix::fcntl::FdFlag;
 use nix::fcntl::OFlag;

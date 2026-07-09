@@ -8,27 +8,28 @@ import org.srx.manager.root.ShellResult
 import org.srx.manager.root.shellQuote
 
 class RootStorageBrowserTest {
-    @Test
-    fun listDirectoriesRejectsUnsafeUserIdWithoutShellCall() = runBlocking {
-        val shell = CapturingShell()
-        val browser = RootStorageBrowser(shell)
+  @Test
+  fun rejectsUnsafeUserId() = runBlocking {
+    val shell = CapturingShell()
+    val browser = RootStorageBrowser(shell)
 
-        assertTrue(browser.listDirectories("0;rm", "Pictures").isEmpty())
-        assertTrue(shell.invocations.isEmpty())
-    }
+    assertTrue(browser.listDirectories("0;rm", "Pictures").isEmpty())
+    assertTrue(shell.invocations.isEmpty())
+  }
 
-    @Test
-    fun listDirectoriesRejectsAndroidDataPrivatePathWithoutShellCall() = runBlocking {
-        val shell = CapturingShell()
-        val browser = RootStorageBrowser(shell)
+  @Test
+  fun rejectsAndroidDataPrivatePath() = runBlocking {
+    val shell = CapturingShell()
+    val browser = RootStorageBrowser(shell)
 
-        assertTrue(browser.listDirectories("0", "/Android/data/com.example").isEmpty())
-        assertTrue(shell.invocations.isEmpty())
-    }
+    assertTrue(browser.listDirectories("0", "/Android/data/com.example").isEmpty())
+    assertTrue(shell.invocations.isEmpty())
+  }
 
-    @Test
-    fun listDirectoriesUsesCleanedCandidatesWithMountMaster() = runBlocking {
-        val shell = CapturingShell(
+  @Test
+  fun usesCleanedCandidatesWithMountMaster() = runBlocking {
+    val shell =
+        CapturingShell(
             ShellResult(
                 0,
                 """
@@ -38,31 +39,32 @@ class RootStorageBrowserTest {
                 pictures/
                 ./
                 ../
-                """.trimIndent(),
+                """
+                    .trimIndent(),
                 "",
             ),
         )
-        val browser = RootStorageBrowser(shell)
+    val browser = RootStorageBrowser(shell)
 
-        val entries = browser.listDirectories("0", "..\\Pictures//./Camera")
+    val entries = browser.listDirectories("0", "..\\Pictures//./Camera")
 
-        assertEquals(listOf("DCIM/", "Pictures/", "alpha.txt"), entries)
-        val invocation = shell.invocations.single()
-        assertTrue(invocation.mountMaster)
-        assertTrue(invocation.command.contains(shellQuote("/storage/emulated/0/Pictures/Camera")))
-        assertTrue(invocation.command.contains(shellQuote("/data/media/0/Pictures/Camera")))
-        assertTrue(invocation.command.contains(shellQuote("/sdcard/Pictures/Camera")))
-    }
+    assertEquals(listOf("DCIM/", "Pictures/", "alpha.txt"), entries)
+    val invocation = shell.invocations.single()
+    assertTrue(invocation.mountMaster)
+    assertTrue(invocation.command.contains(shellQuote("/storage/emulated/0/Pictures/Camera")))
+    assertTrue(invocation.command.contains(shellQuote("/data/media/0/Pictures/Camera")))
+    assertTrue(invocation.command.contains(shellQuote("/sdcard/Pictures/Camera")))
+  }
 
-    @Test
-    fun listDirectoriesOmitsSdcardAliasForNonOwnerUser() = runBlocking {
-        val shell = CapturingShell(ShellResult(0, "Docs/\n", ""))
-        val browser = RootStorageBrowser(shell)
+  @Test
+  fun listDirectoriesOmitsSdcardAliasForNonOwnerUser() = runBlocking {
+    val shell = CapturingShell(ShellResult(0, "Docs/\n", ""))
+    val browser = RootStorageBrowser(shell)
 
-        assertEquals(listOf("Docs/"), browser.listDirectories("10", "Documents"))
-        val command = shell.invocations.single().command
-        assertTrue(command.contains(shellQuote("/storage/emulated/10/Documents")))
-        assertTrue(command.contains(shellQuote("/data/media/10/Documents")))
-        assertTrue(!command.contains("/sdcard"))
-    }
+    assertEquals(listOf("Docs/"), browser.listDirectories("10", "Documents"))
+    val command = shell.invocations.single().command
+    assertTrue(command.contains(shellQuote("/storage/emulated/10/Documents")))
+    assertTrue(command.contains(shellQuote("/data/media/10/Documents")))
+    assertTrue(!command.contains("/sdcard"))
+  }
 }

@@ -53,129 +53,130 @@ internal fun PathSuggestionBrowser(
     onListDirectories: (String, String, (List<String>) -> Unit) -> Unit,
     onPick: (String) -> Unit,
 ) {
-    val browserState = rememberStorageBrowserState(userId, value, onListDirectories)
-    val suggestions = browserState.suggestions
-    val shape = RoundedCornerShape(20.dp)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(188.dp)
-            .clip(shape)
-            .background(glassSurfaceColor(0.56f)),
-    ) {
-        when {
-            browserState.loading -> PathBrowserMessage("正在读取目录...")
-            suggestions.isEmpty() -> PathBrowserMessage("没有可补全的下一级路径")
-            else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
-                itemsIndexed(suggestions) { index, suggestion ->
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(applyPathPrefix(value, suggestion.relativePath)) }
-                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            PathBrowserIcon(isDirectory = suggestion.isDirectory)
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                                Text(
-                                    text = suggestion.displayPath,
-                                    color = MiuixTheme.colorScheme.onSurface,
-                                    fontSize = 13.sp,
-                                    lineHeight = 17.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                if (!suggestion.isParent && suggestion.relativePath != suggestion.displayPath) {
-                                    Text(
-                                        text = suggestion.relativePath,
-                                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                                        fontSize = 11.sp,
-                                        lineHeight = 14.sp,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        }
-                        if (index != suggestions.lastIndex) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .height(1.dp)
-                                    .background(MiuixTheme.colorScheme.onSurface.copy(alpha = if (isSrxDarkTheme()) 0.03f else 0.04f)),
-                            )
-                        }
+  val browserState = rememberStorageBrowserState(userId, value, onListDirectories)
+  val suggestions = browserState.suggestions
+  val shape = RoundedCornerShape(20.dp)
+  Box(
+      modifier =
+          Modifier.fillMaxWidth().height(188.dp).clip(shape).background(glassSurfaceColor(0.56f)),
+  ) {
+    when {
+      browserState.loading -> PathBrowserMessage("正在读取目录...")
+      suggestions.isEmpty() -> PathBrowserMessage("没有可补全的下一级路径")
+      else ->
+          LazyColumn(modifier = Modifier.fillMaxSize()) {
+            itemsIndexed(suggestions) { index, suggestion ->
+              Column {
+                Row(
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .clickable { onPick(applyPathPrefix(value, suggestion.relativePath)) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                  PathBrowserIcon(isDirectory = suggestion.isDirectory)
+                  Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        text = suggestion.displayPath,
+                        color = MiuixTheme.colorScheme.onSurface,
+                        fontSize = 13.sp,
+                        lineHeight = 17.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!suggestion.isParent && suggestion.relativePath != suggestion.displayPath) {
+                      Text(
+                          text = suggestion.relativePath,
+                          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                          fontSize = 11.sp,
+                          lineHeight = 14.sp,
+                          maxLines = 2,
+                          overflow = TextOverflow.Ellipsis,
+                      )
                     }
+                  }
                 }
+                if (index != suggestions.lastIndex) {
+                  Box(
+                      Modifier.fillMaxWidth()
+                          .height(1.dp)
+                          .background(
+                              MiuixTheme.colorScheme.onSurface.copy(
+                                  alpha = if (isSrxDarkTheme()) 0.03f else 0.04f
+                              )
+                          ),
+                  )
+                }
+              }
             }
-        }
+          }
     }
+  }
 }
 
 @Composable
 private fun PathBrowserMessage(text: String) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 12.sp,
-            lineHeight = 18.sp,
-            textAlign = TextAlign.Center,
-        )
-    }
+  Box(
+      modifier = Modifier.fillMaxSize(),
+      contentAlignment = Alignment.Center,
+  ) {
+    Text(
+        text,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
+        textAlign = TextAlign.Center,
+    )
+  }
 }
 
 @Composable
 private fun PathBrowserIcon(isDirectory: Boolean) {
-    val color = if (isDirectory) {
+  val color =
+      if (isDirectory) {
         MiuixTheme.colorScheme.primary
-    } else {
+      } else {
         MiuixTheme.colorScheme.onSurfaceVariantSummary
-    }
-    Box(
-        modifier = Modifier
-            .size(16.dp)
-            .drawBehind {
-                val stroke = Stroke(width = 2.dp.toPx())
-                val radius = 4.dp.toPx()
-                drawRoundRect(
-                    color = color,
-                    size = size,
-                    cornerRadius = CornerRadius(radius, radius),
-                    style = stroke,
-                    alpha = if (isDirectory) 0.95f else 0.72f,
-                )
-                if (isDirectory) {
-                    drawRoundRect(
-                        color = color,
-                        topLeft = Offset(3.dp.toPx(), 3.dp.toPx()),
-                        size = Size(7.dp.toPx(), 2.dp.toPx()),
-                        cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
-                        alpha = 0.95f,
-                    )
-                } else {
-                    drawRoundRect(
-                        color = color,
-                        topLeft = Offset(4.dp.toPx(), 5.dp.toPx()),
-                        size = Size(8.dp.toPx(), 2.dp.toPx()),
-                        cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
-                        alpha = 0.72f,
-                    )
-                    drawRoundRect(
-                        color = color,
-                        topLeft = Offset(4.dp.toPx(), 9.dp.toPx()),
-                        size = Size(6.dp.toPx(), 2.dp.toPx()),
-                        cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
-                        alpha = 0.72f,
-                    )
-                }
-            },
-    )
+      }
+  Box(
+      modifier =
+          Modifier.size(16.dp).drawBehind {
+            val stroke = Stroke(width = 2.dp.toPx())
+            val radius = 4.dp.toPx()
+            drawRoundRect(
+                color = color,
+                size = size,
+                cornerRadius = CornerRadius(radius, radius),
+                style = stroke,
+                alpha = if (isDirectory) 0.95f else 0.72f,
+            )
+            if (isDirectory) {
+              drawRoundRect(
+                  color = color,
+                  topLeft = Offset(3.dp.toPx(), 3.dp.toPx()),
+                  size = Size(7.dp.toPx(), 2.dp.toPx()),
+                  cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+                  alpha = 0.95f,
+              )
+            } else {
+              drawRoundRect(
+                  color = color,
+                  topLeft = Offset(4.dp.toPx(), 5.dp.toPx()),
+                  size = Size(8.dp.toPx(), 2.dp.toPx()),
+                  cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+                  alpha = 0.72f,
+              )
+              drawRoundRect(
+                  color = color,
+                  topLeft = Offset(4.dp.toPx(), 9.dp.toPx()),
+                  size = Size(6.dp.toPx(), 2.dp.toPx()),
+                  cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx()),
+                  alpha = 0.72f,
+              )
+            }
+          },
+  )
 }
 
 @Composable
@@ -184,18 +185,18 @@ private fun rememberStorageBrowserState(
     value: String,
     onListDirectories: (String, String, (List<String>) -> Unit) -> Unit,
 ): PathBrowserState {
-    val parsed = remember(userId, value) { splitPathBrowserInput(value, userId) }
-    var entries by remember(userId, parsed.dirRel) { mutableStateOf<List<String>?>(null) }
-    LaunchedEffect(userId, parsed.dirRel) {
-        entries = null
-        onListDirectories(userId, parsed.dirRel) { entries = it }
-    }
-    return remember(parsed, entries) {
-        PathBrowserState(
-            suggestions = pathBrowserSuggestions(parsed, entries.orEmpty()),
-            loading = entries == null,
-        )
-    }
+  val parsed = remember(userId, value) { splitPathBrowserInput(value, userId) }
+  var entries by remember(userId, parsed.dirRel) { mutableStateOf<List<String>?>(null) }
+  LaunchedEffect(userId, parsed.dirRel) {
+    entries = null
+    onListDirectories(userId, parsed.dirRel) { entries = it }
+  }
+  return remember(parsed, entries) {
+    PathBrowserState(
+        suggestions = pathBrowserSuggestions(parsed, entries.orEmpty()),
+        loading = entries == null,
+    )
+  }
 }
 
 internal data class PathBrowserInput(
@@ -210,62 +211,72 @@ private data class PathBrowserState(
 )
 
 internal enum class MappingField {
-    From,
-    To,
+  From,
+  To,
 }
 
 internal fun splitPathBrowserInput(value: String, userId: String): PathBrowserInput {
-    val clean = normalizeSuggestionInput(value, userId)
-    if (clean.isBlank() || clean.endsWith('/')) {
-        val dirRel = clean.trimEnd('/')
-        return PathBrowserInput(dirRel = dirRel, prefix = clean, query = "")
-    }
-    if (clean.equals("Android", ignoreCase = true)) {
-        return PathBrowserInput(
-            dirRel = "Android",
-            prefix = "Android/",
-            query = "",
-        )
-    }
-    val slash = clean.lastIndexOf('/')
-    if (slash < 0) return PathBrowserInput(dirRel = "", prefix = "", query = clean.lowercase())
-    val dirRel = clean.substring(0, slash)
+  val clean = normalizeSuggestionInput(value, userId)
+  if (clean.isBlank() || clean.endsWith('/')) {
+    val dirRel = clean.trimEnd('/')
+    return PathBrowserInput(dirRel = dirRel, prefix = clean, query = "")
+  }
+  if (clean.equals("Android", ignoreCase = true)) {
     return PathBrowserInput(
-        dirRel = dirRel,
-        prefix = clean.substring(0, slash + 1),
-        query = clean.substring(slash + 1).lowercase(),
+        dirRel = "Android",
+        prefix = "Android/",
+        query = "",
     )
+  }
+  val slash = clean.lastIndexOf('/')
+  if (slash < 0) return PathBrowserInput(dirRel = "", prefix = "", query = clean.lowercase())
+  val dirRel = clean.substring(0, slash)
+  return PathBrowserInput(
+      dirRel = dirRel,
+      prefix = clean.substring(0, slash + 1),
+      query = clean.substring(slash + 1).lowercase(),
+  )
 }
 
-internal fun pathBrowserSuggestions(parsed: PathBrowserInput, entries: List<String>): List<PathSuggestion> {
-    if (parsed.dirRel.isAndroidDataPrivateBrowserPath()) {
-        val parentRel = parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "")
-            .let { if (it.isBlank()) "" else "$it/" }
-        return listOf(PathSuggestion(relativePath = parentRel, displayPath = "..", isParent = true))
-    }
-    val baseSuggestions = if (parsed.dirRel.isBlank()) {
+internal fun pathBrowserSuggestions(
+    parsed: PathBrowserInput,
+    entries: List<String>,
+): List<PathSuggestion> {
+  if (parsed.dirRel.isAndroidDataPrivateBrowserPath()) {
+    val parentRel =
+        parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "").let {
+          if (it.isBlank()) "" else "$it/"
+        }
+    return listOf(PathSuggestion(relativePath = parentRel, displayPath = "..", isParent = true))
+  }
+  val baseSuggestions =
+      if (parsed.dirRel.isBlank()) {
         entries.distinctBy { it.trimEnd('/').lowercase() }
-    } else {
+      } else {
         entries
-    }
-    val parent = if (parsed.dirRel.isBlank()) {
+      }
+  val parent =
+      if (parsed.dirRel.isBlank()) {
         emptyList()
-    } else {
-        val parentRel = parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "")
-            .let { if (it.isBlank()) "" else "$it/" }
+      } else {
+        val parentRel =
+            parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "").let {
+              if (it.isBlank()) "" else "$it/"
+            }
         listOf(PathSuggestion(relativePath = parentRel, displayPath = "..", isParent = true))
-    }
-    return parent + baseSuggestions
-        .filter { suggestion ->
+      }
+  return parent +
+      baseSuggestions
+          .filter { suggestion ->
             val name = suggestion.trimEnd('/')
             parsed.query.isBlank() || name.contains(parsed.query, ignoreCase = true)
-        }
-        .filterNot { suggestion ->
+          }
+          .filterNot { suggestion ->
             val relative = parsed.prefix + suggestion
             relative.equals(parsed.prefix, ignoreCase = true) ||
                 relative.trimEnd('/').equals(parsed.prefix.trimEnd('/'), ignoreCase = true)
-        }
-        .map { entry ->
+          }
+          .map { entry ->
             val isDirectory = entry.endsWith("/")
             val name = entry.trimEnd('/')
             val relativePath = parsed.prefix + name + if (isDirectory) "/" else ""
@@ -274,36 +285,41 @@ internal fun pathBrowserSuggestions(parsed: PathBrowserInput, entries: List<Stri
                 displayPath = name,
                 isDirectory = isDirectory,
             )
-        }
+          }
 }
 
 private fun normalizeSuggestionInput(value: String, userId: String): String {
-    val currentUserRoot = "storage/emulated/$userId/"
-    val anyUserRoot = Regex("^storage/emulated/\\d+/")
-    val currentDataRoot = "data/media/$userId/"
-    val anyDataRoot = Regex("^data/media/\\d+/")
-    return value.trim()
-        .removePrefix("!")
-        .replace('\\', '/')
-        .trimStart('/')
-        .removePrefix(currentUserRoot)
-        .removePrefix(currentDataRoot)
-        .removePrefix("sdcard/")
-        .replace(anyUserRoot, "")
-        .replace(anyDataRoot, "")
+  val currentUserRoot = "storage/emulated/$userId/"
+  val anyUserRoot = Regex("^storage/emulated/\\d+/")
+  val currentDataRoot = "data/media/$userId/"
+  val anyDataRoot = Regex("^data/media/\\d+/")
+  return value
+      .trim()
+      .removePrefix("!")
+      .replace('\\', '/')
+      .trimStart('/')
+      .removePrefix(currentUserRoot)
+      .removePrefix(currentDataRoot)
+      .removePrefix("sdcard/")
+      .replace(anyUserRoot, "")
+      .replace(anyDataRoot, "")
 }
 
 private fun String.isAndroidDataPrivateBrowserPath(): Boolean {
-    val clean = trim('/').lowercase()
-    return clean == "android/data" || clean.startsWith("android/data/")
+  val clean = trim('/').lowercase()
+  return clean == "android/data" || clean.startsWith("android/data/")
 }
 
 private fun hasAllowRulePrefix(value: String): Boolean = value.trimStart().startsWith("!")
 
-internal fun normalizeEditablePathInput(value: String, userId: String, allowRuleSyntax: Boolean = false): String {
-    val excluded = allowRuleSyntax && hasAllowRulePrefix(value)
-    val clean = normalizeSuggestionInput(value, userId).trimStart('/')
-    return if (excluded) "!$clean" else clean
+internal fun normalizeEditablePathInput(
+    value: String,
+    userId: String,
+    allowRuleSyntax: Boolean = false,
+): String {
+  val excluded = allowRuleSyntax && hasAllowRulePrefix(value)
+  val clean = normalizeSuggestionInput(value, userId).trimStart('/')
+  return if (excluded) "!$clean" else clean
 }
 
 internal fun normalizeEditablePathTextFieldValue(
@@ -311,9 +327,9 @@ internal fun normalizeEditablePathTextFieldValue(
     userId: String,
     allowRuleSyntax: Boolean = false,
 ): TextFieldValue {
-    val normalized = normalizeEditablePathInput(value.text, userId, allowRuleSyntax)
-    if (normalized == value.text) return value
-    return TextFieldValue(normalized, selection = value.selection.clampToText(normalized.length))
+  val normalized = normalizeEditablePathInput(value.text, userId, allowRuleSyntax)
+  if (normalized == value.text) return value
+  return TextFieldValue(normalized, selection = value.selection.clampToText(normalized.length))
 }
 
 private fun applyPathPrefix(current: String, suggestion: String): String =

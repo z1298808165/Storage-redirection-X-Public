@@ -7,14 +7,14 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.GraphicsLayerScope
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.unit.Density
 import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
-import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.Backdrop
+import top.yukonga.miuix.kmp.blur.BlendColorEntry
 import top.yukonga.miuix.kmp.blur.BlurColors
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -29,19 +29,23 @@ class CombinedBackdrop(
     val first: Backdrop,
     val second: Backdrop,
 ) : Backdrop {
-    override val isCoordinatesDependent: Boolean = first.isCoordinatesDependent || second.isCoordinatesDependent
-    override val offsetResidualX: Float get() = first.offsetResidualX
-    override val offsetResidualY: Float get() = first.offsetResidualY
+  override val isCoordinatesDependent: Boolean =
+      first.isCoordinatesDependent || second.isCoordinatesDependent
+  override val offsetResidualX: Float
+    get() = first.offsetResidualX
 
-    override fun DrawScope.drawBackdrop(
-        density: Density,
-        coordinates: LayoutCoordinates?,
-        layerBlock: (GraphicsLayerScope.() -> Unit)?,
-        downscaleFactor: Int,
-    ) {
-        with(first) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
-        with(second) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
-    }
+  override val offsetResidualY: Float
+    get() = first.offsetResidualY
+
+  override fun DrawScope.drawBackdrop(
+      density: Density,
+      coordinates: LayoutCoordinates?,
+      layerBlock: (GraphicsLayerScope.() -> Unit)?,
+      downscaleFactor: Int,
+  ) {
+    with(first) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
+    with(second) { drawBackdrop(density, coordinates, layerBlock, downscaleFactor) }
+  }
 }
 
 @Composable
@@ -49,14 +53,18 @@ fun rememberCombinedBackdrop(first: Backdrop, second: Backdrop): Backdrop =
     remember(first, second) { CombinedBackdrop(first, second) }
 
 @Stable
-class LiveGlassBackdropScene internal constructor(
+class LiveGlassBackdropScene
+internal constructor(
     val enabled: Boolean,
     val backgroundBackdrop: LayerBackdrop,
     val contentBackdrop: LayerBackdrop,
     val backdrop: Backdrop,
 ) {
-    val activeBackdrop: Backdrop? get() = if (enabled) backdrop else null
-    val activeBackgroundBackdrop: Backdrop? get() = if (enabled) backgroundBackdrop else null
+  val activeBackdrop: Backdrop?
+    get() = if (enabled) backdrop else null
+
+  val activeBackgroundBackdrop: Backdrop?
+    get() = if (enabled) backgroundBackdrop else null
 }
 
 @Composable
@@ -64,22 +72,20 @@ fun rememberLiveGlassBackdropScene(
     enabled: Boolean,
     backgroundColor: Color = MiuixTheme.colorScheme.surface,
 ): LiveGlassBackdropScene {
-    val backgroundBackdrop = rememberLayerBackdrop {
-        drawRect(backgroundColor)
-        drawContent()
-    }
-    val contentBackdrop = rememberLayerBackdrop {
-        drawContent()
-    }
-    val combinedBackdrop = rememberCombinedBackdrop(backgroundBackdrop, contentBackdrop)
-    return remember(enabled, backgroundBackdrop, contentBackdrop, combinedBackdrop) {
-        LiveGlassBackdropScene(
-            enabled = enabled,
-            backgroundBackdrop = backgroundBackdrop,
-            contentBackdrop = contentBackdrop,
-            backdrop = combinedBackdrop,
-        )
-    }
+  val backgroundBackdrop = rememberLayerBackdrop {
+    drawRect(backgroundColor)
+    drawContent()
+  }
+  val contentBackdrop = rememberLayerBackdrop { drawContent() }
+  val combinedBackdrop = rememberCombinedBackdrop(backgroundBackdrop, contentBackdrop)
+  return remember(enabled, backgroundBackdrop, contentBackdrop, combinedBackdrop) {
+    LiveGlassBackdropScene(
+        enabled = enabled,
+        backgroundBackdrop = backgroundBackdrop,
+        contentBackdrop = contentBackdrop,
+        backdrop = combinedBackdrop,
+    )
+  }
 }
 
 fun Modifier.liveGlassBackgroundLayer(scene: LiveGlassBackdropScene): Modifier =
@@ -90,12 +96,12 @@ fun Modifier.liveGlassContentLayer(scene: LiveGlassBackdropScene): Modifier =
 
 @Composable
 fun rememberBlurBackdrop(enabled: Boolean = isSrxBlurEffectEnabled()): LayerBackdrop? {
-    if (!enabled || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-    val surface = MiuixTheme.colorScheme.surface
-    return rememberLayerBackdrop {
-        drawRect(surface)
-        drawContent()
-    }
+  if (!enabled || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+  val surface = MiuixTheme.colorScheme.surface
+  return rememberLayerBackdrop {
+    drawRect(surface)
+    drawContent()
+  }
 }
 
 @Composable
@@ -104,22 +110,27 @@ fun BlurredBar(
     enabled: Boolean = isSrxBlurEffectEnabled(),
     content: @Composable () -> Unit,
 ) {
-    Box(
-        modifier = if (enabled && backdrop != null) {
+  Box(
+      modifier =
+          if (enabled && backdrop != null) {
             Modifier.textureBlur(
                 backdrop = backdrop,
                 shape = RectangleShape,
                 blurRadius = SrxFixedBlurRadius,
-                colors = BlurColors(
-                    blendColors = listOf(
-                        BlendColorEntry(color = MiuixTheme.colorScheme.surface.copy(alpha = 0.87f)),
+                colors =
+                    BlurColors(
+                        blendColors =
+                            listOf(
+                                BlendColorEntry(
+                                    color = MiuixTheme.colorScheme.surface.copy(alpha = 0.87f)
+                                ),
+                            ),
                     ),
-                ),
             )
-        } else {
+          } else {
             Modifier
-        },
-    ) {
-        content()
-    }
+          },
+  ) {
+    content()
+  }
 }
