@@ -579,7 +579,9 @@ clear_file_monitor_log() {
 }
 
 file_monitor_watch_capacity_limited() {
-  adb_su "grep -Eq 'daemon monitor watch limit reached|capacity_limited=true' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null"
+  local matches
+  matches="$(adb_su "grep -E 'daemon monitor watch limit reached|capacity_limited=true' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null || true")"
+  [ -n "$matches" ]
 }
 
 assert_file_monitor_enabled_for_scenario() {
