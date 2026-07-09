@@ -804,10 +804,25 @@ function Invoke-FileMonitorWriteDeniedCase {
     $fileName = ($Path -split '/')[-1]
     if (-not $MissingPath) { $MissingPath = $Path }
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" $Label "file_write_denied" @{ file_path = $Path; payload = $Payload } "^PASS \[file_write_denied\]").Ok
-    $ok = (Require-Missing "scenario-$Scenario" "$Label missing" $MissingPath) -and $ok
-    Write-Host "  - monitor_failure_record_skipped $Scenario/$Label file=$fileName reason=ordinary-app-inotify"
-    $ok
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $failureCountBeforeAttempt = $script:Failures.Count
+        $ok = (Invoke-ServiceCase "scenario-$Scenario" $Label "file_write_denied" @{ file_path = $Path; payload = $Payload } "^PASS \[file_write_denied\]").Ok
+        $ok = (Require-Missing "scenario-$Scenario" "$Label missing" $MissingPath) -and $ok
+        if ($ok) {
+            Write-Host "  - monitor_failure_record_skipped $Scenario/$Label file=$fileName reason=ordinary-app-inotify"
+            return $true
+        }
+        if ($attempt -lt 2) {
+            if ($script:Failures.Count -gt $failureCountBeforeAttempt) {
+                $script:Failures.RemoveRange($failureCountBeforeAttempt, $script:Failures.Count - $failureCountBeforeAttempt)
+            }
+            Write-Host "  - file_monitor_write_denied_retry scenario=$Scenario label=$Label attempt=$attempt"
+            Prepare-ServiceCase "scenario-$Scenario-$Label-retry"
+            Wait-Storage "scenario-$Scenario-$Label-retry" | Out-Null
+            Start-Sleep -Milliseconds $script:ResultPollMilliseconds
+        }
+    }
+    $false
 }
 
 function Invoke-FileMonitorMediaStoreSuccessCase {

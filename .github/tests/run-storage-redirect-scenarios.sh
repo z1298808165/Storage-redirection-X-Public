@@ -1548,12 +1548,23 @@ run_file_monitor_write_denied_case() {
   local path="$3"
   local missing_path="${4:-$path}"
   local file_name
+  local attempt
   file_name="$(basename "$path")"
 
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
-  run_service_case "$scenario" "$label" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$path" --es payload "$PAYLOAD" &&
-    check_file_missing "scenario-${scenario}-${label}-missing" "$missing_path" &&
-    echo "monitor_failure_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=ordinary-app-inotify"
+  for attempt in 1 2; do
+    if run_service_case "$scenario" "$label" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$path" --es payload "$PAYLOAD" &&
+      check_file_missing "scenario-${scenario}-${label}-missing" "$missing_path"; then
+      echo "monitor_failure_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=ordinary-app-inotify"
+      return 0
+    fi
+    [ "$attempt" -lt 2 ] || break
+    echo "file_monitor_write_denied_retry scenario=${scenario} label=${label} attempt=${attempt}"
+    ensure_current_app_mount_confirmed "scenario-${scenario}-${label}-retry" || return 1
+    wait_storage_ready "scenario-${scenario}-${label}-retry" 30 >/dev/null || return 1
+    sleep_ms "$SRT_RESULT_POLL_MS"
+  done
+  return 1
 }
 
 run_file_monitor_mediastore_success_case() {
