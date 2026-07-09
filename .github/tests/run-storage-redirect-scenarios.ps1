@@ -863,7 +863,7 @@ function Invoke-FileMonitorMediaStoreSuccessCase {
     if ($RequireMonitorRecord) {
         $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
     } else {
-        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=disabled-profile-mediastore-create"
+        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=optional-mediastore-create-monitor-record"
     }
     $ok
 }
@@ -937,7 +937,7 @@ function Invoke-MediaStoreMonitorScenario {
     if (-not (Wait-Storage "scenario-$Scenario-mediastore-storage")) { return $false }
     if (-not (Wait-MediaProviderReady "scenario-$Scenario-mediastore-provider")) { return $false }
     $ok = $true
-    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false) -and $ok
     if ([int]$Scenario -eq 27) {
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }

@@ -1608,7 +1608,7 @@ run_file_monitor_mediastore_success_case() {
     check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
     { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
-    { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=disabled-profile-mediastore-create"; }
+    { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=optional-mediastore-create-monitor-record"; }
 }
 
 run_file_monitor_mediastore_relative_data_success_case() {
@@ -1678,7 +1678,7 @@ run_file_monitor_mediastore_scenario() {
   restart_media_provider
   wait_storage_ready "scenario-${scenario}-mediastore-storage" 60 >/dev/null || return 1
   wait_media_provider_ready "scenario-${scenario}-mediastore-provider" 120 >/dev/null || return 1
-  run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
+  run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" 0 &&
     { [ "$scenario" != "27" ] || check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT"; } &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
