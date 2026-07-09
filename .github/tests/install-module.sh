@@ -119,12 +119,37 @@ seed_config() {
   done
 }
 
-verify_loaded() {
-  adb_root "test -d ${MODULE_DIR} && test ! -e ${MODULE_DIR}/disable"
-  adb_root "grep -q ' /dev/srx_config ' /proc/mounts"
-  adb_root "ls -la ${MODULE_DIR}/logs; ls -la /dev/srx_config"
+check_loaded() {
+  adb_root "test -d ${MODULE_DIR} && test ! -e ${MODULE_DIR}/disable" >/dev/null 2>&1 &&
+    adb_root "grep -q ' /dev/srx_config ' /proc/mounts" >/dev/null 2>&1
 }
 
+print_module_diagnostics() {
+  echo "=== SRX 模块诊断 ==="
+  adb_root "echo ===module_dir===; ls -la ${MODULE_DIR} 2>&1 || true; echo ===logs===; ls -la ${MODULE_DIR}/logs 2>&1 || true; echo ===config===; ls -la ${MODULE_DIR}/config 2>&1 || true; echo ===mounts===; grep -E 'srx_config|storage.redirect|zygisk|magisk' /proc/mounts || true; echo ===running_log===; tail -80 ${MODULE_DIR}/logs/running.log 2>&1 || true"
+  adb_root "echo ===magisk===; magisk -V 2>&1 || true" || true
+  adb_magisk '--sqlite "SELECT key,value FROM settings;"' | grep -E 'zygisk|root_access' || true
+  adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|AndroidRuntime|FATAL EXCEPTION' || true
+}
+
+wait_for_module_loaded() {
+  local timeout_seconds="${1:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local attempt=1
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if check_loaded; then
+      adb_root "ls -la ${MODULE_DIR}/logs; ls -la /dev/srx_config"
+      return 0
+    fi
+    echo "等待 SRX 模块加载完成：第 ${attempt} 次"
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+
+  echo "SRX 模块加载验证超时。"
+  print_module_diagnostics
+  return 1
+}
 # 安装测试 APK
 if [ ! -f "$APP_APK" ]; then
   echo "未找到测试 APK: $APP_APK"
@@ -177,5 +202,5 @@ if ! adb_magisk "--sqlite \"SELECT value FROM settings WHERE key='zygisk';\"" | 
   exit 1
 fi
 
-verify_loaded
+wait_for_module_loaded 90
 echo "SRX 模块安装并加载成功。"
