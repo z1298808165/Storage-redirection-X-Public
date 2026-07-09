@@ -553,6 +553,12 @@ public class Hooker {
     if (clazz == null)
       return;
     installMutationOn(clazz);
+    try {
+      Class<?> transport = Class.forName("android.content.ContentProvider$Transport");
+      installMutationOn(transport);
+    } catch (Throwable t) {
+      logWarn("java hook transport mutation fallback failed", t);
+    }
   }
 
   private static synchronized void tryInstallFuseHook(Class<?> clazz) {

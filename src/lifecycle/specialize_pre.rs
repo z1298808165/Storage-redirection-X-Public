@@ -300,6 +300,7 @@ impl RuntimeFlow {
         }
 
         self.configure_monitoring();
+        Logger::init(Some(&self.package_name));
 
         // MediaProvider 的重定向 Java hook 仍在 pre 阶段安装；SAF 来源识别
         // 走 native 文件监视路径，避免在系统 provider 内加载 LSPlant。
@@ -316,7 +317,6 @@ impl RuntimeFlow {
             );
         }
 
-        Logger::init(Some(&self.package_name));
         self.configure_writer_runtime_watch(&writer_context, writer_config_dir.as_deref());
         log::info!(
             "app start pkg={} redirect={} monitor={}",

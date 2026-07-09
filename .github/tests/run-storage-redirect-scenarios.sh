@@ -1608,7 +1608,7 @@ run_file_monitor_disabled_redirect_scenario() {
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
   run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 &&
     run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
-    run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT"
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT"
 }
 
 run_file_monitor_regular_scenario() {
@@ -1634,7 +1634,7 @@ run_file_monitor_mediastore_scenario() {
   run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
     { [ "$scenario" != "27" ] || check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT"; } &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" &&
-    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-mapped-create" "Download/SrtMonitorMap" "$MONITOR_MAP_TARGET" &&
     run_file_monitor_mediastore_denied_case "$scenario" "media-read-only-denied" "Download/SrtMonitorLocked" "$MONITOR_LOCKED_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" "$MONITOR_WRITABLE_ROOT" "$PRIVATE_MONITOR_WRITABLE_ROOT"

@@ -851,7 +851,7 @@ function Invoke-DisabledRedirectMonitorScenario {
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
     $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
     $ok
 }
 
@@ -883,7 +883,7 @@ function Invoke-MediaStoreMonitorScenario {
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }
     $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-relative-data-create" "Pictures/SrtRelativeData" $MonitorRelativeDataRoot $PrivateMonitorRelativeDataRoot) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-nnngram-relative-data" "Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-mapped-create" "Download/SrtMonitorMap" $MonitorMapTarget) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreDeniedCase $Scenario "media-read-only-denied" "Download/SrtMonitorLocked" $MonitorLockedRoot) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" $MonitorWritableRoot $PrivateMonitorWritableRoot) -and $ok
