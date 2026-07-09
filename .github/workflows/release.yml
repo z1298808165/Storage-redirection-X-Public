@@ -151,7 +151,7 @@ jobs:
           ! unzip -Z1 "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -E '(^|/)([^/]+\.sh|[^/]+\.prop|[^/]+\.rule|srxctl)$|^META-INF/' | while IFS= read -r entry; do unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" "$entry" | grep -q $'\r' && printf '%s\n' "$entry"; done | grep .
 
       - name: Upload module artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: storage.redirect.x-v${{ env.VERSION }}.zip
           path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
@@ -217,7 +217,7 @@ jobs:
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
       - name: Upload manager APK artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: storage-redirect-x-manager-v${{ env.VERSION }}.apk
           path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
@@ -309,7 +309,7 @@ jobs:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Upload release test-flow runtime
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: release-test-flow-runtime-v${{ env.VERSION }}
           if-no-files-found: error
@@ -360,7 +360,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download release test-flow runtime
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8.0.1
         with:
           name: release-test-flow-runtime-v${{ env.VERSION }}
           path: .
@@ -389,7 +389,7 @@ jobs:
 
       - name: Upload test-flow artifacts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: release-test-flow-android${{ matrix.android.version }}-artifacts
           if-no-files-found: ignore
