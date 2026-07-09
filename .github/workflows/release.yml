@@ -414,7 +414,6 @@ jobs:
       - name: Prime Android emulator package
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null
           for attempt in 1 2 3; do
             if sdkmanager --install emulator --channel=0; then
               exit 0
