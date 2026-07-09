@@ -208,7 +208,9 @@ public class Hooker {
     try {
       Object[] actualArgs = unwrapArgs(args);
       String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
-      if (!isMediaProviderHookerOrReceiver(this, args) && !hasMediaStoreUriArg(actualArgs)) {
+      if (!isMediaProviderHookerOrReceiver(this, args)
+          && !hasMediaStoreUriArg(actualArgs)
+          && !hasSafeMediaStoreMutationValues(actualArgs)) {
         return callBackupPassthrough(args);
       }
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
@@ -596,11 +598,48 @@ public class Hooker {
   private static boolean hasMediaStoreUriArg(Object[] args) {
     if (args == null) return false;
     for (Object arg : args) {
-      if (arg instanceof android.net.Uri && String.valueOf(arg).startsWith("content://media/")) {
-        return true;
+      if (hasMediaStoreUriArg(arg, 0)) return true;
+    }
+    return false;
+  }
+
+  private static boolean hasMediaStoreUriArg(Object arg, int depth) {
+    if (arg == null || depth > 3) return false;
+    if (arg instanceof android.net.Uri && String.valueOf(arg).startsWith("content://media/")) {
+      return true;
+    }
+    if (arg instanceof Object[]) {
+      Object[] values = (Object[]) arg;
+      for (int i = 0; i < values.length; i++) {
+        if (hasMediaStoreUriArg(values[i], depth + 1)) return true;
       }
     }
     return false;
+  }
+
+  private static boolean hasSafeMediaStoreMutationValues(Object[] args) {
+    if (args == null) return false;
+    for (Object arg : args) {
+      if (arg instanceof ContentValues) {
+        if (hasSafeMediaStoreMutationValue((ContentValues) arg)) return true;
+      } else if (arg instanceof ContentValues[]) {
+        ContentValues[] values = (ContentValues[]) arg;
+        for (int i = 0; i < values.length; i++) {
+          if (hasSafeMediaStoreMutationValue(values[i])) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private static boolean hasSafeMediaStoreMutationValue(ContentValues values) {
+    if (values == null || values.size() == 0) return false;
+    String data = firstString(values, "_data", "data");
+    if (isSafePublicMediaValuePath(data)) return true;
+    String relative = values.getAsString("relative_path");
+    if (relative == null || relative.length() == 0)
+      relative = relativePathFromDirectoryColumns(values);
+    return isSafePublicMediaRelativePath(relative);
   }
 
   private static boolean shouldProbeMediaStoreMutationPatch(int callerUid) {
@@ -2524,6 +2563,41 @@ public class Hooker {
     int userId = userIdFromUid(callerUid);
     if (userId < 0) return null;
     return "/storage/emulated/" + userId + "/" + relative;
+  }
+
+  private static boolean isSafePublicMediaValuePath(String path) {
+    if (path == null || path.length() == 0 || path.startsWith("file://") || path.indexOf('\\') >= 0)
+      return false;
+    String relative = null;
+    if (path.startsWith("/storage/emulated/")) {
+      String rest = path.substring("/storage/emulated/".length());
+      int slash = rest.indexOf('/');
+      if (slash > 0 && slash < rest.length() - 1) relative = rest.substring(slash + 1);
+    } else if (path.startsWith("/data/media/")) {
+      String rest = path.substring("/data/media/".length());
+      int slash = rest.indexOf('/');
+      if (slash > 0 && slash < rest.length() - 1) relative = rest.substring(slash + 1);
+    } else {
+      relative = path.startsWith("/") ? path.substring(1) : path;
+    }
+    return isSafePublicMediaRelativePath(relative);
+  }
+
+  private static boolean isSafePublicMediaRelativePath(String relativePath) {
+    if (relativePath == null || relativePath.length() == 0 || relativePath.indexOf('\\') >= 0)
+      return false;
+    String relative = relativePath.startsWith("/") ? relativePath.substring(1) : relativePath;
+    while (relative.endsWith("/") && relative.length() > 0) {
+      relative = relative.substring(0, relative.length() - 1);
+    }
+    if (relative.length() == 0 || relative.startsWith("/")) return false;
+    String[] segments = relative.split("/", -1);
+    if (segments.length < 1 || !isPublicMediaRoot(segments[0])) return false;
+    for (int i = 0; i < segments.length; i++) {
+      String segment = segments[i];
+      if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment)) return false;
+    }
+    return true;
   }
 
   private static boolean isPublicMediaRoot(String root) {
