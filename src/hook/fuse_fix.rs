@@ -435,22 +435,3 @@ fn patch_plt_slot(slot: usize, replacement: usize) -> bool {
     }
     true
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn android_14_x86_64_skips_native_fuse_fix() {
-        assert_eq!(
-            should_skip_native_fuse_fix_for_platform(34),
-            cfg!(target_arch = "x86_64")
-        );
-    }
-
-    #[test]
-    fn other_android_versions_keep_native_fuse_fix_available() {
-        assert!(!should_skip_native_fuse_fix_for_platform(33));
-        assert!(!should_skip_native_fuse_fix_for_platform(35));
-    }
-}

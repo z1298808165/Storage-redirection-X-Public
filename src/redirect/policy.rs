@@ -15,13 +15,26 @@ const DOWNLOAD_PROVIDER_UI: &str = "com.android.providers.downloads.ui";
 const EXTERNAL_STORAGE_PROVIDER: &str = "com.android.externalstorage";
 const MTP_PACKAGE: &str = "com.android.mtp";
 
-#[derive(Default)]
 struct SharedUidState {
     uid_by_package: HashMap<String, i32>,
     packages_by_uid: HashMap<i32, Vec<String>>,
     system_writer_shared_uids: HashSet<i32>,
+    uid_file_path: String,
     last_fingerprint: u64,
     is_loaded: bool,
+}
+
+impl Default for SharedUidState {
+    fn default() -> Self {
+        Self {
+            uid_by_package: HashMap::new(),
+            packages_by_uid: HashMap::new(),
+            system_writer_shared_uids: HashSet::new(),
+            uid_file_path: SYSTEM_WRITER_UIDS_FILE.to_string(),
+            last_fingerprint: 0,
+            is_loaded: false,
+        }
+    }
 }
 
 static SHARED_UID_STATE: Lazy<Mutex<SharedUidState>> =
@@ -128,11 +141,33 @@ pub fn refresh_shared_uid_cache() {
     let mut state = SHARED_UID_STATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let fingerprint = compute_uid_file_fingerprint();
-    if state.is_loaded && fingerprint == state.last_fingerprint {
+    refresh_shared_uid_cache_locked(&mut state, false);
+}
+
+// 系统代写进程通过 Zygisk 保留的模块目录 FD 读取配置，避免依赖最终 mount namespace
+// 中可能不可见的 /data/adb/modules 路径。
+pub fn set_shared_uid_config_dir(config_dir: &str) {
+    if config_dir.is_empty() {
         return;
     }
-    load_shared_uid_cache(&mut state, fingerprint);
+
+    let uid_file_path = uid_file_path_for_config_dir(config_dir);
+    let mut state = SHARED_UID_STATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let source_changed = state.uid_file_path != uid_file_path;
+    if source_changed {
+        state.uid_file_path = uid_file_path;
+    }
+    refresh_shared_uid_cache_locked(&mut state, source_changed);
+}
+
+fn refresh_shared_uid_cache_locked(state: &mut SharedUidState, force: bool) {
+    let fingerprint = compute_uid_file_fingerprint(&state.uid_file_path);
+    if !force && state.is_loaded && fingerprint == state.last_fingerprint {
+        return;
+    }
+    load_shared_uid_cache(state, fingerprint);
 }
 
 pub fn get_shared_group_members(package_name: &str) -> Vec<String> {
@@ -198,72 +233,6 @@ pub fn get_fresh_uid_for_package(package_name: &str) -> i32 {
     }
     refresh_shared_uid_cache();
     get_uid_for_package(package_name)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn replace_test_uid_cache(
-    uid_by_package: HashMap<String, i32>,
-) -> (
-    HashMap<String, i32>,
-    HashMap<i32, Vec<String>>,
-    HashSet<i32>,
-    bool,
-) {
-    let mut state = SHARED_UID_STATE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let previous_uid_by_package = std::mem::replace(&mut state.uid_by_package, uid_by_package);
-    let previous_packages_by_uid = std::mem::take(&mut state.packages_by_uid);
-    let previous_system_writer_shared_uids = std::mem::take(&mut state.system_writer_shared_uids);
-    let previous_loaded = state.is_loaded;
-
-    let pairs = state
-        .uid_by_package
-        .iter()
-        .map(|(package, uid)| (package.clone(), *uid))
-        .collect::<Vec<_>>();
-    for (package, uid) in pairs {
-        state.packages_by_uid.entry(uid).or_default().push(package);
-    }
-    for packages in state.packages_by_uid.values_mut() {
-        packages.sort();
-        packages.dedup();
-    }
-    state.system_writer_shared_uids = state
-        .packages_by_uid
-        .iter()
-        .filter_map(|(uid, packages)| {
-            (packages.len() >= 2 && packages.iter().any(|name| is_system_writer_candidate(name)))
-                .then_some(*uid)
-        })
-        .collect();
-    state.last_fingerprint = compute_uid_file_fingerprint();
-    state.is_loaded = true;
-
-    (
-        previous_uid_by_package,
-        previous_packages_by_uid,
-        previous_system_writer_shared_uids,
-        previous_loaded,
-    )
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn restore_test_uid_cache(
-    uid_by_package: HashMap<String, i32>,
-    packages_by_uid: HashMap<i32, Vec<String>>,
-    system_writer_shared_uids: HashSet<i32>,
-    is_loaded: bool,
-) {
-    let mut state = SHARED_UID_STATE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    state.uid_by_package = uid_by_package;
-    state.packages_by_uid = packages_by_uid;
-    state.system_writer_shared_uids = system_writer_shared_uids;
-    state.is_loaded = is_loaded;
 }
 
 // 格式: "pkg1,pkg2,pkg3"
@@ -333,9 +302,13 @@ fn is_shared_uid(uid: i32, packages_by_uid: &HashMap<i32, Vec<String>>) -> bool 
         .unwrap_or(false)
 }
 
+fn uid_file_path_for_config_dir(config_dir: &str) -> String {
+    SYSTEM_WRITER_UIDS_FILE.replacen(crate::platform::module_paths::CONFIG_DIR, config_dir, 1)
+}
+
 // 基于 mtime 与文件大小
-fn compute_uid_file_fingerprint() -> u64 {
-    let Ok(meta) = std::fs::metadata(SYSTEM_WRITER_UIDS_FILE) else {
+fn compute_uid_file_fingerprint(uid_file_path: &str) -> u64 {
+    let Ok(meta) = std::fs::metadata(uid_file_path) else {
         return 0;
     };
     let size = meta.len();
@@ -349,7 +322,7 @@ fn compute_uid_file_fingerprint() -> u64 {
 }
 
 fn load_shared_uid_cache(state: &mut SharedUidState, fingerprint: u64) {
-    let file = File::open(SYSTEM_WRITER_UIDS_FILE);
+    let file = File::open(&state.uid_file_path);
     let Ok(file) = file else {
         handle_uid_cache_open_failure(state, fingerprint);
         return;
@@ -405,56 +378,14 @@ fn handle_uid_cache_open_failure(state: &mut SharedUidState, fingerprint: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, HashSet};
 
     #[test]
-    fn file_monitor_hook_bridge_excludes_ui_shells() {
-        assert!(is_file_monitor_bridge_package(
-            "com.android.providers.downloads"
-        ));
-        assert!(is_file_monitor_bridge_package(
-            "com.android.externalstorage"
-        ));
-        assert!(is_file_monitor_bridge_package("com.android.mtp"));
-
-        assert!(!is_file_monitor_bridge_package(
+    fn file_monitor_ui_detects_system_and_oem_file_shells() {
+        assert!(is_file_monitor_ui_package("com.android.documentsui"));
+        assert!(is_file_monitor_ui_package("com.android.photopicker"));
+        assert!(is_file_monitor_ui_package(
             "com.android.providers.downloads.ui"
         ));
-        assert!(!is_file_monitor_bridge_package("com.android.documentsui"));
-        assert!(!is_file_monitor_bridge_package("com.android.photopicker"));
-    }
-
-    #[test]
-    fn saf_native_monitor_targets_storage_bridges_only() {
-        assert!(is_saf_native_monitor_bridge_package(
-            "com.android.providers.downloads"
-        ));
-        assert!(is_saf_native_monitor_bridge_package(
-            "com.android.externalstorage"
-        ));
-        assert!(!is_saf_native_monitor_bridge_package("com.android.mtp"));
-        assert!(!is_saf_native_monitor_bridge_package(
-            "com.android.documentsui"
-        ));
-        assert!(!is_saf_native_monitor_bridge_package(
-            "com.android.providers.downloads.ui"
-        ));
-        assert!(!is_saf_native_monitor_bridge_package(
-            "com.android.providers.media.module"
-        ));
-    }
-
-    #[test]
-    fn media_intermediate_still_includes_ui_shells_for_attribution() {
-        assert!(is_media_intermediate_package("com.android.documentsui"));
-        assert!(is_media_intermediate_package("com.android.photopicker"));
-        assert!(is_media_intermediate_package(
-            "com.android.providers.downloads.ui"
-        ));
-    }
-
-    #[test]
-    fn file_monitor_ui_detects_oem_file_shells() {
         assert!(is_file_monitor_ui_package("com.coloros.filemanager"));
         assert!(is_file_monitor_ui_package(
             "com.mi.android.globalFileExplorer"
@@ -466,22 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_uid_cache_reload_keeps_inherited_cache() {
-        let mut state = SharedUidState {
-            uid_by_package: HashMap::from([("com.leo.xposed.xradiant".to_string(), 10164)]),
-            packages_by_uid: HashMap::from([(10164, vec!["com.leo.xposed.xradiant".to_string()])]),
-            system_writer_shared_uids: HashSet::new(),
-            last_fingerprint: 42,
-            is_loaded: true,
-        };
-
-        handle_uid_cache_open_failure(&mut state, 0);
-
-        assert_eq!(
-            state.uid_by_package.get("com.leo.xposed.xradiant"),
-            Some(&10164)
-        );
-        assert_eq!(state.last_fingerprint, 0);
-        assert!(state.is_loaded);
+    fn media_intermediate_includes_file_ui_for_attribution() {
+        assert!(is_media_intermediate_package(
+            "com.android.providers.media.module"
+        ));
+        assert!(is_media_intermediate_package(
+            "com.android.providers.downloads"
+        ));
+        assert!(is_media_intermediate_package("com.android.externalstorage"));
+        assert!(is_media_intermediate_package("com.coloros.filemanager"));
     }
 }

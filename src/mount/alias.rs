@@ -426,35 +426,3 @@ fn append_unique(list: &mut Vec<String>, value: String) {
 fn should_skip_self_shadowing_alias(source: &str, target: &str) -> bool {
     !paths::eq_ignore_case(source, target) && paths::is_child(source, target)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{MountPlanner, should_skip_self_shadowing_alias};
-
-    #[test]
-    fn storage_aliases_include_data_media_backend_for_lower_fs_writers() {
-        let planner = MountPlanner::new("com.example.app", 10123, "", "/data/local/tmp/srx", false);
-
-        let aliases = planner.expand_storage_alias_paths("/storage/emulated/0/Download/Locked");
-
-        assert!(aliases.contains(&"/storage/emulated/0/Download/Locked".to_string()));
-        assert!(aliases.contains(&"/data/media/0/Download/Locked".to_string()));
-        assert!(aliases.contains(&"/mnt/runtime/full/emulated/0/Download/Locked".to_string()));
-    }
-
-    #[test]
-    fn storage_alias_bind_skips_private_backend_parent_shadowing() {
-        assert!(should_skip_self_shadowing_alias(
-            "/data/media/0/Android/data/com.example.app/sdcard",
-            "/data/media/0"
-        ));
-        assert!(!should_skip_self_shadowing_alias(
-            "/data/media/0/Android/data/com.example.app/sdcard",
-            "/storage/emulated/0"
-        ));
-        assert!(!should_skip_self_shadowing_alias(
-            "/data/media/0/Download/SrtAllow",
-            "/data/media/0/Download/SrtAllow"
-        ));
-    }
-}

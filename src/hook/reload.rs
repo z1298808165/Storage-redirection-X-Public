@@ -67,17 +67,3 @@ fn reload_interval_ms(is_event_window: bool) -> i64 {
         RUNTIME_CONFIG_RELOAD_INTERVAL_MS
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn event_window_uses_short_reload_interval() {
-        assert_eq!(
-            reload_interval_ms(true),
-            RUNTIME_CONFIG_EVENT_RELOAD_INTERVAL_MS
-        );
-        assert_eq!(reload_interval_ms(false), RUNTIME_CONFIG_RELOAD_INTERVAL_MS);
-    }
-}

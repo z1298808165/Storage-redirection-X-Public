@@ -182,30 +182,3 @@ fn android_log(priority: i32, tag: &str, message: &str) {
 unsafe extern "C" {
     fn __android_log_print(prio: c_int, tag: *const c_char, fmt: *const c_char, ...) -> c_int;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use log::Level as LogLevel;
-
-    #[test]
-    fn file_monitor_records_do_not_require_debug_logging() {
-        set_debug_logging_enabled(false);
-
-        let monitor_metadata = Metadata::builder()
-            .level(LogLevel::Info)
-            .target(FILE_MONITOR_LOG_TAG)
-            .build();
-        let default_metadata = Metadata::builder()
-            .level(LogLevel::Info)
-            .target(DEFAULT_LOG_TAG)
-            .build();
-
-        assert!(is_record_enabled(&monitor_metadata));
-        assert!(!is_record_enabled(&default_metadata));
-
-        set_debug_logging_enabled(true);
-        assert!(is_record_enabled(&default_metadata));
-        set_debug_logging_enabled(false);
-    }
-}

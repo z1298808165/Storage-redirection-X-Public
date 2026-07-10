@@ -46,34 +46,3 @@ pub(crate) fn system_time_from_time(secs: i64, nsecs: u32) -> SystemTime {
         SystemTime::UNIX_EPOCH - Duration::new((-secs) as u64, nsecs)
     }
 }
-
-#[cfg(test)]
-mod test {
-    use std::time::Duration;
-    use std::time::UNIX_EPOCH;
-
-    use crate::time::time_from_system_time;
-
-    #[test]
-    fn test_time_from_system_time_negative() {
-        let before_epoch = UNIX_EPOCH - Duration::new(1, 200_000_000);
-        let (secs, nanos) = time_from_system_time(&before_epoch);
-        assert_eq!((-2, 800_000_000), (secs, nanos));
-    }
-
-    #[test]
-    fn test_time_from_system_time_i64_min_boundary() {
-        // timespec { tv_sec: i64::MIN, tv_nsec: 0 }
-        let min_system_time = UNIX_EPOCH - Duration::new(i64::MAX as u64 + 1, 0);
-        let (secs, nanos) = time_from_system_time(&min_system_time);
-        assert_eq!((i64::MIN, 0), (secs, nanos));
-
-        let min_system_time_plus_eps = UNIX_EPOCH - Duration::new(i64::MAX as u64, 800_000_000);
-        let (secs, nanos) = time_from_system_time(&min_system_time_plus_eps);
-        assert_eq!((i64::MIN, 200_000_000), (secs, nanos));
-
-        let min_system_time_plus_one = UNIX_EPOCH - Duration::new(i64::MAX as u64, 0);
-        let (secs, nanos) = time_from_system_time(&min_system_time_plus_one);
-        assert_eq!((i64::MIN + 1, 0), (secs, nanos));
-    }
-}

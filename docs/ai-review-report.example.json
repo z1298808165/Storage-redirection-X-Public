@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "reviewer": "Codex AI Agent",
+  "baseCommit": "<git rev-parse HEAD>",
+  "tree": "<git write-tree>",
+  "files": ["path/to/staged-file"],
+  "verdict": "pass",
+  "summary": "已检查精确暂存差异及相关调用链，未发现未解决的代码质量问题。",
+  "checks": {
+    "scope_and_necessity": {
+      "result": "pass",
+      "evidence": "说明每项改动为何属于当前唯一目的。"
+    },
+    "dead_code_and_test_residue": {
+      "result": "pass",
+      "evidence": "说明如何排除无用代码、调试代码和测试残留。"
+    },
+    "duplication_and_reuse": {
+      "result": "pass",
+      "evidence": "说明检查过的现有实现和复用结论。"
+    },
+    "abstraction_and_complexity": {
+      "result": "pass",
+      "evidence": "说明控制流与抽象层次为何与问题规模相称。"
+    },
+    "error_and_resource_paths": {
+      "result": "pass",
+      "evidence": "说明失败路径、资源和生命周期检查结果。"
+    },
+    "concurrency_and_global_state": {
+      "result": "not_applicable",
+      "evidence": "本次改动不读取或修改并发及全局状态。"
+    },
+    "compatibility_and_hook_boundaries": {
+      "result": "not_applicable",
+      "evidence": "本次改动不触及运行时兼容性或 hook 边界。"
+    },
+    "tests_and_verification": {
+      "result": "pass",
+      "evidence": "列出与改动风险对应的实际验证及结果。"
+    },
+    "readability_and_maintenance": {
+      "result": "pass",
+      "evidence": "说明命名、注释和后续维护成本检查结果。"
+    }
+  },
+  "findings": [],
+  "validation": [
+    {
+      "command": "git diff --cached --check",
+      "result": "pass",
+      "evidence": "命令退出码为 0，没有空白错误。"
+    }
+  ]
+}

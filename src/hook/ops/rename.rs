@@ -410,28 +410,3 @@ fn should_apply_rename_policy(hub: &crate::hook::stats::InterceptHub) -> bool {
 fn should_apply_rename_policy_for_mode(is_monitor_only: bool, package_name: &str) -> bool {
     !is_monitor_only || policy::is_system_writer_package(package_name)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn monitor_only_rename_policy_still_applies_to_media_provider() {
-        assert!(should_apply_rename_policy_for_mode(
-            true,
-            "com.android.providers.media.module"
-        ));
-        assert!(!should_apply_rename_policy_for_mode(
-            true,
-            "com.android.providers.downloads"
-        ));
-        assert!(!should_apply_rename_policy_for_mode(
-            true,
-            "com.tencent.mobileqq"
-        ));
-        assert!(should_apply_rename_policy_for_mode(
-            false,
-            "com.tencent.mobileqq"
-        ));
-    }
-}

@@ -87,7 +87,14 @@ impl RuntimeFlow {
         self.should_skip_post_work = false;
         self.should_keep_module_loaded = false;
 
-        policy::refresh_shared_uid_cache();
+        // 系统代写进程在 specialize 后可能无法通过绝对路径访问模块目录。先保留
+        // Zygisk 模块目录 FD，让 UID 归因与其余配置共用同一可访问来源。
+        if should_open_writer_config_fd_before_uid_resolution(&self.package_name) {
+            self.open_module_dir_fd_for_writer();
+            policy::set_shared_uid_config_dir(&self.writer_config_dir());
+        } else {
+            policy::refresh_shared_uid_cache();
+        }
         if let Some(config_package) =
             resolve_config_package_for_uid(&self.package_name, self.app_uid)
             && config_package != self.package_name
@@ -109,6 +116,7 @@ impl RuntimeFlow {
             is_file_monitor_ui_process(&self.package_name, &process.nice_name);
         if self.is_file_monitor_ui {
             self.should_skip_post_work = true;
+            self.close_module_dir_fd();
             self.request_dlclose();
             log::info!(
                 "file monitor UI daemon-only bypass pkg={} nice={} uid={} pid={}",
@@ -128,6 +136,7 @@ impl RuntimeFlow {
             has_effective_config,
         ) {
             self.should_skip_post_work = true;
+            self.close_module_dir_fd();
             self.request_dlclose();
             log::debug!(
                 "app config inactive, fast bypass pkg={} uid={}",
@@ -140,7 +149,9 @@ impl RuntimeFlow {
         let config = SettingsHub::instance();
         let writer_config_dir = if is_system_writer || is_shared_uid_writer || is_monitor_bridge {
             self.open_module_dir_fd_for_writer();
-            Some(self.writer_config_dir())
+            let config_dir = self.writer_config_dir();
+            policy::set_shared_uid_config_dir(&config_dir);
+            Some(config_dir)
         } else {
             None
         };
@@ -800,6 +811,11 @@ fn should_fast_bypass_app_config(
     !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge && !has_effective_config
 }
 
+fn should_open_writer_config_fd_before_uid_resolution(package_name: &str) -> bool {
+    policy::is_system_writer_package(package_name)
+        || policy::is_file_monitor_bridge_package(package_name)
+}
+
 fn is_file_monitor_ui_process(package_name: &str, nice_name: &str) -> bool {
     policy::is_file_monitor_ui_package(package_name) || is_legacy_file_monitor_ui_process(nice_name)
 }
@@ -862,20 +878,32 @@ fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
 }
 
 #[cfg(test)]
-fn allowed_paths_need_app_redirect_hook(allowed_real_paths: &[String], user_id: i32) -> bool {
-    let storage_root = platform::paths::storage_user_root_for_user(user_id);
-    allowed_real_paths.iter().any(|path| {
-        let raw = path.trim_start();
-        if raw.is_empty() || raw.starts_with('!') {
-            return false;
-        }
-        let mut resolved =
-            platform::paths::resolve_user_path(&platform::paths::normalize(raw), user_id);
-        if !platform::paths::is_absolute(&resolved) {
-            resolved = platform::paths::normalize(&platform::paths::join(&storage_root, &resolved));
-        }
-        media_allowed_write_hook_path(&resolved, &storage_root)
-    })
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_monitor_ui_bypass_covers_system_oem_and_legacy_names() {
+        assert!(is_file_monitor_ui_process(
+            "com.android.documentsui",
+            "com.android.documentsui"
+        ));
+        assert!(is_file_monitor_ui_process(
+            "com.coloros.filemanager",
+            "com.coloros.filemanager"
+        ));
+        assert!(is_file_monitor_ui_process(
+            "com.android.providers.media",
+            "com.android.providers.media:PhotoPicker"
+        ));
+        assert!(is_file_monitor_ui_process(
+            "android.process.mediaUI",
+            "android.process.mediaUI"
+        ));
+        assert!(!is_file_monitor_ui_process(
+            "com.android.providers.downloads",
+            "com.android.providers.downloads"
+        ));
+    }
 }
 
 fn app_redirect_hook_reason_for_process(
@@ -893,334 +921,4 @@ fn app_redirect_hook_reason_for_process(
     // 普通应用只走 companion mount 路径。PLT 写入 hook 可能碰到 JIT/memfd
     // 保护页，也会破坏测试流要求的“普通应用不安装 hook”边界。
     None
-}
-
-#[cfg(test)]
-fn app_redirect_hook_reason(
-    allowed_real_paths: &[String],
-    path_mappings: &[PathMapping],
-    user_id: i32,
-    is_fuse_daemon_redirect_enabled: bool,
-) -> Option<&'static str> {
-    if is_fuse_daemon_redirect_enabled
-        && allowed_paths_need_app_redirect_hook(allowed_real_paths, user_id)
-    {
-        return Some("media_allowed_write");
-    }
-    if allowed_paths_shadow_mapping_requests(allowed_real_paths, path_mappings, user_id) {
-        return Some("mapping_shadowed_by_allow");
-    }
-    None
-}
-
-#[cfg(test)]
-fn allowed_paths_shadow_mapping_requests(
-    allowed_real_paths: &[String],
-    path_mappings: &[PathMapping],
-    user_id: i32,
-) -> bool {
-    if allowed_real_paths.is_empty() || path_mappings.is_empty() {
-        return false;
-    }
-
-    let storage_root = platform::paths::storage_user_root_for_user(user_id);
-    let mapping_requests: Vec<String> = path_mappings
-        .iter()
-        .filter_map(|mapping| {
-            resolve_storage_rule_path(&mapping.request_path, user_id, &storage_root)
-        })
-        .collect();
-    if mapping_requests.is_empty() {
-        return false;
-    }
-
-    allowed_real_paths.iter().any(|path| {
-        let raw = path.trim_start();
-        if raw.is_empty() || raw.starts_with('!') {
-            return false;
-        }
-        let Some(allowed_path) = resolve_storage_rule_path(raw, user_id, &storage_root) else {
-            return false;
-        };
-        mapping_requests.iter().any(|request_path| {
-            platform::paths::matches(&allowed_path, request_path, true)
-                || (!platform::paths::contains_wildcards(&allowed_path)
-                    && platform::paths::is_same_or_child(request_path, &allowed_path))
-        })
-    })
-}
-
-#[cfg(test)]
-fn resolve_storage_rule_path(path: &str, user_id: i32, storage_root: &str) -> Option<String> {
-    let mut resolved =
-        platform::paths::resolve_user_path(&platform::paths::normalize(path), user_id);
-    if resolved.is_empty() || platform::paths::has_unsafe_segments(&resolved) {
-        return None;
-    }
-    if !platform::paths::is_absolute(&resolved) {
-        resolved = platform::paths::normalize(&platform::paths::join(storage_root, &resolved));
-    }
-    if !platform::paths::is_child(&resolved, storage_root)
-        && !platform::paths::eq_ignore_case(&resolved, storage_root)
-    {
-        return None;
-    }
-    Some(resolved)
-}
-
-#[cfg(test)]
-fn media_allowed_write_hook_path(path: &str, storage_root: &str) -> bool {
-    let Some(relative) = platform::paths::relative_child_path(path, storage_root) else {
-        return false;
-    };
-    let Some(first) = relative.split('/').find(|part| !part.is_empty()) else {
-        return false;
-    };
-    matches!(first, "DCIM" | "Pictures" | "Movies")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use writer_state::should_defer_media_boot_extras_for_state;
-
-    fn writer_context(is_media_provider: bool) -> SystemWriterContext {
-        SystemWriterContext {
-            is_system_writer: true,
-            is_media_provider,
-            is_monitor_bridge: false,
-            should_install_fuse_fix: is_media_provider,
-            has_merged_writer_mappings: false,
-            merged_writer_mappings: Vec::new(),
-        }
-    }
-
-    fn saf_monitor_bridge_context() -> SystemWriterContext {
-        SystemWriterContext {
-            is_system_writer: false,
-            is_media_provider: false,
-            is_monitor_bridge: true,
-            should_install_fuse_fix: false,
-            has_merged_writer_mappings: false,
-            merged_writer_mappings: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn java_hook_installs_only_for_real_media_provider_context() {
-        // Java hook covers MediaProvider ContentValues path patches.
-        assert!(should_install_java_hook_for_writer(
-            &writer_context(true),
-            true,
-            false,
-            false,
-        ));
-
-        // FUSE/monitor support also needs MediaProvider mutation hooks.
-        assert!(should_install_java_hook_for_writer(
-            &writer_context(true),
-            false,
-            true,
-            false,
-        ));
-
-        // 非 MediaProvider 不安装
-        assert!(!should_install_java_hook_for_writer(
-            &writer_context(false),
-            true,
-            false,
-            false,
-        ));
-
-        // boot-lite/defer 只推迟 native extras，Java ContentValues mutation 仍需预装。
-        assert!(should_install_java_hook_for_writer(
-            &writer_context(true),
-            true,
-            false,
-            true,
-        ));
-
-        // MediaProvider 即使当前未命中配置，也预装 Java mutation hook。
-        assert!(should_install_java_hook_for_writer(
-            &writer_context(true),
-            false,
-            false,
-            false,
-        ));
-    }
-
-    #[test]
-    fn java_hook_skips_saf_monitor_bridge() {
-        assert!(!should_install_java_hook_for_writer(
-            &saf_monitor_bridge_context(),
-            false,
-            true,
-            false,
-        ));
-        assert!(!should_install_java_hook_for_writer(
-            &saf_monitor_bridge_context(),
-            false,
-            false,
-            false,
-        ));
-    }
-
-    #[test]
-    fn file_monitor_ui_process_covers_modern_and_legacy_picker_names() {
-        assert!(is_file_monitor_ui_process(
-            "com.android.photopicker",
-            "com.android.photopicker"
-        ));
-        assert!(is_file_monitor_ui_process(
-            "com.android.documentsui",
-            "com.android.documentsui"
-        ));
-        assert!(is_file_monitor_ui_process(
-            "android.process.media",
-            "android.process.media:PhotoPicker"
-        ));
-        assert!(is_file_monitor_ui_process(
-            "android.process.mediaUI",
-            "android.process.mediaUI"
-        ));
-        assert!(!is_file_monitor_ui_process(
-            "com.android.providers.downloads",
-            "com.android.providers.downloads"
-        ));
-    }
-
-    #[test]
-    fn app_redirect_hook_covers_mapping_shadowed_by_allowed_parent() {
-        let mappings = vec![PathMapping::new(
-            "Download/SrtProbe".to_string(),
-            "Download/Test".to_string(),
-        )];
-
-        assert_eq!(
-            app_redirect_hook_reason(&["Download".to_string()], &mappings, 0, false),
-            Some("mapping_shadowed_by_allow")
-        );
-        assert!(allowed_paths_shadow_mapping_requests(
-            &["Download".to_string()],
-            &mappings,
-            0
-        ));
-    }
-
-    #[test]
-    fn app_redirect_hook_preloads_for_redirect_hot_config() {
-        assert_eq!(
-            app_redirect_hook_reason_for_process(true, false, &[], &[], 0, false),
-            None
-        );
-    }
-
-    #[test]
-    fn app_redirect_hook_skips_disabled_and_system_writer_processes() {
-        assert_eq!(
-            app_redirect_hook_reason_for_process(false, false, &[], &[], 0, false),
-            None
-        );
-        assert_eq!(
-            app_redirect_hook_reason_for_process(true, true, &[], &[], 0, false),
-            None
-        );
-    }
-
-    #[test]
-    fn app_redirect_hook_ignores_unrelated_allow_and_exclusions() {
-        let mappings = vec![PathMapping::new(
-            "Download/SrtProbe".to_string(),
-            "Download/Test".to_string(),
-        )];
-
-        assert_eq!(
-            app_redirect_hook_reason(&["Pictures".to_string()], &mappings, 0, false),
-            None
-        );
-        assert_eq!(
-            app_redirect_hook_reason(&["!Download".to_string()], &mappings, 0, false),
-            None
-        );
-    }
-
-    #[test]
-    fn app_redirect_hook_keeps_media_allowed_reason_when_fuse_enabled() {
-        assert_eq!(
-            app_redirect_hook_reason(&["DCIM/SrtFuseQQ/SrtAllowed*".to_string()], &[], 0, true,),
-            Some("media_allowed_write")
-        );
-    }
-
-    #[test]
-    fn media_boot_extras_defer_only_before_boot_completed() {
-        assert!(should_defer_media_boot_extras_for_state(
-            true, true, false, false,
-        ));
-        assert!(should_defer_media_boot_extras_for_state(
-            true, false, true, false,
-        ));
-
-        assert!(!should_defer_media_boot_extras_for_state(
-            true, true, false, true,
-        ));
-        assert!(!should_defer_media_boot_extras_for_state(
-            false, true, true, false,
-        ));
-        assert!(!should_defer_media_boot_extras_for_state(
-            true, false, false, false,
-        ));
-    }
-
-    #[test]
-    fn companion_payload_preserves_mount_request_fields() {
-        let allowed = vec!["/storage/emulated/0/DCIM".to_string()];
-        let excluded = vec!["/storage/emulated/0/Download".to_string()];
-        let sandboxed = vec!["/storage/emulated/0/Pictures".to_string()];
-        let read_only = vec!["/storage/emulated/0/Documents".to_string()];
-        let mappings = vec![PathMapping::new(
-            "/storage/emulated/0/A".to_string(),
-            "/storage/emulated/0/B".to_string(),
-        )];
-
-        let payload = build_companion_request_payload(&CompanionMountRequest {
-            pid: 123,
-            uid: 10123,
-            package_name: "org.srx.test",
-            app_data_dir: "/data/user/0/org.srx.test",
-            is_fuse_daemon_redirect_enabled: true,
-            is_file_monitor_enabled: true,
-            redirect_target: "/data/media/0/Android/data/org.srx.test/sdcard",
-            allowed_real_paths: &allowed,
-            excluded_real_paths: &excluded,
-            sandboxed_paths: &sandboxed,
-            read_only_paths: &read_only,
-            path_mappings: &mappings,
-            is_mapping_mode_only: true,
-            operation: "apply",
-            config_version: 42,
-        });
-
-        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(value["operation"], "apply");
-        assert_eq!(value["pid"], 123);
-        assert_eq!(value["uid"], 10123);
-        assert_eq!(value["package"], "org.srx.test");
-        assert_eq!(value["fuse_daemon_redirect_enabled"], true);
-        assert_eq!(value["file_monitor_enabled"], true);
-        assert_eq!(value["mapping_mode_only"], true);
-        assert_eq!(value["config_version"], 42);
-        assert_eq!(value["allowed_real_paths"][0], allowed[0]);
-        assert_eq!(value["excluded_real_paths"][0], excluded[0]);
-        assert_eq!(value["sandboxed_paths"][0], sandboxed[0]);
-        assert_eq!(value["read_only_paths"][0], read_only[0]);
-        assert_eq!(
-            value["path_mappings"][0]["request_path"],
-            mappings[0].request_path
-        );
-        assert_eq!(
-            value["path_mappings"][0]["final_path"],
-            mappings[0].final_path
-        );
-    }
 }

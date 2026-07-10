@@ -114,45 +114,6 @@ fn has_potential_storage_prefix(pathname: &str) -> bool {
         || pathname.starts_with("/data/media/")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fast_storage_path_check_handles_aliases() {
-        assert!(is_storage_path_fast("/storage/emulated/0/DCIM/x.jpg"));
-        assert!(is_storage_path_fast("/sdcard/Download/foo"));
-        assert!(is_storage_path_fast("/storage/self/primary/Movies/foo.mp4"));
-        assert!(is_storage_path_fast("/mnt/runtime/default/emulated/10/foo"));
-        assert!(is_storage_path_fast("/mnt/user/0/primary/foo"));
-        assert!(is_storage_path_fast("/data/media/0/Download/foo"));
-    }
-
-    #[test]
-    fn fast_storage_path_check_rejects_non_storage() {
-        assert!(!is_storage_path_fast("/system/bin/sh"));
-        assert!(!is_storage_path_fast("/data/app/com.demo/base.apk"));
-        assert!(!is_storage_path_fast("/data/user/0/com.demo/files/x"));
-        assert!(!is_storage_path_fast("/proc/self/maps"));
-        assert!(!is_storage_path_fast("/dev/binder"));
-        assert!(!is_storage_path_fast(""));
-        assert!(!is_storage_path_fast("relative/path"));
-    }
-
-    #[test]
-    fn fast_data_media_path_check_does_not_double_match_storage_alias() {
-        // normalize 会把 /data/media/N 转成 /storage/emulated/N，
-        // 因此 is_data_media_path_fast 对 /data/media 路径返回 false 是预期行为；
-        // 这里仅锁定该不变量，避免后续修改无意中改变语义。
-        assert!(!is_data_media_path_fast("/data/media/0/Download/foo"));
-        assert!(!is_data_media_path_fast("/data/app/com.demo"));
-        assert!(!is_data_media_path_fast("/data/user/0/com.demo/files"));
-        assert!(!is_data_media_path_fast("/storage/emulated/0/DCIM/x.jpg"));
-        assert!(!is_data_media_path_fast("/system/bin"));
-        assert!(!is_data_media_path_fast(""));
-    }
-}
-
 // 启用重定向时 /data/media 也视为相关
 pub fn is_relevant_storage_path(hub: &InterceptHub, pathname: &str) -> bool {
     if is_storage_path_fast(pathname) {

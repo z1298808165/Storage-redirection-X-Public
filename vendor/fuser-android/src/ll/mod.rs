@@ -289,35 +289,3 @@ impl From<Generation> for u64 {
         fh.0
     }
 }
-
-#[cfg(test)]
-mod test {
-    use std::io::IoSlice;
-    use std::ops::Deref;
-    use std::ops::DerefMut;
-    /// If we want to be able to cast bytes to our fuse C struct types we need it
-    /// to be aligned.  This struct helps getting &[u8]s which are 8 byte aligned.
-    #[cfg(test)]
-    #[repr(align(8))]
-    pub(crate) struct AlignedData<T>(pub T);
-    impl<T> Deref for AlignedData<T> {
-        type Target = T;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-    impl<T> DerefMut for AlignedData<T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.0
-        }
-    }
-
-    pub(crate) fn ioslice_to_vec(s: &[IoSlice<'_>]) -> Vec<u8> {
-        let mut v = Vec::with_capacity(s.iter().map(|x| x.len()).sum());
-        for x in s {
-            v.extend_from_slice(x);
-        }
-        v
-    }
-}

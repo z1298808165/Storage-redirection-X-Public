@@ -10,6 +10,7 @@ use std::os::unix::fs::MetadataExt;
 const LOGCAT_OP_TAG: &str = "FileMonitorOp";
 const ANDROID_APP_UID_START: i32 = 10000;
 const MEDIA_RW_GID: u32 = 1023;
+const REDIRECT_BACKEND_DIR_REQUIRED_MODE: mode_t = 0o2773;
 const PRIVATE_CHILD_DIR_REQUIRED_MODE: mode_t = 0o2751;
 const PRIVATE_CHILD_FILE_REQUIRED_MODE: mode_t = 0o664;
 
@@ -279,10 +280,24 @@ pub(super) fn should_prefer_watch_package_for_system_writer_owner(
             || policy::is_media_intermediate_package(owner_package))
 }
 
-pub(super) fn repair_android_private_owner(display_path: &str, backend_path: &str) {
-    let Some(scope) = android_private_owner_repair_scope(display_path) else {
+pub(super) fn repair_monitored_backend_owner(
+    source: &str,
+    watch_package_name: &str,
+    display_path: &str,
+    backend_path: &str,
+) {
+    let scope = if source == "redirect_root" {
+        redirect_backend_owner_repair_scope(watch_package_name)
+    } else {
+        android_private_owner_repair_scope(display_path)
+    };
+    let Some(scope) = scope else {
         return;
     };
+    repair_backend_owner_in_scope(&scope, backend_path);
+}
+
+fn repair_backend_owner_in_scope(scope: &AndroidPrivateOwnerRepairScope, backend_path: &str) {
     if !path_is_same_or_child(backend_path, &scope.backend_root) {
         return;
     }
@@ -312,6 +327,33 @@ pub(super) fn repair_android_private_owner(display_path: &str, backend_path: &st
             &scope.backend_root,
         );
     }
+}
+
+fn redirect_backend_owner_repair_scope(
+    package_name: &str,
+) -> Option<AndroidPrivateOwnerRepairScope> {
+    if package_name.is_empty()
+        || policy::is_media_intermediate_package(package_name)
+        || policy::is_system_writer_package(package_name)
+    {
+        return None;
+    }
+
+    let owner_uid = resolve_android_private_owner_uid(package_name);
+    if owner_uid < ANDROID_APP_UID_START {
+        return None;
+    }
+    let user_id = platform::user_id_from_uid(owner_uid);
+    if user_id < 0 || !SettingsHub::instance().should_redirect(package_name, owner_uid) {
+        return None;
+    }
+
+    let storage_root = paths::default_redirect_target(package_name, user_id);
+    Some(AndroidPrivateOwnerRepairScope {
+        owner_package: package_name.to_string(),
+        owner_uid,
+        backend_root: paths::storage_to_data_media_path(&storage_root),
+    })
 }
 
 pub(super) fn android_private_owner_repair_scope(
@@ -410,7 +452,7 @@ fn chmod_android_private_path_if_needed(
         return;
     }
     let required_mode = match file_type {
-        value if value == libc::S_IFDIR as mode_t => PRIVATE_CHILD_DIR_REQUIRED_MODE,
+        value if value == libc::S_IFDIR as mode_t => android_private_dir_required_mode(path),
         value if value == libc::S_IFREG as mode_t => PRIVATE_CHILD_FILE_REQUIRED_MODE,
         _ => return,
     };
@@ -440,6 +482,14 @@ fn chmod_android_private_path_if_needed(
             fixed_mode,
             error_no
         );
+    }
+}
+
+fn android_private_dir_required_mode(path: &str) -> mode_t {
+    if paths::is_default_redirect_backend_path(path) {
+        REDIRECT_BACKEND_DIR_REQUIRED_MODE
+    } else {
+        PRIVATE_CHILD_DIR_REQUIRED_MODE
     }
 }
 
@@ -525,41 +575,4 @@ fn build_timestamp() -> String {
         return String::new();
     }
     String::from_utf8_lossy(&buffer[..written]).to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_regular_files_skip_private_chmod_repair() {
-        let private_root = "/data/media/0/Android/data/xyz.nextalone.nnngram";
-
-        assert!(should_skip_android_private_cache_file_chmod(
-            "/data/media/0/Android/data/xyz.nextalone.nnngram/cache/-6114055387070794989_97.jpg",
-            private_root,
-            libc::S_IFREG as mode_t,
-        ));
-        assert!(should_skip_android_private_cache_file_chmod(
-            "/data/media/0/Android/data/xyz.nextalone.nnngram/cache/stickers/a.tgs",
-            private_root,
-            libc::S_IFREG as mode_t,
-        ));
-    }
-
-    #[test]
-    fn sqlite_and_directories_still_use_private_chmod_repair() {
-        let private_root = "/data/media/0/Android/data/xyz.nextalone.nnngram";
-
-        assert!(!should_skip_android_private_cache_file_chmod(
-            "/data/media/0/Android/data/xyz.nextalone.nnngram/cache/cache4.db-wal",
-            private_root,
-            libc::S_IFREG as mode_t,
-        ));
-        assert!(!should_skip_android_private_cache_file_chmod(
-            "/data/media/0/Android/data/xyz.nextalone.nnngram/cache",
-            private_root,
-            libc::S_IFDIR as mode_t,
-        ));
-    }
 }

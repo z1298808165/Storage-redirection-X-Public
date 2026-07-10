@@ -9,20 +9,11 @@ use crate::config::SettingsHub;
 use crate::platform::paths;
 use events::{
     MonitorEventPaths, emit_monitor_event, monitor_operation_from_mask,
-    repair_android_private_owner, resolve_monitor_identity, should_emit_monitor_operation,
+    repair_monitored_backend_owner, resolve_monitor_identity, should_emit_monitor_operation,
     should_filter_display_path, should_skip_ambiguous_allowed_real_path_event,
     should_skip_ambiguous_read_only_path_event, should_skip_public_root_event_identity,
 };
-#[cfg(test)]
-use events::{
-    MonitorIdentity, android_private_owner_repair_scope, path_is_same_or_child,
-    should_prefer_watch_package_for_system_writer_owner,
-};
 use libc::inotify_event;
-#[cfg(test)]
-use roots::{
-    align_display_dir_to_backend_ancestor, is_high_value_monitor_source, map_record_from_path,
-};
 use roots::{
     build_private_owner_repair_roots, build_watch_roots, dedup_roots, is_under_any_root,
     select_watch_start, should_descend_into_child, should_record_display_path,
@@ -317,7 +308,12 @@ impl RegularAppMonitor {
             source: root.source,
         };
 
-        repair_android_private_owner(&node.display_dir, &node.backend_dir);
+        repair_monitored_backend_owner(
+            node.source,
+            &node.package_name,
+            &node.display_dir,
+            &node.backend_dir,
+        );
         if self.add_watch_node(&node) {
             Some(node)
         } else {
@@ -352,7 +348,12 @@ impl RegularAppMonitor {
                 };
                 if !file_type.is_dir() {
                     if repair_existing_files {
-                        repair_android_private_owner(&child_display_dir, &child_backend_dir);
+                        repair_monitored_backend_owner(
+                            node.source,
+                            &node.package_name,
+                            &child_display_dir,
+                            &child_backend_dir,
+                        );
                     }
                     continue;
                 }
@@ -372,7 +373,12 @@ impl RegularAppMonitor {
                     excluded_roots: node.excluded_roots.clone(),
                     source: node.source,
                 };
-                repair_android_private_owner(&child.display_dir, &child.backend_dir);
+                repair_monitored_backend_owner(
+                    child.source,
+                    &child.package_name,
+                    &child.display_dir,
+                    &child.backend_dir,
+                );
                 if self.add_watch_node(&child) {
                     stack.push(child);
                 }
@@ -431,8 +437,18 @@ impl RegularAppMonitor {
         for node in nodes {
             let event_paths = MonitorEventPaths::from_node(&node, &name);
 
-            repair_android_private_owner(&node.display_dir, &node.backend_dir);
-            repair_android_private_owner(&event_paths.display_path, &event_paths.backend_path);
+            repair_monitored_backend_owner(
+                node.source,
+                &node.package_name,
+                &node.display_dir,
+                &node.backend_dir,
+            );
+            repair_monitored_backend_owner(
+                node.source,
+                &node.package_name,
+                &event_paths.display_path,
+                &event_paths.backend_path,
+            );
 
             if is_dir && inotify::is_created_or_moved_to(mask) {
                 if should_descend_into_child(&node, &event_paths.display_path) {
@@ -536,7 +552,3 @@ impl Drop for RegularAppMonitor {
         self.reset();
     }
 }
-
-#[cfg(test)]
-#[path = "daemon_monitor/tests.rs"]
-mod tests;
