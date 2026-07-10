@@ -163,6 +163,7 @@ public class Hooker {
         try {
           Object mappedResult = tryOpenMappedMediaFile(args, callerUid);
           if (mappedResult != null) {
+            recordProviderOpenSuccess(this, args, actualArgs, mappedResult, callerUid);
             logOpenResult("owner_mapped", mappedResult);
             return mappedResult;
           }
@@ -186,12 +187,14 @@ public class Hooker {
         }
         Object mappedResult = tryOpenMappedMediaFile(args, callerUid);
         if (mappedResult != null) {
+          recordProviderOpenSuccess(this, args, actualArgs, mappedResult, callerUid);
           logOpenResult("mapped", mappedResult);
           return mappedResult;
         }
         recordProviderOpenPath(this, args, actualArgs, callerUid);
         Object result = callBackup(args);
         completeDirectMediaWriteFromSource(this, args, actualArgs, result, callerUid);
+        if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
         logOpenResult("backup", result);
         return result;
       } finally {
