@@ -276,6 +276,10 @@ impl InterceptHub {
         self.is_hooks_installed.load(Ordering::Relaxed)
     }
 
+    pub fn is_runtime_hook_initialized(&self) -> bool {
+        self.is_initialized.load(Ordering::Relaxed)
+    }
+
     pub fn install(&self) -> bool {
         if self.is_hooks_installed() {
             log::warn!("hook already installed");

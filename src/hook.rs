@@ -37,10 +37,14 @@ pub(crate) use media_fuse::{
 pub use stats::InterceptHub;
 
 pub(crate) fn refresh_runtime_config_from_settings() {
-    InterceptHub::instance().refresh_monitor_runtime_config();
+    let hub = InterceptHub::instance();
+    hub.refresh_monitor_runtime_config();
     fuse_fix::refresh_runtime_config();
-    let package_name = InterceptHub::instance().get_package_name();
-    if !package_name.is_empty() && platform::is_boot_completed() {
+    let package_name = hub.get_package_name();
+    if hub.is_runtime_hook_initialized()
+        && !package_name.is_empty()
+        && platform::is_boot_completed()
+    {
         fuse_fix::install_if_enabled(&package_name);
     }
 }
