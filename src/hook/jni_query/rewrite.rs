@@ -200,12 +200,15 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     let (path_value, has_file_scheme, normalized_from_relative) =
         if let Some((path_text, has_file_scheme)) = split_media_store_value_path(original_text) {
             (Cow::Borrowed(path_text), has_file_scheme, false)
-        } else if let Some(normalized) =
-            normalize_media_store_relative_value_path(original_text, caller_uid)
-        {
-            (Cow::Owned(normalized), false, true)
         } else {
-            return None;
+            (
+                Cow::Owned(normalize_media_store_relative_value_path(
+                    original_text,
+                    caller_uid,
+                )?),
+                false,
+                true,
+            )
         };
     let path_text = path_value.as_ref();
     let (caller_package, effective_uid) = resolve_storage_caller_context(caller_uid, path_text);
@@ -1519,9 +1522,7 @@ fn normalize_media_store_relative_value_path(text: &str, caller_uid: i32) -> Opt
     if !MEDIASTORE_RELATIVE_ROOTS.contains(&root) {
         return None;
     }
-    if segments.clone().next().is_none() {
-        return None;
-    }
+    segments.clone().next()?;
     if segments
         .clone()
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")

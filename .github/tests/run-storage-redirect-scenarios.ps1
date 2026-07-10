@@ -110,6 +110,8 @@ $MonitorRelativeDataRoot = "$RealRoot/Pictures/SrtRelativeData"
 $PrivateMonitorRelativeDataRoot = "$PrivateRoot/Pictures/SrtRelativeData"
 $MonitorNnngramRoot = "$RealRoot/Pictures/Nnngram"
 $PrivateMonitorNnngramRoot = "$PrivateRoot/Pictures/Nnngram"
+$MediaStoreRoutingProbeRoot = "$RealRoot/Documents/SrtMediaRoutingProbe"
+$PrivateMediaStoreRoutingProbeRoot = "$PrivateRoot/Documents/SrtMediaRoutingProbe"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -613,6 +615,7 @@ function Wait-MediaProviderReady {
 }
 
 function Clear-Targets {
+    Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile' '$BackendRoot/Download/Test/$TestFile' '$BackendPrivateRoot/Download/Test/$TestFile' '$BackendRoot/Download/Test/$HotBeforeFile' '$BackendRoot/Download/Test/$HotAfterFile' '$BackendPrivateRoot/Download/Test/$HotBeforeFile' '$BackendPrivateRoot/Download/Test/$HotAfterFile' '$BackendRoot/.xldownload/$TestFile' '$BackendRoot/.xlDownload/$TestFile' '$BackendPrivateRoot/.xldownload/$TestFile' '$BackendPrivateRoot/.xlDownload/$TestFile'" | Out-Null
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow/tmp' '$BackendRoot/Download/SrtLegacy/tmp' '$BackendRoot/Download/SrtQMark/Keep1' '$BackendRoot/Download/SrtQMark/Keep12' '$BackendRoot/Download/SrtLongest/Deep' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow/tmp' '$BackendPrivateRoot/Download/SrtLegacy/tmp' '$BackendPrivateRoot/Download/SrtQMark/Keep1' '$BackendPrivateRoot/Download/SrtQMark/Keep12' '$BackendPrivateRoot/Download/SrtLongest/Deep' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload'; chmod -R 777 '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' 2>/dev/null || true; chmod 777 '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -f '$BackendRoot/Download/$QMarkFileSingleFile' '$BackendPrivateRoot/Download/$QMarkFileSingleFile'" | Out-Null
@@ -886,8 +889,7 @@ function Invoke-FileMonitorMediaStoreSuccessCase {
         [string]$Label,
         [string]$RelativePath,
         [string]$ExpectedPath,
-        [string]$PrivatePath = "",
-        [bool]$RequireMonitorRecord = $true
+        [string]$PrivatePath = ""
     )
     $fileName = New-MonitorFileName $Scenario $Label
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
@@ -896,11 +898,7 @@ function Invoke-FileMonitorMediaStoreSuccessCase {
     if ($PrivatePath) {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
-    if ($RequireMonitorRecord) {
-        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
-    } else {
-        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=optional-mediastore-create-monitor-record"
-    }
+    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
     $ok
 }
 
@@ -910,8 +908,7 @@ function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
         [string]$Label,
         [string]$RelativeDataDir,
         [string]$ExpectedPath,
-        [string]$PrivatePath = "",
-        [bool]$RequireMonitorRecord = $true
+        [string]$PrivatePath = ""
     )
     $fileName = (New-MonitorFileName $Scenario $Label) -replace '\.bin$', '.jpg'
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
@@ -922,11 +919,7 @@ function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
     $ok = (Test-NoReadOnlyFailureRecord $Scenario $Label $fileName) -and $ok
-    if ($RequireMonitorRecord) {
-        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
-    } else {
-        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=disabled-profile-mediastore-relative-data"
-    }
+    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
     $ok
 }
 
@@ -944,8 +937,13 @@ function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
     $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true $false
-    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot $false) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
+    $mediaFile = "srt_mediastore_public_only.txt"
+    $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "disabled-mediastore-public-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
+    $ok = $mediaResult.Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "disabled-mediastore-public-file" "$MediaStoreRoutingProbeRoot/$mediaFile") -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "disabled-mediastore-private-directory" $PrivateMediaStoreRoutingProbeRoot) -and $ok
     $ok
 }
 
@@ -974,15 +972,15 @@ function Invoke-MediaStoreMonitorScenario {
     if (-not (Wait-Storage "scenario-$Scenario-mediastore-storage")) { return $false }
     if (-not (Wait-MediaProviderReady "scenario-$Scenario-mediastore-provider")) { return $false }
     $ok = $true
-    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
     if ([int]$Scenario -eq 27) {
         $ok = (Test-ScopedFuseDaemonStarted ([int]$Scenario) $MonitorLockedRoot) -and $ok
     }
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-relative-data-create" "Pictures/SrtRelativeData" $MonitorRelativeDataRoot $PrivateMonitorRelativeDataRoot $false) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot $false) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-relative-data-create" "Pictures/SrtRelativeData" $MonitorRelativeDataRoot $PrivateMonitorRelativeDataRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "media-nnngram-relative-data" "/Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-mapped-create" "Download/SrtMonitorMap" $MonitorMapTarget) -and $ok
     $ok = (Invoke-FileMonitorMediaStoreDeniedCase $Scenario "media-read-only-denied" "Download/SrtMonitorLocked" $MonitorLockedRoot) -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" $MonitorWritableRoot $PrivateMonitorWritableRoot $false) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" $MonitorWritableRoot $PrivateMonitorWritableRoot) -and $ok
     $ok
 }
 
@@ -1233,7 +1231,14 @@ function Invoke-StandardScenario {
     if ($Scenario -eq 4) { $ok = (Expect-AppEntry $Scenario "mapped-real-view" "$RealRoot/Download/Test" $TestFile) -and $ok }
     $ok = (Require-File "scenario-$Scenario" "expected-location" (Get-ExpectedPath $Scenario)) -and $ok
     switch ($Scenario) {
-        2 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
+        2 {
+            $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok
+            $mediaFile = "srt_mediastore_sandbox_only.txt"
+            $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
+            $ok = $mediaResult.Ok -and $ok
+            $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
+            $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-directory" $MediaStoreRoutingProbeRoot) -and $ok
+        }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         7 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         8 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/.xldownload/$TestFile") -and $ok }

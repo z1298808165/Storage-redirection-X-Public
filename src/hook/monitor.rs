@@ -8,6 +8,25 @@ const ANDROID_APP_UID_START: i32 = 10_000;
 const SHOULD_MONITOR_LOG_DIR_CREATE: bool = true;
 const READ_ONLY_DENY_REASON: &str = "deny_reason=read_only_rule";
 
+pub(super) struct OpenResultRecord<'a> {
+    pub(super) op_name: &'a str,
+    pub(super) flags: i32,
+    pub(super) pathname: &'a str,
+    pub(super) original_pathname: &'a str,
+    pub(super) is_mapping: bool,
+    pub(super) result: i32,
+    pub(super) error_no: i32,
+}
+
+pub(super) struct RenameResultRecord<'a> {
+    pub(super) op_name: &'a str,
+    pub(super) new_pathname: &'a str,
+    pub(super) old_pathname: &'a str,
+    pub(super) result: i32,
+    pub(super) error_no: i32,
+    pub(super) flags: i32,
+}
+
 pub fn has_write_intent_flags(flags: i32) -> bool {
     if flags < 0 {
         return false;
@@ -31,27 +50,8 @@ fn has_create_intent_flags(flags: i32) -> bool {
     (flags & O_CREAT) != 0 || (flags & O_TMPFILE) == O_TMPFILE
 }
 
-pub fn record_open_result(
-    hub: &InterceptHub,
-    op_name: &str,
-    flags: i32,
-    pathname: &str,
-    original_pathname: &str,
-    is_mapping: bool,
-    result: i32,
-    error_no: i32,
-) {
-    record_open_result_with_extra(
-        hub,
-        op_name,
-        flags,
-        pathname,
-        original_pathname,
-        is_mapping,
-        result,
-        error_no,
-        None,
-    );
+pub fn record_open_result(hub: &InterceptHub, record: OpenResultRecord<'_>) {
+    record_open_result_with_extra(hub, &record, None);
 }
 
 pub fn record_read_only_open_result(
@@ -63,29 +63,21 @@ pub fn record_read_only_open_result(
     read_only_path: &str,
 ) {
     let extra_tail = read_only_extra_tail(pathname, read_only_path);
-    record_open_result_with_extra(
-        hub,
+    let record = OpenResultRecord {
         op_name,
         flags,
         pathname,
         original_pathname,
-        false,
-        -1,
-        libc::EROFS,
-        Some(extra_tail.as_str()),
-    );
+        is_mapping: false,
+        result: -1,
+        error_no: libc::EROFS,
+    };
+    record_open_result_with_extra(hub, &record, Some(extra_tail.as_str()));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_open_result_with_extra(
     hub: &InterceptHub,
-    op_name: &str,
-    flags: i32,
-    pathname: &str,
-    original_pathname: &str,
-    is_mapping: bool,
-    result: i32,
-    error_no: i32,
+    record: &OpenResultRecord<'_>,
     extra_tail: Option<&str>,
 ) {
     if !hub.is_monitor_enabled() {
@@ -93,34 +85,57 @@ fn record_open_result_with_extra(
     }
     if should_skip_media_provider_pending_probe(
         &hub.get_package_name(),
-        flags,
-        pathname,
-        original_pathname,
-        is_mapping,
-        result,
-        error_no,
+        record.flags,
+        record.pathname,
+        record.original_pathname,
+        record.is_mapping,
+        record.result,
+        record.error_no,
     ) {
         return;
     }
 
-    if result >= 0
-        && record_saf_bridge_provider_path(hub, pathname, saf_provider_open_filter(flags))
+    if record.result >= 0
+        && record_saf_bridge_provider_path(
+            hub,
+            record.pathname,
+            saf_provider_open_filter(record.flags),
+        )
     {
         return;
     }
 
-    remember_private_path_caller_hint_for_monitor(hub, pathname);
+    let display_path = media_store_pending_open_display_path(
+        &hub.get_package_name(),
+        record.flags,
+        record.pathname,
+        record.result,
+    );
+    let display_original_path = display_path
+        .as_ref()
+        .and_then(|_| media_store_pending_display_path(record.original_pathname));
+    let record_path = display_path.as_deref().unwrap_or(record.pathname);
+    let record_original_path = display_original_path
+        .as_deref()
+        .unwrap_or(record.original_pathname);
 
-    let mut extra =
-        build_open_result_extra(op_name, flags, pathname, original_pathname, is_mapping);
+    remember_private_path_caller_hint_for_monitor(hub, record_path);
+
+    let mut extra = build_open_result_extra(
+        record.op_name,
+        record.flags,
+        record_path,
+        record_original_path,
+        record.is_mapping,
+    );
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
     AuditTrail::instance().record_operation_result(
         OpKind::Open,
         &caller_package,
-        pathname,
-        result,
-        error_no,
+        record_path,
+        record.result,
+        record.error_no,
         &extra,
     );
 }
@@ -153,21 +168,36 @@ fn should_skip_media_provider_pending_probe(
     flags: i32,
     pathname: &str,
     original_pathname: &str,
-    _is_mapping: bool,
-    _result: i32,
-    _error_no: i32,
+    is_mapping: bool,
+    result: i32,
+    error_no: i32,
 ) -> bool {
-    if !has_write_intent_flags(flags)
-        || !crate::redirect::policy::is_media_provider_package(package_name)
-    {
-        return false;
-    }
-
-    is_media_store_pending_file(pathname) || is_media_store_pending_file(original_pathname)
+    result == -1
+        && error_no == libc::ENOENT
+        && has_create_intent_flags(flags)
+        && !is_mapping
+        && (original_pathname.is_empty() || original_pathname == pathname)
+        && crate::redirect::policy::is_media_provider_package(package_name)
+        && is_media_store_pending_file(pathname)
 }
 
 fn is_media_store_pending_file(pathname: &str) -> bool {
     media_store_pending_display_path(pathname).is_some()
+}
+
+fn media_store_pending_open_display_path(
+    package_name: &str,
+    flags: i32,
+    pathname: &str,
+    result: i32,
+) -> Option<String> {
+    if result < 0
+        || !has_create_intent_flags(flags)
+        || !policy::is_media_provider_package(package_name)
+    {
+        return None;
+    }
+    media_store_pending_display_path(pathname)
 }
 
 fn media_store_pending_display_path(pathname: &str) -> Option<String> {
@@ -215,27 +245,27 @@ fn is_media_store_pending_commit(
 
 fn record_media_store_pending_commit_if_needed(
     hub: &InterceptHub,
-    op_name: &str,
-    new_pathname: &str,
-    old_pathname: &str,
-    result: i32,
-    error_no: i32,
-    flags: i32,
+    record: &RenameResultRecord<'_>,
     extra_tail: Option<&str>,
 ) -> bool {
-    if !is_media_store_pending_commit(&hub.get_package_name(), old_pathname, new_pathname, result) {
+    if !is_media_store_pending_commit(
+        &hub.get_package_name(),
+        record.old_pathname,
+        record.new_pathname,
+        record.result,
+    ) {
         return false;
     }
 
-    let mut extra = if flags >= 0 {
+    let mut extra = if record.flags >= 0 {
         format!(
             "op={}|op_filter=open:create|flags=0x{:x}|from={}|source=media_store_pending_commit",
-            op_name, flags, old_pathname
+            record.op_name, record.flags, record.old_pathname
         )
     } else {
         format!(
             "op={}|op_filter=open:create|from={}|source=media_store_pending_commit",
-            op_name, old_pathname
+            record.op_name, record.old_pathname
         )
     };
     append_extra_tail(&mut extra, extra_tail);
@@ -243,9 +273,9 @@ fn record_media_store_pending_commit_if_needed(
     AuditTrail::instance().record_operation_result(
         OpKind::Open,
         &caller_package,
-        new_pathname,
-        result,
-        error_no,
+        record.new_pathname,
+        record.result,
+        record.error_no,
         &extra,
     );
     true
@@ -454,30 +484,25 @@ pub fn record_rename_result(
     error_no: i32,
     flags: i32,
 ) {
-    record_rename_result_with_extra(
-        hub,
+    let record = RenameResultRecord {
         op_name,
         new_pathname,
         old_pathname,
         result,
         error_no,
         flags,
-        None,
-    );
+    };
+    record_rename_result_with_extra(hub, &record, None);
 }
 
 pub fn record_rename_result_with_display_paths(
     hub: &InterceptHub,
-    op_name: &str,
-    new_pathname: &str,
-    old_pathname: &str,
+    record: RenameResultRecord<'_>,
     display_new_pathname: &str,
     display_old_pathname: &str,
-    result: i32,
-    error_no: i32,
-    flags: i32,
 ) {
-    let extra_tail = if new_pathname != display_new_pathname || old_pathname != display_old_pathname
+    let extra_tail = if record.new_pathname != display_new_pathname
+        || record.old_pathname != display_old_pathname
     {
         Some(format!(
             "display_from={}|display_to={}",
@@ -486,16 +511,7 @@ pub fn record_rename_result_with_display_paths(
     } else {
         None
     };
-    record_rename_result_with_extra(
-        hub,
-        op_name,
-        new_pathname,
-        old_pathname,
-        result,
-        error_no,
-        flags,
-        extra_tail.as_deref(),
-    );
+    record_rename_result_with_extra(hub, &record, extra_tail.as_deref());
 }
 
 pub fn record_read_only_rename_result(
@@ -507,63 +523,52 @@ pub fn record_read_only_rename_result(
     read_only_path: &str,
 ) {
     let extra_tail = read_only_extra_tail(new_pathname, read_only_path);
-    record_rename_result_with_extra(
-        hub,
+    let record = RenameResultRecord {
         op_name,
         new_pathname,
         old_pathname,
-        -1,
-        libc::EROFS,
+        result: -1,
+        error_no: libc::EROFS,
         flags,
-        Some(&extra_tail),
-    );
+    };
+    record_rename_result_with_extra(hub, &record, Some(&extra_tail));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_rename_result_with_extra(
     hub: &InterceptHub,
-    op_name: &str,
-    new_pathname: &str,
-    old_pathname: &str,
-    result: i32,
-    error_no: i32,
-    flags: i32,
+    record: &RenameResultRecord<'_>,
     extra_tail: Option<&str>,
 ) {
     if !hub.is_monitor_enabled() {
         return;
     }
 
-    if record_media_store_pending_commit_if_needed(
-        hub,
-        op_name,
-        new_pathname,
-        old_pathname,
-        result,
-        error_no,
-        flags,
-        extra_tail,
-    ) {
+    if record_media_store_pending_commit_if_needed(hub, record, extra_tail) {
         return;
     }
 
-    if result >= 0 && record_saf_bridge_provider_path(hub, new_pathname, "provider_open:create") {
+    if record.result >= 0
+        && record_saf_bridge_provider_path(hub, record.new_pathname, "provider_open:create")
+    {
         return;
     }
 
-    let mut extra = if flags >= 0 {
-        format!("op={}|flags=0x{:x}|from={}", op_name, flags, old_pathname)
+    let mut extra = if record.flags >= 0 {
+        format!(
+            "op={}|flags=0x{:x}|from={}",
+            record.op_name, record.flags, record.old_pathname
+        )
     } else {
-        format!("op={}|from={}", op_name, old_pathname)
+        format!("op={}|from={}", record.op_name, record.old_pathname)
     };
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
     AuditTrail::instance().record_operation_result(
         OpKind::Rename,
         &caller_package,
-        new_pathname,
-        result,
-        error_no,
+        record.new_pathname,
+        record.result,
+        record.error_no,
         &extra,
     );
 }

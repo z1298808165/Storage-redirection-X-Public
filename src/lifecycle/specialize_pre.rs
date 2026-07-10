@@ -877,6 +877,23 @@ fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
     }
 }
 
+fn app_redirect_hook_reason_for_process(
+    should_redirect: bool,
+    is_system_writer: bool,
+    _allowed_real_paths: &[String],
+    _path_mappings: &[PathMapping],
+    _user_id: i32,
+    _is_fuse_daemon_redirect_enabled: bool,
+) -> Option<&'static str> {
+    if !should_redirect || is_system_writer {
+        return None;
+    }
+
+    // 普通应用只走 companion mount 路径。PLT 写入 hook 可能碰到 JIT/memfd
+    // 保护页，也会破坏测试流要求的“普通应用不安装 hook”边界。
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,21 +921,4 @@ mod tests {
             "com.android.providers.downloads"
         ));
     }
-}
-
-fn app_redirect_hook_reason_for_process(
-    should_redirect: bool,
-    is_system_writer: bool,
-    _allowed_real_paths: &[String],
-    _path_mappings: &[PathMapping],
-    _user_id: i32,
-    _is_fuse_daemon_redirect_enabled: bool,
-) -> Option<&'static str> {
-    if !should_redirect || is_system_writer {
-        return None;
-    }
-
-    // 普通应用只走 companion mount 路径。PLT 写入 hook 可能碰到 JIT/memfd
-    // 保护页，也会破坏测试流要求的“普通应用不安装 hook”边界。
-    None
 }

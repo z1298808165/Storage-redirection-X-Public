@@ -314,14 +314,16 @@ where
     if final_old != old_resolved.as_ref() || final_new != new_resolved.as_ref() {
         monitor::record_rename_result_with_display_paths(
             hub,
-            op_name,
-            final_new,
-            final_old,
+            monitor::RenameResultRecord {
+                op_name,
+                new_pathname: final_new,
+                old_pathname: final_old,
+                result,
+                error_no,
+                flags: request.flags,
+            },
             new_resolved.as_ref(),
             old_resolved.as_ref(),
-            result,
-            error_no,
-            request.flags,
         );
     } else {
         monitor::record_rename_result(

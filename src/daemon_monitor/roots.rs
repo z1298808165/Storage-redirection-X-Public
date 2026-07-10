@@ -372,13 +372,11 @@ pub(super) fn is_high_value_monitor_source(source: &str) -> bool {
 
 pub(super) fn select_watch_start(root: &WatchRoot) -> Option<WatchStart> {
     match directory_status(&root.backend_root) {
-        Ok(true) => {
-            return Some(WatchStart {
-                backend_dir: root.backend_root.clone(),
-                display_dir: root.display_root.clone(),
-            });
-        }
-        Ok(false) => return None,
+        Ok(true) => Some(WatchStart {
+            backend_dir: root.backend_root.clone(),
+            display_dir: root.display_root.clone(),
+        }),
+        Ok(false) => None,
         Err(errno) => {
             if is_high_value_monitor_source(root.source)
                 && root.display_root != root.backend_root

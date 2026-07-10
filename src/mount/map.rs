@@ -2,6 +2,12 @@ use super::MountPlanner;
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
 use crate::platform::{fs, module_paths, paths};
 
+pub(super) struct PathMappingApplyOptions {
+    pub(super) should_chown_current_dirs: bool,
+    pub(super) should_create_missing_request_path: bool,
+    pub(super) should_use_existing_target_source_only: bool,
+}
+
 impl MountPlanner {
     pub(super) fn resolve_path_mappings(
         &self,
@@ -79,10 +85,7 @@ impl MountPlanner {
         target_source_roots: &[String],
         read_only_paths: &[String],
         excluded_real_paths: &[String],
-        should_chown_current_dirs: bool,
-        should_create_missing_request_path: bool,
-        should_use_existing_target_source_only: bool,
-        is_any_applied_out: Option<&mut bool>,
+        options: PathMappingApplyOptions,
     ) -> bool {
         let mut is_any_applied = false;
 
@@ -97,7 +100,7 @@ impl MountPlanner {
                 .resolve_mapping_target_source(
                     target_relative,
                     target_source_roots,
-                    should_use_existing_target_source_only,
+                    options.should_use_existing_target_source_only,
                 )
             else {
                 continue;
@@ -113,8 +116,8 @@ impl MountPlanner {
             if !self.ensure_mapping_request_mount_point(
                 &mapping.request_path,
                 storage_path,
-                should_chown_current_dirs,
-                should_create_missing_request_path,
+                options.should_chown_current_dirs,
+                options.should_create_missing_request_path,
             ) {
                 log::warn!("map mount point unavailable: {}", mapping.request_path);
                 continue;
@@ -164,10 +167,7 @@ impl MountPlanner {
             }
         }
 
-        if let Some(out) = is_any_applied_out {
-            *out = is_any_applied;
-        }
-        true
+        is_any_applied
     }
 
     fn resolve_mapping_target_source(

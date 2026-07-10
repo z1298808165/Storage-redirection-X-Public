@@ -156,13 +156,12 @@ fn install_target_if_enabled() {
         }
         return;
     }
-    if !enabled {
-        if !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
-            log::info!(
-                "zero-width fuse fix disabled; media fuse compatibility hooks remain installable installed={}",
-                unsafe { srx_fuse_fix_is_installed() }
-            );
-        }
+    if !enabled && !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
+        log::info!(
+            "zero-width fuse fix disabled; media fuse compatibility hooks remain installable installed={}",
+            // SAFETY: This no-argument query only reads hook-owned native state.
+            unsafe { srx_fuse_fix_is_installed() }
+        );
     }
     register_compare_hooks_once();
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {

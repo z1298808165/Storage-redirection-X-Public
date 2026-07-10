@@ -51,6 +51,17 @@ pub(crate) struct RecentPrivateOwnerIdentity {
     pub(crate) confidence: &'static str,
 }
 
+struct PrivatePathHintRequest<'a> {
+    normalized_path: &'a str,
+    affinity_owner_package: &'a str,
+    package_name: &'a str,
+    user_id: i32,
+    source: &'static str,
+    confidence: &'static str,
+    caller_uid: i32,
+    persist: bool,
+}
+
 pub(crate) fn remember_private_path_owner_hint(
     normalized_path: &str,
     package_name: &str,
@@ -100,16 +111,16 @@ pub(crate) fn remember_private_path_caller_hint_in_memory(
         return;
     }
 
-    remember_private_path_hint_inner(
+    remember_private_path_hint_inner(PrivatePathHintRequest {
         normalized_path,
-        owner_package,
-        caller_package,
+        affinity_owner_package: owner_package,
+        package_name: caller_package,
         user_id,
-        "recent_private_caller",
-        "medium",
+        source: "recent_private_caller",
+        confidence: "medium",
         caller_uid,
-        false,
-    );
+        persist: false,
+    });
 }
 
 pub(crate) fn remember_private_path_caller_uid_hint_in_memory(
@@ -122,16 +133,16 @@ pub(crate) fn remember_private_path_caller_uid_hint_in_memory(
         return;
     }
 
-    remember_private_path_hint_inner(
+    remember_private_path_hint_inner(PrivatePathHintRequest {
         normalized_path,
-        owner_package,
-        "",
+        affinity_owner_package: owner_package,
+        package_name: "",
         user_id,
-        "recent_private_caller",
-        "medium",
+        source: "recent_private_caller",
+        confidence: "medium",
         caller_uid,
-        false,
-    );
+        persist: false,
+    });
 }
 
 fn remember_private_path_hint(
@@ -143,7 +154,7 @@ fn remember_private_path_hint(
     confidence: &'static str,
     caller_uid: i32,
 ) {
-    remember_private_path_hint_inner(
+    remember_private_path_hint_inner(PrivatePathHintRequest {
         normalized_path,
         affinity_owner_package,
         package_name,
@@ -151,53 +162,47 @@ fn remember_private_path_hint(
         source,
         confidence,
         caller_uid,
-        true,
-    );
+        persist: true,
+    });
 }
 
-fn remember_private_path_hint_inner(
-    normalized_path: &str,
-    affinity_owner_package: &str,
-    package_name: &str,
-    user_id: i32,
-    source: &'static str,
-    confidence: &'static str,
-    caller_uid: i32,
-    persist: bool,
-) {
-    let has_package_name = is_valid_package_name(package_name);
-    let has_caller_uid = source == "recent_private_caller"
-        && caller_uid >= ANDROID_APP_UID_START
-        && platform::user_id_from_uid(caller_uid) == user_id;
-    if user_id < 0
-        || normalized_path.is_empty()
-        || !is_valid_package_name(affinity_owner_package)
+fn remember_private_path_hint_inner(request: PrivatePathHintRequest<'_>) {
+    let has_package_name = is_valid_package_name(request.package_name);
+    let has_caller_uid = request.source == "recent_private_caller"
+        && request.caller_uid >= ANDROID_APP_UID_START
+        && platform::user_id_from_uid(request.caller_uid) == request.user_id;
+    if request.user_id < 0
+        || request.normalized_path.is_empty()
+        || !is_valid_package_name(request.affinity_owner_package)
         || (!has_package_name && !has_caller_uid)
     {
         return;
     }
 
-    let affinity_text = private_owner_affinity_text(normalized_path, affinity_owner_package);
+    let affinity_text =
+        private_owner_affinity_text(request.normalized_path, request.affinity_owner_package);
     let tokens = extract_affinity_tokens(&affinity_text);
     if tokens.is_empty() {
         return;
     }
 
     let hint = PrivateOwnerHint {
-        user_id,
+        user_id: request.user_id,
         updated_ms: paths::monotonic_ms(),
-        owner_package: affinity_owner_package.to_string(),
-        package_name: package_name.to_string(),
-        caller_uid,
+        owner_package: request.affinity_owner_package.to_string(),
+        package_name: request.package_name.to_string(),
+        caller_uid: request.caller_uid,
         tokens,
-        source,
-        confidence,
+        source: request.source,
+        confidence: request.confidence,
     };
 
     let hints_to_write = if let Ok(mut hints) = RECENT_PRIVATE_OWNER_HINT.lock() {
         remember_hint_locked(&mut hints, hint.clone());
-        persist.then(|| hints.iter().cloned().collect::<Vec<_>>())
-    } else if persist {
+        request
+            .persist
+            .then(|| hints.iter().cloned().collect::<Vec<_>>())
+    } else if request.persist {
         Some(vec![hint.clone()])
     } else {
         None
@@ -750,10 +755,10 @@ fn saf_hint_path_matches(hint_path: &str, normalized_path: &str) -> bool {
     if paths::is_child(normalized_path, hint_path) {
         return true;
     }
-    if let Some(display_path) = media_store_pending_display_path(normalized_path) {
-        if paths::is_child(&display_path, hint_path) {
-            return true;
-        }
+    if let Some(display_path) = media_store_pending_display_path(normalized_path)
+        && paths::is_child(&display_path, hint_path)
+    {
+        return true;
     }
     let Some(hint_name) = path_file_name(hint_path) else {
         return false;

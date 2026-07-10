@@ -115,19 +115,17 @@ pub(super) struct AndroidPrivateOwnerRepairScope {
 
 pub(super) fn emit_monitor_event(
     identity: &MonitorIdentity,
-    display_path: &str,
-    from_path: &str,
-    backend_path: &str,
+    paths: &MonitorEventPaths,
     watch_package_name: &str,
     source: &str,
     mask: u32,
     operation_name: &str,
 ) {
-    if identity.package_name.is_empty() || display_path.is_empty() {
+    if identity.package_name.is_empty() || paths.display_path.is_empty() {
         return;
     }
 
-    if SettingsHub::instance().should_filter_monitor_record(display_path, operation_name) {
+    if SettingsHub::instance().should_filter_monitor_record(&paths.display_path, operation_name) {
         return;
     }
 
@@ -146,21 +144,21 @@ pub(super) fn emit_monitor_event(
         identity.package_name,
         identity.package_name,
         event_kind,
-        display_path,
+        paths.display_path,
         identity.identify_method,
         identity.identify_reliability,
         operation_name,
         source,
         mask,
-        backend_path
+        paths.backend_path
     );
     if watch_package_name != identity.package_name {
         line.push_str("|watch_package=");
         line.push_str(watch_package_name);
     }
-    if !from_path.is_empty() && from_path != display_path {
+    if !paths.from_path.is_empty() && paths.from_path != paths.display_path {
         line.push_str("|from=");
-        line.push_str(from_path);
+        line.push_str(&paths.from_path);
     }
     log::info!(target: LOGCAT_OP_TAG, "{}", line);
 }

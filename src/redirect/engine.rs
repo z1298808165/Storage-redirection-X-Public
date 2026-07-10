@@ -418,8 +418,9 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
             || (is_write_operation
                 && redirect_policy::is_media_provider_package(&package_name)
                 && has_system_writer_recent_public_caller_hint(user_id, &normalized_path)));
-    if !caller_signal.has_external_caller_signal && !has_anonymous_mapping_request_owner_hint {
-        if let Some(self_rule) = resolve_system_writer_self_explicit_rule(
+    if !caller_signal.has_external_caller_signal
+        && !has_anonymous_mapping_request_owner_hint
+        && let Some(self_rule) = resolve_system_writer_self_explicit_rule(
             &package_name,
             self_uid,
             user_id,
@@ -427,21 +428,21 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
             is_data_media,
             is_write_operation,
             true,
-        ) {
-            writer_trace.log(
-                self_rule.exit_reason,
-                &package_name,
-                paths::monotonic_ms().saturating_sub(caller_started_ms),
-                self_rule.enable_ms,
-                SystemWriterPolicyTiming {
-                    mapping_ms: self_rule.mapping_ms,
-                    fallback_ms: self_rule.fallback_ms,
-                    ..Default::default()
-                },
-                &self_rule.decision,
-            );
-            return self_rule.decision;
-        }
+        )
+    {
+        writer_trace.log(
+            self_rule.exit_reason,
+            &package_name,
+            paths::monotonic_ms().saturating_sub(caller_started_ms),
+            self_rule.enable_ms,
+            SystemWriterPolicyTiming {
+                mapping_ms: self_rule.mapping_ms,
+                fallback_ms: self_rule.fallback_ms,
+                ..Default::default()
+            },
+            &self_rule.decision,
+        );
+        return self_rule.decision;
     }
 
     if redirect_policy::is_media_provider_package(&package_name)

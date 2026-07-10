@@ -172,7 +172,7 @@ fn should_skip_for_stuck_children(request: &MountRequest) -> bool {
     }
 
     let count = STUCK_MOUNT_SKIP_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if count <= 8 || count % STUCK_MOUNT_SKIP_LOG_STEP == 0 {
+    if count <= 8 || count.is_multiple_of(STUCK_MOUNT_SKIP_LOG_STEP) {
         log::warn!(
             "daemon mount circuit open stuck_children={} pkg={} pid={} op={:?} n={}",
             stuck,
@@ -417,7 +417,7 @@ fn start_scoped_fuse_services(
 
     let mut states = Vec::with_capacity(roots.len());
     for root in roots {
-        match start_fuse_service_for_root(request, &root, real_root_override.clone()) {
+        match start_fuse_service_for_root(request, root, real_root_override.clone()) {
             Some(state) => states.push(state),
             None => {
                 for state in &states {

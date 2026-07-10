@@ -216,7 +216,7 @@ where
         flags,
         result,
         error_no,
-        |c_path| call_original(c_path),
+        &mut call_original,
     ) {
         final_path = Cow::Owned(retry.new_path);
         is_redirected = true;
@@ -458,7 +458,16 @@ where
         );
     }
     monitor::record_open_result(
-        hub, op_name, flags, final_path, from_path, is_mapping, result, error_no,
+        hub,
+        monitor::OpenResultRecord {
+            op_name,
+            flags,
+            pathname: final_path,
+            original_pathname: from_path,
+            is_mapping,
+            result,
+            error_no,
+        },
     );
     result
 }
@@ -752,31 +761,33 @@ where
     let retry_result = retry_open();
     let retry_error_no = runtime::errno_for_result(retry_result);
     if retry_result < 0 {
-        if retry_error_no == libc::EEXIST {
-            if let Some((existing_result, existing_error_no, retry_flags)) =
+        if retry_error_no == libc::EEXIST
+            && let Some((existing_result, existing_error_no, retry_flags)) =
                 retry_deleted_existing_path(to_path, flags)
-            {
-                log::debug!(
-                    "write op={} deleted fd retry opened existing from={} to={} flags=0x{:x} retry_flags=0x{:x} old_fd={} new_fd={}",
-                    op_name,
-                    from_path,
-                    to_path,
-                    flags,
-                    retry_flags,
-                    result,
-                    existing_result
-                );
-                unsafe {
-                    libc::close(result);
-                }
-                return OpenFdDiag {
-                    result: existing_result,
-                    error_no: existing_error_no,
-                    fd_path: resolve_fd_path(existing_result),
-                    fd_flags: unsafe { libc::fcntl(existing_result, libc::F_GETFL) },
-                    retried: true,
-                };
+        {
+            log::debug!(
+                "write op={} deleted fd retry opened existing from={} to={} flags=0x{:x} retry_flags=0x{:x} old_fd={} new_fd={}",
+                op_name,
+                from_path,
+                to_path,
+                flags,
+                retry_flags,
+                result,
+                existing_result
+            );
+            // SAFETY: result is the still-owned descriptor returned by the original open call.
+            unsafe {
+                libc::close(result);
             }
+            // SAFETY: existing_result is a successful descriptor returned by the retry helper.
+            let fd_flags = unsafe { libc::fcntl(existing_result, libc::F_GETFL) };
+            return OpenFdDiag {
+                result: existing_result,
+                error_no: existing_error_no,
+                fd_path: resolve_fd_path(existing_result),
+                fd_flags,
+                retried: true,
+            };
         }
         log::warn!(
             "write op={} deleted fd retry failed from={} to={} flags=0x{:x} old_fd={} retry_ret={} retry_errno={}",

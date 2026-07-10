@@ -289,9 +289,7 @@ impl RegularAppMonitor {
     }
 
     fn add_watch_root(&mut self, root: &WatchRoot) -> Option<WatchNode> {
-        let Some(start) = select_watch_start(root) else {
-            return None;
-        };
+        let start = select_watch_start(root)?;
 
         if self.watch_nodes.len() >= MAX_WATCHES {
             self.mark_capacity_limited();
@@ -450,19 +448,20 @@ impl RegularAppMonitor {
                 &event_paths.backend_path,
             );
 
-            if is_dir && inotify::is_created_or_moved_to(mask) {
-                if should_descend_into_child(&node, &event_paths.display_path) {
-                    let child = WatchRoot {
-                        package_name: node.package_name.clone(),
-                        backend_root: event_paths.backend_path.clone(),
-                        display_root: event_paths.display_path.clone(),
-                        record_display_root: node.record_display_root.clone(),
-                        record_from_root: node.record_from_root.clone(),
-                        excluded_roots: node.excluded_roots.clone(),
-                        source: node.source,
-                    };
-                    let _ = self.add_watch_tree(&child);
-                }
+            if is_dir
+                && inotify::is_created_or_moved_to(mask)
+                && should_descend_into_child(&node, &event_paths.display_path)
+            {
+                let child = WatchRoot {
+                    package_name: node.package_name.clone(),
+                    backend_root: event_paths.backend_path.clone(),
+                    display_root: event_paths.display_path.clone(),
+                    record_display_root: node.record_display_root.clone(),
+                    record_from_root: node.record_from_root.clone(),
+                    excluded_roots: node.excluded_roots.clone(),
+                    source: node.source,
+                };
+                let _ = self.add_watch_tree(&child);
             }
 
             let operation_name = monitor_operation_from_mask(mask);
@@ -507,9 +506,7 @@ impl RegularAppMonitor {
             }
             emit_monitor_event(
                 &identity,
-                &event_paths.display_path,
-                &event_paths.from_path,
-                &event_paths.backend_path,
+                &event_paths,
                 &node.package_name,
                 node.source,
                 mask,

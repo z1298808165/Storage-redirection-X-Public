@@ -99,6 +99,8 @@ MONITOR_RELATIVE_DATA_ROOT="${REAL_ROOT}/Pictures/SrtRelativeData"
 PRIVATE_MONITOR_RELATIVE_DATA_ROOT="${PRIVATE_ROOT}/Pictures/SrtRelativeData"
 MONITOR_NNNGRAM_ROOT="${REAL_ROOT}/Pictures/Nnngram"
 PRIVATE_MONITOR_NNNGRAM_ROOT="${PRIVATE_ROOT}/Pictures/Nnngram"
+MEDIASTORE_ROUTING_PROBE_ROOT="${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"
+PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT="${PRIVATE_ROOT}/Documents/SrtMediaRoutingProbe"
 SRT_FRESH_APP_PER_CASE="${SRT_FRESH_APP_PER_CASE:-1}"
 SRT_RESULT_POLL_MS="${SRT_RESULT_POLL_MS:-150}"
 SRT_APP_LAUNCH_SETTLE_MS="${SRT_APP_LAUNCH_SETTLE_MS:-800}"
@@ -402,6 +404,7 @@ scenario_title() {
 clean_targets() {
   sleep_ms $SRT_SERVICE_CASE_SETTLE_MS
   clean_results
+  adb_su "rm -rf '${MEDIASTORE_ROUTING_PROBE_ROOT}' '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'; find '${REAL_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' -maxdepth 1 -name '$TEST_FILE' -delete 2>/dev/null || true" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${REAL_ROOT}/Download/Test/$HOT_AFTER_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_AFTER_FILE' 2>/dev/null || true" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/$ALLOW_PART_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$ALLOW_PART_FILE' '${REAL_ROOT}/Download/$QMARK_SINGLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_SINGLE_FILE' '${REAL_ROOT}/Download/$QMARK_DOUBLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_DOUBLE_FILE'" >/dev/null
@@ -1637,7 +1640,6 @@ run_file_monitor_mediastore_success_case() {
   local relative_path="$3"
   local expected_path="$4"
   local private_path="${5:-}"
-  local require_monitor_record="${6:-1}"
   local file_name
   file_name="$(monitor_file_name "$scenario" "$label")"
 
@@ -1645,8 +1647,7 @@ run_file_monitor_mediastore_success_case() {
   run_mediastore_download_create_case "$scenario" "$label" "$file_name" "$relative_path" &&
     check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
-    { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
-    { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=optional-mediastore-create-monitor-record"; }
+    expect_file_monitor_success_record "$scenario" "$label" "$file_name"
 }
 
 run_file_monitor_mediastore_relative_data_success_case() {
@@ -1655,7 +1656,6 @@ run_file_monitor_mediastore_relative_data_success_case() {
   local relative_data_dir="$3"
   local expected_path="$4"
   local private_path="${5:-}"
-  local require_monitor_record="${6:-1}"
   local file_name
   file_name="$(monitor_file_name "$scenario" "$label" | sed 's/\.bin$/.jpg/')"
 
@@ -1665,8 +1665,7 @@ run_file_monitor_mediastore_relative_data_success_case() {
     adb_su "test -s '$expected_path/$file_name'" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
     expect_no_read_only_failure_record "$scenario" "$label" "$file_name" &&
-    { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
-    { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=disabled-profile-mediastore-relative-data"; }
+    expect_file_monitor_success_record "$scenario" "$label" "$file_name"
 }
 
 run_file_monitor_mediastore_denied_case() {
@@ -1687,9 +1686,13 @@ run_file_monitor_disabled_redirect_scenario() {
   local scenario="$1"
   local file_name
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
+  local media_file="srt_mediastore_public_only.txt"
   run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 0 &&
-    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" 0 &&
-    run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" 0
+    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
+    run_service_case "$scenario" "disabled-mediastore-public-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
+    check_file_exists "scenario-${scenario}-disabled-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
+    check_file_missing "scenario-${scenario}-disabled-mediastore-private-directory" "$PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT"
 }
 
 run_file_monitor_regular_scenario() {
@@ -1717,13 +1720,13 @@ run_file_monitor_mediastore_scenario() {
   restart_media_provider
   wait_storage_ready "scenario-${scenario}-mediastore-storage" 60 >/dev/null || return 1
   wait_media_provider_ready "scenario-${scenario}-mediastore-provider" 120 >/dev/null || return 1
-  run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" 0 &&
+  run_file_monitor_mediastore_success_case "$scenario" "media-allow-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
     { [ "$scenario" != "27" ] || check_scoped_fuse_daemon_started "$scenario" "$MONITOR_LOCKED_ROOT"; } &&
-    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" 0 &&
-    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" 0 &&
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" &&
+    run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-mapped-create" "Download/SrtMonitorMap" "$MONITOR_MAP_TARGET" &&
     run_file_monitor_mediastore_denied_case "$scenario" "media-read-only-denied" "Download/SrtMonitorLocked" "$MONITOR_LOCKED_ROOT" &&
-    run_file_monitor_mediastore_success_case "$scenario" "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" "$MONITOR_WRITABLE_ROOT" "$PRIVATE_MONITOR_WRITABLE_ROOT" 0
+    run_file_monitor_mediastore_success_case "$scenario" "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" "$MONITOR_WRITABLE_ROOT" "$PRIVATE_MONITOR_WRITABLE_ROOT"
 }
 
 app_pid() {
@@ -1848,6 +1851,12 @@ run_standard_scenario() {
   echo "step 7/7: 校验 root 视角物理落点"
   if ! check_file_location "$scenario"; then
     return 1
+  fi
+  if [ "$scenario" = "2" ]; then
+    local media_file="srt_mediastore_sandbox_only.txt"
+    run_service_case "$scenario" "mediastore-sandbox-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
+      check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
+      check_file_missing "scenario-${scenario}-mediastore-public-directory" "$MEDIASTORE_ROUTING_PROBE_ROOT" || return 1
   fi
 }
 
@@ -2000,6 +2009,7 @@ fail=0
 build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
+export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE

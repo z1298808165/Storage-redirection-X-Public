@@ -200,7 +200,10 @@ public class Hooker {
   }
 
   public Object providerMutationCallback(Object[] args) throws Throwable {
-    if (isInsideProviderInternalCall()) return callBackupWithProviderPassthrough(args);
+    if (isInsideProviderInternalCall()) {
+      // Keep the outer caller scope active for filesystem redirection inside MediaProvider.
+      return callBackup(args);
+    }
     int callerUid = android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
     captureBinderCaller(callerUid, callerPid);
@@ -221,7 +224,8 @@ public class Hooker {
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       enterProviderInternalCall();
       try {
-        Object result = callBackup(args);
+        Object result =
+            redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);

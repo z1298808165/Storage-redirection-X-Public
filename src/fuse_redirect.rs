@@ -261,10 +261,10 @@ pub fn scoped_mount_roots_for_hybrid_rules(
         }) || scoped_path_mappings
             .iter()
             .any(|(request_path, final_path)| {
-                (!paths::contains_wildcards(&request_path)
-                    && paths::is_child(&request_path, read_only_root))
-                    || (!paths::contains_wildcards(&final_path)
-                        && paths::is_child(&final_path, read_only_root))
+                (!paths::contains_wildcards(request_path)
+                    && paths::is_child(request_path, read_only_root))
+                    || (!paths::contains_wildcards(final_path)
+                        && paths::is_child(final_path, read_only_root))
             })
         {
             roots.push(read_only_root.clone());
@@ -1127,17 +1127,17 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
-        if let Some(size) = size {
-            if let Err(errno) = truncate_path(&backend.path, size) {
-                reply.error(errno);
-                return;
-            }
+        if let Some(size) = size
+            && let Err(errno) = truncate_path(&backend.path, size)
+        {
+            reply.error(errno);
+            return;
         }
-        if atime.is_some() || mtime.is_some() {
-            if let Err(errno) = utimens_path(&backend.path, atime, mtime) {
-                reply.error(errno);
-                return;
-            }
+        if (atime.is_some() || mtime.is_some())
+            && let Err(errno) = utimens_path(&backend.path, atime, mtime)
+        {
+            reply.error(errno);
+            return;
         }
 
         match self.attr_for_backend(ino, &backend) {
@@ -1310,16 +1310,8 @@ impl RedirectPolicy {
         );
         sort_path_mappings_shortest_request_first(&mut path_mappings);
 
-        let rule_prefixes = build_rule_prefixes(
-            &config.allowed_real_paths,
-            &config.excluded_real_paths,
-            &config.sandboxed_paths,
-            &config.read_only_paths,
-            &path_mappings,
-            user_id,
-            &storage_root,
-            &mount_root,
-        );
+        let rule_prefixes =
+            build_rule_prefixes(&config, &path_mappings, user_id, &storage_root, &mount_root);
 
         let normalized_read_only_paths = normalize_rule_list(config.read_only_paths, user_id);
         let (read_only_paths, read_only_excluded_paths) =
@@ -1422,9 +1414,8 @@ impl RedirectPolicy {
             }
         } else if self.matches_any(&self.excluded_real_paths, storage_path) {
             BackendKind::Redirect
-        } else if self.matches_any(&self.read_only_excluded_paths, storage_path) {
-            BackendKind::Real
-        } else if self.matches_any(&self.allowed_real_paths, storage_path)
+        } else if self.matches_any(&self.read_only_excluded_paths, storage_path)
+            || self.matches_any(&self.allowed_real_paths, storage_path)
             || matches!(operation, OperationKind::Read)
                 && (is_read_only || self.has_real_child_rule(storage_path))
         {
@@ -1937,21 +1928,19 @@ fn insert_dir_entry(
 }
 
 fn build_rule_prefixes(
-    allowed_real_paths: &[String],
-    excluded_real_paths: &[String],
-    sandboxed_paths: &[String],
-    read_only_paths: &[String],
+    config: &FuseRedirectConfig,
     path_mappings: &[PathMapping],
     user_id: i32,
     storage_root: &str,
     mount_root: &str,
 ) -> Vec<RulePrefix> {
     let mut prefixes = Vec::new();
-    for rule in allowed_real_paths
+    for rule in config
+        .allowed_real_paths
         .iter()
-        .chain(excluded_real_paths.iter())
-        .chain(sandboxed_paths.iter())
-        .chain(read_only_paths.iter())
+        .chain(config.excluded_real_paths.iter())
+        .chain(config.sandboxed_paths.iter())
+        .chain(config.read_only_paths.iter())
     {
         if let Some(prefix) = visible_rule_prefix(rule, user_id, storage_root, mount_root) {
             prefixes.push(prefix);

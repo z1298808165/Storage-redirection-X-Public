@@ -16,6 +16,24 @@ use crate::redirect::{
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t, off_t, timespec};
 use std::ffi::CString;
 
+struct SinglePathAuditRequest<'a> {
+    kind: OpKind,
+    op_name: &'a str,
+    dirfd: c_int,
+    pathname: *const c_char,
+    log_flags: i32,
+    extra_tail: Option<String>,
+}
+
+struct LinkAuditRequest<'a> {
+    op_name: &'a str,
+    olddirfd: c_int,
+    oldpath: *const c_char,
+    newdirfd: c_int,
+    newpath: *const c_char,
+    flags: i32,
+}
+
 pub unsafe extern "C" fn hooked_mkdir(pathname: *const c_char, mode: mode_t) -> c_int {
     let self_ptr = hooked_mkdir as *mut c_void;
     runtime::with_hook_guard(
@@ -176,12 +194,14 @@ pub unsafe extern "C" fn hooked_rmdir(pathname: *const c_char) -> c_int {
 
             handle_single_path_audit(
                 hub,
-                OpKind::Rmdir,
-                "rmdir",
-                AT_FDCWD,
-                pathname,
-                0,
-                None,
+                SinglePathAuditRequest {
+                    kind: OpKind::Rmdir,
+                    op_name: "rmdir",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: None,
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -220,12 +240,14 @@ pub unsafe extern "C" fn hooked_link(oldpath: *const c_char, newpath: *const c_c
 
             handle_link_audit(
                 hub,
-                "link",
-                AT_FDCWD,
-                oldpath,
-                AT_FDCWD,
-                newpath,
-                -1,
+                LinkAuditRequest {
+                    op_name: "link",
+                    olddirfd: AT_FDCWD,
+                    oldpath,
+                    newdirfd: AT_FDCWD,
+                    newpath,
+                    flags: -1,
+                },
                 |call_old, call_new| {
                     runtime::call_prev(
                         self_ptr,
@@ -275,12 +297,14 @@ pub unsafe extern "C" fn hooked_linkat(
 
             handle_link_audit(
                 hub,
-                "linkat",
-                olddirfd,
-                oldpath,
-                newdirfd,
-                newpath,
-                flags,
+                LinkAuditRequest {
+                    op_name: "linkat",
+                    olddirfd,
+                    oldpath,
+                    newdirfd,
+                    newpath,
+                    flags,
+                },
                 |call_old, call_new| {
                     runtime::call_prev(
                         self_ptr,
@@ -330,12 +354,14 @@ pub unsafe extern "C" fn hooked_symlink(target: *const c_char, linkpath: *const 
             };
             handle_single_path_audit(
                 hub,
-                OpKind::Symlink,
-                "symlink",
-                AT_FDCWD,
-                linkpath,
-                0,
-                extra,
+                SinglePathAuditRequest {
+                    kind: OpKind::Symlink,
+                    op_name: "symlink",
+                    dirfd: AT_FDCWD,
+                    pathname: linkpath,
+                    log_flags: 0,
+                    extra_tail: extra,
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -384,12 +410,14 @@ pub unsafe extern "C" fn hooked_symlinkat(
             };
             handle_single_path_audit(
                 hub,
-                OpKind::Symlink,
-                "symlinkat",
-                newdirfd,
-                linkpath,
-                0,
-                extra,
+                SinglePathAuditRequest {
+                    kind: OpKind::Symlink,
+                    op_name: "symlinkat",
+                    dirfd: newdirfd,
+                    pathname: linkpath,
+                    log_flags: 0,
+                    extra_tail: extra,
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -431,12 +459,14 @@ pub unsafe extern "C" fn hooked_truncate(pathname: *const c_char, length: off_t)
 
             handle_single_path_audit(
                 hub,
-                OpKind::Truncate,
-                "truncate",
-                AT_FDCWD,
-                pathname,
-                0,
-                Some(format!("length={}", length)),
+                SinglePathAuditRequest {
+                    kind: OpKind::Truncate,
+                    op_name: "truncate",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("length={}", length)),
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -475,12 +505,14 @@ pub unsafe extern "C" fn hooked_truncate64(pathname: *const c_char, length: off_
 
             handle_single_path_audit(
                 hub,
-                OpKind::Truncate,
-                "truncate64",
-                AT_FDCWD,
-                pathname,
-                0,
-                Some(format!("length={}", length)),
+                SinglePathAuditRequest {
+                    kind: OpKind::Truncate,
+                    op_name: "truncate64",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("length={}", length)),
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -587,12 +619,14 @@ pub unsafe extern "C" fn hooked_chmod(pathname: *const c_char, mode: mode_t) -> 
 
             handle_single_path_audit(
                 hub,
-                OpKind::Chmod,
-                "chmod",
-                AT_FDCWD,
-                pathname,
-                mode as i32,
-                Some(format!("mode=0{:o}", mode)),
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "chmod",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: mode as i32,
+                    extra_tail: Some(format!("mode=0{:o}", mode)),
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -677,12 +711,14 @@ pub unsafe extern "C" fn hooked_fchmodat(
 
             handle_single_path_audit(
                 hub,
-                OpKind::Chmod,
-                "fchmodat",
-                dirfd,
-                pathname,
-                flags,
-                Some(format!("mode=0{:o}|flags=0x{:x}", mode, flags)),
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "fchmodat",
+                    dirfd,
+                    pathname,
+                    log_flags: flags,
+                    extra_tail: Some(format!("mode=0{:o}|flags=0x{:x}", mode, flags)),
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -734,12 +770,14 @@ pub unsafe extern "C" fn hooked_utimensat(
 
             handle_single_path_audit(
                 hub,
-                OpKind::Utimens,
-                "utimensat",
-                dirfd,
-                pathname,
-                flags,
-                Some(format!("flags=0x{:x}", flags)),
+                SinglePathAuditRequest {
+                    kind: OpKind::Utimens,
+                    op_name: "utimensat",
+                    dirfd,
+                    pathname,
+                    log_flags: flags,
+                    extra_tail: Some(format!("flags=0x{:x}", flags)),
+                },
                 |call_path| {
                     runtime::call_prev(
                         self_ptr,
@@ -1435,51 +1473,62 @@ where
 
 fn handle_single_path_audit<F>(
     hub: &InterceptHub,
-    kind: OpKind,
-    op_name: &str,
-    dirfd: c_int,
-    pathname: *const c_char,
-    log_flags: i32,
-    extra_tail: Option<String>,
+    request: SinglePathAuditRequest<'_>,
     call_original: F,
 ) -> c_int
 where
     F: FnOnce(*const c_char) -> c_int,
 {
-    if pathname.is_null() {
-        return call_original(pathname);
+    if request.pathname.is_null() {
+        return call_original(request.pathname);
     }
 
     let PreparedPath::Ready {
         path_for_decision, ..
-    } = (unsafe { prepare_relevant_path(hub, op_name, dirfd, pathname, log_flags, true) })
+    // SAFETY: pathname was checked non-null above and remains valid for this intercepted call.
+    } = (unsafe {
+        prepare_relevant_path(
+            hub,
+            request.op_name,
+            request.dirfd,
+            request.pathname,
+            request.log_flags,
+            true,
+        )
+    })
     else {
-        return call_original(pathname);
+        return call_original(request.pathname);
     };
 
-    diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), log_flags);
+    diagnostic::log_diag_path_event(
+        hub,
+        request.op_name,
+        "input",
+        path_for_decision.as_ref(),
+        request.log_flags,
+    );
     if should_apply_mutation_policy(hub)
         && deny_read_only_single_path_if_needed(
             hub,
-            kind,
-            op_name,
+            request.kind,
+            request.op_name,
             path_for_decision.as_ref(),
-            extra_tail.as_deref(),
+            request.extra_tail.as_deref(),
         )
     {
         return -1;
     }
     fix_system_writer_private_owner_for_mutation(hub, &path_for_decision);
-    let result = call_original(pathname);
+    let result = call_original(request.pathname);
     let current_errno = runtime::current_errno();
     monitor::record_path_operation_result(
         hub,
-        kind,
-        op_name,
+        request.kind,
+        request.op_name,
         path_for_decision.as_ref(),
         result,
         if result < 0 { current_errno } else { 0 },
-        extra_tail.as_deref(),
+        request.extra_tail.as_deref(),
     );
     runtime::set_errno(current_errno);
     result
@@ -1857,12 +1906,8 @@ fn resolve_private_owner_sqlite_backend_for_package(
         media_fuse::should_allow_private_owner_sqlite_owner_backend(&storage_path)
     {
         owner_uid
-    } else if let Some(recent_caller_uid) =
-        media_fuse::has_recent_private_owner_sqlite_access(&storage_path)
-    {
-        recent_caller_uid
     } else {
-        return None;
+        media_fuse::has_recent_private_owner_sqlite_access(&storage_path)?
     };
 
     let backend_path = writer::storage_to_data_media_path(&storage_path);
@@ -1880,7 +1925,7 @@ fn backend_fd_size(fd: c_int) -> i64 {
         return -1;
     }
     let statbuf = unsafe { statbuf.assume_init() };
-    statbuf.st_size as i64
+    statbuf.st_size
 }
 
 fn fix_system_writer_private_owner_for_mutation(hub: &InterceptHub, path: &str) {
@@ -1892,36 +1937,48 @@ fn fix_system_writer_private_owner_for_mutation(hub: &InterceptHub, path: &str) 
 
 fn handle_link_audit<F>(
     hub: &InterceptHub,
-    op_name: &str,
-    olddirfd: c_int,
-    oldpath: *const c_char,
-    newdirfd: c_int,
-    newpath: *const c_char,
-    flags: i32,
+    request: LinkAuditRequest<'_>,
     call_original: F,
 ) -> c_int
 where
     F: FnOnce(*const c_char, *const c_char) -> c_int,
 {
-    if oldpath.is_null() || newpath.is_null() {
-        return call_original(oldpath, newpath);
+    if request.oldpath.is_null() || request.newpath.is_null() {
+        return call_original(request.oldpath, request.newpath);
     }
 
     let PreparedPath::Ready {
         path_for_decision, ..
-    } = (unsafe { prepare_relevant_path(hub, op_name, newdirfd, newpath, flags, true) })
+    // SAFETY: newpath was checked non-null above and remains valid for this intercepted call.
+    } = (unsafe {
+        prepare_relevant_path(
+            hub,
+            request.op_name,
+            request.newdirfd,
+            request.newpath,
+            request.flags,
+            true,
+        )
+    })
     else {
-        return call_original(oldpath, newpath);
+        return call_original(request.oldpath, request.newpath);
     };
 
-    diagnostic::log_diag_path_event(hub, op_name, "input-new", path_for_decision.as_ref(), flags);
-    let old_text = unsafe { c_str_to_string(oldpath) };
-    let from_path = resolve_extra_path(olddirfd, &old_text);
-    let extra_tail = if flags >= 0 {
+    diagnostic::log_diag_path_event(
+        hub,
+        request.op_name,
+        "input-new",
+        path_for_decision.as_ref(),
+        request.flags,
+    );
+    // SAFETY: oldpath was checked non-null above and is valid for the intercepted call duration.
+    let old_text = unsafe { c_str_to_string(request.oldpath) };
+    let from_path = resolve_extra_path(request.olddirfd, &old_text);
+    let extra_tail = if request.flags >= 0 {
         if from_path.is_empty() {
-            Some(format!("flags=0x{:x}", flags))
+            Some(format!("flags=0x{:x}", request.flags))
         } else {
-            Some(format!("flags=0x{:x}|from={}", flags, from_path))
+            Some(format!("flags=0x{:x}|from={}", request.flags, from_path))
         }
     } else if from_path.is_empty() {
         None
@@ -1932,19 +1989,19 @@ where
         && deny_read_only_single_path_if_needed(
             hub,
             OpKind::Link,
-            op_name,
+            request.op_name,
             path_for_decision.as_ref(),
             extra_tail.as_deref(),
         )
     {
         return -1;
     }
-    let result = call_original(oldpath, newpath);
+    let result = call_original(request.oldpath, request.newpath);
     let current_errno = runtime::current_errno();
     monitor::record_path_operation_result(
         hub,
         OpKind::Link,
-        op_name,
+        request.op_name,
         path_for_decision.as_ref(),
         result,
         if result < 0 { current_errno } else { 0 },

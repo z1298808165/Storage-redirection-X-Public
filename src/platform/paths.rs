@@ -18,10 +18,10 @@ pub fn normalize(path: &str) -> String {
     }
 
     // 优化：对于常用路径先查缓存
-    if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock() {
-        if let Some(cached) = cache.get(path) {
-            return cached.clone();
-        }
+    if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock()
+        && let Some(cached) = cache.get(path)
+    {
+        return cached.clone();
     }
 
     let mut result = String::with_capacity(path.len());

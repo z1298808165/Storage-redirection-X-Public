@@ -383,7 +383,7 @@ fn is_process_uninterruptible(pid: i32) -> bool {
 
 fn log_uninterruptible_skip(proc: &AppProcess) {
     let count = UNINTERRUPTIBLE_SKIP_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if count <= 8 || count % UNINTERRUPTIBLE_SKIP_LOG_STEP == 0 {
+    if count <= 8 || count.is_multiple_of(UNINTERRUPTIBLE_SKIP_LOG_STEP) {
         log::warn!(
             "daemon skip uninterruptible process pid={} pkg={} n={}",
             proc.pid,

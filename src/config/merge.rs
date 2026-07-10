@@ -10,11 +10,11 @@ const DOWNLOAD_PROVIDER_UI_PACKAGE: &str = "com.android.providers.downloads.ui";
 
 #[derive(Clone, Copy)]
 enum PackagePathMatchMode {
-    RedirectOwner,
-    EnabledOwner,
-    MappingRequestOwner,
-    ReadOnlyOwner,
-    MonitorOwner,
+    Redirect,
+    Enabled,
+    MappingRequest,
+    ReadOnly,
+    Monitor,
 }
 
 fn is_public_storage_collection_root(segment: &str) -> bool {
@@ -185,12 +185,7 @@ impl SettingsHub {
         }
 
         let user_id = platform::user_id_from_uid(app_uid);
-        resolve_package_by_path_in_apps(
-            &state.apps,
-            user_id,
-            path,
-            PackagePathMatchMode::RedirectOwner,
-        )
+        resolve_package_by_path_in_apps(&state.apps, user_id, path, PackagePathMatchMode::Redirect)
     }
 
     pub fn resolve_enabled_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
@@ -199,12 +194,7 @@ impl SettingsHub {
             return String::new();
         }
 
-        resolve_package_by_path_in_apps(
-            &state.apps,
-            user_id,
-            path,
-            PackagePathMatchMode::EnabledOwner,
-        )
+        resolve_package_by_path_in_apps(&state.apps, user_id, path, PackagePathMatchMode::Enabled)
     }
 
     pub fn resolve_mapping_request_package_by_path_for_user(
@@ -221,7 +211,7 @@ impl SettingsHub {
             &state.apps,
             user_id,
             path,
-            PackagePathMatchMode::MappingRequestOwner,
+            PackagePathMatchMode::MappingRequest,
         )
     }
 
@@ -231,12 +221,7 @@ impl SettingsHub {
             return String::new();
         }
 
-        resolve_package_by_path_in_apps(
-            &state.apps,
-            user_id,
-            path,
-            PackagePathMatchMode::ReadOnlyOwner,
-        )
+        resolve_package_by_path_in_apps(&state.apps, user_id, path, PackagePathMatchMode::ReadOnly)
     }
 
     pub fn resolve_monitor_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
@@ -245,12 +230,7 @@ impl SettingsHub {
             return String::new();
         }
 
-        resolve_package_by_path_in_apps(
-            &state.apps,
-            user_id,
-            path,
-            PackagePathMatchMode::MonitorOwner,
-        )
+        resolve_package_by_path_in_apps(&state.apps, user_id, path, PackagePathMatchMode::Monitor)
     }
 
     pub fn is_public_mapping_target_path_for_user(&self, user_id: i32, path: &str) -> bool {
@@ -367,7 +347,7 @@ fn resolve_package_by_path_in_apps(
             }
         }
 
-        if matches!(mode, PackagePathMatchMode::ReadOnlyOwner)
+        if matches!(mode, PackagePathMatchMode::ReadOnly)
             && read_only_rule_matches_path(&user.read_only_paths, &normalized)
         {
             let (included, _) = paths::split_exclusion_rules(&user.read_only_paths);
@@ -397,18 +377,18 @@ fn should_match_mapping_target_for_mode(
     final_path: &str,
 ) -> bool {
     match mode {
-        PackagePathMatchMode::RedirectOwner => false,
-        PackagePathMatchMode::MappingRequestOwner => false,
-        PackagePathMatchMode::ReadOnlyOwner => false,
-        PackagePathMatchMode::EnabledOwner => true,
-        PackagePathMatchMode::MonitorOwner => is_specific_storage_owner_hint(user_id, final_path),
+        PackagePathMatchMode::Redirect => false,
+        PackagePathMatchMode::MappingRequest => false,
+        PackagePathMatchMode::ReadOnly => false,
+        PackagePathMatchMode::Enabled => true,
+        PackagePathMatchMode::Monitor => is_specific_storage_owner_hint(user_id, final_path),
     }
 }
 
 fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> bool {
     !matches!(
         mode,
-        PackagePathMatchMode::MappingRequestOwner | PackagePathMatchMode::ReadOnlyOwner
+        PackagePathMatchMode::MappingRequest | PackagePathMatchMode::ReadOnly
     )
 }
 

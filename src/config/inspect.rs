@@ -270,10 +270,10 @@ fn should_filter_monitor_record_locked_for_version(
 
     // 优化：为高频路径和操作组合提供快速缓存查找
     let cache_key = format!("{:x}|{}|{}", config_version, normalized_path, op);
-    if let Ok(cache) = MONITOR_PATH_MATCH_CACHE.try_lock() {
-        if let Some(&cached_result) = cache.get(&cache_key) {
-            return cached_result;
-        }
+    if let Ok(cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
+        && let Some(&cached_result) = cache.get(&cache_key)
+    {
+        return cached_result;
     }
 
     let path_matched = filters

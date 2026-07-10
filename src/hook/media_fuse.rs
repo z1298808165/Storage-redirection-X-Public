@@ -246,10 +246,7 @@ pub fn has_recent_private_owner_sqlite_access_for_caller(
 }
 
 pub fn has_recent_private_owner_sqlite_access(path: &str) -> Option<i32> {
-    let Some((normalized_path, owner_package, user_id)) = resolve_private_owner_sqlite_path(path)
-    else {
-        return None;
-    };
+    let (normalized_path, owner_package, user_id) = resolve_private_owner_sqlite_path(path)?;
 
     let now_ms = paths::monotonic_ms();
     let Ok(mut accesses) = RECENT_PRIVATE_OWNER_SQLITE_ACCESS.lock() else {
@@ -270,10 +267,7 @@ pub fn has_recent_private_owner_sqlite_access(path: &str) -> Option<i32> {
 }
 
 pub fn should_allow_private_owner_sqlite_owner_backend(path: &str) -> Option<i32> {
-    let Some((normalized_path, owner_package, user_id)) = resolve_private_owner_sqlite_path(path)
-    else {
-        return None;
-    };
+    let (normalized_path, owner_package, user_id) = resolve_private_owner_sqlite_path(path)?;
 
     if !should_force_private_owner_sqlite_for_owner(&owner_package, user_id) {
         return None;

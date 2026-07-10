@@ -209,10 +209,7 @@ impl AuditTrail {
         if SettingsHub::instance().should_filter_monitor_record(&normalized, source) {
             return None;
         }
-        let Some(package_name) = resolve_recent_path_caller_package(caller_uid, caller_package)
-        else {
-            return None;
-        };
+        let package_name = resolve_recent_path_caller_package(caller_uid, caller_package)?;
         let normalized_for_hint = normalized.clone();
         let package_for_hint = package_name.clone();
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
@@ -851,28 +848,18 @@ fn resolve_caller_info_for_path_locked(
         return query_identity;
     }
 
-    if can_use_recent_private_owner_hint {
-        if let Some(identity) =
+    if can_use_recent_private_owner_hint
+        && let Some(identity) =
             source_hint::infer_recent_private_owner_identity(normalized_path, user_id)
-        {
-            return SourceIdentity::new(
-                identity.package_name,
-                identity.source,
-                identity.confidence,
-            );
-        }
+    {
+        return SourceIdentity::new(identity.package_name, identity.source, identity.confidence);
     }
 
-    if can_use_recent_private_owner_hint {
-        if let Some(identity) =
+    if can_use_recent_private_owner_hint
+        && let Some(identity) =
             source_hint::infer_public_path_token_identity(normalized_path, user_id)
-        {
-            return SourceIdentity::new(
-                identity.package_name,
-                identity.source,
-                identity.confidence,
-            );
-        }
+    {
+        return SourceIdentity::new(identity.package_name, identity.source, identity.confidence);
     }
 
     if user_id < 0 {

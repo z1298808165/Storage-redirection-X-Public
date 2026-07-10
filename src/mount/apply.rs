@@ -1,3 +1,4 @@
+use super::map::PathMappingApplyOptions;
 use super::{MountPlanner, concrete_mount_fallback_parent};
 use crate::domain::PathMapping;
 use crate::platform::{fs, module_paths, paths};
@@ -363,17 +364,17 @@ impl MountPlanner {
                 namespace_mappings.len(),
                 scoped_fuse_roots.len()
             );
-            let mut is_any_applied = false;
-            let _ = self.apply_resolved_path_mappings(
+            let is_any_applied = self.apply_resolved_path_mappings(
                 &namespace_mappings,
                 &storage_path,
                 &mapping_source_roots,
                 read_only_paths,
                 excluded_real_paths,
-                true,
-                true,
-                false,
-                Some(&mut is_any_applied),
+                PathMappingApplyOptions {
+                    should_chown_current_dirs: true,
+                    should_create_missing_request_path: true,
+                    should_use_existing_target_source_only: false,
+                },
             );
             let _ = is_any_applied;
         }
@@ -394,17 +395,17 @@ impl MountPlanner {
                 scoped_fuse_roots,
             );
             if !read_only_shadowed_mappings.is_empty() {
-                let mut is_any_restored = false;
-                let _ = self.apply_resolved_path_mappings(
+                let is_any_restored = self.apply_resolved_path_mappings(
                     &read_only_shadowed_mappings,
                     &storage_path,
                     &mapping_source_roots,
                     read_only_paths,
                     excluded_real_paths,
-                    true,
-                    false,
-                    false,
-                    Some(&mut is_any_restored),
+                    PathMappingApplyOptions {
+                        should_chown_current_dirs: true,
+                        should_create_missing_request_path: false,
+                        should_use_existing_target_source_only: false,
+                    },
                 );
                 if is_any_restored {
                     log::info!(
@@ -571,17 +572,17 @@ impl MountPlanner {
             scoped_fuse_roots.len()
         );
 
-        let mut is_any_applied = false;
-        let _ = self.apply_resolved_path_mappings(
+        let mut is_any_applied = self.apply_resolved_path_mappings(
             &namespace_mappings,
             &storage_path,
             &mapping_source_roots,
             read_only_paths,
             &[],
-            false,
-            false,
-            false,
-            Some(&mut is_any_applied),
+            PathMappingApplyOptions {
+                should_chown_current_dirs: false,
+                should_create_missing_request_path: false,
+                should_use_existing_target_source_only: false,
+            },
         );
 
         let read_only_shadowed_mappings = self.read_only_shadowed_path_mappings(
@@ -600,17 +601,17 @@ impl MountPlanner {
                 &mapping_source_roots,
                 scoped_fuse_roots,
             );
-            let mut is_any_restored = false;
-            let _ = self.apply_resolved_path_mappings(
+            let is_any_restored = self.apply_resolved_path_mappings(
                 &read_only_shadowed_mappings,
                 &storage_path,
                 &mapping_source_roots,
                 read_only_paths,
                 &[],
-                false,
-                false,
-                false,
-                Some(&mut is_any_restored),
+                PathMappingApplyOptions {
+                    should_chown_current_dirs: false,
+                    should_create_missing_request_path: false,
+                    should_use_existing_target_source_only: false,
+                },
             );
             is_any_applied = is_any_applied || is_any_restored;
         }
@@ -1036,10 +1037,10 @@ fn build_mapping_source_roots(
 ) -> Vec<String> {
     let mut roots = Vec::with_capacity(2);
     roots.push(data_media_root.to_string());
-    if let Some(anchor) = real_storage_anchor {
-        if !roots.iter().any(|root| root == anchor) {
-            roots.push(anchor.clone());
-        }
+    if let Some(anchor) = real_storage_anchor
+        && !roots.iter().any(|root| root == anchor)
+    {
+        roots.push(anchor.clone());
     }
     roots
 }
