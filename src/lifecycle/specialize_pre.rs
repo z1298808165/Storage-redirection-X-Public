@@ -316,6 +316,9 @@ impl RuntimeFlow {
         // MediaProvider 的重定向 Java hook 仍在 pre 阶段安装；SAF 来源识别
         // 走 native 文件监视路径，避免在系统 provider 内加载 LSPlant。
         if should_install_media_provider_java_hook {
+            // Java hook 会在零配置启动时预装并跨配置热加载继续工作。仅登记
+            // 系统写入进程身份，使后续回调能刷新监控状态，不在这里安装 PLT hook。
+            crate::hook::InterceptHub::instance().register_runtime_identity(&self.package_name);
             install_java_hook(self.env);
         } else if (writer_context.is_system_writer || writer_context.is_monitor_bridge)
             && !writer_context.is_media_provider

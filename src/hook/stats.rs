@@ -143,6 +143,22 @@ impl InterceptHub {
         true
     }
 
+    pub fn register_runtime_identity(&self, package_name: &str) {
+        if package_name.is_empty() {
+            return;
+        }
+
+        let mut name = self
+            .package_name
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if *name == package_name {
+            return;
+        }
+        *name = package_name.to_string();
+        log::info!("hook runtime identity pkg={package_name}");
+    }
+
     pub fn init_media_runtime(&self, package_name: &str, is_monitor_enabled: bool) -> bool {
         if !self.init(package_name, true, is_monitor_enabled) {
             return false;

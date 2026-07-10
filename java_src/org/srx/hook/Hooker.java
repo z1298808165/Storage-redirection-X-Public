@@ -1617,13 +1617,12 @@ public class Hooker {
       String path = queryDataPath(receiver, request.uri);
       if (path == null || path.length() == 0) return;
       int resultFd = providerOpenResultFd(result);
-      if (resultFd < 0) return;
       recordProviderOpenSuccess(
           path,
           callerUid,
           packageNameForUid(callerUid),
           hasCreateIntentMode(request.mode) ? "provider_open:create" : "provider_open:write",
-          resultFd);
+          Math.max(resultFd, 0));
     } catch (Throwable ignored) {
     }
   }
