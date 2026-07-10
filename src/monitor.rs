@@ -147,6 +147,41 @@ impl AuditTrail {
         self.record_recent_path_caller(path, caller_uid, caller_package, "provider_open", "high");
     }
 
+    pub fn record_media_provider_open_success(
+        &self,
+        path: &str,
+        caller_uid: i32,
+        caller_package: &str,
+        op_filter: &str,
+        result_fd: i32,
+    ) -> bool {
+        if !self.is_enabled() || !SettingsHub::instance().is_file_monitor_enabled() {
+            return false;
+        }
+        let Some((normalized, package_name)) = self.record_recent_path_caller(
+            path,
+            caller_uid,
+            caller_package,
+            "provider_open",
+            "high",
+        ) else {
+            return false;
+        };
+        let op_filter = normalize_provider_open_op_filter(op_filter);
+        let extra = format!(
+            "op=provider_open|op_filter={op_filter}|source=media_provider_java|caller_uid={caller_uid}"
+        );
+        self.record_operation_result(
+            OpKind::Open,
+            &package_name,
+            &normalized,
+            result_fd,
+            0,
+            &extra,
+        );
+        true
+    }
+
     pub fn record_saf_provider_path(
         &self,
         path: &str,

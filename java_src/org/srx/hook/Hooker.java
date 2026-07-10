@@ -169,7 +169,10 @@ public class Hooker {
         } finally {
           exitProviderInternalCall();
         }
-        return callBackupPassthrough(args);
+        recordProviderOpenPath(this, args, actualArgs, callerUid);
+        Object result = callBackupPassthrough(args);
+        if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
+        return result;
       }
       captureMediaSourceFileDescriptor(this, actualArgs, callerUid);
       enterProviderInternalCall();
@@ -870,6 +873,9 @@ public class Hooker {
 
   private static native void recordProviderOpenPath(
       String path, int callerUid, String callerPackage);
+
+  private static native void recordProviderOpenSuccess(
+      String path, int callerUid, String callerPackage, String opFilter, int resultFd);
 
   private static native boolean recordReadOnlyFuseOperation(
       int kind,
@@ -1594,6 +1600,46 @@ public class Hooker {
       }
     } catch (Throwable ignored) {
     }
+  }
+
+  private static void recordProviderOpenSuccess(
+      Hooker hooker, Object[] rawArgs, Object[] actualArgs, Object result, int callerUid) {
+    try {
+      if (!(hooker != null && hooker.target instanceof Method)) return;
+      Method method = (Method) hooker.target;
+      if (!isProviderOpenMethodName(method.getName())) return;
+      OpenRequest request = parseOpenRequest(method.getName(), actualArgs);
+      if (request == null || !isWriteMode(request.mode)) return;
+      String uriText = String.valueOf(request.uri);
+      if (!uriText.startsWith("content://media/")) return;
+      android.content.ContentProvider receiver = providerReceiver(rawArgs);
+      if (receiver == null) return;
+      String path = queryDataPath(receiver, request.uri);
+      if (path == null || path.length() == 0) return;
+      int resultFd = providerOpenResultFd(result);
+      if (resultFd < 0) return;
+      recordProviderOpenSuccess(
+          path,
+          callerUid,
+          packageNameForUid(callerUid),
+          hasCreateIntentMode(request.mode) ? "provider_open:create" : "provider_open:write",
+          resultFd);
+    } catch (Throwable ignored) {
+    }
+  }
+
+  private static int providerOpenResultFd(Object result) {
+    try {
+      if (result instanceof ParcelFileDescriptor) {
+        return ((ParcelFileDescriptor) result).getFd();
+      }
+      if (result instanceof AssetFileDescriptor) {
+        ParcelFileDescriptor pfd = ((AssetFileDescriptor) result).getParcelFileDescriptor();
+        return pfd == null ? -1 : pfd.getFd();
+      }
+    } catch (Throwable ignored) {
+    }
+    return -1;
   }
 
   private static void rememberProviderOpenPath(String path, int callerUid) {

@@ -44,6 +44,9 @@ const RECORD_QUERY_ACCESS_PATH_NAME: &[u8] = b"recordQueryAccessPath\0";
 const RECORD_QUERY_ACCESS_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)V\0";
 const RECORD_PROVIDER_OPEN_PATH_NAME: &[u8] = b"recordProviderOpenPath\0";
 const RECORD_PROVIDER_OPEN_PATH_SIG: &[u8] = b"(Ljava/lang/String;ILjava/lang/String;)V\0";
+const RECORD_PROVIDER_OPEN_SUCCESS_NAME: &[u8] = b"recordProviderOpenSuccess\0";
+const RECORD_PROVIDER_OPEN_SUCCESS_SIG: &[u8] =
+    b"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;I)V\0";
 const RECORD_READ_ONLY_FUSE_OPERATION_NAME: &[u8] = b"recordReadOnlyFuseOperation\0";
 const RECORD_READ_ONLY_FUSE_OPERATION_SIG: &[u8] =
     b"(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)Z\0";
@@ -129,6 +132,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: RECORD_PROVIDER_OPEN_PATH_NAME.as_ptr() as *mut _,
             signature: RECORD_PROVIDER_OPEN_PATH_SIG.as_ptr() as *mut _,
             fnPtr: record_provider_open_path as *mut _,
+        },
+        JNINativeMethod {
+            name: RECORD_PROVIDER_OPEN_SUCCESS_NAME.as_ptr() as *mut _,
+            signature: RECORD_PROVIDER_OPEN_SUCCESS_SIG.as_ptr() as *mut _,
+            fnPtr: record_provider_open_success as *mut _,
         },
         JNINativeMethod {
             name: RECORD_READ_ONLY_FUSE_OPERATION_NAME.as_ptr() as *mut _,
@@ -477,6 +485,34 @@ unsafe extern "C" fn record_provider_open_path(
         &path_text,
         caller_uid,
         &package_text,
+    );
+}
+
+unsafe extern "C" fn record_provider_open_success(
+    env: *mut JNIEnv,
+    _class: jclass,
+    path: jstring,
+    caller_uid: jni_sys::jint,
+    caller_package: jstring,
+    op_filter: jstring,
+    result_fd: jni_sys::jint,
+) {
+    if env.is_null() || path.is_null() || op_filter.is_null() || result_fd < 0 {
+        return;
+    }
+    let path_text = crate::zygisk::jni::get_jstring_utf8(env, path);
+    let package_text = if caller_package.is_null() {
+        String::new()
+    } else {
+        crate::zygisk::jni::get_jstring_utf8(env, caller_package)
+    };
+    let op_filter_text = crate::zygisk::jni::get_jstring_utf8(env, op_filter);
+    crate::monitor::AuditTrail::instance().record_media_provider_open_success(
+        &path_text,
+        caller_uid,
+        &package_text,
+        &op_filter_text,
+        result_fd,
     );
 }
 
