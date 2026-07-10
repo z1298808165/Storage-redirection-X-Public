@@ -269,13 +269,26 @@ class MediaStoreTestCases(
                 payload,
                 args.keepPending,
             ) ?: return@measure testCase.fail("createMediaWithRelativeData returned null")
+        val readBack = readMediaBytesWithRetry(uri)
+        if (readBack == null || !readBack.contentEquals(payload)) {
+          return@measure testCase.fail(
+              message = "published media content mismatch",
+              metadata =
+                  mapOf(
+                      "uri" to uri.toString(),
+                      "expectedSize" to payload.size.toString(),
+                      "actualSize" to (readBack?.size ?: -1).toString(),
+                  ),
+          )
+        }
         testCase.pass(
-            message = "create with relative DATA succeeded",
+            message = "openOutputStream create, publish, and readback succeeded",
             metadata =
                 mapOf(
                     "uri" to uri.toString(),
                     "fileName" to fileName,
                     "relativeDataPath" to relativeDataPath,
+                    "size" to readBack.size.toString(),
                 ),
         )
       }

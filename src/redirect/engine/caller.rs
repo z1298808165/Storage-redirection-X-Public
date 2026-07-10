@@ -240,7 +240,10 @@ pub(super) fn resolve_system_writer_caller_context(
         effective_caller_uid,
     );
 
-    if effective_caller_package.is_empty()
+    let can_restore_recent_provider_caller = effective_caller_package.is_empty()
+        || effective_caller_package == package_name
+        || redirect_policy::is_system_writer_package(&effective_caller_package);
+    if can_restore_recent_provider_caller
         && !has_external_caller_signal
         && !crate::hook::is_path_owner_inference_disabled()
         && redirect_policy::is_media_provider_package(package_name)
@@ -823,6 +826,91 @@ mod tests {
             "me.fakerqu.test.storageredirect"
         );
         assert_eq!(result.effective_caller_uid, 10192);
+        assert!(result.is_caller_from_inferred);
+    }
+
+    #[test]
+    fn recent_provider_caller_prevents_other_app_read_only_inference() {
+        let _guard = lock_caller_test();
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+        let hub = SettingsHub::instance();
+        let (previous_apps, previous_loaded) = hub.replace_test_apps(HashMap::from([
+            (
+                "com.aliyun.tongyi".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: Vec::new(),
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                            path_mappings: Vec::new(),
+                        },
+                    )]),
+                },
+            ),
+            (
+                "xyz.nextalone.nnngram".to_string(),
+                AppProfile {
+                    user_profiles: HashMap::from([(
+                        0,
+                        UserProfile {
+                            is_enabled: true,
+                            is_mapping_mode_only: false,
+                            allowed_real_paths: vec!["/storage/emulated/0/Pictures".to_string()],
+                            excluded_real_paths: Vec::new(),
+                            sandboxed_paths: Vec::new(),
+                            read_only_paths: Vec::new(),
+                            path_mappings: Vec::new(),
+                        },
+                    )]),
+                },
+            ),
+        ]));
+        let previous_uid_cache = redirect_policy::replace_test_uid_cache(HashMap::from([
+            ("com.aliyun.tongyi".to_string(), 10232),
+            ("xyz.nextalone.nnngram".to_string(), 10312),
+            ("com.android.providers.media.module".to_string(), 10217),
+        ]));
+        let audit = crate::monitor::AuditTrail::instance();
+        let was_monitor_enabled = audit.is_enabled();
+        audit.set_enabled(true);
+        audit.init("com.android.providers.media.module", 10217);
+        let path = "/storage/emulated/0/Pictures/Nnngram/IMG_20260710_084625_417.jpg";
+        audit.record_provider_open_path(path, 10312, "xyz.nextalone.nnngram");
+
+        let result = resolve_system_writer_caller_context(
+            InterceptHub::instance(),
+            SystemWriterCallerResolveRequest {
+                package_name: "com.android.providers.media.module",
+                self_uid: 10217,
+                is_shared_uid: false,
+                normalized_path: path,
+                is_write_operation: true,
+                has_explicit_caller_signal: true,
+                can_infer_caller_by_path: true,
+                effective_caller_uid: 10217,
+                original_caller_uid: 10217,
+                effective_caller_package: "com.android.providers.media.module".to_string(),
+                user_id: 0,
+            },
+        );
+
+        audit.set_enabled(was_monitor_enabled);
+        redirect_policy::restore_test_uid_cache(
+            previous_uid_cache.0,
+            previous_uid_cache.1,
+            previous_uid_cache.2,
+            previous_uid_cache.3,
+        );
+        hub.restore_test_apps(previous_apps, previous_loaded);
+        crate::monitor::clear_recent_private_owner_hint_for_tests();
+
+        assert_eq!(result.effective_caller_package, "xyz.nextalone.nnngram");
+        assert_eq!(result.effective_caller_uid, 10312);
         assert!(result.is_caller_from_inferred);
     }
 }

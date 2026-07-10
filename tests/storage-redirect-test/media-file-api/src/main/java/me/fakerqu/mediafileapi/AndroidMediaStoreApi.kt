@@ -212,11 +212,9 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
         } ?: return null
     val written =
         try {
-          context.contentResolver.openFileDescriptor(uri, "w")?.use { fd ->
-            ParcelFileDescriptor.AutoCloseOutputStream(fd).use { stream ->
-              stream.write(content)
-              stream.flush()
-            }
+          context.contentResolver.openOutputStream(uri, "w")?.use { stream ->
+            stream.write(content)
+            stream.flush()
             true
           } ?: false
         } catch (_: Exception) {

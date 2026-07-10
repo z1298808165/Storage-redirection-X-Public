@@ -6,6 +6,7 @@ export MSYS2_ARG_CONV_EXCL="*"
 
 APP_ID="${APP_ID:-me.fakerqu.test.storageredirect}"
 CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${APP_ID}.json"
+READ_ONLY_OWNER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
 GLOBAL_CONFIG="/data/adb/modules/storage.redirect.x/config/global.json"
 LOG_PATH="/data/adb/modules/storage.redirect.x/logs/running.log"
 FILE_MONITOR_LOG_PATH="/data/adb/modules/storage.redirect.x/logs/file_monitor.log"
@@ -185,6 +186,14 @@ write_config() {
   adb_write_file "$CONFIG" "$content" >/dev/null
 }
 
+write_cross_app_read_only_config() {
+  adb_write_file "$READ_ONLY_OWNER_CONFIG" '{"users":{"0":{"enabled":true,"read_only_paths":["DCIM","Pictures"]}}}' >/dev/null
+}
+
+clear_cross_app_read_only_config() {
+  adb_su "rm -f '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1 || true
+}
+
 write_global_config() {
   local content="$1"
   adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config" >/dev/null
@@ -215,6 +224,7 @@ use_mount_namespace_fallback_config() {
 
 apply_config() {
   disable_fuse_daemon_config
+  clear_cross_app_read_only_config
   case "$1" in
     1)
       adb_su "rm -f '$CONFIG'" >/dev/null
@@ -304,10 +314,12 @@ apply_config() {
     26)
       write_global_config "$(test_global_config false true)"
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_cross_app_read_only_config
       ;;
     27)
       write_global_config "$(test_global_config true true)"
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_cross_app_read_only_config
       ;;
     28)
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}'
@@ -454,6 +466,31 @@ restore_app_config() {
     adb_su "chmod 644 '$CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
   else
     adb_su "rm -f '$CONFIG'" >/dev/null 2>&1 || true
+  fi
+}
+
+backup_cross_app_config() {
+  cross_app_config_backup_ready=0
+  if adb_su "test -f '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1; then
+    original_cross_app_config_exists=1
+    original_cross_app_config_b64="$(adb_su "base64 '$READ_ONLY_OWNER_CONFIG' 2>/dev/null | tr -d '[:space:]'")"
+  else
+    original_cross_app_config_exists=0
+    original_cross_app_config_b64=""
+  fi
+  cross_app_config_backup_ready=1
+}
+
+restore_cross_app_config() {
+  if [ "${cross_app_config_backup_ready:-0}" -ne 1 ]; then
+    return 0
+  fi
+  if [ "${original_cross_app_config_exists:-0}" -eq 1 ] && [ -n "${original_cross_app_config_b64:-}" ]; then
+    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null 2>&1 || true
+    adb_root "printf '%s' '$original_cross_app_config_b64' | base64 -d > '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1 || true
+    adb_su "chmod 644 '$READ_ONLY_OWNER_CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
+  else
+    clear_cross_app_read_only_config
   fi
 }
 
@@ -683,6 +720,7 @@ cleanup_test_artifacts() {
   set +e
   echo "== cleanup test artifacts =="
   adb shell am force-stop "$APP_ID" >/dev/null 2>&1
+  restore_cross_app_config >/dev/null 2>&1
   restore_app_config >/dev/null 2>&1
   restore_global_config >/dev/null 2>&1
   clean_results >/dev/null 2>&1
@@ -1624,6 +1662,7 @@ run_file_monitor_mediastore_relative_data_success_case() {
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
   run_mediastore_image_relative_data_create_case "$scenario" "$label" "$file_name" "$relative_data_dir" &&
     check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
+    adb_su "test -s '$expected_path/$file_name'" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
     expect_no_read_only_failure_record "$scenario" "$label" "$file_name" &&
     { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
@@ -1937,6 +1976,7 @@ run_scenario() {
 cleanup_done=0
 global_config_backup_ready=0
 app_config_backup_ready=0
+cross_app_config_backup_ready=0
 if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
   trap cleanup_test_artifacts EXIT
 fi
@@ -1944,6 +1984,7 @@ fi
 wait_boot_completed
 backup_global_config
 backup_app_config
+backup_cross_app_config
 adb shell pm grant "$APP_ID" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
 adb shell pm grant "$APP_ID" android.permission.WRITE_EXTERNAL_STORAGE >/dev/null 2>&1 || true
 adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1 || true
@@ -1957,6 +1998,9 @@ adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
 
 fail=0
 build_scenario_list
+
+export READ_ONLY_OWNER_CONFIG
+export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
 export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario

@@ -19,6 +19,7 @@ if ([string]::IsNullOrWhiteSpace($Serial)) {
 
 $Action = "me.fakerqu.test.storageredirection.TEST_CASE"
 $Config = "/data/adb/modules/storage.redirect.x/config/apps/$AppId.json"
+$ReadOnlyOwnerConfig = "/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
 $GlobalConfig = "/data/adb/modules/storage.redirect.x/config/global.json"
 $LogPath = "/data/adb/modules/storage.redirect.x/logs/running.log"
 $FileMonitorLogPath = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log"
@@ -115,6 +116,7 @@ $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:CleanupDone = $false
 $script:GlobalConfigBackupReady = $false
 $script:AppConfigBackupReady = $false
+$script:CrossAppConfigBackupReady = $false
 $script:FreshAppPerCase = -not ($env:SRT_FRESH_APP_PER_CASE -match '^(0|false|FALSE|no|NO)$')
 if ($FreshAppPerCase) { $script:FreshAppPerCase = $true }
 $script:ResultPollMilliseconds = if ($env:SRT_RESULT_POLL_MS -match '^\d+$') { [Math]::Max(50, [int]$env:SRT_RESULT_POLL_MS) } else { 150 }
@@ -147,6 +149,16 @@ function Write-DeviceConfig {
     param([string]$Json)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json))
     Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$encoded' | base64 -d > '$Config'; chmod 644 '$Config'" | Out-Null
+}
+
+function Write-CrossAppReadOnlyConfig {
+    $json = '{"users":{"0":{"enabled":true,"read_only_paths":["DCIM","Pictures"]}}}'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    Invoke-Su "printf '%s' '$encoded' | base64 -d > '$ReadOnlyOwnerConfig'; chmod 644 '$ReadOnlyOwnerConfig'" | Out-Null
+}
+
+function Clear-CrossAppReadOnlyConfig {
+    Invoke-Su "rm -f '$ReadOnlyOwnerConfig'" | Out-Null
 }
 
 function Write-GlobalConfig {
@@ -217,6 +229,27 @@ function Restore-AppConfig {
     }
 }
 
+function Backup-CrossAppConfig {
+    $script:CrossAppConfigBackupReady = $false
+    if (Test-Su "test -f '$ReadOnlyOwnerConfig'") {
+        $script:OriginalCrossAppConfigExists = $true
+        $script:OriginalCrossAppConfigBase64 = ((Invoke-Su "base64 '$ReadOnlyOwnerConfig' 2>/dev/null | tr -d '[:space:]'") -join "")
+    } else {
+        $script:OriginalCrossAppConfigExists = $false
+        $script:OriginalCrossAppConfigBase64 = ""
+    }
+    $script:CrossAppConfigBackupReady = $true
+}
+
+function Restore-CrossAppConfig {
+    if (-not $script:CrossAppConfigBackupReady) { return }
+    if ($script:OriginalCrossAppConfigExists -and -not [string]::IsNullOrWhiteSpace($script:OriginalCrossAppConfigBase64)) {
+        Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$script:OriginalCrossAppConfigBase64' | base64 -d > '$ReadOnlyOwnerConfig'; chmod 644 '$ReadOnlyOwnerConfig'" | Out-Null
+    } else {
+        Clear-CrossAppReadOnlyConfig
+    }
+}
+
 function Test-FuseDaemonScenarioSupport {
     $mode = $env:RUN_FUSE_DAEMON_SCENARIOS
     if ($mode -match '^(1|true|TRUE|yes|YES)$') { return $true }
@@ -265,6 +298,7 @@ function Get-ScenarioList {
 function Apply-ScenarioConfig {
     param([int]$Scenario)
     Disable-FuseDaemonConfig
+    Clear-CrossAppReadOnlyConfig
     switch ($Scenario) {
         1 { Invoke-Su "rm -f '$Config'" | Out-Null }
         2 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
@@ -324,10 +358,12 @@ function Apply-ScenarioConfig {
         26 {
             Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false -FileMonitorEnabled $true)
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+            Write-CrossAppReadOnlyConfig
         }
         27 {
             Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $true -FileMonitorEnabled $true)
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+            Write-CrossAppReadOnlyConfig
         }
         28 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}' }
         29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
@@ -881,6 +917,7 @@ function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-MediaStoreImageRelativeDataCreateCase ([int]$Scenario) $Label $fileName $RelativeDataDir).Ok
     $ok = (Require-File "scenario-$Scenario" "$Label expected" "$ExpectedPath/$fileName") -and $ok
+    $ok = (Test-Su "test -s '$ExpectedPath/$fileName'") -and $ok
     if ($PrivatePath) {
         $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
     }
@@ -1021,6 +1058,7 @@ function Invoke-TestArtifactCleanup {
     $script:CleanupDone = $true
     Write-Host "== cleanup test artifacts =="
     try { Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null } catch { Write-Warning "force-stop cleanup failed: $_" }
+    try { Restore-CrossAppConfig } catch { Write-Warning "cross-app read-only config restore failed: $_" }
     try { Restore-AppConfig } catch { Write-Warning "app config restore failed: $_" }
     try { Restore-GlobalConfig } catch { Write-Warning "global config restore failed: $_" }
     try { Clear-Results } catch { Write-Warning "result cleanup failed: $_" }
@@ -1641,6 +1679,7 @@ $script:ExitCode = 0
 try {
     Backup-GlobalConfig
     Backup-AppConfig
+    Backup-CrossAppConfig
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_EXTERNAL_STORAGE") | Out-Null
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.WRITE_EXTERNAL_STORAGE") | Out-Null
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_MEDIA_IMAGES") | Out-Null

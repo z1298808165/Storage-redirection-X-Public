@@ -1061,9 +1061,9 @@ public class Hooker {
       int mode = ((Integer) args[4]).intValue();
       boolean write = fileOpenModeHasWriteIntent(mode);
       logFuseFileOpenMode(mode, write);
-      return write;
+      if (write) return true;
     }
-    for (int i = 4; i < args.length; i++) {
+    for (int i = 5; i < args.length; i++) {
       if (args[i] instanceof Boolean && ((Boolean) args[i]).booleanValue()) return true;
     }
     return false;
