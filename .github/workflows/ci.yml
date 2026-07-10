@@ -422,6 +422,22 @@ jobs:
             sleep $((attempt * 5))
           done
 
+      - name: Prime Android system image package
+        run: |
+          set -euo pipefail
+          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
+          install_dir="$ANDROID_HOME/system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}"
+          for attempt in 1 2 3; do
+            if sdkmanager --install "$package" --channel=0; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$install_dir"
+            sleep $((attempt * 5))
+          done
+
       - name: Run Android test-flow scenarios
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
