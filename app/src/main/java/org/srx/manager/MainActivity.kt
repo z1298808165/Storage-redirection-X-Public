@@ -175,13 +175,16 @@ private fun SrxManagerApp(
   val state by viewModel.state.collectAsStateWithLifecycle()
   var page by rememberSaveable { mutableStateOf(Page.Dashboard) }
   var pageHistory by rememberSaveable { mutableStateOf<List<Page>>(emptyList()) }
-  val navBackStack = remember { NavBackStack<SrxRoute>(SrxRoute.Main) }
+  var themeRouteOpen by rememberSaveable { mutableStateOf(false) }
+  val navBackStack = remember {
+    NavBackStack<SrxRoute>(SrxRoute.Main).apply { if (themeRouteOpen) add(SrxRoute.Theme) }
+  }
   var showRootDialog by remember { mutableStateOf(false) }
   var toast by remember { mutableStateOf<String?>(null) }
   var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
   var selectedAppPackages by rememberSaveable { mutableStateOf<List<String>>(emptyList()) }
   var pendingBatchTemplate by remember { mutableStateOf<ConfigTemplate?>(null) }
-  var startupUpdateCheckDone by remember { mutableStateOf(false) }
+  var startupUpdateCheckDone by rememberSaveable { mutableStateOf(false) }
   val appsListState = rememberLazyListState()
   val logsListState = rememberLazyListState()
   val backupExportLauncher =
@@ -211,9 +214,6 @@ private fun SrxManagerApp(
     }
   }
   val predictiveBackEnabled = prefs.predictiveBack
-  LaunchedEffect(predictiveBackEnabled) {
-    syncPredictiveBackEnabled(context.applicationInfo, predictiveBackEnabled)
-  }
   LaunchedEffect(state.snackbar) {
     state.snackbar?.let {
       toast = it
@@ -254,6 +254,7 @@ private fun SrxManagerApp(
     if (navBackStack.size > 1) {
       val top = navBackStack.last()
       navBackStack.removeAt(navBackStack.lastIndex)
+      if (top == SrxRoute.Theme) themeRouteOpen = false
       if (top is SrxRoute.AppConfig) {
         viewModel.closeAppConfig()
       }
@@ -262,6 +263,7 @@ private fun SrxManagerApp(
   fun pushRoute(route: SrxRoute) {
     if (navBackStack.lastOrNull() != route) {
       navBackStack.add(route)
+      if (route == SrxRoute.Theme) themeRouteOpen = true
     }
   }
   fun navigateToPage(target: Page) {
@@ -278,6 +280,7 @@ private fun SrxManagerApp(
     while (navBackStack.size > 1) {
       navBackStack.removeAt(navBackStack.lastIndex)
     }
+    themeRouteOpen = false
   }
   fun popPageHistory() {
     val previous = pageHistory.lastOrNull() ?: Page.Dashboard
@@ -505,7 +508,13 @@ private fun SrxManagerApp(
                             onColorStyle = viewModel::setColorStyle,
                             onColorSpec = viewModel::setColorSpec,
                             onThemeMode = viewModel::setThemeMode,
-                            onPredictiveBack = viewModel::setPredictiveBack,
+                            onPredictiveBack = { enabled ->
+                              themeRouteOpen = true
+                              startupUpdateCheckDone = true
+                              viewModel.setPredictiveBack(enabled)
+                              syncPredictiveBackEnabled(context.applicationInfo, enabled)
+                              (context as? ComponentActivity)?.recreate()
+                            },
                             onPageScale = viewModel::setPageScale,
                         )
                       }

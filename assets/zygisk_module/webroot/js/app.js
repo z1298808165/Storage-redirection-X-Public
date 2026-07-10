@@ -3298,6 +3298,7 @@
       percent +
       "%</output></div>" +
       '<div class="theme-scale-control">' +
+      '<div class="theme-scale-keypoints" aria-hidden="true"><span style="--key-point:0%"></span><span style="--key-point:33.333%"></span><span style="--key-point:66.667%"></span><span style="--key-point:100%"></span></div>' +
       '<input class="theme-scale-slider" id="pageScaleSlider" type="range" min="80" max="110" step="1" value="' +
       percent +
       '" aria-label="界面缩放" aria-valuetext="' +
@@ -3316,8 +3317,12 @@
     const uiOptions = Theme.getUiOptions();
     const accentColor = Number(uiOptions.accentColor) || 0;
     const dynamicColor = uiOptions.dynamicColor === true;
+    const viewportRatio =
+      Math.max(0.42, Math.min(0.9, window.innerWidth / Math.max(window.innerHeight, 1))) || 0.5625;
     content.innerHTML =
-      '<section class="theme-preview" aria-label="主题预览">' +
+      '<section class="theme-preview" aria-label="主题预览" style="--theme-preview-ratio:' +
+      viewportRatio.toFixed(4) +
+      '">' +
       '<div class="theme-preview-bar"><span></span><span></span></div>' +
       '<div class="theme-preview-body"><div class="theme-preview-primary"></div><div class="theme-preview-lines"><span></span><span></span><span></span></div></div>' +
       '<div class="theme-preview-nav"><span class="active"></span><span></span><span></span><span></span></div>' +
@@ -3335,9 +3340,12 @@
         "跟随系统壁纸生成界面配色，关闭后使用固定主题色",
       ) +
       (dynamicColor
-        ? '<div class="theme-palette-row"><div class="switch-label-group"><div class="switch-label">强调色</div><div class="switch-hint">选择系统取色，或指定应用主题色</div></div>' +
-          accentPaletteHtml(accentColor) +
-          "</div>"
+        ? settingSelectRow(
+            "强调色",
+            "accentColor",
+            accentColorLabel(accentColor),
+            "选择系统取色，或指定应用主题色",
+          )
         : "") +
       (dynamicColor && accentColor !== 0
         ? settingSelectRow(
@@ -3397,12 +3405,19 @@
         renderThemePage();
       });
     });
-    content.querySelectorAll(".theme-color-swatch").forEach((swatch) => {
-      swatch.addEventListener("click", () => {
-        Theme.setUiOption("accentColor", Number(swatch.dataset.value) || 0);
-        renderThemePage();
+    content
+      .querySelector('.setting-select-row[data-key="accentColor"]')
+      ?.addEventListener("click", () => {
+        showSettingOptionDialog(
+          "强调色",
+          WEBUI_ACCENT_COLOR_OPTIONS,
+          Number(Theme.getUiOption("accentColor")) || 0,
+          (value) => {
+            Theme.setUiOption("accentColor", Number(value) || 0);
+            renderThemePage();
+          },
+        );
       });
-    });
     content
       .querySelector('.setting-select-row[data-key="colorStyle"]')
       ?.addEventListener("click", () => {
@@ -3432,13 +3447,22 @@
     const scaleSlider = content.querySelector("#pageScaleSlider");
     const scaleValue = content.querySelector("#pageScaleValue");
     const scaleCard = content.querySelector("#pageScaleCard");
+    const readScalePercent = () => {
+      let percent = Math.max(80, Math.min(110, Number(scaleSlider?.value) || 100));
+      const keyPoint = [80, 90, 100, 110].find((point) => Math.abs(point - percent) <= 1);
+      if (keyPoint !== undefined) {
+        percent = keyPoint;
+        if (scaleSlider) scaleSlider.value = String(keyPoint);
+      }
+      return percent;
+    };
     const applyScale = () => {
-      const percent = Math.max(80, Math.min(110, Number(scaleSlider?.value) || 100));
+      const percent = readScalePercent();
       Theme.setUiOption("pageScale", percent / 100);
     };
     const updateScale = () => {
       if (!scaleSlider) return;
-      const percent = Math.max(80, Math.min(110, Number(scaleSlider.value) || 100));
+      const percent = readScalePercent();
       const progress = ((percent - 80) / 30) * 100;
       if (scaleValue) scaleValue.textContent = percent + "%";
       scaleSlider.style.setProperty("--scale-progress", progress.toFixed(2) + "%");

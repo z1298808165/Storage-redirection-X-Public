@@ -815,10 +815,10 @@ body.liquid-glass-disabled .nav-indicator {
 .theme-page { padding-bottom: calc(var(--safe-bottom) + 28px); }
 .theme-page-content { padding-bottom: calc(var(--safe-bottom) + 18px); }
 .theme-page-section { margin-bottom: 18px; }
-.theme-preview { position: relative; width: min(54%, 250px); aspect-ratio: 9 / 16; margin: 2px auto 22px; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: 28px; background: var(--color-bg); box-shadow: var(--shadow-md); }
+.theme-preview { position: relative; width: min(40%, 190px); aspect-ratio: var(--theme-preview-ratio, 9 / 16); margin: 2px auto 22px; overflow: hidden; border: 1px solid var(--color-border-strong); border-radius: 20px; background: var(--color-bg); box-shadow: var(--shadow-md); }
 .theme-preview-bar { display: flex; align-items: center; justify-content: space-between; height: 16%; padding: 14% 10% 3%; }
 .theme-preview-bar span:first-child { width: 40%; height: 7px; border-radius: 2px; background: var(--color-text); }
-.theme-preview-bar span:last-child { width: 12%; aspect-ratio: 1; border-radius: 50%; background: var(--color-surface-overlay); border: 1px solid var(--color-border); }
+.theme-preview-bar span:last-child { width: 24%; height: 5px; border-radius: 2px; background: var(--color-text); opacity: 0.34; }
 .theme-preview-body { display: grid; grid-template-rows: 1.2fr 1fr; gap: 7%; height: 68%; padding: 8%; }
 .theme-preview-primary { border-radius: 16px; background: var(--color-primary); opacity: 0.88; }
 .theme-preview-lines { display: grid; grid-template-rows: repeat(3, 1fr); gap: 12%; }
@@ -846,7 +846,10 @@ body.liquid-glass-disabled .nav-indicator {
 .theme-scale-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; }
 .theme-scale-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .theme-scale-value { flex: 0 0 auto; min-width: 52px; padding-top: 2px; color: var(--color-text-secondary); font-family: var(--font-mono); font-size: 14px; font-weight: 760; line-height: 1.2; text-align: right; font-variant-numeric: tabular-nums; }
-.theme-scale-control { padding-top: 14px; cursor: default; }
+.theme-scale-control { position: relative; padding-top: 14px; cursor: default; }
+.theme-scale-keypoints { position: absolute; z-index: 1; top: 23px; right: 13px; left: 13px; height: 16px; pointer-events: none; }
+.theme-scale-slider { position: relative; z-index: 2; }
+.theme-scale-keypoints span { position: absolute; top: 50%; left: var(--key-point); width: 5px; height: 5px; border-radius: 50%; background: var(--color-text-tertiary); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-surface) 76%, transparent); transform: translate(-50%, -50%); opacity: 0.72; }
 .theme-scale-slider { --scale-progress: 66.67%; display: block; width: 100%; height: 34px; margin: 0; padding: 0; border: 0; border-radius: var(--radius-full); appearance: none; -webkit-appearance: none; background: transparent; cursor: pointer; touch-action: pan-x; }
 .theme-scale-slider::-webkit-slider-runnable-track { width: 100%; height: 16px; border: 0; border-radius: var(--radius-full); background: linear-gradient(90deg, var(--color-primary) 0 var(--scale-progress), var(--color-surface-overlay) var(--scale-progress) 100%); box-shadow: inset 0 1px 2px rgba(24,32,42,0.1), inset 0 0 0 1px var(--color-border); }
 .theme-scale-slider::-webkit-slider-thumb { width: 26px; height: 26px; margin-top: -5px; border: 4px solid var(--color-surface); border-radius: 50%; appearance: none; -webkit-appearance: none; background: var(--color-primary); box-shadow: 0 3px 9px rgba(28,72,112,0.25), 0 0 0 1px var(--color-primary-border); transition: transform 160ms ease, box-shadow 160ms ease; }
@@ -879,7 +882,7 @@ body.scale-modal-open .bottom-nav { visibility: hidden !important; pointer-event
 @media (min-width: 700px) {
   .app-container { width: min(760px, 100vw); }
   .page { padding-inline: 28px; }
-  .theme-preview { width: 210px; }
+  .theme-preview { width: 190px; }
 }
 
 @media (max-width: 380px) {
@@ -889,5 +892,5 @@ body.scale-modal-open .bottom-nav { visibility: hidden !important; pointer-event
   .module-feature-row { gap: 8px; }
   .module-feature-chip { min-width: 84px; padding-inline: 11px; }
   .filter-chip { padding-inline: 12px; }
-  .theme-preview { width: 62%; }
+  .theme-preview { width: 44%; }
 }

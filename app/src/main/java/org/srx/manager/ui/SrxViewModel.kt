@@ -44,7 +44,6 @@ import org.srx.manager.data.UpdateChecker
 import org.srx.manager.data.UserProfile
 import org.srx.manager.root.RootShell
 import org.srx.manager.root.isSafePackageName
-import org.srx.manager.syncPredictiveBackEnabled
 
 data class AppUiState(
     val rootChecked: Boolean = false,
@@ -588,7 +587,6 @@ class SrxViewModel(
 
   fun setPredictiveBack(enabled: Boolean) {
     prefs.setPredictiveBackCompatPref(enabled)
-    syncPredictiveBackEnabled(getApplication<Application>().applicationInfo, enabled)
     viewModelScope.launch { prefs.setPredictiveBack(enabled) }
   }
 

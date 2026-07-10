@@ -1,5 +1,6 @@
 package org.srx.manager.ui.screen
 
+import android.annotation.SuppressLint
 import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,7 +23,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,6 +50,7 @@ import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UiThemeMode
 import org.srx.manager.subtleFieldLabelColor
 import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.SliderDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
@@ -73,11 +75,12 @@ internal fun ThemeSettingsScreen(
     onPredictiveBack: (Boolean) -> Unit,
     onPageScale: (Float) -> Unit,
 ) {
+  var showAccentColorPicker by remember { mutableStateOf(false) }
   var showColorStylePicker by remember { mutableStateOf(false) }
   var showColorSpecPicker by remember { mutableStateOf(false) }
   var showPageScaleEditor by remember { mutableStateOf(false) }
 
-  Box(modifier = Modifier.fillMaxSize()) {
+  Box(modifier = Modifier.fillMaxSize().appMeshBackground()) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().overScrollVertical(),
         contentPadding =
@@ -111,16 +114,18 @@ internal fun ThemeSettingsScreen(
               showDivider = prefs.dynamicColor,
           )
           if (prefs.dynamicColor) {
-            AccentColorPalette(
-                selected = prefs.accentColor,
-                onSelect = onAccentColor,
+            SettingSelectRow(
+                title = "强调色",
+                summary = "选择系统取色，或指定应用主题色",
+                value = accentColorLabel(prefs.accentColor),
+                onClick = { showAccentColorPicker = true },
                 showDivider = prefs.accentColor != 0,
             )
           }
           if (prefs.dynamicColor && prefs.accentColor != 0) {
             SettingSelectRow(
                 title = "色彩风格",
-                summary = "调整主题色板的明度与饱和度倾向",
+                summary = "选择主题色板的明度与饱和度倾向",
                 value = colorStyleLabel(prefs.colorStyle),
                 onClick = { showColorStylePicker = true },
             )
@@ -136,16 +141,25 @@ internal fun ThemeSettingsScreen(
       }
       item {
         SectionTitle("显示")
-        PageScaleCard(
-            scale = prefs.pageScale,
-            onOpenEditor = { showPageScaleEditor = true },
-            onScaleChange = onPageScale,
-        )
+        GlassCard(alpha = 0.58f) {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            CompactSwitchRow(
+                title = "预测性返回手势",
+                summary = "返回二级页面时显示上级页面预览",
+                checked = prefs.predictiveBack,
+                onCheckedChange = onPredictiveBack,
+            )
+          }
+          PageScaleControl(
+              scale = prefs.pageScale,
+              onOpenEditor = { showPageScaleEditor = true },
+              onScaleChange = onPageScale,
+          )
+        }
       }
       item {
         SectionTitle("视觉效果")
         GlassCard(alpha = 0.58f) {
-          val showPredictiveBack = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
           CompactSwitchRow(
               title = "悬浮底栏",
               summary = "让底部导航悬浮于页面内容之上",
@@ -163,21 +177,24 @@ internal fun ThemeSettingsScreen(
               summary = "为浮动面板和弹窗保留背景模糊",
               checked = prefs.blurEffect,
               onCheckedChange = onBlurEffect,
-              showDivider = showPredictiveBack,
+              showDivider = false,
           )
-          if (showPredictiveBack) {
-            CompactSwitchRow(
-                title = "预测性返回手势",
-                summary = "返回二级页面时显示上级页面预览",
-                checked = prefs.predictiveBack,
-                onCheckedChange = onPredictiveBack,
-                showDivider = false,
-            )
-          }
         }
       }
     }
   }
+  SettingOptionDialog(
+      show = showAccentColorPicker,
+      title = "强调色",
+      options = AccentColorOptions,
+      selected = prefs.accentColor,
+      onDismiss = { showAccentColorPicker = false },
+      leading = { color, selected -> AccentColorPenIcon(color, selected) },
+      onSelect = {
+        onAccentColor(it)
+        showAccentColorPicker = false
+      },
+  )
   SettingOptionDialog(
       show = showColorStylePicker,
       title = "色彩风格",
@@ -211,17 +228,21 @@ internal fun ThemeSettingsScreen(
   )
 }
 
+@SuppressLint("ConfigurationScreenWidthHeight")
 @Composable
 private fun ThemePreview(modifier: Modifier = Modifier) {
   val colors = MiuixTheme.colorScheme
-  val frameShape = RoundedCornerShape(28.dp)
+  val configuration = LocalConfiguration.current
+  val screenRatio =
+      configuration.screenWidthDp.toFloat() / configuration.screenHeightDp.coerceAtLeast(1)
+  val frameShape = RoundedCornerShape(20.dp)
   val rowShape = RoundedCornerShape(12.dp)
   Box(modifier = modifier, contentAlignment = Alignment.Center) {
     Box(
         modifier =
-            Modifier.fillMaxWidth(0.54f)
-                .widthIn(max = 210.dp)
-                .aspectRatio(9f / 16f)
+            Modifier.fillMaxWidth(0.4f)
+                .widthIn(max = 190.dp)
+                .aspectRatio(screenRatio)
                 .clip(frameShape)
                 .appMeshBackground()
                 .border(1.dp, colors.onSurface.copy(alpha = 0.12f), frameShape),
@@ -243,10 +264,10 @@ private fun ThemePreview(modifier: Modifier = Modifier) {
                   .background(colors.onSurface),
           )
           Box(
-              Modifier.size(18.dp)
-                  .clip(CircleShape)
-                  .background(colors.surfaceContainerHigh)
-                  .border(1.dp, colors.onSurface.copy(alpha = 0.1f), CircleShape),
+              Modifier.fillMaxWidth(0.24f)
+                  .height(5.dp)
+                  .clip(RoundedCornerShape(2.dp))
+                  .background(colors.onSurface.copy(alpha = 0.34f)),
           )
         }
         Spacer(Modifier.height(12.dp))
@@ -305,13 +326,13 @@ private fun ThemePreview(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PageScaleCard(
+private fun PageScaleControl(
     scale: Float,
     onOpenEditor: () -> Unit,
     onScaleChange: (Float) -> Unit,
 ) {
   var sliderValue by remember(scale) { mutableFloatStateOf(scale.coerceIn(0.8f, 1.1f)) }
-  GlassCard(alpha = 0.58f) {
+  Column(modifier = Modifier.fillMaxWidth()) {
     Row(
         modifier =
             Modifier.fillMaxWidth()
@@ -350,6 +371,10 @@ private fun PageScaleCard(
         onValueChange = { sliderValue = it },
         onValueChangeFinished = { onScaleChange(sliderValue) },
         valueRange = 0.8f..1.1f,
+        showKeyPoints = true,
+        keyPoints = listOf(0.8f, 0.9f, 1f, 1.1f),
+        magnetThreshold = 0.01f,
+        hapticEffect = SliderDefaults.SliderHapticEffect.Step,
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
     )
   }
