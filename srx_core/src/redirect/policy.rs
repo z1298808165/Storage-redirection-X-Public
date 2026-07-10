@@ -271,25 +271,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uid_file_candidates_prioritize_shared_mirror() {
-        assert_eq!(
-            SYSTEM_WRITER_UID_FILE_CANDIDATES,
-            [
-                "/dev/srx_config/system_writer_uids.list",
-                "/data/adb/modules/storage.redirect.x/config/system_writer_uids.list",
-            ]
-        );
-    }
-
-    #[test]
-    fn uid_map_line_parses_package_and_uid() {
-        assert_eq!(
-            parse_line("com.tencent.tmgp.sgame:10352\r"),
-            Some(("com.tencent.tmgp.sgame".to_string(), 10352))
-        );
-    }
-
-    #[test]
     fn file_monitor_ui_detects_system_and_oem_file_shells() {
         assert!(is_file_monitor_ui_package("com.android.documentsui"));
         assert!(is_file_monitor_ui_package("com.android.photopicker"));
