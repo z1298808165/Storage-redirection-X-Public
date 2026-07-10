@@ -3,6 +3,7 @@ const path = require("path");
 const vm = require("vm");
 
 const repoRoot = path.resolve(__dirname, "..");
+const apiJsPath = path.join(repoRoot, "assets/zygisk_module/webroot/js/api.js");
 const appJsPath = path.join(repoRoot, "assets/zygisk_module/webroot/js/app.js");
 const fixtureDir = path.join(repoRoot, "docs/config-fixtures");
 
@@ -57,6 +58,7 @@ sandbox.window.window = sandbox.window;
 sandbox.window.document = sandbox.document;
 sandbox.globalThis = sandbox;
 
+vm.runInNewContext(fs.readFileSync(apiJsPath, "utf8"), sandbox, { filename: apiJsPath });
 vm.runInNewContext(fs.readFileSync(appJsPath, "utf8"), sandbox, { filename: appJsPath });
 
 const webui = sandbox.window.__SRX_WEBUI_TEST__;
@@ -123,4 +125,28 @@ assertDeepEqual(
   "backup-ui-preferences-invalid-values",
 );
 
-console.log("WebUI config fixtures verified");
+sandbox.window.Api.exec = async () =>
+  [
+    "system_accent1_600=#ff336699",
+    "system_accent1_200=0xff99CCEE",
+    "system_accent2_600=#ff445566",
+    "system_accent2_200=#ffAABBCC",
+  ].join("\n");
+sandbox.window.Api.readSystemAccentPalette()
+  .then((palette) => {
+    assertDeepEqual(
+      palette,
+      {
+        lightPrimary: "#336699",
+        darkPrimary: "#99CCEE",
+        lightSecondary: "#445566",
+        darkSecondary: "#AABBCC",
+      },
+      "webui-system-accent-palette",
+    );
+    console.log("WebUI config fixtures verified");
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

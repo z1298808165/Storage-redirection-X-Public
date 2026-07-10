@@ -1,10 +1,8 @@
 package org.srx.manager.ui.screen
 
-import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -35,7 +33,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.roundToInt
 import org.srx.manager.CenteredDialog
 import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
@@ -45,18 +42,12 @@ import org.srx.manager.SectionTitle
 import org.srx.manager.data.AppConfig
 import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.GlobalConfig
-import org.srx.manager.data.UiColorSpec
-import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiPreferences
-import org.srx.manager.data.UiThemeMode
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.srxSuccessColor
-import org.srx.manager.subtleFieldLabelColor
 import org.srx.manager.ui.AppUiState
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextField
-import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Download
 import top.yukonga.miuix.kmp.icon.extended.File
@@ -104,16 +95,7 @@ internal fun SettingsScreen(
     onGlobal: (GlobalConfig) -> Unit,
     onSaveTemplate: (ConfigTemplate) -> Unit,
     onDeleteTemplate: (String) -> Unit,
-    onFloating: (Boolean) -> Unit,
-    onLiquid: (Boolean) -> Unit,
-    onBlurEffect: (Boolean) -> Unit,
-    onDynamicColor: (Boolean) -> Unit,
-    onAccentColor: (Int) -> Unit,
-    onColorStyle: (UiColorStyle) -> Unit,
-    onColorSpec: (UiColorSpec) -> Unit,
-    onThemeMode: (UiThemeMode) -> Unit,
-    onPredictiveBack: (Boolean) -> Unit,
-    onPageScale: (Float) -> Unit,
+    onOpenTheme: () -> Unit,
     onBackupExport: () -> Unit,
     onBackupImport: () -> Unit,
     onDiagnosticExport: () -> Unit,
@@ -125,10 +107,6 @@ internal fun SettingsScreen(
   var showAutoTemplatePicker by remember { mutableStateOf(false) }
   var showAutoTemplateEmptyEnable by remember { mutableStateOf(false) }
   var showAutoTemplateEmptyInfo by remember { mutableStateOf(false) }
-  var showAccentColorPicker by remember { mutableStateOf(false) }
-  var showColorStylePicker by remember { mutableStateOf(false) }
-  var showColorSpecPicker by remember { mutableStateOf(false) }
-  var showPageScaleEditor by remember { mutableStateOf(false) }
   val autoTemplateInUseId = global.autoEnableNewAppsTemplateId
   val autoTemplate =
       remember(state.templates, global.autoEnableNewAppsTemplateId) {
@@ -243,89 +221,15 @@ internal fun SettingsScreen(
       }
     }
     item {
-      SectionTitle("主题")
-      GlassCard(
-          insideMargin = PaddingValues(top = 10.dp, bottom = 8.dp),
-          alpha = 0.58f,
-      ) {
-        ThemeModeSelector(
-            mode = prefs.themeMode,
-            onMode = onThemeMode,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-        )
-        Spacer(Modifier.height(12.dp))
-        CompactSwitchRow(
-            title = "动态取色",
-            summary = "开启后跟随系统壁纸色，关闭后使用固定主题色",
-            checked = prefs.dynamicColor,
-            onCheckedChange = onDynamicColor,
-            showDivider = prefs.dynamicColor,
-        )
-        if (prefs.dynamicColor) {
-          SettingSelectRow(
-              title = "强调色",
-              summary = "默认使用系统壁纸色，也可指定应用主题色",
-              value = accentColorLabel(prefs.accentColor),
-              onClick = { showAccentColorPicker = true },
-              showDivider = prefs.accentColor != 0,
-              leading = { AccentColorPenIcon(prefs.accentColor) },
-          )
-        }
-        if (prefs.dynamicColor && prefs.accentColor != 0) {
-          SettingSelectRow(
-              title = "色彩风格",
-              summary = "控制强调色生成主题色板时的倾向",
-              value = colorStyleLabel(prefs.colorStyle),
-              onClick = { showColorStylePicker = true },
-          )
-          SettingSelectRow(
-              title = "色彩标准",
-              summary = "选择 MIUIX 主题色生成标准",
-              value = colorSpecLabel(prefs.colorSpec),
-              onClick = { showColorSpecPicker = true },
-              showDivider = false,
-          )
-        }
-      }
-    }
-    item {
-      SectionTitle("视觉效果")
+      SectionTitle("外观")
       GlassCard(alpha = 0.58f) {
-        val showPredictiveBack = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE
         SettingSelectRow(
-            title = "界面缩放",
-            summary = "调整页面密度，范围 80% - 110%",
-            value = pageScalePercentLabel(prefs.pageScale),
-            onClick = { showPageScaleEditor = true },
+            title = "主题与外观",
+            summary = "主题模式、色彩、液态玻璃与界面缩放",
+            value = themeModeLabel(prefs.themeMode),
+            onClick = onOpenTheme,
+            showDivider = false,
         )
-        CompactSwitchRow(
-            title = "悬浮底栏",
-            summary = "启用 MIUIX 主题风格的悬浮底部导航",
-            checked = prefs.floatingBottomBar,
-            onCheckedChange = onFloating,
-        )
-        CompactSwitchRow(
-            title = "液态玻璃",
-            summary = "控制卡片、按钮、弹窗、通知和底栏的玻璃材质",
-            checked = prefs.liquidGlass,
-            onCheckedChange = onLiquid,
-        )
-        CompactSwitchRow(
-            title = "模糊",
-            summary = "启用顶部、底部栏和液态玻璃背景模糊，模糊强度使用固定值",
-            checked = prefs.blurEffect,
-            onCheckedChange = onBlurEffect,
-            showDivider = showPredictiveBack,
-        )
-        if (showPredictiveBack) {
-          CompactSwitchRow(
-              title = "预测性返回手势",
-              summary = "启用系统预测性返回手势支持，二级页面返回时显示上级页面预览",
-              checked = prefs.predictiveBack,
-              onCheckedChange = onPredictiveBack,
-              showDivider = false,
-          )
-        }
       }
     }
     item {
@@ -411,49 +315,6 @@ internal fun SettingsScreen(
       }
     }
   }
-  SettingOptionDialog(
-      show = showAccentColorPicker,
-      title = "强调色",
-      options = AccentColorOptions,
-      selected = prefs.accentColor,
-      onDismiss = { showAccentColorPicker = false },
-      leading = { value, selected -> AccentColorPenIcon(value, selected) },
-      onSelect = {
-        onAccentColor(it)
-        showAccentColorPicker = false
-      },
-  )
-  SettingOptionDialog(
-      show = showColorStylePicker,
-      title = "色彩风格",
-      options = ColorStyleOptions,
-      selected = prefs.colorStyle,
-      onDismiss = { showColorStylePicker = false },
-      onSelect = {
-        onColorStyle(it)
-        showColorStylePicker = false
-      },
-  )
-  SettingOptionDialog(
-      show = showColorSpecPicker,
-      title = "色彩标准",
-      options = ColorSpecOptions,
-      selected = prefs.colorSpec,
-      onDismiss = { showColorSpecPicker = false },
-      onSelect = {
-        onColorSpec(it)
-        showColorSpecPicker = false
-      },
-  )
-  PageScaleDialog(
-      show = showPageScaleEditor,
-      scale = prefs.pageScale,
-      onDismiss = { showPageScaleEditor = false },
-      onSave = {
-        onPageScale(it)
-        showPageScaleEditor = false
-      },
-  )
   AutoTemplatePickerDialog(
       show = showAutoTemplatePicker,
       templates = state.templates,
@@ -548,74 +409,6 @@ internal fun SettingsScreen(
               danger = true,
           )
         }
-      }
-    }
-  }
-}
-
-private const val PageScaleMinPercent = 80
-private const val PageScaleMaxPercent = 110
-
-private fun pageScalePercent(scale: Float): Int =
-    (scale.coerceIn(PageScaleMinPercent / 100f, PageScaleMaxPercent / 100f) * 100).roundToInt()
-
-private fun pageScalePercentLabel(scale: Float): String = "${pageScalePercent(scale)}%"
-
-@Composable
-private fun PageScaleDialog(
-    show: Boolean,
-    scale: Float,
-    onDismiss: () -> Unit,
-    onSave: (Float) -> Unit,
-) {
-  var input by remember(show, scale) { mutableStateOf(pageScalePercent(scale).toString()) }
-  val parsed = input.toIntOrNull()
-  val clamped = parsed?.coerceIn(PageScaleMinPercent, PageScaleMaxPercent)
-  val isInvalid = input.isNotBlank() && parsed == null
-  CenteredDialog(
-      title = "界面缩放",
-      summary = "降低比例可以缓解 DPI 或字体放大后的文本截断；范围 80% - 110%。",
-      show = show,
-      onDismiss = onDismiss,
-  ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      TextField(
-          value = input,
-          onValueChange = { value -> input = value.filter(Char::isDigit).take(3) },
-          label = "缩放百分比",
-          colors = TextFieldDefaults.textFieldColors(labelColor = subtleFieldLabelColor()),
-          useLabelAsPlaceholder = true,
-          singleLine = true,
-          modifier = Modifier.fillMaxWidth(),
-      )
-      Text(
-          text =
-              when {
-                isInvalid || parsed == null -> "请输入 80 - 110"
-                clamped != parsed -> "将保存为 ${clamped}%"
-                else -> "当前为 ${clamped}%"
-              },
-          color =
-              if (isInvalid || parsed == null) {
-                MiuixTheme.colorScheme.error
-              } else {
-                MiuixTheme.colorScheme.onSurfaceVariantSummary
-              },
-          fontSize = 12.sp,
-          lineHeight = 16.sp,
-      )
-      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
-        GlassTextButton(
-            "保存",
-            {
-              input.toIntOrNull()?.coerceIn(PageScaleMinPercent, PageScaleMaxPercent)?.let {
-                onSave(it / 100f)
-              }
-            },
-            modifier = Modifier.weight(1f),
-            primary = true,
-        )
       }
     }
   }

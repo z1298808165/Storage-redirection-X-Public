@@ -239,7 +239,7 @@
   const WEBUI_PAGE_SCALE_MIN = 0.8;
   const WEBUI_PAGE_SCALE_MAX = 1.1;
   const WEBUI_ACCENT_COLOR_OPTIONS = [
-    { value: 0, label: "默认", color: "" },
+    { value: 0, label: "系统取色", color: "" },
     { value: 0xfff44336, label: "红色", color: "#F44336" },
     { value: 0xffe91e63, label: "粉色", color: "#E91E63" },
     { value: 0xff9c27b0, label: "紫色", color: "#9C27B0" },
@@ -678,6 +678,9 @@
     $("#updateBack")?.addEventListener("click", () => {
       routeTo("dashboard", { replaceHistory: true });
     });
+    $("#themeBack")?.addEventListener("click", () => {
+      routeTo("settings", { replaceHistory: true });
+    });
   }
 
   function loadPage(page) {
@@ -690,6 +693,9 @@
         break;
       case "settings":
         loadSettings();
+        break;
+      case "theme":
+        renderThemePage();
         break;
       case "logs":
         loadLogs();
@@ -719,8 +725,6 @@
       if (State.currentPage !== requestPage || State.dashboardRequestId !== requestId) return;
       State.globalConfig = globalConfig;
       State.moduleStatus = status;
-      const moduleStatusEl = $("#statModuleStatus");
-      if (moduleStatusEl) moduleStatusEl.textContent = moduleStatusText(status);
       $("#moduleVersionDisplay").textContent = version || "--";
       setFeatureChipState(
         "monitorStatusChip",
@@ -816,19 +820,26 @@
     if (!actions || actions.dataset.ready === "1") return;
     actions.dataset.ready = "1";
     const items = [
-      { icon: "↻", label: "快速重启 MediaProvider", action: restartMediaProviderWithLoading },
-      { icon: "↑", label: "检查更新", page: "update" },
-      { icon: "ⓘ", label: "关于与开源协议", page: "about" },
+      {
+        icon: "refresh",
+        label: "重启 MediaProvider",
+        description: "让系统写入进程重新加载当前配置",
+        action: restartMediaProviderWithLoading,
+      },
+      { icon: "download", label: "检查更新", description: "查看模块的新版本", page: "update" },
+      { icon: "file", label: "关于与开源协议", description: "版本信息与依赖许可", page: "about" },
     ];
     items.forEach((item) => {
       const el = document.createElement("button");
       el.className = "action-item";
       el.innerHTML =
         '<span class="action-item-icon">' +
-        item.icon +
-        '</span><span class="action-item-label">' +
-        item.label +
-        '</span><span class="action-item-arrow">›</span>';
+        iconHtml(item.icon) +
+        '</span><span class="action-item-copy"><span class="action-item-label">' +
+        escapeHtml(item.label) +
+        '</span><span class="action-item-description">' +
+        escapeHtml(item.description) +
+        '</span></span><span class="action-item-arrow" aria-hidden="true">›</span>';
       el.addEventListener("click", () => {
         if (item.page) routeTo(item.page);
         else if (item.action) item.action();
@@ -860,13 +871,6 @@
     if (labelEl) labelEl.textContent = label;
     chip.title = label + "：" + finalStateText;
     chip.setAttribute("aria-label", label + "：" + finalStateText);
-  }
-
-  function moduleStatusText(status) {
-    if (status === "enabled") return "\u8fd0\u884c\u4e2d";
-    if (status === "disabled") return "\u5df2\u505c\u6b62";
-    if (status === "reboot_required") return "\u9700\u91cd\u542f";
-    return "\u672a\u77e5";
   }
 
   function modulePowerLabel(status) {
@@ -909,13 +913,10 @@
       btn.textContent = enabled ? "停止中..." : "启动中...";
       btn.classList.add("is-busy");
       State.moduleStatus = nextStatus;
-      const moduleStatusEl = $("#statModuleStatus");
-      if (moduleStatusEl) moduleStatusEl.textContent = enabled ? "停止中" : "启动中";
       try {
         await toggleModuleRuntimeWithLoading(enabled);
         const verifiedStatus = await Api.getModuleStatus();
         State.moduleStatus = verifiedStatus;
-        if (moduleStatusEl) moduleStatusEl.textContent = moduleStatusText(verifiedStatus);
         if (!enabled && verifiedStatus === "reboot_required") {
           Api.showManagerToast(
             "\u6a21\u5757\u5df2\u542f\u7528\uff0c\u91cd\u542f\u8bbe\u5907\u540e\u751f\u6548",
@@ -1655,6 +1656,10 @@
       (checked ? "on" : "") +
       '" data-key="' +
       key +
+      '" type="button" role="switch" aria-checked="' +
+      String(checked) +
+      '" aria-label="' +
+      escapeHtml(label) +
       '"></button></div>'
     );
   }
@@ -1771,51 +1776,71 @@
       });
     });
   }
+
   function showPageScaleDialog() {
     const currentPercent = webUiPageScalePercent(Theme.getUiOption("pageScale") || 1);
     showModalWithHistory(
-      '<div class="modal-title">界面缩放</div>' +
-        '<input class="modal-input" id="pageScaleInput" type="number" min="80" max="110" step="1" inputmode="numeric" value="' +
+      '<div class="page-scale-dialog">' +
+        '<div class="modal-title">界面缩放</div>' +
+        '<div class="page-scale-dialog-range">80% - 110%</div>' +
+        '<label class="page-scale-input-wrap" for="pageScaleInput">' +
+        '<input class="modal-input page-scale-input" id="pageScaleInput" type="text" inputmode="numeric" maxlength="3" autocomplete="off" value="' +
         currentPercent +
-        '">' +
-        '<div class="modal-hint" id="pageScaleHint">范围 80% - 110%，降低比例可以缓解 DPI 或字体放大后的文本截断。</div>' +
-        '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="pageScaleConfirm" type="button">保存</button></div>',
+        '"><span aria-hidden="true">%</span></label>' +
+        '<div class="modal-hint page-scale-dialog-hint" id="pageScaleHint">输入 80 到 110 之间的整数</div>' +
+        '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="pageScaleConfirm" type="button">确定</button></div>' +
+        "</div>",
       { backdropClose: true },
     );
+    const overlay = document.getElementById("modalOverlay");
     const input = document.getElementById("pageScaleInput");
     const hint = document.getElementById("pageScaleHint");
-    const updateHint = () => {
-      const percent = Number.parseInt(input?.value || "", 10);
-      const invalid = !Number.isFinite(percent);
-      hint?.classList.toggle("error", invalid);
-      if (invalid) {
-        if (hint) hint.textContent = "请输入 80 - 110";
-        return null;
-      }
-      const clamped = Math.max(80, Math.min(110, percent));
-      if (hint) {
-        hint.textContent =
-          clamped === percent ? "当前为 " + clamped + "%" : "将保存为 " + clamped + "%";
-      }
-      return clamped;
+    document.body.classList.add("scale-modal-open");
+    overlay?.classList.add("scale-modal-overlay");
+
+    const cleanupScaleModal = () => {
+      document.body.classList.remove("scale-modal-open");
+      overlay?.classList.remove("scale-modal-overlay");
     };
+    const closeScaleModal = () => {
+      cleanupScaleModal();
+      closeActiveModal();
+    };
+    const readPercent = () => {
+      const value = Number.parseInt(input?.value || "", 10);
+      const valid = Number.isFinite(value) && value >= 80 && value <= 110;
+      input?.classList.toggle("invalid", !valid);
+      hint?.classList.toggle("error", !valid);
+      if (hint) hint.textContent = valid ? "输入 80 到 110 之间的整数" : "请输入 80 - 110";
+      return valid ? value : null;
+    };
+
     input?.addEventListener("input", () => {
       input.value = input.value.replace(/[^\d]/g, "").slice(0, 3);
-      updateHint();
+      readPercent();
+    });
+    input?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") document.getElementById("pageScaleConfirm")?.click();
     });
     document.querySelector("#pageScaleConfirm")?.addEventListener("click", () => {
-      const percent = updateHint();
+      const percent = readPercent();
       if (percent == null) {
         input?.focus();
         return;
       }
       Theme.setUiOption("pageScale", percent / 100);
-      closeActiveModal();
-      loadSettings();
+      closeScaleModal();
+      if (State.currentPage === "theme") renderThemePage();
     });
-    document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
-    updateHint();
-    setTimeout(() => input?.focus(), 120);
+    document.querySelector(".modal-close")?.addEventListener("click", closeScaleModal);
+
+    const previousCleanup = State.modalCleanup;
+    State.modalCleanup = () => {
+      previousCleanup?.();
+      cleanupScaleModal();
+    };
+    focusWithoutViewportJump(input);
+    input?.select();
   }
   function normalizeGlobalRuntimeConfig(raw) {
     const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -3192,6 +3217,248 @@
   }
 
   // ═══ Settings ═══
+  function themeModeLabel(mode) {
+    return { light: "浅色", dark: "深色", system: "跟随系统" }[mode] || "跟随系统";
+  }
+
+  function themePreferenceSummary() {
+    const uiOptions = Theme.getUiOptions();
+    const color = uiOptions.dynamicColor
+      ? accentColorLabel(Number(uiOptions.accentColor) || 0)
+      : "默认配色";
+    return (
+      themeModeLabel(Theme.get()) + " · " + color + " · " + webUiPageScaleLabel(uiOptions.pageScale)
+    );
+  }
+
+  function themeModeSelectorHtml(currentTheme) {
+    const options = [
+      { value: "system", label: "跟随系统" },
+      { value: "light", label: "浅色" },
+      { value: "dark", label: "深色" },
+    ];
+    return (
+      '<div class="theme-selector" role="radiogroup" aria-label="主题模式">' +
+      options
+        .map(
+          (option) =>
+            '<label class="theme-option' +
+            (currentTheme === option.value ? " active" : "") +
+            '"><input type="radio" name="theme" value="' +
+            option.value +
+            '" ' +
+            (currentTheme === option.value ? "checked" : "") +
+            '><span class="theme-option-label">' +
+            option.label +
+            "</span></label>",
+        )
+        .join("") +
+      "</div>"
+    );
+  }
+
+  function accentPaletteHtml(selected) {
+    return (
+      '<div class="theme-color-palette" role="radiogroup" aria-label="强调色">' +
+      WEBUI_ACCENT_COLOR_OPTIONS.map((option) => {
+        const active = option.value === selected;
+        const color = option.color || "var(--system-accent-color, var(--color-primary))";
+        return (
+          '<button class="theme-color-swatch' +
+          (active ? " active" : "") +
+          (option.value === 0 ? " system" : "") +
+          '" type="button" data-value="' +
+          option.value +
+          '" role="radio" aria-checked="' +
+          String(active) +
+          '" aria-label="' +
+          option.label +
+          '" title="' +
+          option.label +
+          '" style="--swatch-color:' +
+          color +
+          '"><span aria-hidden="true"></span></button>'
+        );
+      }).join("") +
+      "</div>"
+    );
+  }
+
+  function pageScaleControlHtml(scale) {
+    const percent = webUiPageScalePercent(scale);
+    const progress = ((percent - 80) / 30) * 100;
+    return (
+      '<div class="theme-settings-card theme-scale-card" id="pageScaleCard" role="button" tabindex="0" aria-label="手动输入界面缩放，当前 ' +
+      percent +
+      '%">' +
+      '<div class="theme-scale-header"><div class="switch-label-group">' +
+      '<div class="switch-label">界面缩放</div>' +
+      '<div class="switch-hint">调整整体界面缩放比例</div></div>' +
+      '<output class="theme-scale-value" id="pageScaleValue" for="pageScaleSlider">' +
+      percent +
+      "%</output></div>" +
+      '<div class="theme-scale-control">' +
+      '<input class="theme-scale-slider" id="pageScaleSlider" type="range" min="80" max="110" step="1" value="' +
+      percent +
+      '" aria-label="界面缩放" aria-valuetext="' +
+      percent +
+      '%" style="--scale-progress:' +
+      progress.toFixed(2) +
+      '%">' +
+      "</div></div>"
+    );
+  }
+
+  function renderThemePage() {
+    const content = $("#themeContent");
+    if (!content) return;
+    const currentTheme = Theme.get();
+    const uiOptions = Theme.getUiOptions();
+    const accentColor = Number(uiOptions.accentColor) || 0;
+    const dynamicColor = uiOptions.dynamicColor === true;
+    content.innerHTML =
+      '<section class="theme-preview" aria-label="主题预览">' +
+      '<div class="theme-preview-bar"><span></span><span></span></div>' +
+      '<div class="theme-preview-body"><div class="theme-preview-primary"></div><div class="theme-preview-lines"><span></span><span></span><span></span></div></div>' +
+      '<div class="theme-preview-nav"><span class="active"></span><span></span><span></span><span></span></div>' +
+      "</section>" +
+      '<div class="section theme-page-section"><h2 class="section-title">主题模式</h2>' +
+      '<div class="theme-settings-card theme-mode-card">' +
+      themeModeSelectorHtml(currentTheme) +
+      "</div></div>" +
+      '<div class="section theme-page-section"><h2 class="section-title">颜色</h2>' +
+      '<div class="theme-settings-card"><div class="theme-settings-rows">' +
+      switchRow(
+        "动态取色",
+        "dynamicColor",
+        dynamicColor,
+        "跟随系统壁纸生成界面配色，关闭后使用固定主题色",
+      ) +
+      (dynamicColor
+        ? '<div class="theme-palette-row"><div class="switch-label-group"><div class="switch-label">强调色</div><div class="switch-hint">选择系统取色，或指定应用主题色</div></div>' +
+          accentPaletteHtml(accentColor) +
+          "</div>"
+        : "") +
+      (dynamicColor && accentColor !== 0
+        ? settingSelectRow(
+            "色彩风格",
+            "colorStyle",
+            optionLabel(WEBUI_COLOR_STYLE_OPTIONS, uiOptions.colorStyle, uiOptions.colorStyle),
+            "调整主题色板的明度与饱和度倾向",
+          ) +
+          settingSelectRow(
+            "色彩标准",
+            "colorSpec",
+            optionLabel(WEBUI_COLOR_SPEC_OPTIONS, uiOptions.colorSpec, uiOptions.colorSpec),
+            "选择主题色生成算法版本",
+          )
+        : "") +
+      "</div></div></div>" +
+      '<div class="section theme-page-section"><h2 class="section-title">显示</h2>' +
+      pageScaleControlHtml(uiOptions.pageScale) +
+      "</div>" +
+      '<div class="section theme-page-section"><h2 class="section-title">视觉效果</h2>' +
+      '<div class="theme-settings-card"><div class="theme-settings-rows">' +
+      switchRow(
+        "悬浮底栏",
+        "floatingNav",
+        uiOptions.floatingNav !== false,
+        "让底部导航悬浮于页面内容之上",
+      ) +
+      switchRow(
+        "液态玻璃",
+        "liquidGlass",
+        uiOptions.liquidGlass !== false,
+        "启用玻璃高光、透镜放大与底栏跟随形变",
+      ) +
+      switchRow(
+        "材质模糊",
+        "blurEffect",
+        uiOptions.blurEffect !== false,
+        "为浮动面板和弹窗保留背景模糊",
+      ) +
+      "</div></div></div>";
+    bindThemePageEvents(content);
+  }
+
+  function bindThemePageEvents(content) {
+    content.querySelectorAll('input[name="theme"]').forEach((radio) => {
+      radio.addEventListener("change", () => {
+        Theme.apply(radio.value);
+        renderThemePage();
+      });
+    });
+    content.querySelectorAll(".toggle").forEach((toggle) => {
+      toggle.addEventListener("click", () => {
+        const key = toggle.dataset.key;
+        const enabled = !toggle.classList.contains("on");
+        Theme.setUiOption(key, enabled);
+        if (key === "dynamicColor" && enabled) Theme.refreshSystemAccent(true);
+        renderThemePage();
+      });
+    });
+    content.querySelectorAll(".theme-color-swatch").forEach((swatch) => {
+      swatch.addEventListener("click", () => {
+        Theme.setUiOption("accentColor", Number(swatch.dataset.value) || 0);
+        renderThemePage();
+      });
+    });
+    content
+      .querySelector('.setting-select-row[data-key="colorStyle"]')
+      ?.addEventListener("click", () => {
+        showSettingOptionDialog(
+          "色彩风格",
+          WEBUI_COLOR_STYLE_OPTIONS,
+          Theme.getUiOption("colorStyle") || "TonalSpot",
+          (value) => {
+            Theme.setUiOption("colorStyle", value);
+            renderThemePage();
+          },
+        );
+      });
+    content
+      .querySelector('.setting-select-row[data-key="colorSpec"]')
+      ?.addEventListener("click", () => {
+        showSettingOptionDialog(
+          "色彩标准",
+          WEBUI_COLOR_SPEC_OPTIONS,
+          Theme.getUiOption("colorSpec") || "Spec2025",
+          (value) => {
+            Theme.setUiOption("colorSpec", value);
+            renderThemePage();
+          },
+        );
+      });
+    const scaleSlider = content.querySelector("#pageScaleSlider");
+    const scaleValue = content.querySelector("#pageScaleValue");
+    const scaleCard = content.querySelector("#pageScaleCard");
+    const applyScale = () => {
+      const percent = Math.max(80, Math.min(110, Number(scaleSlider?.value) || 100));
+      Theme.setUiOption("pageScale", percent / 100);
+    };
+    const updateScale = () => {
+      if (!scaleSlider) return;
+      const percent = Math.max(80, Math.min(110, Number(scaleSlider.value) || 100));
+      const progress = ((percent - 80) / 30) * 100;
+      if (scaleValue) scaleValue.textContent = percent + "%";
+      scaleSlider.style.setProperty("--scale-progress", progress.toFixed(2) + "%");
+      scaleSlider.setAttribute("aria-valuetext", percent + "%");
+      scaleCard?.setAttribute("aria-label", "手动输入界面缩放，当前 " + percent + "%");
+    };
+    const openScaleDialog = () => showPageScaleDialog();
+    scaleCard?.addEventListener("click", openScaleDialog);
+    scaleCard?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openScaleDialog();
+    });
+    ["pointerdown", "click", "keydown"].forEach((eventName) => {
+      scaleSlider?.addEventListener(eventName, (event) => event.stopPropagation());
+    });
+    scaleSlider?.addEventListener("input", updateScale);
+    scaleSlider?.addEventListener("change", applyScale);
+  }
+
   async function loadSettings() {
     const content = $("#settingsContent");
     try {
@@ -3218,42 +3485,8 @@
         }
       }
       State.globalConfig = normalizedGlobal;
-      const currentTheme = Theme.get();
-      const uiOptions = Theme.getUiOptions();
-      const accentColor = Number(uiOptions.accentColor) || 0;
-      const dynamicColor = uiOptions.dynamicColor === true;
-      const themeRows =
-        switchRow(
-          "动态取色",
-          "dynamicColor",
-          dynamicColor,
-          "开启后使用 WebUI 主题色系统；默认沿用当前主题色，也可指定强调色",
-        ) +
-        (dynamicColor
-          ? settingSelectRow(
-              "强调色",
-              "accentColor",
-              accentColorLabel(accentColor),
-              "默认使用 WebUI 当前主题色，也可指定应用主题色",
-              accentSwatchHtml(accentColor),
-            )
-          : "") +
-        (dynamicColor && accentColor !== 0
-          ? settingSelectRow(
-              "色彩风格",
-              "colorStyle",
-              optionLabel(WEBUI_COLOR_STYLE_OPTIONS, uiOptions.colorStyle, uiOptions.colorStyle),
-              "控制强调色生成主题变量时的倾向",
-            ) +
-            settingSelectRow(
-              "色彩标准",
-              "colorSpec",
-              optionLabel(WEBUI_COLOR_SPEC_OPTIONS, uiOptions.colorSpec, uiOptions.colorSpec),
-              "选择 WebUI 主题色生成标准",
-            )
-          : "");
       const templateSection =
-        '<div class="section template-section" style="margin-top:16px"><h2 class="section-title">配置模板</h2>' +
+        '<div class="section template-section settings-section"><h2 class="section-title">配置模板</h2>' +
         '<div class="template-card"><div class="config-group-header"><span class="config-group-title">模板库</span><button class="icon-btn icon-btn-sm icon-btn-add" id="templateAddBtn" type="button" aria-label="添加配置模板" title="添加配置模板">' +
         iconHtml("plus") +
         "</button></div>" +
@@ -3263,7 +3496,7 @@
           : '<div class="app-empty" style="padding:18px;font-size:12px">还没有配置模板，可从应用配置页保存当前配置为模板</div>') +
         "</div></div></div>";
       content.innerHTML =
-        '<div class="config-group">' +
+        '<div class="section settings-section"><h2 class="section-title">模块设置</h2><div class="config-group">' +
         switchRow(
           "文件监视",
           "fileMonitor",
@@ -3299,8 +3532,16 @@
           State.globalConfig.app_config_auto_save === true,
           "开启后应用配置页的修改会在每个操作结束后自动保存",
         ) +
-        "</div>" +
-        '<div class="section experiment-settings-section" style="margin-top:16px"><h2 class="section-title">实验区</h2>' +
+        "</div></div>" +
+        '<div class="section settings-section appearance-settings-section"><h2 class="section-title">外观</h2><div class="config-group">' +
+        settingSelectRow(
+          "主题与外观",
+          "themePage",
+          themePreferenceSummary(),
+          "主题模式、颜色、缩放和视觉效果",
+        ) +
+        "</div></div>" +
+        '<div class="section experiment-settings-section settings-section"><h2 class="section-title">实验区</h2>' +
         '<div class="theme-settings-card"><div class="theme-settings-rows">' +
         switchRow(
           "Fuse daemon",
@@ -3309,58 +3550,8 @@
           "仅在普通应用的通配规则前缀启用 scoped FUSE，精确处理 !、*、?；普通路径继续使用 mount namespace。可提升复杂规则准确性，但通配前缀内的高频读写会多一层用户态转发。",
         ) +
         "</div></div></div>" +
-        '<div class="section theme-settings-section" style="margin-top:16px"><h2 class="section-title">主题</h2>' +
-        '<div class="theme-settings-card">' +
-        '<div class="theme-selector">' +
-        '<label class="theme-option' +
-        (currentTheme === "light" ? " active" : "") +
-        '"><input type="radio" name="theme" value="light" ' +
-        (currentTheme === "light" ? "checked" : "") +
-        '><span class="theme-option-label">浅色</span></label>' +
-        '<label class="theme-option' +
-        (currentTheme === "dark" ? " active" : "") +
-        '"><input type="radio" name="theme" value="dark" ' +
-        (currentTheme === "dark" ? "checked" : "") +
-        '><span class="theme-option-label">深色</span></label>' +
-        '<label class="theme-option' +
-        (currentTheme === "system" ? " active" : "") +
-        '"><input type="radio" name="theme" value="system" ' +
-        (currentTheme === "system" ? "checked" : "") +
-        '><span class="theme-option-label">跟随系统</span></label>' +
-        "</div>" +
-        '<div class="theme-settings-rows">' +
-        themeRows +
-        "</div></div></div>" +
-        '<div class="section visual-settings-section" style="margin-top:16px"><h2 class="section-title">视觉效果</h2>' +
-        '<div class="theme-settings-card">' +
-        '<div class="theme-settings-rows">' +
-        settingSelectRow(
-          "界面缩放",
-          "pageScale",
-          webUiPageScaleLabel(uiOptions.pageScale),
-          "调整 WebUI 页面密度，范围 80% - 110%",
-        ) +
-        switchRow(
-          "悬浮底栏",
-          "floatingNav",
-          uiOptions.floatingNav !== false,
-          "启用底部导航与配置操作栏的悬浮容器形态",
-        ) +
-        switchRow(
-          "液态玻璃特效",
-          "liquidGlass",
-          uiOptions.liquidGlass !== false,
-          "启用全局实时背景模糊和液态水滴动效",
-        ) +
-        switchRow(
-          "背景模糊效果",
-          "blurEffect",
-          uiOptions.blurEffect !== false,
-          "关闭后所有弹窗、提示和浮动面板改用实色表面",
-        ) +
-        "</div></div></div>" +
         templateSection +
-        '<div class="section backup-restore-section" style="margin-top:16px"><h2 class="section-title">备份还原</h2>' +
+        '<div class="section backup-restore-section settings-section"><h2 class="section-title">备份还原</h2>' +
         '<div class="backup-restore-card">' +
         '<div class="backup-restore-actions">' +
         '<button class="backup-action backup-export-btn" id="backupExportBtn" type="button"><span class="icon icon-download" aria-hidden="true"></span><span>备份</span></button>' +
@@ -3372,31 +3563,16 @@
           ".srxbak.zip,.srxbak.json,application/zip,application/json",
         ) +
         "</div></div>" +
-        '<div class="config-group" style="margin-top:16px"><div class="switch-row"><div class="switch-label-group"><div class="switch-label">配置文件路径</div><div class="switch-hint" style="font-family:monospace;font-size:11px">/data/adb/modules/storage.redirect.x/config/</div></div></div></div>';
+        '<div class="config-group settings-path-card"><div class="switch-row"><div class="switch-label-group"><div class="switch-label">配置文件路径</div><div class="switch-hint settings-path-value">/data/adb/modules/storage.redirect.x/config/</div></div></div></div>';
 
-      content.querySelectorAll('input[name="theme"]').forEach((radio) => {
-        radio.addEventListener("change", () => {
-          Theme.apply(radio.value);
-          content.querySelectorAll(".theme-option").forEach((o) => o.classList.remove("active"));
-          radio.closest(".theme-option")?.classList.add("active");
-        });
-      });
+      content
+        .querySelector('.setting-select-row[data-key="themePage"]')
+        ?.addEventListener("click", () => routeTo("theme"));
       content.querySelectorAll(".toggle").forEach((toggle) => {
         toggle.addEventListener("click", async () => {
           if (toggle.disabled) return;
           toggle.classList.toggle("on");
           const key = toggle.dataset.key;
-          if (
-            key === "floatingNav" ||
-            key === "liquidGlass" ||
-            key === "blurEffect" ||
-            key === "dynamicColor"
-          ) {
-            Theme.setUiOption(key, toggle.classList.contains("on"));
-            setTimeout(() => Theme.resetNavIndicator(), 120);
-            if (key === "dynamicColor") loadSettings();
-            return;
-          }
           if (key === "autoEnableNewApps") {
             await handleAutoEnableNewAppsToggle(content, toggle);
             return;
@@ -3404,48 +3580,6 @@
           await saveGlobalSettingImmediate(content, toggle, key);
         });
       });
-      content
-        .querySelector('.setting-select-row[data-key="accentColor"]')
-        ?.addEventListener("click", () => {
-          showSettingOptionDialog(
-            "强调色",
-            WEBUI_ACCENT_COLOR_OPTIONS,
-            Number(Theme.getUiOption("accentColor")) || 0,
-            (value) => {
-              Theme.setUiOption("accentColor", value);
-              loadSettings();
-            },
-          );
-        });
-      content
-        .querySelector('.setting-select-row[data-key="colorStyle"]')
-        ?.addEventListener("click", () => {
-          showSettingOptionDialog(
-            "色彩风格",
-            WEBUI_COLOR_STYLE_OPTIONS,
-            Theme.getUiOption("colorStyle") || "TonalSpot",
-            (value) => {
-              Theme.setUiOption("colorStyle", value);
-              loadSettings();
-            },
-          );
-        });
-      content
-        .querySelector('.setting-select-row[data-key="colorSpec"]')
-        ?.addEventListener("click", () => {
-          showSettingOptionDialog(
-            "色彩标准",
-            WEBUI_COLOR_SPEC_OPTIONS,
-            Theme.getUiOption("colorSpec") || "Spec2025",
-            (value) => {
-              Theme.setUiOption("colorSpec", value);
-              loadSettings();
-            },
-          );
-        });
-      content
-        .querySelector('.setting-select-row[data-key="pageScale"]')
-        ?.addEventListener("click", showPageScaleDialog);
       content.querySelector("#autoTemplateRow")?.addEventListener("click", () => {
         showAutoTemplatePickerDialog(
           State.globalConfig?.auto_enable_new_apps_template_id || "",

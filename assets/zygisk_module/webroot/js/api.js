@@ -654,6 +654,48 @@ const Api = {
     return await NativeBridge.exec(cmd, options);
   },
 
+  /** Read Android 12+ wallpaper-derived accent resources without modifying system settings. */
+  async readSystemAccentPalette() {
+    const names = [
+      "system_accent1_600",
+      "system_accent1_200",
+      "system_accent2_600",
+      "system_accent2_200",
+    ];
+    const command =
+      "for name in " +
+      names.join(" ") +
+      '; do value=$(/system/bin/cmd overlay lookup android android:color/$name 2>/dev/null | tail -n 1); printf "%s=%s\\n" "$name" "$value"; done';
+    try {
+      const output = await this.exec(command, { timeoutMs: 5000 });
+      const colors = {};
+      String(output || "")
+        .split(/\r?\n/)
+        .forEach((line) => {
+          const separator = line.indexOf("=");
+          if (separator <= 0) return;
+          const name = line.slice(0, separator).trim();
+          const match = line
+            .slice(separator + 1)
+            .trim()
+            .match(/(?:#|0x)([0-9a-f]{8}|[0-9a-f]{6})\b/i);
+          if (!names.includes(name) || !match) return;
+          const value = match[1].length === 8 ? match[1].slice(2) : match[1];
+          colors[name] = "#" + value.toUpperCase();
+        });
+      const primary = colors.system_accent1_600 || colors.system_accent1_200;
+      if (!primary) return null;
+      return {
+        lightPrimary: colors.system_accent1_600 || primary,
+        darkPrimary: colors.system_accent1_200 || primary,
+        lightSecondary: colors.system_accent2_600 || primary,
+        darkSecondary: colors.system_accent2_200 || primary,
+      };
+    } catch {
+      return null;
+    }
+  },
+
   invalidateConfiguredAppsCache() {
     this._configuredAppsCache = null;
     this._configuredAppsCacheAt = 0;

@@ -1,14 +1,21 @@
 package org.srx.manager.ui.screen
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,7 +42,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal val AccentColorOptions =
     listOf(
-        0 to "默认",
+        0 to "系统取色",
         0xFFF44336.toInt() to "红色",
         0xFFE91E63.toInt() to "粉色",
         0xFF9C27B0.toInt() to "紫色",
@@ -89,13 +96,18 @@ internal fun ThemeModeSelector(
 ) {
   val items =
       listOf(
+          UiThemeMode.System to "跟随系统",
           UiThemeMode.Light to "浅色",
           UiThemeMode.Dark to "深色",
-          UiThemeMode.System to "跟随系统",
       )
+  val containerShape = RoundedCornerShape(18.dp)
+  val itemShape = RoundedCornerShape(14.dp)
   Row(
       modifier =
-          modifier.clip(CircleShape).background(capsuleContainerColor(), CircleShape).padding(5.dp),
+          modifier
+              .clip(containerShape)
+              .background(capsuleContainerColor(), containerShape)
+              .padding(4.dp),
       horizontalArrangement = Arrangement.spacedBy(4.dp),
   ) {
     items.forEach { (itemMode, label) ->
@@ -106,7 +118,7 @@ internal fun ThemeModeSelector(
                   .then(
                       if (selected) {
                         Modifier.dropShadow(
-                            CircleShape,
+                            itemShape,
                             Shadow(
                                 radius = 10.dp,
                                 color = MiuixTheme.colorScheme.primary,
@@ -117,13 +129,13 @@ internal fun ThemeModeSelector(
                         Modifier
                       },
                   )
-                  .clip(CircleShape)
+                  .clip(itemShape)
                   .background(
                       if (selected) capsuleSelectedColor() else Color.Transparent,
-                      CircleShape,
+                      itemShape,
                   )
                   .clickable { onMode(itemMode) }
-                  .padding(vertical = 10.dp),
+                  .padding(vertical = 9.dp),
           contentAlignment = Alignment.Center,
       ) {
         Text(
@@ -132,6 +144,127 @@ internal fun ThemeModeSelector(
             fontWeight = if (selected) FontWeight.Black else FontWeight.SemiBold,
             fontSize = 12.sp,
             maxLines = 1,
+        )
+      }
+    }
+  }
+}
+
+@Composable
+internal fun AccentColorPalette(
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    showDivider: Boolean = true,
+) {
+  Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            text = "强调色",
+            fontSize = 16.sp,
+            lineHeight = 20.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = "选择系统取色，或指定应用主题色",
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+        )
+      }
+      Row(
+          modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        AccentColorOptions.forEach { (value, label) ->
+          AccentColorSwatch(
+              color = value,
+              selected = selected == value,
+              label = label,
+              onClick = { onSelect(value) },
+          )
+        }
+      }
+    }
+    if (showDivider) {
+      Box(
+          Modifier.fillMaxWidth()
+              .padding(start = 16.dp)
+              .height(1.dp)
+              .background(
+                  MiuixTheme.colorScheme.onSurface.copy(
+                      alpha = if (isSrxDarkTheme()) 0.035f else 0.045f
+                  )
+              ),
+      )
+    }
+  }
+}
+
+@Composable
+private fun AccentColorSwatch(
+    color: Int,
+    selected: Boolean,
+    label: String,
+    onClick: () -> Unit,
+) {
+  val tint = if (color == 0) MiuixTheme.colorScheme.primary else Color(color)
+  Box(
+      modifier =
+          Modifier.size(40.dp)
+              .clip(CircleShape)
+              .border(
+                  width = if (selected) 2.dp else 1.dp,
+                  color =
+                      if (selected) MiuixTheme.colorScheme.primary
+                      else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                  shape = CircleShape,
+              )
+              .clickable(onClick = onClick)
+              .padding(5.dp),
+      contentAlignment = Alignment.Center,
+  ) {
+    if (color == 0) {
+      Canvas(modifier = Modifier.matchParentSize().clip(CircleShape)) {
+        val colors =
+            listOf(
+                Color(0xFF1677D2),
+                Color(0xFF16845B),
+                Color(0xFFC23D42),
+                Color(0xFF9C6411),
+            )
+        colors.forEachIndexed { index, sectionColor ->
+          drawArc(
+              color = sectionColor,
+              startAngle = index * 90f - 90f,
+              sweepAngle = 90f,
+              useCenter = true,
+          )
+        }
+      }
+    } else {
+      Box(Modifier.matchParentSize().clip(CircleShape).background(tint))
+    }
+    if (selected) {
+      Canvas(modifier = Modifier.size(14.dp)) {
+        val markColor = Color.White
+        val stroke = 2.dp.toPx()
+        drawLine(
+            color = markColor,
+            start = Offset(size.width * 0.14f, size.height * 0.52f),
+            end = Offset(size.width * 0.42f, size.height * 0.78f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = markColor,
+            start = Offset(size.width * 0.42f, size.height * 0.78f),
+            end = Offset(size.width * 0.88f, size.height * 0.2f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
         )
       }
     }

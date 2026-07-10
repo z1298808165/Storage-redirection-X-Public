@@ -69,6 +69,7 @@ import org.srx.manager.ui.screen.AppsScreen
 import org.srx.manager.ui.screen.DashboardScreen
 import org.srx.manager.ui.screen.LogsScreen
 import org.srx.manager.ui.screen.SettingsScreen
+import org.srx.manager.ui.screen.ThemeSettingsScreen
 import org.srx.manager.ui.screen.UpdateScreen
 import org.srx.manager.ui.theme.SrxTheme
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
@@ -123,6 +124,8 @@ private sealed interface SrxRoute : NavKey {
   data object About : SrxRoute
 
   data object Update : SrxRoute
+
+  data object Theme : SrxRoute
 
   data class AppConfig(val packageName: String) : SrxRoute
 }
@@ -440,16 +443,7 @@ private fun SrxManagerApp(
                 onGlobal = viewModel::updateGlobalConfig,
                 onSaveTemplate = viewModel::saveTemplate,
                 onDeleteTemplate = viewModel::deleteTemplate,
-                onFloating = viewModel::setFloatingBottomBar,
-                onLiquid = viewModel::setLiquidGlass,
-                onBlurEffect = viewModel::setBlurEffect,
-                onDynamicColor = viewModel::setDynamicColor,
-                onAccentColor = viewModel::setAccentColor,
-                onColorStyle = viewModel::setColorStyle,
-                onColorSpec = viewModel::setColorSpec,
-                onThemeMode = viewModel::setThemeMode,
-                onPredictiveBack = viewModel::setPredictiveBack,
-                onPageScale = viewModel::setPageScale,
+                onOpenTheme = { pushRoute(SrxRoute.Theme) },
                 onBackupExport = { backupExportLauncher.launch(viewModel.backupFileName()) },
                 onBackupImport = {
                   backupImportLauncher.launch(
@@ -497,6 +491,22 @@ private fun SrxManagerApp(
                             onAutoCheckUpdates = viewModel::setAutoCheckUpdates,
                             onUpdateChannel = viewModel::setUpdateChannel,
                             onCheckNow = { viewModel.checkForUpdates(manual = true) },
+                        )
+                      }
+                      entry<SrxRoute.Theme> {
+                        ThemeSettingsScreen(
+                            prefs = prefs,
+                            onBack = ::popNavBackStack,
+                            onFloating = viewModel::setFloatingBottomBar,
+                            onLiquid = viewModel::setLiquidGlass,
+                            onBlurEffect = viewModel::setBlurEffect,
+                            onDynamicColor = viewModel::setDynamicColor,
+                            onAccentColor = viewModel::setAccentColor,
+                            onColorStyle = viewModel::setColorStyle,
+                            onColorSpec = viewModel::setColorSpec,
+                            onThemeMode = viewModel::setThemeMode,
+                            onPredictiveBack = viewModel::setPredictiveBack,
+                            onPageScale = viewModel::setPageScale,
                         )
                       }
                       entry<SrxRoute.AppConfig> {

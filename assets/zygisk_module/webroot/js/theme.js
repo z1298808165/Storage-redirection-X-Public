@@ -39,6 +39,8 @@ const THEME_ACCENT_COLORS = {
 
 const Theme = {
   _current: "light",
+  _systemAccentPalette: null,
+  _systemAccentRequest: null,
 
   init() {
     const stored = localStorage.getItem(THEME_KEY) || "light";
@@ -51,6 +53,7 @@ const Theme = {
     this._bindNavDrag();
     this._bindLiquidSurfaceLight();
     this.resetNavIndicator();
+    this.refreshSystemAccent();
   },
 
   apply(mode) {
@@ -108,10 +111,7 @@ const Theme = {
     document.body.classList.toggle("nav-floating-disabled", prefs.floatingNav === false);
     document.body.classList.toggle("liquid-glass-disabled", prefs.liquidGlass === false);
     document.body.classList.toggle("blur-effect-disabled", prefs.blurEffect === false);
-    document.body.classList.toggle(
-      "liquid-surface-disabled",
-      prefs.liquidGlass === false || prefs.blurEffect === false,
-    );
+    document.body.classList.toggle("liquid-surface-disabled", prefs.blurEffect === false);
     this.applyPageScale(prefs);
     this.applyAccentOptions(prefs);
     this.resetNavIndicator();
@@ -187,7 +187,11 @@ const Theme = {
     const root = document.documentElement;
     const prefs = Object.assign({}, THEME_UI_DEFAULTS, options || {});
     const accent = Number(prefs.accentColor) || 0;
-    const enabled = prefs.dynamicColor === true && accent !== 0;
+    const systemPalette = this._systemAccentPalette;
+    const systemAccent = this._isDarkResolved()
+      ? systemPalette?.darkPrimary
+      : systemPalette?.lightPrimary;
+    const enabled = prefs.dynamicColor === true && (accent !== 0 || !!systemAccent);
     root.classList.toggle("custom-accent", enabled);
     if (!enabled) {
       root.style.removeProperty("--color-primary");
@@ -196,9 +200,12 @@ const Theme = {
       root.style.removeProperty("--color-primary-border");
       root.style.removeProperty("--color-info");
       root.style.removeProperty("--color-text-on-primary");
+      if (!systemPalette) root.style.removeProperty("--system-accent-color");
       return;
     }
-    const base = this._hexToRgb(THEME_ACCENT_COLORS[accent] || this._argbToHex(accent));
+    const base = this._hexToRgb(
+      accent === 0 ? systemAccent : THEME_ACCENT_COLORS[accent] || this._argbToHex(accent),
+    );
     const style = prefs.colorStyle || THEME_UI_DEFAULTS.colorStyle;
     const spec = prefs.colorSpec || THEME_UI_DEFAULTS.colorSpec;
     const saturation =
@@ -223,16 +230,22 @@ const Theme = {
         Monochrome: 0,
       }[style] ?? 24;
     const specLightness = spec === "Spec2021" ? -2 : 0;
-    const primary = this._rgbToHex(
-      this._adjustColor(base, { saturation, lightness: specLightness }),
-    );
-    const secondary = this._rgbToHex(
-      this._adjustColor(base, {
-        hue: secondaryHue,
-        saturation: Math.max(0, saturation * 0.82),
-        lightness: spec === "Spec2021" ? 7 : 11,
-      }),
-    );
+    const primary =
+      accent === 0
+        ? systemAccent
+        : this._rgbToHex(this._adjustColor(base, { saturation, lightness: specLightness }));
+    const secondary =
+      accent === 0
+        ? this._isDarkResolved()
+          ? systemPalette?.darkSecondary || primary
+          : systemPalette?.lightSecondary || primary
+        : this._rgbToHex(
+            this._adjustColor(base, {
+              hue: secondaryHue,
+              saturation: Math.max(0, saturation * 0.82),
+              lightness: spec === "Spec2021" ? 7 : 11,
+            }),
+          );
     const primaryRgb = this._hexToRgb(primary);
     root.style.setProperty("--color-primary", primary);
     root.style.setProperty("--color-primary-2", secondary);
@@ -249,6 +262,29 @@ const Theme = {
       "--color-text-on-primary",
       this._relativeLuminance(primaryRgb) > 0.55 ? "#101828" : "#ffffff",
     );
+    if (systemPalette) {
+      root.style.setProperty(
+        "--system-accent-color",
+        this._isDarkResolved() ? systemPalette.darkPrimary : systemPalette.lightPrimary,
+      );
+    }
+  },
+
+  async refreshSystemAccent(force) {
+    if (!force && this._systemAccentPalette) return this._systemAccentPalette;
+    if (this._systemAccentRequest) return this._systemAccentRequest;
+    if (typeof Api === "undefined" || typeof Api.readSystemAccentPalette !== "function")
+      return null;
+    this._systemAccentRequest = Api.readSystemAccentPalette()
+      .then((palette) => {
+        if (palette) this._systemAccentPalette = palette;
+        this.applyAccentOptions(this.getUiOptions());
+        return this._systemAccentPalette;
+      })
+      .finally(() => {
+        this._systemAccentRequest = null;
+      });
+    return this._systemAccentRequest;
   },
 
   _isDarkResolved() {
@@ -382,6 +418,9 @@ const Theme = {
     mq.addEventListener("change", () => {
       if (this._current === "system") this.apply("system");
     });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && this.getUiOption("dynamicColor")) this.refreshSystemAccent(true);
+    });
   },
 
   _bindToggle() {
@@ -444,7 +483,12 @@ const Theme = {
       ".liquid-surface, .bottom-nav, .app-batch-bar, .modal-sheet, .dialog-box, .toast, .search-input-wrapper, .filter-group, .app-config-header, .status-card, .action-list, .app-list, .config-group, .theme-selector, .theme-settings-card, .template-card, .backup-restore-card, .log-card, .app-user-menu, .license-item";
     const update = (target, clientX, clientY) => {
       const surface = target?.closest?.(selector);
-      if (!surface || document.body.classList.contains("liquid-surface-disabled")) return;
+      if (
+        !surface ||
+        document.body.classList.contains("liquid-glass-disabled") ||
+        document.body.classList.contains("liquid-surface-disabled")
+      )
+        return;
       const rect = surface.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       surface.style.setProperty(
@@ -487,6 +531,11 @@ const Theme = {
       targetW: 0,
       lastClientX: 0,
       velocity: 0,
+      positionVelocity: 0,
+      widthVelocity: 0,
+      lastFrameTime: 0,
+      pressClientX: 0,
+      pressClientY: 0,
       raf: 0,
     };
 
@@ -517,8 +566,8 @@ const Theme = {
     };
     const resetLiquidMotion = () => {
       nav.style.setProperty("--nav-rubber-x", "0px");
-      nav.style.setProperty("--nav-indicator-scale-x", "1");
-      nav.style.setProperty("--nav-indicator-scale-y", "1");
+      indicator.style.setProperty("--nav-indicator-scale-x", "1");
+      indicator.style.setProperty("--nav-indicator-scale-y", "1");
     };
     const syncActiveClass = (item) => {
       items().forEach((n) => {
@@ -526,6 +575,9 @@ const Theme = {
         n.classList.toggle("active", active);
         n.classList.toggle("is-under-lens", active);
       });
+    };
+    const syncPressTarget = (item = null) => {
+      items().forEach((n) => n.classList.toggle("is-press-target", n === item));
     };
     const setTargetFromItem = (item, immediate) => {
       if (!item) return;
@@ -538,6 +590,8 @@ const Theme = {
       if (immediate) {
         state.currentX = left;
         state.currentW = width;
+        state.positionVelocity = 0;
+        state.widthVelocity = 0;
         indicator.style.left = left + "px";
         indicator.style.width = width + "px";
         resetLiquidMotion();
@@ -572,11 +626,11 @@ const Theme = {
       state.lastClientX = clientX;
       state.targetX = Math.max(6, Math.min(navBox.width - width - 6, x));
       state.targetW = width * (1 + clamp(Math.abs(state.velocity) / 260, 0, 0.11));
-      nav.style.setProperty(
+      indicator.style.setProperty(
         "--nav-indicator-scale-x",
         (1 + clamp(Math.abs(state.velocity) / 420, 0, 0.09)).toFixed(3),
       );
-      nav.style.setProperty(
+      indicator.style.setProperty(
         "--nav-indicator-scale-y",
         (1 - clamp(Math.abs(state.velocity) / 980, 0, 0.035)).toFixed(3),
       );
@@ -591,24 +645,44 @@ const Theme = {
     };
     const kickAnimation = () => {
       if (state.raf) return;
-      const frame = () => {
+      const frame = (time) => {
+        const frameScale = state.lastFrameTime
+          ? clamp((time - state.lastFrameTime) / 16.667, 0.5, 2)
+          : 1;
+        state.lastFrameTime = time;
         const dx = state.targetX - state.currentX;
         const dw = state.targetW - state.currentW;
-        const xEase = state.dragging ? 0.24 : 0.18;
-        const wEase = state.dragging ? 0.2 : 0.16;
-        state.currentX += dx * xEase;
-        state.currentW += dw * wEase;
-        if (Math.abs(dx) < 0.15) state.currentX = state.targetX;
-        if (Math.abs(dw) < 0.15) state.currentW = state.targetW;
+        const xSpring = state.dragging ? 0.22 : 0.16;
+        const xDamping = state.dragging ? 0.62 : 0.76;
+        const widthSpring = state.dragging ? 0.18 : 0.14;
+        const widthDamping = state.dragging ? 0.66 : 0.74;
+        state.positionVelocity =
+          (state.positionVelocity + dx * xSpring * frameScale) * Math.pow(xDamping, frameScale);
+        state.widthVelocity =
+          (state.widthVelocity + dw * widthSpring * frameScale) *
+          Math.pow(widthDamping, frameScale);
+        state.currentX += state.positionVelocity * frameScale;
+        state.currentW += state.widthVelocity * frameScale;
+        if (Math.abs(dx) < 0.12 && Math.abs(state.positionVelocity) < 0.12) {
+          state.currentX = state.targetX;
+          state.positionVelocity = 0;
+        }
+        if (Math.abs(dw) < 0.12 && Math.abs(state.widthVelocity) < 0.12) {
+          state.currentW = state.targetW;
+          state.widthVelocity = 0;
+        }
         indicator.style.left = state.currentX + "px";
         indicator.style.width = Math.max(40, state.currentW) + "px";
         if (
-          Math.abs(state.targetX - state.currentX) > 0.15 ||
-          Math.abs(state.targetW - state.currentW) > 0.15
+          Math.abs(state.targetX - state.currentX) > 0.12 ||
+          Math.abs(state.targetW - state.currentW) > 0.12 ||
+          Math.abs(state.positionVelocity) > 0.12 ||
+          Math.abs(state.widthVelocity) > 0.12
         ) {
           state.raf = requestAnimationFrame(frame);
         } else {
           state.raf = 0;
+          state.lastFrameTime = 0;
         }
       };
       state.raf = requestAnimationFrame(frame);
@@ -616,11 +690,17 @@ const Theme = {
 
     nav.addEventListener("pointerdown", (e) => {
       const item = e.target.closest(".nav-item");
-      if (!item) return;
+      if (!item || document.body.classList.contains("liquid-glass-disabled")) return;
       state.pointerId = e.pointerId;
       state.activeItem = item;
       state.lastClientX = e.clientX;
+      state.pressClientX = e.clientX;
+      state.pressClientY = e.clientY;
       state.velocity = 0;
+      clearTimeout(nav._movingTimer);
+      nav.classList.remove("is-moving");
+      nav.classList.add("is-pressing");
+      syncPressTarget(item);
       updateLightFromPointer(e.clientX, e.clientY);
       clearTimeout(state.longPressTimer);
       state.longPressTimer = setTimeout(() => {
@@ -628,14 +708,25 @@ const Theme = {
         nav.classList.add("dragging");
         nav.setPointerCapture?.(state.pointerId);
         setTargetFromItem(item, true);
-      }, 260);
+        syncPressTarget();
+      }, 220);
     });
-    nav.addEventListener("pointermove", (e) => {
-      if (!state.dragging || e.pointerId !== state.pointerId) return;
+    window.addEventListener("pointermove", (e) => {
+      if (e.pointerId !== state.pointerId) return;
+      if (!state.dragging) {
+        const movement = Math.hypot(e.clientX - state.pressClientX, e.clientY - state.pressClientY);
+        if (movement > 8) {
+          clearTimeout(state.longPressTimer);
+          nav.classList.remove("is-pressing");
+          syncPressTarget();
+        }
+        return;
+      }
       e.preventDefault();
       updateTargetFromPointer(e.clientX, e.clientY);
     });
     const finish = (e) => {
+      if (state.pointerId === null || e.pointerId !== state.pointerId) return;
       clearTimeout(state.longPressTimer);
       if (state.dragging && state.activeItem) {
         e.preventDefault();
@@ -653,13 +744,17 @@ const Theme = {
         }
       }
       state.dragging = false;
+      if (state.pointerId !== null && nav.hasPointerCapture?.(state.pointerId)) {
+        nav.releasePointerCapture?.(state.pointerId);
+      }
       state.pointerId = null;
-      nav.classList.remove("dragging");
+      nav.classList.remove("is-pressing", "dragging");
+      syncPressTarget();
       resetLiquidMotion();
       kickAnimation();
     };
-    nav.addEventListener("pointerup", finish);
-    nav.addEventListener("pointercancel", finish);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   },
 
   _pulseIndicator(container) {
@@ -696,7 +791,8 @@ const Theme = {
     const nav = document.getElementById("bottomNav");
     const navIndicator = nav?.querySelector(".nav-indicator");
     if (!nav || !navIndicator) return;
-    nav.classList.remove("is-moving", "dragging");
+    nav.classList.remove("is-pressing", "is-moving", "dragging");
+    nav.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("is-press-target"));
     navIndicator.style.transform = "";
     const align = () => {
       const active = nav.querySelector(".nav-item.active");
@@ -970,7 +1066,8 @@ const Theme = {
       document.body.classList.toggle("about-active", page === "about");
       document.body.classList.toggle("apps-page-active", page === "apps");
       document.body.classList.toggle("logs-page-active", page === "logs");
-      const isSecondaryPage = page === "app-config" || page === "about" || page === "update";
+      const isSecondaryPage =
+        page === "app-config" || page === "about" || page === "update" || page === "theme";
       document.body.classList.toggle("app-config-active", page === "app-config");
       document.body.classList.toggle("secondary-page-active", isSecondaryPage);
       document.getElementById("bottomNav")?.toggleAttribute("hidden", isSecondaryPage);
@@ -980,15 +1077,17 @@ const Theme = {
     document.querySelectorAll(".nav-item").forEach((n) => {
       n.classList.remove("active");
       n.classList.remove("is-under-lens");
+      n.classList.remove("is-press-target");
     });
     const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
     if (navItem) {
       navItem.classList.add("active");
       this._syncNavLens(navItem);
-    } else if (page === "about" || page === "update") {
-      const dashboardNav = document.querySelector('.nav-item[data-page="dashboard"]');
-      dashboardNav?.classList.add("active");
-      this._syncNavLens(dashboardNav);
+    } else if (page === "about" || page === "update" || page === "theme") {
+      const parentPage = page === "theme" ? "settings" : "dashboard";
+      const parentNav = document.querySelector('.nav-item[data-page="' + parentPage + '"]');
+      parentNav?.classList.add("active");
+      this._syncNavLens(parentNav);
     }
     requestAnimationFrame(() => this.resetNavIndicator());
     if (page === "apps") requestAnimationFrame(() => this.resetFilterIndicator());
