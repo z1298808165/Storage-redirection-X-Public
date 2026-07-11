@@ -1,11 +1,12 @@
 use libc::{
     IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED, IN_ISDIR,
-    IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_Q_OVERFLOW, c_void, inotify_add_watch,
+    IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_Q_OVERFLOW, c_void, inotify_add_watch,
     inotify_event, inotify_init1, read,
 };
 use std::ffi::CString;
 
 const EVENT_MASK: u32 = IN_CREATE
+    | IN_MODIFY
     | IN_CLOSE_WRITE
     | IN_MOVED_TO
     | IN_MOVED_FROM
@@ -71,7 +72,15 @@ pub(super) fn is_self_removed(mask: u32) -> bool {
 }
 
 pub(super) fn is_relevant_event(mask: u32) -> bool {
-    (mask & (IN_CREATE | IN_CLOSE_WRITE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_ATTRIB)) != 0
+    (mask
+        & (IN_CREATE
+            | IN_MODIFY
+            | IN_CLOSE_WRITE
+            | IN_MOVED_TO
+            | IN_MOVED_FROM
+            | IN_DELETE
+            | IN_ATTRIB))
+        != 0
 }
 
 pub(super) fn is_dir(mask: u32) -> bool {

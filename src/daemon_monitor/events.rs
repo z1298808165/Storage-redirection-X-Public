@@ -4,7 +4,9 @@ use super::roots::map_record_from_path;
 use crate::config::SettingsHub;
 use crate::platform::{self, paths};
 use crate::redirect::policy;
-use libc::{IN_ATTRIB, IN_CLOSE_WRITE, IN_DELETE, IN_MOVED_FROM, IN_MOVED_TO, mode_t, time, tm};
+use libc::{
+    IN_ATTRIB, IN_CLOSE_WRITE, IN_DELETE, IN_MODIFY, IN_MOVED_FROM, IN_MOVED_TO, mode_t, time, tm,
+};
 use std::os::unix::fs::MetadataExt;
 
 const LOGCAT_OP_TAG: &str = "FileMonitorOp";
@@ -540,7 +542,7 @@ pub(super) fn monitor_operation_from_mask(mask: u32) -> &'static str {
         "delete"
     } else if (mask & IN_ATTRIB) != 0 {
         "attrib"
-    } else if (mask & IN_CLOSE_WRITE) != 0 {
+    } else if (mask & (IN_MODIFY | IN_CLOSE_WRITE)) != 0 {
         "open:write"
     } else {
         "inotify"
