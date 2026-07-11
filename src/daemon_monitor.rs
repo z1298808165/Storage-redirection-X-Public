@@ -88,9 +88,9 @@ impl RegularAppMonitor {
             && paths::monotonic_ms().saturating_sub(self.last_rebuild_ms) >= MISSING_ROOT_RETRY_MS
     }
 
-    pub fn reconfigure(&mut self, config: &SettingsHub, force: bool) {
+    pub fn reconfigure(&mut self, config: &SettingsHub) {
         let version = config.config_version();
-        if !force && !self.needs_rebuild && self.config_version == version {
+        if !self.needs_rebuild && self.config_version == version {
             if self.should_retry_missing_roots() {
                 self.retry_missing_watch_roots();
             }

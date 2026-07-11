@@ -86,7 +86,7 @@ pub fn main_entry() -> i32 {
             reconcile_running_apps(current, mode);
             last_version = current;
         }
-        file_monitor.reconfigure(config, should_reconcile);
+        file_monitor.reconfigure(config);
         file_monitor.drain_events();
         round = round.saturating_add(1);
         thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
