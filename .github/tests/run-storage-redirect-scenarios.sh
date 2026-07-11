@@ -1653,8 +1653,15 @@ run_file_monitor_existing_write_case() {
   check_file_exists "scenario-${scenario}-${label}-seed" "$backend_path" || return 1
   sleep_ms 1800
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
-  run_service_case "$scenario" "$label" "file_overwrite" '^PASS \[file_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD" &&
+  local previous_fresh_app_per_case="$SRT_FRESH_APP_PER_CASE"
+  SRT_FRESH_APP_PER_CASE=0
+  if run_service_case "$scenario" "$label" "file_overwrite" '^PASS \[file_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD"; then
+    SRT_FRESH_APP_PER_CASE="$previous_fresh_app_per_case"
     wait_file_monitor_log_line "$scenario" "$label" "$file_name" write
+  else
+    SRT_FRESH_APP_PER_CASE="$previous_fresh_app_per_case"
+    return 1
+  fi
 }
 
 run_file_monitor_mediastore_success_case() {

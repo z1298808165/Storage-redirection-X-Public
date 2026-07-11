@@ -894,7 +894,13 @@ function Invoke-FileMonitorExistingWriteCase {
     if (-not $seed.Ok -or -not (Require-File "scenario-$Scenario" "$Label seed" $BackendPath)) { return $false }
     Start-Sleep -Milliseconds 1800
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" $Label "file_overwrite" @{ file_path = $RequestPath; payload = $Payload } "^PASS \[file_overwrite\]").Ok
+    $previousFreshAppPerCase = $script:FreshAppPerCase
+    try {
+        $script:FreshAppPerCase = $false
+        $ok = (Invoke-ServiceCase "scenario-$Scenario" $Label "file_overwrite" @{ file_path = $RequestPath; payload = $Payload } "^PASS \[file_overwrite\]").Ok
+    } finally {
+        $script:FreshAppPerCase = $previousFreshAppPerCase
+    }
     $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "write") -and $ok
     $ok
 }
