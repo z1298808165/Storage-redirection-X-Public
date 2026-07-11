@@ -1652,7 +1652,10 @@ run_file_monitor_existing_write_case() {
   run_write_case "$scenario" "${label}-seed" "$request_path" "${PAYLOAD}-seed-tail" || return 1
   check_file_exists "scenario-${scenario}-${label}-seed" "$backend_path" || return 1
   sleep_ms 1800
-  prepare_file_monitor_assertion "$scenario" "$label" || return 1
+  assert_file_monitor_enabled_for_scenario "$scenario" "$label" || return 1
+  adb logcat -c >/dev/null 2>&1 || true
+  clear_file_monitor_log
+  sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
   local previous_fresh_app_per_case="$SRT_FRESH_APP_PER_CASE"
   SRT_FRESH_APP_PER_CASE=0
   if run_service_case "$scenario" "$label" "file_overwrite" '^PASS \[file_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD"; then

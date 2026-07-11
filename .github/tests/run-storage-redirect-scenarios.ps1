@@ -893,7 +893,10 @@ function Invoke-FileMonitorExistingWriteCase {
     $seed = Invoke-WriteCase ([int]$Scenario) "$Label-seed" $RequestPath "$Payload-seed-tail"
     if (-not $seed.Ok -or -not (Require-File "scenario-$Scenario" "$Label seed" $BackendPath)) { return $false }
     Start-Sleep -Milliseconds 1800
-    if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
+    if (-not (Test-FileMonitorEnabledForScenario $Scenario $Label)) { return $false }
+    Invoke-Adb @("logcat", "-c") | Out-Null
+    Clear-FileMonitorLog
+    Start-Sleep -Milliseconds $script:ServiceCaseSettleMilliseconds
     $previousFreshAppPerCase = $script:FreshAppPerCase
     try {
         $script:FreshAppPerCase = $false
