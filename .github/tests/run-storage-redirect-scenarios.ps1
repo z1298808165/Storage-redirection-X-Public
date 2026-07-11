@@ -765,7 +765,7 @@ function Wait-FileMonitorLogLine {
         [string]$Scenario,
         [string]$Label,
         [string]$FileName,
-        [ValidateSet("success", "failure")]
+        [ValidateSet("success", "failure", "write")]
         [string]$Expected,
         [int]$TimeoutSeconds = 30,
         [switch]$AllowCapacityLimitedInotifyMiss
@@ -778,6 +778,10 @@ function Wait-FileMonitorLogLine {
         )
         foreach ($line in $lines) {
             if ($Expected -eq "success" -and $line -notmatch "ret=-1" -and $line -notmatch "op=close_write") {
+                Write-Host "  - monitor_log_found $Scenario/$Label file=$FileName expected=$Expected"
+                return $true
+            }
+            if ($Expected -eq "write" -and $line -match "\|OPEN\|" -and $line -match "op=open:write" -and $line -notmatch "ret=-1") {
                 Write-Host "  - monitor_log_found $Scenario/$Label file=$FileName expected=$Expected"
                 return $true
             }
@@ -883,6 +887,17 @@ function Invoke-FileMonitorWriteDeniedCase {
     $false
 }
 
+function Invoke-FileMonitorExistingWriteCase {
+    param([string]$Scenario, [string]$Label, [string]$RequestPath, [string]$BackendPath)
+    $fileName = ($RequestPath -split '/')[-1]
+    $backendDir = ($BackendPath -replace '/[^/]+$', '')
+    Invoke-Su "mkdir -p '$backendDir'; printf old > '$BackendPath'; chmod 666 '$BackendPath'" | Out-Null
+    if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
+    $ok = (Invoke-WriteCase ([int]$Scenario) $Label $RequestPath $Payload).Ok
+    $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "write") -and $ok
+    $ok
+}
+
 function Invoke-FileMonitorMediaStoreSuccessCase {
     param(
         [string]$Scenario,
@@ -951,6 +966,7 @@ function Invoke-RegularMonitorScenario {
     param([string]$Scenario)
     $allowFile = "srt_monitor_${Scenario}_allow.bin"
     $mapFile = "srt_monitor_${Scenario}_map.bin"
+    $existingFile = "srt_monitor_${Scenario}_existing.bin"
     $lockedFile = "srt_monitor_${Scenario}_locked.bin"
     $writableFile = "srt_monitor_${Scenario}_writable.bin"
     $ok = $true
@@ -961,6 +977,7 @@ function Invoke-RegularMonitorScenario {
         Write-Host "regular_allow_write_skipped scenario=$Scenario reason=mount-namespace-allowed-real-direct-write-is-platform-permission-sensitive"
     }
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-mapped-write" "$MonitorMapRequest/$mapFile" "$MonitorMapTarget/$mapFile" "" $false $false "ordinary-app-direct-mapped-write") -and $ok
+    $ok = (Invoke-FileMonitorExistingWriteCase $Scenario "regular-existing-write" "$MonitorMapRequest/$existingFile" "$MonitorMapTarget/$existingFile") -and $ok
     $ok = (Invoke-FileMonitorWriteDeniedCase $Scenario "regular-read-only-denied" "$MonitorLockedRoot/$lockedFile") -and $ok
     $ok = (Invoke-FileMonitorWriteSuccessCase $Scenario "regular-read-only-excluded-write" "$MonitorWritableRoot/$writableFile" "$MonitorWritableRoot/$writableFile" "$PrivateMonitorWritableRoot/$writableFile" $true $false "ordinary-app-read-only-exclusion-direct-write") -and $ok
     $ok

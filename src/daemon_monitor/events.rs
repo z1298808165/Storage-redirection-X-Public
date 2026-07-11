@@ -129,7 +129,9 @@ pub(super) fn emit_monitor_event(
         return;
     }
 
-    let event_kind = if operation_name.starts_with("delete") {
+    let event_kind = if operation_name.starts_with("open") {
+        "OPEN"
+    } else if operation_name.starts_with("delete") {
         "DELETE"
     } else if operation_name.starts_with("rename") {
         "RENAME"
@@ -531,10 +533,6 @@ pub(super) fn should_filter_display_path(path: &str, operation_name: &str) -> bo
         || SettingsHub::instance().should_filter_monitor_record(path, operation_name)
 }
 
-pub(super) fn should_emit_monitor_operation(operation_name: &str) -> bool {
-    operation_name != "close_write"
-}
-
 pub(super) fn monitor_operation_from_mask(mask: u32) -> &'static str {
     if (mask & (IN_MOVED_TO | IN_MOVED_FROM)) != 0 {
         "rename"
@@ -543,7 +541,7 @@ pub(super) fn monitor_operation_from_mask(mask: u32) -> &'static str {
     } else if (mask & IN_ATTRIB) != 0 {
         "attrib"
     } else if (mask & IN_CLOSE_WRITE) != 0 {
-        "close_write"
+        "open:write"
     } else {
         "inotify"
     }

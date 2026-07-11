@@ -665,6 +665,13 @@ wait_file_monitor_log_line() {
           return 0
         fi
         ;;
+      write)
+        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- '|OPEN|' | grep -F -- 'op=open:write' | grep -Fv -- 'ret=-1' || true")"
+        if [ -n "$matches" ]; then
+          echo "monitor_log_found scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
+          return 0
+        fi
+        ;;
       failure)
         matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- 'ret=-1' | grep -F -- 'deny_reason=read_only_rule' || true")"
         if [ -n "$matches" ]; then
@@ -1634,6 +1641,20 @@ run_file_monitor_write_denied_case() {
   return 1
 }
 
+run_file_monitor_existing_write_case() {
+  local scenario="$1"
+  local label="$2"
+  local request_path="$3"
+  local backend_path="$4"
+  local file_name
+  file_name="$(basename "$request_path")"
+
+  adb_su "mkdir -p '$(dirname "$backend_path")'; printf old > '$backend_path'; chmod 666 '$backend_path'" || return 1
+  prepare_file_monitor_assertion "$scenario" "$label" || return 1
+  run_write_case "$scenario" "$label" "$request_path" "$PAYLOAD" &&
+    wait_file_monitor_log_line "$scenario" "$label" "$file_name" write
+}
+
 run_file_monitor_mediastore_success_case() {
   local scenario="$1"
   local label="$2"
@@ -1697,9 +1718,10 @@ run_file_monitor_disabled_redirect_scenario() {
 
 run_file_monitor_regular_scenario() {
   local scenario="$1"
-  local allow_file map_file locked_file writable_file
+  local allow_file map_file existing_file locked_file writable_file
   allow_file="$(monitor_file_name "$scenario" "regular_allow")"
   map_file="$(monitor_file_name "$scenario" "regular_map")"
+  existing_file="$(monitor_file_name "$scenario" "regular_existing")"
   locked_file="$(monitor_file_name "$scenario" "regular_locked")"
   writable_file="$(monitor_file_name "$scenario" "regular_writable")"
 
@@ -1711,6 +1733,7 @@ run_file_monitor_regular_scenario() {
   fi
 
   run_file_monitor_write_success_case "$scenario" "regular-mapped-write" "$MONITOR_MAP_REQUEST/$map_file" "$MONITOR_MAP_TARGET/$map_file" "" 0 0 "ordinary-app-direct-mapped-write" &&
+    run_file_monitor_existing_write_case "$scenario" "regular-existing-write" "$MONITOR_MAP_REQUEST/$existing_file" "$MONITOR_MAP_TARGET/$existing_file" &&
     run_file_monitor_write_denied_case "$scenario" "regular-read-only-denied" "$MONITOR_LOCKED_ROOT/$locked_file" "$MONITOR_LOCKED_ROOT/$locked_file" &&
     run_file_monitor_write_success_case "$scenario" "regular-read-only-excluded-write" "$MONITOR_WRITABLE_ROOT/$writable_file" "$MONITOR_WRITABLE_ROOT/$writable_file" "$PRIVATE_MONITOR_WRITABLE_ROOT/$writable_file" 1 0 "ordinary-app-read-only-exclusion-direct-write"
 }

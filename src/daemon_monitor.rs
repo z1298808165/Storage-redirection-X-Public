@@ -9,9 +9,9 @@ use crate::config::SettingsHub;
 use crate::platform::paths;
 use events::{
     MonitorEventPaths, emit_monitor_event, monitor_operation_from_mask,
-    repair_monitored_backend_owner, resolve_monitor_identity, should_emit_monitor_operation,
-    should_filter_display_path, should_skip_ambiguous_allowed_real_path_event,
-    should_skip_ambiguous_read_only_path_event, should_skip_public_root_event_identity,
+    repair_monitored_backend_owner, resolve_monitor_identity, should_filter_display_path,
+    should_skip_ambiguous_allowed_real_path_event, should_skip_ambiguous_read_only_path_event,
+    should_skip_public_root_event_identity,
 };
 use libc::inotify_event;
 use roots::{
@@ -465,9 +465,6 @@ impl RegularAppMonitor {
             }
 
             let operation_name = monitor_operation_from_mask(mask);
-            if !should_emit_monitor_operation(operation_name) {
-                continue;
-            }
             if !should_record_display_path(&event_paths.display_path, &node.record_display_root)
                 || should_filter_display_path(&event_paths.display_path, operation_name)
                 || is_under_any_root(&event_paths.display_path, &node.excluded_roots)
@@ -501,6 +498,7 @@ impl RegularAppMonitor {
                 &event_paths.display_path,
                 &event_paths.from_path,
                 operation_name,
+                mask,
             ) {
                 continue;
             }
@@ -521,9 +519,20 @@ impl RegularAppMonitor {
         path: &str,
         from_path: &str,
         operation_name: &str,
+        mask: u32,
     ) -> bool {
-        let event_key = format!("{}|{}|{}|{}", package_name, operation_name, path, from_path);
         let now_ms = paths::monotonic_ms();
+        let create_key = format!("{}|create|{}|{}", package_name, path, from_path);
+        if operation_name == "open:write"
+            && self
+                .recent_event_ms
+                .get(&create_key)
+                .is_some_and(|last_ms| now_ms.saturating_sub(*last_ms) < DUPLICATE_EVENT_WINDOW_MS)
+        {
+            return true;
+        }
+
+        let event_key = format!("{}|{}|{}|{}", package_name, operation_name, path, from_path);
         if let Some(last_ms) = self.recent_event_ms.get_mut(&event_key) {
             if now_ms.saturating_sub(*last_ms) < DUPLICATE_EVENT_WINDOW_MS {
                 *last_ms = now_ms;
@@ -535,6 +544,10 @@ impl RegularAppMonitor {
 
         self.recent_event_ms.insert(event_key.clone(), now_ms);
         self.recent_event_order.push_back(event_key);
+        if inotify::is_created_or_moved_to(mask) {
+            self.recent_event_ms.insert(create_key.clone(), now_ms);
+            self.recent_event_order.push_back(create_key);
+        }
         while self.recent_event_order.len() > MAX_RECENT_EVENTS {
             if let Some(oldest) = self.recent_event_order.pop_front() {
                 self.recent_event_ms.remove(&oldest);
