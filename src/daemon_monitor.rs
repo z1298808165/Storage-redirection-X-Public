@@ -88,6 +88,10 @@ impl RegularAppMonitor {
             && paths::monotonic_ms().saturating_sub(self.last_rebuild_ms) >= MISSING_ROOT_RETRY_MS
     }
 
+    pub fn configured_version(&self) -> u64 {
+        self.config_version
+    }
+
     pub fn reconfigure(&mut self, config: &SettingsHub) {
         let version = config.config_version();
         if !self.needs_rebuild && self.config_version == version {

@@ -7,6 +7,7 @@ use crate::redirect_policy as policy;
 use crate::runtime_control;
 use std::collections::HashSet;
 use std::fs as std_fs;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -14,6 +15,8 @@ use std::time::Duration;
 const RECONCILE_INTERVAL_MS: u64 = 1000;
 const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
+const FILE_MONITOR_POLL_MS: u64 = 100;
+const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
 const PREWARM_MAX_REQUESTS: usize = 16;
@@ -54,7 +57,8 @@ pub fn main_entry() -> i32 {
     let mut last_periodic_reconcile_ms = crate::platform::paths::monotonic_ms();
     let mut round: usize = 0;
     let mut pending_full_reconcile = false;
-    let mut file_monitor = RegularAppMonitor::new();
+    let file_monitor_version = start_file_monitor_thread();
+    let mut fallback_file_monitor = file_monitor_version.is_none().then(RegularAppMonitor::new);
     loop {
         if !runtime_control::is_module_runtime_enabled() {
             log::info!("daemon stop reason=runtime_disabled");
@@ -70,8 +74,11 @@ pub fn main_entry() -> i32 {
             || current != before
             || pending_full_reconcile
             || periodic_reconcile;
-        file_monitor.reconfigure(config);
+        if let Some(file_monitor) = fallback_file_monitor.as_mut() {
+            file_monitor.reconfigure(config);
+        }
         if should_reconcile {
+            wait_for_file_monitor_version(file_monitor_version.as_ref(), current);
             policy::refresh_shared_uid_cache();
             let mode = if pending_full_reconcile {
                 pending_full_reconcile = false;
@@ -87,9 +94,54 @@ pub fn main_entry() -> i32 {
             reconcile_running_apps(current, mode);
             last_version = current;
         }
-        file_monitor.drain_events();
+        if let Some(file_monitor) = fallback_file_monitor.as_mut() {
+            file_monitor.drain_events();
+        }
         round = round.saturating_add(1);
         thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
+    }
+}
+
+fn start_file_monitor_thread() -> Option<Arc<AtomicU64>> {
+    let configured_version = Arc::new(AtomicU64::new(0));
+    let thread_version = Arc::clone(&configured_version);
+    let spawn_result = thread::Builder::new()
+        .name("srx-file-monitor".to_string())
+        .spawn(move || {
+            let config = SettingsHub::instance();
+            let mut file_monitor = RegularAppMonitor::new();
+            while runtime_control::is_module_runtime_enabled() {
+                file_monitor.reconfigure(config);
+                thread_version.store(file_monitor.configured_version(), Ordering::Release);
+                file_monitor.drain_events();
+                thread::sleep(Duration::from_millis(FILE_MONITOR_POLL_MS));
+            }
+            log::info!("daemon file monitor stop reason=runtime_disabled");
+        });
+    if let Err(error) = spawn_result {
+        log::warn!("daemon file monitor thread start failed error={}", error);
+        return None;
+    }
+    Some(configured_version)
+}
+
+fn wait_for_file_monitor_version(configured_version: Option<&Arc<AtomicU64>>, version: u64) {
+    let Some(configured_version) = configured_version else {
+        return;
+    };
+    let started_ms = crate::platform::paths::monotonic_ms();
+    while configured_version.load(Ordering::Acquire) < version {
+        if crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
+            >= FILE_MONITOR_SYNC_TIMEOUT_MS
+        {
+            log::warn!(
+                "daemon file monitor config sync timeout expected={:x} actual={:x}",
+                version,
+                configured_version.load(Ordering::Acquire)
+            );
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
