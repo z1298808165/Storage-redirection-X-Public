@@ -891,7 +891,9 @@ function Invoke-FileMonitorExistingWriteCase {
     param([string]$Scenario, [string]$Label, [string]$RequestPath, [string]$BackendPath)
     $fileName = ($RequestPath -split '/')[-1]
     $backendDir = ($BackendPath -replace '/[^/]+$', '')
-    Invoke-Su "mkdir -p '$backendDir'; printf old > '$BackendPath'; chmod 666 '$BackendPath'" | Out-Null
+    $uid = ((& adb shell "cmd package list packages -U '$AppId' 2>/dev/null | sed -n 's/.* uid://p' | head -1") -join "").Trim()
+    if (-not $uid) { return $false }
+    Invoke-Su "mkdir -p '$backendDir'; printf old > '$BackendPath'; chown '$uid`:1023' '$BackendPath'; chmod 660 '$BackendPath'" | Out-Null
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-WriteCase ([int]$Scenario) $Label $RequestPath $Payload).Ok
     $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "write") -and $ok

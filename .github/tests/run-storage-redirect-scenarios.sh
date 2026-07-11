@@ -1646,10 +1646,12 @@ run_file_monitor_existing_write_case() {
   local label="$2"
   local request_path="$3"
   local backend_path="$4"
-  local file_name
+  local file_name uid
+  uid=$(test_app_uid)
+  [ -n $uid ] || return 1
   file_name="$(basename "$request_path")"
 
-  adb_su "mkdir -p '$(dirname "$backend_path")'; printf old > '$backend_path'; chmod 666 '$backend_path'" || return 1
+  adb_su "mkdir -p '$(dirname "$backend_path")'; printf old > '$backend_path'; chown '$uid':1023 '$backend_path'; chmod 660 '$backend_path'" || return 1
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
   run_write_case "$scenario" "$label" "$request_path" "$PAYLOAD" &&
     wait_file_monitor_log_line "$scenario" "$label" "$file_name" write
