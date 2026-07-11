@@ -70,6 +70,7 @@ pub fn main_entry() -> i32 {
             || current != before
             || pending_full_reconcile
             || periodic_reconcile;
+        file_monitor.reconfigure(config);
         if should_reconcile {
             policy::refresh_shared_uid_cache();
             let mode = if pending_full_reconcile {
@@ -86,7 +87,6 @@ pub fn main_entry() -> i32 {
             reconcile_running_apps(current, mode);
             last_version = current;
         }
-        file_monitor.reconfigure(config);
         file_monitor.drain_events();
         round = round.saturating_add(1);
         thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
