@@ -890,10 +890,9 @@ function Invoke-FileMonitorWriteDeniedCase {
 function Invoke-FileMonitorExistingWriteCase {
     param([string]$Scenario, [string]$Label, [string]$RequestPath, [string]$BackendPath)
     $fileName = ($RequestPath -split '/')[-1]
-    $backendDir = ($BackendPath -replace '/[^/]+$', '')
-    $uid = ((& adb shell "cmd package list packages -U '$AppId' 2>/dev/null | sed -n 's/.* uid://p' | head -1") -join "").Trim()
-    if (-not $uid) { return $false }
-    Invoke-Su "mkdir -p '$backendDir'; printf old > '$BackendPath'; chown '$uid`:1023' '$BackendPath'; chmod 660 '$BackendPath'" | Out-Null
+    $seed = Invoke-WriteCase ([int]$Scenario) "$Label-seed" $RequestPath "seed"
+    if (-not $seed.Ok -or -not (Require-File "scenario-$Scenario" "$Label seed" $BackendPath)) { return $false }
+    Start-Sleep -Milliseconds 1800
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
     $ok = (Invoke-WriteCase ([int]$Scenario) $Label $RequestPath $Payload).Ok
     $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "write") -and $ok
