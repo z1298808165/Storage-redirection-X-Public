@@ -144,6 +144,15 @@ class StorageRedirectTestRunner(
           )
       results +=
           runLogged(
+              TestCase.FILE_WRITE_THEN_OVERWRITE,
+              TestCaseArgs(
+                  filePath = File(fileRoot, "write_then_overwrite.txt").absolutePath,
+                  payload = "overwrite".toByteArray(),
+                  expectedPayload = TestFixtures.filePayload("write-then-overwrite-seed"),
+              ),
+          )
+      results +=
+          runLogged(
               TestCase.FILE_OVERWRITE,
               TestCaseArgs(
                   filePath = filePath,

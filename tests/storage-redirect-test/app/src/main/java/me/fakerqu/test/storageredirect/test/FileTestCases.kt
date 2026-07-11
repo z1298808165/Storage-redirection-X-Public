@@ -171,6 +171,60 @@ class FileTestCases(
         )
       }
 
+  fun writeThenOverwrite(args: TestCaseArgs): TestResult =
+      TestCase.FILE_WRITE_THEN_OVERWRITE.measure {
+        val targetPath =
+            args.requireFilePath(TestCase.FILE_WRITE_THEN_OVERWRITE)
+                ?: return@measure args.missingPathResult(TestCase.FILE_WRITE_THEN_OVERWRITE)
+        val seed =
+            args.expectedPayload
+                ?: return@measure TestCase.FILE_WRITE_THEN_OVERWRITE.fail(
+                    message = "missing required parameter: ${TestCaseArgs.EXTRA_EXPECTED_PAYLOAD}",
+                    metadata = pathMetadata(targetPath),
+                )
+        val payload = args.payloadOr(TestFixtures.filePayload("overwrite"))
+        if (payload.size > seed.size) {
+          return@measure TestCase.FILE_WRITE_THEN_OVERWRITE.fail(
+              message = "payload exceeds seed size",
+              metadata =
+                  pathMetadata(targetPath) +
+                      mapOf(
+                          "seedSize" to seed.size.toString(),
+                          "payloadSize" to payload.size.toString(),
+                      ),
+          )
+        }
+        val readBack =
+            RandomAccessFile(File(targetPath), "rw").use { file ->
+              file.write(seed)
+              file.fd.sync()
+              Thread.sleep(OVERWRITE_SETTLE_DELAY_MS)
+              file.seek(0)
+              file.write(payload)
+              file.fd.sync()
+              ByteArray(seed.size).also {
+                file.seek(0)
+                file.readFully(it)
+              }
+            }
+        val expected = seed.copyOf().also { payload.copyInto(it) }
+        if (!readBack.contentEquals(expected)) {
+          return@measure TestCase.FILE_WRITE_THEN_OVERWRITE.fail(
+              message = "read after overwrite did not preserve seed suffix",
+              metadata = pathMetadata(targetPath),
+          )
+        }
+        TestCase.FILE_WRITE_THEN_OVERWRITE.pass(
+            message = "write and in-place overwrite succeeded",
+            metadata =
+                pathMetadata(targetPath) +
+                    mapOf(
+                        "bytesWritten" to payload.size.toString(),
+                        "fileSize" to readBack.size.toString(),
+                    ),
+        )
+      }
+
   fun writeDenied(args: TestCaseArgs): TestResult =
       TestCase.FILE_WRITE_DENIED.measure {
         val targetPath =
@@ -702,6 +756,7 @@ class FileTestCases(
     private const val MAX_LISTED_ENTRIES = 40
     private const val EXISTS_RETRY_COUNT = 10
     private const val EXISTS_RETRY_DELAY_MS = 100L
+    private const val OVERWRITE_SETTLE_DELAY_MS = 1800L
     private const val DEFAULT_TRUNCATE_LENGTH = 4L
     private const val DEFAULT_CHMOD_MODE = 384
   }

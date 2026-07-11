@@ -1647,24 +1647,13 @@ run_file_monitor_existing_write_case() {
   local request_path="$3"
   local backend_path="$4"
   local file_name
+  local seed_payload="${PAYLOAD}-seed-tail"
   file_name="$(basename "$request_path")"
 
-  run_write_case "$scenario" "${label}-seed" "$request_path" "${PAYLOAD}-seed-tail" || return 1
-  check_file_exists "scenario-${scenario}-${label}-seed" "$backend_path" || return 1
-  sleep_ms 1800
-  assert_file_monitor_enabled_for_scenario "$scenario" "$label" || return 1
-  adb logcat -c >/dev/null 2>&1 || true
-  clear_file_monitor_log
-  sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
-  local previous_fresh_app_per_case="$SRT_FRESH_APP_PER_CASE"
-  SRT_FRESH_APP_PER_CASE=0
-  if run_service_case "$scenario" "$label" "file_overwrite" '^PASS \[file_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD"; then
-    SRT_FRESH_APP_PER_CASE="$previous_fresh_app_per_case"
+  prepare_file_monitor_assertion "$scenario" "$label" || return 1
+  run_service_case "$scenario" "$label" "file_write_then_overwrite" '^PASS \[file_write_then_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD" --es expected_payload "$seed_payload" &&
+    check_file_exists "scenario-${scenario}-${label}-expected" "$backend_path" &&
     wait_file_monitor_log_line "$scenario" "$label" "$file_name" write
-  else
-    SRT_FRESH_APP_PER_CASE="$previous_fresh_app_per_case"
-    return 1
-  fi
 }
 
 run_file_monitor_mediastore_success_case() {
