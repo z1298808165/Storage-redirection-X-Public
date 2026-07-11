@@ -524,6 +524,7 @@ impl RegularAppMonitor {
         let now_ms = paths::monotonic_ms();
         let create_key = format!("{}|create|{}|{}", package_name, path, from_path);
         if operation_name == "open:write"
+            && !inotify::is_modify(mask)
             && self
                 .recent_event_ms
                 .get(&create_key)
@@ -533,6 +534,17 @@ impl RegularAppMonitor {
         }
 
         let event_key = format!("{}|{}|{}|{}", package_name, operation_name, path, from_path);
+        if inotify::is_modify(mask) {
+            if self
+                .recent_event_ms
+                .insert(event_key.clone(), now_ms)
+                .is_none()
+            {
+                self.recent_event_order.push_back(event_key);
+            }
+            self.trim_recent_events();
+            return false;
+        }
         if let Some(last_ms) = self.recent_event_ms.get_mut(&event_key) {
             if now_ms.saturating_sub(*last_ms) < DUPLICATE_EVENT_WINDOW_MS {
                 *last_ms = now_ms;
@@ -548,12 +560,16 @@ impl RegularAppMonitor {
             self.recent_event_ms.insert(create_key.clone(), now_ms);
             self.recent_event_order.push_back(create_key);
         }
+        self.trim_recent_events();
+        false
+    }
+
+    fn trim_recent_events(&mut self) {
         while self.recent_event_order.len() > MAX_RECENT_EVENTS {
             if let Some(oldest) = self.recent_event_order.pop_front() {
                 self.recent_event_ms.remove(&oldest);
             }
         }
-        false
     }
 }
 

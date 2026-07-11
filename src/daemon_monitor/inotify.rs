@@ -91,6 +91,10 @@ pub(super) fn is_created_or_moved_to(mask: u32) -> bool {
     (mask & (IN_CREATE | IN_MOVED_TO)) != 0
 }
 
+pub(super) fn is_modify(mask: u32) -> bool {
+    (mask & IN_MODIFY) != 0
+}
+
 pub(super) fn cstring_path(path: &str) -> Option<CString> {
     if path.is_empty() || path.contains('\0') {
         return None;
