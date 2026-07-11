@@ -3,6 +3,7 @@ package me.fakerqu.test.storageredirect.test
 import android.content.Context
 import android.system.OsConstants
 import java.io.File
+import java.io.RandomAccessFile
 import me.fakerqu.mediafileapi.AndroidFileApi
 
 class FileTestCases(
@@ -118,6 +119,55 @@ class FileTestCases(
         TestCase.FILE_WRITE.pass(
             message = "write succeeded",
             metadata = pathMetadata(targetPath) + mapOf("bytesWritten" to payload.size.toString()),
+        )
+      }
+
+  fun overwrite(args: TestCaseArgs): TestResult =
+      TestCase.FILE_OVERWRITE.measure {
+        val targetPath =
+            args.requireFilePath(TestCase.FILE_OVERWRITE)
+                ?: return@measure args.missingPathResult(TestCase.FILE_OVERWRITE)
+        val target = File(targetPath)
+        if (!target.isFile) {
+          return@measure TestCase.FILE_OVERWRITE.fail(
+              message = "file does not exist before overwrite",
+              metadata = pathMetadata(targetPath),
+          )
+        }
+        val original = target.readBytes()
+        val payload = args.payloadOr(TestFixtures.filePayload("overwrite"))
+        if (payload.size > original.size) {
+          return@measure TestCase.FILE_OVERWRITE.fail(
+              message = "payload exceeds existing file size",
+              metadata =
+                  pathMetadata(targetPath) +
+                      mapOf(
+                          "originalSize" to original.size.toString(),
+                          "payloadSize" to payload.size.toString(),
+                      ),
+          )
+        }
+        RandomAccessFile(target, "rw").use {
+          it.seek(0)
+          it.write(payload)
+          it.fd.sync()
+        }
+        val readBack = target.readBytes()
+        val expected = original.copyOf().also { payload.copyInto(it) }
+        if (!readBack.contentEquals(expected)) {
+          return@measure TestCase.FILE_OVERWRITE.fail(
+              message = "read after overwrite did not preserve existing suffix",
+              metadata = pathMetadata(targetPath),
+          )
+        }
+        TestCase.FILE_OVERWRITE.pass(
+            message = "in-place overwrite succeeded",
+            metadata =
+                pathMetadata(targetPath) +
+                    mapOf(
+                        "bytesWritten" to payload.size.toString(),
+                        "fileSize" to readBack.size.toString(),
+                    ),
         )
       }
 

@@ -144,6 +144,14 @@ class StorageRedirectTestRunner(
           )
       results +=
           runLogged(
+              TestCase.FILE_OVERWRITE,
+              TestCaseArgs(
+                  filePath = filePath,
+                  payload = "overwrite".toByteArray(),
+              ),
+          )
+      results +=
+          runLogged(
               TestCase.FILE_STAT,
               TestCaseArgs(filePath = filePath),
           )

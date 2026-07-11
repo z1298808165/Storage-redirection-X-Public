@@ -49,6 +49,7 @@ enum class TestCase(val id: String) {
   FILE_CREATE("file_create"),
   FILE_READ("file_read"),
   FILE_WRITE("file_write"),
+  FILE_OVERWRITE("file_overwrite"),
   FILE_WRITE_DENIED("file_write_denied"),
   FILE_DELETE("file_delete"),
   FILE_DELETE_DENIED("file_delete_denied"),
@@ -149,6 +150,7 @@ enum class TestCase(val id: String) {
           setOf(
               FILE_READ,
               FILE_WRITE,
+              FILE_OVERWRITE,
               FILE_WRITE_DENIED,
               FILE_DELETE,
               FILE_DELETE_DENIED,
@@ -231,6 +233,7 @@ enum class TestCase(val id: String) {
       FILE_CREATE -> file.create(args)
       FILE_READ -> file.read(args)
       FILE_WRITE -> file.write(args)
+      FILE_OVERWRITE -> file.overwrite(args)
       FILE_WRITE_DENIED -> file.writeDenied(args)
       FILE_DELETE -> file.delete(args)
       FILE_DELETE_DENIED -> file.deleteDenied(args)

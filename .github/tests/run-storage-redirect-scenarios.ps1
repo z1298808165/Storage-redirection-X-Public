@@ -890,11 +890,11 @@ function Invoke-FileMonitorWriteDeniedCase {
 function Invoke-FileMonitorExistingWriteCase {
     param([string]$Scenario, [string]$Label, [string]$RequestPath, [string]$BackendPath)
     $fileName = ($RequestPath -split '/')[-1]
-    $seed = Invoke-WriteCase ([int]$Scenario) "$Label-seed" $RequestPath "seed"
+    $seed = Invoke-WriteCase ([int]$Scenario) "$Label-seed" $RequestPath "$Payload-seed-tail"
     if (-not $seed.Ok -or -not (Require-File "scenario-$Scenario" "$Label seed" $BackendPath)) { return $false }
     Start-Sleep -Milliseconds 1800
     if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
-    $ok = (Invoke-WriteCase ([int]$Scenario) $Label $RequestPath $Payload).Ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" $Label "file_overwrite" @{ file_path = $RequestPath; payload = $Payload } "^PASS \[file_overwrite\]").Ok
     $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "write") -and $ok
     $ok
 }
