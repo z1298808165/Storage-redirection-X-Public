@@ -156,6 +156,7 @@ jobs:
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 
       - name: Upload module artifact
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         uses: actions/upload-artifact@v7.0.1
         with:
           name: storage.redirect.x-v${{ env.VERSION }}.zip
@@ -235,6 +236,7 @@ jobs:
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
       - name: Upload manager APK artifact
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         uses: actions/upload-artifact@v7.0.1
         with:
           name: storage-redirect-x-manager-v${{ env.VERSION }}.apk
@@ -556,6 +558,45 @@ jobs:
             --jq '.assets[].name' > release-assets.txt
           grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
           grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
+
+  cleanup-build-artifacts:
+    needs:
+      - prepare
+      - module
+      - app
+      - test-flow-build
+      - test-flow-required
+      - create-ci-release
+    if: always() && github.event_name == 'push' && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Delete build artifacts from Actions storage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for name in \
+            "storage.redirect.x-v${VERSION}.zip" \
+            "storage-redirect-x-manager-v${VERSION}.apk" \
+            "test-flow-runtime-v${VERSION}"; do
+            mapfile -t artifact_ids < <(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name == \"${name}\") | .id")
+            for artifact_id in "${artifact_ids[@]}"; do
+              for attempt in 1 2 3; do
+                if gh api --method DELETE \
+                  "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"; then
+                  break
+                fi
+                test "$attempt" -lt 3
+                sleep $((attempt * 2))
+              done
+            done
+          done
 
   update-manifest:
     if: github.event_name == 'push'

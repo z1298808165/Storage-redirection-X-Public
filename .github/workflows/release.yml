@@ -577,3 +577,42 @@ jobs:
           git add update.json
           git commit -m "发布：更新更新清单 v${VERSION}"
           git push origin "HEAD:${RELEASE_BRANCH}"
+
+  cleanup-build-artifacts:
+    needs:
+      - prepare
+      - module
+      - app
+      - test-flow-build
+      - test-flow-required
+      - publish-release
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Delete build artifacts from Actions storage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for name in \
+            "storage.redirect.x-v${VERSION}.zip" \
+            "storage-redirect-x-manager-v${VERSION}.apk" \
+            "release-test-flow-runtime-v${VERSION}"; do
+            mapfile -t artifact_ids < <(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name == \"${name}\") | .id")
+            for artifact_id in "${artifact_ids[@]}"; do
+              for attempt in 1 2 3; do
+                if gh api --method DELETE \
+                  "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"; then
+                  break
+                fi
+                test "$attempt" -lt 3
+                sleep $((attempt * 2))
+              done
+            done
+          done
