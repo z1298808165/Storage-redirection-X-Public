@@ -253,6 +253,7 @@ internal fun CenteredDialog(
     show: Boolean,
     title: String? = null,
     summary: String? = null,
+    denseSurface: Boolean = false,
     onDismiss: () -> Unit,
     content: @Composable () -> Unit,
 ) {
@@ -280,13 +281,28 @@ internal fun CenteredDialog(
     ) {
       GlassCard(
           modifier =
-              Modifier.fillMaxWidth().padding(horizontal = 28.dp).widthIn(max = 360.dp).clickable(
-                  interactionSource = insideClick,
-                  indication = null,
-              ) {},
+              Modifier.fillMaxWidth()
+                  .padding(horizontal = 28.dp)
+                  .widthIn(max = 360.dp)
+                  .then(
+                      if (denseSurface) {
+                        Modifier.background(
+                            MiuixTheme.colorScheme.surfaceContainerHigh.copy(
+                                alpha = if (dark) 0.82f else 0.76f
+                            ),
+                            RoundedCornerShape(30.dp),
+                        )
+                      } else {
+                        Modifier
+                      }
+                  )
+                  .clickable(
+                      interactionSource = insideClick,
+                      indication = null,
+                  ) {},
           cornerRadius = 30.dp,
           insideMargin = PaddingValues(24.dp),
-          alpha = if (liquid) 0.78f else 1f,
+          alpha = if (liquid) if (denseSurface) 0.94f else 0.78f else 1f,
           shadowAlpha = 0.2f,
       ) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {

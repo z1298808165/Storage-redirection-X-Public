@@ -84,6 +84,26 @@ assertDeepEqual(
   "v1.2.57",
   "update-version-falls-back-to-tag",
 );
+const toggleClasses = new Set();
+const toggleAttributes = {};
+const toggle = {
+  disabled: false,
+  classList: {
+    toggle: (name, enabled) => {
+      if (enabled) toggleClasses.add(name);
+      else toggleClasses.delete(name);
+    },
+  },
+  setAttribute: (name, value) => {
+    toggleAttributes[name] = value;
+  },
+};
+webui.setToggleState(toggle, true);
+webui.setToggleBusy(toggle, true);
+assertDeepEqual(toggleClasses.has("on"), true, "toggle-visual-state");
+assertDeepEqual(toggleAttributes["aria-checked"], "true", "toggle-accessible-state");
+assertDeepEqual(toggle.disabled, true, "toggle-disabled-while-saving");
+assertDeepEqual(toggleAttributes["aria-busy"], "true", "toggle-accessible-busy-state");
 
 const rawApp = readJson("app-profile-normalization-input.json");
 const normalizedApp = readJson("app-profile-normalization-output.json");

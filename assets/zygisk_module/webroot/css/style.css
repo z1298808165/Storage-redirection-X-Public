@@ -87,9 +87,12 @@
 .switch-label { font-size: 15px; font-weight: 760; }
 .switch-hint { font-size: 12px; color: var(--color-text-tertiary); margin-top: 4px; line-height: 1.5; }
 .toggle { width: 54px; height: 32px; border-radius: var(--radius-full); border: 1px solid var(--glass-border); background: var(--color-surface-overlay); cursor: pointer; position: relative; flex-shrink: 0; transition: background var(--transition-normal), box-shadow var(--transition-normal); box-shadow: inset 0 2px 8px rgba(32,48,72,0.08); }
+.toggle::before { content: ''; position: absolute; inset: -6px 0; }
 .toggle::after { content: ""; position: absolute; top: 50%; left: 3px; width: 26px; height: 26px; border-radius: 50%; background: var(--glass-bg-strong); transform: translateY(-50%); transition: transform var(--transition-spring), background var(--transition-normal); box-shadow: var(--glass-inner), 0 5px 14px rgba(32,48,72,0.18); }
 .toggle.on { background: linear-gradient(135deg, var(--color-primary), var(--color-primary-2)); box-shadow: var(--liquid-shadow); }
 .toggle.on::after { transform: translateX(22px) translateY(-50%); background: #fff; }
+.toggle:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; }
+.toggle:disabled { cursor: wait; opacity: 0.78; }
 .auto-template-row { width: 100%; min-height: 58px; display: flex; align-items: center; gap: 11px; padding: 12px 16px; border: none; border-bottom: 1px solid var(--color-border); background: transparent; color: var(--color-text); font-family: var(--font-family); text-align: left; cursor: pointer; }
 .auto-template-icon { width: 34px; height: 34px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: var(--color-primary); background: var(--color-primary-bg); flex: 0 0 34px; }
 .auto-template-icon .icon { width: 17px; height: 17px; flex-basis: 17px; }
@@ -730,6 +733,7 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
 .switch-label { font-size: 14px; font-weight: 700; }
 .switch-hint { margin-top: 3px; font-size: 11px; line-height: 1.45; }
 .toggle { width: 44px; height: 26px; border-radius: 13px; box-shadow: none; }
+.toggle::before { inset: -9px 0; }
 .toggle::after { left: 3px; width: 20px; height: 20px; background: #ffffff; box-shadow: 0 1px 3px rgba(24,32,42,0.2); }
 .toggle.on { background: var(--color-primary); box-shadow: none; }
 .toggle.on::after { transform: translateX(18px) translateY(-50%); }

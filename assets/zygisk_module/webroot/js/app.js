@@ -1663,6 +1663,17 @@
       '"></button></div>'
     );
   }
+  function setToggleState(toggle, enabled) {
+    if (!toggle) return;
+    toggle.classList.toggle("on", !!enabled);
+    toggle.setAttribute("aria-checked", String(!!enabled));
+  }
+
+  function setToggleBusy(toggle, busy) {
+    if (!toggle) return;
+    toggle.disabled = !!busy;
+    toggle.setAttribute("aria-busy", String(!!busy));
+  }
   function optionLabel(options, value, fallback) {
     const match = options.find((item) => item.value === value);
     return match ? match.label : fallback || String(value ?? "");
@@ -1880,6 +1891,50 @@
       "</button>"
     );
   }
+  function refreshAutoTemplateStatus(content) {
+    const existing = content.querySelector("#autoTemplateRow");
+    const html = autoRedirectTemplateStatusHtml(
+      State.globalConfig,
+      State.templates,
+      State.autoTemplateFallbackNoticeId,
+    );
+    if (existing && !html) {
+      existing.remove();
+      return;
+    }
+    if (existing) {
+      existing.outerHTML = html;
+    } else if (html) {
+      content
+        .querySelector('.toggle[data-key="autoEnableNewApps"]')
+        ?.closest(".switch-row")
+        ?.insertAdjacentHTML("afterend", html);
+    }
+    bindAutoTemplateStatus(content);
+  }
+
+  function bindAutoTemplateStatus(content) {
+    content.querySelector("#autoTemplateRow")?.addEventListener("click", () => {
+      showAutoTemplatePickerDialog(
+        State.globalConfig?.auto_enable_new_apps_template_id || "",
+        async (templateId) => {
+          try {
+            await saveGlobalConfigFromSettings(
+              content,
+              {
+                auto_enable_redirect_for_new_apps: true,
+                auto_enable_new_apps_template_id: templateId,
+              },
+              { silent: true },
+            );
+            refreshAutoTemplateStatus(content);
+          } catch {
+            Theme.showToast("保存失败，已恢复原状态", "error");
+          }
+        },
+      ).catch(() => Theme.showToast("加载模板失败", "error"));
+    });
+  }
   function autoTemplateDefaultRowHtml(selected) {
     return (
       '<div class="template-row auto-template-default' +
@@ -1904,7 +1959,7 @@
       "</div>"
     );
   }
-  async function showAutoTemplatePickerDialog(currentTemplateId, onPick) {
+  async function showAutoTemplatePickerDialog(currentTemplateId, onPick, onDismiss) {
     const templates = await loadTemplates(true);
     const safeCurrent = isSafeTemplateId(currentTemplateId) ? String(currentTemplateId) : "";
     const currentExists =
@@ -1927,24 +1982,38 @@
         emptyHint,
       { backdropClose: true },
     );
+    let picked = false;
     document.querySelectorAll("#modalContent .template-row").forEach((row) => {
       row.addEventListener("click", async () => {
+        picked = true;
         closeActiveModal();
         await onPick(row.dataset.templateId || row.dataset.id || "");
       });
     });
+    const previousCleanup = State.modalCleanup;
+    State.modalCleanup = () => {
+      previousCleanup?.();
+      if (!picked) onDismiss?.();
+    };
   }
-  function showAutoTemplateEmptyEnableDialog(onConfirm) {
+  function showAutoTemplateEmptyEnableDialog(onConfirm, onDismiss) {
     showModalWithHistory(
       '<div class="modal-title">没有配置模板</div>' +
         '<div class="modal-hint">当前还没有配置模板。继续开启后，新安装应用会默认只开启重定向，不会附加允许路径、沙盒路径或映射规则。</div>' +
         '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="autoTemplateEmptyEnable" type="button">继续开启</button></div>',
     );
+    let confirmed = false;
     document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
     document.getElementById("autoTemplateEmptyEnable")?.addEventListener("click", async () => {
+      confirmed = true;
       closeActiveModal();
       await onConfirm();
     });
+    const previousCleanup = State.modalCleanup;
+    State.modalCleanup = () => {
+      previousCleanup?.();
+      if (!confirmed) onDismiss?.();
+    };
   }
   async function isAutoTemplateReferenced(templateId) {
     if (!isSafeTemplateId(templateId)) return false;
@@ -3599,7 +3668,7 @@
       content.querySelectorAll(".toggle").forEach((toggle) => {
         toggle.addEventListener("click", async () => {
           if (toggle.disabled) return;
-          toggle.classList.toggle("on");
+          setToggleState(toggle, !toggle.classList.contains("on"));
           const key = toggle.dataset.key;
           if (key === "autoEnableNewApps") {
             await handleAutoEnableNewAppsToggle(content, toggle);
@@ -3608,25 +3677,7 @@
           await saveGlobalSettingImmediate(content, toggle, key);
         });
       });
-      content.querySelector("#autoTemplateRow")?.addEventListener("click", () => {
-        showAutoTemplatePickerDialog(
-          State.globalConfig?.auto_enable_new_apps_template_id || "",
-          async (templateId) => {
-            try {
-              await saveGlobalConfigFromSettings(
-                content,
-                {
-                  auto_enable_redirect_for_new_apps: true,
-                  auto_enable_new_apps_template_id: templateId,
-                },
-                { reloadSettings: true },
-              );
-            } catch {
-              Theme.showToast("保存失败，已恢复原状态", "error");
-            }
-          },
-        ).catch(() => Theme.showToast("加载模板失败", "error"));
-      });
+      bindAutoTemplateStatus(content);
       content.querySelector("#backupExportBtn")?.addEventListener("click", handleBackupExport);
       content
         .querySelector("#backupImportBtn")
@@ -3717,7 +3768,7 @@
       config.verbose_logging_enabled === true,
       "详细日志",
     );
-    Theme.showToast("设置已保存", "success");
+    if (!options?.silent) Theme.showToast("设置已保存", "success");
     if (options?.reloadSettings) loadSettings();
     return config;
   }
@@ -3725,24 +3776,30 @@
   async function handleAutoEnableNewAppsToggle(content, toggle) {
     if (!toggle.classList.contains("on")) {
       await saveGlobalSettingImmediate(content, toggle, "autoEnableNewApps", {
-        reloadSettings: true,
+        silent: true,
       });
+      refreshAutoTemplateStatus(content);
       return;
     }
     if (State.globalConfig?.auto_enable_new_apps_template_id) {
       await saveGlobalSettingImmediate(content, toggle, "autoEnableNewApps", {
-        reloadSettings: true,
+        silent: true,
       });
+      refreshAutoTemplateStatus(content);
       return;
     }
-    toggle.classList.remove("on");
+    setToggleBusy(toggle, true);
     let templates = [];
     try {
       templates = await loadTemplates(true);
     } catch {
+      setToggleState(toggle, false);
+      setToggleBusy(toggle, false);
       Theme.showToast("加载模板失败，已恢复原状态", "error");
       return;
     }
+    setToggleBusy(toggle, false);
+    const restoreDisabledState = () => setToggleState(toggle, false);
     if (!templates.length) {
       showAutoTemplateEmptyEnableDialog(async () => {
         try {
@@ -3752,43 +3809,51 @@
               auto_enable_redirect_for_new_apps: true,
               auto_enable_new_apps_template_id: "",
             },
-            { reloadSettings: true },
+            { silent: true },
           );
+          refreshAutoTemplateStatus(content);
         } catch {
+          setToggleState(toggle, false);
           Theme.showToast("保存失败，已恢复原状态", "error");
         }
-      });
+      }, restoreDisabledState);
       return;
     }
-    showAutoTemplatePickerDialog("", async (templateId) => {
-      try {
-        await saveGlobalConfigFromSettings(
-          content,
-          {
-            auto_enable_redirect_for_new_apps: true,
-            auto_enable_new_apps_template_id: templateId,
-          },
-          { reloadSettings: true },
-        );
-      } catch {
-        Theme.showToast("保存失败，已恢复原状态", "error");
-      }
-    });
+    showAutoTemplatePickerDialog(
+      "",
+      async (templateId) => {
+        try {
+          await saveGlobalConfigFromSettings(
+            content,
+            {
+              auto_enable_redirect_for_new_apps: true,
+              auto_enable_new_apps_template_id: templateId,
+            },
+            { silent: true },
+          );
+          refreshAutoTemplateStatus(content);
+        } catch {
+          setToggleState(toggle, false);
+          Theme.showToast("保存失败，已恢复原状态", "error");
+        }
+      },
+      restoreDisabledState,
+    );
   }
 
   async function saveGlobalSettingImmediate(content, toggle, key) {
     const options = arguments[3] || {};
     const previous = !toggle.classList.contains("on");
-    toggle.disabled = true;
+    setToggleBusy(toggle, true);
     try {
-      await saveGlobalConfigFromSettings(content, null, options);
+      await saveGlobalConfigFromSettings(content, null, Object.assign({ silent: true }, options));
     } catch {
-      toggle.classList.toggle("on", previous);
+      setToggleState(toggle, previous);
       Theme.showToast("保存失败，已恢复原状态", "error");
-      toggle.disabled = false;
+      setToggleBusy(toggle, false);
       return;
     }
-    toggle.disabled = false;
+    setToggleBusy(toggle, false);
   }
 
   function stableJson(value) {
@@ -6191,8 +6256,8 @@
       },
       operation: {
         title: `操作`,
-        description: `按完整操作名过滤，例如 openat、openat2 或 provider_open:read。`,
-        placeholder: `openat 或 provider_open:read`,
+        description: `按操作名或模式过滤，支持 *、? 和意图后缀，例如 open*、open*:read。`,
+        placeholder: `open* 或 open*:read`,
       },
       intent: {
         title: `意图`,
@@ -6421,6 +6486,8 @@
       shouldFilterMonitorLogEntry,
       splitMonitorOperationRules,
       mergeMonitorOperationRules,
+      setToggleBusy,
+      setToggleState,
       updateChannelBadge,
       updateVersionBadge,
     };

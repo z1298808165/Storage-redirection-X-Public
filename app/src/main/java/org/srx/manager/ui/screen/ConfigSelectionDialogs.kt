@@ -65,6 +65,7 @@ internal fun TemplatePickerDialog(
   CenteredDialog(
       title = title,
       show = show,
+      denseSurface = true,
       onDismiss = onDismiss,
   ) {
     if (templates.isEmpty()) {
@@ -373,7 +374,11 @@ private fun SelectableDialogRow(
       if (selected) {
         primary.copy(alpha = if (dark) 0.16f else 0.09f)
       } else {
-        glassSurfaceColor(if (liquid) 0.74f else 0.9f)
+        if (liquid) {
+          MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.78f else 0.72f)
+        } else {
+          glassSurfaceColor(0.9f)
+        }
       }
   val borderColor =
       if (selected) {

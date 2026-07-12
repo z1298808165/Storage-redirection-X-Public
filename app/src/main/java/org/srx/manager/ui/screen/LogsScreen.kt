@@ -35,8 +35,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,6 +63,7 @@ import org.srx.manager.subtleFieldLabelColor
 import org.srx.manager.ui.AppUiState
 import org.srx.manager.ui.component.AppIconImage
 import org.srx.manager.ui.component.SrxSearchField
+import org.srx.manager.ui.theme.isSrxDarkTheme
 import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
@@ -511,7 +514,7 @@ private fun FileMonitorFilterDialog(
           )
       MonitorFilterType.Operation ->
           MonitorFilterEditor(
-              placeholder = "openat 或 provider_open:read",
+              placeholder = "open* 或 open*:read",
               value = operationInput,
               values = operations,
               onValue = { operationInput = it },
@@ -593,7 +596,7 @@ private fun FileMonitorFilterDialog(
 
 private enum class MonitorFilterType(val label: String, val description: String) {
   Path("路径", "排除目录及其子路径，支持 * 和 ? 通配。"),
-  Operation("操作", "按完整操作名过滤，例如 openat、openat2 或 provider_open:read。"),
+  Operation("操作", "按操作名或模式过滤，支持 *、? 和意图后缀，例如 open*、open*:read。"),
   Intent("意图", "按访问目的过滤，不受 open、openat 等具体操作名影响。"),
 }
 
@@ -634,6 +637,7 @@ private fun MonitorFilterTabs(
     onSelect: (MonitorFilterType) -> Unit,
 ) {
   val outerShape = RoundedCornerShape(15.dp)
+  val dark = isSrxDarkTheme()
   Row(
       modifier =
           Modifier.fillMaxWidth()
@@ -649,14 +653,39 @@ private fun MonitorFilterTabs(
   ) {
     MonitorFilterType.entries.forEach { type ->
       val active = type == selected
+      val itemShape = RoundedCornerShape(11.dp)
       Row(
           modifier =
               Modifier.weight(1f)
                   .height(38.dp)
-                  .clip(RoundedCornerShape(11.dp))
+                  .then(
+                      if (active) {
+                        Modifier.dropShadow(
+                            itemShape,
+                            Shadow(
+                                radius = 10.dp,
+                                color = MiuixTheme.colorScheme.primary,
+                                alpha = if (dark) 0.18f else 0.1f,
+                            ),
+                        )
+                      } else {
+                        Modifier
+                      }
+                  )
+                  .clip(itemShape)
                   .background(
-                      if (active) MiuixTheme.colorScheme.surface else Color.Transparent,
-                      RoundedCornerShape(11.dp),
+                      if (active) {
+                        MiuixTheme.colorScheme.primary.copy(alpha = if (dark) 0.22f else 0.13f)
+                      } else {
+                        Color.Transparent
+                      },
+                      itemShape,
+                  )
+                  .border(
+                      1.dp,
+                      if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.38f)
+                      else Color.Transparent,
+                      itemShape,
                   )
                   .clickable { onSelect(type) }
                   .padding(horizontal = 7.dp),
