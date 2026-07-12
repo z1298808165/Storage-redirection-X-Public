@@ -10,14 +10,14 @@
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/v1.2.56/storage-redirect-x-manager-v1.2.56.apk"
   },
   "beta": {
-    "version": "1.2.57-ci.467",
-    "tag": "ci-build-29184509526-1",
-    "title": "CI Build 1.2.57-ci.467",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29184509526-1",
+    "version": "1.2.57-ci.468",
+    "tag": "ci-build-29187695160-1",
+    "title": "CI Build 1.2.57-ci.468",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29187695160-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29184509526-1/storage-redirect-x-manager-v1.2.57-ci.467.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29184509526-1/storage.redirect.x-v1.2.57-ci.467.zip"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29187695160-1/storage-redirect-x-manager-v1.2.57-ci.468.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29187695160-1/storage.redirect.x-v1.2.57-ci.468.zip"
   },
   "releases": []
 }
