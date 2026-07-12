@@ -710,7 +710,6 @@ function Restart-MediaProvider {
 }
 
 function Ensure-MonitorCollector {
-    Invoke-Su "touch /data/adb/modules/storage.redirect.x/config/apps '$GlobalConfig' '$Config' 2>/dev/null || true" | Out-Null
     Invoke-Su "/data/adb/modules/storage.redirect.x/bin/srxctl ensure-collectors" | Out-Null
 }
 

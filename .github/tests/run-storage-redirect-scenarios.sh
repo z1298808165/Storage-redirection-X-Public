@@ -610,7 +610,6 @@ restart_media_provider() {
 }
 
 ensure_monitor_collector() {
-  adb_su "touch /data/adb/modules/storage.redirect.x/config/apps '$GLOBAL_CONFIG' '$CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
   adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl ensure-collectors" >/dev/null 2>&1 || true
 }
 
