@@ -2006,6 +2006,10 @@
     return "正式版";
   }
 
+  function updateVersionBadge(update) {
+    return String(update?.versionName || update?.tagName || "").trim();
+  }
+
   function openExternalUrl(url) {
     const target = String(url || "").trim();
     if (!/^https?:\/\//i.test(target)) return false;
@@ -2171,13 +2175,13 @@
       '<div class="modal-title">发现新版本</div>' +
         '<div class="update-dialog-summary">当前模块版本 ' +
         escapeHtml(currentVersionName || "--") +
-        "，发现 " +
-        escapeHtml(update.title || update.tagName || "新版本") +
-        "。</div>" +
+        "，有新版本可用。</div>" +
         '<div class="update-dialog-meta"><span>' +
         escapeHtml(updateChannelBadge(update.channel, update.prerelease)) +
         "</span>" +
-        (update.tagName ? "<span>" + escapeHtml(update.tagName) + "</span>" : "") +
+        (updateVersionBadge(update)
+          ? "<span>" + escapeHtml(updateVersionBadge(update)) + "</span>"
+          : "") +
         "</div>" +
         '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="openUpdateRelease" type="button">打开</button></div>',
       { backdropClose: true },
@@ -6417,6 +6421,8 @@
       shouldFilterMonitorLogEntry,
       splitMonitorOperationRules,
       mergeMonitorOperationRules,
+      updateChannelBadge,
+      updateVersionBadge,
     };
   }
 

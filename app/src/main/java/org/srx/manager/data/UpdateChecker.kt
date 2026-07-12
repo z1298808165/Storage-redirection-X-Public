@@ -16,6 +16,7 @@ enum class UpdateChannel {
 
 data class ReleaseUpdate(
     val tagName: String,
+    val versionName: String,
     val title: String,
     val htmlUrl: String,
     val channel: UpdateChannel,
@@ -81,6 +82,7 @@ class UpdateChecker(
           val tag = release.tag.ifBlank { release.version }
           ReleaseUpdate(
               tagName = tag,
+              versionName = release.version.ifBlank { tag },
               title = release.title.takeIf { it.isNotBlank() } ?: tag,
               htmlUrl =
                   release.url.takeIf { it.isNotBlank() }

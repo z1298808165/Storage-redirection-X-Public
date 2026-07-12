@@ -20,6 +20,7 @@ class UpdateCheckerTest {
 
     requireNotNull(update)
     assertEquals("v1.2.57", update.tagName)
+    assertEquals("1.2.57", update.versionName)
     assertEquals("Storage Redirect X v1.2.57", update.title)
     assertEquals("https://github.com/example/repo/releases/tag/v1.2.57", update.htmlUrl)
     assertEquals(UpdateChannel.Stable, update.channel)
@@ -38,6 +39,7 @@ class UpdateCheckerTest {
 
     requireNotNull(update)
     assertEquals("ci-build-123", update.tagName)
+    assertEquals("1.2.58-ci.123", update.versionName)
     assertEquals(UpdateChannel.Beta, update.channel)
     assertTrue(update.prerelease)
   }
@@ -54,6 +56,7 @@ class UpdateCheckerTest {
 
     requireNotNull(update)
     assertEquals("ci-build-123", update.tagName)
+    assertEquals("1.2.58-ci.123", update.versionName)
     assertEquals("1.2.58-ci.123.apk", update.downloadUrl)
   }
 

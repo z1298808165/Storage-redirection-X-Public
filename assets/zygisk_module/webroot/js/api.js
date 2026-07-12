@@ -625,6 +625,7 @@ function findReleaseUpdate(manifest, repository, currentVersionName, channel) {
   const tag = String(release.tag || release.version || "").trim();
   return {
     tagName: tag,
+    versionName: String(release.version || tag).trim(),
     title: String(release.title || tag).trim(),
     htmlUrl:
       String(release.url || "").trim() ||

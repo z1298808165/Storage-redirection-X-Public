@@ -69,6 +69,21 @@ assertDeepEqual(
   "https://github.com/Kindness-Kismet/Storage-redirection-X-Public",
   "official-release-repository",
 );
+assertDeepEqual(webui.updateChannelBadge("Stable", false), "正式版", "stable-update-badge");
+assertDeepEqual(webui.updateChannelBadge("Beta", true), "测试版", "beta-update-badge");
+assertDeepEqual(
+  webui.updateVersionBadge({
+    versionName: "1.2.57-ci.467",
+    tagName: "ci-build-29184509526-1",
+  }),
+  "1.2.57-ci.467",
+  "update-version-prefers-version-name",
+);
+assertDeepEqual(
+  webui.updateVersionBadge({ tagName: "v1.2.57" }),
+  "v1.2.57",
+  "update-version-falls-back-to-tag",
+);
 
 const rawApp = readJson("app-profile-normalization-input.json");
 const normalizedApp = readJson("app-profile-normalization-output.json");

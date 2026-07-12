@@ -45,7 +45,7 @@ internal fun UpdateFoundDialog(
           lineHeight = 21.sp,
       )
       Text(
-          "当前模块版本 ${currentVersion.ifBlank { "--" }}，发现 ${update.title.ifBlank { update.tagName.ifBlank { "新版本" } }}。",
+          "当前模块版本 ${currentVersion.ifBlank { "--" }}，有新版本可用。",
           modifier = Modifier.fillMaxWidth(),
           color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
           fontSize = 14.sp,
@@ -58,8 +58,9 @@ internal fun UpdateFoundDialog(
           verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
         UpdateMetaBadge(updateChannelBadge(update))
-        if (update.tagName.isNotBlank()) {
-          UpdateMetaBadge(update.tagName)
+        val versionName = update.versionName.ifBlank { update.tagName }
+        if (versionName.isNotBlank()) {
+          UpdateMetaBadge(versionName)
         }
       }
       Row(
