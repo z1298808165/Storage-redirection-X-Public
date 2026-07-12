@@ -45,9 +45,30 @@ jobs:
           fi
           echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
 
+  init-release:
+    needs:
+      - prepare
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Storage Redirect X v${VERSION}" \
+            --notes "构建与测试进行中。" \
+            --draft
+
   module:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: prepare
+    needs:
+      - prepare
+      - init-release
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -161,16 +182,20 @@ jobs:
           ! unzip -l "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -q 'CHANGELOG.md'
           ! unzip -Z1 "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" | grep -E '(^|/)([^/]+\.sh|[^/]+\.prop|[^/]+\.rule|srxctl)$|^META-INF/' | while IFS= read -r entry; do unzip -p "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" "$entry" | grep -q $'\r' && printf '%s\n' "$entry"; done | grep .
 
-      - name: Upload module artifact
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: storage.redirect.x-v${{ env.VERSION }}.zip
-          path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
-          if-no-files-found: error
+      - name: Upload module to draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v${VERSION}" \
+            "build/assets/storage.redirect.x-v${VERSION}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   app:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: prepare
+    needs:
+      - prepare
+      - init-release
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -238,13 +263,14 @@ jobs:
           mkdir -p build/app
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
-      - name: Upload manager APK artifact
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: storage-redirect-x-manager-v${{ env.VERSION }}.apk
-          path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
-          if-no-files-found: error
-          compression-level: 0
+      - name: Upload manager APK to draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v${VERSION}" \
+            "build/app/storage-redirect-x-manager-v${VERSION}.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
 
   test-flow-build:
     name: Build release test-flow runtime
@@ -487,6 +513,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - prepare
+      - init-release
       - module
       - app
       - test-flow-required
@@ -511,36 +538,32 @@ jobs:
             cp "$RELEASE_NOTES" build/changelog.md
           fi
 
-      - name: Download release artifacts
+      - name: Verify draft GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p build/downloads
-          gh run download "$GITHUB_RUN_ID" \
+          test "$(gh release view "v${VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "storage.redirect.x-v${VERSION}.zip" \
-            --dir build/downloads
-          gh run download "$GITHUB_RUN_ID" \
+            --json isDraft \
+            --jq '.isDraft')" = "true"
+          gh release view "v${VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
-            --name "storage-redirect-x-manager-v${VERSION}.apk" \
-            --dir build/downloads
+            --json assets \
+            --jq '.assets[].name' > release-assets.txt
+          grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
+          grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
 
-      - name: Verify downloaded release artifacts
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          test -f "build/downloads/storage.redirect.x-v${VERSION}.zip"
-          test -f "build/downloads/storage-redirect-x-manager-v${VERSION}.apk"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          name: Storage Redirect X v${{ env.VERSION }}
-          body_path: build/changelog.md
-          fail_on_unmatched_files: true
-          files: |
-            build/downloads/storage.redirect.x-v${{ env.VERSION }}.zip
-            build/downloads/storage-redirect-x-manager-v${{ env.VERSION }}.apk
-          draft: false
-          prerelease: false
+          gh release edit "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Storage Redirect X v${VERSION}" \
+            --notes-file build/changelog.md \
+            --draft=false \
+            --prerelease=false \
+            --latest
 
       - name: Verify GitHub Release assets
         env:
@@ -581,6 +604,7 @@ jobs:
   cleanup-build-artifacts:
     needs:
       - prepare
+      - init-release
       - module
       - app
       - test-flow-build
@@ -590,17 +614,29 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: write
-      contents: read
+      contents: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
+      - name: Delete incomplete draft GitHub Release
+        if: needs.init-release.result == 'success' && needs.publish-release.result != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh release view "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft \
+            --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+            gh release delete "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --yes
+          fi
+
       - name: Delete build artifacts from Actions storage
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           for name in \
-            "storage.redirect.x-v${VERSION}.zip" \
-            "storage-redirect-x-manager-v${VERSION}.apk" \
             "release-test-flow-runtime-v${VERSION}"; do
             mapfile -t artifact_ids < <(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
