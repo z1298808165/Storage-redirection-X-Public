@@ -25,6 +25,12 @@ const UNINTERRUPTIBLE_SKIP_LOG_STEP: u64 = 32;
 
 static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
+struct FileMonitorSync {
+    configured_version: AtomicU64,
+    requested_rebuild: AtomicU64,
+    completed_rebuild: AtomicU64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReconcileMode {
     Prewarm,
@@ -57,8 +63,8 @@ pub fn main_entry() -> i32 {
     let mut last_periodic_reconcile_ms = crate::platform::paths::monotonic_ms();
     let mut round: usize = 0;
     let mut pending_full_reconcile = false;
-    let file_monitor_version = start_file_monitor_thread();
-    let mut fallback_file_monitor = file_monitor_version.is_none().then(RegularAppMonitor::new);
+    let file_monitor_sync = start_file_monitor_thread();
+    let mut fallback_file_monitor = file_monitor_sync.is_none().then(RegularAppMonitor::new);
     loop {
         if !runtime_control::is_module_runtime_enabled() {
             log::info!("daemon stop reason=runtime_disabled");
@@ -75,10 +81,10 @@ pub fn main_entry() -> i32 {
             || pending_full_reconcile
             || periodic_reconcile;
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {
-            file_monitor.reconfigure(config);
+            file_monitor.reconfigure(config, false);
         }
         if should_reconcile {
-            wait_for_file_monitor_version(file_monitor_version.as_ref(), current);
+            wait_for_file_monitor_version(file_monitor_sync.as_ref(), current);
             policy::refresh_shared_uid_cache();
             let mode = if pending_full_reconcile {
                 pending_full_reconcile = false;
@@ -91,7 +97,14 @@ pub fn main_entry() -> i32 {
             } else {
                 ReconcileMode::Full
             };
-            reconcile_running_apps(current, mode);
+            let mounts_changed = reconcile_running_apps(current, mode);
+            if mounts_changed {
+                if let Some(sync) = file_monitor_sync.as_ref() {
+                    request_file_monitor_rebuild(sync);
+                } else if let Some(file_monitor) = fallback_file_monitor.as_mut() {
+                    file_monitor.reconfigure(config, true);
+                }
+            }
             last_version = current;
         }
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {
@@ -102,17 +115,31 @@ pub fn main_entry() -> i32 {
     }
 }
 
-fn start_file_monitor_thread() -> Option<Arc<AtomicU64>> {
-    let configured_version = Arc::new(AtomicU64::new(0));
-    let thread_version = Arc::clone(&configured_version);
+fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
+    let sync = Arc::new(FileMonitorSync {
+        configured_version: AtomicU64::new(0),
+        requested_rebuild: AtomicU64::new(0),
+        completed_rebuild: AtomicU64::new(0),
+    });
+    let thread_sync = Arc::clone(&sync);
     let spawn_result = thread::Builder::new()
         .name("srx-file-monitor".to_string())
         .spawn(move || {
             let config = SettingsHub::instance();
             let mut file_monitor = RegularAppMonitor::new();
             while runtime_control::is_module_runtime_enabled() {
-                file_monitor.reconfigure(config);
-                thread_version.store(file_monitor.configured_version(), Ordering::Release);
+                let requested_rebuild = thread_sync.requested_rebuild.load(Ordering::Acquire);
+                let force_rebuild =
+                    requested_rebuild > thread_sync.completed_rebuild.load(Ordering::Acquire);
+                file_monitor.reconfigure(config, force_rebuild);
+                thread_sync
+                    .configured_version
+                    .store(file_monitor.configured_version(), Ordering::Release);
+                if force_rebuild {
+                    thread_sync
+                        .completed_rebuild
+                        .store(requested_rebuild, Ordering::Release);
+                }
                 file_monitor.drain_events();
                 thread::sleep(Duration::from_millis(FILE_MONITOR_POLL_MS));
             }
@@ -122,23 +149,36 @@ fn start_file_monitor_thread() -> Option<Arc<AtomicU64>> {
         log::warn!("daemon file monitor thread start failed error={}", error);
         return None;
     }
-    Some(configured_version)
+    Some(sync)
 }
 
-fn wait_for_file_monitor_version(configured_version: Option<&Arc<AtomicU64>>, version: u64) {
-    let Some(configured_version) = configured_version else {
+fn wait_for_file_monitor_version(sync: Option<&Arc<FileMonitorSync>>, version: u64) {
+    let Some(sync) = sync else {
         return;
     };
     let started_ms = crate::platform::paths::monotonic_ms();
-    while configured_version.load(Ordering::Acquire) < version {
+    while sync.configured_version.load(Ordering::Acquire) < version {
         if crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
             >= FILE_MONITOR_SYNC_TIMEOUT_MS
         {
             log::warn!(
                 "daemon file monitor config sync timeout expected={:x} actual={:x}",
                 version,
-                configured_version.load(Ordering::Acquire)
+                sync.configured_version.load(Ordering::Acquire)
             );
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn request_file_monitor_rebuild(sync: &FileMonitorSync) {
+    let requested = sync.requested_rebuild.fetch_add(1, Ordering::AcqRel) + 1;
+    let started_ms = crate::platform::paths::monotonic_ms();
+    while sync.completed_rebuild.load(Ordering::Acquire) < requested {
+        if crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
+            >= FILE_MONITOR_SYNC_TIMEOUT_MS
+        {
             break;
         }
         thread::sleep(Duration::from_millis(10));
@@ -185,7 +225,7 @@ fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mu
     config.config_version() != before
 }
 
-fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) {
+fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let started_ms = crate::platform::paths::monotonic_ms();
     let mut seen = HashSet::new();
     let mut applied = 0usize;
@@ -250,6 +290,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) {
         deferred,
         crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
     );
+    applied > 0 || disabled > 0
 }
 
 struct ReconcilePlan {

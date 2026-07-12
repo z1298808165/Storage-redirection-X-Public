@@ -92,9 +92,9 @@ impl RegularAppMonitor {
         self.config_version
     }
 
-    pub fn reconfigure(&mut self, config: &SettingsHub) {
+    pub fn reconfigure(&mut self, config: &SettingsHub, force: bool) {
         let version = config.config_version();
-        if !self.needs_rebuild && self.config_version == version {
+        if !force && !self.needs_rebuild && self.config_version == version {
             if self.should_retry_missing_roots() {
                 self.retry_missing_watch_roots();
             }
