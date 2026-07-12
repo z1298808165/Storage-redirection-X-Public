@@ -152,7 +152,7 @@ val appVersionCode =
         ?: defaultBuildVersion.versionCode
 val appCompileSdk = providers.gradleProperty("srx.compileSdk").orNull?.toIntOrNull() ?: 37
 val appTargetSdk = providers.gradleProperty("srx.targetSdk").orNull?.toIntOrNull() ?: appCompileSdk
-val defaultOfficialReleaseRepository = "z1298808165/Storage-redirection-X-Public"
+val defaultOfficialReleaseRepository = "Kindness-Kismet/Storage-redirection-X-Public"
 val defaultReleaseBranch = "SRX-R"
 
 fun gitOriginUrl(): String? {

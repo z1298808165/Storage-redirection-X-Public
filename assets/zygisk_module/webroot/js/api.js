@@ -23,7 +23,7 @@ const LIST_APPS_OUTPUT = "/data/Namespace-Proxy/list.config";
 const FILE_MONITOR_LOG = LOGS_DIR + "/file_monitor.log";
 const MODULE_LOG_PACKAGE = "storage.redirect.x";
 const DEFAULT_RELEASE_REPOSITORY = "z1298808165/Storage-redirection-X-Public";
-const DEFAULT_OFFICIAL_RELEASE_REPOSITORY = "z1298808165/Storage-redirection-X-Public";
+const DEFAULT_OFFICIAL_RELEASE_REPOSITORY = "Kindness-Kismet/Storage-redirection-X-Public";
 const DEFAULT_RELEASE_BRANCH = "SRX-R";
 const UPDATE_MANIFEST_URL =
   "https://raw.githubusercontent.com/" +

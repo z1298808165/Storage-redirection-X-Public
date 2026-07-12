@@ -64,6 +64,12 @@ vm.runInNewContext(fs.readFileSync(appJsPath, "utf8"), sandbox, { filename: appJ
 const webui = sandbox.window.__SRX_WEBUI_TEST__;
 if (!webui) throw new Error("WebUI test exports were not initialized");
 
+assertDeepEqual(
+  sandbox.window.Api.getOfficialReleaseRepositoryUrl(),
+  "https://github.com/Kindness-Kismet/Storage-redirection-X-Public",
+  "official-release-repository",
+);
+
 const rawApp = readJson("app-profile-normalization-input.json");
 const normalizedApp = readJson("app-profile-normalization-output.json");
 

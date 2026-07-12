@@ -2057,7 +2057,7 @@
       : "https://github.com/z1298808165/Storage-redirection-X-Public";
     const officialUrl = Api.getOfficialReleaseRepositoryUrl
       ? Api.getOfficialReleaseRepositoryUrl()
-      : releaseUrl;
+      : "https://github.com/Kindness-Kismet/Storage-redirection-X-Public";
     content.innerHTML =
       '<div class="section update-settings-section"><h2 class="section-title">更新</h2>' +
       '<div class="config-group update-settings-card">' +
