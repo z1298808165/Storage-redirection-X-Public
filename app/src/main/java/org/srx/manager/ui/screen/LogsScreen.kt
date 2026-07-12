@@ -1,6 +1,7 @@
 package org.srx.manager.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,6 +73,7 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.icon.extended.Delete
 import top.yukonga.miuix.kmp.icon.extended.File
+import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
@@ -106,6 +108,7 @@ internal fun LogsScreen(
                       it.callerPackage,
                       it.watchPackage,
                       it.operation,
+                      it.operationIntent,
                       it.action,
                       it.errorText,
                       it.path,
@@ -413,84 +416,131 @@ private fun FileMonitorFilterDialog(
     onDismiss: () -> Unit,
     onSave: (FileMonitorFilters, Boolean) -> Unit,
 ) {
+  val initialRules = remember(show) { splitMonitorOperationRules(filters.excludedOperations) }
   var paths by remember(show) { mutableStateOf(filters.excludedPaths) }
-  var operations by remember(show) { mutableStateOf(filters.excludedOperations) }
+  var operations by remember(show) { mutableStateOf(initialRules.first) }
+  var intents by remember(show) { mutableStateOf(initialRules.second) }
+  var selectedType by remember(show) { mutableStateOf(MonitorFilterType.Path) }
   var pathInput by remember(show) { mutableStateOf("") }
   var pathValidation by remember(show) { mutableStateOf<MonitorFilterPathValidation?>(null) }
   var operationInput by remember(show) { mutableStateOf("") }
+  var pendingRemoval by remember(show) { mutableStateOf<MonitorFilterRemoval?>(null) }
   fun saveDraft(
       nextPaths: List<String> = paths,
       nextOperations: List<String> = operations,
+      nextIntents: List<String> = intents,
       silent: Boolean = true,
   ) {
     onSave(
-        FileMonitorFilters(excludedPaths = nextPaths, excludedOperations = nextOperations),
+        FileMonitorFilters(
+            excludedPaths = nextPaths,
+            excludedOperations = mergeMonitorOperationRules(nextOperations, nextIntents),
+        ),
         silent,
     )
   }
   CenteredDialog(
-      title = "文件监视过滤",
-      summary = "请输入相对路径，例如 Download、Android/media；普通路径按前缀过滤，也支持 * 和 ? 通配。",
       show = show,
       onDismiss = onDismiss,
   ) {
-    MonitorFilterEditor(
-        title = "排除路径",
-        placeholder = "Download 或 Android/cache",
-        value = pathInput,
-        values = paths,
-        onValue = {
-          pathInput = it
-          pathValidation = validateMonitorFilterPathInput(it)
-        },
-        onAdd = {
-          val result = validateMonitorFilterPathInput(pathInput)
-          pathValidation = result
-          val value = result.value
-          when {
-            !result.valid -> Unit
-            value in paths -> pathValidation = result.copy(valid = false, message = "规则已存在")
-            else -> {
-              val nextPaths = paths + value
-              paths = nextPaths
-              pathInput = ""
-              pathValidation = null
-              if (autoSave) saveDraft(nextPaths = nextPaths)
-            }
-          }
-        },
-        onRemove = {
-          val nextPaths = paths - it
-          paths = nextPaths
-          if (autoSave) saveDraft(nextPaths = nextPaths)
-        },
-        validationText = if (pathInput.isBlank()) "" else pathValidation?.message.orEmpty(),
-        validationError = pathValidation?.valid == false,
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Text(
+          "文件监视过滤",
+          modifier = Modifier.weight(1f),
+          fontWeight = FontWeight.Black,
+          fontSize = 17.sp,
+          lineHeight = 21.sp,
+      )
+      Text(
+          "${paths.size + operations.size + intents.size} 条规则",
+          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          fontSize = 11.sp,
+          fontWeight = FontWeight.Bold,
+      )
+    }
+    MonitorFilterTabs(
+        selected = selectedType,
+        counts =
+            mapOf(
+                MonitorFilterType.Path to paths.size,
+                MonitorFilterType.Operation to operations.size,
+                MonitorFilterType.Intent to intents.size,
+            ),
+        onSelect = { selectedType = it },
     )
-    Spacer(Modifier.height(14.dp))
-    MonitorFilterEditor(
-        title = "排除操作类型",
-        placeholder = "provider_open:read 或 open*:read",
-        value = operationInput,
-        values = operations,
-        onValue = { operationInput = it },
-        onAdd = {
-          val value = operationInput.trim()
-          if (value.isNotBlank() && value.length <= 512 && value !in operations) {
-            val nextOperations = operations + value
-            operations = nextOperations
-            operationInput = ""
-            if (autoSave) saveDraft(nextOperations = nextOperations)
-          }
-        },
-        onRemove = {
-          val nextOperations = operations - it
-          operations = nextOperations
-          if (autoSave) saveDraft(nextOperations = nextOperations)
-        },
+    Text(
+        selectedType.description,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 34.dp),
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
     )
+    when (selectedType) {
+      MonitorFilterType.Path ->
+          MonitorFilterEditor(
+              placeholder = "Download 或 Android/cache",
+              value = pathInput,
+              values = paths,
+              onValue = {
+                pathInput = it
+                pathValidation = validateMonitorFilterPathInput(it)
+              },
+              onAdd = {
+                val result = validateMonitorFilterPathInput(pathInput)
+                pathValidation = result
+                val value = result.value
+                when {
+                  !result.valid -> Unit
+                  value in paths -> pathValidation = result.copy(valid = false, message = "规则已存在")
+                  else -> {
+                    val nextPaths = paths + value
+                    paths = nextPaths
+                    pathInput = ""
+                    pathValidation = null
+                    if (autoSave) saveDraft(nextPaths = nextPaths)
+                  }
+                }
+              },
+              onRemove = { pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Path, it) },
+              validationText = if (pathInput.isBlank()) "" else pathValidation?.message.orEmpty(),
+              validationError = pathValidation?.valid == false,
+          )
+      MonitorFilterType.Operation ->
+          MonitorFilterEditor(
+              placeholder = "openat 或 provider_open:read",
+              value = operationInput,
+              values = operations,
+              onValue = { operationInput = it },
+              onAdd = {
+                val value = operationInput.trim()
+                if (value.isNotBlank() && value.length <= 512 && value !in operations) {
+                  val nextOperations = operations + value
+                  operations = nextOperations
+                  operationInput = ""
+                  if (autoSave) saveDraft(nextOperations = nextOperations)
+                }
+              },
+              onRemove = { pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Operation, it) },
+          )
+      MonitorFilterType.Intent ->
+          MonitorIntentEditor(
+              selected = intents,
+              onToggle = { intent ->
+                if (intent in intents) {
+                  pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Intent, intent)
+                } else {
+                  val nextIntents = intents + intent
+                  intents = nextIntents
+                  if (autoSave) saveDraft(nextIntents = nextIntents)
+                }
+              },
+          )
+    }
     if (!autoSave) {
-      Spacer(Modifier.height(16.dp))
       Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
         GlassTextButton(
@@ -499,6 +549,149 @@ private fun FileMonitorFilterDialog(
             modifier = Modifier.weight(1f),
             primary = true,
         )
+      }
+    }
+  }
+  pendingRemoval?.let { removal ->
+    CenteredDialog(
+        title = "删除过滤规则",
+        summary = "确认删除过滤规则“${removal.displayValue}”？",
+        show = show,
+        onDismiss = { pendingRemoval = null },
+    ) {
+      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        GlassTextButton("取消", { pendingRemoval = null }, modifier = Modifier.weight(1f))
+        GlassTextButton(
+            "删除",
+            {
+              when (removal.type) {
+                MonitorFilterType.Path -> {
+                  val nextPaths = paths - removal.value
+                  paths = nextPaths
+                  if (autoSave) saveDraft(nextPaths = nextPaths)
+                }
+                MonitorFilterType.Operation -> {
+                  val nextOperations = operations - removal.value
+                  operations = nextOperations
+                  if (autoSave) saveDraft(nextOperations = nextOperations)
+                }
+                MonitorFilterType.Intent -> {
+                  val nextIntents = intents - removal.value
+                  intents = nextIntents
+                  if (autoSave) saveDraft(nextIntents = nextIntents)
+                }
+              }
+              pendingRemoval = null
+            },
+            modifier = Modifier.weight(1f),
+            danger = true,
+        )
+      }
+    }
+  }
+}
+
+private enum class MonitorFilterType(val label: String, val description: String) {
+  Path("路径", "排除目录及其子路径，支持 * 和 ? 通配。"),
+  Operation("操作", "按完整操作名过滤，例如 openat、openat2 或 provider_open:read。"),
+  Intent("意图", "按访问目的过滤，不受 open、openat 等具体操作名影响。"),
+}
+
+private data class MonitorFilterRemoval(val type: MonitorFilterType, val value: String) {
+  val displayValue: String
+    get() = if (type == MonitorFilterType.Intent) monitorIntentLabel(value) else value
+}
+
+private val MonitorIntents = listOf("read", "write", "create")
+
+private fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
+  val intents = mutableListOf<String>()
+  val operations = mutableListOf<String>()
+  values.forEach { value ->
+    val match = Regex("^\\*:(read|write|create)$", RegexOption.IGNORE_CASE).matchEntire(value)
+    if (match == null) operations += value else intents += match.groupValues[1].lowercase()
+  }
+  return operations to intents.distinct()
+}
+
+private fun mergeMonitorOperationRules(
+    operations: List<String>,
+    intents: List<String>,
+): List<String> = (operations + intents.map { "*:$it" }).distinct()
+
+private fun monitorIntentLabel(intent: String): String =
+    when (intent) {
+      "read" -> "读取意图"
+      "write" -> "写入意图"
+      "create" -> "创建意图"
+      else -> intent
+    }
+
+@Composable
+private fun MonitorFilterTabs(
+    selected: MonitorFilterType,
+    counts: Map<MonitorFilterType, Int>,
+    onSelect: (MonitorFilterType) -> Unit,
+) {
+  val outerShape = RoundedCornerShape(15.dp)
+  Row(
+      modifier =
+          Modifier.fillMaxWidth()
+              .clip(outerShape)
+              .background(glassSurfaceColor(0.56f), outerShape)
+              .border(
+                  1.dp,
+                  MiuixTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+                  outerShape,
+              )
+              .padding(4.dp),
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    MonitorFilterType.entries.forEach { type ->
+      val active = type == selected
+      Row(
+          modifier =
+              Modifier.weight(1f)
+                  .height(38.dp)
+                  .clip(RoundedCornerShape(11.dp))
+                  .background(
+                      if (active) MiuixTheme.colorScheme.surface else Color.Transparent,
+                      RoundedCornerShape(11.dp),
+                  )
+                  .clickable { onSelect(type) }
+                  .padding(horizontal = 7.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.Center,
+      ) {
+        Text(
+            type.label,
+            color =
+                if (active) MiuixTheme.colorScheme.primary
+                else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Spacer(Modifier.size(5.dp))
+        Box(
+            modifier =
+                Modifier.clip(RoundedCornerShape(6.dp))
+                    .background(
+                        if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
+                        else glassSurfaceColor(0.7f),
+                    )
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+          Text(
+              "${counts[type] ?: 0}",
+              color =
+                  if (active) MiuixTheme.colorScheme.primary
+                  else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+              fontSize = 9.sp,
+              lineHeight = 11.sp,
+              fontWeight = FontWeight.Black,
+          )
+        }
       }
     }
   }
@@ -542,7 +735,6 @@ private fun hasStorageRootPrefixForMonitorFilter(path: String): Boolean {
 
 @Composable
 private fun MonitorFilterEditor(
-    title: String,
     placeholder: String,
     value: String,
     values: List<String>,
@@ -553,7 +745,6 @@ private fun MonitorFilterEditor(
     validationError: Boolean = false,
 ) {
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-    Text(title, fontWeight = FontWeight.Black, fontSize = 13.sp)
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -570,23 +761,28 @@ private fun MonitorFilterEditor(
       )
       RoundIconAction(
           icon = MiuixIcons.Add,
-          contentDescription = "添加$title",
+          contentDescription = "添加规则",
           onClick = onAdd,
           size = 36.dp,
           iconSize = 17.dp,
       )
     }
-    if (validationText.isNotBlank()) {
-      Text(
-          validationText,
-          color = if (validationError) MiuixTheme.colorScheme.error else srxSuccessColor(),
-          fontSize = 11.sp,
-          lineHeight = 14.sp,
-          modifier = Modifier.padding(start = 2.dp),
-      )
+    Box(
+        modifier = Modifier.fillMaxWidth().height(16.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+      if (validationText.isNotBlank()) {
+        Text(
+            validationText,
+            color = if (validationError) MiuixTheme.colorScheme.error else srxSuccessColor(),
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(start = 2.dp),
+        )
+      }
     }
     LazyColumn(
-        modifier = Modifier.fillMaxWidth().heightIn(max = 132.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 42.dp, max = 176.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
       if (values.isEmpty()) {
@@ -610,9 +806,10 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
   Row(
       modifier =
           Modifier.fillMaxWidth()
+              .height(42.dp)
               .clip(RoundedCornerShape(14.dp))
               .background(glassSurfaceColor(0.58f), RoundedCornerShape(14.dp))
-              .padding(horizontal = 10.dp, vertical = 8.dp),
+              .padding(horizontal = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(8.dp),
   ) {
@@ -621,7 +818,7 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
         modifier = Modifier.weight(1f),
         fontSize = 12.sp,
         lineHeight = 16.sp,
-        maxLines = 2,
+        maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
     IconButton(
@@ -634,6 +831,62 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
           tint = MiuixTheme.colorScheme.error,
           modifier = Modifier.size(15.dp),
       )
+    }
+  }
+}
+
+@Composable
+private fun MonitorIntentEditor(selected: List<String>, onToggle: (String) -> Unit) {
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    MonitorIntents.forEach { intent ->
+      val active = intent in selected
+      val shape = RoundedCornerShape(14.dp)
+      Row(
+          modifier =
+              Modifier.fillMaxWidth()
+                  .height(54.dp)
+                  .clip(shape)
+                  .background(
+                      if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.11f)
+                      else glassSurfaceColor(0.58f),
+                      shape,
+                  )
+                  .border(
+                      1.dp,
+                      if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.32f)
+                      else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+                      shape,
+                  )
+                  .clickable { onToggle(intent) }
+                  .padding(horizontal = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+          Text(
+              monitorIntentLabel(intent),
+              color =
+                  if (active) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface,
+              fontWeight = FontWeight.Black,
+              fontSize = 13.sp,
+          )
+          Text(
+              when (intent) {
+                "read" -> "仅读取现有内容"
+                "write" -> "写入或追加内容"
+                else -> "新建、覆盖或临时文件"
+              },
+              color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+              fontSize = 11.sp,
+          )
+        }
+        Icon(
+            imageVector = if (active) MiuixIcons.Ok else MiuixIcons.Add,
+            contentDescription = if (active) "已添加" else "添加",
+            tint = MiuixTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp),
+        )
+      }
     }
   }
 }
@@ -665,6 +918,7 @@ private fun LogTimeText(
 private fun logEntrySummary(entry: LogEntry): String {
   if (entry.isModuleWebUiExport) return "存储重定向X · ${entry.action.ifBlank { "模块导出" }}"
   val parts = mutableListOf<String>()
+  if (entry.operationIntent.isNotBlank()) parts += monitorIntentLabel(entry.operationIntent)
   val process = entry.processPackage.takeIf { it.isNotBlank() && it != "-" }
   val caller = entry.callerPackage.takeIf { it.isNotBlank() && it != "-" }
   val watch = entry.watchPackage.takeIf { it.isNotBlank() && it != "-" }

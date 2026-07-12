@@ -125,6 +125,38 @@ assertDeepEqual(
   "backup-ui-preferences-invalid-values",
 );
 
+const createOpenEntry = webui.parseLogLine(
+  `2026-07-12 12:34:56|com.example|com.example|OPEN|/storage/emulated/0/Download/a.txt|ret=8|errno=0|op=openat2|op_filter=openat2:create|flags=0x40`,
+);
+assertDeepEqual(createOpenEntry.operationLabel, `openat2`, `log-operation-keeps-raw-type`);
+assertDeepEqual(createOpenEntry.operationIntent, `create`, `log-operation-exposes-intent`);
+assertDeepEqual(
+  webui.shouldFilterMonitorLogEntry(createOpenEntry, {
+    excluded_paths: [],
+    excluded_operations: [`*:create`],
+  }),
+  true,
+  `log-create-intent-filter`,
+);
+assertDeepEqual(
+  webui.shouldFilterMonitorLogEntry(createOpenEntry, {
+    excluded_paths: [],
+    excluded_operations: [`open*:read`],
+  }),
+  false,
+  `log-read-rule-does-not-hide-create-intent`,
+);
+assertDeepEqual(
+  webui.splitMonitorOperationRules([`open*:read`, `*:create`, `rename*`]),
+  { operations: [`open*:read`, `rename*`], intents: [`create`] },
+  `monitor-filter-splits-intents`,
+);
+assertDeepEqual(
+  webui.mergeMonitorOperationRules([`open*:read`, `rename*`], [`create`]),
+  [`open*:read`, `rename*`, `*:create`],
+  `monitor-filter-merges-intents`,
+);
+
 sandbox.window.Api.exec = async () =>
   [
     "system_accent1_600=#ff336699",

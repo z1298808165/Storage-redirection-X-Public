@@ -137,6 +137,7 @@ data class LogEntry(
     val source: String = "",
     val resultGroup: String = "",
     val filterOperation: String = "",
+    val operationIntent: String = "",
     val isModuleWebUiExport: Boolean = false,
 )
 

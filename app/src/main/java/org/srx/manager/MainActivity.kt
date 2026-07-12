@@ -70,6 +70,7 @@ import org.srx.manager.ui.screen.DashboardScreen
 import org.srx.manager.ui.screen.LogsScreen
 import org.srx.manager.ui.screen.SettingsScreen
 import org.srx.manager.ui.screen.ThemeSettingsScreen
+import org.srx.manager.ui.screen.UpdateFoundDialog
 import org.srx.manager.ui.screen.UpdateScreen
 import org.srx.manager.ui.theme.SrxTheme
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
@@ -663,26 +664,16 @@ private fun SrxManagerApp(
 
           state.pendingUpdate?.let { update ->
             val currentModuleVersion = state.dashboard.version.ifBlank { "--" }
-            CenteredDialog(
-                title = "发现新版本",
-                summary = "当前模块版本 ${currentModuleVersion}，发现 ${update.title}。是否打开该版本发布页？",
-                show = true,
+            UpdateFoundDialog(
+                update = update,
+                currentVersion = currentModuleVersion,
                 onDismiss = viewModel::clearPendingUpdate,
-            ) {
-              Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                GlassTextButton("取消", viewModel::clearPendingUpdate, modifier = Modifier.weight(1f))
-                GlassTextButton(
-                    "打开",
-                    {
-                      val opened = openExternalUrl(context, update.htmlUrl)
-                      if (!opened) toast = "未找到可用浏览器"
-                      viewModel.clearPendingUpdate()
-                    },
-                    modifier = Modifier.weight(1f),
-                    primary = true,
-                )
-              }
-            }
+                onOpen = {
+                  val opened = openExternalUrl(context, update.htmlUrl)
+                  if (!opened) toast = "未找到可用浏览器"
+                  viewModel.clearPendingUpdate()
+                },
+            )
           }
         }
       }

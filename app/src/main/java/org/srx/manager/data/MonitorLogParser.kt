@@ -45,13 +45,17 @@ private fun parseMonitorLogLine(
   val identifyMethod = extras["identify_method"].orEmpty()
   val identifyReliability = extras["identify_reliability"].orEmpty()
   val source = extras["source"].orEmpty()
-  val op = extras["op_filter"] ?: extras["op"] ?: parts.getOrNull(3).orEmpty()
+  val filterOperation = extras["op_filter"] ?: extras["op"] ?: parts.getOrNull(3).orEmpty()
+  val rawOperation = extras["op"] ?: parts.getOrNull(3).orEmpty()
+  val operationIntent = monitorOperationIntent(filterOperation)
   val landingPath = normalizeMonitorLogPath(parts.getOrNull(4).orEmpty())
   val isModuleExport = isModuleExportRecord(extras, processPkg, callerPkg, watchPkg)
   val pkg =
       if (isModuleExport) ModulePackageName
       else selectMonitorDisplayPackage(processPkg, callerPkg, watchPkg, identifyMethod)
-  val operation = if (isModuleExport) "export" else formatMonitorLogOperationBadge(op)
+  val operation =
+      if (isModuleExport) "export"
+      else formatMonitorLogOperationBadge(rawOperation.ifBlank { filterOperation })
   return LogEntry(
       timestamp = parts[0],
       timeText = parts[0].takeIf { it.length >= 16 }?.substring(11, 16) ?: "--:--",
@@ -64,7 +68,7 @@ private fun parseMonitorLogLine(
       operation = operation,
       action =
           if (isModuleExport) describeModuleExportOperation(extras)
-          else describeMonitorOperation(op, extras),
+          else describeMonitorOperation(filterOperation, extras),
       path = landingPath,
       ok = ok,
       errorText = if (ok) "" else describeMonitorFailure(ret, extras),
@@ -76,7 +80,8 @@ private fun parseMonitorLogLine(
       identifyReliability = identifyReliability,
       source = source,
       resultGroup = resultGroup,
-      filterOperation = op,
+      filterOperation = filterOperation,
+      operationIntent = operationIntent,
       isModuleWebUiExport = isModuleExport,
   )
 }
@@ -181,15 +186,16 @@ private fun describeMonitorOperation(op: String, extras: Map<String, String>): S
 private fun formatMonitorLogOperationBadge(op: String): String {
   val value = op.trim().lowercase()
   if (value.isBlank()) return "unknown"
-  return when (value) {
-    "provider_open:read",
-    "provider_open:create",
-    "provider_open:write" -> value
-    "inotify",
-    "fuse_create" -> "create"
-    else -> value.removeSuffix(":create").removeSuffix(":read")
-  }
+  return value.removeSuffix(":create").removeSuffix(":write").removeSuffix(":read")
 }
+
+private fun monitorOperationIntent(operation: String): String =
+    Regex(":(read|write|create)$", RegexOption.IGNORE_CASE)
+        .find(operation.trim())
+        ?.groupValues
+        ?.get(1)
+        ?.lowercase()
+        .orEmpty()
 
 private fun describeMonitorFailure(ret: Int?, extras: Map<String, String>): String {
   if (ret != null && ret >= 0) return ""
@@ -256,7 +262,9 @@ private fun LogEntry.coalesceKey(): String {
   if (finalPath.isBlank()) return ""
   val isDiagnosticArchive = finalPath.isDiagnosticLogArchivePath()
   val coalescePath = finalPath.diagnosticArchiveCoalescePath().normalizedStoragePathForCoalesce()
-  val op = if (isDiagnosticArchive) "diagnostic_export" else operation.normalizedMonitorOperation()
+  val op =
+      if (isDiagnosticArchive) "diagnostic_export"
+      else filterOperation.ifBlank { operation }.normalizedMonitorOperation()
   return listOf(
           timestamp.take(16),
           coalescePath.replace(Regex("^/storage/emulated/\\d+/"), "/storage/emulated/*/"),
@@ -296,7 +304,7 @@ private fun LogEntry.hasRequestPathRecord(): Boolean =
 private fun LogEntry.isIntermediateCreateOpenRecord(): Boolean =
     processPackage.isIntermediateLogPackage() &&
         fromPath.isBlank() &&
-        operation.normalizedMonitorOperation() == "create"
+        filterOperation.ifBlank { operation }.normalizedMonitorOperation() == "create"
 
 private fun LogEntry.isMediaStorePendingIntermediateRecord(): Boolean =
     listOf(path, landingPath, backendPath).any { it.isMediaStorePendingPath() }
@@ -410,6 +418,7 @@ private fun String.normalizedMonitorOperation(): String =
               it == "provider_open" ||
               it == "create" ||
               it == "fuse_create" ||
+              it == "inotify" ||
               it == "export"
       )
           "create"

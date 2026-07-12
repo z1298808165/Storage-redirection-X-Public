@@ -5415,7 +5415,9 @@
     const eventKind = parts[3] || "";
     const path = parts[4] || extractPathFromLog(line);
     const extras = parseLogExtras(parts.slice(5));
-    const syscallOp = extras.op_filter || extras.op || eventKind;
+    const filterOperation = extras.op_filter || extras.op || eventKind;
+    const rawOperation = extras.op || eventKind;
+    const operationIntent = monitorOperationIntent(filterOperation);
     if (extras.op === "monitor_watch") return null;
     const ret = Number(extras.ret ?? NaN);
     const errno = Number(extras.errno ?? NaN);
@@ -5434,10 +5436,10 @@
     const appName = getLogPackageLabel(pkg);
     const operationLabel = isModuleWebUiExport
       ? "export"
-      : formatLogOperationBadge(syscallOp || eventKind);
+      : formatLogOperationBadge(rawOperation || filterOperation);
     const action = isModuleWebUiExport
       ? describeModuleExportOperation(extras)
-      : describeLogOperation(eventKind, syscallOp, extras);
+      : describeLogOperation(eventKind, filterOperation, extras);
     const sourceText = isModuleWebUiExport
       ? describeModuleExportSource(extras)
       : describeLogSource(processPkg, callerPkg, extras);
@@ -5445,6 +5447,7 @@
     const statusText = ok ? "成功" : describeErrno(errno, extras);
     const timeText = timestamp.length >= 16 ? timestamp.slice(11, 16) : "--:--";
     const meta = [];
+    if (operationIntent) meta.push(monitorIntentLabel(operationIntent));
     if (sourceText) meta.push(sourceText);
     if (extras.identify_reliability)
       meta.push("可靠性 " + formatReliability(extras.identify_reliability));
@@ -5456,6 +5459,7 @@
       callerPkg,
       watchPkg,
       operationLabel,
+      operationIntent,
       action,
       sourceText,
       statusText,
@@ -5476,7 +5480,8 @@
       pkg,
       appName,
       operationLabel,
-      filterOperation: syscallOp,
+      operationIntent,
+      filterOperation,
       action,
       summaryText,
       path: displayPath,
@@ -5532,6 +5537,18 @@
       .toLowerCase();
     if (!pattern || !value || pattern.includes("/")) return false;
     return wildcardMatches(pattern, value);
+  }
+
+  function monitorOperationIntent(operation) {
+    const match = String(operation || String())
+      .trim()
+      .toLowerCase()
+      .match(/:(read|write|create)$/);
+    return match ? match[1] : String();
+  }
+
+  function monitorIntentLabel(intent) {
+    return { read: `读取意图`, write: `写入意图`, create: `创建意图` }[intent] || String();
   }
 
   function monitorPathFilterMatches(rule, path) {
@@ -6092,6 +6109,26 @@
     });
   }
 
+  const MONITOR_INTENTS = [`read`, `write`, `create`];
+
+  function splitMonitorOperationRules(items) {
+    const operations = [];
+    const intents = [];
+    normalizeMonitorFilterOperationList(items).forEach((value) => {
+      const match = String(value).match(/^\*:(read|write|create)$/i);
+      if (match) intents.push(match[1].toLowerCase());
+      else operations.push(value);
+    });
+    return { operations, intents };
+  }
+
+  function mergeMonitorOperationRules(operations, intents) {
+    return normalizeMonitorFilterOperationList([
+      ...operations,
+      ...intents.map((intent) => `*:${intent}`),
+    ]);
+  }
+
   function renderMonitorFilterList(container, items, type) {
     if (!container) return;
     if (!items.length) {
@@ -6102,8 +6139,10 @@
       .map(
         (value, index) =>
           '<div class="monitor-filter-item">' +
-          '<span class="monitor-filter-value">' +
+          '<span class="monitor-filter-value" title="' +
           escapeHtml(value) +
+          '">' +
+          escapeHtml(type === `intent` ? monitorIntentLabel(value) : value) +
           "</span>" +
           '<button class="monitor-filter-delete" type="button" data-type="' +
           type +
@@ -6116,7 +6155,7 @@
   }
 
   async function showMonitorFilterDialog() {
-    const loading = Theme.showLoadingDialog("正在读取过滤配置...");
+    const loading = Theme.showLoadingDialog(`正在读取过滤配置...`);
     let filters;
     try {
       const [monitorFilters, globalConfig] = await Promise.all([
@@ -6128,125 +6167,198 @@
       State.monitorFilters = filters;
     } catch {
       loading.close();
-      Theme.showToast("读取过滤配置失败", "error");
+      Theme.showToast(`读取过滤配置失败`, `error`);
       return;
     }
     loading.close();
+
     const autoSave = isAppConfigAutoSaveEnabled();
-    const modalActions = autoSave
-      ? ""
-      : '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="monitorFilterSave" type="button">保存</button></div>';
+    const splitRules = splitMonitorOperationRules(filters.excluded_operations);
     const draft = {
       excluded_paths: normalizeMonitorFilterPathList(filters.excluded_paths),
-      excluded_operations: normalizeMonitorFilterOperationList(filters.excluded_operations),
+      excluded_operations: splitRules.operations,
+      excluded_intents: splitRules.intents,
     };
+    const panels = {
+      path: {
+        title: `路径`,
+        description: `排除目录及其子路径，支持 * 和 ? 通配。`,
+        placeholder: `Download 或 Android/cache`,
+      },
+      operation: {
+        title: `操作`,
+        description: `按完整操作名过滤，例如 openat、openat2 或 provider_open:read。`,
+        placeholder: `openat 或 provider_open:read`,
+      },
+      intent: {
+        title: `意图`,
+        description: `按访问目的过滤，不受 open、openat 等具体操作名影响。`,
+      },
+    };
+    const actions = autoSave
+      ? String()
+      : `<div class='modal-actions'><button class='btn btn-secondary modal-close' type='button'>取消</button><button class='btn btn-primary' id='monitorFilterSave' type='button'>保存</button></div>`;
     showModalWithHistory(
-      '<div class="modal-title">文件监视过滤</div>' +
-        '<div class="modal-hint">请输入相对路径，例如 Download、Android/media；普通路径按前缀过滤，也支持 * 和 ? 通配。</div>' +
-        '<div class="monitor-filter-section">' +
-        '<div class="monitor-filter-title">排除路径</div>' +
-        '<div class="monitor-filter-input-row"><input type="text" class="modal-input" id="monitorFilterPathInput" placeholder="Download 或 Android/cache" autocomplete="off"><button class="icon-btn icon-btn-sm icon-btn-add monitor-filter-add" id="monitorFilterAddPath" type="button" aria-label="添加排除路径" title="添加排除路径">' +
-        iconHtml("plus") +
-        "</button></div>" +
-        '<div class="path-validation" id="monitorFilterPathValidation"></div>' +
-        '<div class="monitor-filter-list" id="monitorFilterPathList"></div>' +
-        "</div>" +
-        '<div class="monitor-filter-section">' +
-        '<div class="monitor-filter-title">排除操作类型</div>' +
-        '<div class="monitor-filter-input-row"><input type="text" class="modal-input" id="monitorFilterOpInput" placeholder="provider_open:read 或 open*:read" autocomplete="off"><button class="icon-btn icon-btn-sm icon-btn-add monitor-filter-add" id="monitorFilterAddOp" type="button" aria-label="添加操作类型" title="添加操作类型">' +
-        iconHtml("plus") +
-        "</button></div>" +
-        '<div class="monitor-filter-list" id="monitorFilterOpList"></div>' +
-        "</div>" +
-        modalActions,
+      `<div class='modal-title monitor-filter-heading'><span>文件监视过滤</span><span class='monitor-filter-total' id='monitorFilterTotal'></span></div>
+       <div class='monitor-filter-tabs' role='tablist' aria-label='过滤规则类型'>
+         ${Object.entries(panels)
+           .map(
+             ([key, panel], index) =>
+               `<button class='monitor-filter-tab${index ? String() : ` active`}' type='button' role='tab' aria-selected='${index ? `false` : `true`}' data-panel='${key}'><span>${panel.title}</span><small data-count='${key}'>0</small></button>`,
+           )
+           .join(String())}
+       </div>
+       <div class='monitor-filter-workspace'>
+         <div class='monitor-filter-description' id='monitorFilterDescription'></div>
+         <div class='monitor-filter-input-row' id='monitorFilterInputRow'><input type='text' class='modal-input' id='monitorFilterInput' autocomplete='off'><button class='icon-btn icon-btn-sm icon-btn-add monitor-filter-add' id='monitorFilterAdd' type='button' aria-label='添加规则' title='添加规则'>${iconHtml(`plus`)}</button></div>
+         <div class='path-validation' id='monitorFilterValidation'></div>
+         <div class='monitor-intent-options' id='monitorFilterIntentOptions'>
+           ${MONITOR_INTENTS.map((intent) => `<button class='monitor-intent-option' type='button' data-intent='${intent}' aria-pressed='false'><span>${monitorIntentLabel(intent)}</span><small>${{ read: `仅读取现有内容`, write: `写入或追加内容`, create: `新建、覆盖或临时文件` }[intent]}</small>${iconHtml(`plus`)}</button>`).join(String())}
+         </div>
+         <div class='monitor-filter-list' id='monitorFilterList'></div>
+       </div>${actions}`,
       { backdropClose: true },
     );
 
-    const pathInput = $("#monitorFilterPathInput");
-    const pathValidation = $("#monitorFilterPathValidation");
-    const opInput = $("#monitorFilterOpInput");
-    const persistDraft = async (silent) => {
-      const snapshot = JSON.parse(JSON.stringify(draft));
+    let activeType = `path`;
+    const input = $(`#monitorFilterInput`);
+    const validation = $(`#monitorFilterValidation`);
+    const persist = async (closeAfterSave = false) => {
+      const snapshot = {
+        excluded_paths: draft.excluded_paths.slice(),
+        excluded_operations: mergeMonitorOperationRules(
+          draft.excluded_operations,
+          draft.excluded_intents,
+        ),
+      };
       State.monitorFilterSaveQueue = State.monitorFilterSaveQueue
         .catch(() => false)
         .then(() => Api.writeMonitorFilters(snapshot));
       const ok = await State.monitorFilterSaveQueue;
-      if (ok) {
+      if (!ok) Theme.showToast(`保存过滤配置失败`, `error`);
+      else {
         State.monitorFilters = snapshot;
-        if (!silent) {
+        if (closeAfterSave) {
           closeActiveModal();
-          Theme.showToast("过滤配置已保存", "success");
+          Theme.showToast(`过滤配置已保存`, `success`);
         }
-      } else {
-        Theme.showToast("保存过滤配置失败", "error");
       }
       return ok;
     };
+    const keyForType = (type) =>
+      type === `path`
+        ? `excluded_paths`
+        : type === `intent`
+          ? `excluded_intents`
+          : `excluded_operations`;
     const render = () => {
-      renderMonitorFilterList($("#monitorFilterPathList"), draft.excluded_paths, "path");
-      renderMonitorFilterList($("#monitorFilterOpList"), draft.excluded_operations, "operation");
-      $("#modalContent")
-        ?.querySelectorAll(".monitor-filter-delete")
-        .forEach((btn) => {
-          btn.addEventListener("click", async () => {
-            const key = btn.dataset.type === "path" ? "excluded_paths" : "excluded_operations";
-            draft[key].splice(Number(btn.dataset.index), 1);
-            render();
-            if (autoSave) await persistDraft(true);
+      const panel = panels[activeType];
+      const values = draft[keyForType(activeType)];
+      $(`#monitorFilterDescription`).textContent = panel.description;
+      $(`#monitorFilterInputRow`).hidden = activeType === `intent`;
+      $(`#monitorFilterIntentOptions`).hidden = activeType !== `intent`;
+      $(`#monitorFilterList`).hidden = activeType === `intent`;
+      validation.hidden = activeType === `intent`;
+      if (activeType !== `path`) {
+        validation.textContent = String();
+        validation.classList.remove(`valid`, `invalid`);
+      }
+      input.placeholder = panel.placeholder || String();
+      renderMonitorFilterList($(`#monitorFilterList`), values, activeType);
+      const counts = {
+        path: draft.excluded_paths.length,
+        operation: draft.excluded_operations.length,
+        intent: draft.excluded_intents.length,
+      };
+      $(`#monitorFilterTotal`).textContent =
+        Object.values(counts).reduce((sum, count) => sum + count, 0) + ` 条规则`;
+      Object.entries(counts).forEach(([type, count]) => {
+        const node = document.querySelector(`[data-count='${type}']`);
+        if (node) node.textContent = count;
+      });
+      $$(`.monitor-intent-option`).forEach((button) => {
+        const selected = draft.excluded_intents.includes(button.dataset.intent);
+        button.classList.toggle(`selected`, selected);
+        button.setAttribute(`aria-pressed`, String(selected));
+        button.title = selected ? `点击移除此过滤规则` : `点击添加此过滤规则`;
+        const icon = button.querySelector(`.icon`);
+        if (icon) icon.className = `icon icon-${selected ? `check` : `plus`}`;
+      });
+      $(`#monitorFilterList`)
+        ?.querySelectorAll(`.monitor-filter-delete`)
+        .forEach((button) => {
+          button.addEventListener(`click`, () => {
+            const index = Number(button.dataset.index);
+            const value = values[index];
+            const label = activeType === `intent` ? monitorIntentLabel(value) : value;
+            Theme.confirmDelete(`删除过滤规则“${label}”？`, async () => {
+              values.splice(index, 1);
+              render();
+              if (autoSave) await persist();
+            });
           });
         });
     };
-    const addValue = async (key, input, label) => {
+    const addCurrentValue = async () => {
+      const key = keyForType(activeType);
       const result =
-        key === "excluded_paths"
-          ? validateMonitorFilterPath(input?.value || "", { allowLegacyAbsolute: false })
-          : { valid: true, value: String(input?.value || "").trim(), msg: "" };
-      const value = result.value;
-      if (!result.valid) {
-        Theme.showToast(result.msg || label + "格式不正确", "error");
-        if (key === "excluded_paths") showMonitorFilterPathValidation(input, pathValidation);
+        activeType === `path`
+          ? validateMonitorFilterPath(input.value, { allowLegacyAbsolute: false })
+          : { valid: true, value: String(input.value || String()).trim(), msg: String() };
+      if (!result.valid || !result.value) {
+        Theme.showToast(result.msg || `规则不能为空`, `error`);
+        if (activeType === `path`) showMonitorFilterPathValidation(input, validation);
         return;
       }
-      if (!value) {
-        Theme.showToast(label + "不能为空", "error");
-        return;
-      }
-      if (value.includes("\0") || value.length > 512) {
-        Theme.showToast(label + "格式不正确", "error");
-        return;
-      }
-      if (draft[key].includes(value)) {
-        Theme.showToast("规则已存在", "error");
-        return;
-      }
-      draft[key].push(value);
-      input.value = "";
-      if (key === "excluded_paths") showMonitorFilterPathValidation(input, pathValidation);
+      if (result.value.includes(`\0`) || result.value.length > 512)
+        return Theme.showToast(`规则格式不正确`, `error`);
+      if (draft[key].includes(result.value)) return Theme.showToast(`规则已存在`, `error`);
+      draft[key].push(result.value);
+      input.value = String();
       render();
-      if (autoSave) await persistDraft(true);
-      focusWithoutViewportJump(input);
+      if (autoSave) await persist();
     };
-    $("#monitorFilterAddPath")?.addEventListener("click", () =>
-      addValue("excluded_paths", pathInput, "排除路径"),
+    $$(`.monitor-filter-tab`).forEach((tab) =>
+      tab.addEventListener(`click`, () => {
+        activeType = tab.dataset.panel;
+        $$(`.monitor-filter-tab`).forEach((item) => {
+          const active = item === tab;
+          item.classList.toggle(`active`, active);
+          item.setAttribute(`aria-selected`, String(active));
+        });
+        render();
+        if (activeType !== `intent`) setTimeout(() => focusWithoutViewportJump(input), 80);
+      }),
     );
-    $("#monitorFilterAddOp")?.addEventListener("click", () =>
-      addValue("excluded_operations", opInput, "操作类型"),
+    $$(`.monitor-intent-option`).forEach((button) =>
+      button.addEventListener(`click`, async () => {
+        const intent = button.dataset.intent;
+        if (!MONITOR_INTENTS.includes(intent)) return;
+        const index = draft.excluded_intents.indexOf(intent);
+        if (index >= 0) {
+          Theme.confirmDelete(`删除过滤规则“${monitorIntentLabel(intent)}”？`, async () => {
+            draft.excluded_intents.splice(index, 1);
+            render();
+            if (autoSave) await persist();
+          });
+          return;
+        }
+        draft.excluded_intents.push(intent);
+        render();
+        if (autoSave) await persist();
+      }),
     );
-    pathInput?.addEventListener("input", () =>
-      showMonitorFilterPathValidation(pathInput, pathValidation),
-    );
-    pathInput?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") addValue("excluded_paths", pathInput, "排除路径");
+    $(`#monitorFilterAdd`)?.addEventListener(`click`, addCurrentValue);
+    input?.addEventListener(`keydown`, (event) => {
+      if (event.key === `Enter`) addCurrentValue();
     });
-    opInput?.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") addValue("excluded_operations", opInput, "操作类型");
+    input?.addEventListener(`input`, () => {
+      if (activeType === `path`) showMonitorFilterPathValidation(input, validation);
     });
-    $("#monitorFilterSave")?.addEventListener("click", async () => {
-      await persistDraft(false);
-    });
-    document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
+    $(`#monitorFilterSave`)?.addEventListener(`click`, () => persist(true));
+    document.querySelector(`.modal-close`)?.addEventListener(`click`, closeActiveModal);
     render();
-    setTimeout(() => focusWithoutViewportJump(pathInput), 220);
+    setTimeout(() => focusWithoutViewportJump(input), 220);
   }
 
   async function loadAbout() {
@@ -6301,6 +6413,10 @@
       normalizeBackupUiPreferences,
       normalizeGlobalRuntimeConfig,
       normalizeUsersConfig,
+      parseLogLine,
+      shouldFilterMonitorLogEntry,
+      splitMonitorOperationRules,
+      mergeMonitorOperationRules,
     };
   }
 

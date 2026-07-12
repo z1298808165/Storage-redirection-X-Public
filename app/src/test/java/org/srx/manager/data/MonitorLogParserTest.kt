@@ -19,6 +19,7 @@ class MonitorLogParserTest {
     assertEquals("com.example.camera", entry.packageName)
     assertEquals("Label:com.example.camera", entry.label)
     assertEquals("open", entry.operation)
+    assertEquals("create", entry.operationIntent)
     assertEquals("带创建意图的文件打开", entry.action)
     assertEquals("/storage/emulated/0/DCIM/pending", entry.path)
     assertTrue(entry.ok)
@@ -66,7 +67,8 @@ class MonitorLogParserTest {
     val entry = entries.single()
     assertEquals("xyz.nextalone.nnngram", entry.packageName)
     assertEquals("Label:xyz.nextalone.nnngram", entry.label)
-    assertEquals("open:write", entry.operation)
+    assertEquals("open", entry.operation)
+    assertEquals("write", entry.operationIntent)
     assertEquals("caller", entry.identifyMethod)
   }
 
@@ -93,7 +95,7 @@ class MonitorLogParserTest {
     val entry = entries.single()
     assertEquals("com.tencent.mobileqq", entry.packageName)
     assertEquals("Label:com.tencent.mobileqq", entry.label)
-    assertEquals("create", entry.operation)
+    assertEquals("fuse_create", entry.operation)
     assertEquals("fuse_redirect", entry.identifyMethod)
     assertEquals("fuse_redirect", entry.source)
   }
@@ -148,7 +150,7 @@ class MonitorLogParserTest {
     val entry = parseMonitorLogEntries(raw).single()
 
     assertEquals("com.tencent.mm", entry.packageName)
-    assertEquals("create", entry.operation)
+    assertEquals("inotify", entry.operation)
     assertEquals("watch_package", entry.identifyMethod)
     assertEquals("path_mapping", entry.source)
     assertEquals(
@@ -209,7 +211,8 @@ class MonitorLogParserTest {
     val entry = parseMonitorLogEntries(raw).single()
 
     assertEquals("com.tencent.mm", entry.packageName)
-    assertEquals("open", entry.operation)
+    assertEquals("rename", entry.operation)
+    assertEquals("create", entry.operationIntent)
     assertEquals("带创建意图的文件打开", entry.action)
     assertEquals(
         "/storage/emulated/0/Download/WeiXin/storage-redirect-x-backup-20260619-130840.srxbak.zip",
@@ -235,7 +238,7 @@ class MonitorLogParserTest {
     val entries = parseMonitorLogEntries(raw)
 
     assertEquals(1, entries.size)
-    assertEquals("create", entries.single().operation)
+    assertEquals("inotify", entries.single().operation)
     assertEquals("/storage/emulated/0/Download/b.txt", entries.single().path)
   }
 
@@ -318,7 +321,7 @@ class MonitorLogParserTest {
     assertFalse(entry.isModuleWebUiExport)
     assertEquals("com.android.providers.media.module", entry.packageName)
     assertEquals("Label:com.android.providers.media.module", entry.label)
-    assertEquals("create", entry.operation)
+    assertEquals("inotify", entry.operation)
     assertEquals("创建类文件操作", entry.action)
   }
 
@@ -335,7 +338,7 @@ class MonitorLogParserTest {
     assertFalse(entry.isModuleWebUiExport)
     assertEquals("com.android.providers.media.module", entry.packageName)
     assertEquals("Label:com.android.providers.media.module", entry.label)
-    assertEquals("create", entry.operation)
+    assertEquals("inotify", entry.operation)
     assertEquals("media_provider_fallback", entry.identifyMethod)
     assertEquals("cn.wps.moffice_eng", entry.watchPackage)
   }
@@ -564,7 +567,8 @@ class MonitorLogParserTest {
     assertEquals("org.srx.manager", entry.packageName)
     assertEquals("org.srx.manager", entry.callerPackage)
     assertEquals("provider_open", entry.identifyMethod)
-    assertEquals("provider_open:write", entry.operation)
+    assertEquals("provider_open", entry.operation)
+    assertEquals("write", entry.operationIntent)
   }
 
   @Test
@@ -586,8 +590,10 @@ class MonitorLogParserTest {
             )
             .single()
 
-    assertEquals("provider_open:read", readEntry.operation)
-    assertEquals("provider_open:create", createEntry.operation)
+    assertEquals("provider_open", readEntry.operation)
+    assertEquals("read", readEntry.operationIntent)
+    assertEquals("provider_open", createEntry.operation)
+    assertEquals("create", createEntry.operationIntent)
   }
 
   @Test
@@ -700,5 +706,43 @@ class MonitorLogParserTest {
         parseMonitorLogEntries(raw, filters = FileMonitorFilters(excludedPaths = emptyList()))
 
     assertTrue(entries.isEmpty())
+  }
+
+  @Test
+  fun preservesRawOperationAndCreateIntent() {
+    val raw =
+        "2026-07-12 12:34:56|com.example.app|com.example.app|OPEN|" +
+            "/storage/emulated/0/Download/a.txt|ret=8|errno=0|" +
+            "op=openat2|op_filter=openat2:create|flags=0x40"
+
+    val entry =
+        parseMonitorLogEntries(raw, filters = FileMonitorFilters(excludedPaths = emptyList()))
+            .single()
+
+    assertEquals("openat2", entry.operation)
+    assertEquals("openat2:create", entry.filterOperation)
+    assertEquals("create", entry.operationIntent)
+    assertTrue(
+        parseMonitorLogEntries(
+                raw,
+                filters =
+                    FileMonitorFilters(
+                        excludedPaths = emptyList(),
+                        excludedOperations = listOf("*:create"),
+                    ),
+            )
+            .isEmpty()
+    )
+    assertFalse(
+        parseMonitorLogEntries(
+                raw,
+                filters =
+                    FileMonitorFilters(
+                        excludedPaths = emptyList(),
+                        excludedOperations = listOf("open*:read"),
+                    ),
+            )
+            .isEmpty()
+    )
   }
 }
