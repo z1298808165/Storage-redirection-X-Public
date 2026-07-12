@@ -8,6 +8,7 @@ use super::super::util::c_str_to_string;
 use crate::platform::paths;
 use crate::redirect::{policy, process_redirect_path, record_redirect_hit};
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t, off_t, timespec};
+use std::borrow::Cow;
 use std::ffi::CString;
 
 pub unsafe extern "C" fn hooked_mkdir(pathname: *const c_char, mode: mode_t) -> c_int {
@@ -191,10 +192,12 @@ where
     let redirect_result = process_redirect_path(hub, &path_text);
     diagnostic::log_diag_redirect_decision(hub, op_name, &path_text, &redirect_result);
 
+    let mut final_path: Cow<'_, str> = Cow::Borrowed(path_text.as_str());
     let result = if redirect_result.is_redirect() {
         record_redirect_hit(hub, op_name, &path_text, &redirect_result.new_path);
         runtime::ensure_redirect_parent_dirs(&redirect_result.new_path, mode);
-        if let Ok(c_path) = CString::new(redirect_result.new_path) {
+        if let Ok(c_path) = CString::new(redirect_result.new_path.as_str()) {
+            final_path = Cow::Owned(redirect_result.new_path);
             call_original(c_path.as_ptr())
         } else {
             call_original(pathname)
@@ -207,7 +210,7 @@ where
     } else {
         0
     };
-    monitor::record_mkdir_result(hub, op_name, &path_text, result, error_no);
+    monitor::record_mkdir_result(hub, op_name, final_path.as_ref(), result, error_no);
     result
 }
 
@@ -837,10 +840,12 @@ where
     let redirect_result = process_redirect_path(hub, &path_text);
     diagnostic::log_diag_redirect_decision(hub, op_name, &path_text, &redirect_result);
 
+    let mut final_path: Cow<'_, str> = Cow::Borrowed(path_text.as_str());
     let result = if redirect_result.is_redirect() {
         record_redirect_hit(hub, op_name, &path_text, &redirect_result.new_path);
         runtime::ensure_redirect_parent_dirs(&redirect_result.new_path, mode);
-        if let Ok(c_path) = CString::new(redirect_result.new_path) {
+        if let Ok(c_path) = CString::new(redirect_result.new_path.as_str()) {
+            final_path = Cow::Owned(redirect_result.new_path);
             call_original(c_path.as_ptr())
         } else {
             call_original(pathname)
@@ -853,6 +858,6 @@ where
     } else {
         0
     };
-    monitor::record_mkdir_result(hub, op_name, &path_text, result, error_no);
+    monitor::record_mkdir_result(hub, op_name, final_path.as_ref(), result, error_no);
     result
 }
