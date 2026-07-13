@@ -24,3 +24,10 @@ fuser = { version = "0.17", default-features = false }
 
 [patch.crates-io]
 fuser = { path = "vendor/fuser-android" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

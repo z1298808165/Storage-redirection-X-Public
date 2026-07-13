@@ -65,7 +65,7 @@ fn build_lsplant_bridge(target_arch: &str) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let build_dir = out_dir.join("lsplant_cmake").join(abi);
     let install_dir = out_dir.join("lsplant_install").join(abi);
-    let profile = "Release";
+    let profile = "MinSizeRel";
     let inline_hook_include = PathBuf::from(
         env::var_os("DEP_SRX_INLINE_HOOK_INCLUDE").expect("DEP_SRX_INLINE_HOOK_INCLUDE"),
     );
@@ -86,6 +86,9 @@ fn build_lsplant_bridge(target_arch: &str) {
         .arg("-DANDROID_PLATFORM=android-29")
         .arg("-DANDROID_STL=c++_static")
         .arg(format!("-DCMAKE_BUILD_TYPE={profile}"))
+        .arg("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON")
+        .arg("-DCMAKE_C_FLAGS_MINSIZEREL=-Oz -DNDEBUG")
+        .arg("-DCMAKE_CXX_FLAGS_MINSIZEREL=-Oz -DNDEBUG")
         .arg(format!("-DCMAKE_INSTALL_PREFIX={}", install_dir.display()))
         .arg(format!(
             "-DSRX_INLINE_HOOK_INCLUDE_DIR={}",
