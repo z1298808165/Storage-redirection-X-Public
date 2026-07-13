@@ -6191,6 +6191,35 @@
     return timestamp || entry.timeText || "--:--";
   }
 
+  function logOperationCopyValue(entry) {
+    return String(entry?.filterOperation || entry?.operationLabel || `unknown`).trim() || `unknown`;
+  }
+
+  async function copyText(text) {
+    const value = String(text || String());
+    if (!value) return false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch {}
+    const input = document.createElement(`textarea`);
+    input.value = value;
+    input.setAttribute(`readonly`, String());
+    input.style.position = `fixed`;
+    input.style.opacity = `0`;
+    document.body.appendChild(input);
+    input.select();
+    input.setSelectionRange(0, value.length);
+    let copied = false;
+    try {
+      copied = document.execCommand(`copy`);
+    } catch {}
+    input.remove();
+    return copied;
+  }
+
   function renderLogCard(entry) {
     const iconSrc = Api.getAppIconSrc ? Api.getAppIconSrc(entry.pkg) : "";
     const initial = (entry.appName || entry.pkg || "?").trim().charAt(0).toUpperCase() || "?";
@@ -6235,13 +6264,15 @@
       '<div class="log-card-body">' +
       '<div class="log-card-head">' +
       identityHtml +
-      '<span class="log-status ' +
+      '<button class="log-status ' +
       entry.status +
-      '" title="' +
-      escapeHtml(entry.status === "error" ? entry.statusText : entry.action) +
+      '" type="button" data-copy-operation="' +
+      escapeHtml(logOperationCopyValue(entry)) +
+      '" aria-label="复制操作规则" title="复制操作规则：' +
+      escapeHtml(logOperationCopyValue(entry)) +
       '">' +
       escapeHtml(entry.operationLabel || "unknown") +
-      "</span>" +
+      "</button>" +
       '<button class="log-time" type="button" aria-label="' +
       escapeHtml(timeTitle) +
       '" title="' +
@@ -6271,6 +6302,17 @@
         event.stopPropagation();
         const packageName = btn.dataset.pkg || "";
         if (isSinglePackageName(packageName)) openAppConfig(packageName, { originPage: "logs" });
+      });
+    });
+    root.querySelectorAll(".log-status[data-copy-operation]").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const value = btn.dataset.copyOperation || "";
+        const copied = await copyText(value);
+        Theme.showToast(
+          copied ? "已复制操作规则：" + value : "复制操作规则失败",
+          copied ? "success" : "error",
+        );
       });
     });
     root.querySelectorAll(".log-time").forEach((btn) => {
@@ -6303,13 +6345,6 @@
       else operations.push(value);
     });
     return { operations, intents };
-  }
-
-  function mergeMonitorOperationRules(operations, intents) {
-    return normalizeMonitorFilterOperationList([
-      ...operations,
-      ...intents.map((intent) => `*:${intent}`),
-    ]);
   }
 
   function renderMonitorFilterList(container, items, type) {
@@ -6356,11 +6391,9 @@
     loading.close();
 
     const autoSave = isAppConfigAutoSaveEnabled();
-    const splitRules = splitMonitorOperationRules(filters.excluded_operations);
     const draft = {
       excluded_paths: normalizeMonitorFilterPathList(filters.excluded_paths),
-      excluded_operations: splitRules.operations,
-      excluded_intents: splitRules.intents,
+      excluded_operations: normalizeMonitorFilterOperationList(filters.excluded_operations),
     };
     const panels = {
       path: {
@@ -6409,10 +6442,7 @@
     const persist = async (closeAfterSave = false) => {
       const snapshot = {
         excluded_paths: draft.excluded_paths.slice(),
-        excluded_operations: mergeMonitorOperationRules(
-          draft.excluded_operations,
-          draft.excluded_intents,
-        ),
+        excluded_operations: draft.excluded_operations.slice(),
       };
       State.monitorFilterSaveQueue = State.monitorFilterSaveQueue
         .catch(() => false)
@@ -6428,15 +6458,15 @@
       }
       return ok;
     };
-    const keyForType = (type) =>
-      type === `path`
-        ? `excluded_paths`
-        : type === `intent`
-          ? `excluded_intents`
-          : `excluded_operations`;
+    const operationRuleValues = (type) => {
+      const rules = splitMonitorOperationRules(draft.excluded_operations);
+      return type === `intent` ? rules.intents : rules.operations;
+    };
+    const valuesForType = (type) =>
+      type === `path` ? draft.excluded_paths : operationRuleValues(type);
     const render = () => {
       const panel = panels[activeType];
-      const values = draft[keyForType(activeType)];
+      const values = valuesForType(activeType);
       $(`#monitorFilterDescription`).textContent = panel.description;
       $(`#monitorFilterInputRow`).hidden = activeType === `intent`;
       $(`#monitorFilterIntentOptions`).hidden = activeType !== `intent`;
@@ -6450,8 +6480,8 @@
       renderMonitorFilterList($(`#monitorFilterList`), values, activeType);
       const counts = {
         path: draft.excluded_paths.length,
-        operation: draft.excluded_operations.length,
-        intent: draft.excluded_intents.length,
+        operation: operationRuleValues(`operation`).length,
+        intent: operationRuleValues(`intent`).length,
       };
       $(`#monitorFilterTotal`).textContent =
         Object.values(counts).reduce((sum, count) => sum + count, 0) + ` 条规则`;
@@ -6460,7 +6490,7 @@
         if (node) node.textContent = count;
       });
       $$(`.monitor-intent-option`).forEach((button) => {
-        const selected = draft.excluded_intents.includes(button.dataset.intent);
+        const selected = draft.excluded_operations.includes(`*:${button.dataset.intent}`);
         button.classList.toggle(`selected`, selected);
         button.setAttribute(`aria-pressed`, String(selected));
         button.title = selected ? `点击移除此过滤规则` : `点击添加此过滤规则`;
@@ -6475,7 +6505,13 @@
             const value = values[index];
             const label = activeType === `intent` ? monitorIntentLabel(value) : value;
             Theme.confirmDelete(`删除过滤规则“${label}”？`, async () => {
-              values.splice(index, 1);
+              if (activeType === `path`) {
+                draft.excluded_paths.splice(index, 1);
+              } else {
+                const storedValue = activeType === `intent` ? `*:${value}` : value;
+                const storedIndex = draft.excluded_operations.indexOf(storedValue);
+                if (storedIndex >= 0) draft.excluded_operations.splice(storedIndex, 1);
+              }
               render();
               if (autoSave) await persist();
             });
@@ -6483,7 +6519,6 @@
         });
     };
     const addCurrentValue = async () => {
-      const key = keyForType(activeType);
       const result =
         activeType === `path`
           ? validateMonitorFilterPath(input.value, { allowLegacyAbsolute: false })
@@ -6495,8 +6530,9 @@
       }
       if (result.value.includes(`\0`) || result.value.length > 512)
         return Theme.showToast(`规则格式不正确`, `error`);
-      if (draft[key].includes(result.value)) return Theme.showToast(`规则已存在`, `error`);
-      draft[key].push(result.value);
+      const target = activeType === `path` ? draft.excluded_paths : draft.excluded_operations;
+      if (target.includes(result.value)) return Theme.showToast(`规则已存在`, `error`);
+      target.push(result.value);
       input.value = String();
       render();
       if (autoSave) await persist();
@@ -6517,16 +6553,17 @@
       button.addEventListener(`click`, async () => {
         const intent = button.dataset.intent;
         if (!MONITOR_INTENTS.includes(intent)) return;
-        const index = draft.excluded_intents.indexOf(intent);
+        const rule = `*:${intent}`;
+        const index = draft.excluded_operations.indexOf(rule);
         if (index >= 0) {
           Theme.confirmDelete(`删除过滤规则“${monitorIntentLabel(intent)}”？`, async () => {
-            draft.excluded_intents.splice(index, 1);
+            draft.excluded_operations.splice(index, 1);
             render();
             if (autoSave) await persist();
           });
           return;
         }
-        draft.excluded_intents.push(intent);
+        draft.excluded_operations.push(rule);
         render();
         if (autoSave) await persist();
       }),
@@ -6596,10 +6633,10 @@
       normalizeBackupUiPreferences,
       normalizeGlobalRuntimeConfig,
       normalizeUsersConfig,
+      logOperationCopyValue,
       parseLogLine,
       shouldFilterMonitorLogEntry,
       splitMonitorOperationRules,
-      mergeMonitorOperationRules,
       setToggleBusy,
       setToggleState,
       updateChannelBadge,

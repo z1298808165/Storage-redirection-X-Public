@@ -172,6 +172,11 @@ const createOpenEntry = webui.parseLogLine(
 assertDeepEqual(createOpenEntry.operationLabel, `openat2`, `log-operation-keeps-raw-type`);
 assertDeepEqual(createOpenEntry.operationIntent, `create`, `log-operation-exposes-intent`);
 assertDeepEqual(
+  webui.logOperationCopyValue(createOpenEntry),
+  `openat2:create`,
+  `log-operation-copy-uses-filter-rule`,
+);
+assertDeepEqual(
   webui.shouldFilterMonitorLogEntry(createOpenEntry, {
     excluded_paths: [],
     excluded_operations: [`*:create`],
@@ -193,9 +198,15 @@ assertDeepEqual(
   `monitor-filter-splits-intents`,
 );
 assertDeepEqual(
-  webui.mergeMonitorOperationRules([`open*:read`, `rename*`], [`create`]),
-  [`open*:read`, `rename*`, `*:create`],
-  `monitor-filter-merges-intents`,
+  webui.normalizeBackupMonitorFilters({
+    excluded_paths: [`Pictures`, `Download`, `Android/media`],
+    excluded_operations: [`*:create`, `open*:read`, `rename*`],
+  }),
+  {
+    excluded_paths: [`Pictures`, `Download`, `Android/media`],
+    excluded_operations: [`*:create`, `open*:read`, `rename*`],
+  },
+  `monitor-filter-preserves-insertion-order`,
 );
 
 sandbox.window.Api.exec = async () =>

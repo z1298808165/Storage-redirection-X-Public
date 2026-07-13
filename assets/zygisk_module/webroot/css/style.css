@@ -332,7 +332,7 @@ body.logs-page-active .app-container { overflow: hidden; }
 .log-app-identity.is-disabled { cursor: default; }
 .log-app-identity:not(.is-disabled):active { opacity: 0.72; }
 .log-card-title { min-width: 0; flex: 1; font-size: 16px; font-weight: 820; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.log-status { flex-shrink: 0; max-width: 78px; padding: 4px 7px; border-radius: 7px; font-size: 10px; font-weight: 820; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: lowercase; }
+.log-status { flex-shrink: 0; max-width: 78px; margin: 0; padding: 4px 7px; border: 0; border-radius: 7px; appearance: none; -webkit-appearance: none; font-family: var(--font-family); font-size: 10px; font-weight: 820; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-transform: lowercase; cursor: copy; touch-action: manipulation; }
 .log-status.success { background: rgba(16,168,121,0.12); color: var(--color-success); }
 .log-status.error { background: rgba(217,77,77,0.14); color: var(--color-danger); }
 .log-status.warn { background: rgba(212,139,22,0.14); color: var(--color-warning); }
@@ -344,10 +344,10 @@ body.logs-page-active .app-container { overflow: hidden; }
 .log-expand-btn:active { transform: scale(0.9); background: var(--color-surface-overlay); }
 .log-card.expanded .log-expand-btn .icon { transform: rotate(180deg); }
 .log-action { margin-top: 8px; font-size: 13px; line-height: 1.35; color: var(--color-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.log-path { margin-top: 5px; font-family: var(--font-mono); font-size: 13px; line-height: 1.38; color: var(--color-text); word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.log-path { margin-top: 5px; font-family: var(--font-mono); font-size: 13px; line-height: 1.38; color: var(--color-text); word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: text; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
 .log-card.expanded .log-path { display: block; -webkit-line-clamp: unset; overflow: visible; }
 .log-card.expanded .log-action { white-space: normal; }
-.log-detail { display: none; margin-top: 8px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; }
+.log-detail { display: none; margin-top: 8px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.45; cursor: text; user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
 .log-card.expanded .log-detail { display: block; }
 .log-detail-error { color: var(--color-danger); font-weight: 740; }
 .monitor-filter-section { margin-top: 14px; }

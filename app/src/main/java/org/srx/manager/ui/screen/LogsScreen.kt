@@ -1,5 +1,9 @@
 package org.srx.manager.ui.screen
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.runtime.Composable
@@ -39,6 +44,7 @@ import androidx.compose.ui.draw.dropShadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.shadow.Shadow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -237,6 +243,7 @@ private fun LogCard(
     onToggleTime: () -> Unit,
     onOpenApp: (InstalledApp) -> Unit,
 ) {
+  val context = LocalContext.current
   var expanded by
       remember(entry.timestamp, entry.packageName, entry.path, entry.landingPath) {
         mutableStateOf(false)
@@ -280,7 +287,17 @@ private fun LogCard(
             modifier = Modifier.weight(1f),
             onOpenApp = onOpenApp,
         )
-        LogOperationBadge(entry.operation, entry.ok)
+        LogOperationBadge(
+            operation = entry.operation,
+            filterOperation = entry.filterOperation,
+            ok = entry.ok,
+            onCopy = { value ->
+              val clipboard =
+                  context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+              clipboard.setPrimaryClip(ClipData.newPlainText("操作规则", value))
+              Toast.makeText(context, "已复制操作规则：$value", Toast.LENGTH_SHORT).show()
+            },
+        )
         LogTimeText(
             text = formatLogEntryTime(entry, showFullTime),
             showFullTime = showFullTime,
@@ -302,32 +319,38 @@ private fun LogCard(
             lineHeight = 16.sp,
         )
       }
-      Text(
-          primaryPath.ifBlank { "未解析到路径" },
-          maxLines = if (expanded) Int.MAX_VALUE else 2,
-          overflow = TextOverflow.Ellipsis,
-          fontSize = 12.sp,
-          lineHeight = 17.sp,
-      )
-      if (expanded && actualPath.isNotBlank() && actualPath != primaryPath) {
+      SelectionContainer {
         Text(
-            "实际路径：$actualPath",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 12.sp,
-            lineHeight = 16.sp,
-            maxLines = 3,
+            primaryPath.ifBlank { "未解析到路径" },
+            maxLines = if (expanded) Int.MAX_VALUE else 2,
             overflow = TextOverflow.Ellipsis,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
         )
       }
+      if (expanded && actualPath.isNotBlank() && actualPath != primaryPath) {
+        SelectionContainer {
+          Text(
+              "实际路径：$actualPath",
+              color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+              fontSize = 12.sp,
+              lineHeight = 16.sp,
+              maxLines = 3,
+              overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
       if (expanded && requestPath.isNotBlank() && requestPath != primaryPath) {
-        Text(
-            "请求路径：$requestPath",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 12.sp,
-            lineHeight = 16.sp,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        SelectionContainer {
+          Text(
+              "请求路径：$requestPath",
+              color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+              fontSize = 12.sp,
+              lineHeight = 16.sp,
+              maxLines = 3,
+              overflow = TextOverflow.Ellipsis,
+          )
+        }
       }
       if (expanded && !entry.ok && entry.errorText.isNotBlank()) {
         Text(
@@ -419,10 +442,11 @@ private fun FileMonitorFilterDialog(
     onDismiss: () -> Unit,
     onSave: (FileMonitorFilters, Boolean) -> Unit,
 ) {
-  val initialRules = remember(show) { splitMonitorOperationRules(filters.excludedOperations) }
   var paths by remember(show) { mutableStateOf(filters.excludedPaths) }
-  var operations by remember(show) { mutableStateOf(initialRules.first) }
-  var intents by remember(show) { mutableStateOf(initialRules.second) }
+  var operationRules by remember(show) { mutableStateOf(filters.excludedOperations) }
+  val splitRules = splitMonitorOperationRules(operationRules)
+  val operations = splitRules.first
+  val intents = splitRules.second
   var selectedType by remember(show) { mutableStateOf(MonitorFilterType.Path) }
   var pathInput by remember(show) { mutableStateOf("") }
   var pathValidation by remember(show) { mutableStateOf<MonitorFilterPathValidation?>(null) }
@@ -430,14 +454,13 @@ private fun FileMonitorFilterDialog(
   var pendingRemoval by remember(show) { mutableStateOf<MonitorFilterRemoval?>(null) }
   fun saveDraft(
       nextPaths: List<String> = paths,
-      nextOperations: List<String> = operations,
-      nextIntents: List<String> = intents,
+      nextOperationRules: List<String> = operationRules,
       silent: Boolean = true,
   ) {
     onSave(
         FileMonitorFilters(
             excludedPaths = nextPaths,
-            excludedOperations = mergeMonitorOperationRules(nextOperations, nextIntents),
+            excludedOperations = nextOperationRules,
         ),
         silent,
     )
@@ -521,10 +544,10 @@ private fun FileMonitorFilterDialog(
               onAdd = {
                 val value = operationInput.trim()
                 if (value.isNotBlank() && value.length <= 512 && value !in operations) {
-                  val nextOperations = operations + value
-                  operations = nextOperations
+                  val nextRules = operationRules + value
+                  operationRules = nextRules
                   operationInput = ""
-                  if (autoSave) saveDraft(nextOperations = nextOperations)
+                  if (autoSave) saveDraft(nextOperationRules = nextRules)
                 }
               },
               onRemove = { pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Operation, it) },
@@ -536,9 +559,9 @@ private fun FileMonitorFilterDialog(
                 if (intent in intents) {
                   pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Intent, intent)
                 } else {
-                  val nextIntents = intents + intent
-                  intents = nextIntents
-                  if (autoSave) saveDraft(nextIntents = nextIntents)
+                  val nextRules = operationRules + "*:$intent"
+                  operationRules = nextRules
+                  if (autoSave) saveDraft(nextOperationRules = nextRules)
                 }
               },
           )
@@ -574,14 +597,14 @@ private fun FileMonitorFilterDialog(
                   if (autoSave) saveDraft(nextPaths = nextPaths)
                 }
                 MonitorFilterType.Operation -> {
-                  val nextOperations = operations - removal.value
-                  operations = nextOperations
-                  if (autoSave) saveDraft(nextOperations = nextOperations)
+                  val nextRules = operationRules - removal.value
+                  operationRules = nextRules
+                  if (autoSave) saveDraft(nextOperationRules = nextRules)
                 }
                 MonitorFilterType.Intent -> {
-                  val nextIntents = intents - removal.value
-                  intents = nextIntents
-                  if (autoSave) saveDraft(nextIntents = nextIntents)
+                  val nextRules = operationRules - "*:${removal.value}"
+                  operationRules = nextRules
+                  if (autoSave) saveDraft(nextOperationRules = nextRules)
                 }
               }
               pendingRemoval = null
@@ -616,11 +639,6 @@ private fun splitMonitorOperationRules(values: List<String>): Pair<List<String>,
   }
   return operations to intents.distinct()
 }
-
-private fun mergeMonitorOperationRules(
-    operations: List<String>,
-    intents: List<String>,
-): List<String> = (operations + intents.map { "*:$it" }).distinct()
 
 private fun monitorIntentLabel(intent: String): String =
     when (intent) {
@@ -1050,13 +1068,20 @@ private fun PathExpandButton(expanded: Boolean, enabled: Boolean, onClick: () ->
 }
 
 @Composable
-private fun LogOperationBadge(operation: String, ok: Boolean) {
+private fun LogOperationBadge(
+    operation: String,
+    filterOperation: String,
+    ok: Boolean,
+    onCopy: (String) -> Unit,
+) {
   val color = if (ok) srxSuccessColor() else MiuixTheme.colorScheme.error
+  val copyValue = filterOperation.ifBlank { operation }.ifBlank { "unknown" }
   Text(
       text = operation.ifBlank { "unknown" },
       modifier =
           Modifier.clip(RoundedCornerShape(7.dp))
               .background(color.copy(alpha = 0.14f))
+              .clickable { onCopy(copyValue) }
               .padding(horizontal = 7.dp, vertical = 3.dp),
       color = color,
       fontSize = 10.sp,
