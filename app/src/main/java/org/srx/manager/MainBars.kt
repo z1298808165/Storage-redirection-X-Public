@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -129,6 +130,7 @@ internal fun AppBatchActionBar(
     prefs: UiPreferences,
     blurBackdrop: LayerBackdrop?,
     backdrop: Backdrop,
+    dialogBackdrop: Backdrop?,
     bottomGlassEnabled: Boolean,
 ) {
   var showTemplates by remember { mutableStateOf(false) }
@@ -262,15 +264,17 @@ internal fun AppBatchActionBar(
       }
     }
   }
-  TemplatePickerDialog(
-      show = showTemplates,
-      templates = templates,
-      title = "选择配置模板",
-      emptyText = "还没有配置模板",
-      onDismiss = { showTemplates = false },
-      onPick = {
-        showTemplates = false
-        onApplyTemplate(it)
-      },
-  )
+  CompositionLocalProvider(LocalSrxBackdrop provides dialogBackdrop) {
+    TemplatePickerDialog(
+        show = showTemplates,
+        templates = templates,
+        title = "选择配置模板",
+        emptyText = "还没有配置模板",
+        onDismiss = { showTemplates = false },
+        onPick = {
+          showTemplates = false
+          onApplyTemplate(it)
+        },
+    )
+  }
 }

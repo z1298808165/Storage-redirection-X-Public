@@ -346,6 +346,7 @@ private fun SrxManagerApp(
                   prefs = prefs,
                   blurBackdrop = blurBackdrop,
                   backdrop = glassScene.backdrop,
+                  dialogBackdrop = glassScene.activeBackdrop,
                   bottomGlassEnabled = glassScene.enabled,
               )
             } else {
