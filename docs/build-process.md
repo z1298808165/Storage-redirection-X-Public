@@ -110,6 +110,8 @@ py .github\scripts\resolve_build_version.py --include-dirty --format json
 
 管理 App 的“检查更新”不再直接请求 GitHub Releases API，而是读取仓库分支上的静态 `update.json`，避免未认证 GitHub API 的每出口 IP 频率限制导致 `HTTP 403`。
 
+CI 与 Release 发布完成后会从对应 GitHub Release 回读最终 Markdown 正文，移除 `提交列表` 和完整变更对比，再写入 `update.json` 的 `releaseNotes` 字段。管理 App 与 WebUI 使用同一份正文，并按 `模块更新`、`App 更新`、`其它更新` 分区展示；旧清单没有该字段时仍可正常检查更新，只是不显示更新日志。
+
 默认清单地址由构建时的仓库和分支生成：
 
 ```text
