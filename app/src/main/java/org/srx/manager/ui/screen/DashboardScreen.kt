@@ -195,7 +195,7 @@ private fun ModuleStatusCard(
         verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.CenterVertically),
     ) {
       Image(
-          painter = painterResource(R.drawable.srx_logo),
+          painter = painterResource(R.drawable.srx_logo_vector),
           contentDescription = null,
           modifier = Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)),
           contentScale = ContentScale.Fit,

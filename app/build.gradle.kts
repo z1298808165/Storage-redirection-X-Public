@@ -398,6 +398,9 @@ android {
   kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21) } }
 
   packaging {
+    // Keep release payloads compressed in the APK; Android extracts them during install.
+    dex.useLegacyPackaging = true
+    jniLibs.useLegacyPackaging = true
     resources.excludes +=
         setOf(
             "META-INF/AL2.0",

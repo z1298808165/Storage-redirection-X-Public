@@ -3,9 +3,6 @@
     <item
         android:width="58dp"
         android:height="58dp"
-        android:gravity="center">
-        <bitmap
-            android:gravity="fill"
-            android:src="@drawable/srx_logo" />
-    </item>
+        android:drawable="@drawable/srx_logo_vector"
+        android:gravity="center" />
 </layer-list>
