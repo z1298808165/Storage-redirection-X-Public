@@ -31,6 +31,58 @@ const UPDATE_MANIFEST_URL =
   "/" +
   DEFAULT_RELEASE_BRANCH +
   "/update.json";
+const MOCK_RELEASE_NOTES = `## 模块更新
+
+### 修复了什么问题
+- 修复配置重载后文件监视状态不同步的问题。
+- 优化 **FUSE**、挂载和路径映射的兼容处理。
+- 更新 WebUI 的检查更新弹窗，支持 Markdown 与长内容滚动。
+
+### 注意事项
+- 更新模块后建议重启已配置应用和 MediaProvider。
+- 涉及运行时挂载的配置需要重新进入应用后生效。
+
+## App 更新
+
+### 增加了什么功能
+- 管理 App 的更新弹窗现在会直接显示 Release 更新日志。
+- 支持标题、列表、**粗体**、行内代码和 [链接](https://github.com/z1298808165/Storage-redirection-X-Public)。
+
+### 修复了什么问题
+- 限制更新日志区域最大高度，按钮始终保持可见。
+- 按模块、App 和其它内容分别呈现变更。
+
+## 其它更新
+
+### 构建与文档
+- 调整 CI 和 Release 更新日志生成规范。
+- 自动从 GitHub Release 回读最终正文并写入更新清单。
+- 客户端不会显示提交列表和完整提交对比。
+- 这一条用于延长预览内容，方便确认滚动体验。
+- 另一条较长的示例内容，用于检查窄屏下文字换行、段落间距和弹窗整体高度是否自然。`;
+
+function hasNativeWebUiBridge() {
+  return (
+    (typeof window !== "undefined" && typeof window.LSPosedBridge?.exec === "function") ||
+    (typeof ksu !== "undefined" && typeof ksu.exec === "function")
+  );
+}
+
+function mockUpdateManifest() {
+  return {
+    schema: 1,
+    repository: DEFAULT_RELEASE_REPOSITORY,
+    stable: {
+      version: "9.9.9",
+      tag: "v9.9.9-preview",
+      title: "Storage Redirect X 本地预览",
+      prerelease: false,
+      releaseNotes: MOCK_RELEASE_NOTES,
+    },
+    beta: null,
+    releases: [],
+  };
+}
 const MEDIA_PROVIDER_PACKAGES = [
   "com.android.providers.media.module",
   "com.google.android.providers.media.module",
@@ -634,6 +686,7 @@ function findReleaseUpdate(manifest, repository, currentVersionName, channel) {
     prerelease: best.entry.channel === "Beta" || release.prerelease === true,
     downloadUrl: String(release.downloadUrl || "").trim(),
     moduleUrl: String(release.moduleUrl || "").trim(),
+    releaseNotes: String(release.releaseNotes || "").trim(),
   };
 }
 
@@ -1904,6 +1957,7 @@ const Api = {
   },
 
   async fetchUpdateManifest(manifestUrl) {
+    if (!hasNativeWebUiBridge()) return mockUpdateManifest();
     const url = manifestUrl || UPDATE_MANIFEST_URL;
     const response = await fetch(url, {
       method: "GET",

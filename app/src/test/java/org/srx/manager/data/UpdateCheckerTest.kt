@@ -25,6 +25,7 @@ class UpdateCheckerTest {
     assertEquals("https://github.com/example/repo/releases/tag/v1.2.57", update.htmlUrl)
     assertEquals(UpdateChannel.Stable, update.channel)
     assertEquals(false, update.prerelease)
+    assertEquals("## 模块更新\n- 修复模块。", update.releaseNotes)
   }
 
   @Test
@@ -82,7 +83,8 @@ class UpdateCheckerTest {
           "stable": {
             "version": "1.2.57",
             "tag": "v1.2.57",
-            "title": "Storage Redirect X v1.2.57"
+            "title": "Storage Redirect X v1.2.57",
+            "releaseNotes": "## 模块更新\n- 修复模块。"
           },
           "beta": {
             "version": "1.2.58-ci.123",

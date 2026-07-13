@@ -253,6 +253,18 @@
 .update-dialog-summary { color: var(--color-text-secondary); font-size: 14px; line-height: 1.65; text-align: center; }
 .update-dialog-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 12px; }
 .update-dialog-meta span { max-width: 100%; padding: 5px 9px; border-radius: var(--radius-full); background: var(--color-primary-bg); color: var(--color-primary); font-size: 11px; line-height: 1.2; font-weight: 820; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.update-notes-scroll { max-height: min(44vh, 360px); margin-top: 14px; padding-right: 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--color-border-strong) transparent; }
+.update-note-section + .update-note-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--color-border); }
+.update-note-section > h3 { margin: 0 0 8px; color: var(--color-primary); font-size: 13px; line-height: 18px; font-weight: 860; letter-spacing: 0; }
+.update-markdown { color: var(--color-text-secondary); font-size: 13px; line-height: 1.62; overflow-wrap: anywhere; }
+.update-markdown h2, .update-markdown h3, .update-markdown h4, .update-markdown h5, .update-markdown h6 { margin: 12px 0 6px; color: var(--color-text); font-size: 13px; line-height: 1.45; font-weight: 820; letter-spacing: 0; }
+.update-markdown p { margin: 0 0 8px; }
+.update-markdown ul, .update-markdown ol { margin: 0 0 9px; padding-left: 20px; }
+.update-markdown li + li { margin-top: 4px; }
+.update-markdown code { padding: 2px 5px; border-radius: 6px; background: var(--color-surface-overlay); color: var(--color-text); font-family: var(--font-mono); font-size: 0.92em; }
+.update-markdown pre { margin: 8px 0; padding: 10px; overflow-x: auto; border-radius: 8px; background: var(--color-surface-overlay); }
+.update-markdown pre code { padding: 0; background: transparent; white-space: pre; }
+.update-markdown a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
 .template-card { background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-xl); overflow: hidden; box-shadow: var(--glass-inner), var(--shadow-sm); }
 .template-list-scroll { max-height: min(48vh, 420px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .template-picker-list { max-height: min(52vh, 460px); }

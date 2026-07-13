@@ -429,6 +429,7 @@ dependencies {
   implementation(libs.miuix.navigation3.ui)
   implementation(libs.miuix.preference)
   implementation(libs.miuix.blur)
+  implementation(libs.markwon.core)
   implementation(libs.appiconloader)
   implementation(libs.hiddenapibypass)
 

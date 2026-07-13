@@ -22,6 +22,7 @@ data class ReleaseUpdate(
     val channel: UpdateChannel,
     val prerelease: Boolean,
     val downloadUrl: String? = null,
+    val releaseNotes: String = "",
 )
 
 class UpdateChecker(
@@ -90,6 +91,7 @@ class UpdateChecker(
               channel = candidate.entry.channel,
               prerelease = candidate.entry.channel == UpdateChannel.Beta || release.prerelease,
               downloadUrl = release.downloadUrl.takeIf { it.isNotBlank() },
+              releaseNotes = release.releaseNotes,
           )
         }
   }
@@ -186,6 +188,7 @@ class UpdateChecker(
       val repository: String = "",
       val prerelease: Boolean = false,
       val downloadUrl: String = "",
+      val releaseNotes: String = "",
   )
 
   private companion object {

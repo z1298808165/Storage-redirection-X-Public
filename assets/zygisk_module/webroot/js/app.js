@@ -2079,6 +2079,104 @@
     return String(update?.versionName || update?.tagName || "").trim();
   }
 
+  function sanitizeReleaseNotes(markdown) {
+    let normalized = String(markdown || "")
+      .replace(/\r\n?/g, "\n")
+      .trim();
+    const commitHeading = normalized.search(/^#{1,6}\s*提交列表\s*$/im);
+    if (commitHeading >= 0) normalized = normalized.slice(0, commitHeading).trimEnd();
+    return normalized.replace(/^\*\*完整变更对比\*\*\s*:\s*https?:\/\/\S+\s*$/gim, "").trim();
+  }
+
+  function releaseNoteSections(markdown) {
+    const notes = sanitizeReleaseNotes(markdown);
+    if (!notes) return [];
+    const heading = /^##\s*(模块更新|App\s*更新|其它更新|其他更新)\s*$/gim;
+    const matches = Array.from(notes.matchAll(heading));
+    if (!matches.length) return [{ title: "其它更新", markdown: notes }];
+    return matches
+      .map((match, index) => ({
+        title: /^模块/.test(match[1])
+          ? "模块更新"
+          : /^app/i.test(match[1])
+            ? "App 更新"
+            : "其它更新",
+        markdown: notes.slice(match.index + match[0].length, matches[index + 1]?.index).trim(),
+      }))
+      .filter((section) => section.markdown);
+  }
+
+  function markdownInlineHtml(text) {
+    const codeTokens = [];
+    let html = escapeHtml(text).replace(/`([^`]+)`/g, (_, code) => {
+      const token = `@@SRX_CODE_${codeTokens.length}@@`;
+      codeTokens.push("<code>" + code + "</code>");
+      return token;
+    });
+    html = html
+      .replace(
+        /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener">$1</a>',
+      )
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+    return html.replace(/@@SRX_CODE_(\d+)@@/g, (_, index) => codeTokens[Number(index)] || "");
+  }
+
+  function markdownToHtml(markdown) {
+    const lines = String(markdown || "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n");
+    const html = [];
+    let listType = "";
+    let inCode = false;
+    let codeLines = [];
+    const closeList = () => {
+      if (listType) html.push(`</${listType}>`);
+      listType = "";
+    };
+    lines.forEach((line) => {
+      if (/^```/.test(line.trim())) {
+        closeList();
+        if (inCode) {
+          html.push("<pre><code>" + escapeHtml(codeLines.join("\n")) + "</code></pre>");
+          codeLines = [];
+        }
+        inCode = !inCode;
+        return;
+      }
+      if (inCode) {
+        codeLines.push(line);
+        return;
+      }
+      const heading = /^(#{1,6})\s+(.+)$/.exec(line);
+      const unordered = /^\s*[-*+]\s+(.+)$/.exec(line);
+      const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+      if (heading) {
+        closeList();
+        const level = Math.min(6, heading[1].length + 1);
+        html.push(`<h${level}>${markdownInlineHtml(heading[2])}</h${level}>`);
+      } else if (unordered || ordered) {
+        const nextType = unordered ? "ul" : "ol";
+        if (listType !== nextType) {
+          closeList();
+          listType = nextType;
+          html.push(`<${listType}>`);
+        }
+        html.push("<li>" + markdownInlineHtml((unordered || ordered)[1]) + "</li>");
+      } else if (line.trim()) {
+        closeList();
+        html.push("<p>" + markdownInlineHtml(line.trim()) + "</p>");
+      } else {
+        closeList();
+      }
+    });
+    closeList();
+    if (inCode) html.push("<pre><code>" + escapeHtml(codeLines.join("\n")) + "</code></pre>");
+    return html.join("");
+  }
+
   function openExternalUrl(url) {
     const target = String(url || "").trim();
     if (!/^https?:\/\//i.test(target)) return false;
@@ -2240,6 +2338,21 @@
   }
 
   function showUpdateFoundDialog(update, currentVersionName) {
+    const noteSections = releaseNoteSections(update.releaseNotes);
+    const notesHtml = noteSections.length
+      ? '<div class="update-notes-scroll">' +
+        noteSections
+          .map(
+            (section) =>
+              '<section class="update-note-section"><h3>' +
+              escapeHtml(section.title) +
+              '</h3><div class="update-markdown">' +
+              markdownToHtml(section.markdown) +
+              "</div></section>",
+          )
+          .join("") +
+        "</div>"
+      : "";
     showModalWithHistory(
       '<div class="modal-title">发现新版本</div>' +
         '<div class="update-dialog-summary">当前模块版本 ' +
@@ -2252,6 +2365,7 @@
           ? "<span>" + escapeHtml(updateVersionBadge(update)) + "</span>"
           : "") +
         "</div>" +
+        notesHtml +
         '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="openUpdateRelease" type="button">打开</button></div>',
       { backdropClose: true },
     );
