@@ -10,15 +10,15 @@
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/v1.2.56/storage-redirect-x-manager-v1.2.56.apk"
   },
   "beta": {
-    "version": "1.2.57-ci.481",
-    "tag": "ci-build-29231466725-1",
-    "title": "CI Build 1.2.57-ci.481",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29231466725-1",
+    "version": "1.2.57-ci.482",
+    "tag": "ci-build-29234368972-1",
+    "title": "CI Build 1.2.57-ci.482",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29234368972-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29231466725-1/storage-redirect-x-manager-v1.2.57-ci.481.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29231466725-1/storage.redirect.x-v1.2.57-ci.481.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.481`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29226651193-1`\n- 当前提交：`404c71d`\n\n## 模块更新\n\n### 注意事项\n- 优化文件监视过滤交互。\n\n## App 更新\n\n### 注意事项\n- 优化文件监视过滤交互。\n\n## 其它更新\n\n### 注意事项\n- 优化文件监视过滤交互。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29234368972-1/storage-redirect-x-manager-v1.2.57-ci.482.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29234368972-1/storage.redirect.x-v1.2.57-ci.482.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.482`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29231466725-1`\n- 当前提交：`543ac55`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复文件监控与日志相关问题：按字母序排列文件监视过滤规则。\n\n## App 更新\n\n### 修复了什么问题\n- 修复文件监控与日志相关问题：按字母序排列文件监视过滤规则。\n\n## 其它更新\n\n### 修复了什么问题\n- 修复文件监控与日志相关问题：按字母序排列文件监视过滤规则。"
   },
   "releases": []
 }
