@@ -204,22 +204,22 @@ const DEFAULT_GLOBAL_CONFIG = {
 const DEFAULT_FILE_MONITOR_FILTERS = {
   excluded_paths: ["Android/data"],
   excluded_operations: [
-    "open:read",
+    "attrib*",
+    "chmod*",
+    "delete*",
+    "fchmod*",
+    "ftruncate*",
+    "futimens*",
+    "link*",
     "open*:read",
+    "open:read",
     "provider_open:read",
     "rename*",
-    "unlink*",
-    "delete*",
     "rmdir*",
-    "link*",
     "symlink*",
     "truncate*",
-    "ftruncate*",
-    "chmod*",
-    "fchmod*",
+    "unlink*",
     "utimens*",
-    "futimens*",
-    "attrib*",
   ],
 };
 
@@ -526,7 +526,7 @@ function normalizeMonitorFilterPathList(list) {
     seen.add(value);
     out.push(value);
   });
-  return out.slice(0, 200);
+  return out.slice(0, 200).sort(compareMonitorFilterValues);
 }
 
 function normalizeMonitorFilterOperationList(list) {
@@ -539,10 +539,20 @@ function normalizeMonitorFilterOperationList(list) {
     seen.add(value);
     out.push(value);
   });
-  const normalized = out.slice(0, 200);
+  const normalized = out.slice(0, 200).sort(compareMonitorFilterValues);
   return isLegacyDefaultMonitorOperations(normalized)
     ? DEFAULT_FILE_MONITOR_FILTERS.excluded_operations.slice()
     : normalized;
+}
+
+function compareMonitorFilterValues(left, right) {
+  const leftText = String(left);
+  const rightText = String(right);
+  const leftLower = leftText.toLowerCase();
+  const rightLower = rightText.toLowerCase();
+  if (leftLower < rightLower) return -1;
+  if (leftLower > rightLower) return 1;
+  return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
 }
 
 function isLegacyDefaultMonitorOperations(list) {

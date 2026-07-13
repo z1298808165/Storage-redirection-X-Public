@@ -200,13 +200,13 @@ assertDeepEqual(
 assertDeepEqual(
   webui.normalizeBackupMonitorFilters({
     excluded_paths: [`Pictures`, `Download`, `Android/media`],
-    excluded_operations: [`*:create`, `open*:read`, `rename*`],
+    excluded_operations: [`rename*`, `*:create`, `open*:read`],
   }),
   {
-    excluded_paths: [`Pictures`, `Download`, `Android/media`],
+    excluded_paths: [`Android/media`, `Download`, `Pictures`],
     excluded_operations: [`*:create`, `open*:read`, `rename*`],
   },
-  `monitor-filter-preserves-insertion-order`,
+  `monitor-filter-sorts-rules-alphabetically`,
 );
 
 sandbox.window.Api.exec = async () =>

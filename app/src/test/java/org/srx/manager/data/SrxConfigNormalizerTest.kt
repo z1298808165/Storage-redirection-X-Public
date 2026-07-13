@@ -254,12 +254,12 @@ class SrxConfigNormalizerTest {
             ),
         )
 
-    assertEquals(listOf("Download", "Android/data", "Android/media"), normalized.excludedPaths)
+    assertEquals(listOf("Android/data", "Android/media", "Download"), normalized.excludedPaths)
     assertEquals(listOf("open:read", "rename*"), normalized.excludedOperations)
   }
 
   @Test
-  fun normalizeFileMonitorFiltersPreservesInsertionOrder() {
+  fun sortsMonitorFiltersAlphabetically() {
     val normalized =
         SrxConfigNormalizer.normalizeFileMonitorFilters(
             FileMonitorFilters(
@@ -268,9 +268,9 @@ class SrxConfigNormalizerTest {
             ),
         )
 
-    assertEquals(listOf("Pictures", "Download", "Android/media"), normalized.excludedPaths)
+    assertEquals(listOf("Android/media", "Download", "Pictures"), normalized.excludedPaths)
     assertEquals(
-        listOf("rename*", "*:create", "open*:read"),
+        listOf("*:create", "open*:read", "rename*"),
         normalized.excludedOperations,
     )
   }

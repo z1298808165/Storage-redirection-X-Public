@@ -57,22 +57,22 @@ data class FileMonitorFilters(
     @SerialName("excluded_operations")
     val excludedOperations: List<String> =
         listOf(
-            "open:read",
+            "attrib*",
+            "chmod*",
+            "delete*",
+            "fchmod*",
+            "ftruncate*",
+            "futimens*",
+            "link*",
             "open*:read",
+            "open:read",
             "provider_open:read",
             "rename*",
-            "unlink*",
-            "delete*",
             "rmdir*",
-            "link*",
             "symlink*",
             "truncate*",
-            "ftruncate*",
-            "chmod*",
-            "fchmod*",
+            "unlink*",
             "utimens*",
-            "futimens*",
-            "attrib*",
         ),
 )
 

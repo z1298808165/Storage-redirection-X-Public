@@ -243,22 +243,22 @@ if [ ! -f "$MODPATH/config/file_monitor_filters.json" ]; then
     "Android/data"
   ],
   "excluded_operations": [
-    "open:read",
+    "attrib*",
+    "chmod*",
+    "delete*",
+    "fchmod*",
+    "ftruncate*",
+    "futimens*",
+    "link*",
     "open*:read",
+    "open:read",
     "provider_open:read",
     "rename*",
-    "unlink*",
-    "delete*",
     "rmdir*",
-    "link*",
     "symlink*",
     "truncate*",
-    "ftruncate*",
-    "chmod*",
-    "fchmod*",
-    "utimens*",
-    "futimens*",
-    "attrib*"
+    "unlink*",
+    "utimens*"
   ]
 }
 EOF

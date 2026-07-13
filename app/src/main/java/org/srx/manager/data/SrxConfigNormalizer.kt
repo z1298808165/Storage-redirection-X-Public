@@ -380,6 +380,7 @@ internal object SrxConfigNormalizer {
           .filter { it.isNotBlank() && '\u0000' !in it && it.length <= 512 }
           .distinct()
           .take(200)
+          .sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
 
   private fun normalizeMonitorFilterOperations(values: List<String>): List<String> {
     val normalized = normalizeMonitorFilterList(values)
@@ -399,6 +400,7 @@ internal object SrxConfigNormalizer {
           .mapNotNull { sanitizeMonitorFilterPathOrNull(it, allowLegacyAbsolute = true) }
           .distinct()
           .take(200)
+          .sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
 
   private fun sanitizeMonitorFilterPathOrNull(raw: String, allowLegacyAbsolute: Boolean): String? {
     val text = raw.trim().replace('\\', '/').replace(Regex("/+"), "/")

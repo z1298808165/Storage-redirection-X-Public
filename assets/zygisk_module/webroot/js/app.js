@@ -199,22 +199,22 @@
   const BACKUP_STORAGE_BASE = "/storage/emulated/0";
   const BACKUP_DEFAULT_DIR = "Download";
   const DEFAULT_MONITOR_FILTER_OPERATIONS = [
-    "open:read",
+    "attrib*",
+    "chmod*",
+    "delete*",
+    "fchmod*",
+    "ftruncate*",
+    "futimens*",
+    "link*",
     "open*:read",
+    "open:read",
     "provider_open:read",
     "rename*",
-    "unlink*",
-    "delete*",
     "rmdir*",
-    "link*",
     "symlink*",
     "truncate*",
-    "ftruncate*",
-    "chmod*",
-    "fchmod*",
+    "unlink*",
     "utimens*",
-    "futimens*",
-    "attrib*",
   ];
   const LEGACY_DEFAULT_MONITOR_FILTER_OPERATIONS = ["open:read", "rename*", "unlink*", "delete*"];
   const LEGACY_FULL_DEFAULT_MONITOR_FILTER_OPERATIONS = [
@@ -2969,7 +2969,7 @@
       seen.add(result.value);
       out.push(result.value);
     });
-    return out;
+    return out.sort(compareMonitorFilterValues);
   }
 
   function normalizeMonitorFilterOperationList(list) {
@@ -2981,7 +2981,19 @@
       seen.add(value);
       out.push(value);
     });
-    return isLegacyDefaultMonitorOperations(out) ? DEFAULT_MONITOR_FILTER_OPERATIONS.slice() : out;
+    return isLegacyDefaultMonitorOperations(out)
+      ? DEFAULT_MONITOR_FILTER_OPERATIONS.slice()
+      : out.sort(compareMonitorFilterValues);
+  }
+
+  function compareMonitorFilterValues(left, right) {
+    const leftText = String(left);
+    const rightText = String(right);
+    const leftLower = leftText.toLowerCase();
+    const rightLower = rightText.toLowerCase();
+    if (leftLower < rightLower) return -1;
+    if (leftLower > rightLower) return 1;
+    return leftText < rightText ? -1 : leftText > rightText ? 1 : 0;
   }
 
   function isLegacyDefaultMonitorOperations(list) {
@@ -6533,6 +6545,7 @@
       const target = activeType === `path` ? draft.excluded_paths : draft.excluded_operations;
       if (target.includes(result.value)) return Theme.showToast(`规则已存在`, `error`);
       target.push(result.value);
+      target.sort(compareMonitorFilterValues);
       input.value = String();
       render();
       if (autoSave) await persist();
@@ -6564,6 +6577,7 @@
           return;
         }
         draft.excluded_operations.push(rule);
+        draft.excluded_operations.sort(compareMonitorFilterValues);
         render();
         if (autoSave) await persist();
       }),

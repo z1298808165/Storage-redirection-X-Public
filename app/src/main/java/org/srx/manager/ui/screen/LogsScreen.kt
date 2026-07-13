@@ -523,7 +523,7 @@ private fun FileMonitorFilterDialog(
                   !result.valid -> Unit
                   value in paths -> pathValidation = result.copy(valid = false, message = "规则已存在")
                   else -> {
-                    val nextPaths = paths + value
+                    val nextPaths = sortMonitorFilterValues(paths + value)
                     paths = nextPaths
                     pathInput = ""
                     pathValidation = null
@@ -544,7 +544,7 @@ private fun FileMonitorFilterDialog(
               onAdd = {
                 val value = operationInput.trim()
                 if (value.isNotBlank() && value.length <= 512 && value !in operations) {
-                  val nextRules = operationRules + value
+                  val nextRules = sortMonitorFilterValues(operationRules + value)
                   operationRules = nextRules
                   operationInput = ""
                   if (autoSave) saveDraft(nextOperationRules = nextRules)
@@ -559,7 +559,7 @@ private fun FileMonitorFilterDialog(
                 if (intent in intents) {
                   pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Intent, intent)
                 } else {
-                  val nextRules = operationRules + "*:$intent"
+                  val nextRules = sortMonitorFilterValues(operationRules + "*:$intent")
                   operationRules = nextRules
                   if (autoSave) saveDraft(nextOperationRules = nextRules)
                 }
@@ -629,6 +629,9 @@ private data class MonitorFilterRemoval(val type: MonitorFilterType, val value: 
 }
 
 private val MonitorIntents = listOf("read", "write", "create")
+
+private fun sortMonitorFilterValues(values: List<String>): List<String> =
+    values.sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
 
 private fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
   val intents = mutableListOf<String>()
