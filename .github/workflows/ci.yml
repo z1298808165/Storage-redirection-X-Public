@@ -655,7 +655,14 @@ jobs:
           fetch-depth: 0
 
       - name: Update beta manifest entry
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p temp
+          gh release view "$CI_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json body \
+            --jq '.body' > temp/build-release-notes.md
           python .github/scripts/update_manifest.py \
             --channel beta \
             --repository "$GITHUB_REPOSITORY" \
@@ -663,7 +670,8 @@ jobs:
             --tag "$CI_TAG" \
             --title "CI Build $VERSION" \
             --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
-            --module-asset "storage.redirect.x-v${VERSION}.zip"
+            --module-asset "storage.redirect.x-v${VERSION}.zip" \
+            --release-notes-file temp/build-release-notes.md
           python .github/scripts/resolve_build_version.py --record-version "$VERSION"
 
       - name: Commit update manifest and build baseline

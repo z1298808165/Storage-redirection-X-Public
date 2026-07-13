@@ -578,7 +578,14 @@ jobs:
           grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
 
       - name: Update stable manifest entry
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p temp
+          gh release view "v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json body \
+            --jq '.body' > temp/build-release-notes.md
           RELEASE_BRANCH="${{ needs.prepare.outputs.release_branch }}"
           git fetch origin "$RELEASE_BRANCH"
           git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
@@ -589,7 +596,8 @@ jobs:
             --tag "v${VERSION}" \
             --title "Storage Redirect X v${VERSION}" \
             --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
-            --module-asset "storage.redirect.x-v${VERSION}.zip"
+            --module-asset "storage.redirect.x-v${VERSION}.zip" \
+            --release-notes-file temp/build-release-notes.md
 
           if git diff --quiet -- update.json; then
             echo "update.json already up to date"

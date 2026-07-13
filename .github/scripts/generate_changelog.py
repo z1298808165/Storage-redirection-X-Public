@@ -179,6 +179,31 @@ def changed_patch(previous: str, current: str) -> str:
     return run_git(args, allow_fail=True)[:MAX_PATCH_CHARS]
 
 
+def commit_changed_files(commit: CommitInfo) -> list[str]:
+    output = run_git(
+        ['diff-tree', '--no-commit-id', '--name-only', '-r', commit.sha],
+        allow_fail=True,
+    )
+    return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def change_components(path: str) -> set[str]:
+    if path.startswith('app/'):
+        return {'app'}
+    if path.startswith('assets/zygisk_module/webroot/'):
+        return {'module'}
+    if path.startswith(('.github/', 'docs/', 'scripts/')) or path in {
+        'AGENTS.md',
+        'CLAUDE.md',
+        'CONTRIBUTING.md',
+        'README.md',
+    }:
+        return {'other'}
+    if path == 'update.json':
+        return set()
+    return {'module'}
+
+
 def patch_path_affects_classification(path: str) -> bool:
     if path in CLASSIFICATION_PATCH_EXCLUDED_FILES:
         return False
@@ -555,10 +580,8 @@ def compare_url(previous: str, current: str) -> str:
 
 
 def write_changelog(mode: str, version: str, previous: str, current: str, output: Path) -> None:
-    files = changed_files(previous, current)
     commits = commit_infos(previous, current)
     patch = changed_patch(previous, current)
-    sections = classify_changes(files, commits, patch)
 
     title = "CI 构建更新日志" if mode == "ci" else "Release 更新日志"
     baseline = "上一版 CI 或 Release 构建" if mode == "ci" else "上一版 Release 构建"
@@ -573,16 +596,43 @@ def write_changelog(mode: str, version: str, previous: str, current: str, output
         f"- 对比基准：{baseline} `{previous_label}`",
         f"- 当前提交：`{current[:7]}`",
     ]
-    section_titles = [
+    detail_titles = [
         ("fixed", "### 修复了什么问题"),
         ("features", "### 增加了什么功能"),
         ("usage", "### 新功能怎么使用"),
         ("notes", "### 注意事项"),
     ]
-    for key, heading in section_titles:
-        items = sections[key]
-        if items:
-            lines.extend(["", heading, *items])
+    component_titles = [
+        ('module', '## 模块更新'),
+        ('app', '## App 更新'),
+        ('other', '## 其它更新'),
+    ]
+    component_commits = {key: [] for key, _ in component_titles}
+    for commit in commits:
+        components = set().union(*(change_components(path) for path in commit_changed_files(commit)))
+        for component in components:
+            component_commits[component].append(commit)
+
+    for component, component_heading in component_titles:
+        selected_commits = component_commits[component]
+        if not selected_commits:
+            continue
+        selected_files = sorted(
+            {
+                path
+                for commit in selected_commits
+                for path in commit_changed_files(commit)
+                if component in change_components(path)
+            }
+        )
+        sections = classify_changes(selected_files, selected_commits, patch)
+        if not any(sections.values()):
+            sections['notes'] = [f"- {commit.summary}。" for commit in selected_commits]
+        lines.extend(["", component_heading])
+        for key, heading in detail_titles:
+            items = sections[key]
+            if items:
+                lines.extend(["", heading, *items])
 
     commit_list = commit_lines(commits)
     if commit_list:

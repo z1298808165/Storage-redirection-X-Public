@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -31,6 +32,21 @@ def load_manifest(path: Path) -> dict:
     return data
 
 
+def sanitize_release_notes(markdown: str) -> str:
+    normalized = markdown.replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not normalized:
+        return ''
+    commit_heading = re.search(r'(?im)^#{1,6}\s*提交列表\s*$', normalized)
+    if commit_heading:
+        normalized = normalized[: commit_heading.start()].rstrip()
+    normalized = re.sub(
+        r'(?im)^\*\*完整变更对比\*\*\s*:\s*https?://\S+\s*$',
+        '',
+        normalized,
+    ).strip()
+    return normalized
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default="update.json", help="manifest path")
@@ -42,6 +58,7 @@ def main() -> None:
     parser.add_argument("--release-url", default="", help="override release page URL")
     parser.add_argument("--apk-asset", default="", help="manager APK asset name")
     parser.add_argument("--module-asset", default="", help="module ZIP asset name")
+    parser.add_argument("--release-notes-file", default="", help="Markdown release notes file")
     args = parser.parse_args()
 
     manifest_path = Path(args.manifest)
@@ -61,6 +78,11 @@ def main() -> None:
         entry["downloadUrl"] = asset_url(args.repository, args.tag, args.apk_asset)
     if args.module_asset:
         entry["moduleUrl"] = asset_url(args.repository, args.tag, args.module_asset)
+    if args.release_notes_file:
+        notes_path = Path(args.release_notes_file)
+        notes = sanitize_release_notes(notes_path.read_text(encoding="utf-8"))
+        if notes:
+            entry["releaseNotes"] = notes
 
     manifest[args.channel] = entry
     manifest_path.write_text(
