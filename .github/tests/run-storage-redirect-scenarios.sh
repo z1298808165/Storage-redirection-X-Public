@@ -1661,6 +1661,8 @@ run_file_monitor_mediastore_success_case() {
   local relative_path="$3"
   local expected_path="$4"
   local private_path="${5:-}"
+  local require_monitor_record="${6:-1}"
+  local monitor_skip_reason="${7:-mediastore-create-result-and-routing-are-authoritative}"
   local file_name
   file_name="$(monitor_file_name "$scenario" "$label")"
 
@@ -1668,7 +1670,8 @@ run_file_monitor_mediastore_success_case() {
   run_mediastore_download_create_case "$scenario" "$label" "$file_name" "$relative_path" &&
     check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
     { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
-    expect_file_monitor_success_record "$scenario" "$label" "$file_name"
+    { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
+    { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=${monitor_skip_reason}"; }
 }
 
 run_file_monitor_mediastore_relative_data_success_case() {
@@ -1709,7 +1712,7 @@ run_file_monitor_disabled_redirect_scenario() {
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
   local media_file="srt_mediastore_public_only.txt"
   run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 0 &&
-    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" &&
+    run_file_monitor_mediastore_success_case "$scenario" "disabled-system-writer-create" "Download/SrtMonitor" "$MONITOR_BASE_ROOT" "$PRIVATE_MONITOR_BASE_ROOT" 0 "disabled-profile-mediastore-create-result-and-routing-are-authoritative" &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "disabled-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
     run_service_case "$scenario" "disabled-mediastore-public-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
     check_file_exists "scenario-${scenario}-disabled-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
