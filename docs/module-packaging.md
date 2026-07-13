@@ -46,7 +46,7 @@ module.zip
 ## 打包注意事项
 
 - **zip 内路径必须使用正斜杠 `/`**。Windows 的 `Compress-Archive` 或 `ZipFile.CreateFromDirectory` 会使用反斜杠 `\`，Android recovery/KernelSU 无法识别。需要使用 `ZipArchive.CreateEntry` 手动指定正斜杠路径。
-- **刷入包条目使用 store/no compression 模式**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对 deflate 条目的兼容性不稳定，可能把文本脚本解成 0 字节。CI 脚本使用 `zip -0`，PowerShell 打包使用 `CompressionLevel.NoCompression`。
+- **安装关键文本条目保持不压缩**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对压缩文本条目的兼容性不稳定，可能把脚本解成 0 字节。因此 `*.sh`、`*.prop`、`*.rule`、`META-INF/*` 和 `bin/srxctl` 在 Linux/macOS 使用 Store，在 PowerShell 使用 `CompressionLevel.NoCompression`；体积较大的 native 二进制、WebUI 和其它资源使用 Deflate 压缩。
 - **shell 脚本必须使用 Unix 换行符 (LF)**。Windows 编辑器可能保存为 CRLF，导致 `\r` 被 shell 解释为命令的一部分而报错。
 - **shell 脚本不能有 UTF-8 BOM**。BOM (`EF BB BF`) 会导致 shebang 行无法识别。
 - **不要包含 `config/`、`logs/`、`tmp/` 目录**。这些是运行时生成的，由 manager app 管理。
@@ -86,10 +86,14 @@ author=Storage Redirect Team
 description=Storage Redirect X module.
 EOF
 
-# 打包（确保 LF 换行 + 正斜杠路径 + store/no compression）
+# 打包（关键安装文本使用 Store，其余条目使用 Deflate）
 cd "$OUT_DIR"
 find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' \) -exec dos2unix {} \;
-zip -0 -r "../../storage.redirect.x-v${VERSION}.zip" .
+OUTPUT_ZIP="../../storage.redirect.x-v${VERSION}.zip"
+rm -f "$OUTPUT_ZIP"
+zip -9 -r "$OUTPUT_ZIP" . -x '*.sh' '*.prop' '*.rule' 'META-INF/*' 'bin/srxctl'
+find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' -o -path './bin/srxctl' \) \
+  -print | zip -0 "$OUTPUT_ZIP" -@
 ```
 
 ## Windows PowerShell 打包示例
@@ -136,14 +140,21 @@ foreach ($file in $textFiles) {
     [System.IO.File]::WriteAllText($file.FullName, $content, $utf8NoBom)
 }
 
-# 打包（使用正斜杠路径和 no compression）
+# 打包（使用正斜杠路径，并让安装关键文本保持 no compression）
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
 $pkgRoot = (Resolve-Path $pkgDir).Path
 Get-ChildItem -Recurse $pkgDir -File | ForEach-Object {
     $relativePath = $_.FullName.Substring($pkgRoot.Length).TrimStart([char]92).Replace([char]92, [char]47)
-    $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::NoCompression)
+    $keepUncompressed = $_.Extension -in @(".sh", ".prop", ".rule") -or
+        $relativePath.StartsWith("META-INF/") -or $relativePath -eq "bin/srxctl"
+    $compression = if ($keepUncompressed) {
+        [System.IO.Compression.CompressionLevel]::NoCompression
+    } else {
+        [System.IO.Compression.CompressionLevel]::Optimal
+    }
+    $entry = $zip.CreateEntry($relativePath, $compression)
     $entryStream = $entry.Open()
     $fileStream = [System.IO.File]::OpenRead($_.FullName)
     $fileStream.CopyTo($entryStream)
