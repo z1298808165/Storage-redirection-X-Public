@@ -618,7 +618,6 @@ jobs:
             --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
             gh release delete "$CI_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --cleanup-tag \
               --yes
           fi
 
