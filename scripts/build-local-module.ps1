@@ -38,6 +38,19 @@ function Invoke-Checked {
     }
 }
 
+function Get-CargoTargetDirectory {
+    $metadataJson = & cargo metadata --format-version 1 --no-deps
+    if ($LASTEXITCODE -ne 0) {
+        Fail "无法解析 Cargo 目标目录"
+    }
+
+    $metadata = $metadataJson | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$metadata.target_directory)) {
+        Fail "Cargo metadata 未返回目标目录"
+    }
+    return [System.IO.Path]::GetFullPath([string]$metadata.target_directory)
+}
+
 function Get-FirstExistingPath {
     param([string[]]$Paths)
 
@@ -413,8 +426,9 @@ function Build-ModuleZip {
     )
 
     $templateDir = Join-Path $RepoRoot "assets\zygisk_module"
-    $soFile = Join-Path $RepoRoot "target\aarch64-linux-android\release\libsrx_core.so"
-    $daemonFile = Join-Path $RepoRoot "target\aarch64-linux-android\release\srx_daemon"
+    $releaseDir = Join-Path (Join-Path (Get-CargoTargetDirectory) "aarch64-linux-android") "release"
+    $soFile = Join-Path $releaseDir "libsrx_core.so"
+    $daemonFile = Join-Path $releaseDir "srx_daemon"
 
     if (-not (Test-Path -LiteralPath $soFile)) {
         Fail "缺失构建输出文件: $soFile"
@@ -467,7 +481,16 @@ function Build-ModuleZip {
         $pkgRoot = (Resolve-Path -LiteralPath $PackageDir).Path
         Get-ChildItem -LiteralPath $PackageDir -Recurse -File | ForEach-Object {
             $relativePath = $_.FullName.Substring($pkgRoot.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
-            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::NoCompression)
+            $keepUncompressed =
+                $_.Extension -in @(".sh", ".prop", ".rule") -or
+                $relativePath.StartsWith("META-INF/", [System.StringComparison]::Ordinal) -or
+                $relativePath -eq "bin/srxctl"
+            $compression = if ($keepUncompressed) {
+                [System.IO.Compression.CompressionLevel]::NoCompression
+            } else {
+                [System.IO.Compression.CompressionLevel]::Optimal
+            }
+            $entry = $zip.CreateEntry($relativePath, $compression)
             $entryStream = $entry.Open()
             $fileStream = [System.IO.File]::OpenRead($_.FullName)
             try {

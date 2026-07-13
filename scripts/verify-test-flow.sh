@@ -49,8 +49,9 @@ cargo test --target "$TARGET_TRIPLE" --no-run
 
 echo "==> Build SRX module binaries for $TARGET_TRIPLE"
 cargo build --target "$TARGET_TRIPLE" --release
-cp "target/${TARGET_TRIPLE}/release/libsrx_core.so" "$BUILD_DIR/module-bin/libsrx_core.so"
-cp "target/${TARGET_TRIPLE}/release/srx_daemon" "$BUILD_DIR/module-bin/srx_daemon"
+CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps | "${python_cmd[@]}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/libsrx_core.so" "$BUILD_DIR/module-bin/libsrx_core.so"
+cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/srx_daemon" "$BUILD_DIR/module-bin/srx_daemon"
 
 echo "==> Package test-flow module zip"
 MODULE_ZIP="$BUILD_DIR/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip"

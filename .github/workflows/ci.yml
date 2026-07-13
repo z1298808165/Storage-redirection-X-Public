@@ -174,7 +174,12 @@ jobs:
           mkdir -p build/assets
           (
             cd "build/storage.redirect.x-v${VERSION}"
-            zip -0 -r "$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip" .
+            OUTPUT_ZIP="$GITHUB_WORKSPACE/build/assets/storage.redirect.x-v${VERSION}.zip"
+            rm -f "$OUTPUT_ZIP"
+            zip -9 -r "$OUTPUT_ZIP" . \
+              -x '*.sh' '*.prop' '*.rule' 'META-INF/*' 'bin/srxctl'
+            find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' -o -path './bin/srxctl' \) \
+              -print | zip -0 "$OUTPUT_ZIP" -@
           )
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 

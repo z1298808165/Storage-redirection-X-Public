@@ -34,6 +34,17 @@ function Invoke-Checked {
     }
 }
 
+function Get-CargoTargetDirectory {
+    $metadataJson = & cargo metadata --format-version 1 --no-deps
+    if ($LASTEXITCODE -ne 0) { Fail "Unable to resolve Cargo target directory." }
+
+    $metadata = $metadataJson | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$metadata.target_directory)) {
+        Fail "Cargo metadata did not provide a target directory."
+    }
+    return [System.IO.Path]::GetFullPath([string]$metadata.target_directory)
+}
+
 function Resolve-BuildPath {
     param([string]$Path)
     if ([System.IO.Path]::IsPathRooted($Path)) {
@@ -165,7 +176,16 @@ function New-ModulePackage {
         $root = (Resolve-Path -LiteralPath $packageDir).Path
         Get-ChildItem -LiteralPath $packageDir -Recurse -File | ForEach-Object {
             $relativePath = $_.FullName.Substring($root.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
-            $entry = $zip.CreateEntry($relativePath, [System.IO.Compression.CompressionLevel]::NoCompression)
+            $keepUncompressed =
+                $_.Extension -in @(".sh", ".prop", ".rule") -or
+                $relativePath.StartsWith("META-INF/", [System.StringComparison]::Ordinal) -or
+                $relativePath -eq "bin/srxctl"
+            $compression = if ($keepUncompressed) {
+                [System.IO.Compression.CompressionLevel]::NoCompression
+            } else {
+                [System.IO.Compression.CompressionLevel]::Optimal
+            }
+            $entry = $zip.CreateEntry($relativePath, $compression)
             $entryStream = $entry.Open()
             $fileStream = [System.IO.File]::OpenRead($_.FullName)
             try { $fileStream.CopyTo($entryStream) } finally { $fileStream.Dispose(); $entryStream.Dispose() }
@@ -213,8 +233,9 @@ try {
     Invoke-Checked -FilePath "cargo" -Arguments @("build", "--target", $TargetTriple, "--release")
 
     $moduleBinDir = Join-Path $buildRoot "module-bin"
-    $libSource = Join-Path $RepoRoot "target/$TargetTriple/release/libsrx_core.so"
-    $daemonSource = Join-Path $RepoRoot "target/$TargetTriple/release/srx_daemon"
+    $releaseDir = Join-Path (Join-Path (Get-CargoTargetDirectory) $TargetTriple) "release"
+    $libSource = Join-Path $releaseDir "libsrx_core.so"
+    $daemonSource = Join-Path $releaseDir "srx_daemon"
     $libDest = Join-Path $moduleBinDir "libsrx_core.so"
     $daemonDest = Join-Path $moduleBinDir "srx_daemon"
     Copy-Item -LiteralPath $libSource -Destination $libDest -Force

@@ -57,9 +57,13 @@ if [[ "$OUTPUT_PATH" == *.zip ]]; then
   trap 'rm -rf "$MODULE_DIR"' EXIT
   build_module_dir "$MODULE_DIR"
   mkdir -p "$(dirname "$OUTPUT_ABS_PATH")"
+  rm -f "$OUTPUT_ABS_PATH"
   (
     cd "$MODULE_DIR"
-    zip -0 -r "$OUTPUT_ABS_PATH" .
+    zip -9 -r "$OUTPUT_ABS_PATH" . \
+      -x '*.sh' '*.prop' '*.rule' 'META-INF/*' 'bin/srxctl'
+    find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' -o -path './bin/srxctl' \) \
+      -print | zip -0 "$OUTPUT_ABS_PATH" -@
   )
 else
   build_module_dir "$OUTPUT_PATH"
