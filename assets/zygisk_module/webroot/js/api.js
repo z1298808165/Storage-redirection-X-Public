@@ -4,6 +4,7 @@
  */
 
 const MODULE_DIR = "/data/adb/modules/storage.redirect.x";
+const PENDING_MODULE_DIR = "/data/adb/modules_update/storage.redirect.x";
 const CONFIG_DIR = MODULE_DIR + "/config";
 const APPS_DIR = CONFIG_DIR + "/apps";
 const TEMPLATES_CONFIG = CONFIG_DIR + "/templates.json";
@@ -15,6 +16,7 @@ const RUNTIME_DISABLE = MODULE_DIR + "/.runtime_disabled";
 const RUNTIME_STATE_CONFIG = CONFIG_DIR + "/runtime_state.json";
 const MODULE_DISABLE = MODULE_DIR + "/disable";
 const MODULE_BOOT_OK = MODULE_DIR + "/.boot_ok";
+const MODULE_BOOT_VERSION = MODULE_DIR + "/.boot_module_version";
 const MODULE_PROP = MODULE_DIR + "/module.prop";
 const SRXCTL = MODULE_DIR + "/bin/srxctl";
 const DIAGNOSTIC_ARCHIVE_SCRIPT = MODULE_DIR + "/service.d/diagnostic_archive.sh";
@@ -1871,27 +1873,37 @@ const Api = {
   /** Check module status */
   async getModuleStatus() {
     try {
+      const statusFallback =
+        "boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); " +
+        "boot_ok=$(cat " +
+        shellQuote(MODULE_BOOT_OK) +
+        " 2>/dev/null); " +
+        "boot_module_version=$(cat " +
+        shellQuote(MODULE_BOOT_VERSION) +
+        " 2>/dev/null); " +
+        "module_version=$(sed -n 's/^versionCode=//p; s/^version=//p' " +
+        shellQuote(MODULE_PROP) +
+        " 2>/dev/null | tr '\\n' ' '); " +
+        "boot_marker=" +
+        shellQuote(LOGS_DIR) +
+        "/boot_${boot_id}.marker; " +
+        "if [ ! -d " +
+        shellQuote(MODULE_DIR) +
+        " ]; then echo unknown; " +
+        "elif [ -f " +
+        shellQuote(RUNTIME_DISABLE) +
+        " ] || [ -f " +
+        shellQuote(MODULE_DISABLE) +
+        " ]; then echo disabled; " +
+        'elif [ -n "$module_version" ] && [ "$boot_module_version" != "$module_version" ]; then echo reboot_required; ' +
+        'elif [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ -f "$boot_marker" ]; }; then echo enabled; ' +
+        "else echo reboot_required; fi";
       const out = await this.exec(
-        withSrxCtlFallback(
-          "status",
-          "boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); " +
-            "boot_ok=$(cat " +
-            shellQuote(MODULE_BOOT_OK) +
-            " 2>/dev/null); " +
-            "boot_marker=" +
-            shellQuote(LOGS_DIR) +
-            "/boot_${boot_id}.marker; " +
-            "if [ ! -d " +
-            shellQuote(MODULE_DIR) +
-            " ]; then echo unknown; " +
-            "elif [ -f " +
-            shellQuote(RUNTIME_DISABLE) +
-            " ] || [ -f " +
-            shellQuote(MODULE_DISABLE) +
-            " ]; then echo disabled; " +
-            'elif [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ -f "$boot_marker" ]; }; then echo enabled; ' +
-            "else echo reboot_required; fi",
-        ),
+        "if [ -d " +
+          shellQuote(PENDING_MODULE_DIR) +
+          " ]; then echo reboot_required; else " +
+          withSrxCtlFallback("status", statusFallback) +
+          "; fi",
       );
       return ["enabled", "disabled", "reboot_required", "unknown"].includes(out) ? out : "unknown";
     } catch {

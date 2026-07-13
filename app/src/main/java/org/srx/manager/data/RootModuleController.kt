@@ -56,16 +56,21 @@ class RootModuleController(
   }
 
   private fun buildStatusCommand(): String =
-      withSrxCtlFallback(
-          "status",
-          "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); " +
-              "boot_ok=\$(cat ${shellQuote("$ModuleDir/.boot_ok")} 2>/dev/null); " +
-              "boot_marker=${shellQuote(LogsDir)}/boot_\${boot_id}.marker; " +
-              "if [ ! -d ${shellQuote(ModuleDir)} ]; then echo unknown; " +
-              "elif [ -f ${shellQuote(RuntimeDisablePath)} ] || [ -f ${shellQuote("$ModuleDir/disable")} ]; then echo disabled; " +
-              "elif [ -n \"\$boot_id\" ] && { [ \"\$boot_ok\" = \"\$boot_id\" ] || [ -f \"\$boot_marker\" ]; }; then echo enabled; " +
-              "else echo reboot_required; fi",
-      )
+      "if [ -d ${shellQuote(PendingModuleDir)} ]; then echo reboot_required; else " +
+          withSrxCtlFallback(
+              "status",
+              "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); " +
+                  "boot_ok=\$(cat ${shellQuote("$ModuleDir/.boot_ok")} 2>/dev/null); " +
+                  "boot_module_version=\$(cat ${shellQuote(BootModuleVersionPath)} 2>/dev/null); " +
+                  "module_version=\$(sed -n 's/^versionCode=//p; s/^version=//p' ${shellQuote("$ModuleDir/module.prop")} 2>/dev/null | tr '\\n' ' '); " +
+                  "boot_marker=${shellQuote(LogsDir)}/boot_\${boot_id}.marker; " +
+                  "if [ ! -d ${shellQuote(ModuleDir)} ]; then echo unknown; " +
+                  "elif [ -f ${shellQuote(RuntimeDisablePath)} ] || [ -f ${shellQuote("$ModuleDir/disable")} ]; then echo disabled; " +
+                  "elif [ -n \"\$module_version\" ] && [ \"\$boot_module_version\" != \"\$module_version\" ]; then echo reboot_required; " +
+                  "elif [ -n \"\$boot_id\" ] && { [ \"\$boot_ok\" = \"\$boot_id\" ] || [ -f \"\$boot_marker\" ]; }; then echo enabled; " +
+                  "else echo reboot_required; fi",
+          ) +
+          "; fi"
 
   private fun buildSetEnabledCommand(enabled: Boolean): String {
     val action = if (enabled) "start" else "stop"

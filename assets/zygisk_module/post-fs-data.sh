@@ -10,6 +10,7 @@ PACKAGE_EVENT_RECEIVER_READY_FILE="$LOGS_DIR/.package_event_receiver_ready"
 CONFIG_DIR="$MODDIR/config"
 BOOT_PENDING_FILE="$MODDIR/.boot_pending"
 BOOT_OK_FILE="$MODDIR/.boot_ok"
+BOOT_MODULE_VERSION_FILE="$MODDIR/.boot_module_version"
 LOGS_CTX="u:object_r:shell_data_file:s0"
 RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
 
@@ -25,6 +26,12 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$CONFIG_DIR/apps"
 chmod 755 "$CONFIG_DIR" "$CONFIG_DIR/apps" 2>/dev/null
 find "$CONFIG_DIR" -type f -name '*.json' -exec chmod 644 {} \; 2>/dev/null
+
+module_version=$(sed -n 's/^versionCode=//p; s/^version=//p' "$MODDIR/module.prop" 2>/dev/null | tr '\n' ' ')
+if [ -n "$module_version" ]; then
+  printf '%s\n' "$module_version" > "$BOOT_MODULE_VERSION_FILE"
+  chmod 644 "$BOOT_MODULE_VERSION_FILE" 2>/dev/null
+fi
 
 if [ -f "$RUNTIME_DISABLE_FILE" ]; then
   exit 0

@@ -36,11 +36,14 @@ class RootModuleControllerTest {
     val command = shell.invocations.single().command
     assertTrue(
         command,
-        command.startsWith(
+        command.contains(
             "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} status; else "
         ),
     )
+    assertTrue(command, command.startsWith("if [ -d ${shellQuote(PendingModuleDir)} ]"))
     assertTrue(command, command.contains("cat /proc/sys/kernel/random/boot_id"))
+    assertTrue(command, command.contains("cat ${shellQuote(BootModuleVersionPath)}"))
+    assertTrue(command, command.contains("s/^versionCode=//p; s/^version=//p"))
     assertTrue(command, command.contains("echo reboot_required"))
   }
 

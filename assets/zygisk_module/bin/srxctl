@@ -7,6 +7,8 @@ LOGS_DIR="$MODDIR/logs"
 RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
 DAEMON_PID_FILE="$LOGS_DIR/.srx_daemon.pid"
 BOOT_OK_FILE="$MODDIR/.boot_ok"
+BOOT_MODULE_VERSION_FILE="$MODDIR/.boot_module_version"
+PENDING_MODULE_DIR="/data/adb/modules_update/storage.redirect.x"
 BOOT_PENDING_FILE="$MODDIR/.boot_pending"
 
 log_ctl() {
@@ -278,14 +280,20 @@ start_runtime() {
 }
 
 status_runtime() {
-  if [ -f "$RUNTIME_DISABLE_FILE" ]; then
+  if [ -d "$PENDING_MODULE_DIR" ]; then
+    echo reboot_required
+  elif [ -f "$RUNTIME_DISABLE_FILE" ]; then
     echo disabled
   elif [ -f "$MODDIR/disable" ]; then
     echo disabled
   else
     boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
     boot_ok=$(cat "$BOOT_OK_FILE" 2>/dev/null)
-    if [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ -f "$LOGS_DIR/boot_${boot_id}.marker" ]; }; then
+    boot_module_version=$(cat "$BOOT_MODULE_VERSION_FILE" 2>/dev/null)
+    module_version=$(sed -n 's/^versionCode=//p; s/^version=//p' "$MODDIR/module.prop" 2>/dev/null | tr '\n' ' ')
+    if [ -n "$module_version" ] && [ "$boot_module_version" != "$module_version" ]; then
+      echo reboot_required
+    elif [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ -f "$LOGS_DIR/boot_${boot_id}.marker" ]; }; then
       echo enabled
     else
       echo reboot_required

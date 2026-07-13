@@ -5,6 +5,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 const val ModuleDir = "/data/adb/modules/storage.redirect.x"
+const val PendingModuleDir = "/data/adb/modules_update/storage.redirect.x"
 const val ConfigDir = "$ModuleDir/config"
 const val AppsDir = "$ConfigDir/apps"
 const val TemplatesConfigPath = "$ConfigDir/templates.json"
@@ -13,6 +14,7 @@ const val LogsDir = "$ModuleDir/logs"
 const val GlobalConfigPath = "$ConfigDir/global.json"
 const val StatsPath = "$ModuleDir/stats"
 const val RuntimeDisablePath = "$ModuleDir/.runtime_disabled"
+const val BootModuleVersionPath = "$ModuleDir/.boot_module_version"
 const val SrxCtlPath = "$ModuleDir/bin/srxctl"
 const val DiagnosticArchiveScriptPath = "$ModuleDir/service.d/diagnostic_archive.sh"
 const val ListAppsDexPath = "$ModuleDir/bin/list_apps.dex"
