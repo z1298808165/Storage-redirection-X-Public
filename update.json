@@ -10,15 +10,15 @@
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/v1.2.56/storage-redirect-x-manager-v1.2.56.apk"
   },
   "beta": {
-    "version": "1.2.57-ci.476",
-    "tag": "ci-build-29219379032-1",
-    "title": "CI Build 1.2.57-ci.476",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29219379032-1",
+    "version": "1.2.57-ci.480",
+    "tag": "ci-build-29226651193-1",
+    "title": "CI Build 1.2.57-ci.480",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29226651193-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29219379032-1/storage-redirect-x-manager-v1.2.57-ci.476.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29219379032-1/storage.redirect.x-v1.2.57-ci.476.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.476`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29196088755-1`\n- 当前提交：`32ef237`\n\n## 模块更新\n\n### 注意事项\n- 在更新弹窗展示分类更新日志。\n\n## App 更新\n\n### 修复了什么问题\n- 修复配置解析与模板相关问题：统一批量模板选择弹窗背景。\n\n## 其它更新\n\n### 注意事项\n- 规范分类更新日志结构。\n- 按组件生成并写入更新日志。\n- 使用草稿 正式发布 传递构建产物 [skip CI]。\n- 清理已发布构建产物 [skip CI]。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29226651193-1/storage-redirect-x-manager-v1.2.57-ci.480.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29226651193-1/storage.redirect.x-v1.2.57-ci.480.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.480`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29219379032-1`\n- 当前提交：`24cc483`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复核心逻辑相关问题：识别模块更新待重启状态。\n\n## App 更新\n\n### 修复了什么问题\n- 修复核心逻辑相关问题：识别模块更新待重启状态。\n\n## 其它更新\n\n### 注意事项\n- 使用标准媒体接口验证关闭重定向。\n- 恢复关闭重定向的标准媒体路径。\n- 放宽关闭重定向的辅助日志断言。"
   },
   "releases": []
 }
