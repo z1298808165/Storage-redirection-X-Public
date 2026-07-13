@@ -65,7 +65,6 @@ internal fun TemplatePickerDialog(
   CenteredDialog(
       title = title,
       show = show,
-      denseSurface = true,
       onDismiss = onDismiss,
   ) {
     if (templates.isEmpty()) {
