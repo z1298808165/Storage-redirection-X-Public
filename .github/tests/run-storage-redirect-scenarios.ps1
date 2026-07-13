@@ -922,6 +922,33 @@ function Invoke-FileMonitorMediaStoreSuccessCase {
     $ok
 }
 
+function Invoke-FileMonitorMediaStoreImageSuccessCase {
+    param(
+        [string]$Scenario,
+        [string]$Label,
+        [string]$RelativePath,
+        [string]$ExpectedPath,
+        [string]$PrivatePath = "",
+        [bool]$RequireMonitorRecord = $true,
+        [string]$MonitorSkipReason = "mediastore-image-result-and-routing-are-authoritative"
+    )
+    $fileName = (New-MonitorFileName $Scenario $Label) -replace '\.bin$', '.jpg'
+    if (-not (Prepare-FileMonitorAssertion $Scenario $Label)) { return $false }
+    $ok = (Invoke-MediaStoreImageCreateCase ([int]$Scenario) $Label $fileName $RelativePath).Ok
+    $ok = (Require-File "scenario-$Scenario" "$Label expected" "$ExpectedPath/$fileName") -and $ok
+    $ok = (Test-Su "test -s '$ExpectedPath/$fileName'") -and $ok
+    if ($PrivatePath) {
+        $ok = (Require-Missing "scenario-$Scenario" "$Label private" "$PrivatePath/$fileName") -and $ok
+    }
+    $ok = (Test-NoReadOnlyFailureRecord $Scenario $Label $fileName) -and $ok
+    if ($RequireMonitorRecord) {
+        $ok = (Wait-FileMonitorLogLine $Scenario $Label $fileName "success") -and $ok
+    } else {
+        Write-Host "monitor_success_record_skipped scenario=$Scenario label=$Label file=$fileName reason=$MonitorSkipReason"
+    }
+    $ok
+}
+
 function Invoke-FileMonitorMediaStoreRelativeDataSuccessCase {
     param(
         [string]$Scenario,
@@ -958,7 +985,7 @@ function Invoke-DisabledRedirectMonitorScenario {
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
     $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true $false
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false "disabled-profile-mediastore-create-result-and-routing-are-authoritative") -and $ok
-    $ok = (Invoke-FileMonitorMediaStoreRelativeDataSuccessCase $Scenario "disabled-nnngram-relative-data" "Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot) -and $ok
+    $ok = (Invoke-FileMonitorMediaStoreImageSuccessCase $Scenario "disabled-nnngram-standard-create" "Pictures/Nnngram" $MonitorNnngramRoot $PrivateMonitorNnngramRoot $false "disabled-profile-standard-mediastore-result-and-routing-are-authoritative") -and $ok
     $mediaFile = "srt_mediastore_public_only.txt"
     $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "disabled-mediastore-public-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
     $ok = $mediaResult.Ok -and $ok
