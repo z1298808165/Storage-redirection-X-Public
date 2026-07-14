@@ -1,8 +1,12 @@
 package org.srx.manager.data
 
+import java.io.IOException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class UpdateCheckerTest {
@@ -72,6 +76,67 @@ class UpdateCheckerTest {
         )
 
     assertNull(update)
+  }
+
+  @Test
+  fun rawGitHubManifestUsesJsDelivrAsFallback() = runBlocking {
+    val requests = mutableListOf<String>()
+    val fallbackChecker =
+        UpdateChecker("SRX-Manager/test") { url ->
+          requests += url
+          if (url.contains("raw.githubusercontent.com")) throw IOException("HTTP 404")
+          manifest
+        }
+
+    val update =
+        fallbackChecker.check(
+            manifestUrl = "https://raw.githubusercontent.com/example/repo/SRX-R/update.json",
+            repository = "example/repo",
+            currentVersionName = "1.2.56",
+            channel = UpdateChannel.Stable,
+        )
+
+    requireNotNull(update)
+    assertEquals("1.2.57", update.versionName)
+    assertEquals(
+        listOf(
+            "https://raw.githubusercontent.com/example/repo/SRX-R/update.json",
+            "https://cdn.jsdelivr.net/gh/example/repo@SRX-R/update.json",
+        ),
+        requests,
+    )
+  }
+
+  @Test
+  fun reportsFailureOnlyAfterBothManifestSourcesFail() = runBlocking {
+    val requests = mutableListOf<String>()
+    val fallbackChecker =
+        UpdateChecker("SRX-Manager/test") { url ->
+          requests += url
+          throw IOException("HTTP 404")
+        }
+
+    try {
+      fallbackChecker.check(
+          manifestUrl = "https://raw.githubusercontent.com/example/repo/SRX-R/update.json",
+          repository = "example/repo",
+          currentVersionName = "1.2.56",
+          channel = UpdateChannel.Stable,
+      )
+      fail("Expected both manifest sources to fail")
+    } catch (error: IOException) {
+      assertTrue(error.message.orEmpty().contains("首选源与备用镜像均不可用"))
+      assertFalse(error.message.orEmpty().contains("请确认仓库分支已提交"))
+    }
+    assertEquals(2, requests.size)
+  }
+
+  @Test
+  fun customManifestUrlIsNotRewritten() {
+    assertEquals(
+        listOf("https://updates.example.com/update.json"),
+        updateManifestUrls("https://updates.example.com/update.json"),
+    )
   }
 
   private companion object {

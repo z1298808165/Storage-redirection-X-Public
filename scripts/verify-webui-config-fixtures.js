@@ -33,7 +33,9 @@ function assertDeepEqual(actual, expected, label) {
 }
 
 const sandbox = {
+  AbortController,
   console,
+  URL,
   setTimeout: () => 0,
   clearTimeout: () => {},
   localStorage: { getItem: () => null, setItem: () => {} },
@@ -209,28 +211,47 @@ assertDeepEqual(
   `monitor-filter-sorts-rules-alphabetically`,
 );
 
-sandbox.window.Api.exec = async () =>
-  [
-    "system_accent1_600=#ff336699",
-    "system_accent1_200=0xff99CCEE",
-    "system_accent2_600=#ff445566",
-    "system_accent2_200=#ffAABBCC",
-  ].join("\n");
-sandbox.window.Api.readSystemAccentPalette()
-  .then((palette) => {
-    assertDeepEqual(
-      palette,
-      {
-        lightPrimary: "#336699",
-        darkPrimary: "#99CCEE",
-        lightSecondary: "#445566",
-        darkSecondary: "#AABBCC",
-      },
-      "webui-system-accent-palette",
-    );
-    console.log("WebUI config fixtures verified");
-  })
-  .catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+(async () => {
+  sandbox.window.LSPosedBridge = { exec: () => "" };
+  const manifestRequests = [];
+  sandbox.fetch = async (url) => {
+    manifestRequests.push(url);
+    if (url.includes("raw.githubusercontent.com")) return { ok: false, status: 404 };
+    return { ok: true, status: 200, json: async () => ({ schema: 1 }) };
+  };
+  const fetchedManifest = await sandbox.window.Api.fetchUpdateManifest(
+    "https://raw.githubusercontent.com/example/repo/SRX-R/update.json",
+  );
+  assertDeepEqual(fetchedManifest, { schema: 1 }, "update-manifest-fallback-result");
+  assertDeepEqual(
+    manifestRequests,
+    [
+      "https://raw.githubusercontent.com/example/repo/SRX-R/update.json",
+      "https://cdn.jsdelivr.net/gh/example/repo@SRX-R/update.json",
+    ],
+    "update-manifest-fallback-order",
+  );
+
+  sandbox.window.Api.exec = async () =>
+    [
+      "system_accent1_600=#ff336699",
+      "system_accent1_200=0xff99CCEE",
+      "system_accent2_600=#ff445566",
+      "system_accent2_200=#ffAABBCC",
+    ].join("\n");
+  const palette = await sandbox.window.Api.readSystemAccentPalette();
+  assertDeepEqual(
+    palette,
+    {
+      lightPrimary: "#336699",
+      darkPrimary: "#99CCEE",
+      lightSecondary: "#445566",
+      darkSecondary: "#AABBCC",
+    },
+    "webui-system-accent-palette",
+  );
+  console.log("WebUI config fixtures verified");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
