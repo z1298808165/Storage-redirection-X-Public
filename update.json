@@ -10,15 +10,15 @@
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/v1.2.56/storage-redirect-x-manager-v1.2.56.apk"
   },
   "beta": {
-    "version": "1.2.57-ci.519",
-    "tag": "ci-build-29270621629-1",
-    "title": "CI Build 1.2.57-ci.519",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29270621629-1",
+    "version": "1.2.57-ci.521",
+    "tag": "ci-build-29311752703-1",
+    "title": "CI Build 1.2.57-ci.521",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29311752703-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29270621629-1/storage-redirect-x-manager-v1.2.57-ci.519.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29270621629-1/storage.redirect.x-v1.2.57-ci.519.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.519`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29234368972-1`\n- 当前提交：`23196b9`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复配置解析与模板相关问题：恢复 LSPlant 稳定构建配置。\n\n## App 更新\n\n### 注意事项\n- 性能(App)：缩小发布 APK 体积。\n\n## 其它更新\n\n### 注意事项\n- 修复失败构建的草稿清理。\n- 更新构建计数基线。\n- 说明模块选择性压缩规则。\n- 性能(模块)：压缩发布包体积。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29311752703-1/storage-redirect-x-manager-v1.2.57-ci.521.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29311752703-1/storage.redirect.x-v1.2.57-ci.521.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.57-ci.521`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29270621629-1`\n- 当前提交：`3efc437`\n\n## 模块更新\n\n### 注意事项\n- 回退(native)：恢复 daemon 稳定链接配置。\n- 性能(native)：压缩 daemon 动态重定位。"
   },
   "releases": []
 }
