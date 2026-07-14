@@ -364,7 +364,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "srx_core"
-version = "1.2.57"
+version = "1.2.58"
 dependencies = [
  "fuser",
  "jni-sys",
