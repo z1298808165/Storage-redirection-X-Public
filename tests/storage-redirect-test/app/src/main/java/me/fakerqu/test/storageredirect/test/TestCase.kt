@@ -56,6 +56,7 @@ enum class TestCase(val id: String) {
   FILE_DELETE_DENIED("file_delete_denied"),
   FILE_MKDIR("file_mkdir"),
   FILE_MKDIR_DENIED("file_mkdir_denied"),
+  FILE_ATOMIC_SAVE("file_atomic_save"),
   FILE_RENAME("file_rename"),
   FILE_RENAME_DENIED("file_rename_denied"),
   FILE_STAT("file_stat"),
@@ -159,6 +160,7 @@ enum class TestCase(val id: String) {
               FILE_CREATE,
               FILE_MKDIR,
               FILE_MKDIR_DENIED,
+              FILE_ATOMIC_SAVE,
               FILE_RENAME,
               FILE_RENAME_DENIED,
               FILE_STAT,
@@ -242,6 +244,7 @@ enum class TestCase(val id: String) {
       FILE_DELETE_DENIED -> file.deleteDenied(args)
       FILE_MKDIR -> file.mkdir(args)
       FILE_MKDIR_DENIED -> file.mkdirDenied(args)
+      FILE_ATOMIC_SAVE -> file.atomicSave(args)
       FILE_RENAME -> file.rename(args)
       FILE_RENAME_DENIED -> file.renameDenied(args)
       FILE_STAT -> file.stat(args)

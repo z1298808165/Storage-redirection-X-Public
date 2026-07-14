@@ -1413,6 +1413,8 @@ run_fuse_daemon_allow_wildcard_scenario() {
   local scenario="$1"
   local plain_path="$FUSE_PLAIN_ROOT/$TEST_FILE"
   local plain_private="$PRIVATE_FUSE_PLAIN_ROOT/$TEST_FILE"
+  local atomic_path="$FUSE_PLAIN_ROOT/srt_atomic_save.jpg"
+  local atomic_private="$PRIVATE_FUSE_PLAIN_ROOT/srt_atomic_save.jpg"
   local wildcard_path="$FUSE_DCIM_ALLOWED_ROOT/$FUSE_DCIM_MEDIA_FILE"
   local wildcard_private="$PRIVATE_FUSE_DCIM_ALLOWED_ROOT/$FUSE_DCIM_MEDIA_FILE"
   local other_path="$FUSE_DCIM_OTHER_ROOT/$FUSE_DCIM_MEDIA_FILE"
@@ -1434,6 +1436,9 @@ run_fuse_daemon_allow_wildcard_scenario() {
     run_write_case "$scenario" "plain-allow-write" "$plain_path" "$PAYLOAD" &&
     check_file_exists "fuse-plain-real" "$plain_path" &&
     check_file_missing "fuse-plain-private" "$plain_private" &&
+    run_service_case "$scenario" "atomic-save" "file_atomic_save" '^PASS \[file_atomic_save\]' --es file_path "$atomic_path" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" &&
+    check_file_exists "fuse-atomic-real" "$atomic_path" &&
+    check_file_missing "fuse-atomic-private" "$atomic_private" &&
     run_mediastore_image_create_case "$scenario" "wildcard-allow-image-create" "$FUSE_DCIM_MEDIA_FILE" "DCIM/SrtFuseQQ/SrtAllowedAlpha" &&
     check_file_exists "fuse-wildcard-real" "$wildcard_path" &&
     check_file_missing "fuse-wildcard-private" "$wildcard_private" &&

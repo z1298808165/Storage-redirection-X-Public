@@ -4,6 +4,8 @@ import android.content.Context
 import android.system.OsConstants
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import me.fakerqu.mediafileapi.AndroidFileApi
 
 class FileTestCases(
@@ -365,6 +367,41 @@ class FileTestCases(
         TestCase.FILE_MKDIR_DENIED.pass(
             message = "mkdir denied as expected",
             metadata = pathMetadata(dirPath),
+        )
+      }
+
+  fun atomicSave(args: TestCaseArgs): TestResult =
+      TestCase.FILE_ATOMIC_SAVE.measure {
+        val targetPath =
+            args.requireFilePath(TestCase.FILE_ATOMIC_SAVE)
+                ?: return@measure args.missingPathResult(TestCase.FILE_ATOMIC_SAVE)
+        val target = File(targetPath)
+        val temp = File(target.parentFile, ".${target.name}.tmp")
+        val payload = args.payloadOr(TestFixtures.filePayload("atomic-save"))
+        target.parentFile?.mkdirs()
+        target.delete()
+        temp.delete()
+
+        RandomAccessFile(temp, "rw").use { file ->
+          file.write(payload)
+          file.fd.sync()
+        }
+        Files.move(temp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        val readBack = target.readBytes()
+        if (temp.exists() || !readBack.contentEquals(payload)) {
+          return@measure TestCase.FILE_ATOMIC_SAVE.fail(
+              message = "atomic save result mismatch",
+              metadata =
+                  pathMetadata(targetPath) +
+                      mapOf(
+                          "tempExists" to temp.exists().toString(),
+                          "bytesRead" to readBack.size.toString(),
+                      ),
+          )
+        }
+        TestCase.FILE_ATOMIC_SAVE.pass(
+            message = "atomic save succeeded",
+            metadata = pathMetadata(targetPath) + mapOf("bytesWritten" to payload.size.toString()),
         )
       }
 

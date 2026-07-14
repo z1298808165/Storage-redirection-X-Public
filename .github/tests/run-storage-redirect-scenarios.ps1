@@ -1484,6 +1484,8 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     param([int]$Scenario)
     $plainPath = "$FusePlainRoot/$TestFile"
     $plainPrivate = "$PrivateFusePlainRoot/$TestFile"
+    $atomicPath = "$FusePlainRoot/srt_atomic_save.jpg"
+    $atomicPrivate = "$PrivateFusePlainRoot/srt_atomic_save.jpg"
     $wildcardPath = "$FuseDcimAllowedRoot/$FuseDcimMediaFile"
     $wildcardPrivate = "$PrivateFuseDcimAllowedRoot/$FuseDcimMediaFile"
     $otherPath = "$FuseDcimOtherRoot/$FuseDcimMediaFile"
@@ -1505,6 +1507,9 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     $ok = (Invoke-WriteCase $Scenario "plain-allow-write" $plainPath $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-plain-real" $plainPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-plain-private" $plainPrivate) -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "atomic-save" "file_atomic_save" @{ file_path = $atomicPath; payload = $Payload; expected_payload = $Payload } "^PASS \[file_atomic_save\]").Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "fuse-atomic-real" $atomicPath) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "fuse-atomic-private" $atomicPrivate) -and $ok
     $ok = (Invoke-MediaStoreImageCreateCase $Scenario "wildcard-allow-image-create" $FuseDcimMediaFile "DCIM/SrtFuseQQ/SrtAllowedAlpha").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-wildcard-real" $wildcardPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-wildcard-private" $wildcardPrivate) -and $ok
