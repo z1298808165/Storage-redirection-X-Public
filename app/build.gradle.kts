@@ -18,13 +18,6 @@ val cargoVersion =
     }
 
 val autoManifestCommitPrefixes = listOf("CI：更新更新清单", "发布：更新更新清单")
-val buildCountOffsets =
-    mapOf(
-        // Previous CI builds for Cargo.toml 1.2.56 already published 1.2.57-ci.284.
-        // Continue that visible version line without reserving Cargo.toml 1.2.58 early.
-        "1.2.57" to 285,
-    )
-val legacyCiVersionCodeOverrides = setOf("1.2.57")
 
 data class ResolvedBuildVersion(
     val baseVersion: String,
@@ -92,9 +85,6 @@ fun baseVersionCode(version: String): Int {
 }
 
 fun ciVersionCode(baseVersion: String, buildCount: Int): Int {
-  if (baseVersion in legacyCiVersionCodeOverrides) {
-    return baseVersionCode(baseVersion) - 1
-  }
   if (buildCount !in 1..99) {
     throw GradleException(
         "CI build count must be between 1 and 99. Bump Cargo.toml version before continuing."
@@ -129,7 +119,7 @@ fun resolveBuildVersion(baseVersion: String, includeDirty: Boolean): ResolvedBui
     count += 1
   }
 
-  val buildCount = count.coerceAtLeast(1) + (buildCountOffsets[baseVersion] ?: 0)
+  val buildCount = count.coerceAtLeast(1)
   return ResolvedBuildVersion(
       baseVersion = baseVersion,
       buildCount = buildCount,
@@ -144,7 +134,7 @@ val configuredAppVersionName =
 val configuredAppVersionCode =
     providers.environmentVariable("VERSION_CODE").orNull
         ?: providers.gradleProperty("srx.versionCode").orNull
-val defaultBuildVersion = resolveBuildVersion(cargoVersion, includeDirty = true)
+val defaultBuildVersion by lazy { resolveBuildVersion(cargoVersion, includeDirty = true) }
 val appVersionName = configuredAppVersionName ?: defaultBuildVersion.versionName
 val appVersionCode =
     configuredAppVersionCode?.toIntOrNull()

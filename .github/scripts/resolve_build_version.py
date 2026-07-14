@@ -15,16 +15,6 @@ AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
     "发布：更新更新清单",
 )
-BUILD_COUNT_OFFSETS = {
-    # Previous CI builds for Cargo.toml 1.2.56 already published 1.2.57-ci.284.
-    # Continue that visible version line without reserving Cargo.toml 1.2.58 early.
-    "1.2.57": 285,
-}
-LEGACY_CI_VERSION_CODE_OVERRIDES = {
-    "1.2.57",
-}
-
-
 def run_git(args: list[str], check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -190,7 +180,6 @@ def count_non_auto_commits(range_expr: str) -> int:
 def resolve_build_count(current_version: str, include_dirty: bool) -> int:
     head_version = current_head_version()
     start = None if head_version != current_version else version_start_commit(current_version)
-    offset = BUILD_COUNT_OFFSETS.get(current_version, 0)
     historical_count = 0
     if start:
         historical_count = count_non_auto_commits(f"{start}..HEAD")
@@ -201,14 +190,14 @@ def resolve_build_count(current_version: str, include_dirty: bool) -> int:
         last_manifest_commit = latest_ci_manifest_commit(current_version)
         if last_manifest_commit:
             pending_count = count_non_auto_commits(f"{last_manifest_commit}..HEAD")
-            count = max(manifest_count - offset, 0) + pending_count
+            count = manifest_count + pending_count
 
     if include_dirty and is_worktree_dirty():
         if head_version != current_version:
             count = 0
         count += 1
 
-    resolved_count = max(count, 1) + offset
+    resolved_count = max(count, 1)
     baseline_count = read_build_count_baseline(current_version)
     if baseline_count is not None:
         resolved_count = max(resolved_count, baseline_count + 1)
@@ -221,8 +210,6 @@ def version_code(base_version: str, build_count: int, release: bool) -> int:
     base_code = major * 1_000_000 + minor * 10_000 + patch * 100
     if release:
         return base_code
-    if base_version in LEGACY_CI_VERSION_CODE_OVERRIDES:
-        return base_code - 1
     if build_count < 1 or build_count > 99:
         raise SystemExit("CI build count must be between 1 and 99. Bump Cargo.toml version before continuing.")
     return base_code - 100 + build_count
