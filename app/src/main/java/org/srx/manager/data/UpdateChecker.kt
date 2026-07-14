@@ -2,7 +2,9 @@ package org.srx.manager.data
 
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -25,8 +27,10 @@ data class ReleaseUpdate(
     val releaseNotes: String = "",
 )
 
-class UpdateChecker(
+class UpdateChecker
+internal constructor(
     private val userAgent: String,
+    private val manifestBodyFetcher: ((String) -> String)? = null,
 ) {
   suspend fun check(
       manifestUrl: String,
@@ -104,6 +108,29 @@ class UpdateChecker(
       }
 
   private fun fetchManifest(manifestUrl: String): UpdateManifestDto {
+    val urls = updateManifestUrls(manifestUrl)
+    var lastError: Exception? = null
+    for (url in urls) {
+      try {
+        val body = manifestBodyFetcher?.invoke(url) ?: fetchManifestBody(url)
+        return ManifestJson.decodeFromString<UpdateManifestDto>(body)
+      } catch (error: CancellationException) {
+        throw error
+      } catch (error: Exception) {
+        lastError = error
+      }
+    }
+
+    if (urls.size > 1) {
+      throw IOException(
+          "更新清单获取失败：首选源与备用镜像均不可用（最后错误：${lastError?.message ?: "未知错误"}）",
+          lastError,
+      )
+    }
+    throw lastError ?: IOException("Update manifest request failed")
+  }
+
+  private fun fetchManifestBody(manifestUrl: String): String {
     val connection =
         (URL(manifestUrl).openConnection() as HttpURLConnection).apply {
           requestMethod = "GET"
@@ -117,8 +144,7 @@ class UpdateChecker(
       if (code !in 200..299) {
         throw IOException(updateManifestError(code))
       }
-      val body = connection.inputStream.bufferedReader().use { it.readText() }
-      return ManifestJson.decodeFromString<UpdateManifestDto>(body)
+      return connection.inputStream.bufferedReader().use { it.readText() }
     } finally {
       connection.disconnect()
     }
@@ -127,7 +153,7 @@ class UpdateChecker(
   private fun updateManifestError(code: Int): String =
       when (code) {
         403 -> "更新清单访问被 GitHub 限制：HTTP 403，请稍后或切换网络"
-        404 -> "更新清单不存在：HTTP 404，请确认仓库分支已提交 update.json"
+        404 -> "更新清单请求失败：HTTP 404，当前网络或缓存节点未找到该文件"
         else -> "更新清单响应异常：HTTP $code"
       }
 
@@ -194,6 +220,25 @@ class UpdateChecker(
   private companion object {
     val ManifestJson = Json { ignoreUnknownKeys = true }
   }
+}
+
+internal fun updateManifestUrls(manifestUrl: String): List<String> {
+  val uri = runCatching { URI(manifestUrl) }.getOrNull() ?: return listOf(manifestUrl)
+  val segments = uri.rawPath?.trim('/')?.split('/')?.filter { it.isNotBlank() }.orEmpty()
+  if (
+      !uri.scheme.equals("https", ignoreCase = true) ||
+          !uri.host.equals("raw.githubusercontent.com", ignoreCase = true) ||
+          uri.rawQuery != null ||
+          uri.rawFragment != null ||
+          segments.size != 4 ||
+          segments.last() != "update.json"
+  ) {
+    return listOf(manifestUrl)
+  }
+
+  val mirrorUrl =
+      "https://cdn.jsdelivr.net/gh/${segments[0]}/${segments[1]}@${segments[2]}/${segments[3]}"
+  return listOf(manifestUrl, mirrorUrl)
 }
 
 private data class SemVersion(

@@ -33,6 +33,57 @@ const UPDATE_MANIFEST_URL =
   "/" +
   DEFAULT_RELEASE_BRANCH +
   "/update.json";
+
+function updateManifestUrls(manifestUrl) {
+  const urls = [manifestUrl];
+  try {
+    const parsed = new URL(manifestUrl);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "raw.githubusercontent.com" &&
+      !parsed.search &&
+      !parsed.hash &&
+      segments.length === 4 &&
+      segments[3] === "update.json"
+    ) {
+      urls.push(
+        "https://cdn.jsdelivr.net/gh/" +
+          segments[0] +
+          "/" +
+          segments[1] +
+          "@" +
+          segments[2] +
+          "/" +
+          segments[3],
+      );
+    }
+  } catch {}
+  return urls;
+}
+
+function updateManifestResponseError(status) {
+  if (status === 403) return "更新清单访问被 GitHub 限制：HTTP 403，请稍后或切换网络";
+  if (status === 404) return "更新清单请求失败：HTTP 404，当前网络或缓存节点未找到该文件";
+  return "更新清单响应异常：HTTP " + status;
+}
+
+async function fetchUpdateManifestFrom(url) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 10_000) : null;
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (!response.ok) throw new Error(updateManifestResponseError(response.status));
+    return await response.json();
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+}
 const MOCK_RELEASE_NOTES = `## 模块更新
 
 ### 修复了什么问题
@@ -1980,20 +2031,23 @@ const Api = {
 
   async fetchUpdateManifest(manifestUrl) {
     if (!hasNativeWebUiBridge()) return mockUpdateManifest();
-    const url = manifestUrl || UPDATE_MANIFEST_URL;
-    const response = await fetch(url, {
-      method: "GET",
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) {
-      if (response.status === 403)
-        throw new Error("更新清单访问被 GitHub 限制：HTTP 403，请稍后或切换网络");
-      if (response.status === 404)
-        throw new Error("更新清单不存在：HTTP 404，请确认仓库分支已提交 update.json");
-      throw new Error("更新清单响应异常：HTTP " + response.status);
+    const urls = updateManifestUrls(manifestUrl || UPDATE_MANIFEST_URL);
+    let lastError = null;
+    for (const url of urls) {
+      try {
+        return await fetchUpdateManifestFrom(url);
+      } catch (error) {
+        lastError = error;
+      }
     }
-    return await response.json();
+    if (urls.length > 1) {
+      throw new Error(
+        "更新清单获取失败：首选源与备用镜像均不可用（最后错误：" +
+          (lastError?.message || "未知错误") +
+          "）",
+      );
+    }
+    throw lastError || new Error("更新清单获取失败");
   },
 
   async checkForUpdates(options) {
