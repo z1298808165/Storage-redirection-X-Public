@@ -537,6 +537,9 @@ jobs:
           if [ -f "$RELEASE_NOTES" ]; then
             cp "$RELEASE_NOTES" build/changelog.md
           fi
+          python .github/scripts/validate_release_notes.py \
+            --file build/changelog.md \
+            --version "$VERSION"
 
       - name: Verify draft GitHub Release assets
         env:

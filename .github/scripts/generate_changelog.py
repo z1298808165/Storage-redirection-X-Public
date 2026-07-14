@@ -13,6 +13,16 @@ from pathlib import Path
 MAX_PATCH_CHARS = 180_000
 MAX_SECTION_ITEMS = 8
 GENERIC_SUMMARIES = {"CI", "ci", "更新", "修复", "调整", "优化", "文档", "测试"}
+RELEASE_FIX_SUMMARIES = {
+    "媒体代写与系统存储链路": "修复媒体文件保存、系统代写归因和存储路由中的兼容性问题",
+    "FUSE、挂载和路径映射": "修复文件保存、挂载、路径映射及只读规则组合下的兼容性问题",
+    "文件监控与日志": "修复文件操作记录、筛选及日志采集中的准确性和稳定性问题",
+    "WebUI/管理界面": "修复管理界面的显示、交互和状态同步问题",
+    "管理 App": "修复管理 App 的功能、显示和状态同步问题",
+    "配置解析与模板": "修复配置解析、默认值和模板兼容性问题",
+    "重定向策略与调用方识别": "修复重定向策略、调用方识别和应用隔离问题",
+    "核心逻辑": "修复模块核心逻辑中的稳定性和兼容性问题",
+}
 AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
     "发布：更新更新清单",
@@ -90,14 +100,36 @@ def find_previous_ci_ref(current: str) -> str:
     return previous_commit
 
 
-def find_previous_release_ref(current: str) -> str:
-    tags = run_git(
-        ["tag", "--merged", f"{current}^", "--sort=-version:refname", "--list", "v*"],
-        allow_fail=True,
-    )
-    if not tags:
-        return ""
-    return tags.splitlines()[0]
+def release_version(tag: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def select_previous_release_tag(tags: list[str], version: str) -> str:
+    current_version = release_version(f"v{version}")
+    candidates = [
+        (parsed, tag)
+        for tag in tags
+        if (parsed := release_version(tag)) is not None
+        and (current_version is None or parsed < current_version)
+    ]
+    return max(candidates, default=(None, ""))[1]
+
+
+def find_previous_release_ref(current: str, version: str = "") -> str:
+    tags = run_git(["tag", "--list", "v*"], allow_fail=True).splitlines()
+    if version:
+        return select_previous_release_tag(tags, version)
+
+    current_commit = run_git(["rev-parse", f"{current}^{{commit}}"], allow_fail=True)
+    candidates = [
+        tag
+        for tag in tags
+        if run_git(["rev-parse", f"{tag}^{{commit}}"], allow_fail=True) != current_commit
+    ]
+    return select_previous_release_tag(candidates, "")
 
 
 def rev_range(previous: str, current: str) -> str:
@@ -236,7 +268,13 @@ def summarize_commit_text(text: str) -> str:
         flags=re.I,
     )
     normalized = re.sub(
-        r"^(修复|功能|新增|文档|测试|发布|构建|优化|重构|维护|依赖|CI)(\([^)]*\))?[：:]\s*",
+        r"^(修复|功能|新增|文档|测试|发布|构建|优化|性能|重构|维护|依赖|界面|回退|CI)(\([^)]*\))?[：:]\s*",
+        "",
+        normalized,
+        flags=re.I,
+    )
+    normalized = re.sub(
+        r"\s*(?:\[(?:skip ci|ci skip|no ci)\]|仅验证CI)\s*$",
         "",
         normalized,
         flags=re.I,
@@ -281,6 +319,8 @@ def classify_commit(subject: str, summary: str) -> str:
             "test": "test",
             "tests": "test",
             "测试": "test",
+            "回退": "fix",
+            "界面": "feature",
             "perf": "fix",
             "优化": "fix",
             "refactor": "internal",
@@ -483,6 +523,78 @@ def append_grouped_commit_sections(
             add_unique(sections["features"], f"{action_area('新增或增强', area)}能力：{details}")
 
 
+def is_release_process_only(commit: CommitInfo) -> bool:
+    if commit.kind not in {"fix", "feature"}:
+        return True
+    text = f"{commit.subject}\n{commit.summary}"
+    if detect_area(text) in {"CI/Release 发布流程", "测试覆盖", "文档说明"}:
+        return True
+    lowered = text.lower()
+    markers = (
+        "warning",
+        "warnings",
+        "警告",
+        "停止跟踪",
+        "移除跟踪",
+        "文件跟踪",
+        "跟踪文件",
+        "构建计数",
+        "版本计数",
+        "仅验证ci",
+    )
+    return commit.subject.startswith("回退") or "尝试" in text or any(
+        marker in lowered for marker in markers
+    )
+
+
+def classify_release_changes(
+    files: list[str], commits: list[CommitInfo], patch: str
+) -> dict[str, list[str]]:
+    relevant = [commit for commit in commits if not is_release_process_only(commit)]
+    sections = {
+        "fixed": [],
+        "features": [],
+        "changes": [],
+        "usage": [],
+        "notes": [],
+    }
+
+    fixed_areas = {
+        detect_area(f"{commit.subject}\n{commit.summary}")
+        for commit in relevant
+        if commit.kind == "fix"
+    }
+    for area in sorted(fixed_areas):
+        add_unique(
+            sections["fixed"],
+            RELEASE_FIX_SUMMARIES.get(area, f"修复{area}相关问题"),
+        )
+
+    feature_groups: dict[str, list[str]] = {}
+    change_groups: dict[str, list[str]] = {}
+    for commit in relevant:
+        if commit.kind != "feature":
+            continue
+        area = detect_area(f"{commit.subject}\n{commit.summary}")
+        target = feature_groups if is_user_facing_feature(commit, files, patch) else change_groups
+        target.setdefault(area, []).append(commit.summary)
+
+    for area, summaries in feature_groups.items():
+        details = join_limited(summaries)
+        if details:
+            add_unique(sections["features"], f"{action_area('新增或增强', area)}能力：{details}")
+    for area, summaries in change_groups.items():
+        details = join_limited(summaries)
+        if details:
+            add_unique(sections["changes"], f"{action_area('调整或增强', area)}：{details}")
+
+    append_feature_usage(sections, relevant, files, patch)
+    append_contextual_sections(sections, files, patch)
+    for key, values in sections.items():
+        sections[key] = limit_section(values, include_commit_details=False)
+    return sections
+
+
 def extract_config_keys(patch: str) -> list[str]:
     added_lines = [
         line[1:]
@@ -505,7 +617,9 @@ def append_contextual_sections(
     files: list[str],
     patch: str,
 ) -> None:
-    has_substantive_change = bool(sections["fixed"] or sections["features"])
+    has_substantive_change = bool(
+        sections["fixed"] or sections["features"] or sections.get("changes")
+    )
     has_runtime = any(
         path.startswith(("src/hook/", "src/mount", "src/fuse", "src/lifecycle", "src/redirect/", "src/daemon", "java_src/", "native/"))
         for path in files
@@ -540,14 +654,15 @@ def append_feature_usage(
             add_unique(sections["usage"], "在 WebUI 或管理界面的设置页调整界面缩放比例；保存后刷新页面或重新打开管理界面即可使用新的显示比例")
 
 
-def limit_section(items: list[str]) -> list[str]:
+def limit_section(items: list[str], include_commit_details: bool = True) -> list[str]:
     if len(items) <= MAX_SECTION_ITEMS:
         return items
     omitted = len(items) - (MAX_SECTION_ITEMS - 1)
-    return [
-        *items[: MAX_SECTION_ITEMS - 1],
-        f"- 另有 {omitted} 条相关变化已保留在下方提交列表中，完整细节以提交列表和完整变更对比为准。",
-    ]
+    if include_commit_details:
+        summary = f"另有 {omitted} 条相关变化已保留在下方提交列表中，完整细节以提交列表和完整变更对比为准"
+    else:
+        summary = f"另有 {omitted} 条同类变化已合并到以上说明"
+    return [*items[: MAX_SECTION_ITEMS - 1], f"- {summary}。"]
 
 
 def classify_changes(files: list[str], commits: list[CommitInfo], patch: str) -> dict[str, list[str]]:
@@ -556,6 +671,7 @@ def classify_changes(files: list[str], commits: list[CommitInfo], patch: str) ->
     sections = {
         "fixed": [],
         "features": [],
+        "changes": [],
         "usage": [],
         "notes": [],
     }
@@ -582,23 +698,25 @@ def compare_url(previous: str, current: str) -> str:
 def write_changelog(mode: str, version: str, previous: str, current: str, output: Path) -> None:
     commits = commit_infos(previous, current)
     patch = changed_patch(previous, current)
+    net_files = set(changed_files(previous, current))
 
-    title = "CI 构建更新日志" if mode == "ci" else "Release 更新日志"
-    baseline = "上一版 CI 或 Release 构建" if mode == "ci" else "上一版 Release 构建"
-    current_label = version or current[:7]
-    previous_label = previous or "初始提交"
     url = compare_url(previous, current)
-
-    lines = [
-        f"## {title}",
-        "",
-        f"- 当前版本：`{current_label}`",
-        f"- 对比基准：{baseline} `{previous_label}`",
-        f"- 当前提交：`{current[:7]}`",
-    ]
+    if mode == "release":
+        lines = [f"# Storage Redirect X v{version}"]
+    else:
+        current_label = version or current[:7]
+        previous_label = previous or "初始提交"
+        lines = [
+            "## CI 构建更新日志",
+            "",
+            f"- 当前版本：`{current_label}`",
+            f"- 对比基准：上一版 CI 或 Release 构建 `{previous_label}`",
+            f"- 当前提交：`{current[:7]}`",
+        ]
     detail_titles = [
         ("fixed", "### 修复了什么问题"),
         ("features", "### 增加了什么功能"),
+        ("changes", "### 功能变化"),
         ("usage", "### 新功能怎么使用"),
         ("notes", "### 注意事项"),
     ]
@@ -609,11 +727,16 @@ def write_changelog(mode: str, version: str, previous: str, current: str, output
     ]
     component_commits = {key: [] for key, _ in component_titles}
     for commit in commits:
-        components = set().union(*(change_components(path) for path in commit_changed_files(commit)))
+        commit_files = commit_changed_files(commit)
+        if mode == "release":
+            commit_files = [path for path in commit_files if path in net_files]
+        components = set().union(*(change_components(path) for path in commit_files))
         for component in components:
             component_commits[component].append(commit)
 
     for component, component_heading in component_titles:
+        if mode == "release" and component == "other":
+            continue
         selected_commits = component_commits[component]
         if not selected_commits:
             continue
@@ -625,20 +748,27 @@ def write_changelog(mode: str, version: str, previous: str, current: str, output
                 if component in change_components(path)
             }
         )
-        sections = classify_changes(selected_files, selected_commits, patch)
-        if not any(sections.values()):
+        if mode == "release":
+            selected_files = [path for path in selected_files if path in net_files]
+            sections = classify_release_changes(selected_files, selected_commits, patch)
+        else:
+            sections = classify_changes(selected_files, selected_commits, patch)
+        if mode == "ci" and not any(sections.values()):
             sections['notes'] = [f"- {commit.summary}。" for commit in selected_commits]
+        if not any(sections.values()):
+            continue
         lines.extend(["", component_heading])
         for key, heading in detail_titles:
             items = sections[key]
             if items:
                 lines.extend(["", heading, *items])
 
-    commit_list = commit_lines(commits)
-    if commit_list:
-        lines.extend(["", "### 提交列表", *commit_list])
-    if url:
-        lines.extend(["", f"**完整变更对比**: {url}"])
+    if mode == "ci":
+        commit_list = commit_lines(commits)
+        if commit_list:
+            lines.extend(["", "### 提交列表", *commit_list])
+        if url:
+            lines.extend(["", f"**完整变更对比**: {url}"])
 
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -652,7 +782,7 @@ def main() -> None:
 
     current = current_ref()
     if args.mode == "release":
-        previous = find_previous_release_ref(current)
+        previous = find_previous_release_ref(current, args.version)
     else:
         previous = find_previous_ci_ref(current)
     write_changelog(args.mode, args.version, previous, current, Path(args.output))
