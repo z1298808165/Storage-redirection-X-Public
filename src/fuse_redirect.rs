@@ -2,9 +2,9 @@ use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
 use crate::platform::{fs, module_paths, paths};
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, KernelConfig, MountOption, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, SessionACL, TimeOrNow, WriteFlags,
+    INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenAccMode, OpenFlags, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request, SessionACL, TimeOrNow, WriteFlags,
 };
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -800,6 +800,53 @@ impl Filesystem for FuseRedirectFs {
         reply.ok();
     }
 
+    fn flush(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.files.contains_key(&fh.into()) {
+            reply.ok();
+        } else {
+            reply.error(Errno::EBADF);
+        }
+    }
+
+    fn fsync(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let file = {
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let Some(open_file) = state.files.get(&fh.into()) else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            let Some(file) = open_file.file.clone() else {
+                reply.error(Errno::ENOSYS);
+                return;
+            };
+            file
+        };
+        let result = if datasync {
+            file.sync_data()
+        } else {
+            file.sync_all()
+        };
+        match result {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(errno_from_io(error)),
+        }
+    }
+
     fn create(
         &self,
         _req: &Request,
@@ -907,6 +954,83 @@ impl Filesystem for FuseRedirectFs {
         }
     }
 
+    fn mknod(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        let file_type = mode & libc::S_IFMT;
+        if file_type != 0 && file_type != libc::S_IFREG {
+            reply.error(Errno::EPERM);
+            return;
+        }
+        let Some(parent_rel) = self.path_for_ino(parent) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let rel = match Self::child_rel(&parent_rel, name) {
+            Ok(rel) => rel,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+        let backend = match self.backend_for_relative(&rel, OperationKind::Write) {
+            Ok(backend) => backend,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+        if backend.is_read_only {
+            self.policy
+                .emit_monitor_read_only_deny(stringify!(mknod), &backend);
+            reply.error(Errno::EROFS);
+            return;
+        }
+        if let Err(errno) = self.ensure_parent_for_backend(&backend) {
+            reply.error(errno);
+            return;
+        }
+
+        let create_mode = mode & !libc::S_IFMT & !umask;
+        let file = match Self::open_backend_file(
+            &backend.path,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            create_mode,
+        ) {
+            Ok(file) => file,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+        drop(file);
+        fix_path_metadata(
+            &backend.path,
+            self.policy.uid,
+            create_mode,
+            backend.is_shared_public_backend,
+            false,
+        );
+        let ino = {
+            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            Self::ino_for_path_locked(&mut state, &rel)
+        };
+        match self.attr_for_backend(ino, &backend) {
+            Ok(attr) => {
+                self.policy.emit_monitor_create(&backend);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
+            Err(errno) => reply.error(errno),
+        }
+    }
+
     fn mkdir(
         &self,
         _req: &Request,
@@ -978,7 +1102,9 @@ impl Filesystem for FuseRedirectFs {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if !flags.is_empty() {
+        let rename_flags = flags.bits();
+        let rename_noreplace_flag = libc::RENAME_NOREPLACE as u32;
+        if rename_flags & !rename_noreplace_flag != 0 {
             reply.error(Errno::EINVAL);
             return;
         }
@@ -1037,7 +1163,12 @@ impl Filesystem for FuseRedirectFs {
             reply.error(errno);
             return;
         }
-        match std::fs::rename(&old_backend.path, &new_backend.path) {
+        let result = if rename_flags & rename_noreplace_flag != 0 {
+            rename_noreplace(&old_backend.path, &new_backend.path)
+        } else {
+            std::fs::rename(&old_backend.path, &new_backend.path).map_err(errno_from_io)
+        };
+        match result {
             Ok(()) => {
                 fix_existing_path_metadata(
                     &new_backend.path,
@@ -1048,7 +1179,7 @@ impl Filesystem for FuseRedirectFs {
                 remap_inode_path(&mut state, &old_rel, &new_rel);
                 reply.ok();
             }
-            Err(error) => reply.error(errno_from_io(error)),
+            Err(errno) => reply.error(errno),
         }
     }
 
@@ -1204,6 +1335,34 @@ impl Filesystem for FuseRedirectFs {
             255,
             stat.f_frsize as u32,
         );
+    }
+
+    fn fsyncdir(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        {
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            if !state.dirs.contains_key(&fh.into()) {
+                reply.error(Errno::EBADF);
+                return;
+            }
+        }
+        let backend = match self.backend_for_ino(ino) {
+            Ok(backend) => backend,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+        match File::open(&backend.path).and_then(|file| file.sync_all()) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(errno_from_io(error)),
+        }
     }
 }
 
@@ -2430,9 +2589,34 @@ fn remove_inode_path(state: &mut FuseState, rel: &str) {
 }
 
 fn remap_inode_path(state: &mut FuseState, old_rel: &str, new_rel: &str) {
+    if old_rel == new_rel {
+        return;
+    }
+    remove_inode_path(state, new_rel);
     if let Some(ino) = state.inodes.remove(old_rel) {
         state.inodes.insert(new_rel.to_string(), ino);
         state.paths_by_inode.insert(ino, new_rel.to_string());
+    }
+}
+
+fn rename_noreplace(old_path: &Path, new_path: &Path) -> Result<(), Errno> {
+    let old_path = cstring_path(old_path)?;
+    let new_path = cstring_path(new_path)?;
+    // SAFETY: Both pointers reference live, NUL-terminated C strings for the syscall duration.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            old_path.as_ptr(),
+            libc::AT_FDCWD,
+            new_path.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(errno_from_code(last_errno()))
     }
 }
 
