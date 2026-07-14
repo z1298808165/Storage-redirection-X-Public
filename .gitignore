@@ -81,7 +81,6 @@ credentials/
 scenario-*-result.txt
 media-health.txt
 
-# 本地发布说明与个人流程笔记
-/docs/release-notes/
+# 个人流程笔记
 /docs/release-workflow.md
 /docs/version-calculation-verification.md
