@@ -85,12 +85,10 @@ fun baseVersionCode(version: String): Int {
 }
 
 fun ciVersionCode(baseVersion: String, buildCount: Int): Int {
-  if (buildCount !in 1..99) {
-    throw GradleException(
-        "CI build count must be between 1 and 99. Bump Cargo.toml version before continuing."
-    )
+  if (buildCount < 1) {
+    throw GradleException("CI build count must be positive, got: $buildCount")
   }
-  return baseVersionCode(baseVersion) - 100 + buildCount
+  return baseVersionCode(baseVersion) - 100 + buildCount.coerceAtMost(99)
 }
 
 fun versionCodeFrom(versionName: String): Int {

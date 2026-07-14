@@ -210,9 +210,9 @@ def version_code(base_version: str, build_count: int, release: bool) -> int:
     base_code = major * 1_000_000 + minor * 10_000 + patch * 100
     if release:
         return base_code
-    if build_count < 1 or build_count > 99:
-        raise SystemExit("CI build count must be between 1 and 99. Bump Cargo.toml version before continuing.")
-    return base_code - 100 + build_count
+    if build_count < 1:
+        raise SystemExit(f"CI build count must be positive, got: {build_count}")
+    return base_code - 100 + min(build_count, 99)
 
 
 def main() -> None:

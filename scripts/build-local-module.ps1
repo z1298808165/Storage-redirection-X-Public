@@ -233,12 +233,6 @@ function Get-BuildCountOffset {
     return 0
 }
 
-function Test-LegacyCiVersionCodeOverride {
-    param([string]$BaseVersion)
-
-    return $BaseVersion -eq "1.2.57"
-}
-
 function Get-BuildCountBaseline {
     param([string]$BaseVersion)
 
@@ -348,15 +342,7 @@ function Resolve-LocalVersion {
     if ($null -ne $baselineCount) {
         $buildCount = [Math]::Max($buildCount, $baselineCount + 1)
     }
-    if ((-not (Test-LegacyCiVersionCodeOverride -BaseVersion $BaseVersion)) -and $buildCount -gt 99) {
-        Fail "当前版本的 CI 构建次数必须在 1 到 99 之间。请先提升 Cargo.toml 版本。"
-    }
-
-    $resolvedVersionCode = $baseCode - 100 + $buildCount
-    if (Test-LegacyCiVersionCodeOverride -BaseVersion $BaseVersion) {
-        $resolvedVersionCode = $baseCode - 1
-    }
-
+    $resolvedVersionCode = $baseCode - 100 + [Math]::Min($buildCount, 99)
     return @{
         Version = "$BaseVersion-ci.$buildCount"
         VersionCode = $resolvedVersionCode

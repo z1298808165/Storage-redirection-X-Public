@@ -26,7 +26,7 @@ jobs:
       - name: Prepare CI version
         id: version
         run: |
-          python .github/scripts/resolve_build_version.py --format github >> "$GITHUB_OUTPUT"
+          python .github/scripts/validate_ci_transition.py --format github >> "$GITHUB_OUTPUT"
 
   init-ci-release:
     needs:
