@@ -134,12 +134,20 @@ val configuredAppVersionName =
 val configuredAppVersionCode =
     providers.environmentVariable("VERSION_CODE").orNull
         ?: providers.gradleProperty("srx.versionCode").orNull
+val isSpotlessOnlyInvocation =
+    gradle.startParameter.taskNames.isNotEmpty() &&
+        gradle.startParameter.taskNames.all { taskName ->
+          taskName.substringAfterLast(':').startsWith("spotless")
+        }
 val defaultBuildVersion by lazy { resolveBuildVersion(cargoVersion, includeDirty = true) }
-val appVersionName = configuredAppVersionName ?: defaultBuildVersion.versionName
+val appVersionName =
+    configuredAppVersionName
+        ?: if (isSpotlessOnlyInvocation) cargoVersion else defaultBuildVersion.versionName
 val appVersionCode =
     configuredAppVersionCode?.toIntOrNull()
         ?: configuredAppVersionName?.let(::versionCodeFrom)
-        ?: defaultBuildVersion.versionCode
+        ?: if (isSpotlessOnlyInvocation) baseVersionCode(cargoVersion)
+        else defaultBuildVersion.versionCode
 val appCompileSdk = providers.gradleProperty("srx.compileSdk").orNull?.toIntOrNull() ?: 37
 val appTargetSdk = providers.gradleProperty("srx.targetSdk").orNull?.toIntOrNull() ?: appCompileSdk
 val defaultOfficialReleaseRepository = "Kindness-Kismet/Storage-redirection-X-Public"
