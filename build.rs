@@ -19,22 +19,22 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     build_lsplant_bridge(&target_arch);
 
-    let common_link_args = ["-Wl,--gc-sections", "-Wl,--exclude-libs,ALL", "-Wl,-s"];
+    let mut link_args = vec![
+        "-Wl,--gc-sections".to_string(),
+        "-Wl,--exclude-libs,ALL".to_string(),
+        "-Wl,--pack-dyn-relocs=none".to_string(),
+        "-Wl,-soname,libsrx_core.so".to_string(),
+    ];
 
-    for arg in &common_link_args {
-        println!("cargo:rustc-link-arg-cdylib={}", arg);
-        println!("cargo:rustc-link-arg-bin=srx_daemon={}", arg);
-    }
-
-    println!("cargo:rustc-link-arg-cdylib=-Wl,--pack-dyn-relocs=none");
-    println!("cargo:rustc-link-arg-cdylib=-Wl,-soname,libsrx_core.so");
-    // Daemon 使用 Android packed relocations；核心库保留 Zygisk loader 已验证的格式。
-    println!("cargo:rustc-link-arg-bin=srx_daemon=-Wl,--pack-dyn-relocs=android");
+    link_args.push("-Wl,-s".to_string());
 
     // 16KB page 仅 arm64 真机需要；x86_64 模拟器 4KB page 下 zygisksu loader 会漏 mmap RW segment
     if target_arch == "aarch64" {
-        println!("cargo:rustc-link-arg-cdylib=-Wl,-z,max-page-size=16384");
-        println!("cargo:rustc-link-arg-bin=srx_daemon=-Wl,-z,max-page-size=16384");
+        link_args.push("-Wl,-z,max-page-size=16384".to_string());
+    }
+
+    for arg in &link_args {
+        println!("cargo:rustc-link-arg={}", arg);
     }
 }
 
