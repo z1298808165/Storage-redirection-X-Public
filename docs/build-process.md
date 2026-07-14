@@ -96,7 +96,7 @@ CI 和本地测试构建默认生成预发布版本：
 
 仓库还维护 `.github/build-version-baseline.json` 作为本地测试包和公开 CI 的构建序号基线。本地 `scripts/build-local-module.ps1`、`scripts/build-local-app.ps1` 成功产出 `*-ci.N` 包后会把当前基础版本的最高 `N` 写入该文件；公开 CI 成功发布测试构建并更新 `update.json` 时也会写入同一文件。分区同步到公开仓库时会合并私人源码和公开仓库两边的最高值，所以下一次构建总是从“已在本地或远端用过的最高 `N`”继续加 1。
 
-Android `versionCode` 规则为：正式版 `major * 1000000 + minor * 10000 + patch * 100`；CI/本地测试版使用正式版前预留的 99 个编号，即 `baseCode - 100 + N`。因此 `1.2.57-ci.1` 到 `1.2.57-ci.99` 都低于正式版 `1.2.57`，同一基础版本超过 99 次测试构建时应提升 `Cargo.toml` 版本。
+CI 版本名中的 `N` 不设上限，可以连续生成 `1.2.58-ci.100`、`1.2.58-ci.101` 等版本。Android `versionCode` 规则仍确保正式版可覆盖安装：正式版使用 `major * 1000000 + minor * 10000 + patch * 100`；`ci.1` 到 `ci.99` 使用 `baseCode - 100 + N`；`ci.100` 及以后固定使用 `baseCode - 1`。因此超过 99 后版本先后由完整的 SemVer 版本名判断，正式版 `versionCode` 始终高于同一基础版本的 CI 包。
 
 正式 Release 仍使用纯基础版本，例如 `1.2.57`，tag 必须是 `v1.2.57`。如需查看当前仓库会解析出的版本，可运行：
 
@@ -104,7 +104,7 @@ Android `versionCode` 规则为：正式版 `major * 1000000 + minor * 10000 + p
 py .github\scripts\resolve_build_version.py --include-dirty --format json
 ```
 
-同一基础版本发布正式版后，继续开发前必须先提升 `Cargo.toml` 的补丁版本。比如发布 `1.2.57` 后，下一轮测试构建应先改为 `1.2.58`，再从 `1.2.58-ci.1` 开始；构建逻辑不再为任何历史版本保留序号偏移或 `versionCode` 例外。
+从 CI 转正式版时保持同一目标基础版本：例如 `Cargo.toml` 为 `1.2.58` 时，CI 产出 `1.2.58-ci.N`，正式发布仍使用 `1.2.58` 和 tag `v1.2.58`，不额外增加补丁号。正式版发布完成后，如果继续触发普通 CI，才把 `Cargo.toml` 提升到下一个目标版本，例如改为 `1.2.59` 并从 `1.2.59-ci.1` 开始。`.github/scripts/validate_ci_transition.py` 会在 CI `prepare` 和本地公开同步前检查这一转换；跳过 CI 的提交不执行检查。
 
 ### 更新清单
 
