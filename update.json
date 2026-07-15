@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.57\n\n## 模块更新\n\n### 增加了什么功能\n\n- 完善文件监视能力：支持按应用、操作和路径规则筛选记录，显示重定向后的实际路径，并改进过滤规则的选择、排序和管理体验。\n- 文件监视现在覆盖普通文件写入、已有文件覆盖、延迟关闭写入和系统媒体代写等更多操作链路。\n\n### 修复了什么问题\n\n- 修复普通应用重定向、路径映射、通配放行、只读目录及只读排除规则组合使用时的挂载和写入权限问题，并确保普通应用只使用 companion mount、mount namespace 或 scoped FUSE 路径。\n- 修复 MediaStore 和系统媒体代写在相对路径、映射路径、只读目录及多应用共享系统写入进程下的归因与隔离问题，避免一个应用的规则影响其它应用，并保持只读目录中的已有媒体可查询。\n- 修复配置热更新、应用启动和挂载变化期间重定向或文件监视可能延迟生效、短暂失效或漏记事件的问题。\n- 修复模块更新等待重启时状态识别不准确的问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 已有配置可继续使用；涉及正在运行应用的挂载或媒体写入规则时，建议在升级重启后确认目标应用的实际读写落点。\n\n## App 更新\n\n### 增加了什么功能\n\n- 新增检查更新入口和启动时自动检查，可按已安装模块版本判断更新，并从静态更新清单读取正式版与测试版信息。\n- 更新弹窗现在按模块、App 和其它更新分类展示版本说明。\n- App 与 WebUI 统一主题设置和动态取色体验，并完善文件监视过滤、操作显示和设置交互。\n\n### 新功能怎么使用\n\n- 在 App 的更新页面可手动检查版本；启动自动检查可在设置中调整，发现新版本后可直接查看分类更新说明和下载入口。\n- 在文件监视页面使用应用、操作和路径过滤条件缩小记录范围，过滤规则列表会按名称排序以便查找。\n\n### 修复了什么问题\n\n- 修复更新检查版本来源、版本文案、仓库地址和模块版本尚未读取完成时的自动检查问题。\n- 修复日志包导出进度可能倒退、窄屏状态显示和部分弹窗背景或选择状态不一致的问题。\n\n## 其它更新\n\n### 端到端测试流\n\n- 端到端测试流已内置到仓库，覆盖重定向、路径映射、只读规则、MediaStore、文件监视、配置热更新和模块启动状态等 scenario 1-29。\n- PR、CI Build 和正式 Release 会使用一次构建的 x86_64 模块与测试 APK，在 Android 13、14、15、16 模拟器上分别运行完整场景；只有全部版本通过 `Test-flow required gate` 后才允许发布资产或更新清单。\n- 任一 Android 版本的场景失败时会保留 Actions 日志和排障 artifact，并阻止发布资产与更新清单，便于后续定位和修复。"
   },
   "beta": {
-    "version": "1.2.58-ci.1",
-    "tag": "ci-build-29328326115-1",
-    "title": "CI Build 1.2.58-ci.1",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29328326115-1",
+    "version": "1.2.58-ci.15",
+    "tag": "ci-build-29428529018-1",
+    "title": "CI Build 1.2.58-ci.15",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29428529018-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29328326115-1/storage-redirect-x-manager-v1.2.58-ci.1.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29328326115-1/storage.redirect.x-v1.2.58-ci.1.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.58-ci.1`\n- 对比基准：上一版 CI 或 Release 构建 `v1.2.57`\n- 当前提交：`20c069d`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复 FUSE、挂载和路径映射相关问题：补齐 scoped FUSE 文件提交语义。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## 其它更新\n\n### 注意事项\n- 覆盖 scoped FUSE 原子保存流程。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29428529018-1/storage-redirect-x-manager-v1.2.58-ci.15.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29428529018-1/storage.redirect.x-v1.2.58-ci.15.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.58-ci.15`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29328326115-1`\n- 当前提交：`ca2b96a`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复核心逻辑的一组问题：优先恢复可见真实路径、更新清单增加备用镜像回退。\n- 修复 FUSE、挂载和路径映射的一组问题：恢复映射目标可见路径、保持允许真实路径映射一致、优先使用可见存储映射源。\n- 修复媒体代写与系统存储链路相关问题：完善公共目录与媒体保存链。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n- 配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则。\n\n## App 更新\n\n### 修复了什么问题\n- 修复核心逻辑相关问题：更新清单增加备用镜像回退。\n\n## 其它更新\n\n### 注意事项\n- 兼容同秒测试结果时间戳。\n- 覆盖媒体保存与公共目录属主。\n- 覆盖更新清单备用镜像回退。\n- 说明持续递增的 CI 版本流程。\n- 覆盖正式版更新日志净结果规则。\n- 按最终结果生成正式版更新日志。\n- 覆盖持续递增的 CI 版本规则。\n- 允许 CI 构建序号持续递增。"
   },
   "releases": []
 }
