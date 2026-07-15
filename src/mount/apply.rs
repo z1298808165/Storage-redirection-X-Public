@@ -1104,13 +1104,13 @@ fn build_allowed_real_source_candidates(
 ) -> Vec<String> {
     let backend_source = paths::join(data_media_root, relative);
     let mut candidates = Vec::with_capacity(2);
-    candidates.push(backend_source.clone());
     if let Some(anchor) = real_storage_anchor {
         let anchor_source = paths::join(anchor, relative);
         if !paths::eq_ignore_case(&anchor_source, &backend_source) {
             candidates.push(anchor_source);
         }
     }
+    candidates.push(backend_source.clone());
     candidates
 }
 
