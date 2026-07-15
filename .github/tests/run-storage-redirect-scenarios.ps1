@@ -401,10 +401,13 @@ function Wait-ServiceResult {
 
     $pollSeconds = [Math]::Max(0.05, $script:ResultPollMilliseconds / 1000.0).ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
     $command = @"
+marker_mtime=`$(stat -c %Y '$FreshnessMarker' 2>/dev/null || echo 0)
 deadline=`$(date +%s); deadline=`$((deadline + $TimeoutSeconds));
 while [ `$(date +%s) -lt `$deadline ]; do
   for file in '$ResultDir/result_current.txt' '$InternalResultDir/result_current.txt' '$BackendResultDir/result_current.txt' '$SandboxResultDir/result_current.txt' `$(find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do
-    if [ -s "`$file" ] && [ "`$file" -nt '$FreshnessMarker' ]; then
+    if [ -s "`$file" ]; then
+      file_mtime=`$(stat -c %Y "`$file" 2>/dev/null || echo 0)
+      [ "`$file_mtime" -ge "`$marker_mtime" ] || continue
       if [ '$ExpectedTestCase' != 'all' ]; then
         line_count=`$(grep -cve '^[[:space:]]*`$' "`$file" 2>/dev/null || true)
         grep -Eq '^(PASS|FAIL) \[$ExpectedTestCase\]' "`$file" || continue
