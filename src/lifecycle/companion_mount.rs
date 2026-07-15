@@ -22,8 +22,6 @@ use libc::{
 use stats::update_redirect_stats;
 use sys::{c_str, decode_wait_status, errno_text, last_errno};
 
-const FUSE_READY_TIMEOUT_SEC: i64 = 1;
-
 // 等待目标进程就绪后在子进程中执行挂载
 pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool {
     let started_ms = monotonic_ms();
@@ -308,12 +306,8 @@ fn send_mount_result(sock: c_int, result: i32) -> bool {
 }
 
 // 父进程等待子进程挂载结果并回收子进程
-fn handle_parent_process(child: i32, sock: c_int) -> bool {
-    set_recv_timeout(
-        sock,
-        child,
-        mount_timing::COMPANION_PARENT_RECV_PRIMARY_TIMEOUT_SEC,
-    );
+fn handle_parent_process(child: i32, sock: c_int, primary_timeout_sec: i64) -> bool {
+    set_recv_timeout(sock, child, primary_timeout_sec);
 
     let mut result: i32 = -1;
     let expected_size = std::mem::size_of::<i32>() as isize;
@@ -732,7 +726,11 @@ fn start_fuse_service_for_root(
     }
 
     unsafe { close(ready_sockets[1]) };
-    set_recv_timeout(ready_sockets[0], service_child, FUSE_READY_TIMEOUT_SEC);
+    set_recv_timeout(
+        ready_sockets[0],
+        service_child,
+        mount_timing::FUSE_READY_TIMEOUT_SEC,
+    );
     let mut ready_result: i32 = -1;
     let expected = std::mem::size_of::<i32>() as isize;
     let n = recv_result(ready_sockets[0], &mut ready_result);
@@ -797,6 +795,9 @@ fn fuse_config_from_request(
 
 // 通过 socketpair 创建子进程执行挂载操作
 fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
+    let scoped_fuse_root_count = scoped_fuse_mount_roots(request).len();
+    let parent_timeout_sec =
+        mount_timing::companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count);
     log::info!(
         "mount prep pid={} uid={} pkg={} allow={} ro={} map={} map_only={} fuse_daemon={} parent_recv_budget_sec={}",
         request.pid,
@@ -807,7 +808,7 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
         request.path_mappings.len(),
         request.is_mapping_mode_only,
         request.is_fuse_daemon_redirect_enabled,
-        mount_timing::companion_parent_recv_budget_sec()
+        mount_timing::companion_parent_recv_budget_sec(scoped_fuse_root_count)
     );
 
     let mut sockets = [0; 2];
@@ -844,7 +845,7 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
     if child > 0 {
         log::debug!("parent wait child={}", child);
         unsafe { close(sockets[1]) };
-        return handle_parent_process(child, sockets[0]);
+        return handle_parent_process(child, sockets[0], parent_timeout_sec);
     }
 
     log::debug!(

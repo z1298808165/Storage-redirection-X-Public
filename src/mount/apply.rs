@@ -211,6 +211,10 @@ impl MountPlanner {
             return false;
         }
         self.ensure_app_writable_directory_chain(&redirect_android_path, self.app_uid);
+        if !self.prepare_redirect_android_app_directories(&redirect_android_path) {
+            log::error!("mkdir redirected Android app directories failed");
+            return false;
+        }
 
         let mut is_storage_redirect_applied = false;
         if !self.bind_mount_with_storage_aliases(
@@ -285,13 +289,12 @@ impl MountPlanner {
                 );
 
                 for real_source in source_candidates {
-                    if !self.ensure_real_public_directory_exists(&real_source, self.app_uid) {
+                    if !self.ensure_real_public_directory_exists(&real_source) {
                         log::warn!("real path missing and mkdir failed: {}", real_source);
                         continue;
                     }
                     self.ensure_allowed_real_existing_directory_tree_writable(
                         &real_source,
-                        self.app_uid,
                         excluded_real_paths,
                     );
 
@@ -417,6 +420,31 @@ impl MountPlanner {
         }
 
         log::info!("redirect done");
+        true
+    }
+
+    fn prepare_redirect_android_app_directories(&self, redirect_android_path: &str) -> bool {
+        let app_data_root = paths::join(
+            &paths::join(redirect_android_path, "data"),
+            &self.package_name,
+        );
+        let app_media_root = paths::join(
+            &paths::join(redirect_android_path, "media"),
+            &self.package_name,
+        );
+        let required_paths = [
+            paths::join(&app_data_root, "files"),
+            paths::join(&app_data_root, "cache"),
+            app_media_root,
+        ];
+
+        for path in required_paths {
+            if !self.ensure_writable_mapped_directory(&path, self.app_uid) {
+                log::warn!("redirected Android app directory mkdir failed: {}", path);
+                return false;
+            }
+            self.ensure_app_writable_directory_chain(&path, self.app_uid);
+        }
         true
     }
 

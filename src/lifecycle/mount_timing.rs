@@ -1,4 +1,4 @@
-pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 140;
+pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 220;
 pub(crate) const POST_MOUNT_STATUS_POLL_DELAY_US: u32 = 50 * 1000;
 pub(crate) const POST_SPECIALIZE_SLOW_MS: i64 = 20;
 
@@ -10,13 +10,19 @@ pub(crate) const COMPANION_PARENT_RECV_PRIMARY_TIMEOUT_SEC: i64 = 5;
 pub(crate) const COMPANION_PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
 pub(crate) const COMPANION_PROCESS_READY_TIMEOUT_MS: i32 = 5000;
 pub(crate) const COMPANION_MOUNT_SLOW_MS: i64 = 20;
+pub(crate) const FUSE_READY_TIMEOUT_SEC: i64 = 4;
 
 pub(crate) fn post_mount_status_wait_budget_ms() -> i64 {
     (POST_MOUNT_STATUS_POLL_COUNT as i64).saturating_mul(POST_MOUNT_STATUS_POLL_DELAY_US as i64)
         / 1000
 }
 
-pub(crate) fn companion_parent_recv_budget_sec() -> i64 {
-    COMPANION_PARENT_RECV_PRIMARY_TIMEOUT_SEC
+pub(crate) fn companion_parent_recv_budget_sec(scoped_fuse_root_count: usize) -> i64 {
+    companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count)
         .saturating_add(COMPANION_PARENT_RECV_GRACE_TIMEOUT_SEC)
+}
+
+pub(crate) fn companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count: usize) -> i64 {
+    COMPANION_PARENT_RECV_PRIMARY_TIMEOUT_SEC
+        .saturating_add(FUSE_READY_TIMEOUT_SEC.saturating_mul(scoped_fuse_root_count as i64))
 }

@@ -160,8 +160,21 @@ impl SettingsHub {
 
     #[allow(dead_code)]
     pub fn get_monitor_app_specs(&self) -> Vec<MonitorAppSpec> {
+        self.get_daemon_app_specs(true)
+    }
+
+    // quality-allow(lint-suppression): daemon-only callers are absent from the cdylib build.
+    #[allow(dead_code)]
+    pub fn get_public_owner_repair_app_specs(&self) -> Vec<MonitorAppSpec> {
+        self.get_daemon_app_specs(false)
+            .into_iter()
+            .filter(|spec| spec.is_enabled)
+            .collect()
+    }
+
+    fn get_daemon_app_specs(&self, require_file_monitor: bool) -> Vec<MonitorAppSpec> {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !state.is_loaded || !state.is_file_monitor_enabled {
+        if !state.is_loaded || (require_file_monitor && !state.is_file_monitor_enabled) {
             return Vec::new();
         }
 

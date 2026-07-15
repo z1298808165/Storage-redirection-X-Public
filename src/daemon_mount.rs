@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const PARENT_RECV_TIMEOUT_SEC: i64 = 5;
 const PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
-const FUSE_READY_TIMEOUT_SEC: i64 = 1;
+const FUSE_READY_TIMEOUT_SEC: i64 = 4;
 const DAEMON_MOUNT_SLOW_MS: i64 = 20;
 const MAX_UNMOUNT_PASSES_PER_TARGET: usize = 32;
 const MAX_STUCK_MOUNT_CHILDREN: usize = 2;
@@ -239,6 +239,9 @@ fn remember_stuck_mount_child(child: i32) {
 }
 
 fn run_mount_in_forked_child(request: &MountRequest) -> bool {
+    let parent_timeout_sec = PARENT_RECV_TIMEOUT_SEC.saturating_add(
+        FUSE_READY_TIMEOUT_SEC.saturating_mul(scoped_fuse_mount_roots(request).len() as i64),
+    );
     let mut sockets = [0; 2];
     if unsafe { socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets.as_mut_ptr()) } != 0 {
         log_errno("daemon socketpair failed");
@@ -257,7 +260,7 @@ fn run_mount_in_forked_child(request: &MountRequest) -> bool {
 
     if child > 0 {
         unsafe { close(sockets[1]) };
-        return handle_parent_process(child, sockets[0]);
+        return handle_parent_process(child, sockets[0], parent_timeout_sec);
     }
 
     unsafe { close(sockets[0]) };
@@ -521,8 +524,8 @@ fn set_mount_namespace(pid: i32) -> bool {
     true
 }
 
-fn handle_parent_process(child: i32, sock: c_int) -> bool {
-    set_recv_timeout(sock, PARENT_RECV_TIMEOUT_SEC);
+fn handle_parent_process(child: i32, sock: c_int, primary_timeout_sec: i64) -> bool {
+    set_recv_timeout(sock, primary_timeout_sec);
     let mut result: i32 = -1;
     let expected = std::mem::size_of::<i32>() as isize;
     let mut n = recv_result(sock, &mut result);

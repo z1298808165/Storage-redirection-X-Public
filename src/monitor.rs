@@ -144,7 +144,40 @@ impl AuditTrail {
     }
 
     pub fn record_provider_open_path(&self, path: &str, caller_uid: i32, caller_package: &str) {
-        self.record_recent_path_caller(path, caller_uid, caller_package, "provider_open", "high");
+        if caller_uid < ANDROID_APP_UID_START {
+            return;
+        }
+        let normalized = normalize_storage_path_locked(path);
+        if normalized.is_empty() {
+            return;
+        }
+        let Some(package_name) = resolve_recent_path_caller_package(caller_uid, caller_package)
+        else {
+            return;
+        };
+
+        // MediaProvider may perform the native open after the Java callback returns. This hint
+        // carries the caller across that boundary independently of file monitoring.
+        source_hint::remember_public_path_caller_hint(
+            &normalized,
+            &package_name,
+            caller_uid,
+            "provider_open",
+            "high",
+        );
+
+        if !self.is_enabled() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        remember_query_access_locked(
+            &mut state,
+            normalized,
+            package_name,
+            caller_uid,
+            "provider_open",
+            "high",
+        );
     }
 
     pub fn record_media_provider_open_success(

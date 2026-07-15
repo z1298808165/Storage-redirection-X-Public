@@ -131,9 +131,16 @@ impl MountPlanner {
             return false;
         };
 
-        // 无论目录是否已存在，都确保所有者正确
+        // 真实公共目录必须保持 media_rw 所有权；应用可写性由目录模式提供。
         if owner_uid >= 0 {
-            let ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+            let effective_uid = if is_shared_public_storage_directory(&metadata_path, self.user_id)
+            {
+                MEDIA_RW_UID
+            } else {
+                owner_uid as u32
+            };
+            // SAFETY: c_path is a live, NUL-terminated CString for the duration of this call.
+            let ret = unsafe { chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
             if ret != 0 {
                 log::warn!(
                     "mount dir: chown failed errno={} {} path={} metadata_path={}",
@@ -231,7 +238,7 @@ impl MountPlanner {
         self.ensure_writable_directory_chain(path, owner_uid);
     }
 
-    pub(super) fn ensure_real_public_directory_exists(&self, path: &str, owner_uid: i32) -> bool {
+    pub(super) fn ensure_real_public_directory_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: real public mkdir skipped empty path");
             return false;
@@ -258,7 +265,7 @@ impl MountPlanner {
 
         if should_fix_public_metadata {
             self.fix_real_public_directory_metadata_chain(&metadata_path);
-            self.fix_allowed_real_directory_metadata_chain(&metadata_path, owner_uid);
+            self.fix_allowed_real_directory_metadata_chain(&metadata_path);
         }
 
         true
@@ -267,12 +274,8 @@ impl MountPlanner {
     pub(super) fn ensure_allowed_real_existing_directory_tree_writable(
         &self,
         path: &str,
-        owner_uid: i32,
         excluded_real_paths: &[String],
     ) {
-        if owner_uid < 0 {
-            return;
-        }
         let Some(root) = self.metadata_operations_path(path) else {
             return;
         };
@@ -296,8 +299,11 @@ impl MountPlanner {
             if allowed_real_metadata_path_is_excluded(&current, excluded_real_paths) {
                 continue;
             }
+            if !is_data_media_shared_public_directory(&current, self.user_id) {
+                continue;
+            }
             if fs::is_directory(&current) {
-                fix_allowed_real_directory_metadata(&current, owner_uid);
+                fix_allowed_real_directory_metadata(&current);
             }
 
             let Ok(entries) = std::fs::read_dir(&current) else {
@@ -318,10 +324,7 @@ impl MountPlanner {
         }
     }
 
-    fn fix_allowed_real_directory_metadata_chain(&self, path: &str, owner_uid: i32) {
-        if owner_uid < 0 {
-            return;
-        }
+    fn fix_allowed_real_directory_metadata_chain(&self, path: &str) {
         let root = paths::data_media_user_root_for_user(self.user_id);
         let original = path.to_string();
         let mut current = original.clone();
@@ -333,7 +336,7 @@ impl MountPlanner {
             if should_apply_allowed_real_writable_metadata(&current, &original, self.user_id)
                 && fs::is_directory(&current)
             {
-                fix_allowed_real_directory_metadata(&current, owner_uid);
+                fix_allowed_real_directory_metadata(&current);
             }
 
             let parent = parent_preserving_backend_alias(&current);
@@ -914,7 +917,8 @@ fn should_apply_app_writable_metadata(path: &str, user_id: i32) -> bool {
 
     match parts.next() {
         Some("data" | "media" | "obb") => parts.next().is_some(),
-        _ => true,
+        Some(_) => true,
+        None => false,
     }
 }
 
@@ -926,13 +930,21 @@ fn is_data_media_shared_public_directory(path: &str, user_id: i32) -> bool {
     !is_android_app_private_relative_path(relative)
 }
 
+fn is_shared_public_storage_directory(path: &str, user_id: i32) -> bool {
+    if is_data_media_shared_public_directory(path, user_id) {
+        return true;
+    }
+    paths::storage_to_data_media_for_user(path, user_id)
+        .is_some_and(|backend| is_data_media_shared_public_directory(&backend, user_id))
+}
+
 fn is_android_app_private_relative_path(relative: &str) -> bool {
     let mut parts = relative.split('/').filter(|part| !part.is_empty());
     if parts.next() != Some("Android") {
         return false;
     }
     match parts.next() {
-        Some("data" | "media" | "obb") => parts.next().is_some(),
+        Some("data" | "media" | "obb") => true,
         _ => false,
     }
 }
@@ -981,12 +993,13 @@ fn fix_real_public_directory_metadata(path: &str) {
     }
 }
 
-fn fix_allowed_real_directory_metadata(path: &str, owner_uid: i32) {
+fn fix_allowed_real_directory_metadata(path: &str) {
     let Ok(c_path) = CString::new(path) else {
         return;
     };
 
-    let ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+    // SAFETY: c_path is a live, NUL-terminated CString for the duration of this call.
+    let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
     if ret != 0 {
         log::warn!(
             "mount dir: allowed real chown failed errno={} {} path={}",

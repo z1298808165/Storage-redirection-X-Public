@@ -15,9 +15,9 @@ use events::{
 };
 use libc::inotify_event;
 use roots::{
-    build_private_owner_repair_roots, build_watch_roots, dedup_roots, is_under_any_root,
-    select_watch_start, should_descend_into_child, should_record_display_path,
-    sort_roots_by_monitor_priority,
+    build_private_owner_repair_roots, build_public_owner_repair_root, build_watch_roots,
+    dedup_roots, is_under_any_root, select_watch_start, should_descend_into_child,
+    should_record_display_path, sort_roots_by_monitor_priority,
 };
 use std::collections::{HashMap, VecDeque};
 
@@ -25,6 +25,8 @@ const DUPLICATE_EVENT_WINDOW_MS: i64 = 1500;
 const MISSING_ROOT_RETRY_MS: i64 = 1000;
 const MAX_RECENT_EVENTS: usize = 512;
 const MAX_WATCHES: usize = 8192;
+const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
+const PUBLIC_OWNER_EXISTING_WATCH_DEPTH: usize = 2;
 
 #[derive(Clone)]
 struct WatchRoot {
@@ -110,8 +112,9 @@ impl RegularAppMonitor {
         self.last_rebuild_ms = paths::monotonic_ms();
         self.needs_rebuild = false;
 
-        let specs = config.get_monitor_app_specs();
-        if specs.is_empty() {
+        let owner_repair_specs = config.get_public_owner_repair_app_specs();
+        let monitor_specs = config.get_monitor_app_specs();
+        if owner_repair_specs.is_empty() && monitor_specs.is_empty() {
             return;
         }
         if !self.ensure_fd() {
@@ -120,7 +123,12 @@ impl RegularAppMonitor {
         }
 
         let mut roots = Vec::new();
-        for spec in &specs {
+        for spec in &owner_repair_specs {
+            if let Some(root) = build_public_owner_repair_root(spec) {
+                roots.push(root);
+            }
+        }
+        for spec in &monitor_specs {
             roots.extend(build_private_owner_repair_roots(spec));
             roots.extend(build_watch_roots(spec));
         }
@@ -147,7 +155,11 @@ impl RegularAppMonitor {
         if !self.capacity_limited {
             for node in expansion_roots {
                 let repair_existing_files = node.source == "private_owner";
-                self.expand_watch_tree_from(node, repair_existing_files);
+                let recurse_existing_tree = node.source != "public_owner";
+                if node.source == "public_owner" {
+                    self.repair_existing_public_tree(&node);
+                }
+                self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
                 }
@@ -199,7 +211,11 @@ impl RegularAppMonitor {
         if !self.capacity_limited {
             for node in expansion_roots {
                 let repair_existing_files = node.source == "private_owner";
-                self.expand_watch_tree_from(node, repair_existing_files);
+                let recurse_existing_tree = node.source != "public_owner";
+                if node.source == "public_owner" {
+                    self.repair_existing_public_tree(&node);
+                }
+                self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
                 }
@@ -288,7 +304,7 @@ impl RegularAppMonitor {
         let Some(node) = self.add_watch_root(root) else {
             return false;
         };
-        self.expand_watch_tree_from(node, true);
+        self.expand_watch_tree_from(node, true, true);
         true
     }
 
@@ -323,9 +339,14 @@ impl RegularAppMonitor {
         }
     }
 
-    fn expand_watch_tree_from(&mut self, root: WatchNode, repair_existing_files: bool) {
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
+    fn expand_watch_tree_from(
+        &mut self,
+        root: WatchNode,
+        repair_existing_files: bool,
+        recurse_existing_tree: bool,
+    ) {
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
             if self.watch_nodes.len() >= MAX_WATCHES {
                 self.mark_capacity_limited();
                 break;
@@ -382,10 +403,70 @@ impl RegularAppMonitor {
                     &child.backend_dir,
                 );
                 if self.add_watch_node(&child) {
-                    stack.push(child);
+                    if recurse_existing_tree
+                        || (node.source == "public_owner"
+                            && depth < PUBLIC_OWNER_EXISTING_WATCH_DEPTH)
+                    {
+                        stack.push((child, depth.saturating_add(1)));
+                    }
                 }
             }
         }
+    }
+
+    fn repair_existing_public_tree(&self, root: &WatchNode) {
+        let mut stack = vec![root.clone()];
+        let mut repaired = 0usize;
+        while let Some(node) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&node.backend_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if repaired >= MAX_PUBLIC_OWNER_REPAIR_DIRS {
+                    log::warn!(
+                        "daemon public owner repair limit reached root={} limit={}",
+                        root.backend_dir,
+                        MAX_PUBLIC_OWNER_REPAIR_DIRS
+                    );
+                    return;
+                }
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !inotify::is_safe_event_name(&name) {
+                    continue;
+                }
+                let child = WatchNode {
+                    package_name: node.package_name.clone(),
+                    backend_dir: paths::join(&node.backend_dir, &name),
+                    display_dir: paths::join(&node.display_dir, &name),
+                    record_display_root: node.record_display_root.clone(),
+                    record_from_root: node.record_from_root.clone(),
+                    excluded_roots: node.excluded_roots.clone(),
+                    source: node.source,
+                };
+                if !should_descend_into_child(&node, &child.display_dir) {
+                    continue;
+                }
+                repair_monitored_backend_owner(
+                    child.source,
+                    &child.package_name,
+                    &child.display_dir,
+                    &child.backend_dir,
+                );
+                repaired = repaired.saturating_add(1);
+                stack.push(child);
+            }
+        }
+        log::info!(
+            "daemon public owner repair scan root={} dirs={}",
+            root.backend_dir,
+            repaired
+        );
     }
 
     fn add_watch_node(&mut self, node: &WatchNode) -> bool {
@@ -466,6 +547,10 @@ impl RegularAppMonitor {
                     source: node.source,
                 };
                 let _ = self.add_watch_tree(&child);
+            }
+
+            if node.source == "public_owner" || node.source == "private_owner" {
+                continue;
             }
 
             let operation_name = monitor_operation_from_mask(mask);

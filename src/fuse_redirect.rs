@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
+const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
 const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
 const SHARED_PUBLIC_DIR_MODE: u32 = 0o2770;
@@ -463,10 +464,12 @@ impl FuseRedirectFs {
     fn attr_for_backend(&self, ino: INodeNo, backend: &BackendPath) -> Result<FileAttr, Errno> {
         let metadata = std::fs::symlink_metadata(&backend.path).map_err(errno_from_io)?;
         let mut attr = file_attr_from_metadata(ino, metadata);
-        if backend.is_shared_public_backend && attr.kind == FileType::Directory {
+        if backend.is_shared_public_backend {
             attr.uid = self.policy.uid as u32;
             attr.gid = MEDIA_RW_GID;
-            attr.perm = SHARED_PUBLIC_DIR_MODE as u16;
+            if attr.kind == FileType::Directory {
+                attr.perm = SHARED_PUBLIC_DIR_MODE as u16;
+            }
         }
         Ok(attr)
     }
@@ -514,8 +517,19 @@ impl FuseRedirectFs {
         if parent.is_empty() {
             return Ok(());
         }
-        if fs::is_directory(&parent) || fs::create_directory(&parent, self.policy.uid) {
-            fix_mapped_dir_metadata(&parent, self.policy.uid);
+        let owner_uid = if backend.is_shared_public_backend {
+            MEDIA_RW_UID as i32
+        } else {
+            self.policy.uid
+        };
+        if fs::is_directory(&parent) || fs::create_directory(&parent, owner_uid) {
+            fix_path_metadata(
+                Path::new(parent.as_ref()),
+                self.policy.uid,
+                MAPPED_DIR_MODE as u32,
+                backend.is_shared_public_backend,
+                true,
+            );
             Ok(())
         } else {
             Err(Errno::EIO)
@@ -1243,11 +1257,11 @@ impl Filesystem for FuseRedirectFs {
             }
         }
         if uid.is_some() || gid.is_some() {
-            let uid = uid.unwrap_or(if backend.is_shared_public_backend {
-                self.policy.uid as u32
+            let uid = if backend.is_shared_public_backend {
+                MEDIA_RW_UID
             } else {
-                u32::MAX
-            });
+                uid.unwrap_or(u32::MAX)
+            };
             let gid = if backend.is_shared_public_backend {
                 MEDIA_RW_GID
             } else {
@@ -2478,8 +2492,14 @@ fn fix_path_metadata(
     is_dir: bool,
 ) {
     let mode = adjust_metadata_mode(mode, is_shared_public_backend, is_dir);
+    let effective_uid = if is_shared_public_backend {
+        MEDIA_RW_UID
+    } else {
+        owner_uid as u32
+    };
     if let Ok(c_path) = cstring_path(path) {
-        let _ = unsafe { libc::chown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+        // SAFETY: c_path is NUL-terminated and valid for the duration of chown.
+        let _ = unsafe { libc::chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
     }
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
 }
@@ -2638,7 +2658,7 @@ fn is_android_app_private_relative_path(relative: &str) -> bool {
         return false;
     }
     match parts.next() {
-        Some("data" | "media" | "obb") => parts.next().is_some(),
+        Some("data" | "media" | "obb") => true,
         _ => false,
     }
 }

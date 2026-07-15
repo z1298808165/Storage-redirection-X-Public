@@ -61,6 +61,7 @@ public class Hooker {
   private static int OPEN_RESULT_LOG_COUNT;
   private static int OPEN_DELEGATE_LOG_COUNT;
   private static int MUTATION_RESULT_LOG_COUNT;
+  private static int MUTATION_FAILURE_LOG_COUNT;
   private static int FUSE_READ_ONLY_LOG_COUNT;
   private static int FUSE_FILE_OPEN_ALLOW_LOG_COUNT;
   private static int FUSE_REDIRECT_LOG_COUNT;
@@ -206,9 +207,11 @@ public class Hooker {
   }
 
   public Object providerMutationCallback(Object[] args) throws Throwable {
+    String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
     if (isInsideProviderInternalCall()) {
-      // Keep the outer caller scope active for filesystem redirection inside MediaProvider.
-      return callBackup(args);
+      return isInsertLikeMutation(mutationMethod)
+          ? callBackupWithProviderPassthrough(args)
+          : callBackup(args);
     }
     int callerUid = android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
@@ -216,7 +219,6 @@ public class Hooker {
     enterCallerScope(callerUid, callerPid);
     try {
       Object[] actualArgs = unwrapArgs(args);
-      String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
       if (!isMediaProviderHookerOrReceiver(this, args)
           && !hasMediaStoreUriArg(actualArgs)
           && !hasSafeMediaStoreMutationValues(actualArgs)) {
@@ -230,8 +232,13 @@ public class Hooker {
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       enterProviderInternalCall();
       try {
-        Object result =
-            redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
+        Object result;
+        try {
+          result = redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
+        } catch (Throwable error) {
+          logMutationFailure(this, callerUid, callerPid, error);
+          throw error;
+        }
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
@@ -3091,6 +3098,52 @@ public class Hooker {
               + (result == null ? "null" : result.getClass().getName())
               + " n="
               + MUTATION_RESULT_LOG_COUNT);
+    } catch (Throwable ignored) {
+    }
+  }
+
+  private static void logMutationFailure(
+      Hooker hooker, int callerUid, int callerPid, Throwable error) {
+    if (!shouldLog()) return;
+    if (MUTATION_FAILURE_LOG_COUNT >= 96) return;
+    MUTATION_FAILURE_LOG_COUNT++;
+    try {
+      String targetSig =
+          hooker != null && hooker.target instanceof Method
+              ? describeMethod((Method) hooker.target)
+              : "unknown";
+      StringBuilder causeChain = new StringBuilder();
+      java.util.IdentityHashMap<Throwable, Boolean> seen = new java.util.IdentityHashMap<>();
+      Throwable cause = error;
+      int depth = 0;
+      while (cause != null && depth < 16 && !seen.containsKey(cause)) {
+        seen.put(cause, Boolean.TRUE);
+        if (depth > 0) causeChain.append(" <- ");
+        causeChain
+            .append(depth)
+            .append(':')
+            .append(cause.getClass().getName())
+            .append('(')
+            .append(String.valueOf(cause.getMessage()))
+            .append(')');
+        cause = cause.getCause();
+        depth++;
+      }
+      if (cause != null) {
+        causeChain.append(seen.containsKey(cause) ? " <- cycle" : " <- truncated");
+      }
+      android.util.Log.w(
+          "SRX",
+          "java media mutation failure target="
+              + targetSig
+              + " caller_uid="
+              + callerUid
+              + " caller_pid="
+              + callerPid
+              + " causes="
+              + causeChain
+              + " n="
+              + MUTATION_FAILURE_LOG_COUNT);
     } catch (Throwable ignored) {
     }
   }

@@ -44,6 +44,23 @@ pub(super) fn build_private_owner_repair_roots(spec: &MonitorAppSpec) -> Vec<Wat
         .collect()
 }
 
+pub(super) fn build_public_owner_repair_root(spec: &MonitorAppSpec) -> Option<WatchRoot> {
+    if !spec.is_enabled || spec.user_id < 0 {
+        return None;
+    }
+
+    let display_root = paths::storage_user_root_for_user(spec.user_id);
+    Some(WatchRoot {
+        package_name: String::new(),
+        backend_root: paths::data_media_user_root_for_user(spec.user_id),
+        display_root: display_root.clone(),
+        record_display_root: display_root,
+        record_from_root: String::new(),
+        excluded_roots: Vec::new(),
+        source: "public_owner",
+    })
+}
+
 struct WatchRootBuildContext {
     storage_root: String,
     redirect_storage_root: String,
@@ -339,14 +356,15 @@ pub(super) fn sort_roots_by_monitor_priority(roots: &mut [WatchRoot]) {
 
 fn monitor_source_priority(source: &str) -> u8 {
     match source {
-        "private_owner" => 0,
-        "path_mapping" => 1,
-        "sandbox_path" => 2,
-        "read_only_path" => 3,
-        "allowed_real_path" => 4,
-        "redirect_root" => 5,
-        "public_root" => 6,
-        _ => 7,
+        "public_owner" => 0,
+        "private_owner" => 1,
+        "path_mapping" => 2,
+        "sandbox_path" => 3,
+        "read_only_path" => 4,
+        "allowed_real_path" => 5,
+        "redirect_root" => 6,
+        "public_root" => 7,
+        _ => 8,
     }
 }
 
@@ -448,8 +466,25 @@ fn strip_path_suffix(path: &str, suffix: &str) -> Option<String> {
 }
 
 pub(super) fn should_descend_into_child(node: &WatchNode, child_display_dir: &str) -> bool {
+    if node.source == "public_owner" && is_android_app_private_path(child_display_dir) {
+        return false;
+    }
     paths::is_same_or_child(child_display_dir, &node.record_display_root)
         || paths::is_same_or_child(&node.record_display_root, child_display_dir)
+}
+
+fn is_android_app_private_path(path: &str) -> bool {
+    let normalized = paths::normalize(path);
+    let user_id = paths::extract_user_id_from_storage_path(&normalized);
+    if user_id < 0 {
+        return false;
+    }
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(&normalized, &storage_root) else {
+        return false;
+    };
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    parts.next() == Some("Android") && matches!(parts.next(), Some("data" | "media" | "obb"))
 }
 
 pub(super) fn should_record_display_path(display_path: &str, record_display_root: &str) -> bool {

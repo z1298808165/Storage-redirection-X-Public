@@ -11,7 +11,9 @@ use std::os::unix::fs::MetadataExt;
 
 const LOGCAT_OP_TAG: &str = "FileMonitorOp";
 const ANDROID_APP_UID_START: i32 = 10000;
+const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
+const REAL_PUBLIC_DIR_MODE: mode_t = 0o2771;
 const REDIRECT_BACKEND_DIR_REQUIRED_MODE: mode_t = 0o2773;
 const PRIVATE_CHILD_DIR_REQUIRED_MODE: mode_t = 0o2751;
 const PRIVATE_CHILD_FILE_REQUIRED_MODE: mode_t = 0o664;
@@ -288,6 +290,10 @@ pub(super) fn repair_monitored_backend_owner(
     display_path: &str,
     backend_path: &str,
 ) {
+    if source == "public_owner" {
+        repair_public_directory_owner(display_path, backend_path);
+        return;
+    }
     let scope = if source == "redirect_root" {
         redirect_backend_owner_repair_scope(watch_package_name)
     } else {
@@ -297,6 +303,71 @@ pub(super) fn repair_monitored_backend_owner(
         return;
     };
     repair_backend_owner_in_scope(&scope, backend_path);
+}
+
+fn repair_public_directory_owner(display_path: &str, backend_path: &str) {
+    let normalized = paths::normalize(display_path);
+    let user_id = paths::extract_user_id_from_storage_path(&normalized);
+    if user_id < 0 {
+        return;
+    }
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(&normalized, &storage_root) else {
+        return;
+    };
+    if relative.is_empty() || is_android_app_private_relative_path(relative) {
+        return;
+    }
+    let expected_backend = paths::storage_to_data_media_path(&normalized);
+    if !paths::eq_ignore_case(&expected_backend, backend_path) {
+        return;
+    }
+
+    let Some(c_path) = cstring_path(backend_path) else {
+        return;
+    };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path is NUL-terminated and st points to writable storage for lstat.
+    if unsafe { libc::lstat(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return;
+    }
+    // SAFETY: lstat returned success and initialized the complete stat value.
+    let st = unsafe { st.assume_init() };
+    if st.st_mode & libc::S_IFMT as mode_t != libc::S_IFDIR as mode_t {
+        return;
+    }
+
+    if st.st_uid != MEDIA_RW_UID || st.st_gid != MEDIA_RW_GID {
+        // SAFETY: c_path remains valid and identifies the verified public directory.
+        let ret = unsafe { libc::lchown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
+        if ret != 0 {
+            log::warn!(
+                "daemon public owner fix failed path={} errno={}",
+                backend_path,
+                last_errno()
+            );
+            return;
+        }
+        log::info!("daemon public owner fix path={}", backend_path);
+    }
+
+    let current_mode = st.st_mode & 0o7777;
+    if current_mode != REAL_PUBLIC_DIR_MODE {
+        // SAFETY: c_path remains valid and identifies the verified public directory.
+        let ret = unsafe { libc::chmod(c_path.as_ptr(), REAL_PUBLIC_DIR_MODE) };
+        if ret != 0 {
+            log::warn!(
+                "daemon public chmod fix failed path={} errno={}",
+                backend_path,
+                last_errno()
+            );
+        }
+    }
+}
+
+fn is_android_app_private_relative_path(relative: &str) -> bool {
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    parts.next() == Some("Android") && matches!(parts.next(), Some("data" | "media" | "obb"))
 }
 
 fn repair_backend_owner_in_scope(scope: &AndroidPrivateOwnerRepairScope, backend_path: &str) {
