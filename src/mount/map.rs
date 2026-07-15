@@ -200,6 +200,17 @@ impl MountPlanner {
             log::warn!("map target missing and mkdir failed: {}", target_data_media);
             return None;
         }
+
+        for root in target_source_roots {
+            if paths::eq_ignore_case(root, &paths::data_media_user_root_for_user(self.user_id)) {
+                continue;
+            }
+            let candidate = paths::join(root, target_relative);
+            if fs::is_directory(&candidate) {
+                return Some((candidate, true));
+            }
+        }
+
         Some((target_data_media, true))
     }
 

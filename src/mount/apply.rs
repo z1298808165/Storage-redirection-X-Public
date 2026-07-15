@@ -11,13 +11,6 @@ impl MountPlanner {
         let real_storage_anchor_root = module_paths::REAL_STORAGE_TMP_DIR;
         let real_storage_anchor = paths::join(real_storage_anchor_root, &self.user_id.to_string());
 
-        if let Some(anchor) =
-            self.bind_data_media_real_storage_anchor(real_storage_anchor_root, &real_storage_anchor)
-        {
-            self.real_storage_anchor = Some(anchor.clone());
-            return Some(anchor);
-        }
-
         if self.storage_root_is_already_redirected(storage_path) {
             if self.real_storage_anchor_is_usable(&real_storage_anchor) {
                 log::info!(
@@ -27,7 +20,7 @@ impl MountPlanner {
                     real_storage_anchor
                 );
                 self.real_storage_anchor = Some(real_storage_anchor.clone());
-                return Some(real_storage_anchor);
+                return Some(real_storage_anchor.to_string());
             }
             log::warn!(
                 "real storage anchor unavailable after redirect, fallback backend pkg={} storage={} anchor={} target={}",
@@ -44,27 +37,51 @@ impl MountPlanner {
             return anchor;
         }
 
+        if let Some(anchor) = self.bind_visible_real_storage_anchor(
+            storage_path,
+            real_storage_anchor_root,
+            &real_storage_anchor,
+        ) {
+            self.real_storage_anchor = Some(anchor.clone());
+            return Some(anchor);
+        }
+
+        let anchor = self
+            .bind_data_media_real_storage_anchor(real_storage_anchor_root, &real_storage_anchor);
+        self.real_storage_anchor = anchor.clone();
+        anchor
+    }
+
+    fn bind_visible_real_storage_anchor(
+        &self,
+        storage_path: &str,
+        real_storage_anchor_root: &str,
+        real_storage_anchor: &str,
+    ) -> Option<String> {
         if !self.ensure_directory_exists(real_storage_anchor_root, false)
-            || !self.ensure_directory_exists(&real_storage_anchor, false)
+            || !self.ensure_directory_exists(real_storage_anchor, false)
         {
             return None;
         }
 
+        let data_media_root = paths::data_media_user_root_for_user(self.user_id);
         for source_candidate in self.expand_storage_alias_paths(storage_path) {
+            if paths::eq_ignore_case(&source_candidate, &data_media_root) {
+                continue;
+            }
             if !fs::is_directory(&source_candidate) {
                 continue;
             }
+            detach_mount_if_present(real_storage_anchor);
             if self.bind_mount(&source_candidate, &real_storage_anchor, true) {
                 log::info!(
-                    "real storage anchored {} -> {}",
+                    "real storage anchored visible {} -> {}",
                     source_candidate,
                     real_storage_anchor
                 );
-                self.real_storage_anchor = Some(real_storage_anchor.clone());
-                return Some(real_storage_anchor);
+                return Some(real_storage_anchor.to_string());
             }
         }
-
         None
     }
 
@@ -1064,11 +1081,11 @@ fn build_mapping_source_roots(
     data_media_root: &str,
 ) -> Vec<String> {
     let mut roots = Vec::with_capacity(2);
-    roots.push(data_media_root.to_string());
-    if let Some(anchor) = real_storage_anchor
-        && !roots.iter().any(|root| root == anchor)
-    {
+    if let Some(anchor) = real_storage_anchor {
         roots.push(anchor.clone());
+    }
+    if !roots.iter().any(|root| root == data_media_root) {
+        roots.push(data_media_root.to_string());
     }
     roots
 }
