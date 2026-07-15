@@ -83,6 +83,7 @@ impl MountPlanner {
         resolved_mappings: &[PathMapping],
         storage_path: &str,
         target_source_roots: &[String],
+        preferred_target_source_roots: &[String],
         read_only_paths: &[String],
         excluded_real_paths: &[String],
         options: PathMappingApplyOptions,
@@ -100,6 +101,7 @@ impl MountPlanner {
                 .resolve_mapping_target_source(
                     target_relative,
                     target_source_roots,
+                    preferred_target_source_roots,
                     options.should_use_existing_target_source_only,
                 )
             else {
@@ -174,8 +176,42 @@ impl MountPlanner {
         &self,
         target_relative: &str,
         target_source_roots: &[String],
+        preferred_target_source_roots: &[String],
         should_use_existing_target_source_only: bool,
     ) -> Option<(String, bool)> {
+        let target_data_media = paths::join(
+            &paths::data_media_user_root_for_user(self.user_id),
+            target_relative,
+        );
+        for root in preferred_target_source_roots {
+            let Some(root_relative) =
+                paths::relative_child_path(root, &paths::storage_user_root_for_user(self.user_id))
+            else {
+                continue;
+            };
+            if !paths::is_same_or_child(target_relative, &root_relative) {
+                continue;
+            }
+            let Some(candidate_relative) =
+                paths::relative_child_path(target_relative, root_relative)
+            else {
+                continue;
+            };
+            let candidate = paths::join(root, candidate_relative);
+            if !fs::is_directory(&candidate) {
+                if should_use_existing_target_source_only && !fs::is_directory(&target_data_media) {
+                    continue;
+                }
+                if !self.ensure_real_public_directory_exists(&target_data_media) {
+                    log::warn!("map target preferred mkdir failed: {}", target_data_media);
+                    continue;
+                }
+            }
+            if fs::is_directory(&candidate) {
+                return Some((candidate, false));
+            }
+        }
+
         for root in target_source_roots {
             let candidate = paths::join(root, target_relative);
             if fs::is_directory(&candidate) {
@@ -188,10 +224,6 @@ impl MountPlanner {
         // Existing public mapping targets should keep the FUSE-backed source so
         // callers read through Android's storage permission model. Only create a
         // /data/media backend when the target directory does not exist yet.
-        let target_data_media = paths::join(
-            &paths::data_media_user_root_for_user(self.user_id),
-            target_relative,
-        );
         if should_use_existing_target_source_only && !fs::is_directory(&target_data_media) {
             log::warn!("map target missing: {}", target_data_media);
             return None;

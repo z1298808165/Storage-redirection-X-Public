@@ -257,6 +257,7 @@ impl MountPlanner {
         log::info!("android root stays redirected unless allowed explicitly");
         self.ensure_scoped_fuse_mount_points(scoped_fuse_roots, &storage_path);
 
+        let mut restored_allowed_paths: Vec<String> = Vec::new();
         if !allowed_real_paths.is_empty() {
             let resolved_paths = self.resolve_concrete_storage_paths(
                 allowed_real_paths,
@@ -327,11 +328,13 @@ impl MountPlanner {
                     );
                     if is_restored_allowed_path {
                         log::info!("allow restored {}", allowed_path);
+                        restored_allowed_paths.push(allowed_path);
                         break;
                     }
                 }
             }
         }
+        paths::sort_dedup_paths_longest_first_case_insensitive(&mut restored_allowed_paths);
 
         if !excluded_real_paths.is_empty() {
             let resolved_paths =
@@ -388,6 +391,7 @@ impl MountPlanner {
                 &namespace_mappings,
                 &storage_path,
                 &mapping_source_roots,
+                &restored_allowed_paths,
                 read_only_paths,
                 excluded_real_paths,
                 PathMappingApplyOptions {
@@ -419,6 +423,7 @@ impl MountPlanner {
                     &read_only_shadowed_mappings,
                     &storage_path,
                     &mapping_source_roots,
+                    &restored_allowed_paths,
                     read_only_paths,
                     excluded_real_paths,
                     PathMappingApplyOptions {
@@ -621,6 +626,7 @@ impl MountPlanner {
             &namespace_mappings,
             &storage_path,
             &mapping_source_roots,
+            &[],
             read_only_paths,
             &[],
             PathMappingApplyOptions {
@@ -650,6 +656,7 @@ impl MountPlanner {
                 &read_only_shadowed_mappings,
                 &storage_path,
                 &mapping_source_roots,
+                &[],
                 read_only_paths,
                 &[],
                 PathMappingApplyOptions {
