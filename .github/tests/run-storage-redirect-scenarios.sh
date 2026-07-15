@@ -101,6 +101,12 @@ MONITOR_NNNGRAM_ROOT="${REAL_ROOT}/Pictures/Nnngram"
 PRIVATE_MONITOR_NNNGRAM_ROOT="${PRIVATE_ROOT}/Pictures/Nnngram"
 MEDIASTORE_ROUTING_PROBE_ROOT="${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"
 PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT="${PRIVATE_ROOT}/Documents/SrtMediaRoutingProbe"
+RULE_SANDBOX_ROOT="${REAL_ROOT}/SrtRuleSandbox"
+BACKEND_RULE_SANDBOX_ROOT="${BACKEND_ROOT}/SrtRuleSandbox"
+PRIVATE_RULE_SANDBOX_ROOT="${PRIVATE_ROOT}/SrtRuleSandbox"
+RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
+BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
+PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
 SRT_FRESH_APP_PER_CASE="${SRT_FRESH_APP_PER_CASE:-1}"
 SRT_RESULT_POLL_MS="${SRT_RESULT_POLL_MS:-150}"
 SRT_APP_LAUNCH_SETTLE_MS="${SRT_APP_LAUNCH_SETTLE_MS:-800}"
@@ -250,7 +256,8 @@ apply_config() {
       write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtProbe":"Download/SrtMapOnlyMapped"}}}}'
       ;;
     8)
-      write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":[".xlDownload"]}}}'
+      enable_fuse_daemon_config
+      write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":["SrtRuleSandbox"]}}}'
       ;;
     9)
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtReadOnly"]}}}'
@@ -338,7 +345,7 @@ apply_config() {
 
 target_path() {
   case "$1" in
-    8) echo "${REAL_ROOT}/.xldownload/${TEST_FILE}" ;;
+    8) echo "${RULE_SANDBOX_ROOT}/${TEST_FILE}" ;;
     14) echo "${REAL_ROOT}/Download/SrtLongest/Deep/${TEST_FILE}" ;;
     15) echo "${REAL_ROOT}/Download/SrtPriority/${TEST_FILE}" ;;
     *) echo "${REAL_ROOT}/Download/SrtProbe/${TEST_FILE}" ;;
@@ -347,7 +354,7 @@ target_path() {
 
 logical_dir() {
   case "$1" in
-    8) echo "${REAL_ROOT}/.xldownload" ;;
+    8) echo "${RULE_SANDBOX_ROOT}" ;;
     14) echo "${REAL_ROOT}/Download/SrtLongest/Deep" ;;
     15) echo "${REAL_ROOT}/Download/SrtPriority" ;;
     *) echo "${REAL_ROOT}/Download/SrtProbe" ;;
@@ -360,7 +367,7 @@ expected_path() {
     2) echo "${PRIVATE_ROOT}/Download/SrtProbe/${TEST_FILE}" ;;
     3|4) echo "${REAL_ROOT}/Download/Test/${TEST_FILE}" ;;
     7) echo "${REAL_ROOT}/Download/SrtMapOnlyMapped/${TEST_FILE}" ;;
-    8) echo "${PRIVATE_ROOT}/.xldownload/${TEST_FILE}" ;;
+    8) echo "${PRIVATE_RULE_SANDBOX_ROOT}/${TEST_FILE}" ;;
     14) echo "${REAL_ROOT}/Download/SrtLongestDeep/${TEST_FILE}" ;;
     15) echo "${REAL_ROOT}/Download/SrtPriorityMapped/${TEST_FILE}" ;;
     *) return 1 ;;
@@ -376,7 +383,7 @@ scenario_title() {
     5) echo "放行真实 Download，验证保持原路径写入" ;;
     6) echo "仅映射模式，未命中映射路径应保持真实路径写入" ;;
     7) echo "仅映射模式，命中映射路径应写入映射目标" ;;
-    8) echo "仅映射模式叠加 sandboxed_paths，验证 .xlDownload 别名沙盒化" ;;
+    8) echo "FUSE 仅映射模式：命中 sandbox 规则且同级未命中路径保持真实" ;;
     9) echo "read_only_paths 允许读取但拒绝写入、删除、mkdir、rename" ;;
     10) echo "映射目标为只读路径时，映射请求写入应被拒绝" ;;
     11) echo "allowed_real_paths 内联排除与通配符排除规则" ;;
@@ -405,6 +412,7 @@ clean_targets() {
   sleep_ms $SRT_SERVICE_CASE_SETTLE_MS
   clean_results
   adb_su "rm -rf '${MEDIASTORE_ROUTING_PROBE_ROOT}' '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}'" >/dev/null
+  adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'; find '${REAL_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' -maxdepth 1 -name '$TEST_FILE' -delete 2>/dev/null || true" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${REAL_ROOT}/Download/Test/$HOT_AFTER_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_AFTER_FILE' 2>/dev/null || true" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/$ALLOW_PART_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$ALLOW_PART_FILE' '${REAL_ROOT}/Download/$QMARK_SINGLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_SINGLE_FILE' '${REAL_ROOT}/Download/$QMARK_DOUBLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_DOUBLE_FILE'" >/dev/null
@@ -527,16 +535,22 @@ build_scenario_list() {
     return 0
   fi
 
-  scenarios=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 29)
+  local fuse_supported=0
+  scenarios=(1 2 3 4 5 6 7)
   if supports_fuse_daemon_scenarios; then
-    scenarios+=(16 17 18 19)
+    fuse_supported=1
+    scenarios+=(8)
   else
     echo "skip fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
+  fi
+  scenarios+=(9 10 11 12 13 14 15 29)
+  if [ "$fuse_supported" = "1" ]; then
+    scenarios+=(16 17 18 19)
   fi
   scenarios+=(20 21 22)
   scenarios+=(28)
   scenarios+=(23 24)
-  if supports_fuse_daemon_scenarios; then
+  if [ "$fuse_supported" = "1" ]; then
     scenarios+=(25 26 27)
   else
     scenarios+=(26)
@@ -545,6 +559,7 @@ build_scenario_list() {
 }
 
 remove_test_target_artifacts() {
+  adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/$ALLOW_PART_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$ALLOW_PART_FILE' '${REAL_ROOT}/Download/$QMARK_SINGLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_SINGLE_FILE' '${REAL_ROOT}/Download/$QMARK_DOUBLE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/$QMARK_DOUBLE_FILE'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtLegacy' '${REAL_ROOT}/Download/SrtQMark' '${REAL_ROOT}/Download/SrtLongest' '${REAL_ROOT}/Download/SrtLongestBase' '${REAL_ROOT}/Download/SrtLongestDeep' '${REAL_ROOT}/Download/SrtPriority' '${REAL_ROOT}/Download/SrtPriorityMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtLegacy' '${BACKEND_PRIVATE_ROOT}/Download/SrtQMark' '${BACKEND_PRIVATE_ROOT}/Download/SrtLongest' '${BACKEND_PRIVATE_ROOT}/Download/SrtLongestBase' '${BACKEND_PRIVATE_ROOT}/Download/SrtLongestDeep' '${BACKEND_PRIVATE_ROOT}/Download/SrtPriority' '${BACKEND_PRIVATE_ROOT}/Download/SrtPriorityMapped'" >/dev/null
@@ -746,11 +761,13 @@ latest_result() {
 
 wait_service_result() {
   local timeout_seconds="$1"
+  local freshness_marker="$2"
+  local expected_test_case="$3"
   local seconds=$((SRT_RESULT_POLL_MS / 1000))
   local remainder=$((SRT_RESULT_POLL_MS % 1000))
   local poll_delay
   printf -v poll_delay '%d.%03d' "$seconds" "$remainder"
-  adb_su "deadline=\$(date +%s); deadline=\$((deadline + $timeout_seconds)); while [ \$(date +%s) -lt \$deadline ]; do for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do if [ -s \"\$file\" ]; then cat \"\$file\"; exit 0; fi; done; sleep $poll_delay; done; exit 1"
+  adb_su "deadline=\$(date +%s); deadline=\$((deadline + $timeout_seconds)); while [ \$(date +%s) -lt \$deadline ]; do for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do if [ -s \"\$file\" ] && [ \"\$file\" -nt '$freshness_marker' ]; then if [ '$expected_test_case' != 'all' ]; then line_count=\$(grep -cve '^[[:space:]]*\$' \"\$file\" 2>/dev/null || true); grep -Eq '^(PASS|FAIL) \\[$expected_test_case\\]' \"\$file\" || continue; [ \"\$line_count\" -eq 1 ] || continue; fi; cat \"\$file\"; exit 0; fi; done; sleep $poll_delay; done; exit 1"
 }
 
 wait_app_mount_confirmed() {
@@ -992,8 +1009,11 @@ run_service_case() {
   prepare_service_case "scenario-${scenario}-${label}" || return 1
   sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
   clean_results
+  local freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
+  adb_su "touch '$freshness_marker'" >/dev/null
   local start_output
   if ! start_output="$(adb shell am broadcast -n "${APP_ID}/.receiver.TestCaseReceiver" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
+    adb_su "rm -f '$freshness_marker'" >/dev/null
     echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
     printf '%s\n' "$start_output" | sed 's/^/service_start: /'
     return 1
@@ -1008,7 +1028,8 @@ run_service_case() {
 
   local timeout_seconds
   timeout_seconds="$(service_case_timeout_seconds "$test_case")"
-  if wait_service_result "$timeout_seconds" | tee "$output_file"; then
+  if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then
+    adb_su "rm -f '$freshness_marker'" >/dev/null
     cat "$output_file" >>"scenario-${scenario}-result.txt"
     if [ -z "$pass_pattern" ]; then
       return 0
@@ -1019,6 +1040,7 @@ run_service_case() {
     return 1
   fi
 
+  adb_su "rm -f '$freshness_marker'" >/dev/null
   echo "result_timeout scenario=${scenario} test_case=${test_case}"
   adb shell am force-stop "$APP_ID" >/dev/null || true
   return 1
@@ -1175,6 +1197,44 @@ check_file_missing() {
   echo "file_unexpected label=${label} path=${path}"
   adb_su "ls -ld '$path' 2>/dev/null || true" || true
   return 1
+}
+
+check_public_directory_owner() {
+  local label="$1"
+  local path="$2"
+  local actual
+  actual="$(adb_su "stat -c '%u:%g' '$path' 2>/dev/null" | tail -1)"
+  if [ "$actual" = "1023:1023" ]; then
+    echo "public_owner label=${label} path=${path} owner=${actual}"
+    return 0
+  fi
+  echo "public_owner_mismatch label=${label} path=${path} expected=1023:1023 actual=${actual:-missing}" >&2
+  adb_su "ls -ldn '$path' 2>/dev/null || true" >&2 || true
+  return 1
+}
+
+run_rule_sandbox_scenario() {
+  local scenario="$1"
+  local sandbox_path="${RULE_SANDBOX_ROOT}/${TEST_FILE}"
+  local private_sandbox_path="${PRIVATE_RULE_SANDBOX_ROOT}/${TEST_FILE}"
+  local sibling_file="srt_rule_sibling_atomic.jpg"
+  local sibling_path="${RULE_SIBLING_ROOT}/${sibling_file}"
+  local backend_sibling_path="${BACKEND_RULE_SIBLING_ROOT}/${sibling_file}"
+  local private_sibling_path="${PRIVATE_RULE_SIBLING_ROOT}/${sibling_file}"
+  local media_file="srt_rule_sibling_mediastore.jpg"
+
+  check_file_missing "scenario-${scenario}-sandbox-public-before" "$BACKEND_RULE_SANDBOX_ROOT" &&
+    check_scoped_fuse_daemon_started "$scenario" "$REAL_ROOT" &&
+    run_write_case "$scenario" "sandbox-rule-hit" "$sandbox_path" "$PAYLOAD" &&
+    check_file_exists "scenario-${scenario}-sandbox-private" "$private_sandbox_path" &&
+    check_file_missing "scenario-${scenario}-sandbox-public" "$BACKEND_RULE_SANDBOX_ROOT" &&
+    run_service_case "$scenario" "sandbox-sibling-atomic-save" "file_atomic_save" '^PASS \[file_atomic_save\]' --es file_path "$sibling_path" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" &&
+    check_file_exists "scenario-${scenario}-sibling-real" "$backend_sibling_path" &&
+    check_file_missing "scenario-${scenario}-sibling-private" "$private_sibling_path" &&
+    run_mediastore_image_create_case "$scenario" "sandbox-sibling-mediastore-save" "$media_file" "DCIM/SrtRuleSibling" &&
+    check_file_exists "scenario-${scenario}-sibling-mediastore-real" "${BACKEND_RULE_SIBLING_ROOT}/${media_file}" &&
+    check_file_missing "scenario-${scenario}-sibling-mediastore-private" "${PRIVATE_RULE_SIBLING_ROOT}/${media_file}" &&
+    check_public_directory_owner "scenario-${scenario}-dcim" "${BACKEND_ROOT}/DCIM"
 }
 
 check_file_location() {
@@ -1372,7 +1432,7 @@ check_scoped_fuse_daemon_started() {
   local saw_fallback=0
   local saw_session_failed=0
   for _ in $(seq 1 20); do
-    if adb_su "grep -F -- 'fuse redirect mount start pkg=${APP_ID}' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root}' >/dev/null"; then
+    if adb_su "grep -F -- 'fuse redirect mount start pkg=${APP_ID}' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root} ' >/dev/null"; then
       echo "scoped_fuse_started scenario=${scenario} root=${mount_root}"
       return 0
     fi
@@ -1442,6 +1502,7 @@ run_fuse_daemon_allow_wildcard_scenario() {
     run_mediastore_image_create_case "$scenario" "wildcard-allow-image-create" "$FUSE_DCIM_MEDIA_FILE" "DCIM/SrtFuseQQ/SrtAllowedAlpha" &&
     check_file_exists "fuse-wildcard-real" "$wildcard_path" &&
     check_file_missing "fuse-wildcard-private" "$wildcard_private" &&
+    check_public_directory_owner "scenario-${scenario}-dcim" "${BACKEND_ROOT}/DCIM" &&
     run_mediastore_image_create_case "$scenario" "wildcard-other-image-create" "$FUSE_DCIM_MEDIA_FILE" "DCIM/SrtFuseQQ/SrtOther" &&
     check_file_exists "fuse-wildcard-other-private" "$other_private" &&
     check_file_missing "fuse-wildcard-other-real" "$other_path" &&
@@ -1908,7 +1969,12 @@ run_standard_scenario() {
     local media_file="srt_mediastore_sandbox_only.txt"
     run_service_case "$scenario" "mediastore-sandbox-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
       check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
-      check_file_missing "scenario-${scenario}-mediastore-public-directory" "$MEDIASTORE_ROUTING_PROBE_ROOT" || return 1
+      check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
+      { ! adb_su "test -d '${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe'" || check_public_directory_owner "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"; } &&
+      check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || return 1
+  fi
+  if [ "$scenario" = "5" ]; then
+    check_public_directory_owner "scenario-${scenario}-download" "${BACKEND_ROOT}/Download" || return 1
   fi
 }
 
@@ -1960,6 +2026,10 @@ run_scenario() {
   wait_storage_ready "scenario-${scenario}"
   clean_results
   case "$scenario" in
+    8)
+      echo "step 5/7: 验证 sandbox 规则命中与同级未命中路径"
+      run_rule_sandbox_scenario "$scenario"
+      ;;
     9)
       echo "step 5/7: 执行只读路径读取和拒绝类用例"
       run_read_only_scenario "$scenario"
@@ -2064,8 +2134,8 @@ export READ_ONLY_OWNER_CONFIG
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
-export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
+export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
+export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready media_provider_query_ready wait_media_provider_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario check_health print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
 
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"

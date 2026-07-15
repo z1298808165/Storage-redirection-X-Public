@@ -112,6 +112,12 @@ $MonitorNnngramRoot = "$RealRoot/Pictures/Nnngram"
 $PrivateMonitorNnngramRoot = "$PrivateRoot/Pictures/Nnngram"
 $MediaStoreRoutingProbeRoot = "$RealRoot/Documents/SrtMediaRoutingProbe"
 $PrivateMediaStoreRoutingProbeRoot = "$PrivateRoot/Documents/SrtMediaRoutingProbe"
+$RuleSandboxRoot = "$RealRoot/SrtRuleSandbox"
+$BackendRuleSandboxRoot = "$BackendRoot/SrtRuleSandbox"
+$PrivateRuleSandboxRoot = "$BackendPrivateRoot/SrtRuleSandbox"
+$RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
+$BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
+$PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -278,17 +284,22 @@ function Get-ScenarioList {
     }
 
     $defaultScenarios = New-Object System.Collections.Generic.List[int]
-    1..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    $defaultScenarios.Add(29) | Out-Null
-    if (Test-FuseDaemonScenarioSupport) {
-        16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
+    $fuseSupported = Test-FuseDaemonScenarioSupport
+    1..7 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
+    if ($fuseSupported) {
+        $defaultScenarios.Add(8) | Out-Null
     } else {
         Write-Host "skip fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
+    }
+    9..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
+    $defaultScenarios.Add(29) | Out-Null
+    if ($fuseSupported) {
+        16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     }
     20..22 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(28) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    if (Test-FuseDaemonScenarioSupport) {
+    if ($fuseSupported) {
         25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     } else {
         $defaultScenarios.Add(26) | Out-Null
@@ -309,7 +320,10 @@ function Apply-ScenarioConfig {
         5 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download"]}}}' }
         6 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtOther":"Download/SrtOtherMapped"}}}}' }
         7 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtProbe":"Download/SrtMapOnlyMapped"}}}}' }
-        8 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":[".xlDownload"]}}}' }
+        8 {
+            Enable-FuseDaemonConfig
+            Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":["SrtRuleSandbox"]}}}'
+        }
         9 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtReadOnly"]}}}' }
         10 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtMapRO":"Pictures/SrtLocked"},"read_only_paths":["Pictures/SrtLocked"]}}}' }
         11 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtAllow","!Download/SrtAllow/tmp","Download","!Download/*.part"]}}}' }
@@ -383,14 +397,19 @@ function Get-LatestResult {
 }
 
 function Wait-ServiceResult {
-    param([int]$TimeoutSeconds)
+    param([int]$TimeoutSeconds, [string]$FreshnessMarker, [string]$ExpectedTestCase)
 
     $pollSeconds = [Math]::Max(0.05, $script:ResultPollMilliseconds / 1000.0).ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
     $command = @"
 deadline=`$(date +%s); deadline=`$((deadline + $TimeoutSeconds));
 while [ `$(date +%s) -lt `$deadline ]; do
   for file in '$ResultDir/result_current.txt' '$InternalResultDir/result_current.txt' '$BackendResultDir/result_current.txt' '$SandboxResultDir/result_current.txt' `$(find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do
-    if [ -s "`$file" ]; then
+    if [ -s "`$file" ] && [ "`$file" -nt '$FreshnessMarker' ]; then
+      if [ '$ExpectedTestCase' != 'all' ]; then
+        line_count=`$(grep -cve '^[[:space:]]*`$' "`$file" 2>/dev/null || true)
+        grep -Eq '^(PASS|FAIL) \[$ExpectedTestCase\]' "`$file" || continue
+        [ "`$line_count" -eq 1 ] || continue
+      fi
       printf '%s\n' "__SRT_RESULT_PATH__=`$file"
       cat "`$file"
       exit 0
@@ -478,6 +497,8 @@ function Invoke-ServiceCase {
         Start-Sleep -Milliseconds $script:ServiceCaseSettleMilliseconds
     }
     Clear-Results
+    $freshnessMarker = "/data/local/tmp/srx-result-$([Guid]::NewGuid().ToString('N')).marker"
+    Invoke-Su "touch '$freshnessMarker'" | Out-Null
     $args = @("shell", "am", "broadcast", "-n", "$AppId/.receiver.TestCaseReceiver", "-a", $Action, "--es", "test_case", $TestCase)
     foreach ($key in $Extras.Keys) {
         $args += @("--es", [string]$key, [string]$Extras[$key])
@@ -485,7 +506,8 @@ function Invoke-ServiceCase {
     Invoke-Adb $args | Out-Null
 
     $timeoutSeconds = Get-ServiceCaseTimeoutSeconds $TestCase
-    $result = Wait-ServiceResult $timeoutSeconds
+    $result = Wait-ServiceResult $timeoutSeconds $freshnessMarker $TestCase
+    Invoke-Su "rm -f '$freshnessMarker'" | Out-Null
     if ($result.Found) {
         $ok = if ($PassRegex) { $result.Text -match $PassRegex } else { $true }
         if (-not $ok) {
@@ -547,6 +569,19 @@ function Require-Missing {
     param([string]$Scenario, [string]$Label, [string]$Path)
     if (Test-PathMissing $Path) { return $true }
     $script:Failures.Add("$Scenario/$Label unexpected path exists: $Path")
+    $false
+}
+
+function Test-PublicDirectoryOwner {
+    param([string]$Scenario, [string]$Label, [string]$Path)
+    $actualLine = @(Invoke-Su "stat -c '%u:%g' '$Path' 2>/dev/null") | Select-Object -Last 1
+    $actual = if ($null -eq $actualLine) { "" } else { $actualLine.Trim() }
+    if ($actual -eq "1023:1023") {
+        Write-Host "  - public_owner label=$Label path=$Path owner=$actual"
+        return $true
+    }
+    $script:Failures.Add("$Scenario/$Label public directory owner expected 1023:1023, got ${actual}: $Path")
+    @(Invoke-Su "ls -ldn '$Path' 2>/dev/null || true") | ForEach-Object { Write-Host "  owner: $_" }
     $false
 }
 
@@ -615,6 +650,7 @@ function Wait-MediaProviderReady {
 }
 
 function Clear-Targets {
+    Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile' '$BackendRoot/Download/Test/$TestFile' '$BackendPrivateRoot/Download/Test/$TestFile' '$BackendRoot/Download/Test/$HotBeforeFile' '$BackendRoot/Download/Test/$HotAfterFile' '$BackendPrivateRoot/Download/Test/$HotBeforeFile' '$BackendPrivateRoot/Download/Test/$HotAfterFile' '$BackendRoot/.xldownload/$TestFile' '$BackendRoot/.xlDownload/$TestFile' '$BackendPrivateRoot/.xldownload/$TestFile' '$BackendPrivateRoot/.xlDownload/$TestFile'" | Out-Null
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow/tmp' '$BackendRoot/Download/SrtLegacy/tmp' '$BackendRoot/Download/SrtQMark/Keep1' '$BackendRoot/Download/SrtQMark/Keep12' '$BackendRoot/Download/SrtLongest/Deep' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow/tmp' '$BackendPrivateRoot/Download/SrtLegacy/tmp' '$BackendPrivateRoot/Download/SrtQMark/Keep1' '$BackendPrivateRoot/Download/SrtQMark/Keep12' '$BackendPrivateRoot/Download/SrtLongest/Deep' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload'; chmod -R 777 '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' 2>/dev/null || true; chmod 777 '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' 2>/dev/null || true" | Out-Null
@@ -628,6 +664,7 @@ function Clear-Targets {
 }
 
 function Remove-TestTargetArtifacts {
+    Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Download/Test' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile'" | Out-Null
     Invoke-Su "rm -f '$BackendRoot/Download/$QMarkFileSingleFile' '$BackendPrivateRoot/Download/$QMarkFileSingleFile'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtFusePlain' '$BackendRoot/Download/SrtFuseExclude' '$BackendRoot/Download/SrtFuseMapParent' '$BackendRoot/Download/SrtFuseMapRW' '$BackendRoot/Download/SrtFuseMapRO' '$BackendRoot/Download/SrtFuseMulti' '$BackendRoot/DCIM/SrtFuseQQ' '$BackendPrivateRoot/Download/SrtFusePlain' '$BackendPrivateRoot/Download/SrtFuseExclude' '$BackendPrivateRoot/Download/SrtFuseMapParent' '$BackendPrivateRoot/Download/SrtFuseMapRW' '$BackendPrivateRoot/Download/SrtFuseMapRO' '$BackendPrivateRoot/Download/SrtFuseMulti' '$BackendPrivateRoot/DCIM/SrtFuseQQ'" | Out-Null
@@ -1130,7 +1167,7 @@ function Restart-App {
 
 function Get-TargetPath {
     param([int]$Scenario)
-    if ($Scenario -eq 8) { return "$RealRoot/.xldownload/$TestFile" }
+    if ($Scenario -eq 8) { return "$RuleSandboxRoot/$TestFile" }
     if ($Scenario -eq 14) { return "$RealRoot/Download/SrtLongest/Deep/$TestFile" }
     if ($Scenario -eq 15) { return "$RealRoot/Download/SrtPriority/$TestFile" }
     "$RealRoot/Download/SrtProbe/$TestFile"
@@ -1138,7 +1175,7 @@ function Get-TargetPath {
 
 function Get-LogicalDir {
     param([int]$Scenario)
-    if ($Scenario -eq 8) { return "$RealRoot/.xldownload" }
+    if ($Scenario -eq 8) { return $RuleSandboxRoot }
     if ($Scenario -eq 14) { return "$RealRoot/Download/SrtLongest/Deep" }
     if ($Scenario -eq 15) { return "$RealRoot/Download/SrtPriority" }
     "$RealRoot/Download/SrtProbe"
@@ -1154,7 +1191,7 @@ function Get-ExpectedPath {
         5 { "$RealRoot/Download/SrtProbe/$TestFile" }
         6 { "$RealRoot/Download/SrtProbe/$TestFile" }
         7 { "$RealRoot/Download/SrtMapOnlyMapped/$TestFile" }
-        8 { "$PrivateRoot/.xldownload/$TestFile" }
+        8 { "$PrivateRuleSandboxRoot/$TestFile" }
         14 { "$RealRoot/Download/SrtLongestDeep/$TestFile" }
         15 { "$RealRoot/Download/SrtPriorityMapped/$TestFile" }
     }
@@ -1170,7 +1207,7 @@ function Get-ScenarioTitle {
         5 { "allow Download keeps real path" }
         6 { "mapping_mode_only unmatched stays real" }
         7 { "mapping_mode_only mapped path maps" }
-        8 { "mapping_mode_only sandboxed .xlDownload alias" }
+        8 { "FUSE mapping_mode_only sandbox hit with unmatched sibling kept real" }
         9 { "read_only_paths deny writes" }
         10 { "mapped target read-only deny write" }
         11 { "allow with inline exclusions and wildcard" }
@@ -1286,11 +1323,17 @@ function Invoke-StandardScenario {
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
-            $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-directory" $MediaStoreRoutingProbeRoot) -and $ok
+            $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-file" "$MediaStoreRoutingProbeRoot/$mediaFile") -and $ok
+            if (Test-Su "test -d '$BackendRoot/Documents/SrtMediaRoutingProbe'") {
+                $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "mediastore-public-parent-owner" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
+            }
+            $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "android-owner" "$BackendRoot/Android") -and $ok
         }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         7 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
-        8 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/.xldownload/$TestFile") -and $ok }
+    }
+    if ($Scenario -eq 5) {
+        $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "download-owner" "$BackendRoot/Download") -and $ok
     }
     $ok
 }
@@ -1464,7 +1507,7 @@ function Test-ScopedFuseDaemonStarted {
             Write-Warning "scenario-$Scenario/scoped-fuse-session-failed root=$MountRoot"
             return $false
         }
-        if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot' >/dev/null") {
+        if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
             Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot"
             return $true
         }
@@ -1478,6 +1521,32 @@ function Test-ScopedFuseDaemonStarted {
     }
     Write-Warning "scenario-$Scenario/scoped-fuse-start-log-not-observed root=$MountRoot; continuing with behavioral checks"
     $true
+}
+
+function Invoke-RuleSandboxScenario {
+    param([int]$Scenario)
+    $sandboxPath = "$RuleSandboxRoot/$TestFile"
+    $privateSandboxPath = "$PrivateRuleSandboxRoot/$TestFile"
+    $siblingFile = "srt_rule_sibling_atomic.jpg"
+    $siblingPath = "$RuleSiblingRoot/$siblingFile"
+    $backendSiblingPath = "$BackendRuleSiblingRoot/$siblingFile"
+    $privateSiblingPath = "$PrivateRuleSiblingRoot/$siblingFile"
+    $mediaFile = "srt_rule_sibling_mediastore.jpg"
+
+    $ok = Require-Missing "scenario-$Scenario" "sandbox-public-before" $BackendRuleSandboxRoot
+    $ok = (Test-ScopedFuseDaemonStarted $Scenario $RealRoot) -and $ok
+    $ok = (Invoke-WriteCase $Scenario "sandbox-rule-hit" $sandboxPath $Payload).Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "sandbox-private" $privateSandboxPath) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sandbox-public" $BackendRuleSandboxRoot) -and $ok
+    $atomicResult = Invoke-ServiceCase "scenario-$Scenario" "sandbox-sibling-atomic-save" "file_atomic_save" @{ file_path = $siblingPath; payload = $Payload; expected_payload = $Payload } "^PASS \[file_atomic_save\]"
+    $ok = $atomicResult.Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "sibling-real" $backendSiblingPath) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sibling-private" $privateSiblingPath) -and $ok
+    $ok = (Invoke-MediaStoreImageCreateCase $Scenario "sandbox-sibling-mediastore-save" $mediaFile "DCIM/SrtRuleSibling").Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "sibling-mediastore-real" "$BackendRuleSiblingRoot/$mediaFile") -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sibling-mediastore-private" "$PrivateRuleSiblingRoot/$mediaFile") -and $ok
+    $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "dcim-owner" "$BackendRoot/DCIM") -and $ok
+    $ok
 }
 
 function Invoke-FuseDaemonAllowWildcardScenario {
@@ -1513,6 +1582,7 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     $ok = (Invoke-MediaStoreImageCreateCase $Scenario "wildcard-allow-image-create" $FuseDcimMediaFile "DCIM/SrtFuseQQ/SrtAllowedAlpha").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-wildcard-real" $wildcardPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-wildcard-private" $wildcardPrivate) -and $ok
+    $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "dcim-owner" "$BackendRoot/DCIM") -and $ok
     $ok = (Invoke-MediaStoreImageCreateCase $Scenario "wildcard-other-image-create" $FuseDcimMediaFile "DCIM/SrtFuseQQ/SrtOther").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-wildcard-other-private" $otherPrivate) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-wildcard-other-real" $otherPath) -and $ok
@@ -1662,7 +1732,7 @@ function Invoke-MountNamespaceReadOnlyWildcardFallbackScenario {
 function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
-    if ($Scenario -in @(16, 17, 18, 19)) {
+    if ($Scenario -in @(8, 16, 17, 18, 19)) {
         Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     }
     Apply-ScenarioConfig $Scenario
@@ -1674,6 +1744,7 @@ function Invoke-Scenario {
     Restart-App "scenario-$Scenario" ($Scenario -ne 1)
     $before = $script:Failures.Count
     $ok = switch ($Scenario) {
+        8 { Invoke-RuleSandboxScenario $Scenario }
         9 { Invoke-ReadOnlyScenario $Scenario }
         10 { Invoke-MappedReadOnlyScenario $Scenario }
         11 { Invoke-AllowExclusionScenario $Scenario }
