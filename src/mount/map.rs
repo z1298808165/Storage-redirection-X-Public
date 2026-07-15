@@ -101,7 +101,6 @@ impl MountPlanner {
                 .resolve_mapping_target_source(
                     target_relative,
                     target_source_roots,
-                    preferred_target_source_roots,
                     options.should_use_existing_target_source_only,
                 )
             else {
@@ -141,6 +140,31 @@ impl MountPlanner {
                 is_any_applied = true;
                 log::info!("map {} -> {}", mapping.request_path, mapping.final_path);
 
+                if preferred_target_source_roots
+                    .iter()
+                    .any(|root| paths::is_same_or_child(&mapping.final_path, root))
+                    && self.ensure_directory_exists(&mapping.final_path, false)
+                {
+                    let mut is_target_path_mounted = false;
+                    let _ = self.bind_overlay_mount_with_storage_aliases(
+                        &target_source,
+                        &mapping.final_path,
+                        true,
+                        super::PrimaryMountFailure::ContinueAliases,
+                        Some("map target primary mount failed"),
+                        Some("map target alias mount failed"),
+                        Some("map target alias ok"),
+                        Some(&mut is_target_path_mounted),
+                    );
+                    if is_target_path_mounted {
+                        log::info!(
+                            "map target restored {} -> {}",
+                            mapping.final_path,
+                            target_source
+                        );
+                    }
+                }
+
                 if self.is_mapping_read_only(
                     mapping,
                     read_only_paths,
@@ -176,42 +200,12 @@ impl MountPlanner {
         &self,
         target_relative: &str,
         target_source_roots: &[String],
-        preferred_target_source_roots: &[String],
         should_use_existing_target_source_only: bool,
     ) -> Option<(String, bool)> {
         let target_data_media = paths::join(
             &paths::data_media_user_root_for_user(self.user_id),
             target_relative,
         );
-        for root in preferred_target_source_roots {
-            let Some(root_relative) =
-                paths::relative_child_path(root, &paths::storage_user_root_for_user(self.user_id))
-            else {
-                continue;
-            };
-            if !paths::is_same_or_child(target_relative, &root_relative) {
-                continue;
-            }
-            let Some(candidate_relative) =
-                paths::relative_child_path(target_relative, root_relative)
-            else {
-                continue;
-            };
-            let candidate = paths::join(root, candidate_relative);
-            if !fs::is_directory(&candidate) {
-                if should_use_existing_target_source_only && !fs::is_directory(&target_data_media) {
-                    continue;
-                }
-                if !self.ensure_real_public_directory_exists(&target_data_media) {
-                    log::warn!("map target preferred mkdir failed: {}", target_data_media);
-                    continue;
-                }
-            }
-            if fs::is_directory(&candidate) {
-                return Some((candidate, false));
-            }
-        }
-
         for root in target_source_roots {
             let candidate = paths::join(root, target_relative);
             if fs::is_directory(&candidate) {
@@ -228,7 +222,7 @@ impl MountPlanner {
             log::warn!("map target missing: {}", target_data_media);
             return None;
         }
-        if !self.ensure_writable_mapped_directory(&target_data_media, self.app_uid) {
+        if !self.ensure_real_public_directory_exists(&target_data_media) {
             log::warn!("map target missing and mkdir failed: {}", target_data_media);
             return None;
         }
@@ -239,7 +233,7 @@ impl MountPlanner {
             }
             let candidate = paths::join(root, target_relative);
             if fs::is_directory(&candidate) {
-                return Some((candidate, true));
+                return Some((candidate, false));
             }
         }
 
