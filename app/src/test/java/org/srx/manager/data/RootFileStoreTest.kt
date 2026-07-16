@@ -203,14 +203,16 @@ class RootFileStoreTest {
   }
 
   @Test
-  fun clearFileMonitorLogTruncatesConfiguredLogFile() = runBlocking {
+  fun clearMonitorLogUsesDaemonControl() = runBlocking {
     val shell = CapturingShell(ShellResult(0, "", ""))
     val store = RootFileStore(shell)
 
     assertTrue(store.clearFileMonitorLog())
 
     assertEquals(
-        "mkdir -p ${shellQuote(LogsDir)} && : > ${shellQuote(FileMonitorLogPath)}",
+        "if [ -r ${shellQuote(SrxCtlPath)} ]; then " +
+            "/system/bin/sh ${shellQuote(SrxCtlPath)} clear-monitor || exit 1; " +
+            "else mkdir -p ${shellQuote(LogsDir)} && : > ${shellQuote(FileMonitorLogPath)}; fi",
         shell.invocations.single().command,
     )
   }
@@ -255,7 +257,12 @@ class RootFileStoreTest {
         command.contains("mkdir -p \"\$stage/logs\" \"\$stage/config\" \"\$stage/state\""),
     )
     assertTrue(command, command.contains("/system/bin/sh \"\$module/bin/srxctl\" status"))
-    assertTrue(command, command.contains("logcat -d -t 2000 -v threadtime"))
+    assertTrue(command, command.contains("logcat -b main,system,crash -d -t 10000"))
+    assertTrue(command, command.contains("logcat -b main,system -d -t 8000"))
+    assertTrue(command, command.contains("logcat -b crash -d -v threadtime"))
+    assertTrue(command, command.indexOf("logcat_start=") < command.indexOf("cp -p"))
+    assertTrue(command, command.contains("-T \"\$logcat_start\""))
+    assertTrue(command, command.contains("tail -n 3000"))
     assertTrue(command, command.contains("(cd \"\$stage\" && tar -czf \"\$archive\" *)"))
   }
 

@@ -754,7 +754,7 @@ function Ensure-MonitorCollector {
 }
 
 function Clear-FileMonitorLog {
-    Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/logs; : > '$FileMonitorLogPath'" | Out-Null
+    Invoke-Su "/data/adb/modules/storage.redirect.x/bin/srxctl clear-monitor || { mkdir -p /data/adb/modules/storage.redirect.x/logs; : > '$FileMonitorLogPath'; }" | Out-Null
 }
 
 function Test-FileMonitorWatchCapacityLimited {

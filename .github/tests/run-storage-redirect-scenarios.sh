@@ -629,7 +629,7 @@ ensure_monitor_collector() {
 }
 
 clear_file_monitor_log() {
-  adb_su "mkdir -p '/data/adb/modules/storage.redirect.x/logs'; : > '$FILE_MONITOR_LOG_PATH'" >/dev/null 2>&1 || true
+  adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl clear-monitor || { mkdir -p '/data/adb/modules/storage.redirect.x/logs'; : > '$FILE_MONITOR_LOG_PATH'; }" >/dev/null 2>&1 || true
 }
 
 file_monitor_watch_capacity_limited() {
