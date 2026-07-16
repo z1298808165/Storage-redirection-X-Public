@@ -119,6 +119,9 @@ jobs:
           rustc --edition=2024 --test build.rs -o build/build-script-tests
           ./build/build-script-tests
 
+      - name: Verify logging architecture
+        run: python .github/tests/test_logging_architecture.py -v
+
       - name: Install CMake and Ninja
         run: |
           if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
