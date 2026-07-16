@@ -54,6 +54,24 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertNotIn("O_TRUNC", companion_stats)
         self.assertIn("control clear-monitor", control)
 
+    def test_private_log_socket_allows_supported_root_domains(self) -> None:
+        policy = read("assets/zygisk_module/sepolicy.rule")
+        senders = (
+            "zygote",
+            "appdomain",
+            "mediaprovider",
+            "mediaprovider_app",
+            "system_server",
+        )
+        for target in ("magisk", "su", "ksu"):
+            for sender in senders:
+                self.assertIn(
+                    f"allow {sender} {target} unix_dgram_socket sendto", policy
+                )
+            self.assertIn(
+                f"allow {target} {target} unix_dgram_socket sendto", policy
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
