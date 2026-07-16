@@ -149,7 +149,7 @@ start_media_state_collector() {
       rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
       append_media_state_snapshot
       rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-      sleep 30
+      sleep "$DIAGNOSTIC_SNAPSHOT_INTERVAL_SECONDS"
     done
   ) &
   echo "$!" > "$MEDIA_STATE_COLLECTOR_PID_FILE"

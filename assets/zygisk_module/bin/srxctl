@@ -178,49 +178,23 @@ is_verbose_logging_enabled() {
   grep -Eq '"verbose_logging_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
 }
 
-is_file_monitor_enabled() {
-  [ -f "$CONFIG_DIR/global.json" ] || return 1
-  grep -Eq '"file_monitor_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
-}
-
 is_runtime_disabled() {
   [ -f "$RUNTIME_DISABLE_FILE" ] || [ -f "$MODDIR/disable" ]
 }
 
-sync_monitor_collector_now() {
+clear_monitor_log() {
   mkdir -p "$LOGS_DIR"
-
-  if ! is_file_monitor_enabled; then
-    stop_pid_file "$LOGS_DIR/.monitor_collector.pid"
+  daemon_bin="$MODDIR/bin/srx_daemon"
+  if [ -x "$daemon_bin" ] && "$daemon_bin" control clear-monitor; then
+    usleep 100000 2>/dev/null || sleep 0.1
     return 0
   fi
-
-  is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid" && return 0
-
-  service_dir="$MODDIR/service.d"
-  if [ -r "$service_dir/common.sh" ] && [ -r "$service_dir/log_collectors.sh" ]; then
-    FILE_MONITOR_LOG_FILE="$LOGS_DIR/file_monitor.log"
-    PACKAGE_EVENT_LOG_FILE="$LOGS_DIR/package_events.log"
-    RECENT_SOURCE_HINT_FILE="$LOGS_DIR/.recent_source_hint"
-    RECENT_PATH_CALLER_HINT_FILE="$LOGS_DIR/.recent_path_caller_hint"
-    MAX_MONITOR_LOG_BYTES=1048576
-    MAX_PACKAGE_EVENT_LOG_BYTES=524288
-    LOG_ROTATE_BACKUPS=2
-    MONITOR_COLLECTOR_PID_FILE="$LOGS_DIR/.monitor_collector.pid"
-    CONFIG_EVENT_COLLECTOR_PID_FILE="$LOGS_DIR/.config_event_collector.pid"
-    PACKAGE_EVENT_COLLECTOR_PID_FILE="$LOGS_DIR/.package_event_collector.pid"
-    . "$service_dir/common.sh"
-    . "$service_dir/log_collectors.sh"
-    sync_monitor_collector
-  fi
+  : > "$LOGS_DIR/file_monitor.log"
+  chmod 666 "$LOGS_DIR/file_monitor.log" 2>/dev/null
 }
 
-is_monitor_collector_state_ok() {
-  if is_file_monitor_enabled; then
-    is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid"
-    return $?
-  fi
-  ! is_pid_file_alive "$LOGS_DIR/.monitor_collector.pid"
+is_daemon_alive() {
+  is_pid_file_alive "$DAEMON_PID_FILE" || pidof srx_daemon >/dev/null 2>&1
 }
 
 start_collectors_if_needed() {
@@ -229,17 +203,16 @@ start_collectors_if_needed() {
     return 0
   fi
 
-  sync_monitor_collector_now
+  stop_pid_file "$LOGS_DIR/.monitor_collector.pid"
 
   if is_pid_file_alive "$LOGS_DIR/.config_event_collector.pid" \
     && is_pid_file_alive "$LOGS_DIR/.package_event_collector.pid"; then
-    if is_monitor_collector_state_ok \
+    if is_daemon_alive \
       && { ! is_verbose_logging_enabled \
       || { is_pid_file_alive "$LOGS_DIR/.running_collector.pid" \
         && is_pid_file_alive "$LOGS_DIR/.media_state_collector.pid" \
         && is_pid_file_alive "$LOGS_DIR/.app_status_collector.pid" \
-        && is_pid_file_alive "$LOGS_DIR/.app_status_snapshot.pid" \
-        && is_pid_file_alive "$LOGS_DIR/.stats_collector.pid"; }; }; then
+        && is_pid_file_alive "$LOGS_DIR/.app_status_snapshot.pid"; }; }; then
       return 0
     fi
   fi
@@ -307,6 +280,7 @@ case "$1" in
   restart) stop_runtime; start_runtime ;;
   restart-media|media-restart) restart_media_provider ;;
   ensure-collectors) start_collectors_if_needed ;;
+  clear-monitor) clear_monitor_log ;;
   status|"") status_runtime ;;
-  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|status}" >&2; exit 2 ;;
+  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|clear-monitor|status}" >&2; exit 2 ;;
 esac

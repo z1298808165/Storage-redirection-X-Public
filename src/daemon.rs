@@ -40,6 +40,10 @@ enum ReconcileMode {
 
 pub fn main_entry() -> i32 {
     Logger::init(Some("srx_daemon"));
+    if let Err(error) = crate::log_daemon::start() {
+        log::error!("private log writer start failed error={}", error);
+        return 1;
+    }
     log::info!("daemon start");
 
     if !runtime_control::is_module_runtime_enabled() {

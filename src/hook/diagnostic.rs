@@ -7,13 +7,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const FAST_BYPASS_LOG_STEP: u64 = 2048;
 const RELATIVE_BYPASS_LOG_STEP: u64 = 256;
-const DIAG_LOG_STEP: u64 = 64;
-const DIAG_IMPORTANT_LOG_STEP: u64 = 16;
+const DIAG_LOG_STEP: u64 = 2048;
+const DIAG_IMPORTANT_LOG_STEP: u64 = 256;
+const REDIRECT_LOG_STEP: u64 = 2048;
+const REDIRECT_IMPORTANT_LOG_STEP: u64 = 256;
+const ALLOW_DECISION_LOG_STEP: u64 = 4096;
 
 static FAST_BYPASS_COUNT: AtomicU64 = AtomicU64::new(0);
 static RELATIVE_BYPASS_COUNT: AtomicU64 = AtomicU64::new(0);
 static DIAG_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static DIAG_IMPORTANT_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static REDIRECT_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static REDIRECT_IMPORTANT_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static ALLOW_DECISION_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn should_log_by_step(counter: &AtomicU64, step: u64) -> bool {
     let current = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -29,13 +35,49 @@ fn should_log_diag_important_sample() -> bool {
     should_log_by_step(&DIAG_IMPORTANT_LOG_COUNT, DIAG_IMPORTANT_LOG_STEP)
 }
 
+fn is_important_operation(op_name: &str) -> bool {
+    matches!(
+        op_name,
+        "open"
+            | "openat"
+            | "openat2"
+            | "creat"
+            | "mkdir"
+            | "mkdirat"
+            | "unlink"
+            | "unlinkat"
+            | "rmdir"
+            | "rename"
+            | "renameat"
+            | "renameat2"
+            | "link"
+            | "linkat"
+            | "symlink"
+            | "symlinkat"
+            | "truncate"
+            | "truncate64"
+            | "mknod"
+            | "mknodat"
+    )
+}
+
+fn should_log_redirect_sample(op_name: &str) -> bool {
+    if is_important_operation(op_name) {
+        should_log_by_step(&REDIRECT_IMPORTANT_LOG_COUNT, REDIRECT_IMPORTANT_LOG_STEP)
+    } else {
+        should_log_by_step(&REDIRECT_LOG_COUNT, REDIRECT_LOG_STEP)
+    }
+}
+
 pub fn log_diag_path_event(hub: &InterceptHub, op_name: &str, stage: &str, path: &str, flags: i32) {
+    if !crate::logging::is_debug_logging_enabled() {
+        return;
+    }
     if path.is_empty() || !is_storage_path_fast(path) {
         return;
     }
 
-    let is_important =
-        monitor::has_write_intent_flags(flags) || op_name == "unlink" || op_name == "rename";
+    let is_important = monitor::has_write_intent_flags(flags) || is_important_operation(op_name);
     if is_important {
         if !should_log_diag_important_sample() {
             return;
@@ -72,9 +114,18 @@ pub fn log_diag_redirect_decision(
     from_path: &str,
     redirect_result: &RedirectDecision,
 ) {
-    let is_redirected = matches!(redirect_result.action, RedirectAction::Redirect);
-    if !is_redirected && !should_log_diag_sample() {
+    if !crate::logging::is_debug_logging_enabled() {
         return;
+    }
+    match redirect_result.action {
+        RedirectAction::DenyReadOnly => {}
+        RedirectAction::Redirect if !should_log_redirect_sample(op_name) => return,
+        RedirectAction::Allow
+            if !should_log_by_step(&ALLOW_DECISION_LOG_COUNT, ALLOW_DECISION_LOG_STEP) =>
+        {
+            return;
+        }
+        RedirectAction::Redirect | RedirectAction::Allow => {}
     }
 
     if !from_path.is_empty()
@@ -116,6 +167,9 @@ pub fn log_diag_rename_decision(
     final_oldpath: &str,
     final_newpath: &str,
 ) {
+    if !crate::logging::is_debug_logging_enabled() {
+        return;
+    }
     let is_old_changed = !oldpath.is_empty() && oldpath != final_oldpath;
     let is_new_changed = !newpath.is_empty() && newpath != final_newpath;
     if !is_old_changed && !is_new_changed && !should_log_diag_sample() {
@@ -150,6 +204,9 @@ pub fn log_diag_rename_decision(
 }
 
 pub fn record_fast_bypass(op_name: &str, pathname: &str) {
+    if !crate::logging::is_debug_logging_enabled() {
+        return;
+    }
     let current = FAST_BYPASS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if current == 1 || current.is_multiple_of(FAST_BYPASS_LOG_STEP) {
         let normalized = paths::normalize(pathname);
@@ -183,6 +240,9 @@ pub fn log_relative_path_bypass(
     pathname: &str,
     flags: i32,
 ) {
+    if !crate::logging::is_debug_logging_enabled() {
+        return;
+    }
     if pathname.is_empty() || pathname.starts_with('/') {
         return;
     }

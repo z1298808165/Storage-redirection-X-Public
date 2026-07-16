@@ -1147,8 +1147,17 @@ const Api = {
       "; config=" +
       shellQuote(CONFIG_DIR) +
       "; " +
-      diagnosticProgressCommand(progress, 5, "legacy", "正在使用兼容模式导出日志") +
+      diagnosticProgressCommand(progress, 2, "legacy", "正在使用兼容模式导出日志") +
       'rm -rf "$stage" "$archive"; mkdir -p "$stage/logs" "$stage/config" "$stage/state" || exit 1; ' +
+      diagnosticProgressCommand(progress, 3, "logcat", "正在立即截取系统日志") +
+      'logcat_start=$(date "+%m-%d %H:%M:%S.000" 2>/dev/null); ' +
+      '{ echo "capture_started_at=$(date "+%Y-%m-%d %H:%M:%S %z" 2>/dev/null || date 2>/dev/null)"; echo "logcat_start=$logcat_start"; echo "context_line_limit=8000"; echo "filtered_line_limit=10000"; echo "events_line_limit=1500"; echo "delta_line_limit=3000"; } > "$stage/state/logcat-capture.txt"; ' +
+      'logcat -g > "$stage/logcat-buffers.txt" 2>&1 || true; ' +
+      'logcat -b main,system,crash -d -t 10000 -v threadtime -s StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V > "$stage/logcat-srx-filtered.txt" 2>&1 || true; ' +
+      'logcat -b crash -d -v threadtime > "$stage/logcat-crash.txt" 2>&1 || true; ' +
+      'logcat -b main,system -d -t 8000 -v threadtime > "$stage/logcat-main-system-context.txt" 2>&1 || true; ' +
+      'logcat -b events -d -t 1500 -v threadtime > "$stage/logcat-events.txt" 2>&1 || true; ' +
+      'echo "initial_capture_completed_at=$(date "+%Y-%m-%d %H:%M:%S %z" 2>/dev/null || date 2>/dev/null)" >> "$stage/state/logcat-capture.txt"; ' +
       diagnosticProgressCommand(progress, 18, "files", "正在复制模块日志和配置") +
       'if [ -d "$logs" ]; then find "$logs" -maxdepth 1 -type f ! -name ".*.pid" ! -name ".uid_map_last_refresh" -exec cp -p {} "$stage/logs/" \\; 2>/dev/null; fi; ' +
       'cp -p "$module/module.prop" "$stage/module.prop" 2>/dev/null || true; ' +
@@ -1161,9 +1170,11 @@ const Api = {
       '{ /system/bin/sh "$module/bin/srxctl" status 2>/dev/null || true; ls -la "$module" 2>/dev/null; ls -la "$logs" 2>/dev/null; } > "$stage/state/module.txt" 2>&1; ' +
       '{ ps -A 2>/dev/null | grep -E "srx|zygisk|media|storage" || true; } > "$stage/state/processes.txt" 2>&1; ' +
       '{ for p in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do echo "## pidof $p"; pidof "$p" 2>/dev/null || true; done; } > "$stage/state/media-pids.txt" 2>&1; ' +
-      diagnosticProgressCommand(progress, 72, "logcat", "正在截取系统日志") +
-      'logcat -d -t 2000 -v threadtime -s StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F > "$stage/logcat-threadtime.txt" 2>&1 || true; ' +
+      diagnosticProgressCommand(progress, 88, "kernel", "正在截取内核日志") +
       'dmesg 2>/dev/null | tail -n 1000 > "$stage/dmesg-tail.txt" 2>/dev/null || true; ' +
+      diagnosticProgressCommand(progress, 93, "logcat", "正在补充导出期间日志") +
+      'logcat -b main,system,crash -d -T "$logcat_start" -v threadtime -s StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V 2>&1 | tail -n 3000 > "$stage/logcat-export-period.txt" || true; ' +
+      'echo "final_capture_completed_at=$(date "+%Y-%m-%d %H:%M:%S %z" 2>/dev/null || date 2>/dev/null)" >> "$stage/state/logcat-capture.txt"; ' +
       diagnosticProgressCommand(progress, 95, "archive", "正在压缩日志包") +
       '(cd "$stage" && tar -czf "$archive" *) || exit 1; chmod 644 "$archive"; rm -rf "$stage"'
     );
@@ -1978,6 +1989,19 @@ const Api = {
         await this.exec(srxCtlCommand("ensure-collectors"));
       }
     } catch {}
+  },
+
+  async clearFileMonitorLog() {
+    const fallback = "mkdir -p " + shellQuote(LOGS_DIR) + " && : > " + shellQuote(FILE_MONITOR_LOG);
+    await this.exec(
+      "if [ -r " +
+        shellQuote(SRXCTL) +
+        " ]; then " +
+        srxCtlCommand("clear-monitor") +
+        " || exit 1; else " +
+        fallback +
+        "; fi",
+    );
   },
 
   /** Count configured apps */

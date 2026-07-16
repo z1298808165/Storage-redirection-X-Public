@@ -1,8 +1,12 @@
-use libc::{c_char, c_int};
+use libc::{
+    AF_UNIX, SOCK_CLOEXEC, SOCK_DGRAM, SOCK_NONBLOCK, c_char, c_int, c_void, close, sendto,
+    sockaddr, sockaddr_un, socket,
+};
 use log::{Level as LogLevel, LevelFilter, Log, Metadata, Record};
 use std::ffi::CString;
-use std::sync::Once;
+use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Once, OnceLock};
 
 const LOG_LEVEL_VERBOSE: i32 = 0;
 const LOG_LEVEL_DEBUG: i32 = 1;
@@ -14,6 +18,7 @@ const CURRENT_LOG_LEVEL: i32 = LOG_LEVEL_DEBUG;
 const DEFAULT_LOG_TAG: &str = "StorageRedirect";
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const STATS_LOG_TAG: &str = "Stats";
+const PRIVATE_LOG_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 
 const ANDROID_LOG_VERBOSE: i32 = 2;
 const ANDROID_LOG_DEBUG: i32 = 3;
@@ -34,8 +39,15 @@ pub enum Level {
 static LOG_INIT: Once = Once::new();
 static LOG_ADAPTER: LogAdapter = LogAdapter;
 static DEBUG_LOGGING_ENABLED: AtomicBool = AtomicBool::new(false);
+static PRIVATE_LOG_SOCKET: OnceLock<Option<PrivateLogSocket>> = OnceLock::new();
 
 struct LogAdapter;
+
+struct PrivateLogSocket {
+    fd: c_int,
+    addr: sockaddr_un,
+    addr_len: libc::socklen_t,
+}
 
 pub struct Logger;
 
@@ -47,6 +59,55 @@ impl Logger {
 
 pub fn set_debug_logging_enabled(enabled: bool) {
     DEBUG_LOGGING_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+impl PrivateLogSocket {
+    fn new() -> Option<Self> {
+        // SAFETY: socket takes no borrowed pointers and returns an owned descriptor on success.
+        let fd = unsafe { socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) };
+        if fd < 0 {
+            return None;
+        }
+
+        // SAFETY: sockaddr_un is a plain C structure that permits zero initialization.
+        let mut addr: sockaddr_un = unsafe { mem::zeroed() };
+        addr.sun_family = AF_UNIX as _;
+        if PRIVATE_LOG_SOCKET_NAME.len() + 1 > addr.sun_path.len() {
+            // SAFETY: fd is owned here and has not been closed or transferred.
+            unsafe { close(fd) };
+            return None;
+        }
+        addr.sun_path[0] = 0;
+        for (index, byte) in PRIVATE_LOG_SOCKET_NAME.iter().enumerate() {
+            addr.sun_path[index + 1] = *byte as _;
+        }
+
+        Some(Self {
+            fd,
+            addr,
+            addr_len: (mem::size_of::<libc::sa_family_t>() + PRIVATE_LOG_SOCKET_NAME.len() + 1)
+                as libc::socklen_t,
+        })
+    }
+
+    fn send(&self, level: Level, tag: &str, message: &str) -> bool {
+        let message = sanitize_transport_message(message);
+        if message.is_empty() {
+            return false;
+        }
+        let packet = format!("{}\t{}\t{}", level_to_code(level), tag, message);
+        // SAFETY: packet and addr remain alive for the call and their lengths match the buffers.
+        unsafe {
+            sendto(
+                self.fd,
+                packet.as_ptr() as *const c_void,
+                packet.len(),
+                0,
+                &self.addr as *const _ as *const sockaddr,
+                self.addr_len,
+            ) >= 0
+        }
+    }
 }
 
 impl Log for LogAdapter {
@@ -101,19 +162,59 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
     if tag.is_empty() || message.is_empty() {
         return;
     }
-    if tag != FILE_MONITOR_LOG_TAG && !is_debug_logging_enabled() {
+    let is_critical = matches!(level, Level::Warn | Level::Error);
+    if tag != FILE_MONITOR_LOG_TAG
+        && tag != STATS_LOG_TAG
+        && !is_critical
+        && !is_debug_logging_enabled()
+    {
         return;
     }
 
-    let priority = level_to_priority(level);
-    android_log(priority, tag, message);
+    let private_sent = private_log_socket()
+        .map(|socket| socket.send(level, tag, message))
+        .unwrap_or(false);
+    if is_critical || (!private_sent && matches!(tag, FILE_MONITOR_LOG_TAG | STATS_LOG_TAG)) {
+        android_log(level_to_priority(level), tag, message);
+    }
 }
 
 fn is_record_enabled(metadata: &Metadata) -> bool {
     if !is_level_enabled(map_log_level(metadata.level())) {
         return false;
     }
-    metadata.target() == FILE_MONITOR_LOG_TAG || is_debug_logging_enabled()
+    metadata.target() == FILE_MONITOR_LOG_TAG
+        || metadata.target() == STATS_LOG_TAG
+        || matches!(metadata.level(), LogLevel::Warn | LogLevel::Error)
+        || is_debug_logging_enabled()
+}
+
+fn private_log_socket() -> Option<&'static PrivateLogSocket> {
+    if PRIVATE_LOG_SOCKET.get().is_none() && is_zygote_selinux_context() {
+        return None;
+    }
+    PRIVATE_LOG_SOCKET
+        .get_or_init(PrivateLogSocket::new)
+        .as_ref()
+}
+
+fn is_zygote_selinux_context() -> bool {
+    std::fs::read_to_string("/proc/self/attr/current")
+        .map(|context| context.contains("zygote"))
+        .unwrap_or(false)
+}
+
+fn sanitize_transport_message(message: &str) -> String {
+    if !message.contains(['\n', '\r', '\t']) {
+        return message.to_string();
+    }
+    message
+        .chars()
+        .map(|ch| match ch {
+            '\n' | '\r' | '\t' => ' ',
+            _ => ch,
+        })
+        .collect()
 }
 
 fn map_log_level(level: LogLevel) -> Level {
@@ -164,6 +265,16 @@ fn level_to_text(level: Level) -> &'static str {
         Level::Info => "Info",
         Level::Warn => "Warn",
         Level::Error => "Error",
+    }
+}
+
+fn level_to_code(level: Level) -> char {
+    match level {
+        Level::Verbose => 'V',
+        Level::Debug => 'D',
+        Level::Info => 'I',
+        Level::Warn => 'W',
+        Level::Error => 'E',
     }
 }
 

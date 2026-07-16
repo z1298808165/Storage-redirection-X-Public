@@ -12,6 +12,7 @@ PROC_DIR=""
 ANR_DIR=""
 TOMBSTONE_DIR=""
 PROGRESS_FILE=""
+LOGCAT_CAPTURE_START=""
 
 die() {
   update_progress 98 error "$*"
@@ -148,7 +149,7 @@ collect_basic_files() {
 
 collect_device_state() {
   {
-    echo "diagnostic_archive_version=3"
+    echo "diagnostic_archive_version=4"
     echo "progress_protocol=1"
     echo "created_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)"
     echo "id:"
@@ -363,7 +364,7 @@ collect_relevant_proc_state() {
       return 0
     fi
     echo "$package_name $pid" >> "$STATE_DIR/package-pids.txt"
-    progress=$((54 + detail_count * 10 / max_detail_pids))
+    progress=$((56 + detail_count * 8 / max_detail_pids))
     update_progress "$progress" proc "正在采集进程细节 $((detail_count + 1))/$max_detail_pids"
     collect_proc_for_pid "$pid" "$package_name"
     detail_count=$((detail_count + 1))
@@ -396,16 +397,39 @@ collect_dumpsys_state() {
   } > "$STATE_DIR/dumpsys-key-packages.txt" 2>&1
 }
 
-collect_logcat_state() {
+collect_initial_logcat_state() {
+  LOGCAT_CAPTURE_START=$(date '+%m-%d %H:%M:%S.000' 2>/dev/null)
+  {
+    echo "capture_started_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)"
+    echo "logcat_start=$LOGCAT_CAPTURE_START"
+    echo "context_line_limit=8000"
+    echo "filtered_line_limit=10000"
+    echo "events_line_limit=1500"
+    echo "delta_line_limit=3000"
+  } > "$STATE_DIR/logcat-capture.txt" 2>&1
+
   logcat -g > "$stage/logcat-buffers.txt" 2>&1 || true
-  logcat -b main,system,crash -d -t 4000 -v threadtime \
-    > "$stage/logcat-main-system-crash.txt" 2>&1 || true
-  logcat -b events -d -t 1500 -v threadtime \
-    > "$stage/logcat-events.txt" 2>&1 || true
-  logcat -d -t 2500 -v threadtime -s \
+  logcat -b main,system,crash -d -t 10000 -v threadtime -s \
     StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F \
     ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V \
     > "$stage/logcat-srx-filtered.txt" 2>&1 || true
+  logcat -b crash -d -v threadtime > "$stage/logcat-crash.txt" 2>&1 || true
+  logcat -b main,system -d -t 8000 -v threadtime \
+    > "$stage/logcat-main-system-context.txt" 2>&1 || true
+  logcat -b events -d -t 1500 -v threadtime \
+    > "$stage/logcat-events.txt" 2>&1 || true
+  echo "initial_capture_completed_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)" \
+    >> "$STATE_DIR/logcat-capture.txt"
+}
+
+collect_logcat_delta() {
+  [ -n "$LOGCAT_CAPTURE_START" ] || return 0
+  logcat -b main,system,crash -d -T "$LOGCAT_CAPTURE_START" -v threadtime -s \
+    StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F \
+    ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V \
+    2>&1 | tail -n 3000 > "$stage/logcat-export-period.txt" || true
+  echo "final_capture_completed_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)" \
+    >> "$STATE_DIR/logcat-capture.txt"
 }
 
 collect_kernel_state() {
@@ -509,28 +533,30 @@ rm -rf "$stage" "$archive"
 update_progress 1 init "正在准备日志包"
 mkdir -p "$STATE_DIR" "$PROC_DIR" "$ANR_DIR" "$TOMBSTONE_DIR" || die "failed to create stage"
 
-update_progress 8 files "正在复制模块日志和配置"
+update_progress 3 logcat "正在立即截取系统日志"
+collect_initial_logcat_state
+update_progress 12 files "正在复制模块日志和配置"
 collect_basic_files
-update_progress 14 packages "正在分析相关应用"
+update_progress 18 packages "正在分析相关应用"
 collect_package_candidates
-update_progress 22 device "正在采集设备和模块状态"
+update_progress 26 device "正在采集设备和模块状态"
 collect_device_state
-update_progress 32 process "正在采集进程状态"
+update_progress 36 process "正在采集进程状态"
 collect_process_state
-update_progress 42 mounts "正在采集存储挂载状态"
+update_progress 46 mounts "正在采集存储挂载状态"
 collect_mount_state
-update_progress 54 proc "正在采集相关进程细节"
+update_progress 56 proc "正在采集相关进程细节"
 collect_relevant_proc_state
 update_progress 66 dumpsys "正在采集系统服务快照"
 collect_dumpsys_state
-update_progress 78 logcat "正在截取系统日志"
-collect_logcat_state
-update_progress 86 kernel "正在采集内核和压力状态"
+update_progress 80 kernel "正在采集内核和压力状态"
 collect_kernel_state
-update_progress 91 anr "正在截取 ANR 记录"
+update_progress 87 anr "正在截取 ANR 记录"
 copy_anr_files
-update_progress 94 tombstones "正在截取崩溃记录"
+update_progress 90 tombstones "正在截取崩溃记录"
 copy_tombstone_files
+update_progress 93 logcat "正在补充导出期间日志"
+collect_logcat_delta
 
 update_progress 97 archive "正在压缩日志包"
 finalize_archive || die "failed to create archive"

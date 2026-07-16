@@ -185,7 +185,6 @@
 
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
-  const FILE_MONITOR_LOG_DIR = "/data/adb/modules/storage.redirect.x/logs";
   const FILE_MONITOR_LOG = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
   const FILE_MONITOR_LOG_TAIL_LINES = 2000;
   const DASHBOARD_REFRESH_THROTTLE_MS = 1200;
@@ -6623,7 +6622,7 @@
   $("#logClear")?.addEventListener("click", () => {
     Theme.confirmDelete("确认清空文件监视记录？", async () => {
       try {
-        await Api.exec("mkdir -p " + FILE_MONITOR_LOG_DIR + " && : > " + FILE_MONITOR_LOG);
+        await Api.clearFileMonitorLog();
         Theme.showToast("日志已清空", "success");
         loadLogs();
       } catch {

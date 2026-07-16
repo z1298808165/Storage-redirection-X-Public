@@ -12,6 +12,10 @@ use crate::redirect::{
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t};
 use std::borrow::Cow;
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const REDIRECTED_OPEN_FD_LOG_SAMPLE_STEP: u64 = 256;
+static REDIRECTED_OPEN_FD_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 pub struct OpenHow {
@@ -479,6 +483,11 @@ fn log_redirected_open_fd(
     flags: c_int,
     fd_diag: &OpenFdDiag,
 ) {
+    let is_anomaly = fd_diag.result < 0
+        || fd_diag.retried
+        || fd_diag.fd_flags < 0
+        || fd_diag.fd_path.is_empty()
+        || fd_diag.fd_path.ends_with(" (deleted)");
     if fd_diag.result < 0 {
         log::info!(
             "write op={} from={} to={} flags=0x{:x} ret={} errno={}",
@@ -492,8 +501,13 @@ fn log_redirected_open_fd(
         return;
     }
 
+    let count = REDIRECTED_OPEN_FD_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if !is_anomaly && count != 1 && !count.is_multiple_of(REDIRECTED_OPEN_FD_LOG_SAMPLE_STEP) {
+        return;
+    }
+
     log::info!(
-        "write op={} from={} to={} flags=0x{:x} ret={} errno={} fd_flags=0x{:x} fd_retry={} fd_path={}",
+        "write op={} from={} to={} flags=0x{:x} ret={} errno={} fd_flags=0x{:x} fd_retry={} fd_path={} n={}",
         op_name,
         from_path,
         to_path,
@@ -506,7 +520,8 @@ fn log_redirected_open_fd(
             "<empty>"
         } else {
             fd_diag.fd_path.as_str()
-        }
+        },
+        count
     );
 }
 

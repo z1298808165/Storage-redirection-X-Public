@@ -30,8 +30,8 @@ const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
     "libadreno_utils.so",
     "libgsl.so",
 ];
-const FLUSH_THRESHOLD: i32 = 32;
-const FLUSH_INTERVAL_MS: i64 = 2000;
+const FLUSH_THRESHOLD: i32 = 256;
+const FLUSH_INTERVAL_MS: i64 = 10_000;
 const LATE_HOOK_REFRESH_INTERVAL_MS: i64 = 1000;
 const JIT_CACHE_MEMFD_PREFIX: &str = "/memfd:jit-cache";
 const UNSTABLE_CALLER_MODULE_BASENAMES: &[&str] = &[
@@ -577,7 +577,7 @@ impl InterceptHub {
         }
     }
 
-    // 通过 logcat 广播，由外部收集器汇总
+    // 通过私有日志通道批量交给守护进程汇总。
     fn flush_to_global_stats(&self) {
         if !crate::logging::is_debug_logging_enabled() {
             return;
@@ -590,7 +590,6 @@ impl InterceptHub {
         self.last_flush_ms
             .store(crate::platform::paths::monotonic_ms(), Ordering::Relaxed);
 
-        // 收集器按 "+N" 解析
         log::info!(target: STATS_TAG, "+{}", pending);
     }
 }

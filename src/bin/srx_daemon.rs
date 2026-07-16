@@ -15,6 +15,8 @@ mod daemon_mount;
 mod domain;
 #[path = "../fuse_redirect.rs"]
 mod fuse_redirect;
+#[path = "../log_daemon.rs"]
+mod log_daemon;
 #[path = "../logging.rs"]
 mod logging;
 #[path = "../mount.rs"]
@@ -32,5 +34,18 @@ mod redirect {
 mod runtime_control;
 
 fn main() {
+    let mut args = std::env::args();
+    let _ = args.next();
+    if args.next().as_deref() == Some("control") {
+        let Some(command) = args.next() else {
+            eprintln!("usage: srx_daemon control <command>");
+            std::process::exit(2);
+        };
+        std::process::exit(if log_daemon::send_control(&command).is_ok() {
+            0
+        } else {
+            1
+        });
+    }
     std::process::exit(daemon::main_entry());
 }

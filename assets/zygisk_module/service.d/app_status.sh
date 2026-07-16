@@ -95,7 +95,7 @@ start_app_status_snapshot_collector() {
       trim_app_status_log_if_needed
       append_app_status_snapshot
       trim_app_status_log_if_needed
-      sleep 30
+      sleep "$DIAGNOSTIC_SNAPSHOT_INTERVAL_SECONDS"
     done
   ) &
   echo "$!" > "$APP_STATUS_SNAPSHOT_PID_FILE"

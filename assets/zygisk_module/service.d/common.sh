@@ -26,11 +26,6 @@ is_verbose_logging_enabled() {
   grep -Eq '"verbose_logging_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
 }
 
-is_file_monitor_enabled() {
-  [ -f "$CONFIG_DIR/global.json" ] || return 1
-  grep -Eq '"file_monitor_enabled"[[:space:]]*:[[:space:]]*true' "$CONFIG_DIR/global.json" 2>/dev/null
-}
-
 rotate_log_file_if_needed() {
   file="$1"
   max_bytes="$2"
