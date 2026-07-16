@@ -64,6 +64,12 @@ allow system_server shell_data_file file getattr
 allow system_server shell_data_file file create
 
 # Native logs use an abstract datagram socket owned by the root daemon.
+allow zygote magisk unix_dgram_socket sendto
+allow appdomain magisk unix_dgram_socket sendto
+allow mediaprovider magisk unix_dgram_socket sendto
+allow mediaprovider_app magisk unix_dgram_socket sendto
+allow system_server magisk unix_dgram_socket sendto
+allow magisk magisk unix_dgram_socket sendto
 allow zygote su unix_dgram_socket sendto
 allow appdomain su unix_dgram_socket sendto
 allow mediaprovider su unix_dgram_socket sendto
