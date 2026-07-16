@@ -4,9 +4,7 @@
 
 ## 查看模块日志
 
-```bash
-adb logcat -s "SRX" "StorageRedirect"
-```
+详细日志开启时，native 日志优先写入 `/data/adb/modules/storage.redirect.x/logs/running.log`，文件监视记录写入 `file_monitor.log`。`adb logcat -s "SRX" "StorageRedirect"` 主要用于查看 Java 日志、native Warn/Error 镜像和私有通道不可用时的文件监视回退，不再是完整 native 日志来源。
 
 也可以在 WebUI 或管理 App 的设置页右上角点击文件图标导出日志包。导出的 `storage-redirect-x-logs-*.tar.gz` 会包含模块日志、轮转历史、关键配置、运行状态快照、最近相关 logcat 和 dmesg tail，适合在 Issue 或排障沟通中直接提供。
 
@@ -16,7 +14,9 @@ adb logcat -s "SRX" "StorageRedirect"
 /data/adb/modules/storage.redirect.x/logs/
 ```
 
-主要日志会按大小轮转并保留 `.1`、`.2` 历史，例如 `file_monitor.log`、`file_monitor.log.1`、`file_monitor.log.2`。
+主要日志会按大小轮转并保留 `.1`、`.2` 历史，例如 `file_monitor.log`、`file_monitor.log.1`、`file_monitor.log.2`。`running.log`、`file_monitor.log` 和 `stats` 由 `srx_daemon` 私有日志接收器统一写入，默认不需要常驻 `logcat` 采集器。
+
+日志包会在导出一开始保存分层 logcat 快照，并在末尾补抓导出期间日志。`-t 10000` 等参数表示行数而不是秒数；可查看包内 `state/logcat-capture.txt` 判断实际截取时间。为控制体积，main/system 只保留 8000 行上下文，相关标签保留 10000 行，events 保留 1500 行；只有独立且通常较小的 crash 环形缓冲区会完整导出。
 
 ## 关键日志标记
 

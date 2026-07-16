@@ -14,7 +14,7 @@ cargo build --target aarch64-linux-android --release
 
 产物位于 `target/aarch64-linux-android/release/libsrx_core.so`。
 
-模块二进制不再区分 debug/release 两套日志能力。默认只输出 `FileMonitorOp` 文件操作监控日志；需要普通 Rust/Java 调试日志、Stats 统计广播和诊断采集时，在设置页“模块设置”中打开“详细日志”。
+模块二进制不再区分 debug/release 两套日志能力。`FileMonitorOp`、native 详细日志和 Stats 通过 `srx_daemon` 私有 datagram 通道批量落盘，避免默认常驻 `logcat` 以及普通日志反复经过 Android `logd`。需要普通 Rust/Java 调试日志和诊断快照时，在设置页“模块设置”中打开“详细日志”；详细模式仅保留 Java/崩溃上下文所需的一条合并 `logcat` 管道。
 
 Windows PowerShell 设备侧测试建议固定设置 NDK 和 CMake：
 

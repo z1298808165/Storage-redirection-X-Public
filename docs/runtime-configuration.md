@@ -21,7 +21,7 @@
 - `file_monitor_enabled`：启用文件创建监控；覆盖已配置的普通应用，以及 MediaProvider、DownloadProvider 等系统代写链路。普通应用即使关闭“启用重定向”，也会由 `srx_daemon` 在进程外通过 inotify 监控公共存储写入；这类公共根记录只在文件 owner uid 能明确反查到同一个包名时写入，避免误归因。启用重定向的普通应用会监控隔离根、放行路径、`read_only_paths` 和路径映射目标。普通应用不安装进程内 monitor/PLT hook；这是为了避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。真实 MediaProvider/FUSE 服务端仍使用进程内 hook 保留调用方识别；DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不再安装进程内 PLT hook，避免安装应用、设置、文件管理器和导出日志等系统存储链路被卡住。缺失、格式错误或不可读时，沿用历史默认值 `false`。
 - `fuse_fix_enabled`：启用 SRX 内置的 FuseFixer 兼容保护，用于处理 MediaProvider FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
 - `fuse_daemon_redirect_enabled`：启用混合 FUSE 重定向增强。普通路径仍使用默认 mount namespace，只有通配规则前缀会挂载模块内 FUSE daemon；开启后 `!`、`*`、`?` 规则按路径匹配精确生效。关闭或 FUSE 启动失败时，普通应用仍使用默认 mount namespace 方案，通配符规则会退化为已存在的具体匹配目录，必要时退化到最近具体父目录。缺失、格式错误或不可读时，默认值为 `false`。
-- `verbose_logging_enabled`：启用详细日志。打开后立即允许普通 `StorageRedirect` / `SRX` / `Stats` logcat 输出，并启动 `running.log`、`media_provider_state.log`、`app_status.log`、`stats` 等诊断采集；关闭后立即停止这些记录。文件监视记录由 `file_monitor_enabled` 和文件监视过滤配置单独控制。缺失、格式错误或不可读时，默认值为 `false`。
+- `verbose_logging_enabled`：启用详细日志。打开后，普通 native 日志和 Stats 通过 `srx_daemon` 的私有 datagram 通道写入 `running.log` 与 `stats`，并启动 Java/崩溃上下文和 MediaProvider/应用状态采集；关闭后立即停止这些详细记录。文件监视记录由 `file_monitor_enabled` 和文件监视过滤配置单独控制。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时，新安装应用默认只开启重定向，不附加允许路径、沙盒路径或映射规则。若模板文件被外部修改导致该 ID 不再可用，运行脚本会先按仅开启重定向生成新应用配置；APP 和 WebUI 进入设置页时会清空失效引用，并在自动配置模板状态行提示已回退。缺失、格式错误或不可读时，默认值为空字符串。
 - `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
@@ -127,14 +127,25 @@ storage-redirect-x-backup-YYYYMMDD-HHMMSS.srxbak.zip
 
 ## 日志轮转与日志包
 
-运行时日志位于 `/data/adb/modules/storage.redirect.x/logs/`。服务脚本会按大小轮转主要日志，默认保留 `.1`、`.2` 两级历史：
+运行时日志位于 `/data/adb/modules/storage.redirect.x/logs/`。native 普通日志、文件监视记录和 Stats 不再经由 Android `logd` 与常驻 `logcat` 中转，而是由 `srx_daemon` 内置接收器批量写入；Warn/Error 仍可镜像到 Android 日志用于紧急排障。主要日志按大小轮转并保留 `.1`、`.2` 两级历史：
 
 - `file_monitor.log`：默认 1 MiB。
 - `running.log`：默认 2 MiB。
 - `media_provider_state.log`：默认 10 MiB。
 - `app_status.log`：默认 10 MiB。
 
-设置页右上角的文件图标会导出一个 `storage-redirect-x-logs-YYYYMMDD-HHMMSS.tar.gz` 日志包，包含模块日志及轮转历史、`module.prop`、`stats`、关键配置文件、设备/进程状态快照、最近相关 logcat 和 dmesg tail。日志包用于排障分享；配置迁移应使用 `.srxbak.zip` 备份。
+设置页右上角的文件图标会导出一个 `storage-redirect-x-logs-YYYYMMDD-HHMMSS.tar.gz` 日志包。点击导出后会先立即截取 logcat，再执行可能耗时几十秒的进程、挂载和 dumpsys 采集，最后补抓导出期间的新日志。
+
+logcat 窗口按“行数上限”而不是固定分钟计算，因此不是“开始前一分钟”：
+
+- `logcat-srx-filtered.txt`：相关标签最多 10000 行。
+- `logcat-main-system-context.txt`：main/system 上下文最多 8000 行。
+- `logcat-crash.txt`：完整 crash 环形缓冲区；该专用缓冲区通常较小，并非导出全部 main/system 内容。
+- `logcat-events.txt`：events 最多 1500 行。
+- `logcat-export-period.txt`：从首次截取开始到导出末尾的相关日志，最多 3000 行。
+- `state/logcat-capture.txt`：记录实际截取起止时间和各窗口上限；`logcat-buffers.txt` 记录设备缓冲区容量。
+
+繁忙设备在相同行数内覆盖的时间可能只有几十秒，安静设备则可能覆盖数小时。上述分层窗口避免直接导出全部 main/system 缓冲区导致日志包过大、内容过杂，同时优先保留复现时间点、崩溃和 SRX 相关上下文。日志包还包含模块日志及轮转历史、`module.prop`、`stats`、关键配置、设备/进程状态和 dmesg tail；配置迁移应使用 `.srxbak.zip` 备份。
 
 ## 排除规则
 
