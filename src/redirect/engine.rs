@@ -5,9 +5,8 @@ mod trace;
 
 use self::caller::{
     SystemWriterCallerContext, SystemWriterCallerSignal,
-    has_system_writer_mapping_request_owner_hint, has_system_writer_read_only_owner_hint,
-    has_system_writer_recent_public_caller_hint, is_media_provider_internal_without_caller,
-    resolve_system_writer_caller_context,
+    has_system_writer_mapping_request_owner_hint, has_system_writer_recent_public_caller_hint,
+    is_media_provider_internal_without_caller, resolve_system_writer_caller_context,
 };
 use self::policy::{
     SystemWriterPolicyRequest, process_system_writer_policy, resolve_system_writer_enablement,
@@ -412,9 +411,6 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
     let has_anonymous_redirect_owner_hint = has_anonymous_caller
         && (has_anonymous_private_owner_hint
             || has_anonymous_mapping_request_owner_hint
-            || (is_write_operation
-                && redirect_policy::is_media_provider_package(&package_name)
-                && has_system_writer_read_only_owner_hint(user_id, &normalized_path))
             || (is_write_operation
                 && redirect_policy::is_media_provider_package(&package_name)
                 && has_system_writer_recent_public_caller_hint(user_id, &normalized_path)));

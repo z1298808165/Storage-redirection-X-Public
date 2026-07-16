@@ -365,10 +365,6 @@ fn resolve_media_placeholder_write_caller_context(
     let user_id = platform::user_id_from_uid(caller_uid);
     let system_writer = is_system_writer_uid(caller_uid);
     if system_writer {
-        if let Some(context) = resolve_read_only_path_owner_context(user_id, caller_uid, path_text)
-        {
-            return context;
-        }
         if let Some(context) =
             resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
         {
@@ -380,31 +376,7 @@ fn resolve_media_placeholder_write_caller_context(
     if !context.0.is_empty() {
         return context;
     }
-
-    if let Some(context) = resolve_read_only_path_owner_context(user_id, caller_uid, path_text) {
-        return context;
-    }
     context
-}
-
-fn resolve_read_only_path_owner_context(
-    user_id: i32,
-    caller_uid: i32,
-    path_text: &str,
-) -> Option<(String, i32)> {
-    if user_id < 0 || path_text.is_empty() {
-        return None;
-    }
-    let inferred =
-        SettingsHub::instance().resolve_read_only_package_by_path_for_user(user_id, path_text);
-    if inferred.is_empty() {
-        return None;
-    }
-    let inferred_uid = policy::get_fresh_uid_for_package(&inferred);
-    if inferred_uid >= writer::ANDROID_APP_UID_START {
-        return Some((inferred, inferred_uid));
-    }
-    Some((inferred, caller_uid))
 }
 
 pub(crate) fn rewrite_media_store_bucket_id_for_caller(

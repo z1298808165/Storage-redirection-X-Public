@@ -13,7 +13,6 @@ enum PackagePathMatchMode {
     Redirect,
     Enabled,
     MappingRequest,
-    ReadOnly,
     Monitor,
 }
 
@@ -215,15 +214,6 @@ impl SettingsHub {
         )
     }
 
-    pub fn resolve_read_only_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !state.is_loaded || user_id < 0 || path.is_empty() {
-            return String::new();
-        }
-
-        resolve_package_by_path_in_apps(&state.apps, user_id, path, PackagePathMatchMode::ReadOnly)
-    }
-
     pub fn resolve_monitor_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if !state.is_loaded || user_id < 0 || path.is_empty() {
@@ -346,21 +336,6 @@ fn resolve_package_by_path_in_apps(
                 );
             }
         }
-
-        if matches!(mode, PackagePathMatchMode::ReadOnly)
-            && read_only_rule_matches_path(&user.read_only_paths, &normalized)
-        {
-            let (included, _) = paths::split_exclusion_rules(&user.read_only_paths);
-            for rule in included {
-                update_matched_packages(
-                    &mut matched_packages,
-                    &mut matched_prefix_len,
-                    package_name,
-                    &rule,
-                    &normalized,
-                );
-            }
-        }
     }
 
     if matched_packages.len() == 1 {
@@ -379,53 +354,13 @@ fn should_match_mapping_target_for_mode(
     match mode {
         PackagePathMatchMode::Redirect => false,
         PackagePathMatchMode::MappingRequest => false,
-        PackagePathMatchMode::ReadOnly => false,
         PackagePathMatchMode::Enabled => true,
         PackagePathMatchMode::Monitor => is_specific_storage_owner_hint(user_id, final_path),
     }
 }
 
 fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> bool {
-    !matches!(
-        mode,
-        PackagePathMatchMode::MappingRequest | PackagePathMatchMode::ReadOnly
-    )
-}
-
-fn read_only_rule_matches_path(read_only_paths: &[String], normalized: &str) -> bool {
-    let (included, excluded) = paths::split_exclusion_rules(read_only_paths);
-    let pending_display_path = media_store_pending_display_path(normalized);
-    included
-        .iter()
-        .any(|rule| read_only_rule_matches(rule, normalized, pending_display_path.as_deref()))
-        && !excluded
-            .iter()
-            .any(|rule| read_only_rule_matches(rule, normalized, pending_display_path.as_deref()))
-}
-
-fn read_only_rule_matches(
-    rule: &str,
-    normalized: &str,
-    pending_display_path: Option<&str>,
-) -> bool {
-    paths::matches(rule, normalized, true)
-        || pending_display_path.is_some_and(|display_path| paths::matches(rule, display_path, true))
-}
-
-fn media_store_pending_display_path(path: &str) -> Option<String> {
-    let slash = path.rfind('/')?;
-    let file_name = &path[slash + 1..];
-    let pending_tail = file_name.strip_prefix(".pending-")?;
-    let display_name_start = pending_tail.find('-')? + 1;
-    if display_name_start >= pending_tail.len() {
-        return None;
-    }
-
-    Some(format!(
-        "{}/{}",
-        path[..slash].trim_end_matches('/'),
-        &pending_tail[display_name_start..]
-    ))
+    !matches!(mode, PackagePathMatchMode::MappingRequest)
 }
 
 fn prefer_download_provider_match(packages: &[String]) -> Option<&str> {

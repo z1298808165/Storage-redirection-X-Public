@@ -132,15 +132,6 @@ pub(super) fn has_system_writer_recent_public_caller_hint(
     crate::monitor::infer_recent_path_caller_identity(normalized_path, user_id).is_some()
 }
 
-pub(super) fn has_system_writer_read_only_owner_hint(user_id: i32, normalized_path: &str) -> bool {
-    if user_id < 0 || normalized_path.is_empty() || crate::hook::is_path_owner_inference_disabled()
-    {
-        return false;
-    }
-
-    !resolve_read_only_owner_package_by_path(user_id, normalized_path).is_empty()
-}
-
 pub(super) fn resolve_system_writer_caller_context(
     hub: &InterceptHub,
     request: SystemWriterCallerResolveRequest<'_>,
@@ -250,31 +241,6 @@ pub(super) fn resolve_system_writer_caller_context(
         );
         effective_caller_package = path_identity.package_name;
         is_caller_from_inferred = true;
-    }
-
-    let can_override_with_read_only_owner = !has_external_caller_signal
-        && (effective_caller_package.is_empty()
-            || effective_caller_package == package_name
-            || redirect_policy::is_system_writer_package(&effective_caller_package));
-    if can_override_with_read_only_owner
-        && !crate::hook::is_path_owner_inference_disabled()
-        && redirect_policy::is_media_provider_package(package_name)
-    {
-        let inferred = resolve_read_only_owner_package_by_path(user_id, normalized_path);
-        if !inferred.is_empty() {
-            let inferred_uid = redirect_policy::get_fresh_uid_for_package(&inferred);
-            if inferred_uid >= writer::ANDROID_APP_UID_START {
-                effective_caller_uid = inferred_uid;
-            }
-            log::debug!(
-                "writer: read-only path infer caller={} uid={} path={}",
-                inferred,
-                effective_caller_uid,
-                normalized_path
-            );
-            effective_caller_package = inferred;
-            is_caller_from_inferred = true;
-        }
     }
 
     if effective_caller_package.is_empty()
@@ -571,14 +537,6 @@ fn resolve_mapping_request_owner_package_by_path(user_id: i32, normalized_path: 
 
     SettingsHub::instance()
         .resolve_mapping_request_package_by_path_for_user(user_id, normalized_path)
-}
-
-fn resolve_read_only_owner_package_by_path(user_id: i32, normalized_path: &str) -> String {
-    if user_id < 0 || normalized_path.is_empty() {
-        return String::new();
-    }
-
-    SettingsHub::instance().resolve_read_only_package_by_path_for_user(user_id, normalized_path)
 }
 
 fn should_query_download_owner_for_writer(self_uid: i32, package_name: &str) -> bool {
