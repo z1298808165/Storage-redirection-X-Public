@@ -179,7 +179,7 @@ internal fun SettingsScreen(
         )
         CompactSwitchRow(
             title = "详细日志",
-            summary = "开启后立即记录 Rust、Java、Stats 和诊断采集日志",
+            summary = "开启后立即记录 Rust、Java 和诊断采集日志",
             checked = global.verboseLoggingEnabled,
             onCheckedChange = { onGlobal(global.copy(verboseLoggingEnabled = it)) },
         )
