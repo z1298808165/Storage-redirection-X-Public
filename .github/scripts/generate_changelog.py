@@ -38,6 +38,11 @@ CLASSIFICATION_PATCH_EXCLUDED_FILES = {
     "README.md",
     "update.json",
 }
+RUNTIME_VALIDATION_AREAS = {
+    "媒体代写与系统存储链路",
+    "FUSE、挂载和路径映射",
+    "重定向策略与调用方识别",
+}
 
 
 @dataclass(frozen=True)
@@ -589,7 +594,7 @@ def classify_release_changes(
             add_unique(sections["changes"], f"{action_area('调整或增强', area)}：{details}")
 
     append_feature_usage(sections, relevant, files, patch)
-    append_contextual_sections(sections, files, patch)
+    append_contextual_sections(sections, files, relevant, patch)
     for key, values in sections.items():
         sections[key] = limit_section(values, include_commit_details=False)
     return sections
@@ -615,6 +620,7 @@ def extract_config_keys(patch: str) -> list[str]:
 def append_contextual_sections(
     sections: dict[str, list[str]],
     files: list[str],
+    commits: list[CommitInfo],
     patch: str,
 ) -> None:
     has_substantive_change = bool(
@@ -624,9 +630,17 @@ def append_contextual_sections(
         path.startswith(("src/hook/", "src/mount", "src/fuse", "src/lifecycle", "src/redirect/", "src/daemon", "java_src/", "native/"))
         for path in files
     )
+    runtime_change_areas = {
+        detect_area(f"{commit.subject}\n{commit.summary}")
+        for commit in commits
+        if commit.kind in {"fix", "feature"}
+    }
+    has_runtime_behavior_change = bool(
+        runtime_change_areas & RUNTIME_VALIDATION_AREAS
+    )
     has_config = any(path.startswith("src/config") or path.startswith("docs/config-fixtures/") for path in files)
 
-    if has_substantive_change and has_runtime:
+    if has_substantive_change and has_runtime and has_runtime_behavior_change:
         add_unique(sections["notes"], "本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径")
 
     if has_substantive_change and has_config:
@@ -678,7 +692,7 @@ def classify_changes(files: list[str], commits: list[CommitInfo], patch: str) ->
 
     append_grouped_commit_sections(sections, commits, files, domain_patch)
     append_feature_usage(sections, commits, files, domain_patch)
-    append_contextual_sections(sections, domain_files, domain_patch)
+    append_contextual_sections(sections, domain_files, commits, domain_patch)
 
     for key, values in sections.items():
         sections[key] = limit_section(values)
