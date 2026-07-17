@@ -114,7 +114,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 - `file_monitor_enabled`：启用文件创建监控；普通应用由 `srx_daemon` 在进程外监控隔离目录、放行真实路径和路径映射目标，`read_only_paths` 也会被纳入 daemon 监控。普通应用不安装进程内 PLT hook，因为不同应用的 native/图形/加固运行时兼容性不可控，安装后可能导致应用无法打开或闪退；真实 MediaProvider/FUSE 服务端仍使用 hook 保留调用方识别。DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不再安装进程内 PLT hook，避免安装应用、设置、文件管理器和导出日志等系统存储链路被卡住。缺失、格式错误或不可读时，默认值为 `false`。
 - `fuse_fix_enabled`：启用 SRX 内置 FuseFixer-compatible 保护，用于处理 MediaProvider/FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
 - `fuse_daemon_redirect_enabled`：启用混合 FUSE 重定向增强。普通路径仍使用 mount namespace；只有包含 `!`、`*`、`?` 的通配规则会在通配符前的最小具体父目录挂载模块内 FUSE daemon 精确匹配。关闭或 FUSE 启动失败时，默认 mount namespace 方案会退化通配规则。缺失、格式错误或不可读时，默认值为 `false`。
-- `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java/Stats logcat 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log`、`stats` 等诊断采集，关闭后立即停止这些记录。文件监视记录不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
+- `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log` 等诊断采集，关闭后立即停止这些记录。文件监视记录和概览页的轻量运行时生效计数不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时使用仅开启重定向的默认配置。
 - `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。

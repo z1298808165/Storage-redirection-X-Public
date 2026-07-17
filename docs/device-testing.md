@@ -1,7 +1,7 @@
 # 设备侧测试说明
 **重要：设备侧排障时请在设置页打开“详细日志”。**
 
-CI Build 和正式 Release 都会产出单个模块 zip：`storage.redirect.x-v<version>.zip`。默认只保留文件监视记录；打开“详细日志”后，会立即启用 Rust、Java、Stats 和诊断采集日志，关闭后立即停止相关记录。
+CI Build 和正式 Release 都会产出单个模块 zip：`storage.redirect.x-v<version>.zip`。默认保留文件监视记录和概览页轻量运行时生效计数；打开“详细日志”后，会立即启用 Rust、Java 和诊断采集日志，关闭后立即停止相关记录。
 
 设备侧回归测试流已经集成在本仓库内，测试 APP 源码位于 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。测试 APP 来自 `https://github.com/z1298808165/StorageRedirectTest`，合入本仓库后随核心代码一起审查、构建和运行，不再在 CI 或推送流程里动态拉取外部测试项目。
 

@@ -6,7 +6,7 @@
 
 CI Build 和正式 Release 都产出单个刷入包：
 
-- `storage.redirect.x-v<version>.zip`：日常使用和问题定位共用。默认文件监控通过 `srx_daemon` 私有通道直接写入文件，不启动常驻 `logcat`；需要排查问题时，在设置页“模块设置”中打开“详细日志”，模块会启用 native/Java running 日志、Stats 和 media/app 状态采集，关闭后立即停止这些详细记录。
+- `storage.redirect.x-v<version>.zip`：日常使用和问题定位共用。默认文件监控和概览页轻量运行时生效计数通过 `srx_daemon` 私有通道直接写入文件，不启动常驻 `logcat`；需要排查问题时，在设置页“模块设置”中打开“详细日志”，模块会启用 native/Java running 日志和 media/app 状态采集，关闭后立即停止这些详细记录。
 
 ## 目录结构
 
