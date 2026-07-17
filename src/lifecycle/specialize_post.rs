@@ -266,6 +266,9 @@ fn install_plt_hook(
         hub.init(package_name, is_monitor_only, should_monitor);
     }
     if hub.install() {
+        if is_redirect_via_hook {
+            crate::runtime_stats::record_runtime_activation();
+        }
         log::info!("plt hook ok");
         true
     } else {

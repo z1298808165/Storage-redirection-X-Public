@@ -279,7 +279,6 @@ where
             final_new
         );
         hub.increment_total_redirected();
-        hub.increment_global_redirect_count();
     }
 
     runtime::ensure_redirect_parent_directory(

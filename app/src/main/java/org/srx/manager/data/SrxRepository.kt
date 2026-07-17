@@ -48,14 +48,14 @@ class SrxRepository(
     val status = async { moduleStatus() }
     val version = async { moduleVersion() }
     val configs = async { readConfiguredAppConfigs(force = true) }
-    val events = async { readEffectiveEvents() }
+    val runtimeActivations = async { readRuntimeActivations() }
     val loadedConfigs = configs.await()
     DashboardState(
         status = status.await(),
         version = version.await(),
         globalConfig = global.await(),
         enabledApps = countEnabledAppConfigs(loadedConfigs),
-        effectiveEvents = events.await(),
+        runtimeActivations = runtimeActivations.await(),
     )
   }
 
@@ -70,11 +70,11 @@ class SrxRepository(
     )
   }
 
-  suspend fun readDashboardCounts(): Pair<Int, Int> = coroutineScope {
+  suspend fun readDashboardCounts(): Pair<Int, String> = coroutineScope {
     val configs = async { readConfiguredAppConfigs(force = true) }
-    val events = async { readEffectiveEvents() }
+    val runtimeActivations = async { readRuntimeActivations() }
     val enabledApps = countEnabledAppConfigs(configs.await())
-    enabledApps to events.await()
+    enabledApps to runtimeActivations.await()
   }
 
   suspend fun readGlobalConfig(): GlobalConfig {
@@ -270,6 +270,8 @@ class SrxRepository(
   suspend fun clearLogs(): Boolean {
     return fileStore.clearFileMonitorLog()
   }
+
+  suspend fun resetRuntimeStats(): Boolean = fileStore.resetRuntimeStats()
 
   suspend fun exportDiagnosticArchive(
       uri: Uri,
@@ -669,12 +671,8 @@ class SrxRepository(
 
   private suspend fun moduleVersion(): String = moduleController.version()
 
-  private suspend fun readEffectiveEvents(): Int {
-    val stats = readFile(StatsPath).trim().toIntOrNull()
-    if (stats != null && stats >= 0) return stats
-    return parseMonitorLogEntries(readFile(FileMonitorLogPath), filters = readFileMonitorFilters())
-        .count { it.ok }
-  }
+  private suspend fun readRuntimeActivations(): String =
+      parseRuntimeActivationCount(readFile(StatsPath))
 
   private fun resolveLogPackageLabel(packageName: String): String {
     if (packageName.isBlank() || packageName == "-") return packageName

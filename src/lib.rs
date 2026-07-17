@@ -16,4 +16,5 @@ mod mount_status_marker;
 mod platform;
 mod redirect;
 mod runtime_control;
+mod runtime_stats;
 mod zygisk;

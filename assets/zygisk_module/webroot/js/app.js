@@ -35,6 +35,7 @@
     dashboardRequestId: 0,
     dashboardCountsRequestId: 0,
     dashboardLastCountsRefreshAt: 0,
+    runtimeActivationExact: "0",
     appListRequestId: 0,
     renderedAppListId: 0,
     autoTemplateFallbackNoticeId: "",
@@ -186,7 +187,6 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
   const FILE_MONITOR_LOG = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
-  const FILE_MONITOR_LOG_TAIL_LINES = 2000;
   const DASHBOARD_REFRESH_THROTTLE_MS = 1200;
   const BACKUP_MAGIC = "storage.redirect.x.backup";
   const BACKUP_SCHEMA_VERSION = 2;
@@ -765,27 +765,26 @@
     const run = async () => {
       try {
         await Api.ensureLogCollectors?.();
-        const [configuredConfigs, monitorLogRaw] = await Promise.all([
+        const [configuredConfigs, runtimeActivations] = await Promise.all([
           Api.readConfiguredAppConfigs({ force: true }),
-          Api.readStatsCount().then((value) =>
-            value == null
-              ? Api.readFileTail
-                ? Api.readFileTail(FILE_MONITOR_LOG, FILE_MONITOR_LOG_TAIL_LINES)
-                : Api.readFile(FILE_MONITOR_LOG)
-              : String(value),
-          ),
+          Api.readStatsCount(),
         ]);
         if (State.currentPage !== requestPage || State.dashboardCountsRequestId !== requestId)
           return;
         const counts = countConfiguredProfiles(configuredConfigs);
-        $("#statAppCount").textContent = counts.enabled;
-        $("#statEnabledAppCount").textContent = normalizeDashboardCount(monitorLogRaw);
+        State.runtimeActivationExact = runtimeActivations;
+        setDashboardCountValue("statAppCount", counts.enabled);
+        setDashboardCountValue(
+          "statEnabledAppCount",
+          Api.formatCompactRuntimeActivationCount(runtimeActivations),
+          runtimeActivations,
+        );
         setDashboardCountLoading("statAppCount", false);
         setDashboardCountLoading("statEnabledAppCount", false);
       } catch {
         if (State.currentPage === requestPage && State.dashboardCountsRequestId === requestId) {
-          $("#statAppCount").textContent = "--";
-          $("#statEnabledAppCount").textContent = "--";
+          setDashboardCountValue("statAppCount", "--");
+          setDashboardCountValue("statEnabledAppCount", "--");
           setDashboardCountLoading("statAppCount", false);
           setDashboardCountLoading("statEnabledAppCount", false);
         }
@@ -802,11 +801,102 @@
     el.setAttribute("aria-busy", loading ? "true" : "false");
   }
 
+  function setDashboardCountValue(id, value, exactValue) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const text = String(value);
+    el.textContent = text;
+    if (exactValue != null && String(exactValue) !== text) el.title = String(exactValue);
+    else el.removeAttribute("title");
+  }
+
+  function showRuntimeActivationDetails() {
+    const exactValue = State.runtimeActivationExact || "0";
+    showModalWithHistory(
+      '<div class="modal-title">生效次数</div>' +
+        '<div class="runtime-stats-exact">' +
+        escapeHtml(exactValue) +
+        "</div>" +
+        '<div class="modal-actions"><button class="btn btn-primary modal-close" type="button">关闭</button></div>',
+      { backdropClose: true },
+    );
+    document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
+  }
+
+  function showResetRuntimeStatsDialog() {
+    showModalWithHistory(
+      '<div class="modal-title">清除生效次数</div>' +
+        '<div class="modal-hint runtime-stats-reset-hint">清除当前生效次数并从 0 重新统计？此操作不会修改应用配置或重定向状态。</div>' +
+        '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="resetRuntimeStatsConfirm" type="button">清除</button></div>',
+    );
+    document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
+    document.getElementById("resetRuntimeStatsConfirm")?.addEventListener("click", async () => {
+      const button = document.getElementById("resetRuntimeStatsConfirm");
+      if (button) button.disabled = true;
+      try {
+        await Api.resetRuntimeStats();
+        State.runtimeActivationExact = "0";
+        setDashboardCountValue("statEnabledAppCount", "0", "0");
+        closeActiveModal();
+        Theme.showToast("生效次数已清零", "success");
+        refreshDashboardCounts({ force: true });
+      } catch {
+        if (button) button.disabled = false;
+        Theme.showToast("生效次数清零失败", "error");
+      }
+    });
+  }
+
+  function initRuntimeActivationInteractions() {
+    const metric = document.getElementById("runtimeActivationMetric");
+    if (!metric) return;
+    let timer = null;
+    let longPressed = false;
+    let startX = 0;
+    let startY = 0;
+    const cancel = () => {
+      clearTimeout(timer);
+      timer = null;
+    };
+    metric.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      longPressed = false;
+      startX = event.clientX;
+      startY = event.clientY;
+      cancel();
+      timer = setTimeout(() => {
+        longPressed = true;
+        showResetRuntimeStatsDialog();
+      }, 480);
+    });
+    metric.addEventListener("pointermove", (event) => {
+      if (Math.abs(event.clientX - startX) > 8 || Math.abs(event.clientY - startY) > 8) cancel();
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach((name) =>
+      metric.addEventListener(name, cancel),
+    );
+    metric.addEventListener("click", (event) => {
+      if (longPressed) {
+        event.preventDefault();
+        longPressed = false;
+        return;
+      }
+      showRuntimeActivationDetails();
+    });
+    metric.addEventListener("contextmenu", (event) => event.preventDefault());
+    metric.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        showRuntimeActivationDetails();
+      }
+    });
+  }
+
   function renderDashboardPlaceholders() {
     if (!$("#statAppCount")?.textContent || $("#statAppCount")?.textContent === "--")
-      $("#statAppCount").textContent = "0";
+      setDashboardCountValue("statAppCount", "0");
     if (!$("#statEnabledAppCount")?.textContent || $("#statEnabledAppCount")?.textContent === "--")
-      $("#statEnabledAppCount").textContent = "0";
+      setDashboardCountValue("statEnabledAppCount", "0");
     if (
       !$("#moduleVersionDisplay")?.textContent ||
       $("#moduleVersionDisplay")?.textContent === "--"
@@ -3735,7 +3825,7 @@
           "详细日志",
           "verboseLogging",
           State.globalConfig.verbose_logging_enabled === true,
-          "开启后立即记录 Rust、Java、Stats 和诊断采集日志",
+          "开启后立即记录 Rust、Java 和诊断采集日志",
         ) +
         switchRow(
           "新应用自动重定向",
@@ -5509,58 +5599,12 @@
     return coalesceLogEntries(entries, mappingPaths);
   }
 
-  function countEffectiveMonitorEntries(raw) {
-    return countDashboardMonitorEntries(raw);
-  }
-
-  function normalizeDashboardCount(raw) {
-    const text = String(raw || "").trim();
-    if (!text) return "0";
-    if (/^\d+$/.test(text)) return text;
-    return String(countDashboardMonitorEntries(text));
-  }
-
-  function countDashboardMonitorEntries(raw) {
-    const lines = String(raw || "")
-      .trim()
-      .split("\n")
-      .filter(Boolean);
-    const entries = lines.map(parseLogLine).filter(Boolean);
-    const mappingPaths = collectMappingPaths(entries);
-    let count = 0;
-    coalesceLogEntries(entries, mappingPaths).forEach((entry) => {
-      if (!shouldHideCompanionLogEntry(entry, mappingPaths) && isEffectiveMonitorEntry(entry))
-        count += 1;
-    });
-    return count;
-  }
-
   function initDashboardRefreshHooks() {
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refreshDashboardCountsIfVisible();
     });
     window.addEventListener("pageshow", () => refreshDashboardCountsIfVisible());
     window.addEventListener("focus", () => refreshDashboardCountsIfVisible());
-  }
-
-  function isEffectiveMonitorEntry(entry) {
-    if (!entry || entry.status !== "success") return false;
-    const extras = entry.extras || {};
-    const source = String(extras.source || "").toLowerCase();
-    if (source === "allowed_real_path") return false;
-    if (
-      source === "path_mapping" ||
-      source === "sandbox_path" ||
-      source === "redirect_root" ||
-      source === "media_store_pending_commit"
-    ) {
-      return true;
-    }
-    if (source) return false;
-
-    const fromPath = normalizeLogLandingPath(entry.fromPath || "");
-    const toPath = normalizeLogLandingPath(entry.landingPath || entry.path || "");
-    return !!fromPath && !!toPath && fromPath !== toPath;
   }
 
   function hydrateLogPackageInfo(lines) {
@@ -6666,6 +6710,7 @@
     initLogSearch();
     initPullRefreshControls();
     initDashboardRefreshHooks();
+    initRuntimeActivationInteractions();
     loadDashboard();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

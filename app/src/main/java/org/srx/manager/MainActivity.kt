@@ -43,6 +43,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
@@ -228,8 +230,17 @@ private fun SrxManagerApp(
     }
   }
   LaunchedEffect(page) {
-    if (page == Page.Logs && navBackStack.lastOrNull() == SrxRoute.Main) {
-      viewModel.refreshLogs()
+    if (navBackStack.lastOrNull() == SrxRoute.Main) {
+      when (page) {
+        Page.Dashboard -> viewModel.refreshDashboardCounts()
+        Page.Logs -> viewModel.refreshLogs()
+        else -> Unit
+      }
+    }
+  }
+  LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+    if (page == Page.Dashboard && navBackStack.lastOrNull() == SrxRoute.Main) {
+      viewModel.refreshDashboardCounts()
     }
   }
   LaunchedEffect(page, navBackStack.size) {
@@ -385,6 +396,7 @@ private fun SrxManagerApp(
                 bottomPadding = padding.calculateBottomPadding(),
                 onToggleModule = { viewModel.setModuleEnabled(it) },
                 onRestartMediaProvider = viewModel::restartMediaProvider,
+                onResetRuntimeStats = viewModel::resetRuntimeStats,
                 onOpenAbout = { pushRoute(SrxRoute.About) },
                 onOpenUpdate = { pushRoute(SrxRoute.Update) },
             )

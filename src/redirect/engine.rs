@@ -590,7 +590,6 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
 pub fn record_redirect_hit(hub: &InterceptHub, op_name: &str, from_path: &str, to_path: &str) {
     log::trace!("{}: {} -> {}", op_name, from_path, to_path);
     hub.increment_total_redirected();
-    hub.increment_global_redirect_count();
 }
 
 fn reload_writer_config_by_fingerprint(reload_started_ms: i64) -> i64 {

@@ -7,9 +7,8 @@ use crate::monitor::AuditTrail;
 use crate::redirect::policy;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-const STATS_TAG: &str = "Stats";
 const SELF_MODULE_PATH: &str = "libsrx_core.so";
 const SQLITE_MODULE_BASENAME: &str = "libsqlite.so";
 const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
@@ -30,8 +29,6 @@ const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
     "libadreno_utils.so",
     "libgsl.so",
 ];
-const FLUSH_THRESHOLD: i32 = 256;
-const FLUSH_INTERVAL_MS: i64 = 10_000;
 const LATE_HOOK_REFRESH_INTERVAL_MS: i64 = 1000;
 const JIT_CACHE_MEMFD_PREFIX: &str = "/memfd:jit-cache";
 const UNSTABLE_CALLER_MODULE_BASENAMES: &[&str] = &[
@@ -67,8 +64,6 @@ pub struct InterceptHub {
     is_monitor_only: AtomicBool,
     is_monitor_enabled: AtomicBool,
     stats: AtomicStats,
-    pending_redirect_count: AtomicI32,
-    last_flush_ms: AtomicI64,
     last_late_hook_refresh_ms: AtomicI64,
 }
 
@@ -499,24 +494,6 @@ impl InterceptHub {
         );
     }
 
-    // 按阈值或时间双触发刷盘，避免频繁写入
-    pub fn increment_global_redirect_count(&self) {
-        if !crate::logging::is_debug_logging_enabled() {
-            return;
-        }
-        let pending = self.pending_redirect_count.fetch_add(1, Ordering::Relaxed) + 1;
-        if pending >= FLUSH_THRESHOLD {
-            self.flush_to_global_stats();
-            return;
-        }
-
-        let now_ms = crate::platform::paths::monotonic_ms();
-        let last_flush = self.last_flush_ms.load(Ordering::Relaxed);
-        if now_ms - last_flush >= FLUSH_INTERVAL_MS {
-            self.flush_to_global_stats();
-        }
-    }
-
     pub fn increment_open_calls(&self) {
         if crate::logging::is_debug_logging_enabled() {
             self.stats.open_calls.fetch_add(1, Ordering::Relaxed);
@@ -575,22 +552,6 @@ impl InterceptHub {
         if crate::logging::is_debug_logging_enabled() {
             self.stats.total_redirected.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    // 通过私有日志通道批量交给守护进程汇总。
-    fn flush_to_global_stats(&self) {
-        if !crate::logging::is_debug_logging_enabled() {
-            return;
-        }
-        let pending = self.pending_redirect_count.swap(0, Ordering::Relaxed);
-        if pending <= 0 {
-            return;
-        }
-
-        self.last_flush_ms
-            .store(crate::platform::paths::monotonic_ms(), Ordering::Relaxed);
-
-        log::info!(target: STATS_TAG, "+{}", pending);
     }
 }
 
@@ -714,8 +675,6 @@ static INTERCEPT_HUB: InterceptHub = InterceptHub {
     is_monitor_only: AtomicBool::new(false),
     is_monitor_enabled: AtomicBool::new(false),
     stats: AtomicStats::new(),
-    pending_redirect_count: AtomicI32::new(0),
-    last_flush_ms: AtomicI64::new(0),
     last_late_hook_refresh_ms: AtomicI64::new(0),
 };
 

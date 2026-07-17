@@ -3,6 +3,7 @@ package org.srx.manager.ui.screen
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +53,7 @@ import org.srx.manager.PageHeader
 import org.srx.manager.R
 import org.srx.manager.data.GlobalConfig
 import org.srx.manager.data.ModuleStatus
+import org.srx.manager.data.formatCompactRuntimeActivationCount
 import org.srx.manager.glassPanel
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.isSrxGlassBackdropEnabled
@@ -76,11 +78,14 @@ internal fun DashboardScreen(
     bottomPadding: Dp,
     onToggleModule: (Boolean) -> Unit,
     onRestartMediaProvider: () -> Unit,
+    onResetRuntimeStats: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenUpdate: () -> Unit,
 ) {
   var pendingModuleToggle by remember { mutableStateOf<Boolean?>(null) }
   var pendingMediaProviderRestart by remember { mutableStateOf(false) }
+  var showRuntimeActivationDetails by remember { mutableStateOf(false) }
+  var pendingRuntimeStatsReset by remember { mutableStateOf(false) }
   LazyColumn(
       modifier = Modifier.fillMaxSize().overScrollVertical(),
       contentPadding =
@@ -103,8 +108,11 @@ internal fun DashboardScreen(
           status = state.dashboard.status,
           globalConfig = state.dashboard.globalConfig,
           enabledApps = state.dashboard.enabledApps,
-          eventCount = state.dashboard.effectiveEvents,
+          runtimeActivations =
+              formatCompactRuntimeActivationCount(state.dashboard.runtimeActivations),
           onToggleModule = { pendingModuleToggle = it },
+          onRuntimeActivationClick = { showRuntimeActivationDetails = true },
+          onRuntimeActivationLongClick = { pendingRuntimeStatsReset = true },
       )
     }
     item {
@@ -145,6 +153,21 @@ internal fun DashboardScreen(
         },
     )
   }
+  if (showRuntimeActivationDetails) {
+    RuntimeActivationDetailsDialog(
+        exactValue = state.dashboard.runtimeActivations,
+        onDismiss = { showRuntimeActivationDetails = false },
+    )
+  }
+  if (pendingRuntimeStatsReset) {
+    ResetRuntimeStatsConfirmDialog(
+        onDismiss = { pendingRuntimeStatsReset = false },
+        onConfirm = {
+          pendingRuntimeStatsReset = false
+          onResetRuntimeStats()
+        },
+    )
+  }
 }
 
 private data class StatusUi(
@@ -169,8 +192,10 @@ private fun ModuleStatusCard(
     status: ModuleStatus,
     globalConfig: GlobalConfig,
     enabledApps: Int,
-    eventCount: Int,
+    runtimeActivations: String,
     onToggleModule: (Boolean) -> Unit,
+    onRuntimeActivationClick: () -> Unit,
+    onRuntimeActivationLongClick: () -> Unit,
 ) {
   val colors = MiuixTheme.colorScheme
   val statusUi = moduleStatusUi(status)
@@ -237,7 +262,17 @@ private fun ModuleStatusCard(
                 .height(52.dp)
                 .background(colors.onSurface.copy(alpha = if (isSrxDarkTheme()) 0.045f else 0.06f)),
         )
-        MetricBox("生效次数", eventCount.toString(), Modifier.weight(1f))
+        MetricBox(
+            "生效次数",
+            runtimeActivations,
+            Modifier.weight(1f)
+                .combinedClickable(
+                    onClickLabel = "查看精确生效次数",
+                    onLongClickLabel = "清除生效次数",
+                    onLongClick = onRuntimeActivationLongClick,
+                    onClick = onRuntimeActivationClick,
+                ),
+        )
       }
     }
   }
@@ -349,13 +384,69 @@ private fun RestartMediaProviderConfirmDialog(
 }
 
 @Composable
+private fun RuntimeActivationDetailsDialog(exactValue: String, onDismiss: () -> Unit) {
+  CenteredDialog(show = true, onDismiss = onDismiss) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(22.dp),
+    ) {
+      Text(
+          text = "生效次数",
+          color = MiuixTheme.colorScheme.onSurface,
+          fontSize = 18.sp,
+          fontWeight = FontWeight.Bold,
+      )
+      Text(
+          text = exactValue,
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurface,
+          fontSize = if (exactValue.length > 16) 17.sp else 22.sp,
+          fontWeight = FontWeight.Bold,
+          textAlign = TextAlign.Center,
+          maxLines = 1,
+      )
+      GlassTextButton("关闭", onDismiss, modifier = Modifier.fillMaxWidth(), primary = true)
+    }
+  }
+}
+
+@Composable
+private fun ResetRuntimeStatsConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+  CenteredDialog(show = true, onDismiss = onDismiss) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(22.dp),
+    ) {
+      Text(
+          text = "清除当前生效次数并从 0 重新统计？此操作不会修改应用配置或重定向状态。",
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          fontSize = 15.sp,
+          lineHeight = 22.sp,
+          fontWeight = FontWeight.Medium,
+          textAlign = TextAlign.Center,
+      )
+      Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(14.dp),
+      ) {
+        GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
+        GlassTextButton("清除", onConfirm, modifier = Modifier.weight(1f), primary = true)
+      }
+    }
+  }
+}
+
+@Composable
 private fun MetricBox(label: String, value: String, modifier: Modifier) {
   Box(
       modifier = modifier.padding(vertical = 8.dp),
       contentAlignment = Alignment.Center,
   ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-      Text(value, style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.Bold)
+      Text(value, style = MiuixTheme.textStyles.title2, fontWeight = FontWeight.Bold, maxLines = 1)
       Text(label, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 12.sp)
     }
   }

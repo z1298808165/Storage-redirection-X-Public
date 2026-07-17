@@ -122,6 +122,15 @@ class RootFileStore(
     return result.isSuccess
   }
 
+  suspend fun resetRuntimeStats(): Boolean {
+    val result =
+        shell.exec(
+            "[ -r ${shellQuote(SrxCtlPath)} ] && " +
+                "/system/bin/sh ${shellQuote(SrxCtlPath)} reset-stats"
+        )
+    return result.isSuccess
+  }
+
   suspend fun createDiagnosticArchive(
       onProgress: (suspend (DiagnosticArchiveProgress) -> Unit)? = null
   ): String? {

@@ -152,16 +152,17 @@ class SrxViewModel(
     }
   }
 
-  private fun refreshDashboardCounts() {
+  fun refreshDashboardCounts() {
+    if (!_state.value.rootGranted) return
     viewModelScope.launch {
       runCatching { repository.readDashboardCounts() }
-          .onSuccess { (enabledApps, effectiveEvents) ->
+          .onSuccess { (enabledApps, runtimeActivations) ->
             _state.value =
                 _state.value.copy(
                     dashboard =
                         _state.value.dashboard.copy(
                             enabledApps = enabledApps,
-                            effectiveEvents = effectiveEvents,
+                            runtimeActivations = runtimeActivations,
                         ),
                 )
           }
@@ -739,6 +740,29 @@ class SrxViewModel(
         showMessage("日志已清空")
       } else {
         showMessage("清空失败")
+      }
+    }
+  }
+
+  fun resetRuntimeStats() {
+    if (!_state.value.rootGranted) return
+    viewModelScope.launch {
+      val ok = repository.resetRuntimeStats()
+      if (ok) {
+        runCatching { repository.readDashboardCounts() }
+            .onSuccess { (enabledApps, runtimeActivations) ->
+              _state.value =
+                  _state.value.copy(
+                      dashboard =
+                          _state.value.dashboard.copy(
+                              enabledApps = enabledApps,
+                              runtimeActivations = runtimeActivations,
+                          ),
+                  )
+            }
+        showMessage("生效次数已清零")
+      } else {
+        showMessage("生效次数清零失败")
       }
     }
   }

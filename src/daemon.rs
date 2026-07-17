@@ -269,7 +269,11 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         }
         match plan.request.operation {
             MountOperation::Reload => {
+                let had_mount_state = has_mount_state(&plan.request);
                 if execute_mount_request(&plan.request) {
+                    if !had_mount_state && has_mount_state(&plan.request) {
+                        crate::runtime_stats::record_runtime_activation();
+                    }
                     applied += 1;
                 }
             }

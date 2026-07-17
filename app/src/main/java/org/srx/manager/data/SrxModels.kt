@@ -148,7 +148,7 @@ data class DashboardState(
     val version: String = "",
     val globalConfig: GlobalConfig = GlobalConfig(),
     val enabledApps: Int = 0,
-    val effectiveEvents: Int = 0,
+    val runtimeActivations: String = "0",
 )
 
 @Serializable

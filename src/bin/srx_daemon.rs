@@ -32,6 +32,8 @@ mod redirect {
 }
 #[path = "../runtime_control.rs"]
 mod runtime_control;
+#[path = "../runtime_stats.rs"]
+mod runtime_stats;
 
 fn main() {
     let mut args = std::env::args();

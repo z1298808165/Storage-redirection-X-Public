@@ -13,6 +13,8 @@ const SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 const RUNNING_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/running.log";
 const FILE_MONITOR_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
 const STATS_FILE: &str = "/data/adb/modules/storage.redirect.x/stats";
+const STATS_TEMP_FILE: &str = "/data/adb/modules/storage.redirect.x/.stats.tmp";
+const STATS_RESET_ACK_FILE: &str = "/data/adb/modules/storage.redirect.x/.stats.reset.ok";
 const MAX_RUNNING_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MONITOR_BYTES: u64 = 1024 * 1024;
 const LOG_BACKUPS: usize = 2;
@@ -26,6 +28,8 @@ const TAG_STATS: &str = "Stats";
 const TAG_CONTROL: &str = "Control";
 const CONTROL_CLEAR_MONITOR: &str = "clear-monitor";
 const CONTROL_FLUSH_ALL: &str = "flush-all";
+const CONTROL_RESET_STATS: &str = "reset-stats";
+const STATS_SCHEMA: &str = "2";
 
 pub fn start() -> io::Result<()> {
     let fd = bind_log_socket()?;
@@ -175,7 +179,7 @@ fn socket_addr() -> io::Result<(sockaddr_un, libc::socklen_t)> {
 struct LogState {
     running: RollingLog,
     monitor: RollingLog,
-    stats_total: u64,
+    runtime_activations: u64,
     stats_dirty: bool,
     last_flush: Instant,
 }
@@ -185,7 +189,7 @@ impl LogState {
         Ok(Self {
             running: RollingLog::open(RUNNING_LOG, MAX_RUNNING_BYTES)?,
             monitor: RollingLog::open(FILE_MONITOR_LOG, MAX_MONITOR_BYTES)?,
-            stats_total: read_stats_total(),
+            runtime_activations: read_runtime_activations(),
             stats_dirty: false,
             last_flush: Instant::now(),
         })
@@ -215,7 +219,7 @@ impl LogState {
         if delta == 0 {
             return;
         }
-        self.stats_total = self.stats_total.saturating_add(delta);
+        self.runtime_activations = self.runtime_activations.saturating_add(delta);
         self.stats_dirty = true;
     }
 
@@ -223,14 +227,23 @@ impl LogState {
         match command {
             CONTROL_CLEAR_MONITOR => self.monitor.clear(),
             CONTROL_FLUSH_ALL => self.flush_pending(),
+            CONTROL_RESET_STATS => self.reset_stats(),
             _ => {}
+        }
+    }
+
+    fn reset_stats(&mut self) {
+        if persist_runtime_activations(0).is_ok() {
+            self.runtime_activations = 0;
+            self.stats_dirty = false;
+            let _ = fs::write(STATS_RESET_ACK_FILE, b"ok\n");
         }
     }
 
     fn flush_pending(&mut self) {
         self.running.flush();
         self.monitor.flush();
-        if self.stats_dirty && fs::write(STATS_FILE, format!("{}\n", self.stats_total)).is_ok() {
+        if self.stats_dirty && persist_runtime_activations(self.runtime_activations).is_ok() {
             self.stats_dirty = false;
         }
         self.last_flush = Instant::now();
@@ -411,9 +424,36 @@ fn timestamp_text() -> String {
     String::from_utf8_lossy(&buffer[..written]).into_owned()
 }
 
-fn read_stats_total() -> u64 {
-    fs::read_to_string(STATS_FILE)
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+fn read_runtime_activations() -> u64 {
+    let Ok(text) = fs::read_to_string(STATS_FILE) else {
+        return 0;
+    };
+    let mut schema = None;
+    let mut runtime_activations = None;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "schema" => schema = Some(value.trim()),
+            "runtime_activations" => runtime_activations = value.trim().parse::<u64>().ok(),
+            _ => {}
+        }
+    }
+    if schema == Some(STATS_SCHEMA) {
+        runtime_activations.unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+fn format_stats(runtime_activations: u64) -> String {
+    format!("schema={STATS_SCHEMA}\nruntime_activations={runtime_activations}\n")
+}
+
+fn persist_runtime_activations(runtime_activations: u64) -> io::Result<()> {
+    let mut file = File::create(STATS_TEMP_FILE)?;
+    file.write_all(format_stats(runtime_activations).as_bytes())?;
+    file.sync_all()?;
+    fs::rename(STATS_TEMP_FILE, STATS_FILE)
 }

@@ -23,6 +23,8 @@ const DIAGNOSTIC_ARCHIVE_SCRIPT = MODULE_DIR + "/service.d/diagnostic_archive.sh
 const LIST_APPS_DEX = MODULE_DIR + "/bin/list_apps.dex";
 const LIST_APPS_OUTPUT = "/data/Namespace-Proxy/list.config";
 const FILE_MONITOR_LOG = LOGS_DIR + "/file_monitor.log";
+const RUNTIME_STATS_SCHEMA = "2";
+const MAX_RUNTIME_ACTIVATION_COUNT = "18446744073709551615";
 const MODULE_LOG_PACKAGE = "storage.redirect.x";
 const DEFAULT_RELEASE_REPOSITORY = "z1298808165/Storage-redirection-X-Public";
 const DEFAULT_OFFICIAL_RELEASE_REPOSITORY = "Kindness-Kismet/Storage-redirection-X-Public";
@@ -753,6 +755,59 @@ function findReleaseUpdate(manifest, repository, currentVersionName, channel) {
   };
 }
 
+function parseRuntimeActivationCount(raw) {
+  const values = Object.create(null);
+  String(raw || "")
+    .split("\n")
+    .forEach((line) => {
+      const separator = line.indexOf("=");
+      if (separator <= 0) return;
+      values[line.slice(0, separator).trim()] = line.slice(separator + 1).trim();
+    });
+  if (values.schema !== RUNTIME_STATS_SCHEMA) return "0";
+  const count = values.runtime_activations || "";
+  if (!/^\d+$/.test(count)) return "0";
+  const normalized = count.replace(/^0+(?=\d)/, "");
+  if (
+    normalized.length > MAX_RUNTIME_ACTIVATION_COUNT.length ||
+    (normalized.length === MAX_RUNTIME_ACTIVATION_COUNT.length &&
+      normalized > MAX_RUNTIME_ACTIVATION_COUNT)
+  ) {
+    return "0";
+  }
+  return normalized;
+}
+
+function formatCompactRuntimeActivationCount(raw) {
+  const normalized = String(raw || "").replace(/^0+(?=\d)/, "");
+  if (!/^\d+$/.test(normalized)) return "0";
+  if (
+    normalized.length > MAX_RUNTIME_ACTIVATION_COUNT.length ||
+    (normalized.length === MAX_RUNTIME_ACTIVATION_COUNT.length &&
+      normalized > MAX_RUNTIME_ACTIVATION_COUNT)
+  ) {
+    return "0";
+  }
+  const units = ["", "K", "M", "B", "T", "Q", "Qi"];
+  let unitIndex = Math.min(Math.floor((normalized.length - 1) / 3), units.length - 1);
+  if (unitIndex === 0) return normalized;
+
+  const wholeLength = normalized.length - unitIndex * 3;
+  let whole = Number(normalized.slice(0, wholeLength));
+  let decimal = Number(normalized.charAt(wholeLength) || "0");
+  if (Number(normalized.charAt(wholeLength + 1) || "0") >= 5) decimal += 1;
+  if (decimal === 10) {
+    whole += 1;
+    decimal = 0;
+  }
+  if (whole === 1000 && unitIndex < units.length - 1) {
+    whole = 1;
+    decimal = 0;
+    unitIndex += 1;
+  }
+  return `${whole}${decimal === 0 ? "" : `.${decimal}`}${units[unitIndex]}`;
+}
+
 const Api = {
   _packageInfo: new Map(),
   _compatAppListCache: new Map(),
@@ -1476,16 +1531,18 @@ const Api = {
     }
   },
 
-  /** Read the cumulative success counter used by the dashboard. */
+  /** Read the cumulative redirect-runtime activation count used by the dashboard. */
   async readStatsCount() {
     try {
       const out = await this.readFile(MODULE_STATS_FILE);
-      const count = Number.parseInt(String(out || "").trim(), 10);
-      return Number.isFinite(count) && count >= 0 ? count : null;
+      return parseRuntimeActivationCount(out);
     } catch {
-      return null;
+      return "0";
     }
   },
+
+  parseRuntimeActivationCount,
+  formatCompactRuntimeActivationCount,
 
   /** Write global config */
   async writeGlobalConfig(config) {
@@ -2004,6 +2061,16 @@ const Api = {
     );
   },
 
+  async resetRuntimeStats() {
+    if (!hasNativeWebUiBridge()) {
+      this._mockStore.statsCount = 0;
+      return;
+    }
+    await this.exec(
+      "[ -r " + shellQuote(SRXCTL) + " ] && " + srxCtlCommand("reset-stats") + " || exit 1",
+    );
+  },
+
   /** Count configured apps */
   async getConfiguredAppCount() {
     const apps = await this.listConfiguredApps();
@@ -2394,7 +2461,8 @@ const Api = {
           return JSON.stringify(this._mockStore.monitorFilters || DEFAULT_FILE_MONITOR_FILTERS);
         if (path === TEMPLATES_CONFIG)
           return JSON.stringify({ templates: this._mockStore.templates || [] });
-        if (path === MODULE_STATS_FILE) return String(this._mockStore.statsCount || 0);
+        if (path === MODULE_STATS_FILE)
+          return `schema=${RUNTIME_STATS_SCHEMA}\nruntime_activations=${String(this._mockStore.statsCount || 0)}\n`;
         if (path === FILE_MONITOR_LOG) {
           return this._mockFileMonitorLog();
         }
