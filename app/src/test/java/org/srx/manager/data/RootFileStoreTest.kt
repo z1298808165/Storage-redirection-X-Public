@@ -218,6 +218,20 @@ class RootFileStoreTest {
   }
 
   @Test
+  fun resetRuntimeStatsUsesDaemonControl() = runBlocking {
+    val shell = CapturingShell(ShellResult(0, "", ""))
+    val store = RootFileStore(shell)
+
+    assertTrue(store.resetRuntimeStats())
+
+    assertEquals(
+        "[ -r ${shellQuote(SrxCtlPath)} ] && " +
+            "/system/bin/sh ${shellQuote(SrxCtlPath)} reset-stats",
+        shell.invocations.single().command,
+    )
+  }
+
+  @Test
   fun touchConfigTouchesAppsDirAndGlobalConfig() = runBlocking {
     val shell = CapturingShell()
     val store = RootFileStore(shell)

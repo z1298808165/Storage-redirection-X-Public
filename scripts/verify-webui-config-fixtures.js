@@ -86,6 +86,47 @@ assertDeepEqual(
   "v1.2.57",
   "update-version-falls-back-to-tag",
 );
+assertDeepEqual(
+  sandbox.window.Api.parseRuntimeActivationCount(
+    "schema=2\nruntime_activations=18446744073709551615\n",
+  ),
+  "18446744073709551615",
+  "runtime-activation-count-preserves-u64",
+);
+assertDeepEqual(
+  sandbox.window.Api.parseRuntimeActivationCount("1234\n"),
+  "0",
+  "runtime-activation-count-rejects-legacy-format",
+);
+assertDeepEqual(
+  sandbox.window.Api.parseRuntimeActivationCount("schema=2\nruntime_activations=invalid\n"),
+  "0",
+  "runtime-activation-count-rejects-invalid-value",
+);
+assertDeepEqual(
+  sandbox.window.Api.parseRuntimeActivationCount(
+    "schema=2\nruntime_activations=18446744073709551616\n",
+  ),
+  "0",
+  "runtime-activation-count-rejects-u64-overflow",
+);
+assertDeepEqual(
+  ["999", "1000", "1200", "10000", "999950", "100000000", "1000000000"].map(
+    sandbox.window.Api.formatCompactRuntimeActivationCount,
+  ),
+  ["999", "1K", "1.2K", "10K", "1M", "100M", "1B"],
+  "runtime-activation-count-uses-token-style-units",
+);
+assertDeepEqual(
+  sandbox.window.Api.formatCompactRuntimeActivationCount("18446744073709551615"),
+  "18.4Qi",
+  "runtime-activation-count-formats-u64-max",
+);
+assertDeepEqual(
+  sandbox.window.Api.formatCompactRuntimeActivationCount("18446744073709551616"),
+  "0",
+  "runtime-activation-count-compact-rejects-u64-overflow",
+);
 const toggleClasses = new Set();
 const toggleAttributes = {};
 const toggle = {
@@ -249,6 +290,22 @@ assertDeepEqual(
       darkSecondary: "#AABBCC",
     },
     "webui-system-accent-palette",
+  );
+  delete sandbox.window.LSPosedBridge;
+  sandbox.window.Api._mockStore.statsCount = 1200;
+  await sandbox.window.Api.resetRuntimeStats();
+  assertDeepEqual(await sandbox.window.Api.readStatsCount(), "0", "runtime-activation-count-reset");
+  let resetCommand = "";
+  sandbox.window.LSPosedBridge = { exec: () => "" };
+  sandbox.window.Api.exec = async (command) => {
+    resetCommand = command;
+    return "";
+  };
+  await sandbox.window.Api.resetRuntimeStats();
+  assertDeepEqual(
+    resetCommand.includes("reset-stats"),
+    true,
+    "runtime-activation-count-reset-uses-native-control",
   );
   console.log("WebUI config fixtures verified");
 })().catch((error) => {
