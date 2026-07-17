@@ -619,6 +619,29 @@ body::before {
   opacity: 0.72;
 }
 
+[data-theme="dark"] .liquid-surface::before,
+[data-theme="dark"] .bottom-nav::before,
+[data-theme="dark"] .app-batch-bar::before,
+[data-theme="dark"] .modal-sheet::before,
+[data-theme="dark"] .dialog-box::before,
+[data-theme="dark"] .toast::before,
+[data-theme="dark"] .search-input-wrapper::before,
+[data-theme="dark"] .filter-group::before,
+[data-theme="dark"] .app-config-header::before,
+[data-theme="dark"] .status-card::before,
+[data-theme="dark"] .action-list::before,
+[data-theme="dark"] .app-list::before,
+[data-theme="dark"] .config-group::before,
+[data-theme="dark"] .theme-selector::before,
+[data-theme="dark"] .theme-settings-card::before,
+[data-theme="dark"] .template-card::before,
+[data-theme="dark"] .backup-restore-card::before,
+[data-theme="dark"] .log-card::before,
+[data-theme="dark"] .app-user-menu::before,
+[data-theme="dark"] .license-item::before {
+  content: none;
+}
+
 body.liquid-glass-disabled .liquid-surface::before,
 body.liquid-glass-disabled .bottom-nav::before,
 body.liquid-glass-disabled .app-batch-bar::before,
@@ -811,6 +834,10 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
   border: 1px solid rgba(255,255,255,0.2);
   box-shadow: inset 0 -5px 12px rgba(38, 93, 137, 0.08);
   pointer-events: none;
+}
+[data-theme="dark"] .nav-indicator::before,
+[data-theme="dark"] .nav-indicator::after {
+  content: none;
 }
 .bottom-nav.is-pressing { --nav-panel-scale: 1.018; }
 .bottom-nav.is-moving { --nav-panel-scale: 1.01; }
