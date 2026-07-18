@@ -35,6 +35,8 @@
     dashboardRequestId: 0,
     dashboardCountsRequestId: 0,
     dashboardLastCountsRefreshAt: 0,
+    dashboardShown: false,
+    dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
     appListRequestId: 0,
     renderedAppListId: 0,
@@ -287,7 +289,9 @@
     if (page === "logs" && !opts.preserveLogScroll) State.shouldRestoreLogListScroll = false;
     if (page !== "app-config") State.templateEditor = null;
     State.currentPage = page;
-    Theme.navigateTo(page, opts.themeOptions || {});
+    const themeOptions = Object.assign({}, opts.themeOptions || {});
+    if (page === "dashboard" && State.dashboardShown) themeOptions.noAnimation = true;
+    Theme.navigateTo(page, themeOptions);
     loadPage(page);
     if (!opts.skipHistory) {
       if (opts.replaceHistory) replaceHistory(page, opts.historyState || {});
@@ -417,7 +421,8 @@
       if (page !== "app-config") State.currentApp = null;
       Theme.navigateTo(page, {
         preserveScroll: page === "apps" || page === "logs",
-        noAnimation: returningToApps || returningToLogs,
+        noAnimation:
+          returningToApps || returningToLogs || (page === "dashboard" && State.dashboardShown),
       });
       loadPage(page);
     });
@@ -710,6 +715,13 @@
 
   // ═══ Dashboard ═══
   async function loadDashboard() {
+    if (!State.dashboardShown) {
+      State.dashboardShown = true;
+      const card = document.querySelector(".module-status-card");
+      const settleCard = () => card?.classList.add("is-settled");
+      card?.addEventListener("animationend", settleCard, { once: true });
+      setTimeout(settleCard, 360);
+    }
     renderQuickActions();
     renderDashboardPlaceholders();
     refreshDashboardCounts({ force: true });
@@ -760,8 +772,11 @@
     const requestPage = State.currentPage;
     const requestId = ++State.dashboardCountsRequestId;
     State.dashboardLastCountsRefreshAt = Date.now();
-    setDashboardCountLoading("statAppCount", true);
-    setDashboardCountLoading("statEnabledAppCount", true);
+    const showInitialLoading = !State.dashboardCountsLoaded;
+    if (showInitialLoading) {
+      setDashboardCountLoading("statAppCount", true);
+      setDashboardCountLoading("statEnabledAppCount", true);
+    }
     const run = async () => {
       try {
         await Api.ensureLogCollectors?.();
@@ -772,6 +787,7 @@
         if (State.currentPage !== requestPage || State.dashboardCountsRequestId !== requestId)
           return;
         const counts = countConfiguredProfiles(configuredConfigs);
+        State.dashboardCountsLoaded = true;
         State.runtimeActivationExact = runtimeActivations;
         setDashboardCountValue("statAppCount", counts.enabled);
         setDashboardCountValue(
@@ -783,8 +799,10 @@
         setDashboardCountLoading("statEnabledAppCount", false);
       } catch {
         if (State.currentPage === requestPage && State.dashboardCountsRequestId === requestId) {
-          setDashboardCountValue("statAppCount", "--");
-          setDashboardCountValue("statEnabledAppCount", "--");
+          if (!State.dashboardCountsLoaded) {
+            setDashboardCountValue("statAppCount", "--");
+            setDashboardCountValue("statEnabledAppCount", "--");
+          }
           setDashboardCountLoading("statAppCount", false);
           setDashboardCountLoading("statEnabledAppCount", false);
         }

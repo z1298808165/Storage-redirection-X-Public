@@ -1062,7 +1062,6 @@ const Theme = {
     if (target) {
       target.classList.toggle("no-animate", !!options?.noAnimation);
       target.classList.add("active");
-      if (options?.noAnimation) requestAnimationFrame(() => target.classList.remove("no-animate"));
       document.body.classList.toggle("about-active", page === "about");
       document.body.classList.toggle("apps-page-active", page === "apps");
       document.body.classList.toggle("logs-page-active", page === "logs");

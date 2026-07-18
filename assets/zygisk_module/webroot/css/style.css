@@ -562,6 +562,7 @@ body::before {
 .page { max-width: 680px; margin-inline: auto; }
 .page.active { animation: pageEnter 220ms ease both; }
 @keyframes pageEnter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.module-status-card.is-settled { animation: none; }
 .page-header { margin: 2px 0 18px; }
 .page-title { font-size: 28px; font-weight: 760; line-height: 1.14; }
 .page-eyebrow { display: block; margin-bottom: 4px; color: var(--color-text-tertiary); font-size: 11px; font-weight: 700; }
