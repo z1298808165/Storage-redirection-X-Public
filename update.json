@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.9",
-    "tag": "ci-build-29602407685-1",
-    "title": "CI Build 1.2.59-ci.9",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29602407685-1",
+    "version": "1.2.59-ci.10",
+    "tag": "ci-build-29621472062-1",
+    "title": "CI Build 1.2.59-ci.10",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29621472062-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29602407685-1/storage-redirect-x-manager-v1.2.59-ci.9.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29602407685-1/storage.redirect.x-v1.2.59-ci.9.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.9`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29482018902-1`\n- 当前提交：`81c89ef`\n\n## 模块更新\n\n### 增加了什么功能\n- 新增或增强 WebUI/管理界面能力：移除 WebUI 深色模式白色光斑。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## App 更新\n\n### 增加了什么功能\n- 新增或增强 WebUI/管理界面能力：修正详细日志范围说明。\n\n### 新功能怎么使用\n- 需要排障时在设置页的“模块设置”中打开 `详细日志`，定位结束后关闭即可立即停止相关记录。\n\n## 其它更新\n\n### 注意事项\n- 说明运行时生效次数统计口径。\n- 覆盖运行时生效次数解析与重置。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29621472062-1/storage-redirect-x-manager-v1.2.59-ci.10.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29621472062-1/storage.redirect.x-v1.2.59-ci.10.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.10`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29602407685-1`\n- 当前提交：`220bbb6`\n\n## 其它更新\n\n### 注意事项\n- 避免更新日志误报存储链路注意事项。"
   },
   "releases": []
 }
