@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -121,23 +122,13 @@ internal fun AppsScreen(
         label = "搜索应用名称或包名...",
     )
     Spacer(Modifier.height(12.dp))
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-      AppFilterGroup(
-          filter = state.filter,
-          onFilter = onFilter,
-          modifier = Modifier.width(238.dp),
-      )
-      Spacer(Modifier.weight(1f))
-      AppUserSwitcher(
-          users = state.users,
-          selectedUser = state.selectedUser,
-          onUser = onUser,
-      )
-    }
+    AppListControls(
+        filter = state.filter,
+        users = state.users,
+        selectedUser = state.selectedUser,
+        onFilter = onFilter,
+        onUser = onUser,
+    )
     Spacer(Modifier.height(12.dp))
     if (state.apps.isEmpty() && !state.appsLoaded) {
       Box(
@@ -186,6 +177,36 @@ internal fun AppsScreen(
             )
           }
         }
+      }
+    }
+  }
+}
+
+@Composable
+private fun AppListControls(
+    filter: AppFilter,
+    users: List<String>,
+    selectedUser: String,
+    onFilter: (AppFilter) -> Unit,
+    onUser: (String) -> Unit,
+) {
+  BoxWithConstraints(Modifier.fillMaxWidth()) {
+    val stackUserSwitcher = users.size > 1 && maxWidth < 360.dp
+    if (stackUserSwitcher) {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppFilterGroup(filter = filter, onFilter = onFilter, modifier = Modifier.fillMaxWidth())
+        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+          AppUserSwitcher(users = users, selectedUser = selectedUser, onUser = onUser)
+        }
+      }
+    } else {
+      Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          verticalAlignment = Alignment.Top,
+      ) {
+        AppFilterGroup(filter = filter, onFilter = onFilter, modifier = Modifier.weight(1f))
+        AppUserSwitcher(users = users, selectedUser = selectedUser, onUser = onUser)
       }
     }
   }
@@ -492,7 +513,7 @@ private fun StatusPill(app: InstalledApp) {
       when {
         app.isMissing -> "应用已卸载" to srxDangerColor()
         app.isEnabled -> "已启用" to srxSuccessColor()
-        app.isConfigured -> "未启用" to srxPrimaryColor()
+        app.isConfigured -> "已配置" to srxPrimaryColor()
         else -> "未配置" to MiuixTheme.colorScheme.onSurfaceVariantSummary
       }
   Text(

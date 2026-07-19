@@ -1070,7 +1070,7 @@
   let appListCache = { user: [], system: [] };
   let appListCacheUser = "0";
   let currentFilter = "all";
-  const appStatusOrder = { enabled: 0, disabled: 1, unconfigured: 2 };
+  const appStatusOrder = { enabled: 0, missing: 1, disabled: 2, unconfigured: 3 };
 
   function compareAppsByStatus(a, b) {
     const diff =
@@ -1091,6 +1091,7 @@
   async function buildAppListBuckets(installed, configuredState, requestId) {
     const userApps = [];
     const systemApps = [];
+    const installedPackages = new Set(installed);
     for (let i = 0; i < installed.length; i += 1) {
       if (requestId !== State.appListRequestId) return null;
       const pkg = installed[i];
@@ -1103,6 +1104,7 @@
       const status = configuredState.get(pkg) || "unconfigured";
       const app = {
         package: pkg,
+        installed: true,
         configured: status !== "unconfigured",
         enabled: status === "enabled",
         status,
@@ -1113,6 +1115,19 @@
       (app.isSystem ? systemApps : userApps).push(app);
       if (i > 0 && i % 120 === 0) await yieldToUi();
     }
+    configuredState.forEach((status, pkg) => {
+      if (installedPackages.has(pkg)) return;
+      userApps.push({
+        package: pkg,
+        installed: false,
+        configured: true,
+        enabled: false,
+        status: "missing",
+        label: pkg,
+        iconSrc: "",
+        isSystem: false,
+      });
+    });
     return { userApps, systemApps };
   }
 
@@ -1244,10 +1259,13 @@
     const switcher = $("#appUserSwitcher");
     if (!switcher) return;
     const users = State.availableUsers || ["0"];
+    const filterRow = switcher.closest(".filter-row");
+    filterRow?.classList.toggle("has-user-switcher", users.length > 1);
     switcher.classList.toggle("visible", users.length > 1);
     switcher.classList.remove("open");
     if (users.length <= 1) {
       switcher.innerHTML = "";
+      requestAnimationFrame(() => Theme.updateFilterIndicator());
       return;
     }
     switcher.innerHTML =
@@ -1284,6 +1302,7 @@
         loadAppList(true);
       });
     });
+    requestAnimationFrame(() => Theme.updateFilterIndicator());
   }
 
   function applyFilters() {
@@ -1504,22 +1523,29 @@
   }
 
   function statusClass(status) {
-    return status === "enabled" ? "enabled" : status === "disabled" ? "disabled" : "unconfigured";
+    if (status === "enabled") return "enabled";
+    if (status === "missing") return "missing";
+    if (status === "disabled") return "configured";
+    return "unconfigured";
   }
   function statusLabel(status) {
-    return status === "enabled" ? "已启用" : status === "disabled" ? "未启用" : "未配置";
+    if (status === "enabled") return "已启用";
+    if (status === "missing") return "应用已卸载";
+    if (status === "disabled") return "已配置";
+    return "未配置";
   }
 
   function updateCachedAppConfigured(packageName, configured, enabled) {
     const status = configured ? (enabled ? "enabled" : "disabled") : "unconfigured";
     State.appListDirty = true;
     ["user", "system"].forEach((group) => {
-      (appListCache[group] || []).forEach((app) => {
-        if (app.package === packageName) {
-          app.configured = configured;
-          app.enabled = enabled === true;
-          app.status = status;
-        }
+      appListCache[group] = (appListCache[group] || []).filter((app) => {
+        if (app.package !== packageName) return true;
+        if (!configured && app.installed === false) return false;
+        app.configured = configured;
+        app.enabled = enabled === true;
+        app.status = app.installed === false ? "missing" : status;
+        return true;
       });
     });
     if (configured && !State.configuredApps.includes(packageName))
@@ -1531,10 +1557,14 @@
     // 新增：局部更新 DOM，这样返回时不用重绘列表也能体现刚才开启/关闭的状态
     const itemDom = document.querySelector('.app-item[data-pkg="' + packageName + '"]');
     if (itemDom) {
+      const cachedApp = [...(appListCache.user || []), ...(appListCache.system || [])].find(
+        (app) => app.package === packageName,
+      );
+      const displayStatus = cachedApp?.status || status;
       const statusDom = itemDom.querySelector(".app-status");
       if (statusDom) {
-        statusDom.className = "app-status " + statusClass(status);
-        statusDom.textContent = statusLabel(status);
+        statusDom.className = "app-status " + statusClass(displayStatus);
+        statusDom.textContent = statusLabel(displayStatus);
       }
     }
   }
