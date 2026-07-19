@@ -39,7 +39,11 @@
     dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
     appListRequestId: 0,
-    renderedAppListId: 0,
+    renderedApps: [],
+    appListRowHeight: 67,
+    appListWindowStart: -1,
+    appListWindowEnd: -1,
+    appListRenderFrame: 0,
     autoTemplateFallbackNoticeId: "",
     appConfigSaveQueue: Promise.resolve(),
     monitorFilterSaveQueue: Promise.resolve(),
@@ -49,6 +53,10 @@
     readOnlyEditorKeys: new Set(),
     startupUpdateCheckDone: false,
     updateCheckRunning: false,
+    logRenderLimit: 80,
+    logRenderedCount: 0,
+    logFilteredCount: 0,
+    logRenderFrame: 0,
   };
 
   const LICENSES = [
@@ -1325,31 +1333,73 @@
 
   function renderAppList(apps) {
     const listEl = $("#appList");
-    const renderId = ++State.renderedAppListId;
-    listEl.innerHTML = "";
+    if (!listEl) return;
+    State.renderedApps = apps;
+    State.appListWindowStart = -1;
+    State.appListWindowEnd = -1;
     if (apps.length === 0) {
       listEl.innerHTML = '<div class="app-empty">没有找到应用</div>';
       State.shouldRestoreAppListScroll = false;
       exitAppSelectionMode();
       return;
     }
-    const frag = document.createDocumentFragment();
-    const appendChunk = (start) => {
-      if (renderId !== State.renderedAppListId) return;
-      const end = Math.min(start + 36, apps.length);
-      for (let i = start; i < end; i += 1) {
-        frag.appendChild(createAppItem(apps[i]));
-      }
-      listEl.appendChild(frag);
-      restoreAppListScrollIfNeeded();
-      if (end < apps.length) requestAnimationFrame(() => appendChunk(end));
-      else if (State.shouldRestoreAppListScroll)
-        requestAnimationFrame(() => {
-          restoreAppListScrollIfNeeded();
-          State.shouldRestoreAppListScroll = false;
-        });
-    };
-    appendChunk(0);
+    renderAppListWindow(true);
+    if (State.shouldRestoreAppListScroll) {
+      requestAnimationFrame(() => {
+        restoreAppListScrollIfNeeded();
+        scheduleAppListWindowRender();
+        State.shouldRestoreAppListScroll = false;
+      });
+    }
+  }
+
+  function renderAppListWindow(force) {
+    const listEl = $("#appList");
+    const apps = State.renderedApps || [];
+    if (!listEl || !apps.length) return;
+    const rowHeight = State.appListRowHeight || 67;
+    const viewportHeight = listEl.clientHeight || rowHeight * 10;
+    const overscan = 8;
+    const start = Math.max(
+      0,
+      Math.min(apps.length - 1, Math.floor(listEl.scrollTop / rowHeight) - overscan),
+    );
+    const end = Math.min(
+      apps.length,
+      Math.ceil((listEl.scrollTop + viewportHeight) / rowHeight) + overscan,
+    );
+    if (!force && start === State.appListWindowStart && end === State.appListWindowEnd) return;
+    State.appListWindowStart = start;
+    State.appListWindowEnd = end;
+
+    const fragment = document.createDocumentFragment();
+    const topSpacer = document.createElement("div");
+    topSpacer.className = "app-virtual-spacer";
+    topSpacer.style.height = start * rowHeight + "px";
+    fragment.appendChild(topSpacer);
+    for (let index = start; index < end; index += 1) {
+      fragment.appendChild(createAppItem(apps[index], index === apps.length - 1));
+    }
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.className = "app-virtual-spacer";
+    bottomSpacer.style.height = Math.max(0, (apps.length - end) * rowHeight) + "px";
+    fragment.appendChild(bottomSpacer);
+    listEl.replaceChildren(fragment);
+
+    const measuredHeight = listEl.querySelector(".app-item")?.offsetHeight;
+    if (measuredHeight && Math.abs(measuredHeight - rowHeight) > 0.5) {
+      State.appListRowHeight = measuredHeight;
+      State.appListWindowStart = -1;
+      scheduleAppListWindowRender();
+    }
+  }
+
+  function scheduleAppListWindowRender() {
+    if (State.appListRenderFrame) return;
+    State.appListRenderFrame = requestAnimationFrame(() => {
+      State.appListRenderFrame = 0;
+      renderAppListWindow(false);
+    });
   }
 
   function restoreAppListScrollIfNeeded() {
@@ -1359,13 +1409,14 @@
     setScrollerTopInstant(scroller, State.appListScrollTop || 0);
   }
 
-  function createAppItem(app) {
+  function createAppItem(app, isLast) {
     const item = document.createElement("div");
     const selected = State.selectedApps?.has(app.package);
     item.className =
       "app-item" +
       (State.appSelectionMode ? " selection-mode" : "") +
-      (selected ? " selected" : "");
+      (selected ? " selected" : "") +
+      (isLast ? " is-last" : "");
     item.dataset.pkg = app.package;
     const initial = (app.label || app.package)[0].toUpperCase();
     const iconHtml = app.iconSrc
@@ -1613,14 +1664,26 @@
       State.logSearchQuery = input.value.trim().toLowerCase();
       clearBtn?.classList.toggle("hidden", !input.value);
       clearTimeout(timer);
-      timer = setTimeout(renderLogCards, 120);
+      timer = setTimeout(() => renderLogCards({ reset: true }), 120);
     });
     clearBtn?.addEventListener("click", () => {
       input.value = "";
       State.logSearchQuery = "";
       clearBtn.classList.add("hidden");
-      renderLogCards();
+      renderLogCards({ reset: true });
       input.focus();
+    });
+  }
+
+  function initListPerformanceControls() {
+    const appList = $("#appList");
+    const logViewer = $("#logViewer");
+    appList?.addEventListener("scroll", scheduleAppListWindowRender, { passive: true });
+    logViewer?.addEventListener("scroll", scheduleLogListAppend, { passive: true });
+    window.addEventListener("resize", () => {
+      State.appListWindowStart = -1;
+      scheduleAppListWindowRender();
+      scheduleLogListAppend();
     });
   }
 
@@ -5625,12 +5688,15 @@
       infoEl = $("#logInfo");
     if (!raw || !raw.trim()) {
       State.logEntries = [];
+      State.logRenderLimit = 80;
+      State.logRenderedCount = 0;
+      State.logFilteredCount = 0;
       viewer.innerHTML = '<div class="log-empty">暂无文件操作记录</div>';
       if (infoEl) infoEl.textContent = "";
       return;
     }
     State.logEntries = parseMonitorLogEntries(raw, { filters }).reverse();
-    renderLogCards();
+    renderLogCards({ reset: true });
   }
 
   function parseMonitorLogEntries(raw, options) {
@@ -5668,29 +5734,90 @@
     Api.populatePackageInfo(Array.from(packages));
   }
 
-  function renderLogCards() {
-    const viewer = $("#logViewer"),
-      infoEl = $("#logInfo");
-    if (!viewer) return;
+  function getFilteredLogEntries() {
     const query = State.logSearchQuery || "";
     const all = State.logEntries || [];
-    const entries = query ? all.filter((entry) => entry.searchText.includes(query)) : all;
-    if (infoEl)
-      infoEl.textContent = query
-        ? "匹配 " + entries.length + " / " + all.length + " 条"
-        : "共 " + all.length + " 条";
+    return query ? all.filter((entry) => entry.searchText.includes(query)) : all;
+  }
+
+  function updateLogInfo(renderedCount, filteredCount) {
+    const infoEl = $("#logInfo");
+    if (!infoEl) return;
+    const totalCount = (State.logEntries || []).length;
+    if (State.logSearchQuery) {
+      infoEl.textContent =
+        renderedCount < filteredCount
+          ? "显示 " + renderedCount + " / 匹配 " + filteredCount + " / 共 " + totalCount + " 条"
+          : "匹配 " + filteredCount + " / " + totalCount + " 条";
+    } else {
+      infoEl.textContent =
+        renderedCount < filteredCount
+          ? "显示 " + renderedCount + " / 共 " + totalCount + " 条"
+          : "共 " + totalCount + " 条";
+    }
+  }
+
+  function renderLogCards(options) {
+    const viewer = $("#logViewer"),
+      entries = getFilteredLogEntries();
+    if (!viewer) return;
+    if (options?.reset) {
+      State.logRenderLimit = 80;
+      setScrollerTopInstant(viewer, 0);
+    }
+    if (State.shouldRestoreLogListScroll) {
+      const estimatedRestoreCount =
+        Math.ceil((State.logListScrollTop + viewer.clientHeight) / 70) + 20;
+      State.logRenderLimit = Math.max(State.logRenderLimit, estimatedRestoreCount);
+    }
+    const renderedCount = Math.min(entries.length, Math.max(80, State.logRenderLimit));
+    State.logRenderedCount = renderedCount;
+    State.logFilteredCount = entries.length;
+    updateLogInfo(renderedCount, entries.length);
     if (!entries.length) {
       viewer.innerHTML =
-        '<div class="log-empty">' + (query ? "没有匹配的日志" : "暂无文件操作记录") + "</div>";
+        '<div class="log-empty">' +
+        (State.logSearchQuery ? "没有匹配的日志" : "暂无文件操作记录") +
+        "</div>";
       return;
     }
-    viewer.innerHTML = entries.map(renderLogCard).join("");
+    viewer.innerHTML = entries.slice(0, renderedCount).map(renderLogCard).join("");
     bindLogCardToggles(viewer);
+    scheduleLogListAppend();
     if (State.shouldRestoreLogListScroll)
       requestAnimationFrame(() => {
         restoreLogListScrollIfNeeded();
         State.shouldRestoreLogListScroll = false;
       });
+  }
+
+  function appendNextLogBatch() {
+    const viewer = $("#logViewer");
+    const entries = getFilteredLogEntries();
+    if (!viewer || State.logRenderedCount >= entries.length) return;
+    const start = State.logRenderedCount;
+    const end = Math.min(entries.length, start + 80);
+    const fragment = document
+      .createRange()
+      .createContextualFragment(entries.slice(start, end).map(renderLogCard).join(""));
+    bindLogCardToggles(fragment);
+    viewer.appendChild(fragment);
+    State.logRenderLimit = end;
+    State.logRenderedCount = end;
+    State.logFilteredCount = entries.length;
+    updateLogInfo(end, entries.length);
+    scheduleLogListAppend();
+  }
+
+  function scheduleLogListAppend() {
+    if (State.logRenderFrame) return;
+    State.logRenderFrame = requestAnimationFrame(() => {
+      State.logRenderFrame = 0;
+      const viewer = $("#logViewer");
+      if (!viewer || State.logRenderedCount >= State.logFilteredCount) return;
+      const remaining = viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight;
+      if (remaining <= Math.max(320, viewer.clientHeight)) appendNextLogBatch();
+    });
   }
 
   function parseLogLine(line) {
@@ -6756,6 +6883,7 @@
     initNav();
     initSearch();
     initLogSearch();
+    initListPerformanceControls();
     initPullRefreshControls();
     initDashboardRefreshHooks();
     initRuntimeActivationInteractions();

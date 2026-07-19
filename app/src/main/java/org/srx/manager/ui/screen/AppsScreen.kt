@@ -87,6 +87,7 @@ internal fun AppsScreen(
   val filtered by
       remember(state.apps, state.filter, state.search) {
         derivedStateOf {
+          val query = state.search.trim().lowercase()
           state.apps.filter { app ->
             val filterOk =
                 when (state.filter) {
@@ -94,7 +95,6 @@ internal fun AppsScreen(
                   AppFilter.System -> app.isSystem
                   AppFilter.Configured -> app.isConfigured
                 }
-            val query = state.search.trim().lowercase()
             filterOk &&
                 (query.isBlank() ||
                     app.label.lowercase().contains(query) ||
@@ -166,6 +166,14 @@ internal fun AppsScreen(
           itemsIndexed(
               filtered,
               key = { _, app -> app.packageName },
+              contentType = { _, app ->
+                when {
+                  app.isMissing -> "missing"
+                  app.isEnabled -> "enabled"
+                  app.isConfigured -> "configured"
+                  else -> "unconfigured"
+                }
+              },
           ) { index, app ->
             AppListItem(
                 app = app,

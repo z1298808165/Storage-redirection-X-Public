@@ -5,6 +5,7 @@
 .page#page-apps.active { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .page#page-apps .search-bar { flex-shrink: 0; }
 .page#page-apps .app-list { height: 100%; min-height: 0; overflow: hidden auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; box-shadow: var(--glass-inner); }
+.page#page-apps .app-list .app-virtual-spacer { display: block; }
 .page#page-apps .app-list::-webkit-scrollbar { width: 0; }
 .page#page-logs.active { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .page#page-logs .page-header,
@@ -21,10 +22,12 @@
 .pull-refresh.is-refreshing .pull-refresh-scroller { --pull-refresh-offset: 48px; transition: transform var(--transition-fast); }
 .pull-refresh.is-settling .pull-refresh-scroller,
 .pull-refresh.is-settling .pull-refresh-indicator { transition: transform var(--transition-normal), opacity var(--transition-fast); }
-.app-item { position: relative; display: flex; align-items: center; gap: 13px; padding: 15px 16px; cursor: pointer; transition: transform var(--transition-spring), background var(--transition-normal); border-bottom: 1px solid var(--color-border); }
+.app-item { position: relative; display: flex; flex: 0 0 auto; align-items: center; gap: 13px; padding: 15px 16px; cursor: pointer; transition: transform var(--transition-spring), background var(--transition-normal); border-bottom: 1px solid var(--color-border); }
+.app-virtual-spacer { width: 1px; flex: 0 0 auto; pointer-events: none; }
 .app-item:nth-child(1) { animation-delay: 0ms; } .app-item:nth-child(2) { animation-delay: 25ms; } .app-item:nth-child(3) { animation-delay: 50ms; } .app-item:nth-child(4) { animation-delay: 75ms; } .app-item:nth-child(5) { animation-delay: 100ms; } .app-item:nth-child(6) { animation-delay: 125ms; } .app-item:nth-child(7) { animation-delay: 150ms; } .app-item:nth-child(8) { animation-delay: 175ms; } .app-item:nth-child(9) { animation-delay: 200ms; } .app-item:nth-child(10) { animation-delay: 225ms; }
 @keyframes itemIn { from { opacity: 0; transform: translateY(12px) scale(0.985); filter: blur(5px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
 .app-item:last-child { border-bottom: none; }
+.app-item.is-last { border-bottom-color: transparent; }
 .app-item::after { content: ""; position: absolute; inset: 8px 10px; border-radius: 18px; background: rgba(255,255,255,0.32); opacity: 0; transform: scale(0.96); transition: opacity var(--transition-normal), transform var(--transition-spring); pointer-events: none; }
 [data-theme="dark"] .app-item::after { background: rgba(137,180,255,0.1); }
 .app-item:active { transform: scale(0.988); }

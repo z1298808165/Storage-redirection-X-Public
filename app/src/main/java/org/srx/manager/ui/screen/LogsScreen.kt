@@ -185,6 +185,7 @@ internal fun LogsScreen(
               key = { index, entry ->
                 "${entry.timestamp}|${entry.processPackage}|${entry.callerPackage}|${entry.packageName}|${entry.path}|$index"
               },
+              contentType = { _, entry -> if (entry.ok) "success" else "error" },
           ) { _, entry ->
             val app =
                 if (entry.isModuleWebUiExport) null
