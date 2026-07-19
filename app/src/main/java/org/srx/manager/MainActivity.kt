@@ -4,7 +4,6 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -82,6 +81,7 @@ import top.yukonga.miuix.kmp.icon.extended.GridView
 import top.yukonga.miuix.kmp.icon.extended.ListView
 import top.yukonga.miuix.kmp.icon.extended.Notes
 import top.yukonga.miuix.kmp.icon.extended.Settings
+import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 
 class MainActivity : ComponentActivity() {
   private val viewModel: SrxViewModel by viewModels()
@@ -153,9 +153,6 @@ private fun filteredAppPackagesForSelection(state: AppUiState): List<String> {
       }
       .map { it.packageName }
 }
-
-private fun isSrxBackdropRenderingSupported(): Boolean =
-    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
 private fun openExternalUrl(context: Context, url: String): Boolean =
     try {
@@ -256,11 +253,10 @@ private fun SrxManagerApp(
     }
   }
 
-  val blurAvailable = isSrxBackdropRenderingSupported()
+  val blurAvailable = isRenderEffectSupported()
+  val backdropEnabled = blurAvailable && (prefs.blurEffect || prefs.liquidGlass)
   val blurBackdrop = rememberBlurBackdrop(prefs.blurEffect && blurAvailable)
-  val glassBackdropEnabled =
-      prefs.liquidGlass && prefs.blurEffect && blurAvailable && blurBackdrop != null
-  val glassScene = rememberLiveGlassBackdropScene(enabled = glassBackdropEnabled)
+  val glassScene = rememberLiveGlassBackdropScene(enabled = backdropEnabled)
   val backEventState = rememberNavigationEventState(NavigationEventInfo.None)
   fun popNavBackStack() {
     if (navBackStack.size > 1) {
@@ -358,7 +354,6 @@ private fun SrxManagerApp(
                   blurBackdrop = blurBackdrop,
                   backdrop = glassScene.backdrop,
                   dialogBackdrop = glassScene.activeBackdrop,
-                  bottomGlassEnabled = glassScene.enabled,
               )
             } else {
               BottomNavigation(
@@ -368,7 +363,6 @@ private fun SrxManagerApp(
                   prefs = prefs,
                   blurBackdrop = blurBackdrop,
                   backdrop = glassScene.backdrop,
-                  bottomGlassEnabled = glassScene.enabled,
               )
             }
           }

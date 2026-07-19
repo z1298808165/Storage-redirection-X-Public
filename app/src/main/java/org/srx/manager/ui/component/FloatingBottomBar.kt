@@ -72,6 +72,7 @@ import top.yukonga.miuix.kmp.blur.highlight.LightSource
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.sensor.rememberDeviceTilt
+import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 val LocalFloatingBottomBarTabScale = staticCompositionLocalOf { { 1f } }
@@ -170,14 +171,25 @@ fun FloatingBottomBar(
     backdrop: Backdrop,
     tabsCount: Int,
     isBlurEnabled: Boolean = true,
+    isLiquidGlassEnabled: Boolean = true,
     enableDrag: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
   val isDark = isSrxDarkTheme()
+  val effectsSupported = isRenderEffectSupported()
+  val liquid = isLiquidGlassEnabled && effectsSupported
+  val blurEnabled = isBlurEnabled && effectsSupported
   val pillShape = CircleShape
   val accent = MiuixTheme.colorScheme.primary
   val surface = MiuixTheme.colorScheme.surfaceContainer
-  val container = if (isBlurEnabled) surface.copy(alpha = 0.4f) else surface
+  val solidSurface = MiuixTheme.colorScheme.surfaceContainerHigh
+  val container =
+      when {
+        liquid && blurEnabled -> surface.copy(alpha = 0.4f)
+        liquid -> solidSurface.copy(alpha = if (isDark) 0.86f else 0.9f)
+        blurEnabled -> surface.copy(alpha = if (isDark) 0.82f else 0.88f)
+        else -> solidSurface
+      }
   val tabsBackdrop = rememberLayerBackdrop()
   val density = LocalDensity.current
   val barHeight = 64.dp
@@ -290,36 +302,43 @@ fun FloatingBottomBar(
             )
             .clickable(remember { MutableInteractionSource() }, null) {}
             .then(
-                if (isBlurEnabled) {
+                if (liquid || blurEnabled) {
                   Modifier.drawBackdrop(
                       backdrop = backdrop,
                       shape = { pillShape },
                       effects = {
-                        vibrancy()
-                        blur(4.dp.toPx(), 4.dp.toPx())
-                        lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
+                        if (liquid) vibrancy()
+                        if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx())
+                        if (liquid) {
+                          lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
+                        }
                       },
-                      highlight = { baseHighlight.copy(alpha = 0.75f) },
-                      layerBlock = {
-                        val width = size.width.coerceAtLeast(1f)
-                        val s = lerp(1f, 1f + 16.dp.toPx() / width, drag.pressProgress)
-                        scaleX = s
-                        scaleY = s
-                      },
+                      highlight = if (liquid) ({ baseHighlight.copy(alpha = 0.75f) }) else null,
+                      layerBlock =
+                          if (liquid) {
+                            {
+                              val width = size.width.coerceAtLeast(1f)
+                              val s = lerp(1f, 1f + 16.dp.toPx() / width, drag.pressProgress)
+                              scaleX = s
+                              scaleY = s
+                            }
+                          } else {
+                            null
+                          },
                       onDrawSurface = { drawRect(container) },
                   )
                 } else {
                   Modifier.background(container, pillShape)
                 }
             )
-            .then(if (isBlurEnabled) interactiveHighlight.modifier else Modifier)
+            .then(if (liquid) interactiveHighlight.modifier else Modifier)
             .height(barHeight)
             .padding(barInset),
         verticalAlignment = Alignment.CenterVertically,
         content = content,
     )
 
-    if (isBlurEnabled) {
+    if (liquid) {
       CompositionLocalProvider(
           LocalFloatingBottomBarTabScale provides { lerp(1f, 1.2f, drag.pressProgress) },
       ) {
@@ -333,7 +352,7 @@ fun FloatingBottomBar(
                     shape = { pillShape },
                     effects = {
                       vibrancy()
-                      blur(4.dp.toPx(), 4.dp.toPx())
+                      if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx())
                       lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
                     },
                     onDrawSurface = { drawRect(container) },
@@ -350,7 +369,7 @@ fun FloatingBottomBar(
 
     if (tabWidthPx > 0f) {
       val tabWidth = with(density) { tabWidthPx.toDp() }
-      if (isBlurEnabled) {
+      if (liquid) {
         Box(
             Modifier.padding(horizontal = barInset)
                 .graphicsLayer {
@@ -366,15 +385,18 @@ fun FloatingBottomBar(
                     backdrop = combinedBackdrop,
                     shape = { pillShape },
                     effects = {
-                      val progress = drag.pressProgress
-                      lens(
-                          refractionHeight = 10.dp.toPx() * progress,
-                          refractionAmount = 14.dp.toPx() * progress,
-                          depthEffect = true,
-                          chromaticAberration = 0.5f,
-                      )
+                      if (liquid) {
+                        val progress = drag.pressProgress
+                        lens(
+                            refractionHeight = 10.dp.toPx() * progress,
+                            refractionAmount = 14.dp.toPx() * progress,
+                            depthEffect = true,
+                            chromaticAberration = 0.5f,
+                        )
+                      }
                     },
-                    highlight = { pillHighlight.copy(alpha = drag.pressProgress) },
+                    highlight =
+                        if (liquid) ({ pillHighlight.copy(alpha = drag.pressProgress) }) else null,
                     layerBlock = {
                       scaleX = drag.scaleX
                       scaleY = drag.scaleY
@@ -390,16 +412,22 @@ fun FloatingBottomBar(
                               else Color.Black.copy(alpha = 0.1f),
                           alpha = 1f - progress,
                       )
-                      drawRect(Color.Black.copy(alpha = 0.03f * progress))
+                      if (liquid) drawRect(Color.Black.copy(alpha = 0.03f * progress))
                     },
                 )
-                .innerShadow(pillShape) {
-                  InnerShadow(
-                      radius = 8.dp * drag.pressProgress,
-                      color = Color.Black.copy(alpha = 0.15f),
-                      alpha = drag.pressProgress,
-                  )
-                }
+                .then(
+                    if (liquid) {
+                      Modifier.innerShadow(pillShape) {
+                        InnerShadow(
+                            radius = 8.dp * drag.pressProgress,
+                            color = Color.Black.copy(alpha = 0.15f),
+                            alpha = drag.pressProgress,
+                        )
+                      }
+                    } else {
+                      Modifier
+                    }
+                )
                 .height(selectedHeight)
                 .width(tabWidth),
         )

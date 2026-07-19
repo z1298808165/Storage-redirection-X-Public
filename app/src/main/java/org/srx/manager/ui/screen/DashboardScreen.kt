@@ -56,7 +56,7 @@ import org.srx.manager.data.ModuleStatus
 import org.srx.manager.data.formatCompactRuntimeActivationCount
 import org.srx.manager.glassPanel
 import org.srx.manager.glassSurfaceColor
-import org.srx.manager.isSrxGlassBackdropEnabled
+import org.srx.manager.isSrxBackdropEffectEnabled
 import org.srx.manager.srxSuccessColor
 import org.srx.manager.srxWarningColor
 import org.srx.manager.ui.AppUiState
@@ -201,7 +201,7 @@ private fun ModuleStatusCard(
   val statusUi = moduleStatusUi(status)
   val canToggle = status == ModuleStatus.Enabled || status == ModuleStatus.Disabled
   val shape = RoundedCornerShape(34.dp)
-  val useBackdrop = isSrxGlassBackdropEnabled()
+  val useBackdrop = isSrxBackdropEffectEnabled()
   Card(
       modifier =
           Modifier.fillMaxWidth()

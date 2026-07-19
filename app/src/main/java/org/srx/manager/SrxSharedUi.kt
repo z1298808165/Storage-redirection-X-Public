@@ -60,13 +60,9 @@ import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
 import top.yukonga.miuix.kmp.blur.highlight.BloomStroke
 import top.yukonga.miuix.kmp.blur.highlight.Highlight
-import top.yukonga.miuix.kmp.blur.highlight.LightPosition
-import top.yukonga.miuix.kmp.blur.highlight.LightSource
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-
-internal val LocalSrxBackdrop = staticCompositionLocalOf<Backdrop?> { null }
 
 @Composable
 internal fun srxSuccessColor(): Color =
@@ -89,40 +85,21 @@ private val FloatingGlassHighlight: Highlight =
     Highlight(
         width = 1.dp,
         alpha = 1f,
-        style =
-            BloomStroke(
-                color = Color.White.copy(alpha = 0.12f),
-                innerBlurRadius = 2.dp,
-                primaryLight =
-                    LightSource(
-                        position = LightPosition(0.5f, -0.3f, -0.05f),
-                        color = Color.White,
-                        intensity = 1f,
-                    ),
-                secondaryLight =
-                    LightSource(
-                        position = LightPosition(0.5f, 0.8f, -0.5f),
-                        color = Color.White,
-                        intensity = 0.4f,
-                    ),
-                dualPeak = true,
-            ),
+        style = BloomStroke(color = Color.White.copy(alpha = 0.12f), innerBlurRadius = 2.dp),
     )
 
+internal val LocalSrxBackdrop = staticCompositionLocalOf<Backdrop?> { null }
+
 @Composable
-internal fun isSrxGlassBackdropEnabled(): Boolean =
-    isSrxLiquidGlassEnabled() && isSrxBlurEffectEnabled() && LocalSrxBackdrop.current != null
+internal fun isSrxBackdropEffectEnabled(): Boolean =
+    (isSrxLiquidGlassEnabled() || isSrxBlurEffectEnabled()) && LocalSrxBackdrop.current != null
 
 @Composable
 internal fun glassSurfaceColor(alpha: Float = 0.7f): Color =
-    if (!isSrxLiquidGlassEnabled()) {
-      MiuixTheme.colorScheme.surfaceContainerHigh
-    } else if (isSrxDarkTheme()) {
-      MiuixTheme.colorScheme.surfaceContainerHigh.copy(
-          alpha = (alpha * 0.38f).coerceIn(0.22f, 0.6f)
-      )
+    if (isSrxLiquidGlassEnabled() && isSrxBlurEffectEnabled()) {
+      MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = alpha.coerceIn(0.3f, 0.9f))
     } else {
-      MiuixTheme.colorScheme.surface.copy(alpha = (alpha * 0.42f).coerceIn(0.24f, 0.64f))
+      MiuixTheme.colorScheme.surfaceContainerHigh
     }
 
 @Composable
@@ -146,45 +123,68 @@ internal fun Modifier.glassPanel(
     surfaceAlpha: Float = 0.68f,
 ): Modifier {
   val dark = isSrxDarkTheme()
-  val glass = isSrxGlassBackdropEnabled()
+  val liquid = isSrxLiquidGlassEnabled()
+  val blurEnabled = isSrxBlurEffectEnabled()
   val backdrop = LocalSrxBackdrop.current
-  val surface = glassSurfaceColor(surfaceAlpha)
+  val hasBackdrop = backdrop != null && (liquid || blurEnabled)
+  val surface =
+      when {
+        liquid && blurEnabled ->
+            MiuixTheme.colorScheme.surfaceContainer.copy(
+                alpha = (surfaceAlpha * 0.85f).coerceIn(0.48f, 0.72f)
+            )
+        liquid ->
+            MiuixTheme.colorScheme.surfaceContainerHigh.copy(
+                alpha =
+                    ((if (dark) 0.8f else 0.82f) + surfaceAlpha * 0.12f).coerceAtMost(
+                        if (dark) 0.92f else 0.94f
+                    )
+            )
+        blurEnabled ->
+            MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.84f else 0.88f)
+        else -> MiuixTheme.colorScheme.surfaceContainerHigh
+      }
   val accentWash = MiuixTheme.colorScheme.primary.copy(alpha = if (dark) 0.036f else 0.028f)
-  val sheen = Color.White.copy(alpha = if (dark) 0.052f else 0.18f)
-  val rim = Color.White.copy(alpha = if (dark) 0.08f else 0.22f)
+  val sheen = Color.White.copy(alpha = if (dark) 0.052f else 0.12f)
+  val rim = Color.White.copy(alpha = if (dark) 0.08f else 0.16f)
   return this.dropShadow(
           shape = shape,
           shadow =
               Shadow(
-                  radius = if (glass) if (dark) 34.dp else 48.dp else 10.dp,
+                  radius = if (liquid) 18.dp else 10.dp,
                   color = if (dark) Color.Black else Color(0xFF667895),
-                  alpha =
-                      if (glass) if (dark) shadowAlpha * 2.15f else shadowAlpha * 1.38f
-                      else shadowAlpha * 0.8f,
+                  alpha = shadowAlpha * if (liquid) 1.1f else 0.8f,
               ),
       )
       .then(
-          if (glass && backdrop != null) {
+          if (hasBackdrop) {
             Modifier.clip(shape)
                 .drawBackdrop(
-                    backdrop = backdrop,
+                    backdrop = requireNotNull(backdrop),
                     shape = { shape },
                     effects = {
-                      vibrancy()
-                      blur(32.dp.toPx(), 32.dp.toPx())
-                      lens(
-                          refractionHeight = 15.dp.toPx(),
-                          refractionAmount = 16.dp.toPx(),
-                          depthEffect = true,
-                          chromaticAberration = 0.36f,
-                      )
+                      if (liquid) vibrancy()
+                      if (blurEnabled) blur(32.dp.toPx(), 32.dp.toPx())
+                      if (liquid) {
+                        lens(
+                            refractionHeight = 15.dp.toPx(),
+                            refractionAmount = 16.dp.toPx(),
+                            depthEffect = true,
+                            chromaticAberration = 0.24f,
+                        )
+                      }
                     },
-                    highlight = { FloatingGlassHighlight.copy(alpha = if (dark) 0.52f else 0.44f) },
+                    highlight =
+                        if (liquid) {
+                          { FloatingGlassHighlight.copy(alpha = if (dark) 0.52f else 0.44f) }
+                        } else null,
                     onDrawSurface = {
                       drawRect(surface)
-                      drawRect(accentWash)
-                      drawRect(sheen)
-                      drawRect(rim, alpha = 0.35f)
+                      if (liquid) {
+                        drawRect(accentWash)
+                        drawRect(sheen)
+                        drawRect(rim, alpha = 0.35f)
+                      }
                     },
                 )
           } else {
@@ -196,30 +196,36 @@ internal fun Modifier.glassPanel(
 @Composable
 internal fun Modifier.floatingGlassPanel(shape: Shape): Modifier {
   val dark = isSrxDarkTheme()
-  val glass = isSrxGlassBackdropEnabled()
+  val liquid = isSrxLiquidGlassEnabled()
+  val blurEnabled = isSrxBlurEffectEnabled()
   val backdrop = LocalSrxBackdrop.current
-  val surface = MiuixTheme.colorScheme.surfaceContainer
+  val hasBackdrop = backdrop != null && (liquid || blurEnabled)
   val container =
-      if (glass && backdrop != null) {
-        surface.copy(alpha = 0.4f)
-      } else {
-        MiuixTheme.colorScheme.surfaceContainerHigh
+      when {
+        liquid && blurEnabled -> MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.46f)
+        liquid ->
+            MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.88f else 0.92f)
+        blurEnabled ->
+            MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.86f else 0.9f)
+        else -> MiuixTheme.colorScheme.surfaceContainerHigh
       }
   return this.dropShadow(
           shape = shape,
           shadow = Shadow(radius = 10.dp, color = Color.Black, alpha = if (dark) 0.2f else 0.1f),
       )
       .then(
-          if (glass && backdrop != null) {
+          if (hasBackdrop) {
             Modifier.drawBackdrop(
-                backdrop = backdrop,
+                backdrop = requireNotNull(backdrop),
                 shape = { shape },
                 effects = {
-                  vibrancy()
-                  blur(4.dp.toPx(), 4.dp.toPx())
-                  lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
+                  if (liquid) vibrancy()
+                  if (blurEnabled) blur(6.dp.toPx(), 6.dp.toPx())
+                  if (liquid) {
+                    lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
+                  }
                 },
-                highlight = { FloatingGlassHighlight.copy(alpha = 0.75f) },
+                highlight = if (liquid) ({ FloatingGlassHighlight.copy(alpha = 0.75f) }) else null,
                 onDrawSurface = { drawRect(container) },
             )
           } else {
@@ -259,7 +265,6 @@ internal fun CenteredDialog(
 ) {
   if (!show) return
   val dark = isSrxDarkTheme()
-  val liquid = isSrxGlassBackdropEnabled()
   val outsideClick = remember { MutableInteractionSource() }
   val insideClick = remember { MutableInteractionSource() }
   Dialog(
@@ -302,7 +307,7 @@ internal fun CenteredDialog(
                   ) {},
           cornerRadius = 30.dp,
           insideMargin = PaddingValues(24.dp),
-          alpha = if (liquid) if (denseSurface) 0.94f else 0.78f else 1f,
+          alpha = 1f,
           shadowAlpha = 0.2f,
       ) {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -336,7 +341,6 @@ internal fun RoundIconAction(
     iconSize: Dp = RoundActionIconSize,
 ) {
   val color = if (danger) MiuixTheme.colorScheme.error else MiuixTheme.colorScheme.primary
-  val liquid = isSrxLiquidGlassEnabled()
   Box(
       modifier =
           modifier
@@ -344,15 +348,14 @@ internal fun RoundIconAction(
               .dropShadow(
                   CircleShape,
                   Shadow(
-                      radius = if (liquid) 14.dp else 8.dp,
+                      radius = 8.dp,
                       color = if (isSrxDarkTheme()) Color.Black else MiuixTheme.colorScheme.primary,
-                      alpha = if (liquid) 0.08f else 0.05f,
+                      alpha = 0.05f,
                   ),
               )
               .clip(CircleShape)
               .background(
-                  if (liquid) glassSurfaceColor(0.76f)
-                  else color.copy(alpha = if (danger) 0.1f else 0.08f),
+                  color.copy(alpha = if (danger) 0.1f else 0.08f),
                   CircleShape,
               )
               .alpha(if (enabled) 1f else 0.45f)
@@ -396,12 +399,9 @@ internal fun GlassTextButton(
               .clip(CircleShape)
               .background(
                   when {
-                    danger ->
-                        MiuixTheme.colorScheme.error.copy(
-                            alpha = if (isSrxLiquidGlassEnabled()) 0.14f else 0.08f
-                        )
-                    primary -> tint.copy(alpha = if (isSrxLiquidGlassEnabled()) 0.18f else 0.12f)
-                    else -> glassSurfaceColor(if (isSrxLiquidGlassEnabled()) 0.82f else 1f)
+                    danger -> MiuixTheme.colorScheme.error.copy(alpha = 0.08f)
+                    primary -> tint.copy(alpha = 0.12f)
+                    else -> glassSurfaceColor(1f)
                   },
                   CircleShape,
               ),

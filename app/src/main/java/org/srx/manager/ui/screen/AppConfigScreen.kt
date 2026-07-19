@@ -148,7 +148,7 @@ private fun AppConfigHeader(
   ) {
     val shape = RoundedCornerShape(24.dp)
     val useBackdrop =
-        isSrxLiquidGlassEnabled() && isSrxBlurEffectEnabled() && LocalSrxBackdrop.current != null
+        (isSrxLiquidGlassEnabled() || isSrxBlurEffectEnabled()) && LocalSrxBackdrop.current != null
     Card(
         modifier = Modifier.fillMaxWidth().floatingGlassPanel(shape),
         cornerRadius = 24.dp,

@@ -1,6 +1,5 @@
 package org.srx.manager.ui.liquid
 
-import android.os.Build
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
@@ -20,6 +19,7 @@ import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
+import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private const val SrxFixedBlurRadius = 25f
@@ -96,7 +96,7 @@ fun Modifier.liveGlassContentLayer(scene: LiveGlassBackdropScene): Modifier =
 
 @Composable
 fun rememberBlurBackdrop(enabled: Boolean = isSrxBlurEffectEnabled()): LayerBackdrop? {
-  if (!enabled || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+  if (!enabled || !isRenderEffectSupported()) return null
   val surface = MiuixTheme.colorScheme.surface
   return rememberLayerBackdrop {
     drawRect(surface)

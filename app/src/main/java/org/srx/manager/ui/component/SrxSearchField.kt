@@ -25,8 +25,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.srx.manager.ui.theme.isSrxDarkTheme
-import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -42,16 +40,7 @@ fun SrxSearchField(
     modifier: Modifier = Modifier,
 ) {
   val colors = MiuixTheme.colorScheme
-  val dark = isSrxDarkTheme()
-  val liquid = isSrxLiquidGlassEnabled()
-  val backgroundColor =
-      if (!liquid) {
-        colors.surfaceContainerHigh
-      } else if (dark) {
-        colors.surfaceContainerHigh.copy(alpha = 0.74f)
-      } else {
-        colors.surface.copy(alpha = 0.84f)
-      }
+  val backgroundColor = colors.surfaceContainerHigh
   BasicTextField(
       value = query,
       onValueChange = onQueryChange,

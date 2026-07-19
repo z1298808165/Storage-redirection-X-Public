@@ -168,13 +168,13 @@ internal fun ThemeSettingsScreen(
           )
           CompactSwitchRow(
               title = "液态玻璃",
-              summary = "启用玻璃高光、透镜放大与底栏跟随形变",
+              summary = "控制玻璃高光、边缘折射与底栏跟随形变，不会自动开启模糊",
               checked = prefs.liquidGlass,
               onCheckedChange = onLiquid,
           )
           CompactSwitchRow(
               title = "材质模糊",
-              summary = "为浮动面板和弹窗保留背景模糊",
+              summary = "模糊卡片、弹窗和底栏后的页面内容；关闭后改用高不透明度材质",
               checked = prefs.blurEffect,
               onCheckedChange = onBlurEffect,
               showDivider = false,

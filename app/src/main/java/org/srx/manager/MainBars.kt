@@ -52,7 +52,6 @@ internal fun BottomNavigation(
     prefs: UiPreferences,
     blurBackdrop: LayerBackdrop?,
     backdrop: Backdrop,
-    bottomGlassEnabled: Boolean,
 ) {
   val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   if (prefs.floatingBottomBar) {
@@ -70,7 +69,8 @@ internal fun BottomNavigation(
           onSelected = { if (enabled) onPageChange(Page.entries[it]) },
           backdrop = backdrop,
           tabsCount = Page.entries.size,
-          isBlurEnabled = bottomGlassEnabled,
+          isBlurEnabled = prefs.blurEffect,
+          isLiquidGlassEnabled = prefs.liquidGlass,
       ) {
         Page.entries.forEach { item ->
           val selected = item == page
@@ -131,7 +131,6 @@ internal fun AppBatchActionBar(
     blurBackdrop: LayerBackdrop?,
     backdrop: Backdrop,
     dialogBackdrop: Backdrop?,
-    bottomGlassEnabled: Boolean,
 ) {
   var showTemplates by remember { mutableStateOf(false) }
   var selectedIndex by remember { mutableIntStateOf(0) }
@@ -159,7 +158,8 @@ internal fun AppBatchActionBar(
           onSelected = { selectedIndex = it },
           backdrop = backdrop,
           tabsCount = 4,
-          isBlurEnabled = bottomGlassEnabled,
+          isBlurEnabled = prefs.blurEffect,
+          isLiquidGlassEnabled = prefs.liquidGlass,
           enableDrag = false,
       ) {
         FloatingBottomBarItem(
