@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.Exec
+
 plugins {
   alias(libs.plugins.android.application) apply false
   alias(libs.plugins.android.library) apply false
@@ -47,6 +49,8 @@ val spotlessNpmExecutable =
     )
 
 spotless {
+  lineEndings = com.diffplug.spotless.LineEnding.UNIX
+
   kotlin {
     target(
         "app/src/**/*.kt",
@@ -124,47 +128,20 @@ spotless {
 }
 
 val checkNaming by
-    tasks.registering {
+    tasks.registering(Exec::class) {
       group = "verification"
       description = "Checks package names, interface prefixes, and overly long Kotlin declarations."
-
-      doLast {
-        val checkedFiles =
-            fileTree(projectDir) {
-              include("app/src/**/*.kt")
-              include("tests/storage-redirect-test/**/*.kt")
-              exclude("**/build/**")
-              exclude("**/.gradle/**")
-              exclude("**/.kotlin/**")
-            }
-        val packageWithUnderscore = Regex("""(?m)^\s*package\s+\S*_\S*""")
-        val prefixedInterface = Regex("""\binterface\s+I[A-Z][A-Za-z0-9_]*\b""")
-        val longDeclaration =
-            Regex("""\b(class|object|interface|fun|val|var)\s+([A-Za-z0-9_]{51,})\b""")
-        val violations = mutableListOf<String>()
-
-        checkedFiles.files
-            .sortedBy { it.invariantSeparatorsPath }
-            .forEach { sourceFile ->
-              val text = sourceFile.readText()
-              val relativePath = sourceFile.relativeTo(projectDir).invariantSeparatorsPath
-              packageWithUnderscore.findAll(text).forEach { match ->
-                violations +=
-                    "$relativePath: package names must not contain underscores (${match.value.trim()})"
-              }
-              prefixedInterface.findAll(text).forEach { match ->
-                violations += "$relativePath: avoid I-prefixed interfaces (${match.value})"
-              }
-              longDeclaration.findAll(text).forEach { match ->
-                violations +=
-                    "$relativePath: declaration name is too long (${match.groupValues[2]})"
-              }
-            }
-
-        if (violations.isNotEmpty()) {
-          throw GradleException(violations.joinToString(separator = System.lineSeparator()))
-        }
-      }
+      workingDir(projectDir)
+      commandLine(spotlessNodeExecutable ?: "node", "scripts/check-kotlin-naming.js")
+      inputs.files(
+          fileTree(projectDir) {
+            include("app/src/**/*.kt")
+            include("tests/storage-redirect-test/**/*.kt")
+            exclude("**/build/**", "**/.gradle/**", "**/.kotlin/**")
+          }
+      )
+      inputs.file("scripts/check-kotlin-naming.js")
+      outputs.upToDateWhen { true }
     }
 
 tasks.named("spotlessCheck") { dependsOn(checkNaming) }

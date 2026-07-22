@@ -28,13 +28,17 @@ data class ResolvedBuildVersion(
 
 fun runGit(vararg args: String): String? =
     runCatching {
-          val process =
-              ProcessBuilder("git", *args)
-                  .directory(rootProject.projectDir)
-                  .redirectErrorStream(true)
-                  .start()
-          val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-          if (process.waitFor() == 0) output else null
+          val output =
+              providers.exec {
+                commandLine("git", *args)
+                workingDir(rootProject.projectDir)
+                isIgnoreExitValue = true
+              }
+          if (output.result.get().exitValue == 0) {
+            output.standardOutput.asText.get().trim()
+          } else {
+            null
+          }
         }
         .getOrNull()
 
@@ -151,19 +155,6 @@ val appTargetSdk = providers.gradleProperty("srx.targetSdk").orNull?.toIntOrNull
 val defaultOfficialReleaseRepository = "Kindness-Kismet/Storage-redirection-X-Public"
 val defaultReleaseBranch = "SRX-R"
 
-fun gitOriginUrl(): String? {
-  return runCatching {
-        val process =
-            ProcessBuilder("git", "remote", "get-url", "origin")
-                .directory(rootProject.projectDir)
-                .redirectErrorStream(true)
-                .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-        if (process.waitFor() == 0) output.takeIf { it.isNotBlank() } else null
-      }
-      .getOrNull()
-}
-
 fun githubRepositoryFromRemote(remoteUrl: String?): String? {
   val normalized = remoteUrl?.trim()?.removeSuffix(".git") ?: return null
   val patterns =
@@ -177,19 +168,6 @@ fun githubRepositoryFromRemote(remoteUrl: String?): String? {
       "${match.groupValues[1]}/${match.groupValues[2]}"
     }
   }
-}
-
-fun gitCurrentBranch(): String? {
-  return runCatching {
-        val process =
-            ProcessBuilder("git", "branch", "--show-current")
-                .directory(rootProject.projectDir)
-                .redirectErrorStream(true)
-                .start()
-        val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-        if (process.waitFor() == 0) output.takeIf { it.isNotBlank() } else null
-      }
-      .getOrNull()
 }
 
 fun rawGitHubFileUrl(repository: String, branch: String, path: String): String =
