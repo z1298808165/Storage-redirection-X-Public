@@ -92,6 +92,7 @@ spotless {
     target(
         "assets/**/*.js",
         "assets/**/*.json",
+        ".github/tests/storage-redirect-scenarios.json",
         "docs/**/*.json",
         "scripts/**/*.js",
         "*.json",

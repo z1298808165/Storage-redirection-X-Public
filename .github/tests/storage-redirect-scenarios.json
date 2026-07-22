@@ -1,0 +1,178 @@
+{
+  "scenarios": [
+    {
+      "id": 1,
+      "config_mode": "standard",
+      "bash_title": "未启用应用配置，验证默认真实路径写入",
+      "powershell_title": "no config keeps real path"
+    },
+    {
+      "id": 2,
+      "config_mode": "standard",
+      "bash_title": "启用重定向，验证写入应用私有空间",
+      "powershell_title": "default redirect to private"
+    },
+    {
+      "id": 3,
+      "config_mode": "standard",
+      "bash_title": "启用路径映射，验证 SrtProbe 写入真实 Test",
+      "powershell_title": "path mapping to Download/Test"
+    },
+    {
+      "id": 4,
+      "config_mode": "standard",
+      "bash_title": "路径映射叠加真实路径放行，验证映射优先级",
+      "powershell_title": "mapping priority over allow Download"
+    },
+    {
+      "id": 5,
+      "config_mode": "standard",
+      "bash_title": "放行真实 Download，验证保持原路径写入",
+      "powershell_title": "allow Download keeps real path"
+    },
+    {
+      "id": 6,
+      "config_mode": "standard",
+      "bash_title": "仅映射模式，未命中映射路径应保持真实路径写入",
+      "powershell_title": "mapping_mode_only unmatched stays real"
+    },
+    {
+      "id": 7,
+      "config_mode": "standard",
+      "bash_title": "仅映射模式，命中映射路径应写入映射目标",
+      "powershell_title": "mapping_mode_only mapped path maps"
+    },
+    {
+      "id": 8,
+      "config_mode": "fuse",
+      "bash_title": "FUSE 仅映射模式：命中 sandbox 规则且同级未命中路径保持真实",
+      "powershell_title": "FUSE mapping_mode_only sandbox hit with unmatched sibling kept real"
+    },
+    {
+      "id": 9,
+      "config_mode": "standard",
+      "bash_title": "read_only_paths 允许读取但拒绝写入、删除、mkdir、rename",
+      "powershell_title": "read_only_paths deny writes"
+    },
+    {
+      "id": 10,
+      "config_mode": "standard",
+      "bash_title": "映射目标为只读路径时，映射请求写入应被拒绝",
+      "powershell_title": "mapped target read-only deny write"
+    },
+    {
+      "id": 11,
+      "config_mode": "standard",
+      "bash_title": "allowed_real_paths 内联排除与通配符排除规则",
+      "powershell_title": "allow with inline exclusions and wildcard"
+    },
+    {
+      "id": 12,
+      "config_mode": "standard",
+      "bash_title": "excluded_real_paths 旧字段兼容并入排除规则",
+      "powershell_title": "legacy excluded_real_paths merges into allow exclusions"
+    },
+    {
+      "id": 13,
+      "config_mode": "standard",
+      "bash_title": "allowed_real_paths 问号通配符规则",
+      "powershell_title": "allowed_real_paths question-mark wildcard"
+    },
+    {
+      "id": 14,
+      "config_mode": "standard",
+      "bash_title": "path_mappings 最长前缀匹配规则",
+      "powershell_title": "path mapping longest-prefix match"
+    },
+    {
+      "id": 15,
+      "config_mode": "standard",
+      "bash_title": "映射优先于字符串形式 sandboxed_paths",
+      "powershell_title": "mapping priority over string sandboxed_paths"
+    },
+    {
+      "id": 16,
+      "config_mode": "fuse",
+      "bash_title": "Fuse daemon 混合模式：普通放行与通配符放行并存",
+      "powershell_title": "Fuse daemon hybrid plain allow plus wildcard allow"
+    },
+    {
+      "id": 17,
+      "config_mode": "fuse",
+      "bash_title": "Fuse daemon 混合模式：read_only_paths 支持 ! 排除优先",
+      "powershell_title": "Fuse daemon read_only_paths exclusion priority"
+    },
+    {
+      "id": 18,
+      "config_mode": "fuse",
+      "bash_title": "Fuse daemon 混合模式：映射最终目标决定只读权限",
+      "powershell_title": "Fuse daemon mapped final target read-only policy"
+    },
+    {
+      "id": 19,
+      "config_mode": "fuse",
+      "bash_title": "Fuse daemon 混合模式：同父级多通配符规则互不污染",
+      "powershell_title": "Fuse daemon sibling wildcard rules stay scoped"
+    },
+    {
+      "id": 20,
+      "config_mode": "mount_namespace",
+      "bash_title": "默认 mount namespace：allowed_real_paths 通配符回退",
+      "powershell_title": "mount namespace allowed wildcard fallback"
+    },
+    {
+      "id": 21,
+      "config_mode": "mount_namespace",
+      "bash_title": "默认 mount namespace：read_only_paths 通配符回退",
+      "powershell_title": "mount namespace read_only wildcard fallback"
+    },
+    {
+      "id": 22,
+      "config_mode": "mount_namespace",
+      "bash_title": "默认 mount namespace：映射最终目标决定只读权限",
+      "powershell_title": "mount namespace mapped final target read-only policy"
+    },
+    {
+      "id": 23,
+      "config_mode": "monitor_mount",
+      "bash_title": "文件监视：未启用重定向的普通应用与系统代写保存成功记录",
+      "powershell_title": "file monitor disabled redirect regular app and system writer success records"
+    },
+    {
+      "id": 24,
+      "config_mode": "monitor_mount",
+      "bash_title": "文件监视：普通应用 fuse daemon 关闭时映射保存、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor regular app namespace mapping and read-only records"
+    },
+    {
+      "id": 25,
+      "config_mode": "monitor_fuse",
+      "bash_title": "文件监视：普通应用 fuse daemon 开启时保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor regular app with fuse daemon on"
+    },
+    {
+      "id": 26,
+      "config_mode": "monitor_mount",
+      "bash_title": "文件监视：系统代写 fuse daemon 关闭时保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor system writer with fuse daemon off"
+    },
+    {
+      "id": 27,
+      "config_mode": "monitor_fuse",
+      "bash_title": "文件监视：系统代写 fuse daemon 开启时保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor system writer with fuse daemon on"
+    },
+    {
+      "id": 28,
+      "config_mode": "standard",
+      "bash_title": "MediaStore 查询：只读真实图片路径应对应用可见",
+      "powershell_title": "MediaStore query keeps read-only real image visible"
+    },
+    {
+      "id": 29,
+      "config_mode": "standard",
+      "bash_title": "配置热更新：运行中应用无需重启即可从默认重定向切换到路径映射",
+      "powershell_title": "config hot reload switches running app from default redirect to path mapping"
+    }
+  ]
+}
