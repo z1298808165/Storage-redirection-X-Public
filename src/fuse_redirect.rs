@@ -14,8 +14,9 @@ use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
@@ -387,10 +388,105 @@ fn send_ready_result(sock: Option<libc::c_int>, result: i32) {
 struct FuseRedirectFs {
     policy: RedirectPolicy,
     state: Mutex<FuseState>,
+    perf: FusePerfStats,
+}
+
+struct FusePerfStats {
+    package_name: String,
+    calls: AtomicU64,
+    lookup_calls: AtomicU64,
+    metadata_calls: AtomicU64,
+    open_calls: AtomicU64,
+    read_calls: AtomicU64,
+    write_calls: AtomicU64,
+    mutation_calls: AtomicU64,
+    sampled_calls: AtomicU64,
+    sampled_ns: AtomicU64,
+    slow_samples: AtomicU64,
+}
+
+struct FusePerfSample<'a> {
+    stats: Option<&'a FusePerfStats>,
+    started: Option<Instant>,
+    snapshot: bool,
+}
+
+impl FusePerfStats {
+    fn new(package_name: String) -> Self {
+        Self {
+            package_name,
+            calls: AtomicU64::new(0),
+            lookup_calls: AtomicU64::new(0),
+            metadata_calls: AtomicU64::new(0),
+            open_calls: AtomicU64::new(0),
+            read_calls: AtomicU64::new(0),
+            write_calls: AtomicU64::new(0),
+            mutation_calls: AtomicU64::new(0),
+            sampled_calls: AtomicU64::new(0),
+            sampled_ns: AtomicU64::new(0),
+            slow_samples: AtomicU64::new(0),
+        }
+    }
+
+    fn observe<'a>(&'a self, counter: &AtomicU64) -> FusePerfSample<'a> {
+        if !crate::logging::is_debug_logging_enabled() {
+            return FusePerfSample {
+                stats: None,
+                started: None,
+                snapshot: false,
+            };
+        }
+        counter.fetch_add(1, Ordering::Relaxed);
+        let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
+        FusePerfSample {
+            stats: Some(self),
+            started: calls.is_multiple_of(256).then(Instant::now),
+            snapshot: calls.is_multiple_of(4096),
+        }
+    }
+
+    fn log_snapshot(&self) {
+        let sampled = self.sampled_calls.load(Ordering::Relaxed);
+        let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
+        log::debug!(
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} write={} mutation={} samples={} avg_sample_us={} slow_samples={}",
+            self.package_name,
+            self.calls.load(Ordering::Relaxed),
+            self.lookup_calls.load(Ordering::Relaxed),
+            self.metadata_calls.load(Ordering::Relaxed),
+            self.open_calls.load(Ordering::Relaxed),
+            self.read_calls.load(Ordering::Relaxed),
+            self.write_calls.load(Ordering::Relaxed),
+            self.mutation_calls.load(Ordering::Relaxed),
+            sampled,
+            sampled_ns.checked_div(sampled.max(1)).unwrap_or(0) / 1000,
+            self.slow_samples.load(Ordering::Relaxed),
+        );
+    }
+}
+
+impl Drop for FusePerfSample<'_> {
+    fn drop(&mut self) {
+        let Some(stats) = self.stats else {
+            return;
+        };
+        if let Some(started) = self.started {
+            let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            stats.sampled_calls.fetch_add(1, Ordering::Relaxed);
+            stats.sampled_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+            if elapsed_ns >= 5_000_000 {
+                stats.slow_samples.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if self.snapshot {
+            stats.log_snapshot();
+        }
+    }
 }
 
 impl FuseRedirectFs {
     fn new(config: FuseRedirectConfig) -> Option<Self> {
+        let package_name = config.package_name.clone();
         let policy = RedirectPolicy::new(config)?;
         let mut inodes = HashMap::new();
         let mut paths_by_inode = HashMap::new();
@@ -399,6 +495,7 @@ impl FuseRedirectFs {
 
         Some(Self {
             policy,
+            perf: FusePerfStats::new(package_name),
             state: Mutex::new(FuseState {
                 next_ino: ROOT_INO + 1,
                 next_fh: 1,
@@ -558,6 +655,7 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let _perf = self.perf.observe(&self.perf.lookup_calls);
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -569,6 +667,7 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let _perf = self.perf.observe(&self.perf.metadata_calls);
         match self
             .backend_for_ino(ino)
             .and_then(|backend| self.visible_attr_for_backend(ino, &backend))
@@ -579,6 +678,7 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let _perf = self.perf.observe(&self.perf.metadata_calls);
         match self.backend_for_ino(ino).and_then(|backend| {
             std::fs::read_link(&backend.path)
                 .map(|path| path.as_os_str().as_bytes().to_vec())
@@ -590,6 +690,7 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let _perf = self.perf.observe(&self.perf.open_calls);
         let rel = match self.path_for_ino(ino) {
             Some(rel) => rel,
             None => {
@@ -627,6 +728,7 @@ impl Filesystem for FuseRedirectFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let _perf = self.perf.observe(&self.perf.read_calls);
         let entries = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
             if let Some(entries) = state.dirs.get(&fh.into()) {
@@ -673,6 +775,7 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        let _perf = self.perf.observe(&self.perf.open_calls);
         let backend = match self.backend_for_ino(ino) {
             Ok(backend) => backend,
             Err(errno) => {
@@ -730,6 +833,7 @@ impl Filesystem for FuseRedirectFs {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
+        let _perf = self.perf.observe(&self.perf.read_calls);
         let file = {
             let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
@@ -764,6 +868,7 @@ impl Filesystem for FuseRedirectFs {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
+        let _perf = self.perf.observe(&self.perf.write_calls);
         let file = {
             let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
@@ -871,6 +976,7 @@ impl Filesystem for FuseRedirectFs {
         flags: i32,
         reply: ReplyCreate,
     ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -978,6 +1084,7 @@ impl Filesystem for FuseRedirectFs {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         let file_type = mode & libc::S_IFMT;
         if file_type != 0 && file_type != libc::S_IFREG {
             reply.error(Errno::EPERM);
@@ -1054,6 +1161,7 @@ impl Filesystem for FuseRedirectFs {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1099,10 +1207,12 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         self.remove_child(parent, name, false, reply);
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         self.remove_child(parent, name, true, reply);
     }
 
@@ -1116,6 +1226,7 @@ impl Filesystem for FuseRedirectFs {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         let rename_flags = flags.bits();
         let rename_noreplace_flag = libc::RENAME_NOREPLACE as u32;
         if rename_flags & !rename_noreplace_flag != 0 {
@@ -1215,6 +1326,7 @@ impl Filesystem for FuseRedirectFs {
         _flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
         let backend = match self.backend_for_ino(ino) {
             Ok(backend) => backend,
             Err(errno) => {

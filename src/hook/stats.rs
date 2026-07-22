@@ -69,6 +69,7 @@ pub struct InterceptHub {
 
 #[derive(Default)]
 struct AtomicStats {
+    observed_calls: AtomicU64,
     open_calls: AtomicU64,
     openat_calls: AtomicU64,
     stat_calls: AtomicU64,
@@ -84,6 +85,7 @@ struct AtomicStats {
 impl AtomicStats {
     const fn new() -> Self {
         Self {
+            observed_calls: AtomicU64::new(0),
             open_calls: AtomicU64::new(0),
             openat_calls: AtomicU64::new(0),
             stat_calls: AtomicU64::new(0),
@@ -99,6 +101,31 @@ impl AtomicStats {
 }
 
 impl InterceptHub {
+    fn record_hook_call(&self, counter: &AtomicU64) {
+        if !crate::logging::is_debug_logging_enabled() {
+            return;
+        }
+        counter.fetch_add(1, Ordering::Relaxed);
+        let observed = self.stats.observed_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if observed.is_multiple_of(4096) {
+            log::debug!(
+                "perf_snapshot component=hook pkg={} calls={} open={} openat={} stat={} access={} mkdir={} unlink={} rename={} opendir={} readlink={} redirected={}",
+                self.get_package_name(),
+                observed,
+                self.stats.open_calls.load(Ordering::Relaxed),
+                self.stats.openat_calls.load(Ordering::Relaxed),
+                self.stats.stat_calls.load(Ordering::Relaxed),
+                self.stats.access_calls.load(Ordering::Relaxed),
+                self.stats.mkdir_calls.load(Ordering::Relaxed),
+                self.stats.unlink_calls.load(Ordering::Relaxed),
+                self.stats.rename_calls.load(Ordering::Relaxed),
+                self.stats.opendir_calls.load(Ordering::Relaxed),
+                self.stats.readlink_calls.load(Ordering::Relaxed),
+                self.stats.total_redirected.load(Ordering::Relaxed),
+            );
+        }
+    }
+
     pub fn instance() -> &'static InterceptHub {
         &INTERCEPT_HUB
     }
@@ -495,57 +522,39 @@ impl InterceptHub {
     }
 
     pub fn increment_open_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.open_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.open_calls);
     }
 
     pub fn increment_openat_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.openat_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.openat_calls);
     }
 
     pub fn increment_stat_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.stat_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.stat_calls);
     }
 
     pub fn increment_access_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.access_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.access_calls);
     }
 
     pub fn increment_mkdir_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.mkdir_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.mkdir_calls);
     }
 
     pub fn increment_unlink_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.unlink_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.unlink_calls);
     }
 
     pub fn increment_rename_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.rename_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.rename_calls);
     }
 
     pub fn increment_opendir_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.opendir_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.opendir_calls);
     }
 
     pub fn increment_readlink_calls(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.stats.readlink_calls.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_hook_call(&self.stats.readlink_calls);
     }
 
     pub fn increment_total_redirected(&self) {
