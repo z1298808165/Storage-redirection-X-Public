@@ -371,9 +371,9 @@ class SrxViewModel(
     if (!isSafePackageName(app.packageName)) return
     configSaveJob?.cancel()
     viewModelScope.launch {
-      if (!silent) _state.value = _state.value.copy(busy = true)
+      if (!silent) updateBusy(BusyStateChange.Started())
       val ok = repository.writeAppConfig(app.packageName, config)
-      if (!silent) _state.value = _state.value.copy(busy = false, busyMessage = null)
+      if (!silent) updateBusy(BusyStateChange.Finished)
       if (ok) {
         applyConfigToState(app.packageName, config)
         if (!silent) showMessage("配置已保存")
@@ -388,9 +388,9 @@ class SrxViewModel(
     if (!isSafePackageName(app.packageName)) return
     configSaveJob?.cancel()
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true)
+      updateBusy(BusyStateChange.Started())
       val ok = repository.deleteAppConfig(app.packageName)
-      _state.value = _state.value.copy(busy = false, busyMessage = null)
+      updateBusy(BusyStateChange.Finished)
       if (ok) {
         applyConfigToState(app.packageName, null)
         showMessage("配置已删除")
@@ -535,7 +535,7 @@ class SrxViewModel(
     val targets = packageNames.filter(::isSafePackageName).distinct()
     if (targets.isEmpty()) return
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true, busyMessage = "正在应用模板到 ${targets.size} 个应用")
+      updateBusy(BusyStateChange.Started("正在应用模板到 ${targets.size} 个应用"))
       val ok = repository.applyTemplateToApps(templateId, targets)
       val templates = repository.readTemplates()
       val appliedTemplate = templates.firstOrNull { it.id == templateId }
@@ -550,7 +550,8 @@ class SrxViewModel(
         refreshApps(force = true)
         showMessage("应用模板失败")
       }
-      _state.value = _state.value.copy(busy = false, busyMessage = null, templates = templates)
+      updateBusy(BusyStateChange.Finished)
+      _state.value = _state.value.copy(templates = templates)
     }
   }
 
@@ -638,13 +639,13 @@ class SrxViewModel(
 
   fun setModuleEnabled(enabled: Boolean) {
     viewModelScope.launch {
-      _state.value =
-          _state.value.copy(
-              busy = true,
-              busyMessage = if (enabled) "正在启动模块并重启 MediaProvider" else "正在停止模块并重启 MediaProvider",
+      updateBusy(
+          BusyStateChange.Started(
+              if (enabled) "正在启动模块并重启 MediaProvider" else "正在停止模块并重启 MediaProvider"
           )
+      )
       val ok = repository.setModuleEnabled(enabled)
-      _state.value = _state.value.copy(busy = false, busyMessage = null)
+      updateBusy(BusyStateChange.Finished)
       showMessage(if (ok) "模块状态已更新" else "模块状态切换失败")
       refreshDashboard()
     }
@@ -652,28 +653,23 @@ class SrxViewModel(
 
   fun restartMediaProvider() {
     viewModelScope.launch {
-      _state.value =
-          _state.value.copy(
-              busy = true,
-              busyMessage = "正在快速重启 MediaProvider",
-          )
+      updateBusy(BusyStateChange.Started("正在快速重启 MediaProvider"))
       val ok = repository.restartMediaProvider()
-      _state.value = _state.value.copy(busy = false, busyMessage = null)
+      updateBusy(BusyStateChange.Finished)
       showMessage(if (ok) "MediaProvider 已重启" else "重启 MediaProvider 超时")
     }
   }
 
   fun refreshLogs() {
     viewModelScope.launch {
-      _state.value = _state.value.copy(logsRefreshing = true)
+      updateLogs(LogStateChange.RefreshStarted)
       runCatching { repository.readLogs() to repository.readFileMonitorFilters() }
           .onSuccess { (logs, filters) ->
-            _state.value =
-                _state.value.copy(logs = logs, fileMonitorFilters = filters, logsRefreshing = false)
+            updateLogs(LogStateChange.RefreshSucceeded(logs, filters))
             refreshLogAppInfo(logs)
           }
           .onFailure {
-            _state.value = _state.value.copy(logsRefreshing = false)
+            updateLogs(LogStateChange.RefreshFailed)
             showMessage("加载日志失败")
           }
     }
@@ -710,7 +706,7 @@ class SrxViewModel(
             .filter(::isSafePackageName)
             .toSet()
     if (packages.isEmpty()) {
-      _state.value = _state.value.copy(logApps = emptyList())
+      updateLogs(LogStateChange.AppsResolved(emptyList()))
       return
     }
 
@@ -726,7 +722,7 @@ class SrxViewModel(
                     (logApps.associateBy { it.packageName } + knownApps).values.sortedBy {
                       it.packageName
                     }
-                _state.value = _state.value.copy(logApps = merged)
+                updateLogs(LogStateChange.AppsResolved(merged))
               }
         }
   }
@@ -736,7 +732,7 @@ class SrxViewModel(
       val ok = repository.clearLogs()
       if (ok) {
         logAppsJob?.cancel()
-        _state.value = _state.value.copy(logs = emptyList(), logApps = emptyList())
+        updateLogs(LogStateChange.Cleared)
         showMessage("日志已清空")
       } else {
         showMessage("清空失败")
@@ -779,17 +775,17 @@ class SrxViewModel(
 
   fun exportDiagnosticArchiveToUri(uri: Uri) {
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true, busyMessage = "正在启动日志导出", busyProgress = 0.01f)
+      updateBusy(BusyStateChange.Started("正在启动日志导出", 0.01f))
       runCatching { repository.exportDiagnosticArchive(uri, ::updateDiagnosticArchiveProgress) }
           .onSuccess { ok -> showMessage(if (ok) "日志包已保存" else "日志导出失败") }
           .onFailure { showMessage(it.message ?: "日志导出失败") }
-      _state.value = _state.value.copy(busy = false, busyMessage = null, busyProgress = null)
+      updateBusy(BusyStateChange.Finished)
     }
   }
 
   fun exportDiagnosticArchiveToDirectory(uri: Uri) {
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true, busyMessage = "正在启动日志导出", busyProgress = 0.01f)
+      updateBusy(BusyStateChange.Started("正在启动日志导出", 0.01f))
       runCatching {
             repository.exportDiagnosticArchiveToDirectory(
                 uri,
@@ -799,35 +795,27 @@ class SrxViewModel(
           }
           .onSuccess { ok -> showMessage(if (ok) "日志包已保存" else "日志导出失败") }
           .onFailure { showMessage(it.message ?: "日志导出失败") }
-      _state.value = _state.value.copy(busy = false, busyMessage = null, busyProgress = null)
+      updateBusy(BusyStateChange.Finished)
     }
   }
 
   private suspend fun updateDiagnosticArchiveProgress(progress: DiagnosticArchiveProgress) {
-    withContext(Dispatchers.Main.immediate) {
-      val nextProgress = progress.percent.coerceIn(0, 100) / 100f
-      val currentProgress = _state.value.busyProgress ?: 0f
-      _state.value =
-          _state.value.copy(
-              busyMessage = progress.message,
-              busyProgress = maxOf(currentProgress, nextProgress),
-          )
-    }
+    withContext(Dispatchers.Main.immediate) { updateBusy(BusyStateChange.Progress(progress)) }
   }
 
   fun exportBackupToUri(uri: Uri) {
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true)
+      updateBusy(BusyStateChange.Started())
       runCatching { writeBytesToUri(uri, repository.buildBackupZipBytes()) }
           .onSuccess { showMessage("备份已保存") }
           .onFailure { showMessage(it.message ?: "备份失败") }
-      _state.value = _state.value.copy(busy = false, busyMessage = null)
+      updateBusy(BusyStateChange.Finished)
     }
   }
 
   fun restoreBackupFromUri(uri: Uri) {
     viewModelScope.launch {
-      _state.value = _state.value.copy(busy = true)
+      updateBusy(BusyStateChange.Started())
       runCatching { repository.restoreBackupFileBytes(readBytesFromUri(uri)) }
           .onSuccess { ok ->
             if (ok) {
@@ -843,7 +831,7 @@ class SrxViewModel(
             }
           }
           .onFailure { showMessage(it.message ?: "还原失败") }
-      _state.value = _state.value.copy(busy = false, busyMessage = null)
+      updateBusy(BusyStateChange.Finished)
     }
   }
 
@@ -940,6 +928,14 @@ class SrxViewModel(
 
   private fun showMessage(message: String) {
     _state.value = _state.value.copy(snackbar = message)
+  }
+
+  private fun updateBusy(change: BusyStateChange) {
+    _state.value = _state.value.reduceBusy(change)
+  }
+
+  private fun updateLogs(change: LogStateChange) {
+    _state.value = _state.value.reduceLogs(change)
   }
 
   private suspend fun writeBytesToUri(
