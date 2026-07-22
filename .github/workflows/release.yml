@@ -10,7 +10,49 @@ permissions:
   contents: write
 
 jobs:
+  quality:
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6.1.0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-14
+          components: rustfmt
+
+      - name: Run release quality gate
+        run: |
+          chmod +x ./gradlew
+          cargo fmt --all -- --check
+          ./gradlew --no-daemon --console=plain spotlessCheck
+          node scripts/verify-webui-structure.js
+          node scripts/verify-webui-config-fixtures.js
+          cargo test -p native-config-fixtures
+          python -m unittest discover -s .github/tests -p "test_*.py" -v
+
+      - name: Verify inline tests and source quality
+        shell: pwsh
+        run: |
+          ./scripts/validate-inline-tests.ps1 -Ref HEAD
+          ./scripts/validate-code-quality.ps1 -BaseRef HEAD^ -Ref HEAD
+
   prepare:
+    needs:
+      - quality
     if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
@@ -108,9 +150,10 @@ jobs:
           done
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
-      - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-14
           targets: aarch64-linux-android
 
       - name: Run build script tests
@@ -320,9 +363,10 @@ jobs:
           done
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
-      - name: Install Rust nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-14
           targets: x86_64-linux-android
 
       - name: Install CMake and Ninja
