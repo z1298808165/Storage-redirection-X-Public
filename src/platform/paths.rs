@@ -883,6 +883,7 @@ fn is_valid_package_name(package_name: &str) -> bool {
         && package_name.split('.').all(|part| !part.is_empty())
 }
 
+#[cfg(target_os = "android")]
 pub fn monotonic_ms() -> i64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -892,4 +893,17 @@ pub fn monotonic_ms() -> i64 {
         libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts as *mut _);
     }
     ts.tv_sec * 1000 + ts.tv_nsec / 1_000_000
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn monotonic_ms() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }

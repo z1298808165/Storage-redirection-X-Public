@@ -3,6 +3,11 @@ name = "srx_core"
 version = "1.2.59"
 edition = "2024"
 
+[workspace]
+members = ["tests/native-config-fixtures"]
+default-members = ["."]
+resolver = "3"
+
 [lib]
 name = "srx_core"
 crate-type = ["cdylib"]

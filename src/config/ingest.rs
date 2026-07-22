@@ -1,5 +1,5 @@
 use super::{AppProfile, MonitorFilterConfig, SettingsState, UserProfile};
-use crate::domain::PathMapping;
+use crate::domain::{PathMapping, filter_valid_path_mapping_chains};
 use crate::platform::paths;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -463,6 +463,7 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
             }
         }
 
+        user_profile.path_mappings = filter_valid_path_mapping_chains(user_profile.path_mappings);
         app_profile.user_profiles.insert(user_id, user_profile);
     }
 

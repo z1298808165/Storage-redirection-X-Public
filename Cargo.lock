@@ -137,6 +137,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "native-config-fixtures"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "once_cell",
+ "serde_json",
+]
+
+[[package]]
 name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
