@@ -51,6 +51,8 @@
 .tmp/
 tmp/
 temp/
+__pycache__/
+*.py[cod]
 
 # 编辑器与系统文件
 .idea/

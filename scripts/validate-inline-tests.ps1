@@ -32,10 +32,13 @@ function Invoke-Git {
 }
 
 if ($Ref -eq ":") {
-    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", "*.rs")
+    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", "src/*.rs", "src/**/*.rs")
 } else {
     $files = Invoke-Git -Arguments @("ls-tree", "-r", "--name-only", $Ref) |
-        Where-Object { $_.EndsWith(".rs", [StringComparison]::OrdinalIgnoreCase) }
+        Where-Object {
+            $_.StartsWith("src/", [StringComparison]::Ordinal) -and
+            $_.EndsWith(".rs", [StringComparison]::OrdinalIgnoreCase)
+        }
 }
 
 $actual = @{}
