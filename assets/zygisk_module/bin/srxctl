@@ -182,6 +182,35 @@ is_runtime_disabled() {
   [ -f "$RUNTIME_DISABLE_FILE" ] || [ -f "$MODDIR/disable" ]
 }
 
+is_managed_temp_path() {
+  [ "$1" != "/data/local/tmp/srx_" ] || return 1
+  case "$1" in
+    /data/local/tmp/srx_*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *..*) return 1 ;;
+  esac
+  return 0
+}
+
+build_diagnostic_archive() {
+  stage="$1"
+  archive="$2"
+  progress="$3"
+  is_managed_temp_path "$stage" || return 64
+  is_managed_temp_path "$archive" || return 64
+  [ -z "$progress" ] || is_managed_temp_path "$progress" || return 64
+
+  script="$MODDIR/service.d/diagnostic_archive.sh"
+  [ -r "$script" ] || return 127
+  if [ -n "$progress" ]; then
+    /system/bin/sh "$script" "$stage" "$archive" "$progress"
+  else
+    /system/bin/sh "$script" "$stage" "$archive"
+  fi
+}
+
 clear_monitor_log() {
   mkdir -p "$LOGS_DIR"
   daemon_bin="$MODDIR/bin/srx_daemon"
@@ -305,6 +334,7 @@ case "$1" in
   ensure-collectors) start_collectors_if_needed ;;
   clear-monitor) clear_monitor_log ;;
   reset-stats) reset_runtime_stats ;;
+  diagnostic-archive) build_diagnostic_archive "$2" "$3" "$4" ;;
   status|"") status_runtime ;;
-  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|clear-monitor|reset-stats|status}" >&2; exit 2 ;;
+  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|clear-monitor|reset-stats|diagnostic-archive|status}" >&2; exit 2 ;;
 esac

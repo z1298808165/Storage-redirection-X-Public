@@ -34,6 +34,20 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn("logcat-capture.txt", source)
             self.assertIn("tail -n 3000", source)
 
+    def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
+        control = read("assets/zygisk_module/bin/srxctl")
+        self.assertIn('is_managed_temp_path "$stage" || return 64', control)
+        self.assertIn('is_managed_temp_path "$archive" || return 64', control)
+
+        for path in (
+            "app/src/main/java/org/srx/manager/data/RootFileStore.kt",
+            "assets/zygisk_module/webroot/js/api.js",
+        ):
+            source = read(path)
+            self.assertIn("rc=2", source)
+            self.assertIn("127", source)
+            self.assertNotIn("eq 64", source)
+
     def test_default_collectors_do_not_subscribe_to_native_hot_tags(self) -> None:
         collectors = read("assets/zygisk_module/service.d/log_collectors.sh") + read(
             "assets/zygisk_module/service.d/debug_collectors.sh"

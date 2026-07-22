@@ -258,10 +258,9 @@ class RootFileStoreTest {
     assertEquals(180_000L, invocation.timeoutMs)
     val command = invocation.command
     assertTrue(command, command.contains("archive=${shellQuote(archive!!)};"))
-    assertTrue(
-        command,
-        command.startsWith("if [ -r ${shellQuote(DiagnosticArchiveScriptPath)} ]; then "),
-    )
+    assertTrue(command, command.startsWith("if [ -r ${shellQuote(SrxCtlPath)} ]; then "))
+    assertTrue(command, command.contains("diagnostic-archive"))
+    assertTrue(command, command.contains("[ \$rc -eq 2 ] || [ \$rc -eq 127 ] || exit \$rc"))
     assertTrue(
         command,
         command.contains("/system/bin/sh ${shellQuote(DiagnosticArchiveScriptPath)}"),
@@ -303,7 +302,10 @@ class RootFileStoreTest {
     assertTrue(startCommand, startCommand.contains(DiagnosticArchiveScriptPath))
     assertTrue(startCommand, startCommand.contains("\"\$stage\" \"\$archive\" \"\$progress\""))
     assertTrue(startCommand, startCommand.contains("cat > \"\$worker\" <<'SRX_DIAG_WORKER'"))
-    assertTrue(startCommand, startCommand.contains("export stage archive progress done script"))
+    assertTrue(startCommand, startCommand.contains("export stage archive progress done ctl script"))
+    assertTrue(startCommand, startCommand.contains("diagnostic-archive"))
+    assertTrue(startCommand, startCommand.contains("rc=2"))
+    assertTrue(startCommand, startCommand.contains("[ \"\$rc\" -eq 127 ]"))
     assertTrue(startCommand, startCommand.contains("setsid /system/bin/sh \"\$worker\""))
     assertTrue(
         startCommand,

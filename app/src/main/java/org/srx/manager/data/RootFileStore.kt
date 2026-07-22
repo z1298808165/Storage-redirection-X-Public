@@ -232,7 +232,11 @@ class RootFileStore(
     val archiveQ = shellQuote(archive)
     val progressArg = progress?.let { " ${shellQuote(it)}" }.orEmpty()
     val scriptCommand =
-        "if [ -r ${shellQuote(DiagnosticArchiveScriptPath)} ]; then " +
+        "if [ -r ${shellQuote(SrxCtlPath)} ]; then " +
+            "/system/bin/sh ${shellQuote(SrxCtlPath)} diagnostic-archive $stageQ $archiveQ$progressArg; " +
+            "rc=\$?; [ \$rc -eq 0 ] && exit 0; " +
+            "[ \$rc -eq 2 ] || [ \$rc -eq 127 ] || exit \$rc; fi; " +
+            "if [ -r ${shellQuote(DiagnosticArchiveScriptPath)} ]; then " +
             "/system/bin/sh ${shellQuote(DiagnosticArchiveScriptPath)} $stageQ $archiveQ$progressArg; " +
             "rc=\$?; [ \$rc -eq 0 ] && exit 0; fi; "
     return scriptCommand + buildLegacyDiagnosticArchiveCommand(stage, archive, progress)
@@ -261,13 +265,13 @@ class RootFileStore(
         "; " +
         "stage=${shellQuote(stage)}; archive=${shellQuote(archive)}; progress=${shellQuote(progress)}; " +
         "done=${shellQuote(done)}; run_log=${shellQuote(runLog)}; pid_file=${shellQuote(pid)}; " +
-        "worker=${shellQuote(worker)}; script=$script; " +
+        "worker=${shellQuote(worker)}; ctl=${shellQuote(SrxCtlPath)}; script=$script; " +
         "printf '%s|%s|%s\\n' '1' 'start' '正在启动日志导出' > \"\$progress\" 2>/dev/null || true; " +
         "cat > \"\$worker\" <<'SRX_DIAG_WORKER'\n" +
         diagnosticArchiveWorkerScript() +
         "\nSRX_DIAG_WORKER\n" +
         "chmod 700 \"\$worker\" || exit 1; " +
-        "export stage archive progress done script; " +
+        "export stage archive progress done ctl script; " +
         "if command -v setsid >/dev/null 2>&1; then " +
         "setsid /system/bin/sh \"\$worker\" > \"\$run_log\" 2>&1 < /dev/null & worker_pid=\$!; " +
         "else /system/bin/sh \"\$worker\" > \"\$run_log\" 2>&1 < /dev/null & worker_pid=\$!; fi; " +
@@ -277,12 +281,16 @@ class RootFileStore(
   private fun diagnosticArchiveWorkerScript(): String =
       listOf(
               "#!/system/bin/sh",
-              "rc=1",
-              "if [ -r \"\$script\" ]; then",
+              "rc=2",
+              "if [ -r \"\$ctl\" ]; then",
+              "  /system/bin/sh \"\$ctl\" diagnostic-archive \"\$stage\" \"\$archive\" \"\$progress\"",
+              "  rc=\$?",
+              "fi",
+              "if { [ \"\$rc\" -eq 2 ] || [ \"\$rc\" -eq 127 ]; } && [ -r \"\$script\" ]; then",
               "  /system/bin/sh \"\$script\" \"\$stage\" \"\$archive\" \"\$progress\"",
               "  rc=\$?",
-              "else",
-              "  echo \"diagnostic_archive: script missing: \$script\" >&2",
+              "elif [ \"\$rc\" -eq 2 ] || [ \"\$rc\" -eq 127 ]; then",
+              "  echo \"diagnostic_archive: control entry missing: \$ctl\" >&2",
               "  rc=127",
               "fi",
               "printf '%s\\n' \"\$rc\" > \"\$done\"",

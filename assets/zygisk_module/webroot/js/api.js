@@ -350,55 +350,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function diagnosticArchiveWorkerScript() {
-  return [
-    "#!/system/bin/sh",
-    "rc=1",
-    'if [ -r "$script" ]; then',
-    '  /system/bin/sh "$script" "$stage" "$archive" "$progress"',
-    "  rc=$?",
-    "else",
-    '  echo "diagnostic_archive: script missing: $script" >&2',
-    "  rc=127",
-    "fi",
-    'printf "%s\\n" "$rc" > "$done"',
-  ].join("\n");
-}
-
-function parseDiagnosticProgress(line) {
-  const parts = String(line || "")
-    .trim()
-    .split("|");
-  if (parts.length < 3) return null;
-  const percent = Math.max(0, Math.min(100, Number.parseInt(parts[0], 10)));
-  if (!Number.isFinite(percent)) return null;
-  return {
-    percent,
-    phase: String(parts[1] || "").slice(0, 32),
-    message: parts.slice(2).join("|").slice(0, 80) || "正在导出日志",
-  };
-}
-
-function parseDiagnosticArchivePoll(stdout) {
-  let progressLine = "";
-  let doneCode = null;
-  String(stdout || "")
-    .split(/\r?\n/)
-    .forEach((line) => {
-      if (line.startsWith("__SRX_DONE__=")) {
-        const value = line.slice("__SRX_DONE__=".length).trim();
-        if (value !== "") doneCode = Number.parseInt(value, 10);
-      } else if (line.includes("|")) {
-        progressLine = line.trim();
-      }
-    });
-  return {
-    progress: parseDiagnosticProgress(progressLine),
-    progressLine,
-    doneCode: Number.isFinite(doneCode) ? doneCode : null,
-  };
-}
-
 function diagnosticProgressCommand(progress, percent, phase, message) {
   if (!progress) return "";
   return (
@@ -417,12 +368,16 @@ function diagnosticProgressCommand(progress, percent, phase, message) {
 function diagnosticArchiveWorkerScript() {
   return [
     "#!/system/bin/sh",
-    "rc=1",
-    'if [ -r "$script" ]; then',
+    "rc=2",
+    'if [ -r "$ctl" ]; then',
+    '  /system/bin/sh "$ctl" diagnostic-archive "$stage" "$archive" "$progress"',
+    "  rc=$?",
+    "fi",
+    'if { [ "$rc" -eq 2 ] || [ "$rc" -eq 127 ]; } && [ -r "$script" ]; then',
     '  /system/bin/sh "$script" "$stage" "$archive" "$progress"',
     "  rc=$?",
-    "else",
-    '  echo "diagnostic_archive: script missing: $script" >&2',
+    'elif [ "$rc" -eq 2 ] || [ "$rc" -eq 127 ]; then',
+    '  echo "diagnostic_archive: control entry missing: $ctl" >&2',
     "  rc=127",
     "fi",
     'printf "%s\\n" "$rc" > "$done"',
@@ -1121,6 +1076,13 @@ const Api = {
     const progressArg = progress ? " " + shellQuote(progress) : "";
     const scriptCommand =
       "if [ -r " +
+      shellQuote(SRXCTL) +
+      " ]; then " +
+      srxCtlCommand(
+        "diagnostic-archive " + shellQuote(stage) + " " + shellQuote(archive) + progressArg,
+      ) +
+      "; rc=$?; [ $rc -eq 0 ] && exit 0; " +
+      "[ $rc -eq 2 ] || [ $rc -eq 127 ] || exit $rc; fi; if [ -r " +
       shellQuote(DIAGNOSTIC_ARCHIVE_SCRIPT) +
       " ]; then " +
       "/system/bin/sh " +
@@ -1159,6 +1121,8 @@ const Api = {
       "; " +
       "worker=" +
       shellQuote(worker) +
+      "; ctl=" +
+      shellQuote(SRXCTL) +
       "; script=" +
       shellQuote(DIAGNOSTIC_ARCHIVE_SCRIPT) +
       "; " +
@@ -1167,7 +1131,7 @@ const Api = {
       diagnosticArchiveWorkerScript() +
       "\nSRX_DIAG_WORKER\n" +
       'chmod 700 "$worker" 2>/dev/null || true; ' +
-      "export stage archive progress done script; " +
+      "export stage archive progress done ctl script; " +
       "if command -v setsid >/dev/null 2>&1; then " +
       'setsid /system/bin/sh "$worker" > "$run_log" 2>&1 < /dev/null & worker_pid=$!; ' +
       'else /system/bin/sh "$worker" > "$run_log" 2>&1 < /dev/null & worker_pid=$!; fi; ' +
@@ -1232,60 +1196,6 @@ const Api = {
       'echo "final_capture_completed_at=$(date "+%Y-%m-%d %H:%M:%S %z" 2>/dev/null || date 2>/dev/null)" >> "$stage/state/logcat-capture.txt"; ' +
       diagnosticProgressCommand(progress, 95, "archive", "正在压缩日志包") +
       '(cd "$stage" && tar -czf "$archive" *) || exit 1; chmod 644 "$archive"; rm -rf "$stage"'
-    );
-  },
-
-  buildDiagnosticArchiveStartCommand(stage, archive, progress, done, runLog, pid) {
-    const worker = progress + ".worker.sh";
-    const paths = [stage, archive, progress, progress + ".tmp", done, runLog, pid, worker];
-    if (paths.some((path) => !isManagedTempPath(path)))
-      throw new Error("unsafe diagnostic temp path");
-    return (
-      managedTempCleanupCommand(...paths) +
-      "; " +
-      "stage=" +
-      shellQuote(stage) +
-      "; archive=" +
-      shellQuote(archive) +
-      "; progress=" +
-      shellQuote(progress) +
-      "; " +
-      "done=" +
-      shellQuote(done) +
-      "; run_log=" +
-      shellQuote(runLog) +
-      "; pid_file=" +
-      shellQuote(pid) +
-      "; " +
-      "worker=" +
-      shellQuote(worker) +
-      "; script=" +
-      shellQuote(DIAGNOSTIC_ARCHIVE_SCRIPT) +
-      "; " +
-      'printf "%s|%s|%s\\n" "1" "start" "正在启动日志导出" > "$progress" 2>/dev/null || true; ' +
-      "cat > \"$worker\" <<'SRX_DIAG_WORKER'\n" +
-      diagnosticArchiveWorkerScript() +
-      "\nSRX_DIAG_WORKER\n" +
-      'chmod 700 "$worker" 2>/dev/null || true; ' +
-      "export stage archive progress done script; " +
-      "if command -v setsid >/dev/null 2>&1; then " +
-      'setsid /system/bin/sh "$worker" > "$run_log" 2>&1 < /dev/null & worker_pid=$!; ' +
-      'else /system/bin/sh "$worker" > "$run_log" 2>&1 < /dev/null & worker_pid=$!; fi; ' +
-      'printf "%s\\n" "$worker_pid" > "$pid_file"; exit 0'
-    );
-  },
-
-  buildDiagnosticArchivePollCommand(progress, done) {
-    if (!isManagedTempPath(progress) || !isManagedTempPath(done))
-      throw new Error("unsafe diagnostic temp path");
-    return (
-      "progress=" +
-      shellQuote(progress) +
-      "; done=" +
-      shellQuote(done) +
-      "; " +
-      'if [ -f "$progress" ]; then tail -n 1 "$progress"; fi; ' +
-      'printf "\\n__SRX_DONE__="; if [ -f "$done" ]; then cat "$done"; fi'
     );
   },
 
