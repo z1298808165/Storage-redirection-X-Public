@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
 const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
-const READ_ONLY_DIR_MODE: libc::mode_t = 0o555;
 const REAL_PUBLIC_DIR_MODE: libc::mode_t = 0o2771;
 const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
 const ALLOWED_REAL_TREE_METADATA_LIMIT: usize = 256;
@@ -164,33 +163,6 @@ impl MountPlanner {
             );
         }
 
-        true
-    }
-
-    pub(super) fn ensure_read_only_directory_metadata(&self, path: &str) -> bool {
-        let Some(metadata_path) = self.metadata_operations_path(path) else {
-            log::debug!("mount dir: skip public storage root readonly path={}", path);
-            return true;
-        };
-        let Ok(c_path) = CString::new(metadata_path.as_str()) else {
-            return false;
-        };
-        let ret = unsafe { chmod(c_path.as_ptr(), READ_ONLY_DIR_MODE) };
-        if ret != 0 {
-            log::warn!(
-                "mount dir: readonly chmod failed errno={} {} path={} metadata_path={}",
-                last_errno(),
-                errno_text(),
-                path,
-                metadata_path
-            );
-            return false;
-        }
-        log::debug!(
-            "mount dir readonly path={} metadata_path={}",
-            path,
-            metadata_path
-        );
         true
     }
 

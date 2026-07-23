@@ -337,12 +337,73 @@ impl MountPlanner {
         alias_success_log: Option<&str>,
         is_any_mounted_out: Option<&mut bool>,
     ) -> bool {
+        self.bind_read_only_mount_with_storage_aliases_inner(
+            source,
+            primary_target,
+            is_recursive,
+            primary_failure_mode,
+            primary_failure_log,
+            alias_failure_log,
+            alias_success_log,
+            is_any_mounted_out,
+            false,
+        )
+    }
+
+    // quality-allow(lint-suppression): 保持 storage alias 挂载失败处理契约一致，避免复制分支逻辑。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bind_read_only_mount_with_storage_aliases_preserving_backend(
+        &self,
+        source: &str,
+        primary_target: &str,
+        is_recursive: bool,
+        primary_failure_mode: PrimaryMountFailure,
+        primary_failure_log: Option<&str>,
+        alias_failure_log: Option<&str>,
+        alias_success_log: Option<&str>,
+        is_any_mounted_out: Option<&mut bool>,
+    ) -> bool {
+        self.bind_read_only_mount_with_storage_aliases_inner(
+            source,
+            primary_target,
+            is_recursive,
+            primary_failure_mode,
+            primary_failure_log,
+            alias_failure_log,
+            alias_success_log,
+            is_any_mounted_out,
+            true,
+        )
+    }
+
+    // quality-allow(lint-suppression): 共享只读 alias 遍历需接收与两个公开 helper 相同的完整失败策略。
+    #[allow(clippy::too_many_arguments)]
+    fn bind_read_only_mount_with_storage_aliases_inner(
+        &self,
+        source: &str,
+        primary_target: &str,
+        is_recursive: bool,
+        primary_failure_mode: PrimaryMountFailure,
+        primary_failure_log: Option<&str>,
+        alias_failure_log: Option<&str>,
+        alias_success_log: Option<&str>,
+        is_any_mounted_out: Option<&mut bool>,
+        preserve_data_media_backend: bool,
+    ) -> bool {
         let mut is_any_mounted = false;
         let alias_targets = self.expand_storage_alias_paths(primary_target);
 
         for target in alias_targets {
             let is_primary_target = target == primary_target;
             if !is_primary_target && !path_exists(&target) {
+                continue;
+            }
+            if preserve_data_media_backend && is_data_media_backend_alias(&target, self.user_id) {
+                log::debug!(
+                    "alias: skip backend readonly alias src={} dst={}",
+                    source,
+                    target
+                );
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
@@ -403,6 +464,11 @@ impl MountPlanner {
         }
         true
     }
+}
+
+fn is_data_media_backend_alias(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    paths::is_same_or_child(path, &root)
 }
 
 fn path_exists(path: &str) -> bool {

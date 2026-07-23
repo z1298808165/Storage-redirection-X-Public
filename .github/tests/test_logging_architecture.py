@@ -145,6 +145,25 @@ class LoggingArchitectureTest(unittest.TestCase):
         capacity_branch = raw[raw.index("if cache.len() >= RAW_CACHE_CAP") : raw.index("cache.push(entry)")]
         self.assertNotIn("cache.clear()", capacity_branch)
 
+    def test_read_only_exclusions_keep_parent_mount_read_only(self) -> None:
+        apply = read("src/mount/apply.rs")
+        aliases = read("src/mount/alias.rs")
+        branch = apply[
+            apply.index("let preserve_data_media_backend") : apply.index(
+                "if is_read_only_mounted", apply.index("let preserve_data_media_backend")
+            )
+        ]
+        preserving = aliases[
+            aliases.index("bind_read_only_mount_with_storage_aliases_preserving_backend") : aliases.index(
+                "fn path_exists"
+            )
+        ]
+
+        self.assertIn("bind_read_only_mount_with_storage_aliases_preserving_backend", branch)
+        self.assertNotIn("bind_read_write_mount_with_storage_aliases", branch)
+        self.assertIn("is_data_media_backend_alias", preserving)
+        self.assertIn("bind_mount_read_only", preserving)
+
     def test_private_log_socket_allows_supported_root_domains(self) -> None:
         policy = read("assets/zygisk_module/sepolicy.rule")
         senders = (
