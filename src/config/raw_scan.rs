@@ -435,7 +435,7 @@ fn upsert_entry(package_name: &str, user_id: i32, entry: CacheEntry) {
             return;
         }
         if cache.len() >= RAW_CACHE_CAP {
-            cache.clear();
+            cache.remove(0);
         }
         cache.push(entry);
     });

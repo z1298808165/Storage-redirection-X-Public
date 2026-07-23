@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::string::String;
 use std::sync::Mutex;
 
@@ -8,8 +8,37 @@ const STORAGE_EMULATED_PREFIX: &str = "/storage/emulated/";
 
 // 优化：路径规范化缓存（最多保留 256 条最近的路径）
 const PATH_CACHE_MAX_SIZE: usize = 256;
-static PATH_NORMALIZE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
-    Lazy::new(|| Mutex::new(HashMap::with_capacity(PATH_CACHE_MAX_SIZE)));
+
+struct PathNormalizeCache {
+    entries: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl PathNormalizeCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::with_capacity(PATH_CACHE_MAX_SIZE),
+            order: VecDeque::with_capacity(PATH_CACHE_MAX_SIZE),
+        }
+    }
+
+    fn insert(&mut self, path: String, normalized: String) {
+        if self.entries.contains_key(&path) {
+            self.entries.insert(path, normalized);
+            return;
+        }
+        if self.entries.len() >= PATH_CACHE_MAX_SIZE
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+        }
+        self.order.push_back(path.clone());
+        self.entries.insert(path, normalized);
+    }
+}
+
+static PATH_NORMALIZE_CACHE: Lazy<Mutex<PathNormalizeCache>> =
+    Lazy::new(|| Mutex::new(PathNormalizeCache::new()));
 
 // 合并斜杠、去尾斜杠，再逐层解析存储别名
 pub fn normalize(path: &str) -> String {
@@ -19,7 +48,7 @@ pub fn normalize(path: &str) -> String {
 
     // 优化：对于常用路径先查缓存
     if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock()
-        && let Some(cached) = cache.get(path)
+        && let Some(cached) = cache.entries.get(path)
     {
         return cached.clone();
     }
@@ -51,9 +80,6 @@ pub fn normalize(path: &str) -> String {
 
     // 优化：缓存规范化结果
     if let Ok(mut cache) = PATH_NORMALIZE_CACHE.try_lock() {
-        if cache.len() >= PATH_CACHE_MAX_SIZE {
-            cache.clear();
-        }
         cache.insert(path.to_string(), normalized.clone());
     }
 

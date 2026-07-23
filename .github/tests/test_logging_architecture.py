@@ -130,6 +130,21 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("repository.readLogSnapshot()", refresh)
         self.assertNotIn("repository.readFileMonitorFilters()", refresh)
 
+    def test_native_fixed_capacity_caches_evict_incrementally(self) -> None:
+        paths = read("src/platform/paths.rs")
+        monitor = read("src/config/inspect.rs")
+        raw = read("src/config/raw_scan.rs")
+
+        self.assertIn("struct PathNormalizeCache", paths)
+        self.assertIn("self.order.pop_front()", paths)
+        self.assertNotIn("cache.clear();\n        }\n        cache.insert(path", paths)
+        self.assertIn("struct MonitorPathMatchCache", monitor)
+        self.assertIn("cache.prepare_version(config_version)", monitor)
+        self.assertIn("self.order.pop_front()", monitor)
+        self.assertIn("cache.remove(0)", raw)
+        capacity_branch = raw[raw.index("if cache.len() >= RAW_CACHE_CAP") : raw.index("cache.push(entry)")]
+        self.assertNotIn("cache.clear()", capacity_branch)
+
     def test_private_log_socket_allows_supported_root_domains(self) -> None:
         policy = read("assets/zygisk_module/sepolicy.rule")
         senders = (

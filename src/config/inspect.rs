@@ -6,7 +6,7 @@ use crate::config::{
 use crate::platform;
 use crate::redirect::policy;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,8 +15,52 @@ const SELF_PACKAGE_NAME: &str = "com.storage.redirect.x";
 // 优化：监控路径匹配缓存
 const MONITOR_PATH_CACHE_SIZE: usize = 128;
 const MONITOR_DECISION_LOG_STEP: u64 = 1024;
-static MONITOR_PATH_MATCH_CACHE: Lazy<Mutex<HashMap<String, bool>>> =
-    Lazy::new(|| Mutex::new(HashMap::with_capacity(MONITOR_PATH_CACHE_SIZE)));
+
+struct MonitorPathMatchCache {
+    config_version: u64,
+    entries: HashMap<String, bool>,
+    order: VecDeque<String>,
+}
+
+impl MonitorPathMatchCache {
+    fn new() -> Self {
+        Self {
+            config_version: 0,
+            entries: HashMap::with_capacity(MONITOR_PATH_CACHE_SIZE),
+            order: VecDeque::with_capacity(MONITOR_PATH_CACHE_SIZE),
+        }
+    }
+
+    fn prepare_version(&mut self, config_version: u64) -> bool {
+        if self.config_version == config_version {
+            return true;
+        }
+        if config_version < self.config_version {
+            return false;
+        }
+        self.config_version = config_version;
+        self.entries.clear();
+        self.order.clear();
+        true
+    }
+
+    fn insert(&mut self, key: String, value: bool) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key, value);
+            return;
+        }
+        if self.entries.len() >= MONITOR_PATH_CACHE_SIZE
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, value);
+    }
+}
+
+static MONITOR_PATH_MATCH_CACHE: Lazy<Mutex<MonitorPathMatchCache>> =
+    Lazy::new(|| Mutex::new(MonitorPathMatchCache::new()));
 static SYSTEM_WRITER_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static BRIDGE_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static UI_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -282,9 +326,10 @@ fn should_filter_monitor_record_locked_for_version(
     let op = operation.trim().to_lowercase();
 
     // 优化：为高频路径和操作组合提供快速缓存查找
-    let cache_key = format!("{:x}|{}|{}", config_version, normalized_path, op);
-    if let Ok(cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
-        && let Some(&cached_result) = cache.get(&cache_key)
+    let cache_key = format!("{}|{}", normalized_path, op);
+    if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
+        && cache.prepare_version(config_version)
+        && let Some(&cached_result) = cache.entries.get(&cache_key)
     {
         return cached_result;
     }
@@ -302,10 +347,9 @@ fn should_filter_monitor_record_locked_for_version(
     let result = path_matched || op_matched;
 
     // 优化：缓存匹配结果
-    if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock() {
-        if cache.len() >= MONITOR_PATH_CACHE_SIZE {
-            cache.clear();
-        }
+    if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
+        && cache.prepare_version(config_version)
+    {
         cache.insert(cache_key, result);
     }
 
