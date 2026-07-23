@@ -173,18 +173,20 @@ if (-not $hasStagedChanges) {
 $receipt = Assert-StagedReceipt
 if ($PSCmdlet.ParameterSetName -eq "Message") {
     $message = Get-Content -LiteralPath $MessageFile -Raw -Encoding UTF8
-    $message = [regex]::Replace($message, '(?m)^AI-Review-(?:Agent|Tree|Report|Summary):.*\r?\n?', '')
-    $summary = ([string]$receipt.summary -replace '[\r\n]+', ' ').Trim()
-    if ($summary.Length -gt 180) {
-        $summary = $summary.Substring(0, 180)
+    $message = [regex]::Replace($message, '(?m)^AI-Review-(?:Agent|Tree|Report|Summary):.*\r?\n?', '').TrimEnd()
+    if ($env:SRX_PUBLIC_COMMIT -ne "1") {
+        $summary = ([string]$receipt.summary -replace '[\r\n]+', ' ').Trim()
+        if ($summary.Length -gt 180) {
+            $summary = $summary.Substring(0, 180)
+        }
+        $message += "`n`n" +
+            "AI-Review-Agent: $([string]$receipt.reviewer)`n" +
+            "AI-Review-Tree: $([string]$receipt.tree)`n" +
+            "AI-Review-Report: $([string]$receipt.reportHash)`n" +
+            "AI-Review-Summary: $summary"
     }
-    $message = $message.TrimEnd() + "`n`n" +
-        "AI-Review-Agent: $([string]$receipt.reviewer)`n" +
-        "AI-Review-Tree: $([string]$receipt.tree)`n" +
-        "AI-Review-Report: $([string]$receipt.reportHash)`n" +
-        "AI-Review-Summary: $summary`n"
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText((Resolve-Path -LiteralPath $MessageFile).Path, $message, $utf8NoBom)
+    [IO.File]::WriteAllText((Resolve-Path -LiteralPath $MessageFile).Path, $message + "`n", $utf8NoBom)
 }
 
 Write-Host "AI review staged-tree check passed: $([string]$receipt.tree)"
