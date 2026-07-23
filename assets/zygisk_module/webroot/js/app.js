@@ -5668,7 +5668,7 @@
     try {
       await Api.ensureLogCollectors?.();
       const [content, filters] = await Promise.all([
-        Api.readFile(FILE_MONITOR_LOG),
+        Api.readFileTail(FILE_MONITOR_LOG, 500),
         Api.readMonitorFilters({ force: true }).catch(() => State.monitorFilters || null),
       ]);
       if (filters) State.monitorFilters = filters;

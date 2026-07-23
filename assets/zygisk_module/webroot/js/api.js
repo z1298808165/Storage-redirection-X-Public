@@ -216,7 +216,7 @@ const NativeBridge = {
                 if (typeof res === "string") finish(0, res, "");
                 else finish(res);
               })
-              .catch(reject);
+              .catch((error) => finish(1, "", error?.message || String(error)));
           } else if (typeof result === "string") {
             finish(0, result, "");
           }
@@ -227,12 +227,12 @@ const NativeBridge = {
             if (result && typeof result.then === "function") {
               result
                 .then((res) => (typeof res === "string" ? finish(0, res, "") : finish(res)))
-                .catch(reject);
+                .catch((error) => finish(1, "", error?.message || String(error)));
             } else if (typeof result === "string") {
               finish(0, result, "");
             }
           } catch (fallbackError) {
-            reject(fallbackError);
+            finish(1, "", fallbackError?.message || String(fallbackError));
           }
         }
         return;
@@ -416,11 +416,6 @@ function parseDiagnosticArchivePoll(stdout) {
     progressLine,
     doneCode: Number.isFinite(doneCode) ? doneCode : null,
   };
-}
-
-function prepareManagedTempDirCommand(path) {
-  if (!isManagedTempPath(path)) throw new Error("unsafe managed temp path");
-  return managedTempCleanupCommand(path) + "; mkdir -p " + shellQuote(path);
 }
 
 function isSafePackageName(packageName) {
@@ -853,10 +848,9 @@ const Api = {
   async readFileTail(path, lineCount) {
     const lines = Math.max(1, Math.min(5000, Number(lineCount) || 500));
     try {
-      const out = await this.exec("tail -n " + lines + " " + shellQuote(path) + " 2>/dev/null");
-      return out || (await this.readFile(path));
+      return await this.exec("tail -n " + lines + " " + shellQuote(path) + " 2>/dev/null");
     } catch {
-      return await this.readFile(path);
+      return "";
     }
   },
 
@@ -952,6 +946,72 @@ const Api = {
         await this.exec("rm -f " + shellQuote(tmpfile) + " " + shellQuote(tmpb64));
       } catch {}
       console.error("[api] writeRawFile failed:", e);
+      return false;
+    }
+  },
+
+  async writeStagedFiles(stage, files, options) {
+    const entries = Object.entries(files || {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    if (!entries.length) return false;
+    const validPath = /^(?:apps\/)?[A-Za-z0-9._-]+\.json$/;
+    if (entries.some(([relativePath]) => !validPath.test(relativePath))) return false;
+    const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
+    const manifest = "/data/local/tmp/srx_manifest_" + token;
+    const manifestB64 = manifest + ".b64";
+    const payload = entries
+      .map(([relativePath, content]) => relativePath + "\t" + utf8ToBase64(String(content)))
+      .join("\n");
+    const encoded = utf8ToBase64(payload + "\n");
+    const chunkSize = 60000;
+    try {
+      await this.exec(
+        managedTempCleanupCommand(stage) +
+          "; rm -f " +
+          shellQuote(manifest) +
+          " " +
+          shellQuote(manifestB64) +
+          "; mkdir -p " +
+          shellQuote(stage),
+      );
+      for (let offset = 0; offset < encoded.length; offset += chunkSize) {
+        await this.exec(
+          "printf %s " +
+            shellQuote(encoded.slice(offset, offset + chunkSize)) +
+            " >> " +
+            shellQuote(manifestB64),
+        );
+        options?.onProgress?.(Math.min(offset + chunkSize, encoded.length), encoded.length);
+      }
+      await this.exec(
+        "stage=" +
+          shellQuote(stage) +
+          "; manifest=" +
+          shellQuote(manifest) +
+          "; manifest_b64=" +
+          shellQuote(manifestB64) +
+          '; base64 -d "$manifest_b64" > "$manifest" || exit 1; ' +
+          "while IFS=$(printf '\\t') read -r rel encoded; do " +
+          'case "$rel" in *.json|apps/*.json) ;; *) exit 2 ;; esac; ' +
+          'case "$rel" in /*|..|../*|*/..|*/../*|*//*|apps/*/*) exit 2 ;; esac; ' +
+          'target="$stage/$rel"; mkdir -p "${target%/*}" || exit 1; ' +
+          'printf %s "$encoded" | base64 -d > "$target" || exit 1; chmod 644 "$target" || exit 1; ' +
+          'done < "$manifest"; rm -f "$manifest" "$manifest_b64"',
+      );
+      options?.onProgress?.(encoded.length, encoded.length);
+      return true;
+    } catch (e) {
+      try {
+        await this.exec(
+          managedTempCleanupCommand(stage) +
+            "; rm -f " +
+            shellQuote(manifest) +
+            " " +
+            shellQuote(manifestB64),
+        );
+      } catch {}
+      console.error("[api] writeStagedFiles failed:", e);
       return false;
     }
   },
@@ -1528,17 +1588,15 @@ const Api = {
     const stage = "/data/local/tmp/srx_bulk_apps_" + token;
     const total = entries.length;
     try {
-      await this.exec(prepareManagedTempDirCommand(stage));
-      for (let i = 0; i < entries.length; i += 1) {
-        const [packageName, config] = entries[i];
-        options?.onProgress?.(i, total, packageName);
-        const ok = await this.writeRawFile(
-          stage + "/" + packageName + ".json",
+      const files = Object.fromEntries(
+        entries.map(([packageName, config]) => [
+          packageName + ".json",
           JSON.stringify(config, null, 2) + "\n",
-          { mode: "644" },
-        );
-        if (!ok) throw new Error("write staged app failed: " + packageName);
-      }
+        ]),
+      );
+      options?.onProgress?.(0, total, entries[0][0]);
+      const staged = await this.writeStagedFiles(stage, files);
+      if (!staged) throw new Error("write staged apps failed");
       options?.onProgress?.(total, total, "");
       await this.exec(
         "stage=" +
@@ -2103,39 +2161,20 @@ const Api = {
     const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
     const stage = "/data/local/tmp/srx_restore_stage_" + token;
     const rollback = "/data/local/tmp/srx_restore_rollback_" + token;
-    const stageApps = stage + "/apps";
     try {
-      await this.exec(
-        managedTempCleanupCommand(stage, rollback) + "; mkdir -p " + shellQuote(stageApps),
-      );
-      const globalOk = await this.writeRawFile(
-        stage + "/global.json",
-        JSON.stringify(globalConfig, null, 2) + "\n",
-        { mode: "644" },
-      );
-      if (!globalOk) throw new Error("write staged global failed");
-      const templatesOk = await this.writeRawFile(
-        stage + "/templates.json",
-        JSON.stringify({ templates }, null, 2) + "\n",
-        { mode: "644" },
-      );
-      if (!templatesOk) throw new Error("write staged templates failed");
-      const filtersOk = await this.writeRawFile(
-        stage + "/file_monitor_filters.json",
-        JSON.stringify(monitorFilters, null, 2) + "\n",
-        { mode: "644" },
-      );
-      if (!filtersOk) throw new Error("write staged monitor filters failed");
-      const entries = Object.entries(apps)
+      const files = {
+        "global.json": JSON.stringify(globalConfig, null, 2) + "\n",
+        "templates.json": JSON.stringify({ templates }, null, 2) + "\n",
+        "file_monitor_filters.json": JSON.stringify(monitorFilters, null, 2) + "\n",
+      };
+      Object.entries(apps)
         .filter(([packageName]) => isSafePackageName(packageName))
-        .sort(([left], [right]) => left.localeCompare(right));
-      for (const [packageName, config] of entries) {
-        const ok = await this.writeRawFile(
-          stageApps + "/" + packageName + ".json",
-          JSON.stringify(config, null, 2) + "\n",
-          { mode: "644" },
-        );
-        if (!ok) throw new Error("write staged app failed: " + packageName);
+        .sort(([left], [right]) => left.localeCompare(right))
+        .forEach(([packageName, config]) => {
+          files["apps/" + packageName + ".json"] = JSON.stringify(config, null, 2) + "\n";
+        });
+      if (!(await this.writeStagedFiles(stage, files))) {
+        throw new Error("write restore stage failed");
       }
       await this.exec(
         "config=" +

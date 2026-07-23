@@ -96,6 +96,7 @@ class SrxViewModel(
   private var openAppJob: Job? = null
   private var configSaveJob: Job? = null
   private var logAppsJob: Job? = null
+  private var dashboardCountsJob: Job? = null
   private val monitorFiltersSaveMutex = Mutex()
   private val globalConfigSaveRequests = Channel<GlobalConfig>(Channel.CONFLATED)
 
@@ -153,20 +154,21 @@ class SrxViewModel(
   }
 
   fun refreshDashboardCounts() {
-    if (!_state.value.rootGranted) return
-    viewModelScope.launch {
-      runCatching { repository.readDashboardCounts() }
-          .onSuccess { (enabledApps, runtimeActivations) ->
-            _state.value =
-                _state.value.copy(
-                    dashboard =
-                        _state.value.dashboard.copy(
-                            enabledApps = enabledApps,
-                            runtimeActivations = runtimeActivations,
-                        ),
-                )
-          }
-    }
+    if (!_state.value.rootGranted || dashboardCountsJob?.isActive == true) return
+    dashboardCountsJob =
+        viewModelScope.launch {
+          runCatching { repository.readDashboardCounts() }
+              .onSuccess { (enabledApps, runtimeActivations) ->
+                _state.value =
+                    _state.value.copy(
+                        dashboard =
+                            _state.value.dashboard.copy(
+                                enabledApps = enabledApps,
+                                runtimeActivations = runtimeActivations,
+                            ),
+                    )
+              }
+        }
   }
 
   fun refreshUsers() {
@@ -589,7 +591,7 @@ class SrxViewModel(
 
   fun setPredictiveBack(enabled: Boolean) {
     prefs.setPredictiveBackCompatPref(enabled)
-    viewModelScope.launch { prefs.setPredictiveBack(enabled) }
+    viewModelScope.launch { prefs.setPredictiveBack(enabled, persistCompatPref = false) }
   }
 
   fun setPageScale(scale: Float) {

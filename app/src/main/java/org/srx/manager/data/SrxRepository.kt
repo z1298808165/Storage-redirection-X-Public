@@ -139,16 +139,11 @@ class SrxRepository(
     val stage = "/data/local/tmp/srx_bulk_apps_$token"
     try {
       if (!fileStore.prepareCleanDir(stage)) return false
-      safeConfigs.forEach { (packageName, config) ->
-        if (
-            !writeFile(
-                "$stage/$packageName.json",
-                json.encodeToString(config) + "\n",
-                touchAfter = false,
-            )
-        )
-            return false
-      }
+      val stagedFiles =
+          safeConfigs
+              .mapKeys { (packageName, _) -> "$packageName.json" }
+              .mapValues { (_, config) -> json.encodeToString(config) + "\n" }
+      if (!fileStore.writeStagedFiles(stage, stagedFiles)) return false
       return fileStore.publishStagedAppConfigs(stage)
     } finally {
       fileStore.removeTree(stage)
@@ -533,27 +528,22 @@ class SrxRepository(
     try {
       fileStore.removeTree(stage, rollback)
       if (!fileStore.prepareCleanDir(stageApps)) return false
-      if (!writeFile("$stage/global.json", json.encodeToString(normalizedData.global) + "\n"))
-          return false
-      if (
-          !writeFile(
-              "$stage/templates.json",
-              json.encodeToString(ConfigTemplateStore(normalizedData.templates)) + "\n",
-          )
-      )
-          return false
-      if (
-          !writeFile(
-              "$stage/file_monitor_filters.json",
-              json.encodeToString(normalizedData.monitorFilters) + "\n",
-          )
-      )
-          return false
-      normalizedData.apps.filterKeys(::isSafePackageName).toSortedMap().forEach {
-          (packageName, config) ->
-        if (!writeFile("$stageApps/$packageName.json", json.encodeToString(config) + "\n"))
-            return false
+      val stagedFiles = buildMap {
+        put("global.json", json.encodeToString(normalizedData.global) + "\n")
+        put(
+            "templates.json",
+            json.encodeToString(ConfigTemplateStore(normalizedData.templates)) + "\n",
+        )
+        put(
+            "file_monitor_filters.json",
+            json.encodeToString(normalizedData.monitorFilters) + "\n",
+        )
+        normalizedData.apps.filterKeys(::isSafePackageName).toSortedMap().forEach {
+            (packageName, config) ->
+          put("apps/$packageName.json", json.encodeToString(config) + "\n")
+        }
       }
+      if (!fileStore.writeStagedFiles(stage, stagedFiles)) return false
       val result = fileStore.restoreConfigStage(stage, rollback)
       if (result) {
         normalizedData.ui?.let { PreferencesRepository(context).restoreBackupUiPreferences(it) }

@@ -80,6 +80,31 @@ class RootFileStore(
     return result.isSuccess
   }
 
+  suspend fun writeStagedFiles(stage: String, files: Map<String, String>): Boolean {
+    if (!isManagedTempPath(stage) || files.isEmpty()) return false
+    val validPath = Regex("(?:apps/)?[A-Za-z0-9._-]+\\.json")
+    if (files.keys.any { !validPath.matches(it) }) return false
+    val payload =
+        buildString {
+              files.toSortedMap().forEach { (relativePath, content) ->
+                append(relativePath).append('\t').append(base64Utf8(content)).append('\n')
+              }
+            }
+            .toByteArray(Charsets.UTF_8)
+    val result =
+        shell.exec(
+            "stage=${shellQuote(stage)}; mkdir -p \"\$stage\" || exit 1; " +
+                "while IFS=\$(printf '\\t') read -r rel encoded; do " +
+                "case \"\$rel\" in *.json|apps/*.json) ;; *) exit 2 ;; esac; " +
+                "case \"\$rel\" in /*|..|../*|*/..|*/../*|*//*|apps/*/*) exit 2 ;; esac; " +
+                "target=\"\$stage/\$rel\"; mkdir -p \"\${target%/*}\" || exit 1; " +
+                "printf %s \"\$encoded\" | base64 -d > \"\$target\" || exit 1; " +
+                "chmod 644 \"\$target\" || exit 1; done",
+            stdin = payload,
+        )
+    return result.isSuccess
+  }
+
   suspend fun publishStagedAppConfigs(stage: String): Boolean {
     if (!isManagedTempPath(stage)) return false
     val result =

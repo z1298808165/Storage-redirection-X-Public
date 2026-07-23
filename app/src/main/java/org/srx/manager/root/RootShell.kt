@@ -24,6 +24,7 @@ interface ShellExecutor {
       command: String,
       timeoutMs: Long = 120_000L,
       mountMaster: Boolean = false,
+      stdin: ByteArray? = null,
   ): ShellResult
 }
 
@@ -38,6 +39,7 @@ class RootShell : Closeable, ShellExecutor {
       command: String,
       timeoutMs: Long,
       mountMaster: Boolean,
+      stdin: ByteArray?,
   ): ShellResult =
       withContext(Dispatchers.IO) {
         val args =
@@ -59,12 +61,21 @@ class RootShell : Closeable, ShellExecutor {
 
         val outReader = BufferedReader(InputStreamReader(proc.inputStream))
         val errReader = BufferedReader(InputStreamReader(proc.errorStream))
+        val stdinJob =
+            async(Dispatchers.IO) {
+              try {
+                proc.outputStream.use { output -> stdin?.let(output::write) }
+              } catch (_: IOException) {
+                Unit
+              }
+            }
         val stdoutJob = async(Dispatchers.IO) { outReader.readRemaining() }
         val stderrJob = async(Dispatchers.IO) { errReader.readRemaining() }
         val completed = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!completed) {
           proc.destroyForcibly()
           proc.waitFor(1, TimeUnit.SECONDS)
+          stdinJob.cancel()
           val stderrText = stderrJob.await()
           val timeoutText =
               if (stderrText.isBlank()) {
@@ -74,6 +85,7 @@ class RootShell : Closeable, ShellExecutor {
               }
           return@withContext ShellResult(124, stdoutJob.await(), timeoutText)
         }
+        stdinJob.await()
         ShellResult(proc.exitValue(), stdoutJob.await(), stderrJob.await())
       }
 

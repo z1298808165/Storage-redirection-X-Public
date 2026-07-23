@@ -133,8 +133,8 @@ class PreferencesRepository(private val context: Context) {
     context.dataStore.edit { it[themeModeKey] = mode.name }
   }
 
-  suspend fun setPredictiveBack(enabled: Boolean) {
-    setPredictiveBackCompatPref(enabled)
+  suspend fun setPredictiveBack(enabled: Boolean, persistCompatPref: Boolean = true) {
+    if (persistCompatPref) setPredictiveBackCompatPref(enabled)
     context.dataStore.edit { it[predictiveBackKey] = enabled }
   }
 
