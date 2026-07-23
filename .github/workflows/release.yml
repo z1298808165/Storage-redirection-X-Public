@@ -265,19 +265,18 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android SDK build-tools, platform and NDK
+      - name: Install Android SDK build-tools and platform
         run: |
           for attempt in 1 2 3; do
-            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            rm -rf "$ANDROID_HOME/.temp"
             sleep $((attempt * 10))
           done
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
 
       - name: Prepare Android app signing
         env:
@@ -287,12 +286,7 @@ jobs:
           mkdir -p keystore
           printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/srx-manager-release.jks
 
-      - name: Run manager unit tests
-        run: |
-          chmod +x ./gradlew
-          ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest
-
-      - name: Build release app APK
+      - name: Test and build release app APK
         env:
           SRX_APP_SIGNING_STORE_FILE: keystore/srx-manager-release.jks
           SRX_APP_SIGNING_STORE_PASSWORD: ${{ secrets.SRX_APP_SIGNING_STORE_PASSWORD }}
@@ -303,7 +297,7 @@ jobs:
           test -n "$SRX_APP_SIGNING_KEY_ALIAS"
           test -n "$SRX_APP_SIGNING_KEY_PASSWORD"
           chmod +x ./gradlew
-          ./gradlew --no-daemon --console=plain --stacktrace :app:assembleRelease
+          ./gradlew --no-daemon --console=plain --stacktrace :app:testDebugUnitTest :app:assembleRelease
           APK="app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
           mkdir -p build/app
@@ -424,6 +418,15 @@ jobs:
           path: |
             build/test-flow/assets/*.zip
             tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
+
+      - name: Upload release test-flow unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-test-flow-unit-test-reports-v${{ env.VERSION }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
             tests/storage-redirect-test/app/build/reports/
             tests/storage-redirect-test/media-file-api/build/reports/
 
@@ -462,8 +465,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Download release test-flow runtime
         env:
