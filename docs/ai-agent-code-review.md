@@ -22,7 +22,7 @@
 - `concurrency_and_global_state`：共享状态、锁顺序、原子语义、fork 前后状态及测试修改的全局状态均可恢复且无竞态。
 - `compatibility_and_hook_boundaries`：Android 版本、ABI、普通应用与系统写入进程边界正确；需要上游 hook 能力时明确指出。
 - `tests_and_verification`：验证覆盖真实风险；不得为了过门禁新增生产源码内联测试，也不得写完内联测试后在提交前删除来冒充持续回归保障。
-- `readability_and_maintenance`：命名表达业务含义，注释解释约束而非复述代码，后续维护者无需猜测隐含前提。
+- `readability_and_maintenance`：命名表达业务含义，注释解释约束而非复述代码，项目自维护的人类可读内容默认使用中文，后续维护者无需猜测隐含前提。
 
 ## Git 门禁
 

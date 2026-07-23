@@ -175,11 +175,11 @@ try {
 }
 ```
 
-## Windows PowerShell packaging pitfalls
+## Windows PowerShell 打包注意事项
 
-- If `bash` is not available on PATH, use the PowerShell packaging flow above instead of trying to run `.github/scripts/package_module.sh`.
-- Do not rely on `Compress-Archive` or `ZipFile.CreateFromDirectory` for flashable module zips. They can create entries such as `zygisk\arm64-v8a.so`; KernelSU then extracts a literal backslash filename and the installer reports `missing arm64-v8a lib path=.../zygisk/arm64-v8a.so`.
-- Convert `.sh`, `.prop`, `.rule`, and `META-INF` files to LF and UTF-8 without BOM before zipping. CRLF or BOM can break shell execution on device.
-- `module.prop` must be LF and UTF-8 without BOM. If `id=storage.redirect.x` ends with `\r`, KernelSU may create a second module directory named `storage.redirect.x\r`.
+- 如果 PATH 中没有 `bash`，请使用上文的 PowerShell 打包流程，不要尝试运行 `.github/scripts/package_module.sh`。
+- 不要依赖 `Compress-Archive` 或 `ZipFile.CreateFromDirectory` 创建可刷入的模块 zip。它们可能生成 `zygisk\arm64-v8a.so` 之类的条目；KernelSU 随后会解压出名称中包含反斜杠的文件，安装器则会报告 `missing arm64-v8a lib path=.../zygisk/arm64-v8a.so`。
+- 压缩前，请将 `.sh`、`.prop`、`.rule` 和 `META-INF` 文件转换为不带 BOM 的 UTF-8 编码，并使用 LF 换行。CRLF 或 BOM 可能导致设备上的 shell 执行失败。
+- `module.prop` 必须采用不带 BOM 的 UTF-8 编码，并使用 LF 换行。如果 `id=storage.redirect.x` 以 `\r` 结尾，KernelSU 可能会创建名为 `storage.redirect.x\r` 的第二个模块目录。
 - 刷入包应移除 `action.sh`，但保留 `service.d/debug_collectors.sh`、`service.d/media_state.sh` 和 `service.d/app_status.sh`。这些脚本只会在运行时打开“详细日志”后开始记录。
-- The required binary layout is `zygisk/arm64-v8a.so` for `libsrx_core.so` and `bin/srx_daemon` for `srx_daemon`.
+- 必需的二进制文件布局为：`libsrx_core.so` 位于 `zygisk/arm64-v8a.so`，`srx_daemon` 位于 `bin/srx_daemon`。
