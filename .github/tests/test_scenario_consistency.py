@@ -86,6 +86,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
             required = source[source.index("  test-flow-required:") :]
             self.assertIn("needs.test-flow.result", required)
 
+    def test_public_sync_derives_review_for_filtered_staged_tree(self) -> None:
+        source = read("scripts/srx-sync-public.ps1")
+        register = section(source, "function Register-DerivedPublicReview", "function Set-SanitizedSnapshot")
+        self.assertIn('"-Commit", $SourceCommit', register)
+        self.assertIn('Get-GitOutput -Arguments @("write-tree")', register)
+        self.assertIn('Get-GitOutput -Arguments @("diff", "--cached", "--name-only"', register)
+        self.assertIn('"-ReportPath", $reportPath', register)
+        commit_loop = source[source.index("foreach ($currentSourceCommit") :]
+        self.assertLess(
+            commit_loop.index("Register-DerivedPublicReview -SourceCommit $currentSourceCommit"),
+            commit_loop.index('Invoke-Checked -FilePath "git" -Arguments @("commit"'),
+        )
+
     def test_test_flow_reports_are_not_in_runtime_artifacts(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             source = read(workflow)
