@@ -157,6 +157,45 @@ class RootFileStoreTest {
   }
 
   @Test
+  fun writeStagedFilesUsesSingleShellWithStdinManifest() = runBlocking {
+    val shell = CapturingShell(ShellResult(0, "", ""))
+    val store = RootFileStore(shell)
+    val stage = "/data/local/tmp/srx_bulk_apps_123"
+
+    assertTrue(
+        store.writeStagedFiles(
+            stage,
+            mapOf(
+                "com.example.one.json" to "one\n",
+                "apps/com.example.two.json" to "two\n",
+            ),
+        )
+    )
+
+    val invocation = shell.invocations.single()
+    assertTrue(invocation.command.contains("while IFS=\$(printf '\\t') read -r rel encoded"))
+    assertTrue(invocation.command.contains("target=\"\$stage/\$rel\""))
+    val manifest = invocation.stdin!!.toString(Charsets.UTF_8)
+    assertTrue(manifest.contains("com.example.one.json\tb25lCg==\n"))
+    assertTrue(manifest.contains("apps/com.example.two.json\tdHdvCg==\n"))
+  }
+
+  @Test
+  fun writeStagedFilesRejectsUnsafePathsWithoutShellCall() = runBlocking {
+    val shell = CapturingShell()
+    val store = RootFileStore(shell)
+
+    assertFalse(store.writeStagedFiles(ConfigDir, mapOf("global.json" to "{}")))
+    assertFalse(
+        store.writeStagedFiles(
+            "/data/local/tmp/srx_restore_stage_123",
+            mapOf("apps/../global.json" to "{}"),
+        )
+    )
+    assertTrue(shell.invocations.isEmpty())
+  }
+
+  @Test
   fun publishStagedAppConfigsOnlyAllowsManagedTempStage() = runBlocking {
     val shell = CapturingShell(ShellResult(0, "", ""))
     val store = RootFileStore(shell)

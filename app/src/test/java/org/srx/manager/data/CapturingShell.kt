@@ -13,8 +13,9 @@ internal class CapturingShell(
       command: String,
       timeoutMs: Long,
       mountMaster: Boolean,
+      stdin: ByteArray?,
   ): ShellResult {
-    invocations += ShellInvocation(command, timeoutMs, mountMaster)
+    invocations += ShellInvocation(command, timeoutMs, mountMaster, stdin)
     return if (pendingResults.isEmpty()) {
       ShellResult(0, "", "")
     } else {
@@ -27,4 +28,5 @@ internal data class ShellInvocation(
     val command: String,
     val timeoutMs: Long,
     val mountMaster: Boolean,
+    val stdin: ByteArray?,
 )

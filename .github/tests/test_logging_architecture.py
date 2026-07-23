@@ -83,6 +83,38 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("control clear-monitor", control)
         self.assertIn("control reset-stats", control)
 
+    def test_webui_reads_bounded_log_tail_and_cleans_bridge_failures(self) -> None:
+        app = read("assets/zygisk_module/webroot/js/app.js")
+        api = read("assets/zygisk_module/webroot/js/api.js")
+        self.assertIn("Api.readFileTail(FILE_MONITOR_LOG, 500)", app)
+        self.assertNotIn("Api.readFile(FILE_MONITOR_LOG)", app)
+        tail = api[api.index("async readFileTail") : api.index("/** Write content", api.index("async readFileTail"))]
+        self.assertNotIn("this.readFile(path)", tail)
+        bridge = api[api.index("const finish =") : api.index("// 3. Fallback")]
+        self.assertEqual(2, bridge.count(".catch((error) => finish("))
+        self.assertIn("finish(1, \"\", fallbackError?.message", bridge)
+
+    def test_bulk_webui_config_writes_use_one_staged_manifest(self) -> None:
+        api = read("assets/zygisk_module/webroot/js/api.js")
+        bulk = api[api.index("async writeAppConfigs") : api.index("/** Delete app config")]
+        restore = api[api.index("async restoreConfigSnapshot") : api.index("async stopModule")]
+        self.assertIn("this.writeStagedFiles(stage, files)", bulk)
+        self.assertNotIn("this.writeRawFile(", bulk)
+        self.assertIn("this.writeStagedFiles(stage, files)", restore)
+        self.assertNotIn("this.writeRawFile(", restore)
+
+    def test_native_hot_paths_keep_bounded_cache_and_polling(self) -> None:
+        fuse = read("src/fuse_redirect.rs")
+        watcher = read("src/config/watcher.rs")
+        self.assertIn("fn forget(&self", fuse)
+        self.assertIn("lookup_counts: HashMap<u64, u64>", fuse)
+        self.assertIn("dir_entry_refs: HashMap<u64, u64>", fuse)
+        self.assertIn("dirs: HashMap<u64, Arc<[DirEntry]>>", fuse)
+        self.assertIn("remove_unreferenced_inode", fuse)
+        self.assertIn("const POLL_INTERVAL_MS", watcher)
+        self.assertIn("LAST_POLL_MS", watcher)
+        self.assertIn("compare_exchange", watcher)
+
     def test_private_log_socket_allows_supported_root_domains(self) -> None:
         policy = read("assets/zygisk_module/sepolicy.rule")
         senders = (

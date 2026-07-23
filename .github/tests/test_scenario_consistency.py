@@ -72,6 +72,30 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertTrue(values, workflow)
             self.assertTrue(all(value == expected for value in values), workflow)
 
+    def test_workflow_optimizations_preserve_test_flow_gate(self) -> None:
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            app_job = section(source, "  app:", "  test-flow-build:")
+            test_flow = section(source, "  test-flow:", "  test-flow-required:")
+            self.assertIn(':app:testDebugUnitTest :app:assembleRelease', app_job)
+            self.assertNotIn('"ndk;30.0.14904198"', app_job)
+            self.assertNotIn("fetch-depth: 0", test_flow)
+            self.assertIn("fail-fast: true", test_flow)
+            for version in (13, 14, 15, 16):
+                self.assertIn(f"version: {version}", test_flow)
+            required = source[source.index("  test-flow-required:") :]
+            self.assertIn("needs.test-flow.result", required)
+
+    def test_test_flow_reports_are_not_in_runtime_artifacts(self) -> None:
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            upload_start = source.index("Upload test-flow runtime") if "Upload test-flow runtime" in source else source.index("Upload release test-flow runtime")
+            reports_start = source.index("unit test reports", upload_start)
+            runtime_upload = source[upload_start:reports_start]
+            self.assertNotIn("build/reports/", runtime_upload)
+            self.assertIn("build/test-flow/assets/*.zip", runtime_upload)
+            self.assertIn("build/outputs/apk/**/*.apk", runtime_upload)
+
 
 if __name__ == "__main__":
     unittest.main()
