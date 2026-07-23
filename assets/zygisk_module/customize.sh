@@ -287,7 +287,7 @@ chmod 666 "$MODPATH/logs/.package_event_receiver_ready"
 chmod 666 "$MODPATH/logs/media_provider_state.log"
 chmod 666 "$MODPATH/logs/app_status.log"
 
-# WebUI setup
+# 配置 WebUI
 if [ -d "$MODPATH/webroot" ]; then
   ui_print "-- webui dir detected"
   chmod 755 "$MODPATH/webroot"

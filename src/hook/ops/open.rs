@@ -790,11 +790,11 @@ where
                 result,
                 existing_result
             );
-            // SAFETY: result is the still-owned descriptor returned by the original open call.
+            // SAFETY: result 是原始 open 调用返回且当前仍持有的描述符。
             unsafe {
                 libc::close(result);
             }
-            // SAFETY: existing_result is a successful descriptor returned by the retry helper.
+            // SAFETY: existing_result 是重试辅助函数成功返回的描述符。
             let fd_flags = unsafe { libc::fcntl(existing_result, libc::F_GETFL) };
             return OpenFdDiag {
                 result: existing_result,

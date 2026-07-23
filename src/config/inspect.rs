@@ -163,7 +163,7 @@ impl SettingsHub {
         self.get_daemon_app_specs(true)
     }
 
-    // quality-allow(lint-suppression): daemon-only callers are absent from the cdylib build.
+    // quality-allow(lint-suppression): 仅 daemon 使用的调用方不会出现在 cdylib 构建中。
     #[allow(dead_code)]
     pub fn get_public_owner_repair_app_specs(&self) -> Vec<MonitorAppSpec> {
         self.get_daemon_app_specs(false)

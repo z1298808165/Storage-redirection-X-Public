@@ -1,5 +1,5 @@
 /**
- * SRX Core WebUI - Main Application
+ * SRX Core WebUI - 主应用
  */
 (function () {
   "use strict";
@@ -1779,7 +1779,7 @@
     );
     html += "</div>";
 
-    // Allowed paths, including ! exclude rules.
+    // 允许路径，包括以 ! 表示的排除规则。
     const allowRules = getAllowedRules(profile);
     html +=
       '<div class="config-group"><div class="config-group-header"><span class="config-group-title">允许路径</span><button class="icon-btn icon-btn-sm icon-btn-add add-allow-btn" type="button" aria-label="添加允许路径" title="添加允许路径">' +
@@ -1807,7 +1807,7 @@
       html += "</div></div>";
     }
 
-    // Sandbox paths (mapping only)
+    // 沙盒路径（仅映射模式）
     if (!!profile.mapping_mode_only) {
       html +=
         '<div class="config-group config-sandbox-section"><div class="config-group-header"><span class="config-group-title">沙盒路径</span><button class="icon-btn icon-btn-sm icon-btn-add add-sandbox-btn" type="button" aria-label="添加沙盒路径" title="添加沙盒路径">' +
@@ -1822,7 +1822,7 @@
       html += "</div></div>";
     }
 
-    // Mappings
+    // 路径映射
     html +=
       '<div class="config-group"><div class="config-group-header"><span class="config-group-title">路径映射</span><button class="icon-btn icon-btn-sm icon-btn-add add-mapping-btn" type="button" aria-label="添加路径映射" title="添加路径映射">' +
       iconHtml("plus") +
@@ -3427,14 +3427,14 @@
     const hintEl = $("#pathValidation");
     const browserContainer = $("#pathBrowserContainer");
 
-    // Path browser
+    // 路径浏览器
     const browser = buildPathBrowser(storageBase, input, hintEl, null, {
       validateOptions,
       autoLoad: true,
     });
     browserContainer.appendChild(browser);
 
-    // Validation on input
+    // 输入时执行校验
     let validateTimer;
     input.addEventListener("input", () => {
       clearTimeout(validateTimer);
@@ -3517,7 +3517,7 @@
     const reqHint = $("#reqValidation");
     const targetHint = $("#targetValidation");
 
-    // Browsers
+    // 路径浏览器
     const reqBrowser = buildPathBrowser(storageBase, reqInput, reqHint);
     const targetBrowser = buildPathBrowser(storageBase, targetInput, targetHint, null, {
       validateOptions: targetValidateOptions,
@@ -3557,7 +3557,7 @@
     reqInput?.addEventListener("focus", () => activateBrowser("request"));
     targetInput?.addEventListener("focus", () => activateBrowser("target"));
 
-    // Validation
+    // 路径校验
     let reqTimer = null,
       targetTimer = null;
     reqInput?.addEventListener("input", () => {

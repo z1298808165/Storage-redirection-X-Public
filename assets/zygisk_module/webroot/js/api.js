@@ -1,6 +1,6 @@
 /**
- * SRX Core WebUI - KernelSU API Wrapper
- * Abstracts KernelSU WebUI APIs for config management.
+ * SRX Core WebUI - KernelSU API 封装
+ * 封装 KernelSU WebUI API，供配置管理使用。
  */
 
 const MODULE_DIR = "/data/adb/modules/storage.redirect.x";
@@ -769,14 +769,14 @@ const Api = {
   _templatesCache: null,
 
   /**
-   * Execute a shell command as root via KernelSU.
-   * Falls back to mock data in non-KernelSU environments.
+   * 通过 KernelSU 以 root 身份执行 shell 命令。
+   * 在非 KernelSU 环境中回退到模拟数据。
    */
   async exec(cmd, options) {
     return await NativeBridge.exec(cmd, options);
   },
 
-  /** Read Android 12+ wallpaper-derived accent resources without modifying system settings. */
+  /** 读取 Android 12+ 从壁纸派生的强调色资源，不修改系统设置。 */
   async readSystemAccentPalette() {
     const names = [
       "system_accent1_600",
@@ -835,7 +835,7 @@ const Api = {
     this._templatesCache = null;
   },
 
-  /** Read file content as string */
+  /** 以字符串形式读取文件内容 */
   async readFile(path) {
     try {
       return await this.exec("cat " + shellQuote(path) + " 2>/dev/null");
@@ -844,7 +844,7 @@ const Api = {
     }
   },
 
-  /** Read only the tail of a file to keep dashboard refreshes cheap. */
+  /** 只读取文件末尾，降低仪表盘刷新的开销。 */
   async readFileTail(path, lineCount) {
     const lines = Math.max(1, Math.min(5000, Number(lineCount) || 500));
     try {
@@ -854,7 +854,7 @@ const Api = {
     }
   },
 
-  /** Write content to file */
+  /** 将内容写入文件 */
   async writeFile(path, content) {
     if (!isManagedWritePath(path)) return false;
     const tmpfile = "/data/local/tmp/srx_tmp_" + Date.now() + ".json";
@@ -897,7 +897,7 @@ const Api = {
     }
   },
 
-  /** Write content to an arbitrary file without touching the live config marker. */
+  /** 将内容写入任意文件，不触碰实时配置标记。 */
   async writeRawFile(path, content, options) {
     const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
     const tmpfile = "/data/local/tmp/srx_raw_" + token;
@@ -1016,7 +1016,7 @@ const Api = {
     }
   },
 
-  /** Save a generated backup to public Downloads when the WebView has no save picker. */
+  /** WebView 没有保存选择器时，将生成的备份保存到公共下载目录。 */
   async saveBackupToDownloads(fileName, content) {
     const safeName = sanitizeFileName(fileName, "srx-backup.srxbak.json");
     const candidates = ["/storage/emulated/0/Download/" + safeName, "/sdcard/Download/" + safeName];
@@ -1442,7 +1442,7 @@ const Api = {
     }
   },
 
-  /** Save a generated backup to a user-selected public storage directory. */
+  /** 将生成的备份保存到用户选择的公共存储目录。 */
   async saveBackupToDirectory(dirPath, fileName, content) {
     const safeName = sanitizeFileName(fileName, "srx-backup.srxbak.json");
     const dir = String(dirPath || "")
@@ -1473,7 +1473,7 @@ const Api = {
     return ok ? target : "";
   },
 
-  /** Check if file exists */
+  /** 检查文件是否存在 */
   async fileExists(path) {
     try {
       const out = await this.exec("test -f " + shellQuote(path) + " && echo 1 || echo 0");
@@ -1483,7 +1483,7 @@ const Api = {
     }
   },
 
-  /** Read global config as parsed object */
+  /** 读取全局配置并解析为对象 */
   async readGlobalConfig(options) {
     if (options?.force) this.invalidateGlobalConfigCache();
     if (this._globalConfigCache) return Object.assign({}, this._globalConfigCache);
@@ -1501,7 +1501,7 @@ const Api = {
     }
   },
 
-  /** Read the cumulative redirect-runtime activation count used by the dashboard. */
+  /** 读取仪表盘使用的重定向运行时累计激活次数。 */
   async readStatsCount() {
     try {
       const out = await this.readFile(MODULE_STATS_FILE);
@@ -1514,7 +1514,7 @@ const Api = {
   parseRuntimeActivationCount,
   formatCompactRuntimeActivationCount,
 
-  /** Write global config */
+  /** 写入全局配置 */
   async writeGlobalConfig(config) {
     const json = JSON.stringify(config, null, 2);
     const ok = await this.writeFile(GLOBAL_CONFIG, json);
@@ -1558,7 +1558,7 @@ const Api = {
     return ok;
   },
 
-  /** Read app config for a package */
+  /** 读取指定软件包的应用配置 */
   async readAppConfig(packageName) {
     if (!isSafePackageName(packageName)) return null;
     const path = APPS_DIR + "/" + packageName + ".json";
@@ -1571,7 +1571,7 @@ const Api = {
     }
   },
 
-  /** Write app config for a package */
+  /** 写入指定软件包的应用配置 */
   async writeAppConfig(packageName, config) {
     if (!isSafePackageName(packageName)) return false;
     const path = APPS_DIR + "/" + packageName + ".json";
@@ -1622,7 +1622,7 @@ const Api = {
     }
   },
 
-  /** Delete app config */
+  /** 删除应用配置 */
   async deleteAppConfig(packageName) {
     if (!isSafePackageName(packageName)) return false;
     const path = APPS_DIR + "/" + packageName + ".json";
@@ -1692,13 +1692,13 @@ const Api = {
     return await this.writeTemplates(templates);
   },
 
-  /** List all configured app package names */
+  /** 列出所有已配置应用的软件包名 */
   async listConfiguredApps() {
     const configs = await this.readConfiguredAppConfigs();
     return configs.map((item) => item.packageName).filter(isSafePackageName);
   },
 
-  /** Read configured app json files in one root call. */
+  /** 在一次 root 调用中读取所有已配置应用的 JSON 文件。 */
   async readConfiguredAppConfigs(options) {
     const now = Date.now();
     if (!options?.force && this._configuredAppsCache) {
@@ -1758,7 +1758,7 @@ const Api = {
     }
   },
 
-  /** List Android user ids available on device. */
+  /** 列出设备上可用的 Android 用户 ID。 */
   async listUsers() {
     try {
       const out = await this.exec("cmd user list 2>/dev/null || pm list users 2>/dev/null");
@@ -1778,7 +1778,7 @@ const Api = {
     }
   },
 
-  /** Get list of installed apps (user + system) */
+  /** 获取已安装应用列表（用户应用与系统应用） */
   async getInstalledApps(userId) {
     const safeUser = isSafeUserId(userId) ? String(userId) : "";
     const fromKsu = this.getInstalledAppsFromKsu();
@@ -1906,7 +1906,7 @@ const Api = {
     }
   },
 
-  /** Get app label for a package */
+  /** 获取指定软件包的应用标签 */
   async getAppLabel(packageName) {
     if (!isSafePackageName(packageName)) return packageName;
     const cached = this._packageInfo.get(packageName);
@@ -1934,7 +1934,7 @@ const Api = {
     return "";
   },
 
-  /** Get app icon path */
+  /** 获取应用图标路径 */
   async getAppIconPath(packageName) {
     if (!isSafePackageName(packageName)) return "";
     return await this.exec(
@@ -1942,7 +1942,7 @@ const Api = {
     );
   },
 
-  /** List directories at a path */
+  /** 列出指定路径下的目录 */
   async listDir(dirPath) {
     try {
       const out = await this.exec("ls -1Ap " + shellQuote(dirPath) + " 2>/dev/null");
@@ -1967,7 +1967,7 @@ const Api = {
     }
   },
 
-  /** Check module status */
+  /** 检查模块状态 */
   async getModuleStatus() {
     try {
       const statusFallback =
@@ -2039,7 +2039,7 @@ const Api = {
     );
   },
 
-  /** Count configured apps */
+  /** 统计已配置应用数量 */
   async getConfiguredAppCount() {
     const apps = await this.listConfiguredApps();
     return apps.length;
@@ -2119,7 +2119,7 @@ const Api = {
     );
   },
 
-  /** Touch config to trigger hot reload */
+  /** 更新配置时间戳以触发热重载 */
   async touchConfig() {
     try {
       await this.exec(
@@ -2150,7 +2150,7 @@ const Api = {
     return true;
   },
 
-  /** Atomically replace global.json and apps/*.json from a validated backup snapshot. */
+  /** 使用已验证的备份快照原子替换 global.json 和 apps/*.json。 */
   async restoreConfigSnapshot(snapshot) {
     const apps = snapshot?.apps || {};
     const globalConfig = snapshot?.global || DEFAULT_GLOBAL_CONFIG;
@@ -2390,7 +2390,7 @@ const Api = {
         )
         .join("\n");
     }
-    // Simulate package list
+    // 模拟软件包列表
     if (cmd.includes("pm list packages")) {
       return (
         Object.keys(this._mockStore.apps).join("\n") +
@@ -2400,7 +2400,7 @@ const Api = {
     if (cmd.includes("tail") && cmd.includes(FILE_MONITOR_LOG)) {
       return this._mockFileMonitorLog();
     }
-    // Simulate cat
+    // 模拟 cat
     if (cmd.includes("cat")) {
       const match = cmd.match(/["']([^"']+)["']/);
       if (match) {
@@ -2423,18 +2423,18 @@ const Api = {
       }
     }
     if (cmd.includes("module.prop") && cmd.includes("version=")) return "v1.2.45";
-    // Simulate ls apps
+    // 模拟列出应用配置
     if (cmd.includes("ls") && cmd.includes(APPS_DIR)) {
       return Object.keys(this._mockStore.apps).join(".json\n") + ".json";
     }
     if (cmd.includes("cmd user list")) return "0\n10";
-    // Simulate module status
+    // 模拟模块状态
     if (cmd.includes("disable")) return "enabled";
-    // Simulate app label
+    // 模拟应用标签
     if (cmd.includes("pm dump")) return "Mock App";
     return "";
   },
 };
 
-// Export for use
+// 导出供外部使用
 window.Api = Api;

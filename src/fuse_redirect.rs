@@ -2661,7 +2661,7 @@ fn fix_path_metadata(
         owner_uid as u32
     };
     if let Ok(c_path) = cstring_path(path) {
-        // SAFETY: c_path is NUL-terminated and valid for the duration of chown.
+        // SAFETY: c_path 以 NUL 结尾，并在 chown 调用期间保持有效。
         let _ = unsafe { libc::chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
     }
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
@@ -2824,7 +2824,7 @@ fn remap_inode_path(state: &mut FuseState, old_rel: &str, new_rel: &str) {
 fn rename_noreplace(old_path: &Path, new_path: &Path) -> Result<(), Errno> {
     let old_path = cstring_path(old_path)?;
     let new_path = cstring_path(new_path)?;
-    // SAFETY: Both pointers reference live, NUL-terminated C strings for the syscall duration.
+    // SAFETY: 两个指针均指向有效且以 NUL 结尾的 C 字符串，并在 syscall 调用期间保持有效。
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,

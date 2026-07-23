@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = "",
     [int]$VersionCode = 0,
     [string]$OutputDir = "build",
@@ -44,7 +44,7 @@ function Invoke-Checked {
 
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
-        Fail "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+        Fail "命令执行失败，退出码 ${LASTEXITCODE}：$FilePath $($Arguments -join ' ')"
     }
 }
 
@@ -123,7 +123,7 @@ function Get-CargoPackageVersion {
     $cargoToml = Join-Path $RepoRoot "Cargo.toml"
     $line = Get-Content -LiteralPath $cargoToml | Where-Object { $_ -match '^\s*version\s*=\s*"([^"]+)"' } | Select-Object -First 1
     if (-not $line -or $line -notmatch '^\s*version\s*=\s*"([^"]+)"') {
-        Fail "Unable to read package version from Cargo.toml"
+        Fail "无法从 Cargo.toml 读取软件包版本"
     }
 
     return $Matches[1]
@@ -140,7 +140,7 @@ function Invoke-GitText {
         if ($AllowFailure) {
             return $null
         }
-        Fail "git command failed: git $($Arguments -join ' ')"
+        Fail "Git 命令执行失败：git $($Arguments -join ' ')"
     }
 
     return ($output -join "`n").Trim()
@@ -250,7 +250,7 @@ function Update-BuildCountBaseline {
     )
 
     if ($BuildCount -lt 1) {
-        Fail "Build count must be positive, got: $BuildCount"
+        Fail "构建序号必须为正数，当前为：$BuildCount"
     }
 
     if (Test-Path -LiteralPath $BuildVersionBaselinePath) {
@@ -296,7 +296,7 @@ function Resolve-LocalVersion {
 
     $parts = $BaseVersion.Split(".")
     if ($parts.Count -ne 3) {
-        Fail "Cargo.toml version must be MAJOR.MINOR.PATCH, got: $BaseVersion"
+        Fail "Cargo.toml 版本必须采用 MAJOR.MINOR.PATCH 格式，当前为：$BaseVersion"
     }
 
     $major = [int]$parts[0]
@@ -347,7 +347,7 @@ function Assert-UnderPath {
     $pathFull = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 
     if (-not $pathFull.StartsWith($parentFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Fail "Refusing to remove a path outside the expected parent: $pathFull"
+        Fail "拒绝删除预期父目录以外的路径：$pathFull"
     }
 }
 
@@ -369,12 +369,12 @@ function Test-ReleaseApk {
     param([string]$ApkPath)
 
     if (-not (Test-Path -LiteralPath $ApkPath)) {
-        Fail "Missing release APK: $ApkPath"
+        Fail "缺少 release APK：$ApkPath"
     }
 
     $item = Get-Item -LiteralPath $ApkPath
     if ($item.Length -le 0) {
-        Fail "Release APK is empty: $ApkPath"
+        Fail "Release APK 为空：$ApkPath"
     }
 }
 
@@ -419,7 +419,7 @@ function Invoke-AdbChecked {
 
     & $AdbPath -s $Serial @Arguments
     if ($LASTEXITCODE -ne 0) {
-        Fail "adb command failed with exit code ${LASTEXITCODE}: adb -s $Serial $($Arguments -join ' ')"
+        Fail "adb 命令执行失败，退出码 ${LASTEXITCODE}：adb -s $Serial $($Arguments -join ' ')"
     }
 }
 
@@ -456,19 +456,19 @@ try {
     $sourceApk = Join-Path $RepoRoot "app\build\outputs\apk\release\app-release.apk"
     $apkPath = Join-Path $outputRoot "storage.redirect.x-app-v$Version-release.apk"
 
-    Write-Step "Build settings"
-    Write-Host "Variant:      release"
-    Write-Host "Version:      v$Version"
-    Write-Host "Version code: $VersionCode"
-    Write-Host "Output dir:   $outputRoot"
+    Write-Step "构建设置"
+    Write-Host "构建变体：    release"
+    Write-Host "版本：        v$Version"
+    Write-Host "版本代码：    $VersionCode"
+    Write-Host "输出目录：    $outputRoot"
 
     if (-not $SkipBuild) {
         $gradlePath = Join-Path $RepoRoot "gradlew.bat"
         if (-not (Test-Path -LiteralPath $gradlePath)) {
-            Fail "Missing Gradle wrapper: $gradlePath"
+            Fail "缺少 Gradle wrapper：$gradlePath"
         }
 
-        Write-Step "Build release APP"
+        Write-Step "构建 release 应用"
         $hadVersion = Test-Path Env:\VERSION
         $oldVersion = $env:VERSION
         $hadVersionCode = Test-Path Env:\VERSION_CODE
@@ -483,10 +483,10 @@ try {
             Restore-EnvVar -Name "VERSION_CODE" -HadValue $hadVersionCode -OldValue $oldVersionCode
         }
     } else {
-        Write-Step "Skip build and use existing release APK"
+        Write-Step "跳过构建并使用现有 release APK"
     }
 
-    Write-Step "Copy APK output"
+    Write-Step "复制 APK 产物"
     Test-ReleaseApk -ApkPath $sourceApk
     Remove-LocalFile -Path $apkPath -ExpectedParent $outputRoot
     Copy-Item -LiteralPath $sourceApk -Destination $apkPath -Force
@@ -494,32 +494,32 @@ try {
     if ($Version -match "^$([regex]::Escape($baseVersion))-ci\.(\d+)$") {
         Update-BuildCountBaseline -BaseVersion $baseVersion -BuildCount ([int]$Matches[1])
     }
-    Write-Host "Release APK ready: $apkPath" -ForegroundColor Green
+    Write-Host "Release APK 已就绪：$apkPath" -ForegroundColor Green
 
     if ($NoAdb) {
-        Write-Host "ADB step skipped by -NoAdb."
+        Write-Host "已通过 -NoAdb 跳过 ADB 步骤。"
     } else {
         $adbCommand = Get-Command adb -ErrorAction SilentlyContinue
         if (-not $adbCommand) {
-            Write-Host "adb was not found in PATH. APK build only." -ForegroundColor Yellow
+            Write-Host "PATH 中未找到 adb，仅完成 APK 构建。" -ForegroundColor Yellow
         } else {
-            Write-Step "Check connected ADB devices"
+            Write-Step "检查已连接的 ADB 设备"
             $devices = @(Get-AdbDevices -AdbPath $adbCommand.Source)
             $onlineDevices = @($devices | Where-Object { $_.State -eq "device" })
             if ($onlineDevices.Count -eq 0) {
-                Write-Host "No online adb device found. APK build only." -ForegroundColor Yellow
+                Write-Host "未找到在线 adb 设备，仅完成 APK 构建。" -ForegroundColor Yellow
                 if ($devices.Count -gt 0) {
-                    Write-Host "Non-online devices:"
+                    Write-Host "非在线设备："
                     $devices | ForEach-Object { Write-Host "  $($_.Serial)  $($_.State)" }
                 }
             } else {
                 $serial = $onlineDevices[0].Serial
                 if ($onlineDevices.Count -gt 1) {
-                    Write-Host "Online devices:"
+                    Write-Host "在线设备："
                     for ($i = 0; $i -lt $onlineDevices.Count; $i++) {
                         Write-Host "  [$($i + 1)] $($onlineDevices[$i].Serial)"
                     }
-                    $choice = Read-Host "Select device number, or press Enter for 1"
+                    $choice = Read-Host "请选择设备编号，或按 Enter 使用第 1 个设备"
                     if ($choice -match "^\d+$") {
                         $index = [int]$choice - 1
                         if ($index -ge 0 -and $index -lt $onlineDevices.Count) {
@@ -528,12 +528,12 @@ try {
                     }
                 }
 
-                if ((Confirm-YesNo "Connected device $serial found. Install this release APK?")) {
-                    Write-Step "Install release APK"
+                if ((Confirm-YesNo "已发现连接设备 $serial，是否安装此 release APK？")) {
+                    Write-Step "安装 release APK"
                     Invoke-AdbChecked -AdbPath $adbCommand.Source -Serial $serial -Arguments @("install", "-r", $apkPath)
-                    Write-Host "APK install completed." -ForegroundColor Green
+                    Write-Host "APK 安装完成。" -ForegroundColor Green
                 } else {
-                    Write-Host "Install skipped. APK kept at: $apkPath"
+                    Write-Host "已跳过安装，APK 保留于：$apkPath"
                 }
             }
         }

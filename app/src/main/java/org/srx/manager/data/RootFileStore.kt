@@ -379,7 +379,7 @@ class RootFileStore(
 
   private fun managedTempCleanupCommand(vararg paths: String): String {
     if (paths.isEmpty() || paths.any { !isManagedTempPath(it) }) {
-      throw IllegalArgumentException("unsafe managed temp path")
+      throw IllegalArgumentException("托管临时路径不安全")
     }
     return "rm -rf ${paths.joinToString(" ") { shellQuote(it) }}"
   }

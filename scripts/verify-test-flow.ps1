@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -30,17 +30,17 @@ function Invoke-Checked {
 
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
-        Fail "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+        Fail "命令执行失败，退出码 ${LASTEXITCODE}：$FilePath $($Arguments -join ' ')"
     }
 }
 
 function Get-CargoTargetDirectory {
     $metadataJson = & cargo metadata --format-version 1 --no-deps
-    if ($LASTEXITCODE -ne 0) { Fail "Unable to resolve Cargo target directory." }
+    if ($LASTEXITCODE -ne 0) { Fail "无法解析 Cargo 目标目录。" }
 
     $metadata = $metadataJson | ConvertFrom-Json
     if ([string]::IsNullOrWhiteSpace([string]$metadata.target_directory)) {
-        Fail "Cargo metadata did not provide a target directory."
+        Fail "Cargo metadata 未提供目标目录。"
     }
     return [System.IO.Path]::GetFullPath([string]$metadata.target_directory)
 }
@@ -59,7 +59,7 @@ function Assert-UnderPath {
     $parentFull = [System.IO.Path]::GetFullPath($Parent).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     $pathFull = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
     if (-not $pathFull.StartsWith($parentFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Fail "Refusing to operate outside expected directory: $pathFull"
+        Fail "拒绝操作预期目录以外的路径：$pathFull"
     }
 }
 
@@ -95,19 +95,19 @@ function Get-PythonCommand {
         } catch {
         }
     }
-    Fail "Unable to find a usable Python 3 interpreter for test-flow verification."
+    Fail "找不到可用于测试流验证的 Python 3 解释器。"
 }
 
 function Get-ResolvedVersionData {
     $python = Get-PythonCommand
     $output = & $python[0] @($python | Select-Object -Skip 1) ".github/scripts/resolve_build_version.py" "--include-dirty" "--format" "github"
-    if ($LASTEXITCODE -ne 0) { Fail "Unable to resolve test-flow version." }
+    if ($LASTEXITCODE -ne 0) { Fail "无法解析测试流版本。" }
     $data = @{}
     foreach ($line in $output) {
         if ($line -match '^([^=]+)=(.*)$') { $data[$Matches[1]] = $Matches[2] }
     }
     if ([string]::IsNullOrWhiteSpace($data.version) -or [string]::IsNullOrWhiteSpace($data.version_code)) {
-        Fail "Unable to resolve test-flow version."
+        Fail "无法解析测试流版本。"
     }
     return $data
 }
@@ -123,9 +123,9 @@ function New-ModulePackage {
         [string]$WorkDir
     )
 
-    if ($Abi -notin @("arm64-v8a", "x86_64")) { Fail "Unsupported module ABI: $Abi" }
-    if (-not (Test-Path -LiteralPath $SoFile)) { Fail "Missing module library: $SoFile" }
-    if (-not (Test-Path -LiteralPath $DaemonFile)) { Fail "Missing daemon binary: $DaemonFile" }
+    if ($Abi -notin @("arm64-v8a", "x86_64")) { Fail "不支持的模块 ABI：$Abi" }
+    if (-not (Test-Path -LiteralPath $SoFile)) { Fail "缺少模块库：$SoFile" }
+    if (-not (Test-Path -LiteralPath $DaemonFile)) { Fail "缺少 daemon 二进制文件：$DaemonFile" }
 
     $packageDir = Join-Path $WorkDir "module-package"
     Remove-BuildPath -Path $packageDir -ExpectedParent $WorkDir
@@ -206,7 +206,7 @@ function Invoke-AdbSu {
     & adb shell "su 0 sh -c '$escaped'"
     if ($LASTEXITCODE -eq 0) { return }
     & adb shell "su -c '$escaped'"
-    if ($LASTEXITCODE -ne 0) { Fail "adb su command failed: $Command" }
+    if ($LASTEXITCODE -ne 0) { Fail "adb su 命令执行失败：$Command" }
 }
 
 function Assert-ModuleRuntimeState {
@@ -226,10 +226,10 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $buildRoot "module-bin") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $buildRoot "assets") -Force | Out-Null
 
-    Write-Step "Build Rust test binaries for $TargetTriple"
+    Write-Step "为 $TargetTriple 构建 Rust 测试二进制文件"
     Invoke-Checked -FilePath "cargo" -Arguments @("test", "--target", $TargetTriple, "--no-run")
 
-    Write-Step "Build SRX module binaries for $TargetTriple"
+    Write-Step "为 $TargetTriple 构建 SRX 模块二进制文件"
     Invoke-Checked -FilePath "cargo" -Arguments @("build", "--target", $TargetTriple, "--release")
 
     $moduleBinDir = Join-Path $buildRoot "module-bin"
@@ -241,11 +241,11 @@ try {
     Copy-Item -LiteralPath $libSource -Destination $libDest -Force
     Copy-Item -LiteralPath $daemonSource -Destination $daemonDest -Force
 
-    Write-Step "Package test-flow module zip"
+    Write-Step "打包测试流模块 zip"
     $moduleZip = Join-Path $buildRoot "assets/storage.redirect.x-v$version-$ModuleAbi.zip"
     New-ModulePackage -Version $version -VersionCode $versionCode -SoFile $libDest -DaemonFile $daemonDest -OutputZip $moduleZip -Abi $ModuleAbi -WorkDir $buildRoot
 
-    Write-Step "Run Android unit tests and build test APK"
+    Write-Step "运行 Android 单元测试并构建测试 APK"
     $gradle = if (Test-Path -LiteralPath (Join-Path $RepoRoot "gradlew.bat")) { Join-Path $RepoRoot "gradlew.bat" } else { "gradle" }
     Invoke-Checked -FilePath $gradle -Arguments @(
         "--no-daemon", "--console=plain", "--stacktrace",
@@ -256,19 +256,19 @@ try {
     )
 
     $testAppApk = Get-TestAppApk
-    if ([string]::IsNullOrWhiteSpace($testAppApk)) { Fail "Unable to find test app debug APK under $TestAppApkDir." }
+    if ([string]::IsNullOrWhiteSpace($testAppApk)) { Fail "在 $TestAppApkDir 下找不到测试应用 debug APK。" }
 
     if ($RunDeviceScenarios -eq "0") {
-        Write-Host "RUN_DEVICE_SCENARIOS=0: device scenario suite skipped."
+        Write-Host "RUN_DEVICE_SCENARIOS=0：已跳过设备场景套件。"
         exit 0
     }
 
-    Write-Step "Verify connected device and installed module state"
+    Write-Step "验证已连接设备和已安装模块状态"
     Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")
     Invoke-Checked -FilePath "adb" -Arguments @("shell", "while [ `"`$(getprop sys.boot_completed)`" != `"1`" ]; do sleep 2; done")
 
     if ($InstallModule -ne "0") {
-        Write-Step "Install freshly built module zip and reboot test device"
+        Write-Step "安装刚构建的模块 zip 并重启测试设备"
         $remoteZip = "/data/local/tmp/storage.redirect.x-test-flow.zip"
         Invoke-Checked -FilePath "adb" -Arguments @("push", $moduleZip, $remoteZip)
         Invoke-AdbSu "rm -rf /data/adb/modules_update/storage.redirect.x"
@@ -282,14 +282,14 @@ try {
 
     Assert-ModuleRuntimeState
 
-    Write-Step "Install test APK"
+    Write-Step "安装测试 APK"
     Invoke-Checked -FilePath "adb" -Arguments @("install", "-r", $testAppApk)
 
-    Write-Step "Run device scenario suite"
+    Write-Step "运行设备场景套件"
     $env:MODULE_ZIP = $moduleZip
     $env:APP_APK = $testAppApk
     & pwsh -NoProfile -ExecutionPolicy Bypass -File ".github/tests/run-storage-redirect-scenarios.ps1"
-    if ($LASTEXITCODE -ne 0) { Fail "Device scenario suite failed." }
+    if ($LASTEXITCODE -ne 0) { Fail "设备场景套件执行失败。" }
 } finally {
     Pop-Location
 }

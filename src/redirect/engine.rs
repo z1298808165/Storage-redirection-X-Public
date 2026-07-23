@@ -609,8 +609,8 @@ fn reload_writer_config_by_fingerprint(reload_started_ms: i64) -> i64 {
         return 0;
     }
 
-    // MediaProvider can miss inotify events across process restarts or config dir recreation.
-    // A throttled fingerprint probe keeps caller caches tied to the on-disk config version.
+    // MediaProvider 可能在进程重启或配置目录重建期间漏掉 inotify 事件。
+    // 限流的指纹探测使调用方缓存始终对应磁盘上的配置版本。
     SettingsHub::instance().reload_if_changed();
     crate::hook::refresh_runtime_config_from_settings();
     paths::monotonic_ms().saturating_sub(reload_started_ms)

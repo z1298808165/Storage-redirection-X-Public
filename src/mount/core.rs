@@ -139,7 +139,7 @@ impl MountPlanner {
             } else {
                 owner_uid as u32
             };
-            // SAFETY: c_path is a live, NUL-terminated CString for the duration of this call.
+            // SAFETY: c_path 在调用期间是有效且以 NUL 结尾的 CString。
             let ret = unsafe { chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
             if ret != 0 {
                 log::warn!(
@@ -998,7 +998,7 @@ fn fix_allowed_real_directory_metadata(path: &str) {
         return;
     };
 
-    // SAFETY: c_path is a live, NUL-terminated CString for the duration of this call.
+    // SAFETY: c_path 在调用期间是有效且以 NUL 结尾的 CString。
     let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
     if ret != 0 {
         log::warn!(

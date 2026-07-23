@@ -50,8 +50,8 @@ thread_local! {
 }
 
 impl SettingsHub {
-    // Bypasses merged in-memory state and probes disk JSON directly. This is used by
-    // early zygote/writer paths before the normal config snapshot may be available.
+    // 绕过合并后的内存状态，直接探测磁盘 JSON。供正常配置快照可能尚不可用时的
+    // 早期 zygote/代写路径使用。
     pub fn has_enabled_user_profile_in_raw_config(&self, package_name: &str, user_id: i32) -> bool {
         self.get_user_flags_in_raw_config(package_name, user_id)
             .is_enabled

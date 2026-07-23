@@ -334,7 +334,7 @@ private fun SrxManagerApp(
     selectedAppPackages = emptyList()
   }
   BackHandler(enabled = state.busy) {
-    // Busy operations restart system processes; keep the current task modal until they finish.
+    // 忙碌操作会重启系统进程，因此在操作完成前保留当前任务弹窗。
   }
 
   Scaffold(

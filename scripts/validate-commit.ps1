@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = "MessageFile")]
+﻿[CmdletBinding(DefaultParameterSetName = "MessageFile")]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = "MessageFile")]
     [string]$MessageFile,
@@ -19,7 +19,7 @@ function Get-GitLines {
 
     $output = & git @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Arguments -join ' ')"
+        throw "Git 命令执行失败：git $($Arguments -join ' ')"
     }
     return @($output)
 }
@@ -59,10 +59,10 @@ if ($PSCmdlet.ParameterSetName -eq "MessageFile") {
 
 $title = (($message -split "`r?`n", 2)[0]).Trim()
 if ([string]::IsNullOrWhiteSpace($title)) {
-    throw "Commit title must not be empty."
+    throw "Commit 标题不能为空。"
 }
 if ($title.Length -gt 72) {
-    throw "Commit title must not exceed 72 characters; got $($title.Length)."
+    throw "Commit 标题不得超过 72 个字符；当前为 $($title.Length) 个字符。"
 }
 
 $releasePattern = '^Releases: \u53d1\u5e03 \d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$'
@@ -70,33 +70,33 @@ $titlePattern = '^(\u529f\u80fd|\u4fee\u590d|\u91cd\u6784|\u6027\u80fd|\u6d4b\u8
 $match = [regex]::Match($title, $titlePattern)
 if (-not $match.Success -and $title -notmatch $releasePattern) {
     throw @"
-Invalid commit title: $title
-Use: TYPE(optional-scope) + FULLWIDTH COLON + Chinese description
-Allowed TYPE values are documented in AGENTS.md and CONTRIBUTING.md.
+Commit 标题无效：$title
+格式：类型(可选范围) + 中文全角冒号 + 中文描述
+允许的类型值见 AGENTS.md 和 CONTRIBUTING.md。
 "@
 }
 
 if ($match.Success) {
     $description = $match.Groups[2].Value.Trim()
     if ($description.Length -lt 2 -or $description -notmatch '[\u3400-\u9fff]') {
-        throw "Commit description must be a clear Chinese phrase; technical English terms are allowed."
+        throw "Commit 描述必须是清晰的中文短语，可以保留必要的英文技术术语。"
     }
 
     $pathKinds = @($paths | Where-Object { $_ } | ForEach-Object { Get-PathKind -Path $_ } | Sort-Object -Unique)
     if ($pathKinds.Count -gt 1 -and $pathKinds -contains "docs") {
-        throw "Documentation and non-documentation changes must be split by purpose."
+        throw "文档与非文档改动必须按目的拆分。"
     }
     $isDocumentationType = $title -match '^\u6587\u6863(?:\(|\uFF1A)'
     $isCiType = $title -match '^CI(?:\(|\uFF1A)'
     if ($isDocumentationType -and ($pathKinds | Where-Object { $_ -ne "docs" })) {
-        throw "A documentation commit may contain documentation files only."
+        throw "文档类型 Commit 只能包含文档文件。"
     }
     if (-not $isDocumentationType -and $pathKinds.Count -eq 1 -and $pathKinds[0] -eq "docs") {
-        throw "A documentation-only commit must use the documentation type."
+        throw "纯文档 Commit 必须使用文档类型。"
     }
     if ($isCiType -and ($pathKinds | Where-Object { $_ -ne "ci" })) {
-        throw "A CI commit may contain workflow/action files only; use the build type for scripts."
+        throw "CI 类型 Commit 只能包含 workflow/action 文件；脚本改动应使用构建类型。"
     }
 }
 
-Write-Host "Commit convention check passed: $title"
+Write-Host "Commit 规范检查通过：$title"

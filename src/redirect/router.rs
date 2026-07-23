@@ -19,8 +19,8 @@ pub enum RedirectAction {
 pub struct RedirectDecision {
     pub action: RedirectAction,
     pub new_path: String,
-    /// true when the redirect was triggered by an explicit path_mapping entry
-    /// (as opposed to a fallback/excluded redirect to the app's sandbox).
+    /// 显式 path_mapping 条目触发重定向时为 true，区别于 fallback/excluded
+    /// 到应用沙箱的重定向。
     pub is_mapping: bool,
 }
 

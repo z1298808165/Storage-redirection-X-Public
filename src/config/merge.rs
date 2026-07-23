@@ -293,9 +293,9 @@ fn resolve_package_by_path_in_apps(
             _ => continue,
         };
 
-        // Only paths that carry ownership information should infer a caller.
-        // Public allow/exclude/sandbox rules are policy for a known caller, not proof
-        // that an otherwise anonymous public-path request belongs to that app.
+        // 只有携带所有权信息的路径才应推断调用方。
+        // 公共允许、排除和沙箱规则是针对已知调用方的策略，不能证明原本匿名的
+        // 公共路径请求属于该应用。
         if should_match_default_redirect_target_for_mode(mode) {
             let default_redirect_target = paths::default_redirect_target(package_name, user_id);
             update_matched_packages(

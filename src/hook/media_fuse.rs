@@ -537,8 +537,8 @@ fn normalize_storage_path(path: &str) -> String {
 }
 
 fn resolve_private_owner_uid(package_name: &str) -> i32 {
-    // FUSE callbacks run inside MediaProvider request threads. Keep this path
-    // memory-only: refreshing the UID cache here can block the FUSE server.
+    // FUSE 回调在 MediaProvider 请求线程内运行。此路径仅操作内存：
+    // 在这里刷新 UID 缓存可能阻塞 FUSE 服务端。
     policy::get_uid_for_package(package_name)
 }
 

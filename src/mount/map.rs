@@ -215,9 +215,8 @@ impl MountPlanner {
             }
         }
 
-        // Existing public mapping targets should keep the FUSE-backed source so
-        // callers read through Android's storage permission model. Only create a
-        // /data/media backend when the target directory does not exist yet.
+        // 已有公共映射目标应保留 FUSE 后端来源，使调用方通过 Android 存储权限模型读取。
+        // 仅在目标目录尚不存在时创建 /data/media 后端。
         if should_use_existing_target_source_only && !fs::is_directory(&target_data_media) {
             log::warn!("map target missing: {}", target_data_media);
             return None;

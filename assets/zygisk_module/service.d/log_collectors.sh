@@ -1,5 +1,5 @@
 sync_monitor_collector() {
-  # FileMonitorOp is written by the private socket receiver in srx_daemon.
+  # FileMonitorOp 由 srx_daemon 中的私有 socket 接收器写入。
   stop_collector_by_pid_file "$MONITOR_COLLECTOR_PID_FILE"
 }
 

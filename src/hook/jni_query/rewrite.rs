@@ -29,9 +29,8 @@ const MEDIASTORE_RELATIVE_ROOTS: [&str; 12] = [
     "Ringtones",
 ];
 
-// MediaProvider cursor rows can hit this path very frequently. Keep inotify as
-// the fast path, and use a throttled fingerprint check so missed watcher events
-// or an initially empty snapshot do not disable query filtering for a caller.
+// MediaProvider cursor 行可能非常频繁地命中此路径。保留 inotify 作为快路径，
+// 并使用限流的指纹检查，避免监视事件遗漏或初始快照为空导致调用方查询过滤失效。
 const REWRITE_FINGERPRINT_RELOAD_INTERVAL_MS: i64 = 1000;
 static LAST_REWRITE_FINGERPRINT_CHECK_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
 
@@ -568,8 +567,8 @@ pub(crate) fn should_hide_cursor_storage_path_for_caller(
         );
     }
 
-    // Keep rows that look like a still-pending MediaStore entry. Existing public
-    // originals without a caller-visible target are hidden.
+    // 保留看似仍处于 pending 状态的 MediaStore 条目行。
+    // 对调用方没有可见目标的已有公共原始条目则隐藏。
     let original_exists = path_exists_by_syscall(path_text);
     log(
         if original_exists {

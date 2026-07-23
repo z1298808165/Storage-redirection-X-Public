@@ -168,8 +168,8 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
         null
       }
     }
-    // Keep the row pending so the owning app can immediately re-open the URI
-    // for read/write smoke tests before the media scanner re-indexes it.
+    // 保持记录处于待处理状态，使所属应用能在媒体扫描器重新索引前立即重新打开 URI，
+    // 完成读写冒烟测试。
     return uri
   }
 

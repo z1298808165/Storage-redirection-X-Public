@@ -447,7 +447,7 @@ public class Hooker {
         tryInstallFuseHook(clazz);
         hookedAny = true;
       } catch (ClassNotFoundException ignored) {
-        // class not available in this process
+        // 当前进程中不存在此类
       } catch (Throwable t) {
         logWarn("tryDirectProviderHook error for " + name, t);
       }
@@ -1471,8 +1471,8 @@ public class Hooker {
     } catch (Throwable t) {
       logWarn("mapped open failed from=" + path + " to=" + mappedPath, t);
       if (request != null && isWriteMode(request.mode)) {
-        // ParcelFileDescriptor.open may fail with EXDEV on bind mounts.
-        // Fallback: create file directly via FileOutputStream (pure open, no rename).
+        // ParcelFileDescriptor.open 在 bind mount 上可能因 EXDEV 失败。
+        // 回退方案：通过 FileOutputStream 直接创建文件（只执行 open，不重命名）。
         try {
           File file = new File(mappedPath);
           File parent = file.getParentFile();

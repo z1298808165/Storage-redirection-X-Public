@@ -54,9 +54,9 @@ class RootShell : Closeable, ShellExecutor {
             } catch (canceled: CancellationException) {
               throw canceled
             } catch (error: SecurityException) {
-              return@withContext ShellResult(126, "", error.message ?: "su permission denied")
+              return@withContext ShellResult(126, "", error.message ?: "su 权限被拒绝")
             } catch (error: IOException) {
-              return@withContext ShellResult(126, "", error.message ?: "su unavailable")
+              return@withContext ShellResult(126, "", error.message ?: "su 不可用")
             }
 
         val outReader = BufferedReader(InputStreamReader(proc.inputStream))
@@ -79,7 +79,7 @@ class RootShell : Closeable, ShellExecutor {
           val stderrText = stderrJob.await()
           val timeoutText =
               if (stderrText.isBlank()) {
-                "Command timed out"
+                "命令执行超时"
               } else {
                 "$stderrText\nCommand timed out"
               }

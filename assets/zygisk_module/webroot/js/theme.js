@@ -1,7 +1,7 @@
 ﻿/**
- * SRX Core WebUI - Theme & UI Utilities
- * Theme: light (default), dark, system
- * Handles indicator animations for nav/filter
+ * SRX Core WebUI - 主题与界面工具
+ * 主题：light（默认）、dark、system
+ * 处理导航与筛选器的指示器动画
  */
 
 const THEME_KEY = "srx_theme";

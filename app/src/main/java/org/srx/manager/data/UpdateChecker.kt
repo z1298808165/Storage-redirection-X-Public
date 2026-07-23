@@ -127,7 +127,7 @@ internal constructor(
           lastError,
       )
     }
-    throw lastError ?: IOException("Update manifest request failed")
+    throw lastError ?: IOException("更新清单请求失败")
   }
 
   private fun fetchManifestBody(manifestUrl: String): String {

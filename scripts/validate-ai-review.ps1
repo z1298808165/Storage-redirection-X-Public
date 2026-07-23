@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = "Staged")]
+﻿[CmdletBinding(DefaultParameterSetName = "Staged")]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = "Staged")]
     [switch]$Staged,
@@ -21,7 +21,7 @@ function Invoke-Git {
 
     $output = & git @Arguments
     if ($LASTEXITCODE -ne 0 -and -not $AllowFailure) {
-        throw "Git command failed: git $($Arguments -join ' ')"
+        throw "Git 命令执行失败：git $($Arguments -join ' ')"
     }
     return @($output)
 }
@@ -33,11 +33,11 @@ function Get-Receipt {
         $gitPath = Join-Path $repoRoot $gitPath
     }
     if (-not (Test-Path -LiteralPath $gitPath)) {
-        throw "Missing AI review receipt. An AI agent must review the staged diff and run scripts/record-ai-review.ps1."
+        throw "缺少 AI 审核凭据。必须由 AI Agent 审核暂存差异并运行 scripts/record-ai-review.ps1。"
     }
     $receipt = Get-Content -LiteralPath $gitPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([int]$receipt.schema -ne 1) {
-        throw "AI review receipt has an unsupported schema."
+        throw "AI 审核凭据使用了不支持的 schema。"
     }
     return $receipt
 }
@@ -59,21 +59,21 @@ function Assert-StagedReceipt {
     $tree = (Invoke-Git -Arguments @("write-tree")) | Select-Object -First 1
     $baseCommit = (Invoke-Git -Arguments @("rev-parse", "HEAD")) | Select-Object -First 1
     if ([string]$receipt.tree -ne $tree) {
-        throw "AI review is stale: staged tree changed after review. Expected $($receipt.tree), got $tree."
+        throw "AI 审核已过期：审核后暂存 tree 发生变化。预期 $($receipt.tree)，实际 $tree。"
     }
     if ([string]$receipt.baseCommit -ne $baseCommit) {
-        throw "AI review is stale: HEAD changed after review."
+        throw "AI 审核已过期：审核后 HEAD 发生变化。"
     }
     if ([string]$receipt.reportHash -notmatch '^[0-9a-f]{64}$') {
-        throw "AI review receipt has an invalid report hash."
+        throw "AI 审核凭据包含无效的报告哈希。"
     }
     $reportPath = [string]$receipt.reportPath
     if ([string]::IsNullOrWhiteSpace($reportPath) -or -not (Test-Path -LiteralPath $reportPath)) {
-        throw "AI review report is missing. Keep the reviewed report under temp/ until the commit completes."
+        throw "AI 审核报告不存在。提交完成前必须将已审核报告保留在 temp/ 下。"
     }
     $actualHash = Get-FileHash256 -Path $reportPath
     if ($actualHash -ne [string]$receipt.reportHash) {
-        throw "AI review report changed after the receipt was recorded."
+        throw "记录凭据后 AI 审核报告发生变化。"
     }
     $receiptFiles = @($receipt.files | ForEach-Object { ([string]$_).Replace("\", "/") } | Sort-Object -Unique)
     $stagedFiles = @(
@@ -84,7 +84,7 @@ function Assert-StagedReceipt {
     $differences = @(Compare-Object -ReferenceObject $receiptFiles -DifferenceObject $stagedFiles)
     if ($receiptFiles.Count -ne $stagedFiles.Count -or
         $differences.Count -gt 0) {
-        throw "AI review receipt file list does not match the staged change."
+        throw "AI 审核凭据中的文件清单与暂存改动不匹配。"
     }
     return $receipt
 }
@@ -97,7 +97,7 @@ function Get-SingleTrailer {
 
     $matches = [regex]::Matches($Message, "(?m)^$([regex]::Escape($Name)):\s*(.+?)\s*$")
     if ($matches.Count -ne 1) {
-        throw "Commit must contain exactly one $Name trailer."
+        throw "Commit 必须且只能包含一个 $Name trailer。"
     }
     return $matches[0].Groups[1].Value.Trim()
 }
@@ -125,12 +125,12 @@ if ($PSCmdlet.ParameterSetName -eq "Commit") {
         "ls-tree", "--name-only", $Commit, "--", "scripts/validate-ai-review.ps1"
     )) | Select-Object -First 1
     if ($scriptPath -ne "scripts/validate-ai-review.ps1") {
-        Write-Host "AI review check skipped for legacy commit $Commit."
+        Write-Host "旧提交 $Commit 不包含 AI 审核门禁，已跳过检查。"
         exit 0
     }
 
     if (Test-IsEmptyCommit -Commitish $Commit) {
-        Write-Host "AI review check skipped for empty commit $Commit."
+        Write-Host "空提交 $Commit 已跳过 AI 审核检查。"
         exit 0
     }
 
@@ -141,13 +141,13 @@ if ($PSCmdlet.ParameterSetName -eq "Commit") {
     $reportHash = Get-SingleTrailer -Message $message -Name "AI-Review-Report"
     $summary = Get-SingleTrailer -Message $message -Name "AI-Review-Summary"
     if ($reviewTree -ne $tree) {
-        throw "Commit $Commit was reviewed for tree $reviewTree but contains tree $tree."
+        throw "Commit $Commit 审核时对应 tree $reviewTree，但实际包含 tree $tree。"
     }
     if ($reviewer -notmatch '(?i)\b(Codex|Claude(?: Code)?|GitHub Copilot|Cursor|GPT(?:-[0-9.]+)?|Gemini|AI Agent)\b' -or
         $reportHash -notmatch '^[0-9a-f]{64}$' -or $summary.Length -lt 12) {
-        throw "Commit $Commit has invalid AI review trailers."
+        throw "Commit $Commit 包含无效的 AI 审核 trailers。"
     }
-    Write-Host "AI review commit check passed: $Commit"
+    Write-Host "Commit 的 AI 审核检查通过：$Commit"
     exit 0
 }
 
@@ -162,11 +162,11 @@ if (-not $hasStagedChanges) {
             $null = Get-SingleTrailer -Message $message -Name "AI-Review-Report"
             $null = Get-SingleTrailer -Message $message -Name "AI-Review-Summary"
             if ($reviewTree -ne $tree) {
-                throw "Existing AI review trailers do not match the amended commit tree."
+                throw "现有 AI 审核 trailers 与修订后的 Commit tree 不匹配。"
             }
         }
     }
-    Write-Host "AI review check skipped because the staged tree has no changes."
+    Write-Host "暂存 tree 没有改动，已跳过 AI 审核检查。"
     exit 0
 }
 
@@ -189,4 +189,4 @@ if ($PSCmdlet.ParameterSetName -eq "Message") {
     [IO.File]::WriteAllText((Resolve-Path -LiteralPath $MessageFile).Path, $message + "`n", $utf8NoBom)
 }
 
-Write-Host "AI review staged-tree check passed: $([string]$receipt.tree)"
+Write-Host "AI 审核暂存 tree 检查通过：$([string]$receipt.tree)"

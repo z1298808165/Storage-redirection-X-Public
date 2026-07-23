@@ -156,8 +156,8 @@ impl AuditTrail {
             return;
         };
 
-        // MediaProvider may perform the native open after the Java callback returns. This hint
-        // carries the caller across that boundary independently of file monitoring.
+        // MediaProvider 可能在 Java 回调返回后才执行 native open。此提示不依赖文件监视，
+        // 可跨越该边界传递调用方。
         source_hint::remember_public_path_caller_hint(
             &normalized,
             &package_name,

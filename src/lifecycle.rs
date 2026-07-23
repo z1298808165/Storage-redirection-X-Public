@@ -82,9 +82,9 @@ impl RuntimeFlow {
     }
 
     pub fn pre_server_specialize(&mut self) {
-        // system_server post-specialize may no longer be able to obtain the
-        // module fd directly. Keep it across specialize so the receiver path
-        // can read config and write package events through /proc/self/fd.
+        // system_server 在 specialize 后可能无法再直接获取模块 fd。
+        // 跨 specialize 保留该 fd，使接收器路径可通过 /proc/self/fd
+        // 读取配置并写入包事件。
         self.open_server_module_dir_fd();
     }
 

@@ -78,7 +78,7 @@ fun isWorktreeDirty(): Boolean = !runGit("status", "--porcelain").isNullOrBlank(
 fun validateBaseVersion(version: String): List<Int> {
   val numbers = version.split('.').map { part -> part.toIntOrNull() }
   if (numbers.size != 3 || numbers.any { it == null }) {
-    throw GradleException("Cargo.toml version must be MAJOR.MINOR.PATCH, got: $version")
+    throw GradleException("Cargo.toml 版本必须采用 MAJOR.MINOR.PATCH 格式，当前值：$version")
   }
   return numbers.map { requireNotNull(it) }
 }
@@ -90,7 +90,7 @@ fun baseVersionCode(version: String): Int {
 
 fun ciVersionCode(baseVersion: String, buildCount: Int): Int {
   if (buildCount < 1) {
-    throw GradleException("CI build count must be positive, got: $buildCount")
+    throw GradleException("CI 构建序号必须为正数，当前值：$buildCount")
   }
   return baseVersionCode(baseVersion) - 100 + buildCount.coerceAtMost(99)
 }
@@ -372,7 +372,7 @@ android {
   kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21) } }
 
   packaging {
-    // Keep release payloads compressed in the APK; Android extracts them during install.
+    // 保持发布载荷在 APK 中处于压缩状态，由 Android 在安装时解压。
     dex.useLegacyPackaging = true
     jniLibs.useLegacyPackaging = true
     resources.excludes +=

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Ref = ":"
 )
@@ -26,7 +26,7 @@ function Invoke-Git {
 
     $output = & git @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Git command failed: git $($Arguments -join ' ')"
+        throw "Git 命令执行失败：git $($Arguments -join ' ')"
     }
     return @($output)
 }
@@ -63,14 +63,14 @@ $errors = New-Object System.Collections.Generic.List[string]
 foreach ($file in $actual.Keys) {
     foreach ($name in $actual[$file]) {
         if (-not $allowed.ContainsKey($file) -or $allowed[$file] -notcontains $name) {
-            $errors.Add("Disallowed Rust inline test: ${file}::$name")
+            $errors.Add("发现不允许的 Rust 内联测试：${file}::$name")
         }
     }
 }
 foreach ($file in $allowed.Keys) {
     foreach ($name in $allowed[$file]) {
         if (-not $actual.ContainsKey($file) -or $actual[$file] -notcontains $name) {
-            $errors.Add("Missing preserved upstream Rust inline test: ${file}::$name")
+            $errors.Add("缺少应保留的上游 Rust 内联测试：${file}::$name")
         }
     }
 }
@@ -79,4 +79,4 @@ if ($errors.Count -gt 0) {
     throw ($errors -join "`n")
 }
 
-Write-Host "Rust inline test allowlist check passed: 6 upstream tests preserved."
+Write-Host "Rust 内联测试白名单检查通过：已保留 6 个上游测试。"

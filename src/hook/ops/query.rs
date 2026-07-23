@@ -747,7 +747,7 @@ fn log_readlink_reverse_unchanged(op_name: &str, path: &str) {
 
 /// system_writer bypass 返回 ENOENT 时，尝试对路径做重定向决策。
 /// 如果路径命中重定向规则，返回重定向后的路径；否则返回 None。
-// Keep readlink results in the same mapping view that cursor paths expose.
+// 让 readlink 结果与 cursor 路径使用相同的映射视图。
 fn reverse_mapping_readlink_path_for_visible_caller(path: &str) -> String {
     if path.is_empty() {
         return String::new();
@@ -791,7 +791,7 @@ fn reverse_mapping_readlink_path_for_visible_caller(path: &str) -> String {
     }
 }
 
-// If a system-writer query hits ENOENT, retry through the redirect decision.
+// 系统写入进程查询遇到 ENOENT 时，通过重定向决策重试。
 unsafe fn writer_fallback_redirect(
     hub: &InterceptHub,
     dirfd: c_int,

@@ -152,8 +152,8 @@ public final class PackageEventReceiver extends BroadcastReceiver {
     String line = buildLine(action, userId, uid, replacing, packageName);
     appendEventAsync(line);
 
-    // Keep a second delayed event for ADD/REPLACE so shell-side validation can
-    // see the settled PackageManager state even on slower devices.
+    // 为 ADD/REPLACE 保留第二次延迟事件，使 shell 侧验证在较慢设备上也能
+    // 读取到稳定后的 PackageManager 状态。
     if ("added".equals(action) || "replaced".equals(action)) {
       Runnable delayedAppend =
           new Runnable() {

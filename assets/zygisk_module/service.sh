@@ -68,7 +68,7 @@ start_srx_daemon() {
 }
 
 
-# WebUI setup
+# 配置 WebUI
 WEBROOT_DIR="$MODDIR/webroot"
 if [ -d "$WEBROOT_DIR" ]; then
   chmod 755 "$WEBROOT_DIR"

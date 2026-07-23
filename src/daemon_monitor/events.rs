@@ -327,18 +327,18 @@ fn repair_public_directory_owner(display_path: &str, backend_path: &str) {
         return;
     };
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: c_path is NUL-terminated and st points to writable storage for lstat.
+    // SAFETY: c_path 以 NUL 结尾，st 指向可供 lstat 写入的存储空间。
     if unsafe { libc::lstat(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
         return;
     }
-    // SAFETY: lstat returned success and initialized the complete stat value.
+    // SAFETY: lstat 已成功返回并完整初始化 stat 值。
     let st = unsafe { st.assume_init() };
     if st.st_mode & libc::S_IFMT as mode_t != libc::S_IFDIR as mode_t {
         return;
     }
 
     if st.st_uid != MEDIA_RW_UID || st.st_gid != MEDIA_RW_GID {
-        // SAFETY: c_path remains valid and identifies the verified public directory.
+        // SAFETY: c_path 在调用期间保持有效，并指向已验证的公共目录。
         let ret = unsafe { libc::lchown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
         if ret != 0 {
             log::warn!(
@@ -353,7 +353,7 @@ fn repair_public_directory_owner(display_path: &str, backend_path: &str) {
 
     let current_mode = st.st_mode & 0o7777;
     if current_mode != REAL_PUBLIC_DIR_MODE {
-        // SAFETY: c_path remains valid and identifies the verified public directory.
+        // SAFETY: c_path 在调用期间保持有效，并指向已验证的公共目录。
         let ret = unsafe { libc::chmod(c_path.as_ptr(), REAL_PUBLIC_DIR_MODE) };
         if ret != 0 {
             log::warn!(

@@ -159,7 +159,7 @@ fn install_target_if_enabled() {
     if !enabled && !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
         log::info!(
             "zero-width fuse fix disabled; media fuse compatibility hooks remain installable installed={}",
-            // SAFETY: This no-argument query only reads hook-owned native state.
+            // SAFETY: 此无参查询只读取 hook 自有的 native 状态。
             unsafe { srx_fuse_fix_is_installed() }
         );
     }

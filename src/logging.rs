@@ -63,17 +63,17 @@ pub fn set_debug_logging_enabled(enabled: bool) {
 
 impl PrivateLogSocket {
     fn new() -> Option<Self> {
-        // SAFETY: socket takes no borrowed pointers and returns an owned descriptor on success.
+        // SAFETY: socket 不接收借用指针，成功时返回自有描述符。
         let fd = unsafe { socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0) };
         if fd < 0 {
             return None;
         }
 
-        // SAFETY: sockaddr_un is a plain C structure that permits zero initialization.
+        // SAFETY: sockaddr_un 是允许零初始化的普通 C 结构体。
         let mut addr: sockaddr_un = unsafe { mem::zeroed() };
         addr.sun_family = AF_UNIX as _;
         if PRIVATE_LOG_SOCKET_NAME.len() + 1 > addr.sun_path.len() {
-            // SAFETY: fd is owned here and has not been closed or transferred.
+            // SAFETY: fd 由当前代码持有，尚未关闭或转移。
             unsafe { close(fd) };
             return None;
         }
@@ -96,7 +96,7 @@ impl PrivateLogSocket {
             return false;
         }
         let packet = format!("{}\t{}\t{}", level_to_code(level), tag, message);
-        // SAFETY: packet and addr remain alive for the call and their lengths match the buffers.
+        // SAFETY: packet 和 addr 在调用期间保持有效，长度与缓冲区一致。
         unsafe {
             sendto(
                 self.fd,

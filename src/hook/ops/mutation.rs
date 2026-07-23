@@ -1485,7 +1485,7 @@ where
 
     let PreparedPath::Ready {
         path_for_decision, ..
-    // SAFETY: pathname was checked non-null above and remains valid for this intercepted call.
+    // SAFETY: pathname 已在上方确认非空，并在本次拦截调用期间保持有效。
     } = (unsafe {
         prepare_relevant_path(
             hub,
@@ -1949,7 +1949,7 @@ where
 
     let PreparedPath::Ready {
         path_for_decision, ..
-    // SAFETY: newpath was checked non-null above and remains valid for this intercepted call.
+    // SAFETY: newpath 已在上方确认非空，并在本次拦截调用期间保持有效。
     } = (unsafe {
         prepare_relevant_path(
             hub,
@@ -1971,7 +1971,7 @@ where
         path_for_decision.as_ref(),
         request.flags,
     );
-    // SAFETY: oldpath was checked non-null above and is valid for the intercepted call duration.
+    // SAFETY: oldpath 已在上方确认非空，并在本次拦截调用期间保持有效。
     let old_text = unsafe { c_str_to_string(request.oldpath) };
     let from_path = resolve_extra_path(request.olddirfd, &old_text);
     let extra_tail = if request.flags >= 0 {

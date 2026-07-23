@@ -373,11 +373,9 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
 }
 
 fn apply_mount_namespace_fallback(planner: &mut MountPlanner, request: &MountRequest) -> bool {
-    // Scoped FUSE was the preferred recordable read-only path. When the
-    // already-mounted real-storage FUSE anchor can cover the read-only mapping,
-    // keep file monitoring enabled so MediaProvider/FUSE can still emit the
-    // denial record. Otherwise use a hard read-only bind so writes cannot slip
-    // through silently.
+    // Scoped FUSE 是优先采用的可记录只读路径。当已挂载的真实存储 FUSE 锚点
+    // 能覆盖只读映射时，保留文件监视，使 MediaProvider/FUSE 仍可生成拒绝记录。
+    // 否则使用强制只读绑定，避免写入被静默放行。
     let can_record_fallback = request.is_file_monitor_enabled
         && planner.can_record_read_only_mapping_denials(
             &request.path_mappings,

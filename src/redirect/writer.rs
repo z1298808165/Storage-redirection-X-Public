@@ -61,13 +61,12 @@ pub fn reverse_map_path_by_caller_mappings(path: &str, mappings: &[PathMapping])
     String::new()
 }
 
-/// Reverse-map a sandbox path returned by readlink back to the display path.
-/// Strips the /Android/data/<pkg>/sdcard sandbox segment and converts
-/// /data/media/ back to /storage/emulated/, so the caller sees the
-/// original display path that was passed to open().
+/// 将 readlink 返回的沙箱路径反向映射回展示路径。
+/// 移除 /Android/data/<pkg>/sdcard 沙箱段，并将 /data/media/ 转回
+/// /storage/emulated/，使调用方看到传给 open() 的原始展示路径。
 ///
-/// Input:  /data/media/0/Android/data/com.example/sdcard/Download/file.txt
-/// Output: /storage/emulated/0/Download/file.txt
+/// 输入：/data/media/0/Android/data/com.example/sdcard/Download/file.txt
+/// 输出：/storage/emulated/0/Download/file.txt
 pub fn reverse_readlink_sandbox_path(path: &str) -> String {
     let storage_path = data_media_to_storage_path(path);
     if let Some(pos) = storage_path.find("/Android/data/") {

@@ -7,15 +7,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Instrumented test, which will execute on an Android device.
+ * 在 Android 设备上执行的插桩测试。
  *
- * See [testing documentation](http://d.android.com/tools/testing).
+ * 参见[测试文档](http://d.android.com/tools/testing)。
  */
 @RunWith(AndroidJUnit4::class)
 class ExampleInstrumentedTest {
   @Test
   fun useAppContext() {
-    // Context of the app under test.
+    // 被测应用的上下文。
     val appContext = InstrumentationRegistry.getInstrumentation().targetContext
     assertEquals("me.fakerqu.mediafileapi.test", appContext.packageName)
   }

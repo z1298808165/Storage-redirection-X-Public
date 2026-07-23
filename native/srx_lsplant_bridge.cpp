@@ -217,8 +217,8 @@ int SrxStrcasecmpFix(std::string_view a, std::string_view b) {
   return strcasecmp(clean_a.c_str(), clean_b.c_str());
 }
 
-// These callbacks run on MediaProvider FUSE request threads; keep them free of
-// config reload I/O and let the Rust read hook refresh g_fuse_fix_enabled.
+// 这些回调运行在 MediaProvider FUSE 请求线程中；不要在此执行配置重载 I/O，
+// 由 Rust 读取 hook 刷新 g_fuse_fix_enabled。
 bool ShouldAllowPrivateOwnerSqliteAccess(const std::string &path,
                                          uint32_t uid) {
   if (path.empty())

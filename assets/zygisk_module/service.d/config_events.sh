@@ -757,8 +757,8 @@ handle_package_added_event() {
   package_name="$2"
   replacing="$3"
 
-  # Wait for PMS to settle; PackageEventReceiver also emits a delayed duplicate,
-  # this sleep keeps direct file consumption robust if only one line is seen.
+  # 等待 PMS 状态稳定；PackageEventReceiver 也会延迟发送重复事件，
+  # 即使只读取到一行，此等待也能保证直接消费文件时的稳定性。
   sleep 2
   refresh_uid_map force
 

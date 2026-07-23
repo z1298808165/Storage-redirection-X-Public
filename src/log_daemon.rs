@@ -36,7 +36,7 @@ pub fn start() -> io::Result<()> {
     let state = match LogState::new() {
         Ok(state) => state,
         Err(error) => {
-            // SAFETY: fd is still owned locally because the receiver thread was not started.
+            // SAFETY: 接收线程尚未启动，因此 fd 仍由当前代码持有。
             unsafe { close(fd) };
             return Err(error);
         }
@@ -46,7 +46,7 @@ pub fn start() -> io::Result<()> {
         .spawn(move || run(fd, state))
         .map(|_| ())
         .map_err(|error| {
-            // SAFETY: thread creation failed, so ownership of fd was not transferred.
+            // SAFETY: 线程创建失败，因此 fd 的所有权尚未转移。
             unsafe { close(fd) };
             error
         })
@@ -60,13 +60,13 @@ pub fn send_control(command: &str) -> io::Result<()> {
         ));
     }
 
-    // SAFETY: socket takes no borrowed pointers and returns an owned descriptor on success.
+    // SAFETY: socket 不接收借用指针，成功时返回自有描述符。
     let fd = unsafe { socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     let result = send_control_packet(fd, command);
-    // SAFETY: fd is owned by this function and the synchronous send has completed.
+    // SAFETY: fd 由此函数持有，且同步发送已经完成。
     unsafe { close(fd) };
     result
 }
@@ -74,7 +74,7 @@ pub fn send_control(command: &str) -> io::Result<()> {
 fn send_control_packet(fd: i32, command: &str) -> io::Result<()> {
     let (addr, addr_len) = socket_addr()?;
     let packet = format!("I\t{TAG_CONTROL}\t{command}");
-    // SAFETY: packet and addr remain alive for the call and their lengths match the buffers.
+    // SAFETY: packet 和 addr 在调用期间保持有效，长度与缓冲区一致。
     let sent = unsafe {
         sendto(
             fd,
@@ -100,14 +100,14 @@ fn run(fd: i32, mut state: LogState) {
             events: POLLIN,
             revents: 0,
         };
-        // SAFETY: poll_fd points to one initialized pollfd for the duration of the call.
+        // SAFETY: poll_fd 在调用期间指向一个已初始化的 pollfd。
         let ready = unsafe { poll(&mut poll_fd, 1, FLUSH_INTERVAL_MS) };
         if ready <= 0 {
             state.flush_pending();
             continue;
         }
 
-        // SAFETY: buffer is writable for buffer.len() bytes and fd is owned by this thread.
+        // SAFETY: buffer 有 buffer.len() 字节可写空间，fd 由当前线程持有。
         let size = unsafe { recv(fd, buffer.as_mut_ptr() as *mut c_void, buffer.len(), 0) };
         if size <= 0 {
             continue;
@@ -121,14 +121,14 @@ fn run(fd: i32, mut state: LogState) {
 }
 
 fn bind_log_socket() -> io::Result<i32> {
-    // SAFETY: socket takes no borrowed pointers and returns an owned descriptor on success.
+    // SAFETY: socket 不接收借用指针，成功时返回自有描述符。
     let fd = unsafe { socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     let result = bind_log_socket_fd(fd);
     if let Err(error) = result {
-        // SAFETY: bind failed, so fd remains owned locally and has not been transferred.
+        // SAFETY: bind 失败，因此 fd 仍由当前代码持有且尚未转移。
         unsafe { close(fd) };
         return Err(error);
     }
@@ -137,7 +137,7 @@ fn bind_log_socket() -> io::Result<i32> {
 
 fn bind_log_socket_fd(fd: i32) -> io::Result<()> {
     let recv_buffer = SOCKET_RECV_BUFFER_BYTES;
-    // SAFETY: recv_buffer is initialized and the option length exactly matches its type.
+    // SAFETY: recv_buffer 已初始化，选项长度与其类型完全一致。
     unsafe {
         let _ = setsockopt(
             fd,
@@ -149,7 +149,7 @@ fn bind_log_socket_fd(fd: i32) -> io::Result<()> {
     }
 
     let (addr, addr_len) = socket_addr()?;
-    // SAFETY: addr is initialized and addr_len covers only its initialized address bytes.
+    // SAFETY: addr 已初始化，addr_len 仅覆盖已初始化的地址字节。
     if unsafe { bind(fd, &addr as *const _ as *const sockaddr, addr_len) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -157,7 +157,7 @@ fn bind_log_socket_fd(fd: i32) -> io::Result<()> {
 }
 
 fn socket_addr() -> io::Result<(sockaddr_un, libc::socklen_t)> {
-    // SAFETY: sockaddr_un is a plain C structure that permits zero initialization.
+    // SAFETY: sockaddr_un 是允许零初始化的普通 C 结构体。
     let mut addr: sockaddr_un = unsafe { mem::zeroed() };
     addr.sun_family = AF_UNIX as _;
     if SOCKET_NAME.len() + 1 > addr.sun_path.len() {
@@ -399,17 +399,17 @@ fn level_text(level: &str) -> &'static str {
 
 fn timestamp_text() -> String {
     let mut now: libc::time_t = 0;
-    // SAFETY: now points to writable storage for one time_t value.
+    // SAFETY: now 指向可写入一个 time_t 值的存储空间。
     let _ = unsafe { libc::time(&mut now) };
-    // SAFETY: libc::tm is a plain C structure that permits zero initialization.
+    // SAFETY: libc::tm 是允许零初始化的普通 C 结构体。
     let mut value: libc::tm = unsafe { mem::zeroed() };
-    // SAFETY: now and value are valid pointers and localtime_r writes only one tm value.
+    // SAFETY: now 和 value 均为有效指针，localtime_r 只写入一个 tm 值。
     if unsafe { libc::localtime_r(&now, &mut value) }.is_null() {
         return "00/00 00:00:00".to_string();
     }
     let mut buffer = [0u8; 32];
     let format = b"%m/%d %H:%M:%S\0";
-    // SAFETY: buffer, format, and value remain valid for the call with correct lengths.
+    // SAFETY: buffer、format 和 value 在调用期间保持有效，且长度正确。
     let written = unsafe {
         libc::strftime(
             buffer.as_mut_ptr() as *mut _,

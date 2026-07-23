@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$AppId = "me.fakerqu.test.storageredirect",
     [switch]$SkipBasicAll,
@@ -13,7 +13,7 @@ if ([string]::IsNullOrWhiteSpace($Serial)) {
     if ($devices.Count -eq 1) {
         $Serial = ($devices[0] -split "\s+")[0]
     } else {
-        throw "Multiple or no devices detected. Pass -Serial explicitly."
+        throw "检测到多个设备或未检测到设备，请显式传入 -Serial。"
     }
 }
 
@@ -268,14 +268,14 @@ function Test-FuseDaemonScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 29) { throw "Invalid scenario: $scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 29) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 29) { throw "Invalid scenario: $scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 29) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -289,7 +289,7 @@ function Get-ScenarioList {
     if ($fuseSupported) {
         $defaultScenarios.Add(8) | Out-Null
     } else {
-        Write-Host "skip fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
+        Write-Host "跳过 FUSE daemon 场景：模块未暴露 fuse_daemon_redirect_enabled，或 RUN_FUSE_DAEMON_SCENARIOS 已禁用"
     }
     9..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(29) | Out-Null
@@ -303,7 +303,7 @@ function Get-ScenarioList {
         25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     } else {
         $defaultScenarios.Add(26) | Out-Null
-        Write-Host "skip file monitor fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
+        Write-Host "跳过文件监视 FUSE daemon 场景：模块未暴露 fuse_daemon_redirect_enabled，或 RUN_FUSE_DAEMON_SCENARIOS 已禁用"
     }
     @($defaultScenarios)
 }
@@ -383,7 +383,7 @@ function Apply-ScenarioConfig {
         }
         28 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}' }
         29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
-        default { throw "Unknown scenario $Scenario" }
+        default { throw "未知场景 $Scenario" }
     }
 }
 
@@ -832,10 +832,10 @@ function Wait-FileMonitorLogLine {
         Start-Sleep -Milliseconds 200
     }
     if ($AllowCapacityLimitedInotifyMiss -and (Test-FileMonitorWatchCapacityLimited)) {
-        Write-Warning "monitor log skipped $Scenario/$Label file=$FileName expected=$Expected reason=watch-capacity-limited"
+        Write-Warning "已跳过监视日志 $Scenario/$Label file=$FileName expected=$Expected reason=watch-capacity-limited"
         return $true
     }
-    Write-Warning "monitor log timeout $Scenario/$Label file=$FileName expected=$Expected"
+    Write-Warning "监视日志等待超时 $Scenario/$Label file=$FileName expected=$Expected"
     $script:Failures.Add("scenario-$Scenario/$Label monitor log timeout file=$FileName expected=$Expected")
     @(
         Invoke-Su "tail -80 '$FileMonitorLogPath' 2>/dev/null || true"
@@ -1143,16 +1143,16 @@ function Invoke-ConfigHotReloadScenario {
 function Invoke-TestArtifactCleanup {
     if ($script:CleanupDone) { return }
     $script:CleanupDone = $true
-    Write-Host "== cleanup test artifacts =="
-    try { Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null } catch { Write-Warning "force-stop cleanup failed: $_" }
-    try { Restore-CrossAppConfig } catch { Write-Warning "cross-app read-only config restore failed: $_" }
-    try { Restore-AppConfig } catch { Write-Warning "app config restore failed: $_" }
-    try { Restore-GlobalConfig } catch { Write-Warning "global config restore failed: $_" }
-    try { Clear-Results } catch { Write-Warning "result cleanup failed: $_" }
-    try { Remove-TestTargetArtifacts } catch { Write-Warning "target cleanup failed: $_" }
-    try { Remove-RandomMediaStoreRows } catch { Write-Warning "MediaStore cleanup failed: $_" }
-    try { Remove-RandomPhysicalMediaFiles } catch { Write-Warning "physical cleanup failed: $_" }
-    try { Restart-MediaProvider } catch { Write-Warning "MediaProvider restart failed: $_" }
+    Write-Host "== 清理测试产物 =="
+    try { Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null } catch { Write-Warning "force-stop 清理失败：$_" }
+    try { Restore-CrossAppConfig } catch { Write-Warning "跨应用只读配置恢复失败：$_" }
+    try { Restore-AppConfig } catch { Write-Warning "应用配置恢复失败：$_" }
+    try { Restore-GlobalConfig } catch { Write-Warning "全局配置恢复失败：$_" }
+    try { Clear-Results } catch { Write-Warning "结果清理失败：$_" }
+    try { Remove-TestTargetArtifacts } catch { Write-Warning "目标产物清理失败：$_" }
+    try { Remove-RandomMediaStoreRows } catch { Write-Warning "MediaStore 清理失败：$_" }
+    try { Remove-RandomPhysicalMediaFiles } catch { Write-Warning "物理文件清理失败：$_" }
+    try { Restart-MediaProvider } catch { Write-Warning "MediaProvider 重启失败：$_" }
 }
 
 function Restart-App {
@@ -1493,7 +1493,7 @@ function Test-FuseDaemonStarted {
         }
         Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }
-    Write-Warning "scenario-$Scenario/fuse-daemon-started log not observed; continuing with behavioral checks"
+    Write-Warning "未观察到 scenario-$Scenario/fuse-daemon-started 日志；继续执行行为检查"
     $true
 }
 
@@ -1501,12 +1501,12 @@ function Test-ScopedFuseDaemonStarted {
     param([int]$Scenario, [string]$MountRoot, [bool]$Strict = $true)
     for ($i = 0; $i -lt 20; $i++) {
         if (Test-Su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped fuse fell back to mount namespace root=$MountRoot")
+            $script:Failures.Add("scenario-$Scenario scoped FUSE 已回退到 mount namespace root=$MountRoot")
             Write-Warning "scenario-$Scenario/scoped-fuse-fallback root=$MountRoot"
             return $false
         }
         if (Test-Su "grep -F -- 'fuse redirect session ended' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot' >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped fuse session failed root=$MountRoot")
+            $script:Failures.Add("scenario-$Scenario scoped FUSE 会话失败 root=$MountRoot")
             Write-Warning "scenario-$Scenario/scoped-fuse-session-failed root=$MountRoot"
             return $false
         }
@@ -1517,12 +1517,12 @@ function Test-ScopedFuseDaemonStarted {
         Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }
     if ($Strict) {
-        $script:Failures.Add("scenario-$Scenario scoped fuse mount not observed root=$MountRoot")
+        $script:Failures.Add("scenario-$Scenario 未观察到 scoped FUSE 挂载 root=$MountRoot")
         Write-Warning "scenario-$Scenario/scoped-fuse-missing root=$MountRoot"
         @(Invoke-Su "grep -F -- '$AppId' '$LogPath' 2>/dev/null | tail -80 || true") | ForEach-Object { Write-Host "  fuse_tail: $_" }
         return $false
     }
-    Write-Warning "scenario-$Scenario/scoped-fuse-start-log-not-observed root=$MountRoot; continuing with behavioral checks"
+    Write-Warning "scenario-$Scenario/scoped-fuse-start-log-not-observed root=$MountRoot；继续执行行为检查"
     $true
 }
 

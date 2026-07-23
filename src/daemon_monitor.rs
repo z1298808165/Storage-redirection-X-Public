@@ -103,9 +103,8 @@ impl RegularAppMonitor {
             return;
         }
 
-        // Missing roots can force periodic rebuilds. Drain queued events before
-        // closing the old inotify fd so creations observed during the last
-        // loop are not dropped by the rebuild.
+        // 缺失的根目录可能触发周期性重建。关闭旧 inotify fd 前先排空队列事件，
+        // 避免重建时丢失上一轮循环中观测到的创建事件。
         self.drain_events();
         self.reset();
         self.config_version = version;

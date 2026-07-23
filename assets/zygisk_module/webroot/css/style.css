@@ -1,4 +1,4 @@
-/* SRX Core WebUI - liquid glass components */
+/* SRX Core WebUI - 液态玻璃组件 */
 
 .app-list { display: flex; flex-direction: column; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: var(--radius-xl); overflow: hidden auto; box-shadow: var(--glass-inner), var(--shadow-md); }
 .page#page-apps .page-header { flex-shrink: 0; }
@@ -421,7 +421,7 @@ body.modal-open .app-container { overflow: hidden; pointer-events: none; }
 }
 
 
-/* WebUI liquid surface refinements */
+/* WebUI 液态表面细节调整 */
 .modal-sheet,
 .dialog-box,
 .toast,
@@ -472,7 +472,7 @@ body.liquid-surface-disabled .dialog-overlay {
 body.liquid-surface-disabled .status-card::before,
 body.liquid-surface-disabled .log-card::before { content: none; }
 
-/* SRX WebUI control-console redesign */
+/* SRX WebUI 控制台重新设计 */
 :root,
 [data-theme="light"] {
   --color-primary: #1677d2;

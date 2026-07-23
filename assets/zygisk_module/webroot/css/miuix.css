@@ -112,7 +112,7 @@ button, input, select, textarea { font: inherit; }
 button { touch-action: manipulation; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid rgba(143,122,246,0.58); outline-offset: 3px; }
 
-/* Unified WebUI liquid glass surface */
+/* 统一的 WebUI 液态玻璃表面 */
 .liquid-surface,
 .bottom-nav,
 .app-batch-bar,
