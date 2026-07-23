@@ -96,6 +96,32 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("build/test-flow/assets/*.zip", runtime_upload)
             self.assertIn("build/outputs/apk/**/*.apk", runtime_upload)
 
+    def test_workflows_share_runtime_build_and_failure_artifacts(self) -> None:
+        expected_artifacts = {
+            "scenario-*-result.txt",
+            "test-flow-app-mountinfo.txt",
+            "test-flow-logcat.txt",
+            "test-flow-module-state.txt",
+            "media-health.txt",
+        }
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            build = section(source, "      - name: Build x86_64 module zip and test app", "      - name: Upload")
+            test_flow = section(source, "  test-flow:", "  test-flow-required:")
+            artifact = test_flow[test_flow.index("          path: |") :]
+
+            self.assertIn("bash .github/scripts/build_test_flow_runtime.sh", build)
+            self.assertIn("SRT_FAIL_FAST: 1", test_flow)
+            self.assertIn("SRT_SKIP_FINAL_CLEANUP: 1", test_flow)
+            self.assertIn("SRT_SCENARIO_TIMEOUT_SECONDS: 300", test_flow)
+            for path in expected_artifacts:
+                self.assertIn(path, artifact)
+
+        script = read(".github/scripts/build_test_flow_runtime.sh")
+        self.assertIn('cargo test --target "$TARGET_TRIPLE" --no-run', script)
+        self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
+        self.assertIn(":storageRedirectTestApp:assembleDebug", script)
+
 
 if __name__ == "__main__":
     unittest.main()

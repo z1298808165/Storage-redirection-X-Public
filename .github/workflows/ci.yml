@@ -405,22 +405,8 @@ jobs:
 
       - name: Build x86_64 module zip and test app
         run: |
-          chmod +x ./gradlew .github/tests/*.sh .github/scripts/package_module.sh
-          mkdir -p build/test-flow/module-bin build/test-flow/assets
-          cargo test --target "$TARGET_TRIPLE" --no-run
-          cargo build --target "$TARGET_TRIPLE" --release
-          cp "target/${TARGET_TRIPLE}/release/libsrx_core.so" build/test-flow/module-bin/libsrx_core.so
-          cp "target/${TARGET_TRIPLE}/release/srx_daemon" build/test-flow/module-bin/srx_daemon
-          bash .github/scripts/package_module.sh \
-            "$VERSION" "$VERSION_CODE" \
-            build/test-flow/module-bin/libsrx_core.so \
-            build/test-flow/module-bin/srx_daemon \
-            "build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
-            "$MODULE_ABI"
-          ./gradlew --no-daemon --console=plain --stacktrace \
-            :storageRedirectTestApp:testDebugUnitTest \
-            :storageRedirectTestMediaFileApi:testDebugUnitTest \
-            :storageRedirectTestApp:assembleDebug
+          chmod +x ./gradlew .github/tests/*.sh .github/scripts/*.sh
+          bash .github/scripts/build_test_flow_runtime.sh
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
