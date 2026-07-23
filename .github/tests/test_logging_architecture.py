@@ -88,7 +88,7 @@ class LoggingArchitectureTest(unittest.TestCase):
         api = read("assets/zygisk_module/webroot/js/api.js")
         self.assertIn("Api.readFileTail(FILE_MONITOR_LOG, 500)", app)
         self.assertNotIn("Api.readFile(FILE_MONITOR_LOG)", app)
-        tail = api[api.index("async readFileTail") : api.index("/** Write content", api.index("async readFileTail"))]
+        tail = api[api.index("async readFileTail") : api.index("async writeFile", api.index("async readFileTail"))]
         self.assertNotIn("this.readFile(path)", tail)
         bridge = api[api.index("const finish =") : api.index("// 3. Fallback")]
         self.assertEqual(2, bridge.count(".catch((error) => finish("))
@@ -96,7 +96,7 @@ class LoggingArchitectureTest(unittest.TestCase):
 
     def test_bulk_webui_config_writes_use_one_staged_manifest(self) -> None:
         api = read("assets/zygisk_module/webroot/js/api.js")
-        bulk = api[api.index("async writeAppConfigs") : api.index("/** Delete app config")]
+        bulk = api[api.index("async writeAppConfigs") : api.index("async deleteAppConfig")]
         restore = api[api.index("async restoreConfigSnapshot") : api.index("async stopModule")]
         self.assertIn("this.writeStagedFiles(stage, files)", bulk)
         self.assertNotIn("this.writeRawFile(", bulk)
@@ -114,6 +114,21 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("const POLL_INTERVAL_MS", watcher)
         self.assertIn("LAST_POLL_MS", watcher)
         self.assertIn("compare_exchange", watcher)
+
+    def test_manager_log_refresh_uses_one_filter_snapshot(self) -> None:
+        repository = read("app/src/main/java/org/srx/manager/data/SrxRepository.kt")
+        view_model = read("app/src/main/java/org/srx/manager/ui/SrxViewModel.kt")
+        snapshot = repository[
+            repository.index("suspend fun readLogSnapshot") : repository.index("suspend fun clearLogs")
+        ]
+        refresh = view_model[
+            view_model.index("fun refreshLogs()") : view_model.index("fun refreshFileMonitorFilters()")
+        ]
+
+        self.assertEqual(1, snapshot.count("readFileMonitorFilters()"))
+        self.assertIn("MonitorLogSnapshot(entries, filters)", snapshot)
+        self.assertIn("repository.readLogSnapshot()", refresh)
+        self.assertNotIn("repository.readFileMonitorFilters()", refresh)
 
     def test_private_log_socket_allows_supported_root_domains(self) -> None:
         policy = read("assets/zygisk_module/sepolicy.rule")

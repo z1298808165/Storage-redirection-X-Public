@@ -19,6 +19,11 @@ import org.srx.manager.root.RootShell
 import org.srx.manager.root.isSafePackageName
 import org.srx.manager.root.shellQuote
 
+data class MonitorLogSnapshot(
+    val entries: List<LogEntry>,
+    val filters: FileMonitorFilters,
+)
+
 class SrxRepository(
     private val context: Context,
     private val shell: RootShell,
@@ -254,12 +259,14 @@ class SrxRepository(
 
   suspend fun restartMediaProvider(): Boolean = moduleController.restartMediaProvider()
 
-  suspend fun readLogs(): List<LogEntry> {
+  suspend fun readLogSnapshot(): MonitorLogSnapshot {
     val raw = fileStore.readTail(FileMonitorLogPath, LogPreviewTailLines)
     val filters = readFileMonitorFilters()
-    return withContext(Dispatchers.IO) {
-      parseMonitorLogEntries(raw, filters, ::resolveLogPackageLabel)
-    }
+    val entries =
+        withContext(Dispatchers.IO) {
+          parseMonitorLogEntries(raw, filters, ::resolveLogPackageLabel)
+        }
+    return MonitorLogSnapshot(entries, filters)
   }
 
   suspend fun clearLogs(): Boolean {

@@ -665,10 +665,10 @@ class SrxViewModel(
   fun refreshLogs() {
     viewModelScope.launch {
       updateLogs(LogStateChange.RefreshStarted)
-      runCatching { repository.readLogs() to repository.readFileMonitorFilters() }
-          .onSuccess { (logs, filters) ->
-            updateLogs(LogStateChange.RefreshSucceeded(logs, filters))
-            refreshLogAppInfo(logs)
+      runCatching { repository.readLogSnapshot() }
+          .onSuccess { snapshot ->
+            updateLogs(LogStateChange.RefreshSucceeded(snapshot.entries, snapshot.filters))
+            refreshLogAppInfo(snapshot.entries)
           }
           .onFailure {
             updateLogs(LogStateChange.RefreshFailed)

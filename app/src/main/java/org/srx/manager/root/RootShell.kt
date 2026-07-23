@@ -4,10 +4,13 @@ import java.io.BufferedReader
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStreamReader
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 data class ShellResult(
@@ -28,7 +31,19 @@ interface ShellExecutor {
   ): ShellResult
 }
 
-class RootShell : Closeable, ShellExecutor {
+internal fun interface RootProcessStarter {
+  fun start(args: List<String>): Process
+}
+
+class RootShell() : Closeable, ShellExecutor {
+  private var processStarter = RootProcessStarter { args ->
+    ProcessBuilder(args).redirectErrorStream(false).start()
+  }
+
+  internal constructor(processStarter: RootProcessStarter) : this() {
+    this.processStarter = processStarter
+  }
+
   suspend fun checkRoot(): Boolean =
       withContext(Dispatchers.IO) {
         val result = runCatching { exec("id") }.getOrNull()
@@ -50,7 +65,7 @@ class RootShell : Closeable, ShellExecutor {
             }
         val proc =
             try {
-              ProcessBuilder(args).redirectErrorStream(false).start()
+              processStarter.start(args)
             } catch (canceled: CancellationException) {
               throw canceled
             } catch (error: SecurityException) {
@@ -59,37 +74,100 @@ class RootShell : Closeable, ShellExecutor {
               return@withContext ShellResult(126, "", error.message ?: "su 不可用")
             }
 
-        val outReader = BufferedReader(InputStreamReader(proc.inputStream))
-        val errReader = BufferedReader(InputStreamReader(proc.errorStream))
         val stdinJob =
-            async(Dispatchers.IO) {
+            startDaemonTask<Unit>("srx-shell-stdin") {
               try {
                 proc.outputStream.use { output -> stdin?.let(output::write) }
               } catch (_: IOException) {
                 Unit
               }
+              Unit
             }
-        val stdoutJob = async(Dispatchers.IO) { outReader.readRemaining() }
-        val stderrJob = async(Dispatchers.IO) { errReader.readRemaining() }
-        val completed = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
-        if (!completed) {
-          proc.destroyForcibly()
-          proc.waitFor(1, TimeUnit.SECONDS)
-          stdinJob.cancel()
-          val stderrText = stderrJob.await()
-          val timeoutText =
-              if (stderrText.isBlank()) {
-                "命令执行超时"
-              } else {
-                "$stderrText\nCommand timed out"
-              }
-          return@withContext ShellResult(124, stdoutJob.await(), timeoutText)
+        val stdoutJob =
+            startDaemonTask("srx-shell-stdout") {
+              runCatching {
+                    BufferedReader(InputStreamReader(proc.inputStream)).use { it.readRemaining() }
+                  }
+                  .getOrDefault("")
+            }
+        val stderrJob =
+            startDaemonTask("srx-shell-stderr") {
+              runCatching {
+                    BufferedReader(InputStreamReader(proc.errorStream)).use { it.readRemaining() }
+                  }
+                  .getOrDefault("")
+            }
+        try {
+          if (!waitForProcess(proc, timeoutMs)) {
+            terminateProcess(proc, stdinJob, stdoutJob, stderrJob)
+            val stdoutText = stdoutJob.completedValue().orEmpty()
+            val stderrText = stderrJob.completedValue().orEmpty()
+            val timeoutText =
+                if (stderrText.isBlank()) {
+                  "命令执行超时"
+                } else {
+                  "$stderrText\n命令执行超时"
+                }
+            return@withContext ShellResult(124, stdoutText, timeoutText)
+          }
+          stdinJob.get(1, TimeUnit.SECONDS)
+          val stdoutText = stdoutJob.awaitOutputOrClose(proc.inputStream)
+          val stderrText = stderrJob.awaitOutputOrClose(proc.errorStream)
+          ShellResult(proc.exitValue(), stdoutText, stderrText)
+        } catch (canceled: CancellationException) {
+          terminateProcess(proc, stdinJob, stdoutJob, stderrJob)
+          throw canceled
         }
-        stdinJob.await()
-        ShellResult(proc.exitValue(), stdoutJob.await(), stderrJob.await())
       }
 
   override fun close() = Unit
+}
+
+private suspend fun waitForProcess(process: Process, timeoutMs: Long): Boolean {
+  val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0L))
+  while (true) {
+    currentCoroutineContext().ensureActive()
+    val remainingNanos = deadlineNanos - System.nanoTime()
+    if (remainingNanos <= 0L) return !process.isAlive
+    val waitMs = TimeUnit.NANOSECONDS.toMillis(remainingNanos).coerceIn(1L, 100L)
+    if (process.waitFor(waitMs, TimeUnit.MILLISECONDS)) return true
+  }
+}
+
+private suspend fun terminateProcess(
+    process: Process,
+    stdinJob: FutureTask<Unit>,
+    stdoutJob: FutureTask<String>,
+    stderrJob: FutureTask<String>,
+) {
+  runCatching { process.destroyForcibly() }
+  stdinJob.cancel(true)
+  stdoutJob.cancel(true)
+  stderrJob.cancel(true)
+  withContext(Dispatchers.IO) { runCatching { process.waitFor(1, TimeUnit.SECONDS) } }
+}
+
+private fun FutureTask<String>.awaitOutputOrClose(stream: java.io.InputStream): String {
+  runCatching { get(1, TimeUnit.SECONDS) }
+      .getOrNull()
+      ?.let {
+        return it
+      }
+  cancel(true)
+  startDaemonTask<Unit>("srx-shell-stream-close") {
+    runCatching { stream.close() }
+    Unit
+  }
+  return completedValue().orEmpty()
+}
+
+private fun <T> FutureTask<T>.completedValue(): T? =
+    if (isDone && !isCancelled) runCatching { get() }.getOrNull() else null
+
+private fun <T> startDaemonTask(name: String, block: () -> T): FutureTask<T> {
+  val task = FutureTask(Callable(block))
+  Thread(task, name).apply { isDaemon = true }.start()
+  return task
 }
 
 private fun BufferedReader.readRemaining(): String =
