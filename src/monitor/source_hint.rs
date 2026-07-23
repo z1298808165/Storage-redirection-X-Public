@@ -431,32 +431,31 @@ fn infer_from_hints(
     user_id: i32,
     path_tokens: &[String],
 ) -> Option<RecentPrivateOwnerIdentity> {
+    let now_ms = paths::monotonic_ms();
+    let mut snapshot = PackageInferenceSnapshot::default();
     hints
         .into_iter()
-        .filter(|hint| hint_matches(hint, user_id, path_tokens))
-        .max_by(|left, right| {
+        .filter_map(|hint| {
+            resolve_matching_hint(&hint, user_id, path_tokens, now_ms, &mut snapshot)
+                .map(|package_name| (hint, package_name))
+        })
+        .max_by(|(left, _), (right, _)| {
             hint_rank(left)
                 .cmp(&hint_rank(right))
                 .then_with(|| left.updated_ms.cmp(&right.updated_ms))
         })
-        .and_then(|hint| {
-            let package_name = if hint.source == "recent_private_owner" {
-                infer_package_by_private_path_tokens(&hint, path_tokens)
-                    .or_else(|| resolve_hint_package(&hint))?
-            } else {
-                resolve_hint_package(&hint)?
-            };
+        .map(|(hint, package_name)| {
             let (source, confidence) =
                 if hint.source == "recent_private_owner" && package_name != hint.package_name {
                     ("recent_private_token", "medium")
                 } else {
                     (hint.source, hint.confidence)
                 };
-            Some(RecentPrivateOwnerIdentity {
+            RecentPrivateOwnerIdentity {
                 package_name,
                 source,
                 confidence,
-            })
+            }
         })
 }
 
@@ -480,24 +479,34 @@ fn infer_from_path_hints(
         })
 }
 
-fn hint_matches(hint: &PrivateOwnerHint, user_id: i32, path_tokens: &[String]) -> bool {
-    if hint.user_id != user_id {
-        return false;
+#[derive(Default)]
+struct PackageInferenceSnapshot {
+    configured_packages: Option<Vec<String>>,
+    running_packages: Option<Vec<String>>,
+    shared_uid_cache_refreshed: bool,
+}
+
+fn resolve_matching_hint(
+    hint: &PrivateOwnerHint,
+    user_id: i32,
+    path_tokens: &[String],
+    now_ms: i64,
+    snapshot: &mut PackageInferenceSnapshot,
+) -> Option<String> {
+    if hint.user_id != user_id || !has_token_overlap(&hint.tokens, path_tokens) {
+        return None;
     }
-    if !has_token_overlap(&hint.tokens, path_tokens) {
-        return false;
-    }
-    let token_package = infer_package_by_private_path_tokens(hint, path_tokens);
-    let age_ms = paths::monotonic_ms().saturating_sub(hint.updated_ms);
+    let token_package = infer_package_by_private_path_tokens(hint, path_tokens, snapshot);
+    let age_ms = now_ms.saturating_sub(hint.updated_ms);
     let max_age_ms = if token_package.is_some() {
         RECENT_PRIVATE_TOKEN_HINT_WINDOW_MS
     } else {
         private_hint_window_ms(hint)
     };
     if !(0..=max_age_ms).contains(&age_ms) {
-        return false;
+        return None;
     }
-    resolve_hint_package(hint).or(token_package).is_some()
+    resolve_hint_package(hint, snapshot).or(token_package)
 }
 
 fn private_hint_window_ms(hint: &PrivateOwnerHint) -> i64 {
@@ -508,7 +517,10 @@ fn private_hint_window_ms(hint: &PrivateOwnerHint) -> i64 {
     }
 }
 
-fn resolve_hint_package(hint: &PrivateOwnerHint) -> Option<String> {
+fn resolve_hint_package(
+    hint: &PrivateOwnerHint,
+    snapshot: &mut PackageInferenceSnapshot,
+) -> Option<String> {
     if is_valid_package_name(&hint.package_name) {
         return Some(hint.package_name.clone());
     }
@@ -517,8 +529,9 @@ fn resolve_hint_package(hint: &PrivateOwnerHint) -> Option<String> {
     }
 
     let mut packages = policy::get_packages_for_uid(hint.caller_uid);
-    if packages.is_empty() {
+    if packages.is_empty() && !snapshot.shared_uid_cache_refreshed {
         policy::refresh_shared_uid_cache();
+        snapshot.shared_uid_cache_refreshed = true;
         packages = policy::get_packages_for_uid(hint.caller_uid);
     }
     packages.sort();
@@ -534,22 +547,41 @@ fn resolve_hint_package(hint: &PrivateOwnerHint) -> Option<String> {
 fn infer_package_by_private_path_tokens(
     hint: &PrivateOwnerHint,
     path_tokens: &[String],
+    snapshot: &mut PackageInferenceSnapshot,
 ) -> Option<String> {
     if hint.source != "recent_private_owner" {
         return None;
     }
-    policy::refresh_shared_uid_cache();
-    let packages = policy::get_all_package_names();
-    best_private_path_token_package(packages, hint, path_tokens)
-        .or_else(|| infer_running_package_by_private_path_tokens(hint, path_tokens))
+    if snapshot.configured_packages.is_none() {
+        if !snapshot.shared_uid_cache_refreshed {
+            policy::refresh_shared_uid_cache();
+            snapshot.shared_uid_cache_refreshed = true;
+        }
+        snapshot.configured_packages = Some(policy::get_all_package_names());
+    }
+    let configured_match = best_private_path_token_package(
+        snapshot.configured_packages.as_deref().unwrap_or_default(),
+        hint,
+        path_tokens,
+    );
+    if configured_match.is_some() {
+        return configured_match;
+    }
+    if snapshot.running_packages.is_none() {
+        snapshot.running_packages = Some(read_running_packages());
+    }
+    best_private_path_token_package(
+        snapshot.running_packages.as_deref().unwrap_or_default(),
+        hint,
+        path_tokens,
+    )
 }
 
-fn infer_running_package_by_private_path_tokens(
-    hint: &PrivateOwnerHint,
-    path_tokens: &[String],
-) -> Option<String> {
+fn read_running_packages() -> Vec<String> {
     let mut packages = Vec::new();
-    let entries = std::fs::read_dir("/proc").ok()?;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return packages;
+    };
     for entry in entries.flatten() {
         if packages.len() >= MAX_PROC_PACKAGE_CANDIDATES {
             break;
@@ -567,7 +599,7 @@ fn infer_running_package_by_private_path_tokens(
         };
         packages.push(package);
     }
-    best_private_path_token_package(packages, hint, path_tokens)
+    packages
 }
 
 fn read_proc_cmdline_package(path: &std::path::Path) -> Option<String> {
@@ -593,16 +625,16 @@ fn normalize_process_package_text(text: &str) -> Option<String> {
 }
 
 fn best_private_path_token_package(
-    packages: Vec<String>,
+    packages: &[String],
     hint: &PrivateOwnerHint,
     path_tokens: &[String],
 ) -> Option<String> {
     packages
-        .into_iter()
+        .iter()
         .filter(|package| is_valid_private_token_package(package, hint))
         .filter_map(|package| {
-            let score = private_path_token_package_score(&package, &hint.tokens, path_tokens);
-            (score > 0).then_some((score, package))
+            let score = private_path_token_package_score(package, &hint.tokens, path_tokens);
+            (score > 0).then_some((score, package.clone()))
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
         .map(|(_, package)| package)

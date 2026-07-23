@@ -51,6 +51,26 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("inferred_uid != *effective_caller_uid", writer)
         self.assertIn("policy::is_system_writer_package(effective_caller_package)", writer)
 
+    def test_private_hint_inference_reuses_one_lazy_package_snapshot(self) -> None:
+        source = read("src/monitor/source_hint.rs")
+        infer = source[source.index("fn infer_from_hints(") : source.index("fn infer_from_path_hints(")]
+        matcher = source[
+            source.index("fn resolve_matching_hint(") : source.index("fn private_hint_window_ms(")
+        ]
+        resolver = source[
+            source.index("fn infer_package_by_private_path_tokens(") : source.index(
+                "fn read_running_packages()"
+            )
+        ]
+
+        self.assertIn("PackageInferenceSnapshot::default()", infer)
+        self.assertIn("resolve_matching_hint", infer)
+        self.assertNotIn("infer_package_by_private_path_tokens", infer)
+        self.assertEqual(1, matcher.count("infer_package_by_private_path_tokens"))
+        self.assertIn("snapshot.shared_uid_cache_refreshed", resolver)
+        self.assertIn("snapshot.running_packages.is_none()", resolver)
+        self.assertNotIn('read_dir("/proc")', resolver)
+
 
 if __name__ == "__main__":
     unittest.main()
