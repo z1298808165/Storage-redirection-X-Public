@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.22",
-    "tag": "ci-build-29933757935-1",
-    "title": "CI Build 1.2.59-ci.22",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29933757935-1",
+    "version": "1.2.59-ci.29",
+    "tag": "ci-build-29980316871-1",
+    "title": "CI Build 1.2.59-ci.29",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-29980316871-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29933757935-1/storage-redirect-x-manager-v1.2.59-ci.22.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29933757935-1/storage.redirect.x-v1.2.59-ci.22.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.22`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29707918905-1`\n- 当前提交：`c1990a4`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复 FUSE、挂载和路径映射相关问题：过滤原生配置中的循环映射链。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n- 配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则。\n\n## App 更新\n\n### 注意事项\n- 固定工具链并复用 Gradle 配置缓存。\n- 集中管理应用界面状态转换。\n- 统一诊断日志导出控制入口。\n\n## 其它更新\n\n### 注意事项\n- 增加构建前源码质量门禁。\n- 校验测试流双平台场景一致性。\n- 固定工具链并复用 Gradle 配置缓存。\n- 统一诊断日志导出控制入口。\n- 允许外置 Rust 测试通过白名单校验。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29980316871-1/storage-redirect-x-manager-v1.2.59-ci.29.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-29980316871-1/storage.redirect.x-v1.2.59-ci.29.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.29`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-29933757935-1`\n- 当前提交：`9e143a8`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复配置解析与模板相关问题：降低管理端日志与批量配置开销。\n\n### 注意事项\n- 配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则。\n\n## App 更新\n\n### 修复了什么问题\n- 修复配置解析与模板相关问题：降低管理端日志与批量配置开销。\n\n## 其它更新\n\n### 修复了什么问题\n- 修复核心逻辑相关问题：避免公开提交包含审核元数据。"
   },
   "releases": []
 }
