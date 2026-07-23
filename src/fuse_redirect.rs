@@ -501,6 +501,8 @@ impl FuseRedirectFs {
                 next_fh: 1,
                 inodes,
                 paths_by_inode,
+                lookup_counts: HashMap::new(),
+                dir_entry_refs: HashMap::new(),
                 files: HashMap::new(),
                 dirs: HashMap::new(),
             }),
@@ -516,6 +518,23 @@ impl FuseRedirectFs {
         state.inodes.insert(rel.to_string(), ino);
         state.paths_by_inode.insert(ino, rel.to_string());
         INodeNo(ino)
+    }
+
+    fn add_lookup_locked(state: &mut FuseState, ino: INodeNo) {
+        if ino.0 != ROOT_INO {
+            let count = state.lookup_counts.entry(ino.0).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+
+    fn remove_lookup_locked(state: &mut FuseState, ino: INodeNo, count: u64) {
+        if let Some(current) = state.lookup_counts.get_mut(&ino.0) {
+            *current = current.saturating_sub(count);
+            if *current == 0 {
+                state.lookup_counts.remove(&ino.0);
+            }
+        }
+        remove_unreferenced_inode(state, ino.0);
     }
 
     fn path_for_ino(&self, ino: INodeNo) -> Option<String> {
@@ -598,11 +617,17 @@ impl FuseRedirectFs {
         };
         let ino = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-            Self::ino_for_path_locked(&mut state, rel)
+            let ino = Self::ino_for_path_locked(&mut state, rel);
+            Self::add_lookup_locked(&mut state, ino);
+            ino
         };
         match self.visible_attr_for_backend(ino, &backend) {
             Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
-            Err(errno) => reply.error(errno),
+            Err(errno) => {
+                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                Self::remove_lookup_locked(&mut state, ino, 1);
+                reply.error(errno);
+            }
         }
     }
 
@@ -666,6 +691,14 @@ impl Filesystem for FuseRedirectFs {
         }
     }
 
+    fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
+        if ino.0 == ROOT_INO {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        Self::remove_lookup_locked(&mut state, ino, nlookup);
+    }
+
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
         match self
@@ -713,7 +746,9 @@ impl Filesystem for FuseRedirectFs {
         let fh = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
             let fh = state.next_handle();
-            let entries = build_dir_entries(&mut state, &self.policy, ino, &rel);
+            let entries: Arc<[DirEntry]> =
+                build_dir_entries(&mut state, &self.policy, ino, &rel).into();
+            add_dir_entry_refs(&mut state, &entries);
             state.dirs.insert(fh, entries);
             fh
         };
@@ -747,14 +782,16 @@ impl Filesystem for FuseRedirectFs {
                     reply.error(Errno::ENOTDIR);
                     return;
                 }
-                let entries = build_dir_entries(&mut state, &self.policy, ino, &rel);
-                state.dirs.insert(fh.into(), entries.clone());
+                let entries: Arc<[DirEntry]> =
+                    build_dir_entries(&mut state, &self.policy, ino, &rel).into();
+                add_dir_entry_refs(&mut state, &entries);
+                state.dirs.insert(fh.into(), Arc::clone(&entries));
                 entries
             }
         };
 
         for (index, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(entry.ino, (index + 1) as u64, entry.kind, entry.name) {
+            if reply.add(entry.ino, (index + 1) as u64, entry.kind, &entry.name) {
                 break;
             }
         }
@@ -770,7 +807,9 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEmpty,
     ) {
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        state.dirs.remove(&fh.into());
+        if let Some(entries) = state.dirs.remove(&fh.into()) {
+            remove_dir_entry_refs(&mut state, &entries);
+        }
         reply.ok();
     }
 
@@ -1032,11 +1071,15 @@ impl Filesystem for FuseRedirectFs {
         );
         let ino = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-            Self::ino_for_path_locked(&mut state, &rel)
+            let ino = Self::ino_for_path_locked(&mut state, &rel);
+            Self::add_lookup_locked(&mut state, ino);
+            ino
         };
         let attr = match self.attr_for_backend(ino, &backend) {
             Ok(attr) => attr,
             Err(errno) => {
+                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                Self::remove_lookup_locked(&mut state, ino, 1);
                 reply.error(errno);
                 return;
             }
@@ -1141,14 +1184,20 @@ impl Filesystem for FuseRedirectFs {
         );
         let ino = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-            Self::ino_for_path_locked(&mut state, &rel)
+            let ino = Self::ino_for_path_locked(&mut state, &rel);
+            Self::add_lookup_locked(&mut state, ino);
+            ino
         };
         match self.attr_for_backend(ino, &backend) {
             Ok(attr) => {
                 self.policy.emit_monitor_create(&backend);
                 reply.entry(&TTL, &attr, Generation(0));
             }
-            Err(errno) => reply.error(errno),
+            Err(errno) => {
+                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                Self::remove_lookup_locked(&mut state, ino, 1);
+                reply.error(errno);
+            }
         }
     }
 
@@ -2010,8 +2059,10 @@ struct FuseState {
     next_fh: u64,
     inodes: HashMap<String, u64>,
     paths_by_inode: HashMap<u64, String>,
+    lookup_counts: HashMap<u64, u64>,
+    dir_entry_refs: HashMap<u64, u64>,
     files: HashMap<u64, OpenFile>,
-    dirs: HashMap<u64, Vec<DirEntry>>,
+    dirs: HashMap<u64, Arc<[DirEntry]>>,
 }
 
 impl FuseState {
@@ -2714,9 +2765,48 @@ fn time_or_now_to_timespec(value: Option<TimeOrNow>) -> libc::timespec {
     }
 }
 
+fn add_dir_entry_refs(state: &mut FuseState, entries: &[DirEntry]) {
+    for entry in entries {
+        if entry.ino.0 == ROOT_INO {
+            continue;
+        }
+        let count = state.dir_entry_refs.entry(entry.ino.0).or_default();
+        *count = count.saturating_add(1);
+    }
+}
+
+fn remove_dir_entry_refs(state: &mut FuseState, entries: &[DirEntry]) {
+    for entry in entries {
+        if entry.ino.0 == ROOT_INO {
+            continue;
+        }
+        if let Some(count) = state.dir_entry_refs.get_mut(&entry.ino.0) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.dir_entry_refs.remove(&entry.ino.0);
+            }
+        }
+        remove_unreferenced_inode(state, entry.ino.0);
+    }
+}
+
+fn remove_unreferenced_inode(state: &mut FuseState, ino: u64) {
+    if ino == ROOT_INO
+        || state.lookup_counts.contains_key(&ino)
+        || state.dir_entry_refs.contains_key(&ino)
+    {
+        return;
+    }
+    if let Some(rel) = state.paths_by_inode.remove(&ino) {
+        state.inodes.remove(&rel);
+    }
+}
+
 fn remove_inode_path(state: &mut FuseState, rel: &str) {
     if let Some(ino) = state.inodes.remove(rel) {
         state.paths_by_inode.remove(&ino);
+        state.lookup_counts.remove(&ino);
+        state.dir_entry_refs.remove(&ino);
     }
 }
 

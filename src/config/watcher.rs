@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 const EVENT_MASK: u32 = IN_CREATE | IN_DELETE | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO;
 
 static INOTIFY_FD: AtomicI32 = AtomicI32::new(-1);
-// 优化：记录最后一次变更时间，减少高频事件处理
 static LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_POLL_MS: AtomicU64 = AtomicU64::new(0);
 const CHANGE_DEBOUNCE_MS: u64 = 100;
+const POLL_INTERVAL_MS: u64 = 25;
 
 // 初始化 inotify 并添加监听，返回 fd（用于 exempt）
 // 必须在 pre_app_specialize 阶段调用（此时有 root 权限）
@@ -44,10 +45,18 @@ pub fn poll_changed() -> bool {
         return false;
     }
 
-    // 优化：防抖动，避免连续高频事件重复触发配置重载
     let now_ms = paths::monotonic_ms() as u64;
-    let last_ms = LAST_CHANGE_MS.load(Ordering::Relaxed);
-    if now_ms < last_ms + CHANGE_DEBOUNCE_MS {
+    let last_poll_ms = LAST_POLL_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last_poll_ms) < POLL_INTERVAL_MS
+        || LAST_POLL_MS
+            .compare_exchange(last_poll_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    {
+        return false;
+    }
+
+    let last_change_ms = LAST_CHANGE_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last_change_ms) < CHANGE_DEBOUNCE_MS {
         return false;
     }
 
