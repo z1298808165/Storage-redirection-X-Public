@@ -151,10 +151,13 @@ pub unsafe extern "C" fn hooked_unlinkat(
     let call_original = |call_path: *const c_char| -> c_int {
         runtime::call_prev(
             self_ptr,
+            // SAFETY: 直接触发 unlinkat 系统调用；参数由调用方保证有效，call_path 指向合法 C 字符串或为空，flags 为原始调用透传值。
             || unsafe { libc::syscall(libc::SYS_unlinkat, dirfd, call_path, flags) as c_int },
             |prev| {
+                // SAFETY: prev 是 hook 框架返回的原始 unlinkat 函数指针，签名与目标函数一致，transmute 到匹配的函数类型是安全的。
                 let f: unsafe extern "C" fn(c_int, *const c_char, c_int) -> c_int =
                     unsafe { std::mem::transmute(prev) };
+                // SAFETY: f 为上一步得到的原始 unlinkat 实现，参数直接透传原始调用值，指针有效性由调用方保证。
                 unsafe { f(dirfd, call_path, flags) }
             },
         )
@@ -346,6 +349,7 @@ pub unsafe extern "C" fn hooked_symlink(target: *const c_char, linkpath: *const 
                 super::super::caller::update_caller_package_for_current_thread(hub);
             }
 
+            // SAFETY: target 是 symlink 调用传入的原始 C 字符串指针，c_str_to_string 内部处理空指针并按 NUL 结尾读取，指针有效性由调用方保证。
             let target_text = unsafe { c_str_to_string(target) };
             let extra = if target_text.is_empty() {
                 None
@@ -402,6 +406,7 @@ pub unsafe extern "C" fn hooked_symlinkat(
                 super::super::caller::update_caller_package_for_current_thread(hub);
             }
 
+            // SAFETY: target 是 symlinkat 调用传入的原始 C 字符串指针，c_str_to_string 内部处理空指针并按 NUL 结尾读取，指针有效性由调用方保证。
             let target_text = unsafe { c_str_to_string(target) };
             let extra = if target_text.is_empty() {
                 None
@@ -848,6 +853,7 @@ where
         return call_original(pathname);
     }
 
+    // SAFETY: pathname 已在上方判空，prepare_relevant_path 会按 NUL 结尾读取该 C 字符串并解析路径，指针有效性由 hook 调用方保证。
     let PreparedPath::Ready {
         path_for_decision, ..
     } = (unsafe { prepare_relevant_path(hub, op_name, dirfd, pathname, mode as i32, true) })
@@ -1018,6 +1024,7 @@ fn cleanup_empty_redirect_source_dir_if_needed(
         return;
     };
     let saved_errno = runtime::current_errno();
+    // SAFETY: c_path 由上方 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效，rmdir 只读取该路径字符串。
     let ret = unsafe { libc::rmdir(c_path.as_ptr()) };
     let cleanup_errno = runtime::current_errno();
     runtime::set_errno(saved_errno);
@@ -1204,6 +1211,7 @@ where
         return call_original(pathname);
     }
 
+    // SAFETY: pathname 已在上方判空，prepare_relevant_path 会按 NUL 结尾读取该 C 字符串并解析路径，指针有效性由 hook 调用方保证。
     let PreparedPath::Ready {
         path_for_decision, ..
     } = (unsafe { prepare_relevant_path(hub, op_name, dirfd, pathname, flags, true) })
@@ -1401,6 +1409,7 @@ where
         return call_original(pathname);
     }
 
+    // SAFETY: pathname 已在上方判空，prepare_relevant_path 会按 NUL 结尾读取该 C 字符串并解析路径，指针有效性由 hook 调用方保证。
     let PreparedPath::Ready {
         path_for_decision, ..
     } = (unsafe { prepare_relevant_path(hub, op_name, dirfd, pathname, mode as i32, false) })
@@ -1717,7 +1726,9 @@ fn confirm_private_owner_sqlite_ftruncate(
         return None;
     };
 
+    // SAFETY: fd 由调用方传入并保证有效，fcntl(F_GETFL) 只读取该 fd 的状态标志，不涉及内存写入。
     let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: c_path 由上方 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效，open 只读取该路径字符串。
     let retry_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if retry_fd < 0 {
         log::warn!(
@@ -1736,9 +1747,11 @@ fn confirm_private_owner_sqlite_ftruncate(
         return None;
     }
 
+    // SAFETY: retry_fd 是上方 open 成功返回的有效文件描述符，ftruncate 只按 length 调整该 fd 对应文件大小。
     let result = unsafe { libc::ftruncate(retry_fd, length) };
     let retry_errno = runtime::current_errno();
     let backend_size = backend_fd_size(retry_fd);
+    // SAFETY: retry_fd 为本函数内 open 得到的有效描述符，此处关闭后不再使用，避免泄漏。
     unsafe {
         libc::close(retry_fd);
     }
@@ -1794,7 +1807,9 @@ fn confirm_private_owner_sqlite_futimens(
         return None;
     };
 
+    // SAFETY: fd 由调用方传入并保证有效，fcntl(F_GETFL) 只读取该 fd 的状态标志，不涉及内存写入。
     let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: c_path 由上方 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效，open 只读取该路径字符串。
     let retry_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if retry_fd < 0 {
         log::warn!(
@@ -1813,8 +1828,10 @@ fn confirm_private_owner_sqlite_futimens(
         return None;
     }
 
+    // SAFETY: retry_fd 是上方 open 成功返回的有效文件描述符，times 由调用方保证为合法的 timespec 数组或空指针，futimens 只读取它更新该 fd 时间戳。
     let result = unsafe { libc::futimens(retry_fd, times) };
     let retry_errno = runtime::current_errno();
+    // SAFETY: retry_fd 为本函数内 open 得到的有效描述符，此处关闭后不再使用，避免泄漏。
     unsafe {
         libc::close(retry_fd);
     }
@@ -1920,10 +1937,12 @@ fn resolve_private_owner_sqlite_backend_for_package(
 
 fn backend_fd_size(fd: c_int) -> i64 {
     let mut statbuf = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: statbuf 提供足够大小的未初始化 libc::stat 空间，fstat 会向该指针写入完整结构；fd 由调用方保证有效。
     let result = unsafe { libc::fstat(fd, statbuf.as_mut_ptr()) };
     if result != 0 {
         return -1;
     }
+    // SAFETY: 上方 fstat 返回 0，说明内核已完整初始化 statbuf，此处 assume_init 读取的是有效数据。
     let statbuf = unsafe { statbuf.assume_init() };
     statbuf.st_size
 }
