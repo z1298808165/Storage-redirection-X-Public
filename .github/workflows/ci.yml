@@ -149,6 +149,7 @@ jobs:
         with:
           toolchain: nightly-2026-07-14
           targets: aarch64-linux-android
+          components: clippy
 
       - name: Run build script tests
         run: |
@@ -182,6 +183,11 @@ jobs:
           key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
           restore-keys: |
             ${{ runner.os }}-cargo-aarch64-
+
+      - name: Run clippy lint gate
+        run: cargo clippy --target aarch64-linux-android --release --lib -- -D warnings
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Build Rust test binaries
         run: cargo test --target aarch64-linux-android --no-run
