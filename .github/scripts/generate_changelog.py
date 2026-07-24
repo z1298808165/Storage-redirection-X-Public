@@ -43,6 +43,9 @@ RUNTIME_VALIDATION_AREAS = {
     "FUSE、挂载和路径映射",
     "重定向策略与调用方识别",
 }
+CONFIG_VALIDATION_AREAS = {
+    "配置解析与模板",
+}
 
 
 @dataclass(frozen=True)
@@ -594,34 +597,16 @@ def classify_release_changes(
             add_unique(sections["changes"], f"{action_area('调整或增强', area)}：{details}")
 
     append_feature_usage(sections, relevant, files, patch)
-    append_contextual_sections(sections, files, relevant, patch)
+    append_contextual_sections(sections, files, relevant)
     for key, values in sections.items():
         sections[key] = limit_section(values, include_commit_details=False)
     return sections
-
-
-def extract_config_keys(patch: str) -> list[str]:
-    added_lines = [
-        line[1:]
-        for line in patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-    source = "\n".join(added_lines) if added_lines else patch
-    keys = set(
-        re.findall(
-            r"['\"`]([a-z][a-z0-9_]*(?:_enabled|_paths|_mappings|_template_id|_filters|_scale|_mode|_config|_version))['\"`]",
-            source,
-        )
-    )
-    noisy = {"version", "format_version"}
-    return sorted(key for key in keys if key not in noisy)[:6]
 
 
 def append_contextual_sections(
     sections: dict[str, list[str]],
     files: list[str],
     commits: list[CommitInfo],
-    patch: str,
 ) -> None:
     has_substantive_change = bool(
         sections["fixed"] or sections["features"] or sections.get("changes")
@@ -639,11 +624,14 @@ def append_contextual_sections(
         runtime_change_areas & RUNTIME_VALIDATION_AREAS
     )
     has_config = any(path.startswith("src/config") or path.startswith("docs/config-fixtures/") for path in files)
+    has_config_behavior_change = bool(
+        runtime_change_areas & CONFIG_VALIDATION_AREAS
+    )
 
     if has_substantive_change and has_runtime and has_runtime_behavior_change:
         add_unique(sections["notes"], "本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径")
 
-    if has_substantive_change and has_config:
+    if has_substantive_change and has_config and has_config_behavior_change:
         add_unique(sections["notes"], "配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则")
 
 
@@ -692,7 +680,7 @@ def classify_changes(files: list[str], commits: list[CommitInfo], patch: str) ->
 
     append_grouped_commit_sections(sections, commits, files, domain_patch)
     append_feature_usage(sections, commits, files, domain_patch)
-    append_contextual_sections(sections, domain_files, commits, domain_patch)
+    append_contextual_sections(sections, domain_files, commits)
 
     for key, values in sections.items():
         sections[key] = limit_section(values)
