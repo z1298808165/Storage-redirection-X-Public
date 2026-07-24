@@ -589,8 +589,8 @@ function Test-PublicDirectoryOwner {
 }
 
 function Wait-Storage {
-    param([string]$Label)
-    $deadline = (Get-Date).AddSeconds(90)
+    param([string]$Label, [int]$TimeoutSeconds = 90)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         & adb -s $Serial shell "sm list-volumes all 2>/dev/null | grep -q 'emulated;0 mounted' && test -d '$RealRoot'" | Out-Null
         if ($LASTEXITCODE -eq 0) { return $true }
@@ -621,9 +621,9 @@ function Test-MediaProviderQueryReady {
 }
 
 function Wait-MediaProviderReady {
-    param([string]$Label)
+    param([string]$Label, [int]$TimeoutSeconds = 120)
 
-    $deadline = (Get-Date).AddSeconds(120)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $uris = @(
         "content://media/external_primary/images/media",
         "content://media/external_primary/video/media",
@@ -649,6 +649,75 @@ function Wait-MediaProviderReady {
         Start-Sleep -Seconds 2
     }
     $script:Failures.Add("$Label media provider not ready")
+    $false
+}
+
+function Get-MediaProviderPid {
+    $output = @(
+        Invoke-Su "for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof `"`$package`" 2>/dev/null || true; done"
+    ) -join "`n"
+    $match = [regex]::Match($output, '(?m)^\s*(\d+)')
+    if ($match.Success) { $match.Groups[1].Value } else { "" }
+}
+
+function Wait-MediaProviderHookReady {
+    param(
+        [string]$Label,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $mediaPid = Get-MediaProviderPid
+        if ($mediaPid) {
+            $hookLines = @(& adb -s $Serial logcat -d --pid $mediaPid -s SRX:I 2>$null) |
+                Select-String -SimpleMatch "java hook open ok"
+            if ($hookLines.Count -gt 0) {
+                Write-Host "media_provider_hook_ready label=$Label pid=$mediaPid"
+                return $true
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    $mediaPid = Get-MediaProviderPid
+    $pidText = if ($mediaPid) { $mediaPid } else { "missing" }
+    Write-Warning "media_provider_hook_timeout label=$Label pid=$pidText"
+    if ($mediaPid) {
+        @(Invoke-Su "grep -E 'storage.redirect.x/zygisk|libsrx_core' '/proc/$mediaPid/maps' 2>/dev/null || true") |
+            ForEach-Object { Write-Host "media_provider_module_map: $_" }
+        @(& adb -s $Serial logcat -d --pid $mediaPid -s SRX:V StorageRedirect:V 2>$null) |
+            Select-Object -Last 80 |
+            ForEach-Object { Write-Host "media_provider_hook_logcat: $_" }
+    }
+    $false
+}
+
+function Restart-MediaProviderWithHookReady {
+    param([string]$Label)
+
+    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
+    $sdk = 0
+    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) {
+        Restart-MediaProvider
+        if (-not (Wait-Storage "$Label-storage")) { return $false }
+        return Wait-MediaProviderReady "$Label-provider"
+    }
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        Invoke-Adb @("logcat", "-c") | Out-Null
+        Restart-MediaProvider
+        if (-not (Wait-Storage "$Label-storage-attempt-$attempt" 30)) { return $false }
+        if (-not (Wait-MediaProviderReady "$Label-provider-attempt-$attempt" 60)) { return $false }
+        if (Wait-MediaProviderHookReady "$Label-attempt-$attempt" 20) {
+            return $true
+        }
+        if ($attempt -lt 2) {
+            Write-Host "media_provider_hook_retry label=$Label attempt=$attempt"
+        }
+    }
+
+    $script:Failures.Add("$Label media provider hook not ready after restart retries")
     $false
 }
 
@@ -1057,9 +1126,7 @@ function Invoke-RegularMonitorScenario {
 
 function Invoke-MediaStoreMonitorScenario {
     param([string]$Scenario)
-    Restart-MediaProvider
-    if (-not (Wait-Storage "scenario-$Scenario-mediastore-storage")) { return $false }
-    if (-not (Wait-MediaProviderReady "scenario-$Scenario-mediastore-provider")) { return $false }
+    if (-not (Restart-MediaProviderWithHookReady "scenario-$Scenario-mediastore")) { return $false }
     $ok = $true
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "media-allow-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot) -and $ok
     if ([int]$Scenario -eq 27) {

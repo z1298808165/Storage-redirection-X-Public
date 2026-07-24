@@ -122,6 +122,47 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
         self.assertIn(":storageRedirectTestApp:assembleDebug", script)
 
+    def test_media_monitor_waits_for_restarted_provider_hook(self) -> None:
+        bash_wait = section(
+            self.bash,
+            "wait_media_provider_hook_ready()",
+            "print_storage_state()",
+        )
+        ps_wait = section(
+            self.powershell,
+            "function Wait-MediaProviderHookReady",
+            "function Clear-Targets",
+        )
+        bash_scenario = section(
+            self.bash,
+            "run_file_monitor_mediastore_scenario()",
+            "app_pid()",
+        )
+        ps_scenario = section(
+            self.powershell,
+            "function Invoke-MediaStoreMonitorScenario",
+            "function Get-AppPid",
+        )
+
+        for source in (bash_wait, ps_wait):
+            self.assertIn("java hook open ok", source)
+            self.assertIn("media_provider_hook_retry", source)
+            self.assertIn("storage.redirect.x/zygisk|libsrx_core", source)
+        self.assertIn('if [ -n "$sdk" ] && [ "$sdk" -le 34 ]', bash_wait)
+        self.assertIn("$sdk -le 34", ps_wait)
+        self.assertIn("for attempt in 1 2", bash_wait)
+        self.assertIn("$attempt -le 2", ps_wait)
+        self.assertIn("restart_media_provider_with_hook_ready", bash_scenario)
+        self.assertIn("Restart-MediaProviderWithHookReady", ps_scenario)
+        self.assertLess(
+            bash_scenario.index("restart_media_provider_with_hook_ready"),
+            bash_scenario.index("run_file_monitor_mediastore_success_case"),
+        )
+        self.assertLess(
+            ps_scenario.index("Restart-MediaProviderWithHookReady"),
+            ps_scenario.index("Invoke-FileMonitorMediaStoreSuccessCase"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
