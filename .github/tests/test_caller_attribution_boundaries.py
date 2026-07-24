@@ -47,7 +47,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         writer = read("src/redirect/writer.rs")
 
         self.assertIn("read_only_check_path_by_caller_paths", policy)
-        self.assertIn("get_caller_read_only_paths(caller_package, caller_uid)", writer)
+        self.assertIn("CallerRealPathKind::ReadOnly", writer)
         self.assertIn("inferred_uid != *effective_caller_uid", writer)
         self.assertIn("policy::is_system_writer_package(effective_caller_package)", writer)
 
