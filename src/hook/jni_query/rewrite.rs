@@ -363,12 +363,11 @@ fn resolve_media_placeholder_write_caller_context(
 ) -> (String, i32) {
     let user_id = platform::user_id_from_uid(caller_uid);
     let system_writer = is_system_writer_uid(caller_uid);
-    if system_writer {
-        if let Some(context) =
+    if system_writer
+        && let Some(context) =
             resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
-        {
-            return context;
-        }
+    {
+        return context;
     }
 
     let context = resolve_storage_caller_context(caller_uid, path_text);

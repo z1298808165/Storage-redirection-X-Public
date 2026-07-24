@@ -648,7 +648,7 @@ impl FuseRedirectFs {
             fix_path_metadata(
                 Path::new(parent.as_ref()),
                 self.policy.uid,
-                MAPPED_DIR_MODE as u32,
+                MAPPED_DIR_MODE,
                 backend.is_shared_public_backend,
                 true,
             );
@@ -790,7 +790,7 @@ impl Filesystem for FuseRedirectFs {
             }
         };
 
-        for (index, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+        for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
             if reply.add(entry.ino, (index + 1) as u64, entry.kind, &entry.name) {
                 break;
             }
@@ -2859,8 +2859,5 @@ fn is_android_app_private_relative_path(relative: &str) -> bool {
     if parts.next() != Some("Android") {
         return false;
     }
-    match parts.next() {
-        Some("data" | "media" | "obb") => true,
-        _ => false,
-    }
+    matches!(parts.next(), Some("data" | "media" | "obb"))
 }

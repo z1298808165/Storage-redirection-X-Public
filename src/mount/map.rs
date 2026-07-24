@@ -78,6 +78,8 @@ impl MountPlanner {
         resolved
     }
 
+    // quality-allow(lint-suppression): 该方法需同时接收多组独立路径集合与映射选项，拆分反而降低可读性，故保留当前参数数量。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_resolved_path_mappings(
         &self,
         resolved_mappings: &[PathMapping],

@@ -73,7 +73,7 @@ impl MountPlanner {
                 continue;
             }
             detach_mount_if_present(real_storage_anchor);
-            if self.bind_mount(&source_candidate, &real_storage_anchor, true) {
+            if self.bind_mount(&source_candidate, real_storage_anchor, true) {
                 log::info!(
                     "real storage anchored visible {} -> {}",
                     source_candidate,

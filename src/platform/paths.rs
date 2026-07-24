@@ -23,17 +23,16 @@ impl PathNormalizeCache {
     }
 
     fn insert(&mut self, path: String, normalized: String) {
-        if self.entries.contains_key(&path) {
-            self.entries.insert(path, normalized);
+        if self.entries.insert(path.clone(), normalized).is_some() {
+            // 键已存在，仅原地更新值，不改变 LRU 顺序。
             return;
         }
-        if self.entries.len() >= PATH_CACHE_MAX_SIZE
+        if self.entries.len() > PATH_CACHE_MAX_SIZE
             && let Some(oldest) = self.order.pop_front()
         {
             self.entries.remove(&oldest);
         }
-        self.order.push_back(path.clone());
-        self.entries.insert(path, normalized);
+        self.order.push_back(path);
     }
 }
 

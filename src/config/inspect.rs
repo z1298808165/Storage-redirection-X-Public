@@ -45,17 +45,16 @@ impl MonitorPathMatchCache {
     }
 
     fn insert(&mut self, key: String, value: bool) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key, value);
+        if self.entries.insert(key.clone(), value).is_some() {
+            // 键已存在，仅原地更新值，不改变 LRU 顺序。
             return;
         }
-        if self.entries.len() >= MONITOR_PATH_CACHE_SIZE
+        if self.entries.len() > MONITOR_PATH_CACHE_SIZE
             && let Some(oldest) = self.order.pop_front()
         {
             self.entries.remove(&oldest);
         }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value);
+        self.order.push_back(key);
     }
 }
 

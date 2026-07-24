@@ -915,10 +915,7 @@ fn is_android_app_private_relative_path(relative: &str) -> bool {
     if parts.next() != Some("Android") {
         return false;
     }
-    match parts.next() {
-        Some("data" | "media" | "obb") => true,
-        _ => false,
-    }
+    matches!(parts.next(), Some("data" | "media" | "obb"))
 }
 
 fn fix_real_public_directory_metadata(path: &str) {
