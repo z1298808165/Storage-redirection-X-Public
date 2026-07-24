@@ -289,7 +289,6 @@ impl AuditTrail {
             source,
             confidence,
         );
-        let result = (normalized_for_hint.clone(), package_for_hint.clone());
         drop(state);
         source_hint::remember_public_path_caller_hint(
             &normalized_for_hint,
@@ -298,7 +297,7 @@ impl AuditTrail {
             source,
             confidence,
         );
-        Some(result)
+        Some((normalized_for_hint, package_for_hint))
     }
 
     pub fn get_log_fd(&self) -> i32 {
