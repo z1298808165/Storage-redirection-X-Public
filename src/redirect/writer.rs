@@ -20,20 +20,28 @@ pub fn storage_to_data_media_path(path: &str) -> String {
 }
 
 pub fn get_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMapping> {
+    with_caller_mappings(caller_package, caller_uid, |mappings| mappings.to_vec())
+}
+
+// 借用线程本地缓存中的映射，避免命中缓存时克隆整个 Vec。
+fn with_caller_mappings<R>(
+    caller_package: &str,
+    caller_uid: i32,
+    f: impl FnOnce(&[PathMapping]) -> R,
+) -> R {
     CALLER_MAPPING_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let config_version = SettingsHub::instance().config_version();
-        if cache.package_name == caller_package
-            && cache.caller_uid == caller_uid
-            && cache.config_version == config_version
+        if cache.package_name != caller_package
+            || cache.caller_uid != caller_uid
+            || cache.config_version != config_version
         {
-            return cache.mappings.clone();
+            cache.package_name = caller_package.to_string();
+            cache.caller_uid = caller_uid;
+            cache.config_version = config_version;
+            cache.mappings = build_caller_mappings(caller_package, caller_uid);
         }
-        cache.package_name = caller_package.to_string();
-        cache.caller_uid = caller_uid;
-        cache.config_version = config_version;
-        cache.mappings = build_caller_mappings(caller_package, caller_uid);
-        cache.mappings.clone()
+        f(&cache.mappings)
     })
 }
 
@@ -96,10 +104,11 @@ pub fn is_path_allowed_by_caller_real_paths(
         return false;
     }
 
-    caller_path_list_matches(
-        &get_caller_allowed_real_paths(caller_package, caller_uid),
-        resolved_path,
-        false,
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::Allowed,
+        |paths| caller_path_list_matches(paths, resolved_path, false),
     )
 }
 
@@ -112,10 +121,11 @@ pub fn is_path_excluded_by_caller_real_paths(
         return false;
     }
 
-    caller_path_list_matches(
-        &get_caller_excluded_real_paths(caller_package, caller_uid),
-        resolved_path,
-        false,
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::Excluded,
+        |paths| caller_path_list_matches(paths, resolved_path, false),
     )
 }
 
@@ -128,10 +138,11 @@ pub fn is_path_sandboxed_by_caller_paths(
         return false;
     }
 
-    caller_path_list_matches(
-        &get_caller_sandboxed_paths(caller_package, caller_uid),
-        resolved_path,
-        true,
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::Sandboxed,
+        |paths| caller_path_list_matches(paths, resolved_path, true),
     )
 }
 
@@ -144,14 +155,16 @@ pub fn is_path_read_only_by_caller_paths(
         return false;
     }
 
-    caller_path_list_matches(
-        &get_caller_read_only_paths(caller_package, caller_uid),
-        resolved_path,
-        true,
-    ) && !caller_path_list_matches(
-        &get_caller_read_only_excluded_paths(caller_package, caller_uid),
-        resolved_path,
-        true,
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::ReadOnly,
+        |paths| caller_path_list_matches(paths, resolved_path, true),
+    ) && with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::ReadOnlyExcluded,
+        |paths| !caller_path_list_matches(paths, resolved_path, true),
     )
 }
 
@@ -164,10 +177,11 @@ pub fn is_path_read_only_excluded_by_caller_paths(
         return false;
     }
 
-    caller_path_list_matches(
-        &get_caller_read_only_excluded_paths(caller_package, caller_uid),
-        resolved_path,
-        true,
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::ReadOnlyExcluded,
+        |paths| caller_path_list_matches(paths, resolved_path, true),
     )
 }
 
@@ -184,8 +198,9 @@ pub fn read_only_check_path_by_caller_paths(
     caller_package: &str,
     caller_uid: i32,
 ) -> String {
-    let mappings = get_caller_mappings(caller_package, caller_uid);
-    let mapped_path = map_path_by_caller_mappings(resolved_path, &mappings);
+    let mapped_path = with_caller_mappings(caller_package, caller_uid, |mappings| {
+        map_path_by_caller_mappings(resolved_path, mappings)
+    });
     if !mapped_path.is_empty() && mapped_path != resolved_path {
         if is_caller_path_read_only(&mapped_path, caller_package, caller_uid) {
             return mapped_path;
@@ -555,35 +570,13 @@ fn get_caller_default_redirect_target(caller_package: &str, caller_uid: i32) -> 
     })
 }
 
-fn get_caller_allowed_real_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    get_cached_caller_real_paths(caller_package, caller_uid, CallerRealPathKind::Allowed)
-}
-
-fn get_caller_excluded_real_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    get_cached_caller_real_paths(caller_package, caller_uid, CallerRealPathKind::Excluded)
-}
-
-fn get_caller_sandboxed_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    get_cached_caller_real_paths(caller_package, caller_uid, CallerRealPathKind::Sandboxed)
-}
-
-fn get_caller_read_only_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    get_cached_caller_real_paths(caller_package, caller_uid, CallerRealPathKind::ReadOnly)
-}
-
-fn get_caller_read_only_excluded_paths(caller_package: &str, caller_uid: i32) -> Vec<String> {
-    get_cached_caller_real_paths(
-        caller_package,
-        caller_uid,
-        CallerRealPathKind::ReadOnlyExcluded,
-    )
-}
-
-fn get_cached_caller_real_paths(
+//借用线程本地缓存中的路径列表，避免命中缓存时克隆整个 Vec。
+fn with_cached_caller_real_paths<R>(
     caller_package: &str,
     caller_uid: i32,
     kind: CallerRealPathKind,
-) -> Vec<String> {
+    f: impl FnOnce(&[String]) -> R,
+) -> R {
     CALLER_ALLOWED_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let config_version = SettingsHub::instance().config_version();
@@ -593,7 +586,7 @@ fn get_cached_caller_real_paths(
             refresh_caller_real_paths_cache(&mut cache, caller_package, caller_uid);
         }
 
-        cache.paths(kind).to_vec()
+        f(cache.paths(kind))
     })
 }
 

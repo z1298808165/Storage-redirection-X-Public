@@ -81,7 +81,7 @@ impl SystemWriterTrace<'_> {
             mapping_ms: timing.mapping_ms,
             allow_ms: timing.allow_ms,
             fallback_ms: timing.fallback_ms,
-            total_ms: paths::monotonic_ms().saturating_sub(self.perf_started_ms),
+            perf_started_ms: self.perf_started_ms,
             decision,
         });
     }
@@ -157,7 +157,7 @@ impl SystemWriterPolicyTrace<'_> {
             mapping_ms: timing.mapping_ms,
             allow_ms: timing.allow_ms,
             fallback_ms: timing.fallback_ms,
-            total_ms: paths::monotonic_ms().saturating_sub(self.perf_started_ms),
+            perf_started_ms: self.perf_started_ms,
             decision: &decision,
         });
         thumbnail_diag::log_system_writer_decision(&ThumbnailDecisionDiag {
@@ -188,7 +188,9 @@ pub(super) struct WriterRedirectPerf<'a> {
     pub(super) mapping_ms: i64,
     pub(super) allow_ms: i64,
     pub(super) fallback_ms: i64,
-    pub(super) total_ms: i64,
+    // 保存起始时间戳而非预计算的 total_ms，将 clock_gettime 推迟到 gate 内部，
+    // 避免非采样路径上的无效系统调用。
+    pub(super) perf_started_ms: i64,
     pub(super) decision: &'a RedirectDecision,
 }
 
@@ -219,7 +221,9 @@ pub(super) fn log_redirect_perf(
 }
 
 pub(super) fn log_writer_redirect_perf(perf: &WriterRedirectPerf<'_>) {
-    if !should_log_redirect_perf(perf.total_ms) {
+    // 在 gate 内部计算耗时，避免非采样路径上的 clock_gettime 调用。
+    let total_ms = paths::monotonic_ms().saturating_sub(perf.perf_started_ms);
+    if !should_log_redirect_perf(total_ms) {
         return;
     }
     log::info!(
@@ -237,7 +241,7 @@ pub(super) fn log_writer_redirect_perf(perf: &WriterRedirectPerf<'_>) {
         perf.mapping_ms,
         perf.allow_ms,
         perf.fallback_ms,
-        perf.total_ms
+        total_ms
     );
 }
 

@@ -96,7 +96,7 @@ fn process_provider_passthrough_redirect(
         mapping_ms: 0,
         allow_ms: 0,
         fallback_ms: 0,
-        total_ms: paths::monotonic_ms().saturating_sub(perf_started_ms),
+        perf_started_ms,
         decision: &decision,
     });
     decision
