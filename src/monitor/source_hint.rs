@@ -43,6 +43,30 @@ static RECENT_PRIVATE_OWNER_HINT: Lazy<Mutex<VecDeque<PrivateOwnerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
 static RECENT_PATH_CALLER_HINT: Lazy<Mutex<VecDeque<PathCallerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
+static RECENT_SOURCE_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PrivateOwnerHint>>> =
+    Lazy::new(|| Mutex::new(CachedHintFile::default()));
+static RECENT_PATH_CALLER_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PathCallerHint>>> =
+    Lazy::new(|| Mutex::new(CachedHintFile::default()));
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HintFileFingerprint {
+    length: u64,
+    modified_ns: u128,
+}
+
+struct CachedHintFile<T> {
+    fingerprint: Option<HintFileFingerprint>,
+    values: Vec<T>,
+}
+
+impl<T> Default for CachedHintFile<T> {
+    fn default() -> Self {
+        Self {
+            fingerprint: None,
+            values: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecentPrivateOwnerIdentity {
@@ -973,6 +997,7 @@ fn write_hint_file(hints: &[PrivateOwnerHint]) {
         );
     }
     chmod_hint_file(path);
+    invalidate_cached_hint_file(&RECENT_SOURCE_HINT_FILE_CACHE);
 }
 
 fn write_path_hint_file(hints: &[PathCallerHint]) {
@@ -998,30 +1023,80 @@ fn write_path_hint_file(hints: &[PathCallerHint]) {
         );
     }
     chmod_hint_file(path);
+    invalidate_cached_hint_file(&RECENT_PATH_CALLER_HINT_FILE_CACHE);
 }
 
 fn read_hint_file() -> Vec<PrivateOwnerHint> {
-    std::fs::read_to_string(module_paths::RECENT_SOURCE_HINT_FILE)
-        .ok()
-        .map(|content| {
+    read_cached_hint_file(
+        std::path::Path::new(module_paths::RECENT_SOURCE_HINT_FILE),
+        &RECENT_SOURCE_HINT_FILE_CACHE,
+        |content| {
             content
                 .lines()
                 .filter_map(|line| parse_hint_line(line.trim()))
                 .collect()
-        })
-        .unwrap_or_default()
+        },
+    )
 }
 
 fn read_path_hint_file() -> Vec<PathCallerHint> {
-    std::fs::read_to_string(module_paths::RECENT_PATH_CALLER_HINT_FILE)
-        .ok()
-        .map(|content| {
+    read_cached_hint_file(
+        std::path::Path::new(module_paths::RECENT_PATH_CALLER_HINT_FILE),
+        &RECENT_PATH_CALLER_HINT_FILE_CACHE,
+        |content| {
             content
                 .lines()
                 .filter_map(|line| parse_path_hint_line(line.trim()))
                 .collect()
-        })
-        .unwrap_or_default()
+        },
+    )
+}
+
+fn read_cached_hint_file<T: Clone>(
+    path: &std::path::Path,
+    cache: &Mutex<CachedHintFile<T>>,
+    parse: impl FnOnce(&str) -> Vec<T>,
+) -> Vec<T> {
+    let fingerprint = hint_file_fingerprint(path);
+    let Ok(mut cached) = cache.lock() else {
+        return std::fs::read_to_string(path)
+            .ok()
+            .map(|content| parse(&content))
+            .unwrap_or_default();
+    };
+
+    if cached.fingerprint == fingerprint {
+        return cached.values.clone();
+    }
+
+    let values = std::fs::read_to_string(path)
+        .ok()
+        .map(|content| parse(&content))
+        .unwrap_or_default();
+    cached.fingerprint = fingerprint;
+    cached.values = values.clone();
+    values
+}
+
+fn invalidate_cached_hint_file<T>(cache: &Mutex<CachedHintFile<T>>) {
+    if let Ok(mut cached) = cache.lock() {
+        cached.fingerprint = None;
+        cached.values.clear();
+    }
+}
+
+fn hint_file_fingerprint(path: &std::path::Path) -> Option<HintFileFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(HintFileFingerprint {
+        length: metadata.len(),
+        modified_ns,
+    })
 }
 
 fn parse_hint_line(line: &str) -> Option<PrivateOwnerHint> {
