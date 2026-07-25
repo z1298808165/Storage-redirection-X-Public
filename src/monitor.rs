@@ -34,6 +34,7 @@ const RECENT_CALLER_PACKAGE_WINDOW_MS: i64 = 2500;
 const QUERY_ACCESS_WINDOW_MS: i64 = 8_000;
 const MAX_RECENT_EVENTS: usize = 512;
 const MAX_QUERY_ACCESS_PATHS: usize = 1024;
+const QUERY_ACCESS_QUEUE_COMPACTION_LIMIT: usize = MAX_QUERY_ACCESS_PATHS * 2;
 
 #[derive(Copy, Clone)]
 pub enum OpKind {
@@ -59,7 +60,8 @@ struct AuditState {
     recent_event_ms: HashMap<String, i64>,
     recent_event_order: VecDeque<String>,
     query_access_paths: HashMap<String, QueryAccessRecord>,
-    query_access_order: VecDeque<String>,
+    query_access_order: VecDeque<(String, u64)>,
+    next_query_access_generation: u64,
 }
 
 #[derive(Clone)]
@@ -69,6 +71,7 @@ struct QueryAccessRecord {
     updated_ms: i64,
     source: &'static str,
     confidence: &'static str,
+    generation: u64,
 }
 
 struct MonitorStateSnapshot {
@@ -89,6 +92,7 @@ impl AuditState {
             recent_event_order: VecDeque::new(),
             query_access_paths: HashMap::new(),
             query_access_order: VecDeque::new(),
+            next_query_access_generation: 0,
         }
     }
 }
@@ -113,6 +117,7 @@ impl AuditTrail {
         state.recent_event_order.clear();
         state.query_access_paths.clear();
         state.query_access_order.clear();
+        state.next_query_access_generation = 0;
 
         if uid >= 0 && policy::is_shared_uid_process(uid) {
             state.shared_uid_packages = policy::get_shared_uid_packages_string(uid);
@@ -951,12 +956,11 @@ fn remember_query_access_locked(
     confidence: &'static str,
 ) {
     let now_ms = monotonic_ms();
-    if state.query_access_paths.contains_key(&normalized_path) {
-        state
-            .query_access_order
-            .retain(|path| path != &normalized_path);
-    }
-    state.query_access_order.push_back(normalized_path.clone());
+    state.next_query_access_generation = state.next_query_access_generation.wrapping_add(1);
+    let generation = state.next_query_access_generation;
+    state
+        .query_access_order
+        .push_back((normalized_path.clone(), generation));
     state.query_access_paths.insert(
         normalized_path,
         QueryAccessRecord {
@@ -965,6 +969,7 @@ fn remember_query_access_locked(
             updated_ms: now_ms,
             source,
             confidence,
+            generation,
         },
     );
     prune_query_access_locked(state, now_ms);
@@ -1048,19 +1053,32 @@ fn media_store_pending_display_path(normalized_path: &str) -> Option<String> {
 }
 
 fn prune_query_access_locked(state: &mut AuditState, now_ms: i64) {
-    while let Some(oldest) = state.query_access_order.front().cloned() {
-        let should_remove = match state.query_access_paths.get(&oldest) {
-            Some(record) => {
-                now_ms - record.updated_ms > QUERY_ACCESS_WINDOW_MS
-                    || state.query_access_order.len() > MAX_QUERY_ACCESS_PATHS
-            }
-            None => true,
+    while let Some((oldest, generation)) = state.query_access_order.front().cloned() {
+        let Some(record) = state.query_access_paths.get(&oldest) else {
+            state.query_access_order.pop_front();
+            continue;
         };
+        if record.generation != generation {
+            state.query_access_order.pop_front();
+            continue;
+        }
+
+        let should_remove = now_ms - record.updated_ms > QUERY_ACCESS_WINDOW_MS
+            || state.query_access_paths.len() > MAX_QUERY_ACCESS_PATHS;
         if !should_remove {
             break;
         }
         state.query_access_order.pop_front();
         state.query_access_paths.remove(&oldest);
+    }
+
+    if state.query_access_order.len() > QUERY_ACCESS_QUEUE_COMPACTION_LIMIT {
+        state.query_access_order.retain(|(path, generation)| {
+            state
+                .query_access_paths
+                .get(path)
+                .is_some_and(|record| record.generation == *generation)
+        });
     }
 }
 
