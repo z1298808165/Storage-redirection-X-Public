@@ -1184,14 +1184,7 @@ fn relative_path_from_public_storage_path(path: &str, user_id: i32) -> String {
 }
 
 fn normalize_relative_path(path: &str) -> String {
-    let mut value = path.trim().replace('\\', "/");
-    while value.starts_with('/') {
-        value.remove(0);
-    }
-    while value.ends_with('/') {
-        value.pop();
-    }
-    value
+    path.trim().replace('\\', "/").trim_matches('/').to_string()
 }
 
 fn relative_path_is_under(relative_path: &str, root: &str) -> bool {
