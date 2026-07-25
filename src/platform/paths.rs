@@ -44,6 +44,9 @@ pub fn normalize(path: &str) -> String {
     if path.is_empty() {
         return path.to_string();
     }
+    if path.starts_with(STORAGE_EMULATED_PREFIX) && !path.ends_with('/') && !path.contains("//") {
+        return path.to_string();
+    }
 
     // 优化：对于常用路径先查缓存
     if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock()
