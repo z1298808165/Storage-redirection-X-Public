@@ -84,6 +84,7 @@ impl UserRedirectEnablement {
 pub struct MonitorFilterConfig {
     // 配置载入后编译为带用户通配符的绝对匹配模式。
     pub excluded_paths: Vec<String>,
+    // 配置载入后统一为去空白的小写匹配模式。
     pub excluded_operations: Vec<String>,
 }
 

@@ -376,9 +376,8 @@ fn has_monitor_path_wildcard(pattern: &str) -> bool {
 }
 
 fn monitor_operation_filter_matches(rule: &str, operation: &str) -> bool {
-    let pattern = rule.trim().to_lowercase();
-    if pattern.is_empty() || pattern.contains('/') || operation.is_empty() {
+    if rule.is_empty() || operation.is_empty() {
         return false;
     }
-    crate::platform::paths::matches(&pattern, operation, false)
+    crate::platform::paths::matches(rule, operation, false)
 }

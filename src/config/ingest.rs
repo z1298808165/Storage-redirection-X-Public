@@ -101,7 +101,16 @@ fn normalize_monitor_operation_defaults(operations: Vec<String>) -> Vec<String> 
     if is_legacy_default_monitor_operation_filter(&operations) {
         return MonitorFilterConfig::default().excluded_operations;
     }
-    operations
+    let mut normalized: Vec<String> = operations
+        .into_iter()
+        .filter_map(|value| {
+            let value = value.trim().to_lowercase();
+            (!value.is_empty() && !value.contains('/')).then_some(value)
+        })
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn is_legacy_default_monitor_operation_filter(operations: &[String]) -> bool {
