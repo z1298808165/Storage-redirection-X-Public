@@ -1231,12 +1231,11 @@ fn operation_name_from_extra(kind: OpKind, extra: &str) -> String {
     op_type_to_text(kind).to_lowercase()
 }
 
-fn duplicate_event_operation_key(kind: OpKind, operation_name: &str) -> String {
-    let op = operation_name.to_lowercase();
-    if matches!(kind, OpKind::Open) && is_open_write_or_create_operation(&op) {
-        "open:write".to_string()
+fn duplicate_event_operation_key(kind: OpKind, operation_name: &str) -> &str {
+    if matches!(kind, OpKind::Open) && is_open_write_or_create_operation(operation_name) {
+        "open:write"
     } else {
-        op
+        operation_name
     }
 }
 
