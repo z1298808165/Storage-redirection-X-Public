@@ -27,10 +27,16 @@ pub unsafe fn prepare_relevant_path<'a>(
     }
 
     let is_relative = !path_text.starts_with('/');
-    let mut path_for_decision: Cow<'a, str> = Cow::Owned(path_text.clone());
+    let mut path_for_decision: Cow<'a, str> = Cow::Owned(path_text);
     if is_relative {
-        diagnostic::log_relative_path_bypass(hub, op_name, dirfd, &path_text, log_flags);
-        let resolved = path_utils::resolve_path_for_dirfd(dirfd, &path_text);
+        diagnostic::log_relative_path_bypass(
+            hub,
+            op_name,
+            dirfd,
+            path_for_decision.as_ref(),
+            log_flags,
+        );
+        let resolved = path_utils::resolve_path_for_dirfd(dirfd, path_for_decision.as_ref());
         if resolved.is_empty() || !path_utils::is_relevant_storage_path(hub, &resolved) {
             return PreparedPath::Bypass;
         }
