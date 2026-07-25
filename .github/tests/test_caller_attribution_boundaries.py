@@ -53,7 +53,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
 
     def test_private_hint_inference_reuses_one_lazy_package_snapshot(self) -> None:
         source = read("src/monitor/source_hint.rs")
-        infer = source[source.index("fn infer_from_hints(") : source.index("fn infer_from_path_hints(")]
+        infer = source[source.index("fn infer_from_hints") : source.index("fn infer_from_path_hints")]
         matcher = source[
             source.index("fn resolve_matching_hint(") : source.index("fn private_hint_window_ms(")
         ]
