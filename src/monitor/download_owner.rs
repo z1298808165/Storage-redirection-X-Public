@@ -35,8 +35,9 @@ impl DownloadOwnerCache {
     fn get(&mut self, key: &str, now_ms: i64) -> Option<Option<String>> {
         let entry = self.values.get(key)?;
 
-        if entry.expires_at_ms < now_ms {
+        if entry.expires_at_ms <= now_ms {
             self.values.remove(key);
+            self.order.retain(|queued_key| queued_key != key);
             return None;
         }
 
@@ -47,9 +48,8 @@ impl DownloadOwnerCache {
     }
 
     fn put(&mut self, key: String, package_name: Option<String>, now_ms: i64) {
-        if !self.values.contains_key(&key) {
-            self.order.push_back(key.clone());
-        }
+        self.order.retain(|queued_key| queued_key != &key);
+        self.order.push_back(key.clone());
 
         self.values.insert(
             key,
