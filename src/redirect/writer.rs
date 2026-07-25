@@ -215,8 +215,15 @@ pub fn read_only_check_path_by_caller_paths(
 }
 
 pub(crate) fn is_caller_path_read_only(path: &str, caller_package: &str, caller_uid: i32) -> bool {
-    !is_path_excluded_by_caller_real_paths(path, caller_package, caller_uid)
-        && is_path_read_only_by_caller_paths(path, caller_package, caller_uid)
+    if path.is_empty() {
+        return false;
+    }
+
+    with_cached_caller_allowed_cache(caller_package, caller_uid, |cache| {
+        !caller_path_list_matches(&cache.excluded_real_paths, path, false)
+            && caller_path_list_matches(&cache.read_only_paths, path, true)
+            && !caller_path_list_matches(&cache.read_only_excluded_paths, path, true)
+    })
 }
 
 fn caller_path_list_matches(
@@ -577,6 +584,14 @@ fn with_cached_caller_real_paths<R>(
     kind: CallerRealPathKind,
     f: impl FnOnce(&[String]) -> R,
 ) -> R {
+    with_cached_caller_allowed_cache(caller_package, caller_uid, |cache| f(cache.paths(kind)))
+}
+
+fn with_cached_caller_allowed_cache<R>(
+    caller_package: &str,
+    caller_uid: i32,
+    f: impl FnOnce(&CallerAllowedCache) -> R,
+) -> R {
     CALLER_ALLOWED_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let config_version = SettingsHub::instance().config_version();
@@ -586,7 +601,7 @@ fn with_cached_caller_real_paths<R>(
             refresh_caller_real_paths_cache(&mut cache, caller_package, caller_uid);
         }
 
-        f(cache.paths(kind))
+        f(&cache)
     })
 }
 
