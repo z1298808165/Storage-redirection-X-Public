@@ -1189,7 +1189,10 @@ fn normalize_relative_path(path: &str) -> String {
 
 fn relative_path_is_under(relative_path: &str, root: &str) -> bool {
     let relative = normalize_relative_path(relative_path);
-    relative == root || relative.starts_with(&format!("{}/", root))
+    relative == root
+        || (relative.len() > root.len()
+            && relative.starts_with(root)
+            && relative.as_bytes().get(root.len()) == Some(&b'/'))
 }
 
 fn download_relative_suffix(relative_path: &str) -> &str {
@@ -1204,7 +1207,11 @@ fn download_relative_suffix(relative_path: &str) -> &str {
 fn relative_ends_with_suffix(relative_path: &str, suffix: &str) -> bool {
     let relative = relative_path.trim_matches('/');
     let suffix = suffix.trim_matches('/');
-    !suffix.is_empty() && (relative == suffix || relative.ends_with(&format!("/{}", suffix)))
+    !suffix.is_empty()
+        && (relative == suffix
+            || (relative.len() > suffix.len()
+                && relative.ends_with(suffix)
+                && relative.as_bytes().get(relative.len() - suffix.len() - 1) == Some(&b'/')))
 }
 
 fn split_relative_parent_and_name(relative_path: &str) -> Option<(String, String)> {
