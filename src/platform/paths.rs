@@ -44,7 +44,7 @@ pub fn normalize(path: &str) -> String {
     if path.is_empty() {
         return path.to_string();
     }
-    if path.starts_with(STORAGE_EMULATED_PREFIX) && !path.ends_with('/') && !path.contains("//") {
+    if !path.ends_with('/') && !path.contains("//") && !has_potential_storage_alias(path) {
         return path.to_string();
     }
 
@@ -81,6 +81,13 @@ pub fn normalize(path: &str) -> String {
     }
 
     normalized
+}
+
+fn has_potential_storage_alias(path: &str) -> bool {
+    path.starts_with("/sdcard")
+        || path.starts_with("/storage/self/primary")
+        || path.starts_with("/mnt/")
+        || path.starts_with(DATA_MEDIA_PREFIX)
 }
 
 fn resolve_storage_alias(path: String) -> String {
