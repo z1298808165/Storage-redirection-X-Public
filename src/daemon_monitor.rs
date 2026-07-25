@@ -645,8 +645,13 @@ impl RegularAppMonitor {
         self.recent_event_ms.insert(event_key.clone(), now_ms);
         self.recent_event_order.push_back(event_key);
         if inotify::is_created_or_moved_to(mask) {
-            self.recent_event_ms.insert(create_key.clone(), now_ms);
-            self.recent_event_order.push_back(create_key);
+            if self
+                .recent_event_ms
+                .insert(create_key.clone(), now_ms)
+                .is_none()
+            {
+                self.recent_event_order.push_back(create_key);
+            }
         }
         self.trim_recent_events();
         false
