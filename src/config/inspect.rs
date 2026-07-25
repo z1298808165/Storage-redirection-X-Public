@@ -356,17 +356,16 @@ fn should_filter_monitor_record_locked_for_version(
 }
 
 fn monitor_path_filter_matches(rule: &str, path: &str) -> bool {
-    let pattern = normalize_monitor_path_filter_rule(rule);
-    if pattern.is_empty() || path.is_empty() {
+    if rule.is_empty() || path.is_empty() {
         return false;
     }
-    if !has_monitor_path_wildcard(&pattern) {
-        return crate::platform::paths::is_same_or_child(path, &pattern);
+    if !has_monitor_path_wildcard(rule) {
+        return crate::platform::paths::is_same_or_child(path, rule);
     }
-    if crate::platform::paths::matches(&pattern, path, true) {
+    if crate::platform::paths::matches(rule, path, true) {
         return true;
     }
-    if let Some(base) = pattern.strip_suffix("/**") {
+    if let Some(base) = rule.strip_suffix("/**") {
         return crate::platform::paths::matches(base, path, true);
     }
     false
@@ -374,62 +373,6 @@ fn monitor_path_filter_matches(rule: &str, path: &str) -> bool {
 
 fn has_monitor_path_wildcard(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?')
-}
-
-fn normalize_monitor_path_filter_rule(rule: &str) -> String {
-    let collapsed = collapse_monitor_filter_path_slashes(&rule.trim().replace('\\', "/"));
-    if collapsed.is_empty()
-        || collapsed.contains('\0')
-        || collapsed.len() > 512
-        || collapsed.starts_with('!')
-    {
-        return String::new();
-    }
-    if has_monitor_filter_storage_root_prefix(collapsed.trim_start_matches('/')) {
-        return String::new();
-    }
-    let relative = collapsed.trim_matches('/');
-    if relative.is_empty()
-        || relative
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
-        || relative
-            .chars()
-            .any(|ch| matches!(ch, '<' | '>' | ':' | '"' | '|' | '\u{0000}'..='\u{001f}'))
-    {
-        return String::new();
-    }
-    let relative = crate::platform::paths::normalize(relative);
-    format!("/storage/emulated/*/{}", relative.trim_matches('/'))
-}
-
-fn collapse_monitor_filter_path_slashes(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut last_was_slash = false;
-    for ch in value.chars() {
-        if ch == '/' {
-            if !last_was_slash {
-                out.push(ch);
-            }
-            last_was_slash = true;
-        } else {
-            out.push(ch);
-            last_was_slash = false;
-        }
-    }
-    out
-}
-
-fn has_monitor_filter_storage_root_prefix(path: &str) -> bool {
-    let lower = path.trim_start_matches('/').to_ascii_lowercase();
-    lower == "sdcard"
-        || lower.starts_with("sdcard/")
-        || lower == "storage/emulated"
-        || lower.starts_with("storage/emulated/")
-        || lower == "storage/self/primary"
-        || lower.starts_with("storage/self/primary/")
-        || lower == "data/media"
-        || lower.starts_with("data/media/")
 }
 
 fn monitor_operation_filter_matches(rule: &str, operation: &str) -> bool {

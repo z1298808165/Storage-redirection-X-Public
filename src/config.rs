@@ -82,6 +82,7 @@ impl UserRedirectEnablement {
 
 #[derive(Clone)]
 pub struct MonitorFilterConfig {
+    // 配置载入后编译为带用户通配符的绝对匹配模式。
     pub excluded_paths: Vec<String>,
     pub excluded_operations: Vec<String>,
 }
@@ -89,7 +90,7 @@ pub struct MonitorFilterConfig {
 impl MonitorFilterConfig {
     fn default() -> Self {
         Self {
-            excluded_paths: vec!["Android/data".to_string()],
+            excluded_paths: vec!["/storage/emulated/*/Android/data".to_string()],
             excluded_operations: vec![
                 "open:read".to_string(),
                 "open*:read".to_string(),

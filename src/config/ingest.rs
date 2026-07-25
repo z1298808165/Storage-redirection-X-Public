@@ -172,7 +172,7 @@ fn parse_monitor_path_filter_list(value: Option<&Value>) -> Vec<String> {
 
 fn push_monitor_path_filter_pattern(out: &mut Vec<String>, raw: &str) {
     if let Some(value) = sanitize_monitor_path_filter(raw, true) {
-        out.push(value);
+        out.push(format!("/storage/emulated/*/{}", value));
     }
 }
 
