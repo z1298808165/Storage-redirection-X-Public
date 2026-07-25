@@ -73,12 +73,7 @@ pub fn normalize(path: &str) -> String {
         result.pop();
     }
 
-    let result = resolve_sdcard_alias(&result);
-    let result = resolve_self_primary_alias(&result);
-    let result = resolve_mnt_user_primary_alias(&result);
-    let result = resolve_mnt_runtime_alias(&result);
-    let result = resolve_mnt_emulated_alias(&result);
-    let normalized = resolve_data_media_alias(&result);
+    let normalized = resolve_storage_alias(result);
 
     // 优化：缓存规范化结果
     if let Ok(mut cache) = PATH_NORMALIZE_CACHE.try_lock() {
@@ -86,6 +81,35 @@ pub fn normalize(path: &str) -> String {
     }
 
     normalized
+}
+
+fn resolve_storage_alias(path: String) -> String {
+    if path.starts_with("/sdcard") {
+        return resolve_sdcard_alias(&path);
+    }
+    if path.starts_with("/storage/self/primary") {
+        return resolve_self_primary_alias(&path);
+    }
+    if path.starts_with("/mnt/runtime/") {
+        return resolve_mnt_runtime_alias(&path);
+    }
+    if path.starts_with("/mnt/user/") {
+        let primary = resolve_mnt_user_primary_alias(&path);
+        if primary != path {
+            return primary;
+        }
+        return resolve_mnt_emulated_alias(&path);
+    }
+    if path.starts_with("/mnt/installer/")
+        || path.starts_with("/mnt/androidwritable/")
+        || path.starts_with("/mnt/pass_through/")
+    {
+        return resolve_mnt_emulated_alias(&path);
+    }
+    if path.starts_with(DATA_MEDIA_PREFIX) {
+        return resolve_data_media_alias(&path);
+    }
+    path
 }
 
 pub fn resolve_user_path(path: &str, user_id: i32) -> String {
