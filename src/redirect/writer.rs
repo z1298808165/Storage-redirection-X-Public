@@ -155,17 +155,10 @@ pub fn is_path_read_only_by_caller_paths(
         return false;
     }
 
-    with_cached_caller_real_paths(
-        caller_package,
-        caller_uid,
-        CallerRealPathKind::ReadOnly,
-        |paths| caller_path_list_matches(paths, resolved_path, true),
-    ) && with_cached_caller_real_paths(
-        caller_package,
-        caller_uid,
-        CallerRealPathKind::ReadOnlyExcluded,
-        |paths| !caller_path_list_matches(paths, resolved_path, true),
-    )
+    with_cached_caller_allowed_cache(caller_package, caller_uid, |cache| {
+        caller_path_list_matches(&cache.read_only_paths, resolved_path, true)
+            && !caller_path_list_matches(&cache.read_only_excluded_paths, resolved_path, true)
+    })
 }
 
 pub fn is_path_read_only_excluded_by_caller_paths(
@@ -858,7 +851,6 @@ enum CallerRealPathKind {
     Allowed,
     Excluded,
     Sandboxed,
-    ReadOnly,
     ReadOnlyExcluded,
 }
 
@@ -875,7 +867,6 @@ impl CallerAllowedCache {
             CallerRealPathKind::Allowed => &self.allowed_real_paths,
             CallerRealPathKind::Excluded => &self.excluded_real_paths,
             CallerRealPathKind::Sandboxed => &self.sandboxed_paths,
-            CallerRealPathKind::ReadOnly => &self.read_only_paths,
             CallerRealPathKind::ReadOnlyExcluded => &self.read_only_excluded_paths,
         }
     }
