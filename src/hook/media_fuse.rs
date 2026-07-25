@@ -651,18 +651,17 @@ fn private_owner_sqlite_path_mentions_caller_package(
     let Some(relative) = paths::relative_child_path(normalized_path, &storage_private_root) else {
         return false;
     };
+    let relative_lower = relative.to_ascii_lowercase();
     caller_package
         .rsplit('.')
-        .any(|token| is_distinctive_package_path_token(token, relative))
+        .any(|token| is_distinctive_package_path_token(token, &relative_lower))
 }
 
-fn is_distinctive_package_path_token(token: &str, relative_path: &str) -> bool {
+fn is_distinctive_package_path_token(token: &str, relative_path_lower: &str) -> bool {
     let token = token.trim();
     token.len() >= 4
         && token.chars().any(|ch| ch.is_ascii_alphabetic())
-        && relative_path
-            .to_ascii_lowercase()
-            .contains(&token.to_ascii_lowercase())
+        && relative_path_lower.contains(&token.to_ascii_lowercase())
 }
 
 fn remember_private_owner_sqlite_caller_hint(
