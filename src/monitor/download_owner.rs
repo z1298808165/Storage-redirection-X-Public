@@ -94,7 +94,7 @@ pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<Str
         DOWNLOAD_OWNER_CACHE
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .put(candidate.clone(), package_name.clone(), now_ms);
+            .put(candidate, package_name.clone(), now_ms);
 
         if package_name.is_some() {
             return package_name;
