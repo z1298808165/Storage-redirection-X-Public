@@ -1098,7 +1098,7 @@ fn extract_caller_package(caller_package: &str) -> String {
     }
 
     if let Some(value) = extract_kv_value(caller_package, "caller=") {
-        let normalized = normalize_package_text(&value);
+        let normalized = normalize_package_text(value);
         if !normalized.is_empty() {
             return normalized;
         }
@@ -1116,7 +1116,7 @@ fn is_intermediate_caller_package(package_name: &str) -> bool {
 }
 
 // 从 key=value|... 格式中提取指定 key 的值
-fn extract_kv_value(source: &str, key: &str) -> Option<String> {
+fn extract_kv_value<'a>(source: &'a str, key: &str) -> Option<&'a str> {
     let begin = source.find(key)? + key.len();
     if begin >= source.len() {
         return None;
@@ -1128,7 +1128,7 @@ fn extract_kv_value(source: &str, key: &str) -> Option<String> {
     if end <= begin {
         return None;
     }
-    Some(source[begin..end].to_string())
+    Some(&source[begin..end])
 }
 
 fn normalize_package_text(source: &str) -> String {
