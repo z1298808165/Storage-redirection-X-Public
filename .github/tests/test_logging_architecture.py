@@ -104,7 +104,7 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertNotIn("this.writeRawFile(", restore)
 
     def test_native_hot_paths_keep_bounded_cache_and_polling(self) -> None:
-        fuse = read("src/fuse_redirect.rs")
+        fuse = read("src/fuse_redirect/mod.rs")
         watcher = read("src/config/watcher.rs")
         self.assertIn("fn forget(&self", fuse)
         self.assertIn("lookup_counts: HashMap<u64, u64>", fuse)
