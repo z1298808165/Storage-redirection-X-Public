@@ -3,7 +3,7 @@ use crate::redirect::policy;
 use once_cell::sync::Lazy;
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const HINT_VERSION: &str = "3";
 const RECENT_PRIVATE_OWNER_HINT_WINDOW_MS: i64 = 30_000;
@@ -56,14 +56,14 @@ struct HintFileFingerprint {
 
 struct CachedHintFile<T> {
     fingerprint: Option<HintFileFingerprint>,
-    values: Vec<T>,
+    values: Arc<Vec<T>>,
 }
 
 impl<T> Default for CachedHintFile<T> {
     fn default() -> Self {
         Self {
             fingerprint: None,
-            values: Vec::new(),
+            values: Arc::new(Vec::new()),
         }
     }
 }
@@ -249,13 +249,17 @@ pub(crate) fn infer_recent_private_owner_identity(
         return None;
     }
 
-    let mut hints = RECENT_PRIVATE_OWNER_HINT
+    let persisted_hints = read_hint_file();
+    let recent_hints = RECENT_PRIVATE_OWNER_HINT
         .lock()
         .ok()
-        .map(|slot| slot.iter().cloned().collect::<Vec<_>>())
+        .map(|hints| hints.iter().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    hints.extend(read_hint_file());
-    infer_from_hints(hints, user_id, &path_tokens)
+    infer_from_hints(
+        recent_hints.iter().chain(persisted_hints.iter()),
+        user_id,
+        &path_tokens,
+    )
 }
 
 pub(crate) fn remember_public_path_caller_hint(
@@ -352,13 +356,18 @@ pub(crate) fn infer_recent_path_caller_identity(
         return None;
     }
 
-    let mut hints = RECENT_PATH_CALLER_HINT
+    let persisted_hints = read_path_hint_file();
+    let recent_hints = RECENT_PATH_CALLER_HINT
         .lock()
         .ok()
-        .map(|slot| slot.iter().cloned().collect::<Vec<_>>())
+        .map(|hints| hints.iter().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    hints.extend(read_path_hint_file());
-    infer_from_path_hints(hints, user_id, normalized_path)
+    infer_from_path_hints(
+        recent_hints.iter().chain(persisted_hints.iter()),
+        user_id,
+        normalized_path,
+        false,
+    )
 }
 
 pub(crate) fn infer_recent_saf_caller_identity(
@@ -369,19 +378,17 @@ pub(crate) fn infer_recent_saf_caller_identity(
         return None;
     }
 
-    let mut hints = RECENT_PATH_CALLER_HINT
+    let persisted_hints = read_path_hint_file();
+    let recent_hints = RECENT_PATH_CALLER_HINT
         .lock()
         .ok()
-        .map(|slot| slot.iter().cloned().collect::<Vec<_>>())
+        .map(|hints| hints.iter().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    hints.extend(read_path_hint_file());
     infer_from_path_hints(
-        hints
-            .into_iter()
-            .filter(|hint| hint.source == "saf_provider")
-            .collect(),
+        recent_hints.iter().chain(persisted_hints.iter()),
         user_id,
         normalized_path,
+        true,
     )
 }
 
@@ -450,17 +457,16 @@ fn remember_path_hint_locked(hints: &mut VecDeque<PathCallerHint>, hint: PathCal
     }
 }
 
-fn infer_from_hints(
-    hints: Vec<PrivateOwnerHint>,
+fn infer_from_hints<'a>(
+    hints: impl Iterator<Item = &'a PrivateOwnerHint>,
     user_id: i32,
     path_tokens: &[String],
 ) -> Option<RecentPrivateOwnerIdentity> {
     let now_ms = paths::monotonic_ms();
     let mut snapshot = PackageInferenceSnapshot::default();
     hints
-        .into_iter()
         .filter_map(|hint| {
-            resolve_matching_hint(&hint, user_id, path_tokens, now_ms, &mut snapshot)
+            resolve_matching_hint(hint, user_id, path_tokens, now_ms, &mut snapshot)
                 .map(|package_name| (hint, package_name))
         })
         .max_by(|(left, _), (right, _)| {
@@ -483,14 +489,15 @@ fn infer_from_hints(
         })
 }
 
-fn infer_from_path_hints(
-    hints: Vec<PathCallerHint>,
+fn infer_from_path_hints<'a>(
+    hints: impl Iterator<Item = &'a PathCallerHint>,
     user_id: i32,
     normalized_path: &str,
+    saf_only: bool,
 ) -> Option<RecentPrivateOwnerIdentity> {
     let now_ms = paths::monotonic_ms();
     hints
-        .into_iter()
+        .filter(|hint| !saf_only || hint.source == "saf_provider")
         .filter(|hint| path_hint_matches(hint, user_id, normalized_path, now_ms))
         .max_by(|left, right| {
             path_hint_rank(left)
@@ -498,7 +505,7 @@ fn infer_from_path_hints(
                 .then_with(|| left.updated_ms.cmp(&right.updated_ms))
         })
         .map(|hint| RecentPrivateOwnerIdentity {
-            package_name: hint.package_name,
+            package_name: hint.package_name.clone(),
             source: hint.source,
             confidence: hint.confidence,
         })
@@ -1026,7 +1033,7 @@ fn write_path_hint_file(hints: &[PathCallerHint]) {
     invalidate_cached_hint_file(&RECENT_PATH_CALLER_HINT_FILE_CACHE);
 }
 
-fn read_hint_file() -> Vec<PrivateOwnerHint> {
+fn read_hint_file() -> Arc<Vec<PrivateOwnerHint>> {
     read_cached_hint_file(
         std::path::Path::new(module_paths::RECENT_SOURCE_HINT_FILE),
         &RECENT_SOURCE_HINT_FILE_CACHE,
@@ -1039,7 +1046,7 @@ fn read_hint_file() -> Vec<PrivateOwnerHint> {
     )
 }
 
-fn read_path_hint_file() -> Vec<PathCallerHint> {
+fn read_path_hint_file() -> Arc<Vec<PathCallerHint>> {
     read_cached_hint_file(
         std::path::Path::new(module_paths::RECENT_PATH_CALLER_HINT_FILE),
         &RECENT_PATH_CALLER_HINT_FILE_CACHE,
@@ -1052,21 +1059,21 @@ fn read_path_hint_file() -> Vec<PathCallerHint> {
     )
 }
 
-fn read_cached_hint_file<T: Clone>(
+fn read_cached_hint_file<T>(
     path: &std::path::Path,
     cache: &Mutex<CachedHintFile<T>>,
     parse: impl FnOnce(&str) -> Vec<T>,
-) -> Vec<T> {
+) -> Arc<Vec<T>> {
     let fingerprint = hint_file_fingerprint(path);
     let Ok(mut cached) = cache.lock() else {
         return std::fs::read_to_string(path)
             .ok()
-            .map(|content| parse(&content))
-            .unwrap_or_default();
+            .map(|content| Arc::new(parse(&content)))
+            .unwrap_or_else(|| Arc::new(Vec::new()));
     };
 
     if cached.fingerprint == fingerprint {
-        return cached.values.clone();
+        return Arc::clone(&cached.values);
     }
 
     let values = std::fs::read_to_string(path)
@@ -1074,14 +1081,14 @@ fn read_cached_hint_file<T: Clone>(
         .map(|content| parse(&content))
         .unwrap_or_default();
     cached.fingerprint = fingerprint;
-    cached.values = values.clone();
-    values
+    cached.values = Arc::new(values);
+    Arc::clone(&cached.values)
 }
 
 fn invalidate_cached_hint_file<T>(cache: &Mutex<CachedHintFile<T>>) {
     if let Ok(mut cached) = cache.lock() {
         cached.fingerprint = None;
-        cached.values.clear();
+        cached.values = Arc::new(Vec::new());
     }
 }
 
