@@ -41,9 +41,7 @@ pub unsafe fn prepare_relevant_path<'a>(
             return PreparedPath::Bypass;
         }
         path_for_decision = Cow::Owned(resolved);
-    }
-
-    if !path_utils::is_relevant_storage_path(hub, path_for_decision.as_ref()) {
+    } else if !path_utils::is_relevant_storage_path(hub, path_for_decision.as_ref()) {
         if record_fast_bypass {
             diagnostic::record_fast_bypass(op_name, path_for_decision.as_ref());
         }
