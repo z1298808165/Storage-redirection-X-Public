@@ -17,11 +17,13 @@ const CACHE_CAPACITY: usize = 128;
 struct CacheEntry {
     package_name: String,
     expires_at_ms: i64,
+    generation: u64,
 }
 
 struct DownloadOwnerCache {
     values: HashMap<String, CacheEntry>,
-    order: VecDeque<String>,
+    order: VecDeque<(String, u64)>,
+    next_generation: u64,
 }
 
 impl DownloadOwnerCache {
@@ -29,6 +31,7 @@ impl DownloadOwnerCache {
         Self {
             values: HashMap::new(),
             order: VecDeque::new(),
+            next_generation: 0,
         }
     }
 
@@ -37,7 +40,6 @@ impl DownloadOwnerCache {
 
         if entry.expires_at_ms <= now_ms {
             self.values.remove(key);
-            self.order.retain(|queued_key| queued_key != key);
             return None;
         }
 
@@ -48,19 +50,28 @@ impl DownloadOwnerCache {
     }
 
     fn put(&mut self, key: String, package_name: Option<String>, now_ms: i64) {
-        self.order.retain(|queued_key| queued_key != &key);
-        self.order.push_back(key.clone());
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let generation = self.next_generation;
+        self.order.push_back((key.clone(), generation));
 
         self.values.insert(
             key,
             CacheEntry {
                 package_name: package_name.unwrap_or_default(),
                 expires_at_ms: now_ms + CACHE_TTL_MS,
+                generation,
             },
         );
 
         while self.order.len() > CACHE_CAPACITY {
-            if let Some(expired_key) = self.order.pop_front() {
+            let Some((expired_key, generation)) = self.order.pop_front() else {
+                break;
+            };
+            if self
+                .values
+                .get(&expired_key)
+                .is_some_and(|entry| entry.generation == generation)
+            {
                 self.values.remove(&expired_key);
             }
         }
