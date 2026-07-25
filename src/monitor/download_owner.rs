@@ -13,6 +13,7 @@ const DOWNLOAD_SEGMENT: &str = "/Download/";
 const FILE_SCHEME_PREFIX: &str = "file://";
 const CACHE_TTL_MS: i64 = 15_000;
 const CACHE_CAPACITY: usize = 128;
+const CACHE_QUEUE_COMPACTION_LIMIT: usize = CACHE_CAPACITY * 2;
 
 struct CacheEntry {
     package_name: String,
@@ -63,7 +64,7 @@ impl DownloadOwnerCache {
             },
         );
 
-        while self.order.len() > CACHE_CAPACITY {
+        while self.values.len() > CACHE_CAPACITY {
             let Some((expired_key, generation)) = self.order.pop_front() else {
                 break;
             };
@@ -74,6 +75,14 @@ impl DownloadOwnerCache {
             {
                 self.values.remove(&expired_key);
             }
+        }
+
+        if self.order.len() > CACHE_QUEUE_COMPACTION_LIMIT {
+            self.order.retain(|(queued_key, generation)| {
+                self.values
+                    .get(queued_key)
+                    .is_some_and(|entry| entry.generation == *generation)
+            });
         }
     }
 }
