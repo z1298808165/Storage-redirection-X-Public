@@ -79,6 +79,9 @@ pub fn is_storage_path_fast(pathname: &str) -> bool {
     if pathname.is_empty() || !pathname.starts_with('/') {
         return false;
     }
+    if pathname.starts_with("/storage/emulated/") {
+        return true;
+    }
 
     // 热路径：先以前缀快速排除大量非存储路径（如 /system, /data/app, /proc, /dev 等），
     // 只在可能命中存储别名时才做完整 normalize；避免每次 syscall hook 上分配 String。
