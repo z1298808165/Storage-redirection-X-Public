@@ -125,3 +125,8 @@ pub fn is_relevant_storage_path(hub: &InterceptHub, pathname: &str) -> bool {
     }
     false
 }
+
+pub fn is_normalized_relevant_storage_path(hub: &InterceptHub, pathname: &str) -> bool {
+    paths::starts_with(pathname, "/storage/emulated/")
+        || (hub.is_redirect_enabled() && paths::starts_with(pathname, "/data/media/"))
+}

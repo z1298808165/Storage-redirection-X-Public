@@ -37,7 +37,7 @@ pub unsafe fn prepare_relevant_path<'a>(
             log_flags,
         );
         let resolved = path_utils::resolve_path_for_dirfd(dirfd, path_for_decision.as_ref());
-        if resolved.is_empty() || !path_utils::is_relevant_storage_path(hub, &resolved) {
+        if resolved.is_empty() || !path_utils::is_normalized_relevant_storage_path(hub, &resolved) {
             return PreparedPath::Bypass;
         }
         path_for_decision = Cow::Owned(resolved);
