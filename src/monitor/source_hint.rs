@@ -464,9 +464,10 @@ fn infer_from_path_hints(
     user_id: i32,
     normalized_path: &str,
 ) -> Option<RecentPrivateOwnerIdentity> {
+    let now_ms = paths::monotonic_ms();
     hints
         .into_iter()
-        .filter(|hint| path_hint_matches(hint, user_id, normalized_path))
+        .filter(|hint| path_hint_matches(hint, user_id, normalized_path, now_ms))
         .max_by(|left, right| {
             path_hint_rank(left)
                 .cmp(&path_hint_rank(right))
@@ -754,11 +755,16 @@ fn public_path_token_package_score(package_name: &str, path_tokens: &[String]) -
         .sum()
 }
 
-fn path_hint_matches(hint: &PathCallerHint, user_id: i32, normalized_path: &str) -> bool {
+fn path_hint_matches(
+    hint: &PathCallerHint,
+    user_id: i32,
+    normalized_path: &str,
+    now_ms: i64,
+) -> bool {
     if hint.user_id != user_id || !is_valid_package_name(&hint.package_name) {
         return false;
     }
-    let age_ms = paths::monotonic_ms().saturating_sub(hint.updated_ms);
+    let age_ms = now_ms.saturating_sub(hint.updated_ms);
     if !(0..=RECENT_PATH_CALLER_HINT_WINDOW_MS).contains(&age_ms) {
         return false;
     }
