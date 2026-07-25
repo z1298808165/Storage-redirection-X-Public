@@ -654,13 +654,13 @@ fn private_path_token_package_score(
     hint_tokens: &[String],
     path_tokens: &[String],
 ) -> i32 {
+    let package_name = package_name.to_ascii_lowercase();
     hint_tokens
         .iter()
         .filter(|token| {
             path_tokens.contains(token)
                 && token.len() >= 5
                 && package_name
-                    .to_ascii_lowercase()
                     .split(['.', '_', '-'])
                     .any(|part| part == token.as_str())
         })
@@ -742,12 +742,12 @@ fn is_valid_public_path_token_package(package: &str, user_id: i32) -> bool {
 }
 
 fn public_path_token_package_score(package_name: &str, path_tokens: &[String]) -> i32 {
+    let package_name = package_name.to_ascii_lowercase();
     path_tokens
         .iter()
         .filter(|token| {
             token.len() >= 5
                 && package_name
-                    .to_ascii_lowercase()
                     .split(['.', '_', '-'])
                     .any(|part| part == token.as_str())
         })
