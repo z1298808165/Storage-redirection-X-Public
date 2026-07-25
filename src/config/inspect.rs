@@ -322,7 +322,8 @@ fn should_filter_monitor_record_locked_for_version(
     operation: &str,
 ) -> bool {
     let normalized_path = crate::platform::paths::normalize(path);
-    let op = operation.trim().to_lowercase();
+    // 调用方只传入内部规范化的小写操作名，避免在事件热路径重复分配。
+    let op = operation;
 
     // 优化：为高频路径和操作组合提供快速缓存查找
     let cache_key = format!("{}|{}", normalized_path, op);
@@ -341,7 +342,7 @@ fn should_filter_monitor_record_locked_for_version(
     let op_matched = filters
         .excluded_operations
         .iter()
-        .any(|rule| monitor_operation_filter_matches(rule, &op));
+        .any(|rule| monitor_operation_filter_matches(rule, op));
 
     let result = path_matched || op_matched;
 
