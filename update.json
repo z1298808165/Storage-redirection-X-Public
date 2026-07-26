@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.76",
-    "tag": "ci-build-30157081037-5",
-    "title": "CI Build 1.2.59-ci.76",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30157081037-5",
+    "version": "1.2.59-ci.81",
+    "tag": "ci-build-30184707944-1",
+    "title": "CI Build 1.2.59-ci.81",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30184707944-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30157081037-5/storage-redirect-x-manager-v1.2.59-ci.76.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30157081037-5/storage.redirect.x-v1.2.59-ci.76.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.76`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30136976623-1`\n- 当前提交：`3a2ef0a`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复核心逻辑的一组问题：避免相对路径重复判断、避免重复事件队列节点、降低查询访问缓存更新开销、保持下载归属缓存容量上限等。\n\n## 其它更新\n\n### 注意事项\n- 兼容泛型函数签名结构检查。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30184707944-1/storage-redirect-x-manager-v1.2.59-ci.81.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30184707944-1/storage.redirect.x-v1.2.59-ci.81.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.81`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30157081037-5`\n- 当前提交：`6fdc378`\n\n## 模块更新\n\n### 注意事项\n- 稳定本地 Android 环境与版本计算。\n- 优化 daemon 与 FUSE 并发路径。\n\n## App 更新\n\n### 注意事项\n- 稳定本地 Android 环境与版本计算。\n- 优化日志解析与诊断导出。\n\n## 其它更新\n\n### 注意事项\n- 补充本地构建环境与排障说明。\n- 稳定本地 Android 环境与版本计算。\n- 优化 GitHub Actions 编译缓存与关键路径。"
   },
   "releases": []
 }
