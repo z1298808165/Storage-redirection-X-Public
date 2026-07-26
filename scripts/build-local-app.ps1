@@ -13,17 +13,6 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildVersionBaselinePath = Join-Path $RepoRoot ".github\build-version-baseline.json"
 
-function Write-Utf8LfFile {
-    param(
-        [string]$Path,
-        [string]$Content
-    )
-
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $lf = $Content.Replace("`r`n", "`n").Replace("`r", "`n")
-    [System.IO.File]::WriteAllText($Path, $lf, $utf8NoBom)
-}
-
 function Write-Step {
     param([string]$Message)
     Write-Host ""
@@ -42,9 +31,15 @@ function Invoke-Checked {
         [string[]]$Arguments = @()
     )
 
+    $displayCommand = "$FilePath $($Arguments -join ' ')".Trim()
+    $startedAt = Get-Date
+    Write-Host "开始执行：$displayCommand"
     & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        Fail "命令执行失败，退出码 ${LASTEXITCODE}：$FilePath $($Arguments -join ' ')"
+    $exitCode = $LASTEXITCODE
+    $elapsed = (Get-Date) - $startedAt
+    Write-Host ("命令完成：耗时 {0:N1} 秒，退出代码 {1}" -f $elapsed.TotalSeconds, $exitCode)
+    if ($exitCode -ne 0) {
+        Fail "命令执行失败，退出代码 ${exitCode}：$displayCommand"
     }
 }
 
@@ -61,28 +56,6 @@ function Get-FirstExistingPath {
     }
 
     return $null
-}
-
-function Get-LatestChildDirectory {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $null
-    }
-
-    $dirs = @(Get-ChildItem -LiteralPath $Path -Directory | Sort-Object {
-        try {
-            [version]$_.Name
-        } catch {
-            [version]"0.0.0"
-        }
-    } -Descending)
-
-    if ($dirs.Count -eq 0) {
-        return $null
-    }
-
-    return $dirs[0].FullName
 }
 
 function Add-PathPrefix {
@@ -106,17 +79,18 @@ function Initialize-AndroidEnvironment {
         (Join-Path $env:LOCALAPPDATA "Android\Sdk")
     )
 
-    if ($sdk) {
-        $env:ANDROID_HOME = $sdk
-        $env:ANDROID_SDK_ROOT = $sdk
-        Add-PathPrefix (Join-Path $sdk "platform-tools")
-
-        $cmakeRoot = Join-Path $sdk "cmake"
-        $cmakeDir = Get-LatestChildDirectory $cmakeRoot
-        if ($cmakeDir) {
-            Add-PathPrefix (Join-Path $cmakeDir "bin")
-        }
+    if (-not $sdk) {
+        Fail "未找到 Android SDK。请设置 ANDROID_HOME，或通过 Android Studio 安装 SDK。"
     }
+    $env:ANDROID_HOME = $sdk
+    $env:ANDROID_SDK_ROOT = $sdk
+    Add-PathPrefix (Join-Path $sdk "platform-tools")
+
+    if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+        Fail "PATH 中未找到 Java。请安装 JDK 21 并设置 JAVA_HOME。"
+    }
+
+    return @{ Sdk = $sdk }
 }
 
 function Get-CargoPackageVersion {
@@ -156,54 +130,62 @@ function Get-CargoVersionFromText {
     return $null
 }
 
-function Get-CargoVersionAtCommit {
-    param([string]$Commit)
-
-    $text = Invoke-GitText -Arguments @("show", "${Commit}:Cargo.toml") -AllowFailure
+function Get-HeadCargoVersion {
+    $text = Invoke-GitText -Arguments @("show", "HEAD:Cargo.toml") -AllowFailure
     if ($null -eq $text) {
         return $null
     }
-
     return Get-CargoVersionFromText -Text $text
-}
-
-function Get-HeadCargoVersion {
-    return Get-CargoVersionAtCommit -Commit "HEAD"
 }
 
 function Get-VersionStartCommit {
     param([string]$Version)
 
-    $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "HEAD", "--", "Cargo.toml") -AllowFailure
-    if ([string]::IsNullOrWhiteSpace($commitsText)) {
+    $history = Invoke-GitText -Arguments @("log", "--first-parent", "--reverse", "--format=commit:%H", "-p", "--", "Cargo.toml") -AllowFailure
+    if ([string]::IsNullOrWhiteSpace($history)) {
         return $null
     }
 
-    $previousVersion = $null
+    $commit = $null
     $start = $null
-    foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-        $commitVersion = Get-CargoVersionAtCommit -Commit $commit.Trim()
-        if ($commitVersion -eq $Version -and $previousVersion -ne $Version) {
-            $start = $commit.Trim()
+    $addedCurrentVersion = $false
+    $removedCurrentVersion = $false
+    foreach ($line in ($history -split "`n")) {
+        if ($line.StartsWith("commit:")) {
+            if ($addedCurrentVersion -and -not $removedCurrentVersion) {
+                $start = $commit
+            }
+            $commit = $line.Substring("commit:".Length).Trim()
+            $addedCurrentVersion = $false
+            $removedCurrentVersion = $false
+            continue
         }
-        $previousVersion = $commitVersion
+        if ($line.StartsWith("+") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
+            $addedCurrentVersion = $true
+        } elseif ($line.StartsWith("-") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
+            $removedCurrentVersion = $true
+        }
+    }
+    if ($addedCurrentVersion -and -not $removedCurrentVersion) {
+        $start = $commit
     }
 
     return $start
 }
 
-function Test-AutoManifestCommit {
-    param([string]$Commit)
+function Get-NonAutoManifestCommitCount {
+    param([string]$Range)
 
-    $subject = Invoke-GitText -Arguments @("log", "-1", "--pretty=%s", $Commit) -AllowFailure
-    if ($null -eq $subject) {
-        return $false
+    $subjects = Invoke-GitText -Arguments @("log", "--first-parent", "--format=%s", $Range) -AllowFailure
+    if ([string]::IsNullOrWhiteSpace($subjects)) {
+        return 0
     }
-
     $fullWidthColon = [char]0xFF1A
     $updateManifest = -join @([char]0x66F4, [char]0x65B0, [char]0x66F4, [char]0x65B0, [char]0x6E05, [char]0x5355)
     $release = -join @([char]0x53D1, [char]0x5E03)
-    return $subject.StartsWith("CI$fullWidthColon$updateManifest") -or $subject.StartsWith("$release$fullWidthColon$updateManifest")
+    return @(($subjects -split "`n") | Where-Object {
+        -not $_.StartsWith("CI$fullWidthColon$updateManifest") -and -not $_.StartsWith("$release$fullWidthColon$updateManifest")
+    }).Count
 }
 
 function Test-WorktreeDirty {
@@ -243,54 +225,6 @@ function Get-BuildCountBaseline {
     }
 }
 
-function Update-BuildCountBaseline {
-    param(
-        [string]$BaseVersion,
-        [int]$BuildCount
-    )
-
-    if ($BuildCount -lt 1) {
-        Fail "构建序号必须为正数，当前为：$BuildCount"
-    }
-
-    if (Test-Path -LiteralPath $BuildVersionBaselinePath) {
-        try {
-            $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        } catch {
-            $baseline = [pscustomobject]@{}
-        }
-    } else {
-        $baseline = [pscustomobject]@{}
-    }
-
-    if ($null -eq $baseline.PSObject.Properties["buildCounts"]) {
-        $baseline | Add-Member -NotePropertyName "buildCounts" -NotePropertyValue ([pscustomobject]@{})
-    }
-
-    $previous = 0
-    $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
-    if ($null -ne $property) {
-        $previous = [int]$property.Value
-    }
-    $next = [Math]::Max($previous, $BuildCount)
-    if ($null -eq $property) {
-        $baseline.buildCounts | Add-Member -NotePropertyName $BaseVersion -NotePropertyValue $next
-    } else {
-        $property.Value = $next
-    }
-
-    $orderedCounts = [ordered]@{}
-    $baseline.buildCounts.PSObject.Properties.Name | Sort-Object { [version]$_ } | ForEach-Object {
-        $orderedCounts[$_] = [int]$baseline.buildCounts.PSObject.Properties[$_].Value
-    }
-    $orderedBaseline = [ordered]@{
-        schema = 1
-        buildCounts = $orderedCounts
-    }
-    $json = $orderedBaseline | ConvertTo-Json -Depth 5 -Compress
-    Write-Utf8LfFile -Path $BuildVersionBaselinePath -Content ($json + "`n")
-}
-
 function Resolve-LocalVersion {
     param([string]$BaseVersion)
 
@@ -310,12 +244,7 @@ function Resolve-LocalVersion {
     }
     $count = 0
     if (-not [string]::IsNullOrWhiteSpace($start)) {
-        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start..HEAD") -AllowFailure
-        foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-            if (-not (Test-AutoManifestCommit -Commit $commit.Trim())) {
-                $count++
-            }
-        }
+        $count = Get-NonAutoManifestCommitCount -Range "$start..HEAD"
     }
 
     if (Test-WorktreeDirty) {
@@ -439,7 +368,7 @@ function Restore-EnvVar {
 
 Push-Location $RepoRoot
 try {
-    Initialize-AndroidEnvironment
+    $buildEnvironment = Initialize-AndroidEnvironment
 
     $baseVersion = Get-CargoPackageVersion
     $resolved = Resolve-LocalVersion -BaseVersion $baseVersion
@@ -461,6 +390,8 @@ try {
     Write-Host "版本：        v$Version"
     Write-Host "版本代码：    $VersionCode"
     Write-Host "输出目录：    $outputRoot"
+    Write-Host "Android SDK： $($buildEnvironment.Sdk)"
+    Write-Host "Java：        $env:JAVA_HOME"
 
     if (-not $SkipBuild) {
         $gradlePath = Join-Path $RepoRoot "gradlew.bat"
@@ -477,7 +408,7 @@ try {
         $env:VERSION = $Version
         $env:VERSION_CODE = [string]$VersionCode
         try {
-            Invoke-Checked -FilePath $gradlePath -Arguments @("--no-daemon", "--console=plain", ":app:assembleRelease")
+            Invoke-Checked -FilePath $gradlePath -Arguments @("--console=plain", ":app:assembleRelease")
         } finally {
             Restore-EnvVar -Name "VERSION" -HadValue $hadVersion -OldValue $oldVersion
             Restore-EnvVar -Name "VERSION_CODE" -HadValue $hadVersionCode -OldValue $oldVersionCode
@@ -491,9 +422,6 @@ try {
     Remove-LocalFile -Path $apkPath -ExpectedParent $outputRoot
     Copy-Item -LiteralPath $sourceApk -Destination $apkPath -Force
     Test-ReleaseApk -ApkPath $apkPath
-    if ($Version -match "^$([regex]::Escape($baseVersion))-ci\.(\d+)$") {
-        Update-BuildCountBaseline -BaseVersion $baseVersion -BuildCount ([int]$Matches[1])
-    }
     Write-Host "Release APK 已就绪：$apkPath" -ForegroundColor Green
 
     if ($NoAdb) {

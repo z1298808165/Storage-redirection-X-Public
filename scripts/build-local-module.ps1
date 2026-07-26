@@ -13,6 +13,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildVersionBaselinePath = Join-Path $RepoRoot ".github\build-version-baseline.json"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$PreferredNdkVersion = "30.0.14904198"
+$PreferredCmakeVersion = "4.1.2"
 
 function Write-Step {
     param([string]$Message)
@@ -32,9 +34,15 @@ function Invoke-Checked {
         [string[]]$Arguments = @()
     )
 
+    $displayCommand = "$FilePath $($Arguments -join ' ')".Trim()
+    $startedAt = Get-Date
+    Write-Host "开始执行：$displayCommand"
     & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        Fail "命令执行失败，退出代码 ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+    $exitCode = $LASTEXITCODE
+    $elapsed = (Get-Date) - $startedAt
+    Write-Host ("命令完成：耗时 {0:N1} 秒，退出代码 {1}" -f $elapsed.TotalSeconds, $exitCode)
+    if ($exitCode -ne 0) {
+        Fail "命令执行失败，退出代码 ${exitCode}: $displayCommand"
     }
 }
 
@@ -88,6 +96,19 @@ function Get-LatestChildDirectory {
     return $dirs[0].FullName
 }
 
+function Get-PreferredChildDirectory {
+    param(
+        [string]$Path,
+        [string]$PreferredName
+    )
+
+    $preferred = Join-Path $Path $PreferredName
+    if (Test-Path -LiteralPath $preferred -PathType Container) {
+        return (Resolve-Path -LiteralPath $preferred).Path
+    }
+    return Get-LatestChildDirectory -Path $Path
+}
+
 function Add-PathPrefix {
     param([string]$Path)
 
@@ -109,28 +130,45 @@ function Initialize-AndroidEnvironment {
         (Join-Path $env:LOCALAPPDATA "Android\Sdk")
     )
 
-    if ($sdk) {
-        $env:ANDROID_HOME = $sdk
-        $env:ANDROID_SDK_ROOT = $sdk
-        Add-PathPrefix (Join-Path $sdk "platform-tools")
-
-        $cmakeRoot = Join-Path $sdk "cmake"
-        $cmakeDir = Get-LatestChildDirectory $cmakeRoot
-        if ($cmakeDir) {
-            Add-PathPrefix (Join-Path $cmakeDir "bin")
-        }
+    if (-not $sdk) {
+        Fail "未找到 Android SDK。请设置 ANDROID_HOME，或通过 Android Studio 安装 SDK。"
     }
+    $env:ANDROID_HOME = $sdk
+    $env:ANDROID_SDK_ROOT = $sdk
+    Add-PathPrefix (Join-Path $sdk "platform-tools")
+
+    $cmakeDir = Get-PreferredChildDirectory -Path (Join-Path $sdk "cmake") -PreferredName $PreferredCmakeVersion
+    if (-not $cmakeDir -or -not (Test-Path -LiteralPath (Join-Path $cmakeDir "bin\ninja.exe") -PathType Leaf)) {
+        Fail "Android SDK 中缺少可用的 CMake/Ninja。请安装 CMake $PreferredCmakeVersion。"
+    }
+    Add-PathPrefix (Join-Path $cmakeDir "bin")
 
     $ndk = Get-FirstExistingPath @(
+        (Join-Path $sdk "ndk\$PreferredNdkVersion"),
         $env:ANDROID_NDK_HOME,
         $env:ANDROID_NDK_ROOT,
-        $(if ($sdk) { Get-LatestChildDirectory (Join-Path $sdk "ndk") } else { $null })
+        (Get-LatestChildDirectory (Join-Path $sdk "ndk"))
     )
 
-    if ($ndk) {
-        $env:ANDROID_NDK_HOME = $ndk
-        $env:ANDROID_NDK_ROOT = $ndk
-        Add-PathPrefix (Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin")
+    if (-not $ndk) {
+        Fail "Android SDK 中缺少可用的 NDK。请安装 NDK $PreferredNdkVersion。"
+    }
+    $llvmBin = Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin"
+    if (-not (Test-Path -LiteralPath (Join-Path $llvmBin "aarch64-linux-android29-clang.cmd") -PathType Leaf)) {
+        Fail "NDK 工具链不完整：缺少 aarch64-linux-android29-clang.cmd，当前目录为 $ndk"
+    }
+    $env:ANDROID_NDK_HOME = $ndk
+    $env:ANDROID_NDK_ROOT = $ndk
+    Add-PathPrefix $llvmBin
+
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        Fail "PATH 中未找到 cargo。请安装仓库 rust-toolchain.toml 指定的 Rust 工具链。"
+    }
+
+    return @{
+        Sdk = $sdk
+        Ndk = $ndk
+        Cmake = $cmakeDir
     }
 }
 
@@ -171,51 +209,59 @@ function Get-CargoVersionFromText {
     return $null
 }
 
-function Get-CargoVersionAtCommit {
-    param([string]$Commit)
-
-    $text = Invoke-GitText -Arguments @("show", "${Commit}:Cargo.toml") -AllowFailure
+function Get-HeadCargoVersion {
+    $text = Invoke-GitText -Arguments @("show", "HEAD:Cargo.toml") -AllowFailure
     if ($null -eq $text) {
         return $null
     }
-
     return Get-CargoVersionFromText -Text $text
-}
-
-function Get-HeadCargoVersion {
-    return Get-CargoVersionAtCommit -Commit "HEAD"
 }
 
 function Get-VersionStartCommit {
     param([string]$Version)
 
-    $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "HEAD", "--", "Cargo.toml") -AllowFailure
-    if ([string]::IsNullOrWhiteSpace($commitsText)) {
+    $history = Invoke-GitText -Arguments @("log", "--first-parent", "--reverse", "--format=commit:%H", "-p", "--", "Cargo.toml") -AllowFailure
+    if ([string]::IsNullOrWhiteSpace($history)) {
         return $null
     }
 
-    $previousVersion = $null
+    $commit = $null
     $start = $null
-    foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-        $commitVersion = Get-CargoVersionAtCommit -Commit $commit.Trim()
-        if ($commitVersion -eq $Version -and $previousVersion -ne $Version) {
-            $start = $commit.Trim()
+    $addedCurrentVersion = $false
+    $removedCurrentVersion = $false
+    foreach ($line in ($history -split "`n")) {
+        if ($line.StartsWith("commit:")) {
+            if ($addedCurrentVersion -and -not $removedCurrentVersion) {
+                $start = $commit
+            }
+            $commit = $line.Substring("commit:".Length).Trim()
+            $addedCurrentVersion = $false
+            $removedCurrentVersion = $false
+            continue
         }
-        $previousVersion = $commitVersion
+        if ($line.StartsWith("+") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
+            $addedCurrentVersion = $true
+        } elseif ($line.StartsWith("-") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
+            $removedCurrentVersion = $true
+        }
+    }
+    if ($addedCurrentVersion -and -not $removedCurrentVersion) {
+        $start = $commit
     }
 
     return $start
 }
 
-function Test-AutoManifestCommit {
-    param([string]$Commit)
+function Get-NonAutoManifestCommitCount {
+    param([string]$Range)
 
-    $subject = Invoke-GitText -Arguments @("log", "-1", "--pretty=%s", $Commit) -AllowFailure
-    if ($null -eq $subject) {
-        return $false
+    $subjects = Invoke-GitText -Arguments @("log", "--first-parent", "--format=%s", $Range) -AllowFailure
+    if ([string]::IsNullOrWhiteSpace($subjects)) {
+        return 0
     }
-
-    return $subject.StartsWith("CI：更新更新清单") -or $subject.StartsWith("发布：更新更新清单")
+    return @(($subjects -split "`n") | Where-Object {
+        -not $_.StartsWith("CI：更新更新清单") -and -not $_.StartsWith("发布：更新更新清单")
+    }).Count
 }
 
 function Test-WorktreeDirty {
@@ -255,54 +301,6 @@ function Get-BuildCountBaseline {
     }
 }
 
-function Update-BuildCountBaseline {
-    param(
-        [string]$BaseVersion,
-        [int]$BuildCount
-    )
-
-    if ($BuildCount -lt 1) {
-        Fail "构建次数必须为正数，当前为: $BuildCount"
-    }
-
-    if (Test-Path -LiteralPath $BuildVersionBaselinePath) {
-        try {
-            $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        } catch {
-            $baseline = [pscustomobject]@{}
-        }
-    } else {
-        $baseline = [pscustomobject]@{}
-    }
-
-    if ($null -eq $baseline.PSObject.Properties["buildCounts"]) {
-        $baseline | Add-Member -NotePropertyName "buildCounts" -NotePropertyValue ([pscustomobject]@{})
-    }
-
-    $previous = 0
-    $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
-    if ($null -ne $property) {
-        $previous = [int]$property.Value
-    }
-    $next = [Math]::Max($previous, $BuildCount)
-    if ($null -eq $property) {
-        $baseline.buildCounts | Add-Member -NotePropertyName $BaseVersion -NotePropertyValue $next
-    } else {
-        $property.Value = $next
-    }
-
-    $orderedCounts = [ordered]@{}
-    $baseline.buildCounts.PSObject.Properties.Name | Sort-Object { [version]$_ } | ForEach-Object {
-        $orderedCounts[$_] = [int]$baseline.buildCounts.PSObject.Properties[$_].Value
-    }
-    $orderedBaseline = [ordered]@{
-        schema = 1
-        buildCounts = $orderedCounts
-    }
-    $json = $orderedBaseline | ConvertTo-Json -Depth 5 -Compress
-    Write-Utf8LfFile -Path $BuildVersionBaselinePath -Content ($json + "`n")
-}
-
 function Resolve-LocalVersion {
     param([string]$BaseVersion)
 
@@ -322,12 +320,7 @@ function Resolve-LocalVersion {
     }
     $count = 0
     if (-not [string]::IsNullOrWhiteSpace($start)) {
-        $commitsText = Invoke-GitText -Arguments @("rev-list", "--first-parent", "--reverse", "$start..HEAD") -AllowFailure
-        foreach ($commit in ($commitsText -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
-            if (-not (Test-AutoManifestCommit -Commit $commit.Trim())) {
-                $count++
-            }
-        }
+        $count = Get-NonAutoManifestCommitCount -Range "$start..HEAD"
     }
 
     if (Test-WorktreeDirty) {
@@ -654,7 +647,7 @@ function Get-DeviceKsudPath {
 
 Push-Location $RepoRoot
 try {
-    Initialize-AndroidEnvironment
+    $buildEnvironment = Initialize-AndroidEnvironment
 
     $baseVersion = Get-CargoPackageVersion
     $resolved = Resolve-LocalVersion -BaseVersion $baseVersion
@@ -672,6 +665,10 @@ try {
     Write-Host "版本:        v$Version"
     Write-Host "版本号:      $VersionCode"
     Write-Host "输出目录:    $outputRoot"
+    Write-Host "Android SDK: $($buildEnvironment.Sdk)"
+    Write-Host "Android NDK: $($buildEnvironment.Ndk)"
+    Write-Host "CMake:       $($buildEnvironment.Cmake)"
+    Write-Host "Java:        $env:JAVA_HOME"
 
     if (-not $SkipBuild) {
         Write-Step "编译 Android 模块二进制文件"
@@ -692,9 +689,6 @@ try {
 
     Write-Step "验证模块 zip"
     Test-ModuleZip -ZipPath $zipPath
-    if ($Version -match "^$([regex]::Escape($baseVersion))-ci\.(\d+)$") {
-        Update-BuildCountBaseline -BaseVersion $baseVersion -BuildCount ([int]$Matches[1])
-    }
     Write-Host "模块 zip 已就绪: $zipPath" -ForegroundColor Green
 
     if ($NoAdb) {

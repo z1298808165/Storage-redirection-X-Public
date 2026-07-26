@@ -48,64 +48,78 @@ val spotlessNpmExecutable =
         executableName = "npm",
     )
 
+val kotlinSourceFiles =
+    files(
+        fileTree("app/src") {
+          include("**/*.kt")
+          exclude("**/build/**", "**/.gradle/**", "**/.kotlin/**")
+        },
+        fileTree("tests/storage-redirect-test") {
+          include("**/*.kt")
+          exclude("**/build/**", "**/.gradle/**", "**/.kotlin/**")
+        },
+    )
+val javaSourceFiles =
+    files(
+        fileTree("java_src") { include("**/*.java") },
+        fileTree("tools") { include("**/*.java") },
+    )
+val kotlinGradleFiles =
+    files(
+        file("build.gradle.kts"),
+        file("settings.gradle.kts"),
+        fileTree("app") { include("*.gradle.kts") },
+        fileTree("tests/storage-redirect-test") {
+          include("**/*.gradle.kts")
+          exclude("**/build/**", "**/.gradle/**", "**/.kotlin/**")
+        },
+    )
+val rootDataFiles =
+    files(
+        projectDir.listFiles().orEmpty().filter { file ->
+          file.isFile && file.extension in setOf("json", "toml")
+        }
+    )
+val webAndDataFiles =
+    files(
+        fileTree("assets") { include("**/*.js", "**/*.json") },
+        file(".github/tests/storage-redirect-scenarios.json"),
+        fileTree("docs") { include("**/*.json") },
+        fileTree("scripts") { include("**/*.js") },
+        rootDataFiles,
+        fileTree("gradle") { include("**/*.toml") },
+        fileTree("vendor") {
+          include("**/*.toml")
+          exclude("**/target/**")
+        },
+    )
+
 spotless {
   lineEndings = com.diffplug.spotless.LineEnding.UNIX
 
   kotlin {
-    target(
-        "app/src/**/*.kt",
-        "tests/storage-redirect-test/**/*.kt",
-    )
-    targetExclude(
-        "**/build/**",
-        "**/.gradle/**",
-        "**/.kotlin/**",
-    )
+    target(kotlinSourceFiles)
     ktfmt()
     trimTrailingWhitespace()
     endWithNewline()
   }
 
   java {
-    target(
-        "java_src/**/*.java",
-        "tools/**/*.java",
-    )
+    target(javaSourceFiles)
     googleJavaFormat()
     trimTrailingWhitespace()
     endWithNewline()
   }
 
   kotlinGradle {
-    target("*.gradle.kts", "app/*.gradle.kts", "tests/storage-redirect-test/**/*.gradle.kts")
-    targetExclude(
-        "**/build/**",
-        "**/.gradle/**",
-        "**/.kotlin/**",
-    )
+    target(kotlinGradleFiles)
     ktfmt()
     trimTrailingWhitespace()
     endWithNewline()
   }
 
   format("webAndData") {
-    target(
-        "assets/**/*.js",
-        "assets/**/*.json",
-        ".github/tests/storage-redirect-scenarios.json",
-        "docs/**/*.json",
-        "scripts/**/*.js",
-        "*.json",
-        "*.toml",
-        "gradle/**/*.toml",
-        "vendor/**/*.toml",
-    )
-    targetExclude(
-        "**/build/**",
-        "**/target/**",
-        "**/.gradle/**",
-        "**/.kotlin/**",
-    )
+    target(webAndDataFiles)
     val prettierConfig =
         prettier(
                 mapOf(

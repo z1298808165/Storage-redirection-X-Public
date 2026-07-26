@@ -145,6 +145,30 @@ class LoggingArchitectureTest(unittest.TestCase):
         capacity_branch = raw[raw.index("if cache.len() >= RAW_CACHE_CAP") : raw.index("cache.push(entry)")]
         self.assertNotIn("cache.clear()", capacity_branch)
 
+    def test_daemon_monitor_reuses_config_and_filter_decisions(self) -> None:
+        config = read("src/config/inspect.rs")
+        monitor = read("src/daemon_monitor.rs")
+        events = read("src/daemon_monitor/events.rs")
+
+        reconfigure = monitor[
+            monitor.index("pub fn reconfigure") : monitor.index("fn retry_missing_watch_roots")
+        ]
+        emit = events[events.index("pub(super) fn emit_monitor_event") : events.index("fn watch_package_identity")]
+        duplicate = monitor[
+            monitor.index("fn should_skip_duplicate") : monitor.index("fn trim_recent_events")
+        ]
+
+        self.assertIn("get_daemon_monitor_config_snapshot", config)
+        self.assertEqual(1, reconfigure.count("get_daemon_monitor_config_snapshot()"))
+        self.assertNotIn("get_monitor_app_specs", reconfigure)
+        self.assertNotIn("get_public_owner_repair_app_specs", reconfigure)
+        self.assertNotIn("should_filter_monitor_record", emit)
+        self.assertEqual(2, duplicate.count('format!("{}|create|{}|{}"'))
+        self.assertNotIn(
+            'let create_key = format!("{}|create|{}|{}", package_name, path, from_path);\n        if operation_name',
+            duplicate,
+        )
+
     def test_read_only_exclusions_keep_parent_mount_read_only(self) -> None:
         apply = read("src/mount/apply.rs")
         aliases = read("src/mount/alias.rs")

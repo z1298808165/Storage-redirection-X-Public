@@ -45,33 +45,51 @@ fun runGit(vararg args: String): String? =
 fun cargoVersionFromText(text: String): String? =
     Regex("""(?m)^version\s*=\s*"([^"]+)"""").find(text)?.groupValues?.get(1)
 
-fun cargoVersionAtCommit(commit: String): String? =
-    runGit("show", "$commit:Cargo.toml")?.let(::cargoVersionFromText)
-
 fun headCargoVersion(): String? = runGit("show", "HEAD:Cargo.toml")?.let(::cargoVersionFromText)
 
 fun versionStartCommit(version: String): String? {
-  val commits =
-      runGit("rev-list", "--first-parent", "--reverse", "HEAD", "--", "Cargo.toml")
-          ?.lineSequence()
-          ?.filter { it.isNotBlank() }
-          ?.toList() ?: return null
-  var previousVersion: String? = null
+  val history =
+      runGit(
+          "log",
+          "--first-parent",
+          "--reverse",
+          "--format=commit:%H",
+          "-p",
+          "--",
+          "Cargo.toml",
+      ) ?: return null
+  var commit: String? = null
   var start: String? = null
-  for (commit in commits) {
-    val commitVersion = cargoVersionAtCommit(commit)
-    if (commitVersion == version && previousVersion != version) {
+  var addedCurrentVersion = false
+  var removedCurrentVersion = false
+  fun recordVersionStart() {
+    if (addedCurrentVersion && !removedCurrentVersion) {
       start = commit
     }
-    previousVersion = commitVersion
   }
+  for (line in history.lineSequence()) {
+    if (line.startsWith("commit:")) {
+      recordVersionStart()
+      commit = line.removePrefix("commit:").trim()
+      addedCurrentVersion = false
+      removedCurrentVersion = false
+      continue
+    }
+    if (line.startsWith('+') && cargoVersionFromText(line.removePrefix("+")) == version) {
+      addedCurrentVersion = true
+    } else if (line.startsWith('-') && cargoVersionFromText(line.removePrefix("-")) == version) {
+      removedCurrentVersion = true
+    }
+  }
+  recordVersionStart()
   return start
 }
 
-fun isAutoManifestCommit(commit: String): Boolean {
-  val subject = runGit("log", "-1", "--pretty=%s", commit) ?: return false
-  return autoManifestCommitPrefixes.any(subject::startsWith)
-}
+fun countNonAutoManifestCommits(range: String): Int =
+    runGit("log", "--first-parent", "--format=%s", range)
+        ?.lineSequence()
+        ?.filter { it.isNotBlank() }
+        ?.count { subject -> autoManifestCommitPrefixes.none(subject::startsWith) } ?: 0
 
 fun isWorktreeDirty(): Boolean = !runGit("status", "--porcelain").isNullOrBlank()
 
@@ -108,10 +126,7 @@ fun resolveBuildVersion(baseVersion: String, includeDirty: Boolean): ResolvedBui
       if (start == null) {
         0
       } else {
-        runGit("rev-list", "--first-parent", "--reverse", "$start^..HEAD")
-            ?.lineSequence()
-            ?.filter { it.isNotBlank() }
-            ?.count { !isAutoManifestCommit(it) } ?: 0
+        countNonAutoManifestCommits("$start..HEAD")
       }
 
   if (includeDirty && isWorktreeDirty()) {

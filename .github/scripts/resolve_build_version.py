@@ -15,6 +15,8 @@ AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
     "发布：更新更新清单",
 )
+
+
 def run_git(args: list[str], check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -47,14 +49,6 @@ def validate_base_version(version: str) -> tuple[int, int, int]:
     return int(parts[0]), int(parts[1]), int(parts[2])
 
 
-def version_at_commit(commit: str) -> str | None:
-    try:
-        text = run_git(["show", f"{commit}:Cargo.toml"])
-    except subprocess.CalledProcessError:
-        return None
-    return read_cargo_version_from_text(text)
-
-
 def current_head_version() -> str | None:
     try:
         text = run_git(["show", "HEAD:Cargo.toml"])
@@ -64,21 +58,33 @@ def current_head_version() -> str | None:
 
 
 def version_start_commit(current_version: str) -> str | None:
-    commits_text = run_git(["rev-list", "--first-parent", "--reverse", "HEAD", "--", "Cargo.toml"], check=False)
-    commits = [line for line in commits_text.splitlines() if line]
-    previous_version: str | None = None
+    history = run_git(
+        ["log", "--first-parent", "--reverse", "--format=commit:%H", "-p", "--", "Cargo.toml"],
+        check=False,
+    )
+    commit: str | None = None
     start: str | None = None
-    for commit in commits:
-        version = version_at_commit(commit)
-        if version == current_version and previous_version != current_version:
+    added_current_version = False
+    removed_current_version = False
+
+    def record_version_start() -> None:
+        nonlocal start
+        if added_current_version and not removed_current_version:
             start = commit
-        previous_version = version
+
+    for line in history.splitlines():
+        if line.startswith("commit:"):
+            record_version_start()
+            commit = line.removeprefix("commit:").strip()
+            added_current_version = False
+            removed_current_version = False
+            continue
+        if line.startswith("+") and read_cargo_version_from_text(line.removeprefix("+")) == current_version:
+            added_current_version = True
+        elif line.startswith("-") and read_cargo_version_from_text(line.removeprefix("-")) == current_version:
+            removed_current_version = True
+    record_version_start()
     return start
-
-
-def is_auto_manifest_commit(commit: str) -> bool:
-    subject = run_git(["log", "-1", "--pretty=%s", commit])
-    return subject.startswith(AUTO_MANIFEST_PREFIXES)
 
 
 def is_worktree_dirty() -> bool:
@@ -163,18 +169,17 @@ def parse_ci_version(version: str) -> tuple[str, int]:
 
 
 def latest_ci_manifest_commit(current_version: str) -> str | None:
-    commits_text = run_git(["rev-list", "--first-parent", "HEAD"], check=False)
-    for commit in [line for line in commits_text.splitlines() if line]:
-        subject = run_git(["log", "-1", "--pretty=%s", commit])
+    commits_text = run_git(["log", "--first-parent", "--format=%H%x09%s", "HEAD"], check=False)
+    for line in commits_text.splitlines():
+        commit, _, subject = line.partition("\t")
         if subject.startswith(f"CI：更新更新清单 {current_version}-ci."):
             return commit
     return None
 
 
 def count_non_auto_commits(range_expr: str) -> int:
-    commits_text = run_git(["rev-list", "--first-parent", "--reverse", range_expr], check=False)
-    commits = [line for line in commits_text.splitlines() if line]
-    return sum(1 for commit in commits if not is_auto_manifest_commit(commit))
+    subjects_text = run_git(["log", "--first-parent", "--format=%s", range_expr], check=False)
+    return sum(1 for subject in subjects_text.splitlines() if subject and not subject.startswith(AUTO_MANIFEST_PREFIXES))
 
 
 def resolve_build_count(current_version: str, include_dirty: bool) -> int:
