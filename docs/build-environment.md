@@ -42,6 +42,20 @@ $env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.14904198"
 $env:JAVA_HOME = "<JDK 安装目录>"
 ```
 
+上述 `$env:...` 只修改当前 PowerShell 进程，关闭终端后不会保留。需要在 Windows
+用户环境中持久化时，可执行一次：
+
+```powershell
+[Environment]::SetEnvironmentVariable("ANDROID_HOME", "<Android SDK 安装目录>", "User")
+[Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", "<Android SDK 安装目录>", "User")
+[Environment]::SetEnvironmentVariable("ANDROID_NDK_HOME", "<Android SDK 安装目录>\ndk\30.0.14904198", "User")
+[Environment]::SetEnvironmentVariable("JAVA_HOME", "<JDK 21 安装目录>", "User")
+```
+
+Windows 会把用户环境复制给新启动的进程；已经运行的终端、IDE 和 Codex 不会自动刷新，
+设置后需要完全退出并重新打开。仓库的本地构建脚本仍会在每次运行时检查 SDK、NDK、
+CMake、Ninja、Java 和 Rust 工具链，避免环境变量存在但安装目录不完整时表现为长时间无输出。
+
 确保 `ninja` 在 PATH 中。Android SDK 自带 ninja：
 
 ```powershell

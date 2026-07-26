@@ -49,8 +49,21 @@ keyPassword=<key 密码>
 仓库根目录的 `keystore.properties`、`*.jks` 和用户目录私有配置都不应提交。若需要临时指定其他配置文件，可设置 `SRX_APP_SIGNING_PROPERTIES` 或 Gradle property `srx.signing.propertiesFile`。
 
 ```powershell
-.\gradlew.bat --no-daemon --console=plain :app:assembleRelease
+.\gradlew.bat --console=plain :app:assembleRelease
 ```
+
+本地连续构建默认复用 Gradle daemon 和配置缓存。首次构建、构建脚本变化或缓存失效后，
+Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩短。CI 仍使用 `--no-daemon`，
+避免一次性 runner 留存进程。需要排查停顿时可临时增加 `--info`，并查看当前 daemon：
+
+```powershell
+.\gradlew.bat --status
+.\gradlew.bat --console=plain --info :app:assembleRelease
+```
+
+本地构建只读取 `.github/build-version-baseline.json` 计算下一个 CI 风格版本，不会回写该文件。
+该基线仅由 CI 在成功发布构建资产后更新，因此连续构建 App 与模块会使用相同版本号，
+`-SkipBuild` 也不会仅因复用现有产物而推进版本。
 
 ### 集成测试流构建
 
