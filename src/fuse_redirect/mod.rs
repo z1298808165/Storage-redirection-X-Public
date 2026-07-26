@@ -45,6 +45,7 @@ struct FuseState {
     next_fh: u64,
     inodes: HashMap<String, u64>,
     paths_by_inode: HashMap<u64, String>,
+    inode_path_versions: HashMap<u64, u64>,
     lookup_counts: HashMap<u64, u64>,
     dir_entry_refs: HashMap<u64, u64>,
     files: HashMap<u64, OpenFile>,
@@ -74,6 +75,12 @@ struct DirEntry {
     name: String,
 }
 
+struct DirEntryCandidate {
+    rel: String,
+    kind: FileType,
+    name: String,
+}
+
 impl FuseRedirectFs {
     fn new(config: FuseRedirectConfig) -> Option<Self> {
         let package_name = config.package_name.clone();
@@ -91,6 +98,7 @@ impl FuseRedirectFs {
                 next_fh: 1,
                 inodes,
                 paths_by_inode,
+                inode_path_versions: HashMap::from([(ROOT_INO, 0)]),
                 lookup_counts: HashMap::new(),
                 dir_entry_refs: HashMap::new(),
                 files: HashMap::new(),
@@ -107,6 +115,7 @@ impl FuseRedirectFs {
         state.next_ino = state.next_ino.saturating_add(1).max(ROOT_INO + 1);
         state.inodes.insert(rel.to_string(), ino);
         state.paths_by_inode.insert(ino, rel.to_string());
+        state.inode_path_versions.insert(ino, 0);
         INodeNo(ino)
     }
 
@@ -351,69 +360,79 @@ impl Filesystem for FuseRedirectFs {
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
-        let rel = match self.path_for_ino(ino) {
-            Some(rel) => rel,
-            None => {
+        let track_dir_perf = crate::logging::is_debug_logging_enabled();
+        let first_lock_started = track_dir_perf.then(std::time::Instant::now);
+        let (mut rel, mut path_version) = {
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let Some(rel) = state.paths_by_inode.get(&ino.0).cloned() else {
                 reply.error(Errno::ENOENT);
                 return;
-            }
+            };
+            let version = state.inode_path_versions.get(&ino.0).copied().unwrap_or(0);
+            (rel, version)
         };
-        let backend = match self.policy.backend_for_relative(&rel, OperationKind::Read) {
-            Some(backend) => backend,
-            None => {
-                reply.error(Errno::ENOENT);
+        let mut lock_wait_ns = elapsed_ns(first_lock_started);
+        let mut scan_ns = 0u64;
+        let mut retries = 0u64;
+        let (fh, entry_count) = loop {
+            let backend = match self.policy.backend_for_relative(&rel, OperationKind::Read) {
+                Some(backend) => backend,
+                None => {
+                    reply.error(Errno::ENOENT);
+                    return;
+                }
+            };
+            if !backend.path.is_dir() && !self.policy.is_virtual_dir(&rel) {
+                reply.error(Errno::ENOTDIR);
                 return;
             }
-        };
-        if !backend.path.is_dir() && !self.policy.is_virtual_dir(&rel) {
-            reply.error(Errno::ENOTDIR);
-            return;
-        }
-        let fh = {
+            let scan_started = track_dir_perf.then(std::time::Instant::now);
+            let candidates = collect_dir_entry_candidates(&self.policy, &rel);
+            scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
+            let lock_started = track_dir_perf.then(std::time::Instant::now);
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(lock_started));
+            let Some(current_rel) = state.paths_by_inode.get(&ino.0) else {
+                reply.error(Errno::ENOENT);
+                return;
+            };
+            let current_version = state.inode_path_versions.get(&ino.0).copied().unwrap_or(0);
+            if current_rel != &rel || current_version != path_version {
+                rel = current_rel.clone();
+                path_version = current_version;
+                retries = retries.saturating_add(1);
+                continue;
+            }
             let fh = state.next_handle();
+            let entry_count = candidates.len().saturating_add(2);
             let entries: Arc<[DirEntry]> =
-                build_dir_entries(&mut state, &self.policy, ino, &rel).into();
+                materialize_dir_entries(&mut state, ino, &rel, candidates).into();
             add_dir_entry_refs(&mut state, &entries);
             state.dirs.insert(fh, entries);
-            fh
+            break (fh, entry_count);
         };
+        self.perf
+            .record_dir_scan(scan_ns, lock_wait_ns, retries, entry_count);
         reply.opened(FileHandle(fh), FopenFlags::FOPEN_CACHE_DIR);
     }
 
     fn readdir(
         &self,
         _req: &Request,
-        ino: INodeNo,
+        _ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
         let _perf = self.perf.observe(&self.perf.read_calls);
+        let handle = fh.into();
         let entries = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-            if let Some(entries) = state.dirs.get(&fh.into()) {
-                entries.clone()
-            } else {
-                let Some(rel) = state.paths_by_inode.get(&ino.0).cloned() else {
-                    reply.error(Errno::ENOENT);
-                    return;
-                };
-                let Some(backend) = self.policy.backend_for_relative(&rel, OperationKind::Read)
-                else {
-                    reply.error(Errno::ENOENT);
-                    return;
-                };
-                if !backend.path.is_dir() && !self.policy.is_virtual_dir(&rel) {
-                    reply.error(Errno::ENOTDIR);
-                    return;
-                }
-                let entries: Arc<[DirEntry]> =
-                    build_dir_entries(&mut state, &self.policy, ino, &rel).into();
-                add_dir_entry_refs(&mut state, &entries);
-                state.dirs.insert(fh.into(), Arc::clone(&entries));
-                entries
-            }
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            state.dirs.get(&handle).cloned()
+        };
+        let Some(entries) = entries else {
+            reply.error(Errno::EBADF);
+            return;
         };
         for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
             if reply.add(entry.ino, (index + 1) as u64, entry.kind, &entry.name) {
@@ -1161,34 +1180,14 @@ impl Filesystem for FuseRedirectFs {
     }
 }
 
-fn build_dir_entries(
-    state: &mut FuseState,
+fn collect_dir_entry_candidates(
     policy: &policy::RedirectPolicy,
-    ino: INodeNo,
     rel: &str,
-) -> Vec<DirEntry> {
+) -> Vec<DirEntryCandidate> {
     use crate::platform::paths;
-    let parent_rel = paths::parent(rel);
-    let parent_ino = if rel.is_empty() {
-        ROOT_INO
-    } else {
-        *state.inodes.get(&parent_rel).unwrap_or(&ROOT_INO)
-    };
-    let mut entries = vec![
-        DirEntry {
-            ino,
-            kind: FileType::Directory,
-            name: ".".to_string(),
-        },
-        DirEntry {
-            ino: INodeNo(parent_ino),
-            kind: FileType::Directory,
-            name: "..".to_string(),
-        },
-    ];
+    let mut entries = Vec::new();
     let mut seen = HashMap::<String, usize>::new();
     append_backend_dir_entries(
-        state,
         policy,
         rel,
         &policy.redirect_backend_for_rel(rel),
@@ -1196,7 +1195,6 @@ fn build_dir_entries(
         &mut seen,
     );
     append_backend_dir_entries(
-        state,
         policy,
         rel,
         &policy.real_backend_for_rel(rel),
@@ -1212,7 +1210,6 @@ fn build_dir_entries(
             paths::relative_child_path(&mapping.final_path, &policy.storage_root)
         {
             append_backend_dir_entries(
-                state,
                 policy,
                 rel,
                 &policy.real_backend_for_storage_rel(target_rel),
@@ -1221,16 +1218,15 @@ fn build_dir_entries(
             );
         }
     }
-    append_rule_prefix_entries(state, policy, rel, &mut entries, &mut seen);
+    append_rule_prefix_entries(policy, rel, &mut entries, &mut seen);
     entries
 }
 
 fn append_backend_dir_entries(
-    state: &mut FuseState,
     policy: &policy::RedirectPolicy,
     parent_rel: &str,
     backend: &Path,
-    entries: &mut Vec<DirEntry>,
+    entries: &mut Vec<DirEntryCandidate>,
     seen: &mut HashMap<String, usize>,
 ) {
     use crate::platform::paths;
@@ -1258,15 +1254,14 @@ fn append_backend_dir_entries(
             .file_type()
             .map(file_type_from_std)
             .unwrap_or(FileType::RegularFile);
-        insert_dir_entry(state, entries, seen, child_rel, name, kind);
+        insert_dir_entry_candidate(entries, seen, child_rel, name, kind);
     }
 }
 
 fn append_rule_prefix_entries(
-    state: &mut FuseState,
     policy: &policy::RedirectPolicy,
     parent_rel: &str,
-    entries: &mut Vec<DirEntry>,
+    entries: &mut Vec<DirEntryCandidate>,
     seen: &mut HashMap<String, usize>,
 ) {
     use crate::platform::paths;
@@ -1279,20 +1274,12 @@ fn append_rule_prefix_entries(
         } else {
             paths::join(parent_rel, &child_name)
         };
-        insert_dir_entry(
-            state,
-            entries,
-            seen,
-            child_rel,
-            child_name,
-            FileType::Directory,
-        );
+        insert_dir_entry_candidate(entries, seen, child_rel, child_name, FileType::Directory);
     }
 }
 
-fn insert_dir_entry(
-    state: &mut FuseState,
-    entries: &mut Vec<DirEntry>,
+fn insert_dir_entry_candidate(
+    entries: &mut Vec<DirEntryCandidate>,
     seen: &mut HashMap<String, usize>,
     child_rel: String,
     name: String,
@@ -1305,14 +1292,45 @@ fn insert_dir_entry(
         }
         return;
     }
-    let child_ino = FuseRedirectFs::ino_for_path_locked(state, &child_rel);
     let index = entries.len();
-    entries.push(DirEntry {
-        ino: child_ino,
+    entries.push(DirEntryCandidate {
+        rel: child_rel,
         kind,
         name,
     });
     seen.insert(key, index);
+}
+
+fn materialize_dir_entries(
+    state: &mut FuseState,
+    ino: INodeNo,
+    rel: &str,
+    candidates: Vec<DirEntryCandidate>,
+) -> Vec<DirEntry> {
+    let parent_rel = paths::parent(rel);
+    let parent_ino = if rel.is_empty() {
+        ROOT_INO
+    } else {
+        // quality-allow(chinese-language): ROOT_INO 是 FUSE 根 inode 的固定技术标识。
+        *state.inodes.get(&parent_rel).unwrap_or(&ROOT_INO)
+    };
+    let mut entries = Vec::with_capacity(candidates.len().saturating_add(2));
+    entries.push(DirEntry {
+        ino,
+        kind: FileType::Directory,
+        name: ".".to_string(),
+    });
+    entries.push(DirEntry {
+        ino: INodeNo(parent_ino),
+        kind: FileType::Directory,
+        name: "..".to_string(),
+    });
+    entries.extend(candidates.into_iter().map(|candidate| DirEntry {
+        ino: FuseRedirectFs::ino_for_path_locked(state, &candidate.rel),
+        kind: candidate.kind,
+        name: candidate.name,
+    }));
+    entries
 }
 
 fn file_type_from_std(file_type: std::fs::FileType) -> FileType {
@@ -1607,12 +1625,14 @@ fn remove_unreferenced_inode(state: &mut FuseState, ino: u64) {
     }
     if let Some(rel) = state.paths_by_inode.remove(&ino) {
         state.inodes.remove(&rel);
+        state.inode_path_versions.remove(&ino);
     }
 }
 
 fn remove_inode_path(state: &mut FuseState, rel: &str) {
     if let Some(ino) = state.inodes.remove(rel) {
         state.paths_by_inode.remove(&ino);
+        state.inode_path_versions.remove(&ino);
         state.lookup_counts.remove(&ino);
         state.dir_entry_refs.remove(&ino);
     }
@@ -1626,7 +1646,16 @@ fn remap_inode_path(state: &mut FuseState, old_rel: &str, new_rel: &str) {
     if let Some(ino) = state.inodes.remove(old_rel) {
         state.inodes.insert(new_rel.to_string(), ino);
         state.paths_by_inode.insert(ino, new_rel.to_string());
+        let version = state.inode_path_versions.entry(ino).or_default();
+        // quality-allow(chinese-language): wrapping_add 是 Rust 整数回绕 API 名称。
+        *version = version.wrapping_add(1);
     }
+}
+
+fn elapsed_ns(started: Option<std::time::Instant>) -> u64 {
+    started
+        .map(|value| value.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
 }
 
 fn rename_noreplace(old_path: &Path, new_path: &Path) -> Result<(), Errno> {

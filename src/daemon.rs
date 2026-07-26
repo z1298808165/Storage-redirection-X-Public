@@ -237,6 +237,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let mut skipped = 0usize;
     let mut deferred = 0usize;
     let mut plans = Vec::new();
+    let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
 
     for proc in list_app_processes() {
         let key = format!("{}:{}", proc.pid, proc.package_name);
@@ -248,7 +249,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
             continue;
         }
 
-        let request = build_request(&proc, config_version);
+        let request = build_request(&proc, config_version, &config_snapshot);
         plans.push(ReconcilePlan::new(request));
     }
 
@@ -269,9 +270,8 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         }
         match plan.request.operation {
             MountOperation::Reload => {
-                let had_mount_state = has_mount_state(&plan.request);
                 if execute_mount_request(&plan.request) {
-                    if !had_mount_state && has_mount_state(&plan.request) {
+                    if !plan.has_mount_state && has_mount_state(&plan.request) {
                         crate::runtime_stats::record_runtime_activation();
                     }
                     applied += 1;
@@ -333,8 +333,11 @@ impl ReconcilePlan {
     }
 }
 
-fn build_request(proc: &AppProcess, config_version: u64) -> MountRequest {
-    let config = SettingsHub::instance();
+fn build_request(
+    proc: &AppProcess,
+    config_version: u64,
+    snapshot: &crate::config::DaemonReconcileConfigSnapshot,
+) -> MountRequest {
     let (
         operation,
         user_id,
@@ -345,7 +348,7 @@ fn build_request(proc: &AppProcess, config_version: u64) -> MountRequest {
         sandboxed_paths,
         read_only_paths,
         is_mapping_mode_only,
-    ) = match config.get_resolved_user_profile_snapshot(&proc.package_name, proc.uid) {
+    ) = match snapshot.resolve_profile(&proc.package_name, proc.uid) {
         Some(resolved) => (
             MountOperation::Reload,
             resolved.user_id,
@@ -383,8 +386,8 @@ fn build_request(proc: &AppProcess, config_version: u64) -> MountRequest {
         sandboxed_paths,
         read_only_paths,
         is_mapping_mode_only,
-        is_fuse_daemon_redirect_enabled: config.is_fuse_daemon_redirect_enabled(),
-        is_file_monitor_enabled: config.is_file_monitor_enabled(),
+        is_fuse_daemon_redirect_enabled: snapshot.is_fuse_daemon_redirect_enabled,
+        is_file_monitor_enabled: snapshot.is_file_monitor_enabled,
         config_version,
     }
 }
@@ -393,7 +396,7 @@ fn should_skip_process(proc: &AppProcess) -> bool {
     if proc.pid <= 0 || proc.uid < ANDROID_APP_UID_START {
         return true;
     }
-    if is_process_uninterruptible(proc.pid) {
+    if proc.is_uninterruptible {
         log_uninterruptible_skip(proc);
         return true;
     }
@@ -413,6 +416,7 @@ struct AppProcess {
     pid: i32,
     uid: i32,
     package_name: String,
+    is_uninterruptible: bool,
 }
 
 fn list_app_processes() -> Vec<AppProcess> {
@@ -432,13 +436,14 @@ fn list_app_processes() -> Vec<AppProcess> {
         let Some(package_name) = read_process_package(pid) else {
             continue;
         };
-        let Some(uid) = read_process_uid(pid) else {
+        let Some((uid, is_uninterruptible)) = read_process_status(pid) else {
             continue;
         };
         processes.push(AppProcess {
             pid,
             uid,
             package_name,
+            is_uninterruptible,
         });
     }
 
@@ -459,27 +464,18 @@ fn read_process_package(pid: i32) -> Option<String> {
     Some(package.to_string())
 }
 
-fn read_process_uid(pid: i32) -> Option<i32> {
+fn read_process_status(pid: i32) -> Option<(i32, bool)> {
     let status = std_fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    let mut uid = None;
+    let mut is_uninterruptible = false;
     for line in status.lines() {
-        let Some(rest) = line.strip_prefix("Uid:") else {
-            continue;
-        };
-        let uid_text = rest.split_whitespace().next()?;
-        return uid_text.parse::<i32>().ok();
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            uid = rest.split_whitespace().next()?.parse::<i32>().ok();
+        } else if let Some(state) = line.strip_prefix("State:") {
+            is_uninterruptible = state.trim_start().starts_with('D');
+        }
     }
-    None
-}
-
-fn is_process_uninterruptible(pid: i32) -> bool {
-    let Ok(status) = std_fs::read_to_string(format!("/proc/{}/status", pid)) else {
-        return false;
-    };
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("State:"))
-        .map(|state| state.trim_start().starts_with('D'))
-        .unwrap_or(false)
+    uid.map(|uid| (uid, is_uninterruptible))
 }
 
 fn log_uninterruptible_skip(proc: &AppProcess) {

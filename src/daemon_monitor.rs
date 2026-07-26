@@ -111,9 +111,8 @@ impl RegularAppMonitor {
         self.last_rebuild_ms = paths::monotonic_ms();
         self.needs_rebuild = false;
 
-        let owner_repair_specs = config.get_public_owner_repair_app_specs();
-        let monitor_specs = config.get_monitor_app_specs();
-        if owner_repair_specs.is_empty() && monitor_specs.is_empty() {
+        let snapshot = config.get_daemon_monitor_config_snapshot();
+        if snapshot.app_specs.is_empty() {
             return;
         }
         if !self.ensure_fd() {
@@ -122,14 +121,16 @@ impl RegularAppMonitor {
         }
 
         let mut roots = Vec::new();
-        for spec in &owner_repair_specs {
-            if let Some(root) = build_public_owner_repair_root(spec) {
+        for spec in &snapshot.app_specs {
+            if spec.is_enabled
+                && let Some(root) = build_public_owner_repair_root(spec)
+            {
                 roots.push(root);
             }
-        }
-        for spec in &monitor_specs {
-            roots.extend(build_private_owner_repair_roots(spec));
-            roots.extend(build_watch_roots(spec));
+            if snapshot.is_file_monitor_enabled {
+                roots.extend(build_private_owner_repair_roots(spec));
+                roots.extend(build_watch_roots(spec));
+            }
         }
         dedup_roots(&mut roots);
         sort_roots_by_monitor_priority(&mut roots);
@@ -401,13 +402,12 @@ impl RegularAppMonitor {
                     &child.display_dir,
                     &child.backend_dir,
                 );
-                if self.add_watch_node(&child) {
-                    if recurse_existing_tree
+                if self.add_watch_node(&child)
+                    && (recurse_existing_tree
                         || (node.source == "public_owner"
-                            && depth < PUBLIC_OWNER_EXISTING_WATCH_DEPTH)
-                    {
-                        stack.push((child, depth.saturating_add(1)));
-                    }
+                            && depth < PUBLIC_OWNER_EXISTING_WATCH_DEPTH))
+                {
+                    stack.push((child, depth.saturating_add(1)));
                 }
             }
         }
@@ -610,15 +610,15 @@ impl RegularAppMonitor {
         mask: u32,
     ) -> bool {
         let now_ms = paths::monotonic_ms();
-        let create_key = format!("{}|create|{}|{}", package_name, path, from_path);
-        if operation_name == "open:write"
-            && !inotify::is_modify(mask)
-            && self
+        if operation_name == "open:write" && !inotify::is_modify(mask) {
+            let create_key = format!("{}|create|{}|{}", package_name, path, from_path);
+            if self
                 .recent_event_ms
                 .get(&create_key)
                 .is_some_and(|last_ms| now_ms.saturating_sub(*last_ms) < DUPLICATE_EVENT_WINDOW_MS)
-        {
-            return true;
+            {
+                return true;
+            }
         }
 
         let event_key = format!("{}|{}|{}|{}", package_name, operation_name, path, from_path);
@@ -645,6 +645,7 @@ impl RegularAppMonitor {
         self.recent_event_ms.insert(event_key.clone(), now_ms);
         self.recent_event_order.push_back(event_key);
         if inotify::is_created_or_moved_to(mask) {
+            let create_key = format!("{}|create|{}|{}", package_name, path, from_path);
             if self
                 .recent_event_ms
                 .insert(create_key.clone(), now_ms)

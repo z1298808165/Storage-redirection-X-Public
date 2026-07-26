@@ -1,7 +1,7 @@
 use super::{MonitorFilterConfig, SettingsHub, SettingsState};
 use crate::config::{
-    MonitorAppSpec, ResolvedUserProfile, ResolvedUserProfileFlags, UserProfile,
-    UserRedirectEnablement,
+    DaemonMonitorConfigSnapshot, DaemonReconcileConfigSnapshot, MonitorAppSpec,
+    ResolvedUserProfile, ResolvedUserProfileFlags, UserProfile, UserRedirectEnablement,
 };
 use crate::platform;
 use crate::redirect::policy;
@@ -70,6 +70,21 @@ fn should_log_monitor_decision(counter: &AtomicU64) -> bool {
 }
 
 impl SettingsHub {
+    // quality-allow(lint-suppression): 仅 daemon 使用的调用方不会出现在 cdylib 构建中。
+    #[allow(dead_code)]
+    pub fn get_daemon_reconcile_config_snapshot(&self) -> DaemonReconcileConfigSnapshot {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        DaemonReconcileConfigSnapshot {
+            apps: if state.is_loaded {
+                state.apps.clone()
+            } else {
+                HashMap::new()
+            },
+            is_fuse_daemon_redirect_enabled: state.is_fuse_daemon_redirect_enabled,
+            is_file_monitor_enabled: state.is_file_monitor_enabled,
+        }
+    }
+
     pub fn get_resolved_user_profile_snapshot(
         &self,
         package_name: &str,
@@ -201,24 +216,15 @@ impl SettingsHub {
         false
     }
 
-    #[allow(dead_code)]
-    pub fn get_monitor_app_specs(&self) -> Vec<MonitorAppSpec> {
-        self.get_daemon_app_specs(true)
-    }
-
     // quality-allow(lint-suppression): 仅 daemon 使用的调用方不会出现在 cdylib 构建中。
     #[allow(dead_code)]
-    pub fn get_public_owner_repair_app_specs(&self) -> Vec<MonitorAppSpec> {
-        self.get_daemon_app_specs(false)
-            .into_iter()
-            .filter(|spec| spec.is_enabled)
-            .collect()
-    }
-
-    fn get_daemon_app_specs(&self, require_file_monitor: bool) -> Vec<MonitorAppSpec> {
+    pub fn get_daemon_monitor_config_snapshot(&self) -> DaemonMonitorConfigSnapshot {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !state.is_loaded || (require_file_monitor && !state.is_file_monitor_enabled) {
-            return Vec::new();
+        if !state.is_loaded {
+            return DaemonMonitorConfigSnapshot {
+                app_specs: Vec::new(),
+                is_file_monitor_enabled: false,
+            };
         }
 
         let mut specs = Vec::new();
@@ -245,7 +251,10 @@ impl SettingsHub {
                 .cmp(&right.user_id)
                 .then_with(|| left.package_name.cmp(&right.package_name))
         });
-        specs
+        DaemonMonitorConfigSnapshot {
+            app_specs: specs,
+            is_file_monitor_enabled: state.is_file_monitor_enabled,
+        }
     }
 
     pub fn has_enabled_redirect_apps_for_user(&self, app_uid: i32) -> bool {

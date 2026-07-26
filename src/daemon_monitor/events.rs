@@ -129,10 +129,6 @@ pub(super) fn emit_monitor_event(
         return;
     }
 
-    if SettingsHub::instance().should_filter_monitor_record(&paths.display_path, operation_name) {
-        return;
-    }
-
     let event_kind = if operation_name.starts_with("open") {
         "OPEN"
     } else if operation_name.starts_with("delete") {

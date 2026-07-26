@@ -1,4 +1,5 @@
 use crate::domain::PathMapping;
+use crate::platform;
 use crate::platform::module_paths;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -48,6 +49,39 @@ pub struct ResolvedUserProfile {
     pub sandboxed_paths: Vec<String>,
     pub read_only_paths: Vec<String>,
     pub path_mappings: Vec<PathMapping>,
+}
+
+// quality-allow(lint-suppression): 仅 daemon 使用的整轮快照不会出现在 cdylib 构建中。
+#[allow(dead_code)]
+pub struct DaemonReconcileConfigSnapshot {
+    apps: HashMap<String, AppProfile>,
+    pub is_fuse_daemon_redirect_enabled: bool,
+    pub is_file_monitor_enabled: bool,
+}
+
+impl DaemonReconcileConfigSnapshot {
+    // quality-allow(lint-suppression): 该方法只由 daemon 二进制调用，cdylib 目标不会使用。
+    #[allow(dead_code)]
+    pub fn resolve_profile(&self, package_name: &str, app_uid: i32) -> Option<ResolvedUserProfile> {
+        if package_name == "com.storage.redirect.x" {
+            return None;
+        }
+        let user_id = platform::user_id_from_uid(app_uid);
+        let user = self.apps.get(package_name)?.user_profiles.get(&user_id)?;
+        if !user.is_enabled {
+            return None;
+        }
+        Some(ResolvedUserProfile {
+            user_id,
+            redirect_target: platform::paths::default_redirect_target(package_name, user_id),
+            is_mapping_mode_only: user.is_mapping_mode_only,
+            allowed_real_paths: user.allowed_real_paths.clone(),
+            excluded_real_paths: user.excluded_real_paths.clone(),
+            sandboxed_paths: user.sandboxed_paths.clone(),
+            read_only_paths: user.read_only_paths.clone(),
+            path_mappings: user.path_mappings.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +159,13 @@ pub struct MonitorAppSpec {
     pub sandboxed_paths: Vec<String>,
     pub read_only_paths: Vec<String>,
     pub path_mappings: Vec<PathMapping>,
+}
+
+// quality-allow(lint-suppression): 仅 daemon 使用的快照类型不会出现在 cdylib 构建中。
+#[allow(dead_code)]
+pub struct DaemonMonitorConfigSnapshot {
+    pub app_specs: Vec<MonitorAppSpec>,
+    pub is_file_monitor_enabled: bool,
 }
 
 struct SettingsState {
