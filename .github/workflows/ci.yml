@@ -28,6 +28,9 @@ jobs:
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v6.1.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -61,8 +64,6 @@ jobs:
           ./scripts/validate-code-quality.ps1 -BaseRef $baseRef -Ref HEAD
 
   prepare:
-    needs:
-      - quality
     if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-latest
     outputs:
@@ -81,6 +82,7 @@ jobs:
 
   init-ci-release:
     needs:
+      - quality
       - prepare
     if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
     runs-on: ubuntu-latest
@@ -276,6 +278,9 @@ jobs:
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v6.1.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -359,6 +364,9 @@ jobs:
 
       - name: Setup Gradle cache
         uses: gradle/actions/setup-gradle@v6.1.0
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -441,9 +449,10 @@ jobs:
   test-flow:
     name: Test-flow Android ${{ matrix.android.version }}
     needs:
+      - quality
       - prepare
       - test-flow-build
-    if: always() && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -554,6 +563,7 @@ jobs:
   test-flow-required:
     name: Test-flow required gate
     needs:
+      - quality
       - prepare
       - test-flow
     if: always() && needs.prepare.result != 'skipped'
@@ -561,6 +571,10 @@ jobs:
     steps:
       - name: Require all test-flow matrix jobs to pass
         run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "quality result: ${{ needs.quality.result }}" >&2
+            exit 1
+          fi
           if [ "${{ needs.test-flow.result }}" != "success" ]; then
             echo "test-flow matrix result: ${{ needs.test-flow.result }}" >&2
             exit 1

@@ -75,16 +75,32 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_workflow_optimizations_preserve_test_flow_gate(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             source = read(workflow)
+            prepare = section(source, "  prepare:", "  init-")
+            init_job = section(source, "  init-", "  module:")
             app_job = section(source, "  app:", "  test-flow-build:")
             test_flow = section(source, "  test-flow:", "  test-flow-required:")
+            self.assertNotIn("needs:", prepare)
+            self.assertIn("- quality", init_job)
+            self.assertIn("- prepare", init_job)
             self.assertIn(':app:testDebugUnitTest :app:assembleRelease', app_job)
             self.assertNotIn('"ndk;30.0.14904198"', app_job)
             self.assertNotIn("fetch-depth: 0", test_flow)
+            self.assertIn("- quality", test_flow)
+            self.assertIn("needs.quality.result == 'success'", test_flow)
             self.assertIn("fail-fast: true", test_flow)
             for version in (13, 14, 15, 16):
                 self.assertIn(f"version: {version}", test_flow)
             required = source[source.index("  test-flow-required:") :]
+            self.assertIn("needs.quality.result", required)
             self.assertIn("needs.test-flow.result", required)
+
+    def test_gradle_cache_can_be_written_by_public_builds(self) -> None:
+        ci = read(".github/workflows/ci.yml")
+        release = read(".github/workflows/release.yml")
+        self.assertEqual(3, ci.count("cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}"))
+        self.assertEqual(3, release.count("cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}"))
+        self.assertEqual(3, ci.count("cache-read-only: ${{ github.event_name == 'pull_request' }}"))
+        self.assertEqual(3, release.count("cache-read-only: false"))
 
     def test_test_flow_reports_are_not_in_runtime_artifacts(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
