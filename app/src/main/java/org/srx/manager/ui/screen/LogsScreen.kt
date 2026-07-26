@@ -105,13 +105,15 @@ internal fun LogsScreen(
   var showFullTime by rememberSaveable { mutableStateOf(false) }
   val appsByPackage = remember(apps) { apps.associateBy { it.packageName } }
   val filtered =
-      remember(logs, query) {
+      remember(logs, query, appsByPackage) {
         val q = query.trim().lowercase()
         if (q.isBlank()) logs
         else
             logs.filter {
+              val resolvedLabel = appsByPackage[it.packageName]?.label.orEmpty()
               listOf(
                       it.label,
+                      resolvedLabel,
                       it.packageName,
                       it.processPackage,
                       it.callerPackage,

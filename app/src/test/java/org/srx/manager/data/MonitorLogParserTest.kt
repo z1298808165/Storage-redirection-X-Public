@@ -745,4 +745,32 @@ class MonitorLogParserTest {
             .isEmpty()
     )
   }
+
+  @Test
+  fun preservesWildcardFilterSemantics() {
+    val raw =
+        listOf(
+                monitorLine("open:create", "Download/alpha/file.txt"),
+                monitorLine("open:read", "Download/beta/file.txt"),
+                monitorLine("mkdir", "Android/data/com.example/cache/item"),
+            )
+            .joinToString("\n")
+
+    val entries =
+        parseMonitorLogEntries(
+            raw,
+            filters =
+                FileMonitorFilters(
+                    excludedPaths = listOf("Download/al**a/file.?xt", "Android/data/**"),
+                    excludedOperations = listOf("**:create"),
+                ),
+        )
+
+    assertEquals(listOf("/storage/emulated/0/Download/beta/file.txt"), entries.map { it.path })
+  }
+
+  private fun monitorLine(operation: String, relativePath: String): String =
+      "2026-07-25 12:30:41|com.example.app|com.example.app|OPEN|" +
+          "/storage/emulated/0/$relativePath|ret=10|errno=0|op=${operation.substringBefore(':')}|" +
+          "op_filter=$operation"
 }

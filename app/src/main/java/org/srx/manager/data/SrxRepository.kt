@@ -11,6 +11,8 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
@@ -33,7 +35,10 @@ class SrxRepository(
     const val BackupSchemaVersion = 2
     const val BackupModuleId = "storage.redirect.x"
     const val LogPreviewTailLines = 500
+    const val AppDataCacheTtlNanos = 3_000_000_000L
   }
+
+  private data class TimedCache<T>(val value: T, val loadedAtNanos: Long)
 
   private val json = Json {
     ignoreUnknownKeys = true
@@ -45,6 +50,10 @@ class SrxRepository(
   private val moduleController = RootModuleController(shell)
   private val appQuery = RootAppQuery(shell)
   private val storageBrowser = RootStorageBrowser(shell)
+  private val configuredAppsCacheMutex = Mutex()
+  private val dexLabelsCacheMutex = Mutex()
+  private var configuredAppsCache: TimedCache<Map<String, AppConfig>>? = null
+  private val dexLabelsCache = mutableMapOf<String, TimedCache<Map<String, String>>>()
 
   suspend fun checkRoot(): Boolean = shell.checkRoot()
 
@@ -149,7 +158,9 @@ class SrxRepository(
               .mapKeys { (packageName, _) -> "$packageName.json" }
               .mapValues { (_, config) -> json.encodeToString(config) + "\n" }
       if (!fileStore.writeStagedFiles(stage, stagedFiles)) return false
-      return fileStore.publishStagedAppConfigs(stage)
+      val published = fileStore.publishStagedAppConfigs(stage)
+      if (published) invalidateConfiguredAppsCache()
+      return published
     } finally {
       fileStore.removeTree(stage)
     }
@@ -157,7 +168,9 @@ class SrxRepository(
 
   suspend fun deleteAppConfig(packageName: String): Boolean {
     if (!isSafePackageName(packageName)) return false
-    return fileStore.deleteConfig("$AppsDir/$packageName.json")
+    val deleted = fileStore.deleteConfig("$AppsDir/$packageName.json")
+    if (deleted) invalidateConfiguredAppsCache()
+    return deleted
   }
 
   suspend fun readTemplates(): List<ConfigTemplate> {
@@ -234,8 +247,9 @@ class SrxRepository(
     val dexMap = dexApps.await()
 
     withContext(Dispatchers.IO) {
+      val pmByPackage = loadPackageManagerApps(userId).associateBy { it.packageName }
       safePackages.map { pkg ->
-        val info = loadPackageManagerApp(pkg)
+        val info = pmByPackage[pkg]
         InstalledApp(
             packageName = pkg,
             label =
@@ -262,10 +276,7 @@ class SrxRepository(
   suspend fun readLogSnapshot(): MonitorLogSnapshot {
     val raw = fileStore.readTail(FileMonitorLogPath, LogPreviewTailLines)
     val filters = readFileMonitorFilters()
-    val entries =
-        withContext(Dispatchers.IO) {
-          parseMonitorLogEntries(raw, filters, ::resolveLogPackageLabel)
-        }
+    val entries = withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, filters) }
     return MonitorLogSnapshot(entries, filters)
   }
 
@@ -277,7 +288,7 @@ class SrxRepository(
 
   suspend fun exportDiagnosticArchive(
       uri: Uri,
-      onProgress: (suspend (DiagnosticArchiveProgress) -> Unit)? = null,
+      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
   ): Boolean =
       withContext(Dispatchers.IO) {
         val archivePath = createDiagnosticArchive(onProgress) ?: return@withContext false
@@ -294,7 +305,7 @@ class SrxRepository(
   suspend fun exportDiagnosticArchiveToDirectory(
       directoryUri: Uri,
       fileName: String,
-      onProgress: (suspend (DiagnosticArchiveProgress) -> Unit)? = null,
+      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
   ): Boolean =
       withContext(Dispatchers.IO) {
         val safeName =
@@ -445,7 +456,7 @@ class SrxRepository(
   )
 
   suspend fun createDiagnosticArchive(
-      onProgress: (suspend (DiagnosticArchiveProgress) -> Unit)? = null
+      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null
   ): String? {
     return fileStore.createDiagnosticArchive(onProgress)
   }
@@ -519,8 +530,11 @@ class SrxRepository(
       touchAfter: Boolean = false,
   ): Boolean = fileStore.write(path, content, touchAfter)
 
-  private suspend fun writeConfigFile(path: String, content: String): Boolean =
-      fileStore.writeConfig(path, content)
+  private suspend fun writeConfigFile(path: String, content: String): Boolean {
+    val written = fileStore.writeConfig(path, content)
+    if (written && path.startsWith("$AppsDir/")) invalidateConfiguredAppsCache()
+    return written
+  }
 
   private suspend fun touchConfig() {
     fileStore.touchConfig()
@@ -553,6 +567,7 @@ class SrxRepository(
       if (!fileStore.writeStagedFiles(stage, stagedFiles)) return false
       val result = fileStore.restoreConfigStage(stage, rollback)
       if (result) {
+        invalidateConfiguredAppsCache()
         normalizedData.ui?.let { PreferencesRepository(context).restoreBackupUiPreferences(it) }
         touchConfig()
         moduleController.ensureLogCollectors()
@@ -564,10 +579,25 @@ class SrxRepository(
   }
 
   private suspend fun readConfiguredAppConfigs(force: Boolean): Map<String, AppConfig> {
-    val out = fileStore.readConfiguredAppConfigDump()
-    return withContext(Dispatchers.Default) {
-      parseConfiguredAppConfigDump(out, ConfiguredAppConfigMarker, json)
+    return configuredAppsCacheMutex.withLock {
+      configuredAppsCache
+          ?.takeUnless { force || it.isExpired() }
+          ?.value
+          ?.let {
+            return@withLock it
+          }
+      val out = fileStore.readConfiguredAppConfigDump()
+      val parsed =
+          withContext(Dispatchers.Default) {
+            parseConfiguredAppConfigDump(out, ConfiguredAppConfigMarker, json)
+          }
+      configuredAppsCache = TimedCache(parsed, System.nanoTime())
+      parsed
     }
+  }
+
+  private suspend fun invalidateConfiguredAppsCache() {
+    configuredAppsCacheMutex.withLock { configuredAppsCache = null }
   }
 
   private suspend fun countEnabledAppConfigs(configs: Map<String, AppConfig>): Int =
@@ -637,7 +667,20 @@ class SrxRepository(
       }
 
   private suspend fun loadDexAppLabels(userId: String, force: Boolean): Map<String, String> =
-      appQuery.loadDexAppLabels(userId)
+      dexLabelsCacheMutex.withLock {
+        dexLabelsCache[userId]
+            ?.takeUnless { force || it.isExpired() }
+            ?.value
+            ?.let {
+              return@withLock it
+            }
+        val labels = appQuery.loadDexAppLabels(userId)
+        dexLabelsCache[userId] = TimedCache(labels, System.nanoTime())
+        labels
+      }
+
+  private fun TimedCache<*>.isExpired(): Boolean =
+      System.nanoTime() - loadedAtNanos >= AppDataCacheTtlNanos
 
   private fun loadPackageManagerApps(userId: String): List<ApplicationInfo> {
     val pm = context.packageManager
@@ -670,14 +713,6 @@ class SrxRepository(
 
   private suspend fun readRuntimeActivations(): String =
       parseRuntimeActivationCount(readFile(StatsPath))
-
-  private fun resolveLogPackageLabel(packageName: String): String {
-    if (packageName.isBlank() || packageName == "-") return packageName
-    return loadPackageManagerApp(packageName)
-        ?.loadLabel(context.packageManager)
-        ?.toString()
-        ?.takeIf { it.isNotBlank() } ?: packageName
-  }
 
   private fun statusRank(app: InstalledApp): Int =
       when {

@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -801,8 +802,8 @@ class SrxViewModel(
     }
   }
 
-  private suspend fun updateDiagnosticArchiveProgress(progress: DiagnosticArchiveProgress) {
-    withContext(Dispatchers.Main.immediate) { updateBusy(BusyStateChange.Progress(progress)) }
+  private fun updateDiagnosticArchiveProgress(progress: DiagnosticArchiveProgress) {
+    updateBusy(BusyStateChange.Progress(progress))
   }
 
   fun exportBackupToUri(uri: Uri) {
@@ -933,7 +934,7 @@ class SrxViewModel(
   }
 
   private fun updateBusy(change: BusyStateChange) {
-    _state.value = _state.value.reduceBusy(change)
+    _state.update { it.reduceBusy(change) }
   }
 
   private fun updateLogs(change: LogStateChange) {

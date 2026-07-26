@@ -1,6 +1,7 @@
 package org.srx.manager.data
 
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.srx.manager.root.ShellExecutor
 import org.srx.manager.root.base64Utf8
 import org.srx.manager.root.shellQuote
@@ -157,7 +158,7 @@ class RootFileStore(
   }
 
   suspend fun createDiagnosticArchive(
-      onProgress: (suspend (DiagnosticArchiveProgress) -> Unit)? = null
+      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null
   ): String? {
     val token = "${System.currentTimeMillis()}_${(0..99999).random()}"
     val stage = "/data/local/tmp/srx_diag_$token"
@@ -173,7 +174,7 @@ class RootFileStore(
       token: String,
       stage: String,
       archive: String,
-      onProgress: suspend (DiagnosticArchiveProgress) -> Unit,
+      onProgress: (DiagnosticArchiveProgress) -> Unit,
   ): String? {
     val progress = "/data/local/tmp/srx_diag_progress_$token"
     val done = "$progress.done"
@@ -198,7 +199,7 @@ class RootFileStore(
       if (!start.isSuccess) return null
 
       onProgress(DiagnosticArchiveProgress(1, "start", "正在准备日志包"))
-      if (!waitForDiagnosticArchive(done, progress, pid, onProgress)) return null
+      if (!waitForDiagnosticArchive(done, progress, pid, worker, onProgress)) return null
 
       onProgress(DiagnosticArchiveProgress(99, "verify", "正在确认日志包"))
       val exists =
@@ -216,7 +217,14 @@ class RootFileStore(
           } else {
             arrayOf(stage, archive, progress, "$progress.tmp", done, runLog, pid, worker)
           }
-      runCatching { shell.exec(managedTempCleanupCommand(*cleanupPaths), timeoutMs = 10_000L) }
+      withContext(NonCancellable) {
+        runCatching {
+          shell.exec(
+              buildDiagnosticArchiveCleanupCommand(pid, worker, *cleanupPaths),
+              timeoutMs = 10_000L,
+          )
+        }
+      }
     }
   }
 
@@ -224,28 +232,25 @@ class RootFileStore(
       done: String,
       progress: String,
       pid: String,
-      onProgress: suspend (DiagnosticArchiveProgress) -> Unit,
+      worker: String,
+      onProgress: (DiagnosticArchiveProgress) -> Unit,
   ): Boolean {
-    val deadline = System.currentTimeMillis() + 180_000L
     var lastProgressLine = ""
-    while (System.currentTimeMillis() < deadline) {
-      val poll = shell.exec(buildDiagnosticArchivePollCommand(progress, done), timeoutMs = 10_000L)
-      val pollState = parseDiagnosticArchivePoll(poll.stdout)
-      val progressState = pollState.progress?.asArchiveBuildProgress()
-      if (progressState != null && pollState.progressLine != lastProgressLine) {
-        lastProgressLine = pollState.progressLine
-        onProgress(progressState)
-      }
-      val doneCode = pollState.doneCode
-      if (doneCode != null) return doneCode == 0
-      delay(600)
-    }
-
-    shell.exec(
-        "pid_file=${shellQuote(pid)}; if [ -f \"\$pid_file\" ]; then kill \$(cat \"\$pid_file\") 2>/dev/null || true; fi",
-        timeoutMs = 10_000L,
-    )
-    return false
+    var doneCode: Int? = null
+    val result =
+        shell.execStreaming(
+            buildDiagnosticArchiveWaitCommand(progress, done, pid, worker),
+            timeoutMs = 190_000L,
+        ) { line ->
+          val pollState = parseDiagnosticArchivePoll(line)
+          val progressState = pollState.progress?.asArchiveBuildProgress()
+          if (progressState != null && pollState.progressLine != lastProgressLine) {
+            lastProgressLine = pollState.progressLine
+            onProgress(progressState)
+          }
+          pollState.doneCode?.let { doneCode = it }
+        }
+    return result.isSuccess && doneCode == 0
   }
 
   private fun buildDiagnosticArchiveCommand(
@@ -322,10 +327,42 @@ class RootFileStore(
           )
           .joinToString("\n")
 
-  private fun buildDiagnosticArchivePollCommand(progress: String, done: String): String =
-      "progress=${shellQuote(progress)}; done=${shellQuote(done)}; " +
-          "if [ -f \"\$progress\" ]; then tail -n 1 \"\$progress\"; fi; " +
-          "printf '\\n__SRX_DONE__='; if [ -f \"\$done\" ]; then cat \"\$done\"; fi"
+  private fun buildDiagnosticArchiveWaitCommand(
+      progress: String,
+      done: String,
+      pid: String,
+      worker: String,
+  ): String =
+      "progress=${shellQuote(progress)}; done=${shellQuote(done)}; pid_file=${shellQuote(pid)}; " +
+          "worker=${shellQuote(worker)}; " +
+          "last=''; attempt=0; " +
+          "while [ \$attempt -lt 300 ]; do " +
+          "line=\$(tail -n 1 \"\$progress\" 2>/dev/null || true); " +
+          "if [ -n \"\$line\" ] && [ \"\$line\" != \"\$last\" ]; then printf '%s\\n' \"\$line\"; last=\$line; fi; " +
+          "if [ -f \"\$done\" ]; then printf '__SRX_DONE__=%s\\n' \"\$(cat \"\$done\")\"; exit 0; fi; " +
+          "sleep 0.6; attempt=\$((attempt + 1)); done; " +
+          stopDiagnosticArchiveWorkerCommand() +
+          "printf '__SRX_DONE__=124\\n'; exit 124"
+
+  private fun buildDiagnosticArchiveCleanupCommand(
+      pid: String,
+      worker: String,
+      vararg paths: String,
+  ): String {
+    if (!isManagedTempPath(pid) || !isManagedTempPath(worker)) {
+      throw IllegalArgumentException("托管临时路径不安全")
+    }
+    return "pid_file=${shellQuote(pid)}; worker=${shellQuote(worker)}; " +
+        stopDiagnosticArchiveWorkerCommand() +
+        managedTempCleanupCommand(*paths)
+  }
+
+  private fun stopDiagnosticArchiveWorkerCommand(): String =
+      "if [ -r \"\$pid_file\" ]; then worker_pid=\$(cat \"\$pid_file\" 2>/dev/null); " +
+          "case \"\$worker_pid\" in ''|*[!0-9]*) ;; *) " +
+          "if [ -r \"/proc/\$worker_pid/cmdline\" ] && " +
+          "grep -a -F -- \"\$worker\" \"/proc/\$worker_pid/cmdline\" >/dev/null 2>&1; " +
+          "then kill \"\$worker_pid\" 2>/dev/null || true; fi ;; esac; fi; "
 
   private fun buildLegacyDiagnosticArchiveCommand(
       stage: String,

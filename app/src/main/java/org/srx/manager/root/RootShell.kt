@@ -7,6 +7,7 @@ import java.io.InputStreamReader
 import java.util.concurrent.Callable
 import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -29,6 +30,18 @@ interface ShellExecutor {
       mountMaster: Boolean = false,
       stdin: ByteArray? = null,
   ): ShellResult
+
+  suspend fun execStreaming(
+      command: String,
+      timeoutMs: Long = 120_000L,
+      mountMaster: Boolean = false,
+      stdin: ByteArray? = null,
+      onStdoutLine: (String) -> Unit,
+  ): ShellResult {
+    val result = exec(command, timeoutMs, mountMaster, stdin)
+    result.stdout.lineSequence().forEach(onStdoutLine)
+    return result
+  }
 }
 
 internal fun interface RootProcessStarter {
@@ -55,6 +68,22 @@ class RootShell() : Closeable, ShellExecutor {
       timeoutMs: Long,
       mountMaster: Boolean,
       stdin: ByteArray?,
+  ): ShellResult = execInternal(command, timeoutMs, mountMaster, stdin, null)
+
+  override suspend fun execStreaming(
+      command: String,
+      timeoutMs: Long,
+      mountMaster: Boolean,
+      stdin: ByteArray?,
+      onStdoutLine: (String) -> Unit,
+  ): ShellResult = execInternal(command, timeoutMs, mountMaster, stdin, onStdoutLine)
+
+  private suspend fun execInternal(
+      command: String,
+      timeoutMs: Long,
+      mountMaster: Boolean,
+      stdin: ByteArray?,
+      onStdoutLine: ((String) -> Unit)?,
   ): ShellResult =
       withContext(Dispatchers.IO) {
         val args =
@@ -83,10 +112,24 @@ class RootShell() : Closeable, ShellExecutor {
               }
               Unit
             }
+        val callbackFailure = AtomicReference<Throwable>()
+        val stdoutCallback =
+            onStdoutLine?.let { callback ->
+              { line: String ->
+                try {
+                  callback(line)
+                } catch (error: Throwable) {
+                  callbackFailure.compareAndSet(null, error)
+                }
+                Unit
+              }
+            }
         val stdoutJob =
             startDaemonTask("srx-shell-stdout") {
               runCatching {
-                    BufferedReader(InputStreamReader(proc.inputStream)).use { it.readRemaining() }
+                    BufferedReader(InputStreamReader(proc.inputStream)).use {
+                      it.readRemaining(stdoutCallback)
+                    }
                   }
                   .getOrDefault("")
             }
@@ -98,7 +141,7 @@ class RootShell() : Closeable, ShellExecutor {
                   .getOrDefault("")
             }
         try {
-          if (!waitForProcess(proc, timeoutMs)) {
+          if (!waitForProcess(proc, timeoutMs) { callbackFailure.get() != null }) {
             terminateProcess(proc, stdinJob, stdoutJob, stderrJob)
             val stdoutText = stdoutJob.completedValue().orEmpty()
             val stderrText = stderrJob.completedValue().orEmpty()
@@ -108,11 +151,13 @@ class RootShell() : Closeable, ShellExecutor {
                 } else {
                   "$stderrText\n命令执行超时"
                 }
+            callbackFailure.get()?.let { throw it }
             return@withContext ShellResult(124, stdoutText, timeoutText)
           }
           stdinJob.get(1, TimeUnit.SECONDS)
           val stdoutText = stdoutJob.awaitOutputOrClose(proc.inputStream)
           val stderrText = stderrJob.awaitOutputOrClose(proc.errorStream)
+          callbackFailure.get()?.let { throw it }
           ShellResult(proc.exitValue(), stdoutText, stderrText)
         } catch (canceled: CancellationException) {
           terminateProcess(proc, stdinJob, stdoutJob, stderrJob)
@@ -123,10 +168,15 @@ class RootShell() : Closeable, ShellExecutor {
   override fun close() = Unit
 }
 
-private suspend fun waitForProcess(process: Process, timeoutMs: Long): Boolean {
+private suspend fun waitForProcess(
+    process: Process,
+    timeoutMs: Long,
+    shouldAbort: () -> Boolean = { false },
+): Boolean {
   val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs.coerceAtLeast(0L))
   while (true) {
     currentCoroutineContext().ensureActive()
+    if (shouldAbort()) return false
     val remainingNanos = deadlineNanos - System.nanoTime()
     if (remainingNanos <= 0L) return !process.isAlive
     val waitMs = TimeUnit.NANOSECONDS.toMillis(remainingNanos).coerceIn(1L, 100L)
@@ -170,10 +220,11 @@ private fun <T> startDaemonTask(name: String, block: () -> T): FutureTask<T> {
   return task
 }
 
-private fun BufferedReader.readRemaining(): String =
+private fun BufferedReader.readRemaining(onLine: ((String) -> Unit)? = null): String =
     buildString {
           while (true) {
             val line = readLine() ?: break
+            onLine?.invoke(line)
             append(line).append('\n')
           }
         }

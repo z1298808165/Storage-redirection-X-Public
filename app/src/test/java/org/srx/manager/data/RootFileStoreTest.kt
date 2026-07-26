@@ -319,7 +319,7 @@ class RootFileStoreTest {
   }
 
   @Test
-  fun archivesInBackgroundAndPollsProgress() = runBlocking {
+  fun streamsDiagnosticProgressWithSingleWaitShell() = runBlocking {
     val shell =
         CapturingShell(
             ShellResult(0, "", ""),
@@ -355,8 +355,16 @@ class RootFileStoreTest {
         startCommand.contains("printf '%s\\n' \"\$worker_pid\" > \"\$pid_file\"; exit 0"),
     )
 
-    val pollCommand = shell.invocations[1].command
-    assertTrue(pollCommand, pollCommand.contains("__SRX_DONE__="))
+    val waitInvocation = shell.invocations[1]
+    val waitCommand = waitInvocation.command
+    assertEquals(190_000L, waitInvocation.timeoutMs)
+    assertTrue(waitCommand, waitCommand.contains("while [ \$attempt -lt 300 ]"))
+    assertTrue(waitCommand, waitCommand.contains("sleep 0.6"))
+    assertTrue(waitCommand, waitCommand.contains("__SRX_DONE__=%s"))
+    assertTrue(waitCommand, waitCommand.contains("__SRX_DONE__=124"))
+    assertTrue(waitCommand, waitCommand.contains("/proc/\$worker_pid/cmdline"))
+    assertTrue(waitCommand, waitCommand.contains("grep -a -F -- \"\$worker\""))
+    assertTrue(waitCommand, waitCommand.contains("kill \"\$worker_pid\""))
     assertTrue(
         shell.invocations[2].command,
         shell.invocations[2].command.contains("[ -s ${shellQuote(archive!!)} ]"),
@@ -366,6 +374,10 @@ class RootFileStoreTest {
         shell.invocations[3].command.contains("srx_diag_progress_"),
     )
     assertTrue(shell.invocations[3].command, shell.invocations[3].command.contains(".worker.sh"))
+    assertTrue(
+        shell.invocations[3].command,
+        shell.invocations[3].command.contains("/proc/\$worker_pid/cmdline"),
+    )
   }
 
   @Test
