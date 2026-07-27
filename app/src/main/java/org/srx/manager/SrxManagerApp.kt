@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.Build
 import org.lsposed.hiddenapibypass.HiddenApiBypass
+import org.srx.manager.data.PreferencesRepository
 
 private const val SharedPrefsName = "srx_manager"
 private const val PredictiveBackPrefsKey = "predictive_back"
@@ -32,6 +33,9 @@ class SrxManagerApp : Application() {
       val enabled =
           getSharedPreferences(SharedPrefsName, Context.MODE_PRIVATE)
               .getBoolean(PredictiveBackPrefsKey, false)
+      // 这次同步读取无法避免：设置 ApplicationInfo 必须在任何 Activity 创建之前完成。
+      // 登记进缓存后，UI 偏好流就不必在主线程重复读这份 SharedPreferences。
+      PreferencesRepository.seedPredictiveBackCache(enabled)
       syncPredictiveBackEnabled(applicationInfo, enabled)
     }
   }

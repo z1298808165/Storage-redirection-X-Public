@@ -15,6 +15,12 @@ private val Context.dataStore by preferencesDataStore(name = "srx_manager")
 private const val SharedPrefsName = "srx_manager"
 private const val PredictiveBackPrefsKey = "predictive_back"
 
+// 预测式返回需要在 Application.onCreate 里同步取值（那时协程还没法用，DataStore 是
+// 异步的），因此另外用 SharedPreferences 存一份。这里把它缓存在内存中：uiPreferences
+// 流在 Dispatchers.Main.immediate 上被收集，若每次发射都去 getSharedPreferences 读，
+// 就等于在主线程做磁盘 IO，首次访问还要解析 XML。
+@Volatile private var predictiveBackCache: Boolean? = null
+
 enum class UiThemeMode {
   Light,
   Dark,
@@ -54,9 +60,18 @@ data class UiPreferences(
 )
 
 class PreferencesRepository(private val context: Context) {
-  private companion object {
-    const val PageScaleMin = 0.8f
-    const val PageScaleMax = 1.1f
+  companion object {
+    private const val PageScaleMin = 0.8f
+    private const val PageScaleMax = 1.1f
+
+    /**
+     * 记录 Application.onCreate 已经同步读到的兼容开关值。
+     *
+     * 启动时那次读取无法避免（此时协程尚不可用，而 DataStore 是异步的），但把结果 登记进缓存后，后续 uiPreferences 的每次发射都不必再回到磁盘。
+     */
+    fun seedPredictiveBackCache(enabled: Boolean) {
+      predictiveBackCache = enabled
+    }
   }
 
   private val floatingBottomBarKey = booleanPreferencesKey("floating_bottom_bar")
@@ -187,18 +202,26 @@ class PreferencesRepository(private val context: Context) {
 
   suspend fun readPredictiveBack(): Boolean = predictiveBackCompatPref()
 
+  /**
+   * 写入预测式返回的兼容开关。
+   *
+   * 用 apply 异步落盘：调用方紧接着会 recreate Activity，而重建后的读取走内存缓存， 不依赖这次写盘是否已完成；进程被杀时 apply 同样会保证落盘。
+   */
   fun setPredictiveBackCompatPref(enabled: Boolean) {
+    predictiveBackCache = enabled
     context
         .getSharedPreferences(SharedPrefsName, Context.MODE_PRIVATE)
         .edit()
         .putBoolean(PredictiveBackPrefsKey, enabled)
-        .commit()
+        .apply()
   }
 
   private fun predictiveBackCompatPref(): Boolean =
-      context
-          .getSharedPreferences(SharedPrefsName, Context.MODE_PRIVATE)
-          .getBoolean(PredictiveBackPrefsKey, false)
+      predictiveBackCache
+          ?: context
+              .getSharedPreferences(SharedPrefsName, Context.MODE_PRIVATE)
+              .getBoolean(PredictiveBackPrefsKey, false)
+              .also { predictiveBackCache = it }
 
   private fun normalizePageScale(scale: Float?): Float {
     val value = scale ?: 1.0f
