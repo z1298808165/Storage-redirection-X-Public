@@ -85,11 +85,16 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("- quality", init_job)
             self.assertIn("- prepare", init_job)
             self.assertIn(':app:testDebugUnitTest :app:assembleRelease', app_job)
-            self.assertNotIn('"ndk;30.0.14904198"', app_job)
+            # app job 只构建 APK，不需要 NDK。断言「不安装 NDK」这件事本身，
+            # 而不匹配具体版本号，否则升级 NDK 还要连带改测试。
+            self.assertNotIn("ndk;", app_job)
             self.assertNotIn("fetch-depth: 0", test_flow)
             self.assertIn("- quality", test_flow)
             self.assertIn("needs.quality.result == 'success'", test_flow)
-            self.assertIn("fail-fast: true", test_flow)
+            # 矩阵级必须为 false：失败时保留 4 个 Android 版本的完整证据，避免只拿到
+            # 单版本证据而反复返工。版本内的快速停止由 SRT_FAIL_FAST 负责。
+            self.assertIn("fail-fast: false", test_flow)
+            self.assertIn("SRT_FAIL_FAST: 1", test_flow)
             for version in (13, 14, 15, 16):
                 self.assertIn(f"version: {version}", test_flow)
             required = source[source.index("  test-flow-required:") :]
@@ -153,6 +158,21 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 needs = job["needs"]
                 needs = [needs] if isinstance(needs, str) else needs
                 self.assertIn("quality", needs, f"{workflow}:{name}")
+
+    def test_ndk_version_has_single_source(self) -> None:
+        # 本地与 CI 使用不同 NDK 会构建出不同的 hook 实现，因此版本号不得散落在多处：
+        # workflow 通过 SRX_NDK_VERSION 引用，本地脚本读 gradle.properties 的同一属性。
+        properties = read("gradle.properties")
+        match = re.search(r"(?m)^srx\.ndkVersion=(.+)$", properties)
+        self.assertIsNotNone(match)
+        version = match.group(1).strip()
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            self.assertEqual(1, source.count(version), workflow)
+            self.assertIn('SRX_NDK_VERSION: "%s"' % version, source)
+            self.assertIn('"ndk;$SRX_NDK_VERSION"', source)
+        script = read("scripts/build-local-module.ps1")
+        self.assertIn('Get-GradleProperty -Name "srx.ndkVersion"', script)
 
     def test_cargo_cache_key_excludes_sources(self) -> None:
         # key 含 src/** 会让每次源码改动都生成新缓存条目，只能靠 restore-keys 只读
