@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "srx_hook"
 version = "1.0.0"
-source = "git+https://github.com/Kindness-Kismet/srx_hook.git?branch=main#5ec71115c4b674d282f337bb7523ba66471bd98a"
+source = "git+https://github.com/Kindness-Kismet/srx_hook.git?rev=5ec71115c4b674d282f337bb7523ba66471bd98a#5ec71115c4b674d282f337bb7523ba66471bd98a"
 dependencies = [
  "libc",
  "once_cell",
@@ -400,7 +400,7 @@ dependencies = [
 [[package]]
 name = "srx_inline_hook"
 version = "1.0.0"
-source = "git+https://github.com/Kindness-Kismet/srx_inline_hook.git?branch=main#e9abbd58e0c6ee459bb0f7724b896a70ece0a661"
+source = "git+https://github.com/Kindness-Kismet/srx_inline_hook.git?rev=e9abbd58e0c6ee459bb0f7724b896a70ece0a661#e9abbd58e0c6ee459bb0f7724b896a70ece0a661"
 dependencies = [
  "bitflags",
  "libc",
