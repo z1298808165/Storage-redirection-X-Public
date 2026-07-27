@@ -343,11 +343,6 @@ fn router_path_list_matches(
     })
 }
 
-#[allow(dead_code)]
-fn is_path_or_mapped_target_read_only_locked(state: &RouterState, resolved_path: &str) -> bool {
-    !read_only_check_path_locked(state, resolved_path).is_empty()
-}
-
 fn read_only_check_path_locked(state: &RouterState, resolved_path: &str) -> String {
     let mapped_path = writer::map_path_by_caller_mappings(resolved_path, &state.path_mappings);
     if !mapped_path.is_empty() && mapped_path != resolved_path {

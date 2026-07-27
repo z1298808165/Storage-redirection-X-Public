@@ -358,11 +358,6 @@ pub fn is_filtered_media_provider_path(path: &str) -> bool {
         || path.ends_with("/.picker_transcoded")
 }
 
-#[allow(dead_code)]
-pub fn is_android_data_path(path: &str) -> bool {
-    path.contains("/Android/data/") || path.ends_with("/Android/data")
-}
-
 pub fn is_android_data_or_obb_path(path: &str) -> bool {
     let normalized = normalize(path);
     let Some(storage_root) = storage_user_root(&normalized) else {
