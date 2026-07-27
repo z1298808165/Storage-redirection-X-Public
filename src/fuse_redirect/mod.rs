@@ -1,4 +1,6 @@
 mod config;
+mod inode;
+mod metadata;
 mod perf;
 mod policy;
 
@@ -13,14 +15,23 @@ use fuser::{
     ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
     ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
+use inode::{
+    add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs, remove_inode_path,
+    remove_unreferenced_inode,
+};
+use metadata::{
+    adjust_metadata_mode, chmod_path, chown_path, cstring_path, errno_from_code, errno_from_io,
+    fix_existing_path_metadata, fix_path_metadata, last_errno, rename_noreplace, truncate_path,
+    utimens_path,
+};
 use perf::FusePerfStats;
 use policy::{BackendPath, OperationKind, RedirectPolicy};
 use std::collections::HashMap;
-use std::ffi::{CString, OsStr};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1468,227 +1479,10 @@ fn fuse_setattr_operation_name(
     }
 }
 
-fn cstring_path(path: &Path) -> Result<CString, Errno> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| Errno::EINVAL)
-}
-
-fn fix_path_metadata(
-    path: &Path,
-    owner_uid: i32,
-    mode: u32,
-    is_shared_public_backend: bool,
-    is_dir: bool,
-) {
-    let mode = adjust_metadata_mode(mode, is_shared_public_backend, is_dir);
-    let effective_uid = if is_shared_public_backend {
-        MEDIA_RW_UID
-    } else {
-        owner_uid as u32
-    };
-    if let Ok(c_path) = cstring_path(path) {
-        // SAFETY: c_path 以 NUL 结尾，并在 chown 调用期间保持有效。
-        let _ = unsafe { libc::chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
-    }
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-}
-
-fn fix_existing_path_metadata(path: &Path, owner_uid: i32, is_shared_public_backend: bool) {
-    if !is_shared_public_backend {
-        return;
-    }
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = metadata.permissions().mode() & 0o7777;
-    fix_path_metadata(
-        path,
-        owner_uid,
-        mode,
-        is_shared_public_backend,
-        metadata.is_dir(),
-    );
-}
-
-fn adjust_metadata_mode(mode: u32, is_shared_public_backend: bool, is_dir: bool) -> u32 {
-    let mode = mode & 0o7777;
-    if !is_shared_public_backend {
-        return mode;
-    }
-    if is_dir {
-        return SHARED_PUBLIC_DIR_MODE;
-    }
-    let owner_bits_for_group = (mode & 0o700) >> 3;
-    (mode | owner_bits_for_group) & !0o007
-}
-
-fn chmod_path(path: &Path, mode: u32) -> Result<(), Errno> {
-    let c_path = cstring_path(path)?;
-    if unsafe { libc::chmod(c_path.as_ptr(), mode as libc::mode_t) } == 0 {
-        Ok(())
-    } else {
-        Err(errno_from_code(last_errno()))
-    }
-}
-
-fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), Errno> {
-    let c_path = cstring_path(path)?;
-    let uid = if uid == u32::MAX { !0 } else { uid };
-    let gid = if gid == u32::MAX { !0 } else { gid };
-    if unsafe { libc::chown(c_path.as_ptr(), uid, gid) } == 0 {
-        Ok(())
-    } else {
-        Err(errno_from_code(last_errno()))
-    }
-}
-
-fn truncate_path(path: &Path, size: u64) -> Result<(), Errno> {
-    let c_path = cstring_path(path)?;
-    if unsafe { libc::truncate(c_path.as_ptr(), size as libc::off_t) } == 0 {
-        Ok(())
-    } else {
-        Err(errno_from_code(last_errno()))
-    }
-}
-
-fn utimens_path(
-    path: &Path,
-    atime: Option<TimeOrNow>,
-    mtime: Option<TimeOrNow>,
-) -> Result<(), Errno> {
-    let c_path = cstring_path(path)?;
-    let times = [
-        time_or_now_to_timespec(atime),
-        time_or_now_to_timespec(mtime),
-    ];
-    if unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) } == 0 {
-        Ok(())
-    } else {
-        Err(errno_from_code(last_errno()))
-    }
-}
-
-fn time_or_now_to_timespec(value: Option<TimeOrNow>) -> libc::timespec {
-    match value {
-        Some(TimeOrNow::SpecificTime(time)) => match time.duration_since(UNIX_EPOCH) {
-            Ok(duration) => libc::timespec {
-                tv_sec: duration.as_secs() as libc::time_t,
-                tv_nsec: duration.subsec_nanos() as libc::c_long,
-            },
-            Err(_) => libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            },
-        },
-        Some(TimeOrNow::Now) => libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_NOW as libc::c_long,
-        },
-        None => libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT as libc::c_long,
-        },
-    }
-}
-
-fn add_dir_entry_refs(state: &mut FuseState, entries: &[DirEntry]) {
-    for entry in entries {
-        if entry.ino.0 == ROOT_INO {
-            continue;
-        }
-        let count = state.dir_entry_refs.entry(entry.ino.0).or_default();
-        *count = count.saturating_add(1);
-    }
-}
-
-fn remove_dir_entry_refs(state: &mut FuseState, entries: &[DirEntry]) {
-    for entry in entries {
-        if entry.ino.0 == ROOT_INO {
-            continue;
-        }
-        if let Some(count) = state.dir_entry_refs.get_mut(&entry.ino.0) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                state.dir_entry_refs.remove(&entry.ino.0);
-            }
-        }
-        remove_unreferenced_inode(state, entry.ino.0);
-    }
-}
-
-fn remove_unreferenced_inode(state: &mut FuseState, ino: u64) {
-    if ino == ROOT_INO
-        || state.lookup_counts.contains_key(&ino)
-        || state.dir_entry_refs.contains_key(&ino)
-    {
-        return;
-    }
-    if let Some(rel) = state.paths_by_inode.remove(&ino) {
-        state.inodes.remove(&rel);
-        state.inode_path_versions.remove(&ino);
-    }
-}
-
-fn remove_inode_path(state: &mut FuseState, rel: &str) {
-    if let Some(ino) = state.inodes.remove(rel) {
-        state.paths_by_inode.remove(&ino);
-        state.inode_path_versions.remove(&ino);
-        state.lookup_counts.remove(&ino);
-        state.dir_entry_refs.remove(&ino);
-    }
-}
-
-fn remap_inode_path(state: &mut FuseState, old_rel: &str, new_rel: &str) {
-    if old_rel == new_rel {
-        return;
-    }
-    remove_inode_path(state, new_rel);
-    if let Some(ino) = state.inodes.remove(old_rel) {
-        state.inodes.insert(new_rel.to_string(), ino);
-        state.paths_by_inode.insert(ino, new_rel.to_string());
-        let version = state.inode_path_versions.entry(ino).or_default();
-        // quality-allow(chinese-language): wrapping_add 是 Rust 整数回绕 API 名称。
-        *version = version.wrapping_add(1);
-    }
-}
-
 fn elapsed_ns(started: Option<std::time::Instant>) -> u64 {
     started
         .map(|value| value.elapsed().as_nanos().min(u64::MAX as u128) as u64)
         .unwrap_or(0)
-}
-
-fn rename_noreplace(old_path: &Path, new_path: &Path) -> Result<(), Errno> {
-    let old_path = cstring_path(old_path)?;
-    let new_path = cstring_path(new_path)?;
-    // SAFETY: 两个指针均指向有效且以 NUL 结尾的 C 字符串，并在 syscall 调用期间保持有效。
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            old_path.as_ptr(),
-            libc::AT_FDCWD,
-            new_path.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(errno_from_code(last_errno()))
-    }
-}
-
-fn errno_from_io(error: std::io::Error) -> Errno {
-    errno_from_code(error.raw_os_error().unwrap_or(libc::EIO))
-}
-
-fn errno_from_code(code: i32) -> Errno {
-    Errno::from_i32(code)
-}
-
-fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
 }
 
 fn paths_eq(left: &Path, right: &Path) -> bool {
