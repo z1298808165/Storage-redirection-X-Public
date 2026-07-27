@@ -267,6 +267,19 @@ impl InterceptHub {
             .clone()
     }
 
+    /// 在读锁内借用当前包名完成判定，避免仅为一次只读比较而克隆整个 String。
+    ///
+    /// 供 `is_system_writer_package` 这类判定使用：它们只需 `&str`，而 hook 回调在每次
+    /// 被拦截的 syscall 上都会执行，克隆的开销会被放大。闭包内只做纯字符串判断，不要
+    /// 再取本锁或调用可能回到本结构的逻辑，否则会在同一读锁上重入。
+    pub fn with_package_name<R>(&self, f: impl FnOnce(&str) -> R) -> R {
+        let guard = self
+            .package_name
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        f(guard.as_str())
+    }
+
     pub fn set_current_caller_package(&self, caller_package: &str) {
         context::set_current_caller_package(caller_package);
     }
@@ -332,7 +345,7 @@ impl InterceptHub {
             }
         }
 
-        let is_system_writer = policy::is_system_writer_package(&self.get_package_name());
+        let is_system_writer = self.with_package_name(policy::is_system_writer_package);
         let (active_profiles, profile_name) = select_hook_profile(
             is_system_writer,
             self.is_monitor_only(),

@@ -74,7 +74,7 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
     let previous_from_external_signal = context::is_current_caller_from_external_signal();
 
     let can_reuse_recent_caller =
-        should_reuse_recent_current_caller_for_process(&hub.get_package_name());
+        hub.with_package_name(should_reuse_recent_current_caller_for_process);
 
     if !has_caller_signal(hub) {
         if try_reuse_recent_external_signal_for_system_writer(

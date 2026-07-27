@@ -16,7 +16,7 @@ const READLINK_REVERSE_UNCHANGED_LOG_STEP: u64 = 4096;
 const QUERY_FALLBACK_CALLER_MAX_AGE_MS: i64 = 1500;
 
 fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool {
-    if !policy::is_system_writer_package(&hub.get_package_name()) {
+    if !hub.with_package_name(policy::is_system_writer_package) {
         return false;
     }
     if context::is_current_caller_scope_active() {
@@ -761,7 +761,7 @@ fn reverse_mapping_readlink_path_for_visible_caller(path: &str) -> String {
         && !caller_package.is_empty()
         && !policy::is_system_writer_package(&caller_package);
 
-    if !has_explicit_app_caller && policy::is_system_writer_package(&hub.get_package_name()) {
+    if !has_explicit_app_caller && hub.with_package_name(policy::is_system_writer_package) {
         return path.to_string();
     }
 

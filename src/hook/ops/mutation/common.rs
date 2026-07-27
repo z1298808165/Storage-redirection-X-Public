@@ -104,7 +104,7 @@ pub(super) fn should_apply_mutation_policy_for_mode(
 }
 
 pub(super) fn should_enforce_monitor_only_writer_policy(hub: &InterceptHub) -> bool {
-    should_enforce_monitor_only_writer_policy_for_package(&hub.get_package_name())
+    hub.with_package_name(should_enforce_monitor_only_writer_policy_for_package)
 }
 
 pub(super) fn should_enforce_monitor_only_writer_policy_for_package(package_name: &str) -> bool {
@@ -132,7 +132,7 @@ pub(super) fn backend_fd_size(fd: c_int) -> i64 {
 }
 
 pub(super) fn fix_system_writer_private_owner_for_mutation(hub: &InterceptHub, path: &str) {
-    if !should_fix_system_writer_private_owner_for_package(&hub.get_package_name()) {
+    if !hub.with_package_name(should_fix_system_writer_private_owner_for_package) {
         return;
     }
     runtime::fix_system_writer_android_private_owner(path, true);

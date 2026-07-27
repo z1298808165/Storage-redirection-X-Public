@@ -172,7 +172,7 @@ where
     retry_fuse_fix_for_media_provider(hub);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 
-    let is_system_writer = policy::is_system_writer_package(&hub.get_package_name());
+    let is_system_writer = hub.with_package_name(policy::is_system_writer_package);
     let mut is_redirected = false;
     let mut final_path: Cow<'_, str> = Cow::Borrowed(path_for_decision.as_ref());
     let redirect_result = resolve_open_redirect_path(
@@ -275,7 +275,7 @@ where
     retry_fuse_fix_for_media_provider(hub);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 
-    let is_system_writer = policy::is_system_writer_package(&hub.get_package_name());
+    let is_system_writer = hub.with_package_name(policy::is_system_writer_package);
     let mut is_redirected = false;
     let mut final_path: Cow<'_, str> = Cow::Borrowed(path_for_decision.as_ref());
     let mut should_call_with_absolute = false;
@@ -937,7 +937,7 @@ pub unsafe extern "C" fn hooked_creat(pathname: *const c_char, mode: mode_t) -> 
 
 fn should_fix_system_writer_private_owner(hub: &InterceptHub, flags: c_int) -> bool {
     !hub.is_monitor_only()
-        && policy::is_system_writer_package(&hub.get_package_name())
+        && hub.with_package_name(policy::is_system_writer_package)
         && monitor::has_write_intent_flags(flags)
 }
 

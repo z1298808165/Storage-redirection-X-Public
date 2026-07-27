@@ -289,7 +289,7 @@ where
     };
     let error_no = runtime::errno_for_result(result);
     if result == 0
-        && policy::is_system_writer_package(&hub.get_package_name())
+        && hub.with_package_name(policy::is_system_writer_package)
         && !hub.is_monitor_only()
     {
         let owner_path = if redirect_result.is_redirect() {
@@ -512,7 +512,7 @@ fn should_virtualize_anonymous_system_writer_mkdir(
         || redirect_result.is_mapping
         || redirect_result.new_path.is_empty()
         || hub.is_monitor_only()
-        || !policy::is_system_writer_package(&hub.get_package_name())
+        || !hub.with_package_name(policy::is_system_writer_package)
         || !hub.get_current_caller_package().is_empty()
         || hub.get_current_caller_uid() >= writer::ANDROID_APP_UID_START
     {

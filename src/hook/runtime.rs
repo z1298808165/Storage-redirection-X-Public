@@ -40,11 +40,11 @@ fn should_bypass_hook_in_fork_child(hub: &InterceptHub) -> bool {
         return false;
     }
 
-    if policy::is_system_writer_package(&hub.get_package_name()) {
+    if hub.with_package_name(policy::is_system_writer_package) {
         return false;
     }
 
-    if policy::is_saf_native_monitor_bridge_package(&hub.get_package_name()) {
+    if hub.with_package_name(policy::is_saf_native_monitor_bridge_package) {
         return false;
     }
 
@@ -136,7 +136,7 @@ where
 
     let hub = InterceptHub::instance();
     if should_bypass_hook_in_fork_child(hub) {
-        log_fork_child_hook_bypass(&hub.get_package_name());
+        hub.with_package_name(log_fork_child_hook_bypass);
         return original_call();
     }
 
@@ -148,7 +148,7 @@ pub fn should_resolve_caller_context(hub: &InterceptHub) -> bool {
     if context::is_current_caller_scope_active() {
         return false;
     }
-    hub.is_monitor_enabled() || policy::is_system_writer_package(&hub.get_package_name())
+    hub.is_monitor_enabled() || hub.with_package_name(policy::is_system_writer_package)
 }
 
 // 写入类重定向时按需补齐目标父目录
@@ -216,7 +216,7 @@ pub fn fix_system_writer_android_private_owner(path: &str, include_path: bool) {
     }
 
     let hub = InterceptHub::instance();
-    if !policy::is_system_writer_package(&hub.get_package_name()) {
+    if !hub.with_package_name(policy::is_system_writer_package) {
         return;
     }
 

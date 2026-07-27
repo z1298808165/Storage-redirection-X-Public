@@ -375,7 +375,7 @@ fn should_remember_monitor_private_path_caller_hint(
 }
 
 fn record_saf_bridge_provider_path(hub: &InterceptHub, pathname: &str, op_filter: &str) -> bool {
-    if !policy::is_saf_native_monitor_bridge_package(&hub.get_package_name()) {
+    if !hub.with_package_name(policy::is_saf_native_monitor_bridge_package) {
         return false;
     }
     let caller_uid = hub.get_current_caller_uid();
