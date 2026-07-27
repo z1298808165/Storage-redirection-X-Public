@@ -185,42 +185,64 @@ fn should_skip_for_stuck_children(request: &MountRequest) -> bool {
     true
 }
 
+/// 清理已经卡住的挂载子进程，返回仍未回收的数量。
+///
+/// `waitpid` 与 `kill` 都是可能被信号打断、耗时不确定的系统调用，绝不能在持有全局
+/// 挂载状态锁时执行：挂载请求线程也要拿同一把锁，一旦回收阶段变慢，所有请求都会
+/// 跟着阻塞。因此这里先在锁内取走整份待清理列表，立即释放锁，在锁外完成回收，
+/// 最后再把仍然存活的子进程合并回列表。
 fn prune_stuck_mount_children() -> usize {
-    let mut children = STUCK_MOUNT_CHILDREN
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if children.is_empty() {
-        return 0;
-    }
+    let pending = {
+        let mut children = STUCK_MOUNT_CHILDREN
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if children.is_empty() {
+            return 0;
+        }
+        std::mem::take(&mut *children)
+    };
 
-    children.retain(|child| {
+    let mut alive = Vec::with_capacity(pending.len());
+    for child in pending {
         let mut status = 0;
-        let ret = unsafe { waitpid(*child, &mut status, WNOHANG) };
-        if ret == *child {
+        // SAFETY: status 是栈上有效的整数，指针在调用期间保持有效。
+        let ret = unsafe { waitpid(child, &mut status, WNOHANG) };
+        if ret == child {
             log::warn!(
                 "daemon stuck child finally reaped child={} status={}",
                 child,
                 decode_wait_status(status)
             );
-            false
-        } else if ret < 0 {
+            continue;
+        }
+        if ret < 0 {
             let errno = last_errno();
             if errno == libc::ECHILD || errno == libc::ESRCH {
-                false
-            } else {
-                log::warn!(
-                    "daemon stuck child waitpid failed child={} errno={} {}",
-                    child,
-                    errno,
-                    errno_text(errno)
-                );
-                true
+                continue;
             }
-        } else {
-            let _ = unsafe { libc::kill(*child, SIGKILL) };
-            true
+            log::warn!(
+                "daemon stuck child waitpid failed child={} errno={} {}",
+                child,
+                errno,
+                errno_text(errno)
+            );
+            alive.push(child);
+            continue;
         }
-    });
+        // SAFETY: kill 只接收整型参数，不涉及借用指针。
+        let _ = unsafe { libc::kill(child, SIGKILL) };
+        alive.push(child);
+    }
+
+    // 回收期间其它线程可能又登记了新的卡住子进程，这里只做合并，不覆盖。
+    let mut children = STUCK_MOUNT_CHILDREN
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    for child in alive {
+        if !children.contains(&child) {
+            children.push(child);
+        }
+    }
     children.len()
 }
 
@@ -848,9 +870,9 @@ fn append_resolved_storage_alias_targets(
     else {
         return;
     };
-    for target in expand_storage_alias_paths_for_user(&resolved, user_id) {
-        append_unique_target(targets, target);
-    }
+    // 上层 request_overlay_targets 统一交给 normalize_targets 过滤、排序并去重，
+    // 这里无需再对每个目标做一次线性查重扫描。
+    targets.extend(expand_storage_alias_paths_for_user(&resolved, user_id));
 }
 
 fn resolve_request_storage_path(
@@ -883,73 +905,38 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     }
 
     let suffix = &canonical_path[storage_root.len()..];
-    let mut alias_roots = Vec::with_capacity(13);
-    append_unique_target(&mut alias_roots, storage_root);
-    append_unique_target(
-        &mut alias_roots,
-        paths::data_media_user_root_for_user(user_id),
-    );
-    append_unique_target(&mut alias_roots, "/storage/self/primary".to_string());
+    // 这里的别名根都是按固定规则构造的互不相同的字面量，无需再逐个线性去重；
+    // 最终的过滤、排序与去重统一由 normalize_targets 完成。
+    // 不再展开 /data/media/<user>：该前缀必定被 is_safe_mount_target 拒绝，
+    // 生成后只会被 normalize_targets 丢弃，属于无效分配与比较。
+    let mut alias_roots = Vec::with_capacity(14);
+    alias_roots.push(storage_root);
+    alias_roots.push("/storage/self/primary".to_string());
     if user_id == 0 {
-        append_unique_target(&mut alias_roots, "/storage/emulated/legacy".to_string());
+        alias_roots.push("/storage/emulated/legacy".to_string());
     }
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/user/{}/emulated/{}", user_str, user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/runtime/default/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/runtime/read/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/runtime/write/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/runtime/full/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/installer/{}/emulated/{}", user_str, user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/installer/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/androidwritable/{}/emulated/{}", user_str, user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/androidwritable/emulated/{}", user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/pass_through/{}/emulated/{}", user_str, user_str),
-    );
-    append_unique_target(
-        &mut alias_roots,
-        format!("/mnt/pass_through/emulated/{}", user_str),
-    );
+    alias_roots.push(format!("/mnt/user/{}/emulated/{}", user_str, user_str));
+    alias_roots.push(format!("/mnt/runtime/default/emulated/{}", user_str));
+    alias_roots.push(format!("/mnt/runtime/read/emulated/{}", user_str));
+    alias_roots.push(format!("/mnt/runtime/write/emulated/{}", user_str));
+    alias_roots.push(format!("/mnt/runtime/full/emulated/{}", user_str));
+    alias_roots.push(format!("/mnt/installer/{}/emulated/{}", user_str, user_str));
+    alias_roots.push(format!("/mnt/installer/emulated/{}", user_str));
+    alias_roots.push(format!(
+        "/mnt/androidwritable/{}/emulated/{}",
+        user_str, user_str
+    ));
+    alias_roots.push(format!("/mnt/androidwritable/emulated/{}", user_str));
+    alias_roots.push(format!(
+        "/mnt/pass_through/{}/emulated/{}",
+        user_str, user_str
+    ));
+    alias_roots.push(format!("/mnt/pass_through/emulated/{}", user_str));
 
-    let mut expanded = Vec::with_capacity(alias_roots.len());
-    for root in alias_roots {
-        append_unique_target(&mut expanded, format!("{}{}", root, suffix));
+    for root in &mut alias_roots {
+        root.push_str(suffix);
     }
-    expanded
-}
-
-fn append_unique_target(list: &mut Vec<String>, value: String) {
-    if value.is_empty() || list.iter().any(|item| item == &value) {
-        return;
-    }
-    list.push(value);
+    alias_roots
 }
 
 #[derive(Clone)]
@@ -1093,12 +1080,23 @@ fn read_mount_targets(path: &str) -> Vec<String> {
 fn mount_target_count_from_mountinfo(content: &str, target: &str) -> usize {
     content
         .lines()
-        .filter_map(parse_mountinfo_target)
-        .filter(|mount_target| mount_target == target)
+        .filter(|line| mountinfo_line_target_matches(line, target))
         .count()
 }
 
-fn parse_mountinfo_target(line: &str) -> Option<String> {
+/// 卸载重试循环会按次数反复统计挂载点，这里逐行比较挂载目标字段：
+/// 字段为纯 ASCII 且不含转义时直接按原始切片比较，只有含转义的行才展开为 String。
+fn mountinfo_line_target_matches(line: &str, target: &str) -> bool {
+    let Some(raw_target) = parse_mountinfo_raw_target(line) else {
+        return false;
+    };
+    if raw_target.is_ascii() && !raw_target.contains('\\') {
+        return raw_target == target;
+    }
+    unescape_mountinfo_field(raw_target) == target
+}
+
+fn parse_mountinfo_raw_target(line: &str) -> Option<&str> {
     let separator = line.find(" - ")?;
     let before_separator = &line[..separator];
     let mut fields = before_separator.split_whitespace();
@@ -1106,7 +1104,7 @@ fn parse_mountinfo_target(line: &str) -> Option<String> {
     let _parent = fields.next()?;
     let _major_minor = fields.next()?;
     let _root = fields.next()?;
-    fields.next().map(unescape_mountinfo_field)
+    fields.next()
 }
 
 fn unescape_mountinfo_field(value: &str) -> String {

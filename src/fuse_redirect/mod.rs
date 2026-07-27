@@ -33,7 +33,7 @@ use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_millis(250);
@@ -47,7 +47,9 @@ pub(super) const MAX_SCOPED_FUSE_ROOTS: usize = 4;
 
 struct FuseRedirectFs {
     policy: RedirectPolicy,
-    state: Mutex<FuseState>,
+    /// FUSE 请求由多个内核线程并发派发，读多写少：
+    /// 使用读写锁让 read/readdir/fsync 等只读路径可以并行取句柄，避免互斥锁把并发读串行化。
+    state: RwLock<FuseState>,
     perf: FusePerfStats,
 }
 
@@ -104,7 +106,7 @@ impl FuseRedirectFs {
         Some(Self {
             policy,
             perf: FusePerfStats::new(package_name),
-            state: Mutex::new(FuseState {
+            state: RwLock::new(FuseState {
                 next_ino: ROOT_INO + 1,
                 next_fh: 1,
                 inodes,
@@ -148,7 +150,7 @@ impl FuseRedirectFs {
     }
 
     fn path_for_ino(&self, ino: INodeNo) -> Option<String> {
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
         state.paths_by_inode.get(&ino.0).cloned()
     }
 
@@ -226,7 +228,7 @@ impl FuseRedirectFs {
             return;
         };
         let ino = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, rel);
             Self::add_lookup_locked(&mut state, ino);
             ino
@@ -234,7 +236,7 @@ impl FuseRedirectFs {
         match self.visible_attr_for_backend(ino, &backend) {
             Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
             Err(errno) => {
-                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 Self::remove_lookup_locked(&mut state, ino, 1);
                 reply.error(errno);
             }
@@ -307,7 +309,7 @@ impl FuseRedirectFs {
         };
         match result {
             Ok(()) => {
-                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remove_inode_path(&mut state, &rel);
                 reply.ok();
             }
@@ -342,7 +344,7 @@ impl Filesystem for FuseRedirectFs {
         if ino.0 == ROOT_INO {
             return;
         }
-        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
         Self::remove_lookup_locked(&mut state, ino, nlookup);
     }
 
@@ -374,7 +376,7 @@ impl Filesystem for FuseRedirectFs {
         let track_dir_perf = crate::logging::is_debug_logging_enabled();
         let first_lock_started = track_dir_perf.then(std::time::Instant::now);
         let (mut rel, mut path_version) = {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(rel) = state.paths_by_inode.get(&ino.0).cloned() else {
                 reply.error(Errno::ENOENT);
                 return;
@@ -401,7 +403,7 @@ impl Filesystem for FuseRedirectFs {
             let candidates = collect_dir_entry_candidates(&self.policy, &rel);
             scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
             let lock_started = track_dir_perf.then(std::time::Instant::now);
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(lock_started));
             let Some(current_rel) = state.paths_by_inode.get(&ino.0) else {
                 reply.error(Errno::ENOENT);
@@ -438,7 +440,7 @@ impl Filesystem for FuseRedirectFs {
         let _perf = self.perf.observe(&self.perf.read_calls);
         let handle = fh.into();
         let entries = {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             state.dirs.get(&handle).cloned()
         };
         let Some(entries) = entries else {
@@ -461,7 +463,7 @@ impl Filesystem for FuseRedirectFs {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
         if let Some(entries) = state.dirs.remove(&fh.into()) {
             remove_dir_entry_refs(&mut state, &entries);
         }
@@ -493,7 +495,7 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         let fh = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let fh = state.next_handle();
             state.files.insert(
                 fh,
@@ -526,7 +528,7 @@ impl Filesystem for FuseRedirectFs {
     ) {
         let _perf = self.perf.observe(&self.perf.read_calls);
         let file = {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
                 reply.error(Errno::EBADF);
                 return;
@@ -561,7 +563,7 @@ impl Filesystem for FuseRedirectFs {
     ) {
         let _perf = self.perf.observe(&self.perf.write_calls);
         let file = {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
                 reply.error(Errno::EBADF);
                 return;
@@ -605,7 +607,7 @@ impl Filesystem for FuseRedirectFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
         state.files.remove(&fh.into());
         reply.ok();
     }
@@ -618,7 +620,7 @@ impl Filesystem for FuseRedirectFs {
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
         if state.files.contains_key(&fh.into()) {
             reply.ok();
         } else {
@@ -635,7 +637,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEmpty,
     ) {
         let file = {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
                 reply.error(Errno::EBADF);
                 return;
@@ -721,7 +723,7 @@ impl Filesystem for FuseRedirectFs {
             false,
         );
         let ino = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, &rel);
             Self::add_lookup_locked(&mut state, ino);
             ino
@@ -729,14 +731,14 @@ impl Filesystem for FuseRedirectFs {
         let attr = match self.attr_for_backend(ino, &backend) {
             Ok(attr) => attr,
             Err(errno) => {
-                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 Self::remove_lookup_locked(&mut state, ino, 1);
                 reply.error(errno);
                 return;
             }
         };
         let fh = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let fh = state.next_handle();
             state.files.insert(
                 fh,
@@ -833,7 +835,7 @@ impl Filesystem for FuseRedirectFs {
             false,
         );
         let ino = {
-            let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, &rel);
             Self::add_lookup_locked(&mut state, ino);
             ino
@@ -844,7 +846,7 @@ impl Filesystem for FuseRedirectFs {
                 reply.entry(&TTL, &attr, Generation(0));
             }
             Err(errno) => {
-                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 Self::remove_lookup_locked(&mut state, ino, 1);
                 reply.error(errno);
             }
@@ -999,7 +1001,7 @@ impl Filesystem for FuseRedirectFs {
                     self.policy.uid,
                     new_backend.is_shared_public_backend,
                 );
-                let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+                let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remap_inode_path(&mut state, &old_rel, &new_rel);
                 reply.ok();
             }
@@ -1171,7 +1173,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEmpty,
     ) {
         {
-            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             if !state.dirs.contains_key(&fh.into()) {
                 reply.error(Errno::EBADF);
                 return;

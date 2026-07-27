@@ -11,8 +11,16 @@ impl MountPlanner {
         let real_storage_anchor_root = module_paths::REAL_STORAGE_TMP_DIR;
         let real_storage_anchor = paths::join(real_storage_anchor_root, &self.user_id.to_string());
 
-        if self.storage_root_is_already_redirected(storage_path) {
-            if self.real_storage_anchor_is_usable(&real_storage_anchor) {
+        // storage_root_is_already_redirected 与 real_storage_anchor_is_usable 都是只读探测，
+        // 且两者之间没有挂载变更，共享一次 mountinfo 读取，避免重复整份读取与解析。
+        let mountinfo = if self.redirect_target.is_empty() {
+            String::new()
+        } else {
+            read_mountinfo().unwrap_or_default()
+        };
+
+        if self.storage_root_is_already_redirected(&mountinfo, storage_path) {
+            if self.real_storage_anchor_is_usable(&mountinfo, &real_storage_anchor) {
                 log::info!(
                     "real storage anchor reused after redirect pkg={} storage={} anchor={}",
                     self.package_name,
@@ -85,11 +93,11 @@ impl MountPlanner {
         None
     }
 
-    fn real_storage_anchor_is_usable(&self, real_storage_anchor: &str) -> bool {
+    fn real_storage_anchor_is_usable(&self, mountinfo: &str, real_storage_anchor: &str) -> bool {
         if !fs::is_directory(real_storage_anchor) {
             return false;
         }
-        if mount_source_for_target(real_storage_anchor).is_none() {
+        if !mountinfo_has_target(mountinfo, real_storage_anchor) {
             return false;
         }
         ["Android", "Download", "DCIM"]
@@ -131,7 +139,7 @@ impl MountPlanner {
         None
     }
 
-    fn storage_root_is_already_redirected(&self, storage_path: &str) -> bool {
+    fn storage_root_is_already_redirected(&self, mountinfo: &str, storage_path: &str) -> bool {
         if self.redirect_target.is_empty() {
             return false;
         }
@@ -139,7 +147,7 @@ impl MountPlanner {
         if redirect_backend.is_empty() {
             return false;
         }
-        mount_source_for_target(storage_path)
+        mount_source_for_target_from_mountinfo(mountinfo, storage_path)
             .map(|source| {
                 paths::is_same_or_child(&redirect_backend, &source)
                     || mountinfo_root_matches_data_backend(&source, &redirect_backend)
@@ -1136,22 +1144,38 @@ fn is_covered_by_scoped_fuse_mount(path: &str, scoped_fuse_roots: &[String]) -> 
         .any(|root| paths::eq_ignore_case(path, root) || paths::is_child(path, root))
 }
 
-fn mount_source_for_target(target: &str) -> Option<String> {
-    let content = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    mount_source_for_target_from_mountinfo(&content, target)
+fn read_mountinfo() -> Option<String> {
+    std::fs::read_to_string("/proc/self/mountinfo").ok()
 }
 
 fn mount_source_for_target_from_mountinfo(content: &str, target: &str) -> Option<String> {
     let normalized_target = paths::normalize(target);
-    content
-        .lines()
-        .filter_map(parse_mountinfo_source_and_target)
-        .filter(|(_, mount_target)| paths::eq_ignore_case(mount_target, &normalized_target))
-        .max_by_key(|(_, mount_target)| mount_target.len())
-        .map(|(source, _)| source)
+    let mut matched_root: Option<String> = None;
+    for line in content.lines() {
+        let Some((root_field, mount_target)) = parse_mountinfo_root_and_target(line) else {
+            continue;
+        };
+        if !paths::eq_ignore_case(&mount_target, &normalized_target) {
+            continue;
+        }
+        // 命中项的 target 长度一致，沿用原先 max_by_key 的“取最后一个命中”语义；
+        // 只有命中时才展开 root 字段，未命中的行不再产生分配。
+        matched_root = Some(unescape_mountinfo_field(root_field));
+    }
+    matched_root
 }
 
-fn parse_mountinfo_source_and_target(line: &str) -> Option<(String, String)> {
+/// 只判断挂载点是否存在，命中首个匹配即返回，不解析也不分配 root 字段。
+fn mountinfo_has_target(content: &str, target: &str) -> bool {
+    let normalized_target = paths::normalize(target);
+    content.lines().any(|line| {
+        parse_mountinfo_root_and_target(line)
+            .map(|(_, mount_target)| paths::eq_ignore_case(&mount_target, &normalized_target))
+            .unwrap_or(false)
+    })
+}
+
+fn parse_mountinfo_root_and_target(line: &str) -> Option<(&str, String)> {
     let separator = line.find(" - ")?;
     let before_separator = &line[..separator];
     let after_separator = &line[separator + 3..];
@@ -1159,12 +1183,12 @@ fn parse_mountinfo_source_and_target(line: &str) -> Option<(String, String)> {
     let _id = before_fields.next()?;
     let _parent = before_fields.next()?;
     let _major_minor = before_fields.next()?;
-    let root = unescape_mountinfo_field(before_fields.next()?);
+    let root_field = before_fields.next()?;
     let target = paths::normalize(&unescape_mountinfo_field(before_fields.next()?));
     let mut after_fields = after_separator.split_whitespace();
     let _fs_type = after_fields.next()?;
     let _source = after_fields.next()?;
-    Some((root, target))
+    Some((root_field, target))
 }
 
 fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
@@ -1177,7 +1201,12 @@ fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
 }
 
 fn detach_mount_if_present(target: &str) {
-    if mount_source_for_target(target).is_none() {
+    // 该函数会 umount2 改变挂载表，且被 bind_mount 之间反复调用，必须每次重新读取；
+    // 这里只需要判断挂载点是否存在，用存在性探测替代取 source 的整表扫描。
+    let present = read_mountinfo()
+        .map(|content| mountinfo_has_target(&content, target))
+        .unwrap_or(false);
+    if !present {
         return;
     }
     let Ok(c_target) = CString::new(target) else {

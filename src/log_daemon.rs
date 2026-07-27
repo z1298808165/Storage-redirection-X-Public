@@ -1,7 +1,8 @@
 use libc::{
-    AF_UNIX, CMSG_DATA, CMSG_FIRSTHDR, POLLIN, SCM_CREDENTIALS, SO_PASSCRED, SO_RCVBUF,
-    SOCK_CLOEXEC, SOCK_DGRAM, SOL_SOCKET, bind, c_void, close, cmsghdr, iovec, msghdr, poll,
-    pollfd, recvmsg, sendto, setsockopt, sockaddr, sockaddr_un, socket, ucred,
+    AF_UNIX, CMSG_DATA, CMSG_FIRSTHDR, EAGAIN, EINTR, EWOULDBLOCK, MSG_DONTWAIT, POLLIN,
+    SCM_CREDENTIALS, SO_PASSCRED, SO_RCVBUF, SOCK_CLOEXEC, SOCK_DGRAM, SOL_SOCKET, bind, c_void,
+    close, cmsghdr, iovec, msghdr, poll, pollfd, recvmsg, sendto, setsockopt, sockaddr,
+    sockaddr_un, socket, ucred,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -22,6 +23,9 @@ const LOG_BACKUPS: usize = 2;
 const RECV_BUFFER_SIZE: usize = 16 * 1024;
 const FLUSH_BATCH_LINES: usize = 64;
 const FLUSH_INTERVAL_MS: i32 = 2_000;
+/// 单轮 poll 之后最多连续排空的 datagram 数量，避免持续高压写入时
+/// 接收循环长期不返回、迟迟不执行 flush 与统计落盘。
+const MAX_DRAIN_PER_ROUND: usize = 512;
 const SOCKET_RECV_BUFFER_BYTES: libc::c_int = 512 * 1024;
 
 const TAG_FILE_MONITOR: &str = "FileMonitorOp";
@@ -108,21 +112,35 @@ fn run(fd: i32, mut state: LogState) {
             continue;
         }
 
-        let (size, sender_uid) = recv_with_credentials(fd, &mut payload, 0);
-        if size <= 0 {
-            continue;
+        // 一次 poll 之后把内核队列里的 datagram 连续排空，否则突发写入时每轮只取一条，
+        // 队列会持续堆积并被内核直接丢弃。
+        for _ in 0..MAX_DRAIN_PER_ROUND {
+            let (size, sender_uid) = recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
+            if size < 0 {
+                let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if errno == EINTR {
+                    continue;
+                }
+                if errno != EAGAIN && errno != EWOULDBLOCK {
+                    log::warn!("log daemon recvmsg failed errno={}", errno);
+                }
+                break;
+            }
+            if size == 0 {
+                continue;
+            }
+            let Ok(packet) = std::str::from_utf8(&payload[..size as usize]) else {
+                continue;
+            };
+            state.handle(packet, sender_uid);
         }
-        let Ok(packet) = std::str::from_utf8(&payload[..size as usize]) else {
-            continue;
-        };
-        state.handle(packet, sender_uid);
         state.flush_if_due();
     }
 }
 
 /// 接收一条 datagram，同时提取 SCM_CREDENTIALS 中的发送方 UID。
 /// 返回 (接收字节数, 发送方 uid)；uid 仅在内核附加了合法 ucred 时为 Some。
-/// `flags` 直接传给 recvmsg，由调用方决定是否阻塞等待。
+/// `flags` 直接传给 recvmsg；排空循环使用 MSG_DONTWAIT 避免在阻塞 socket 上卡死。
 fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> (isize, Option<u32>) {
     // 控制消息缓冲区，用于接收 SCM_CREDENTIALS（ucred）凭据。
     // 64 字节超过 CMSG_SPACE(sizeof(ucred)) 所需的约 32 字节，留有余量。

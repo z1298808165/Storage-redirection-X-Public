@@ -178,13 +178,16 @@ fn wait_for_process_ready(pid: i32, user_id: i32, timeout_ms: i32) -> bool {
 
     while elapsed_us < timeout_us {
         if is_process_context_ready(pid) {
-            let is_storage_mount_ready = is_process_storage_mount_ready(pid, user_id);
-            log::debug!(
-                "proc ready pid={} wait_us={} storage_mount={}",
-                pid,
-                elapsed_us,
-                is_storage_mount_ready
-            );
+            // storage_mount 只用于调试日志，未开启调试日志时不做整份 mountinfo 的读取与扫描。
+            if crate::logging::is_debug_logging_enabled() {
+                let is_storage_mount_ready = is_process_storage_mount_ready(pid, user_id);
+                log::debug!(
+                    "proc ready pid={} wait_us={} storage_mount={}",
+                    pid,
+                    elapsed_us,
+                    is_storage_mount_ready
+                );
+            }
             return true;
         }
 

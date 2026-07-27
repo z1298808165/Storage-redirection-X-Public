@@ -6,6 +6,7 @@ use crate::config::{
 use crate::platform;
 use crate::redirect::policy;
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,18 +45,27 @@ impl MonitorPathMatchCache {
         true
     }
 
-    fn insert(&mut self, key: String, value: bool) {
-        if self.entries.insert(key.clone(), value).is_some() {
+    /// 接收借用的键，命中已有键时只原地更新值，不再产生任何分配。
+    fn insert(&mut self, key: &str, value: bool) {
+        if let Some(existing) = self.entries.get_mut(key) {
             // 键已存在，仅原地更新值，不改变 LRU 顺序。
+            // quality-allow(chinese-language): 本行是 Rust 解引用赋值，仅原地覆盖已有值。
+            *existing = value;
             return;
         }
+        self.entries.insert(key.to_string(), value);
         if self.entries.len() > MONITOR_PATH_CACHE_SIZE
             && let Some(oldest) = self.order.pop_front()
         {
             self.entries.remove(&oldest);
         }
-        self.order.push_back(key);
+        self.order.push_back(key.to_string());
     }
+}
+
+thread_local! {
+    // 事件热路径复用键缓冲，避免每条监控记录都重新分配缓存键。
+    static MONITOR_CACHE_KEY_BUF: RefCell<String> = RefCell::new(String::new());
 }
 
 static MONITOR_PATH_MATCH_CACHE: Lazy<Mutex<MonitorPathMatchCache>> =
@@ -334,35 +344,42 @@ fn should_filter_monitor_record_locked_for_version(
     // 调用方只传入内部规范化的小写操作名，避免在事件热路径重复分配。
     let op = operation;
 
-    // 优化：为高频路径和操作组合提供快速缓存查找
-    let cache_key = format!("{}|{}", normalized_path, op);
-    if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
-        && cache.prepare_version(config_version)
-        && let Some(&cached_result) = cache.entries.get(&cache_key)
-    {
-        return cached_result;
-    }
+    MONITOR_CACHE_KEY_BUF.with(|buf| {
+        let mut cache_key = buf.borrow_mut();
+        cache_key.clear();
+        cache_key.push_str(&normalized_path);
+        cache_key.push('|');
+        cache_key.push_str(op);
 
-    let path_matched = filters
-        .excluded_paths
-        .iter()
-        .any(|rule| monitor_path_filter_matches(rule, &normalized_path));
+        // 优化：为高频路径和操作组合提供快速缓存查找
+        if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
+            && cache.prepare_version(config_version)
+            && let Some(&cached_result) = cache.entries.get(cache_key.as_str())
+        {
+            return cached_result;
+        }
 
-    let op_matched = filters
-        .excluded_operations
-        .iter()
-        .any(|rule| monitor_operation_filter_matches(rule, op));
+        let path_matched = filters
+            .excluded_paths
+            .iter()
+            .any(|rule| monitor_path_filter_matches(rule, &normalized_path));
 
-    let result = path_matched || op_matched;
+        let op_matched = filters
+            .excluded_operations
+            .iter()
+            .any(|rule| monitor_operation_filter_matches(rule, op));
 
-    // 优化：缓存匹配结果
-    if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
-        && cache.prepare_version(config_version)
-    {
-        cache.insert(cache_key, result);
-    }
+        let result = path_matched || op_matched;
 
-    result
+        // 优化：缓存匹配结果
+        if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
+            && cache.prepare_version(config_version)
+        {
+            cache.insert(cache_key.as_str(), result);
+        }
+
+        result
+    })
 }
 
 fn monitor_path_filter_matches(rule: &str, path: &str) -> bool {

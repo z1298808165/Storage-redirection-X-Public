@@ -7,10 +7,10 @@ use crate::redirect_policy as policy;
 use crate::runtime_control;
 use std::collections::HashSet;
 use std::fs as std_fs;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const RECONCILE_INTERVAL_MS: u64 = 1000;
 const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
@@ -25,10 +25,78 @@ const UNINTERRUPTIBLE_SKIP_LOG_STEP: u64 = 32;
 
 static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// daemon 主循环与文件监视线程之间的配置同步状态。
+///
+/// 早期实现让双方各自以 10ms 步长轮询原子计数，既浪费唤醒又让重建请求最多白等一个
+/// 轮询周期。这里改成原子计数负责传值、条件变量负责唤醒：进度由监视线程通知等待方，
+/// 重建请求由等待方通知监视线程，两侧都不再忙等。
 struct FileMonitorSync {
     configured_version: AtomicU64,
     requested_rebuild: AtomicU64,
     completed_rebuild: AtomicU64,
+    /// 仅用于配合下面两个条件变量，不承载业务数据。
+    signal_lock: Mutex<()>,
+    /// 监视线程完成一轮配置同步后唤醒等待方。
+    progress_signal: Condvar,
+    /// 等待方登记重建请求后唤醒监视线程。
+    request_signal: Condvar,
+}
+
+impl FileMonitorSync {
+    fn lock_signal(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.signal_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// 通知等待方本轮配置同步已经推进。
+    fn notify_progress(&self) {
+        let _guard = self.lock_signal();
+        self.progress_signal.notify_all();
+    }
+
+    /// 登记重建请求后唤醒监视线程。
+    fn notify_request(&self) {
+        let _guard = self.lock_signal();
+        self.request_signal.notify_all();
+    }
+
+    /// 等待监视线程推进一轮，最多等待 `timeout`。
+    ///
+    /// 通知方在持有 `signal_lock` 时才发出通知，因此这里必须先拿锁再复检原子计数，
+    /// 否则会漏掉在检查与等待之间发生的唤醒。
+    fn wait_progress_until(&self, deadline: Instant, is_done: impl Fn() -> bool) -> bool {
+        let mut guard = self.lock_signal();
+        loop {
+            if is_done() {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (next_guard, _) = self
+                .progress_signal
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            guard = next_guard;
+        }
+    }
+
+    /// 等待新的重建请求，最多等待 `timeout`。
+    ///
+    /// 超时返回也要继续下一轮，监视线程仍需按轮询周期 drain 事件。
+    fn wait_new_request(&self, timeout: Duration) {
+        let guard = self.lock_signal();
+        if self.requested_rebuild.load(Ordering::Acquire)
+            > self.completed_rebuild.load(Ordering::Acquire)
+        {
+            return;
+        }
+        let _ = self
+            .request_signal
+            .wait_timeout(guard, timeout)
+            .unwrap_or_else(|error| error.into_inner());
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +192,9 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
         configured_version: AtomicU64::new(0),
         requested_rebuild: AtomicU64::new(0),
         completed_rebuild: AtomicU64::new(0),
+        signal_lock: Mutex::new(()),
+        progress_signal: Condvar::new(),
+        request_signal: Condvar::new(),
     });
     let thread_sync = Arc::clone(&sync);
     let spawn_result = thread::Builder::new()
@@ -144,8 +215,9 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                         .completed_rebuild
                         .store(requested_rebuild, Ordering::Release);
                 }
+                thread_sync.notify_progress();
                 file_monitor.drain_events();
-                thread::sleep(Duration::from_millis(FILE_MONITOR_POLL_MS));
+                thread_sync.wait_new_request(Duration::from_millis(FILE_MONITOR_POLL_MS));
             }
             log::info!("daemon file monitor stop reason=runtime_disabled");
         });
@@ -160,32 +232,33 @@ fn wait_for_file_monitor_version(sync: Option<&Arc<FileMonitorSync>>, version: u
     let Some(sync) = sync else {
         return;
     };
-    let started_ms = crate::platform::paths::monotonic_ms();
-    while sync.configured_version.load(Ordering::Acquire) < version {
-        if crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
-            >= FILE_MONITOR_SYNC_TIMEOUT_MS
-        {
-            log::warn!(
-                "daemon file monitor config sync timeout expected={:x} actual={:x}",
-                version,
-                sync.configured_version.load(Ordering::Acquire)
-            );
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
+    let deadline = Instant::now() + Duration::from_millis(FILE_MONITOR_SYNC_TIMEOUT_MS as u64);
+    let synced = sync.wait_progress_until(deadline, || {
+        sync.configured_version.load(Ordering::Acquire) >= version
+    });
+    if !synced {
+        log::warn!(
+            "daemon file monitor config sync timeout expected={:x} actual={:x}",
+            version,
+            sync.configured_version.load(Ordering::Acquire)
+        );
     }
 }
 
 fn request_file_monitor_rebuild(sync: &FileMonitorSync) {
     let requested = sync.requested_rebuild.fetch_add(1, Ordering::AcqRel) + 1;
-    let started_ms = crate::platform::paths::monotonic_ms();
-    while sync.completed_rebuild.load(Ordering::Acquire) < requested {
-        if crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
-            >= FILE_MONITOR_SYNC_TIMEOUT_MS
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
+    sync.notify_request();
+    let deadline = Instant::now() + Duration::from_millis(FILE_MONITOR_SYNC_TIMEOUT_MS as u64);
+    let rebuilt = sync.wait_progress_until(deadline, || {
+        sync.completed_rebuild.load(Ordering::Acquire) >= requested
+    });
+    if !rebuilt {
+        // 超时说明监视线程这轮没能跟上，主循环会在下一轮 reconcile 再次登记请求。
+        log::warn!(
+            "daemon file monitor rebuild sync timeout requested={} completed={}",
+            requested,
+            sync.completed_rebuild.load(Ordering::Acquire)
+        );
     }
 }
 
@@ -240,8 +313,8 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
 
     for proc in list_app_processes() {
-        let key = format!("{}:{}", proc.pid, proc.package_name);
-        if !seen.insert(key) {
+        // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
+        if !seen.insert(proc.pid) {
             continue;
         }
         if should_skip_process(&proc) {
@@ -426,17 +499,26 @@ fn list_app_processes() -> Vec<AppProcess> {
     };
 
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.chars().all(|ch| ch.is_ascii_digit()) {
+        let file_name = entry.file_name();
+        // /proc 每轮都有数百个目录项，这里只借用文件名判断，不再为每个目录项分配 String。
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if name.is_empty() || !name.bytes().all(|ch| ch.is_ascii_digit()) {
             continue;
         }
         let Ok(pid) = name.parse::<i32>() else {
             continue;
         };
-        let Some(package_name) = read_process_package(pid) else {
+        // 先读 status 取 uid：/proc 中绝大多数是内核线程与系统进程，
+        // 提前用应用 uid 门槛过滤，可省掉这些进程的 cmdline 读取与包名分配。
+        let Some((uid, is_uninterruptible)) = read_process_status(pid) else {
             continue;
         };
-        let Some((uid, is_uninterruptible)) = read_process_status(pid) else {
+        if uid < ANDROID_APP_UID_START {
+            continue;
+        }
+        let Some(package_name) = read_process_package(pid) else {
             continue;
         };
         processes.push(AppProcess {
@@ -468,11 +550,19 @@ fn read_process_status(pid: i32) -> Option<(i32, bool)> {
     let status = std_fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
     let mut uid = None;
     let mut is_uninterruptible = false;
+    let mut state_found = false;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             uid = rest.split_whitespace().next()?.parse::<i32>().ok();
         } else if let Some(state) = line.strip_prefix("State:") {
             is_uninterruptible = state.trim_start().starts_with('D');
+            state_found = true;
+        } else {
+            continue;
+        }
+        // status 后续还有几十行内存与信号字段，两个字段都拿到后不必继续扫描。
+        if uid.is_some() && state_found {
+            break;
         }
     }
     uid.map(|uid| (uid, is_uninterruptible))
