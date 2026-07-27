@@ -1,6 +1,7 @@
 use libc::{
-    AF_UNIX, POLLIN, SO_RCVBUF, SOCK_CLOEXEC, SOCK_DGRAM, SOL_SOCKET, bind, c_void, close, poll,
-    pollfd, recv, sendto, setsockopt, sockaddr, sockaddr_un, socket,
+    AF_UNIX, CMSG_DATA, CMSG_FIRSTHDR, POLLIN, SCM_CREDENTIALS, SO_PASSCRED, SO_RCVBUF,
+    SOCK_CLOEXEC, SOCK_DGRAM, SOL_SOCKET, bind, c_void, close, cmsghdr, iovec, msghdr, poll,
+    pollfd, recvmsg, sendto, setsockopt, sockaddr, sockaddr_un, socket, ucred,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -92,7 +93,7 @@ fn send_control_packet(fd: i32, command: &str) -> io::Result<()> {
 }
 
 fn run(fd: i32, mut state: LogState) {
-    let mut buffer = [0u8; RECV_BUFFER_SIZE];
+    let mut payload = [0u8; RECV_BUFFER_SIZE];
 
     loop {
         let mut poll_fd = pollfd {
@@ -107,17 +108,68 @@ fn run(fd: i32, mut state: LogState) {
             continue;
         }
 
-        // SAFETY: buffer 有 buffer.len() 字节可写空间，fd 由当前线程持有。
-        let size = unsafe { recv(fd, buffer.as_mut_ptr() as *mut c_void, buffer.len(), 0) };
+        let (size, sender_uid) = recv_with_credentials(fd, &mut payload, 0);
         if size <= 0 {
             continue;
         }
-        let Ok(packet) = std::str::from_utf8(&buffer[..size as usize]) else {
+        let Ok(packet) = std::str::from_utf8(&payload[..size as usize]) else {
             continue;
         };
-        state.handle(packet);
+        state.handle(packet, sender_uid);
         state.flush_if_due();
     }
+}
+
+/// 接收一条 datagram，同时提取 SCM_CREDENTIALS 中的发送方 UID。
+/// 返回 (接收字节数, 发送方 uid)；uid 仅在内核附加了合法 ucred 时为 Some。
+/// `flags` 直接传给 recvmsg，由调用方决定是否阻塞等待。
+fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> (isize, Option<u32>) {
+    // 控制消息缓冲区，用于接收 SCM_CREDENTIALS（ucred）凭据。
+    // 64 字节超过 CMSG_SPACE(sizeof(ucred)) 所需的约 32 字节，留有余量。
+    // repr(align(8)) 保证 cmsghdr 所需的对齐要求（64 位系统 sizeof(size_t) = 8）。
+    #[repr(align(8))]
+    struct CmsgBuf([u8; 64]);
+    let mut cmsg_buf = CmsgBuf([0u8; 64]);
+
+    let mut iov = iovec {
+        iov_base: payload.as_mut_ptr() as *mut c_void,
+        iov_len: payload.len(),
+    };
+    // SAFETY: msghdr 是允许零初始化的普通 C 结构体，各字段在下方逐一赋值。
+    let mut msg: msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut c_void;
+    msg.msg_controllen = cmsg_buf.0.len() as _;
+
+    // SAFETY: msg 已完整初始化，payload 有 payload.len() 字节可写空间，fd 由调用方持有。
+    let size = unsafe { recvmsg(fd, &mut msg, flags) };
+    if size <= 0 {
+        return (size, None);
+    }
+
+    // 提取发送方 UID：查找 SOL_SOCKET / SCM_CREDENTIALS 控制消息。
+    // SAFETY: CMSG_FIRSTHDR 在 msg_controllen > 0 时返回指向已初始化控制缓冲区内的指针，
+    //         或在无控制消息时返回 NULL；对 NULL 的检查在下一行完成。
+    let cmsg_ptr = unsafe { CMSG_FIRSTHDR(&msg) };
+    if cmsg_ptr.is_null() {
+        return (size, None);
+    }
+    // SAFETY: cmsg_ptr 非空且由 CMSG_FIRSTHDR 返回，指向已由内核初始化的 cmsghdr。
+    let hdr = unsafe { &*cmsg_ptr };
+    if hdr.cmsg_level != SOL_SOCKET || hdr.cmsg_type != SCM_CREDENTIALS {
+        return (size, None);
+    }
+    // 验证 cmsg_len 足够容纳完整的 ucred，防止越界读取截断的控制消息。
+    let min_len = mem::size_of::<cmsghdr>() + mem::size_of::<ucred>();
+    if (hdr.cmsg_len as usize) < min_len {
+        return (size, None);
+    }
+    // SAFETY: 已确认 cmsg_level/cmsg_type 正确且 cmsg_len 涵盖完整 ucred，
+    //         CMSG_DATA 返回紧跟 cmsghdr 之后、由内核写入的 ucred 起始地址，
+    //         该地址在 cmsg_buf 生命周期内始终有效。
+    let creds = unsafe { &*(CMSG_DATA(cmsg_ptr) as *const ucred) };
+    (size, Some(creds.uid as u32))
 }
 
 fn bind_log_socket() -> io::Result<i32> {
@@ -145,6 +197,20 @@ fn bind_log_socket_fd(fd: i32) -> io::Result<()> {
             SO_RCVBUF,
             &recv_buffer as *const _ as *const _,
             mem::size_of_val(&recv_buffer) as libc::socklen_t,
+        );
+    }
+
+    // 启用 SO_PASSCRED：内核在 recvmsg 的辅助数据中附加发送方凭据（SCM_CREDENTIALS），
+    // 从而可以校验发送方 UID，拒绝非可信来源的 Stats / Control 包。
+    let passcred: libc::c_int = 1;
+    // SAFETY: passcred 已初始化，选项长度与其类型完全一致。
+    unsafe {
+        let _ = setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_PASSCRED,
+            &passcred as *const _ as *const _,
+            mem::size_of_val(&passcred) as libc::socklen_t,
         );
     }
 
@@ -195,14 +261,25 @@ impl LogState {
         })
     }
 
-    fn handle(&mut self, packet: &str) {
+    fn handle(&mut self, packet: &str, sender_uid: Option<u32>) {
         let Some((level, tag, message)) = parse_packet(packet) else {
             return;
         };
         match tag {
             TAG_FILE_MONITOR => self.monitor.append(message),
             TAG_STATS => self.add_stats(message),
-            TAG_CONTROL => self.handle_control(message),
+            TAG_CONTROL => {
+                // Control 命令仅允许 root（uid 0）发送；其它进程的凭据缺失或非 root 时拒绝。
+                if sender_uid == Some(0) {
+                    self.handle_control(message);
+                } else {
+                    self.running.append(&format_running_line(
+                        "W",
+                        "LogDaemon",
+                        "收到非 root 进程的 Control 命令，已忽略",
+                    ));
+                }
+            }
             _ => self
                 .running
                 .append(&format_running_line(level, tag, message)),
@@ -262,7 +339,9 @@ struct RollingLog {
     persisted_bytes: u64,
     pending_bytes: u64,
     pending_lines: usize,
-    writer: BufWriter<File>,
+    /// 轮转或清空过程中旧文件已经失效、而新文件尚未成功打开时置空，
+    /// 避免继续向已被重命名或删除的文件写入。
+    writer: Option<BufWriter<File>>,
 }
 
 impl RollingLog {
@@ -279,12 +358,35 @@ impl RollingLog {
             max_bytes,
             pending_bytes: 0,
             pending_lines: 0,
-            writer: BufWriter::new(file),
+            writer: Some(BufWriter::new(file)),
         })
     }
 
+    /// 返回可写入的 writer；若上一次轮转或清空后尚未打开新文件，则在此重新打开。
+    fn writer_mut(&mut self) -> Option<&mut BufWriter<File>> {
+        if self.writer.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .ok()?;
+            set_log_permissions(&self.path);
+            self.persisted_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            self.pending_bytes = 0;
+            self.pending_lines = 0;
+            self.writer = Some(BufWriter::new(file));
+        }
+        self.writer.as_mut()
+    }
+
     fn append(&mut self, line: &str) {
-        if line.is_empty() || writeln!(self.writer, "{line}").is_err() {
+        if line.is_empty() {
+            return;
+        }
+        let Some(writer) = self.writer_mut() else {
+            return;
+        };
+        if writeln!(writer, "{line}").is_err() {
             return;
         }
         self.pending_bytes = self
@@ -298,8 +400,14 @@ impl RollingLog {
     }
 
     fn flush(&mut self) {
+        let Some(writer) = self.writer.as_mut() else {
+            // 上一次轮转或清空后尚未打开新文件，等到下一次写入时再重新打开。
+            self.pending_bytes = 0;
+            self.pending_lines = 0;
+            return;
+        };
         if self.pending_lines > 0 {
-            if self.writer.flush().is_err() {
+            if writer.flush().is_err() {
                 return;
             }
             self.persisted_bytes = self.persisted_bytes.saturating_add(self.pending_bytes);
@@ -315,7 +423,13 @@ impl RollingLog {
     }
 
     fn rotate(&mut self) {
-        let _ = self.writer.flush();
+        if let Some(writer) = self.writer.as_mut() {
+            let _ = writer.flush();
+        }
+        // 先释放旧句柄，避免重命名成功后继续向已轮转的文件追加日志。
+        self.writer = None;
+        self.pending_bytes = 0;
+        self.pending_lines = 0;
         let oldest = backup_path(&self.path, LOG_BACKUPS);
         let _ = fs::remove_file(oldest);
         for index in (2..=LOG_BACKUPS).rev() {
@@ -325,9 +439,11 @@ impl RollingLog {
             }
         }
         if fs::rename(&self.path, backup_path(&self.path, 1)).is_err() {
+            // 重命名失败说明原文件仍然可用，重新打开继续写入。
             self.persisted_bytes = fs::metadata(&self.path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(self.persisted_bytes);
+            let _ = self.writer_mut();
             return;
         }
         if let Ok(file) = OpenOptions::new()
@@ -335,15 +451,22 @@ impl RollingLog {
             .append(true)
             .open(&self.path)
         {
-            self.writer = BufWriter::new(file);
+            self.writer = Some(BufWriter::new(file));
             self.persisted_bytes = 0;
             set_log_permissions(&self.path);
         }
     }
 
     fn clear(&mut self) {
-        let _ = self.writer.flush();
+        if let Some(writer) = self.writer.as_mut() {
+            let _ = writer.flush();
+        }
+        // 截断前先释放句柄，避免 append 模式下的旧偏移把日志写回被清空的文件尾部。
+        self.writer = None;
+        self.pending_bytes = 0;
+        self.pending_lines = 0;
         if fs::write(&self.path, []).is_err() {
+            let _ = self.writer_mut();
             return;
         }
         if let Ok(file) = OpenOptions::new()
@@ -351,10 +474,8 @@ impl RollingLog {
             .append(true)
             .open(&self.path)
         {
-            self.writer = BufWriter::new(file);
+            self.writer = Some(BufWriter::new(file));
             self.persisted_bytes = 0;
-            self.pending_bytes = 0;
-            self.pending_lines = 0;
             set_log_permissions(&self.path);
         }
     }
