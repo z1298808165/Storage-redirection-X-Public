@@ -43,6 +43,12 @@ struct BackendDecision {
 #[derive(Clone)]
 pub(super) struct RulePrefix {
     pub(super) rel: String,
+    /// `rel` 对应的存储路径，在构造时算出。
+    ///
+    /// 该值由 `storage_root` 与 `rel` 决定，策略建成后即为常量；而 `is_virtual_dir`
+    /// 会被目录扫描按条目数反复调用，若在循环内重新拼接，每个目录项都要为每条规则
+    /// 多分配一次字符串。
+    pub(super) storage_path: String,
     pub(super) full_prefix: bool,
 }
 
@@ -256,11 +262,10 @@ impl RedirectPolicy {
     pub(super) fn is_virtual_dir(&self, rel: &str) -> bool {
         let storage_path = self.storage_path_for_rel(rel);
         self.rule_prefixes.iter().any(|prefix| {
-            let prefix_storage_path = self.storage_path_for_rel(&prefix.rel);
             paths::eq_ignore_case(&prefix.rel, rel)
-                || paths::is_child(&prefix_storage_path, &storage_path)
+                || paths::is_child(&prefix.storage_path, &storage_path)
                 || (!prefix.full_prefix
-                    && rule_has_path_prefix(&storage_path, &prefix_storage_path))
+                    && rule_has_path_prefix(&storage_path, &prefix.storage_path))
         })
     }
 
@@ -574,7 +579,12 @@ fn visible_rule_prefix(
     if rel.is_empty() {
         return None;
     }
-    Some(RulePrefix { rel, full_prefix })
+    // resolved 已是该规则前缀对应的存储路径，等价于策略侧的 storage_path_for_rel(rel)。
+    Some(RulePrefix {
+        rel,
+        storage_path: resolved,
+        full_prefix,
+    })
 }
 
 fn concrete_rule_prefix(rule: &str) -> Option<String> {

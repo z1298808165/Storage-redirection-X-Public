@@ -55,25 +55,31 @@ pub fn normalize(path: &str) -> String {
         return cached.clone();
     }
 
-    let mut result = String::with_capacity(path.len());
-    let mut is_last_slash = false;
-    for ch in path.chars() {
-        if ch == '/' {
-            if !is_last_slash {
-                result.push('/');
-                is_last_slash = true;
+    // 只有确实需要折叠重复斜杠或去掉尾斜杠时才重建字符串。别名路径（如
+    // /data/media/0/... 与 /sdcard/...）通常本身已经规整，此前仍会逐字符复制一遍
+    // 产生完全相同的内容，再交给别名解析；这里先判断是否需要改写，避免这次多余分配。
+    let needs_rewrite = path.contains("//") || (path.len() > 1 && path.ends_with('/'));
+    let normalized = if needs_rewrite {
+        let mut result = String::with_capacity(path.len());
+        let mut is_last_slash = false;
+        for ch in path.chars() {
+            if ch == '/' {
+                if !is_last_slash {
+                    result.push('/');
+                    is_last_slash = true;
+                }
+            } else {
+                result.push(ch);
+                is_last_slash = false;
             }
-        } else {
-            result.push(ch);
-            is_last_slash = false;
         }
-    }
-
-    if result.len() > 1 && result.ends_with('/') {
-        result.pop();
-    }
-
-    let normalized = resolve_storage_alias(result);
+        if result.len() > 1 && result.ends_with('/') {
+            result.pop();
+        }
+        resolve_storage_alias(&result)
+    } else {
+        resolve_storage_alias(path)
+    };
 
     // 优化：缓存规范化结果
     if let Ok(mut cache) = PATH_NORMALIZE_CACHE.try_lock() {
@@ -90,33 +96,35 @@ fn has_potential_storage_alias(path: &str) -> bool {
         || path.starts_with(DATA_MEDIA_PREFIX)
 }
 
-fn resolve_storage_alias(path: String) -> String {
+// 各别名解析分支内部只需借用，因此这里收 &str：调用方在无需折叠斜杠时可以直接
+// 传入原始路径，不必先复制一份仅为满足所有权。
+fn resolve_storage_alias(path: &str) -> String {
     if path.starts_with("/sdcard") {
-        return resolve_sdcard_alias(&path);
+        return resolve_sdcard_alias(path);
     }
     if path.starts_with("/storage/self/primary") {
-        return resolve_self_primary_alias(&path);
+        return resolve_self_primary_alias(path);
     }
     if path.starts_with("/mnt/runtime/") {
-        return resolve_mnt_runtime_alias(&path);
+        return resolve_mnt_runtime_alias(path);
     }
     if path.starts_with("/mnt/user/") {
-        let primary = resolve_mnt_user_primary_alias(&path);
+        let primary = resolve_mnt_user_primary_alias(path);
         if primary != path {
             return primary;
         }
-        return resolve_mnt_emulated_alias(&path);
+        return resolve_mnt_emulated_alias(path);
     }
     if path.starts_with("/mnt/installer/")
         || path.starts_with("/mnt/androidwritable/")
         || path.starts_with("/mnt/pass_through/")
     {
-        return resolve_mnt_emulated_alias(&path);
+        return resolve_mnt_emulated_alias(path);
     }
     if path.starts_with(DATA_MEDIA_PREFIX) {
-        return resolve_data_media_alias(&path);
+        return resolve_data_media_alias(path);
     }
-    path
+    path.to_string()
 }
 
 pub fn resolve_user_path(path: &str, user_id: i32) -> String {
