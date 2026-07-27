@@ -209,11 +209,21 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     }
 
     for allowed_path in allowed_real_paths {
-        let allowed_root =
-            resolve_concrete_scoped_rule_parent(allowed_path, user_id, &storage_root);
-        if !allowed_root.is_empty() {
-            roots.push(allowed_root);
+        // 放行规则以自身为 scoped 根，而不是父目录。取父目录会带来两个问题：顶层规则
+        // （如 DCIM、Pictures）的父目录就是存储根，会让整个存储被 FUSE 接管并在压缩时
+        // 吞并其余更精确的根；而 Download/SrtMonitor 这类规则取到的 Download 也会吞并
+        // 同配置下的兄弟目录（如只读的 Download/SrtMonitorLocked），使其拿不到独立挂载点。
+        // 以规则自身为根即可覆盖该目录下的放行需求，且与兄弟根共存。
+        // mapping_mode_only 的 sandboxed 分支仍沿用父目录，其语义要求按父目录整体接管。
+        let allowed_root = resolve_scoped_rule_path(allowed_path, user_id, &storage_root);
+        if allowed_root.is_empty()
+            || paths::contains_wildcards(&allowed_root)
+            || paths::eq_ignore_case(&allowed_root, &storage_root)
+            || !paths::is_child(&allowed_root, &storage_root)
+        {
+            continue;
         }
+        roots.push(allowed_root);
     }
 
     let normalized_read_only_paths = super::normalize_rule_list(read_only_paths.to_vec(), user_id);
