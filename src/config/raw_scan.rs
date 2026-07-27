@@ -413,9 +413,10 @@ fn lookup_cached_entry(
                 if entry.config_version != config_version {
                     return None;
                 }
-                if !entry.has_config {
-                    return None;
-                }
+                // 未配置的包同样按 TTL 命中缓存。此前这里直接判负，导致任何没有
+                // apps/<包名>.json 的调用方每次重定向决策都要重新 stat 两个候选路径；
+                // MediaProvider 为大量未配置调用方做判定时会持续产生这类 syscall。
+                // config_version 变化会清空缓存，用户改配置后仍然立即可见。
                 if now_ms.saturating_sub(entry.cached_at_ms) > RAW_CACHE_TTL_MS {
                     return None;
                 }
