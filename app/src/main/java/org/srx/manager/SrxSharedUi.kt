@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -80,6 +81,9 @@ internal fun srxDangerColor(): Color =
 
 private val RoundActionSize = 38.dp
 private val RoundActionIconSize = 19.dp
+
+/** 无障碍要求的最小触控目标尺寸。 */
+internal val MinTouchTargetSize = 48.dp
 
 private val FloatingGlassHighlight: Highlight =
     Highlight(
@@ -344,7 +348,38 @@ internal fun RoundIconAction(
   Box(
       modifier =
           modifier
-              .size(size)
+              // 圆形按钮视觉尺寸小于无障碍基线的 48dp，这里把可点击区域撑到基线大小，
+              // 内层保持原有视觉尺寸，外观不变。
+              .sizeIn(minWidth = MinTouchTargetSize, minHeight = MinTouchTargetSize),
+      contentAlignment = Alignment.Center,
+  ) {
+    RoundIconActionSurface(
+        icon = icon,
+        contentDescription = contentDescription,
+        onClick = onClick,
+        color = color,
+        danger = danger,
+        enabled = enabled,
+        size = size,
+        iconSize = iconSize,
+    )
+  }
+}
+
+@Composable
+private fun RoundIconActionSurface(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    color: Color,
+    danger: Boolean,
+    enabled: Boolean,
+    size: Dp,
+    iconSize: Dp,
+) {
+  Box(
+      modifier =
+          Modifier.size(size)
               .dropShadow(
                   CircleShape,
                   Shadow(

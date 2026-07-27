@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -56,6 +57,7 @@ import org.srx.manager.CenteredDialog
 import org.srx.manager.EmptyText
 import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
+import org.srx.manager.MinTouchTargetSize
 import org.srx.manager.PageHeader
 import org.srx.manager.RoundIconAction
 import org.srx.manager.data.FileMonitorFilters
@@ -1065,6 +1067,19 @@ private fun logReliabilityText(reliability: String): String =
 
 @Composable
 private fun PathExpandButton(expanded: Boolean, enabled: Boolean, onClick: () -> Unit) {
+  Box(
+      modifier =
+          // 展开按钮视觉上只有 24dp 且在日志卡片里密集排布，把命中区域撑到无障碍基线
+          // 尺寸以降低误触，内层图标视觉不变。
+          Modifier.sizeIn(minWidth = MinTouchTargetSize, minHeight = MinTouchTargetSize),
+      contentAlignment = Alignment.Center,
+  ) {
+    PathExpandButtonSurface(expanded = expanded, enabled = enabled, onClick = onClick)
+  }
+}
+
+@Composable
+private fun PathExpandButtonSurface(expanded: Boolean, enabled: Boolean, onClick: () -> Unit) {
   Box(
       modifier =
           Modifier.size(24.dp)

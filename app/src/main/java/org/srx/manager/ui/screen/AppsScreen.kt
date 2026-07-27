@@ -3,7 +3,7 @@ package org.srx.manager.ui.screen
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -43,7 +43,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.shadow.Shadow
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -432,12 +431,15 @@ private fun AppListItem(
     Row(
         modifier =
             Modifier.fillMaxWidth()
-                .pointerInput(selectionMode, app.packageName) {
-                  detectTapGestures(
-                      onLongPress = { onLongPress() },
-                      onTap = { onClick() },
-                  )
-                }
+                // 用 combinedClickable 而不是 detectTapGestures：后者不产生 Role.Button
+                // 语义，也没有点击与长按的无障碍动作，读屏用户无法在应用列表这一主操作
+                // 面进入配置页。
+                .combinedClickable(
+                    onClickLabel = if (selectionMode) "切换选中" else "打开配置",
+                    onLongClickLabel = "进入多选",
+                    onLongClick = { onLongPress() },
+                    onClick = { onClick() },
+                )
                 .background(
                     if (selected)
                         MiuixTheme.colorScheme.primary.copy(
