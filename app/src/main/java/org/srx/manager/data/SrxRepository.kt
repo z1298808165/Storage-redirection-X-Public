@@ -59,14 +59,14 @@ class SrxRepository(
 
   suspend fun readDashboard(): DashboardState = coroutineScope {
     val global = async { readGlobalConfig() }
-    val status = async { moduleStatus() }
-    val version = async { moduleVersion() }
+    val statusAndVersion = async { moduleController.statusAndVersion() }
     val configs = async { readConfiguredAppConfigs(force = true) }
     val runtimeActivations = async { readRuntimeActivations() }
     val loadedConfigs = configs.await()
+    val (status, version) = statusAndVersion.await()
     DashboardState(
-        status = status.await(),
-        version = version.await(),
+        status = status,
+        version = version,
         globalConfig = global.await(),
         enabledApps = countEnabledAppConfigs(loadedConfigs),
         runtimeActivations = runtimeActivations.await(),
@@ -75,11 +75,13 @@ class SrxRepository(
 
   suspend fun readDashboardSummary(): DashboardState = coroutineScope {
     val global = async { readGlobalConfig() }
-    val status = async { moduleStatus() }
-    val version = async { moduleVersion() }
+    // 状态与版本都来自模块目录，合并为一次 root 调用；每次 exec 都要新建 su 进程，
+    // 是概览加载最贵的单项开销。
+    val statusAndVersion = async { moduleController.statusAndVersion() }
+    val (status, version) = statusAndVersion.await()
     DashboardState(
-        status = status.await(),
-        version = version.await(),
+        status = status,
+        version = version,
         globalConfig = global.await(),
     )
   }

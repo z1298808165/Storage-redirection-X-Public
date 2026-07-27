@@ -4,18 +4,13 @@ import kotlinx.coroutines.delay
 import org.srx.manager.root.ShellExecutor
 import org.srx.manager.root.shellQuote
 
+private const val StatusSectionMarker = "__SRX_STATUS__"
+private const val VersionSectionMarker = "__SRX_VERSION__"
+
 class RootModuleController(
     private val shell: ShellExecutor,
 ) {
-  suspend fun status(): ModuleStatus {
-    val out = shell.exec(buildStatusCommand()).stdout.trim()
-    return when (out) {
-      "enabled" -> ModuleStatus.Enabled
-      "disabled" -> ModuleStatus.Disabled
-      "reboot_required" -> ModuleStatus.RebootRequired
-      else -> ModuleStatus.Unknown
-    }
-  }
+  suspend fun status(): ModuleStatus = parseStatus(shell.exec(buildStatusCommand()).stdout.trim())
 
   suspend fun setEnabled(enabled: Boolean): Boolean {
     val before = mediaProviderPids()
@@ -35,6 +30,40 @@ class RootModuleController(
       shell.exec(buildEnsureLogCollectorsCommand()).isSuccess
 
   suspend fun version(): String = shell.exec(readModuleVersionCommand()).stdout.trim()
+
+  /**
+   * 一次 root 调用同时读取模块状态与版本。
+   *
+   * 每次 [ShellExecutor.exec] 都要新建一个 su 进程，这是概览加载里最贵的单项开销。 两条命令各自放进子 shell 并以标记行分隔，因此保持原有语义与输出，只是省掉一次
+   * 进程创建。
+   */
+  suspend fun statusAndVersion(): Pair<ModuleStatus, String> {
+    val command =
+        "printf '%s\\n' ${shellQuote(StatusSectionMarker)}; " +
+            "( ${buildStatusCommand()} ); " +
+            "printf '%s\\n' ${shellQuote(VersionSectionMarker)}; " +
+            "( ${readModuleVersionCommand()} )"
+    val out = shell.exec(command).stdout
+    val statusText = sectionText(out, StatusSectionMarker, VersionSectionMarker)
+    val versionText = sectionText(out, VersionSectionMarker, null)
+    return parseStatus(statusText) to versionText
+  }
+
+  private fun sectionText(output: String, startMarker: String, endMarker: String?): String {
+    val start = output.indexOf(startMarker)
+    if (start < 0) return ""
+    val bodyStart = start + startMarker.length
+    val end = endMarker?.let { output.indexOf(it, bodyStart) }?.takeIf { it >= 0 } ?: output.length
+    return output.substring(bodyStart, end).trim()
+  }
+
+  private fun parseStatus(text: String): ModuleStatus =
+      when (text) {
+        "enabled" -> ModuleStatus.Enabled
+        "disabled" -> ModuleStatus.Disabled
+        "reboot_required" -> ModuleStatus.RebootRequired
+        else -> ModuleStatus.Unknown
+      }
 
   private suspend fun mediaProviderPids(): Set<String> {
     val out = shell.exec(mediaProviderPidCommand()).stdout
