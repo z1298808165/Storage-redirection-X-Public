@@ -1,4 +1,5 @@
 mod download_owner;
+mod hint_file;
 mod source_hint;
 mod stack_owner;
 mod thread_hint;

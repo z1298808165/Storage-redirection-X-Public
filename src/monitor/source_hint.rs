@@ -1,15 +1,17 @@
-use crate::platform::{self, module_paths, paths};
+use super::hint_file::{
+    is_valid_package_name, normalize_hint_confidence, normalize_path_hint_op_filter,
+    normalize_path_hint_source, read_hint_file, read_path_hint_file, write_hint_file,
+    write_path_hint_file,
+};
+use crate::platform::{self, paths};
 use crate::redirect::policy;
 use once_cell::sync::Lazy;
 use std::collections::{HashSet, VecDeque};
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-const HINT_VERSION: &str = "3";
 const RECENT_PRIVATE_OWNER_HINT_WINDOW_MS: i64 = 30_000;
 const RECENT_PRIVATE_CALLER_HINT_WINDOW_MS: i64 = 300_000;
 const RECENT_PRIVATE_TOKEN_HINT_WINDOW_MS: i64 = 300_000;
-const RECENT_PATH_CALLER_HINT_VERSION: &str = "2";
 const RECENT_PATH_CALLER_HINT_WINDOW_MS: i64 = 30_000;
 const MAX_RECENT_PRIVATE_OWNER_HINTS: usize = 8;
 const MAX_RECENT_PATH_CALLER_HINTS: usize = 16;
@@ -17,56 +19,32 @@ const ANDROID_APP_UID_START: i32 = 10_000;
 const MAX_PROC_PACKAGE_CANDIDATES: usize = 512;
 
 #[derive(Clone, Debug)]
-struct PrivateOwnerHint {
-    user_id: i32,
-    updated_ms: i64,
-    owner_package: String,
-    package_name: String,
-    caller_uid: i32,
-    tokens: Vec<String>,
-    source: &'static str,
-    confidence: &'static str,
+pub(super) struct PrivateOwnerHint {
+    pub(super) user_id: i32,
+    pub(super) updated_ms: i64,
+    pub(super) owner_package: String,
+    pub(super) package_name: String,
+    pub(super) caller_uid: i32,
+    pub(super) tokens: Vec<String>,
+    pub(super) source: &'static str,
+    pub(super) confidence: &'static str,
 }
 
 #[derive(Clone, Debug)]
-struct PathCallerHint {
-    user_id: i32,
-    updated_ms: i64,
-    package_name: String,
-    path: String,
-    source: &'static str,
-    confidence: &'static str,
-    op_filter: &'static str,
+pub(super) struct PathCallerHint {
+    pub(super) user_id: i32,
+    pub(super) updated_ms: i64,
+    pub(super) package_name: String,
+    pub(super) path: String,
+    pub(super) source: &'static str,
+    pub(super) confidence: &'static str,
+    pub(super) op_filter: &'static str,
 }
 
 static RECENT_PRIVATE_OWNER_HINT: Lazy<Mutex<VecDeque<PrivateOwnerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
 static RECENT_PATH_CALLER_HINT: Lazy<Mutex<VecDeque<PathCallerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
-static RECENT_SOURCE_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PrivateOwnerHint>>> =
-    Lazy::new(|| Mutex::new(CachedHintFile::default()));
-static RECENT_PATH_CALLER_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PathCallerHint>>> =
-    Lazy::new(|| Mutex::new(CachedHintFile::default()));
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct HintFileFingerprint {
-    length: u64,
-    modified_ns: u128,
-}
-
-struct CachedHintFile<T> {
-    fingerprint: Option<HintFileFingerprint>,
-    values: Arc<Vec<T>>,
-}
-
-impl<T> Default for CachedHintFile<T> {
-    fn default() -> Self {
-        Self {
-            fingerprint: None,
-            values: Arc::new(Vec::new()),
-        }
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecentPrivateOwnerIdentity {
@@ -895,7 +873,7 @@ fn is_public_download_path(path: &str) -> bool {
     paths::matches("Download", relative, true)
 }
 
-fn is_public_storage_hint_path(path: &str, user_id: i32) -> bool {
+pub(super) fn is_public_storage_hint_path(path: &str, user_id: i32) -> bool {
     if path.is_empty()
         || path.contains('|')
         || path.contains('\n')
@@ -963,339 +941,4 @@ fn is_generic_token(token: &str) -> bool {
             | "temp"
             | "tmp"
     )
-}
-
-fn write_hint_file(hints: &[PrivateOwnerHint]) {
-    let path = std::path::Path::new(module_paths::RECENT_SOURCE_HINT_FILE);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(mut file) = std::fs::File::create(path) else {
-        return;
-    };
-    for hint in hints {
-        let _ = writeln!(
-            file,
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            HINT_VERSION,
-            hint.user_id,
-            hint.updated_ms,
-            hint.owner_package,
-            hint.package_name,
-            hint.tokens.join(","),
-            hint.source,
-            hint.confidence
-        );
-    }
-    chmod_hint_file(path);
-    invalidate_cached_hint_file(&RECENT_SOURCE_HINT_FILE_CACHE);
-}
-
-fn write_path_hint_file(hints: &[PathCallerHint]) {
-    let path = std::path::Path::new(module_paths::RECENT_PATH_CALLER_HINT_FILE);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let Ok(mut file) = std::fs::File::create(path) else {
-        return;
-    };
-    for hint in hints {
-        let _ = writeln!(
-            file,
-            "{}|{}|{}|{}|{}|{}|{}|{}",
-            RECENT_PATH_CALLER_HINT_VERSION,
-            hint.user_id,
-            hint.updated_ms,
-            hint.package_name,
-            hint.source,
-            hint.confidence,
-            hint.op_filter,
-            hint.path
-        );
-    }
-    chmod_hint_file(path);
-    invalidate_cached_hint_file(&RECENT_PATH_CALLER_HINT_FILE_CACHE);
-}
-
-fn read_hint_file() -> Arc<Vec<PrivateOwnerHint>> {
-    read_cached_hint_file(
-        std::path::Path::new(module_paths::RECENT_SOURCE_HINT_FILE),
-        &RECENT_SOURCE_HINT_FILE_CACHE,
-        |content| {
-            content
-                .lines()
-                .filter_map(|line| parse_hint_line(line.trim()))
-                .collect()
-        },
-    )
-}
-
-fn read_path_hint_file() -> Arc<Vec<PathCallerHint>> {
-    read_cached_hint_file(
-        std::path::Path::new(module_paths::RECENT_PATH_CALLER_HINT_FILE),
-        &RECENT_PATH_CALLER_HINT_FILE_CACHE,
-        |content| {
-            content
-                .lines()
-                .filter_map(|line| parse_path_hint_line(line.trim()))
-                .collect()
-        },
-    )
-}
-
-fn read_cached_hint_file<T>(
-    path: &std::path::Path,
-    cache: &Mutex<CachedHintFile<T>>,
-    parse: impl FnOnce(&str) -> Vec<T>,
-) -> Arc<Vec<T>> {
-    let fingerprint = hint_file_fingerprint(path);
-    let Ok(mut cached) = cache.lock() else {
-        return std::fs::read_to_string(path)
-            .ok()
-            .map(|content| Arc::new(parse(&content)))
-            .unwrap_or_else(|| Arc::new(Vec::new()));
-    };
-
-    if cached.fingerprint == fingerprint {
-        return Arc::clone(&cached.values);
-    }
-
-    let values = std::fs::read_to_string(path)
-        .ok()
-        .map(|content| parse(&content))
-        .unwrap_or_default();
-    cached.fingerprint = fingerprint;
-    cached.values = Arc::new(values);
-    Arc::clone(&cached.values)
-}
-
-fn invalidate_cached_hint_file<T>(cache: &Mutex<CachedHintFile<T>>) {
-    if let Ok(mut cached) = cache.lock() {
-        cached.fingerprint = None;
-        cached.values = Arc::new(Vec::new());
-    }
-}
-
-fn hint_file_fingerprint(path: &std::path::Path) -> Option<HintFileFingerprint> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let modified_ns = metadata
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    Some(HintFileFingerprint {
-        length: metadata.len(),
-        modified_ns,
-    })
-}
-
-fn parse_hint_line(line: &str) -> Option<PrivateOwnerHint> {
-    let parts: Vec<&str> = line.split('|').collect();
-    let (
-        user_id_part,
-        updated_ms_part,
-        owner_package_part,
-        package_name_part,
-        tokens_part,
-        source,
-        confidence,
-    ) = match parts.as_slice() {
-        ["1", user_id, updated_ms, package_name, tokens] => (
-            *user_id,
-            *updated_ms,
-            *package_name,
-            *package_name,
-            *tokens,
-            "recent_private_owner",
-            "medium",
-        ),
-        [
-            "2",
-            user_id,
-            updated_ms,
-            package_name,
-            tokens,
-            source,
-            confidence,
-        ] => (
-            *user_id,
-            *updated_ms,
-            *package_name,
-            *package_name,
-            *tokens,
-            normalize_hint_source(source)?,
-            normalize_hint_confidence(confidence)?,
-        ),
-        [
-            "3",
-            user_id,
-            updated_ms,
-            owner_package,
-            package_name,
-            tokens,
-            source,
-            confidence,
-        ] => (
-            *user_id,
-            *updated_ms,
-            *owner_package,
-            *package_name,
-            *tokens,
-            normalize_hint_source(source)?,
-            normalize_hint_confidence(confidence)?,
-        ),
-        _ => return None,
-    };
-    let user_id = user_id_part.parse().ok()?;
-    let updated_ms = updated_ms_part.parse().ok()?;
-    let owner_package = owner_package_part.to_string();
-    let package_name = package_name_part.to_string();
-    if !is_valid_package_name(&owner_package) || !is_valid_package_name(&package_name) {
-        return None;
-    }
-    let tokens = tokens_part
-        .split(',')
-        .filter(|token| !token.is_empty() && token.chars().all(|ch| ch.is_ascii_alphanumeric()))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return None;
-    }
-    Some(PrivateOwnerHint {
-        user_id,
-        updated_ms,
-        owner_package,
-        package_name,
-        caller_uid: -1,
-        tokens,
-        source,
-        confidence,
-    })
-}
-
-fn parse_path_hint_line(line: &str) -> Option<PathCallerHint> {
-    let parts: Vec<&str> = line.split('|').collect();
-    let (
-        user_id_part,
-        updated_ms_part,
-        package_name_part,
-        source_part,
-        confidence_part,
-        op_filter_part,
-        path_part,
-    ) = match parts.as_slice() {
-        [
-            "1",
-            user_id,
-            updated_ms,
-            package_name,
-            source,
-            confidence,
-            path,
-        ] => (
-            *user_id,
-            *updated_ms,
-            *package_name,
-            *source,
-            *confidence,
-            "provider_open",
-            *path,
-        ),
-        [
-            "2",
-            user_id,
-            updated_ms,
-            package_name,
-            source,
-            confidence,
-            op_filter,
-            path,
-        ] => (
-            *user_id,
-            *updated_ms,
-            *package_name,
-            *source,
-            *confidence,
-            *op_filter,
-            *path,
-        ),
-        _ => return None,
-    };
-    let user_id = user_id_part.parse().ok()?;
-    let updated_ms = updated_ms_part.parse().ok()?;
-    let package_name = package_name_part.to_string();
-    let source = normalize_path_hint_source(source_part)?;
-    let confidence = normalize_hint_confidence(confidence_part)?;
-    let op_filter = normalize_path_hint_op_filter(op_filter_part)?;
-    let path = path_part.to_string();
-    if !is_valid_package_name(&package_name) || !is_public_storage_hint_path(&path, user_id) {
-        return None;
-    }
-    Some(PathCallerHint {
-        user_id,
-        updated_ms,
-        package_name,
-        path,
-        source,
-        confidence,
-        op_filter,
-    })
-}
-
-fn normalize_hint_source(value: &str) -> Option<&'static str> {
-    match value {
-        "recent_private_owner" => Some("recent_private_owner"),
-        "recent_private_caller" => Some("recent_private_caller"),
-        "recent_private_token" => Some("recent_private_token"),
-        _ => None,
-    }
-}
-
-fn normalize_path_hint_source(value: &str) -> Option<&'static str> {
-    match value {
-        "provider_open" => Some("provider_open"),
-        "saf_provider" => Some("saf_provider"),
-        "query_access" => Some("query_access"),
-        _ => None,
-    }
-}
-
-fn normalize_path_hint_op_filter(value: &str) -> Option<&'static str> {
-    match value {
-        "provider_open" => Some("provider_open"),
-        "provider_open:create" => Some("provider_open:create"),
-        "provider_open:read" => Some("provider_open:read"),
-        "provider_open:write" => Some("provider_open:write"),
-        _ => None,
-    }
-}
-
-fn normalize_hint_confidence(value: &str) -> Option<&'static str> {
-    match value {
-        "high" => Some("high"),
-        "medium" => Some("medium"),
-        "fallback" => Some("fallback"),
-        _ => None,
-    }
-}
-
-fn is_valid_package_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.contains('.')
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
-}
-
-fn chmod_hint_file(path: &std::path::Path) {
-    let Some(path_text) = path.to_str() else {
-        return;
-    };
-    let Ok(c_path) = std::ffi::CString::new(path_text) else {
-        return;
-    };
-    unsafe {
-        libc::chmod(c_path.as_ptr(), 0o666);
-    }
 }
