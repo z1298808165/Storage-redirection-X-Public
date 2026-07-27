@@ -1,20 +1,10 @@
 use libc::c_int;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
+
+pub(super) use crate::platform::errno::{last as last_errno, text as errno_text};
 
 pub(super) fn c_str(value: &str) -> Option<CString> {
     CString::new(value).ok()
-}
-
-pub(super) fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
-}
-
-pub(super) fn errno_text(code: i32) -> String {
-    unsafe {
-        CStr::from_ptr(libc::strerror(code))
-            .to_string_lossy()
-            .to_string()
-    }
 }
 
 pub(super) fn decode_wait_status(status: c_int) -> String {

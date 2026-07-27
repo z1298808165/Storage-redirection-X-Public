@@ -113,6 +113,4 @@ pub(super) fn cstring_path(path: &str) -> Option<CString> {
     CString::new(path).ok()
 }
 
-pub(super) fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
-}
+pub(super) use crate::platform::errno::last as last_errno;

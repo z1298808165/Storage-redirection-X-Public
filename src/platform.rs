@@ -2,6 +2,8 @@
 pub mod anti_detect;
 #[path = "platform/elf_img.rs"]
 pub mod elf_img;
+#[path = "platform/errno.rs"]
+pub mod errno;
 #[path = "platform/fs.rs"]
 pub mod fs;
 #[path = "platform/gnu_debugdata.rs"]

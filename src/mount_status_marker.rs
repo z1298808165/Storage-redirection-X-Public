@@ -1,3 +1,4 @@
+use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::fs;
 use crate::platform::unique_fd::UniqueFd;
 use libc::{O_CLOEXEC, O_CREAT, O_TRUNC, O_WRONLY, c_char, chmod, chown, open};
@@ -202,16 +203,4 @@ fn load_selinux_api() -> Option<SelinuxApi> {
         setfilecon: unsafe { std::mem::transmute::<*mut libc::c_void, SetFileCon>(setfilecon) },
         freecon: unsafe { std::mem::transmute::<*mut libc::c_void, FreeCon>(freecon) },
     })
-}
-
-fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
-}
-
-fn errno_text(code: i32) -> String {
-    unsafe {
-        CStr::from_ptr(libc::strerror(code))
-            .to_string_lossy()
-            .to_string()
-    }
 }

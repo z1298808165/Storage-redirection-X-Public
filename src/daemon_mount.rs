@@ -4,6 +4,7 @@ use crate::fuse_redirect::{
 };
 use crate::mount::MountPlanner;
 use crate::mount_status_marker::write_mount_status_marker;
+use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{fs, module_paths, paths};
@@ -1167,18 +1168,6 @@ fn terminate_fuse_child(pid: i32) {
     let _ = unsafe { libc::kill(pid, SIGKILL) };
     let mut status = 0;
     let _ = unsafe { waitpid(pid, &mut status, WNOHANG) };
-}
-
-fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
-}
-
-fn errno_text(code: i32) -> String {
-    unsafe {
-        CStr::from_ptr(libc::strerror(code))
-            .to_string_lossy()
-            .to_string()
-    }
 }
 
 fn decode_wait_status(status: c_int) -> String {

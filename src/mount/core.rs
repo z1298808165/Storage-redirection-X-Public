@@ -1,11 +1,12 @@
 use super::MountPlanner;
+use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::{fs, module_paths, paths};
 use libc::{
     CLONE_NEWNS, MNT_DETACH, MS_BIND, MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, chmod, chown,
     mount, readlink, stat as c_stat, umount2, unshare,
 };
 use std::collections::VecDeque;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MEDIA_RW_UID: u32 = 1023;
@@ -141,10 +142,11 @@ impl MountPlanner {
             // SAFETY: c_path 在调用期间是有效且以 NUL 结尾的 CString。
             let ret = unsafe { chown(c_path.as_ptr(), effective_uid, MEDIA_RW_GID) };
             if ret != 0 {
+                let error_no = last_errno();
                 log::warn!(
                     "mount dir: chown failed errno={} {} path={} metadata_path={}",
-                    last_errno(),
-                    errno_text(),
+                    error_no,
+                    errno_text(error_no),
                     path,
                     metadata_path
                 );
@@ -154,10 +156,11 @@ impl MountPlanner {
         // 无论目录是否已存在，都确保权限正确
         let ret = unsafe { chmod(c_path.as_ptr(), MAPPED_DIR_MODE) };
         if ret != 0 {
+            let error_no = last_errno();
             log::warn!(
                 "mount dir: chmod failed errno={} {} path={} metadata_path={}",
-                last_errno(),
-                errno_text(),
+                error_no,
+                errno_text(error_no),
                 path,
                 metadata_path
             );
@@ -378,10 +381,11 @@ impl MountPlanner {
         let existing_stat = if ret == 0 {
             Some(unsafe { st.assume_init() })
         } else {
+            let error_no = last_errno();
             log::warn!(
                 "mount dir: shared parent stat failed errno={} {} path={} metadata_path={}",
-                last_errno(),
-                errno_text(),
+                error_no,
+                errno_text(error_no),
                 path,
                 metadata_path
             );
@@ -391,10 +395,11 @@ impl MountPlanner {
         if let Some(st) = existing_stat {
             let ret = unsafe { chown(c_path.as_ptr(), st.st_uid, MEDIA_RW_GID) };
             if ret != 0 {
+                let error_no = last_errno();
                 log::warn!(
                     "mount dir: shared parent chgrp failed errno={} {} path={} metadata_path={}",
-                    last_errno(),
-                    errno_text(),
+                    error_no,
+                    errno_text(error_no),
                     path,
                     metadata_path
                 );
@@ -405,10 +410,11 @@ impl MountPlanner {
             if fixed_mode != mode {
                 let ret = unsafe { chmod(c_path.as_ptr(), fixed_mode) };
                 if ret != 0 {
+                    let error_no = last_errno();
                     log::warn!(
                         "mount dir: shared parent chmod failed errno={} {} path={} metadata_path={}",
-                        last_errno(),
-                        errno_text(),
+                        error_no,
+                        errno_text(error_no),
                         path,
                         metadata_path
                     );
@@ -504,11 +510,12 @@ impl MountPlanner {
         };
         let ret = unsafe { umount2(c_target.as_ptr(), MNT_DETACH) };
         if ret != 0 {
+            let error_no = last_errno();
             log::warn!(
                 "readwrite bind cleanup failed dst={} errno={} {}",
                 target,
-                last_errno(),
-                errno_text()
+                error_no,
+                errno_text(error_no)
             );
         }
         false
@@ -578,12 +585,13 @@ impl MountPlanner {
             }
         }
         if ret != 0 {
+            let error_no = last_errno();
             log::error!(
                 "bind mount failed src={} dst={} errno={} {}",
                 source,
                 target,
-                last_errno(),
-                errno_text()
+                error_no,
+                errno_text(error_no)
             );
             return false;
         }
@@ -708,13 +716,14 @@ impl MountPlanner {
             )
         };
         if ret != 0 {
+            let error_no = last_errno();
             log::warn!(
                 "storage parent repair failed src={} dst={} target={} errno={} {}",
                 source,
                 mount_point,
                 target,
-                last_errno(),
-                errno_text()
+                error_no,
+                errno_text(error_no)
             );
             return false;
         }
@@ -750,11 +759,12 @@ impl MountPlanner {
         };
         let ret = unsafe { umount2(c_target.as_ptr(), MNT_DETACH) };
         if ret != 0 {
+            let error_no = last_errno();
             log::warn!(
                 "readonly bind cleanup failed dst={} errno={} {}",
                 target,
-                last_errno(),
-                errno_text()
+                error_no,
+                errno_text(error_no)
             );
         }
         false
@@ -799,11 +809,12 @@ impl MountPlanner {
                 detached += 1;
                 continue;
             }
+            let error_no = last_errno();
             log::debug!(
                 "rollback umount failed dst={} errno={} {}",
                 target,
-                last_errno(),
-                errno_text()
+                error_no,
+                errno_text(error_no)
             );
         }
         if detached > 0 {
@@ -1019,10 +1030,11 @@ fn fix_read_only_public_metadata(path: &str) {
 
     let ret = unsafe { chmod(c_path.as_ptr(), fixed_mode) };
     if ret != 0 {
+        let error_no = last_errno();
         log::warn!(
             "mount dir: readonly public chmod failed errno={} {} path={} mode={:o}",
-            last_errno(),
-            errno_text(),
+            error_no,
+            errno_text(error_no),
             path,
             fixed_mode
         );
@@ -1098,12 +1110,13 @@ fn remount_bind_read_only_inner(target: &str, is_recursive: bool) -> bool {
     if ret == 0 {
         return true;
     }
+    let error_no = last_errno();
     log::warn!(
         "readonly remount failed dst={} recursive={} errno={} {}",
         target,
         is_recursive,
-        last_errno(),
-        errno_text()
+        error_no,
+        errno_text(error_no)
     );
     false
 }
@@ -1128,12 +1141,13 @@ fn remount_bind_read_write_inner(target: &str, is_recursive: bool) -> bool {
     if ret == 0 {
         return true;
     }
+    let error_no = last_errno();
     log::warn!(
         "readwrite remount failed dst={} recursive={} errno={} {}",
         target,
         is_recursive,
-        last_errno(),
-        errno_text()
+        error_no,
+        errno_text(error_no)
     );
     false
 }
@@ -1157,29 +1171,17 @@ fn paths_have_same_inode(left: &str, right: &str) -> bool {
     st_left.st_dev == st_right.st_dev && st_left.st_ino == st_right.st_ino
 }
 
-fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
-}
-
-fn errno_text() -> String {
-    let code = last_errno();
-    unsafe {
-        CStr::from_ptr(libc::strerror(code))
-            .to_string_lossy()
-            .to_string()
-    }
-}
-
 /// 输出目录元数据修复失败的告警。
 ///
 /// 多个元数据修复分支的告警格式完全相同，只有操作名不同，这里统一输出避免重复；
 /// 日志文本与字段顺序保持不变，便于日志解析继续按原有格式匹配。
 fn log_metadata_fix_failure(operation: &str, path: &str) {
+    let error_no = last_errno();
     log::warn!(
         "mount dir: {} failed errno={} {} path={}",
         operation,
-        last_errno(),
-        errno_text(),
+        error_no,
+        errno_text(error_no),
         path
     );
 }

@@ -170,7 +170,4 @@ pub(super) fn errno_from_code(code: i32) -> Errno {
     Errno::from_i32(code)
 }
 
-pub(super) fn last_errno() -> i32 {
-    // SAFETY: __errno 返回当前线程 errno 的有效指针。
-    unsafe { *libc::__errno() }
-}
+pub(super) use crate::platform::errno::last as last_errno;

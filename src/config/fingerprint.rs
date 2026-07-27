@@ -1,3 +1,4 @@
+use crate::platform::errno::last as last_errno;
 use crate::platform::{module_paths, paths};
 use libc::{O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open, stat};
 use std::ffi::CString;
@@ -175,8 +176,4 @@ fn log_config_fingerprint_perf(config_dir: &str, app_count: usize, started_ms: i
             hash
         );
     }
-}
-
-fn last_errno() -> i32 {
-    unsafe { *libc::__errno() }
 }
