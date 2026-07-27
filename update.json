@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.82",
-    "tag": "ci-build-30237076206-1",
-    "title": "CI Build 1.2.59-ci.82",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30237076206-1",
+    "version": "1.2.59-ci.83",
+    "tag": "ci-build-30282451590-1",
+    "title": "CI Build 1.2.59-ci.83",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30282451590-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30237076206-1/storage-redirect-x-manager-v1.2.59-ci.82.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30237076206-1/storage.redirect.x-v1.2.59-ci.82.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.82`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30184707944-1`\n- 当前提交：`78f677e`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复 FUSE、挂载和路径映射的一组问题：原子写状态文件并回滚失败挂载、避免子进程去重取锁死锁。\n- 修复核心逻辑的一组问题：校验控制命令来源并修正日志句柄、加固 inotify 事件读取与溢出补偿、为请求读取增加超时保护。\n\n### 增加了什么功能\n- 新增或增强 WebUI/管理界面能力：启用内容安全策略并延迟加载脚本。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## 其它更新\n\n### 注意事项\n- 更新 CI 版本序号规则说明。\n- CI 版本序号改为按构建次数递增。\n- 补充 1.2.59 发布说明。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30282451590-1/storage-redirect-x-manager-v1.2.59-ci.83.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30282451590-1/storage.redirect.x-v1.2.59-ci.83.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.83`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30237076206-1`\n- 当前提交：`372147c`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复媒体代写与系统存储链路的一组问题：已定型文件名不再按下载占位符改写集合、insert 阶段登记沙箱落点供提交时改名、提交阶段补齐被重定向文件的改名、登记调用方提示以打通 pending 提交重定向。\n- 修复 FUSE、挂载和路径映射的一组问题：放行规则以自身为 scoped 挂载根、只读规则整体未生效时输出告警、fork 前预热私有日志通道初始化。\n- 修复核心逻辑的一组问题：减少目录扫描与规范化的重复分配、移除 PreparedPath 无约束生命周期参数。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## App 更新\n\n### 修复了什么问题\n- 修复 WebUI/管理界面的一组问题：日志列表 key 不再包含列表下标、刷新失败不再静默并给概览计数加节流。\n\n### 增加了什么功能\n- 新增或增强 WebUI/管理界面能力：补齐列表项按钮语义与最小触控目标。\n\n## 其它更新\n\n### 修复了什么问题\n- 修复测试覆盖相关问题：恢复子 shell 内断言的真实判定。"
   },
   "releases": []
 }
