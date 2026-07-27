@@ -224,7 +224,7 @@ fn caller_path_list_matches(
     resolved_path: &str,
     include_xldownload_alias: bool,
 ) -> bool {
-    let pending_display_path = media_store_pending_display_path(resolved_path);
+    let pending_display_path = paths::media_store_pending_display_path(resolved_path);
     configured_paths.iter().any(|configured| {
         !configured.is_empty()
             && (caller_path_matches(configured, resolved_path, include_xldownload_alias)
@@ -241,22 +241,6 @@ fn caller_path_matches(
 ) -> bool {
     paths::matches(configured, resolved_path, true)
         || (include_xldownload_alias && paths::matches_xldownload_alias(configured, resolved_path))
-}
-
-fn media_store_pending_display_path(resolved_path: &str) -> Option<String> {
-    let slash = resolved_path.rfind('/')?;
-    let file_name = &resolved_path[slash + 1..];
-    let pending_tail = file_name.strip_prefix(".pending-")?;
-    let display_name_start = pending_tail.find('-')? + 1;
-    if display_name_start >= pending_tail.len() {
-        return None;
-    }
-
-    Some(format!(
-        "{}/{}",
-        resolved_path[..slash].trim_end_matches('/'),
-        &pending_tail[display_name_start..]
-    ))
 }
 
 // 无映射命中时的 fallback：原路 → redirect_target

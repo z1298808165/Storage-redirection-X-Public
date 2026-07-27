@@ -200,21 +200,11 @@ fn media_store_pending_open_display_path(
     media_store_pending_display_path(pathname)
 }
 
+/// 与 `paths::media_store_pending_display_path` 相同，但先把 `/data/media/` 形态
+/// 归一为 `/storage/emulated/` 别名：hook 侧拿到的是应用实际传入的原始路径。
 fn media_store_pending_display_path(pathname: &str) -> Option<String> {
     let normalized = normalize_storage_alias_for_monitor(pathname);
-    let slash = normalized.rfind('/')?;
-    let file_name = &normalized[slash + 1..];
-    let tail = file_name.strip_prefix(".pending-")?;
-    let display_start = tail.find('-')? + 1;
-    if display_start >= tail.len() {
-        return None;
-    }
-
-    Some(format!(
-        "{}/{}",
-        normalized[..slash].trim_end_matches('/'),
-        &tail[display_start..]
-    ))
+    paths::media_store_pending_display_path(&normalized)
 }
 
 fn normalize_storage_alias_for_monitor(pathname: &str) -> String {

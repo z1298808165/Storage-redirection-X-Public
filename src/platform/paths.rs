@@ -358,6 +358,30 @@ pub fn is_filtered_media_provider_path(path: &str) -> bool {
         || path.ends_with("/.picker_transcoded")
 }
 
+/// 把 MediaStore 未提交文件的 `.pending-<id>-<显示名>` 路径还原为显示名路径。
+///
+/// MediaProvider 在写入完成前使用该临时命名，只有还原后的路径才是用户在相册或
+/// 文件管理器里看到的位置。文件监视记录、FUSE 策略判定和写入归因都依赖同一份
+/// 解析结果，因此必须共用实现：命名格式随 Android 版本变化时只需改这一处，
+/// 否则同一次写入会在不同记录里显示成不同路径。
+///
+/// 传入路径需已规范化；不符合 pending 命名时返回 `None`。
+pub fn media_store_pending_display_path(path: &str) -> Option<String> {
+    let slash = path.rfind('/')?;
+    let file_name = &path[slash + 1..];
+    let pending_tail = file_name.strip_prefix(".pending-")?;
+    let display_name_start = pending_tail.find('-')? + 1;
+    if display_name_start >= pending_tail.len() {
+        return None;
+    }
+
+    Some(format!(
+        "{}/{}",
+        path[..slash].trim_end_matches('/'),
+        &pending_tail[display_name_start..]
+    ))
+}
+
 pub fn is_android_data_or_obb_path(path: &str) -> bool {
     let normalized = normalize(path);
     let Some(storage_root) = storage_user_root(&normalized) else {

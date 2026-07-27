@@ -232,7 +232,7 @@ impl RedirectPolicy {
     }
 
     pub(super) fn matches_any(&self, rules: &[String], storage_path: &str) -> bool {
-        let pending_display_path = media_store_pending_display_path(storage_path);
+        let pending_display_path = paths::media_store_pending_display_path(storage_path);
         rules.iter().any(|rule| {
             paths::matches(rule, storage_path, true)
                 || pending_display_path
@@ -448,21 +448,6 @@ pub(super) fn real_backend_root_for_config(config: &FuseRedirectConfig, user_id:
 
 pub(super) fn real_storage_anchor_for_user(user_id: i32) -> String {
     paths::join(module_paths::REAL_STORAGE_TMP_DIR, &user_id.to_string())
-}
-
-fn media_store_pending_display_path(path: &str) -> Option<String> {
-    let slash = path.rfind('/')?;
-    let file_name = &path[slash + 1..];
-    let pending_tail = file_name.strip_prefix(".pending-")?;
-    let display_name_start = pending_tail.find('-')? + 1;
-    if display_name_start >= pending_tail.len() {
-        return None;
-    }
-    Some(format!(
-        "{}/{}",
-        path[..slash].trim_end_matches('/'),
-        &pending_tail[display_name_start..]
-    ))
 }
 
 fn build_monitor_timestamp() -> String {

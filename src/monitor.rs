@@ -983,7 +983,7 @@ fn resolve_query_access_identity_locked(
         return None;
     }
     let record = state.query_access_paths.get(normalized_path).or_else(|| {
-        media_store_pending_display_path(normalized_path)
+        paths::media_store_pending_display_path(normalized_path)
             .as_deref()
             .and_then(|display_path| state.query_access_paths.get(display_path))
     })?;
@@ -1034,22 +1034,6 @@ fn normalize_provider_open_op_filter(value: &str) -> &'static str {
         "saf_provider:write" => "provider_open:write",
         _ => "provider_open",
     }
-}
-
-fn media_store_pending_display_path(normalized_path: &str) -> Option<String> {
-    let slash = normalized_path.rfind('/')?;
-    let file_name = &normalized_path[slash + 1..];
-    let pending_tail = file_name.strip_prefix(".pending-")?;
-    let display_name_start = pending_tail.find('-')? + 1;
-    if display_name_start >= pending_tail.len() {
-        return None;
-    }
-
-    Some(format!(
-        "{}/{}",
-        normalized_path[..slash].trim_end_matches('/'),
-        &pending_tail[display_name_start..]
-    ))
 }
 
 fn prune_query_access_locked(state: &mut AuditState, now_ms: i64) {

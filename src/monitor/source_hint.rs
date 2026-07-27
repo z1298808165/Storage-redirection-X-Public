@@ -803,7 +803,7 @@ fn path_hint_matches(
         return true;
     }
 
-    if media_store_pending_display_path(normalized_path)
+    if paths::media_store_pending_display_path(normalized_path)
         .as_deref()
         .is_some_and(|display_path| hint.path == display_path)
     {
@@ -824,7 +824,7 @@ fn saf_hint_path_matches(hint_path: &str, normalized_path: &str) -> bool {
     if paths::is_child(normalized_path, hint_path) {
         return true;
     }
-    if let Some(display_path) = media_store_pending_display_path(normalized_path)
+    if let Some(display_path) = paths::media_store_pending_display_path(normalized_path)
         && paths::is_child(&display_path, hint_path)
     {
         return true;
@@ -840,22 +840,6 @@ fn saf_hint_path_matches(hint_path: &str, normalized_path: &str) -> bool {
 
 fn path_file_name(path: &str) -> Option<&str> {
     path.trim_end_matches('/').rsplit('/').next()
-}
-
-fn media_store_pending_display_path(normalized_path: &str) -> Option<String> {
-    let slash = normalized_path.rfind('/')?;
-    let file_name = &normalized_path[slash + 1..];
-    let pending_tail = file_name.strip_prefix(".pending-")?;
-    let display_name_start = pending_tail.find('-')? + 1;
-    if display_name_start >= pending_tail.len() {
-        return None;
-    }
-
-    Some(format!(
-        "{}/{}",
-        normalized_path[..slash].trim_end_matches('/'),
-        &pending_tail[display_name_start..]
-    ))
 }
 
 fn hint_rank(hint: &PrivateOwnerHint) -> i32 {
