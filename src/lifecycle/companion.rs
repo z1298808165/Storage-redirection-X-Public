@@ -3,8 +3,11 @@ use super::companion_request::{CompanionMountRequest, parse_companion_mount_requ
 use crate::logging::Logger;
 use crate::platform::fs;
 use libc::{SIG_IGN, SIGPIPE, c_int, signal};
+use std::time::Duration;
 
 const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
+// 伴生进程单次请求的读取超时：对端异常挂起时不能让伴生进程被永久占用
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 // 伴生进程主流程：读取请求、解析、执行挂载、返回状态
 pub fn run_companion_pipeline(client_fd: c_int) {
@@ -63,7 +66,7 @@ pub fn run_companion_pipeline(client_fd: c_int) {
 
 fn read_payload_length(client_fd: c_int) -> Option<u32> {
     let mut buffer = [0u8; 4];
-    if !fs::read_all(client_fd, &mut buffer) {
+    if !fs::read_all_timeout(client_fd, &mut buffer, READ_TIMEOUT) {
         log::warn!("read length failed fd={}", client_fd);
         return None;
     }
@@ -73,7 +76,7 @@ fn read_payload_length(client_fd: c_int) -> Option<u32> {
 // 按长度读取负载并强制 UTF-8 解码
 fn read_payload_data(client_fd: c_int, payload_len: u32) -> Option<String> {
     let mut buffer = vec![0u8; payload_len as usize];
-    if !fs::read_all(client_fd, &mut buffer) {
+    if !fs::read_all_timeout(client_fd, &mut buffer, READ_TIMEOUT) {
         log::warn!("read payload failed fd={} len={}", client_fd, payload_len);
         return None;
     }

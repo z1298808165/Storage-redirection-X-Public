@@ -1,10 +1,41 @@
-use libc::{EEXIST, EINTR, S_IFDIR, c_int, c_void, chown, mkdir, read, stat, write};
+use libc::{
+    EEXIST, EINTR, POLLIN, S_IFDIR, c_int, c_void, chown, mkdir, poll, pollfd, read, stat, write,
+};
 use std::ffi::CString;
+use std::time::{Duration, Instant};
 
-// EINTR 自动重试，直到填满或出错
-pub fn read_all(fd: c_int, buffer: &mut [u8]) -> bool {
+// 带总超时的阻塞读：每次 read 前先 poll 等待可读，超出截止时间立即失败返回。
+// 用于伴生进程等只信任本地对端但仍不能被对端拖死的场景：
+// 对端一直不发数据或只发一半时，这里会在超时后返回 false，由调用方记录日志并回收 fd。
+pub fn read_all_timeout(fd: c_int, buffer: &mut [u8], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
     let mut total = 0usize;
     while total < buffer.len() {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let remaining = deadline - now;
+        // poll 的超时单位是毫秒，向上取整保证不会因为截断变成非阻塞轮询
+        let remaining_ms = remaining.as_millis().min(c_int::MAX as u128) as c_int;
+        let wait_ms = if remaining_ms == 0 { 1 } else { remaining_ms };
+        let mut poll_fd = pollfd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll_fd 是栈上有效的单元素 pollfd，数量参数与之匹配
+        let ready = unsafe { poll(&mut poll_fd, 1, wait_ms) };
+        if ready < 0 {
+            if errno_is(EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if ready == 0 {
+            return false;
+        }
+        // SAFETY: 读入缓冲区剩余区间，长度不超过缓冲区容量
         let n = unsafe {
             read(
                 fd,
