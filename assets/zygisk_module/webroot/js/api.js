@@ -280,6 +280,56 @@ function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
+/**
+ * 拼装单条命令：命令前缀保持原样，其余参数逐个做 shell 转义。
+ * 只用于参数化命令，需要保留 shell 展开的脚本仍应手写。
+ */
+function shellCommand(program, ...args) {
+  if (!args.length) return program;
+  return program + " " + args.map(shellQuote).join(" ");
+}
+
+/**
+ * 分块上传 base64 内容并落盘到目标路径，供多个原始写入接口复用。
+ * 失败时清理临时文件并返回 false。
+ */
+async function writeBase64Payload(api, path, encoded, options, label) {
+  const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
+  const tmpfile = "/data/local/tmp/srx_raw_" + token;
+  const tmpb64 = tmpfile + ".b64";
+  const targetDir = path.substring(0, path.lastIndexOf("/")) || "/data/local/tmp";
+  const mode = options?.mode || "644";
+  const chunkSize = 60000;
+  try {
+    await api.exec(shellCommand("mkdir -p", targetDir));
+    if (encoded.length <= chunkSize) {
+      await api.exec(shellCommand("printf %s", encoded) + " | base64 -d > " + shellQuote(tmpfile));
+    } else {
+      await api.exec(": > " + shellQuote(tmpb64));
+      for (let i = 0; i < encoded.length; i += chunkSize) {
+        await api.exec(
+          shellCommand("printf %s", encoded.slice(i, i + chunkSize)) + " >> " + shellQuote(tmpb64),
+        );
+      }
+      await api.exec(shellCommand("base64 -d", tmpb64) + " > " + shellQuote(tmpfile));
+    }
+    await api.exec(
+      shellCommand("cp", tmpfile, path) +
+        " && " +
+        shellCommand("chmod", mode, path) +
+        " && " +
+        shellCommand("rm -f", tmpfile, tmpb64),
+    );
+    return true;
+  } catch (e) {
+    try {
+      await api.exec(shellCommand("rm -f", tmpfile, tmpb64));
+    } catch {}
+    console.error(label, e);
+    return false;
+  }
+}
+
 function srxCtlCommand(action) {
   return "/system/bin/sh " + shellQuote(SRXCTL) + " " + action;
 }
@@ -838,7 +888,7 @@ const Api = {
   /** 以字符串形式读取文件内容 */
   async readFile(path) {
     try {
-      return await this.exec("cat " + shellQuote(path) + " 2>/dev/null");
+      return await this.exec(shellCommand("cat", path) + " 2>/dev/null");
     } catch {
       return "";
     }
@@ -848,7 +898,7 @@ const Api = {
   async readFileTail(path, lineCount) {
     const lines = Math.max(1, Math.min(5000, Number(lineCount) || 500));
     try {
-      return await this.exec("tail -n " + lines + " " + shellQuote(path) + " 2>/dev/null");
+      return await this.exec(shellCommand("tail -n " + lines, path) + " 2>/dev/null");
     } catch {
       return "";
     }
@@ -899,55 +949,13 @@ const Api = {
 
   /** 将内容写入任意文件，不触碰实时配置标记。 */
   async writeRawFile(path, content, options) {
-    const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
-    const tmpfile = "/data/local/tmp/srx_raw_" + token;
-    const tmpb64 = tmpfile + ".b64";
-    const targetDir = path.substring(0, path.lastIndexOf("/")) || "/data/local/tmp";
-    const mode = options?.mode || "644";
-    const encoded = utf8ToBase64(content);
-    const chunkSize = 60000;
-    try {
-      await this.exec("mkdir -p " + shellQuote(targetDir));
-      if (encoded.length <= chunkSize) {
-        await this.exec(
-          "printf %s " + shellQuote(encoded) + " | base64 -d > " + shellQuote(tmpfile),
-        );
-      } else {
-        await this.exec(": > " + shellQuote(tmpb64));
-        for (let i = 0; i < encoded.length; i += chunkSize) {
-          await this.exec(
-            "printf %s " +
-              shellQuote(encoded.slice(i, i + chunkSize)) +
-              " >> " +
-              shellQuote(tmpb64),
-          );
-        }
-        await this.exec("base64 -d " + shellQuote(tmpb64) + " > " + shellQuote(tmpfile));
-      }
-      await this.exec(
-        "cp " +
-          shellQuote(tmpfile) +
-          " " +
-          shellQuote(path) +
-          " && " +
-          "chmod " +
-          shellQuote(mode) +
-          " " +
-          shellQuote(path) +
-          " && " +
-          "rm -f " +
-          shellQuote(tmpfile) +
-          " " +
-          shellQuote(tmpb64),
-      );
-      return true;
-    } catch (e) {
-      try {
-        await this.exec("rm -f " + shellQuote(tmpfile) + " " + shellQuote(tmpb64));
-      } catch {}
-      console.error("[api] writeRawFile failed:", e);
-      return false;
-    }
+    return await writeBase64Payload(
+      this,
+      path,
+      utf8ToBase64(content),
+      options,
+      "[api] writeRawFile failed:",
+    );
   },
 
   async writeStagedFiles(stage, files, options) {
@@ -1031,50 +1039,13 @@ const Api = {
   },
 
   async writeRawBase64File(path, encoded, options) {
-    const token = Date.now() + "_" + Math.floor(Math.random() * 100000);
-    const tmpfile = "/data/local/tmp/srx_raw_" + token;
-    const tmpb64 = tmpfile + ".b64";
-    const targetDir = path.substring(0, path.lastIndexOf("/")) || "/data/local/tmp";
-    const mode = options?.mode || "644";
-    const value = String(encoded || "");
-    const chunkSize = 60000;
-    try {
-      await this.exec("mkdir -p " + shellQuote(targetDir));
-      if (value.length <= chunkSize) {
-        await this.exec("printf %s " + shellQuote(value) + " | base64 -d > " + shellQuote(tmpfile));
-      } else {
-        await this.exec(": > " + shellQuote(tmpb64));
-        for (let i = 0; i < value.length; i += chunkSize) {
-          await this.exec(
-            "printf %s " + shellQuote(value.slice(i, i + chunkSize)) + " >> " + shellQuote(tmpb64),
-          );
-        }
-        await this.exec("base64 -d " + shellQuote(tmpb64) + " > " + shellQuote(tmpfile));
-      }
-      await this.exec(
-        "cp " +
-          shellQuote(tmpfile) +
-          " " +
-          shellQuote(path) +
-          " && " +
-          "chmod " +
-          shellQuote(mode) +
-          " " +
-          shellQuote(path) +
-          " && " +
-          "rm -f " +
-          shellQuote(tmpfile) +
-          " " +
-          shellQuote(tmpb64),
-      );
-      return true;
-    } catch (e) {
-      try {
-        await this.exec("rm -f " + shellQuote(tmpfile) + " " + shellQuote(tmpb64));
-      } catch {}
-      console.error("[api] writeRawBase64File failed:", e);
-      return false;
-    }
+    return await writeBase64Payload(
+      this,
+      path,
+      String(encoded || ""),
+      options,
+      "[api] writeRawBase64File failed:",
+    );
   },
 
   async saveBackupBytesToDownloads(fileName, encoded) {
@@ -1334,7 +1305,7 @@ const Api = {
     }
 
     options?.onProgress?.({ percent: 99, phase: "verify", message: "正在确认日志包" });
-    const exists = await this.exec("[ -s " + shellQuote(archive) + " ] && echo 1 || echo 0", {
+    const exists = await this.exec(shellCommand("[ -s", archive) + " ] && echo 1 || echo 0", {
       timeoutMs: 10000,
     }).catch(() => "0");
     if (String(exists).trim() !== "1") throw new Error("日志包生成失败");
@@ -1476,7 +1447,7 @@ const Api = {
   /** 检查文件是否存在 */
   async fileExists(path) {
     try {
-      const out = await this.exec("test -f " + shellQuote(path) + " && echo 1 || echo 0");
+      const out = await this.exec(shellCommand("test -f", path) + " && echo 1 || echo 0");
       return out === "1";
     } catch {
       return false;
@@ -1627,7 +1598,7 @@ const Api = {
     if (!isSafePackageName(packageName)) return false;
     const path = APPS_DIR + "/" + packageName + ".json";
     try {
-      await this.exec("rm -f " + shellQuote(path));
+      await this.exec(shellCommand("rm -f", path));
       if (!(await this.touchConfig())) return false;
       this.invalidateConfiguredAppsCache();
       return true;

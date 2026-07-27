@@ -287,6 +287,31 @@
     { value: "All", label: "全通道最新版" },
   ];
 
+  // ═══ 输入防抖 ═══
+  // 统一输入类防抖延迟：列表重渲染成本高的用长延迟，纯文本重绘用短延迟。
+  const DEBOUNCE_APP_SEARCH_MS = 400;
+  const DEBOUNCE_LOG_SEARCH_MS = 120;
+  const DEBOUNCE_PATH_BROWSE_MS = 220;
+  const DEBOUNCE_PATH_VALIDATE_MS = 180;
+
+  // 返回一个防抖包装函数，重复调用只在静默 waitMs 后执行最后一次；
+  // 包装函数带 cancel(),用于弹窗关闭等需要立即丢弃待执行回调的场景。
+  function debounce(fn, waitMs) {
+    let timer = null;
+    const wrapped = (...args) => {
+      if (timer !== null) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        fn(...args);
+      }, waitMs);
+    };
+    wrapped.cancel = () => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    return wrapped;
+  }
+
   // ═══ Navigation ═══
   function routeTo(page, options) {
     if (!page) return;
@@ -1623,7 +1648,8 @@
   function initSearch() {
     const input = $("#appSearchInput"),
       clearBtn = $("#appSearchClear");
-    let timer = null;
+    // 应用列表渲染成本高，使用较长的防抖延迟保证输入流畅
+    const runFilters = debounce(() => applyFilters(), DEBOUNCE_APP_SEARCH_MS);
     document.addEventListener("click", (e) => {
       const switcher = $("#appUserSwitcher");
       if (switcher && !switcher.contains(e.target)) switcher.classList.remove("open");
@@ -1631,9 +1657,7 @@
 
     input?.addEventListener("input", () => {
       clearBtn.classList.toggle("hidden", !input.value);
-      clearTimeout(timer);
-      // 优化：将搜索防抖延迟从 200ms 提高到 400ms，增强应用列表渲染时的操作流畅度
-      timer = setTimeout(() => applyFilters(), 400);
+      runFilters();
     });
 
     clearBtn?.addEventListener("click", () => {
@@ -1659,12 +1683,11 @@
       clearBtn = $("#logSearchClear");
     if (!input || input._srxBound) return;
     input._srxBound = true;
-    let timer = null;
+    const rerenderLogs = debounce(() => renderLogCards({ reset: true }), DEBOUNCE_LOG_SEARCH_MS);
     input.addEventListener("input", () => {
       State.logSearchQuery = input.value.trim().toLowerCase();
       clearBtn?.classList.toggle("hidden", !input.value);
-      clearTimeout(timer);
-      timer = setTimeout(() => renderLogCards({ reset: true }), 120);
+      rerenderLogs();
     });
     clearBtn?.addEventListener("click", () => {
       input.value = "";
@@ -3241,7 +3264,6 @@
     let currentPrefix = "";
     let currentQuery = "";
     let requestId = 0;
-    let loadTimer = null;
     let cachedDir = "";
     let cachedContents = null;
     let renderedSignature = "";
@@ -3365,15 +3387,17 @@
       }
     };
 
+    // 目录读取在防抖结束时才取用最新的 currentDir，避免连续输入触发多次读取
+    const scheduleLoadDir = debounce(() => loadDir(currentDir), DEBOUNCE_PATH_BROWSE_MS);
+
     const loadForInput = (value) => {
-      clearTimeout(loadTimer);
       currentRulePrefix =
         validateOptions?.allowRuleSyntax && value.trim().startsWith("!") ? "!" : "";
       const parsed = splitInputPath(value);
       currentPrefix = parsed.prefix;
       currentQuery = parsed.query;
       currentDir = parsed.dirRel ? basePath + "/" + parsed.dirRel : basePath;
-      loadTimer = setTimeout(() => loadDir(currentDir), 220);
+      scheduleLoadDir();
     };
 
     container.loadForInput = loadForInput;
@@ -3435,10 +3459,12 @@
     browserContainer.appendChild(browser);
 
     // 输入时执行校验
-    let validateTimer;
+    const runValidate = debounce(
+      () => showPathValidation(input, hintEl, validateOptions),
+      DEBOUNCE_PATH_VALIDATE_MS,
+    );
     input.addEventListener("input", () => {
-      clearTimeout(validateTimer);
-      validateTimer = setTimeout(() => showPathValidation(input, hintEl, validateOptions), 180);
+      runValidate();
       browser.loadForInput(input.value);
     });
 
@@ -3558,19 +3584,20 @@
     targetInput?.addEventListener("focus", () => activateBrowser("target"));
 
     // 路径校验
-    let reqTimer = null,
-      targetTimer = null;
+    const runReqValidate = debounce(
+      () => showPathValidation(reqInput, reqHint),
+      DEBOUNCE_PATH_VALIDATE_MS,
+    );
+    const runTargetValidate = debounce(
+      () => showPathValidation(targetInput, targetHint, targetValidateOptions),
+      DEBOUNCE_PATH_VALIDATE_MS,
+    );
     reqInput?.addEventListener("input", () => {
-      clearTimeout(reqTimer);
-      reqTimer = setTimeout(() => showPathValidation(reqInput, reqHint), 180);
+      runReqValidate();
       activateBrowser("request");
     });
     targetInput?.addEventListener("input", () => {
-      clearTimeout(targetTimer);
-      targetTimer = setTimeout(
-        () => showPathValidation(targetInput, targetHint, targetValidateOptions),
-        180,
-      );
+      runTargetValidate();
       activateBrowser("target");
     });
 
