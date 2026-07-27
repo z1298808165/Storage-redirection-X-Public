@@ -2037,15 +2037,20 @@ public class Hooker {
 
   private static boolean isLikelyDownloadMediaPlaceholder(ContentValues values) {
     if (values == null) return false;
+    String displayName = firstString(values, "_display_name", "display_name");
     String mimeType = values.getAsString("mime_type");
     if (mimeType != null) {
       String lower = mimeType.toLowerCase(Locale.ROOT);
-      if (lower.startsWith("image/")
-          || lower.startsWith("video/")
-          || "application/octet-stream".equals(lower)) return true;
+      if (lower.startsWith("image/") || lower.startsWith("video/")) return true;
+      // application/octet-stream 只有在文件名也未定型时才算占位符。下载器常以该 MIME
+      // 加无扩展名的临时名建占位记录，改写到图片或视频集合可让成品在相册中可见；但
+      // 请求方若已给出带扩展名的文件名（如 .bin），说明类型已定，此时改写集合会让
+      // MediaProvider 按图片 MIME 再追加一次扩展名，落盘变成 .bin.jpg。
+      if ("application/octet-stream".equals(lower)) {
+        return displayName == null || displayName.length() == 0 || !hasFileExtension(displayName);
+      }
       return false;
     }
-    String displayName = firstString(values, "_display_name", "display_name");
     if (displayName == null || displayName.length() == 0) return true;
     return !hasFileExtension(displayName);
   }
