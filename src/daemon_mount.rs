@@ -238,10 +238,44 @@ fn remember_stuck_mount_child(child: i32) {
     );
 }
 
+/// fork 之前在父进程算好的挂载计划。
+///
+/// 子进程只保留调用线程，不能依赖其它父线程在 fork 瞬间持有的 malloc arena 或全局锁，
+/// 所以所有可以提前得到的路径字符串都放在这里，子进程直接复用已分配好的内容。
+struct MountForkPlan {
+    /// 需要交给 FUSE 服务接管的挂载根，父子进程共用同一份结果。
+    scoped_fuse_roots: Vec<String>,
+    /// 挂载状态文件路径。
+    state_path: String,
+    /// 挂载状态文件的临时写入路径。
+    temp_state_path: String,
+    /// 本次请求按规则推导出的重叠挂载点，用于清理上一轮残留。
+    overlay_targets: Vec<String>,
+    /// 目标进程的 mount namespace 路径，已提前转换为 C 字符串。
+    mount_namespace_path: Option<CString>,
+}
+
+impl MountForkPlan {
+    fn build(request: &MountRequest) -> Self {
+        let state_path = state_file_path(request);
+        let temp_state_path = format!("{}.tmp", state_path);
+        Self {
+            scoped_fuse_roots: scoped_fuse_mount_roots(request),
+            state_path,
+            temp_state_path,
+            overlay_targets: request_overlay_targets(request),
+            mount_namespace_path: CString::new(format!("/proc/{}/ns/mnt", request.pid)).ok(),
+        }
+    }
+}
+
 fn run_mount_in_forked_child(request: &MountRequest) -> bool {
-    let parent_timeout_sec = PARENT_RECV_TIMEOUT_SEC.saturating_add(
-        FUSE_READY_TIMEOUT_SEC.saturating_mul(scoped_fuse_mount_roots(request).len() as i64),
-    );
+    // fork 之后的子进程只保留调用线程。此时若再做堆分配、首次初始化或获取全局锁，
+    // 可能因为其它父线程在 fork 瞬间持有 malloc arena 或全局锁而永久阻塞。
+    // 因此把可以提前算出的字符串与路径列表全部在父进程算好，子进程只做 setns/mount/write。
+    let plan = MountForkPlan::build(request);
+    let parent_timeout_sec = PARENT_RECV_TIMEOUT_SEC
+        .saturating_add(FUSE_READY_TIMEOUT_SEC.saturating_mul(plan.scoped_fuse_roots.len() as i64));
     let mut sockets = [0; 2];
     if unsafe { socketpair(AF_UNIX, SOCK_DGRAM, 0, sockets.as_mut_ptr()) } != 0 {
         log_errno("daemon socketpair failed");
@@ -264,18 +298,18 @@ fn run_mount_in_forked_child(request: &MountRequest) -> bool {
     }
 
     unsafe { close(sockets[0]) };
-    let ok = handle_child_process(request, sockets[1]);
+    let ok = handle_child_process(request, &plan, sockets[1]);
     unsafe { libc::_exit(if ok { 0 } else { 1 }) };
 }
 
-fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
-    if !set_mount_namespace(request.pid) {
+fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_int) -> bool {
+    if !set_mount_namespace(plan.mount_namespace_path.as_deref()) {
         let _ = send_mount_result(sock, -1);
         unsafe { close(sock) };
         return false;
     }
 
-    if !clear_previous_mounts(request) {
+    if !clear_previous_mounts(plan) {
         log::warn!(
             "daemon mount cleanup incomplete pid={} pkg={}",
             request.pid,
@@ -297,13 +331,13 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
         false,
     );
     planner.set_file_monitor_enabled(request.is_file_monitor_enabled);
-    let scoped_fuse_roots = scoped_fuse_mount_roots(request);
+    let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
     let ok = if request.is_mapping_mode_only {
         planner.apply_path_mappings_only(
             &request.path_mappings,
             &request.sandboxed_paths,
             &request.read_only_paths,
-            &scoped_fuse_roots,
+            scoped_fuse_roots,
         )
     } else {
         planner.apply_sdcard_redirect(
@@ -311,7 +345,7 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
             &request.excluded_real_paths,
             &request.read_only_paths,
             &request.path_mappings,
-            &scoped_fuse_roots,
+            scoped_fuse_roots,
         )
     };
     if ok {
@@ -324,12 +358,12 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
                 request.is_fuse_daemon_redirect_enabled,
                 fuse_roots.len()
             );
-            for root in &fuse_roots {
+            for root in fuse_roots {
                 log::info!("daemon hybrid fuse root {}", root);
             }
         }
         let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, &fuse_roots, planner.real_storage_anchor()) {
+            match start_scoped_fuse_services(request, fuse_roots, planner.real_storage_anchor()) {
                 Some(children) => children,
                 None => {
                     log::warn!(
@@ -359,7 +393,7 @@ fn handle_child_process(request: &MountRequest, sock: c_int) -> bool {
             }
         }
         let mounted_targets = planner.take_mounted_targets();
-        if !write_mount_state(request, &mounted_targets, &fuse_children) {
+        if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
         let _ = send_mount_result(sock, 0);
@@ -504,9 +538,9 @@ fn start_fuse_service_for_root(
     })
 }
 
-fn set_mount_namespace(pid: i32) -> bool {
-    let ns_path = format!("/proc/{}/ns/mnt", pid);
-    let Ok(c_path) = CString::new(ns_path) else {
+fn set_mount_namespace(ns_path: Option<&CStr>) -> bool {
+    // 路径在 fork 之前就已经转换好，这里只做 open/setns，避免子进程再次堆分配。
+    let Some(c_path) = ns_path else {
         return false;
     };
     let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
@@ -675,11 +709,11 @@ fn send_mount_result(sock: c_int, result: i32) -> bool {
     }
 }
 
-fn clear_previous_mounts(request: &MountRequest) -> bool {
-    let state_path = state_file_path(request);
-    let fuse_children = read_fuse_child_pids(&state_path);
-    let mut targets = read_mount_targets(&state_path);
-    targets.extend(request_overlay_targets(request));
+fn clear_previous_mounts(plan: &MountForkPlan) -> bool {
+    let state_path = plan.state_path.as_str();
+    let fuse_children = read_fuse_child_pids(state_path);
+    let mut targets = read_mount_targets(state_path);
+    targets.extend(plan.overlay_targets.iter().cloned());
     let targets = module_paths::normalize_mount_targets(&targets);
     for pid in &fuse_children {
         terminate_fuse_child(*pid);
@@ -948,6 +982,7 @@ fn fuse_config_from_request(
 
 fn write_mount_state(
     request: &MountRequest,
+    plan: &MountForkPlan,
     targets: &[String],
     fuse_children: &[FuseMountState],
 ) -> bool {
@@ -958,15 +993,29 @@ fn write_mount_state(
         );
         return false;
     }
-    let state_path = state_file_path(request);
-    let temp_path = format!("{}.tmp", state_path);
-    let Ok(c_temp_path) = CString::new(temp_path.clone()) else {
+    // 路径在 fork 之前已由 MountForkPlan 算好，直接复用，避免子进程堆分配。
+    let state_path = plan.state_path.as_str();
+    let temp_path = plan.temp_state_path.as_str();
+    let Ok(c_temp_path) = CString::new(temp_path) else {
         return false;
     };
+    let mut content = String::new();
+    content.push_str(&format!("version={}\n", request.config_version));
+    content.push_str(&format!("package={}\n", request.package_name));
+    content.push_str(&format!("uid={}\n", request.uid));
+    for state in fuse_children {
+        content.push_str(&format!("fuse_child={}\n", state.child));
+    }
+    let mut all_targets = targets.to_vec();
+    all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
+    for target in module_paths::normalize_mount_targets(&all_targets) {
+        content.push_str("target=");
+        content.push_str(&target);
+        content.push('\n');
+    }
     // 先写临时文件并 fsync，再原子 rename 覆盖正式文件。
     // 这样即使中途崩溃或断电，也只会残留临时文件，正式挂载清单仍是上一轮的完整内容，
-    // 避免清理旧挂载时因为读到空文件而永久漏卸挂载点。
-    // SAFETY: c_temp_path 在调用期间保持存活，且是以 NUL 结尾的合法路径。
+    // 避免 clear_previous_mounts 因为读到空文件而永久漏卸挂载点。
     let fd = unsafe {
         open(
             c_temp_path.as_ptr(),
@@ -983,22 +1032,7 @@ fn write_mount_state(
         );
         return false;
     }
-    let mut content = String::new();
-    content.push_str(&format!("version={}\n", request.config_version));
-    content.push_str(&format!("package={}\n", request.package_name));
-    content.push_str(&format!("uid={}\n", request.uid));
-    for state in fuse_children {
-        content.push_str(&format!("fuse_child={}\n", state.child));
-    }
-    let mut all_targets = targets.to_vec();
-    all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-    for target in module_paths::normalize_mount_targets(&all_targets) {
-        content.push_str("target=");
-        content.push_str(&target);
-        content.push('\n');
-    }
     let mut ok = fs::write_all(fd, content.as_bytes());
-    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符。
     if ok && unsafe { libc::fsync(fd) } != 0 {
         log::warn!(
             "daemon mount state fsync failed path={} errno={} {}",
@@ -1008,13 +1042,12 @@ fn write_mount_state(
         );
         ok = false;
     }
-    // SAFETY: 同上，关闭与改权限使用的都是本函数持有的 fd 与存活字符串。
     unsafe {
         libc::close(fd);
         let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
     }
     if ok {
-        ok = std::fs::rename(&temp_path, &state_path).is_ok();
+        ok = std::fs::rename(temp_path, state_path).is_ok();
         if !ok {
             log::warn!(
                 "daemon mount state rename failed temp={} path={}",
@@ -1031,7 +1064,7 @@ fn write_mount_state(
             state_path
         );
     } else {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(temp_path);
     }
     ok
 }
