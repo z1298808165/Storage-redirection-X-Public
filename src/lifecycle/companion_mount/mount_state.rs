@@ -1,5 +1,5 @@
-use super::FuseMountState;
 use super::sys::{errno_text, last_errno};
+use super::{CompanionMountForkPlan, FuseMountState};
 use crate::lifecycle::companion_request::CompanionMountRequest;
 use crate::platform::{fs, module_paths};
 use libc::{O_CLOEXEC, O_CREAT, O_TRUNC, O_WRONLY, chmod, open};
@@ -7,6 +7,7 @@ use std::ffi::CString;
 
 pub(super) fn write_mount_state(
     request: &CompanionMountRequest,
+    plan: &CompanionMountForkPlan,
     targets: &[String],
     fuse_children: &[FuseMountState],
 ) -> bool {
@@ -21,9 +22,10 @@ pub(super) fn write_mount_state(
         return false;
     }
 
-    let state_path = state_file_path(request);
-    let temp_path = format!("{}.tmp", state_path);
-    let Ok(c_temp_path) = CString::new(temp_path.clone()) else {
+    // 路径在 fork 之前已经算好，这里直接复用，避免子进程重复拼接字符串。
+    let state_path = plan.state_path.as_str();
+    let temp_path = plan.temp_state_path.as_str();
+    let Ok(c_temp_path) = CString::new(temp_path) else {
         return false;
     };
     let fd = unsafe {
@@ -60,7 +62,6 @@ pub(super) fn write_mount_state(
     }
 
     let mut ok = fs::write_all(fd, content.as_bytes());
-    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符，c_temp_path 在调用期间保持存活。
     unsafe {
         if libc::fsync(fd) != 0 {
             ok = false;
@@ -69,7 +70,7 @@ pub(super) fn write_mount_state(
         let _ = chmod(c_temp_path.as_ptr(), 0o600);
     }
     // 先写临时文件再原子改名：写入中途失败时保留上一份有效状态，避免留下被截断的状态文件。
-    if ok && std::fs::rename(&temp_path, &state_path).is_err() {
+    if ok && std::fs::rename(temp_path, state_path).is_err() {
         ok = false;
         log::warn!(
             "mount state rename failed temp={} path={}",
@@ -85,12 +86,12 @@ pub(super) fn write_mount_state(
             state_path
         );
     } else {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(temp_path);
     }
     ok
 }
 
-fn state_file_path(request: &CompanionMountRequest) -> String {
+pub(super) fn state_file_path(request: &CompanionMountRequest) -> String {
     let safe_package = module_paths::sanitize_name(&request.package_name);
     format!(
         "{}/{}_{}.state",

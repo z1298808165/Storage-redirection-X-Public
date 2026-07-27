@@ -20,7 +20,7 @@ use libc::{
     setns, setsockopt, socketpair, umount2, waitpid,
 };
 use stats::update_redirect_stats;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use sys::{c_str, decode_wait_status, errno_text, last_errno};
 
 // 等待目标进程就绪后在子进程中执行挂载
@@ -112,10 +112,10 @@ fn log_companion_mount_perf(
 }
 
 // 切换到目标进程的挂载命名空间
-fn set_mount_namespace(pid: i32) -> bool {
-    let ns_path = format!("/proc/{}/ns/mnt", pid);
-    let Ok(c_path) = std::ffi::CString::new(ns_path.clone()) else {
-        log::error!("ns path invalid pid={} path={}", pid, ns_path);
+fn set_mount_namespace(pid: i32, ns_path: Option<&CStr>) -> bool {
+    // 路径在 fork 之前就已经转换好，这里只做 open/setns，避免子进程再次堆分配。
+    let Some(c_path) = ns_path else {
+        log::error!("ns path invalid pid={}", pid);
         return false;
     };
     let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
@@ -466,8 +466,12 @@ fn log_recv_failure(child: i32, n: isize, expected: isize, phase: &str) {
 }
 
 // 子进程切换命名空间并执行实际挂载
-fn handle_child_process(request: &CompanionMountRequest, sock: c_int) -> bool {
-    if !set_mount_namespace(request.pid) {
+fn handle_child_process(
+    request: &CompanionMountRequest,
+    plan: &CompanionMountForkPlan,
+    sock: c_int,
+) -> bool {
+    if !set_mount_namespace(request.pid, plan.mount_namespace_path.as_deref()) {
         log::error!(
             "child setns failed pid={} pkg={}",
             request.pid,
@@ -487,14 +491,14 @@ fn handle_child_process(request: &CompanionMountRequest, sock: c_int) -> bool {
     );
     mount_mgr.set_file_monitor_enabled(request.is_file_monitor_enabled);
 
-    let scoped_fuse_roots = scoped_fuse_mount_roots(request);
+    let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
     let is_success = if request.is_mapping_mode_only {
         log::info!("map-only mount count={}", request.path_mappings.len());
         mount_mgr.apply_path_mappings_only(
             &request.path_mappings,
             &request.sandboxed_paths,
             &request.read_only_paths,
-            &scoped_fuse_roots,
+            scoped_fuse_roots,
         )
     } else {
         mount_mgr.apply_sdcard_redirect(
@@ -502,7 +506,7 @@ fn handle_child_process(request: &CompanionMountRequest, sock: c_int) -> bool {
             &request.excluded_real_paths,
             &request.read_only_paths,
             &request.path_mappings,
-            &scoped_fuse_roots,
+            scoped_fuse_roots,
         )
     };
 
@@ -524,13 +528,12 @@ fn handle_child_process(request: &CompanionMountRequest, sock: c_int) -> bool {
                 request.is_fuse_daemon_redirect_enabled,
                 fuse_roots.len()
             );
-            for root in &fuse_roots {
+            for root in fuse_roots {
                 log::info!("hybrid fuse root {}", root);
             }
         }
         let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, &fuse_roots, mount_mgr.real_storage_anchor())
-            {
+            match start_scoped_fuse_services(request, fuse_roots, mount_mgr.real_storage_anchor()) {
                 Some(children) => children,
                 None => {
                     log::warn!(
@@ -560,7 +563,7 @@ fn handle_child_process(request: &CompanionMountRequest, sock: c_int) -> bool {
             }
         }
         let mounted_targets = mount_mgr.take_mounted_targets();
-        if !mount_state::write_mount_state(request, &mounted_targets, &fuse_children) {
+        if !mount_state::write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!(
                 "mount state save failed pid={} pkg={}",
                 request.pid,
@@ -846,9 +849,41 @@ fn fuse_config_from_request(
     }
 }
 
+/// fork 之前在父进程算好的挂载计划。
+///
+/// 子进程只保留调用线程，不能依赖其它父线程在 fork 瞬间持有的 malloc arena 或全局锁，
+/// 所以所有可以提前得到的路径字符串都放在这里，子进程直接复用已分配好的内容。
+struct CompanionMountForkPlan {
+    /// 需要交给 FUSE 服务接管的挂载根，父子进程共用同一份结果。
+    scoped_fuse_roots: Vec<String>,
+    /// 挂载状态文件路径。
+    state_path: String,
+    /// 挂载状态文件的临时写入路径。
+    temp_state_path: String,
+    /// 目标进程的 mount namespace 路径，已提前转换为 C 字符串。
+    mount_namespace_path: Option<CString>,
+}
+
+impl CompanionMountForkPlan {
+    fn build(request: &CompanionMountRequest) -> Self {
+        let state_path = mount_state::state_file_path(request);
+        let temp_state_path = format!("{}.tmp", state_path);
+        Self {
+            scoped_fuse_roots: scoped_fuse_mount_roots(request),
+            state_path,
+            temp_state_path,
+            mount_namespace_path: CString::new(format!("/proc/{}/ns/mnt", request.pid)).ok(),
+        }
+    }
+}
+
 // 通过 socketpair 创建子进程执行挂载操作
 fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
-    let scoped_fuse_root_count = scoped_fuse_mount_roots(request).len();
+    // fork 之后的子进程只保留调用线程。此时若再做堆分配、首次初始化或获取全局锁，
+    // 可能因为其它父线程在 fork 瞬间持有 malloc arena 或全局锁而永久阻塞。
+    // 因此把可以提前算出的字符串与路径列表全部在父进程算好，子进程只做 setns/mount/write。
+    let plan = CompanionMountForkPlan::build(request);
+    let scoped_fuse_root_count = plan.scoped_fuse_roots.len();
     let parent_timeout_sec =
         mount_timing::companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count);
     log::info!(
@@ -908,6 +943,6 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
     );
     unsafe { close(sockets[0]) };
     let sock = sockets[1];
-    let is_success = handle_child_process(request, sock);
+    let is_success = handle_child_process(request, &plan, sock);
     unsafe { libc::_exit(if is_success { 0 } else { 1 }) };
 }
