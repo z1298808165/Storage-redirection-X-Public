@@ -782,6 +782,36 @@ impl MountPlanner {
         false
     }
 
+    /// 卸载本次已记录的全部挂载点并清空记录。
+    ///
+    /// 批量 FUSE 启动失败后需要退回到纯 mount namespace 方案，若不先卸载已装好的
+    /// bind/overlay 挂载，降级路径会在同一目标上再叠一层挂载，导致挂载栈重复、
+    /// 卸载顺序错乱。按记录的倒序卸载可以先摘掉后装的覆盖层。
+    pub(crate) fn unmount_recorded_targets(&self) -> usize {
+        let targets = std::mem::take(&mut *self.mounted_targets.borrow_mut());
+        let mut detached = 0usize;
+        for target in targets.iter().rev() {
+            let Ok(c_target) = CString::new(target.as_str()) else {
+                continue;
+            };
+            // SAFETY: c_target 是以 NUL 结尾的合法 C 字符串，且在本次调用期间保持存活。
+            if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } == 0 {
+                detached += 1;
+                continue;
+            }
+            log::debug!(
+                "rollback umount failed dst={} errno={} {}",
+                target,
+                last_errno(),
+                errno_text()
+            );
+        }
+        if detached > 0 {
+            log::info!("rollback umount done count={}/{}", detached, targets.len());
+        }
+        detached
+    }
+
     fn record_mounted_target(&self, target: &str) {
         if target.is_empty() {
             return;

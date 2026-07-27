@@ -959,12 +959,17 @@ fn write_mount_state(
         return false;
     }
     let state_path = state_file_path(request);
-    let Ok(c_path) = CString::new(state_path.clone()) else {
+    let temp_path = format!("{}.tmp", state_path);
+    let Ok(c_temp_path) = CString::new(temp_path.clone()) else {
         return false;
     };
+    // 先写临时文件并 fsync，再原子 rename 覆盖正式文件。
+    // 这样即使中途崩溃或断电，也只会残留临时文件，正式挂载清单仍是上一轮的完整内容，
+    // 避免清理旧挂载时因为读到空文件而永久漏卸挂载点。
+    // SAFETY: c_temp_path 在调用期间保持存活，且是以 NUL 结尾的合法路径。
     let fd = unsafe {
         open(
-            c_path.as_ptr(),
+            c_temp_path.as_ptr(),
             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
             0o600,
         )
@@ -972,7 +977,7 @@ fn write_mount_state(
     if fd < 0 {
         log::warn!(
             "daemon mount state open failed path={} errno={} {}",
-            state_path,
+            temp_path,
             last_errno(),
             errno_text(last_errno())
         );
@@ -992,10 +997,31 @@ fn write_mount_state(
         content.push_str(&target);
         content.push('\n');
     }
-    let ok = fs::write_all(fd, content.as_bytes());
+    let mut ok = fs::write_all(fd, content.as_bytes());
+    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符。
+    if ok && unsafe { libc::fsync(fd) } != 0 {
+        log::warn!(
+            "daemon mount state fsync failed path={} errno={} {}",
+            temp_path,
+            last_errno(),
+            errno_text(last_errno())
+        );
+        ok = false;
+    }
+    // SAFETY: 同上，关闭与改权限使用的都是本函数持有的 fd 与存活字符串。
     unsafe {
         libc::close(fd);
-        let _ = libc::chmod(c_path.as_ptr(), 0o600);
+        let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
+    }
+    if ok {
+        ok = std::fs::rename(&temp_path, &state_path).is_ok();
+        if !ok {
+            log::warn!(
+                "daemon mount state rename failed temp={} path={}",
+                temp_path,
+                state_path
+            );
+        }
     }
     if ok {
         log::info!(
@@ -1004,6 +1030,8 @@ fn write_mount_state(
             targets.len(),
             state_path
         );
+    } else {
+        let _ = std::fs::remove_file(&temp_path);
     }
     ok
 }

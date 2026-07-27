@@ -22,12 +22,13 @@ pub(super) fn write_mount_state(
     }
 
     let state_path = state_file_path(request);
-    let Ok(c_path) = CString::new(state_path.clone()) else {
+    let temp_path = format!("{}.tmp", state_path);
+    let Ok(c_temp_path) = CString::new(temp_path.clone()) else {
         return false;
     };
     let fd = unsafe {
         open(
-            c_path.as_ptr(),
+            c_temp_path.as_ptr(),
             O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
             0o600,
         )
@@ -36,7 +37,7 @@ pub(super) fn write_mount_state(
         let errno = last_errno();
         log::warn!(
             "mount state open failed path={} errno={} {}",
-            state_path,
+            temp_path,
             errno,
             errno_text(errno)
         );
@@ -58,11 +59,23 @@ pub(super) fn write_mount_state(
         content.push('\n');
     }
 
-    let ok = fs::write_all(fd, content.as_bytes());
+    let mut ok = fs::write_all(fd, content.as_bytes());
+    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符，c_temp_path 在调用期间保持存活。
     unsafe {
-        libc::fsync(fd);
+        if libc::fsync(fd) != 0 {
+            ok = false;
+        }
         libc::close(fd);
-        let _ = chmod(c_path.as_ptr(), 0o600);
+        let _ = chmod(c_temp_path.as_ptr(), 0o600);
+    }
+    // 先写临时文件再原子改名：写入中途失败时保留上一份有效状态，避免留下被截断的状态文件。
+    if ok && std::fs::rename(&temp_path, &state_path).is_err() {
+        ok = false;
+        log::warn!(
+            "mount state rename failed temp={} path={}",
+            temp_path,
+            state_path
+        );
     }
     if ok {
         log::info!(
@@ -71,6 +84,8 @@ pub(super) fn write_mount_state(
             targets.len(),
             state_path
         );
+    } else {
+        let _ = std::fs::remove_file(&temp_path);
     }
     ok
 }
