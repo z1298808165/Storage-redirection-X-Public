@@ -10,7 +10,7 @@ use identity::ProcessIdentity;
 use payload::{
     CompanionMountRequest, build_companion_request_payload, send_companion_request_payload,
 };
-use perf::{SpecializePerf, log_specialize_perf};
+use perf::{SpecializePerf, SpecializePerfStages, log_specialize_perf};
 use route::RouteConfigSnapshot;
 use writer_state::{
     SystemWriterContext, mark_media_hook_deferred, resolve_system_writer_context,
@@ -18,7 +18,6 @@ use writer_state::{
 };
 
 use crate::config::{SettingsHub, watcher};
-use crate::domain::PathMapping;
 use crate::java_hook;
 use crate::logging::Logger;
 use crate::monitor::AuditTrail;
@@ -53,8 +52,43 @@ impl RuntimeFlow {
         }
     }
 
+    // 汇总各阶段统计并输出退出点性能日志，避免每个退出点重复罗列全部字段
+    fn log_specialize_exit(
+        &self,
+        exit_reason: &str,
+        app_count: usize,
+        is_system_writer: bool,
+        stages: &SpecializePerfStages,
+    ) {
+        log_specialize_perf(&SpecializePerf {
+            package_name: &self.package_name,
+            exit_reason,
+            pid: self.app_pid,
+            uid: self.app_uid,
+            app_count,
+            should_redirect: self.should_redirect,
+            should_monitor: self.should_monitor,
+            is_system_writer,
+            is_hook_redirect: self.is_system_writer_hook_redirect,
+            allow_count: stages.allow_count,
+            excluded_count: stages.excluded_count,
+            mapping_count: stages.mapping_count,
+            payload_bytes: stages.payload_bytes,
+            config_init_ms: stages.config_init_ms,
+            config_reload_ms: stages.config_reload_ms,
+            shared_uid_ms: stages.shared_uid_ms,
+            decision_ms: stages.decision_ms,
+            writer_context_ms: stages.writer_context_ms,
+            enabled_scan_ms: stages.enabled_scan_ms,
+            route_ms: stages.route_ms,
+            payload_ms: stages.payload_ms,
+            send_ms: stages.send_ms,
+            total_ms: monotonic_ms().saturating_sub(stages.started_ms),
+        });
+    }
+
     pub fn pre_app_specialize(&mut self, args: *mut abi::AppSpecializeArgs) {
-        let perf_started_ms = monotonic_ms();
+        let mut perf_stages = SpecializePerfStages::new(monotonic_ms());
         if args.is_null() {
             return;
         }
@@ -161,19 +195,19 @@ impl RuntimeFlow {
             log::warn!("config init failed");
             return;
         }
-        let config_init_ms = monotonic_ms().saturating_sub(config_init_started_ms);
+        perf_stages.config_init_ms = monotonic_ms().saturating_sub(config_init_started_ms);
 
         let config_reload_started_ms = monotonic_ms();
         config.reload_if_changed();
-        let config_reload_ms = monotonic_ms().saturating_sub(config_reload_started_ms);
+        perf_stages.config_reload_ms = monotonic_ms().saturating_sub(config_reload_started_ms);
         let shared_uid_started_ms = monotonic_ms();
         policy::refresh_shared_uid_cache();
-        let shared_uid_ms = monotonic_ms().saturating_sub(shared_uid_started_ms);
+        perf_stages.shared_uid_ms = monotonic_ms().saturating_sub(shared_uid_started_ms);
 
         let decision_started_ms = monotonic_ms();
         self.should_redirect = config.should_redirect(&self.package_name, self.app_uid);
         self.should_monitor = config.should_monitor(&self.package_name, self.app_uid);
-        let decision_ms = monotonic_ms().saturating_sub(decision_started_ms);
+        perf_stages.decision_ms = monotonic_ms().saturating_sub(decision_started_ms);
 
         // 隔离进程无 FUSE 挂载和存储权限，跳过重定向
         if should_skip_isolated_uid(self.app_uid) {
@@ -185,31 +219,12 @@ impl RuntimeFlow {
                 self.request_dlclose();
             }
             self.close_module_dir_fd();
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "isolated",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
+            self.log_specialize_exit(
+                "isolated",
+                config.get_app_count(),
                 is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: 0,
-                excluded_count: 0,
-                mapping_count: 0,
-                payload_bytes: 0,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms: 0,
-                enabled_scan_ms: 0,
-                route_ms: 0,
-                payload_ms: 0,
-                send_ms: 0,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
+                &perf_stages,
+            );
             return;
         }
 
@@ -237,7 +252,7 @@ impl RuntimeFlow {
         if self.should_install_fuse_fix {
             self.should_keep_module_loaded = true;
         }
-        let writer_context_ms = monotonic_ms().saturating_sub(writer_context_started_ms);
+        perf_stages.writer_context_ms = monotonic_ms().saturating_sub(writer_context_started_ms);
 
         let enabled_scan_started_ms = monotonic_ms();
         let has_enabled_apps = if is_system_writer {
@@ -245,7 +260,7 @@ impl RuntimeFlow {
         } else {
             config.has_enabled_redirect_apps_for_user(self.app_uid)
         };
-        let enabled_scan_ms = monotonic_ms().saturating_sub(enabled_scan_started_ms);
+        perf_stages.enabled_scan_ms = monotonic_ms().saturating_sub(enabled_scan_started_ms);
         if is_system_writer {
             log::info!(
                 "writer final pkg={} uid={} apps={} enabled={} redirect={} monitor={} hook_redirect={} fuse_fix={}",
@@ -282,31 +297,12 @@ impl RuntimeFlow {
                 log::info!("module dir fd kept for runtime config reload");
             }
             self.request_dlclose();
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "bypass",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
+            self.log_specialize_exit(
+                "bypass",
+                config.get_app_count(),
                 is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: 0,
-                excluded_count: 0,
-                mapping_count: 0,
-                payload_bytes: 0,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms,
-                enabled_scan_ms,
-                route_ms: 0,
-                payload_ms: 0,
-                send_ms: 0,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
+                &perf_stages,
+            );
             return;
         }
 
@@ -340,34 +336,12 @@ impl RuntimeFlow {
         );
 
         if !self.should_redirect {
-            if self.is_file_monitor_ui {
-                self.close_module_dir_fd();
-            }
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "monitor_only",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
+            self.log_specialize_exit(
+                "monitor_only",
+                config.get_app_count(),
                 is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: 0,
-                excluded_count: 0,
-                mapping_count: 0,
-                payload_bytes: 0,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms,
-                enabled_scan_ms,
-                route_ms: 0,
-                payload_ms: 0,
-                send_ms: 0,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
+                &perf_stages,
+            );
             return;
         }
 
@@ -426,27 +400,25 @@ impl RuntimeFlow {
             &path_mappings,
             is_mapping_mode_only,
         );
-        let route_ms = monotonic_ms().saturating_sub(route_config_started_ms);
+        perf_stages.route_ms = monotonic_ms().saturating_sub(route_config_started_ms);
+        perf_stages.allow_count = allowed_real_paths.len();
+        perf_stages.excluded_count = excluded_real_paths.len();
+        perf_stages.mapping_count = path_mappings.len();
 
-        if is_mapping_mode_only {
-            log::info!(
-                "map-only allow={} excl={} sandbox={} ro={} map={}",
-                allowed_real_paths.len(),
-                excluded_real_paths.len(),
-                sandboxed_paths.len(),
-                read_only_paths.len(),
-                path_mappings.len()
-            );
-        } else {
-            log::info!(
-                "redirect allow={} excl={} sandbox={} ro={} map={}",
-                allowed_real_paths.len(),
-                excluded_real_paths.len(),
-                sandboxed_paths.len(),
-                read_only_paths.len(),
-                path_mappings.len()
-            );
-        }
+        // 仅映射模式与重定向模式的规模日志字段完全一致，只有前缀不同
+        log::info!(
+            "{} allow={} excl={} sandbox={} ro={} map={}",
+            if is_mapping_mode_only {
+                "map-only"
+            } else {
+                "redirect"
+            },
+            allowed_real_paths.len(),
+            excluded_real_paths.len(),
+            sandboxed_paths.len(),
+            read_only_paths.len(),
+            path_mappings.len()
+        );
 
         log::info!(
             "monitor pkg={} on={}",
@@ -456,14 +428,7 @@ impl RuntimeFlow {
 
         let is_fuse_daemon_redirect_enabled = config.is_fuse_daemon_redirect_enabled();
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
-        let app_redirect_hook_reason = app_redirect_hook_reason_for_process(
-            self.should_redirect,
-            is_system_writer,
-            &allowed_real_paths,
-            &path_mappings,
-            user_id,
-            is_fuse_daemon_redirect_enabled,
-        );
+        let app_redirect_hook_reason = app_redirect_hook_reason_for_process();
         self.should_install_app_redirect_hook = app_redirect_hook_reason.is_some();
         if self.should_install_app_redirect_hook {
             self.should_keep_module_loaded = true;
@@ -476,31 +441,12 @@ impl RuntimeFlow {
 
         if self.is_system_writer_hook_redirect {
             log::info!("writer skip companion mount (per-caller hook)");
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "writer_hook",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
+            self.log_specialize_exit(
+                "writer_hook",
+                config.get_app_count(),
                 is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: allowed_real_paths.len(),
-                excluded_count: excluded_real_paths.len(),
-                mapping_count: path_mappings.len(),
-                payload_bytes: 0,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms,
-                enabled_scan_ms,
-                route_ms,
-                payload_ms: 0,
-                send_ms: 0,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
+                &perf_stages,
+            );
             return;
         }
 
@@ -535,105 +481,42 @@ impl RuntimeFlow {
             operation: "apply",
             config_version: config.config_version(),
         });
-        let payload_ms = monotonic_ms().saturating_sub(payload_started_ms);
-        let payload_bytes = payload.len();
+        perf_stages.payload_ms = monotonic_ms().saturating_sub(payload_started_ms);
+        perf_stages.payload_bytes = payload.len();
         if payload.is_empty() {
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "empty_payload",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
+            self.log_specialize_exit(
+                "empty_payload",
+                config.get_app_count(),
                 is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: allowed_real_paths.len(),
-                excluded_count: excluded_real_paths.len(),
-                mapping_count: path_mappings.len(),
-                payload_bytes,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms,
-                enabled_scan_ms,
-                route_ms,
-                payload_ms,
-                send_ms: 0,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
+                &perf_stages,
+            );
             return;
         }
 
-        if !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge {
-            let send_started_ms = monotonic_ms();
-            self.is_mount_request_sent =
-                send_companion_request_payload(self.api.as_ref(), &payload);
-            let send_ms = monotonic_ms().saturating_sub(send_started_ms);
+        // 预挂载路径与兜底路径的发送动作完全一致，只有额外日志和退出原因不同
+        let is_pre_mount_request = !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge;
+        let send_started_ms = monotonic_ms();
+        self.is_mount_request_sent = send_companion_request_payload(self.api.as_ref(), &payload);
+        perf_stages.send_ms = monotonic_ms().saturating_sub(send_started_ms);
+        if is_pre_mount_request {
             log::info!(
                 "mount request sent pre pkg={} sent={} payload={} map_only={}",
                 self.package_name,
                 self.is_mount_request_sent,
-                payload_bytes,
+                perf_stages.payload_bytes,
                 is_mapping_mode_only
             );
-            log_specialize_perf(&SpecializePerf {
-                package_name: &self.package_name,
-                exit_reason: "mount_request_pre",
-                pid: self.app_pid,
-                uid: self.app_uid,
-                app_count: config.get_app_count(),
-                should_redirect: self.should_redirect,
-                should_monitor: self.should_monitor,
-                is_system_writer,
-                is_hook_redirect: self.is_system_writer_hook_redirect,
-                allow_count: allowed_real_paths.len(),
-                excluded_count: excluded_real_paths.len(),
-                mapping_count: path_mappings.len(),
-                payload_bytes,
-                config_init_ms,
-                config_reload_ms,
-                shared_uid_ms,
-                decision_ms,
-                writer_context_ms,
-                enabled_scan_ms,
-                route_ms,
-                payload_ms,
-                send_ms,
-                total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-            });
-            return;
         }
-
-        let send_started_ms = monotonic_ms();
-        self.is_mount_request_sent = send_companion_request_payload(self.api.as_ref(), &payload);
-        let send_ms = monotonic_ms().saturating_sub(send_started_ms);
-        log_specialize_perf(&SpecializePerf {
-            package_name: &self.package_name,
-            exit_reason: "mount_request",
-            pid: self.app_pid,
-            uid: self.app_uid,
-            app_count: config.get_app_count(),
-            should_redirect: self.should_redirect,
-            should_monitor: self.should_monitor,
+        self.log_specialize_exit(
+            if is_pre_mount_request {
+                "mount_request_pre"
+            } else {
+                "mount_request"
+            },
+            config.get_app_count(),
             is_system_writer,
-            is_hook_redirect: self.is_system_writer_hook_redirect,
-            allow_count: allowed_real_paths.len(),
-            excluded_count: excluded_real_paths.len(),
-            mapping_count: path_mappings.len(),
-            payload_bytes,
-            config_init_ms,
-            config_reload_ms,
-            shared_uid_ms,
-            decision_ms,
-            writer_context_ms,
-            enabled_scan_ms,
-            route_ms,
-            payload_ms,
-            send_ms,
-            total_ms: monotonic_ms().saturating_sub(perf_started_ms),
-        });
+            &perf_stages,
+        );
     }
 
     pub(super) fn send_deferred_mount_request(&mut self) {
@@ -880,20 +763,14 @@ fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
     }
 }
 
-fn app_redirect_hook_reason_for_process(
-    should_redirect: bool,
-    is_system_writer: bool,
-    _allowed_real_paths: &[String],
-    _path_mappings: &[PathMapping],
-    _user_id: i32,
-    _is_fuse_daemon_redirect_enabled: bool,
-) -> Option<&'static str> {
-    if !should_redirect || is_system_writer {
-        return None;
-    }
-
-    // 普通应用只走 companion mount 路径。PLT 写入 hook 可能碰到 JIT/memfd
-    // 保护页，也会破坏测试流要求的“普通应用不安装 hook”边界。
+/// 判断普通应用是否需要安装重定向 hook。
+///
+/// 按架构约束，普通应用只走 companion mount 路径，因此这里恒定返回 `None`：
+/// PLT 写入 hook 可能碰到 JIT/memfd 保护页，也会破坏测试流要求的
+/// “普通应用不安装 hook”边界。保留该函数是为了让调用点显式表达这一决策，
+/// 不要按“未实现”补回 hook 分支；若确实需要该能力，属于上游 hook 库的缺口，
+/// 应按 docs/upstream-hook-dependencies.md 单独提出。
+fn app_redirect_hook_reason_for_process() -> Option<&'static str> {
     None
 }
 

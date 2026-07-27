@@ -78,23 +78,31 @@ pub fn parse_monitor_filter_config(state: &mut SettingsState, json_content: &str
     true
 }
 
-fn parse_filter_list(value: Option<&Value>) -> Vec<String> {
+/// 解析过滤列表配置，字符串与字符串数组两种写法都支持。
+///
+/// 具体条目如何清洗由 `push` 决定，操作过滤与路径过滤的遍历、排序和去重逻辑完全一致，
+/// 这里统一实现，避免两份相同的解析流程各自演进。
+fn parse_filter_list_with(value: Option<&Value>, push: fn(&mut Vec<String>, &str)) -> Vec<String> {
     let Some(value) = value else {
         return Vec::new();
     };
     let mut out = Vec::new();
     if let Some(raw) = value.as_str() {
-        push_filter_pattern(&mut out, raw);
+        push(&mut out, raw);
     } else if let Some(items) = value.as_array() {
         for item in items {
             if let Some(raw) = item.as_str() {
-                push_filter_pattern(&mut out, raw);
+                push(&mut out, raw);
             }
         }
     }
     out.sort();
     out.dedup();
     out
+}
+
+fn parse_filter_list(value: Option<&Value>) -> Vec<String> {
+    parse_filter_list_with(value, push_filter_pattern)
 }
 
 fn normalize_monitor_operation_defaults(operations: Vec<String>) -> Vec<String> {
@@ -161,22 +169,7 @@ fn is_legacy_default_monitor_operation_filter(operations: &[String]) -> bool {
 }
 
 fn parse_monitor_path_filter_list(value: Option<&Value>) -> Vec<String> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(raw) = value.as_str() {
-        push_monitor_path_filter_pattern(&mut out, raw);
-    } else if let Some(items) = value.as_array() {
-        for item in items {
-            if let Some(raw) = item.as_str() {
-                push_monitor_path_filter_pattern(&mut out, raw);
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
+    parse_filter_list_with(value, push_monitor_path_filter_pattern)
 }
 
 fn push_monitor_path_filter_pattern(out: &mut Vec<String>, raw: &str) {
@@ -436,10 +429,7 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
                     .push(PathMapping::new(resolved_current, resolved_target));
             };
 
-            if mappings_value.is_object() {
-                let Some(map) = mappings_value.as_object() else {
-                    continue;
-                };
+            if let Some(map) = mappings_value.as_object() {
                 for (current_key, target_value) in map {
                     let Some(target_str) = target_value.as_str() else {
                         continue;
