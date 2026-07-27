@@ -2374,20 +2374,36 @@ public class Hooker {
 
       android.content.ContentProvider receiver = providerReceiver(rawArgs);
       String displayPath = queryDataPath(receiver, (android.net.Uri) uriValue);
-      if (displayPath == null || displayPath.length() == 0) return;
 
       // 数据库记录的是用户可见路径，需先换算到实际落盘的沙箱路径。
-      String finalPath = rewriteMediaStorePath(displayPath, callerUid);
+      String finalPath =
+          displayPath == null || displayPath.length() == 0
+              ? null
+              : rewriteMediaStorePath(displayPath, callerUid);
+      logInfo(
+          "media pending commit probe uri="
+              + uriText
+              + " display="
+              + displayPath
+              + " final="
+              + finalPath);
+      if (displayPath == null || displayPath.length() == 0) return;
       if (finalPath == null || finalPath.length() == 0) return;
       if (finalPath.equals(displayPath)) return;
 
       java.io.File finalFile = new java.io.File(finalPath);
-      if (finalFile.exists()) return;
+      if (finalFile.exists()) {
+        logInfo("media pending commit skip exists path=" + finalPath);
+        return;
+      }
       java.io.File parent = finalFile.getParentFile();
       if (parent == null) return;
       String name = finalFile.getName();
       java.io.File[] children = parent.listFiles();
-      if (children == null) return;
+      if (children == null) {
+        logInfo("media pending commit list failed parent=" + parent.getAbsolutePath());
+        return;
+      }
       for (java.io.File child : children) {
         // 只接受 .pending-<id>-<最终名> 这一确切形态；用 endsWith 会让「另一个文件名恰好
         // 以本名结尾」的 pending 文件被误改名。
@@ -2402,6 +2418,7 @@ public class Hooker {
                 + finalPath);
         return;
       }
+      logInfo("media pending commit no candidate parent=" + parent.getAbsolutePath());
     } catch (Throwable t) {
       logWarn("media pending commit failed", t);
     }
