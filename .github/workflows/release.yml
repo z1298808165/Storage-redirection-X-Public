@@ -13,6 +13,7 @@ jobs:
   quality:
     if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -56,6 +57,7 @@ jobs:
   prepare:
     if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_code: ${{ steps.version.outputs.version_code }}
@@ -94,6 +96,7 @@ jobs:
       - prepare
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -111,9 +114,11 @@ jobs:
   module:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
+      - quality
       - prepare
       - init-release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
@@ -183,13 +188,24 @@ jobs:
       - name: Restore Cargo build cache
         uses: actions/cache@v5.0.5
         with:
+          # registry 与 git 只由 Cargo.lock 决定，单独成条避免被源码改动拖着一起失效。
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-aarch64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-aarch64-
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Restore Cargo build target cache
+        uses: actions/cache@v5.0.5
+        with:
+          # target 的 key 不含 src/**：源码每改一次都会生成新 key，只能靠 restore-keys
+          # 只读回退，随后仍写入一份新缓存，导致缓存无界增长并触发仓库级驱逐。
+          # 增量正确性由 cargo 自身的指纹机制保证。
+          path: target
+          key: ${{ runner.os }}-cargo-target-aarch64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-aarch64-
 
       - name: Build Rust test binaries
         run: cargo test --target aarch64-linux-android --no-run
@@ -242,9 +258,11 @@ jobs:
   app:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
+      - quality
       - prepare
       - init-release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
@@ -319,8 +337,10 @@ jobs:
 
   test-flow-build:
     name: Build release test-flow runtime
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: prepare
+    if: startsWith(github.ref, 'refs/tags/v') && needs.quality.result == 'success'
+    needs:
+      - quality
+      - prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -387,13 +407,24 @@ jobs:
       - name: Restore Cargo test-flow cache
         uses: actions/cache@v5.0.5
         with:
+          # registry 与 git 只由 Cargo.lock 决定，单独成条避免被源码改动拖着一起失效。
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'src/**', 'build.rs') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-x86_64-
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Restore Cargo test-flow target cache
+        uses: actions/cache@v5.0.5
+        with:
+          # target 的 key 不含 src/**：源码每改一次都会生成新 key，只能靠 restore-keys
+          # 只读回退，随后仍写入一份新缓存，导致缓存无界增长并触发仓库级驱逐。
+          # 增量正确性由 cargo 自身的指纹机制保证。
+          path: target
+          key: ${{ runner.os }}-cargo-target-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-x86_64-
 
       - name: Build x86_64 module zip and test app
         run: |
@@ -546,6 +577,7 @@ jobs:
       - test-flow
     if: always() && needs.prepare.result != 'skipped'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require all test-flow matrix jobs to pass
         run: |
@@ -567,6 +599,7 @@ jobs:
       - app
       - test-flow-required
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -672,6 +705,7 @@ jobs:
       - publish-release
     if: always() && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: write
       contents: write
