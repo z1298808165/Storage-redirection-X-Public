@@ -505,7 +505,9 @@ fn should_skip_duplicate_monitor_create(
     }
     let key = format!("{}|{}|{}", package_name, display_path, backend_path);
     let now_ms = paths::monotonic_ms();
-    let Ok(mut recent) = RECENT_MONITOR_CREATES.lock() else {
+    // 该函数可能在 fork 出来的 FUSE 子进程里执行，阻塞获取全局锁会因为父进程线程持锁而永久卡死；
+    // 去重只是优化项，拿不到锁时按未去重处理即可。
+    let Ok(mut recent) = RECENT_MONITOR_CREATES.try_lock() else {
         return false;
     };
     if let Some(last_ms) = recent.get_mut(&key) {
