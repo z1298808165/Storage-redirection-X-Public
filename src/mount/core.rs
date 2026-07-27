@@ -926,12 +926,7 @@ fn fix_real_public_directory_metadata(path: &str) {
     let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
     let ret = unsafe { c_stat(c_path.as_ptr(), st.as_mut_ptr()) };
     if ret != 0 {
-        log::warn!(
-            "mount dir: real public stat failed errno={} {} path={}",
-            last_errno(),
-            errno_text(),
-            path
-        );
+        log_metadata_fix_failure("real public stat", path);
         return;
     }
     let st = unsafe { st.assume_init() };
@@ -939,12 +934,7 @@ fn fix_real_public_directory_metadata(path: &str) {
     if st.st_uid != MEDIA_RW_UID || st.st_gid != MEDIA_RW_GID {
         let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
         if ret != 0 {
-            log::warn!(
-                "mount dir: real public chown failed errno={} {} path={}",
-                last_errno(),
-                errno_text(),
-                path
-            );
+            log_metadata_fix_failure("real public chown", path);
         }
     }
 
@@ -952,12 +942,7 @@ fn fix_real_public_directory_metadata(path: &str) {
     if mode != REAL_PUBLIC_DIR_MODE {
         let ret = unsafe { chmod(c_path.as_ptr(), REAL_PUBLIC_DIR_MODE) };
         if ret != 0 {
-            log::warn!(
-                "mount dir: real public chmod failed errno={} {} path={}",
-                last_errno(),
-                errno_text(),
-                path
-            );
+            log_metadata_fix_failure("real public chmod", path);
         }
     }
 }
@@ -970,22 +955,12 @@ fn fix_allowed_real_directory_metadata(path: &str) {
     // SAFETY: c_path 在调用期间是有效且以 NUL 结尾的 CString。
     let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
     if ret != 0 {
-        log::warn!(
-            "mount dir: allowed real chown failed errno={} {} path={}",
-            last_errno(),
-            errno_text(),
-            path
-        );
+        log_metadata_fix_failure("allowed real chown", path);
     }
 
     let ret = unsafe { chmod(c_path.as_ptr(), ALLOWED_REAL_DIR_MODE) };
     if ret != 0 {
-        log::warn!(
-            "mount dir: allowed real chmod failed errno={} {} path={}",
-            last_errno(),
-            errno_text(),
-            path
-        );
+        log_metadata_fix_failure("allowed real chmod", path);
     }
 }
 
@@ -997,12 +972,7 @@ fn fix_read_only_public_metadata(path: &str) {
     let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
     let ret = unsafe { c_stat(c_path.as_ptr(), st.as_mut_ptr()) };
     if ret != 0 {
-        log::warn!(
-            "mount dir: readonly public stat failed errno={} {} path={}",
-            last_errno(),
-            errno_text(),
-            path
-        );
+        log_metadata_fix_failure("readonly public stat", path);
         return;
     }
     let st = unsafe { st.assume_init() };
@@ -1168,4 +1138,18 @@ fn errno_text() -> String {
             .to_string_lossy()
             .to_string()
     }
+}
+
+/// 输出目录元数据修复失败的告警。
+///
+/// 多个元数据修复分支的告警格式完全相同，只有操作名不同，这里统一输出避免重复；
+/// 日志文本与字段顺序保持不变，便于日志解析继续按原有格式匹配。
+fn log_metadata_fix_failure(operation: &str, path: &str) {
+    log::warn!(
+        "mount dir: {} failed errno={} {} path={}",
+        operation,
+        last_errno(),
+        errno_text(),
+        path
+    );
 }
