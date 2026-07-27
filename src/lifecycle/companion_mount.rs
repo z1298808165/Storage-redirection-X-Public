@@ -736,6 +736,8 @@ fn start_fuse_service_for_root(
         return None;
     }
 
+    // 先在父进程走完私有日志通道初始化，避免子进程继承处于初始化中的 OnceLock 而永久阻塞。
+    crate::logging::prepare_for_fork();
     let service_child = unsafe { libc::fork() };
     if service_child < 0 {
         let errno = last_errno();
@@ -916,6 +918,8 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
         return false;
     }
 
+    // 先在父进程走完私有日志通道初始化，避免子进程继承处于初始化中的 OnceLock 而永久阻塞。
+    crate::logging::prepare_for_fork();
     let child = unsafe { libc::fork() };
     if child < 0 {
         let errno = last_errno();

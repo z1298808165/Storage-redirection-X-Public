@@ -198,6 +198,21 @@ fn private_log_socket() -> Option<&'static PrivateLogSocket> {
         .as_ref()
 }
 
+/// 在 fork 之前完成私有日志通道的初始化。
+///
+/// `private_log_socket` 走 `OnceLock::get_or_init`。若父进程的某个线程正好在 fork
+/// 瞬间处于该初始化过程中，子进程会继承一个「已加锁但永远不会被完成」的 OnceLock，
+/// 之后任何一条日志都会永久阻塞——而挂载子进程的整条路径都在记日志。
+///
+/// 因此在 fork 前先由当前线程走完初始化：此后子进程内的 `get_or_init` 只会命中
+/// 已完成状态，不再需要获取内部锁。
+///
+/// zygote 上下文不建立私有通道，此时 OnceLock 仍保持未初始化，子进程的日志会退回
+/// android_log；这条路径不涉及 OnceLock 内部锁，因此不构成阻塞风险。
+pub fn prepare_for_fork() {
+    let _ = private_log_socket();
+}
+
 fn is_zygote_selinux_context() -> bool {
     std::fs::read_to_string("/proc/self/attr/current")
         .map(|context| context.contains("zygote"))
