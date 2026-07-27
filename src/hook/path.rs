@@ -97,10 +97,19 @@ pub fn is_data_media_path_fast(pathname: &str) -> bool {
         return false;
     }
 
-    // /data/media/ 已经是规范化形态，直接比较前缀；其他 /data/... 路径快速短路
     if !pathname.starts_with("/data/") {
         return false;
     }
+
+    // 结果要求 normalize 后仍以 /data/media/ 开头，而 normalize 对 /data/ 路径只会
+    // 折叠重复斜杠、去尾斜杠并把 /data/media/<数字用户> 改写为 /storage/emulated/。
+    // 因此不含重复斜杠且前缀不是 /data/media/ 的路径必然不命中，可以在分配之前排除。
+    // 应用进程访问 /data/user/0/<包名>/、/data/app/ 等路径极其频繁，这里省掉的是每次
+    // syscall 一次 String 分配；含重复斜杠的少见形态仍交给 normalize 判定，行为不变。
+    if !pathname.contains("//") && !pathname.starts_with("/data/media/") {
+        return false;
+    }
+
     let normalized = paths::normalize(pathname);
     paths::starts_with(&normalized, "/data/media/")
 }
