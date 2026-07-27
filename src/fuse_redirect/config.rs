@@ -241,7 +241,21 @@ pub fn scoped_mount_roots_for_hybrid_rules(
         }
     }
 
-    compact_scoped_mount_roots(roots, &storage_root)
+    // 挂载根的三级降级（去重剔子路径、退化顶层、退化整个存储根）只输出最终结果，
+    // 一旦降级就看不出是哪条规则贡献了多余的根。这里在压缩前后各记录一次：该函数只在
+    // 应用挂载时执行一次，频率极低。
+    log::info!(
+        "scoped roots raw count={} list={}",
+        roots.len(),
+        roots.join(",")
+    );
+    let compacted = compact_scoped_mount_roots(roots, &storage_root);
+    log::info!(
+        "scoped roots compacted count={} list={}",
+        compacted.len(),
+        compacted.join(",")
+    );
+    compacted
 }
 
 fn resolve_scoped_path_mappings(
