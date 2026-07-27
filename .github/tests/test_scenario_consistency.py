@@ -1,6 +1,8 @@
 import json
 import re
 import unittest
+
+import yaml
 from pathlib import Path
 
 
@@ -137,6 +139,28 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('cargo test --target "$TARGET_TRIPLE" --no-run', script)
         self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
         self.assertIn(":storageRedirectTestApp:assembleDebug", script)
+
+    def test_every_job_is_bounded_and_build_jobs_wait_for_quality(self) -> None:
+        # 缺少 timeout-minutes 的 job 会用 GitHub 的 6 小时默认值，一次挂起就吃满额度
+        # 并占住 draft release 阻塞清理；构建 job 不等 quality 则会在格式或快速检查
+        # 失败时白跑约 11 分钟机器时间。
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            parsed = yaml.safe_load(read(workflow))
+            for name, job in parsed["jobs"].items():
+                self.assertIsNotNone(job.get("timeout-minutes"), f"{workflow}:{name}")
+            for name in ("module", "app", "test-flow-build"):
+                job = parsed["jobs"][name]
+                needs = job["needs"]
+                needs = [needs] if isinstance(needs, str) else needs
+                self.assertIn("quality", needs, f"{workflow}:{name}")
+
+    def test_cargo_cache_key_excludes_sources(self) -> None:
+        # key 含 src/** 会让每次源码改动都生成新缓存条目，只能靠 restore-keys 只读
+        # 回退，随后仍写入一份新缓存，导致缓存无界增长并触发仓库级驱逐。
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            for line in re.findall(r"(?m)^\s*key: .*cargo.*$", source):
+                self.assertNotIn("src/**", line, f"{workflow}: {line.strip()}")
 
     def test_scenario_roots_are_exported_to_subshells(self) -> None:
         # 场景函数由 `bash -c` 子 shell 执行，顶层赋值必须显式 export，
