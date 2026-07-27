@@ -26,6 +26,11 @@ const FILE_MONITOR_LOG = LOGS_DIR + "/file_monitor.log";
 const RUNTIME_STATS_SCHEMA = "2";
 const MAX_RUNTIME_ACTIVATION_COUNT = "18446744073709551615";
 const MODULE_LOG_PACKAGE = "storage.redirect.x";
+// 日志导出轮询把完成标记与进度合并为一次 root 调用，用这两个标记分隔两段输出。
+const DiagnosticPollDoneMarkerText = "__SRX_DONE__";
+const DiagnosticPollProgressMarkerText = "__SRX_PROGRESS__";
+const DiagnosticPollDoneMarker = "'" + DiagnosticPollDoneMarkerText + "'";
+const DiagnosticPollProgressMarker = "'" + DiagnosticPollProgressMarkerText + "'";
 const DEFAULT_RELEASE_REPOSITORY = "z1298808165/Storage-redirection-X-Public";
 const DEFAULT_OFFICIAL_RELEASE_REPOSITORY = "Kindness-Kismet/Storage-redirection-X-Public";
 const DEFAULT_RELEASE_BRANCH = "SRX-R";
@@ -398,6 +403,20 @@ function publicStorageWriteTestCommand(source, target) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 从合并输出中取出标记之间的一段内容；缺少起始标记时返回空串。 */
+function sectionBetween(output, startMarker, endMarker) {
+  const text = String(output || "");
+  const start = text.indexOf(startMarker);
+  if (start < 0) return "";
+  const bodyStart = start + startMarker.length;
+  let end = text.length;
+  if (endMarker) {
+    const found = text.indexOf(endMarker, bodyStart);
+    if (found >= 0) end = found;
+  }
+  return text.slice(bodyStart, end).trim();
 }
 
 function diagnosticProgressCommand(progress, percent, phase, message) {
@@ -1268,22 +1287,39 @@ const Api = {
     while (Date.now() < deadline) {
       await sleep(800);
 
-      // 检查是否完成
-      const doneCode = await this.exec(
-        "[ -f " + shellQuote(done) + " ] && cat " + shellQuote(done) + ' || echo ""',
+      // 完成标记与进度合并为一次调用：每次 exec 都要新建一个 root shell，
+      // 原先每轮发两条命令，180 秒上限下最坏会产生约 450 次调用。
+      const pollText = await this.exec(
+        "printf '%s\\n' " +
+          DiagnosticPollDoneMarker +
+          "; [ -f " +
+          shellQuote(done) +
+          " ] && cat " +
+          shellQuote(done) +
+          "; printf '%s\\n' " +
+          DiagnosticPollProgressMarker +
+          "; [ -f " +
+          shellQuote(progress) +
+          " ] && tail -n 1 " +
+          shellQuote(progress) +
+          // 两个文件在任务启动初期都可能还不存在，此时 [ -f ] 会让整条命令以非 0
+          // 退出，而 exec 对非 0 退出是 reject。补 : 使命令始终成功返回，否则进度
+          // 更新会被 catch 静默吞掉。
+          "; :",
         { timeoutMs: 3000 },
       ).catch(() => "");
-      if (doneCode.trim() !== "") {
-        const code = parseInt(doneCode.trim());
+      const doneCode = sectionBetween(
+        pollText,
+        DiagnosticPollDoneMarkerText,
+        DiagnosticPollProgressMarkerText,
+      );
+      if (doneCode !== "") {
+        const code = parseInt(doneCode);
         if (code !== 0) throw new Error("日志打包失败 (exit " + code + ")");
         break;
       }
 
-      // 读取进度
-      const progressText = await this.exec(
-        "[ -f " + shellQuote(progress) + " ] && tail -n 1 " + shellQuote(progress) + ' || echo ""',
-        { timeoutMs: 3000 },
-      ).catch(() => "");
+      const progressText = sectionBetween(pollText, DiagnosticPollProgressMarkerText, null);
       const match = progressText.match(/^(\d+)\|([^|]*)\|(.*)$/);
       if (match) {
         const phase = match[2] || "running";
