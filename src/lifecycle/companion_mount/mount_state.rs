@@ -52,7 +52,7 @@ pub(super) fn write_mount_state(
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-    for target in normalize_targets(&all_targets) {
+    for target in module_paths::normalize_mount_targets(&all_targets) {
         content.push_str("target=");
         content.push_str(&target);
         content.push('\n');
@@ -76,44 +76,11 @@ pub(super) fn write_mount_state(
 }
 
 fn state_file_path(request: &CompanionMountRequest) -> String {
-    let safe_package = sanitize_name(&request.package_name);
+    let safe_package = module_paths::sanitize_name(&request.package_name);
     format!(
         "{}/{}_{}.state",
         module_paths::MOUNT_STATE_DIR,
         safe_package,
         request.pid
     )
-}
-
-fn normalize_targets(targets: &[String]) -> Vec<String> {
-    let mut normalized: Vec<String> = targets
-        .iter()
-        .filter(|target| is_safe_mount_target(target))
-        .cloned()
-        .collect();
-    normalized.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
-    normalized.dedup();
-    normalized
-}
-
-fn is_safe_mount_target(target: &str) -> bool {
-    if target.is_empty() || target.contains('\0') || target.contains("/../") {
-        return false;
-    }
-    target.starts_with("/storage/")
-        || target.starts_with("/mnt/")
-        || target.starts_with(module_paths::REAL_STORAGE_TMP_PREFIX)
-}
-
-fn sanitize_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }

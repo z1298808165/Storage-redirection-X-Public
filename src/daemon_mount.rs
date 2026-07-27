@@ -680,7 +680,7 @@ fn clear_previous_mounts(request: &MountRequest) -> bool {
     let fuse_children = read_fuse_child_pids(&state_path);
     let mut targets = read_mount_targets(&state_path);
     targets.extend(request_overlay_targets(request));
-    let targets = normalize_targets(&targets);
+    let targets = module_paths::normalize_mount_targets(&targets);
     for pid in &fuse_children {
         terminate_fuse_child(*pid);
     }
@@ -800,7 +800,7 @@ fn request_overlay_targets(request: &MountRequest) -> Vec<String> {
         );
     }
 
-    normalize_targets(&targets)
+    module_paths::normalize_mount_targets(&targets)
 }
 
 fn append_resolved_storage_alias_targets(
@@ -987,7 +987,7 @@ fn write_mount_state(
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-    for target in normalize_targets(&all_targets) {
+    for target in module_paths::normalize_mount_targets(&all_targets) {
         content.push_str("target=");
         content.push_str(&target);
         content.push('\n');
@@ -1012,7 +1012,7 @@ fn state_file_path(request: &MountRequest) -> String {
     format!(
         "{}/{}_{}.state",
         module_paths::MOUNT_STATE_DIR,
-        sanitize_name(&request.package_name),
+        module_paths::sanitize_name(&request.package_name),
         request.pid
     )
 }
@@ -1024,7 +1024,7 @@ fn read_mount_targets(path: &str) -> Vec<String> {
     content
         .lines()
         .filter_map(|line| line.strip_prefix("target="))
-        .filter(|target| is_safe_mount_target(target))
+        .filter(|target| module_paths::is_safe_mount_target(target))
         .map(ToString::to_string)
         .collect()
 }
@@ -1105,39 +1105,6 @@ fn terminate_fuse_child(pid: i32) {
     let _ = unsafe { libc::kill(pid, SIGKILL) };
     let mut status = 0;
     let _ = unsafe { waitpid(pid, &mut status, WNOHANG) };
-}
-
-fn normalize_targets(targets: &[String]) -> Vec<String> {
-    let mut normalized: Vec<String> = targets
-        .iter()
-        .filter(|target| is_safe_mount_target(target))
-        .cloned()
-        .collect();
-    normalized.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
-    normalized.dedup();
-    normalized
-}
-
-fn is_safe_mount_target(target: &str) -> bool {
-    if target.is_empty() || target.contains('\0') || target.contains("/../") {
-        return false;
-    }
-    target.starts_with("/storage/")
-        || target.starts_with("/mnt/")
-        || target.starts_with(module_paths::REAL_STORAGE_TMP_PREFIX)
-}
-
-fn sanitize_name(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn last_errno() -> i32 {
