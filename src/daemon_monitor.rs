@@ -65,6 +65,8 @@ pub struct RegularAppMonitor {
     missing_roots: usize,
     capacity_limited: bool,
     needs_rebuild: bool,
+    /// inotify 队列溢出后待执行的一次全量补偿扫描。
+    overflow_resync: bool,
     last_rebuild_ms: i64,
 }
 
@@ -80,6 +82,7 @@ impl RegularAppMonitor {
             missing_roots: 0,
             capacity_limited: false,
             needs_rebuild: true,
+            overflow_resync: false,
             last_rebuild_ms: 0,
         }
     }
@@ -152,10 +155,12 @@ impl RegularAppMonitor {
             }
         }
 
+        // 溢出补偿扫描需要对全部来源重新执行 owner 修复，不能只覆盖 private_owner。
+        let overflow_resync = std::mem::take(&mut self.overflow_resync);
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = node.source == "private_owner";
-                let recurse_existing_tree = node.source != "public_owner";
+                let repair_existing_files = overflow_resync || node.source == "private_owner";
+                let recurse_existing_tree = overflow_resync || node.source != "public_owner";
                 if node.source == "public_owner" {
                     self.repair_existing_public_tree(&node);
                 }
@@ -241,9 +246,11 @@ impl RegularAppMonitor {
             return;
         }
 
-        let mut buffer = [0u8; 16 * 1024];
+        // inotify_event 需要 4 字节对齐；内核保证每个事件总长度是 sizeof(int) 的倍数，
+        // 因此缓冲区起始 4 字节对齐后，后续每个事件也满足对齐要求。
+        let mut buffer = inotify::InotifyBuf::<{ 16 * 1024 }>::new();
         loop {
-            let n = inotify::read_into(self.fd, &mut buffer);
+            let n = inotify::read_into(self.fd, &mut buffer.0);
             if n < 0 {
                 let errno = inotify::last_errno();
                 if errno == libc::EINTR {
@@ -262,7 +269,9 @@ impl RegularAppMonitor {
             let mut offset = 0usize;
             let total = n as usize;
             while offset + std::mem::size_of::<inotify_event>() <= total {
-                let event = unsafe { &*(buffer.as_ptr().add(offset) as *const inotify_event) };
+                // SAFETY: 循环条件已保证 offset 起至少还有一个完整 inotify_event，
+                // 且 InotifyBuf 按 4 字节对齐，事件起始地址满足对齐要求。
+                let event = unsafe { &*(buffer.0.as_ptr().add(offset) as *const inotify_event) };
                 let event_len = inotify::event_len(event);
                 if event_len == 0 || offset + event_len > total {
                     break;
@@ -490,7 +499,10 @@ impl RegularAppMonitor {
     fn handle_event(&mut self, event: &inotify_event) {
         let mask = event.mask;
         if inotify::is_queue_overflow(mask) {
+            // 溢出说明内核已经丢弃了数量未知的事件，只重建监视集无法补回这批事件对应的
+            // owner 修复与路径记录，这里额外登记一次全量补偿扫描。
             self.needs_rebuild = true;
+            self.overflow_resync = true;
             log::warn!("daemon monitor queue overflow");
             return;
         }

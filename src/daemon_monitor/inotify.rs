@@ -5,6 +5,17 @@ use libc::{
 };
 use std::ffi::CString;
 
+/// inotify 读取缓冲区。`inotify_event` 需要至少 4 字节对齐（wd/mask/cookie/len 均为 i32/u32），
+/// 内核保证每个事件总长度是 sizeof(int) 的倍数，故缓冲区起始 4 字节对齐后首个及后续事件均满足对齐要求。
+#[repr(align(4))]
+pub(super) struct InotifyBuf<const N: usize>(pub(super) [u8; N]);
+
+impl<const N: usize> InotifyBuf<N> {
+    pub(super) const fn new() -> Self {
+        Self([0u8; N])
+    }
+}
+
 const EVENT_MASK: u32 = IN_CREATE
     | IN_MODIFY
     | IN_CLOSE_WRITE

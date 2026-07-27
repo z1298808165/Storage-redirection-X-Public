@@ -37,6 +37,18 @@ pub fn init(config_dir: &str) -> i32 {
     fd
 }
 
+// inotify_event 需要 4 字节对齐；内核保证每个事件总长度是 sizeof(int) 的倍数，
+// 因此缓冲区起始 4 字节对齐后，后续每个事件也满足对齐要求。
+// 使用 4096 字节容纳多个事件，避免 1024 字节时单次 read 截断。
+#[repr(align(4))]
+struct InotifyBuf([u8; 4096]);
+
+impl InotifyBuf {
+    fn new() -> Self {
+        Self([0u8; 4096])
+    }
+}
+
 // 非阻塞检查是否有配置变更事件
 // 在 hook 热路径调用，无事件时开销极小（一次非阻塞 read 系统调用）
 pub fn poll_changed() -> bool {
@@ -60,17 +72,24 @@ pub fn poll_changed() -> bool {
         return false;
     }
 
-    let mut buf = [0u8; 1024];
-    let len = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+    let mut buf = InotifyBuf::new();
+    // SAFETY: 读入 buf 自身的完整区间，长度取自同一数组，不会越界。
+    let len = unsafe { libc::read(fd, buf.0.as_mut_ptr() as *mut _, buf.0.len()) };
     if len <= 0 {
         return false;
     }
 
     let mut changed = false;
-    let mut offset = 0;
-    while offset < len as usize {
-        let event = unsafe { &*(buf.as_ptr().add(offset) as *const inotify_event) };
+    let mut offset = 0usize;
+    let total = len as usize;
+    while offset + std::mem::size_of::<inotify_event>() <= total {
+        // SAFETY: 循环条件已保证 offset 起至少还有一个完整 inotify_event，
+        // 且 InotifyBuf 按 4 字节对齐，事件起始地址满足对齐要求。
+        let event = unsafe { &*(buf.0.as_ptr().add(offset) as *const inotify_event) };
         let event_len = std::mem::size_of::<inotify_event>() + event.len as usize;
+        if event_len == 0 || offset + event_len > total {
+            break;
+        }
 
         if is_config_event(event) {
             changed = true;
