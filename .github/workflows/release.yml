@@ -9,6 +9,13 @@ permissions:
   actions: read
   contents: write
 
+env:
+  # 与 gradle.properties 的 srx.ndkVersion 保持一致；本地构建脚本读取该属性。
+  # 版本分叉会让本地与 CI 构建出不同的 hook 实现，因此集中在这里定义。
+  SRX_NDK_VERSION: "30.0.14904198"
+  SRX_ANDROID_PLATFORM: "platforms;android-37.0"
+  SRX_ANDROID_BUILD_TOOLS: "build-tools;35.0.0"
+
 jobs:
   quality:
     if: github.repository == 'z1298808165/Storage-redirection-X-Public' && startsWith(github.ref, 'refs/tags/v')
@@ -146,16 +153,16 @@ jobs:
       - name: Install Android SDK build-tools, platform and NDK
         run: |
           for attempt in 1 2 3; do
-            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/$SRX_NDK_VERSION"
             sleep $((attempt * 10))
           done
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> $GITHUB_ENV
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -291,7 +298,7 @@ jobs:
       - name: Install Android SDK build-tools and platform
         run: |
           for attempt in 1 2 3; do
-            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0"; then
+            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
@@ -374,16 +381,16 @@ jobs:
       - name: Install Android SDK build-tools, platform and NDK
         run: |
           for attempt in 1 2 3; do
-            if sdkmanager "platforms;android-37.0" "build-tools;35.0.0" "ndk;30.0.14904198"; then
+            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/30.0.14904198"
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/$SRX_NDK_VERSION"
             sleep $((attempt * 10))
           done
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.14904198" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> $GITHUB_ENV
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -477,7 +484,11 @@ jobs:
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
     strategy:
-      fail-fast: true
+      # 保持 false：每次失败都要拿到 4 个 Android 版本的完整证据，才能区分版本相关
+      # 问题与通用问题。github-actions-failure-notes.md 里多次出现「某版本失败、其余
+      # 因 fail-fast 取消」，只有单版本证据会导致反复返工，返工成本高于多跑的机器时间。
+      # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
+      fail-fast: false
       matrix:
         android:
           - api: 33
