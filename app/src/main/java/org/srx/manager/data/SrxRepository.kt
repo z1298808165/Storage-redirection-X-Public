@@ -87,7 +87,10 @@ class SrxRepository(
   }
 
   suspend fun readDashboardCounts(): Pair<Int, String> = coroutineScope {
-    val configs = async { readConfiguredAppConfigs(force = true) }
+    // 走缓存而非强制重读：所有写配置路径都会调用 invalidateConfiguredAppsCache，
+    // 因此写入后必然重新加载；其余情况由缓存 TTL 兜住陈旧度。原先恒定 force 会让
+    // 每次触发都重新 dump 并解析全部 apps/*.json。
+    val configs = async { readConfiguredAppConfigs(force = false) }
     val runtimeActivations = async { readRuntimeActivations() }
     val enabledApps = countEnabledAppConfigs(configs.await())
     enabledApps to runtimeActivations.await()

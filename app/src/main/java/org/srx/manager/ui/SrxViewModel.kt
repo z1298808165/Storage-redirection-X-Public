@@ -2,6 +2,7 @@ package org.srx.manager.ui
 
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.time.LocalDateTime
@@ -75,6 +76,9 @@ data class AppUiState(
     val snackbar: String? = null,
 )
 
+// 与 WebUI 的 DASHBOARD_REFRESH_THROTTLE_MS 取值一致，保证两端刷新节奏相同。
+private const val DashboardCountsThrottleMs = 1200L
+
 class SrxViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
@@ -98,6 +102,7 @@ class SrxViewModel(
   private var configSaveJob: Job? = null
   private var logAppsJob: Job? = null
   private var dashboardCountsJob: Job? = null
+  private var dashboardCountsRefreshedAt = 0L
   private val monitorFiltersSaveMutex = Mutex()
   private val globalConfigSaveRequests = Channel<GlobalConfig>(Channel.CONFLATED)
 
@@ -138,7 +143,7 @@ class SrxViewModel(
           .onSuccess { _state.value = _state.value.copy(dashboard = it, error = null) }
           .onFailure { showMessage("加载概览失败：${it.message ?: "未知错误"}") }
       _state.value = _state.value.copy(loading = false)
-      refreshDashboardCounts()
+      refreshDashboardCounts(force = true)
       refreshUsers()
       refreshTemplates()
       refreshFileMonitorFilters()
@@ -150,12 +155,21 @@ class SrxViewModel(
       runCatching { repository.readDashboardSummary() }
           .onSuccess { _state.value = _state.value.copy(dashboard = it, error = null) }
           .onFailure { showMessage("加载概览失败：${it.message ?: "未知错误"}") }
-      refreshDashboardCounts()
+      refreshDashboardCounts(force = true)
     }
   }
 
-  fun refreshDashboardCounts() {
+  /**
+   * 刷新概览页的统计计数。
+   *
+   * 该刷新会 dump 全部应用配置并解析，[force] 为 false 时按最小间隔节流：切换页面与 每次回到前台都会触发，若不节流则连续动作会反复发起 root 调用。间隔与 WebUI
+   * 的 DASHBOARD_REFRESH_THROTTLE_MS 保持一致，避免两端行为不同。
+   */
+  fun refreshDashboardCounts(force: Boolean = false) {
     if (!_state.value.rootGranted || dashboardCountsJob?.isActive == true) return
+    val now = SystemClock.elapsedRealtime()
+    if (!force && now - dashboardCountsRefreshedAt < DashboardCountsThrottleMs) return
+    dashboardCountsRefreshedAt = now
     dashboardCountsJob =
         viewModelScope.launch {
           runCatching { repository.readDashboardCounts() }
@@ -169,6 +183,12 @@ class SrxViewModel(
                             ),
                     )
               }
+              .onFailure {
+                // 计数刷新失败时数字会停留在旧值，与「确实没有已启用应用」无法区分，
+                // 因此必须提示而不是静默。同时清掉节流时间戳以便下次立即重试。
+                dashboardCountsRefreshedAt = 0L
+                showMessage("加载概览计数失败：${it.message ?: "未知错误"}")
+              }
         }
   }
 
@@ -180,6 +200,7 @@ class SrxViewModel(
                 _state.value.selectedUser.takeIf { it in users } ?: users.firstOrNull() ?: "0"
             _state.value = _state.value.copy(users = users, selectedUser = selected)
           }
+          .onFailure { showMessage("加载用户列表失败：${it.message ?: "未知错误"}") }
     }
   }
 
@@ -423,6 +444,7 @@ class SrxViewModel(
             _state.value = _state.value.copy(templates = templates)
             reconcileAutoTemplateFallback(templates)
           }
+          .onFailure { showMessage("加载配置模板失败：${it.message ?: "未知错误"}") }
     }
   }
 
@@ -682,6 +704,7 @@ class SrxViewModel(
     viewModelScope.launch {
       runCatching { repository.readFileMonitorFilters() }
           .onSuccess { filters -> _state.value = _state.value.copy(fileMonitorFilters = filters) }
+          .onFailure { showMessage("加载文件监视过滤规则失败：${it.message ?: "未知错误"}") }
     }
   }
 
@@ -844,8 +867,11 @@ class SrxViewModel(
       onResult: (List<String>) -> Unit,
   ) {
     viewModelScope.launch {
+      // 失败时仍回调空列表让浏览器结束 loading，但要给出提示：否则「目录读取失败」
+      // 与「该目录确实没有子目录」在界面上完全一样。
       val entries =
           runCatching { repository.listStorageDirectories(userId, dirRel) }
+              .onFailure { showMessage("读取目录失败：${it.message ?: "未知错误"}") }
               .getOrDefault(emptyList())
       onResult(entries)
     }
