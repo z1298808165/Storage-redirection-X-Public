@@ -138,6 +138,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
         self.assertIn(":storageRedirectTestApp:assembleDebug", script)
 
+    def test_scenario_roots_are_exported_to_subshells(self) -> None:
+        # 场景函数由 `bash -c` 子 shell 执行，顶层赋值必须显式 export，
+        # 否则场景内读到空串，断言路径会退化并失去校验意义。
+        assigned = set(re.findall(r"(?m)^([A-Z][A-Z0-9_]*)=", self.bash))
+        exported = set()
+        for line in re.findall(r"(?m)^export (?!-f)(.*)$", self.bash):
+            exported.update(line.split())
+        self.assertEqual(set(), assigned - exported)
+
+    def test_adb_su_propagates_remote_exit_status(self) -> None:
+        # adb_su 用管道剥离 CR，退出码会取自末尾的 tr 而恒为 0；
+        # 子 shell 中 SHELLOPTS 不继承，必须在函数内局部启用 pipefail，
+        # 否则 check_file_exists 之类的断言会无条件通过。
+        adb_su = section(self.bash, "adb_su()", "adb_write_file()")
+        self.assertIn("local -", adb_su)
+        self.assertIn("set -o pipefail", adb_su)
+        self.assertLess(adb_su.index("set -o pipefail"), adb_su.index("adb_root"))
+
     def test_media_monitor_waits_for_restarted_provider_hook(self) -> None:
         bash_wait = section(
             self.bash,
