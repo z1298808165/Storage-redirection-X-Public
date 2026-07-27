@@ -18,6 +18,45 @@ pub struct CompanionMountRequest {
     pub config_version: u64,
 }
 
+impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
+    fn package_name(&self) -> &str {
+        &self.package_name
+    }
+    fn uid(&self) -> i32 {
+        self.uid
+    }
+    fn app_data_dir(&self) -> &str {
+        &self.app_data_dir
+    }
+    fn redirect_target(&self) -> &str {
+        &self.redirect_target
+    }
+    fn is_file_monitor_enabled(&self) -> bool {
+        self.is_file_monitor_enabled
+    }
+    fn is_fuse_daemon_redirect_enabled(&self) -> bool {
+        self.is_fuse_daemon_redirect_enabled
+    }
+    fn allowed_real_paths(&self) -> &[String] {
+        &self.allowed_real_paths
+    }
+    fn excluded_real_paths(&self) -> &[String] {
+        &self.excluded_real_paths
+    }
+    fn sandboxed_paths(&self) -> &[String] {
+        &self.sandboxed_paths
+    }
+    fn read_only_paths(&self) -> &[String] {
+        &self.read_only_paths
+    }
+    fn path_mappings(&self) -> &[crate::domain::PathMapping] {
+        &self.path_mappings
+    }
+    fn is_mapping_mode_only(&self) -> bool {
+        self.is_mapping_mode_only
+    }
+}
+
 // 从 JSON 负载解析挂载请求，校验必填字段
 pub fn parse_companion_mount_request(payload: &str) -> Result<CompanionMountRequest, String> {
     let mut request = CompanionMountRequest::default();

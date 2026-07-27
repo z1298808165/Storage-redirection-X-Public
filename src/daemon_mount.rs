@@ -1,7 +1,5 @@
 use crate::domain::PathMapping;
-use crate::fuse_redirect::{
-    FuseRedirectConfig, mount_blocking_with_ready, scoped_mount_roots_for_hybrid_rules,
-};
+use crate::fuse_redirect::{FuseRedirectConfig, mount_blocking_with_ready};
 use crate::mount::MountPlanner;
 use crate::mount_status_marker::write_mount_status_marker;
 use crate::platform::errno::{last as last_errno, text as errno_text};
@@ -55,6 +53,45 @@ pub struct MountRequest {
     pub is_fuse_daemon_redirect_enabled: bool,
     pub is_file_monitor_enabled: bool,
     pub config_version: u64,
+}
+
+impl crate::fuse_redirect::MountRequestFields for MountRequest {
+    fn package_name(&self) -> &str {
+        &self.package_name
+    }
+    fn uid(&self) -> i32 {
+        self.uid
+    }
+    fn app_data_dir(&self) -> &str {
+        &self.app_data_dir
+    }
+    fn redirect_target(&self) -> &str {
+        &self.redirect_target
+    }
+    fn is_file_monitor_enabled(&self) -> bool {
+        self.is_file_monitor_enabled
+    }
+    fn is_fuse_daemon_redirect_enabled(&self) -> bool {
+        self.is_fuse_daemon_redirect_enabled
+    }
+    fn allowed_real_paths(&self) -> &[String] {
+        &self.allowed_real_paths
+    }
+    fn excluded_real_paths(&self) -> &[String] {
+        &self.excluded_real_paths
+    }
+    fn sandboxed_paths(&self) -> &[String] {
+        &self.sandboxed_paths
+    }
+    fn read_only_paths(&self) -> &[String] {
+        &self.read_only_paths
+    }
+    fn path_mappings(&self) -> &[crate::domain::PathMapping] {
+        &self.path_mappings
+    }
+    fn is_mapping_mode_only(&self) -> bool {
+        self.is_mapping_mode_only
+    }
 }
 
 pub fn has_mount_state(request: &MountRequest) -> bool {
@@ -491,19 +528,7 @@ fn start_scoped_fuse_services(
 }
 
 fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
-    if !request.is_fuse_daemon_redirect_enabled {
-        return Vec::new();
-    }
-
-    scoped_mount_roots_for_hybrid_rules(
-        request.uid,
-        &request.allowed_real_paths,
-        &request.excluded_real_paths,
-        &request.sandboxed_paths,
-        &request.read_only_paths,
-        &request.path_mappings,
-        request.is_mapping_mode_only,
-    )
+    crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request)
 }
 
 fn start_fuse_service_for_root(
@@ -955,21 +980,7 @@ fn fuse_config_from_request(
     mount_root: Option<String>,
     real_root_override: Option<String>,
 ) -> FuseRedirectConfig {
-    FuseRedirectConfig {
-        package_name: request.package_name.clone(),
-        uid: request.uid,
-        app_data_dir: request.app_data_dir.clone(),
-        redirect_target: request.redirect_target.clone(),
-        mount_root,
-        real_root_override,
-        is_file_monitor_enabled: request.is_file_monitor_enabled,
-        allowed_real_paths: request.allowed_real_paths.clone(),
-        excluded_real_paths: request.excluded_real_paths.clone(),
-        sandboxed_paths: request.sandboxed_paths.clone(),
-        read_only_paths: request.read_only_paths.clone(),
-        path_mappings: request.path_mappings.clone(),
-        is_mapping_mode_only: request.is_mapping_mode_only,
-    }
+    crate::fuse_redirect::fuse_config_from_request(request, mount_root, real_root_override)
 }
 
 fn write_mount_state(

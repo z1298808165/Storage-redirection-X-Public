@@ -25,6 +25,69 @@ impl FuseRedirectConfig {
     }
 }
 
+/// 挂载请求中构造 FUSE 配置与计算 scoped 挂载根所需的字段。
+///
+/// daemon 侧的 `MountRequest` 与 companion 侧的 `CompanionMountRequest` 各自演进，字段
+/// 相同但类型不同（前者另有 `operation`），此前两处的配置构造与挂载根计算是逐字重复的。
+/// 由该 trait 统一取值，两处共用下面的 [`fuse_config_from_request`] 与
+/// [`scoped_fuse_mount_roots_for_request`]，避免规则字段增减时漏改一侧。
+pub trait MountRequestFields {
+    fn package_name(&self) -> &str;
+    fn uid(&self) -> i32;
+    fn app_data_dir(&self) -> &str;
+    fn redirect_target(&self) -> &str;
+    fn is_file_monitor_enabled(&self) -> bool;
+    fn is_fuse_daemon_redirect_enabled(&self) -> bool;
+    fn allowed_real_paths(&self) -> &[String];
+    fn excluded_real_paths(&self) -> &[String];
+    fn sandboxed_paths(&self) -> &[String];
+    fn read_only_paths(&self) -> &[String];
+    fn path_mappings(&self) -> &[PathMapping];
+    fn is_mapping_mode_only(&self) -> bool;
+}
+
+/// 按挂载请求构造 FUSE 重定向配置。
+pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
+    request: &R,
+    mount_root: Option<String>,
+    real_root_override: Option<String>,
+) -> FuseRedirectConfig {
+    FuseRedirectConfig {
+        package_name: request.package_name().to_string(),
+        uid: request.uid(),
+        app_data_dir: request.app_data_dir().to_string(),
+        redirect_target: request.redirect_target().to_string(),
+        mount_root,
+        real_root_override,
+        is_file_monitor_enabled: request.is_file_monitor_enabled(),
+        allowed_real_paths: request.allowed_real_paths().to_vec(),
+        excluded_real_paths: request.excluded_real_paths().to_vec(),
+        sandboxed_paths: request.sandboxed_paths().to_vec(),
+        read_only_paths: request.read_only_paths().to_vec(),
+        path_mappings: request.path_mappings().to_vec(),
+        is_mapping_mode_only: request.is_mapping_mode_only(),
+    }
+}
+
+/// 计算挂载请求对应的 scoped 挂载根；未启用 FUSE daemon 重定向时返回空列表。
+pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
+    request: &R,
+) -> Vec<String> {
+    if !request.is_fuse_daemon_redirect_enabled() {
+        return Vec::new();
+    }
+
+    scoped_mount_roots_for_hybrid_rules(
+        request.uid(),
+        request.allowed_real_paths(),
+        request.excluded_real_paths(),
+        request.sandboxed_paths(),
+        request.read_only_paths(),
+        request.path_mappings(),
+        request.is_mapping_mode_only(),
+    )
+}
+
 pub fn mount_blocking_with_ready(
     config: FuseRedirectConfig,
     ready_sock: Option<libc::c_int>,

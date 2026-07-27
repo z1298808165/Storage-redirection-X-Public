@@ -5,7 +5,8 @@ mod perf;
 mod policy;
 
 pub use config::{
-    FuseRedirectConfig, mount_blocking_with_ready, scoped_mount_roots_for_hybrid_rules,
+    FuseRedirectConfig, MountRequestFields, fuse_config_from_request, mount_blocking_with_ready,
+    scoped_fuse_mount_roots_for_request,
 };
 
 use crate::platform::{fs, paths};

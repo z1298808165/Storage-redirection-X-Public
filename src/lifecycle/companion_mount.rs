@@ -6,9 +6,7 @@ mod sys;
 use super::companion_request::CompanionMountRequest;
 use super::mount_timing;
 use crate::config::SettingsHub;
-use crate::fuse_redirect::{
-    FuseRedirectConfig, mount_blocking_with_ready, scoped_mount_roots_for_hybrid_rules,
-};
+use crate::fuse_redirect::{FuseRedirectConfig, mount_blocking_with_ready};
 use crate::mount::MountPlanner;
 use crate::mount_status_marker::write_mount_status_marker;
 use crate::platform::unique_fd::UniqueFd;
@@ -703,19 +701,7 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
 }
 
 fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {
-    if !request.is_fuse_daemon_redirect_enabled {
-        return Vec::new();
-    }
-
-    scoped_mount_roots_for_hybrid_rules(
-        request.uid,
-        &request.allowed_real_paths,
-        &request.excluded_real_paths,
-        &request.sandboxed_paths,
-        &request.read_only_paths,
-        &request.path_mappings,
-        request.is_mapping_mode_only,
-    )
+    crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request)
 }
 
 fn start_fuse_service_for_root(
@@ -837,21 +823,7 @@ fn fuse_config_from_request(
     mount_root: Option<String>,
     real_root_override: Option<String>,
 ) -> FuseRedirectConfig {
-    FuseRedirectConfig {
-        package_name: request.package_name.clone(),
-        uid: request.uid,
-        app_data_dir: request.app_data_dir.clone(),
-        redirect_target: request.redirect_target.clone(),
-        mount_root,
-        real_root_override,
-        is_file_monitor_enabled: request.is_file_monitor_enabled,
-        allowed_real_paths: request.allowed_real_paths.clone(),
-        excluded_real_paths: request.excluded_real_paths.clone(),
-        sandboxed_paths: request.sandboxed_paths.clone(),
-        read_only_paths: request.read_only_paths.clone(),
-        path_mappings: request.path_mappings.clone(),
-        is_mapping_mode_only: request.is_mapping_mode_only,
-    }
+    crate::fuse_redirect::fuse_config_from_request(request, mount_root, real_root_override)
 }
 
 /// fork 之前在父进程算好的挂载计划。
