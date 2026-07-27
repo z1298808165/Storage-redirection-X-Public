@@ -395,7 +395,7 @@ impl MountPlanner {
                 namespace_mappings.len(),
                 scoped_fuse_roots.len()
             );
-            let is_any_applied = self.apply_resolved_path_mappings(
+            if !self.apply_resolved_path_mappings(
                 &namespace_mappings,
                 &storage_path,
                 &mapping_source_roots,
@@ -407,8 +407,13 @@ impl MountPlanner {
                     should_create_missing_request_path: true,
                     should_use_existing_target_source_only: false,
                 },
-            );
-            let _ = is_any_applied;
+            ) {
+                log::warn!(
+                    "mapping: nothing applied count={} storage={}",
+                    namespace_mappings.len(),
+                    storage_path
+                );
+            }
         }
 
         let read_only_shadowed_mappings = self.read_only_shadowed_path_mappings(
@@ -418,14 +423,22 @@ impl MountPlanner {
             "readonly map restore",
         );
         if !read_only_paths.is_empty() {
-            let _ = self.apply_read_only_paths(
+            // 只读规则整体未生效意味着本该被拒绝的写入会被放行，属用户可感知的功能
+            // 失效而非日志噪音，必须留下告警而不是丢弃返回值。
+            if !self.apply_read_only_paths(
                 read_only_paths,
                 excluded_real_paths,
                 &namespace_mappings,
                 &storage_path,
                 &mapping_source_roots,
                 scoped_fuse_roots,
-            );
+            ) {
+                log::warn!(
+                    "readonly: nothing applied count={} storage={}",
+                    read_only_paths.len(),
+                    storage_path
+                );
+            }
             if !read_only_shadowed_mappings.is_empty() {
                 let is_any_restored = self.apply_resolved_path_mappings(
                     &read_only_shadowed_mappings,
