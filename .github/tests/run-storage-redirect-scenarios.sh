@@ -1539,7 +1539,10 @@ check_scoped_fuse_daemon_started() {
     return 1
   fi
   echo "scoped_fuse_missing scenario=${scenario} root=${mount_root}" >&2
-  adb_su "grep -F -- '${APP_ID}' '$LOG_PATH' 2>/dev/null | tail -80 || true" | sed 's/^/fuse_tail: /'
+  # scoped root 的逐条 hybrid fuse root 记录紧随 count 之后，80 行窗口常被后续日志挤掉，
+  # 因此按关键字单独再取一次，避免定位挂载根缺失时缺少最关键的一段。
+  adb_su "grep -F -- '${APP_ID}' '$LOG_PATH' 2>/dev/null | tail -200 || true" | sed 's/^/fuse_tail: /'
+  adb_su "grep -E 'hybrid fuse root|scoped fuse|fuse redirect mount' '$LOG_PATH' 2>/dev/null | tail -60 || true" | sed 's/^/fuse_roots: /'
   return 1
 }
 
