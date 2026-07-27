@@ -80,6 +80,31 @@ struct MonitorStateSnapshot {
     shared_uid_packages: String,
 }
 
+/// 归因所需的状态快照。
+///
+/// 归因过程包含写 hint 文件、读 hint 文件和扫描 /proc 等 IO，而它只依赖下面这几个
+/// 字段。持锁做这些 IO 会让所有 hook 线程在同一把锁上串行（MediaProvider 的多个
+/// binder 线程尤其明显），因此先取快照再在锁外归因。
+struct CallerResolveSnapshot {
+    package_name: String,
+    uid: i32,
+    shared_uid_packages: String,
+    caller_package: String,
+    caller_package_updated_ms: i64,
+}
+
+impl CallerResolveSnapshot {
+    fn capture(state: &AuditState) -> Self {
+        Self {
+            package_name: state.package_name.clone(),
+            uid: state.uid,
+            shared_uid_packages: state.shared_uid_packages.clone(),
+            caller_package: state.caller_package.clone(),
+            caller_package_updated_ms: state.caller_package_updated_ms,
+        }
+    }
+}
+
 impl AuditState {
     fn new() -> Self {
         Self {
@@ -362,20 +387,29 @@ impl AuditTrail {
             return;
         }
 
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if should_filter_shared_uid_probe_event_locked(&state, &normalized, result, error_no) {
-            return;
-        }
-        drop(state);
+        // 归因过程包含 hint 文件读写与 /proc 扫描，不能持锁进行：这把锁被所有 hook
+        // 线程共用，MediaProvider 的多个 binder 线程会因此完全串行。这里只在锁内取
+        // 归因所需的状态快照和唯一依赖 state 的中间结果，随后释放锁再做 IO。
+        let (resolve_snapshot, query_access_identity) = {
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            let snapshot = CallerResolveSnapshot::capture(&state);
+            if should_filter_shared_uid_probe_event(&snapshot, &normalized, result, error_no) {
+                return;
+            }
+            let query_access_identity = resolve_query_access_identity_locked(&state, &normalized);
+            (snapshot, query_access_identity)
+        };
 
-        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        let source_identity = resolve_caller_info_for_path_locked(
-            &state,
+        let source_identity = resolve_caller_info_for_path(
+            &resolve_snapshot,
             caller_package,
             &normalized,
             is_mkdir_like_extra(extra),
             should_use_recent_private_owner_hint(kind, &normalized, &operation_name),
+            query_access_identity,
         );
+
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let event_key = build_event_key_locked(
             &state,
             &source_identity,
@@ -472,8 +506,8 @@ fn is_filtered_media_provider_path(path: &str) -> bool {
     paths::is_filtered_media_provider_path(path)
 }
 
-fn should_filter_shared_uid_probe_event_locked(
-    state: &AuditState,
+fn should_filter_shared_uid_probe_event(
+    state: &CallerResolveSnapshot,
     path: &str,
     result: i32,
     error_no: i32,
@@ -786,8 +820,8 @@ impl SourceIdentity {
 }
 
 // 结合直接信号、shared_uid 线索与近期调用方回退推断调用方包名
-fn resolve_caller_info_locked(
-    state: &AuditState,
+fn resolve_caller_info_from_snapshot(
+    state: &CallerResolveSnapshot,
     caller_package: &str,
     normalized_path: &str,
     is_mkdir_like: bool,
@@ -846,7 +880,7 @@ fn resolve_caller_info_locked(
 }
 
 fn should_use_recent_media_provider_caller(
-    state: &AuditState,
+    state: &CallerResolveSnapshot,
     normalized_path: &str,
     is_mkdir_like: bool,
 ) -> bool {
@@ -873,12 +907,17 @@ fn is_public_storage_path(path: &str) -> bool {
     paths::is_child(path, &storage_root)
 }
 
-fn resolve_caller_info_for_path_locked(
-    state: &AuditState,
+/// 在锁外完成调用方归因。
+///
+/// `query_access_identity` 是唯一需要读 `AuditState` 的中间结果，由调用方在持锁时
+/// 预先取出并按原顺序传入，这样 hint 文件读写与 /proc 扫描都不必持锁。
+fn resolve_caller_info_for_path(
+    state: &CallerResolveSnapshot,
     caller_package: &str,
     normalized_path: &str,
     is_mkdir_like: bool,
     can_use_recent_private_owner_hint: bool,
+    query_access_identity: Option<SourceIdentity>,
 ) -> SourceIdentity {
     let private_owner = paths::extract_android_private_path_owner(normalized_path);
     if !private_owner.is_empty() && !is_intermediate_caller_package(&private_owner) {
@@ -888,7 +927,7 @@ fn resolve_caller_info_for_path_locked(
     }
 
     let identity =
-        resolve_caller_info_locked(state, caller_package, normalized_path, is_mkdir_like);
+        resolve_caller_info_from_snapshot(state, caller_package, normalized_path, is_mkdir_like);
 
     if should_prefer_direct_identity(&identity) {
         return identity;
@@ -915,7 +954,7 @@ fn resolve_caller_info_for_path_locked(
         );
     }
 
-    if let Some(query_identity) = resolve_query_access_identity_locked(state, normalized_path) {
+    if let Some(query_identity) = query_access_identity {
         return query_identity;
     }
 
