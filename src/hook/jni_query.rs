@@ -1,5 +1,6 @@
 // CursorWindow 查询层 Hook：按重定向规则过滤与改写 MediaStore 查询结果
 
+mod path_util;
 mod rewrite;
 mod types;
 

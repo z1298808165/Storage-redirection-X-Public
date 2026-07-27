@@ -1,5 +1,13 @@
 use super::super::stats::InterceptHub;
-use super::types::{FILE_SCHEME_PREFIX, SAMPLE_LOG_INITIAL, SAMPLE_LOG_INTERVAL, STORAGE_PREFIXES};
+use super::path_util::{
+    download_relative_suffix, has_unsafe_relative_path_segment, is_media_store_pending_path,
+    is_probe_path, is_visibility_log_path, java_bucket_id, normalize_bucket_path_for_user,
+    normalize_media_store_relative_value_path, normalize_public_storage_path,
+    normalize_relative_path, relative_ends_with_suffix, relative_path_from_public_storage_path,
+    relative_path_is_under, split_media_store_value_path, split_relative_parent_and_name,
+    split_storage_path, to_public_storage_path,
+};
+use super::types::{FILE_SCHEME_PREFIX, SAMPLE_LOG_INITIAL, SAMPLE_LOG_INTERVAL};
 use crate::config::SettingsHub;
 use crate::domain::PathMapping;
 use crate::platform::{self, paths};
@@ -14,20 +22,6 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 static REWRITE_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 static VISIBILITY_SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 const READ_ONLY_DENIED_SENTINEL_PREFIX: &str = "__SRX_READ_ONLY_DENIED__:";
-const MEDIASTORE_RELATIVE_ROOTS: [&str; 12] = [
-    "Alarms",
-    "Audiobooks",
-    "DCIM",
-    "Documents",
-    "Download",
-    "Movies",
-    "Music",
-    "Notifications",
-    "Pictures",
-    "Podcasts",
-    "Recordings",
-    "Ringtones",
-];
 
 // MediaProvider cursor 行可能非常频繁地命中此路径。保留 inotify 作为快路径，
 // 并使用限流的指纹检查，避免监视事件遗漏或初始快照为空导致调用方查询过滤失效。
@@ -828,15 +822,6 @@ fn rewrite_default_sandbox_media_store_value_with_target(
     Some(rewritten)
 }
 
-fn to_public_storage_path(path: &str) -> String {
-    const PREFIX: &str = "/data/media/";
-    if !path.starts_with(PREFIX) {
-        return path.to_string();
-    }
-    let suffix = &path[PREFIX.len()..];
-    format!("/storage/emulated/{}", suffix)
-}
-
 fn rewrite_cursor_storage_path_for_mapping_view(
     original_text: &str,
     path_text: &str,
@@ -1149,126 +1134,16 @@ fn is_distinct_public_mapping(original: &str, mapped: &str) -> bool {
     !mapped_public.is_empty() && mapped_public != original_public
 }
 
-fn normalize_public_storage_path(path: &str, user_id: i32) -> Option<NormalizedPublicPath> {
-    if path.is_empty() || user_id < 0 {
-        return None;
-    }
-    let path_text = path.strip_prefix(FILE_SCHEME_PREFIX).unwrap_or(path);
-    let normalized = paths::resolve_user_path(&paths::normalize(path_text), user_id);
-    if normalized.is_empty() || paths::has_unsafe_segments(&normalized) {
-        return None;
-    }
-    let public = to_public_storage_path(&normalized);
-    let storage_root = format!("/storage/emulated/{}/", user_id);
-    let relative = normalize_relative_path(public.strip_prefix(&storage_root)?);
-    Some(NormalizedPublicPath {
-        path: public,
-        relative,
-    })
-}
-
-fn relative_path_from_public_storage_path(path: &str, user_id: i32) -> String {
-    if path.is_empty() || user_id < 0 {
-        return String::new();
-    }
-    let normalized = paths::resolve_user_path(&paths::normalize(path), user_id);
-    if normalized.is_empty() || paths::has_unsafe_segments(&normalized) {
-        return String::new();
-    }
-    let public = to_public_storage_path(&normalized);
-    let storage_root = format!("/storage/emulated/{}/", user_id);
-    public
-        .strip_prefix(&storage_root)
-        .map(normalize_relative_path)
-        .unwrap_or_default()
-}
-
-fn normalize_relative_path(path: &str) -> String {
-    path.trim().replace('\\', "/").trim_matches('/').to_string()
-}
-
-fn relative_path_is_under(relative_path: &str, root: &str) -> bool {
-    let relative = normalize_relative_path(relative_path);
-    relative == root
-        || (relative.len() > root.len()
-            && relative.starts_with(root)
-            && relative.as_bytes().get(root.len()) == Some(&b'/'))
-}
-
-fn download_relative_suffix(relative_path: &str) -> &str {
-    let relative = relative_path.trim_matches('/');
-    if relative == "Download" {
-        ""
-    } else {
-        relative.strip_prefix("Download/").unwrap_or("")
-    }
-}
-
-fn relative_ends_with_suffix(relative_path: &str, suffix: &str) -> bool {
-    let relative = relative_path.trim_matches('/');
-    let suffix = suffix.trim_matches('/');
-    !suffix.is_empty()
-        && (relative == suffix
-            || (relative.len() > suffix.len()
-                && relative.ends_with(suffix)
-                && relative.as_bytes().get(relative.len() - suffix.len() - 1) == Some(&b'/')))
-}
-
-fn split_relative_parent_and_name(relative_path: &str) -> Option<(String, String)> {
-    let relative = normalize_relative_path(relative_path);
-    let slash = relative.rfind('/')?;
-    if slash == 0 || slash >= relative.len() - 1 {
-        return None;
-    }
-    Some((
-        relative[..slash].to_string(),
-        relative[slash + 1..].to_string(),
-    ))
-}
-
-fn has_unsafe_relative_path_segment(relative_path: &str) -> bool {
-    let relative = normalize_relative_path(relative_path);
-    relative
-        .split('/')
-        .any(|part| part.is_empty() || part == "." || part == "..")
-}
-
 struct DownloadMediaPlaceholderSource {
     path: String,
     relative_path: String,
     file_name: String,
 }
 
-struct NormalizedPublicPath {
-    path: String,
-    relative: String,
-}
-
 struct PlaceholderCandidate {
     path: String,
     score: i32,
     request_len: usize,
-}
-
-fn normalize_bucket_path_for_user(path: &str, user_id: i32) -> String {
-    if path.is_empty() || user_id < 0 {
-        return String::new();
-    }
-    let normalized = paths::resolve_user_path(&paths::normalize(path), user_id);
-    if normalized.is_empty() {
-        return String::new();
-    }
-    let public_path = to_public_storage_path(&normalized);
-    public_path.trim_end_matches('/').to_string()
-}
-
-fn java_bucket_id(path: &str) -> i32 {
-    let lower = path.to_lowercase();
-    let mut hash = 0i32;
-    for unit in lower.encode_utf16() {
-        hash = hash.wrapping_mul(31).wrapping_add(unit as i32);
-    }
-    hash
 }
 
 fn resolve_caller_package(caller_uid: i32, path_text: &str) -> String {
@@ -1432,95 +1307,4 @@ fn sample_visibility_log(
         if target.is_empty() { "empty" } else { target },
         index + 1
     );
-}
-
-fn is_visibility_log_path(path: &str) -> bool {
-    path.contains("/SRXTest/")
-        || path.contains("/srx_pathowner_verify")
-        || path.contains("/srx_photosgo")
-}
-
-fn split_storage_path(text: &str) -> Option<(&str, bool)> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if let Some(path_text) = text.strip_prefix(FILE_SCHEME_PREFIX)
-        && STORAGE_PREFIXES
-            .iter()
-            .any(|prefix| path_text.starts_with(prefix))
-    {
-        return Some((path_text, true));
-    }
-
-    if STORAGE_PREFIXES
-        .iter()
-        .any(|prefix| text.starts_with(prefix))
-    {
-        return Some((text, false));
-    }
-    None
-}
-
-fn split_media_store_value_path(text: &str) -> Option<(&str, bool)> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if let Some(path_text) = text.strip_prefix(FILE_SCHEME_PREFIX)
-        && is_media_store_value_path(path_text)
-    {
-        return Some((path_text, true));
-    }
-
-    if is_media_store_value_path(text) {
-        return Some((text, false));
-    }
-    None
-}
-
-fn normalize_media_store_relative_value_path(text: &str, caller_uid: i32) -> Option<String> {
-    if text.is_empty() || text.starts_with(FILE_SCHEME_PREFIX) || text.contains('\\') {
-        return None;
-    }
-    let relative = text.strip_prefix('/').unwrap_or(text);
-    if relative.is_empty() || relative.starts_with('/') {
-        return None;
-    }
-    let mut segments = relative.split('/');
-    let root = segments.next()?;
-    if !MEDIASTORE_RELATIVE_ROOTS.contains(&root) {
-        return None;
-    }
-    segments.clone().next()?;
-    if segments
-        .clone()
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return None;
-    }
-    let user_id = platform::user_id_from_uid(caller_uid);
-    if user_id < 0 {
-        return None;
-    }
-    Some(format!("/storage/emulated/{}/{}", user_id, relative))
-}
-
-fn is_media_store_value_path(path: &str) -> bool {
-    STORAGE_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-        || path.starts_with("/data/media/")
-}
-
-fn is_probe_path(path: &str) -> bool {
-    path.ends_with("/.srx_probe") || path.ends_with("/.srx_probe/")
-}
-
-fn is_media_store_pending_path(path: &str) -> bool {
-    let path_text = path.strip_prefix(FILE_SCHEME_PREFIX).unwrap_or(path);
-    path_text
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.starts_with(".pending-"))
 }
