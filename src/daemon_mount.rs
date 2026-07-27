@@ -1003,6 +1003,7 @@ fn write_mount_state(
     // 先写临时文件并 fsync，再原子 rename 覆盖正式文件。
     // 这样即使中途崩溃或断电，也只会残留临时文件，正式挂载清单仍是上一轮的完整内容，
     // 避免 clear_previous_mounts 因为读到空文件而永久漏卸挂载点。
+    // SAFETY: c_temp_path 在调用期间保持存活，且是以 NUL 结尾的合法路径。
     let fd = unsafe {
         open(
             c_temp_path.as_ptr(),
@@ -1020,6 +1021,7 @@ fn write_mount_state(
         return false;
     }
     let mut ok = fs::write_all(fd, content.as_bytes());
+    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符。
     if ok && unsafe { libc::fsync(fd) } != 0 {
         log::warn!(
             "daemon mount state fsync failed path={} errno={} {}",
@@ -1029,6 +1031,7 @@ fn write_mount_state(
         );
         ok = false;
     }
+    // SAFETY: 同上，关闭与改权限使用的都是本函数持有的 fd 与存活字符串。
     unsafe {
         libc::close(fd);
         let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
