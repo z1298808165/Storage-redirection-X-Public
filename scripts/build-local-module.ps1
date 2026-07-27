@@ -13,7 +13,27 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BuildVersionBaselinePath = Join-Path $RepoRoot ".github\build-version-baseline.json"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$PreferredNdkVersion = "30.0.14904198"
+function Get-GradleProperty {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Fallback
+    )
+
+    $propertiesPath = Join-Path $RepoRoot "gradle.properties"
+    if (Test-Path -LiteralPath $propertiesPath -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $propertiesPath) {
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) { continue }
+            $parts = $trimmed.Split("=", 2)
+            if ($parts[0].Trim() -eq $Name) { return $parts[1].Trim() }
+        }
+    }
+    return $Fallback
+}
+
+# NDK 版本以 gradle.properties 的 srx.ndkVersion 为唯一来源，与 CI 使用同一取值；
+# 本地与 CI 使用不同 NDK 会构建出不同的 hook 实现。
+$PreferredNdkVersion = Get-GradleProperty -Name "srx.ndkVersion" -Fallback "30.0.14904198"
 $PreferredCmakeVersion = "4.1.2"
 
 function Write-Step {
