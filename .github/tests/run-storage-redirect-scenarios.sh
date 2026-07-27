@@ -1255,6 +1255,9 @@ check_file_exists() {
     return 0
   fi
   echo "file_missing label=${label} path=${path}"
+  # 文件不在预期位置时，列出父目录内容：多数落点问题的关键信息是文件究竟落在了
+  # 哪里、或是否以中间态命名（例如 MediaStore 的 .pending- 前缀）残留。
+  adb_su "ls -la \"\$(dirname '$path')\" 2>/dev/null || true" || true
   return 1
 }
 
