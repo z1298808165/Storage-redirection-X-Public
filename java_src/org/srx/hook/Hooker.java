@@ -242,6 +242,7 @@ public class Hooker {
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
+        commitRedirectedPendingFile(this, args, actualArgs, callerUid, mutationMethod);
         logMutationResult(this, result);
         return result;
       } finally {
@@ -2347,6 +2348,77 @@ public class Hooker {
       }
     } catch (Throwable ignored) {
     }
+  }
+
+  /**
+   * 在 MediaStore 提交阶段补齐被重定向文件的改名。
+   *
+   * <p>应用经 MediaStore 写入时，MediaProvider 先以 {@code .pending-<id>-<名称>} 临时名创建
+   * 文件、提交时再改名为最终名。写入被重定向到沙箱后，MediaProvider 在 update 提交阶段 不会对沙箱内的文件再发起改名（实测全程只有 insert
+   * 阶段一次针对公共路径的预清理）， 因此文件会永久停留在 pending 名——数据完整但在相册与文件管理器中不可见。
+   *
+   * <p>这里在 update 成功后按数据库记录的最终路径推导出沙箱内的 pending 文件并完成改名。 只处理确实存在 pending
+   * 文件、且最终名尚不存在的情况，因此对未重定向的写入以及已由 MediaProvider 自行改名的写入都不产生影响。
+   */
+  private static void commitRedirectedPendingFile(
+      Hooker hooker, Object[] rawArgs, Object[] actualArgs, int callerUid, String mutationMethod) {
+    try {
+      if (!"update".equals(mutationMethod) || actualArgs == null) return;
+      if (callerUid < ANDROID_APP_UID_START) return;
+      int uriIndex = findMutationUriIndex(actualArgs);
+      if (uriIndex < 0) return;
+      Object uriValue = actualArgs[uriIndex];
+      if (!(uriValue instanceof android.net.Uri)) return;
+      String uriText = String.valueOf(uriValue);
+      if (!uriText.startsWith("content://media/")) return;
+
+      android.content.ContentProvider receiver = providerReceiver(rawArgs);
+      String displayPath = queryDataPath(receiver, (android.net.Uri) uriValue);
+      if (displayPath == null || displayPath.length() == 0) return;
+
+      // 数据库记录的是用户可见路径，需先换算到实际落盘的沙箱路径。
+      String finalPath = rewriteMediaStorePath(displayPath, callerUid);
+      if (finalPath == null || finalPath.length() == 0) return;
+      if (finalPath.equals(displayPath)) return;
+
+      java.io.File finalFile = new java.io.File(finalPath);
+      if (finalFile.exists()) return;
+      java.io.File parent = finalFile.getParentFile();
+      if (parent == null) return;
+      String name = finalFile.getName();
+      java.io.File[] children = parent.listFiles();
+      if (children == null) return;
+      for (java.io.File child : children) {
+        // 只接受 .pending-<id>-<最终名> 这一确切形态；用 endsWith 会让「另一个文件名恰好
+        // 以本名结尾」的 pending 文件被误改名。
+        if (!isPendingFileOf(child.getName(), name)) continue;
+        boolean renamed = child.renameTo(finalFile);
+        logInfo(
+            "media pending commit renamed="
+                + renamed
+                + " from="
+                + child.getAbsolutePath()
+                + " to="
+                + finalPath);
+        return;
+      }
+    } catch (Throwable t) {
+      logWarn("media pending commit failed", t);
+    }
+  }
+
+  /** 判断 {@code fileName} 是否为 {@code displayName} 的 {@code .pending-<id>-<名称>} 中间态。 */
+  private static boolean isPendingFileOf(String fileName, String displayName) {
+    if (fileName == null || displayName == null || displayName.length() == 0) return false;
+    if (!fileName.startsWith(".pending-")) return false;
+    int idStart = ".pending-".length();
+    int dash = fileName.indexOf('-', idStart);
+    if (dash < 0 || dash == idStart) return false;
+    for (int i = idStart; i < dash; i++) {
+      char ch = fileName.charAt(i);
+      if (ch < '0' || ch > '9') return false;
+    }
+    return fileName.substring(dash + 1).equals(displayName);
   }
 
   private static PendingDirectMediaWrite peekPendingDirectMediaWrite(android.net.Uri uri) {
