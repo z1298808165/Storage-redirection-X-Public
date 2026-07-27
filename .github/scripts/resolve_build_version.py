@@ -11,10 +11,6 @@ from pathlib import Path
 
 
 BUILD_VERSION_BASELINE_PATH = Path(".github/build-version-baseline.json")
-AUTO_MANIFEST_PREFIXES = (
-    "CI：更新更新清单",
-    "发布：更新更新清单",
-)
 
 
 def run_git(args: list[str], check: bool = True) -> str:
@@ -47,44 +43,6 @@ def validate_base_version(version: str) -> tuple[int, int, int]:
     if len(parts) != 3 or any(not part.isdigit() for part in parts):
         raise SystemExit(f"Cargo.toml version must be MAJOR.MINOR.PATCH, got: {version}")
     return int(parts[0]), int(parts[1]), int(parts[2])
-
-
-def current_head_version() -> str | None:
-    try:
-        text = run_git(["show", "HEAD:Cargo.toml"])
-    except subprocess.CalledProcessError:
-        return None
-    return read_cargo_version_from_text(text)
-
-
-def version_start_commit(current_version: str) -> str | None:
-    history = run_git(
-        ["log", "--first-parent", "--reverse", "--format=commit:%H", "-p", "--", "Cargo.toml"],
-        check=False,
-    )
-    commit: str | None = None
-    start: str | None = None
-    added_current_version = False
-    removed_current_version = False
-
-    def record_version_start() -> None:
-        nonlocal start
-        if added_current_version and not removed_current_version:
-            start = commit
-
-    for line in history.splitlines():
-        if line.startswith("commit:"):
-            record_version_start()
-            commit = line.removeprefix("commit:").strip()
-            added_current_version = False
-            removed_current_version = False
-            continue
-        if line.startswith("+") and read_cargo_version_from_text(line.removeprefix("+")) == current_version:
-            added_current_version = True
-        elif line.startswith("-") and read_cargo_version_from_text(line.removeprefix("-")) == current_version:
-            removed_current_version = True
-    record_version_start()
-    return start
 
 
 def is_worktree_dirty() -> bool:
@@ -168,46 +126,29 @@ def parse_ci_version(version: str) -> tuple[str, int]:
     return match.group(1), int(match.group(2))
 
 
-def latest_ci_manifest_commit(current_version: str) -> str | None:
-    commits_text = run_git(["log", "--first-parent", "--format=%H%x09%s", "HEAD"], check=False)
-    for line in commits_text.splitlines():
-        commit, _, subject = line.partition("\t")
-        if subject.startswith(f"CI：更新更新清单 {current_version}-ci."):
-            return commit
-    return None
-
-
-def count_non_auto_commits(range_expr: str) -> int:
-    subjects_text = run_git(["log", "--first-parent", "--format=%s", range_expr], check=False)
-    return sum(1 for subject in subjects_text.splitlines() if subject and not subject.startswith(AUTO_MANIFEST_PREFIXES))
-
-
 def resolve_build_count(current_version: str, include_dirty: bool) -> int:
-    head_version = current_head_version()
-    start = None if head_version != current_version else version_start_commit(current_version)
-    historical_count = 0
-    if start:
-        historical_count = count_non_auto_commits(f"{start}..HEAD")
+    """按构建次数解析下一个 CI 序号。
 
-    manifest_count = published_manifest_build_count(current_version)
-    count = historical_count
-    if manifest_count is not None:
-        last_manifest_commit = latest_ci_manifest_commit(current_version)
-        if last_manifest_commit:
-            pending_count = count_non_auto_commits(f"{last_manifest_commit}..HEAD")
-            count = manifest_count + pending_count
+    序号只取决于该基础版本已经产出过多少个构建，与提交数量无关：
+    以基线文件与已发布清单中记录的最高 `N` 为准，下一次构建加 1。
+    同一个基础版本首次构建时两者都没有记录，从 1 开始。
+    `include_dirty` 只影响本地：工作区干净说明当前提交对应的构建已经产出，
+    直接复用记录中的最高序号，避免仅重新打包就推进版本；有未提交改动时才算作新构建。
+    """
+    recorded = [
+        count
+        for count in (
+            read_build_count_baseline(current_version),
+            published_manifest_build_count(current_version),
+        )
+        if count is not None
+    ]
+    highest = max(recorded) if recorded else 0
 
-    if include_dirty and is_worktree_dirty():
-        if head_version != current_version:
-            count = 0
-        count += 1
+    if include_dirty and not is_worktree_dirty() and highest > 0:
+        return highest
 
-    resolved_count = max(count, 1)
-    baseline_count = read_build_count_baseline(current_version)
-    if baseline_count is not None:
-        resolved_count = max(resolved_count, baseline_count + 1)
-
-    return resolved_count
+    return highest + 1
 
 
 def version_code(base_version: str, build_count: int, release: bool) -> int:

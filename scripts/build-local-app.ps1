@@ -120,87 +120,35 @@ function Invoke-GitText {
     return ($output -join "`n").Trim()
 }
 
-function Get-CargoVersionFromText {
-    param([string]$Text)
-
-    if ($Text -match '(?m)^version\s*=\s*"([^"]+)"') {
-        return $Matches[1]
-    }
-
-    return $null
-}
-
-function Get-HeadCargoVersion {
-    $text = Invoke-GitText -Arguments @("show", "HEAD:Cargo.toml") -AllowFailure
-    if ($null -eq $text) {
-        return $null
-    }
-    return Get-CargoVersionFromText -Text $text
-}
-
-function Get-VersionStartCommit {
-    param([string]$Version)
-
-    $history = Invoke-GitText -Arguments @("log", "--first-parent", "--reverse", "--format=commit:%H", "-p", "--", "Cargo.toml") -AllowFailure
-    if ([string]::IsNullOrWhiteSpace($history)) {
-        return $null
-    }
-
-    $commit = $null
-    $start = $null
-    $addedCurrentVersion = $false
-    $removedCurrentVersion = $false
-    foreach ($line in ($history -split "`n")) {
-        if ($line.StartsWith("commit:")) {
-            if ($addedCurrentVersion -and -not $removedCurrentVersion) {
-                $start = $commit
-            }
-            $commit = $line.Substring("commit:".Length).Trim()
-            $addedCurrentVersion = $false
-            $removedCurrentVersion = $false
-            continue
-        }
-        if ($line.StartsWith("+") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
-            $addedCurrentVersion = $true
-        } elseif ($line.StartsWith("-") -and (Get-CargoVersionFromText -Text $line.Substring(1)) -eq $Version) {
-            $removedCurrentVersion = $true
-        }
-    }
-    if ($addedCurrentVersion -and -not $removedCurrentVersion) {
-        $start = $commit
-    }
-
-    return $start
-}
-
-function Get-NonAutoManifestCommitCount {
-    param([string]$Range)
-
-    $subjects = Invoke-GitText -Arguments @("log", "--first-parent", "--format=%s", $Range) -AllowFailure
-    if ([string]::IsNullOrWhiteSpace($subjects)) {
-        return 0
-    }
-    $fullWidthColon = [char]0xFF1A
-    $updateManifest = -join @([char]0x66F4, [char]0x65B0, [char]0x66F4, [char]0x65B0, [char]0x6E05, [char]0x5355)
-    $release = -join @([char]0x53D1, [char]0x5E03)
-    return @(($subjects -split "`n") | Where-Object {
-        -not $_.StartsWith("CI$fullWidthColon$updateManifest") -and -not $_.StartsWith("$release$fullWidthColon$updateManifest")
-    }).Count
-}
-
 function Test-WorktreeDirty {
     $status = Invoke-GitText -Arguments @("status", "--porcelain") -AllowFailure
     return -not [string]::IsNullOrWhiteSpace($status)
 }
 
-function Get-BuildCountOffset {
+function Get-PublishedManifestBuildCount {
     param([string]$BaseVersion)
 
-    if ($BaseVersion -eq "1.2.57") {
-        return 285
+    $manifestPath = Join-Path $RepoRoot "update.json"
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return $null
     }
 
-    return 0
+    try {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+
+    $version = $manifest.beta.version
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        return $null
+    }
+    $pattern = "^" + [regex]::Escape($BaseVersion) + "-ci\.(\d+)$"
+    if ($version -match $pattern) {
+        return [int]$Matches[1]
+    }
+
+    return $null
 }
 
 function Get-BuildCountBaseline {
@@ -237,27 +185,24 @@ function Resolve-LocalVersion {
     $minor = [int]$parts[1]
     $patch = [int]$parts[2]
     $baseCode = ($major * 1000000) + ($minor * 10000) + ($patch * 100)
-    $headVersion = Get-HeadCargoVersion
-    $start = $null
-    if ($headVersion -eq $BaseVersion) {
-        $start = Get-VersionStartCommit -Version $BaseVersion
-    }
-    $count = 0
-    if (-not [string]::IsNullOrWhiteSpace($start)) {
-        $count = Get-NonAutoManifestCommitCount -Range "$start..HEAD"
-    }
 
-    if (Test-WorktreeDirty) {
-        if ($headVersion -ne $BaseVersion) {
-            $count = 0
+    # 序号按构建次数递增，与提交数量无关：以基线与已发布清单中记录的最高 N 为准加 1。
+    # 工作区干净说明当前提交对应的构建已经产出，直接复用记录中的最高序号，
+    # 避免仅重新打包就推进版本；有未提交改动时才算作新构建。
+    $highest = 0
+    foreach ($recorded in @(
+        (Get-BuildCountBaseline -BaseVersion $BaseVersion),
+        (Get-PublishedManifestBuildCount -BaseVersion $BaseVersion)
+    )) {
+        if ($null -ne $recorded -and $recorded -gt $highest) {
+            $highest = $recorded
         }
-        $count++
     }
 
-    $buildCount = [Math]::Max($count, 1) + (Get-BuildCountOffset -BaseVersion $BaseVersion)
-    $baselineCount = Get-BuildCountBaseline -BaseVersion $BaseVersion
-    if ($null -ne $baselineCount) {
-        $buildCount = [Math]::Max($buildCount, $baselineCount + 1)
+    if (-not (Test-WorktreeDirty) -and $highest -gt 0) {
+        $buildCount = $highest
+    } else {
+        $buildCount = $highest + 1
     }
     $resolvedVersionCode = $baseCode - 100 + [Math]::Min($buildCount, 99)
     return @{
