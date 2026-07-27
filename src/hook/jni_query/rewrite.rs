@@ -263,6 +263,17 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
         has_file_scheme,
         false,
     );
+    // 登记「该公共路径属于哪个调用方」。MediaProvider 随后提交 pending 文件时，是以自身
+    // 身份对公共路径发起 stat 与 rename，此时已没有 binder 调用方可用；只有依靠这条按
+    // 路径的提示才能解析出原始调用方，进而把提交两侧一并重定向到沙箱。提示查询侧已支持
+    // 把 `.pending-<id>-<名称>` 归一为显示名再匹配，因此登记显示名路径即可覆盖提交阶段。
+    crate::monitor::remember_public_path_caller_hint(
+        path_text,
+        &caller_package,
+        effective_uid,
+        "provider_open",
+        "high",
+    );
     Some(rewritten)
 }
 

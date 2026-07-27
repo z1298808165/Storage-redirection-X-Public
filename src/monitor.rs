@@ -8,7 +8,8 @@ pub(crate) use download_owner::infer_download_owner_package_by_path;
 pub(crate) use source_hint::{
     infer_recent_path_caller_identity, remember_private_path_caller_hint,
     remember_private_path_caller_hint_in_memory, remember_private_path_caller_uid_hint_in_memory,
-    remember_private_path_owner_hint, remember_saf_path_caller_hint,
+    remember_private_path_owner_hint, remember_public_path_caller_hint,
+    remember_saf_path_caller_hint,
 };
 pub(crate) use stack_owner::infer_caller_package_by_stack;
 
