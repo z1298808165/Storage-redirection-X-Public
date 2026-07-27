@@ -686,6 +686,18 @@ where
 
     let redirect_result = process_redirect_path_for_runtime(hub, &path_text);
     diagnostic::log_diag_redirect_decision(hub, op_name, &path_text, &redirect_result);
+    // MediaStore 提交阶段对 .pending- 文件的存在性检查决定了改名能否找到源文件，
+    // 而常规决策日志按操作类型采样输出，stat 这类高频操作几乎不会命中。这里对
+    // pending 形态单独无条件记录一次：该形态仅在 MediaStore 提交时出现，频率极低。
+    if paths::media_store_pending_display_path(&path_text).is_some() {
+        log::info!(
+            "pending probe op={} path={} action={:?} new={}",
+            op_name,
+            path_text,
+            redirect_result.action,
+            redirect_result.new_path
+        );
+    }
 
     if redirect_result.is_redirect() {
         record_redirect_hit(hub, op_name, &path_text, &redirect_result.new_path);
