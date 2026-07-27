@@ -74,6 +74,12 @@ public class Hooker {
   private static int DIRECT_MEDIA_WRITE_LOG_COUNT;
   private static int BUCKET_ID_REWRITE_LOG_COUNT;
   private static final HashMap<Integer, SourceFdCapture> RECENT_MEDIA_SOURCE_FDS = new HashMap<>();
+
+  /** URI 到重定向后沙箱路径的映射，用于把 insert 阶段的落点带到提交阶段。 */
+  private static final HashMap<String, String> REDIRECTED_MEDIA_TARGETS = new HashMap<>();
+
+  private static final int REDIRECTED_MEDIA_TARGET_LIMIT = 64;
+
   private static final HashMap<String, PendingDirectMediaWrite> PENDING_DIRECT_MEDIA_WRITES =
       new HashMap<>();
   private static final HashMap<String, String> RECENT_BUCKET_ID_REWRITES = new HashMap<>();
@@ -241,8 +247,9 @@ public class Hooker {
         }
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
+        rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
-        commitRedirectedPendingFile(this, args, actualArgs, callerUid, mutationMethod);
+        commitRedirectedPendingFile(actualArgs, mutationMethod);
         logMutationResult(this, result);
         return result;
       } finally {
@@ -2351,59 +2358,72 @@ public class Hooker {
   }
 
   /**
+   * 记录被重定向的 MediaStore 写入目标。
+   *
+   * <p>insert 阶段已算出该次写入实际落盘的沙箱路径，此处按返回的 URI 存下来。提交阶段无法 再从数据库查到 {@code _data}（实测在 provider 内部调用中查询返回
+   * null），因此必须在 insert 时把路径带过去。
+   */
+  private static void rememberRedirectedMediaTarget(
+      Object[] actualArgs, Object result, int callerUid, String mutationMethod) {
+    try {
+      if (!"insert".equals(mutationMethod) || !(result instanceof android.net.Uri)) return;
+      if (callerUid < ANDROID_APP_UID_START || actualArgs == null) return;
+      ContentValues values = findContentValues(actualArgs);
+      if (values == null) return;
+      String relativePath = values.getAsString("relative_path");
+      if (relativePath == null || relativePath.length() == 0) {
+        relativePath = relativePathFromDirectoryColumns(values);
+      }
+      if (relativePath == null || relativePath.length() == 0) return;
+      String displayName = firstString(values, "_display_name", "display_name");
+      if (displayName == null || displayName.length() == 0) return;
+      String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+      if (probePath == null) return;
+      String sandboxPath = rewriteMediaStorePath(probePath, callerUid);
+      if (sandboxPath == null || sandboxPath.length() == 0) return;
+      synchronized (REDIRECTED_MEDIA_TARGETS) {
+        if (REDIRECTED_MEDIA_TARGETS.size() > REDIRECTED_MEDIA_TARGET_LIMIT) {
+          REDIRECTED_MEDIA_TARGETS.clear();
+        }
+        REDIRECTED_MEDIA_TARGETS.put(result.toString(), sandboxPath);
+      }
+      logInfo("media redirect target uri=" + result + " sandbox=" + sandboxPath);
+    } catch (Throwable ignored) {
+    }
+  }
+
+  /**
    * 在 MediaStore 提交阶段补齐被重定向文件的改名。
    *
    * <p>应用经 MediaStore 写入时，MediaProvider 先以 {@code .pending-<id>-<名称>} 临时名创建
    * 文件、提交时再改名为最终名。写入被重定向到沙箱后，MediaProvider 在 update 提交阶段 不会对沙箱内的文件再发起改名（实测全程只有 insert
    * 阶段一次针对公共路径的预清理）， 因此文件会永久停留在 pending 名——数据完整但在相册与文件管理器中不可见。
    *
-   * <p>这里在 update 成功后按数据库记录的最终路径推导出沙箱内的 pending 文件并完成改名。 只处理确实存在 pending
-   * 文件、且最终名尚不存在的情况，因此对未重定向的写入以及已由 MediaProvider 自行改名的写入都不产生影响。
+   * <p>只处理确实存在 pending 文件、且最终名尚不存在的情况，因此对未重定向的写入以及已由 MediaProvider 自行改名的写入都不产生影响。
    */
-  private static void commitRedirectedPendingFile(
-      Hooker hooker, Object[] rawArgs, Object[] actualArgs, int callerUid, String mutationMethod) {
+  private static void commitRedirectedPendingFile(Object[] actualArgs, String mutationMethod) {
     try {
       if (!"update".equals(mutationMethod) || actualArgs == null) return;
-      if (callerUid < ANDROID_APP_UID_START) return;
       int uriIndex = findMutationUriIndex(actualArgs);
       if (uriIndex < 0) return;
       Object uriValue = actualArgs[uriIndex];
-      if (!(uriValue instanceof android.net.Uri)) return;
-      String uriText = String.valueOf(uriValue);
-      if (!uriText.startsWith("content://media/")) return;
-
-      android.content.ContentProvider receiver = providerReceiver(rawArgs);
-      String displayPath = queryDataPath(receiver, (android.net.Uri) uriValue);
-
-      // 数据库记录的是用户可见路径，需先换算到实际落盘的沙箱路径。
-      String finalPath =
-          displayPath == null || displayPath.length() == 0
-              ? null
-              : rewriteMediaStorePath(displayPath, callerUid);
-      logInfo(
-          "media pending commit probe uri="
-              + uriText
-              + " display="
-              + displayPath
-              + " final="
-              + finalPath);
-      if (displayPath == null || displayPath.length() == 0) return;
-      if (finalPath == null || finalPath.length() == 0) return;
-      if (finalPath.equals(displayPath)) return;
-
-      java.io.File finalFile = new java.io.File(finalPath);
-      if (finalFile.exists()) {
-        logInfo("media pending commit skip exists path=" + finalPath);
-        return;
+      if (uriValue == null) return;
+      String sandboxPath;
+      synchronized (REDIRECTED_MEDIA_TARGETS) {
+        sandboxPath = REDIRECTED_MEDIA_TARGETS.remove(uriValue.toString());
       }
+      if (sandboxPath == null || sandboxPath.length() == 0) return;
+
+      java.io.File finalFile = new java.io.File(sandboxPath);
+      if (finalFile.exists()) return;
       java.io.File parent = finalFile.getParentFile();
       if (parent == null) return;
-      String name = finalFile.getName();
       java.io.File[] children = parent.listFiles();
       if (children == null) {
         logInfo("media pending commit list failed parent=" + parent.getAbsolutePath());
         return;
       }
+      String name = finalFile.getName();
       for (java.io.File child : children) {
         // 只接受 .pending-<id>-<最终名> 这一确切形态；用 endsWith 会让「另一个文件名恰好
         // 以本名结尾」的 pending 文件被误改名。
@@ -2415,13 +2435,22 @@ public class Hooker {
                 + " from="
                 + child.getAbsolutePath()
                 + " to="
-                + finalPath);
+                + sandboxPath);
         return;
       }
       logInfo("media pending commit no candidate parent=" + parent.getAbsolutePath());
     } catch (Throwable t) {
       logWarn("media pending commit failed", t);
     }
+  }
+
+  /** 取出参数中的第一个 {@link ContentValues}，与 patchMediaStoreValues 的遍历方式一致。 */
+  private static ContentValues findContentValues(Object[] actualArgs) {
+    if (actualArgs == null) return null;
+    for (Object arg : actualArgs) {
+      if (arg instanceof ContentValues) return (ContentValues) arg;
+    }
+    return null;
   }
 
   /** 判断 {@code fileName} 是否为 {@code displayName} 的 {@code .pending-<id>-<名称>} 中间态。 */
