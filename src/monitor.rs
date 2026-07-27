@@ -639,8 +639,7 @@ fn infer_monitor_redirect_backend(
         return None;
     }
 
-    let mappings = writer::get_caller_mappings(caller_package, caller_uid);
-    let mapped_path = writer::map_path_by_caller_mappings(normalized_path, &mappings);
+    let mapped_path = writer::map_caller_path(normalized_path, caller_package, caller_uid);
     if !mapped_path.is_empty() && mapped_path != normalized_path {
         return monitor_backend_from_storage_path(mapped_path, "path_mapping");
     }

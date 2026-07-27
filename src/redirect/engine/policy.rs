@@ -370,6 +370,8 @@ fn evaluate_system_writer_mapping_stage(
     trace: &SystemWriterPolicyTrace<'_>,
 ) -> MappingStageResult {
     let mapping_started_ms = paths::monotonic_ms();
+    // 这里除了换算路径，后续还要遍历 final_path 并回调重定向引擎，因此仍取一份
+    // 映射快照，不能在缓存借用内完成。
     let caller_mappings = writer::get_caller_mappings(context.caller_package, context.caller_uid);
     let mapped_path = writer::map_path_by_caller_mappings(context.resolved_path, &caller_mappings);
     let mapping_ms = paths::monotonic_ms().saturating_sub(mapping_started_ms);

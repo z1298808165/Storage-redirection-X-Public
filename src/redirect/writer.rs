@@ -19,6 +19,24 @@ pub fn storage_to_data_media_path(path: &str) -> String {
     paths::storage_to_data_media_path(path)
 }
 
+/// 把调用方路径按其映射规则换算为目标路径。
+///
+/// 直接在缓存借用内完成换算，避免热路径上为每次判定克隆整份映射表
+/// （每条 `PathMapping` 含两个 String）。闭包内只做纯字符串换算，不会重新进入
+/// 本缓存，因此不存在 `RefCell` 重入风险。
+pub fn map_caller_path(path: &str, caller_package: &str, caller_uid: i32) -> String {
+    with_caller_mappings(caller_package, caller_uid, |mappings| {
+        map_path_by_caller_mappings(path, mappings)
+    })
+}
+
+/// `map_caller_path` 的反向换算：把落盘路径还原为调用方请求的展示路径。
+pub fn reverse_map_caller_path(path: &str, caller_package: &str, caller_uid: i32) -> String {
+    with_caller_mappings(caller_package, caller_uid, |mappings| {
+        reverse_map_path_by_caller_mappings(path, mappings)
+    })
+}
+
 pub fn get_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMapping> {
     with_caller_mappings(caller_package, caller_uid, |mappings| mappings.to_vec())
 }

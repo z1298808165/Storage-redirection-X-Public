@@ -782,8 +782,7 @@ fn reverse_mapping_readlink_path_for_visible_caller(path: &str) -> String {
     }
 
     let normalized = paths::normalize(path);
-    let mappings = writer::get_caller_mappings(&caller_package, caller_uid);
-    let display_path = writer::reverse_map_path_by_caller_mappings(&normalized, &mappings);
+    let display_path = writer::reverse_map_caller_path(&normalized, &caller_package, caller_uid);
     if display_path.is_empty() || display_path == normalized {
         path.to_string()
     } else {

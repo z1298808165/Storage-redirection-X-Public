@@ -675,8 +675,7 @@ fn resolve_system_writer_self_explicit_rule(
     let mapping_started_ms = paths::monotonic_ms();
     let mut mapping_ms = 0;
     if include_mappings {
-        let caller_mappings = writer::get_caller_mappings(&self_rule_package, self_uid);
-        let mapped_path = writer::map_path_by_caller_mappings(&resolved_path, &caller_mappings);
+        let mapped_path = writer::map_caller_path(&resolved_path, &self_rule_package, self_uid);
         mapping_ms = paths::monotonic_ms().saturating_sub(mapping_started_ms);
         if !mapped_path.is_empty() && mapped_path != resolved_path {
             if is_write_operation

@@ -484,8 +484,7 @@ fn resolve_mapping_request_mkdir_redirect(
             .saturating_mul(platform::ANDROID_USER_ID_OFFSET)
             .saturating_add(writer::ANDROID_APP_UID_START);
     }
-    let mappings = writer::get_caller_mappings(&caller_package, caller_uid);
-    let mapped_path = writer::map_path_by_caller_mappings(&resolved_path, &mappings);
+    let mapped_path = writer::map_caller_path(&resolved_path, &caller_package, caller_uid);
     if mapped_path.is_empty() || paths::eq_ignore_case(&mapped_path, &resolved_path) {
         return None;
     }
