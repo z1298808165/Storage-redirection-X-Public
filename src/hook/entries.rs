@@ -59,13 +59,6 @@ pub fn is_hook_enabled(active_profiles: HookProfileSet, entry_profiles: HookProf
     active_profiles.intersects(entry_profiles)
 }
 
-pub fn count_hooks_for_profile(active_profiles: HookProfileSet) -> usize {
-    build_hook_entries()
-        .into_iter()
-        .filter(|entry| is_hook_enabled(active_profiles, entry.profiles))
-        .count()
-}
-
 pub fn build_hook_entries() -> Vec<HookEntry> {
     vec![
         HookEntry {

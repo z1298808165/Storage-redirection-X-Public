@@ -1,7 +1,5 @@
 use super::context;
-use super::entries::{
-    HookProfile, HookProfileSet, build_hook_entries, count_hooks_for_profile, is_hook_enabled,
-};
+use super::entries::{HookProfile, HookProfileSet, build_hook_entries, is_hook_enabled};
 use crate::config::SettingsHub;
 use crate::monitor::AuditTrail;
 use crate::redirect::policy;
@@ -343,14 +341,17 @@ impl InterceptHub {
             self.is_app_write_only.load(Ordering::Relaxed),
         );
 
-        let selected_hook_count = count_hooks_for_profile(active_profiles);
+        let entries = build_hook_entries();
+        let selected_hook_count = entries
+            .iter()
+            .filter(|entry| is_hook_enabled(active_profiles, entry.profiles))
+            .count();
         log::info!(
             "hook profile={} count={}",
             profile_name,
             selected_hook_count
         );
 
-        let entries = build_hook_entries();
         let mut hook_list: Vec<&'static str> = Vec::new();
         let mut optional_missing: Vec<&'static str> = Vec::new();
         let mut required_failed: Vec<&'static str> = Vec::new();
