@@ -100,6 +100,22 @@ impl SettingsHub {
         self.reload_from_dir(&config_dir, true)
     }
 
+    /// 把当前生效的全局开关与监视过滤规则复制到待加载状态，作为解析失败时的回退基线。
+    ///
+    /// 只复制这两类由单个文件整体决定的配置；`apps` 由 `load_app_configs` 按包名逐个
+    /// 加载，其解析失败已经在 `parse_app_config` 内保留旧条目，无需在此预置。
+    fn seed_loaded_state_from_current(&self, loaded_state: &mut SettingsState) {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if !state.is_loaded {
+            return;
+        }
+        loaded_state.is_file_monitor_enabled = state.is_file_monitor_enabled;
+        loaded_state.is_fuse_fix_enabled = state.is_fuse_fix_enabled;
+        loaded_state.is_fuse_daemon_redirect_enabled = state.is_fuse_daemon_redirect_enabled;
+        loaded_state.is_verbose_logging_enabled = state.is_verbose_logging_enabled;
+        loaded_state.monitor_filters = state.monitor_filters.clone();
+    }
+
     fn reload_from_dir(&self, config_dir: &str, force: bool) -> bool {
         let (is_loaded, last_fingerprint) = {
             let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
@@ -127,14 +143,16 @@ impl SettingsHub {
         loaded_state.config_dir = config_dir.to_string();
         loaded_state.should_log_summary =
             super::fingerprint::should_log_config_summary_once(fingerprint);
+        // 以当前生效的配置作为起点：全局配置或过滤配置解析失败时，解析函数不会改动
+        // 对应字段，重载后仍保持上一次生效的值，而不是被静默重置为默认值。
+        self.seed_loaded_state_from_current(&mut loaded_state);
         let global_started_ms = paths::monotonic_ms();
         if !load_global_config(&mut loaded_state) {
-            log::warn!("global config load failed, monitor off");
-            loaded_state.is_file_monitor_enabled = false;
-            loaded_state.is_fuse_daemon_redirect_enabled = false;
-            loaded_state.is_verbose_logging_enabled = false;
+            log::warn!("global config load failed, keeping previous global settings");
         }
-        load_monitor_filter_config(&mut loaded_state);
+        if !load_monitor_filter_config(&mut loaded_state) {
+            log::warn!("monitor filter config load failed, keeping previous filters");
+        }
         crate::logging::set_debug_logging_enabled(loaded_state.is_verbose_logging_enabled);
         let global_ms = paths::monotonic_ms().saturating_sub(global_started_ms);
         let apps_started_ms = paths::monotonic_ms();
@@ -177,15 +195,13 @@ fn load_global_config(state: &mut SettingsState) -> bool {
     let mut is_too_large = false;
     let content = read_file(&global_path, &mut is_too_large);
 
+    // 文件过大属于内容异常，交由调用方保留上一次生效的开关，不在此处重置。
     if is_too_large {
         log::warn!("global config too large, ignored: {}", global_path);
-        state.is_file_monitor_enabled = false;
-        state.is_fuse_fix_enabled = true;
-        state.is_fuse_daemon_redirect_enabled = false;
-        state.is_verbose_logging_enabled = false;
         return false;
     }
 
+    // 文件缺失或为空表示用户确实清空了配置，回落默认值。
     if content.is_empty() {
         if state.should_log_summary {
             log::debug!("global config missing, defaults");

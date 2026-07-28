@@ -4,39 +4,37 @@ use crate::platform::paths;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// 解析全局配置。
+///
+/// 解析失败时不修改 `state` 的任何开关，由调用方决定是保留上一次生效的配置还是
+/// 使用默认值：配置文件缺失表示用户确实清空了配置，应回落默认；而内容损坏或被
+/// 截断（例如管理端覆盖写入的瞬间读到半个 JSON）不应静默关掉文件监控。
 pub fn parse_global_config(state: &mut SettingsState, json_content: &str) -> bool {
-    state.is_fuse_fix_enabled = true;
-    state.is_fuse_daemon_redirect_enabled = false;
-    state.is_verbose_logging_enabled = false;
     let parsed: Value = match serde_json::from_str(json_content) {
         Ok(value) => value,
         Err(error) => {
             log::error!("global config parse err: {}", error);
-            state.is_file_monitor_enabled = false;
-            state.is_fuse_fix_enabled = true;
-            state.is_fuse_daemon_redirect_enabled = false;
-            state.is_verbose_logging_enabled = false;
             return false;
         }
     };
 
-    if let Some(value) = parsed.get("file_monitor_enabled") {
-        state.is_file_monitor_enabled = value.as_bool().unwrap_or(false);
-    } else {
-        state.is_file_monitor_enabled = false;
-    }
-
-    if let Some(value) = parsed.get("fuse_fix_enabled") {
-        state.is_fuse_fix_enabled = value.as_bool().unwrap_or(true);
-    }
-
-    if let Some(value) = parsed.get("fuse_daemon_redirect_enabled") {
-        state.is_fuse_daemon_redirect_enabled = value.as_bool().unwrap_or(false);
-    }
-
-    if let Some(value) = parsed.get("verbose_logging_enabled") {
-        state.is_verbose_logging_enabled = value.as_bool().unwrap_or(false);
-    }
+    // 解析成功后才落值：缺失的键按各自默认值处理。
+    state.is_file_monitor_enabled = parsed
+        .get("file_monitor_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    state.is_fuse_fix_enabled = parsed
+        .get("fuse_fix_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    state.is_fuse_daemon_redirect_enabled = parsed
+        .get("fuse_daemon_redirect_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    state.is_verbose_logging_enabled = parsed
+        .get("verbose_logging_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     if state.should_log_summary {
         log::debug!(
@@ -50,12 +48,15 @@ pub fn parse_global_config(state: &mut SettingsState, json_content: &str) -> boo
     true
 }
 
+/// 解析文件监视过滤配置。
+///
+/// 解析失败时保持 `state.monitor_filters` 不变。清空排除列表会让本应被排除的目录
+/// 重新产生监控记录，因此内容损坏时保留上一次生效的过滤规则比回落默认值更安全。
 pub fn parse_monitor_filter_config(state: &mut SettingsState, json_content: &str) -> bool {
     let parsed: Value = match serde_json::from_str(json_content) {
         Ok(value) => value,
         Err(error) => {
             log::error!("monitor filter config parse err: {}", error);
-            state.monitor_filters = MonitorFilterConfig::default();
             return false;
         }
     };
