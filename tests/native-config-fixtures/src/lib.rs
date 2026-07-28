@@ -129,3 +129,50 @@ pub fn normalize_app_config(package_name: &str, json: &str) -> serde_json::Value
     }
     serde_json::json!({ "users": users })
 }
+
+/// 全局配置解析结果，供外置测试断言解析失败时是否保留了原有开关。
+#[derive(Debug, PartialEq, Eq)]
+pub struct GlobalConfigOutcome {
+    pub is_ok: bool,
+    pub is_file_monitor_enabled: bool,
+    pub is_fuse_fix_enabled: bool,
+    pub is_fuse_daemon_redirect_enabled: bool,
+    pub is_verbose_logging_enabled: bool,
+}
+
+/// 以给定的“上一次生效开关”为起点解析全局配置，返回解析结果与解析后的开关。
+pub fn parse_global_config_from(
+    previous: (bool, bool, bool, bool),
+    json: &str,
+) -> GlobalConfigOutcome {
+    let (monitor, fuse_fix, fuse_daemon, verbose) = previous;
+    let mut state = SettingsState::new();
+    state.is_file_monitor_enabled = monitor;
+    state.is_fuse_fix_enabled = fuse_fix;
+    state.is_fuse_daemon_redirect_enabled = fuse_daemon;
+    state.is_verbose_logging_enabled = verbose;
+
+    let is_ok = ingest::parse_global_config(&mut state, json);
+    GlobalConfigOutcome {
+        is_ok,
+        is_file_monitor_enabled: state.is_file_monitor_enabled,
+        is_fuse_fix_enabled: state.is_fuse_fix_enabled,
+        is_fuse_daemon_redirect_enabled: state.is_fuse_daemon_redirect_enabled,
+        is_verbose_logging_enabled: state.is_verbose_logging_enabled,
+    }
+}
+
+/// 以给定的“上一次生效排除列表”为起点解析监视过滤配置，返回解析结果与解析后的列表。
+pub fn parse_monitor_filters_from(
+    previous_excluded_paths: &[&str],
+    json: &str,
+) -> (bool, Vec<String>) {
+    let mut state = SettingsState::new();
+    state.monitor_filters.excluded_paths = previous_excluded_paths
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect();
+
+    let is_ok = ingest::parse_monitor_filter_config(&mut state, json);
+    (is_ok, state.monitor_filters.excluded_paths.clone())
+}
