@@ -8,6 +8,7 @@ import android.os.Build
 import android.provider.DocumentsContract
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -36,6 +37,10 @@ class SrxRepository(
     const val BackupModuleId = "storage.redirect.x"
     const val LogPreviewTailLines = 500
     const val AppDataCacheTtlNanos = 3_000_000_000L
+    /** 导出读取 root 文件的超时，与 RootShell 默认超时保持一致。 */
+    const val RootFileCopyTimeoutMs = 120_000L
+    /** 等待 stderr 消费线程收尾的时间，仅为回收线程，不影响导出结果。 */
+    const val StderrDrainJoinMs = 1_000L
   }
 
   private data class TimedCache<T>(val value: T, val loadedAtNanos: Long)
@@ -356,6 +361,10 @@ class SrxRepository(
   }
 
   private fun copyRootFileToUri(archivePath: String, uri: Uri): Boolean {
+    // 这里不能复用 RootShell.exec：导出需要把 stdout 直接streaming 到 content URI，
+    // 而 exec 会把输出收成字符串。因此在本地补上 RootShell 已有的两项保护：
+    // 必须消费 stderr（否则 su 授权提示或 SELinux 告警写满管道缓冲区会让进程卡死），
+    // 且 waitFor 必须带超时（否则授权对话框无人应答时会永久阻塞，导出进度条无法取消）。
     val proc =
         try {
           ProcessBuilder("su", "-c", "cat ${shellQuote(archivePath)}")
@@ -364,15 +373,25 @@ class SrxRepository(
         } catch (_: Exception) {
           return false
         }
+    val stderrDrain =
+        Thread { runCatching { proc.errorStream.use { it.readBytes() } } }
+            .apply {
+              isDaemon = true
+              start()
+            }
     return try {
       context.contentResolver.openOutputStream(uri, "w")?.use { output ->
         proc.inputStream.use { input -> input.copyTo(output) }
       } ?: return false
-      proc.waitFor() == 0
+      if (!proc.waitFor(RootFileCopyTimeoutMs, TimeUnit.MILLISECONDS)) {
+        return false
+      }
+      proc.exitValue() == 0
     } catch (_: Exception) {
       false
     } finally {
-      runCatching { proc.destroy() }
+      runCatching { proc.destroyForcibly() }
+      runCatching { stderrDrain.join(StderrDrainJoinMs) }
     }
   }
 
