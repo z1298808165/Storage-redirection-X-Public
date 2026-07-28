@@ -50,10 +50,9 @@ pub fn start() -> io::Result<()> {
         .name("srx-log-writer".to_string())
         .spawn(move || run(fd, state))
         .map(|_| ())
-        .map_err(|error| {
+        .inspect_err(|_| {
             // SAFETY: 线程创建失败，因此 fd 的所有权尚未转移。
             unsafe { close(fd) };
-            error
         })
 }
 

@@ -209,8 +209,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-target-aarch64-
 
+      # 用 --all-targets 覆盖 src/bin 与内联测试：此前只查 --lib，二进制目标下的
+      # 告警长期无人发现（log_daemon.rs 的 manual_inspect 即由此漏出）。
       - name: Run clippy lint gate
-        run: cargo clippy --target aarch64-linux-android --release --lib -- -D warnings
+        run: cargo clippy --target aarch64-linux-android --release --all-targets -- -D warnings
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
