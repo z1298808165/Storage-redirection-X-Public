@@ -60,22 +60,7 @@ pub fn normalize(path: &str) -> String {
     // 产生完全相同的内容，再交给别名解析；这里先判断是否需要改写，避免这次多余分配。
     let needs_rewrite = path.contains("//") || (path.len() > 1 && path.ends_with('/'));
     let normalized = if needs_rewrite {
-        let mut result = String::with_capacity(path.len());
-        let mut is_last_slash = false;
-        for ch in path.chars() {
-            if ch == '/' {
-                if !is_last_slash {
-                    result.push('/');
-                    is_last_slash = true;
-                }
-            } else {
-                result.push(ch);
-                is_last_slash = false;
-            }
-        }
-        if result.len() > 1 && result.ends_with('/') {
-            result.pop();
-        }
+        let result = collapse_redundant_slashes(path);
         resolve_storage_alias(&result)
     } else {
         resolve_storage_alias(path)
@@ -87,6 +72,80 @@ pub fn normalize(path: &str) -> String {
     }
 
     normalized
+}
+
+fn collapse_redundant_slashes(path: &str) -> String {
+    let mut result = String::with_capacity(path.len());
+    let mut is_last_slash = false;
+    for ch in path.chars() {
+        if ch == '/' {
+            if !is_last_slash {
+                result.push('/');
+                is_last_slash = true;
+            }
+        } else {
+            result.push(ch);
+            is_last_slash = false;
+        }
+    }
+    if result.len() > 1 && result.ends_with('/') {
+        result.pop();
+    }
+    result
+}
+
+/// 折叠路径中的 `.` 与 `..` 段，返回内核实际会解析到的等价路径。
+///
+/// 仅供 hook 决策入口使用，不能并入 [`normalize`]：配置校验依赖
+/// `normalize` 之后 [`has_unsafe_segments`] 仍能看到 `..` 来拒绝越界规则，
+/// 若在那里提前折叠，`DCIM/../../etc` 这类配置会被折叠成合法路径而通过校验。
+///
+/// hook 侧必须折叠的原因相反：`Pictures/../ReadOnlyDir/a.jpg` 与任何规则都不
+/// 匹配，但内核解析后仍落在 `ReadOnlyDir` 内。对于跳过 companion mount、没有
+/// `MS_RDONLY` 兜底的系统代写进程，不折叠就等于只读保护与路径映射被绕过。
+///
+/// 绝对路径在根目录处的 `..` 直接丢弃，与内核一致；相对路径的前导 `..` 无法在
+/// 词法层解析，原样保留交由调用方按当前目录处理。符号链接不在词法层处理范围内。
+pub fn collapse_dot_segments(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => match segments.last() {
+                // 前一段可回退：抵消这一对。
+                Some(&last) if last != ".." => {
+                    segments.pop();
+                }
+                // 绝对路径已在根目录，`..` 无处可退，按内核语义丢弃。
+                _ if is_absolute => {}
+                // 相对路径的前导 `..` 保留。
+                _ => segments.push(".."),
+            },
+            other => segments.push(other),
+        }
+    }
+
+    let mut result = String::with_capacity(path.len());
+    if is_absolute {
+        result.push('/');
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            result.push('/');
+        }
+        result.push_str(segment);
+    }
+    result
+}
+
+/// 判断路径是否含需要折叠的 `.` 或 `..` 段。廉价预筛，避免在热路径上对绝大多数
+/// 不含点段的路径做逐段扫描。
+pub fn needs_dot_segment_collapse(path: &str) -> bool {
+    if !path.contains('.') {
+        return false;
+    }
+    has_unsafe_segments(path)
 }
 
 fn has_potential_storage_alias(path: &str) -> bool {

@@ -22,6 +22,7 @@ use crate::config::{SettingsHub, watcher};
 use crate::hook::stats::InterceptHub;
 use crate::monitor::AuditTrail;
 use crate::platform::{self, paths};
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const WRITER_ALLOWED_LOG_STEP: u64 = 256;
@@ -59,7 +60,14 @@ struct SystemWriterRedirectRequest<'a> {
 }
 
 fn normalize_request_path(pathname: &str) -> NormalizedRequestPath {
-    let raw_normalized = paths::normalize(pathname);
+    // 先折叠 . 与 .. 段：规则匹配必须在内核实际解析到的路径上进行，否则
+    // Pictures/../ReadOnlyDir 这类写法会绕过只读保护与路径映射。
+    let collapsed = if paths::needs_dot_segment_collapse(pathname) {
+        Cow::Owned(paths::collapse_dot_segments(pathname))
+    } else {
+        Cow::Borrowed(pathname)
+    };
+    let raw_normalized = paths::normalize(collapsed.as_ref());
     let is_data_media_input = paths::starts_with(&raw_normalized, "/data/media/");
     let path = if is_data_media_input {
         writer::data_media_to_storage_path(&raw_normalized)
