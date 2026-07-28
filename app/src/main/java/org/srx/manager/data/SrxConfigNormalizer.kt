@@ -7,10 +7,18 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.srx.manager.root.isSafePackageName
 import org.srx.manager.root.isSafeUserId
 
 internal object SrxConfigNormalizer {
+  /** 合并配置文件时使用的 JSON 实例，输出格式与 SrxRepository 的写入格式保持一致。 */
+  private val MergeJson = Json {
+    prettyPrint = true
+    encodeDefaults = true
+    explicitNulls = false
+  }
+
   private val LegacyDefaultMonitorOperations = listOf("open:read", "rename*", "unlink*", "delete*")
   private val LegacyFullDefaultMonitorOperations =
       listOf(
@@ -37,6 +45,28 @@ internal object SrxConfigNormalizer {
           autoEnableNewAppsTemplateId =
               config.autoEnableNewAppsTemplateId.trim().takeIf(::isSafeTemplateId).orEmpty(),
       )
+
+  /**
+   * 把待写入的 JSON 与磁盘上的原始 JSON 做顶层浅合并，保留 App 未覆盖的键。
+   *
+   * 读取配置时 `ignoreUnknownKeys` 会丢弃 App 不认识的键，写入时又整文件重建， 因此模块或 WebUI 新增的配置字段会在用户改任意一个开关后被静默清空并回落默认值。
+   *
+   * 只做顶层浅合并：嵌套对象（如 `users`）由 App 完整建模并整体负责，深合并反而会 让用户删除的条目无法真正删除。任一侧解析失败时按原样返回 [incoming]，
+   * 避免因为磁盘内容损坏而阻断正常保存。
+   */
+  fun mergeUnknownTopLevelKeys(incoming: String, existing: String): String {
+    if (existing.isBlank()) return incoming
+    return runCatching {
+          val incomingObject = MergeJson.parseToJsonElement(incoming).jsonObject
+          val existingObject = MergeJson.parseToJsonElement(existing).jsonObject
+          val preserved = existingObject.filterKeys { it !in incomingObject }
+          if (preserved.isEmpty()) {
+            return@runCatching incoming
+          }
+          MergeJson.encodeToString(JsonObject(incomingObject + preserved)) + "\n"
+        }
+        .getOrElse { incoming }
+  }
 
   fun normalizeAppConfig(config: AppConfig): AppConfig {
     return config.copy(

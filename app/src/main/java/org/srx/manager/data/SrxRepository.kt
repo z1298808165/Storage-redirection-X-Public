@@ -120,14 +120,18 @@ class SrxRepository(
 
   suspend fun writeFileMonitorFilters(filters: FileMonitorFilters): Boolean {
     val normalized = SrxConfigNormalizer.normalizeFileMonitorFilters(filters)
-    val ok = writeConfigFile(FileMonitorFiltersConfigPath, json.encodeToString(normalized) + "\n")
+    val ok =
+        writeMergedConfigFile(
+            FileMonitorFiltersConfigPath,
+            json.encodeToString(normalized) + "\n",
+        )
     if (ok) touchConfig()
     return ok
   }
 
   suspend fun writeGlobalConfig(config: GlobalConfig): Boolean {
     val ok =
-        writeConfigFile(
+        writeMergedConfigFile(
             GlobalConfigPath,
             json.encodeToString(SrxConfigNormalizer.normalizeGlobalConfig(config)) + "\n",
         )
@@ -146,7 +150,7 @@ class SrxRepository(
 
   suspend fun writeAppConfig(packageName: String, config: AppConfig): Boolean {
     if (!isSafePackageName(packageName)) return false
-    return writeConfigFile(
+    return writeMergedConfigFile(
         "$AppsDir/$packageName.json",
         json.encodeToString(SrxConfigNormalizer.normalizeAppConfig(config)) + "\n",
     )
@@ -558,6 +562,19 @@ class SrxRepository(
     val written = fileStore.writeConfig(path, content)
     if (written && path.startsWith("$AppsDir/")) invalidateConfiguredAppsCache()
     return written
+  }
+
+  /**
+   * 把序列化结果与磁盘上的原始 JSON 浅合并后再写回。
+   *
+   * 读取时 `ignoreUnknownKeys` 会丢弃 App 不认识的键，写入时又整文件重建， 因此模块或 WebUI 新增的配置字段会在用户改任意一个开关后被静默清空并回落默认值。
+   * 这里保留原文件中 App 未覆盖的顶层键，只覆盖本次实际序列化出的键。
+   *
+   * 只做顶层浅合并：嵌套对象（如 `users`）由 App 完整建模并整体负责， 深合并反而会让用户删除的条目无法真正删除。
+   */
+  private suspend fun writeMergedConfigFile(path: String, content: String): Boolean {
+    val existing = readFile(path)
+    return writeConfigFile(path, SrxConfigNormalizer.mergeUnknownTopLevelKeys(content, existing))
   }
 
   private suspend fun touchConfig() {
