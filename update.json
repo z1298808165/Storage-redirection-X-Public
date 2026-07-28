@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.85",
-    "tag": "ci-build-30319885798-3",
-    "title": "CI Build 1.2.59-ci.85",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30319885798-3",
+    "version": "1.2.59-ci.86",
+    "tag": "ci-build-30359005516-1",
+    "title": "CI Build 1.2.59-ci.86",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-30359005516-1",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30319885798-3/storage-redirect-x-manager-v1.2.59-ci.85.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30319885798-3/storage.redirect.x-v1.2.59-ci.85.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.85`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30315389268-1`\n- 当前提交：`6afdff5`\n\n## 模块更新\n\n### 注意事项\n- clippy 门禁扩至全目标并修复漏出告警。\n\n## App 更新\n\n### 注意事项\n- 删除三个零引用资源。\n\n## 其它更新\n\n### 注意事项\n- clippy 门禁扩至全目标并修复漏出告警。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30359005516-1/storage-redirect-x-manager-v1.2.59-ci.86.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-30359005516-1/storage.redirect.x-v1.2.59-ci.86.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.86`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-30319885798-3`\n- 当前提交：`12d8555`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复核心逻辑的一组问题：暂时恢复目录消失时的整树重建、按发送方限流监控与统计记录、目录删除与移动改为局部清理并注销 watch、区分 add_watch 失败原因并标记配额耗尽等。\n- 修复 FUSE、挂载和路径映射的一组问题：私有目录改用直连后端绕开 rename 失败、daemon 侧回退前卸载并回滚已挂载服务。\n- 修复媒体代写与系统存储链路相关问题：媒体缓存表改为逐条淘汰并限制驻留。\n- 修复配置解析与模板相关问题：解析失败保留上一次生效配置。\n- 修复重定向策略与调用方识别的一组问题：多用户路径改写只作用于前缀、hook 决策前折叠 . 与 .. 段。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n- 配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则。\n\n## App 更新\n\n### 修复了什么问题\n- 修复 WebUI/管理界面的一组问题：保存配置保留模块新增字段、导出读取 root 文件补超时与 stderr 消费。\n\n## 其它更新\n\n### 注意事项\n- 为监视树重建的提前返回补充可区分日志。\n- 补充文件监视链路专项诊断采集。\n- FUSE 通配场景改用挂载表判别性断言。"
   },
   "releases": []
 }
