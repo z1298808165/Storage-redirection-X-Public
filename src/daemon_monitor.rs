@@ -609,75 +609,6 @@ impl RegularAppMonitor {
         }
     }
 
-    /// 丢弃某个 watch 及其子树的节点记录。
-    ///
-    /// 用于内核已自动移除 watch 的场景（`IN_IGNORED`），因此只清理本地记录。
-    /// 子树按 `backend_dir` 路径前缀识别：`watch_nodes` 只按 wd 索引、不保存父子关系，
-    /// 而目录被删除时其子目录的 watch 也已失效，留着会让后续事件按陈旧路径处理。
-    ///
-    /// 关键约束：监视树由单个根递归展开，同一根下可有上百个节点。若被移除的正是监视
-    /// 根，按前缀匹配会把整棵树一并清空——此前的实现就因此在测试流「场景间删除并
-    /// 重建被监视目录」时把 watch 数从 84 清成 0 且不再重建，监视彻底失效。因此清理
-    /// 后一旦发现已无任何 watch，必须置位重建，交由下一轮按当前配置重新建树。
-    fn remove_watch_subtree(&mut self, wd: i32) {
-        let Some(nodes) = self.watch_nodes.remove(&wd) else {
-            return;
-        };
-        let removed_dirs: Vec<String> = nodes.iter().map(|node| node.backend_dir.clone()).collect();
-        self.watch_nodes.retain(|_, nodes| {
-            nodes.retain(|node| {
-                !removed_dirs
-                    .iter()
-                    .any(|removed| paths::is_child(&node.backend_dir, removed))
-            });
-            !nodes.is_empty()
-        });
-
-        if self.watch_nodes.is_empty() {
-            // 监视根消失（或最后一个节点被清理）：局部清理已无意义，必须重建。
-            self.needs_rebuild = true;
-            log::info!(
-                "daemon monitor watch tree emptied by ignored wd={}, rebuild scheduled",
-                wd
-            );
-        }
-    }
-
-    /// 主动移除某个 watch 及其子树，并向内核注销。
-    ///
-    /// 用于目录被移走的场景：watch 仍然有效，必须显式 `inotify_rm_watch`，否则内核
-    /// 既不发 `IN_IGNORED` 也不释放该 watch，配额与陈旧路径都会泄漏。
-    ///
-    /// 与 [`Self::remove_watch_subtree`] 同样受「被移走的可能正是监视根」约束，因此
-    /// 无条件置位重建：被移出监视范围的放行或只读根需要按当前配置重新登记。
-    fn detach_watch_subtree(&mut self, wd: i32) {
-        let stale_dirs: Vec<String> = self
-            .watch_nodes
-            .get(&wd)
-            .map(|nodes| nodes.iter().map(|node| node.backend_dir.clone()).collect())
-            .unwrap_or_default();
-
-        let mut detach_wds = vec![wd];
-        for (candidate_wd, nodes) in &self.watch_nodes {
-            if *candidate_wd == wd {
-                continue;
-            }
-            if nodes.iter().any(|node| {
-                stale_dirs
-                    .iter()
-                    .any(|stale| paths::is_child(&node.backend_dir, stale))
-            }) {
-                detach_wds.push(*candidate_wd);
-            }
-        }
-
-        for detach_wd in detach_wds {
-            inotify::remove_watch(self.fd, detach_wd);
-            self.watch_nodes.remove(&detach_wd);
-        }
-        self.needs_rebuild = true;
-    }
-
     fn mark_capacity_limited(&mut self) {
         if !self.capacity_limited {
             log::warn!("daemon monitor watch limit reached n={}", MAX_WATCHES);
@@ -707,20 +638,12 @@ impl RegularAppMonitor {
             return;
         }
         if inotify::is_watch_ignored(mask) {
-            // 内核已自动移除该 watch。优先只丢弃它及其子树记录，避免应用批量清理目录时
-            // 每一批删除都触发 reset() + 全树 read_dir + chown。
-            self.remove_watch_subtree(event.wd);
+            self.watch_nodes.remove(&event.wd);
+            self.needs_rebuild = true;
             return;
         }
-        if inotify::is_self_moved(mask) {
-            // 目录被移走后 watch 仍然有效，内核不会发 IN_IGNORED，节点里记录的
-            // backend_dir/display_dir 会变成陈旧路径，后续事件会按错误的显示路径做
-            // 属主修复与路径记录。必须显式向内核注销该 watch 及其子树。
-            self.detach_watch_subtree(event.wd);
-            return;
-        }
-        if inotify::is_self_deleted(mask) {
-            // 目录自身被删除。内核随后会补发 IN_IGNORED，届时在上面的分支做局部清理。
+        if inotify::is_self_removed(mask) {
+            self.needs_rebuild = true;
             return;
         }
         if !inotify::is_relevant_event(mask) {

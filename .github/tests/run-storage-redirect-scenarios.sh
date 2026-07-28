@@ -709,6 +709,9 @@ wait_file_monitor_log_line() {
   fi
   echo "monitor_log_timeout scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
   adb_su "tail -80 '$FILE_MONITOR_LOG_PATH' 2>/dev/null || true" | sed 's/^/monitor_log_tail: /'
+  # 在断言超时的当下立刻取内核 watch 数与监视日志。场景结束后再采集会受后续
+  # 场景的配置切换与重建影响，无法反映写入发生时监视是否真的存在。
+  capture_file_monitor_diagnostics 2>/dev/null | sed "s/^/monitor_timeout_probe scenario=${scenario}: /" || true
   return 1
 }
 
@@ -2067,8 +2070,19 @@ capture_file_monitor_diagnostics() {
   echo "===inotify_kernel_limits==="
   adb_su "for f in max_user_watches max_user_instances max_queued_events; do printf '%s=' \"\$f\"; cat \"/proc/sys/fs/inotify/\$f\" 2>/dev/null || echo unknown; done"
   echo
-  echo "===daemon_inotify_usage==="
-  adb_su "pid=\$(pidof srx_daemon 2>/dev/null | awk '{print \$1}'); if [ -n \"\$pid\" ]; then echo daemon_pid=\$pid; ls -l \"/proc/\$pid/fd\" 2>/dev/null | grep -c inotify || true; else echo daemon_not_running; fi"
+  # 直接从内核读每个 inotify fd 上的 watch 数量。
+  #
+  # fdinfo 中每个 watch 对应一行 "inotify wd:..."，这是内核事实，不依赖模块日志：
+  # 排查监视失效时，模块侧汇总日志可能因未执行到、日志级别或轮转而缺失，
+  # 而 watch 数为 0 与为 N 是可直接区分的硬证据。
+  echo "===daemon_inotify_watch_counts==="
+  # 注意 grep -c 在零匹配时退出码非 0，不能用 "|| echo 0" 兜底（会得到两行输出而
+  # 污染后续算术）。这里统一用 "| wc -l" 取计数，零匹配自然得到 0 且退出码为 0。
+  adb_su "pid=\$(pidof srx_daemon 2>/dev/null | awk '{print \$1}'); if [ -z \"\$pid\" ]; then echo daemon_not_running; else echo daemon_pid=\$pid; total=0; for fd in /proc/\$pid/fd/*; do [ -L \"\$fd\" ] || continue; case \"\$(readlink \"\$fd\" 2>/dev/null)\" in *inotify*) n=\$(grep '^inotify ' \"/proc/\$pid/fdinfo/\$(basename \"\$fd\")\" 2>/dev/null | wc -l | tr -d ' '); n=\${n:-0}; echo \"fd=\$(basename \"\$fd\") watches=\$n\"; total=\$((total+n));; esac; done; echo \"total_watches=\$total\"; fi"
+  echo
+  echo "===daemon_inotify_watched_paths==="
+  # 抽样列出被监视目录的 inode，便于确认监视的是否为预期目录树。
+  adb_su "pid=\$(pidof srx_daemon 2>/dev/null | awk '{print \$1}'); if [ -n \"\$pid\" ]; then for fd in /proc/\$pid/fd/*; do [ -L \"\$fd\" ] || continue; case \"\$(readlink \"\$fd\" 2>/dev/null)\" in *inotify*) grep '^inotify ' \"/proc/\$pid/fdinfo/\$(basename \"\$fd\")\" 2>/dev/null | head -12 || true;; esac; done; fi"
   echo
   echo "===monitor_collector_state==="
   adb_su "ls -l /data/adb/modules/storage.redirect.x/logs/ 2>/dev/null || true"
