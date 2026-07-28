@@ -186,23 +186,31 @@ fn resolve_storage_alias(path: &str) -> String {
     path.to_string()
 }
 
+/// 把主用户路径改写为指定用户的路径。
+///
+/// 只替换路径**前缀**：此前用的是整串 `replace`，会改写路径中间出现的同名字面量。
+/// 例如 user 10 访问 `/storage/emulated/0/Download/storage/emulated/0/note.txt`
+/// （备份类目录里确实会出现该字面量）时两处都被改写，得到的路径与真实文件不符，
+/// 后续只读与映射判定就作用在错误的对象上。
 pub fn resolve_user_path(path: &str, user_id: i32) -> String {
     if user_id == 0 {
         return path.to_string();
     }
 
-    let mut resolved = path.to_string();
-    let user_str = user_id.to_string();
-    resolved = resolved.replace(
-        "/storage/emulated/0/",
-        &format!("/storage/emulated/{}/", user_str),
-    );
-    if resolved == "/storage/emulated/0" {
-        resolved = format!("/storage/emulated/{}", user_str);
+    // 命中前缀时一次分配即可完成改写。
+    if let Some(rest) = path.strip_prefix("/storage/emulated/0")
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return format!("/storage/emulated/{}{}", user_id, rest);
     }
 
-    resolved = resolved.replace("/data/user/0/", &format!("/data/user/{}/", user_str));
-    resolved
+    if let Some(rest) = path.strip_prefix("/data/user/0")
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return format!("/data/user/{}{}", user_id, rest);
+    }
+
+    path.to_string()
 }
 
 // 替换 ${APP_DATA_DIR} / ${REDIRECT_TARGET} 占位符
