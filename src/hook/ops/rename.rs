@@ -377,7 +377,6 @@ fn deny_read_only_rename(
     flags: i32,
     read_only_path: &str,
 ) -> c_int {
-    runtime::set_read_only_errno();
     monitor::record_read_only_rename_result(
         hub,
         op_name,
@@ -394,6 +393,8 @@ fn deny_read_only_rename(
         read_only_path,
         flags
     );
+    // 审计与日志会执行系统调用，EROFS 必须在它们之后设置。
+    runtime::set_read_only_errno();
     -1
 }
 

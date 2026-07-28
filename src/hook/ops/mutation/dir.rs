@@ -104,7 +104,7 @@ pub unsafe extern "C" fn hooked_unlink(pathname: *const c_char) -> c_int {
                 crate::hook::caller::update_caller_package_for_current_thread(hub);
             }
 
-            handle_unlink_like(hub, "unlink", AT_FDCWD, pathname, -1, false, |call_path| {
+            handle_unlink_like(hub, "unlink", AT_FDCWD, pathname, -1, |call_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::unlink(call_path),
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn hooked_unlinkat(
                 crate::hook::caller::update_caller_package_for_current_thread(hub);
             }
 
-            handle_unlink_like(hub, "unlinkat", dirfd, pathname, flags, true, call_original)
+            handle_unlink_like(hub, "unlinkat", dirfd, pathname, flags, call_original)
         },
     )
 }
@@ -560,7 +560,6 @@ fn handle_unlink_like<F>(
     dirfd: c_int,
     pathname: *const c_char,
     flags: i32,
-    should_preserve_errno: bool,
     call_original: F,
 ) -> c_int
 where
@@ -591,9 +590,8 @@ where
             if result < 0 { current_errno } else { 0 },
             flags,
         );
-        if should_preserve_errno {
-            runtime::set_errno(current_errno);
-        }
+        // 审计会执行系统调用，必须恢复原函数调用后的 errno。
+        runtime::set_errno(current_errno);
         return result;
     }
 
@@ -612,9 +610,6 @@ where
             flags,
             &redirect_result.new_path,
         );
-        if should_preserve_errno {
-            runtime::set_read_only_errno();
-        }
         return result;
     }
 
@@ -658,8 +653,7 @@ where
             flags,
         );
     }
-    if should_preserve_errno {
-        runtime::set_errno(current_errno);
-    }
+    // 审计与日志会执行系统调用，必须恢复原函数调用后的 errno。
+    runtime::set_errno(current_errno);
     result
 }

@@ -320,7 +320,6 @@ pub(super) fn deny_read_only_mkdir(
     path: &str,
     read_only_path: &str,
 ) -> c_int {
-    runtime::set_read_only_errno();
     monitor::record_read_only_mkdir_result(hub, op_name, path, read_only_path);
     log::debug!(
         "readonly deny op={} path={} read_only_path={}",
@@ -328,6 +327,8 @@ pub(super) fn deny_read_only_mkdir(
         path,
         read_only_path
     );
+    // 审计与日志会执行系统调用，EROFS 必须在它们之后设置。
+    runtime::set_read_only_errno();
     -1
 }
 
@@ -338,7 +339,6 @@ pub(super) fn deny_read_only_unlink(
     flags: i32,
     read_only_path: &str,
 ) -> c_int {
-    runtime::set_read_only_errno();
     monitor::record_read_only_unlink_result(hub, op_name, path, flags, read_only_path);
     log::debug!(
         "readonly deny op={} path={} read_only_path={} flags=0x{:x}",
@@ -347,6 +347,8 @@ pub(super) fn deny_read_only_unlink(
         read_only_path,
         flags
     );
+    // 审计与日志会执行系统调用，EROFS 必须在它们之后设置。
+    runtime::set_read_only_errno();
     -1
 }
 
@@ -362,7 +364,6 @@ pub(super) fn deny_read_only_single_path_if_needed(
     if !redirect_result.is_denied() {
         return false;
     }
-    runtime::set_read_only_errno();
     let read_only_tail = read_only_extra_tail(path, &redirect_result.new_path, extra_tail);
     monitor::record_read_only_path_operation_result(
         hub,
@@ -377,6 +378,8 @@ pub(super) fn deny_read_only_single_path_if_needed(
         path,
         redirect_result.new_path
     );
+    // 审计与日志会执行系统调用，EROFS 必须在它们之后设置。
+    runtime::set_read_only_errno();
     true
 }
 

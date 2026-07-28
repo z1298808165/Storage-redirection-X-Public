@@ -473,6 +473,9 @@ where
             error_no,
         },
     );
+    // 审计与日志会执行系统调用，必须把 errno 恢复成原函数调用后的值，
+    // 否则调用方读到的是 hook 内部产生的无关 errno。
+    runtime::set_errno(error_no);
     result
 }
 
@@ -880,7 +883,6 @@ fn deny_read_only_open(
     flags: c_int,
     read_only_path: &str,
 ) -> c_int {
-    runtime::set_read_only_errno();
     monitor::record_read_only_open_result(hub, op_name, flags, path, path, read_only_path);
     log::debug!(
         "readonly deny op={} path={} read_only_path={} flags=0x{:x}",
@@ -889,6 +891,8 @@ fn deny_read_only_open(
         read_only_path,
         flags
     );
+    // 审计与日志会执行系统调用，只读拒绝的 EROFS 必须在它们之后设置。
+    runtime::set_read_only_errno();
     -1
 }
 
