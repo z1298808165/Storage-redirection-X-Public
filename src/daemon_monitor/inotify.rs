@@ -40,10 +40,36 @@ pub(super) fn read_into(fd: i32, buffer: &mut [u8]) -> isize {
     unsafe { read(fd, buffer.as_mut_ptr() as *mut c_void, buffer.len()) }
 }
 
-pub(super) fn add_watch(fd: i32, path: &str) -> Option<i32> {
-    let c_path = cstring_path(path)?;
+/// `inotify_add_watch` 失败原因。
+///
+/// 必须区分这几类：内核 watch 配额耗尽（`max_user_watches`，与模块内部的
+/// `MAX_WATCHES` 无关）需要标记容量受限并告警；目录不存在属于正常竞态，交由
+/// missing 重试处理；其余 errno 需要限频告警而不是静默跳过。
+pub(super) enum AddWatchError {
+    /// 内核 watch 配额耗尽或内存不足。
+    Capacity(i32),
+    /// 目标目录不存在或已被删除。
+    Missing,
+    /// 路径含 NUL 等无法构造 C 字符串的情况。
+    InvalidPath,
+    /// 其它 errno。
+    Other(i32),
+}
+
+pub(super) fn add_watch(fd: i32, path: &str) -> Result<i32, AddWatchError> {
+    let Some(c_path) = cstring_path(path) else {
+        return Err(AddWatchError::InvalidPath);
+    };
     let wd = unsafe { inotify_add_watch(fd, c_path.as_ptr(), EVENT_MASK) };
-    if wd < 0 { None } else { Some(wd) }
+    if wd >= 0 {
+        return Ok(wd);
+    }
+    let errno = crate::platform::errno::last();
+    Err(match errno {
+        libc::ENOSPC | libc::ENOMEM => AddWatchError::Capacity(errno),
+        libc::ENOENT => AddWatchError::Missing,
+        other => AddWatchError::Other(other),
+    })
 }
 
 pub(super) fn event_len(event: &inotify_event) -> usize {
@@ -114,3 +140,4 @@ pub(super) fn cstring_path(path: &str) -> Option<CString> {
 }
 
 pub(super) use crate::platform::errno::last as last_errno;
+pub(super) use crate::platform::errno::text as errno_text;

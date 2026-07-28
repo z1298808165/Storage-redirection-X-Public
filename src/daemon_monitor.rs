@@ -68,6 +68,8 @@ pub struct RegularAppMonitor {
     /// inotify 队列溢出后待执行的一次全量补偿扫描。
     overflow_resync: bool,
     last_rebuild_ms: i64,
+    /// `inotify_add_watch` 非预期 errno 的累计次数，用于按 2 的幂限频告警。
+    add_watch_error_count: u32,
 }
 
 impl RegularAppMonitor {
@@ -84,6 +86,7 @@ impl RegularAppMonitor {
             needs_rebuild: true,
             overflow_resync: false,
             last_rebuild_ms: 0,
+            add_watch_error_count: 0,
         }
     }
 
@@ -478,8 +481,12 @@ impl RegularAppMonitor {
     }
 
     fn add_watch_node(&mut self, node: &WatchNode) -> bool {
-        let Some(wd) = inotify::add_watch(self.fd, &node.backend_dir) else {
-            return false;
+        let wd = match inotify::add_watch(self.fd, &node.backend_dir) {
+            Ok(wd) => wd,
+            Err(error) => {
+                self.note_add_watch_error(node, error);
+                return false;
+            }
         };
 
         let nodes = self.watch_nodes.entry(wd).or_default();
@@ -487,6 +494,45 @@ impl RegularAppMonitor {
             nodes.push(node.clone());
         }
         true
+    }
+
+    /// 记录 `inotify_add_watch` 失败原因。
+    ///
+    /// 内核 watch 配额耗尽必须置位 `capacity_limited`：否则深目录场景下每个子目录都
+    /// 失败却被当作"无需递归"静默跳过，日志里只看到一个远小于 MAX_WATCHES 的计数，
+    /// 无法与"目录不存在"区分。目录不存在属于正常竞态，由 missing 重试路径处理。
+    fn note_add_watch_error(&mut self, node: &WatchNode, error: inotify::AddWatchError) {
+        match error {
+            inotify::AddWatchError::Capacity(errno) => {
+                if !self.capacity_limited {
+                    log::warn!(
+                        "daemon monitor kernel watch quota exhausted errno={} {} dir={}; \
+                         检查 /proc/sys/fs/inotify/max_user_watches",
+                        errno,
+                        inotify::errno_text(errno),
+                        node.backend_dir
+                    );
+                }
+                self.capacity_limited = true;
+            }
+            inotify::AddWatchError::Missing => {}
+            inotify::AddWatchError::InvalidPath => {
+                log::warn!("daemon monitor watch path invalid dir={}", node.backend_dir);
+            }
+            inotify::AddWatchError::Other(errno) => {
+                // 限频：深目录树下同一 errno 可能连续出现上千次。
+                self.add_watch_error_count = self.add_watch_error_count.saturating_add(1);
+                if self.add_watch_error_count.is_power_of_two() {
+                    log::warn!(
+                        "daemon monitor add_watch failed errno={} {} dir={} count={}",
+                        errno,
+                        inotify::errno_text(errno),
+                        node.backend_dir,
+                        self.add_watch_error_count
+                    );
+                }
+            }
+        }
     }
 
     fn mark_capacity_limited(&mut self) {
