@@ -2058,7 +2058,7 @@ print_diagnostics() {
 # 便于区分「配额耗尽」与「监视根本没建立」。
 capture_file_monitor_diagnostics() {
   echo "===monitor_log_lines==="
-  adb_su "grep -aE 'daemon monitor|watch quota|add_watch failed|rm_watch|drain budget|queue overflow|resync' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -200 || true"
+  adb_su "grep -aE 'daemon monitor|watch quota|add_watch failed|rm_watch|drain budget|queue overflow|resync|monitor skip|monitor unchanged|file monitor' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -200 || true"
   echo
   echo "===file_monitor_log_size==="
   adb_su "ls -l /data/adb/modules/storage.redirect.x/logs/file_monitor.log 2>/dev/null || echo missing"

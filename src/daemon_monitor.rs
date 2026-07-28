@@ -85,6 +85,8 @@ pub struct RegularAppMonitor {
     add_watch_error_count: u32,
     /// 上次登记溢出补偿全量扫描的时间，用于限流。
     last_overflow_resync_ms: i64,
+    /// 配置未变化而直接沿用现有监视树的次数，用于限频输出排查日志。
+    unchanged_reconfigure_count: u32,
 }
 
 impl RegularAppMonitor {
@@ -103,6 +105,7 @@ impl RegularAppMonitor {
             last_rebuild_ms: 0,
             add_watch_error_count: 0,
             last_overflow_resync_ms: 0,
+            unchanged_reconfigure_count: 0,
         }
     }
 
@@ -122,6 +125,19 @@ impl RegularAppMonitor {
             if self.should_retry_missing_roots() {
                 self.retry_missing_watch_roots();
             }
+            // 排查用：按 2 的幂限频记录一次「配置未变化、沿用现有监视树」。
+            // 汇总日志缺失时需要区分两种情形：reconfigure 每轮都在走这条捷径
+            // （说明监视树是早前建立的、或从未建立），还是根本没被调用。
+            self.unchanged_reconfigure_count = self.unchanged_reconfigure_count.saturating_add(1);
+            if self.unchanged_reconfigure_count.is_power_of_two() {
+                log::info!(
+                    "daemon monitor unchanged n={} watches={} missing={} version={:x}",
+                    self.unchanged_reconfigure_count,
+                    self.watch_nodes.len(),
+                    self.missing_roots,
+                    self.config_version
+                );
+            }
             return;
         }
 
@@ -137,10 +153,22 @@ impl RegularAppMonitor {
 
         let snapshot = config.get_daemon_monitor_config_snapshot();
         if snapshot.app_specs.is_empty() {
+            // 排查用：监视树未建立时必须能区分「没有可监视的应用配置」与其它原因，
+            // 否则汇总日志缺失时无法判断是提前返回还是根本没被调用。
+            log::info!(
+                "daemon monitor skip reason=no_app_specs file_monitor={} version={:x}",
+                snapshot.is_file_monitor_enabled,
+                version
+            );
             return;
         }
         if !self.ensure_fd() {
             self.needs_rebuild = true;
+            log::warn!(
+                "daemon monitor skip reason=inotify_fd_unavailable specs={} version={:x}",
+                snapshot.app_specs.len(),
+                version
+            );
             return;
         }
 
