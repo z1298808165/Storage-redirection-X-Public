@@ -472,6 +472,18 @@ fn apply_mount_namespace_fallback(planner: &mut MountPlanner, request: &MountReq
     // Scoped FUSE 是优先采用的可记录只读路径。当已挂载的真实存储 FUSE 锚点
     // 能覆盖只读映射时，保留文件监视，使 MediaProvider/FUSE 仍可生成拒绝记录。
     // 否则使用强制只读绑定，避免写入被静默放行。
+    // 主方案已经装好的 bind/overlay 必须先卸载。降级路径会对同一批目标重新执行挂载，
+    // 若保留旧挂载会在同一目标上再叠一层，导致挂载栈重复、卸载顺序错乱。
+    // 配置热重载触发的降级会走到这里，因此这一步不能省。
+    let detached = planner.unmount_recorded_targets();
+    if detached > 0 {
+        log::info!(
+            "daemon hybrid fuse namespace fallback rollback count={} pid={} pkg={}",
+            detached,
+            request.pid,
+            request.package_name
+        );
+    }
     let can_record_fallback = request.is_file_monitor_enabled
         && planner.can_record_read_only_mapping_denials(
             &request.path_mappings,
@@ -517,14 +529,37 @@ fn start_scoped_fuse_services(
         match start_fuse_service_for_root(request, root, real_root_override.clone()) {
             Some(state) => states.push(state),
             None => {
-                for state in &states {
-                    terminate_fuse_child(state.child);
-                }
+                rollback_scoped_fuse_services(&states);
                 return None;
             }
         }
     }
     Some(states)
+}
+
+/// 批量启动部分失败时回滚已成功的 FUSE 服务。
+///
+/// 已成功的服务此时已经完成 FUSE mount，只终止子进程会把挂载点留在目标 mount
+/// namespace 里变成死挂载，后续访问返回 ENOTCONN 且没有任何路径会再清理它。
+/// 因此必须按启动的逆序先卸载挂载点，再终止对应子进程。
+fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
+    for state in states.iter().rev() {
+        if let Ok(c_target) = CString::new(state.target.as_str()) {
+            // SAFETY: c_target 是以 NUL 结尾的合法路径，且在本次调用期间保持存活。
+            if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } != 0 {
+                let errno = last_errno();
+                if errno != libc::EINVAL && errno != libc::ENOENT {
+                    log::warn!(
+                        "daemon fuse rollback umount failed target={} errno={} {}",
+                        state.target,
+                        errno,
+                        errno_text(errno)
+                    );
+                }
+            }
+        }
+        terminate_fuse_child(state.child);
+    }
 }
 
 fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
