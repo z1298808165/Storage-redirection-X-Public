@@ -1390,6 +1390,10 @@ function Invoke-StandardScenario {
         2 {
             $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok
             $mediaFile = "srt_mediastore_sandbox_only.txt"
+            # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，必须先确认
+            # MediaProvider 的 Java hook 已就绪；hook 未安装时 MediaProvider 会走
+            # lower FS 直接写入公共路径，落点校验失败。与 bash 侧保持一致。
+            $ok = (Restart-MediaProviderWithHookReady "scenario-$Scenario-mediastore") -and $ok
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok

@@ -2118,6 +2118,12 @@ run_standard_scenario() {
   fi
   if [ "$scenario" = "2" ]; then
     local media_file="srt_mediastore_sandbox_only.txt"
+    # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，因此必须先确认
+    # MediaProvider 的 Java hook 已就绪。此前直接沿用上一场景遗留的进程状态：
+    # hook 尚未安装时 MediaProvider 会走 lower FS 直接写入公共路径，落点校验失败。
+    # Android 15（SDK 35）上实测复现——通过轮与失败轮的创建耗时分别为 1559ms 与
+    # 711ms，后者即未经 hook 的直写。
+    restart_media_provider_with_hook_ready "scenario-${scenario}-mediastore" || return 1
     run_service_case "$scenario" "mediastore-sandbox-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
       check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
