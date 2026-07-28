@@ -16,6 +16,8 @@ const RECONCILE_INTERVAL_MS: u64 = 1000;
 const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
 const FILE_MONITOR_POLL_MS: u64 = 100;
+/// 降级路径单轮最多连续排空的次数，避免挤占同一循环内的 reconcile。
+const FALLBACK_DRAIN_ROUNDS: usize = 4;
 const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
@@ -180,7 +182,13 @@ pub fn main_entry() -> i32 {
             last_version = current;
         }
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {
-            file_monitor.drain_events();
+            // 无独立监视线程的降级路径：本循环还要承担 reconcile，因此不无限排空，
+            // 但也不能只读一轮就睡 RECONCILE_INTERVAL_MS，否则突发写入会大量积压。
+            for _ in 0..FALLBACK_DRAIN_ROUNDS {
+                if !file_monitor.drain_events() {
+                    break;
+                }
+            }
         }
         round = round.saturating_add(1);
         thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
@@ -216,8 +224,11 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                         .store(requested_rebuild, Ordering::Release);
                 }
                 thread_sync.notify_progress();
-                file_monitor.drain_events();
-                thread_sync.wait_new_request(Duration::from_millis(FILE_MONITOR_POLL_MS));
+                // 达到单轮预算时队列里仍有事件，立即进入下一轮继续排空，不等轮询间隔，
+                // 避免把"防止饿死重建"变成"事件延迟一个周期"。
+                if !file_monitor.drain_events() {
+                    thread_sync.wait_new_request(Duration::from_millis(FILE_MONITOR_POLL_MS));
+                }
             }
             log::info!("daemon file monitor stop reason=runtime_disabled");
         });

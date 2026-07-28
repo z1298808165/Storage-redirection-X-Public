@@ -25,7 +25,20 @@ const DUPLICATE_EVENT_WINDOW_MS: i64 = 1500;
 const MISSING_ROOT_RETRY_MS: i64 = 1000;
 const MAX_RECENT_EVENTS: usize = 512;
 const MAX_WATCHES: usize = 8192;
+/// 单轮 `drain_events` 最多处理的事件数。
+///
+/// 事件掩码包含 `IN_MODIFY`，持续写入会按写调用产生事件。若一直读到 EAGAIN 才返回，
+/// 监视线程会长时间停在排空循环内，使配置重建、溢出补偿和版本推进被无限推迟。
+/// 达到预算即返回，让调用方有机会处理重建，剩余事件留在内核队列下一轮继续读。
+const MAX_EVENTS_PER_DRAIN: usize = 4096;
+/// 两次溢出补偿全量扫描之间的最小间隔。
+///
+/// 溢出多由写入风暴引起，而补偿扫描要遍历全树并做 owner 修复。不限流的话风暴期间
+/// 会反复触发全扫，反而延长处理时间、加剧溢出。
+const OVERFLOW_RESYNC_MIN_INTERVAL_MS: i64 = 30_000;
 const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
+/// 递归展开监视树时最多访问的目录数，与 [`MAX_PUBLIC_OWNER_REPAIR_DIRS`] 对齐。
+const MAX_EXISTING_TREE_REPAIR_DIRS: usize = 32768;
 const PUBLIC_OWNER_EXISTING_WATCH_DEPTH: usize = 2;
 
 #[derive(Clone)]
@@ -70,6 +83,8 @@ pub struct RegularAppMonitor {
     last_rebuild_ms: i64,
     /// `inotify_add_watch` 非预期 errno 的累计次数，用于按 2 的幂限频告警。
     add_watch_error_count: u32,
+    /// 上次登记溢出补偿全量扫描的时间，用于限流。
+    last_overflow_resync_ms: i64,
 }
 
 impl RegularAppMonitor {
@@ -87,6 +102,7 @@ impl RegularAppMonitor {
             overflow_resync: false,
             last_rebuild_ms: 0,
             add_watch_error_count: 0,
+            last_overflow_resync_ms: 0,
         }
     }
 
@@ -111,7 +127,9 @@ impl RegularAppMonitor {
 
         // 缺失的根目录可能触发周期性重建。关闭旧 inotify fd 前先排空队列事件，
         // 避免重建时丢失上一轮循环中观测到的创建事件。
-        self.drain_events();
+        // 这里紧接着就要关闭 fd，未读完的事件会随 fd 一起丢弃，因此忽略单轮预算继续读完；
+        // 饿死重建的风险不存在，本调用本身就发生在重建流程内。
+        while self.drain_events() {}
         self.reset();
         self.config_version = version;
         self.last_rebuild_ms = paths::monotonic_ms();
@@ -244,15 +262,28 @@ impl RegularAppMonitor {
         }
     }
 
-    pub fn drain_events(&mut self) {
+    /// 排空 inotify 事件队列。
+    ///
+    /// 返回 `true` 表示因达到单轮预算而提前返回、内核队列中仍有事件待处理，调用方
+    /// 应立即再次调用而不要先等待轮询间隔，否则剩余事件会被推迟一个轮询周期。
+    pub fn drain_events(&mut self) -> bool {
         if self.fd < 0 {
-            return;
+            return false;
         }
 
         // inotify_event 需要 4 字节对齐；内核保证每个事件总长度是 sizeof(int) 的倍数，
         // 因此缓冲区起始 4 字节对齐后，后续每个事件也满足对齐要求。
         let mut buffer = inotify::InotifyBuf::<{ 16 * 1024 }>::new();
+        let mut handled = 0usize;
         loop {
+            if handled >= MAX_EVENTS_PER_DRAIN {
+                // 队列里可能仍有事件，但必须让出控制权，让调用方有机会处理重建。
+                log::info!(
+                    "daemon monitor drain budget reached n={}, resume next round",
+                    handled
+                );
+                return true;
+            }
             let n = inotify::read_into(self.fd, &mut buffer.0);
             if n < 0 {
                 let errno = inotify::last_errno();
@@ -281,8 +312,10 @@ impl RegularAppMonitor {
                 }
                 self.handle_event(event);
                 offset += event_len;
+                handled = handled.saturating_add(1);
             }
         }
+        false
     }
 
     fn ensure_fd(&mut self) -> bool {
@@ -358,9 +391,22 @@ impl RegularAppMonitor {
         recurse_existing_tree: bool,
     ) {
         let mut stack = vec![(root, 0usize)];
+        // 遍历预算：MAX_WATCHES 只约束目录 watch 数量，而 repair_existing_files 打开时
+        // 每个文件都会做一次 owner 修复，没有上限。溢出补偿会对所有来源打开该开关，
+        // 大目录下这一步可能长时间占住监视线程，因此与 public_owner 路径一样设预算。
+        let mut visited_dirs = 0usize;
         while let Some((node, depth)) = stack.pop() {
             if self.watch_nodes.len() >= MAX_WATCHES {
                 self.mark_capacity_limited();
+                break;
+            }
+            visited_dirs = visited_dirs.saturating_add(1);
+            if visited_dirs > MAX_EXISTING_TREE_REPAIR_DIRS {
+                log::warn!(
+                    "daemon monitor existing tree repair budget reached dirs={} root={}",
+                    visited_dirs,
+                    node.backend_dir
+                );
                 break;
             }
 
@@ -546,10 +592,21 @@ impl RegularAppMonitor {
         let mask = event.mask;
         if inotify::is_queue_overflow(mask) {
             // 溢出说明内核已经丢弃了数量未知的事件，只重建监视集无法补回这批事件对应的
-            // owner 修复与路径记录，这里额外登记一次全量补偿扫描。
+            // owner 修复与路径记录，因此需要一次全量补偿扫描。
             self.needs_rebuild = true;
-            self.overflow_resync = true;
-            log::warn!("daemon monitor queue overflow");
+            // 但补偿扫描本身会遍历全树并做 owner 修复，而溢出通常正是写入风暴引起的：
+            // 风暴期间反复执行全树扫描会拉长处理时间、导致继续溢出，形成
+            // 「溢出→全扫→再溢出」的放大循环。因此对补偿扫描限流。
+            let now_ms = paths::monotonic_ms();
+            if now_ms.saturating_sub(self.last_overflow_resync_ms)
+                >= OVERFLOW_RESYNC_MIN_INTERVAL_MS
+            {
+                self.overflow_resync = true;
+                self.last_overflow_resync_ms = now_ms;
+                log::warn!("daemon monitor queue overflow, full resync scheduled");
+            } else {
+                log::warn!("daemon monitor queue overflow, resync throttled");
+            }
             return;
         }
         if inotify::is_watch_ignored(mask) {
