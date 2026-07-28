@@ -104,8 +104,40 @@ pub(super) fn is_watch_ignored(mask: u32) -> bool {
     (mask & IN_IGNORED) != 0
 }
 
-pub(super) fn is_self_removed(mask: u32) -> bool {
-    (mask & (IN_DELETE_SELF | IN_MOVE_SELF)) != 0
+pub(super) fn is_self_deleted(mask: u32) -> bool {
+    (mask & IN_DELETE_SELF) != 0
+}
+
+/// 被监视目录自身被重命名或移动。
+///
+/// 与删除不同，移动之后 watch 仍然有效，内核不会补发 `IN_IGNORED`，
+/// 因此必须由调用方主动注销，否则记录的路径会一直是旧路径。
+pub(super) fn is_self_moved(mask: u32) -> bool {
+    (mask & IN_MOVE_SELF) != 0
+}
+
+/// 向内核注销一个 watch。
+///
+/// 忽略 EINVAL：watch 可能已被内核自动移除，此时重复注销不是错误。
+pub(super) fn remove_watch(fd: i32, wd: i32) {
+    if fd < 0 {
+        return;
+    }
+    // Android 的 inotify_rm_watch 第二参数是 u32；wd 来自内核返回的非负值，
+    // 直接用 as 转换，不走可能 panic 的受检转换，避免异常输入导致 daemon 崩溃。
+    // SAFETY: fd 已在上方判非负，wd 是本模块 add_watch 从内核取得并记录的描述符；
+    // inotify_rm_watch 不接触本进程内存，非法 fd/wd 只会返回 EINVAL 而非未定义行为。
+    if unsafe { libc::inotify_rm_watch(fd, wd as u32) } != 0 {
+        let errno = last_errno();
+        if errno != libc::EINVAL {
+            log::warn!(
+                "daemon monitor inotify_rm_watch failed wd={} errno={} {}",
+                wd,
+                errno,
+                errno_text(errno)
+            );
+        }
+    }
 }
 
 pub(super) fn is_relevant_event(mask: u32) -> bool {
