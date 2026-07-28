@@ -60,6 +60,12 @@ pub(super) struct RedirectPolicy {
     pub(super) storage_root: String,
     pub(super) mount_rel: String,
     pub(super) real_root: PathBuf,
+    // 应用自有私有目录（Android/data|media|obb）专用的真实后端根，固定指向 /data/media/<user>。
+    // real_root 通常是 real_storage anchor，而该 anchor 优先 bind 到 /storage/emulated/<user>，
+    // 也就是叠在系统 MediaProvider FUSE 之上；MediaProvider 对 Android/media/<pkg> 下的文件
+    // rename 会返回 ERANGE，导致依赖“写临时文件再改名”原子替换的应用安装或保存失败。
+    // 私有目录本身不进 MediaStore 索引，直连 f2fs 既能绕开该缺陷又不损失系统语义。
+    pub(super) private_real_root: PathBuf,
     pub(super) redirect_root: PathBuf,
     pub(super) rule_prefixes: Vec<RulePrefix>,
     pub(super) allowed_real_paths: Vec<String>,
@@ -133,6 +139,7 @@ impl RedirectPolicy {
             storage_root,
             mount_rel,
             real_root,
+            private_real_root: PathBuf::from(paths::data_media_user_root_for_user(user_id)),
             redirect_root: PathBuf::from(redirect_root_string),
             rule_prefixes,
             allowed_real_paths: super::normalize_rule_list(config.allowed_real_paths, user_id),
@@ -281,10 +288,43 @@ impl RedirectPolicy {
 
     pub(super) fn real_backend_for_storage_rel(&self, rel: &str) -> PathBuf {
         if rel.is_empty() {
-            self.real_root.clone()
-        } else {
-            self.real_root.join(rel)
+            return self.real_root.clone();
         }
+        self.real_backend_root_for_storage_rel(rel).join(rel)
+    }
+
+    // 按相对路径选择真实后端根：应用自有私有目录走 private_real_root 直连 f2fs，
+    // 其余共享公共目录仍走 real_root 以保留 MediaStore 索引与 pending 语义。
+    //
+    // 分流边界必须覆盖 Android 这一层本身，而不是只覆盖 Android/data|media|obb 及更深。
+    // readdir 会用字符串相等比较枚举项路径与子项解析出的后端路径，父子异根时该子项会被
+    // 静默丢弃：若 Android 归 real_root 而 Android/media 归 private_real_root，列举
+    // Android 时三个私有子目录都会消失。同理也不能额外要求 <pkg> 段。
+    //
+    // 分流只能放在这个唯一的物理拼接点上：real_backend_for_rel、backend_path_for_storage
+    // 以及 readdir 的两处直接调用都汇聚到此，放在更上层会漏掉 readdir 一侧。
+    fn real_backend_root_for_storage_rel(&self, rel: &str) -> &PathBuf {
+        if is_android_private_storage_subtree_relative_path(rel) {
+            &self.private_real_root
+        } else {
+            &self.real_root
+        }
+    }
+
+    // 判断某个枚举得到的后端路径是否是该 rel 在真实侧的合法后端。
+    // 真实后端根按私有子树分流后，同一父目录下的子项可能落在 real_root 或
+    // private_real_root，readdir 不能再用单一路径做相等比较：列举存储根时枚举源是
+    // real_root，而子项 Android 解析到 private_real_root，纯相等判断会把它丢弃。
+    pub(super) fn is_real_backend_path_for_storage_rel(&self, rel: &str, path: &Path) -> bool {
+        [&self.real_root, &self.private_real_root]
+            .iter()
+            .any(|root| {
+                if rel.is_empty() {
+                    path == root.as_path()
+                } else {
+                    path == root.join(rel)
+                }
+            })
     }
 
     pub(super) fn redirect_backend_for_storage_rel(&self, rel: &str) -> PathBuf {
@@ -772,4 +812,18 @@ fn is_android_app_private_relative_path(relative: &str) -> bool {
         return false;
     }
     matches!(parts.next(), Some("data" | "media" | "obb"))
+}
+
+// 判断相对路径是否属于走 private_real_root 的私有子树，包含 Android 目录节点自身。
+// 覆盖 Android 这一层是为了让它与 Android/data|media|obb 同根，避免 readdir 因父子
+// 异根而丢弃这三个子目录；Android 下的其余条目同源同分区，改根不影响可见性。
+fn is_android_private_storage_subtree_relative_path(relative: &str) -> bool {
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    if parts.next() != Some("Android") {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(second) => matches!(second, "data" | "media" | "obb"),
+    }
 }

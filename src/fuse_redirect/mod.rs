@@ -1261,7 +1261,18 @@ fn append_backend_dir_entries(
         else {
             continue;
         };
-        if !paths_eq(&item.path(), &child_backend.path) && !policy.is_virtual_dir(&child_rel) {
+        // 该子项按策略解析出的后端必须就是当前枚举源这一侧，否则跳过，避免真实侧与
+        // 重定向侧互相收录对方的条目。真实后端根按私有子树分流后，同一父目录下的子项
+        // 可能落在两个真实根之一，故真实侧改用按 rel 判定而非单一路径相等比较。
+        // 重定向根虽然位于 private_real_root 之下，但枚举项形如
+        // <redirect_root>/<rel>，与真实侧的 <真实根>/<rel> 只有在 rel 自我嵌套时才
+        // 可能相等，因此这条放宽不会让重定向侧条目被误判为真实侧后端。
+        let is_expected_backend = paths_eq(&item.path(), &child_backend.path)
+            || policy.is_real_backend_path_for_storage_rel(
+                &policy.full_storage_rel(&child_rel),
+                &item.path(),
+            );
+        if !is_expected_backend && !policy.is_virtual_dir(&child_rel) {
             continue;
         }
         let kind = item
