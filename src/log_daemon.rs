@@ -4,6 +4,7 @@ use libc::{
     close, cmsghdr, iovec, msghdr, poll, pollfd, recvmsg, sendto, setsockopt, sockaddr,
     sockaddr_un, socket, ucred,
 };
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::mem;
@@ -27,6 +28,17 @@ const FLUSH_INTERVAL_MS: i32 = 2_000;
 /// 接收循环长期不返回、迟迟不执行 flush 与统计落盘。
 const MAX_DRAIN_PER_ROUND: usize = 512;
 const SOCKET_RECV_BUFFER_BYTES: libc::c_int = 512 * 1024;
+/// 单个发送方 uid 在一个限流窗口内允许写入的监控/统计记录条数。
+///
+/// 监控记录由被 hook 的应用进程和 FUSE daemon 发出，发送方是任意应用 uid，
+/// 无法按 uid 做身份校验（对比 Control 命令只允许 root）。因此改为限流：
+/// 抽象命名空间套接字没有文件权限门槛，任何能连上的进程都可写入，若不限流
+/// 就能用几 MB 垃圾把 1 MiB 上限的真实监控记录整体挤出轮转窗口。
+const MAX_RECORDS_PER_UID_WINDOW: u32 = 4096;
+/// 限流窗口长度。窗口结束后计数清零。
+const RATE_LIMIT_WINDOW_MS: i64 = 10_000;
+/// 限流表最多跟踪的发送方数量，防止伪造 uid 时表本身无界增长。
+const MAX_TRACKED_SENDERS: usize = 256;
 
 const TAG_FILE_MONITOR: &str = "FileMonitorOp";
 const TAG_STATS: &str = "Stats";
@@ -259,12 +271,21 @@ fn socket_addr() -> io::Result<(sockaddr_un, libc::socklen_t)> {
     ))
 }
 
+/// 单个发送方在当前限流窗口内的计数。
+struct SenderQuota {
+    window_started_ms: i64,
+    count: u32,
+    /// 本窗口内已丢弃的条数，窗口结束时汇总告警一次。
+    dropped: u32,
+}
+
 struct LogState {
     running: RollingLog,
     monitor: RollingLog,
     runtime_activations: u64,
     stats_dirty: bool,
     last_flush: Instant,
+    sender_quotas: HashMap<u32, SenderQuota>,
 }
 
 impl LogState {
@@ -275,7 +296,57 @@ impl LogState {
             runtime_activations: read_runtime_activations(),
             stats_dirty: false,
             last_flush: Instant::now(),
+            sender_quotas: HashMap::new(),
         })
+    }
+
+    /// 判断该发送方在当前窗口内是否还有配额。
+    ///
+    /// 凭据缺失（`None`）时不限流：内核在 `SO_PASSCRED` 下正常都会附带凭据，
+    /// 缺失多为异常路径，限流会误伤模块自身记录。
+    fn allow_from_sender(&mut self, sender_uid: Option<u32>) -> bool {
+        let Some(uid) = sender_uid else {
+            return true;
+        };
+        let now_ms = crate::platform::paths::monotonic_ms();
+
+        // 表满时清理已过窗口的条目，避免伪造 uid 让表无界增长。
+        if self.sender_quotas.len() >= MAX_TRACKED_SENDERS && !self.sender_quotas.contains_key(&uid)
+        {
+            self.sender_quotas.retain(|_, quota| {
+                now_ms.saturating_sub(quota.window_started_ms) < RATE_LIMIT_WINDOW_MS
+            });
+            if self.sender_quotas.len() >= MAX_TRACKED_SENDERS {
+                return false;
+            }
+        }
+
+        let quota = self.sender_quotas.entry(uid).or_insert(SenderQuota {
+            window_started_ms: now_ms,
+            count: 0,
+            dropped: 0,
+        });
+
+        if now_ms.saturating_sub(quota.window_started_ms) >= RATE_LIMIT_WINDOW_MS {
+            let dropped = quota.dropped;
+            quota.window_started_ms = now_ms;
+            quota.count = 0;
+            quota.dropped = 0;
+            if dropped > 0 {
+                self.running.append(&format_running_line(
+                    "W",
+                    "LogDaemon",
+                    &format!("发送方 uid={} 超出记录限流，已丢弃 {} 条", uid, dropped),
+                ));
+            }
+        }
+
+        if quota.count >= MAX_RECORDS_PER_UID_WINDOW {
+            quota.dropped = quota.dropped.saturating_add(1);
+            return false;
+        }
+        quota.count = quota.count.saturating_add(1);
+        true
     }
 
     fn handle(&mut self, packet: &str, sender_uid: Option<u32>) {
@@ -283,8 +354,17 @@ impl LogState {
             return;
         };
         match tag {
-            TAG_FILE_MONITOR => self.monitor.append(message),
-            TAG_STATS => self.add_stats(message),
+            // 监控与统计的发送方是任意应用 uid，无法做身份校验，改为按发送方限流。
+            TAG_FILE_MONITOR => {
+                if self.allow_from_sender(sender_uid) {
+                    self.monitor.append(message);
+                }
+            }
+            TAG_STATS => {
+                if self.allow_from_sender(sender_uid) {
+                    self.add_stats(message);
+                }
+            }
             TAG_CONTROL => {
                 // Control 命令仅允许 root（uid 0）发送；其它进程的凭据缺失或非 root 时拒绝。
                 if sender_uid == Some(0) {
