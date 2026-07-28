@@ -355,13 +355,15 @@ where
 }
 
 fn retry_fuse_fix_for_media_provider(hub: &InterceptHub) {
-    let package_name = hub.get_package_name();
-    if policy::is_media_provider_package(&package_name) {
-        if crate::platform::is_boot_completed() {
-            crate::hook::install_fuse_fix_if_enabled(&package_name);
-        } else {
-            fuse_fix::retry_if_target_enabled();
-        }
+    // 该函数在每次 open/openat 上都会执行，因此先用借用做判定，只有确认是
+    // MediaProvider 且需要安装时才克隆包名，避免热路径上的无谓分配。
+    if !hub.with_package_name(policy::is_media_provider_package) {
+        return;
+    }
+    if crate::platform::is_boot_completed() {
+        crate::hook::install_fuse_fix_if_enabled(&hub.get_package_name());
+    } else {
+        fuse_fix::retry_if_target_enabled();
     }
 }
 

@@ -18,6 +18,7 @@ pub mod paths;
 pub mod unique_fd;
 
 use std::ffi::{CStr, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const ANDROID_USER_ID_OFFSET: i32 = 100000;
 pub const MIN_SUPPORTED_API_LEVEL: i32 = 31;
@@ -47,8 +48,21 @@ pub fn system_property_get(name: &str) -> Option<String> {
     Some(text.to_string_lossy().trim().to_string())
 }
 
+/// `sys.boot_completed` 是否已置位。
+///
+/// 该属性单调：一旦变为 `1` 就不会再变回去，因此结果为真后永久缓存。
+/// 这条判断位于 open/openat 热路径上（MediaProvider 每次 open 都会经过），
+/// 未缓存时每次都要构造 CString、调用 `__system_property_get` 并再分配一次字符串。
 pub fn is_boot_completed() -> bool {
-    system_property_get("sys.boot_completed").as_deref() == Some("1")
+    static BOOT_COMPLETED: AtomicBool = AtomicBool::new(false);
+    if BOOT_COMPLETED.load(Ordering::Relaxed) {
+        return true;
+    }
+    if system_property_get("sys.boot_completed").as_deref() == Some("1") {
+        BOOT_COMPLETED.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 pub fn user_id_from_uid(uid: i32) -> i32 {
