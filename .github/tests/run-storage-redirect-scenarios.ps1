@@ -1564,6 +1564,34 @@ function Test-FuseDaemonStarted {
     $true
 }
 
+# 判别性断言：确认 FUSE daemon 真的接管了挂载点，而不是静默回退到 mount namespace。
+#
+# 依据 mountinfo 中的挂载源 srx_fuse_redirect（config.rs 里 MountOption::FSName 的取值）。
+# 该字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。
+# 这比日志断言更可靠：日志行可能因采样、轮转或格式变化漏判，而挂载表是内核事实。
+function Test-FuseMountActive {
+    param([int]$Scenario)
+    $appPid = Get-AppPid
+    if (-not $appPid) {
+        $script:Failures.Add("scenario-$Scenario 无法获取应用 pid，无法确认 FUSE 是否接管")
+        Write-Warning "scenario-$Scenario/fuse-mount-check-no-pid"
+        return $false
+    }
+
+    for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Su "grep -Fq 'srx_fuse_redirect' `"/proc/$appPid/mountinfo`" 2>/dev/null") {
+            Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid"
+            return $true
+        }
+        Start-Sleep -Milliseconds $script:ResultPollMilliseconds
+    }
+
+    $script:Failures.Add("scenario-$Scenario FUSE 未接管挂载点，可能已静默回退到 mount namespace pid=$appPid")
+    Write-Warning "scenario-$Scenario/fuse-mount-inactive pid=$appPid"
+    Invoke-Su "grep -F 'fuse' `"/proc/$appPid/mountinfo`" 2>/dev/null | head -20"
+    return $false
+}
+
 function Test-ScopedFuseDaemonStarted {
     param([int]$Scenario, [string]$MountRoot, [bool]$Strict = $true)
     for ($i = 0; $i -lt 20; $i++) {
@@ -1643,6 +1671,7 @@ function Invoke-FuseDaemonAllowWildcardScenario {
     $qmarkMissMediaPrivate = "$PrivateFuseQMarkMissRoot/Media/$FuseQMarkMissMediaFile"
 
     $ok = Test-FuseDaemonStarted $Scenario
+    $ok = (Test-FuseMountActive $Scenario) -and $ok
     $ok = (Invoke-WriteCase $Scenario "plain-allow-write" $plainPath $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-plain-real" $plainPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-plain-private" $plainPrivate) -and $ok
@@ -1683,6 +1712,7 @@ function Invoke-FuseDaemonReadOnlyExclusionScenario {
     $writablePath = "$FuseExcludeRoot/Writable/$TestFile"
 
     $ok = Test-FuseDaemonStarted $Scenario
+    $ok = (Test-FuseMountActive $Scenario) -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-excluded-write" "file_write" @{ file_path = $writablePath; payload = $Payload; expected_payload = $Payload } "^PASS \[file_write\]").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-read-only-excluded-real" $writablePath) -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-locked-write-denied" "file_write_denied" @{ file_path = $lockedPath; payload = $Payload } "^PASS \[file_write_denied\]").Ok -and $ok
@@ -1698,6 +1728,7 @@ function Invoke-FuseDaemonMappingReadOnlyScenario {
     $roTarget = "$FuseMapRoTarget/$TestFile"
 
     $ok = Test-FuseDaemonStarted $Scenario
+    $ok = (Test-FuseMountActive $Scenario) -and $ok
     $ok = (Invoke-WriteCase $Scenario "mapping-target-excluded-write" $rwRequest $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-mapping-rw-target" $rwTarget) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-mapping-rw-request" $rwRequest) -and $ok
@@ -1734,6 +1765,7 @@ function Invoke-FuseDaemonMultiWildcardScenario {
     $otherPrivate = "$PrivateFuseMultiRoot/Other/$TestFile"
 
     $ok = Test-FuseDaemonStarted $Scenario
+    $ok = (Test-FuseMountActive $Scenario) -and $ok
     $ok = (Invoke-WriteCase $Scenario "multi-qq-write" $qqPath $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "fuse-multi-qq-real" $qqPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "fuse-multi-qq-private" $qqPrivate) -and $ok
