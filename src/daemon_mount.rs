@@ -95,7 +95,44 @@ impl crate::fuse_redirect::MountRequestFields for MountRequest {
 }
 
 pub fn has_mount_state(request: &MountRequest) -> bool {
-    std::fs::metadata(state_file_path(request)).is_ok()
+    let state_path = state_file_path(request);
+    if std::fs::metadata(&state_path).is_err() {
+        return false;
+    }
+    // 记录过 FUSE 服务却已经死掉时，挂载点会留在目标 namespace 里变成 ENOTCONN 死挂载，
+    // 应用访问会直接失败。此时把挂载状态视为无效，让周期 reconcile 重新执行挂载；
+    // 若 FUSE 再次启动失败，启动阶段的 mount namespace 降级会接管。
+    !has_dead_fuse_child(&state_path, request)
+}
+
+/// 检查挂载状态中记录的 FUSE 服务进程是否已经退出。
+///
+/// FUSE 服务是在挂载用的 fork 子进程内启动的，因此相对本 daemon 是孙进程；挂载子进程
+/// 随后立即退出，这些服务会被 init 收养。也就是说 daemon 既不能也不需要 `waitpid`
+/// 回收它们，`waitpid` 只会返回 ECHILD；判定存活只能查 `/proc/<pid>`。
+/// 同理它们不会以僵尸形式留在 daemon 名下，`/proc` 目录存在即表示服务仍在运行。
+fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
+    let children = read_fuse_child_pids(state_path);
+    if children.is_empty() {
+        return false;
+    }
+
+    for child in children {
+        // pid 被回收后复用会让已死的服务看起来仍存活，此时只是不触发重挂，与加入本
+        // 检查之前的行为一致，不构成回退；反向误判（把存活服务判为已死）才会导致重挂
+        // 循环，而这种判定不会产生那种结果。
+        if std::fs::metadata(format!("/proc/{}", child)).is_ok() {
+            continue;
+        }
+        log::warn!(
+            "daemon fuse child gone pid={} app_pid={} pkg={}, remount pending",
+            child,
+            request.pid,
+            request.package_name
+        );
+        return true;
+    }
+    false
 }
 
 pub fn execute_mount_request(request: &MountRequest) -> bool {
