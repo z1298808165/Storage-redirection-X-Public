@@ -1402,6 +1402,10 @@ function Invoke-StandardScenario {
                 $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "mediastore-public-parent-owner" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
             }
             $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "android-owner" "$BackendRoot/Android") -and $ok
+            # 上面重启了 MediaProvider，存储卷需要时间重新挂载。后续场景的清理与
+            # 预置发生在其自身存储等待之前，若此时卷未恢复，mkdir 会失败并导致
+            # 挂载点缺失。与 bash 侧一致，在本场景内把存储状态还原后再继续。
+            $ok = (Wait-Storage "scenario-$Scenario-mediastore-restore" 60) -and $ok
         }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         7 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }

@@ -2120,15 +2120,19 @@ run_standard_scenario() {
     local media_file="srt_mediastore_sandbox_only.txt"
     # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，因此必须先确认
     # MediaProvider 的 Java hook 已就绪。此前直接沿用上一场景遗留的进程状态：
-    # hook 尚未安装时 MediaProvider 会走 lower FS 直接写入公共路径，落点校验失败。
-    # Android 15（SDK 35）上实测复现——通过轮与失败轮的创建耗时分别为 1559ms 与
-    # 711ms，后者即未经 hook 的直写。
+    # hook 尚未安装时 MediaProvider 会走 lower FS 直接写入公共路径（logcat 可见
+    # "Open with lower FS for ..." 后直接改名到公共路径），落点校验随即失败。
     restart_media_provider_with_hook_ready "scenario-${scenario}-mediastore" || return 1
     run_service_case "$scenario" "mediastore-sandbox-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
       check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       { ! adb_su "test -d '${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe'" || check_public_directory_owner "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"; } &&
       check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || return 1
+    # 上面重启了 MediaProvider，存储卷需要时间重新挂载。后续场景的 step 2
+    # （清理并预置目标）发生在其自身 step 4 的存储等待之前，若此时卷未恢复，
+    # mkdir 会以 No such file or directory 失败，进而导致挂载点缺失、
+    # mount confirm 连续重试失败。因此在本场景内把存储状态还原后再继续。
+    wait_storage_ready "scenario-${scenario}-mediastore-restore" 60 >/dev/null || return 1
   fi
   if [ "$scenario" = "5" ]; then
     check_public_directory_owner "scenario-${scenario}-download" "${BACKEND_ROOT}/Download" || return 1
