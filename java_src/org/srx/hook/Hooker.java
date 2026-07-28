@@ -21,6 +21,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -75,14 +77,35 @@ public class Hooker {
   private static int BUCKET_ID_REWRITE_LOG_COUNT;
   private static final HashMap<Integer, SourceFdCapture> RECENT_MEDIA_SOURCE_FDS = new HashMap<>();
 
-  /** URI 到重定向后沙箱路径的映射，用于把 insert 阶段的落点带到提交阶段。 */
-  private static final HashMap<String, String> REDIRECTED_MEDIA_TARGETS = new HashMap<>();
+  /**
+   * URI 到重定向后沙箱路径的映射，用于把 insert 阶段的落点带到提交阶段。
+   *
+   * <p>使用 {@link LinkedHashMap} 按插入顺序逐条淘汰最旧条目。此前满容量时整表 {@code clear()}，批量导入超过 {@link
+   * #REDIRECTED_MEDIA_TARGET_LIMIT} 个文件会把尚未进入 提交阶段的改名记录一起丢弃，那些文件会永久停留在 {@code .pending-} 名下——数据完整
+   * 但在相册与文件管理器中不可见。
+   */
+  private static final LinkedHashMap<String, String> REDIRECTED_MEDIA_TARGETS =
+      new LinkedHashMap<>();
 
   private static final int REDIRECTED_MEDIA_TARGET_LIMIT = 64;
 
-  private static final HashMap<String, PendingDirectMediaWrite> PENDING_DIRECT_MEDIA_WRITES =
-      new HashMap<>();
-  private static final HashMap<String, String> RECENT_BUCKET_ID_REWRITES = new HashMap<>();
+  /**
+   * insert 阶段登记的直写记录，等待写入完成阶段取用。
+   *
+   * <p>按插入顺序维护，便于在容量上限处淘汰最旧条目。此前既没有容量上限，也只在条目 被查询时才按 60 秒过期清理，从未被查询的条目会永久驻留在 MediaProvider 进程里。
+   */
+  private static final LinkedHashMap<String, PendingDirectMediaWrite> PENDING_DIRECT_MEDIA_WRITES =
+      new LinkedHashMap<>();
+
+  private static final int PENDING_DIRECT_MEDIA_WRITE_LIMIT = 256;
+
+  /** 直写记录的存活时间，超过即视为已失效。 */
+  private static final long PENDING_DIRECT_MEDIA_WRITE_TTL_MS = 60000L;
+
+  /** 相册分组键改写记录，按插入顺序维护以便逐条淘汰最旧条目。 */
+  private static final LinkedHashMap<String, String> RECENT_BUCKET_ID_REWRITES =
+      new LinkedHashMap<>();
+
   private static final int MAX_RECENT_BUCKET_ID_REWRITES = 512;
   private static final Pattern INLINE_BUCKET_ID_EQUALS =
       Pattern.compile("(\\bbucket_id\\s*=\\s*)(')?(-?\\d+)(')?", Pattern.CASE_INSENSITIVE);
@@ -2278,6 +2301,22 @@ public class Hooker {
       PendingDirectMediaWrite pending =
           new PendingDirectMediaWrite(path, callerUid, android.os.SystemClock.elapsedRealtime());
       synchronized (PENDING_DIRECT_MEDIA_WRITES) {
+        // 插入时顺带清理已过期条目：过期判定原先只在条目被查询时执行，
+        // 从未被查询的条目会永久驻留。
+        long nowMs = android.os.SystemClock.elapsedRealtime();
+        Iterator<PendingDirectMediaWrite> stale = PENDING_DIRECT_MEDIA_WRITES.values().iterator();
+        while (stale.hasNext()) {
+          if (nowMs - stale.next().elapsedMs > PENDING_DIRECT_MEDIA_WRITE_TTL_MS) {
+            stale.remove();
+          }
+        }
+        // 清理后仍超容量时逐条淘汰最旧记录，保证表大小有上限。
+        while (PENDING_DIRECT_MEDIA_WRITES.size() >= PENDING_DIRECT_MEDIA_WRITE_LIMIT) {
+          Iterator<String> oldest = PENDING_DIRECT_MEDIA_WRITES.keySet().iterator();
+          if (!oldest.hasNext()) break;
+          oldest.next();
+          oldest.remove();
+        }
         PENDING_DIRECT_MEDIA_WRITES.put(result.toString(), pending);
       }
       logDirectMediaWrite("register", callerUid, String.valueOf(result), path, 0, null);
@@ -2387,8 +2426,12 @@ public class Hooker {
       String sandboxPath = rewriteMediaStorePath(probePath, callerUid);
       if (sandboxPath == null || sandboxPath.length() == 0) return;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
-        if (REDIRECTED_MEDIA_TARGETS.size() > REDIRECTED_MEDIA_TARGET_LIMIT) {
-          REDIRECTED_MEDIA_TARGETS.clear();
+        // 逐条淘汰最旧记录，不整表清空：批量导入时后到的写入不应清掉尚未提交的改名记录。
+        while (REDIRECTED_MEDIA_TARGETS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
+          Iterator<String> oldest = REDIRECTED_MEDIA_TARGETS.keySet().iterator();
+          if (!oldest.hasNext()) break;
+          oldest.next();
+          oldest.remove();
         }
         REDIRECTED_MEDIA_TARGETS.put(result.toString(), sandboxPath);
       }
@@ -2478,7 +2521,7 @@ public class Hooker {
       PendingDirectMediaWrite pending = PENDING_DIRECT_MEDIA_WRITES.get(uri.toString());
       if (pending == null) return null;
       long age = android.os.SystemClock.elapsedRealtime() - pending.elapsedMs;
-      if (age > 60000L) {
+      if (age > PENDING_DIRECT_MEDIA_WRITE_TTL_MS) {
         PENDING_DIRECT_MEDIA_WRITES.remove(uri.toString());
         return null;
       }
@@ -3660,9 +3703,14 @@ public class Hooker {
         || displayBucketId.equals(realBucketId)) return;
     String key = bucketIdRewriteKey(callerUid, displayBucketId);
     synchronized (RECENT_BUCKET_ID_REWRITES) {
-      if (RECENT_BUCKET_ID_REWRITES.size() >= MAX_RECENT_BUCKET_ID_REWRITES
+      // 逐条淘汰最旧记录，不整表清空：清空会让此前已改写的相册分组键全部失效，
+      // 相册分组会突然回退到真实目录桶。
+      while (RECENT_BUCKET_ID_REWRITES.size() >= MAX_RECENT_BUCKET_ID_REWRITES
           && !RECENT_BUCKET_ID_REWRITES.containsKey(key)) {
-        RECENT_BUCKET_ID_REWRITES.clear();
+        Iterator<String> oldest = RECENT_BUCKET_ID_REWRITES.keySet().iterator();
+        if (!oldest.hasNext()) break;
+        oldest.next();
+        oldest.remove();
       }
       RECENT_BUCKET_ID_REWRITES.put(key, realBucketId);
     }
