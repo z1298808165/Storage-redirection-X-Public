@@ -600,14 +600,15 @@ function Wait-Storage {
     $false
 }
 
-# 轮询真实存储根是否已可创建目录。
+# 轮询场景预置真正需要的目录层级是否已可写。
 #
-# Wait-Storage 只确认卷 mounted 且根目录可 stat，但重启 MediaProvider 后存在
-# 「卷已挂载、root 视角却还不能建目录」的窗口。场景预置正是靠 mkdir，
-# 因此需要直接验证可写性。探测目录用完即删。与 bash 侧 wait_real_root_writable 对应。
+# Wait-Storage 只确认卷 mounted 且根目录可 stat，不足以判断能否建目录。探测点
+# 刻意取 Download 子目录而非存储根：重启 MediaProvider 后 /storage/emulated 会
+# 短时变为无写位，而其下的 /storage/emulated/0 权限正常，只探测存储根会误判。
+# 探测目录用完即删。与 bash 侧 wait_real_root_writable 对应。
 function Wait-RealRootWritable {
     param([string]$Label, [int]$TimeoutSeconds = 60)
-    $probe = "$RealRoot/.srt_writable_probe"
+    $probe = "$RealRoot/Download/.srt_writable_probe"
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         if (Test-Su "mkdir -p '$probe' && rmdir '$probe'") { return $true }
@@ -1409,8 +1410,17 @@ function Invoke-StandardScenario {
             $mediaFile = "srt_mediastore_sandbox_only.txt"
             # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，必须先确认
             # MediaProvider 的 Java hook 已就绪；hook 未安装时 MediaProvider 会走
-            # lower FS 直接写入公共路径，落点校验失败。与 bash 侧保持一致。
-            $ok = (Restart-MediaProviderWithHookReady "scenario-$Scenario-mediastore") -and $ok
+            # lower FS 直接写入公共路径，落点校验失败。
+            #
+            # 优先只等待、不重启：重启会把 /storage/emulated 短时变为无写位，
+            # 导致后续场景预置目录失败。仅在等不到就绪记录时才重启兜底，并在
+            # 重启后等待真实可写。与 bash 侧保持一致。
+            if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-mediastore" 20)) {
+                Write-Host "  - scenario-$Scenario/media-hook-not-observed, restarting provider"
+                $ok = (Restart-MediaProviderWithHookReady "scenario-$Scenario-mediastore") -and $ok
+                $ok = (Wait-Storage "scenario-$Scenario-mediastore-restore" 60) -and $ok
+                $ok = (Wait-RealRootWritable "scenario-$Scenario-mediastore-restore" 60) -and $ok
+            }
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
@@ -1419,12 +1429,6 @@ function Invoke-StandardScenario {
                 $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "mediastore-public-parent-owner" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
             }
             $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "android-owner" "$BackendRoot/Android") -and $ok
-            # 上面重启了 MediaProvider，存储需要时间恢复。后续场景的清理与预置
-            # 发生在其自身存储等待之前，若此时未恢复，mkdir 会失败并导致挂载点
-            # 缺失。仅等挂载不够——存在「卷已挂载但 root 视角还不能建目录」的
-            # 窗口，故额外轮询真实可写性。与 bash 侧一致。
-            $ok = (Wait-Storage "scenario-$Scenario-mediastore-restore" 60) -and $ok
-            $ok = (Wait-RealRootWritable "scenario-$Scenario-mediastore-restore" 60) -and $ok
         }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         7 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }

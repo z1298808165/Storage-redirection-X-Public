@@ -953,16 +953,18 @@ wait_storage_ready() {
   return 1
 }
 
-# 轮询真实存储根是否已可创建目录。
+# 轮询场景预置真正需要的目录层级是否已可写。
 #
-# wait_storage_ready 只确认卷 mounted 且根目录可 stat，但重启 MediaProvider 后
-# 存在「卷已挂载、root 视角却还不能建目录」的窗口。场景预置正是靠 mkdir，
-# 因此需要直接验证可写性而不是只看挂载状态。探测目录用完即删。
+# wait_storage_ready 只确认卷 mounted 且根目录可 stat，不足以判断能否建目录。
+# 探测点刻意取 Download 子目录而非存储根：重启 MediaProvider 后实测
+# /storage/emulated 会短时变为 dr-xr-x---（连 media_rw 都无写位），而其下的
+# /storage/emulated/0 权限正常，只探测存储根会误判为已就绪。clean_targets 实际
+# 创建的是 Download 下的目录，因此按同一层级探测。探测目录用完即删。
 wait_real_root_writable() {
   local label="$1"
   local timeout_seconds="${2:-60}"
   local deadline=$((SECONDS + timeout_seconds))
-  local probe="${REAL_ROOT}/.srt_writable_probe"
+  local probe="${REAL_ROOT}/Download/.srt_writable_probe"
 
   while [ "$SECONDS" -lt "$deadline" ]; do
     if adb_su "mkdir -p '$probe' && rmdir '$probe'" >/dev/null 2>&1; then
@@ -2142,24 +2144,32 @@ run_standard_scenario() {
   if [ "$scenario" = "2" ]; then
     local media_file="srt_mediastore_sandbox_only.txt"
     # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，因此必须先确认
-    # MediaProvider 的 Java hook 已就绪。此前直接沿用上一场景遗留的进程状态：
-    # hook 尚未安装时 MediaProvider 会走 lower FS 直接写入公共路径（logcat 可见
-    # "Open with lower FS for ..." 后直接改名到公共路径），落点校验随即失败。
-    restart_media_provider_with_hook_ready "scenario-${scenario}-mediastore" || return 1
+    # MediaProvider 的 Java hook 已就绪：hook 未安装时 MediaProvider 会走 lower FS
+    # 直接写入公共路径（logcat 可见 "Open with lower FS for ..." 后直接改名到公共
+    # 路径），落点校验随即失败。Android 15 上实测必现。
+    #
+    # 优先只等待、不重启。曾无条件调用 restart_media_provider_with_hook_ready，
+    # 该场景本身通过了，但重启会把 /storage/emulated 短时变为 dr-xr-x---（无写位），
+    # 使后续场景预置目录的 mkdir 以 No such file or directory 失败、挂载点缺失，
+    # Android 15/16 连带在场景 4 失败。实测两版本均在重启后首次探测即就绪，
+    # 说明 hook 通常早已安装，重启并非必要。
+    #
+    # 仅在等待不到时才重启兜底：hook 就绪判据是按当前 pid 过滤 logcat 中的
+    # "java hook open ok"，而先前场景会执行 adb logcat -c，早期日志可能已被清空，
+    # 此时无法凭日志确认，只能重启以产生新的就绪记录。
+    if ! wait_media_provider_hook_ready "scenario-${scenario}-mediastore" 20; then
+      echo "scenario-${scenario} media hook not observed, restarting provider"
+      restart_media_provider_with_hook_ready "scenario-${scenario}-mediastore" || return 1
+      # 重启会短时移除 /storage/emulated 的写位，必须等真实可写后再交给后续场景，
+      # 否则其预置目录的 mkdir 会失败。
+      wait_storage_ready "scenario-${scenario}-mediastore-restore" 60 >/dev/null || return 1
+      wait_real_root_writable "scenario-${scenario}-mediastore-restore" 60 || return 1
+    fi
     run_service_case "$scenario" "mediastore-sandbox-only" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$media_file" --es relative_path "Documents/SrtMediaRoutingProbe" &&
       check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       { ! adb_su "test -d '${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe'" || check_public_directory_owner "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"; } &&
       check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || return 1
-    # 上面重启了 MediaProvider，存储需要时间恢复。后续场景的 step 2（清理并预置
-    # 目标）发生在其自身 step 4 的存储等待之前，若此时未恢复，mkdir 会以
-    # No such file or directory 失败，进而挂载点缺失、mount confirm 连续重试失败。
-    #
-    # 注意仅 wait_storage_ready 不足够：它只校验卷已 mounted 且根目录可 stat，
-    # 而实测重启后存在「卷已挂载但 root 视角尚不可建目录」的窗口（Android 15/16
-    # 上必现）。因此这里额外轮询一次真实的可写性，与 clean_targets 的实际操作一致。
-    wait_storage_ready "scenario-${scenario}-mediastore-restore" 60 >/dev/null || return 1
-    wait_real_root_writable "scenario-${scenario}-mediastore-restore" 60 || return 1
   fi
   if [ "$scenario" = "5" ]; then
     check_public_directory_owner "scenario-${scenario}-download" "${BACKEND_ROOT}/Download" || return 1
