@@ -91,9 +91,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertNotIn("fetch-depth: 0", test_flow)
             self.assertIn("- quality", test_flow)
             self.assertIn("needs.quality.result == 'success'", test_flow)
-            # 矩阵级必须为 false：失败时保留 4 个 Android 版本的完整证据，避免只拿到
-            # 单版本证据而反复返工。版本内的快速停止由 SRT_FAIL_FAST 负责。
-            self.assertIn("fail-fast: false", test_flow)
+            # 矩阵级为 true：任一 Android 版本失败即取消其余，尽快释放模拟器资源。
+            # 需要跨版本对比证据时用不带 --failed 的完整重跑单独获取。
+            # 版本内的快速停止仍由 SRT_FAIL_FAST 负责。
+            self.assertIn("fail-fast: true", test_flow)
             self.assertIn("SRT_FAIL_FAST: 1", test_flow)
             for version in (13, 14, 15, 16):
                 self.assertIn(f"version: {version}", test_flow)

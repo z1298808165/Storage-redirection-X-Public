@@ -484,11 +484,10 @@ jobs:
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
     strategy:
-      # 保持 false：每次失败都要拿到 4 个 Android 版本的完整证据，才能区分版本相关
-      # 问题与通用问题。github-actions-failure-notes.md 里多次出现「某版本失败、其余
-      # 因 fail-fast 取消」，只有单版本证据会导致反复返工，返工成本高于多跑的机器时间。
+      # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
-      fail-fast: false
+      # 需要跨版本对比证据时，用不带 --failed 的完整重跑单独获取。
+      fail-fast: true
       matrix:
         android:
           - api: 33
