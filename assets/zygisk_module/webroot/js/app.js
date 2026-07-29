@@ -6128,9 +6128,7 @@
   }
 
   function normalizeMonitorCoalesceOperation(value) {
-    const op = String(value || "")
-      .toLowerCase()
-      .replace(/:create$|:read$/g, "");
+    const op = monitorOperationBaseName(value);
     return op === "open" ||
       op === "openat" ||
       op === "openat2" ||
@@ -6279,12 +6277,19 @@
     return score;
   }
 
+  // 打开类操作必须按 read/write/create 意图分别描述：读取探测和创建落点是不同行为，
+  // 统一写成创建会把相册、扫描器的目录读取误报成创建。
   function describeLogOperation(eventKind, syscallOp, extras) {
-    const op = formatLogOperationBadge(syscallOp);
-    if (op === "provider_open:read") return "Provider 读取请求";
-    if (op === "provider_open:create") return "Provider 创建请求";
-    if (op === "provider_open:write") return "Provider 写入请求";
-    if (op === "open" || op === "openat" || op === "openat2" || op === "provider_open") {
+    const op = monitorOperationBaseName(syscallOp);
+    const intent = monitorOperationIntent(syscallOp);
+    if (op === "provider_open") {
+      return (
+        { read: "Provider 读取请求", write: "Provider 写入请求", create: "Provider 创建请求" }[
+          intent
+        ] || "Provider 打开请求"
+      );
+    }
+    if (op === "open" || op === "openat" || op === "openat2") {
       const hints = [];
       const flags = parseInt(String(extras.flags || "").replace(/^0x/i, ""), 16);
       if (Number.isFinite(flags)) {
@@ -6293,12 +6298,26 @@
         if ((flags & 0x400) !== 0) hints.push("O_APPEND");
         if ((flags & 0x410000) === 0x410000) hints.push("O_TMPFILE");
       }
-      return "带创建意图的文件打开" + (hints.length ? "（" + hints.join(" / ") + "）" : "");
+      const text =
+        {
+          read: "文件读取请求",
+          write: "文件写入请求",
+          create: "带创建意图的文件打开",
+        }[intent] || "文件打开请求";
+      return text + (hints.length ? "（" + hints.join(" / ") + "）" : "");
     }
     if (op === "mkdir" || op === "mkdirat") return "目录创建请求";
     if (op === "mknod" || op === "mknodat") return "文件节点创建请求";
     if (String(eventKind || "").toUpperCase() === "CREATE") return "创建类文件操作";
-    return op ? "文件操作：" + op : "文件操作记录";
+    const badge = formatLogOperationBadge(syscallOp);
+    return badge ? "文件操作：" + badge : "文件操作记录";
+  }
+
+  function monitorOperationBaseName(op) {
+    return String(op || "")
+      .trim()
+      .toLowerCase()
+      .replace(/:create$|:write$|:read$/, "");
   }
 
   function describeLogSource(processPkg, callerPkg, extras) {
@@ -6409,14 +6428,8 @@
       .trim()
       .toLowerCase();
     if (!value) return "unknown";
-    if (
-      value === "provider_open:read" ||
-      value === "provider_open:create" ||
-      value === "provider_open:write"
-    )
-      return value;
     if (value === "inotify") return "create";
-    return value.replace(/:create$|:read$/g, "");
+    return monitorOperationBaseName(value);
   }
 
   function parseLogExtras(parts) {

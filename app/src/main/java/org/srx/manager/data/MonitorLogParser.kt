@@ -69,7 +69,7 @@ private fun parseMonitorLogLine(
       operation = operation,
       action =
           if (isModuleExport) describeModuleExportOperation(extras)
-          else describeMonitorOperation(filterOperation, extras),
+          else describeMonitorOperation(filterOperation),
       path = landingPath,
       ok = ok,
       errorText = if (ok) "" else describeMonitorFailure(ret, extras),
@@ -160,34 +160,46 @@ private fun describeModuleExportOperation(extras: Map<String, String>): String =
           }
     }
 
-private fun describeMonitorOperation(op: String, extras: Map<String, String>): String {
+// 打开类操作必须按 read/write/create 意图分别描述：读取探测和创建落点是不同行为，
+// 统一写成创建会把相册、扫描器的目录读取误报成创建。
+private fun describeMonitorOperation(op: String): String {
   val value = op.lowercase()
-  return when (value) {
-    "provider_open:read" -> "Provider 读取请求"
-    "provider_open:create" -> "Provider 创建请求"
-    "provider_open:write" -> "Provider 写入请求"
-    else ->
-        when (value.removeSuffix(":create").removeSuffix(":write").removeSuffix(":read")) {
-          "open",
-          "openat",
-          "openat2",
-          "provider_open" -> "带创建意图的文件打开"
-          "mkdir",
-          "mkdirat" -> "目录创建请求"
-          "mknod",
-          "mknodat" -> "文件节点创建请求"
-          "create",
-          "fuse_create",
-          "inotify" -> "创建类文件操作"
-          else -> if (op.isBlank()) "文件操作记录" else "文件操作：$op"
+  val intent = monitorOperationIntent(value)
+  return when (value.monitorOperationBaseName()) {
+    "provider_open" ->
+        when (intent) {
+          "read" -> "Provider 读取请求"
+          "write" -> "Provider 写入请求"
+          "create" -> "Provider 创建请求"
+          else -> "Provider 打开请求"
         }
+    "open",
+    "openat",
+    "openat2" ->
+        when (intent) {
+          "read" -> "文件读取请求"
+          "write" -> "文件写入请求"
+          "create" -> "带创建意图的文件打开"
+          else -> "文件打开请求"
+        }
+    "mkdir",
+    "mkdirat" -> "目录创建请求"
+    "mknod",
+    "mknodat" -> "文件节点创建请求"
+    "create",
+    "fuse_create",
+    "inotify" -> "创建类文件操作"
+    else -> if (op.isBlank()) "文件操作记录" else "文件操作：$op"
   }
 }
+
+private fun String.monitorOperationBaseName(): String =
+    lowercase().removeSuffix(":create").removeSuffix(":write").removeSuffix(":read")
 
 private fun formatMonitorLogOperationBadge(op: String): String {
   val value = op.trim().lowercase()
   if (value.isBlank()) return "unknown"
-  return value.removeSuffix(":create").removeSuffix(":write").removeSuffix(":read")
+  return value.monitorOperationBaseName()
 }
 
 private fun monitorOperationIntent(operation: String): String =
