@@ -226,6 +226,60 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun describesOpenIntentSeparately() {
+    val readEntry =
+        parseMonitorLogEntries(
+                "2026-07-28 21:37:20|com.android.providers.media.module|com.coloros.gallery3d|OPEN|" +
+                    "/storage/emulated/0/.MediaTrash/.mediaTrash|ret=131|errno=0|" +
+                    "identify_method=caller|identify_reliability=high|op=open|op_filter=open:read|flags=0x84000",
+                filters =
+                    FileMonitorFilters(
+                        excludedPaths = emptyList(),
+                        excludedOperations = emptyList(),
+                    ),
+            )
+            .single()
+    val writeEntry =
+        parseMonitorLogEntries(
+                "2026-07-28 21:39:05|com.android.providers.media.module|com.example.app|OPEN|" +
+                    "/storage/emulated/0/Download/a.json|ret=131|errno=0|" +
+                    "identify_method=caller|identify_reliability=high|op=open|op_filter=open:write|flags=0x20202",
+                filters = FileMonitorFilters(excludedPaths = emptyList()),
+            )
+            .single()
+    val plainEntry =
+        parseMonitorLogEntries(
+                "2026-07-28 21:39:06|com.example.app|com.example.app|OPEN|" +
+                    "/storage/emulated/0/Download/b.json|ret=5|errno=0|op=open",
+                filters = FileMonitorFilters(excludedPaths = emptyList()),
+            )
+            .single()
+
+    assertEquals("read", readEntry.operationIntent)
+    assertEquals("文件读取请求", readEntry.action)
+    assertEquals("write", writeEntry.operationIntent)
+    assertEquals("文件写入请求", writeEntry.action)
+    assertEquals("", plainEntry.operationIntent)
+    assertEquals("文件打开请求", plainEntry.action)
+  }
+
+  @Test
+  fun describesProviderOpenWithoutIntentSuffix() {
+    val entry =
+        parseMonitorLogEntries(
+                "2026-07-28 21:40:00|com.android.externalstorage|com.example.app|OPEN|" +
+                    "/storage/emulated/0/Download/c.apk|ret=0|errno=0|" +
+                    "identify_method=saf_provider|identify_reliability=high|op=provider_open|" +
+                    "op_filter=provider_open|source=saf_provider|caller_uid=10360"
+            )
+            .single()
+
+    assertEquals("provider_open", entry.operation)
+    assertEquals("", entry.operationIntent)
+    assertEquals("Provider 打开请求", entry.action)
+  }
+
+  @Test
   fun parserSkipsMonitorWatchRecordsAndMalformedLines() {
     val raw =
         listOf(
