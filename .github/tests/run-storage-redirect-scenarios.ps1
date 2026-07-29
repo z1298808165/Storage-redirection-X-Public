@@ -600,24 +600,6 @@ function Wait-Storage {
     $false
 }
 
-# 轮询场景预置真正需要的目录层级是否已可写。
-#
-# Wait-Storage 只确认卷 mounted 且根目录可 stat，不足以判断能否建目录。探测点
-# 刻意取 Download 子目录而非存储根：重启 MediaProvider 后 /storage/emulated 会
-# 短时变为无写位，而其下的 /storage/emulated/0 权限正常，只探测存储根会误判。
-# 探测目录用完即删。与 bash 侧 wait_real_root_writable 对应。
-function Wait-RealRootWritable {
-    param([string]$Label, [int]$TimeoutSeconds = 60)
-    $probe = "$RealRoot/Download/.srt_writable_probe"
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Su "mkdir -p '$probe' && rmdir '$probe'") { return $true }
-        Start-Sleep -Seconds 2
-    }
-    $script:Failures.Add("$Label storage root not writable")
-    $false
-}
-
 function Test-MediaProviderQueryReady {
     param([string]$Uri)
 
@@ -1408,19 +1390,6 @@ function Invoke-StandardScenario {
         2 {
             $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok
             $mediaFile = "srt_mediastore_sandbox_only.txt"
-            # 该断言校验 MediaStore 写入是否被重定向进应用沙箱，必须先确认
-            # MediaProvider 的 Java hook 已就绪；hook 未安装时 MediaProvider 会走
-            # lower FS 直接写入公共路径，落点校验失败。
-            #
-            # 优先只等待、不重启：重启会把 /storage/emulated 短时变为无写位，
-            # 导致后续场景预置目录失败。仅在等不到就绪记录时才重启兜底，并在
-            # 重启后等待真实可写。与 bash 侧保持一致。
-            if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-mediastore" 20)) {
-                Write-Host "  - scenario-$Scenario/media-hook-not-observed, restarting provider"
-                $ok = (Restart-MediaProviderWithHookReady "scenario-$Scenario-mediastore") -and $ok
-                $ok = (Wait-Storage "scenario-$Scenario-mediastore-restore" 60) -and $ok
-                $ok = (Wait-RealRootWritable "scenario-$Scenario-mediastore-restore" 60) -and $ok
-            }
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
