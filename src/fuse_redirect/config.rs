@@ -402,18 +402,37 @@ fn compact_scoped_mount_roots(mut roots: Vec<String>, storage_root: &str) -> Vec
         return effective;
     }
 
+    // 第二级降级：把各根收敛到其所属的顶层存储子目录（如 Download、DCIM）。
+    // 收敛不出顶层子目录（即该根本身就是存储根）的情况直接丢弃，不能让它把
+    // 整个存储根带进结果——那等于让模块内 FUSE 接管全部共享存储。
     let mut top_level: Vec<String> = effective
         .iter()
-        .map(|root| {
-            top_level_storage_child(root, storage_root).unwrap_or_else(|| storage_root.to_string())
-        })
+        .filter_map(|root| top_level_storage_child(root, storage_root))
         .collect();
     paths::sort_dedup_paths_case_insensitive(&mut top_level);
-    if top_level.len() <= super::MAX_SCOPED_FUSE_ROOTS {
+    if !top_level.is_empty() && top_level.len() <= super::MAX_SCOPED_FUSE_ROOTS {
         return top_level;
     }
 
-    vec![storage_root.to_string()]
+    // 顶层降级后仍超限：放弃 scoped FUSE，返回空列表让调用方走 mount namespace。
+    //
+    // 此前这里退化为整个存储根 `/storage/emulated/<user>`，即模块内 FUSE 提供全部
+    // 共享存储。这偏离了「只在通配规则的最小具体父目录挂载 FUSE」的设计前提：真机
+    // 实测中 7 个顶层目录规则就会触发该退化（scoped roots raw count=7 → compacted
+    // count=1 list=/storage/emulated/0），属常见配置而非极端情况；而接管整个存储的
+    // 路径缺少验证，且历史上无条件启用 MediaProvider native FUSE 曾导致
+    // Android 13 出现 Transport endpoint is not connected。
+    //
+    // mount namespace 方案会让通配规则退化为按已存在目录匹配，功能上弱于 FUSE，
+    // 但作用范围可控，比接管整个存储更安全。
+    log::warn!(
+        "scoped roots exceed limit after top-level fallback: effective={} top_level={} limit={}, \
+         skip scoped fuse and use mount namespace",
+        effective.len(),
+        top_level.len(),
+        super::MAX_SCOPED_FUSE_ROOTS
+    );
+    Vec::new()
 }
 
 fn top_level_storage_child(path: &str, storage_root: &str) -> Option<String> {
