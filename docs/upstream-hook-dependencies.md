@@ -10,9 +10,13 @@
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", branch = "main" }
-srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", branch = "main" }
+# quality-allow(chinese-language): 以下两行是 Cargo.toml 依赖声明原文，属机器解析的配置语法，改写会失去参考价值。
+srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "5ec71115c4b674d282f337bb7523ba66471bd98a" }
+# quality-allow(chinese-language): 同上，保留依赖声明原文以便直接比对 Cargo.toml。
+srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "e9abbd58e0c6ee459bb0f7724b896a70ece0a661" }
 ```
+
+依赖按 `rev` 固定到具体 commit（而非跟随 `branch`），因此升级上游必须显式修改 `rev`，不会因上游推送而静默变化。
 
 `Cargo.lock` 会锁定实际使用的上游 commit。构建时 Cargo 会把源码拉取到本机 Cargo git 缓存，例如 `~/.cargo/git/checkouts/`，而不是拉到本仓库目录下。
 
@@ -73,4 +77,16 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 - 若需要上游已有修复，更新 Cargo git 依赖锁定 commit，并说明更新的是哪个上游库。
 - 若需要上游新增能力或修复 bug，必须提醒需要更新 `srx_hook` 或 `srx_inline_hook`，并尽量描述需要的 API、行为或复现条件。
 - 若暂时只能在本仓库 workaround，必须说明这是临时方案，并记录后续上游更新需求。
+
+## 已判定的能力边界
+
+### fork 子进程中的配置锁：暂不需要上游 atfork 能力
+
+`should_bypass_hook_in_fork_child`（`src/hook/runtime.rs`）对系统代写进程与 shared-uid 进程**不**绕过 hook，因此这两类进程的 fork 子进程会进入完整重定向决策链，而链上使用阻塞锁：`SettingsHub` 的 `state.lock()`（`src/config/inspect.rs` 十余处、`src/config/raw_scan.rs`）与 `PathRouter` 的 `state.read()`（`src/redirect/router.rs`）。若 fork 恰好发生在另一线程持锁重载配置期间，子进程中该锁处于永久占用状态，第一次被拦截的 open 就会永久阻塞。`PATH_NORMALIZE_CACHE` 使用 `try_lock`（`src/platform/paths.rs`）说明该风险此前已被意识到。
+
+**真机实测结论：该竞态的前提条件不成立，因此不改。** 在 Android 16（SDK 36、KernelSU）真机上用 `strace -f -e trace=clone,fork,vfork` 观测 MediaProvider（38 个线程）共 55 秒：25 秒 MediaStore 查询负载下 clone 调用 0 次；30 秒混合负载（文件写入、MediaStore 查询、媒体扫描广播）下同样 0 次。strace 本身工作正常（日志含 `Process <pid> detached`），进程快照也确认 MediaProvider 无子进程。模块日志中 shared-uid 相关记录同为 0。即「系统代写进程 fork」这一前提在实际环境中未观测到。
+
+不修改的理由是收益与风险不对称：修复需触及整条决策链十余处锁语义，改错会导致热路径死锁或重定向被错误放行，比原风险更严重；而该竞态无法用外置测试构造，测试流也覆盖不到（普通应用不装进程内 hook，系统代写进程的 fork 时序不可控），缺乏验证手段。
+
+**上游能力现状**：`srx_hook` 提供 `is_forked_child()`，实现为纯 pid 比较（`getpid() != INSTALL_PID`），async-signal-safe，可在 fork 子进程中安全调用；但**没有** `pthread_atfork` 注册能力。若将来出现确实会 fork 的系统代写进程（例如厂商定制 MediaProvider）而需要在子进程侧标记「仅走原函数」，则需要上游新增 atfork 钩子注册 API；在此之前不需要上游更新。
 
