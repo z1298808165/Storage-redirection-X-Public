@@ -1465,12 +1465,56 @@ function Set-ReadOnlyMediaImage {
     Wait-MediaStoreReadOnlyImage
 }
 
+# 按 Java String.hashCode() 计算目录的 MediaStore bucket_id。
+#
+# MediaProvider 用小写目录路径的 hashCode 作为 bucket_id，模块也按同一算法把请求
+# 目录的 bucket_id 换成映射目标目录的。这里在测试侧独立实现，用于校验结果是否指向
+# 预期目录，而非与模块自身的计算结果比较。路径不含尾斜杠（与模块实现一致）。
+function Get-JavaBucketId {
+    param([string]$Path)
+    # 用 long 累加并每步取模 2^32，最后再折算为有符号 32 位。
+    # 直接用 [int] 累加会在中间步骤溢出并抛 InvalidCastIConvertible。
+    [long]$hash = 0
+    foreach ($unit in $Path.ToLowerInvariant().ToCharArray()) {
+        $hash = ($hash * 31 + [int][char]$unit) % 4294967296
+    }
+    if ($hash -ge 2147483648) { $hash -= 4294967296 }
+    [int]$hash
+}
+
+# 校验查询结果中的 bucket_id 是否等于指定目录的 bucket_id。
+#
+# bucket_id 是相册按目录分组的键：改写错会让重定向后的文件归入真实目录桶，
+# 或让未重定向的文件被错误改写，表现为相册分组错乱。
+function Test-MediaStoreBucketId {
+    param([string]$Label, [string]$ResultFile, [string]$ExpectedDir)
+    if (-not (Test-Path -LiteralPath $ResultFile)) {
+        $script:Failures.Add("$Label bucket_id 结果文件缺失：$ResultFile")
+        return $false
+    }
+    $text = Get-Content -LiteralPath $ResultFile -Raw
+    $matched = [regex]::Match($text, 'bucketId=(-?\d+)')
+    if (-not $matched.Success) {
+        $script:Failures.Add("$Label 结果中缺少 bucketId")
+        return $false
+    }
+    $actual = [int]$matched.Groups[1].Value
+    $expected = Get-JavaBucketId $ExpectedDir
+    if ($actual -ne $expected) {
+        $script:Failures.Add("$Label bucket_id 不匹配 dir=$ExpectedDir expected=$expected actual=$actual")
+        return $false
+    }
+    Write-Host "  - $Label/bucket-id-ok dir=$ExpectedDir bucket_id=$actual"
+    return $true
+}
+
 function Invoke-MediaStoreReadOnlyQueryScenario {
     param([int]$Scenario)
     $logicalPath = "$ReadOnlyMediaRoot/$ReadOnlyImageFile"
     $privatePath = "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
     $ok = Wait-MediaStoreReadOnlyImage
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-query" "mediastore_query_read_only_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_query_read_only_image\]").Ok -and $ok
+    $ok = (Test-MediaStoreBucketId "scenario-$Scenario-read-only-image" "scenario-$Scenario-read-only-image-query-result.txt" $ReadOnlyMediaRoot) -and $ok
     $list = Invoke-ServiceCase "scenario-$Scenario" "read-only-image-list" "file_list_dir" @{ file_dir = $ReadOnlyMediaRoot } "^PASS \[file_list_dir\]"
     $ok = $list.Ok -and (Test-Path "scenario-$Scenario-read-only-image-list-result.txt") -and ((Get-Content "scenario-$Scenario-read-only-image-list-result.txt" -Raw) -match "entries=.*$([regex]::Escape($ReadOnlyImageFile))") -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-file-read" "file_read" @{ file_path = $logicalPath } "^PASS \[file_read\]").Ok -and $ok
