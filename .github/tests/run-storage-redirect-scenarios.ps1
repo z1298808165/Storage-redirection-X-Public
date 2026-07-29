@@ -600,6 +600,23 @@ function Wait-Storage {
     $false
 }
 
+# 轮询真实存储根是否已可创建目录。
+#
+# Wait-Storage 只确认卷 mounted 且根目录可 stat，但重启 MediaProvider 后存在
+# 「卷已挂载、root 视角却还不能建目录」的窗口。场景预置正是靠 mkdir，
+# 因此需要直接验证可写性。探测目录用完即删。与 bash 侧 wait_real_root_writable 对应。
+function Wait-RealRootWritable {
+    param([string]$Label, [int]$TimeoutSeconds = 60)
+    $probe = "$RealRoot/.srt_writable_probe"
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Su "mkdir -p '$probe' && rmdir '$probe'") { return $true }
+        Start-Sleep -Seconds 2
+    }
+    $script:Failures.Add("$Label storage root not writable")
+    $false
+}
+
 function Test-MediaProviderQueryReady {
     param([string]$Uri)
 
@@ -1402,10 +1419,12 @@ function Invoke-StandardScenario {
                 $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "mediastore-public-parent-owner" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
             }
             $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "android-owner" "$BackendRoot/Android") -and $ok
-            # 上面重启了 MediaProvider，存储卷需要时间重新挂载。后续场景的清理与
-            # 预置发生在其自身存储等待之前，若此时卷未恢复，mkdir 会失败并导致
-            # 挂载点缺失。与 bash 侧一致，在本场景内把存储状态还原后再继续。
+            # 上面重启了 MediaProvider，存储需要时间恢复。后续场景的清理与预置
+            # 发生在其自身存储等待之前，若此时未恢复，mkdir 会失败并导致挂载点
+            # 缺失。仅等挂载不够——存在「卷已挂载但 root 视角还不能建目录」的
+            # 窗口，故额外轮询真实可写性。与 bash 侧一致。
             $ok = (Wait-Storage "scenario-$Scenario-mediastore-restore" 60) -and $ok
+            $ok = (Wait-RealRootWritable "scenario-$Scenario-mediastore-restore" 60) -and $ok
         }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
         7 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
