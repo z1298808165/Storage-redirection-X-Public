@@ -106,10 +106,20 @@ class SrxViewModel(
   private val monitorFiltersSaveMutex = Mutex()
   private val globalConfigSaveRequests = Channel<GlobalConfig>(Channel.CONFLATED)
 
+  /**
+   * 全局配置读写互斥锁。
+   *
+   * 全局配置有两条写路径：用户改开关走 [globalConfigSaveRequests] 通道串行落盘， 而 [reconcileAutoTemplateFallback]
+   * 会自行读取并可能写回。两者此前互不同步， 若用户的改动尚在通道中未落盘，reconcile 读到磁盘上的旧值后会覆盖内存状态， 界面上的开关就会自己弹回旧值，甚至把用户的修改写没。
+   *
+   * 因此两条路径的「读取、写入、据结果更新状态」整段都必须在本锁内完成。
+   */
+  private val globalConfigMutex = Mutex()
+
   init {
     viewModelScope.launch {
       for (config in globalConfigSaveRequests) {
-        val ok = repository.writeGlobalConfig(config)
+        val ok = globalConfigMutex.withLock { repository.writeGlobalConfig(config) }
         if (ok) {
           if (_state.value.dashboard.globalConfig == config) {
             showMessage("设置已保存")
@@ -117,7 +127,10 @@ class SrxViewModel(
           continue
         }
 
-        val persisted = runCatching { repository.readGlobalConfig() }.getOrDefault(config)
+        val persisted =
+            globalConfigMutex.withLock {
+              runCatching { repository.readGlobalConfig() }.getOrDefault(config)
+            }
         if (_state.value.dashboard.globalConfig == config) {
           _state.value =
               _state.value.copy(
@@ -448,7 +461,15 @@ class SrxViewModel(
     }
   }
 
-  private suspend fun reconcileAutoTemplateFallback(templates: List<ConfigTemplate>) {
+  /**
+   * 校正自动新应用模板：模板被删除后清空对应配置项。
+   *
+   * 整段在 [globalConfigMutex] 内执行，与用户改开关的保存通道互斥，避免读到 尚未落盘的旧值并把用户修改覆盖回去。
+   */
+  private suspend fun reconcileAutoTemplateFallback(templates: List<ConfigTemplate>) =
+      globalConfigMutex.withLock { reconcileAutoTemplateFallbackLocked(templates) }
+
+  private suspend fun reconcileAutoTemplateFallbackLocked(templates: List<ConfigTemplate>) {
     val global = repository.readGlobalConfig()
     val templateId = global.autoEnableNewAppsTemplateId
     if (
