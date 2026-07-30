@@ -10,7 +10,9 @@ const APPS_DIR = CONFIG_DIR + "/apps";
 const TEMPLATES_CONFIG = CONFIG_DIR + "/templates.json";
 const FILE_MONITOR_FILTERS_CONFIG = CONFIG_DIR + "/file_monitor_filters.json";
 const LOGS_DIR = MODULE_DIR + "/logs";
-const MODULE_STATS_FILE = MODULE_DIR + "/stats";
+// stats 存放在模块目录之外的持久目录，避免模块升级时计数丢失。
+const STATS_PERSIST_DIR = "/data/adb/storage.redirect.x";
+const MODULE_STATS_FILE = STATS_PERSIST_DIR + "/stats";
 const GLOBAL_CONFIG = CONFIG_DIR + "/global.json";
 const RUNTIME_DISABLE = MODULE_DIR + "/.runtime_disabled";
 const RUNTIME_STATE_CONFIG = CONFIG_DIR + "/runtime_state.json";
@@ -1230,7 +1232,7 @@ const Api = {
       diagnosticProgressCommand(progress, 18, "files", "正在复制模块日志和配置") +
       'if [ -d "$logs" ]; then find "$logs" -maxdepth 1 -type f ! -name ".*.pid" ! -name ".uid_map_last_refresh" -exec cp -p {} "$stage/logs/" \\; 2>/dev/null; fi; ' +
       'cp -p "$module/module.prop" "$stage/module.prop" 2>/dev/null || true; ' +
-      'cp -p "$module/stats" "$stage/stats" 2>/dev/null || true; ' +
+      'cp -p "/data/adb/storage.redirect.x/stats" "$stage/stats" 2>/dev/null || true; ' +
       'cp -p "$config/global.json" "$stage/config/global.json" 2>/dev/null || true; ' +
       'cp -p "$config/file_monitor_filters.json" "$stage/config/file_monitor_filters.json" 2>/dev/null || true; ' +
       'cp -p "$config/templates.json" "$stage/config/templates.json" 2>/dev/null || true; ' +

@@ -59,6 +59,29 @@ restore_existing_config() {
   rm -rf "$BACKUP_CONFIG_DIR"
 }
 
+# 一次性迁移：旧版本把 stats 存在模块目录内，新版本改到持久目录。
+# 升级时若持久目录还没有 stats 但旧模块目录里有，把它迁移过去。
+# 迁移完成后旧文件保留，让旧 daemon 继续正常写入，重启后由新 daemon 接管。
+migrate_stats_to_persistent_dir() {
+  stats_dir="/data/adb/storage.redirect.x"
+  old_stats="$ACTIVE_MODULE_DIR/stats"
+  new_stats="$stats_dir/stats"
+
+  if [ -f "$new_stats" ]; then
+    return 0
+  fi
+
+  if [ ! -f "$old_stats" ]; then
+    return 0
+  fi
+
+  ui_print "-- migrate stats to persistent dir"
+  mkdir -p "$stats_dir" 2>/dev/null
+  if ! cp -f "$old_stats" "$new_stats" 2>/dev/null; then
+    ui_print "-- warn: stats migration failed, counter will restart from 0"
+  fi
+}
+
 # 清理旧模块 ID 残留，防止 ZygiskNext 同时加载多份 so
 for legacy_id in $LEGACY_MODULE_IDS; do
   legacy_dir="/data/adb/modules/$legacy_id"
@@ -70,6 +93,7 @@ done
 
 print_progress 10 "prepare module"
 backup_existing_config
+migrate_stats_to_persistent_dir
 
 # 解压文件
 print_progress 20 "extract module files"

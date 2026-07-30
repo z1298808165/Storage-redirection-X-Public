@@ -386,7 +386,7 @@ class RootFileStore(
         progressCommand(progress, 18, "files", "正在复制模块日志和配置") +
         "if [ -d \"\$logs\" ]; then find \"\$logs\" -maxdepth 1 -type f ! -name '.*.pid' ! -name '.uid_map_last_refresh' -exec cp -p {} \"\$stage/logs/\" \\; 2>/dev/null; fi; " +
         "cp -p \"\$module/module.prop\" \"\$stage/module.prop\" 2>/dev/null || true; " +
-        "cp -p \"\$module/stats\" \"\$stage/stats\" 2>/dev/null || true; " +
+        "cp -p \"/data/adb/storage.redirect.x/stats\" \"\$stage/stats\" 2>/dev/null || true; " +
         "cp -p \"\$config/global.json\" \"\$stage/config/global.json\" 2>/dev/null || true; " +
         "cp -p \"\$config/file_monitor_filters.json\" \"\$stage/config/file_monitor_filters.json\" 2>/dev/null || true; " +
         "cp -p \"\$config/templates.json\" \"\$stage/config/templates.json\" 2>/dev/null || true; " +

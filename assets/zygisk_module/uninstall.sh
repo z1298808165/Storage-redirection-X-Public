@@ -45,8 +45,25 @@ stop_collector_by_pid_file "$STATS_COLLECTOR_PID_FILE"
 stop_collector_by_pid_file "$CONFIG_EVENT_COLLECTOR_PID_FILE"
 stop_collector_by_pid_file "$PACKAGE_EVENT_COLLECTOR_PID_FILE"
 
-rm -f /data/local/tmp/storage.redirect.x_stats 2>/dev/null
-rm -rf /data/local/tmp/storage.redirect.x 2>/dev/null
+# 仅允许删除已知的模块私有路径，防止误删无关目录。
+safe_remove_known_path() {
+  target="$1"
+  case "$target" in
+    /data/local/tmp/storage.redirect.x_stats|\
+    /data/local/tmp/storage.redirect.x|\
+    /data/adb/storage.redirect.x)
+      rm -rf "$target" 2>/dev/null
+      ;;
+    *)
+      ui_print "-- warn: skip unknown path=$target"
+      ;;
+  esac
+}
+
+safe_remove_known_path /data/local/tmp/storage.redirect.x_stats
+safe_remove_known_path /data/local/tmp/storage.redirect.x
+# stats 持久目录在模块目录之外，模块管理器不会自动清理，需要显式删除。
+safe_remove_known_path /data/adb/storage.redirect.x
 
 ui_print "-- Storage Redirect X uninstalled"
 ui_print "-- temporary files cleaned"

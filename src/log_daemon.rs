@@ -15,9 +15,16 @@ use std::time::{Duration, Instant};
 const SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 const RUNNING_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/running.log";
 const FILE_MONITOR_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
-const STATS_FILE: &str = "/data/adb/modules/storage.redirect.x/stats";
-const STATS_TEMP_FILE: &str = "/data/adb/modules/storage.redirect.x/.stats.tmp";
-const STATS_RESET_ACK_FILE: &str = "/data/adb/modules/storage.redirect.x/.stats.reset.ok";
+/// 生效次数存放在模块目录之外的持久目录。
+///
+/// 模块管理器在开机时会先删除旧模块目录再换上待更新目录，且这一步发生在
+/// 任何模块脚本之前。把累计计数放在模块目录内，会让「刷入后到重启之间」
+/// 由旧 daemon 继续累加的次数随旧目录一起丢失。放在持久目录后，旧 daemon
+/// 和新 daemon 读写同一个文件，升级不再影响计数。
+const STATS_DIR: &str = "/data/adb/storage.redirect.x";
+const STATS_FILE: &str = "/data/adb/storage.redirect.x/stats";
+const STATS_TEMP_FILE: &str = "/data/adb/storage.redirect.x/.stats.tmp";
+const STATS_RESET_ACK_FILE: &str = "/data/adb/storage.redirect.x/.stats.reset.ok";
 const MAX_RUNNING_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MONITOR_BYTES: u64 = 1024 * 1024;
 const LOG_BACKUPS: usize = 2;
@@ -642,6 +649,11 @@ fn timestamp_text() -> String {
     String::from_utf8_lossy(&buffer[..written]).into_owned()
 }
 
+/// 启动时读取已累计的生效次数。
+///
+/// 文件不存在（首次安装）或读取失败时均返回 0，daemon 从 0 重新累加。
+/// `schema` 与当前版本不一致时同样返回 0：schema 只在统计口径变化时提升，
+/// 旧值与新口径不可比，丢弃是有意行为。
 fn read_runtime_activations() -> u64 {
     let Ok(text) = fs::read_to_string(STATS_FILE) else {
         return 0;
@@ -670,6 +682,8 @@ fn format_stats(runtime_activations: u64) -> String {
 }
 
 fn persist_runtime_activations(runtime_activations: u64) -> io::Result<()> {
+    // 目录可能尚不存在（首次安装或迁移前的首次启动），确保先创建。
+    fs::create_dir_all(STATS_DIR)?;
     let mut file = File::create(STATS_TEMP_FILE)?;
     file.write_all(format_stats(runtime_activations).as_bytes())?;
     file.sync_all()?;

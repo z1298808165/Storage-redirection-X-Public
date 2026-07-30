@@ -26,6 +26,10 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$CONFIG_DIR/apps"
 chmod 755 "$CONFIG_DIR" "$CONFIG_DIR/apps" 2>/dev/null
 find "$CONFIG_DIR" -type f -name '*.json' -exec chmod 644 {} \; 2>/dev/null
+# stats 持久目录位于模块目录之外，模块升级不会删除它。
+# daemon 写入时会自行 create_dir_all，这里提前创建只是保险。
+mkdir -p /data/adb/storage.redirect.x
+chmod 700 /data/adb/storage.redirect.x 2>/dev/null
 
 module_version=$(sed -n 's/^versionCode=//p; s/^version=//p' "$MODDIR/module.prop" 2>/dev/null | tr '\n' ' ')
 if [ -n "$module_version" ]; then

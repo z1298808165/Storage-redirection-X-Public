@@ -136,7 +136,7 @@ collect_basic_files() {
   fi
 
   copy_file_if_exists "$MODDIR/module.prop" "$stage/module.prop"
-  copy_file_if_exists "$MODDIR/stats" "$stage/stats"
+  copy_file_if_exists "/data/adb/storage.redirect.x/stats" "$stage/stats"
   copy_file_if_exists "$CONFIG_DIR/global.json" "$stage/config/global.json"
   copy_file_if_exists "$CONFIG_DIR/file_monitor_filters.json" "$stage/config/file_monitor_filters.json"
   copy_file_if_exists "$CONFIG_DIR/templates.json" "$stage/config/templates.json"
