@@ -83,6 +83,46 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("control clear-monitor", control)
         self.assertIn("control reset-stats", control)
 
+    def test_module_update_keeps_existing_runtime_stats(self) -> None:
+        customize = read("assets/zygisk_module/customize.sh")
+        api = read("assets/zygisk_module/webroot/js/api.js")
+        daemon = read("src/log_daemon.rs")
+        srxctl = read("assets/zygisk_module/bin/srxctl")
+        post_fs = read("assets/zygisk_module/post-fs-data.sh")
+        uninstall = read("assets/zygisk_module/uninstall.sh")
+
+        # stats 必须存放在模块目录之外的持久目录
+        self.assertIn('"/data/adb/storage.redirect.x/stats"', daemon)
+        self.assertIn('"/data/adb/storage.redirect.x/.stats.tmp"', daemon)
+        self.assertIn('"/data/adb/storage.redirect.x/.stats.reset.ok"', daemon)
+        self.assertNotIn('"/data/adb/modules/storage.redirect.x/stats"', daemon)
+
+        # post-fs-data.sh 必须为持久目录做 mkdir
+        self.assertIn("mkdir -p /data/adb/storage.redirect.x", post_fs)
+
+        # srxctl reset-stats fallback 必须写到持久目录
+        self.assertIn('"/data/adb/storage.redirect.x"', srxctl)
+        self.assertNotIn('"$MODDIR/stats"', srxctl)
+        self.assertNotIn('"$MODDIR/.stats.tmp"', srxctl)
+        self.assertNotIn('"$MODDIR/.stats.reset.ok"', srxctl)
+
+        # WebUI 必须从持久目录读取
+        self.assertIn('"/data/adb/storage.redirect.x/stats"', api)
+        self.assertNotIn('MODULE_DIR + "/stats"', api)
+
+        # customize.sh 升级时做一次性迁移，不再做 backup/restore
+        self.assertIn("migrate_stats_to_persistent_dir", customize)
+        migrate_call = customize.index("\nmigrate_stats_to_persistent_dir\n")
+        unzip_call = customize.index('unzip -o "$ZIPFILE"')
+        self.assertLess(migrate_call, unzip_call)
+        self.assertNotIn("backup_existing_stats", customize)
+        self.assertNotIn("restore_existing_stats", customize)
+
+        # uninstall.sh 必须通过安全守卫清理持久目录
+        self.assertIn("safe_remove_known_path", uninstall)
+        self.assertIn("safe_remove_known_path /data/adb/storage.redirect.x", uninstall)
+        self.assertIn("/data/adb/storage.redirect.x)", uninstall)
+
     def test_webui_reads_bounded_log_tail_and_cleans_bridge_failures(self) -> None:
         app = read("assets/zygisk_module/webroot/js/app.js")
         api = read("assets/zygisk_module/webroot/js/api.js")
