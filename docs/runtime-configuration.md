@@ -23,7 +23,7 @@
 - `fuse_daemon_redirect_enabled`：启用混合 FUSE 重定向增强。普通路径仍使用默认 mount namespace，只有通配规则前缀会挂载模块内 FUSE daemon；开启后 `!`、`*`、`?` 规则按路径匹配精确生效。关闭或 FUSE 启动失败时，普通应用仍使用默认 mount namespace 方案，通配符规则会退化为已存在的具体匹配目录，必要时退化到最近具体父目录。缺失、格式错误或不可读时，默认值为 `false`。
 - `verbose_logging_enabled`：启用详细日志。打开后，普通 native 日志通过 `srx_daemon` 的私有 datagram 通道写入 `running.log`，并启动 Java/崩溃上下文和 MediaProvider/应用状态采集；关闭后立即停止这些详细记录。文件监视记录由 `file_monitor_enabled` 和文件监视过滤配置单独控制，概览页的轻量运行时生效计数始终启用。缺失、格式错误或不可读时，默认值为 `false`。
 
-概览页“生效次数”累计重定向运行时成功启用的次数：普通应用的 companion mount 成功启用一次计一次，daemon 为尚无 mount state 的进程首次补建重定向运行时计一次，系统写入进程的重定向 hook 成功启用一次计一次。已有 mount state 的配置重载不重复计数。它不统计每次文件访问或路径改写，也不受详细日志和文件监视开关影响。`stats` 使用带 schema 的独立格式保存精确值；概览页仅按 `K`、`M`、`B`、`T` 等国际短单位缩写显示，点击计数可查看精确值，长按并确认后可清零重新统计。旧版混合口径的纯数字统计不会并入新版计数。
+概览页“生效次数”累计重定向运行时成功启用的次数：普通应用的 companion mount 成功启用一次计一次，daemon 为尚无 mount state 的进程首次补建重定向运行时计一次，系统写入进程的重定向 hook 成功启用一次计一次。已有 mount state 的配置重载不重复计数。它不统计每次文件访问或路径改写，也不受详细日志和文件监视开关影响。`stats` 使用带 schema 的独立格式保存精确值，存放在 `/data/adb/storage.redirect.x/stats`（模块目录之外的持久路径，模块升级不会触碰该目录）。概览页仅按 `K`、`M`、`B`、`T` 等国际短单位缩写显示，点击计数可查看精确值，长按并确认后可清零重新统计。累计计数不会因模块升级归零，刷入后延迟重启期间由旧 daemon 继续累加的次数也不会丢失；只有首次安装或用户主动清零才会从 0 开始。旧版混合口径的纯数字统计不会并入新版计数。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时，新安装应用默认只开启重定向，不附加允许路径、沙盒路径或映射规则。若模板文件被外部修改导致该 ID 不再可用，运行脚本会先按仅开启重定向生成新应用配置；APP 和 WebUI 进入设置页时会清空失效引用，并在自动配置模板状态行提示已回退。缺失、格式错误或不可读时，默认值为空字符串。
 - `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
