@@ -905,6 +905,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
+        self.policy.emit_monitor_create(&backend);
         self.reply_entry_for_rel(&rel, reply);
     }
 
