@@ -1279,12 +1279,15 @@ check_file_missing() {
 check_public_directory_owner() {
   local label="$1"
   local path="$2"
-  local actual
-  actual="$(adb_su "stat -c '%u:%g' '$path' 2>/dev/null" | tail -1)"
-  if [ "$actual" = "1023:1023" ]; then
-    echo "public_owner label=${label} path=${path} owner=${actual}"
-    return 0
-  fi
+  local actual attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    actual="$(adb_su "stat -c '%u:%g' '$path' 2>/dev/null" | tail -1)"
+    if [ "$actual" = "1023:1023" ]; then
+      echo "public_owner label=${label} path=${path} owner=${actual} attempt=${attempt}"
+      return 0
+    fi
+    sleep_ms 250
+  done
   echo "public_owner_mismatch label=${label} path=${path} expected=1023:1023 actual=${actual:-missing}" >&2
   adb_su "ls -ldn '$path' 2>/dev/null || true" >&2 || true
   return 1

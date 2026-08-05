@@ -577,11 +577,15 @@ function Require-Missing {
 
 function Test-PublicDirectoryOwner {
     param([string]$Scenario, [string]$Label, [string]$Path)
-    $actualLine = @(Invoke-Su "stat -c '%u:%g' '$Path' 2>/dev/null") | Select-Object -Last 1
-    $actual = if ($null -eq $actualLine) { "" } else { $actualLine.Trim() }
-    if ($actual -eq "1023:1023") {
-        Write-Host "  - public_owner label=$Label path=$Path owner=$actual"
-        return $true
+    $actual = ""
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        $actualLine = @(Invoke-Su "stat -c '%u:%g' '$Path' 2>/dev/null") | Select-Object -Last 1
+        $actual = if ($null -eq $actualLine) { "" } else { $actualLine.Trim() }
+        if ($actual -eq "1023:1023") {
+            Write-Host "  - public_owner label=$Label path=$Path owner=$actual attempt=$attempt"
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
     }
     $script:Failures.Add("$Scenario/$Label public directory owner expected 1023:1023, got ${actual}: $Path")
     @(Invoke-Su "ls -ldn '$Path' 2>/dev/null || true") | ForEach-Object { Write-Host "  owner: $_" }
