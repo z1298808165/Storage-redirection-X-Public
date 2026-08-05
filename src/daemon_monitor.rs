@@ -191,6 +191,15 @@ impl RegularAppMonitor {
         let mut expansion_roots = Vec::new();
         let mut missing_watch_roots = Vec::new();
         for root in &roots {
+            if root.source == "public_owner" {
+                if self.repair_public_owner_root(root) {
+                    applied_roots = applied_roots.saturating_add(1);
+                } else {
+                    self.missing_roots = self.missing_roots.saturating_add(1);
+                    missing_watch_roots.push(root.clone());
+                }
+                continue;
+            }
             if let Some(node) = self.add_watch_root(root) {
                 applied_roots = applied_roots.saturating_add(1);
                 expansion_roots.push(node);
@@ -210,9 +219,6 @@ impl RegularAppMonitor {
             for node in expansion_roots {
                 let repair_existing_files = overflow_resync || node.source == "private_owner";
                 let recurse_existing_tree = overflow_resync || node.source != "public_owner";
-                if node.source == "public_owner" {
-                    self.repair_existing_public_tree(&node);
-                }
                 self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
@@ -248,6 +254,14 @@ impl RegularAppMonitor {
         let mut expansion_roots = Vec::new();
         let mut roots = std::mem::take(&mut self.missing_watch_roots).into_iter();
         while let Some(root) = roots.next() {
+            if root.source == "public_owner" {
+                if self.repair_public_owner_root(&root) {
+                    applied_roots = applied_roots.saturating_add(1);
+                } else {
+                    still_missing.push(root);
+                }
+                continue;
+            }
             if self.watch_nodes.len() >= MAX_WATCHES {
                 self.mark_capacity_limited();
                 still_missing.push(root);
@@ -266,9 +280,6 @@ impl RegularAppMonitor {
             for node in expansion_roots {
                 let repair_existing_files = node.source == "private_owner";
                 let recurse_existing_tree = node.source != "public_owner";
-                if node.source == "public_owner" {
-                    self.repair_existing_public_tree(&node);
-                }
                 self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
@@ -378,6 +389,29 @@ impl RegularAppMonitor {
             return false;
         };
         self.expand_watch_tree_from(node, true, true);
+        true
+    }
+
+    fn repair_public_owner_root(&self, root: &WatchRoot) -> bool {
+        let Some(start) = select_watch_start(root) else {
+            return false;
+        };
+        let node = WatchNode {
+            package_name: root.package_name.clone(),
+            backend_dir: start.backend_dir,
+            display_dir: start.display_dir,
+            record_display_root: root.record_display_root.clone(),
+            record_from_root: root.record_from_root.clone(),
+            excluded_roots: root.excluded_roots.clone(),
+            source: root.source,
+        };
+        repair_monitored_backend_owner(
+            node.source,
+            &node.package_name,
+            &node.display_dir,
+            &node.backend_dir,
+        );
+        self.repair_existing_public_tree(&node);
         true
     }
 
