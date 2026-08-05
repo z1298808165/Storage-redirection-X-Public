@@ -223,6 +223,10 @@ class LoggingArchitectureTest(unittest.TestCase):
 
         self.assertIn('if root.source == "public_owner"', reconfigure)
         self.assertIn("self.repair_public_owner_root(root)", reconfigure)
+        self.assertIn("self.repair_public_owner_roots_if_due()", reconfigure)
+        self.assertIn("public_owner_roots", reconfigure)
+        self.assertIn("fn repair_public_owner_roots_if_due", monitor)
+        self.assertIn("PUBLIC_OWNER_REPAIR_INTERVAL_MS", monitor)
         self.assertIn('if root.source == "public_owner"', retry)
         self.assertIn("self.repair_public_owner_root(&root)", retry)
         self.assertIn("self.repair_existing_public_tree(&node)", repair)
