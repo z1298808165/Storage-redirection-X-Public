@@ -209,6 +209,24 @@ class LoggingArchitectureTest(unittest.TestCase):
             duplicate,
         )
 
+    def test_public_owner_repair_does_not_consume_audit_watches(self) -> None:
+        monitor = read("src/daemon_monitor.rs")
+        reconfigure = monitor[
+            monitor.index("pub fn reconfigure") : monitor.index("fn retry_missing_watch_roots")
+        ]
+        retry = monitor[
+            monitor.index("fn retry_missing_watch_roots") : monitor.index("fn ensure_fd")
+        ]
+        repair = monitor[
+            monitor.index("fn repair_public_owner_root") : monitor.index("fn add_watch_root")
+        ]
+
+        self.assertIn('if root.source == "public_owner"', reconfigure)
+        self.assertIn("self.repair_public_owner_root(root)", reconfigure)
+        self.assertIn('if root.source == "public_owner"', retry)
+        self.assertIn("self.repair_public_owner_root(&root)", retry)
+        self.assertIn("self.repair_existing_public_tree(&node)", repair)
+
     def test_read_only_exclusions_keep_parent_mount_read_only(self) -> None:
         apply = read("src/mount/apply.rs")
         aliases = read("src/mount/alias.rs")
