@@ -37,6 +37,8 @@ const MAX_EVENTS_PER_DRAIN: usize = 4096;
 /// 会反复触发全扫，反而延长处理时间、加剧溢出。
 const OVERFLOW_RESYNC_MIN_INTERVAL_MS: i64 = 30_000;
 const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
+/// 公共 owner 修复不安装 inotify watch，使用有界周期扫描覆盖运行期间新建的目录。
+const PUBLIC_OWNER_REPAIR_INTERVAL_MS: i64 = 1000;
 /// 递归展开监视树时最多访问的目录数，与 [`MAX_PUBLIC_OWNER_REPAIR_DIRS`] 对齐。
 const MAX_EXISTING_TREE_REPAIR_DIRS: usize = 32768;
 const PUBLIC_OWNER_EXISTING_WATCH_DEPTH: usize = 2;
@@ -75,6 +77,7 @@ pub struct RegularAppMonitor {
     recent_event_ms: HashMap<String, i64>,
     recent_event_order: VecDeque<String>,
     missing_watch_roots: Vec<WatchRoot>,
+    public_owner_roots: Vec<WatchRoot>,
     missing_roots: usize,
     capacity_limited: bool,
     needs_rebuild: bool,
@@ -87,6 +90,7 @@ pub struct RegularAppMonitor {
     last_overflow_resync_ms: i64,
     /// 配置未变化而直接沿用现有监视树的次数，用于限频输出排查日志。
     unchanged_reconfigure_count: u32,
+    last_public_owner_repair_ms: i64,
 }
 
 impl RegularAppMonitor {
@@ -98,6 +102,7 @@ impl RegularAppMonitor {
             recent_event_ms: HashMap::new(),
             recent_event_order: VecDeque::new(),
             missing_watch_roots: Vec::new(),
+            public_owner_roots: Vec::new(),
             missing_roots: 0,
             capacity_limited: false,
             needs_rebuild: true,
@@ -106,6 +111,7 @@ impl RegularAppMonitor {
             add_watch_error_count: 0,
             last_overflow_resync_ms: 0,
             unchanged_reconfigure_count: 0,
+            last_public_owner_repair_ms: 0,
         }
     }
 
@@ -125,6 +131,7 @@ impl RegularAppMonitor {
             if self.should_retry_missing_roots() {
                 self.retry_missing_watch_roots();
             }
+            self.repair_public_owner_roots_if_due();
             // 排查用：按 2 的幂限频记录一次「配置未变化、沿用现有监视树」。
             // 汇总日志缺失时需要区分两种情形：reconfigure 每轮都在走这条捷径
             // （说明监视树是早前建立的、或从未建立），还是根本没被调用。
@@ -186,6 +193,11 @@ impl RegularAppMonitor {
         }
         dedup_roots(&mut roots);
         sort_roots_by_monitor_priority(&mut roots);
+        self.public_owner_roots = roots
+            .iter()
+            .filter(|root| root.source == "public_owner")
+            .cloned()
+            .collect();
 
         let mut applied_roots = 0usize;
         let mut expansion_roots = Vec::new();
@@ -226,6 +238,7 @@ impl RegularAppMonitor {
             }
         }
         self.missing_watch_roots = missing_watch_roots;
+        self.last_public_owner_repair_ms = paths::monotonic_ms();
 
         log::info!(
             "daemon monitor roots={} applied={} missing={} watches={} capacity_limited={} version={:x}",
@@ -251,12 +264,14 @@ impl RegularAppMonitor {
         let previous_missing = self.missing_watch_roots.len();
         let mut still_missing = Vec::new();
         let mut applied_roots = 0usize;
+        let mut repaired_public_root = false;
         let mut expansion_roots = Vec::new();
         let mut roots = std::mem::take(&mut self.missing_watch_roots).into_iter();
         while let Some(root) = roots.next() {
             if root.source == "public_owner" {
                 if self.repair_public_owner_root(&root) {
                     applied_roots = applied_roots.saturating_add(1);
+                    repaired_public_root = true;
                 } else {
                     still_missing.push(root);
                 }
@@ -288,6 +303,9 @@ impl RegularAppMonitor {
         }
         self.missing_roots = still_missing.len();
         self.missing_watch_roots = still_missing;
+        if repaired_public_root {
+            self.last_public_owner_repair_ms = paths::monotonic_ms();
+        }
         if applied_roots > 0 || self.missing_roots != previous_missing {
             log::info!(
                 "daemon monitor retry missing previous={} applied={} remaining={} watches={} capacity_limited={} version={:x}",
@@ -380,8 +398,10 @@ impl RegularAppMonitor {
         self.fd = -1;
         self.watch_nodes.clear();
         self.missing_watch_roots.clear();
+        self.public_owner_roots.clear();
         self.missing_roots = 0;
         self.capacity_limited = false;
+        self.last_public_owner_repair_ms = 0;
     }
 
     fn add_watch_tree(&mut self, root: &WatchRoot) -> bool {
@@ -413,6 +433,20 @@ impl RegularAppMonitor {
         );
         self.repair_existing_public_tree(&node);
         true
+    }
+
+    fn repair_public_owner_roots_if_due(&mut self) {
+        if self.public_owner_roots.is_empty() {
+            return;
+        }
+        let now = paths::monotonic_ms();
+        if now.saturating_sub(self.last_public_owner_repair_ms) < PUBLIC_OWNER_REPAIR_INTERVAL_MS {
+            return;
+        }
+        self.last_public_owner_repair_ms = now;
+        for root in self.public_owner_roots.clone() {
+            self.repair_public_owner_root(&root);
+        }
     }
 
     fn add_watch_root(&mut self, root: &WatchRoot) -> Option<WatchNode> {
