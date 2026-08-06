@@ -123,11 +123,16 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("safe_remove_known_path /data/adb/storage.redirect.x", uninstall)
         self.assertIn("/data/adb/storage.redirect.x)", uninstall)
 
-    def test_webui_reads_bounded_log_tail_and_cleans_bridge_failures(self) -> None:
+    def test_webui_reads_all_rotated_logs_and_renders_in_batches(self) -> None:
         app = read("assets/zygisk_module/webroot/js/app.js")
         api = read("assets/zygisk_module/webroot/js/api.js")
-        self.assertIn("Api.readFileTail(FILE_MONITOR_LOG, 500)", app)
+        self.assertIn("Api.readFileWithBackups(FILE_MONITOR_LOG)", app)
         self.assertNotIn("Api.readFile(FILE_MONITOR_LOG)", app)
+        self.assertIn('for f in "$base".*', api)
+        self.assertIn('sort -rn', api)
+        self.assertIn('case "$suffix" in', api)
+        self.assertIn("appendNextLogBatch", app)
+        self.assertIn("logRenderLimit: 80", app)
         tail = api[api.index("async readFileTail") : api.index("async writeFile", api.index("async readFileTail"))]
         self.assertNotIn("this.readFile(path)", tail)
         bridge = api[api.index("const finish =") : api.index("// 3. Fallback")]
