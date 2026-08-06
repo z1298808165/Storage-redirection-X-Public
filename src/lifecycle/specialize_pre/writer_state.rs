@@ -105,17 +105,17 @@ pub(super) fn should_defer_media_boot_extras_for_state(
         && !is_boot_completed
 }
 
-pub(super) fn should_install_java_hook_for_writer(
-    context: &SystemWriterContext,
-    _is_system_writer_hook_redirect: bool,
-    _should_monitor: bool,
-    _should_defer_media_boot_extras: bool,
-) -> bool {
+pub(super) fn should_install_java_hook_for_writer(context: &SystemWriterContext) -> bool {
     // MediaProvider 的 ContentValues 路径补丁需要 Java hook。Android 13
     // 上 MediaProvider 可能在模块配置写入前就已经启动，且测试/部分设备
     // 不能安全重启该进程；因此 Java mutation hook 需要在 MediaProvider
     // 首次 specialize 时预装。真正是否改写路径仍由 native callback 按
     // caller uid 和实时配置决定，这里不扩大普通应用或 native/PLT hook。
+    //
+    // 判定只看进程身份，与启用应用数、monitor 开关、boot 推迟状态都无关：
+    // 这三项曾作为参数传入却从未参与判定，容易被误读成「零启用应用时不装
+    // hook」。实际上只要 MediaProvider 走到这里就一定会装，因此
+    // `state_absent` 只能说明 specialize 未执行到此处，而非配置导致跳过。
     context.is_system_writer && context.is_media_provider
 }
 

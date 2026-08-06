@@ -286,14 +286,12 @@ impl RuntimeFlow {
             );
         }
 
-        let should_defer_media_boot_extras =
-            self.defer_media_boot_extras_if_needed(&writer_context);
-        let should_install_media_provider_java_hook = should_install_java_hook_for_writer(
-            &writer_context,
-            self.is_system_writer_hook_redirect,
-            self.should_monitor,
-            should_defer_media_boot_extras,
-        );
+        // 仅为其副作用调用：置 boot_lite、撤下 fuse fix 并落推迟标记。
+        // 返回值不参与 Java hook 决策——MediaProvider 的 Java hook 无论是否推迟
+        // 都要预装，两者相互独立。
+        self.defer_media_boot_extras_if_needed(&writer_context);
+        let should_install_media_provider_java_hook =
+            should_install_java_hook_for_writer(&writer_context);
         if should_install_media_provider_java_hook {
             self.should_keep_module_loaded = true;
         }
@@ -643,14 +641,16 @@ impl RuntimeFlow {
         }
     }
 
-    fn defer_media_boot_extras_if_needed(&mut self, writer_context: &SystemWriterContext) -> bool {
+    // 只产生副作用，不返回判定结果：调用方不需要知道是否推迟，
+    // Java hook 的安装决策与推迟状态无关。
+    fn defer_media_boot_extras_if_needed(&mut self, writer_context: &SystemWriterContext) {
         let should_defer = should_defer_media_boot_extras(
             writer_context.is_media_provider,
             self.is_system_writer_hook_redirect,
             self.should_install_fuse_fix,
         );
         if !should_defer {
-            return false;
+            return;
         }
 
         self.is_system_writer_boot_lite = self.is_system_writer_hook_redirect;
@@ -667,7 +667,6 @@ impl RuntimeFlow {
             self.is_system_writer_boot_lite,
             writer_context.should_install_fuse_fix
         );
-        true
     }
 }
 
