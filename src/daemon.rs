@@ -325,6 +325,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let mut deferred = 0usize;
     let mut plans = Vec::new();
     let mut media_processes = Vec::new();
+    let mut media_like_names: Vec<String> = Vec::new();
     let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
 
     for proc in list_app_processes() {
@@ -336,6 +337,12 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         // 这里借本轮已有的枚举结果记下它，避免自愈逻辑重复扫描 /proc。
         if media_hook_heal::is_media_provider_process(&proc.package_name) {
             media_processes.push((proc.pid, proc.uid));
+        } else if proc.package_name.contains("providers.media")
+            || proc.package_name.contains("process.media")
+        {
+            // 名字看着像 MediaProvider 却没被判定命中：记下原始包名，
+            // 用于区分「MediaProvider 没在跑」与「判定没认出它」。
+            media_like_names.push(proc.package_name.clone());
         }
         if should_skip_process(&proc) {
             skipped += 1;
@@ -346,7 +353,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         plans.push(ReconcilePlan::new(request));
     }
 
-    media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes);
+    media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
 
     if mode == ReconcileMode::Prewarm {
         plans.sort_by_key(|plan| plan.priority());

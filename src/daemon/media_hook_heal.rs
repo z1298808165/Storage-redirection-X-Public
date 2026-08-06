@@ -16,7 +16,7 @@ use crate::config::SettingsHub;
 use crate::platform::module_paths;
 use crate::redirect::policy;
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// 每次 daemon 生命周期内只自愈一次。
 ///
@@ -87,15 +87,46 @@ pub(super) fn is_hook_ready_for(
     state.boot_id == current_boot_id
 }
 
+/// 上一次已登记的跳过原因，用于「仅在判定结果变化时输出」。
+///
+/// reconcile 每 3 秒一轮，若每轮都记录跳过原因，会把 running.log 的诊断窗口
+/// （artifact 只截取尾部若干行）冲掉，反而丢失需要的证据。
+static LAST_SKIP_REASON: AtomicU8 = AtomicU8::new(SKIP_NONE);
+
+const SKIP_NONE: u8 = 0;
+const SKIP_NO_MEDIA_PROCESS: u8 = 1;
+const SKIP_ALREADY_ATTEMPTED: u8 = 2;
+const SKIP_BOOT_INCOMPLETE: u8 = 3;
+const SKIP_NO_ENABLED_APPS: u8 = 4;
+const SKIP_HOOK_READY: u8 = 5;
+
+/// 记录跳过原因，同一原因连续出现时只记录一次。
+fn log_skip_once(reason: u8, detail: &str) {
+    if LAST_SKIP_REASON.swap(reason, Ordering::Relaxed) == reason {
+        return;
+    }
+    log::info!("media hook self-heal skip reason={} {}", reason, detail);
+}
+
 /// 在 daemon reconcile 中检查并按需自愈。
 ///
 /// `media_processes` 为本轮枚举到的 MediaProvider 进程（pid 由调用方提供，
-/// 避免本模块重复扫描 /proc）。
-pub(super) fn heal_if_needed(config: &SettingsHub, media_processes: &[(i32, i32)]) {
+/// 避免本模块重复扫描 /proc）。`media_like_names` 是名字像 MediaProvider
+/// 却未被判定命中的包名，用于区分「MediaProvider 没在跑」与「判定没认出它」。
+pub(super) fn heal_if_needed(
+    config: &SettingsHub,
+    media_processes: &[(i32, i32)],
+    media_like_names: &[String],
+) {
     if media_processes.is_empty() {
+        log_skip_once(
+            SKIP_NO_MEDIA_PROCESS,
+            &format!("no_media_provider_process unmatched_like={media_like_names:?}"),
+        );
         return;
     }
     if SELF_HEAL_ATTEMPTED.load(Ordering::Relaxed) {
+        log_skip_once(SKIP_ALREADY_ATTEMPTED, "already_attempted_this_daemon");
         return;
     }
 
@@ -103,6 +134,7 @@ pub(super) fn heal_if_needed(config: &SettingsHub, media_processes: &[(i32, i32)
     // 贸然重启会打断本来会正确装上 hook 的进程。boot_completed 之后，
     // `boot.sh` 的既有推迟重启也已执行完毕，不会与本自愈重复。
     if !crate::platform::is_boot_completed() {
+        log_skip_once(SKIP_BOOT_INCOMPLETE, "boot_not_completed");
         return;
     }
 
@@ -111,6 +143,20 @@ pub(super) fn heal_if_needed(config: &SettingsHub, media_processes: &[(i32, i32)
         .iter()
         .any(|(_, uid)| config.has_effective_enabled_redirect_apps_for_user(*uid));
     if !has_enabled_apps {
+        log_skip_once(
+            SKIP_NO_ENABLED_APPS,
+            &format!(
+                "no_enabled_redirect_apps media_pids={:?} media_uids={:?}",
+                media_processes
+                    .iter()
+                    .map(|(pid, _)| *pid)
+                    .collect::<Vec<_>>(),
+                media_processes
+                    .iter()
+                    .map(|(_, uid)| *uid)
+                    .collect::<Vec<_>>()
+            ),
+        );
         return;
     }
 
@@ -122,12 +168,23 @@ pub(super) fn heal_if_needed(config: &SettingsHub, media_processes: &[(i32, i32)
         .filter(|pid| !is_hook_ready_for(state.as_ref(), *pid, &current_boot_id))
         .collect();
     if stale.is_empty() {
+        log_skip_once(
+            SKIP_HOOK_READY,
+            &format!(
+                "hook_ready_for_all media_pids={:?}",
+                media_processes
+                    .iter()
+                    .map(|(pid, _)| *pid)
+                    .collect::<Vec<_>>()
+            ),
+        );
         return;
     }
 
     if SELF_HEAL_ATTEMPTED.swap(true, Ordering::AcqRel) {
         return;
     }
+    LAST_SKIP_REASON.store(SKIP_NONE, Ordering::Relaxed);
 
     log::warn!(
         "media hook self-heal: restart MediaProvider pids={:?} stage={} record_pid={} record_boot={}",
