@@ -124,13 +124,18 @@ pub(super) fn should_install_java_hook_for_writer(
 /// 系统代写进程只输出 logcat、不写模块日志文件，而 MediaProvider 的 specialize
 /// 往往发生在测试流清空 logcat 之前，安装结果事后在两边都取不到。落盘后即可区分
 /// 「hook 从未安装」与「已安装但未触发」这两种需要相反修复的情况。
+///
+/// 记录进程号，用于把该结果与排查时实际在跑的 MediaProvider 对应起来：
+/// MediaProvider 在一次开机内可能重启多次，每次 specialize 都会覆盖本文件，
+/// 缺少进程号时无法判断读到的结果属于哪个进程。
 pub(super) fn record_media_hook_install_state(stage: &str) {
     let path = module_paths::MEDIA_HOOK_INSTALL_STATE_FILE;
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let boot_completed = platform::is_boot_completed();
-    let record = format!("stage={stage} boot_completed={boot_completed}\n");
+    let pid = std::process::id();
+    let record = format!("stage={stage} pid={pid} boot_completed={boot_completed}\n");
     let _ = std::fs::write(path, record.as_bytes());
     if let Ok(c_path) = CString::new(path) {
         // SAFETY: c_path 由 CString 持有且在本作用域内存活，保证是以 NUL 结尾的
