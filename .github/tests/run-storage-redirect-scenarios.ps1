@@ -1383,6 +1383,53 @@ function Expect-NoAppEntry {
     $true
 }
 
+# 采集场景 2 MediaStore 子用例的 MediaProvider hook 安装证据（PS1 镜像）。
+# 在 Invoke-ServiceCase 完成后、Require-File 断言前调用，
+# 此时 logcat buffer 仍包含本次 insert 的 SRX 回调日志。
+function Invoke-CaptureScenario2MediastoreHookDiag {
+    $outFile = "scenario-2-mediastore-hook-diag.txt"
+    $lines = [System.Collections.Generic.List[string]]::new()
+
+    $lines.Add("===media_provider_pid===")
+    $mpPid = Get-MediaProviderPid
+    $lines.Add("pid=$( if ($mpPid) { $mpPid } else { 'missing' } )")
+    $lines.Add("")
+
+    $lines.Add("===srx_logcat_for_media_provider===")
+    if ($mpPid) {
+        $logcatOut = & adb -s $Serial logcat -d --pid $mpPid -s "SRX:V" 2>$null |
+            Select-Object -Last 200
+        $lines.AddRange([string[]]$logcatOut)
+    } else {
+        $lines.Add("media_provider_pid_missing: cannot filter logcat")
+    }
+    $lines.Add("")
+
+    $lines.Add("===sandbox_dir_content===")
+    $dirOut = Invoke-Su "ls -la '$PrivateMediaStoreRoutingProbeRoot/' 2>/dev/null || echo dir_missing"
+    $lines.AddRange([string[]]$dirOut)
+    $lines.Add("")
+
+    $lines.Add("===running_log_java_hook_lines===")
+    $runningOut = Invoke-Su @"
+grep -aE 'java hook|writer final|writer init|writer boot|boot_lite|specialize' \
+  /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true
+"@
+    $lines.AddRange([string[]]$runningOut)
+    $lines.Add("")
+
+    $lines.Add("===media_hook_deferred_marker===")
+    $markerOut = Invoke-Su "ls -la /data/adb/modules/storage.redirect.x/logs/.media_hook_deferred 2>/dev/null || echo marker_absent"
+    $lines.AddRange([string[]]$markerOut)
+    $lines.Add("")
+
+    try {
+        $lines | Set-Content -Encoding UTF8 -Path $outFile
+    } catch {
+        # 诊断写入失败不影响断言链
+    }
+}
+
 function Invoke-StandardScenario {
     param([int]$Scenario)
     $ok = (Invoke-WriteCase $Scenario "write" (Get-TargetPath $Scenario) $Payload).Ok
@@ -1396,6 +1443,8 @@ function Invoke-StandardScenario {
             $mediaFile = "srt_mediastore_sandbox_only.txt"
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
+            # 断言前立即采集 hook 证据，此时 logcat buffer 仍覆盖本次 insert。
+            Invoke-CaptureScenario2MediastoreHookDiag
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
             $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-file" "$MediaStoreRoutingProbeRoot/$mediaFile") -and $ok
             if (Test-Su "test -d '$BackendRoot/Documents/SrtMediaRoutingProbe'") {
