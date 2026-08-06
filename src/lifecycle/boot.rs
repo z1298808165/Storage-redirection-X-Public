@@ -88,7 +88,7 @@ pub fn log_boot_summary_once() {
     );
 }
 
-fn read_boot_id() -> String {
+pub(crate) fn read_boot_id() -> String {
     let Ok(c_path) = CString::new(BOOT_ID_PATH) else {
         return String::new();
     };
