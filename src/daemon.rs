@@ -1,4 +1,7 @@
 use crate::config::{SettingsHub, watcher};
+
+#[path = "daemon/media_hook_heal.rs"]
+mod media_hook_heal;
 use crate::daemon_monitor::RegularAppMonitor;
 use crate::daemon_mount::{MountOperation, MountRequest, execute_mount_request, has_mount_state};
 use crate::logging::Logger;
@@ -321,12 +324,18 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let mut skipped = 0usize;
     let mut deferred = 0usize;
     let mut plans = Vec::new();
+    let mut media_processes = Vec::new();
     let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
 
     for proc in list_app_processes() {
         // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
         if !seen.insert(proc.pid) {
             continue;
+        }
+        // MediaProvider 走 hook 而非挂载，会被 should_skip_process 跳过；
+        // 这里借本轮已有的枚举结果记下它，避免自愈逻辑重复扫描 /proc。
+        if media_hook_heal::is_media_provider_process(&proc.package_name) {
+            media_processes.push((proc.pid, proc.uid));
         }
         if should_skip_process(&proc) {
             skipped += 1;
@@ -336,6 +345,8 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         let request = build_request(&proc, config_version, &config_snapshot);
         plans.push(ReconcilePlan::new(request));
     }
+
+    media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes);
 
     if mode == ReconcileMode::Prewarm {
         plans.sort_by_key(|plan| plan.priority());

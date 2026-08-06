@@ -138,7 +138,7 @@ pub(super) fn record_media_hook_install_state(stage: &str) {
     }
     let boot_completed = platform::is_boot_completed();
     let pid = std::process::id();
-    let boot_id = crate::lifecycle::boot::read_boot_id();
+    let boot_id = platform::read_boot_id();
     let boot_id = if boot_id.is_empty() {
         "unknown".to_string()
     } else {

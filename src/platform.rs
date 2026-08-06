@@ -65,6 +65,34 @@ pub fn is_boot_completed() -> bool {
     false
 }
 
+/// 读取当前开机周期的 boot id。
+///
+/// 供跨重启保留的状态文件判断归属：进程号会跨 boot 复用，仅凭进程号可能把
+/// 上一次开机的残留记录误判为本次开机的结果。读取失败时返回空串，由调用方
+/// 决定回退行为。
+pub fn read_boot_id() -> String {
+    const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+    let Ok(c_path) = CString::new(BOOT_ID_PATH) else {
+        return String::new();
+    };
+    // SAFETY: c_path 在本作用域内存活，是以 NUL 结尾的合法 C 字符串。
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return String::new();
+    }
+
+    let file = unique_fd::UniqueFd::new(fd);
+    let mut buffer = [0u8; 128];
+    // SAFETY: 只向本地缓冲写入，长度上限留出末位空间。
+    let n = unsafe { libc::read(file.get(), buffer.as_mut_ptr() as *mut _, buffer.len() - 1) };
+    if n <= 0 {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&buffer[..n as usize]);
+    text.trim_matches(|c| c == ' ' || c == '\n' || c == '\r' || c == '\t')
+        .to_string()
+}
+
 pub fn user_id_from_uid(uid: i32) -> i32 {
     if uid >= 0 {
         uid / ANDROID_USER_ID_OFFSET

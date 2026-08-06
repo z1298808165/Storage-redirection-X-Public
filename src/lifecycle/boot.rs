@@ -3,10 +3,9 @@ use crate::logging::Logger;
 use crate::platform::fs;
 use crate::platform::module_paths;
 use crate::platform::unique_fd::UniqueFd;
-use libc::{EEXIST, O_CLOEXEC, O_CREAT, O_EXCL, O_RDONLY, O_WRONLY, open};
+use libc::{EEXIST, O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open};
 use std::ffi::CString;
 
-const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const GLOBAL_CONFIG_PATH: &str = "/data/adb/modules/storage.redirect.x/config/global.json";
 const APPS_CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config/apps";
 
@@ -88,29 +87,8 @@ pub fn log_boot_summary_once() {
     );
 }
 
-pub(crate) fn read_boot_id() -> String {
-    let Ok(c_path) = CString::new(BOOT_ID_PATH) else {
-        return String::new();
-    };
-    let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        return String::new();
-    }
-
-    let file = UniqueFd::new(fd);
-    let mut buffer = [0u8; 128];
-    let n = unsafe { libc::read(file.get(), buffer.as_mut_ptr() as *mut _, buffer.len() - 1) };
-    if n <= 0 {
-        return String::new();
-    }
-    buffer[n as usize] = 0;
-    let text = String::from_utf8_lossy(&buffer[..n as usize]);
-    trim_ascii(&text)
-}
-
-fn trim_ascii(value: &str) -> String {
-    let trimmed = value.trim_matches(|c| c == ' ' || c == '\n' || c == '\r' || c == '\t');
-    trimmed.to_string()
+fn read_boot_id() -> String {
+    crate::platform::read_boot_id()
 }
 
 fn read_file_monitor_enabled_default_false() -> bool {
