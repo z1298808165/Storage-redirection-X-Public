@@ -573,6 +573,7 @@ impl RollingLog {
             let _ = self.writer_mut();
             return;
         }
+        remove_numeric_backups(&self.path);
         if let Ok(file) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -587,6 +588,32 @@ impl RollingLog {
 
 fn backup_path(path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.{}", path.display(), index))
+}
+
+fn remove_numeric_backups(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Some(base_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let prefix = format!("{base_name}.");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let _ = fs::remove_file(entry.path());
+    }
 }
 
 fn set_log_permissions(path: &Path) {

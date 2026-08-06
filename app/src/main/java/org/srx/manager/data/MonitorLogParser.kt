@@ -11,7 +11,6 @@ internal fun parseMonitorLogEntries(
   val compiledFilters = filters?.let(::compileMonitorFilters)
   return raw.lineSequence()
       .filter { it.isNotBlank() }
-      .takeLastCompat(500)
       .mapNotNull { parseMonitorLogLine(it, labelCache, labelResolver) }
       .filterNot { it.path.substringAfterLast('/').matches(TempJsLogPathRegex) }
       .filterNot { it.isMediaStorePendingIntermediateRecord() }
@@ -535,9 +534,6 @@ private fun wildcardMatches(pattern: String, value: String): Boolean {
   while (patternIndex < pattern.length && pattern[patternIndex] == '*') patternIndex += 1
   return patternIndex == pattern.length
 }
-
-private fun Sequence<String>.takeLastCompat(count: Int): Sequence<String> =
-    toList().takeLast(count).asSequence()
 
 private val TempJsLogPathRegex = Regex("^\\.[^/]+\\.js$", RegexOption.IGNORE_CASE)
 private val DiagnosticLogArchiveRegex =

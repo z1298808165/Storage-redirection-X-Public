@@ -218,6 +218,14 @@ clear_monitor_log() {
     usleep 100000 2>/dev/null || sleep 0.1
     return 0
   fi
+  base="$LOGS_DIR/file_monitor.log"
+  for f in "$base".*; do
+    suffix="${f##*.}"
+    case "$suffix" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    rm -f "$f"
+  done
   : > "$LOGS_DIR/file_monitor.log"
   chmod 666 "$LOGS_DIR/file_monitor.log" 2>/dev/null
 }

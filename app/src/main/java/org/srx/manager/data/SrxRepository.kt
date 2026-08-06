@@ -35,7 +35,6 @@ class SrxRepository(
     const val BackupMagic = "storage.redirect.x.backup"
     const val BackupSchemaVersion = 2
     const val BackupModuleId = "storage.redirect.x"
-    const val LogPreviewTailLines = 500
     const val AppDataCacheTtlNanos = 3_000_000_000L
     /** 导出读取 root 文件的超时，与 RootShell 默认超时保持一致。 */
     const val RootFileCopyTimeoutMs = 120_000L
@@ -288,7 +287,7 @@ class SrxRepository(
   suspend fun restartMediaProvider(): Boolean = moduleController.restartMediaProvider()
 
   suspend fun readLogSnapshot(): MonitorLogSnapshot {
-    val raw = fileStore.readTail(FileMonitorLogPath, LogPreviewTailLines)
+    val raw = fileStore.readAllWithBackups(FileMonitorLogPath)
     val filters = readFileMonitorFilters()
     val entries = withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, filters) }
     return MonitorLogSnapshot(entries, filters)

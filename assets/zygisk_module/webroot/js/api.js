@@ -925,6 +925,21 @@ const Api = {
     }
   },
 
+  /** 读取当前日志及全部轮转备份，按时间顺序合并。 */
+  async readFileWithBackups(path) {
+    const command =
+      "base=" +
+      shellQuote(path) +
+      '; { for f in "$base".*; do [ -f "$f" ] || continue; suffix="${f##*.}"; case "$suffix" in ' +
+      "''|*[!0-9]*) continue;; esac; printf '%s\\t%s\\n' \"$suffix\" \"$f\"; done | " +
+      'sort -rn | while IFS="$(printf \'\\t\')" read -r _ f; do cat "$f"; done; cat "$base" 2>/dev/null; }';
+    try {
+      return await this.exec(command);
+    } catch {
+      return "";
+    }
+  },
+
   /** 将内容写入文件 */
   async writeFile(path, content) {
     if (!isManagedWritePath(path)) return false;
@@ -2026,7 +2041,13 @@ const Api = {
   },
 
   async clearFileMonitorLog() {
-    const fallback = "mkdir -p " + shellQuote(LOGS_DIR) + " && : > " + shellQuote(FILE_MONITOR_LOG);
+    const fallback =
+      "mkdir -p " +
+      shellQuote(LOGS_DIR) +
+      " && base=" +
+      shellQuote(FILE_MONITOR_LOG) +
+      '; for f in "$base".*; do suffix="${f##*.}"; case "$suffix" in ' +
+      '\'\'|*[!0-9]*) continue;; esac; rm -f "$f"; done; : > "$base"';
     await this.exec(
       "if [ -r " +
         shellQuote(SRXCTL) +
@@ -2406,7 +2427,7 @@ const Api = {
         "\ncom.android.chrome\ncom.twitter.android\ncom.spotify.music"
       );
     }
-    if (cmd.includes("tail") && cmd.includes(FILE_MONITOR_LOG)) {
+    if (cmd.includes(FILE_MONITOR_LOG) && cmd.includes("cat")) {
       return this._mockFileMonitorLog();
     }
     // 模拟 cat

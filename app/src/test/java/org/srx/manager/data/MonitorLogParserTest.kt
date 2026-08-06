@@ -7,6 +7,48 @@ import org.junit.Test
 
 class MonitorLogParserTest {
   @Test
+  fun keepsGalleryCreatorForOuaClassifierDirectories() {
+    val raw =
+        listOf(
+                "2026-08-06 00:35:49|com.android.providers.media.module|com.coloros.gallery3d|MKDIR|" +
+                    "/storage/emulated/0/oua_classifier|ret=0|errno=0|identify_method=caller|" +
+                    "identify_reliability=high|op=mkdir",
+                "2026-08-06 00:35:49|com.android.providers.media.module|com.coloros.gallery3d|MKDIR|" +
+                    "/storage/emulated/0/oua_classifier/debug|ret=0|errno=0|identify_method=caller|" +
+                    "identify_reliability=high|op=mkdir",
+                "2026-08-06 00:35:49|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
+                    "/storage/emulated/0/oua_classifier|ret=0|errno=0|identify_method=media_provider_fallback|" +
+                    "identify_reliability=fallback|op=inotify|source=public_root|watch_package=com.coloros.gallery3d",
+            )
+            .joinToString("\n")
+
+    val entries = parseMonitorLogEntries(raw)
+
+    assertEquals(3, entries.size)
+    assertEquals(
+        setOf("com.coloros.gallery3d", "com.android.providers.media.module"),
+        entries.map { it.packageName }.toSet(),
+    )
+    assertTrue(
+        entries.filter { it.operation == "mkdir" }.all { it.packageName == "com.coloros.gallery3d" }
+    )
+  }
+
+  @Test
+  fun parsesEntriesBeyondPreviousPreviewLimit() {
+    val raw =
+        (0..500).joinToString("\n") { index ->
+          "2026-06-10 10:20:${(index % 60).toString().padStart(2, '0')}|" +
+              "com.example.app|com.example.app|OPEN|/storage/emulated/0/Download/$index.txt|" +
+              "op=open|op_filter=open:read|ret=3"
+        }
+
+    val entries = parseMonitorLogEntries(raw)
+
+    assertEquals(501, entries.size)
+  }
+
+  @Test
   fun prefersRealCaller() {
     val raw =
         "2026-06-10 10:20:30.000|com.android.providers.media.module|com.example.camera|open|" +

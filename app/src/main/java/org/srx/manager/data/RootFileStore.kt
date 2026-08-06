@@ -22,6 +22,20 @@ class RootFileStore(
     return shell.exec("tail -n $safeLines ${shellQuote(path)} 2>/dev/null").stdout
   }
 
+  suspend fun readAllWithBackups(path: String): String {
+    val quotedPath = shellQuote(path)
+    return shell
+        .exec(
+            "base=$quotedPath; " +
+                "{ for f in \"\$base\".*; do [ -f \"\$f\" ] || continue; suffix=\"\${f##*.}\"; " +
+                "case \"\$suffix\" in ''|*[!0-9]*) continue;; esac; " +
+                "printf '%s\\t%s\\n' \"\$suffix\" \"\$f\"; done | sort -rn | " +
+                "while IFS=\"\$(printf '\\t')\" read -r _ f; do cat \"\$f\"; done; " +
+                "cat \"\$base\" 2>/dev/null; }"
+        )
+        .stdout
+  }
+
   suspend fun readConfiguredAppConfigDump(): String =
       shell
           .exec(
@@ -143,7 +157,11 @@ class RootFileStore(
         shell.exec(
             "if [ -r ${shellQuote(SrxCtlPath)} ]; then " +
                 "/system/bin/sh ${shellQuote(SrxCtlPath)} clear-monitor || exit 1; " +
-                "else mkdir -p ${shellQuote(LogsDir)} && : > ${shellQuote(FileMonitorLogPath)}; fi"
+                "else mkdir -p ${shellQuote(LogsDir)} && " +
+                "base=${shellQuote(FileMonitorLogPath)}; " +
+                "for f in \"\$base\".*; do [ -f \"\$f\" ] || continue; suffix=\"\${f##*.}\"; " +
+                "case \"\$suffix\" in ''|*[!0-9]*) continue;; esac; rm -f \"\$f\"; done; " +
+                ": > \"\$base\"; fi"
         )
     return result.isSuccess
   }

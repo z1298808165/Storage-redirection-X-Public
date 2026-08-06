@@ -5695,7 +5695,7 @@
     try {
       await Api.ensureLogCollectors?.();
       const [content, filters] = await Promise.all([
-        Api.readFileTail(FILE_MONITOR_LOG, 500),
+        Api.readFileWithBackups(FILE_MONITOR_LOG),
         Api.readMonitorFilters({ force: true }).catch(() => State.monitorFilters || null),
       ]);
       if (filters) State.monitorFilters = filters;
@@ -5732,7 +5732,7 @@
     if (options?.hydratePackages !== false) hydrateLogPackageInfo(lines);
     const filters = normalizeLogMonitorFilters(options?.filters || State.monitorFilters);
     const entries = lines
-      .slice(-500)
+      .filter(Boolean)
       .map(parseLogLine)
       .filter(Boolean)
       .filter((entry) => !shouldFilterMonitorLogEntry(entry, filters));
@@ -5751,7 +5751,7 @@
   function hydrateLogPackageInfo(lines) {
     if (!Api.populatePackageInfo) return;
     const packages = new Set();
-    lines.slice(-500).forEach((line) => {
+    lines.forEach((line) => {
       const parts = String(line || "").split("|");
       const extras = parseLogExtras(parts.slice(5));
       [parts[1], parts[2], extras.watch_package].forEach((pkg) => {
