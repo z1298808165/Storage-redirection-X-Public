@@ -103,6 +103,16 @@ impl RuntimeFlow {
         self.app_uid = process.uid;
         self.app_pid = process.pid;
 
+        // MediaProvider 一进入 specialize 就登记，早于任何提前返回分支。
+        //
+        // 只有终态（init_ok/init_failed/dex_unavailable）时才能说明走到了
+        // install_java_hook；若最终只留下 specialize_enter，说明模块已注入该进程
+        // 但从更早的分支返回了。两者需要相反的修复，而 logcat 采集晚于
+        // MediaProvider specialize、writer 进程又不写模块日志文件，事后无从区分。
+        if policy::is_media_provider_package(&self.package_name) {
+            record_media_hook_install_state("specialize_enter");
+        }
+
         log::debug!(
             "proc ctx nice={} pkg={} uid={} pid={}",
             process.nice_name,
