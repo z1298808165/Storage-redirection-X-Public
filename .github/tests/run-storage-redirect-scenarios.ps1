@@ -1418,6 +1418,14 @@ grep -aE 'java hook|writer final|writer init|writer boot|boot_lite|specialize' \
     $lines.AddRange([string[]]$runningOut)
     $lines.Add("")
 
+    # 模块在 MediaProvider specialize 时落盘的 Java hook 安装结果。
+    # logcat 采集晚于 MediaProvider specialize，安装记录事后取不到；
+    # 该文件是区分「hook 从未安装」与「已安装但未触发」的唯一硬证据。
+    $lines.Add("===media_hook_install_state===")
+    $installStateOut = Invoke-Su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent"
+    $lines.AddRange([string[]]$installStateOut)
+    $lines.Add("")
+
     $lines.Add("===media_hook_deferred_marker===")
     $markerOut = Invoke-Su "ls -la /data/adb/modules/storage.redirect.x/logs/.media_hook_deferred 2>/dev/null || echo marker_absent"
     $lines.AddRange([string[]]$markerOut)

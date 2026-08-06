@@ -2176,6 +2176,13 @@ capture_scenario2_mediastore_hook_diag() {
       /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true" || true
     echo
 
+    echo "===media_hook_install_state==="
+    # 模块在 MediaProvider specialize 时落盘的 Java hook 安装结果。
+    # logcat 采集晚于 MediaProvider specialize，安装记录事后取不到；
+    # 该文件是区分「hook 从未安装」与「已安装但未触发」的唯一硬证据。
+    adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent" || true
+    echo
+
     echo "===media_hook_deferred_marker==="
     # 若此标记存在，说明开机时 MediaProvider 被推迟了 hook 安装，
     # 等待 boot_completed 后由 boot.sh 触发重启。

@@ -119,6 +119,28 @@ pub(super) fn should_install_java_hook_for_writer(
     context.is_system_writer && context.is_media_provider
 }
 
+/// 记录 MediaProvider Java hook 的安装结果，供失败后排查读取。
+///
+/// 系统代写进程只输出 logcat、不写模块日志文件，而 MediaProvider 的 specialize
+/// 往往发生在测试流清空 logcat 之前，安装结果事后在两边都取不到。落盘后即可区分
+/// 「hook 从未安装」与「已安装但未触发」这两种需要相反修复的情况。
+pub(super) fn record_media_hook_install_state(stage: &str) {
+    let path = module_paths::MEDIA_HOOK_INSTALL_STATE_FILE;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let boot_completed = platform::is_boot_completed();
+    let record = format!("stage={stage} boot_completed={boot_completed}\n");
+    let _ = std::fs::write(path, record.as_bytes());
+    if let Ok(c_path) = CString::new(path) {
+        // SAFETY: c_path 由 CString 持有且在本作用域内存活，保证是以 NUL 结尾的
+        // 合法 C 字符串指针；chmod 只按该路径调整权限位，不写入内存。
+        unsafe {
+            libc::chmod(c_path.as_ptr(), 0o644);
+        }
+    }
+}
+
 pub(super) fn mark_media_hook_deferred() {
     let path = module_paths::MEDIA_HOOK_DEFERRED_FILE;
     if let Some(parent) = std::path::Path::new(path).parent() {

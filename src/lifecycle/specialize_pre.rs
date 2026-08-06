@@ -13,8 +13,9 @@ use payload::{
 use perf::{SpecializePerf, SpecializePerfStages, log_specialize_perf};
 use route::RouteConfigSnapshot;
 use writer_state::{
-    SystemWriterContext, mark_media_hook_deferred, resolve_system_writer_context,
-    should_defer_media_boot_extras, should_install_java_hook_for_writer,
+    SystemWriterContext, mark_media_hook_deferred, record_media_hook_install_state,
+    resolve_system_writer_context, should_defer_media_boot_extras,
+    should_install_java_hook_for_writer,
 };
 
 use crate::config::{SettingsHub, watcher};
@@ -665,13 +666,16 @@ fn install_java_hook(env: *mut jni_sys::JNIEnv) {
     // 用于 Caller 识别，工作稳定
     if !java_hook::is_available() {
         log::info!("java hook skip: hooker dex unavailable");
+        record_media_hook_install_state("dex_unavailable");
         return;
     }
     log::info!("java hook available dex_bytes={}", java_hook::dex_len());
     if java_hook::init_once(env) {
         log::info!("java hook init ok");
+        record_media_hook_install_state("init_ok");
     } else {
         log::warn!("java hook init failed");
+        record_media_hook_install_state("init_failed");
     }
 }
 

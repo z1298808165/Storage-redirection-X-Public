@@ -6,6 +6,14 @@ pub const CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config";
 pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.runtime_disabled";
 pub const MEDIA_HOOK_DEFERRED_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_hook_deferred";
+/// MediaProvider Java hook 安装结果的落盘记录。
+///
+/// 系统代写进程只输出 logcat、不写模块日志文件，而 MediaProvider 的
+/// specialize 发生在测试流清空 logcat 之前，因此安装结果在事后排查时
+/// 两边都取不到。这里把结果写入文件，使「hook 从未安装」与
+/// 「已安装但未触发」在失败后仍可区分。
+pub const MEDIA_HOOK_INSTALL_STATE_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/logs/.media_hook_install_state";
 pub const RECENT_SOURCE_HINT_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.recent_source_hint";
 pub const RECENT_PATH_CALLER_HINT_FILE: &str =
