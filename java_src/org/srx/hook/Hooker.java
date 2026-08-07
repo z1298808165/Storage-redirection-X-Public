@@ -123,6 +123,9 @@ public class Hooker {
   private static final int FUSE_KIND_UNLINK = 5;
   private static final int FUSE_KIND_RMDIR = 6;
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
+  // 记录外层 provider 调用是否开启了重定向：嵌套 insert 需要据此决定是否保留
+  // MediaProvider 内部文件操作的重定向，避免在公共目录创建父目录。
+  private static final ThreadLocal<Boolean> PROVIDER_INTERNAL_REDIRECT = new ThreadLocal<>();
   public Method backup;
   private Member target;
 
@@ -238,7 +241,9 @@ public class Hooker {
   public Object providerMutationCallback(Object[] args) throws Throwable {
     String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
     if (isInsideProviderInternalCall()) {
-      return isInsertLikeMutation(mutationMethod)
+      // 外层调用者开启重定向时必须保留调用者作用域，让 MediaProvider 内部的
+      // 目录与文件操作继续被重定向到私有后端，否则会在公共目录留下父目录。
+      return isInsertLikeMutation(mutationMethod) && !isProviderInternalRedirectEnabled()
           ? callBackupWithProviderPassthrough(args)
           : callBackup(args);
     }
@@ -260,6 +265,7 @@ public class Hooker {
               : new MutationPatchResult(false, false);
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       enterProviderInternalCall();
+      Boolean previousRedirect = markProviderInternalRedirect(redirectEnabled);
       try {
         Object result;
         try {
@@ -276,6 +282,7 @@ public class Hooker {
         logMutationResult(this, result);
         return result;
       } finally {
+        restoreProviderInternalRedirect(previousRedirect);
         exitProviderInternalCall();
       }
     } finally {
@@ -433,6 +440,26 @@ public class Hooker {
     } else {
       PROVIDER_INTERNAL_DEPTH.set(depth.intValue() - 1);
     }
+  }
+
+  /** 记录外层 provider 调用是否开启重定向，供嵌套 mutation 判断能否直通。 */
+  private static Boolean markProviderInternalRedirect(boolean redirectEnabled) {
+    Boolean previous = PROVIDER_INTERNAL_REDIRECT.get();
+    PROVIDER_INTERNAL_REDIRECT.set(Boolean.valueOf(redirectEnabled));
+    return previous;
+  }
+
+  private static void restoreProviderInternalRedirect(Boolean previous) {
+    if (previous == null) {
+      PROVIDER_INTERNAL_REDIRECT.remove();
+    } else {
+      PROVIDER_INTERNAL_REDIRECT.set(previous);
+    }
+  }
+
+  private static boolean isProviderInternalRedirectEnabled() {
+    Boolean redirectEnabled = PROVIDER_INTERNAL_REDIRECT.get();
+    return redirectEnabled != null && redirectEnabled.booleanValue();
   }
 
   private static boolean isInsideProviderInternalCall() {
@@ -1870,18 +1897,11 @@ public class Hooker {
         requestedCollection = mediaPatch.mediaCollection;
         directWriteRequested = true;
       } else {
-        String backendPath = rewriteStoragePathToBackend(originalPath, callerUid);
-        if (backendPath != null && !backendPath.equals(originalPath)) {
+        String mappedPath = rewriteStoragePathForValues(originalPath, callerUid);
+        if (mappedPath != null && !mappedPath.equals(originalPath)) {
           patched = copyIfNeeded(patched, values);
-          patched.put(dataKey, backendPath);
-          String displayPath = rewriteStoragePathForValues(originalPath, callerUid);
-          patchRelativePathFromDataIfMissing(
-              patched, displayPath == null ? originalPath : displayPath, callerUid);
-          logDebug(
-              "media mutation backend_path="
-                  + backendPath
-                  + " display_path="
-                  + (displayPath == null ? originalPath : displayPath));
+          patched.put(dataKey, mappedPath);
+          patchRelativePathFromDataIfMissing(patched, mappedPath, callerUid);
         }
       }
     }
@@ -1911,13 +1931,6 @@ public class Hooker {
       String displayName = firstString(relativeSource, "_display_name", "display_name");
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
       rememberMediaStoreMutationPathHint(probePath, relativeSource, callerUid);
-      String backendPath = rewriteStoragePathToBackend(probePath, callerUid);
-      if (backendPath != null && !backendPath.equals(probePath)) {
-        patched = copyIfNeeded(patched, values);
-        patched.put("_data", backendPath);
-        logDebug(
-            "media mutation relative backend_path=" + backendPath + " display_path=" + probePath);
-      }
       String mappedPath = rewriteStoragePathForValues(probePath, callerUid);
       String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
       if (mappedRelative != null
@@ -2770,25 +2783,6 @@ public class Hooker {
     if (fallback == null) fallback = normalizeRelativeDataPath(path, callerUid);
     logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
     return fallback;
-  }
-
-  /** 返回 MediaProvider 执行物理文件操作时应使用的 backend 路径。 */
-  private static String rewriteStoragePathToBackend(String path, int callerUid) {
-    if (path == null || path.length() == 0) return null;
-    String rewritten = null;
-    try {
-      rewritten = rewriteMediaStorePath(path, callerUid);
-    } catch (Throwable ignored) {
-    }
-    if (rewritten == null || rewritten.length() == 0 || rewritten.equals(path)) return null;
-    String resolved = resolveOpenPathSafe(rewritten, callerUid);
-    if (resolved != null && resolved.length() > 0 && !resolved.equals(rewritten)) {
-      return resolved;
-    }
-    if (rewritten.startsWith("/data/media/") || rewritten.startsWith("file:///data/media/")) {
-      return rewritten;
-    }
-    return null;
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {
