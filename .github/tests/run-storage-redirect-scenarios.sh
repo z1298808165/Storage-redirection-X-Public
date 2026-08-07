@@ -2231,7 +2231,7 @@ run_standard_scenario() {
     capture_scenario2_mediastore_hook_diag
     check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
       check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
-      check_file_missing "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe" &&
+      { ! adb_su "test -d '${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe'" || check_public_directory_owner "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe"; } &&
       check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || return 1
   fi
   if [ "$scenario" = "5" ]; then
