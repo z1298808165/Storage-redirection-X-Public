@@ -439,6 +439,21 @@ pub(crate) fn storage_path_exists_by_syscall(path_text: &str) -> bool {
     path_exists_by_syscall(path_text)
 }
 
+pub(crate) fn remove_empty_directory_by_syscall(path_text: &str) -> bool {
+    let Ok(c_path) = CString::new(path_text) else {
+        return false;
+    };
+    // SAFETY: c_path 由 CString 构造且在 syscall 返回前保持有效，参数使用固定的 AT_FDCWD/AT_REMOVEDIR。
+    unsafe {
+        libc::syscall(
+            libc::SYS_unlinkat,
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            libc::AT_REMOVEDIR,
+        ) == 0
+    }
+}
+
 pub(crate) fn should_hide_cursor_storage_path_for_caller(
     original_text: &str,
     caller_uid: i32,

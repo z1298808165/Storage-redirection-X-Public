@@ -33,6 +33,8 @@ const RESOLVE_OPEN_PATH_NAME: &[u8] = b"resolveOpenPath\0";
 const RESOLVE_OPEN_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
 const STORAGE_PATH_EXISTS_NAME: &[u8] = b"storagePathExistsBySyscall\0";
 const STORAGE_PATH_EXISTS_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
+const REMOVE_EMPTY_DIRECTORY_NAME: &[u8] = b"removeEmptyDirectoryBySyscall\0";
+const REMOVE_EMPTY_DIRECTORY_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
 const REWRITE_MEDIA_STORE_PATH_NAME: &[u8] = b"rewriteMediaStorePath\0";
 const REWRITE_MEDIA_STORE_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
 const RESOLVE_DOWNLOAD_PLACEHOLDER_NAME: &[u8] = b"resolveDownloadPlaceholder\0";
@@ -107,6 +109,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: STORAGE_PATH_EXISTS_NAME.as_ptr() as *mut _,
             signature: STORAGE_PATH_EXISTS_SIG.as_ptr() as *mut _,
             fnPtr: storage_path_exists as *mut _,
+        },
+        JNINativeMethod {
+            name: REMOVE_EMPTY_DIRECTORY_NAME.as_ptr() as *mut _,
+            signature: REMOVE_EMPTY_DIRECTORY_SIG.as_ptr() as *mut _,
+            fnPtr: remove_empty_directory as *mut _,
         },
         JNINativeMethod {
             name: REWRITE_MEDIA_STORE_PATH_NAME.as_ptr() as *mut _,
@@ -366,6 +373,22 @@ unsafe extern "C" fn storage_path_exists(
     }
     let path_text = crate::zygisk::jni::get_jstring_utf8(env, path);
     if crate::hook::storage_path_exists_by_syscall(&path_text) {
+        jni_sys::JNI_TRUE
+    } else {
+        jni_sys::JNI_FALSE
+    }
+}
+
+unsafe extern "C" fn remove_empty_directory(
+    env: *mut JNIEnv,
+    _class: jclass,
+    path: jstring,
+) -> jni_sys::jboolean {
+    if env.is_null() || path.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+    let path_text = crate::zygisk::jni::get_jstring_utf8(env, path);
+    if crate::hook::remove_empty_directory_by_syscall(&path_text) {
         jni_sys::JNI_TRUE
     } else {
         jni_sys::JNI_FALSE
