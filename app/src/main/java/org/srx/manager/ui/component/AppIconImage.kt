@@ -45,10 +45,14 @@ fun AppIconImage(
   val context = LocalContext.current
   val targetSizePx = with(density) { 48.dp.roundToPx() }
   val cached =
-      remember(appInfo.packageName, appInfo.uid, appInfo.sourceDir) { AppIconCache.get(appInfo) }
+      remember(appInfo.packageName, appInfo.uid, appInfo.sourceDir, targetSizePx) {
+        AppIconCache.get(appInfo, targetSizePx)
+      }
   var bitmap by
-      remember(appInfo.packageName, appInfo.uid, appInfo.sourceDir) { mutableStateOf(cached) }
-  LaunchedEffect(appInfo.packageName, appInfo.uid, appInfo.sourceDir) {
+      remember(appInfo.packageName, appInfo.uid, appInfo.sourceDir, targetSizePx) {
+        mutableStateOf(cached)
+      }
+  LaunchedEffect(appInfo.packageName, appInfo.uid, appInfo.sourceDir, targetSizePx) {
     if (bitmap == null) bitmap = AppIconCache.load(context, appInfo, targetSizePx)
   }
   Crossfade(targetState = bitmap, animationSpec = tween(150), label = "AppIconFade") { icon ->
