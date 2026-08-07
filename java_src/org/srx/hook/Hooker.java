@@ -1870,11 +1870,18 @@ public class Hooker {
         requestedCollection = mediaPatch.mediaCollection;
         directWriteRequested = true;
       } else {
-        String mappedPath = rewriteStoragePathForValues(originalPath, callerUid);
-        if (mappedPath != null && !mappedPath.equals(originalPath)) {
+        String backendPath = rewriteStoragePathToBackend(originalPath, callerUid);
+        if (backendPath != null && !backendPath.equals(originalPath)) {
           patched = copyIfNeeded(patched, values);
-          patched.put(dataKey, mappedPath);
-          patchRelativePathFromDataIfMissing(patched, mappedPath, callerUid);
+          patched.put(dataKey, backendPath);
+          String displayPath = rewriteStoragePathForValues(originalPath, callerUid);
+          patchRelativePathFromDataIfMissing(
+              patched, displayPath == null ? originalPath : displayPath, callerUid);
+          logDebug(
+              "media mutation backend_path="
+                  + backendPath
+                  + " display_path="
+                  + (displayPath == null ? originalPath : displayPath));
         }
       }
     }
@@ -1904,6 +1911,13 @@ public class Hooker {
       String displayName = firstString(relativeSource, "_display_name", "display_name");
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
       rememberMediaStoreMutationPathHint(probePath, relativeSource, callerUid);
+      String backendPath = rewriteStoragePathToBackend(probePath, callerUid);
+      if (backendPath != null && !backendPath.equals(probePath)) {
+        patched = copyIfNeeded(patched, values);
+        patched.put("_data", backendPath);
+        logDebug(
+            "media mutation relative backend_path=" + backendPath + " display_path=" + probePath);
+      }
       String mappedPath = rewriteStoragePathForValues(probePath, callerUid);
       String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
       if (mappedRelative != null
@@ -2756,6 +2770,25 @@ public class Hooker {
     if (fallback == null) fallback = normalizeRelativeDataPath(path, callerUid);
     logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
     return fallback;
+  }
+
+  /** 返回 MediaProvider 执行物理文件操作时应使用的 backend 路径。 */
+  private static String rewriteStoragePathToBackend(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    String rewritten = null;
+    try {
+      rewritten = rewriteMediaStorePath(path, callerUid);
+    } catch (Throwable ignored) {
+    }
+    if (rewritten == null || rewritten.length() == 0 || rewritten.equals(path)) return null;
+    String resolved = resolveOpenPathSafe(rewritten, callerUid);
+    if (resolved != null && resolved.length() > 0 && !resolved.equals(rewritten)) {
+      return resolved;
+    }
+    if (rewritten.startsWith("/data/media/") || rewritten.startsWith("file:///data/media/")) {
+      return rewritten;
+    }
+    return null;
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {
