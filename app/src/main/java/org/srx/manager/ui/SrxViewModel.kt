@@ -181,6 +181,9 @@ class SrxViewModel(
       refreshUsers()
       refreshTemplates()
       refreshFileMonitorFilters()
+      // 初始化阶段提前加载应用列表：与 Dashboard 计数刷新并发，config TTL 缓存由互斥锁
+      // 保证只有一次 root 调用，另一方命中缓存直接返回；用户导航到应用页时数据大概率已就绪。
+      refreshApps()
     }
   }
 
@@ -277,7 +280,10 @@ class SrxViewModel(
               dashboard = state.dashboard.copy(enabledApps = cached.count { it.isEnabled }),
           )
     }
-    refreshApps(force = true)
+    // force=false：初始化时 refreshDashboardCounts 已预热了配置 TTL 缓存，
+    // 无需再次拉起 su 进程；只有 TTL 超期或配置写入后 invalidateConfiguredAppsCache
+    // 主动使缓存失效时，才会实际触发 root 读取。
+    refreshApps(force = false)
   }
 
   fun selectUser(userId: String) {

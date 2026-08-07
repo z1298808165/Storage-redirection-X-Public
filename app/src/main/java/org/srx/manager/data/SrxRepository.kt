@@ -37,7 +37,10 @@ class SrxRepository(
     const val BackupMagic = "storage.redirect.x.backup"
     const val BackupSchemaVersion = 2
     const val BackupModuleId = "storage.redirect.x"
-    const val AppDataCacheTtlNanos = 3_000_000_000L
+    // 配置文件通过写入路径主动使缓存失效（invalidateConfiguredAppsCache），
+    // TTL 仅作兜底；30 秒足够覆盖从 Dashboard 页导航到应用列表页的典型路径，
+    // 避免连续两次 su 进程调用。
+    const val AppDataCacheTtlNanos = 30_000_000_000L
     /** 解析应用名称的并发分片数：loadLabel 属于 IO 密集操作，过高并发只会加剧磁盘争用。 */
     const val LabelResolveParallelism = 4
     /** 导出读取 root 文件的超时，与 RootShell 默认超时保持一致。 */
