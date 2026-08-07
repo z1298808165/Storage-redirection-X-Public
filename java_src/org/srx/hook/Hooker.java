@@ -1699,6 +1699,21 @@ public class Hooker {
     String hintPath = mediaStoreMutationHintPath(path, values, callerUid);
     if (hintPath == null || hintPath.length() == 0) return;
     rememberProviderOpenPath(hintPath, callerUid);
+    // MediaProvider 可能异步创建相对路径目录，登记直接父目录以延续原始调用方归因。
+    int userId = userIdFromUid(callerUid);
+    String storageRoot = "/storage/emulated/" + userId;
+    String publicHintPath = hintPath;
+    String dataPrefix = "/data/media/" + userId + "/";
+    if (hintPath.startsWith(dataPrefix)) {
+      publicHintPath = storageRoot + "/" + hintPath.substring(dataPrefix.length());
+    }
+    String storagePrefix = storageRoot + "/";
+    if (publicHintPath.startsWith(storagePrefix)) {
+      int slash = publicHintPath.lastIndexOf('/');
+      if (slash > storageRoot.length()) {
+        rememberProviderOpenPath(publicHintPath.substring(0, slash), callerUid);
+      }
+    }
   }
 
   private static String mediaStoreMutationHintPath(
