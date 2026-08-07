@@ -79,6 +79,27 @@ data class AppUiState(
 // 与 WebUI 的 DASHBOARD_REFRESH_THROTTLE_MS 取值一致，保证两端刷新节奏相同。
 private const val DashboardCountsThrottleMs = 1200L
 
+/**
+ * 进程级应用列表缓存。
+ *
+ * ViewModel 会随界面重建而重新初始化，若每次都要等 root 与 PackageManager 查询完成才出内容，
+ * 返回应用页时会重复出现空列表。这里按用户缓存最近一次结果，重建后可以先渲染旧列表， 后台刷新完成再替换。
+ */
+private object AppListMemoryCache {
+  private var cachedUserId: String? = null
+  private var cachedApps: List<InstalledApp> = emptyList()
+
+  @Synchronized
+  fun get(userId: String): List<InstalledApp> =
+      if (cachedUserId == userId) cachedApps else emptyList()
+
+  @Synchronized
+  fun put(userId: String, apps: List<InstalledApp>) {
+    cachedUserId = userId
+    cachedApps = apps
+  }
+}
+
 class SrxViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
@@ -224,6 +245,7 @@ class SrxViewModel(
           _state.value = _state.value.copy(appsRefreshing = true)
           try {
             val apps = repository.loadInstalledApps(_state.value.selectedUser, force)
+            AppListMemoryCache.put(_state.value.selectedUser, apps)
             _state.value =
                 _state.value.copy(
                     apps = apps,
@@ -244,7 +266,18 @@ class SrxViewModel(
 
   fun ensureAppsLoaded() {
     val state = _state.value
-    if (!state.appsLoaded && !state.appsRefreshing) refreshApps(force = true)
+    if (state.appsLoaded || state.appsRefreshing) return
+    // 先用进程级缓存立即出内容，再在后台刷新，避免每次进入应用页都从空列表开始等待。
+    val cached = AppListMemoryCache.get(state.selectedUser)
+    if (cached.isNotEmpty()) {
+      _state.value =
+          state.copy(
+              apps = cached,
+              appsLoaded = true,
+              dashboard = state.dashboard.copy(enabledApps = cached.count { it.isEnabled }),
+          )
+    }
+    refreshApps(force = true)
   }
 
   fun selectUser(userId: String) {
