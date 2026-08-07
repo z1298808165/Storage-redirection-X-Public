@@ -118,6 +118,13 @@ data class InstalledApp(
 
   val isEnabled: Boolean
     get() = isInstalled && config?.users?.values?.any { it.enabled } == true
+
+  // 搜索框每次输入都会重算过滤结果，逐项调用 lowercase() 会在大列表上产生大量临时字符串，
+  // 因此在构造后一次性缓存小写形式供 UI 复用。
+  val searchLabel: String by lazy(LazyThreadSafetyMode.PUBLICATION) { label.lowercase() }
+
+  val searchPackageName: String by
+      lazy(LazyThreadSafetyMode.PUBLICATION) { packageName.lowercase() }
 }
 
 data class LogEntry(

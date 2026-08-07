@@ -96,8 +96,8 @@ internal fun AppsScreen(
                 }
             filterOk &&
                 (query.isBlank() ||
-                    app.label.lowercase().contains(query) ||
-                    app.packageName.lowercase().contains(query))
+                    app.searchLabel.contains(query) ||
+                    app.searchPackageName.contains(query))
           }
         }
       }

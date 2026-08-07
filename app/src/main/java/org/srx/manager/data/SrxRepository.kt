@@ -8,9 +8,11 @@ import android.os.Build
 import android.provider.DocumentsContract
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +38,8 @@ class SrxRepository(
     const val BackupSchemaVersion = 2
     const val BackupModuleId = "storage.redirect.x"
     const val AppDataCacheTtlNanos = 3_000_000_000L
+    /** 解析应用名称的并发分片数：loadLabel 属于 IO 密集操作，过高并发只会加剧磁盘争用。 */
+    const val LabelResolveParallelism = 4
     /** 导出读取 root 文件的超时，与 RootShell 默认超时保持一致。 */
     const val RootFileCopyTimeoutMs = 120_000L
     /** 等待 stderr 消费线程收尾的时间，仅为回收线程，不影响导出结果。 */
@@ -58,6 +62,8 @@ class SrxRepository(
   private val dexLabelsCacheMutex = Mutex()
   private var configuredAppsCache: TimedCache<Map<String, AppConfig>>? = null
   private val dexLabelsCache = mutableMapOf<String, TimedCache<Map<String, String>>>()
+  /** 应用名称缓存：键包含安装包路径，应用升级或卸载重装后自动失效。 */
+  private val appLabelCache = ConcurrentHashMap<String, String>()
 
   suspend fun checkRoot(): Boolean = shell.checkRoot()
 
@@ -260,15 +266,12 @@ class SrxRepository(
     val dexMap = dexApps.await()
 
     withContext(Dispatchers.IO) {
-      val pmByPackage = loadPackageManagerApps(userId).associateBy { it.packageName }
+      // 只需要少量包信息时逐个查询，避免为几个包枚举整机应用列表。
       safePackages.map { pkg ->
-        val info = pmByPackage[pkg]
+        val info = loadPackageManagerApp(pkg)
         InstalledApp(
             packageName = pkg,
-            label =
-                info?.loadLabel(context.packageManager)?.toString()?.takeIf { it.isNotBlank() }
-                    ?: dexMap[pkg]
-                    ?: pkg,
+            label = resolveAppLabel(pkg, info) ?: dexMap[pkg] ?: pkg,
             isSystem = info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 } ?: false,
             appInfo = info,
             config = configMap[pkg],
@@ -657,27 +660,56 @@ class SrxRepository(
                 .filter(::isSafePackageName)
                 .distinct()
 
-        allPackages
-            .map { pkg ->
-              val info = pmByPackage[pkg] ?: loadPackageManagerApp(pkg)
-              InstalledApp(
-                  packageName = pkg,
-                  label =
-                      info?.loadLabel(context.packageManager)?.toString()?.takeIf {
-                        it.isNotBlank()
-                      } ?: dexMap[pkg] ?: pkg,
-                  isSystem = info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 } ?: false,
-                  appInfo = info,
-                  config = configMap[pkg],
-                  isInstalled = info != null,
-              )
+        // loadLabel 需要打开 APK 读取资源，单线程串行解析整机应用会明显拖慢首屏，
+        // 因此分片并发解析，并按安装包路径缓存名称，避免每次刷新重复解析。
+        val chunkSize = ((allPackages.size + LabelResolveParallelism - 1) / LabelResolveParallelism)
+        val built =
+            if (chunkSize <= 0) {
+              emptyList()
+            } else {
+              coroutineScope {
+                    allPackages
+                        .chunked(chunkSize)
+                        .map { chunk ->
+                          async {
+                            chunk.map { pkg ->
+                              val info = pmByPackage[pkg] ?: loadPackageManagerApp(pkg)
+                              InstalledApp(
+                                  packageName = pkg,
+                                  label = resolveAppLabel(pkg, info) ?: dexMap[pkg] ?: pkg,
+                                  isSystem =
+                                      info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 }
+                                          ?: false,
+                                  appInfo = info,
+                                  config = configMap[pkg],
+                                  isInstalled = info != null,
+                              )
+                            }
+                          }
+                        }
+                        .awaitAll()
+                  }
+                  .flatten()
             }
-            .sortedWith(
-                compareBy<InstalledApp> { statusRank(it) }
-                    .thenBy { it.label.lowercase() }
-                    .thenBy { it.packageName }
-            )
+
+        built.sortedWith(
+            compareBy<InstalledApp> { statusRank(it) }
+                .thenBy { it.searchLabel }
+                .thenBy { it.packageName }
+        )
       }
+
+  /** 按安装包路径缓存应用名称：应用升级后 sourceDir 或版本会变化，缓存自然失效。 */
+  private fun resolveAppLabel(packageName: String, info: ApplicationInfo?): String? {
+    if (info == null) return null
+    val key = "$packageName:${info.sourceDir}"
+    appLabelCache[key]?.let {
+      return it
+    }
+    val label = info.loadLabel(context.packageManager).toString().takeIf { it.isNotBlank() }
+    if (label != null) appLabelCache[key] = label
+    return label
+  }
 
   private suspend fun parseBackupPayload(text: String): BackupData =
       withContext(Dispatchers.Default) {
