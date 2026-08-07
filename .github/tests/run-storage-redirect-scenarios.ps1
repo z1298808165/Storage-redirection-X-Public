@@ -1455,9 +1455,7 @@ function Invoke-StandardScenario {
             Invoke-CaptureScenario2MediastoreHookDiag
             $ok = (Require-File "scenario-$Scenario" "mediastore-sandbox-file" "$PrivateMediaStoreRoutingProbeRoot/$mediaFile") -and $ok
             $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-file" "$MediaStoreRoutingProbeRoot/$mediaFile") -and $ok
-            if (Test-Su "test -d '$BackendRoot/Documents/SrtMediaRoutingProbe'") {
-                $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "mediastore-public-parent-owner" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
-            }
+            $ok = (Require-Missing "scenario-$Scenario" "mediastore-public-parent" "$BackendRoot/Documents/SrtMediaRoutingProbe") -and $ok
             $ok = (Test-PublicDirectoryOwner "scenario-$Scenario" "android-owner" "$BackendRoot/Android") -and $ok
         }
         3 { $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok }
