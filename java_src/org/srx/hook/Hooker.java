@@ -122,7 +122,13 @@ public class Hooker {
   private static final LinkedHashMap<String, PendingDirectMediaWrite> PENDING_DIRECT_MEDIA_WRITES =
       new LinkedHashMap<>();
 
+  /** MediaProvider 可能清理 binder 身份后在另一线程创建相对路径目录，保留短时调用方提示。 */
+  private static final LinkedHashMap<String, DirectoryCallerHint> RECENT_MEDIA_DIRECTORY_CALLERS =
+      new LinkedHashMap<>();
+
   private static final int PENDING_DIRECT_MEDIA_WRITE_LIMIT = 256;
+  private static final int RECENT_MEDIA_DIRECTORY_CALLER_LIMIT = 64;
+  private static final long RECENT_MEDIA_DIRECTORY_CALLER_TTL_MS = 60000L;
 
   /** 直写记录的存活时间，超过即视为已失效。 */
   private static final long PENDING_DIRECT_MEDIA_WRITE_TTL_MS = 60000L;
@@ -364,6 +370,10 @@ public class Hooker {
     if (receiver == null) return callBackup(args);
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
     int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
+    if (scopedUid == null) {
+      int hintedUid = recentMediaDirectoryCallerUid(receiver.getPath());
+      if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
+    }
     String directPath = resolveMediaStoreDirectPathForValues(receiver.getPath(), callerUid);
     if (directPath == null || directPath.equals(receiver.getPath())) return callBackup(args);
     DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
@@ -408,13 +418,17 @@ public class Hooker {
       return callBackup(args);
     }
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    if (scopedUid == null) return callBackup(args);
     Object[] actualArgs = unwrapArgs(args);
     int parentIndex = firstFileArgumentIndex(actualArgs);
     if (parentIndex < 0) return callBackup(args);
     File publicParent = (File) actualArgs[parentIndex];
+    int callerUid =
+        scopedUid == null
+            ? recentMediaDirectoryCallerUid(publicParent.getPath())
+            : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
     String directParentPath =
-        resolveMediaStoreDirectPathForValues(publicParent.getPath(), scopedUid.intValue());
+        resolveMediaStoreDirectPathForValues(publicParent.getPath(), callerUid);
     if (directParentPath == null || directParentPath.equals(publicParent.getPath())) {
       return callBackup(args);
     }
@@ -893,7 +907,10 @@ public class Hooker {
       }
     }
     if (pathIndex < 0 || sourcePath == null) return callBackup(args);
-    String directPath = resolveMediaStoreDirectPathForValues(sourcePath, scopedUid.intValue());
+    int callerUid =
+        scopedUid == null ? recentMediaDirectoryCallerUid(sourcePath) : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+    String directPath = resolveMediaStoreDirectPathForValues(sourcePath, callerUid);
     if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
     Object replacement = actualArgs[pathIndex] instanceof Path ? Paths.get(directPath) : directPath;
     Object[] patchedArgs = replaceArgument(args, pathIndex, replacement);
@@ -2256,8 +2273,45 @@ public class Hooker {
     if (publicHintPath.startsWith(storagePrefix)) {
       int slash = publicHintPath.lastIndexOf('/');
       if (slash > storageRoot.length()) {
-        rememberProviderOpenPath(publicHintPath.substring(0, slash), callerUid);
+        String parent = publicHintPath.substring(0, slash);
+        rememberProviderOpenPath(parent, callerUid);
+        rememberMediaDirectoryCaller(parent, callerUid);
       }
+    }
+  }
+
+  private static void rememberMediaDirectoryCaller(String path, int callerUid) {
+    if (path == null || path.length() == 0 || callerUid < ANDROID_APP_UID_START) return;
+    long now = android.os.SystemClock.elapsedRealtime();
+    synchronized (RECENT_MEDIA_DIRECTORY_CALLERS) {
+      Iterator<String> stale = RECENT_MEDIA_DIRECTORY_CALLERS.keySet().iterator();
+      while (stale.hasNext()) {
+        DirectoryCallerHint hint = RECENT_MEDIA_DIRECTORY_CALLERS.get(stale.next());
+        if (hint == null || now - hint.elapsedMs > RECENT_MEDIA_DIRECTORY_CALLER_TTL_MS) {
+          stale.remove();
+        }
+      }
+      while (RECENT_MEDIA_DIRECTORY_CALLERS.size() >= RECENT_MEDIA_DIRECTORY_CALLER_LIMIT) {
+        Iterator<String> oldest = RECENT_MEDIA_DIRECTORY_CALLERS.keySet().iterator();
+        if (!oldest.hasNext()) break;
+        oldest.next();
+        oldest.remove();
+      }
+      RECENT_MEDIA_DIRECTORY_CALLERS.put(path, new DirectoryCallerHint(callerUid, now));
+    }
+  }
+
+  private static int recentMediaDirectoryCallerUid(String path) {
+    if (path == null || path.length() == 0) return -1;
+    long now = android.os.SystemClock.elapsedRealtime();
+    synchronized (RECENT_MEDIA_DIRECTORY_CALLERS) {
+      DirectoryCallerHint hint = RECENT_MEDIA_DIRECTORY_CALLERS.get(path);
+      if (hint == null) return -1;
+      if (now - hint.elapsedMs > RECENT_MEDIA_DIRECTORY_CALLER_TTL_MS) {
+        RECENT_MEDIA_DIRECTORY_CALLERS.remove(path);
+        return -1;
+      }
+      return hint.callerUid;
     }
   }
 
@@ -3256,6 +3310,16 @@ public class Hooker {
 
     PendingDirectMediaWrite(String path, int callerUid, long elapsedMs) {
       this.path = path;
+      this.callerUid = callerUid;
+      this.elapsedMs = elapsedMs;
+    }
+  }
+
+  private static final class DirectoryCallerHint {
+    final int callerUid;
+    final long elapsedMs;
+
+    DirectoryCallerHint(int callerUid, long elapsedMs) {
       this.callerUid = callerUid;
       this.elapsedMs = elapsedMs;
     }
