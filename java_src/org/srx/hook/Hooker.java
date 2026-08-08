@@ -70,6 +70,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
+  private static final HashSet<String> HOOKED_ACTIVITY_THREAD_METHODS = new HashSet<>();
   private static final ThreadLocal<MediaFileBuildContext> MEDIA_FILE_BUILD_CONTEXT =
       new ThreadLocal<>();
   private static volatile boolean QUERY_HOOK_PENDING = true;
@@ -619,6 +620,7 @@ public class Hooker {
       // 策略1: 直接通过 ClassLoader 查找当前进程已加载的 Provider 类。
       boolean directHooked = tryDirectProviderHook();
       tryInstallDirectoryHooks();
+      tryInstallActivityThreadProviderHook();
       tryInstallMediaFileUtilsHooksForKnownLoaders();
       // 策略2: 兜底 - hook attachInfo 等待 Provider 实例触发。
       Class<?> cpClass = Class.forName("android.content.ContentProvider");
@@ -810,6 +812,46 @@ public class Hooker {
     } catch (Throwable t) {
       logWarn("java hook directory installer failed", t);
     }
+  }
+
+  private static synchronized void tryInstallActivityThreadProviderHook() {
+    try {
+      Class<?> activityThread = Class.forName("android.app.ActivityThread");
+      Method callback =
+          Hooker.class.getDeclaredMethod("activityThreadInstallProviderCallback", Object[].class);
+      callback.setAccessible(true);
+      for (Method method : activityThread.getDeclaredMethods()) {
+        if (!"installProvider".equals(method.getName())) continue;
+        String key = describeMethod(method);
+        if (!HOOKED_ACTIVITY_THREAD_METHODS.add(key)) continue;
+        Hooker hooker = new Hooker();
+        Method backup = hooker.doHook(method, callback);
+        if (backup == null) {
+          HOOKED_ACTIVITY_THREAD_METHODS.remove(key);
+          logWarn("java hook ActivityThread installProvider failed " + key);
+          continue;
+        }
+        backup.setAccessible(true);
+        hooker.backup = backup;
+        hooker.target = method;
+        HOOKS.add(hooker);
+        logInfo("java hook ActivityThread installProvider ok " + key);
+      }
+    } catch (Throwable t) {
+      logWarn("java hook ActivityThread installProvider installer failed", t);
+    }
+  }
+
+  public Object activityThreadInstallProviderCallback(Object[] args) throws Throwable {
+    Object result = callBackup(args);
+    android.content.ContentProvider provider = providerFromObject(result, 0);
+    if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+      ClassLoader loader = provider.getClass().getClassLoader();
+      logInfo("java hook media provider loader acquired " + loader);
+      tryLoadAndHookMediaProvider(loader);
+      tryInstallMediaFileUtilsHooks(loader);
+    }
+    return result;
   }
 
   private static synchronized void tryInstallMediaFileUtilsHooks(ClassLoader loader) {
@@ -1034,6 +1076,34 @@ public class Hooker {
             }
           } catch (Throwable ignored) {
           }
+        }
+      }
+    }
+    return null;
+  }
+
+  private static android.content.ContentProvider providerFromObject(Object value, int depth) {
+    if (value == null || depth > 2) return null;
+    if (value instanceof android.content.ContentProvider) {
+      return (android.content.ContentProvider) value;
+    }
+    if (value instanceof Object[]) {
+      for (Object item : (Object[]) value) {
+        android.content.ContentProvider provider = providerFromObject(item, depth + 1);
+        if (provider != null) return provider;
+      }
+      return null;
+    }
+    for (Class<?> clazz = value.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+      for (Field field : clazz.getDeclaredFields()) {
+        if (!android.content.ContentProvider.class.isAssignableFrom(field.getType())
+            && !field.getName().contains("provider")) continue;
+        try {
+          field.setAccessible(true);
+          android.content.ContentProvider provider =
+              providerFromObject(field.get(value), depth + 1);
+          if (provider != null) return provider;
+        } catch (Throwable ignored) {
         }
       }
     }
