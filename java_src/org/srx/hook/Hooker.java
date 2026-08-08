@@ -484,11 +484,10 @@ public class Hooker {
       tryInstallOpenHook(clazz);
       tryInstallMutationHook(clazz);
       tryInstallFuseHook(clazz);
-      // 如果当前类不是 MediaProvider，尝试用它的 ClassLoader 加载 MediaProvider
-      // Android 16+ MediaProvider 可能重写了 attachInfo 导致基类 hook 无法拦截
-      if (QUERY_HOOK_PENDING) {
-        tryLoadAndHookMediaProvider(clazz.getClassLoader());
-      }
+      // MediaProvider 可能在注入入口之后才由独立 ClassLoader 加载，FileUtils hook 不能依赖
+      // QUERY_HOOK_PENDING 的一次性状态，必须在 attachInfo 阶段用当前 Provider 的 ClassLoader
+      // 再次尝试安装；Android 16+ 还可能重写 attachInfo。
+      tryLoadAndHookMediaProvider(clazz.getClassLoader());
     }
     return result;
   }
