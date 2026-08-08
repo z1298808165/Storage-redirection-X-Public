@@ -246,6 +246,10 @@ public class Hooker {
     String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
     // 某些 Android 版本的 MediaProvider 在 attachInfo 之后才切换线程上下文 ClassLoader，
     // 首次 mutation 是拿到该 ClassLoader 并补装 FileUtils hook 的最后稳定入口。
+    android.content.ContentProvider provider = providerReceiver(args);
+    if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+      tryInstallMediaFileUtilsHooks(provider.getClass().getClassLoader());
+    }
     tryInstallMediaFileUtilsHooks(Thread.currentThread().getContextClassLoader());
     if (isInsideProviderInternalCall()) {
       return isInsertLikeMutation(mutationMethod)
@@ -939,6 +943,20 @@ public class Hooker {
     }
     if (receiver instanceof android.content.ContentProvider)
       return (android.content.ContentProvider) receiver;
+    if (receiver != null) {
+      for (Class<?> clazz = receiver.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+        for (Field field : clazz.getDeclaredFields()) {
+          try {
+            field.setAccessible(true);
+            Object value = field.get(receiver);
+            if (value instanceof android.content.ContentProvider) {
+              return (android.content.ContentProvider) value;
+            }
+          } catch (Throwable ignored) {
+          }
+        }
+      }
+    }
     return null;
   }
 
