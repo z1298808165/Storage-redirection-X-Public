@@ -244,6 +244,9 @@ public class Hooker {
 
   public Object providerMutationCallback(Object[] args) throws Throwable {
     String mutationMethod = target instanceof Method ? ((Method) target).getName() : null;
+    // 某些 Android 版本的 MediaProvider 在 attachInfo 之后才切换线程上下文 ClassLoader，
+    // 首次 mutation 是拿到该 ClassLoader 并补装 FileUtils hook 的最后稳定入口。
+    tryInstallMediaFileUtilsHooks(Thread.currentThread().getContextClassLoader());
     if (isInsideProviderInternalCall()) {
       return isInsertLikeMutation(mutationMethod)
           ? callBackupWithProviderPassthrough(args)
