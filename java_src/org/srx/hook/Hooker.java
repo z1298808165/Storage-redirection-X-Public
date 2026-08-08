@@ -9,6 +9,7 @@ import android.database.AbstractCursor;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.lang.reflect.Constructor;
@@ -53,6 +54,9 @@ public class Hooker {
   private static final HashSet<String> HOOKED_MUTATION_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
+  private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
+  private static final ThreadLocal<MediaFileBuildContext> MEDIA_FILE_BUILD_CONTEXT =
+      new ThreadLocal<>();
   private static volatile boolean QUERY_HOOK_PENDING = true;
   private static int QUERY_LOG_COUNT;
   private static int QUERY_NULL_EMPTY_LOG_COUNT;
@@ -352,6 +356,73 @@ public class Hooker {
     }
   }
 
+  /**
+   * MediaProvider insert 在构造结果 File 时可能绕过 java.io.File.mkdirs hook。直接改写 FileUtils
+   * 返回的结果对象，令后续建目录和临时文件都使用私有目标；数据库字段在 computeValuesFromData 返回后恢复为公共逻辑路径，保持 MediaStore 查询契约不变。
+   */
+  public Object providerMediaFileUtilsCallback(Object[] args) throws Throwable {
+    Method method = target instanceof Method ? (Method) target : null;
+    String methodName = method == null ? null : method.getName();
+    if ("computeValuesFromData".equals(methodName)) {
+      Object result;
+      try {
+        result = callBackup(args);
+      } finally {
+        restoreMediaFileBuildValues(args);
+      }
+      return result;
+    }
+    Object result = callBackup(args);
+    if (!(result instanceof File)) return result;
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    if (scopedUid == null) return result;
+    File source = (File) result;
+    String directPath =
+        resolveMediaStoreDirectPathForValues(source.getPath(), scopedUid.intValue());
+    if (directPath == null || directPath.equals(source.getPath())) return result;
+    MEDIA_FILE_BUILD_CONTEXT.set(
+        new MediaFileBuildContext(publicMediaStorePath(source.getPath(), scopedUid.intValue())));
+    logInfo(
+        "media direct FileUtils method="
+            + methodName
+            + " from="
+            + source.getPath()
+            + " to="
+            + directPath);
+    return new File(directPath);
+  }
+
+  private static void restoreMediaFileBuildValues(Object[] args) {
+    MediaFileBuildContext context = MEDIA_FILE_BUILD_CONTEXT.get();
+    if (context == null) return;
+    try {
+      Object[] actualArgs = unwrapArgs(args);
+      if (actualArgs.length == 0 || !(actualArgs[0] instanceof ContentValues)) return;
+      if (context.publicPath == null || context.publicPath.length() == 0) return;
+      ContentValues values = (ContentValues) actualArgs[0];
+      values.put(MediaStore.MediaColumns.DATA, context.publicPath);
+      String relativePath = mediaStoreRelativePath(context.publicPath);
+      if (relativePath != null) values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+    } finally {
+      MEDIA_FILE_BUILD_CONTEXT.remove();
+    }
+  }
+
+  private static String publicMediaStorePath(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    if (path.startsWith("/storage/emulated/")) return path;
+    return mediaStoreDisplayPath(path, callerUid);
+  }
+
+  private static String mediaStoreRelativePath(String path) {
+    if (path == null || !path.startsWith("/storage/emulated/")) return null;
+    int rootEnd = path.indexOf('/', "/storage/emulated/".length());
+    if (rootEnd < 0 || rootEnd + 1 >= path.length()) return "/";
+    int parentEnd = path.lastIndexOf('/');
+    if (parentEnd <= rootEnd) return "/";
+    return path.substring(rootEnd + 1, parentEnd + 1);
+  }
+
   private static File directoryReceiver(Object[] args) {
     if (args == null || args.length == 0) return null;
     if (args[0] instanceof File) return (File) args[0];
@@ -524,6 +595,9 @@ public class Hooker {
         tryInstallOpenHook(clazz);
         tryInstallMutationHook(clazz);
         tryInstallFuseHook(clazz);
+        if (isMediaProviderClass(clazz.getName())) {
+          tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
+        }
         hookedAny = true;
       } catch (ClassNotFoundException ignored) {
         // 当前进程中不存在此类
@@ -545,6 +619,9 @@ public class Hooker {
           tryInstallOpenHook(clazz);
           tryInstallMutationHook(clazz);
           tryInstallFuseHook(clazz);
+          if (isMediaProviderClass(clazz.getName())) {
+            tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
+          }
         }
       } catch (ClassNotFoundException ignored) {
       } catch (Throwable ignored) {
@@ -675,6 +752,50 @@ public class Hooker {
     } catch (Throwable t) {
       logWarn("java hook directory installer failed", t);
     }
+  }
+
+  private static synchronized void tryInstallMediaFileUtilsHooks(ClassLoader loader) {
+    if (loader == null) return;
+    try {
+      Class<?> fileUtils =
+          Class.forName("com.android.providers.media.util.FileUtils", false, loader);
+      Method callback =
+          Hooker.class.getDeclaredMethod("providerMediaFileUtilsCallback", Object[].class);
+      callback.setAccessible(true);
+      installMediaFileUtilsMethod(
+          fileUtils, "buildUniqueFile", callback, File.class, String.class, String.class);
+      installMediaFileUtilsMethod(
+          fileUtils, "buildNonUniqueFile", callback, File.class, String.class, String.class);
+      installMediaFileUtilsMethod(
+          fileUtils, "computeValuesFromData", callback, ContentValues.class, boolean.class);
+    } catch (Throwable t) {
+      logWarn("java hook media FileUtils installer failed", t);
+    }
+  }
+
+  private static void installMediaFileUtilsMethod(
+      Class<?> fileUtils, String methodName, Method callback, Class<?>... parameterTypes)
+      throws Throwable {
+    StringBuilder keyBuilder =
+        new StringBuilder(fileUtils.getName()).append('#').append(methodName);
+    for (Class<?> parameterType : parameterTypes) {
+      keyBuilder.append('(').append(parameterType.getName()).append(')');
+    }
+    String key = keyBuilder.toString();
+    if (!HOOKED_MEDIA_FILE_UTILS_METHODS.add(key)) return;
+    Method method = fileUtils.getDeclaredMethod(methodName, parameterTypes);
+    method.setAccessible(true);
+    Hooker hooker = new Hooker();
+    Method backup = hooker.doHook(method, callback);
+    if (backup == null) {
+      HOOKED_MEDIA_FILE_UTILS_METHODS.remove(key);
+      return;
+    }
+    backup.setAccessible(true);
+    hooker.backup = backup;
+    hooker.target = method;
+    HOOKS.add(hooker);
+    logInfo("java hook media FileUtils ok " + key);
   }
 
   private static boolean isMediaProviderClass(String name) {
@@ -2790,6 +2911,14 @@ public class Hooker {
       this.path = path;
       this.callerUid = callerUid;
       this.elapsedMs = elapsedMs;
+    }
+  }
+
+  private static final class MediaFileBuildContext {
+    final String publicPath;
+
+    MediaFileBuildContext(String publicPath) {
+      this.publicPath = publicPath;
     }
   }
 
