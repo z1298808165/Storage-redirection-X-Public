@@ -55,7 +55,10 @@ public class Hooker {
   };
   private static final String[] MEDIA_FILE_UTILS_CLASS_NAMES = {
     "com.android.providers.media.util.FileUtils",
-    "com.google.android.providers.media.util.FileUtils"
+    "com.android.providers.media.module.util.FileUtils",
+    "com.google.android.providers.media.util.FileUtils",
+    "com.google.android.providers.media.module.util.FileUtils",
+    "com.google.android.providers.media.module.FileUtils"
   };
   private static final ArrayList<Hooker> HOOKS = new ArrayList<>();
   private static final HashSet<String> HOOKED_QUERY_CLASSES = new HashSet<>();
@@ -65,6 +68,8 @@ public class Hooker {
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
+  private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
+  private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
   private static final ThreadLocal<MediaFileBuildContext> MEDIA_FILE_BUILD_CONTEXT =
       new ThreadLocal<>();
   private static volatile boolean QUERY_HOOK_PENDING = true;
@@ -820,18 +825,27 @@ public class Hooker {
     for (String className : MEDIA_FILE_UTILS_CLASS_NAMES) {
       try {
         Class<?> fileUtils = Class.forName(className, false, loader);
+        boolean firstClassObservation = MEDIA_FILE_UTILS_CLASSES_LOGGED.add(className);
+        if (firstClassObservation) {
+          logInfo("java hook media FileUtils class found " + className);
+        }
+        int candidateMethodCount = 0;
         for (Method method : fileUtils.getDeclaredMethods()) {
           String methodName = method.getName();
           if ("buildUniqueFile".equals(methodName)
               || "buildNonUniqueFile".equals(methodName)
               || "computeValuesFromData".equals(methodName)
               || "computeDataFromValues".equals(methodName)) {
+            candidateMethodCount++;
             try {
               installMediaFileUtilsMethod(fileUtils, method, callback);
             } catch (Throwable t) {
               logWarn("java hook media FileUtils method failed " + method, t);
             }
           }
+        }
+        if (firstClassObservation && candidateMethodCount == 0) {
+          logWarn("java hook media FileUtils target methods missing " + className);
         }
       } catch (ClassNotFoundException ignored) {
         // AOSP 与 Google MediaProvider 使用不同的 Java 包名，缺失候选属于正常情况。
@@ -880,6 +894,9 @@ public class Hooker {
     Method backup = hooker.doHook(method, callback);
     if (backup == null) {
       HOOKED_MEDIA_FILE_UTILS_METHODS.remove(key);
+      if (MEDIA_FILE_UTILS_REJECTED_LOGGED.add(key)) {
+        logWarn("java hook media FileUtils rejected " + key);
+      }
       return;
     }
     backup.setAccessible(true);
