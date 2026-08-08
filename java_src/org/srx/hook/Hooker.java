@@ -259,9 +259,11 @@ public class Hooker {
           && !hasSafeMediaStoreMutationValues(actualArgs)) {
         return callBackupPassthrough(args);
       }
-      MediaStorePublicParentCleanup publicParentCleanup =
-          captureMediaStorePublicParentCleanup(actualArgs, callerUid, mutationMethod);
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
+      MediaStorePublicParentCleanup publicParentCleanup =
+          redirectEnabled
+              ? captureMediaStorePublicParentCleanup(actualArgs, callerUid, mutationMethod)
+              : null;
       MutationPatchResult patch =
           redirectEnabled || shouldProbeMediaStoreMutationPatch(callerUid)
               ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
