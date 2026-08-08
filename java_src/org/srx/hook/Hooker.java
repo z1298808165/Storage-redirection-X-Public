@@ -945,6 +945,17 @@ public class Hooker {
       return (android.content.ContentProvider) receiver;
     if (receiver != null) {
       for (Class<?> clazz = receiver.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+        try {
+          Method getProvider = clazz.getDeclaredMethod("getContentProvider");
+          getProvider.setAccessible(true);
+          Object value = getProvider.invoke(receiver);
+          if (value instanceof android.content.ContentProvider) {
+            return (android.content.ContentProvider) value;
+          }
+        } catch (Throwable ignored) {
+        }
+      }
+      for (Class<?> clazz = receiver.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
         for (Field field : clazz.getDeclaredFields()) {
           try {
             field.setAccessible(true);
