@@ -18,6 +18,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Member;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -68,6 +70,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_MUTATION_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
+  private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
@@ -440,6 +443,10 @@ public class Hooker {
   }
 
   private static Object[] replaceFileArgument(Object[] args, int index, File replacement) {
+    return replaceArgument(args, index, replacement);
+  }
+
+  private static Object[] replaceArgument(Object[] args, int index, Object replacement) {
     if (args == null) return null;
     if (args.length == 1 && args[0] instanceof Object[]) {
       Object[] nested = ((Object[]) args[0]).clone();
@@ -811,8 +818,100 @@ public class Hooker {
         HOOKS.add(hooker);
         logInfo("java hook directory ok " + key);
       }
+      tryInstallNativeDirectoryHooks();
     } catch (Throwable t) {
       logWarn("java hook directory installer failed", t);
+    }
+  }
+
+  /**
+   * MediaProvider 的部分 Android 版本通过 NIO 或 libcore Os 直接创建目录，绕过
+   * java.io.File.mkdirs。目录创建必须和文件路径使用同一条规则，否则会留下公共父目录。
+   */
+  private static synchronized void tryInstallNativeDirectoryHooks() {
+    try {
+      Class<?> files = Class.forName("java.nio.file.Files");
+      for (Method method : files.getDeclaredMethods()) {
+        if (!"createDirectories".equals(method.getName())
+            && !"createDirectory".equals(method.getName())) continue;
+        installNativeDirectoryMethod(method);
+      }
+    } catch (Throwable t) {
+      logWarn("java hook NIO directory installer failed", t);
+    }
+    try {
+      Class<?> os = Class.forName("android.system.Os");
+      for (Method method : os.getDeclaredMethods()) {
+        if (!"mkdir".equals(method.getName()) && !"mkdirat".equals(method.getName())) continue;
+        installNativeDirectoryMethod(method);
+      }
+    } catch (Throwable t) {
+      logWarn("java hook Os directory installer failed", t);
+    }
+  }
+
+  private static void installNativeDirectoryMethod(Method method) throws Throwable {
+    String key = describeMethod(method);
+    if (!HOOKED_NATIVE_DIRECTORY_METHODS.add(key)) return;
+    Method callback =
+        Hooker.class.getDeclaredMethod("providerNativeDirectoryCallback", Object[].class);
+    callback.setAccessible(true);
+    method.setAccessible(true);
+    Hooker hooker = new Hooker();
+    Method backup = hooker.doHook(method, callback);
+    if (backup == null) {
+      HOOKED_NATIVE_DIRECTORY_METHODS.remove(key);
+      logWarn("java hook native directory rejected " + key);
+      return;
+    }
+    backup.setAccessible(true);
+    hooker.backup = backup;
+    hooker.target = method;
+    HOOKS.add(hooker);
+    logInfo("java hook native directory ok " + key);
+  }
+
+  public Object providerNativeDirectoryCallback(Object[] args) throws Throwable {
+    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    if (scopedUid == null) return callBackup(args);
+    Object[] actualArgs = unwrapArgs(args);
+    if (actualArgs == null) return callBackup(args);
+    int pathIndex = -1;
+    String sourcePath = null;
+    for (int i = 0; i < actualArgs.length; i++) {
+      Object value = actualArgs[i];
+      if (value instanceof Path) {
+        pathIndex = i;
+        sourcePath = value.toString();
+        break;
+      }
+      if (value instanceof String && ((String) value).startsWith("/storage/emulated/")) {
+        pathIndex = i;
+        sourcePath = (String) value;
+        break;
+      }
+    }
+    if (pathIndex < 0 || sourcePath == null) return callBackup(args);
+    String directPath = resolveMediaStoreDirectPathForValues(sourcePath, scopedUid.intValue());
+    if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
+    Object replacement = actualArgs[pathIndex] instanceof Path ? Paths.get(directPath) : directPath;
+    Object[] patchedArgs = replaceArgument(args, pathIndex, replacement);
+    DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
+    try {
+      Object result = callBackup(patchedArgs);
+      logInfo(
+          "media native directory method="
+              + (target instanceof Method ? ((Method) target).getName() : null)
+              + " from="
+              + sourcePath
+              + " to="
+              + directPath
+              + " result="
+              + result);
+      return result;
+    } finally {
+      DIRECTORY_REDIRECT_ACTIVE.remove();
     }
   }
 
