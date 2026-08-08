@@ -87,6 +87,10 @@ public class Hooker {
   private static final LinkedHashMap<String, String> REDIRECTED_MEDIA_TARGETS =
       new LinkedHashMap<>();
 
+  /** 延迟清理 MediaProvider 异步补建的公共父目录。 */
+  private static final LinkedHashMap<String, MediaStorePublicParentCleanup>
+      MEDIA_STORE_PUBLIC_PARENT_CLEANUPS = new LinkedHashMap<>();
+
   private static final int REDIRECTED_MEDIA_TARGET_LIMIT = 64;
 
   /**
@@ -218,6 +222,7 @@ public class Hooker {
         Object mappedResult = tryOpenMappedMediaFile(args, callerUid);
         if (mappedResult != null) {
           recordProviderOpenSuccess(this, args, actualArgs, mappedResult, callerUid);
+          cleanupDeferredMediaStorePublicParent(actualArgs, false);
           logOpenResult("mapped", mappedResult);
           return mappedResult;
         }
@@ -225,6 +230,7 @@ public class Hooker {
         Object result = callBackup(args);
         completeDirectMediaWriteFromSource(this, args, actualArgs, result, callerUid);
         if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
+        cleanupDeferredMediaStorePublicParent(actualArgs, false);
         logOpenResult("backup", result);
         return result;
       } finally {
@@ -273,9 +279,12 @@ public class Hooker {
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
         rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
+        rememberMediaStorePublicParentCleanup(result, publicParentCleanup);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
         commitRedirectedPendingFile(actualArgs, mutationMethod);
         cleanupMediaStorePublicParent(publicParentCleanup);
+        if ("update".equals(mutationMethod))
+          cleanupDeferredMediaStorePublicParent(actualArgs, true);
         logMutationResult(this, result);
         return result;
       } finally {
@@ -1736,8 +1745,10 @@ public class Hooker {
       int userId = userIdFromUid(callerUid);
       if (userId < 0) return null;
       String publicParent = "/storage/emulated/" + userId + "/" + relative;
+      String dataParent = "/data/media/" + userId + "/" + relative;
       return new MediaStorePublicParentCleanup(
-          publicParent, storagePathExistsBySyscall(publicParent));
+          publicParent,
+          storagePathExistsBySyscall(publicParent) || storagePathExistsBySyscall(dataParent));
     } catch (Throwable ignored) {
       return null;
     }
@@ -1747,9 +1758,48 @@ public class Hooker {
     if (cleanup == null || cleanup.existedBefore) return;
     try {
       boolean deleted = removeEmptyDirectoryBySyscall(cleanup.path);
+      String dataPath = dataMediaPathForStoragePath(cleanup.path);
+      if (dataPath != null) deleted |= removeEmptyDirectoryBySyscall(dataPath);
       if (deleted) logDebug("media public empty parent removed path=" + cleanup.path);
     } catch (Throwable ignored) {
     }
+  }
+
+  private static String dataMediaPathForStoragePath(String path) {
+    String prefix = "/storage/emulated/";
+    if (path == null || !path.startsWith(prefix)) return null;
+    return "/data/media/" + path.substring(prefix.length());
+  }
+
+  private static void rememberMediaStorePublicParentCleanup(
+      Object result, MediaStorePublicParentCleanup cleanup) {
+    if (cleanup == null || cleanup.existedBefore || !(result instanceof android.net.Uri)) return;
+    String uri = result.toString();
+    synchronized (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS) {
+      while (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
+        Iterator<String> oldest = MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.keySet().iterator();
+        if (!oldest.hasNext()) break;
+        oldest.next();
+        oldest.remove();
+      }
+      MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.put(uri, cleanup);
+    }
+  }
+
+  private static void cleanupDeferredMediaStorePublicParent(
+      Object[] actualArgs, boolean removeAfterCleanup) {
+    int uriIndex = findMutationUriIndex(actualArgs);
+    if (uriIndex < 0 || actualArgs == null || uriIndex >= actualArgs.length) return;
+    Object uriValue = actualArgs[uriIndex];
+    if (uriValue == null) return;
+    MediaStorePublicParentCleanup cleanup;
+    synchronized (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS) {
+      cleanup =
+          removeAfterCleanup
+              ? MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.remove(uriValue.toString())
+              : MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.get(uriValue.toString());
+    }
+    cleanupMediaStorePublicParent(cleanup);
   }
 
   private static String mediaStoreMutationHintPath(
