@@ -372,24 +372,54 @@ public class Hooker {
       }
       return result;
     }
-    Object result = callBackup(args);
-    if (!(result instanceof File)) return result;
+    if (!"buildUniqueFile".equals(methodName) && !"buildNonUniqueFile".equals(methodName)) {
+      return callBackup(args);
+    }
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    if (scopedUid == null) return result;
-    File source = (File) result;
-    String directPath =
-        resolveMediaStoreDirectPathForValues(source.getPath(), scopedUid.intValue());
-    if (directPath == null || directPath.equals(source.getPath())) return result;
-    MEDIA_FILE_BUILD_CONTEXT.set(
-        new MediaFileBuildContext(publicMediaStorePath(source.getPath(), scopedUid.intValue())));
+    if (scopedUid == null) return callBackup(args);
+    Object[] actualArgs = unwrapArgs(args);
+    int parentIndex = firstFileArgumentIndex(actualArgs);
+    if (parentIndex < 0) return callBackup(args);
+    File publicParent = (File) actualArgs[parentIndex];
+    String directParentPath =
+        resolveMediaStoreDirectPathForValues(publicParent.getPath(), scopedUid.intValue());
+    if (directParentPath == null || directParentPath.equals(publicParent.getPath())) {
+      return callBackup(args);
+    }
+    Object[] patchedArgs = replaceFileArgument(args, parentIndex, new File(directParentPath));
+    Object result = callBackup(patchedArgs);
+    if (!(result instanceof File)) return result;
+    File directFile = (File) result;
+    String publicPath = publicParent.getPath() + File.separator + directFile.getName();
+    MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
     logInfo(
         "media direct FileUtils method="
             + methodName
             + " from="
-            + source.getPath()
+            + publicPath
             + " to="
-            + directPath);
-    return new File(directPath);
+            + directFile.getPath());
+    return result;
+  }
+
+  private static int firstFileArgumentIndex(Object[] args) {
+    if (args == null) return -1;
+    for (int i = 0; i < args.length; i++) {
+      if (args[i] instanceof File) return i;
+    }
+    return -1;
+  }
+
+  private static Object[] replaceFileArgument(Object[] args, int index, File replacement) {
+    if (args == null) return null;
+    if (args.length == 1 && args[0] instanceof Object[]) {
+      Object[] nested = ((Object[]) args[0]).clone();
+      nested[index] = replacement;
+      return new Object[] {nested};
+    }
+    Object[] copy = args.clone();
+    copy[index] = replacement;
+    return copy;
   }
 
   private static void restoreMediaFileBuildValues(Object[] args) {
@@ -767,7 +797,11 @@ public class Hooker {
             || "buildNonUniqueFile".equals(methodName)
             || "computeValuesFromData".equals(methodName)
             || "computeDataFromValues".equals(methodName)) {
-          installMediaFileUtilsMethod(fileUtils, method, callback);
+          try {
+            installMediaFileUtilsMethod(fileUtils, method, callback);
+          } catch (Throwable t) {
+            logWarn("java hook media FileUtils method failed " + method, t);
+          }
         }
       }
     } catch (Throwable t) {
