@@ -539,17 +539,19 @@ fn list_app_processes() -> Vec<AppProcess> {
         let Ok(pid) = name.parse::<i32>() else {
             continue;
         };
-        // 先读 status 取 uid：/proc 中绝大多数是内核线程与系统进程，
-        // 提前用应用 uid 门槛过滤，可省掉这些进程的 cmdline 读取与包名分配。
+        // 先读 status 取 uid：/proc 中绝大多数是内核线程与系统进程。
+        // MediaProvider 在部分 Android 版本启动时会先以系统 UID 建立进程，
+        // 再切换到应用 UID；因此不能在读取 cmdline 前用应用 UID 门槛过滤，
+        // 否则 daemon 会漏掉未安装 Java hook 的 Provider，无法触发自愈重启。
         let Some((uid, is_uninterruptible)) = read_process_status(pid) else {
             continue;
         };
-        if uid < ANDROID_APP_UID_START {
-            continue;
-        }
         let Some(package_name) = read_process_package(pid) else {
             continue;
         };
+        if uid < ANDROID_APP_UID_START && !policy::is_media_provider_package(&package_name) {
+            continue;
+        }
         processes.push(AppProcess {
             pid,
             uid,
