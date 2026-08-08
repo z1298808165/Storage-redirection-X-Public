@@ -363,7 +363,7 @@ public class Hooker {
   public Object providerMediaFileUtilsCallback(Object[] args) throws Throwable {
     Method method = target instanceof Method ? (Method) target : null;
     String methodName = method == null ? null : method.getName();
-    if ("computeValuesFromData".equals(methodName)) {
+    if ("computeValuesFromData".equals(methodName) || "computeDataFromValues".equals(methodName)) {
       Object result;
       try {
         result = callBackup(args);
@@ -761,28 +761,30 @@ public class Hooker {
       Method callback =
           Hooker.class.getDeclaredMethod("providerMediaFileUtilsCallback", Object[].class);
       callback.setAccessible(true);
-      installMediaFileUtilsMethod(
-          fileUtils, "buildUniqueFile", callback, File.class, String.class, String.class);
-      installMediaFileUtilsMethod(
-          fileUtils, "buildNonUniqueFile", callback, File.class, String.class, String.class);
-      installMediaFileUtilsMethod(
-          fileUtils, "computeValuesFromData", callback, ContentValues.class, boolean.class);
+      for (Method method : fileUtils.getDeclaredMethods()) {
+        String methodName = method.getName();
+        if ("buildUniqueFile".equals(methodName)
+            || "buildNonUniqueFile".equals(methodName)
+            || "computeValuesFromData".equals(methodName)
+            || "computeDataFromValues".equals(methodName)) {
+          installMediaFileUtilsMethod(fileUtils, method, callback);
+        }
+      }
     } catch (Throwable t) {
       logWarn("java hook media FileUtils installer failed", t);
     }
   }
 
   private static void installMediaFileUtilsMethod(
-      Class<?> fileUtils, String methodName, Method callback, Class<?>... parameterTypes)
-      throws Throwable {
+      Class<?> fileUtils, Method method, Method callback) throws Throwable {
+    String methodName = method.getName();
     StringBuilder keyBuilder =
         new StringBuilder(fileUtils.getName()).append('#').append(methodName);
-    for (Class<?> parameterType : parameterTypes) {
+    for (Class<?> parameterType : method.getParameterTypes()) {
       keyBuilder.append('(').append(parameterType.getName()).append(')');
     }
     String key = keyBuilder.toString();
     if (!HOOKED_MEDIA_FILE_UTILS_METHODS.add(key)) return;
-    Method method = fileUtils.getDeclaredMethod(methodName, parameterTypes);
     method.setAccessible(true);
     Hooker hooker = new Hooker();
     Method backup = hooker.doHook(method, callback);
