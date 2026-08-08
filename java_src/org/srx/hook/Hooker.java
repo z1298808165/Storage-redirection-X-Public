@@ -47,6 +47,16 @@ public class Hooker {
     "Recordings",
     "Ringtones"
   };
+  private static final String[] MEDIA_PROVIDER_CLASS_NAMES = {
+    "com.android.providers.media.MediaProvider",
+    "com.android.providers.media.module.MediaProvider",
+    "com.google.android.providers.media.MediaProvider",
+    "com.google.android.providers.media.module.MediaProvider"
+  };
+  private static final String[] MEDIA_FILE_UTILS_CLASS_NAMES = {
+    "com.android.providers.media.util.FileUtils",
+    "com.google.android.providers.media.util.FileUtils"
+  };
   private static final ArrayList<Hooker> HOOKS = new ArrayList<>();
   private static final HashSet<String> HOOKED_QUERY_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_OPEN_CLASSES = new HashSet<>();
@@ -674,6 +684,8 @@ public class Hooker {
     return new String[] {
       "com.android.providers.media.MediaProvider",
       "com.android.providers.media.module.MediaProvider",
+      "com.google.android.providers.media.MediaProvider",
+      "com.google.android.providers.media.module.MediaProvider",
       "com.android.providers.downloads.DownloadProvider",
       "com.android.providers.downloads.DownloadStorageProvider",
       "com.android.externalstorage.ExternalStorageProvider",
@@ -797,27 +809,35 @@ public class Hooker {
 
   private static synchronized void tryInstallMediaFileUtilsHooks(ClassLoader loader) {
     if (loader == null) return;
+    Method callback;
     try {
-      Class<?> fileUtils =
-          Class.forName("com.android.providers.media.util.FileUtils", false, loader);
-      Method callback =
-          Hooker.class.getDeclaredMethod("providerMediaFileUtilsCallback", Object[].class);
+      callback = Hooker.class.getDeclaredMethod("providerMediaFileUtilsCallback", Object[].class);
       callback.setAccessible(true);
-      for (Method method : fileUtils.getDeclaredMethods()) {
-        String methodName = method.getName();
-        if ("buildUniqueFile".equals(methodName)
-            || "buildNonUniqueFile".equals(methodName)
-            || "computeValuesFromData".equals(methodName)
-            || "computeDataFromValues".equals(methodName)) {
-          try {
-            installMediaFileUtilsMethod(fileUtils, method, callback);
-          } catch (Throwable t) {
-            logWarn("java hook media FileUtils method failed " + method, t);
+    } catch (Throwable t) {
+      logWarn("java hook media FileUtils callback unavailable", t);
+      return;
+    }
+    for (String className : MEDIA_FILE_UTILS_CLASS_NAMES) {
+      try {
+        Class<?> fileUtils = Class.forName(className, false, loader);
+        for (Method method : fileUtils.getDeclaredMethods()) {
+          String methodName = method.getName();
+          if ("buildUniqueFile".equals(methodName)
+              || "buildNonUniqueFile".equals(methodName)
+              || "computeValuesFromData".equals(methodName)
+              || "computeDataFromValues".equals(methodName)) {
+            try {
+              installMediaFileUtilsMethod(fileUtils, method, callback);
+            } catch (Throwable t) {
+              logWarn("java hook media FileUtils method failed " + method, t);
+            }
           }
         }
+      } catch (ClassNotFoundException ignored) {
+        // AOSP 与 Google MediaProvider 使用不同的 Java 包名，缺失候选属于正常情况。
+      } catch (Throwable t) {
+        logWarn("java hook media FileUtils installer failed " + className, t);
       }
-    } catch (Throwable t) {
-      logWarn("java hook media FileUtils installer failed", t);
     }
   }
 
@@ -870,8 +890,11 @@ public class Hooker {
   }
 
   private static boolean isMediaProviderClass(String name) {
-    return "com.android.providers.media.MediaProvider".equals(name)
-        || "com.android.providers.media.module.MediaProvider".equals(name);
+    if (name == null) return false;
+    for (String candidate : MEDIA_PROVIDER_CLASS_NAMES) {
+      if (candidate.equals(name)) return true;
+    }
+    return false;
   }
 
   private static boolean isProviderOpenHookClass(String name) {
