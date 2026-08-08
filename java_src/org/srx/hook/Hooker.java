@@ -1087,6 +1087,17 @@ public class Hooker {
     if (value instanceof android.content.ContentProvider) {
       return (android.content.ContentProvider) value;
     }
+    for (Class<?> clazz = value.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+      try {
+        Method getProvider = clazz.getDeclaredMethod("getContentProvider");
+        getProvider.setAccessible(true);
+        Object provider = getProvider.invoke(value);
+        if (provider instanceof android.content.ContentProvider) {
+          return (android.content.ContentProvider) provider;
+        }
+      } catch (Throwable ignored) {
+      }
+    }
     if (value instanceof Object[]) {
       for (Object item : (Object[]) value) {
         android.content.ContentProvider provider = providerFromObject(item, depth + 1);
