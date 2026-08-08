@@ -25,6 +25,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -269,6 +270,7 @@ public class Hooker {
     if (target instanceof Method) {
       tryInstallMediaFileUtilsHooks(((Method) target).getDeclaringClass().getClassLoader());
     }
+    tryInstallMediaProviderFromActivityThread();
     tryInstallMediaFileUtilsHooksForKnownLoaders();
     tryInstallMediaFileUtilsHooks(Thread.currentThread().getContextClassLoader());
     if (isInsideProviderInternalCall()) {
@@ -1083,7 +1085,7 @@ public class Hooker {
   }
 
   private static android.content.ContentProvider providerFromObject(Object value, int depth) {
-    if (value == null || depth > 2) return null;
+    if (value == null || depth > 4) return null;
     if (value instanceof android.content.ContentProvider) {
       return (android.content.ContentProvider) value;
     }
@@ -1105,6 +1107,15 @@ public class Hooker {
       }
       return null;
     }
+    if (value instanceof Map) {
+      int count = 0;
+      for (Object item : ((Map<?, ?>) value).values()) {
+        android.content.ContentProvider provider = providerFromObject(item, depth + 1);
+        if (provider != null) return provider;
+        if (++count >= 32) break;
+      }
+      return null;
+    }
     for (Class<?> clazz = value.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
       for (Field field : clazz.getDeclaredFields()) {
         if (!android.content.ContentProvider.class.isAssignableFrom(field.getType())
@@ -1119,6 +1130,26 @@ public class Hooker {
       }
     }
     return null;
+  }
+
+  private static void tryInstallMediaProviderFromActivityThread() {
+    Object thread = currentActivityThread();
+    if (thread == null) return;
+    for (Class<?> clazz = thread.getClass(); clazz != null; clazz = clazz.getSuperclass()) {
+      try {
+        Field field = clazz.getDeclaredField("mProviderMap");
+        field.setAccessible(true);
+        android.content.ContentProvider provider = providerFromObject(field.get(thread), 0);
+        if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+          ClassLoader loader = provider.getClass().getClassLoader();
+          logInfo("java hook media provider loader acquired from ActivityThread " + loader);
+          tryLoadAndHookMediaProvider(loader);
+          tryInstallMediaFileUtilsHooks(loader);
+          return;
+        }
+      } catch (Throwable ignored) {
+      }
+    }
   }
 
   private static void installQueryOn(Class<?> clazz) {
