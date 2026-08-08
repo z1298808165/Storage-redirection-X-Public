@@ -250,6 +250,10 @@ public class Hooker {
     if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
       tryInstallMediaFileUtilsHooks(provider.getClass().getClassLoader());
     }
+    if (target instanceof Method) {
+      tryInstallMediaFileUtilsHooks(((Method) target).getDeclaringClass().getClassLoader());
+    }
+    tryInstallMediaFileUtilsHooksForKnownLoaders();
     tryInstallMediaFileUtilsHooks(Thread.currentThread().getContextClassLoader());
     if (isInsideProviderInternalCall()) {
       return isInsertLikeMutation(mutationMethod)
@@ -600,6 +604,7 @@ public class Hooker {
       // 策略1: 直接通过 ClassLoader 查找当前进程已加载的 Provider 类。
       boolean directHooked = tryDirectProviderHook();
       tryInstallDirectoryHooks();
+      tryInstallMediaFileUtilsHooksForKnownLoaders();
       // 策略2: 兜底 - hook attachInfo 等待 Provider 实例触发。
       Class<?> cpClass = Class.forName("android.content.ContentProvider");
       installMutationFallback(cpClass);
@@ -813,6 +818,30 @@ public class Hooker {
       }
     } catch (Throwable t) {
       logWarn("java hook media FileUtils installer failed", t);
+    }
+  }
+
+  /**
+   * MediaProvider 的模块类可能由独立的 APEX 或 PathClassLoader 加载，注入入口拿到的 ContentProvider 类加载器不一定就是该加载器。启动和首次
+   * mutation 时同时探测已知加载器， 避免只在错误的 loader 上尝试导致 FileUtils hook 永久缺失。
+   */
+  private static void tryInstallMediaFileUtilsHooksForKnownLoaders() {
+    HashSet<ClassLoader> loaders = new HashSet<>();
+    loaders.add(Hooker.class.getClassLoader());
+    loaders.add(ClassLoader.getSystemClassLoader());
+    loaders.add(Thread.currentThread().getContextClassLoader());
+    try {
+      loaders.add(Class.forName("android.content.ContentProvider").getClassLoader());
+    } catch (Throwable ignored) {
+    }
+    try {
+      loaders.add(Class.forName("android.app.ActivityThread").getClassLoader());
+    } catch (Throwable ignored) {
+    }
+    for (ClassLoader loader : loaders) {
+      if (loader == null) continue;
+      tryInstallMediaFileUtilsHooks(loader);
+      tryLoadAndHookMediaProvider(loader);
     }
   }
 
