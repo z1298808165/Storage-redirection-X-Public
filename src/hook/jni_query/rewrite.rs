@@ -277,6 +277,64 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     Some(rewritten)
 }
 
+/// 解析 MediaProvider 创建文件前必须接收的实际显示路径。
+/// 与查询改写不同，这里保留 Android/data 沙箱前缀，使父目录直接创建在配置的私有目标中。
+pub(crate) fn resolve_media_store_direct_path_for_caller(
+    original_text: &str,
+    caller_uid: i32,
+) -> Option<String> {
+    if caller_uid < 0 {
+        return None;
+    }
+    let (path_text, _) = split_storage_path(original_text)?;
+    let (caller_package, effective_uid) = resolve_storage_caller_context(caller_uid, path_text);
+    if caller_package.is_empty() {
+        return None;
+    }
+
+    if let Some(mapped_target) =
+        resolve_mapping_view_open_target(path_text, &caller_package, effective_uid)
+    {
+        let display_target = to_public_storage_path(&mapped_target);
+        if display_target != path_text {
+            log::info!(
+                "media direct path caller={} uid={} input={} target={}",
+                caller_package,
+                effective_uid,
+                path_text,
+                display_target
+            );
+            return Some(display_target);
+        }
+    }
+
+    let hub = InterceptHub::instance();
+    let previous_package = hub.get_current_caller_package();
+    let previous_uid = hub.get_current_caller_uid();
+    hub.set_current_caller_package(&caller_package);
+    hub.set_current_caller_uid(effective_uid);
+    let _explicit_caller = crate::hook::enter_explicit_caller_decision();
+    let decision = process_write_redirect_path(hub, path_text);
+    hub.set_current_caller_package(&previous_package);
+    hub.set_current_caller_uid(previous_uid);
+    if !decision.is_redirect() || decision.new_path.is_empty() {
+        return None;
+    }
+
+    let display_target = to_public_storage_path(&decision.new_path);
+    if display_target == path_text {
+        return None;
+    }
+    log::info!(
+        "media direct path caller={} uid={} input={} target={}",
+        caller_package,
+        effective_uid,
+        path_text,
+        display_target
+    );
+    Some(display_target)
+}
+
 pub(crate) fn resolve_download_media_placeholder_path_for_caller(
     original_path: &str,
     relative_path: &str,
@@ -437,21 +495,6 @@ pub(crate) fn is_redirect_enabled_for_caller_uid(caller_uid: i32) -> bool {
 
 pub(crate) fn storage_path_exists_by_syscall(path_text: &str) -> bool {
     path_exists_by_syscall(path_text)
-}
-
-pub(crate) fn remove_empty_directory_by_syscall(path_text: &str) -> bool {
-    let Ok(c_path) = CString::new(path_text) else {
-        return false;
-    };
-    // SAFETY: c_path 由 CString 构造且在 syscall 返回前保持有效，参数使用固定的 AT_FDCWD/AT_REMOVEDIR。
-    unsafe {
-        libc::syscall(
-            libc::SYS_unlinkat,
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            libc::AT_REMOVEDIR,
-        ) == 0
-    }
 }
 
 pub(crate) fn should_hide_cursor_storage_path_for_caller(

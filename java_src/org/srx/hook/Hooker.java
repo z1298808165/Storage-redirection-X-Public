@@ -87,10 +87,6 @@ public class Hooker {
   private static final LinkedHashMap<String, String> REDIRECTED_MEDIA_TARGETS =
       new LinkedHashMap<>();
 
-  /** 延迟清理 MediaProvider 异步补建的公共父目录。 */
-  private static final LinkedHashMap<String, MediaStorePublicParentCleanup>
-      MEDIA_STORE_PUBLIC_PARENT_CLEANUPS = new LinkedHashMap<>();
-
   private static final int REDIRECTED_MEDIA_TARGET_LIMIT = 64;
 
   /**
@@ -222,7 +218,6 @@ public class Hooker {
         Object mappedResult = tryOpenMappedMediaFile(args, callerUid);
         if (mappedResult != null) {
           recordProviderOpenSuccess(this, args, actualArgs, mappedResult, callerUid);
-          cleanupDeferredMediaStorePublicParent(actualArgs, false);
           logOpenResult("mapped", mappedResult);
           return mappedResult;
         }
@@ -230,7 +225,6 @@ public class Hooker {
         Object result = callBackup(args);
         completeDirectMediaWriteFromSource(this, args, actualArgs, result, callerUid);
         if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
-        cleanupDeferredMediaStorePublicParent(actualArgs, false);
         logOpenResult("backup", result);
         return result;
       } finally {
@@ -260,13 +254,9 @@ public class Hooker {
         return callBackupPassthrough(args);
       }
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
-      MediaStorePublicParentCleanup publicParentCleanup =
-          redirectEnabled
-              ? captureMediaStorePublicParentCleanup(actualArgs, callerUid, mutationMethod)
-              : null;
       MutationPatchResult patch =
           redirectEnabled || shouldProbeMediaStoreMutationPatch(callerUid)
-              ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
+              ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod, redirectEnabled)
               : new MutationPatchResult(false, false);
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       enterProviderInternalCall();
@@ -281,12 +271,8 @@ public class Hooker {
         registerDirectWriteAfterInsert(
             args, result, callerUid, mutationMethod, patch.directWriteRequested);
         rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
-        rememberMediaStorePublicParentCleanup(result, publicParentCleanup);
         finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
         commitRedirectedPendingFile(actualArgs, mutationMethod);
-        cleanupMediaStorePublicParent(publicParentCleanup);
-        if ("update".equals(mutationMethod))
-          cleanupDeferredMediaStorePublicParent(actualArgs, true);
         logMutationResult(this, result);
         return result;
       } finally {
@@ -917,9 +903,9 @@ public class Hooker {
 
   private static native boolean storagePathExistsBySyscall(String path);
 
-  private static native boolean removeEmptyDirectoryBySyscall(String path);
-
   private static native String rewriteMediaStorePath(String path, int callerUid);
+
+  private static native String resolveMediaStoreDirectPath(String path, int callerUid);
 
   private static native String resolveDownloadPlaceholder(
       String originalPath, String relativePath, String displayName, boolean video, int callerUid);
@@ -1732,78 +1718,6 @@ public class Hooker {
     }
   }
 
-  private static MediaStorePublicParentCleanup captureMediaStorePublicParentCleanup(
-      Object[] actualArgs, int callerUid, String mutationMethod) {
-    if (!"insert".equals(mutationMethod) || callerUid < ANDROID_APP_UID_START) return null;
-    try {
-      ContentValues values = findContentValues(actualArgs);
-      if (values == null) return null;
-      String relativePath = values.getAsString("relative_path");
-      if (relativePath == null || relativePath.length() == 0) {
-        relativePath = relativePathFromDirectoryColumns(values);
-      }
-      String relative = normalizeRelativePathValue(relativePath);
-      if (!isSafePublicMediaRelativePath(relative)) return null;
-      int userId = userIdFromUid(callerUid);
-      if (userId < 0) return null;
-      String publicParent = "/storage/emulated/" + userId + "/" + relative;
-      String dataParent = "/data/media/" + userId + "/" + relative;
-      return new MediaStorePublicParentCleanup(
-          publicParent,
-          storagePathExistsBySyscall(publicParent) || storagePathExistsBySyscall(dataParent));
-    } catch (Throwable ignored) {
-      return null;
-    }
-  }
-
-  private static void cleanupMediaStorePublicParent(MediaStorePublicParentCleanup cleanup) {
-    if (cleanup == null || cleanup.existedBefore) return;
-    try {
-      boolean deleted = removeEmptyDirectoryBySyscall(cleanup.path);
-      String dataPath = dataMediaPathForStoragePath(cleanup.path);
-      if (dataPath != null) deleted |= removeEmptyDirectoryBySyscall(dataPath);
-      if (deleted) logDebug("media public empty parent removed path=" + cleanup.path);
-    } catch (Throwable ignored) {
-    }
-  }
-
-  private static String dataMediaPathForStoragePath(String path) {
-    String prefix = "/storage/emulated/";
-    if (path == null || !path.startsWith(prefix)) return null;
-    return "/data/media/" + path.substring(prefix.length());
-  }
-
-  private static void rememberMediaStorePublicParentCleanup(
-      Object result, MediaStorePublicParentCleanup cleanup) {
-    if (cleanup == null || cleanup.existedBefore || !(result instanceof android.net.Uri)) return;
-    String uri = result.toString();
-    synchronized (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS) {
-      while (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
-        Iterator<String> oldest = MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.keySet().iterator();
-        if (!oldest.hasNext()) break;
-        oldest.next();
-        oldest.remove();
-      }
-      MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.put(uri, cleanup);
-    }
-  }
-
-  private static void cleanupDeferredMediaStorePublicParent(
-      Object[] actualArgs, boolean removeAfterCleanup) {
-    int uriIndex = findMutationUriIndex(actualArgs);
-    if (uriIndex < 0 || actualArgs == null || uriIndex >= actualArgs.length) return;
-    Object uriValue = actualArgs[uriIndex];
-    if (uriValue == null) return;
-    MediaStorePublicParentCleanup cleanup;
-    synchronized (MEDIA_STORE_PUBLIC_PARENT_CLEANUPS) {
-      cleanup =
-          removeAfterCleanup
-              ? MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.remove(uriValue.toString())
-              : MEDIA_STORE_PUBLIC_PARENT_CLEANUPS.get(uriValue.toString());
-    }
-    cleanupMediaStorePublicParent(cleanup);
-  }
-
   private static String mediaStoreMutationHintPath(
       String path, ContentValues values, int callerUid) {
     if (path == null || path.length() == 0 || callerUid < ANDROID_APP_UID_START) return null;
@@ -1890,7 +1804,11 @@ public class Hooker {
   }
 
   private static MutationPatchResult patchMediaStoreValues(
-      Object[] rawArgs, Object[] actualArgs, int callerUid, String mutationMethod)
+      Object[] rawArgs,
+      Object[] actualArgs,
+      int callerUid,
+      String mutationMethod,
+      boolean redirectEnabled)
       throws FileNotFoundException {
     if (actualArgs == null || actualArgs.length == 0) return new MutationPatchResult(false, false);
     boolean patchedAny = false;
@@ -1903,7 +1821,8 @@ public class Hooker {
       Object arg = actualArgs[i];
       if (arg instanceof ContentValues) {
         ContentValuesPatch patch =
-            patchContentValues((ContentValues) arg, callerUid, mutationUri, insertLike);
+            patchContentValues(
+                (ContentValues) arg, callerUid, mutationUri, insertLike, redirectEnabled);
         requestedCollection =
             mergeRequestedMediaCollection(requestedCollection, patch.mediaCollection);
         directWriteRequested |= patch.directWriteRequested;
@@ -1916,7 +1835,7 @@ public class Hooker {
         ContentValues[] patchedValues = null;
         for (int j = 0; j < values.length; j++) {
           ContentValuesPatch patch =
-              patchContentValues(values[j], callerUid, mutationUri, insertLike);
+              patchContentValues(values[j], callerUid, mutationUri, insertLike, redirectEnabled);
           requestedCollection =
               mergeRequestedMediaCollection(requestedCollection, patch.mediaCollection);
           directWriteRequested |= patch.directWriteRequested;
@@ -1945,7 +1864,11 @@ public class Hooker {
   }
 
   private static ContentValuesPatch patchContentValues(
-      ContentValues values, int callerUid, android.net.Uri mutationUri, boolean insertLike)
+      ContentValues values,
+      int callerUid,
+      android.net.Uri mutationUri,
+      boolean insertLike,
+      boolean redirectEnabled)
       throws FileNotFoundException {
     if (values == null || values.size() == 0) return new ContentValuesPatch(values, null, false);
 
@@ -2001,6 +1924,24 @@ public class Hooker {
         directWriteRequested = true;
         relativeSource = patched;
         relativePath = relativeSource.getAsString("relative_path");
+      }
+    }
+    if (insertLike && redirectEnabled && relativePath != null && relativePath.length() > 0) {
+      String displayName = firstString(relativeSource, "_display_name", "display_name");
+      String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+      String directPath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
+      if (directPath != null && !directPath.equals(probePath)) {
+        patched = copyIfNeeded(patched, values);
+        patched.put("_data", directPath);
+        ensureSandboxParentDir(directPath);
+        relativeSource = patched;
+        logInfo(
+            "media direct insert path="
+                + probePath
+                + " target="
+                + directPath
+                + " relative="
+                + relativePath);
       }
     }
     if (relativePath != null && relativePath.length() > 0) {
@@ -2804,16 +2745,6 @@ public class Hooker {
     }
   }
 
-  private static final class MediaStorePublicParentCleanup {
-    final String path;
-    final boolean existedBefore;
-
-    MediaStorePublicParentCleanup(String path, boolean existedBefore) {
-      this.path = path;
-      this.existedBefore = existedBefore;
-    }
-  }
-
   private static ContentValues copyIfNeeded(ContentValues current, ContentValues original) {
     return current != null ? current : new ContentValues(original);
   }
@@ -2869,6 +2800,19 @@ public class Hooker {
     if (fallback == null) fallback = normalizeRelativeDataPath(path, callerUid);
     logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
     return fallback;
+  }
+
+  private static String resolveMediaStoreDirectPathForValues(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    try {
+      String directPath = resolveMediaStoreDirectPath(path, callerUid);
+      if (directPath == null || directPath.length() == 0 || directPath.equals(path)) return null;
+      if (!isSafePublicMediaValuePath(directPath)
+          && !isSrxSandboxFallbackPath(directPath, callerUid)) return null;
+      return directPath;
+    } catch (Throwable ignored) {
+      return null;
+    }
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {
