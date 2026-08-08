@@ -57,6 +57,7 @@ public class Hooker {
     "com.google.android.providers.media.module.MediaProvider"
   };
   private static final String[] MEDIA_FILE_UTILS_CLASS_NAMES = {
+    "android.os.FileUtils",
     "com.android.providers.media.util.FileUtils",
     "com.android.providers.media.module.util.FileUtils",
     "com.google.android.providers.media.util.FileUtils",
