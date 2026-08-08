@@ -125,6 +125,7 @@ public class Hooker {
   private static final int FUSE_KIND_RMDIR = 6;
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
   private static final ThreadLocal<Boolean> DIRECTORY_REDIRECT_ACTIVE = new ThreadLocal<>();
+  private static final ThreadLocal<Integer> MEDIA_PROVIDER_CALLER_UID = new ThreadLocal<>();
   public Method backup;
   private Member target;
 
@@ -261,6 +262,7 @@ public class Hooker {
               ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
               : new MutationPatchResult(false, false);
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
+      MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
       enterProviderInternalCall();
       try {
         Object result;
@@ -279,6 +281,7 @@ public class Hooker {
         return result;
       } finally {
         exitProviderInternalCall();
+        MEDIA_PROVIDER_CALLER_UID.remove();
       }
     } finally {
       exitCallerScope();
@@ -318,12 +321,13 @@ public class Hooker {
   }
 
   public Object providerDirectoryCallback(Object[] args) throws Throwable {
-    if (!isInsideProviderInternalCall() || Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) {
+    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) {
       return callBackup(args);
     }
     File receiver = directoryReceiver(args);
     if (receiver == null) return callBackup(args);
-    int callerUid = android.os.Binder.getCallingUid();
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
     String directPath = resolveMediaStoreDirectPathForValues(receiver.getPath(), callerUid);
     if (directPath == null || directPath.equals(receiver.getPath())) return callBackup(args);
     DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
