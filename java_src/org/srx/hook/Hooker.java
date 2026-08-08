@@ -52,6 +52,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_MUTATION_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_MUTATION_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
+  private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
   private static volatile boolean QUERY_HOOK_PENDING = true;
   private static int QUERY_LOG_COUNT;
   private static int QUERY_NULL_EMPTY_LOG_COUNT;
@@ -123,6 +124,7 @@ public class Hooker {
   private static final int FUSE_KIND_UNLINK = 5;
   private static final int FUSE_KIND_RMDIR = 6;
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
+  private static final ThreadLocal<Boolean> DIRECTORY_REDIRECT_ACTIVE = new ThreadLocal<>();
   public Method backup;
   private Member target;
 
@@ -256,7 +258,7 @@ public class Hooker {
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
       MutationPatchResult patch =
           redirectEnabled || shouldProbeMediaStoreMutationPatch(callerUid)
-              ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod, redirectEnabled)
+              ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
               : new MutationPatchResult(false, false);
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       enterProviderInternalCall();
@@ -313,6 +315,47 @@ public class Hooker {
     } finally {
       exitCallerScope();
     }
+  }
+
+  public Object providerDirectoryCallback(Object[] args) throws Throwable {
+    if (!isInsideProviderInternalCall() || Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) {
+      return callBackup(args);
+    }
+    File receiver = directoryReceiver(args);
+    if (receiver == null) return callBackup(args);
+    int callerUid = android.os.Binder.getCallingUid();
+    String directPath = resolveMediaStoreDirectPathForValues(receiver.getPath(), callerUid);
+    if (directPath == null || directPath.equals(receiver.getPath())) return callBackup(args);
+    DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
+    try {
+      Method method = target instanceof Method ? (Method) target : null;
+      boolean created =
+          method != null && "mkdir".equals(method.getName())
+              ? new File(directPath).mkdir()
+              : new File(directPath).mkdirs();
+      logInfo(
+          "media direct directory method="
+              + (method == null ? null : method.getName())
+              + " from="
+              + receiver.getPath()
+              + " to="
+              + directPath
+              + " result="
+              + created);
+      return Boolean.valueOf(created);
+    } finally {
+      DIRECTORY_REDIRECT_ACTIVE.remove();
+    }
+  }
+
+  private static File directoryReceiver(Object[] args) {
+    if (args == null || args.length == 0) return null;
+    if (args[0] instanceof File) return (File) args[0];
+    if (args.length == 1 && args[0] instanceof Object[]) {
+      Object[] nested = (Object[]) args[0];
+      return nested.length > 0 && nested[0] instanceof File ? (File) nested[0] : null;
+    }
+    return null;
   }
 
   public Object providerFileOpenCallback(Object[] args) throws Throwable {
@@ -445,6 +488,7 @@ public class Hooker {
     try {
       // 策略1: 直接通过 ClassLoader 查找当前进程已加载的 Provider 类。
       boolean directHooked = tryDirectProviderHook();
+      tryInstallDirectoryHooks();
       // 策略2: 兜底 - hook attachInfo 等待 Provider 实例触发。
       Class<?> cpClass = Class.forName("android.content.ContentProvider");
       installMutationFallback(cpClass);
@@ -599,6 +643,33 @@ public class Hooker {
       if (!isMediaProviderClass(name)) continue;
       if (!HOOKED_FUSE_CLASSES.add(name)) continue;
       installFuseOn(c);
+    }
+  }
+
+  private static synchronized void tryInstallDirectoryHooks() {
+    try {
+      Class<?> fileClass = File.class;
+      for (String methodName : new String[] {"mkdirs", "mkdir"}) {
+        String key = fileClass.getName() + "#" + methodName;
+        if (!HOOKED_DIRECTORY_METHODS.add(key)) continue;
+        Method method = fileClass.getDeclaredMethod(methodName);
+        Method callback =
+            Hooker.class.getDeclaredMethod("providerDirectoryCallback", Object[].class);
+        callback.setAccessible(true);
+        Hooker hooker = new Hooker();
+        Method backup = hooker.doHook(method, callback);
+        if (backup == null) {
+          HOOKED_DIRECTORY_METHODS.remove(key);
+          continue;
+        }
+        backup.setAccessible(true);
+        hooker.backup = backup;
+        hooker.target = method;
+        HOOKS.add(hooker);
+        logInfo("java hook directory ok " + key);
+      }
+    } catch (Throwable t) {
+      logWarn("java hook directory installer failed", t);
     }
   }
 
@@ -1804,11 +1875,7 @@ public class Hooker {
   }
 
   private static MutationPatchResult patchMediaStoreValues(
-      Object[] rawArgs,
-      Object[] actualArgs,
-      int callerUid,
-      String mutationMethod,
-      boolean redirectEnabled)
+      Object[] rawArgs, Object[] actualArgs, int callerUid, String mutationMethod)
       throws FileNotFoundException {
     if (actualArgs == null || actualArgs.length == 0) return new MutationPatchResult(false, false);
     boolean patchedAny = false;
@@ -1821,8 +1888,7 @@ public class Hooker {
       Object arg = actualArgs[i];
       if (arg instanceof ContentValues) {
         ContentValuesPatch patch =
-            patchContentValues(
-                (ContentValues) arg, callerUid, mutationUri, insertLike, redirectEnabled);
+            patchContentValues((ContentValues) arg, callerUid, mutationUri, insertLike);
         requestedCollection =
             mergeRequestedMediaCollection(requestedCollection, patch.mediaCollection);
         directWriteRequested |= patch.directWriteRequested;
@@ -1835,7 +1901,7 @@ public class Hooker {
         ContentValues[] patchedValues = null;
         for (int j = 0; j < values.length; j++) {
           ContentValuesPatch patch =
-              patchContentValues(values[j], callerUid, mutationUri, insertLike, redirectEnabled);
+              patchContentValues(values[j], callerUid, mutationUri, insertLike);
           requestedCollection =
               mergeRequestedMediaCollection(requestedCollection, patch.mediaCollection);
           directWriteRequested |= patch.directWriteRequested;
@@ -1864,11 +1930,7 @@ public class Hooker {
   }
 
   private static ContentValuesPatch patchContentValues(
-      ContentValues values,
-      int callerUid,
-      android.net.Uri mutationUri,
-      boolean insertLike,
-      boolean redirectEnabled)
+      ContentValues values, int callerUid, android.net.Uri mutationUri, boolean insertLike)
       throws FileNotFoundException {
     if (values == null || values.size() == 0) return new ContentValuesPatch(values, null, false);
 
@@ -1924,24 +1986,6 @@ public class Hooker {
         directWriteRequested = true;
         relativeSource = patched;
         relativePath = relativeSource.getAsString("relative_path");
-      }
-    }
-    if (insertLike && redirectEnabled && relativePath != null && relativePath.length() > 0) {
-      String displayName = firstString(relativeSource, "_display_name", "display_name");
-      String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
-      String directPath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
-      if (directPath != null && !directPath.equals(probePath)) {
-        patched = copyIfNeeded(patched, values);
-        patched.put("_data", directPath);
-        ensureSandboxParentDir(directPath);
-        relativeSource = patched;
-        logInfo(
-            "media direct insert path="
-                + probePath
-                + " target="
-                + directPath
-                + " relative="
-                + relativePath);
       }
     }
     if (relativePath != null && relativePath.length() > 0) {
