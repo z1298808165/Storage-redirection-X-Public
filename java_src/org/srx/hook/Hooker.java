@@ -483,6 +483,7 @@ public class Hooker {
   public Object providerMediaFileColumnCallback(Object[] args) throws Throwable {
     Method method = target instanceof Method ? (Method) target : null;
     String methodName = method == null ? null : method.getName();
+    if ("ensureNonUniqueFileColumns".equals(methodName)) return callBackup(args);
     Object[] actualArgs = unwrapArgs(args);
     ContentValues values = findContentValues(actualArgs);
     if (values == null) return callBackup(args);
