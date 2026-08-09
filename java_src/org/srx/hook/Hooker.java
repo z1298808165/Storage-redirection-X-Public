@@ -1028,7 +1028,6 @@ public class Hooker {
   public Object providerNativeDirectoryCallback(Object[] args) throws Throwable {
     if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    if (scopedUid == null) return callBackup(args);
     Object[] actualArgs = unwrapArgs(args);
     if (actualArgs == null) return callBackup(args);
     int pathIndex = -1;
