@@ -415,7 +415,9 @@ public class Hooker {
       }
       return result;
     }
-    if (!"buildUniqueFile".equals(methodName) && !"buildNonUniqueFile".equals(methodName)) {
+    if (!"buildFile".equals(methodName)
+        && !"buildUniqueFile".equals(methodName)
+        && !"buildNonUniqueFile".equals(methodName)) {
       return callBackup(args);
     }
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
@@ -993,7 +995,8 @@ public class Hooker {
         int candidateMethodCount = 0;
         for (Method method : fileUtils.getDeclaredMethods()) {
           String methodName = method.getName();
-          if ("buildUniqueFile".equals(methodName)
+          if ("buildFile".equals(methodName)
+              || "buildUniqueFile".equals(methodName)
               || "buildNonUniqueFile".equals(methodName)
               || "computeValuesFromData".equals(methodName)
               || "computeDataFromValues".equals(methodName)) {
