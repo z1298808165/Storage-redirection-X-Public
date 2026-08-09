@@ -686,12 +686,6 @@ extern "C" jobject srx_lsplant_hook(JNIEnv *env, jobject target_method,
   return lsplant::Hook(env, target_method, hooker_object, callback_method);
 }
 
-extern "C" bool srx_lsplant_deoptimize(JNIEnv *env, jobject target_method) {
-  if (env == nullptr || target_method == nullptr)
-    return false;
-  return lsplant::Deoptimize(env, target_method);
-}
-
 extern "C" bool srx_lsplant_unhook(JNIEnv *env, jobject target_method) {
   if (env == nullptr || target_method == nullptr)
     return false;

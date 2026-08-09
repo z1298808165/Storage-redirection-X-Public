@@ -21,8 +21,6 @@ const HIDDEN_ROW_SENTINEL: &str = "\u{1F}SRX_HIDDEN_ROW";
 const DO_HOOK_NAME: &[u8] = b"doHook\0";
 const DO_HOOK_SIG: &[u8] =
     b"(Ljava/lang/reflect/Member;Ljava/lang/reflect/Method;)Ljava/lang/reflect/Method;\0";
-const DO_DEOPTIMIZE_NAME: &[u8] = b"doDeoptimize\0";
-const DO_DEOPTIMIZE_SIG: &[u8] = b"(Ljava/lang/reflect/Member;)Z\0";
 const DO_UNHOOK_NAME: &[u8] = b"doUnhook\0";
 const DO_UNHOOK_SIG: &[u8] = b"(Ljava/lang/reflect/Member;)Z\0";
 const CALLBACK_NAME: &[u8] = b"onMediaProviderQuery\0";
@@ -82,11 +80,6 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: DO_HOOK_NAME.as_ptr() as *mut _,
             signature: DO_HOOK_SIG.as_ptr() as *mut _,
             fnPtr: do_hook as *mut _,
-        },
-        JNINativeMethod {
-            name: DO_DEOPTIMIZE_NAME.as_ptr() as *mut _,
-            signature: DO_DEOPTIMIZE_SIG.as_ptr() as *mut _,
-            fnPtr: do_deoptimize as *mut _,
         },
         JNINativeMethod {
             name: DO_UNHOOK_NAME.as_ptr() as *mut _,
@@ -241,21 +234,6 @@ unsafe extern "C" fn do_hook(
         log::error!("[Hook] do_hook failed: lsplant::hook returned null");
     }
     result
-}
-
-unsafe extern "C" fn do_deoptimize(
-    env: *mut JNIEnv,
-    _thiz: jobject,
-    target: jobject,
-) -> jni_sys::jboolean {
-    if !ensure_lsplant_initialized(env) {
-        return jni_sys::JNI_FALSE;
-    }
-    if lsplant::deoptimize(env, target) {
-        jni_sys::JNI_TRUE
-    } else {
-        jni_sys::JNI_FALSE
-    }
 }
 
 unsafe extern "C" fn do_unhook(

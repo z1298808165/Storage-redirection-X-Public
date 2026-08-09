@@ -12,7 +12,6 @@ unsafe extern "C" {
         hooker_object: jobject,
         callback_method: jobject,
     ) -> jobject;
-    fn srx_lsplant_deoptimize(env: *mut JNIEnv, target_method: jobject) -> bool;
     fn srx_lsplant_unhook(env: *mut JNIEnv, target_method: jobject) -> bool;
 }
 
@@ -59,14 +58,6 @@ pub fn unhook(env: *mut JNIEnv, target_method: jobject) -> bool {
         return false;
     }
     unsafe { srx_lsplant_unhook(env, target_method) }
-}
-
-pub fn deoptimize(env: *mut JNIEnv, target_method: jobject) -> bool {
-    if env.is_null() || target_method.is_null() {
-        return false;
-    }
-    // SAFETY: JNI 环境和反射方法均已完成空指针校验，C 桥接只转发到 LSPlant。
-    unsafe { srx_lsplant_deoptimize(env, target_method) }
 }
 
 #[unsafe(no_mangle)]
