@@ -940,19 +940,25 @@ public class Hooker {
           if (!hasContentValuesParameter(method)) continue;
           String sig = describeMethod(method);
           if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(sig)) continue;
-          method.setAccessible(true);
-          Hooker hooker = new Hooker();
-          Method backup = hooker.doHook(method, callback);
-          if (backup == null) {
+          try {
+            method.setAccessible(true);
+            Hooker hooker = new Hooker();
+            Method backup = hooker.doHook(method, callback);
+            if (backup == null) {
+              HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(sig);
+              logWarn("java hook media file columns failed " + sig);
+              continue;
+            }
+            backup.setAccessible(true);
+            hooker.backup = backup;
+            hooker.target = method;
+            HOOKS.add(hooker);
+            logInfo("java hook media file columns ok " + sig);
+          } catch (Throwable t) {
+            // 单个私有重载被运行时拒绝时，仍需继续安装公开包装方法。
             HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(sig);
-            logWarn("java hook media file columns failed " + sig);
-            continue;
+            logWarn("java hook media file columns installer failed " + sig, t);
           }
-          backup.setAccessible(true);
-          hooker.backup = backup;
-          hooker.target = method;
-          HOOKS.add(hooker);
-          logInfo("java hook media file columns ok " + sig);
         }
       }
     } catch (Throwable t) {
