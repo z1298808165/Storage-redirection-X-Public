@@ -1081,10 +1081,28 @@ public class Hooker {
   }
 
   /**
-   * MediaProvider 的部分 Android 版本通过 NIO 或 libcore Os 直接创建目录，绕过
-   * java.io.File.mkdirs。目录创建必须和文件路径使用同一条规则，否则会留下公共父目录。
+   * MediaProvider 的部分 Android 版本会内联 java.io.File.mkdirs 与 UnixFileSystem.createDirectory，或通过
+   * NIO/libcore Os 直接创建目录。
+   *
+   * <p>目录创建必须在不可内联的 native 终点使用同一条路径规则，否则会留下公共父目录。
    */
   private static synchronized void tryInstallNativeDirectoryHooks() {
+    for (String className : new String[] {"java.io.UnixFileSystem", "java.io.LinuxFileSystem"}) {
+      try {
+        Class<?> fileSystem = Class.forName(className);
+        for (Method method : fileSystem.getDeclaredMethods()) {
+          Class<?>[] parameterTypes = method.getParameterTypes();
+          if (!"createDirectory0".equals(method.getName())
+              || !Modifier.isNative(method.getModifiers())
+              || parameterTypes.length != 1
+              || !File.class.isAssignableFrom(parameterTypes[0])) continue;
+          installNativeDirectoryMethod(method);
+        }
+      } catch (ClassNotFoundException ignored) {
+      } catch (Throwable t) {
+        logWarn("java hook filesystem native directory installer failed " + className, t);
+      }
+    }
     try {
       Class<?> files = Class.forName("java.nio.file.Files");
       for (Method method : files.getDeclaredMethods()) {
@@ -1136,6 +1154,11 @@ public class Hooker {
     String sourcePath = null;
     for (int i = 0; i < actualArgs.length; i++) {
       Object value = actualArgs[i];
+      if (value instanceof File) {
+        pathIndex = i;
+        sourcePath = ((File) value).getPath();
+        break;
+      }
       if (value instanceof Path) {
         pathIndex = i;
         sourcePath = value.toString();
@@ -1157,11 +1180,15 @@ public class Hooker {
     if (mappingPath == null) mappingPath = sourcePath;
     String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
     if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
-    Object replacement = actualArgs[pathIndex] instanceof Path ? Paths.get(directPath) : directPath;
-    Object[] patchedArgs = replaceArgument(args, pathIndex, replacement);
+    Object sourceArg = actualArgs[pathIndex];
+    Object replacement =
+        sourceArg instanceof File
+            ? new File(directPath)
+            : sourceArg instanceof Path ? Paths.get(directPath) : directPath;
+    replaceActualArg(args, actualArgs, pathIndex, replacement);
     DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
     try {
-      Object result = callBackup(patchedArgs);
+      Object result = callBackup(args);
       logInfo(
           "media native directory method="
               + (target instanceof Method ? ((Method) target).getName() : null)
