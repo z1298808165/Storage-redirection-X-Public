@@ -73,8 +73,9 @@ public class Hooker {
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
-  private static final HashSet<String> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
-  private static final HashSet<String> MEDIA_FILE_COLUMN_CLASSES_LOGGED = new HashSet<>();
+  private static final HashSet<Method> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
+  private static final HashSet<Method> DEOPTIMIZED_MEDIA_DIRECTORY_CALLERS = new HashSet<>();
+  private static final HashSet<Class<?>> MEDIA_FILE_COLUMN_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
   private static final HashSet<String> HOOKED_ACTIVITY_THREAD_METHODS = new HashSet<>();
@@ -983,10 +984,11 @@ public class Hooker {
   private static synchronized void tryInstallMediaFileColumnHooks(Class<?> clazz) {
     if (clazz == null) return;
     try {
-      boolean firstClassObservation = MEDIA_FILE_COLUMN_CLASSES_LOGGED.add(clazz.getName());
+      boolean firstClassObservation = MEDIA_FILE_COLUMN_CLASSES_LOGGED.add(clazz);
       if (firstClassObservation) {
         logInfo("java hook media file columns class found " + clazz.getName());
       }
+      deoptimizeMediaDirectoryCallers(clazz);
       Method callback =
           Hooker.class.getDeclaredMethod("providerMediaFileColumnCallback", Object[].class);
       callback.setAccessible(true);
@@ -1000,18 +1002,13 @@ public class Hooker {
           if (!hasContentValuesParameter(method)) continue;
           candidateMethodCount++;
           String sig = describeMethod(method);
-          if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(sig)) continue;
+          if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(method)) continue;
           try {
             method.setAccessible(true);
             Hooker hooker = new Hooker();
-            if (hooker.doDeoptimize(method)) {
-              logInfo("java hook media file columns deoptimized " + sig);
-            } else {
-              logWarn("java hook media file columns deoptimize failed " + sig);
-            }
             Method backup = hooker.doHook(method, callback);
             if (backup == null) {
-              HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(sig);
+              HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(method);
               logWarn("java hook media file columns failed " + sig);
               continue;
             }
@@ -1022,7 +1019,7 @@ public class Hooker {
             logInfo("java hook media file columns ok " + sig);
           } catch (Throwable t) {
             // 单个私有重载被运行时拒绝时，仍需继续安装公开包装方法。
-            HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(sig);
+            HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(method);
             logWarn("java hook media file columns installer failed " + sig, t);
           }
         }
@@ -1033,6 +1030,40 @@ public class Hooker {
     } catch (Throwable t) {
       logWarn("java hook media file columns installer failed " + clazz, t);
     }
+  }
+
+  private static void deoptimizeMediaDirectoryCallers(Class<?> clazz) {
+    for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+      for (Method method : c.getDeclaredMethods()) {
+        if (!isMediaDirectoryCallerMethod(method)
+            || !DEOPTIMIZED_MEDIA_DIRECTORY_CALLERS.add(method)) continue;
+        String sig = describeMethod(method);
+        try {
+          method.setAccessible(true);
+          if (new Hooker().doDeoptimize(method)) {
+            logInfo("java hook media directory caller deoptimized " + sig);
+          } else {
+            DEOPTIMIZED_MEDIA_DIRECTORY_CALLERS.remove(method);
+            logWarn("java hook media directory caller deoptimize failed " + sig);
+          }
+        } catch (Throwable t) {
+          DEOPTIMIZED_MEDIA_DIRECTORY_CALLERS.remove(method);
+          logWarn("java hook media directory caller deoptimize failed " + sig, t);
+        }
+      }
+    }
+  }
+
+  private static boolean isMediaDirectoryCallerMethod(Method method) {
+    if (!hasContentValuesParameter(method)) return false;
+    String name = method.getName();
+    return "insert".equals(name)
+        || "insertInternal".equals(name)
+        || "insertFile".equals(name)
+        || "insertAllowingUpsert".equals(name)
+        || "ensureFileColumns".equals(name)
+        || "ensureUniqueFileColumns".equals(name)
+        || "ensureNonUniqueFileColumns".equals(name);
   }
 
   private static synchronized void installMutationFallback(Class<?> clazz) {
