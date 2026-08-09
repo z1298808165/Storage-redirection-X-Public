@@ -158,6 +158,7 @@ public class Hooker {
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
   private static final ThreadLocal<Boolean> DIRECTORY_REDIRECT_ACTIVE = new ThreadLocal<>();
   private static final ThreadLocal<Integer> MEDIA_PROVIDER_CALLER_UID = new ThreadLocal<>();
+  private static final ThreadLocal<String> MEDIA_PROVIDER_MUTATION_METHOD = new ThreadLocal<>();
   public Method backup;
   private Member target;
 
@@ -309,6 +310,7 @@ public class Hooker {
               : new MutationPatchResult(false, false);
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
+      MEDIA_PROVIDER_MUTATION_METHOD.set(mutationMethod);
       enterProviderInternalCall();
       try {
         Object result;
@@ -327,6 +329,7 @@ public class Hooker {
         return result;
       } finally {
         exitProviderInternalCall();
+        MEDIA_PROVIDER_MUTATION_METHOD.remove();
         MEDIA_PROVIDER_CALLER_UID.remove();
       }
     } finally {
@@ -483,7 +486,8 @@ public class Hooker {
   public Object providerMediaFileColumnCallback(Object[] args) throws Throwable {
     Method method = target instanceof Method ? (Method) target : null;
     String methodName = method == null ? null : method.getName();
-    if ("ensureNonUniqueFileColumns".equals(methodName)) return callBackup(args);
+    String mutationMethod = MEDIA_PROVIDER_MUTATION_METHOD.get();
+    if (mutationMethod != null && !isInsertLikeMutation(mutationMethod)) return callBackup(args);
     Object[] actualArgs = unwrapArgs(args);
     ContentValues values = findContentValues(actualArgs);
     if (values == null) return callBackup(args);
