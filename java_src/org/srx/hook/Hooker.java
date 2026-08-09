@@ -894,12 +894,11 @@ public class Hooker {
           Hooker.class.getDeclaredMethod("providerMediaFileColumnCallback", Object[].class);
       callback.setAccessible(true);
       for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
-        if (!isMediaProviderClass(c.getName())) continue;
         for (Method method : c.getDeclaredMethods()) {
           String name = method.getName();
           if (!("ensureFileColumns".equals(name)
               || "ensureUniqueFileColumns".equals(name)
-              || "ensureNonUniqueFileColumn".equals(name))) continue;
+              || "ensureNonUniqueFileColumns".equals(name))) continue;
           if (!hasContentValuesParameter(method)) continue;
           String sig = describeMethod(method);
           if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(sig)) continue;
