@@ -424,6 +424,9 @@ public class Hooker {
       }
       return result;
     }
+    if ("mkdirs".equals(methodName) || "mkdir".equals(methodName)) {
+      return providerMediaFileUtilsDirectoryCallback(args, methodName);
+    }
     if (!"buildFile".equals(methodName)
         && !"buildUniqueFile".equals(methodName)
         && !"buildNonUniqueFile".equals(methodName)) {
@@ -480,6 +483,33 @@ public class Hooker {
             + publicPath
             + " to="
             + directFile.getPath());
+    return result;
+  }
+
+  private Object providerMediaFileUtilsDirectoryCallback(Object[] args, String methodName)
+      throws Throwable {
+    Object[] actualArgs = unwrapArgs(args);
+    int fileIndex = firstFileArgumentIndex(actualArgs);
+    if (fileIndex < 0) return callBackup(args);
+    File source = (File) actualArgs[fileIndex];
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    int callerUid =
+        scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+    String mappingPath = mediaStoreDisplayPath(source.getPath(), callerUid);
+    if (mappingPath == null) mappingPath = source.getPath();
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+    if (directPath == null || directPath.equals(source.getPath())) return callBackup(args);
+    Object result = callBackup(replaceFileArgument(args, fileIndex, new File(directPath)));
+    logInfo(
+        "media direct FileUtils directory method="
+            + methodName
+            + " from="
+            + source.getPath()
+            + " to="
+            + directPath
+            + " result="
+            + result);
     return result;
   }
 
@@ -1139,6 +1169,8 @@ public class Hooker {
           if ("buildFile".equals(methodName)
               || "buildUniqueFile".equals(methodName)
               || "buildNonUniqueFile".equals(methodName)
+              || "mkdirs".equals(methodName)
+              || "mkdir".equals(methodName)
               || "computeValuesFromData".equals(methodName)
               || "computeDataFromValues".equals(methodName)) {
             candidateMethodCount++;
