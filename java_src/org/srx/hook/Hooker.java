@@ -73,6 +73,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
+  private static final HashSet<String> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
   private static final HashSet<String> HOOKED_ACTIVITY_THREAD_METHODS = new HashSet<>();
@@ -275,9 +276,11 @@ public class Hooker {
     // 首次 mutation 是拿到该 ClassLoader 并补装 FileUtils hook 的最后稳定入口。
     android.content.ContentProvider provider = providerReceiver(args);
     if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+      tryInstallMediaFileColumnHooks(provider.getClass());
       tryInstallMediaFileUtilsHooks(provider.getClass().getClassLoader());
     }
     if (target instanceof Method) {
+      tryInstallMediaFileColumnHooks(((Method) target).getDeclaringClass());
       tryInstallMediaFileUtilsHooks(((Method) target).getDeclaringClass().getClassLoader());
     }
     tryInstallMediaProviderFromActivityThread();
@@ -432,14 +435,37 @@ public class Hooker {
     if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
     String directParentPath =
         resolveMediaStoreDirectPathForValues(publicParent.getPath(), callerUid);
-    if (directParentPath == null || directParentPath.equals(publicParent.getPath())) {
-      return callBackup(args);
+    Object[] patchedArgs = args;
+    boolean patched = false;
+    if (directParentPath != null && !directParentPath.equals(publicParent.getPath())) {
+      patchedArgs = replaceFileArgument(patchedArgs, parentIndex, new File(directParentPath));
+      patched = true;
     }
-    Object[] patchedArgs = replaceFileArgument(args, parentIndex, new File(directParentPath));
+    int relativeIndex = parentIndex + 1;
+    int displayNameIndex = parentIndex + 2;
+    String publicPath = null;
+    if (relativeIndex < actualArgs.length
+        && actualArgs[relativeIndex] instanceof String
+        && displayNameIndex < actualArgs.length
+        && actualArgs[displayNameIndex] instanceof String) {
+      String relativePath = (String) actualArgs[relativeIndex];
+      String displayName = (String) actualArgs[displayNameIndex];
+      String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+      String directFilePath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
+      String directRelativePath = physicalRelativePath(directFilePath, callerUid);
+      publicPath = probePath;
+      if (directRelativePath != null && !directRelativePath.equals(relativePath)) {
+        patchedArgs = replaceArgument(patchedArgs, relativeIndex, directRelativePath);
+        patched = true;
+      }
+    }
+    if (!patched) return callBackup(args);
     Object result = callBackup(patchedArgs);
     if (!(result instanceof File)) return result;
     File directFile = (File) result;
-    String publicPath = publicParent.getPath() + File.separator + directFile.getName();
+    if (publicPath == null) {
+      publicPath = publicParent.getPath() + File.separator + directFile.getName();
+    }
     MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
     logInfo(
         "media direct FileUtils method="
@@ -449,6 +475,72 @@ public class Hooker {
             + " to="
             + directFile.getPath());
     return result;
+  }
+
+  public Object providerMediaFileColumnCallback(Object[] args) throws Throwable {
+    Method method = target instanceof Method ? (Method) target : null;
+    String methodName = method == null ? null : method.getName();
+    Object[] actualArgs = unwrapArgs(args);
+    ContentValues values = findContentValues(actualArgs);
+    if (values == null) return callBackup(args);
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+    String relativePath = values.getAsString(MediaStore.MediaColumns.RELATIVE_PATH);
+    if (relativePath == null || relativePath.length() == 0) {
+      relativePath = relativePathFromDirectoryColumns(values);
+    }
+    String displayName = firstString(values, MediaStore.MediaColumns.DISPLAY_NAME, "display_name");
+    String publicPath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+    String directPath = resolveMediaStoreDirectPathForValues(publicPath, callerUid);
+    String directRelativePath = physicalRelativePath(directPath, callerUid);
+    if (directRelativePath == null || directRelativePath.equals(relativePath)) {
+      return callBackup(args);
+    }
+
+    boolean hadRelative = values.containsKey(MediaStore.MediaColumns.RELATIVE_PATH);
+    Object originalRelative = values.get(MediaStore.MediaColumns.RELATIVE_PATH);
+    boolean hadPrimary = values.containsKey("primary_directory");
+    Object originalPrimary = values.get("primary_directory");
+    boolean hadSecondary = values.containsKey("secondary_directory");
+    Object originalSecondary = values.get("secondary_directory");
+    values.put(MediaStore.MediaColumns.RELATIVE_PATH, directRelativePath);
+    patchDirectoryColumns(values, directRelativePath);
+    MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
+    try {
+      return callBackup(args);
+    } finally {
+      restoreMediaFileBuildValues(args);
+      restoreContentValue(
+          values, MediaStore.MediaColumns.RELATIVE_PATH, hadRelative, originalRelative);
+      restoreContentValue(values, "primary_directory", hadPrimary, originalPrimary);
+      restoreContentValue(values, "secondary_directory", hadSecondary, originalSecondary);
+      logInfo(
+          "media direct file columns method="
+              + methodName
+              + " from="
+              + publicPath
+              + " to="
+              + directPath);
+    }
+  }
+
+  private static void restoreContentValue(
+      ContentValues values, String key, boolean present, Object original) {
+    if (values == null) return;
+    if (!present) {
+      values.remove(key);
+    } else if (original instanceof String) {
+      values.put(key, (String) original);
+    } else if (original instanceof Integer) {
+      values.put(key, (Integer) original);
+    } else if (original instanceof Long) {
+      values.put(key, (Long) original);
+    } else if (original instanceof Boolean) {
+      values.put(key, (Boolean) original);
+    } else if (original != null) {
+      values.put(key, String.valueOf(original));
+    }
   }
 
   private static int firstFileArgumentIndex(Object[] args) {
@@ -680,6 +772,7 @@ public class Hooker {
         tryInstallMutationHook(clazz);
         tryInstallFuseHook(clazz);
         if (isMediaProviderClass(clazz.getName())) {
+          tryInstallMediaFileColumnHooks(clazz);
           tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
         }
         hookedAny = true;
@@ -704,6 +797,7 @@ public class Hooker {
           tryInstallMutationHook(clazz);
           tryInstallFuseHook(clazz);
           if (isMediaProviderClass(clazz.getName())) {
+            tryInstallMediaFileColumnHooks(clazz);
             tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
           }
         }
@@ -790,6 +884,42 @@ public class Hooker {
       if (!isProviderMutationHookClass(name)) continue;
       if (!HOOKED_MUTATION_CLASSES.add(name)) continue;
       installMutationOn(c);
+    }
+  }
+
+  private static synchronized void tryInstallMediaFileColumnHooks(Class<?> clazz) {
+    if (clazz == null) return;
+    try {
+      Method callback =
+          Hooker.class.getDeclaredMethod("providerMediaFileColumnCallback", Object[].class);
+      callback.setAccessible(true);
+      for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+        if (!isMediaProviderClass(c.getName())) continue;
+        for (Method method : c.getDeclaredMethods()) {
+          String name = method.getName();
+          if (!("ensureFileColumns".equals(name)
+              || "ensureUniqueFileColumns".equals(name)
+              || "ensureNonUniqueFileColumn".equals(name))) continue;
+          if (!hasContentValuesParameter(method)) continue;
+          String sig = describeMethod(method);
+          if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(sig)) continue;
+          method.setAccessible(true);
+          Hooker hooker = new Hooker();
+          Method backup = hooker.doHook(method, callback);
+          if (backup == null) {
+            HOOKED_MEDIA_FILE_COLUMN_METHODS.remove(sig);
+            logWarn("java hook media file columns failed " + sig);
+            continue;
+          }
+          backup.setAccessible(true);
+          hooker.backup = backup;
+          hooker.target = method;
+          HOOKS.add(hooker);
+          logInfo("java hook media file columns ok " + sig);
+        }
+      }
+    } catch (Throwable t) {
+      logWarn("java hook media file columns installer failed " + clazz, t);
     }
   }
 
@@ -970,6 +1100,7 @@ public class Hooker {
       ClassLoader loader = provider.getClass().getClassLoader();
       logInfo("java hook media provider loader acquired " + loader);
       tryLoadAndHookMediaProvider(loader);
+      tryInstallMediaFileColumnHooks(provider.getClass());
       tryInstallMediaFileUtilsHooks(loader);
     }
     return result;
@@ -1264,6 +1395,7 @@ public class Hooker {
           ClassLoader loader = provider.getClass().getClassLoader();
           logInfo("java hook media provider loader acquired from ActivityThread " + loader);
           tryLoadAndHookMediaProvider(loader);
+          tryInstallMediaFileColumnHooks(provider.getClass());
           tryInstallMediaFileUtilsHooks(loader);
           return;
         }
@@ -3405,6 +3537,21 @@ public class Hooker {
     } catch (Throwable ignored) {
       return null;
     }
+  }
+
+  private static String mediaStorePhysicalRoot(int callerUid) {
+    int userId = userIdFromUid(callerUid);
+    return userId < 0 ? null : "/data/media/" + userId;
+  }
+
+  private static String physicalRelativePath(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    if (path.startsWith("file://")) path = path.substring("file://".length());
+    String root = mediaStorePhysicalRoot(callerUid);
+    if (root == null || !path.startsWith(root + "/")) return null;
+    int lastSlash = path.lastIndexOf('/');
+    if (lastSlash <= root.length() || lastSlash + 1 >= path.length()) return null;
+    return path.substring(root.length() + 1, lastSlash + 1);
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {
