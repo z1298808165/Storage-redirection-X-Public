@@ -3539,7 +3539,8 @@ public class Hooker {
       if (directPath == null || directPath.length() == 0 || directPath.equals(path)) return null;
       if (!isSafePublicMediaValuePath(directPath)
           && !isSrxSandboxFallbackPath(directPath, callerUid)) return null;
-      return directPath;
+      String physicalPath = mediaStorePhysicalPath(directPath, callerUid);
+      return physicalPath == null ? directPath : physicalPath;
     } catch (Throwable ignored) {
       return null;
     }
@@ -3548,6 +3549,22 @@ public class Hooker {
   private static String mediaStorePhysicalRoot(int callerUid) {
     int userId = userIdFromUid(callerUid);
     return userId < 0 ? null : "/data/media/" + userId;
+  }
+
+  private static String mediaStorePhysicalPath(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    boolean hasFileScheme = path.startsWith("file://");
+    String value = hasFileScheme ? path.substring("file://".length()) : path;
+    int userId = userIdFromUid(callerUid);
+    if (userId < 0) return null;
+    String displayRoot = "/storage/emulated/" + userId + "/";
+    if (value.startsWith(displayRoot)) {
+      String physical = "/data/media/" + userId + "/" + value.substring(displayRoot.length());
+      return hasFileScheme ? "file://" + physical : physical;
+    }
+    String physicalRoot = "/data/media/" + userId + "/";
+    if (value.startsWith(physicalRoot)) return path;
+    return null;
   }
 
   private static String physicalRelativePath(String path, int callerUid) {
