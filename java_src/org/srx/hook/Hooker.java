@@ -484,7 +484,9 @@ public class Hooker {
       }
       return result;
     }
-    if ("mkdirs".equals(methodName) || "mkdir".equals(methodName)) {
+    if ("createDir".equals(methodName)
+        || "mkdirs".equals(methodName)
+        || "mkdir".equals(methodName)) {
       return providerMediaFileUtilsDirectoryCallback(args, methodName);
     }
     if (!"buildFile".equals(methodName)
@@ -1343,6 +1345,7 @@ public class Hooker {
           if ("buildFile".equals(methodName)
               || "buildUniqueFile".equals(methodName)
               || "buildNonUniqueFile".equals(methodName)
+              || "createDir".equals(methodName)
               || "mkdirs".equals(methodName)
               || "mkdir".equals(methodName)
               || "computeValuesFromData".equals(methodName)
