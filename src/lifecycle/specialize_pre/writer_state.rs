@@ -64,8 +64,9 @@ pub(super) fn resolve_system_writer_context(
     if !*should_monitor && context.is_media_provider && is_file_monitor_enabled {
         *should_monitor = true;
     }
-    context.should_install_fuse_fix = context.is_media_provider
-        && (is_file_monitor_enabled || context.has_merged_writer_mappings || has_enabled_apps);
+    // MediaProvider 可能早于应用配置启动；始终预装 media-runtime native hook，
+    // 后续 mkdir/mkdirat 仍按调用方和实时完整路径配置决定重定向或原样放行。
+    context.should_install_fuse_fix = context.is_media_provider;
 
     if context.has_merged_writer_mappings {
         log::info!(

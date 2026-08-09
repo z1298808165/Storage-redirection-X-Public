@@ -1,14 +1,8 @@
 // MediaProvider hook 自愈：检测到 MediaProvider 缺少有效 Java hook 时重启该进程。
 //
-// 背景：MediaProvider 在开机早期 specialize 时，若配置里还没有任何启用重定向的
-// 应用，模块不会在该进程内建立有效拦截。此后用户（或测试流）才打开某个应用的
-// 重定向时，这个已经在跑的 MediaProvider 进程没有任何机制补装 hook——
-// `.media_hook_deferred` 只在开机时已有启用应用才产生，`boot.sh` 的
-// `restart_media_provider_for_deferred_hooks` 因此不会触发；
-// `fuse_fix` 的自杀式重启要求模块代码正在 MediaProvider 内运行，而这里恰好没有。
-//
-// 结果是该应用经 MediaStore 的写入会持续落到公共目录，直到 MediaProvider 因
-// 其它原因重启，表现为「开了重定向但仍写入公共目录，重启设备后恢复」。
+// 背景：MediaProvider 需要同时保有 Java 调用方识别和 media-runtime native
+// 目录拦截。两者都会在首次 specialize 时预装；若注入阶段异常而没有留下有效
+// 安装记录，则在已有应用启用重定向后从 daemon 侧触发一次自愈重启。
 //
 // 本模块从 daemon 侧做外部重启：MediaProvider 正在运行、已有应用启用重定向、
 // 但安装记录不属于当前 boot 与该 pid 时，重启一次让它重新 specialize。
