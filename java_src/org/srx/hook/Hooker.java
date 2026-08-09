@@ -71,6 +71,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_MUTATION_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
+  private static final HashSet<String> HOOKED_FILE_SYSTEM_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
@@ -412,6 +413,7 @@ public class Hooker {
   /** MediaProvider 先通过 File.getParentFile 计算目录，再调用 mkdirs；父目录必须在此处完成重定向。 */
   public Object providerFileParentCallback(Object[] args) throws Throwable {
     if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
+    if (!isInsertLikeMutation(MEDIA_PROVIDER_MUTATION_METHOD.get())) return callBackup(args);
     File receiver = directoryReceiver(args);
     if (receiver == null) return callBackup(args);
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
@@ -433,6 +435,37 @@ public class Hooker {
             + " to="
             + (directParent == null ? null : directParent.getPath()));
     return directParent;
+  }
+
+  public Object providerFileSystemDirectoryCallback(Object[] args) throws Throwable {
+    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    Object[] actualArgs = unwrapArgs(args);
+    int fileIndex = firstFileArgumentIndex(actualArgs);
+    if (fileIndex < 0) return callBackup(args);
+    File source = (File) actualArgs[fileIndex];
+    int callerUid =
+        scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+    String mappingPath = mediaStoreDisplayPath(source.getPath(), callerUid);
+    if (mappingPath == null) mappingPath = source.getPath();
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+    if (directPath == null || directPath.equals(source.getPath())) return callBackup(args);
+    Object[] patchedArgs = replaceFileSystemFileArgument(args, source, new File(directPath));
+    DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
+    try {
+      Object result = callBackup(patchedArgs);
+      logInfo(
+          "media direct filesystem directory from="
+              + source.getPath()
+              + " to="
+              + directPath
+              + " result="
+              + result);
+      return result;
+    } finally {
+      DIRECTORY_REDIRECT_ACTIVE.remove();
+    }
   }
 
   /**
@@ -618,6 +651,29 @@ public class Hooker {
 
   private static Object[] replaceFileArgument(Object[] args, int index, File replacement) {
     return replaceArgument(args, index, replacement);
+  }
+
+  private static Object[] replaceFileSystemFileArgument(
+      Object[] args, File source, File replacement) {
+    if (args == null) return null;
+    if (args.length == 1 && args[0] instanceof Object[]) {
+      Object[] nested = ((Object[]) args[0]).clone();
+      for (int i = 0; i < nested.length; i++) {
+        if (nested[i] == source) {
+          nested[i] = replacement;
+          break;
+        }
+      }
+      return new Object[] {nested};
+    }
+    Object[] copy = args.clone();
+    for (int i = 0; i < copy.length; i++) {
+      if (copy[i] == source) {
+        copy[i] = replacement;
+        break;
+      }
+    }
+    return copy;
   }
 
   private static Object[] replaceArgument(Object[] args, int index, Object replacement) {
@@ -1073,9 +1129,56 @@ public class Hooker {
         HOOKS.add(hooker);
         logInfo("java hook directory ok " + key);
       }
+      tryInstallFileSystemDirectoryHooks();
       tryInstallNativeDirectoryHooks();
     } catch (Throwable t) {
       logWarn("java hook directory installer failed", t);
+    }
+  }
+
+  private static void tryInstallFileSystemDirectoryHooks() {
+    for (String className : new String[] {"java.io.UnixFileSystem", "java.io.LinuxFileSystem"}) {
+      try {
+        Class<?> fileSystem = Class.forName(className);
+        for (Method method : fileSystem.getDeclaredMethods()) {
+          if (!"createDirectory".equals(method.getName())) continue;
+          boolean hasFileParameter = false;
+          for (Class<?> parameterType : method.getParameterTypes()) {
+            if (File.class.isAssignableFrom(parameterType)) {
+              hasFileParameter = true;
+              break;
+            }
+          }
+          if (!hasFileParameter) continue;
+          String key = describeMethod(method);
+          if (!HOOKED_FILE_SYSTEM_DIRECTORY_METHODS.add(key)) continue;
+          try {
+            method.setAccessible(true);
+            Method callback =
+                Hooker.class.getDeclaredMethod(
+                    "providerFileSystemDirectoryCallback", Object[].class);
+            callback.setAccessible(true);
+            Hooker hooker = new Hooker();
+            Method backup = hooker.doHook(method, callback);
+            if (backup == null) {
+              HOOKED_FILE_SYSTEM_DIRECTORY_METHODS.remove(key);
+              logWarn("java hook filesystem directory failed " + key);
+              continue;
+            }
+            backup.setAccessible(true);
+            hooker.backup = backup;
+            hooker.target = method;
+            HOOKS.add(hooker);
+            logInfo("java hook filesystem directory ok " + key);
+          } catch (Throwable t) {
+            HOOKED_FILE_SYSTEM_DIRECTORY_METHODS.remove(key);
+            logWarn("java hook filesystem directory installer failed " + key, t);
+          }
+        }
+      } catch (ClassNotFoundException ignored) {
+      } catch (Throwable t) {
+        logWarn("java hook filesystem directory class failed " + className, t);
+      }
     }
   }
 
