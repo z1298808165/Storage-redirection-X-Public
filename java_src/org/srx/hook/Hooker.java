@@ -74,6 +74,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
+  private static final HashSet<String> MEDIA_FILE_COLUMN_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
   private static final HashSet<String> HOOKED_ACTIVITY_THREAD_METHODS = new HashSet<>();
@@ -830,6 +831,9 @@ public class Hooker {
       try {
         Class<?> clazz = loader.loadClass(name);
         if (clazz != null) {
+          if (isMediaProviderClass(clazz.getName())) {
+            logInfo("java hook media provider class loaded " + clazz.getName());
+          }
           try {
             tryInstallQueryHook(clazz);
           } catch (Throwable t) {
@@ -952,9 +956,14 @@ public class Hooker {
   private static synchronized void tryInstallMediaFileColumnHooks(Class<?> clazz) {
     if (clazz == null) return;
     try {
+      boolean firstClassObservation = MEDIA_FILE_COLUMN_CLASSES_LOGGED.add(clazz.getName());
+      if (firstClassObservation) {
+        logInfo("java hook media file columns class found " + clazz.getName());
+      }
       Method callback =
           Hooker.class.getDeclaredMethod("providerMediaFileColumnCallback", Object[].class);
       callback.setAccessible(true);
+      int candidateMethodCount = 0;
       for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
         for (Method method : c.getDeclaredMethods()) {
           String name = method.getName();
@@ -962,6 +971,7 @@ public class Hooker {
               || "ensureUniqueFileColumns".equals(name)
               || "ensureNonUniqueFileColumns".equals(name))) continue;
           if (!hasContentValuesParameter(method)) continue;
+          candidateMethodCount++;
           String sig = describeMethod(method);
           if (!HOOKED_MEDIA_FILE_COLUMN_METHODS.add(sig)) continue;
           try {
@@ -984,6 +994,9 @@ public class Hooker {
             logWarn("java hook media file columns installer failed " + sig, t);
           }
         }
+      }
+      if (firstClassObservation && candidateMethodCount == 0) {
+        logWarn("java hook media file columns target methods missing " + clazz.getName());
       }
     } catch (Throwable t) {
       logWarn("java hook media file columns installer failed " + clazz, t);
