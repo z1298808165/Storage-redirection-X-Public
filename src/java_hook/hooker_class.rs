@@ -8,19 +8,29 @@ use crate::hook::{
     should_hide_cursor_storage_path_for_caller,
 };
 use crate::zygisk::jni::{
-    call_object_method_a, get_method_id, get_object_class, new_global_ref, new_jstring_utf8,
-    register_natives,
+    call_object_method_a, call_static_object_method_a, delete_local_ref, get_method_id,
+    get_object_class, get_static_method_id, new_global_ref, new_jstring_utf8, register_natives,
 };
-use jni_sys::{_jobject, JNIEnv, JNINativeMethod, jclass, jobject, jobjectArray, jstring, jvalue};
+use jni_sys::{
+    _jobject, JNIEnv, JNINativeMethod, jboolean, jclass, jobject, jobjectArray, jstring, jvalue,
+};
+use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 static HOOKER_CLASS_GLOBAL: AtomicPtr<_jobject> = AtomicPtr::new(std::ptr::null_mut());
 static LSPLANT_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL: AtomicPtr<c_void> =
+    AtomicPtr::new(std::ptr::null_mut());
+static FILE_SYSTEM_DIRECTORY_REWRITE_METHOD: AtomicPtr<c_void> =
+    AtomicPtr::new(std::ptr::null_mut());
 const HIDDEN_ROW_SENTINEL: &str = "\u{1F}SRX_HIDDEN_ROW";
 
 const DO_HOOK_NAME: &[u8] = b"doHook\0";
 const DO_HOOK_SIG: &[u8] =
     b"(Ljava/lang/reflect/Member;Ljava/lang/reflect/Method;)Ljava/lang/reflect/Method;\0";
+const DO_HOOK_FILE_SYSTEM_DIRECTORY_NAME: &[u8] = b"doHookFileSystemCreateDirectory\0";
+const DO_HOOK_FILE_SYSTEM_DIRECTORY_SIG: &[u8] =
+    b"(Ljava/lang/Class;Ljava/lang/reflect/Member;)Z\0";
 const DO_UNHOOK_NAME: &[u8] = b"doUnhook\0";
 const DO_UNHOOK_SIG: &[u8] = b"(Ljava/lang/reflect/Member;)Z\0";
 const CALLBACK_NAME: &[u8] = b"onMediaProviderQuery\0";
@@ -80,6 +90,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: DO_HOOK_NAME.as_ptr() as *mut _,
             signature: DO_HOOK_SIG.as_ptr() as *mut _,
             fnPtr: do_hook as *mut _,
+        },
+        JNINativeMethod {
+            name: DO_HOOK_FILE_SYSTEM_DIRECTORY_NAME.as_ptr() as *mut _,
+            signature: DO_HOOK_FILE_SYSTEM_DIRECTORY_SIG.as_ptr() as *mut _,
+            fnPtr: do_hook_file_system_create_directory as *mut _,
         },
         JNINativeMethod {
             name: DO_UNHOOK_NAME.as_ptr() as *mut _,
@@ -232,6 +247,94 @@ unsafe extern "C" fn do_hook(
     let result = lsplant::hook(env, target, thiz, callback);
     if result.is_null() {
         log::error!("[Hook] do_hook failed: lsplant::hook returned null");
+    }
+    result
+}
+
+unsafe extern "C" fn do_hook_file_system_create_directory(
+    env: *mut JNIEnv,
+    _thiz: jobject,
+    target_class: jclass,
+    target: jobject,
+) -> jboolean {
+    if env.is_null() || target_class.is_null() || target.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+    if !FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL
+        .load(Ordering::Acquire)
+        .is_null()
+    {
+        return jni_sys::JNI_TRUE;
+    }
+
+    let rewrite_method = get_static_method_id(
+        env,
+        hooker_class(),
+        "rewriteFileSystemNativeDirectory",
+        "(Ljava/io/File;)Ljava/io/File;",
+    );
+    if rewrite_method.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+    let original = lsplant::get_native_function(env, target);
+    if original.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+
+    FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.store(rewrite_method.cast(), Ordering::Release);
+    FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.store(original, Ordering::Release);
+    let replacement = [JNINativeMethod {
+        name: c"createDirectory0".as_ptr() as *mut _,
+        signature: c"(Ljava/io/File;)Z".as_ptr() as *mut _,
+        fnPtr: hooked_file_system_create_directory as *mut _,
+    }];
+    if register_natives(env, target_class, &replacement) {
+        log::info!("java hook filesystem native directory registered");
+        jni_sys::JNI_TRUE
+    } else {
+        FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
+        FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.store(std::ptr::null_mut(), Ordering::Release);
+        log::warn!("java hook filesystem native directory registration failed");
+        jni_sys::JNI_FALSE
+    }
+}
+
+unsafe extern "C" fn hooked_file_system_create_directory(
+    env: *mut JNIEnv,
+    thiz: jobject,
+    source_file: jobject,
+) -> jboolean {
+    type OriginalFn = unsafe extern "C" fn(*mut JNIEnv, jobject, jobject) -> jboolean;
+
+    let original_ptr = FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.load(Ordering::Acquire);
+    if original_ptr.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+    // SAFETY: 安装入口只接受已校验签名的实例 native 方法 createDirectory0(File)，
+    // LSPlant 返回的是该方法注册前的 JNI 函数地址，因此参数和返回值 ABI 与此类型一致。
+    let original: OriginalFn = unsafe { std::mem::transmute(original_ptr) };
+    let rewrite_method = FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.load(Ordering::Acquire);
+    if rewrite_method.is_null() || source_file.is_null() {
+        // SAFETY: original 的 JNI ABI 已在上方按 createDirectory0(File) 的固定签名校验。
+        return unsafe { original(env, thiz, source_file) };
+    }
+
+    let rewritten = call_static_object_method_a(
+        env,
+        hooker_class(),
+        rewrite_method as jni_sys::jmethodID,
+        &[jvalue { l: source_file }],
+    );
+    let call_file = if rewritten.is_null() {
+        source_file
+    } else {
+        rewritten
+    };
+    // SAFETY: call_file 是当前 JNI 调用的 File 参数或 Java 回调返回的同类型本地引用，
+    // original 保持 createDirectory0(File) 的原始 JNI ABI。
+    let result = unsafe { original(env, thiz, call_file) };
+    if !rewritten.is_null() && rewritten != source_file {
+        delete_local_ref(env, rewritten);
     }
     result
 }

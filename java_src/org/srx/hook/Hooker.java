@@ -165,6 +165,8 @@ public class Hooker {
 
   private native Method doHook(Member target, Method callback);
 
+  private native boolean doHookFileSystemCreateDirectory(Class<?> targetClass, Member target);
+
   private native boolean doUnhook(Member target);
 
   public Object callback(Object[] args) throws Throwable {
@@ -1096,7 +1098,7 @@ public class Hooker {
               || !Modifier.isNative(method.getModifiers())
               || parameterTypes.length != 1
               || !File.class.isAssignableFrom(parameterTypes[0])) continue;
-          installNativeDirectoryMethod(method);
+          installFileSystemNativeDirectoryMethod(fileSystem, method);
         }
       } catch (ClassNotFoundException ignored) {
       } catch (Throwable t) {
@@ -1143,6 +1145,38 @@ public class Hooker {
     hooker.target = method;
     HOOKS.add(hooker);
     logInfo("java hook native directory ok " + key);
+  }
+
+  private static void installFileSystemNativeDirectoryMethod(Class<?> targetClass, Method method) {
+    String key = describeMethod(method);
+    if (!HOOKED_NATIVE_DIRECTORY_METHODS.add(key)) return;
+    try {
+      method.setAccessible(true);
+      if (!new Hooker().doHookFileSystemCreateDirectory(targetClass, method)) {
+        HOOKED_NATIVE_DIRECTORY_METHODS.remove(key);
+        logWarn("java hook filesystem native directory rejected " + key);
+        return;
+      }
+      logInfo("java hook filesystem native directory ok " + key);
+    } catch (Throwable t) {
+      HOOKED_NATIVE_DIRECTORY_METHODS.remove(key);
+      logWarn("java hook filesystem native directory failed " + key, t);
+    }
+  }
+
+  private static File rewriteFileSystemNativeDirectory(File source) {
+    if (source == null) return null;
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    int callerUid =
+        scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
+    if (callerUid < ANDROID_APP_UID_START) return source;
+    String sourcePath = source.getPath();
+    String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
+    if (mappingPath == null) mappingPath = sourcePath;
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+    if (directPath == null || directPath.equals(sourcePath)) return source;
+    logInfo("media filesystem native directory from=" + sourcePath + " to=" + directPath);
+    return new File(directPath);
   }
 
   public Object providerNativeDirectoryCallback(Object[] args) throws Throwable {

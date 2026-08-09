@@ -12,6 +12,7 @@ unsafe extern "C" {
         hooker_object: jobject,
         callback_method: jobject,
     ) -> jobject;
+    fn srx_lsplant_get_native_function(env: *mut JNIEnv, target_method: jobject) -> *mut c_void;
     fn srx_lsplant_unhook(env: *mut JNIEnv, target_method: jobject) -> bool;
 }
 
@@ -58,6 +59,14 @@ pub fn unhook(env: *mut JNIEnv, target_method: jobject) -> bool {
         return false;
     }
     unsafe { srx_lsplant_unhook(env, target_method) }
+}
+
+pub fn get_native_function(env: *mut JNIEnv, target_method: jobject) -> *mut c_void {
+    if env.is_null() || target_method.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: env 与反射 Method 均已判空，C 桥接只读取 LSPlant 已解析的 ArtMethod native data。
+    unsafe { srx_lsplant_get_native_function(env, target_method) }
 }
 
 #[unsafe(no_mangle)]

@@ -686,6 +686,13 @@ extern "C" jobject srx_lsplant_hook(JNIEnv *env, jobject target_method,
   return lsplant::Hook(env, target_method, hooker_object, callback_method);
 }
 
+extern "C" void *srx_lsplant_get_native_function(JNIEnv *env,
+                                                   jobject target_method) {
+  if (env == nullptr || target_method == nullptr)
+    return nullptr;
+  return lsplant::GetNativeFunction(env, target_method);
+}
+
 extern "C" bool srx_lsplant_unhook(JNIEnv *env, jobject target_method) {
   if (env == nullptr || target_method == nullptr)
     return false;
