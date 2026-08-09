@@ -378,7 +378,10 @@ public class Hooker {
       int hintedUid = recentMediaDirectoryCallerUid(receiver.getPath());
       if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
     }
-    String directPath = resolveMediaStoreDirectPathForValues(receiver.getPath(), callerUid);
+    String sourcePath = receiver.getPath();
+    String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
+    if (mappingPath == null) mappingPath = sourcePath;
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
     if (directPath == null || directPath.equals(receiver.getPath())) return callBackup(args);
     DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
     try {
@@ -391,7 +394,7 @@ public class Hooker {
           "media direct directory method="
               + (method == null ? null : method.getName())
               + " from="
-              + receiver.getPath()
+              + sourcePath
               + " to="
               + directPath
               + " result="
@@ -1032,7 +1035,9 @@ public class Hooker {
         sourcePath = value.toString();
         break;
       }
-      if (value instanceof String && ((String) value).startsWith("/storage/emulated/")) {
+      if (value instanceof String
+          && (((String) value).startsWith("/storage/emulated/")
+              || ((String) value).startsWith("/data/media/"))) {
         pathIndex = i;
         sourcePath = (String) value;
         break;
@@ -1042,7 +1047,9 @@ public class Hooker {
     int callerUid =
         scopedUid == null ? recentMediaDirectoryCallerUid(sourcePath) : scopedUid.intValue();
     if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
-    String directPath = resolveMediaStoreDirectPathForValues(sourcePath, callerUid);
+    String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
+    if (mappingPath == null) mappingPath = sourcePath;
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
     if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
     Object replacement = actualArgs[pathIndex] instanceof Path ? Paths.get(directPath) : directPath;
     Object[] patchedArgs = replaceArgument(args, pathIndex, replacement);
