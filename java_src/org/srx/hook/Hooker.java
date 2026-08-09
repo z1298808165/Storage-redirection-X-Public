@@ -830,13 +830,37 @@ public class Hooker {
       try {
         Class<?> clazz = loader.loadClass(name);
         if (clazz != null) {
-          tryInstallQueryHook(clazz);
-          tryInstallOpenHook(clazz);
-          tryInstallMutationHook(clazz);
-          tryInstallFuseHook(clazz);
+          try {
+            tryInstallQueryHook(clazz);
+          } catch (Throwable t) {
+            logWarn("java hook media query installer failed " + name, t);
+          }
+          try {
+            tryInstallOpenHook(clazz);
+          } catch (Throwable t) {
+            logWarn("java hook media open installer failed " + name, t);
+          }
+          try {
+            tryInstallMutationHook(clazz);
+          } catch (Throwable t) {
+            logWarn("java hook media mutation installer failed " + name, t);
+          }
+          try {
+            tryInstallFuseHook(clazz);
+          } catch (Throwable t) {
+            logWarn("java hook media fuse installer failed " + name, t);
+          }
           if (isMediaProviderClass(clazz.getName())) {
-            tryInstallMediaFileColumnHooks(clazz);
-            tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
+            try {
+              tryInstallMediaFileColumnHooks(clazz);
+            } catch (Throwable t) {
+              logWarn("java hook media file columns loader failed " + name, t);
+            }
+            try {
+              tryInstallMediaFileUtilsHooks(clazz.getClassLoader());
+            } catch (Throwable t) {
+              logWarn("java hook media FileUtils loader failed " + name, t);
+            }
           }
         }
       } catch (ClassNotFoundException ignored) {
