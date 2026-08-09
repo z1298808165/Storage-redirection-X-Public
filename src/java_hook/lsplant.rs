@@ -13,6 +13,11 @@ unsafe extern "C" {
         callback_method: jobject,
     ) -> jobject;
     fn srx_lsplant_get_native_function(env: *mut JNIEnv, target_method: jobject) -> *mut c_void;
+    fn srx_lsplant_install_native_function_hook(
+        target_function: *mut c_void,
+        replacement: *mut c_void,
+    ) -> bool;
+    fn srx_lsplant_get_hooked_native_original() -> *mut c_void;
     fn srx_lsplant_unhook(env: *mut JNIEnv, target_method: jobject) -> bool;
 }
 
@@ -67,6 +72,22 @@ pub fn get_native_function(env: *mut JNIEnv, target_method: jobject) -> *mut c_v
     }
     // SAFETY: env 与反射 Method 均已判空，C 桥接只读取 LSPlant 已解析的 ArtMethod native data。
     unsafe { srx_lsplant_get_native_function(env, target_method) }
+}
+
+pub fn install_native_function_hook(
+    target_function: *mut c_void,
+    replacement: *mut c_void,
+) -> bool {
+    if target_function.is_null() || replacement.is_null() {
+        return false;
+    }
+    // SAFETY: 两个地址均来自已校验的 createDirectory0(File) JNI 方法及其同 ABI 替换函数。
+    unsafe { srx_lsplant_install_native_function_hook(target_function, replacement) }
+}
+
+pub fn hooked_native_function_original() -> *mut c_void {
+    // SAFETY: C 桥接只返回 inline hook 安装时保存的原函数 trampoline 地址。
+    unsafe { srx_lsplant_get_hooked_native_original() }
 }
 
 #[unsafe(no_mangle)]

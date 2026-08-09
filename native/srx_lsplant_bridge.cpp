@@ -83,6 +83,8 @@ void *g_fuse_fix_reply_open_stub = nullptr;
 void *g_fuse_fix_reply_create_stub = nullptr;
 void *g_fuse_fix_passthrough_enable_stub = nullptr;
 void *g_fuse_fix_passthrough_open_stub = nullptr;
+void *g_lsplant_native_function_original = nullptr;
+void *g_lsplant_native_function_stub = nullptr;
 std::atomic_bool g_fuse_fix_enabled{true};
 std::atomic<int64_t> g_last_passthrough_log_us{0};
 std::atomic<uint32_t> g_suppressed_passthrough_logs{0};
@@ -691,6 +693,24 @@ extern "C" void *srx_lsplant_get_native_function(JNIEnv *env,
   if (env == nullptr || target_method == nullptr)
     return nullptr;
   return lsplant::GetNativeFunction(env, target_method);
+}
+
+extern "C" bool srx_lsplant_install_native_function_hook(void *target_function,
+                                                           void *replacement) {
+  std::lock_guard lock(g_hook_mutex);
+  if (g_lsplant_native_function_stub != nullptr)
+    return g_lsplant_native_function_original != nullptr;
+  if (target_function == nullptr || replacement == nullptr)
+    return false;
+  g_lsplant_native_function_stub = srx_inline_hook_hook_func_addr(
+      target_function, replacement, &g_lsplant_native_function_original);
+  return g_lsplant_native_function_stub != nullptr &&
+         g_lsplant_native_function_original != nullptr;
+}
+
+extern "C" void *srx_lsplant_get_hooked_native_original() {
+  std::lock_guard lock(g_hook_mutex);
+  return g_lsplant_native_function_original;
 }
 
 extern "C" bool srx_lsplant_unhook(JNIEnv *env, jobject target_method) {

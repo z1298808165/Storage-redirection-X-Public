@@ -165,7 +165,7 @@ public class Hooker {
 
   private native Method doHook(Member target, Method callback);
 
-  private native boolean doHookFileSystemCreateDirectory(Class<?> targetClass, Member target);
+  private native boolean doHookFileSystemCreateDirectory(Member target);
 
   private native boolean doUnhook(Member target);
 
@@ -1098,7 +1098,7 @@ public class Hooker {
               || !Modifier.isNative(method.getModifiers())
               || parameterTypes.length != 1
               || !File.class.isAssignableFrom(parameterTypes[0])) continue;
-          installFileSystemNativeDirectoryMethod(fileSystem, method);
+          installFileSystemNativeDirectoryMethod(method);
         }
       } catch (ClassNotFoundException ignored) {
       } catch (Throwable t) {
@@ -1147,12 +1147,12 @@ public class Hooker {
     logInfo("java hook native directory ok " + key);
   }
 
-  private static void installFileSystemNativeDirectoryMethod(Class<?> targetClass, Method method) {
+  private static void installFileSystemNativeDirectoryMethod(Method method) {
     String key = describeMethod(method);
     if (!HOOKED_NATIVE_DIRECTORY_METHODS.add(key)) return;
     try {
       method.setAccessible(true);
-      if (!new Hooker().doHookFileSystemCreateDirectory(targetClass, method)) {
+      if (!new Hooker().doHookFileSystemCreateDirectory(method)) {
         HOOKED_NATIVE_DIRECTORY_METHODS.remove(key);
         logWarn("java hook filesystem native directory rejected " + key);
         return;

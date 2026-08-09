@@ -19,8 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 static HOOKER_CLASS_GLOBAL: AtomicPtr<_jobject> = AtomicPtr::new(std::ptr::null_mut());
 static LSPLANT_INITIALIZED: AtomicBool = AtomicBool::new(false);
-static FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL: AtomicPtr<c_void> =
-    AtomicPtr::new(std::ptr::null_mut());
 static FILE_SYSTEM_DIRECTORY_REWRITE_METHOD: AtomicPtr<c_void> =
     AtomicPtr::new(std::ptr::null_mut());
 const HIDDEN_ROW_SENTINEL: &str = "\u{1F}SRX_HIDDEN_ROW";
@@ -29,8 +27,7 @@ const DO_HOOK_NAME: &[u8] = b"doHook\0";
 const DO_HOOK_SIG: &[u8] =
     b"(Ljava/lang/reflect/Member;Ljava/lang/reflect/Method;)Ljava/lang/reflect/Method;\0";
 const DO_HOOK_FILE_SYSTEM_DIRECTORY_NAME: &[u8] = b"doHookFileSystemCreateDirectory\0";
-const DO_HOOK_FILE_SYSTEM_DIRECTORY_SIG: &[u8] =
-    b"(Ljava/lang/Class;Ljava/lang/reflect/Member;)Z\0";
+const DO_HOOK_FILE_SYSTEM_DIRECTORY_SIG: &[u8] = b"(Ljava/lang/reflect/Member;)Z\0";
 const DO_UNHOOK_NAME: &[u8] = b"doUnhook\0";
 const DO_UNHOOK_SIG: &[u8] = b"(Ljava/lang/reflect/Member;)Z\0";
 const CALLBACK_NAME: &[u8] = b"onMediaProviderQuery\0";
@@ -254,16 +251,12 @@ unsafe extern "C" fn do_hook(
 unsafe extern "C" fn do_hook_file_system_create_directory(
     env: *mut JNIEnv,
     _thiz: jobject,
-    target_class: jclass,
     target: jobject,
 ) -> jboolean {
-    if env.is_null() || target_class.is_null() || target.is_null() {
+    if env.is_null() || target.is_null() {
         return jni_sys::JNI_FALSE;
     }
-    if !FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL
-        .load(Ordering::Acquire)
-        .is_null()
-    {
+    if !lsplant::hooked_native_function_original().is_null() {
         return jni_sys::JNI_TRUE;
     }
 
@@ -276,25 +269,21 @@ unsafe extern "C" fn do_hook_file_system_create_directory(
     if rewrite_method.is_null() {
         return jni_sys::JNI_FALSE;
     }
-    let original = lsplant::get_native_function(env, target);
-    if original.is_null() {
+    let target_function = lsplant::get_native_function(env, target);
+    if target_function.is_null() {
         return jni_sys::JNI_FALSE;
     }
 
     FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.store(rewrite_method.cast(), Ordering::Release);
-    FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.store(original, Ordering::Release);
-    let replacement = [JNINativeMethod {
-        name: c"createDirectory0".as_ptr() as *mut _,
-        signature: c"(Ljava/io/File;)Z".as_ptr() as *mut _,
-        fnPtr: hooked_file_system_create_directory as *mut _,
-    }];
-    if register_natives(env, target_class, &replacement) {
-        log::info!("java hook filesystem native directory registered");
+    if lsplant::install_native_function_hook(
+        target_function,
+        hooked_file_system_create_directory as *mut c_void,
+    ) {
+        log::info!("java hook filesystem native directory inline installed");
         jni_sys::JNI_TRUE
     } else {
-        FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.store(std::ptr::null_mut(), Ordering::Release);
         FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.store(std::ptr::null_mut(), Ordering::Release);
-        log::warn!("java hook filesystem native directory registration failed");
+        log::warn!("java hook filesystem native directory inline failed");
         jni_sys::JNI_FALSE
     }
 }
@@ -306,7 +295,7 @@ unsafe extern "C" fn hooked_file_system_create_directory(
 ) -> jboolean {
     type OriginalFn = unsafe extern "C" fn(*mut JNIEnv, jobject, jobject) -> jboolean;
 
-    let original_ptr = FILE_SYSTEM_CREATE_DIRECTORY_ORIGINAL.load(Ordering::Acquire);
+    let original_ptr = lsplant::hooked_native_function_original();
     if original_ptr.is_null() {
         return jni_sys::JNI_FALSE;
     }
