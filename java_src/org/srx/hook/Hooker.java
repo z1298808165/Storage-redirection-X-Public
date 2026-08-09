@@ -409,6 +409,32 @@ public class Hooker {
     }
   }
 
+  /** MediaProvider 先通过 File.getParentFile 计算目录，再调用 mkdirs；父目录必须在此处完成重定向。 */
+  public Object providerFileParentCallback(Object[] args) throws Throwable {
+    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
+    File receiver = directoryReceiver(args);
+    if (receiver == null) return callBackup(args);
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
+    if (scopedUid == null) {
+      int hintedUid = recentMediaDirectoryCallerUid(receiver.getPath());
+      if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
+    }
+    String sourcePath = receiver.getPath();
+    String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
+    if (mappingPath == null) mappingPath = sourcePath;
+    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+    if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
+    int parentEnd = directPath.lastIndexOf('/');
+    File directParent = parentEnd > 0 ? new File(directPath.substring(0, parentEnd)) : null;
+    logInfo(
+        "media direct parent from="
+            + sourcePath
+            + " to="
+            + (directParent == null ? null : directParent.getPath()));
+    return directParent;
+  }
+
   /**
    * MediaProvider insert 在构造结果 File 时可能绕过 java.io.File.mkdirs hook。直接改写 FileUtils
    * 返回的结果对象，令后续建目录和临时文件都使用私有目标；数据库字段在 computeValuesFromData 返回后恢复为公共逻辑路径，保持 MediaStore 查询契约不变。
@@ -1024,12 +1050,16 @@ public class Hooker {
   private static synchronized void tryInstallDirectoryHooks() {
     try {
       Class<?> fileClass = File.class;
-      for (String methodName : new String[] {"mkdirs", "mkdir"}) {
+      for (String methodName : new String[] {"mkdirs", "mkdir", "getParentFile"}) {
         String key = fileClass.getName() + "#" + methodName;
         if (!HOOKED_DIRECTORY_METHODS.add(key)) continue;
         Method method = fileClass.getDeclaredMethod(methodName);
         Method callback =
-            Hooker.class.getDeclaredMethod("providerDirectoryCallback", Object[].class);
+            Hooker.class.getDeclaredMethod(
+                "getParentFile".equals(methodName)
+                    ? "providerFileParentCallback"
+                    : "providerDirectoryCallback",
+                Object[].class);
         callback.setAccessible(true);
         Hooker hooker = new Hooker();
         Method backup = hooker.doHook(method, callback);
