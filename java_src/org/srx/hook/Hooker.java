@@ -1089,17 +1089,21 @@ public class Hooker {
    * <p>目录创建必须在不可内联的 native 终点使用同一条路径规则，否则会留下公共父目录。
    */
   private static synchronized void tryInstallNativeDirectoryHooks() {
+    try {
+      Field fileSystemField = File.class.getDeclaredField("fs");
+      fileSystemField.setAccessible(true);
+      Object fileSystem = fileSystemField.get(null);
+      if (fileSystem != null) {
+        installFileSystemNativeDirectoryMethod(
+            findFileSystemNativeDirectoryMethod(fileSystem.getClass()));
+      }
+    } catch (Throwable t) {
+      logWarn("java hook filesystem native directory runtime lookup failed", t);
+    }
     for (String className : new String[] {"java.io.UnixFileSystem", "java.io.LinuxFileSystem"}) {
       try {
         Class<?> fileSystem = Class.forName(className);
-        for (Method method : fileSystem.getDeclaredMethods()) {
-          Class<?>[] parameterTypes = method.getParameterTypes();
-          if (!"createDirectory0".equals(method.getName())
-              || !Modifier.isNative(method.getModifiers())
-              || parameterTypes.length != 1
-              || !File.class.isAssignableFrom(parameterTypes[0])) continue;
-          installFileSystemNativeDirectoryMethod(method);
-        }
+        installFileSystemNativeDirectoryMethod(findFileSystemNativeDirectoryMethod(fileSystem));
       } catch (ClassNotFoundException ignored) {
       } catch (Throwable t) {
         logWarn("java hook filesystem native directory installer failed " + className, t);
@@ -1126,7 +1130,19 @@ public class Hooker {
     }
   }
 
+  private static Method findFileSystemNativeDirectoryMethod(Class<?> fileSystem) {
+    for (Class<?> c = fileSystem; c != null; c = c.getSuperclass()) {
+      try {
+        Method method = c.getDeclaredMethod("createDirectory0", File.class);
+        if (Modifier.isNative(method.getModifiers())) return method;
+      } catch (NoSuchMethodException ignored) {
+      }
+    }
+    return null;
+  }
+
   private static void installNativeDirectoryMethod(Method method) throws Throwable {
+    if (method == null) return;
     String key = describeMethod(method);
     if (!HOOKED_NATIVE_DIRECTORY_METHODS.add(key)) return;
     Method callback =
