@@ -1334,7 +1334,8 @@ public class Hooker {
     }
     for (String className : MEDIA_FILE_UTILS_CLASS_NAMES) {
       try {
-        Class<?> fileUtils = Class.forName(className, false, loader);
+        ClassLoader lookupLoader = "android.os.FileUtils".equals(className) ? null : loader;
+        Class<?> fileUtils = Class.forName(className, false, lookupLoader);
         boolean firstClassObservation = MEDIA_FILE_UTILS_CLASSES_LOGGED.add(className);
         if (firstClassObservation) {
           logInfo("java hook media FileUtils class found " + className);
