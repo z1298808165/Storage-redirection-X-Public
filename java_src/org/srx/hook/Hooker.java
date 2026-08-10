@@ -430,11 +430,15 @@ public class Hooker {
     if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
     int parentEnd = directPath.lastIndexOf('/');
     File directParent = parentEnd > 0 ? new File(directPath.substring(0, parentEnd)) : null;
-    logInfo(
-        "media direct parent from="
-            + sourcePath
-            + " to="
-            + (directParent == null ? null : directParent.getPath()));
+    if (directParent == null) return callBackup(args);
+    // getParentFile 必须向上收敛。像 /data/media/0/Android 这类沙箱祖先目录会被映射回自身子树，
+    // 一旦返回子孙目录，File.mkdirs 的逐级向上递归就会在同一节点上无限打转。
+    String directParentPath = directParent.getPath();
+    if (directParentPath.equals(sourcePath) || directParentPath.startsWith(sourcePath + "/")) {
+      logDebug("media direct parent skip cycle from=" + sourcePath + " to=" + directParentPath);
+      return callBackup(args);
+    }
+    logInfo("media direct parent from=" + sourcePath + " to=" + directParentPath);
     return directParent;
   }
 
