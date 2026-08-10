@@ -309,17 +309,24 @@ fn allowed_media_write_needs_backend_redirect(resolved_path: &str, user_id: i32)
 
 // 根据进程身份决策路径重定向，系统代写进程使用按调用方映射
 pub fn process_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDecision {
-    process_redirect_path_inner(hub, pathname, false)
+    process_redirect_path_inner(hub, pathname, false, false)
 }
 
 pub fn process_write_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDecision {
-    process_redirect_path_inner(hub, pathname, true)
+    process_redirect_path_inner(hub, pathname, true, false)
+}
+
+// 建目录必须走完整决策链：provider 直通只用于避免已改写路径被二次重定向，
+// 不能顺带放行公共目录创建，否则 MediaStore 落库时会在公共目录留下空目录。
+pub fn process_dir_create_redirect_path(hub: &InterceptHub, pathname: &str) -> RedirectDecision {
+    process_redirect_path_inner(hub, pathname, true, true)
 }
 
 fn process_redirect_path_inner(
     hub: &InterceptHub,
     pathname: &str,
     is_write_operation: bool,
+    is_dir_create_operation: bool,
 ) -> RedirectDecision {
     let perf_started_ms = paths::monotonic_ms();
     let self_uid = unsafe { libc::getuid() as i32 };
@@ -328,7 +335,9 @@ fn process_redirect_path_inner(
     let is_system_writer_process =
         redirect_policy::is_system_writer_package(&package_name) || is_shared_uid;
     let is_explicit_caller_decision = crate::hook::is_explicit_caller_decision_active();
-    if should_bypass_system_writer_provider_passthrough(is_system_writer_process) {
+    if !is_dir_create_operation
+        && should_bypass_system_writer_provider_passthrough(is_system_writer_process)
+    {
         return process_provider_passthrough_redirect(&package_name, pathname, perf_started_ms);
     }
     if !is_system_writer_process {

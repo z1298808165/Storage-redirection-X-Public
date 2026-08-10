@@ -23,7 +23,8 @@ pub(crate) use context::{
     enter_explicit_caller_decision, enter_path_owner_inference_disabled,
     enter_provider_passthrough, exit_provider_passthrough, get_binder_saved_caller_package,
     is_explicit_caller_decision_active, is_path_owner_inference_disabled,
-    is_provider_passthrough_active,
+    is_provider_passthrough_active, is_provider_passthrough_virtual_dir,
+    provider_passthrough_virtual_dir_target, remember_provider_passthrough_virtual_dir,
 };
 pub(crate) use jni_query::{
     is_redirect_enabled_for_caller_uid, resolve_download_media_placeholder_path_for_caller,

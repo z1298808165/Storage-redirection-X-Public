@@ -8,7 +8,9 @@ use crate::hook::stats::InterceptHub;
 use crate::hook::util::c_str_to_string;
 use crate::monitor::OpKind;
 use crate::platform::paths;
-use crate::redirect::{RedirectDecision, policy, process_write_redirect_path, writer};
+use crate::redirect::{
+    RedirectDecision, policy, process_dir_create_redirect_path, process_write_redirect_path, writer,
+};
 use libc::{c_char, c_int};
 
 pub(super) struct SinglePathAuditRequest<'a> {
@@ -409,4 +411,12 @@ pub(super) fn process_redirect_path_for_mutation(
     path: &str,
 ) -> RedirectDecision {
     process_write_redirect_path(hub, path)
+}
+
+// mkdir/mkdirat 单独入口，避免 provider 直通把公共目录创建一并放行
+pub(super) fn process_redirect_path_for_dir_create(
+    hub: &InterceptHub,
+    path: &str,
+) -> RedirectDecision {
+    process_dir_create_redirect_path(hub, path)
 }

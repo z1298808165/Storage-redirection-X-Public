@@ -1,6 +1,9 @@
 use crate::platform::paths::monotonic_ms;
 use std::cell::{Cell, RefCell};
 
+// 单次 MediaStore 插入涉及的目录层级有限，用作登记表容量上限
+const PROVIDER_PASSTHROUGH_VIRTUAL_DIR_MAX: usize = 16;
+
 thread_local! {
     static CALLER_PACKAGE: RefCell<String> = const { RefCell::new(String::new()) };
     static CALLER_UID: Cell<i32> = const { Cell::new(-1) };
@@ -16,6 +19,9 @@ thread_local! {
     static BINDER_IDENTITY_CLEARED: Cell<bool> = const { Cell::new(false) };
     static REENTRY_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PROVIDER_PASSTHROUGH_DEPTH: Cell<u32> = const { Cell::new(0) };
+    // provider 直通期间被拦下的公共目录 -> 沙箱目标，仅用于让查询结果与 mkdir 结果保持一致
+    static PROVIDER_PASSTHROUGH_VIRTUAL_DIRS: RefCell<Vec<(String, String)>> =
+        const { RefCell::new(Vec::new()) };
     static EXPLICIT_CALLER_DECISION_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PATH_OWNER_INFERENCE_DISABLED_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
@@ -253,6 +259,7 @@ pub fn exit_provider_passthrough() {
         let current = depth.get();
         if current <= 1 {
             depth.set(0);
+            clear_provider_passthrough_virtual_dirs();
             if !is_current_caller_scope_active() {
                 clear_current_caller();
                 clear_binder_saved_caller_uid();
@@ -266,6 +273,58 @@ pub fn exit_provider_passthrough() {
 
 pub fn is_provider_passthrough_active() -> bool {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| depth.get() > 0)
+}
+
+// 登记键统一折算到 /storage/emulated 路径空间：mkdir 的判定路径可能是 /data/media 形式，
+// 而后续查询按归一化路径查表，两侧不一致会导致查不到已登记的目录。
+fn virtual_dir_key(path: &str) -> String {
+    crate::platform::paths::data_media_to_storage_path(path)
+}
+
+// 记录一个「未在公共目录落地、实际重定向到沙箱」的目录，供同一直通窗口内的查询使用
+pub fn remember_provider_passthrough_virtual_dir(public_path: &str, sandbox_path: &str) {
+    if public_path.is_empty() || sandbox_path.is_empty() {
+        return;
+    }
+    let key = virtual_dir_key(public_path);
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| {
+        let mut dirs = dirs.borrow_mut();
+        if dirs.iter().any(|(public, _)| public == &key) {
+            return;
+        }
+        // 单次插入涉及的目录层级有限，设上限避免异常场景下无界增长
+        if dirs.len() >= PROVIDER_PASSTHROUGH_VIRTUAL_DIR_MAX {
+            dirs.remove(0);
+        }
+        dirs.push((key, sandbox_path.to_string()));
+    })
+}
+
+// 虚拟目录对应的沙箱目标，仅用于目录内容列举：列出沙箱内容才与应用可见状态一致。
+pub fn provider_passthrough_virtual_dir_target(public_path: &str) -> Option<String> {
+    if public_path.is_empty() {
+        return None;
+    }
+    let key = virtual_dir_key(public_path);
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| {
+        dirs.borrow()
+            .iter()
+            .find(|(public, _)| public == &key)
+            .map(|(_, sandbox)| sandbox.clone())
+    })
+}
+
+// 该公共目录是否属于本次直通窗口内被拦下、实际未在公共路径落地的目录
+pub fn is_provider_passthrough_virtual_dir(public_path: &str) -> bool {
+    if public_path.is_empty() {
+        return false;
+    }
+    let key = virtual_dir_key(public_path);
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow().iter().any(|(p, _)| p == &key))
+}
+
+fn clear_provider_passthrough_virtual_dirs() {
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow_mut().clear());
 }
 
 pub fn set_binder_identity_cleared(cleared: bool) {

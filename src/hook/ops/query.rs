@@ -14,6 +14,14 @@ static READLINK_REVERSE_UNCHANGED_COUNT: AtomicU64 = AtomicU64::new(0);
 const SYSTEM_WRITER_QUERY_BYPASS_LOG_STEP: u64 = 4096;
 const READLINK_REVERSE_UNCHANGED_LOG_STEP: u64 = 4096;
 const QUERY_FALLBACK_CALLER_MAX_AGE_MS: i64 = 1500;
+// 向上查找真实祖先目录的层级上限，避免异常路径导致长循环
+const PROVIDER_PASSTHROUGH_STANDIN_MAX_DEPTH: usize = 32;
+// STATX_TYPE：只请求文件类型，libc 未对 Android 导出该常量
+const STATX_TYPE_MASK: c_uint = 0x0000_0001;
+
+// 转发原函数时使用的签名别名，避免在调用点反复书写跨行的裸指针参数列表
+type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
+type StatxFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_uint, *mut libc::statx) -> c_int;
 
 fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool {
     if !hub.with_package_name(policy::is_system_writer_package) {
@@ -156,6 +164,89 @@ unsafe fn fix_system_writer_private_owner_for_query(dirfd: c_int, pathname: *con
     runtime::fix_system_writer_android_private_owner(&path_text, false);
 }
 
+// 用原始系统调用判断目录是否真实存在。这里不能走 libc 包装，否则会再次进入本模块的
+// PLT hook 造成递归；直接发起 statx 系统调用可以拿到未经改写的真实结果。
+fn raw_directory_exists(path: &str) -> bool {
+    let Ok(c_path) = CString::new(path) else {
+        return false;
+    };
+    // SAFETY: c_path 以 NUL 结尾且在调用期间有效，statxbuf 为本地栈变量，内核只写入该结构。
+    unsafe {
+        let mut statxbuf: libc::statx = std::mem::zeroed();
+        let saved_errno = runtime::current_errno();
+        let ret = call_statx_syscall(
+            AT_FDCWD,
+            c_path.as_ptr(),
+            0,
+            STATX_TYPE_MASK,
+            &mut statxbuf as *mut libc::statx,
+        );
+        runtime::set_errno(saved_errno);
+        ret == 0 && (u32::from(statxbuf.stx_mode) & libc::S_IFMT) == libc::S_IFDIR
+    }
+}
+
+// 直通窗口内被拦下的公共目录，用同一路径空间内最近的真实祖先回答存在性查询。
+// 只替换被查询的目标，不改写调用方看到的路径，_data 因此与未拦截时完全一致。
+//
+// 必须逐级验证祖先是否真实存在，不能假设「未登记的祖先就一定存在」：叶子目录的 mkdir
+// 命中沙箱已存在而直接报成功后，File.mkdirs 不会再回溯创建中间层级，这些中间目录既没有
+// 登记也不存在，用它们当替身会让存在性查询继续失败。
+unsafe fn provider_passthrough_virtual_dir_standin_path(
+    dirfd: c_int,
+    pathname: *const c_char,
+) -> Option<CString> {
+    if !crate::hook::is_provider_passthrough_active() {
+        return None;
+    }
+    // SAFETY: dirfd 与 pathname 由调用方 hook 原样透传，在本次调用期间保持有效。
+    let path_text = unsafe { resolve_system_writer_query_path(dirfd, pathname) }?;
+    if !crate::hook::is_provider_passthrough_virtual_dir(&path_text) {
+        return None;
+    }
+    let is_data_media_input = path_text.starts_with("/data/media/");
+    let mut ancestor = paths::parent(&path_text);
+    for _ in 0..PROVIDER_PASSTHROUGH_STANDIN_MAX_DEPTH {
+        if ancestor.is_empty() || ancestor == "/" {
+            return None;
+        }
+        if raw_directory_exists(&ancestor) {
+            log::debug!(
+                "virtual dir standin path={} standin={}",
+                path_text,
+                ancestor
+            );
+            // 输入是 /data/media 后端路径时替身保持同一空间，避免跨路径空间比较
+            let standin = if is_data_media_input && !ancestor.starts_with("/data/media/") {
+                paths::storage_to_data_media_path(&ancestor)
+            } else {
+                ancestor
+            };
+            return CString::new(standin).ok();
+        }
+        ancestor = paths::parent(&ancestor);
+    }
+    None
+}
+
+// 虚拟目录的内容列举解析到沙箱目标，保证列出的文件与应用实际可见的一致
+unsafe fn provider_passthrough_virtual_dir_listing_path(
+    dirfd: c_int,
+    pathname: *const c_char,
+) -> Option<CString> {
+    if !crate::hook::is_provider_passthrough_active() {
+        return None;
+    }
+    // SAFETY: dirfd 与 pathname 由调用方 hook 原样透传，在本次调用期间保持有效。
+    let path_text = unsafe { resolve_system_writer_query_path(dirfd, pathname) }?;
+    let target = crate::hook::provider_passthrough_virtual_dir_target(&path_text)?;
+    if target.is_empty() {
+        return None;
+    }
+    log::debug!("virtual dir listing path={} target={}", path_text, target);
+    CString::new(target).ok()
+}
+
 unsafe fn resolve_system_writer_query_path(
     dirfd: c_int,
     pathname: *const c_char,
@@ -205,6 +296,18 @@ pub unsafe extern "C" fn hooked_stat(pathname: *const c_char, statbuf: *mut libc
         },
         |hub| {
             hub.increment_stat_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(AT_FDCWD, pathname)
+            {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::stat(standin.as_ptr(), statbuf),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int =
+                            std::mem::transmute(prev);
+                        f(standin.as_ptr(), statbuf)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "stat") {
                 return call_query_with_writer_fallback(hub, AT_FDCWD, pathname, |call_path| {
                     runtime::call_prev(
@@ -249,6 +352,18 @@ pub unsafe extern "C" fn hooked_lstat(pathname: *const c_char, statbuf: *mut lib
         },
         |hub| {
             hub.increment_stat_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(AT_FDCWD, pathname)
+            {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::lstat(standin.as_ptr(), statbuf),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int =
+                            std::mem::transmute(prev);
+                        f(standin.as_ptr(), statbuf)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "lstat") {
                 return call_query_with_writer_fallback(hub, AT_FDCWD, pathname, |call_path| {
                     runtime::call_prev(
@@ -302,6 +417,16 @@ pub unsafe extern "C" fn hooked_fstatat(
         },
         |hub| {
             hub.increment_stat_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(dirfd, pathname) {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::fstatat(dirfd, standin.as_ptr(), statbuf, flags),
+                    |prev| {
+                        let f: FstatatFn = std::mem::transmute(prev);
+                        f(dirfd, standin.as_ptr(), statbuf, flags)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "fstatat") {
                 return call_query_with_writer_fallback(hub, dirfd, pathname, |call_path| {
                     runtime::call_prev(
@@ -354,6 +479,18 @@ pub unsafe extern "C" fn hooked_access(pathname: *const c_char, mode: c_int) -> 
         },
         |hub| {
             hub.increment_access_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(AT_FDCWD, pathname)
+            {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::access(standin.as_ptr(), mode),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char, c_int) -> c_int =
+                            std::mem::transmute(prev);
+                        f(standin.as_ptr(), mode)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "access") {
                 return call_query_with_writer_fallback(hub, AT_FDCWD, pathname, |call_path| {
                     runtime::call_prev(
@@ -403,6 +540,17 @@ pub unsafe extern "C" fn hooked_faccessat(
         },
         |hub| {
             hub.increment_access_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(dirfd, pathname) {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::faccessat(dirfd, standin.as_ptr(), mode, flags),
+                    |prev| {
+                        let f: unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int =
+                            std::mem::transmute(prev);
+                        f(dirfd, standin.as_ptr(), mode, flags)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "faccessat") {
                 return call_query_with_writer_fallback(hub, dirfd, pathname, |call_path| {
                     runtime::call_prev(
@@ -462,6 +610,16 @@ pub unsafe extern "C" fn hooked_statx(
         },
         |hub| {
             hub.increment_stat_calls();
+            if let Some(standin) = provider_passthrough_virtual_dir_standin_path(dirfd, pathname) {
+                return runtime::call_prev(
+                    self_ptr,
+                    || call_statx_syscall(dirfd, standin.as_ptr(), flags, mask, statxbuf),
+                    |prev| {
+                        let f: StatxFn = std::mem::transmute(prev);
+                        f(dirfd, standin.as_ptr(), flags, mask, statxbuf)
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "statx") {
                 return call_query_with_writer_fallback(hub, dirfd, pathname, |call_path| {
                     runtime::call_prev(
@@ -516,6 +674,18 @@ pub unsafe extern "C" fn hooked_opendir(name: *const c_char) -> *mut libc::DIR {
         },
         |hub| {
             hub.increment_opendir_calls();
+            // 目录列举与存在性查询不同：列出沙箱内容才与应用实际可见的文件一致
+            if let Some(target) = provider_passthrough_virtual_dir_listing_path(AT_FDCWD, name) {
+                return runtime::call_prev(
+                    self_ptr,
+                    || libc::opendir(target.as_ptr()),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char) -> *mut libc::DIR =
+                            std::mem::transmute(prev);
+                        f(target.as_ptr())
+                    },
+                );
+            }
             if should_bypass_system_writer_query(hub, "opendir") {
                 return call_opendir_with_writer_fallback(hub, name, |call_path| {
                     runtime::call_prev(

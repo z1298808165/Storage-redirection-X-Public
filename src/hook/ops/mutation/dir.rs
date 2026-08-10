@@ -236,7 +236,7 @@ where
         return result;
     }
 
-    let mut redirect_result = process_redirect_path_for_mutation(hub, path_for_decision.as_ref());
+    let mut redirect_result = process_redirect_path_for_dir_create(hub, path_for_decision.as_ref());
     if !redirect_result.is_redirect()
         && !redirect_result.is_denied()
         && let Some(mapping_redirect) = resolve_mapping_request_mkdir_redirect(
@@ -279,6 +279,14 @@ where
         let redirected_path = redirect_result.new_path.clone();
         record_redirect_hit(hub, op_name, path_for_decision.as_ref(), &redirected_path);
         runtime::ensure_redirect_parent_dirs(&redirected_path, 0o2773);
+        // 直通窗口内公共目录没有真正创建，登记该目录让随后的查询报告「存在」，
+        // 否则 MediaProvider 在 mkdirs 之后检查目录会判定创建失败。
+        if crate::hook::is_provider_passthrough_active() {
+            crate::hook::remember_provider_passthrough_virtual_dir(
+                path_for_decision.as_ref(),
+                &redirect_result.new_path,
+            );
+        }
         if let Ok(c_path) = CString::new(redirected_path) {
             call_original(c_path.as_ptr())
         } else {
