@@ -260,6 +260,62 @@ verify_storage_redirect_module_loaded_with_reboot_retry() {
   verify_storage_redirect_module_loaded
 }
 
+media_provider_pid() {
+  adb_su 'for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof "$package" 2>/dev/null || true; done' |
+    tr -d '\r' |
+    awk 'NF { print $1; exit }'
+}
+
+wait_media_provider_hook_ready() {
+  local label="$1"
+  local timeout_seconds="${2:-60}"
+  local sdk deadline pid boot_id install_state
+
+  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
+    echo "media_provider_hook_check_skipped label=${label} sdk=${sdk}"
+    return 0
+  fi
+
+  deadline=$((SECONDS + timeout_seconds))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    adb shell content query --uri content://media/external_primary/file --projection _id --where '_id=-1' >/dev/null 2>&1 || true
+    pid="$(media_provider_pid)"
+    if [ -n "$pid" ]; then
+      boot_id="$(adb shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r' || true)"
+      install_state="$(adb_su 'cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true' | tr -d '\r')"
+      if [ -n "$boot_id" ] && grep -Fq "stage=init_ok pid=${pid} boot_id=${boot_id} " <<<"$install_state"; then
+        echo "media_provider_hook_ready label=${label} pid=${pid} boot_id=${boot_id}"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+
+  pid="$(media_provider_pid)"
+  echo "MediaProvider hook did not become ready: label=${label} pid=${pid:-missing}" >&2
+  adb_su "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_id=\$boot_id; echo install_state; cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent; echo deferred_marker; ls -la /data/adb/modules/storage.redirect.x/logs/.media_hook_deferred 2>/dev/null || echo marker_absent; echo media_processes; ps -A | grep -E 'providers.media|android.process.media' || true; if [ -n '${pid:-}' ]; then echo module_maps; grep -E 'storage.redirect.x/zygisk|libsrx_core' '/proc/${pid}/maps' 2>/dev/null || echo module_map_absent; fi" || true
+  adb_magisk '--denylist ls' 2>/dev/null || true
+  adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|linker|fatal' || true
+  return 1
+}
+
+verify_media_provider_hook_with_reboot_retry() {
+  if wait_media_provider_hook_ready "module-boot" 60; then
+    return 0
+  fi
+
+  echo "MediaProvider hook was absent after module boot; retrying one clean device boot."
+  adb reboot
+  wait_for_boot 420
+  wait_for_root_shell 120
+  assert_installed_module_files /data/adb/modules/storage.redirect.x
+  grant_magisk_shell
+  VERIFY_MODULE_TIMEOUT_SECONDS=120 verify_storage_redirect_module_loaded
+
+  wait_media_provider_hook_ready "module-clean-boot" 120
+}
+
 install_test_app_before_module_boot
 
 if ! run_rootavd_patch; then
@@ -322,3 +378,4 @@ else
 fi
 
 verify_storage_redirect_module_loaded_with_reboot_retry
+verify_media_provider_hook_with_reboot_retry

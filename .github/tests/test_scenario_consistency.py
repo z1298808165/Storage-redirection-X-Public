@@ -375,6 +375,34 @@ class ScenarioConsistencyTest(unittest.TestCase):
             ps_standard.index('Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only"'),
         )
 
+    def test_module_boot_recovers_missing_media_provider_hook_once(self) -> None:
+        install = read(".github/tests/install-storage-redirect-module.sh")
+        wait = section(
+            install,
+            "wait_media_provider_hook_ready()",
+            "verify_media_provider_hook_with_reboot_retry()",
+        )
+        recovery = section(
+            install,
+            "verify_media_provider_hook_with_reboot_retry()",
+            "install_test_app_before_module_boot",
+        )
+
+        self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", wait)
+        self.assertIn('if [ -n "$sdk" ] && [ "$sdk" -le 34 ]', wait)
+        self.assertIn('wait_media_provider_hook_ready "module-boot" 60', recovery)
+        self.assertIn("adb reboot", recovery)
+        self.assertIn('wait_media_provider_hook_ready "module-clean-boot" 120', recovery)
+        self.assertEqual(1, recovery.count("adb reboot"))
+        self.assertLess(
+            recovery.index('wait_media_provider_hook_ready "module-boot"'),
+            recovery.index("adb reboot"),
+        )
+        self.assertLess(
+            recovery.index("adb reboot"),
+            recovery.index('wait_media_provider_hook_ready "module-clean-boot"'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
