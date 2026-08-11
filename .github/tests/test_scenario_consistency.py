@@ -201,6 +201,53 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("set -o pipefail", adb_su)
         self.assertLess(adb_su.index("set -o pipefail"), adb_su.index("adb_root"))
 
+    def test_initial_storage_recovery_reboots_only_after_timeout(self) -> None:
+        recovery = section(
+            self.bash,
+            "ensure_initial_storage_ready()",
+            "media_provider_query_ready()",
+        )
+        self.assertIn('if wait_storage_ready "initial" 60', recovery)
+        self.assertIn("adb reboot", recovery)
+        self.assertIn('wait_storage_ready "initial-reboot" 120', recovery)
+        self.assertLess(recovery.index("wait_storage_ready"), recovery.index("adb reboot"))
+        startup = self.bash[self.bash.index("wait_boot_completed\nbackup_global_config") :]
+        self.assertIn("ensure_initial_storage_ready", startup)
+        self.assertLess(startup.index("backup_global_config"), startup.index("ensure_initial_storage_ready"))
+
+    def test_windows_test_flow_keeps_python_command_as_object(self) -> None:
+        script = read("scripts/verify-test-flow.ps1")
+        resolver = section(script, "function Get-PythonCommand", "function Get-ResolvedVersionData")
+        version = section(script, "function Get-ResolvedVersionData", "function New-ModulePackage")
+        self.assertIn("[pscustomobject]", resolver)
+        self.assertIn("$candidate.FilePath", resolver)
+        self.assertIn("@($candidate.Arguments)", resolver)
+        self.assertNotIn("$candidate[0]", resolver)
+        self.assertIn("$python.FilePath", version)
+        self.assertIn("@($python.Arguments)", version)
+
+    def test_scoped_fuse_start_check_ignores_clean_session_end(self) -> None:
+        bash_check = section(
+            self.bash,
+            "check_scoped_fuse_daemon_started()",
+            "run_fuse_daemon_allow_wildcard_scenario()",
+        )
+        ps_check = section(
+            self.powershell,
+            "function Test-ScopedFuseDaemonStarted",
+            "function Invoke-RuleSandboxScenario",
+        )
+
+        for source in (bash_check, ps_check):
+            self.assertIn("fuse redirect mount start", source)
+            self.assertIn("fuse redirect mount failed", source)
+            self.assertIn("daemon hybrid fuse scoped service failed", source)
+            self.assertNotIn("fuse redirect session ended", source)
+            self.assertLess(
+                source.index("fuse redirect mount start"),
+                source.index("fuse redirect mount failed"),
+            )
+
     def test_media_monitor_waits_for_restarted_provider_hook(self) -> None:
         bash_wait = section(
             self.bash,

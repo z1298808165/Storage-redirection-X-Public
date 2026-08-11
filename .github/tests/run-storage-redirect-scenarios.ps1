@@ -1802,19 +1802,24 @@ function Test-FuseMountActive {
 function Test-ScopedFuseDaemonStarted {
     param([int]$Scenario, [string]$MountRoot, [bool]$Strict = $true)
     for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
+            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot"
+            return $true
+        }
         if (Test-Su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
             $script:Failures.Add("scenario-$Scenario scoped FUSE 已回退到 mount namespace root=$MountRoot")
             Write-Warning "scenario-$Scenario/scoped-fuse-fallback root=$MountRoot"
             return $false
         }
-        if (Test-Su "grep -F -- 'fuse redirect session ended' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot' >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped FUSE 会话失败 root=$MountRoot")
-            Write-Warning "scenario-$Scenario/scoped-fuse-session-failed root=$MountRoot"
+        if (Test-Su "grep -F -- 'fuse redirect mount failed mp=$MountRoot ' '$LogPath' 2>/dev/null >/dev/null") {
+            $script:Failures.Add("scenario-$Scenario scoped FUSE 挂载失败 root=$MountRoot")
+            Write-Warning "scenario-$Scenario/scoped-fuse-mount-failed root=$MountRoot"
             return $false
         }
-        if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
-            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot"
-            return $true
+        if (Test-Su "grep -F -- 'daemon hybrid fuse scoped service failed' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
+            $script:Failures.Add("scenario-$Scenario scoped FUSE 服务启动失败 root=$MountRoot")
+            Write-Warning "scenario-$Scenario/scoped-fuse-service-failed root=$MountRoot"
+            return $false
         }
         Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }

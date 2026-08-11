@@ -87,10 +87,17 @@ function Normalize-TextFile {
 }
 
 function Get-PythonCommand {
-    if (-not [string]::IsNullOrWhiteSpace($env:PYTHON)) { return @($env:PYTHON) }
-    foreach ($candidate in @(@("python"), @("py", "-3"), @("python3"))) {
+    if (-not [string]::IsNullOrWhiteSpace($env:PYTHON)) {
+        return [pscustomobject]@{ FilePath = $env:PYTHON; Arguments = @() }
+    }
+    $candidates = @(
+        [pscustomobject]@{ FilePath = "python"; Arguments = @() },
+        [pscustomobject]@{ FilePath = "py"; Arguments = @("-3") },
+        [pscustomobject]@{ FilePath = "python3"; Arguments = @() }
+    )
+    foreach ($candidate in $candidates) {
         try {
-            & $candidate[0] @($candidate | Select-Object -Skip 1) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" | Out-Null
+            & $candidate.FilePath @($candidate.Arguments) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" | Out-Null
             if ($LASTEXITCODE -eq 0) { return $candidate }
         } catch {
         }
@@ -100,7 +107,7 @@ function Get-PythonCommand {
 
 function Get-ResolvedVersionData {
     $python = Get-PythonCommand
-    $output = & $python[0] @($python | Select-Object -Skip 1) ".github/scripts/resolve_build_version.py" "--include-dirty" "--format" "github"
+    $output = & $python.FilePath @($python.Arguments) ".github/scripts/resolve_build_version.py" "--include-dirty" "--format" "github"
     if ($LASTEXITCODE -ne 0) { Fail "无法解析测试流版本。" }
     $data = @{}
     foreach ($line in $output) {

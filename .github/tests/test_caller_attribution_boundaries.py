@@ -71,6 +71,23 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("snapshot.running_packages.is_none()", resolver)
         self.assertNotIn('read_dir("/proc")', resolver)
 
+    def test_provider_directory_reports_existing_target_and_cleans_empty_source(self) -> None:
+        java = read("java_src/org/srx/hook/Hooker.java")
+        jni = read("src/java_hook/hooker_class.rs")
+        directory = read("src/hook/ops/mutation/dir.rs")
+
+        callback = java[
+            java.index("public Object providerDirectoryCallback") : java.index(
+                "public Object providerFileParentCallback"
+            )
+        ]
+        self.assertIn("created || directDirectory.isDirectory()", callback)
+        self.assertIn("cleanupProviderRedirectSourceDirectory(sourcePath, directPath)", callback)
+        self.assertIn('b"cleanupProviderRedirectSourceDirectory\\0"', jni)
+        self.assertIn("cleanup_provider_redirect_source_directory", jni)
+        self.assertIn("is_public_default_sandbox_redirect(source_path, target_path)", directory)
+        self.assertIn("libc::rmdir(c_path.as_ptr())", directory)
+
 
 if __name__ == "__main__":
     unittest.main()
