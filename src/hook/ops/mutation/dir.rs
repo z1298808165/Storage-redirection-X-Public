@@ -295,9 +295,11 @@ where
         let redirected_path = redirect_result.new_path.clone();
         record_redirect_hit(hub, op_name, path_for_decision.as_ref(), &redirected_path);
         runtime::ensure_redirect_parent_dirs(&redirected_path, 0o2773);
-        // 直通窗口内公共目录没有真正创建，登记该目录让随后的查询报告「存在」，
+        // Provider 变更期内公共目录没有真正创建，登记该目录让随后的查询报告「存在」，
         // 否则 MediaProvider 在 mkdirs 之后检查目录会判定创建失败。
-        if crate::hook::is_provider_passthrough_active() {
+        if crate::hook::is_provider_passthrough_active()
+            || crate::hook::is_provider_virtual_scope_active()
+        {
             crate::hook::remember_provider_passthrough_virtual_dir(
                 path_for_decision.as_ref(),
                 &redirect_result.new_path,
@@ -411,6 +413,14 @@ fn cleanup_empty_redirect_source_dir_if_needed(
     }
 
     cleanup_empty_redirect_source_dir(op_name, source_path, &redirect_result.new_path);
+}
+
+pub(crate) fn remember_provider_redirect_source_directory(source_path: &str, target_path: &str) {
+    if !is_public_default_sandbox_redirect(source_path, target_path) {
+        return;
+    }
+
+    crate::hook::remember_provider_passthrough_virtual_dir(source_path, target_path);
 }
 
 pub(crate) fn cleanup_provider_redirect_source_directory(source_path: &str, target_path: &str) {

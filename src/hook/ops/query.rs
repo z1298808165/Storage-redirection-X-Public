@@ -186,7 +186,7 @@ fn raw_directory_exists(path: &str) -> bool {
     }
 }
 
-// 直通窗口内被拦下的公共目录，用同一路径空间内最近的真实祖先回答存在性查询。
+// Provider 变更期内被拦下的公共目录，用同一路径空间内最近的真实祖先回答存在性查询。
 // 只替换被查询的目标，不改写调用方看到的路径，_data 因此与未拦截时完全一致。
 //
 // 必须逐级验证祖先是否真实存在，不能假设「未登记的祖先就一定存在」：叶子目录的 mkdir
@@ -241,7 +241,9 @@ unsafe fn provider_passthrough_virtual_dir_listing_path(
     dirfd: c_int,
     pathname: *const c_char,
 ) -> Option<CString> {
-    if !crate::hook::is_provider_passthrough_active() {
+    if !crate::hook::is_provider_passthrough_active()
+        && !crate::hook::is_provider_virtual_scope_active()
+    {
         return None;
     }
     // SAFETY: dirfd 与 pathname 由调用方 hook 原样透传，在本次调用期间保持有效。

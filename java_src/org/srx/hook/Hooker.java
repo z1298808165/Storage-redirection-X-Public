@@ -316,26 +316,31 @@ public class Hooker {
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
       MEDIA_PROVIDER_MUTATION_METHOD.set(mutationMethod);
-      enterProviderInternalCall();
+      enterProviderVirtualScope();
       try {
-        Object result;
+        enterProviderInternalCall();
         try {
-          result = redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
-        } catch (Throwable error) {
-          logMutationFailure(this, callerUid, callerPid, error);
-          throw error;
+          Object result;
+          try {
+            result = redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
+          } catch (Throwable error) {
+            logMutationFailure(this, callerUid, callerPid, error);
+            throw error;
+          }
+          registerDirectWriteAfterInsert(
+              args, result, callerUid, mutationMethod, patch.directWriteRequested);
+          rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
+          finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
+          commitRedirectedPendingFile(actualArgs, mutationMethod);
+          logMutationResult(this, result);
+          return result;
+        } finally {
+          exitProviderInternalCall();
+          MEDIA_PROVIDER_MUTATION_METHOD.remove();
+          MEDIA_PROVIDER_CALLER_UID.remove();
         }
-        registerDirectWriteAfterInsert(
-            args, result, callerUid, mutationMethod, patch.directWriteRequested);
-        rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
-        finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
-        commitRedirectedPendingFile(actualArgs, mutationMethod);
-        logMutationResult(this, result);
-        return result;
       } finally {
-        exitProviderInternalCall();
-        MEDIA_PROVIDER_MUTATION_METHOD.remove();
-        MEDIA_PROVIDER_CALLER_UID.remove();
+        exitProviderVirtualScope();
       }
     } finally {
       exitCallerScope();
@@ -401,7 +406,7 @@ public class Hooker {
               : directDirectory.mkdirs();
       boolean available = created || directDirectory.isDirectory();
       if (available) {
-        cleanupProviderRedirectSourceDirectory(sourcePath, directPath);
+        rememberProviderRedirectSourceDirectory(sourcePath, directPath);
       }
       logInfo(
           "media direct directory method="
@@ -1861,7 +1866,7 @@ public class Hooker {
 
   private static native boolean isProviderVirtualPathVisible(String path);
 
-  private static native void cleanupProviderRedirectSourceDirectory(
+  private static native void rememberProviderRedirectSourceDirectory(
       String sourcePath, String targetPath);
 
   private static native String rewriteMediaStorePath(String path, int callerUid);
@@ -1903,6 +1908,10 @@ public class Hooker {
   private static native void enterProviderPassthrough();
 
   private static native void exitProviderPassthrough();
+
+  private static native void enterProviderVirtualScope();
+
+  private static native void exitProviderVirtualScope();
 
   private static native boolean isDebugLoggingEnabled();
 

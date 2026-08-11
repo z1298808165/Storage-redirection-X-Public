@@ -19,7 +19,8 @@ thread_local! {
     static BINDER_IDENTITY_CLEARED: Cell<bool> = const { Cell::new(false) };
     static REENTRY_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PROVIDER_PASSTHROUGH_DEPTH: Cell<u32> = const { Cell::new(0) };
-    // provider 直通期间被拦下的公共目录 -> 沙箱目标，仅用于让查询结果与 mkdir 结果保持一致
+    static PROVIDER_VIRTUAL_SCOPE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    // provider 变更期间被拦下的公共目录 -> 沙箱目标，仅用于让查询结果与 mkdir 结果保持一致
     static PROVIDER_PASSTHROUGH_VIRTUAL_DIRS: RefCell<Vec<(String, String)>> =
         const { RefCell::new(Vec::new()) };
     static EXPLICIT_CALLER_DECISION_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -254,25 +255,55 @@ pub fn enter_provider_passthrough() {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
 }
 
-pub fn exit_provider_passthrough() {
+pub fn exit_provider_passthrough() -> Vec<(String, String)> {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| {
         let current = depth.get();
         if current <= 1 {
             depth.set(0);
-            clear_provider_passthrough_virtual_dirs();
+            let virtual_dirs = take_provider_virtual_dirs_if_idle();
             if !is_current_caller_scope_active() {
                 clear_current_caller();
                 clear_binder_saved_caller_uid();
                 set_binder_identity_cleared(false);
             }
+            virtual_dirs
         } else {
             depth.set(current - 1);
+            Vec::new()
         }
-    });
+    })
 }
 
 pub fn is_provider_passthrough_active() -> bool {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| depth.get() > 0)
+}
+
+pub fn enter_provider_virtual_scope() {
+    PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+}
+
+pub fn exit_provider_virtual_scope() -> Vec<(String, String)> {
+    PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current <= 1 {
+            depth.set(0);
+            take_provider_virtual_dirs_if_idle()
+        } else {
+            depth.set(current - 1);
+            Vec::new()
+        }
+    })
+}
+
+pub fn is_provider_virtual_scope_active() -> bool {
+    PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+fn take_provider_virtual_dirs_if_idle() -> Vec<(String, String)> {
+    if is_provider_passthrough_active() || is_provider_virtual_scope_active() {
+        return Vec::new();
+    }
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| std::mem::take(&mut *dirs.borrow_mut()))
 }
 
 // 登记键统一折算到 /storage/emulated 路径空间：mkdir 的判定路径可能是 /data/media 形式，
@@ -323,10 +354,11 @@ pub fn is_provider_passthrough_virtual_dir(public_path: &str) -> bool {
     PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow().iter().any(|(p, _)| p == &key))
 }
 
-// 返回直通窗口内应按虚拟目录回答查询的目录路径。MediaStore 会先创建公共父目录，
+// 返回 Provider 变更期内应按虚拟目录回答查询的目录路径。MediaStore 会先创建公共父目录，
 // 随后对 .pending-* 文件执行存在性检查；两者必须落到同一份线程内登记状态。
 pub fn provider_passthrough_virtual_query_dir(path: &str) -> Option<String> {
-    if !is_provider_passthrough_active() || path.is_empty() {
+    if (!is_provider_passthrough_active() && !is_provider_virtual_scope_active()) || path.is_empty()
+    {
         return None;
     }
     if is_provider_passthrough_virtual_dir(path) {
@@ -339,10 +371,6 @@ pub fn provider_passthrough_virtual_query_dir(path: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn clear_provider_passthrough_virtual_dirs() {
-    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow_mut().clear());
 }
 
 pub fn set_binder_identity_cleared(cleared: bool) {

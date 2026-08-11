@@ -21,10 +21,12 @@ pub(crate) use caller::{
 };
 pub(crate) use context::{
     enter_explicit_caller_decision, enter_path_owner_inference_disabled,
-    enter_provider_passthrough, exit_provider_passthrough, get_binder_saved_caller_package,
+    enter_provider_passthrough, enter_provider_virtual_scope, exit_provider_passthrough,
+    exit_provider_virtual_scope, get_binder_saved_caller_package,
     is_explicit_caller_decision_active, is_path_owner_inference_disabled,
-    is_provider_passthrough_active, provider_passthrough_virtual_dir_target,
-    provider_passthrough_virtual_query_dir, remember_provider_passthrough_virtual_dir,
+    is_provider_passthrough_active, is_provider_virtual_scope_active,
+    provider_passthrough_virtual_dir_target, provider_passthrough_virtual_query_dir,
+    remember_provider_passthrough_virtual_dir,
 };
 pub(crate) use jni_query::{
     is_redirect_enabled_for_caller_uid, resolve_download_media_placeholder_path_for_caller,
@@ -36,7 +38,9 @@ pub(crate) use jni_query::{
 pub(crate) use media_fuse::{
     record_read_only_fuse_operation, should_allow_public_mapping_target_access,
 };
-pub(crate) use ops::mutation::cleanup_provider_redirect_source_directory;
+pub(crate) use ops::mutation::{
+    cleanup_provider_redirect_source_directory, remember_provider_redirect_source_directory,
+};
 pub use stats::InterceptHub;
 
 pub(crate) fn refresh_runtime_config_from_settings() {

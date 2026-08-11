@@ -81,9 +81,23 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
                 "public Object providerFileParentCallback"
             )
         ]
+        mutation = java[
+            java.index("public Object providerMutationCallback") : java.index(
+                "public Object providerFuseCallback"
+            )
+        ]
         self.assertIn("created || directDirectory.isDirectory()", callback)
-        self.assertIn("cleanupProviderRedirectSourceDirectory(sourcePath, directPath)", callback)
-        self.assertIn('b"cleanupProviderRedirectSourceDirectory\\0"', jni)
+        self.assertIn("rememberProviderRedirectSourceDirectory(sourcePath, directPath)", callback)
+        self.assertIn('b"rememberProviderRedirectSourceDirectory\\0"', jni)
+        self.assertIn(
+            "redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args)",
+            mutation,
+        )
+        self.assertIn("enterProviderVirtualScope()", mutation)
+        self.assertIn("exitProviderVirtualScope()", mutation)
+        self.assertIn("for (source, target) in crate::hook::exit_provider_passthrough()", jni)
+        self.assertIn("for (source, target) in crate::hook::exit_provider_virtual_scope()", jni)
+        self.assertIn("remember_provider_redirect_source_directory", jni)
         self.assertIn("cleanup_provider_redirect_source_directory", jni)
         self.assertIn("is_public_default_sandbox_redirect(source_path, target_path)", directory)
         self.assertIn("libc::rmdir(c_path.as_ptr())", directory)

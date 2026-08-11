@@ -42,8 +42,8 @@ const STORAGE_PATH_EXISTS_NAME: &[u8] = b"storagePathExistsBySyscall\0";
 const STORAGE_PATH_EXISTS_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
 const PROVIDER_VIRTUAL_PATH_VISIBLE_NAME: &[u8] = b"isProviderVirtualPathVisible\0";
 const PROVIDER_VIRTUAL_PATH_VISIBLE_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
-const CLEANUP_PROVIDER_REDIRECT_SOURCE_NAME: &[u8] = b"cleanupProviderRedirectSourceDirectory\0";
-const CLEANUP_PROVIDER_REDIRECT_SOURCE_SIG: &[u8] = b"(Ljava/lang/String;Ljava/lang/String;)V\0";
+const REMEMBER_PROVIDER_REDIRECT_SOURCE_NAME: &[u8] = b"rememberProviderRedirectSourceDirectory\0";
+const REMEMBER_PROVIDER_REDIRECT_SOURCE_SIG: &[u8] = b"(Ljava/lang/String;Ljava/lang/String;)V\0";
 const REWRITE_MEDIA_STORE_PATH_NAME: &[u8] = b"rewriteMediaStorePath\0";
 const REWRITE_MEDIA_STORE_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
 const RESOLVE_DOWNLOAD_PLACEHOLDER_NAME: &[u8] = b"resolveDownloadPlaceholder\0";
@@ -72,6 +72,9 @@ const EXIT_CALLER_SCOPE_SIG: &[u8] = b"()V\0";
 const ENTER_PROVIDER_PASSTHROUGH_NAME: &[u8] = b"enterProviderPassthrough\0";
 const EXIT_PROVIDER_PASSTHROUGH_NAME: &[u8] = b"exitProviderPassthrough\0";
 const PROVIDER_PASSTHROUGH_SIG: &[u8] = b"()V\0";
+const ENTER_PROVIDER_VIRTUAL_SCOPE_NAME: &[u8] = b"enterProviderVirtualScope\0";
+const EXIT_PROVIDER_VIRTUAL_SCOPE_NAME: &[u8] = b"exitProviderVirtualScope\0";
+const PROVIDER_VIRTUAL_SCOPE_SIG: &[u8] = b"()V\0";
 const DEBUG_LOGGING_ENABLED_NAME: &[u8] = b"isDebugLoggingEnabled\0";
 const DEBUG_LOGGING_ENABLED_SIG: &[u8] = b"()Z\0";
 
@@ -133,9 +136,9 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             fnPtr: is_provider_virtual_path_visible as *mut _,
         },
         JNINativeMethod {
-            name: CLEANUP_PROVIDER_REDIRECT_SOURCE_NAME.as_ptr() as *mut _,
-            signature: CLEANUP_PROVIDER_REDIRECT_SOURCE_SIG.as_ptr() as *mut _,
-            fnPtr: cleanup_provider_redirect_source_directory as *mut _,
+            name: REMEMBER_PROVIDER_REDIRECT_SOURCE_NAME.as_ptr() as *mut _,
+            signature: REMEMBER_PROVIDER_REDIRECT_SOURCE_SIG.as_ptr() as *mut _,
+            fnPtr: remember_provider_redirect_source_directory as *mut _,
         },
         JNINativeMethod {
             name: REWRITE_MEDIA_STORE_PATH_NAME.as_ptr() as *mut _,
@@ -206,6 +209,16 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: EXIT_PROVIDER_PASSTHROUGH_NAME.as_ptr() as *mut _,
             signature: PROVIDER_PASSTHROUGH_SIG.as_ptr() as *mut _,
             fnPtr: exit_provider_passthrough as *mut _,
+        },
+        JNINativeMethod {
+            name: ENTER_PROVIDER_VIRTUAL_SCOPE_NAME.as_ptr() as *mut _,
+            signature: PROVIDER_VIRTUAL_SCOPE_SIG.as_ptr() as *mut _,
+            fnPtr: enter_provider_virtual_scope as *mut _,
+        },
+        JNINativeMethod {
+            name: EXIT_PROVIDER_VIRTUAL_SCOPE_NAME.as_ptr() as *mut _,
+            signature: PROVIDER_VIRTUAL_SCOPE_SIG.as_ptr() as *mut _,
+            fnPtr: exit_provider_virtual_scope as *mut _,
         },
         JNINativeMethod {
             name: DEBUG_LOGGING_ENABLED_NAME.as_ptr() as *mut _,
@@ -502,7 +515,7 @@ unsafe extern "C" fn is_provider_virtual_path_visible(
     }
 }
 
-unsafe extern "C" fn cleanup_provider_redirect_source_directory(
+unsafe extern "C" fn remember_provider_redirect_source_directory(
     env: *mut JNIEnv,
     _class: jclass,
     source_path: jstring,
@@ -513,7 +526,7 @@ unsafe extern "C" fn cleanup_provider_redirect_source_directory(
     }
     let source = crate::zygisk::jni::get_jstring_utf8(env, source_path);
     let target = crate::zygisk::jni::get_jstring_utf8(env, target_path);
-    crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
+    crate::hook::remember_provider_redirect_source_directory(&source, &target);
 }
 
 unsafe extern "C" fn rewrite_media_store_path(
@@ -770,7 +783,19 @@ unsafe extern "C" fn enter_provider_passthrough(_env: *mut JNIEnv, _class: jclas
 }
 
 unsafe extern "C" fn exit_provider_passthrough(_env: *mut JNIEnv, _class: jclass) {
-    crate::hook::exit_provider_passthrough();
+    for (source, target) in crate::hook::exit_provider_passthrough() {
+        crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
+    }
+}
+
+unsafe extern "C" fn enter_provider_virtual_scope(_env: *mut JNIEnv, _class: jclass) {
+    crate::hook::enter_provider_virtual_scope();
+}
+
+unsafe extern "C" fn exit_provider_virtual_scope(_env: *mut JNIEnv, _class: jclass) {
+    for (source, target) in crate::hook::exit_provider_virtual_scope() {
+        crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
+    }
 }
 
 unsafe extern "C" fn is_debug_logging_enabled(
