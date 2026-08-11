@@ -412,7 +412,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         clean = section(self.bash, "clean_targets()", "clean_results()")
 
         self.assertIn("'${BACKEND_ROOT}/Download/Test'", prepare)
+        self.assertIn("'${BACKEND_ROOT}/Download/SrtPriority'", prepare)
+        self.assertIn("'${BACKEND_ROOT}/Download/SrtPriorityMapped'", prepare)
         self.assertIn("test -d '${BACKEND_ROOT}/Download/Test'", prepare)
+        self.assertIn("test -d '${BACKEND_ROOT}/Download/SrtPriority'", prepare)
         self.assertNotIn("'${REAL_ROOT}/Download/Test'", prepare)
         self.assertIn("prepare_backend_core_targets", clean)
         self.assertIn("export -f", self.bash)
