@@ -23,6 +23,7 @@ $ReadOnlyOwnerConfig = "/data/adb/modules/storage.redirect.x/config/apps/com.and
 $GlobalConfig = "/data/adb/modules/storage.redirect.x/config/global.json"
 $LogPath = "/data/adb/modules/storage.redirect.x/logs/running.log"
 $FileMonitorLogPath = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log"
+$MountStateDir = "/data/adb/modules/storage.redirect.x/tmp/mount_state"
 $ResultDir = "/sdcard/Android/data/$AppId/files/test_case_result"
 $InternalResultDir = "/data/data/$AppId/files/test_case_result"
 $RealRoot = "/storage/emulated/0"
@@ -517,6 +518,9 @@ function Invoke-ServiceCase {
         if (-not $ok) {
             $script:Failures.Add("$Scenario/$Label expected $PassRegex, got: $($result.Text -replace "`n", " | ")")
             Write-Host "    FAIL $Scenario/$Label"
+            if ($script:FailFast) {
+                throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
+            }
         } else {
             Write-Host "    PASS $Scenario/$Label"
         }
@@ -525,14 +529,20 @@ function Invoke-ServiceCase {
 
     $script:Failures.Add("$Scenario/$Label result timeout for $TestCase")
     Write-Host "    TIMEOUT $Scenario/$Label"
-    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+    Stop-AppAndWaitFuseCleanup "$Scenario/$Label/timeout" $true | Out-Null
+    if ($script:FailFast) {
+        throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
+    }
     [pscustomobject]@{ Ok = $false; Text = "timeout"; Path = "" }
 }
 
 function Prepare-ServiceCase {
     param([string]$Label)
     if (-not $script:FreshAppPerCase) { return }
-    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+    $cleanupOk = Stop-AppAndWaitFuseCleanup "$Label/fresh-app"
+    if (-not $cleanupOk -and $script:FailFast) {
+        throw "[SRT_FAIL_FAST_ITEM] $Label/fresh-app-cleanup"
+    }
     Start-Sleep -Milliseconds 500
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
@@ -1151,6 +1161,84 @@ function Get-AppPid {
     if ($pidText) { ($pidText -split "\s+")[0] } else { "" }
 }
 
+function Test-AppHasNoStaleFuseMount {
+    param([string]$Label, [string]$ProcessId)
+    $pattern = '(/SrtFuse|/SrtProbe).* - fuse '
+    if (-not (Test-Su "! grep -Eq '$pattern' '/proc/$ProcessId/mountinfo' 2>/dev/null")) {
+        $script:Failures.Add("$Label 新应用命名空间继承了上轮 FUSE 挂载 pid=$ProcessId")
+        Write-Warning "$Label/stale-fuse-mount pid=$ProcessId"
+        Invoke-Su "grep -E '$pattern' '/proc/$ProcessId/mountinfo' 2>/dev/null | head -20"
+        return $false
+    }
+    Write-Host "  - fuse_namespace_clean label=$Label pid=$ProcessId"
+    $true
+}
+
+function Get-ProcessStartTimeTicks {
+    param([int]$ProcessId)
+    $stat = ((Invoke-Su "cat '/proc/$ProcessId/stat' 2>/dev/null || true") -join " ").Trim()
+    if ([string]::IsNullOrWhiteSpace($stat)) { return "" }
+    $nameEnd = $stat.LastIndexOf(')')
+    if ($nameEnd -lt 0 -or $nameEnd + 1 -ge $stat.Length) { return "" }
+    $fields = @($stat.Substring($nameEnd + 1).Trim() -split '\s+')
+    if ($fields.Count -le 19) { return "" }
+    $fields[19]
+}
+
+function Stop-AppAndWaitFuseCleanup {
+    param([string]$Label, [bool]$RequireStateCleanup = $false)
+    $appPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($appPid)) {
+        Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+        return $true
+    }
+
+    $statePath = "$MountStateDir/${AppId}_${appPid}.state"
+    $identities = @(
+        Invoke-Su "sed -n 's/^fuse_child=//p' '$statePath' 2>/dev/null || true" |
+            Where-Object { $_ -match '^\d+:\d+$' }
+    )
+    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+
+    $ok = $true
+    foreach ($identity in $identities) {
+        $parts = $identity -split ':', 2
+        $childPid = [int]$parts[0]
+        $expectedStart = $parts[1]
+        $exited = $false
+        for ($attempt = 0; $attempt -lt 50; $attempt++) {
+            if ((Get-ProcessStartTimeTicks $childPid) -ne $expectedStart) {
+                $exited = $true
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $exited) {
+            $script:Failures.Add("$Label FUSE 会话未在应用退出后回收 child=$childPid app_pid=$appPid")
+            $ok = $false
+        }
+    }
+
+    if ($RequireStateCleanup) {
+        $removed = $false
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            if (Test-Su "test ! -e '$statePath'") {
+                $removed = $true
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $removed) {
+            $script:Failures.Add("$Label 挂载状态未在应用退出后清理 path=$statePath")
+            $ok = $false
+        }
+    }
+    if ($ok -and $identities.Count -gt 0) {
+        Write-Host "  - fuse_sessions_cleaned label=$Label app_pid=$appPid count=$($identities.Count)"
+    }
+    $ok
+}
+
 function Invoke-ConfigHotReloadScenario {
     param([int]$Scenario)
     $previousFreshAppPerCase = $script:FreshAppPerCase
@@ -1160,6 +1248,9 @@ function Invoke-ConfigHotReloadScenario {
         $initialPid = Get-AppPid
         if ([string]::IsNullOrWhiteSpace($initialPid)) {
             $script:Failures.Add("scenario-$Scenario app pid missing before hot reload")
+            return $false
+        }
+        if (-not (Test-AppHasNoStaleFuseMount "scenario-$Scenario/precondition" $initialPid)) {
             return $false
         }
 
@@ -1222,15 +1313,22 @@ function Invoke-TestArtifactCleanup {
     try { Restore-AppConfig } catch { Write-Warning "应用配置恢复失败：$_" }
     try { Restore-GlobalConfig } catch { Write-Warning "全局配置恢复失败：$_" }
     try { Clear-Results } catch { Write-Warning "结果清理失败：$_" }
+    try { Invoke-Su "rm -f /data/local/tmp/srx-result-*.marker" | Out-Null } catch { Write-Warning "结果标记清理失败：$_" }
     try { Remove-TestTargetArtifacts } catch { Write-Warning "目标产物清理失败：$_" }
     try { Remove-RandomMediaStoreRows } catch { Write-Warning "MediaStore 清理失败：$_" }
     try { Remove-RandomPhysicalMediaFiles } catch { Write-Warning "物理文件清理失败：$_" }
     try { Restart-MediaProvider } catch { Write-Warning "MediaProvider 重启失败：$_" }
+    if ($script:Failures.Count -eq 0) {
+        Remove-Item -LiteralPath "scenario-2-mediastore-hook-diag.txt" -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Restart-App {
     param([string]$Label, [bool]$ExpectMount = $true)
-    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+    $cleanupOk = Stop-AppAndWaitFuseCleanup "$Label/restart"
+    if (-not $cleanupOk -and $script:FailFast) {
+        throw "[SRT_FAIL_FAST_ITEM] $Label/restart-cleanup"
+    }
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     Invoke-Adb @("shell", "am", "start", "-n", "$AppId/.MainActivity") | Out-Null
@@ -1548,13 +1646,12 @@ function Get-JavaBucketId {
 # bucket_id 是相册按目录分组的键：改写错会让重定向后的文件归入真实目录桶，
 # 或让未重定向的文件被错误改写，表现为相册分组错乱。
 function Test-MediaStoreBucketId {
-    param([string]$Label, [string]$ResultFile, [string]$ExpectedDir)
-    if (-not (Test-Path -LiteralPath $ResultFile)) {
-        $script:Failures.Add("$Label bucket_id 结果文件缺失：$ResultFile")
+    param([string]$Label, [string]$ResultText, [string]$ExpectedDir)
+    if ([string]::IsNullOrWhiteSpace($ResultText)) {
+        $script:Failures.Add("$Label bucket_id 结果为空")
         return $false
     }
-    $text = Get-Content -LiteralPath $ResultFile -Raw
-    $matched = [regex]::Match($text, 'bucketId=(-?\d+)')
+    $matched = [regex]::Match($ResultText, 'bucketId=(-?\d+)')
     if (-not $matched.Success) {
         $script:Failures.Add("$Label 结果中缺少 bucketId")
         return $false
@@ -1574,10 +1671,15 @@ function Invoke-MediaStoreReadOnlyQueryScenario {
     $logicalPath = "$ReadOnlyMediaRoot/$ReadOnlyImageFile"
     $privatePath = "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
     $ok = Wait-MediaStoreReadOnlyImage
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-query" "mediastore_query_read_only_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_query_read_only_image\]").Ok -and $ok
-    $ok = (Test-MediaStoreBucketId "scenario-$Scenario-read-only-image" "scenario-$Scenario-read-only-image-query-result.txt" $ReadOnlyMediaRoot) -and $ok
+    $query = Invoke-ServiceCase "scenario-$Scenario" "read-only-image-query" "mediastore_query_read_only_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_query_read_only_image\]"
+    $ok = $query.Ok -and $ok
+    $ok = (Test-MediaStoreBucketId "scenario-$Scenario-read-only-image" $query.Text $ReadOnlyMediaRoot) -and $ok
     $list = Invoke-ServiceCase "scenario-$Scenario" "read-only-image-list" "file_list_dir" @{ file_dir = $ReadOnlyMediaRoot } "^PASS \[file_list_dir\]"
-    $ok = $list.Ok -and (Test-Path "scenario-$Scenario-read-only-image-list-result.txt") -and ((Get-Content "scenario-$Scenario-read-only-image-list-result.txt" -Raw) -match "entries=.*$([regex]::Escape($ReadOnlyImageFile))") -and $ok
+    $listHasImage = $list.Text -match "entries=.*$([regex]::Escape($ReadOnlyImageFile))"
+    if (-not $listHasImage) {
+        $script:Failures.Add("scenario-$Scenario/read-only-image-list 缺少 $ReadOnlyImageFile :: $($list.Text -replace "`n", " | ")")
+    }
+    $ok = $list.Ok -and $listHasImage -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-file-read" "file_read" @{ file_path = $logicalPath } "^PASS \[file_read\]").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "read-only-media-real" $logicalPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "read-only-media-private" $privatePath) -and $ok
@@ -1939,6 +2041,11 @@ function Invoke-MountNamespaceReadOnlyWildcardFallbackScenario {
 function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
+    $before = $script:Failures.Count
+    $ok = Stop-AppAndWaitFuseCleanup "scenario-$Scenario/transition" $true
+    if (-not $ok -and $script:FailFast) {
+        throw "[SRT_FAIL_FAST_ITEM] scenario-$Scenario/transition-cleanup"
+    }
     if ($Scenario -in @(8, 16, 17, 18, 19)) {
         Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     }
@@ -1949,8 +2056,7 @@ function Invoke-Scenario {
     if ($Scenario -eq 21) { Set-MountNamespaceReadOnlySeed }
     if ($Scenario -eq 28) { Set-ReadOnlyMediaImage }
     Restart-App "scenario-$Scenario" ($Scenario -ne 1)
-    $before = $script:Failures.Count
-    $ok = switch ($Scenario) {
+    $scenarioOk = switch ($Scenario) {
         8 { Invoke-RuleSandboxScenario $Scenario }
         9 { Invoke-ReadOnlyScenario $Scenario }
         10 { Invoke-MappedReadOnlyScenario $Scenario }
@@ -1973,6 +2079,8 @@ function Invoke-Scenario {
         29 { Invoke-ConfigHotReloadScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
+    $ok = [bool]$scenarioOk -and $ok
+    $ok = (Stop-AppAndWaitFuseCleanup "scenario-$Scenario/finalize" $true) -and $ok
     if (-not $ok -and $script:Failures.Count -eq $before) {
         $script:Failures.Add("scenario-$Scenario returned false without a detailed failure")
     }
@@ -2037,7 +2145,19 @@ try {
 
     foreach ($scenario in $scenarios) {
         $failuresBeforeScenario = $script:Failures.Count
-        Invoke-Scenario $scenario
+        try {
+            Invoke-Scenario $scenario
+        } catch {
+            if (-not $_.Exception.Message.StartsWith("[SRT_FAIL_FAST_ITEM]")) { throw }
+            Stop-AppAndWaitFuseCleanup "scenario-$scenario/abort" $true | Out-Null
+            $script:Summary.Add([pscustomobject]@{
+                Scenario = $scenario
+                Title = (Get-ScenarioTitle $scenario)
+                Passed = $false
+                NewFailures = ($script:Failures.Count - $failuresBeforeScenario)
+            }) | Out-Null
+            Write-Warning "场景 $scenario 的单项失败，已按 SRT_FAIL_FAST 立即停止：$($_.Exception.Message)"
+        }
         if ($script:FailFast -and $script:Failures.Count -gt $failuresBeforeScenario) {
             Write-Warning "场景 $scenario 失败，已按 SRT_FAIL_FAST 停止后续场景"
             break
