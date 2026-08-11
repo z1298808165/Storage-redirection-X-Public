@@ -216,6 +216,16 @@ function Invoke-AdbSu {
     if ($LASTEXITCODE -ne 0) { Fail "adb su 命令执行失败：$Command" }
 }
 
+function Wait-DeviceBootCompleted {
+    Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")
+    for ($attempt = 1; $attempt -le 90; $attempt++) {
+        $bootCompleted = (& adb shell getprop sys.boot_completed | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $bootCompleted -eq "1") { return }
+        Start-Sleep -Seconds 2
+    }
+    Fail "设备在 180 秒内未完成启动。"
+}
+
 function Assert-ModuleRuntimeState {
     $command = @'
 id; module_dir=/data/adb/modules/storage.redirect.x; logs_dir="$module_dir/logs"; boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); daemon_pid=$(cat "$logs_dir/.srx_daemon.pid" 2>/dev/null || true); test -d "$module_dir"; test ! -e "$module_dir/disable"; for file in module.prop post-fs-data.sh service.sh sepolicy.rule LICENSE COPYING bin/srx_daemon zygisk/__MODULE_ABI__.so; do test -s "$module_dir/$file" || exit 1; done; test -d "$module_dir/config/apps"; test -d "$logs_dir"; { [ -z "$boot_id" ] || [ "$(cat "$module_dir/.boot_ok" 2>/dev/null || true)" = "$boot_id" ] || test -f "$logs_dir/boot_${boot_id}.marker"; }; { [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null || pidof srx_daemon >/dev/null 2>&1; }; cat "$module_dir/module.prop"
@@ -271,8 +281,7 @@ try {
     }
 
     Write-Step "验证已连接设备和已安装模块状态"
-    Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")
-    Invoke-Checked -FilePath "adb" -Arguments @("shell", "while [ `"`$(getprop sys.boot_completed)`" != `"1`" ]; do sleep 2; done")
+    Wait-DeviceBootCompleted
 
     if ($InstallModule -ne "0") {
         Write-Step "安装刚构建的模块 zip 并重启测试设备"
@@ -283,8 +292,7 @@ try {
         Invoke-AdbSu $installCommand
         try { Invoke-AdbSu "rm -f '$remoteZip'" } catch { Write-Warning $_ }
         Invoke-Checked -FilePath "adb" -Arguments @("reboot")
-        Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")
-        Invoke-Checked -FilePath "adb" -Arguments @("shell", "while [ `"`$(getprop sys.boot_completed)`" != `"1`" ]; do sleep 2; done")
+        Wait-DeviceBootCompleted
     }
 
     Assert-ModuleRuntimeState

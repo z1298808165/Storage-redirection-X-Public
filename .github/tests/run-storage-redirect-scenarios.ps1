@@ -126,6 +126,7 @@ $script:CleanupDone = $false
 $script:GlobalConfigBackupReady = $false
 $script:AppConfigBackupReady = $false
 $script:CrossAppConfigBackupReady = $false
+$script:DeviceExecutionStateBackupReady = $false
 $script:FreshAppPerCase = -not ($env:SRT_FRESH_APP_PER_CASE -match '^(0|false|FALSE|no|NO)$')
 if ($FreshAppPerCase) { $script:FreshAppPerCase = $true }
 $script:ResultPollMilliseconds = if ($env:SRT_RESULT_POLL_MS -match '^\d+$') { [Math]::Max(50, [int]$env:SRT_RESULT_POLL_MS) } else { 150 }
@@ -182,7 +183,7 @@ function Get-TestGlobalConfig {
     $enabled = if ($FuseDaemonEnabled) { "true" } else { "false" }
     $fileMonitorEnabledValue = if ($null -ne $FileMonitorEnabled) { [bool]$FileMonitorEnabled } else { $script:FileMonitorEnabled }
     $fileMonitor = if ($fileMonitorEnabledValue) { "true" } else { "false" }
-    '{"file_monitor_enabled":' + $fileMonitor + ',"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":' + $enabled + ',"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":true,"auto_enable_new_apps_template_id":"","app_config_auto_save":true}'
+    '{"file_monitor_enabled":' + $fileMonitor + ',"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":' + $enabled + ',"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}'
 }
 
 function Enable-FuseDaemonConfig {
@@ -257,6 +258,37 @@ function Restore-CrossAppConfig {
         Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$script:OriginalCrossAppConfigBase64' | base64 -d > '$ReadOnlyOwnerConfig'; chmod 644 '$ReadOnlyOwnerConfig'" | Out-Null
     } else {
         Clear-CrossAppReadOnlyConfig
+    }
+}
+
+function Backup-DeviceExecutionState {
+    $script:DeviceExecutionStateBackupReady = $false
+    $script:OriginalStayOnWhilePluggedIn = ((Invoke-Adb @("shell", "settings", "get", "global", "stay_on_while_plugged_in")) -join "").Trim()
+    $inactive = ((Invoke-Adb @("shell", "am", "get-inactive", $AppId)) -join "").Trim()
+    $script:OriginalAppInactive = $inactive -match "Idle=true"
+    $whitelist = @(Invoke-Adb @("shell", "cmd", "deviceidle", "whitelist"))
+    $script:OriginalDeviceIdleWhitelist = @($whitelist | Where-Object { $_ -match "(^|,)$([regex]::Escape($AppId))(,|$)" }).Count -gt 0
+    $script:DeviceExecutionStateBackupReady = $true
+}
+
+function Prepare-DeviceExecutionState {
+    Invoke-Adb @("shell", "input", "keyevent", "WAKEUP") | Out-Null
+    Invoke-Adb @("shell", "wm", "dismiss-keyguard") | Out-Null
+    Invoke-Adb @("shell", "svc", "power", "stayon", "true") | Out-Null
+    Invoke-Adb @("shell", "am", "set-inactive", $AppId, "false") | Out-Null
+    Invoke-Adb @("shell", "cmd", "deviceidle", "whitelist", "+$AppId") | Out-Null
+}
+
+function Restore-DeviceExecutionState {
+    if (-not $script:DeviceExecutionStateBackupReady) { return }
+    if (-not $script:OriginalDeviceIdleWhitelist) {
+        Invoke-Adb @("shell", "cmd", "deviceidle", "whitelist", "-$AppId") | Out-Null
+    }
+    Invoke-Adb @("shell", "am", "set-inactive", $AppId, $script:OriginalAppInactive.ToString().ToLowerInvariant()) | Out-Null
+    if ([string]::IsNullOrWhiteSpace($script:OriginalStayOnWhilePluggedIn) -or $script:OriginalStayOnWhilePluggedIn -eq "null") {
+        Invoke-Adb @("shell", "settings", "delete", "global", "stay_on_while_plugged_in") | Out-Null
+    } else {
+        Invoke-Adb @("shell", "settings", "put", "global", "stay_on_while_plugged_in", $script:OriginalStayOnWhilePluggedIn) | Out-Null
     }
 }
 
@@ -1318,6 +1350,7 @@ function Invoke-TestArtifactCleanup {
     try { Remove-RandomMediaStoreRows } catch { Write-Warning "MediaStore 清理失败：$_" }
     try { Remove-RandomPhysicalMediaFiles } catch { Write-Warning "物理文件清理失败：$_" }
     try { Restart-MediaProvider } catch { Write-Warning "MediaProvider 重启失败：$_" }
+    try { Restore-DeviceExecutionState } catch { Write-Warning "设备执行状态恢复失败：$_" }
     if ($script:Failures.Count -eq 0) {
         Remove-Item -LiteralPath "scenario-2-mediastore-hook-diag.txt" -Force -ErrorAction SilentlyContinue
     }
@@ -2130,6 +2163,8 @@ try {
     Backup-GlobalConfig
     Backup-AppConfig
     Backup-CrossAppConfig
+    Backup-DeviceExecutionState
+    Prepare-DeviceExecutionState
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_EXTERNAL_STORAGE") | Out-Null
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.WRITE_EXTERNAL_STORAGE") | Out-Null
     Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_MEDIA_IMAGES") | Out-Null

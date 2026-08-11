@@ -226,6 +226,70 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("$python.FilePath", version)
         self.assertIn("@($python.Arguments)", version)
 
+    def test_windows_test_flow_polls_boot_property_without_remote_shell_expression(self) -> None:
+        script = read("scripts/verify-test-flow.ps1")
+        wait = section(script, "function Wait-DeviceBootCompleted", "function Assert-ModuleRuntimeState")
+        self.assertIn('Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")', wait)
+        self.assertIn("adb shell getprop sys.boot_completed", wait)
+        self.assertIn('$bootCompleted -eq "1"', wait)
+        self.assertNotIn("while [", script)
+        self.assertEqual(2, script.count("Wait-DeviceBootCompleted\n"))
+
+    def test_basic_all_leaves_media_cleanup_to_the_device_runner(self) -> None:
+        runner = read(
+            "tests/storage-redirect-test/app/src/main/java/"
+            "me/fakerqu/test/storageredirect/test/StorageRedirectTestRunner.kt"
+        )
+        all_case = section(runner, "private fun runAllExceptDelete", "private fun runLogged")
+        self.assertNotIn("contentResolver.delete", all_case)
+        self.assertNotIn("createdMedia", all_case)
+        self.assertIn("cleanupBootstrapDirs(bootstrapDirs)", all_case)
+        self.assertIn("Remove-RandomMediaStoreRows", self.powershell)
+        self.assertIn("remove_random_mediastore_rows", self.bash)
+
+    def test_device_flow_prevents_and_restores_background_freezing(self) -> None:
+        for source in (self.powershell, self.bash):
+            self.assertIn("stay_on_while_plugged_in", source)
+            self.assertIn("WAKEUP", source)
+            self.assertIn("dismiss-keyguard", source)
+            self.assertIn("get-inactive", source)
+            self.assertIn("set-inactive", source)
+            self.assertIn("deviceidle", source)
+        self.assertIn("OriginalAppInactive", self.powershell)
+        self.assertIn('",${APP_ID},"', self.bash)
+        self.assertIn("original_app_inactive", self.bash)
+
+        ps_start = self.powershell[self.powershell.index("try {\n    Backup-GlobalConfig") :]
+        self.assertLess(
+            ps_start.index("Backup-DeviceExecutionState"),
+            ps_start.index("Prepare-DeviceExecutionState"),
+        )
+        ps_cleanup = section(
+            self.powershell,
+            "function Invoke-TestArtifactCleanup",
+            "function Restart-App",
+        )
+        self.assertLess(
+            ps_cleanup.index("Restart-MediaProvider"),
+            ps_cleanup.index("Restore-DeviceExecutionState"),
+        )
+
+        bash_start = self.bash[self.bash.index("wait_boot_completed\nbackup_global_config") :]
+        self.assertLess(
+            bash_start.index("backup_device_execution_state"),
+            bash_start.index("prepare_device_execution_state"),
+        )
+        bash_cleanup = section(self.bash, "cleanup_test_artifacts()", "latest_result()")
+        self.assertLess(
+            bash_cleanup.index("restart_media_provider"),
+            bash_cleanup.index("restore_device_execution_state"),
+        )
+
+    def test_no_config_scenario_disables_automatic_app_enablement(self) -> None:
+        for source in (self.powershell, self.bash):
+            self.assertIn('"auto_enable_redirect_for_new_apps":false', source)
+            self.assertIn('"app_config_auto_save":false', source)
+
     def test_scoped_fuse_start_check_ignores_clean_session_end(self) -> None:
         bash_check = section(
             self.bash,

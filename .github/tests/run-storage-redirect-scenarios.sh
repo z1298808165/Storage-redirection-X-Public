@@ -194,6 +194,41 @@ wait_boot_completed() {
   adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
 }
 
+backup_device_execution_state() {
+  device_execution_state_backup_ready=0
+  original_stay_on_while_plugged_in="$(adb shell settings get global stay_on_while_plugged_in | tr -d '\r')"
+  original_app_inactive="$(adb shell am get-inactive "$APP_ID" | tr -d '\r' | sed -n 's/^Idle=//p')"
+  if adb shell cmd deviceidle whitelist | tr -d '\r' | grep -Fq ",${APP_ID},"; then
+    original_deviceidle_whitelist=1
+  else
+    original_deviceidle_whitelist=0
+  fi
+  device_execution_state_backup_ready=1
+}
+
+prepare_device_execution_state() {
+  adb shell input keyevent WAKEUP >/dev/null
+  adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
+  adb shell svc power stayon true >/dev/null
+  adb shell am set-inactive "$APP_ID" false >/dev/null
+  adb shell cmd deviceidle whitelist +"$APP_ID" >/dev/null
+}
+
+restore_device_execution_state() {
+  if [ "${device_execution_state_backup_ready:-0}" -ne 1 ]; then
+    return 0
+  fi
+  if [ "${original_deviceidle_whitelist:-0}" -eq 0 ]; then
+    adb shell cmd deviceidle whitelist -"$APP_ID" >/dev/null 2>&1 || true
+  fi
+  adb shell am set-inactive "$APP_ID" "${original_app_inactive:-false}" >/dev/null 2>&1 || true
+  if [ -z "${original_stay_on_while_plugged_in:-}" ] || [ "$original_stay_on_while_plugged_in" = "null" ]; then
+    adb shell settings delete global stay_on_while_plugged_in >/dev/null 2>&1 || true
+  else
+    adb shell settings put global stay_on_while_plugged_in "$original_stay_on_while_plugged_in" >/dev/null 2>&1 || true
+  fi
+}
+
 write_config() {
   local content="$1"
   adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null
@@ -221,7 +256,7 @@ test_global_config() {
     1|true|TRUE|yes|YES) file_monitor_enabled=true ;;
     *) file_monitor_enabled=false ;;
   esac
-  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":%s,"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":true,"auto_enable_new_apps_template_id":"","app_config_auto_save":true}' "$file_monitor_enabled" "$fuse_daemon_enabled"
+  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":%s,"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}' "$file_monitor_enabled" "$fuse_daemon_enabled"
 }
 
 enable_fuse_daemon_config() {
@@ -761,6 +796,7 @@ cleanup_test_artifacts() {
   remove_random_mediastore_rows >/dev/null 2>&1
   remove_random_physical_media_files >/dev/null 2>&1
   restart_media_provider >/dev/null 2>&1
+  restore_device_execution_state >/dev/null 2>&1
   return "$status"
 }
 
@@ -2391,6 +2427,7 @@ cleanup_done=0
 global_config_backup_ready=0
 app_config_backup_ready=0
 cross_app_config_backup_ready=0
+device_execution_state_backup_ready=0
 if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
   trap cleanup_test_artifacts EXIT
 fi
@@ -2399,6 +2436,8 @@ wait_boot_completed
 backup_global_config
 backup_app_config
 backup_cross_app_config
+backup_device_execution_state
+prepare_device_execution_state
 adb shell pm grant "$APP_ID" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
 adb shell pm grant "$APP_ID" android.permission.WRITE_EXTERNAL_STORAGE >/dev/null 2>&1 || true
 adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1 || true

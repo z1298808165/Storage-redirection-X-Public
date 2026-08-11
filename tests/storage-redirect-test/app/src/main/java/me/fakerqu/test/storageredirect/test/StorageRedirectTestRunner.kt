@@ -31,7 +31,6 @@ class StorageRedirectTestRunner(
     val results = mutableListOf<TestResult>()
     val mediaStore = MediaStoreTestCases(context)
     val fileCases = FileTestCases(context)
-    val createdMedia = mutableListOf<Uri>()
     val bootstrapDirs = mutableListOf<File>()
 
     try {
@@ -80,7 +79,6 @@ class StorageRedirectTestRunner(
           }
           continue
         }
-        createdMedia += uri
         val initial = TestFixtures.initialPayload(mediaType)
         val updated = TestFixtures.updatedPayload(mediaType)
         chain.drop(1).forEach { case ->
@@ -180,23 +178,13 @@ class StorageRedirectTestRunner(
               TestCaseArgs(filePath = filePath, length = 8),
           )
     } finally {
-      cleanupAllArtifacts(createdMedia, bootstrapDirs)
+      cleanupBootstrapDirs(bootstrapDirs)
     }
 
     return results
   }
 
-  private fun cleanupAllArtifacts(
-      createdMedia: List<Uri>,
-      bootstrapDirs: List<File>,
-  ) {
-    createdMedia.forEach { uri ->
-      try {
-        context.contentResolver.delete(uri, null, null)
-      } catch (e: Exception) {
-        Log.w(TAG, "failed to delete test media $uri", e)
-      }
-    }
+  private fun cleanupBootstrapDirs(bootstrapDirs: List<File>) {
     bootstrapDirs.forEach { dir ->
       try {
         dir.deleteRecursively()
