@@ -59,6 +59,9 @@ impl crate::fuse_redirect::MountRequestFields for MountRequest {
     fn package_name(&self) -> &str {
         &self.package_name
     }
+    fn pid(&self) -> i32 {
+        self.pid
+    }
     fn uid(&self) -> i32 {
         self.uid
     }
@@ -105,28 +108,109 @@ pub fn has_mount_state(request: &MountRequest) -> bool {
     !has_dead_fuse_child(&state_path, request)
 }
 
+/// 删除已经不属于存活应用进程实例的挂载状态。
+///
+/// FUSE 服务会在应用退出时自行卸载；状态文件由常驻 daemon 的周期 reconcile 回收，
+/// 避免按 PID 命名的记录无限累积。旧格式没有启动时间，回退比较包名与 UID，避免
+/// 把已复用给其它进程的 PID 误当成原应用仍在运行。
+pub fn prune_stale_mount_states() -> usize {
+    let Ok(entries) = std::fs::read_dir(module_paths::MOUNT_STATE_DIR) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("state") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(package_name) = state_value(&content, "package=") else {
+            continue;
+        };
+        let Some(pid) = state_file_pid(&path, package_name) else {
+            continue;
+        };
+        let app_start_time =
+            state_value(&content, "app_start_time=").and_then(|value| value.parse::<u64>().ok());
+        let is_alive = match app_start_time {
+            Some(start) => crate::platform::is_process_instance_alive(pid, start),
+            None => {
+                let uid = state_value(&content, "uid=").and_then(|value| value.parse().ok());
+                legacy_state_owner_is_alive(pid, package_name, uid)
+            }
+        };
+        if is_alive {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        log::info!("daemon pruned stale mount states count={}", removed);
+    }
+    removed
+}
+
+fn state_value<'a>(content: &'a str, prefix: &str) -> Option<&'a str> {
+    content.lines().find_map(|line| line.strip_prefix(prefix))
+}
+
+fn state_file_pid(path: &std::path::Path, package_name: &str) -> Option<i32> {
+    let stem = path.file_stem()?.to_str()?;
+    let prefix = format!("{}_", module_paths::sanitize_name(package_name));
+    stem.strip_prefix(&prefix)?.parse().ok()
+}
+
+fn legacy_state_owner_is_alive(pid: i32, package_name: &str, expected_uid: Option<i32>) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{}/cmdline", pid)) else {
+        return false;
+    };
+    let end = cmdline
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(cmdline.len());
+    if String::from_utf8_lossy(&cmdline[..end]) != package_name {
+        return false;
+    }
+    let Some(expected_uid) = expected_uid else {
+        return true;
+    };
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", pid)) else {
+        return false;
+    };
+    status.lines().any(|line| {
+        line.strip_prefix("Uid:")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<i32>().ok())
+            == Some(expected_uid)
+    })
+}
+
 /// 检查挂载状态中记录的 FUSE 服务进程是否已经退出。
 ///
 /// FUSE 服务是在挂载用的 fork 子进程内启动的，因此相对本 daemon 是孙进程；挂载子进程
 /// 随后立即退出，这些服务会被 init 收养。也就是说 daemon 既不能也不需要 `waitpid`
-/// 回收它们，`waitpid` 只会返回 ECHILD；判定存活只能查 `/proc/<pid>`。
-/// 同理它们不会以僵尸形式留在 daemon 名下，`/proc` 目录存在即表示服务仍在运行。
+/// 回收它们，`waitpid` 只会返回 ECHILD；判定存活只能查 `/proc/<pid>`。它们不会以
+/// 僵尸形式留在 daemon 名下，但 PID 仍可能被复用，因此还要比较启动时钟值。
 fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
-    let children = read_fuse_child_pids(state_path);
+    let children = read_fuse_children(state_path);
     if children.is_empty() {
         return false;
     }
 
     for child in children {
-        // pid 被回收后复用会让已死的服务看起来仍存活，此时只是不触发重挂，与加入本
-        // 检查之前的行为一致，不构成回退；反向误判（把存活服务判为已死）才会导致重挂
-        // 循环，而这种判定不会产生那种结果。
-        if std::fs::metadata(format!("/proc/{}", child)).is_ok() {
+        if child
+            .start_time_ticks
+            .is_some_and(|start| crate::platform::is_process_instance_alive(child.pid, start))
+        {
             continue;
         }
         log::warn!(
             "daemon fuse child gone pid={} app_pid={} pkg={}, remount pending",
-            child,
+            child.pid,
             request.pid,
             request.package_name
         );
@@ -656,9 +740,19 @@ fn start_fuse_service_for_root(
         return None;
     }
 
+    let Some(child_start_time_ticks) = crate::platform::process_start_time_ticks(service_child)
+    else {
+        rollback_scoped_fuse_services(&[FuseMountState {
+            target: mount_root.to_string(),
+            child: service_child,
+            child_start_time_ticks: 0,
+        }]);
+        return None;
+    };
     Some(FuseMountState {
         target: mount_root.to_string(),
         child: service_child,
+        child_start_time_ticks,
     })
 }
 
@@ -835,13 +929,10 @@ fn send_mount_result(sock: c_int, result: i32) -> bool {
 
 fn clear_previous_mounts(plan: &MountForkPlan) -> bool {
     let state_path = plan.state_path.as_str();
-    let fuse_children = read_fuse_child_pids(state_path);
+    let fuse_children = read_fuse_children(state_path);
     let mut targets = read_mount_targets(state_path);
     targets.extend(plan.overlay_targets.iter().cloned());
     let targets = module_paths::normalize_mount_targets(&targets);
-    for pid in &fuse_children {
-        terminate_fuse_child(*pid);
-    }
     if targets.is_empty() && fuse_children.is_empty() {
         return true;
     }
@@ -850,6 +941,9 @@ fn clear_previous_mounts(plan: &MountForkPlan) -> bool {
         if !clear_mount_target_stack(target) {
             ok = false;
         }
+    }
+    for child in &fuse_children {
+        terminate_recorded_fuse_child(child);
     }
     let _ = std::fs::remove_file(state_path);
     ok
@@ -1045,6 +1139,7 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
 struct FuseMountState {
     target: String,
     child: i32,
+    child_start_time_ticks: u64,
 }
 
 fn fuse_config_from_request(
@@ -1078,8 +1173,14 @@ fn write_mount_state(
     content.push_str(&format!("version={}\n", request.config_version));
     content.push_str(&format!("package={}\n", request.package_name));
     content.push_str(&format!("uid={}\n", request.uid));
+    if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(request.pid) {
+        content.push_str(&format!("app_start_time={}\n", start_time_ticks));
+    }
     for state in fuse_children {
-        content.push_str(&format!("fuse_child={}\n", state.child));
+        content.push_str(&format!(
+            "fuse_child={}:{}\n",
+            state.child, state.child_start_time_ticks
+        ));
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
@@ -1219,16 +1320,42 @@ fn unescape_mountinfo_field(value: &str) -> String {
     out
 }
 
-fn read_fuse_child_pids(path: &str) -> Vec<i32> {
+#[derive(Clone, Copy)]
+struct FuseChildIdentity {
+    pid: i32,
+    start_time_ticks: Option<u64>,
+}
+
+fn read_fuse_children(path: &str) -> Vec<FuseChildIdentity> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
         .filter_map(|line| {
-            line.strip_prefix("fuse_child=")
-                .and_then(|pid| pid.parse::<i32>().ok())
-                .filter(|pid| *pid > 0)
+            let value = line.strip_prefix("fuse_child=")?;
+            let (pid, start_time_ticks) = match value.split_once(':') {
+                Some((pid, start)) => (pid.parse().ok()?, start.parse().ok()),
+                None => (value.parse().ok()?, None),
+            };
+            (pid > 0).then_some(FuseChildIdentity {
+                pid,
+                start_time_ticks,
+            })
         })
         .collect()
+}
+
+fn terminate_recorded_fuse_child(child: &FuseChildIdentity) {
+    let Some(start_time_ticks) = child.start_time_ticks else {
+        log::warn!(
+            "daemon skip legacy fuse child signal without identity pid={}",
+            child.pid
+        );
+        return;
+    };
+    if !crate::platform::is_process_instance_alive(child.pid, start_time_ticks) {
+        return;
+    }
+    terminate_fuse_child(child.pid);
 }
 
 fn terminate_fuse_child(pid: i32) {

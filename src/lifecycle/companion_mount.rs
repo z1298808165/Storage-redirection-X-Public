@@ -651,6 +651,7 @@ fn apply_mount_namespace_fallback(
 pub(super) struct FuseMountState {
     pub target: String,
     pub child: i32,
+    pub child_start_time_ticks: u64,
 }
 
 fn start_scoped_fuse_services(
@@ -775,9 +776,19 @@ fn start_fuse_service_for_root(
         return None;
     }
 
+    let Some(child_start_time_ticks) = crate::platform::process_start_time_ticks(service_child)
+    else {
+        rollback_scoped_fuse_services(&[FuseMountState {
+            target: mount_root.to_string(),
+            child: service_child,
+            child_start_time_ticks: 0,
+        }]);
+        return None;
+    };
     Some(FuseMountState {
         target: mount_root.to_string(),
         child: service_child,
+        child_start_time_ticks,
     })
 }
 

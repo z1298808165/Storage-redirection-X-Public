@@ -50,8 +50,14 @@ pub(super) fn write_mount_state(
     content.push_str(&format!("version={}\n", request.config_version));
     content.push_str(&format!("package={}\n", request.package_name));
     content.push_str(&format!("uid={}\n", request.uid));
+    if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(request.pid) {
+        content.push_str(&format!("app_start_time={}\n", start_time_ticks));
+    }
     for state in fuse_children {
-        content.push_str(&format!("fuse_child={}\n", state.child));
+        content.push_str(&format!(
+            "fuse_child={}:{}\n",
+            state.child, state.child_start_time_ticks
+        ));
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));

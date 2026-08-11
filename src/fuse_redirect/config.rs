@@ -5,6 +5,8 @@ use fuser::{MountOption, SessionACL};
 #[derive(Clone)]
 pub struct FuseRedirectConfig {
     pub package_name: String,
+    pub app_pid: i32,
+    pub app_start_time_ticks: Option<u64>,
     pub uid: i32,
     pub app_data_dir: String,
     pub redirect_target: String,
@@ -33,6 +35,7 @@ impl FuseRedirectConfig {
 /// [`scoped_fuse_mount_roots_for_request`]，避免规则字段增减时漏改一侧。
 pub trait MountRequestFields {
     fn package_name(&self) -> &str;
+    fn pid(&self) -> i32;
     fn uid(&self) -> i32;
     fn app_data_dir(&self) -> &str;
     fn redirect_target(&self) -> &str;
@@ -54,6 +57,8 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
 ) -> FuseRedirectConfig {
     FuseRedirectConfig {
         package_name: request.package_name().to_string(),
+        app_pid: request.pid(),
+        app_start_time_ticks: crate::platform::process_start_time_ticks(request.pid()),
         uid: request.uid(),
         app_data_dir: request.app_data_dir().to_string(),
         redirect_target: request.redirect_target().to_string(),
@@ -92,6 +97,17 @@ pub fn mount_blocking_with_ready(
     config: FuseRedirectConfig,
     ready_sock: Option<libc::c_int>,
 ) -> bool {
+    let app_pid = config.app_pid;
+    let Some(app_start_time_ticks) = config.app_start_time_ticks else {
+        log::warn!(
+            "fuse redirect app identity unavailable pkg={} app_pid={}",
+            config.package_name,
+            app_pid
+        );
+        send_ready_result(ready_sock, -1);
+        return false;
+    };
+    let package_name = config.package_name.clone();
     let user_id = config.user_id();
     let mount_point = fuse_mount_point(&config, user_id);
     let metadata_dir = mount_point_metadata_dir(&mount_point, user_id);
@@ -142,14 +158,56 @@ pub fn mount_blocking_with_ready(
         fs.policy.path_mappings.len()
     );
 
-    match fuser::mount2_with_ready(fs, &mount_point, &mount_options, |ready| {
-        send_ready_result(ready_sock, if ready { 0 } else { -1 });
-    }) {
-        Ok(()) => true,
+    let background = match fuser::spawn_mount2(fs, &mount_point, &mount_options) {
+        Ok(background) => background,
+        Err(error) => {
+            send_ready_result(ready_sock, -1);
+            log::warn!(
+                "fuse redirect mount failed mp={} err={}",
+                mount_point,
+                error
+            );
+            return false;
+        }
+    };
+    send_ready_result(ready_sock, 0);
+
+    loop {
+        if background.guard.is_finished() {
+            return finish_background_session(background, &mount_point, false);
+        }
+        if !crate::platform::is_process_instance_alive(app_pid, app_start_time_ticks) {
+            log::info!(
+                "fuse redirect app exited, unmount session pkg={} app_pid={} mp={}",
+                package_name,
+                app_pid,
+                mount_point
+            );
+            return finish_background_session(background, &mount_point, true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+fn finish_background_session(
+    background: fuser::BackgroundSession,
+    mount_point: &str,
+    app_exited: bool,
+) -> bool {
+    match background.umount_and_join() {
+        Ok(()) => {
+            log::info!(
+                "fuse redirect session ended cleanly mp={} app_exited={}",
+                mount_point,
+                app_exited
+            );
+            true
+        }
         Err(error) => {
             log::warn!(
-                "fuse redirect session ended with error mp={} err={}",
+                "fuse redirect session ended with error mp={} app_exited={} err={}",
                 mount_point,
+                app_exited,
                 error
             );
             false

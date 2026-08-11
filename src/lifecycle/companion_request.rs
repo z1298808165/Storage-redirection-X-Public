@@ -22,6 +22,9 @@ impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
     fn package_name(&self) -> &str {
         &self.package_name
     }
+    fn pid(&self) -> i32 {
+        self.pid
+    }
     fn uid(&self) -> i32 {
         self.uid
     }

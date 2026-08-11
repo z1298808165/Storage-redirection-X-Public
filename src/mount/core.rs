@@ -27,7 +27,7 @@ fn should_log_step(count: u64, step: u64) -> bool {
 }
 
 impl MountPlanner {
-    // 按需 unshare 并设置 /storage 为 MS_PRIVATE
+    // 按需 unshare，并隔离目标应用命名空间内的全部挂载传播。
     pub(super) fn ensure_mount_namespace_prepared(&mut self) -> bool {
         if self.is_namespace_ready {
             return true;
@@ -41,23 +41,24 @@ impl MountPlanner {
             }
         }
 
-        let Ok(storage) = CString::new("/storage") else {
+        // 重定向同时覆盖 /storage、/data/media 与 /mnt 下的多个存储别名。只隔离
+        // 部分父挂载会让 scoped FUSE 经未隔离的别名传播，服务退出后其它应用便会
+        // 继承 ENOTCONN 挂载。进入目标应用命名空间后一次性私有化整棵挂载树。
+        let Ok(root) = CString::new("/") else {
             return false;
         };
         let ret = unsafe {
             mount(
                 std::ptr::null(),
-                storage.as_ptr(),
+                root.as_ptr(),
                 std::ptr::null(),
                 (MS_REC | MS_PRIVATE) as libc::c_ulong,
                 std::ptr::null(),
             )
         };
         if ret != 0 {
-            log::warn!(
-                "mount ns: /storage MS_PRIVATE failed errno={}",
-                last_errno()
-            );
+            log::error!("mount ns: / MS_PRIVATE failed errno={}", last_errno());
+            return false;
         }
 
         let mut buf = [0u8; 256];

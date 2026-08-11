@@ -3,7 +3,9 @@ use crate::config::{SettingsHub, watcher};
 #[path = "daemon/media_hook_heal.rs"]
 mod media_hook_heal;
 use crate::daemon_monitor::RegularAppMonitor;
-use crate::daemon_mount::{MountOperation, MountRequest, execute_mount_request, has_mount_state};
+use crate::daemon_mount::{
+    MountOperation, MountRequest, execute_mount_request, has_mount_state, prune_stale_mount_states,
+};
 use crate::logging::Logger;
 use crate::platform;
 use crate::redirect_policy as policy;
@@ -318,6 +320,7 @@ fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mu
 
 fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let started_ms = crate::platform::paths::monotonic_ms();
+    prune_stale_mount_states();
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;
