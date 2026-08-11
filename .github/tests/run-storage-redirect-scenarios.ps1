@@ -717,10 +717,16 @@ function Wait-MediaProviderHookReady {
     while ((Get-Date) -lt $deadline) {
         $mediaPid = Get-MediaProviderPid
         if ($mediaPid) {
+            $bootId = (@(Invoke-Adb @("shell", "cat", "/proc/sys/kernel/random/boot_id")) | Select-Object -First 1).Trim()
+            $installState = (@(Invoke-Su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true") -join "`n").Trim()
+            if ($bootId -and $installState.Contains("stage=init_ok pid=$mediaPid boot_id=$bootId ")) {
+                Write-Host "media_provider_hook_ready label=$Label pid=$mediaPid source=install-state"
+                return $true
+            }
             $hookLines = @(& adb -s $Serial logcat -d --pid $mediaPid -s SRX:I 2>$null) |
                 Select-String -SimpleMatch "java hook open ok"
             if ($hookLines.Count -gt 0) {
-                Write-Host "media_provider_hook_ready label=$Label pid=$mediaPid"
+                Write-Host "media_provider_hook_ready label=$Label pid=$mediaPid source=logcat"
                 return $true
             }
         }
@@ -738,6 +744,17 @@ function Wait-MediaProviderHookReady {
             ForEach-Object { Write-Host "media_provider_hook_logcat: $_" }
     }
     $false
+}
+
+function Confirm-MediaProviderHookReady {
+    param([string]$Label)
+
+    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
+    $sdk = 0
+    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) { return $true }
+    if (Wait-MediaProviderHookReady "$Label-current" 3) { return $true }
+    Write-Host "media_provider_hook_recovery label=$Label"
+    Restart-MediaProviderWithHookReady "$Label-recovery"
 }
 
 function Restart-MediaProviderWithHookReady {
@@ -1582,6 +1599,7 @@ function Invoke-StandardScenario {
         2 {
             $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok
             $mediaFile = "srt_mediastore_sandbox_only.txt"
+            if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before-mediastore")) { return $false }
             $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
             $ok = $mediaResult.Ok -and $ok
             # 断言前立即采集 hook 证据，此时 logcat buffer 仍覆盖本次 insert。
@@ -2176,6 +2194,7 @@ try {
     Restart-MediaProvider
     Wait-Storage "initial" | Out-Null
     Wait-MediaProviderReady "initial" | Out-Null
+    if (-not (Confirm-MediaProviderHookReady "initial")) { throw "初始 MediaProvider hook 恢复失败" }
 
     if (-not $SkipBasicAll) {
         Invoke-BasicAll

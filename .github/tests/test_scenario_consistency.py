@@ -336,6 +336,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         for source in (bash_wait, ps_wait):
             self.assertIn("java hook open ok", source)
+            self.assertIn("stage=init_ok", source)
+            self.assertIn("boot_id", source)
             self.assertIn("media_provider_hook_retry", source)
             self.assertIn("storage.redirect.x/zygisk|libsrx_core", source)
         self.assertIn('if [ -n "$sdk" ] && [ "$sdk" -le 34 ]', bash_wait)
@@ -351,6 +353,26 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(
             ps_scenario.index("Restart-MediaProviderWithHookReady"),
             ps_scenario.index("Invoke-FileMonitorMediaStoreSuccessCase"),
+        )
+
+    def test_initial_and_scenario_two_recover_missing_media_provider_hook(self) -> None:
+        bash_standard = section(self.bash, "run_standard_scenario()", "run_scenario()")
+        ps_standard = section(
+            self.powershell,
+            "function Invoke-StandardScenario",
+            "function Set-ReadOnlySeed",
+        )
+        self.assertIn('ensure_media_provider_hook_ready "initial"', self.bash)
+        self.assertIn('ensure_media_provider_hook_ready "scenario-${scenario}-before-mediastore"', bash_standard)
+        self.assertIn('Confirm-MediaProviderHookReady "initial"', self.powershell)
+        self.assertIn('Confirm-MediaProviderHookReady "scenario-$Scenario-before-mediastore"', ps_standard)
+        self.assertLess(
+            bash_standard.index("ensure_media_provider_hook_ready"),
+            bash_standard.index('run_service_case "$scenario" "mediastore-sandbox-only"'),
+        )
+        self.assertLess(
+            ps_standard.index("Confirm-MediaProviderHookReady"),
+            ps_standard.index('Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only"'),
         )
 
 
