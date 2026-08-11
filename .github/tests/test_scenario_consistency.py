@@ -403,6 +403,25 @@ class ScenarioConsistencyTest(unittest.TestCase):
             recovery.index('wait_media_provider_hook_ready "module-clean-boot"'),
         )
 
+    def test_bash_prepares_mapping_source_on_real_backend(self) -> None:
+        prepare = section(
+            self.bash,
+            "prepare_backend_core_targets()",
+            "clean_targets()",
+        )
+        clean = section(self.bash, "clean_targets()", "clean_results()")
+
+        self.assertIn("'${BACKEND_ROOT}/Download/Test'", prepare)
+        self.assertIn("test -d '${BACKEND_ROOT}/Download/Test'", prepare)
+        self.assertNotIn("'${REAL_ROOT}/Download/Test'", prepare)
+        self.assertIn("prepare_backend_core_targets", clean)
+        self.assertIn("export -f", self.bash)
+        self.assertRegex(self.bash, r"export -f [^\n]*prepare_backend_core_targets")
+        self.assertLess(
+            clean.index("prepare_backend_core_targets"),
+            clean.index("fix_private_backend_permissions"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
