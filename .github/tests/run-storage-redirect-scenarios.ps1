@@ -132,6 +132,7 @@ $script:AppLaunchSettleMilliseconds = if ($env:SRT_APP_LAUNCH_SETTLE_MS -match '
 $script:MountConfirmTimeoutMilliseconds = if ($env:SRT_MOUNT_CONFIRM_TIMEOUT_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_MOUNT_CONFIRM_TIMEOUT_MS) } else { 0 }
 $script:ServiceCaseSettleMilliseconds = if ($env:SRT_SERVICE_CASE_SETTLE_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_SERVICE_CASE_SETTLE_MS) } else { 50 }
 $script:FileMonitorEnabled = $env:SRT_FILE_MONITOR_ENABLED -match '^(1|true|TRUE|yes|YES)$'
+$script:FailFast = $env:SRT_FAIL_FAST -match '^(1|true|TRUE|yes|YES)$'
 
 function Invoke-Adb {
     param([string[]]$Arguments)
@@ -741,6 +742,7 @@ function Clear-Targets {
 
 function Remove-TestTargetArtifacts {
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
+    Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Download/Test' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile'" | Out-Null
     Invoke-Su "rm -f '$BackendRoot/Download/$QMarkFileSingleFile' '$BackendPrivateRoot/Download/$QMarkFileSingleFile'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtFusePlain' '$BackendRoot/Download/SrtFuseExclude' '$BackendRoot/Download/SrtFuseMapParent' '$BackendRoot/Download/SrtFuseMapRW' '$BackendRoot/Download/SrtFuseMapRO' '$BackendRoot/Download/SrtFuseMulti' '$BackendRoot/DCIM/SrtFuseQQ' '$BackendPrivateRoot/Download/SrtFusePlain' '$BackendPrivateRoot/Download/SrtFuseExclude' '$BackendPrivateRoot/Download/SrtFuseMapParent' '$BackendPrivateRoot/Download/SrtFuseMapRW' '$BackendPrivateRoot/Download/SrtFuseMapRO' '$BackendPrivateRoot/Download/SrtFuseMulti' '$BackendPrivateRoot/DCIM/SrtFuseQQ'" | Out-Null
@@ -2034,7 +2036,12 @@ try {
     $scenarios = Get-ScenarioList
 
     foreach ($scenario in $scenarios) {
+        $failuresBeforeScenario = $script:Failures.Count
         Invoke-Scenario $scenario
+        if ($script:FailFast -and $script:Failures.Count -gt $failuresBeforeScenario) {
+            Write-Warning "场景 $scenario 失败，已按 SRT_FAIL_FAST 停止后续场景"
+            break
+        }
     }
 
     Write-Host "== summary =="
