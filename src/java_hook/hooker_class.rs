@@ -42,6 +42,8 @@ const STORAGE_PATH_EXISTS_NAME: &[u8] = b"storagePathExistsBySyscall\0";
 const STORAGE_PATH_EXISTS_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
 const PROVIDER_VIRTUAL_PATH_VISIBLE_NAME: &[u8] = b"isProviderVirtualPathVisible\0";
 const PROVIDER_VIRTUAL_PATH_VISIBLE_SIG: &[u8] = b"(Ljava/lang/String;)Z\0";
+const CLEANUP_PROVIDER_REDIRECT_SOURCE_NAME: &[u8] = b"cleanupProviderRedirectSourceDirectory\0";
+const CLEANUP_PROVIDER_REDIRECT_SOURCE_SIG: &[u8] = b"(Ljava/lang/String;Ljava/lang/String;)V\0";
 const REWRITE_MEDIA_STORE_PATH_NAME: &[u8] = b"rewriteMediaStorePath\0";
 const REWRITE_MEDIA_STORE_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Ljava/lang/String;\0";
 const RESOLVE_DOWNLOAD_PLACEHOLDER_NAME: &[u8] = b"resolveDownloadPlaceholder\0";
@@ -129,6 +131,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: PROVIDER_VIRTUAL_PATH_VISIBLE_NAME.as_ptr() as *mut _,
             signature: PROVIDER_VIRTUAL_PATH_VISIBLE_SIG.as_ptr() as *mut _,
             fnPtr: is_provider_virtual_path_visible as *mut _,
+        },
+        JNINativeMethod {
+            name: CLEANUP_PROVIDER_REDIRECT_SOURCE_NAME.as_ptr() as *mut _,
+            signature: CLEANUP_PROVIDER_REDIRECT_SOURCE_SIG.as_ptr() as *mut _,
+            fnPtr: cleanup_provider_redirect_source_directory as *mut _,
         },
         JNINativeMethod {
             name: REWRITE_MEDIA_STORE_PATH_NAME.as_ptr() as *mut _,
@@ -493,6 +500,20 @@ unsafe extern "C" fn is_provider_virtual_path_visible(
     } else {
         jni_sys::JNI_FALSE
     }
+}
+
+unsafe extern "C" fn cleanup_provider_redirect_source_directory(
+    env: *mut JNIEnv,
+    _class: jclass,
+    source_path: jstring,
+    target_path: jstring,
+) {
+    if env.is_null() || source_path.is_null() || target_path.is_null() {
+        return;
+    }
+    let source = crate::zygisk::jni::get_jstring_utf8(env, source_path);
+    let target = crate::zygisk::jni::get_jstring_utf8(env, target_path);
+    crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
 }
 
 unsafe extern "C" fn rewrite_media_store_path(

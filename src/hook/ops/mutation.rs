@@ -4,6 +4,7 @@ mod link;
 mod meta;
 mod node;
 
+pub(crate) use dir::cleanup_provider_redirect_source_directory;
 pub use dir::{hooked_mkdir, hooked_mkdirat, hooked_rmdir, hooked_unlink, hooked_unlinkat};
 pub use link::{hooked_link, hooked_linkat, hooked_symlink, hooked_symlinkat};
 pub use meta::{

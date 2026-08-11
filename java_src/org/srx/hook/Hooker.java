@@ -394,10 +394,15 @@ public class Hooker {
     DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
     try {
       Method method = target instanceof Method ? (Method) target : null;
+      File directDirectory = new File(directPath);
       boolean created =
           method != null && "mkdir".equals(method.getName())
-              ? new File(directPath).mkdir()
-              : new File(directPath).mkdirs();
+              ? directDirectory.mkdir()
+              : directDirectory.mkdirs();
+      boolean available = created || directDirectory.isDirectory();
+      if (available) {
+        cleanupProviderRedirectSourceDirectory(sourcePath, directPath);
+      }
       logInfo(
           "media direct directory method="
               + (method == null ? null : method.getName())
@@ -405,9 +410,11 @@ public class Hooker {
               + sourcePath
               + " to="
               + directPath
-              + " result="
-              + created);
-      return Boolean.valueOf(created);
+              + " created="
+              + created
+              + " available="
+              + available);
+      return Boolean.valueOf(available);
     } finally {
       DIRECTORY_REDIRECT_ACTIVE.remove();
     }
@@ -1853,6 +1860,9 @@ public class Hooker {
   private static native boolean storagePathExistsBySyscall(String path);
 
   private static native boolean isProviderVirtualPathVisible(String path);
+
+  private static native void cleanupProviderRedirectSourceDirectory(
+      String sourcePath, String targetPath);
 
   private static native String rewriteMediaStorePath(String path, int callerUid);
 

@@ -410,6 +410,18 @@ fn cleanup_empty_redirect_source_dir_if_needed(
         return;
     }
 
+    cleanup_empty_redirect_source_dir(op_name, source_path, &redirect_result.new_path);
+}
+
+pub(crate) fn cleanup_provider_redirect_source_directory(source_path: &str, target_path: &str) {
+    if !is_public_default_sandbox_redirect(source_path, target_path) {
+        return;
+    }
+
+    cleanup_empty_redirect_source_dir("java provider directory", source_path, target_path);
+}
+
+fn cleanup_empty_redirect_source_dir(op_name: &str, source_path: &str, target_path: &str) {
     let source = paths::normalize(source_path);
     let source_backend = if source.starts_with("/storage/emulated/") {
         paths::storage_to_data_media_path(&source)
@@ -419,7 +431,7 @@ fn cleanup_empty_redirect_source_dir_if_needed(
         return;
     };
     let target_backend = paths::storage_to_data_media_path(&paths::data_media_to_storage_path(
-        &paths::normalize(&redirect_result.new_path),
+        &paths::normalize(target_path),
     ));
     if source_backend.is_empty()
         || target_backend.is_empty()
@@ -442,7 +454,7 @@ fn cleanup_empty_redirect_source_dir_if_needed(
             op_name,
             source_path,
             source_backend,
-            redirect_result.new_path
+            target_path
         );
         return;
     }
