@@ -323,6 +323,24 @@ pub fn is_provider_passthrough_virtual_dir(public_path: &str) -> bool {
     PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow().iter().any(|(p, _)| p == &key))
 }
 
+// 返回直通窗口内应按虚拟目录回答查询的目录路径。MediaStore 会先创建公共父目录，
+// 随后对 .pending-* 文件执行存在性检查；两者必须落到同一份线程内登记状态。
+pub fn provider_passthrough_virtual_query_dir(path: &str) -> Option<String> {
+    if !is_provider_passthrough_active() || path.is_empty() {
+        return None;
+    }
+    if is_provider_passthrough_virtual_dir(path) {
+        return Some(path.to_string());
+    }
+    crate::platform::paths::media_store_pending_display_path(path)?;
+    let parent = crate::platform::paths::parent(path);
+    if !parent.is_empty() && is_provider_passthrough_virtual_dir(&parent) {
+        Some(parent)
+    } else {
+        None
+    }
+}
+
 fn clear_provider_passthrough_virtual_dirs() {
     PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow_mut().clear());
 }

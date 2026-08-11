@@ -130,6 +130,39 @@ pub fn is_path_allowed_by_caller_real_paths(
     )
 }
 
+pub fn is_path_parent_of_caller_allowed_real_path(
+    resolved_path: &str,
+    caller_package: &str,
+    caller_uid: i32,
+) -> bool {
+    if resolved_path.is_empty() || caller_uid < ANDROID_APP_UID_START {
+        return false;
+    }
+
+    let normalized_path = paths::data_media_to_storage_path(&paths::normalize(resolved_path));
+    let storage_root = paths::storage_user_root_for_user(platform::user_id_from_uid(caller_uid));
+    if !paths::is_child(&normalized_path, &storage_root) {
+        return false;
+    }
+
+    with_cached_caller_real_paths(
+        caller_package,
+        caller_uid,
+        CallerRealPathKind::Allowed,
+        |configured_paths| {
+            configured_paths.iter().any(|configured| {
+                let configured = configured.trim();
+                if configured.is_empty() || configured.starts_with('!') {
+                    return false;
+                }
+                let concrete_prefix = paths::concrete_prefix_before_wildcard(configured);
+                !concrete_prefix.is_empty()
+                    && paths::is_same_or_child(&concrete_prefix, &normalized_path)
+            })
+        },
+    )
+}
+
 pub fn is_path_excluded_by_caller_real_paths(
     resolved_path: &str,
     caller_package: &str,

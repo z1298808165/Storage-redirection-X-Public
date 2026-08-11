@@ -72,6 +72,7 @@ public class Hooker {
   private static final HashSet<String> HOOKED_FUSE_CLASSES = new HashSet<>();
   private static final HashSet<String> HOOKED_DIRECTORY_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_NATIVE_DIRECTORY_METHODS = new HashSet<>();
+  private static final HashSet<String> HOOKED_FILE_SYSTEM_ACCESS_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<Method> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
   private static final HashSet<Class<?>> MEDIA_FILE_COLUMN_CLASSES_LOGGED = new HashSet<>();
@@ -156,6 +157,7 @@ public class Hooker {
   private static final int FUSE_KIND_RENAME = 4;
   private static final int FUSE_KIND_UNLINK = 5;
   private static final int FUSE_KIND_RMDIR = 6;
+  private static final int FILE_SYSTEM_ACCESS_OK = 0x08;
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
   private static final ThreadLocal<Boolean> DIRECTORY_REDIRECT_ACTIVE = new ThreadLocal<>();
   private static final ThreadLocal<Integer> MEDIA_PROVIDER_CALLER_UID = new ThreadLocal<>();
@@ -1100,6 +1102,7 @@ public class Hooker {
       if (fileSystem != null) {
         installFileSystemNativeDirectoryMethod(
             findFileSystemNativeDirectoryMethod(fileSystem.getClass()));
+        installFileSystemAccessMethod(findFileSystemAccessMethod(fileSystem.getClass()));
       }
     } catch (Throwable t) {
       logWarn("java hook filesystem native directory runtime lookup failed", t);
@@ -1108,6 +1111,7 @@ public class Hooker {
       try {
         Class<?> fileSystem = Class.forName(className);
         installFileSystemNativeDirectoryMethod(findFileSystemNativeDirectoryMethod(fileSystem));
+        installFileSystemAccessMethod(findFileSystemAccessMethod(fileSystem));
       } catch (ClassNotFoundException ignored) {
       } catch (Throwable t) {
         logWarn("java hook filesystem native directory installer failed " + className, t);
@@ -1143,6 +1147,60 @@ public class Hooker {
       }
     }
     return null;
+  }
+
+  private static Method findFileSystemAccessMethod(Class<?> fileSystem) {
+    for (Class<?> c = fileSystem; c != null; c = c.getSuperclass()) {
+      try {
+        Method method = c.getDeclaredMethod("checkAccess", File.class, Integer.TYPE);
+        if (method.getReturnType() == Boolean.TYPE && !Modifier.isNative(method.getModifiers())) {
+          return method;
+        }
+      } catch (NoSuchMethodException ignored) {
+      }
+    }
+    return null;
+  }
+
+  private static void installFileSystemAccessMethod(Method method) throws Throwable {
+    if (method == null) return;
+    String key = describeMethod(method);
+    if (!HOOKED_FILE_SYSTEM_ACCESS_METHODS.add(key)) return;
+    Method callback =
+        Hooker.class.getDeclaredMethod("providerFileSystemAccessCallback", Object[].class);
+    callback.setAccessible(true);
+    method.setAccessible(true);
+    Hooker hooker = new Hooker();
+    Method backup = hooker.doHook(method, callback);
+    if (backup == null) {
+      HOOKED_FILE_SYSTEM_ACCESS_METHODS.remove(key);
+      logWarn("java hook filesystem access rejected " + key);
+      return;
+    }
+    backup.setAccessible(true);
+    hooker.backup = backup;
+    hooker.target = method;
+    HOOKS.add(hooker);
+    logInfo("java hook filesystem access ok " + key);
+  }
+
+  public Object providerFileSystemAccessCallback(Object[] args) throws Throwable {
+    Object[] actualArgs = unwrapArgs(args);
+    if (actualArgs == null) return callBackup(args);
+    File source = null;
+    Integer access = null;
+    for (Object value : actualArgs) {
+      if (source == null && value instanceof File) source = (File) value;
+      if (value instanceof Integer) access = (Integer) value;
+    }
+    if (source != null
+        && access != null
+        && access.intValue() == FILE_SYSTEM_ACCESS_OK
+        && isProviderVirtualPathVisible(source.getPath())) {
+      logInfo("java filesystem virtual exists path=" + source.getPath());
+      return Boolean.TRUE;
+    }
+    return callBackup(args);
   }
 
   private static void installNativeDirectoryMethod(Method method) throws Throwable {
@@ -1793,6 +1851,8 @@ public class Hooker {
   private static native String resolveOpenPath(String path, int callerUid);
 
   private static native boolean storagePathExistsBySyscall(String path);
+
+  private static native boolean isProviderVirtualPathVisible(String path);
 
   private static native String rewriteMediaStorePath(String path, int callerUid);
 

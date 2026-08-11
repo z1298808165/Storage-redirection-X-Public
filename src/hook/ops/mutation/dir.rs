@@ -261,6 +261,22 @@ where
         );
     }
 
+    if should_passthrough_provider_allowed_parent_mkdir(
+        hub,
+        path_for_decision.as_ref(),
+        &redirect_result,
+    ) {
+        log::info!(
+            "{} provider allowed parent passthrough path={}",
+            op_name,
+            path_for_decision
+        );
+        let result = call_original(pathname);
+        let error_no = runtime::errno_for_result(result);
+        monitor::record_mkdir_result(hub, op_name, path_for_decision.as_ref(), result, error_no);
+        return result;
+    }
+
     if should_virtualize_anonymous_system_writer_mkdir(
         hub,
         path_for_decision.as_ref(),
@@ -355,6 +371,30 @@ where
         monitor::record_mkdir_result(hub, op_name, path_for_decision.as_ref(), result, error_no);
     }
     result
+}
+
+fn should_passthrough_provider_allowed_parent_mkdir(
+    hub: &InterceptHub,
+    source_path: &str,
+    redirect_result: &RedirectDecision,
+) -> bool {
+    if !redirect_result.is_redirect()
+        || redirect_result.is_mapping
+        || hub.is_monitor_only()
+        || !crate::hook::is_provider_passthrough_active()
+        || !hub.with_package_name(policy::is_system_writer_package)
+    {
+        return false;
+    }
+
+    let caller_package = hub.get_current_caller_package();
+    let caller_uid = hub.get_current_caller_uid();
+    !caller_package.is_empty()
+        && writer::is_path_parent_of_caller_allowed_real_path(
+            source_path,
+            &caller_package,
+            caller_uid,
+        )
 }
 
 fn cleanup_empty_redirect_source_dir_if_needed(
