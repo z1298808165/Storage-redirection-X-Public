@@ -201,10 +201,29 @@ unsafe fn provider_passthrough_virtual_dir_standin_path(
     }
     // SAFETY: dirfd 与 pathname 由调用方 hook 原样透传，在本次调用期间保持有效。
     let path_text = unsafe { resolve_system_writer_query_path(dirfd, pathname) }?;
-    if !crate::hook::is_provider_passthrough_virtual_dir(&path_text) {
+    // 优先尝试路径本身是虚拟目录的情况，其次只处理父目录为虚拟目录的
+    // MediaStore .pending- 文件。MediaProvider 会在 ensureFileColumns 中查询
+    // pending 文件，而此时公共父目录仅以虚拟形式存在；其它普通子文件仍应
+    // 返回真实查询结果，避免把 .nomedia 等不存在的文件误报为存在。
+    let effective_path = if crate::hook::is_provider_passthrough_virtual_dir(&path_text) {
+        path_text.clone()
+    } else if paths::media_store_pending_display_path(&path_text).is_some() {
+        let parent = paths::parent(&path_text);
+        if !parent.is_empty() && crate::hook::is_provider_passthrough_virtual_dir(&parent) {
+            log::debug!(
+                "virtual dir standin parent match path={} parent={}",
+                path_text,
+                parent
+            );
+            parent
+        } else {
+            return None;
+        }
+    } else {
         return None;
-    }
-    let is_data_media_input = path_text.starts_with("/data/media/");
+    };
+    let is_data_media_input = effective_path.starts_with("/data/media/");
+    let path_text = effective_path;
     let mut ancestor = paths::parent(&path_text);
     for _ in 0..PROVIDER_PASSTHROUGH_STANDIN_MAX_DEPTH {
         if ancestor.is_empty() || ancestor == "/" {

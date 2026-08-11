@@ -892,11 +892,20 @@ fn should_use_recent_media_provider_caller(
     normalized_path: &str,
     is_mkdir_like: bool,
 ) -> bool {
+    let public_mkdir_has_matching_hint = if is_mkdir_like && is_public_storage_path(normalized_path)
+    {
+        let user_id = paths::extract_user_id_from_storage_path(normalized_path);
+        user_id >= 0
+            && infer_recent_path_caller_identity(normalized_path, user_id)
+                .is_some_and(|identity| identity.package_name == state.caller_package)
+    } else {
+        true
+    };
     policy::is_media_provider_package(&state.package_name)
         && !state.caller_package.is_empty()
         && state.caller_package_updated_ms >= 0
         && !is_intermediate_caller_package(&state.caller_package)
-        && !(is_mkdir_like && is_public_storage_path(normalized_path))
+        && public_mkdir_has_matching_hint
 }
 
 fn is_public_storage_path(path: &str) -> bool {
