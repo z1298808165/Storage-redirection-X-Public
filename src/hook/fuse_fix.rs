@@ -149,7 +149,7 @@ fn install_target_if_enabled() {
         return;
     }
     let native_probe = crate::platform::system_property_get("debug.srx.fuse_probe")
-        .filter(|probe| matches!(probe.as_str(), "core" | "extended"));
+        .filter(|probe| matches!(probe.as_str(), "core" | "extended" | "all"));
     if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level())
         && native_probe.is_none()
     {
@@ -234,7 +234,7 @@ fn install_target_if_enabled() {
             "fuse fix diagnostic probe={} core_hooks={} extended_hooks={} compare_hooks=false",
             native_probe.as_deref().unwrap_or("unknown"),
             native_probe.as_deref() != Some("extended"),
-            native_probe.as_deref() == Some("extended")
+            native_probe.as_deref() != Some("core")
         );
     }
 
