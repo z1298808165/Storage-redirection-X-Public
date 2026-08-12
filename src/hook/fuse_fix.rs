@@ -163,15 +163,7 @@ fn install_target_if_enabled() {
             unsafe { srx_fuse_fix_is_installed() }
         );
     }
-    if !should_disable_compare_hooks_for_platform(crate::platform::android_api_level()) {
-        register_compare_hooks_once();
-    } else if !COMPARE_HOOKS_REGISTERED.load(Ordering::Acquire)
-        && !DISABLED_LOGGED.swap(true, Ordering::Relaxed)
-    {
-        log::warn!(
-            "fuse fix compare hooks disabled on Android 13/14 x86_64; path hooks remain active"
-        );
-    }
+    register_compare_hooks_once();
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {
         return;
     }
@@ -263,10 +255,6 @@ fn find_first_plt_slot(elf: &ElfImg, symbol: &str) -> *mut c_void {
 }
 
 fn should_disable_extended_hooks_for_platform(api_level: i32) -> bool {
-    cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
-}
-
-fn should_disable_compare_hooks_for_platform(api_level: i32) -> bool {
     cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
 }
 
