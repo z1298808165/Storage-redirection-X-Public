@@ -148,7 +148,7 @@ fn install_target_if_enabled() {
         INSTALL_ATTEMPTED.store(true, Ordering::Relaxed);
         return;
     }
-    let native_probe = crate::platform::system_property_get("persist.srx.fuse_probe")
+    let native_probe = crate::platform::system_property_get("debug.srx.fuse_probe")
         .filter(|probe| matches!(probe.as_str(), "core" | "extended"));
     if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level())
         && native_probe.is_none()

@@ -76,6 +76,13 @@ if [ -z "$TEST_APP_APK" ]; then
   exit 1
 fi
 
+if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
+  adb shell setprop debug.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE" >/dev/null 2>&1 || true
+  probe_value="$(adb shell getprop debug.srx.fuse_probe 2>/dev/null | tr -d '\r' || true)"
+  echo "fuse_probe_property=$probe_value"
+  export SRT_SCENARIOS="1"
+fi
+
 MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
   APP_APK="$TEST_APP_APK" \
   bash .github/tests/install-storage-redirect-module.sh
@@ -84,8 +91,4 @@ adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE all
 export SRT_SKIP_FINAL_CLEANUP=1
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
-if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
-  adb shell setprop persist.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE"
-  export SRT_SCENARIOS="1"
-fi
 bash .github/tests/run-storage-redirect-scenarios.sh
