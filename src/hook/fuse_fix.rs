@@ -153,7 +153,12 @@ fn install_target_if_enabled() {
         .or_else(|| crate::platform::system_property_get("persist.debug.srx.fuse_probe"))
         .or_else(|| std::fs::read_to_string(module_paths::FUSE_PROBE_FILE).ok())
         .map(|probe| probe.trim().to_string())
-        .filter(|probe| matches!(probe.as_str(), "core" | "extended" | "all" | "all_compare"));
+        .filter(|probe| {
+            matches!(
+                probe.as_str(),
+                "core" | "extended" | "all" | "all_compare" | "late"
+            )
+        });
     if let Some(probe) = native_probe.as_deref() {
         log::warn!(
             "fuse fix diagnostic property={} api={}",
@@ -169,6 +174,11 @@ fn install_target_if_enabled() {
                 "fuse fix native hooks skipped on Android 13/14 x86_64; Java media mutation remains active"
             );
         }
+        return;
+    }
+    if native_probe.as_deref() == Some("late") && !crate::platform::is_boot_completed() {
+        log::info!("fuse fix delayed probe waiting for boot completion");
+        INSTALL_ATTEMPTED.store(false, Ordering::Release);
         return;
     }
     if !enabled && !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {

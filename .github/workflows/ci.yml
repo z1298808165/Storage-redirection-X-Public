@@ -526,7 +526,7 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
-      PERSIST_SRX_FUSE_PROBE: ${{ (contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker') || contains(github.event.head_commit.message, 'Fuse 探针单场景触发')) && 'all_compare' || contains(github.event.head_commit.message, '全量组合探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
+      PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '延迟全量探针') && 'late' || (contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker') || contains(github.event.head_commit.message, 'Fuse 探针单场景触发')) && 'all_compare' || contains(github.event.head_commit.message, '全量组合探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
@@ -596,7 +596,7 @@ jobs:
           done
 
       - name: Run Android test-flow scenarios
-        if: ${{ (!contains(github.event.head_commit.message, '全量组合比较探针') && !contains(github.event.head_commit.message, '全量组合探针') && !contains(github.event.head_commit.message, '核心组探针') && !contains(github.event.head_commit.message, '扩展组探针')) || matrix.android.api == 34 }}
+        if: ${{ (!contains(github.event.head_commit.message, '延迟全量探针') && !contains(github.event.head_commit.message, '全量组合比较探针') && !contains(github.event.head_commit.message, '全量组合探针') && !contains(github.event.head_commit.message, '核心组探针') && !contains(github.event.head_commit.message, '扩展组探针')) || matrix.android.api == 34 }}
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
           api-level: ${{ matrix.android.api }}
@@ -611,7 +611,7 @@ jobs:
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Skip non-target probe shard
-        if: ${{ (contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, '全量组合探针') || contains(github.event.head_commit.message, '核心组探针') || contains(github.event.head_commit.message, '扩展组探针')) && matrix.android.api != 34 }}
+        if: ${{ (contains(github.event.head_commit.message, '延迟全量探针') || contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, '全量组合探针') || contains(github.event.head_commit.message, '核心组探针') || contains(github.event.head_commit.message, '扩展组探针')) && matrix.android.api != 34 }}
         run: echo "仅验证 Fuse 探针：跳过 Android ${{ matrix.android.version }} 测试分片"
 
       - name: Upload test-flow artifacts
