@@ -359,6 +359,10 @@ done
 adb_magisk "--sqlite \"REPLACE INTO settings (key,value) VALUES('zygisk',1);\""
 install_storage_redirect_module
 seed_storage_redirect_test_environment
+if [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
+  adb_root "setprop persist.debug.srx.fuse_probe '$PERSIST_SRX_FUSE_PROBE'"
+  echo "持久 Fuse 探针属性已在模块重启前写入：$PERSIST_SRX_FUSE_PROBE"
+fi
 adb reboot
 wait_for_boot 420
 wait_for_root_shell 120
