@@ -149,7 +149,14 @@ fn install_target_if_enabled() {
         return;
     }
     let native_probe = crate::platform::system_property_get("debug.srx.fuse_probe")
-        .filter(|probe| matches!(probe.as_str(), "core" | "extended" | "all"));
+        .filter(|probe| matches!(probe.as_str(), "core" | "extended" | "all" | "all_compare"));
+    if let Some(probe) = native_probe.as_deref() {
+        log::warn!(
+            "fuse fix diagnostic property={} api={}",
+            probe,
+            crate::platform::android_api_level()
+        );
+    }
     if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level())
         && native_probe.is_none()
     {
@@ -167,7 +174,7 @@ fn install_target_if_enabled() {
             unsafe { srx_fuse_fix_is_installed() }
         );
     }
-    if native_probe.is_none() {
+    if native_probe.is_none() || native_probe.as_deref() == Some("all_compare") {
         register_compare_hooks_once();
     }
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {
@@ -231,10 +238,11 @@ fn install_target_if_enabled() {
     };
     if native_probe.is_some() {
         log::warn!(
-            "fuse fix diagnostic probe={} core_hooks={} extended_hooks={} compare_hooks=false",
+            "fuse fix diagnostic probe={} core_hooks={} extended_hooks={} compare_hooks={}",
             native_probe.as_deref().unwrap_or("unknown"),
             native_probe.as_deref() != Some("extended"),
-            native_probe.as_deref() != Some("core")
+            native_probe.as_deref() != Some("core"),
+            native_probe.as_deref() == Some("all_compare")
         );
     }
 
