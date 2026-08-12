@@ -148,7 +148,11 @@ fn install_target_if_enabled() {
         INSTALL_ATTEMPTED.store(true, Ordering::Relaxed);
         return;
     }
-    if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level()) {
+    let native_probe = crate::platform::system_property_get("persist.srx.fuse_probe")
+        .filter(|probe| matches!(probe.as_str(), "core" | "extended"));
+    if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level())
+        && native_probe.is_none()
+    {
         if !INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel) {
             log::warn!(
                 "fuse fix native hooks skipped on Android 13/14 x86_64; Java media mutation remains active"
@@ -163,7 +167,9 @@ fn install_target_if_enabled() {
             unsafe { srx_fuse_fix_is_installed() }
         );
     }
-    register_compare_hooks_once();
+    if native_probe.is_none() {
+        register_compare_hooks_once();
+    }
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {
         return;
     }
@@ -186,6 +192,28 @@ fn install_target_if_enabled() {
     let reply_create_slot = find_first_plt_slot(&elf, "fuse_reply_create");
     let passthrough_enable_slot = find_first_plt_slot(&elf, "fuse_passthrough_enable");
     let passthrough_open_slot = find_first_plt_slot(&elf, "fuse_passthrough_open");
+    let (is_app_accessible_path, is_package_owned_path, is_bpf_backing_path) =
+        if native_probe.as_deref() == Some("extended") {
+            (
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } else {
+            (
+                is_app_accessible_path,
+                is_package_owned_path,
+                is_bpf_backing_path,
+            )
+        };
+    if native_probe.is_some() {
+        log::warn!(
+            "fuse fix diagnostic probe={} core_hooks={} extended_hooks={}",
+            native_probe.as_deref().unwrap_or("unknown"),
+            native_probe.as_deref() != Some("extended"),
+            native_probe.as_deref() == Some("extended")
+        );
+    }
 
     let installed = unsafe {
         srx_fuse_fix_install(

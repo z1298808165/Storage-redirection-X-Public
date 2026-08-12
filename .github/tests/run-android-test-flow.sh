@@ -84,4 +84,8 @@ adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE all
 export SRT_SKIP_FINAL_CLEANUP=1
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
+if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
+  adb shell setprop persist.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE"
+  export SRT_SCENARIOS="1"
+fi
 bash .github/tests/run-storage-redirect-scenarios.sh

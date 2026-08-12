@@ -526,6 +526,7 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
