@@ -1110,11 +1110,6 @@ wait_media_provider_hook_ready() {
 
 ensure_media_provider_hook_ready() {
   local label="$1"
-  local sdk
-  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
-    return 0
-  fi
   if wait_media_provider_hook_ready "${label}-current" 3; then
     return 0
   fi
@@ -1124,16 +1119,7 @@ ensure_media_provider_hook_ready() {
 
 restart_media_provider_with_hook_ready() {
   local label="$1"
-  local attempt sdk
-
-  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
-    restart_media_provider
-    wait_storage_ready "${label}-storage" 60 >/dev/null || return 1
-    wait_media_provider_ready "${label}-provider" 120 >/dev/null || return 1
-    return 0
-  fi
-
+  local attempt
   for attempt in 1 2; do
     adb logcat -c >/dev/null 2>&1 || true
     restart_media_provider

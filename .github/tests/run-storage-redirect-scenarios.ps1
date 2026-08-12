@@ -749,9 +749,6 @@ function Wait-MediaProviderHookReady {
 function Confirm-MediaProviderHookReady {
     param([string]$Label)
 
-    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
-    $sdk = 0
-    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) { return $true }
     if (Wait-MediaProviderHookReady "$Label-current" 3) { return $true }
     Write-Host "media_provider_hook_recovery label=$Label"
     Restart-MediaProviderWithHookReady "$Label-recovery"
@@ -759,14 +756,6 @@ function Confirm-MediaProviderHookReady {
 
 function Restart-MediaProviderWithHookReady {
     param([string]$Label)
-
-    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
-    $sdk = 0
-    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) {
-        Restart-MediaProvider
-        if (-not (Wait-Storage "$Label-storage")) { return $false }
-        return Wait-MediaProviderReady "$Label-provider"
-    }
 
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         Invoke-Adb @("logcat", "-c") | Out-Null

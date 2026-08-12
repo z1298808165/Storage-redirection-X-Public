@@ -269,14 +269,7 @@ media_provider_pid() {
 wait_media_provider_hook_ready() {
   local label="$1"
   local timeout_seconds="${2:-60}"
-  local sdk deadline pid boot_id install_state
-
-  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
-    echo "media_provider_hook_check_skipped label=${label} sdk=${sdk}"
-    return 0
-  fi
-
+  local deadline pid boot_id install_state
   deadline=$((SECONDS + timeout_seconds))
   while [ "$SECONDS" -lt "$deadline" ]; do
     adb shell content query --uri content://media/external_primary/file --projection _id --where '_id=-1' >/dev/null 2>&1 || true
