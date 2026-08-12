@@ -1002,8 +1002,15 @@ ensure_initial_storage_ready() {
     return 0
   fi
 
+  echo "initial_storage_recovery: request emulated volume remount"
+  adb shell "sm mount 'emulated;0'" >/dev/null 2>&1 || true
+  if wait_storage_ready "initial-remount" 15; then
+    echo "initial_storage_recovery: emulated storage recovered by remount"
+    return 0
+  fi
+
   echo "initial_storage_recovery: reboot after emulated storage stayed unavailable"
-  adb reboot
+  adb reboot >/dev/null 2>&1 || true
   ADB_ROOT_MODE=""
   wait_boot_completed
   wait_storage_ready "initial-reboot" 120

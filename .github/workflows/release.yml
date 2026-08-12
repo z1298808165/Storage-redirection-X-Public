@@ -257,6 +257,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if [ "$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" || true
+              exit 1
+            fi
+            sleep 2
+          done
           gh release upload "v${VERSION}" \
             "build/assets/storage.redirect.x-v${VERSION}.zip" \
             --repo "$GITHUB_REPOSITORY" \
@@ -337,6 +347,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if [ "$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" || true
+              exit 1
+            fi
+            sleep 2
+          done
           gh release upload "v${VERSION}" \
             "build/app/storage-redirect-x-manager-v${VERSION}.apk" \
             --repo "$GITHUB_REPOSITORY" \
@@ -452,11 +472,11 @@ jobs:
             tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
 
       - name: Upload release test-flow unit test reports
-        if: always()
+        if: always() && hashFiles('tests/storage-redirect-test/app/build/reports/**', 'tests/storage-redirect-test/media-file-api/build/reports/**') != ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: release-test-flow-unit-test-reports-v${{ env.VERSION }}
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 14
           path: |
             tests/storage-redirect-test/app/build/reports/
@@ -574,6 +594,7 @@ jobs:
           retention-days: 14
           path: |
             scenario-*-result.txt
+            test-flow-preflight.txt
             test-flow-app-mountinfo.txt
             test-flow-logcat.txt
             test-flow-module-state.txt
@@ -723,21 +744,12 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - name: Delete incomplete draft GitHub Release
-        if: needs.init-release.result == 'success' && needs.publish-release.result != 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$(gh release view "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isDraft \
-            --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
-            gh release delete "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --yes
-          fi
+      - name: 保留失败 Release 诊断资源
+        if: needs.publish-release.result != 'success'
+        run: echo "保留草稿 Release 与测试流 artifact，供失败排查使用。"
 
       - name: Delete build artifacts from Actions storage
+        if: needs.publish-release.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
