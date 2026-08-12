@@ -997,12 +997,25 @@ wait_storage_ready() {
   return 1
 }
 
+request_android13_storage_mount() {
+  local sdk
+  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  if [ "$sdk" != "33" ]; then
+    return 0
+  fi
+  echo "initial_storage_recovery: request Android 13 vold mount"
+  adb shell "cmd storage mount all" >/dev/null 2>&1 || true
+  adb shell "vdc volume mount emulated;0" >/dev/null 2>&1 || true
+  adb shell "sm mount 'emulated;0'" >/dev/null 2>&1 || true
+}
+
 ensure_initial_storage_ready() {
   if wait_storage_ready "initial" 60; then
     return 0
   fi
 
   echo "initial_storage_recovery: request emulated volume remount"
+  request_android13_storage_mount
   adb shell "sm mount 'emulated;0'" >/dev/null 2>&1 || true
   if wait_storage_ready "initial-remount" 15; then
     echo "initial_storage_recovery: emulated storage recovered by remount"
@@ -1013,6 +1026,7 @@ ensure_initial_storage_ready() {
   adb reboot >/dev/null 2>&1 || true
   ADB_ROOT_MODE=""
   wait_boot_completed
+  request_android13_storage_mount
   wait_storage_ready "initial-reboot" 120
   detect_adb_root_mode
   echo "initial_storage_recovery: emulated storage recovered"
