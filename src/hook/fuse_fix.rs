@@ -231,7 +231,7 @@ fn install_target_if_enabled() {
     };
     if native_probe.is_some() {
         log::warn!(
-            "fuse fix diagnostic probe={} core_hooks={} extended_hooks={}",
+            "fuse fix diagnostic probe={} core_hooks={} extended_hooks={} compare_hooks=false",
             native_probe.as_deref().unwrap_or("unknown"),
             native_probe.as_deref() != Some("extended"),
             native_probe.as_deref() == Some("extended")
