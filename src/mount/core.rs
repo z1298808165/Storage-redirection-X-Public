@@ -127,6 +127,14 @@ impl MountPlanner {
             );
             return false;
         }
+        if !is_existing && self.is_file_monitor_enabled {
+            let display_path = self.monitor_display_path_for_backend(&metadata_path);
+            crate::logging::write_mount_prep_record(
+                &self.package_name,
+                &display_path,
+                &metadata_path,
+            );
+        }
 
         let Ok(c_path) = CString::new(metadata_path.as_str()) else {
             return false;
@@ -168,6 +176,28 @@ impl MountPlanner {
         }
 
         true
+    }
+
+    fn monitor_display_path_for_backend(&self, backend_path: &str) -> String {
+        let normalized = paths::normalize(backend_path);
+        let storage_root = paths::storage_user_root_for_user(self.user_id);
+        let mut candidate_roots = Vec::with_capacity(2);
+        let default_target = paths::default_redirect_target(&self.package_name, self.user_id);
+        candidate_roots.push(self.to_data_media_backend_path(&default_target));
+        if !self.redirect_target.is_empty() {
+            candidate_roots.push(self.to_data_media_backend_path(&self.redirect_target));
+        }
+
+        for root in candidate_roots {
+            if root.is_empty() {
+                continue;
+            }
+            if let Some(relative) = paths::relative_child_path(&normalized, &root) {
+                return paths::join(&storage_root, relative);
+            }
+        }
+
+        paths::data_media_to_storage_path(&normalized)
     }
 
     pub(super) fn ensure_read_only_tree_accessible(&self, path: &str) {

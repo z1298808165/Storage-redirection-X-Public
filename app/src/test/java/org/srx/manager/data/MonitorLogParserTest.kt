@@ -89,6 +89,27 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun keepsMountPreparationAlongsideCallerMkdir() {
+    val raw =
+        listOf(
+                "2026-06-10 10:20:01|com.coloros.gallery3d|com.coloros.gallery3d|MKDIR|" +
+                    "/storage/emulated/0/.MediaTrash|ret=0|errno=0|identify_method=mount_prep|" +
+                    "identify_reliability=high|op=mkdir|source=mount_prep|" +
+                    "backend=/data/media/0/Android/data/com.coloros.gallery3d/sdcard/.MediaTrash",
+                "2026-06-10 10:20:20|com.android.providers.media.module|bin.mt.plus|MKDIR|" +
+                    "/storage/emulated/0/.MediaTrash|ret=0|errno=0|identify_method=caller|" +
+                    "identify_reliability=high|op=mkdir",
+            )
+            .joinToString("\n")
+
+    val entries = parseMonitorLogEntries(raw)
+
+    assertEquals(2, entries.size)
+    assertEquals("mount_prep", entries.last().identifyMethod)
+    assertEquals("bin.mt.plus", entries.first().callerPackage)
+  }
+
+  @Test
   fun coalescesAppOpenWriteBeforeProviderCreate() {
     val raw =
         listOf(

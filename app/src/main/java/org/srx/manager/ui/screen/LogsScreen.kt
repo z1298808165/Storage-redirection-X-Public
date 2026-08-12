@@ -1048,6 +1048,7 @@ private fun logIdentifyMethodText(method: String): String =
       "query_access" -> "媒体查询记录"
       "module_export" -> "模块导出记录"
       "provider_open" -> "Provider 打开请求"
+      "mount_prep" -> "挂载准备"
       "media_provider_fallback" -> "MediaProvider 回退"
       "thread_name" -> "线程名"
       "java_stack" -> "Java 栈推断"

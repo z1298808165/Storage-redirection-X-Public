@@ -274,7 +274,8 @@ private fun LogEntry.coalesceKey(): String {
   val isDiagnosticArchive = finalPath.isDiagnosticLogArchivePath()
   val coalescePath = finalPath.diagnosticArchiveCoalescePath().normalizedStoragePathForCoalesce()
   val op =
-      if (isDiagnosticArchive) "diagnostic_export"
+      if (source == "mount_prep") "mount_prep"
+      else if (isDiagnosticArchive) "diagnostic_export"
       else filterOperation.ifBlank { operation }.normalizedMonitorOperation()
   return listOf(
           timestamp.take(16),

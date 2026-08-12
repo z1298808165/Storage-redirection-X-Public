@@ -179,6 +179,55 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
     }
 }
 
+pub fn write_mount_prep_record(package_name: &str, path: &str, backend_path: &str) {
+    if package_name.is_empty() || path.is_empty() {
+        return;
+    }
+    let timestamp = build_file_monitor_timestamp();
+    if timestamp.is_empty() {
+        return;
+    }
+    let mut line = format!(
+        "{}|{}|{}|MKDIR|{}|ret=0|errno=0|identify_method=mount_prep|identify_reliability=high|op=mkdir|source=mount_prep",
+        timestamp, package_name, package_name, path,
+    );
+    if !backend_path.is_empty() {
+        line.push_str("|backend=");
+        line.push_str(backend_path);
+    }
+    write_log(Level::Info, FILE_MONITOR_LOG_TAG, &line);
+}
+
+fn build_file_monitor_timestamp() -> String {
+    let mut now: libc::time_t = 0;
+    // SAFETY: libc::time 仅写入由本函数独占的有效 time_t 指针。
+    unsafe { libc::time(&mut now as *mut _) };
+
+    // SAFETY: libc::tm 是可按字节置零的 C 时间结构，后续由 localtime_r 完整填充。
+    let mut tm_value: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r 接收有效时间值和本地可写结构，返回指针仅用于空指针判断。
+    let tm_ptr = unsafe { libc::localtime_r(&now as *const _, &mut tm_value as *mut _) };
+    if tm_ptr.is_null() {
+        return String::new();
+    }
+
+    let mut buffer = [0u8; 32];
+    let format = b"%Y-%m-%d %H:%M:%S\0";
+    // SAFETY: strftime 使用有效格式、可写缓冲区及已初始化的 tm 结构，并受缓冲区长度约束。
+    let written = unsafe {
+        libc::strftime(
+            buffer.as_mut_ptr() as *mut _,
+            buffer.len(),
+            format.as_ptr() as *const _,
+            &tm_value as *const _,
+        )
+    };
+    if written == 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buffer[..written]).to_string()
+}
+
 fn is_record_enabled(metadata: &Metadata) -> bool {
     if !is_level_enabled(map_log_level(metadata.level())) {
         return false;
