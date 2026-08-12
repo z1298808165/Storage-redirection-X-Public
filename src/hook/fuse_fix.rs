@@ -151,7 +151,7 @@ fn install_target_if_enabled() {
     if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level()) {
         if !INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel) {
             log::warn!(
-                "fuse fix native hooks skipped on Android 14 x86_64; Java media mutation remains active"
+                "fuse fix native hooks skipped on Android 13/14 x86_64; Java media mutation remains active"
             );
         }
         return;
@@ -254,7 +254,7 @@ fn find_first_plt_slot(elf: &ElfImg, symbol: &str) -> *mut c_void {
 }
 
 fn should_skip_native_fuse_fix_for_platform(api_level: i32) -> bool {
-    cfg!(target_arch = "x86_64") && api_level == 34
+    cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
 }
 
 fn register_compare_hooks_once() {
