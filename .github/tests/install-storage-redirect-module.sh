@@ -361,6 +361,7 @@ install_storage_redirect_module
 seed_storage_redirect_test_environment
 if [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
   adb_root "setprop persist.debug.srx.fuse_probe '$PERSIST_SRX_FUSE_PROBE'"
+  adb_root "printf '%s\\n' '$PERSIST_SRX_FUSE_PROBE' > /data/adb/modules/storage.redirect.x/.fuse_probe"
   echo "持久 Fuse 探针属性已在模块重启前写入：$PERSIST_SRX_FUSE_PROBE"
 fi
 adb reboot
