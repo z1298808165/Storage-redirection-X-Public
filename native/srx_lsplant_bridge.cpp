@@ -486,8 +486,7 @@ int SrxFuseFixInstall(void *is_app_accessible_path, void *is_package_owned_path,
                       void *is_bpf_backing_path,
                       void *should_open_with_fuse, void *reply_open_slot,
                       void *reply_create_slot, void *passthrough_enable_slot,
-                      void *passthrough_open_slot,
-                      bool install_extended_hooks) {
+                      void *passthrough_open_slot) {
   if (srx_inline_hook_init(SRX_INLINE_HOOK_MODE_UNIQUE, false) != 0)
     return -1;
 
@@ -513,17 +512,12 @@ int SrxFuseFixInstall(void *is_app_accessible_path, void *is_package_owned_path,
                          &g_fuse_fix_is_bpf_backing_stub)) {
     installed++;
   }
-  if (install_extended_hooks && InstallFuseFixHook(
+  if (InstallFuseFixHook(
           should_open_with_fuse,
           reinterpret_cast<void *>(SrxFuseFixShouldOpenWithFuse),
           reinterpret_cast<void **>(&g_orig_should_open_with_fuse),
           &g_fuse_fix_should_open_with_fuse_stub)) {
     installed++;
-  }
-  if (!install_extended_hooks) {
-    LogInfoIfVerbose(
-        "[RsInfo] fuse fix core hooks only; extended passthrough hooks disabled");
-    return installed;
   }
   if (InstallFuseFixHook(ResolveDefaultSymbol("fuse_reply_open"),
                          reinterpret_cast<void *>(SrxFuseFixReplyOpen),
@@ -658,13 +652,11 @@ extern "C" int srx_fuse_fix_install(void *is_app_accessible_path,
                                       void *reply_open_slot,
                                       void *reply_create_slot,
                                       void *passthrough_enable_slot,
-                                       void *passthrough_open_slot,
-                                       bool install_extended_hooks) {
+                                       void *passthrough_open_slot) {
   return SrxFuseFixInstall(is_app_accessible_path, is_package_owned_path,
                            is_bpf_backing_path, should_open_with_fuse,
                            reply_open_slot, reply_create_slot,
-                            passthrough_enable_slot, passthrough_open_slot,
-                            install_extended_hooks);
+                            passthrough_enable_slot, passthrough_open_slot);
 }
 
 extern "C" bool srx_lsplant_init(JNIEnv *env) {

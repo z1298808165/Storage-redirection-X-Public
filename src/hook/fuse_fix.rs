@@ -53,7 +53,6 @@ unsafe extern "C" {
         reply_create_slot: *mut c_void,
         passthrough_enable_slot: *mut c_void,
         passthrough_open_slot: *mut c_void,
-        install_extended_hooks: bool,
     ) -> i32;
     fn srx_fuse_fix_is_installed() -> bool;
     fn srx_fuse_fix_set_enabled(enabled: bool);
@@ -149,12 +148,13 @@ fn install_target_if_enabled() {
         INSTALL_ATTEMPTED.store(true, Ordering::Relaxed);
         return;
     }
-    let install_extended_hooks =
-        !should_disable_extended_hooks_for_platform(crate::platform::android_api_level());
-    if !install_extended_hooks && !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
-        log::warn!(
-            "fuse fix extended native hooks disabled on Android 13/14 x86_64; core FuseFix hooks remain active"
-        );
+    if should_skip_native_fuse_fix_for_platform(crate::platform::android_api_level()) {
+        if !INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel) {
+            log::warn!(
+                "fuse fix native hooks skipped on Android 13/14 x86_64; Java media mutation remains active"
+            );
+        }
+        return;
     }
     if !enabled && !DISABLED_LOGGED.swap(true, Ordering::Relaxed) {
         log::info!(
@@ -197,7 +197,6 @@ fn install_target_if_enabled() {
             reply_create_slot,
             passthrough_enable_slot,
             passthrough_open_slot,
-            install_extended_hooks,
         )
     };
     if installed > 0 {
@@ -254,7 +253,7 @@ fn find_first_plt_slot(elf: &ElfImg, symbol: &str) -> *mut c_void {
         .unwrap_or(std::ptr::null_mut())
 }
 
-fn should_disable_extended_hooks_for_platform(api_level: i32) -> bool {
+fn should_skip_native_fuse_fix_for_platform(api_level: i32) -> bool {
     cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
 }
 
