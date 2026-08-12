@@ -596,7 +596,7 @@ jobs:
           done
 
       - name: Run Android test-flow scenarios
-        if: env.PERSIST_SRX_FUSE_PROBE == '' || matrix.android.api == 34
+        if: ${{ (!contains(github.event.head_commit.message, 'Fuse 探针单场景触发') && !contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker')) || matrix.android.api == 34 }}
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
           api-level: ${{ matrix.android.api }}
@@ -611,7 +611,7 @@ jobs:
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Skip non-target probe shard
-        if: env.PERSIST_SRX_FUSE_PROBE != '' && matrix.android.api != 34
+        if: ${{ (contains(github.event.head_commit.message, 'Fuse 探针单场景触发') || contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker')) && matrix.android.api != 34 }}
         run: echo "仅验证 Fuse 探针：跳过 Android ${{ matrix.android.version }} 测试分片"
 
       - name: Upload test-flow artifacts
