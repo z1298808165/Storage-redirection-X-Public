@@ -530,7 +530,7 @@ jobs:
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
-      # 需要跨版本对比证据时，用不带 --failed 的完整重跑单独获取；全量组合比较探针仅验证 Android14 场景1。
+      # 需要跨版本对比证据时，用不带 --failed 的完整重跑单独获取；探针模式统一仅验证 Android14 场景1。
       fail-fast: true
       matrix:
         android:
