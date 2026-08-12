@@ -67,29 +67,6 @@ prepare_device_health() {
   fi
 }
 
-prepare_post_install_health() {
-  local recovery
-  if wait_for_emulated_storage 120; then
-    return 0
-  fi
-
-  for recovery in 1 2; do
-    echo "模块安装后共享存储恢复尝试 ${recovery}/2" >&2
-    adb shell "sm mount 'emulated;0'" >/dev/null 2>&1 || true
-    if wait_for_emulated_storage 30; then
-      return 0
-    fi
-    adb reboot >/dev/null 2>&1 || true
-    if ! wait_for_adb_ready; then
-      break
-    fi
-  done
-
-  capture_preflight_diagnostics
-  echo "模块安装后共享存储仍不可用" >&2
-  return 1
-}
-
 prepare_device_health
 
 TEST_APP_APK="$(find tests/storage-redirect-test/app/build/outputs/apk/debug -maxdepth 1 -name '*-debug.apk' -print -quit)"
@@ -102,8 +79,6 @@ fi
 MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
   APP_APK="$TEST_APP_APK" \
   bash .github/tests/install-storage-redirect-module.sh
-
-prepare_post_install_health
 
 adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
 export SRT_SKIP_FINAL_CLEANUP=1
