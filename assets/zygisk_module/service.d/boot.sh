@@ -44,14 +44,6 @@ restart_media_provider_for_deferred_hooks() {
   fi
   rm -f "$MEDIA_HOOK_DEFERRED_FILE"
 
-  sdk=$(getprop ro.build.version.sdk 2>/dev/null || true)
-  case "$sdk" in
-    33|34)
-      log -p i -t Boot "skip MediaProvider restart for deferred srx hooks sdk=$sdk"
-      return 0
-      ;;
-  esac
-
   media_pkgs=$(pm list packages 2>/dev/null |
     sed -n 's/^package://p' |
     grep -E '^(com\.android\.providers\.media|com\.android\.providers\.media\.module|com\.google\.android\.providers\.media\.module)$')
