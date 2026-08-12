@@ -206,6 +206,29 @@ fn install_target_if_enabled() {
                 is_bpf_backing_path,
             )
         };
+    let (
+        should_open_with_fuse,
+        reply_open_slot,
+        reply_create_slot,
+        passthrough_enable_slot,
+        passthrough_open_slot,
+    ) = if native_probe.as_deref() == Some("core") {
+        (
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } else {
+        (
+            should_open_with_fuse,
+            reply_open_slot,
+            reply_create_slot,
+            passthrough_enable_slot,
+            passthrough_open_slot,
+        )
+    };
     if native_probe.is_some() {
         log::warn!(
             "fuse fix diagnostic probe={} core_hooks={} extended_hooks={}",
