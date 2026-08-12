@@ -77,9 +77,11 @@ if [ -z "$TEST_APP_APK" ]; then
 fi
 
 if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
+  adb shell setprop persist.debug.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE" >/dev/null 2>&1 || true
   adb shell setprop debug.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE" >/dev/null 2>&1 || true
   probe_value="$(adb shell getprop debug.srx.fuse_probe 2>/dev/null | tr -d '\r' || true)"
-  echo "fuse_probe_property=$probe_value"
+  persist_probe_value="$(adb shell getprop persist.debug.srx.fuse_probe 2>/dev/null | tr -d '\r' || true)"
+  echo "fuse_probe_property=$probe_value persist_fuse_probe_property=$persist_probe_value"
   export SRT_SCENARIOS="1"
 fi
 

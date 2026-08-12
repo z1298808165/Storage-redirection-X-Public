@@ -149,6 +149,7 @@ fn install_target_if_enabled() {
         return;
     }
     let native_probe = crate::platform::system_property_get("debug.srx.fuse_probe")
+        .or_else(|| crate::platform::system_property_get("persist.debug.srx.fuse_probe"))
         .filter(|probe| matches!(probe.as_str(), "core" | "extended" | "all" | "all_compare"));
     if let Some(probe) = native_probe.as_deref() {
         log::warn!(
