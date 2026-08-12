@@ -526,7 +526,7 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
-      PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '全量探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
+      PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '全量组合探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
@@ -596,6 +596,7 @@ jobs:
           done
 
       - name: Run Android test-flow scenarios
+        if: env.PERSIST_SRX_FUSE_PROBE == '' || matrix.android.api == 34
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
           api-level: ${{ matrix.android.api }}
@@ -608,6 +609,10 @@ jobs:
           emulator-boot-timeout: 1500
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
           script: bash .github/tests/run-android-test-flow.sh
+
+      - name: Skip non-target probe shard
+        if: env.PERSIST_SRX_FUSE_PROBE != '' && matrix.android.api != 34
+        run: echo "仅验证 Fuse 探针：跳过 Android ${{ matrix.android.version }} 测试分片"
 
       - name: Upload test-flow artifacts
         if: always() && hashFiles('scenario-*-result.txt', 'scenario-2-mediastore-hook-diag.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
