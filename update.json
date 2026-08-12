@@ -13,15 +13,15 @@
     "releaseNotes": "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 改进 scoped FUSE 文件保存、原子替换和同步操作的兼容性，避免部分应用保存或覆盖文件时失败。\n- 修复放行实际路径与路径映射视图的可见性和写入权限问题，同时保留公共存储文件的 `media_rw` 元数据。\n- 修复 MediaStore 与系统代写公共媒体文件时的归因、保存和存储路由一致性问题。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、系统媒体进程和挂载状态完整加载新版本。\n- 重启后建议确认已配置应用的文件保存位置和公共媒体写入结果符合预期。\n\n## App 更新\n\n### 修复了什么问题\n\n- App 与 WebUI 检查更新时会在主要更新清单源不可用时自动切换到镜像源，提高更新信息获取的可用性。"
   },
   "beta": {
-    "version": "1.2.59-ci.95",
-    "tag": "ci-build-31235966235-2",
-    "title": "CI Build 1.2.59-ci.95",
-    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-31235966235-2",
+    "version": "1.2.59-ci.96",
+    "tag": "ci-build-31547094519-4",
+    "title": "CI Build 1.2.59-ci.96",
+    "url": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/tag/ci-build-31547094519-4",
     "repository": "z1298808165/Storage-redirection-X-Public",
     "prerelease": true,
-    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-31235966235-2/storage-redirect-x-manager-v1.2.59-ci.95.apk",
-    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-31235966235-2/storage.redirect.x-v1.2.59-ci.95.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.95`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-31155475128-1`\n- 当前提交：`60519d5`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复重定向策略与调用方识别的一组问题：仅在启用重定向时清理 MediaStore 父目录、补齐 MediaStore 父目录调用方归因。\n- 修复核心逻辑的一组问题：延后清理异步创建的 MediaStore 父目录、清理 MediaStore 公共空父目录、撤销 MediaStore 公共父目录修复与强断言、避免 MediaStore 创建公共父目录。\n- 修复媒体代写与系统存储链路相关问题：保留 MediaProvider 嵌套写入的调用者重定向。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## 其它更新\n\n### 修复了什么问题\n- 修复核心逻辑相关问题：撤销 MediaStore 公共父目录修复与强断言。"
+    "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-31547094519-4/storage-redirect-x-manager-v1.2.59-ci.96.apk",
+    "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-31547094519-4/storage.redirect.x-v1.2.59-ci.96.zip",
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.59-ci.96`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-31235966235-2`\n- 当前提交：`24cdf3a`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复媒体代写与系统存储链路的一组问题：延长虚拟目录作用域、正确处理已存在的重定向目录、补齐虚拟目录存在性与允许父路径、完成 MediaProvider 公共目录虚拟化判定等。\n- 修复 FUSE、挂载和路径映射相关问题：隔离挂载传播并回收应用会话。\n- 修复核心逻辑的一组问题：消除 media direct parent 递归导致的日志洪水、阻止 provider 直通期间公共目录侧漏、精确查找系统文件系统 native 目录入口、使用 bootstrap 加载 framework FileUtils 等。\n- 修复重定向策略与调用方识别相关问题：补齐 FileUtils 目录创建重定向。\n\n### 注意事项\n- 本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径。\n\n## 其它更新\n\n### 修复了什么问题\n- 修复媒体代写与系统存储链路相关问题：延长虚拟目录作用域。"
   },
   "releases": []
 }
