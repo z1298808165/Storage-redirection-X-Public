@@ -486,7 +486,8 @@ int SrxFuseFixInstall(void *is_app_accessible_path, void *is_package_owned_path,
                       void *is_bpf_backing_path,
                       void *should_open_with_fuse, void *reply_open_slot,
                       void *reply_create_slot, void *passthrough_enable_slot,
-                      void *passthrough_open_slot) {
+                      void *passthrough_open_slot,
+                      bool allow_process_wide_fallback) {
   if (srx_inline_hook_init(SRX_INLINE_HOOK_MODE_UNIQUE, false) != 0)
     return -1;
 
@@ -519,57 +520,69 @@ int SrxFuseFixInstall(void *is_app_accessible_path, void *is_package_owned_path,
           &g_fuse_fix_should_open_with_fuse_stub)) {
     installed++;
   }
-  if (InstallFuseFixHook(ResolveDefaultSymbol("fuse_reply_open"),
-                         reinterpret_cast<void *>(SrxFuseFixReplyOpen),
-                         reinterpret_cast<void **>(&g_orig_fuse_reply_open),
-                         &g_fuse_fix_reply_open_stub)) {
-    installed++;
-  } else if (PatchFuseFixPltSlot(
-                 reply_open_slot, reinterpret_cast<void *>(SrxFuseFixReplyOpen),
+  // 优先改调用方 PLT 槽，把兼容逻辑限制在 MediaProvider；探针关闭时不回退到
+  // process-wide 符号 hook，避免把 libc/libfuse 的其它调用一并改写。
+  if (reply_open_slot != nullptr) {
+    if (PatchFuseFixPltSlot(
+            reply_open_slot, reinterpret_cast<void *>(SrxFuseFixReplyOpen),
+            reinterpret_cast<void **>(&g_orig_fuse_reply_open),
+            &g_fuse_fix_reply_open_stub)) {
+      installed++;
+    }
+  } else if (allow_process_wide_fallback && InstallFuseFixHook(
+                 ResolveDefaultSymbol("fuse_reply_open"),
+                 reinterpret_cast<void *>(SrxFuseFixReplyOpen),
                  reinterpret_cast<void **>(&g_orig_fuse_reply_open),
                  &g_fuse_fix_reply_open_stub)) {
     installed++;
   }
-  if (InstallFuseFixHook(ResolveDefaultSymbol("fuse_reply_create"),
-                         reinterpret_cast<void *>(SrxFuseFixReplyCreate),
-                         reinterpret_cast<void **>(&g_orig_fuse_reply_create),
-                         &g_fuse_fix_reply_create_stub)) {
-    installed++;
-  } else if (PatchFuseFixPltSlot(
-                 reply_create_slot,
+  if (reply_create_slot != nullptr) {
+    if (PatchFuseFixPltSlot(
+            reply_create_slot,
+            reinterpret_cast<void *>(SrxFuseFixReplyCreate),
+            reinterpret_cast<void **>(&g_orig_fuse_reply_create),
+            &g_fuse_fix_reply_create_stub)) {
+      installed++;
+    }
+  } else if (allow_process_wide_fallback && InstallFuseFixHook(
+                 ResolveDefaultSymbol("fuse_reply_create"),
                  reinterpret_cast<void *>(SrxFuseFixReplyCreate),
                  reinterpret_cast<void **>(&g_orig_fuse_reply_create),
                  &g_fuse_fix_reply_create_stub)) {
     installed++;
   }
-  if (InstallFuseFixHook(
-          ResolveDefaultSymbol("fuse_passthrough_enable"),
-          reinterpret_cast<void *>(SrxFuseFixPassthroughEnable),
-          reinterpret_cast<void **>(&g_orig_fuse_passthrough_enable),
-          &g_fuse_fix_passthrough_enable_stub)) {
-    installed++;
-  } else if (PatchFuseFixPltSlot(
-                 passthrough_enable_slot,
+  if (passthrough_enable_slot != nullptr) {
+    if (PatchFuseFixPltSlot(
+            passthrough_enable_slot,
+            reinterpret_cast<void *>(SrxFuseFixPassthroughEnable),
+            reinterpret_cast<void **>(&g_orig_fuse_passthrough_enable),
+            &g_fuse_fix_passthrough_enable_stub)) {
+      installed++;
+    }
+  } else if (allow_process_wide_fallback && InstallFuseFixHook(
+                 ResolveDefaultSymbol("fuse_passthrough_enable"),
                  reinterpret_cast<void *>(SrxFuseFixPassthroughEnable),
                  reinterpret_cast<void **>(&g_orig_fuse_passthrough_enable),
                  &g_fuse_fix_passthrough_enable_stub)) {
     installed++;
   }
-  if (InstallFuseFixHook(
-          ResolveDefaultSymbol("fuse_passthrough_open"),
-          reinterpret_cast<void *>(SrxFuseFixPassthroughOpen),
-          reinterpret_cast<void **>(&g_orig_fuse_passthrough_open),
-          &g_fuse_fix_passthrough_open_stub)) {
-    installed++;
-  } else if (PatchFuseFixPltSlot(
-                 passthrough_open_slot,
+  if (passthrough_open_slot != nullptr) {
+    if (PatchFuseFixPltSlot(
+            passthrough_open_slot,
+            reinterpret_cast<void *>(SrxFuseFixPassthroughOpen),
+            reinterpret_cast<void **>(&g_orig_fuse_passthrough_open),
+            &g_fuse_fix_passthrough_open_stub)) {
+      installed++;
+    }
+  } else if (allow_process_wide_fallback && InstallFuseFixHook(
+                 ResolveDefaultSymbol("fuse_passthrough_open"),
                  reinterpret_cast<void *>(SrxFuseFixPassthroughOpen),
                  reinterpret_cast<void **>(&g_orig_fuse_passthrough_open),
                  &g_fuse_fix_passthrough_open_stub)) {
     installed++;
   }
   LogInfoIfVerbose(
-      "[RsInfo] fuse fix native hooks installed=%d app_accessible=%d package_owned=%d bpf_backing=%d should_open=%d reply_open=%d reply_create=%d passthrough_enable=%d passthrough_open=%d",
+      "[RsInfo] fuse fix native hooks installed=%d app_accessible=%d package_owned=%d bpf_backing=%d should_open=%d reply_open=%d reply_create=%d passthrough_enable=%d passthrough_open=%d process_wide_fallback=%d",
       installed, g_fuse_fix_is_app_accessible_stub != nullptr,
       g_fuse_fix_is_package_owned_stub != nullptr,
       g_fuse_fix_is_bpf_backing_stub != nullptr,
@@ -577,7 +590,7 @@ int SrxFuseFixInstall(void *is_app_accessible_path, void *is_package_owned_path,
       g_fuse_fix_reply_open_stub != nullptr,
       g_fuse_fix_reply_create_stub != nullptr,
       g_fuse_fix_passthrough_enable_stub != nullptr,
-      g_fuse_fix_passthrough_open_stub != nullptr);
+      g_fuse_fix_passthrough_open_stub != nullptr, allow_process_wide_fallback);
   return installed;
 }
 
@@ -652,11 +665,13 @@ extern "C" int srx_fuse_fix_install(void *is_app_accessible_path,
                                       void *reply_open_slot,
                                       void *reply_create_slot,
                                       void *passthrough_enable_slot,
-                                       void *passthrough_open_slot) {
+                                       void *passthrough_open_slot,
+                                       bool allow_process_wide_fallback) {
   return SrxFuseFixInstall(is_app_accessible_path, is_package_owned_path,
                            is_bpf_backing_path, should_open_with_fuse,
                            reply_open_slot, reply_create_slot,
-                            passthrough_enable_slot, passthrough_open_slot);
+                           passthrough_enable_slot, passthrough_open_slot,
+                           allow_process_wide_fallback);
 }
 
 extern "C" bool srx_lsplant_init(JNIEnv *env) {

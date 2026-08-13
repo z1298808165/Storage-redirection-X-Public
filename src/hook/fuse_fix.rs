@@ -54,6 +54,7 @@ unsafe extern "C" {
         reply_create_slot: *mut c_void,
         passthrough_enable_slot: *mut c_void,
         passthrough_open_slot: *mut c_void,
+        allow_process_wide_fallback: bool,
     ) -> i32;
     fn srx_fuse_fix_is_installed() -> bool;
     fn srx_fuse_fix_set_enabled(enabled: bool);
@@ -270,6 +271,7 @@ fn install_target_if_enabled() {
             reply_create_slot,
             passthrough_enable_slot,
             passthrough_open_slot,
+            native_probe.is_none(),
         )
     };
     if installed > 0 {
@@ -278,7 +280,7 @@ fn install_target_if_enabled() {
             .unwrap_or_else(|err| err.into_inner())
             .clone();
         log::info!(
-            "fuse fix installed pkg={} hooks={} app_accessible={} package_owned={} bpf_backing={} should_open_with_fuse={} reply_open_slot={} reply_create_slot={} passthrough_enable_slot={} passthrough_open_slot={}",
+            "fuse fix installed pkg={} hooks={} app_accessible={} package_owned={} bpf_backing={} should_open_with_fuse={} reply_open_slot={} reply_create_slot={} passthrough_enable_slot={} passthrough_open_slot={} process_wide_fallback={}",
             package_name,
             installed,
             !is_app_accessible_path.is_null(),
@@ -288,7 +290,8 @@ fn install_target_if_enabled() {
             !reply_open_slot.is_null(),
             !reply_create_slot.is_null(),
             !passthrough_enable_slot.is_null(),
-            !passthrough_open_slot.is_null()
+            !passthrough_open_slot.is_null(),
+            native_probe.is_none()
         );
     } else {
         INSTALL_ATTEMPTED.store(false, Ordering::Release);
