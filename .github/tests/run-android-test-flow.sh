@@ -69,6 +69,9 @@ prepare_device_health() {
 
 prepare_device_health
 
+# CI 模拟器只保留 FuseFix 属性诊断，不安装 native FuseFix hook。
+export SRT_FUSE_FIX_ENABLED=false
+
 TEST_APP_APK="$(find tests/storage-redirect-test/app/build/outputs/apk/debug -maxdepth 1 -name '*-debug.apk' -print -quit)"
 if [ -z "$TEST_APP_APK" ]; then
   echo "No test app debug APK found under tests/storage-redirect-test/app/build/outputs/apk/debug." >&2
