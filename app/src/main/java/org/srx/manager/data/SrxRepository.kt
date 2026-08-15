@@ -47,6 +47,8 @@ class SrxRepository(
     const val RootFileCopyTimeoutMs = 120_000L
     /** 等待 stderr 消费线程收尾的时间，仅为回收线程，不影响导出结果。 */
     const val StderrDrainJoinMs = 1_000L
+    /** tar.gz 需要保留双扩展名，使用通用 MIME 兼容不识别 application/gzip 的文件客户端。 */
+    const val DiagnosticArchiveMimeType = "application/octet-stream"
   }
 
   private data class TimedCache<T>(val value: T, val loadedAtNanos: Long)
@@ -361,7 +363,12 @@ class SrxRepository(
     val parentUri = DocumentsContract.buildDocumentUriUsingTree(directoryUri, treeDocumentId)
     val fileUri =
         runCatching {
-              DocumentsContract.createDocument(resolver, parentUri, "application/gzip", fileName)
+              DocumentsContract.createDocument(
+                  resolver,
+                  parentUri,
+                  DiagnosticArchiveMimeType,
+                  fileName,
+              )
             }
             .getOrNull() ?: return false
     val ok = copyRootFileToUri(archivePath, fileUri)

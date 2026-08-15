@@ -230,17 +230,9 @@ public class Hooker {
       }
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
       if (!redirectEnabled) {
-        enterProviderInternalCall();
-        try {
-          Object mappedResult = tryOpenMappedMediaFile(args, callerUid);
-          if (mappedResult != null) {
-            recordProviderOpenSuccess(this, args, actualArgs, mappedResult, callerUid);
-            logOpenResult("owner_mapped", mappedResult);
-            return mappedResult;
-          }
-        } finally {
-          exitProviderInternalCall();
-        }
+        // 未开启重定向的调用方必须保持 MediaProvider 原始 URI/FD 语义。
+        // 这里若继续尝试映射文件，可能把未配置应用的原图读取带入其它调用方
+        // 的路径提示或映射目标，导致缩略图可见但原图打开失败。
         recordProviderOpenPath(this, args, actualArgs, callerUid);
         Object result = callBackupPassthrough(args);
         if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
