@@ -302,14 +302,14 @@ function Test-FuseDaemonScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 30) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 31) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 30) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 31) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -333,6 +333,7 @@ function Get-ScenarioList {
     }
     20..22 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(28) | Out-Null
+    $defaultScenarios.Add(31) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     if ($fuseSupported) {
         25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
@@ -419,6 +420,7 @@ function Apply-ScenarioConfig {
         28 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}' }
         29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         30 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
+        31 { Write-DeviceConfig '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}' }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -1445,6 +1447,7 @@ function Get-ScenarioTitle {
         28 { "MediaStore query keeps read-only real image visible" }
         29 { "config hot reload switches running app from default redirect to path mapping" }
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
+        31 { "disabled redirect keeps thumbnail and full image readable" }
     }
 }
 
@@ -1724,6 +1727,19 @@ function Invoke-MediaStoreReadOnlyQueryScenario {
     }
     $ok = $list.Ok -and $listHasImage -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-only-image-file-read" "file_read" @{ file_path = $logicalPath } "^PASS \[file_read\]").Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "read-only-media-real" $logicalPath) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "read-only-media-private" $privatePath) -and $ok
+    $ok
+}
+
+function Invoke-MediaStoreDisabledRedirectImageScenario {
+    param([int]$Scenario)
+    $logicalPath = "$ReadOnlyMediaRoot/$ReadOnlyImageFile"
+    $privatePath = "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
+    $ok = Wait-MediaStoreReadOnlyImage
+    $ok = (Require-Missing "scenario-$Scenario" "disabled-redirect-stale-map-target" "$RealRoot/Pictures/SrtLocked/$ReadOnlyImageFile") -and $ok
+    $result = Invoke-ServiceCase "scenario-$Scenario" "disabled-redirect-image-read" "mediastore_read_thumbnail_image" @{ file_name = $ReadOnlyImageFile; expected_path = $logicalPath } "^PASS \[mediastore_read_thumbnail_image\]"
+    $ok = $result.Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "read-only-media-real" $logicalPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "read-only-media-private" $privatePath) -and $ok
     $ok
@@ -2115,7 +2131,7 @@ function Invoke-Scenario {
     if ($Scenario -eq 9) { Set-ReadOnlySeed }
     if ($Scenario -eq 10) { Set-MappedReadOnlyTargets }
     if ($Scenario -eq 21) { Set-MountNamespaceReadOnlySeed }
-    if ($Scenario -eq 28) { Set-ReadOnlyMediaImage }
+    if ($Scenario -in @(28, 31)) { Set-ReadOnlyMediaImage }
     Restart-App "scenario-$Scenario" ($Scenario -ne 1)
     $scenarioOk = switch ($Scenario) {
         8 { Invoke-RuleSandboxScenario $Scenario }
@@ -2139,6 +2155,7 @@ function Invoke-Scenario {
         28 { Invoke-MediaStoreReadOnlyQueryScenario $Scenario }
         29 { Invoke-ConfigHotReloadScenario $Scenario }
         30 { Invoke-MediaStoreOpenTypedCollectionScenario $Scenario }
+        31 { Invoke-MediaStoreDisabledRedirectImageScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

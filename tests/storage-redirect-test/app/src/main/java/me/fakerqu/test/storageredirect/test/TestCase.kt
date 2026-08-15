@@ -45,6 +45,7 @@ enum class TestCase(val id: String) {
   MEDIASTORE_DELETE_DOWNLOAD("mediastore_delete_download"),
   MEDIASTORE_THUMBNAIL_IMAGE("mediastore_thumbnail_image"),
   MEDIASTORE_THUMBNAIL_VIDEO("mediastore_thumbnail_video"),
+  MEDIASTORE_READ_THUMBNAIL_IMAGE("mediastore_read_thumbnail_image"),
   MEDIASTORE_OPEN_TYPED_COLLECTION("mediastore_open_typed_collection"),
   FILE_LIST_DIR("file_list_dir"),
   FILE_CREATE("file_create"),
@@ -87,7 +88,8 @@ enum class TestCase(val id: String) {
         MEDIASTORE_READ_IMAGE,
         MEDIASTORE_WRITE_IMAGE,
         MEDIASTORE_DELETE_IMAGE,
-        MEDIASTORE_THUMBNAIL_IMAGE -> MediaStoreApi.MediaType.IMAGE
+        MEDIASTORE_THUMBNAIL_IMAGE,
+        MEDIASTORE_READ_THUMBNAIL_IMAGE -> MediaStoreApi.MediaType.IMAGE
 
         MEDIASTORE_QUERY_VIDEO,
         MEDIASTORE_QUERY_PATH_VIDEO,
@@ -233,6 +235,7 @@ enum class TestCase(val id: String) {
 
       MEDIASTORE_THUMBNAIL_IMAGE -> mediaStore.thumbnailImage(args)
       MEDIASTORE_THUMBNAIL_VIDEO -> mediaStore.thumbnailVideo(args)
+      MEDIASTORE_READ_THUMBNAIL_IMAGE -> mediaStore.readThumbnailImage(args)
       MEDIASTORE_OPEN_TYPED_COLLECTION -> mediaStore.openTypedAssetFileCollection()
 
       FILE_LIST_DIR -> file.listDir(args)

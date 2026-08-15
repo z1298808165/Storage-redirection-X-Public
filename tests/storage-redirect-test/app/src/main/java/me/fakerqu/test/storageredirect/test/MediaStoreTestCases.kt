@@ -1,5 +1,6 @@
 package me.fakerqu.test.storageredirect.test
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
@@ -136,6 +137,9 @@ class MediaStoreTestCases(
 
   fun thumbnailVideo(args: TestCaseArgs): TestResult =
       thumbnail(TestCase.MEDIASTORE_THUMBNAIL_VIDEO, args)
+
+  fun readThumbnailImage(args: TestCaseArgs): TestResult =
+      readThumbnailImage(TestCase.MEDIASTORE_READ_THUMBNAIL_IMAGE, args)
 
   fun openTypedAssetFileCollection(): TestResult =
       TestCase.MEDIASTORE_OPEN_TYPED_COLLECTION.measure {
@@ -462,6 +466,79 @@ class MediaStoreTestCases(
                         "width" to bitmap.width.toString(),
                         "height" to bitmap.height.toString(),
                     ),
+        )
+      }
+
+  private fun readThumbnailImage(
+      testCase: TestCase,
+      args: TestCaseArgs,
+  ): TestResult =
+      testCase.measure {
+        val expectedPath =
+            args.expectedPath ?: return@measure args.missingExpectedPathResult(testCase)
+        val fileName = args.fileName ?: expectedPath.substringAfterLast('/')
+        if (fileName.isBlank()) {
+          return@measure testCase.fail(
+              message = "missing required parameter: ${TestCaseArgs.EXTRA_FILE_NAME}",
+              metadata = mapOf("hint" to "pass file name via --es ${TestCaseArgs.EXTRA_FILE_NAME}"),
+          )
+        }
+        val rows =
+            api.getMedia(
+                MediaStoreApi.MediaType.IMAGE,
+                volume,
+                TestFixtures.projection(MediaStoreApi.MediaType.IMAGE),
+            )
+        val matched =
+            rows
+                .map { row -> row.associate { it.columnName to (it.value?.toString() ?: "") } }
+                .firstOrNull { row ->
+                  row[MediaStore.MediaColumns.DISPLAY_NAME] == fileName &&
+                      row[MediaStore.MediaColumns.DATA] == expectedPath
+                }
+                ?: return@measure testCase.fail(
+                    message = "media row not found at expected path",
+                    metadata = mapOf("fileName" to fileName, "expectedPath" to expectedPath),
+                )
+        val id = matched[MediaStore.Images.ImageColumns._ID]?.toLongOrNull()
+        if (id == null) {
+          return@measure testCase.fail(
+              message = "media row has no valid id",
+              metadata = mapOf("fileName" to fileName, "expectedPath" to expectedPath),
+          )
+        }
+        val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+        val bitmap = api.loadThumbnail(uri, Size(200, 200))
+        if (bitmap == null) {
+          return@measure testCase.fail(
+              message = "loadThumbnail returned null",
+              metadata = mapOf("uri" to uri.toString(), "expectedPath" to expectedPath),
+          )
+        }
+        val readBack = readMediaBytesWithRetry(uri)
+        val expected = TestFixtures.initialPayload(MediaStoreApi.MediaType.IMAGE)
+        if (readBack == null || !readBack.contentEquals(expected)) {
+          return@measure testCase.fail(
+              message = "full-size image read did not match expected payload",
+              metadata =
+                  mapOf(
+                      "uri" to uri.toString(),
+                      "expectedPath" to expectedPath,
+                      "expectedSize" to expected.size.toString(),
+                      "actualSize" to (readBack?.size ?: -1).toString(),
+                  ),
+          )
+        }
+        testCase.pass(
+            message = "thumbnail and full-size image read succeeded",
+            metadata =
+                mapOf(
+                    "uri" to uri.toString(),
+                    "expectedPath" to expectedPath,
+                    "bytesRead" to readBack.size.toString(),
+                    "thumbnailWidth" to bitmap.width.toString(),
+                    "thumbnailHeight" to bitmap.height.toString(),
+                ),
         )
       }
 

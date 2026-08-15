@@ -102,6 +102,21 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("is_public_default_sandbox_redirect(source_path, target_path)", directory)
         self.assertIn("libc::rmdir(c_path.as_ptr())", directory)
 
+    def test_disabled_provider_open_does_not_enter_mapped_file_branch(self) -> None:
+        java = read("java_src/org/srx/hook/Hooker.java")
+        callback = java[
+            java.index("public Object providerOpenCallback") : java.index(
+                "public Object providerMutationCallback"
+            )
+        ]
+        disabled_branch = callback[
+            callback.index("if (!redirectEnabled)") : callback.index(
+                "captureMediaSourceFileDescriptor", callback.index("if (!redirectEnabled)")
+            )
+        ]
+        self.assertNotIn("tryOpenMappedMediaFile", disabled_branch)
+        self.assertIn("callBackupPassthrough(args)", disabled_branch)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -380,6 +380,9 @@ apply_config() {
     30)
       write_config '{"users":{"0":{"enabled":true}}}'
       ;;
+    31)
+      write_config '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}'
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -450,6 +453,7 @@ scenario_title() {
     28) echo "MediaStore 查询：只读真实图片路径应对应用可见" ;;
     29) echo "配置热更新：运行中应用无需重启即可从默认重定向切换到路径映射" ;;
     30) echo "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录" ;;
+    31) echo "关闭重定向：缩略图与原图均按真实 MediaStore 路径读取" ;;
   esac
 }
 
@@ -579,7 +583,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 30 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 31 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -596,7 +600,7 @@ build_scenario_list() {
   else
     echo "skip fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
   fi
-  scenarios+=(9 10 11 12 13 14 15 29 30)
+  scenarios+=(9 10 11 12 13 14 15 29 30 31)
   if [ "$fuse_supported" = "1" ]; then
     scenarios+=(16 17 18 19)
   fi
@@ -2365,7 +2369,7 @@ run_scenario() {
       seed_read_only_targets
       targets_prepared_before_start=1
       ;;
-    28)
+    28|31)
       echo "step 2/7: 清理并预置只读媒体源文件"
       clean_targets
       prepare_read_only_media_image
@@ -2459,6 +2463,13 @@ run_scenario() {
     30)
       echo "step 5/7: 验证 MediaProvider 集合 URI 不执行媒体行重映射"
       run_mediastore_open_typed_collection_scenario "$scenario"
+      ;;
+    31)
+      echo "step 5/7: 验证关闭重定向时缩略图与原图均可读取"
+      check_file_missing "disabled-redirect-stale-map-target" "$REAL_ROOT/Pictures/SrtLocked/$READ_ONLY_IMAGE_FILE" &&
+        run_service_case "$scenario" "disabled-redirect-image-read" "mediastore_read_thumbnail_image" '^PASS \[mediastore_read_thumbnail_image\]' --es file_name "$READ_ONLY_IMAGE_FILE" --es expected_path "$READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE" &&
+        check_file_exists "disabled-redirect-image-real" "$READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE" &&
+        check_file_missing "disabled-redirect-image-private" "$PRIVATE_READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"

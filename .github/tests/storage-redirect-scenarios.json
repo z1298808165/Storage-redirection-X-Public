@@ -179,6 +179,12 @@
       "config_mode": "standard",
       "bash_title": "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录",
       "powershell_title": "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping"
+    },
+    {
+      "id": 31,
+      "config_mode": "standard",
+      "bash_title": "关闭重定向：缩略图与原图均按真实 MediaStore 路径读取",
+      "powershell_title": "disabled redirect keeps thumbnail and full image readable"
     }
   ]
 }
