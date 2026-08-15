@@ -185,6 +185,12 @@
       "config_mode": "standard",
       "bash_title": "关闭重定向：缩略图与原图均按真实 MediaStore 路径读取",
       "powershell_title": "disabled redirect keeps thumbnail and full image readable"
+    },
+    {
+      "id": 32,
+      "config_mode": "standard",
+      "bash_title": "真实后端失联恢复：MediaProvider 重启后应用无需重启即可继续保存图片",
+      "powershell_title": "real backend recovery keeps app alive after MediaProvider restart"
     }
   ]
 }

@@ -302,14 +302,14 @@ function Test-FuseDaemonScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 31) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 32) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 31) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 32) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -334,6 +334,7 @@ function Get-ScenarioList {
     20..22 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(28) | Out-Null
     $defaultScenarios.Add(31) | Out-Null
+    $defaultScenarios.Add(32) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     if ($fuseSupported) {
         25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
@@ -421,6 +422,7 @@ function Apply-ScenarioConfig {
         29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         30 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         31 { Write-DeviceConfig '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}' }
+        32 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -1346,6 +1348,35 @@ function Invoke-ConfigHotReloadScenario {
     }
 }
 
+function Invoke-BackendEndpointRecoveryScenario {
+    param([int]$Scenario)
+    $initialPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($initialPid)) {
+        $script:Failures.Add("scenario-$Scenario backend recovery app pid missing")
+        return $false
+    }
+    if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before")) { return $false }
+
+    $beforeFile = "srt_monitor_32_backend_before.jpg"
+    $afterFile = "srt_monitor_32_backend_after.jpg"
+    $expectedDir = "$RealRoot/Pictures/SrtRelativeData"
+    $ok = (Invoke-MediaStoreImageCreateCase $Scenario "backend-before" $beforeFile "Pictures/SrtRelativeData").Ok
+    $ok = (Require-File "scenario-$Scenario" "backend-before" "$expectedDir/$beforeFile") -and $ok
+    if (-not $ok) { return $false }
+
+    if (-not (Restart-MediaProviderWithHookReady "scenario-$Scenario-provider-restart")) { return $false }
+    if (-not (Wait-Storage "scenario-$Scenario-backend-recovery" 30)) { return $false }
+    $currentPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -ne $initialPid) {
+        $script:Failures.Add("scenario-$Scenario backend recovery app pid changed before=$initialPid after=$currentPid")
+        return $false
+    }
+
+    $ok = (Invoke-MediaStoreImageCreateCase $Scenario "backend-after" $afterFile "Pictures/SrtRelativeData").Ok
+    $ok = (Require-File "scenario-$Scenario" "backend-after" "$expectedDir/$afterFile") -and $ok
+    $ok
+}
+
 function Invoke-TestArtifactCleanup {
     if ($script:CleanupDone) { return }
     $script:CleanupDone = $true
@@ -1448,6 +1479,7 @@ function Get-ScenarioTitle {
         29 { "config hot reload switches running app from default redirect to path mapping" }
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
         31 { "disabled redirect keeps thumbnail and full image readable" }
+        32 { "real backend recovery keeps app alive after MediaProvider restart" }
     }
 }
 
@@ -2156,6 +2188,7 @@ function Invoke-Scenario {
         29 { Invoke-ConfigHotReloadScenario $Scenario }
         30 { Invoke-MediaStoreOpenTypedCollectionScenario $Scenario }
         31 { Invoke-MediaStoreDisabledRedirectImageScenario $Scenario }
+        32 { Invoke-BackendEndpointRecoveryScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
