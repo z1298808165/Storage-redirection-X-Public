@@ -561,6 +561,7 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             request.package_name
         );
     }
+    clear_previous_allowed_real_backend_mounts(request);
 
     if request.operation == MountOperation::Disable {
         let _ = send_mount_result(sock, 0);
@@ -1009,6 +1010,44 @@ fn clear_previous_mounts(plan: &MountForkPlan) -> bool {
     }
     let _ = std::fs::remove_file(state_path);
     ok
+}
+
+/// 清理允许真实目录在 `/data/media` 下遗留的系统 FUSE 子挂载。
+///
+/// 这类路径是本次请求从 `/storage` 配置推导出的后端目标，不写入状态文件，
+/// 因而不能交给通用的外部路径过滤。旧的 FUSE 子挂载即使仍出现在 mountinfo，
+/// 访问也可能返回 ENOTCONN；先在应用私有 namespace 中摘除它，后续挂载流程
+/// 才能重新绑定可用的后端目录。
+fn clear_previous_allowed_real_backend_mounts(request: &MountRequest) {
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let data_media_root = paths::data_media_user_root_for_user(user_id);
+    let mut targets = Vec::new();
+
+    for raw_path in &request.allowed_real_paths {
+        let Some(resolved) =
+            resolve_request_storage_path(request, raw_path, user_id, &storage_root)
+        else {
+            continue;
+        };
+        let Some(backend) = paths::storage_to_data_media_for_user(&resolved, user_id) else {
+            continue;
+        };
+        if backend == data_media_root || targets.iter().any(|target| target == &backend) {
+            continue;
+        }
+        targets.push(backend);
+    }
+
+    targets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
+    for target in targets {
+        if current_mount_target_count(&target) == 0 {
+            continue;
+        }
+        if clear_mount_target_stack(&target) {
+            log::info!("daemon cleared allowed real backend target={}", target);
+        }
+    }
 }
 
 fn clear_mount_target_stack(target: &str) -> bool {
