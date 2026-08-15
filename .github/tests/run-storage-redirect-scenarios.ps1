@@ -1356,6 +1356,11 @@ function Invoke-BackendEndpointRecoveryScenario {
         return $false
     }
     if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before")) { return $false }
+    $initialMediaPid = Get-MediaProviderPid
+    if ([string]::IsNullOrWhiteSpace($initialMediaPid)) {
+        $script:Failures.Add("scenario-$Scenario backend recovery media provider pid missing")
+        return $false
+    }
 
     $beforeFile = "srt_monitor_32_backend_before.jpg"
     $afterFile = "srt_monitor_32_backend_after.jpg"
@@ -1364,11 +1369,16 @@ function Invoke-BackendEndpointRecoveryScenario {
     $ok = (Require-File "scenario-$Scenario" "backend-before" "$expectedDir/$beforeFile") -and $ok
     if (-not $ok) { return $false }
 
-    if (-not (Restart-MediaProviderWithHookReady "scenario-$Scenario-provider-restart")) { return $false }
+    if (-not (Restart-App "scenario-$Scenario-app-restart" $true)) { return $false }
     if (-not (Wait-Storage "scenario-$Scenario-backend-recovery" 30)) { return $false }
     $currentPid = Get-AppPid
-    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -ne $initialPid) {
+    $currentMediaPid = Get-MediaProviderPid
+    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -eq $initialPid) {
         $script:Failures.Add("scenario-$Scenario backend recovery app pid changed before=$initialPid after=$currentPid")
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($currentMediaPid) -or $currentMediaPid -ne $initialMediaPid) {
+        $script:Failures.Add("scenario-$Scenario backend recovery media provider restarted before=$initialMediaPid after=$currentMediaPid")
         return $false
     }
 
@@ -1479,7 +1489,7 @@ function Get-ScenarioTitle {
         29 { "config hot reload switches running app from default redirect to path mapping" }
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
         31 { "disabled redirect keeps thumbnail and full image readable" }
-        32 { "real backend recovery keeps app alive after MediaProvider restart" }
+        32 { "real backend recovery survives app restart without restarting MediaProvider" }
     }
 }
 

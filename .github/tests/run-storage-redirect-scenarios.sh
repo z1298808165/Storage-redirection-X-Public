@@ -457,7 +457,7 @@ scenario_title() {
     29) echo "配置热更新：运行中应用无需重启即可从默认重定向切换到路径映射" ;;
     30) echo "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录" ;;
     31) echo "关闭重定向：缩略图与原图均按真实 MediaStore 路径读取" ;;
-    32) echo "真实后端失联恢复：MediaProvider 重启后应用无需重启即可继续保存图片" ;;
+    32) echo "真实后端失联恢复：应用重启后无需重启 MediaProvider 即可继续保存图片" ;;
   esac
 }
 
@@ -2187,7 +2187,7 @@ run_config_hot_reload_scenario() {
 
 run_backend_endpoint_recovery_scenario() {
   local scenario="$1"
-  local initial_pid current_pid
+  local initial_pid current_pid initial_media_pid current_media_pid
   local before_file="srt_monitor_32_backend_before.jpg"
   local after_file="srt_monitor_32_backend_after.jpg"
   local expected_dir="${REAL_ROOT}/Pictures/SrtRelativeData"
@@ -2198,14 +2198,26 @@ run_backend_endpoint_recovery_scenario() {
     return 1
   fi
   ensure_media_provider_hook_ready "scenario-${scenario}-before" || return 1
+  initial_media_pid="$(media_provider_pid)"
+  if [ -z "$initial_media_pid" ]; then
+    echo "backend_recovery_media_provider_pid_missing scenario=${scenario}" >&2
+    return 1
+  fi
   run_mediastore_image_create_case "$scenario" "backend-before" "$before_file" "Pictures/SrtRelativeData" &&
     check_file_exists "scenario-${scenario}-backend-before" "${expected_dir}/${before_file}" || return 1
 
-  restart_media_provider_with_hook_ready "scenario-${scenario}-provider-restart" || return 1
+  adb shell am force-stop "$APP_ID" >/dev/null || return 1
+  sleep 0.5
+  start_app_and_confirm_mount "scenario-${scenario}-app-restart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-backend-recovery" 30 >/dev/null || return 1
   current_pid="$(app_pid)"
-  if [ -z "$current_pid" ] || [ "$current_pid" != "$initial_pid" ]; then
+  current_media_pid="$(media_provider_pid)"
+  if [ -z "$current_pid" ] || [ "$current_pid" = "$initial_pid" ]; then
     echo "backend_recovery_pid_changed scenario=${scenario} before=${initial_pid} after=${current_pid:-missing}" >&2
+    return 1
+  fi
+  if [ -z "$current_media_pid" ] || [ "$current_media_pid" != "$initial_media_pid" ]; then
+    echo "backend_recovery_media_provider_restarted scenario=${scenario} before=${initial_media_pid} after=${current_media_pid:-missing}" >&2
     return 1
   fi
 
@@ -2504,7 +2516,7 @@ run_scenario() {
         check_file_missing "disabled-redirect-image-private" "$PRIVATE_READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
       ;;
     32)
-      echo "step 5/7: 验证 MediaProvider 重启后真实后端可恢复且应用 PID 不变"
+      echo "step 5/7: 验证应用重启后真实后端可恢复且 MediaProvider PID 不变"
       run_backend_endpoint_recovery_scenario "$scenario"
       ;;
     23)

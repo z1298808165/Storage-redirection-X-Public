@@ -189,8 +189,8 @@
     {
       "id": 32,
       "config_mode": "standard",
-      "bash_title": "真实后端失联恢复：MediaProvider 重启后应用无需重启即可继续保存图片",
-      "powershell_title": "real backend recovery keeps app alive after MediaProvider restart"
+      "bash_title": "真实后端失联恢复：应用重启后无需重启 MediaProvider 即可继续保存图片",
+      "powershell_title": "real backend recovery survives app restart without restarting MediaProvider"
     }
   ]
 }

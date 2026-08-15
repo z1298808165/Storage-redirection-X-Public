@@ -388,12 +388,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "function Invoke-BackendEndpointRecoveryScenario",
             "function Invoke-TestArtifactCleanup",
         )
-        self.assertIn("restart_media_provider_with_hook_ready", bash_scenario)
-        self.assertIn("provider-restart", bash_scenario)
+        self.assertIn('am force-stop "$APP_ID"', bash_scenario)
+        self.assertIn("app-restart", bash_scenario)
         self.assertIn("backend_recovery", bash_scenario)
         self.assertIn("pid", bash_scenario)
+        self.assertIn("Restart-App", ps_scenario)
+        self.assertIn("app-restart", ps_scenario)
         self.assertIn("MediaProvider", ps_scenario)
-        self.assertIn("provider-restart", ps_scenario)
         self.assertIn("backend recovery", ps_scenario)
         self.assertIn("pid", ps_scenario)
 
