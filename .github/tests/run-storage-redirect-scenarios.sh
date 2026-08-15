@@ -868,7 +868,7 @@ label_expects_mount() {
   local scenario
   scenario="$(scenario_from_label "$1")"
   case "$scenario" in
-    ""|1|23) return 1 ;;
+    ""|1|23|31) return 1 ;;
     *) return 0 ;;
   esac
 }
