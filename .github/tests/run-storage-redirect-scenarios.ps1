@@ -302,14 +302,14 @@ function Test-FuseDaemonScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 29) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 30) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 29) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 30) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -327,6 +327,7 @@ function Get-ScenarioList {
     }
     9..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(29) | Out-Null
+    $defaultScenarios.Add(30) | Out-Null
     if ($fuseSupported) {
         16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     }
@@ -417,6 +418,7 @@ function Apply-ScenarioConfig {
         }
         28 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}' }
         29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
+        30 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -1442,6 +1444,7 @@ function Get-ScenarioTitle {
         27 { "file monitor system writer with fuse daemon on" }
         28 { "MediaStore query keeps read-only real image visible" }
         29 { "config hot reload switches running app from default redirect to path mapping" }
+        30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
     }
 }
 
@@ -2083,6 +2086,19 @@ function Invoke-MountNamespaceReadOnlyWildcardFallbackScenario {
     $ok
 }
 
+function Invoke-MediaStoreOpenTypedCollectionScenario {
+    param([int]$Scenario)
+    Wait-MediaProviderReady "$Scenario/typed-collection" 60 | Out-Null
+    if (-not (Wait-MediaProviderHookReady "$Scenario/typed-collection" 60)) { return $false }
+    $result = Invoke-ServiceCase "scenario-$Scenario" "typed-collection" "mediastore_open_typed_collection" @{} "^PASS \[mediastore_open_typed_collection\]"
+    $logcat = (Invoke-Adb @("logcat", "-d", "-s", "SRX:V")) -join "`n"
+    if ($logcat -notmatch "java open delegate reason=collection_uri_passthrough") {
+        $script:Failures.Add("scenario-$Scenario/typed-collection missing collection URI passthrough log")
+        return $false
+    }
+    $result.Ok
+}
+
 function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
@@ -2122,6 +2138,7 @@ function Invoke-Scenario {
         27 { Invoke-MediaStoreMonitorScenario $Scenario }
         28 { Invoke-MediaStoreReadOnlyQueryScenario $Scenario }
         29 { Invoke-ConfigHotReloadScenario $Scenario }
+        30 { Invoke-MediaStoreOpenTypedCollectionScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

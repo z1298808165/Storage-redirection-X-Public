@@ -173,6 +173,12 @@
       "config_mode": "standard",
       "bash_title": "配置热更新：运行中应用无需重启即可从默认重定向切换到路径映射",
       "powershell_title": "config hot reload switches running app from default redirect to path mapping"
+    },
+    {
+      "id": 30,
+      "config_mode": "standard",
+      "bash_title": "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录",
+      "powershell_title": "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping"
     }
   ]
 }

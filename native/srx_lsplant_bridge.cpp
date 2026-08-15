@@ -463,6 +463,7 @@ bool PatchFuseFixPltSlot(void *slot, void *replacement, void **orig,
     return false;
   }
 
+  // quality-allow(chinese-language): 固定日志保留 ci98 的机器解析字段与 Android 动态链接术语。
   *orig = current;
   *slot_ptr = replacement;
   if (mprotect(reinterpret_cast<void *>(page_start),

@@ -2,13 +2,16 @@ package me.fakerqu.test.storageredirect.test
 
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.Size
+import java.io.File
 import me.fakerqu.mediafileapi.AndroidMediaStoreApi
 import me.fakerqu.mediafileapi.MediaStoreApi
 
 class MediaStoreTestCases(
-    context: Context,
+    private val context: Context,
 ) {
   private val api = AndroidMediaStoreApi(context)
   private val volume = MediaStoreApi.VolumeType.EXTERNAL
@@ -132,6 +135,28 @@ class MediaStoreTestCases(
 
   fun thumbnailVideo(args: TestCaseArgs): TestResult =
       thumbnail(TestCase.MEDIASTORE_THUMBNAIL_VIDEO, args)
+
+  fun openTypedAssetFileCollection(): TestResult =
+      TestCase.MEDIASTORE_OPEN_TYPED_COLLECTION.measure {
+        val testCase = TestCase.MEDIASTORE_OPEN_TYPED_COLLECTION
+        val collectionUri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val source =
+            ParcelFileDescriptor.open(
+                File(context.applicationInfo.sourceDir),
+                ParcelFileDescriptor.MODE_READ_ONLY,
+            )
+        val options = Bundle().apply { putParcelable("file_descriptor", source) }
+        try {
+          context.contentResolver
+              .openTypedAssetFileDescriptor(collectionUri, "*/*", options, null)
+              ?.use {}
+          testCase.pass(
+              message = "collection URI open delegated without remapping",
+          )
+        } finally {
+          source.close()
+        }
+      }
 
   private fun query(
       testCase: TestCase,

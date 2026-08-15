@@ -2443,6 +2443,10 @@ public class Hooker {
       request = parseOpenRequest(method.getName(), args);
       if (request == null) return null;
       if (!String.valueOf(request.uri).startsWith("content://media/")) return null;
+      if (!isSingleItemMediaUri(request.uri)) {
+        logOpenDelegate("collection_uri_passthrough", String.valueOf(request.uri), "");
+        return null;
+      }
       path = queryDataPath(receiver, request.uri);
       if (path == null || path.length() == 0) {
         logOpenDelegate("mapped_query_miss", String.valueOf(request.uri), "");
@@ -4853,6 +4857,12 @@ public class Hooker {
     } catch (Throwable ignored) {
       return false;
     }
+  }
+
+  private static boolean isSingleItemMediaUri(android.net.Uri uri) {
+    if (uri == null) return false;
+    String last = uri.getLastPathSegment();
+    return last != null && last.length() > 0 && isAllDigits(last);
   }
 
   private static boolean isAllDigits(String value) {
