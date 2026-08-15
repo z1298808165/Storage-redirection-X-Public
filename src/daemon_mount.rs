@@ -7,9 +7,9 @@ use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{fs, module_paths, paths};
 use libc::{
-    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL,
-    SIGTERM, SO_RCVTIMEO, SOCK_DGRAM, SOL_SOCKET, WNOHANG, c_int, c_void, close, open, recv, send,
-    setns, setsockopt, socketpair, umount2, waitpid,
+    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY,
+    SIGKILL, SIGTERM, SO_RCVTIMEO, SOCK_DGRAM, SOL_SOCKET, WNOHANG, c_int, c_void, close, open,
+    recv, send, setns, setsockopt, socketpair, umount2, waitpid,
 };
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -122,11 +122,13 @@ fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -
     // 系统回收或替换。周期 reconcile 需要把这种状态视为缺失，否则应用会一直保留
     // 一份看似有效、实际访问已经失败的重定向。
     let targets = read_mount_targets(&state_path);
-    if check_mount_targets
-        && !targets.is_empty()
-        && !mount_targets_present(request.pid, &targets, request)
-    {
-        return false;
+    if check_mount_targets {
+        if !targets.is_empty() && !mount_targets_present(request.pid, &targets, request) {
+            return false;
+        }
+        if !backend_mount_targets_responsive(request) {
+            return false;
+        }
     }
     true
 }
@@ -168,6 +170,42 @@ fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -
         expected_groups.len()
     );
     false
+}
+
+/// 检查应用 namespace 内真实存储后端是否仍能响应目录访问。
+///
+/// `/proc/<pid>/mountinfo` 只能证明挂载记录还在，MediaProvider 的 FUSE 服务退出后，
+/// 记录仍可能保留但访问返回 ENOTCONN。通过 `/proc/<pid>/root` 解析路径会沿用目标
+/// 进程的 mount namespace，不需要切换 daemon 自身的 namespace，也不会修改目录元数据。
+fn backend_mount_targets_responsive(request: &MountRequest) -> bool {
+    let proc_root = format!("/proc/{}/root", request.pid);
+    for target in allowed_real_backend_targets(request) {
+        let probe_path = format!("{}{}", proc_root, target);
+        let Ok(c_path) = CString::new(probe_path.as_str()) else {
+            continue;
+        };
+        // SAFETY: c_path 由当前作用域持有，指针在 open 调用期间有效；标志只读打开目录。
+        let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC) };
+        if fd >= 0 {
+            // SAFETY: fd 来自上面的成功 open，且此处是唯一的关闭路径。
+            unsafe { close(fd) };
+            continue;
+        }
+
+        let errno = last_errno();
+        if errno == libc::ENOTCONN {
+            log::warn!(
+                "daemon backend mount endpoint disconnected pid={} pkg={} target={} errno={} {}",
+                request.pid,
+                request.package_name,
+                target,
+                errno,
+                errno_text(errno)
+            );
+            return false;
+        }
+    }
+    true
 }
 
 /// 删除已经不属于存活应用进程实例的挂载状态。
@@ -1019,6 +1057,17 @@ fn clear_previous_mounts(plan: &MountForkPlan) -> bool {
 /// 访问也可能返回 ENOTCONN；先在应用私有 namespace 中摘除它，后续挂载流程
 /// 才能重新绑定可用的后端目录。
 fn clear_previous_allowed_real_backend_mounts(request: &MountRequest) {
+    for target in allowed_real_backend_targets(request) {
+        if current_mount_target_count(&target) == 0 {
+            continue;
+        }
+        if clear_mount_target_stack(&target) {
+            log::info!("daemon cleared allowed real backend target={}", target);
+        }
+    }
+}
+
+fn allowed_real_backend_targets(request: &MountRequest) -> Vec<String> {
     let user_id = crate::platform::user_id_from_uid(request.uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
     let data_media_root = paths::data_media_user_root_for_user(user_id);
@@ -1040,14 +1089,7 @@ fn clear_previous_allowed_real_backend_mounts(request: &MountRequest) {
     }
 
     targets.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| b.cmp(a)));
-    for target in targets {
-        if current_mount_target_count(&target) == 0 {
-            continue;
-        }
-        if clear_mount_target_stack(&target) {
-            log::info!("daemon cleared allowed real backend target={}", target);
-        }
-    }
+    targets
 }
 
 fn clear_mount_target_stack(target: &str) -> bool {
