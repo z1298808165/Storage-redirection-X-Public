@@ -736,6 +736,7 @@ jobs:
       - test-flow-build
       - test-flow-required
       - create-ci-release
+      - update-manifest
     if: always() && github.event_name == 'push' && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -744,10 +745,25 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: 删除失败 CI Release
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && (needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$CI_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --cleanup-tag \
+              --yes
+          else
+            echo "failed CI release not found: $CI_TAG"
+          fi
+
       - name: 保留失败 CI 诊断资源
-        if: needs.create-ci-release.result != 'success'
-        run: echo "保留草稿 Release 与测试流 artifact，供失败排查使用。"
+        if: needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success'
+        run: echo "保留 Actions 日志与测试流 artifact，供失败排查使用。"
 
       - name: Delete build artifacts from Actions storage
         if: needs.create-ci-release.result == 'success'
