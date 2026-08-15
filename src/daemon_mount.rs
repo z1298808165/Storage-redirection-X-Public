@@ -98,6 +98,15 @@ impl crate::fuse_redirect::MountRequestFields for MountRequest {
 }
 
 pub fn has_mount_state(request: &MountRequest) -> bool {
+    has_mount_state_internal(request, false)
+}
+
+/// 周期 reconcile 使用更严格的状态判定，额外确认记录的目标仍存在于应用 namespace。
+pub fn has_healthy_mount_state(request: &MountRequest) -> bool {
+    has_mount_state_internal(request, true)
+}
+
+fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -> bool {
     let state_path = state_file_path(request);
     if std::fs::metadata(&state_path).is_err() {
         return false;
@@ -105,7 +114,51 @@ pub fn has_mount_state(request: &MountRequest) -> bool {
     // 记录过 FUSE 服务却已经死掉时，挂载点会留在目标 namespace 里变成 ENOTCONN 死挂载，
     // 应用访问会直接失败。此时把挂载状态视为无效，让周期 reconcile 重新执行挂载；
     // 若 FUSE 再次启动失败，启动阶段的 mount namespace 降级会接管。
-    !has_dead_fuse_child(&state_path, request)
+    if has_dead_fuse_child(&state_path, request) {
+        return false;
+    }
+
+    // 状态文件只代表 daemon 曾经成功执行过挂载，进程的 mount namespace 可能随后被
+    // 系统回收或替换。周期 reconcile 需要把这种状态视为缺失，否则应用会一直保留
+    // 一份看似有效、实际访问已经失败的重定向。
+    let targets = read_mount_targets(&state_path);
+    if check_mount_targets
+        && !targets.is_empty()
+        && !mount_targets_present(request.pid, &targets, request)
+    {
+        return false;
+    }
+    true
+}
+
+fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -> bool {
+    let path = format!("/proc/{}/mountinfo", pid);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        log::warn!(
+            "daemon mountinfo unavailable pid={} pkg={} path={}, remount pending",
+            pid,
+            request.package_name,
+            path
+        );
+        return false;
+    };
+
+    let missing = targets
+        .iter()
+        .filter(|target| mount_target_count_from_mountinfo(&content, target) == 0)
+        .count();
+    if missing == 0 {
+        return true;
+    }
+
+    log::warn!(
+        "daemon mount target missing pid={} pkg={} missing={} total={}, remount pending",
+        pid,
+        request.package_name,
+        missing,
+        targets.len()
+    );
+    false
 }
 
 /// 删除已经不属于存活应用进程实例的挂载状态。
@@ -1301,23 +1354,22 @@ fn parse_mountinfo_raw_target(line: &str) -> Option<&str> {
 
 fn unescape_mountinfo_field(value: &str) -> String {
     let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
+    let mut out = Vec::with_capacity(value.len());
     let mut index = 0usize;
     while index < bytes.len() {
         if bytes[index] == b'\\' && index + 3 < bytes.len() {
-            let octal = &value[index + 1..index + 4];
-            if octal.as_bytes().iter().all(|ch| (b'0'..=b'7').contains(ch))
-                && let Ok(code) = u8::from_str_radix(octal, 8)
-            {
-                out.push(code as char);
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|ch| (b'0'..=b'7').contains(ch)) {
+                let code = (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + (digits[2] - b'0');
+                out.push(code);
                 index += 4;
                 continue;
             }
         }
-        out.push(bytes[index] as char);
+        out.push(bytes[index]);
         index += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[derive(Clone, Copy)]

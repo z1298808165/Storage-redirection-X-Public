@@ -4,7 +4,8 @@ use crate::config::{SettingsHub, watcher};
 mod media_hook_heal;
 use crate::daemon_monitor::RegularAppMonitor;
 use crate::daemon_mount::{
-    MountOperation, MountRequest, execute_mount_request, has_mount_state, prune_stale_mount_states,
+    MountOperation, MountRequest, execute_mount_request, has_healthy_mount_state, has_mount_state,
+    prune_stale_mount_states,
 };
 use crate::logging::Logger;
 use crate::platform;
@@ -353,7 +354,10 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         }
 
         let request = build_request(&proc, config_version, &config_snapshot);
-        plans.push(ReconcilePlan::new(request));
+        plans.push(ReconcilePlan::new(
+            request,
+            mode == ReconcileMode::MissingOnly,
+        ));
     }
 
     media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
@@ -412,8 +416,12 @@ struct ReconcilePlan {
 }
 
 impl ReconcilePlan {
-    fn new(request: MountRequest) -> Self {
-        let has_mount_state = has_mount_state(&request);
+    fn new(request: MountRequest, check_mount_targets: bool) -> Self {
+        let has_mount_state = if check_mount_targets {
+            has_healthy_mount_state(&request)
+        } else {
+            has_mount_state(&request)
+        };
         Self {
             request,
             has_mount_state,
