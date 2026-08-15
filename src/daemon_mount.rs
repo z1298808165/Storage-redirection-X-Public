@@ -143,20 +143,29 @@ fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -
         return false;
     };
 
-    let missing = targets
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let alias_roots = storage_alias_roots_for_user(user_id);
+    let expected_groups = targets
         .iter()
-        .filter(|target| mount_target_count_from_mountinfo(&content, target) == 0)
-        .count();
+        .map(|target| canonical_mount_target(target, &storage_root, &alias_roots))
+        .collect::<HashSet<_>>();
+    let present_groups = targets
+        .iter()
+        .filter(|target| mount_target_count_from_mountinfo(&content, target) > 0)
+        .map(|target| canonical_mount_target(target, &storage_root, &alias_roots))
+        .collect::<HashSet<_>>();
+    let missing = expected_groups.difference(&present_groups).count();
     if missing == 0 {
         return true;
     }
 
     log::warn!(
-        "daemon mount target missing pid={} pkg={} missing={} total={}, remount pending",
+        "daemon mount target group missing pid={} pkg={} missing={} total={}, remount pending",
         pid,
         request.package_name,
         missing,
-        targets.len()
+        expected_groups.len()
     );
     false
 }
@@ -1147,7 +1156,6 @@ fn resolve_request_storage_path(
 }
 
 fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Vec<String> {
-    let user_str = user_id.to_string();
     let storage_root = paths::storage_user_root_for_user(user_id);
     if !paths::is_same_or_child(canonical_path, &storage_root) {
         return vec![canonical_path.to_string()];
@@ -1158,8 +1166,16 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     // 最终的过滤、排序与去重统一由 normalize_targets 完成。
     // 不再展开 /data/media/<user>：该前缀必定被 is_safe_mount_target 拒绝，
     // 生成后只会被 normalize_targets 丢弃，属于无效分配与比较。
+    storage_alias_roots_for_user(user_id)
+        .into_iter()
+        .map(|root| format!("{}{}", root, suffix))
+        .collect()
+}
+
+fn storage_alias_roots_for_user(user_id: i32) -> Vec<String> {
+    let user_str = user_id.to_string();
     let mut alias_roots = Vec::with_capacity(14);
-    alias_roots.push(storage_root);
+    alias_roots.push(paths::storage_user_root_for_user(user_id));
     alias_roots.push("/storage/self/primary".to_string());
     if user_id == 0 {
         alias_roots.push("/storage/emulated/legacy".to_string());
@@ -1181,11 +1197,22 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
         user_str, user_str
     ));
     alias_roots.push(format!("/mnt/pass_through/emulated/{}", user_str));
-
-    for root in &mut alias_roots {
-        root.push_str(suffix);
-    }
     alias_roots
+}
+
+fn canonical_mount_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {
+    for alias_root in alias_roots {
+        if target == alias_root {
+            return storage_root.to_string();
+        }
+        let Some(suffix) = target.strip_prefix(alias_root.as_str()) else {
+            continue;
+        };
+        if suffix.starts_with('/') {
+            return format!("{}{}", storage_root, suffix);
+        }
+    }
+    target.to_string()
 }
 
 #[derive(Clone)]
