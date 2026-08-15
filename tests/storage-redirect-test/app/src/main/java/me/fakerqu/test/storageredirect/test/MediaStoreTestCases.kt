@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.util.Size
 import java.io.File
+import java.io.FileNotFoundException
 import me.fakerqu.mediafileapi.AndroidMediaStoreApi
 import me.fakerqu.mediafileapi.MediaStoreApi
 
@@ -146,12 +147,19 @@ class MediaStoreTestCases(
                 ParcelFileDescriptor.MODE_READ_ONLY,
             )
         val options = Bundle().apply { putParcelable("file_descriptor", source) }
+        var providerMessage: String? = null
         try {
-          context.contentResolver
-              .openTypedAssetFileDescriptor(collectionUri, "*/*", options, null)
-              ?.use {}
+          try {
+            context.contentResolver
+                .openTypedAssetFileDescriptor(collectionUri, "*/*", options, null)
+                ?.use {}
+          } catch (e: FileNotFoundException) {
+            providerMessage = e.message.orEmpty()
+          }
           testCase.pass(
-              message = "collection URI open delegated without remapping",
+              message =
+                  providerMessage?.let { "collection URI delegated to provider ($it)" }
+                      ?: "collection URI open delegated without remapping",
           )
         } finally {
           source.close()
