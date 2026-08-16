@@ -74,6 +74,7 @@ data class AppUiState(
     val updateCheckRunning: Boolean = false,
     val pendingUpdate: ReleaseUpdate? = null,
     val snackbar: String? = null,
+    val mediaProviderRestartNotice: List<String>? = null,
 )
 
 // 与 WebUI 的 DASHBOARD_REFRESH_THROTTLE_MS 取值一致，保证两端刷新节奏相同。
@@ -739,10 +740,19 @@ class SrxViewModel(
   fun restartMediaProvider() {
     viewModelScope.launch {
       updateBusy(BusyStateChange.Started("正在快速重启 MediaProvider"))
-      val ok = repository.restartMediaProvider()
+      val result = repository.restartMediaProvider()
       updateBusy(BusyStateChange.Finished)
-      showMessage(if (ok) "MediaProvider 已重启" else "重启 MediaProvider 超时")
+      if (result.success) {
+        _state.value = _state.value.copy(mediaProviderRestartNotice = result.runningPackages)
+        showMessage("MediaProvider 已重启，普通应用进程保持运行")
+      } else {
+        showMessage("重启 MediaProvider 超时")
+      }
     }
+  }
+
+  fun clearMediaProviderRestartNotice() {
+    _state.value = _state.value.copy(mediaProviderRestartNotice = null)
   }
 
   fun refreshLogs() {

@@ -6,6 +6,12 @@ import org.srx.manager.root.shellQuote
 
 private const val StatusSectionMarker = "__SRX_STATUS__"
 private const val VersionSectionMarker = "__SRX_VERSION__"
+private const val RunningAppMarker = "srx_restart_running_app="
+
+data class MediaProviderRestartResult(
+    val success: Boolean,
+    val runningPackages: List<String>,
+)
 
 class RootModuleController(
     private val shell: ShellExecutor,
@@ -19,9 +25,17 @@ class RootModuleController(
     return waitForMediaProviderRestart(before, timeoutMs = 10_000L, intervalMs = 250L)
   }
 
-  suspend fun restartMediaProvider(): Boolean {
+  suspend fun restartMediaProvider(): MediaProviderRestartResult {
     val result = shell.exec(buildRestartMediaProviderCommand())
-    return result.isSuccess
+    val runningPackages =
+        result.stdout
+            .lineSequence()
+            .mapNotNull { line -> line.trim().takeIf { it.startsWith(RunningAppMarker) } }
+            .map { it.removePrefix(RunningAppMarker) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .toList()
+    return MediaProviderRestartResult(result.isSuccess, runningPackages)
   }
 
   suspend fun ensureLogCollectors(): Boolean =
@@ -115,13 +129,10 @@ class RootModuleController(
   private fun buildRestartMediaProviderCommand(): String =
       withSrxCtlFallback(
           "restart-media",
-          "force_stop() { if command -v timeout >/dev/null 2>&1; then timeout 2 am force-stop \"\$1\" >/dev/null 2>&1 || true; else am force-stop \"\$1\" >/dev/null 2>&1 || true; fi; }; apps=${shellQuote("$ConfigDir/apps")}; " +
+          "apps=${shellQuote("$ConfigDir/apps")}; " +
               "for config in \"\$apps\"/*.json; do [ -f \"\$config\" ] || continue; package=\${config##*/}; package=\${package%.json}; " +
               "case \"\$package\" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; " +
-              "force_stop \"\$package\"; done; " +
-              "for i in \$(seq 1 40); do alive=0; for config in \"\$apps\"/*.json; do [ -f \"\$config\" ] || continue; package=\${config##*/}; package=\${package%.json}; " +
-              "case \"\$package\" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; " +
-              "pidof \"\$package\" >/dev/null 2>&1 && alive=1 && break; done; [ \"\$alive\" -eq 0 ] && break; sleep 0.1; done; " +
+              "pidof \"\$package\" >/dev/null 2>&1 && printf 'srx_restart_running_app=%s\\n' \"\$package\"; done; " +
               "previous=\$(for p in ${mediaProviderPackages()}; do pidof \"\$p\" 2>/dev/null || true; done); " +
               "for p in ${mediaProviderPackages()}; do pids=\$(pidof \"\$p\" 2>/dev/null); for pid in \$pids; do kill -9 \"\$pid\" 2>/dev/null || true; done; done; " +
               "for i in \$(seq 1 100); do boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); ready=0; for p in ${mediaProviderPackages()}; do " +

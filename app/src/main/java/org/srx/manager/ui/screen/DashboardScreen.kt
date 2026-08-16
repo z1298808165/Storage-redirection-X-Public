@@ -78,6 +78,7 @@ internal fun DashboardScreen(
     bottomPadding: Dp,
     onToggleModule: (Boolean) -> Unit,
     onRestartMediaProvider: () -> Unit,
+    onDismissMediaProviderRestartNotice: () -> Unit,
     onResetRuntimeStats: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenUpdate: () -> Unit,
@@ -153,6 +154,17 @@ internal fun DashboardScreen(
         },
     )
   }
+  state.mediaProviderRestartNotice
+      ?.takeIf { it.isNotEmpty() }
+      ?.let { packages ->
+        MediaProviderRestartNoticeDialog(
+            packages =
+                packages.map { packageName ->
+                  state.apps.firstOrNull { it.packageName == packageName }?.label ?: packageName
+                },
+            onDismiss = onDismissMediaProviderRestartNotice,
+        )
+      }
   if (showRuntimeActivationDetails) {
     RuntimeActivationDetailsDialog(
         exactValue = state.dashboard.runtimeActivations,
@@ -315,9 +327,9 @@ private fun ModuleToggleConfirmDialog(
 ) {
   val message =
       if (enable) {
-        "启动模块会恢复配置应用和 MediaProvider hook，受保护管理器会跳过。是否继续？"
+        "启动模块会恢复运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？"
       } else {
-        "停止模块会结束相关进程并退出 hook，受保护管理器会跳过。是否继续？"
+        "停止模块会停止运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？"
       }
   CenteredDialog(
       show = show,
@@ -379,6 +391,47 @@ private fun RestartMediaProviderConfirmDialog(
         GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
         GlassTextButton("确认", onConfirm, modifier = Modifier.weight(1f), primary = true)
       }
+    }
+  }
+}
+
+@Composable
+private fun MediaProviderRestartNoticeDialog(
+    packages: List<String>,
+    onDismiss: () -> Unit,
+) {
+  CenteredDialog(show = true, onDismiss = onDismiss) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+      Text(
+          text = "MediaProvider 已重启，运行中的普通应用进程保持原样。以下应用当时仍在运行：",
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          fontSize = 15.sp,
+          lineHeight = 22.sp,
+          fontWeight = FontWeight.Medium,
+          textAlign = TextAlign.Center,
+      )
+      Text(
+          text = packages.joinToString("\n"),
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurface,
+          fontSize = 14.sp,
+          lineHeight = 20.sp,
+          textAlign = TextAlign.Center,
+      )
+      Text(
+          text = "模块未结束这些应用。若某个应用发送图片仍无反应，再手动结束并重新打开对应应用。",
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          fontSize = 14.sp,
+          lineHeight = 20.sp,
+          textAlign = TextAlign.Center,
+      )
+      GlassTextButton("知道了", onDismiss, modifier = Modifier.fillMaxWidth(), primary = true)
     }
   }
 }

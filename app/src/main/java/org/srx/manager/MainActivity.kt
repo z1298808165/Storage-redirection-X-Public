@@ -390,6 +390,7 @@ private fun SrxManagerApp(
                 bottomPadding = padding.calculateBottomPadding(),
                 onToggleModule = { viewModel.setModuleEnabled(it) },
                 onRestartMediaProvider = viewModel::restartMediaProvider,
+                onDismissMediaProviderRestartNotice = viewModel::clearMediaProviderRestartNotice,
                 onResetRuntimeStats = viewModel::resetRuntimeStats,
                 onOpenAbout = { pushRoute(SrxRoute.About) },
                 onOpenUpdate = { pushRoute(SrxRoute.Update) },

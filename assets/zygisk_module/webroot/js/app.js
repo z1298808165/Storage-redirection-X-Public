@@ -1044,8 +1044,8 @@
     btn.onclick = async () => {
       const confirmed = await confirmAction(
         enabled
-          ? "停止模块会结束已配置应用进程和 MediaProvider 进程，让已安装的 hook 退出当前进程。KernelSU、Magisk、APatch 管理器等受保护应用会被跳过。是否继续？"
-          : "启动模块会重启已配置应用进程和 MediaProvider 进程，让新进程按当前配置重新安装 hook。KernelSU、Magisk、APatch 管理器等受保护应用会被跳过。是否继续？",
+          ? "停止模块会停止运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？"
+          : "启动模块会恢复运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？",
       );
       if (!confirmed) return;
       const nextStatus = enabled ? "disabled" : "enabled";
@@ -1097,6 +1097,19 @@
         () => resolve(false),
       );
     });
+  }
+
+  function showMediaProviderRestartNotice(packages) {
+    if (!Array.isArray(packages) || packages.length === 0) return;
+    const list = packages.join("\n");
+    Theme.showDialog(
+      "MediaProvider 已重启，运行中的普通应用进程保持原样。\n\n" +
+        "以下应用当时仍在运行：\n" +
+        list +
+        "\n\n模块未结束这些应用。若某个应用发送图片仍无反应，再手动结束并重新打开对应应用。",
+      () => {},
+      () => {},
+    );
   }
 
   // ═══ App List ═══
@@ -5668,9 +5681,10 @@
     if (!confirmed) return;
     const loading = Theme.showLoadingDialog("正在快速重启 MediaProvider...");
     try {
-      const ok = await Api.restartMediaProvider();
-      if (!ok) throw new Error("MediaProvider restart timeout");
-      Api.showManagerToast("MediaProvider 已重启");
+      const result = await Api.restartMediaProvider();
+      if (!result?.ok) throw new Error("MediaProvider restart timeout");
+      Api.showManagerToast("MediaProvider 已重启，普通应用进程保持运行");
+      showMediaProviderRestartNotice(result.runningApps);
     } catch (error) {
       Theme.showToast("重启 MediaProvider 失败", "error");
     } finally {

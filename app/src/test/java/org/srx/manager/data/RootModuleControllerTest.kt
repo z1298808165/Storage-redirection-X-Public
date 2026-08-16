@@ -107,13 +107,19 @@ class RootModuleControllerTest {
   fun restartMediaProviderUsesFallback() = runBlocking {
     val shell =
         CapturingShell(
-            ShellResult(0, "123", ""),
+            ShellResult(
+                0,
+                "srx_restart_running_app=com.tencent.mm\nsrx_restart_running_app=org.example\n",
+                "",
+            ),
             ShellResult(0, "", ""),
             ShellResult(0, "456", ""),
         )
     val controller = RootModuleController(shell)
 
-    assertTrue(controller.restartMediaProvider())
+    val restart = controller.restartMediaProvider()
+    assertTrue(restart.success)
+    assertEquals(listOf("com.tencent.mm", "org.example"), restart.runningPackages)
 
     val command = shell.invocations.single().command
     assertTrue(
@@ -123,8 +129,8 @@ class RootModuleControllerTest {
         ),
     )
     assertTrue(command, command.contains("pidof \"\$p\""))
-    assertTrue(command, command.contains("force_stop \"\$package\""))
-    assertTrue(command, command.contains("timeout 2 am force-stop"))
+    assertTrue(command, command.contains("srx_restart_running_app"))
+    assertTrue(command, !command.contains("am force-stop"))
     assertTrue(command, command.contains(".media_hook_install_state"))
     assertTrue(command, command.contains("stage=init_ok pid=\$pid boot_id=\$boot_id"))
     assertTrue(command, command.contains("content query --uri content://media/external/file"))

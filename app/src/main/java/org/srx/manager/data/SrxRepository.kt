@@ -292,7 +292,8 @@ class SrxRepository(
 
   suspend fun setModuleEnabled(enabled: Boolean): Boolean = moduleController.setEnabled(enabled)
 
-  suspend fun restartMediaProvider(): Boolean = moduleController.restartMediaProvider()
+  suspend fun restartMediaProvider(): MediaProviderRestartResult =
+      moduleController.restartMediaProvider()
 
   suspend fun readLogSnapshot(): MonitorLogSnapshot {
     val raw = fileStore.readAllWithBackups(FileMonitorLogPath)

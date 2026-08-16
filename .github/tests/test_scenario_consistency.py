@@ -417,10 +417,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("MediaProvider", ps_scenario)
         self.assertIn("quick_restart_app_pid_not_changed", bash_scenario)
         self.assertIn("quick restart app pid unchanged", ps_scenario)
+        self.assertIn("quick_restart_app_preserved", bash_scenario)
+        self.assertIn("quick restart unexpectedly changed running app pid", ps_scenario)
         self.assertIn("wait_media_provider_hook_ready", bash_scenario)
         self.assertIn("Wait-MediaProviderHookReady", ps_scenario)
         self.assertIn("start_app_and_confirm_mount", bash_scenario)
         self.assertIn("Restart-App", ps_scenario)
+
+    def test_quick_media_provider_restart_preserves_running_apps(self) -> None:
+        source = read("assets/zygisk_module/bin/srxctl")
+        restart = section(source, "restart_media_provider() {", "start_collectors_if_needed() {")
+        self.assertIn("report_running_configured_packages", restart)
+        self.assertNotIn("am force-stop", restart)
+        self.assertNotIn("kill_package_processes", restart)
 
     def test_module_boot_recovers_missing_media_provider_hook_once(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")

@@ -358,14 +358,11 @@ function restartMediaProviderFallbackCommand() {
   const appsDir = shellQuote(APPS_DIR);
   const hookState = shellQuote(LOGS_DIR + "/.media_hook_install_state");
   return (
-    'force_stop() { if command -v timeout >/dev/null 2>&1; then timeout 2 am force-stop "$1" >/dev/null 2>&1 || true; else am force-stop "$1" >/dev/null 2>&1 || true; fi; }; apps=' +
+    "apps=" +
     appsDir +
     '; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
     'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
-    'force_stop "$package"; done; ' +
-    'for i in $(seq 1 40); do alive=0; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
-    'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
-    'pidof "$package" >/dev/null 2>&1 && alive=1 && break; done; [ "$alive" -eq 0 ] && break; sleep 0.1; done; ' +
+    'pidof "$package" >/dev/null 2>&1 && printf "srx_restart_running_app=%s\\n" "$package"; done; ' +
     "previous=$(for p in " +
     mediaPackages +
     '; do pidof "$p" 2>/dev/null || true; done); ' +
@@ -2320,12 +2317,21 @@ const Api = {
 
   async restartMediaProvider() {
     try {
-      await this.exec(withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()), {
-        timeoutMs: 30_000,
-      });
-      return true;
+      const output = await this.exec(
+        withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()),
+        {
+          timeoutMs: 30_000,
+        },
+      );
+      const runningApps = String(output || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("srx_restart_running_app="))
+        .map((line) => line.slice("srx_restart_running_app=".length))
+        .filter(Boolean);
+      return { ok: true, runningApps: [...new Set(runningApps)] };
     } catch {
-      return false;
+      return { ok: false, runningApps: [] };
     } finally {
       try {
         await this.ensureLogCollectors();

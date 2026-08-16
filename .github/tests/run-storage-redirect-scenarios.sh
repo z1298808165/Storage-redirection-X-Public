@@ -2257,6 +2257,13 @@ run_quick_media_provider_restart_recovery_scenario() {
     return 1
   fi
 
+  preserved_app_pid="$(app_pid)"
+  if [ -z "$preserved_app_pid" ] || [ "$preserved_app_pid" != "$initial_pid" ]; then
+    echo "quick_restart_app_unexpectedly_changed scenario=${scenario} before=${initial_pid} after=${preserved_app_pid:-missing}" >&2
+    return 1
+  fi
+  echo "quick_restart_app_preserved scenario=${scenario} pid=${preserved_app_pid}"
+
   start_app_and_confirm_mount "scenario-${scenario}-quick-app-restart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-quick-restart" 30 >/dev/null || return 1
   current_pid="$(app_pid)"

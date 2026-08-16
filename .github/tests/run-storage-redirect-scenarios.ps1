@@ -1422,6 +1422,13 @@ function Invoke-QuickMediaProviderRestartRecoveryScenario {
         return $false
     }
 
+    $preservedAppPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($preservedAppPid) -or $preservedAppPid -ne $initialPid) {
+        $script:Failures.Add("scenario-$Scenario quick restart unexpectedly changed running app pid before=$initialPid after=$preservedAppPid")
+        return $false
+    }
+    Write-Host "  - quick_restart_app_preserved scenario=$Scenario pid=$preservedAppPid"
+
     if (-not (Restart-App "scenario-$Scenario-quick-app-restart" $true)) { return $false }
     if (-not (Wait-Storage "scenario-$Scenario-quick-restart" 30)) { return $false }
     $currentPid = Get-AppPid
