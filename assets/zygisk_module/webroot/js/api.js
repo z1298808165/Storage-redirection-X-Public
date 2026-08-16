@@ -358,11 +358,11 @@ function restartMediaProviderFallbackCommand() {
   const appsDir = shellQuote(APPS_DIR);
   const hookState = shellQuote(LOGS_DIR + "/.media_hook_install_state");
   return (
-    "apps=" +
+    'force_stop() { if command -v timeout >/dev/null 2>&1; then timeout 2 am force-stop "$1" >/dev/null 2>&1 || true; else am force-stop "$1" >/dev/null 2>&1 || true; fi; }; apps=' +
     appsDir +
     '; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
     'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
-    'am force-stop "$package" >/dev/null 2>&1 || true; done; ' +
+    'force_stop "$package"; done; ' +
     'for i in $(seq 1 40); do alive=0; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
     'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
     'pidof "$package" >/dev/null 2>&1 && alive=1 && break; done; [ "$alive" -eq 0 ] && break; sleep 0.1; done; ' +

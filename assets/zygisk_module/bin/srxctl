@@ -112,7 +112,8 @@ force_stop_configured_packages() {
       log_ctl "skip protected package: $package_name"
       continue
     fi
-    am force-stop "$package_name" >/dev/null 2>&1 &
+    pidof "$package_name" >/dev/null 2>&1 || continue
+    run_bounded 2 am force-stop "$package_name" &
     jobs=$((jobs + 1))
     if [ "$jobs" -ge 8 ]; then
       wait
