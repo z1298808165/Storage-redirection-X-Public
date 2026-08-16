@@ -353,6 +353,34 @@ function withSrxCtlFallback(action, fallback) {
   );
 }
 
+function restartMediaProviderFallbackCommand() {
+  const mediaPackages = MEDIA_PROVIDER_PACKAGES.map(shellQuote).join(" ");
+  const appsDir = shellQuote(APPS_DIR);
+  const hookState = shellQuote(LOGS_DIR + "/.media_hook_install_state");
+  return (
+    "apps=" +
+    appsDir +
+    '; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
+    'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
+    'am force-stop "$package" >/dev/null 2>&1 || true; done; ' +
+    'for i in $(seq 1 40); do alive=0; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
+    'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
+    'pidof "$package" >/dev/null 2>&1 && alive=1 && break; done; [ "$alive" -eq 0 ] && break; sleep 0.1; done; ' +
+    "previous=$(for p in " +
+    mediaPackages +
+    '; do pidof "$p" 2>/dev/null || true; done); ' +
+    "for p in " +
+    mediaPackages +
+    '; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done; done; ' +
+    "for i in $(seq 1 100); do boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); ready=0; for p in " +
+    mediaPackages +
+    '; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do case " $previous " in *" $pid "*) ;; *) state=$(cat ' +
+    hookState +
+    ' 2>/dev/null); printf \'%s\\n\' "$state" | grep -Fq "stage=init_ok pid=$pid boot_id=$boot_id " && ready=1;; esac; done; done; ' +
+    '[ "$ready" -eq 1 ] && exit 0; content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 || true; content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 || true; sleep 0.1; done; exit 1'
+  );
+}
+
 function isManagedTempPath(path) {
   const clean = String(path || "").replace(/\/+$/g, "");
   return (
@@ -2292,15 +2320,9 @@ const Api = {
 
   async restartMediaProvider() {
     const beforePids = await this.getMediaProviderPids();
-    await this.exec(
-      withSrxCtlFallback(
-        "restart-media",
-        'for p in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done; done; ' +
-          "content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 || true; content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 || true",
-      ),
-    );
+    await this.exec(withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()));
     const ok = await this.waitForMediaProviderRestart(beforePids, {
-      timeoutMs: 8000,
+      timeoutMs: 20000,
       intervalMs: 250,
     });
     await this.ensureLogCollectors();
