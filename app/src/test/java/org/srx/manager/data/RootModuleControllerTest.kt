@@ -123,6 +123,9 @@ class RootModuleControllerTest {
         ),
     )
     assertTrue(command, command.contains("pidof \"\$p\""))
+    assertTrue(command, command.contains("am force-stop \"\$package\""))
+    assertTrue(command, command.contains(".media_hook_install_state"))
+    assertTrue(command, command.contains("stage=init_ok pid=\$pid boot_id=\$boot_id"))
     assertTrue(command, command.contains("content query --uri content://media/external/file"))
     assertTrue(command, command.contains("content query --uri content://media/internal/file"))
   }

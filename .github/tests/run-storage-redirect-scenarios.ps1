@@ -302,14 +302,14 @@ function Test-FuseDaemonScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 32) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 33) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 32) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 33) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -335,6 +335,7 @@ function Get-ScenarioList {
     $defaultScenarios.Add(28) | Out-Null
     $defaultScenarios.Add(31) | Out-Null
     $defaultScenarios.Add(32) | Out-Null
+    $defaultScenarios.Add(33) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     if ($fuseSupported) {
         25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
@@ -423,6 +424,7 @@ function Apply-ScenarioConfig {
         30 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         31 { Write-DeviceConfig '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}' }
         32 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
+        33 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -1387,6 +1389,50 @@ function Invoke-BackendEndpointRecoveryScenario {
     $ok
 }
 
+function Invoke-QuickMediaProviderRestartRecoveryScenario {
+    param([int]$Scenario)
+    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
+    $sdk = 0
+    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) {
+        Write-Host "skip_quick_media_provider_restart scenario=$Scenario sdk=$sdk`: system FUSE detach is unsupported on this emulator"
+        return $true
+    }
+
+    if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before")) { return $false }
+    if (-not (Restart-App "scenario-$Scenario-quick-initial-app" $true)) { return $false }
+    $initialPid = Get-AppPid
+    $initialMediaPid = Get-MediaProviderPid
+    if ([string]::IsNullOrWhiteSpace($initialPid) -or [string]::IsNullOrWhiteSpace($initialMediaPid)) {
+        $script:Failures.Add("scenario-$Scenario quick restart initial pid missing")
+        return $false
+    }
+    $before = Invoke-MediaStoreImageCreateCase $Scenario "quick-before" "srt_monitor_33_quick_before.jpg" "Pictures/SrtRelativeData"
+    $ok = (Require-File "scenario-$Scenario" "quick-before" "$RealRoot/Pictures/SrtRelativeData/srt_monitor_33_quick_before.jpg") -and $before.Ok
+    if (-not $ok) { return $false }
+
+    try { Invoke-Su "/data/adb/modules/storage.redirect.x/bin/srxctl restart-media" | Out-Null } catch {
+        $script:Failures.Add("scenario-$Scenario quick MediaProvider restart failed: $_")
+        return $false
+    }
+    if (-not (Wait-MediaProviderReady "scenario-$Scenario-quick-provider" 60)) { return $false }
+    if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-quick-hook" 30)) { return $false }
+    $currentMediaPid = Get-MediaProviderPid
+    if ([string]::IsNullOrWhiteSpace($currentMediaPid) -or $currentMediaPid -eq $initialMediaPid) {
+        $script:Failures.Add("scenario-$Scenario quick restart MediaProvider pid unchanged before=$initialMediaPid after=$currentMediaPid")
+        return $false
+    }
+
+    if (-not (Restart-App "scenario-$Scenario-quick-app-restart" $true)) { return $false }
+    if (-not (Wait-Storage "scenario-$Scenario-quick-restart" 30)) { return $false }
+    $currentPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -eq $initialPid) {
+        $script:Failures.Add("scenario-$Scenario quick restart app pid unchanged before=$initialPid after=$currentPid")
+        return $false
+    }
+    $after = Invoke-MediaStoreImageCreateCase $Scenario "quick-after" "srt_monitor_33_quick_after.jpg" "Pictures/SrtRelativeData"
+    (Require-File "scenario-$Scenario" "quick-after" "$RealRoot/Pictures/SrtRelativeData/srt_monitor_33_quick_after.jpg") -and $after.Ok
+}
+
 function Invoke-TestArtifactCleanup {
     if ($script:CleanupDone) { return }
     $script:CleanupDone = $true
@@ -1490,6 +1536,7 @@ function Get-ScenarioTitle {
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
         31 { "disabled redirect keeps thumbnail and full image readable" }
         32 { "real backend recovery survives app restart without restarting MediaProvider" }
+        33 { "quick MediaProvider restart restores app mounts and image saving" }
     }
 }
 
@@ -2199,6 +2246,7 @@ function Invoke-Scenario {
         30 { Invoke-MediaStoreOpenTypedCollectionScenario $Scenario }
         31 { Invoke-MediaStoreDisabledRedirectImageScenario $Scenario }
         32 { Invoke-BackendEndpointRecoveryScenario $Scenario }
+        33 { Invoke-QuickMediaProviderRestartRecoveryScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

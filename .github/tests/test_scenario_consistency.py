@@ -27,7 +27,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         cls.powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
 
     def test_manifest_is_contiguous_and_unique(self) -> None:
-        self.assertEqual(list(range(1, 33)), self.ids)
+        self.assertEqual(list(range(1, 34)), self.ids)
         self.assertEqual(len(self.ids), len(set(self.ids)))
 
     def test_both_runners_cover_every_config_and_title(self) -> None:
@@ -397,6 +397,30 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("MediaProvider", ps_scenario)
         self.assertIn("backend recovery", ps_scenario)
         self.assertIn("pid", ps_scenario)
+
+    def test_quick_media_provider_restart_recreates_app_mount(self) -> None:
+        bash_scenario = section(
+            self.bash,
+            "run_quick_media_provider_restart_recovery_scenario()",
+            "check_health()",
+        )
+        ps_scenario = section(
+            self.powershell,
+            "function Invoke-QuickMediaProviderRestartRecoveryScenario",
+            "function Invoke-TestArtifactCleanup",
+        )
+        for source in (bash_scenario, ps_scenario):
+            self.assertIn("srxctl restart-media", source)
+            self.assertIn("quick-before", source)
+            self.assertIn("quick-after", source)
+        self.assertIn("media_provider", bash_scenario)
+        self.assertIn("MediaProvider", ps_scenario)
+        self.assertIn("quick_restart_app_pid_not_changed", bash_scenario)
+        self.assertIn("quick restart app pid unchanged", ps_scenario)
+        self.assertIn("wait_media_provider_hook_ready", bash_scenario)
+        self.assertIn("Wait-MediaProviderHookReady", ps_scenario)
+        self.assertIn("start_app_and_confirm_mount", bash_scenario)
+        self.assertIn("Restart-App", ps_scenario)
 
     def test_module_boot_recovers_missing_media_provider_hook_once(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")
