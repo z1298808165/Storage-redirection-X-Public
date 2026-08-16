@@ -377,7 +377,7 @@ function restartMediaProviderFallbackCommand() {
     '; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do case " $previous " in *" $pid "*) ;; *) state=$(cat ' +
     hookState +
     ' 2>/dev/null); printf \'%s\\n\' "$state" | grep -Fq "stage=init_ok pid=$pid boot_id=$boot_id " && ready=1;; esac; done; done; ' +
-    '[ "$ready" -eq 1 ] && exit 0; content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 || true; content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 || true; sleep 0.1; done; exit 1'
+    '[ "$ready" -eq 1 ] && exit 0; if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & else content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & fi; if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & else content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & fi; sleep 0.1; done; exit 1'
   );
 }
 
@@ -2319,14 +2319,18 @@ const Api = {
   },
 
   async restartMediaProvider() {
-    const beforePids = await this.getMediaProviderPids();
-    await this.exec(withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()));
-    const ok = await this.waitForMediaProviderRestart(beforePids, {
-      timeoutMs: 20000,
-      intervalMs: 250,
-    });
-    await this.ensureLogCollectors();
-    return ok;
+    try {
+      await this.exec(withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()), {
+        timeoutMs: 30_000,
+      });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      try {
+        await this.ensureLogCollectors();
+      } catch {}
+    }
   },
 
   async getMediaProviderPids() {

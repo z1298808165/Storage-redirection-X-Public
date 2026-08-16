@@ -20,10 +20,8 @@ class RootModuleController(
   }
 
   suspend fun restartMediaProvider(): Boolean {
-    val before = mediaProviderPids()
     val result = shell.exec(buildRestartMediaProviderCommand())
-    return result.isSuccess &&
-        waitForMediaProviderRestart(before, timeoutMs = 15_000L, intervalMs = 250L)
+    return result.isSuccess
   }
 
   suspend fun ensureLogCollectors(): Boolean =
@@ -129,8 +127,11 @@ class RootModuleController(
               "for i in \$(seq 1 100); do boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); ready=0; for p in ${mediaProviderPackages()}; do " +
               "pids=\$(pidof \"\$p\" 2>/dev/null); for pid in \$pids; do case \" \$previous \" in *\" \$pid \"*) ;; *) state=\$(cat ${shellQuote("$LogsDir/.media_hook_install_state")} 2>/dev/null); " +
               "printf '%s\\n' \"\$state\" | grep -Fq \"stage=init_ok pid=\$pid boot_id=\$boot_id \" && ready=1;; esac; done; done; " +
-              "[ \"\$ready\" -eq 1 ] && exit 0; content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 || true; " +
-              "content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 || true; sleep 0.1; done; exit 1",
+              "[ \"\$ready\" -eq 1 ] && exit 0; " +
+              "if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & " +
+              "else content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & fi; " +
+              "if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & " +
+              "else content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & fi; sleep 0.1; done; exit 1",
       )
 
   private fun buildEnsureLogCollectorsCommand(): String =

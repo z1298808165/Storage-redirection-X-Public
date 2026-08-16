@@ -40,6 +40,26 @@ wait_until_dead() {
   return 1
 }
 
+run_bounded() {
+  seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@" >/dev/null 2>&1 || true
+    return 0
+  fi
+  "$@" >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$i" -ge 10 ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      break
+    fi
+    usleep 100000 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+  done
+}
+
 stop_collectors() {
   for pid_file in \
     "$LOGS_DIR/.monitor_collector.pid" \
@@ -140,8 +160,8 @@ media_provider_pids() {
 }
 
 wake_media_provider() {
-  content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 &
-  content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 &
+  run_bounded 1 content query --uri content://media/external/file --projection _id --limit 1 &
+  run_bounded 1 content query --uri content://media/internal/file --projection _id --limit 1 &
 }
 
 wait_for_media_provider_start() {
@@ -196,8 +216,12 @@ wait_for_media_provider_hook_ready() {
 restart_media_provider() {
   previous_pids=$(media_provider_pids)
   force_stop_configured_packages
-  if ! wait_for_configured_packages_stopped 40 100000; then
+  if ! wait_for_configured_packages_stopped 20 100000; then
     log_ctl "configured package stop timed out before media provider restart"
+    for package_name in $(configured_packages); do
+      protected_package "$package_name" && continue
+      kill_package_processes "$package_name"
+    done
   fi
   for package_name in \
     com.android.providers.media.module \

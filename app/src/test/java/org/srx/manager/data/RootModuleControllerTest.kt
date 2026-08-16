@@ -115,7 +115,7 @@ class RootModuleControllerTest {
 
     assertTrue(controller.restartMediaProvider())
 
-    val command = shell.invocations[1].command
+    val command = shell.invocations.single().command
     assertTrue(
         command,
         command.startsWith(
@@ -128,6 +128,7 @@ class RootModuleControllerTest {
     assertTrue(command, command.contains("stage=init_ok pid=\$pid boot_id=\$boot_id"))
     assertTrue(command, command.contains("content query --uri content://media/external/file"))
     assertTrue(command, command.contains("content query --uri content://media/internal/file"))
+    assertTrue(command, command.contains("timeout 1 content query"))
   }
 
   @Test
