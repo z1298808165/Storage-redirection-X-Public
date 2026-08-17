@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -53,7 +54,14 @@ const TAG_CONTROL: &str = "Control";
 const CONTROL_CLEAR_MONITOR: &str = "clear-monitor";
 const CONTROL_FLUSH_ALL: &str = "flush-all";
 const CONTROL_RESET_STATS: &str = "reset-stats";
+const CONTROL_RECONCILE_RUNNING: &str = "reconcile-running";
 const STATS_SCHEMA: &str = "2";
+
+static RECONCILE_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn reconcile_request_slot() -> &'static Mutex<Option<String>> {
+    RECONCILE_REQUEST.get_or_init(|| Mutex::new(None))
+}
 
 pub fn start() -> io::Result<()> {
     let fd = bind_log_socket()?;
@@ -92,6 +100,13 @@ pub fn send_control(command: &str) -> io::Result<()> {
     // SAFETY: fd 由此函数持有，且同步发送已经完成。
     unsafe { close(fd) };
     result
+}
+
+pub fn take_reconcile_request() -> Option<String> {
+    reconcile_request_slot()
+        .lock()
+        .ok()
+        .and_then(|mut request| request.take())
 }
 
 fn send_control_packet(fd: i32, command: &str) -> io::Result<()> {
@@ -409,6 +424,21 @@ impl LogState {
             CONTROL_CLEAR_MONITOR => self.monitor.clear(),
             CONTROL_FLUSH_ALL => self.flush_pending(),
             CONTROL_RESET_STATS => self.reset_stats(),
+            CONTROL_RECONCILE_RUNNING => {
+                if let Ok(mut request) = reconcile_request_slot().lock() {
+                    // quality-allow(chinese-language): legacy 是控制协议的固定请求标识，供旧调用方保留完成日志语义。
+                    *request = Some("legacy".to_string());
+                }
+            }
+            command if command.starts_with("reconcile-running:") => {
+                let token = command.trim_start_matches("reconcile-running:");
+                if !token.is_empty()
+                    && let Ok(mut request) = reconcile_request_slot().lock()
+                {
+                    // quality-allow(chinese-language): token 来自控制协议，作为机器匹配字段必须保持原值。
+                    *request = Some(token.to_string());
+                }
+            }
             _ => {}
         }
     }

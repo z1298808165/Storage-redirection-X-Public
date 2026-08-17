@@ -37,7 +37,6 @@ static COMPARE_HOOKS_REFRESHED: AtomicBool = AtomicBool::new(false);
 static COMPARE_HOOKS_PATCHED_DIRECT: AtomicBool = AtomicBool::new(false);
 static DISABLED_LOGGED: AtomicBool = AtomicBool::new(false);
 static LAST_RUNTIME_ENABLED: AtomicBool = AtomicBool::new(true);
-static REENABLE_RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
 static TARGET_ENABLED: AtomicBool = AtomicBool::new(false);
 static TARGET_PACKAGE: RwLock<String> = RwLock::new(String::new());
 static COMPARE_PATCH_LOCK: Mutex<()> = Mutex::new(());
@@ -109,7 +108,11 @@ pub(super) fn sync_runtime_enabled_from_settings() -> bool {
             package_name
         );
         if enabled && !previous_enabled {
-            restart_media_provider_after_reenable(&package_name, installed);
+            log::info!(
+                "fuse fix re-enabled in media provider process without provider restart installed={} pkg={}",
+                installed,
+                package_name
+            );
         }
     }
     if enabled {
@@ -125,22 +128,6 @@ fn mark_target_package(package_name: &str) {
         .unwrap_or_else(|err| err.into_inner());
     if target.is_empty() {
         *target = package_name.to_string();
-    }
-}
-
-fn restart_media_provider_after_reenable(package_name: &str, installed: bool) {
-    if !policy::is_media_provider_package(package_name) {
-        return;
-    }
-    if REENABLE_RESTART_REQUESTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    log::warn!(
-        "fuse fix re-enabled after disabled, restart media provider to drop fuse dentry cache installed={}",
-        installed
-    );
-    unsafe {
-        libc::kill(libc::getpid(), libc::SIGKILL);
     }
 }
 

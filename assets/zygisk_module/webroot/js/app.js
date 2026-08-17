@@ -57,6 +57,7 @@
     logRenderedCount: 0,
     logFilteredCount: 0,
     logRenderFrame: 0,
+    mediaProviderReloadRunning: false,
   };
 
   const LICENSES = [
@@ -962,8 +963,8 @@
     const items = [
       {
         icon: "refresh",
-        label: "重启 MediaProvider",
-        description: "让系统写入进程重新加载当前配置",
+        label: "重新挂载运行中应用",
+        description: "刷新已配置应用的重定向挂载并同步媒体进程",
         action: restartMediaProviderWithLoading,
       },
       { icon: "download", label: "检查更新", description: "查看模块的新版本", page: "update" },
@@ -1044,8 +1045,8 @@
     btn.onclick = async () => {
       const confirmed = await confirmAction(
         enabled
-          ? "停止模块会停止运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？"
-          : "启动模块会恢复运行时并重启 MediaProvider，普通应用进程保持运行。媒体访问可能短暂不可用，是否继续？",
+          ? "停止模块会停止运行时并请求 MediaProvider 进程内热重载，普通应用进程保持运行。媒体访问可能短暂抖动，是否继续？"
+          : "启动模块会恢复运行时并请求 MediaProvider 进程内热重载，普通应用进程保持运行。媒体访问可能短暂抖动，是否继续？",
       );
       if (!confirmed) return;
       const nextStatus = enabled ? "disabled" : "enabled";
@@ -1063,7 +1064,9 @@
           );
         } else {
           Api.showManagerToast(
-            enabled ? "模块已停止，MediaProvider 已重启" : "模块已启动，MediaProvider 已重启",
+            enabled
+              ? "模块已停止，MediaProvider 已完成热重载"
+              : "模块已启动，MediaProvider 已完成热重载",
           );
         }
         updatePowerButton(verifiedStatus);
@@ -1079,11 +1082,13 @@
 
   async function toggleModuleRuntimeWithLoading(isStopping) {
     const loading = Theme.showLoadingDialog(
-      isStopping ? "正在停止模块并重启 MediaProvider..." : "正在启动模块并重启 MediaProvider...",
+      isStopping
+        ? "正在停止模块并请求 MediaProvider 热重载..."
+        : "正在启动模块并请求 MediaProvider 热重载...",
     );
     try {
       const ok = isStopping ? await Api.stopModule() : await Api.startModule();
-      if (!ok) throw new Error("MediaProvider restart timeout");
+      if (!ok) throw new Error("MediaProvider hot reload timeout");
     } finally {
       loading.close();
     }
@@ -1097,19 +1102,6 @@
         () => resolve(false),
       );
     });
-  }
-
-  function showMediaProviderRestartNotice(packages) {
-    if (!Array.isArray(packages) || packages.length === 0) return;
-    const list = packages.join("\n");
-    Theme.showDialog(
-      "MediaProvider 已重启，运行中的普通应用进程保持原样。\n\n" +
-        "以下应用当时仍在运行：\n" +
-        list +
-        "\n\n模块未结束这些应用。若某个应用发送图片仍无反应，再手动结束并重新打开对应应用。",
-      () => {},
-      () => {},
-    );
   }
 
   // ═══ App List ═══
@@ -5675,20 +5667,22 @@
   }
 
   async function restartMediaProviderWithLoading() {
+    if (State.mediaProviderReloadRunning) return;
     const confirmed = await confirmAction(
-      "快速重启会结束 MediaProvider 进程并触发系统重新拉起，期间媒体访问可能短暂不可用。是否继续？",
+      "将重新挂载运行中的已配置应用，并请求 MediaProvider 在原进程内刷新配置。不结束 Provider 或应用进程。期间媒体访问可能短暂抖动。是否继续？",
     );
     if (!confirmed) return;
-    const loading = Theme.showLoadingDialog("正在快速重启 MediaProvider...");
+    State.mediaProviderReloadRunning = true;
+    const loading = Theme.showLoadingDialog("正在重新挂载运行中应用...");
     try {
       const result = await Api.restartMediaProvider();
-      if (!result?.ok) throw new Error("MediaProvider restart timeout");
-      Api.showManagerToast("MediaProvider 已重启，普通应用进程保持运行");
-      showMediaProviderRestartNotice(result.runningApps);
+      if (!result?.ok) throw new Error("MediaProvider hot reload timeout");
+      Api.showManagerToast("运行中应用已重新挂载，MediaProvider 已同步热重载");
     } catch (error) {
-      Theme.showToast("重启 MediaProvider 失败", "error");
+      Theme.showToast("重新挂载运行中应用失败", "error");
     } finally {
       loading.close();
+      State.mediaProviderReloadRunning = false;
     }
   }
 

@@ -74,7 +74,6 @@ data class AppUiState(
     val updateCheckRunning: Boolean = false,
     val pendingUpdate: ReleaseUpdate? = null,
     val snackbar: String? = null,
-    val mediaProviderRestartNotice: List<String>? = null,
 )
 
 // 与 WebUI 的 DASHBOARD_REFRESH_THROTTLE_MS 取值一致，保证两端刷新节奏相同。
@@ -126,6 +125,7 @@ class SrxViewModel(
   private var dashboardCountsJob: Job? = null
   private var dashboardCountsRefreshedAt = 0L
   private val monitorFiltersSaveMutex = Mutex()
+  private val remountMutex = Mutex()
   private val globalConfigSaveRequests = Channel<GlobalConfig>(Channel.CONFLATED)
 
   /**
@@ -739,20 +739,27 @@ class SrxViewModel(
 
   fun restartMediaProvider() {
     viewModelScope.launch {
-      updateBusy(BusyStateChange.Started("正在快速重启 MediaProvider"))
-      val result = repository.restartMediaProvider()
-      updateBusy(BusyStateChange.Finished)
-      if (result.success) {
-        _state.value = _state.value.copy(mediaProviderRestartNotice = result.runningPackages)
-        showMessage("MediaProvider 已重启，普通应用进程保持运行")
-      } else {
-        showMessage("重启 MediaProvider 超时")
+      if (_state.value.busy) return@launch
+      remountMutex.withLock {
+        if (_state.value.busy) return@withLock
+        updateBusy(BusyStateChange.Started("正在重新挂载运行中应用（等待完成）"))
+        try {
+          runCatching { repository.restartMediaProvider() }
+              .onSuccess { result ->
+                showMessage(
+                    if (result.success) {
+                      "运行中应用已重新挂载，MediaProvider 已同步热重载"
+                    } else {
+                      "运行中应用重新挂载超时"
+                    },
+                )
+              }
+              .onFailure { showMessage("重新挂载运行中应用失败") }
+        } finally {
+          updateBusy(BusyStateChange.Finished)
+        }
       }
     }
-  }
-
-  fun clearMediaProviderRestartNotice() {
-    _state.value = _state.value.copy(mediaProviderRestartNotice = null)
   }
 
   fun refreshLogs() {

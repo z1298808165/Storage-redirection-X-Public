@@ -10,6 +10,9 @@ BOOT_OK_FILE="$MODDIR/.boot_ok"
 BOOT_MODULE_VERSION_FILE="$MODDIR/.boot_module_version"
 PENDING_MODULE_DIR="/data/adb/modules_update/storage.redirect.x"
 BOOT_PENDING_FILE="$MODDIR/.boot_pending"
+HOT_RELOAD_REQUEST_FILE="$LOGS_DIR/.media_provider_hot_reload.request"
+HOT_RELOAD_ACK_FILE="$LOGS_DIR/.media_provider_hot_reload.ack"
+RUNNING_LOG_FILE="$LOGS_DIR/running.log"
 
 log_ctl() {
   log -p i -t SRXCTL "$*" 2>/dev/null
@@ -95,16 +98,6 @@ protected_package() {
   return 1
 }
 
-report_running_configured_packages() {
-  for package_name in $(configured_packages); do
-    if protected_package "$package_name"; then
-      continue
-    fi
-    pidof "$package_name" >/dev/null 2>&1 || continue
-    printf 'srx_restart_running_app=%s\n' "$package_name"
-  done
-}
-
 media_provider_pids() {
   pidof com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media 2>/dev/null
 }
@@ -136,6 +129,86 @@ wait_for_media_provider_start() {
   return 1
 }
 
+write_media_provider_hot_reload_request() {
+  provider_pid="$1"
+  request_id="$(date +%s%N 2>/dev/null || true)-$$"
+  [ -n "$request_id" ] || request_id="$(cat /proc/uptime 2>/dev/null | tr -d ' .')-$$"
+  temp_file="${HOT_RELOAD_REQUEST_FILE}.tmp.$$"
+  printf 'request=%s provider_pid=%s\n' "$request_id" "$provider_pid" > "$temp_file" || return 1
+  chmod 644 "$temp_file" 2>/dev/null || true
+  mv -f "$temp_file" "$HOT_RELOAD_REQUEST_FILE" || return 1
+  printf '%s\n' "$request_id"
+}
+
+signal_media_provider_hot_reload() {
+  provider_pid="$1"
+  kill -USR2 "$provider_pid" 2>/dev/null
+}
+
+hot_reload_completed_count() {
+  provider_pid="$1"
+  grep -F "media provider hot reload completed" "$RUNNING_LOG_FILE" 2>/dev/null \
+    | grep -F "pid=$provider_pid" 2>/dev/null | wc -l
+}
+
+running_app_remount_completed_count() {
+  request_id="$1"
+  grep -F "running app remount completed request=$request_id " "$RUNNING_LOG_FILE" 2>/dev/null | wc -l
+}
+
+wait_for_media_provider_hot_reload() {
+  request_id="$1"
+  provider_pid="$2"
+  before_count="$3"
+  attempts="${4:-100}"
+  delay_us="${5:-100000}"
+  boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    ack=$(cat "$HOT_RELOAD_ACK_FILE" 2>/dev/null || true)
+    if printf '%s\n' "$ack" | grep -Fq "stage=hot_reload_ok request=$request_id pid=$provider_pid boot_id=$boot_id"; then
+      return 0
+    fi
+    current_count=$(hot_reload_completed_count "$provider_pid")
+    if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
+      return 0
+    fi
+    usleep "$delay_us" 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+request_running_app_remount() {
+  required="${1:-1}"
+  if ! is_daemon_alive; then
+    log_ctl "running app remount skipped: daemon not running"
+    [ "$required" = "1" ] && return 1
+    return 0
+  fi
+  request_id="$(date +%s%N 2>/dev/null || true)-$$"
+  [ -n "$request_id" ] || request_id="$(cat /proc/uptime 2>/dev/null | tr -d ' .')-$$"
+  before_count=$(running_app_remount_completed_count "$request_id")
+  daemon_bin="$MODDIR/bin/srx_daemon"
+  if [ ! -x "$daemon_bin" ] || ! "$daemon_bin" control "reconcile-running:$request_id" >/dev/null 2>&1; then
+    log_ctl "running app remount request failed"
+    return 1
+  fi
+  attempts=100
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    current_count=$(running_app_remount_completed_count "$request_id")
+    if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
+      log_ctl "running app remount completed request=$request_id"
+      return 0
+    fi
+    usleep 100000 2>/dev/null || sleep 0.1
+    i=$((i + 1))
+  done
+  log_ctl "running app remount timed out request=$request_id"
+  return 1
+}
+
 media_provider_hook_ready() {
   pid="$1"
   boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
@@ -164,27 +237,38 @@ wait_for_media_provider_hook_ready() {
 }
 
 restart_media_provider() {
+  require_running_remount="${1:-0}"
   previous_pids=$(media_provider_pids)
-  # 应用进程保持运行；输出运行中的配置应用，供 App/WebUI 在完成后即时提示。
-  report_running_configured_packages
-  for package_name in \
-    com.android.providers.media.module \
-    com.google.android.providers.media.module \
-    com.android.providers.media; do
-    pids=$(pidof "$package_name" 2>/dev/null)
-    [ -n "$pids" ] || continue
-    for pid in $pids; do
-      kill -9 "$pid" 2>/dev/null || true
-    done
+  # 应用进程和 MediaProvider 均保持运行，只在 Provider 进程内刷新运行时状态。
+  provider_pid=""
+  for pid in $previous_pids; do
+    provider_pid="$pid"
+    break
   done
-  # 只有新进程和 Java hook 都就绪后才报告重启成功，避免应用拿到旧的 FUSE endpoint。
-  if wait_for_media_provider_start 50 100000 "$previous_pids" \
-    && wait_for_media_provider_hook_ready 100 100000; then
-    log_ctl "media provider restart ready"
+  if [ -z "$provider_pid" ]; then
+    log_ctl "media provider hot reload skipped: provider not running"
+    return 1
+  fi
+  request_id=$(write_media_provider_hot_reload_request "$provider_pid") || {
+    log_ctl "media provider hot reload request write failed"
+    return 1
+  }
+  before_count=$(hot_reload_completed_count "$provider_pid")
+  if ! signal_media_provider_hot_reload "$provider_pid"; then
+    log_ctl "media provider hot reload signal failed pid=$provider_pid"
+    return 1
+  fi
+  if wait_for_media_provider_hot_reload "$request_id" "$provider_pid" "$before_count" 100 100000; then
+    log_ctl "media provider hot reload ready pid=$provider_pid"
     ready=0
   else
-    log_ctl "media provider restart timed out before hook ready"
+    log_ctl "media provider hot reload timed out pid=$provider_pid"
     ready=1
+  fi
+  if [ "$ready" -eq 0 ]; then
+    if ! request_running_app_remount "$require_running_remount"; then
+      ready=1
+    fi
   fi
   start_collectors_if_needed
   return "$ready"
@@ -366,11 +450,11 @@ case "$1" in
   stop) stop_runtime ;;
   start) start_runtime ;;
   restart) stop_runtime; start_runtime ;;
-  restart-media|media-restart) restart_media_provider ;;
+  remount-running|restart-media|media-restart|hot-reload-media) restart_media_provider 1 ;;
   ensure-collectors) start_collectors_if_needed ;;
   clear-monitor) clear_monitor_log ;;
   reset-stats) reset_runtime_stats ;;
   diagnostic-archive) build_diagnostic_archive "$2" "$3" "$4" ;;
   status|"") status_runtime ;;
-  *) echo "usage: srxctl {start|stop|restart|restart-media|ensure-collectors|clear-monitor|reset-stats|diagnostic-archive|status}" >&2; exit 2 ;;
+  *) echo "用法：srxctl {start|stop|restart|remount-running|ensure-collectors|clear-monitor|reset-stats|diagnostic-archive|status}" >&2; exit 2 ;;
 esac

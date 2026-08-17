@@ -1,16 +1,13 @@
 package org.srx.manager.data
 
-import kotlinx.coroutines.delay
 import org.srx.manager.root.ShellExecutor
 import org.srx.manager.root.shellQuote
 
 private const val StatusSectionMarker = "__SRX_STATUS__"
 private const val VersionSectionMarker = "__SRX_VERSION__"
-private const val RunningAppMarker = "srx_restart_running_app="
 
 data class MediaProviderRestartResult(
     val success: Boolean,
-    val runningPackages: List<String>,
 )
 
 class RootModuleController(
@@ -19,23 +16,13 @@ class RootModuleController(
   suspend fun status(): ModuleStatus = parseStatus(shell.exec(buildStatusCommand()).stdout.trim())
 
   suspend fun setEnabled(enabled: Boolean): Boolean {
-    val before = mediaProviderPids()
     val result = shell.exec(buildSetEnabledCommand(enabled))
-    if (!result.isSuccess) return false
-    return waitForMediaProviderRestart(before, timeoutMs = 10_000L, intervalMs = 250L)
+    return result.isSuccess
   }
 
   suspend fun restartMediaProvider(): MediaProviderRestartResult {
     val result = shell.exec(buildRestartMediaProviderCommand())
-    val runningPackages =
-        result.stdout
-            .lineSequence()
-            .mapNotNull { line -> line.trim().takeIf { it.startsWith(RunningAppMarker) } }
-            .map { it.removePrefix(RunningAppMarker) }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .toList()
-    return MediaProviderRestartResult(result.isSuccess, runningPackages)
+    return MediaProviderRestartResult(result.isSuccess)
   }
 
   suspend fun ensureLogCollectors(): Boolean =
@@ -77,25 +64,6 @@ class RootModuleController(
         else -> ModuleStatus.Unknown
       }
 
-  private suspend fun mediaProviderPids(): Set<String> {
-    val out = shell.exec(mediaProviderPidCommand()).stdout
-    return out.split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
-  }
-
-  private suspend fun waitForMediaProviderRestart(
-      before: Set<String>,
-      timeoutMs: Long = 15_000L,
-      intervalMs: Long = 500L,
-  ): Boolean {
-    val deadline = System.currentTimeMillis() + timeoutMs
-    while (System.currentTimeMillis() < deadline) {
-      val current = mediaProviderPids()
-      if (current.isNotEmpty() && (before.isEmpty() || current.any { it !in before })) return true
-      delay(intervalMs)
-    }
-    return false
-  }
-
   private fun buildStatusCommand(): String =
       "if [ -d ${shellQuote(PendingModuleDir)} ]; then echo reboot_required; else " +
           withSrxCtlFallback(
@@ -127,23 +95,7 @@ class RootModuleController(
   }
 
   private fun buildRestartMediaProviderCommand(): String =
-      withSrxCtlFallback(
-          "restart-media",
-          "apps=${shellQuote("$ConfigDir/apps")}; " +
-              "for config in \"\$apps\"/*.json; do [ -f \"\$config\" ] || continue; package=\${config##*/}; package=\${package%.json}; " +
-              "case \"\$package\" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; " +
-              "pidof \"\$package\" >/dev/null 2>&1 && printf 'srx_restart_running_app=%s\\n' \"\$package\"; done; " +
-              "previous=\$(for p in ${mediaProviderPackages()}; do pidof \"\$p\" 2>/dev/null || true; done); " +
-              "for p in ${mediaProviderPackages()}; do pids=\$(pidof \"\$p\" 2>/dev/null); for pid in \$pids; do kill -9 \"\$pid\" 2>/dev/null || true; done; done; " +
-              "for i in \$(seq 1 100); do boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); ready=0; for p in ${mediaProviderPackages()}; do " +
-              "pids=\$(pidof \"\$p\" 2>/dev/null); for pid in \$pids; do case \" \$previous \" in *\" \$pid \"*) ;; *) state=\$(cat ${shellQuote("$LogsDir/.media_hook_install_state")} 2>/dev/null); " +
-              "printf '%s\\n' \"\$state\" | grep -Fq \"stage=init_ok pid=\$pid boot_id=\$boot_id \" && ready=1;; esac; done; done; " +
-              "[ \"\$ready\" -eq 1 ] && exit 0; " +
-              "if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & " +
-              "else content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & fi; " +
-              "if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & " +
-              "else content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & fi; sleep 0.1; done; exit 1",
-      )
+      withSrxCtlFallback("remount-running", "exit 1")
 
   private fun buildEnsureLogCollectorsCommand(): String =
       withSrxCtlFallback(
@@ -156,23 +108,9 @@ class RootModuleController(
   private fun readModuleVersionCommand(): String =
       "sed -n 's/^version=//p' ${shellQuote("$ModuleDir/module.prop")} 2>/dev/null | head -n 1"
 
-  private fun mediaProviderPidCommand(): String =
-      "for p in ${mediaProviderPackages()}; do pidof \"\$p\" 2>/dev/null || true; done"
-
   private fun withSrxCtlFallback(
       action: String,
       fallback: String,
   ): String =
       "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} $action; else $fallback; fi"
-
-  private fun mediaProviderPackages(): String = MediaProviderPackages.joinToString(" ")
-
-  private companion object {
-    val MediaProviderPackages =
-        listOf(
-            "com.android.providers.media.module",
-            "com.google.android.providers.media.module",
-            "com.android.providers.media",
-        )
-  }
 }

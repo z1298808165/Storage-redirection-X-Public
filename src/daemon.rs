@@ -153,11 +153,13 @@ pub fn main_entry() -> i32 {
         let before = config.config_version();
         let did_reload = reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
         let current = config.config_version();
+        let control_reconcile = crate::log_daemon::take_reconcile_request();
         let periodic_reconcile = should_periodic_reconcile(&mut last_periodic_reconcile_ms);
         let should_reconcile = round < INITIAL_RECONCILE_ROUNDS
             || did_reload
             || current != last_version
             || current != before
+            || control_reconcile.is_some()
             || pending_full_reconcile
             || periodic_reconcile;
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {
@@ -166,7 +168,7 @@ pub fn main_entry() -> i32 {
         if should_reconcile {
             wait_for_file_monitor_version(file_monitor_sync.as_ref(), current);
             policy::refresh_shared_uid_cache();
-            let mode = if pending_full_reconcile {
+            let mode = if control_reconcile.is_some() || pending_full_reconcile {
                 pending_full_reconcile = false;
                 ReconcileMode::Full
             } else if should_prewarm_reconcile(round, did_reload, current, last_version, before) {
@@ -178,6 +180,13 @@ pub fn main_entry() -> i32 {
                 ReconcileMode::Full
             };
             let mounts_changed = reconcile_running_apps(current, mode);
+            if let Some(request) = control_reconcile.as_deref() {
+                log::info!(
+                    "running app remount completed request={} applied={}",
+                    request,
+                    mounts_changed
+                );
+            }
             if mounts_changed {
                 if let Some(sync) = file_monitor_sync.as_ref() {
                     request_file_monitor_rebuild(sync);

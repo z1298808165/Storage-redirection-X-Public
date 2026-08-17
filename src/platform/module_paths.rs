@@ -15,6 +15,11 @@ pub const MEDIA_HOOK_DEFERRED_FILE: &str =
 /// 「已安装但未触发」在失败后仍可区分。
 pub const MEDIA_HOOK_INSTALL_STATE_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_hook_install_state";
+/// MediaProvider 进程内热重载请求与确认文件。
+pub const MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/logs/.media_provider_hot_reload.request";
+pub const MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/logs/.media_provider_hot_reload.ack";
 pub const RECENT_SOURCE_HINT_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.recent_source_hint";
 pub const RECENT_PATH_CALLER_HINT_FILE: &str =

@@ -2,6 +2,7 @@
 use super::RuntimeFlow;
 use super::mount_timing;
 use crate::hook::{InterceptHub, install_fuse_fix_if_enabled};
+use crate::java_hook;
 use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{self, anti_detect};
@@ -15,6 +16,9 @@ static PLT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 impl RuntimeFlow {
     pub fn post_app_specialize(&mut self, _args: *const abi::AppSpecializeArgs) {
         let perf_started_ms = monotonic_ms();
+        if policy::is_media_provider_package(&self.package_name) {
+            java_hook::start_hot_reload_after_specialize();
+        }
         if self.should_skip_post_work {
             log_post_perf(self, "skip", 0, 0, 0, perf_started_ms);
             return;

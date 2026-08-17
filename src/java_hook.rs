@@ -5,6 +5,7 @@
 
 mod dex_loader;
 mod hooker_class;
+mod hot_reload;
 mod lsplant;
 
 use crate::zygisk::jni::{
@@ -102,6 +103,14 @@ fn init(env: *mut JNIEnv, install_method: &str, hook_name: &str) -> bool {
     }
     delete_local_ref(env, clazz);
     install_ok
+}
+
+// MediaProvider 完成 specialize 后再启动轮询线程，避免在线程仍处于
+// zygote 上下文时创建线程并访问模块目录。
+pub fn start_hot_reload_after_specialize() {
+    if MEDIA_PROVIDER_HOOK_INITIALIZED.load(Ordering::Acquire) {
+        hot_reload::start();
+    }
 }
 
 fn install_hook(env: *mut JNIEnv, clazz: jni_sys::jclass, method_name: &str) -> bool {

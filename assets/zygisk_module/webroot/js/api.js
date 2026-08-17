@@ -353,31 +353,6 @@ function withSrxCtlFallback(action, fallback) {
   );
 }
 
-function restartMediaProviderFallbackCommand() {
-  const mediaPackages = MEDIA_PROVIDER_PACKAGES.map(shellQuote).join(" ");
-  const appsDir = shellQuote(APPS_DIR);
-  const hookState = shellQuote(LOGS_DIR + "/.media_hook_install_state");
-  return (
-    "apps=" +
-    appsDir +
-    '; for config in "$apps"/*.json; do [ -f "$config" ] || continue; package=${config##*/}; package=${package%.json}; ' +
-    'case "$package" in com.storage.redirect.x|com.topjohnwu.magisk|io.github.huskydg.magisk|io.github.vvb2060.magisk|me.weishu.kernelsu|me.weishu.kernelsu.next|io.github.rifsxd.ksunext|com.sukisu.ultra|me.bmax.apatch|me.garfieldhan.apatch.next|io.github.a13e300.ksuwebui|com.dergoogler.mmrl) continue;; esac; ' +
-    'pidof "$package" >/dev/null 2>&1 && printf "srx_restart_running_app=%s\\n" "$package"; done; ' +
-    "previous=$(for p in " +
-    mediaPackages +
-    '; do pidof "$p" 2>/dev/null || true; done); ' +
-    "for p in " +
-    mediaPackages +
-    '; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done; done; ' +
-    "for i in $(seq 1 100); do boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); ready=0; for p in " +
-    mediaPackages +
-    '; do pids=$(pidof "$p" 2>/dev/null); for pid in $pids; do case " $previous " in *" $pid "*) ;; *) state=$(cat ' +
-    hookState +
-    ' 2>/dev/null); printf \'%s\\n\' "$state" | grep -Fq "stage=init_ok pid=$pid boot_id=$boot_id " && ready=1;; esac; done; done; ' +
-    '[ "$ready" -eq 1 ] && exit 0; if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & else content query --uri content://media/external/file --projection _id --limit 1 >/dev/null 2>&1 & fi; if command -v timeout >/dev/null 2>&1; then timeout 1 content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & else content query --uri content://media/internal/file --projection _id --limit 1 >/dev/null 2>&1 & fi; sleep 0.1; done; exit 1'
-  );
-}
-
 function isManagedTempPath(path) {
   const clean = String(path || "").replace(/\/+$/g, "");
   return (
@@ -2317,21 +2292,12 @@ const Api = {
 
   async restartMediaProvider() {
     try {
-      const output = await this.exec(
-        withSrxCtlFallback("restart-media", restartMediaProviderFallbackCommand()),
-        {
-          timeoutMs: 30_000,
-        },
-      );
-      const runningApps = String(output || "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("srx_restart_running_app="))
-        .map((line) => line.slice("srx_restart_running_app=".length))
-        .filter(Boolean);
-      return { ok: true, runningApps: [...new Set(runningApps)] };
+      await this.exec(withSrxCtlFallback("remount-running", "exit 1"), {
+        timeoutMs: 30_000,
+      });
+      return { ok: true };
     } catch {
-      return { ok: false, runningApps: [] };
+      return { ok: false };
     } finally {
       try {
         await this.ensureLogCollectors();
