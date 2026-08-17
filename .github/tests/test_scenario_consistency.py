@@ -398,7 +398,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("backend recovery", ps_scenario)
         self.assertIn("pid", ps_scenario)
 
-    def test_quick_media_provider_restart_recreates_app_mount(self) -> None:
+    def test_quick_media_provider_hot_reload_preserves_processes(self) -> None:
         bash_scenario = section(
             self.bash,
             "run_quick_media_provider_restart_recovery_scenario()",
@@ -410,26 +410,140 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "function Invoke-TestArtifactCleanup",
         )
         for source in (bash_scenario, ps_scenario):
-            self.assertIn("srxctl restart-media", source)
+            self.assertIn("srxctl remount-running", source)
+            self.assertIn("running app remount completed request=", source)
             self.assertIn("quick-before", source)
             self.assertIn("quick-after", source)
         self.assertIn("media_provider", bash_scenario)
         self.assertIn("MediaProvider", ps_scenario)
-        self.assertIn("quick_restart_app_pid_not_changed", bash_scenario)
-        self.assertIn("quick restart app pid unchanged", ps_scenario)
+        self.assertIn("quick_restart_media_provider_pid_changed", bash_scenario)
+        self.assertIn("quick restart MediaProvider pid changed", ps_scenario)
         self.assertIn("quick_restart_app_preserved", bash_scenario)
         self.assertIn("quick restart unexpectedly changed running app pid", ps_scenario)
+        self.assertIn("quick_restart_app_unexpectedly_changed", bash_scenario)
+        self.assertIn("quick restart app pid changed", ps_scenario)
         self.assertIn("wait_media_provider_hook_ready", bash_scenario)
         self.assertIn("Wait-MediaProviderHookReady", ps_scenario)
         self.assertIn("start_app_and_confirm_mount", bash_scenario)
         self.assertIn("Restart-App", ps_scenario)
 
-    def test_quick_media_provider_restart_preserves_running_apps(self) -> None:
+    def test_quick_media_provider_hot_reload_keeps_processes_running(self) -> None:
         source = read("assets/zygisk_module/bin/srxctl")
         restart = section(source, "restart_media_provider() {", "start_collectors_if_needed() {")
-        self.assertIn("report_running_configured_packages", restart)
+        self.assertIn("write_media_provider_hot_reload_request", restart)
+        self.assertIn("signal_media_provider_hot_reload", restart)
+        self.assertIn("kill -USR2", source)
+        self.assertIn("wait_for_media_provider_hot_reload", restart)
         self.assertNotIn("am force-stop", restart)
+        self.assertNotIn("kill -9", restart)
         self.assertNotIn("kill_package_processes", restart)
+        self.assertNotIn("srx_restart_running_app", source)
+        self.assertIn('request_running_app_remount "$require_running_remount"', restart)
+        self.assertIn('[ "$required" = "1" ] && return 1', source)
+
+    def test_quick_media_provider_restart_records_app_after_before_case(self) -> None:
+        bash_scenario = section(
+            self.bash,
+            "run_quick_media_provider_restart_recovery_scenario()",
+            "check_health()",
+        )
+        ps_scenario = section(
+            self.powershell,
+            "function Invoke-QuickMediaProviderRestartRecoveryScenario",
+            "function Invoke-TestArtifactCleanup",
+        )
+        for source in (bash_scenario, ps_scenario):
+            before_case = source.index("quick-before")
+            app_pid = source.index("initial_pid", before_case) if "initial_pid" in source else source.index("initialPid", before_case)
+            self.assertGreater(app_pid, before_case)
+
+    def test_mount_confirmation_ignores_stale_same_package_pid(self) -> None:
+        bash_wait = section(self.bash, "wait_app_mount_confirmed()", "scenario_from_label()")
+        ps_wait = section(self.powershell, "function Wait-AppMountConfirmed", "function Wait-MediaProviderReady")
+        self.assertIn("for (i=1; i<=NF; i++)", bash_wait)
+        self.assertIn("END {if (max !=", bash_wait)
+        self.assertIn("for (i=1; i<=NF; i++)", ps_wait)
+        self.assertIn("END {if (max !=", ps_wait)
+
+    def test_app_restart_waits_for_previous_process_to_exit(self) -> None:
+        bash_start = section(self.bash, "start_app_and_confirm_mount()", "wait_storage_ready()")
+        bash_wait = section(self.bash, "wait_app_process_stopped()", "resume_hot_reload_app()")
+        ps_stop = section(self.powershell, "function Stop-AppAndWaitFuseCleanup", "function Invoke-ConfigHotReloadScenario")
+        ps_wait = section(self.powershell, "function Wait-AppProcessStopped", "function Test-AppHasNoStaleFuseMount")
+        self.assertIn("wait_app_process_stopped 10", bash_start)
+        self.assertIn('previous_pid="$(app_pid)"', bash_start)
+        self.assertIn('quick-initial-app', bash_start)
+        self.assertIn("app_pid", bash_wait)
+        self.assertIn("Wait-AppProcessStopped", ps_stop)
+        self.assertIn('quick-initial-app', ps_stop)
+
+        quick_bash = section(self.bash, "run_quick_media_provider_restart_recovery_scenario()", "check_health()")
+        quick_ps = section(self.powershell, "function Invoke-QuickMediaProviderRestartRecoveryScenario", "function Get-TargetPath")
+        self.assertIn("ensure_current_app_mount_confirmed", quick_bash)
+        self.assertIn("Get-AppPid", quick_ps)
+        self.assertIn("Wait-AppMountConfirmed", quick_ps)
+        self.assertIn("Get-AppPid", ps_wait)
+
+    def test_media_provider_hot_reload_protocol_is_present(self) -> None:
+        source = read("src/java_hook/hot_reload.rs")
+        java_hook = read("src/java_hook.rs")
+        specialize_post = read("src/lifecycle/specialize_post.rs")
+        srxctl = read("assets/zygisk_module/bin/srxctl")
+        webui = read("assets/zygisk_module/webroot/js/api.js")
+        self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE", source)
+        self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE", source)
+        self.assertIn("stage=hot_reload_ok", source)
+        self.assertIn("SIGUSR2", source)
+        self.assertIn("SIGNAL_PENDING", source)
+        self.assertIn("hot_reload_completed_count", srxctl)
+        self.assertIn('boot_id=$boot_id"', srxctl)
+        self.assertIn("stage=hot_reload_ok", srxctl)
+        self.assertIn('withSrxCtlFallback("remount-running", "exit 1")', webui)
+        self.assertNotIn("restartMediaProviderHotReloadFallbackCommand", webui)
+        self.assertNotIn('kill -9 "$pid"', webui)
+        self.assertIn('grep -F "media provider hot reload completed"', srxctl)
+        self.assertIn('grep -F "pid=$provider_pid"', srxctl)
+        self.assertIn("start_hot_reload_after_specialize", java_hook)
+        init_section = section(java_hook, "fn init(", "pub fn start_hot_reload_after_specialize")
+        self.assertNotIn("hot_reload::start();", init_section)
+        self.assertIn("java_hook::start_hot_reload_after_specialize();", specialize_post)
+
+    def test_hot_reload_has_no_manual_app_restart_notice(self) -> None:
+        srxctl = read("assets/zygisk_module/bin/srxctl")
+        web_api = read("assets/zygisk_module/webroot/js/api.js")
+        web_app = read("assets/zygisk_module/webroot/js/app.js")
+        controller = read("app/src/main/java/org/srx/manager/data/RootModuleController.kt")
+        dashboard = read("app/src/main/java/org/srx/manager/ui/screen/DashboardScreen.kt")
+        for source in (srxctl, web_api, web_app, controller, dashboard):
+            self.assertNotIn("srx_restart_running_app", source)
+            self.assertNotIn("MediaProviderRestartNotice", source)
+        self.assertNotIn("showMediaProviderRestartNotice", web_app)
+        self.assertIn("重新挂载运行中应用", dashboard)
+
+    def test_remount_ui_reports_completion_and_serializes_requests(self) -> None:
+        view_model = read("app/src/main/java/org/srx/manager/ui/SrxViewModel.kt")
+        web_app = read("assets/zygisk_module/webroot/js/app.js")
+        self.assertIn("private val remountMutex = Mutex()", view_model)
+        self.assertIn("正在重新挂载运行中应用（等待完成）", view_model)
+        self.assertIn("finally {", section(view_model, "fun restartMediaProvider()", "fun refreshLogs()"))
+        self.assertIn("mediaProviderReloadRunning: false", web_app)
+        self.assertIn("if (State.mediaProviderReloadRunning) return;", web_app)
+        self.assertIn("State.mediaProviderReloadRunning = false", section(web_app, "async function restartMediaProviderWithLoading()", "// ═══ Logs"))
+
+    def test_running_app_remount_is_requested_after_provider_hot_reload(self) -> None:
+        srxctl = read("assets/zygisk_module/bin/srxctl")
+        daemon = read("src/daemon.rs")
+        log_daemon = read("src/log_daemon.rs")
+        self.assertIn("request_running_app_remount", srxctl)
+        self.assertIn('control "reconcile-running:$request_id"', srxctl)
+        self.assertIn("running_app_remount_completed_count", srxctl)
+        self.assertIn("running app remount timed out request=", srxctl)
+        self.assertIn('if ! request_running_app_remount "$require_running_remount"; then', srxctl)
+        self.assertIn("take_reconcile_request", daemon)
+        self.assertIn("control_reconcile", daemon)
+        self.assertIn("running app remount completed request=", daemon)
+        self.assertIn('const CONTROL_RECONCILE_RUNNING: &str = "reconcile-running"', log_daemon)
+        self.assertIn("RECONCILE_REQUEST", log_daemon)
 
     def test_module_boot_recovers_missing_media_provider_hook_once(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")

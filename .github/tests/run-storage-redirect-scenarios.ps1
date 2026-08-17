@@ -485,7 +485,7 @@ function Wait-AppMountConfirmed {
 deadline=`$((`$(date +%s) + $timeoutSeconds))
 pid=""
 while [ `$(date +%s) -le `$deadline ]; do
-  pid=`$(pidof '$AppId' 2>/dev/null | awk '{print `$1}')
+  pid=`$(pidof '$AppId' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (`$i+0 > max) max=`$i} END {if (max != "") print max}')
   [ -n "`$pid" ] && break
   sleep 0.1
 done
@@ -1203,8 +1203,19 @@ function Invoke-MediaStoreMonitorScenario {
 }
 
 function Get-AppPid {
-    $pidText = @(Invoke-Adb @("shell", "pidof", $AppId)) | Select-Object -First 1
-    if ($pidText) { ($pidText -split "\s+")[0] } else { "" }
+    $pidText = @(Invoke-Adb @("shell", "pidof", $AppId)) -join " "
+    $pids = [regex]::Matches($pidText, '\d+') | ForEach-Object { [int]$_.Value }
+    if ($pids) { ($pids | Sort-Object -Descending | Select-Object -First 1).ToString() } else { "" }
+}
+
+function Wait-AppProcessStopped {
+    param([int]$TimeoutSeconds = 10)
+    $attempts = [Math]::Max(1, $TimeoutSeconds * 10)
+    for ($attempt = 0; $attempt -lt $attempts; $attempt++) {
+        if ([string]::IsNullOrWhiteSpace((Get-AppPid))) { return $true }
+        Start-Sleep -Milliseconds 100
+    }
+    [string]::IsNullOrWhiteSpace((Get-AppPid))
 }
 
 function Test-AppHasNoStaleFuseMount {
@@ -1247,6 +1258,10 @@ function Stop-AppAndWaitFuseCleanup {
     Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
 
     $ok = $true
+    if ($Label -like "*quick-initial-app*" -and -not (Wait-AppProcessStopped)) {
+        $script:Failures.Add("$Label 应用进程未在启动前退出 app_pid=$appPid")
+        $ok = $false
+    }
     foreach ($identity in $identities) {
         $parts = $identity -split ':', 2
         $childPid = [int]$parts[0]
@@ -1391,34 +1406,36 @@ function Invoke-BackendEndpointRecoveryScenario {
 
 function Invoke-QuickMediaProviderRestartRecoveryScenario {
     param([int]$Scenario)
-    $sdkText = (@(Invoke-Adb @("shell", "getprop", "ro.build.version.sdk")) | Select-Object -First 1).Trim()
-    $sdk = 0
-    if ([int]::TryParse($sdkText, [ref]$sdk) -and $sdk -le 34) {
-        Write-Host "skip_quick_media_provider_restart scenario=$Scenario sdk=$sdk`: system FUSE detach is unsupported on this emulator"
-        return $true
-    }
-
     if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before")) { return $false }
-    if (-not (Restart-App "scenario-$Scenario-quick-initial-app" $true)) { return $false }
-    $initialPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace((Get-AppPid))) {
+        if (-not (Restart-App "scenario-$Scenario-quick-initial-app" $true)) { return $false }
+    } elseif (-not (Wait-AppMountConfirmed "scenario-$Scenario-quick-initial-app")) {
+        return $false
+    }
     $initialMediaPid = Get-MediaProviderPid
+    $before = Invoke-MediaStoreImageCreateCase $Scenario "quick-before" "srt_monitor_33_quick_before.jpg" "Pictures/SrtRelativeData"
+    $ok = (Require-File "scenario-$Scenario" "quick-before" "$RealRoot/Pictures/SrtRelativeData/srt_monitor_33_quick_before.jpg") -and $before.Ok
+    if (-not $ok) { return $false }
+    # 图片用例会按需拉起应用主进程，必须在用例完成后记录稳定 PID。
+    $initialPid = Get-AppPid
     if ([string]::IsNullOrWhiteSpace($initialPid) -or [string]::IsNullOrWhiteSpace($initialMediaPid)) {
         $script:Failures.Add("scenario-$Scenario quick restart initial pid missing")
         return $false
     }
-    $before = Invoke-MediaStoreImageCreateCase $Scenario "quick-before" "srt_monitor_33_quick_before.jpg" "Pictures/SrtRelativeData"
-    $ok = (Require-File "scenario-$Scenario" "quick-before" "$RealRoot/Pictures/SrtRelativeData/srt_monitor_33_quick_before.jpg") -and $before.Ok
-    if (-not $ok) { return $false }
 
-    try { Invoke-Su "/data/adb/modules/storage.redirect.x/bin/srxctl restart-media" | Out-Null } catch {
+    try { Invoke-Su "/data/adb/modules/storage.redirect.x/bin/srxctl remount-running" | Out-Null } catch {
         $script:Failures.Add("scenario-$Scenario quick MediaProvider restart failed: $_")
+        return $false
+    }
+    if (-not (Test-Su "grep -F 'running app remount completed request=' '$LogPath' | tail -1 | grep -F 'request=' >/dev/null")) {
+        $script:Failures.Add("scenario-$Scenario quick remount completion missing")
         return $false
     }
     if (-not (Wait-MediaProviderReady "scenario-$Scenario-quick-provider" 60)) { return $false }
     if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-quick-hook" 30)) { return $false }
     $currentMediaPid = Get-MediaProviderPid
-    if ([string]::IsNullOrWhiteSpace($currentMediaPid) -or $currentMediaPid -eq $initialMediaPid) {
-        $script:Failures.Add("scenario-$Scenario quick restart MediaProvider pid unchanged before=$initialMediaPid after=$currentMediaPid")
+    if ([string]::IsNullOrWhiteSpace($currentMediaPid) -or $currentMediaPid -ne $initialMediaPid) {
+        $script:Failures.Add("scenario-$Scenario quick restart MediaProvider pid changed before=$initialMediaPid after=$currentMediaPid")
         return $false
     }
 
@@ -1429,11 +1446,9 @@ function Invoke-QuickMediaProviderRestartRecoveryScenario {
     }
     Write-Host "  - quick_restart_app_preserved scenario=$Scenario pid=$preservedAppPid"
 
-    if (-not (Restart-App "scenario-$Scenario-quick-app-restart" $true)) { return $false }
-    if (-not (Wait-Storage "scenario-$Scenario-quick-restart" 30)) { return $false }
     $currentPid = Get-AppPid
-    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -eq $initialPid) {
-        $script:Failures.Add("scenario-$Scenario quick restart app pid unchanged before=$initialPid after=$currentPid")
+    if ([string]::IsNullOrWhiteSpace($currentPid) -or $currentPid -ne $initialPid) {
+        $script:Failures.Add("scenario-$Scenario quick restart app pid changed before=$initialPid after=$currentPid")
         return $false
     }
     $after = Invoke-MediaStoreImageCreateCase $Scenario "quick-after" "srt_monitor_33_quick_after.jpg" "Pictures/SrtRelativeData"
@@ -1543,7 +1558,7 @@ function Get-ScenarioTitle {
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
         31 { "disabled redirect keeps thumbnail and full image readable" }
         32 { "real backend recovery survives app restart without restarting MediaProvider" }
-        33 { "quick MediaProvider restart restores app mounts and image saving" }
+        33 { "MediaProvider hot reload preserves app mounts and image saving" }
     }
 }
 

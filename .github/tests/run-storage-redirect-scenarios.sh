@@ -461,7 +461,7 @@ scenario_title() {
     30) echo "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录" ;;
     31) echo "关闭重定向：缩略图与原图均按真实 MediaStore 路径读取" ;;
     32) echo "真实后端失联恢复：应用重启后无需重启 MediaProvider 即可继续保存图片" ;;
-    33) echo "快速重启 MediaProvider 后应用挂载与图片保存恢复" ;;
+    33) echo "MediaProvider 进程内热重载后应用挂载与图片保存恢复" ;;
   esac
 }
 
@@ -850,7 +850,7 @@ wait_app_mount_confirmed() {
   fi
   local timeout_seconds=$(((SRT_MOUNT_CONFIRM_TIMEOUT_MS + 999) / 1000))
   local output
-  if output="$(adb_su "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; marker=\"marker ok path=/data/user/0/$APP_ID/.srx_mount_status_\$pid\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
+  if output="$(adb_su "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; marker=\"marker ok path=/data/user/0/$APP_ID/.srx_mount_status_\$pid\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
     local confirmed_pid
     confirmed_pid="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
     if [ -n "$confirmed_pid" ] && app_mountinfo_has_expected_paths "$label" "$confirmed_pid"; then
@@ -980,8 +980,13 @@ start_app_and_confirm_mount() {
 
   for attempt in $(seq 1 "$max_attempts"); do
     LAST_MOUNT_CONFIRMED_PID=""
+    local previous_pid
+    previous_pid="$(app_pid)"
     adb shell am force-stop "$APP_ID" >/dev/null || true
-    sleep 0.5
+    if [[ "$label" == *quick-initial-app* ]] && [ -n "$previous_pid" ] && ! wait_app_process_stopped 10; then
+      echo "app stop timeout: $label" >&2
+      return 1
+    fi
     adb logcat -c >/dev/null 2>&1 || true
     adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
     adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
@@ -2111,7 +2116,21 @@ run_file_monitor_mediastore_scenario() {
 }
 
 app_pid() {
-  adb shell "pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'" | tr -d '\r' | tail -1
+  # 同包的旧进程可能在 force-stop 后短暂残留，跨行取最高 PID 对应刚启动的主进程。
+  adb shell "pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'" |
+    tr -d '\r' | tail -1
+}
+
+wait_app_process_stopped() {
+  local timeout_seconds="${1:-10}"
+  local deadline=$((SECONDS + timeout_seconds))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -z "$(app_pid)" ]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  [ -z "$(app_pid)" ]
 }
 
 resume_hot_reload_app() {
@@ -2230,30 +2249,34 @@ run_backend_endpoint_recovery_scenario() {
 }
 
 run_quick_media_provider_restart_recovery_scenario() {
-  local scenario="$1" sdk initial_pid current_pid initial_media_pid current_media_pid
-  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
-    echo "skip_quick_media_provider_restart scenario=${scenario} sdk=${sdk}: system FUSE detach is unsupported on this emulator"
-    return 0
-  fi
+  local scenario="$1" initial_pid current_media_pid initial_media_pid
 
   ensure_media_provider_hook_ready "scenario-${scenario}-before" || return 1
-  start_app_and_confirm_mount "scenario-${scenario}-quick-initial-app" 1 || return 1
-  initial_pid="$(app_pid)"
+  if [ -z "$(app_pid)" ]; then
+    start_app_and_confirm_mount "scenario-${scenario}-quick-initial-app" 1 || return 1
+  else
+    ensure_current_app_mount_confirmed "scenario-${scenario}-quick-initial-app" || return 1
+  fi
   initial_media_pid="$(media_provider_pid)"
+  run_mediastore_image_create_case "$scenario" "quick-before" "srt_monitor_33_quick_before.jpg" "Pictures/SrtRelativeData" &&
+    check_file_exists "scenario-${scenario}-quick-before" "${REAL_ROOT}/Pictures/SrtRelativeData/srt_monitor_33_quick_before.jpg" || return 1
+  # 图片用例会按需拉起应用主进程，必须在用例完成后记录稳定 PID。
+  initial_pid="$(app_pid)"
   if [ -z "$initial_pid" ] || [ -z "$initial_media_pid" ]; then
     echo "quick_restart_initial_pid_missing scenario=${scenario}" >&2
     return 1
   fi
-  run_mediastore_image_create_case "$scenario" "quick-before" "srt_monitor_33_quick_before.jpg" "Pictures/SrtRelativeData" &&
-    check_file_exists "scenario-${scenario}-quick-before" "${REAL_ROOT}/Pictures/SrtRelativeData/srt_monitor_33_quick_before.jpg" || return 1
 
-  adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl restart-media" || return 1
+  adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl remount-running" || return 1
+  adb_su "grep -F 'running app remount completed request=' '$LOG_PATH' | tail -1 | grep -F 'request=' >/dev/null" || {
+    echo "quick_restart_remount_completion_missing scenario=${scenario}" >&2
+    return 1
+  }
   wait_media_provider_ready "scenario-${scenario}-quick-provider" 60 >/dev/null || return 1
   wait_media_provider_hook_ready "scenario-${scenario}-quick-hook" 30 || return 1
   current_media_pid="$(media_provider_pid)"
-  if [ -z "$current_media_pid" ] || [ "$current_media_pid" = "$initial_media_pid" ]; then
-    echo "quick_restart_media_provider_pid_not_changed scenario=${scenario} before=${initial_media_pid} after=${current_media_pid:-missing}" >&2
+  if [ -z "$current_media_pid" ] || [ "$current_media_pid" != "$initial_media_pid" ]; then
+    echo "quick_restart_media_provider_pid_changed scenario=${scenario} before=${initial_media_pid} after=${current_media_pid:-missing}" >&2
     return 1
   fi
 
@@ -2263,14 +2286,6 @@ run_quick_media_provider_restart_recovery_scenario() {
     return 1
   fi
   echo "quick_restart_app_preserved scenario=${scenario} pid=${preserved_app_pid}"
-
-  start_app_and_confirm_mount "scenario-${scenario}-quick-app-restart" 1 || return 1
-  wait_storage_ready "scenario-${scenario}-quick-restart" 30 >/dev/null || return 1
-  current_pid="$(app_pid)"
-  if [ -z "$current_pid" ] || [ "$current_pid" = "$initial_pid" ]; then
-    echo "quick_restart_app_pid_not_changed scenario=${scenario} before=${initial_pid} after=${current_pid:-missing}" >&2
-    return 1
-  fi
   run_mediastore_image_create_case "$scenario" "quick-after" "srt_monitor_33_quick_after.jpg" "Pictures/SrtRelativeData" &&
     check_file_exists "scenario-${scenario}-quick-after" "${REAL_ROOT}/Pictures/SrtRelativeData/srt_monitor_33_quick_after.jpg"
 }
@@ -2570,7 +2585,7 @@ run_scenario() {
       run_backend_endpoint_recovery_scenario "$scenario"
       ;;
     33)
-      echo "step 5/7: 验证快速重启 MediaProvider 后应用挂载与图片保存恢复"
+      echo "step 5/7: 验证 MediaProvider 进程内热重载后应用挂载与图片保存恢复"
       run_quick_media_provider_restart_recovery_scenario "$scenario"
       ;;
     23)

@@ -48,18 +48,16 @@ class RootModuleControllerTest {
   }
 
   @Test
-  fun setEnabledUsesSrxctlStartWithLegacyFallback() = runBlocking {
+  fun setEnabledUsesSrxctlStartWithHotReloadFallback() = runBlocking {
     val shell =
         CapturingShell(
-            ShellResult(0, "123", ""),
             ShellResult(0, "", ""),
-            ShellResult(0, "456", ""),
         )
     val controller = RootModuleController(shell)
 
     assertTrue(controller.setEnabled(true))
 
-    val command = shell.invocations[1].command
+    val command = shell.invocations.single().command
     assertTrue(
         command,
         command.startsWith(
@@ -76,18 +74,16 @@ class RootModuleControllerTest {
   }
 
   @Test
-  fun setDisabledUsesSrxctlStopWithLegacyFallback() = runBlocking {
+  fun setDisabledUsesSrxctlStopWithHotReloadFallback() = runBlocking {
     val shell =
         CapturingShell(
-            ShellResult(0, "123", ""),
             ShellResult(0, "", ""),
-            ShellResult(0, "456", ""),
         )
     val controller = RootModuleController(shell)
 
     assertTrue(controller.setEnabled(false))
 
-    val command = shell.invocations[1].command
+    val command = shell.invocations.single().command
     assertTrue(
         command,
         command.startsWith(
@@ -109,7 +105,7 @@ class RootModuleControllerTest {
         CapturingShell(
             ShellResult(
                 0,
-                "srx_restart_running_app=com.tencent.mm\nsrx_restart_running_app=org.example\n",
+                "media provider hot reload ready pid=456\n",
                 "",
             ),
             ShellResult(0, "", ""),
@@ -119,23 +115,17 @@ class RootModuleControllerTest {
 
     val restart = controller.restartMediaProvider()
     assertTrue(restart.success)
-    assertEquals(listOf("com.tencent.mm", "org.example"), restart.runningPackages)
 
     val command = shell.invocations.single().command
     assertTrue(
         command,
         command.startsWith(
-            "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} restart-media; else "
+            "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} remount-running; else "
         ),
     )
-    assertTrue(command, command.contains("pidof \"\$p\""))
-    assertTrue(command, command.contains("srx_restart_running_app"))
     assertTrue(command, !command.contains("am force-stop"))
-    assertTrue(command, command.contains(".media_hook_install_state"))
-    assertTrue(command, command.contains("stage=init_ok pid=\$pid boot_id=\$boot_id"))
-    assertTrue(command, command.contains("content query --uri content://media/external/file"))
-    assertTrue(command, command.contains("content query --uri content://media/internal/file"))
-    assertTrue(command, command.contains("timeout 1 content query"))
+    assertTrue(command, command.contains("else exit 1; fi"))
+    assertTrue(command, !command.contains("kill -9"))
   }
 
   @Test

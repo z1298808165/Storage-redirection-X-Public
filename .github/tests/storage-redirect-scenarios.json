@@ -195,8 +195,8 @@
     {
       "id": 33,
       "config_mode": "standard",
-      "bash_title": "快速重启 MediaProvider 后应用挂载与图片保存恢复",
-      "powershell_title": "quick MediaProvider restart restores app mounts and image saving"
+      "bash_title": "MediaProvider 进程内热重载后应用挂载与图片保存恢复",
+      "powershell_title": "MediaProvider hot reload preserves app mounts and image saving"
     }
   ]
 }
