@@ -50,6 +50,36 @@ class FileTestCases(
         )
       }
 
+  fun listDirTree(args: TestCaseArgs): TestResult =
+      TestCase.FILE_LIST_DIR_TREE.measure {
+        val dirPath = args.fileDir ?: args.filePath
+        if (dirPath.isNullOrBlank()) {
+          return@measure TestCase.FILE_LIST_DIR_TREE.fail(
+              message =
+                  "missing required parameter: ${TestCaseArgs.EXTRA_FILE_DIR} or ${TestCaseArgs.EXTRA_FILE_PATH}",
+          )
+        }
+        val root = File(dirPath)
+        if (!root.isDirectory) {
+          return@measure TestCase.FILE_LIST_DIR_TREE.fail(
+              message = "path is not a directory",
+              metadata = mapOf("path" to dirPath),
+          )
+        }
+        val children = root.listFiles()?.filter(File::isDirectory).orEmpty()
+        var listedEntries = 0
+        children.forEach { child -> listedEntries += child.listFiles()?.size ?: 0 }
+        TestCase.FILE_LIST_DIR_TREE.pass(
+            message = "directory tree listed",
+            metadata =
+                mapOf(
+                    "path" to dirPath,
+                    "listedDirectories" to children.size.toString(),
+                    "listedEntries" to listedEntries.toString(),
+                ),
+        )
+      }
+
   fun create(args: TestCaseArgs): TestResult =
       TestCase.FILE_CREATE.measure {
         val targetPath =

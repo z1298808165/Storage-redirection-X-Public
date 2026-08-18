@@ -110,16 +110,14 @@ function Invoke-DirectoryCachePressure {
     $command = "rm -rf '$pressureBackendRoot'; mkdir -p '$pressureBackendRoot'; " +
         "i=0; while [ `$i -lt $Count ]; do mkdir -p '$pressureBackendRoot/dir_'`$i; i=`$((i + 1)); done; true"
     Invoke-Su $command | Out-Null
-    for ($index = 0; $index -lt $Count; $index++) {
-        Invoke-Adb @(
-            "shell", "am", "broadcast", "-n", "$AppId/.receiver.TestCaseReceiver",
-            "-a", "me.fakerqu.test.storageredirection.TEST_CASE",
-            "--es", "test_case", "file_list_dir",
-            "--es", "file_dir", "$pressureRoot/dir_$index"
-        ) | Out-Null
-        Start-Sleep -Milliseconds 100
-    }
-    Write-Host "  directory_pressure count=$Count root=$pressureRoot"
+    Invoke-Adb @(
+        "shell", "am", "broadcast", "-n", "$AppId/.receiver.TestCaseReceiver",
+        "-a", "me.fakerqu.test.storageredirection.TEST_CASE",
+        "--es", "test_case", "file_list_dir_tree",
+        "--es", "file_dir", $pressureRoot
+    ) | Out-Null
+    Start-Sleep -Seconds 2
+    Write-Host "  directory_pressure count=$Count root=$pressureRoot mode=tree"
 }
 
 function Start-PressureApp {
@@ -248,6 +246,7 @@ try {
         $abnormal = $iteration -gt ($Iterations - $AbnormalIterations)
         $mode = if ($abnormal) { "abnormal" } else { "normal" }
         $logPath = Join-Path $logRoot ("iteration-{0:D3}-{1}.log" -f $iteration, $mode)
+        Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
         Write-Host "== stress iteration $iteration/$Iterations mode=$mode =="
         $job = Start-ScenarioJob -LogPath $logPath
         $result = Wait-ScenarioJob -Job $job -KillChild $abnormal -Timeout $TimeoutSeconds

@@ -554,6 +554,8 @@ impl Filesystem for FuseRedirectFs {
                         sources,
                     },
                 );
+                self.perf
+                    .record_dir_cache_peak_entries(state.dir_candidate_cache.len());
             }
             let fh = state.next_handle();
             let entry_count = candidates.len().saturating_add(2);

@@ -38,6 +38,7 @@ pub(super) struct FusePerfStats {
     pub(super) dir_cache_source_changed: AtomicU64,
     pub(super) dir_cache_source_missing: AtomicU64,
     pub(super) dir_cache_evictions: AtomicU64,
+    pub(super) dir_cache_peak_entries: AtomicU64,
 }
 
 pub(super) struct FusePerfSample<'a> {
@@ -75,6 +76,7 @@ impl FusePerfStats {
             dir_cache_source_changed: AtomicU64::new(0),
             dir_cache_source_missing: AtomicU64::new(0),
             dir_cache_evictions: AtomicU64::new(0),
+            dir_cache_peak_entries: AtomicU64::new(0),
         }
     }
 
@@ -125,6 +127,25 @@ impl FusePerfStats {
         }
     }
 
+    pub(super) fn record_dir_cache_peak_entries(&self, entries: usize) {
+        if !crate::logging::is_debug_logging_enabled() {
+            return;
+        }
+        let entries = entries.min(u64::MAX as usize) as u64;
+        let mut current = self.dir_cache_peak_entries.load(Ordering::Relaxed);
+        while entries > current {
+            match self.dir_cache_peak_entries.compare_exchange_weak(
+                current,
+                entries,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(updated) => current = updated,
+            }
+        }
+    }
+
     fn record_dir_cache_decision(&self, hit: bool, reason: Option<DirectoryCacheMissReason>) {
         if !crate::logging::is_debug_logging_enabled() {
             return;
@@ -152,7 +173,7 @@ impl FusePerfStats {
             let hits = self.dir_cache_hits.load(Ordering::Relaxed);
             let misses = self.dir_cache_misses.load(Ordering::Relaxed);
             log::debug!(
-                "fuse_dir_cache_sample pkg={} decisions={} hits={} misses={} hit_ratio_pct={} ttl_expired={} source_changed={} source_missing={} evictions={}",
+                "fuse_dir_cache_sample pkg={} decisions={} hits={} misses={} hit_ratio_pct={} ttl_expired={} source_changed={} source_missing={} evictions={} peak_entries={}",
                 self.package_name,
                 decisions,
                 hits,
@@ -162,6 +183,7 @@ impl FusePerfStats {
                 self.dir_cache_source_changed.load(Ordering::Relaxed),
                 self.dir_cache_source_missing.load(Ordering::Relaxed),
                 self.dir_cache_evictions.load(Ordering::Relaxed),
+                self.dir_cache_peak_entries.load(Ordering::Relaxed),
             );
         }
     }
@@ -188,7 +210,7 @@ impl FusePerfStats {
         let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
         let dir_scans = self.dir_scans.load(Ordering::Relaxed);
         log::debug!(
-            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_decisions={} dir_cache_hits={} dir_cache_misses={} dir_cache_hit_ratio_pct={} dir_cache_ttl_expired={} dir_cache_source_changed={} dir_cache_source_missing={} dir_cache_evictions={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_decisions={} dir_cache_hits={} dir_cache_misses={} dir_cache_hit_ratio_pct={} dir_cache_ttl_expired={} dir_cache_source_changed={} dir_cache_source_missing={} dir_cache_evictions={} dir_cache_peak_entries={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
             self.package_name,
             self.calls.load(Ordering::Relaxed),
             self.lookup_calls.load(Ordering::Relaxed),
@@ -215,6 +237,7 @@ impl FusePerfStats {
             self.dir_cache_source_changed.load(Ordering::Relaxed),
             self.dir_cache_source_missing.load(Ordering::Relaxed),
             self.dir_cache_evictions.load(Ordering::Relaxed),
+            self.dir_cache_peak_entries.load(Ordering::Relaxed),
             self.dir_scan_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_lock_wait_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_scan_retries.load(Ordering::Relaxed),

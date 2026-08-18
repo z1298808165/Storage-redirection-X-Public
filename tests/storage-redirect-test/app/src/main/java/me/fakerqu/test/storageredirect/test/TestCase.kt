@@ -48,6 +48,7 @@ enum class TestCase(val id: String) {
   MEDIASTORE_READ_THUMBNAIL_IMAGE("mediastore_read_thumbnail_image"),
   MEDIASTORE_OPEN_TYPED_COLLECTION("mediastore_open_typed_collection"),
   FILE_LIST_DIR("file_list_dir"),
+  FILE_LIST_DIR_TREE("file_list_dir_tree"),
   FILE_CREATE("file_create"),
   FILE_READ("file_read"),
   FILE_WRITE("file_write"),
@@ -183,7 +184,7 @@ enum class TestCase(val id: String) {
               FILE_SYMLINK_DENIED,
           )
 
-  fun requiresFileDir(): Boolean = this == FILE_LIST_DIR
+  fun requiresFileDir(): Boolean = this == FILE_LIST_DIR || this == FILE_LIST_DIR_TREE
 
   fun run(context: Context, args: TestCaseArgs = TestCaseArgs()): TestResult {
     val mediaStore = MediaStoreTestCases(context)
@@ -239,6 +240,7 @@ enum class TestCase(val id: String) {
       MEDIASTORE_OPEN_TYPED_COLLECTION -> mediaStore.openTypedAssetFileCollection()
 
       FILE_LIST_DIR -> file.listDir(args)
+      FILE_LIST_DIR_TREE -> file.listDirTree(args)
       FILE_CREATE -> file.create(args)
       FILE_READ -> file.read(args)
       FILE_WRITE -> file.write(args)

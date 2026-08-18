@@ -43,6 +43,11 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn("fuse/mount-state-index.txt", source)
             self.assertIn("diagnostic-summary.json", source)
 
+    def test_fuse_cache_sampling_includes_peak_entries(self) -> None:
+        source = read("src/fuse_redirect/perf.rs")
+        self.assertIn("dir_cache_peak_entries", source)
+        self.assertIn("peak_entries={}", source)
+
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")
         self.assertIn('is_managed_temp_path "$stage" || return 64', control)
