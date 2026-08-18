@@ -1409,7 +1409,7 @@ function Invoke-QuickMediaProviderRestartRecoveryScenario {
     if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before")) { return $false }
     if ([string]::IsNullOrWhiteSpace((Get-AppPid))) {
         if (-not (Restart-App "scenario-$Scenario-quick-initial-app" $true)) { return $false }
-    } elseif (-not (Wait-AppMountConfirmed "scenario-$Scenario-quick-initial-app")) {
+    } elseif ($script:MountConfirmTimeoutMilliseconds -gt 0 -and -not (Wait-AppMountConfirmed "scenario-$Scenario-quick-initial-app")) {
         return $false
     }
     $initialMediaPid = Get-MediaProviderPid
@@ -1488,7 +1488,7 @@ function Restart-App {
     if (-not $confirmed -and $script:AppLaunchSettleMilliseconds -gt 0) {
         Start-Sleep -Milliseconds $script:AppLaunchSettleMilliseconds
     }
-    Wait-Storage $Label | Out-Null
+    return (Wait-Storage $Label)
 }
 
 function Get-TargetPath {
