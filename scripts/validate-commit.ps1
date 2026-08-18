@@ -38,6 +38,9 @@ function Get-PathKind {
     if ($normalized -match '^\.github/(workflows|actions)/') {
         return "ci"
     }
+    if ($normalized -in @("update.json", ".github/build-version-baseline.json")) {
+        return "ci"
+    }
     if (
         $normalized -match '(^|/)(tests?|testdata|fixtures)(/|$)' -or
         $normalized -match '(^|/)[^/]*(Test|Tests|Spec)\.(kt|java|rs|js|ts|tsx)$'
