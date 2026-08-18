@@ -34,7 +34,7 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -108,9 +108,33 @@ struct DirEntryCandidate {
     name: String,
 }
 
+#[derive(Clone)]
+struct DirectorySourceSignature {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    is_dir: Option<bool>,
+}
+
+impl DirectorySourceSignature {
+    fn capture(path: &Path) -> Self {
+        let metadata = std::fs::metadata(path).ok();
+        Self {
+            path: path.to_path_buf(),
+            modified: metadata.as_ref().and_then(|value| value.modified().ok()),
+            is_dir: metadata.as_ref().map(std::fs::Metadata::is_dir),
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        let current = Self::capture(&self.path);
+        self.modified == current.modified && self.is_dir == current.is_dir
+    }
+}
+
 struct CachedDirCandidates {
     created_at: Instant,
     candidates: Vec<DirEntryCandidate>,
+    sources: Vec<DirectorySourceSignature>,
 }
 
 impl FuseRedirectFs {
@@ -441,22 +465,30 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
             let cache_lock_started = track_dir_perf.then(Instant::now);
-            let cached_candidates = {
+            let cached = {
                 let state = self.state.read().unwrap_or_else(|err| err.into_inner());
                 state
                     .dir_candidate_cache
                     .get(&rel)
                     .filter(|cached| cached.created_at.elapsed() <= DIR_CANDIDATE_CACHE_TTL)
-                    .map(|cached| cached.candidates.clone())
+                    .map(|cached| (cached.candidates.clone(), cached.sources.clone()))
             };
             lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(cache_lock_started));
-            let (candidates, from_cache) = if let Some(candidates) = cached_candidates {
-                (candidates, true)
+            let cached_candidates = cached.and_then(|(candidates, sources)| {
+                sources
+                    .iter()
+                    .all(DirectorySourceSignature::is_current)
+                    .then_some(candidates)
+            });
+            let (candidates, sources, from_cache) = if let Some(candidates) = cached_candidates {
+                self.perf.record_dir_cache_hit();
+                (candidates, Vec::new(), true)
             } else {
+                self.perf.record_dir_cache_miss();
                 let scan_started = track_dir_perf.then(Instant::now);
-                let candidates = collect_dir_entry_candidates(&self.policy, &rel);
+                let (candidates, sources) = collect_dir_entry_candidates(&self.policy, &rel);
                 scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
-                (candidates, false)
+                (candidates, sources, false)
             };
             let lock_started = track_dir_perf.then(std::time::Instant::now);
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -481,6 +513,7 @@ impl Filesystem for FuseRedirectFs {
                     CachedDirCandidates {
                         created_at: Instant::now(),
                         candidates: candidates.clone(),
+                        sources,
                     },
                 );
             }
@@ -1417,16 +1450,18 @@ impl Filesystem for FuseRedirectFs {
 fn collect_dir_entry_candidates(
     policy: &policy::RedirectPolicy,
     rel: &str,
-) -> Vec<DirEntryCandidate> {
+) -> (Vec<DirEntryCandidate>, Vec<DirectorySourceSignature>) {
     use crate::platform::paths;
     let mut entries = Vec::new();
     let mut seen = HashMap::<String, usize>::new();
+    let mut sources = Vec::new();
     append_backend_dir_entries(
         policy,
         rel,
         &policy.redirect_backend_for_rel(rel),
         &mut entries,
         &mut seen,
+        &mut sources,
     );
     append_backend_dir_entries(
         policy,
@@ -1434,6 +1469,7 @@ fn collect_dir_entry_candidates(
         &policy.real_backend_for_rel(rel),
         &mut entries,
         &mut seen,
+        &mut sources,
     );
     for mapping in &policy.path_mappings {
         if paths::matches(
@@ -1449,11 +1485,19 @@ fn collect_dir_entry_candidates(
                 &policy.real_backend_for_storage_rel(target_rel),
                 &mut entries,
                 &mut seen,
+                &mut sources,
             );
         }
     }
     append_rule_prefix_entries(policy, rel, &mut entries, &mut seen);
-    entries
+    (entries, sources)
+}
+
+fn append_directory_source(path: &Path, sources: &mut Vec<DirectorySourceSignature>) {
+    if sources.iter().any(|source| source.path == path) {
+        return;
+    }
+    sources.push(DirectorySourceSignature::capture(path));
 }
 
 fn append_backend_dir_entries(
@@ -1462,8 +1506,10 @@ fn append_backend_dir_entries(
     backend: &Path,
     entries: &mut Vec<DirEntryCandidate>,
     seen: &mut HashMap<String, usize>,
+    sources: &mut Vec<DirectorySourceSignature>,
 ) {
     use crate::platform::paths;
+    append_directory_source(backend, sources);
     let Ok(read_dir) = std::fs::read_dir(backend) else {
         return;
     };

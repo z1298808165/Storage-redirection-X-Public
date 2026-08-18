@@ -21,6 +21,8 @@ pub(super) struct FusePerfStats {
     pub(super) dir_lock_wait_ns: AtomicU64,
     pub(super) dir_scan_retries: AtomicU64,
     pub(super) dir_entries: AtomicU64,
+    pub(super) dir_cache_hits: AtomicU64,
+    pub(super) dir_cache_misses: AtomicU64,
 }
 
 pub(super) struct FusePerfSample<'a> {
@@ -51,6 +53,8 @@ impl FusePerfStats {
             dir_lock_wait_ns: AtomicU64::new(0),
             dir_scan_retries: AtomicU64::new(0),
             dir_entries: AtomicU64::new(0),
+            dir_cache_hits: AtomicU64::new(0),
+            dir_cache_misses: AtomicU64::new(0),
         }
     }
 
@@ -87,6 +91,18 @@ impl FusePerfStats {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(super) fn record_dir_cache_hit(&self) {
+        if crate::logging::is_debug_logging_enabled() {
+            self.dir_cache_hits.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn record_dir_cache_miss(&self) {
+        if crate::logging::is_debug_logging_enabled() {
+            self.dir_cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn observe<'a>(&'a self, counter: &AtomicU64) -> FusePerfSample<'a> {
         if !crate::logging::is_debug_logging_enabled() {
             return FusePerfSample {
@@ -109,7 +125,7 @@ impl FusePerfStats {
         let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
         let dir_scans = self.dir_scans.load(Ordering::Relaxed);
         log::debug!(
-            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_hits={} dir_cache_misses={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
             self.package_name,
             self.calls.load(Ordering::Relaxed),
             self.lookup_calls.load(Ordering::Relaxed),
@@ -125,6 +141,8 @@ impl FusePerfStats {
             sampled_ns.checked_div(sampled.max(1)).unwrap_or(0) / 1000,
             self.slow_samples.load(Ordering::Relaxed),
             dir_scans,
+            self.dir_cache_hits.load(Ordering::Relaxed),
+            self.dir_cache_misses.load(Ordering::Relaxed),
             self.dir_scan_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_lock_wait_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_scan_retries.load(Ordering::Relaxed),
