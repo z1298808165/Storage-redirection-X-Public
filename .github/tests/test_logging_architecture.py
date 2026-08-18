@@ -47,6 +47,8 @@ class LoggingArchitectureTest(unittest.TestCase):
         source = read("src/fuse_redirect/perf.rs")
         self.assertIn("dir_cache_peak_entries", source)
         self.assertIn("peak_entries={}", source)
+        self.assertIn("dir_cache_capacity", source)
+        self.assertIn("max_capacity={}", source)
 
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")

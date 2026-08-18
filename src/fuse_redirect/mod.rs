@@ -43,7 +43,7 @@ const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
 const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(250);
-const MAX_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
+const INITIAL_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
 const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
 pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
@@ -75,6 +75,8 @@ struct FuseState {
     files: HashMap<u64, OpenFile>,
     dirs: HashMap<u64, Arc<[DirEntry]>>,
     dir_candidate_cache: HashMap<String, CachedDirCandidates>,
+    dir_candidate_cache_capacity: usize,
+    dir_candidate_cache_max_capacity: usize,
 }
 
 impl FuseState {
@@ -83,6 +85,29 @@ impl FuseState {
         self.next_fh = self.next_fh.saturating_add(1).max(1);
         fh
     }
+}
+
+fn dir_candidate_cache_capacity_limits() -> (usize, usize) {
+    let total_kib = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|content| {
+            content.lines().find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next() == Some("MemTotal:")).then(|| fields.next()?.parse::<u64>().ok())?
+            })
+        })
+        .unwrap_or(4 * 1024 * 1024);
+    let max_capacity = if total_kib < 4 * 1024 * 1024 {
+        64
+    } else if total_kib < 8 * 1024 * 1024 {
+        128
+    } else {
+        256
+    };
+    (
+        INITIAL_DIR_CANDIDATE_CACHE_ENTRIES.min(max_capacity),
+        max_capacity,
+    )
 }
 
 struct OpenFile {
@@ -159,14 +184,18 @@ impl FuseRedirectFs {
     fn new(config: FuseRedirectConfig) -> Option<Self> {
         let package_name = config.package_name.clone();
         let policy = RedirectPolicy::new(config)?;
+        let (dir_cache_capacity, dir_cache_max_capacity) = dir_candidate_cache_capacity_limits();
         let mut inodes = HashMap::new();
         let mut paths_by_inode = HashMap::new();
         inodes.insert(String::new(), ROOT_INO);
         paths_by_inode.insert(ROOT_INO, String::new());
 
+        let perf = FusePerfStats::new(package_name);
+        perf.record_dir_cache_capacity(dir_cache_capacity, dir_cache_max_capacity);
+
         Some(Self {
             policy,
-            perf: FusePerfStats::new(package_name),
+            perf,
             passthrough_enabled: AtomicBool::new(false),
             state: RwLock::new(FuseState {
                 next_ino: ROOT_INO + 1,
@@ -179,6 +208,8 @@ impl FuseRedirectFs {
                 files: HashMap::new(),
                 dirs: HashMap::new(),
                 dir_candidate_cache: HashMap::new(),
+                dir_candidate_cache_capacity: dir_cache_capacity,
+                dir_candidate_cache_max_capacity: dir_cache_max_capacity,
             }),
         })
     }
@@ -542,8 +573,18 @@ impl Filesystem for FuseRedirectFs {
                 continue;
             }
             if !from_cache {
-                if state.dir_candidate_cache.len() >= MAX_DIR_CANDIDATE_CACHE_ENTRIES {
+                if state.dir_candidate_cache.len() >= state.dir_candidate_cache_capacity {
                     self.perf.record_dir_cache_eviction();
+                    if state.dir_candidate_cache_capacity < state.dir_candidate_cache_max_capacity {
+                        state.dir_candidate_cache_capacity = state
+                            .dir_candidate_cache_capacity
+                            .saturating_mul(2)
+                            .min(state.dir_candidate_cache_max_capacity);
+                        self.perf.record_dir_cache_capacity(
+                            state.dir_candidate_cache_capacity,
+                            state.dir_candidate_cache_max_capacity,
+                        );
+                    }
                     state.dir_candidate_cache.clear();
                 }
                 state.dir_candidate_cache.insert(
