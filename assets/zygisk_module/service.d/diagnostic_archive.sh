@@ -7,6 +7,7 @@ MODDIR=${MODDIR%/service.d}
 CONFIG_DIR="$MODDIR/config"
 APPS_CONFIG_DIR="$CONFIG_DIR/apps"
 LOGS_DIR="$MODDIR/logs"
+MOUNT_STATE_SOURCE_DIR="$MODDIR/tmp/mount_state"
 STATE_DIR=""
 PROC_DIR=""
 ANR_DIR=""
@@ -147,9 +148,26 @@ collect_basic_files() {
   fi
 }
 
+collect_fuse_state() {
+  mkdir -p "$stage/fuse/mount_state"
+  {
+    echo "mount_state_source=$MOUNT_STATE_SOURCE_DIR"
+    find "$MOUNT_STATE_SOURCE_DIR" -maxdepth 1 -type f -name "*.state" 2>/dev/null | sort
+  } > "$stage/fuse/mount-state-index.txt" 2>&1
+  if [ -d "$MOUNT_STATE_SOURCE_DIR" ]; then
+    find "$MOUNT_STATE_SOURCE_DIR" -maxdepth 1 -type f -name "*.state" \
+      -exec cp -p {} "$stage/fuse/mount_state/" \; 2>/dev/null || true
+  fi
+  {
+    echo "sample_sources=$LOGS_DIR/running.log*"
+    grep -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' \
+      "$LOGS_DIR"/running.log* 2>/dev/null | tail -n 240 || true
+  } > "$stage/fuse/cache-performance.txt" 2>&1
+}
+
 collect_device_state() {
   {
-    echo "diagnostic_archive_version=4"
+    echo "diagnostic_archive_version=5"
     echo "progress_protocol=1"
     echo "created_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)"
     echo "id:"
@@ -545,6 +563,8 @@ update_progress 36 process "正在采集进程状态"
 collect_process_state
 update_progress 46 mounts "正在采集存储挂载状态"
 collect_mount_state
+update_progress 52 fuse "正在采集 FUSE 挂载和缓存状态"
+collect_fuse_state
 update_progress 56 proc "正在采集相关进程细节"
 collect_relevant_proc_state
 update_progress 66 dumpsys "正在采集系统服务快照"

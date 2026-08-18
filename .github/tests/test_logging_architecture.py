@@ -21,6 +21,10 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("-b crash -d -v threadtime", script)
         self.assertIn('-T "$LOGCAT_CAPTURE_START"', script)
         self.assertIn("tail -n 3000", script)
+        self.assertIn('diagnostic_archive_version=5', script)
+        self.assertIn("collect_fuse_state", script)
+        self.assertIn('fuse/cache-performance.txt', script)
+        self.assertIn('fuse/mount_state', script)
 
     def test_legacy_exporters_use_the_same_bounded_windows(self) -> None:
         for path in (
@@ -33,6 +37,8 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn("logcat-buffers.txt", source)
             self.assertIn("logcat-capture.txt", source)
             self.assertIn("tail -n 3000", source)
+            self.assertIn("fuse/cache-performance.txt", source)
+            self.assertIn("fuse/mount-state-index.txt", source)
 
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")

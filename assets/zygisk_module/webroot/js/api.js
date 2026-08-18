@@ -1251,6 +1251,10 @@ const Api = {
       'cp -p "$config/global.json" "$stage/config/global.json" 2>/dev/null || true; ' +
       'cp -p "$config/file_monitor_filters.json" "$stage/config/file_monitor_filters.json" 2>/dev/null || true; ' +
       'cp -p "$config/templates.json" "$stage/config/templates.json" 2>/dev/null || true; ' +
+      'mkdir -p "$stage/fuse/mount_state"; ' +
+      '{ echo "mount_state_source=$module/tmp/mount_state"; find "$module/tmp/mount_state" -maxdepth 1 -type f -name "*.state" 2>/dev/null | sort; } > "$stage/fuse/mount-state-index.txt" 2>&1; ' +
+      'if [ -d "$module/tmp/mount_state" ]; then find "$module/tmp/mount_state" -maxdepth 1 -type f -name "*.state" -exec cp -p {} "$stage/fuse/mount_state/" \; 2>/dev/null || true; fi; ' +
+      '{ echo "sample_sources=$logs/running.log*"; grep -h -E "fuse_dir_cache_sample|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | tail -n 240 || true; } > "$stage/fuse/cache-performance.txt" 2>&1; ' +
       diagnosticProgressCommand(progress, 45, "state", "正在采集基础状态") +
       '{ date; id; uname -a; getprop ro.build.fingerprint 2>/dev/null; getprop ro.product.model 2>/dev/null; getprop ro.build.version.release 2>/dev/null; } > "$stage/state/device.txt" 2>&1; ' +
       '{ /system/bin/sh "$module/bin/srxctl" status 2>/dev/null || true; ls -la "$module" 2>/dev/null; ls -la "$logs" 2>/dev/null; } > "$stage/state/module.txt" 2>&1; ' +
