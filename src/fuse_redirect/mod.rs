@@ -13,8 +13,8 @@ use crate::platform::{fs, paths};
 use fuser::{
     AccessFlags, CopyFileRangeFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
     Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use inode::{
     add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs, remove_inode_path,
@@ -92,6 +92,7 @@ struct DirEntry {
     ino: INodeNo,
     kind: FileType,
     name: String,
+    rel: String,
 }
 
 #[derive(Clone)]
@@ -510,6 +511,52 @@ impl Filesystem for FuseRedirectFs {
         };
         for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
             if reply.add(entry.ino, (index + 1) as u64, entry.kind, &entry.name) {
+                break;
+            }
+        }
+        reply.ok();
+    }
+
+    fn readdirplus(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let _perf = self.perf.observe(&self.perf.read_calls);
+        let handle = fh.into();
+        let entries = {
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+            if !state.paths_by_inode.contains_key(&ino.0) {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+            let Some(entries) = state.dirs.get(&handle).cloned() else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            entries
+        };
+        for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
+            let Some(backend) = self
+                .policy
+                .backend_for_relative(&entry.rel, OperationKind::Read)
+            else {
+                continue;
+            };
+            let Ok(attr) = self.visible_attr_for_backend(entry.ino, &backend) else {
+                continue;
+            };
+            if reply.add(
+                entry.ino,
+                (index + 1) as u64,
+                &entry.name,
+                &TTL,
+                &attr,
+                Generation(0),
+            ) {
                 break;
             }
         }
@@ -1506,16 +1553,22 @@ fn materialize_dir_entries(
         ino,
         kind: FileType::Directory,
         name: ".".to_string(),
+        rel: rel.to_string(),
     });
     entries.push(DirEntry {
         ino: INodeNo(parent_ino),
         kind: FileType::Directory,
         name: "..".to_string(),
+        rel: parent_rel.clone(),
     });
-    entries.extend(candidates.into_iter().map(|candidate| DirEntry {
-        ino: FuseRedirectFs::ino_for_path_locked(state, &candidate.rel),
-        kind: candidate.kind,
-        name: candidate.name,
+    entries.extend(candidates.into_iter().map(|candidate| {
+        let ino = FuseRedirectFs::ino_for_path_locked(state, &candidate.rel);
+        DirEntry {
+            ino,
+            kind: candidate.kind,
+            name: candidate.name,
+            rel: candidate.rel,
+        }
     }));
     entries
 }
