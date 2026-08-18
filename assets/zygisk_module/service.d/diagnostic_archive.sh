@@ -167,7 +167,7 @@ collect_fuse_state() {
 
 collect_device_state() {
   {
-    echo "diagnostic_archive_version=5"
+    echo "diagnostic_archive_version=6"
     echo "progress_protocol=1"
     echo "created_at=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)"
     echo "id:"
@@ -450,6 +450,41 @@ collect_logcat_delta() {
     >> "$STATE_DIR/logcat-capture.txt"
 }
 
+collect_diagnostic_summary() {
+  module_version=$(sed -n 's/^version=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-')
+  module_version_code=$(sed -n 's/^versionCode=//p' "$MODDIR/module.prop" 2>/dev/null | head -n 1 | tr -cd '0-9')
+  boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -cd 'A-Za-z0-9-')
+  runtime_status=$(/system/bin/sh "$MODDIR/bin/srxctl" status 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._:+-')
+  created_at=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null | tr -cd 'A-Za-z0-9._:+-')
+  mount_state_count=$(find "$MOUNT_STATE_SOURCE_DIR" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l | tr -d ' ')
+  fuse_cache_sample_count=$(grep -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' "$LOGS_DIR"/running.log* 2>/dev/null | wc -l | tr -d ' ')
+  fuse_cache_eviction_lines=$(grep -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' "$LOGS_DIR"/running.log* 2>/dev/null | grep -c 'evictions=' | tr -d ' ')
+  monitor_capacity_limited=$(grep -h 'capacity_limited=' "$LOGS_DIR"/running.log* 2>/dev/null | tail -n 1 | sed -n 's/.*capacity_limited=\([^ ]*\).*/\1/p' | tr -cd 'A-Za-z')
+  [ -n "$module_version_code" ] || module_version_code=0
+  [ -n "$mount_state_count" ] || mount_state_count=0
+  [ -n "$fuse_cache_sample_count" ] || fuse_cache_sample_count=0
+  [ -n "$fuse_cache_eviction_lines" ] || fuse_cache_eviction_lines=0
+  [ -n "$monitor_capacity_limited" ] || monitor_capacity_limited=unknown
+  media_hook_state_present=0
+  [ -s "$LOGS_DIR/.media_hook_install_state" ] && media_hook_state_present=1
+  {
+    printf '{\n'
+    printf '  "schema": 1,\n'
+    printf '  "archive_version": 6,\n'
+    printf '  "created_at": "%s",\n' "$created_at"
+    printf '  "module_version": "%s",\n' "$module_version"
+    printf '  "module_version_code": %s,\n' "$module_version_code"
+    printf '  "boot_id": "%s",\n' "$boot_id"
+    printf '  "runtime_status": "%s",\n' "$runtime_status"
+    printf '  "mount_state_count": %s,\n' "$mount_state_count"
+    printf '  "fuse_cache_sample_count": %s,\n' "$fuse_cache_sample_count"
+    printf '  "fuse_cache_eviction_lines": %s,\n' "$fuse_cache_eviction_lines"
+    printf '  "monitor_capacity_limited": "%s",\n' "$monitor_capacity_limited"
+    printf '  "media_hook_state_present": %s\n' "$media_hook_state_present"
+    printf '}\n'
+  } > "$stage/diagnostic-summary.json"
+}
+
 collect_kernel_state() {
   dmesg 2>/dev/null | tail -n 1200 > "$stage/dmesg-tail.txt" 2>/dev/null || true
   dmesg 2>/dev/null |
@@ -577,6 +612,8 @@ update_progress 90 tombstones "正在截取崩溃记录"
 copy_tombstone_files
 update_progress 93 logcat "正在补充导出期间日志"
 collect_logcat_delta
+update_progress 96 summary "正在生成诊断摘要"
+collect_diagnostic_summary
 
 update_progress 97 archive "正在压缩日志包"
 finalize_archive || die "failed to create archive"

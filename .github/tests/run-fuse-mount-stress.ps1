@@ -33,8 +33,9 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 
 $stateRoot = "/data/adb/modules/storage.redirect.x/tmp/mount_state"
 $statePattern = "$stateRoot/${AppId}_*.state"
-$pressureRoot = "/storage/emulated/0/Download/SrtCachePressure"
-$pressureBackendRoot = "/data/media/0/Download/SrtCachePressure"
+$pressureRoot = "/storage/emulated/0/SrtRuleSandbox/CachePressure"
+$pressureBackendRoot = "/data/media/0/Android/data/$AppId/sdcard/SrtRuleSandbox/CachePressure"
+$moduleLogDir = "/data/adb/modules/storage.redirect.x/logs"
 
 function Invoke-Adb {
     param([string[]]$Arguments)
@@ -121,6 +122,27 @@ function Invoke-DirectoryCachePressure {
     Write-Host "  directory_pressure count=$Count root=$pressureRoot"
 }
 
+function Wait-DirectoryCacheSample {
+    param([int]$TimeoutSeconds = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $sampleLines = @(Invoke-Su "grep -a -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' '$moduleLogDir'/running.log* 2>/dev/null || true")
+        $appSamples = @($sampleLines | Where-Object { $_ -match "pkg=$([regex]::Escape($AppId))(\s|$)" })
+        if ($appSamples.Count -gt 0) {
+            $lastSample = [string]$appSamples[-1]
+            $evictions = 0
+            if ($lastSample -match 'evictions=(\d+)') { $evictions = [int]$Matches[1] }
+            return [pscustomobject]@{
+                Sampled = $true
+                Evictions = $evictions
+                LastSample = $lastSample
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    [pscustomobject]@{ Sampled = $false; Evictions = 0; LastSample = "" }
+}
+
 function Start-ScenarioJob {
     param([string]$LogPath)
     Start-Job -ScriptBlock {
@@ -153,6 +175,12 @@ function Wait-ScenarioJob {
                 Invoke-DirectoryCachePressure -Count $DirectoryPressureCount
                 $pressureDone = $true
                 if ($DirectoryPressureOnly) {
+                    $sample = Wait-DirectoryCacheSample
+                    if (-not $sample.Sampled) {
+                        Write-Warning "未观察到目标应用的 FUSE 目录缓存采样。"
+                    } else {
+                        Write-Host "  directory_pressure_sample evictions=$($sample.Evictions)"
+                    }
                     Stop-Job -Job $Job -ErrorAction SilentlyContinue
                     break
                 }

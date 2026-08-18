@@ -21,7 +21,9 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("-b crash -d -v threadtime", script)
         self.assertIn('-T "$LOGCAT_CAPTURE_START"', script)
         self.assertIn("tail -n 3000", script)
-        self.assertIn('diagnostic_archive_version=5', script)
+        self.assertIn('diagnostic_archive_version=6', script)
+        self.assertIn('diagnostic-summary.json', script)
+        self.assertIn('collect_diagnostic_summary', script)
         self.assertIn("collect_fuse_state", script)
         self.assertIn('fuse/cache-performance.txt', script)
         self.assertIn('fuse/mount_state', script)
@@ -39,6 +41,7 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn("tail -n 3000", source)
             self.assertIn("fuse/cache-performance.txt", source)
             self.assertIn("fuse/mount-state-index.txt", source)
+            self.assertIn("diagnostic-summary.json", source)
 
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")
