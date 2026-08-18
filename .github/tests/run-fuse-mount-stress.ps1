@@ -122,25 +122,47 @@ function Invoke-DirectoryCachePressure {
     Write-Host "  directory_pressure count=$Count root=$pressureRoot"
 }
 
+function Start-PressureApp {
+    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+    Invoke-Su ": > '$moduleLogDir/running.log' 2>/dev/null || true" | Out-Null
+    Start-Sleep -Milliseconds 500
+    Invoke-Adb @("shell", "am", "start", "-n", "$AppId/.MainActivity") | Out-Null
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        if (@(Get-FuseChildren).Count -gt 0) { return $true }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    $false
+}
+
 function Wait-DirectoryCacheSample {
     param([int]$TimeoutSeconds = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $lastSample = ""
+    $lastSampleAt = $null
     do {
-        $sampleLines = @(Invoke-Su "grep -a -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' '$moduleLogDir'/running.log* 2>/dev/null || true")
+        $sampleLines = @(Invoke-Su "grep -a -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' '$moduleLogDir/running.log' 2>/dev/null || true")
         $appSamples = @($sampleLines | Where-Object { $_ -match "pkg=$([regex]::Escape($AppId))(\s|$)" })
         if ($appSamples.Count -gt 0) {
-            $lastSample = [string]$appSamples[-1]
-            $evictions = 0
-            if ($lastSample -match 'evictions=(\d+)') { $evictions = [int]$Matches[1] }
-            return [pscustomobject]@{
-                Sampled = $true
-                Evictions = $evictions
-                LastSample = $lastSample
+            $candidate = [string]$appSamples[-1]
+            if ($candidate -ne $lastSample) {
+                $lastSample = $candidate
+                $lastSampleAt = Get-Date
             }
+            if ($lastSampleAt -and ((Get-Date) - $lastSampleAt).TotalSeconds -ge 2) { break }
         }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    [pscustomobject]@{ Sampled = $false; Evictions = 0; LastSample = "" }
+    $decisions = 0
+    $evictions = 0
+    if ($lastSample -match 'decisions=(\d+)') { $decisions = [int]$Matches[1] }
+    if ($lastSample -match 'evictions=(\d+)') { $evictions = [int]$Matches[1] }
+    [pscustomobject]@{
+        Sampled = -not [string]::IsNullOrWhiteSpace($lastSample)
+        Decisions = $decisions
+        Evictions = $evictions
+        LastSample = $lastSample
+    }
 }
 
 function Start-ScenarioJob {
@@ -171,7 +193,15 @@ function Wait-ScenarioJob {
             $pressureChildren = @(Get-FuseChildren)
             $pressureReady = (Test-Path -LiteralPath $LogPath -PathType Leaf) -and
                 [bool](Select-String -LiteralPath $LogPath -Pattern "PASS scenario-8/sandbox-rule-hit" -Quiet)
-            if ($pressureChildren.Count -gt 0 -and $pressureReady) {
+            $pressureCanStart = $pressureReady -and ($DirectoryPressureOnly -or $pressureChildren.Count -gt 0)
+            if ($pressureCanStart) {
+                if ($DirectoryPressureOnly) {
+                    Stop-Job -Job $Job -ErrorAction SilentlyContinue
+                    if (-not (Start-PressureApp)) {
+                        Write-Warning "目录压力模式未观察到新的 FUSE child。"
+                        break
+                    }
+                }
                 Invoke-DirectoryCachePressure -Count $DirectoryPressureCount
                 $pressureDone = $true
                 if ($DirectoryPressureOnly) {
@@ -179,7 +209,7 @@ function Wait-ScenarioJob {
                     if (-not $sample.Sampled) {
                         Write-Warning "未观察到目标应用的 FUSE 目录缓存采样。"
                     } else {
-                        Write-Host "  directory_pressure_sample evictions=$($sample.Evictions)"
+                        Write-Host "  directory_pressure_sample decisions=$($sample.Decisions) evictions=$($sample.Evictions) line=$($sample.LastSample)"
                     }
                     Stop-Job -Job $Job -ErrorAction SilentlyContinue
                     break
