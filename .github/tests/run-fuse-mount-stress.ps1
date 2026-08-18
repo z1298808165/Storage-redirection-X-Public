@@ -4,13 +4,18 @@ param(
     [string]$AppId = "me.fakerqu.test.storageredirect",
     [int]$Iterations = 5,
     [int]$AbnormalIterations = 2,
-    [int]$TimeoutSeconds = 180
+    [int]$TimeoutSeconds = 180,
+    [int]$DirectoryPressureCount = 0,
+    [switch]$DirectoryPressureOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($Iterations -lt 1 -or $AbnormalIterations -lt 0 -or $AbnormalIterations -gt $Iterations) {
     throw "Iterations 与 AbnormalIterations 参数范围无效。"
+}
+if ($DirectoryPressureCount -lt 0 -or $DirectoryPressureCount -gt 256) {
+    throw "DirectoryPressureCount 参数范围无效。"
 }
 
 if ([string]::IsNullOrWhiteSpace($Serial)) {
@@ -28,6 +33,8 @@ New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
 
 $stateRoot = "/data/adb/modules/storage.redirect.x/tmp/mount_state"
 $statePattern = "$stateRoot/${AppId}_*.state"
+$pressureRoot = "/storage/emulated/0/Download/SrtCachePressure"
+$pressureBackendRoot = "/data/media/0/Download/SrtCachePressure"
 
 function Invoke-Adb {
     param([string[]]$Arguments)
@@ -96,6 +103,24 @@ function Stop-TestApp {
     try { Wait-TestCleanup -Timeout 30 | Out-Null } catch { Write-Warning "测试 APP 清理检查失败：$_" }
 }
 
+function Invoke-DirectoryCachePressure {
+    param([int]$Count)
+    if ($Count -le 0) { return }
+    $command = "rm -rf '$pressureBackendRoot'; mkdir -p '$pressureBackendRoot'; " +
+        "i=0; while [ `$i -lt $Count ]; do mkdir -p '$pressureBackendRoot/dir_'`$i; i=`$((i + 1)); done; true"
+    Invoke-Su $command | Out-Null
+    for ($index = 0; $index -lt $Count; $index++) {
+        Invoke-Adb @(
+            "shell", "am", "broadcast", "-n", "$AppId/.receiver.TestCaseReceiver",
+            "-a", "me.fakerqu.test.storageredirection.TEST_CASE",
+            "--es", "test_case", "file_list_dir",
+            "--es", "file_dir", "$pressureRoot/dir_$index"
+        ) | Out-Null
+        Start-Sleep -Milliseconds 100
+    }
+    Write-Host "  directory_pressure count=$Count root=$pressureRoot"
+}
+
 function Start-ScenarioJob {
     param([string]$LogPath)
     Start-Job -ScriptBlock {
@@ -118,7 +143,21 @@ function Wait-ScenarioJob {
     )
     $deadline = (Get-Date).AddSeconds($Timeout)
     $killed = $false
+    $pressureDone = $false
     while ($Job.State -eq "Running" -and (Get-Date) -lt $deadline) {
+        if (-not $pressureDone -and $DirectoryPressureCount -gt 0) {
+            $pressureChildren = @(Get-FuseChildren)
+            $pressureReady = (Test-Path -LiteralPath $LogPath -PathType Leaf) -and
+                [bool](Select-String -LiteralPath $LogPath -Pattern "PASS scenario-8/sandbox-rule-hit" -Quiet)
+            if ($pressureChildren.Count -gt 0 -and $pressureReady) {
+                Invoke-DirectoryCachePressure -Count $DirectoryPressureCount
+                $pressureDone = $true
+                if ($DirectoryPressureOnly) {
+                    Stop-Job -Job $Job -ErrorAction SilentlyContinue
+                    break
+                }
+            }
+        }
         if ($KillChild -and -not $killed) {
             $children = @(Get-FuseChildren)
             if ($children.Count -gt 0) {
@@ -136,9 +175,12 @@ function Wait-ScenarioJob {
     }
     $result = @(Receive-Job -Job $Job -ErrorAction SilentlyContinue)
     Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+    $exitCode = if ($result.Count -gt 0) { [int]$result[-1] } else { -1 }
+    if ($DirectoryPressureOnly -and $pressureDone) { $exitCode = 0 }
     [pscustomobject]@{
         Killed = $killed
-        ExitCode = if ($result.Count -gt 0) { [int]$result[-1] } else { -1 }
+        PressureDone = $pressureDone
+        ExitCode = $exitCode
     }
 }
 
@@ -154,7 +196,12 @@ try {
         Stop-TestApp
         $clean = Wait-TestCleanup -Timeout 30
 
-        if ($abnormal) {
+        if ($DirectoryPressureOnly) {
+            if (-not $result.PressureDone) {
+                $failures.Add("iteration-$iteration 未完成目录压力访问")
+            }
+            Write-Host "  pressure_result count=$DirectoryPressureCount exit=$($result.ExitCode)"
+        } elseif ($abnormal) {
             if (-not $result.Killed) {
                 $failures.Add("iteration-$iteration 未观察到可终止的 FUSE child")
             }
@@ -170,6 +217,7 @@ try {
     }
 }
 finally {
+    try { Invoke-Su "rm -rf '$pressureBackendRoot'" | Out-Null } catch { Write-Warning "目录压力产物清理失败：$_" }
     Stop-TestApp
 }
 
