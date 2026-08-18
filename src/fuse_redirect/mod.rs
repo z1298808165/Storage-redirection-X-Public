@@ -25,7 +25,7 @@ use metadata::{
     fix_existing_path_metadata, fix_path_metadata, last_errno, rename_noreplace, truncate_path,
     utimens_path,
 };
-use perf::FusePerfStats;
+use perf::{DirectoryCacheMissReason, FusePerfStats};
 use policy::{BackendPath, OperationKind, RedirectPolicy};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -125,10 +125,28 @@ impl DirectorySourceSignature {
         }
     }
 
-    fn is_current(&self) -> bool {
-        let current = Self::capture(&self.path);
-        self.modified == current.modified && self.is_dir == current.is_dir
+    fn state(&self) -> DirectorySourceState {
+        let Some(metadata) = std::fs::metadata(&self.path).ok() else {
+            return if self.modified.is_none() && self.is_dir.is_none() {
+                DirectorySourceState::Current
+            } else {
+                DirectorySourceState::Missing
+            };
+        };
+        let modified = metadata.modified().ok();
+        let is_dir = Some(metadata.is_dir());
+        if self.modified == modified && self.is_dir == is_dir {
+            DirectorySourceState::Current
+        } else {
+            DirectorySourceState::Changed
+        }
     }
+}
+
+enum DirectorySourceState {
+    Current,
+    Changed,
+    Missing,
 }
 
 struct CachedDirCandidates {
@@ -467,24 +485,43 @@ impl Filesystem for FuseRedirectFs {
             let cache_lock_started = track_dir_perf.then(Instant::now);
             let cached = {
                 let state = self.state.read().unwrap_or_else(|err| err.into_inner());
-                state
-                    .dir_candidate_cache
-                    .get(&rel)
-                    .filter(|cached| cached.created_at.elapsed() <= DIR_CANDIDATE_CACHE_TTL)
-                    .map(|cached| (cached.candidates.clone(), cached.sources.clone()))
+                state.dir_candidate_cache.get(&rel).map(|cached| {
+                    (
+                        cached.created_at,
+                        cached.candidates.clone(),
+                        cached.sources.clone(),
+                    )
+                })
             };
             lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(cache_lock_started));
-            let cached_candidates = cached.and_then(|(candidates, sources)| {
-                sources
-                    .iter()
-                    .all(DirectorySourceSignature::is_current)
-                    .then_some(candidates)
-            });
+            let (cached_candidates, cache_miss_reason) = match cached {
+                None => (None, DirectoryCacheMissReason::NotCached),
+                Some((created_at, _candidates, _sources))
+                    if created_at.elapsed() > DIR_CANDIDATE_CACHE_TTL =>
+                {
+                    (None, DirectoryCacheMissReason::TtlExpired)
+                }
+                Some((_, candidates, sources)) => {
+                    let reason = sources.iter().find_map(|source| match source.state() {
+                        DirectorySourceState::Current => None,
+                        DirectorySourceState::Changed => {
+                            Some(DirectoryCacheMissReason::SourceChanged)
+                        }
+                        DirectorySourceState::Missing => {
+                            Some(DirectoryCacheMissReason::SourceMissing)
+                        }
+                    });
+                    match reason {
+                        Some(reason) => (None, reason),
+                        None => (Some(candidates), DirectoryCacheMissReason::NotCached),
+                    }
+                }
+            };
             let (candidates, sources, from_cache) = if let Some(candidates) = cached_candidates {
                 self.perf.record_dir_cache_hit();
                 (candidates, Vec::new(), true)
             } else {
-                self.perf.record_dir_cache_miss();
+                self.perf.record_dir_cache_miss(cache_miss_reason);
                 let scan_started = track_dir_perf.then(Instant::now);
                 let (candidates, sources) = collect_dir_entry_candidates(&self.policy, &rel);
                 scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));

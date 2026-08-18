@@ -1,6 +1,16 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+const DIR_CACHE_SAMPLE_STEP: u64 = 256;
+
+#[derive(Clone, Copy)]
+pub(super) enum DirectoryCacheMissReason {
+    NotCached,
+    TtlExpired,
+    SourceChanged,
+    SourceMissing,
+}
+
 pub(super) struct FusePerfStats {
     pub(super) package_name: String,
     pub(super) calls: AtomicU64,
@@ -21,8 +31,12 @@ pub(super) struct FusePerfStats {
     pub(super) dir_lock_wait_ns: AtomicU64,
     pub(super) dir_scan_retries: AtomicU64,
     pub(super) dir_entries: AtomicU64,
+    pub(super) dir_cache_decisions: AtomicU64,
     pub(super) dir_cache_hits: AtomicU64,
     pub(super) dir_cache_misses: AtomicU64,
+    pub(super) dir_cache_ttl_expired: AtomicU64,
+    pub(super) dir_cache_source_changed: AtomicU64,
+    pub(super) dir_cache_source_missing: AtomicU64,
 }
 
 pub(super) struct FusePerfSample<'a> {
@@ -53,8 +67,12 @@ impl FusePerfStats {
             dir_lock_wait_ns: AtomicU64::new(0),
             dir_scan_retries: AtomicU64::new(0),
             dir_entries: AtomicU64::new(0),
+            dir_cache_decisions: AtomicU64::new(0),
             dir_cache_hits: AtomicU64::new(0),
             dir_cache_misses: AtomicU64::new(0),
+            dir_cache_ttl_expired: AtomicU64::new(0),
+            dir_cache_source_changed: AtomicU64::new(0),
+            dir_cache_source_missing: AtomicU64::new(0),
         }
     }
 
@@ -92,14 +110,50 @@ impl FusePerfStats {
     }
 
     pub(super) fn record_dir_cache_hit(&self) {
-        if crate::logging::is_debug_logging_enabled() {
-            self.dir_cache_hits.fetch_add(1, Ordering::Relaxed);
-        }
+        self.record_dir_cache_decision(true, None);
     }
 
-    pub(super) fn record_dir_cache_miss(&self) {
-        if crate::logging::is_debug_logging_enabled() {
+    pub(super) fn record_dir_cache_miss(&self, reason: DirectoryCacheMissReason) {
+        self.record_dir_cache_decision(false, Some(reason));
+    }
+
+    fn record_dir_cache_decision(&self, hit: bool, reason: Option<DirectoryCacheMissReason>) {
+        if !crate::logging::is_debug_logging_enabled() {
+            return;
+        }
+
+        if hit {
+            self.dir_cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
             self.dir_cache_misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(reason) = reason {
+                let counter = match reason {
+                    DirectoryCacheMissReason::NotCached => None,
+                    DirectoryCacheMissReason::TtlExpired => Some(&self.dir_cache_ttl_expired),
+                    DirectoryCacheMissReason::SourceChanged => Some(&self.dir_cache_source_changed),
+                    DirectoryCacheMissReason::SourceMissing => Some(&self.dir_cache_source_missing),
+                };
+                if let Some(counter) = counter {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let decisions = self.dir_cache_decisions.fetch_add(1, Ordering::Relaxed) + 1;
+        if decisions == 1 || decisions.is_multiple_of(DIR_CACHE_SAMPLE_STEP) {
+            let hits = self.dir_cache_hits.load(Ordering::Relaxed);
+            let misses = self.dir_cache_misses.load(Ordering::Relaxed);
+            log::debug!(
+                "fuse_dir_cache_sample pkg={} decisions={} hits={} misses={} hit_ratio_pct={} ttl_expired={} source_changed={} source_missing={}",
+                self.package_name,
+                decisions,
+                hits,
+                misses,
+                hits.saturating_mul(100) / decisions.max(1),
+                self.dir_cache_ttl_expired.load(Ordering::Relaxed),
+                self.dir_cache_source_changed.load(Ordering::Relaxed),
+                self.dir_cache_source_missing.load(Ordering::Relaxed),
+            );
         }
     }
 
@@ -125,7 +179,7 @@ impl FusePerfStats {
         let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
         let dir_scans = self.dir_scans.load(Ordering::Relaxed);
         log::debug!(
-            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_hits={} dir_cache_misses={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_decisions={} dir_cache_hits={} dir_cache_misses={} dir_cache_hit_ratio_pct={} dir_cache_ttl_expired={} dir_cache_source_changed={} dir_cache_source_missing={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
             self.package_name,
             self.calls.load(Ordering::Relaxed),
             self.lookup_calls.load(Ordering::Relaxed),
@@ -141,8 +195,16 @@ impl FusePerfStats {
             sampled_ns.checked_div(sampled.max(1)).unwrap_or(0) / 1000,
             self.slow_samples.load(Ordering::Relaxed),
             dir_scans,
+            self.dir_cache_decisions.load(Ordering::Relaxed),
             self.dir_cache_hits.load(Ordering::Relaxed),
             self.dir_cache_misses.load(Ordering::Relaxed),
+            self.dir_cache_hits
+                .load(Ordering::Relaxed)
+                .saturating_mul(100)
+                / self.dir_cache_decisions.load(Ordering::Relaxed).max(1),
+            self.dir_cache_ttl_expired.load(Ordering::Relaxed),
+            self.dir_cache_source_changed.load(Ordering::Relaxed),
+            self.dir_cache_source_missing.load(Ordering::Relaxed),
             self.dir_scan_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_lock_wait_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_scan_retries.load(Ordering::Relaxed),
