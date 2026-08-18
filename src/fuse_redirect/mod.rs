@@ -42,7 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
-const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(100);
+const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(250);
 const MAX_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
 const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
