@@ -1,4 +1,5 @@
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::string::String;
 use std::sync::Mutex;
@@ -39,6 +40,16 @@ impl PathNormalizeCache {
 static PATH_NORMALIZE_CACHE: Lazy<Mutex<PathNormalizeCache>> =
     Lazy::new(|| Mutex::new(PathNormalizeCache::new()));
 
+// 同一线程连续处理相同别名路径时，先走这一项缓存，避免重复竞争全局锁。
+struct LastNormalizedPath {
+    path: String,
+    normalized: String,
+}
+
+thread_local! {
+    static LAST_NORMALIZED_PATH: RefCell<Option<LastNormalizedPath>> = const { RefCell::new(None) };
+}
+
 // 合并斜杠、去尾斜杠，再逐层解析存储别名
 pub fn normalize(path: &str) -> String {
     if path.is_empty() {
@@ -48,11 +59,28 @@ pub fn normalize(path: &str) -> String {
         return path.to_string();
     }
 
+    if let Some(normalized) = LAST_NORMALIZED_PATH.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|cached| cached.path == path)
+            .map(|cached| cached.normalized.clone())
+    }) {
+        return normalized;
+    }
+
     // 优化：对于常用路径先查缓存
     if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock()
         && let Some(cached) = cache.entries.get(path)
     {
-        return cached.clone();
+        let normalized = cached.clone();
+        LAST_NORMALIZED_PATH.with(|slot| {
+            // quality-allow(chinese-language): path 与 normalized 是必要的 Rust 字段名。
+            *slot.borrow_mut() = Some(LastNormalizedPath {
+                path: path.to_string(),
+                normalized: normalized.clone(),
+            });
+        });
+        return normalized;
     }
 
     // 只有确实需要折叠重复斜杠或去掉尾斜杠时才重建字符串。别名路径（如
