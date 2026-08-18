@@ -36,11 +36,13 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
+const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(100);
+const MAX_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
 const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
 pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
@@ -66,6 +68,7 @@ struct FuseState {
     dir_entry_refs: HashMap<u64, u64>,
     files: HashMap<u64, OpenFile>,
     dirs: HashMap<u64, Arc<[DirEntry]>>,
+    dir_candidate_cache: HashMap<String, CachedDirCandidates>,
 }
 
 impl FuseState {
@@ -91,10 +94,16 @@ struct DirEntry {
     name: String,
 }
 
+#[derive(Clone)]
 struct DirEntryCandidate {
     rel: String,
     kind: FileType,
     name: String,
+}
+
+struct CachedDirCandidates {
+    created_at: Instant,
+    candidates: Vec<DirEntryCandidate>,
 }
 
 impl FuseRedirectFs {
@@ -120,6 +129,7 @@ impl FuseRedirectFs {
                 dir_entry_refs: HashMap::new(),
                 files: HashMap::new(),
                 dirs: HashMap::new(),
+                dir_candidate_cache: HashMap::new(),
             }),
         })
     }
@@ -274,6 +284,11 @@ impl FuseRedirectFs {
         }
     }
 
+    fn invalidate_dir_candidate_cache(&self) {
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+        state.dir_candidate_cache.clear();
+    }
+
     fn open_backend_file(path: &Path, flags: i32, mode: u32) -> Result<File, Errno> {
         let c_path = cstring_path(path)?;
         let fd = unsafe { libc::open(c_path.as_ptr(), flags | libc::O_CLOEXEC, mode) };
@@ -315,6 +330,7 @@ impl FuseRedirectFs {
             Ok(()) => {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remove_inode_path(&mut state, &rel);
+                state.dir_candidate_cache.clear();
                 reply.ok();
             }
             Err(error) => reply.error(errno_from_io(error)),
@@ -417,9 +433,24 @@ impl Filesystem for FuseRedirectFs {
                 reply.error(Errno::ENOTDIR);
                 return;
             }
-            let scan_started = track_dir_perf.then(std::time::Instant::now);
-            let candidates = collect_dir_entry_candidates(&self.policy, &rel);
-            scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
+            let cache_lock_started = track_dir_perf.then(Instant::now);
+            let cached_candidates = {
+                let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+                state
+                    .dir_candidate_cache
+                    .get(&rel)
+                    .filter(|cached| cached.created_at.elapsed() <= DIR_CANDIDATE_CACHE_TTL)
+                    .map(|cached| cached.candidates.clone())
+            };
+            lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(cache_lock_started));
+            let (candidates, from_cache) = if let Some(candidates) = cached_candidates {
+                (candidates, true)
+            } else {
+                let scan_started = track_dir_perf.then(Instant::now);
+                let candidates = collect_dir_entry_candidates(&self.policy, &rel);
+                scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
+                (candidates, false)
+            };
             let lock_started = track_dir_perf.then(std::time::Instant::now);
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             lock_wait_ns = lock_wait_ns.saturating_add(elapsed_ns(lock_started));
@@ -433,6 +464,18 @@ impl Filesystem for FuseRedirectFs {
                 path_version = current_version;
                 retries = retries.saturating_add(1);
                 continue;
+            }
+            if !from_cache {
+                if state.dir_candidate_cache.len() >= MAX_DIR_CANDIDATE_CACHE_ENTRIES {
+                    state.dir_candidate_cache.clear();
+                }
+                state.dir_candidate_cache.insert(
+                    rel.clone(),
+                    CachedDirCandidates {
+                        created_at: Instant::now(),
+                        candidates: candidates.clone(),
+                    },
+                );
             }
             let fh = state.next_handle();
             let entry_count = candidates.len().saturating_add(2);
@@ -826,6 +869,7 @@ impl Filesystem for FuseRedirectFs {
             backend.is_shared_public_backend,
             false,
         );
+        self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, &rel);
@@ -852,6 +896,7 @@ impl Filesystem for FuseRedirectFs {
                     is_read_only: false,
                 },
             );
+            state.dir_candidate_cache.clear();
             fh
         };
         self.policy.emit_monitor_create(&backend);
@@ -948,6 +993,7 @@ impl Filesystem for FuseRedirectFs {
             backend.is_shared_public_backend,
             false,
         );
+        self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, &rel);
@@ -1018,6 +1064,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
+        self.invalidate_dir_candidate_cache();
         self.policy.emit_monitor_create(&backend);
         self.reply_entry_for_rel(&rel, reply);
     }
@@ -1118,6 +1165,7 @@ impl Filesystem for FuseRedirectFs {
                 );
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remap_inode_path(&mut state, &old_rel, &new_rel);
+                state.dir_candidate_cache.clear();
                 reply.ok();
             }
             Err(errno) => reply.error(errno),
