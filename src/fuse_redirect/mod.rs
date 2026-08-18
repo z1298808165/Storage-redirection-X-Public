@@ -11,10 +11,10 @@ pub use config::{
 
 use crate::platform::{fs, paths};
 use fuser::{
-    AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, TimeOrNow, WriteFlags,
+    AccessFlags, CopyFileRangeFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use inode::{
     add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs, remove_inode_path,
@@ -30,10 +30,11 @@ use policy::{BackendPath, OperationKind, RedirectPolicy};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,6 +53,7 @@ struct FuseRedirectFs {
     /// 使用读写锁让 read/readdir/fsync 等只读路径可以并行取句柄，避免互斥锁把并发读串行化。
     state: RwLock<FuseState>,
     perf: FusePerfStats,
+    passthrough_enabled: AtomicBool,
 }
 
 struct FuseState {
@@ -107,6 +109,7 @@ impl FuseRedirectFs {
         Some(Self {
             policy,
             perf: FusePerfStats::new(package_name),
+            passthrough_enabled: AtomicBool::new(false),
             state: RwLock::new(FuseState {
                 next_ino: ROOT_INO + 1,
                 next_fh: 1,
@@ -321,11 +324,25 @@ impl FuseRedirectFs {
 
 impl Filesystem for FuseRedirectFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
-        let _ = config.add_capabilities(InitFlags::FUSE_PASSTHROUGH);
-        let _ = config.set_max_stack_depth(2);
-        let _ = config.set_max_background(32);
-        let _ = config.set_congestion_threshold(24);
-        let _ = config.set_max_write(1024 * 1024);
+        let passthrough_supported = config.capabilities().contains(InitFlags::FUSE_PASSTHROUGH);
+        let passthrough_enabled = config.add_capabilities(InitFlags::FUSE_PASSTHROUGH).is_ok();
+        let stack_depth_enabled = config.set_max_stack_depth(2).is_ok();
+        let max_background_enabled = config.set_max_background(32).is_ok();
+        let congestion_enabled = config.set_congestion_threshold(24).is_ok();
+        let max_write_enabled = config.set_max_write(1024 * 1024).is_ok();
+        self.passthrough_enabled
+            .store(passthrough_enabled, Ordering::Relaxed);
+        log::info!(
+            "fuse init pkg={} kernel_abi={} passthrough_supported={} passthrough_enabled={} stack_depth={} max_background={} congestion={} max_write={}",
+            self.policy.package_name,
+            config.kernel_abi(),
+            passthrough_supported,
+            passthrough_enabled,
+            stack_depth_enabled,
+            max_background_enabled,
+            congestion_enabled,
+            max_write_enabled
+        );
         Ok(())
     }
 
@@ -508,11 +525,15 @@ impl Filesystem for FuseRedirectFs {
             );
             fh
         };
-        match reply.open_backing(&file) {
-            Ok(backing) => {
-                reply.opened_passthrough(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE, &backing)
+        if self.passthrough_enabled.load(Ordering::Relaxed) {
+            match reply.open_backing(&file) {
+                Ok(backing) => {
+                    reply.opened_passthrough(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE, &backing)
+                }
+                Err(_) => reply.opened(FileHandle(fh), FopenFlags::empty()),
             }
-            Err(_) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+        } else {
+            reply.opened(FileHandle(fh), FopenFlags::empty());
         }
     }
 
@@ -660,6 +681,88 @@ impl Filesystem for FuseRedirectFs {
         }
     }
 
+    fn copy_file_range(
+        &self,
+        _req: &Request,
+        _ino_in: INodeNo,
+        fh_in: FileHandle,
+        offset_in: u64,
+        _ino_out: INodeNo,
+        fh_out: FileHandle,
+        offset_out: u64,
+        len: u64,
+        flags: CopyFileRangeFlags,
+        reply: ReplyWrite,
+    ) {
+        let _perf = self.perf.observe(&self.perf.mutation_calls);
+        if !flags.is_empty() {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        let Some(mut input_offset) = libc::off_t::try_from(offset_in).ok() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        let Some(mut output_offset) = libc::off_t::try_from(offset_out).ok() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        let (input, output, output_read_only, output_rel) = {
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+            let Some(input) = state.files.get(&fh_in.into()) else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            let Some(input_file) = input.file.clone() else {
+                reply.error(Errno::ENOSYS);
+                return;
+            };
+            let Some(output) = state.files.get(&fh_out.into()) else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            let Some(output_file) = output.file.clone() else {
+                reply.error(Errno::ENOSYS);
+                return;
+            };
+            (
+                input_file,
+                output_file,
+                output.is_read_only,
+                output.rel.clone(),
+            )
+        };
+        if output_read_only {
+            if let Some(backend) = self
+                .policy
+                .backend_for_relative(&output_rel, OperationKind::Write)
+            {
+                self.policy
+                    .emit_monitor_read_only_deny("copy_file_range", &backend);
+            }
+            reply.error(Errno::EROFS);
+            return;
+        }
+        let copy_len = len.min(usize::MAX as u64) as usize;
+        // SAFETY: 两个文件描述符均来自状态表中的活动 Arc<File>，offset 指针指向本地可写值，长度和 flags 已完成边界校验。
+        let copied = unsafe {
+            libc::syscall(
+                libc::SYS_copy_file_range,
+                input.as_raw_fd(),
+                &mut input_offset as *mut libc::off_t,
+                output.as_raw_fd(),
+                &mut output_offset as *mut libc::off_t,
+                copy_len,
+                0u32,
+            )
+        };
+        if copied >= 0 {
+            reply.written(copied as u32);
+        } else {
+            reply.error(errno_from_code(last_errno()));
+        }
+    }
+
     fn create(
         &self,
         _req: &Request,
@@ -752,22 +855,32 @@ impl Filesystem for FuseRedirectFs {
             fh
         };
         self.policy.emit_monitor_create(&backend);
-        match reply.open_backing(&file) {
-            Ok(backing) => reply.created_passthrough(
+        if self.passthrough_enabled.load(Ordering::Relaxed) {
+            match reply.open_backing(&file) {
+                Ok(backing) => reply.created_passthrough(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(fh),
+                    FopenFlags::empty(),
+                    &backing,
+                ),
+                Err(_) => reply.created(
+                    &TTL,
+                    &attr,
+                    Generation(0),
+                    FileHandle(fh),
+                    FopenFlags::empty(),
+                ),
+            }
+        } else {
+            reply.created(
                 &TTL,
                 &attr,
                 Generation(0),
                 FileHandle(fh),
                 FopenFlags::empty(),
-                &backing,
-            ),
-            Err(_) => reply.created(
-                &TTL,
-                &attr,
-                Generation(0),
-                FileHandle(fh),
-                FopenFlags::empty(),
-            ),
+            );
         }
     }
 
