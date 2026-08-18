@@ -1,7 +1,7 @@
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
 use crate::platform::{fs, module_paths, paths};
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -40,6 +40,53 @@ struct BackendDecision {
     is_read_only: bool,
 }
 
+#[derive(Clone, Default)]
+struct RuleIndex {
+    exact: HashSet<String>,
+    wildcard: Vec<String>,
+}
+
+impl RuleIndex {
+    fn new(rules: &[String]) -> Self {
+        let mut index = Self::default();
+        for rule in rules {
+            if !paths::contains_wildcards(rule) && !rule.contains("//") {
+                index
+                    .exact
+                    .insert(paths::match_key(rule.trim_end_matches('/')));
+            } else {
+                index.wildcard.push(rule.clone());
+            }
+        }
+        index
+    }
+
+    fn matches(&self, storage_path: &str) -> bool {
+        if self.matches_exact(storage_path) {
+            return true;
+        }
+        self.wildcard
+            .iter()
+            .any(|rule| paths::matches(rule, storage_path, true))
+    }
+
+    fn matches_exact(&self, storage_path: &str) -> bool {
+        let mut candidate = storage_path.trim_end_matches('/');
+        loop {
+            if self.exact.contains(&paths::match_key(candidate)) {
+                return true;
+            }
+            let Some(separator) = candidate.rfind('/') else {
+                return false;
+            };
+            if separator == 0 {
+                return false;
+            }
+            candidate = &candidate[..separator];
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RulePrefix {
     pub(super) rel: String,
@@ -72,7 +119,11 @@ pub(super) struct RedirectPolicy {
     pub(super) excluded_real_paths: Vec<String>,
     pub(super) sandboxed_paths: Vec<String>,
     pub(super) read_only_paths: Vec<String>,
-    pub(super) read_only_excluded_paths: Vec<String>,
+    allowed_real_index: RuleIndex,
+    excluded_real_index: RuleIndex,
+    sandboxed_index: RuleIndex,
+    read_only_index: RuleIndex,
+    read_only_excluded_index: RuleIndex,
     pub(super) path_mappings: Vec<PathMapping>,
     pub(super) is_mapping_mode_only: bool,
     pub(super) is_file_monitor_enabled: bool,
@@ -132,6 +183,15 @@ impl RedirectPolicy {
         let read_only_excluded_paths =
             paths::overlapping_exclusion_rules(&read_only_paths, &read_only_excluded_paths);
 
+        let allowed_real_paths = super::normalize_rule_list(config.allowed_real_paths, user_id);
+        let excluded_real_paths = super::normalize_rule_list(config.excluded_real_paths, user_id);
+        let sandboxed_paths = super::normalize_rule_list(config.sandboxed_paths, user_id);
+        let allowed_real_index = RuleIndex::new(&allowed_real_paths);
+        let excluded_real_index = RuleIndex::new(&excluded_real_paths);
+        let sandboxed_index = RuleIndex::new(&sandboxed_paths);
+        let read_only_index = RuleIndex::new(&read_only_paths);
+        let read_only_excluded_index = RuleIndex::new(&read_only_excluded_paths);
+
         Some(Self {
             package_name: config.package_name,
             uid: config.uid,
@@ -142,11 +202,15 @@ impl RedirectPolicy {
             private_real_root: PathBuf::from(paths::data_media_user_root_for_user(user_id)),
             redirect_root: PathBuf::from(redirect_root_string),
             rule_prefixes,
-            allowed_real_paths: super::normalize_rule_list(config.allowed_real_paths, user_id),
-            excluded_real_paths: super::normalize_rule_list(config.excluded_real_paths, user_id),
-            sandboxed_paths: super::normalize_rule_list(config.sandboxed_paths, user_id),
+            allowed_real_paths,
+            excluded_real_paths,
             read_only_paths,
-            read_only_excluded_paths,
+            allowed_real_index,
+            excluded_real_index,
+            sandboxed_paths,
+            sandboxed_index,
+            read_only_index,
+            read_only_excluded_index,
             path_mappings,
             is_mapping_mode_only: config.is_mapping_mode_only,
             is_file_monitor_enabled: config.is_file_monitor_enabled,
@@ -200,21 +264,21 @@ impl RedirectPolicy {
 
     fn is_read_only(&self, storage_path: &str) -> bool {
         if let Some(mapped_target) = self.resolve_mapping(storage_path) {
-            if self.matches_any(&self.excluded_real_paths, &mapped_target) {
+            if self.matches_any(&self.excluded_real_index, &mapped_target) {
                 return false;
             }
-            if self.matches_any(&self.read_only_excluded_paths, &mapped_target) {
+            if self.matches_any(&self.read_only_excluded_index, &mapped_target) {
                 return false;
             }
-            return self.matches_any(&self.read_only_paths, &mapped_target);
+            return self.matches_any(&self.read_only_index, &mapped_target);
         }
-        if self.matches_any(&self.excluded_real_paths, storage_path) {
+        if self.matches_any(&self.excluded_real_index, storage_path) {
             return false;
         }
-        if self.matches_any(&self.read_only_excluded_paths, storage_path) {
+        if self.matches_any(&self.read_only_excluded_index, storage_path) {
             return false;
         }
-        if self.matches_any(&self.read_only_paths, storage_path) {
+        if self.matches_any(&self.read_only_index, storage_path) {
             return true;
         }
         false
@@ -225,15 +289,15 @@ impl RedirectPolicy {
         let kind = if self.resolve_mapping(storage_path).is_some() {
             BackendKind::Real
         } else if self.is_mapping_mode_only {
-            if self.matches_any(&self.sandboxed_paths, storage_path) {
+            if self.matches_any(&self.sandboxed_index, storage_path) {
                 BackendKind::Redirect
             } else {
                 BackendKind::Real
             }
-        } else if self.matches_any(&self.excluded_real_paths, storage_path) {
+        } else if self.matches_any(&self.excluded_real_index, storage_path) {
             BackendKind::Redirect
-        } else if self.matches_any(&self.read_only_excluded_paths, storage_path)
-            || self.matches_any(&self.allowed_real_paths, storage_path)
+        } else if self.matches_any(&self.read_only_excluded_index, storage_path)
+            || self.matches_any(&self.allowed_real_index, storage_path)
             || matches!(operation, OperationKind::Read)
                 && (is_read_only || self.has_real_child_rule(storage_path))
         {
@@ -244,14 +308,12 @@ impl RedirectPolicy {
         BackendDecision { kind, is_read_only }
     }
 
-    pub(super) fn matches_any(&self, rules: &[String], storage_path: &str) -> bool {
+    fn matches_any(&self, index: &RuleIndex, storage_path: &str) -> bool {
         let pending_display_path = paths::media_store_pending_display_path(storage_path);
-        rules.iter().any(|rule| {
-            paths::matches(rule, storage_path, true)
-                || pending_display_path
-                    .as_deref()
-                    .is_some_and(|display_path| paths::matches(rule, display_path, true))
-        })
+        index.matches(storage_path)
+            || pending_display_path
+                .as_deref()
+                .is_some_and(|display_path| index.matches(display_path))
     }
 
     fn has_real_child_rule(&self, storage_path: &str) -> bool {
