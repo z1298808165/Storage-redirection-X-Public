@@ -543,6 +543,7 @@ impl Filesystem for FuseRedirectFs {
             }
             if !from_cache {
                 if state.dir_candidate_cache.len() >= MAX_DIR_CANDIDATE_CACHE_ENTRIES {
+                    self.perf.record_dir_cache_eviction();
                     state.dir_candidate_cache.clear();
                 }
                 state.dir_candidate_cache.insert(
