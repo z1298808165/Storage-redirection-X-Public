@@ -8,6 +8,9 @@ pub(super) struct FusePerfStats {
     pub(super) metadata_calls: AtomicU64,
     pub(super) open_calls: AtomicU64,
     pub(super) read_calls: AtomicU64,
+    pub(super) read_bytes: AtomicU64,
+    pub(super) read_buffer_hits: AtomicU64,
+    pub(super) read_buffer_allocations: AtomicU64,
     pub(super) write_calls: AtomicU64,
     pub(super) mutation_calls: AtomicU64,
     pub(super) sampled_calls: AtomicU64,
@@ -35,6 +38,9 @@ impl FusePerfStats {
             metadata_calls: AtomicU64::new(0),
             open_calls: AtomicU64::new(0),
             read_calls: AtomicU64::new(0),
+            read_bytes: AtomicU64::new(0),
+            read_buffer_hits: AtomicU64::new(0),
+            read_buffer_allocations: AtomicU64::new(0),
             write_calls: AtomicU64::new(0),
             mutation_calls: AtomicU64::new(0),
             sampled_calls: AtomicU64::new(0),
@@ -67,6 +73,20 @@ impl FusePerfStats {
             .fetch_add(entries.min(u64::MAX as usize) as u64, Ordering::Relaxed);
     }
 
+    pub(super) fn record_read_buffer(&self, bytes: usize, reused: bool) {
+        if !crate::logging::is_debug_logging_enabled() {
+            return;
+        }
+        self.read_bytes
+            .fetch_add(bytes.min(u64::MAX as usize) as u64, Ordering::Relaxed);
+        let counter = if reused {
+            &self.read_buffer_hits
+        } else {
+            &self.read_buffer_allocations
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(super) fn observe<'a>(&'a self, counter: &AtomicU64) -> FusePerfSample<'a> {
         if !crate::logging::is_debug_logging_enabled() {
             return FusePerfSample {
@@ -89,13 +109,16 @@ impl FusePerfStats {
         let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
         let dir_scans = self.dir_scans.load(Ordering::Relaxed);
         log::debug!(
-            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
             self.package_name,
             self.calls.load(Ordering::Relaxed),
             self.lookup_calls.load(Ordering::Relaxed),
             self.metadata_calls.load(Ordering::Relaxed),
             self.open_calls.load(Ordering::Relaxed),
             self.read_calls.load(Ordering::Relaxed),
+            self.read_bytes.load(Ordering::Relaxed),
+            self.read_buffer_hits.load(Ordering::Relaxed),
+            self.read_buffer_allocations.load(Ordering::Relaxed),
             self.write_calls.load(Ordering::Relaxed),
             self.mutation_calls.load(Ordering::Relaxed),
             sampled,

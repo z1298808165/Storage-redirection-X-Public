@@ -27,6 +27,7 @@ use metadata::{
 };
 use perf::FusePerfStats;
 use policy::{BackendPath, OperationKind, RedirectPolicy};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -48,6 +49,11 @@ pub(super) const MEDIA_RW_GID: u32 = 1023;
 pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
 const SHARED_PUBLIC_DIR_MODE: u32 = 0o2770;
 pub(super) const MAX_SCOPED_FUSE_ROOTS: usize = 4;
+
+thread_local! {
+    // FUSE 读回调通常在固定工作线程上重复执行，复用 256 KiB 内的缓冲区减少分配。
+    static FUSE_READ_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+}
 
 struct FuseRedirectFs {
     policy: RedirectPolicy,
@@ -651,14 +657,19 @@ impl Filesystem for FuseRedirectFs {
             };
             file
         };
-        let mut buf = vec![0u8; (size as usize).min(MAX_READ_SIZE)];
-        match file.read_at(&mut buf, offset) {
-            Ok(n) => {
-                buf.truncate(n);
-                reply.data(&buf);
+        let requested = (size as usize).min(MAX_READ_SIZE);
+        FUSE_READ_BUFFER.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            let reused = buffer.capacity() >= requested;
+            buffer.resize(requested, 0);
+            match file.read_at(&mut buffer, offset) {
+                Ok(n) => {
+                    self.perf.record_read_buffer(n, reused);
+                    reply.data(&buffer[..n]);
+                }
+                Err(error) => reply.error(errno_from_io(error)),
             }
-            Err(error) => reply.error(errno_from_io(error)),
-        }
+        });
     }
 
     fn write(
