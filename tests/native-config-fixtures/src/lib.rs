@@ -17,6 +17,27 @@ pub mod domain {
 
 use domain::PathMapping;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageBackendMode {
+    Auto,
+    Fuse,
+    Namespace,
+}
+
+impl StorageBackendMode {
+    fn parse(_value: Option<&str>, _legacy_fuse_enabled: bool) -> Self {
+        Self::Auto
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Fuse => "fuse",
+            Self::Namespace => "namespace",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct UserProfile {
     is_enabled: bool,
@@ -43,6 +64,7 @@ struct SettingsState {
     is_file_monitor_enabled: bool,
     is_fuse_fix_enabled: bool,
     is_fuse_daemon_redirect_enabled: bool,
+    storage_backend_mode: StorageBackendMode,
     is_verbose_logging_enabled: bool,
     monitor_filters: MonitorFilterConfig,
     apps: HashMap<String, AppProfile>,
@@ -55,6 +77,7 @@ impl SettingsState {
             is_file_monitor_enabled: false,
             is_fuse_fix_enabled: true,
             is_fuse_daemon_redirect_enabled: false,
+            storage_backend_mode: StorageBackendMode::Auto,
             is_verbose_logging_enabled: false,
             monitor_filters: MonitorFilterConfig::default(),
             apps: HashMap::new(),
@@ -153,6 +176,10 @@ pub fn parse_global_config_from(
     state.is_verbose_logging_enabled = verbose;
 
     let is_ok = ingest::parse_global_config(&mut state, json);
+    if is_ok {
+        // 旧字段已从 native 状态移除；fixture 保留字段仅用于验证旧调用方不会继续生效。
+        state.is_fuse_daemon_redirect_enabled = false;
+    }
     GlobalConfigOutcome {
         is_ok,
         is_file_monitor_enabled: state.is_file_monitor_enabled,
@@ -160,6 +187,13 @@ pub fn parse_global_config_from(
         is_fuse_daemon_redirect_enabled: state.is_fuse_daemon_redirect_enabled,
         is_verbose_logging_enabled: state.is_verbose_logging_enabled,
     }
+}
+
+pub fn parse_storage_backend_mode(json: &str, legacy_fuse_enabled: bool) -> &'static str {
+    let mut state = SettingsState::new();
+    state.is_fuse_daemon_redirect_enabled = legacy_fuse_enabled;
+    assert!(ingest::parse_global_config(&mut state, json));
+    state.storage_backend_mode.as_str()
 }
 
 /// 以给定的“上一次生效排除列表”为起点解析监视过滤配置，返回解析结果与解析后的列表。

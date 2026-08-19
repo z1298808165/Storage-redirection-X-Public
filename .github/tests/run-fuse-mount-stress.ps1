@@ -139,7 +139,7 @@ function Wait-DirectoryCacheSample {
     $lastSample = ""
     $lastSampleAt = $null
     do {
-        $sampleLines = @(Invoke-Su "grep -a -h -E 'fuse_dir_cache_sample|perf_snapshot component=fuse' '$moduleLogDir/running.log' 2>/dev/null || true")
+        $sampleLines = @(Invoke-Su "grep -a -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$moduleLogDir/running.log' 2>/dev/null || true")
         $appSamples = @($sampleLines | Where-Object { $_ -match "pkg=$([regex]::Escape($AppId))(\s|$)" })
         if ($appSamples.Count -gt 0) {
             $candidate = [string]$appSamples[-1]
@@ -169,7 +169,7 @@ function Start-ScenarioJob {
         param($Root, $RunnerPath, $DeviceSerial, $OutputPath)
         Set-Location $Root
         $env:ANDROID_SERIAL = $DeviceSerial
-        $env:RUN_FUSE_DAEMON_SCENARIOS = "1"
+        $env:RUN_FUSE_BACKEND_SCENARIOS = "1"
         $env:SRT_FAIL_FAST = "0"
         $env:SRT_SCENARIOS = "8"
         & powershell -NoProfile -ExecutionPolicy Bypass -File $RunnerPath -SkipBasicAll *> $OutputPath

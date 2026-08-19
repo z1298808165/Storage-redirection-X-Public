@@ -586,7 +586,7 @@ jobs:
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts
-        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
+        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: release-test-flow-android${{ matrix.android.version }}-artifacts
@@ -598,6 +598,7 @@ jobs:
             test-flow-app-mountinfo.txt
             test-flow-logcat.txt
             test-flow-module-state.txt
+            test-flow-backend-diagnostic.txt
             test-flow-monitor-state.txt
             media-health.txt
 

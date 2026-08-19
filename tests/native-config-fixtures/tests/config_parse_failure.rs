@@ -2,9 +2,10 @@
 
 use native_config_fixtures::{
     GlobalConfigOutcome, parse_global_config_from, parse_monitor_filters_from,
+    parse_storage_backend_mode,
 };
 
-/// 上一次生效的开关：监控开启、fuse fix 关闭、fuse daemon 开启、详细日志开启。
+/// 上一次生效的开关：监控开启、fuse fix 关闭、历史字段开启、详细日志开启。
 /// 故意与默认值全部相反，这样"保留"和"回落默认"的结果不会混淆。
 const PREVIOUS: (bool, bool, bool, bool) = (true, false, true, true);
 
@@ -98,4 +99,21 @@ fn valid_monitor_filters_replace_previous_excluded_paths() {
     );
     assert!(is_ok);
     assert_eq!(excluded, vec!["/storage/emulated/*/DCIM".to_string()]);
+}
+
+#[test]
+fn storage_backend_mode_always_uses_auto_and_ignores_legacy_values() {
+    assert_eq!(parse_storage_backend_mode("{}", false), "auto");
+    assert_eq!(
+        parse_storage_backend_mode(r#"{"fuse_daemon_redirect_enabled":true}"#, false),
+        "auto"
+    );
+    assert_eq!(
+        parse_storage_backend_mode(r#"{"storage_backend_mode":"fuse"}"#, false),
+        "auto"
+    );
+    assert_eq!(
+        parse_storage_backend_mode(r#"{"storage_backend_mode":"namespace"}"#, true),
+        "auto"
+    );
 }

@@ -42,7 +42,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn(f'{item["id"]}) echo "{item["bash_title"]}"', bash_titles)
             self.assertIn(f'{item["id"]} {{ "{item["powershell_title"]}" }}', ps_titles)
 
-    def test_config_modes_match_runner_switches(self) -> None:
+    def test_auto_backend_config_is_used_by_all_runner_switches(self) -> None:
         bash_config = section(self.bash, "apply_config()", "target_path()")
         ps_config = section(self.powershell, "function Apply-ScenarioConfig", "function Clear-Results")
         for item in self.scenarios:
@@ -54,18 +54,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
             bash_text = bash_block.group(1)
             ps_text = ps_block.group(1)
             mode = item["config_mode"]
-            if mode == "fuse":
-                self.assertIn("enable_fuse_daemon_config", bash_text)
-                self.assertIn("Enable-FuseDaemonConfig", ps_text)
-            elif mode == "mount_namespace":
-                self.assertIn("use_mount_namespace_fallback_config", bash_text)
-                self.assertIn("Use-MountNamespaceFallbackConfig", ps_text)
-            elif mode.startswith("monitor_"):
-                self.assertIn("test_global_config", bash_text)
+            self.assertNotIn("enable_fuse_daemon_config", bash_text)
+            self.assertNotIn("Enable-FuseDaemonConfig", ps_text)
+            self.assertNotIn("use_mount_namespace_fallback_config", bash_text)
+            self.assertNotIn("Use-MountNamespaceFallbackConfig", ps_text)
+            if mode.startswith("monitor_"):
                 self.assertIn("FileMonitorEnabled $true", ps_text)
-                expected = "true true" if mode == "monitor_fuse" else "false true"
-                self.assertIn(expected, bash_text)
-                self.assertIn(f"FuseDaemonEnabled ${str(mode == 'monitor_fuse').lower()}", ps_text)
+                self.assertIn('storage_backend_mode":"auto', self.bash)
 
     def test_workflows_run_manifest_scenarios(self) -> None:
         expected = ",".join(str(value) for value in self.ids)
@@ -126,6 +121,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "test-flow-app-mountinfo.txt",
             "test-flow-logcat.txt",
             "test-flow-module-state.txt",
+            "test-flow-backend-diagnostic.txt",
             "media-health.txt",
         }
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
@@ -464,6 +460,17 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("END {if (max !=", bash_wait)
         self.assertIn("for (i=1; i<=NF; i++)", ps_wait)
         self.assertIn("END {if (max !=", ps_wait)
+
+    def test_auto_fuse_parent_mount_covers_nested_mapping(self) -> None:
+        mount_paths = section(
+            self.bash,
+            "expected_mount_paths_for_label()",
+            "app_mountinfo_has_expected_paths()",
+        )
+        scenario_four = re.search(r"(?ms)^    4\)\n(.*?)(?=^\s*esac)", mount_paths)
+        self.assertIsNotNone(scenario_four)
+        self.assertIn('"${REAL_ROOT}/Download"', scenario_four.group(1))
+        self.assertNotIn('"${REAL_ROOT}/Download/SrtProbe"', scenario_four.group(1))
 
     def test_app_restart_waits_for_previous_process_to_exit(self) -> None:
         bash_start = section(self.bash, "start_app_and_confirm_mount()", "wait_storage_ready()")

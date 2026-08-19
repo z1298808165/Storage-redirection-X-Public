@@ -250,29 +250,21 @@ write_global_config() {
 }
 
 test_global_config() {
-  local fuse_daemon_enabled="$1"
+  local storage_backend_mode="${1:-auto}"
   local file_monitor_enabled="${2:-$SRT_FILE_MONITOR_ENABLED}"
   case "$file_monitor_enabled" in
     1|true|TRUE|yes|YES) file_monitor_enabled=true ;;
     *) file_monitor_enabled=false ;;
   esac
-  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":%s,"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}' "$file_monitor_enabled" "$fuse_daemon_enabled"
+  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"storage_backend_mode":"auto","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}' "$file_monitor_enabled"
 }
 
-enable_fuse_daemon_config() {
-  write_global_config "$(test_global_config true)"
-}
-
-disable_fuse_daemon_config() {
-  write_global_config "$(test_global_config false)"
-}
-
-use_mount_namespace_fallback_config() {
-  write_global_config "$(test_global_config false)"
+set_backend_config() {
+  write_global_config "$(test_global_config "$1" "${2:-$SRT_FILE_MONITOR_ENABLED}")"
 }
 
 apply_config() {
-  disable_fuse_daemon_config
+  set_backend_config auto
   clear_cross_app_read_only_config
   case "$1" in
     1)
@@ -297,7 +289,7 @@ apply_config() {
       write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtProbe":"Download/SrtMapOnlyMapped"}}}}'
       ;;
     8)
-      enable_fuse_daemon_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":["SrtRuleSandbox"]}}}'
       ;;
     9)
@@ -322,52 +314,52 @@ apply_config() {
       write_config '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":"Download/SrtPriority","path_mappings":{"Download/SrtPriority":"Download/SrtPriorityMapped"}}}}'
       ;;
     16)
-      enable_fuse_daemon_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFusePlain","DCIM/SrtFuseQQ/SrtAllowed*","Download/SrtFuseQ?/Media","Download/SrtFuseMedia*/Drop"]}}}'
       ;;
     17)
-      enable_fuse_daemon_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFuseExclude/Writable"],"read_only_paths":["Download/SrtFuseExclude","!Download/SrtFuseExclude/Writable"]}}}'
       ;;
     18)
-      enable_fuse_daemon_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtFuseMapParent","!Download/SrtFuseMapParent/WritableTarget"],"path_mappings":{"Download/SrtFuseMapRW":"Download/SrtFuseMapParent/WritableTarget","Download/SrtFuseMapRO":"Download/SrtFuseMapParent/LockedTarget"}}}}'
       ;;
     19)
-      enable_fuse_daemon_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFuseMulti/QQ/*","Download/SrtFuseMulti/WeChat/*"],"read_only_paths":["Download/SrtFuseMulti/Locked/*"]}}}'
       ;;
     20)
-      use_mount_namespace_fallback_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMountNsAllow/Team*/Deep","Download/SrtMountNsAllow/Q?/Deep"]}}}'
       ;;
     21)
-      use_mount_namespace_fallback_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtMountNsReadOnly/Team*/Deep"]}}}'
       ;;
     22)
-      use_mount_namespace_fallback_config
+      set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtMountNsMapParent","!Download/SrtMountNsMapParent/WritableTarget"],"path_mappings":{"Download/SrtMountNsMapRW":"Download/SrtMountNsMapParent/WritableTarget","Download/SrtMountNsMapRO":"Download/SrtMountNsMapParent/LockedTarget"}}}}'
       ;;
     23)
-      write_global_config "$(test_global_config false true)"
+      set_backend_config auto true
       write_config '{"users":{"0":{"enabled":false}}}'
       ;;
     24)
-      write_global_config "$(test_global_config false true)"
+      set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     25)
-      write_global_config "$(test_global_config true true)"
+      set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
     26)
-      write_global_config "$(test_global_config false true)"
+      set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       write_cross_app_read_only_config
       ;;
     27)
-      write_global_config "$(test_global_config true true)"
+      set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       write_cross_app_read_only_config
       ;;
@@ -444,18 +436,18 @@ scenario_title() {
     13) echo "allowed_real_paths 问号通配符规则" ;;
     14) echo "path_mappings 最长前缀匹配规则" ;;
     15) echo "映射优先于字符串形式 sandboxed_paths" ;;
-    16) echo "Fuse daemon 混合模式：普通放行与通配符放行并存" ;;
-    17) echo "Fuse daemon 混合模式：read_only_paths 支持 ! 排除优先" ;;
-    18) echo "Fuse daemon 混合模式：映射最终目标决定只读权限" ;;
-    19) echo "Fuse daemon 混合模式：同父级多通配符规则互不污染" ;;
-    20) echo "默认 mount namespace：allowed_real_paths 通配符回退" ;;
-    21) echo "默认 mount namespace：read_only_paths 通配符回退" ;;
-    22) echo "默认 mount namespace：映射最终目标决定只读权限" ;;
+    16) echo "FUSE 数据面：普通放行与通配符放行并存" ;;
+    17) echo "FUSE 数据面：read_only_paths 支持 ! 排除优先" ;;
+    18) echo "FUSE 数据面：映射最终目标决定只读权限" ;;
+    19) echo "FUSE 数据面：同父级多通配符规则互不污染" ;;
+    20) echo "自动后端：allowed_real_paths 通配符匹配或 namespace 回退" ;;
+    21) echo "自动后端：read_only_paths 通配符匹配或 namespace 回退" ;;
+    22) echo "自动后端：映射最终目标决定只读权限" ;;
     23) echo "文件监视：未启用重定向的普通应用与系统代写保存成功记录" ;;
-    24) echo "文件监视：普通应用 fuse daemon 关闭时映射保存、只读失败与只读排除成功记录" ;;
-    25) echo "文件监视：普通应用 fuse daemon 开启时保存成功、只读失败与只读排除成功记录" ;;
-    26) echo "文件监视：系统代写 fuse daemon 关闭时保存成功、只读失败与只读排除成功记录" ;;
-    27) echo "文件监视：系统代写 fuse daemon 开启时保存成功、只读失败与只读排除成功记录" ;;
+    24) echo "文件监视：普通应用自动后端映射保存、只读失败与只读排除成功记录" ;;
+    25) echo "文件监视：普通应用自动后端保存成功、只读失败与只读排除成功记录" ;;
+    26) echo "文件监视：系统代写自动后端保存成功、只读失败与只读排除成功记录" ;;
+    27) echo "文件监视：系统代写自动后端保存成功、只读失败与只读排除成功记录" ;;
     28) echo "MediaStore 查询：只读真实图片路径应对应用可见" ;;
     29) echo "配置热更新：运行中应用无需重启即可从默认重定向切换到路径映射" ;;
     30) echo "MediaProvider 集合 URI：openTypedAssetFile 不应重映射首条媒体记录" ;;
@@ -570,12 +562,9 @@ restore_cross_app_config() {
   fi
 }
 
-supports_fuse_daemon_scenarios() {
-  case "${RUN_FUSE_DAEMON_SCENARIOS:-auto}" in
-    1|true|TRUE|yes|YES) return 0 ;;
-    0|false|FALSE|no|NO) return 1 ;;
-  esac
-  adb_su "for file in /data/adb/modules/storage.redirect.x/bin/srx_daemon /data/adb/modules/storage.redirect.x/zygisk/arm64-v8a.so /data/adb/modules/storage.redirect.x/zygisk/x86_64.so; do [ -f \"\$file\" ] && grep -a -q 'fuse_daemon_redirect_enabled' \"\$file\" && exit 0; done; exit 1" >/dev/null 2>&1
+supports_fuse_backend_scenarios() {
+  # 所有场景都使用 auto；实际后端由运行时日志和 mountinfo 记录。
+  return 0
 }
 
 build_scenario_list() {
@@ -600,27 +589,14 @@ build_scenario_list() {
     return 0
   fi
 
-  local fuse_supported=0
   scenarios=(1 2 3 4 5 6 7)
-  if supports_fuse_daemon_scenarios; then
-    fuse_supported=1
-    scenarios+=(8)
-  else
-    echo "skip fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
-  fi
+  scenarios+=(8)
   scenarios+=(9 10 11 12 13 14 15 29 30 31 32 33)
-  if [ "$fuse_supported" = "1" ]; then
-    scenarios+=(16 17 18 19)
-  fi
+  scenarios+=(16 17 18 19)
   scenarios+=(20 21 22)
   scenarios+=(28)
   scenarios+=(23 24)
-  if [ "$fuse_supported" = "1" ]; then
-    scenarios+=(25 26 27)
-  else
-    scenarios+=(26)
-    echo "skip file monitor fuse daemon scenarios: module does not expose fuse_daemon_redirect_enabled or RUN_FUSE_DAEMON_SCENARIOS disabled"
-  fi
+  scenarios+=(25 26 27)
 }
 
 remove_test_target_artifacts() {
@@ -889,7 +865,9 @@ expected_mount_paths_for_label() {
       printf '%s\n' "${REAL_ROOT}/Download/SrtProbe"
       ;;
     4)
-      printf '%s\n' "${REAL_ROOT}/Download" "${REAL_ROOT}/Download/SrtProbe"
+      # 父目录放行与子路径映射共存时，Auto/FUSE 只需建立一个父级会话；
+      # 子路径属于会话内的逻辑映射，不会额外出现在 mountinfo 中。
+      printf '%s\n' "${REAL_ROOT}/Download"
       ;;
   esac
 }
@@ -1647,7 +1625,7 @@ run_qmark_wildcard_scenario() {
 check_fuse_daemon_started() {
   local scenario="$1"
   for _ in 1 2 3 4 5; do
-    if adb_su "grep -Eq 'fuse redirect mount start pkg=${APP_ID}|mount request cfg pkg=${APP_ID} fuse_daemon=true|app mount confirmed pid=' '$LOG_PATH' 2>/dev/null"; then
+    if adb_su "grep -Eq 'backend_effective pkg=${APP_ID}|fuse redirect mount start pkg=${APP_ID}|app mount confirmed pid=' '$LOG_PATH' 2>/dev/null"; then
       echo "fuse_daemon_started scenario=${scenario}"
       return 0
     fi
@@ -1657,7 +1635,7 @@ check_fuse_daemon_started() {
   return 0
 }
 
-# 判别性断言：确认 FUSE daemon 真的接管了挂载点，而不是静默回退到 mount namespace。
+# 判别性断言：确认 FUSE 数据面真的接管了挂载点，而不是静默回退到 mount namespace。
 #
 # 依据 mountinfo 中的挂载源 srx_fuse_redirect（config.rs 里 MountOption::FSName 的取值）。
 # 该字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。
@@ -2404,6 +2382,7 @@ capture_scenario2_mediastore_hook_diag() {
 capture_test_flow_artifacts() {
   adb logcat -d >test-flow-logcat.txt 2>/dev/null || true
   adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; case \"\$log\" in file_monitor.log|running.log) tail -1000 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; *) tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; esac; done" >test-flow-module-state.txt 2>/dev/null || true
+  adb_su "echo schema=1; echo ===fuse_capability_snapshot===; cat /data/adb/modules/storage.redirect.x/.fuse_capability 2>/dev/null || echo state=unknown; echo; echo ===backend_effective===; grep -a -h 'backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -80 || true; echo; echo ===fuse_cache_summary===; grep -a -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -120 || true" >test-flow-backend-diagnostic.txt 2>/dev/null || true
   capture_file_monitor_diagnostics >test-flow-monitor-state.txt 2>/dev/null || true
   {
     echo "===app_pids==="
@@ -2604,6 +2583,8 @@ run_scenario() {
       run_standard_scenario "$scenario"
       ;;
   esac
+  echo "step 6/7: 记录 auto 实际后端和 FUSE cache 容量"
+  adb_su "grep -h 'backend_effective' '$LOG_PATH' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LOG_PATH' 2>/dev/null | tail -3 || true"
 }
 
 cleanup_done=0
@@ -2641,7 +2622,7 @@ export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config enable_fuse_daemon_config disable_fuse_daemon_config use_mount_namespace_fallback_config apply_config target_path logical_dir expected_path scenario_title prepare_backend_core_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config target_path logical_dir expected_path scenario_title prepare_backend_core_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
 export -f run_quick_media_provider_restart_recovery_scenario
 
 for scenario in "${scenarios[@]}"; do

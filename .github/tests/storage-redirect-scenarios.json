@@ -44,7 +44,7 @@
     },
     {
       "id": 8,
-      "config_mode": "fuse",
+      "config_mode": "auto",
       "bash_title": "FUSE 仅映射模式：命中 sandbox 规则且同级未命中路径保持真实",
       "powershell_title": "FUSE mapping_mode_only sandbox hit with unmatched sibling kept real"
     },
@@ -92,75 +92,75 @@
     },
     {
       "id": 16,
-      "config_mode": "fuse",
-      "bash_title": "Fuse daemon 混合模式：普通放行与通配符放行并存",
-      "powershell_title": "Fuse daemon hybrid plain allow plus wildcard allow"
+      "config_mode": "auto",
+      "bash_title": "FUSE 数据面：普通放行与通配符放行并存",
+      "powershell_title": "auto backend plain allow plus wildcard allow"
     },
     {
       "id": 17,
-      "config_mode": "fuse",
-      "bash_title": "Fuse daemon 混合模式：read_only_paths 支持 ! 排除优先",
-      "powershell_title": "Fuse daemon read_only_paths exclusion priority"
+      "config_mode": "auto",
+      "bash_title": "FUSE 数据面：read_only_paths 支持 ! 排除优先",
+      "powershell_title": "auto backend read_only_paths exclusion priority"
     },
     {
       "id": 18,
-      "config_mode": "fuse",
-      "bash_title": "Fuse daemon 混合模式：映射最终目标决定只读权限",
-      "powershell_title": "Fuse daemon mapped final target read-only policy"
+      "config_mode": "auto",
+      "bash_title": "FUSE 数据面：映射最终目标决定只读权限",
+      "powershell_title": "auto backend mapped final target read-only policy"
     },
     {
       "id": 19,
-      "config_mode": "fuse",
-      "bash_title": "Fuse daemon 混合模式：同父级多通配符规则互不污染",
-      "powershell_title": "Fuse daemon sibling wildcard rules stay scoped"
+      "config_mode": "auto",
+      "bash_title": "FUSE 数据面：同父级多通配符规则互不污染",
+      "powershell_title": "auto backend sibling wildcard rules stay scoped"
     },
     {
       "id": 20,
-      "config_mode": "mount_namespace",
-      "bash_title": "默认 mount namespace：allowed_real_paths 通配符回退",
-      "powershell_title": "mount namespace allowed wildcard fallback"
+      "config_mode": "auto",
+      "bash_title": "自动后端：allowed_real_paths 通配符匹配或 namespace 回退",
+      "powershell_title": "auto backend allowed wildcard match or namespace fallback"
     },
     {
       "id": 21,
-      "config_mode": "mount_namespace",
-      "bash_title": "默认 mount namespace：read_only_paths 通配符回退",
-      "powershell_title": "mount namespace read_only wildcard fallback"
+      "config_mode": "auto",
+      "bash_title": "自动后端：read_only_paths 通配符匹配或 namespace 回退",
+      "powershell_title": "auto backend read_only wildcard match or namespace fallback"
     },
     {
       "id": 22,
-      "config_mode": "mount_namespace",
-      "bash_title": "默认 mount namespace：映射最终目标决定只读权限",
-      "powershell_title": "mount namespace mapped final target read-only policy"
+      "config_mode": "auto",
+      "bash_title": "自动后端：映射最终目标决定只读权限",
+      "powershell_title": "auto backend mapped final target read-only policy"
     },
     {
       "id": 23,
-      "config_mode": "monitor_mount",
+      "config_mode": "monitor_auto",
       "bash_title": "文件监视：未启用重定向的普通应用与系统代写保存成功记录",
       "powershell_title": "file monitor disabled redirect regular app and system writer success records"
     },
     {
       "id": 24,
-      "config_mode": "monitor_mount",
-      "bash_title": "文件监视：普通应用 fuse daemon 关闭时映射保存、只读失败与只读排除成功记录",
-      "powershell_title": "file monitor regular app namespace mapping and read-only records"
+      "config_mode": "monitor_auto",
+      "bash_title": "文件监视：普通应用自动后端映射保存、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor regular app auto backend mapping and read-only records"
     },
     {
       "id": 25,
-      "config_mode": "monitor_fuse",
-      "bash_title": "文件监视：普通应用 fuse daemon 开启时保存成功、只读失败与只读排除成功记录",
-      "powershell_title": "file monitor regular app with fuse daemon on"
+      "config_mode": "monitor_auto",
+      "bash_title": "文件监视：普通应用自动后端保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor regular app with auto backend"
     },
     {
       "id": 26,
-      "config_mode": "monitor_mount",
-      "bash_title": "文件监视：系统代写 fuse daemon 关闭时保存成功、只读失败与只读排除成功记录",
-      "powershell_title": "file monitor system writer with fuse daemon off"
+      "config_mode": "monitor_auto",
+      "bash_title": "文件监视：系统代写自动后端保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor system writer with auto backend"
     },
     {
       "id": 27,
-      "config_mode": "monitor_fuse",
-      "bash_title": "文件监视：系统代写 fuse daemon 开启时保存成功、只读失败与只读排除成功记录",
-      "powershell_title": "file monitor system writer with fuse daemon on"
+      "config_mode": "monitor_auto",
+      "bash_title": "文件监视：系统代写自动后端保存成功、只读失败与只读排除成功记录",
+      "powershell_title": "file monitor system writer with auto backend"
     },
     {
       "id": 28,

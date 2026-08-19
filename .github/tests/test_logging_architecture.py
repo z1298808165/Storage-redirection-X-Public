@@ -21,11 +21,12 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("-b crash -d -v threadtime", script)
         self.assertIn('-T "$LOGCAT_CAPTURE_START"', script)
         self.assertIn("tail -n 3000", script)
-        self.assertIn('diagnostic_archive_version=6', script)
+        self.assertIn('diagnostic_archive_version=8', script)
         self.assertIn('diagnostic-summary.json', script)
         self.assertIn('collect_diagnostic_summary', script)
         self.assertIn("collect_fuse_state", script)
         self.assertIn('fuse/cache-performance.txt', script)
+        self.assertIn('test-flow-backend-diagnostic.txt', read(".github/tests/run-storage-redirect-scenarios.sh"))
         self.assertIn('fuse/mount_state', script)
 
     def test_legacy_exporters_use_the_same_bounded_windows(self) -> None:
@@ -49,6 +50,38 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("peak_entries={}", source)
         self.assertIn("dir_cache_capacity", source)
         self.assertIn("max_capacity={}", source)
+        self.assertIn("dir_cache_bytes", source)
+        self.assertIn("byte_budget={}", source)
+        self.assertIn("oversize={}", source)
+
+    def test_backend_diagnostic_artifact_captures_selection_contract(self) -> None:
+        source = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn("test-flow-backend-diagnostic.txt", source)
+        self.assertIn(".fuse_capability", source)
+        self.assertIn("backend_effective", source)
+        self.assertIn("fuse_dir_cache_(config|sample)|perf_snapshot component=fuse", source)
+        daemon = read("src/daemon_mount.rs")
+        companion = read("src/lifecycle/companion_mount.rs")
+        for mount_source in (daemon, companion):
+            self.assertIn("selection_reason=", mount_source)
+            self.assertIn("capability=", mount_source)
+
+    def test_mount_intent_cleanup_uses_process_starttime(self) -> None:
+        intent = read("src/mount_intent.rs")
+        daemon = read("src/daemon.rs")
+        self.assertIn("pub fn prune_stale", intent)
+        self.assertIn("process_start_time_ticks", intent)
+        self.assertIn("mount_intent::prune_stale", daemon)
+
+    def test_namespace_fallback_reexpands_wildcard_rules_after_fuse_failure(self) -> None:
+        config = read("src/fuse_redirect/config.rs")
+        daemon = read("src/daemon_mount.rs")
+        companion = read("src/lifecycle/companion_mount.rs")
+        self.assertIn("expand_namespace_fallback_rules", config)
+        self.assertIn("expand_namespace_fallback_rules", daemon)
+        self.assertIn("expand_namespace_fallback_rules", companion)
+        self.assertIn("scoped_mount_failed_namespace_fallback", daemon)
+        self.assertIn("scoped_mount_failed_namespace_fallback", companion)
 
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")

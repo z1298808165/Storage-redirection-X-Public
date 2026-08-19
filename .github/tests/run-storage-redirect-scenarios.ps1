@@ -179,23 +179,23 @@ function Write-GlobalConfig {
 }
 
 function Get-TestGlobalConfig {
-    param([bool]$FuseDaemonEnabled, [Nullable[bool]]$FileMonitorEnabled = $null)
-    $enabled = if ($FuseDaemonEnabled) { "true" } else { "false" }
+    param(
+        [ValidateSet("auto", "fuse", "namespace")]
+        [string]$StorageBackendMode = "auto",
+        [Nullable[bool]]$FileMonitorEnabled = $null
+    )
     $fileMonitorEnabledValue = if ($null -ne $FileMonitorEnabled) { [bool]$FileMonitorEnabled } else { $script:FileMonitorEnabled }
     $fileMonitor = if ($fileMonitorEnabledValue) { "true" } else { "false" }
-    '{"file_monitor_enabled":' + $fileMonitor + ',"fuse_fix_enabled":true,"fuse_daemon_redirect_enabled":' + $enabled + ',"verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}'
+    '{"file_monitor_enabled":' + $fileMonitor + ',"fuse_fix_enabled":true,"storage_backend_mode":"auto","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}'
 }
 
-function Enable-FuseDaemonConfig {
-    Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $true)
-}
-
-function Disable-FuseDaemonConfig {
-    Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false)
-}
-
-function Use-MountNamespaceFallbackConfig {
-    Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false)
+function Set-BackendConfig {
+    param(
+        [ValidateSet("auto", "fuse", "namespace")]
+        [string]$Mode = "auto",
+        [Nullable[bool]]$FileMonitorEnabled = $null
+    )
+    Write-GlobalConfig (Get-TestGlobalConfig -StorageBackendMode $Mode -FileMonitorEnabled $FileMonitorEnabled)
 }
 
 function Backup-GlobalConfig {
@@ -292,11 +292,9 @@ function Restore-DeviceExecutionState {
     }
 }
 
-function Test-FuseDaemonScenarioSupport {
-    $mode = $env:RUN_FUSE_DAEMON_SCENARIOS
-    if ($mode -match '^(1|true|TRUE|yes|YES)$') { return $true }
-    if ($mode -match '^(0|false|FALSE|no|NO)$') { return $false }
-    Test-Su "for file in /data/adb/modules/storage.redirect.x/bin/srx_daemon /data/adb/modules/storage.redirect.x/zygisk/arm64-v8a.so /data/adb/modules/storage.redirect.x/zygisk/x86_64.so; do [ -f `"`$file`" ] && grep -a -q 'fuse_daemon_redirect_enabled' `"`$file`" && exit 0; done; exit 1"
+function Test-FuseBackendScenarioSupport {
+    # 所有场景都使用 auto；是否实际启用 FUSE 由运行时日志和 mountinfo 记录。
+    return $true
 }
 
 function Get-ScenarioList {
@@ -318,37 +316,26 @@ function Get-ScenarioList {
     }
 
     $defaultScenarios = New-Object System.Collections.Generic.List[int]
-    $fuseSupported = Test-FuseDaemonScenarioSupport
+    $fuseSupported = Test-FuseBackendScenarioSupport
     1..7 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    if ($fuseSupported) {
-        $defaultScenarios.Add(8) | Out-Null
-    } else {
-        Write-Host "跳过 FUSE daemon 场景：模块未暴露 fuse_daemon_redirect_enabled，或 RUN_FUSE_DAEMON_SCENARIOS 已禁用"
-    }
+    $defaultScenarios.Add(8) | Out-Null
     9..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(29) | Out-Null
     $defaultScenarios.Add(30) | Out-Null
-    if ($fuseSupported) {
-        16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    }
+    16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     20..22 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     $defaultScenarios.Add(28) | Out-Null
     $defaultScenarios.Add(31) | Out-Null
     $defaultScenarios.Add(32) | Out-Null
     $defaultScenarios.Add(33) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    if ($fuseSupported) {
-        25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    } else {
-        $defaultScenarios.Add(26) | Out-Null
-        Write-Host "跳过文件监视 FUSE daemon 场景：模块未暴露 fuse_daemon_redirect_enabled，或 RUN_FUSE_DAEMON_SCENARIOS 已禁用"
-    }
+    25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     @($defaultScenarios)
 }
 
 function Apply-ScenarioConfig {
     param([int]$Scenario)
-    Disable-FuseDaemonConfig
+    Set-BackendConfig -Mode "auto"
     Clear-CrossAppReadOnlyConfig
     switch ($Scenario) {
         1 { Invoke-Su "rm -f '$Config'" | Out-Null }
@@ -359,7 +346,7 @@ function Apply-ScenarioConfig {
         6 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtOther":"Download/SrtOtherMapped"}}}}' }
         7 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/SrtProbe":"Download/SrtMapOnlyMapped"}}}}' }
         8 {
-            Enable-FuseDaemonConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":["SrtRuleSandbox"]}}}'
         }
         9 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtReadOnly"]}}}' }
@@ -370,52 +357,52 @@ function Apply-ScenarioConfig {
         14 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtLongest":"Download/SrtLongestBase","Download/SrtLongest/Deep":"Download/SrtLongestDeep"}}}}' }
         15 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":"Download/SrtPriority","path_mappings":{"Download/SrtPriority":"Download/SrtPriorityMapped"}}}}' }
         16 {
-            Enable-FuseDaemonConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFusePlain","DCIM/SrtFuseQQ/SrtAllowed*","Download/SrtFuseQ?/Media","Download/SrtFuseMedia*/Drop"]}}}'
         }
         17 {
-            Enable-FuseDaemonConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFuseExclude/Writable"],"read_only_paths":["Download/SrtFuseExclude","!Download/SrtFuseExclude/Writable"]}}}'
         }
         18 {
-            Enable-FuseDaemonConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtFuseMapParent","!Download/SrtFuseMapParent/WritableTarget"],"path_mappings":{"Download/SrtFuseMapRW":"Download/SrtFuseMapParent/WritableTarget","Download/SrtFuseMapRO":"Download/SrtFuseMapParent/LockedTarget"}}}}'
         }
         19 {
-            Enable-FuseDaemonConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtFuseMulti/QQ/*","Download/SrtFuseMulti/WeChat/*"],"read_only_paths":["Download/SrtFuseMulti/Locked/*"]}}}'
         }
         20 {
-            Use-MountNamespaceFallbackConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMountNsAllow/Team*/Deep","Download/SrtMountNsAllow/Q?/Deep"]}}}'
         }
         21 {
-            Use-MountNamespaceFallbackConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtMountNsReadOnly/Team*/Deep"]}}}'
         }
         22 {
-            Use-MountNamespaceFallbackConfig
+            Set-BackendConfig -Mode "auto"
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Download/SrtMountNsMapParent","!Download/SrtMountNsMapParent/WritableTarget"],"path_mappings":{"Download/SrtMountNsMapRW":"Download/SrtMountNsMapParent/WritableTarget","Download/SrtMountNsMapRO":"Download/SrtMountNsMapParent/LockedTarget"}}}}'
         }
         23 {
-            Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false -FileMonitorEnabled $true)
+            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":false}}}'
         }
         24 {
-            Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false -FileMonitorEnabled $true)
+            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
         }
         25 {
-            Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $true -FileMonitorEnabled $true)
+            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
         }
         26 {
-            Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $false -FileMonitorEnabled $true)
+            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
             Write-CrossAppReadOnlyConfig
         }
         27 {
-            Write-GlobalConfig (Get-TestGlobalConfig -FuseDaemonEnabled $true -FileMonitorEnabled $true)
+            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
             Write-CrossAppReadOnlyConfig
         }
@@ -1541,18 +1528,18 @@ function Get-ScenarioTitle {
         13 { "allowed_real_paths question-mark wildcard" }
         14 { "path mapping longest-prefix match" }
         15 { "mapping priority over string sandboxed_paths" }
-        16 { "Fuse daemon hybrid plain allow plus wildcard allow" }
-        17 { "Fuse daemon read_only_paths exclusion priority" }
-        18 { "Fuse daemon mapped final target read-only policy" }
-        19 { "Fuse daemon sibling wildcard rules stay scoped" }
-        20 { "mount namespace allowed wildcard fallback" }
-        21 { "mount namespace read_only wildcard fallback" }
-        22 { "mount namespace mapped final target read-only policy" }
+        16 { "auto backend plain allow plus wildcard allow" }
+        17 { "auto backend read_only_paths exclusion priority" }
+        18 { "auto backend mapped final target read-only policy" }
+        19 { "auto backend sibling wildcard rules stay scoped" }
+        20 { "auto backend allowed wildcard match or namespace fallback" }
+        21 { "auto backend read_only wildcard match or namespace fallback" }
+        22 { "auto backend mapped final target read-only policy" }
         23 { "file monitor disabled redirect regular app and system writer success records" }
-        24 { "file monitor regular app namespace mapping and read-only records" }
-        25 { "file monitor regular app with fuse daemon on" }
-        26 { "file monitor system writer with fuse daemon off" }
-        27 { "file monitor system writer with fuse daemon on" }
+        24 { "file monitor regular app auto backend mapping and read-only records" }
+        25 { "file monitor regular app with auto backend" }
+        26 { "file monitor system writer with auto backend" }
+        27 { "file monitor system writer with auto backend" }
         28 { "MediaStore query keeps read-only real image visible" }
         29 { "config hot reload switches running app from default redirect to path mapping" }
         30 { "MediaProvider collection URI openTypedAssetFile bypasses single-row remapping" }
@@ -1931,7 +1918,7 @@ function Invoke-QMarkWildcardScenario {
 function Test-FuseDaemonStarted {
     param([int]$Scenario)
     for ($i = 0; $i -lt 5; $i++) {
-        if (Test-Su "grep -Eq 'fuse redirect mount start pkg=$AppId|mount request cfg pkg=$AppId fuse_daemon=true|app mount confirmed pid=' '$LogPath' 2>/dev/null") {
+        if (Test-Su "grep -Eq 'backend_effective pkg=$AppId|fuse redirect mount start pkg=$AppId|app mount confirmed pid=' '$LogPath' 2>/dev/null") {
             Write-Host "  - scenario-$Scenario/fuse-daemon-started"
             return $true
         }
@@ -1941,7 +1928,7 @@ function Test-FuseDaemonStarted {
     $true
 }
 
-# 判别性断言：确认 FUSE daemon 真的接管了挂载点，而不是静默回退到 mount namespace。
+# 判别性断言：确认 FUSE 数据面真的接管了挂载点，而不是静默回退到 mount namespace。
 #
 # 依据 mountinfo 中的挂载源 srx_fuse_redirect（config.rs 里 MountOption::FSName 的取值）。
 # 该字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。
@@ -2272,6 +2259,8 @@ function Invoke-Scenario {
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
+    Write-Host "  - scenario-$Scenario/backend-effective"
+    Invoke-Su "grep -h 'backend_effective' '$LogPath' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LogPath' 2>/dev/null | tail -3 || true" | Write-Host
     $ok = (Stop-AppAndWaitFuseCleanup "scenario-$Scenario/finalize" $true) -and $ok
     if (-not $ok -and $script:Failures.Count -eq $before) {
         $script:Failures.Add("scenario-$Scenario returned false without a detailed failure")
@@ -2282,7 +2271,7 @@ function Invoke-Scenario {
 
 function Invoke-BasicAll {
     Write-Host "== basic suite with default redirect enabled =="
-    Disable-FuseDaemonConfig
+    Set-BackendConfig -Mode "auto"
     Write-DeviceConfig '{"users":{"0":{"enabled":true}}}'
     Clear-Targets
     Restart-App "all-basic"
