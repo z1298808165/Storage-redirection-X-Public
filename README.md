@@ -103,7 +103,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 {
   "file_monitor_enabled": true,
   "fuse_fix_enabled": true,
-  "fuse_daemon_redirect_enabled": false,
+  "storage_backend_mode": "auto",
   "verbose_logging_enabled": false,
   "auto_enable_redirect_for_new_apps": false,
   "auto_enable_new_apps_template_id": "",
@@ -113,7 +113,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 
 - `file_monitor_enabled`：启用文件创建监控；普通应用由 `srx_daemon` 在进程外监控隔离目录、放行真实路径和路径映射目标，`read_only_paths` 也会被纳入 daemon 监控。普通应用不安装进程内 PLT hook，因为不同应用的 native/图形/加固运行时兼容性不可控，安装后可能导致应用无法打开或闪退；真实 MediaProvider/FUSE 服务端仍使用 hook 保留调用方识别。DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不再安装进程内 PLT hook，避免安装应用、设置、文件管理器和导出日志等系统存储链路被卡住。缺失、格式错误或不可读时，默认值为 `false`。
 - `fuse_fix_enabled`：启用 SRX 内置 FuseFixer-compatible 保护，用于处理 MediaProvider/FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
-- `fuse_daemon_redirect_enabled`：启用混合 FUSE 重定向增强。普通路径仍使用 mount namespace；只有包含 `!`、`*`、`?` 的通配规则会在通配符前的最小具体父目录挂载模块内 FUSE daemon 精确匹配。关闭或 FUSE 启动失败时，默认 mount namespace 方案会退化通配规则。缺失、格式错误或不可读时，默认值为 `false`。
+- `storage_backend_mode`：保留为配置格式字段，运行时固定为 `auto`。native 根据设备能力、规则复杂度和 FUSE 服务健康状态选择 scoped FUSE 或 mount namespace；旧版 `fuse_daemon_redirect_enabled` 不再读取，管理端和测试流也始终写入 `auto`。实际选择会记录为 `backend_effective` 并随诊断日志导出。
 - `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log` 等诊断采集，关闭后立即停止这些记录。文件监视记录和概览页的轻量运行时生效计数不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时使用仅开启重定向的默认配置。
@@ -154,7 +154,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | 是否启用当前用户的重定向配置。配置文件中存在该用户但未写此字段时会按启用处理。 |
 | `mapping_mode_only` | bool | `false` | 仅映射模式。启用后不再执行完整沙盒 fallback，只应用 `path_mappings` 和 `sandboxed_paths`。 |
-| `allowed_real_paths` | string array | `[]` | 完整隔离模式下的真实路径放行列表，命中后保持原路径。支持 `!` 排除规则，普通放行和排除规则都可使用 `*`、`?` 通配符；默认 mount namespace 会退化通配规则，FUSE daemon 可精确匹配。 |
+| `allowed_real_paths` | string array | `[]` | 完整隔离模式下的真实路径放行列表，命中后保持原路径。支持 `!` 排除规则，普通放行和排除规则都可使用 `*`、`?` 通配符；自动模式按设备能力选择精确 FUSE 或 namespace 回退。 |
 | `excluded_real_paths` | string array | `[]` | 旧版兼容字段。读取时会并入 `allowed_real_paths` 的 `!` 排除规则；新配置建议直接写 `allowed_real_paths`。 |
 | `sandboxed_paths` | string 或 string array | `[]` | 仅映射模式下的局部沙盒路径，命中后仍进入应用沙盒。 |
 | `read_only_paths` | string 或 string array | `[]` | 只读模式目录。支持具体相对目录、`!` 排除前缀以及 `*`、`?` 通配符；运行时读取会按真实路径放行并禁止写入。 |
@@ -330,7 +330,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 - 只读正向规则会提供真实读取通道；即使没有配置 `allowed_real_paths`，应用也能读取该目录但不能写入。`!` 只读排除规则优先覆盖同组正向只读规则，命中后继续按沙盒、映射或显式允许规则处理。
 - 路径映射的入口或最终目标命中只读路径时，映射入口也会继承只读，不能通过映射绕过写入限制。
 - 只读路径接受相对目录、`!` 排除前缀以及 `*` / `?` 通配符；与允许路径排除规则直接冲突的正向只读路径会被忽略，只读排除规则优先于正向只读规则。
-- 普通应用使用默认 mount namespace 方案时，通配符规则会先退化为已存在的具体匹配目录；没有具体匹配时再退化到最近的具体父目录。该退化会尽量避免整条规则失效，但允许规则可能变宽，排除、沙盒和只读规则可能变严。需要严格按 `!`、`*`、`?` 精确匹配时，请开启 FUSE daemon 重定向；开启后只在通配规则前缀挂载 FUSE，普通路径继续使用 mount namespace。
+- 自动模式下，设备支持且规则需要动态匹配时使用 scoped FUSE；FUSE 不可用、服务启动失败或规则不需要用户态转发时使用 mount namespace。最终后端和 FUSE 会话信息会写入运行日志。
 - 只读 mount 会在允许路径、排除路径和显式映射之后应用，确保只读层尽量成为最终生效层。
 
 ### FuseFixer 兼容保护
@@ -421,7 +421,7 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 
 同一应用下，排除规则优先于普通放行规则。也就是说，先允许 `Pictures`，再排除 `Pictures/Private`，最终 `Pictures/Private` 仍会进入应用沙盒。
 
-普通应用使用默认 mount namespace 方案时，通配符规则会先退化为已存在的具体匹配目录；没有匹配目录时再退化到最近的具体父目录，避免整条规则完全失效。该退化可能让允许规则范围变宽，也可能让排除、沙盒和只读规则范围变严。需要严格按 `!`、`*`、`?` 精确匹配时，请开启 FUSE daemon 重定向；开启后只在通配规则前缀挂载 FUSE，普通路径继续使用 mount namespace。
+自动模式下，动态通配规则优先使用 scoped FUSE；设备缺少能力或 FUSE 会话异常时回退到 mount namespace，并记录 `backend_effective`。
 
 通配符说明：
 
@@ -452,9 +452,10 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 - [构建流程](docs/build-process.md)
 - [模块打包](docs/module-packaging.md)
 - [运行时配置说明](docs/runtime-configuration.md)
+- [FUSE-first 迁移架构](docs/fuse-first-migration.md)
 - [上游 Hook 依赖说明](docs/upstream-hook-dependencies.md)
 - [设备侧测试说明](docs/device-testing.md)
 
 ## 测试流
 
-设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块和测试 APK，再在 Android 13/14/15/16 模拟器上各自执行完整 scenario 1-29，单个 Android 版本内失败快速停止，全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。合并 PR 时建议把 `Test-flow required gate` 配成必需检查。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。
+设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块和测试 APK，再在 Android 13/14/15/16 模拟器上各自执行完整 scenario 1-33，单个 Android 版本内失败快速停止，全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。

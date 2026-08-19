@@ -18,7 +18,7 @@
     "global": {
       "file_monitor_enabled": false,
       "fuse_fix_enabled": true,
-      "fuse_daemon_redirect_enabled": false,
+      "storage_backend_mode": "auto",
       "verbose_logging_enabled": false,
       "auto_enable_redirect_for_new_apps": false,
       "auto_enable_new_apps_template_id": "",

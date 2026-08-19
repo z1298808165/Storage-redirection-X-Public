@@ -10,7 +10,7 @@
 {
   "file_monitor_enabled": true,
   "fuse_fix_enabled": true,
-  "fuse_daemon_redirect_enabled": false,
+  "storage_backend_mode": "auto",
   "verbose_logging_enabled": false,
   "auto_enable_redirect_for_new_apps": false,
   "auto_enable_new_apps_template_id": "",
@@ -20,7 +20,7 @@
 
 - `file_monitor_enabled`：启用文件创建监控；覆盖已配置的普通应用，以及 MediaProvider、DownloadProvider 等系统代写链路。普通应用即使关闭“启用重定向”，也会由 `srx_daemon` 在进程外通过 inotify 监控公共存储写入；这类公共根记录只在文件 owner uid 能明确反查到同一个包名时写入，避免误归因。启用重定向的普通应用会监控隔离根、放行路径、`read_only_paths` 和路径映射目标。普通应用不安装进程内 monitor/PLT hook；这是为了避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。真实 MediaProvider/FUSE 服务端仍使用进程内 hook 保留调用方识别；DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不再安装进程内 PLT hook，避免安装应用、设置、文件管理器和导出日志等系统存储链路被卡住。缺失、格式错误或不可读时，沿用历史默认值 `false`。
 - `fuse_fix_enabled`：启用 SRX 内置的 FuseFixer 兼容保护，用于处理 MediaProvider FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
-- `fuse_daemon_redirect_enabled`：启用混合 FUSE 重定向增强。普通路径仍使用默认 mount namespace，只有通配规则前缀会挂载模块内 FUSE daemon；开启后 `!`、`*`、`?` 规则按路径匹配精确生效。关闭或 FUSE 启动失败时，普通应用仍使用默认 mount namespace 方案，通配符规则会退化为已存在的具体匹配目录，必要时退化到最近具体父目录。缺失、格式错误或不可读时，默认值为 `false`。
+- `storage_backend_mode`：保留为配置格式字段，运行时固定为 `auto`。native 根据设备能力、规则复杂度和 FUSE 服务健康状态选择 scoped FUSE 或 mount namespace。旧版 `fuse_daemon_redirect_enabled` 不再读取；管理端和测试流始终写入 `auto`。最终选择写入 `backend_effective` 日志，并进入诊断摘要。
 - `verbose_logging_enabled`：启用详细日志。打开后，普通 native 日志通过 `srx_daemon` 的私有 datagram 通道写入 `running.log`，并启动 Java/崩溃上下文和 MediaProvider/应用状态采集；关闭后立即停止这些详细记录。文件监视记录由 `file_monitor_enabled` 和文件监视过滤配置单独控制，概览页的轻量运行时生效计数始终启用。缺失、格式错误或不可读时，默认值为 `false`。
 
 概览页“生效次数”累计重定向运行时成功启用的次数：普通应用的 companion mount 成功启用一次计一次，daemon 为尚无 mount state 的进程首次补建重定向运行时计一次，系统写入进程的重定向 hook 成功启用一次计一次。已有 mount state 的配置重载不重复计数。它不统计每次文件访问或路径改写，也不受详细日志和文件监视开关影响。`stats` 使用带 schema 的独立格式保存精确值，存放在 `/data/adb/storage.redirect.x/stats`（模块目录之外的持久路径，模块升级不会触碰该目录）。概览页仅按 `K`、`M`、`B`、`T` 等国际短单位缩写显示，点击计数可查看精确值，长按并确认后可清零重新统计。累计计数不会因模块升级归零，刷入后延迟重启期间由旧 daemon 继续累加的次数也不会丢失；只有首次安装或用户主动清零才会从 0 开始。旧版混合口径的纯数字统计不会并入新版计数。
@@ -169,7 +169,7 @@ logcat 窗口按“行数上限”而不是固定分钟计算，因此不是“�
 
 `!` 和通配符仅用于**真实路径规则**，不用于**路径映射**。
 
-普通应用使用默认 mount namespace 方案时，内核 bind mount 不能表达通配符。运行时会先把通配规则退化为已存在的具体匹配目录；没有匹配目录时再退化到最近的具体父目录，避免整条规则完全失效。该退化可能让允许规则覆盖范围变宽，也可能让排除、沙盒和只读规则覆盖范围变严。需要严格按 `!`、`*`、`?` 精确匹配时，请开启 FUSE daemon 重定向；开启后只在通配规则前缀挂载 FUSE，普通路径继续使用 mount namespace。
+自动模式下，内核 bind mount 不能表达的动态通配规则会优先使用 scoped FUSE；FUSE 不可用、服务启动失败或健康检查失败时回落到 mount namespace。最终后端、FUSE cache 容量和 mount intent 数量会进入运行日志与诊断摘要。
 
 ### 示例
 
