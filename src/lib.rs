@@ -12,6 +12,7 @@ mod lifecycle;
 mod logging;
 mod monitor;
 mod mount;
+mod mount_intent;
 mod mount_status_marker;
 mod platform;
 mod redirect;

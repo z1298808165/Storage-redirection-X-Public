@@ -1,6 +1,16 @@
+use crate::config::StorageBackendMode;
 use crate::domain::PathMapping;
-use crate::platform::{fs, paths};
+use crate::platform::{fs, module_paths, paths};
 use fuser::{MountOption, SessionACL};
+use std::ffi::CString;
+use std::os::unix::fs::FileTypeExt;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FuseCapability {
+    Unknown,
+    Available,
+    Unavailable,
+}
 
 #[derive(Clone)]
 pub struct FuseRedirectConfig {
@@ -40,7 +50,7 @@ pub trait MountRequestFields {
     fn app_data_dir(&self) -> &str;
     fn redirect_target(&self) -> &str;
     fn is_file_monitor_enabled(&self) -> bool;
-    fn is_fuse_daemon_redirect_enabled(&self) -> bool;
+    fn storage_backend_mode(&self) -> StorageBackendMode;
     fn allowed_real_paths(&self) -> &[String];
     fn excluded_real_paths(&self) -> &[String];
     fn sandboxed_paths(&self) -> &[String];
@@ -78,8 +88,26 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
 pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     request: &R,
 ) -> Vec<String> {
-    if !request.is_fuse_daemon_redirect_enabled() {
+    if matches!(
+        request.storage_backend_mode(),
+        StorageBackendMode::Namespace
+    ) {
         return Vec::new();
+    }
+
+    let backend_mode = request.storage_backend_mode();
+    let capability_available = match backend_mode {
+        StorageBackendMode::Fuse => fuse_first_capability_available(),
+        StorageBackendMode::Auto => fuse_capability() == FuseCapability::Available,
+        StorageBackendMode::Namespace => false,
+    };
+    if !capability_available {
+        return Vec::new();
+    }
+
+    if matches!(backend_mode, StorageBackendMode::Fuse) {
+        let user_id = crate::platform::user_id_from_uid(request.uid());
+        return vec![paths::storage_user_root_for_user(user_id)];
     }
 
     scoped_mount_roots_for_hybrid_rules(
@@ -91,6 +119,160 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
         request.path_mappings(),
         request.is_mapping_mode_only(),
     )
+}
+
+/// FUSE-first 只在设备暴露可读写 `/dev/fuse` 且模块具备 root 运行环境时启用。
+/// 具体挂载仍由子进程验证；能力探测失败会回退到 namespace。
+pub fn fuse_device_present() -> bool {
+    std::fs::metadata("/dev/fuse")
+        .map(|metadata| metadata.file_type().is_char_device())
+        .unwrap_or(false)
+}
+
+/// 返回 daemon 最近一次记录的 FUSE 能力。
+///
+/// 普通应用只读取这个原子替换的快照，不直接打开 `/dev/fuse`。快照缺失时保持
+/// `Unknown`，由规划层走保守的 namespace fallback 路径。
+pub fn fuse_capability() -> FuseCapability {
+    let Ok(content) = std::fs::read_to_string(module_paths::FUSE_CAPABILITY_FILE) else {
+        return FuseCapability::Unknown;
+    };
+    let current_boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string());
+    let snapshot_boot_id = content
+        .lines()
+        .find_map(|line| line.strip_prefix("boot_id="))
+        .map(str::trim);
+    if current_boot_id.as_deref() != snapshot_boot_id {
+        return FuseCapability::Unknown;
+    }
+    match content
+        .lines()
+        .find_map(|line| line.strip_prefix("state="))
+        .map(str::trim)
+    {
+        Some("available") => FuseCapability::Available,
+        Some("unavailable") => FuseCapability::Unavailable,
+        _ => FuseCapability::Unknown,
+    }
+}
+
+pub fn fuse_capability_as_str(capability: FuseCapability) -> &'static str {
+    match capability {
+        FuseCapability::Unknown => "unknown",
+        FuseCapability::Available => "available",
+        FuseCapability::Unavailable => "unavailable",
+    }
+}
+
+/// 自动后端使用的 fallback 路径决策，应用侧与 daemon 共享同一个判断接口。
+pub fn expand_mount_fallbacks_for_mode(mode: StorageBackendMode) -> bool {
+    match mode {
+        StorageBackendMode::Namespace => true,
+        StorageBackendMode::Fuse => false,
+        StorageBackendMode::Auto => fuse_capability() != FuseCapability::Available,
+    }
+}
+
+/// 在实际 FUSE 启动失败后，把 namespace fallback 所需的通配规则收敛到父目录。
+pub fn expand_namespace_fallback_rules(uid: i32, rules: &[String]) -> Vec<String> {
+    let user_id = crate::platform::user_id_from_uid(uid);
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let mut expanded = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let trimmed = rule.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (excluded, body) = if let Some(stripped) = trimmed.strip_prefix('!') {
+            (true, stripped.trim_start())
+        } else {
+            (false, trimmed)
+        };
+        let resolved = if !excluded && paths::contains_wildcards(body) {
+            paths::wildcard_policy_fallback_parent(body, &storage_root)
+                .unwrap_or_else(|| body.to_string())
+        } else {
+            body.to_string()
+        };
+        expanded.push(if excluded {
+            format!("!{resolved}")
+        } else {
+            resolved
+        });
+    }
+    paths::sort_dedup_paths_case_insensitive(&mut expanded);
+    expanded
+}
+
+fn write_fuse_capability_snapshot(capability: FuseCapability, reason: &str) -> FuseCapability {
+    let state = match capability {
+        FuseCapability::Available => "available",
+        FuseCapability::Unavailable => "unavailable",
+        FuseCapability::Unknown => "unknown",
+    };
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let content = format!("schema=1\nboot_id={boot_id}\nstate={state}\nreason={reason}\n");
+    let path = std::path::Path::new(module_paths::FUSE_CAPABILITY_FILE);
+    let temp = path.with_extension("tmp");
+    if std::fs::write(&temp, content).is_ok() && std::fs::rename(&temp, path).is_ok() {
+        log::info!("fuse capability snapshot state={} reason={}", state, reason);
+    } else {
+        let _ = std::fs::remove_file(temp);
+        log::warn!(
+            "fuse capability snapshot write failed state={} reason={}",
+            state,
+            reason
+        );
+    }
+    capability
+}
+
+/// 在 root daemon 或 companion 挂载路径中刷新能力快照。
+// quality-allow(lint-suppression): 该入口由 Android daemon 二进制调用，cdylib 目标不会直接调用。
+#[allow(dead_code)]
+pub fn refresh_fuse_capability_snapshot(reason: &str) -> FuseCapability {
+    let capability = if fuse_first_capability_available() {
+        FuseCapability::Available
+    } else {
+        FuseCapability::Unavailable
+    };
+    write_fuse_capability_snapshot(capability, reason)
+}
+
+/// 记录实际 scoped FUSE 挂载结果，失败时让后续请求立即走 namespace fallback。
+pub fn record_fuse_capability_result(available: bool, reason: &str) -> FuseCapability {
+    write_fuse_capability_snapshot(
+        if available {
+            FuseCapability::Available
+        } else {
+            FuseCapability::Unavailable
+        },
+        reason,
+    )
+}
+
+fn fuse_first_capability_available() -> bool {
+    if !fuse_device_present() {
+        log::warn!("fuse-first capability missing /dev/fuse");
+        return false;
+    }
+    let Ok(path) = CString::new("/dev/fuse") else {
+        return false;
+    };
+    // SAFETY: path 指向以 NUL 结尾的固定字符串，flags 只读写设备能力探测；返回 fd 立即关闭。
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        log::warn!("fuse-first capability cannot open /dev/fuse");
+        return false;
+    }
+    // SAFETY: fd 来自上面的 open，且在当前线程中尚未交给其它所有者。
+    unsafe { libc::close(fd) };
+    true
 }
 
 pub fn mount_blocking_with_ready(

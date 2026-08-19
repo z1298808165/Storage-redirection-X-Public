@@ -21,6 +21,8 @@ mod log_daemon;
 mod logging;
 #[path = "../mount.rs"]
 mod mount;
+#[path = "../mount_intent.rs"]
+mod mount_intent;
 #[path = "../mount_status_marker.rs"]
 mod mount_status_marker;
 #[path = "../platform.rs"]

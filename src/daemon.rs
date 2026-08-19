@@ -132,6 +132,7 @@ pub fn main_entry() -> i32 {
         log::warn!("daemon config init failed");
         return 1;
     }
+    crate::fuse_redirect::config::refresh_fuse_capability_snapshot("daemon_start");
     policy::refresh_shared_uid_cache();
     let config_watch_fd = watcher::init(crate::platform::module_paths::CONFIG_DIR);
     if config_watch_fd < 0 {
@@ -331,6 +332,12 @@ fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mu
 fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let started_ms = crate::platform::paths::monotonic_ms();
     prune_stale_mount_states();
+    crate::mount_intent::prune_stale();
+    if crate::fuse_redirect::config::fuse_capability()
+        != crate::fuse_redirect::config::FuseCapability::Available
+    {
+        crate::fuse_redirect::config::refresh_fuse_capability_snapshot("reconcile_probe");
+    }
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;
@@ -508,7 +515,7 @@ fn build_request(
         sandboxed_paths,
         read_only_paths,
         is_mapping_mode_only,
-        is_fuse_daemon_redirect_enabled: snapshot.is_fuse_daemon_redirect_enabled,
+        storage_backend_mode: snapshot.storage_backend_mode,
         is_file_monitor_enabled: snapshot.is_file_monitor_enabled,
         config_version,
     }

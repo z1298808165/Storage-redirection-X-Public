@@ -28,7 +28,8 @@ const val BackupMaxBytes = 8 * 1024 * 1024
 data class GlobalConfig(
     @SerialName("file_monitor_enabled") val fileMonitorEnabled: Boolean = false,
     @SerialName("fuse_fix_enabled") val fuseFixEnabled: Boolean = true,
-    @SerialName("fuse_daemon_redirect_enabled") val fuseDaemonRedirectEnabled: Boolean = false,
+    /** 数据面由 native 按设备能力自动选择，字段仅用于保持配置格式稳定。 */
+    @SerialName("storage_backend_mode") val storageBackendMode: String = "auto",
     @SerialName("verbose_logging_enabled") val verboseLoggingEnabled: Boolean = false,
     @SerialName("auto_enable_redirect_for_new_apps")
     val autoEnableRedirectForNewApps: Boolean = false,

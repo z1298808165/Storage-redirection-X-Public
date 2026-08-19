@@ -42,6 +42,7 @@ internal object SrxConfigNormalizer {
 
   fun normalizeGlobalConfig(config: GlobalConfig): GlobalConfig =
       config.copy(
+          storageBackendMode = "auto",
           autoEnableNewAppsTemplateId =
               config.autoEnableNewAppsTemplateId.trim().takeIf(::isSafeTemplateId).orEmpty(),
       )
@@ -59,7 +60,10 @@ internal object SrxConfigNormalizer {
     return runCatching {
           val incomingObject = MergeJson.parseToJsonElement(incoming).jsonObject
           val existingObject = MergeJson.parseToJsonElement(existing).jsonObject
-          val preserved = existingObject.filterKeys { it !in incomingObject }
+          val preserved =
+              existingObject.filterKeys {
+                it !in incomingObject && it != "fuse_daemon_redirect_enabled"
+              }
           if (preserved.isEmpty()) {
             return@runCatching incoming
           }

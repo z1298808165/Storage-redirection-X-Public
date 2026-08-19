@@ -6,6 +6,34 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// 普通应用存储数据面的内部规划模式。
+///
+/// 配置入口固定返回 `Auto`；其余变体仅保留给规划器表达设备能力探测和回退结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StorageBackendMode {
+    #[default]
+    Auto,
+    Fuse,
+    Namespace,
+}
+
+impl StorageBackendMode {
+    /// 配置面固定使用自动选择；具体后端由运行时根据设备能力和挂载计划决定。
+    pub fn parse(_value: Option<&str>, _legacy_fuse_enabled: bool) -> Self {
+        // 规划变体只在部分目标的运行时路径构造；在 daemon 目标中保留其类型可见性。
+        let _planner_fallbacks = [Self::Fuse, Self::Namespace];
+        Self::Auto
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Fuse => "fuse",
+            Self::Namespace => "namespace",
+        }
+    }
+}
+
 #[path = "config/consensus.rs"]
 mod consensus;
 #[path = "config/fingerprint.rs"]
@@ -55,7 +83,7 @@ pub struct ResolvedUserProfile {
 #[allow(dead_code)]
 pub struct DaemonReconcileConfigSnapshot {
     apps: HashMap<String, AppProfile>,
-    pub is_fuse_daemon_redirect_enabled: bool,
+    pub storage_backend_mode: StorageBackendMode,
     pub is_file_monitor_enabled: bool,
 }
 
@@ -172,7 +200,7 @@ struct SettingsState {
     config_dir: String,
     is_file_monitor_enabled: bool,
     is_fuse_fix_enabled: bool,
-    is_fuse_daemon_redirect_enabled: bool,
+    storage_backend_mode: StorageBackendMode,
     is_verbose_logging_enabled: bool,
     monitor_filters: MonitorFilterConfig,
     apps: HashMap<String, AppProfile>,
@@ -188,7 +216,7 @@ impl SettingsState {
             config_dir: module_paths::CONFIG_DIR.to_string(),
             is_file_monitor_enabled: false,
             is_fuse_fix_enabled: true,
-            is_fuse_daemon_redirect_enabled: false,
+            storage_backend_mode: StorageBackendMode::Auto,
             is_verbose_logging_enabled: false,
             monitor_filters: MonitorFilterConfig::default(),
             apps: HashMap::new(),

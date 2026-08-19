@@ -1,10 +1,13 @@
 pub const MODULE_DIR: &str = "/data/adb/modules/storage.redirect.x";
 pub const MOUNT_STATE_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_state";
+pub const MOUNT_INTENT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_intent";
 pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage";
 pub const REAL_STORAGE_TMP_PREFIX: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
 pub const CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config";
 pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.runtime_disabled";
 pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_probe";
+/// daemon 写入、普通应用只读的 FUSE 能力快照。
+pub const FUSE_CAPABILITY_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_capability";
 pub const MEDIA_HOOK_DEFERRED_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_hook_deferred";
 /// MediaProvider Java hook 安装结果的落盘记录。

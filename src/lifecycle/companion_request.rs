@@ -6,7 +6,7 @@ pub struct CompanionMountRequest {
     pub uid: i32,
     pub package_name: String,
     pub app_data_dir: String,
-    pub is_fuse_daemon_redirect_enabled: bool,
+    pub storage_backend_mode: crate::config::StorageBackendMode,
     pub is_file_monitor_enabled: bool,
     pub redirect_target: String,
     pub allowed_real_paths: Vec<String>,
@@ -37,8 +37,8 @@ impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
     fn is_file_monitor_enabled(&self) -> bool {
         self.is_file_monitor_enabled
     }
-    fn is_fuse_daemon_redirect_enabled(&self) -> bool {
-        self.is_fuse_daemon_redirect_enabled
+    fn storage_backend_mode(&self) -> crate::config::StorageBackendMode {
+        self.storage_backend_mode
     }
     fn allowed_real_paths(&self) -> &[String] {
         &self.allowed_real_paths
@@ -78,10 +78,10 @@ pub fn parse_companion_mount_request(payload: &str) -> Result<CompanionMountRequ
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    request.is_fuse_daemon_redirect_enabled = value
-        .get("fuse_daemon_redirect_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    request.storage_backend_mode = crate::config::StorageBackendMode::parse(
+        value.get("storage_backend_mode").and_then(|v| v.as_str()),
+        false,
+    );
     request.is_file_monitor_enabled = value
         .get("file_monitor_enabled")
         .and_then(|v| v.as_bool())

@@ -1,9 +1,10 @@
-mod config;
+pub(crate) mod config;
 mod inode;
 mod metadata;
 mod perf;
 mod policy;
 
+// 公开这些配置类型供 daemon/测试流复用；部分构建目标只使用其中的函数。
 pub use config::{
     FuseRedirectConfig, MountRequestFields, fuse_config_from_request, mount_blocking_with_ready,
     scoped_fuse_mount_roots_for_request,
@@ -49,6 +50,7 @@ pub(super) const MEDIA_RW_GID: u32 = 1023;
 pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
 const SHARED_PUBLIC_DIR_MODE: u32 = 0o2770;
 pub(super) const MAX_SCOPED_FUSE_ROOTS: usize = 4;
+const INITIAL_DIR_CANDIDATE_CACHE_BYTES: usize = 256 * 1024;
 
 thread_local! {
     // FUSE 读回调通常在固定工作线程上重复执行，复用 256 KiB 内的缓冲区减少分配。
@@ -75,6 +77,8 @@ struct FuseState {
     files: HashMap<u64, OpenFile>,
     dirs: HashMap<u64, Arc<[DirEntry]>>,
     dir_candidate_cache: HashMap<String, CachedDirCandidates>,
+    dir_candidate_cache_bytes: usize,
+    dir_candidate_cache_byte_budget: usize,
     dir_candidate_cache_capacity: usize,
     dir_candidate_cache_max_capacity: usize,
 }
@@ -85,9 +89,14 @@ impl FuseState {
         self.next_fh = self.next_fh.saturating_add(1).max(1);
         fh
     }
+
+    fn clear_dir_candidate_cache(&mut self) {
+        self.dir_candidate_cache.clear();
+        self.dir_candidate_cache_bytes = 0;
+    }
 }
 
-fn dir_candidate_cache_capacity_limits() -> (usize, usize) {
+fn dir_candidate_cache_capacity_limits() -> (usize, usize, usize) {
     let total_kib = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|content| {
@@ -97,16 +106,17 @@ fn dir_candidate_cache_capacity_limits() -> (usize, usize) {
             })
         })
         .unwrap_or(4 * 1024 * 1024);
-    let max_capacity = if total_kib < 4 * 1024 * 1024 {
-        64
+    let (max_capacity, byte_budget) = if total_kib < 4 * 1024 * 1024 {
+        (64, 256 * 1024)
     } else if total_kib < 8 * 1024 * 1024 {
-        128
+        (128, 512 * 1024)
     } else {
-        256
+        (256, 1024 * 1024)
     };
     (
         INITIAL_DIR_CANDIDATE_CACHE_ENTRIES.min(max_capacity),
         max_capacity,
+        byte_budget,
     )
 }
 
@@ -176,15 +186,39 @@ enum DirectorySourceState {
 
 struct CachedDirCandidates {
     created_at: Instant,
+    estimated_bytes: usize,
     candidates: Vec<DirEntryCandidate>,
     sources: Vec<DirectorySourceSignature>,
+}
+
+fn estimate_cached_dir_candidates_bytes(
+    rel: &str,
+    candidates: &[DirEntryCandidate],
+    sources: &[DirectorySourceSignature],
+) -> usize {
+    let candidate_bytes = candidates.iter().fold(0usize, |total, candidate| {
+        total
+            .saturating_add(candidate.rel.len())
+            .saturating_add(candidate.name.len())
+            .saturating_add(std::mem::size_of::<DirEntryCandidate>())
+    });
+    let source_bytes = sources.iter().fold(0usize, |total, source| {
+        total
+            .saturating_add(source.path.to_string_lossy().len())
+            .saturating_add(std::mem::size_of::<DirectorySourceSignature>())
+    });
+    rel.len()
+        .saturating_add(candidate_bytes)
+        .saturating_add(source_bytes)
+        .saturating_add(INITIAL_DIR_CANDIDATE_CACHE_BYTES / 64)
 }
 
 impl FuseRedirectFs {
     fn new(config: FuseRedirectConfig) -> Option<Self> {
         let package_name = config.package_name.clone();
         let policy = RedirectPolicy::new(config)?;
-        let (dir_cache_capacity, dir_cache_max_capacity) = dir_candidate_cache_capacity_limits();
+        let (dir_cache_capacity, dir_cache_max_capacity, dir_cache_byte_budget) =
+            dir_candidate_cache_capacity_limits();
         let mut inodes = HashMap::new();
         let mut paths_by_inode = HashMap::new();
         inodes.insert(String::new(), ROOT_INO);
@@ -192,6 +226,8 @@ impl FuseRedirectFs {
 
         let perf = FusePerfStats::new(package_name);
         perf.record_dir_cache_capacity(dir_cache_capacity, dir_cache_max_capacity);
+        perf.record_dir_cache_budget(0, dir_cache_byte_budget);
+        perf.log_dir_cache_config();
 
         Some(Self {
             policy,
@@ -208,6 +244,8 @@ impl FuseRedirectFs {
                 files: HashMap::new(),
                 dirs: HashMap::new(),
                 dir_candidate_cache: HashMap::new(),
+                dir_candidate_cache_bytes: 0,
+                dir_candidate_cache_byte_budget: dir_cache_byte_budget,
                 dir_candidate_cache_capacity: dir_cache_capacity,
                 dir_candidate_cache_max_capacity: dir_cache_max_capacity,
             }),
@@ -366,7 +404,7 @@ impl FuseRedirectFs {
 
     fn invalidate_dir_candidate_cache(&self) {
         let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
-        state.dir_candidate_cache.clear();
+        state.clear_dir_candidate_cache();
     }
 
     fn open_backend_file(path: &Path, flags: i32, mode: u32) -> Result<File, Errno> {
@@ -410,7 +448,7 @@ impl FuseRedirectFs {
             Ok(()) => {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remove_inode_path(&mut state, &rel);
-                state.dir_candidate_cache.clear();
+                state.clear_dir_candidate_cache();
                 reply.ok();
             }
             Err(error) => reply.error(errno_from_io(error)),
@@ -573,9 +611,18 @@ impl Filesystem for FuseRedirectFs {
                 continue;
             }
             if !from_cache {
-                if state.dir_candidate_cache.len() >= state.dir_candidate_cache_capacity {
-                    self.perf.record_dir_cache_eviction();
-                    if state.dir_candidate_cache_capacity < state.dir_candidate_cache_max_capacity {
+                let estimated_bytes =
+                    estimate_cached_dir_candidates_bytes(&rel, &candidates, &sources);
+                if let Some(previous) = state.dir_candidate_cache.remove(&rel) {
+                    state.dir_candidate_cache_bytes = state
+                        .dir_candidate_cache_bytes
+                        .saturating_sub(previous.estimated_bytes);
+                }
+                if estimated_bytes <= state.dir_candidate_cache_byte_budget {
+                    if state.dir_candidate_cache.len() >= state.dir_candidate_cache_capacity
+                        && state.dir_candidate_cache_capacity
+                            < state.dir_candidate_cache_max_capacity
+                    {
                         state.dir_candidate_cache_capacity = state
                             .dir_candidate_cache_capacity
                             .saturating_mul(2)
@@ -585,15 +632,42 @@ impl Filesystem for FuseRedirectFs {
                             state.dir_candidate_cache_max_capacity,
                         );
                     }
-                    state.dir_candidate_cache.clear();
+                    while !state.dir_candidate_cache.is_empty()
+                        && (state.dir_candidate_cache.len() >= state.dir_candidate_cache_capacity
+                            || state
+                                .dir_candidate_cache_bytes
+                                .saturating_add(estimated_bytes)
+                                > state.dir_candidate_cache_byte_budget)
+                    {
+                        let Some(evicted_key) = state.dir_candidate_cache.keys().next().cloned()
+                        else {
+                            break;
+                        };
+                        if let Some(evicted) = state.dir_candidate_cache.remove(&evicted_key) {
+                            state.dir_candidate_cache_bytes = state
+                                .dir_candidate_cache_bytes
+                                .saturating_sub(evicted.estimated_bytes);
+                            self.perf.record_dir_cache_eviction();
+                        }
+                    }
+                    state.dir_candidate_cache_bytes = state
+                        .dir_candidate_cache_bytes
+                        .saturating_add(estimated_bytes);
+                    state.dir_candidate_cache.insert(
+                        rel.clone(),
+                        CachedDirCandidates {
+                            created_at: Instant::now(),
+                            estimated_bytes,
+                            candidates: candidates.clone(),
+                            sources,
+                        },
+                    );
+                } else {
+                    self.perf.record_dir_cache_oversize();
                 }
-                state.dir_candidate_cache.insert(
-                    rel.clone(),
-                    CachedDirCandidates {
-                        created_at: Instant::now(),
-                        candidates: candidates.clone(),
-                        sources,
-                    },
+                self.perf.record_dir_cache_budget(
+                    state.dir_candidate_cache_bytes,
+                    state.dir_candidate_cache_byte_budget,
                 );
                 self.perf
                     .record_dir_cache_peak_entries(state.dir_candidate_cache.len());
@@ -1068,7 +1142,7 @@ impl Filesystem for FuseRedirectFs {
                     is_read_only: false,
                 },
             );
-            state.dir_candidate_cache.clear();
+            state.clear_dir_candidate_cache();
             fh
         };
         self.policy.emit_monitor_create(&backend);
@@ -1337,7 +1411,7 @@ impl Filesystem for FuseRedirectFs {
                 );
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remap_inode_path(&mut state, &old_rel, &new_rel);
-                state.dir_candidate_cache.clear();
+                state.clear_dir_candidate_cache();
                 reply.ok();
             }
             Err(errno) => reply.error(errno),

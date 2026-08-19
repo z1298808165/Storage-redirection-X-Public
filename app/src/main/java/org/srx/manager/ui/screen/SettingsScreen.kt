@@ -208,19 +208,6 @@ internal fun SettingsScreen(
       }
     }
     item {
-      SectionTitle("实验区")
-      GlassCard(alpha = 0.58f) {
-        CompactSwitchRow(
-            title = "Fuse daemon",
-            summary =
-                "仅在普通应用的通配规则前缀启用 scoped FUSE，精确处理 !、*、?；普通路径继续使用 mount namespace。可提升复杂规则准确性，但通配前缀内的高频读写会多一层用户态转发。",
-            checked = global.fuseDaemonRedirectEnabled,
-            onCheckedChange = { onGlobal(global.copy(fuseDaemonRedirectEnabled = it)) },
-            showDivider = false,
-        )
-      }
-    }
-    item {
       SectionTitle("外观")
       GlassCard(alpha = 0.58f) {
         SettingSelectRow(

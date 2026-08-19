@@ -25,6 +25,14 @@ use sys::{c_str, decode_wait_status, errno_text, last_errno};
 pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool {
     let started_ms = monotonic_ms();
     if !is_redirect_enabled_for_request(request) {
+        crate::mount_intent::mark_state(
+            &request.package_name,
+            request.pid,
+            request.uid,
+            request.storage_backend_mode,
+            request.config_version,
+            "disabled",
+        );
         log::warn!(
             "companion mount denied redirect disabled pkg={} uid={} pid={}",
             request.package_name,
@@ -50,11 +58,27 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
         log::warn!("wait proc not ready pid={}", request.pid);
     }
     let mount_started_ms = monotonic_ms();
+    crate::mount_intent::mark_state(
+        &request.package_name,
+        request.pid,
+        request.uid,
+        request.storage_backend_mode,
+        request.config_version,
+        "applying",
+    );
     let is_success = run_mount_in_forked_child(request);
     let mount_ms = monotonic_ms().saturating_sub(mount_started_ms);
     let marker_started_ms = monotonic_ms();
     let marker_ok =
         write_mount_status_marker(&request.app_data_dir, request.pid, request.uid, is_success);
+    crate::mount_intent::mark_state(
+        &request.package_name,
+        request.pid,
+        request.uid,
+        request.storage_backend_mode,
+        request.config_version,
+        if is_success { "mounted" } else { "failed" },
+    );
     let marker_ms = monotonic_ms().saturating_sub(marker_started_ms);
     log_companion_mount_perf(
         request, is_success, marker_ok, wait_ms, mount_ms, marker_ms, started_ms,
@@ -91,7 +115,7 @@ fn log_companion_mount_perf(
         return;
     }
     log::info!(
-        "perf companion mount pkg={} pid={} uid={} ok={} marker={} allow={} ro={} map={} map_only={} fuse_daemon={} wait_ms={} mount_ms={} marker_ms={} total_ms={}",
+        "perf companion mount pkg={} pid={} uid={} ok={} marker={} allow={} ro={} map={} map_only={} wait_ms={} mount_ms={} marker_ms={} total_ms={}",
         request.package_name,
         request.pid,
         request.uid,
@@ -101,7 +125,6 @@ fn log_companion_mount_perf(
         request.read_only_paths.len(),
         request.path_mappings.len(),
         request.is_mapping_mode_only,
-        request.is_fuse_daemon_redirect_enabled,
         wait_ms,
         mount_ms,
         marker_ms,
@@ -523,10 +546,9 @@ fn handle_child_process(
         let fuse_roots = scoped_fuse_roots;
         if !fuse_roots.is_empty() {
             log::info!(
-                "hybrid fuse roots pkg={} pid={} enabled={} count={}",
+                "hybrid fuse roots pkg={} pid={} count={}",
                 request.package_name,
                 request.pid,
-                request.is_fuse_daemon_redirect_enabled,
                 fuse_roots.len()
             );
             for root in fuse_roots {
@@ -535,8 +557,18 @@ fn handle_child_process(
         }
         let fuse_children = if !fuse_roots.is_empty() {
             match start_scoped_fuse_services(request, fuse_roots, mount_mgr.real_storage_anchor()) {
-                Some(children) => children,
+                Some(children) => {
+                    crate::fuse_redirect::config::record_fuse_capability_result(
+                        true,
+                        "companion_scoped_mount_ready",
+                    );
+                    children
+                }
                 None => {
+                    crate::fuse_redirect::config::record_fuse_capability_result(
+                        false,
+                        "companion_scoped_mount_failed",
+                    );
                     log::warn!(
                         "hybrid fuse scoped service failed pid={} pkg={}",
                         request.pid,
@@ -548,6 +580,30 @@ fn handle_child_process(
         } else {
             Vec::new()
         };
+        let effective_backend = if !fuse_roots.is_empty() && !fuse_children.is_empty() {
+            "fuse"
+        } else {
+            "namespace"
+        };
+        let capability = crate::fuse_redirect::config::fuse_capability();
+        let selection_reason = if effective_backend == "fuse" {
+            "scoped_mount_ready"
+        } else if fuse_roots.is_empty() {
+            "capability_unavailable_or_unknown"
+        } else {
+            "scoped_mount_failed_namespace_fallback"
+        };
+        log::info!(
+            "backend_effective pkg={} pid={} requested={} effective={} capability={} selection_reason={} fuse_roots={} fuse_sessions={}",
+            request.package_name,
+            request.pid,
+            request.storage_backend_mode.as_str(),
+            effective_backend,
+            crate::fuse_redirect::config::fuse_capability_as_str(capability),
+            selection_reason,
+            fuse_roots.len(),
+            fuse_children.len()
+        );
         let hybrid_degraded = !fuse_roots.is_empty() && fuse_children.is_empty();
         if hybrid_degraded {
             log::warn!(
@@ -616,10 +672,18 @@ fn apply_mount_namespace_fallback(
             request.package_name
         );
     }
+    let allowed_real_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid,
+        &request.allowed_real_paths,
+    );
+    let read_only_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid,
+        &request.read_only_paths,
+    );
     let can_record_fallback = request.is_file_monitor_enabled
         && mount_mgr.can_record_read_only_mapping_denials(
             &request.path_mappings,
-            &request.read_only_paths,
+            &read_only_paths,
             &request.excluded_real_paths,
         );
     mount_mgr.set_file_monitor_enabled(can_record_fallback);
@@ -633,14 +697,14 @@ fn apply_mount_namespace_fallback(
         mount_mgr.apply_path_mappings_only(
             &request.path_mappings,
             &request.sandboxed_paths,
-            &request.read_only_paths,
+            &read_only_paths,
             &[],
         )
     } else {
         mount_mgr.apply_sdcard_redirect(
-            &request.allowed_real_paths,
+            &allowed_real_paths,
             &request.excluded_real_paths,
-            &request.read_only_paths,
+            &read_only_paths,
             &request.path_mappings,
             &[],
         )
@@ -875,7 +939,7 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
     let parent_timeout_sec =
         mount_timing::companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count);
     log::info!(
-        "mount prep pid={} uid={} pkg={} allow={} ro={} map={} map_only={} fuse_daemon={} parent_recv_budget_sec={}",
+        "mount prep pid={} uid={} pkg={} allow={} ro={} map={} map_only={} parent_recv_budget_sec={}",
         request.pid,
         request.uid,
         request.package_name,
@@ -883,7 +947,6 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest) -> bool {
         request.read_only_paths.len(),
         request.path_mappings.len(),
         request.is_mapping_mode_only,
-        request.is_fuse_daemon_redirect_enabled,
         mount_timing::companion_parent_recv_budget_sec(scoped_fuse_root_count)
     );
 

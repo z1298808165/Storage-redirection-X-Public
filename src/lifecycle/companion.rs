@@ -95,7 +95,7 @@ fn write_status(client_fd: c_int, status: i32) {
 
 fn log_mount_request(request: &CompanionMountRequest) {
     log::info!(
-        "req op=apply pid={} pkg={} allow={} excl={} sandbox={} ro={} map={} map_only={} fuse_daemon={} file_monitor={} version={:x}",
+        "req op=apply pid={} pkg={} allow={} excl={} sandbox={} ro={} map={} map_only={} file_monitor={} version={:x}",
         request.pid,
         request.package_name,
         request.allowed_real_paths.len(),
@@ -104,7 +104,6 @@ fn log_mount_request(request: &CompanionMountRequest) {
         request.read_only_paths.len(),
         request.path_mappings.len(),
         request.is_mapping_mode_only,
-        request.is_fuse_daemon_redirect_enabled,
         request.is_file_monitor_enabled,
         request.config_version
     );

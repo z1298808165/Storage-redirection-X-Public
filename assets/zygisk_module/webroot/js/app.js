@@ -2086,7 +2086,7 @@
     return {
       file_monitor_enabled: source.file_monitor_enabled === true,
       fuse_fix_enabled: source.fuse_fix_enabled !== false,
-      fuse_daemon_redirect_enabled: source.fuse_daemon_redirect_enabled === true,
+      storage_backend_mode: "auto",
       verbose_logging_enabled: source.verbose_logging_enabled === true,
       auto_enable_redirect_for_new_apps: source.auto_enable_redirect_for_new_apps === true,
       auto_enable_new_apps_template_id: isSafeTemplateId(source.auto_enable_new_apps_template_id)
@@ -3996,15 +3996,6 @@
           "主题模式、颜色、缩放和视觉效果",
         ) +
         "</div></div>" +
-        '<div class="section experiment-settings-section settings-section"><h2 class="section-title">实验区</h2>' +
-        '<div class="theme-settings-card"><div class="theme-settings-rows">' +
-        switchRow(
-          "Fuse daemon",
-          "fuseDaemonRedirect",
-          State.globalConfig.fuse_daemon_redirect_enabled === true,
-          "仅在普通应用的通配规则前缀启用 scoped FUSE，精确处理 !、*、?；普通路径继续使用 mount namespace。可提升复杂规则准确性，但通配前缀内的高频读写会多一层用户态转发。",
-        ) +
-        "</div></div></div>" +
         templateSection +
         '<div class="section backup-restore-section settings-section"><h2 class="section-title">备份还原</h2>' +
         '<div class="backup-restore-card">' +
@@ -4089,10 +4080,7 @@
             true,
           fuse_fix_enabled:
             content.querySelector('.toggle[data-key="fuseFix"]')?.classList.contains("on") ?? true,
-          fuse_daemon_redirect_enabled:
-            content
-              .querySelector('.toggle[data-key="fuseDaemonRedirect"]')
-              ?.classList.contains("on") === true,
+          storage_backend_mode: "auto",
           verbose_logging_enabled:
             content
               .querySelector('.toggle[data-key="verboseLogging"]')
@@ -4394,7 +4382,7 @@
     return {
       file_monitor_enabled: source.file_monitor_enabled === true,
       fuse_fix_enabled: source.fuse_fix_enabled !== false,
-      fuse_daemon_redirect_enabled: source.fuse_daemon_redirect_enabled === true,
+      storage_backend_mode: "auto",
       verbose_logging_enabled: source.verbose_logging_enabled === true,
       auto_enable_redirect_for_new_apps: source.auto_enable_redirect_for_new_apps === true,
       auto_enable_new_apps_template_id: isSafeTemplateId(source.auto_enable_new_apps_template_id)

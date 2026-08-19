@@ -322,7 +322,7 @@ internal fun AppConfigScreen(
             )
             CompactSwitchRow(
                 title = "只读模式",
-                summary = "禁止写入指定真实目录；默认方案会退化通配规则，FUSE daemon 可精确匹配",
+                summary = "禁止写入指定真实目录；namespace 会退化通配规则，FUSE 数据面可精确匹配",
                 checked = readOnlyEditorEnabled || profile.readOnlyPaths.isNotEmpty(),
                 onCheckedChange = { checked ->
                   readOnlyEditorEnabled = checked

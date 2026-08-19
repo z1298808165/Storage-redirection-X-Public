@@ -435,7 +435,7 @@ impl RuntimeFlow {
             self.should_monitor
         );
 
-        let is_fuse_daemon_redirect_enabled = config.is_fuse_daemon_redirect_enabled();
+        let storage_backend_mode = config.storage_backend_mode();
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
         let app_redirect_hook_reason = app_redirect_hook_reason_for_process();
         self.should_install_app_redirect_hook = app_redirect_hook_reason.is_some();
@@ -460,9 +460,8 @@ impl RuntimeFlow {
         }
 
         log::info!(
-            "mount request cfg pkg={} fuse_daemon={} file_monitor={} allow={} excl={} sandbox={} ro={} map={} map_only={}",
+            "mount request cfg pkg={} backend_requested=auto file_monitor={} allow={} excl={} sandbox={} ro={} map={} map_only={}",
             self.package_name,
-            is_fuse_daemon_redirect_enabled,
             is_file_monitor_enabled,
             allowed_real_paths.len(),
             excluded_real_paths.len(),
@@ -478,7 +477,7 @@ impl RuntimeFlow {
             uid: self.app_uid,
             package_name: &self.package_name,
             app_data_dir: &self.app_data_dir,
-            is_fuse_daemon_redirect_enabled,
+            storage_backend_mode,
             is_file_monitor_enabled,
             redirect_target: &redirect_base,
             allowed_real_paths: &allowed_real_paths,
@@ -501,6 +500,14 @@ impl RuntimeFlow {
             );
             return;
         }
+
+        crate::mount_intent::mark_planned(
+            &self.package_name,
+            self.app_pid,
+            self.app_uid,
+            storage_backend_mode,
+            config.config_version(),
+        );
 
         // 预挂载路径与兜底路径的发送动作完全一致，只有额外日志和退出原因不同
         let is_pre_mount_request = !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge;

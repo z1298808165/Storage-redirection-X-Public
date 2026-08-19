@@ -255,12 +255,21 @@ const NativeBridge = {
 const DEFAULT_GLOBAL_CONFIG = {
   file_monitor_enabled: false,
   fuse_fix_enabled: true,
-  fuse_daemon_redirect_enabled: false,
+  storage_backend_mode: "auto",
   verbose_logging_enabled: false,
   auto_enable_redirect_for_new_apps: false,
   auto_enable_new_apps_template_id: "",
   app_config_auto_save: false,
 };
+
+function normalizeGlobalConfigForRuntime(raw) {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const normalized = Object.assign({}, DEFAULT_GLOBAL_CONFIG, source, {
+    storage_backend_mode: "auto",
+  });
+  delete normalized.fuse_daemon_redirect_enabled;
+  return normalized;
+}
 const DEFAULT_FILE_MONITOR_FILTERS = {
   excluded_paths: ["Android/data"],
   excluded_operations: [
@@ -1254,7 +1263,8 @@ const Api = {
       'mkdir -p "$stage/fuse/mount_state"; ' +
       '{ echo "mount_state_source=$module/tmp/mount_state"; find "$module/tmp/mount_state" -maxdepth 1 -type f -name "*.state" 2>/dev/null | sort; } > "$stage/fuse/mount-state-index.txt" 2>&1; ' +
       'if [ -d "$module/tmp/mount_state" ]; then find "$module/tmp/mount_state" -maxdepth 1 -type f -name "*.state" -exec cp -p {} "$stage/fuse/mount_state/" \; 2>/dev/null || true; fi; ' +
-      '{ echo "sample_sources=$logs/running.log*"; grep -h -E "fuse_dir_cache_sample|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | tail -n 240 || true; } > "$stage/fuse/cache-performance.txt" 2>&1; ' +
+      'mkdir -p "$stage/fuse/mount_intent"; if [ -d "$module/tmp/mount_intent" ]; then find "$module/tmp/mount_intent" -maxdepth 1 -type f -name "*.intent" -exec cp -p {} "$stage/fuse/mount_intent/" \; 2>/dev/null || true; fi; ' +
+      '{ echo "sample_sources=$logs/running.log*"; grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | tail -n 240 || true; } > "$stage/fuse/cache-performance.txt" 2>&1; ' +
       diagnosticProgressCommand(progress, 45, "state", "正在采集基础状态") +
       '{ date; id; uname -a; getprop ro.build.fingerprint 2>/dev/null; getprop ro.product.model 2>/dev/null; getprop ro.build.version.release 2>/dev/null; } > "$stage/state/device.txt" 2>&1; ' +
       '{ /system/bin/sh "$module/bin/srxctl" status 2>/dev/null || true; ls -la "$module" 2>/dev/null; ls -la "$logs" 2>/dev/null; } > "$stage/state/module.txt" 2>&1; ' +
@@ -1271,12 +1281,21 @@ const Api = {
       'runtime_status=$(/system/bin/sh "$module/bin/srxctl" status 2>/dev/null | head -n 1 | tr -cd "A-Za-z0-9._:+-"); ' +
       'created_at=$(date "+%Y-%m-%dT%H:%M:%S%z" 2>/dev/null | tr -cd "A-Za-z0-9._:+-"); ' +
       'mount_state_count=$(find "$module/tmp/mount_state" -maxdepth 1 -type f -name "*.state" 2>/dev/null | wc -l | tr -d " "); ' +
-      'fuse_cache_sample_count=$(grep -h -E "fuse_dir_cache_sample|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | wc -l | tr -d " "); ' +
-      'fuse_cache_eviction_lines=$(grep -h -E "fuse_dir_cache_sample|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | grep -c "evictions=" | tr -d " "); ' +
+      'fuse_cache_sample_count=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | wc -l | tr -d " "); ' +
+      'fuse_cache_eviction_lines=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | grep -c "evictions=" | tr -d " "); ' +
+      'backend_effective_last=$(grep -h "backend_effective" "$logs"/running.log* 2>/dev/null | tail -n 1 | sed -n "s/.*effective=\\([^ ]*\\).*/\\1/p" | tr -cd "A-Za-z"); ' +
+      'fuse_cache_capacity=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | awk "{for (i=1; i<=NF; i++) if (\$i ~ /^capacity=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}"); ' +
+      'fuse_cache_max_capacity=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | awk "{for (i=1; i<=NF; i++) if (\$i ~ /^max_capacity=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}"); ' +
+      'fuse_cache_peak_entries=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | awk "{for (i=1; i<=NF; i++) if (\$i ~ /^peak_entries=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}"); ' +
+      'fuse_cache_bytes=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | awk "{for (i=1; i<=NF; i++) if (\$i ~ /^bytes=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}"); ' +
+      'fuse_cache_byte_budget=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | awk "{for (i=1; i<=NF; i++) if (\$i ~ /^byte_budget=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}"); ' +
+      'fuse_cache_oversize_lines=$(grep -h -E "fuse_dir_cache_(config|sample)|perf_snapshot component=fuse" "$logs"/running.log* 2>/dev/null | grep -c "oversize=" | tr -d " "); ' +
+      'fuse_capability_state=$(sed -n "s/^state=//p" "$module/.fuse_capability" 2>/dev/null | head -n 1 | tr -cd "A-Za-z"); fuse_capability_reason=$(sed -n "s/^reason=//p" "$module/.fuse_capability" 2>/dev/null | head -n 1 | tr -cd "A-Za-z0-9._-"); ' +
+      'mount_intent_count=$(find "$module/tmp/mount_intent" -maxdepth 1 -type f -name "*.intent" 2>/dev/null | wc -l | tr -d " "); ' +
       'monitor_capacity_limited=$(grep -h "capacity_limited=" "$logs"/running.log* 2>/dev/null | tail -n 1 | sed -n "s/.*capacity_limited=\\([^ ]*\\).*/\\1/p" | tr -cd "A-Za-z"); ' +
-      '[ -n "$module_version_code" ] || module_version_code=0; [ -n "$mount_state_count" ] || mount_state_count=0; [ -n "$fuse_cache_sample_count" ] || fuse_cache_sample_count=0; [ -n "$fuse_cache_eviction_lines" ] || fuse_cache_eviction_lines=0; [ -n "$monitor_capacity_limited" ] || monitor_capacity_limited=unknown; ' +
+      '[ -n "$module_version_code" ] || module_version_code=0; [ -n "$mount_state_count" ] || mount_state_count=0; [ -n "$fuse_cache_sample_count" ] || fuse_cache_sample_count=0; [ -n "$fuse_cache_eviction_lines" ] || fuse_cache_eviction_lines=0; [ -n "$backend_effective_last" ] || backend_effective_last=unknown; [ -n "$fuse_cache_capacity" ] || fuse_cache_capacity=unknown; [ -n "$fuse_cache_max_capacity" ] || fuse_cache_max_capacity=unknown; [ -n "$fuse_cache_peak_entries" ] || fuse_cache_peak_entries=unknown; [ -n "$fuse_cache_bytes" ] || fuse_cache_bytes=unknown; [ -n "$fuse_cache_byte_budget" ] || fuse_cache_byte_budget=unknown; [ -n "$fuse_cache_oversize_lines" ] || fuse_cache_oversize_lines=0; [ -n "$fuse_capability_state" ] || fuse_capability_state=unknown; [ -n "$fuse_capability_reason" ] || fuse_capability_reason=unknown; [ -n "$mount_intent_count" ] || mount_intent_count=0; [ -n "$monitor_capacity_limited" ] || monitor_capacity_limited=unknown; ' +
       'media_hook_state_present=0; [ -s "$logs/.media_hook_install_state" ] && media_hook_state_present=1; ' +
-      '{ printf "{\\n"; printf "  \\"schema\\": 1,\\n"; printf "  \\"archive_version\\": 6,\\n"; printf "  \\"created_at\\": \\"%s\\",\\n" "$created_at"; printf "  \\"module_version\\": \\"%s\\",\\n" "$module_version"; printf "  \\"module_version_code\\": %s,\\n" "$module_version_code"; printf "  \\"boot_id\\": \\"%s\\",\\n" "$boot_id"; printf "  \\"runtime_status\\": \\"%s\\",\\n" "$runtime_status"; printf "  \\"mount_state_count\\": %s,\\n" "$mount_state_count"; printf "  \\"fuse_cache_sample_count\\": %s,\\n" "$fuse_cache_sample_count"; printf "  \\"fuse_cache_eviction_lines\\": %s,\\n" "$fuse_cache_eviction_lines"; printf "  \\"monitor_capacity_limited\\": \\"%s\\",\\n" "$monitor_capacity_limited"; printf "  \\"media_hook_state_present\\": %s\\n" "$media_hook_state_present"; printf "}\\n"; } > "$stage/diagnostic-summary.json"; ' +
+      '{ printf "{\\n"; printf "  \\"schema\\": 1,\\n"; printf "  \\"archive_version\\": 8,\\n"; printf "  \\"created_at\\": \\"%s\\",\\n" "$created_at"; printf "  \\"module_version\\": \\"%s\\",\\n" "$module_version"; printf "  \\"module_version_code\\": %s,\\n" "$module_version_code"; printf "  \\"boot_id\\": \\"%s\\",\\n" "$boot_id"; printf "  \\"runtime_status\\": \\"%s\\",\\n" "$runtime_status"; printf "  \\"mount_state_count\\": %s,\\n" "$mount_state_count"; printf "  \\"fuse_cache_sample_count\\": %s,\\n" "$fuse_cache_sample_count"; printf "  \\"fuse_cache_eviction_lines\\": %s,\\n" "$fuse_cache_eviction_lines"; printf "  \\"backend_effective_last\\": \\"%s\\",\\n" "$backend_effective_last"; printf "  \\"fuse_cache_capacity\\": \\"%s\\",\\n" "$fuse_cache_capacity"; printf "  \\"fuse_cache_max_capacity\\": \\"%s\\",\\n" "$fuse_cache_max_capacity"; printf "  \\"fuse_cache_peak_entries\\": \\"%s\\",\\n" "$fuse_cache_peak_entries"; printf "  \\"fuse_cache_bytes\\": \\"%s\\",\\n" "$fuse_cache_bytes"; printf "  \\"fuse_cache_byte_budget\\": \\"%s\\",\\n" "$fuse_cache_byte_budget"; printf "  \\"fuse_cache_oversize_lines\\": %s,\\n" "$fuse_cache_oversize_lines"; printf "  \\"fuse_capability_state\\": \\"%s\\",\\n" "$fuse_capability_state"; printf "  \\"fuse_capability_reason\\": \\"%s\\",\\n" "$fuse_capability_reason"; printf "  \\"mount_intent_count\\": %s,\\n" "$mount_intent_count"; printf "  \\"monitor_capacity_limited\\": \\"%s\\",\\n" "$monitor_capacity_limited"; printf "  \\"media_hook_state_present\\": %s\\n" "$media_hook_state_present"; printf "}\\n"; } > "$stage/diagnostic-summary.json"; ' +
       diagnosticProgressCommand(progress, 96, "summary", "正在生成诊断摘要") +
       diagnosticProgressCommand(progress, 97, "archive", "正在压缩日志包") +
       '(cd "$stage" && tar -czf "$archive" *) || exit 1; chmod 644 "$archive"; rm -rf "$stage"'
@@ -1530,14 +1549,14 @@ const Api = {
     if (this._globalConfigCache) return Object.assign({}, this._globalConfigCache);
     const content = await this.readFile(GLOBAL_CONFIG);
     if (!content) {
-      this._globalConfigCache = Object.assign({}, DEFAULT_GLOBAL_CONFIG);
+      this._globalConfigCache = normalizeGlobalConfigForRuntime({});
       return Object.assign({}, this._globalConfigCache);
     }
     try {
-      this._globalConfigCache = Object.assign({}, DEFAULT_GLOBAL_CONFIG, JSON.parse(content));
+      this._globalConfigCache = normalizeGlobalConfigForRuntime(JSON.parse(content));
       return Object.assign({}, this._globalConfigCache);
     } catch {
-      this._globalConfigCache = Object.assign({}, DEFAULT_GLOBAL_CONFIG);
+      this._globalConfigCache = normalizeGlobalConfigForRuntime({});
       return Object.assign({}, this._globalConfigCache);
     }
   },
@@ -1557,11 +1576,12 @@ const Api = {
 
   /** 写入全局配置 */
   async writeGlobalConfig(config) {
-    const json = JSON.stringify(config, null, 2);
+    const normalized = normalizeGlobalConfigForRuntime(config);
+    const json = JSON.stringify(normalized, null, 2);
     const ok = await this.writeFile(GLOBAL_CONFIG, json);
     if (ok) {
-      this._globalConfigCache = Object.assign({}, config);
-      if (this._mockStore) this._mockStore.global = Object.assign({}, config);
+      this._globalConfigCache = normalized;
+      if (this._mockStore) this._mockStore.global = Object.assign({}, normalized);
     }
     return ok;
   },

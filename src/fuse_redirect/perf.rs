@@ -41,6 +41,9 @@ pub(super) struct FusePerfStats {
     pub(super) dir_cache_peak_entries: AtomicU64,
     pub(super) dir_cache_capacity: AtomicU64,
     pub(super) dir_cache_max_capacity: AtomicU64,
+    pub(super) dir_cache_bytes: AtomicU64,
+    pub(super) dir_cache_byte_budget: AtomicU64,
+    pub(super) dir_cache_oversize: AtomicU64,
 }
 
 pub(super) struct FusePerfSample<'a> {
@@ -81,6 +84,9 @@ impl FusePerfStats {
             dir_cache_peak_entries: AtomicU64::new(0),
             dir_cache_capacity: AtomicU64::new(0),
             dir_cache_max_capacity: AtomicU64::new(0),
+            dir_cache_bytes: AtomicU64::new(0),
+            dir_cache_byte_budget: AtomicU64::new(0),
+            dir_cache_oversize: AtomicU64::new(0),
         }
     }
 
@@ -91,6 +97,29 @@ impl FusePerfStats {
             max_capacity.min(u64::MAX as usize) as u64,
             Ordering::Relaxed,
         );
+    }
+
+    pub(super) fn record_dir_cache_budget(&self, bytes: usize, budget: usize) {
+        self.dir_cache_bytes
+            .store(bytes.min(u64::MAX as usize) as u64, Ordering::Relaxed);
+        self.dir_cache_byte_budget
+            .store(budget.min(u64::MAX as usize) as u64, Ordering::Relaxed);
+    }
+
+    pub(super) fn log_dir_cache_config(&self) {
+        log::debug!(
+            "fuse_dir_cache_config pkg={} capacity={} max_capacity={} byte_budget={}",
+            self.package_name,
+            self.dir_cache_capacity.load(Ordering::Relaxed),
+            self.dir_cache_max_capacity.load(Ordering::Relaxed),
+            self.dir_cache_byte_budget.load(Ordering::Relaxed),
+        );
+    }
+
+    pub(super) fn record_dir_cache_oversize(&self) {
+        if crate::logging::is_debug_logging_enabled() {
+            self.dir_cache_oversize.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn record_dir_scan(
@@ -186,7 +215,7 @@ impl FusePerfStats {
             let hits = self.dir_cache_hits.load(Ordering::Relaxed);
             let misses = self.dir_cache_misses.load(Ordering::Relaxed);
             log::debug!(
-                "fuse_dir_cache_sample pkg={} decisions={} hits={} misses={} hit_ratio_pct={} ttl_expired={} source_changed={} source_missing={} evictions={} peak_entries={} capacity={} max_capacity={}",
+                "fuse_dir_cache_sample pkg={} decisions={} hits={} misses={} hit_ratio_pct={} ttl_expired={} source_changed={} source_missing={} evictions={} oversize={} peak_entries={} capacity={} max_capacity={} bytes={} byte_budget={}",
                 self.package_name,
                 decisions,
                 hits,
@@ -196,9 +225,12 @@ impl FusePerfStats {
                 self.dir_cache_source_changed.load(Ordering::Relaxed),
                 self.dir_cache_source_missing.load(Ordering::Relaxed),
                 self.dir_cache_evictions.load(Ordering::Relaxed),
+                self.dir_cache_oversize.load(Ordering::Relaxed),
                 self.dir_cache_peak_entries.load(Ordering::Relaxed),
                 self.dir_cache_capacity.load(Ordering::Relaxed),
                 self.dir_cache_max_capacity.load(Ordering::Relaxed),
+                self.dir_cache_bytes.load(Ordering::Relaxed),
+                self.dir_cache_byte_budget.load(Ordering::Relaxed),
             );
         }
     }
@@ -225,7 +257,7 @@ impl FusePerfStats {
         let sampled_ns = self.sampled_ns.load(Ordering::Relaxed);
         let dir_scans = self.dir_scans.load(Ordering::Relaxed);
         log::debug!(
-            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_decisions={} dir_cache_hits={} dir_cache_misses={} dir_cache_hit_ratio_pct={} dir_cache_ttl_expired={} dir_cache_source_changed={} dir_cache_source_missing={} dir_cache_evictions={} dir_cache_peak_entries={} dir_cache_capacity={} dir_cache_max_capacity={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
+            "perf_snapshot component=fuse pkg={} calls={} lookup={} metadata={} open={} read={} read_bytes={} read_buffer_hits={} read_buffer_allocations={} write={} mutation={} samples={} avg_sample_us={} slow_samples={} dir_scans={} dir_cache_decisions={} dir_cache_hits={} dir_cache_misses={} dir_cache_hit_ratio_pct={} dir_cache_ttl_expired={} dir_cache_source_changed={} dir_cache_source_missing={} dir_cache_evictions={} dir_cache_oversize={} dir_cache_peak_entries={} dir_cache_capacity={} dir_cache_max_capacity={} dir_cache_bytes={} dir_cache_byte_budget={} avg_dir_scan_us={} avg_dir_lock_wait_us={} dir_scan_retries={} avg_dir_entries={}",
             self.package_name,
             self.calls.load(Ordering::Relaxed),
             self.lookup_calls.load(Ordering::Relaxed),
@@ -252,9 +284,12 @@ impl FusePerfStats {
             self.dir_cache_source_changed.load(Ordering::Relaxed),
             self.dir_cache_source_missing.load(Ordering::Relaxed),
             self.dir_cache_evictions.load(Ordering::Relaxed),
+            self.dir_cache_oversize.load(Ordering::Relaxed),
             self.dir_cache_peak_entries.load(Ordering::Relaxed),
             self.dir_cache_capacity.load(Ordering::Relaxed),
             self.dir_cache_max_capacity.load(Ordering::Relaxed),
+            self.dir_cache_bytes.load(Ordering::Relaxed),
+            self.dir_cache_byte_budget.load(Ordering::Relaxed),
             self.dir_scan_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_lock_wait_ns.load(Ordering::Relaxed) / dir_scans.max(1) / 1000,
             self.dir_scan_retries.load(Ordering::Relaxed),

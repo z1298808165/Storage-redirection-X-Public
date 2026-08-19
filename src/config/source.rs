@@ -64,10 +64,9 @@ impl SettingsHub {
 
         if loaded_state.should_log_summary {
             log::info!(
-                "config loaded monitor={} fuse_fix={} fuse_daemon={} verbose_log={} apps={}",
+                "config loaded monitor={} fuse_fix={} backend_requested=auto verbose_log={} apps={}",
                 loaded_state.is_file_monitor_enabled,
                 loaded_state.is_fuse_fix_enabled,
-                loaded_state.is_fuse_daemon_redirect_enabled,
                 loaded_state.is_verbose_logging_enabled,
                 loaded_state.apps.len()
             );
@@ -111,7 +110,7 @@ impl SettingsHub {
         }
         loaded_state.is_file_monitor_enabled = state.is_file_monitor_enabled;
         loaded_state.is_fuse_fix_enabled = state.is_fuse_fix_enabled;
-        loaded_state.is_fuse_daemon_redirect_enabled = state.is_fuse_daemon_redirect_enabled;
+        loaded_state.storage_backend_mode = state.storage_backend_mode;
         loaded_state.is_verbose_logging_enabled = state.is_verbose_logging_enabled;
         loaded_state.monitor_filters = state.monitor_filters.clone();
     }
@@ -172,10 +171,9 @@ impl SettingsHub {
         );
 
         log::info!(
-            "config reloaded monitor={} fuse_fix={} fuse_daemon={} verbose_log={} apps={}",
+            "config reloaded monitor={} fuse_fix={} backend_requested=auto verbose_log={} apps={}",
             loaded_state.is_file_monitor_enabled,
             loaded_state.is_fuse_fix_enabled,
-            loaded_state.is_fuse_daemon_redirect_enabled,
             loaded_state.is_verbose_logging_enabled,
             loaded_state.apps.len()
         );
@@ -208,7 +206,7 @@ fn load_global_config(state: &mut SettingsState) -> bool {
         }
         state.is_file_monitor_enabled = false;
         state.is_fuse_fix_enabled = true;
-        state.is_fuse_daemon_redirect_enabled = false;
+        state.storage_backend_mode = super::StorageBackendMode::Auto;
         state.is_verbose_logging_enabled = false;
         return true;
     }

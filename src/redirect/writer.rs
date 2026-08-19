@@ -2,6 +2,7 @@ use crate::config::{ResolvedUserProfile, SettingsHub};
 use crate::domain::{
     PathMapping, filter_valid_path_mapping_chains, sort_path_mappings_longest_request_first,
 };
+use crate::fuse_redirect::config::expand_mount_fallbacks_for_mode;
 use crate::platform::{self, paths};
 use crate::redirect::policy;
 use std::cell::RefCell;
@@ -652,7 +653,7 @@ fn refresh_caller_real_paths_cache(
     }
 
     let config = SettingsHub::instance();
-    let expand_mount_fallbacks = !config.is_fuse_daemon_redirect_enabled();
+    let expand_mount_fallbacks = expand_mount_fallbacks_for_mode(config.storage_backend_mode());
     if let Some(profile) = get_effective_profile(config, caller_package, caller_uid) {
         cache.allowed_real_paths = expand_wildcard_mount_fallback_rules(
             profile.allowed_real_paths,
@@ -679,7 +680,7 @@ fn refresh_caller_real_paths_cache(
     );
     paths::sort_dedup_paths_case_insensitive(&mut cache.sandboxed_paths);
 
-    let raw_expand_mount_fallbacks = !config.is_fuse_daemon_redirect_enabled();
+    let raw_expand_mount_fallbacks = expand_mount_fallbacks;
     append_raw_profile_paths(
         &mut cache.read_only_paths,
         config.get_user_read_only_paths_in_raw_config(caller_package, user_id),

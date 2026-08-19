@@ -90,7 +90,7 @@ impl SettingsHub {
             } else {
                 HashMap::new()
             },
-            is_fuse_daemon_redirect_enabled: state.is_fuse_daemon_redirect_enabled,
+            storage_backend_mode: state.storage_backend_mode,
             is_file_monitor_enabled: state.is_file_monitor_enabled,
         }
     }
@@ -136,9 +136,9 @@ impl SettingsHub {
         state.is_fuse_fix_enabled
     }
 
-    pub fn is_fuse_daemon_redirect_enabled(&self) -> bool {
+    pub fn storage_backend_mode(&self) -> super::StorageBackendMode {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        state.is_fuse_daemon_redirect_enabled
+        state.storage_backend_mode
     }
 
     pub fn should_redirect(&self, package_name: &str, app_uid: i32) -> bool {

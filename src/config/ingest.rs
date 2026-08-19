@@ -1,4 +1,4 @@
-use super::{AppProfile, MonitorFilterConfig, SettingsState, UserProfile};
+use super::{AppProfile, MonitorFilterConfig, SettingsState, StorageBackendMode, UserProfile};
 use crate::domain::{PathMapping, filter_valid_path_mapping_chains};
 use crate::platform::paths;
 use serde_json::Value;
@@ -27,10 +27,10 @@ pub fn parse_global_config(state: &mut SettingsState, json_content: &str) -> boo
         .get("fuse_fix_enabled")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    state.is_fuse_daemon_redirect_enabled = parsed
-        .get("fuse_daemon_redirect_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    state.storage_backend_mode = StorageBackendMode::parse(
+        parsed.get("storage_backend_mode").and_then(Value::as_str),
+        false,
+    );
     state.is_verbose_logging_enabled = parsed
         .get("verbose_logging_enabled")
         .and_then(Value::as_bool)
@@ -38,10 +38,10 @@ pub fn parse_global_config(state: &mut SettingsState, json_content: &str) -> boo
 
     if state.should_log_summary {
         log::debug!(
-            "global monitor={} fuse_fix={} fuse_daemon={} verbose_log={}",
+            "global monitor={} fuse_fix={} backend_requested={} verbose_log={}",
             state.is_file_monitor_enabled,
             state.is_fuse_fix_enabled,
-            state.is_fuse_daemon_redirect_enabled,
+            state.storage_backend_mode.as_str(),
             state.is_verbose_logging_enabled
         );
     }

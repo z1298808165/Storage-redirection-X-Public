@@ -50,7 +50,7 @@ pub struct MountRequest {
     pub sandboxed_paths: Vec<String>,
     pub read_only_paths: Vec<String>,
     pub is_mapping_mode_only: bool,
-    pub is_fuse_daemon_redirect_enabled: bool,
+    pub storage_backend_mode: crate::config::StorageBackendMode,
     pub is_file_monitor_enabled: bool,
     pub config_version: u64,
 }
@@ -74,8 +74,8 @@ impl crate::fuse_redirect::MountRequestFields for MountRequest {
     fn is_file_monitor_enabled(&self) -> bool {
         self.is_file_monitor_enabled
     }
-    fn is_fuse_daemon_redirect_enabled(&self) -> bool {
-        self.is_fuse_daemon_redirect_enabled
+    fn storage_backend_mode(&self) -> crate::config::StorageBackendMode {
+        self.storage_backend_mode
     }
     fn allowed_real_paths(&self) -> &[String] {
         &self.allowed_real_paths
@@ -321,13 +321,57 @@ fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
 
 pub fn execute_mount_request(request: &MountRequest) -> bool {
     let started_ms = monotonic_ms();
+    let initial_state = if request.operation == MountOperation::Disable {
+        "disabled"
+    } else {
+        "applying"
+    };
+    crate::mount_intent::mark_state(
+        &request.package_name,
+        request.pid,
+        request.uid,
+        request.storage_backend_mode,
+        request.config_version,
+        initial_state,
+    );
     if should_skip_for_stuck_children(request) {
+        crate::mount_intent::mark_state(
+            &request.package_name,
+            request.pid,
+            request.uid,
+            request.storage_backend_mode,
+            request.config_version,
+            "failed",
+        );
         return false;
     }
     let Some(_guard) = MountPidGuard::try_acquire(request) else {
+        crate::mount_intent::mark_state(
+            &request.package_name,
+            request.pid,
+            request.uid,
+            request.storage_backend_mode,
+            request.config_version,
+            "duplicate",
+        );
         return recently_mounted(request);
     };
     let is_success = run_mount_in_forked_child(request);
+    let final_state = if request.operation == MountOperation::Disable {
+        "disabled"
+    } else if is_success {
+        "mounted"
+    } else {
+        "failed"
+    };
+    crate::mount_intent::mark_state(
+        &request.package_name,
+        request.pid,
+        request.uid,
+        request.storage_backend_mode,
+        request.config_version,
+        final_state,
+    );
     if is_success {
         remember_successful_mount(request);
         if request.operation == MountOperation::Reload {
@@ -338,7 +382,7 @@ pub fn execute_mount_request(request: &MountRequest) -> bool {
     let total_ms = monotonic_ms().saturating_sub(started_ms);
     if total_ms >= DAEMON_MOUNT_SLOW_MS || !is_success {
         log::info!(
-            "daemon mount pkg={} pid={} op={:?} ok={} allow={} excl={} sandbox={} ro={} map={} map_only={} fuse_daemon={} ms={}",
+            "daemon mount pkg={} pid={} op={:?} ok={} allow={} excl={} sandbox={} ro={} map={} map_only={} ms={}",
             request.package_name,
             request.pid,
             request.operation,
@@ -349,7 +393,6 @@ pub fn execute_mount_request(request: &MountRequest) -> bool {
             request.read_only_paths.len(),
             request.path_mappings.len(),
             request.is_mapping_mode_only,
-            request.is_fuse_daemon_redirect_enabled,
             total_ms
         );
     }
@@ -636,10 +679,9 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         let fuse_roots = scoped_fuse_roots;
         if !fuse_roots.is_empty() {
             log::info!(
-                "daemon hybrid fuse roots pkg={} pid={} enabled={} count={}",
+                "daemon hybrid fuse roots pkg={} pid={} count={}",
                 request.package_name,
                 request.pid,
-                request.is_fuse_daemon_redirect_enabled,
                 fuse_roots.len()
             );
             for root in fuse_roots {
@@ -648,8 +690,18 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         }
         let fuse_children = if !fuse_roots.is_empty() {
             match start_scoped_fuse_services(request, fuse_roots, planner.real_storage_anchor()) {
-                Some(children) => children,
+                Some(children) => {
+                    crate::fuse_redirect::config::record_fuse_capability_result(
+                        true,
+                        "scoped_mount_ready",
+                    );
+                    children
+                }
                 None => {
+                    crate::fuse_redirect::config::record_fuse_capability_result(
+                        false,
+                        "scoped_mount_failed",
+                    );
                     log::warn!(
                         "daemon hybrid fuse scoped service failed pid={} pkg={}",
                         request.pid,
@@ -661,6 +713,30 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         } else {
             Vec::new()
         };
+        let effective_backend = if !fuse_roots.is_empty() && !fuse_children.is_empty() {
+            "fuse"
+        } else {
+            "namespace"
+        };
+        let capability = crate::fuse_redirect::config::fuse_capability();
+        let selection_reason = if effective_backend == "fuse" {
+            "scoped_mount_ready"
+        } else if fuse_roots.is_empty() {
+            "capability_unavailable_or_unknown"
+        } else {
+            "scoped_mount_failed_namespace_fallback"
+        };
+        log::info!(
+            "backend_effective pkg={} pid={} requested={} effective={} capability={} selection_reason={} fuse_roots={} fuse_sessions={}",
+            request.package_name,
+            request.pid,
+            request.storage_backend_mode.as_str(),
+            effective_backend,
+            crate::fuse_redirect::config::fuse_capability_as_str(capability),
+            selection_reason,
+            fuse_roots.len(),
+            fuse_children.len()
+        );
         let hybrid_degraded = !fuse_roots.is_empty() && fuse_children.is_empty();
         if hybrid_degraded {
             log::warn!(
@@ -706,10 +782,18 @@ fn apply_mount_namespace_fallback(planner: &mut MountPlanner, request: &MountReq
             request.package_name
         );
     }
+    let allowed_real_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid,
+        &request.allowed_real_paths,
+    );
+    let read_only_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid,
+        &request.read_only_paths,
+    );
     let can_record_fallback = request.is_file_monitor_enabled
         && planner.can_record_read_only_mapping_denials(
             &request.path_mappings,
-            &request.read_only_paths,
+            &read_only_paths,
             &request.excluded_real_paths,
         );
     planner.set_file_monitor_enabled(can_record_fallback);
@@ -723,14 +807,14 @@ fn apply_mount_namespace_fallback(planner: &mut MountPlanner, request: &MountReq
         planner.apply_path_mappings_only(
             &request.path_mappings,
             &request.sandboxed_paths,
-            &request.read_only_paths,
+            &read_only_paths,
             &[],
         )
     } else {
         planner.apply_sdcard_redirect(
-            &request.allowed_real_paths,
+            &allowed_real_paths,
             &request.excluded_real_paths,
-            &request.read_only_paths,
+            &read_only_paths,
             &request.path_mappings,
             &[],
         )

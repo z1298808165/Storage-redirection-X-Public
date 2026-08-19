@@ -113,8 +113,10 @@ impl PathRouter {
             paths::resolve_user_path(&paths::normalize(redirect_target), state.user_id);
         state.is_mapping_mode_only = is_mapping_mode_only;
 
-        let expand_mount_fallbacks =
-            !crate::config::SettingsHub::instance().is_fuse_daemon_redirect_enabled();
+        let config = crate::config::SettingsHub::instance();
+        let expand_mount_fallbacks = crate::fuse_redirect::config::expand_mount_fallbacks_for_mode(
+            config.storage_backend_mode(),
+        );
         state.allowed_real_paths = resolve_router_path_list(
             allowed_real_paths,
             state.user_id,
