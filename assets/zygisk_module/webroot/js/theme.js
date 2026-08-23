@@ -112,6 +112,8 @@ const Theme = {
     document.body.classList.toggle("liquid-glass-disabled", prefs.liquidGlass === false);
     document.body.classList.toggle("blur-effect-disabled", prefs.blurEffect === false);
     document.body.classList.toggle("liquid-surface-disabled", prefs.blurEffect === false);
+    // 折射依赖背景模糊，两个开关同时开启才启用位移贴图
+    window.LiquidGlass?.setEnabled(prefs.liquidGlass !== false && prefs.blurEffect !== false);
     this.applyPageScale(prefs);
     this.applyAccentOptions(prefs);
     this.resetNavIndicator();
@@ -700,6 +702,7 @@ const Theme = {
       clearTimeout(nav._movingTimer);
       nav.classList.remove("is-moving");
       nav.classList.add("is-pressing");
+      window.LiquidGlass?.freeze("navDrag");
       syncPressTarget(item);
       updateLightFromPointer(e.clientX, e.clientY);
       clearTimeout(state.longPressTimer);
@@ -718,6 +721,7 @@ const Theme = {
         if (movement > 8) {
           clearTimeout(state.longPressTimer);
           nav.classList.remove("is-pressing");
+          window.LiquidGlass?.unfreeze("navDrag");
           syncPressTarget();
         }
         return;
@@ -749,6 +753,7 @@ const Theme = {
       }
       state.pointerId = null;
       nav.classList.remove("is-pressing", "dragging");
+      window.LiquidGlass?.unfreeze("navDrag");
       syncPressTarget();
       resetLiquidMotion();
       kickAnimation();
@@ -811,6 +816,7 @@ const Theme = {
       }
 
       this._syncNavLens(active);
+      window.LiquidGlass?.scheduleRefresh(navIndicator);
     };
     requestAnimationFrame(() => {
       align();
