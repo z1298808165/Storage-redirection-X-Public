@@ -981,3 +981,134 @@ body.scale-modal-open .bottom-nav { visibility: hidden !important; pointer-event
   .filter-chip { padding-inline: 12px; }
   .theme-preview { width: 44%; }
 }
+
+/* 液态玻璃折射层：折射生效时降低表面底色，让边缘弯曲与高光成为主要观感 */
+body.srx-lens-ready .srx-lens {
+  --srx-lens-light-x: 50%;
+  --srx-lens-light-y: 28%;
+  --srx-lens-angle: 90deg;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0 rgba(70, 92, 116, 0.06),
+    0 16px 40px rgba(28, 38, 50, 0.14);
+}
+[data-theme="dark"] body.srx-lens-ready .srx-lens {
+  background: rgba(20, 26, 34, 0.2);
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 18px 44px rgba(0, 0, 0, 0.4);
+}
+
+/* 边缘高光带：沿光源方向生成一圈镜面反射，模拟玻璃厚度 */
+body.srx-lens-ready .srx-lens::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    var(--srx-lens-angle, 90deg),
+    rgba(255, 255, 255, 0.92),
+    rgba(255, 255, 255, 0.12) 34%,
+    rgba(255, 255, 255, 0) 58%,
+    rgba(255, 255, 255, 0.3)
+  );
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  opacity: 0.72;
+  pointer-events: none;
+}
+[data-theme="dark"] body.srx-lens-ready .srx-lens::after { opacity: 0.5; }
+
+/* 表面泛光：光源位置驱动的柔和高亮，替代原先固定角度渐变 */
+body.srx-lens-ready .srx-lens::before {
+  background:
+    radial-gradient(
+      circle at var(--srx-lens-light-x, 50%) var(--srx-lens-light-y, 28%),
+      rgba(255, 255, 255, 0.46),
+      transparent 42%
+    ),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), transparent 46%);
+  opacity: 0.8;
+}
+[data-theme="dark"] body.srx-lens-ready .srx-lens::before {
+  background:
+    radial-gradient(
+      circle at var(--srx-lens-light-x, 50%) var(--srx-lens-light-y, 28%),
+      rgba(150, 190, 255, 0.24),
+      transparent 42%
+    ),
+    linear-gradient(180deg, rgba(150, 190, 255, 0.1), transparent 46%);
+  opacity: 0.66;
+}
+
+/* 折射生效时底栏与指示器交出底色，只保留光学结构 */
+body.srx-lens-ready .bottom-nav { overflow: visible; }
+body.srx-lens-ready .nav-indicator {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.8),
+    inset 0 -2px 6px rgba(31, 83, 126, 0.1),
+    0 8px 20px rgba(28, 72, 112, 0.16);
+}
+[data-theme="dark"] body.srx-lens-ready .nav-indicator {
+  background: rgba(150, 175, 205, 0.14);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+body.srx-lens-ready .app-batch-status,
+body.srx-lens-ready .filter-indicator { background: rgba(255, 255, 255, 0.16); }
+[data-theme="dark"] body.srx-lens-ready .app-batch-status,
+[data-theme="dark"] body.srx-lens-ready .filter-indicator {
+  background: rgba(150, 175, 205, 0.14);
+}
+
+/* 按钮类小尺寸玻璃：折射幅度更小，按压时同步压暗高光 */
+body.srx-lens-ready .icon-btn,
+body.srx-lens-ready .back-btn,
+body.srx-lens-ready .btn-secondary,
+body.srx-lens-ready .backup-action,
+body.srx-lens-ready .user-tab,
+body.srx-lens-ready .app-user-trigger,
+body.srx-lens-ready .setting-option-row {
+  position: relative;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 6px 16px rgba(28, 38, 50, 0.1);
+}
+[data-theme="dark"] body.srx-lens-ready .icon-btn,
+[data-theme="dark"] body.srx-lens-ready .back-btn,
+[data-theme="dark"] body.srx-lens-ready .btn-secondary,
+[data-theme="dark"] body.srx-lens-ready .backup-action,
+[data-theme="dark"] body.srx-lens-ready .user-tab,
+[data-theme="dark"] body.srx-lens-ready .app-user-trigger,
+[data-theme="dark"] body.srx-lens-ready .setting-option-row {
+  background: rgba(30, 38, 48, 0.24);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+body.srx-lens-ready .icon-btn:active,
+body.srx-lens-ready .back-btn:active,
+body.srx-lens-ready .btn-secondary:active,
+body.srx-lens-ready .backup-action:active,
+body.srx-lens-ready .app-user-trigger:active,
+body.srx-lens-ready .setting-option-row:active { filter: brightness(0.97) saturate(1.06); }
+
+/* 选中态优先于玻璃底色：折射只负责边缘光学，主色标识仍由原有强调色承担 */
+body.srx-lens-ready .user-tab.active {
+  background: linear-gradient(135deg, rgba(143, 122, 246, 0.92), rgba(243, 182, 163, 0.86));
+  border-color: transparent;
+  box-shadow: var(--liquid-shadow);
+}
+body.srx-lens-ready .setting-option-row.selected {
+  background: var(--color-primary-bg);
+  border-color: var(--color-primary-border);
+}
