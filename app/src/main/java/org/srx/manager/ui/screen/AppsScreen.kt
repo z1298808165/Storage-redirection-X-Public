@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -62,6 +63,8 @@ import org.srx.manager.srxSuccessColor
 import org.srx.manager.ui.AppUiState
 import org.srx.manager.ui.component.AppIconImage
 import org.srx.manager.ui.component.SrxSearchField
+import org.srx.manager.ui.component.liquidGlassControl
+import org.srx.manager.ui.component.liquidPressScale
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.PullToRefresh
@@ -227,7 +230,14 @@ private fun AppFilterGroup(
 ) {
   Row(
       modifier =
-          modifier.clip(CircleShape).background(capsuleContainerColor(), CircleShape).padding(5.dp),
+          modifier
+              .liquidGlassControl(
+                  shape = CircleShape,
+                  tint = capsuleContainerColor(),
+                  refractionHeight = 8.dp,
+                  refractionAmount = 10.dp,
+              )
+              .padding(5.dp),
       horizontalArrangement = Arrangement.spacedBy(2.dp),
   ) {
     FilterButton("用户", filter == AppFilter.User, Modifier.weight(1f)) { onFilter(AppFilter.User) }
@@ -289,6 +299,7 @@ private fun AppUserSwitcher(
 ) {
   if (users.size <= 1) return
   var expanded by remember(users, selectedUser) { mutableStateOf(false) }
+  val triggerInteraction = remember { MutableInteractionSource() }
   Column(horizontalAlignment = Alignment.End) {
     Text(
         text = "U$selectedUser",
@@ -301,9 +312,16 @@ private fun AppUserSwitcher(
                         alpha = if (isSrxDarkTheme()) 0.22f else 0.14f,
                     ),
                 )
-                .clip(CircleShape)
-                .background(capsuleSelectedColor(), CircleShape)
-                .clickable { expanded = !expanded }
+                .liquidPressScale(triggerInteraction)
+                .liquidGlassControl(
+                    shape = CircleShape,
+                    tint = capsuleSelectedColor(),
+                    refractionHeight = 8.dp,
+                    refractionAmount = 10.dp,
+                )
+                .clickable(interactionSource = triggerInteraction, indication = null) {
+                  expanded = !expanded
+                }
                 .padding(horizontal = 15.dp, vertical = 12.dp),
         color = srxPrimaryColor(),
         fontWeight = FontWeight.Black,
@@ -313,8 +331,12 @@ private fun AppUserSwitcher(
       Column(
           modifier =
               Modifier.padding(top = 8.dp)
-                  .clip(RoundedCornerShape(20.dp))
-                  .background(glassSurfaceColor(0.88f))
+                  .liquidGlassControl(
+                      shape = RoundedCornerShape(20.dp),
+                      tint = glassSurfaceColor(0.88f),
+                      refractionHeight = 12.dp,
+                      refractionAmount = 14.dp,
+                  )
                   .padding(6.dp),
           verticalArrangement = Arrangement.spacedBy(4.dp),
       ) {

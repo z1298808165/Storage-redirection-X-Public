@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlin.math.roundToInt
+import org.srx.manager.ui.component.liquidGlassControl
+import org.srx.manager.ui.component.liquidPressScale
 import org.srx.manager.ui.liquid.lens
 import org.srx.manager.ui.liquid.vibrancy
 import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
@@ -377,6 +379,7 @@ private fun RoundIconActionSurface(
     size: Dp,
     iconSize: Dp,
 ) {
+  val interactionSource = remember { MutableInteractionSource() }
   Box(
       modifier =
           Modifier.size(size)
@@ -388,15 +391,17 @@ private fun RoundIconActionSurface(
                       alpha = 0.05f,
                   ),
               )
-              .clip(CircleShape)
-              .background(
-                  color.copy(alpha = if (danger) 0.1f else 0.08f),
-                  CircleShape,
+              .liquidPressScale(interactionSource)
+              .liquidGlassControl(
+                  shape = CircleShape,
+                  tint = color.copy(alpha = if (danger) 0.1f else 0.08f),
+                  refractionHeight = 7.dp,
+                  refractionAmount = 9.dp,
               )
               .alpha(if (enabled) 1f else 0.45f)
               .clickable(
                   enabled = enabled,
-                  interactionSource = null,
+                  interactionSource = interactionSource,
                   indication = null,
                   onClick = onClick,
               ),
@@ -431,14 +436,16 @@ internal fun GlassTextButton(
       modifier =
           modifier
               .height(44.dp)
-              .clip(CircleShape)
-              .background(
-                  when {
-                    danger -> MiuixTheme.colorScheme.error.copy(alpha = 0.08f)
-                    primary -> tint.copy(alpha = 0.12f)
-                    else -> glassSurfaceColor(1f)
-                  },
-                  CircleShape,
+              .liquidGlassControl(
+                  shape = CircleShape,
+                  tint =
+                      when {
+                        danger -> MiuixTheme.colorScheme.error.copy(alpha = 0.08f)
+                        primary -> tint.copy(alpha = 0.12f)
+                        else -> glassSurfaceColor(1f)
+                      },
+                  refractionHeight = 10.dp,
+                  refractionAmount = 12.dp,
               ),
       cornerRadius = 22.dp,
       minWidth = 0.dp,

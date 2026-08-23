@@ -60,6 +60,7 @@ import org.srx.manager.isSrxBackdropEffectEnabled
 import org.srx.manager.srxSuccessColor
 import org.srx.manager.srxWarningColor
 import org.srx.manager.ui.AppUiState
+import org.srx.manager.ui.component.liquidGlassControl
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -458,8 +459,12 @@ private fun FeatureChip(label: String, enabled: Boolean, modifier: Modifier) {
   Row(
       modifier =
           modifier
-              .clip(CircleShape)
-              .background(glassSurfaceColor(0.62f), CircleShape)
+              .liquidGlassControl(
+                  shape = CircleShape,
+                  tint = glassSurfaceColor(0.62f),
+                  refractionHeight = 8.dp,
+                  refractionAmount = 9.dp,
+              )
               .padding(horizontal = 13.dp, vertical = 9.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.Center,
