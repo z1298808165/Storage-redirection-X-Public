@@ -1,4 +1,4 @@
-﻿/**
+/**
  * SRX Core WebUI - 主题与界面工具
  * 主题：light（默认）、dark、system
  * 处理导航与筛选器的指示器动画
@@ -41,6 +41,7 @@ const Theme = {
   _current: "light",
   _systemAccentPalette: null,
   _systemAccentRequest: null,
+  _navigationSequence: 0,
 
   init() {
     const stored = localStorage.getItem(THEME_KEY) || "light";
@@ -51,6 +52,7 @@ const Theme = {
     this._bindResize();
     this._initIndicators();
     this._bindNavDrag();
+    this._bindLiquidToggleMotion();
     this._bindLiquidSurfaceLight();
     this.resetNavIndicator();
     this.refreshSystemAccent();
@@ -112,8 +114,9 @@ const Theme = {
     document.body.classList.toggle("liquid-glass-disabled", prefs.liquidGlass === false);
     document.body.classList.toggle("blur-effect-disabled", prefs.blurEffect === false);
     document.body.classList.toggle("liquid-surface-disabled", prefs.blurEffect === false);
-    // 折射依赖背景模糊，两个开关同时开启才启用位移贴图
-    window.LiquidGlass?.setEnabled(prefs.liquidGlass !== false && prefs.blurEffect !== false);
+    // 折射与材质模糊分别受各自开关控制，关闭液态玻璃会立即释放全部位移滤镜。
+    window.LiquidGlass?.setBlurEnabled(prefs.blurEffect !== false);
+    window.LiquidGlass?.setEnabled(prefs.liquidGlass !== false);
     this.applyPageScale(prefs);
     this.applyAccentOptions(prefs);
     this.resetNavIndicator();
@@ -454,9 +457,12 @@ const Theme = {
       const updateNavIndicator = () => {
         const active = nav.querySelector(".nav-item.active");
         if (active) {
-          navIndicator.style.width = active.offsetWidth + "px";
-          navIndicator.style.left = active.offsetLeft + "px";
-          this._syncNavLens(active);
+          if (nav._moveIndicatorTo) nav._moveIndicatorTo(active, true);
+          else {
+            navIndicator.style.width = active.offsetWidth + "px";
+            navIndicator.style.left = active.offsetLeft + "px";
+            this._syncNavLens(active);
+          }
         }
       };
       requestAnimationFrame(updateNavIndicator);
@@ -515,6 +521,119 @@ const Theme = {
     );
   },
 
+  _bindLiquidToggleMotion() {
+    if (this._liquidToggleMotionBound) return;
+    this._liquidToggleMotionBound = true;
+    const activePointers = new Map();
+    const isLiquidEnabled = (toggle) =>
+      !!toggle &&
+      !toggle.disabled &&
+      document.body.classList.contains("srx-lens-ready") &&
+      !document.body.classList.contains("liquid-glass-disabled");
+    const findToggleHit = (target, clientX, clientY) => {
+      const directToggle = target?.closest?.(".toggle");
+      if (directToggle) return { toggle: directToggle, expanded: false };
+      const row = target?.closest?.(".switch-row");
+      const toggle = row?.querySelector?.(".toggle");
+      if (!toggle || toggle.disabled) return null;
+      const rect = toggle.getBoundingClientRect();
+      const hitSlop = 9;
+      if (
+        clientX < rect.left - hitSlop ||
+        clientX > rect.right + hitSlop ||
+        clientY < rect.top - hitSlop ||
+        clientY > rect.bottom + hitSlop
+      ) {
+        return null;
+      }
+      return { toggle, expanded: true };
+    };
+    const updateLight = (toggle, clientX, clientY) => {
+      const rect = toggle.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      toggle.style.setProperty(
+        "--toggle-touch-x",
+        Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100)).toFixed(2) + "%",
+      );
+      toggle.style.setProperty(
+        "--toggle-touch-y",
+        Math.max(0, Math.min(100, ((clientY - rect.top) / rect.height) * 100)).toFixed(2) + "%",
+      );
+    };
+    const beginPress = (toggle, clientX, clientY) => {
+      if (!isLiquidEnabled(toggle)) return;
+      clearTimeout(toggle._liquidPressTimer);
+      toggle._liquidPressStartedAt = performance.now();
+      updateLight(toggle, clientX, clientY);
+      toggle.classList.remove("is-liquid-burst");
+      toggle.classList.add("is-liquid-pressing");
+    };
+    const release = (toggle) => {
+      if (!toggle) return;
+      const startedAt = toggle._liquidPressStartedAt || performance.now();
+      const remaining = Math.max(0, 150 - (performance.now() - startedAt));
+      clearTimeout(toggle._liquidPressTimer);
+      toggle._liquidPressTimer = setTimeout(() => {
+        if (toggle._liquidPressStartedAt !== startedAt) return;
+        toggle.classList.remove("is-liquid-pressing");
+        toggle.classList.remove("is-liquid-burst");
+        if (!isLiquidEnabled(toggle)) return;
+        void toggle.offsetWidth;
+        toggle.classList.add("is-liquid-burst");
+        clearTimeout(toggle._liquidBurstTimer);
+        toggle._liquidBurstTimer = setTimeout(
+          () => toggle.classList.remove("is-liquid-burst"),
+          480,
+        );
+      }, remaining);
+    };
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        if (event.button !== 0) return;
+        const hit = findToggleHit(event.target, event.clientX, event.clientY);
+        if (!hit) return;
+        const { toggle, expanded } = hit;
+        activePointers.set(event.pointerId, { toggle, expanded });
+        beginPress(toggle, event.clientX, event.clientY);
+      },
+      { passive: true },
+    );
+    document.addEventListener(
+      "pointermove",
+      (event) => {
+        const active = activePointers.get(event.pointerId);
+        if (active && isLiquidEnabled(active.toggle)) {
+          updateLight(active.toggle, event.clientX, event.clientY);
+        }
+      },
+      { passive: true },
+    );
+    const finishPointer = (event) => {
+      const active = activePointers.get(event.pointerId);
+      activePointers.delete(event.pointerId);
+      if (!active) return;
+      release(active.toggle);
+      if (event.type !== "pointerup" || !active.expanded || active.toggle.disabled) return;
+      const hit = findToggleHit(event.target, event.clientX, event.clientY);
+      if (hit?.toggle === active.toggle) active.toggle.click();
+    };
+    document.addEventListener("pointerup", finishPointer, { passive: true });
+    document.addEventListener("pointercancel", finishPointer, { passive: true });
+    document.addEventListener("keydown", (event) => {
+      if (event.repeat || (event.key !== " " && event.key !== "Enter")) return;
+      const toggle = event.target?.closest?.(".toggle");
+      if (isLiquidEnabled(toggle)) {
+        const rect = toggle.getBoundingClientRect();
+        beginPress(toggle, rect.left + rect.width / 2, rect.top + rect.height / 2);
+      }
+    });
+    document.addEventListener("keyup", (event) => {
+      if (event.key !== " " && event.key !== "Enter") return;
+      release(event.target?.closest?.(".toggle"));
+    });
+  },
+
   _bindNavDrag() {
     const nav = document.getElementById("bottomNav");
     const indicator = nav?.querySelector(".nav-indicator");
@@ -526,6 +645,7 @@ const Theme = {
       pointerId: null,
       longPressTimer: null,
       dragging: false,
+      canceled: false,
       activeItem: null,
       currentX: 0,
       currentW: 0,
@@ -539,11 +659,42 @@ const Theme = {
       pressClientX: 0,
       pressClientY: 0,
       raf: 0,
+      calibrationToken: 0,
     };
 
-    nav._dragState = state; // 允许外部校准物理坐标
+    nav._dragState = state;
 
     const navRect = () => nav.getBoundingClientRect();
+    const pointerLocalX = (clientX, box = navRect()) => {
+      const layoutWidth = nav.offsetWidth || box.width;
+      if (!box.width || !layoutWidth) return 0;
+      return (clientX - box.left) * (layoutWidth / box.width);
+    };
+    const indicatorBounds = (width) => {
+      const style = getComputedStyle(nav);
+      const leftInset = parseFloat(style.paddingLeft) || 0;
+      const rightInset = parseFloat(style.paddingRight) || 0;
+      const contentWidth = nav.clientWidth || nav.offsetWidth || 0;
+      return {
+        min: leftInset,
+        max: Math.max(leftInset, contentWidth - rightInset - width),
+      };
+    };
+    const setIndicatorGeometry = (left, width) => {
+      const nextWidth = Math.max(40, Number(width) || indicator.offsetWidth || 40);
+      const bounds = indicatorBounds(nextWidth);
+      const clamped = Math.max(bounds.min, Math.min(bounds.max, left));
+      indicator.style.width = nextWidth + "px";
+      indicator.style.left = clamped + "px";
+      return clamped;
+    };
+    const cancelIndicatorAnimation = () => {
+      if (state.raf) cancelAnimationFrame(state.raf);
+      state.raf = 0;
+      state.lastFrameTime = 0;
+      state.positionVelocity = 0;
+      state.widthVelocity = 0;
+    };
     const updateLightFromPointer = (clientX, clientY) => {
       const box = navRect();
       if (!box.width || !box.height) return;
@@ -557,14 +708,8 @@ const Theme = {
       );
     };
     const setRubberOffset = (clientX) => {
-      const box = navRect();
-      if (!box.width) return;
-      const center = box.left + box.width / 2;
-      const fraction = clamp((clientX - center) / (box.width / 2), -1, 1);
-      nav.style.setProperty(
-        "--nav-rubber-x",
-        (Math.sign(fraction) * Math.pow(Math.abs(fraction), 0.72) * 4).toFixed(2) + "px",
-      );
+      // 拖动时保持底栏坐标固定，避免容器位移反过来改变指针坐标系。
+      nav.style.setProperty("--nav-rubber-x", "0px");
     };
     const resetLiquidMotion = () => {
       nav.style.setProperty("--nav-rubber-x", "0px");
@@ -583,27 +728,42 @@ const Theme = {
     };
     const setTargetFromItem = (item, immediate) => {
       if (!item) return;
+      state.activeItem = item;
+      // 激活态字体权重会参与底栏布局，必须先更新 class 再读取几何值。
+      syncActiveClass(item);
       const left = item.offsetLeft;
       const width = item.offsetWidth;
-      state.activeItem = item;
       state.targetX = left;
       state.targetW = width;
-      syncActiveClass(item);
       if (immediate) {
+        cancelIndicatorAnimation();
         state.currentX = left;
         state.currentW = width;
         state.positionVelocity = 0;
         state.widthVelocity = 0;
-        indicator.style.left = left + "px";
-        indicator.style.width = width + "px";
+        state.currentX = setIndicatorGeometry(left, width);
+        state.targetX = state.currentX;
         resetLiquidMotion();
       } else {
         kickAnimation();
       }
     };
+    nav._moveIndicatorTo = (item, immediate = false) => setTargetFromItem(item, immediate);
+    nav._scheduleIndicatorCalibration = () => {
+      const token = ++state.calibrationToken;
+      const align = (pass) => {
+        requestAnimationFrame(() => {
+          if (token !== state.calibrationToken || state.pointerId !== null) return;
+          const active = nav.querySelector(".nav-item.active");
+          if (active && active.offsetWidth > 0) setTargetFromItem(active, true);
+          if (pass < 1) align(pass + 1);
+        });
+      };
+      align(0);
+    };
     const nearestItem = (clientX) => {
       const navBox = navRect();
-      const x = clientX - navBox.left;
+      const x = pointerLocalX(clientX, navBox);
       let best = null;
       let bestScore = Infinity;
       items().forEach((item) => {
@@ -621,29 +781,30 @@ const Theme = {
       const list = items();
       if (!list.length) return;
       const best = nearestItem(clientX) || list[0];
+      if (best !== state.activeItem) {
+        state.activeItem = best;
+        syncActiveClass(best);
+      }
       const width = best.offsetWidth;
-      const x = clientX - navBox.left - width / 2;
+      const x = pointerLocalX(clientX, navBox) - width / 2;
       const dx = clientX - state.lastClientX;
       state.velocity = state.velocity * 0.58 + dx * 0.42;
       state.lastClientX = clientX;
-      state.targetX = Math.max(6, Math.min(navBox.width - width - 6, x));
-      state.targetW = width * (1 + clamp(Math.abs(state.velocity) / 260, 0, 0.11));
-      indicator.style.setProperty(
-        "--nav-indicator-scale-x",
-        (1 + clamp(Math.abs(state.velocity) / 420, 0, 0.09)).toFixed(3),
-      );
+      const bounds = indicatorBounds(width);
+      state.targetX = clamp(x, bounds.min, bounds.max);
+      state.targetW = width;
+      state.currentX = state.targetX;
+      state.currentW = width;
+      state.positionVelocity = 0;
+      state.widthVelocity = 0;
+      state.currentX = setIndicatorGeometry(state.currentX, width);
+      indicator.style.setProperty("--nav-indicator-scale-x", "1");
       indicator.style.setProperty(
         "--nav-indicator-scale-y",
         (1 - clamp(Math.abs(state.velocity) / 980, 0, 0.035)).toFixed(3),
       );
       setRubberOffset(clientX);
       updateLightFromPointer(clientX, clientY);
-      if (best !== state.activeItem) {
-        state.activeItem = best;
-        syncActiveClass(best);
-        Theme._pulseIndicator(nav);
-      }
-      kickAnimation();
     };
     const kickAnimation = () => {
       if (state.raf) return;
@@ -673,8 +834,7 @@ const Theme = {
           state.currentW = state.targetW;
           state.widthVelocity = 0;
         }
-        indicator.style.left = state.currentX + "px";
-        indicator.style.width = Math.max(40, state.currentW) + "px";
+        state.currentX = setIndicatorGeometry(state.currentX, state.currentW);
         if (
           Math.abs(state.targetX - state.currentX) > 0.12 ||
           Math.abs(state.targetW - state.currentW) > 0.12 ||
@@ -699,29 +859,42 @@ const Theme = {
       state.pressClientX = e.clientX;
       state.pressClientY = e.clientY;
       state.velocity = 0;
+      state.canceled = false;
+      ++state.calibrationToken;
       clearTimeout(nav._movingTimer);
       nav.classList.remove("is-moving");
       nav.classList.add("is-pressing");
-      window.LiquidGlass?.freeze("navDrag");
       syncPressTarget(item);
       updateLightFromPointer(e.clientX, e.clientY);
-      clearTimeout(state.longPressTimer);
-      state.longPressTimer = setTimeout(() => {
+      const beginDrag = () => {
+        if (state.dragging || state.pointerId === null) return;
+        clearTimeout(state.longPressTimer);
         state.dragging = true;
         nav.classList.add("dragging");
+        window.LiquidGlass?.freeze("navDrag");
         nav.setPointerCapture?.(state.pointerId);
-        setTargetFromItem(item, true);
+        setTargetFromItem(state.activeItem, true);
         syncPressTarget();
-      }, 220);
+      };
+      state.beginDrag = beginDrag;
+      clearTimeout(state.longPressTimer);
+      state.longPressTimer = setTimeout(beginDrag, 160);
     });
     window.addEventListener("pointermove", (e) => {
       if (e.pointerId !== state.pointerId) return;
       if (!state.dragging) {
-        const movement = Math.hypot(e.clientX - state.pressClientX, e.clientY - state.pressClientY);
-        if (movement > 8) {
+        const dx = e.clientX - state.pressClientX;
+        const dy = e.clientY - state.pressClientY;
+        if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy)) {
+          state.beginDrag?.();
+          updateTargetFromPointer(e.clientX, e.clientY);
+          e.preventDefault();
+          return;
+        }
+        if (Math.abs(dy) > 8) {
+          state.canceled = true;
           clearTimeout(state.longPressTimer);
           nav.classList.remove("is-pressing");
-          window.LiquidGlass?.unfreeze("navDrag");
           syncPressTarget();
         }
         return;
@@ -732,19 +905,20 @@ const Theme = {
     const finish = (e) => {
       if (state.pointerId === null || e.pointerId !== state.pointerId) return;
       clearTimeout(state.longPressTimer);
-      if (state.dragging && state.activeItem) {
+      const draggedItem = state.dragging ? state.activeItem : null;
+      if (draggedItem) {
         e.preventDefault();
         nav._suppressClickUntil = Date.now() + 360;
-        state.targetW = state.activeItem.offsetWidth;
-        setTargetFromItem(state.activeItem, false);
-        window.App?.navigateFromNav?.(state.activeItem.dataset.page);
+      } else if (e.type === "pointerup" && !state.canceled && state.activeItem) {
+        nav._suppressClickUntil = Date.now() + 360;
+      } else if (state.canceled) {
+        nav._suppressClickUntil = Date.now() + 360;
       } else {
         const activeNow = nav.querySelector(".nav-item.active");
         if (activeNow && activeNow.offsetWidth > 0) {
-          state.targetX = activeNow.offsetLeft;
-          state.currentX = activeNow.offsetLeft;
           state.targetW = activeNow.offsetWidth;
-          state.currentW = activeNow.offsetWidth;
+          state.targetX = activeNow.offsetLeft;
+          state.currentW = state.targetW;
         }
       }
       state.dragging = false;
@@ -752,11 +926,21 @@ const Theme = {
         nav.releasePointerCapture?.(state.pointerId);
       }
       state.pointerId = null;
+      state.beginDrag = null;
+      ++state.calibrationToken;
       nav.classList.remove("is-pressing", "dragging");
       window.LiquidGlass?.unfreeze("navDrag");
       syncPressTarget();
       resetLiquidMotion();
-      kickAnimation();
+      if (draggedItem) {
+        setTargetFromItem(draggedItem, true);
+        window.App?.navigateFromNav?.(draggedItem.dataset.page);
+      } else if (e.type === "pointerup" && !state.canceled && state.activeItem) {
+        setTargetFromItem(state.activeItem, true);
+        window.App?.navigateFromNav?.(state.activeItem.dataset.page);
+      } else {
+        kickAnimation();
+      }
     };
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
@@ -773,17 +957,29 @@ const Theme = {
     const nav = document.getElementById("bottomNav");
     const navIndicator = nav?.querySelector(".nav-indicator");
     if (!nav || !navIndicator) return;
+    if (nav._dragState) ++nav._dragState.calibrationToken;
     const active = nav.querySelector(".nav-item.active");
     if (active && active.offsetWidth > 0) {
-      this._pulseIndicator(nav);
+      if (nav._moveIndicatorTo) {
+        nav._moveIndicatorTo(active, true);
+        return;
+      }
       const left = active.offsetLeft;
       const width = active.offsetWidth;
+      const style = getComputedStyle(nav);
+      const leftInset = parseFloat(style.paddingLeft) || 0;
+      const rightInset = parseFloat(style.paddingRight) || 0;
+      const maxLeft = Math.max(
+        leftInset,
+        (nav.clientWidth || nav.offsetWidth) - rightInset - width,
+      );
+      const clampedLeft = Math.max(leftInset, Math.min(maxLeft, left));
       navIndicator.style.width = width + "px";
-      navIndicator.style.left = left + "px";
+      navIndicator.style.left = clampedLeft + "px";
 
       if (nav._dragState) {
-        nav._dragState.targetX = left;
-        nav._dragState.currentX = left;
+        nav._dragState.targetX = clampedLeft;
+        nav._dragState.currentX = clampedLeft;
         nav._dragState.targetW = width;
         nav._dragState.currentW = width;
       }
@@ -798,10 +994,18 @@ const Theme = {
     if (!nav || !navIndicator) return;
     nav.classList.remove("is-pressing", "is-moving", "dragging");
     nav.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("is-press-target"));
-    navIndicator.style.transform = "";
+    if (nav._scheduleIndicatorCalibration) {
+      nav._scheduleIndicatorCalibration();
+      return;
+    }
     const align = () => {
       const active = nav.querySelector(".nav-item.active");
       if (!active || active.offsetWidth === 0) return;
+
+      if (nav._moveIndicatorTo) {
+        nav._moveIndicatorTo(active, true);
+        return;
+      }
 
       const left = active.offsetLeft;
       const width = active.offsetWidth;
@@ -816,12 +1020,8 @@ const Theme = {
       }
 
       this._syncNavLens(active);
-      window.LiquidGlass?.scheduleRefresh(navIndicator);
     };
-    requestAnimationFrame(() => {
-      align();
-      requestAnimationFrame(align);
-    });
+    requestAnimationFrame(align);
   },
 
   updateFilterIndicator() {
@@ -1025,6 +1225,7 @@ const Theme = {
     if (!overlay || !content) return; // 防御性判断
 
     content.innerHTML = contentHtml;
+    content.classList.toggle("update-dialog-sheet", !!content.querySelector(".update-dialog"));
     this.bindModalViewport();
 
     document.body.classList.add("modal-open");
@@ -1058,27 +1259,7 @@ const Theme = {
 
   /* ── Navigation ── */
   navigateTo(page, options) {
-    const current = document.querySelector(".page.active");
-    if (current && current.id !== "page-" + page && !options?.noAnimation) {
-      current.classList.add("leaving");
-      setTimeout(() => current.classList.remove("leaving"), 240);
-    }
-    document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
-    const target = document.getElementById("page-" + page);
-    if (target) {
-      target.classList.toggle("no-animate", !!options?.noAnimation);
-      target.classList.add("active");
-      document.body.classList.toggle("about-active", page === "about");
-      document.body.classList.toggle("apps-page-active", page === "apps");
-      document.body.classList.toggle("logs-page-active", page === "logs");
-      const isSecondaryPage =
-        page === "app-config" || page === "about" || page === "update" || page === "theme";
-      document.body.classList.toggle("app-config-active", page === "app-config");
-      document.body.classList.toggle("secondary-page-active", isSecondaryPage);
-      document.getElementById("bottomNav")?.toggleAttribute("hidden", isSecondaryPage);
-      const scroller = document.querySelector(".app-container");
-      if (scroller && !options?.preserveScroll) scroller.scrollTo({ top: 0, behavior: "auto" });
-    }
+    const navigationSequence = ++this._navigationSequence;
     document.querySelectorAll(".nav-item").forEach((n) => {
       n.classList.remove("active");
       n.classList.remove("is-under-lens");
@@ -1094,8 +1275,50 @@ const Theme = {
       parentNav?.classList.add("active");
       this._syncNavLens(parentNav);
     }
-    requestAnimationFrame(() => this.resetNavIndicator());
-    if (page === "apps") requestAnimationFrame(() => this.resetFilterIndicator());
+    this.updateNavIndicator();
+
+    const applyPage = () => {
+      const current = document.querySelector(".page.active");
+      if (current && current.id !== "page-" + page && !options?.noAnimation) {
+        current.classList.add("leaving");
+        setTimeout(() => current.classList.remove("leaving"), 240);
+      }
+      document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
+      const target = document.getElementById("page-" + page);
+      if (target) {
+        target.classList.toggle("no-animate", !!options?.noAnimation);
+        target.classList.add("active");
+        document.body.classList.toggle("about-active", page === "about");
+        document.body.classList.toggle("apps-page-active", page === "apps");
+        document.body.classList.toggle("logs-page-active", page === "logs");
+        const isSecondaryPage =
+          page === "app-config" || page === "about" || page === "update" || page === "theme";
+        document.body.classList.toggle("app-config-active", page === "app-config");
+        document.body.classList.toggle("secondary-page-active", isSecondaryPage);
+        document.getElementById("bottomNav")?.toggleAttribute("hidden", isSecondaryPage);
+        const scroller = document.querySelector(".app-container");
+        if (scroller && !options?.preserveScroll) scroller.scrollTo({ top: 0, behavior: "auto" });
+      }
+      if (page === "apps") requestAnimationFrame(() => this.resetFilterIndicator());
+      this.resetNavIndicator();
+    };
+
+    if (!options?.deferPage) {
+      applyPage();
+      return null;
+    }
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          if (navigationSequence !== this._navigationSequence) {
+            resolve(false);
+            return;
+          }
+          applyPage();
+          resolve(true);
+        }, 0);
+      });
+    });
   },
 
   confirmDelete(message, onConfirm) {

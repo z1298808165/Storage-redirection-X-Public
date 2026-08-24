@@ -16,103 +16,122 @@ const LIQUID_GLASS_MAX_EDGE = 1024;
 const LIQUID_GLASS_MAX_FILTERS = 40;
 const LIQUID_GLASS_SCAN_DELAY = 90;
 const LIQUID_GLASS_SIZE_STEP = 2;
+const LIQUID_GLASS_REFRESH_BUDGET_MS = 6;
+const LIQUID_GLASS_REFRESH_BATCH_SIZE = 8;
 
 // 每类表面的折射参数：blur 与 saturate 对应材质厚度，折射高度与幅度对应边缘弯曲程度。
 const LIQUID_GLASS_TARGETS = [
   {
     selector: ".bottom-nav",
-    blur: 16,
-    saturate: 1.74,
-    refractionHeight: 22,
-    refractionAmount: 20,
+    blur: 11,
+    saturate: 1.28,
+    refractionHeight: 18,
+    refractionAmount: 16,
   },
   {
     selector: ".nav-indicator",
-    blur: 8,
-    saturate: 1.9,
-    refractionHeight: 13,
-    refractionAmount: 17,
+    blur: 5,
+    saturate: 1.36,
+    refractionHeight: 11,
+    refractionAmount: 14,
     depthEffect: true,
   },
   {
     selector: ".app-batch-bar",
-    blur: 16,
-    saturate: 1.74,
-    refractionHeight: 22,
-    refractionAmount: 20,
+    blur: 11,
+    saturate: 1.28,
+    refractionHeight: 18,
+    refractionAmount: 16,
   },
   {
     selector: ".app-batch-status",
-    blur: 8,
-    saturate: 1.9,
-    refractionHeight: 13,
-    refractionAmount: 17,
+    blur: 5,
+    saturate: 1.36,
+    refractionHeight: 11,
+    refractionAmount: 14,
     depthEffect: true,
   },
   {
     selector: ".modal-sheet",
-    blur: 26,
-    saturate: 1.6,
-    refractionHeight: 26,
-    refractionAmount: 22,
+    blur: 16,
+    saturate: 1.24,
+    refractionHeight: 22,
+    refractionAmount: 18,
   },
   {
     selector: ".dialog-box",
-    blur: 26,
-    saturate: 1.6,
-    refractionHeight: 26,
-    refractionAmount: 22,
+    blur: 16,
+    saturate: 1.24,
+    refractionHeight: 22,
+    refractionAmount: 18,
   },
-  { selector: ".toast", blur: 18, saturate: 1.7, refractionHeight: 16, refractionAmount: 16 },
+  { selector: ".toast", blur: 12, saturate: 1.3, refractionHeight: 14, refractionAmount: 14 },
   {
     selector: ".search-input-wrapper",
-    blur: 12,
-    saturate: 1.62,
+    blur: 8,
+    saturate: 1.28,
     refractionHeight: 14,
     refractionAmount: 14,
   },
   {
     selector: ".filter-group",
-    blur: 12,
-    saturate: 1.62,
+    blur: 8,
+    saturate: 1.28,
     refractionHeight: 14,
     refractionAmount: 14,
   },
   {
     selector: ".filter-indicator",
-    blur: 7,
-    saturate: 1.86,
+    blur: 5,
+    saturate: 1.34,
     refractionHeight: 11,
     refractionAmount: 14,
     depthEffect: true,
   },
   {
     selector: ".icon-btn, .back-btn",
-    blur: 8,
-    saturate: 1.66,
+    blur: 6,
+    saturate: 1.3,
     refractionHeight: 9,
     refractionAmount: 12,
     depthEffect: true,
   },
   {
+    selector: ".toggle",
+    blur: 4,
+    saturate: 1.32,
+    refractionHeight: 7,
+    refractionAmount: 9,
+    depthEffect: true,
+  },
+  {
     selector: ".btn-secondary, .backup-action, .setting-option-row, .user-tab, .app-user-trigger",
-    blur: 9,
-    saturate: 1.62,
+    blur: 7,
+    saturate: 1.28,
     refractionHeight: 10,
     refractionAmount: 12,
   },
   {
     selector: ".app-user-menu",
-    blur: 18,
-    saturate: 1.66,
+    blur: 12,
+    saturate: 1.28,
     refractionHeight: 16,
     refractionAmount: 16,
+  },
+  {
+    selector:
+      ".liquid-surface, .app-config-header, .status-card, .action-list, .app-list, .config-group, .theme-selector, .theme-settings-card, .template-card, .backup-restore-card, .log-card, .license-item",
+    blur: 10,
+    saturate: 1.24,
+    refractionHeight: 16,
+    refractionAmount: 15,
   },
 ];
 
 const LiquidGlass = {
   _supported: null,
   _enabled: false,
+  _blurEnabled: true,
   _initialized: false,
   _svg: null,
   _filters: new Map(),
@@ -122,6 +141,8 @@ const LiquidGlass = {
   _resizeObserver: null,
   _mutationObserver: null,
   _scanTimer: 0,
+  _pendingScanRoots: new Set(),
+  _scanFrame: 0,
   _pendingRefresh: new Set(),
   _refreshFrame: 0,
   _freezeOwners: new Set(),
@@ -145,7 +166,7 @@ const LiquidGlass = {
     this._bindTiltLight();
   },
 
-  /** 液态玻璃与材质模糊开关同时开启时才启用折射。 */
+  /** 液态玻璃开关控制折射；材质模糊由独立状态决定是否叠加。 */
   setEnabled(enabled) {
     const next = !!enabled && this.isSupported();
     if (next === this._enabled) {
@@ -166,6 +187,13 @@ const LiquidGlass = {
     return this._enabled;
   },
 
+  setBlurEnabled(enabled) {
+    const next = !!enabled;
+    if (next === this._blurEnabled) return;
+    this._blurEnabled = next;
+    this.refreshAll();
+  },
+
   /** 扫描并登记指定范围内的玻璃表面。 */
   scan(root) {
     if (!this._enabled) return;
@@ -183,7 +211,8 @@ const LiquidGlass = {
     this._elements.set(element, { options, key: "" });
     element.classList.add(LIQUID_GLASS_ELEMENT_CLASS);
     this._resizeObserver?.observe(element);
-    this.refresh(element);
+    if (this._freezeOwners.size) this._pendingRefresh.add(element);
+    else this.refresh(element);
   },
 
   release(element) {
@@ -228,13 +257,18 @@ const LiquidGlass = {
       depthEffect: !!options.depthEffect,
     };
     const key = this._filterKey(spec);
-    if (key !== entry.key) {
+    const keyChanged = key !== entry.key;
+    if (keyChanged) {
       this._dropFilterReference(entry.key);
       entry.key = key;
     }
-    const filter = this._filterFor(key, spec);
+    const filter =
+      !keyChanged && this._filters.has(key)
+        ? this._filters.get(key).url
+        : this._filterFor(key, spec);
     if (!filter) return;
-    const value = `blur(${options.blur}px) ${filter} saturate(${options.saturate})`;
+    const blur = this._blurEnabled && options.blur > 0 ? `blur(${options.blur}px) ` : "";
+    const value = `${blur}${filter} saturate(${options.saturate})`;
     element.style.setProperty("backdrop-filter", value);
     element.style.setProperty("-webkit-backdrop-filter", value);
   },
@@ -250,7 +284,9 @@ const LiquidGlass = {
 
   unfreeze(owner) {
     if (!this._freezeOwners.delete(owner || "default")) return;
-    if (this._freezeOwners.size === 0 && this._pendingRefresh.size) this._flushRefresh();
+    if (this._freezeOwners.size === 0 && this._pendingRefresh.size && !this._refreshFrame) {
+      this._refreshFrame = requestAnimationFrame(() => this._flushRefresh());
+    }
   },
 
   /** 合并同一帧内的多次刷新请求，拖动指示器时避免重复生成贴图。 */
@@ -264,14 +300,31 @@ const LiquidGlass = {
 
   _flushRefresh() {
     this._refreshFrame = 0;
-    const pending = [...this._pendingRefresh];
-    this._pendingRefresh.clear();
-    pending.forEach((item) => this.refresh(item));
+    if (this._freezeOwners.size || !this._pendingRefresh.size) return;
+    const startedAt = performance.now();
+    let processed = 0;
+    for (const item of this._pendingRefresh) {
+      this._pendingRefresh.delete(item);
+      this.refresh(item);
+      processed += 1;
+      if (
+        processed >= LIQUID_GLASS_REFRESH_BATCH_SIZE ||
+        performance.now() - startedAt >= LIQUID_GLASS_REFRESH_BUDGET_MS
+      ) {
+        break;
+      }
+    }
+    if (this._pendingRefresh.size && !this._freezeOwners.size) {
+      this._refreshFrame = requestAnimationFrame(() => this._flushRefresh());
+    }
   },
 
   refreshAll() {
     if (!this._enabled) return;
-    [...this._elements.keys()].forEach((element) => this.refresh(element));
+    this._elements.forEach((_entry, element) => this._pendingRefresh.add(element));
+    if (!this._freezeOwners.size && !this._refreshFrame) {
+      this._refreshFrame = requestAnimationFrame(() => this._flushRefresh());
+    }
   },
 
   _quantize(value) {
@@ -473,13 +526,13 @@ const LiquidGlass = {
       });
     }
     if (typeof MutationObserver === "function") {
-      this._mutationObserver = new MutationObserver(() => {
-        if (this._scanTimer) return;
-        this._scanTimer = setTimeout(() => {
-          this._scanTimer = 0;
-          this._collectDetached();
-          this.scan();
-        }, LIQUID_GLASS_SCAN_DELAY);
+      this._mutationObserver = new MutationObserver((records) => {
+        records.forEach((record) => {
+          record.addedNodes.forEach((node) => {
+            if (node.nodeType === Node.ELEMENT_NODE) this._pendingScanRoots.add(node);
+          });
+        });
+        this._scheduleMutationScan();
       });
     }
     const start = () => {
@@ -502,10 +555,38 @@ const LiquidGlass = {
     });
   },
 
+  _scheduleMutationScan() {
+    if (this._scanFrame || this._scanTimer) return;
+    this._scanTimer = setTimeout(() => {
+      this._scanTimer = 0;
+      this._scanFrame = requestAnimationFrame(() => {
+        this._scanFrame = 0;
+        const roots = [...this._pendingScanRoots];
+        this._pendingScanRoots.clear();
+        roots.forEach((root) => this.scan(root));
+        this._collectDetached();
+        if (this._pendingScanRoots.size) this._scheduleMutationScan();
+      });
+    }, LIQUID_GLASS_SCAN_DELAY);
+  },
+
   _releaseAll() {
     this._freezeOwners.clear();
     this._pendingRefresh.clear();
+    this._pendingScanRoots.clear();
+    if (this._scanFrame) cancelAnimationFrame(this._scanFrame);
+    this._scanFrame = 0;
+    clearTimeout(this._scanTimer);
+    this._scanTimer = 0;
     [...this._elements.keys()].forEach((element) => this.release(element));
+    document.querySelectorAll(".toggle").forEach((toggle) => {
+      toggle.classList.remove("is-liquid-pressing", "is-liquid-burst");
+      clearTimeout(toggle._liquidPressTimer);
+      clearTimeout(toggle._liquidBurstTimer);
+      toggle._liquidPressStartedAt = 0;
+      toggle.style.removeProperty("--toggle-touch-x");
+      toggle.style.removeProperty("--toggle-touch-y");
+    });
     this._filters.forEach((record) => record.node.remove());
     this._filters.clear();
   },

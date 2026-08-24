@@ -167,6 +167,12 @@ private val LicenseItems =
         LicenseItem("APP / UI", "Miuix", "Apache 2.0", "https://github.com/compose-miuix-ui/miuix"),
         LicenseItem(
             "APP / UI",
+            "AndroidLiquidGlass / Backdrop",
+            "Apache 2.0",
+            "https://github.com/Kyant0/AndroidLiquidGlass",
+        ),
+        LicenseItem(
+            "APP / UI",
             "AppIconLoader",
             "Apache 2.0",
             "https://github.com/zhanghai/AppIconLoader",

@@ -167,6 +167,7 @@ val appVersionCode =
         else defaultBuildVersion.versionCode
 val appCompileSdk = providers.gradleProperty("srx.compileSdk").orNull?.toIntOrNull() ?: 37
 val appTargetSdk = providers.gradleProperty("srx.targetSdk").orNull?.toIntOrNull() ?: appCompileSdk
+val defaultReleaseRepository = "z1298808165/Storage-redirection-X-Public"
 val defaultOfficialReleaseRepository = "Kindness-Kismet/Storage-redirection-X-Public"
 val defaultReleaseBranch = "SRX-R"
 
@@ -192,7 +193,7 @@ val releaseRepository =
     (providers.gradleProperty("srx.releaseRepository").orNull
             ?: providers.environmentVariable("SRX_RELEASE_REPOSITORY").orNull
             ?: providers.environmentVariable("GITHUB_REPOSITORY").orNull
-            ?: defaultOfficialReleaseRepository)
+            ?: defaultReleaseRepository)
         .trim()
 val officialReleaseRepository =
     (providers.gradleProperty("srx.officialReleaseRepository").orNull
@@ -421,6 +422,7 @@ dependencies {
   implementation(libs.miuix.navigation3.ui)
   implementation(libs.miuix.preference)
   implementation(libs.miuix.blur)
+  implementation(libs.kyant.backdrop)
   implementation(libs.markwon.core)
   implementation(libs.appiconloader)
   implementation(libs.hiddenapibypass)

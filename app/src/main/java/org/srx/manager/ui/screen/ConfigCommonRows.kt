@@ -2,6 +2,7 @@ package org.srx.manager.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -18,8 +20,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.srx.manager.data.UserProfile
+import org.srx.manager.ui.component.LiquidSwitch
 import org.srx.manager.ui.theme.isSrxDarkTheme
-import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -33,12 +35,18 @@ internal fun CompactSwitchRow(
     onCheckedChange: (Boolean) -> Unit,
     showDivider: Boolean = true,
 ) {
+  val interactionSource = remember { MutableInteractionSource() }
   Column(Modifier.fillMaxWidth()) {
     Row(
         modifier =
             Modifier.fillMaxWidth()
                 .heightIn(min = 64.dp)
-                .clickable { onCheckedChange(!checked) }
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                ) {
+                  onCheckedChange(!checked)
+                }
                 .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -62,9 +70,10 @@ internal fun CompactSwitchRow(
             lineHeight = 18.sp,
         )
       }
-      Switch(
+      LiquidSwitch(
           checked = checked,
           onCheckedChange = onCheckedChange,
+          interactionSource = interactionSource,
       )
     }
     if (showDivider) {

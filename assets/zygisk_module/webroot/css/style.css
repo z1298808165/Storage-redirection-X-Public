@@ -11,6 +11,12 @@
 .page#page-logs .page-header,
 .page#page-logs .log-search,
 .page#page-logs .log-toolbar { flex-shrink: 0; }
+.page#page-logs .pull-refresh,
+.page#page-logs .log-card-list {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
 .pull-refresh { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: transparent; border: 0; box-shadow: none; }
 .pull-refresh-indicator { position: absolute; top: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--color-text-tertiary); font-size: 12px; font-weight: 760; opacity: 0; transform: translate3d(0, -44px, 0); pointer-events: none; transition: opacity var(--transition-fast), transform var(--transition-fast); z-index: 3; }
 .pull-refresh.is-pulling .pull-refresh-indicator,
@@ -149,7 +155,8 @@
 .toast.success { color: var(--color-success); } .toast.error { color: var(--color-danger); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(16px) scale(0.9); filter: blur(6px); } to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
 
-.modal-overlay, .dialog-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(8,13,23,0.34); display: flex; align-items: center; justify-content: center; padding: 24px; animation: overlayIn 120ms ease; backdrop-filter: var(--ios-glass-blur); -webkit-backdrop-filter: var(--ios-glass-blur); }
+.modal-overlay, .dialog-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(255,255,255,0.08); display: flex; align-items: center; justify-content: center; padding: 24px; animation: overlayIn 120ms ease; }
+[data-theme="dark"] .modal-overlay, [data-theme="dark"] .dialog-overlay { background: rgba(0,0,0,0.24); }
 .modal-overlay { align-items: center; padding: 24px 18px calc(24px + var(--safe-bottom)); overflow: hidden; }
 .modal-overlay.keyboard-active { padding-top: 12px; padding-bottom: 12px; }
 .dialog-overlay { z-index: 400; }
@@ -166,13 +173,13 @@
 [data-theme="dark"] .modal-input::placeholder { color: rgba(114,129,152,0.56); }
 .modal-input:focus { border-color: var(--color-primary-border); box-shadow: 0 6px 18px rgba(143,122,246,0.1); }
 .modal-input.invalid { border-color: rgba(220,59,59,0.42); }
-.modal-hint { font-size: 12px; color: var(--color-text-tertiary); margin: 9px 0 14px; line-height: 1.55; }
+.modal-hint { font-size: 12px; color: var(--color-text-secondary); margin: 9px 0 14px; line-height: 1.55; }
 .modal-hint.error { color: var(--color-danger); }
 .modal-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .modal-row .modal-input { flex: 1; }
 .modal-actions, .dialog-actions { display: flex; gap: 10px; margin-top: 18px; }
 .modal-actions .btn, .dialog-actions .btn { flex: 1; }
-.dialog-body { font-size: 14px; line-height: 1.65; color: var(--color-text-secondary); text-align: center; }
+.dialog-body { font-size: 14px; line-height: 1.65; color: var(--color-text); text-align: center; }
 
 .path-browser { border: 1px solid var(--glass-border); border-radius: 20px; margin-bottom: 10px; max-height: 188px; overflow-y: auto; background: var(--color-surface-input); box-shadow: inset 0 1px 0 rgba(255,255,255,0.22); }
 .modal-overlay.keyboard-active .path-browser { max-height: 156px; }
@@ -262,9 +269,37 @@
 .repository-card-title { font-size: 14px; line-height: 19px; font-weight: 820; }
 .repository-card-url { max-width: 100%; color: var(--color-primary); font-size: 12px; line-height: 17px; font-weight: 760; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .update-dialog-summary { color: var(--color-text-secondary); font-size: 14px; line-height: 1.65; text-align: center; }
+.modal-sheet.update-dialog-sheet {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  background: var(--ios-glass-bg);
+}
+
+/* 更新弹窗内容区不再分离，始终保持背景连贯到弹窗底部边框 */
+.modal-sheet.update-dialog-sheet .update-dialog {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  background: transparent;
+}
+.modal-sheet.update-dialog-sheet .update-dialog-actions {
+  margin-top: auto;
+  background: transparent;
+}
+
+.update-dialog { position: relative; display: flex; min-height: 0; max-height: inherit; flex-direction: column; background: transparent; }
+.update-dialog::before {
+  content: none;
+}
+.update-dialog > * { position: relative; z-index: 1; }
+.update-dialog-header { flex: 0 0 auto; padding: 24px 20px 0; }
 .update-dialog-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 12px; }
 .update-dialog-meta span { max-width: 100%; padding: 5px 9px; border-radius: var(--radius-full); background: var(--color-primary-bg); color: var(--color-primary); font-size: 11px; line-height: 1.2; font-weight: 820; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.update-notes-scroll { max-height: min(44vh, 360px); margin-top: 14px; padding-right: 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--color-border-strong) transparent; }
+.update-notes-scroll { min-height: 0; max-height: min(44vh, 360px); margin-top: 14px; padding: 0 26px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--color-border-strong) transparent; }
+.update-dialog-actions { flex: 0 0 auto; margin-top: 0; padding: 18px 20px 20px; background: transparent; box-shadow: none; }
 .update-note-section + .update-note-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--color-border); }
 .update-note-section > h3 { margin: 0 0 8px; color: var(--color-primary); font-size: 13px; line-height: 18px; font-weight: 860; letter-spacing: 0; }
 .update-markdown { color: var(--color-text-secondary); font-size: 13px; line-height: 1.62; overflow-wrap: anywhere; }
@@ -449,10 +484,12 @@ body.liquid-surface-disabled .dialog-box {
 
 body.liquid-surface-disabled .modal-overlay,
 body.liquid-surface-disabled .dialog-overlay {
-  background: rgba(8,13,23,0.34);
+  background: rgba(255,255,255,0.08);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+[data-theme="dark"] body.liquid-surface-disabled .modal-overlay,
+[data-theme="dark"] body.liquid-surface-disabled .dialog-overlay { background: rgba(0,0,0,0.24); }
 
 .status-card::before,
 .log-card::before {
@@ -496,11 +533,11 @@ body.liquid-surface-disabled .log-card::before { content: none; }
   --ios-glass-border: rgba(255, 255, 255, 0.78);
   --ios-glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.92), inset 0 -1px 0 rgba(70, 92, 116, 0.08);
   --ios-glass-shadow: 0 18px 44px rgba(28, 38, 50, 0.13), 0 4px 12px rgba(28, 38, 50, 0.06);
-  --ios-glass-blur: blur(24px) saturate(175%);
+  --ios-glass-blur: blur(14px) saturate(132%);
   --liquid-indicator-bg: linear-gradient(145deg, rgba(255, 255, 255, 0.72), rgba(224, 239, 251, 0.38));
   --liquid-indicator-border: rgba(255, 255, 255, 0.92);
   --liquid-indicator-shadow: inset 0 1.5px 1px rgba(255, 255, 255, 0.98), inset 0 -2px 5px rgba(31, 83, 126, 0.1), 0 7px 18px rgba(28, 72, 112, 0.15);
-  --liquid-indicator-blur: blur(13px) saturate(190%) contrast(1.06);
+  --liquid-indicator-blur: blur(6px) saturate(140%) contrast(1.03);
   --glass-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(245, 249, 252, 0.58));
   --glass-bg-strong: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(245, 249, 252, 0.7));
   --glass-border: rgba(255, 255, 255, 0.76);
@@ -571,8 +608,8 @@ body::before {
 
 .app-container { padding-top: calc(var(--safe-top) + 10px); }
 .page { max-width: 680px; margin-inline: auto; }
-.page.active { animation: pageEnter 220ms ease both; }
-@keyframes pageEnter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+.page.active { animation: pageEnter 180ms ease-out both; }
+@keyframes pageEnter { from { opacity: 0; transform: translate3d(0,4px,0); } to { opacity: 1; transform: translate3d(0,0,0); } }
 .module-status-card.is-settled { animation: none; }
 .page-header { margin: 2px 0 18px; }
 .page-title { font-size: 28px; font-weight: 760; line-height: 1.14; }
@@ -802,17 +839,17 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
 .btn-secondary { background: var(--color-surface-overlay); box-shadow: none; }
 
 .bottom-nav {
-  bottom: calc(8px + var(--safe-bottom));
-  width: min(calc(100vw - 28px), 356px);
+  bottom: calc(12px + var(--safe-bottom));
+  width: min(calc(100vw - 24px), 312px);
   height: 64px;
-  padding: 5px;
-  border-radius: 28px;
+  padding: 4px;
+  border-radius: 32px;
   background: var(--ios-glass-bg);
   border-color: var(--ios-glass-border);
   box-shadow: var(--ios-glass-edge), var(--ios-glass-shadow);
   backdrop-filter: var(--ios-glass-blur);
   -webkit-backdrop-filter: var(--ios-glass-blur);
-  overflow: visible;
+  overflow: hidden;
 }
 .bottom-nav::before {
   background:
@@ -821,14 +858,14 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
   opacity: 0.78;
 }
 .nav-indicator {
-  top: 5px;
-  height: calc(100% - 10px);
-  border-radius: 23px;
+  top: 4px;
+  height: calc(100% - 8px);
+  border-radius: 28px;
   backdrop-filter: var(--liquid-indicator-blur);
   -webkit-backdrop-filter: var(--liquid-indicator-blur);
-  transform: translateZ(0) scaleX(var(--nav-indicator-scale-x, 1)) scaleY(var(--nav-indicator-scale-y, 1));
+  transform: scaleX(var(--nav-indicator-scale-x, 1)) scaleY(var(--nav-indicator-scale-y, 1));
   scale: 1;
-  transition: scale 430ms cubic-bezier(0.16, 1, 0.3, 1), transform 90ms linear, box-shadow 260ms ease, filter 260ms ease;
+  transition: box-shadow 180ms ease, filter 180ms ease;
 }
 .nav-indicator::before {
   content: "";
@@ -851,27 +888,24 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
 [data-theme="dark"] .nav-indicator::after {
   content: none;
 }
-.bottom-nav.is-pressing { --nav-panel-scale: 1.018; }
-.bottom-nav.is-moving { --nav-panel-scale: 1.01; }
-.bottom-nav.dragging { --nav-panel-scale: 1.018; }
-.bottom-nav.is-moving .nav-indicator { scale: 1.08; }
+.bottom-nav.is-pressing { --nav-panel-scale: 1; }
+.bottom-nav.dragging { --nav-panel-scale: 1; }
 .bottom-nav.is-pressing .nav-indicator,
 .bottom-nav.dragging .nav-indicator {
-  scale: 1.28;
   filter: saturate(1.08) brightness(1.04);
-  box-shadow: inset 0 2px 2px rgba(255,255,255,0.96), inset 0 -3px 7px rgba(31,83,126,0.12), 0 12px 26px rgba(28,72,112,0.2);
+  box-shadow: inset 0 2px 2px rgba(255,255,255,0.96), inset 0 -3px 7px rgba(31,83,126,0.12), 0 7px 16px rgba(28,72,112,0.16);
 }
 .nav-item {
-  border-radius: 22px;
-  transition: color var(--transition-normal), transform 430ms cubic-bezier(0.16, 1, 0.3, 1), text-shadow var(--transition-normal);
+  border-radius: 28px;
+  transition: color 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.nav-icon { transition: transform 430ms cubic-bezier(0.16, 1, 0.3, 1), filter var(--transition-normal); }
-.nav-item.is-under-lens { transform: translateY(-1px) scale(1.04); text-shadow: 0 4px 12px rgba(22,119,210,0.12); }
+.nav-icon { transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), filter 180ms ease; }
+.nav-item.is-under-lens { transform: none; }
 .bottom-nav.is-pressing .nav-item.is-press-target,
-.bottom-nav.dragging .nav-item.is-under-lens { transform: translateY(-3px) scale(1.16); }
-.nav-item.active .nav-icon { transform: translateY(-1px) scale(1.06); filter: drop-shadow(0 4px 8px rgba(22,119,210,0.16)); }
+.bottom-nav.dragging .nav-item.is-under-lens { transform: scale(1.1); }
+.nav-item.active .nav-icon { transform: none; filter: none; }
 .bottom-nav.is-pressing .nav-item.is-press-target .nav-icon,
-.bottom-nav.dragging .nav-item.is-under-lens .nav-icon { transform: translateY(-1px) scale(1.08); }
+.bottom-nav.dragging .nav-item.is-under-lens .nav-icon { transform: none; }
 body.liquid-glass-disabled .bottom-nav::before,
 body.liquid-glass-disabled .nav-indicator::before,
 body.liquid-glass-disabled .nav-indicator::after { content: none; }
@@ -1050,7 +1084,7 @@ body.srx-lens-ready .srx-lens::before {
 }
 
 /* 折射生效时底栏与指示器交出底色，只保留光学结构 */
-body.srx-lens-ready .bottom-nav { overflow: visible; }
+body.srx-lens-ready .bottom-nav { overflow: hidden; }
 body.srx-lens-ready .nav-indicator {
   background: rgba(255, 255, 255, 0.16);
   border-color: rgba(255, 255, 255, 0.5);
@@ -1111,4 +1145,129 @@ body.srx-lens-ready .user-tab.active {
 body.srx-lens-ready .setting-option-row.selected {
   background: var(--color-primary-bg);
   border-color: var(--color-primary-border);
+}
+
+/* 关闭材质模糊后提高底色不透明度，折射仍由液态玻璃开关独立控制。 */
+body.blur-effect-disabled.srx-lens-ready .srx-lens {
+  background: var(--color-surface-elevated);
+}
+
+body.srx-lens-ready .modal-sheet.update-dialog-sheet .update-dialog,
+body.srx-lens-ready .modal-sheet.update-dialog-sheet .update-dialog-actions {
+  background: transparent;
+}
+body.liquid-surface-disabled .modal-sheet.update-dialog-sheet .update-dialog,
+body.liquid-surface-disabled .modal-sheet.update-dialog-sheet .update-dialog-actions {
+  background: transparent;
+}
+
+/* 小型开关沿用原有轨道与圆形滑块，只把轨道接入折射层。 */
+body.srx-lens-ready .toggle.srx-lens {
+  --toggle-thumb-scale: 1;
+  isolation: isolate;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.42);
+  overflow: visible;
+  transform: translateZ(0) scale(1);
+  transform-origin: center;
+  transition:
+    transform 430ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 260ms ease,
+    background var(--transition-normal),
+    border-color var(--transition-normal),
+    box-shadow 430ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.58),
+    inset 0 -1px 0 rgba(70, 92, 116, 0.08),
+    0 5px 14px rgba(28, 38, 50, 0.1);
+}
+body.srx-lens-ready .toggle.srx-lens.on {
+  background: color-mix(in srgb, var(--color-primary) 56%, transparent);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+[data-theme="dark"] body.srx-lens-ready .toggle.srx-lens {
+  background: rgba(30, 38, 48, 0.3);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+[data-theme="dark"] body.srx-lens-ready .toggle.srx-lens.on {
+  background: color-mix(in srgb, var(--color-primary) 48%, transparent);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+body.srx-lens-ready .toggle.srx-lens::before {
+  content: "";
+  position: absolute;
+  inset: -9px 0;
+  z-index: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at var(--toggle-touch-x, 70%) var(--toggle-touch-y, 30%),
+    color-mix(in srgb, var(--color-primary) 52%, white),
+    transparent 68%
+  );
+  filter: blur(8px);
+  opacity: 0;
+  transform: scale(0.76);
+  transition: opacity 220ms ease, transform 430ms cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+body.srx-lens-ready .toggle.srx-lens::after {
+  content: "";
+  position: absolute;
+  inset: auto;
+  top: 50%;
+  left: 3px;
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.94);
+  transform: translateY(-50%) scale(var(--toggle-thumb-scale));
+  transition:
+    transform 430ms cubic-bezier(0.16, 1, 0.3, 1),
+    background var(--transition-normal),
+    box-shadow 360ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 240ms ease;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.84),
+    0 2px 6px rgba(24, 32, 42, 0.2);
+  opacity: 1;
+  mask: none;
+  -webkit-mask: none;
+  pointer-events: none;
+}
+body.srx-lens-ready .toggle.srx-lens.on::after {
+  transform: translateX(18px) translateY(-50%) scale(var(--toggle-thumb-scale));
+}
+body.srx-lens-ready .toggle.srx-lens.is-liquid-pressing {
+  --toggle-thumb-scale: 1.3;
+  transform: translateZ(0) scale(1.16);
+  filter: saturate(1.2) brightness(1.06);
+  border-color: rgba(255, 255, 255, 0.68);
+  box-shadow:
+    inset 0 2px 2px rgba(255, 255, 255, 0.92),
+    inset 0 -2px 5px rgba(46, 89, 132, 0.14),
+    0 10px 24px color-mix(in srgb, var(--color-primary) 34%, transparent);
+}
+body.srx-lens-ready .toggle.srx-lens.is-liquid-pressing::before,
+body.srx-lens-ready .toggle.srx-lens.is-liquid-burst::before {
+  opacity: 0.72;
+  transform: scale(1.24);
+}
+body.srx-lens-ready .toggle.srx-lens.is-liquid-pressing::after {
+  filter: brightness(1.08) saturate(1.16);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.98),
+    0 5px 13px color-mix(in srgb, var(--color-primary) 38%, rgba(24, 32, 42, 0.24));
+}
+body.srx-lens-ready .toggle.srx-lens.is-liquid-burst {
+  animation: liquidToggleRelease 460ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes liquidToggleRelease {
+  0% { transform: translateZ(0) scale(1.16); }
+  42% { transform: translateZ(0) scale(0.96); }
+  72% { transform: translateZ(0) scale(1.045); }
+  100% { transform: translateZ(0) scale(1); }
 }

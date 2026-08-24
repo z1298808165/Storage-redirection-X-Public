@@ -55,6 +55,9 @@ import androidx.navigationevent.NavigationEventInfo
 import androidx.navigationevent.compose.NavigationBackHandler
 import androidx.navigationevent.compose.NavigationEventState
 import androidx.navigationevent.compose.rememberNavigationEventState
+import com.kyant.backdrop.backdrops.layerBackdrop as kyantLayerBackdrop
+import com.kyant.backdrop.backdrops.rememberCombinedBackdrop as rememberKyantCombinedBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop as rememberKyantLayerBackdrop
 import org.srx.manager.data.AppFilter
 import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.UiPreferences
@@ -257,6 +260,11 @@ private fun SrxManagerApp(
   val backdropEnabled = blurAvailable && (prefs.blurEffect || prefs.liquidGlass)
   val blurBackdrop = rememberBlurBackdrop(prefs.blurEffect && blurAvailable)
   val glassScene = rememberLiveGlassBackdropScene(enabled = backdropEnabled)
+  val kyantEnabled = prefs.liquidGlass && blurAvailable
+  val kyantBackgroundBackdrop = rememberKyantLayerBackdrop()
+  val kyantContentBackdrop = rememberKyantLayerBackdrop()
+  val kyantBackdrop = rememberKyantCombinedBackdrop(kyantBackgroundBackdrop, kyantContentBackdrop)
+  val activeKyantBackdrop = kyantBackdrop.takeIf { kyantEnabled }
   val backEventState = rememberNavigationEventState(NavigationEventInfo.None)
   fun popNavBackStack() {
     if (navBackStack.size > 1) {
@@ -354,6 +362,7 @@ private fun SrxManagerApp(
                   blurBackdrop = blurBackdrop,
                   backdrop = glassScene.backdrop,
                   dialogBackdrop = glassScene.activeBackdrop,
+                  kyantBackdrop = activeKyantBackdrop,
               )
             } else {
               BottomNavigation(
@@ -363,6 +372,7 @@ private fun SrxManagerApp(
                   prefs = prefs,
                   blurBackdrop = blurBackdrop,
                   backdrop = glassScene.backdrop,
+                  kyantBackdrop = activeKyantBackdrop,
               )
             }
           }
@@ -469,12 +479,29 @@ private fun SrxManagerApp(
 
     Box(modifier = Modifier.fillMaxSize()) {
       Box(
-          modifier = Modifier.fillMaxSize().appMeshBackground().liveGlassBackgroundLayer(glassScene)
+          modifier =
+              Modifier.fillMaxSize()
+                  .then(
+                      if (kyantEnabled) Modifier.kyantLayerBackdrop(kyantBackgroundBackdrop)
+                      else Modifier
+                  )
+                  .appMeshBackground()
+                  .liveGlassBackgroundLayer(glassScene)
       )
       Box(modifier = Modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalSrxBackdrop provides glassScene.activeBackgroundBackdrop) {
+        CompositionLocalProvider(
+            LocalSrxBackdrop provides glassScene.activeBackgroundBackdrop,
+            LocalSrxOverlayBackdrop provides glassScene.activeBackdrop,
+            LocalSrxKyantBackdrop provides kyantBackgroundBackdrop.takeIf { kyantEnabled },
+        ) {
           Box(
-              modifier = Modifier.fillMaxSize().liveGlassContentLayer(glassScene),
+              modifier =
+                  Modifier.fillMaxSize()
+                      .then(
+                          if (kyantEnabled) Modifier.kyantLayerBackdrop(kyantContentBackdrop)
+                          else Modifier
+                      )
+                      .liveGlassContentLayer(glassScene),
           ) {
             NavDisplay(
                 backStack = navBackStack,
@@ -571,7 +598,10 @@ private fun SrxManagerApp(
           }
         }
 
-        CompositionLocalProvider(LocalSrxBackdrop provides glassScene.activeBackdrop) {
+        CompositionLocalProvider(
+            LocalSrxBackdrop provides glassScene.activeBackdrop,
+            LocalSrxKyantBackdrop provides activeKyantBackdrop,
+        ) {
           AnimatedVisibility(
               visible = state.busy,
               modifier = Modifier.fillMaxSize(),

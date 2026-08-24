@@ -49,90 +49,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.fastRoundToInt
 import androidx.compose.ui.util.lerp
-import kotlin.math.PI
+import com.kyant.backdrop.Backdrop as KyantBackdrop
+import com.kyant.backdrop.backdrops.layerBackdrop as kyantLayerBackdrop
+import com.kyant.backdrop.backdrops.rememberCombinedBackdrop as rememberKyantCombinedBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop as rememberKyantLayerBackdrop
+import com.kyant.backdrop.drawBackdrop as kyantDrawBackdrop
+import com.kyant.backdrop.effects.blur as kyantBlur
+import com.kyant.backdrop.effects.lens as kyantLens
+import com.kyant.backdrop.effects.vibrancy as kyantVibrancy
+import com.kyant.backdrop.highlight.Highlight as KyantHighlight
+import com.kyant.backdrop.shadow.InnerShadow as KyantInnerShadow
+import com.kyant.backdrop.shadow.Shadow as KyantShadow
 import kotlin.math.abs
-import kotlin.math.cos
 import kotlin.math.sign
-import kotlin.math.sin
-import kotlin.math.sqrt
 import kotlinx.coroutines.launch
-import org.srx.manager.ui.liquid.InnerShadow
-import org.srx.manager.ui.liquid.innerShadow
-import org.srx.manager.ui.liquid.lens
-import org.srx.manager.ui.liquid.rememberCombinedBackdrop
-import org.srx.manager.ui.liquid.vibrancy
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
-import top.yukonga.miuix.kmp.blur.highlight.BloomStroke
-import top.yukonga.miuix.kmp.blur.highlight.Highlight
-import top.yukonga.miuix.kmp.blur.highlight.LightPosition
-import top.yukonga.miuix.kmp.blur.highlight.LightSource
-import top.yukonga.miuix.kmp.blur.layerBackdrop
-import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.sensor.rememberDeviceTilt
 import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 val LocalFloatingBottomBarTabScale = staticCompositionLocalOf { { 1f } }
-
-private val IndicatorHighlight: Highlight =
-    Highlight(
-        width = 1.dp,
-        alpha = 1f,
-        style =
-            BloomStroke(
-                color = Color.White.copy(alpha = 0.12f),
-                innerBlurRadius = 2.dp,
-                primaryLight =
-                    LightSource(
-                        position = LightPosition(0.5f, -0.3f, -0.05f),
-                        color = Color.White,
-                        intensity = 1f,
-                    ),
-                secondaryLight =
-                    LightSource(
-                        position = LightPosition(0.5f, 0.8f, -0.5f),
-                        color = Color.White,
-                        intensity = 0.4f,
-                    ),
-                dualPeak = true,
-            ),
-    )
-
-@Composable
-private fun rememberGravityRotatedHighlight(base: Highlight, extraDegrees: Float = 0f): Highlight {
-  val baseStyle = base.style as BloomStroke
-  val tilt by rememberDeviceTilt()
-  val rotatedPrimary =
-      remember(tilt, baseStyle.primaryLight, extraDegrees) {
-        val gx = tilt.gravityX
-        val gy = tilt.gravityY
-        val magSq = gx * gx + gy * gy
-        val (lx0, ly0) =
-            if (magSq > 0.01f) {
-              val inv = 1f / sqrt(magSq)
-              gx * inv to gy * inv
-            } else {
-              0f to -1f
-            }
-        val rad = extraDegrees * PI / 180.0
-        val c = cos(rad).toFloat()
-        val s = sin(rad).toFloat()
-        baseStyle.primaryLight.copy(
-            position =
-                LightPosition(
-                    x = 0.5f + c * lx0 - s * ly0,
-                    y = 0.7f + s * lx0 + c * ly0,
-                    z = baseStyle.primaryLight.position.z,
-                ),
-        )
-      }
-  return remember(base, rotatedPrimary) {
-    base.copy(style = baseStyle.copy(primaryLight = rotatedPrimary))
-  }
-}
 
 @Composable
 fun RowScope.FloatingBottomBarItem(
@@ -169,6 +107,7 @@ fun FloatingBottomBar(
     selectedIndex: Int,
     onSelected: (Int) -> Unit,
     backdrop: Backdrop,
+    kyantBackdrop: KyantBackdrop? = null,
     tabsCount: Int,
     isBlurEnabled: Boolean = true,
     isLiquidGlassEnabled: Boolean = true,
@@ -177,7 +116,7 @@ fun FloatingBottomBar(
 ) {
   val isDark = isSrxDarkTheme()
   val effectsSupported = isRenderEffectSupported()
-  val liquid = isLiquidGlassEnabled && effectsSupported
+  val liquid = isLiquidGlassEnabled && effectsSupported && kyantBackdrop != null
   val blurEnabled = isBlurEnabled && effectsSupported
   val pillShape = CircleShape
   val accent = MiuixTheme.colorScheme.primary
@@ -190,7 +129,7 @@ fun FloatingBottomBar(
         blurEnabled -> surface.copy(alpha = if (isDark) 0.82f else 0.88f)
         else -> solidSurface
       }
-  val tabsBackdrop = rememberLayerBackdrop()
+  val tabsBackdrop = rememberKyantLayerBackdrop()
   val density = LocalDensity.current
   val barHeight = 64.dp
   val barInset = 4.dp
@@ -284,9 +223,7 @@ fun FloatingBottomBar(
             },
         )
       }
-  val baseHighlight = rememberGravityRotatedHighlight(IndicatorHighlight, -45f)
-  val pillHighlight = rememberGravityRotatedHighlight(IndicatorHighlight, 90f)
-  val combinedBackdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop)
+  val combinedBackdrop = kyantBackdrop?.let { rememberKyantCombinedBackdrop(it, tabsBackdrop) }
 
   Box(modifier = modifier.width(IntrinsicSize.Min), contentAlignment = Alignment.CenterStart) {
     Row(
@@ -302,29 +239,36 @@ fun FloatingBottomBar(
             )
             .clickable(remember { MutableInteractionSource() }, null) {}
             .then(
-                if (liquid || blurEnabled) {
+                if (liquid) {
+                  Modifier.kyantDrawBackdrop(
+                      backdrop = requireNotNull(kyantBackdrop),
+                      shape = { pillShape },
+                      effects = {
+                        kyantVibrancy()
+                        if (blurEnabled) kyantBlur(8.dp.toPx())
+                        kyantLens(24.dp.toPx(), 24.dp.toPx())
+                      },
+                      highlight = { KyantHighlight.Default.copy(alpha = 0.75f) },
+                      shadow = {
+                        KyantShadow(
+                            radius = 10.dp,
+                            color = Color.Black.copy(alpha = if (isDark) 0.2f else 0.1f),
+                        )
+                      },
+                      layerBlock = {
+                        val width = size.width.coerceAtLeast(1f)
+                        val s = lerp(1f, 1f + 16.dp.toPx() / width, drag.pressProgress)
+                        scaleX = s
+                        scaleY = s
+                      },
+                      onDrawSurface = { drawRect(container) },
+                  )
+                } else if (blurEnabled) {
                   Modifier.drawBackdrop(
                       backdrop = backdrop,
                       shape = { pillShape },
-                      effects = {
-                        if (liquid) vibrancy()
-                        if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx())
-                        if (liquid) {
-                          lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
-                        }
-                      },
-                      highlight = if (liquid) ({ baseHighlight.copy(alpha = 0.75f) }) else null,
-                      layerBlock =
-                          if (liquid) {
-                            {
-                              val width = size.width.coerceAtLeast(1f)
-                              val s = lerp(1f, 1f + 16.dp.toPx() / width, drag.pressProgress)
-                              scaleX = s
-                              scaleY = s
-                            }
-                          } else {
-                            null
-                          },
+                      effects = { if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx()) },
+                      highlight = null,
                       onDrawSurface = { drawRect(container) },
                   )
                 } else {
@@ -345,16 +289,18 @@ fun FloatingBottomBar(
         Row(
             Modifier.clearAndSetSemantics {}
                 .alpha(0f)
-                .layerBackdrop(tabsBackdrop)
+                .kyantLayerBackdrop(tabsBackdrop)
                 .graphicsLayer { translationX = panelOffset }
-                .drawBackdrop(
-                    backdrop = backdrop,
+                .kyantDrawBackdrop(
+                    backdrop = requireNotNull(kyantBackdrop),
                     shape = { pillShape },
                     effects = {
-                      vibrancy()
-                      if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx())
-                      lens(refractionHeight = 24.dp.toPx(), refractionAmount = 24.dp.toPx())
+                      kyantVibrancy()
+                      if (blurEnabled) kyantBlur(8.dp.toPx())
+                      kyantLens(24.dp.toPx(), 24.dp.toPx())
                     },
+                    highlight = { KyantHighlight.Default.copy(alpha = 0.75f) },
+                    shadow = null,
                     onDrawSurface = { drawRect(container) },
                 )
                 .then(interactiveHighlight.modifier)
@@ -381,22 +327,30 @@ fun FloatingBottomBar(
                     if (enableDrag) interactiveHighlight.gestureModifier.then(drag.modifier)
                     else Modifier
                 )
-                .drawBackdrop(
-                    backdrop = combinedBackdrop,
+                .kyantDrawBackdrop(
+                    backdrop = requireNotNull(combinedBackdrop),
                     shape = { pillShape },
                     effects = {
-                      if (liquid) {
-                        val progress = drag.pressProgress
-                        lens(
-                            refractionHeight = 10.dp.toPx() * progress,
-                            refractionAmount = 14.dp.toPx() * progress,
-                            depthEffect = true,
-                            chromaticAberration = 0.5f,
-                        )
-                      }
+                      val progress = drag.pressProgress
+                      kyantLens(
+                          10.dp.toPx() * progress,
+                          14.dp.toPx() * progress,
+                          chromaticAberration = true,
+                      )
                     },
-                    highlight =
-                        if (liquid) ({ pillHighlight.copy(alpha = drag.pressProgress) }) else null,
+                    highlight = { KyantHighlight.Default.copy(alpha = drag.pressProgress) },
+                    shadow = {
+                      KyantShadow(
+                          radius = 8.dp,
+                          color = Color.Black.copy(alpha = 0.12f * drag.pressProgress),
+                      )
+                    },
+                    innerShadow = {
+                      KyantInnerShadow(
+                          radius = 8.dp * drag.pressProgress,
+                          alpha = drag.pressProgress,
+                      )
+                    },
                     layerBlock = {
                       scaleX = drag.scaleX
                       scaleY = drag.scaleY
@@ -412,21 +366,8 @@ fun FloatingBottomBar(
                               else Color.Black.copy(alpha = 0.1f),
                           alpha = 1f - progress,
                       )
-                      if (liquid) drawRect(Color.Black.copy(alpha = 0.03f * progress))
+                      drawRect(Color.Black.copy(alpha = 0.03f * progress))
                     },
-                )
-                .then(
-                    if (liquid) {
-                      Modifier.innerShadow(pillShape) {
-                        InnerShadow(
-                            radius = 8.dp * drag.pressProgress,
-                            color = Color.Black.copy(alpha = 0.15f),
-                            alpha = drag.pressProgress,
-                        )
-                      }
-                    } else {
-                      Modifier
-                    }
                 )
                 .height(selectedHeight)
                 .width(tabWidth),

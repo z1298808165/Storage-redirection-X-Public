@@ -1,5 +1,11 @@
 package org.srx.manager
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,6 +25,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -39,10 +48,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
+import com.kyant.backdrop.Backdrop as KyantBackdrop
 import kotlin.math.roundToInt
 import org.srx.manager.ui.component.liquidGlassControl
 import org.srx.manager.ui.component.liquidPressScale
@@ -66,6 +75,7 @@ import top.yukonga.miuix.kmp.blur.highlight.Highlight
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.utils.MiuixPopupUtils
 
 @Composable
 internal fun srxSuccessColor(): Color =
@@ -95,6 +105,8 @@ private val FloatingGlassHighlight: Highlight =
     )
 
 internal val LocalSrxBackdrop = staticCompositionLocalOf<Backdrop?> { null }
+internal val LocalSrxOverlayBackdrop = staticCompositionLocalOf<Backdrop?> { null }
+internal val LocalSrxKyantBackdrop = staticCompositionLocalOf<KyantBackdrop?> { null }
 
 @Composable
 internal fun isSrxBackdropEffectEnabled(): Boolean =
@@ -127,6 +139,7 @@ internal fun Modifier.glassPanel(
     shape: Shape,
     shadowAlpha: Float = 0.08f,
     surfaceAlpha: Float = 0.68f,
+    minimumSurfaceAlpha: Float = 0.48f,
 ): Modifier {
   val dark = isSrxDarkTheme()
   val liquid = isSrxLiquidGlassEnabled()
@@ -137,7 +150,7 @@ internal fun Modifier.glassPanel(
       when {
         liquid && blurEnabled ->
             MiuixTheme.colorScheme.surfaceContainer.copy(
-                alpha = (surfaceAlpha * 0.85f).coerceIn(0.48f, 0.72f)
+                alpha = (surfaceAlpha * 0.85f).coerceIn(minimumSurfaceAlpha, 0.72f)
             )
         liquid ->
             MiuixTheme.colorScheme.surfaceContainerHigh.copy(
@@ -266,69 +279,81 @@ internal fun CenteredDialog(
     title: String? = null,
     summary: String? = null,
     denseSurface: Boolean = false,
+    modifier: Modifier = Modifier,
+    maxWidth: Dp = 360.dp,
+    outsideMargin: DpSize = DpSize(28.dp, 28.dp),
+    insideMargin: DpSize = DpSize(24.dp, 24.dp),
     onDismiss: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-  if (!show) return
+  val backdrop = LocalSrxOverlayBackdrop.current ?: LocalSrxBackdrop.current
+  val shape = RoundedCornerShape(30.dp)
   val dark = isSrxDarkTheme()
+  val visible = remember { mutableStateOf(show) }
   val outsideClick = remember { MutableInteractionSource() }
   val insideClick = remember { MutableInteractionSource() }
-  Dialog(
-      onDismissRequest = onDismiss,
-      properties = DialogProperties(usePlatformDefaultWidth = false),
+  LaunchedEffect(show) { visible.value = show }
+  MiuixPopupUtils.DialogLayout(
+      visible = visible,
+      enterTransition = fadeIn(tween(160)) + scaleIn(tween(180), initialScale = 0.96f),
+      exitTransition = fadeOut(tween(140)) + scaleOut(tween(140), targetScale = 0.96f),
+      enableWindowDim = false,
+      enableAutoLargeScreen = false,
+      renderInRootScaffold = true,
   ) {
-    Box(
-        modifier =
-            Modifier.fillMaxSize()
-                .background(
-                    if (dark) Color.Black.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.08f)
-                )
-                .clickable(
-                    interactionSource = outsideClick,
-                    indication = null,
-                    onClick = onDismiss,
-                ),
-        contentAlignment = Alignment.Center,
-    ) {
-      GlassCard(
+    BackHandler(enabled = show, onBack = onDismiss)
+    CompositionLocalProvider(LocalSrxBackdrop provides backdrop) {
+      Box(
           modifier =
-              Modifier.fillMaxWidth()
-                  .padding(horizontal = 28.dp)
-                  .widthIn(max = 360.dp)
-                  .then(
-                      if (denseSurface) {
-                        Modifier.background(
-                            MiuixTheme.colorScheme.surfaceContainerHigh.copy(
-                                alpha = if (dark) 0.82f else 0.76f
-                            ),
-                            RoundedCornerShape(30.dp),
-                        )
-                      } else {
-                        Modifier
-                      }
+              Modifier.fillMaxSize()
+                  .background(
+                      if (dark) Color.Black.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.08f)
                   )
                   .clickable(
-                      interactionSource = insideClick,
+                      interactionSource = outsideClick,
                       indication = null,
-                  ) {},
-          cornerRadius = 30.dp,
-          insideMargin = PaddingValues(24.dp),
-          alpha = 1f,
-          shadowAlpha = 0.2f,
+                      onClick = onDismiss,
+                  ),
+          contentAlignment = Alignment.Center,
       ) {
-        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-          if (title != null) {
-            Text(title, fontWeight = FontWeight.Black, fontSize = 17.sp, lineHeight = 21.sp)
+        Card(
+            modifier =
+                modifier
+                    .padding(horizontal = outsideMargin.width)
+                    .widthIn(max = maxWidth)
+                    .fillMaxWidth()
+                    .glassPanel(
+                        shape = shape,
+                        shadowAlpha = 0.2f,
+                        surfaceAlpha = if (denseSurface) 0.68f else 0.42f,
+                        minimumSurfaceAlpha = if (denseSurface) 0.44f else 0.3f,
+                    )
+                    .clickable(
+                        interactionSource = insideClick,
+                        indication = null,
+                    ) {},
+            cornerRadius = 30.dp,
+            insideMargin =
+                PaddingValues(
+                    horizontal = insideMargin.width,
+                    vertical = insideMargin.height,
+                ),
+            colors = CardDefaults.defaultColors(color = Color.Transparent),
+        ) {
+          Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            if (title != null) {
+              Text(title, fontWeight = FontWeight.Black, fontSize = 17.sp, lineHeight = 21.sp)
+            }
+            if (summary != null) {
+              Text(
+                  summary,
+                  color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                  fontSize = 13.sp,
+                  lineHeight = 19.sp,
+              )
+            }
+            content()
           }
-          if (summary != null) {
-            Text(
-                summary,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-            )
-          }
-          content()
         }
       }
     }

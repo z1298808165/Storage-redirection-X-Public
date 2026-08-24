@@ -22,17 +22,17 @@
   --color-border-strong: rgba(17,24,39,0.14);
   
   /* --- 统一的 iOS 液态玻璃材质参数 --- */
-  --ios-glass-bg: rgba(255, 255, 255, 0.55);
+  --ios-glass-bg: rgba(255, 255, 255, 0.62);
   --ios-glass-border: rgba(255, 255, 255, 0.4);
   --ios-glass-edge: inset 0 1px 1px rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.3);
   --ios-glass-shadow: 0 8px 32px rgba(31, 38, 135, 0.08);
-  --ios-glass-blur: blur(24px) saturate(180%);
+  --ios-glass-blur: blur(14px) saturate(132%);
 
   /* --- 气泡指示器专属的光学参数 --- */
-  --liquid-indicator-bg: rgba(255, 255, 255, 0.65); /* 半透明以透出底部折射 */
+  --liquid-indicator-bg: rgba(255, 255, 255, 0.6); /* 半透明以透出底部折射 */
   --liquid-indicator-border: rgba(255, 255, 255, 0.8);
   --liquid-indicator-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.95), inset 0 -2px 4px rgba(0, 0, 0, 0.05), 0 4px 12px rgba(0, 0, 0, 0.1);
-  --liquid-indicator-blur: blur(12px) saturate(200%) contrast(1.1); /* 产生边缘扭曲和色彩增强 */
+  --liquid-indicator-blur: blur(6px) saturate(140%) contrast(1.03); /* 产生边缘扭曲和色彩增强 */
   
   --glass-bg: linear-gradient(180deg, rgba(255,255,255,0.78), rgba(247,250,253,0.5));
   --glass-bg-strong: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(247,250,253,0.7));
@@ -56,7 +56,7 @@
   --srx-page-padding-x: clamp(14px,4vw,24px);
   --srx-page-padding-top: 18px;
   --srx-page-padding-bottom: 10px;
-  --bottom-nav-h: 62px;
+  --bottom-nav-h: 64px;
   --safe-top: var(--window-inset-top, env(safe-area-inset-top, 0px));
   --safe-bottom: var(--window-inset-bottom, env(safe-area-inset-bottom, 0px));
   --font-family: "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Microsoft YaHei UI", sans-serif;
@@ -85,7 +85,7 @@
   --color-border-strong: rgba(137,180,255,0.14);
   
   /* 深色模式下的 iOS 玻璃材质 */
-  --ios-glass-bg: rgba(28, 28, 30, 0.55);
+  --ios-glass-bg: rgba(28, 28, 30, 0.64);
   --ios-glass-border: rgba(255, 255, 255, 0.15);
   --ios-glass-edge: inset 0 1px 1px rgba(255, 255, 255, 0.2), inset 0 0 0 1px rgba(255, 255, 255, 0.05);
   --ios-glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
@@ -220,6 +220,10 @@ body.liquid-surface-disabled .license-item {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+body.liquid-surface-disabled .update-dialog,
+body.liquid-surface-disabled .update-dialog-actions {
+  background: transparent;
+}
 
 body.liquid-surface-disabled .liquid-surface::before,
 body.liquid-surface-disabled .bottom-nav::before,
@@ -260,7 +264,7 @@ body.liquid-surface-disabled .nav-indicator::before { content: none; }
 .page#page-apps.active { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
 .page.no-animate.active { animation: none; }
 .page.leaving { animation: pageLeave 220ms cubic-bezier(0.4,0,0.2,1) both; }
-@keyframes pageEnter { from { opacity: 0; transform: translate3d(0,18px,0) scale(0.985); filter: blur(8px); } to { opacity: 1; transform: translate3d(0,0,0) scale(1); filter: blur(0); } }
+@keyframes pageEnter { from { opacity: 0; transform: translate3d(0,12px,0) scale(0.992); } to { opacity: 1; transform: translate3d(0,0,0) scale(1); } }
 @keyframes pageLeave { from { opacity: 1; } to { opacity: 0; transform: translate3d(0,-8px,0) scale(0.992); } }
 .page-header { display: flex; align-items: center; gap: 12px; margin: 4px 0 18px; }
 .page-header-text { flex: 1; min-width: 0; }
@@ -431,16 +435,16 @@ body.apps-page-active .app-container { overflow-y: hidden; overflow-x: hidden; }
 .bottom-nav { 
   --nav-rubber-x: 0px; --nav-panel-scale: 1;
   position: fixed; 
-  bottom: calc(10px + var(--safe-bottom)); 
+  bottom: calc(12px + var(--safe-bottom));
   left: 50%; 
   transform: translateX(-50%) translateX(var(--nav-rubber-x)) scale(var(--nav-panel-scale)); 
   transform-origin: 50% 100%; 
   z-index: 100; 
-  width: min(calc(100vw - 36px), 344px); 
+  width: min(calc(100vw - 24px), 312px);
   height: var(--bottom-nav-h); 
-  display: flex; align-items: center; justify-content: space-between; padding: 6px; 
+  display: flex; align-items: center; justify-content: space-between; padding: 4px;
   background: var(--ios-glass-bg); 
-  border: 1px solid var(--ios-glass-border); 
+  border: none;
   border-radius: 28px; 
   box-shadow: var(--ios-glass-edge), var(--ios-glass-shadow); 
   backdrop-filter: var(--ios-glass-blur); 
@@ -455,7 +459,7 @@ body.secondary-page-active .app-container { padding-bottom: calc(24px + var(--sa
 
 /* --- 核心：液态气泡指示器 (包含边缘扭曲与物理高光) --- */
 .nav-indicator { 
-  position: absolute; top: 6px; left: 6px; height: calc(100% - 12px); 
+  position: absolute; top: 4px; left: 4px; height: calc(100% - 8px);
   background: var(--liquid-indicator-bg); 
   border: 1px solid var(--liquid-indicator-border); 
   border-radius: var(--radius-full); 
@@ -466,10 +470,10 @@ body.secondary-page-active .app-container { padding-bottom: calc(24px + var(--sa
   -webkit-backdrop-filter: var(--liquid-indicator-blur);
   
   /* var(--nav-indicator-pop) 由 JS 注入，实现长按Q弹放大 */
-  transform: translateZ(0) scaleX(var(--nav-indicator-scale-x, 1)) scaleY(var(--nav-indicator-scale-y, 1)) scale(var(--nav-indicator-pop, 1)); 
+  transform: scaleX(var(--nav-indicator-scale-x, 1)) scaleY(var(--nav-indicator-scale-y, 1)) scale(var(--nav-indicator-pop, 1));
   transform-origin: center; 
   z-index: 4; pointer-events: none; 
-  will-change: left, width, transform; 
+  will-change: transform;
 }
 /* 增加一丝顶部的高光反射，模拟玻璃穹顶 */
 .nav-indicator::before {
@@ -479,17 +483,14 @@ body.secondary-page-active .app-container { padding-bottom: calc(24px + var(--sa
 }
 
 .bottom-nav.is-moving, .bottom-nav.dragging { --nav-panel-scale: 1.012; }
-/* 当底层拖拽时，被选中的文本通过缩放模拟中心放大的透视感 */
-.nav-item { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 4px 6px; background: none; border: none; color: var(--color-text-secondary); font-size: 10px; cursor: pointer; border-radius: var(--radius-full); transition: color var(--transition-normal), transform var(--transition-spring), text-shadow var(--transition-normal); position: relative; z-index: 5; touch-action: none; }
-.nav-item.active { color: var(--color-primary); font-weight: 760; }
-[data-theme="dark"] .nav-item.active { color: #dce9ff; }
-.nav-item.is-under-lens { transform: translateY(-2px) scale(1.12); text-shadow: 0 4px 12px rgba(47,125,255,0.15); }
+.nav-item { flex: 1 1 76px; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 4px 6px; background: none; border: none; color: var(--color-text); font-size: 11px; cursor: pointer; border-radius: var(--radius-full); transition: color var(--transition-normal), transform var(--transition-spring); position: relative; z-index: 5; touch-action: none; }
+.nav-item.active { font-weight: 760; }
 
 .nav-icon { width: 18px; height: 18px; flex-basis: 18px; display: inline-flex; align-items: center; justify-content: center; transition: transform var(--transition-spring), filter var(--transition-normal); }
-.nav-item.active .nav-icon { transform: translateY(-2px) scale(1.08); filter: drop-shadow(0 5px 10px rgba(0,0,0,0.12)); }
-.nav-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1px; white-space: nowrap; }
+.nav-label { font-size: 11px; line-height: 14px; font-weight: 650; letter-spacing: 0; white-space: nowrap; }
+.nav-item.active .nav-label { font-weight: 760; }
 
-body.nav-floating-disabled .bottom-nav { left: 0; right: 0; bottom: 0; width: 100%; height: calc(var(--bottom-nav-h) + var(--safe-bottom)); transform: none; border-radius: 0; border-inline: none; border-bottom: none; padding: 6px 6px calc(6px + var(--safe-bottom)); }
+body.nav-floating-disabled .bottom-nav { left: 0; right: 0; bottom: 0; width: 100%; height: calc(var(--bottom-nav-h) + var(--safe-bottom)); transform: none; border-radius: 0; border-inline: none; border-bottom: none; padding: 4px 4px calc(4px + var(--safe-bottom)); }
 body.nav-floating-disabled .app-container { padding-bottom: calc(var(--bottom-nav-h) + var(--safe-bottom) + 14px); }
 body.app-config-active.nav-floating-disabled .app-container { padding-bottom: calc(24px + var(--safe-bottom)); }
 body.liquid-surface-disabled .bottom-nav { background: var(--color-surface-elevated); box-shadow: var(--shadow-md); backdrop-filter: none; -webkit-backdrop-filter: none; }

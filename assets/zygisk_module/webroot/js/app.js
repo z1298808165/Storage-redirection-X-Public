@@ -35,6 +35,7 @@
     dashboardRequestId: 0,
     dashboardCountsRequestId: 0,
     dashboardLastCountsRefreshAt: 0,
+    dashboardCountsSchedule: null,
     dashboardShown: false,
     dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
@@ -58,6 +59,7 @@
     logFilteredCount: 0,
     logRenderFrame: 0,
     mediaProviderReloadRunning: false,
+    pageLoadSequence: 0,
   };
 
   const LICENSES = [
@@ -168,6 +170,12 @@
       name: "Miuix",
       license: "Apache 2.0",
       url: "https://github.com/compose-miuix-ui/miuix",
+    },
+    {
+      group: "APP / UI",
+      name: "AndroidLiquidGlass / Backdrop",
+      license: "Apache 2.0",
+      url: "https://github.com/Kyant0/AndroidLiquidGlass",
     },
     {
       group: "APP / UI",
@@ -319,14 +327,26 @@
     const opts = options || {};
     const samePage = State.currentPage === page;
     if (samePage && !opts.force) return;
+    if (State.currentPage === "dashboard" && page !== "dashboard") {
+      State.dashboardRequestId++;
+      State.dashboardCountsRequestId++;
+      cancelDashboardCountsSchedule();
+    }
     if (page === "apps" && !opts.preserveAppScroll) State.shouldRestoreAppListScroll = false;
     if (page === "logs" && !opts.preserveLogScroll) State.shouldRestoreLogListScroll = false;
     if (page !== "app-config") State.templateEditor = null;
     State.currentPage = page;
     const themeOptions = Object.assign({}, opts.themeOptions || {});
     if (page === "dashboard" && State.dashboardShown) themeOptions.noAnimation = true;
-    Theme.navigateTo(page, themeOptions);
-    loadPage(page);
+    const pageReady = Theme.navigateTo(page, themeOptions);
+    const loadSequence = ++State.pageLoadSequence;
+    const scheduleLoad = () => {
+      requestAnimationFrame(() => {
+        if (State.currentPage === page && State.pageLoadSequence === loadSequence) loadPage(page);
+      });
+    };
+    if (pageReady && typeof pageReady.then === "function") pageReady.then(scheduleLoad);
+    else loadPage(page);
     if (!opts.skipHistory) {
       if (opts.replaceHistory) replaceHistory(page, opts.historyState || {});
       else pushHistory(page, opts.historyState || {});
@@ -695,7 +715,7 @@
       if (page === "dashboard") refreshDashboardCounts({ force: true });
       return;
     }
-    routeTo(page);
+    routeTo(page, { prioritizeNav: true });
   }
 
   function initNav() {
@@ -787,7 +807,7 @@
         "详细日志",
       );
       updatePowerButton(status);
-      maybeRunStartupUpdateCheck(version);
+      scheduleStartupUpdateCheck(version);
     } catch {
       Theme.showToast("加载状态失败", "error");
     }
@@ -812,8 +832,8 @@
       setDashboardCountLoading("statEnabledAppCount", true);
     }
     const run = async () => {
+      State.dashboardCountsSchedule = null;
       try {
-        await Api.ensureLogCollectors?.();
         const [configuredConfigs, runtimeActivations] = await Promise.all([
           Api.readConfiguredAppConfigs({ force: true }),
           Api.readStatsCount(),
@@ -842,8 +862,34 @@
         }
       }
     };
-    if ("requestIdleCallback" in window) window.requestIdleCallback(run, { timeout: 900 });
-    else setTimeout(run, 32);
+    cancelDashboardCountsSchedule();
+    if ("requestIdleCallback" in window) {
+      State.dashboardCountsSchedule = {
+        idle: true,
+        id: window.requestIdleCallback(run, { timeout: 900 }),
+      };
+    } else {
+      State.dashboardCountsSchedule = { idle: false, id: setTimeout(run, 32) };
+    }
+  }
+
+  function cancelDashboardCountsSchedule() {
+    const scheduled = State.dashboardCountsSchedule;
+    if (!scheduled) return;
+    if (scheduled.idle && "cancelIdleCallback" in window) {
+      window.cancelIdleCallback(scheduled.id);
+    } else {
+      clearTimeout(scheduled.id);
+    }
+    State.dashboardCountsSchedule = null;
+  }
+
+  function scheduleStartupUpdateCheck(moduleVersion) {
+    const run = () => {
+      if (State.currentPage === "dashboard") maybeRunStartupUpdateCheck(moduleVersion);
+    };
+    if ("requestIdleCallback" in window) window.requestIdleCallback(run, { timeout: 1800 });
+    else setTimeout(run, 260);
   }
 
   function setDashboardCountLoading(id, loading) {
@@ -1454,7 +1500,7 @@
         escapeHtml(initial) +
         '"><img class="app-icon-img" src="' +
         escapeHtml(app.iconSrc) +
-        '" alt="" loading="lazy" onerror="const icon=this.closest(\'.app-icon\'); if (icon) icon.classList.add(\'fallback\'); this.remove();"></div>'
+        '" alt="" loading="lazy"></div>'
       : '<div class="app-icon fallback" data-initial="' + escapeHtml(initial) + '"></div>';
     item.innerHTML =
       iconHtml +
@@ -1701,6 +1747,29 @@
       renderLogCards({ reset: true });
       input.focus();
     });
+  }
+
+  /** 图标加载失败时回退到首字母占位，避免依赖被 CSP 拦截的内联事件。 */
+  function applyAppIconFallback(image) {
+    const holder = image.closest(".app-icon, .log-card-icon");
+    if (holder) {
+      holder.classList.remove("has-image");
+      holder.classList.add("fallback");
+    }
+    image.remove();
+  }
+
+  function initAppIconFallback() {
+    document.addEventListener(
+      "error",
+      (event) => {
+        const image = event.target;
+        if (!(image instanceof HTMLImageElement)) return;
+        if (!image.matches(".app-icon-img, .log-card-icon-img")) return;
+        applyAppIconFallback(image);
+      },
+      true,
+    );
   }
 
   function initListPerformanceControls() {
@@ -2555,8 +2624,9 @@
         channel: prefs.updateChannel,
         repository: Api.getReleaseRepository ? Api.getReleaseRepository() : undefined,
       });
-      if (update) showUpdateFoundDialog(update, currentVersionName);
-      else if (manual) Theme.showToast("已是最新版本", "success");
+      if (update && (!manual ? State.currentPage === "dashboard" : true)) {
+        showUpdateFoundDialog(update, currentVersionName);
+      } else if (manual) Theme.showToast("已是最新版本", "success");
     } catch (error) {
       if (manual) Theme.showToast("检查更新失败：" + (error?.message || "未知错误"), "error");
     } finally {
@@ -2582,7 +2652,7 @@
         "</div>"
       : "";
     showModalWithHistory(
-      '<div class="modal-title">发现新版本</div>' +
+      '<div class="update-dialog"><div class="update-dialog-header"><div class="modal-title">发现新版本</div>' +
         '<div class="update-dialog-summary">当前模块版本 ' +
         escapeHtml(currentVersionName || "--") +
         "，有新版本可用。</div>" +
@@ -2592,9 +2662,9 @@
         (updateVersionBadge(update)
           ? "<span>" + escapeHtml(updateVersionBadge(update)) + "</span>"
           : "") +
-        "</div>" +
+        "</div></div>" +
         notesHtml +
-        '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="openUpdateRelease" type="button">打开</button></div>',
+        '<div class="modal-actions update-dialog-actions"><button class="btn btn-secondary modal-close" type="button">取消</button><button class="btn btn-primary" id="openUpdateRelease" type="button">打开</button></div></div>',
       { backdropClose: true },
     );
     document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
@@ -6497,7 +6567,7 @@
         escapeHtml(initial) +
         '" aria-hidden="true"><img class="log-card-icon-img" src="' +
         escapeHtml(iconSrc) +
-        '" alt="" loading="lazy" onerror="const icon=this.closest(\'.log-card-icon\'); if (icon) { icon.classList.remove(\'has-image\'); icon.classList.add(\'fallback\'); } this.remove();"></div>'
+        '" alt="" loading="lazy"></div>'
       : '<div class="log-card-icon fallback" data-initial="' +
         escapeHtml(initial) +
         '" aria-hidden="true"></div>';
@@ -6919,6 +6989,7 @@
     initNav();
     initSearch();
     initLogSearch();
+    initAppIconFallback();
     initListPerformanceControls();
     initPullRefreshControls();
     initDashboardRefreshHooks();

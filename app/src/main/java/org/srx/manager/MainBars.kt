@@ -25,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.kyant.backdrop.Backdrop as KyantBackdrop
 import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.UiPreferences
 import org.srx.manager.ui.component.FloatingBottomBar
@@ -52,6 +53,7 @@ internal fun BottomNavigation(
     prefs: UiPreferences,
     blurBackdrop: LayerBackdrop?,
     backdrop: Backdrop,
+    kyantBackdrop: KyantBackdrop?,
 ) {
   val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   if (prefs.floatingBottomBar) {
@@ -68,6 +70,7 @@ internal fun BottomNavigation(
           selectedIndex = Page.entries.indexOf(page),
           onSelected = { if (enabled) onPageChange(Page.entries[it]) },
           backdrop = backdrop,
+          kyantBackdrop = kyantBackdrop,
           tabsCount = Page.entries.size,
           isBlurEnabled = prefs.blurEffect,
           isLiquidGlassEnabled = prefs.liquidGlass,
@@ -131,6 +134,7 @@ internal fun AppBatchActionBar(
     blurBackdrop: LayerBackdrop?,
     backdrop: Backdrop,
     dialogBackdrop: Backdrop?,
+    kyantBackdrop: KyantBackdrop?,
 ) {
   var showTemplates by remember { mutableStateOf(false) }
   var selectedIndex by remember { mutableIntStateOf(0) }
@@ -157,6 +161,7 @@ internal fun AppBatchActionBar(
           selectedIndex = selectedIndex,
           onSelected = { selectedIndex = it },
           backdrop = backdrop,
+          kyantBackdrop = kyantBackdrop,
           tabsCount = 4,
           isBlurEnabled = prefs.blurEffect,
           isLiquidGlassEnabled = prefs.liquidGlass,
@@ -264,7 +269,10 @@ internal fun AppBatchActionBar(
       }
     }
   }
-  CompositionLocalProvider(LocalSrxBackdrop provides dialogBackdrop) {
+  CompositionLocalProvider(
+      LocalSrxBackdrop provides dialogBackdrop,
+      LocalSrxKyantBackdrop provides kyantBackdrop,
+  ) {
     TemplatePickerDialog(
         show = showTemplates,
         templates = templates,
