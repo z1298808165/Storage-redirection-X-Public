@@ -36,7 +36,10 @@
     dashboardCountsRequestId: 0,
     dashboardLastCountsRefreshAt: 0,
     dashboardCountsSchedule: null,
+    dashboardCountsInFlight: null,
+    dashboardCountsGeneration: 0,
     dashboardShown: false,
+    dashboardDataLoaded: false,
     dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
     appListRequestId: 0,
@@ -330,6 +333,7 @@
     if (State.currentPage === "dashboard" && page !== "dashboard") {
       State.dashboardRequestId++;
       State.dashboardCountsRequestId++;
+      State.dashboardCountsGeneration++;
       cancelDashboardCountsSchedule();
     }
     if (page === "apps" && !opts.preserveAppScroll) State.shouldRestoreAppListScroll = false;
@@ -346,7 +350,7 @@
       });
     };
     if (pageReady && typeof pageReady.then === "function") pageReady.then(scheduleLoad);
-    else loadPage(page);
+    else scheduleLoad();
     if (!opts.skipHistory) {
       if (opts.replaceHistory) replaceHistory(page, opts.historyState || {});
       else pushHistory(page, opts.historyState || {});
@@ -769,6 +773,10 @@
 
   // ═══ Dashboard ═══
   async function loadDashboard() {
+    if (State.dashboardDataLoaded) {
+      if (!State.dashboardCountsLoaded) refreshDashboardCounts();
+      return;
+    }
     if (!State.dashboardShown) {
       State.dashboardShown = true;
       const card = document.querySelector(".module-status-card");
@@ -790,6 +798,7 @@
       if (State.currentPage !== requestPage || State.dashboardRequestId !== requestId) return;
       State.globalConfig = globalConfig;
       State.moduleStatus = status;
+      State.dashboardDataLoaded = true;
       $("#moduleVersionDisplay").textContent = version || "--";
       setFeatureChipState(
         "monitorStatusChip",
@@ -823,8 +832,11 @@
 
   function refreshDashboardCounts(options) {
     if (State.currentPage !== "dashboard") return;
+    if (State.dashboardCountsInFlight === State.dashboardCountsGeneration) return;
     const requestPage = State.currentPage;
     const requestId = ++State.dashboardCountsRequestId;
+    const requestGeneration = ++State.dashboardCountsGeneration;
+    State.dashboardCountsInFlight = requestGeneration;
     State.dashboardLastCountsRefreshAt = Date.now();
     const showInitialLoading = !State.dashboardCountsLoaded;
     if (showInitialLoading) {
@@ -835,10 +847,14 @@
       State.dashboardCountsSchedule = null;
       try {
         const [configuredConfigs, runtimeActivations] = await Promise.all([
-          Api.readConfiguredAppConfigs({ force: true }),
+          Api.readConfiguredAppConfigs(),
           Api.readStatsCount(),
         ]);
-        if (State.currentPage !== requestPage || State.dashboardCountsRequestId !== requestId)
+        if (
+          State.currentPage !== requestPage ||
+          State.dashboardCountsRequestId !== requestId ||
+          State.dashboardCountsGeneration !== requestGeneration
+        )
           return;
         const counts = countConfiguredProfiles(configuredConfigs);
         State.dashboardCountsLoaded = true;
@@ -852,13 +868,21 @@
         setDashboardCountLoading("statAppCount", false);
         setDashboardCountLoading("statEnabledAppCount", false);
       } catch {
-        if (State.currentPage === requestPage && State.dashboardCountsRequestId === requestId) {
+        if (
+          State.currentPage === requestPage &&
+          State.dashboardCountsRequestId === requestId &&
+          State.dashboardCountsGeneration === requestGeneration
+        ) {
           if (!State.dashboardCountsLoaded) {
             setDashboardCountValue("statAppCount", "--");
             setDashboardCountValue("statEnabledAppCount", "--");
           }
           setDashboardCountLoading("statAppCount", false);
           setDashboardCountLoading("statEnabledAppCount", false);
+        }
+      } finally {
+        if (State.dashboardCountsInFlight === requestGeneration) {
+          State.dashboardCountsInFlight = null;
         }
       }
     };

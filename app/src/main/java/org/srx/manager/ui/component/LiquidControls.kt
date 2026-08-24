@@ -1,9 +1,11 @@
 package org.srx.manager.ui.component
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -190,23 +192,17 @@ internal fun LiquidSwitch(
   val pressProgress by
       animateFloatAsState(
           targetValue = if (visualPressed && enabled) 1f else 0f,
-          animationSpec = spring(dampingRatio = 0.56f, stiffness = 760f),
+          animationSpec = spring(dampingRatio = 0.46f, stiffness = 560f),
           label = "liquidSwitchPress",
-      )
-  val offset by
-      animateDpAsState(
-          targetValue = if (checked) 25.dp else 4.dp,
-          animationSpec = spring(dampingRatio = 0.7f, stiffness = 987f),
-          label = "liquidSwitchOffset",
       )
   val trackTint by
       animateColorAsState(
           targetValue =
               when {
-                checked && visualPressed -> MiuixTheme.colorScheme.primary.copy(alpha = 0.58f)
-                checked -> MiuixTheme.colorScheme.primary.copy(alpha = 0.42f)
-                visualPressed -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.3f)
-                else -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.18f)
+                checked && visualPressed -> MiuixTheme.colorScheme.primary.copy(alpha = 0.86f)
+                checked -> MiuixTheme.colorScheme.primary.copy(alpha = 0.72f)
+                visualPressed -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.5f)
+                else -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.34f)
               },
           label = "liquidSwitchTrack",
       )
@@ -214,30 +210,60 @@ internal fun LiquidSwitch(
       animateColorAsState(
           targetValue =
               when {
-                checked && visualPressed -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.9f)
-                checked -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.68f)
-                visualPressed -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.78f)
-                else -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.58f)
+                checked && visualPressed -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.98f)
+                checked -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.92f)
+                visualPressed -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.94f)
+                else -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.88f)
               },
           label = "liquidSwitchThumb",
       )
   val accent = MiuixTheme.colorScheme.primary
+  val secondary = MiuixTheme.colorScheme.secondary
   val trackBackdrop = rememberKyantLayerBackdrop()
   val thumbBackdrop = rememberKyantCombinedBackdrop(backdrop, trackBackdrop)
+  var switchAppeared by remember { mutableStateOf(false) }
+  val selectionPulse = remember { Animatable(0f) }
+  val offset by
+      animateDpAsState(
+          targetValue = if (checked) 25.dp else 4.dp,
+          animationSpec =
+              if (switchAppeared) spring(dampingRatio = 0.56f, stiffness = 720f)
+              else spring(dampingRatio = 1f, stiffness = 10_000f),
+          label = "liquidSwitchOffset",
+      )
+  LaunchedEffect(checked) {
+    if (!switchAppeared) {
+      switchAppeared = true
+      selectionPulse.snapTo(0f)
+      return@LaunchedEffect
+    }
+    selectionPulse.snapTo(0f)
+    selectionPulse.animateTo(1f, tween(durationMillis = 260))
+    selectionPulse.animateTo(0f, tween(durationMillis = 520))
+  }
+  val bubbleOffsetTarget = if (checked) 21.dp else 0.dp
+  val bubbleOffset by
+      animateDpAsState(
+          targetValue = bubbleOffsetTarget,
+          animationSpec =
+              if (switchAppeared) spring(dampingRatio = 0.38f, stiffness = 430f)
+              else spring(dampingRatio = 1f, stiffness = 10_000f),
+          label = "liquidSwitchBubbleOffset",
+      )
 
   Box(
       modifier =
           modifier
               .size(49.dp, 28.dp)
               .graphicsLayer {
-                val scale = lerp(1f, 1.1f, pressProgress)
+                val scale = lerp(1f, 1.06f, pressProgress)
                 scaleX = scale
                 scaleY = scale
-                shadowElevation = (4.dp + 9.dp * pressProgress).toPx()
+                shadowElevation = (6.dp * pressProgress).toPx()
                 shape = CircleShape
                 clip = false
-                ambientShadowColor = accent.copy(alpha = 0.18f + 0.2f * pressProgress)
-                spotShadowColor = accent.copy(alpha = 0.24f + 0.28f * pressProgress)
+                ambientShadowColor = accent.copy(alpha = 0.2f * pressProgress)
+                spotShadowColor = accent.copy(alpha = 0.28f * pressProgress)
               }
               .toggleable(
                   value = checked,
@@ -261,18 +287,18 @@ internal fun LiquidSwitch(
                 backdrop = backdrop,
                 shape = { CircleShape },
                 effects = {
-                  if (blurEnabled) kyantBlur((3.dp + 1.dp * pressProgress).toPx())
+                  if (blurEnabled) kyantBlur((1.dp + 1.dp * pressProgress).toPx())
                   kyantLens(
-                      (6.dp + 3.dp * pressProgress).toPx(),
-                      (8.dp + 5.dp * pressProgress).toPx(),
+                      (3.dp + 2.dp * pressProgress).toPx(),
+                      (4.dp + 3.dp * pressProgress).toPx(),
                       chromaticAberration = true,
                   )
                 },
                 highlight = { KyantHighlight.Ambient.copy(alpha = 0.48f + 0.34f * pressProgress) },
                 shadow = {
                   KyantShadow(
-                      radius = 4.dp + 5.dp * pressProgress,
-                      color = accent.copy(alpha = 0.12f + 0.16f * pressProgress),
+                      radius = 5.dp * pressProgress,
+                      color = accent.copy(alpha = 0.16f * pressProgress),
                   )
                 },
                 innerShadow = {
@@ -285,40 +311,81 @@ internal fun LiquidSwitch(
             ),
     )
     Box(
-        Modifier.offset(x = offset)
-            .size(20.dp)
+        Modifier.offset(x = 1.dp + bubbleOffset)
+            .size(26.dp)
             .graphicsLayer {
-              val scale = lerp(1f, 1.28f, pressProgress)
-              scaleX = scale
-              scaleY = scale
-              shadowElevation = (2.dp + 8.dp * pressProgress).toPx()
-              shape = CircleShape
-              clip = false
-              ambientShadowColor = Color.White.copy(alpha = 0.2f + 0.32f * pressProgress)
-              spotShadowColor = accent.copy(alpha = 0.16f + 0.3f * pressProgress)
+              val bubbleProgress = maxOf(pressProgress, selectionPulse.value).coerceIn(0f, 1f)
+              val scale = lerp(0.72f, 1.28f, bubbleProgress)
+              scaleX = scale * if (checked) 1.04f else 1f
+              scaleY = scale * if (checked) 0.98f else 1f
+              alpha = bubbleProgress * 0.72f
             }
             .kyantDrawBackdrop(
                 backdrop = thumbBackdrop,
                 shape = { CircleShape },
                 effects = {
-                  if (blurEnabled) kyantBlur((2.dp + 1.dp * pressProgress).toPx())
+                  if (blurEnabled) kyantBlur((1.dp + 2.dp * pressProgress).toPx())
                   kyantLens(
-                      (5.dp + 2.dp * pressProgress).toPx(),
-                      (7.dp + 4.dp * pressProgress).toPx(),
+                      (4.dp + 5.dp * pressProgress).toPx(),
+                      (6.dp + 8.dp * pressProgress).toPx(),
+                      chromaticAberration = true,
+                  )
+                },
+                highlight = { KyantHighlight.Ambient.copy(alpha = 0.62f + 0.3f * pressProgress) },
+                shadow = {
+                  KyantShadow(
+                      radius = 3.dp + 5.dp * pressProgress,
+                      color = accent.copy(alpha = 0.08f + 0.16f * pressProgress),
+                  )
+                },
+                innerShadow = {
+                  KyantInnerShadow(
+                      radius = 3.dp + 4.dp * pressProgress,
+                      alpha = 0.3f + 0.3f * pressProgress,
+                  )
+                },
+                onDrawSurface = {
+                  drawRect(
+                      if (checked) accent.copy(alpha = 0.3f) else secondary.copy(alpha = 0.24f)
+                  )
+                },
+            ),
+    )
+    Box(
+        Modifier.offset(x = offset)
+            .size(20.dp)
+            .graphicsLayer {
+              val scale = lerp(1f, 1.16f, pressProgress)
+              scaleX = scale
+              scaleY = scale
+              shadowElevation = (5.dp * pressProgress).toPx()
+              shape = CircleShape
+              clip = false
+              ambientShadowColor = Color.White.copy(alpha = 0.28f * pressProgress)
+              spotShadowColor = accent.copy(alpha = 0.26f * pressProgress)
+            }
+            .kyantDrawBackdrop(
+                backdrop = thumbBackdrop,
+                shape = { CircleShape },
+                effects = {
+                  if (blurEnabled) kyantBlur((0.5.dp + 1.dp * pressProgress).toPx())
+                  kyantLens(
+                      (2.dp + 2.dp * pressProgress).toPx(),
+                      (3.dp + 3.dp * pressProgress).toPx(),
                       chromaticAberration = true,
                   )
                 },
                 highlight = { KyantHighlight.Ambient.copy(alpha = 0.72f + 0.2f * pressProgress) },
                 shadow = {
                   KyantShadow(
-                      radius = 3.dp + 5.dp * pressProgress,
-                      color = accent.copy(alpha = 0.13f + 0.2f * pressProgress),
+                      radius = 5.dp * pressProgress,
+                      color = accent.copy(alpha = 0.18f * pressProgress),
                   )
                 },
                 innerShadow = {
                   KyantInnerShadow(
-                      radius = 4.dp * pressProgress,
-                      alpha = 0.65f * pressProgress,
+                      radius = 3.dp * pressProgress,
+                      alpha = 0.55f * pressProgress,
                   )
                 },
                 onDrawSurface = { drawRect(thumbTint) },

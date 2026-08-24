@@ -17,7 +17,7 @@ const LIQUID_GLASS_MAX_FILTERS = 40;
 const LIQUID_GLASS_SCAN_DELAY = 90;
 const LIQUID_GLASS_SIZE_STEP = 2;
 const LIQUID_GLASS_REFRESH_BUDGET_MS = 6;
-const LIQUID_GLASS_REFRESH_BATCH_SIZE = 8;
+const LIQUID_GLASS_REFRESH_BATCH_SIZE = 4;
 
 // 每类表面的折射参数：blur 与 saturate 对应材质厚度，折射高度与幅度对应边缘弯曲程度。
 const LIQUID_GLASS_TARGETS = [
@@ -98,10 +98,11 @@ const LIQUID_GLASS_TARGETS = [
   },
   {
     selector: ".toggle",
-    blur: 4,
-    saturate: 1.32,
-    refractionHeight: 7,
-    refractionAmount: 9,
+    // 小尺寸开关保留边缘折射，但降低模糊与位移，避免轨道和滑块发虚。
+    blur: 1,
+    saturate: 1.16,
+    refractionHeight: 3,
+    refractionAmount: 4,
     depthEffect: true,
   },
   {
@@ -559,14 +560,16 @@ const LiquidGlass = {
     if (this._scanFrame || this._scanTimer) return;
     this._scanTimer = setTimeout(() => {
       this._scanTimer = 0;
-      this._scanFrame = requestAnimationFrame(() => {
+      const run = () => {
         this._scanFrame = 0;
         const roots = [...this._pendingScanRoots];
         this._pendingScanRoots.clear();
         roots.forEach((root) => this.scan(root));
         this._collectDetached();
         if (this._pendingScanRoots.size) this._scheduleMutationScan();
-      });
+      };
+      if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 400 });
+      else requestAnimationFrame(run);
     }, LIQUID_GLASS_SCAN_DELAY);
   },
 
