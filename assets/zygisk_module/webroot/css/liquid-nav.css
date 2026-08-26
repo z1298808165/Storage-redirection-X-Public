@@ -1,0 +1,244 @@
+/* SRX WebUI - 液态玻璃悬浮底栏
+ *
+ * 分层顺序与参考实现 IosLiquidGlassNavigationBar 一致：
+ * 面板玻璃 → 面板高光 → 真实页签 → 指示器（折射玻璃 → 强调色副本 → 表面着色 → 高光）。
+ * 折射位移贴图与高光贴图由 js/liquid-nav.js 逐像素烘焙后写入。
+ */
+
+.bottom-nav {
+  --nav-rubber-x: 0px;
+  --nav-panel-scale: 1;
+  --nav-pill-x: 0px;
+  --nav-pill-w: 0px;
+  --nav-row-w: 0px;
+  --nav-pill-scale-x: 1;
+  --nav-pill-scale-y: 1;
+  --nav-press: 0;
+  --nav-tab-scale: 1;
+  --nav-container-bg: rgba(250, 250, 250, 0.4);
+  --nav-pill-tint: rgba(0, 0, 0, 0.1);
+  --nav-panel-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  position: fixed;
+  left: 50%;
+  bottom: calc(12px + var(--safe-bottom));
+  z-index: 100;
+  width: min(calc(100vw - 48px), 420px);
+  height: var(--bottom-nav-h);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  overflow: visible;
+  transform: translateX(-50%) translateX(var(--nav-rubber-x));
+  transform-origin: 50% 100%;
+  transition: none;
+}
+
+[data-theme="dark"] .bottom-nav {
+  --nav-container-bg: rgba(18, 18, 18, 0.4);
+  --nav-pill-tint: rgba(255, 255, 255, 0.1);
+  --nav-panel-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+}
+
+.bottom-nav::before,
+.bottom-nav::after {
+  content: none;
+}
+
+/* 面板层：按压时整体轻微放大，与参考实现的 layerBlock 缩放一致。 */
+.nav-panel {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 0;
+  transform: scale(var(--nav-panel-scale));
+  transform-origin: 50% 50%;
+}
+
+.nav-panel-glass {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--nav-container-bg);
+  box-shadow: var(--nav-panel-shadow);
+}
+
+/* 高光贴图为白光 + alpha 强度，用普通合成叠加：plus-lighter 会让所在分组
+ * 变成 backdrop root，同级的 backdrop-filter 就采样不到页面背景。 */
+.nav-panel-bloom,
+.nav-pill-bloom {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  pointer-events: none;
+}
+
+.nav-panel-bloom {
+  opacity: 0.75;
+}
+
+.nav-pill-bloom {
+  opacity: var(--nav-press);
+}
+
+.nav-item {
+  position: relative;
+  z-index: 5;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  color: var(--color-text);
+  border-radius: var(--radius-full);
+  transition: color var(--transition-normal), opacity 120ms linear;
+}
+
+/* 图标与文字尺寸对齐参考实现的 22dp 图标 + 11sp 标签。 */
+.bottom-nav .nav-icon,
+.nav-accent-tab .nav-icon {
+  width: 22px;
+  height: 22px;
+  flex-basis: 22px;
+}
+
+/* 指示器覆盖当前页签，按压时真实页签淡出，只留下会随折射弯曲的强调色副本。 */
+.nav-item.is-under-lens {
+  opacity: calc(1 - var(--nav-press));
+}
+
+.nav-pill {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: var(--nav-pill-w);
+  border-radius: var(--radius-full);
+  pointer-events: none;
+  z-index: 6;
+  transform: translateX(var(--nav-pill-x)) scaleX(var(--nav-pill-scale-x))
+    scaleY(var(--nav-pill-scale-y));
+  transform-origin: 50% 50%;
+}
+
+.nav-pill-glass,
+.nav-pill-accent,
+.nav-pill-accent-lens,
+.nav-pill-tint,
+.nav-pill-shade {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* 裁剪与折射必须分层：Chromium 下同一元素既有 overflow: hidden 又有 filter 时，
+ * 滤镜输入不会被裁剪，溢出的页签副本会漏到指示器外面。 */
+.nav-pill-accent {
+  overflow: hidden;
+}
+
+.nav-pill-accent-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--nav-row-w);
+  height: 100%;
+  display: flex;
+  align-items: center;
+  transform: translateX(calc(-1 * var(--nav-pill-x)));
+}
+
+.nav-accent-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 6px;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 650;
+  transform: scale(var(--nav-tab-scale));
+}
+
+.nav-pill-tint {
+  background: var(--nav-pill-tint);
+  opacity: calc(1 - var(--nav-press));
+}
+
+/* 按压时叠加的暗化与内阴影，对应参考实现的第二层表面绘制与 InnerShadow。 */
+.nav-pill-shade {
+  background: rgba(0, 0, 0, 0.03);
+  opacity: var(--nav-press);
+  box-shadow: inset 0 calc(8px * var(--nav-press)) calc(8px * var(--nav-press))
+    rgba(0, 0, 0, 0.15);
+}
+
+/* 贴底铺满形态下面板改为直角，指示器仍保持胶囊。 */
+body.nav-floating-disabled .bottom-nav {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: calc(var(--bottom-nav-h) + var(--safe-bottom));
+  padding: 4px 4px calc(4px + var(--safe-bottom));
+  border-radius: 0;
+  transform: none;
+}
+
+body.nav-floating-disabled .nav-pill {
+  bottom: calc(4px + var(--safe-bottom));
+}
+
+body.nav-floating-disabled .nav-panel-glass {
+  box-shadow: none;
+}
+
+/* 关闭液态玻璃后退回不含折射与高光的纯色底栏。 */
+body.liquid-glass-disabled .nav-panel-bloom,
+body.liquid-glass-disabled .nav-pill-bloom,
+body.liquid-glass-disabled .nav-pill-accent,
+body.liquid-glass-disabled .nav-pill-shade,
+body.liquid-surface-disabled .nav-panel-bloom,
+body.liquid-surface-disabled .nav-pill-bloom,
+body.liquid-surface-disabled .nav-pill-accent,
+body.liquid-surface-disabled .nav-pill-shade {
+  display: none;
+}
+
+body.liquid-glass-disabled .nav-panel-glass,
+body.liquid-surface-disabled .nav-panel-glass {
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-md);
+}
+
+body.liquid-glass-disabled .nav-pill-tint,
+body.liquid-surface-disabled .nav-pill-tint {
+  background: var(--color-primary-bg);
+  opacity: 1;
+}
+
+body.liquid-glass-disabled .nav-item,
+body.liquid-surface-disabled .nav-item {
+  transition: none;
+}
+
+body.liquid-glass-disabled .nav-item.is-under-lens,
+body.liquid-surface-disabled .nav-item.is-under-lens {
+  opacity: 1;
+}
+
+body.liquid-glass-disabled .nav-item.active,
+body.liquid-surface-disabled .nav-item.active {
+  color: var(--color-primary);
+}

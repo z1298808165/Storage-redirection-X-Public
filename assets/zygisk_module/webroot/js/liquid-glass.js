@@ -20,22 +20,8 @@ const LIQUID_GLASS_REFRESH_BUDGET_MS = 6;
 const LIQUID_GLASS_REFRESH_BATCH_SIZE = 4;
 
 // 每类表面的折射参数：blur 与 saturate 对应材质厚度，折射高度与幅度对应边缘弯曲程度。
+// 悬浮底栏由 liquid-nav.js 自行分层渲染，不在这里登记。
 const LIQUID_GLASS_TARGETS = [
-  {
-    selector: ".bottom-nav",
-    blur: 11,
-    saturate: 1.28,
-    refractionHeight: 18,
-    refractionAmount: 16,
-  },
-  {
-    selector: ".nav-indicator",
-    blur: 5,
-    saturate: 1.36,
-    refractionHeight: 11,
-    refractionAmount: 14,
-    depthEffect: true,
-  },
   {
     selector: ".app-batch-bar",
     blur: 11,
@@ -186,6 +172,14 @@ const LiquidGlass = {
 
   isEnabled() {
     return this._enabled;
+  },
+
+  /**
+   * 供悬浮底栏等自建分层的模块复用同一套折射贴图算法，避免重复实现。
+   * 返回值为 PNG data URL，位移编码规则见 `_displacementDataUrl`。
+   */
+  buildDisplacementMap(spec) {
+    return this._displacementDataUrl(spec);
   },
 
   setBlurEnabled(enabled) {
@@ -462,6 +456,8 @@ const LiquidGlass = {
   /**
    * 生成折射位移贴图：R 通道编码水平位移，G 通道编码垂直位移，
    * 中性值 128 表示不偏移，位移方向沿圆角矩形距离场梯度指向内部。
+   * `chromaticAberration` 与 `spectralShift` 用于生成色散分量贴图：
+   * `spectralShift` 取 1 / 0 / -1 分别对应红、绿、蓝三个采样通道。
    */
   _displacementDataUrl(spec) {
     const width = spec.width;
@@ -471,6 +467,8 @@ const LiquidGlass = {
     if (amount <= 0 || band <= 0) return "";
     const context = this._context(width, height);
     if (!context) return "";
+    const chromatic = spec.chromaticAberration > 0 ? spec.chromaticAberration : 0;
+    const spectralShift = chromatic > 0 ? spec.spectralShift || 0 : 0;
     const image = context.createImageData(width, height);
     const data = image.data;
     const halfWidth = width / 2;
@@ -510,8 +508,15 @@ const LiquidGlass = {
           gradientY += centerY / length;
         }
         const gradientLength = Math.hypot(gradientX, gradientY) || 1;
-        const offsetX = (-amount * depth * gradientX) / gradientLength;
-        const offsetY = (-amount * depth * gradientY) / gradientLength;
+        let offsetX = (-amount * depth * gradientX) / gradientLength;
+        let offsetY = (-amount * depth * gradientY) / gradientLength;
+        if (spectralShift !== 0) {
+          // 色散强度随象限位置变化，与参考实现的 dispersionIntensity 一致。
+          const dispersion =
+            1 + spectralShift * chromatic * ((centerX * centerY) / (halfWidth * halfHeight));
+          offsetX *= dispersion;
+          offsetY *= dispersion;
+        }
         data[index] = liquidGlassChannel(offsetX, scale);
         data[index + 1] = liquidGlassChannel(offsetY, scale);
       }

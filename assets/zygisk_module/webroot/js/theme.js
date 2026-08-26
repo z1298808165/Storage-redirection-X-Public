@@ -117,6 +117,8 @@ const Theme = {
     // 折射与材质模糊分别受各自开关控制，关闭液态玻璃会立即释放全部位移滤镜。
     window.LiquidGlass?.setBlurEnabled(prefs.blurEffect !== false);
     window.LiquidGlass?.setEnabled(prefs.liquidGlass !== false);
+    window.LiquidNav?.setBlurEnabled(prefs.blurEffect !== false);
+    window.LiquidNav?.setEnabled(prefs.liquidGlass !== false);
     this.applyPageScale(prefs);
     this.applyAccentOptions(prefs);
     this.resetNavIndicator();
@@ -452,18 +454,10 @@ const Theme = {
 
   _initIndicators() {
     const nav = document.getElementById("bottomNav");
-    const navIndicator = nav?.querySelector(".nav-indicator");
-    if (nav && navIndicator) {
+    if (nav) {
       const updateNavIndicator = () => {
         const active = nav.querySelector(".nav-item.active");
-        if (active) {
-          if (nav._moveIndicatorTo) nav._moveIndicatorTo(active, true);
-          else {
-            navIndicator.style.width = active.offsetWidth + "px";
-            navIndicator.style.left = active.offsetLeft + "px";
-            this._syncNavLens(active);
-          }
-        }
+        if (active) nav._moveIndicatorTo?.(active, true);
       };
       requestAnimationFrame(updateNavIndicator);
       document.fonts?.ready.then(updateNavIndicator);
@@ -636,67 +630,173 @@ const Theme = {
 
   _bindNavDrag() {
     const nav = document.getElementById("bottomNav");
-    const indicator = nav?.querySelector(".nav-indicator");
-    if (!nav || !indicator || nav._dragBound) return;
+    if (!nav || nav._dragBound) return;
     nav._dragBound = true;
     const items = () => Array.from(nav.querySelectorAll(".nav-item"));
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
     const state = {
       pointerId: null,
-      longPressTimer: null,
       dragging: false,
       canceled: false,
+      releasePending: false,
+      dragEligible: false,
+      pressItem: null,
       activeItem: null,
-      currentX: 0,
-      currentW: 0,
-      targetX: 0,
-      targetW: 0,
-      lastClientX: 0,
+      value: 0,
+      targetValue: 0,
+      valueVelocity: 0,
       velocity: 0,
-      positionVelocity: 0,
-      widthVelocity: 0,
+      velocityTarget: 0,
+      velocityVelocity: 0,
+      pressProgress: 0,
+      pressTarget: 0,
+      pressVelocity: 0,
+      scaleX: 1,
+      scaleY: 1,
+      scaleXTarget: 1,
+      scaleYTarget: 1,
+      scaleXVelocity: 0,
+      scaleYVelocity: 0,
+      panelOffset: 0,
+      panelTarget: 0,
+      panelVelocity: 0,
+      shapeX: 1,
+      shapeY: 1,
+      lastPointerX: 0,
+      lastPointerTime: 0,
       lastFrameTime: 0,
-      pressClientX: 0,
-      pressClientY: 0,
       raf: 0,
       calibrationToken: 0,
     };
 
     nav._dragState = state;
-
-    const navRect = () => nav.getBoundingClientRect();
-    const pointerLocalX = (clientX, box = navRect()) => {
-      const layoutWidth = nav.offsetWidth || box.width;
-      if (!box.width || !layoutWidth) return 0;
-      return (clientX - box.left) * (layoutWidth / box.width);
+    // 参考实现的按压放大倍率：56dp 指示器放大到 78dp。
+    const PRESS_SCALE = 78 / 56;
+    const tabWidth = () => {
+      const first = items()[0];
+      return first?.offsetWidth || 1;
     };
-    const indicatorBounds = (width) => {
-      const style = getComputedStyle(nav);
-      const leftInset = parseFloat(style.paddingLeft) || 0;
-      const rightInset = parseFloat(style.paddingRight) || 0;
-      const contentWidth = nav.clientWidth || nav.offsetWidth || 0;
-      return {
-        min: leftInset,
-        max: Math.max(leftInset, contentWidth - rightInset - width),
+    const indexOf = (item) => Math.max(0, items().indexOf(item));
+    const syncActiveClass = (item) => {
+      items().forEach((entry) => {
+        const active = entry === item;
+        entry.classList.toggle("active", active);
+        entry.classList.toggle("is-under-lens", active);
+      });
+    };
+    const syncLensClass = (item) => {
+      items().forEach((entry) => entry.classList.toggle("is-under-lens", entry === item));
+    };
+    const applyVisualState = () => {
+      window.LiquidNav?.apply({
+        value: state.value,
+        panelOffset: state.panelOffset,
+        shapeX: state.shapeX,
+        shapeY: state.shapeY,
+        pressProgress: state.pressProgress,
+      });
+    };
+    const springStep = (value, velocity, target, stiffness, damping, frameScale) => {
+      const nextVelocity =
+        (velocity + (target - value) * stiffness * frameScale) * Math.pow(damping, frameScale);
+      return [value + nextVelocity * frameScale, nextVelocity];
+    };
+    const startAnimation = () => {
+      if (state.raf) return;
+      const frame = (time) => {
+        const frameScale = state.lastFrameTime
+          ? clamp((time - state.lastFrameTime) / 16.667, 0.5, 2)
+          : 1;
+        state.lastFrameTime = time;
+        [state.value, state.valueVelocity] = springStep(
+          state.value,
+          state.valueVelocity,
+          state.targetValue,
+          0.28,
+          0.66,
+          frameScale,
+        );
+        [state.velocity, state.velocityVelocity] = springStep(
+          state.velocity,
+          state.velocityVelocity,
+          state.velocityTarget,
+          0.1,
+          0.78,
+          frameScale,
+        );
+        [state.pressProgress, state.pressVelocity] = springStep(
+          state.pressProgress,
+          state.pressVelocity,
+          state.pressTarget,
+          0.24,
+          0.68,
+          frameScale,
+        );
+        [state.scaleX, state.scaleXVelocity] = springStep(
+          state.scaleX,
+          state.scaleXVelocity,
+          state.scaleXTarget,
+          0.24,
+          0.68,
+          frameScale,
+        );
+        [state.scaleY, state.scaleYVelocity] = springStep(
+          state.scaleY,
+          state.scaleYVelocity,
+          state.scaleYTarget,
+          0.24,
+          0.68,
+          frameScale,
+        );
+        [state.panelOffset, state.panelVelocity] = springStep(
+          state.panelOffset,
+          state.panelVelocity,
+          state.panelTarget,
+          0.12,
+          0.72,
+          frameScale,
+        );
+        const visibleItems = items();
+        const visibleIndex = clamp(Math.round(state.value), 0, visibleItems.length - 1);
+        if (visibleItems[visibleIndex]) syncLensClass(visibleItems[visibleIndex]);
+        if (
+          state.releasePending &&
+          Math.abs(state.targetValue - state.value) < Math.max(0.025, (items().length - 1) * 0.025)
+        ) {
+          state.releasePending = false;
+          state.pressTarget = 0;
+          state.scaleXTarget = 1;
+          state.scaleYTarget = 1;
+        }
+        // 基础缩放跟随按压，叠加适度的速度形变以增强流动感。
+        const baseScale = 1 + (PRESS_SCALE - 1) * state.pressProgress;
+        const velocityFactor = Math.min(0.4, Math.abs(state.velocity) / 12);
+        state.shapeX = baseScale * (1 + velocityFactor * 0.2);
+        state.shapeY = baseScale * (1 - velocityFactor * 0.12);
+        applyVisualState();
+        const moving =
+          Math.abs(state.targetValue - state.value) > 0.001 ||
+          Math.abs(state.valueVelocity) > 0.001 ||
+          Math.abs(state.velocityTarget - state.velocity) > 0.01 ||
+          Math.abs(state.velocityVelocity) > 0.01 ||
+          Math.abs(state.pressTarget - state.pressProgress) > 0.001 ||
+          Math.abs(state.pressVelocity) > 0.001 ||
+          Math.abs(state.scaleXTarget - state.scaleX) > 0.001 ||
+          Math.abs(state.scaleXVelocity) > 0.001 ||
+          Math.abs(state.scaleYTarget - state.scaleY) > 0.001 ||
+          Math.abs(state.scaleYVelocity) > 0.001 ||
+          Math.abs(state.panelTarget - state.panelOffset) > 0.001 ||
+          Math.abs(state.panelVelocity) > 0.001;
+        if (moving) state.raf = requestAnimationFrame(frame);
+        else {
+          state.raf = 0;
+          state.lastFrameTime = 0;
+        }
       };
-    };
-    const setIndicatorGeometry = (left, width) => {
-      const nextWidth = Math.max(40, Number(width) || indicator.offsetWidth || 40);
-      const bounds = indicatorBounds(nextWidth);
-      const clamped = Math.max(bounds.min, Math.min(bounds.max, left));
-      indicator.style.width = nextWidth + "px";
-      indicator.style.left = clamped + "px";
-      return clamped;
-    };
-    const cancelIndicatorAnimation = () => {
-      if (state.raf) cancelAnimationFrame(state.raf);
-      state.raf = 0;
-      state.lastFrameTime = 0;
-      state.positionVelocity = 0;
-      state.widthVelocity = 0;
+      state.raf = requestAnimationFrame(frame);
     };
     const updateLightFromPointer = (clientX, clientY) => {
-      const box = navRect();
+      const box = nav.getBoundingClientRect();
       if (!box.width || !box.height) return;
       nav.style.setProperty(
         "--nav-touch-x",
@@ -707,46 +807,16 @@ const Theme = {
         clamp(((clientY - box.top) / box.height) * 100, 0, 100).toFixed(2) + "%",
       );
     };
-    const setRubberOffset = (clientX) => {
-      // 拖动时保持底栏坐标固定，避免容器位移反过来改变指针坐标系。
-      nav.style.setProperty("--nav-rubber-x", "0px");
-    };
-    const resetLiquidMotion = () => {
-      nav.style.setProperty("--nav-rubber-x", "0px");
-      indicator.style.setProperty("--nav-indicator-scale-x", "1");
-      indicator.style.setProperty("--nav-indicator-scale-y", "1");
-    };
-    const syncActiveClass = (item) => {
-      items().forEach((n) => {
-        const active = n === item;
-        n.classList.toggle("active", active);
-        n.classList.toggle("is-under-lens", active);
-      });
-    };
-    const syncPressTarget = (item = null) => {
-      items().forEach((n) => n.classList.toggle("is-press-target", n === item));
-    };
     const setTargetFromItem = (item, immediate) => {
       if (!item) return;
       state.activeItem = item;
-      // 激活态字体权重会参与底栏布局，必须先更新 class 再读取几何值。
       syncActiveClass(item);
-      const left = item.offsetLeft;
-      const width = item.offsetWidth;
-      state.targetX = left;
-      state.targetW = width;
+      state.targetValue = indexOf(item);
       if (immediate) {
-        cancelIndicatorAnimation();
-        state.currentX = left;
-        state.currentW = width;
-        state.positionVelocity = 0;
-        state.widthVelocity = 0;
-        state.currentX = setIndicatorGeometry(left, width);
-        state.targetX = state.currentX;
-        resetLiquidMotion();
-      } else {
-        kickAnimation();
-      }
+        state.value = state.targetValue;
+        state.valueVelocity = 0;
+        applyVisualState();
+      } else startAnimation();
     };
     nav._moveIndicatorTo = (item, immediate = false) => setTargetFromItem(item, immediate);
     nav._scheduleIndicatorCalibration = () => {
@@ -755,192 +825,98 @@ const Theme = {
         requestAnimationFrame(() => {
           if (token !== state.calibrationToken || state.pointerId !== null) return;
           const active = nav.querySelector(".nav-item.active");
-          if (active && active.offsetWidth > 0) setTargetFromItem(active, true);
+          if (active && active.offsetWidth > 0) {
+            setTargetFromItem(active, !state.releaseAnimating);
+          }
           if (pass < 1) align(pass + 1);
         });
       };
       align(0);
     };
-    const nearestItem = (clientX) => {
-      const navBox = navRect();
-      const x = pointerLocalX(clientX, navBox);
-      let best = null;
-      let bestScore = Infinity;
-      items().forEach((item) => {
-        const center = item.offsetLeft + item.offsetWidth / 2;
-        const score = Math.abs(x - center);
-        if (score < bestScore) {
-          bestScore = score;
-          best = item;
-        }
-      });
-      return best;
-    };
-    const updateTargetFromPointer = (clientX, clientY) => {
-      const navBox = navRect();
+    const updateTargetFromPointer = (clientX, clientY, time) => {
       const list = items();
       if (!list.length) return;
-      const best = nearestItem(clientX) || list[0];
+      const elapsed = Math.max(1, time - state.lastPointerTime);
+      const delta = clientX - state.lastPointerX;
+      const valueDelta = delta / tabWidth();
+      state.targetValue = clamp(state.targetValue + valueDelta, 0, list.length - 1);
+      state.velocityTarget = state.velocityTarget * 0.52 + ((valueDelta * 1000) / elapsed) * 0.48;
+      state.lastPointerX = clientX;
+      state.lastPointerTime = time;
+      const best = list[Math.round(state.targetValue)] || list[0];
       if (best !== state.activeItem) {
         state.activeItem = best;
-        syncActiveClass(best);
+        syncLensClass(best);
       }
-      const width = best.offsetWidth;
-      const x = pointerLocalX(clientX, navBox) - width / 2;
-      const dx = clientX - state.lastClientX;
-      state.velocity = state.velocity * 0.58 + dx * 0.42;
-      state.lastClientX = clientX;
-      const bounds = indicatorBounds(width);
-      state.targetX = clamp(x, bounds.min, bounds.max);
-      state.targetW = width;
-      state.currentX = state.targetX;
-      state.currentW = width;
-      state.positionVelocity = 0;
-      state.widthVelocity = 0;
-      state.currentX = setIndicatorGeometry(state.currentX, width);
-      indicator.style.setProperty("--nav-indicator-scale-x", "1");
-      indicator.style.setProperty(
-        "--nav-indicator-scale-y",
-        (1 - clamp(Math.abs(state.velocity) / 980, 0, 0.035)).toFixed(3),
-      );
-      setRubberOffset(clientX);
+      const totalWidth = nav.offsetWidth || 1;
+      const dragFraction = clamp(delta / totalWidth, -1, 1);
+      state.panelTarget = 4 * Math.sign(dragFraction) * Math.sqrt(Math.abs(dragFraction));
       updateLightFromPointer(clientX, clientY);
-    };
-    const kickAnimation = () => {
-      if (state.raf) return;
-      const frame = (time) => {
-        const frameScale = state.lastFrameTime
-          ? clamp((time - state.lastFrameTime) / 16.667, 0.5, 2)
-          : 1;
-        state.lastFrameTime = time;
-        const dx = state.targetX - state.currentX;
-        const dw = state.targetW - state.currentW;
-        const xSpring = state.dragging ? 0.22 : 0.16;
-        const xDamping = state.dragging ? 0.62 : 0.76;
-        const widthSpring = state.dragging ? 0.18 : 0.14;
-        const widthDamping = state.dragging ? 0.66 : 0.74;
-        state.positionVelocity =
-          (state.positionVelocity + dx * xSpring * frameScale) * Math.pow(xDamping, frameScale);
-        state.widthVelocity =
-          (state.widthVelocity + dw * widthSpring * frameScale) *
-          Math.pow(widthDamping, frameScale);
-        state.currentX += state.positionVelocity * frameScale;
-        state.currentW += state.widthVelocity * frameScale;
-        if (Math.abs(dx) < 0.12 && Math.abs(state.positionVelocity) < 0.12) {
-          state.currentX = state.targetX;
-          state.positionVelocity = 0;
-        }
-        if (Math.abs(dw) < 0.12 && Math.abs(state.widthVelocity) < 0.12) {
-          state.currentW = state.targetW;
-          state.widthVelocity = 0;
-        }
-        state.currentX = setIndicatorGeometry(state.currentX, state.currentW);
-        if (
-          Math.abs(state.targetX - state.currentX) > 0.12 ||
-          Math.abs(state.targetW - state.currentW) > 0.12 ||
-          Math.abs(state.positionVelocity) > 0.12 ||
-          Math.abs(state.widthVelocity) > 0.12
-        ) {
-          state.raf = requestAnimationFrame(frame);
-        } else {
-          state.raf = 0;
-          state.lastFrameTime = 0;
-        }
-      };
-      state.raf = requestAnimationFrame(frame);
+      startAnimation();
     };
 
     nav.addEventListener("pointerdown", (e) => {
       const item = e.target.closest(".nav-item");
       if (!item || document.body.classList.contains("liquid-glass-disabled")) return;
+      e.preventDefault();
       state.pointerId = e.pointerId;
-      state.activeItem = item;
-      state.lastClientX = e.clientX;
-      state.pressClientX = e.clientX;
-      state.pressClientY = e.clientY;
-      state.velocity = 0;
+      state.pressItem = item;
+      state.dragEligible = item.classList.contains("active");
+      state.activeItem = item.classList.contains("active")
+        ? item
+        : nav.querySelector(".nav-item.active");
+      state.targetValue = indexOf(item);
+      state.lastPointerX = e.clientX;
+      state.lastPointerTime = e.timeStamp;
       state.canceled = false;
+      state.dragging = true;
+      if (!state.dragEligible) state.dragging = false;
+      state.releasePending = false;
+      state.pressTarget = 1;
+      state.scaleXTarget = PRESS_SCALE;
+      state.scaleYTarget = PRESS_SCALE;
       ++state.calibrationToken;
-      clearTimeout(nav._movingTimer);
-      nav.classList.remove("is-moving");
-      nav.classList.add("is-pressing");
-      syncPressTarget(item);
-      updateLightFromPointer(e.clientX, e.clientY);
-      const beginDrag = () => {
-        if (state.dragging || state.pointerId === null) return;
-        clearTimeout(state.longPressTimer);
-        state.dragging = true;
-        nav.classList.add("dragging");
-        window.LiquidGlass?.freeze("navDrag");
-        nav.setPointerCapture?.(state.pointerId);
-        setTargetFromItem(state.activeItem, true);
-        syncPressTarget();
-      };
-      state.beginDrag = beginDrag;
-      clearTimeout(state.longPressTimer);
-      state.longPressTimer = setTimeout(beginDrag, 160);
+      window.LiquidGlass?.freeze("navDrag");
+      if (state.dragEligible) nav.setPointerCapture?.(state.pointerId);
+      startAnimation();
     });
     window.addEventListener("pointermove", (e) => {
-      if (e.pointerId !== state.pointerId) return;
-      if (!state.dragging) {
-        const dx = e.clientX - state.pressClientX;
-        const dy = e.clientY - state.pressClientY;
-        if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy)) {
-          state.beginDrag?.();
-          updateTargetFromPointer(e.clientX, e.clientY);
-          e.preventDefault();
-          return;
-        }
-        if (Math.abs(dy) > 8) {
-          state.canceled = true;
-          clearTimeout(state.longPressTimer);
-          nav.classList.remove("is-pressing");
-          syncPressTarget();
-        }
-        return;
-      }
+      if (e.pointerId !== state.pointerId || !state.dragging || !state.dragEligible) return;
       e.preventDefault();
-      updateTargetFromPointer(e.clientX, e.clientY);
+      updateTargetFromPointer(e.clientX, e.clientY, e.timeStamp);
     });
     const finish = (e) => {
       if (state.pointerId === null || e.pointerId !== state.pointerId) return;
-      clearTimeout(state.longPressTimer);
-      const draggedItem = state.dragging ? state.activeItem : null;
-      if (draggedItem) {
-        e.preventDefault();
-        nav._suppressClickUntil = Date.now() + 360;
-      } else if (e.type === "pointerup" && !state.canceled && state.activeItem) {
-        nav._suppressClickUntil = Date.now() + 360;
-      } else if (state.canceled) {
-        nav._suppressClickUntil = Date.now() + 360;
-      } else {
-        const activeNow = nav.querySelector(".nav-item.active");
-        if (activeNow && activeNow.offsetWidth > 0) {
-          state.targetW = activeNow.offsetWidth;
-          state.targetX = activeNow.offsetLeft;
-          state.currentW = state.targetW;
-        }
-      }
+      e.preventDefault();
+      const list = items();
+      const targetIndex = state.dragEligible
+        ? clamp(Math.round(state.targetValue), 0, list.length - 1)
+        : indexOf(state.pressItem);
+      const targetItem = list[targetIndex];
+      state.targetValue = targetIndex;
+      state.panelTarget = 0;
+      state.velocityTarget = 0;
       state.dragging = false;
+      state.dragEligible = false;
+      state.releasePending = true;
+      state.releaseAnimating = true;
+      clearTimeout(nav._releaseAnimationTimer);
+      nav._releaseAnimationTimer = setTimeout(() => {
+        state.releaseAnimating = false;
+      }, 720);
       if (state.pointerId !== null && nav.hasPointerCapture?.(state.pointerId)) {
         nav.releasePointerCapture?.(state.pointerId);
       }
       state.pointerId = null;
-      state.beginDrag = null;
       ++state.calibrationToken;
-      nav.classList.remove("is-pressing", "dragging");
       window.LiquidGlass?.unfreeze("navDrag");
-      syncPressTarget();
-      resetLiquidMotion();
-      if (draggedItem) {
-        setTargetFromItem(draggedItem, true);
-        window.App?.navigateFromNav?.(draggedItem.dataset.page);
-      } else if (e.type === "pointerup" && !state.canceled && state.activeItem) {
-        setTargetFromItem(state.activeItem, true);
-        window.App?.navigateFromNav?.(state.activeItem.dataset.page);
-      } else {
-        kickAnimation();
+      nav._suppressClickUntil = Date.now() + 360;
+      if (targetItem) {
+        state.activeItem = targetItem;
+        syncActiveClass(targetItem);
+        window.App?.navigateFromNav?.(targetItem.dataset.page);
       }
+      startAnimation();
     };
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
@@ -955,73 +931,20 @@ const Theme = {
 
   updateNavIndicator() {
     const nav = document.getElementById("bottomNav");
-    const navIndicator = nav?.querySelector(".nav-indicator");
-    if (!nav || !navIndicator) return;
+    if (!nav) return;
     if (nav._dragState) ++nav._dragState.calibrationToken;
     const active = nav.querySelector(".nav-item.active");
     if (active && active.offsetWidth > 0) {
-      if (nav._moveIndicatorTo) {
-        nav._moveIndicatorTo(active, true);
-        return;
-      }
-      const left = active.offsetLeft;
-      const width = active.offsetWidth;
-      const style = getComputedStyle(nav);
-      const leftInset = parseFloat(style.paddingLeft) || 0;
-      const rightInset = parseFloat(style.paddingRight) || 0;
-      const maxLeft = Math.max(
-        leftInset,
-        (nav.clientWidth || nav.offsetWidth) - rightInset - width,
-      );
-      const clampedLeft = Math.max(leftInset, Math.min(maxLeft, left));
-      navIndicator.style.width = width + "px";
-      navIndicator.style.left = clampedLeft + "px";
-
-      if (nav._dragState) {
-        nav._dragState.targetX = clampedLeft;
-        nav._dragState.currentX = clampedLeft;
-        nav._dragState.targetW = width;
-        nav._dragState.currentW = width;
-      }
-
-      this._syncNavLens(active);
+      nav._moveIndicatorTo?.(active, !nav._dragState?.releaseAnimating);
     }
   },
 
   resetNavIndicator() {
     const nav = document.getElementById("bottomNav");
-    const navIndicator = nav?.querySelector(".nav-indicator");
-    if (!nav || !navIndicator) return;
-    nav.classList.remove("is-pressing", "is-moving", "dragging");
-    nav.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("is-press-target"));
-    if (nav._scheduleIndicatorCalibration) {
-      nav._scheduleIndicatorCalibration();
-      return;
-    }
-    const align = () => {
-      const active = nav.querySelector(".nav-item.active");
-      if (!active || active.offsetWidth === 0) return;
-
-      if (nav._moveIndicatorTo) {
-        nav._moveIndicatorTo(active, true);
-        return;
-      }
-
-      const left = active.offsetLeft;
-      const width = active.offsetWidth;
-      navIndicator.style.width = width + "px";
-      navIndicator.style.left = left + "px";
-
-      if (nav._dragState) {
-        nav._dragState.targetX = left;
-        nav._dragState.currentX = left;
-        nav._dragState.targetW = width;
-        nav._dragState.currentW = width;
-      }
-
-      this._syncNavLens(active);
-    };
-    requestAnimationFrame(align);
+    if (!nav) return;
+    nav.classList.remove("is-moving");
+    window.LiquidNav?.measure();
+    nav._scheduleIndicatorCalibration?.();
   },
 
   updateFilterIndicator() {

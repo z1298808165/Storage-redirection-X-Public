@@ -82,7 +82,10 @@ val rootDataFiles =
     )
 val webAndDataFiles =
     files(
-        fileTree("assets") { include("**/*.js", "**/*.json") },
+        fileTree("assets") {
+          include("**/*.js", "**/*.json")
+          exclude("**/vendor/**")
+        },
         file(".github/tests/storage-redirect-scenarios.json"),
         fileTree("docs") { include("**/*.json") },
         fileTree("scripts") { include("**/*.js") },

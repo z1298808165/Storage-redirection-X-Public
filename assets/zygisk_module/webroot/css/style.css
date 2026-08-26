@@ -460,8 +460,7 @@ body.modal-open .app-container { overflow: hidden; pointer-events: none; }
 .modal-sheet,
 .dialog-box,
 .toast,
-.app-batch-bar,
-.bottom-nav { --liquid-x: 50%; --liquid-y: 0%; }
+.app-batch-bar { --liquid-x: 50%; --liquid-y: 0%; }
 
 .template-card,
 .backup-restore-card,
@@ -618,7 +617,6 @@ body::before {
 .section-title { margin: 0 0 8px; padding: 0 2px; color: var(--color-text-secondary); font-size: 12px; font-weight: 700; text-transform: none; }
 
 .liquid-surface,
-.bottom-nav,
 .app-batch-bar,
 .modal-sheet,
 .dialog-box,
@@ -643,7 +641,6 @@ body::before {
 }
 
 .liquid-surface::before,
-.bottom-nav::before,
 .app-batch-bar::before,
 .modal-sheet::before,
 .dialog-box::before,
@@ -669,7 +666,6 @@ body::before {
 }
 
 [data-theme="dark"] .liquid-surface::before,
-[data-theme="dark"] .bottom-nav::before,
 [data-theme="dark"] .app-batch-bar::before,
 [data-theme="dark"] .modal-sheet::before,
 [data-theme="dark"] .dialog-box::before,
@@ -692,7 +688,6 @@ body::before {
 }
 
 body.liquid-glass-disabled .liquid-surface::before,
-body.liquid-glass-disabled .bottom-nav::before,
 body.liquid-glass-disabled .app-batch-bar::before,
 body.liquid-glass-disabled .modal-sheet::before,
 body.liquid-glass-disabled .dialog-box::before,
@@ -713,7 +708,6 @@ body.liquid-glass-disabled .app-user-menu::before,
 body.liquid-glass-disabled .license-item::before { content: none; }
 
 body.liquid-glass-disabled .liquid-surface,
-body.liquid-glass-disabled .bottom-nav,
 body.liquid-glass-disabled .app-batch-bar,
 body.liquid-glass-disabled .modal-sheet,
 body.liquid-glass-disabled .dialog-box,
@@ -737,7 +731,6 @@ body.liquid-glass-disabled .license-item {
   box-shadow: var(--shadow-sm);
 }
 
-body.blur-effect-disabled .bottom-nav,
 body.blur-effect-disabled .app-batch-bar,
 body.blur-effect-disabled .modal-sheet,
 body.blur-effect-disabled .dialog-box,
@@ -837,100 +830,6 @@ body.blur-effect-disabled .app-user-menu { backdrop-filter: none; -webkit-backdr
 .btn { border-radius: 16px; }
 .btn-primary { background: var(--color-primary); box-shadow: none; }
 .btn-secondary { background: var(--color-surface-overlay); box-shadow: none; }
-
-.bottom-nav {
-  bottom: calc(12px + var(--safe-bottom));
-  width: min(calc(100vw - 24px), 312px);
-  height: 64px;
-  padding: 4px;
-  border-radius: 32px;
-  background: var(--ios-glass-bg);
-  border-color: var(--ios-glass-border);
-  box-shadow: var(--ios-glass-edge), var(--ios-glass-shadow);
-  backdrop-filter: var(--ios-glass-blur);
-  -webkit-backdrop-filter: var(--ios-glass-blur);
-  overflow: hidden;
-}
-.bottom-nav::before {
-  background:
-    radial-gradient(circle at var(--nav-touch-x, 50%) var(--nav-touch-y, 18%), rgba(255,255,255,0.56), transparent 27%),
-    linear-gradient(180deg, rgba(255,255,255,0.3), transparent 44%);
-  opacity: 0.78;
-}
-.nav-indicator {
-  top: 4px;
-  height: calc(100% - 8px);
-  border-radius: 28px;
-  backdrop-filter: var(--liquid-indicator-blur);
-  -webkit-backdrop-filter: var(--liquid-indicator-blur);
-  transform: scaleX(var(--nav-indicator-scale-x, 1)) scaleY(var(--nav-indicator-scale-y, 1));
-  scale: 1;
-  transition: box-shadow 180ms ease, filter 180ms ease;
-}
-.nav-indicator::before {
-  content: "";
-  inset: 0;
-  background:
-    radial-gradient(circle at var(--nav-touch-x, 50%) 12%, rgba(255,255,255,0.82), transparent 36%),
-    linear-gradient(180deg, rgba(255,255,255,0.5), rgba(255,255,255,0.08) 38%, transparent 62%);
-  opacity: 0.84;
-}
-.nav-indicator::after {
-  content: "";
-  position: absolute;
-  inset: 1px;
-  border-radius: inherit;
-  border: 1px solid rgba(255,255,255,0.2);
-  box-shadow: inset 0 -5px 12px rgba(38, 93, 137, 0.08);
-  pointer-events: none;
-}
-[data-theme="dark"] .nav-indicator::before,
-[data-theme="dark"] .nav-indicator::after {
-  content: none;
-}
-.bottom-nav.is-pressing { --nav-panel-scale: 1; }
-.bottom-nav.dragging { --nav-panel-scale: 1; }
-.bottom-nav.is-pressing .nav-indicator,
-.bottom-nav.dragging .nav-indicator {
-  filter: saturate(1.08) brightness(1.04);
-  box-shadow: inset 0 2px 2px rgba(255,255,255,0.96), inset 0 -3px 7px rgba(31,83,126,0.12), 0 7px 16px rgba(28,72,112,0.16);
-}
-.nav-item {
-  border-radius: 28px;
-  transition: color 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.nav-icon { transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), filter 180ms ease; }
-.nav-item.is-under-lens { transform: none; }
-.bottom-nav.is-pressing .nav-item.is-press-target,
-.bottom-nav.dragging .nav-item.is-under-lens { transform: scale(1.1); }
-.nav-item.active .nav-icon { transform: none; filter: none; }
-.bottom-nav.is-pressing .nav-item.is-press-target .nav-icon,
-.bottom-nav.dragging .nav-item.is-under-lens .nav-icon { transform: none; }
-body.liquid-glass-disabled .bottom-nav::before,
-body.liquid-glass-disabled .nav-indicator::before,
-body.liquid-glass-disabled .nav-indicator::after { content: none; }
-body.liquid-glass-disabled .bottom-nav,
-body.liquid-glass-disabled .nav-indicator,
-body.liquid-glass-disabled .nav-item { transition-duration: 1ms; }
-body.liquid-glass-disabled .bottom-nav {
-  background: var(--color-surface-elevated);
-  border-color: var(--color-border);
-  box-shadow: var(--shadow-md);
-}
-body.liquid-glass-disabled .bottom-nav.is-pressing,
-body.liquid-glass-disabled .bottom-nav.is-moving,
-body.liquid-glass-disabled .bottom-nav.dragging { --nav-panel-scale: 1; }
-body.liquid-glass-disabled .bottom-nav .nav-indicator { scale: 1; filter: none; }
-body.liquid-glass-disabled .nav-item.is-under-lens,
-body.liquid-glass-disabled .bottom-nav.is-pressing .nav-item.is-press-target,
-body.liquid-glass-disabled .bottom-nav.dragging .nav-item.is-under-lens { transform: none; text-shadow: none; }
-body.liquid-glass-disabled .nav-indicator {
-  background: var(--color-primary-bg);
-  border-color: var(--color-primary-border);
-  box-shadow: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
 
 .secondary-page-header { align-items: center; }
 .theme-page { padding-bottom: calc(var(--safe-bottom) + 28px); }
@@ -1083,20 +982,6 @@ body.srx-lens-ready .srx-lens::before {
   opacity: 0.66;
 }
 
-/* 折射生效时底栏与指示器交出底色，只保留光学结构 */
-body.srx-lens-ready .bottom-nav { overflow: hidden; }
-body.srx-lens-ready .nav-indicator {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.5);
-  box-shadow:
-    inset 0 1.5px 1px rgba(255, 255, 255, 0.8),
-    inset 0 -2px 6px rgba(31, 83, 126, 0.1),
-    0 8px 20px rgba(28, 72, 112, 0.16);
-}
-[data-theme="dark"] body.srx-lens-ready .nav-indicator {
-  background: rgba(150, 175, 205, 0.14);
-  border-color: rgba(255, 255, 255, 0.2);
-}
 body.srx-lens-ready .app-batch-status,
 body.srx-lens-ready .filter-indicator { background: rgba(255, 255, 255, 0.16); }
 [data-theme="dark"] body.srx-lens-ready .app-batch-status,
