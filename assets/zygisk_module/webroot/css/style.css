@@ -11,8 +11,7 @@
 .page#page-logs .page-header,
 .page#page-logs .log-search,
 .page#page-logs .log-toolbar { flex-shrink: 0; }
-.page#page-logs .pull-refresh,
-.page#page-logs .log-card-list {
+.page#page-logs .pull-refresh {
   background: transparent;
   border: 0;
   box-shadow: none;
@@ -358,7 +357,7 @@ body.logs-page-active .app-container { overflow: hidden; }
 .log-header-actions { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .log-toolbar { display: flex; align-items: center; justify-content: flex-end; min-height: 18px; margin: -4px 2px 10px; }
 .log-info { font-size: 11px; color: var(--color-text-tertiary); margin-left: auto; }
-.log-card-list { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 10px; padding-bottom: 18px; overflow: hidden auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: none; -ms-overflow-style: none; }
+.log-card-list { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; gap: 10px; padding: 12px 12px 18px; background: var(--ios-glass-bg); border: 1px solid var(--ios-glass-border); border-radius: var(--radius-xl); box-shadow: var(--glass-inner); overflow: hidden auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: none; -ms-overflow-style: none; }
 .log-card-list::-webkit-scrollbar { width: 0; height: 0; }
 .path-browser::-webkit-scrollbar, .modal-sheet::-webkit-scrollbar { width: 4px; }
 .path-browser::-webkit-scrollbar-thumb, .modal-sheet::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 4px; }
