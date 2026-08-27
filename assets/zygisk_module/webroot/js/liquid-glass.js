@@ -84,11 +84,12 @@ const LIQUID_GLASS_TARGETS = [
   },
   {
     selector: ".toggle",
-    // 小尺寸开关保留边缘折射，但降低模糊与位移，避免轨道和滑块发虚。
-    blur: 1,
-    saturate: 1.16,
+    // 小尺寸开关保留边缘折射，但降低模糊与位移，避免轨道和滑块发虚；
+    // 轨道用半透明玻璃渐变 + backdrop blur 体现通透，滑块(圆圈)本身保持锐利。
+    blur: 2,
+    saturate: 1.18,
     refractionHeight: 3,
-    refractionAmount: 4,
+    refractionAmount: 5,
     depthEffect: true,
   },
   {

@@ -53,6 +53,7 @@ const Theme = {
     this._initIndicators();
     this._bindNavDrag();
     this._bindLiquidToggleMotion();
+    this._bindLiquidToggleSpring();
     this._bindLiquidSurfaceLight();
     this.resetNavIndicator();
     this.refreshSystemAccent();
@@ -626,6 +627,133 @@ const Theme = {
       if (event.key !== " " && event.key !== "Enter") return;
       release(event.target?.closest?.(".toggle"));
     });
+  },
+
+  /**
+   * 开关圆圈弹簧：位移与缩放改用欠阻尼物理弹簧逐帧驱动，对齐 miuix Switch 的
+   * thumbOffsetSpringSpec(ζ=0.7, k=987) 与 thumbScaleSpringSpec(ζ=0.6, k=987)。
+   * 通过 MutationObserver 感知 .on / .is-liquid-pressing 变化并启动弹簧循环。
+   */
+  _bindLiquidToggleSpring() {
+    if (this._liquidToggleSpringBound) return;
+    this._liquidToggleSpringBound = true;
+
+    const BUBBLE_TRAVEL = 18;           /* 开启时圆圈位移 px，与 .srx-lens.on 一致 */
+    const THUMB_PRESS_SCALE = 1.127;    /* 按压放大，对齐 miuix Switch */
+
+    const springs = new Map();          /* toggle -> { x, xv, s, sv, done } */
+    let raf = 0;
+    let lastTime = 0;
+
+    /* on 时圆圈位移从 CSS 变量 --toggle-bubble-on-x 读，桌面/移动端分别定义。 */
+    const readOnX = (toggle) => {
+      const raw = parseFloat(getComputedStyle(toggle).getPropertyValue("--toggle-bubble-on-x"));
+      return Number.isFinite(raw) ? raw : 0;
+    };
+
+    /* 读取圆圈当前视觉位置：优先 inline(弹簧历史值)，其次 computed，最后按 class 推导。 */
+    const readX = (toggle) => {
+      const inline = parseFloat(toggle.style.getPropertyValue("--toggle-bubble-x"));
+      if (Number.isFinite(inline)) return inline;
+      const computed = parseFloat(getComputedStyle(toggle).getPropertyValue("--toggle-bubble-x"));
+      if (Number.isFinite(computed)) return computed;
+      return toggle.classList.contains("on") ? BUBBLE_TRAVEL : 0;
+    };
+
+    const ensure = (toggle) => {
+      let sp = springs.get(toggle);
+      if (!sp) {
+        sp = { x: readX(toggle), xv: 0, s: 1, sv: 0, done: true };
+        springs.set(toggle, sp);
+      }
+      return sp;
+    };
+
+    /* 半隐式欧拉弹簧，物理参数对齐 Compose spring(stiffness, dampingRatio)。 */
+    const springStep = (cur, vel, target, stiffness, dampingRatio, dt) => {
+      const omega0 = Math.sqrt(stiffness);
+      const c = 2 * dampingRatio * omega0;
+      const nv = vel + (-stiffness * (cur - target) - c * vel) * dt;
+      return [cur + nv * dt, nv];
+    };
+
+    const frame = (time) => {
+      const dt = lastTime ? Math.min(0.034, Math.max(0.001, (time - lastTime) / 1000)) : 0.016;
+      lastTime = time;
+      let alive = false;
+      springs.forEach((sp, toggle) => {
+        if (sp.done) return;
+        const on = toggle.classList.contains("on");
+        const pressing = toggle.classList.contains("is-liquid-pressing");
+        const targetX = on ? readOnX(toggle) : 0;
+        const targetS = pressing ? THUMB_PRESS_SCALE : 1;
+
+        const xr = springStep(sp.x, sp.xv, targetX, 987, 0.7, dt);
+        sp.x = xr[0];
+        sp.xv = xr[1];
+        const sr = springStep(sp.s, sp.sv, targetS, 987, 0.6, dt);
+        sp.s = sr[0];
+        sp.sv = sr[1];
+
+        toggle.style.setProperty("--toggle-bubble-x", sp.x.toFixed(3) + "px");
+        toggle.style.setProperty("--toggle-thumb-scale", sp.s.toFixed(4));
+
+        const settled =
+          Math.abs(sp.x - targetX) < 0.05 &&
+          Math.abs(sp.s - targetS) < 0.001 &&
+          Math.abs(sp.xv) < 0.05 &&
+          Math.abs(sp.sv) < 0.005;
+        if (settled) {
+          sp.done = true;
+          toggle.style.setProperty("--toggle-bubble-x", targetX.toFixed(3) + "px");
+          toggle.style.setProperty("--toggle-thumb-scale", targetS.toFixed(4));
+        } else {
+          alive = true;
+        }
+      });
+      raf = alive ? requestAnimationFrame(frame) : 0;
+    };
+
+    const activate = (toggle) => {
+      const sp = ensure(toggle);
+      sp.done = false;
+      if (!raf) {
+        lastTime = 0;
+        raf = requestAnimationFrame(frame);
+      }
+    };
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "childList") {
+          /* 新增开关时立即按初始状态 seed 位置，保证后续切换从正确起点起步。 */
+          mutation.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+            if (node.classList && node.classList.contains("toggle")) ensure(node);
+            if (node.querySelectorAll) node.querySelectorAll(".toggle").forEach(ensure);
+          });
+          mutation.removedNodes.forEach((node) => {
+            if (node.nodeType !== 1) return;
+            if (node.classList && node.classList.contains("toggle")) springs.delete(node);
+            if (node.querySelectorAll) node.querySelectorAll(".toggle").forEach((t) => springs.delete(t));
+          });
+        } else if (mutation.type === "attributes" && mutation.attributeName === "class") {
+          const el = mutation.target;
+          if (el && el.classList && el.classList.contains("toggle") && el.classList.contains("srx-lens")) {
+            activate(el);
+          }
+        }
+      }
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+
+    /* 已渲染的开关立即建立弹簧状态。 */
+    document.querySelectorAll(".toggle").forEach(ensure);
   },
 
   _bindNavDrag() {
