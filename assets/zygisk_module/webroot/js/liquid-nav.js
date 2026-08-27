@@ -450,7 +450,10 @@
         tabWidth,
         panelWidth: Math.max(2, Math.round(this.panel.offsetWidth)),
         panelHeight: Math.max(2, Math.round(this.panel.offsetHeight)),
-        pillWidth: Math.max(2, Math.round(this.pill.offsetWidth)),
+        /* 气泡宽度直接用 tabWidth 推算：它同时被写进 --nav-pill-w，二者恒等。
+           量测 offsetWidth 在首次 measure 时会拿到未布局的 0（被 clamp 成 2），
+           导致气泡滤镜以错误尺寸生成且之后不再重建（面板靠 inset:0 定位无此问题）。 */
+        pillWidth: Math.max(2, Math.round(tabWidth)),
         pillHeight: Math.max(2, Math.round(this.pill.offsetHeight)),
         tabCount: count,
       };
@@ -611,10 +614,15 @@
       if (!this._built || !metrics.navWidth) return;
       const press = clamp(state.pressProgress || 0, 0, 1);
       const style = this.nav.style;
+      const shapeX = state.shapeX || 1;
+      const shapeY = state.shapeY || 1;
       style.setProperty("--nav-rubber-x", (state.panelOffset || 0).toFixed(3) + "px");
       style.setProperty("--nav-pill-x", ((state.value || 0) * metrics.tabWidth).toFixed(3) + "px");
-      style.setProperty("--nav-pill-scale-x", (state.shapeX || 1).toFixed(4));
-      style.setProperty("--nav-pill-scale-y", (state.shapeY || 1).toFixed(4));
+      style.setProperty("--nav-pill-scale-x", shapeX.toFixed(4));
+      style.setProperty("--nav-pill-scale-y", shapeY.toFixed(4));
+      /* 副本行反向补偿气泡缩放：内容固定在屏幕空间，不随气泡平移/缩放。 */
+      style.setProperty("--nav-pill-inv-scale-x", (1 / shapeX).toFixed(4));
+      style.setProperty("--nav-pill-inv-scale-y", (1 / shapeY).toFixed(4));
       style.setProperty("--nav-press", press.toFixed(4));
       style.setProperty(
         "--nav-panel-scale",

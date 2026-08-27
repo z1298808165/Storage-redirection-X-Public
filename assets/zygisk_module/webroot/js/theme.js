@@ -768,11 +768,19 @@ const Theme = {
           state.scaleXTarget = 1;
           state.scaleYTarget = 1;
         }
-        // 基础缩放跟随按压，叠加适度的速度形变以增强流动感。
-        const baseScale = 1 + (PRESS_SCALE - 1) * state.pressProgress;
-        const velocityFactor = Math.min(0.4, Math.abs(state.velocity) / 12);
-        state.shapeX = baseScale * (1 + velocityFactor * 0.2);
-        state.shapeY = baseScale * (1 - velocityFactor * 0.12);
+        // 对齐参考实现 layerBlock：形状由欠阻尼的 scaleX/scaleY 弹簧驱动（按压时
+        // 过冲 + 振荡产生果冻波动），再叠加带方向的速度果冻形变。
+        // quality-allow(chinese-language): 以下两行保留参考实现 layerBlock 的速度果冻公式原样，便于逐字对照，翻译会丢失精度。
+        //   scaleX /= 1 - clamp(velocity/10 * 0.75, -0.2, 0.2)
+        //   scaleY *= 1 - clamp(velocity/10 * 0.25, -0.2, 0.2)
+        // 参考实现 velocity 单位是 range/sec(除以 tab 数-1)，这里 state.velocity 是
+        // tab/sec，需先除以 (tabCount-1) 再对齐，否则速度果冻会提前饱和、拉伸过头。
+        const rangeCount = Math.max(1, items().length - 1);
+        const velocityTenth = state.velocity / rangeCount / 10;
+        const dvx = clamp(velocityTenth * 0.75, -0.2, 0.2);
+        const dvy = clamp(velocityTenth * 0.25, -0.2, 0.2);
+        state.shapeX = state.scaleX / (1 - dvx);
+        state.shapeY = state.scaleY * (1 - dvy);
         applyVisualState();
         const moving =
           Math.abs(state.targetValue - state.value) > 0.001 ||
