@@ -638,10 +638,10 @@ const Theme = {
     if (this._liquidToggleSpringBound) return;
     this._liquidToggleSpringBound = true;
 
-    const BUBBLE_TRAVEL = 18;           /* 开启时圆圈位移 px，与 .srx-lens.on 一致 */
-    const THUMB_PRESS_SCALE = 1.127;    /* 按压放大，对齐 miuix Switch */
+    const BUBBLE_TRAVEL = 18; /* 开启时圆圈位移 px，与 .srx-lens.on 一致 */
+    const THUMB_PRESS_SCALE = 1.127; /* 按压放大，对齐 miuix Switch */
 
-    const springs = new Map();          /* toggle -> { x, xv, s, sv, done } */
+    const springs = new Map(); /* toggle -> { x, xv, s, sv, done } */
     let raf = 0;
     let lastTime = 0;
 
@@ -735,11 +735,17 @@ const Theme = {
           mutation.removedNodes.forEach((node) => {
             if (node.nodeType !== 1) return;
             if (node.classList && node.classList.contains("toggle")) springs.delete(node);
-            if (node.querySelectorAll) node.querySelectorAll(".toggle").forEach((t) => springs.delete(t));
+            if (node.querySelectorAll)
+              node.querySelectorAll(".toggle").forEach((t) => springs.delete(t));
           });
         } else if (mutation.type === "attributes" && mutation.attributeName === "class") {
           const el = mutation.target;
-          if (el && el.classList && el.classList.contains("toggle") && el.classList.contains("srx-lens")) {
+          if (
+            el &&
+            el.classList &&
+            el.classList.contains("toggle") &&
+            el.classList.contains("srx-lens")
+          ) {
             activate(el);
           }
         }
