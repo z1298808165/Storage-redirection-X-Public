@@ -119,6 +119,15 @@ $PrivateRuleSandboxRoot = "$BackendPrivateRoot/SrtRuleSandbox"
 $RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
 $BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
 $PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
+$OwnPrivateDataRoot = "$RealRoot/Android/data/$AppId/Tencent/QQfile_recv"
+$OwnPrivateMediaRoot = "$RealRoot/Android/media/$AppId/Tencent/QQfile_recv"
+$OwnPrivateObbRoot = "$RealRoot/Android/obb/$AppId/Tencent/QQfile_recv"
+$BackendOwnPrivateDataRoot = "$BackendRoot/Android/data/$AppId/Tencent/QQfile_recv"
+$BackendOwnPrivateMediaRoot = "$BackendRoot/Android/media/$AppId/Tencent/QQfile_recv"
+$BackendOwnPrivateObbRoot = "$BackendRoot/Android/obb/$AppId/Tencent/QQfile_recv"
+$SandboxOwnPrivateDataRoot = "$BackendPrivateRoot/Android/data/$AppId/Tencent/QQfile_recv"
+$SandboxOwnPrivateMediaRoot = "$BackendPrivateRoot/Android/media/$AppId/Tencent/QQfile_recv"
+$SandboxOwnPrivateObbRoot = "$BackendPrivateRoot/Android/obb/$AppId/Tencent/QQfile_recv"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -300,14 +309,14 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 33) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 34) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 33) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 34) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -328,6 +337,7 @@ function Get-ScenarioList {
     $defaultScenarios.Add(31) | Out-Null
     $defaultScenarios.Add(32) | Out-Null
     $defaultScenarios.Add(33) | Out-Null
+    $defaultScenarios.Add(34) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     @($defaultScenarios)
@@ -412,6 +422,7 @@ function Apply-ScenarioConfig {
         31 { Write-DeviceConfig '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}' }
         32 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         33 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
+        34 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -770,6 +781,7 @@ function Restart-MediaProviderWithHookReady {
 }
 
 function Clear-Targets {
+    Invoke-Su "rm -rf '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; mkdir -p '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; chmod -R 777 '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile' '$BackendRoot/Download/Test/$TestFile' '$BackendPrivateRoot/Download/Test/$TestFile' '$BackendRoot/Download/Test/$HotBeforeFile' '$BackendRoot/Download/Test/$HotAfterFile' '$BackendPrivateRoot/Download/Test/$HotBeforeFile' '$BackendPrivateRoot/Download/Test/$HotAfterFile' '$BackendRoot/.xldownload/$TestFile' '$BackendRoot/.xlDownload/$TestFile' '$BackendPrivateRoot/.xldownload/$TestFile' '$BackendPrivateRoot/.xlDownload/$TestFile'" | Out-Null
@@ -784,6 +796,7 @@ function Clear-Targets {
 }
 
 function Remove-TestTargetArtifacts {
+    Invoke-Su "rm -rf '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Download/Test' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile'" | Out-Null
@@ -1546,12 +1559,32 @@ function Get-ScenarioTitle {
         31 { "disabled redirect keeps thumbnail and full image readable" }
         32 { "real backend recovery survives app restart without restarting MediaProvider" }
         33 { "MediaProvider hot reload preserves app mounts and image saving" }
+        34 { "own package QQfile_recv paths stay real" }
     }
 }
 
 function Invoke-WriteCase {
     param([int]$Scenario, [string]$Label, [string]$Path, [string]$Data)
     Invoke-ServiceCase "scenario-$Scenario" $Label "file_write" @{ file_path = $Path; payload = $Data; expected_payload = $Data } "^PASS \[file_write\]"
+}
+
+function Invoke-OwnPrivateDirectoriesScenario {
+    param([int]$Scenario)
+    $labels = @("data", "media", "obb")
+    $requestRoots = @($OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot)
+    $backendRoots = @($BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot)
+    $sandboxRoots = @($SandboxOwnPrivateDataRoot, $SandboxOwnPrivateMediaRoot, $SandboxOwnPrivateObbRoot)
+    $ok = $true
+    for ($index = 0; $index -lt $labels.Count; $index++) {
+        $fileName = "srt_qqfile_recv_$($labels[$index]).txt"
+        $requestPath = "$($requestRoots[$index])/$fileName"
+        $backendPath = "$($backendRoots[$index])/$fileName"
+        $sandboxPath = "$($sandboxRoots[$index])/$fileName"
+        $ok = (Invoke-WriteCase $Scenario "own-$($labels[$index])" $requestPath $Payload).Ok -and $ok
+        $ok = (Require-File "scenario-$Scenario" "own-$($labels[$index])-real" $backendPath) -and $ok
+        $ok = (Require-Missing "scenario-$Scenario" "own-$($labels[$index])-sandbox" $sandboxPath) -and $ok
+    }
+    $ok
 }
 
 function Invoke-CreateCase {
@@ -2256,6 +2289,7 @@ function Invoke-Scenario {
         31 { Invoke-MediaStoreDisabledRedirectImageScenario $Scenario }
         32 { Invoke-BackendEndpointRecoveryScenario $Scenario }
         33 { Invoke-QuickMediaProviderRestartRecoveryScenario $Scenario }
+        34 { Invoke-OwnPrivateDirectoriesScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
