@@ -286,9 +286,9 @@ impl RedirectPolicy {
 
     fn backend_decision(&self, storage_path: &str, operation: OperationKind) -> BackendDecision {
         let is_read_only = self.is_read_only(storage_path);
-        let kind = if self.resolve_mapping(storage_path).is_some() {
-            BackendKind::Real
-        } else if self.is_own_private_storage_path(storage_path) {
+        let kind = if self.resolve_mapping(storage_path).is_some()
+            || self.is_own_private_storage_path(storage_path)
+        {
             BackendKind::Real
         } else if self.is_mapping_mode_only {
             if self.matches_any(&self.sandboxed_index, storage_path) {
@@ -335,7 +335,7 @@ impl RedirectPolicy {
         ];
         private_roots
             .iter()
-            .any(|root| paths::matches(root, &relative, true))
+            .any(|root| paths::matches(root, relative, true))
     }
 
     fn has_real_child_rule(&self, storage_path: &str) -> bool {
