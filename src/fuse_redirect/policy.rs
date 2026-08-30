@@ -288,6 +288,8 @@ impl RedirectPolicy {
         let is_read_only = self.is_read_only(storage_path);
         let kind = if self.resolve_mapping(storage_path).is_some() {
             BackendKind::Real
+        } else if self.is_own_private_storage_path(storage_path) {
+            BackendKind::Real
         } else if self.is_mapping_mode_only {
             if self.matches_any(&self.sandboxed_index, storage_path) {
                 BackendKind::Redirect
@@ -314,6 +316,26 @@ impl RedirectPolicy {
             || pending_display_path
                 .as_deref()
                 .is_some_and(|display_path| index.matches(display_path))
+    }
+
+    // 应用自己包名的私有目录（Android/data|media|obb/<pkg>）属于 app-specific
+    // 外部存储，由系统 MediaProvider 直接映射到 /data/media/<user>，本就不该被
+    // 重定向。若把它们当公共路径重定向，会落到 redirect_target 下再套一层
+    // sdcard/，应用保存或下载到自己私有目录的文件会丢失可见性。这里在决策层
+    // 直接判 Real，后续 real_backend_root_for_storage_rel 会自然选 private_real_root
+    // 直连 f2fs，无需新增挂载点。
+    fn is_own_private_storage_path(&self, storage_path: &str) -> bool {
+        let Some(relative) = paths::relative_child_path(storage_path, &self.storage_root) else {
+            return false;
+        };
+        let private_roots = [
+            format!("Android/data/{}", self.package_name),
+            format!("Android/media/{}", self.package_name),
+            format!("Android/obb/{}", self.package_name),
+        ];
+        private_roots
+            .iter()
+            .any(|root| paths::matches(root, &relative, true))
     }
 
     fn has_real_child_rule(&self, storage_path: &str) -> bool {

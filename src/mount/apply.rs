@@ -264,6 +264,7 @@ impl MountPlanner {
 
         log::info!("android root stays redirected unless allowed explicitly");
         self.ensure_scoped_fuse_mount_points(scoped_fuse_roots, &storage_path);
+        self.restore_own_private_directories(&storage_path, &data_media_root, scoped_fuse_roots);
 
         let mut restored_allowed_paths: Vec<String> = Vec::new();
         if !allowed_real_paths.is_empty() {
@@ -489,6 +490,60 @@ impl MountPlanner {
             self.ensure_app_writable_directory_chain(&path, self.app_uid);
         }
         true
+    }
+
+    // 把应用自己包名的私有目录（Android/data|media|obb/<pkg>）bind 回真实后端。
+    // 这些目录属于 app-specific 外部存储，系统 MediaProvider 已按包名隔离，本就不该
+    // 被重定向；而 storage root 整体 bind 到沙箱时会把它们一并带走，应用保存或下载
+    // 到自己私有目录的文件会多套一层 sdcard/。这里在整体重定向之后把它们 bind 回
+    // 直连 f2fs 的真实位置 /data/media/<user>，绕开 MediaProvider 对私有目录 rename
+    // 的 ERANGE 缺陷，与 FUSE 侧 private_real_root 的语义一致。
+    fn restore_own_private_directories(
+        &self,
+        storage_path: &str,
+        data_media_root: &str,
+        scoped_fuse_roots: &[String],
+    ) {
+        let private_roots = [
+            format!("Android/data/{}", self.package_name),
+            format!("Android/media/{}", self.package_name),
+            format!("Android/obb/{}", self.package_name),
+        ];
+        for relative in private_roots {
+            let storage_target = paths::join(storage_path, &relative);
+            if is_covered_by_scoped_fuse_mount(&storage_target, scoped_fuse_roots) {
+                log::info!(
+                    "skip own private restore (handled by scoped fuse): {}",
+                    storage_target
+                );
+                continue;
+            }
+
+            let source = paths::join(data_media_root, &relative);
+            if !self.ensure_writable_mapped_directory(&source, self.app_uid) {
+                log::warn!("own private source mkdir failed: {}", source);
+                continue;
+            }
+            if !self.ensure_directory_exists(&storage_target, true) {
+                log::warn!("own private target mkdir failed: {}", storage_target);
+                continue;
+            }
+
+            let mut is_restored = false;
+            let _ = self.bind_mount_with_storage_aliases(
+                &source,
+                &storage_target,
+                true,
+                super::PrimaryMountFailure::StopCurrentTarget,
+                None,
+                Some("own private alias restore failed"),
+                Some("own private alias restore ok"),
+                Some(&mut is_restored),
+            );
+            if is_restored {
+                log::info!("own private restored {}", storage_target);
+            }
+        }
     }
 
     fn ensure_scoped_fuse_mount_points(&self, scoped_fuse_roots: &[String], storage_path: &str) {
