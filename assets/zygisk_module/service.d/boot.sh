@@ -42,6 +42,12 @@ restart_media_provider_for_deferred_hooks() {
   if [ ! -f "$MEDIA_HOOK_DEFERRED_FILE" ]; then
     return 0
   fi
+  sdk=$(getprop ro.build.version.sdk 2>/dev/null || true)
+  if [ -n "$sdk" ] && [ "$sdk" -ge 37 ]; then
+    rm -f "$MEDIA_HOOK_DEFERRED_FILE"
+    log -p i -t Boot "skip MediaProvider restart for lazy Android $sdk provider"
+    return 0
+  fi
   rm -f "$MEDIA_HOOK_DEFERRED_FILE"
 
   media_pkgs=$(pm list packages 2>/dev/null |

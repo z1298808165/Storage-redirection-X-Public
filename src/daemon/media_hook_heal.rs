@@ -93,6 +93,7 @@ const SKIP_ALREADY_ATTEMPTED: u8 = 2;
 const SKIP_BOOT_INCOMPLETE: u8 = 3;
 const SKIP_NO_ENABLED_APPS: u8 = 4;
 const SKIP_HOOK_READY: u8 = 5;
+const SKIP_LAZY_MEDIA_PROVIDER: u8 = 6;
 
 /// 记录跳过原因，同一原因连续出现时只记录一次。
 fn log_skip_once(reason: u8, detail: &str) {
@@ -112,6 +113,15 @@ pub(super) fn heal_if_needed(
     media_processes: &[(i32, i32)],
     media_like_names: &[String],
 ) {
+    if crate::platform::android_api_level() >= 37 {
+        // Android 17 的 MediaProvider APEX 按需启动；此时重启 Provider 会让
+        // emulated FUSE 根端点失联，后续由真实 MediaStore 访问触发注入。
+        log_skip_once(
+            SKIP_LAZY_MEDIA_PROVIDER,
+            "android17_lazy_provider_no_restart",
+        );
+        return;
+    }
     if media_processes.is_empty() {
         log_skip_once(
             SKIP_NO_MEDIA_PROCESS,
