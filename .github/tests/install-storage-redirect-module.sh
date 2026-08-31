@@ -89,6 +89,7 @@ wait_for_emulator_shutdown() {
 start_emulator() {
   local avd_name="${AVD_NAME:-test}"
   local emulator_port="${EMULATOR_PORT:-5554}"
+  local gpu_mode="${EMULATOR_GPU_MODE:-swiftshader_indirect}"
   local ramdisk_args=()
   EMULATOR_LOG="${RUNNER_TEMP:-/tmp}/rooted-emulator.log"
 
@@ -96,7 +97,7 @@ start_emulator() {
     ramdisk_args=(-ramdisk "$PATCHED_RAMDISK")
   fi
 
-  nohup "$ANDROID_HOME/emulator/emulator" -port "$emulator_port" -avd "$avd_name" "${ramdisk_args[@]}" -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim >"$EMULATOR_LOG" 2>&1 &
+  nohup "$ANDROID_HOME/emulator/emulator" -port "$emulator_port" -avd "$avd_name" "${ramdisk_args[@]}" -no-window -gpu "$gpu_mode" -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim >"$EMULATOR_LOG" 2>&1 &
   sleep 5
   if [ -f "$EMULATOR_LOG" ]; then
     tail -80 "$EMULATOR_LOG" || true
@@ -203,7 +204,41 @@ install_test_app_before_module_boot() {
     exit 1
   fi
 
-  adb install -r "$APP_APK"
+  local deadline=$((SECONDS + ${PACKAGE_SERVICE_TIMEOUT_SECONDS:-120}))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if adb shell "cmd package list packages >/dev/null 2>&1" >/dev/null 2>&1; then
+      break
+    fi
+    adb reconnect >/dev/null 2>&1 || true
+    sleep 2
+  done
+
+  local attempts="${APP_INSTALL_ATTEMPTS:-5}"
+  local attempt
+  local installed=0
+  for attempt in $(seq 1 "$attempts"); do
+    if adb install -r "$APP_APK"; then
+      # Android 17 上 adb install 可能返回成功，但包名并未进入 PackageManager，
+      # 后续场景会因 app uid/pid 缺失而失败，因此以包名校验结果作为安装成功依据。
+      if adb shell "cmd package list packages 2>/dev/null | grep -qx 'package:$APP_ID'"; then
+        installed=1
+        break
+      fi
+    fi
+    echo "测试 APK 安装后包名不可见，重试安装：${attempt}/${attempts}" >&2
+    if [ "$attempt" -eq "$attempts" ]; then
+      echo "测试 APK 安装失败，PackageManager 可能仍未就绪。" >&2
+      adb shell "cmd package list packages 2>&1" || true
+      exit 1
+    fi
+    adb reconnect >/dev/null 2>&1 || true
+    sleep 5
+  done
+  if [ "$installed" -ne 1 ]; then
+    echo "测试 APK 安装失败：包名 $APP_ID 未出现在 package 服务中。" >&2
+    adb shell "cmd package list packages 2>&1" || true
+    exit 1
+  fi
   adb shell pm grant "$APP_ID" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
   adb shell pm grant "$APP_ID" android.permission.WRITE_EXTERNAL_STORAGE >/dev/null 2>&1 || true
   adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1 || true
@@ -309,6 +344,16 @@ verify_media_provider_hook_with_reboot_retry() {
   wait_media_provider_hook_ready "module-clean-boot" 120
 }
 
+defer_media_provider_hook_check_for_lazy_provider() {
+  case "${ANDROID_API_LEVEL:-}" in
+    37|37.*|3[8-9]|3[8-9].*)
+      echo "Android ${ANDROID_API_LEVEL} MediaProvider 采用惰性启动，延后 hook readiness 到测试流首次访问。"
+      return 0
+      ;;
+  esac
+  verify_media_provider_hook_with_reboot_retry
+}
+
 install_test_app_before_module_boot
 
 if ! run_rootavd_patch; then
@@ -376,4 +421,26 @@ else
 fi
 
 verify_storage_redirect_module_loaded_with_reboot_retry
-verify_media_provider_hook_with_reboot_retry
+defer_media_provider_hook_check_for_lazy_provider
+
+# Android 17 上 rootAVD 打补丁与随后的重启可能让第三方应用不出现在 package 服务中，
+# 场景执行时会表现为 app uid not found 与 app pid not found 而全部失败。
+# 进入场景前确认测试应用可见，必要时重新安装并冷启动一次以生成 UID 与数据目录。
+ensure_test_app_available() {
+  if adb shell "cmd package list packages 2>/dev/null | grep -qx 'package:$APP_ID'"; then
+    return 0
+  fi
+  echo "测试应用在模块重启后不可见，重新安装" >&2
+  install_test_app_before_module_boot
+  if adb shell "cmd package list packages 2>/dev/null | grep -qx 'package:$APP_ID'"; then
+    return 0
+  fi
+  echo "测试应用在重新安装后仍不可用" >&2
+  adb shell "cmd package list packages 2>&1" || true
+  return 1
+}
+
+ensure_test_app_available
+adb shell "am start -n $APP_ID/.MainActivity" >/dev/null 2>&1 || true
+sleep 3
+adb shell appops set "$APP_ID" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true

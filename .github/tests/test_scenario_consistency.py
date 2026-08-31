@@ -97,6 +97,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("needs.quality.result", required)
             self.assertIn("needs.test-flow.result", required)
 
+    def test_android17_flow_is_integrated_without_diagnostic_artifact_upload(self) -> None:
+        source = read(".github/workflows/ci.yml")
+        experimental = section(source, "  test-flow-android17:", "  test-flow-required:")
+        self.assertIn("github.ref_name == 'SRX-R' || github.base_ref == 'SRX-R'", experimental)
+        self.assertIn("ANDROID_TARGET: google_apis", experimental)
+        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", experimental)
+        self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", experimental)
+        self.assertIn('ANDROID_API_LEVEL: "37.0"', experimental)
+        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk", experimental)
+        self.assertIn("Download test-flow runtime", experimental)
+        self.assertNotIn("Upload Android 17 diagnostic artifacts", experimental)
+        self.assertNotIn("actions/upload-artifact@v7.0.1", experimental)
+        self.assertNotIn("gh release", experimental)
+        self.assertNotIn("update.json", experimental)
+        required = section(source, "  test-flow-required:", "  create-ci-release:")
+        self.assertIn("- test-flow-android17", required)
+        self.assertIn("needs.test-flow-android17.result", required)
+
     def test_gradle_cache_can_be_written_by_public_builds(self) -> None:
         ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/release.yml")
@@ -580,6 +598,106 @@ class ScenarioConsistencyTest(unittest.TestCase):
             recovery.index("adb reboot"),
             recovery.index('wait_media_provider_hook_ready "module-clean-boot"'),
         )
+        self.assertIn("defer_media_provider_hook_check_for_lazy_provider", install)
+        self.assertIn("MediaProvider 采用惰性启动", install)
+
+    def test_android17_skips_provider_restart_that_detaches_fuse_storage(self) -> None:
+        source = read(".github/tests/run-storage-redirect-scenarios.sh")
+        restart = section(source, "restart_media_provider() {", "ensure_monitor_collector()")
+        self.assertIn('[ "$sdk" -ge 37 ]', restart)
+        self.assertIn("can detach emulated storage", restart)
+
+        boot = read("assets/zygisk_module/service.d/boot.sh")
+        deferred = section(boot, "restart_media_provider_for_deferred_hooks() {", "  media_pkgs=")
+        self.assertIn('getprop ro.build.version.sdk', deferred)
+        self.assertIn('skip MediaProvider restart for lazy Android', deferred)
+
+    def test_test_app_install_waits_for_package_service(self) -> None:
+        install = read(".github/tests/install-storage-redirect-module.sh")
+        section_text = section(install, "install_test_app_before_module_boot()", "seed_storage_redirect_test_environment()")
+        self.assertIn("cmd package list packages", section_text)
+        self.assertIn("APP_INSTALL_ATTEMPTS", section_text)
+        self.assertIn("adb reconnect", section_text)
+
+    def test_test_flow_waits_for_services_after_module_reboot(self) -> None:
+        flow = read(".github/tests/run-android-test-flow.sh")
+        post_install = section(flow, "bash .github/tests/install-storage-redirect-module.sh", "adb shell appops set")
+        self.assertIn("wait_for_adb_ready", post_install)
+        self.assertIn("package_service_deadline", post_install)
+        self.assertIn("cmd package list packages", post_install)
+
+    def test_android17_disables_graphics_readback_before_and_after_module_reboot(self) -> None:
+        flow = read(".github/tests/run-android-test-flow.sh")
+        workaround = section(
+            flow,
+            "android17_disable_graphics_readback()",
+            "prepare_device_health\n",
+        )
+        post_install = section(flow, "bash .github/tests/install-storage-redirect-module.sh", "adb shell appops set")
+
+        self.assertIn("service call window 137 i32 0", workaround)
+        self.assertIn("service call window 135", workaround)
+        self.assertIn(r"Parcel\([[:space:]]*00000000", workaround)
+        self.assertIn("test-flow-graphics-state.txt", workaround)
+        self.assertIn('[ "$sdk" -ne 37 ]', workaround)
+        self.assertIn("cmd package list packages -d --user 0", workaround)
+        self.assertIn("pidof com.android.systemui", workaround)
+        self.assertIn("pidof system_server", workaround)
+        self.assertIn("stable_system_server_pid", workaround)
+        self.assertIn("stable_isTaskSnapshotSupported", workaround)
+        self.assertIn("SystemUI 是 persistent 系统进程", workaround)
+        self.assertNotIn("killall com.android.systemui", workaround)
+        self.assertIn("sleep 8", workaround)
+        self.assertIn('android17_disable_graphics_readback "初次启动后"', flow)
+        self.assertIn('android17_disable_graphics_readback "模块重启后"', post_install)
+        self.assertEqual(3, flow.count("android17_disable_graphics_readback"))
+        self.assertLess(
+            post_install.index('android17_disable_graphics_readback "模块重启后"'),
+            post_install.index("=== shell_packages ==="),
+        )
+
+    def test_scenario_runner_recovers_transient_adb_boot_errors(self) -> None:
+        flow = read(".github/tests/run-storage-redirect-scenarios.sh")
+        boot = section(flow, "wait_boot_completed()", "backup_device_execution_state()")
+        self.assertIn("adb get-state", boot)
+        self.assertIn("adb reconnect offline", boot)
+        self.assertIn("timeout 10s adb shell getprop sys.boot_completed", boot)
+
+    def test_bash_root_timeout_wraps_the_adb_executable_not_shell_function(self) -> None:
+        flow = read(".github/tests/run-storage-redirect-scenarios.sh")
+        root = section(flow, "adb_root()", "adb_write_file()")
+        start = section(flow, "start_app_and_confirm_mount()", "wait_storage_ready()")
+
+        self.assertIn('timeout_command=(timeout --foreground "${ADB_ROOT_TIMEOUT_SECONDS}s")', root)
+        self.assertIn("adb_su_timeout()", root)
+        self.assertIn('adb_su_timeout 30 ": > \'$LOG_PATH\' 2>/dev/null || true"', start)
+        self.assertNotRegex(flow, r"timeout(?: --foreground)? [0-9]+s? adb_su(?:\s|$)")
+        self.assertIn("cat \\\"\\$q/cmdline\\\" 2>/dev/null", flow)
+        self.assertIn('adb_su_timeout "$host_timeout_seconds"', section(flow, "wait_service_result()", "scenario_from_label()"))
+        self.assertIn('adb_su_timeout "$host_timeout_seconds"', section(flow, "wait_config_applied()", "service_case_timeout_seconds()"))
+
+    def test_android17_diagnostics_do_not_report_expected_missing_files(self) -> None:
+        flow = read(".github/tests/run-storage-redirect-scenarios.sh")
+        storage = section(flow, "print_storage_state()", "run_service_case()")
+        rootavd = read(".github/vendor/rootAVD/rootAVD.sh")
+
+        self.assertIn("optional_storage_alias_absent path=", storage)
+        self.assertIn('if ! $BB wget -q --no-check-certificate $SRCURL$JSON || [ ! -s "$JSON" ]', rootavd)
+        self.assertLess(rootavd.index('[ ! -s "$JSON" ]'), rootavd.index('VER=$(json_value "version" < $JSON)'))
+
+    def test_media_provider_readiness_rejects_query_errors_and_uses_ps_fallback(self) -> None:
+        flow = read(".github/tests/run-storage-redirect-scenarios.sh")
+        query = section(flow, "media_provider_query_ready()", "wait_media_provider_ready()")
+        self.assertIn('timeout 15s adb shell content query', query)
+        self.assertIn("Error while accessing provider:media", query)
+        readiness = section(flow, "wait_media_provider_ready()", "media_provider_pid()")
+        self.assertIn("local uris=(\"content://media/external_primary/file\")", readiness)
+        hook = section(flow, "ensure_media_provider_hook_ready()", "restart_media_provider_with_hook_ready()")
+        self.assertIn("if media_provider_is_lazy; then", hook)
+        self.assertIn("timeout --foreground 120s bash -c 'check_health'", flow)
+        self.assertIn("timeout --foreground 180s bash -c 'capture_test_flow_artifacts'", flow)
+        pid = section(flow, "media_provider_pid()", "wait_media_provider_hook_ready()")
+        self.assertIn("ps -A -o PID,NAME,ARGS", pid)
 
     def test_bash_prepares_mapping_source_on_real_backend(self) -> None:
         prepare = section(

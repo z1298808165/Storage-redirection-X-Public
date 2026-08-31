@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Android 17 上出现整脚本 9 秒内静默退出（exit 224）的现象，日志无任何标记。
+# ERR trap 在失败命令处输出行号与退出码，用于精确定位传播到 job 层的异常退出码。
+trap 'echo "::warning file=run-storage-redirect-scenarios.sh,line=${BASH_LINENO[0]}::场景脚本命令失败：${BASH_COMMAND} 退出码=$?" >&2' ERR
+
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
@@ -167,15 +171,19 @@ fix_private_backend_permissions() {
 adb_root() {
   local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
   local encoded runner
+  local -a timeout_command=()
   detect_adb_root_mode
   encoded="$(printf '%s' "$command" | base64 | tr -d '\n')"
   runner="printf '%s' '$encoded' | base64 -d | sh"
+  if [ -n "${ADB_ROOT_TIMEOUT_SECONDS:-}" ]; then
+    timeout_command=(timeout --foreground "${ADB_ROOT_TIMEOUT_SECONDS}s")
+  fi
   case "$ADB_ROOT_MODE" in
-    su0) adb shell "su 0 sh -c \"$runner\"" ;;
-    su) adb shell "su -c \"$runner\"" ;;
-    magisk) adb shell magisk su -c "$runner" ;;
-    system_magisk) adb shell /system/bin/magisk su -c "$runner" ;;
-    debug_magisk) adb shell /debug_ramdisk/magisk su -c "$runner" ;;
+    su0) "${timeout_command[@]}" adb shell "su 0 sh -c \"$runner\"" ;;
+    su) "${timeout_command[@]}" adb shell "su -c \"$runner\"" ;;
+    magisk) "${timeout_command[@]}" adb shell magisk su -c "$runner" ;;
+    system_magisk) "${timeout_command[@]}" adb shell /system/bin/magisk su -c "$runner" ;;
+    debug_magisk) "${timeout_command[@]}" adb shell /debug_ramdisk/magisk su -c "$runner" ;;
     *) echo "No usable adb root shell found." >&2; return 1 ;;
   esac
 }
@@ -190,6 +198,13 @@ adb_su() {
   adb_root "$1" | tr -d '\r'
 }
 
+adb_su_timeout() {
+  local timeout_seconds="$1"
+  local ADB_ROOT_TIMEOUT_SECONDS="$timeout_seconds"
+  shift
+  adb_su "$1"
+}
+
 adb_write_file() {
   local path="$1"
   local content="$2"
@@ -199,8 +214,23 @@ adb_write_file() {
 }
 
 wait_boot_completed() {
-  adb wait-for-device
-  adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+  local deadline=$((SECONDS + ${ADB_BOOT_TIMEOUT_SECONDS:-300}))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ "$(adb get-state 2>/dev/null || true)" = "device" ] &&
+      [ "$(timeout 10s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" = "1" ]; then
+      return 0
+    fi
+    if adb devices 2>/dev/null | grep -q $'\toffline$'; then
+      adb reconnect offline >/dev/null 2>&1 || true
+    else
+      adb start-server >/dev/null 2>&1 || true
+    fi
+    sleep 3
+  done
+
+  echo "等待 Android 启动完成超时，当前设备状态：" >&2
+  adb devices -l >&2 || true
+  return 1
 }
 
 backup_device_execution_state() {
@@ -670,7 +700,7 @@ remove_random_physical_media_files() {
 restart_media_provider() {
   local sdk
   sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-  if [ -n "$sdk" ] && [ "$sdk" -le 34 ]; then
+  if [ -n "$sdk" ] && { [ "$sdk" -le 34 ] || [ "$sdk" -ge 37 ]; }; then
     echo "skip_media_provider_restart sdk=${sdk}: restarting MediaProvider can detach emulated storage on this emulator" >&2
     return 0
   fi
@@ -822,13 +852,14 @@ latest_result() {
 
 wait_service_result() {
   local timeout_seconds="$1"
+  local host_timeout_seconds=$((timeout_seconds + 15))
   local freshness_marker="$2"
   local expected_test_case="$3"
   local seconds=$((SRT_RESULT_POLL_MS / 1000))
   local remainder=$((SRT_RESULT_POLL_MS % 1000))
   local poll_delay
   printf -v poll_delay '%d.%03d' "$seconds" "$remainder"
-  adb_su "marker_mtime=\$(stat -c %Y '$freshness_marker' 2>/dev/null || echo 0); deadline=\$(date +%s); deadline=\$((deadline + $timeout_seconds)); while [ \$(date +%s) -lt \$deadline ]; do for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do if [ -s \"\$file\" ]; then file_mtime=\$(stat -c %Y \"\$file\" 2>/dev/null || echo 0); [ \"\$file_mtime\" -ge \"\$marker_mtime\" ] || continue; if [ '$expected_test_case' != 'all' ]; then line_count=\$(grep -cve '^[[:space:]]*\$' \"\$file\" 2>/dev/null || true); grep -Eq '^(PASS|FAIL) \\[$expected_test_case\\]' \"\$file\" || continue; [ \"\$line_count\" -eq 1 ] || continue; fi; cat \"\$file\"; exit 0; fi; done; sleep $poll_delay; done; exit 1"
+  adb_su_timeout "$host_timeout_seconds" "marker_mtime=\$(stat -c %Y '$freshness_marker' 2>/dev/null || echo 0); deadline=\$(date +%s); deadline=\$((deadline + $timeout_seconds)); while [ \$(date +%s) -lt \$deadline ]; do for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do if [ -s \"\$file\" ]; then file_mtime=\$(stat -c %Y \"\$file\" 2>/dev/null || echo 0); [ \"\$file_mtime\" -ge \"\$marker_mtime\" ] || continue; if [ '$expected_test_case' != 'all' ]; then line_count=\$(grep -cve '^[[:space:]]*\$' \"\$file\" 2>/dev/null || true); grep -Eq '^(PASS|FAIL) \\[$expected_test_case\\]' \"\$file\" || continue; [ \"\$line_count\" -eq 1 ] || continue; fi; cat \"\$file\"; exit 0; fi; done; sleep $poll_delay; done; exit 1"
 }
 
 wait_app_mount_confirmed() {
@@ -841,8 +872,9 @@ wait_app_mount_confirmed() {
     return 1
   fi
   local timeout_seconds=$(((SRT_MOUNT_CONFIRM_TIMEOUT_MS + 999) / 1000))
+  local host_timeout_seconds=$((timeout_seconds + 15))
   local output
-  if output="$(adb_su "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; marker=\"marker ok path=/data/user/0/$APP_ID/.srx_mount_status_\$pid\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
+  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -z \"\$pid\" ] && pid=\$(for q in /proc/[0-9]*; do c=\$(cat \"\$q/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${q#/proc/}\";; esac; done | sort -n | tail -1); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; marker=\"marker ok path=/data/user/0/$APP_ID/.srx_mount_status_\$pid\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$marker)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
     local confirmed_pid
     confirmed_pid="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
     if [ -n "$confirmed_pid" ] && app_mountinfo_has_expected_paths "$label" "$confirmed_pid"; then
@@ -923,8 +955,9 @@ ensure_current_app_mount_confirmed() {
 wait_config_applied() {
   local label="$1"
   local timeout_seconds=$(((SRT_CONFIG_APPLY_TIMEOUT_MS + 999) / 1000))
+  local host_timeout_seconds=$((timeout_seconds + 15))
   local output
-  if output="$(adb_su "deadline=\$((\$(date +%s) + $timeout_seconds)); while [ \$(date +%s) -le \$deadline ]; do if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq 'config (reloaded|loaded) .*apps=[1-9]'; then exit 0; fi; sleep 0.1; done; tail -80 '$LOG_PATH' 2>/dev/null; exit 1")"; then
+  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); while [ \$(date +%s) -le \$deadline ]; do if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq 'config (reloaded|loaded) .*apps=[1-9]'; then exit 0; fi; sleep 0.1; done; tail -80 '$LOG_PATH' 2>/dev/null; exit 1")"; then
     return 0
   fi
   echo "config apply timeout: $label" >&2
@@ -976,14 +1009,28 @@ start_app_and_confirm_mount() {
     LAST_MOUNT_CONFIRMED_PID=""
     local previous_pid
     previous_pid="$(app_pid)"
-    adb shell am force-stop "$APP_ID" >/dev/null || true
+    # Android 17 冷启动后 framework 可能短暂未就绪，adb 子命令偶发不返回；
+    # 统一包 timeout 防挂起，失败快速进入下一轮重试而不是空等场景级超时。
+    timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
     if [[ "$label" == *quick-initial-app* ]] && [ -n "$previous_pid" ] && ! wait_app_process_stopped 10; then
       echo "app stop timeout: $label" >&2
       return 1
     fi
-    adb logcat -c >/dev/null 2>&1 || true
-    adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
-    adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
+    timeout 15 adb logcat -c >/dev/null 2>&1 || true
+    adb_su_timeout 30 ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
+    local am_start_output am_start_try
+    am_start_output=""
+    for am_start_try in 1 2 3; do
+      if am_start_output="$(timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" 2>&1)"; then
+        if grep -q "Status: ok" <<<"$am_start_output"; then
+          break
+        fi
+      fi
+      # "Too early to start activity" 等 framework 未就绪错误：立即退避重试，
+      # 避免进入 mount 确认轮询空转数十秒才发现应用根本没起来。
+      echo "am start 未就绪（${label} 第 ${am_start_try}/3 次），退避重试：$(grep -m1 -E 'Error|Exception|Too early|error' <<<"$am_start_output" | cut -c1-120)" >&2
+      sleep 5
+    done
     if wait_app_mount_confirmed "$label" "$expect_mount"; then
       return 0
     fi
@@ -1050,36 +1097,54 @@ ensure_initial_storage_ready() {
 media_provider_query_ready() {
   local uri="$1"
   local output
-  output="$(adb shell content query --uri "$uri" --projection _id --where '_id=-1' 2>&1 || true)"
-  if grep -Eq 'Error while accessing provider:media|Volume external_primary not found|IllegalArgumentException|Unknown URL|Unsupported Uri' <<<"$output"; then
+  if ! output="$(timeout 15s adb shell content query --uri "$uri" --projection _id --where '_id=-1' 2>&1)"; then
+    return 1
+  fi
+  if grep -Eiq 'Error while accessing provider:media|Volume [^ ]+ not found|IllegalArgumentException|Unknown URL|Unsupported Uri' <<<"$output"; then
     return 1
   fi
   return 0
+}
+
+media_provider_is_lazy() {
+  local sdk
+  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  [ -n "$sdk" ] && [ "$sdk" -ge 37 ]
 }
 
 wait_media_provider_ready() {
   local label="$1"
   local timeout_seconds="${2:-120}"
   local deadline=$((SECONDS + timeout_seconds))
-  local uris=(
-    "content://media/external_primary/images/media"
-    "content://media/external_primary/video/media"
-    "content://media/external_primary/audio/media"
-    "content://media/external_primary/file"
-    "content://media/external_primary/downloads"
-    "content://media/external/images/media"
-    "content://media/external/video/media"
-    "content://media/external/audio/media"
-    "content://media/external/file"
-    "content://media/external/downloads"
-  )
+  if media_provider_is_lazy; then
+    echo "MediaProvider readiness deferred until first app access: ${label}"
+    return 0
+  fi
+  local sdk
+  sdk="$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  local uris=("content://media/external_primary/file")
+  if [ -z "$sdk" ] || [ "$sdk" -lt 37 ]; then
+    uris+=(
+      "content://media/external_primary/images/media"
+      "content://media/external_primary/video/media"
+      "content://media/external_primary/audio/media"
+      "content://media/external_primary/downloads"
+      "content://media/external/images/media"
+      "content://media/external/video/media"
+      "content://media/external/audio/media"
+      "content://media/external/file"
+      "content://media/external/downloads"
+    )
+  fi
 
+  local last_failed_uri=""
   while [ "$SECONDS" -lt "$deadline" ]; do
     local ready=1
     local uri
     for uri in "${uris[@]}"; do
       if ! media_provider_query_ready "$uri"; then
         ready=0
+        last_failed_uri="$uri"
         break
       fi
     done
@@ -1090,12 +1155,13 @@ wait_media_provider_ready() {
   done
 
   echo "Timed out waiting for MediaProvider: ${label}"
+  echo "MediaProvider readiness probe failed: ${last_failed_uri:-unknown}"
   print_storage_state "${label}-media-provider-timeout"
   return 1
 }
 
 media_provider_pid() {
-  adb_su "for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof \"\$package\" 2>/dev/null || true; done" |
+  adb_su "for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof \"\$package\" 2>/dev/null || true; done; ps -A -o PID,NAME,ARGS 2>/dev/null | awk '\$0 ~ /providers\\.media|android\\.process\\.media/ {print \$1}'" |
     tr -d '\r' |
     awk 'NF { print $1; exit }'
 }
@@ -1139,6 +1205,10 @@ wait_media_provider_hook_ready() {
 
 ensure_media_provider_hook_ready() {
   local label="$1"
+  if media_provider_is_lazy; then
+    echo "MediaProvider hook readiness deferred until first app access: ${label}"
+    return 0
+  fi
   if wait_media_provider_hook_ready "${label}-current" 3; then
     return 0
   fi
@@ -1169,7 +1239,7 @@ print_storage_state() {
   local label="$1"
   echo "=== storage state: ${label} ==="
   adb shell "date; getprop ro.build.version.sdk; getprop ro.build.version.release; getprop sys.boot_completed; getprop dev.bootcomplete; getprop init.svc.sdcard; getprop init.svc.media; sm list-volumes all 2>/dev/null || true; df -h /storage/emulated/0 /sdcard 2>&1 || true; ls -ld /storage /storage/emulated /storage/emulated/0 /sdcard 2>&1 || true; mount | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
-  adb_su "id; ls -ld /mnt/user/0 /mnt/user/0/emulated /mnt/user/0/emulated/0 /mnt/runtime/default/emulated/0 2>&1 || true; cat /proc/mounts | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
+  adb_su "id; for path in /mnt/user/0 /mnt/user/0/emulated /mnt/user/0/emulated/0 /mnt/runtime/default/emulated/0; do if [ -e \"\$path\" ]; then ls -ld \"\$path\"; else echo optional_storage_alias_absent path=\$path; fi; done; cat /proc/mounts | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
 }
 
 run_service_case() {
@@ -1186,7 +1256,9 @@ run_service_case() {
   local freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
   adb_su "touch '$freshness_marker'" >/dev/null
   local start_output
-  if ! start_output="$(adb shell am broadcast -n "${APP_ID}/.receiver.TestCaseReceiver" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
+  # Android 17 上向刚重启的应用发 broadcast 偶发阻塞至场景级超时；包 90 秒
+  # timeout 使挂起快速走 service_start_failed 路径（有输出、可重试）。
+  if ! start_output="$(timeout 90 adb shell am broadcast -n "${APP_ID}/.receiver.TestCaseReceiver" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
     adb_su "rm -f '$freshness_marker'" >/dev/null
     echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
     printf '%s\n' "$start_output" | sed 's/^/service_start: /'
@@ -1287,8 +1359,8 @@ run_write_test() {
       return 1
     fi
     echo "write_retry scenario=${scenario} attempt=${attempt}"
-    adb shell am force-stop "$APP_ID" >/dev/null || true
-    adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
+    timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
+    timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null || true
     wait_storage_ready "scenario-${scenario}-write-retry"
     clean_targets
   done
@@ -2111,8 +2183,17 @@ run_file_monitor_mediastore_scenario() {
 
 app_pid() {
   # 同包的旧进程可能在 force-stop 后短暂残留，跨行取最高 PID 对应刚启动的主进程。
-  adb shell "pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'" |
-    tr -d '\r' | tail -1
+  local pid
+  pid="$(adb shell "pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'" |
+    tr -d '\r' | awk 'NF {print; exit}')"
+  if [ -n "$pid" ]; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  # Android 17 上应用进程名仍受 comm 的 15 字符限制，长包名会被截断，pidof 无法再
+  # 按完整包名匹配；这里退回遍历 /proc 的完整命令行首参，避免误判为进程不存在。
+  adb shell "for p in /proc/[0-9]*; do c=\$(cat \"\$p/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${p#/proc/}\";; esac; done" |
+    tr -d '\r' | sort -n | tail -1
 }
 
 wait_app_process_stopped() {
@@ -2131,7 +2212,7 @@ resume_hot_reload_app() {
   local scenario="$1"
   local expected_pid="$2"
   local current_pid
-  adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null
+  timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null || true
   wait_storage_ready "scenario-${scenario}-hot-reload-resume" 30 >/dev/null
   current_pid="$(app_pid)"
   if [ -z "$current_pid" ] || [ "$current_pid" != "$expected_pid" ]; then
@@ -2649,9 +2730,13 @@ adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES >/dev/null 2>&
 adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1 || true
 adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_AUDIO >/dev/null 2>&1 || true
 fix_private_backend_permissions || true
+echo "场景脚本 preflight：restart_media_provider" >&2
 restart_media_provider
+echo "场景脚本 preflight：ensure_initial_storage_ready" >&2
 ensure_initial_storage_ready
+echo "场景脚本 preflight：wait_media_provider_ready" >&2
 wait_media_provider_ready "initial"
+echo "场景脚本 preflight：ensure_media_provider_hook_ready" >&2
 ensure_media_provider_hook_ready "initial" || exit 1
 adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
 
@@ -2664,7 +2749,8 @@ export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config target_path logical_dir expected_path scenario_title prepare_backend_core_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config target_path logical_dir expected_path scenario_title prepare_backend_core_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_scenario
+export -f media_provider_is_lazy
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario
 
@@ -2682,8 +2768,13 @@ for scenario in "${scenarios[@]}"; do
   fi
   echo "::endgroup::"
 done
-check_health || fail=1
-capture_test_flow_artifacts
+if ! timeout --foreground 120s bash -c 'check_health'; then
+  echo "health check timed out or failed"
+  fail=1
+fi
+if ! timeout --foreground 180s bash -c 'capture_test_flow_artifacts'; then
+  echo "test-flow artifact capture timed out"
+fi
 
 if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
   trap - EXIT

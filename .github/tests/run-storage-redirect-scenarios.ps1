@@ -664,7 +664,7 @@ function Test-MediaProviderQueryReady {
         return $false
     }
     if ($text -match "Error while accessing provider:media" -or
-        $text -match "Volume external_primary not found" -or
+        $text -match "Volume [^ ]+ not found" -or
         $text -match "IllegalArgumentException" -or
         $text -match "Unknown URL" -or
         $text -match "Unsupported Uri") {
@@ -677,18 +677,25 @@ function Wait-MediaProviderReady {
     param([string]$Label, [int]$TimeoutSeconds = 120)
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $uris = @(
-        "content://media/external_primary/images/media",
-        "content://media/external_primary/video/media",
-        "content://media/external_primary/audio/media",
-        "content://media/external_primary/file",
-        "content://media/external_primary/downloads",
-        "content://media/external/images/media",
-        "content://media/external/video/media",
-        "content://media/external/audio/media",
-        "content://media/external/file",
-        "content://media/external/downloads"
-    )
+    if (Test-MediaProviderIsLazy) {
+        Write-Host "MediaProvider readiness deferred until first app access: $Label"
+        return $true
+    }
+    $sdk = (& adb -s $Serial shell getprop ro.build.version.sdk 2>$null | Out-String).Trim()
+    $uris = @("content://media/external_primary/file")
+    if ([string]::IsNullOrEmpty($sdk) -or [int]$sdk -lt 37) {
+        $uris += @(
+            "content://media/external_primary/images/media",
+            "content://media/external_primary/video/media",
+            "content://media/external_primary/audio/media",
+            "content://media/external_primary/downloads",
+            "content://media/external/images/media",
+            "content://media/external/video/media",
+            "content://media/external/audio/media",
+            "content://media/external/file",
+            "content://media/external/downloads"
+        )
+    }
 
     while ((Get-Date) -lt $deadline) {
         $ready = $true
@@ -711,6 +718,11 @@ function Get-MediaProviderPid {
     ) -join "`n"
     $match = [regex]::Match($output, '(?m)^\s*(\d+)')
     if ($match.Success) { $match.Groups[1].Value } else { "" }
+}
+
+function Test-MediaProviderIsLazy {
+    $sdk = (& adb -s $Serial shell getprop ro.build.version.sdk 2>$null | Out-String).Trim()
+    return -not [string]::IsNullOrEmpty($sdk) -and [int]$sdk -ge 37
 }
 
 function Wait-MediaProviderHookReady {
@@ -755,6 +767,10 @@ function Wait-MediaProviderHookReady {
 function Confirm-MediaProviderHookReady {
     param([string]$Label)
 
+    if (Test-MediaProviderIsLazy) {
+        Write-Host "MediaProvider hook readiness deferred until first app access: $Label"
+        return $true
+    }
     if (Wait-MediaProviderHookReady "$Label-current" 3) { return $true }
     Write-Host "media_provider_hook_recovery label=$Label"
     Restart-MediaProviderWithHookReady "$Label-recovery"

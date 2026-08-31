@@ -970,7 +970,11 @@ FetchMagiskDLData() {
 	local i=1
 
 	rm -rf *.json > /dev/null 2>&1
-	$BB wget -q --no-check-certificate $SRCURL$JSON
+	if ! $BB wget -q --no-check-certificate $SRCURL$JSON || [ ! -s "$JSON" ]; then
+		echo "[!] Skip unavailable $CHANNEL Magisk metadata"
+		rm -f "$JSON" > /dev/null 2>&1
+		return 0
+	fi
 	VER=$(json_value "version" < $JSON)
 	VER_CODE=$(json_value "versionCode" 1 < $JSON)
 	DLL=$(json_value "link" 1 < $JSON)
