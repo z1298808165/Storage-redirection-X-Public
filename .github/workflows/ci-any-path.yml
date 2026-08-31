@@ -1,0 +1,116 @@
+name: Any Path Redirect CI
+
+on:
+  push:
+    branches: [codex/any-path-redirect]
+  pull_request:
+    branches: [codex/any-path-redirect]
+
+permissions:
+  contents: read
+
+env:
+  SRX_NDK_VERSION: "30.0.14904198"
+  SRX_ANDROID_PLATFORM: "platforms;android-37.0"
+  SRX_ANDROID_BUILD_TOOLS: "build-tools;35.0.0"
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-14
+          components: rustfmt
+
+      - name: Verify formatting and tests
+        run: |
+          chmod +x ./gradlew
+          cargo fmt --all -- --check
+          ./gradlew --no-daemon --console=plain spotlessCheck
+          node scripts/verify-webui-structure.js
+          node scripts/verify-webui-config-fixtures.js
+          cargo test -p native-config-fixtures
+          python -m unittest discover -s .github/tests -p "test_*.py" -v
+
+  build:
+    name: Build downloadable test artifacts
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERSION: "1.2.60-any-path.${{ github.run_number }}"
+      VERSION_CODE: "1260001"
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-14
+          targets: x86_64-linux-android
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build module and test-flow artifacts
+        run: |
+          chmod +x ./gradlew .github/scripts/*.sh
+          bash .github/scripts/build_test_flow_runtime.sh
+
+      - name: Build manager APK
+        run: ./gradlew --no-daemon --console=plain :app:assembleDebug
+
+      - name: Upload branch artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: any-path-redirect-ci-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            build/test-flow/assets/*.zip
+            tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
+            app/build/outputs/apk/debug/*.apk
+            app/build/reports/
