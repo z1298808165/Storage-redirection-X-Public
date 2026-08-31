@@ -7,6 +7,7 @@ on:
     branches: [codex/any-path-redirect]
 
 permissions:
+  actions: read
   contents: read
 
 env:
@@ -47,8 +48,8 @@ jobs:
           cargo test -p native-config-fixtures
           python -m unittest discover -s .github/tests -p "test_*.py" -v
 
-  build:
-    name: Build downloadable test artifacts
+  test-flow-build:
+    name: Build test-flow runtime
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -105,7 +106,7 @@ jobs:
       - name: Upload branch artifacts
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: any-path-redirect-ci-${{ github.run_number }}
+          name: test-flow-runtime-v${{ env.VERSION }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -114,3 +115,227 @@ jobs:
             tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
             app/build/outputs/apk/debug/*.apk
             app/build/reports/
+
+  test-flow:
+    name: Test-flow Android ${{ matrix.android.version }}
+    needs:
+      - quality
+      - test-flow-build
+    if: always() && needs.quality.result == 'success' && needs.test-flow-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      VERSION: "1.2.60-any-path.${{ github.run_number }}"
+      VERSION_CODE: "1260001"
+      ANDROID_TARGET: google_apis
+      ANDROID_ARCH: x86_64
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+      ANDROID_API_LEVEL: ${{ matrix.android.api }}
+      SRT_SCENARIOS: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35"
+      SRT_FAIL_FAST: 1
+      SRT_SKIP_FINAL_CLEANUP: 1
+      SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      SRT_FUSE_FIX_ENABLED: false
+    strategy:
+      fail-fast: true
+      matrix:
+        android:
+          - api: 33
+            version: 13
+          - api: 34
+            version: 14
+          - api: 35
+            version: 15
+          - api: 36
+            version: 16
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download test-flow runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v${{ env.VERSION }}" --dir .
+
+      - name: Enable KVM permissions
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            sudo sh -c 'echo KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install emulator and system image
+        run: |
+          set -euo pipefail
+          sdkmanager --install emulator --channel=0
+          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
+          sdkmanager --install "$package" --channel=0
+
+      - name: Run Android test-flow scenarios
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: ${{ matrix.android.api }}
+          target: ${{ env.ANDROID_TARGET }}
+          arch: ${{ env.ANDROID_ARCH }}
+          profile: pixel_7
+          disk-size: 4096M
+          heap-size: 1024M
+          disable-animations: true
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
+          script: bash .github/tests/run-android-test-flow.sh
+
+      - name: Upload test-flow diagnostics
+        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: any-path-test-flow-android${{ matrix.android.version }}-${{ github.run_number }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            scenario-*-result.txt
+            test-flow-preflight.txt
+            test-flow-app-mountinfo.txt
+            test-flow-logcat.txt
+            test-flow-module-state.txt
+            test-flow-backend-diagnostic.txt
+            test-flow-monitor-state.txt
+            media-health.txt
+
+  test-flow-android17:
+    name: Test-flow Android 17
+    needs:
+      - quality
+      - test-flow-build
+    if: always() && needs.quality.result == 'success' && needs.test-flow-build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      VERSION: "1.2.60-any-path.${{ github.run_number }}"
+      VERSION_CODE: "1260001"
+      ANDROID_TARGET: google_apis
+      ANDROID_ARCH: x86_64
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+      ANDROID_API_LEVEL: "37.0"
+      SRT_SCENARIOS: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35"
+      SRT_FAIL_FAST: 1
+      SRT_SKIP_FINAL_CLEANUP: 1
+      SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      SRT_FUSE_FIX_ENABLED: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download test-flow runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v${{ env.VERSION }}" --dir .
+
+      - name: Enable KVM permissions
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            sudo sh -c 'echo KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android 17 emulator image
+        run: |
+          set -euo pipefail
+          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
+          sdkmanager --install emulator "$package" --channel=0
+
+      - name: Run Android 17 test-flow scenarios
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: "37.0"
+          target: ${{ env.ANDROID_TARGET }}
+          arch: ${{ env.ANDROID_ARCH }}
+          profile: pixel_7
+          disk-size: 4096M
+          heap-size: 1024M
+          disable-animations: false
+          emulator-boot-timeout: 1800
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
+          script: bash .github/tests/run-android-test-flow.sh
+
+      - name: Upload Android 17 diagnostics
+        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: any-path-test-flow-android17-${{ github.run_number }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            scenario-*-result.txt
+            test-flow-preflight.txt
+            test-flow-app-mountinfo.txt
+            test-flow-logcat.txt
+            test-flow-module-state.txt
+            test-flow-backend-diagnostic.txt
+            test-flow-monitor-state.txt
+            media-health.txt
+
+  test-flow-required:
+    name: Test-flow required gate
+    needs:
+      - quality
+      - test-flow-build
+      - test-flow
+      - test-flow-android17
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require all test-flow jobs to pass
+        run: |
+          set -euo pipefail
+          test "${{ needs.quality.result }}" = success
+          test "${{ needs.test-flow-build.result }}" = success
+          test "${{ needs.test-flow.result }}" = success
+          test "${{ needs.test-flow-android17.result }}" = success
+
+  upload-branch-assets:
+    name: Upload final branch assets
+    needs:
+      - test-flow-build
+      - test-flow-required
+    if: always() && needs.test-flow-build.result == 'success' && needs.test-flow-required.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download built runtime assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v1.2.60-any-path.${{ github.run_number }}" --dir .
+
+      - name: Upload final module and manager assets
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: any-path-redirect-assets-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            build/test-flow/assets/*.zip
+            app/build/outputs/apk/debug/*.apk
