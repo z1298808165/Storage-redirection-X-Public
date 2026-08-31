@@ -18,12 +18,14 @@ class RootStorageBrowserTest {
   }
 
   @Test
-  fun rejectsAndroidDataPrivatePath() = runBlocking {
+  fun listsAndroidDataPrivatePath() = runBlocking {
     val shell = CapturingShell()
     val browser = RootStorageBrowser(shell)
 
-    assertTrue(browser.listDirectories("0", "/Android/data/com.example").isEmpty())
-    assertTrue(shell.invocations.isEmpty())
+    browser.listDirectories("0", "/Android/data/com.example")
+    assertTrue(
+        shell.invocations.single().command.contains("/storage/emulated/0/Android/data/com.example")
+    )
   }
 
   @Test
