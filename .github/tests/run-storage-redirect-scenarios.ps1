@@ -128,6 +128,15 @@ $BackendOwnPrivateObbRoot = "$BackendRoot/Android/obb/$AppId/Tencent/QQfile_recv
 $SandboxOwnPrivateDataRoot = "$BackendPrivateRoot/Android/data/$AppId/Tencent/QQfile_recv"
 $SandboxOwnPrivateMediaRoot = "$BackendPrivateRoot/Android/media/$AppId/Tencent/QQfile_recv"
 $SandboxOwnPrivateObbRoot = "$BackendPrivateRoot/Android/obb/$AppId/Tencent/QQfile_recv"
+$AnyRelativeRequest = "$RealRoot/Android/data/$AppId/cache"
+$AnyAbsoluteUserRequest = "/data/user/0/$AppId/files"
+$AnyUserIdRequest = "/data/user/0/$AppId/cache"
+$AnyLegacyDataRequest = "/data/data/$AppId/code_cache"
+$AnyPublicToPrivateRequest = "$RealRoot/Download/SrtAnyPublicToPrivate"
+$AnyRelativePublicTarget = "$RealRoot/Download/SrtAnyRelativePublic"
+$AnyAbsolutePublicTarget = "$RealRoot/Download/SrtAnyAbsolutePublic"
+$AnyUserPrivateTarget = "/data/user/0/$AppId/cache/redirected"
+$AnyLegacyPrivateTarget = "$RealRoot/Android/media/$AppId/cache"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -309,14 +318,14 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 34) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 35) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 34) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 35) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -338,6 +347,7 @@ function Get-ScenarioList {
     $defaultScenarios.Add(32) | Out-Null
     $defaultScenarios.Add(33) | Out-Null
     $defaultScenarios.Add(34) | Out-Null
+    $defaultScenarios.Add(35) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     @($defaultScenarios)
@@ -423,6 +433,10 @@ function Apply-ScenarioConfig {
         32 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         33 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         34 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
+        35 {
+            $json = '{"users":{"0":{"enabled":true,"path_mappings":{"Android/data/' + $AppId + '/cache":"Download/SrtAnyRelativePublic","/data/user/0/' + $AppId + '/files":"Download/SrtAnyAbsolutePublic","/data/user/0/' + $AppId + '/cache":"Android/data/' + $AppId + '/cache","/data/data/' + $AppId + '/code_cache":"Android/media/' + $AppId + '/cache","Download/SrtAnyPublicToPrivate":"/data/user/0/' + $AppId + '/cache/redirected"}}}}'
+            Write-DeviceConfig $json
+        }
         default { throw "未知场景 $Scenario" }
     }
 }
@@ -809,6 +823,7 @@ function Clear-Targets {
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendRoot/Download/SrtMountNsAllow/Qa/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/Qa/Deep'; chmod -R 777 '$BackendRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsAllow' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; mkdir -p '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked/Writable' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked/Writable' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; chmod -R 777 '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
+    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
 }
 
 function Remove-TestTargetArtifacts {
@@ -817,6 +832,7 @@ function Remove-TestTargetArtifacts {
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Download/Test' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile'" | Out-Null
     Invoke-Su "rm -f '$BackendRoot/Download/$QMarkFileSingleFile' '$BackendPrivateRoot/Download/$QMarkFileSingleFile'" | Out-Null
+    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtFusePlain' '$BackendRoot/Download/SrtFuseExclude' '$BackendRoot/Download/SrtFuseMapParent' '$BackendRoot/Download/SrtFuseMapRW' '$BackendRoot/Download/SrtFuseMapRO' '$BackendRoot/Download/SrtFuseMulti' '$BackendRoot/DCIM/SrtFuseQQ' '$BackendPrivateRoot/Download/SrtFusePlain' '$BackendPrivateRoot/Download/SrtFuseExclude' '$BackendPrivateRoot/Download/SrtFuseMapParent' '$BackendPrivateRoot/Download/SrtFuseMapRW' '$BackendPrivateRoot/Download/SrtFuseMapRO' '$BackendPrivateRoot/Download/SrtFuseMulti' '$BackendPrivateRoot/DCIM/SrtFuseQQ'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtFuseQa' '$BackendRoot/Download/SrtFuseQab' '$BackendRoot/Download/SrtFuseQb' '$BackendRoot/Download/SrtFuseMediaAlpha' '$BackendPrivateRoot/Download/SrtFuseQa' '$BackendPrivateRoot/Download/SrtFuseQab' '$BackendPrivateRoot/Download/SrtFuseQb' '$BackendPrivateRoot/Download/SrtFuseMediaAlpha'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMountNsAllow' '$BackendRoot/Download/SrtMountNsReadOnly' '$BackendRoot/Download/SrtMountNsMapParent' '$BackendRoot/Download/SrtMountNsMapRW' '$BackendRoot/Download/SrtMountNsMapRO' '$BackendPrivateRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsReadOnly' '$BackendPrivateRoot/Download/SrtMountNsMapParent' '$BackendPrivateRoot/Download/SrtMountNsMapRW' '$BackendPrivateRoot/Download/SrtMountNsMapRO'" | Out-Null
@@ -1576,6 +1592,7 @@ function Get-ScenarioTitle {
         32 { "real backend recovery survives app restart without restarting MediaProvider" }
         33 { "MediaProvider hot reload preserves app mounts and image saving" }
         34 { "own package QQfile_recv paths stay real" }
+        35 { "arbitrary path mapping matrix across public and private roots" }
     }
 }
 
@@ -1599,6 +1616,24 @@ function Invoke-OwnPrivateDirectoriesScenario {
         $ok = (Invoke-WriteCase $Scenario "own-$($labels[$index])" $requestPath $Payload).Ok -and $ok
         $ok = (Require-File "scenario-$Scenario" "own-$($labels[$index])-real" $backendPath) -and $ok
         $ok = (Require-Missing "scenario-$Scenario" "own-$($labels[$index])-sandbox" $sandboxPath) -and $ok
+    }
+    $ok
+}
+
+function Invoke-AnyPathMappingScenario {
+    param([int]$Scenario)
+    $cases = @(
+        @{ Label = "relative-android-data-to-public"; Request = "$AnyRelativeRequest/srt_any_relative.txt"; Expected = "$AnyRelativePublicTarget/srt_any_relative.txt"; Source = "$BackendRoot/Android/data/$AppId/cache/srt_any_relative.txt" },
+        @{ Label = "absolute-data-user-to-public"; Request = "$AnyAbsoluteUserRequest/srt_any_absolute.txt"; Expected = "$AnyAbsolutePublicTarget/srt_any_absolute.txt"; Source = "$AnyAbsoluteUserRequest/srt_any_absolute.txt" },
+        @{ Label = "user-id-data-user-to-private"; Request = "$AnyUserIdRequest/srt_any_user_id.txt"; Expected = "$BackendRoot/Android/data/$AppId/cache/srt_any_user_id.txt"; Source = "$AnyUserIdRequest/srt_any_user_id.txt" },
+        @{ Label = "legacy-data-data-to-private"; Request = "$AnyLegacyDataRequest/srt_any_legacy.txt"; Expected = "$BackendRoot/Android/media/$AppId/cache/srt_any_legacy.txt"; Source = "$AnyLegacyDataRequest/srt_any_legacy.txt" },
+        @{ Label = "public-to-absolute-private"; Request = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Expected = "$AnyUserPrivateTarget/srt_any_public_private.txt"; Source = "$AnyPublicToPrivateRequest/srt_any_public_private.txt" }
+    )
+    $ok = $true
+    foreach ($case in $cases) {
+        $ok = (Invoke-WriteCase $Scenario $case.Label $case.Request $Payload).Ok -and $ok
+        $ok = (Require-File "scenario-$Scenario" "$($case.Label)-target" $case.Expected) -and $ok
+        $ok = (Require-Missing "scenario-$Scenario" "$($case.Label)-source" $case.Source) -and $ok
     }
     $ok
 }
@@ -2306,6 +2341,7 @@ function Invoke-Scenario {
         32 { Invoke-BackendEndpointRecoveryScenario $Scenario }
         33 { Invoke-QuickMediaProviderRestartRecoveryScenario $Scenario }
         34 { Invoke-OwnPrivateDirectoriesScenario $Scenario }
+        35 { Invoke-AnyPathMappingScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
