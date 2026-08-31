@@ -822,9 +822,6 @@ fn resolve_path_mappings(
         if paths::eq_ignore_case(&current, &target) {
             continue;
         }
-        if paths::is_android_data_or_obb_path(&target) {
-            continue;
-        }
         resolved.push(PathMapping::new(current, target));
     }
     resolved

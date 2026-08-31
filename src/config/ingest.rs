@@ -378,35 +378,27 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
         if let Some(mappings_value) = user_obj.get("path_mappings") {
             let mut index_by_current_path: HashMap<String, usize> = HashMap::new();
             let mut upsert_mapping = |current_raw: &str, target_raw: &str| {
-                let resolved_current = resolve_allowed_path_for_user(current_raw, &storage_root);
+                let resolved_current =
+                    resolve_mapping_path_for_user(current_raw, user_id, &storage_root);
                 if resolved_current.is_empty() {
                     log::warn!(
-                        "skip map (current invalid, relative only): user={} path={}",
+                        "skip map (current invalid): user={} path={}",
                         user_id,
                         current_raw
                     );
                     return;
                 }
 
-                let resolved_target = resolve_allowed_path_for_user(target_raw, &storage_root);
+                let resolved_target =
+                    resolve_mapping_path_for_user(target_raw, user_id, &storage_root);
                 if resolved_target.is_empty() {
                     log::warn!(
-                        "skip map (target invalid, relative only): user={} path={}",
+                        "skip map (target invalid): user={} path={}",
                         user_id,
                         target_raw
                     );
                     return;
                 }
-                if paths::is_android_data_or_obb_path(&resolved_target) {
-                    log::warn!(
-                        "skip map (target private): user={} cur={} target={}",
-                        user_id,
-                        resolved_current,
-                        resolved_target
-                    );
-                    return;
-                }
-
                 if paths::eq_ignore_case(&resolved_current, &resolved_target) {
                     return;
                 }
@@ -672,6 +664,27 @@ fn resolve_allowed_path_for_user(raw_path: &str, storage_root: &str) -> String {
         return String::new();
     };
     if is_excluded {
+        return String::new();
+    }
+    resolved
+}
+
+/// 解析路径映射。旧配置中的相对路径继续相对于用户共享存储根解析；
+/// 映射专用字段同时保留绝对路径，以支持 `/data/user`、`/data/data` 等
+/// 不属于共享存储树的 namespace 目标。其它规则仍使用上面的严格解析器。
+fn resolve_mapping_path_for_user(raw_path: &str, user_id: i32, storage_root: &str) -> String {
+    let raw = raw_path.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let mut resolved = paths::resolve_user_path(&paths::normalize(raw), user_id);
+    if resolved.is_empty() || paths::has_unsafe_segments(&resolved) {
+        return String::new();
+    }
+    if !paths::is_absolute(&resolved) {
+        resolved = paths::normalize(&paths::join(storage_root, &resolved));
+    }
+    if !paths::is_safe_namespace_path(&resolved) {
         return String::new();
     }
     resolved

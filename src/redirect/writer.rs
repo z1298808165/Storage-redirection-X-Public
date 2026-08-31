@@ -521,7 +521,7 @@ pub fn log_system_writer_skip_path_infer_for_low_uid(original_caller_uid: i32, p
     );
 }
 
-// 过滤跨存储/越界/同一路径/Android/data 与 Android/obb 及重复项
+// 过滤空路径、越界段、同一路径及重复入口；绝对路径映射保留给调用方重写链路。
 fn build_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMapping> {
     if caller_package.is_empty() || caller_uid < ANDROID_APP_UID_START {
         return Vec::new();
@@ -534,8 +534,6 @@ fn build_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMappi
     }
 
     let user_id = platform::user_id_from_uid(caller_uid);
-    let storage_root = paths::storage_user_root_for_user(user_id);
-
     let mut seen_current: HashSet<String> = HashSet::new();
     let mut mappings: Vec<PathMapping> = Vec::new();
 
@@ -550,15 +548,12 @@ fn build_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMappi
         if paths::has_unsafe_segments(&current_path) || paths::has_unsafe_segments(&target_path) {
             continue;
         }
-        if paths::eq_ignore_case(&current_path, &target_path) {
-            continue;
-        }
-        if !paths::is_child(&current_path, &storage_root)
-            || !paths::is_child(&target_path, &storage_root)
+        if !paths::is_safe_namespace_path(&current_path)
+            || !paths::is_safe_namespace_path(&target_path)
         {
             continue;
         }
-        if paths::is_android_data_or_obb_path(&target_path) {
+        if paths::eq_ignore_case(&current_path, &target_path) {
             continue;
         }
         if !seen_current.insert(paths::match_key(&current_path)) {

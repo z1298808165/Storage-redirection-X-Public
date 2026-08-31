@@ -221,6 +221,14 @@ fn resolve_storage_alias(path: &str) -> String {
 /// （备份类目录里确实会出现该字面量）时两处都被改写，得到的路径与真实文件不符，
 /// 后续只读与映射判定就作用在错误的对象上。
 pub fn resolve_user_path(path: &str, user_id: i32) -> String {
+    // `/data/data` 是 `/data/user/0` 的历史别名，即使当前用户是 0 也要先
+    // 规范化，避免绝对映射在不同入口产生两套路径。
+    if let Some(rest) = path.strip_prefix("/data/data")
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return format!("/data/user/{user_id}{rest}");
+    }
+
     if user_id == 0 {
         return path.to_string();
     }
@@ -751,6 +759,15 @@ pub fn has_unsafe_segments(path: &str) -> bool {
     }
 
     false
+}
+
+pub fn is_safe_namespace_path(path: &str) -> bool {
+    if path.is_empty() || path == "/" || !is_absolute(path) || has_unsafe_segments(path) {
+        return false;
+    }
+    ["/proc", "/sys", "/dev", "/data/adb"]
+        .iter()
+        .all(|prefix| path != *prefix && !path.starts_with(&format!("{prefix}/")))
 }
 
 pub fn join(base: &str, relative: &str) -> String {

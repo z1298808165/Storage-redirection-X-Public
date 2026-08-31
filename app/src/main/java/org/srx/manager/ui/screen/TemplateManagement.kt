@@ -321,8 +321,8 @@ internal fun TemplateEditorDialog(
               userId = userId,
               onListDirectories = onListDirectories,
               onAdd = { from, to ->
-                val cleanFrom = normalizeEditablePathInput(from, userId)
-                val cleanTo = normalizeEditablePathInput(to, userId)
+                val cleanFrom = normalizeEditableMappingInput(from, userId)
+                val cleanTo = normalizeEditableMappingInput(to, userId)
                 if (cleanFrom.isNotBlank() && cleanTo.isNotBlank() && cleanFrom != cleanTo) {
                   updateProfile {
                     it.copy(pathMappings = (it.pathMappings + (cleanFrom to cleanTo)).toSortedMap())
@@ -330,8 +330,8 @@ internal fun TemplateEditorDialog(
                 }
               },
               onUpdate = { old, from, to ->
-                val cleanFrom = normalizeEditablePathInput(from, userId)
-                val cleanTo = normalizeEditablePathInput(to, userId)
+                val cleanFrom = normalizeEditableMappingInput(from, userId)
+                val cleanTo = normalizeEditableMappingInput(to, userId)
                 if (cleanFrom.isNotBlank() && cleanTo.isNotBlank() && cleanFrom != cleanTo) {
                   updateProfile {
                     val mappings = it.pathMappings.toMutableMap()

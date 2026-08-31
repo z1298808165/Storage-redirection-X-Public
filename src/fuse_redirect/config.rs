@@ -583,7 +583,8 @@ fn resolve_scoped_path_mappings(
         if request_path.is_empty()
             || final_path.is_empty()
             || paths::eq_ignore_case(&request_path, &final_path)
-            || paths::is_android_data_or_obb_path(&final_path)
+            || !paths::is_same_or_child(&request_path, storage_root)
+            || !paths::is_same_or_child(&final_path, storage_root)
         {
             continue;
         }

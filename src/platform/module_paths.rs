@@ -2,7 +2,10 @@ pub const MODULE_DIR: &str = "/data/adb/modules/storage.redirect.x";
 pub const MOUNT_STATE_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_state";
 pub const MOUNT_INTENT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_intent";
 pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage";
-pub const REAL_STORAGE_TMP_PREFIX: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
+// quality-allow(lint-suppression): 该常量保留给外部挂载状态检查与兼容脚本使用。
+#[allow(dead_code)]
+pub const REAL_STORAGE_TMP_PREFIX: &str =
+    "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
 pub const CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config";
 pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.runtime_disabled";
 pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_probe";
@@ -49,15 +52,23 @@ pub fn normalize_mount_targets(targets: &[String]) -> Vec<String> {
 
 /// 判断挂载目标是否位于本模块允许操作的目录范围内。
 ///
-/// 只允许 `/storage/`、`/mnt/` 与模块自身的真实存储临时目录；
-/// 空路径、含 NUL 或含 `/../` 的路径一律拒绝，避免状态文件被污染后卸载到无关目录。
+/// 允许共享存储、挂载别名以及应用私有数据目录作为状态目标；
+/// 系统根、伪文件系统和模块目录不作为可清理的映射目标，避免状态文件
+/// 被污染后卸载到无关目录。
 pub fn is_safe_mount_target(target: &str) -> bool {
-    if target.is_empty() || target.contains('\0') || target.contains("/../") {
+    if target.is_empty() || target == "/" || target.contains('\0') {
         return false;
     }
-    target.starts_with("/storage/")
-        || target.starts_with("/mnt/")
-        || target.starts_with(REAL_STORAGE_TMP_PREFIX)
+    if !target.starts_with('/')
+        || target
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return false;
+    }
+    ["/proc", "/sys", "/dev", "/data/adb"]
+        .iter()
+        .all(|prefix| target != *prefix && !target.starts_with(&format!("{prefix}/")))
 }
 
 /// 把任意字符串转换为可安全用于文件名的形式。
