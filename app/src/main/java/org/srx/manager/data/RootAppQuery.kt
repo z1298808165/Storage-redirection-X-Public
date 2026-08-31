@@ -41,4 +41,36 @@ class RootAppQuery(
         }
         .toMap()
   }
+
+  /**
+   * 通过 root shell 枚举指定用户的包名，绕过 Android 17 上普通应用的 package visibility 过滤。 这里只返回包名；标签和 ApplicationInfo
+   * 仍由 PackageManager/Dex 通道解析。
+   */
+  suspend fun listInstalledPackages(userId: String): List<String> {
+    if (!isSafeUserId(userId)) return emptyList()
+    val userArg = " --user $userId"
+    val commands =
+        listOf(
+            "pm list packages -f -U$userArg 2>/dev/null",
+            "cmd package list packages -f -U$userArg 2>/dev/null",
+        )
+    for (command in commands) {
+      val result = shell.exec(command)
+      if (!result.isSuccess) continue
+      val packages =
+          result.stdout
+              .lineSequence()
+              .mapNotNull { line ->
+                val value = line.trim().removePrefix("package:")
+                val pathEnd = value.indexOf('=')
+                val packageName =
+                    if (pathEnd >= 0) value.substring(pathEnd + 1).substringBefore(' ') else value
+                packageName.takeIf(::isSafePackageName)
+              }
+              .distinct()
+              .toList()
+      if (packages.isNotEmpty()) return packages
+    }
+    return emptyList()
+  }
 }

@@ -77,4 +77,25 @@ class RootAppQueryTest {
     )
     assertEquals("cat ${shellQuote(ListAppsOutputPath)} 2>/dev/null", shell.invocations[1].command)
   }
+
+  @Test
+  fun rootPackageListFiltersUnsafeNames() = runBlocking {
+    val shell =
+        CapturingShell(
+            ShellResult(
+                0,
+                """
+                package:/data/app/alpha/base.apk=com.example.alpha uid:10001
+                package:/data/app/bad/base.apk=bad/pkg uid:10002
+                package:/system/app/beta/base.apk=org.demo.beta uid:10003
+                """
+                    .trimIndent(),
+                "",
+            ),
+        )
+    val query = RootAppQuery(shell)
+
+    assertEquals(listOf("com.example.alpha", "org.demo.beta"), query.listInstalledPackages("0"))
+    assertTrue(shell.invocations.single().command.contains("pm list packages -f -U --user 0"))
+  }
 }

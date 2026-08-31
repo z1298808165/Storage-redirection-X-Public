@@ -250,11 +250,12 @@ class SrxRepository(
       coroutineScope {
         val configs = async { readConfiguredAppConfigs(force) }
         val apps = async(Dispatchers.IO) { loadPackageManagerApps(userId) }
-        val dexApps = async { if (userId == "0") emptyMap() else loadDexAppLabels(userId, force) }
+        val dexApps = async { loadDexAppLabels(userId, force) }
+        val shellPackages = async { appQuery.listInstalledPackages(userId) }
         val configMap = configs.await()
         val pmApps = apps.await()
         val dexMap = dexApps.await()
-        buildInstalledApps(configMap, pmApps, dexMap)
+        buildInstalledApps(configMap, pmApps, dexMap, shellPackages.await())
       }
 
   suspend fun loadInstalledAppsForPackages(
@@ -663,11 +664,13 @@ class SrxRepository(
       configMap: Map<String, AppConfig>,
       pmApps: List<ApplicationInfo>,
       dexMap: Map<String, String>,
+      shellPackages: List<String> = emptyList(),
   ): List<InstalledApp> =
       withContext(Dispatchers.IO) {
         val pmByPackage = pmApps.associateBy { it.packageName }
+        val shellPackageSet = shellPackages.toSet()
         val allPackages =
-            (pmByPackage.keys + dexMap.keys + configMap.keys + context.packageName)
+            (pmByPackage.keys + dexMap.keys + shellPackages + configMap.keys + context.packageName)
                 .filter(::isSafePackageName)
                 .distinct()
 
@@ -693,7 +696,7 @@ class SrxRepository(
                                           ?: false,
                                   appInfo = info,
                                   config = configMap[pkg],
-                                  isInstalled = info != null,
+                                  isInstalled = info != null || pkg in shellPackageSet,
                               )
                             }
                           }
