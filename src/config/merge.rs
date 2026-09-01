@@ -13,7 +13,6 @@ enum PackagePathMatchMode {
     Redirect,
     Enabled,
     MappingRequest,
-    MappingTarget,
     Monitor,
 }
 
@@ -234,24 +233,6 @@ impl SettingsHub {
         )
     }
 
-    pub fn resolve_mapping_target_package_by_path_for_user(
-        &self,
-        user_id: i32,
-        path: &str,
-    ) -> String {
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !state.is_loaded || user_id < 0 || path.is_empty() {
-            return String::new();
-        }
-
-        resolve_package_by_path_in_apps(
-            &state.apps,
-            user_id,
-            path,
-            PackagePathMatchMode::MappingTarget,
-        )
-    }
-
     pub fn resolve_monitor_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if !state.is_loaded || user_id < 0 || path.is_empty() {
@@ -384,18 +365,15 @@ fn should_match_mapping_target_for_mode(
     final_path: &str,
 ) -> bool {
     match mode {
-        PackagePathMatchMode::Redirect | PackagePathMatchMode::MappingRequest => false,
-        PackagePathMatchMode::MappingTarget => true,
+        PackagePathMatchMode::Redirect => false,
+        PackagePathMatchMode::MappingRequest => false,
         PackagePathMatchMode::Enabled => true,
         PackagePathMatchMode::Monitor => is_specific_mapping_target_owner_hint(user_id, final_path),
     }
 }
 
 fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> bool {
-    !matches!(
-        mode,
-        PackagePathMatchMode::MappingRequest | PackagePathMatchMode::MappingTarget
-    )
+    !matches!(mode, PackagePathMatchMode::MappingRequest)
 }
 
 fn prefer_download_provider_match(packages: &[String]) -> Option<&str> {

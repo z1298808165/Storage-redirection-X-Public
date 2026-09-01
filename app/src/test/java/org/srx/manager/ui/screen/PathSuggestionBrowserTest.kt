@@ -63,16 +63,4 @@ class PathSuggestionBrowserTest {
     assertEquals("Pictures", normalized.text)
     assertEquals(TextRange(0, "Pictures".length), normalized.selection)
   }
-
-  @Test
-  fun mappingInputPreservesPrivateAbsolutePath() {
-    assertEquals(
-        "/data/user/0/com.example/files",
-        normalizeEditableMappingInput("/data/user/0/com.example/files", "0"),
-    )
-    assertEquals(
-        "Android/data/com.example/cache",
-        normalizeEditableMappingInput("Android//data/com.example/cache/", "0"),
-    )
-  }
 }

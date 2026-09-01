@@ -130,21 +130,6 @@ fn resolve_storage_caller_context(caller_uid: i32, path_text: &str) -> (String, 
 
     let caller_package = resolve_caller_package(caller_uid, path_text);
     if !caller_package.is_empty() {
-        // 通过 QQ/微信等应用私有路径分享文件时，安装器或文件管理器是实际
-        // 打开方，但映射归属仍由 Android/data|media|obb/<包名> 明确给出。
-        // 仅在路径携带同一包名所有权时切换上下文，公共映射目标继续遵循
-        // 打开方自己的隔离视图。
-        let user_id = platform::user_id_from_uid(caller_uid);
-        let private_owner = paths::extract_android_private_path_owner(path_text);
-        if !private_owner.is_empty() && private_owner != caller_package {
-            if let Some(context) =
-                resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
-            {
-                if context.0 == private_owner {
-                    return context;
-                }
-            }
-        }
         return (caller_package, caller_uid);
     }
 
