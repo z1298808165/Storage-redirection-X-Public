@@ -2,7 +2,7 @@ use super::stats::InterceptHub;
 use super::{caller, context, diagnostic, monitor, path as path_utils};
 use crate::config::SettingsHub;
 use crate::platform::{self, fs, paths};
-use crate::redirect::{policy, process_redirect_path, record_redirect_hit};
+use crate::redirect::{policy, process_redirect_path, record_redirect_hit, writer};
 use libc::{AT_FDCWD, c_char, c_void, mode_t};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -222,7 +222,125 @@ pub fn fix_system_writer_android_private_owner(path: &str, include_path: bool) {
 
     let saved_errno = current_errno();
     fix_system_writer_android_private_owner_inner(path, include_path);
+    fix_system_writer_mapping_target_access(path);
     set_errno(saved_errno);
+}
+
+fn fix_system_writer_mapping_target_access(path: &str) {
+    let caller_package = InterceptHub::instance().get_current_caller_package();
+    let caller_uid = InterceptHub::instance().get_current_caller_uid();
+    if caller_package.is_empty() || caller_uid < ANDROID_APP_UID_START {
+        return;
+    }
+    let normalized = paths::normalize(path);
+    let user_id = platform::user_id_from_uid(caller_uid);
+    if user_id < 0 {
+        return;
+    }
+    let owner = SettingsHub::instance()
+        .resolve_mapping_target_package_by_path_for_user(user_id, &normalized);
+    if owner.is_empty() || owner != caller_package {
+        return;
+    }
+    let target = paths::resolve_user_path(&normalized, user_id);
+    let backend = paths::storage_to_data_media_for_user(&target, user_id).unwrap_or_default();
+    if backend.is_empty() {
+        return;
+    }
+    let Ok(c_path) = CString::new(backend.as_str()) else {
+        return;
+    };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path 是本地 CString，st 指向可写的未初始化 stat 空间，调用期间均保持有效。
+    if unsafe { libc::lstat(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return;
+    }
+    // SAFETY: lstat 成功返回后，内核已完整初始化 st。
+    let st = unsafe { st.assume_init() };
+    if st.st_mode & libc::S_IFMT as mode_t != libc::S_IFREG as mode_t {
+        return;
+    }
+    let mode = (st.st_mode as mode_t) & 0o7777;
+    let required = mode | 0o004;
+    // SAFETY: c_path 仍在本地作用域内有效，required 仅包含文件权限位。
+    if required != mode && unsafe { libc::chmod(c_path.as_ptr(), required) } == 0 {
+        log::debug!(
+            "system writer mapped target access path={} target={} mode=0{:o}",
+            path,
+            target,
+            required
+        );
+    }
+}
+
+/// 映射到公共目录的文件仍可能由 MediaProvider 以 `media_rw:media_rw 0660`
+/// 创建。应用通过自身 Android/data|media|obb 别名再次打开时，系统 FUSE
+/// 会按底层权限检查，导致 QQ FileProvider 等进程收到 EACCES。为显式映射
+/// 的私有别名补齐其它读写位，保持公共目录的 MediaStore 所有者不变。
+pub fn fix_mapped_private_alias_access(hub: &InterceptHub, path: &str, flags: i32) {
+    if path.is_empty() {
+        return;
+    }
+    let package_name = hub.get_package_name();
+    let private_owner = paths::extract_android_private_path_owner(path);
+    if private_owner.is_empty() {
+        return;
+    }
+    let effective_package = if private_owner == package_name {
+        package_name
+    } else {
+        private_owner.clone()
+    };
+    let owner_uid = policy::get_fresh_uid_for_package(&effective_package);
+    if owner_uid < ANDROID_APP_UID_START
+        || !SettingsHub::instance().should_redirect(&effective_package, owner_uid)
+    {
+        return;
+    }
+    let mapped = writer::map_caller_path(path, &effective_package, owner_uid);
+    if mapped.is_empty() || paths::eq_ignore_case(&mapped, path) {
+        return;
+    }
+    let target = paths::normalize(&mapped);
+    let user_id = platform::user_id_from_uid(owner_uid);
+    if user_id < 0
+        || !paths::is_child(&target, &paths::storage_user_root_for_user(user_id))
+        || !SettingsHub::instance().is_public_mapping_target_path_for_user(user_id, &target)
+    {
+        return;
+    }
+    let backend = paths::storage_to_data_media_for_user(&target, user_id).unwrap_or_default();
+    if backend.is_empty() {
+        return;
+    }
+    let Ok(c_path) = CString::new(backend.as_str()) else {
+        return;
+    };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path 是本地 CString，st 指向可写的未初始化 stat 空间，调用期间均保持有效。
+    if unsafe { libc::lstat(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return;
+    }
+    // SAFETY: lstat 成功返回后，内核已完整初始化 st。
+    let st = unsafe { st.assume_init() };
+    if st.st_mode & libc::S_IFMT as mode_t != libc::S_IFREG as mode_t {
+        return;
+    }
+    let mode = (st.st_mode as mode_t) & 0o7777;
+    let write_intent = flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC) != 0;
+    let required = mode | 0o004 | if write_intent { 0o002 } else { 0 };
+    if required == mode {
+        return;
+    }
+    // SAFETY: c_path 仍在本地作用域内有效，required 仅包含文件权限位。
+    if unsafe { libc::chmod(c_path.as_ptr(), required) } == 0 {
+        log::debug!(
+            "mapped private alias access path={} target={} mode=0{:o}",
+            path,
+            target,
+            required
+        );
+    }
 }
 
 fn create_storage_parent_dirs_recursive(

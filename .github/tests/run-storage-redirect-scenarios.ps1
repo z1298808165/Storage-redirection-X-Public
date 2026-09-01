@@ -137,6 +137,9 @@ $AnyRelativePublicTarget = "$RealRoot/Download/SrtAnyRelativePublic"
 $AnyAbsolutePublicTarget = "$RealRoot/Download/SrtAnyAbsolutePublic"
 $AnyUserPrivateTarget = "/data/user/0/$AppId/cache/redirected"
 $AnyLegacyPrivateTarget = "$RealRoot/Android/media/$AppId/cache"
+$AnyMediaRequest = "$RealRoot/Download/SrtAnyMediaRequest"
+$AnyMediaTarget = "$RealRoot/Download/SrtAnyMediaTarget"
+$AnyMediaFile = "srt_any_media.bin"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -434,7 +437,7 @@ function Apply-ScenarioConfig {
         33 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         34 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         35 {
-            $json = '{"users":{"0":{"enabled":true,"path_mappings":{"Android/data/' + $AppId + '/cache":"Download/SrtAnyRelativePublic","/data/user/0/' + $AppId + '/files":"Download/SrtAnyAbsolutePublic","/data/user/0/' + $AppId + '/cache":"Android/data/' + $AppId + '/cache","/data/data/' + $AppId + '/code_cache":"Android/media/' + $AppId + '/cache","Download/SrtAnyPublicToPrivate":"/data/user/0/' + $AppId + '/cache/redirected"}}}}'
+            $json = '{"users":{"0":{"enabled":true,"path_mappings":{"Android/data/' + $AppId + '/cache":"Download/SrtAnyRelativePublic","/data/user/0/' + $AppId + '/files":"Download/SrtAnyAbsolutePublic","/data/user/0/' + $AppId + '/cache":"Android/data/' + $AppId + '/cache","/data/data/' + $AppId + '/code_cache":"Android/media/' + $AppId + '/cache","Download/SrtAnyPublicToPrivate":"/data/user/0/' + $AppId + '/cache/redirected","Download/SrtAnyMediaRequest":"Download/SrtAnyMediaTarget"}}}}'
             Write-DeviceConfig $json
         }
         default { throw "未知场景 $Scenario" }
@@ -823,7 +826,7 @@ function Clear-Targets {
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendRoot/Download/SrtMountNsAllow/Qa/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/Qa/Deep'; chmod -R 777 '$BackendRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsAllow' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; mkdir -p '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked/Writable' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked/Writable' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; chmod -R 777 '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
-    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
+    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
 }
 
 function Remove-TestTargetArtifacts {
@@ -1627,11 +1630,17 @@ function Invoke-AnyPathMappingScenario {
         @{ Label = "absolute-data-user-to-public"; Request = "$AnyAbsoluteUserRequest/srt_any_absolute.txt"; Expected = "$AnyAbsolutePublicTarget/srt_any_absolute.txt"; Source = "$AnyAbsoluteUserRequest/srt_any_absolute.txt" },
         @{ Label = "user-id-data-user-to-private"; Request = "$AnyUserIdRequest/srt_any_user_id.txt"; Expected = "$BackendRoot/Android/data/$AppId/cache/srt_any_user_id.txt"; Source = "$AnyUserIdRequest/srt_any_user_id.txt" },
         @{ Label = "legacy-data-data-to-private"; Request = "$AnyLegacyDataRequest/srt_any_legacy.txt"; Expected = "$BackendRoot/Android/media/$AppId/cache/srt_any_legacy.txt"; Source = "$AnyLegacyDataRequest/srt_any_legacy.txt" },
-        @{ Label = "public-to-absolute-private"; Request = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Expected = "$AnyUserPrivateTarget/srt_any_public_private.txt"; Source = "$AnyPublicToPrivateRequest/srt_any_public_private.txt" }
+        @{ Label = "public-to-absolute-private"; Request = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Expected = "$AnyUserPrivateTarget/srt_any_public_private.txt"; Source = "$AnyPublicToPrivateRequest/srt_any_public_private.txt" },
+        @{ Label = "mapped-mediastore-target"; Request = "$AnyMediaRequest/$AnyMediaFile"; Expected = "$AnyMediaTarget/$AnyMediaFile"; Source = "$AnyMediaRequest/$AnyMediaFile"; MediaStore = $true }
     )
     $ok = $true
     foreach ($case in $cases) {
-        $ok = (Invoke-WriteCase $Scenario $case.Label $case.Request $Payload).Ok -and $ok
+        if ($case.MediaStore) {
+            $mediaResult = Invoke-MediaStoreDownloadCreateCase $Scenario $case.Label $AnyMediaFile "Download/SrtAnyMediaRequest"
+            $ok = $mediaResult.Ok -and $ok
+        } else {
+            $ok = (Invoke-WriteCase $Scenario $case.Label $case.Request $Payload).Ok -and $ok
+        }
         $ok = (Require-File "scenario-$Scenario" "$($case.Label)-target" $case.Expected) -and $ok
         $ok = (Require-Missing "scenario-$Scenario" "$($case.Label)-source" $case.Source) -and $ok
     }
