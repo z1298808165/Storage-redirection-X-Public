@@ -209,6 +209,12 @@
       "config_mode": "standard",
       "bash_title": "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射",
       "powershell_title": "arbitrary path mapping matrix across public and private roots"
+    },
+    {
+      "id": 36,
+      "config_mode": "auto",
+      "bash_title": "映射私有别名可继续写入已由 MediaProvider 创建的文件",
+      "powershell_title": "mapped private alias continues writing an existing file"
     }
   ]
 }
