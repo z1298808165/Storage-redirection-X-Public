@@ -4,7 +4,8 @@ pub const MOUNT_INTENT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mou
 pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage";
 // quality-allow(lint-suppression): 该常量保留给外部挂载状态检查与兼容脚本使用。
 #[allow(dead_code)]
-pub const REAL_STORAGE_TMP_PREFIX: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
+pub const REAL_STORAGE_TMP_PREFIX: &str =
+    "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
 pub const CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config";
 pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.runtime_disabled";
 pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_probe";

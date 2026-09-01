@@ -535,17 +535,8 @@ fn resolve_mapping_request_owner_package_by_path(user_id: i32, normalized_path: 
         return String::new();
     }
 
-    let settings = SettingsHub::instance();
-    let request_owner =
-        settings.resolve_mapping_request_package_by_path_for_user(user_id, normalized_path);
-    if !request_owner.is_empty() {
-        return request_owner;
-    }
-
-    // MediaProvider 先创建映射目标目录，再通过同一路径执行 pending 文件改名。
-    // 目标目录没有请求路径的所有权标记时，仍需使用显式映射目标
-    // 反查归属应用；冲突目标会返回空串，保持匿名公共路径的隔离边界。
-    settings.resolve_mapping_target_package_by_path_for_user(user_id, normalized_path)
+    SettingsHub::instance()
+        .resolve_mapping_request_package_by_path_for_user(user_id, normalized_path)
 }
 
 fn should_query_download_owner_for_writer(self_uid: i32, package_name: &str) -> bool {

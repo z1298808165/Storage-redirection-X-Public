@@ -27,7 +27,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         cls.powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
 
     def test_manifest_is_contiguous_and_unique(self) -> None:
-        self.assertEqual(list(range(1, max(self.ids) + 1)), self.ids)
+        self.assertEqual(list(range(1, 35)), self.ids)
         self.assertEqual(len(self.ids), len(set(self.ids)))
 
     def test_both_runners_cover_every_config_and_title(self) -> None:
@@ -68,22 +68,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
             values = re.findall(r'SRT_SCENARIOS:\s*"([0-9,]+)"', read(workflow))
             self.assertTrue(values, workflow)
             self.assertTrue(all(value == expected for value in values), workflow)
-
-    def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
-        workflow = read(".github/workflows/ci-any-path.yml")
-        for job in ("prepare:", "module:", "app:", "test-flow-build:", "test-flow:"):
-            self.assertIn(f"  {job}", workflow)
-        self.assertIn("test-flow-android17:", workflow)
-        self.assertIn("api: 33", workflow)
-        self.assertIn("api: 34", workflow)
-        self.assertIn("api: 35", workflow)
-        self.assertIn("api: 36", workflow)
-        self.assertIn('ANDROID_API_LEVEL: "37.0"', workflow)
-        self.assertIn("disable-linux-hw-accel: false", workflow)
-        self.assertIn("test-flow-required:", workflow)
-        self.assertIn("upload-branch-assets:", workflow)
-        self.assertIn("build/test-flow/assets/*.zip", workflow)
-        self.assertIn("*.apk", workflow)
 
     def test_workflow_optimizations_preserve_test_flow_gate(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):

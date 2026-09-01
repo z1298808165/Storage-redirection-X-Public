@@ -1,7 +1,6 @@
 package me.fakerqu.test.storageredirect.test
 
 import android.content.ContentUris
-import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
@@ -10,7 +9,6 @@ import android.provider.MediaStore
 import android.util.Size
 import java.io.File
 import java.io.FileNotFoundException
-import java.io.RandomAccessFile
 import me.fakerqu.mediafileapi.AndroidMediaStoreApi
 import me.fakerqu.mediafileapi.MediaStoreApi
 
@@ -85,95 +83,6 @@ class MediaStoreTestCases(
 
   fun createDownload(args: TestCaseArgs): TestResult =
       create(TestCase.MEDIASTORE_CREATE_DOWNLOAD, MediaStoreApi.MediaType.DOWNLOAD, args)
-
-  fun createThenFileOverwrite(args: TestCaseArgs): TestResult =
-      TestCase.MEDIASTORE_CREATE_THEN_FILE_OVERWRITE.measure {
-        val testCase = TestCase.MEDIASTORE_CREATE_THEN_FILE_OVERWRITE
-        val aliasPath =
-            args.filePath ?: return@measure testCase.fail("missing required parameter: file_path")
-        val seed = args.expectedPayload ?: return@measure testCase.fail("missing expected_payload")
-        val payload = args.payloadOr(TestFixtures.filePayload("overwrite"))
-        if (payload.size > seed.size) {
-          return@measure testCase.fail("payload exceeds seed size")
-        }
-        val values =
-            ContentValues().apply {
-              put(MediaStore.MediaColumns.DISPLAY_NAME, File(aliasPath).name)
-              put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
-              put(MediaStore.MediaColumns.DATA, aliasPath)
-              put(MediaStore.MediaColumns.IS_PENDING, 1)
-              put(
-                  MediaStore.Files.FileColumns.MEDIA_TYPE,
-                  MediaStore.Files.FileColumns.MEDIA_TYPE_NONE,
-              )
-            }
-        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        val storedPath = args.targetFilePath ?: aliasPath
-        try {
-          context.contentResolver.delete(
-              collection,
-              "${MediaStore.MediaColumns.DATA}=? OR ${MediaStore.MediaColumns.DATA}=?",
-              arrayOf(aliasPath, storedPath),
-          )
-        } catch (_: Exception) {}
-        val uri =
-            try {
-              context.contentResolver.insert(collection, values)
-            } catch (_: Exception) {
-              null
-            } ?: return@measure testCase.fail("MediaStore create returned null")
-        val created =
-            try {
-              context.contentResolver.openOutputStream(uri, "w")?.use {
-                it.write(seed)
-                it.flush()
-                true
-              } ?: false
-            } catch (_: Exception) {
-              false
-            }
-        if (!created) return@measure testCase.fail("MediaStore initial write failed")
-        context.contentResolver.update(
-            uri,
-            ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
-            null,
-            null,
-        )
-        val readBack =
-            RandomAccessFile(File(aliasPath), "rw").use { file ->
-              file.seek(0)
-              file.write(payload)
-              file.fd.sync()
-              ByteArray(seed.size).also {
-                file.seek(0)
-                file.readFully(it)
-              }
-            }
-        // 再从映射的公共别名写入一次，覆盖 MediaProvider FUSE 层对写权限的校验。
-        val publicAliasPath = "/storage/emulated/0/Download/QQ/${File(aliasPath).name}"
-        val publicReadBack =
-            RandomAccessFile(File(publicAliasPath), "rw").use { file ->
-              file.seek(0)
-              file.write(payload)
-              file.fd.sync()
-              ByteArray(seed.size).also {
-                file.seek(0)
-                file.readFully(it)
-              }
-            }
-        val expected = seed.copyOf().also { payload.copyInto(it) }
-        if (!readBack.contentEquals(expected) || !publicReadBack.contentEquals(expected)) {
-          return@measure testCase.fail("alias readback mismatch", mapOf("uri" to uri.toString()))
-        }
-        testCase.pass(
-            "MediaStore create followed by alias overwrite succeeded",
-            mapOf(
-                "uri" to uri.toString(),
-                "path" to aliasPath,
-                "bytesWritten" to payload.size.toString(),
-            ),
-        )
-      }
 
   fun createDownloadDenied(args: TestCaseArgs): TestResult =
       createDenied(

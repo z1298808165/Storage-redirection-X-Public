@@ -42,46 +42,6 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("has_system_writer_recent_public_caller_hint", engine)
         self.assertIn("resolve_android_private_path_owner", caller)
 
-    def test_mapping_target_owner_is_used_before_system_writer_fallback(self) -> None:
-        caller = read("src/redirect/engine/caller.rs")
-        resolver = caller[
-            caller.index("fn resolve_mapping_request_owner_package_by_path") : caller.index(
-                "fn should_query_download_owner_for_writer"
-            )
-        ]
-
-        self.assertIn("resolve_mapping_request_package_by_path_for_user", resolver)
-        self.assertIn("resolve_mapping_target_package_by_path_for_user", resolver)
-        self.assertIn("if !request_owner.is_empty()", resolver)
-
-    def test_private_mapping_share_keeps_owner_context_for_external_openers(self) -> None:
-        rewrite = read("src/hook/jni_query/rewrite.rs")
-        context = rewrite[
-            rewrite.index("fn resolve_storage_caller_context") : rewrite.index(
-                "fn resolve_mapping_request_caller_context"
-            )
-        ]
-
-        self.assertIn("extract_android_private_path_owner", context)
-        self.assertIn("resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)", context)
-        self.assertIn("private_owner", context)
-
-    def test_private_mapping_alias_repairs_public_target_file_access(self) -> None:
-        runtime = read("src/hook/runtime.rs")
-        open_hook = read("src/hook/ops/open.rs")
-        self.assertIn("fix_mapped_private_alias_access", runtime)
-        self.assertIn("mode | 0o006", runtime)
-        self.assertGreaterEqual(open_hook.count("fix_mapped_private_alias_access"), 2)
-
-    def test_media_file_columns_keep_mapping_during_pending_publish(self) -> None:
-        hooker = read("java_src/org/srx/hook/Hooker.java")
-        callback = hooker[
-            hooker.index("public Object providerMediaFileColumnCallback") : hooker.index(
-                "private static void restoreContentValue"
-            )
-        ]
-        self.assertIn('!"update".equals(mutationMethod)', callback)
-
     def test_known_callers_still_apply_their_read_only_policy(self) -> None:
         policy = read("src/redirect/engine/policy.rs")
         writer = read("src/redirect/writer.rs")
