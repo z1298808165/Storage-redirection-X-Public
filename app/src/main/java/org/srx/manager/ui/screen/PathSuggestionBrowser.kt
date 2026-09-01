@@ -252,6 +252,13 @@ internal fun pathBrowserSuggestions(
     parsed: PathBrowserInput,
     entries: List<String>,
 ): List<PathSuggestion> {
+  if (parsed.dirRel.isAndroidDataPrivateBrowserPath()) {
+    val parentRel =
+        parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "").let {
+          if (it.isBlank()) "" else "$it/"
+        }
+    return listOf(PathSuggestion(relativePath = parentRel, displayPath = "..", isParent = true))
+  }
   val baseSuggestions =
       if (parsed.dirRel.isBlank()) {
         entries.distinctBy { it.trimEnd('/').lowercase() }
@@ -306,6 +313,11 @@ private fun normalizeSuggestionInput(value: String, userId: String): String {
       .removePrefix("sdcard/")
       .replace(anyUserRoot, "")
       .replace(anyDataRoot, "")
+}
+
+private fun String.isAndroidDataPrivateBrowserPath(): Boolean {
+  val clean = trim('/').lowercase()
+  return clean == "android/data" || clean.startsWith("android/data/")
 }
 
 private fun hasAllowRulePrefix(value: String): Boolean = value.trimStart().startsWith("!")

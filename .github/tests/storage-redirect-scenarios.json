@@ -203,12 +203,6 @@
       "config_mode": "standard",
       "bash_title": "启用重定向，验证自有包名 Android/data|media|obb/Tencent/QQfile_recv 保持真实路径",
       "powershell_title": "own package QQfile_recv paths stay real"
-    },
-    {
-      "id": 35,
-      "config_mode": "standard",
-      "bash_title": "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射",
-      "powershell_title": "arbitrary path mapping matrix across public and private roots"
     }
   ]
 }
