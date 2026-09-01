@@ -321,8 +321,8 @@ internal fun TemplateEditorDialog(
               userId = userId,
               onListDirectories = onListDirectories,
               onAdd = { from, to ->
-                val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
-                val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
+                val cleanFrom = normalizeEditableMappingInput(from, userId)
+                val cleanTo = normalizeEditableMappingInput(to, userId)
                 if (cleanFrom.isNotBlank() && cleanTo.isNotBlank() && cleanFrom != cleanTo) {
                   updateProfile {
                     it.copy(pathMappings = (it.pathMappings + (cleanFrom to cleanTo)).toSortedMap())
@@ -330,14 +330,12 @@ internal fun TemplateEditorDialog(
                 }
               },
               onUpdate = { old, from, to ->
-                val cleanOldFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(old)
-                val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
-                val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
+                val cleanFrom = normalizeEditableMappingInput(from, userId)
+                val cleanTo = normalizeEditableMappingInput(to, userId)
                 if (cleanFrom.isNotBlank() && cleanTo.isNotBlank() && cleanFrom != cleanTo) {
                   updateProfile {
                     val mappings = it.pathMappings.toMutableMap()
                     mappings.remove(old)
-                    mappings.remove(cleanOldFrom)
                     mappings[cleanFrom] = cleanTo
                     it.copy(pathMappings = mappings.toSortedMap())
                   }
