@@ -261,7 +261,9 @@ fn fix_system_writer_mapping_target_access(path: &str) {
         return;
     }
     let mode = (st.st_mode as mode_t) & 0o7777;
-    let required = mode | 0o004;
+    // MediaProvider 创建的目标文件通常为 0660/0664；QQ 等调用方随后仍需
+    // 通过系统代写链路继续写入同一文件，因此映射目标必须具备其它用户读写位。
+    let required = mode | 0o006;
     // SAFETY: c_path 仍在本地作用域内有效，required 仅包含文件权限位。
     if required != mode && unsafe { libc::chmod(c_path.as_ptr(), required) } == 0 {
         log::debug!(
