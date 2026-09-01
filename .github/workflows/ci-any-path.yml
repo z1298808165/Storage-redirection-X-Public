@@ -599,5 +599,5 @@ jobs:
           retention-days: 14
           compression-level: 0
           path: |
-            build/assets/*.zip
-            build/app/*.apk
+            *.zip
+            *.apk
