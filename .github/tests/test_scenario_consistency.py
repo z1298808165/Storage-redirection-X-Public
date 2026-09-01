@@ -69,6 +69,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertTrue(values, workflow)
             self.assertTrue(all(value == expected for value in values), workflow)
 
+    def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
+        workflow = read(".github/workflows/ci-any-path.yml")
+        self.assertIn("test-flow-android17:", workflow)
+        self.assertIn("api: 33", workflow)
+        self.assertIn("api: 34", workflow)
+        self.assertIn("api: 35", workflow)
+        self.assertIn("api: 36", workflow)
+        self.assertIn('ANDROID_API_LEVEL: "37.0"', workflow)
+        self.assertIn("test-flow-required:", workflow)
+        self.assertIn("upload-branch-assets:", workflow)
+        self.assertIn("build/test-flow/assets/*.zip", workflow)
+        self.assertIn("app/build/outputs/apk/debug/*.apk", workflow)
+
     def test_workflow_optimizations_preserve_test_flow_gate(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             source = read(workflow)
