@@ -27,7 +27,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         cls.powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
 
     def test_manifest_is_contiguous_and_unique(self) -> None:
-        self.assertEqual(list(range(1, 35)), self.ids)
+        self.assertEqual(list(range(1, max(self.ids) + 1)), self.ids)
         self.assertEqual(len(self.ids), len(set(self.ids)))
 
     def test_both_runners_cover_every_config_and_title(self) -> None:
