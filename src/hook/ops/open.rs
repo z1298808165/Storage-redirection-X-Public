@@ -170,6 +170,7 @@ where
     };
 
     retry_fuse_fix_for_media_provider(hub);
+    runtime::fix_mapped_private_alias_access(hub, &path_for_decision, flags);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 
     let is_system_writer = hub.with_package_name(policy::is_system_writer_package);
@@ -228,6 +229,10 @@ where
         error_no = retry.error_no;
     }
 
+    if result >= 0 && is_system_writer {
+        runtime::fix_system_writer_android_private_owner(final_path.as_ref(), true);
+    }
+
     finalize_open_result(
         hub,
         op_name,
@@ -273,6 +278,7 @@ where
     };
 
     retry_fuse_fix_for_media_provider(hub);
+    runtime::fix_mapped_private_alias_access(hub, &path_for_decision, flags);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 
     let is_system_writer = hub.with_package_name(policy::is_system_writer_package);
@@ -350,6 +356,10 @@ where
         error_no,
         || call_original(call_target.dirfd, call_target.path),
     );
+
+    if result >= 0 && is_system_writer {
+        runtime::fix_system_writer_android_private_owner(final_path.as_ref(), true);
+    }
 
     result
 }
