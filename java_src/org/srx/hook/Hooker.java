@@ -305,6 +305,9 @@ public class Hooker {
           redirectEnabled || shouldProbeMediaStoreMutationPatch(callerUid)
               ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
               : new MutationPatchResult(false, false);
+      if ("update".equals(mutationMethod)) {
+        patchPendingMediaUpdatePath(args, actualArgs);
+      }
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
       MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
       MEDIA_PROVIDER_MUTATION_METHOD.set(mutationMethod);
@@ -316,8 +319,14 @@ public class Hooker {
           try {
             result = redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
           } catch (Throwable error) {
-            logMutationFailure(this, callerUid, callerPid, error);
-            throw error;
+            Integer recovered =
+                recoverCommittedRedirectedMediaUpdate(
+                    provider, actualArgs, callerUid, mutationMethod, error);
+            if (recovered == null) {
+              logMutationFailure(this, callerUid, callerPid, error);
+              throw error;
+            }
+            result = recovered;
           }
           registerDirectWriteAfterInsert(
               args, result, callerUid, mutationMethod, patch.directWriteRequested);
@@ -557,10 +566,29 @@ public class Hooker {
     Method method = target instanceof Method ? (Method) target : null;
     String methodName = method == null ? null : method.getName();
     String mutationMethod = MEDIA_PROVIDER_MUTATION_METHOD.get();
-    if (mutationMethod != null && !isInsertLikeMutation(mutationMethod)) return callBackup(args);
+    // insert 成功后，MediaProvider 会在发布 pending 文件的 update 中再次执行
+    // ensureFileColumns。此处必须继续把私有请求目录换算为映射目标，否则 update
+    // 会重新看到 Android/data 路径并以“禁止插入私有文件”结束。
+    if (mutationMethod != null
+        && !isInsertLikeMutation(mutationMethod)
+        && !"update".equals(mutationMethod)) return callBackup(args);
     Object[] actualArgs = unwrapArgs(args);
     ContentValues values = findContentValues(actualArgs);
     if (values == null) return callBackup(args);
+    MediaFileBuildContext pendingContext = MEDIA_FILE_BUILD_CONTEXT.get();
+    if ("update".equals(mutationMethod)
+        && pendingContext != null
+        && pendingContext.publicPath != null
+        && pendingContext.publicPath.length() > 0) {
+      String pendingRelative = mediaStoreRelativePath(pendingContext.publicPath);
+      if (pendingRelative != null) {
+        values.put(MediaStore.MediaColumns.DATA, pendingContext.publicPath);
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, pendingRelative);
+        patchDirectoryColumns(values, pendingRelative);
+        logInfo("media pending column path patched to=" + pendingContext.publicPath);
+        return callBackup(args);
+      }
+    }
     Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
     int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
     if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
@@ -2107,8 +2135,10 @@ public class Hooker {
   }
 
   private static boolean shouldAllowFuseFileOpen(FuseFileOpenRequest request) {
-    if (request == null || request.forWrite || request.callerUid < ANDROID_APP_UID_START)
-      return false;
+    if (request == null || request.callerUid < ANDROID_APP_UID_START) return false;
+    // 映射目标由该应用的 path_mappings 明确产生。MediaProvider 在 FUSE 层仍按目标
+    // 公共目录做权限校验时，写入请求也要沿用映射授权，否则 QQ 的分片临时文件会被
+    // 误判为“无权写入公共目录”。
     return allowsPublicMappingTargetSafe(request.path, request.callerUid)
         || allowsPublicMappingTargetSafe(request.ioPath, request.callerUid);
   }
@@ -2943,6 +2973,75 @@ public class Hooker {
         patched == null ? values : patched, requestedCollection, directWriteRequested);
   }
 
+  /**
+   * update(is_pending=0) 的 ContentValues 通常不带 _data；补回 insert 时登记的公共目标， 防止 MediaProvider 的
+   * ensureFileColumns 再次校验原始 Android/data 私有路径。
+   */
+  private static void patchPendingMediaUpdatePath(Object[] rawArgs, Object[] actualArgs) {
+    try {
+      int uriIndex = findMutationUriIndex(actualArgs);
+      if (uriIndex < 0 || !(actualArgs[uriIndex] instanceof android.net.Uri)) return;
+      String publicPath;
+      synchronized (REDIRECTED_MEDIA_TARGETS) {
+        publicPath = REDIRECTED_MEDIA_TARGETS.get(actualArgs[uriIndex].toString());
+      }
+      if (publicPath == null || publicPath.length() == 0) return;
+      ContentValues original = findContentValues(actualArgs);
+      if (original == null) return;
+      ContentValues patched = new ContentValues(original);
+      patched.put(MediaStore.MediaColumns.DATA, publicPath);
+      String relativePath = mediaStoreRelativePath(publicPath);
+      if (relativePath != null) patched.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+      int valuesIndex = -1;
+      for (int i = 0; i < actualArgs.length; i++) {
+        if (actualArgs[i] == original) {
+          valuesIndex = i;
+          break;
+        }
+      }
+      if (valuesIndex >= 0) replaceActualArg(rawArgs, actualArgs, valuesIndex, patched);
+      MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
+      logInfo("media pending update path patched to=" + publicPath);
+    } catch (Throwable ignored) {
+    }
+  }
+
+  /**
+   * 部分 Android 17 MediaProvider 会先提交 pending 更新，再用旧目录字段做一次末尾校验并抛出
+   * IllegalArgumentException。只有数据库中的最终路径已与本次映射目标完全一致时，才把这次已完成的更新 恢复为成功，避免调用方收到与实际提交结果相反的错误。
+   */
+  private static Integer recoverCommittedRedirectedMediaUpdate(
+      android.content.ContentProvider provider,
+      Object[] actualArgs,
+      int callerUid,
+      String mutationMethod,
+      Throwable error) {
+    if (!"update".equals(mutationMethod) || !isPrivateFileValidationFailure(error)) return null;
+    int uriIndex = findMutationUriIndex(actualArgs);
+    if (uriIndex < 0 || !(actualArgs[uriIndex] instanceof android.net.Uri)) return null;
+    android.net.Uri uri = (android.net.Uri) actualArgs[uriIndex];
+    String expectedPath;
+    synchronized (REDIRECTED_MEDIA_TARGETS) {
+      expectedPath = REDIRECTED_MEDIA_TARGETS.get(uri.toString());
+    }
+    if (expectedPath == null || expectedPath.length() == 0) return null;
+    String committedPath = queryDataPath(provider, uri);
+    String expectedDisplay = normalizeStorageDisplayPath(expectedPath, callerUid);
+    String committedDisplay = normalizeStorageDisplayPath(committedPath, callerUid);
+    if (expectedDisplay == null || !expectedDisplay.equals(committedDisplay)) return null;
+    logInfo("media pending update recovered uri=" + uri + " committed=" + committedDisplay);
+    return Integer.valueOf(1);
+  }
+
+  private static boolean isPrivateFileValidationFailure(Throwable error) {
+    for (Throwable current = error; current != null; current = current.getCause()) {
+      if (!(current instanceof IllegalArgumentException)) continue;
+      String message = current.getMessage();
+      if (message != null && message.startsWith("Inserting private file:")) return true;
+    }
+    return false;
+  }
+
   private static int findMutationUriIndex(Object[] actualArgs) {
     if (actualArgs == null) return -1;
     for (int i = 0; i < actualArgs.length; i++) {
@@ -3444,6 +3543,11 @@ public class Hooker {
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
       if (probePath == null) return;
       String sandboxPath = rewriteMediaStorePath(probePath, callerUid);
+      // 显式路径映射已在 insert 前把 _data 改写为公共目标；此时再次按
+      // 映射解析会返回空，因此直接保存已改写的目标路径供后续 update 使用。
+      if (sandboxPath == null || sandboxPath.length() == 0) {
+        sandboxPath = values.getAsString("_data");
+      }
       if (sandboxPath == null || sandboxPath.length() == 0) return;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
         // 逐条淘汰最旧记录，不整表清空：批量导入时后到的写入不应清掉尚未提交的改名记录。
