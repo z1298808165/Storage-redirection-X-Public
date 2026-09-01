@@ -1605,7 +1605,7 @@ function Get-ScenarioTitle {
         33 { "MediaProvider hot reload preserves app mounts and image saving" }
         34 { "own package QQfile_recv paths stay real" }
         35 { "arbitrary path mapping matrix across public and private roots" }
-        36 { "mapped private alias can continue writing an existing file" }
+        36 { "mapped private alias continues writing an existing file" }
     }
 }
 
