@@ -83,6 +83,9 @@ FUSE_MAP_RW_TARGET="${FUSE_MAP_PARENT}/WritableTarget"
 FUSE_MAP_RO_TARGET="${FUSE_MAP_PARENT}/LockedTarget"
 FUSE_MULTI_ROOT="${REAL_ROOT}/Download/SrtFuseMulti"
 PRIVATE_FUSE_MULTI_ROOT="${PRIVATE_ROOT}/Download/SrtFuseMulti"
+QQ_ALIAS_MAPPED_ROOT="${REAL_ROOT}/Download/SrtQqAliasMapped"
+QQ_ALIAS_MAPPED_FILE="srt_qq_alias_existing.bin"
+QQ_ALIAS_REQUEST_ROOT="${REAL_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv"
 MOUNT_NS_ALLOW_ROOT="${REAL_ROOT}/Download/SrtMountNsAllow"
 PRIVATE_MOUNT_NS_ALLOW_ROOT="${PRIVATE_ROOT}/Download/SrtMountNsAllow"
 MOUNT_NS_READ_ONLY_ROOT="${REAL_ROOT}/Download/SrtMountNsReadOnly"
@@ -438,6 +441,10 @@ apply_config() {
     35)
       write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"Android/data/%s/cache\":\"Download/SrtAnyRelativePublic\",\"/data/user/0/%s/files\":\"Download/SrtAnyAbsolutePublic\",\"/data/user/0/%s/cache\":\"Android/data/%s/cache\",\"/data/data/%s/code_cache\":\"Android/media/%s/cache\",\"Download/SrtAnyPublicToPrivate\":\"/data/user/0/%s/cache/redirected\",\"Download/SrtAnyMediaRequest\":\"Download/SrtAnyMediaTarget\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID")"
       ;;
+    36)
+      set_backend_config auto
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Documents","Movies","Music","Pictures"],"path_mappings":{"Android/data/'"${APP_ID}"'/Tencent/QQfile_recv":"Download/SrtQqAliasMapped","Download/QQ":"Download/SrtQqAliasMapped"}}}}'
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -513,6 +520,7 @@ scenario_title() {
     33) echo "MediaProvider 进程内热重载后应用挂载与图片保存恢复" ;;
     34) echo "启用重定向，验证自有包名 Android/data|media|obb/Tencent/QQfile_recv 保持真实路径" ;;
     35) echo "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射" ;;
+    36) echo "映射私有别名可继续写入已由 MediaProvider 创建的文件" ;;
   esac
 }
 
@@ -646,7 +654,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 35 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 36 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -663,7 +671,7 @@ build_scenario_list() {
   scenarios+=(28)
   scenarios+=(23 24)
   scenarios+=(25 26 27)
-  scenarios+=(35)
+  scenarios+=(35 36)
 }
 
 remove_test_target_artifacts() {
@@ -2598,6 +2606,14 @@ run_any_path_mapping_scenario() {
     check_file_missing "scenario-${scenario}-mapped-mediastore-source" "${ANY_MEDIA_REQUEST}/${ANY_MEDIA_FILE}"
 }
 
+run_qq_alias_mapped_existing_file_scenario() {
+  local request="${QQ_ALIAS_REQUEST_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
+  local target="${QQ_ALIAS_MAPPED_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
+  run_service_case "$1" "qq-alias-mediastore-overwrite" "mediastore_create_then_file_overwrite" '^PASS \\[mediastore_create_then_file_overwrite\\]' --es file_path "$request" --es target_file_path "$target" --es payload append --es expected_payload seedseed &&
+    check_file_exists "qq-alias-target" "$target" &&
+    check_file_missing "qq-alias-private" "$request"
+}
+
 run_mediastore_open_typed_collection_scenario() {
   local scenario="$1"
   wait_media_provider_ready "scenario-${scenario}-typed-collection" 60 || return 1
@@ -2743,6 +2759,10 @@ run_scenario() {
     35)
       echo "step 5/7: 执行任意路径映射矩阵"
       run_any_path_mapping_scenario "$scenario"
+      ;;
+    36)
+      echo "step 5/7: 验证映射私有别名对既有文件的继续写入"
+      run_qq_alias_mapped_existing_file_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
