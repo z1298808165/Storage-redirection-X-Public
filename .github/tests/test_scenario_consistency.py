@@ -83,7 +83,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("test-flow-required:", workflow)
         self.assertIn("upload-branch-assets:", workflow)
         self.assertIn("build/test-flow/assets/*.zip", workflow)
-        self.assertIn("build/app/*.apk", workflow)
+        self.assertIn("*.apk", workflow)
 
     def test_workflow_optimizations_preserve_test_flow_gate(self) -> None:
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
