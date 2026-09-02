@@ -70,8 +70,17 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         runtime = read("src/hook/runtime.rs")
         open_hook = read("src/hook/ops/open.rs")
         self.assertIn("fix_mapped_private_alias_access", runtime)
-        self.assertIn("mode | 0o004", runtime)
+        self.assertIn("mode | 0o006", runtime)
         self.assertGreaterEqual(open_hook.count("fix_mapped_private_alias_access"), 2)
+
+    def test_media_file_columns_keep_mapping_during_pending_publish(self) -> None:
+        hooker = read("java_src/org/srx/hook/Hooker.java")
+        callback = hooker[
+            hooker.index("public Object providerMediaFileColumnCallback") : hooker.index(
+                "private static void restoreContentValue"
+            )
+        ]
+        self.assertIn('!"update".equals(mutationMethod)', callback)
 
     def test_known_callers_still_apply_their_read_only_policy(self) -> None:
         policy = read("src/redirect/engine/policy.rs")

@@ -140,6 +140,9 @@ $AnyLegacyPrivateTarget = "$RealRoot/Android/media/$AppId/cache"
 $AnyMediaRequest = "$RealRoot/Download/SrtAnyMediaRequest"
 $AnyMediaTarget = "$RealRoot/Download/SrtAnyMediaTarget"
 $AnyMediaFile = "srt_any_media.bin"
+$QqAliasMappedRoot = "$RealRoot/Download/SrtQqAliasMapped"
+$QqAliasMappedFile = "srt_qq_alias_existing.bin"
+$QqAliasRequestRoot = "$RealRoot/Android/data/$AppId/Tencent/QQfile_recv"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -321,14 +324,14 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 35) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 36) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
             if ([string]::IsNullOrWhiteSpace($part)) { continue }
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 35) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 36) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -351,6 +354,7 @@ function Get-ScenarioList {
     $defaultScenarios.Add(33) | Out-Null
     $defaultScenarios.Add(34) | Out-Null
     $defaultScenarios.Add(35) | Out-Null
+    $defaultScenarios.Add(36) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     @($defaultScenarios)
@@ -438,6 +442,11 @@ function Apply-ScenarioConfig {
         34 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         35 {
             $json = '{"users":{"0":{"enabled":true,"path_mappings":{"Android/data/' + $AppId + '/cache":"Download/SrtAnyRelativePublic","/data/user/0/' + $AppId + '/files":"Download/SrtAnyAbsolutePublic","/data/user/0/' + $AppId + '/cache":"Android/data/' + $AppId + '/cache","/data/data/' + $AppId + '/code_cache":"Android/media/' + $AppId + '/cache","Download/SrtAnyPublicToPrivate":"/data/user/0/' + $AppId + '/cache/redirected","Download/SrtAnyMediaRequest":"Download/SrtAnyMediaTarget"}}}}'
+            Write-DeviceConfig $json
+        }
+        36 {
+            Set-BackendConfig -Mode "auto"
+            $json = '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Documents","Movies","Music","Pictures"],"path_mappings":{"Android/data/' + $AppId + '/Tencent/QQfile_recv":"Download/SrtQqAliasMapped","Download/QQ":"Download/SrtQqAliasMapped"}}}}'
             Write-DeviceConfig $json
         }
         default { throw "未知场景 $Scenario" }
@@ -1596,6 +1605,7 @@ function Get-ScenarioTitle {
         33 { "MediaProvider hot reload preserves app mounts and image saving" }
         34 { "own package QQfile_recv paths stay real" }
         35 { "arbitrary path mapping matrix across public and private roots" }
+        36 { "mapped private alias can continue writing an existing file" }
     }
 }
 
@@ -1644,6 +1654,17 @@ function Invoke-AnyPathMappingScenario {
         $ok = (Require-File "scenario-$Scenario" "$($case.Label)-target" $case.Expected) -and $ok
         $ok = (Require-Missing "scenario-$Scenario" "$($case.Label)-source" $case.Source) -and $ok
     }
+    $ok
+}
+
+function Invoke-QqAliasMappedExistingFileScenario {
+    param([int]$Scenario)
+    $requestPath = "$QqAliasRequestRoot/$QqAliasMappedFile"
+    $targetPath = "$QqAliasMappedRoot/$QqAliasMappedFile"
+    $result = Invoke-ServiceCase "scenario-$Scenario" "qq-alias-mediastore-overwrite" "mediastore_create_then_file_overwrite" @{ file_path = $requestPath; target_file_path = $targetPath; payload = "append"; expected_payload = "seedseed" } "^PASS \[mediastore_create_then_file_overwrite\]"
+    $ok = $result.Ok
+    $ok = (Require-File "scenario-$Scenario" "qq-alias-target" $targetPath) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "qq-alias-private" $requestPath) -and $ok
     $ok
 }
 
@@ -2351,6 +2372,7 @@ function Invoke-Scenario {
         33 { Invoke-QuickMediaProviderRestartRecoveryScenario $Scenario }
         34 { Invoke-OwnPrivateDirectoriesScenario $Scenario }
         35 { Invoke-AnyPathMappingScenario $Scenario }
+        36 { Invoke-QqAliasMappedExistingFileScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
