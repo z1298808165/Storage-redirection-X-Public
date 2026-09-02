@@ -324,7 +324,7 @@ apply_config() {
     1)
       adb_su "rm -f '$CONFIG'" >/dev/null
       ;;
-    2)
+    2|29|30|34)
       write_config '{"users":{"0":{"enabled":true}}}'
       ;;
     3)
@@ -399,20 +399,11 @@ apply_config() {
       set_backend_config auto true
       write_config '{"users":{"0":{"enabled":false}}}'
       ;;
-    24)
+    24|25)
       set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       ;;
-    25)
-      set_backend_config auto true
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
-      ;;
-    26)
-      set_backend_config auto true
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
-      write_cross_app_read_only_config
-      ;;
-    27)
+    26|27)
       set_backend_config auto true
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
       write_cross_app_read_only_config
@@ -420,23 +411,11 @@ apply_config() {
     28)
       write_config '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}'
       ;;
-    29)
-      write_config '{"users":{"0":{"enabled":true}}}'
-      ;;
-    30)
-      write_config '{"users":{"0":{"enabled":true}}}'
-      ;;
     31)
       write_config '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}'
       ;;
-    32)
+    32|33)
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}'
-      ;;
-    33)
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}'
-      ;;
-    34)
-      write_config '{"users":{"0":{"enabled":true}}}'
       ;;
     35)
       write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"Android/data/%s/cache\":\"Download/SrtAnyRelativePublic\",\"/data/user/0/%s/files\":\"Download/SrtAnyAbsolutePublic\",\"/data/user/0/%s/cache\":\"Android/data/%s/cache\",\"/data/data/%s/code_cache\":\"Android/media/%s/cache\",\"Download/SrtAnyPublicToPrivate\":\"/data/user/0/%s/cache/redirected\",\"Download/SrtAnyMediaRequest\":\"Download/SrtAnyMediaTarget\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID")"
@@ -646,6 +625,10 @@ build_scenario_list() {
   if [ -n "${SRT_SCENARIOS:-}" ]; then
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
+    if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
+      scenarios=($(seq 1 36))
+      return 0
+    fi
     local scenario
     for scenario in $normalized; do
       case "$scenario" in

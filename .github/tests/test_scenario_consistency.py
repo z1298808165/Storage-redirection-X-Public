@@ -17,6 +17,13 @@ def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
 
 
+def powershell_case_values(label: str) -> list[str]:
+    condition = re.search(r"@\(([^)]+)\)", label)
+    if condition:
+        return [value.strip() for value in condition.group(1).split(",")]
+    return [value.strip() for value in re.split(r"[,|]", label) if value.strip()]
+
+
 class ScenarioConsistencyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -36,8 +43,23 @@ class ScenarioConsistencyTest(unittest.TestCase):
         bash_titles = section(self.bash, "scenario_title()", "clean_targets()")
         ps_titles = section(self.powershell, "function Get-ScenarioTitle", "function Invoke-WriteCase")
 
-        self.assertEqual(self.ids, [int(value) for value in re.findall(r"(?m)^\s{4}(\d+)\)", bash_config)])
-        self.assertEqual(self.ids, [int(value) for value in re.findall(r"(?m)^\s{8}(\d+)\s*\{", ps_config)])
+        bash_config_ids = [
+            int(value)
+            for group in re.findall(r"(?m)^\s{4}([0-9|]+)\)", bash_config)
+            for value in group.split("|")
+        ]
+        ps_config_ids = [
+            int(value)
+            for label in re.findall(
+                r"(?m)^\s{8}((?:[0-9|, ]+)|(?:\{\s*\$_\s+-in\s+@\([^)]+\)\s*\}))\s*\{",
+                ps_config,
+            )
+            for value in powershell_case_values(label)
+        ]
+        self.assertEqual(self.ids, sorted(bash_config_ids))
+        self.assertEqual(self.ids, sorted(ps_config_ids))
+        self.assertEqual(len(self.ids), len(set(bash_config_ids)))
+        self.assertEqual(len(self.ids), len(set(ps_config_ids)))
         for item in self.scenarios:
             self.assertIn(f'{item["id"]}) echo "{item["bash_title"]}"', bash_titles)
             self.assertIn(f'{item["id"]} {{ "{item["powershell_title"]}" }}', ps_titles)
@@ -47,12 +69,32 @@ class ScenarioConsistencyTest(unittest.TestCase):
         ps_config = section(self.powershell, "function Apply-ScenarioConfig", "function Clear-Results")
         for item in self.scenarios:
             scenario_id = item["id"]
-            bash_block = re.search(rf"(?ms)^\s{{4}}{scenario_id}\)\n(.*?)(?=^\s{{4}}(?:\d+|\*)\))", bash_config)
-            ps_block = re.search(rf"(?ms)^\s{{8}}{scenario_id}\s*\{{(.*?)(?=^\s{{8}}(?:\d+|default)\s*\{{)", ps_config)
+            bash_block = next(
+                (
+                    match
+                    for match in re.finditer(
+                        r"(?ms)^\s{4}([0-9|]+)\)\n(.*?)(?=^\s{4}(?:[0-9|]+|\*)\))",
+                        bash_config,
+                    )
+                    if str(scenario_id) in match.group(1).split("|")
+                ),
+                None,
+            )
+            ps_block = next(
+                (
+                    match
+                    for match in re.finditer(
+                        r"(?ms)^\s{8}((?:[0-9|, ]+)|(?:\{\s*\$_\s+-in\s+@\([^)]+\)\s*\}))\s*\{(.*?)(?=^\s{8}(?:[0-9|, ]+|\{\s*\$_\s+-in\s+@\([^)]+\)\s*\}|default)\s*\{)",
+                        ps_config,
+                    )
+                    if str(scenario_id) in powershell_case_values(match.group(1))
+                ),
+                None,
+            )
             self.assertIsNotNone(bash_block, scenario_id)
             self.assertIsNotNone(ps_block, scenario_id)
-            bash_text = bash_block.group(1)
-            ps_text = ps_block.group(1)
+            bash_text = bash_block.group(2)
+            ps_text = ps_block.group(2)
             mode = item["config_mode"]
             self.assertNotIn("enable_fuse_daemon_config", bash_text)
             self.assertNotIn("Enable-FuseDaemonConfig", ps_text)
@@ -63,11 +105,21 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 self.assertIn('storage_backend_mode":"auto', self.bash)
 
     def test_workflows_run_manifest_scenarios(self) -> None:
-        expected = ",".join(str(value) for value in self.ids)
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
-            values = re.findall(r'SRT_SCENARIOS:\s*"([0-9,]+)"', read(workflow))
+            values = re.findall(r'SRT_SCENARIOS:\s*"([^"]+)"', read(workflow))
             self.assertTrue(values, workflow)
-            self.assertTrue(all(value == expected for value in values), workflow)
+            self.assertTrue(all(value == "all" for value in values), workflow)
+
+        any_path_values = re.findall(
+            r'SRT_SCENARIOS:\s*"([^"]+)"', read(".github/workflows/ci-any-path.yml")
+        )
+        self.assertTrue(any_path_values)
+        self.assertTrue(all(value == "all" for value in any_path_values))
+
+    def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
+        expected_max = max(self.ids)
+        self.assertIn(f"scenarios=($(seq 1 {expected_max}))", self.bash)
+        self.assertIn(f"return @(1..{expected_max})", self.powershell)
 
     def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
         workflow = read(".github/workflows/ci-any-path.yml")

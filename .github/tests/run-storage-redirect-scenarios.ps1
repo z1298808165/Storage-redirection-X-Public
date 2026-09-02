@@ -328,8 +328,14 @@ function Get-ScenarioList {
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
-        foreach ($part in ($env:SRT_SCENARIOS -split "[,\s;]+")) {
-            if ([string]::IsNullOrWhiteSpace($part)) { continue }
+        $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
+            return @(1..36)
+        }
+        if ($parts -contains "all") {
+            throw "all 选择器不能与其它场景号混用"
+        }
+        foreach ($part in $parts) {
             $scenario = [int]$part
             if ($scenario -lt 1 -or $scenario -gt 36) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
@@ -366,7 +372,7 @@ function Apply-ScenarioConfig {
     Clear-CrossAppReadOnlyConfig
     switch ($Scenario) {
         1 { Invoke-Su "rm -f '$Config'" | Out-Null }
-        2 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
+        { $_ -in @(2, 29, 30, 34) } { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         3 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtProbe":"Download/Test"}}}}' }
         4 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download"],"path_mappings":{"Download/SrtProbe":"Download/Test"}}}}' }
         5 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download"]}}}' }
@@ -415,31 +421,18 @@ function Apply-ScenarioConfig {
             Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":false}}}'
         }
-        24 {
+        { $_ -in @(24, 25) } {
             Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
         }
-        25 {
-            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
-            Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
-        }
-        26 {
-            Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
-            Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
-            Write-CrossAppReadOnlyConfig
-        }
-        27 {
+        { $_ -in @(26, 27) } {
             Set-BackendConfig -Mode "auto" -FileMonitorEnabled $true
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
             Write-CrossAppReadOnlyConfig
         }
         28 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"read_only_paths":["Pictures/SrtReadOnlyMedia"]}}}' }
-        29 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
-        30 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
         31 { Write-DeviceConfig '{"users":{"0":{"enabled":false,"path_mappings":{"Pictures/SrtReadOnlyMedia":"Pictures/SrtLocked"}}}}' }
-        32 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
-        33 { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
-        34 { Write-DeviceConfig '{"users":{"0":{"enabled":true}}}' }
+        { $_ -in @(32, 33) } { Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}' }
         35 {
             $json = '{"users":{"0":{"enabled":true,"path_mappings":{"Android/data/' + $AppId + '/cache":"Download/SrtAnyRelativePublic","/data/user/0/' + $AppId + '/files":"Download/SrtAnyAbsolutePublic","/data/user/0/' + $AppId + '/cache":"Android/data/' + $AppId + '/cache","/data/data/' + $AppId + '/code_cache":"Android/media/' + $AppId + '/cache","Download/SrtAnyPublicToPrivate":"/data/user/0/' + $AppId + '/cache/redirected","Download/SrtAnyMediaRequest":"Download/SrtAnyMediaTarget"}}}}'
             Write-DeviceConfig $json
