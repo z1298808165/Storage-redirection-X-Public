@@ -165,7 +165,7 @@ class SrxConfigNormalizerTest {
   }
 
   @Test
-  fun normalizeAppConfigDropsPrivatePathMappingTargets() {
+  fun normalizeAppConfigKeepsPrivatePathMappingTargets() {
     val normalized =
         SrxConfigNormalizer.normalizeAppConfig(
             AppConfig(
@@ -188,7 +188,38 @@ class SrxConfigNormalizerTest {
     assertEquals(
         mapOf(
             "DCIM/App" to "Pictures/App",
+            "Download/Game" to "Android/data/com.example.game/files",
             "Download/Media" to "Android/media/com.example.game/cache",
+            "Download/Obb" to "Android/obb/com.example.game",
+        ),
+        normalized.users.getValue("0").pathMappings,
+    )
+  }
+
+  @Test
+  fun normalizeAppConfigKeepsAbsolutePathMappings() {
+    val normalized =
+        SrxConfigNormalizer.normalizeAppConfig(
+            AppConfig(
+                users =
+                    mapOf(
+                        "0" to
+                            UserProfile(
+                                pathMappings =
+                                    mapOf(
+                                        "/data/user/0/com.example/files" to
+                                            "/storage/emulated/0/Download",
+                                        "Download/Cache" to "/data/data/com.example/cache",
+                                    ),
+                            ),
+                    ),
+            ),
+        )
+
+    assertEquals(
+        mapOf(
+            "/data/user/0/com.example/files" to "Download",
+            "Download/Cache" to "/data/data/com.example/cache",
         ),
         normalized.users.getValue("0").pathMappings,
     )
@@ -230,6 +261,26 @@ class SrxConfigNormalizerTest {
     assertEquals(
         "Download/*",
         SrxConfigNormalizer.sanitizeEditablePath("Download/*", allowRuleSyntax = true),
+    )
+  }
+
+  @Test
+  fun sanitizeEditableMappingPathSupportsAbsolute() {
+    assertEquals(
+        "/data/user/0/com.example/files",
+        SrxConfigNormalizer.sanitizeEditableMappingPath("/data/user/0/com.example/files"),
+    )
+    assertEquals(
+        "Download/cache",
+        SrxConfigNormalizer.sanitizeEditableMappingPath("/storage/emulated/0/Download/cache"),
+    )
+    assertEquals(
+        "Download/cache",
+        SrxConfigNormalizer.sanitizeEditableMappingPath("storage/emulated/0/Download/cache"),
+    )
+    assertEquals(
+        "",
+        SrxConfigNormalizer.sanitizeEditableMappingPath("/data/user/0/../com.example"),
     )
   }
 

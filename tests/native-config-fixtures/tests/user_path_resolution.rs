@@ -32,6 +32,18 @@ fn rewrites_data_user_prefix_for_secondary_user() {
 }
 
 #[test]
+fn rewrites_legacy_data_data_alias_for_secondary_user() {
+    assert_eq!(
+        paths::resolve_user_path("/data/data/com.example/files", 0),
+        "/data/user/0/com.example/files"
+    );
+    assert_eq!(
+        paths::resolve_user_path("/data/data/com.example/files", 10),
+        "/data/user/10/com.example/files"
+    );
+}
+
+#[test]
 fn does_not_rewrite_literal_inside_path() {
     // 关键回归点：备份类目录里可能出现存储路径字面量。此前用整串 replace 会把
     // 中间那一段也改写，导致解析出的路径与真实文件不符。

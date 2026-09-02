@@ -23,6 +23,7 @@ enum class TestCase(val id: String) {
   MEDIASTORE_CREATE_AUDIO("mediastore_create_audio"),
   MEDIASTORE_CREATE_FILE("mediastore_create_file"),
   MEDIASTORE_CREATE_DOWNLOAD("mediastore_create_download"),
+  MEDIASTORE_CREATE_THEN_FILE_OVERWRITE("mediastore_create_then_file_overwrite"),
   MEDIASTORE_CREATE_IMAGE_DENIED("mediastore_create_image_denied"),
   MEDIASTORE_CREATE_VIDEO_DENIED("mediastore_create_video_denied"),
   MEDIASTORE_CREATE_AUDIO_DENIED("mediastore_create_audio_denied"),
@@ -120,6 +121,7 @@ enum class TestCase(val id: String) {
         MEDIASTORE_QUERY_DOWNLOAD,
         MEDIASTORE_QUERY_PATH_DOWNLOAD,
         MEDIASTORE_CREATE_DOWNLOAD,
+        MEDIASTORE_CREATE_THEN_FILE_OVERWRITE,
         MEDIASTORE_CREATE_DOWNLOAD_DENIED,
         MEDIASTORE_READ_DOWNLOAD,
         MEDIASTORE_WRITE_DOWNLOAD,
@@ -210,6 +212,7 @@ enum class TestCase(val id: String) {
       MEDIASTORE_CREATE_AUDIO -> mediaStore.createAudio(args)
       MEDIASTORE_CREATE_FILE -> mediaStore.createFile(args)
       MEDIASTORE_CREATE_DOWNLOAD -> mediaStore.createDownload(args)
+      MEDIASTORE_CREATE_THEN_FILE_OVERWRITE -> mediaStore.createThenFileOverwrite(args)
       MEDIASTORE_CREATE_IMAGE_DENIED -> mediaStore.createImageDenied(args)
       MEDIASTORE_CREATE_VIDEO_DENIED -> mediaStore.createVideoDenied(args)
       MEDIASTORE_CREATE_AUDIO_DENIED -> mediaStore.createAudioDenied(args)
