@@ -50,6 +50,77 @@ pub fn sort_path_mappings_shortest_request_first(mappings: &mut [PathMapping]) {
     });
 }
 
+/// 按最长请求前缀逐层应用映射，支持“父映射结果继续命中子映射”的规则链。
+pub fn map_path_by_mappings(path: &str, mappings: &[PathMapping]) -> String {
+    map_mapping_chain(path, mappings, false)
+}
+
+/// 按最长目标前缀反向还原映射链，用于 MediaStore 展示路径恢复。
+pub fn reverse_map_path_by_mappings(path: &str, mappings: &[PathMapping]) -> String {
+    map_mapping_chain(path, mappings, true)
+}
+
+fn map_mapping_chain(path: &str, mappings: &[PathMapping], reverse: bool) -> String {
+    if path.is_empty() || mappings.is_empty() {
+        return String::new();
+    }
+
+    let mut current = path.to_string();
+    let mut changed = false;
+    let mut visited = HashSet::new();
+    visited.insert(paths::match_key(&current));
+
+    for _ in 0..=MAX_PATH_MAPPING_DEPTH {
+        let best = mappings
+            .iter()
+            .filter_map(|mapping| {
+                let root = if reverse {
+                    &mapping.final_path
+                } else {
+                    &mapping.request_path
+                };
+                paths::child_suffix(&current, root).map(|suffix| (mapping, suffix))
+            })
+            .max_by(|(left, _), (right, _)| {
+                let left_root = if reverse {
+                    &left.final_path
+                } else {
+                    &left.request_path
+                };
+                let right_root = if reverse {
+                    &right.final_path
+                } else {
+                    &right.request_path
+                };
+                left_root
+                    .len()
+                    .cmp(&right_root.len())
+                    .then_with(|| paths::match_key(left_root).cmp(&paths::match_key(right_root)))
+            });
+
+        let Some((mapping, suffix)) = best else {
+            return if changed { current } else { String::new() };
+        };
+        let target = if reverse {
+            &mapping.request_path
+        } else {
+            &mapping.final_path
+        };
+        let next = if suffix.is_empty() {
+            target.clone()
+        } else {
+            format!("{}{}", target, suffix)
+        };
+        if !visited.insert(paths::match_key(&next)) {
+            return String::new();
+        }
+        current = next;
+        changed = true;
+    }
+
+    String::new()
+}
+
 pub fn dedup_path_mappings_by_request_case_insensitive(mappings: &mut Vec<PathMapping>) {
     mappings.dedup_by(|a, b| paths::eq_ignore_case(&a.request_path, &b.request_path));
 }

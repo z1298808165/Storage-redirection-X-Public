@@ -215,6 +215,12 @@
       "config_mode": "auto",
       "bash_title": "映射私有别名可继续写入已由 MediaProvider 创建的文件",
       "powershell_title": "mapped private alias continues writing an existing file"
+    },
+    {
+      "id": 37,
+      "config_mode": "standard",
+      "bash_title": "父映射结果继续命中子映射",
+      "powershell_title": "nested mapping chain applies parent result to child rule"
     }
   ]
 }

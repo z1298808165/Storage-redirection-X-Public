@@ -1,6 +1,7 @@
 use crate::config::{ResolvedUserProfile, SettingsHub};
 use crate::domain::{
-    PathMapping, filter_valid_path_mapping_chains, sort_path_mappings_longest_request_first,
+    PathMapping, filter_valid_path_mapping_chains, map_path_by_mappings,
+    reverse_map_path_by_mappings, sort_path_mappings_longest_request_first,
 };
 use crate::fuse_redirect::config::expand_mount_fallbacks_for_mode;
 use crate::platform::{self, paths};
@@ -65,27 +66,11 @@ fn with_caller_mappings<R>(
 }
 
 pub fn map_path_by_caller_mappings(path: &str, mappings: &[PathMapping]) -> String {
-    for mapping in mappings {
-        if let Some(suffix) = paths::child_suffix(path, &mapping.request_path) {
-            if suffix.is_empty() {
-                return mapping.final_path.clone();
-            }
-            return format!("{}{}", mapping.final_path, suffix);
-        }
-    }
-    String::new()
+    map_path_by_mappings(path, mappings)
 }
 
 pub fn reverse_map_path_by_caller_mappings(path: &str, mappings: &[PathMapping]) -> String {
-    for mapping in mappings {
-        if let Some(suffix) = paths::child_suffix(path, &mapping.final_path) {
-            if suffix.is_empty() {
-                return mapping.request_path.clone();
-            }
-            return format!("{}{}", mapping.request_path, suffix);
-        }
-    }
-    String::new()
+    reverse_map_path_by_mappings(path, mappings)
 }
 
 /// 将 readlink 返回的沙箱路径反向映射回展示路径。

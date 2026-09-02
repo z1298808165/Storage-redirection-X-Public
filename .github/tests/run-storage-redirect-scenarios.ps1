@@ -143,6 +143,9 @@ $AnyMediaFile = "srt_any_media.bin"
 $QqAliasMappedRoot = "$RealRoot/Download/SrtQqAliasMapped"
 $QqAliasMappedFile = "srt_qq_alias_existing.bin"
 $QqAliasRequestRoot = "$RealRoot/Android/data/$AppId/Tencent/QQfile_recv"
+$NestedMappingRequestRoot = "$RealRoot/Android/data/$AppId/Tencent"
+$NestedMappingStageRoot = "$RealRoot/Android/data/$AppId/sandbox"
+$NestedMappingTargetRoot = "$RealRoot/Download/SrtNestedMappingQQ"
 
 $script:Summary = New-Object System.Collections.Generic.List[object]
 $script:Failures = New-Object System.Collections.Generic.List[string]
@@ -324,20 +327,20 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 36) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 37) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(1..36)
+            return @(1..37)
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 36) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 37) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -361,6 +364,7 @@ function Get-ScenarioList {
     $defaultScenarios.Add(34) | Out-Null
     $defaultScenarios.Add(35) | Out-Null
     $defaultScenarios.Add(36) | Out-Null
+    $defaultScenarios.Add(37) | Out-Null
     23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
     @($defaultScenarios)
@@ -440,6 +444,10 @@ function Apply-ScenarioConfig {
         36 {
             Set-BackendConfig -Mode "auto"
             $json = '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Documents","Movies","Music","Pictures"],"path_mappings":{"Android/data/' + $AppId + '/Tencent/QQfile_recv":"Download/SrtQqAliasMapped","Download/QQ":"Download/SrtQqAliasMapped"}}}}'
+            Write-DeviceConfig $json
+        }
+        37 {
+            $json = '{"users":{"0":{"enabled":true,"path_mappings":{"/storage/emulated/0/Android/data/' + $AppId + '/Tencent":"/storage/emulated/0/Android/data/' + $AppId + '/sandbox","/storage/emulated/0/Android/data/' + $AppId + '/sandbox/QQfile_recv":"/storage/emulated/0/Download/SrtNestedMappingQQ"}}}}'
             Write-DeviceConfig $json
         }
         default { throw "未知场景 $Scenario" }
@@ -828,7 +836,7 @@ function Clear-Targets {
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendRoot/Download/SrtMountNsAllow/Qa/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/Qa/Deep'; chmod -R 777 '$BackendRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsAllow' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; mkdir -p '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked/Writable' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked/Writable' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; chmod -R 777 '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
-    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
+    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
 }
 
 function Remove-TestTargetArtifacts {
@@ -1599,6 +1607,7 @@ function Get-ScenarioTitle {
         34 { "own package QQfile_recv paths stay real" }
         35 { "arbitrary path mapping matrix across public and private roots" }
         36 { "mapped private alias continues writing an existing file" }
+        37 { "nested mapping chain applies parent result to child rule" }
     }
 }
 
@@ -1658,6 +1667,17 @@ function Invoke-QqAliasMappedExistingFileScenario {
     $ok = $result.Ok
     $ok = (Require-File "scenario-$Scenario" "qq-alias-target" $targetPath) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "qq-alias-private" $requestPath) -and $ok
+    $ok
+}
+
+function Invoke-NestedMappingChainScenario {
+    param([int]$Scenario)
+    $file = "$NestedMappingRequestRoot/QQfile_recv/nested.bin"
+    $target = "$NestedMappingTargetRoot/nested.bin"
+    $result = Invoke-WriteCase $Scenario "nested-mapping-chain" $file $Payload
+    $ok = $result.Ok
+    $ok = (Require-File "scenario-$Scenario" "nested-mapping-target" $target) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "nested-mapping-request" $file) -and $ok
     $ok
 }
 
@@ -2366,6 +2386,7 @@ function Invoke-Scenario {
         34 { Invoke-OwnPrivateDirectoriesScenario $Scenario }
         35 { Invoke-AnyPathMappingScenario $Scenario }
         36 { Invoke-QqAliasMappedExistingFileScenario $Scenario }
+        37 { Invoke-NestedMappingChainScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

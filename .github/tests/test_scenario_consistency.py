@@ -110,11 +110,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertTrue(values, workflow)
             self.assertTrue(all(value == "all" for value in values), workflow)
 
-        any_path_values = re.findall(
-            r'SRT_SCENARIOS:\s*"([^"]+)"', read(".github/workflows/ci-any-path.yml")
-        )
-        self.assertTrue(any_path_values)
-        self.assertTrue(all(value == "all" for value in any_path_values))
+        any_path_workflow = ROOT / ".github/workflows/ci-any-path.yml"
+        if any_path_workflow.exists():
+            any_path_values = re.findall(
+                r'SRT_SCENARIOS:\s*"([^"]+)"', read(".github/workflows/ci-any-path.yml")
+            )
+            self.assertTrue(any_path_values)
+            self.assertTrue(all(value == "all" for value in any_path_values))
 
     def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
         expected_max = max(self.ids)
@@ -122,6 +124,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn(f"return @(1..{expected_max})", self.powershell)
 
     def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
+        if not (ROOT / ".github/workflows/ci-any-path.yml").exists():
+            self.skipTest("主分支不包含实验分支专用 workflow")
         workflow = read(".github/workflows/ci-any-path.yml")
         for job in ("prepare:", "module:", "app:", "test-flow-build:", "test-flow:"):
             self.assertIn(f"  {job}", workflow)

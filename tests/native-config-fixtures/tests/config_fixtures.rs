@@ -1,3 +1,6 @@
+use native_config_fixtures::domain::{
+    PathMapping, map_path_by_mappings, reverse_map_path_by_mappings,
+};
 use native_config_fixtures::normalize_app_config;
 use std::fs;
 use std::path::PathBuf;
@@ -47,5 +50,32 @@ fn native_runtime_rejects_cyclic_mapping_chains() {
     assert_eq!(
         normalized["users"]["0"]["path_mappings"],
         serde_json::json!({ "Keep": "Target" })
+    );
+}
+
+#[test]
+fn mapping_chain_rewrites_parent_result_into_nested_rule() {
+    let mappings = vec![
+        PathMapping::new(
+            "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent".to_string(),
+            "/storage/emulated/0/Android/data/com.tencent.mobileqq/sandbox".to_string(),
+        ),
+        PathMapping::new(
+            "/storage/emulated/0/Android/data/com.tencent.mobileqq/sandbox/QQfile_recv".to_string(),
+            "/storage/emulated/0/Download/third-party/QQ".to_string(),
+        ),
+    ];
+    let request =
+        "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/QQfile_recv/file.bin";
+    assert_eq!(
+        map_path_by_mappings(request, &mappings),
+        "/storage/emulated/0/Download/third-party/QQ/file.bin"
+    );
+    assert_eq!(
+        reverse_map_path_by_mappings(
+            "/storage/emulated/0/Download/third-party/QQ/file.bin",
+            &mappings,
+        ),
+        request
     );
 }

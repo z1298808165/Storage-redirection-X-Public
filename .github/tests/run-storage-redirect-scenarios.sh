@@ -135,6 +135,9 @@ ANY_LEGACY_PRIVATE_TARGET="${REAL_ROOT}/Android/media/${APP_ID}/cache"
 ANY_MEDIA_REQUEST="${REAL_ROOT}/Download/SrtAnyMediaRequest"
 ANY_MEDIA_TARGET="${REAL_ROOT}/Download/SrtAnyMediaTarget"
 ANY_MEDIA_FILE="srt_any_media.bin"
+NESTED_MAPPING_REQUEST_ROOT="${REAL_ROOT}/Android/data/${APP_ID}/Tencent"
+NESTED_MAPPING_STAGE_ROOT="${REAL_ROOT}/Android/data/${APP_ID}/sandbox"
+NESTED_MAPPING_TARGET_ROOT="${REAL_ROOT}/Download/SrtNestedMappingQQ"
 SRT_FRESH_APP_PER_CASE="${SRT_FRESH_APP_PER_CASE:-1}"
 SRT_RESULT_POLL_MS="${SRT_RESULT_POLL_MS:-150}"
 SRT_APP_LAUNCH_SETTLE_MS="${SRT_APP_LAUNCH_SETTLE_MS:-800}"
@@ -424,6 +427,9 @@ apply_config() {
       set_backend_config auto
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Documents","Movies","Music","Pictures"],"path_mappings":{"Android/data/'"${APP_ID}"'/Tencent/QQfile_recv":"Download/SrtQqAliasMapped","Download/QQ":"Download/SrtQqAliasMapped"}}}}'
       ;;
+    37)
+      write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"/storage/emulated/0/Android/data/%s/Tencent\":\"/storage/emulated/0/Android/data/%s/sandbox\",\"/storage/emulated/0/Android/data/%s/sandbox/QQfile_recv\":\"/storage/emulated/0/Download/SrtNestedMappingQQ\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID")"
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -500,6 +506,7 @@ scenario_title() {
     34) echo "启用重定向，验证自有包名 Android/data|media|obb/Tencent/QQfile_recv 保持真实路径" ;;
     35) echo "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射" ;;
     36) echo "映射私有别名可继续写入已由 MediaProvider 创建的文件" ;;
+    37) echo "父映射结果继续命中子映射" ;;
   esac
 }
 
@@ -511,7 +518,7 @@ prepare_backend_core_targets() {
 }
 
 prepare_any_path_targets() {
-  adb_su "rm -rf '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
+  adb_su "rm -rf '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
 }
 
 clean_targets() {
@@ -626,7 +633,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 36))
+      scenarios=($(seq 1 37))
       return 0
     fi
     local scenario
@@ -637,7 +644,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 36 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 37 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -654,7 +661,7 @@ build_scenario_list() {
   scenarios+=(28)
   scenarios+=(23 24)
   scenarios+=(25 26 27)
-  scenarios+=(35 36)
+  scenarios+=(35 36 37)
 }
 
 remove_test_target_artifacts() {
@@ -2597,6 +2604,14 @@ run_qq_alias_mapped_existing_file_scenario() {
     check_file_missing "qq-alias-private" "$request"
 }
 
+run_nested_mapping_chain_scenario() {
+  local scenario="$1" file="${NESTED_MAPPING_REQUEST_ROOT}/QQfile_recv/nested.bin"
+  local target="${NESTED_MAPPING_TARGET_ROOT}/nested.bin"
+  run_write_case "$scenario" "nested-mapping-chain" "$file" "$PAYLOAD" &&
+    check_file_exists "scenario-${scenario}-nested-mapping-target" "$target" &&
+    check_file_missing "scenario-${scenario}-nested-mapping-request" "$file"
+}
+
 run_mediastore_open_typed_collection_scenario() {
   local scenario="$1"
   wait_media_provider_ready "scenario-${scenario}-typed-collection" 60 || return 1
@@ -2747,6 +2762,10 @@ run_scenario() {
       echo "step 5/7: 验证映射私有别名对既有文件的继续写入"
       run_qq_alias_mapped_existing_file_scenario "$scenario"
       ;;
+    37)
+      echo "step 5/7: 验证父映射结果继续命中子映射"
+      run_nested_mapping_chain_scenario "$scenario"
+      ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
       run_file_monitor_disabled_redirect_scenario "$scenario"
@@ -2802,7 +2821,7 @@ fail=0
 build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
-export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT
+export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
@@ -2812,6 +2831,7 @@ export -f media_provider_is_lazy
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario
 export -f run_any_path_mapping_scenario
+export -f run_nested_mapping_chain_scenario
 
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"
