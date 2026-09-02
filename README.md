@@ -420,6 +420,7 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 - 空路径会被忽略。
 - `path_mappings` 的源路径和目标路径不能相同，相同会被忽略。
 - `path_mappings` 不能形成循环映射，映射链深度超过 10 层的源规则会被忽略。
+- `path_mappings` 支持有限深度的嵌套链：父路径映射后的目标路径可继续命中更具体的子路径规则，并按最长前缀继续处理。
 - `allowed_real_paths` 支持 `!` 前缀表示排除规则。
 - `excluded_real_paths` 是旧版兼容字段，新配置请优先在 `allowed_real_paths` 中使用 `!` 前缀。
 - `path_mappings` 和 `sandboxed_paths` 不支持 `!` 排除前缀。
