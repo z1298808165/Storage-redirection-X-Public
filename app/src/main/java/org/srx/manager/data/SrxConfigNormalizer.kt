@@ -320,6 +320,9 @@ internal object SrxConfigNormalizer {
       allowWildcards: Boolean = allowRuleSyntax,
   ): String = sanitizeConfigPath(raw, allowRuleSyntax, allowWildcards).orEmpty()
 
+  /** 映射字段同时支持旧的存储相对路径和新的任意绝对路径。 */
+  fun sanitizeEditableMappingPath(raw: String): String = sanitizeMappingPath(raw).orEmpty()
+
   fun sanitizeMonitorFilterPath(raw: String, allowLegacyAbsolute: Boolean = true): String =
       sanitizeMonitorFilterPathOrNull(raw, allowLegacyAbsolute).orEmpty()
 
@@ -530,15 +533,12 @@ internal object SrxConfigNormalizer {
     val cleaned =
         values
             .mapNotNull { (request, target) ->
-              val cleanRequest =
-                  sanitizeConfigPath(request, allowRuleSyntax = false, allowWildcards = false)
-              val cleanTarget =
-                  sanitizeConfigPath(target, allowRuleSyntax = false, allowWildcards = false)
+              val cleanRequest = sanitizeMappingPath(request)
+              val cleanTarget = sanitizeMappingPath(target)
               if (
                   cleanRequest.isNullOrBlank() ||
                       cleanTarget.isNullOrBlank() ||
-                      cleanRequest == cleanTarget ||
-                      isAndroidDataOrObbPath(cleanTarget)
+                      cleanRequest == cleanTarget
               ) {
                 null
               } else {
@@ -587,12 +587,49 @@ internal object SrxConfigNormalizer {
     return cycles
   }
 
-  private fun isAndroidDataOrObbPath(path: String): Boolean {
-    val parts = path.trim('/').split('/').filter(String::isNotBlank)
-    return parts.size >= 2 &&
-        parts[0].equals("Android", ignoreCase = true) &&
-        (parts[1].equals("data", ignoreCase = true) || parts[1].equals("obb", ignoreCase = true))
+  private fun sanitizeMappingPath(raw: String): String? {
+    val text = raw.trim().replace('\\', '/').replace(Regex("/+"), "/")
+    if (text.isBlank() || text.length > 512 || '\u0000' in text) return null
+    val path = text.trimEnd('/')
+    if (path.isBlank() || path == "/" || path.split('/').any { it == "." || it == ".." }) {
+      return null
+    }
+    val absolute = path.startsWith('/')
+    var body = path.removePrefix("/")
+    val storageAlias =
+        body
+            .replace(Regex("^storage/emulated/\\d+/?"), "")
+            .replace(Regex("^data/media/\\d+/?"), "")
+            .removePrefix("sdcard/")
+            .trim('/')
+    if (absolute && storageAlias != body.trim('/')) {
+      body = storageAlias
+      if (body.isBlank()) return null
+      return body
+    }
+    if (absolute && hasForbiddenNamespacePrefix("/$body")) return null
+    if (!absolute) {
+      body =
+          body
+              .replace(Regex("^storage/emulated/\\d+/?"), "")
+              .replace(Regex("^data/media/\\d+/?"), "")
+              .removePrefix("sdcard/")
+              .trim('/')
+      if (body.isBlank() || hasStorageRootPrefix(body)) return null
+    }
+    if (Regex("[<>:\"|?*\\x00-\\x1F]").containsMatchIn(body)) return null
+    return if (absolute) "/$body" else body
   }
+
+  private fun hasForbiddenNamespacePrefix(path: String): Boolean =
+      path == "/proc" ||
+          path.startsWith("/proc/") ||
+          path == "/sys" ||
+          path.startsWith("/sys/") ||
+          path == "/dev" ||
+          path.startsWith("/dev/") ||
+          path == "/data/adb" ||
+          path.startsWith("/data/adb/")
 
   private fun detectMappingDepth(mappings: Map<String, String>): Map<String, Int> {
     val depths = mutableMapOf<String, Int>()

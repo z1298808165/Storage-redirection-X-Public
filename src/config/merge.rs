@@ -13,6 +13,7 @@ enum PackagePathMatchMode {
     Redirect,
     Enabled,
     MappingRequest,
+    MappingTarget,
     Monitor,
 }
 
@@ -56,7 +57,18 @@ fn is_specific_mapping_request_owner_hint(user_id: i32, request_path: &str) -> b
     is_specific_storage_owner_hint(user_id, request_path)
 }
 
-fn resolve_mapping_storage_path_for_user(user_id: i32, path: &str) -> String {
+fn is_specific_mapping_target_owner_hint(user_id: i32, path: &str) -> bool {
+    let resolved_path = resolve_mapping_path_for_user(user_id, path);
+    if resolved_path.is_empty() {
+        return false;
+    }
+    if paths::is_same_or_child(&resolved_path, &paths::storage_user_root_for_user(user_id)) {
+        return is_specific_storage_owner_hint(user_id, &resolved_path);
+    }
+    true
+}
+
+fn resolve_mapping_path_for_user(user_id: i32, path: &str) -> String {
     let storage_root = paths::storage_user_root_for_user(user_id);
     let mut resolved = paths::resolve_user_path(&paths::normalize(path), user_id);
     if resolved.is_empty() || paths::has_unsafe_segments(&resolved) {
@@ -65,16 +77,24 @@ fn resolve_mapping_storage_path_for_user(user_id: i32, path: &str) -> String {
     if !paths::is_absolute(&resolved) {
         resolved = paths::normalize(&paths::join(&storage_root, &resolved));
     }
-    if paths::eq_ignore_case(&resolved, &storage_root) || !paths::is_child(&resolved, &storage_root)
-    {
+    if !paths::is_safe_namespace_path(&resolved) {
+        return String::new();
+    }
+    resolved
+}
+
+fn resolve_mapping_storage_path_for_user(user_id: i32, path: &str) -> String {
+    let resolved = resolve_mapping_path_for_user(user_id, path);
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    if !paths::is_child(&resolved, &storage_root) {
         return String::new();
     }
     resolved
 }
 
 fn is_valid_mapping_target_for_redirect_owner(user_id: i32, final_path: &str) -> bool {
-    let resolved_path = resolve_mapping_storage_path_for_user(user_id, final_path);
-    !resolved_path.is_empty() && !paths::is_android_data_or_obb_path(&resolved_path)
+    let resolved_path = resolve_mapping_path_for_user(user_id, final_path);
+    !resolved_path.is_empty()
 }
 
 fn update_matched_packages(
@@ -214,6 +234,24 @@ impl SettingsHub {
         )
     }
 
+    pub fn resolve_mapping_target_package_by_path_for_user(
+        &self,
+        user_id: i32,
+        path: &str,
+    ) -> String {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if !state.is_loaded || user_id < 0 || path.is_empty() {
+            return String::new();
+        }
+
+        resolve_package_by_path_in_apps(
+            &state.apps,
+            user_id,
+            path,
+            PackagePathMatchMode::MappingTarget,
+        )
+    }
+
     pub fn resolve_monitor_package_by_path_for_user(&self, user_id: i32, path: &str) -> String {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         if !state.is_loaded || user_id < 0 || path.is_empty() {
@@ -276,11 +314,6 @@ fn resolve_package_by_path_in_apps(
     mode: PackagePathMatchMode,
 ) -> String {
     let normalized = paths::normalize(path);
-    let storage_root = paths::storage_user_root_for_user(user_id);
-    if !paths::is_child(&normalized, &storage_root) {
-        return String::new();
-    }
-
     let mut matched_packages: Vec<String> = Vec::new();
     let mut matched_prefix_len = 0usize;
     for (package_name, app) in apps {
@@ -308,9 +341,8 @@ fn resolve_package_by_path_in_apps(
         }
 
         for mapping in &user.path_mappings {
-            let request_path =
-                resolve_mapping_storage_path_for_user(user_id, &mapping.request_path);
-            let final_path = resolve_mapping_storage_path_for_user(user_id, &mapping.final_path);
+            let request_path = resolve_mapping_path_for_user(user_id, &mapping.request_path);
+            let final_path = resolve_mapping_path_for_user(user_id, &mapping.final_path);
             if request_path.is_empty()
                 || final_path.is_empty()
                 || !is_valid_mapping_target_for_redirect_owner(user_id, &final_path)
@@ -352,15 +384,18 @@ fn should_match_mapping_target_for_mode(
     final_path: &str,
 ) -> bool {
     match mode {
-        PackagePathMatchMode::Redirect => false,
-        PackagePathMatchMode::MappingRequest => false,
+        PackagePathMatchMode::Redirect | PackagePathMatchMode::MappingRequest => false,
+        PackagePathMatchMode::MappingTarget => true,
         PackagePathMatchMode::Enabled => true,
-        PackagePathMatchMode::Monitor => is_specific_storage_owner_hint(user_id, final_path),
+        PackagePathMatchMode::Monitor => is_specific_mapping_target_owner_hint(user_id, final_path),
     }
 }
 
 fn should_match_default_redirect_target_for_mode(mode: PackagePathMatchMode) -> bool {
-    !matches!(mode, PackagePathMatchMode::MappingRequest)
+    !matches!(
+        mode,
+        PackagePathMatchMode::MappingRequest | PackagePathMatchMode::MappingTarget
+    )
 }
 
 fn prefer_download_provider_match(packages: &[String]) -> Option<&str> {

@@ -39,30 +39,23 @@ impl MountPlanner {
                 target_path = self.normalize_path(&paths::join(storage_path, &target_path));
             }
 
-            if paths::eq_ignore_case(&current_path, storage_path)
-                || paths::eq_ignore_case(&target_path, storage_path)
-            {
+            if current_path == "/" || target_path == "/" {
                 log::warn!(
-                    "skip map (whole storage not supported): cur={} tgt={}",
+                    "skip map (root path not supported): cur={} tgt={}",
                     current_path,
                     target_path
                 );
                 continue;
             }
 
-            if !paths::is_child(&current_path, storage_path)
-                || !paths::is_child(&target_path, storage_path)
+            if !paths::is_safe_namespace_path(&current_path)
+                || !paths::is_safe_namespace_path(&target_path)
             {
                 log::warn!(
-                    "skip map (not under storage): cur={} tgt={}",
+                    "skip map (unsafe namespace path): cur={} tgt={}",
                     current_path,
                     target_path
                 );
-                continue;
-            }
-
-            if paths::is_android_data_or_obb_path(&target_path) {
-                log::warn!("skip map (private app target): tgt={}", target_path);
                 continue;
             }
 
@@ -93,15 +86,10 @@ impl MountPlanner {
         let mut is_any_applied = false;
 
         for mapping in resolved_mappings {
-            let Some(target_relative) =
-                paths::relative_child_path(&mapping.final_path, storage_path)
-            else {
-                continue;
-            };
-
             let Some((target_source, should_fix_target_permissions)) = self
-                .resolve_mapping_target_source(
-                    target_relative,
+                .resolve_mapping_target_source_path(
+                    &mapping.final_path,
+                    storage_path,
                     target_source_roots,
                     options.should_use_existing_target_source_only,
                 )
@@ -127,16 +115,24 @@ impl MountPlanner {
             }
 
             let mut is_current_path_mounted = false;
-            let _ = self.bind_overlay_mount_with_storage_aliases(
-                &target_source,
-                &mapping.request_path,
-                true,
-                super::PrimaryMountFailure::ContinueAliases,
-                Some("map primary mount failed"),
-                Some("map alias mount failed"),
-                Some("map alias ok"),
-                Some(&mut is_current_path_mounted),
-            );
+            if self.is_storage_path(&mapping.request_path, storage_path) {
+                let _ = self.bind_overlay_mount_with_storage_aliases(
+                    &target_source,
+                    &mapping.request_path,
+                    true,
+                    super::PrimaryMountFailure::ContinueAliases,
+                    Some("map primary mount failed"),
+                    Some("map alias mount failed"),
+                    Some("map alias ok"),
+                    Some(&mut is_current_path_mounted),
+                );
+            } else {
+                let recursive = std::fs::metadata(&target_source)
+                    .map(|metadata| metadata.is_dir())
+                    .unwrap_or(true);
+                is_current_path_mounted =
+                    self.bind_mount_overlay(&target_source, &mapping.request_path, recursive);
+            }
 
             if is_current_path_mounted {
                 is_any_applied = true;
@@ -241,6 +237,40 @@ impl MountPlanner {
         Some((target_data_media, true))
     }
 
+    /// 共享存储下的映射需要切换到对应真实后端；其它绝对路径直接作为
+    /// bind mount 源使用。后者使 `/data/user`、`/data/data` 等路径不再被
+    /// 错误地拼接到 `/data/media`。
+    fn resolve_mapping_target_source_path(
+        &self,
+        final_path: &str,
+        storage_path: &str,
+        target_source_roots: &[String],
+        should_use_existing_target_source_only: bool,
+    ) -> Option<(String, bool)> {
+        if let Some(relative) = paths::relative_child_path(final_path, storage_path) {
+            return self.resolve_mapping_target_source(
+                relative,
+                target_source_roots,
+                should_use_existing_target_source_only,
+            );
+        }
+
+        if std::fs::metadata(final_path).is_err() && !self.ensure_directory_exists(final_path, true)
+        {
+            log::warn!("map target directory unavailable: {}", final_path);
+            return None;
+        }
+        let metadata = std::fs::metadata(final_path).ok()?;
+        if !metadata.is_dir() && !metadata.is_file() {
+            return None;
+        }
+        Some((final_path.to_string(), false))
+    }
+
+    fn is_storage_path(&self, path: &str, storage_path: &str) -> bool {
+        paths::is_same_or_child(path, storage_path)
+    }
+
     fn ensure_mapping_request_mount_point(
         &self,
         request_path: &str,
@@ -249,7 +279,30 @@ impl MountPlanner {
         should_prefer_redirect_fallback: bool,
     ) -> bool {
         if !should_prefer_redirect_fallback {
-            return fs::is_directory(request_path);
+            return std::fs::metadata(request_path)
+                .map(|metadata| metadata.is_dir() || metadata.is_file())
+                .unwrap_or(false);
+        }
+
+        if std::fs::metadata(request_path)
+            .map(|metadata| metadata.is_dir() || metadata.is_file())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        // 非共享存储目标（例如当前应用的 `/data/user` 目录）不参与存储
+        // fallback；只创建缺失的目录链，避免把绝对路径误转换成 storage 相对路径。
+        if !paths::is_same_or_child(request_path, storage_path) {
+            let uid = if should_chown_current_dirs
+                && (request_path.starts_with("/data/user/")
+                    || request_path.starts_with("/data/data/"))
+            {
+                self.app_uid
+            } else {
+                -1
+            };
+            return fs::create_directory(request_path, uid);
         }
 
         let uid = if should_chown_current_dirs {

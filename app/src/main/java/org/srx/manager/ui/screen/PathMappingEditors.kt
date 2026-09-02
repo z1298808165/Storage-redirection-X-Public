@@ -39,20 +39,6 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-private fun isAndroidDataOrObbMappingTarget(path: String): Boolean {
-  val parts = path.trim().replace('\\', '/').trim('/').split('/').filter(String::isNotBlank)
-  return parts.size >= 2 &&
-      parts[0].equals("Android", ignoreCase = true) &&
-      (parts[1].equals("data", ignoreCase = true) || parts[1].equals("obb", ignoreCase = true))
-}
-
-private fun mappingTargetError(path: String): String? =
-    if (isAndroidDataOrObbMappingTarget(path)) {
-      "映射目标不能位于 Android/data 或 Android/obb"
-    } else {
-      null
-    }
-
 @Composable
 private fun PathInputDialog(
     show: Boolean,
@@ -121,15 +107,13 @@ private fun MappingInputDialog(
 ) {
   var from by
       remember(show, initialRequest, userId) {
-        mutableStateOf(pathTextFieldValue(normalizeEditablePathInput(initialRequest, userId)))
+        mutableStateOf(pathTextFieldValue(normalizeEditableMappingInput(initialRequest, userId)))
       }
   var to by
       remember(show, initialTarget, userId) {
-        mutableStateOf(pathTextFieldValue(normalizeEditablePathInput(initialTarget, userId)))
+        mutableStateOf(pathTextFieldValue(normalizeEditableMappingInput(initialTarget, userId)))
       }
   var activeField by remember(show) { mutableStateOf<MappingField?>(null) }
-  var targetError by
-      remember(show, initialTarget, userId) { mutableStateOf(mappingTargetError(to.text)) }
   CenteredDialog(
       title = title,
       summary = null,
@@ -139,7 +123,7 @@ private fun MappingInputDialog(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
       TextField(
           value = from,
-          onValueChange = { from = normalizeEditablePathTextFieldValue(it, userId) },
+          onValueChange = { from = normalizeEditableMappingTextFieldValue(it, userId) },
           label = "请求路径",
           colors = TextFieldDefaults.textFieldColors(labelColor = subtleFieldLabelColor()),
           useLabelAsPlaceholder = true,
@@ -156,10 +140,7 @@ private fun MappingInputDialog(
       }
       TextField(
           value = to,
-          onValueChange = {
-            to = normalizeEditablePathTextFieldValue(it, userId)
-            targetError = mappingTargetError(to.text)
-          },
+          onValueChange = { to = normalizeEditableMappingTextFieldValue(it, userId) },
           label = "目标路径",
           colors = TextFieldDefaults.textFieldColors(labelColor = subtleFieldLabelColor()),
           useLabelAsPlaceholder = true,
@@ -170,28 +151,13 @@ private fun MappingInputDialog(
               },
       )
       if (activeField == MappingField.To) {
-        PathSuggestionBrowser(to.text, userId, onListDirectories) {
-          to = pathTextFieldValue(it)
-          targetError = mappingTargetError(to.text)
-        }
-      }
-      targetError?.let { error ->
-        Text(
-            text = error,
-            color = MiuixTheme.colorScheme.error,
-            fontSize = 12.sp,
-            lineHeight = 16.sp,
-        )
+        PathSuggestionBrowser(to.text, userId, onListDirectories) { to = pathTextFieldValue(it) }
       }
       Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
         GlassTextButton(
             confirmText,
-            {
-              val error = mappingTargetError(to.text)
-              targetError = error
-              if (error == null) onConfirm(from.text, to.text)
-            },
+            { onConfirm(from.text, to.text) },
             modifier = Modifier.weight(1f),
             primary = true,
         )
@@ -269,8 +235,15 @@ internal fun MappingEditorCard(
   var editingMapping by remember { mutableStateOf<Pair<String, String>?>(null) }
   GlassCard(insideMargin = PaddingValues(0.dp), alpha = 0.52f, shadowAlpha = 0.14f) {
     ConfigGroupHeader(title = "路径映射", addLabel = "添加路径映射", onAdd = { showDialog = true })
+    Text(
+        "请求路径和目标路径都按应用视角填写，可使用相对路径或绝对路径；Android/data、Android/media、Android/obb 可直接选择。未命中的公共路径仍进入应用沙盒。",
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+    )
     if (mappings.isEmpty()) {
-      EmptyConfigHint("将请求路径映射到目标路径")
+      EmptyConfigHint("例如 Download/Cache -> /data/user/0/应用包名/files/Cache")
     } else {
       mappings.entries.forEachIndexed { index, (request, target) ->
         MappingRow(

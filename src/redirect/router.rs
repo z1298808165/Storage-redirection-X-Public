@@ -379,9 +379,6 @@ fn resolve_router_mappings(
         if paths::eq_ignore_case(&current_path, &target_path) {
             continue;
         }
-        if paths::is_android_data_or_obb_path(&target_path) {
-            continue;
-        }
         mappings.push(PathMapping::new(current_path, target_path));
     }
 

@@ -53,7 +53,15 @@ internal fun PathSuggestionBrowser(
     onListDirectories: (String, String, (List<String>) -> Unit) -> Unit,
     onPick: (String) -> Unit,
 ) {
-  val browserState = rememberStorageBrowserState(userId, value, onListDirectories)
+  val absolutePath = value.trim().startsWith('/')
+  val publicStorageAlias =
+      value.trim().matches(Regex("^/(storage/emulated|data/media|sdcard)(/|$).*"))
+  val browserState =
+      if (absolutePath && !publicStorageAlias) {
+        PathBrowserState(emptyList(), loading = false)
+      } else {
+        rememberStorageBrowserState(userId, value, onListDirectories)
+      }
   val suggestions = browserState.suggestions
   val shape = RoundedCornerShape(20.dp)
   Box(
@@ -62,6 +70,8 @@ internal fun PathSuggestionBrowser(
   ) {
     when {
       browserState.loading -> PathBrowserMessage("正在读取目录...")
+      suggestions.isEmpty() && absolutePath && !publicStorageAlias ->
+          PathBrowserMessage("绝对路径请直接填写，目录提示仅适用于公共存储")
       suggestions.isEmpty() -> PathBrowserMessage("没有可补全的下一级路径")
       else ->
           LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -242,13 +252,6 @@ internal fun pathBrowserSuggestions(
     parsed: PathBrowserInput,
     entries: List<String>,
 ): List<PathSuggestion> {
-  if (parsed.dirRel.isAndroidDataPrivateBrowserPath()) {
-    val parentRel =
-        parsed.dirRel.substringBeforeLast('/', missingDelimiterValue = "").let {
-          if (it.isBlank()) "" else "$it/"
-        }
-    return listOf(PathSuggestion(relativePath = parentRel, displayPath = "..", isParent = true))
-  }
   val baseSuggestions =
       if (parsed.dirRel.isBlank()) {
         entries.distinctBy { it.trimEnd('/').lowercase() }
@@ -305,11 +308,6 @@ private fun normalizeSuggestionInput(value: String, userId: String): String {
       .replace(anyDataRoot, "")
 }
 
-private fun String.isAndroidDataPrivateBrowserPath(): Boolean {
-  val clean = trim('/').lowercase()
-  return clean == "android/data" || clean.startsWith("android/data/")
-}
-
 private fun hasAllowRulePrefix(value: String): Boolean = value.trimStart().startsWith("!")
 
 internal fun normalizeEditablePathInput(
@@ -320,6 +318,26 @@ internal fun normalizeEditablePathInput(
   val excluded = allowRuleSyntax && hasAllowRulePrefix(value)
   val clean = normalizeSuggestionInput(value, userId).trimStart('/')
   return if (excluded) "!$clean" else clean
+}
+
+/** 映射编辑器保留绝对路径；相对输入继续兼容共享存储下的旧格式。 */
+internal fun normalizeEditableMappingInput(value: String, userId: String): String {
+  val text = value.trim().replace('\\', '/').replace(Regex("/+"), "/")
+  return when {
+    text.startsWith('/') && text.matches(Regex("^/(storage/emulated|data/media|sdcard)(/|$).*")) ->
+        normalizeSuggestionInput(text, userId).trim('/')
+    text.startsWith('/') -> text.trimEnd('/')
+    else -> normalizeSuggestionInput(text, userId).trim('/')
+  }
+}
+
+internal fun normalizeEditableMappingTextFieldValue(
+    value: TextFieldValue,
+    userId: String,
+): TextFieldValue {
+  val normalized = normalizeEditableMappingInput(value.text, userId)
+  if (normalized == value.text) return value
+  return TextFieldValue(normalized, selection = value.selection.clampToText(normalized.length))
 }
 
 internal fun normalizeEditablePathTextFieldValue(

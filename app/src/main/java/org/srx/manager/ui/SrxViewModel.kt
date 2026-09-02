@@ -409,8 +409,8 @@ class SrxViewModel(
       from: String,
       to: String,
   ) {
-    val cleanFrom = cleanPath(from, allowRuleSyntax = false)
-    val cleanTo = cleanPath(to, allowRuleSyntax = false)
+    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
+    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
     if (cleanFrom.isBlank() || cleanTo.isBlank() || cleanFrom == cleanTo) {
       showMessage("映射路径无效")
       return
@@ -425,9 +425,9 @@ class SrxViewModel(
       from: String,
       to: String,
   ) {
-    val cleanOldFrom = cleanPath(oldFrom, allowRuleSyntax = false)
-    val cleanFrom = cleanPath(from, allowRuleSyntax = false)
-    val cleanTo = cleanPath(to, allowRuleSyntax = false)
+    val cleanOldFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(oldFrom)
+    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
+    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
     if (cleanFrom.isBlank() || cleanTo.isBlank() || cleanFrom == cleanTo) {
       showMessage("映射路径无效")
       return

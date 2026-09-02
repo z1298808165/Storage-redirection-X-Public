@@ -1270,7 +1270,7 @@ fn request_overlay_targets(request: &MountRequest) -> Vec<String> {
     }
 
     for mapping in &request.path_mappings {
-        append_resolved_storage_alias_targets(
+        append_resolved_mapping_request_targets(
             &mut targets,
             request,
             &mapping.request_path,
@@ -1280,6 +1280,31 @@ fn request_overlay_targets(request: &MountRequest) -> Vec<String> {
     }
 
     module_paths::normalize_mount_targets(&targets)
+}
+
+fn append_resolved_mapping_request_targets(
+    targets: &mut Vec<String>,
+    request: &MountRequest,
+    raw_path: &str,
+    user_id: i32,
+    storage_root: &str,
+) {
+    let resolved = paths::resolve_user_path(
+        &paths::resolve_placeholders(
+            &paths::normalize(raw_path),
+            &request.app_data_dir,
+            &request.redirect_target,
+        ),
+        user_id,
+    );
+    if resolved.is_empty() || paths::has_unsafe_segments(&resolved) || resolved == "/" {
+        return;
+    }
+    if paths::is_same_or_child(&resolved, storage_root) {
+        targets.extend(expand_storage_alias_paths_for_user(&resolved, user_id));
+    } else if paths::is_absolute(&resolved) {
+        targets.push(resolved);
+    }
 }
 
 fn append_resolved_storage_alias_targets(
@@ -1329,8 +1354,6 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     let suffix = &canonical_path[storage_root.len()..];
     // 这里的别名根都是按固定规则构造的互不相同的字面量，无需再逐个线性去重；
     // 最终的过滤、排序与去重统一由 normalize_targets 完成。
-    // 不再展开 /data/media/<user>：该前缀必定被 is_safe_mount_target 拒绝，
-    // 生成后只会被 normalize_targets 丢弃，属于无效分配与比较。
     storage_alias_roots_for_user(user_id)
         .into_iter()
         .map(|root| format!("{}{}", root, suffix))
