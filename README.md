@@ -11,7 +11,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 - 文件系统重定向：按用户、应用和路径规则重定向存储访问。
 - MediaProvider 查询 Hook：让系统媒体服务能配合重定向后的路径工作。
 - 系统 writer 代写处理：覆盖 `com.android.providers.media.module` 等系统进程按调用方写入的场景。
-- 路径过滤：支持路径映射、真实路径放行、`!` 排除规则和仅映射模式下的局部沙盒路径。
+- 路径过滤：支持路径映射、真实路径放行、`!` 排除规则和仅映射模式下的局部沙盒路径；路径映射可在应用可见的公共存储路径与应用私有 namespace 路径之间建立定向映射。
 - FUSE 兼容保护：内置 FuseFixer-compatible 保护，可通过全局配置关闭。
 - 配置模板与备份还原：WebUI 和管理 App 支持保存、应用、批量应用配置模板，并可导出和还原互通的 ZIP 备份。
 
@@ -82,6 +82,26 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 ```
 
 `allowed_real_paths` 和 `path_mappings` 可以同时存在。路径映射优先级更高，所以允许 `DCIM` 同时映射 `DCIM/MyApp -> Pictures/MyApp` 时，`DCIM` 下其他内容走真实路径，`DCIM/MyApp` 走映射目标；同一路径既允许又映射时，最终走映射目标。
+
+启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>` 和 `Android/obb/<包名>` 子树默认保持真实路径。这是应用私有目录的系统语义，不等同于把整个 `Android` 目录加入 `allowed_real_paths`；其它应用包名的私有目录仍按正常规则处理。
+
+### 任意路径映射
+
+`path_mappings` 的请求路径和目标路径分别独立解析，既可以填写相对共享存储路径，也可以填写受支持的绝对路径。因此可以把公共存储、`Android/data|media|obb/<包名>` 下的应用私有目录，以及 `/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有 namespace 路径按需互相映射。这里的“任意”是指在路径校验和当前应用 mount namespace 可见范围内任意组合，并不表示可以越过 namespace 或访问任意系统路径。
+
+例如，以下规则覆盖公共路径到应用私有目录、应用私有目录到公共路径，以及 `/data/data` 历史别名：
+
+```json
+{
+  "path_mappings": {
+    "Download/导入": "/data/user/0/<包名>/files/导入",
+    "/data/user/0/<包名>/files/导出": "Download/导出",
+    "/data/data/<包名>/code_cache": "Android/media/<包名>/cache"
+  }
+}
+```
+
+相对请求路径按当前用户的共享存储根解析；绝对路径按应用自身的 mount namespace 解析。映射仍受路径安全校验、循环检测和最大映射链深度限制。
 
 ## 手动配置
 
@@ -158,7 +178,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 | `excluded_real_paths` | string array | `[]` | 旧版兼容字段。读取时会并入 `allowed_real_paths` 的 `!` 排除规则；新配置建议直接写 `allowed_real_paths`。 |
 | `sandboxed_paths` | string 或 string array | `[]` | 仅映射模式下的局部沙盒路径，命中后仍进入应用沙盒。 |
 | `read_only_paths` | string 或 string array | `[]` | 只读模式目录。支持具体相对目录、`!` 排除前缀以及 `*`、`?` 通配符；运行时读取会按真实路径放行并禁止写入。 |
-| `path_mappings` | object 或 array | `{}` | 路径映射规则，把虚拟路径改写到指定真实路径。 |
+| `path_mappings` | object 或 array | `{}` | 路径映射规则，把请求路径改写到目标路径；源和目标都支持相对共享存储路径或受支持的绝对 namespace 路径。 |
 
 `path_mappings` 推荐写成对象：
 
@@ -249,6 +269,7 @@ Storage Redirect X 的核心 Zygisk 模块，负责文件系统重定向、Media
 - 命中 `path_mappings`：改写到映射目标。
 - 命中 `allowed_real_paths`：保持真实路径。
 - 命中 `allowed_real_paths` 中的 `!` 排除规则：进入应用沙盒。
+- 当前应用自己的 `Android/data|media|obb/<包名>` 子树：保持真实路径。
 - 其他路径：进入 `/storage/emulated/<user>/Android/data/<package>/sdcard/...`。
 
 ### 仅映射模式 `mapping_mode_only`
@@ -392,11 +413,10 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 
 所有配置路径都遵循以下规则：
 
-- 只能使用相对路径，例如 `Download/MyApp`。
-- 不能以 `/` 开头。
-- 不能包含 `..`。
+- `allowed_real_paths`、`sandboxed_paths`、`read_only_paths` 只能使用相对共享存储路径，例如 `Download/MyApp`；`path_mappings` 的源路径和目标路径还支持受支持的绝对 namespace 路径。
+- 相对路径不能以 `/` 开头，所有路径都不能包含 `.`、`..` 路径段。
 - 不能包含控制字符，单条路径长度不能超过 512 字符。
-- 不能直接写 `sdcard`、`storage/emulated`、`storage/self/primary`、`data/media` 等存储根或根别名。
+- 非映射规则不能直接写 `sdcard`、`storage/emulated`、`storage/self/primary`、`data/media` 等存储根或根别名；映射的绝对路径也必须通过 namespace 安全校验。
 - 空路径会被忽略。
 - `path_mappings` 的源路径和目标路径不能相同，相同会被忽略。
 - `path_mappings` 不能形成循环映射，映射链深度超过 10 层的源规则会被忽略。
@@ -458,4 +478,4 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 
 ## 测试流
 
-设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块和测试 APK，再在 Android 13/14/15/16 模拟器上各自执行完整 scenario 1-33，单个 Android 版本内失败快速停止，全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。
+设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块和测试 APK，再在 Android 13/14/15/16 模拟器上各自执行完整 scenario 1-36，单个 Android 版本内失败快速停止，全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。

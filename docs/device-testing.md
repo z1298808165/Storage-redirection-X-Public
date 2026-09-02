@@ -43,12 +43,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-33。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-36。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
-- 当前模块跑完 scenario 1-33；如果显式设置 `RUN_FUSE_BACKEND_SCENARIOS=0`，脚本会跳过需要 FUSE 数据面的场景。旧变量 `RUN_FUSE_DAEMON_SCENARIOS` 仍作为迁移期间的别名。
+- 当前模块跑完 scenario 1-36；如果显式设置 `RUN_FUSE_BACKEND_SCENARIOS=0`，脚本会跳过需要 FUSE 数据面的场景。旧变量 `RUN_FUSE_DAEMON_SCENARIOS` 仍作为迁移期间的别名。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
 
@@ -178,7 +178,8 @@ Remove-Item Env:SRT_SCENARIOS
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-33。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-36。 |
+| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-36。与其它场景号混用会报错。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
 | `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
@@ -187,7 +188,7 @@ Remove-Item Env:SRT_SCENARIOS
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-33，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-33 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-36，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-36 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
 
 完整脚本覆盖以下场景：
 
@@ -227,6 +228,9 @@ CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/1
 | 31 | 关闭应用重定向后，缩略图和完整图片仍可从真实 MediaStore 路径读取。 |
 | 32 | 真实后端端点短暂恢复后，应用重启仍能完成挂载，不要求重启 MediaProvider。 |
 | 33 | MediaProvider 热重启后保留应用挂载，并继续完成图片保存。 |
+| 34 | 启用重定向时，当前应用自己的 `Android/data|media|obb/<包名>` 子树保持真实路径，不再次套入应用沙盒。 |
+| 35 | 任意路径映射矩阵：验证公共存储、`Android/data|media|obb/<包名>`、`/data/user`、`/data/data` 及公共路径之间的相对/绝对映射。 |
+| 36 | 映射应用私有别名后，仍可写入 MediaProvider 已创建的现有文件。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 ## 手动运行用例
