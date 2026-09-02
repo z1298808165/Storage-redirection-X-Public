@@ -19,6 +19,7 @@ class RootStorageBrowser(
             .split('/')
             .filter { it.isNotBlank() && it != "." && it != ".." }
             .joinToString("/")
+    if (clean.isAndroidDataPrivatePath()) return emptyList()
     val target =
         if (clean.isBlank()) "/storage/emulated/$userId" else "/storage/emulated/$userId/$clean"
     val candidates =
@@ -45,5 +46,10 @@ class RootStorageBrowser(
                 .thenBy(String.CASE_INSENSITIVE_ORDER) { it.trimEnd('/') }
         )
         .toList()
+  }
+
+  private fun String.isAndroidDataPrivatePath(): Boolean {
+    val clean = trim('/').lowercase()
+    return clean == "android/data" || clean.startsWith("android/data/")
   }
 }
