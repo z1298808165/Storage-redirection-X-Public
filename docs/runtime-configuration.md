@@ -100,17 +100,18 @@
 
 管理 App、WebUI 和 native 运行时都会对路径规则做兜底校验。手动编辑 JSON 时也应遵守以下规则：
 
-- `allowed_real_paths`、`sandboxed_paths` 和 `read_only_paths` 继续使用相对存储路径，例如 `Download/MyApp`。
-- `path_mappings` 的请求路径和目标路径支持相对存储路径，也支持以 `/` 开头的绝对路径；绝对路径会在应用自己的 mount namespace 中生效。
+- `allowed_real_paths`、`sandboxed_paths` 和 `read_only_paths` 继续使用相对共享存储路径，例如 `Download/MyApp`；只有 `path_mappings` 支持绝对 namespace 路径。
+- `path_mappings` 的请求路径和目标路径支持相对共享存储路径，也支持以 `/` 开头的绝对路径；绝对路径会在应用自己的 mount namespace 中生效，可用于 `/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有目录。
 - 不能包含 `.`、`..` 路径段、控制字符或超过 512 字符的路径。
-- 不能直接写 `sdcard`、`storage/emulated`、`storage/self/primary`、`data/media` 等存储根或根别名。
+- 非映射规则不能直接写 `sdcard`、`storage/emulated`、`storage/self/primary`、`data/media` 等存储根或根别名；映射的绝对路径也必须通过 namespace 安全校验。
 - `allowed_real_paths` 支持 `!` 排除前缀；`path_mappings` 和 `sandboxed_paths` 不支持 `!`。
 - `read_only_paths` 支持 `!` 前缀表示只读排除，也支持 `*`、`?` 通配符。
 - 同一路径既作为放行又作为排除时，排除规则优先保留。
 - `path_mappings` 的源路径和目标路径不能相同，不能形成循环映射，映射链深度超过 10 层的源规则会被忽略。
-- `Android/data`、`Android/media` 和 `Android/obb` 可以作为映射入口或目标，管理 App 的路径浏览器也可直接进入这些目录。`/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有路径请在映射输入框中直接填写绝对路径。
+- `Android/data`、`Android/media` 和 `Android/obb` 可以作为映射入口或目标，管理 App 的路径浏览器也可直接进入这些目录。启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 子树默认保持真实路径，不会再次套入应用沙盒；其它应用包名的同名目录不享受这条默认放行。`/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有路径请在映射输入框中直接填写绝对路径。
 - `/data/data/<包名>/...` 会按当前用户转换为 `/data/user/<用户>/<包名>/...`，旧配置中的这个历史别名继续有效。
 - 启用应用重定向后，未命中的公共路径默认进入该应用的沙盒目录。因此映射请求路径填写应用实际看到的公共路径，目标路径填写希望绑定的存储路径或绝对路径，不需要再把公共路径改写成沙盒完整路径。
+- `path_mappings` 可以把公共存储路径与应用私有 namespace 路径互相映射；“任意路径”仅表示在当前应用 namespace 和路径校验允许的范围内自由组合，不包含系统根目录或越权访问。
 
 ## 备份格式
 

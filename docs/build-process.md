@@ -73,7 +73,7 @@ Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩�
 .\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
 ```
 
-需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行 1-33 号设备侧场景：
+需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行 1-36 号设备侧场景：
 
 ```bash
 bash scripts/verify-test-flow.sh
@@ -93,7 +93,7 @@ $env:SRX_TEST_MODULE_ABI = "x86_64"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 ```
 
-调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再在 Android 13/14/15/16 x86_64 模拟器上各自运行完整 scenario 1-33。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地完整验证默认仍执行最终白名单清理，适合复用真机或模拟器。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
+调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再在 Android 13/14/15/16 x86_64 模拟器上各自运行完整 scenario 1-36。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地完整验证默认仍执行最终白名单清理，适合复用真机或模拟器。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
 
 ### 版本号规则
 
