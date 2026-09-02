@@ -316,6 +316,10 @@ internal fun normalizeEditablePathInput(
     allowRuleSyntax: Boolean = false,
 ): String {
   val excluded = allowRuleSyntax && hasAllowRulePrefix(value)
+  val raw = value.trim().removePrefix("!").trimStart()
+  if (raw.startsWith('/') && !raw.matches(Regex("^/(storage/emulated|data/media|sdcard)(/|$).*"))) {
+    return if (excluded) "!" else ""
+  }
   val clean = normalizeSuggestionInput(value, userId).trimStart('/')
   return if (excluded) "!$clean" else clean
 }

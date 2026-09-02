@@ -1911,7 +1911,7 @@
     });
     if (!allowRules.length)
       html +=
-        '<div class="app-empty" style="padding:16px;font-size:12px">允许路径可直接访问；! 可排除子路径，* 和 ? 在默认方案下会退化匹配</div>';
+        '<div class="app-empty" style="padding:16px;font-size:12px">允许路径可直接访问；仅支持共享存储根下的相对路径；! 可排除子路径，* 和 ? 在默认方案下会退化匹配</div>';
     html += "</div></div>";
 
     if (readOnlyEditorEnabled) {
@@ -1924,7 +1924,7 @@
       });
       if (!(profile.read_only_paths || []).length)
         html +=
-          '<div class="app-empty" style="padding:16px;font-size:12px">只读路径保持可读但禁止写入；可用 ! 排除子路径，默认方案会退化通配</div>';
+          '<div class="app-empty" style="padding:16px;font-size:12px">只读路径保持可读但禁止写入；仅支持共享存储根下的相对路径；可用 ! 排除子路径，默认方案会退化通配</div>';
       html += "</div></div>";
     }
 
@@ -1939,7 +1939,7 @@
       });
       if (!(profile.sandboxed_paths || []).length)
         html +=
-          '<div class="app-empty" style="padding:16px;font-size:12px">仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒</div>';
+          '<div class="app-empty" style="padding:16px;font-size:12px">仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；仅支持共享存储根下的相对路径</div>';
       html += "</div></div>";
     }
 
@@ -3510,9 +3510,9 @@
     const isEdit = !!originalPath;
     const titles = { allow: "添加允许路径", sandbox: "添加沙盒路径", readonly: "添加只读路径" };
     const hints = {
-      allow: "直接输入路径可放行；加 ! 前缀可排除子路径。",
-      sandbox: "仅映射模式下，未命中映射时进入沙盒。",
-      readonly: "只读路径保持可读但禁止写入；加 ! 前缀可排除子路径。",
+      allow: "直接输入路径可放行；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
+      sandbox: "仅映射模式下，未命中映射时进入沙盒；仅支持共享存储根下的相对路径。",
+      readonly: "只读路径保持可读但禁止写入；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
     };
     const storageBase = "/storage/emulated/" + getActiveConfigUserId();
     const validateOptions =

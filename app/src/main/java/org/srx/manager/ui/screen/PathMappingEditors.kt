@@ -49,6 +49,7 @@ private fun PathInputDialog(
     initialValue: String = "",
     allowRuleSyntax: Boolean = false,
     allowWildcards: Boolean = allowRuleSyntax,
+    boundaryHint: String = "",
     confirmText: String = "添加",
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
@@ -77,6 +78,14 @@ private fun PathInputDialog(
           singleLine = true,
           modifier = Modifier.fillMaxWidth(),
       )
+      if (boundaryHint.isNotBlank()) {
+        Text(
+            boundaryHint,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+        )
+      }
       PathSuggestionBrowser(value.text, userId, onListDirectories) {
         value = pathTextFieldValue(it)
       }
@@ -180,6 +189,7 @@ internal fun PathEditorCard(
     onRemove: (String) -> Unit,
     allowRuleSyntax: Boolean = false,
     allowWildcards: Boolean = allowRuleSyntax,
+    boundaryHint: String = "",
 ) {
   var showDialog by remember { mutableStateOf(false) }
   var editingValue by remember { mutableStateOf<String?>(null) }
@@ -208,6 +218,7 @@ internal fun PathEditorCard(
       initialValue = editing.orEmpty(),
       allowRuleSyntax = allowRuleSyntax,
       allowWildcards = allowWildcards,
+      boundaryHint = boundaryHint,
       confirmText = if (editing == null) "添加" else "保存",
       onDismiss = {
         showDialog = false

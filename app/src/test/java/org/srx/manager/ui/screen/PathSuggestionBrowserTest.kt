@@ -75,4 +75,13 @@ class PathSuggestionBrowserTest {
         normalizeEditableMappingInput("Android//data/com.example/cache/", "0"),
     )
   }
+
+  @Test
+  fun ruleInputRejectsNonSharedAbsolutePaths() {
+    assertEquals("", normalizeEditablePathInput("/data/user/0/com.example/files", "0"))
+    assertEquals(
+        "Download/cache",
+        normalizeEditablePathInput("/storage/emulated/0/Download/cache", "0"),
+    )
+  }
 }

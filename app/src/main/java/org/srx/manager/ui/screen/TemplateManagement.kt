@@ -190,7 +190,7 @@ internal fun TemplateEditorDialog(
         item {
           PathEditorCard(
               title = "允许路径",
-              emptyHint = "允许路径可直接访问；! 可排除子路径，* 和 ? 在默认方案下会退化匹配",
+              emptyHint = "允许路径可直接访问；仅支持共享存储根下的相对路径；! 可排除子路径，* 和 ? 在默认方案下会退化匹配",
               values = profile.allowedRealPaths,
               addLabel = "添加允许路径",
               placeholder = "路径",
@@ -223,13 +223,14 @@ internal fun TemplateEditorDialog(
                 updateProfile { it.copy(allowedRealPaths = it.allowedRealPaths - value) }
               },
               allowRuleSyntax = true,
+              boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Download/MyApp；不支持绝对路径。",
           )
         }
         if (readOnlyEditorEnabled || profile.readOnlyPaths.isNotEmpty()) {
           item {
             PathEditorCard(
                 title = "只读路径",
-                emptyHint = "只读路径保持可读但禁止写入；可用 ! 排除子路径，默认方案会退化通配",
+                emptyHint = "只读路径保持可读但禁止写入；仅支持共享存储根下的相对路径；可用 ! 排除子路径，默认方案会退化通配",
                 values = profile.readOnlyPaths,
                 addLabel = "添加只读路径",
                 placeholder = "路径或通配符",
@@ -274,6 +275,7 @@ internal fun TemplateEditorDialog(
                 },
                 allowRuleSyntax = true,
                 allowWildcards = true,
+                boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Pictures/Original；不支持绝对路径。",
             )
           }
         }
@@ -281,7 +283,7 @@ internal fun TemplateEditorDialog(
           item {
             PathEditorCard(
                 title = "沙盒路径",
-                emptyHint = "仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒",
+                emptyHint = "仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；仅支持共享存储根下的相对路径",
                 values = profile.sandboxedPaths,
                 addLabel = "添加沙盒路径",
                 placeholder = "路径",
@@ -312,6 +314,7 @@ internal fun TemplateEditorDialog(
                 onRemove = { value ->
                   updateProfile { it.copy(sandboxedPaths = it.sandboxedPaths - value) }
                 },
+                boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Download/Temp；不支持绝对路径。",
             )
           }
         }
