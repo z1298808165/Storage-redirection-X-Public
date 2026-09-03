@@ -5,14 +5,29 @@
 ## 提交前流程
 
 1. 只暂存一个职责单一的改动，运行 `git diff --cached --stat`、`git diff --cached` 并阅读相关调用链，不能只看文件名或摘要。
-2. AI Agent 检查改动是否必要，是否存在无用代码、测试残留、重复实现、过度抽象、占位逻辑、错误或资源泄漏、并发或全局状态风险、兼容性问题和 hook 边界错误。
-3. 运行与风险相称的格式化、静态检查、构建或测试。没有适用测试时，必须记录实际完成的代码路径检查，不能虚构命令或结果。
-4. AI Agent 根据 `docs/ai-review-report.example.json` 在 `temp/` 下生成 JSON 报告。报告中的 `baseCommit`、`tree` 和 `files` 必须分别来自当前 `git rev-parse HEAD`、`git write-tree` 和 `git diff --cached --name-only --diff-filter=ACMRD`。
-5. 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/record-ai-review.ps1 -ReportPath temp/<report>.json` 记录审核凭据，然后正常提交。
+2. AI Agent 根据精确 diff 生成 Commit 标题、正文和用户更新说明。涉及用户可见行为时，正文必须说明适用范围、输入与目标类型、限制条件、兼容行为和验证结果；路径映射至少说明相对共享存储路径、绝对 namespace 路径及安全边界。
+3. AI Agent 对自己生成的标题、正文和更新说明进行第二轮语义审核，逐项核对实现证据、最终用户行为、边界措辞、版本对比范围和三者之间的一致性；发现夸大、遗漏或把测试过程写成产品行为时，先修正文案再继续。
+4. AI Agent 检查改动是否必要，是否存在无用代码、测试残留、重复实现、过度抽象、占位逻辑、错误或资源泄漏、并发或全局状态风险、兼容性问题和 hook 边界错误。
+5. 运行与风险相称的格式化、静态检查、构建或测试。没有适用测试时，必须记录实际完成的代码路径检查，不能虚构命令或结果。
+6. AI Agent 根据 `docs/ai-review-report.example.json` 在 `temp/` 下生成 JSON 报告。报告中的 `baseCommit`、`tree` 和 `files` 必须分别来自当前 `git rev-parse HEAD`、`git write-tree` 和 `git diff --cached --name-only --diff-filter=ACMRD`。
+7. 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/record-ai-review.ps1 -ReportPath temp/<report>.json` 记录审核凭据，然后正常提交。
 
-报告只有在所有阻塞发现均已修复、九项检查均有具体证据且结论为 `pass` 时才能登记。修改暂存内容、切换 `HEAD` 或改写报告后，旧凭据自动失效，必须重新审核。
+Commit 正文建议使用以下结构，按改动实际需要保留章节：
+
+```text
+变更：说明实现了什么用户可见行为
+范围：说明适用路径、调用方或组件边界
+限制：说明校验、回退、循环检测、链深度或兼容约束
+验证：列出实际运行的检查或测试及结果
+```
+
+提交后的 CI 生成器会读取正文中的用户说明，并过滤 `AI-Review-*`、`Signed-off-by` 和 `Co-authored-by` 等机器 trailer；因此正文应保持面向用户和维护者的事实描述，不要把审核凭据当作更新内容。
+
+报告只有在所有阻塞发现均已修复、十项检查均有具体证据且结论为 `pass` 时才能登记，其中 `content_accuracy_and_user_messaging` 专门核对 Commit 正文、更新说明与实际用户行为是否一致。修改暂存内容、切换 `HEAD` 或改写报告后，旧凭据自动失效，必须重新审核。
 
 ## 审核标准
+
+- `content_accuracy_and_user_messaging`：Commit 标题/正文和更新说明均来自实际 diff，准确描述用户可见行为、适用范围、边界限制和验证结果；没有夸大能力、遗漏限制或把测试过程写成产品行为。
 
 - `scope_and_necessity`：每处新增或修改都服务于本 Commit 的唯一目的；没有顺手重构、未来可能用到的扩展点或不可达分支。
 - `dead_code_and_test_residue`：没有无用函数、未使用配置、调试输出、临时兼容层、内联测试、测试专用 helper 或测试后残留。

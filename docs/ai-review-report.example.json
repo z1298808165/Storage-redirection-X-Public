@@ -11,6 +11,10 @@
       "result": "pass",
       "evidence": "说明每项改动为何属于当前唯一目的。"
     },
+    "content_accuracy_and_user_messaging": {
+      "result": "pass",
+      "evidence": "已将 Commit 正文和更新说明与实际 diff、用户行为、适用范围及限制逐项核对，未发现夸大或遗漏。"
+    },
     "dead_code_and_test_residue": {
       "result": "pass",
       "evidence": "说明如何排除无用代码、调试代码和测试残留。"
