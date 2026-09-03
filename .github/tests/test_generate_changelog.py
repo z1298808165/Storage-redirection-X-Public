@@ -21,12 +21,12 @@ CHANGELOG = load_script("generate_changelog")
 RELEASE_NOTES = load_script("validate_release_notes")
 
 
-def commit(subject: str) -> object:
-    summary = CHANGELOG.summarize_commit_text(subject)
+def commit(subject: str, body: str = "") -> object:
+    summary = CHANGELOG.summarize_commit_text(CHANGELOG.summary_input(subject, body))
     return CHANGELOG.CommitInfo(
         sha="abc1234",
         subject=subject,
-        body="",
+        body=body,
         summary=summary,
         kind=CHANGELOG.classify_commit(subject, summary),
     )
@@ -90,6 +90,43 @@ class GenerateChangelogTest(unittest.TestCase):
             CHANGELOG.summarize_commit_text("界面(App)：统一主题设置"),
             "统一主题设置",
         )
+
+    def test_mapping_summaries_explain_supported_boundaries(self) -> None:
+        any_path = CHANGELOG.summarize_commit_text("功能：合并任意路径映射能力")
+        self.assertIn("公共存储", any_path)
+        self.assertIn("/data/user", any_path)
+        self.assertIn("源和目标独立解析", any_path)
+
+        nested = CHANGELOG.summarize_commit_text("功能：支持嵌套路径映射链")
+        self.assertIn("父路径映射后的目标", nested)
+        self.assertIn("最长前缀", nested)
+
+        boundary = CHANGELOG.summarize_commit_text("界面：提示路径规则边界并强化保存校验")
+        self.assertIn("普通规则仅接受相对共享存储路径", boundary)
+        self.assertIn("绝对路径", boundary)
+
+        expanded = CHANGELOG.summarize_commit_text("功能：扩展路径映射的请求端和目标端解析")
+        self.assertIn("公共存储", expanded)
+        self.assertIn("源和目标独立解析", expanded)
+
+    def test_mapping_feature_is_present_in_ci_sections(self) -> None:
+        commits = [commit("功能：合并任意路径映射能力")]
+        sections = CHANGELOG.classify_changes(
+            ["src/config/merge.rs", "src/mount/map.rs"],
+            commits,
+            "",
+        )
+        self.assertTrue(sections["features"])
+        self.assertIn("/data/user", "\n".join(sections["features"]))
+
+    def test_commit_body_adds_scope_without_leaking_review_metadata(self) -> None:
+        item = commit(
+            "功能：支持路径映射能力",
+            "源和目标支持相对共享存储路径及经过校验的绝对 namespace 路径。\n"
+            "AI-Review-Summary: 这段机器审核凭据不应显示。",
+        )
+        self.assertIn("绝对 namespace 路径", item.summary)
+        self.assertNotIn("机器审核凭据", item.summary)
 
     def test_release_notes_validator_accepts_final_result_sections(self) -> None:
         markdown = """# Storage Redirect X v1.2.58

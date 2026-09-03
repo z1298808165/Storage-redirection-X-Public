@@ -13,6 +13,19 @@ from pathlib import Path
 MAX_PATCH_CHARS = 180_000
 MAX_SECTION_ITEMS = 8
 GENERIC_SUMMARIES = {"CI", "ci", "更新", "修复", "调整", "优化", "文档", "测试"}
+PATH_MAPPING_SUMMARY = (
+    "支持任意路径映射：公共存储、`Android/data|media|obb/<包名>` 私有目录与 "
+    "`/data/user`、`/data/data` 等当前 namespace 路径可按需双向映射，源和目标独立解析，"
+    "并受路径校验、循环检测及最大映射链深度限制"
+)
+NESTED_MAPPING_SUMMARY = (
+    "支持嵌套路径映射链：父路径映射后的目标可继续命中更具体的子路径规则，"
+    "并按最长前缀和最大映射链深度继续处理"
+)
+PATH_RULE_BOUNDARY_SUMMARY = (
+    "明确路径规则边界：普通规则仅接受相对共享存储路径，`path_mappings` 另支持经过"
+    " namespace 安全校验的绝对路径"
+)
 RELEASE_FIX_SUMMARIES = {
     "媒体代写与系统存储链路": "修复媒体文件保存、系统代写归因和存储路由中的兼容性问题",
     "FUSE、挂载和路径映射": "修复文件保存、挂载、路径映射及只读规则组合下的兼容性问题",
@@ -162,7 +175,7 @@ def commit_infos(previous: str, current: str) -> list[CommitInfo]:
         if is_auto_manifest_subject(subject):
             continue
         body = parts[2].strip() if len(parts) > 2 else ""
-        summary = summarize_commit_text(subject)
+        summary = summarize_commit_text(summary_input(subject, body))
         commits.append(
             CommitInfo(
                 sha=sha,
@@ -181,6 +194,21 @@ def is_auto_manifest_subject(subject: str) -> bool:
 
 def commit_lines(commits: list[CommitInfo]) -> list[str]:
     return [f"- `{commit.sha}` {commit.summary}" for commit in commits]
+
+
+def summary_input(subject: str, body: str) -> str:
+    """保留提交正文中的用户说明，过滤审核凭据和其它机器 trailer。"""
+    body_lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or re.match(
+            r"^(?:AI-Review-(?:Agent|Tree|Report|Summary):|Signed-off-by:|Co-authored-by:)",
+            stripped,
+            flags=re.I,
+        ):
+            continue
+        body_lines.append(stripped)
+    return "\n".join([subject.strip(), *body_lines[:12]])
 
 
 def changed_files(previous: str, current: str) -> list[str]:
@@ -300,7 +328,21 @@ def summarize_commit_text(text: str) -> str:
     result = normalized
     for source, target in replacements:
         result = re.sub(re.escape(source), target, result, flags=re.I)
-    return result or "未填写提交说明"
+    result = result or "未填写提交说明"
+    if (
+        "任意路径映射" in normalized
+        or ("任意路径" in normalized and "映射" in normalized)
+        or ("路径映射" in normalized and "请求端和目标端" in normalized)
+        or ("path_mappings" in normalized and "namespace" in normalized)
+    ):
+        return PATH_MAPPING_SUMMARY
+    if "嵌套路径映射" in normalized or "映射链" in normalized:
+        return NESTED_MAPPING_SUMMARY
+    if "路径规则边界" in normalized or (
+        "映射字段" in normalized and "绝对路径" in normalized
+    ):
+        return PATH_RULE_BOUNDARY_SUMMARY
+    return result
 
 
 def classify_commit(subject: str, summary: str) -> str:
@@ -442,6 +484,10 @@ def is_user_facing_feature(commit: CommitInfo, _files: list[str], _patch: str) -
         "管理 App",
         "管理界面",
         "WebUI",
+        "路径映射",
+        "任意路径",
+        "映射链",
+        "namespace",
     )
     return any(marker in text for marker in feature_markers)
 

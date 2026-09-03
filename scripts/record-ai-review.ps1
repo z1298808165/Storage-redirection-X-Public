@@ -9,6 +9,7 @@ Set-StrictMode -Version Latest
 
 $requiredChecks = @(
     "scope_and_necessity",
+    "content_accuracy_and_user_messaging",
     "dead_code_and_test_residue",
     "duplication_and_reuse",
     "abstraction_and_complexity",
