@@ -493,29 +493,6 @@ pub fn media_store_pending_display_path(path: &str) -> Option<String> {
     ))
 }
 
-pub fn is_android_data_or_obb_path(path: &str) -> bool {
-    let normalized = normalize(path);
-    let Some(storage_root) = storage_user_root(&normalized) else {
-        return false;
-    };
-    let Some(relative) = relative_child_path(&normalized, &storage_root) else {
-        return false;
-    };
-
-    let mut segments = relative.split('/').filter(|segment| !segment.is_empty());
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    if !first.eq_ignore_ascii_case("Android") {
-        return false;
-    }
-
-    let Some(second) = segments.next() else {
-        return false;
-    };
-    second.eq_ignore_ascii_case("data") || second.eq_ignore_ascii_case("obb")
-}
-
 // is_recursive 允许 target 深入 rule 之下任意层级
 pub fn matches(rule_path: &str, target_path: &str, is_recursive: bool) -> bool {
     if rule_path.is_empty() || target_path.is_empty() {
