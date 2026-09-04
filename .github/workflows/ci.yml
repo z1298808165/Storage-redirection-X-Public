@@ -526,6 +526,9 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      # 每个场景入口仍会重启应用；场景内多个 service case 复用应用进程，
+      # 避免重复 force-stop/start 和 mount 确认。
+      SRT_FRESH_APP_PER_CASE: 0
       # CI Android 测试流统一关闭 FuseFix native hook；探针属性仅用于诊断。
       SRT_FUSE_FIX_ENABLED: false
       PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '延迟全量探针') && 'late' || (contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker') || contains(github.event.head_commit.message, 'Fuse 探针单场景触发')) && 'all_compare' || contains(github.event.head_commit.message, '全量组合探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
@@ -657,9 +660,6 @@ jobs:
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
       SRT_FUSE_FIX_ENABLED: false
-      # Android 17 的每个场景入口仍会重启应用；同一场景内复用应用进程，
-      # 避免每个 service case 重复 force-stop/start 和 mount 确认。
-      SRT_FRESH_APP_PER_CASE: 0
       EMULATOR_GPU_MODE: swiftshader_indirect
     steps:
       - name: Checkout repository

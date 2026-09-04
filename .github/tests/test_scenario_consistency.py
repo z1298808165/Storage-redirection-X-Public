@@ -163,6 +163,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             # 版本内的快速停止仍由 SRT_FAIL_FAST 负责。
             self.assertIn("fail-fast: true", test_flow)
             self.assertIn("SRT_FAIL_FAST: 1", test_flow)
+            self.assertIn("SRT_FRESH_APP_PER_CASE: 0", test_flow)
             for version in (13, 14, 15, 16):
                 self.assertIn(f"version: {version}", test_flow)
             required = source[source.index("  test-flow-required:") :]
@@ -177,7 +178,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", experimental)
         self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", experimental)
         self.assertIn('ANDROID_API_LEVEL: "37.0"', experimental)
-        self.assertIn("SRT_FRESH_APP_PER_CASE: 0", experimental)
+        self.assertIn("SRT_FRESH_APP_PER_CASE: 0", source)
         self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk", experimental)
         self.assertIn("Download test-flow runtime", experimental)
         self.assertNotIn("Upload Android 17 diagnostic artifacts", experimental)
