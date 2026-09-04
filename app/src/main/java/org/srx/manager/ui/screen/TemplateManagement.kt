@@ -223,7 +223,7 @@ internal fun TemplateEditorDialog(
                 updateProfile { it.copy(allowedRealPaths = it.allowedRealPaths - value) }
               },
               allowRuleSyntax = true,
-              boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Download/MyApp；不支持绝对路径。",
+              boundaryHint = "边界：填写共享存储根下的相对路径，例如 Download/MyApp。",
           )
         }
         if (readOnlyEditorEnabled || profile.readOnlyPaths.isNotEmpty()) {
@@ -275,7 +275,7 @@ internal fun TemplateEditorDialog(
                 },
                 allowRuleSyntax = true,
                 allowWildcards = true,
-                boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Pictures/Original；不支持绝对路径。",
+                boundaryHint = "边界：填写共享存储根下的相对路径，例如 Pictures/Original；可用 *、? 及 ! 排除子路径。",
             )
           }
         }

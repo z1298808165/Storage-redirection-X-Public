@@ -345,7 +345,7 @@ internal fun AppConfigScreen(
               onUpdate = onUpdateAllowed,
               onRemove = onRemoveAllowed,
               allowRuleSyntax = true,
-              boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Download/MyApp；不支持 /data、/system 等绝对路径。",
+              boundaryHint = "边界：填写共享存储根下的相对路径，例如 Download/MyApp。",
           )
         }
         if (readOnlyEditorEnabled || profile.readOnlyPaths.isNotEmpty()) {
@@ -363,7 +363,7 @@ internal fun AppConfigScreen(
                 onRemove = onRemoveReadOnly,
                 allowRuleSyntax = true,
                 allowWildcards = true,
-                boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Pictures/Original；不支持 /data、/system 等绝对路径。",
+                boundaryHint = "边界：填写共享存储根下的相对路径，例如 Pictures/Original；可用 *、? 及 ! 排除子路径。",
             )
           }
         }

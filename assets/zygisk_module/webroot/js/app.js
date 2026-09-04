@@ -1924,7 +1924,7 @@
       });
       if (!(profile.read_only_paths || []).length)
         html +=
-          '<div class="app-empty" style="padding:16px;font-size:12px">只读路径保持可读但禁止写入；仅支持共享存储根下的相对路径；可用 ! 排除子路径，默认方案会退化通配</div>';
+          '<div class="app-empty" style="padding:16px;font-size:12px">只读路径保持可读但禁止写入；支持 *、? 通配及 ! 排除子路径</div>';
       html += "</div></div>";
     }
 
@@ -3159,12 +3159,7 @@
       : Object.entries(mappings || {});
     return entries
       .filter(
-        ([req, target]) =>
-          typeof req === "string" &&
-          req &&
-          typeof target === "string" &&
-          target &&
-          !isAndroidDataOrObbPath(target),
+        ([req, target]) => typeof req === "string" && req && typeof target === "string" && target,
       )
       .sort(([a], [b]) => comparePathNames(a, b))
       .reduce((out, [req, target]) => {
@@ -3200,6 +3195,21 @@
     noUnsafe: { re: /[<>:"|?*\x00-\x1f]/, msg: "路径包含非法字符" },
     noEmpty: { re: /^\s*$/, msg: "路径不能为空" },
   };
+
+  // 路径映射的请求与目标均支持共享存储相对路径及 namespace 绝对路径。
+  function validateMappingPath(raw) {
+    const text = String(raw || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+/g, "/");
+    if (!text) return { valid: false, msg: "路径不能为空" };
+    if (text.length > 512 || text.includes("\0")) return { valid: false, msg: "路径格式不正确" };
+    const body = text.replace(/^\/+/, "");
+    if (!body || body.split("/").some((part) => part === "." || part === ".."))
+      return { valid: false, msg: "路径不能包含 . 或 .." };
+    if (/[<>:"|?*\x00-\x1f]/.test(body)) return { valid: false, msg: "路径包含非法字符" };
+    return { valid: true, msg: "路径格式正确" };
+  }
 
   function validatePath(raw, options) {
     if (!raw || !raw.trim()) return { valid: false, msg: "路径不能为空" };
@@ -3341,7 +3351,9 @@
   }
 
   function showPathValidation(inputEl, hintEl, options) {
-    const result = validatePath(inputEl.value, options);
+    const result = options?.mappingPath
+      ? validateMappingPath(inputEl.value)
+      : validatePath(inputEl.value, options);
     if (!inputEl.value.trim()) {
       hintEl.textContent = "";
       inputEl.classList.remove("invalid");
@@ -3512,7 +3524,7 @@
     const hints = {
       allow: "直接输入路径可放行；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
       sandbox: "仅映射模式下，未命中映射时进入沙盒；仅支持共享存储根下的相对路径。",
-      readonly: "只读路径保持可读但禁止写入；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
+      readonly: "只读路径保持可读但禁止写入；支持 *、? 通配；加 ! 前缀可排除子路径。",
     };
     const storageBase = "/storage/emulated/" + getActiveConfigUserId();
     const validateOptions =
@@ -3612,7 +3624,6 @@
       '<button class="btn btn-primary" id="modalAddMapping" type="button">' +
       (isEdit ? "保存修改" : "添加") +
       "</button>";
-    const targetValidateOptions = { disallowPrivateAndroidTarget: true };
 
     showModalWithHistory(
       '<div class="modal-title">' +
@@ -3630,7 +3641,9 @@
         '<div id="targetBrowserContainer"></div>' +
         '<div class="modal-hint">路径匹配时重定向。相对于 ' +
         storageBase +
-        "。</div>" +
+        "；相对路径以 " +
+        storageBase +
+        " 为根，亦可填写 namespace 绝对路径。</div>" +
         '<div class="modal-actions"><button class="btn btn-secondary modal-close" type="button">取消</button>' +
         actionButton +
         "</div>",
@@ -3645,7 +3658,7 @@
     // 路径浏览器
     const reqBrowser = buildPathBrowser(storageBase, reqInput, reqHint);
     const targetBrowser = buildPathBrowser(storageBase, targetInput, targetHint, null, {
-      validateOptions: targetValidateOptions,
+      validateOptions: { mappingPath: true },
     });
     reqBrowser.hidden = true;
     targetBrowser.hidden = true;
@@ -3684,11 +3697,11 @@
 
     // 路径校验
     const runReqValidate = debounce(
-      () => showPathValidation(reqInput, reqHint),
+      () => showPathValidation(reqInput, reqHint, { mappingPath: true }),
       DEBOUNCE_PATH_VALIDATE_MS,
     );
     const runTargetValidate = debounce(
-      () => showPathValidation(targetInput, targetHint, targetValidateOptions),
+      () => showPathValidation(targetInput, targetHint, { mappingPath: true }),
       DEBOUNCE_PATH_VALIDATE_MS,
     );
     reqInput?.addEventListener("input", () => {
@@ -3703,11 +3716,12 @@
     $("#modalAddMapping")?.addEventListener("click", () => {
       const req = reqInput.value.trim(),
         target = targetInput.value.trim();
-      if (!validatePath(req).valid) {
+      const reqValidation = validateMappingPath(req);
+      if (!reqValidation.valid) {
         Theme.showToast("请求路径格式不正确", "error");
         return;
       }
-      const targetValidation = validatePath(target, targetValidateOptions);
+      const targetValidation = validateMappingPath(target);
       if (!targetValidation.valid) {
         Theme.showToast(targetValidation.msg || "目标路径格式不正确", "error");
         return;
@@ -4708,13 +4722,28 @@
       ? raw.map((item) => [item?.request_path, item?.final_path])
       : Object.entries(raw && typeof raw === "object" ? raw : {});
     entries.forEach(([reqRaw, targetRaw]) => {
-      const req = sanitizeBackupPath(reqRaw);
-      const target = sanitizeBackupPath(targetRaw);
+      const req = sanitizeMappingPathWeb(reqRaw);
+      const target = sanitizeMappingPathWeb(targetRaw);
       if (!req || !target || req === target) return;
-      if (isAndroidDataOrObbPath(target)) return;
       mappings[req] = target;
     });
     return sortPathMappings(filterValidBackupMappingChains(mappings));
+  }
+
+  function sanitizeMappingPathWeb(raw) {
+    const text = String(raw ?? "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+/g, "/")
+      .replace(/\/+$/, "");
+    if (!text || text.length > 512 || text.includes("\0") || text === "/") return "";
+    const absolute = text.startsWith("/");
+    const body = text.replace(/^\/+/, "");
+    if (!body || body.split("/").some((part) => part === "." || part === "..")) return "";
+    if (/[<>:"|?*\x00-\x1f]/.test(body)) return "";
+    if (absolute && /^(proc|sys|dev|data\/adb)(\/|$)/i.test(body)) return "";
+    if (!absolute && hasMonitorFilterStorageRootPrefix(body)) return "";
+    return absolute ? "/" + body : body;
   }
 
   const MAX_PATH_MAPPING_DEPTH = 10;

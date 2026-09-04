@@ -301,9 +301,8 @@ fn is_public_mapping_target_path(user_id: i32, path: &str) -> bool {
     if !paths::is_child(path, &storage_root) {
         return false;
     }
-    if paths::is_android_data_or_obb_path(path) {
-        return false;
-    }
+    // Android/data、Android/media、Android/obb 及其应用子目录均可作为映射目标；
+    // 仍要求路径不携带其它应用所有权，避免跨应用归属歧义。
     paths::extract_android_private_path_owner(path).is_empty()
 }
 

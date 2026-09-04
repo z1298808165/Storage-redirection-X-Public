@@ -217,9 +217,8 @@ fn build_path_mapping_watch_roots(
         if paths::eq_ignore_case(&request_path, &final_path) {
             continue;
         }
-        if paths::is_android_data_or_obb_path(&final_path) {
-            continue;
-        }
+        // Android/data、Android/media、Android/obb 均可作为映射目标，按最终
+        // 真实路径建立监视根，不再因私有目录类别而丢弃规则。
         let Some(backend_root) = paths::storage_to_data_media_for_user(&final_path, spec.user_id)
         else {
             continue;

@@ -318,12 +318,12 @@ fn resolve_router_storage_path(path: &str, user_id: i32, storage_root: &str) -> 
 }
 
 fn is_path_excluded_locked(state: &RouterState, resolved_path: &str) -> bool {
-    router_path_list_matches(&state.excluded_real_paths, resolved_path, false)
+    router_path_list_matches(&state.excluded_real_paths, resolved_path, true)
 }
 
 fn is_path_allowed_real_locked(state: &RouterState, resolved_path: &str) -> bool {
     !is_path_excluded_locked(state, resolved_path)
-        && router_path_list_matches(&state.allowed_real_paths, resolved_path, false)
+        && router_path_list_matches(&state.allowed_real_paths, resolved_path, true)
 }
 
 fn is_path_read_only_locked(state: &RouterState, resolved_path: &str) -> bool {
