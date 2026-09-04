@@ -603,8 +603,10 @@ impl MountPlanner {
                 return false;
             }
 
-            let mut resolved_sandboxed_paths = Vec::with_capacity(sandboxed_paths.len());
-            for path in sandboxed_paths {
+            let (sandboxed_includes, sandboxed_excludes) =
+                paths::split_exclusion_rules(sandboxed_paths);
+            let mut resolved_sandboxed_paths = Vec::with_capacity(sandboxed_includes.len());
+            for path in &sandboxed_includes {
                 let Some(resolved) =
                     self.resolve_storage_path_for_mount(path, &storage_path, "sandbox")
                 else {
@@ -681,6 +683,49 @@ impl MountPlanner {
                 );
                 if is_sandbox_mount_applied {
                     log::info!("map-only sandbox {} -> {}", sandboxed_path, sandbox_source);
+                }
+            }
+
+            // 嵌套排除规则覆盖沙盒父目录：将排除子目录恢复为真实共享存储，
+            // 使 `Pictures/*` 与 `!Pictures/QQ` 组合保持递归语义。
+            for excluded in sandboxed_excludes {
+                let Some(excluded_path) = self.resolve_storage_path_for_mount(
+                    &excluded,
+                    &storage_path,
+                    "sandbox exclude",
+                ) else {
+                    continue;
+                };
+                if paths::contains_wildcards(&excluded_path) || !fs::is_directory(&excluded_path) {
+                    continue;
+                }
+                let Some(relative) = paths::relative_child_path(&excluded_path, &storage_path)
+                else {
+                    continue;
+                };
+                let source_candidates = build_allowed_real_source_candidates(
+                    &real_storage_anchor,
+                    &data_media_root,
+                    relative,
+                );
+                for source in source_candidates {
+                    if !fs::is_directory(&source) {
+                        continue;
+                    }
+                    let mut restored = false;
+                    let _ = self.bind_mount_with_storage_aliases(
+                        &source,
+                        &excluded_path,
+                        true,
+                        super::PrimaryMountFailure::StopCurrentTarget,
+                        None,
+                        Some("sandbox exclude restore failed"),
+                        Some("sandbox exclude restored"),
+                        Some(&mut restored),
+                    );
+                    if restored {
+                        break;
+                    }
                 }
             }
         }

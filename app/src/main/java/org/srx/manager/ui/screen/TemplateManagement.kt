@@ -283,7 +283,7 @@ internal fun TemplateEditorDialog(
           item {
             PathEditorCard(
                 title = "沙盒路径",
-                emptyHint = "仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；仅支持共享存储根下的相对路径",
+                emptyHint = "仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；支持 *、? 通配及 ! 排除子路径",
                 values = profile.sandboxedPaths,
                 addLabel = "添加沙盒路径",
                 placeholder = "路径",
@@ -293,7 +293,7 @@ internal fun TemplateEditorDialog(
                   updateProfile {
                     it.copy(
                         sandboxedPaths =
-                            (it.sandboxedPaths + normalizeEditablePathInput(value, userId))
+                            (it.sandboxedPaths + normalizeEditablePathInput(value, userId, true))
                                 .filter(String::isNotBlank)
                                 .distinct()
                                 .sorted(),
@@ -304,7 +304,8 @@ internal fun TemplateEditorDialog(
                   updateProfile {
                     it.copy(
                         sandboxedPaths =
-                            (it.sandboxedPaths - old + normalizeEditablePathInput(value, userId))
+                            (it.sandboxedPaths - old +
+                                    normalizeEditablePathInput(value, userId, true))
                                 .filter(String::isNotBlank)
                                 .distinct()
                                 .sorted(),
@@ -314,7 +315,9 @@ internal fun TemplateEditorDialog(
                 onRemove = { value ->
                   updateProfile { it.copy(sandboxedPaths = it.sandboxedPaths - value) }
                 },
-                boundaryHint = "边界：只能填写共享存储根下的相对路径，例如 Download/Temp；不支持绝对路径。",
+                allowRuleSyntax = true,
+                allowWildcards = true,
+                boundaryHint = "边界：填写共享存储根下的相对路径；支持 *、? 通配及 ! 排除子路径。",
             )
           }
         }

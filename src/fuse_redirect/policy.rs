@@ -122,6 +122,7 @@ pub(super) struct RedirectPolicy {
     allowed_real_index: RuleIndex,
     excluded_real_index: RuleIndex,
     sandboxed_index: RuleIndex,
+    sandboxed_excluded_index: RuleIndex,
     read_only_index: RuleIndex,
     read_only_excluded_index: RuleIndex,
     pub(super) path_mappings: Vec<PathMapping>,
@@ -185,10 +186,14 @@ impl RedirectPolicy {
 
         let allowed_real_paths = super::normalize_rule_list(config.allowed_real_paths, user_id);
         let excluded_real_paths = super::normalize_rule_list(config.excluded_real_paths, user_id);
-        let sandboxed_paths = super::normalize_rule_list(config.sandboxed_paths, user_id);
+        let (sandboxed_includes, sandboxed_excludes) =
+            paths::split_exclusion_rules(&config.sandboxed_paths);
+        let sandboxed_paths = super::normalize_rule_list(sandboxed_includes, user_id);
+        let sandboxed_excluded_paths = super::normalize_rule_list(sandboxed_excludes, user_id);
         let allowed_real_index = RuleIndex::new(&allowed_real_paths);
         let excluded_real_index = RuleIndex::new(&excluded_real_paths);
         let sandboxed_index = RuleIndex::new(&sandboxed_paths);
+        let sandboxed_excluded_index = RuleIndex::new(&sandboxed_excluded_paths);
         let read_only_index = RuleIndex::new(&read_only_paths);
         let read_only_excluded_index = RuleIndex::new(&read_only_excluded_paths);
 
@@ -209,6 +214,7 @@ impl RedirectPolicy {
             excluded_real_index,
             sandboxed_paths,
             sandboxed_index,
+            sandboxed_excluded_index,
             read_only_index,
             read_only_excluded_index,
             path_mappings,
@@ -291,7 +297,9 @@ impl RedirectPolicy {
         {
             BackendKind::Real
         } else if self.is_mapping_mode_only {
-            if self.matches_any(&self.sandboxed_index, storage_path) {
+            if self.matches_any(&self.sandboxed_index, storage_path)
+                && !self.matches_any(&self.sandboxed_excluded_index, storage_path)
+            {
                 BackendKind::Redirect
             } else {
                 BackendKind::Real

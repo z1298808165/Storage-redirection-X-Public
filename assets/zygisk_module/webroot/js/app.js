@@ -1939,7 +1939,7 @@
       });
       if (!(profile.sandboxed_paths || []).length)
         html +=
-          '<div class="app-empty" style="padding:16px;font-size:12px">仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；仅支持共享存储根下的相对路径</div>';
+          '<div class="app-empty" style="padding:16px;font-size:12px">仅映射模式下，未命中映射且匹配沙盒路径时将进入应用沙盒；支持 *、? 通配及 ! 排除子路径</div>';
       html += "</div></div>";
     }
 
@@ -3523,16 +3523,18 @@
     const titles = { allow: "添加允许路径", sandbox: "添加沙盒路径", readonly: "添加只读路径" };
     const hints = {
       allow: "直接输入路径可放行；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
-      sandbox: "仅映射模式下，未命中映射时进入沙盒；仅支持共享存储根下的相对路径。",
+      sandbox: "仅映射模式下，未命中映射时进入沙盒；支持 *、? 通配及 ! 排除子路径。",
       readonly: "只读路径保持可读但禁止写入；支持 *、? 通配；加 ! 前缀可排除子路径。",
     };
     const storageBase = "/storage/emulated/" + getActiveConfigUserId();
     const validateOptions =
       type === "allow"
         ? { allowRuleSyntax: true }
-        : type === "readonly"
+        : type === "sandbox"
           ? { allowRuleSyntax: true, allowWildcards: true }
-          : null;
+          : type === "readonly"
+            ? { allowRuleSyntax: true, allowWildcards: true }
+            : null;
     const actionButton =
       '<button class="btn btn-primary" id="modalAddBtn" type="button">' +
       (isEdit ? "保存修改" : "添加") +
@@ -3656,7 +3658,9 @@
     const targetHint = $("#targetValidation");
 
     // 路径浏览器
-    const reqBrowser = buildPathBrowser(storageBase, reqInput, reqHint);
+    const reqBrowser = buildPathBrowser(storageBase, reqInput, reqHint, null, {
+      validateOptions: { mappingPath: true },
+    });
     const targetBrowser = buildPathBrowser(storageBase, targetInput, targetHint, null, {
       validateOptions: { mappingPath: true },
     });
@@ -4870,7 +4874,12 @@
     ) {
       warnings.push("sandboxed_paths 格式不支持，已忽略");
     }
-    rawSandboxed.forEach((item) => pushUniquePath(sandboxed, sanitizeBackupPath(item)));
+    rawSandboxed.forEach((item) =>
+      pushUniquePath(
+        sandboxed,
+        sanitizeBackupPath(item, { allowRuleSyntax: true, allowWildcards: true }),
+      ),
+    );
     profile.sandboxed_paths = sortPathRules(sandboxed);
     profile.path_mappings = normalizeBackupMappings(raw.path_mappings);
     return { profile, warnings };

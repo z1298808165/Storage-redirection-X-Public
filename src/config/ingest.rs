@@ -530,16 +530,20 @@ fn push_sandboxed_path(
     storage_root: &str,
     sandboxed_paths: &mut Vec<String>,
 ) {
-    let resolved = resolve_allowed_path_for_user(raw, storage_root);
-    if resolved.is_empty() {
+    let Some((is_excluded, resolved)) = resolve_allowed_path_rule_for_user(raw, storage_root)
+    else {
         log::warn!(
             "skip sandbox path (invalid, relative only): user={} path={}",
             user_id,
             raw
         );
         return;
-    }
-    sandboxed_paths.push(resolved);
+    };
+    sandboxed_paths.push(if is_excluded {
+        format!("!{resolved}")
+    } else {
+        resolved
+    });
 }
 
 fn parse_read_only_paths(

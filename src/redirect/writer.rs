@@ -112,7 +112,7 @@ pub fn is_path_allowed_by_caller_real_paths(
         caller_package,
         caller_uid,
         CallerRealPathKind::Allowed,
-        |paths| caller_path_list_matches(paths, resolved_path, false),
+        |paths| caller_path_list_matches(paths, resolved_path, true),
     )
 }
 
@@ -179,7 +179,11 @@ pub fn is_path_sandboxed_by_caller_paths(
         caller_package,
         caller_uid,
         CallerRealPathKind::Sandboxed,
-        |paths| caller_path_list_matches(paths, resolved_path, true),
+        |paths| {
+            let (includes, excludes) = paths::split_exclusion_rules(paths);
+            caller_path_list_matches(&includes, resolved_path, true)
+                && !caller_path_list_matches(&excludes, resolved_path, true)
+        },
     )
 }
 

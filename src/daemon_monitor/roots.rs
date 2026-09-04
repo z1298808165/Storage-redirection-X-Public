@@ -250,7 +250,10 @@ fn build_sandbox_watch_roots(
     else {
         return roots;
     };
-    for sandboxed_path in &spec.sandboxed_paths {
+    let (included_sandboxed_paths, excluded_sandboxed_paths) =
+        paths::split_exclusion_rules(&spec.sandboxed_paths);
+    let excluded_roots = resolved_excluded_roots(&excluded_sandboxed_paths, spec, context);
+    for sandboxed_path in &included_sandboxed_paths {
         let Some(display_root) = resolve_profile_storage_path(
             sandboxed_path,
             spec.user_id,
@@ -271,7 +274,7 @@ fn build_sandbox_watch_roots(
             display_root: landing_display_root.clone(),
             record_display_root: landing_display_root,
             record_from_root: display_root,
-            excluded_roots: Vec::new(),
+            excluded_roots: excluded_roots.clone(),
             source: "sandbox_path",
         });
     }

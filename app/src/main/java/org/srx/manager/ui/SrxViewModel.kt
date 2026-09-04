@@ -344,7 +344,7 @@ class SrxViewModel(
       }
 
   fun addSandboxPath(value: String) =
-      updateListPath(value) { profile, path ->
+      updateListPath(value, allowRuleSyntax = true, allowWildcards = true) { profile, path ->
         profile.copy(sandboxedPaths = (profile.sandboxedPaths + path).distinct().sorted())
       }
 
@@ -362,7 +362,7 @@ class SrxViewModel(
       oldValue: String,
       newValue: String,
   ) =
-      updateListPath(newValue) { profile, path ->
+      updateListPath(newValue, allowRuleSyntax = true, allowWildcards = true) { profile, path ->
         profile.copy(
             sandboxedPaths = (profile.sandboxedPaths - oldValue + path).distinct().sorted()
         )

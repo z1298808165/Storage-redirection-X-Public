@@ -42,6 +42,7 @@ struct RouterState {
     allowed_real_paths: Vec<String>,
     excluded_real_paths: Vec<String>,
     sandboxed_paths: Vec<String>,
+    sandboxed_excluded_paths: Vec<String>,
     read_only_paths: Vec<String>,
     read_only_excluded_paths: Vec<String>,
     path_mappings: Vec<PathMapping>,
@@ -58,6 +59,7 @@ impl RouterState {
             allowed_real_paths: Vec::new(),
             excluded_real_paths: Vec::new(),
             sandboxed_paths: Vec::new(),
+            sandboxed_excluded_paths: Vec::new(),
             read_only_paths: Vec::new(),
             read_only_excluded_paths: Vec::new(),
             path_mappings: Vec::new(),
@@ -129,8 +131,11 @@ impl PathRouter {
             &state.storage_root,
             false,
         );
+        let (sandbox_includes, sandbox_excludes) = paths::split_exclusion_rules(sandboxed_paths);
         state.sandboxed_paths =
-            resolve_router_sandboxed_paths(sandboxed_paths, state.user_id, &state.storage_root);
+            resolve_router_sandboxed_paths(&sandbox_includes, state.user_id, &state.storage_root);
+        state.sandboxed_excluded_paths =
+            resolve_router_sandboxed_paths(&sandbox_excludes, state.user_id, &state.storage_root);
         let (read_only_includes, read_only_excludes) =
             paths::split_exclusion_rules(read_only_paths);
         state.read_only_paths = resolve_router_read_only_paths(
@@ -191,6 +196,7 @@ impl PathRouter {
         let state = self.state.read().unwrap_or_else(|err| err.into_inner());
         state.is_mapping_mode_only
             && router_path_list_matches(&state.sandboxed_paths, resolved_path, true)
+            && !router_path_list_matches(&state.sandboxed_excluded_paths, resolved_path, true)
     }
 
     pub fn map_path(&self, resolved_path: &str) -> String {

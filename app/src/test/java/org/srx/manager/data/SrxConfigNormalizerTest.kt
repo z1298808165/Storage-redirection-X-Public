@@ -70,6 +70,28 @@ class SrxConfigNormalizerTest {
   }
 
   @Test
+  fun normalizeAppConfigKeepsNestedSandboxRules() {
+    val normalized =
+        SrxConfigNormalizer.normalizeAppConfig(
+            AppConfig(
+                users =
+                    mapOf(
+                        "0" to
+                            UserProfile(
+                                sandboxedPaths =
+                                    listOf("Pictures/*", "!Pictures/QQ", "!Pictures/QQ/Cache"),
+                            ),
+                    ),
+            ),
+        )
+
+    assertEquals(
+        listOf("Pictures/*", "!Pictures/QQ", "!Pictures/QQ/Cache"),
+        normalized.users.getValue("0").sandboxedPaths,
+    )
+  }
+
+  @Test
   fun keepsExcludeOnAllowedPathConflict() {
     val normalized =
         SrxConfigNormalizer.normalizeAppConfig(

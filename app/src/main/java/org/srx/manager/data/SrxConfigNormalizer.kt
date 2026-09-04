@@ -506,8 +506,8 @@ internal object SrxConfigNormalizer {
         sandboxedPaths =
             sortPathRules(
                 profile.sandboxedPaths,
-                allowRuleSyntax = false,
-                allowWildcards = false,
+                allowRuleSyntax = true,
+                allowWildcards = true,
             ),
         readOnlyPaths = cleanedReadOnlyPaths,
         pathMappings = normalizePathMappings(profile.pathMappings),

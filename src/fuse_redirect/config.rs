@@ -493,16 +493,23 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     let user_id = crate::platform::user_id_from_uid(uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
     let scoped_allowed_rules = allowed_real_paths.iter().map(String::as_str);
+    let sandbox_include_rules = sandboxed_paths
+        .iter()
+        .filter(|rule| !rule.trim_start().starts_with('!'))
+        .map(String::as_str);
     let mut roots = scoped_mount_roots_for_wildcard_rules(
         uid,
         scoped_allowed_rules
             .chain(excluded_real_paths.iter().map(String::as_str))
-            .chain(sandboxed_paths.iter().map(String::as_str))
+            .chain(sandbox_include_rules)
             .chain(read_only_paths.iter().map(String::as_str)),
     );
 
     if is_mapping_mode_only {
         for sandboxed_path in sandboxed_paths {
+            if sandboxed_path.trim_start().starts_with('!') {
+                continue;
+            }
             let sandboxed_root =
                 resolve_concrete_scoped_rule_parent(sandboxed_path, user_id, &storage_root);
             if !sandboxed_root.is_empty() {
