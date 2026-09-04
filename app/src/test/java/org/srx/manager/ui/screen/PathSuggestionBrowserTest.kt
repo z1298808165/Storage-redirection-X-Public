@@ -77,6 +77,15 @@ class PathSuggestionBrowserTest {
   }
 
   @Test
+  fun mappingInputKeepsRootWhileTypingAbsolutePath() {
+    assertEquals("/", normalizeEditableMappingInput("/", "0"))
+    assertEquals(
+        "/data/user/0/com.example/files",
+        normalizeEditableMappingInput("/data/user/0/com.example/files", "0"),
+    )
+  }
+
+  @Test
   fun ruleInputRejectsNonSharedAbsolutePaths() {
     assertEquals("", normalizeEditablePathInput("/data/user/0/com.example/files", "0"))
     assertEquals(

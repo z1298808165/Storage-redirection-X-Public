@@ -330,6 +330,10 @@ internal fun normalizeEditableMappingInput(value: String, userId: String): Strin
   return when {
     text.startsWith('/') && text.matches(Regex("^/(storage/emulated|data/media|sdcard)(/|$).*")) ->
         normalizeSuggestionInput(text, userId).trim('/')
+    // 保留用户输入绝对路径时的根斜杠。TextField 会在每次按键后调用本函数，
+    // 若把单独的 "/" 立即清空，后续输入会变成相对路径（例如 data/...），
+    // 导致无法填写 /data/user/... 等受支持的 namespace 目标。
+    text == "/" -> "/"
     text.startsWith('/') -> text.trimEnd('/')
     else -> normalizeSuggestionInput(text, userId).trim('/')
   }
