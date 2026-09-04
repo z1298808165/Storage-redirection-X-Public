@@ -657,6 +657,9 @@ jobs:
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
       SRT_FUSE_FIX_ENABLED: false
+      # Android 17 的每个场景入口仍会重启应用；同一场景内复用应用进程，
+      # 避免每个 service case 重复 force-stop/start 和 mount 确认。
+      SRT_FRESH_APP_PER_CASE: 0
       EMULATOR_GPU_MODE: swiftshader_indirect
     steps:
       - name: Checkout repository
