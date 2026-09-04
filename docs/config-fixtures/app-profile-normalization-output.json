@@ -14,7 +14,7 @@
       "read_only_paths": ["Documents/ReadOnly", "Movies/*"],
       "path_mappings": {
         "Cache": "Android/media/com.example/cache",
-        "DCIM/App": "Pictures/App"
+        "/storage/emulated/10/DCIM/App": "/data/media/10/Pictures/App"
       }
     }
   }
