@@ -4742,10 +4742,18 @@
       .replace(/\/+$/, "");
     if (!text || text.length > 512 || text.includes("\0") || text === "/") return "";
     const absolute = text.startsWith("/");
-    const body = text.replace(/^\/+/, "");
+    let body = text.replace(/^\/+/, "");
     if (!body || body.split("/").some((part) => part === "." || part === "..")) return "";
     if (/[<>:"|?*\x00-\x1f]/.test(body)) return "";
     if (absolute && /^(proc|sys|dev|data\/adb)(\/|$)/i.test(body)) return "";
+    const storageAlias = body
+      .replace(/^storage\/emulated\/\d+\/?/i, "")
+      .replace(/^data\/media\/\d+\/?/i, "")
+      .replace(/^sdcard\/?/i, "")
+      .replace(/^\/+|\/+$/g, "");
+    if (absolute && storageAlias !== body.replace(/^\/+|\/+$/g, "")) {
+      return storageAlias;
+    }
     if (!absolute && hasMonitorFilterStorageRootPrefix(body)) return "";
     return absolute ? "/" + body : body;
   }
