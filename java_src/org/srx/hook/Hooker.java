@@ -330,7 +330,12 @@ public class Hooker {
           }
           registerDirectWriteAfterInsert(
               args, result, callerUid, mutationMethod, patch.directWriteRequested);
-          rememberRedirectedMediaTarget(actualArgs, result, callerUid, mutationMethod);
+          rememberRedirectedMediaTarget(
+              actualArgs,
+              result,
+              callerUid,
+              mutationMethod,
+              patch.patchedAny || patch.directWriteRequested);
           finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
           commitRedirectedPendingFile(actualArgs, mutationMethod);
           logMutationResult(this, result);
@@ -3527,9 +3532,18 @@ public class Hooker {
    * null），因此必须在 insert 时把路径带过去。
    */
   private static void rememberRedirectedMediaTarget(
-      Object[] actualArgs, Object result, int callerUid, String mutationMethod) {
+      Object[] actualArgs,
+      Object result,
+      int callerUid,
+      String mutationMethod,
+      boolean wasRedirected) {
     try {
-      if (!"insert".equals(mutationMethod) || !(result instanceof android.net.Uri)) return;
+      // MediaProvider 会在原始 insert 返回前把 _data 回填到传入的 ContentValues。
+      // 只有本次参数确实被重定向改写，才允许把该值登记到 URI 表；否则后续
+      // update(is_pending=0) 会把未重定向写入误当作沙箱 pending 文件处理。
+      if (!"insert".equals(mutationMethod)
+          || !(result instanceof android.net.Uri)
+          || !wasRedirected) return;
       if (callerUid < ANDROID_APP_UID_START || actualArgs == null) return;
       ContentValues values = findContentValues(actualArgs);
       if (values == null) return;
