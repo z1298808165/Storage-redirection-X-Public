@@ -3,6 +3,18 @@
 use std::collections::HashMap;
 
 pub mod platform {
+    pub mod inotify {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/inotify.rs"
+        ));
+    }
+    pub mod lru_cache {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/lru_cache.rs"
+        ));
+    }
     pub mod paths {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),

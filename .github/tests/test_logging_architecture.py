@@ -227,14 +227,16 @@ class LoggingArchitectureTest(unittest.TestCase):
     def test_native_fixed_capacity_caches_evict_incrementally(self) -> None:
         paths = read("src/platform/paths.rs")
         monitor = read("src/config/inspect.rs")
+        cache = read("src/platform/lru_cache.rs")
         raw = read("src/config/raw_scan.rs")
 
         self.assertIn("struct PathNormalizeCache", paths)
-        self.assertIn("self.order.pop_front()", paths)
+        self.assertIn("LruCache", paths)
         self.assertNotIn("cache.clear();\n        }\n        cache.insert(path", paths)
         self.assertIn("struct MonitorPathMatchCache", monitor)
         self.assertIn("cache.prepare_version(config_version)", monitor)
-        self.assertIn("self.order.pop_front()", monitor)
+        self.assertIn("LruCache", monitor)
+        self.assertIn("while self.entries.len() > self.capacity", cache)
         self.assertIn("cache.remove(0)", raw)
         capacity_branch = raw[raw.index("if cache.len() >= RAW_CACHE_CAP") : raw.index("cache.push(entry)")]
         self.assertNotIn("cache.clear()", capacity_branch)
