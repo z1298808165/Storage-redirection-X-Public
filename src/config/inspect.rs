@@ -4,10 +4,11 @@ use crate::config::{
     ResolvedUserProfile, ResolvedUserProfileFlags, UserProfile, UserRedirectEnablement,
 };
 use crate::platform;
+use crate::platform::lru_cache::LruCache;
 use crate::redirect::policy;
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,16 +20,14 @@ const MONITOR_DECISION_LOG_STEP: u64 = 1024;
 
 struct MonitorPathMatchCache {
     config_version: u64,
-    entries: HashMap<String, bool>,
-    order: VecDeque<String>,
+    entries: LruCache<String, bool>,
 }
 
 impl MonitorPathMatchCache {
     fn new() -> Self {
         Self {
             config_version: 0,
-            entries: HashMap::with_capacity(MONITOR_PATH_CACHE_SIZE),
-            order: VecDeque::with_capacity(MONITOR_PATH_CACHE_SIZE),
+            entries: LruCache::new(MONITOR_PATH_CACHE_SIZE),
         }
     }
 
@@ -41,25 +40,16 @@ impl MonitorPathMatchCache {
         }
         self.config_version = config_version;
         self.entries.clear();
-        self.order.clear();
         true
     }
 
     /// 接收借用的键，命中已有键时只原地更新值，不再产生任何分配。
     fn insert(&mut self, key: &str, value: bool) {
-        if let Some(existing) = self.entries.get_mut(key) {
-            // 键已存在，仅原地更新值，不改变 LRU 顺序。
-            // quality-allow(chinese-language): 本行是 Rust 解引用赋值，仅原地覆盖已有值。
-            *existing = value;
-            return;
-        }
         self.entries.insert(key.to_string(), value);
-        if self.entries.len() > MONITOR_PATH_CACHE_SIZE
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.entries.remove(&oldest);
-        }
-        self.order.push_back(key.to_string());
+    }
+
+    fn get(&mut self, key: &str) -> Option<bool> {
+        self.entries.get(&key.to_string())
     }
 }
 
@@ -84,7 +74,7 @@ impl SettingsHub {
     #[allow(dead_code)]
     pub fn get_daemon_reconcile_config_snapshot(&self) -> DaemonReconcileConfigSnapshot {
         let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        DaemonReconcileConfigSnapshot {
+        let snapshot = DaemonReconcileConfigSnapshot {
             apps: if state.is_loaded {
                 state.apps.clone()
             } else {
@@ -92,7 +82,9 @@ impl SettingsHub {
             },
             storage_backend_mode: state.storage_backend_mode,
             is_file_monitor_enabled: state.is_file_monitor_enabled,
-        }
+        };
+        drop(state);
+        snapshot
     }
 
     pub fn get_resolved_user_profile_snapshot(
@@ -229,16 +221,25 @@ impl SettingsHub {
     // quality-allow(lint-suppression): 仅 daemon 使用的调用方不会出现在 cdylib 构建中。
     #[allow(dead_code)]
     pub fn get_daemon_monitor_config_snapshot(&self) -> DaemonMonitorConfigSnapshot {
-        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !state.is_loaded {
+        let (apps, is_file_monitor_enabled) = {
+            let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+            if !state.is_loaded {
+                return DaemonMonitorConfigSnapshot {
+                    app_specs: Vec::new(),
+                    is_file_monitor_enabled: false,
+                };
+            }
+            (state.apps.clone(), state.is_file_monitor_enabled)
+        };
+        if apps.is_empty() {
             return DaemonMonitorConfigSnapshot {
                 app_specs: Vec::new(),
-                is_file_monitor_enabled: false,
+                is_file_monitor_enabled,
             };
         }
 
         let mut specs = Vec::new();
-        for (package_name, app) in &state.apps {
+        for (package_name, app) in &apps {
             if package_name == SELF_PACKAGE_NAME || policy::is_system_writer_package(package_name) {
                 continue;
             }
@@ -263,7 +264,7 @@ impl SettingsHub {
         });
         DaemonMonitorConfigSnapshot {
             app_specs: specs,
-            is_file_monitor_enabled: state.is_file_monitor_enabled,
+            is_file_monitor_enabled,
         }
     }
 
@@ -354,7 +355,7 @@ fn should_filter_monitor_record_locked_for_version(
         // 优化：为高频路径和操作组合提供快速缓存查找
         if let Ok(mut cache) = MONITOR_PATH_MATCH_CACHE.try_lock()
             && cache.prepare_version(config_version)
-            && let Some(&cached_result) = cache.entries.get(cache_key.as_str())
+            && let Some(cached_result) = cache.get(cache_key.as_str())
         {
             return cached_result;
         }

@@ -1,6 +1,6 @@
+use super::lru_cache::LruCache;
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
 use std::string::String;
 use std::sync::Mutex;
 
@@ -11,29 +11,22 @@ const STORAGE_EMULATED_PREFIX: &str = "/storage/emulated/";
 const PATH_CACHE_MAX_SIZE: usize = 256;
 
 struct PathNormalizeCache {
-    entries: HashMap<String, String>,
-    order: VecDeque<String>,
+    cache: LruCache<String, String>,
 }
 
 impl PathNormalizeCache {
     fn new() -> Self {
         Self {
-            entries: HashMap::with_capacity(PATH_CACHE_MAX_SIZE),
-            order: VecDeque::with_capacity(PATH_CACHE_MAX_SIZE),
+            cache: LruCache::new(PATH_CACHE_MAX_SIZE),
         }
     }
 
     fn insert(&mut self, path: String, normalized: String) {
-        if self.entries.insert(path.clone(), normalized).is_some() {
-            // 键已存在，仅原地更新值，不改变 LRU 顺序。
-            return;
-        }
-        if self.entries.len() > PATH_CACHE_MAX_SIZE
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.entries.remove(&oldest);
-        }
-        self.order.push_back(path);
+        self.cache.insert(path, normalized);
+    }
+
+    fn get(&mut self, path: &str) -> Option<String> {
+        self.cache.get(&path.to_string())
     }
 }
 
@@ -69,10 +62,9 @@ pub fn normalize(path: &str) -> String {
     }
 
     // 优化：对于常用路径先查缓存
-    if let Ok(cache) = PATH_NORMALIZE_CACHE.try_lock()
-        && let Some(cached) = cache.entries.get(path)
+    if let Ok(mut cache) = PATH_NORMALIZE_CACHE.try_lock()
+        && let Some(normalized) = cache.get(path)
     {
-        let normalized = cached.clone();
         LAST_NORMALIZED_PATH.with(|slot| {
             // quality-allow(chinese-language): path 与 normalized 是必要的 Rust 字段名。
             *slot.borrow_mut() = Some(LastNormalizedPath {
@@ -86,13 +78,7 @@ pub fn normalize(path: &str) -> String {
     // 只有确实需要折叠重复斜杠或去掉尾斜杠时才重建字符串。别名路径（如
     // /data/media/0/... 与 /sdcard/...）通常本身已经规整，此前仍会逐字符复制一遍
     // 产生完全相同的内容，再交给别名解析；这里先判断是否需要改写，避免这次多余分配。
-    let needs_rewrite = path.contains("//") || (path.len() > 1 && path.ends_with('/'));
-    let normalized = if needs_rewrite {
-        let result = collapse_redundant_slashes(path);
-        resolve_storage_alias(&result)
-    } else {
-        resolve_storage_alias(path)
-    };
+    let normalized = resolve_storage_alias(&normalize_syntax(path));
 
     // 优化：缓存规范化结果
     if let Ok(mut cache) = PATH_NORMALIZE_CACHE.try_lock() {
@@ -100,6 +86,14 @@ pub fn normalize(path: &str) -> String {
     }
 
     normalized
+}
+
+/// 仅执行斜杠折叠和尾斜杠清理，不解析 Android 存储别名。
+pub fn normalize_syntax(path: &str) -> String {
+    if !path.contains("//") && (path.len() <= 1 || !path.ends_with('/')) {
+        return path.to_string();
+    }
+    collapse_redundant_slashes(path)
 }
 
 fn collapse_redundant_slashes(path: &str) -> String {

@@ -5,8 +5,9 @@ use crate::domain::{
 };
 use crate::platform::{self, paths};
 use once_cell::sync::Lazy;
-use std::sync::RwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RedirectAction {
@@ -39,12 +40,12 @@ struct RouterState {
     user_id: i32,
     storage_root: String,
     redirect_target: String,
-    allowed_real_paths: Vec<String>,
-    excluded_real_paths: Vec<String>,
-    sandboxed_paths: Vec<String>,
-    sandboxed_excluded_paths: Vec<String>,
-    read_only_paths: Vec<String>,
-    read_only_excluded_paths: Vec<String>,
+    allowed_real_paths: RouterPathIndex,
+    excluded_real_paths: RouterPathIndex,
+    sandboxed_paths: RouterPathIndex,
+    sandboxed_excluded_paths: RouterPathIndex,
+    read_only_paths: RouterPathIndex,
+    read_only_excluded_paths: RouterPathIndex,
     path_mappings: Vec<PathMapping>,
     is_mapping_mode_only: bool,
 }
@@ -56,27 +57,92 @@ impl RouterState {
             user_id: 0,
             storage_root: String::new(),
             redirect_target: String::new(),
-            allowed_real_paths: Vec::new(),
-            excluded_real_paths: Vec::new(),
-            sandboxed_paths: Vec::new(),
-            sandboxed_excluded_paths: Vec::new(),
-            read_only_paths: Vec::new(),
-            read_only_excluded_paths: Vec::new(),
+            allowed_real_paths: RouterPathIndex::default(),
+            excluded_real_paths: RouterPathIndex::default(),
+            sandboxed_paths: RouterPathIndex::default(),
+            sandboxed_excluded_paths: RouterPathIndex::default(),
+            read_only_paths: RouterPathIndex::default(),
+            read_only_excluded_paths: RouterPathIndex::default(),
             path_mappings: Vec::new(),
             is_mapping_mode_only: false,
         }
     }
 }
 
+/// 预编译路径规则索引，按首段路径缩小匹配候选，避免每次查询线性扫描全部规则。
+#[derive(Clone, Default)]
+struct RouterPathIndex {
+    entries: Vec<String>,
+    buckets: HashMap<String, Vec<usize>>,
+    fallback: Vec<usize>,
+}
+
+impl RouterPathIndex {
+    fn new(entries: Vec<String>) -> Self {
+        let mut index = Self {
+            entries,
+            buckets: HashMap::new(),
+            fallback: Vec::new(),
+        };
+        for (idx, pattern) in index.entries.iter().enumerate() {
+            if let Some(key) = router_path_first_segment(pattern) {
+                index.buckets.entry(key).or_default().push(idx);
+            } else {
+                index.fallback.push(idx);
+            }
+        }
+        index
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn matches(&self, resolved_path: &str, include_xldownload_alias: bool) -> bool {
+        let first_segment = router_path_first_segment_ref(resolved_path);
+        let mut candidates = self
+            .buckets
+            .iter()
+            .filter(|(key, _)| {
+                first_segment.is_some_and(|segment| key.eq_ignore_ascii_case(segment))
+            })
+            .flat_map(|(_, indices)| indices.iter().copied())
+            .chain(self.fallback.iter().copied());
+        candidates.any(|idx| {
+            let configured = &self.entries[idx];
+            !configured.is_empty()
+                && (paths::matches(configured, resolved_path, true)
+                    || (include_xldownload_alias
+                        && paths::matches_xldownload_alias(configured, resolved_path)))
+        })
+    }
+}
+
+fn router_path_first_segment(path: &str) -> Option<String> {
+    let segment = router_path_first_segment_ref(path)?;
+    if paths::contains_wildcards(segment) {
+        return None;
+    }
+    Some(segment.to_ascii_lowercase())
+}
+
+fn router_path_first_segment_ref(path: &str) -> Option<&str> {
+    let trimmed = path.strip_prefix('/')?;
+    let segment = trimmed.split('/').next()?;
+    (!segment.is_empty()).then_some(segment)
+}
+
 pub struct PathRouter {
-    state: RwLock<RouterState>,
+    // 配置更新很少、路径判定极其频繁。读锁只用来取得不可变快照，随后在锁外完成
+    // 规则匹配，避免通配符判断和映射解析阻塞配置刷新。
+    state: RwLock<Arc<RouterState>>,
     initialized: AtomicBool,
 }
 
 impl PathRouter {
     fn new() -> Self {
         Self {
-            state: RwLock::new(RouterState::new()),
+            state: RwLock::new(Arc::new(RouterState::new())),
             initialized: AtomicBool::new(false),
         }
     }
@@ -107,7 +173,7 @@ impl PathRouter {
         path_mappings: &[PathMapping],
         is_mapping_mode_only: bool,
     ) {
-        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+        let mut state = RouterState::new();
         state.current_package = package_name.to_string();
         state.user_id = platform::user_id_from_uid(app_uid);
         state.storage_root = paths::storage_user_root_for_user(state.user_id);
@@ -119,39 +185,47 @@ impl PathRouter {
         let expand_mount_fallbacks = crate::fuse_redirect::config::expand_mount_fallbacks_for_mode(
             config.storage_backend_mode(),
         );
-        state.allowed_real_paths = resolve_router_path_list(
+        state.allowed_real_paths = RouterPathIndex::new(resolve_router_path_list(
             allowed_real_paths,
             state.user_id,
             &state.storage_root,
             expand_mount_fallbacks,
-        );
-        state.excluded_real_paths = resolve_router_path_list(
+        ));
+        state.excluded_real_paths = RouterPathIndex::new(resolve_router_path_list(
             excluded_real_paths,
             state.user_id,
             &state.storage_root,
             false,
-        );
+        ));
         let (sandbox_includes, sandbox_excludes) = paths::split_exclusion_rules(sandboxed_paths);
-        state.sandboxed_paths =
-            resolve_router_sandboxed_paths(&sandbox_includes, state.user_id, &state.storage_root);
-        state.sandboxed_excluded_paths =
-            resolve_router_sandboxed_paths(&sandbox_excludes, state.user_id, &state.storage_root);
+        state.sandboxed_paths = RouterPathIndex::new(resolve_router_sandboxed_paths(
+            &sandbox_includes,
+            state.user_id,
+            &state.storage_root,
+        ));
+        state.sandboxed_excluded_paths = RouterPathIndex::new(resolve_router_sandboxed_paths(
+            &sandbox_excludes,
+            state.user_id,
+            &state.storage_root,
+        ));
         let (read_only_includes, read_only_excludes) =
             paths::split_exclusion_rules(read_only_paths);
-        state.read_only_paths = resolve_router_read_only_paths(
+        state.read_only_paths = RouterPathIndex::new(resolve_router_read_only_paths(
             &read_only_includes,
             state.user_id,
             &state.storage_root,
             expand_mount_fallbacks,
-        );
+        ));
         let excluded_read_only_paths = resolve_router_read_only_paths(
             &read_only_excludes,
             state.user_id,
             &state.storage_root,
             false,
         );
-        state.read_only_excluded_paths =
-            paths::overlapping_exclusion_rules(&state.read_only_paths, &excluded_read_only_paths);
+        state.read_only_excluded_paths = RouterPathIndex::new(paths::overlapping_exclusion_rules(
+            &state.read_only_paths.entries,
+            &excluded_read_only_paths,
+        ));
         state.path_mappings =
             resolve_router_mappings(path_mappings, state.user_id, &state.storage_root);
 
@@ -166,10 +240,12 @@ impl PathRouter {
             state.path_mappings.len(),
             state.is_mapping_mode_only
         );
+        // quality-allow(chinese-language): 此处是 Rust 解引用赋值，原子替换不可变配置快照。
+        *self.state.write().unwrap_or_else(|err| err.into_inner()) = Arc::new(state);
     }
 
     pub fn redirect_target(&self) -> String {
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         state.redirect_target.clone()
     }
 
@@ -177,7 +253,7 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return false;
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         is_path_excluded_locked(&state, resolved_path)
     }
 
@@ -185,7 +261,7 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return false;
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         is_path_allowed_real_locked(&state, resolved_path)
     }
 
@@ -193,17 +269,17 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return false;
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         state.is_mapping_mode_only
-            && router_path_list_matches(&state.sandboxed_paths, resolved_path, true)
-            && !router_path_list_matches(&state.sandboxed_excluded_paths, resolved_path, true)
+            && state.sandboxed_paths.matches(resolved_path, true)
+            && !state.sandboxed_excluded_paths.matches(resolved_path, true)
     }
 
     pub fn map_path(&self, resolved_path: &str) -> String {
         if resolved_path.is_empty() {
             return String::new();
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         writer::map_path_by_caller_mappings(resolved_path, &state.path_mappings)
     }
 
@@ -211,7 +287,7 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return false;
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         state
             .path_mappings
             .iter()
@@ -222,7 +298,7 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return String::new();
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         read_only_check_path_locked(&state, resolved_path)
     }
 
@@ -230,8 +306,15 @@ impl PathRouter {
         if resolved_path.is_empty() {
             return false;
         }
-        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        let state = self.router_state_snapshot();
         is_path_read_only_locked(&state, resolved_path)
+    }
+
+    fn router_state_snapshot(&self) -> Arc<RouterState> {
+        self.state
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 }
 
@@ -324,31 +407,18 @@ fn resolve_router_storage_path(path: &str, user_id: i32, storage_root: &str) -> 
 }
 
 fn is_path_excluded_locked(state: &RouterState, resolved_path: &str) -> bool {
-    router_path_list_matches(&state.excluded_real_paths, resolved_path, true)
+    state.excluded_real_paths.matches(resolved_path, true)
 }
 
 fn is_path_allowed_real_locked(state: &RouterState, resolved_path: &str) -> bool {
     !is_path_excluded_locked(state, resolved_path)
-        && router_path_list_matches(&state.allowed_real_paths, resolved_path, true)
+        && state.allowed_real_paths.matches(resolved_path, true)
 }
 
 fn is_path_read_only_locked(state: &RouterState, resolved_path: &str) -> bool {
     !is_path_excluded_locked(state, resolved_path)
-        && !router_path_list_matches(&state.read_only_excluded_paths, resolved_path, true)
-        && router_path_list_matches(&state.read_only_paths, resolved_path, true)
-}
-
-fn router_path_list_matches(
-    configured_paths: &[String],
-    resolved_path: &str,
-    include_xldownload_alias: bool,
-) -> bool {
-    configured_paths.iter().any(|configured| {
-        !configured.is_empty()
-            && (paths::matches(configured, resolved_path, true)
-                || (include_xldownload_alias
-                    && paths::matches_xldownload_alias(configured, resolved_path)))
-    })
+        && !state.read_only_excluded_paths.matches(resolved_path, true)
+        && state.read_only_paths.matches(resolved_path, true)
 }
 
 fn read_only_check_path_locked(state: &RouterState, resolved_path: &str) -> String {

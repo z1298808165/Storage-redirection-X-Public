@@ -6,6 +6,7 @@ mod inotify;
 mod roots;
 
 use crate::config::SettingsHub;
+use crate::platform::inotify::Event;
 use crate::platform::paths;
 use events::{
     MonitorEventPaths, emit_monitor_event, monitor_operation_from_mask,
@@ -13,7 +14,6 @@ use events::{
     should_skip_ambiguous_allowed_real_path_event, should_skip_ambiguous_read_only_path_event,
     should_skip_public_root_event_identity,
 };
-use libc::inotify_event;
 use roots::{
     build_private_owner_repair_roots, build_public_owner_repair_root, build_watch_roots,
     dedup_roots, is_under_any_root, select_watch_start, should_descend_into_child,
@@ -357,20 +357,11 @@ impl RegularAppMonitor {
                 break;
             }
 
-            let mut offset = 0usize;
             let total = n as usize;
-            while offset + std::mem::size_of::<inotify_event>() <= total {
-                // SAFETY: 循环条件已保证 offset 起至少还有一个完整 inotify_event，
-                // 且 InotifyBuf 按 4 字节对齐，事件起始地址满足对齐要求。
-                let event = unsafe { &*(buffer.0.as_ptr().add(offset) as *const inotify_event) };
-                let event_len = inotify::event_len(event);
-                if event_len == 0 || offset + event_len > total {
-                    break;
-                }
+            inotify::for_each_event(&buffer.0[..total], |event| {
                 self.handle_event(event);
-                offset += event_len;
                 handled = handled.saturating_add(1);
-            }
+            });
         }
         false
     }
@@ -684,7 +675,7 @@ impl RegularAppMonitor {
         self.capacity_limited = true;
     }
 
-    fn handle_event(&mut self, event: &inotify_event) {
+    fn handle_event(&mut self, event: &Event<'_>) {
         let mask = event.mask;
         if inotify::is_queue_overflow(mask) {
             // 溢出说明内核已经丢弃了数量未知的事件，只重建监视集无法补回这批事件对应的

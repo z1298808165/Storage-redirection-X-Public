@@ -1,7 +1,7 @@
 use libc::{
     IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_IGNORED, IN_ISDIR,
     IN_MODIFY, IN_MOVE_SELF, IN_MOVED_FROM, IN_MOVED_TO, IN_Q_OVERFLOW, c_void, inotify_add_watch,
-    inotify_event, inotify_init1, read,
+    inotify_init1, read,
 };
 use std::ffi::CString;
 
@@ -72,16 +72,14 @@ pub(super) fn add_watch(fd: i32, path: &str) -> Result<i32, AddWatchError> {
     })
 }
 
-pub(super) fn event_len(event: &inotify_event) -> usize {
-    std::mem::size_of::<inotify_event>() + event.len as usize
-}
+/// 逐个解析一次 read 返回的事件，集中维护长度和对齐边界检查。
+pub(super) use crate::platform::inotify::for_each_event;
 
-pub(super) fn event_name(event: &inotify_event) -> String {
-    if event.len == 0 {
+pub(super) fn event_name(event: &crate::platform::inotify::Event<'_>) -> String {
+    if event.name.is_empty() {
         return String::new();
     }
-    let name_ptr = unsafe { (event as *const inotify_event).add(1) as *const u8 };
-    let name_bytes = unsafe { std::slice::from_raw_parts(name_ptr, event.len as usize) };
+    let name_bytes = event.name;
     let end = name_bytes
         .iter()
         .position(|byte| *byte == 0)

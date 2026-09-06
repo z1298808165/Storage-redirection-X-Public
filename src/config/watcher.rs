@@ -1,7 +1,8 @@
+use crate::platform::inotify::Event;
 use crate::platform::paths;
 use libc::{
     IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_MOVED_FROM, IN_MOVED_TO, c_int, inotify_add_watch,
-    inotify_event, inotify_init1,
+    inotify_init1,
 };
 use std::ffi::CString;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -80,23 +81,11 @@ pub fn poll_changed() -> bool {
     }
 
     let mut changed = false;
-    let mut offset = 0usize;
-    let total = len as usize;
-    while offset + std::mem::size_of::<inotify_event>() <= total {
-        // SAFETY: 循环条件已保证 offset 起至少还有一个完整 inotify_event，
-        // 且 InotifyBuf 按 4 字节对齐，事件起始地址满足对齐要求。
-        let event = unsafe { &*(buf.0.as_ptr().add(offset) as *const inotify_event) };
-        let event_len = std::mem::size_of::<inotify_event>() + event.len as usize;
-        if event_len == 0 || offset + event_len > total {
-            break;
-        }
-
+    crate::platform::inotify::for_each_event(&buf.0[..len as usize], |event| {
         if is_config_event(event) {
             changed = true;
         }
-
-        offset += event_len;
-    }
+    });
 
     if changed {
         LAST_CHANGE_MS.store(now_ms, Ordering::Relaxed);
@@ -113,16 +102,14 @@ fn add_watch(fd: c_int, path: &str) -> bool {
 }
 
 // 仅处理非目录的 .json 文件事件
-fn is_config_event(event: &inotify_event) -> bool {
+fn is_config_event(event: &Event<'_>) -> bool {
     if (event.mask & libc::IN_ISDIR) != 0 {
         return false;
     }
-    if event.len > 0 {
-        let name_ptr = unsafe { (event as *const inotify_event).add(1) as *const u8 };
-        let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, event.len as usize) };
-        if let Ok(name) = std::str::from_utf8(name_slice) {
-            return name.trim_end_matches('\0').ends_with(".json");
-        }
+    if !event.name.is_empty()
+        && let Ok(name) = std::str::from_utf8(event.name)
+    {
+        return name.trim_end_matches('\0').ends_with(".json");
     }
     true
 }

@@ -1,8 +1,12 @@
+mod attrs;
 pub(crate) mod config;
+mod helpers;
 mod inode;
 mod metadata;
 mod perf;
 mod policy;
+mod rules;
+pub(super) use rules::normalize_rule_list;
 
 // 公开这些配置类型供 daemon/测试流复用；部分构建目标只使用其中的函数。
 pub use config::{
@@ -11,11 +15,15 @@ pub use config::{
 };
 
 use crate::platform::{fs, paths};
+use attrs::{file_attr_from_metadata, file_type_from_std, synthetic_dir_attr};
 use fuser::{
     AccessFlags, CopyFileRangeFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags,
-    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry,
-    ReplyOpen, ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request, TimeOrNow, WriteFlags,
+};
+use helpers::{
+    elapsed_ns, fuse_open_operation_name, fuse_setattr_operation_name, open_flags_write, paths_eq,
 };
 use inode::{
     add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs, remove_inode_path,
@@ -38,7 +46,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
@@ -1783,149 +1791,4 @@ fn materialize_dir_entries(
         }
     }));
     entries
-}
-
-fn file_type_from_std(file_type: std::fs::FileType) -> FileType {
-    if file_type.is_dir() {
-        FileType::Directory
-    } else if file_type.is_symlink() {
-        FileType::Symlink
-    } else {
-        FileType::RegularFile
-    }
-}
-
-fn file_type_from_mode(mode: u32) -> FileType {
-    match mode & libc::S_IFMT {
-        libc::S_IFDIR => FileType::Directory,
-        libc::S_IFLNK => FileType::Symlink,
-        libc::S_IFBLK => FileType::BlockDevice,
-        libc::S_IFCHR => FileType::CharDevice,
-        libc::S_IFIFO => FileType::NamedPipe,
-        libc::S_IFSOCK => FileType::Socket,
-        _ => FileType::RegularFile,
-    }
-}
-
-fn file_attr_from_metadata(ino: INodeNo, metadata: std::fs::Metadata) -> FileAttr {
-    use std::os::unix::fs::MetadataExt as _;
-    FileAttr {
-        ino,
-        size: metadata.size(),
-        blocks: metadata.blocks(),
-        atime: unix_time(metadata.atime(), metadata.atime_nsec()),
-        mtime: unix_time(metadata.mtime(), metadata.mtime_nsec()),
-        ctime: unix_time(metadata.ctime(), metadata.ctime_nsec()),
-        crtime: UNIX_EPOCH,
-        kind: file_type_from_mode(metadata.mode()),
-        perm: (metadata.mode() & 0o7777) as u16,
-        nlink: metadata.nlink() as u32,
-        uid: metadata.uid(),
-        gid: metadata.gid(),
-        rdev: metadata.rdev() as u32,
-        flags: 0,
-        blksize: metadata.blksize() as u32,
-    }
-}
-
-fn synthetic_dir_attr(ino: INodeNo, uid: u32, gid: u32) -> FileAttr {
-    let now = SystemTime::now();
-    FileAttr {
-        ino,
-        size: 0,
-        blocks: 0,
-        atime: now,
-        mtime: now,
-        ctime: now,
-        crtime: UNIX_EPOCH,
-        kind: FileType::Directory,
-        perm: 0o2773,
-        nlink: 2,
-        uid,
-        gid,
-        rdev: 0,
-        flags: 0,
-        blksize: 4096,
-    }
-}
-
-fn unix_time(sec: i64, nsec: i64) -> SystemTime {
-    if sec < 0 {
-        return UNIX_EPOCH;
-    }
-    UNIX_EPOCH + Duration::new(sec as u64, nsec.max(0) as u32)
-}
-
-pub(super) fn normalize_rule_list(paths_in: Vec<String>, user_id: i32) -> Vec<String> {
-    use crate::platform::paths;
-    let mut out = Vec::with_capacity(paths_in.len());
-    let storage_root = paths::storage_user_root_for_user(user_id);
-    for path in paths_in {
-        let path = path.trim_start();
-        let (excluded, body) = if let Some(stripped) = path.strip_prefix('!') {
-            (true, stripped.trim_start())
-        } else {
-            (false, path)
-        };
-        let mut resolved = paths::resolve_user_path(&paths::normalize(body), user_id);
-        if resolved.is_empty() || paths::has_unsafe_segments(&resolved) {
-            continue;
-        }
-        if !paths::is_absolute(&resolved) {
-            resolved = paths::normalize(&paths::join(&storage_root, &resolved));
-        }
-        if paths::is_child(&resolved, &storage_root) {
-            if excluded {
-                out.push(format!("!{resolved}"));
-            } else {
-                out.push(resolved);
-            }
-        }
-    }
-    paths::sort_dedup_paths_case_insensitive(&mut out);
-    out
-}
-
-fn open_flags_write(flags: i32) -> bool {
-    let accmode = OpenFlags(flags).acc_mode();
-    accmode == OpenAccMode::O_WRONLY || accmode == OpenAccMode::O_RDWR || flags & libc::O_TRUNC != 0
-}
-
-fn fuse_open_operation_name(flags: i32) -> &'static str {
-    if open_flags_write(flags) {
-        "open:write"
-    } else {
-        "open:read"
-    }
-}
-
-fn fuse_setattr_operation_name(
-    has_mode: bool,
-    has_uid: bool,
-    has_gid: bool,
-    has_size: bool,
-    has_atime: bool,
-    has_mtime: bool,
-) -> &'static str {
-    if has_size {
-        "truncate"
-    } else if has_mode {
-        "chmod"
-    } else if has_uid || has_gid {
-        "chown"
-    } else if has_atime || has_mtime {
-        "utimens"
-    } else {
-        "setattr"
-    }
-}
-
-fn elapsed_ns(started: Option<std::time::Instant>) -> u64 {
-    started
-        .map(|value| value.elapsed().as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
-}
-
-fn paths_eq(left: &Path, right: &Path) -> bool {
-    left == right
 }

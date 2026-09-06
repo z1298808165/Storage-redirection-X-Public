@@ -8,8 +8,12 @@ pub mod errno;
 pub mod fs;
 #[path = "platform/gnu_debugdata.rs"]
 pub mod gnu_debugdata;
+#[path = "platform/inotify.rs"]
+pub mod inotify;
 #[path = "platform/linker.rs"]
 pub mod linker;
+#[path = "platform/lru_cache.rs"]
+pub mod lru_cache;
 #[path = "platform/module_paths.rs"]
 pub mod module_paths;
 #[path = "platform/paths.rs"]
