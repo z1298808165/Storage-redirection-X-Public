@@ -659,7 +659,7 @@ jobs:
       - quality
       - prepare
       - test-flow-build
-    if: always() && github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.ref_name == 'SRX-R' || github.base_ref == 'SRX-R') && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
+    if: always() && github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.ref_name == 'SRX-R' || github.ref_name == 'codex/ci-artifacts' || github.base_ref == 'SRX-R') && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 50
     env:
