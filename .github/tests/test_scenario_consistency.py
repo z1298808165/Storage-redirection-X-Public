@@ -173,7 +173,16 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_android17_flow_is_integrated_without_diagnostic_artifact_upload(self) -> None:
         source = read(".github/workflows/ci.yml")
         experimental = section(source, "  test-flow-android17:", "  test-flow-required:")
-        self.assertIn("github.ref_name == 'SRX-R' || github.base_ref == 'SRX-R'", experimental)
+        # 所有获准运行矩阵的分支均应运行 Android17，不再复制分支白名单。
+        matrix = section(source, "  test-flow:", "  test-flow-android17:")
+        matrix_condition = next(line.strip() for line in matrix.splitlines() if line.startswith("    if:"))
+        android17_condition = next(line.strip() for line in experimental.splitlines() if line.startswith("    if:"))
+        self.assertEqual(matrix_condition, android17_condition)
+        for dependency in ("quality", "prepare", "test-flow-build"):
+            self.assertIn(f"needs.{dependency}.result == 'success'", android17_condition)
+            self.assertIn(f"- {dependency}", experimental)
+        self.assertNotIn("github.ref", android17_condition)
+        self.assertNotIn("github.repository", android17_condition)
         self.assertIn("ANDROID_TARGET: google_apis", experimental)
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", experimental)
         self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", experimental)
