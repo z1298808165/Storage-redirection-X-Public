@@ -79,3 +79,19 @@ fn primary_user_path_is_unchanged() {
     let path = "/storage/emulated/0/DCIM/a.jpg";
     assert_eq!(paths::resolve_user_path(path, 0), path);
 }
+
+#[test]
+fn storage_alias_roots_include_backend_and_public_paths() {
+    let aliases = paths::storage_alias_roots_for_user(0);
+
+    assert!(aliases.contains(&"/storage/emulated/0".to_string()));
+    assert!(aliases.contains(&"/data/media/0".to_string()));
+    assert!(aliases.contains(&"/storage/self/primary".to_string()));
+    assert_eq!(
+        aliases.len(),
+        aliases
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+}

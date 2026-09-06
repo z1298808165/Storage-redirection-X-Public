@@ -18,68 +18,13 @@ impl MountPlanner {
             return Vec::new();
         }
 
-        let user_str = self.user_id.to_string();
         let storage_root = paths::storage_user_root_for_user(self.user_id);
         if !paths::is_same_or_child(canonical_path, &storage_root) {
             return vec![canonical_path.to_string()];
         }
 
         let suffix = &canonical_path[storage_root.len()..];
-        let mut alias_roots: Vec<String> = Vec::with_capacity(13);
-        append_unique(&mut alias_roots, storage_root.clone());
-        append_unique(
-            &mut alias_roots,
-            paths::data_media_user_root_for_user(self.user_id),
-        );
-        append_unique(&mut alias_roots, "/storage/self/primary".to_string());
-        if self.user_id == 0 {
-            append_unique(&mut alias_roots, "/storage/emulated/legacy".to_string());
-        }
-
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/user/{}/emulated/{}", user_str, user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/runtime/default/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/runtime/read/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/runtime/write/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/runtime/full/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/installer/{}/emulated/{}", user_str, user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/installer/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/androidwritable/{}/emulated/{}", user_str, user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/androidwritable/emulated/{}", user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/pass_through/{}/emulated/{}", user_str, user_str),
-        );
-        append_unique(
-            &mut alias_roots,
-            format!("/mnt/pass_through/emulated/{}", user_str),
-        );
+        let alias_roots = paths::storage_alias_roots_for_user(self.user_id);
 
         let mut expanded = Vec::with_capacity(alias_roots.len());
         for root in alias_roots {

@@ -147,7 +147,7 @@ fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -
 
     let user_id = crate::platform::user_id_from_uid(request.uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
-    let alias_roots = storage_alias_roots_for_user(user_id);
+    let alias_roots = paths::storage_alias_roots_for_user(user_id);
     let expected_groups = targets
         .iter()
         .map(|target| canonical_mount_target(target, &storage_root, &alias_roots))
@@ -1354,38 +1354,10 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
     let suffix = &canonical_path[storage_root.len()..];
     // 这里的别名根都是按固定规则构造的互不相同的字面量，无需再逐个线性去重；
     // 最终的过滤、排序与去重统一由 normalize_targets 完成。
-    storage_alias_roots_for_user(user_id)
+    paths::storage_alias_roots_for_user(user_id)
         .into_iter()
         .map(|root| format!("{}{}", root, suffix))
         .collect()
-}
-
-fn storage_alias_roots_for_user(user_id: i32) -> Vec<String> {
-    let user_str = user_id.to_string();
-    let mut alias_roots = Vec::with_capacity(14);
-    alias_roots.push(paths::storage_user_root_for_user(user_id));
-    alias_roots.push("/storage/self/primary".to_string());
-    if user_id == 0 {
-        alias_roots.push("/storage/emulated/legacy".to_string());
-    }
-    alias_roots.push(format!("/mnt/user/{}/emulated/{}", user_str, user_str));
-    alias_roots.push(format!("/mnt/runtime/default/emulated/{}", user_str));
-    alias_roots.push(format!("/mnt/runtime/read/emulated/{}", user_str));
-    alias_roots.push(format!("/mnt/runtime/write/emulated/{}", user_str));
-    alias_roots.push(format!("/mnt/runtime/full/emulated/{}", user_str));
-    alias_roots.push(format!("/mnt/installer/{}/emulated/{}", user_str, user_str));
-    alias_roots.push(format!("/mnt/installer/emulated/{}", user_str));
-    alias_roots.push(format!(
-        "/mnt/androidwritable/{}/emulated/{}",
-        user_str, user_str
-    ));
-    alias_roots.push(format!("/mnt/androidwritable/emulated/{}", user_str));
-    alias_roots.push(format!(
-        "/mnt/pass_through/{}/emulated/{}",
-        user_str, user_str
-    ));
-    alias_roots.push(format!("/mnt/pass_through/emulated/{}", user_str));
-    alias_roots
 }
 
 fn canonical_mount_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {

@@ -335,6 +335,36 @@ pub fn data_media_user_root_for_user(user_id: i32) -> String {
     format!("{}{}", DATA_MEDIA_PREFIX, user_id)
 }
 
+/// 返回同一用户共享存储的所有系统路径别名。
+///
+/// 挂载创建和挂载状态校验必须使用完全一致的别名集合，否则状态文件中的
+/// `/data/media/<user>` 与应用 namespace 中的 `/storage/emulated/<user>` 会被
+/// 误判成两个独立挂载组，重启后持续触发重复重挂载。
+pub fn storage_alias_roots_for_user(user_id: i32) -> Vec<String> {
+    let user_str = user_id.to_string();
+    let mut alias_roots = Vec::with_capacity(16);
+    alias_roots.push(storage_user_root_for_user(user_id));
+    alias_roots.push(data_media_user_root_for_user(user_id));
+    alias_roots.push("/storage/self/primary".to_string());
+    if user_id == 0 {
+        alias_roots.push("/storage/emulated/legacy".to_string());
+    }
+    alias_roots.push(format!("/mnt/user/{user_str}/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/runtime/default/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/runtime/read/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/runtime/write/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/runtime/full/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/installer/{user_str}/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/installer/emulated/{user_str}"));
+    alias_roots.push(format!(
+        "/mnt/androidwritable/{user_str}/emulated/{user_str}"
+    ));
+    alias_roots.push(format!("/mnt/androidwritable/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/pass_through/{user_str}/emulated/{user_str}"));
+    alias_roots.push(format!("/mnt/pass_through/emulated/{user_str}"));
+    alias_roots
+}
+
 pub fn default_redirect_target(package_name: &str, user_id: i32) -> String {
     format!(
         "{}/Android/data/{}/sdcard",
