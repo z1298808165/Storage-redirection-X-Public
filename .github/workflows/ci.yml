@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [SRX-R]
   push:
-    branches: [SRX-R]
+    branches: [SRX-R, codex/ci-artifacts]
 
 permissions:
   actions: read
@@ -19,7 +19,7 @@ env:
 
 jobs:
   quality:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: (github.repository == 'z1298808165/Storage-redirection-X-Public' || github.ref_name == 'codex/ci-artifacts') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -72,7 +72,7 @@ jobs:
           ./scripts/validate-code-quality.ps1 -BaseRef $baseRef -Ref HEAD
 
   prepare:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: (github.repository == 'z1298808165/Storage-redirection-X-Public' || github.ref_name == 'codex/ci-artifacts') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -93,7 +93,7 @@ jobs:
     needs:
       - quality
       - prepare
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -272,7 +272,7 @@ jobs:
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 
       - name: Upload module to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
@@ -291,6 +291,14 @@ jobs:
             "build/assets/storage.redirect.x-v${VERSION}.zip" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+      - name: Upload module as branch artifact
+        if: github.event_name == 'push' && github.ref_name == 'codex/ci-artifacts'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ci-branch-module-${{ github.run_id }}
+          path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
+          if-no-files-found: error
 
   app:
     needs:
@@ -365,7 +373,7 @@ jobs:
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
       - name: Upload manager APK to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
@@ -384,6 +392,14 @@ jobs:
             "build/app/storage-redirect-x-manager-v${VERSION}.apk" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+      - name: Upload manager APK as branch artifact
+        if: github.event_name == 'push' && github.ref_name == 'codex/ci-artifacts'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ci-branch-app-${{ github.run_id }}
+          path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
+          if-no-files-found: error
 
   test-flow-build:
     name: Build test-flow runtime
@@ -741,7 +757,7 @@ jobs:
           fi
 
   create-ci-release:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
     needs:
       - prepare
       - init-ci-release
@@ -823,7 +839,7 @@ jobs:
       - test-flow-required
       - create-ci-release
       - update-manifest
-    if: always() && github.event_name == 'push' && needs.prepare.result == 'success'
+    if: always() && github.event_name == 'push' && github.ref_name == 'SRX-R' && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -874,7 +890,7 @@ jobs:
           done
 
   update-manifest:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R'
     needs:
       - prepare
       - create-ci-release
