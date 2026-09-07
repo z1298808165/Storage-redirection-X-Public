@@ -379,7 +379,7 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
             let mut index_by_current_path: HashMap<String, usize> = HashMap::new();
             let mut upsert_mapping = |current_raw: &str, target_raw: &str| {
                 let resolved_current =
-                    resolve_mapping_path_for_user(current_raw, user_id, &storage_root);
+                    resolve_mapping_request_path_for_user(current_raw, user_id, &storage_root);
                 if resolved_current.is_empty() {
                     log::warn!(
                         "skip map (current invalid): user={} path={}",
@@ -689,6 +689,22 @@ fn resolve_mapping_path_for_user(raw_path: &str, user_id: i32, storage_root: &st
         resolved = paths::normalize(&paths::join(storage_root, &resolved));
     }
     if !paths::is_safe_namespace_path(&resolved) {
+        return String::new();
+    }
+    resolved
+}
+
+fn resolve_mapping_request_path_for_user(
+    raw_path: &str,
+    user_id: i32,
+    storage_root: &str,
+) -> String {
+    let resolved = resolve_mapping_path_for_user(raw_path, user_id, storage_root);
+    if paths::is_application_private_root(&resolved) {
+        log::warn!(
+            "skip map (application private root is not allowed): {}",
+            resolved
+        );
         return String::new();
     }
     resolved

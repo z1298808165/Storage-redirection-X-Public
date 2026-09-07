@@ -542,6 +542,9 @@ fn build_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMappi
         {
             continue;
         }
+        if paths::is_application_private_root(&current_path) {
+            continue;
+        }
         if paths::eq_ignore_case(&current_path, &target_path) {
             continue;
         }

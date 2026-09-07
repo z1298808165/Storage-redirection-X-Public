@@ -771,6 +771,52 @@ pub fn is_safe_namespace_path(path: &str) -> bool {
         .all(|prefix| path != *prefix && !path.starts_with(&format!("{prefix}/")))
 }
 
+/// 判断路径是否正好是应用私有数据目录的根目录。
+///
+/// 应用私有目录下的子路径可以作为映射边界，但私有根目录本身不能被重定向：
+/// 对它创建挂载点或修复权限会改变应用自身数据目录的所有者、权限或可见性。
+/// 调用方应先完成用户路径与存储别名解析，再使用该检查；这里仍保留主要别名和
+/// `/data/data` 历史写法，作为跨入口的最后一道防线。
+pub fn is_application_private_root(path: &str) -> bool {
+    let normalized_path = normalize(path);
+    let normalized = normalized_path.trim_end_matches('/');
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let storage_root = STORAGE_EMULATED_PREFIX;
+    if let Some(rest) = normalized.strip_prefix(storage_root) {
+        let mut parts = rest.split('/').filter(|part| !part.is_empty());
+        let Some(user_id) = parts.next() else {
+            return false;
+        };
+        if user_id != "legacy" && !user_id.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        return parts.next() == Some("Android")
+            && matches!(parts.next(), Some("data" | "media" | "obb"))
+            && parts.next().is_some_and(is_valid_package_name)
+            && parts.next().is_none();
+    }
+
+    let mut parts = normalized
+        .strip_prefix('/')
+        .unwrap_or(normalized)
+        .split('/')
+        .filter(|part| !part.is_empty());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("data"), Some("data"), Some(package_name), None) => {
+            is_valid_package_name(package_name)
+        }
+        (Some("data"), Some("user" | "user_de"), Some(user_id), Some(package_name)) => {
+            user_id.chars().all(|ch| ch.is_ascii_digit())
+                && is_valid_package_name(package_name)
+                && parts.next().is_none()
+        }
+        _ => false,
+    }
+}
+
 pub fn join(base: &str, relative: &str) -> String {
     if base.is_empty() {
         return relative.to_string();

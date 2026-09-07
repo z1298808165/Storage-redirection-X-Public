@@ -589,6 +589,7 @@ fn resolve_scoped_path_mappings(
         let final_path = resolve_scoped_rule_path(&mapping.final_path, user_id, storage_root);
         if request_path.is_empty()
             || final_path.is_empty()
+            || paths::is_application_private_root(&request_path)
             || paths::eq_ignore_case(&request_path, &final_path)
             || !paths::is_same_or_child(&request_path, storage_root)
             || !paths::is_same_or_child(&final_path, storage_root)

@@ -321,7 +321,24 @@ internal object SrxConfigNormalizer {
   ): String = sanitizeConfigPath(raw, allowRuleSyntax, allowWildcards).orEmpty()
 
   /** 映射字段同时支持旧的存储相对路径和新的任意绝对路径。 */
-  fun sanitizeEditableMappingPath(raw: String): String = sanitizeMappingPath(raw).orEmpty()
+  fun sanitizeEditableMappingPath(
+      raw: String,
+      rejectApplicationPrivateRoot: Boolean = true,
+  ): String = sanitizeMappingPath(raw, rejectApplicationPrivateRoot).orEmpty()
+
+  fun editableMappingPathError(
+      raw: String,
+      rejectApplicationPrivateRoot: Boolean = true,
+  ): String? {
+    if (rejectApplicationPrivateRoot && isApplicationPrivateRootPath(raw)) {
+      return "不能直接映射应用私有目录根路径，请填写其下的子路径"
+    }
+    return if (sanitizeMappingPath(raw, rejectApplicationPrivateRoot) == null) {
+      "映射路径无效"
+    } else {
+      null
+    }
+  }
 
   fun sanitizeMonitorFilterPath(raw: String, allowLegacyAbsolute: Boolean = true): String =
       sanitizeMonitorFilterPathOrNull(raw, allowLegacyAbsolute).orEmpty()
@@ -533,8 +550,8 @@ internal object SrxConfigNormalizer {
     val cleaned =
         values
             .mapNotNull { (request, target) ->
-              val cleanRequest = sanitizeMappingPath(request)
-              val cleanTarget = sanitizeMappingPath(target)
+              val cleanRequest = sanitizeMappingPath(request, rejectApplicationPrivateRoot = true)
+              val cleanTarget = sanitizeMappingPath(target, rejectApplicationPrivateRoot = false)
               if (
                   cleanRequest.isNullOrBlank() ||
                       cleanTarget.isNullOrBlank() ||
@@ -587,7 +604,10 @@ internal object SrxConfigNormalizer {
     return cycles
   }
 
-  private fun sanitizeMappingPath(raw: String): String? {
+  private fun sanitizeMappingPath(
+      raw: String,
+      rejectApplicationPrivateRoot: Boolean = true,
+  ): String? {
     val text = raw.trim().replace('\\', '/').replace(Regex("/+"), "/")
     if (text.isBlank() || text.length > 512 || '\u0000' in text) return null
     val path = text.trimEnd('/')
@@ -596,30 +616,78 @@ internal object SrxConfigNormalizer {
     }
     val absolute = path.startsWith('/')
     var body = path.removePrefix("/")
-    val storageAlias =
-        body
-            .replace(Regex("^storage/emulated/\\d+/?"), "")
-            .replace(Regex("^data/media/\\d+/?"), "")
-            .removePrefix("sdcard/")
-            .trim('/')
-    if (absolute && storageAlias != body.trim('/')) {
+    val storageAlias = canonicalStorageRelativePath(body)
+    if (storageAlias != null) {
       body = storageAlias
-      if (body.isBlank()) return null
+      if (body.isBlank() || (rejectApplicationPrivateRoot && isApplicationPrivateRootPath(body))) {
+        return null
+      }
+      if (Regex("[<>:\"|?*\\x00-\\x1F]").containsMatchIn(body)) return null
       return body
     }
     if (absolute && hasForbiddenNamespacePrefix("/$body")) return null
     if (!absolute) {
-      body =
-          body
-              .replace(Regex("^storage/emulated/\\d+/?"), "")
-              .replace(Regex("^data/media/\\d+/?"), "")
-              .removePrefix("sdcard/")
-              .trim('/')
       if (body.isBlank() || hasStorageRootPrefix(body)) return null
     }
     if (Regex("[<>:\"|?*\\x00-\\x1F]").containsMatchIn(body)) return null
-    return if (absolute) "/$body" else body
+    val normalized = if (absolute) "/$body" else body
+    if (rejectApplicationPrivateRoot && isApplicationPrivateRootPath(normalized)) return null
+    return normalized
   }
+
+  private fun canonicalStorageRelativePath(body: String): String? {
+    val aliases =
+        listOf(
+            Regex("^storage/emulated/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^storage/emulated/legacy(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^storage/self/primary(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^data/media/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^sdcard(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^mnt/user/\\d+/emulated/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex(
+                "^mnt/runtime/(default|read|write|full)/emulated/\\d+(?:/|$)",
+                RegexOption.IGNORE_CASE,
+            ),
+            Regex("^mnt/installer(?:/\\d+)?/emulated/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^mnt/androidwritable(?:/\\d+)?/emulated/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+            Regex("^mnt/pass_through(?:/\\d+)?/emulated/\\d+(?:/|$)", RegexOption.IGNORE_CASE),
+        )
+    aliases
+        .firstNotNullOfOrNull { alias ->
+          if (alias.containsMatchIn(body)) alias.replaceFirst(body, "").trim('/') else null
+        }
+        ?.let {
+          return it
+        }
+    return null
+  }
+
+  private fun isApplicationPrivateRootPath(raw: String): Boolean {
+    val normalized = raw.trim().replace('\\', '/').replace(Regex("/+"), "/").trimEnd('/')
+    if (normalized.isBlank()) return false
+
+    val storageRelative = canonicalStorageRelativePath(normalized.removePrefix("/"))
+    val body = storageRelative ?: normalized.removePrefix("/")
+    val parts = body.split('/').filter(String::isNotBlank)
+    if (
+        parts.size == 3 &&
+            parts[0].equals("Android", ignoreCase = true) &&
+            parts[1].lowercase() in setOf("data", "media", "obb")
+    ) {
+      return isApplicationPackageSegment(parts[2])
+    }
+
+    return when {
+      parts.size == 3 && parts[0] == "data" && parts[1] == "data" ->
+          isApplicationPackageSegment(parts[2])
+      parts.size == 4 && parts[0] == "data" && parts[1] in setOf("user", "user_de") ->
+          parts[2].all(Char::isDigit) && isApplicationPackageSegment(parts[3])
+      else -> false
+    }
+  }
+
+  private fun isApplicationPackageSegment(value: String): Boolean =
+      value.contains('.') && isSafePackageName(value)
 
   private fun hasForbiddenNamespacePrefix(path: String): Boolean =
       path == "/proc" ||

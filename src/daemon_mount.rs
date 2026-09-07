@@ -154,7 +154,9 @@ fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -
         .collect::<HashSet<_>>();
     let present_groups = targets
         .iter()
-        .filter(|target| mount_target_count_from_mountinfo(&content, target) > 0)
+        .filter(|target| {
+            mount_target_count_from_mountinfo(&content, target, &storage_root, &alias_roots) > 0
+        })
         .map(|target| canonical_mount_target(target, &storage_root, &alias_roots))
         .collect::<HashSet<_>>();
     let missing = expected_groups.difference(&present_groups).count();
@@ -1231,7 +1233,7 @@ fn is_mount_stack_cleared(mounted_count: usize) -> bool {
 
 fn current_mount_target_count(target: &str) -> usize {
     std::fs::read_to_string("/proc/self/mountinfo")
-        .map(|content| mount_target_count_from_mountinfo(&content, target))
+        .map(|content| mount_target_count_from_mountinfo(&content, target, "", &[]))
         .unwrap_or(0)
 }
 
@@ -1297,7 +1299,11 @@ fn append_resolved_mapping_request_targets(
         ),
         user_id,
     );
-    if resolved.is_empty() || paths::has_unsafe_segments(&resolved) || resolved == "/" {
+    if resolved.is_empty()
+        || paths::has_unsafe_segments(&resolved)
+        || resolved == "/"
+        || paths::is_application_private_root(&resolved)
+    {
         return;
     }
     if paths::is_same_or_child(&resolved, storage_root) {
@@ -1361,8 +1367,17 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
 }
 
 fn canonical_mount_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {
+    let target = paths::normalize(target);
+    let target = if target == "/data/data" {
+        "/data/user/0".to_string()
+    } else if let Some(rest) = target.strip_prefix("/data/data/") {
+        format!("/data/user/0/{}", rest)
+    } else {
+        target
+    };
+
     for alias_root in alias_roots {
-        if target == alias_root {
+        if target == *alias_root {
             return storage_root.to_string();
         }
         let Some(suffix) = target.strip_prefix(alias_root.as_str()) else {
@@ -1509,23 +1524,23 @@ fn read_mount_targets(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn mount_target_count_from_mountinfo(content: &str, target: &str) -> usize {
+fn mount_target_count_from_mountinfo(
+    content: &str,
+    target: &str,
+    storage_root: &str,
+    alias_roots: &[String],
+) -> usize {
+    let canonical_target = canonical_mount_target(target, storage_root, alias_roots);
     content
         .lines()
-        .filter(|line| mountinfo_line_target_matches(line, target))
+        .filter(|line| {
+            let Some(raw_target) = parse_mountinfo_raw_target(line) else {
+                return false;
+            };
+            let mount_target = unescape_mountinfo_field(raw_target);
+            canonical_mount_target(&mount_target, storage_root, alias_roots) == canonical_target
+        })
         .count()
-}
-
-/// 卸载重试循环会按次数反复统计挂载点，这里逐行比较挂载目标字段：
-/// 字段为纯 ASCII 且不含转义时直接按原始切片比较，只有含转义的行才展开为 String。
-fn mountinfo_line_target_matches(line: &str, target: &str) -> bool {
-    let Some(raw_target) = parse_mountinfo_raw_target(line) else {
-        return false;
-    };
-    if raw_target.is_ascii() && !raw_target.contains('\\') {
-        return raw_target == target;
-    }
-    unescape_mountinfo_field(raw_target) == target
 }
 
 fn parse_mountinfo_raw_target(line: &str) -> Option<&str> {

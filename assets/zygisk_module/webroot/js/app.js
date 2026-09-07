@@ -3159,7 +3159,13 @@
       : Object.entries(mappings || {});
     return entries
       .filter(
-        ([req, target]) => typeof req === "string" && req && typeof target === "string" && target,
+        ([req, target]) =>
+          typeof req === "string" &&
+          req &&
+          typeof target === "string" &&
+          target &&
+          validateMappingPath(req).valid &&
+          validateMappingPath(target, { allowApplicationPrivateRoot: true }).valid,
       )
       .sort(([a], [b]) => comparePathNames(a, b))
       .reduce((out, [req, target]) => {
@@ -3197,7 +3203,7 @@
   };
 
   // 路径映射的请求与目标均支持共享存储相对路径及 namespace 绝对路径。
-  function validateMappingPath(raw) {
+  function validateMappingPath(raw, options) {
     const text = String(raw || "")
       .trim()
       .replace(/\\/g, "/")
@@ -3208,7 +3214,65 @@
     if (!body || body.split("/").some((part) => part === "." || part === ".."))
       return { valid: false, msg: "路径不能包含 . 或 .." };
     if (/[<>:"|?*\x00-\x1f]/.test(body)) return { valid: false, msg: "路径包含非法字符" };
+    if (!options?.allowApplicationPrivateRoot && isApplicationPrivateRootPath(text)) {
+      return { valid: false, msg: "不能直接映射应用私有目录根路径，请填写其下的子路径" };
+    }
     return { valid: true, msg: "路径格式正确" };
+  }
+
+  function canonicalStorageRelativePath(path) {
+    const body = String(path || "").replace(/^\/+/, "");
+    const aliases = [
+      /^storage\/emulated\/\d+(?:\/|$)/i,
+      /^storage\/emulated\/legacy(?:\/|$)/i,
+      /^storage\/self\/primary(?:\/|$)/i,
+      /^data\/media\/\d+(?:\/|$)/i,
+      /^sdcard(?:\/|$)/i,
+      /^mnt\/user\/\d+\/emulated\/\d+(?:\/|$)/i,
+      /^mnt\/runtime\/(default|read|write|full)\/emulated\/\d+(?:\/|$)/i,
+      /^mnt\/installer(?:\/\d+)?\/emulated\/\d+(?:\/|$)/i,
+      /^mnt\/androidwritable(?:\/\d+)?\/emulated\/\d+(?:\/|$)/i,
+      /^mnt\/pass_through(?:\/\d+)?\/emulated\/\d+(?:\/|$)/i,
+    ];
+    for (const alias of aliases) {
+      if (alias.test(body)) return body.replace(alias, "").replace(/^\/+|\/+$/g, "");
+    }
+    return null;
+  }
+
+  function isApplicationPrivatePackageSegment(segment) {
+    return /^[A-Za-z0-9_][A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]+$/.test(segment);
+  }
+
+  function isApplicationPrivateRootPath(raw) {
+    const normalized = String(raw || "")
+      .trim()
+      .replace(/\\/g, "/")
+      .replace(/\/+/g, "/")
+      .replace(/\/+$/g, "");
+    if (!normalized) return false;
+
+    const storageRelative = canonicalStorageRelativePath(normalized);
+    const body = storageRelative || normalized.replace(/^\/+/, "");
+    const parts = body.split("/").filter(Boolean);
+    if (
+      parts.length === 3 &&
+      parts[0].toLowerCase() === "android" &&
+      ["data", "media", "obb"].includes(parts[1].toLowerCase())
+    ) {
+      return isApplicationPrivatePackageSegment(parts[2]);
+    }
+    if (parts.length === 3 && parts[0] === "data" && parts[1] === "data") {
+      return isApplicationPrivatePackageSegment(parts[2]);
+    }
+    if (
+      parts.length === 4 &&
+      parts[0] === "data" &&
+      (parts[1] === "user" || parts[1] === "user_de")
+    ) {
+      return /^\d+$/.test(parts[2]) && isApplicationPrivatePackageSegment(parts[3]);
+    }
+    return false;
   }
 
   function validatePath(raw, options) {
@@ -3352,7 +3416,7 @@
 
   function showPathValidation(inputEl, hintEl, options) {
     const result = options?.mappingPath
-      ? validateMappingPath(inputEl.value)
+      ? validateMappingPath(inputEl.value, options)
       : validatePath(inputEl.value, options);
     if (!inputEl.value.trim()) {
       hintEl.textContent = "";
@@ -3641,7 +3705,7 @@
         '">' +
         '<div class="path-validation" id="targetValidation"></div>' +
         '<div id="targetBrowserContainer"></div>' +
-        '<div class="modal-hint">路径匹配时重定向。相对于 ' +
+        '<div class="modal-hint">路径匹配时重定向。请求路径不能直接使用应用私有目录根路径，目标路径可以使用内部路径根目录。相对于 ' +
         storageBase +
         "；相对路径以 " +
         storageBase +
@@ -3705,7 +3769,11 @@
       DEBOUNCE_PATH_VALIDATE_MS,
     );
     const runTargetValidate = debounce(
-      () => showPathValidation(targetInput, targetHint, { mappingPath: true }),
+      () =>
+        showPathValidation(targetInput, targetHint, {
+          mappingPath: true,
+          allowApplicationPrivateRoot: true,
+        }),
       DEBOUNCE_PATH_VALIDATE_MS,
     );
     reqInput?.addEventListener("input", () => {
@@ -3722,10 +3790,10 @@
         target = targetInput.value.trim();
       const reqValidation = validateMappingPath(req);
       if (!reqValidation.valid) {
-        Theme.showToast("请求路径格式不正确", "error");
+        Theme.showToast(reqValidation.msg || "请求路径格式不正确", "error");
         return;
       }
-      const targetValidation = validateMappingPath(target);
+      const targetValidation = validateMappingPath(target, { allowApplicationPrivateRoot: true });
       if (!targetValidation.valid) {
         Theme.showToast(targetValidation.msg || "目标路径格式不正确", "error");
         return;
@@ -4727,14 +4795,14 @@
       : Object.entries(raw && typeof raw === "object" ? raw : {});
     entries.forEach(([reqRaw, targetRaw]) => {
       const req = sanitizeMappingPathWeb(reqRaw);
-      const target = sanitizeMappingPathWeb(targetRaw);
+      const target = sanitizeMappingPathWeb(targetRaw, true);
       if (!req || !target || req === target) return;
       mappings[req] = target;
     });
     return sortPathMappings(filterValidBackupMappingChains(mappings));
   }
 
-  function sanitizeMappingPathWeb(raw) {
+  function sanitizeMappingPathWeb(raw, allowApplicationPrivateRoot = false) {
     const text = String(raw ?? "")
       .trim()
       .replace(/\\/g, "/")
@@ -4752,9 +4820,16 @@
       .replace(/^sdcard\/?/i, "")
       .replace(/^\/+|\/+$/g, "");
     if (absolute && storageAlias !== body.replace(/^\/+|\/+$/g, "")) {
+      if (!allowApplicationPrivateRoot && isApplicationPrivateRootPath(storageAlias)) return "";
       return storageAlias;
     }
     if (!absolute && hasMonitorFilterStorageRootPrefix(body)) return "";
+    if (
+      !allowApplicationPrivateRoot &&
+      isApplicationPrivateRootPath(absolute ? "/" + body : body)
+    ) {
+      return "";
+    }
     return absolute ? "/" + body : body;
   }
 

@@ -54,6 +54,33 @@ fn native_runtime_rejects_cyclic_mapping_chains() {
 }
 
 #[test]
+fn native_runtime_rejects_private_roots_but_keeps_private_children() {
+    let input = r#"{
+        "users": {
+            "0": {
+                "path_mappings": {
+                    "Android/data/com.example": "Download/root",
+                    "Download/data": "/data/user/0/com.example",
+                    "Download/cache": "/data/user/0/com.example/cache",
+                    "Download/files": "/data/media/0/Android/data/com.example/files",
+                    "Download/target-root": "Android/data/com.example"
+                }
+            }
+        }
+    }"#;
+    let normalized = normalize_app_config("com.example", input);
+    assert_eq!(
+        normalized["users"]["0"]["path_mappings"],
+        serde_json::json!({
+            "Download/cache": "/data/user/0/com.example/cache",
+            "Download/data": "/data/user/0/com.example",
+            "Download/files": "Android/data/com.example/files",
+            "Download/target-root": "Android/data/com.example"
+        })
+    );
+}
+
+#[test]
 fn mapping_chain_rewrites_parent_result_into_nested_rule() {
     let mappings = vec![
         PathMapping::new(

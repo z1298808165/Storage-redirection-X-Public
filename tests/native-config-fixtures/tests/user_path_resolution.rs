@@ -95,3 +95,34 @@ fn storage_alias_roots_include_backend_and_public_paths() {
             .len()
     );
 }
+
+#[test]
+fn detects_application_private_roots_but_not_private_children() {
+    let roots = [
+        "/storage/emulated/0/Android/data/com.example",
+        "/data/media/0/Android/media/com.example/",
+        "/mnt/runtime/read/emulated/0/Android/obb/com.example",
+        "/storage/emulated/legacy/Android/data/com.example",
+        "/data/user/0/com.example",
+        "/data/user_de/10/com.example/",
+        "/data/data/com.example",
+    ];
+    for path in roots {
+        assert!(
+            paths::is_application_private_root(path),
+            "expected private root: {path}"
+        );
+    }
+
+    let children = [
+        "/storage/emulated/0/Android/data/com.example/files",
+        "/data/user/0/com.example/cache",
+        "/data/data/com.example/files",
+    ];
+    for path in children {
+        assert!(
+            !paths::is_application_private_root(path),
+            "unexpected private root: {path}"
+        );
+    }
+}

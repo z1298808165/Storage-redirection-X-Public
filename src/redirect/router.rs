@@ -447,6 +447,9 @@ fn resolve_router_mappings(
         else {
             continue;
         };
+        if paths::is_application_private_root(&current_path) {
+            continue;
+        }
         let Some(target_path) =
             resolve_router_storage_path(&mapping.final_path, user_id, storage_root)
         else {

@@ -38,7 +38,7 @@ fn is_public_storage_collection_root(segment: &str) -> bool {
 }
 
 fn is_specific_storage_owner_hint(user_id: i32, path: &str) -> bool {
-    let resolved_path = resolve_mapping_storage_path_for_user(user_id, path);
+    let resolved_path = resolve_mapping_request_storage_path_for_user(user_id, path);
     let Some(relative_path) = paths::storage_relative_path_for_user(&resolved_path, user_id) else {
         return false;
     };
@@ -83,8 +83,16 @@ fn resolve_mapping_path_for_user(user_id: i32, path: &str) -> String {
     resolved
 }
 
-fn resolve_mapping_storage_path_for_user(user_id: i32, path: &str) -> String {
+fn resolve_mapping_request_path_for_user(user_id: i32, path: &str) -> String {
     let resolved = resolve_mapping_path_for_user(user_id, path);
+    if paths::is_application_private_root(&resolved) {
+        return String::new();
+    }
+    resolved
+}
+
+fn resolve_mapping_request_storage_path_for_user(user_id: i32, path: &str) -> String {
+    let resolved = resolve_mapping_request_path_for_user(user_id, path);
     let storage_root = paths::storage_user_root_for_user(user_id);
     if !paths::is_child(&resolved, &storage_root) {
         return String::new();
@@ -340,7 +348,8 @@ fn resolve_package_by_path_in_apps(
         }
 
         for mapping in &user.path_mappings {
-            let request_path = resolve_mapping_path_for_user(user_id, &mapping.request_path);
+            let request_path =
+                resolve_mapping_request_path_for_user(user_id, &mapping.request_path);
             let final_path = resolve_mapping_path_for_user(user_id, &mapping.final_path);
             if request_path.is_empty()
                 || final_path.is_empty()

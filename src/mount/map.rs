@@ -59,6 +59,14 @@ impl MountPlanner {
                 continue;
             }
 
+            if paths::is_application_private_root(&current_path) {
+                log::warn!(
+                    "skip map (application private request root is not allowed): {}",
+                    current_path
+                );
+                continue;
+            }
+
             if paths::eq_ignore_case(&current_path, &target_path) {
                 continue;
             }

@@ -409,10 +409,12 @@ class SrxViewModel(
       from: String,
       to: String,
   ) {
-    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
-    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
+    val fromError = SrxConfigNormalizer.editableMappingPathError(from, true)
+    val toError = SrxConfigNormalizer.editableMappingPathError(to, false)
+    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from, true)
+    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to, false)
     if (cleanFrom.isBlank() || cleanTo.isBlank() || cleanFrom == cleanTo) {
-      showMessage("映射路径无效")
+      showMessage(fromError ?: toError ?: "映射路径无效")
       return
     }
     updateProfile {
@@ -425,11 +427,13 @@ class SrxViewModel(
       from: String,
       to: String,
   ) {
-    val cleanOldFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(oldFrom)
-    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from)
-    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to)
+    val fromError = SrxConfigNormalizer.editableMappingPathError(from, true)
+    val toError = SrxConfigNormalizer.editableMappingPathError(to, false)
+    val cleanOldFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(oldFrom, true)
+    val cleanFrom = SrxConfigNormalizer.sanitizeEditableMappingPath(from, true)
+    val cleanTo = SrxConfigNormalizer.sanitizeEditableMappingPath(to, false)
     if (cleanFrom.isBlank() || cleanTo.isBlank() || cleanFrom == cleanTo) {
-      showMessage("映射路径无效")
+      showMessage(fromError ?: toError ?: "映射路径无效")
       return
     }
     updateProfile { profile ->

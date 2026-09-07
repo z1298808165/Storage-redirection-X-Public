@@ -247,7 +247,7 @@ internal fun MappingEditorCard(
   GlassCard(insideMargin = PaddingValues(0.dp), alpha = 0.52f, shadowAlpha = 0.14f) {
     ConfigGroupHeader(title = "路径映射", addLabel = "添加路径映射", onAdd = { showDialog = true })
     Text(
-        "请求路径和目标路径都按应用视角填写，可使用相对路径或绝对路径；Android/data、Android/media、Android/obb 可直接选择。未命中的公共路径仍进入应用沙盒。",
+        "请求路径和目标路径都按应用视角填写，可使用相对路径或绝对路径；请求路径不能直接使用应用私有目录根路径，目标路径可以使用内部路径根目录。未命中的公共路径仍进入应用沙盒。",
         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         fontSize = 12.sp,
         lineHeight = 17.sp,

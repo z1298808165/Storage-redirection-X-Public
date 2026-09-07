@@ -187,7 +187,7 @@ class SrxConfigNormalizerTest {
   }
 
   @Test
-  fun normalizeAppConfigKeepsPrivatePathMappingTargets() {
+  fun normalizeAppConfigKeepsPrivatePathMappingChildren() {
     val normalized =
         SrxConfigNormalizer.normalizeAppConfig(
             AppConfig(
@@ -304,6 +304,44 @@ class SrxConfigNormalizerTest {
         "",
         SrxConfigNormalizer.sanitizeEditableMappingPath("/data/user/0/../com.example"),
     )
+  }
+
+  @Test
+  fun rejectsPrivateRootsAllowsChildren() {
+    listOf(
+            "Android/data/com.example",
+            "/data/user/0/com.example/",
+            "/data/user_de/10/com.example",
+            "/data/data/com.example",
+            "/storage/emulated/0/Android/media/com.example",
+            "/data/media/0/Android/obb/com.example",
+            "/mnt/runtime/read/emulated/0/Android/data/com.example",
+        )
+        .forEach { path ->
+          assertTrue(path, SrxConfigNormalizer.sanitizeEditableMappingPath(path).isBlank())
+        }
+
+    listOf(
+            "Android/data/com.example",
+            "/data/user/0/com.example/",
+            "/data/data/com.example",
+        )
+        .forEach { path ->
+          assertTrue(
+              path,
+              SrxConfigNormalizer.sanitizeEditableMappingPath(path, false).isNotBlank(),
+          )
+        }
+
+    listOf(
+            "Android/data/com.example/files",
+            "/data/user/0/com.example/cache",
+            "/data/data/com.example/files",
+            "/mnt/user/0/emulated/0/Android/data/com.example/files",
+        )
+        .forEach { path ->
+          assertTrue(path, SrxConfigNormalizer.sanitizeEditableMappingPath(path).isNotBlank())
+        }
   }
 
   @Test
