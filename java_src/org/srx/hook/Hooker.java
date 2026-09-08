@@ -305,7 +305,9 @@ public class Hooker {
           redirectEnabled || shouldProbeMediaStoreMutationPatch(callerUid)
               ? patchMediaStoreValues(args, actualArgs, callerUid, mutationMethod)
               : new MutationPatchResult(false, false);
-      if ("update".equals(mutationMethod)) {
+      // 仅对已启用重定向的调用方补回 pending 目标。MediaProvider、截图服务等
+      // 系统调用方可能复用相同 URI；若无条件套用旧登记，会把普通写入改到其它应用的沙箱。
+      if ("update".equals(mutationMethod) && redirectEnabled) {
         patchPendingMediaUpdatePath(args, actualArgs);
       }
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
@@ -320,8 +322,10 @@ public class Hooker {
             result = redirectEnabled ? callBackup(args) : callBackupWithProviderPassthrough(args);
           } catch (Throwable error) {
             Integer recovered =
-                recoverCommittedRedirectedMediaUpdate(
-                    provider, actualArgs, callerUid, mutationMethod, error);
+                redirectEnabled
+                    ? recoverCommittedRedirectedMediaUpdate(
+                        provider, actualArgs, callerUid, mutationMethod, error)
+                    : null;
             if (recovered == null) {
               logMutationFailure(this, callerUid, callerPid, error);
               throw error;
@@ -335,9 +339,11 @@ public class Hooker {
               result,
               callerUid,
               mutationMethod,
-              patch.patchedAny || patch.directWriteRequested);
-          finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
-          commitRedirectedPendingFile(actualArgs, mutationMethod);
+              redirectEnabled && (patch.patchedAny || patch.directWriteRequested));
+          if (redirectEnabled) {
+            finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
+            commitRedirectedPendingFile(actualArgs, mutationMethod);
+          }
           logMutationResult(this, result);
           return result;
         } finally {
