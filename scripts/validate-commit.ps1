@@ -52,15 +52,18 @@ function Get-PathKind {
 
 if ($PSCmdlet.ParameterSetName -eq "MessageFile") {
     $message = Get-Content -LiteralPath $MessageFile -Raw -Encoding UTF8
-    $paths = Get-GitLines -Arguments @("diff", "--cached", "--name-only", "--diff-filter=ACMR")
+    $paths = @(Get-GitLines -Arguments @("diff", "--cached", "--name-only", "--diff-filter=ACMR"))
 } else {
     $message = (Get-GitLines -Arguments @("show", "-s", "--format=%B", $Commit)) -join "`n"
-    $paths = Get-GitLines -Arguments @(
+    $paths = @(Get-GitLines -Arguments @(
         "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", $Commit
-    )
+    ))
 }
 
 $title = (($message -split "`r?`n", 2)[0]).Trim()
+if ($paths.Count -gt 0 -and $message -notmatch '(?m)^(?:变更|用户影响)[：:]\s*\S') {
+    throw "包含文件改动的 Commit 必须由 AI Agent 在正文中写入 变更： 或 用户影响：，供 CI/Release 更新日志直接使用。"
+}
 if ([string]::IsNullOrWhiteSpace($title)) {
     throw "Commit 标题不能为空。"
 }

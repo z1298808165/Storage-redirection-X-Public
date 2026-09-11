@@ -760,14 +760,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate Chinese changelog
+      - name: Generate changelog from AI commit descriptions
         run: |
           mkdir -p build
           python .github/scripts/generate_changelog.py \
             --mode ci \
             --version "$VERSION" \
             --output build/CHANGELOG.md
-
       - name: Verify draft CI release assets
         env:
           GH_TOKEN: ${{ github.token }}

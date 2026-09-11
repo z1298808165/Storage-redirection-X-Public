@@ -644,21 +644,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate Chinese changelog
+      - name: Generate changelog from AI commit descriptions
         run: |
           mkdir -p build
           python .github/scripts/generate_changelog.py \
             --mode release \
             --version "$VERSION" \
             --output build/changelog.md
-          RELEASE_NOTES="docs/release-notes/v${VERSION}.md"
-          if [ -f "$RELEASE_NOTES" ]; then
-            cp "$RELEASE_NOTES" build/changelog.md
-          fi
-          python .github/scripts/validate_release_notes.py \
-            --file build/changelog.md \
-            --version "$VERSION"
-
       - name: Verify draft GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}

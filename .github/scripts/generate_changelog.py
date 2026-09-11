@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Chinese changelogs for CI artifacts and GitHub Releases."""
+"""根据提交时由 AI Agent 生成的用户说明渲染中文 CI/Release 更新日志。"""
 
 from __future__ import annotations
 
@@ -10,55 +10,18 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-MAX_PATCH_CHARS = 180_000
-MAX_SECTION_ITEMS = 8
-GENERIC_SUMMARIES = {"CI", "ci", "更新", "修复", "调整", "优化", "文档", "测试"}
-PATH_MAPPING_SUMMARY = (
-    "支持任意路径映射：公共存储、`Android/data|media|obb/<包名>` 私有目录与 "
-    "`/data/user`、`/data/data` 等当前 namespace 路径可按需双向映射，源和目标独立解析，"
-    "并受路径校验、循环检测及最大映射链深度限制"
-)
-NESTED_MAPPING_SUMMARY = (
-    "支持嵌套路径映射链：父路径映射后的目标可继续命中更具体的子路径规则，"
-    "并按最长前缀和最大映射链深度继续处理"
-)
-PATH_RULE_BOUNDARY_SUMMARY = (
-    "明确路径规则边界：普通规则仅接受相对共享存储路径，`path_mappings` 另支持经过"
-    " namespace 安全校验的绝对路径"
-)
-RELEASE_FIX_SUMMARIES = {
-    "媒体代写与系统存储链路": "修复媒体文件保存、系统代写归因和存储路由中的兼容性问题",
-    "FUSE、挂载和路径映射": "修复文件保存、挂载、路径映射及只读规则组合下的兼容性问题",
-    "文件监控与日志": "修复文件操作记录、筛选及日志采集中的准确性和稳定性问题",
-    "WebUI/管理界面": "修复管理界面的显示、交互和状态同步问题",
-    "管理 App": "修复管理 App 的功能、显示和状态同步问题",
-    "配置解析与模板": "修复配置解析、默认值和模板兼容性问题",
-    "重定向策略与调用方识别": "修复重定向策略、调用方识别和应用隔离问题",
-    "核心逻辑": "修复模块核心逻辑中的稳定性和兼容性问题",
-}
+MAX_SECTION_ITEMS = 20
+COMPONENTS = ("module", "app", "other")
+SECTIONS = ("fixed", "features", "changes", "usage", "notes")
 AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
     "发布：更新更新清单",
 )
-CLASSIFICATION_PATCH_EXCLUDED_PREFIXES = (
-    ".github/",
-    "docs/",
-    "scripts/",
+MACHINE_TRAILER_PATTERN = re.compile(
+    r"^(?:AI-Review-(?:Agent|Tree|Report|Summary):|Signed-off-by:|Co-authored-by:)",
+    flags=re.I,
 )
-CLASSIFICATION_PATCH_EXCLUDED_FILES = {
-    "AGENTS.md",
-    "CONTRIBUTING.md",
-    "README.md",
-    "update.json",
-}
-RUNTIME_VALIDATION_AREAS = {
-    "媒体代写与系统存储链路",
-    "FUSE、挂载和路径映射",
-    "重定向策略与调用方识别",
-}
-CONFIG_VALIDATION_AREAS = {
-    "配置解析与模板",
-}
+BODY_FIELD_PATTERN = re.compile(r"^(变更|用户影响|范围|限制|验证)[：:]\s*(.*)$")
 
 
 @dataclass(frozen=True)
@@ -66,8 +29,7 @@ class CommitInfo:
     sha: str
     subject: str
     body: str
-    summary: str
-    kind: str
+    fields: dict[str, str]
 
 
 def run_git(args: list[str], allow_fail: bool = False) -> str:
@@ -90,6 +52,11 @@ def current_ref() -> str:
     return os.environ.get("GITHUB_SHA") or run_git(["rev-parse", "HEAD"])
 
 
+def release_version(tag: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
 def find_previous_ci_ref(current: str) -> str:
     candidates: list[tuple[int, str]] = []
     refs = run_git(
@@ -104,28 +71,12 @@ def find_previous_ci_ref(current: str) -> str:
         allow_fail=True,
     )
     for line in refs.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\t", 1)
-        if len(parts) != 2:
-            continue
-        timestamp, tag = parts
-        candidates.append((int(timestamp or "0"), tag))
-
+        timestamp, separator, tag = line.strip().partition("\t")
+        if separator and tag:
+            candidates.append((int(timestamp or "0"), tag))
     if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0][1]
-
-    previous_commit = run_git(["rev-parse", f"{current}^"], allow_fail=True)
-    return previous_commit
-
-
-def release_version(tag: str) -> tuple[int, int, int] | None:
-    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
-    if not match:
-        return None
-    return tuple(int(part) for part in match.groups())
+        return max(candidates)[1]
+    return run_git(["rev-parse", f"{current}^"], allow_fail=True)
 
 
 def select_previous_release_tag(tags: list[str], version: str) -> str:
@@ -136,689 +87,249 @@ def select_previous_release_tag(tags: list[str], version: str) -> str:
         if (parsed := release_version(tag)) is not None
         and (current_version is None or parsed < current_version)
     ]
-    return max(candidates, default=(None, ""))[1]
+    return max(candidates, default=((0, 0, 0), ""))[1]
 
 
-def find_previous_release_ref(current: str, version: str = "") -> str:
+def find_previous_release_ref(version: str) -> str:
     tags = run_git(["tag", "--list", "v*"], allow_fail=True).splitlines()
-    if version:
-        return select_previous_release_tag(tags, version)
-
-    current_commit = run_git(["rev-parse", f"{current}^{{commit}}"], allow_fail=True)
-    candidates = [
-        tag
-        for tag in tags
-        if run_git(["rev-parse", f"{tag}^{{commit}}"], allow_fail=True) != current_commit
-    ]
-    return select_previous_release_tag(candidates, "")
+    return select_previous_release_tag(tags, version)
 
 
 def rev_range(previous: str, current: str) -> str:
-    if previous:
-        return f"{previous}..{current}"
-    return current
+    return f"{previous}..{current}" if previous else current
 
 
-def commit_infos(previous: str, current: str) -> list[CommitInfo]:
-    log_range = rev_range(previous, current)
-    output = run_git(["log", "--pretty=format:%H%x1f%s%x1f%b%x1e", log_range], allow_fail=True)
-    commits: list[CommitInfo] = []
-    for raw in output.split("\x1e"):
-        raw = raw.strip("\n")
-        if not raw:
+def summary_input(subject: str, body: str) -> str:
+    """过滤审核凭据，保留 Agent 写入的用户说明。"""
+    body_lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or MACHINE_TRAILER_PATTERN.match(stripped):
             continue
-        parts = raw.split("\x1f", 2)
-        if len(parts) < 2:
+        body_lines.append(stripped)
+    return "\n".join([subject.strip(), *body_lines[:20]])
+
+
+def parse_body_fields(body: str) -> dict[str, str]:
+    fields: dict[str, list[str]] = {}
+    current_field = ""
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line or MACHINE_TRAILER_PATTERN.match(line):
             continue
-        sha = parts[0][:7]
-        subject = parts[1].strip()
-        if is_auto_manifest_subject(subject):
+        match = BODY_FIELD_PATTERN.match(line)
+        if match:
+            current_field = match.group(1)
+            fields.setdefault(current_field, []).append(match.group(2).strip())
             continue
-        body = parts[2].strip() if len(parts) > 2 else ""
-        summary = summarize_commit_text(summary_input(subject, body))
-        commits.append(
-            CommitInfo(
-                sha=sha,
-                subject=subject,
-                body=body,
-                summary=summary,
-                kind=classify_commit(subject, summary),
-            )
-        )
-    return commits
+        if current_field and not line.startswith(("AI-Review-", "Signed-off-by:", "Co-authored-by:")):
+            fields.setdefault(current_field, []).append(line)
+    return {key: " ".join(value).strip() for key, value in fields.items() if " ".join(value).strip()}
 
 
 def is_auto_manifest_subject(subject: str) -> bool:
     return subject.startswith(AUTO_MANIFEST_PREFIXES)
 
 
-def commit_lines(commits: list[CommitInfo]) -> list[str]:
-    return [f"- `{commit.sha}` {commit.summary}" for commit in commits]
-
-
-def summary_input(subject: str, body: str) -> str:
-    """保留提交正文中的用户说明，过滤审核凭据和其它机器 trailer。"""
-    body_lines = []
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped or re.match(
-            r"^(?:AI-Review-(?:Agent|Tree|Report|Summary):|Signed-off-by:|Co-authored-by:)",
-            stripped,
-            flags=re.I,
-        ):
+def commit_infos(previous: str, current: str) -> list[CommitInfo]:
+    output = run_git(
+        ["log", "--pretty=format:%H%x1f%s%x1f%b%x1e", rev_range(previous, current)],
+        allow_fail=True,
+    )
+    commits: list[CommitInfo] = []
+    for raw in output.split("\x1e"):
+        parts = raw.strip("\n").split("\x1f", 2)
+        if len(parts) < 2 or is_auto_manifest_subject(parts[1].strip()):
             continue
-        body_lines.append(stripped)
-    return "\n".join([subject.strip(), *body_lines[:12]])
+        subject = parts[1].strip()
+        body = parts[2].strip() if len(parts) > 2 else ""
+        commits.append(
+            CommitInfo(
+                sha=parts[0][:12],
+                subject=subject,
+                body=body,
+                fields=parse_body_fields(body),
+            )
+        )
+    return commits
 
 
 def changed_files(previous: str, current: str) -> list[str]:
-    if previous:
-        args = ["diff", "--name-only", f"{previous}..{current}"]
-    else:
-        args = ["show", "--format=", "--name-only", current]
-    output = run_git(args, allow_fail=True)
-    return [line.strip() for line in output.splitlines() if line.strip()]
-
-
-def changed_patch(previous: str, current: str) -> str:
-    if previous:
-        args = [
-            "diff",
-            "--unified=0",
-            "--no-ext-diff",
-            f"{previous}..{current}",
-            "--",
-            ".",
-            ":(exclude)vendor/**",
-            ":(exclude)target/**",
-        ]
-    else:
-        args = [
-            "show",
-            "--format=",
-            "--unified=0",
-            "--no-ext-diff",
-            current,
-            "--",
-            ".",
-            ":(exclude)vendor/**",
-            ":(exclude)target/**",
-        ]
-    return run_git(args, allow_fail=True)[:MAX_PATCH_CHARS]
+    args = ["diff", "--name-only", f"{previous}..{current}"] if previous else ["show", "--format=", "--name-only", current]
+    return [line.strip() for line in run_git(args, allow_fail=True).splitlines() if line.strip()]
 
 
 def commit_changed_files(commit: CommitInfo) -> list[str]:
     output = run_git(
-        ['diff-tree', '--no-commit-id', '--name-only', '-r', commit.sha],
+        ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit.sha],
         allow_fail=True,
     )
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def change_components(path: str) -> set[str]:
-    if path.startswith('app/'):
-        return {'app'}
-    if path.startswith('assets/zygisk_module/webroot/'):
-        return {'module'}
-    if path.startswith(('.github/', 'docs/', 'scripts/')) or path in {
-        'AGENTS.md',
-        'CLAUDE.md',
-        'CONTRIBUTING.md',
-        'README.md',
+    if path.startswith("app/"):
+        return {"app"}
+    if path.startswith("assets/zygisk_module/webroot/"):
+        return {"module"}
+    if path.startswith((".github/", "docs/", "scripts/")) or path in {
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "README.md",
     }:
-        return {'other'}
-    if path == 'update.json':
+        return {"other"}
+    if path == "update.json":
         return set()
-    return {'module'}
+    return {"module"}
 
 
-def patch_path_affects_classification(path: str) -> bool:
-    if path in CLASSIFICATION_PATCH_EXCLUDED_FILES:
-        return False
-    if path.startswith(CLASSIFICATION_PATCH_EXCLUDED_PREFIXES):
-        return False
-    if "/test/" in path or path.startswith("app/src/test/"):
-        return False
-    return True
+def commit_kind(subject: str) -> str:
+    match = re.match(r"^\s*([^（(：:]+)(?:\([^)]*\))?[：:]", subject)
+    prefix = match.group(1).strip().lower() if match else ""
+    return {
+        "修复": "fix",
+        "回退": "fix",
+        "功能": "feature",
+        "新增": "feature",
+        "界面": "feature",
+        "重构": "change",
+        "性能": "change",
+        "维护": "change",
+        "依赖": "change",
+        "测试": "process",
+        "文档": "process",
+        "构建": "process",
+        "CI": "process",
+        "发布": "process",
+    }.get(prefix, "change")
 
 
-def classification_patch(patch: str) -> str:
-    chunks: list[str] = []
-    include_current_file = True
-    for line in patch.splitlines():
-        if line.startswith("diff --git "):
-            match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
-            path = match.group(2) if match else ""
-            include_current_file = patch_path_affects_classification(path)
-        if include_current_file:
-            chunks.append(line)
-    return "\n".join(chunks)
+def subject_description(subject: str) -> str:
+    description = re.sub(r"^\s*[^（(：:]+(?:\([^)]*\))?[：:]\s*", "", subject)
+    description = re.sub(r"\s*(?:\[(?:skip ci|ci skip|no ci)\]|仅验证CI)\s*$", "", description, flags=re.I)
+    return description.strip(" 。；;，,\t")
 
 
-def summarize_commit_text(text: str) -> str:
-    normalized = " ".join(line.strip() for line in text.splitlines() if line.strip())
-    normalized = re.sub(
-        r"^(feat|fix|docs|ci|chore|refactor|perf|test|build)(\([^)]*\))?:\s*",
-        "",
-        normalized,
-        flags=re.I,
-    )
-    normalized = re.sub(
-        r"^(修复|功能|新增|文档|测试|发布|构建|优化|性能|重构|维护|依赖|界面|回退|CI)(\([^)]*\))?[：:]\s*",
-        "",
-        normalized,
-        flags=re.I,
-    )
-    normalized = re.sub(
-        r"\s*(?:\[(?:skip ci|ci skip|no ci)\]|仅验证CI)\s*$",
-        "",
-        normalized,
-        flags=re.I,
-    )
-    replacements = [
-        ("attribute system media writes to caller apps", "将系统媒体代写归因到真实调用应用"),
-        ("caller", "调用方"),
-        ("system media writes", "系统媒体代写"),
-        ("changelog", "更新日志"),
-        ("release", "正式发布"),
-        ("ci", "CI"),
-        ("config", "配置"),
-        ("workflow", "工作流"),
-    ]
-    result = normalized
-    for source, target in replacements:
-        result = re.sub(re.escape(source), target, result, flags=re.I)
-    result = result or "未填写提交说明"
-    if (
-        "任意路径映射" in normalized
-        or ("任意路径" in normalized and "映射" in normalized)
-        or ("路径映射" in normalized and "请求端和目标端" in normalized)
-        or ("path_mappings" in normalized and "namespace" in normalized)
-    ):
-        return PATH_MAPPING_SUMMARY
-    if "嵌套路径映射" in normalized or "映射链" in normalized:
-        return NESTED_MAPPING_SUMMARY
-    if "路径规则边界" in normalized or (
-        "映射字段" in normalized and "绝对路径" in normalized
-    ):
-        return PATH_RULE_BOUNDARY_SUMMARY
-    return result
+def user_summary(commit: CommitInfo) -> str:
+    change = commit.fields.get("用户影响") or commit.fields.get("变更") or subject_description(commit.subject)
+    parts = [change]
+    scope = commit.fields.get("范围")
+    limit = commit.fields.get("限制")
+    if scope:
+        parts.append(f"适用范围：{scope}")
+    if limit:
+        parts.append(f"限制：{limit}")
+    return "；".join(part.strip(" 。；;，,") for part in parts if part.strip(" 。；;，,"))
 
 
-def classify_commit(subject: str, summary: str) -> str:
-    prefix_match = re.match(r"^\s*([A-Za-z]+|[\u4e00-\u9fff]+)(?:\([^)]*\))?[：:]", subject)
-    if prefix_match:
-        prefix = prefix_match.group(1).lower()
-        prefix_map = {
-            "fix": "fix",
-            "bugfix": "fix",
-            "hotfix": "fix",
-            "修复": "fix",
-            "feat": "feature",
-            "feature": "feature",
-            "功能": "feature",
-            "新增": "feature",
-            "docs": "docs",
-            "doc": "docs",
-            "文档": "docs",
-            "ci": "ci",
-            "build": "ci",
-            "构建": "ci",
-            "release": "ci",
-            "发布": "ci",
-            "test": "test",
-            "tests": "test",
-            "测试": "test",
-            "回退": "fix",
-            "界面": "feature",
-            "perf": "fix",
-            "优化": "fix",
-            "refactor": "internal",
-            "重构": "internal",
-            "chore": "internal",
-            "维护": "internal",
-            "依赖": "dependency",
-        }
-        if prefix in prefix_map:
-            return prefix_map[prefix]
-
-    lowered = subject.lower()
-    if subject.strip().upper() == "CI" or any(word in lowered for word in ("workflow", "artifact", "release")):
-        return "ci"
-
-    fix_markers = (
-        "修复",
-        "避免",
-        "降低",
-        "减少",
-        "补齐",
-        "补全",
-        "校正",
-        "清理",
-        "兼容",
-        "处理",
-        "稳定",
-        "放行",
-        "保留",
-        "禁止",
-        "严格",
-        "恢复",
-        "兜底",
-    )
-    feature_markers = ("新增", "增加", "支持", "引入", "启用", "提供", "允许", "接入", "产出")
-    docs_markers = ("文档", "说明", "README", "docs/")
-    test_markers = ("测试", "覆盖", "fixture")
-
-    if summary.startswith(fix_markers) or any(marker in summary for marker in fix_markers[:8]):
-        return "fix"
-    if summary.startswith(feature_markers):
-        return "feature"
-    if any(marker in summary for marker in docs_markers):
-        return "docs"
-    if any(marker in summary for marker in test_markers):
-        return "test"
-    return "internal"
+def section_for_commit(commit: CommitInfo, mode: str) -> str | None:
+    kind = commit_kind(commit.subject)
+    if kind == "fix":
+        return "fixed"
+    if kind == "feature":
+        return "features"
+    if kind == "change":
+        return "changes"
+    if mode == "ci":
+        return "changes"
+    return None
 
 
-def add_unique(items: list[str], sentence: str) -> None:
-    sentence = sentence.strip()
-    if not sentence:
-        return
-    if not sentence.startswith("- "):
-        sentence = f"- {sentence}"
-    if not sentence.endswith(("。", "！", "？")):
-        sentence = f"{sentence.rstrip('；;,.，、 ')}。"
-    if sentence not in items:
-        items.append(sentence)
-
-
-def compact_phrase(text: str) -> str:
-    text = re.sub(r"\s+", " ", text).strip()
-    return text.strip("。；;,.，、 ")
-
-
-def meaningful_phrase(text: str) -> bool:
-    text = compact_phrase(text)
-    return bool(text and text not in GENERIC_SUMMARIES and len(text) > 2)
-
-
-def join_limited(items: list[str], limit: int = 4) -> str:
-    phrases = [compact_phrase(item) for item in items if meaningful_phrase(item)]
-    shown = phrases[:limit]
-    result = "、".join(shown)
-    if len(phrases) > limit:
-        suffix = " 等" if re.search(r"[A-Za-z0-9]$", result) else "等"
-        result = f"{result}{suffix}"
-    return result
-
-
-def action_area(action: str, area: str) -> str:
-    separator = " " if re.match(r"^[A-Za-z0-9]", area) else ""
-    return f"{action}{separator}{area}"
-
-
-def is_user_facing_feature(commit: CommitInfo, _files: list[str], _patch: str) -> bool:
-    text = "\n".join([commit.subject, commit.summary])
-    feature_markers = (
-        "设置",
-        "开关",
-        "配置项",
-        "配置键",
-        "全局配置",
-        "用户配置",
-        "配置",
-        "页面",
-        "入口",
-        "菜单",
-        "按钮",
-        "模板",
-        "导入",
-        "导出",
-        "备份",
-        "恢复",
-        "缩放",
-        "路径浏览器",
-        "日志包",
-        "自动保存",
-        "详细日志",
-        "管理 App",
-        "管理界面",
-        "WebUI",
-        "路径映射",
-        "任意路径",
-        "映射链",
-        "namespace",
-    )
-    return any(marker in text for marker in feature_markers)
-
-
-def detect_area(text: str) -> str:
-    area_rules = [
-        (
-            (
-                "MediaProvider",
-                "媒体",
-                "系统代写",
-                "writer hook",
-                "SAF",
-                "DocumentsUI",
-                "PhotoPicker",
-                "Hooker.java",
-            ),
-            "媒体代写与系统存储链路",
-        ),
-        (
-            (
-                "FUSE",
-                "FuseFix",
-                "fuse",
-                "挂载",
-                "mount",
-                "通配符",
-                "只读",
-                "映射",
-                "路径映射",
-                "公共映射",
-            ),
-            "FUSE、挂载和路径映射",
-        ),
-        (
-            ("文件监视", "文件监控", "监视记录", "日志导出", "采集器", "source_hint"),
-            "文件监控与日志",
-        ),
-        (
-            ("WebUI", "webui", "界面", "缩放", "bottomNav", "app.js", "miuix"),
-            "WebUI/管理界面",
-        ),
-        (
-            ("管理 App", "MainActivity", "SettingsScreen", "Compose", "Miuix", "APK"),
-            "管理 App",
-        ),
-        (("配置", "raw 配置", "模板", "global.json", "apps/", "config"), "配置解析与模板"),
-        (("重定向", "redirect", "caller", "调用方", "归因", "路径策略", "router"), "重定向策略与调用方识别"),
-        (("CI", "workflow", "artifact", "Release", "产物", "更新日志"), "CI/Release 发布流程"),
-        (("测试", "单元测试", "fixture"), "测试覆盖"),
-        (("文档", "README", "docs/"), "文档说明"),
-    ]
-    for keywords, area in area_rules:
-        if any(keyword in text for keyword in keywords):
-            return area
-    return "核心逻辑"
-
-
-def append_grouped_commit_sections(
-    sections: dict[str, list[str]],
-    commits: list[CommitInfo],
-    files: list[str],
-    patch: str,
-) -> None:
-    fix_groups: dict[str, list[str]] = {}
-    feature_groups: dict[str, list[str]] = {}
-
+def collect_analysis(mode: str, files: list[str], commits: list[CommitInfo]) -> dict[str, dict[str, list[dict[str, object]]]]:
+    file_set = set(files)
+    analysis = {
+        component: {section: [] for section in SECTIONS}
+        for component in COMPONENTS
+        if mode == "ci" or component != "other"
+    }
     for commit in commits:
-        area = detect_area(f"{commit.subject}\n{commit.summary}")
-        if commit.kind == "fix":
-            fix_groups.setdefault(area, []).append(commit.summary)
-        elif commit.kind == "feature" and is_user_facing_feature(commit, files, patch):
-            feature_groups.setdefault(area, []).append(commit.summary)
-
-    for area, summaries in fix_groups.items():
-        details = join_limited(summaries)
-        if not details:
+        summary = user_summary(commit)
+        if not summary:
             continue
-        if len(summaries) == 1:
-            add_unique(sections["fixed"], f"{action_area('修复', area)}相关问题：{details}")
-        else:
-            add_unique(sections["fixed"], f"{action_area('修复', area)}的一组问题：{details}")
-
-    for area, summaries in feature_groups.items():
-        details = join_limited(summaries)
-        if details:
-            add_unique(sections["features"], f"{action_area('新增或增强', area)}能力：{details}")
-
-
-def is_release_process_only(commit: CommitInfo) -> bool:
-    if commit.kind not in {"fix", "feature"}:
-        return True
-    text = f"{commit.subject}\n{commit.summary}"
-    if detect_area(text) in {"CI/Release 发布流程", "测试覆盖", "文档说明"}:
-        return True
-    lowered = text.lower()
-    markers = (
-        "warning",
-        "warnings",
-        "警告",
-        "停止跟踪",
-        "移除跟踪",
-        "文件跟踪",
-        "跟踪文件",
-        "构建计数",
-        "版本计数",
-        "仅验证ci",
-    )
-    return commit.subject.startswith("回退") or "尝试" in text or any(
-        marker in lowered for marker in markers
-    )
-
-
-def classify_release_changes(
-    files: list[str], commits: list[CommitInfo], patch: str
-) -> dict[str, list[str]]:
-    relevant = [commit for commit in commits if not is_release_process_only(commit)]
-    sections = {
-        "fixed": [],
-        "features": [],
-        "changes": [],
-        "usage": [],
-        "notes": [],
-    }
-
-    fixed_areas = {
-        detect_area(f"{commit.subject}\n{commit.summary}")
-        for commit in relevant
-        if commit.kind == "fix"
-    }
-    for area in sorted(fixed_areas):
-        add_unique(
-            sections["fixed"],
-            RELEASE_FIX_SUMMARIES.get(area, f"修复{area}相关问题"),
-        )
-
-    feature_groups: dict[str, list[str]] = {}
-    change_groups: dict[str, list[str]] = {}
-    for commit in relevant:
-        if commit.kind != "feature":
+        section = section_for_commit(commit, mode)
+        if section is None:
             continue
-        area = detect_area(f"{commit.subject}\n{commit.summary}")
-        target = feature_groups if is_user_facing_feature(commit, files, patch) else change_groups
-        target.setdefault(area, []).append(commit.summary)
-
-    for area, summaries in feature_groups.items():
-        details = join_limited(summaries)
-        if details:
-            add_unique(sections["features"], f"{action_area('新增或增强', area)}能力：{details}")
-    for area, summaries in change_groups.items():
-        details = join_limited(summaries)
-        if details:
-            add_unique(sections["changes"], f"{action_area('调整或增强', area)}：{details}")
-
-    append_feature_usage(sections, relevant, files, patch)
-    append_contextual_sections(sections, files, relevant)
-    for key, values in sections.items():
-        sections[key] = limit_section(values, include_commit_details=False)
-    return sections
+        commit_files = [path for path in commit_changed_files(commit) if path in file_set]
+        for component in COMPONENTS:
+            if component not in analysis:
+                continue
+            component_files = [path for path in commit_files if component in change_components(path)]
+            if not component_files:
+                continue
+            add_unique(
+                analysis[component][section],
+                {"text": summary, "files": component_files},
+            )
+    return analysis
 
 
-def append_contextual_sections(
-    sections: dict[str, list[str]],
-    files: list[str],
-    commits: list[CommitInfo],
-) -> None:
-    has_substantive_change = bool(
-        sections["fixed"] or sections["features"] or sections.get("changes")
-    )
-    has_runtime = any(
-        path.startswith(("src/hook/", "src/mount", "src/fuse", "src/lifecycle", "src/redirect/", "src/daemon", "java_src/", "native/"))
-        for path in files
-    )
-    runtime_change_areas = {
-        detect_area(f"{commit.subject}\n{commit.summary}")
-        for commit in commits
-        if commit.kind in {"fix", "feature"}
-    }
-    has_runtime_behavior_change = bool(
-        runtime_change_areas & RUNTIME_VALIDATION_AREAS
-    )
-    has_config = any(path.startswith("src/config") or path.startswith("docs/config-fixtures/") for path in files)
-    has_config_behavior_change = bool(
-        runtime_change_areas & CONFIG_VALIDATION_AREAS
-    )
-
-    if has_substantive_change and has_runtime and has_runtime_behavior_change:
-        add_unique(sections["notes"], "本次涉及运行时 hook、挂载或系统存储链路，升级后建议重点验证文件保存、相册读取、SAF 导出和已配置应用的读写路径")
-
-    if has_substantive_change and has_config and has_config_behavior_change:
-        add_unique(sections["notes"], "配置解析或默认值有调整时，已有配置会继续按兼容逻辑读取；运行中的应用可能需要重启后才完全使用新规则")
-
-
-def append_feature_usage(
-    sections: dict[str, list[str]],
-    commits: list[CommitInfo],
-    files: list[str],
-    patch: str,
-) -> None:
-    if not sections["features"]:
+def add_unique(items: list[dict[str, object]], item: dict[str, object]) -> None:
+    text = str(item["text"]).strip(" 。；;，,")
+    if not text:
         return
-
-    for commit in commits:
-        if commit.kind != "feature" or not is_user_facing_feature(commit, files, patch):
-            continue
-        text = f"{commit.subject}\n{commit.summary}"
-        if "配置操作即时保存" in text or "自动保存" in text or "app_config_auto_save" in text:
-            add_unique(sections["usage"], "在 WebUI 设置页打开 `配置操作即时保存` 后，进入应用配置页直接修改配置即可；关闭时仍沿用手动点击 `保存` 的旧流程")
-        if "详细日志" in text or "verbose_logging_enabled" in text:
-            add_unique(sections["usage"], "需要排障时在设置页的“模块设置”中打开 `详细日志`，定位结束后关闭即可立即停止相关记录")
-        if "管理界面缩放" in text or "界面缩放" in text or "page_scale" in text or "缩放" in text:
-            add_unique(sections["usage"], "在 WebUI 或管理界面的设置页调整界面缩放比例；保存后刷新页面或重新打开管理界面即可使用新的显示比例")
+    if not any(existing["text"] == text for existing in items):
+        items.append({"text": text, "files": item["files"]})
 
 
-def limit_section(items: list[str], include_commit_details: bool = True) -> list[str]:
-    if len(items) <= MAX_SECTION_ITEMS:
-        return items
-    omitted = len(items) - (MAX_SECTION_ITEMS - 1)
-    if include_commit_details:
-        summary = f"另有 {omitted} 条相关变化已保留在下方提交列表中，完整细节以提交列表和完整变更对比为准"
-    else:
-        summary = f"另有 {omitted} 条同类变化已合并到以上说明"
-    return [*items[: MAX_SECTION_ITEMS - 1], f"- {summary}。"]
+def limit_analysis(analysis: dict[str, dict[str, list[dict[str, object]]]]) -> None:
+    for sections in analysis.values():
+        for section, items in sections.items():
+            if len(items) > MAX_SECTION_ITEMS:
+                sections[section] = items[:MAX_SECTION_ITEMS]
 
 
-def classify_changes(files: list[str], commits: list[CommitInfo], patch: str) -> dict[str, list[str]]:
-    domain_patch = classification_patch(patch)
-    domain_files = [path for path in files if patch_path_affects_classification(path)]
-    sections = {
-        "fixed": [],
-        "features": [],
-        "changes": [],
-        "usage": [],
-        "notes": [],
-    }
-
-    append_grouped_commit_sections(sections, commits, files, domain_patch)
-    append_feature_usage(sections, commits, files, domain_patch)
-    append_contextual_sections(sections, domain_files, commits)
-
-    for key, values in sections.items():
-        sections[key] = limit_section(values)
-
-    return sections
-
-
-def compare_url(previous: str, current: str) -> str:
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    if not repo:
-        return ""
-    if previous:
-        return f"https://github.com/{repo}/compare/{previous}...{current}"
-    return f"https://github.com/{repo}/commit/{current}"
-
-
-def write_changelog(mode: str, version: str, previous: str, current: str, output: Path) -> None:
-    commits = commit_infos(previous, current)
-    patch = changed_patch(previous, current)
-    net_files = set(changed_files(previous, current))
-
-    url = compare_url(previous, current)
+def render_analysis(mode: str, version: str, previous: str, current: str, analysis: dict[str, dict[str, list[dict[str, object]]]]) -> str:
     if mode == "release":
         lines = [f"# Storage Redirect X v{version}"]
     else:
-        current_label = version or current[:7]
-        previous_label = previous or "初始提交"
         lines = [
             "## CI 构建更新日志",
             "",
-            f"- 当前版本：`{current_label}`",
-            f"- 对比基准：上一版 CI 或 Release 构建 `{previous_label}`",
-            f"- 当前提交：`{current[:7]}`",
+            f"- 当前版本：`{version or current[:7]}`",
+            f"- 对比基准：上一版 CI 或 Release 构建 `{previous or '初始提交'}`",
+            f"- 当前提交：`{current[:12]}`",
         ]
-    detail_titles = [
-        ("fixed", "### 修复了什么问题"),
-        ("features", "### 增加了什么功能"),
-        ("changes", "### 功能变化"),
-        ("usage", "### 新功能怎么使用"),
-        ("notes", "### 注意事项"),
-    ]
-    component_titles = [
-        ('module', '## 模块更新'),
-        ('app', '## App 更新'),
-        ('other', '## 其它更新'),
-    ]
-    component_commits = {key: [] for key, _ in component_titles}
-    for commit in commits:
-        commit_files = commit_changed_files(commit)
-        if mode == "release":
-            commit_files = [path for path in commit_files if path in net_files]
-        components = set().union(*(change_components(path) for path in commit_files))
-        for component in components:
-            component_commits[component].append(commit)
-
-    for component, component_heading in component_titles:
-        if mode == "release" and component == "other":
+    headings = {
+        "fixed": "### 修复了什么问题",
+        "features": "### 增加了什么功能",
+        "changes": "### 功能变化",
+        "usage": "### 新功能怎么使用",
+        "notes": "### 注意事项",
+    }
+    component_headings = {"module": "## 模块更新", "app": "## App 更新", "other": "## 其它更新"}
+    for component in COMPONENTS:
+        sections = analysis.get(component, {})
+        if not any(sections.get(section) for section in SECTIONS):
             continue
-        selected_commits = component_commits[component]
-        if not selected_commits:
-            continue
-        selected_files = sorted(
-            {
-                path
-                for commit in selected_commits
-                for path in commit_changed_files(commit)
-                if component in change_components(path)
-            }
-        )
-        if mode == "release":
-            selected_files = [path for path in selected_files if path in net_files]
-            sections = classify_release_changes(selected_files, selected_commits, patch)
-        else:
-            sections = classify_changes(selected_files, selected_commits, patch)
-        if mode == "ci" and not any(sections.values()):
-            sections['notes'] = [f"- {commit.summary}。" for commit in selected_commits]
-        if not any(sections.values()):
-            continue
-        lines.extend(["", component_heading])
-        for key, heading in detail_titles:
-            items = sections[key]
-            if items:
-                lines.extend(["", heading, *items])
-
+        lines.extend(["", component_headings[component]])
+        for section in SECTIONS:
+            items = sections.get(section, [])
+            if not items:
+                continue
+            lines.extend(["", headings[section]])
+            lines.extend(f"- {item['text']}。" for item in items)
     if mode == "ci":
-        commit_list = commit_lines(commits)
-        if commit_list:
-            lines.extend(["", "### 提交列表", *commit_list])
-        if url:
-            lines.extend(["", f"**完整变更对比**: {url}"])
+        commits = commit_infos(previous, current)
+        if commits:
+            lines.extend(["", "### 提交列表"])
+            lines.extend(f"- `{commit.sha}` {commit.subject}" for commit in commits)
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        if repo:
+            compare = f"https://github.com/{repo}/{('compare/' + previous + '...' + current) if previous else ('commit/' + current)}"
+            lines.extend(["", f"**完整变更对比**: {compare}"])
+    if mode == "release" and len(lines) == 1:
+        raise SystemExit("更新日志生成失败：对比范围内没有可读取的用户说明。")
+    return "\n".join(lines) + "\n"
 
-    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+def write_changelog(mode: str, version: str, current: str, output: Path) -> None:
+    previous = find_previous_release_ref(version) if mode == "release" else find_previous_ci_ref(current)
+    files = changed_files(previous, current)
+    commits = commit_infos(previous, current)
+    analysis = collect_analysis(mode, files, commits)
+    limit_analysis(analysis)
+    output.write_text(render_analysis(mode, version, previous, current, analysis), encoding="utf-8")
 
 
 def main() -> None:
@@ -827,13 +338,7 @@ def main() -> None:
     parser.add_argument("--version", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-
-    current = current_ref()
-    if args.mode == "release":
-        previous = find_previous_release_ref(current, args.version)
-    else:
-        previous = find_previous_ci_ref(current)
-    write_changelog(args.mode, args.version, previous, current, Path(args.output))
+    write_changelog(args.mode, args.version, current_ref(), Path(args.output))
 
 
 if __name__ == "__main__":
