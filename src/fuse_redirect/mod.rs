@@ -822,7 +822,16 @@ impl Filesystem for FuseRedirectFs {
                 Ok(backing) => {
                     reply.opened_passthrough(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE, &backing)
                 }
-                Err(_) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+                Err(error) => {
+                    self.passthrough_enabled.store(false, Ordering::Relaxed);
+                    log::debug!(
+                        "fuse passthrough disabled after backing open failure pkg={} rel={} err={}",
+                        self.policy.package_name,
+                        backend.rel,
+                        error
+                    );
+                    reply.opened(FileHandle(fh), FopenFlags::empty());
+                }
             }
         } else {
             reply.opened(FileHandle(fh), FopenFlags::empty());
@@ -1164,13 +1173,22 @@ impl Filesystem for FuseRedirectFs {
                     FopenFlags::empty(),
                     &backing,
                 ),
-                Err(_) => reply.created(
-                    &TTL,
-                    &attr,
-                    Generation(0),
-                    FileHandle(fh),
-                    FopenFlags::empty(),
-                ),
+                Err(error) => {
+                    self.passthrough_enabled.store(false, Ordering::Relaxed);
+                    log::debug!(
+                        "fuse passthrough disabled after backing create failure pkg={} rel={} err={}",
+                        self.policy.package_name,
+                        backend.rel,
+                        error
+                    );
+                    reply.created(
+                        &TTL,
+                        &attr,
+                        Generation(0),
+                        FileHandle(fh),
+                        FopenFlags::empty(),
+                    );
+                }
             }
         } else {
             reply.created(

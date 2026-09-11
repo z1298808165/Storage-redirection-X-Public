@@ -816,8 +816,12 @@ impl MountPlanner {
         if remount_bind_read_write_inner(target, is_recursive) {
             return true;
         }
-        if is_recursive && remount_bind_read_write_inner(target, false) {
+        if !is_recursive && remount_bind_read_write_inner(target, true) {
             log::warn!("readwrite remount recursive fallback ok dst={}", target);
+            return true;
+        }
+        if is_recursive && remount_bind_read_write_inner(target, false) {
+            log::warn!("readwrite remount nonrecursive fallback ok dst={}", target);
             return true;
         }
         false

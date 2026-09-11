@@ -316,6 +316,14 @@ fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
             request.pid,
             request.package_name
         );
+        if crate::fuse_redirect::config::fuse_capability()
+            == crate::fuse_redirect::config::FuseCapability::Available
+        {
+            crate::fuse_redirect::config::record_fuse_capability_result(
+                false,
+                "scoped_session_child_gone",
+            );
+        }
         return true;
     }
     false

@@ -98,7 +98,13 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     let backend_mode = request.storage_backend_mode();
     let capability_available = match backend_mode {
         StorageBackendMode::Fuse => fuse_first_capability_available(),
-        StorageBackendMode::Auto => fuse_capability() == FuseCapability::Available,
+        // Unknown 只表示设备探测尚未得到真实会话结果，允许首次请求进行一次实际
+        // scoped 挂载验证；失败后由 record_fuse_capability_result 锁定为 Unavailable。
+        StorageBackendMode::Auto => match fuse_capability() {
+            FuseCapability::Available => true,
+            FuseCapability::Unknown => fuse_device_present(),
+            FuseCapability::Unavailable => false,
+        },
         StorageBackendMode::Namespace => false,
     };
     if !capability_available {
@@ -121,8 +127,10 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     )
 }
 
-/// FUSE-first 只在设备暴露可读写 `/dev/fuse` 且模块具备 root 运行环境时启用。
-/// 具体挂载仍由子进程验证；能力探测失败会回退到 namespace。
+/// 检查设备是否暴露可读写的 `/dev/fuse`。
+///
+/// 这只是设备节点探测，不代表当前内核、挂载 namespace 或 FUSE 修复链路支持完整
+/// scoped 会话。真实能力必须由实际挂载结果确认，失败后回退到 namespace。
 pub fn fuse_device_present() -> bool {
     std::fs::metadata("/dev/fuse")
         .map(|metadata| metadata.file_type().is_char_device())
@@ -237,7 +245,9 @@ fn write_fuse_capability_snapshot(capability: FuseCapability, reason: &str) -> F
 #[allow(dead_code)]
 pub fn refresh_fuse_capability_snapshot(reason: &str) -> FuseCapability {
     let capability = if fuse_first_capability_available() {
-        FuseCapability::Available
+        // 打开设备只能证明节点存在；避免在首次真实会话前把 HyperOS/MIUI 的
+        // FUSE 兼容性误报为 Available。首次 scoped 挂载会把状态推进到最终结果。
+        FuseCapability::Unknown
     } else {
         FuseCapability::Unavailable
     };
@@ -386,6 +396,9 @@ fn finish_background_session(
             true
         }
         Err(error) => {
+            // 会话异常结束通常意味着当前内核、挂载 namespace 或 FUSE 修复链路
+            // 不支持该 scoped 会话；让 Auto 后端后续请求稳定回退到 namespace。
+            record_fuse_capability_result(false, "scoped_session_end_error");
             log::warn!(
                 "fuse redirect session ended with error mp={} app_exited={} err={}",
                 mount_point,

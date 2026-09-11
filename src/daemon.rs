@@ -333,11 +333,6 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let started_ms = crate::platform::paths::monotonic_ms();
     prune_stale_mount_states();
     crate::mount_intent::prune_stale();
-    if crate::fuse_redirect::config::fuse_capability()
-        != crate::fuse_redirect::config::FuseCapability::Available
-    {
-        crate::fuse_redirect::config::refresh_fuse_capability_snapshot("reconcile_probe");
-    }
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;

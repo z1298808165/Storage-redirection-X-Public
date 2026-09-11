@@ -13,6 +13,7 @@ use std::os::fd::BorrowedFd;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::mpsc::{self, SyncSender};
 use std::thread::JoinHandle;
 use std::thread::{self};
 
@@ -224,14 +225,44 @@ impl<FS: Filesystem> Session<FS> {
         let sender = self.ch.sender();
         // Take the fuse_session, so that we can unmount it
         let mount = std::mem::take(&mut *self.mount.mount.lock());
+        let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let guard = thread::Builder::new()
             .name("fuser-bg".to_string())
-            .spawn(move || self.run())?;
-        Ok(BackgroundSession {
-            guard,
-            sender,
-            mount,
-        })
+            .spawn(move || self.run_with_startup(Some(startup_sender)));
+        let guard = match guard {
+            Ok(guard) => guard,
+            Err(error) => {
+                if let Some(mount) = mount {
+                    let _ = mount.umount();
+                }
+                return Err(error);
+            }
+        };
+
+        match startup_receiver.recv() {
+            Ok(Ok(())) => Ok(BackgroundSession {
+                guard,
+                sender,
+                mount,
+            }),
+            Ok(Err(error)) => {
+                if let Some(mount) = mount {
+                    let _ = mount.umount();
+                }
+                let _ = guard.join();
+                Err(error)
+            }
+            Err(_) => {
+                if let Some(mount) = mount {
+                    let _ = mount.umount();
+                }
+                let _ = guard.join();
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "FUSE background thread exited before startup confirmation",
+                ))
+            }
+        }
     }
 
     /// Run the session loop that receives kernel requests and dispatches them to method
@@ -241,6 +272,13 @@ impl<FS: Filesystem> Session<FS> {
     /// # Errors
     /// Returns any final error when the session comes to an end.
     pub(crate) fn run(self) -> io::Result<()> {
+        self.run_with_startup(None)
+    }
+
+    fn run_with_startup(
+        self,
+        mut startup_sender: Option<SyncSender<io::Result<()>>>,
+    ) -> io::Result<()> {
         let Session {
             filesystem,
             ch,
@@ -255,13 +293,17 @@ impl<FS: Filesystem> Session<FS> {
 
         if !cfg!(any(target_os = "linux", target_os = "android")) && n_threads != 1 {
             // TODO: check whether it works on macOS/FreeBSD and enable if it works.
-            return Err(io::Error::other(
+            let error = io::Error::other(
                 "n_threads != 1 is only supported on Linux-like targets",
-            ));
+            );
+            notify_startup(&mut startup_sender, Err(clone_io_error(&error)));
+            return Err(error);
         }
 
         let Some(n_threads_minus_one) = n_threads.checked_sub(1) else {
-            return Err(io::Error::other("n_threads"));
+            let error = io::Error::other("n_threads");
+            notify_startup(&mut startup_sender, Err(clone_io_error(&error)));
+            return Err(error);
         };
 
         let mut filesystem = Arc::new(filesystem);
@@ -272,14 +314,29 @@ impl<FS: Filesystem> Session<FS> {
             if config.clone_fd {
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 {
-                    channels.push(ch.clone_fd()?);
+                    match ch.clone_fd() {
+                        Ok(channel) => channels.push(channel),
+                        Err(error) if clone_fd_is_optional_failure(&error) => {
+                            log::warn!(
+                                "FUSE clone fd unavailable; using one shared worker channel: {}",
+                                error
+                            );
+                            channels.clear();
+                            break;
+                        }
+                        Err(error) => {
+                            notify_startup(&mut startup_sender, Err(clone_io_error(&error)));
+                            return Err(error);
+                        }
+                    }
                     continue;
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "android")))]
                 {
-                    return Err(io::Error::other(
-                        "clone_fd is only supported on Linux-like targets",
-                    ));
+                    let error =
+                        io::Error::other("clone_fd is only supported on Linux-like targets");
+                    notify_startup(&mut startup_sender, Err(clone_io_error(&error)));
+                    return Err(error);
                 }
             } else {
                 channels.push(ch.clone());
@@ -298,12 +355,19 @@ impl<FS: Filesystem> Session<FS> {
                 allowed,
                 session_owner,
             };
-            threads.push(
-                thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || event_loop.event_loop())?,
-            );
+            match thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || event_loop.event_loop())
+            {
+                Ok(thread) => threads.push(thread),
+                Err(error) => {
+                    notify_startup(&mut startup_sender, Err(clone_io_error(&error)));
+                    return Err(error);
+                }
+            }
         }
+
+        notify_startup(&mut startup_sender, Ok(()));
 
         let mut reply: io::Result<()> = Ok(());
         for thread in threads {
@@ -492,6 +556,30 @@ impl<FS: Filesystem> Session<FS> {
     pub fn notifier(&self) -> Notifier {
         Notifier::new(self.ch.sender())
     }
+}
+
+fn clone_io_error(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
+}
+
+fn notify_startup(sender: &mut Option<SyncSender<io::Result<()>>>, result: io::Result<()>) {
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(result);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn clone_fd_is_optional_failure(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(
+            libc::EINVAL
+                | libc::ENOTTY
+                | libc::ENOSYS
+                | libc::EOPNOTSUPP
+                | libc::EPERM
+        )
+    )
 }
 
 #[derive(Debug)]
