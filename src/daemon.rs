@@ -122,11 +122,16 @@ struct DaemonInstanceLock {
 
 impl DaemonInstanceLock {
     fn acquire() -> io::Result<Option<Self>> {
-        std_fs::create_dir_all(crate::platform::module_paths::DAEMON_STATE_DIR)?;
+        let lock_path =
+            std::path::Path::new(crate::platform::module_paths::DAEMON_INSTANCE_LOCK_FILE);
+        if let Some(parent) = lock_path.parent() {
+            std_fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(crate::platform::module_paths::DAEMON_INSTANCE_LOCK_FILE)?;
         // SAFETY: as_raw_fd() 来源于 file 持有的有效文件描述符；非阻塞独占锁的持有
         // 时间与 DaemonInstanceLock 生命周期一致。
