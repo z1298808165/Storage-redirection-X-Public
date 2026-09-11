@@ -12,7 +12,7 @@
 6. AI Agent 根据 `docs/ai-review-report.example.json` 在 `temp/` 下生成 JSON 报告。报告中的 `baseCommit`、`tree` 和 `files` 必须分别来自当前 `git rev-parse HEAD`、`git write-tree` 和 `git diff --cached --name-only --diff-filter=ACMRD`。
 7. 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/record-ai-review.ps1 -ReportPath temp/<report>.json` 记录审核凭据，然后正常提交。
 
-Commit 正文建议使用以下结构，按改动实际需要保留章节：
+Commit 正文必须使用以下结构，按改动实际需要保留章节；至少填写 `变更：` 或 `用户影响：`，供后续 CI/Release 直接读取：
 
 ```text
 变更：说明实现了什么用户可见行为
@@ -21,7 +21,7 @@ Commit 正文建议使用以下结构，按改动实际需要保留章节：
 验证：列出实际运行的检查或测试及结果
 ```
 
-提交后的 CI 生成器会读取正文中的用户说明，并过滤 `AI-Review-*`、`Signed-off-by` 和 `Co-authored-by` 等机器 trailer；因此正文应保持面向用户和维护者的事实描述，不要把审核凭据当作更新内容。
+提交后的 CI/Release 生成器不会再次调用模型，而是读取当前 AI Agent 在正文中写入的 `变更：` 或 `用户影响：`，并过滤 `AI-Review-*`、`Signed-off-by` 和 `Co-authored-by` 等机器 trailer；因此正文必须保持面向用户和维护者的事实描述，不要把审核凭据或测试过程当作更新内容。
 
 报告只有在所有阻塞发现均已修复、十项检查均有具体证据且结论为 `pass` 时才能登记，其中 `content_accuracy_and_user_messaging` 专门核对 Commit 正文、更新说明与实际用户行为是否一致。修改暂存内容、切换 `HEAD` 或改写报告后，旧凭据自动失效，必须重新审核。
 
