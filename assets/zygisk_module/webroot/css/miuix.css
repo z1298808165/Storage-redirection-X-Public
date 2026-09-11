@@ -209,9 +209,12 @@ body.liquid-surface-disabled .template-card,
 body.liquid-surface-disabled .backup-restore-card,
 body.liquid-surface-disabled .log-card,
 body.liquid-surface-disabled .app-user-menu,
-body.liquid-surface-disabled .license-item {
+body.liquid-surface-disabled .license-item,
+body.liquid-surface-disabled .update-current-card,
+body.liquid-surface-disabled .repository-card,
+body.liquid-surface-disabled .module-status-card {
   background: var(--themed-surface);
-  border-color: var(--themed-border);
+  border-color: transparent;
   box-shadow: var(--shadow-md);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -239,7 +242,10 @@ body.liquid-surface-disabled .template-card::before,
 body.liquid-surface-disabled .backup-restore-card::before,
 body.liquid-surface-disabled .log-card::before,
 body.liquid-surface-disabled .app-user-menu::before,
-body.liquid-surface-disabled .license-item::before { content: none; }
+body.liquid-surface-disabled .license-item::before,
+body.liquid-surface-disabled .update-current-card::before,
+body.liquid-surface-disabled .repository-card::before,
+body.liquid-surface-disabled .module-status-card::before { content: none; }
 
 body.liquid-surface-disabled .app-batch-status {
   background: var(--color-primary-bg);

@@ -730,9 +730,12 @@ body.liquid-glass-disabled .template-card,
 body.liquid-glass-disabled .backup-restore-card,
 body.liquid-glass-disabled .log-card,
 body.liquid-glass-disabled .app-user-menu,
-body.liquid-glass-disabled .license-item {
+body.liquid-glass-disabled .license-item,
+body.liquid-glass-disabled .update-current-card,
+body.liquid-glass-disabled .repository-card,
+body.liquid-glass-disabled .module-status-card {
   background: var(--themed-surface);
-  border-color: var(--themed-border);
+  border-color: transparent;
   box-shadow: var(--shadow-sm);
 }
 
