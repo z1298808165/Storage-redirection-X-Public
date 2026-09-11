@@ -24,7 +24,9 @@ use std::collections::{HashMap, VecDeque};
 const DUPLICATE_EVENT_WINDOW_MS: i64 = 1500;
 const MISSING_ROOT_RETRY_MS: i64 = 1000;
 const MAX_RECENT_EVENTS: usize = 512;
-const MAX_WATCHES: usize = 8192;
+const DEFAULT_MAX_WATCHES: usize = 8192;
+/// 防止设备把 inotify 配额调得过大后，监视器一次性递归展开整个共享存储。
+const MAX_WATCHES_CEILING: usize = 32768;
 /// 单轮 `drain_events` 最多处理的事件数。
 ///
 /// 事件掩码包含 `IN_MODIFY`，持续写入会按写调用产生事件。若一直读到 EAGAIN 才返回，
@@ -42,6 +44,15 @@ const PUBLIC_OWNER_REPAIR_INTERVAL_MS: i64 = 1000;
 /// 递归展开监视树时最多访问的目录数，与 [`MAX_PUBLIC_OWNER_REPAIR_DIRS`] 对齐。
 const MAX_EXISTING_TREE_REPAIR_DIRS: usize = 32768;
 const PUBLIC_OWNER_EXISTING_WATCH_DEPTH: usize = 2;
+
+fn runtime_max_watches() -> usize {
+    std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .map(|limit| limit.min(MAX_WATCHES_CEILING))
+        .unwrap_or(DEFAULT_MAX_WATCHES)
+}
 
 #[derive(Clone)]
 struct WatchRoot {
@@ -74,6 +85,7 @@ pub struct RegularAppMonitor {
     fd: i32,
     config_version: u64,
     watch_nodes: HashMap<i32, Vec<WatchNode>>,
+    max_watches: usize,
     recent_event_ms: HashMap<String, i64>,
     recent_event_order: VecDeque<String>,
     missing_watch_roots: Vec<WatchRoot>,
@@ -99,6 +111,7 @@ impl RegularAppMonitor {
             fd: -1,
             config_version: 0,
             watch_nodes: HashMap::new(),
+            max_watches: runtime_max_watches(),
             recent_event_ms: HashMap::new(),
             recent_event_order: VecDeque::new(),
             missing_watch_roots: Vec::new(),
@@ -126,6 +139,7 @@ impl RegularAppMonitor {
     }
 
     pub fn reconfigure(&mut self, config: &SettingsHub, force: bool) {
+        self.refresh_max_watches();
         let version = config.config_version();
         if !force && !self.needs_rebuild && self.config_version == version {
             if self.should_retry_missing_roots() {
@@ -219,7 +233,7 @@ impl RegularAppMonitor {
                 self.missing_roots = self.missing_roots.saturating_add(1);
                 missing_watch_roots.push(root.clone());
             }
-            if self.watch_nodes.len() >= MAX_WATCHES {
+            if self.watch_nodes.len() >= self.max_watches {
                 self.capacity_limited = true;
                 break;
             }
@@ -277,7 +291,7 @@ impl RegularAppMonitor {
                 }
                 continue;
             }
-            if self.watch_nodes.len() >= MAX_WATCHES {
+            if self.watch_nodes.len() >= self.max_watches {
                 self.mark_capacity_limited();
                 still_missing.push(root);
                 still_missing.extend(roots);
@@ -443,7 +457,7 @@ impl RegularAppMonitor {
     fn add_watch_root(&mut self, root: &WatchRoot) -> Option<WatchNode> {
         let start = select_watch_start(root)?;
 
-        if self.watch_nodes.len() >= MAX_WATCHES {
+        if self.watch_nodes.len() >= self.max_watches {
             self.mark_capacity_limited();
             return None;
         }
@@ -478,12 +492,12 @@ impl RegularAppMonitor {
         recurse_existing_tree: bool,
     ) {
         let mut stack = vec![(root, 0usize)];
-        // 遍历预算：MAX_WATCHES 只约束目录 watch 数量，而 repair_existing_files 打开时
+        // 遍历预算：max_watches 只约束目录 watch 数量，而 repair_existing_files 打开时
         // 每个文件都会做一次 owner 修复，没有上限。溢出补偿会对所有来源打开该开关，
         // 大目录下这一步可能长时间占住监视线程，因此与 public_owner 路径一样设预算。
         let mut visited_dirs = 0usize;
         while let Some((node, depth)) = stack.pop() {
-            if self.watch_nodes.len() >= MAX_WATCHES {
+            if self.watch_nodes.len() >= self.max_watches {
                 self.mark_capacity_limited();
                 break;
             }
@@ -528,7 +542,7 @@ impl RegularAppMonitor {
                 if !should_descend_into_child(&node, &child_display_dir) {
                     continue;
                 }
-                if self.watch_nodes.len() >= MAX_WATCHES {
+                if self.watch_nodes.len() >= self.max_watches {
                     self.mark_capacity_limited();
                     break;
                 }
@@ -632,7 +646,7 @@ impl RegularAppMonitor {
     /// 记录 `inotify_add_watch` 失败原因。
     ///
     /// 内核 watch 配额耗尽必须置位 `capacity_limited`：否则深目录场景下每个子目录都
-    /// 失败却被当作"无需递归"静默跳过，日志里只看到一个远小于 MAX_WATCHES 的计数，
+    /// 失败却被当作"无需递归"静默跳过，日志里只看到一个远小于当前预算的计数，
     /// 无法与"目录不存在"区分。目录不存在属于正常竞态，由 missing 重试路径处理。
     fn note_add_watch_error(&mut self, node: &WatchNode, error: inotify::AddWatchError) {
         match error {
@@ -670,9 +684,28 @@ impl RegularAppMonitor {
 
     fn mark_capacity_limited(&mut self) {
         if !self.capacity_limited {
-            log::warn!("daemon monitor watch limit reached n={}", MAX_WATCHES);
+            log::warn!(
+                "daemon monitor watch limit reached n={} kernel_limit=/proc/sys/fs/inotify/max_user_watches",
+                self.max_watches
+            );
         }
         self.capacity_limited = true;
+    }
+
+    fn refresh_max_watches(&mut self) {
+        let current = runtime_max_watches();
+        if current == self.max_watches {
+            return;
+        }
+        log::info!(
+            "daemon monitor watch budget changed previous={} current={}",
+            self.max_watches,
+            current
+        );
+        self.max_watches = current;
+        if self.watch_nodes.len() < self.max_watches {
+            self.capacity_limited = false;
+        }
     }
 
     fn handle_event(&mut self, event: &Event<'_>) {
