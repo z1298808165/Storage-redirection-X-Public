@@ -12,7 +12,9 @@ use crate::platform;
 use crate::redirect_policy as policy;
 use crate::runtime_control;
 use std::collections::HashSet;
-use std::fs as std_fs;
+use std::fs::{self as std_fs, File, OpenOptions};
+use std::io;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -114,8 +116,46 @@ enum ReconcileMode {
     MissingOnly,
 }
 
+struct DaemonInstanceLock {
+    _file: File,
+}
+
+impl DaemonInstanceLock {
+    fn acquire() -> io::Result<Option<Self>> {
+        std_fs::create_dir_all(crate::platform::module_paths::DAEMON_STATE_DIR)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(crate::platform::module_paths::DAEMON_INSTANCE_LOCK_FILE)?;
+        // SAFETY: as_raw_fd() 来源于 file 持有的有效文件描述符；非阻塞独占锁的持有
+        // 时间与 DaemonInstanceLock 生命周期一致。
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(errno) if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK)
+        {
+            return Ok(None);
+        }
+        Err(error)
+    }
+}
+
 pub fn main_entry() -> i32 {
     Logger::init(Some("srx_daemon"));
+    let _instance_lock = match DaemonInstanceLock::acquire() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            log::info!("daemon exit reason=already_running");
+            return 0;
+        }
+        Err(error) => {
+            log::error!("daemon instance lock acquire failed error={}", error);
+            return 1;
+        }
+    };
     if let Err(error) = crate::log_daemon::start() {
         log::error!("private log writer start failed error={}", error);
         return 1;

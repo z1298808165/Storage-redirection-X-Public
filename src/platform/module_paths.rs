@@ -32,6 +32,9 @@ pub const RECENT_PATH_CALLER_HINT_FILE: &str =
 pub const SYSTEM_WRITER_UIDS_FILE: &str =
     "/data/adb/modules/storage.redirect.x/config/system_writer_uids.list";
 pub const LOG_DIR: &str = "/data/adb/modules/storage.redirect.x/logs";
+pub const DAEMON_STATE_DIR: &str = "/data/adb/storage.redirect.x";
+/// daemon 单实例锁位于模块目录之外，避免模块升级替换目录时丢失锁语义。
+pub const DAEMON_INSTANCE_LOCK_FILE: &str = "/data/adb/storage.redirect.x/.srx_daemon.lock";
 
 /// 过滤并归一化挂载点清单。
 ///

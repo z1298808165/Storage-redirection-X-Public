@@ -54,17 +54,33 @@ start_srx_daemon() {
 
   if [ -r "$daemon_pid_file" ]; then
     old_pid=$(cat "$daemon_pid_file" 2>/dev/null)
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+    if [ -n "$old_pid" ] && daemon_process_matches "$old_pid"; then
       log -p i -t Boot "srx daemon already running pid=$old_pid"
       return 0
     fi
   fi
+
+  for running_pid in $(pidof srx_daemon 2>/dev/null); do
+    if daemon_process_matches "$running_pid"; then
+      printf '%s\n' "$running_pid" > "$daemon_pid_file"
+      chmod 600 "$daemon_pid_file" 2>/dev/null
+      log -p i -t Boot "srx daemon pid file repaired pid=$running_pid"
+      return 0
+    fi
+  done
 
   "$daemon_bin" >/dev/null 2>&1 &
   daemon_pid=$!
   echo "$daemon_pid" > "$daemon_pid_file"
   chmod 600 "$daemon_pid_file" 2>/dev/null
   log -p i -t Boot "srx daemon started pid=$daemon_pid"
+}
+
+daemon_process_matches() {
+  pid="$1"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ "$(readlink "/proc/$pid/exe" 2>/dev/null)" = "$daemon_bin" ]
 }
 
 
