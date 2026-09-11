@@ -654,7 +654,7 @@ jobs:
       TARGET_TRIPLE: x86_64-linux-android
       MODULE_ABI: x86_64
       ANDROID_API_LEVEL: "37.0"
-      MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk
+      MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk
       SRT_SCENARIOS: "all"
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1

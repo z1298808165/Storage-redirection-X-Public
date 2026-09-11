@@ -188,7 +188,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", experimental)
         self.assertIn('ANDROID_API_LEVEL: "37.0"', experimental)
         self.assertIn("SRT_FRESH_APP_PER_CASE: 0", source)
-        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v30.7/Magisk-v30.7.apk", experimental)
+        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk", experimental)
         self.assertIn("Download test-flow runtime", experimental)
         self.assertNotIn("Upload Android 17 diagnostic artifacts", experimental)
         self.assertNotIn("actions/upload-artifact@v7.0.1", experimental)
