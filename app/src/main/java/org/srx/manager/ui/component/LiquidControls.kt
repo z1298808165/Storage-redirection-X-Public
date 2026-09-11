@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
@@ -129,8 +130,8 @@ internal fun Modifier.liquidPressScale(
 }
 
 /**
- * 参考 AndroidLiquidGlass 的 LiquidToggle：液态玻璃开启且 backdrop 可用时，轨道和滑块使用 小尺寸折射；其余情况直接使用 Miuix
- * 开关。两种路径均保留触觉反馈和无障碍语义。
+ * 参考 AndroidLiquidGlass 的 LiquidToggle：液态玻璃开启且 backdrop 可用时，轨道和滑块使用 小尺寸折射；backdrop 或 RenderEffect
+ * 不可用时使用静态玻璃表面，避免退回灰色原生开关。 液态玻璃关闭时仍使用 Miuix 开关。两种路径均保留触觉反馈和无障碍语义。
  */
 @Composable
 internal fun LiquidSwitch(
@@ -140,16 +141,23 @@ internal fun LiquidSwitch(
     enabled: Boolean = true,
     interactionSource: MutableInteractionSource? = null,
 ) {
-  if (
-      !isSrxLiquidGlassEnabled() ||
-          !isRenderEffectSupported() ||
-          LocalSrxKyantBackdrop.current == null
-  ) {
+  if (!isSrxLiquidGlassEnabled()) {
     Switch(
         checked = checked,
         onCheckedChange = onCheckedChange,
         modifier = modifier,
         enabled = enabled,
+    )
+    return
+  }
+
+  if (!isRenderEffectSupported() || LocalSrxKyantBackdrop.current == null) {
+    StaticLiquidSwitch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        modifier = modifier,
+        enabled = enabled,
+        interactionSource = interactionSource,
     )
     return
   }
@@ -390,6 +398,90 @@ internal fun LiquidSwitch(
                 },
                 onDrawSurface = { drawRect(thumbTint) },
             ),
+    )
+  }
+}
+
+/** 不依赖实时 backdrop 的静态液态玻璃开关，供旧系统或 backdrop 初始化失败时使用。 */
+@Composable
+private fun StaticLiquidSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier,
+    enabled: Boolean,
+    interactionSource: MutableInteractionSource?,
+) {
+  val resolvedInteractionSource = interactionSource ?: remember { MutableInteractionSource() }
+  val pressed by resolvedInteractionSource.collectIsPressedAsState()
+  val hapticFeedback = LocalHapticFeedback.current
+  val progress by
+      animateFloatAsState(
+          targetValue = if (pressed && enabled) 1f else 0f,
+          animationSpec = spring(dampingRatio = 0.7f, stiffness = 700f),
+          label = "staticLiquidSwitchPress",
+      )
+  val offset by
+      animateDpAsState(
+          targetValue = if (checked) 25.dp else 4.dp,
+          animationSpec = spring(dampingRatio = 0.72f, stiffness = 700f),
+          label = "staticLiquidSwitchOffset",
+      )
+  val primary = MiuixTheme.colorScheme.primary
+  val trackColor =
+      if (checked) primary.copy(alpha = 0.78f) else MiuixTheme.colorScheme.surfaceContainerHighest
+  val thumbColor =
+      if (checked) MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.96f)
+      else MiuixTheme.colorScheme.surface.copy(alpha = 0.96f)
+  Box(
+      modifier =
+          modifier
+              .size(49.dp, 28.dp)
+              .graphicsLayer {
+                val scale = lerp(1f, 1.04f, progress)
+                scaleX = scale
+                scaleY = scale
+                alpha = if (enabled) 1f else 0.52f
+              }
+              .toggleable(
+                  value = checked,
+                  enabled = enabled,
+                  role = Role.Switch,
+                  interactionSource = resolvedInteractionSource,
+                  indication = null,
+                  onValueChange = { value ->
+                    onCheckedChange(value)
+                    hapticFeedback.performHapticFeedback(
+                        if (value) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff
+                    )
+                  },
+              ),
+      contentAlignment = Alignment.CenterStart,
+  ) {
+    Box(
+        Modifier.size(49.dp, 28.dp)
+            .clip(CircleShape)
+            .background(trackColor)
+            .border(
+                width = 1.dp,
+                color = primary.copy(alpha = if (checked) 0.32f else 0.2f),
+                shape = CircleShape,
+            )
+    )
+    Box(
+        Modifier.offset(x = offset)
+            .size(20.dp)
+            .graphicsLayer {
+              shadowElevation = 4.dp.toPx() + 3.dp.toPx() * progress
+              shape = CircleShape
+              clip = false
+            }
+            .clip(CircleShape)
+            .background(thumbColor)
+            .border(
+                width = 1.dp,
+                color = Color.White.copy(alpha = if (checked) 0.42f else 0.62f),
+                shape = CircleShape,
+            )
     )
   }
 }

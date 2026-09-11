@@ -3158,6 +3158,7 @@
       ? mappings.map((m) => [m.request_path, m.final_path])
       : Object.entries(mappings || {});
     return entries
+      .map(([req, target]) => [sanitizeMappingPathWeb(req), sanitizeMappingPathWeb(target, true)])
       .filter(
         ([req, target]) =>
           typeof req === "string" &&
@@ -3786,16 +3787,24 @@
     });
 
     $("#modalAddMapping")?.addEventListener("click", () => {
-      const req = reqInput.value.trim(),
-        target = targetInput.value.trim();
-      const reqValidation = validateMappingPath(req);
+      const rawReq = reqInput.value.trim(),
+        rawTarget = targetInput.value.trim();
+      const reqValidation = validateMappingPath(rawReq);
       if (!reqValidation.valid) {
         Theme.showToast(reqValidation.msg || "请求路径格式不正确", "error");
         return;
       }
-      const targetValidation = validateMappingPath(target, { allowApplicationPrivateRoot: true });
+      const targetValidation = validateMappingPath(rawTarget, {
+        allowApplicationPrivateRoot: true,
+      });
       if (!targetValidation.valid) {
         Theme.showToast(targetValidation.msg || "目标路径格式不正确", "error");
+        return;
+      }
+      const req = sanitizeMappingPathWeb(rawReq);
+      const target = sanitizeMappingPathWeb(rawTarget, true);
+      if (!req || !target) {
+        Theme.showToast("映射路径无效", "error");
         return;
       }
       if (req === target) {
