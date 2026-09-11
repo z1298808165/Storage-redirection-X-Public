@@ -210,8 +210,8 @@ body.liquid-surface-disabled .backup-restore-card,
 body.liquid-surface-disabled .log-card,
 body.liquid-surface-disabled .app-user-menu,
 body.liquid-surface-disabled .license-item {
-  background: var(--color-surface-elevated);
-  border-color: var(--color-border);
+  background: var(--themed-surface);
+  border-color: var(--themed-border);
   box-shadow: var(--shadow-md);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -247,6 +247,23 @@ body.liquid-surface-disabled .app-batch-status {
   box-shadow: none;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* 关闭模糊时只移除材质效果，保留当前主题主色的实体表面。 */
+body.liquid-surface-disabled {
+  --glass-bg: var(--themed-surface);
+  --glass-bg-strong: var(--themed-surface-strong);
+  --glass-border: var(--themed-border);
+  --ios-glass-bg: var(--themed-surface);
+  --ios-glass-border: var(--themed-border);
+}
+
+body.liquid-glass-disabled {
+  --glass-bg: var(--themed-surface);
+  --glass-bg-strong: var(--themed-surface-strong);
+  --glass-border: var(--themed-border);
+  --ios-glass-bg: var(--themed-surface);
+  --ios-glass-border: var(--themed-border);
 }
 
 
@@ -436,7 +453,7 @@ body.secondary-page-active .app-container { padding-bottom: calc(24px + var(--sa
 
 body.nav-floating-disabled .app-container { padding-bottom: calc(var(--bottom-nav-h) + var(--safe-bottom) + 14px); }
 body.app-config-active.nav-floating-disabled .app-container { padding-bottom: calc(24px + var(--safe-bottom)); }
-body.liquid-surface-disabled .search-input-wrapper, body.liquid-surface-disabled .filter-group { background: var(--color-surface-overlay); backdrop-filter: none; -webkit-backdrop-filter: none; }
+body.liquid-surface-disabled .search-input-wrapper, body.liquid-surface-disabled .filter-group { background: var(--themed-surface-strong); border-color: var(--themed-border); backdrop-filter: none; -webkit-backdrop-filter: none; }
 
 @media (min-width: 700px) { .app-container { left: 50%; width: min(720px, 100vw); transform: translateX(-50%); } }
 .about-page { position: relative; overflow: visible; color: var(--color-text); min-height: max-content; padding-bottom: calc(var(--safe-bottom) + 56px); touch-action: pan-y; }

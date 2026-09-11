@@ -45,6 +45,7 @@ import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UserProfile
 import org.srx.manager.floatingGlassPanel
 import org.srx.manager.subtleFieldLabelColor
+import org.srx.manager.themedSurfaceColor
 import org.srx.manager.ui.AppUiState
 import org.srx.manager.ui.liquid.CombinedBackdrop
 import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
@@ -155,9 +156,7 @@ private fun AppConfigHeader(
         insideMargin = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
         colors =
             CardDefaults.defaultColors(
-                color =
-                    if (useBackdrop) Color.Transparent
-                    else MiuixTheme.colorScheme.surfaceContainerHigh,
+                color = if (useBackdrop) Color.Transparent else themedSurfaceColor(),
             ),
     ) {
       Row(

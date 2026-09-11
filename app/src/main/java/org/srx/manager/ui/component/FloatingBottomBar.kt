@@ -63,6 +63,7 @@ import com.kyant.backdrop.shadow.Shadow as KyantShadow
 import kotlin.math.abs
 import kotlin.math.sign
 import kotlinx.coroutines.launch
+import org.srx.manager.themedSurfaceColor
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.blur
@@ -121,7 +122,7 @@ fun FloatingBottomBar(
   val pillShape = CircleShape
   val accent = MiuixTheme.colorScheme.primary
   val surface = MiuixTheme.colorScheme.surfaceContainer
-  val solidSurface = MiuixTheme.colorScheme.surfaceContainerHigh
+  val solidSurface = themedSurfaceColor()
   val container =
       when {
         liquid && blurEnabled -> surface.copy(alpha = 0.4f)

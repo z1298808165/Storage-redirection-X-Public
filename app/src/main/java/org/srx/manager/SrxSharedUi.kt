@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -117,8 +118,14 @@ internal fun glassSurfaceColor(alpha: Float = 0.7f): Color =
     if (isSrxLiquidGlassEnabled() && isSrxBlurEffectEnabled()) {
       MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = alpha.coerceIn(0.3f, 0.9f))
     } else {
-      MiuixTheme.colorScheme.surfaceContainerHigh
+      themedSurfaceColor()
     }
+
+@Composable
+internal fun themedSurfaceColor(): Color =
+    MiuixTheme.colorScheme.primary
+        .copy(alpha = if (isSrxDarkTheme()) 0.18f else 0.12f)
+        .compositeOver(MiuixTheme.colorScheme.surface)
 
 @Composable
 internal fun subtleFieldLabelColor(): Color =
@@ -159,9 +166,8 @@ internal fun Modifier.glassPanel(
                         if (dark) 0.92f else 0.94f
                     )
             )
-        blurEnabled ->
-            MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.84f else 0.88f)
-        else -> MiuixTheme.colorScheme.surfaceContainerHigh
+        blurEnabled -> themedSurfaceColor()
+        else -> themedSurfaceColor()
       }
   val accentWash = MiuixTheme.colorScheme.primary.copy(alpha = if (dark) 0.036f else 0.028f)
   val sheen = Color.White.copy(alpha = if (dark) 0.052f else 0.12f)
@@ -224,9 +230,8 @@ internal fun Modifier.floatingGlassPanel(shape: Shape): Modifier {
         liquid && blurEnabled -> MiuixTheme.colorScheme.surfaceContainer.copy(alpha = 0.46f)
         liquid ->
             MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.88f else 0.92f)
-        blurEnabled ->
-            MiuixTheme.colorScheme.surfaceContainerHigh.copy(alpha = if (dark) 0.86f else 0.9f)
-        else -> MiuixTheme.colorScheme.surfaceContainerHigh
+        blurEnabled -> themedSurfaceColor()
+        else -> themedSurfaceColor()
       }
   return this.dropShadow(
           shape = shape,

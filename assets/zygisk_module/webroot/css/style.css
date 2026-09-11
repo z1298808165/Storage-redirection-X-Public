@@ -474,8 +474,8 @@ body.modal-open .app-container { overflow: hidden; pointer-events: none; }
 body.liquid-surface-disabled .toast,
 body.liquid-surface-disabled .modal-sheet,
 body.liquid-surface-disabled .dialog-box {
-  background: var(--color-surface-elevated);
-  border-color: var(--color-border);
+  background: var(--themed-surface);
+  border-color: var(--themed-border);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
@@ -514,6 +514,9 @@ body.liquid-surface-disabled .log-card::before { content: none; }
   --color-primary-2: #1677d2;
   --color-primary-bg: rgba(22, 119, 210, 0.09);
   --color-primary-border: rgba(22, 119, 210, 0.22);
+  --themed-surface: #f4f8fd;
+  --themed-surface-strong: #edf5fe;
+  --themed-border: rgba(22, 119, 210, 0.18);
   --color-bg: #f3f5f7;
   --color-surface: #ffffff;
   --color-surface-elevated: #ffffff;
@@ -559,6 +562,9 @@ body.liquid-surface-disabled .log-card::before { content: none; }
   --color-primary-2: #6eb7f2;
   --color-primary-bg: rgba(110, 183, 242, 0.12);
   --color-primary-border: rgba(110, 183, 242, 0.24);
+  --themed-surface: #1d2733;
+  --themed-surface-strong: #243241;
+  --themed-border: rgba(110, 183, 242, 0.2);
   --color-bg: #111418;
   --color-surface: #191d22;
   --color-surface-elevated: #20252b;
@@ -725,8 +731,8 @@ body.liquid-glass-disabled .backup-restore-card,
 body.liquid-glass-disabled .log-card,
 body.liquid-glass-disabled .app-user-menu,
 body.liquid-glass-disabled .license-item {
-  background: var(--color-surface-elevated);
-  border-color: var(--color-border);
+  background: var(--themed-surface);
+  border-color: var(--themed-border);
   box-shadow: var(--shadow-sm);
 }
 

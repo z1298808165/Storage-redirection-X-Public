@@ -49,6 +49,7 @@ import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UiThemeMode
 import org.srx.manager.subtleFieldLabelColor
+import org.srx.manager.themedSurfaceColor
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SliderDefaults
 import top.yukonga.miuix.kmp.basic.Text
@@ -287,7 +288,7 @@ private fun ThemePreview(modifier: Modifier = Modifier) {
                 Modifier.fillMaxWidth()
                     .weight(1f)
                     .clip(rowShape)
-                    .background(colors.surfaceContainer)
+                    .background(themedSurfaceColor())
                     .border(1.dp, colors.onSurface.copy(alpha = 0.07f), rowShape),
             )
           }
@@ -300,7 +301,7 @@ private fun ThemePreview(modifier: Modifier = Modifier) {
                   .padding(horizontal = 16.dp, vertical = 12.dp)
                   .height(36.dp)
                   .clip(RoundedCornerShape(14.dp))
-                  .background(colors.surfaceContainerHigh)
+                  .background(themedSurfaceColor())
                   .border(
                       1.dp,
                       colors.onSurface.copy(alpha = 0.08f),

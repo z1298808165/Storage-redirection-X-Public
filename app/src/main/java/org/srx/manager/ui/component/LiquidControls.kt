@@ -51,6 +51,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import org.srx.manager.LocalSrxBackdrop
 import org.srx.manager.LocalSrxKyantBackdrop
+import org.srx.manager.themedSurfaceColor
 import org.srx.manager.ui.liquid.lens
 import org.srx.manager.ui.liquid.vibrancy
 import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
@@ -427,8 +428,7 @@ private fun StaticLiquidSwitch(
           label = "staticLiquidSwitchOffset",
       )
   val primary = MiuixTheme.colorScheme.primary
-  val trackColor =
-      if (checked) primary.copy(alpha = 0.78f) else MiuixTheme.colorScheme.surfaceContainerHighest
+  val trackColor = if (checked) primary.copy(alpha = 0.78f) else themedSurfaceColor()
   val thumbColor =
       if (checked) MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.96f)
       else MiuixTheme.colorScheme.surface.copy(alpha = 0.96f)
