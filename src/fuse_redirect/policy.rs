@@ -297,8 +297,9 @@ impl RedirectPolicy {
         {
             BackendKind::Real
         } else if self.is_mapping_mode_only {
-            if self.matches_any(&self.sandboxed_index, storage_path)
-                && !self.matches_any(&self.sandboxed_excluded_index, storage_path)
+            if self.is_foreign_private_storage_path(storage_path)
+                || (self.matches_any(&self.sandboxed_index, storage_path)
+                    && !self.matches_any(&self.sandboxed_excluded_index, storage_path))
             {
                 BackendKind::Redirect
             } else {
@@ -344,6 +345,32 @@ impl RedirectPolicy {
         private_roots
             .iter()
             .any(|root| paths::matches(root, relative, true))
+    }
+
+    // mapping_mode_only 仍然可能使用覆盖整个共享存储根的 scoped FUSE。
+    // 此时若把所有未命中沙盒规则的路径都直接落到 real_root，会绕过系统
+    // MediaProvider 对其它应用 Android/data|media|obb/<pkg> 的可见性隔离。
+    // 应用自有私有目录由上层的 is_own_private_storage_path 保持真实落点；
+    // 其它应用的私有目录必须继续走 redirect 后端，使其在目录枚举和显式访问
+    // 中都不会暴露真实文件。
+    fn is_foreign_private_storage_path(&self, storage_path: &str) -> bool {
+        let Some(relative) = paths::relative_child_path(storage_path, &self.storage_root) else {
+            return false;
+        };
+        let mut parts = relative.split('/').filter(|part| !part.is_empty());
+        if parts.next() != Some("Android") {
+            return false;
+        }
+        let Some(category) = parts.next() else {
+            return false;
+        };
+        if !matches!(category, "data" | "media" | "obb") {
+            return false;
+        }
+        let Some(package_name) = parts.next() else {
+            return false;
+        };
+        !paths::eq_ignore_case(package_name, &self.package_name)
     }
 
     fn has_real_child_rule(&self, storage_path: &str) -> bool {
@@ -408,6 +435,19 @@ impl RedirectPolicy {
     // private_real_root，readdir 不能再用单一路径做相等比较：列举存储根时枚举源是
     // real_root，而子项 Android 解析到 private_real_root，纯相等判断会把它丢弃。
     pub(super) fn is_real_backend_path_for_storage_rel(&self, rel: &str, path: &Path) -> bool {
+        let storage_path = if rel.is_empty() {
+            self.storage_root.clone()
+        } else {
+            paths::join(&self.storage_root, rel)
+        };
+        if self
+            .backend_decision(&storage_path, OperationKind::Read)
+            .kind
+            != BackendKind::Real
+            || self.resolve_mapping(&storage_path).is_some()
+        {
+            return false;
+        }
         [&self.real_root, &self.private_real_root]
             .iter()
             .any(|root| {
