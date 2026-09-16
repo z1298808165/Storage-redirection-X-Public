@@ -828,6 +828,8 @@ impl MountPlanner {
         source_roots: &[String],
         scoped_fuse_roots: &[String],
     ) -> bool {
+        let data_media_root = paths::data_media_user_root_for_user(self.user_id);
+        let read_only_source_roots = build_read_only_source_roots(source_roots, &data_media_root);
         let (included_read_only_paths, excluded_read_only_paths) =
             paths::split_exclusion_rules(read_only_paths);
         let resolved_paths = self.resolve_concrete_storage_paths(
@@ -850,6 +852,8 @@ impl MountPlanner {
             &resolved_read_only_excluded_paths,
         ));
         paths::sort_dedup_paths_case_insensitive(&mut excluded_rules);
+        // scoped FUSE 已接管对应路径的只读判定时，namespace 侧不再重复挂载。
+        let mut delegated_to_scoped_fuse = false;
         let mut effective_paths: Vec<String> = Vec::with_capacity(resolved_paths.len());
         for path in resolved_paths {
             if path_shadows_mapping_request(&path, path_mappings) {
@@ -874,7 +878,15 @@ impl MountPlanner {
                 continue;
             }
             if is_covered_by_scoped_fuse_mount(&path, scoped_fuse_roots) {
-                log::info!("readonly mount kept with scoped fuse fallback: {}", path);
+                // scoped FUSE 覆盖范围内的只读规则由 FUSE 规则层执行：FUSE 对 open-for-write、
+                // truncate、chmod、link、mkdir、rename、delete 与 W_OK 访问逐条判定 is_read_only。
+                // 此处再叠一层 namespace 只读 bind 会用 real_storage 锚点遮蔽 FUSE 视图，
+                // 命中通配父目录的真实文件会读成空或过期内容（只读规则本意只限制写入）。
+                // FUSE 启动失败时 apply_mount_namespace_fallback 会先回滚再按展开后的规则重挂，
+                // 只读强制仍然保留，因此这里不保留 namespace 备份挂载。
+                log::info!("readonly mount delegated to scoped fuse: {}", path);
+                delegated_to_scoped_fuse = true;
+                continue;
             }
             let is_redundant = effective_paths
                 .iter()
@@ -894,7 +906,9 @@ impl MountPlanner {
             let Some(relative) = paths::relative_child_path(excluded_child, storage_path) else {
                 continue;
             };
-            let Some(source_path) = self.resolve_read_only_source(relative, source_roots) else {
+            let Some(source_path) =
+                self.resolve_read_only_source(relative, &read_only_source_roots)
+            else {
                 continue;
             };
             if !self.ensure_writable_mapped_directory(&source_path, self.app_uid) {
@@ -917,7 +931,9 @@ impl MountPlanner {
                 continue;
             }
 
-            let Some(source_path) = self.resolve_read_only_source(relative, source_roots) else {
+            let Some(source_path) =
+                self.resolve_read_only_source(relative, &read_only_source_roots)
+            else {
                 log::warn!("readonly source missing: {}", read_only_path);
                 continue;
             };
@@ -973,7 +989,9 @@ impl MountPlanner {
                 );
                 continue;
             }
-            let Some(source_path) = self.resolve_read_only_source(relative, source_roots) else {
+            let Some(source_path) =
+                self.resolve_read_only_source(relative, &read_only_source_roots)
+            else {
                 log::warn!(
                     "readonly exclude restore source missing: {}",
                     excluded_child
@@ -1007,7 +1025,9 @@ impl MountPlanner {
                 log::info!("readonly exclude restored {}", excluded_child);
             }
         }
-        is_any_mounted
+        // 交由 scoped FUSE 执行的只读规则同样属于"已强制"，不能按未生效处理，
+        // 否则会误报 readonly 规则放行写入。
+        is_any_mounted || delegated_to_scoped_fuse
     }
 
     fn resolve_read_only_exclusion_rules(
@@ -1232,6 +1252,25 @@ fn build_mapping_source_roots(
     }
     if !roots.iter().any(|root| root == data_media_root) {
         roots.push(data_media_root.to_string());
+    }
+    roots
+}
+
+/// 只读挂载的内容来源顺序：真实后端优先，可见别名锚点只作回退。
+///
+/// 可见锚点是 `/storage/emulated/<user>` 的 bind，在 Android 11 及以上它背后是系统
+/// FUSE，属于派生视图；模块自身与测试都在 `/data/media/<user>` 上直接建目录和写种子，
+/// 这些改动不会自动让系统 FUSE 失效，锚点因此可能把刚写入的真实文件读成空或旧内容。
+/// 只读规则只限制写入、不改变内容归属，因此固定以真实后端为权威来源。
+fn build_read_only_source_roots(source_roots: &[String], data_media_root: &str) -> Vec<String> {
+    let mut roots = Vec::with_capacity(source_roots.len().saturating_add(1));
+    if !data_media_root.is_empty() {
+        roots.push(data_media_root.to_string());
+    }
+    for root in source_roots {
+        if root != data_media_root && !roots.iter().any(|existing| existing == root) {
+            roots.push(root.clone());
+        }
     }
     roots
 }
