@@ -1086,9 +1086,13 @@ pub fn extract_user_id_from_storage_path(path: &str) -> i32 {
 }
 
 /// 从 `/data/media/<user>/...` 后端路径提取 Android 用户 ID。
+///
+/// 只能做语法归一化：`normalize` 会把 `/data/media/<user>/...` 改写为
+/// `/storage/emulated/<user>/...`，先归一化再按 `/data/media/` 前缀截取会永远拿不到
+/// 用户段，函数退化成恒返回 `None`，调用方基于它的后端识别分支随之失效。
 pub fn extract_user_id_from_data_media_path(path: &str) -> Option<i32> {
-    let normalized = normalize(path);
-    let rest = normalized.strip_prefix("/data/media/")?;
+    let normalized = normalize_syntax(path);
+    let rest = normalized.strip_prefix(DATA_MEDIA_PREFIX)?;
     let user = rest.split('/').next()?.parse::<i32>().ok()?;
     (user >= 0).then_some(user)
 }
