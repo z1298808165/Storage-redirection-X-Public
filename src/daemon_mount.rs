@@ -1032,6 +1032,27 @@ fn start_scoped_fuse_services(
             failed_roots.len(),
             failed_roots.join(",")
         );
+        // 规划阶段已跳过这些预期 FUSE 根对应的 bind；部分失败时先收回已启动会话，
+        // 再以单个存储根会话保留原始规则的动态匹配，避免失败根变成无规则覆盖。
+        let user_id = crate::platform::user_id_from_uid(request.uid);
+        let storage_root = paths::storage_user_root_for_user(user_id);
+        rollback_scoped_fuse_services(&states);
+        if let Some(state) = start_fuse_service_for_root(request, &storage_root, real_root_override)
+        {
+            log::warn!(
+                "daemon fuse partial roots collapsed to storage root pkg={} pid={} failed={}",
+                request.package_name,
+                request.pid,
+                failed_roots.len()
+            );
+            return Some(vec![state]);
+        }
+        log::warn!(
+            "daemon fuse partial roots and storage-root retry failed pkg={} pid={}",
+            request.package_name,
+            request.pid
+        );
+        return None;
     }
 
     if states.is_empty() {
@@ -1061,7 +1082,10 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
                 }
             }
         }
-        terminate_fuse_child(state.child);
+        terminate_fuse_child(
+            state.child,
+            (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
+        );
     }
 }
 
@@ -1120,7 +1144,7 @@ fn start_fuse_service_for_root(
             request.pid,
             request.package_name
         );
-        terminate_fuse_child(service_child);
+        terminate_fuse_child(service_child, None);
         return None;
     }
 
@@ -1790,7 +1814,7 @@ fn terminate_recorded_fuse_child(child: &FuseChildIdentity) -> bool {
     if !crate::platform::is_process_instance_alive(child.pid, start_time_ticks) {
         return true;
     }
-    terminate_fuse_child(child.pid);
+    terminate_fuse_child(child.pid, Some(start_time_ticks));
     if crate::platform::is_process_instance_alive(child.pid, start_time_ticks) {
         // 服务进程卡在不可中断的 FUSE 请求里时 SIGKILL 也无法回收，清理会因此不完整；
         // 记下残留进程的状态，便于区分真实残留与一次性清理竞态。
@@ -1806,7 +1830,10 @@ fn terminate_recorded_fuse_child(child: &FuseChildIdentity) -> bool {
     true
 }
 
-fn terminate_fuse_child(pid: i32) {
+fn terminate_fuse_child(pid: i32, start_time_ticks: Option<u64>) {
+    if !process_identity_alive(pid, start_time_ticks) {
+        return;
+    }
     if unsafe { libc::kill(pid, SIGTERM) } != 0 {
         let errno = last_errno();
         if errno != libc::ESRCH {
@@ -1830,14 +1857,24 @@ fn terminate_fuse_child(pid: i32) {
         // 把负返回值也当作「已回收」会在第一次循环就直接返回，永远走不到下面的
         // SIGKILL 升级，留下长期存活并空转的残留服务进程。因此这里以 `/proc`
         // 存活探测为准，用满整个 SIGTERM 宽限窗口后再升级信号。
-        if !crate::platform::process_exists(pid) {
+        if !process_identity_alive(pid, start_time_ticks) {
             return;
         }
         unsafe { libc::usleep(10 * 1000) };
     }
+    if !process_identity_alive(pid, start_time_ticks) {
+        return;
+    }
     let _ = unsafe { libc::kill(pid, SIGKILL) };
     let mut status = 0;
     let _ = unsafe { waitpid(pid, &mut status, WNOHANG) };
+}
+
+fn process_identity_alive(pid: i32, start_time_ticks: Option<u64>) -> bool {
+    match start_time_ticks {
+        Some(start) => crate::platform::is_process_instance_alive(pid, start),
+        None => crate::platform::process_exists(pid),
+    }
 }
 
 fn decode_wait_status(status: c_int) -> String {

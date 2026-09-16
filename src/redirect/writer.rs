@@ -642,11 +642,11 @@ fn refresh_caller_real_paths_cache(
     let config = SettingsHub::instance();
     let expand_mount_fallbacks = expand_mount_fallbacks_for_mode(config.storage_backend_mode());
     if let Some(profile) = get_effective_profile(config, caller_package, caller_uid) {
-        cache.allowed_real_paths = expand_wildcard_mount_fallback_rules(
-            profile.allowed_real_paths,
-            caller_uid,
-            expand_mount_fallbacks,
-        );
+        // 允许规则必须保留通配符本身：仅命中的具体目录保持真实，
+        // 未命中的兄弟目录仍需进入默认私有后端。父目录收敛只适用于只读边界，
+        // 不能把整个 Download/DCIM 父目录误判为允许真实写入。
+        cache.allowed_real_paths =
+            expand_wildcard_mount_fallback_rules(profile.allowed_real_paths, caller_uid, false);
         cache.excluded_real_paths = profile.excluded_real_paths;
         cache.sandboxed_paths = profile.sandboxed_paths;
         cache.read_only_paths = expand_wildcard_mount_fallback_rules(

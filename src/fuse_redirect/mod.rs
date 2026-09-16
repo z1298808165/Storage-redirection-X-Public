@@ -61,16 +61,11 @@ const SHARED_PUBLIC_DIR_MODE: u32 = 0o2770;
 ///
 /// 优先保持"只在通配规则命中的最小具体父目录上挂 FUSE"的设计前提，能不收敛就不收敛。
 pub(super) const TARGET_SCOPED_FUSE_ROOTS: usize = 4;
-/// 二级降级（把各根收敛到所属顶层存储子目录）后的硬上限。
+/// 多 scoped 会话模式允许保留的根数上限。
 ///
-/// 二级降级的输出天然是"一个顶层目录一个根"，数量上界就是顶层目录个数：
-/// [`super::config`] 的 `public_collection_name` 列出的 12 个公共集合目录，加上
-/// `Android` 共 13 个。硬上限取 16 后二级在数学上成为终点，正常配置不会再掉进
-/// "放弃 scoped FUSE、退回 mount namespace"的三级分支；另外 3 个余量留给用户自建的
-/// 顶层目录。
-///
-/// 这个上限不是内核约束，而是资源预算：每个根对应一个 `srx_fuse` 子进程和一次会话，
-/// 父进程的挂载等待预算按根数线性增长，因此不能无界放大。
+/// 这个上限不是规则能力或内核约束，而是资源预算：每个根对应一个 `srx_fuse` 子进程和
+/// 一次会话，父进程的挂载等待预算也按根数线性增长。顶层根超过该预算时改用单个共享
+/// 存储根 FUSE 会话，仍由原始规则逐路径匹配，不再因为根数退回精度较弱的 namespace。
 pub(super) const MAX_SCOPED_FUSE_ROOTS: usize = 16;
 const INITIAL_DIR_CANDIDATE_CACHE_BYTES: usize = 256 * 1024;
 

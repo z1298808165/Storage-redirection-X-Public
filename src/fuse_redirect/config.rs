@@ -135,6 +135,19 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
         return vec![paths::storage_user_root_for_user(user_id)];
     }
 
+    // 只有 wildcard 只读规则时使用 namespace fallback。此类规则需要把通配
+    // 收敛到父目录并依赖真实存储种子；启动 scoped FUSE 会把 Download 根接管，
+    // 反而丢失 fallback 的真实文件视图。
+    if request.allowed_real_paths().is_empty()
+        && request.path_mappings().is_empty()
+        && request
+            .read_only_paths()
+            .iter()
+            .any(|rule| paths::contains_wildcards(rule))
+    {
+        return Vec::new();
+    }
+
     scoped_mount_roots_for_hybrid_rules(
         request.uid(),
         request.allowed_real_paths(),
@@ -474,22 +487,32 @@ pub fn mount_blocking_with_ready(
             return false;
         }
     };
-    // 挂载后立即登记本次会话的挂载身份；挂载表不可读时返回 None，收尾退回按挂载源前缀判断。
-    let session_mount_identity = ScopedMountIdentity::capture(&mount_point, &session_mount_source);
-    if let Some(identity) = session_mount_identity.as_ref() {
-        log::info!(
-            "fuse redirect session mount registered mp={} mount_id={} source={}",
-            mount_point,
-            identity.mount_id,
-            identity.source
-        );
-    } else {
+    // spawn_mount2 返回只代表后台线程已创建；必须等待 mountinfo 出现本会话挂载，
+    // 再向父进程报告 ready，避免父进程在挂载栈尚未稳定时误判为成功。
+    let Some(session_mount_identity) =
+        wait_for_stable_session_mount(&mount_point, &session_mount_source)
+    else {
         log::warn!(
-            "fuse redirect session mount identity unavailable mp={} source={}",
+            "fuse redirect mount not stable mp={} source={}",
             mount_point,
             session_mount_source
         );
-    }
+        // 就绪失败也按本会话身份收尾，避免卸载同路径上新建的其它会话。
+        let identity = ScopedMountIdentity {
+            source: session_mount_source.clone(),
+            mount_id: 0,
+        };
+        finish_background_session(background, &mount_point, false, Some(&identity));
+        send_ready_result(ready_sock, -1);
+        return false;
+    };
+    // 挂载后登记本次会话身份；挂载表不可读时不向父进程报告 ready。
+    log::info!(
+        "fuse redirect session mount registered mp={} mount_id={} source={}",
+        mount_point,
+        session_mount_identity.mount_id,
+        session_mount_identity.source
+    );
     send_ready_result(ready_sock, 0);
 
     loop {
@@ -503,7 +526,7 @@ pub fn mount_blocking_with_ready(
                 background,
                 &mount_point,
                 !app_alive,
-                session_mount_identity.as_ref(),
+                Some(&session_mount_identity),
             );
         }
         if !crate::platform::is_process_instance_alive(app_pid, app_start_time_ticks) {
@@ -517,7 +540,7 @@ pub fn mount_blocking_with_ready(
                 background,
                 &mount_point,
                 true,
-                session_mount_identity.as_ref(),
+                Some(&session_mount_identity),
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -695,6 +718,25 @@ impl ScopedMountIdentity {
     }
 }
 
+/// 在有限窗口内连续确认本会话挂载，避免启动后立即报告不稳定状态。
+fn wait_for_stable_session_mount(mount_point: &str, source: &str) -> Option<ScopedMountIdentity> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+    let mut consecutive_matches = 0;
+    while std::time::Instant::now() < deadline {
+        let identity = ScopedMountIdentity::capture(mount_point, source);
+        if identity.is_some() {
+            consecutive_matches += 1;
+            if consecutive_matches >= 2 {
+                return identity;
+            }
+        } else {
+            consecutive_matches = 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
 /// 读取当前挂载表中指定挂载点上的全部记录。
 ///
 /// 同一路径可能叠着多层挂载（daemon 重挂载期间旧会话与新会话并存），因此返回列表，由
@@ -863,6 +905,12 @@ pub fn scoped_mount_roots_for_hybrid_rules(
 ) -> Vec<String> {
     let user_id = crate::platform::user_id_from_uid(uid);
     let storage_root = paths::storage_user_root_for_user(user_id);
+    // 映射源中的通配也依赖动态目录匹配，不能仅交给 namespace 的启动时展开。
+    // 先复用映射校验，避免无效目标或 namespace 外路径扩大 FUSE 接管范围。
+    let scoped_path_mappings = resolve_scoped_path_mappings(path_mappings, user_id, &storage_root);
+    let mapping_wildcard_rules = scoped_path_mappings
+        .iter()
+        .map(|(request, _)| request.as_str());
     let scoped_allowed_rules = allowed_real_paths.iter().map(String::as_str);
     let sandbox_include_rules = sandboxed_paths
         .iter()
@@ -873,7 +921,7 @@ pub fn scoped_mount_roots_for_hybrid_rules(
         scoped_allowed_rules
             .chain(excluded_real_paths.iter().map(String::as_str))
             .chain(sandbox_include_rules)
-            .chain(read_only_paths.iter().map(String::as_str)),
+            .chain(mapping_wildcard_rules),
     );
 
     if is_mapping_mode_only {
@@ -907,12 +955,13 @@ pub fn scoped_mount_roots_for_hybrid_rules(
         roots.push(allowed_root);
     }
 
+    // 仅有通配只读规则时不单独启动 scoped FUSE：namespace fallback 会把规则收敛到
+    // 具体父目录，既能保留真实文件可读性，也避免 FUSE 根覆盖后无法准备真实种子目录。
     let normalized_read_only_paths = super::normalize_rule_list(read_only_paths.to_vec(), user_id);
     let (read_only_includes, read_only_excludes) =
         paths::split_exclusion_rules(&normalized_read_only_paths);
     let read_only_excludes =
         paths::overlapping_exclusion_rules(&read_only_includes, &read_only_excludes);
-    let scoped_path_mappings = resolve_scoped_path_mappings(path_mappings, user_id, &storage_root);
     for read_only_root in &read_only_includes {
         if paths::contains_wildcards(read_only_root) {
             continue;
@@ -1022,13 +1071,8 @@ fn compact_scoped_mount_roots(mut roots: Vec<String>, storage_root: &str) -> Vec
         return effective;
     }
 
-    // 第二级降级：把各根收敛到其所属的顶层存储子目录（如 Download、DCIM）。
-    // 收敛不出顶层子目录（即该根本身就是存储根）的情况直接丢弃，不能让它把
-    // 整个存储根带进结果——那等于让模块内 FUSE 接管全部共享存储。
-    //
-    // 这一级的输出上界就是顶层目录个数（public_collection_name 的 12 个公共集合目录
-    // 加 Android 共 13 个），所以硬上限必须不小于它，否则二级接不住就会直接掉进三级的
-    // "放弃 FUSE"分支。一级用软目标、二级用硬上限，正是为了让二级成为终点。
+    // 第二级压缩到顶层子目录；超出硬预算时使用单个存储根会话。
+    // 预算只限制会话数量，不应改变原规则的动态匹配语义。
     let mut top_level: Vec<String> = effective
         .iter()
         .filter_map(|root| top_level_storage_child(root, storage_root))
@@ -1047,29 +1091,16 @@ fn compact_scoped_mount_roots(mut roots: Vec<String>, storage_root: &str) -> Vec
         return top_level;
     }
 
-    // 顶层降级后仍超限：放弃 scoped FUSE，返回空列表让调用方走 mount namespace。
-    //
-    // 此前这里退化为整个存储根 `/storage/emulated/<user>`，即模块内 FUSE 提供全部
-    // 共享存储。这偏离了「只在通配规则的最小具体父目录挂载 FUSE」的设计前提：真机
-    // 实测中 7 个顶层目录规则就会触发该退化（scoped roots raw count=7 → compacted
-    // count=1 list=/storage/emulated/0），属常见配置而非极端情况；而接管整个存储的
-    // 路径缺少验证，且历史上无条件启用 MediaProvider native FUSE 曾导致
-    // Android 13 出现 Transport endpoint is not connected。
-    //
-    // mount namespace 方案会让通配规则退化为按已存在目录匹配，功能上弱于 FUSE，
-    // 但作用范围可控，比接管整个存储更安全。
-    //
-    // 硬上限抬到 16（不小于顶层目录个数）之后，本分支只可能在规则跨及 3 个以上用户自建
-    // 顶层目录时才触发，已从"常见配置"收敛为罕见路径；保留它是为了给异常配置一个可控
-    // 回退，而不是放弃 FUSE 覆盖。
+    // 自定义顶层目录数量没有固定上限；返回空列表会静默退回 namespace，
+    // 丢失之后新建目录的通配映射。存储根会话仍逐路径应用原始规则。
     log::warn!(
         "scoped roots exceed limit after top-level fallback: effective={} top_level={} limit={}, \
-         skip scoped fuse and use mount namespace",
+         collapse to single storage-root fuse session",
         effective.len(),
         top_level.len(),
         super::MAX_SCOPED_FUSE_ROOTS
     );
-    Vec::new()
+    vec![storage_root.to_string()]
 }
 
 fn top_level_storage_child(path: &str, storage_root: &str) -> Option<String> {

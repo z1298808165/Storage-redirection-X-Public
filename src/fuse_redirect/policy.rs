@@ -177,8 +177,15 @@ impl RedirectPolicy {
         let rule_prefixes =
             build_rule_prefixes(&config, &path_mappings, user_id, &storage_root, &mount_root);
 
-        let normalized_read_only_paths =
-            super::normalize_rule_list(config.read_only_paths, user_id);
+        // FUSE 与 namespace fallback 保持一致：通配只读规则收敛到具体父目录，
+        // 确保通配根目录下未命中具体子目录的访问仍不会绕过只读边界。
+        let normalized_read_only_paths = super::normalize_rule_list(
+            crate::fuse_redirect::config::expand_namespace_fallback_rules(
+                config.uid,
+                &config.read_only_paths,
+            ),
+            user_id,
+        );
         let (read_only_paths, read_only_excluded_paths) =
             paths::split_exclusion_rules(&normalized_read_only_paths);
         let read_only_excluded_paths =
@@ -310,7 +317,13 @@ impl RedirectPolicy {
         if self.matches_any(&self.read_only_index, storage_path) {
             return true;
         }
-        false
+        // 通配只读规则在 FUSE 中也以其具体父目录作为安全边界；这样未命中
+        // 通配子目录的访问不会因后端切换而落入私有重定向路径。
+        self.read_only_paths.iter().any(|rule| {
+            paths::contains_wildcards(rule)
+                && paths::wildcard_policy_fallback_parent(rule, &self.storage_root)
+                    .is_some_and(|parent| paths::is_same_or_child(storage_path, &parent))
+        })
     }
 
     fn backend_decision(&self, storage_path: &str, operation: OperationKind) -> BackendDecision {

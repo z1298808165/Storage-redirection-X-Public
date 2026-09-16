@@ -750,6 +750,27 @@ fn start_scoped_fuse_services(
             failed_roots.len(),
             failed_roots.join(",")
         );
+        // 规划阶段已跳过这些预期 FUSE 根对应的 bind；部分失败时先收回已启动会话，
+        // 再以单个存储根会话保留原始规则的动态匹配，避免失败根变成无规则覆盖。
+        let user_id = platform::user_id_from_uid(request.uid);
+        let storage_root = platform::paths::storage_user_root_for_user(user_id);
+        rollback_scoped_fuse_services(&states);
+        if let Some(state) = start_fuse_service_for_root(request, &storage_root, real_root_override)
+        {
+            log::warn!(
+                "fuse partial roots collapsed to storage root pkg={} pid={} failed={}",
+                request.package_name,
+                request.pid,
+                failed_roots.len()
+            );
+            return Some(vec![state]);
+        }
+        log::warn!(
+            "fuse partial roots and storage-root retry failed pkg={} pid={}",
+            request.package_name,
+            request.pid
+        );
+        return None;
     }
 
     if states.is_empty() {
@@ -779,7 +800,10 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
                 }
             }
         }
-        terminate_fuse_service(state.child);
+        terminate_fuse_service(
+            state.child,
+            (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
+        );
     }
 }
 
@@ -854,7 +878,7 @@ fn start_fuse_service_for_root(
             request.pid,
             request.package_name
         );
-        terminate_fuse_service(service_child);
+        terminate_fuse_service(service_child, None);
         return None;
     }
 
@@ -874,7 +898,10 @@ fn start_fuse_service_for_root(
     })
 }
 
-fn terminate_fuse_service(pid: i32) {
+fn terminate_fuse_service(pid: i32, start_time_ticks: Option<u64>) {
+    if !process_identity_alive(pid, start_time_ticks) {
+        return;
+    }
     // SIGTERM 失败通常说明子进程已经退出成僵尸或权限受限，此时仍然必须回收；
     // 直接返回会把僵尸进程留在伴生进程下，长期运行会耗尽进程表。
     // SAFETY: kill 只接收整型参数，不涉及借用指针。
@@ -898,7 +925,7 @@ fn terminate_fuse_service(pid: i32) {
         // （FUSE 服务子进程由挂载 worker fork，worker 退出后由 init 收养，此后
         // 固定得到 ECHILD）。把它当作已退出会直接跳过下面的 SIGKILL 升级，留下
         // 长期存活并空转的残留服务进程；这里改用 `/proc` 存活探测。
-        if !crate::platform::process_exists(pid) {
+        if !process_identity_alive(pid, start_time_ticks) {
             return;
         }
         unsafe { libc::usleep(10 * 1000) };
@@ -914,13 +941,20 @@ fn terminate_fuse_service(pid: i32) {
         }
         // SIGKILL 之后同样不能依赖 `waitpid` 判断目标是否消失，否则会对已经退出
         // 但无法回收的目标误报残留。
-        if !crate::platform::process_exists(pid) {
+        if !process_identity_alive(pid, start_time_ticks) {
             return;
         }
         // SAFETY: usleep 只接收整型参数，不涉及借用指针。
         unsafe { libc::usleep(10 * 1000) };
     }
     log::warn!("fuse service still alive after SIGKILL child={}", pid);
+}
+
+fn process_identity_alive(pid: i32, start_time_ticks: Option<u64>) -> bool {
+    match start_time_ticks {
+        Some(start) => platform::is_process_instance_alive(pid, start),
+        None => platform::process_exists(pid),
+    }
 }
 
 fn fuse_config_from_request(
