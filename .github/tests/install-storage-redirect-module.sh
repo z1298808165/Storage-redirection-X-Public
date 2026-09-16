@@ -301,6 +301,17 @@ media_provider_pid() {
     awk 'NF { print $1; exit }'
 }
 
+# 首次开机时 MediaProvider 进程可能早于模块注入可用就被创建，此时该进程永远不会走到
+# specialize + Java hook 安装路径。重启这个进程会重新走一次 specialize，比整机重启代价低。
+restart_media_provider_process() {
+  local package
+  for package in com.google.android.providers.media.module com.android.providers.media.module com.android.providers.media; do
+    adb shell am force-stop "$package" >/dev/null 2>&1 || true
+  done
+  adb_su "pkill -f com.google.android.providers.media.module 2>/dev/null || true; pkill -f com.android.providers.media.module 2>/dev/null || true" >/dev/null 2>&1 || true
+  sleep 2
+}
+
 wait_media_provider_hook_ready() {
   local label="$1"
   local timeout_seconds="${2:-60}"
@@ -322,7 +333,7 @@ wait_media_provider_hook_ready() {
 
   pid="$(media_provider_pid)"
   echo "MediaProvider hook did not become ready: label=${label} pid=${pid:-missing}" >&2
-  adb_su "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_id=\$boot_id; echo install_state; cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent; echo deferred_marker; ls -la /data/adb/modules/storage.redirect.x/logs/.media_hook_deferred 2>/dev/null || echo marker_absent; echo media_processes; ps -A | grep -E 'providers.media|android.process.media' || true; if [ -n '${pid:-}' ]; then echo module_maps; grep -E 'storage.redirect.x/zygisk|libsrx_core' '/proc/${pid}/maps' 2>/dev/null || echo module_map_absent; fi" || true
+  adb_su "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_id=\$boot_id; echo install_state; cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent; echo deferred_marker; ls -la /data/adb/modules/storage.redirect.x/logs/.media_hook_deferred 2>/dev/null || echo marker_absent; echo media_processes; ps -A | grep -E 'providers.media|android.process.media' || true; if [ -n '${pid:-}' ]; then echo module_maps; grep -E 'storage.redirect.x/zygisk|libsrx_core' '/proc/${pid}/maps' 2>/dev/null || echo module_map_absent; fi; echo module_zygisk_files; ls -la /data/adb/modules/storage.redirect.x/zygisk/ 2>/dev/null || echo zygisk_dir_absent; echo module_mapped_processes; timeout 15 sh -c \"grep -l 'storage.redirect.x/zygisk' /proc/[0-9]*/maps 2>/dev/null | head -20\" || echo maps_probe_failed; echo media_provider_state_log; tail -20 /data/adb/modules/storage.redirect.x/logs/media_provider_state.log 2>/dev/null || echo media_provider_state_absent; echo module_running_log_tail; tail -30 /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null || echo running_log_absent" || true
   adb_magisk '--denylist ls' 2>/dev/null || true
   adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|linker|fatal' || true
   return 1
@@ -330,6 +341,14 @@ wait_media_provider_hook_ready() {
 
 verify_media_provider_hook_with_reboot_retry() {
   if wait_media_provider_hook_ready "module-boot" 60; then
+    return 0
+  fi
+
+  # 先自愈：让 MediaProvider 进程重新走一次 specialize，避免为一次进程创建时机竞争
+  # 就付出整机重启的代价。只有自愈仍不生效时才退回整机重启。
+  echo "MediaProvider hook absent after module boot; restarting the MediaProvider process and re-checking."
+  restart_media_provider_process
+  if wait_media_provider_hook_ready "module-restart" 60; then
     return 0
   fi
 

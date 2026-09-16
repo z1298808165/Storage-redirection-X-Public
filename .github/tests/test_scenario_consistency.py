@@ -780,6 +780,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn("media_provider_hook_check_skipped", wait)
         self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", wait)
         self.assertIn('wait_media_provider_hook_ready "module-boot" 60', recovery)
+        self.assertIn('wait_media_provider_hook_ready "module-restart" 60', recovery)
         self.assertIn("adb reboot", recovery)
         self.assertIn('wait_media_provider_hook_ready "module-clean-boot" 120', recovery)
         self.assertEqual(1, recovery.count("adb reboot"))
@@ -791,6 +792,29 @@ class ScenarioConsistencyTest(unittest.TestCase):
             recovery.index("adb reboot"),
             recovery.index('wait_media_provider_hook_ready "module-clean-boot"'),
         )
+        # 进程级自愈必须先于整机重启：先重启 MediaProvider 进程重新走 specialize，
+        # 只有自愈仍不生效才付出整机重启代价。
+        self.assertIn("restart_media_provider_process", recovery)
+        self.assertLess(
+            recovery.index('wait_media_provider_hook_ready "module-boot"'),
+            recovery.index("restart_media_provider_process"),
+        )
+        self.assertLess(
+            recovery.index("restart_media_provider_process"),
+            recovery.index('wait_media_provider_hook_ready "module-restart"'),
+        )
+        self.assertLess(
+            recovery.index('wait_media_provider_hook_ready "module-restart"'),
+            recovery.index("adb reboot"),
+        )
+        self.assertLess(
+            install.index("restart_media_provider_process() {"),
+            install.index("verify_media_provider_hook_with_reboot_retry()"),
+        )
+        # 失败现场必须能区分"Zygisk 整体没注入"与"只漏了 MediaProvider"。
+        self.assertIn("module_zygisk_files", wait)
+        self.assertIn("module_mapped_processes", wait)
+        self.assertIn("module_running_log_tail", wait)
         self.assertIn("defer_media_provider_hook_check_for_lazy_provider", install)
         self.assertIn("MediaProvider 采用惰性启动", install)
 
