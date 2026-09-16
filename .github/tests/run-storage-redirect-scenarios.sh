@@ -2511,14 +2511,18 @@ capture_scenario2_mediastore_hook_diag() {
 }
 
 capture_test_flow_artifacts() {
-  adb logcat -d >test-flow-logcat.txt 2>/dev/null || true
+  adb logcat -b all -d >test-flow-logcat.txt 2>/dev/null || true
   adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; case \"\$log\" in file_monitor.log|running.log) tail -1000 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; *) tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; esac; done" >test-flow-module-state.txt 2>/dev/null || true
   adb_su "echo schema=1; echo ===fuse_capability_snapshot===; cat /data/adb/modules/storage.redirect.x/.fuse_capability 2>/dev/null || echo state=unknown; echo; echo ===backend_effective===; grep -a -h 'backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -80 || true; echo; echo ===fuse_cache_summary===; grep -a -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -120 || true" >test-flow-backend-diagnostic.txt 2>/dev/null || true
   capture_file_monitor_diagnostics >test-flow-monitor-state.txt 2>/dev/null || true
   {
+    echo "===app_exit_info==="
+    adb shell dumpsys activity exit-info "$APP_ID" || true
     echo "===app_pids==="
     adb shell "pidof '$APP_ID' 2>/dev/null || true"
     for pid in $(adb shell "pidof '$APP_ID' 2>/dev/null" | tr -d '\r'); do
+      echo "--- /proc/${pid}/threads ---"
+      adb_su "for task in /proc/${pid}/task/*; do echo ---\$task---; cat \"\$task/comm\" \"\$task/wchan\" \"\$task/stack\" 2>/dev/null || true; done"
       echo "--- /proc/${pid}/mountinfo ---"
       adb_su "cat '/proc/${pid}/mountinfo' 2>/dev/null | grep -E 'SrtProbe|Download/Test|SrtMonitor|/storage|/mnt/runtime|/mnt/user|/mnt/installer|/mnt/androidwritable|/mnt/pass_through|fuse|srx' || true"
     done
@@ -2804,6 +2808,11 @@ run_scenario() {
       run_standard_scenario "$scenario"
       ;;
   esac
+  # AND 链中的失败可能不触发 errexit，显式保留分支结果，避免诊断成功覆盖失败。
+  local scenario_status=$?
+  if [ "$scenario_status" -ne 0 ]; then
+    return "$scenario_status"
+  fi
   echo "step 6/7: 记录 auto 实际后端和 FUSE cache 容量"
   adb_su "grep -h 'backend_effective' '$LOG_PATH' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LOG_PATH' 2>/dev/null | tail -3 || true"
 }
@@ -2892,10 +2901,16 @@ export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 
+failure_artifacts_captured=0
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"
-  if ! timeout --foreground "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -c 'run_scenario "$1"' _ "$scenario"; then
+  if ! timeout --foreground "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -e -o pipefail -c 'run_scenario "$1"' _ "$scenario"; then
     echo "scenario ${scenario}: failed or timed out"
+    # 在健康探测或下一场景清理之前保存首个失败现场；采集失败仍保留场景失败状态。
+    if [ "$failure_artifacts_captured" -eq 0 ]; then
+      timeout --foreground 180s bash -c 'capture_test_flow_artifacts' || true
+      failure_artifacts_captured=1
+    fi
     timeout --foreground 90s bash -c 'print_diagnostics "$1"' _ "$scenario" || true
     fail=1
     if [ "$SRT_FAIL_FAST" = "1" ]; then
@@ -2910,7 +2925,7 @@ if ! timeout --foreground 120s bash -c 'check_health'; then
   echo "health check timed out or failed"
   fail=1
 fi
-if ! timeout --foreground 180s bash -c 'capture_test_flow_artifacts'; then
+if [ "$failure_artifacts_captured" -eq 0 ] && ! timeout --foreground 180s bash -c 'capture_test_flow_artifacts'; then
   echo "test-flow artifact capture timed out"
 fi
 
