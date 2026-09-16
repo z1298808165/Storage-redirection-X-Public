@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.Executors
 import me.fakerqu.test.storageredirect.receiver.TestCaseReceiver
 import me.fakerqu.test.storageredirect.test.StorageRedirectTestRunner
@@ -73,12 +74,7 @@ class TestService : Service() {
               )
             }
         val failed = results.count { !it.passed }
-        val resultDir =
-            getExternalFilesDir("test_case_result") ?: File(filesDir, "test_case_result")
-        resultDir.mkdirs()
-        val resultFile = File(resultDir, "result_${System.currentTimeMillis()}.txt")
-        writeResultFile(resultFile, results)
-        writeCurrentResultFile(resultDir, results)
+        reportResults(results)
 
         if (failed > 0) {
           Log.w(
@@ -158,6 +154,44 @@ class TestService : Service() {
         }
   }
 
+  /**
+   * 结果上报按候选目录逐个尝试，任一目录写入成功即视为上报完成。
+   *
+   * 被测应用自身的外部专属目录同样处于重定向范围内：进程可能在宿主把挂载从 planned 变为已应用之前就开始执行任务，此时 `getExternalFilesDir()`
+   * 返回的可见路径尚不可建， 直接写入会抛 `FileNotFoundException: ENOENT`。该异常一旦逃出执行器线程会终止整个
+   * 进程，导致所有候选目录都拿不到结果文件，设备测试流只能超时失败。因此这里显式吞掉 单个目录的失败并回退到内部 `filesDir`，两处路径都在测试脚本的结果扫描范围内。
+   */
+  private fun reportResults(results: List<TestResult>) {
+    val targets = ArrayList<File>(2)
+    getExternalFilesDir("test_case_result")?.let { targets.add(it) }
+    targets.add(File(filesDir, "test_case_result"))
+
+    var succeeded = false
+    var lastError: Throwable? = null
+    for (target in targets) {
+      try {
+        if (!ensureResultDir(target)) {
+          throw IOException("结果目录不可用: ${target.absolutePath}")
+        }
+        writeResultFile(File(target, "result_${System.currentTimeMillis()}.txt"), results)
+        writeCurrentResultFile(target, results)
+        succeeded = true
+      } catch (e: Throwable) {
+        lastError = e
+        Log.w(TAG, "结果目录写入失败 dir=${target.absolutePath}", e)
+      }
+    }
+    if (!succeeded) {
+      Log.e(TAG, "全部结果目录写入失败", lastError)
+    }
+  }
+
+  private fun ensureResultDir(dir: File): Boolean {
+    if (dir.isDirectory) return true
+    dir.mkdirs()
+    return dir.isDirectory
+  }
+
   private fun writeResultFile(
       file: File,
       results: List<TestResult>,
@@ -199,8 +233,10 @@ class TestService : Service() {
             message = "$stage failed: ${error.javaClass.simpleName}",
             error = error.stackTraceToString(),
         )
-    val resultDir = File(filesDir, "test_case_result")
-    resultDir.mkdirs()
-    writeCurrentResultFile(resultDir, listOf(result))
+    try {
+      reportResults(listOf(result))
+    } catch (e: Throwable) {
+      Log.e(TAG, "上报即时失败结果异常", e)
+    }
   }
 }
