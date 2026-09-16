@@ -3576,6 +3576,14 @@ public class Hooker {
       if (sandboxPath == null || sandboxPath.length() == 0) {
         if (!wasRedirected) return;
         sandboxPath = values.getAsString("_data");
+        // Provider 回填的 _data 可能仍是 pending 临时名，登记必须保存最终显示名。
+        if (sandboxPath != null) {
+          File pendingFile = new File(sandboxPath);
+          if (isPendingFileOf(pendingFile.getName(), displayName)
+              && pendingFile.getParentFile() != null) {
+            sandboxPath = new File(pendingFile.getParentFile(), displayName).getPath();
+          }
+        }
       }
       if (sandboxPath == null || sandboxPath.length() == 0) return;
       if (!wasRedirected
