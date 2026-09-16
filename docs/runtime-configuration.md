@@ -55,16 +55,16 @@
 `storage_backend_mode = auto` 下，native 会把一条应用的规则集合收敛为最少个数的 scoped FUSE 挂载根，每根一个独立 `srx_fuse` 会话进程。两级阈值：
 
 - **软目标 4**（`TARGET_SCOPED_FUSE_ROOTS`）：规则去重、剔除子路径后的根数不超过 4 时直接使用，绝大多数配置收敛在这一档。
-- **硬上限 16**（`MAX_SCOPED_FUSE_ROOTS`）：超过软目标时把各根收敛到顶层存储子目录（上界即顶层目录个数），该结果只要不超过 16 就照常挂载，不放弃 FUSE 覆盖。
+- **多会话预算 16**（`MAX_SCOPED_FUSE_ROOTS`）：超过软目标时先把各根收敛到顶层存储子目录；如果顶层目录仍超过 16，不再退回 namespace，而是折叠为一个存储根 FUSE 会话。该会话仍按原始规则逐路径匹配，保持通配符对后续新建目录的动态语义。
 
 功耗与性能特征：
 
 - **空闲成本为零**：每个会话是单线程阻塞在 `/dev/fuse` read 上，无 IO 时不产生 CPU 唤醒；成本只是每个会话一个进程的内存占用。
 - **IO 直通**：会话建立时与内核协商 FUSE passthrough（Android GKI 内核已回移植），协商成功后文件读写直连 backing fd，不回用户态；只有 lookup/元数据走 FUSE 转发。协商结果写入 `fuse init ... passthrough_enabled=` 日志。
 - **随应用退出回收**：应用进程退出后由会话自身卸载挂载点并退出（`fuse redirect app exited, unmount session` 日志），会话数不随应用生命周期累积。
-- **失败只丢单根**：某根启动失败时保留已成功的根（`fuse partial scoped mount` 日志），不再整组回滚，避免健康会话被无谓销毁重建。
+- **失败根精确回退**：某根启动失败时先记录失败根并尝试单个存储根 FUSE 会话（`fuse partial roots collapsed to storage root`）；只有该重试也失败时才使用 namespace 回退。这样不会出现规划阶段跳过 bind、运行阶段又没有 FUSE 接管的空档。
 
-排查功耗异常时，先看 `scoped roots expanded past soft target count=` 日志：出现即说明该应用的规则集合覆盖了超过 4 个顶层目录、正在以多于软目标的会话数运行；若会话数与 IO 量都偏大，优先精简该应用的规则（合并到共同父目录），让根数回到软目标以内。
+排查功耗异常时，先看 `scoped roots expanded past soft target count=` 日志：出现表示一级压缩后的最小根数超过 4，随后可能按顶层目录合并；该日志不等于最终会话数超过 4。若最终仍超过多会话预算，日志会出现 `collapse to single storage-root fuse session`，规则精度保持不变，但单个会话覆盖范围更大、内存成本更低。
 
 ## 局部沙盒路径
 
@@ -106,6 +106,7 @@
 ```
 
 - `read_only_paths` 支持字符串或字符串数组，运行时读取会按真实路径放行并禁止写入。
+- `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 是 MediaProvider 管理的应用私有外部存储根。挂载恢复优先使用系统 FUSE 锚点，关闭针对整棵私有树的属主修复监视，并保留已有子目录元数据；包名根仍有初始化处理。目标是不依赖额外允许路径访问自有目录，当前版本的完整真机回归尚未完成。
 - 普通应用通过 mount namespace 的只读 bind mount 强制生效，不会因为只读配置额外安装 PLT hook；这是稳定性约束，避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。
 - 真实 MediaProvider/FUSE 服务端仍通过现有系统 writer hook 识别调用方；DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不进入进程内 PLT hook 链路；写入只读路径会返回 `EROFS`。
 - 只读正向规则会提供真实读取通道；即使没有配置 `allowed_real_paths`，应用也能读取该目录但不能写入。`!` 只读排除规则优先覆盖同组正向只读规则，命中后继续按沙盒、映射或显式允许规则处理。
@@ -118,6 +119,7 @@
 
 - `allowed_real_paths`、`sandboxed_paths` 和 `read_only_paths` 继续使用相对共享存储路径，例如 `Download/MyApp`；只有 `path_mappings` 支持绝对 namespace 路径。
 - `path_mappings` 的请求路径和目标路径支持相对共享存储路径，也支持以 `/` 开头的绝对路径；绝对路径会在应用自己的 mount namespace 中生效，可用于 `/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有目录。
+- 应用私有根目录本身不作为映射入口，但其子路径仍支持通配映射，例如 `Android/data/com.example.app/file/* -> Download/AAA`；已有私有子目录在元数据准备阶段保留属主和权限；包名根仍有初始化处理，不表示所有历史权限均已自动恢复。
 - 不能包含 `.`、`..` 路径段、控制字符或超过 512 字符的路径。
 - 非映射规则不能直接写 `sdcard`、`storage/emulated`、`storage/self/primary`、`data/media` 等存储根或根别名；映射的绝对路径也必须通过 namespace 安全校验。
 - `allowed_real_paths` 支持 `!` 排除前缀；`path_mappings` 和 `sandboxed_paths` 不支持 `!`。
