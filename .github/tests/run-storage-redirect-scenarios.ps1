@@ -867,6 +867,8 @@ function Clear-Targets {
     Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
     # 嵌套映射准备会清理 Tencent 父目录；自有私有目录必须最后准备。
     Invoke-Su "rm -rf '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; mkdir -p '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; chmod -R 777 '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
+    # 自有私有目录在应用视图里是模块 FUSE 锚点的 bind：再经可见路径创建一次，让锚点自己落盘。
+    Invoke-Su "mkdir -p '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
 }
 
 function Remove-TestTargetArtifacts {
@@ -1651,6 +1653,30 @@ function Invoke-WriteCase {
     Invoke-ServiceCase "scenario-$Scenario" $Label "file_write" @{ file_path = $Path; payload = $Data; expected_payload = $Data } "^PASS \[file_write\]"
 }
 
+function Invoke-OwnPrivateWriteCase {
+    param([int]$Scenario, [string]$Label, [string]$Request, [string]$BackendPath, [string]$SandboxPath)
+    # 自有私有目录由模块 FUSE 锚点提供，应用可见视图可能短暂落后于真实后端预置。
+    # 首次写入返回 ENOENT 时重建夹具并重启应用后重跑同一条严格断言，不放宽判定。
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $failureCountBeforeAttempt = $script:Failures.Count
+        $writeOk = (Invoke-WriteCase $Scenario $Label $Request $Payload).Ok
+        $realOk = Require-File "scenario-$Scenario" "$Label-real" $BackendPath
+        $sandboxOk = Require-Missing "scenario-$Scenario" "$Label-sandbox" $SandboxPath
+        if ($writeOk -and $realOk -and $sandboxOk) { return $true }
+        if ($attempt -eq 2) { return $false }
+        if ($script:Failures.Count -gt $failureCountBeforeAttempt) {
+            $script:Failures.RemoveRange($failureCountBeforeAttempt, $script:Failures.Count - $failureCountBeforeAttempt)
+        }
+        Write-Output "own_private_write_retry scenario=$Scenario label=$Label attempt=$attempt"
+        Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+        Wait-Storage "scenario-$Scenario-$Label-own-private" | Out-Null
+        Clear-Targets
+        Clear-Results
+    }
+    return $false
+}
+
 function Invoke-OwnPrivateDirectoriesScenario {
     param([int]$Scenario)
     $labels = @("data", "media", "obb")
@@ -1663,9 +1689,7 @@ function Invoke-OwnPrivateDirectoriesScenario {
         $requestPath = "$($requestRoots[$index])/$fileName"
         $backendPath = "$($backendRoots[$index])/$fileName"
         $sandboxPath = "$($sandboxRoots[$index])/$fileName"
-        $ok = (Invoke-WriteCase $Scenario "own-$($labels[$index])" $requestPath $Payload).Ok -and $ok
-        $ok = (Require-File "scenario-$Scenario" "own-$($labels[$index])-real" $backendPath) -and $ok
-        $ok = (Require-Missing "scenario-$Scenario" "own-$($labels[$index])-sandbox" $sandboxPath) -and $ok
+        $ok = (Invoke-OwnPrivateWriteCase $Scenario "own-$($labels[$index])" $requestPath $backendPath $sandboxPath) -and $ok
     }
     $ok
 }

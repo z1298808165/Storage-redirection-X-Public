@@ -51,6 +51,30 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(bash.index("mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}'"),
                         bash.index("  fix_private_backend_permissions"))
 
+    def test_own_private_fixture_is_materialized_through_visible_path(self) -> None:
+        # 自有私有目录在应用视图里是模块 FUSE 锚点的 bind；只写真实后端时锚点可能继续
+        # 以否命中文档响应应用首个 lookup（场景 34 own-data 在 Android 13 上返回 ENOENT）。
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("mkdir -p '${OWN_PRIVATE_DATA_ROOT}'", bash)
+        self.assertLess(bash.index("mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}'"),
+                        bash.index("mkdir -p '${OWN_PRIVATE_DATA_ROOT}'"))
+        ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertIn("mkdir -p '$OwnPrivateDataRoot'", ps)
+
+    def test_own_private_write_keeps_strict_assertions_on_retry(self) -> None:
+        # 重试只重建夹具并重启应用，断言集合必须与首次一致，不得放宽或跳过落点校验。
+        bash = section(self.bash, "run_own_private_directories_scenario() {", "run_any_path_mapping_scenario() {")
+        self.assertIn("run_own_private_write_case", bash)
+        retry = section(self.bash, "run_own_private_write_case() {", "run_any_path_mapping_scenario() {")
+        for token in ("run_write_case", "check_file_exists", "check_file_missing", "own_private_write_retry", "clean_targets"):
+            self.assertIn(token, retry)
+        self.assertIn("export -f run_own_private_directories_scenario run_own_private_write_case", self.bash)
+        ps = section(self.powershell, "function Invoke-OwnPrivateWriteCase", "function Invoke-OwnPrivateDirectoriesScenario")
+        for token in ("Invoke-WriteCase", "Require-File", "Require-Missing", "own_private_write_retry", "Clear-Targets"):
+            self.assertIn(token, ps)
+        ps_scenario = section(self.powershell, "function Invoke-OwnPrivateDirectoriesScenario", "function Invoke-AnyPathMappingScenario")
+        self.assertIn("Invoke-OwnPrivateWriteCase", ps_scenario)
+
     def test_shared_probe_invalidation_precedes_backend_cleanup(self) -> None:
         # 前序场景已查询过的文件应经系统 FUSE 删除，不能仅修改底层文件系统。
         ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")

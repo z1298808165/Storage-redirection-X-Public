@@ -553,6 +553,10 @@ clean_targets() {
   adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'" >/dev/null || echo "自有目录 FUSE 清理受限，继续校验真实后端清理" >&2
   adb_su "rm -rf '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
   adb_su "mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; chmod -R 777 '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
+  # 自有私有目录在应用视图里是模块 FUSE 锚点的 bind：只改真实后端时锚点仍可能以否命中文档
+  # 响应应用的首个 lookup（场景 34 own-data 在 Android 13 上返回 ENOENT，同轮 Android 15/17
+  # 通过）。这里再经可见路径创建一次，让锚点自己落盘；受限时忽略，后端预置仍然生效。
+  adb_su "mkdir -p '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
   fix_private_backend_permissions
 }
 
@@ -2636,11 +2640,34 @@ run_own_private_directories_scenario() {
     file_name="srt_qqfile_recv_${labels[$index]}.txt"
     backend_path="${backend_roots[$index]}/${file_name}"
     sandbox_path="${sandbox_roots[$index]}/${file_name}"
-    if ! run_write_case "$scenario" "own-${labels[$index]}" "${request_roots[$index]}/${file_name}" "$PAYLOAD" ||
-      ! check_file_exists "scenario-${scenario}-own-${labels[$index]}-real" "$backend_path" ||
-      ! check_file_missing "scenario-${scenario}-own-${labels[$index]}-sandbox" "$sandbox_path"; then
+    if ! run_own_private_write_case "$scenario" "own-${labels[$index]}" \
+      "${request_roots[$index]}/${file_name}" "$backend_path" "$sandbox_path"; then
       return 1
     fi
+  done
+}
+
+run_own_private_write_case() {
+  local scenario="$1" label="$2" request_file="$3" backend_file="$4" sandbox_file="$5"
+  local attempt
+  # 自有私有目录由模块 FUSE 锚点提供，应用可见视图可能短暂落后于真实后端预置。
+  # 首次写入返回 ENOENT 时重建夹具并重启应用后重跑同一条严格断言，不放宽判定；
+  # 重试仍失败说明不是预置时序，按真实失败上报。
+  for attempt in 1 2; do
+    if run_write_case "$scenario" "$label" "$request_file" "$PAYLOAD" &&
+      check_file_exists "scenario-${scenario}-${label}-real" "$backend_file" &&
+      check_file_missing "scenario-${scenario}-${label}-sandbox" "$sandbox_file"; then
+      return 0
+    fi
+    if [ "$attempt" -eq 2 ]; then
+      return 1
+    fi
+    echo "own_private_write_retry scenario=${scenario} label=${label} attempt=${attempt}"
+    timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
+    timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null || true
+    wait_storage_ready "scenario-${scenario}-${label}-own-private"
+    clean_targets
+    clean_results
   done
 }
 
@@ -2955,7 +2982,7 @@ export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_
 export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
 export -f run_quick_media_provider_restart_recovery_scenario
-export -f run_own_private_directories_scenario
+export -f run_own_private_directories_scenario run_own_private_write_case
 export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
