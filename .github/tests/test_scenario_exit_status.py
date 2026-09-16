@@ -22,6 +22,7 @@ class ScenarioExitTests(unittest.TestCase):
         options = launcher.split(" -c ", 1)[0].split()[1:]
         stubs = """
 apply_config() { :; }
+apply_config_and_wait() { :; }
 wait_config_applied() { :; }
 clean_targets() { :; }
 adb() { :; }

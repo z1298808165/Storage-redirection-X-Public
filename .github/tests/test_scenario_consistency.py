@@ -71,6 +71,27 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn(token, bash)
         self.assertIn("export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario", self.bash)
 
+    def test_bash_case_patterns_use_posix_single_backslash(self) -> None:
+        # 单引号不会折叠反斜杠，`\\[` 会原样传给 grep；ubuntu-latest 的 GNU grep 3.11 按
+        # POSIX BRE 解析后不再匹配字面 `[`，断言会静默失配（场景 36 曾因此在 PASS 之后判失败）。
+        patterns = re.findall(
+            r"""run_service_case\s+"[^"]*"\s+"[^"]*"\s+"[^"]*"\s+'([^']*)'""",
+            self.bash,
+        )
+        self.assertTrue(patterns)
+        for pattern in patterns:
+            self.assertNotIn("\\\\", pattern)
+
+    def test_config_apply_wait_is_bounded_by_line_watermark(self) -> None:
+        # daemon 输出 reload 标记后会立刻跟进大批挂载日志，固定尾部行数窗口会被冲出（场景 22
+        # 应用超时），等待必须以行水位为界，并由记录水位、重写配置的辅助函数统一调用。
+        body = section(self.bash, "wait_config_applied() {", "\nservice_case_timeout_seconds() {")
+        self.assertIn("tail -n +$((watermark + 1))", body)
+        self.assertNotIn("tail -240", body)
+        self.assertIn("wc -l < '$LOG_PATH'", body)
+        self.assertIn('write_config "$APP_CONFIG_CONTENT"', body)
+        self.assertEqual(self.bash.count('wait_config_applied "'), 1)
+
     def test_mount_probe_refreshes_pid_inside_bounded_poll(self) -> None:
         ps = section(self.powershell, "function Test-FuseMountActive", "function Test-ScopedFuseDaemonStarted")
         self.assertLess(ps.index("for ($i = 0; $i -lt 20; $i++)"), ps.index("$appPid = Get-AppPid"))
