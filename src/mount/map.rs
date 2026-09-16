@@ -1,5 +1,7 @@
 use super::MountPlanner;
-use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
+use crate::domain::{
+    PathMapping, expand_namespace_path_mappings, sort_path_mappings_shortest_request_first,
+};
 use crate::platform::errno::last as last_errno;
 use crate::platform::{fs, module_paths, paths};
 
@@ -81,6 +83,8 @@ impl MountPlanner {
 
             resolved.push(PathMapping::new(current_path, target_path));
         }
+
+        let mut resolved = expand_namespace_path_mappings(&resolved);
 
         sort_path_mappings_shortest_request_first(&mut resolved);
 

@@ -1,5 +1,5 @@
 use crate::platform::paths;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const MAX_PATH_MAPPING_DEPTH: usize = 10;
 
@@ -119,6 +119,45 @@ fn map_mapping_chain(path: &str, mappings: &[PathMapping], reverse: bool) -> Str
     }
 
     String::new()
+}
+
+/// 将链式路径规则展开为独立挂载点，保留直接入口并补齐每个父映射下的子入口。
+/// 所有最终目标仍由原规则按最长前缀解析，沿用循环检测和链深度边界。
+pub fn expand_namespace_path_mappings(mappings: &[PathMapping]) -> Vec<PathMapping> {
+    let mut expanded = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending: VecDeque<(String, usize)> = mappings
+        .iter()
+        .map(|mapping| (mapping.request_path.clone(), 0))
+        .collect();
+
+    while let Some((request, depth)) = pending.pop_front() {
+        if !seen.insert(paths::match_key(&request)) {
+            continue;
+        }
+        let target = map_path_by_mappings(&request, mappings);
+        if target.is_empty() {
+            continue;
+        }
+        expanded.push(PathMapping::new(request.clone(), target));
+        if depth >= MAX_PATH_MAPPING_DEPTH {
+            continue;
+        }
+        for parent in mappings {
+            let Some(suffix) = paths::child_suffix(&request, &parent.final_path) else {
+                continue;
+            };
+            // 相等入口本就在原规则中；这里只补充目标目录内部的子映射。
+            if suffix.is_empty() {
+                continue;
+            }
+            let alias = format!("{}{}", parent.request_path, suffix);
+            if !seen.contains(&paths::match_key(&alias)) {
+                pending.push_back((alias, depth + 1));
+            }
+        }
+    }
+    expanded
 }
 
 pub fn dedup_path_mappings_by_request_case_insensitive(mappings: &mut Vec<PathMapping>) {
