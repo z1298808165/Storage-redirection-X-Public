@@ -31,6 +31,7 @@ class MediaPendingLifecycleTest(unittest.TestCase):
             methods.append(source[start:brace] + function_body(source, signature))
         fixture = r'''
 import java.util.*;
+import java.io.File;
 import java.nio.file.*;
 public class PendingFixture {
   static final int ANDROID_APP_UID_START = 10000;
@@ -72,6 +73,7 @@ public class PendingFixture {
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,false);
     check(REDIRECTED_MEDIA_TARGETS.isEmpty());
     mapping=null;
+    insert.put("_data",root.resolve(".pending-123-photo.jpg").toString());
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,true);
     check(target.toString().equals(REDIRECTED_MEDIA_TARGETS.get(uri.toString())));
     Path pending=root.resolve(".pending-123-photo.jpg");
