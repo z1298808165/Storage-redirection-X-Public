@@ -74,6 +74,35 @@ PRIVATE_READ_ONLY_MEDIA_ROOT=/unused
         self.assertEqual(19, result.returncode, result.stderr)
         self.assertNotIn("step 6/7", result.stdout)
 
+    def test_private_cleanup_distinguishes_fuse_and_backend_failures(self):
+        clean = FLOW[FLOW.index("clean_targets() {") : FLOW.index("clean_results() {")]
+        lines = [line for line in clean.splitlines() if line.startswith('  adb_su "rm -rf') and "OWN_PRIVATE_DATA_ROOT" in line]
+        self.assertEqual(2, len(lines))
+        for backend_status in (0, 41):
+            script = """
+OWN_PRIVATE_DATA_ROOT=/storage/data
+OWN_PRIVATE_MEDIA_ROOT=/storage/media
+OWN_PRIVATE_OBB_ROOT=/storage/obb
+BACKEND_OWN_PRIVATE_DATA_ROOT=/backend/data
+BACKEND_OWN_PRIVATE_MEDIA_ROOT=/backend/media
+BACKEND_OWN_PRIVATE_OBB_ROOT=/backend/obb
+SANDBOX_OWN_PRIVATE_DATA_ROOT=/sandbox/data
+SANDBOX_OWN_PRIVATE_MEDIA_ROOT=/sandbox/media
+SANDBOX_OWN_PRIVATE_OBB_ROOT=/sandbox/obb
+adb_su() {
+  "$BASH" -n -c "$1" || return 2
+  case "$1" in
+    # quality-allow(chinese-language): shell路径匹配与返回码为执行式回归代码。
+    *"/storage/"*) return 13 ;;
+    # quality-allow(chinese-language): 后端返回码占位由测试参数替换，非面向用户文案。
+    *"/backend/"*) return BACKEND_STATUS ;;
+  esac
+}
+""".replace("BACKEND_STATUS", str(backend_status))
+            result = subprocess.run([BASH, "-e", "-c", script + "\n".join(lines) + "\necho 完成"], text=True, encoding="utf-8", capture_output=True, timeout=10)
+            self.assertEqual(backend_status, result.returncode, result.stderr)
+            self.assertEqual(backend_status == 0, "完成" in result.stdout)
+
     def test_first_failure_preserves_artifacts_and_stops(self):
         loop = FLOW[FLOW.index("failure_artifacts_captured=0\n") : FLOW.index('if [ "${SRT_SKIP_FINAL_CLEANUP', FLOW.index("failure_artifacts_captured=0\n"))]
         stub = """
