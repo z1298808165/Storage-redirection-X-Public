@@ -226,6 +226,7 @@ where
 
     let call_target =
         OpenCallTarget::for_open(pathname, final_path.as_ref(), is_relative, is_redirected);
+    let existed_before = std::path::Path::new(final_path.as_ref()).exists();
     let mut result = call_original(call_target.path);
     let mut error_no = runtime::errno_for_result(result);
 
@@ -258,6 +259,7 @@ where
         flags,
         is_redirected,
         redirect_result.is_mapping,
+        existed_before,
         result,
         error_no,
         || {
@@ -330,6 +332,7 @@ where
         should_call_with_absolute = is_relative;
     }
 
+    let existed_before = std::path::Path::new(final_path.as_ref()).exists();
     let call_target = OpenCallTarget::for_openat(
         dirfd,
         pathname,
@@ -374,6 +377,7 @@ where
         flags,
         is_redirected,
         redirect_result.is_mapping,
+        existed_before,
         result,
         error_no,
         || call_original(call_target.dirfd, call_target.path),
@@ -467,6 +471,7 @@ fn finalize_open_result<F>(
     flags: c_int,
     is_redirected: bool,
     is_mapping: bool,
+    existed_before: bool,
     mut result: c_int,
     mut error_no: c_int,
     mut retry_open: F,
@@ -505,6 +510,7 @@ where
             is_mapping,
             result,
             error_no,
+            existed_before,
         },
     );
     // 审计与日志会执行系统调用，必须把 errno 恢复成原函数调用后的值，

@@ -16,6 +16,7 @@ pub(super) struct OpenResultRecord<'a> {
     pub(super) is_mapping: bool,
     pub(super) result: i32,
     pub(super) error_no: i32,
+    pub(super) existed_before: bool,
 }
 
 pub(super) struct RenameResultRecord<'a> {
@@ -71,6 +72,7 @@ pub fn record_read_only_open_result(
         is_mapping: false,
         result: -1,
         error_no: libc::EROFS,
+        existed_before: false,
     };
     record_open_result_with_extra(hub, &record, Some(extra_tail.as_str()));
 }
@@ -105,6 +107,7 @@ fn record_open_result_with_extra(
         return;
     }
 
+    let record_existed_before = record.existed_before;
     let display_path = media_store_pending_open_display_path(
         &hub.get_package_name(),
         record.flags,
@@ -127,6 +130,7 @@ fn record_open_result_with_extra(
         record_path,
         record_original_path,
         record.is_mapping,
+        record_existed_before,
     );
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
@@ -146,8 +150,9 @@ fn build_open_result_extra(
     pathname: &str,
     original_pathname: &str,
     is_mapping: bool,
+    existed_before: bool,
 ) -> String {
-    let operation_filter_name = open_operation_filter_name(op_name, flags);
+    let operation_filter_name = open_operation_filter_name(op_name, flags, existed_before);
     let mut extra = format!(
         "op={}|op_filter={}|flags=0x{:x}",
         op_name, operation_filter_name, flags
@@ -271,8 +276,8 @@ fn record_media_store_pending_commit_if_needed(
     true
 }
 
-fn open_operation_filter_name(op_name: &str, flags: i32) -> String {
-    if has_create_intent_flags(flags) {
+fn open_operation_filter_name(op_name: &str, flags: i32, existed_before: bool) -> String {
+    if has_create_intent_flags(flags) && !existed_before {
         return format!("{}:create", op_name);
     }
     if has_write_intent_flags(flags) {

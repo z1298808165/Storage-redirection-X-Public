@@ -226,12 +226,7 @@ impl RegularAppMonitor {
         let mut missing_watch_roots = Vec::new();
         for root in &roots {
             if root.source == "public_owner" {
-                if self.repair_public_owner_root(root) {
-                    applied_roots = applied_roots.saturating_add(1);
-                } else {
-                    self.missing_roots = self.missing_roots.saturating_add(1);
-                    missing_watch_roots.push(root.clone());
-                }
+                // 公共目录修复可能遍历大树，先安装全部事件监视，再执行该扫描。
                 continue;
             }
             if let Some(node) = self.add_watch_root(root) {
@@ -257,6 +252,19 @@ impl RegularAppMonitor {
                 if self.capacity_limited {
                     break;
                 }
+            }
+        }
+        // 先消费安装期间的目录创建事件，及时为新子目录登记 watch。
+        self.drain_events();
+        for root in &roots {
+            if root.source != "public_owner" {
+                continue;
+            }
+            if self.repair_public_owner_root(root) {
+                applied_roots = applied_roots.saturating_add(1);
+            } else {
+                self.missing_roots = self.missing_roots.saturating_add(1);
+                missing_watch_roots.push(root.clone());
             }
         }
         self.missing_watch_roots = missing_watch_roots;
@@ -585,11 +593,18 @@ impl RegularAppMonitor {
     fn repair_existing_public_tree(&mut self, root: &WatchNode) {
         let mut stack = vec![root.clone()];
         let mut repaired = 0usize;
+        let mut scanned_entries = 0usize;
+        self.drain_events();
         while let Some(node) = stack.pop() {
             let Ok(entries) = std::fs::read_dir(&node.backend_dir) else {
                 continue;
             };
             for entry in entries.flatten() {
+                // 大量文件同样会延迟目录事件；按所有条目分批处理，沿用单轮事件预算。
+                scanned_entries = scanned_entries.saturating_add(1);
+                if scanned_entries.is_multiple_of(64) {
+                    self.drain_events();
+                }
                 if repaired >= MAX_PUBLIC_OWNER_REPAIR_DIRS {
                     log::warn!(
                         "daemon public owner repair limit reached root={} limit={}",
