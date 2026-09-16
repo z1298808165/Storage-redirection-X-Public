@@ -339,10 +339,11 @@ public class Hooker {
               result,
               callerUid,
               mutationMethod,
-              redirectEnabled && (patch.patchedAny || patch.directWriteRequested));
+              redirectEnabled,
+              patch.patchedAny || patch.directWriteRequested);
           if (redirectEnabled) {
             finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
-            commitRedirectedPendingFile(actualArgs, mutationMethod);
+            commitRedirectedPendingFile(actualArgs, result, mutationMethod);
           }
           logMutationResult(this, result);
           return result;
@@ -3542,14 +3543,14 @@ public class Hooker {
       Object result,
       int callerUid,
       String mutationMethod,
+      boolean redirectEnabled,
       boolean wasRedirected) {
     try {
-      // MediaProvider 会在原始 insert 返回前把 _data 回填到传入的 ContentValues。
-      // 只有本次参数确实被重定向改写，才允许把该值登记到 URI 表；否则后续
-      // update(is_pending=0) 会把未重定向写入误当作沙箱 pending 文件处理。
+      // 外层参数可能保持公共显示路径，FileColumn 层仍会重定向实际创建路径。
+      // 登记以当前调用方的原生路径解析为准；仅显式改写过的参数允许回退到 _data。
       if (!"insert".equals(mutationMethod)
           || !(result instanceof android.net.Uri)
-          || !wasRedirected) return;
+          || !redirectEnabled) return;
       if (callerUid < ANDROID_APP_UID_START || actualArgs == null) return;
       ContentValues values = findContentValues(actualArgs);
       if (values == null) return;
@@ -3566,9 +3567,13 @@ public class Hooker {
       // 显式路径映射已在 insert 前把 _data 改写为公共目标；此时再次按
       // 映射解析会返回空，因此直接保存已改写的目标路径供后续 update 使用。
       if (sandboxPath == null || sandboxPath.length() == 0) {
+        if (!wasRedirected) return;
         sandboxPath = values.getAsString("_data");
       }
       if (sandboxPath == null || sandboxPath.length() == 0) return;
+      if (!wasRedirected
+          && normalizeStorageDisplayPath(probePath, callerUid)
+              .equals(normalizeStorageDisplayPath(sandboxPath, callerUid))) return;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
         // 逐条淘汰最旧记录，不整表清空：批量导入时后到的写入不应清掉尚未提交的改名记录。
         while (REDIRECTED_MEDIA_TARGETS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
@@ -3593,9 +3598,17 @@ public class Hooker {
    *
    * <p>只处理确实存在 pending 文件、且最终名尚不存在的情况，因此对未重定向的写入以及已由 MediaProvider 自行改名的写入都不产生影响。
    */
-  private static void commitRedirectedPendingFile(Object[] actualArgs, String mutationMethod) {
+  private static void commitRedirectedPendingFile(
+      Object[] actualArgs, Object result, String mutationMethod) {
     try {
       if (!"update".equals(mutationMethod) || actualArgs == null) return;
+      ContentValues values = findContentValues(actualArgs);
+      Integer pending = values == null ? null : values.getAsInteger("is_pending");
+      // 元数据更新、继续写入 pending 或更新未命中时保留登记，等待实际发布成功。
+      if (pending == null
+          || pending.intValue() != 0
+          || !(result instanceof Number)
+          || ((Number) result).intValue() <= 0) return;
       int uriIndex = findMutationUriIndex(actualArgs);
       if (uriIndex < 0) return;
       Object uriValue = actualArgs[uriIndex];
