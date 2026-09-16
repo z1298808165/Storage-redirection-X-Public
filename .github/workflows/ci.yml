@@ -837,10 +837,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 草稿发布可能尚未创建 tag；仅删除草稿，保留已有 tag 作为诊断锚点。
           if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release delete "$CI_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --cleanup-tag \
               --yes
           else
             echo "failed CI release not found: $CI_TAG"
