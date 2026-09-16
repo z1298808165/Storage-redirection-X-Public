@@ -795,7 +795,10 @@ wait_file_monitor_log_line() {
         fi
         ;;
       write)
-        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E 'op_filter=open:write|op=write' | grep -Fv -- 'ret=-1' || true")"
+        # 覆盖写记录有三种来源：普通应用的 daemon inotify 监视写（事件类型 OPEN，字段 op=open:write）、
+        # 系统写入进程 hook（字段 op_filter=open:write）、以及 FUSE 只读拒绝（op=write，已被 ret=-1 排除）。
+        # 三者必须取并集：只匹配 hook 形式会把 daemon 监视到的成功覆盖写误判成丢失事件。
+        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E 'op=open:write|op_filter=open:write|op=write' | grep -Fv -- 'ret=-1' || true")"
         if [ -n "$matches" ]; then
           echo "monitor_log_found scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
           return 0
@@ -2420,6 +2423,31 @@ print_diagnostics() {
   # 这里按关键字全量过滤，确保监视树建立与事件处理的记录不会被挤掉。
   echo "=== file monitor diagnostics ==="
   capture_file_monitor_diagnostics || true
+  echo "=== read-only rule diagnostics ==="
+  capture_read_only_diagnostics || true
+}
+
+# 采集只读规则的承接方式与访问权限诊断。
+#
+# 只读规则有两条承接路径：namespace 只读 bind 与 scoped FUSE。两者在应用侧表现完全
+# 不同——namespace bind 会把可见路径改绑到真实后端，而后端带 media_rw_data_file
+# 上下文，普通应用即使目录属于自身 UID 也会被 SELinux 拒绝列举，应用侧只表现为
+# listFiles 返回 null（列举为空）；scoped FUSE 则保留应用可访问的视图。只看挂载日志
+# 无法区分「挂载没生效」和「挂载生效但应用没有权限」，因此这里固定输出 SELinux 模式、
+# 双方目录的标签与模式、应用命名空间内的挂载项、scoped 根规划结果与 AVC 拒绝，
+# 让失败现场直接给出可判定的证据。
+capture_read_only_diagnostics() {
+  echo "===read_only_diagnostics==="
+  echo "selinux_mode=$(adb_su 'getenforce 2>/dev/null || echo unknown')"
+  echo "---visible_and_backend_labels---"
+  adb_su "for path in '${READ_ONLY_MEDIA_ROOT}' '${READ_ONLY_ROOT}' '${BACKEND_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_ROOT}/Download/SrtReadOnly'; do ls -ladZ \"\$path\" 2>&1 || true; done"
+  echo "---app_mount_entries---"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'SrtReadOnly|SrtMountNsReadOnly|storage.redirect' /proc/\$pid/mountinfo 2>/dev/null || echo no_matching_mount_entry; else echo app_not_running; fi"
+  echo "---scoped_fuse_plan---"
+  adb_su "grep -aE 'scoped roots|scoped fuse|fuse session|backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -30 || true"
+  echo "---avc_denials---"
+  adb_su "dmesg 2>/dev/null | grep -a 'avc:.*denied' | tail -40 || true"
+  echo
 }
 
 # 采集文件监视链路的专项诊断。

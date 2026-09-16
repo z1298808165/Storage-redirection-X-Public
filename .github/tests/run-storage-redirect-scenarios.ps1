@@ -1026,7 +1026,7 @@ function Wait-FileMonitorLogLine {
                 Write-Host "  - monitor_log_found $Scenario/$Label file=$FileName expected=$Expected"
                 return $true
             }
-            if ($Expected -eq "write" -and ($line -match "op_filter=open:write" -or $line -match "op=write") -and $line -notmatch "ret=-1") {
+            if ($Expected -eq "write" -and ($line -match "op=open:write" -or $line -match "op_filter=open:write" -or $line -match "op=write") -and $line -notmatch "ret=-1") {
                 Write-Host "  - monitor_log_found $Scenario/$Label file=$FileName expected=$Expected"
                 return $true
             }
