@@ -142,6 +142,8 @@ struct OpenFile {
     #[allow(dead_code)]
     rel: String,
     file: Option<Arc<File>>,
+    // backing 注册必须覆盖整个打开句柄生命周期；提前注销会让内核 passthrough 返回 EIO。
+    _backing: Option<Arc<fuser::BackingId>>,
     is_read_only: bool,
 }
 
@@ -821,6 +823,7 @@ impl Filesystem for FuseRedirectFs {
                 OpenFile {
                     rel: backend.rel.clone(),
                     file: file.try_clone().ok().map(Arc::new),
+                    _backing: None,
                     is_read_only: backend.is_read_only,
                 },
             );
@@ -829,6 +832,13 @@ impl Filesystem for FuseRedirectFs {
         if self.passthrough_enabled.load(Ordering::Relaxed) {
             match reply.open_backing(&file) {
                 Ok(backing) => {
+                    let backing = Arc::new(backing);
+                    {
+                        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+                        if let Some(open_file) = state.files.get_mut(&fh) {
+                            open_file._backing = Some(Arc::clone(&backing));
+                        }
+                    }
                     reply.opened_passthrough(FileHandle(fh), FopenFlags::FOPEN_KEEP_CACHE, &backing)
                 }
                 Err(error) => {
@@ -1165,6 +1175,7 @@ impl Filesystem for FuseRedirectFs {
                 OpenFile {
                     rel,
                     file: file.try_clone().ok().map(Arc::new),
+                    _backing: None,
                     is_read_only: false,
                 },
             );
@@ -1174,14 +1185,23 @@ impl Filesystem for FuseRedirectFs {
         self.policy.emit_monitor_create(&backend);
         if self.passthrough_enabled.load(Ordering::Relaxed) {
             match reply.open_backing(&file) {
-                Ok(backing) => reply.created_passthrough(
-                    &TTL,
-                    &attr,
-                    Generation(0),
-                    FileHandle(fh),
-                    FopenFlags::empty(),
-                    &backing,
-                ),
+                Ok(backing) => {
+                    let backing = Arc::new(backing);
+                    {
+                        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+                        if let Some(open_file) = state.files.get_mut(&fh) {
+                            open_file._backing = Some(Arc::clone(&backing));
+                        }
+                    }
+                    reply.created_passthrough(
+                        &TTL,
+                        &attr,
+                        Generation(0),
+                        FileHandle(fh),
+                        FopenFlags::empty(),
+                        &backing,
+                    );
+                }
                 Err(error) => {
                     self.passthrough_enabled.store(false, Ordering::Relaxed);
                     log::debug!(
