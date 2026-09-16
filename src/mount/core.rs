@@ -1280,6 +1280,10 @@ fn remount_bind_read_write_inner(target: &str, is_recursive: bool) -> bool {
 ///
 /// `mount(MS_BIND | MS_REMOUNT)` 对不是挂载点的路径必然返回 EINVAL，因此在重挂载
 /// 之前先用挂载表判断一次，避免用注定失败的系统调用去试探挂载状态。
+///
+/// 这里刻意沿用 `mountinfo_has_target` 的别名折叠比较：`/storage/self/primary` 一类
+/// 别名与 `/storage/emulated/<user>` 是同一个目录对象，按字面挂载目标比较会把已经是
+/// 挂载点的别名误判成普通目录，从而多挂一层 bind 覆盖原有可写挂载。
 fn is_mount_point(path: &str) -> bool {
     read_mountinfo()
         .map(|content| mountinfo_has_target(&content, path))

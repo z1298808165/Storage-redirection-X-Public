@@ -958,27 +958,18 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     // 仅有通配只读规则时不单独启动 scoped FUSE：namespace fallback 会把规则收敛到
     // 具体父目录，既能保留真实文件可读性，也避免 FUSE 根覆盖后无法准备真实种子目录。
     let normalized_read_only_paths = super::normalize_rule_list(read_only_paths.to_vec(), user_id);
-    let (read_only_includes, read_only_excludes) =
-        paths::split_exclusion_rules(&normalized_read_only_paths);
-    let read_only_excludes =
-        paths::overlapping_exclusion_rules(&read_only_includes, &read_only_excludes);
+    let (read_only_includes, _) = paths::split_exclusion_rules(&normalized_read_only_paths);
+    // 具体只读规则一律由 scoped FUSE 就地承接，而不是在 namespace 里把可见路径改绑到
+    // 真实后端：`/data/media/<user>` 后端带 media_rw_data_file 上下文，普通应用即使
+    // 目录属于自身 UID 也会被 SELinux 拒绝列举该目录（应用侧表现为 listFiles 返回 null，
+    // 目录列举为空）。交给 FUSE 后可见路径仍是应用可访问的视图，内容直接读真实后端，
+    // 只读仍按 open-for-write、truncate、chmod、link、rename、delete 与 W_OK 逐条判定。
+    // 带排除子项或嵌套映射的规则还需要运行期动态目录匹配，同样必须依赖 scoped FUSE。
     for read_only_root in &read_only_includes {
-        if paths::contains_wildcards(read_only_root) {
+        if read_only_root.is_empty() || paths::contains_wildcards(read_only_root) {
             continue;
         }
-        if read_only_excludes.iter().any(|excluded| {
-            !paths::contains_wildcards(excluded) && paths::is_child(excluded, read_only_root)
-        }) || scoped_path_mappings
-            .iter()
-            .any(|(request_path, final_path)| {
-                (!paths::contains_wildcards(request_path)
-                    && paths::is_child(request_path, read_only_root))
-                    || (!paths::contains_wildcards(final_path)
-                        && paths::is_child(final_path, read_only_root))
-            })
-        {
-            roots.push(read_only_root.clone());
-        }
+        roots.push(read_only_root.clone());
     }
 
     // 挂载根的三级降级（去重剔子路径、退化顶层、退化整个存储根）只输出最终结果，

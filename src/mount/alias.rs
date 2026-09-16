@@ -351,6 +351,19 @@ impl MountPlanner {
             if !is_primary_target && !path_exists(&target) {
                 continue;
             }
+            // 别名展开会同时包含主目标本身和真实后端路径。只读来源取自真实后端时，
+            // 别名里的同路径目标与来源是同一个目录对象：bind 到自身不会增加任何只读
+            // 限制，却会在挂载表里把真实后端目录变成只读挂载点，遮蔽该目录可见别名
+            // 视图的读取，使应用侧列举为空。主目标由 namespace 只读 bind 承担，因此
+            // 这里只跳过非主目标的同名项（读写别名沿用相同判定）。
+            if !is_primary_target && paths::eq_ignore_case(source, &target) {
+                log::debug!(
+                    "alias: skip self bind readonly src={} dst={}",
+                    source,
+                    target
+                );
+                continue;
+            }
             if preserve_data_media_backend && is_data_media_backend_alias(&target, self.user_id) {
                 log::debug!(
                     "alias: skip backend readonly alias src={} dst={}",
