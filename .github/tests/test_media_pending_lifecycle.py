@@ -107,6 +107,18 @@ public class PendingFixture {
             self.assertEqual(0, result.returncode, result.stderr)
 
 
+class MediaDirectoryScopeTest(unittest.TestCase):
+    def test_column_redirect_registers_existing_scoped_cleanup(self):
+        source = (ROOT / "java_src/org/srx/hook/Hooker.java").read_text(encoding="utf-8")
+        body = function_body(source, "public Object providerMediaFileColumnCallback(")
+        self.assertIn("rememberProviderRedirectSourceDirectory(publicParent.getPath(), directParent.getPath())", body)
+        self.assertLess(body.index("finally"), body.index("rememberProviderRedirectSourceDirectory"))
+        native = (ROOT / "src/hook/ops/mutation/dir.rs").read_text(encoding="utf-8")
+        cleanup = function_body(native, "pub(crate) fn cleanup_provider_redirect_source_directory(")
+        self.assertIn("is_public_default_sandbox_redirect", cleanup)
+        self.assertIn("libc::rmdir", function_body(native, "fn cleanup_empty_redirect_source_dir("))
+
+
 class FuseBackingLifetimeTest(unittest.TestCase):
     def test_both_reply_paths_retain_registration_until_release(self):
         source = (ROOT / "src/fuse_redirect/mod.rs").read_text(encoding="utf-8")
