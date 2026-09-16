@@ -232,7 +232,7 @@ impl RedirectPolicy {
         let storage_path = self.storage_path_for_rel(&rel);
         let resolved_storage_path = paths::normalize(&storage_path);
         let decision = self.backend_decision(&resolved_storage_path, operation);
-        let backend = match decision.kind {
+        let mut backend = match decision.kind {
             BackendKind::Real => {
                 if let Some(mapped_target) = self.resolve_mapping(&resolved_storage_path) {
                     self.backend_path_for_storage(&mapped_target, BackendKind::Real)?
@@ -242,6 +242,29 @@ impl RedirectPolicy {
             }
             BackendKind::Redirect => self.redirect_backend_for_rel(&rel),
         };
+
+        // 分享应用传递的文件路径时，目标应用的 scoped FUSE 仍会套用自身的
+        // sandboxed_paths。若发送方文件尚未在目标应用沙箱中建立同名副本，目标
+        // 应用会得到一个存在的重定向目录，却无法打开实际文件，表现为 QQ/微信
+        // 分享面板没有文件或发送失败。对只读的具体文件保留沙箱优先；仅当重定向
+        // 后端不存在、真实文件存在且路径命中沙箱规则时，回退到公共真实后端，
+        // 让 Android 已授予的 content/file URI 能在目标 namespace 中完成读取。
+        if matches!(operation, OperationKind::Read)
+            && decision.kind == BackendKind::Redirect
+            && self.matches_any(&self.sandboxed_index, &resolved_storage_path)
+            && !self.matches_any(&self.sandboxed_excluded_index, &resolved_storage_path)
+        {
+            let real_backend = self.real_backend_for_rel(&rel);
+            if !backend.exists() && real_backend.is_file() {
+                log::debug!(
+                    "fuse share read fallback pkg={} path={} backend={}",
+                    self.package_name,
+                    resolved_storage_path,
+                    real_backend.display()
+                );
+                backend = real_backend;
+            }
+        }
 
         let is_shared_public_backend = self.is_shared_public_backend_path(&backend);
         Some(BackendPath {
