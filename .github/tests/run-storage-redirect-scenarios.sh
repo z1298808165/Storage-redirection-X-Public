@@ -123,14 +123,15 @@ BACKEND_OWN_PRIVATE_OBB_ROOT="${BACKEND_ROOT}/Android/obb/${APP_ID}/Tencent/QQfi
 SANDBOX_OWN_PRIVATE_DATA_ROOT="${BACKEND_PRIVATE_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv"
 SANDBOX_OWN_PRIVATE_MEDIA_ROOT="${BACKEND_PRIVATE_ROOT}/Android/media/${APP_ID}/Tencent/QQfile_recv"
 SANDBOX_OWN_PRIVATE_OBB_ROOT="${BACKEND_PRIVATE_ROOT}/Android/obb/${APP_ID}/Tencent/QQfile_recv"
-ANY_RELATIVE_REQUEST="${REAL_ROOT}/Android/data/${APP_ID}/cache"
+# 各矩阵规则使用独立源和目标，链式映射由场景 37 单独覆盖。
+ANY_RELATIVE_REQUEST="${REAL_ROOT}/Android/data/${APP_ID}/srt_any_relative"
 ANY_ABSOLUTE_USER_REQUEST="/data/user/0/${APP_ID}/files"
 ANY_USER_ID_REQUEST="/data/user/0/${APP_ID}/cache"
 ANY_LEGACY_DATA_REQUEST="/data/data/${APP_ID}/code_cache"
 ANY_PUBLIC_TO_PRIVATE_REQUEST="${REAL_ROOT}/Download/SrtAnyPublicToPrivate"
 ANY_RELATIVE_PUBLIC_TARGET="${REAL_ROOT}/Download/SrtAnyRelativePublic"
 ANY_ABSOLUTE_PUBLIC_TARGET="${REAL_ROOT}/Download/SrtAnyAbsolutePublic"
-ANY_USER_PRIVATE_TARGET="/data/user/0/${APP_ID}/cache/redirected"
+ANY_USER_PRIVATE_TARGET="/data/user/0/${APP_ID}/no_backup/srt_any_private"
 ANY_LEGACY_PRIVATE_TARGET="${REAL_ROOT}/Android/media/${APP_ID}/cache"
 ANY_MEDIA_REQUEST="${REAL_ROOT}/Download/SrtAnyMediaRequest"
 ANY_MEDIA_TARGET="${REAL_ROOT}/Download/SrtAnyMediaTarget"
@@ -421,7 +422,7 @@ apply_config() {
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["DCIM","Pictures"]}}}'
       ;;
     35)
-      write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"Android/data/%s/cache\":\"Download/SrtAnyRelativePublic\",\"/data/user/0/%s/files\":\"Download/SrtAnyAbsolutePublic\",\"/data/user/0/%s/cache\":\"Android/data/%s/cache\",\"/data/data/%s/code_cache\":\"Android/media/%s/cache\",\"Download/SrtAnyPublicToPrivate\":\"/data/user/0/%s/cache/redirected\",\"Download/SrtAnyMediaRequest\":\"Download/SrtAnyMediaTarget\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID")"
+      write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"Android/data/%s/srt_any_relative\":\"Download/SrtAnyRelativePublic\",\"/data/user/0/%s/files\":\"Download/SrtAnyAbsolutePublic\",\"/data/user/0/%s/cache\":\"Android/data/%s/cache\",\"/data/data/%s/code_cache\":\"Android/media/%s/cache\",\"Download/SrtAnyPublicToPrivate\":\"/data/user/0/%s/no_backup/srt_any_private\",\"Download/SrtAnyMediaRequest\":\"Download/SrtAnyMediaTarget\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID" "$APP_ID")"
       ;;
     36)
       set_backend_config auto
@@ -518,14 +519,15 @@ prepare_backend_core_targets() {
 }
 
 prepare_any_path_targets() {
-  adb_su "rm -rf '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
+  adb_su "rm -rf '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
 }
 
 clean_targets() {
+  # 与 PowerShell 一致，先通知系统 FUSE 失效前序探针，再清理底层目录。
+  adb_su "rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE' '${REAL_ROOT}/Download/Test/$TEST_FILE' || echo '共享探针 FUSE 清理失败，继续底层清理并保留后续断言' >&2" >/dev/null
+
   sleep_ms $SRT_SERVICE_CASE_SETTLE_MS
   clean_results
-  adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
-  adb_su "mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; chmod -R 777 '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
   adb_su "rm -rf '${MEDIASTORE_ROUTING_PROBE_ROOT}' '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}'" >/dev/null
   adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'; find '${REAL_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' -maxdepth 1 -name '$TEST_FILE' -delete 2>/dev/null || true" >/dev/null
@@ -541,6 +543,9 @@ clean_targets() {
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'; mkdir -p '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked/Writable' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked/Writable' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'; chmod -R 777 '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram' 2>/dev/null || true" >/dev/null
   prepare_backend_core_targets
   prepare_any_path_targets
+  # 嵌套映射准备会删除私有父目录，随后再创建自有目录测试数据。
+  adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
+  adb_su "mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; chmod -R 777 '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
   fix_private_backend_permissions
 }
 
@@ -788,7 +793,7 @@ wait_file_monitor_log_line() {
         fi
         ;;
       write)
-        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- '|OPEN|' | grep -F -- 'op=open:write' | grep -Fv -- 'ret=-1' || true")"
+        matches="$(adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E 'op_filter=open:write|op=write' | grep -Fv -- 'ret=-1' || true")"
         if [ -n "$matches" ]; then
           echo "monitor_log_found scenario=${scenario} label=${label} file=${file_name} expected=${expected}"
           return 0
@@ -860,6 +865,7 @@ cleanup_test_artifacts() {
   restore_global_config >/dev/null 2>&1
   clean_results >/dev/null 2>&1
   remove_test_target_artifacts >/dev/null 2>&1
+  clear_alias_mediastore_fixture >/dev/null 2>&1
   remove_random_mediastore_rows >/dev/null 2>&1
   remove_random_physical_media_files >/dev/null 2>&1
   restart_media_provider >/dev/null 2>&1
@@ -1752,20 +1758,24 @@ check_fuse_daemon_started() {
 check_fuse_mount_active() {
   local scenario="$1"
   local pid output
-  pid="$(app_pid)"
-  if [ -z "$pid" ]; then
-    echo "fuse_mount_check_no_pid scenario=${scenario}"
-    return 1
-  fi
-
+  pid=""
   for _ in $(seq 1 20); do
-    if adb_su "grep -Fq 'srx_fuse_redirect' \"/proc/${pid}/mountinfo\" 2>/dev/null"; then
+    # 启动或重建期间 PID 会变化；只验证当前进程的真实挂载，不重启应用兜底。
+    pid="$(app_pid)"
+    if [ -n "$pid" ] && adb_su "grep -Fq 'srx_fuse_redirect' \"/proc/${pid}/mountinfo\" 2>/dev/null"; then
       echo "fuse_mount_active scenario=${scenario} pid=${pid}"
       return 0
     fi
     sleep_ms "$SRT_RESULT_POLL_MS"
   done
 
+  # 后续用例可能重启进程并清空日志，失败时先输出当前身份和挂载现场。
+  adb_su "ps -A -o PID,PPID,NAME,ARGS; if [ -n '$pid' ]; then cat /proc/$pid/stat /proc/$pid/status /proc/$pid/mountinfo 2>/dev/null; fi; cat '$LOG_PATH'" >&2 || true
+  adb logcat -d -t 2000 >&2 || true
+  if [ -z "$pid" ]; then
+    echo "fuse_mount_check_no_pid scenario=${scenario}" >&2
+    return 1
+  fi
   output="$(adb_su "grep -F 'fuse' \"/proc/${pid}/mountinfo\" 2>/dev/null | head -20")"
   echo "fuse_mount_inactive scenario=${scenario} pid=${pid}: FUSE 未接管，可能已静默回退到 mount namespace" >&2
   printf '%s\n' "$output" | sed "s/^/fuse_mountinfo scenario=${scenario}: /" >&2
@@ -2078,6 +2088,9 @@ run_file_monitor_existing_write_case() {
   file_name="$(basename "$request_path")"
 
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
+  # 该用例验证既有文件的原位覆盖；先在映射目标创建种子文件，避免首次 open
+  # 被记录为 open:create，导致把 fixture 未准备完整误判为监视器丢失 write 事件。
+  adb_su "mkdir -p '$(dirname "$backend_path")'; printf '%s' '$seed_payload' > '$backend_path'; chmod 777 '$backend_path' 2>/dev/null || true" >/dev/null
   run_service_case "$scenario" "$label" "file_write_then_overwrite" '^PASS \[file_write_then_overwrite\]' --es file_path "$request_path" --es payload "$PAYLOAD" --es expected_payload "$seed_payload" &&
     check_file_exists "scenario-${scenario}-${label}-expected" "$backend_path" &&
     wait_file_monitor_log_line "$scenario" "$label" "$file_name" write
@@ -2578,7 +2591,7 @@ run_any_path_mapping_scenario() {
 
   run_write_case "$scenario" "relative-android-data-to-public" "$relative_file" "$PAYLOAD" &&
     check_file_exists "scenario-${scenario}-relative-public" "${ANY_RELATIVE_PUBLIC_TARGET}/srt_any_relative.txt" &&
-    check_file_missing "scenario-${scenario}-relative-source" "${BACKEND_ROOT}/Android/data/${APP_ID}/cache/srt_any_relative.txt" &&
+    check_file_missing "scenario-${scenario}-relative-source" "${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative/srt_any_relative.txt" &&
     run_write_case "$scenario" "absolute-data-user-to-public" "$absolute_file" "$PAYLOAD" &&
     check_file_exists "scenario-${scenario}-absolute-public" "${ANY_ABSOLUTE_PUBLIC_TARGET}/srt_any_absolute.txt" &&
     check_file_missing "scenario-${scenario}-absolute-source" "$absolute_file" &&
@@ -2596,7 +2609,16 @@ run_any_path_mapping_scenario() {
     check_file_missing "scenario-${scenario}-mapped-mediastore-source" "${ANY_MEDIA_REQUEST}/${ANY_MEDIA_FILE}"
 }
 
+clear_alias_mediastore_fixture() {
+  # 与 PowerShell 一致，仅清理固定测试文件在请求、公共别名、目标三个目录的索引。
+  local escaped_app="${APP_ID//./\\.}"
+  remove_mediastore_rows_by_pattern "content://media/external/file" \
+    '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_qq_alias_existing\.bin(,|$)' \
+    "_data=/storage/emulated/0/(Android/data/${escaped_app}/Tencent/QQfile_recv|Download/QQ|Download/SrtQqAliasMapped)/(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_qq_alias_existing\.bin(,|$)"
+}
+
 run_qq_alias_mapped_existing_file_scenario() {
+  clear_alias_mediastore_fixture
   local request="${QQ_ALIAS_REQUEST_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
   local target="${QQ_ALIAS_MAPPED_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
   run_service_case "$1" "qq-alias-mediastore-overwrite" "mediastore_create_then_file_overwrite" '^PASS \\[mediastore_create_then_file_overwrite\\]' --es file_path "$request" --es target_file_path "$target" --es payload append --es expected_payload seedseed &&
@@ -2786,16 +2808,52 @@ run_scenario() {
   adb_su "grep -h 'backend_effective' '$LOG_PATH' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LOG_PATH' 2>/dev/null | tail -3 || true"
 }
 
+# 与 PowerShell 共用设备端锁；未持锁的进程不得执行配置恢复或清理。
+device_run_lock_path="/data/local/tmp/srx-test-flow.lock"
+device_run_lock_token="$(date +%s)-$$-${RANDOM}-${RANDOM}"
+device_run_lock_held=0
+
+acquire_device_run_lock() {
+  if ! adb_su "mkdir '$device_run_lock_path' 2>/dev/null" >/dev/null; then
+    echo "设备测试锁已占用或创建失败：$device_run_lock_path；本次未修改设备配置。" >&2
+    return 1
+  fi
+  if ! adb_su "printf '%s' '$device_run_lock_token' > '$device_run_lock_path/owner'" >/dev/null; then
+    echo "设备测试锁标识写入失败，保留锁目录供排查：$device_run_lock_path" >&2
+    return 1
+  fi
+  device_run_lock_held=1
+}
+
+release_device_run_lock() {
+  [ "$device_run_lock_held" -eq 1 ] || return 0
+  if ! adb_su "test \"\$(cat '$device_run_lock_path/owner' 2>/dev/null)\" = '$device_run_lock_token' && rm '$device_run_lock_path/owner' && rmdir '$device_run_lock_path'" >/dev/null; then
+    echo "设备测试锁释放失败或归属已变更，保留现场：$device_run_lock_path" >&2
+  fi
+  device_run_lock_held=0
+}
+
+finish_test_run() {
+  local status=$?
+  # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
+  if [ "$device_run_lock_held" -eq 1 ]; then
+    if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
+      cleanup_test_artifacts || true
+    fi
+    release_device_run_lock
+  fi
+  return "$status"
+}
+
 cleanup_done=0
 global_config_backup_ready=0
 app_config_backup_ready=0
 cross_app_config_backup_ready=0
 device_execution_state_backup_ready=0
-if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
-  trap cleanup_test_artifacts EXIT
-fi
+trap finish_test_run EXIT
 
 wait_boot_completed
+acquire_device_run_lock
 backup_global_config
 backup_app_config
 backup_cross_app_config
@@ -2831,6 +2889,7 @@ export -f media_provider_is_lazy
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario
 export -f run_any_path_mapping_scenario
+export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 
 for scenario in "${scenarios[@]}"; do

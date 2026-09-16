@@ -33,6 +33,71 @@ class ScenarioConsistencyTest(unittest.TestCase):
         cls.bash = read(".github/tests/run-storage-redirect-scenarios.sh")
         cls.powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
 
+    def test_optional_diagnostics_accept_empty_output(self) -> None:
+        body = section(self.powershell, "function Invoke-CaptureScenario2MediastoreHookDiag", "function Invoke-StandardScenario")
+        # 日志轮转或过滤无匹配属于正常情况，空诊断不能中断后面的行为断言。
+        for name in ("logcatOut", "dirOut", "runningOut", "installStateOut", "markerOut"):
+            self.assertIn(f"$lines.AddRange([string[]]@(${name} | Where-Object {{ $null -ne $_ }}))", body)
+        self.assertIn("../../temp/scenario-2-mediastore-hook-diag.txt", body)
+
+    def test_private_fixture_is_prepared_after_nested_mapping_cleanup(self) -> None:
+        # 场景 37 清理的父目录包含场景 34 的 data 子目录，顺序反转会产生 ENOENT。
+        ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertLess(ps.index("'$NestedMappingRequestRoot'"),
+                        ps.index("mkdir -p '$BackendOwnPrivateDataRoot'"))
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertLess(bash.index("  prepare_any_path_targets"),
+                        bash.index("mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}'"))
+        self.assertLess(bash.index("mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}'"),
+                        bash.index("  fix_private_backend_permissions"))
+
+    def test_shared_probe_invalidation_precedes_backend_cleanup(self) -> None:
+        # 前序场景已查询过的文件应经系统 FUSE 删除，不能仅修改底层文件系统。
+        ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertLess(ps.index("rm -f '$RealRoot/Download/SrtProbe/$TestFile'"),
+                        ps.index("rm -rf '$BackendRoot/Download/SrtProbe'"))
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE'", bash)
+        self.assertLess(bash.index("rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE'"),
+                        bash.index("rm -rf '${REAL_ROOT}/Download/SrtProbe'"))
+
+    def test_alias_fixture_cleanup_covers_all_aliases(self) -> None:
+        ps = section(self.powershell, "function Clear-AliasMediaStoreFixture", "function Invoke-NestedMappingChainScenario")
+        for token in ("$QqAliasRequestRoot", "$RealRoot/Download/QQ", "$QqAliasMappedRoot", "Remove-MediaStoreRowsByPattern"):
+            self.assertIn(token, ps)
+        self.assertLess(ps.index("    Clear-AliasMediaStoreFixture"), ps.index("Invoke-ServiceCase"))
+        bash = section(self.bash, "clear_alias_mediastore_fixture() {", "run_nested_mapping_chain_scenario() {")
+        for token in ("Tencent/QQfile_recv", "Download/QQ", "Download/SrtQqAliasMapped", "srt_qq_alias_existing"):
+            self.assertIn(token, bash)
+        self.assertIn("export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario", self.bash)
+
+    def test_mount_probe_refreshes_pid_inside_bounded_poll(self) -> None:
+        ps = section(self.powershell, "function Test-FuseMountActive", "function Test-ScopedFuseDaemonStarted")
+        self.assertLess(ps.index("for ($i = 0; $i -lt 20; $i++)"), ps.index("$appPid = Get-AppPid"))
+        self.assertIn("/proc/$appPid/mountinfo", ps)
+        self.assertNotIn("Restart-App", ps)
+        bash = section(self.bash, "check_fuse_mount_active() {", "check_scoped_fuse_daemon_started() {")
+        self.assertLess(bash.index("for _ in $(seq 1 20)"), bash.index('pid="$(app_pid)"'))
+        self.assertIn("/proc/${pid}/mountinfo", bash)
+        self.assertNotIn("start_app", bash)
+
+    def test_device_lock_precedes_backup_and_outlives_cleanup(self) -> None:
+        # 两种运行器使用同一个设备锁，抢锁失败的实例不得恢复别人的配置。
+        lock_path = "/data/local/tmp/srx-test-flow.lock"
+        self.assertIn(lock_path, self.powershell)
+        self.assertIn(lock_path, self.bash)
+        ps_start = self.powershell[self.powershell.index("$script:ExitCode = 0") :]
+        self.assertLess(ps_start.index("Enter-DeviceRunLock"),
+                        ps_start.index("Backup-GlobalConfig"))
+        self.assertIn("try { Invoke-TestArtifactCleanup } finally { Exit-DeviceRunLock }", ps_start)
+        bash_start = self.bash[self.bash.index("trap finish_test_run EXIT") :]
+        self.assertLess(bash_start.index("acquire_device_run_lock"),
+                        bash_start.index("backup_global_config"))
+        finish = section(self.bash, "finish_test_run() {", "cleanup_done=0")
+        self.assertIn('if [ "$device_run_lock_held" -eq 1 ]', finish)
+        self.assertLess(finish.index("cleanup_test_artifacts"), finish.index("release_device_run_lock"))
+        self.assertIn('return "$status"', finish)
+
     def test_manifest_is_contiguous_and_unique(self) -> None:
         self.assertEqual(list(range(1, max(self.ids) + 1)), self.ids)
         self.assertEqual(len(self.ids), len(set(self.ids)))
@@ -308,7 +373,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("adb reboot", recovery)
         self.assertIn('wait_storage_ready "initial-reboot" 120', recovery)
         self.assertLess(recovery.index("wait_storage_ready"), recovery.index("adb reboot"))
-        startup = self.bash[self.bash.index("wait_boot_completed\nbackup_global_config") :]
+        startup = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\nbackup_global_config") :]
         self.assertIn("ensure_initial_storage_ready", startup)
         self.assertLess(startup.index("backup_global_config"), startup.index("ensure_initial_storage_ready"))
 
@@ -371,7 +436,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             ps_cleanup.index("Restore-DeviceExecutionState"),
         )
 
-        bash_start = self.bash[self.bash.index("wait_boot_completed\nbackup_global_config") :]
+        bash_start = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\nbackup_global_config") :]
         self.assertLess(
             bash_start.index("backup_device_execution_state"),
             bash_start.index("prepare_device_execution_state"),

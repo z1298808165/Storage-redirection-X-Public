@@ -10,6 +10,21 @@ def read(path: str) -> str:
 
 
 class LoggingArchitectureTest(unittest.TestCase):
+    def test_monitor_watches_precede_slow_public_owner_scan(self) -> None:
+        # 公共目录扫描期间仍须消费事件，避免新目录内的覆盖写入漏记。
+        source = read("src/daemon_monitor.rs")
+        rebuild = source[
+            source.index("    pub fn reconfigure(") : source.index("    fn retry_missing_watch_roots(")
+        ]
+        scan_start = rebuild.index("self.repair_public_owner_root(root)")
+        self.assertLess(rebuild.index("self.add_watch_root(root)"), scan_start)
+        self.assertLess(rebuild.index("self.expand_watch_tree_from("), scan_start)
+        scan = source[
+            source.index("    fn repair_existing_public_tree(") : source.index("    fn add_watch_node(")
+        ]
+        self.assertIn("scanned_entries.is_multiple_of(64)", scan)
+        self.assertIn("self.drain_events();", scan)
+
     def test_diagnostic_logcat_snapshot_precedes_slow_collection(self) -> None:
         script = read("assets/zygisk_module/service.d/diagnostic_archive.sh")
         main_flow = script.index('update_progress 1 init "正在准备日志包"')
