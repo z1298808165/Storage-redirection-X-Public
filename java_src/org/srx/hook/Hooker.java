@@ -633,6 +633,13 @@ public class Hooker {
           values, MediaStore.MediaColumns.RELATIVE_PATH, hadRelative, originalRelative);
       restoreContentValue(values, "primary_directory", hadPrimary, originalPrimary);
       restoreContentValue(values, "secondary_directory", hadSecondary, originalSecondary);
+      // AOT 的目录创建可能绕过 Java mkdir 回调；列路径重定向同样登记作用域收尾。
+      // 原生入口只接受公共路径到默认沙箱的同后缀映射，并且只删除空目录。
+      File publicParent = new File(publicPath).getParentFile();
+      File directParent = new File(directPath).getParentFile();
+      if (publicParent != null && directParent != null) {
+        rememberProviderRedirectSourceDirectory(publicParent.getPath(), directParent.getPath());
+      }
       logInfo(
           "media direct file columns method="
               + methodName
