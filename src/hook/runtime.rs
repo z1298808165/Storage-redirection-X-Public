@@ -153,7 +153,7 @@ pub fn should_resolve_caller_context(hub: &InterceptHub) -> bool {
 
 // 写入类重定向时按需补齐目标父目录
 pub fn ensure_redirect_parent_directory(op_name: &str, from_path: &str, to_path: &str, flags: i32) {
-    if from_path == to_path || !monitor::has_write_intent_flags(flags) {
+    if !monitor::has_write_intent_flags(flags) {
         return;
     }
 

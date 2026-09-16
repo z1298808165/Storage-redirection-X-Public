@@ -952,10 +952,39 @@ pub(super) fn monitor_event_kind_for_operation(operation_name: &str) -> &'static
 
 pub(super) fn fix_mapped_dir_metadata(path: &str, owner_uid: i32) {
     if let Ok(c_path) = CString::new(path) {
+        // Android 私有外部存储由 MediaProvider 管理，已有目录的 owner/mode 不能被
+        // FUSE 初始化改写；否则应用会被迫额外配置 allowed/read-only 才能访问。新建
+        // 目标仍由后续创建流程初始化，已有目录只保留系统元数据。
+        if let Some(user_id) = paths::extract_user_id_from_data_media_path(path)
+            && is_android_private_backend_path(path, user_id)
+            && !is_android_private_package_root(path, user_id)
+            && fs::is_directory(path)
+        {
+            log::debug!("fuse keep existing Android private metadata path={}", path);
+            return;
+        }
         // SAFETY: c_path 以 NUL 结尾，并在 chown/chmod 调用期间保持有效。
         let _ = unsafe { libc::chown(c_path.as_ptr(), owner_uid as u32, super::MEDIA_RW_GID) };
         let _ = unsafe { libc::chmod(c_path.as_ptr(), super::MAPPED_DIR_MODE) };
     }
+}
+
+fn is_android_private_backend_path(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        return false;
+    };
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    parts.next() == Some("Android") && matches!(parts.next(), Some("data" | "media" | "obb"))
+}
+
+fn is_android_private_package_root(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        return false;
+    };
+    relative.split('/').filter(|part| !part.is_empty()).count() == 3
+        && is_android_private_backend_path(path, user_id)
 }
 
 fn is_android_app_private_relative_path(relative: &str) -> bool {

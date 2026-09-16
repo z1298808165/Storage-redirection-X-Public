@@ -18,34 +18,13 @@ pub(super) fn build_watch_roots(spec: &MonitorAppSpec) -> Vec<WatchRoot> {
 }
 
 pub(super) fn build_private_owner_repair_roots(spec: &MonitorAppSpec) -> Vec<WatchRoot> {
-    // 只开了路径映射的应用在挂载阶段不触碰私有目录属主与权限：`apply_path_mappings_only`
-    // 不执行 `restore_own_private_directories`，只做绑定挂载。守护进程侧必须保持一致，
-    // 否则映射模式的应用仍会因为监视根建立和后续事件触发被改写
-    // `Android/{data,media,obb}/<pkg>` 的属主与权限位，导致外观上「只开了映射却被改了权限」。
-    if !spec.is_enabled || spec.is_mapping_mode_only {
-        return Vec::new();
-    }
-
-    let context = WatchRootBuildContext::new(spec);
-    ["media", "data", "obb"]
-        .into_iter()
-        .filter_map(|category| {
-            let display_root = paths::join(
-                &paths::join(&paths::join(&context.storage_root, "Android"), category),
-                &spec.package_name,
-            );
-            let backend_root = paths::storage_to_data_media_for_user(&display_root, spec.user_id)?;
-            Some(WatchRoot {
-                package_name: spec.package_name.clone(),
-                backend_root,
-                display_root: display_root.clone(),
-                record_display_root: display_root,
-                record_from_root: String::new(),
-                excluded_roots: Vec::new(),
-                source: "private_owner",
-            })
-        })
-        .collect()
+    // Android 私有外部存储根及其子树由 MediaProvider 负责 owner/mode 生命周期。
+    // 过去为完整隔离应用建立 private_owner watch，并在事件到达时递归 lchown/chmod，
+    // 会把系统已建立的 data/media/obb 权限改成应用 UID/固定模式，导致应用看似只有
+    // 添加 allowed_real_paths 后才能访问。重定向模块保留普通文件监视和路径归因，
+    // 不再主动修复这棵系统管理的私有树。
+    let _ = spec;
+    Vec::new()
 }
 
 pub(super) fn build_public_owner_repair_root(spec: &MonitorAppSpec) -> Option<WatchRoot> {

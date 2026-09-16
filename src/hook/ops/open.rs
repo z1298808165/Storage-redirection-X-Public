@@ -16,6 +16,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const REDIRECTED_OPEN_FD_LOG_SAMPLE_STEP: u64 = 256;
 static REDIRECTED_OPEN_FD_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+fn is_android_private_storage_path(path: &str) -> bool {
+    let prefix = "/storage/emulated/";
+    let Some((_, relative)) = path
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.split_once("/"))
+    else {
+        return false;
+    };
+    paths::matches("Android/data", relative, true)
+        || paths::matches("Android/media", relative, true)
+        || paths::matches("Android/obb", relative, true)
+}
 
 #[repr(C)]
 pub struct OpenHow {
@@ -170,6 +182,11 @@ where
     };
 
     retry_fuse_fix_for_media_provider(hub);
+    if monitor::has_write_intent_flags(flags)
+        && is_android_private_storage_path(path_for_decision.as_ref())
+    {
+        runtime::ensure_redirect_parent_dirs(path_for_decision.as_ref(), 0o2773);
+    }
     runtime::fix_mapped_private_alias_access(hub, &path_for_decision, flags);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 
@@ -278,6 +295,11 @@ where
     };
 
     retry_fuse_fix_for_media_provider(hub);
+    if monitor::has_write_intent_flags(flags)
+        && is_android_private_storage_path(path_for_decision.as_ref())
+    {
+        runtime::ensure_redirect_parent_dirs(path_for_decision.as_ref(), 0o2773);
+    }
     runtime::fix_mapped_private_alias_access(hub, &path_for_decision, flags);
     diagnostic::log_diag_path_event(hub, op_name, "input", path_for_decision.as_ref(), flags);
 

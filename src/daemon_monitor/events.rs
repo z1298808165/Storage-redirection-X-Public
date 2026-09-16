@@ -470,6 +470,13 @@ fn chown_android_private_path_if_needed(
     owner_package: &str,
     private_root: &str,
 ) {
+    // private_root 是 MediaProvider 创建并维护的应用私有根。它的 owner/mode 可能随
+    // Android 版本、厂商实现或 FUSE 层不同，守护进程不能在每次事件中把根目录强制改成
+    // 应用 UID/固定模式；根目录被改写后，应用会表现为必须额外配置允许路径才能访问。
+    // 子目录和文件仍保留现有的按需修复逻辑，处理重定向链路确实新建出的条目。
+    if paths::eq_ignore_case(path, private_root) {
+        return;
+    }
     let Some(c_path) = cstring_path(path) else {
         return;
     };

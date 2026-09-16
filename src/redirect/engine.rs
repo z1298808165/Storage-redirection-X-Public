@@ -68,7 +68,8 @@ fn normalize_request_path(pathname: &str) -> NormalizedRequestPath {
         Cow::Borrowed(pathname)
     };
     let raw_normalized = paths::normalize(collapsed.as_ref());
-    let is_data_media_input = paths::starts_with(&raw_normalized, "/data/media/");
+    let is_data_media_input = paths::starts_with(&raw_normalized, "/data/media/")
+        || is_android_private_storage_path(&raw_normalized);
     let path = if is_data_media_input {
         writer::data_media_to_storage_path(&raw_normalized)
     } else {
@@ -78,6 +79,19 @@ fn normalize_request_path(pathname: &str) -> NormalizedRequestPath {
         path,
         is_data_media_input,
     }
+}
+
+fn is_android_private_storage_path(path: &str) -> bool {
+    let storage_prefix = "/storage/emulated/";
+    let Some(relative) = path
+        .strip_prefix(storage_prefix)
+        .and_then(|rest| rest.split_once('/').map(|(_, suffix)| suffix))
+    else {
+        return false;
+    };
+    paths::matches("Android/data", relative, true)
+        || paths::matches("Android/media", relative, true)
+        || paths::matches("Android/obb", relative, true)
 }
 
 fn process_provider_passthrough_redirect(
@@ -511,11 +525,7 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
     AuditTrail::instance().update_caller_package(&effective_caller_package);
 
     if user_id < 0 {
-        writer::log_system_writer_user_unresolved(
-            &effective_caller_package,
-            effective_caller_uid,
-            pathname,
-        );
+        writer::log_system_writer_user_unresolved(&package_name, effective_caller_uid, pathname);
         return writer_trace.allow("user_empty", &effective_caller_package, caller_ms, 0);
     }
 
@@ -570,12 +580,17 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
     }
 
     if is_data_media
-        && is_system_writer_default_sandbox_path(
+        && (is_system_writer_default_sandbox_path(
             &resolved_path,
             &effective_caller_package,
             user_id,
             &package_name,
-        )
+        ) || is_system_writer_android_private_storage_path(
+            &resolved_path,
+            &effective_caller_package,
+            user_id,
+            &package_name,
+        ))
     {
         return writer_trace.allow(
             "private_backend_input",
@@ -680,6 +695,12 @@ fn resolve_system_writer_self_explicit_rule(
     let resolved_path = paths::resolve_user_path(normalized_path, user_id);
     if !writer::is_path_in_user_storage(&resolved_path, user_id)
         || is_system_writer_default_sandbox_path(
+            &resolved_path,
+            self_redirect_package,
+            user_id,
+            package_name,
+        )
+        || is_system_writer_android_private_storage_path(
             &resolved_path,
             self_redirect_package,
             user_id,
@@ -1038,7 +1059,14 @@ fn resolve_system_writer_private_backend_path(
     user_id: i32,
     package_name: &str,
 ) -> String {
-    if is_system_writer_default_sandbox_path(resolved_path, caller_package, user_id, package_name) {
+    if is_system_writer_default_sandbox_path(resolved_path, caller_package, user_id, package_name)
+        || is_system_writer_android_private_storage_path(
+            resolved_path,
+            caller_package,
+            user_id,
+            package_name,
+        )
+    {
         return writer::storage_to_data_media_path(resolved_path);
     }
 

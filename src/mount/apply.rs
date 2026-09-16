@@ -492,12 +492,13 @@ impl MountPlanner {
         true
     }
 
-    // 把应用自己包名的私有目录（Android/data|media|obb/<pkg>）bind 回真实后端。
+    // 把应用自己包名的私有目录（Android/data|media|obb/<pkg>）bind 回系统存储视图。
     // 这些目录属于 app-specific 外部存储，系统 MediaProvider 已按包名隔离，本就不该
     // 被重定向；而 storage root 整体 bind 到沙箱时会把它们一并带走，应用保存或下载
-    // 到自己私有目录的文件会多套一层 sdcard/。这里在整体重定向之后把它们 bind 回
-    // 直连 f2fs 的真实位置 /data/media/<user>，绕开 MediaProvider 对私有目录 rename
-    // 的 ERANGE 缺陷，与 FUSE 侧 private_real_root 的语义一致。
+    // 到自己私有目录的文件会多套一层 sdcard/。这里在整体重定向之后优先从挂载前保存的
+    // 系统 FUSE 锚点恢复；不能直接绑定 /data/media 的 f2fs 后端，否则目标会带着
+    // media_rw_data_file 上下文绕过 MediaProvider FUSE，普通应用即使目录属于自身 UID
+    // 仍会被 SELinux 拒绝。后端路径只用于创建缺失的包名根。
     fn restore_own_private_directories(
         &self,
         storage_path: &str,
@@ -519,12 +520,32 @@ impl MountPlanner {
                 continue;
             }
 
-            let source = paths::join(data_media_root, &relative);
-            if !self.ensure_writable_mapped_directory(&source, self.app_uid) {
-                log::warn!("own private source mkdir failed: {}", source);
+            let backend_source = paths::join(data_media_root, &relative);
+            // MediaProvider 可能尚未为包名下的任意子目录建立真实目录；先由守护进程
+            // 在当前 mount namespace 中显式创建完整后端路径，再执行元数据修正。
+            if !fs::create_directory(&backend_source, self.app_uid)
+                || !self.ensure_writable_mapped_directory(&backend_source, self.app_uid)
+            {
+                log::warn!("own private source mkdir failed: {}", backend_source);
                 continue;
             }
-            if !self.ensure_directory_exists(&storage_target, true) {
+            // 三类自有私有目录统一保留系统 FUSE 的访问控制与上下文。
+            // 锚点缺失时不把 /data/media 直接暴露给应用；保留诊断并等待后续恢复。
+            let Some(source) = self
+                .real_storage_anchor()
+                .as_ref()
+                .map(|anchor| paths::join(anchor, &relative))
+                .filter(|path| fs::is_directory(path))
+            else {
+                log::warn!("own private FUSE anchor unavailable: {}", storage_target);
+                continue;
+            };
+            // metadata_operations_path 将 storage alias 转到 /data/media；但在包名
+            // 根尚未挂载子目录时，需要先在当前 namespace 的可见路径创建挂载点，
+            // 否则 bind 只能覆盖包名根，应用后续创建 QQfile_recv 会得到 ENOENT。
+            if !fs::create_directory(&storage_target, -1)
+                || !self.ensure_directory_exists(&storage_target, true)
+            {
                 log::warn!("own private target mkdir failed: {}", storage_target);
                 continue;
             }
@@ -1308,7 +1329,6 @@ fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
             .map(|source| paths::is_same_or_child(backend, &source))
             .unwrap_or(false)
 }
-
 fn detach_mount_if_present(target: &str) {
     // 该函数会 umount2 改变挂载表，且被 bind_mount 之间反复调用，必须每次重新读取；
     // 这里只需要判断挂载点是否存在，用存在性探测替代取 source 的整表扫描。

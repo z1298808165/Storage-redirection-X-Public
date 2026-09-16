@@ -128,6 +128,21 @@ impl MountPlanner {
             );
             return false;
         }
+        // Android 私有外部存储目录由 MediaProvider 按包名和系统版本维护。已有目录的
+        // owner/mode 可能是 media_rw、应用 UID 或厂商专用组合，均不能因为一次重定向挂载
+        // 被强制改成映射目录的固定值；否则应用会失去原本可用的 data/media/obb 访问权限。
+        // 缺失目录仍允许继续走下面的初始化，以便首次创建应用私有目标。
+        if is_existing
+            && is_android_private_backend_path(&metadata_path, self.user_id)
+            && !is_android_private_package_root(&metadata_path, self.user_id)
+        {
+            log::debug!(
+                "mount dir: keep existing Android private metadata path={} metadata_path={}",
+                path,
+                metadata_path
+            );
+            return true;
+        }
         if !is_existing && self.is_file_monitor_enabled {
             let display_path = self.monitor_display_path_for_backend(&metadata_path);
             crate::logging::write_mount_prep_record(
@@ -738,6 +753,13 @@ impl MountPlanner {
         if !requested {
             return false;
         }
+        // 应用自己的 Android/data|media|obb/<包名> 必须递归绑定。包名根下的
+        // Tencent/QQfile_recv 等目录可能在挂载后才出现；非递归 bind 只覆盖空的
+        // 包名根，应用随后访问子目录会得到 ENOENT。该例外仍限定在当前应用的
+        // 私有包名根，不会放开公共存储树的递归绑定。
+        if self.is_android_private_package_target(target) {
+            return true;
+        }
         if self.is_public_storage_alias_path(source)
             || self.is_public_storage_alias_path(target)
             || self.is_real_storage_anchor_path(source)
@@ -753,6 +775,14 @@ impl MountPlanner {
             return false;
         }
         true
+    }
+
+    fn is_android_private_package_target(&self, path: &str) -> bool {
+        let normalized = paths::normalize(path);
+        ["data", "media", "obb"].iter().any(|kind| {
+            let suffix = format!("/Android/{}/{}", kind, self.package_name);
+            normalized.ends_with(&suffix)
+        })
     }
 
     fn repair_disconnected_storage_parent(&self, target: &str) -> bool {
@@ -988,6 +1018,24 @@ fn is_android_private_storage_path(path: &str, storage_root: &str) -> bool {
         || relative.starts_with("Android/data/")
         || relative.starts_with("Android/media/")
         || relative.starts_with("Android/obb/")
+}
+
+fn is_android_private_backend_path(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        return false;
+    };
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    parts.next() == Some("Android") && matches!(parts.next(), Some("data" | "media" | "obb"))
+}
+
+fn is_android_private_package_root(path: &str, user_id: i32) -> bool {
+    let root = paths::data_media_user_root_for_user(user_id);
+    let Some(relative) = paths::relative_child_path(path, &root) else {
+        return false;
+    };
+    relative.split('/').filter(|part| !part.is_empty()).count() == 3
+        && is_android_private_backend_path(path, user_id)
 }
 
 fn should_apply_app_writable_metadata(path: &str, user_id: i32) -> bool {

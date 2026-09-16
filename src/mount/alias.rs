@@ -50,6 +50,10 @@ impl MountPlanner {
 
         for target in alias_targets {
             let is_primary_target = target == primary_target;
+            if paths::eq_ignore_case(source, &target) {
+                log::debug!("alias: skip self bind src={} dst={}", source, target);
+                continue;
+            }
             if !is_primary_target && !path_exists(&target) {
                 continue;
             }
@@ -129,6 +133,10 @@ impl MountPlanner {
 
         for target in alias_targets {
             let is_primary_target = target == primary_target;
+            if paths::eq_ignore_case(source, &target) {
+                log::debug!("alias: skip self overlay src={} dst={}", source, target);
+                continue;
+            }
             if !is_primary_target && !path_exists(&target) {
                 continue;
             }

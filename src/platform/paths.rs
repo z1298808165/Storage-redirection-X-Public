@@ -1085,6 +1085,14 @@ pub fn extract_user_id_from_storage_path(path: &str) -> i32 {
     path[user_start..user_end].parse().unwrap_or(-1)
 }
 
+/// 从 `/data/media/<user>/...` 后端路径提取 Android 用户 ID。
+pub fn extract_user_id_from_data_media_path(path: &str) -> Option<i32> {
+    let normalized = normalize(path);
+    let rest = normalized.strip_prefix("/data/media/")?;
+    let user = rest.split('/').next()?.parse::<i32>().ok()?;
+    (user >= 0).then_some(user)
+}
+
 pub fn extract_android_private_path_owner(path: &str) -> String {
     const PREFIX: &str = "/storage/emulated/";
     let Some(rest) = path.strip_prefix(PREFIX) else {
