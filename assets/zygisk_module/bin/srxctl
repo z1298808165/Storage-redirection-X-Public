@@ -449,6 +449,15 @@ status_runtime() {
   fi
 }
 
+run_doctor() {
+  daemon_bin="$MODDIR/bin/srx_daemon"
+  if [ ! -x "$daemon_bin" ]; then
+    echo "找不到 srx_daemon：$daemon_bin" >&2
+    return 127
+  fi
+  "$daemon_bin" doctor
+}
+
 case "$1" in
   stop) stop_runtime ;;
   start) start_runtime ;;
@@ -457,7 +466,8 @@ case "$1" in
   ensure-collectors) start_collectors_if_needed ;;
   clear-monitor) clear_monitor_log ;;
   reset-stats) reset_runtime_stats ;;
+  doctor) run_doctor ;;
   diagnostic-archive) build_diagnostic_archive "$2" "$3" "$4" ;;
   status|"") status_runtime ;;
-  *) echo "用法：srxctl {start|stop|restart|remount-running|ensure-collectors|clear-monitor|reset-stats|diagnostic-archive|status}" >&2; exit 2 ;;
+  *) echo "用法：srxctl {start|stop|restart|remount-running|ensure-collectors|clear-monitor|reset-stats|doctor|diagnostic-archive|status}" >&2; exit 2 ;;
 esac

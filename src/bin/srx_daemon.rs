@@ -15,12 +15,16 @@ mod daemon_mount;
 mod domain;
 #[path = "../fuse_redirect/mod.rs"]
 mod fuse_redirect;
+#[path = "../fuse_supervisor.rs"]
+mod fuse_supervisor;
 #[path = "../log_daemon.rs"]
 mod log_daemon;
 #[path = "../logging.rs"]
 mod logging;
 #[path = "../mount.rs"]
 mod mount;
+#[path = "../mount_identity.rs"]
+mod mount_identity;
 #[path = "../mount_intent.rs"]
 mod mount_intent;
 #[path = "../mount_status_marker.rs"]
@@ -47,6 +51,9 @@ fn main() {
         } else {
             1
         });
+    }
+    if command.as_deref() == Some("doctor") {
+        std::process::exit(daemon_mount::doctor_report());
     }
     if command.as_deref() == Some("control") {
         let Some(command) = args.next() else {

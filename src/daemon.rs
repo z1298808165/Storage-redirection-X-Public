@@ -421,6 +421,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     let started_ms = crate::platform::paths::monotonic_ms();
     prune_stale_mount_states();
     crate::mount_intent::prune_stale();
+    crate::mount_identity::prune_stale();
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;
@@ -476,6 +477,19 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
             skipped += 1;
             continue;
         }
+        // 恢复动作由账本归属与端点健康共同决定：被判定为"不摘除"或"已收敛"的命名空间
+        // 不能继续注入，否则就是在死连接上叠加新的挂载层。这里在真正执行前取一次监督结论，
+        // 既作为执行门禁，也把判定依据写进日志。
+        if let Some(snapshot) = crate::daemon_mount::supervise_mount_request(&plan.request) {
+            if !snapshot.last_action.allows_inject() {
+                log::warn!(
+                    "daemon reconcile skip inject {}",
+                    crate::fuse_supervisor::render_namespace(&snapshot)
+                );
+                skipped += 1;
+                continue;
+            }
+        }
         match plan.request.operation {
             MountOperation::Reload => {
                 if execute_mount_request(&plan.request) {
@@ -515,6 +529,11 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
             deferred,
             crate::platform::paths::monotonic_ms().saturating_sub(started_ms)
         );
+        // 监督计数只在确实发生过恢复行为时输出，避免每轮都刷同样的零值。
+        let summary = crate::fuse_supervisor::SupervisorSummary::snapshot();
+        if summary.has_activity() {
+            log::info!("daemon supervisor {}", summary.render());
+        }
     }
     applied > 0 || disabled > 0
 }
