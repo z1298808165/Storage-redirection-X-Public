@@ -1006,30 +1006,44 @@ class ScenarioConsistencyTest(unittest.TestCase):
             clean.index("fix_private_backend_permissions"),
         )
 
-    def test_mediastore_relative_path_keeps_sandbox_prefix(self) -> None:
-        """insert 的 relative_path 必须保留沙箱前缀，否则文件落到公共目录、沙箱落点为空。
+    def test_mediastore_insert_patches_public_data_not_sandbox_relative(self) -> None:
+        """insert 必须补公共形态的 _data，且不得把沙箱前缀写进 relative_path。
 
-        显示路径改写把沙箱目标还原成公共显示路径后与原值相同（mediaStoreDisplayPath 会剥掉
-        Android/data/<包名>/sdcard/），旧实现据此判定「无需改写」于是放过，场景 2 的
-        mediastore-sandbox-only 断言 file_missing。守卫锁定：显示路径无变化时必须改走直接目标
-        取物理相对段。
+        MediaProvider 的 assertPrivatePathNotInValues 会把 _data 与 relative_path 两个字段都送进
+        FileUtils.isDataOrObbRelativePath()：只要其一出现 Android/data|obb 形态且调用方无权访问，
+        该次 insert 立即抛 IllegalArgumentException("Inserting private file: ... is not allowed")，
+        场景 2 的 mediastore_create_file 随之返回 null。ensureFileColumns 又以 _data 是否为空分流，
+        只有 _data 非空时才按该路径建父目录并跳过 relative_path 落点校验。因此守卫锁定：
+        1. insert 且原本没有 _data 时必须补 _data；
+        2. 补进去的 _data 与 relative_path 都必须是公共显示路径，不能带 Android/data 沙箱前缀；
+        3. 不得再引入向 relative_path 写沙箱相对段的 helper。
         """
         java = read("java_src/org/srx/hook/Hooker.java")
         patch = section(java, "private static ContentValuesPatch patchContentValues(", "\n  /**")
-        self.assertIn("resolveMediaStoreSandboxRelativePath(probePath, callerUid)", patch)
+        self.assertIn('if (insertLike && dataKey == null) {', patch)
+        self.assertIn('patched.put("_data", publicPath);', patch)
+        self.assertIn("buildMediaStoreProbePath(relativePath, insertDisplayName, callerUid)", patch)
+        # 沙箱前缀一旦进入 relative_path 就会被 MediaProvider 拒绝，helper 不得回归。
+        self.assertNotIn("resolveMediaStoreSandboxRelativePath", java)
+        # _data 用的必须是显示路径构造器，而不是物理路径构造器，否则同样命中私有路径校验。
+        data_section = section(patch, 'if (insertLike && dataKey == null) {', "    if (!insertLike")
+        self.assertNotIn("resolveMediaStoreDirectPathForValues", data_section)
 
-        helper = section(
+    def test_mediastore_pending_update_replays_public_target(self) -> None:
+        """发布 pending 文件的 update 必须回填公共目标，不能在 ensureFileColumns 里露出沙箱路径。
+
+        insert 成功后 MediaProvider 会在发布 pending 的 update 中再次执行 ensureFileColumns；
+        若此时 values 露出 Android/data 私有目录，会以“禁止插入私有文件”结束。守卫锁定
+        providerMediaFileColumnCallback 的 pending 回填分支写入的是公共 _data 与公共 relative_path。
+        """
+        java = read("java_src/org/srx/hook/Hooker.java")
+        callback = section(
             java,
-            "private static String resolveMediaStoreSandboxRelativePath(",
-            "private static void ensureSandboxParentDir(",
+            "public Object providerMediaFileColumnCallback(",
+            "private static boolean isInsertLikeMutation(",
         )
-        self.assertIn("resolveMediaStoreDirectPathForValues(probePath, callerUid)", helper)
-        self.assertIn("physicalRelativePath(directPath, callerUid)", helper)
-
-        # physicalRelativePath 是唯一从物理根截出相对段的实现，必须保留沙箱前缀语义。
-        physical = section(java, "private static String physicalRelativePath(", "\n  /**")
-        self.assertIn("mediaStorePhysicalRoot(callerUid)", physical)
-        self.assertRegex(physical, r"path\.substring\(root\.length\(\) \+ 1, lastSlash \+ 1\)")
+        self.assertIn('values.put(MediaStore.MediaColumns.DATA, pendingContext.publicPath);', callback)
+        self.assertIn("mediaStoreRelativePath(pendingContext.publicPath)", callback)
 
 
 if __name__ == "__main__":
