@@ -2975,23 +2975,32 @@ public class Hooker {
       rememberMediaStoreMutationPathHint(probePath, relativeSource, callerUid);
       String mappedPath = rewriteStoragePathForValues(probePath, callerUid);
       String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
-      if (mappedRelative == null
-          || normalizeRelativePathValue(mappedRelative)
-              .equals(normalizeRelativePathValue(relativePath))) {
-        // 显示路径改写后与原值相等时不能就此放过：rewriteStoragePathForValues 返回的是
-        // 「显示路径」，而 mediaStoreDisplayPath 会把沙箱前缀 Android/data/<包名>/sdcard/
-        // 剥掉，于是沙箱目标被还原成公共显示路径、与本值相同。若沿用该结果，relative_path
-        // 保持不变，MediaProvider 就会把文件写到公共目录，导致沙箱落点为空，即场景 2 报出的
-        // file_missing 标签 scenario-2-mediastore-sandbox-file。
-        // 这里改查「直接目标」并对物理路径取相对段，保留沙箱前缀，使父目录在私有目标中创建。
-        mappedRelative = resolveMediaStoreSandboxRelativePath(probePath, callerUid);
-      }
       if (mappedRelative != null
           && !normalizeRelativePathValue(mappedRelative)
               .equals(normalizeRelativePathValue(relativePath))) {
         patched = copyIfNeeded(patched, values);
         patched.put("relative_path", mappedRelative);
         patchDirectoryColumns(patched, mappedRelative);
+      }
+    }
+    // insert 且未提供 _data 时补一个公共形态的 _data。MediaProvider 的 ensureFileColumns
+    // 以 _data 是否为空分流：_data 非空才按该路径建父目录并跳过 relative_path 的落点校验，
+    // 否则会走到 assertPrivatePathNotInValues，只要 relative_path 里出现
+    // Android/data/<包名>/sdcard/ 就直接抛「Inserting private file: ... is not allowed」。
+    // 因此 relative_path 必须保持公共值，沙箱落点交由 _data 直写通道完成；这里补 _data 是为了
+    // 让 MediaProvider 采纳公共路径分支，真正的重定向仍由后续直写登记与 native 层执行。
+    if (insertLike && dataKey == null) {
+      String insertDisplayName = firstString(relativeSource, "_display_name", "display_name");
+      String publicPath = buildMediaStoreProbePath(relativePath, insertDisplayName, callerUid);
+      if (publicPath != null && publicPath.length() > 0) {
+        patched = copyIfNeeded(patched, values);
+        patched.put("_data", publicPath);
+        String publicRelative = mediaStoreRelativePath(publicPath);
+        if (publicRelative != null) {
+          patched.put("relative_path", publicRelative);
+          patchDirectoryColumns(patched, publicRelative);
+        }
+        rememberMediaStoreMutationPathHint(publicPath, patched, callerUid);
       }
     }
     if (!insertLike && mutationUri != null) {
@@ -4052,23 +4061,6 @@ public class Hooker {
     int lastSlash = path.lastIndexOf('/');
     if (lastSlash <= root.length() || lastSlash + 1 >= path.length()) return null;
     return path.substring(root.length() + 1, lastSlash + 1);
-  }
-
-  /**
-   * 解析公共 MediaStore 值在沙箱内的相对路径（保留 Android/data/&lt;包名&gt;/sdcard/ 前缀）。
-   *
-   * <p>显示路径改写把沙箱目标还原成公共显示路径后与原值相同，无法用来判断是否进入沙箱； 而 insert 需要的是带沙箱前缀的 relative_path，否则 MediaProvider
-   * 会把文件落到公共目录。 这里走直接目标：先取该值的沙箱物理目标，再从物理根截出相对段，得到 MediaProvider 建目录所需的私有相对路径。
-   */
-  private static String resolveMediaStoreSandboxRelativePath(String probePath, int callerUid) {
-    if (probePath == null || probePath.length() == 0) return null;
-    try {
-      String directPath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
-      if (directPath == null || directPath.length() == 0) return null;
-      return physicalRelativePath(directPath, callerUid);
-    } catch (Throwable ignored) {
-      return null;
-    }
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {
