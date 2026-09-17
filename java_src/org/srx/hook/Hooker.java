@@ -3958,15 +3958,11 @@ public class Hooker {
         // 目录创建可能因 owner/namespace 校验失败而返回 null。对经过安全校验的公共
         // MediaStore 路径回退到对应的 /data/media 物理路径，保留相同的相对落点和数据库
         // 显示路径，同时绕开 MediaProvider 自身的 FUSE 表面。
-        if (!isRedirectEnabledForCallerUid(callerUid) || !isSafePublicMediaValuePath(path))
-          return null;
-        directPath = mediaStorePhysicalPath(path, callerUid);
+        directPath = mediaStorePublicPhysicalFallback(path, callerUid);
       }
       if (directPath == null || directPath.length() == 0) return null;
       if (directPath.equals(path)) {
-        if (!isRedirectEnabledForCallerUid(callerUid) || !isSafePublicMediaValuePath(path))
-          return null;
-        String physicalPath = mediaStorePhysicalPath(path, callerUid);
+        String physicalPath = mediaStorePublicPhysicalFallback(path, callerUid);
         if (physicalPath == null || physicalPath.equals(path)) return null;
         logDebug("media direct physical fallback from=" + path + " to=" + physicalPath);
         return physicalPath;
@@ -3978,6 +3974,42 @@ public class Hooker {
     } catch (Throwable ignored) {
       return null;
     }
+  }
+
+  /**
+   * 公共 MediaStore 值没有 native 目标时的物理回退路径。
+   *
+   * <p>回退必须先跟随父目录的重定向目标。MediaProvider 在 insert 期间会用 `File.getParentFile()` 和 `.pending-<随机>-<文件名>`
+   * 临时名构造结果文件，native 路径重写未必为这个临时名返回目标；若此时 直接回退到公共物理目录，后续 mkdir 仍会被 native 改写进沙箱，公共目录本身并不存在
+   * （errno=ENOENT），MediaProvider 在它下面创建 pending 文件就会失败并让 insert 返回 null。
+   *
+   * <p>先跟随父目录目标可以让临时文件与最终文件落到同一棵子树，同时保留“允许写入真实公共路径” 场景下回退到 `/data/media/<user>` 公共物理路径的原行为。
+   */
+  private static String mediaStorePublicPhysicalFallback(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    if (!isRedirectEnabledForCallerUid(callerUid) || !isSafePublicMediaValuePath(path)) return null;
+    boolean hasFileScheme = path.startsWith("file://");
+    String value = hasFileScheme ? path.substring("file://".length()) : path;
+    String candidate = value;
+    int end = value.lastIndexOf('/');
+    if (end > 0 && end + 1 < value.length()) {
+      String parent = value.substring(0, end);
+      String parentTarget = null;
+      try {
+        parentTarget = resolveMediaStoreDirectPath(parent, callerUid);
+      } catch (Throwable ignored) {
+        parentTarget = null;
+      }
+      if (parentTarget != null
+          && parentTarget.length() > 0
+          && !parentTarget.equals(parent)
+          && isSrxSandboxFallbackPath(parentTarget, callerUid)) {
+        candidate = parentTarget + "/" + value.substring(end + 1);
+      }
+    }
+    String physical = mediaStorePhysicalPath(candidate, callerUid);
+    if (physical == null) return null;
+    return hasFileScheme ? "file://" + physical : physical;
   }
 
   private static String mediaStorePhysicalRoot(int callerUid) {
