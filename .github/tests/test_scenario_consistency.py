@@ -153,6 +153,64 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(bash.index("rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE'"),
                         bash.index("rm -rf '${REAL_ROOT}/Download/SrtProbe'"))
 
+    def test_fixture_directory_removal_stays_on_visible_view(self) -> None:
+        # 夹具目录的删除必须留在**可见路径**上，且先于 REAL_ROOT 切到后端。
+        #
+        # 只删探针文件不够：模块对重定向目录的 unlink 返回 EDOM（`rm: ...: Math result
+        # not representable`），该次删除不生效；目录级 `rm -rf` 才会让模块丢弃该目录项、
+        # 使后续 lookup 不再命中残留。若把这条目录删除一并改走后端，前序场景写入可见
+        # SrtProbe 的探针会一路存活到后续场景的控制组，被 `file_unexpected` 判失败
+        # （Android 17 场景 20 `mount-ns-control-real`，残留 mtime 早于该场景十余分钟）。
+        #
+        # 反向证据：run `35128270269`（公开 `3565c0f4`）此处两条都在可见路径，整轮 EDOM
+        # 仅 2 次、场景 20 通过；run `35238174287`（公开 `36abe4b0`）只剩文件级一条，
+        # 整轮 EDOM 14 次、场景 20 失败。
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        switch = bash.index('local REAL_ROOT="${BACKEND_ROOT}"')
+        visible_dirs = bash.index("rm -rf '${REAL_ROOT}/Download/SrtProbe'")
+        # 目录级删除必须存在，且必须排在 local REAL_ROOT 覆盖之前（此时 REAL_ROOT 是可见路径）。
+        self.assertLess(visible_dirs, switch)
+        # 覆盖范围不能靠硬编码清单：可见语句删掉的每个目录，都必须同样出现在切换后的
+        # 删除语句集合里。两处都写作 `${REAL_ROOT}/...`（切换后 REAL_ROOT 即后端根），
+        # 因此只要后端补了新夹具目录而被漏在可见分支，本守卫就会报出缺失项 —— 正是
+        # 「只删 SrtProbe 而漏掉别名目录」这一静默缺口的拦截点。
+        visible_targets = self.removal_targets(self.line_with(bash[:switch], "rm -rf '${REAL_ROOT}/Download/SrtProbe'"))
+        backend_targets = self.removal_targets(bash[switch:])
+        self.assertGreaterEqual(len(visible_targets), 8)
+        self.assertEqual(
+            sorted(visible_targets - backend_targets),
+            [],
+            "可见路径删除的目录必须同时出现在后端删除语句中",
+        )
+        # 后端路径的目录删除仍须保留（确定性落点由它保证），只是排在切换之后。
+        self.assertLess(switch, bash.index("rm -rf '${REAL_ROOT}/Download/SrtProbe", switch))
+
+        ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertLess(ps.index("rm -rf '$RealRoot/Download/SrtProbe'"),
+                        ps.index("rm -rf '$BackendRoot/Download/SrtProbe'"))
+        visible_ps = self.removal_targets(self.line_with(ps, "rm -rf '$RealRoot/Download/SrtProbe'"), "$RealRoot")
+        backend_ps = self.removal_targets(ps, "$BackendRoot")
+        self.assertGreaterEqual(len(visible_ps), 8)
+        self.assertEqual(sorted(visible_ps - backend_ps), [],
+                         "可见路径删除的目录必须同时出现在后端删除语句中")
+
+    @staticmethod
+    def line_with(text: str, needle: str) -> str:
+        # 取含指定片段的**单行**：两处对应语句各自成行，避免把同函数内其它删除语句混入比对。
+        for line in text.splitlines():
+            if needle in line:
+                return line
+        raise AssertionError("line containing %r not found" % needle)
+
+    @staticmethod
+    def removal_targets(text: str, prefix: str = "${REAL_ROOT}") -> set:
+        # 收集 `rm -rf '<prefix>/X' ...` 语句里的目录目标。可见分支只传单行、后端分支传
+        # 整段，两种用法都能正确取集合；`find ... -delete` 的目标不以 rm -rf 开头，不会误收。
+        targets: set = set()
+        for group in re.findall(r"rm -rf((?:\s+'[^']+')+)", text):
+            targets.update(re.findall(r"'" + re.escape(prefix) + r"/([A-Za-z0-9_./-]+)'", group))
+        return targets
+
     def test_alias_fixture_cleanup_covers_all_aliases(self) -> None:
         ps = section(self.powershell, "function Clear-AliasMediaStoreFixture", "function Invoke-NestedMappingChainScenario")
         for token in ("$QqAliasRequestRoot", "$RealRoot/Download/QQ", "$QqAliasMappedRoot", "Remove-MediaStoreRowsByPattern"):
