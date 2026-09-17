@@ -891,6 +891,10 @@ function Clear-Targets {
     # 先经系统 FUSE 删除共享探针，通知其失效前序场景的 inode 缓存；
     # 仅删除 /data/media 后端会让 lookup 仍命中旧文件，而随后 open 返回 ENOENT。
     Invoke-Su "rm -f '$RealRoot/Download/SrtProbe/$TestFile' '$RealRoot/Download/Test/$TestFile' || echo '共享探针 FUSE 清理失败，继续底层清理并保留后续断言' >&2" | Out-Null
+    # 只删探针文件不够：模块对重定向目录的 unlink 返回 EDOM（Math result not representable），
+    # 该次删除不生效。必须同时删到目录本身，目录级 rm -rf 才会让模块丢弃该目录项，
+    # 后续 lookup 不再命中残留（Android 17 场景 20 的 file_unexpected 即残留所致）。
+    Invoke-Su "rm -rf '$RealRoot/Download/SrtProbe' '$RealRoot/Download/SrtOther' '$RealRoot/Download/SrtOtherMapped' '$RealRoot/Download/SrtMapOnlyMapped' '$RealRoot/Download/SrtReadOnly' '$RealRoot/Download/SrtMapRO' '$RealRoot/Download/SrtAllow' '$RealRoot/Pictures/SrtLocked' '$RealRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
 
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null

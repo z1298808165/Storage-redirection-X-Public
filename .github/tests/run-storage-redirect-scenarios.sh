@@ -543,9 +543,24 @@ prepare_any_path_targets() {
 }
 
 clean_targets() {
-  # 与 PowerShell 一致，先经系统 FUSE（可见路径）删除共享探针，通知其失效前序场景
-  # 的 inode 缓存；仅清理底层会让后续 lookup 仍命中旧文件。锚点受限时回退底层清理。
+  # 共享探针与夹具目录的删除必须走**可见路径**：该路径由模块 FUSE 承接，删除请求会经
+  # 模块通知系统 FUSE 失效前序场景查询过的 inode 缓存；只删后端那一份会让后续 lookup
+  # 继续命中旧文件。删不掉时如实报错，但不能因此中断清理（内层 `|| echo` 保证退出码 0）。
+  #
+  # 只删探针文件是不够的：模块对重定向目录的 unlink 返回 EDOM
+  # （`rm: ...: Math result not representable`），该次删除不生效；必须**同时删到目录
+  # 本身**，目录级 `rm -rf` 会继续递归并让模块丢弃该目录项，后续 lookup 才不再命中残留。
+  # 这两条都必须在 REAL_ROOT 切到后端之前执行（此时 REAL_ROOT 仍是可见路径）。
+  #
+  # 对照证据（Android 17 场景 20 `file_unexpected label=mount-ns-control-real`）：
+  # - run `35128270269`（公开 `3565c0f4`）此处有可见 `rm -f` + 可见 `rm -rf`，整轮 EDOM
+  #   只出现 2 次（同一次清理的 rm -f 与 rm -rf 递归各一次），场景 20 通过；
+  # - run `35238174287`（公开 `36abe4b0`）把 `rm -rf` 整体改走后端后只剩可见 `rm -f`，
+  #   场景 7 起每次清理都报 EDOM、共 14 次，场景 5/6 写入可见 SrtProbe 的探针
+  #   （mtime 15:23，早于场景 20 的 15:31）一路存活，被 `file_unexpected` 判失败。
   adb_su "rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE' '${REAL_ROOT}/Download/Test/$TEST_FILE' || echo '共享探针 FUSE 清理失败，继续底层清理并保留后续断言' >&2" >/dev/null
+  adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" >/dev/null
+
   # 其余夹具的预置与清理一律改走原始后端路径：/storage/emulated/0 是应用视图，刚落盘的
   # 场景配置（只读路径、映射父目录）会在这条视图上覆盖到夹具父目录，root shell
   # 从该视图 mkdir 会被以 EPERM 拒绝（Android 17 场景 17 缺少 Locked/Writable 目录，
