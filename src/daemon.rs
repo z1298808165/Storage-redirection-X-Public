@@ -480,15 +480,15 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         // 恢复动作由账本归属与端点健康共同决定：被判定为"不摘除"或"已收敛"的命名空间
         // 不能继续注入，否则就是在死连接上叠加新的挂载层。这里在真正执行前取一次监督结论，
         // 既作为执行门禁，也把判定依据写进日志。
-        if let Some(snapshot) = crate::daemon_mount::supervise_mount_request(&plan.request) {
-            if !snapshot.last_action.allows_inject() {
-                log::warn!(
-                    "daemon reconcile skip inject {}",
-                    crate::fuse_supervisor::render_namespace(&snapshot)
-                );
-                skipped += 1;
-                continue;
-            }
+        if let Some(snapshot) = crate::daemon_mount::supervise_mount_request(&plan.request)
+            && !snapshot.last_action.allows_inject()
+        {
+            log::warn!(
+                "daemon reconcile skip inject {}",
+                crate::fuse_supervisor::render_namespace(&snapshot)
+            );
+            skipped += 1;
+            continue;
         }
         match plan.request.operation {
             MountOperation::Reload => {

@@ -953,27 +953,28 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     // 继续挂载只会在同一个挂载点上再叠一层：应用最终看到的是最顶层那份，而底下的死挂载
     // 仍然占用着挂载表，后续每一轮恢复都会让栈更高。这里把"摘除未验证"累计到账本，达到
     // 预算后显式拒绝注入，把问题暴露成持续可观测的状态，而不是让它无限叠加。
-    if request.operation == MountOperation::Reload && !cleanup.is_cleared() {
-        if let Some(mut ledger) = mount_identity::load(&request.package_name, request.pid) {
-            let poisoned = ledger.record_detach_failure();
-            let attempts = ledger.detach_attempts;
-            let _ = mount_identity::save(&ledger);
-            if poisoned {
-                fuse_supervisor::record_action(
-                    RecoveryAction::RefusePoisoned,
-                    EndpointHealth::Unprobed(0),
-                );
-                log::error!(
-                    "daemon mount refused reason=detach_not_verified attempts={} pid={} pkg={}",
-                    attempts,
-                    request.pid,
-                    request.package_name
-                );
-                let _ = send_mount_result(sock, -1);
-                // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
-                unsafe { close(sock) };
-                return false;
-            }
+    if request.operation == MountOperation::Reload
+        && !cleanup.is_cleared()
+        && let Some(mut ledger) = mount_identity::load(&request.package_name, request.pid)
+    {
+        let poisoned = ledger.record_detach_failure();
+        let attempts = ledger.detach_attempts;
+        let _ = mount_identity::save(&ledger);
+        if poisoned {
+            fuse_supervisor::record_action(
+                RecoveryAction::RefusePoisoned,
+                EndpointHealth::Unprobed(0),
+            );
+            log::error!(
+                "daemon mount refused reason=detach_not_verified attempts={} pid={} pkg={}",
+                attempts,
+                request.pid,
+                request.package_name
+            );
+            let _ = send_mount_result(sock, -1);
+            // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
+            unsafe { close(sock) };
+            return false;
         }
     }
     clear_previous_allowed_real_backend_mounts(request);

@@ -168,8 +168,8 @@ pub fn namespace_identity(pid: i32) -> Option<NamespaceIdentity> {
     // SAFETY: 上一步返回 0 表示内核已写入完整的 stat 结构。
     let stat = unsafe { buf.assume_init() };
     Some(NamespaceIdentity {
-        dev: stat.st_dev as u64,
-        ino: stat.st_ino as u64,
+        dev: stat.st_dev,
+        ino: stat.st_ino,
     })
 }
 
