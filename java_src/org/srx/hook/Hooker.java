@@ -2975,6 +2975,17 @@ public class Hooker {
       rememberMediaStoreMutationPathHint(probePath, relativeSource, callerUid);
       String mappedPath = rewriteStoragePathForValues(probePath, callerUid);
       String mappedRelative = relativePathFromStoragePath(mappedPath, callerUid);
+      if (mappedRelative == null
+          || normalizeRelativePathValue(mappedRelative)
+              .equals(normalizeRelativePathValue(relativePath))) {
+        // 显示路径改写后与原值相等时不能就此放过：rewriteStoragePathForValues 返回的是
+        // 「显示路径」，而 mediaStoreDisplayPath 会把沙箱前缀 Android/data/<包名>/sdcard/
+        // 剥掉，于是沙箱目标被还原成公共显示路径、与本值相同。若沿用该结果，relative_path
+        // 保持不变，MediaProvider 就会把文件写到公共目录，沙箱落点为空（场景 2 的
+        // file_missing label=scenario-2-mediastore-sandbox-file）。
+        // 这里改查「直接目标」并对物理路径取相对段，保留沙箱前缀，使父目录在私有目标中创建。
+        mappedRelative = resolveMediaStoreSandboxRelativePath(probePath, callerUid);
+      }
       if (mappedRelative != null
           && !normalizeRelativePathValue(mappedRelative)
               .equals(normalizeRelativePathValue(relativePath))) {
@@ -4041,6 +4052,23 @@ public class Hooker {
     int lastSlash = path.lastIndexOf('/');
     if (lastSlash <= root.length() || lastSlash + 1 >= path.length()) return null;
     return path.substring(root.length() + 1, lastSlash + 1);
+  }
+
+  /**
+   * 解析公共 MediaStore 值在沙箱内的相对路径（保留 Android/data/&lt;包名&gt;/sdcard/ 前缀）。
+   *
+   * <p>显示路径改写把沙箱目标还原成公共显示路径后与原值相同，无法用来判断是否进入沙箱； 而 insert 需要的是带沙箱前缀的 relative_path，否则 MediaProvider
+   * 会把文件落到公共目录。 这里走直接目标：先取该值的沙箱物理目标，再从物理根截出相对段，得到 MediaProvider 建目录所需的私有相对路径。
+   */
+  private static String resolveMediaStoreSandboxRelativePath(String probePath, int callerUid) {
+    if (probePath == null || probePath.length() == 0) return null;
+    try {
+      String directPath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
+      if (directPath == null || directPath.length() == 0) return null;
+      return physicalRelativePath(directPath, callerUid);
+    } catch (Throwable ignored) {
+      return null;
+    }
   }
 
   private static void ensureSandboxParentDir(String sandboxPath) {

@@ -1006,6 +1006,31 @@ class ScenarioConsistencyTest(unittest.TestCase):
             clean.index("fix_private_backend_permissions"),
         )
 
+    def test_mediastore_relative_path_keeps_sandbox_prefix(self) -> None:
+        """insert 的 relative_path 必须保留沙箱前缀，否则文件落到公共目录、沙箱落点为空。
+
+        显示路径改写把沙箱目标还原成公共显示路径后与原值相同（mediaStoreDisplayPath 会剥掉
+        Android/data/<包名>/sdcard/），旧实现据此判定「无需改写」于是放过，场景 2 的
+        mediastore-sandbox-only 断言 file_missing。守卫锁定：显示路径无变化时必须改走直接目标
+        取物理相对段。
+        """
+        java = read("java_src/org/srx/hook/Hooker.java")
+        patch = section(java, "private static ContentValuesPatch patchContentValues(", "\n  /**")
+        self.assertIn("resolveMediaStoreSandboxRelativePath(probePath, callerUid)", patch)
+
+        helper = section(
+            java,
+            "private static String resolveMediaStoreSandboxRelativePath(",
+            "private static void ensureSandboxParentDir(",
+        )
+        self.assertIn("resolveMediaStoreDirectPathForValues(probePath, callerUid)", helper)
+        self.assertIn("physicalRelativePath(directPath, callerUid)", helper)
+
+        # physicalRelativePath 是唯一从物理根截出相对段的实现，必须保留沙箱前缀语义。
+        physical = section(java, "private static String physicalRelativePath(", "\n  /**")
+        self.assertIn("mediaStorePhysicalRoot(callerUid)", physical)
+        self.assertRegex(physical, r"path\.substring\(root\.length\(\) \+ 1, lastSlash \+ 1\)")
+
 
 if __name__ == "__main__":
     unittest.main()
