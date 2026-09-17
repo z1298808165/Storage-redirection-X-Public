@@ -3952,7 +3952,24 @@ public class Hooker {
     if (path == null || path.length() == 0) return null;
     try {
       String directPath = resolveMediaStoreDirectPath(path, callerUid);
-      if (directPath == null || directPath.length() == 0 || directPath.equals(path)) return null;
+      if (directPath == null || directPath.length() == 0) {
+        // native 重写只在路径实际进入沙箱或映射目标时返回结果。公共 real 路径也不能
+        // 让 MediaProvider 在 /storage/emulated 上创建目录：该进程看到的是系统 FUSE，
+        // 目录创建可能因 owner/namespace 校验失败而返回 null。对经过安全校验的公共
+        // MediaStore 路径回退到对应的 /data/media 物理路径，保留相同的相对落点和数据库
+        // 显示路径，同时绕开 MediaProvider 自身的 FUSE 表面。
+        if (!isRedirectEnabledForCallerUid(callerUid) || !isSafePublicMediaValuePath(path))
+          return null;
+        directPath = mediaStorePhysicalPath(path, callerUid);
+      }
+      if (directPath == null || directPath.length() == 0) return null;
+      if (directPath.equals(path)) {
+        if (!isSafePublicMediaValuePath(path)) return null;
+        String physicalPath = mediaStorePhysicalPath(path, callerUid);
+        if (physicalPath == null || physicalPath.equals(path)) return null;
+        logDebug("media direct physical fallback from=" + path + " to=" + physicalPath);
+        return physicalPath;
+      }
       if (!isSafePublicMediaValuePath(directPath)
           && !isSrxSandboxFallbackPath(directPath, callerUid)) return null;
       String physicalPath = mediaStorePhysicalPath(directPath, callerUid);
