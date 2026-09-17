@@ -2981,8 +2981,8 @@ public class Hooker {
         // 显示路径改写后与原值相等时不能就此放过：rewriteStoragePathForValues 返回的是
         // 「显示路径」，而 mediaStoreDisplayPath 会把沙箱前缀 Android/data/<包名>/sdcard/
         // 剥掉，于是沙箱目标被还原成公共显示路径、与本值相同。若沿用该结果，relative_path
-        // 保持不变，MediaProvider 就会把文件写到公共目录，沙箱落点为空（场景 2 的
-        // file_missing label=scenario-2-mediastore-sandbox-file）。
+        // 保持不变，MediaProvider 就会把文件写到公共目录，导致沙箱落点为空，即场景 2 报出的
+        // file_missing 标签 scenario-2-mediastore-sandbox-file。
         // 这里改查「直接目标」并对物理路径取相对段，保留沙箱前缀，使父目录在私有目标中创建。
         mappedRelative = resolveMediaStoreSandboxRelativePath(probePath, callerUid);
       }
