@@ -167,9 +167,24 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
 
         self.assertIn("isRedirectEnabledForCallerUid(callerUid)", resolver)
         self.assertIn("isSafePublicMediaValuePath(path)", resolver)
-        self.assertIn("directPath = mediaStorePhysicalPath(path, callerUid)", resolver)
+        self.assertIn("directPath = mediaStorePublicPhysicalFallback(path, callerUid)", resolver)
         self.assertIn("return physicalPath", resolver)
         self.assertNotIn("normalizeRelativeDataPath(path, callerUid)", resolver)
+
+    def test_public_media_store_fallback_follows_parent_redirect_target(self) -> None:
+        java = read("java_src/org/srx/hook/Hooker.java")
+        fallback = java[
+            java.index("private static String mediaStorePublicPhysicalFallback") : java.index(
+                "private static String mediaStorePhysicalRoot"
+            )
+        ]
+
+        # MediaProvider 在 insert 期间用 .pending-<随机>-<文件名> 构造结果文件，native 重写未必
+        # 为这个临时名返回目标。回退若直接落到公共物理目录，mkdir 仍会被 native 改写进沙箱，
+        # 公共目录实际不存在，pending 文件创建失败会让 insert 返回 null。
+        self.assertIn("resolveMediaStoreDirectPath(parent, callerUid)", fallback)
+        self.assertIn("isSrxSandboxFallbackPath(parentTarget, callerUid)", fallback)
+        self.assertIn('candidate = parentTarget + "/" + value.substring(end + 1)', fallback)
 
     def test_enotconn_cleanup_detaches_owned_dead_fuse_mount(self) -> None:
         rust = read("src/fuse_redirect/config.rs")
