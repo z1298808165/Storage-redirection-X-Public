@@ -586,12 +586,13 @@ fn finish_background_session(
 
 /// 处理 scoped 会话收尾失败。
 ///
-/// 挂载点被回收时 `umount` 必然失败：daemon 重新挂载会先摘除目标挂载点再终止旧服务
-/// 进程，应用退出时系统也会连带销毁它的挂载 namespace。此时 EINVAL/ENOENT/ENOTCONN
-/// 只说明挂载点已经不存在，应用仍在运行且挂载点仍有引用时则是 EBUSY，两者都只是收尾
-/// 事件，不能证明设备不支持 scoped 会话。能力快照是整机状态，一旦写成 unavailable，
-/// Auto 后端在本轮开机内不会再次尝试 scoped 挂载，因此只有挂载点仍由本次会话持有且
-/// 延迟卸载也失败时才记录能力失败。
+/// 挂载点被回收时 `umount` 可能失败：daemon 重新挂载会先摘除目标挂载点再终止旧服务
+/// 进程，应用退出时系统也会连带销毁它的挂载 namespace。此时 EINVAL/ENOENT 只说明
+/// 挂载点已经不存在；ENOTCONN 则表示 FUSE 连接已断但挂载记录仍可能留在应用 namespace
+/// 中，必须继续用会话身份执行延迟卸载，否则应用会永久看到失效挂载。应用仍在运行且
+/// 挂载点仍有引用时则是 EBUSY，两者都只是收尾事件，不能证明设备不支持 scoped 会话。
+/// 能力快照是整机状态，一旦写成 unavailable，Auto 后端在本轮开机内不会再次尝试 scoped
+/// 挂载，因此只有挂载点仍由本次会话持有且延迟卸载也失败时才记录能力失败。
 fn finish_failed_session(
     mount_point: &str,
     app_exited: bool,
@@ -636,9 +637,10 @@ fn finish_failed_session(
 /// - EINVAL：`umount2` 要求目标仍是挂载点，重新挂载流程已用 `MNT_DETACH` 摘掉旧挂载时
 ///   就会返回该错误；
 /// - ENOENT：挂载点路径已不存在；
-/// - ENOTCONN：挂载记录还在但 FUSE 服务已退出，等价于本次会话已经结束。
+/// `ENOTCONN` 不在此列：它通常表示挂载记录还在但 FUSE 服务已退出，必须由调用方继续
+/// 执行 `MNT_DETACH`，否则目标进程会永久保留返回 ENOTCONN 的死挂载。
 fn is_already_unmounted_errno(error_no: i32) -> bool {
-    matches!(error_no, libc::EINVAL | libc::ENOENT | libc::ENOTCONN)
+    matches!(error_no, libc::EINVAL | libc::ENOENT)
 }
 
 /// 用延迟卸载兜底清理会话挂载点。
