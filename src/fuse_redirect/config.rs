@@ -637,6 +637,7 @@ fn finish_failed_session(
 /// - EINVAL：`umount2` 要求目标仍是挂载点，重新挂载流程已用 `MNT_DETACH` 摘掉旧挂载时
 ///   就会返回该错误；
 /// - ENOENT：挂载点路径已不存在；
+///
 /// `ENOTCONN` 不在此列：它通常表示挂载记录还在但 FUSE 服务已退出，必须由调用方继续
 /// 执行 `MNT_DETACH`，否则目标进程会永久保留返回 ENOTCONN 的死挂载。
 fn is_already_unmounted_errno(error_no: i32) -> bool {
