@@ -3964,7 +3964,8 @@ public class Hooker {
       }
       if (directPath == null || directPath.length() == 0) return null;
       if (directPath.equals(path)) {
-        if (!isSafePublicMediaValuePath(path)) return null;
+        if (!isRedirectEnabledForCallerUid(callerUid) || !isSafePublicMediaValuePath(path))
+          return null;
         String physicalPath = mediaStorePhysicalPath(path, callerUid);
         if (physicalPath == null || physicalPath.equals(path)) return null;
         logDebug("media direct physical fallback from=" + path + " to=" + physicalPath);
