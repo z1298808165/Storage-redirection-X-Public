@@ -187,6 +187,21 @@ fix_private_backend_permissions() {
   adb_su "app_uid='$uid'; app_root='${BACKEND_ROOT}/Android/data/${APP_ID}'; sandbox='${BACKEND_PRIVATE_ROOT}'; mkdir -p \"\$sandbox\"; chown -R \"\$app_uid\":1023 \"\$app_root\" 2>/dev/null || true; find \"\$app_root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$app_root\" -type f -exec chmod 0664 {} + 2>/dev/null || true" >/dev/null
 }
 
+# 自有私有目录夹具的属主修正：Android 13 上应用的自有私有目录视图经系统 FUSE 锚点
+# 恢复，MediaProvider 按属主过滤目录项——root 预置的夹具对应用不可见，写入直接
+# ENOENT（场景 34 own-data 重试后仍失败，是确定性差异而非时序）。后端拷贝与可见
+# 路径两份夹具都按应用属主修正；模块自身创建包名根时也用应用 uid，语义一致。
+# fix_private_backend_permissions 只覆盖 Android/data 一支，这里补齐 media/obb 与可见路径。
+fix_own_private_fixture_permissions() {
+  local uid
+  uid="$(test_app_uid)"
+  if [ -z "$uid" ]; then
+    echo "own_private_fixture_permission_fix_skipped: app uid not found for $APP_ID" >&2
+    return 1
+  fi
+  adb_su "app_uid='$uid'; for root in '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'; do chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+}
+
 adb_root() {
   local command="PATH=/debug_ramdisk:/sbin:/data/adb/magisk:\$PATH; $1"
   local encoded runner
@@ -528,8 +543,15 @@ prepare_any_path_targets() {
 }
 
 clean_targets() {
-  # 与 PowerShell 一致，先通知系统 FUSE 失效前序探针，再清理底层目录。
+  # 与 PowerShell 一致，先经系统 FUSE（可见路径）删除共享探针，通知其失效前序场景
+  # 的 inode 缓存；仅清理底层会让后续 lookup 仍命中旧文件。锚点受限时回退底层清理。
   adb_su "rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE' '${REAL_ROOT}/Download/Test/$TEST_FILE' || echo '共享探针 FUSE 清理失败，继续底层清理并保留后续断言' >&2" >/dev/null
+  # 其余夹具的预置与清理一律改走原始后端路径：/storage/emulated/0 是应用视图，刚落盘的
+  # 场景配置（只读路径、映射父目录）会在这条视图上覆盖到夹具父目录，root shell
+  # 从该视图 mkdir 会被以 EPERM 拒绝（Android 17 场景 17 缺少 Locked/Writable 目录，
+  # 于是 file_write_denied 的前置断言直接失败）。原始后端与可见路径指向同一份目录树，
+  # 但不经过任何重定向层，因此预置结果是确定的；断言仍读应用可见路径。
+  local REAL_ROOT="${BACKEND_ROOT}"
 
   sleep_ms $SRT_SERVICE_CASE_SETTLE_MS
   clean_results
@@ -553,10 +575,14 @@ clean_targets() {
   adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'" >/dev/null || echo "自有目录 FUSE 清理受限，继续校验真实后端清理" >&2
   adb_su "rm -rf '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
   adb_su "mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; chmod -R 777 '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
-  # 自有私有目录在应用视图里是模块 FUSE 锚点的 bind：只改真实后端时锚点仍可能以否命中文档
-  # 响应应用的首个 lookup（场景 34 own-data 在 Android 13 上返回 ENOENT，同轮 Android 15/17
-  # 通过）。这里再经可见路径创建一次，让锚点自己落盘；受限时忽略，后端预置仍然生效。
-  adb_su "mkdir -p '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
+  # 自有私有目录在应用视图里是模块锚点的 bind，权威落点是可见路径：新版本把
+  # app-specific 存储放在独立卷上（Android 13 的 Android/data|obb 是独立 ext4），
+  # 此时 /data/media/0 下的同名路径是另一份目录，只预置后端拷贝会让应用看到空包名根，
+  # 写入直接 ENOENT（场景 34 own-data）。因此可见路径必须预置成功，且不再吞掉错误。
+  if ! adb_su "mkdir -p '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'"; then
+    echo "自有目录可见路径预置失败，应用视图写入将直接 ENOENT；后端拷贝仍会预置" >&2
+  fi
+  fix_own_private_fixture_permissions
   fix_private_backend_permissions
 }
 
@@ -1512,6 +1538,26 @@ check_file_missing() {
   adb_su "ls -ld '$path' 2>/dev/null || true" || true
   return 1
 }
+# 自有包名私有目录的真实落点随 Android 版本不同：app-specific 存储在部分版本是独立卷
+# （Android 13 的 Android/data|obb 为独立 ext4），此时可见路径与 /data/media/0 下的同名
+# 路径是两份目录。这里只要求真实落点二选一，且沙盒路径必须没有该文件——应用视图被错误
+# 重定向时可见路径（未重定向视角）自然为空，仍会被判失败。
+check_own_private_real_landing() {
+  local label="$1"
+  local visible_path="$2"
+  local backend_path="$3"
+  if adb_su "test -f '$visible_path'"; then
+    echo "file_exists label=${label} path=${visible_path}"
+    return 0
+  fi
+  if adb_su "test -f '$backend_path'"; then
+    echo "file_exists label=${label} path=${backend_path}"
+    return 0
+  fi
+  echo "file_missing label=${label} path=${visible_path}"
+  adb_su "for path in '$visible_path' '$backend_path'; do echo \"> \$path\"; ls -la \"\$(dirname \"\$path\")\" 2>&1 | head -20 || true; done" || true
+  return 1
+}
 
 check_public_directory_owner() {
   local label="$1"
@@ -2458,6 +2504,8 @@ print_diagnostics() {
   capture_file_monitor_diagnostics || true
   echo "=== read-only rule diagnostics ==="
   capture_read_only_diagnostics || true
+  echo "=== own private diagnostics ==="
+  capture_own_private_diagnostics || true
 }
 
 # 采集只读规则的承接方式与访问权限诊断。
@@ -2480,6 +2528,25 @@ capture_read_only_diagnostics() {
   adb_su "grep -aE 'scoped roots|scoped fuse|fuse session|backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -30 || true"
   echo "---avc_denials---"
   adb_su "dmesg 2>/dev/null | grep -a 'avc:.*denied' | tail -40 || true"
+  echo
+}
+
+# 自有私有目录与夹具可见性的现场采集：需要回答三个问题——(1) 夹具是否落在应用真正
+# 看到的那份目录里（不同版本 app-specific 存储可能挂在独立卷），(2) 应用视图里包名根
+# 与子目录是否存在，(3) 模块在本次应用启动里是走 Real 直连还是回退到重定向。三者任一
+# 缺失都会表现为 file_write 直接 ENOENT，而现有诊断只能看到目录列表、无法定位落点。
+capture_own_private_diagnostics() {
+  echo "===own_private_diagnostics==="
+  echo "---fixture_identity---"
+  adb_su "for path in '${OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}'; do printf '%s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; done"
+  echo "---package_root_listing---"
+  adb_su "for path in '${REAL_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/data/${APP_ID}' '${REAL_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}'; do echo \"> \$path\"; ls -la \"\$path\" 2>&1 | head -20; done"
+  echo "---mount_identity---"
+  adb_su "for path in '${REAL_ROOT}/Android/data' '${REAL_ROOT}/Android/obb' '${REAL_ROOT}/Android/media' '${BACKEND_ROOT}/Android/data'; do printf '%s dev=' \"\$path\"; stat -c '%D' \"\$path\" 2>&1 || true; grep -aF \" \$path \" /proc/self/mountinfo 2>/dev/null | head -3 || true; done"
+  echo "---app_mount_entries---"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'Android/(data|media|obb)|/storage/emulated/0 ' /proc/\$pid/mountinfo 2>/dev/null | tail -40 || echo no_matching_mount_entry; else echo app_not_running; fi"
+  echo "---daemon_own_private_log---"
+  adb_su "grep -aE 'own private|scoped fuse|anchor|backend_effective|companion mount' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true"
   echo
 }
 
@@ -2629,7 +2696,7 @@ run_standard_scenario() {
 
 run_own_private_directories_scenario() {
   local scenario="$1"
-  local file_name backend_path sandbox_path
+  local file_name visible_path backend_path sandbox_path
   local -a labels=(data media obb)
   local -a request_roots=("$OWN_PRIVATE_DATA_ROOT" "$OWN_PRIVATE_MEDIA_ROOT" "$OWN_PRIVATE_OBB_ROOT")
   local -a backend_roots=("$BACKEND_OWN_PRIVATE_DATA_ROOT" "$BACKEND_OWN_PRIVATE_MEDIA_ROOT" "$BACKEND_OWN_PRIVATE_OBB_ROOT")
@@ -2638,24 +2705,25 @@ run_own_private_directories_scenario() {
 
   for index in "${!labels[@]}"; do
     file_name="srt_qqfile_recv_${labels[$index]}.txt"
+    visible_path="${request_roots[$index]}/${file_name}"
     backend_path="${backend_roots[$index]}/${file_name}"
     sandbox_path="${sandbox_roots[$index]}/${file_name}"
     if ! run_own_private_write_case "$scenario" "own-${labels[$index]}" \
-      "${request_roots[$index]}/${file_name}" "$backend_path" "$sandbox_path"; then
+      "$visible_path" "$visible_path" "$backend_path" "$sandbox_path"; then
       return 1
     fi
   done
 }
 
 run_own_private_write_case() {
-  local scenario="$1" label="$2" request_file="$3" backend_file="$4" sandbox_file="$5"
+  local scenario="$1" label="$2" request_file="$3" visible_file="$4" backend_file="$5" sandbox_file="$6"
   local attempt
-  # 自有私有目录由模块 FUSE 锚点提供，应用可见视图可能短暂落后于真实后端预置。
+  # 自有私有目录由模块锚点提供，应用可见视图可能短暂落后于真实后端预置。
   # 首次写入返回 ENOENT 时重建夹具并重启应用后重跑同一条严格断言，不放宽判定；
   # 重试仍失败说明不是预置时序，按真实失败上报。
   for attempt in 1 2; do
     if run_write_case "$scenario" "$label" "$request_file" "$PAYLOAD" &&
-      check_file_exists "scenario-${scenario}-${label}-real" "$backend_file" &&
+      check_own_private_real_landing "scenario-${scenario}-${label}-real" "$visible_file" "$backend_file" &&
       check_file_missing "scenario-${scenario}-${label}-sandbox" "$sandbox_file"; then
       return 0
     fi
@@ -2979,7 +3047,7 @@ export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario run_own_private_write_case

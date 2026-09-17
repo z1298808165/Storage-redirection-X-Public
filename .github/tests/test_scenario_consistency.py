@@ -66,14 +66,82 @@ class ScenarioConsistencyTest(unittest.TestCase):
         bash = section(self.bash, "run_own_private_directories_scenario() {", "run_any_path_mapping_scenario() {")
         self.assertIn("run_own_private_write_case", bash)
         retry = section(self.bash, "run_own_private_write_case() {", "run_any_path_mapping_scenario() {")
-        for token in ("run_write_case", "check_file_exists", "check_file_missing", "own_private_write_retry", "clean_targets"):
+        for token in ("run_write_case", "check_own_private_real_landing", "check_file_missing", "own_private_write_retry", "clean_targets"):
             self.assertIn(token, retry)
         self.assertIn("export -f run_own_private_directories_scenario run_own_private_write_case", self.bash)
         ps = section(self.powershell, "function Invoke-OwnPrivateWriteCase", "function Invoke-OwnPrivateDirectoriesScenario")
-        for token in ("Invoke-WriteCase", "Require-File", "Require-Missing", "own_private_write_retry", "Clear-Targets"):
+        for token in ("Invoke-WriteCase", "Require-OwnPrivateRealLanding", "Require-Missing", "own_private_write_retry", "Clear-Targets"):
             self.assertIn(token, ps)
         ps_scenario = section(self.powershell, "function Invoke-OwnPrivateDirectoriesScenario", "function Invoke-AnyPathMappingScenario")
         self.assertIn("Invoke-OwnPrivateWriteCase", ps_scenario)
+
+    def test_own_private_real_landing_accepts_version_specific_volume(self) -> None:
+        # app-specific 存储在部分版本是独立卷（Android 13 的 Android/data|obb），此时可见路径
+        # 与 /data/media/0 下的同名路径是两份目录；断言只接受二者之一，且沙盒必须为空。
+        landing = section(self.bash, "check_own_private_real_landing() {", "run_rule_sandbox_scenario() {")
+        self.assertIn("test -f '$visible_path'", landing)
+        self.assertIn("test -f '$backend_path'", landing)
+        self.assertLess(landing.index("test -f '$visible_path'"), landing.index("test -f '$backend_path'"))
+        self.assertIn("return 1", landing)
+        self.assertIn("check_own_private_real_landing", self.big_bash_export_line())
+        ps_landing = section(self.powershell, "function Require-OwnPrivateRealLanding", "function Test-PublicDirectoryOwner")
+        self.assertIn("test -f '$VisiblePath'", ps_landing)
+        self.assertIn("test -f '$BackendPath'", ps_landing)
+        self.assertLess(ps_landing.index("test -f '$VisiblePath'"), ps_landing.index("test -f '$BackendPath'"))
+        ps_case = section(self.powershell, "function Invoke-OwnPrivateWriteCase", "function Invoke-OwnPrivateDirectoriesScenario")
+        self.assertIn("Require-OwnPrivateRealLanding", ps_case)
+
+    def test_own_private_visible_fixture_creation_reports_failure(self) -> None:
+        # 可见路径是自有私有目录的权威落点；预置失败必须显式上报，否则症状会退化成
+        # 应用侧 file_write 的裸 ENOENT（场景 34 own-data 曾如此）。
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if ! adb_su \"mkdir -p '${OWN_PRIVATE_DATA_ROOT}'", bash)
+        self.assertNotIn("mkdir -p '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' 2>/dev/null", bash)
+        self.assertIn("自有目录可见路径预置失败", bash)
+        ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertIn("Test-Su \"mkdir -p '$OwnPrivateDataRoot'", ps)
+        self.assertNotIn("mkdir -p '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' 2>/dev/null", ps)
+        self.assertIn("自有目录可见路径预置失败", ps)
+
+    def test_own_private_fixture_ownership_normalized(self) -> None:
+        # Android 13 上应用的自有私有目录视图经系统 FUSE 锚点恢复，MediaProvider 按属主
+        # 过滤目录项；root 预置的夹具必须按应用属主修正，否则对应用不可见（写入 ENOENT）。
+        # 两个运行器都必须把后端拷贝与可见路径两份夹具统一 chown 成应用 uid。
+        bash_fix = self.bash.split("fix_own_private_fixture_permissions() {", 1)[1].split("\n}", 1)[0]
+        for token in ("test_app_uid", "chown -R", "BACKEND_OWN_PRIVATE_DATA_ROOT", "OWN_PRIVATE_DATA_ROOT", "2771"):
+            self.assertIn(token, bash_fix)
+        bash_targets = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("fix_own_private_fixture_permissions", bash_targets)
+        self.assertIn("fix_own_private_fixture_permissions", self.big_bash_export_line())
+        ps_fix = section(self.powershell, "function Fix-OwnPrivateFixturePermissions", "function Clear-Targets")
+        for token in ("Test-AppUid", "chown -R", "$BackendOwnPrivateDataRoot", "$OwnPrivateDataRoot", "2771"):
+            self.assertIn(token, ps_fix)
+        ps_targets = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
+        self.assertIn("Fix-OwnPrivateFixturePermissions", ps_targets)
+
+    def test_fixture_operations_bypass_app_visible_view(self) -> None:
+        # /storage/emulated/0 是应用视图，刚应用的只读/映射配置会覆盖夹具父目录，root shell
+        # 从该视图 mkdir 会被 EPERM 拒绝（Android 17 场景 17）。clean_targets 内的夹具操作
+        # 必须整体改走原始后端路径；但共享探针的 FUSE 失效清理必须仍在可见路径上先行，
+        # 否则底层删除不会通知系统 FUSE 失效其 inode 缓存（与 PowerShell 侧语义一致）。
+        bash = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn('local REAL_ROOT="${BACKEND_ROOT}"', bash)
+        self.assertLess(bash.index("rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE'"),
+                        bash.index('local REAL_ROOT="${BACKEND_ROOT}"'))
+        self.assertLess(bash.index('local REAL_ROOT="${BACKEND_ROOT}"'),
+                        bash.index("mkdir -p '${REAL_ROOT}/Download/SrtProbe'"))
+
+    def test_own_private_diagnostics_is_exported_and_wired(self) -> None:
+        self.assertIn("capture_own_private_diagnostics", self.big_bash_export_line())
+        self.assertIn("capture_own_private_diagnostics || true", self.bash)
+
+    def big_bash_export_line(self) -> str:
+        # 文件里有多条 export -f；场景函数集中导出的是以 detect_adb_root_mode 开头的大列表。
+        for line in self.bash.splitlines():
+            if line.startswith("export -f detect_adb_root_mode"):
+                return line
+        self.fail("big export -f list not found")
+        return ""
 
     def test_shared_probe_invalidation_precedes_backend_cleanup(self) -> None:
         # 前序场景已查询过的文件应经系统 FUSE 删除，不能仅修改底层文件系统。

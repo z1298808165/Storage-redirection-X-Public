@@ -676,6 +676,19 @@ function Require-Missing {
     $false
 }
 
+# 自有包名私有目录的真实落点随 Android 版本不同：app-specific 存储在部分版本是独立卷
+# （Android 13 的 Android/data|obb 为独立 ext4），此时可见路径与 /data/media/0 下的同名
+# 路径是两份目录。这里只要求真实落点二选一，且沙盒断言必须没有该文件——应用视图被错误
+# 重定向时可见路径（未重定向视角）自然为空，仍会被判失败。
+function Require-OwnPrivateRealLanding {
+    param([string]$Scenario, [string]$Label, [string]$VisiblePath, [string]$BackendPath)
+    if (Test-Su "test -f '$VisiblePath'") { return $true }
+    if (Test-Su "test -f '$BackendPath'") { return $true }
+    $script:Failures.Add("$Scenario/$Label missing file: $VisiblePath")
+    @(Invoke-Su "ls -la '$VisiblePath' '$BackendPath' 2>&1 || true") | ForEach-Object { Write-Host "  landing: $_" }
+    $false
+}
+
 function Test-PublicDirectoryOwner {
     param([string]$Scenario, [string]$Label, [string]$Path)
     $actual = ""
@@ -848,6 +861,32 @@ function Restart-MediaProviderWithHookReady {
     $false
 }
 
+function Test-AppUid {
+    $uidLine = (& adb -s $Serial shell "cmd package list packages -U '$AppId' 2>/dev/null | sed -n 's/.* uid://p' | head -1" |
+        ForEach-Object { $_ -replace "`r", "" } | Select-Object -First 1)
+    if ($null -eq $uidLine) { "" } else { $uidLine.Trim() }
+}
+
+# 自有私有目录夹具的属主修正：Android 13 上应用的自有私有目录视图经系统 FUSE 锚点
+# 恢复，MediaProvider 按属主过滤目录项——root 预置的夹具对应用不可见，写入直接
+# ENOENT（场景 34 own-data 重试后仍失败，是确定性差异而非时序）。后端拷贝与可见
+# 路径两份夹具都按应用属主修正；模块自身创建包名根时也用应用 uid，语义一致。
+function Fix-OwnPrivateFixturePermissions {
+    $uid = Test-AppUid
+    if ([string]::IsNullOrEmpty($uid)) {
+        Write-Warning "own_private_fixture_permission_fix_skipped: app uid not found for $AppId"
+        return
+    }
+    $roots = @(
+        $BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot,
+        $OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot
+    )
+    $rootsArg = ($roots | ForEach-Object { "'$_'" }) -join " "
+    $command = 'app_uid=' + "'" + $uid + "'" + '; for root in ' + $rootsArg +
+        '; do chown -R $app_uid:1023 $root 2>/dev/null || true; find $root -type d -exec chmod 2771 {} + 2>/dev/null || true; find $root -type f -exec chmod 0664 {} + 2>/dev/null || true; done'
+    Invoke-Su $command | Out-Null
+}
+
 function Clear-Targets {
     # 先经系统 FUSE 删除共享探针，通知其失效前序场景的 inode 缓存；
     # 仅删除 /data/media 后端会让 lookup 仍命中旧文件，而随后 open 返回 ENOENT。
@@ -867,8 +906,14 @@ function Clear-Targets {
     Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
     # 嵌套映射准备会清理 Tencent 父目录；自有私有目录必须最后准备。
     Invoke-Su "rm -rf '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; mkdir -p '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; chmod -R 777 '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
-    # 自有私有目录在应用视图里是模块 FUSE 锚点的 bind：再经可见路径创建一次，让锚点自己落盘。
-    Invoke-Su "mkdir -p '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
+    # 自有私有目录在应用视图里是模块锚点的 bind，权威落点是可见路径：新版本把
+    # app-specific 存储放在独立卷上（Android 13 的 Android/data|obb 为独立 ext4），
+    # 此时 /data/media/0 下的同名路径是另一份目录，只预置后端拷贝会让应用看到空包名根，
+    # 写入直接 ENOENT（场景 34 own-data）。因此可见路径必须预置成功，且不再吞掉错误。
+    if (-not (Test-Su "mkdir -p '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot'")) {
+        Write-Host "自有目录可见路径预置失败，应用视图写入将直接 ENOENT；后端拷贝仍会预置"
+    }
+    Fix-OwnPrivateFixturePermissions
 }
 
 function Remove-TestTargetArtifacts {
@@ -1654,13 +1699,15 @@ function Invoke-WriteCase {
 }
 
 function Invoke-OwnPrivateWriteCase {
-    param([int]$Scenario, [string]$Label, [string]$Request, [string]$BackendPath, [string]$SandboxPath)
-    # 自有私有目录由模块 FUSE 锚点提供，应用可见视图可能短暂落后于真实后端预置。
-    # 首次写入返回 ENOENT 时重建夹具并重启应用后重跑同一条严格断言，不放宽判定。
+    param([int]$Scenario, [string]$Label, [string]$Request, [string]$VisiblePath, [string]$BackendPath, [string]$SandboxPath)
+    # 自有私有目录由模块锚点提供，应用可见视图可能短暂落后于真实后端预置。
+    # 首次写入返回 ENOENT 时重建夹具并重启应用后重跑同一条严格断言，不放宽判定；
+    # 重试仍失败说明不是预置时序，按真实失败上报。真实落点按版本可能是可见路径
+    # （独立卷）或 /data/media 后端拷贝，二选一命中即可，沙盒必须为空。
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         $failureCountBeforeAttempt = $script:Failures.Count
         $writeOk = (Invoke-WriteCase $Scenario $Label $Request $Payload).Ok
-        $realOk = Require-File "scenario-$Scenario" "$Label-real" $BackendPath
+        $realOk = Require-OwnPrivateRealLanding "scenario-$Scenario" "$Label-real" $VisiblePath $BackendPath
         $sandboxOk = Require-Missing "scenario-$Scenario" "$Label-sandbox" $SandboxPath
         if ($writeOk -and $realOk -and $sandboxOk) { return $true }
         if ($attempt -eq 2) { return $false }
@@ -1689,7 +1736,7 @@ function Invoke-OwnPrivateDirectoriesScenario {
         $requestPath = "$($requestRoots[$index])/$fileName"
         $backendPath = "$($backendRoots[$index])/$fileName"
         $sandboxPath = "$($sandboxRoots[$index])/$fileName"
-        $ok = (Invoke-OwnPrivateWriteCase $Scenario "own-$($labels[$index])" $requestPath $backendPath $sandboxPath) -and $ok
+        $ok = (Invoke-OwnPrivateWriteCase $Scenario "own-$($labels[$index])" $requestPath $requestPath $backendPath $sandboxPath) -and $ok
     }
     $ok
 }
