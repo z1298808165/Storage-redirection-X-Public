@@ -157,6 +157,32 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertNotIn("tryOpenMappedMediaFile", disabled_branch)
         self.assertIn("callBackupPassthrough(args)", disabled_branch)
 
+    def test_public_media_store_values_fall_back_to_physical_storage(self) -> None:
+        java = read("java_src/org/srx/hook/Hooker.java")
+        resolver = java[
+            java.index("private static String resolveMediaStoreDirectPathForValues") : java.index(
+                "private static String mediaStorePhysicalRoot"
+            )
+        ]
+
+        self.assertIn("isRedirectEnabledForCallerUid(callerUid)", resolver)
+        self.assertIn("isSafePublicMediaValuePath(path)", resolver)
+        self.assertIn("directPath = mediaStorePhysicalPath(path, callerUid)", resolver)
+        self.assertIn("return physicalPath", resolver)
+        self.assertNotIn("normalizeRelativeDataPath(path, callerUid)", resolver)
+
+    def test_enotconn_cleanup_detaches_owned_dead_fuse_mount(self) -> None:
+        rust = read("src/fuse_redirect/config.rs")
+        cleanup = rust[
+            rust.index("fn finish_failed_session") : rust.index(
+                "/// scoped 挂载使用的挂载源前缀"
+            )
+        ]
+
+        self.assertIn("if app_exited || is_already_unmounted_errno(error_no)", cleanup)
+        self.assertIn("if detach_mount_point(mount_point, identity)", cleanup)
+        self.assertIn("matches!(error_no, libc::EINVAL | libc::ENOENT)", cleanup)
+
 
 if __name__ == "__main__":
     unittest.main()
