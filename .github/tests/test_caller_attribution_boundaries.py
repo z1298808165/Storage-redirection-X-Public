@@ -1,12 +1,61 @@
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+HARNESS = ROOT / ".github" / "tests" / "harness" / "should_passthrough_provider_allowed_parent_mkdir.rs"
 
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def extract_fn(source: str, fn_name: str) -> str:
+    """用大括号计数从源码中抽出整个 fn（含签名与函数体），不依赖固定结尾标记。
+
+    这样即使 dir.rs 在目标函数之后增删函数，也能稳定取到完整的 should_passthrough_*
+    实现，避免按函数名下标截断导致抄错。
+    """
+    marker = f"fn {fn_name}("
+    start = source.index(marker)
+    brace_start = source.index("{", start)
+    depth = 0
+    idx = brace_start
+    while idx < len(source):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                idx += 1
+                break
+        idx += 1
+    return source[start:idx]
+
+
+def build_harness(template: str, fn_src: str) -> str:
+    """把抽出的真实 fn 注入 harness 模板的占位符处。"""
+    placeholder = "// __INJECT_SHOULD_PASSTHROUGH_FN__"
+    if placeholder not in template:
+        raise AssertionError("harness 模板缺少注入占位符")
+    return template.replace(placeholder, fn_src)
+
+
+def remove_virtual_branch(fn_src: str) -> str:
+    """反向验证用：去掉 scope 条件里的 virtual 分支，使其只接受 passthrough。
+
+    若原函数真的包含 virtual 作用域放行（修复点），去掉后 virtual-only 用例会从 TRUE 变 FALSE，
+    从而让 harness 运行非 0，证明 harness 在验证真实函数而非空壳。
+    """
+    marker = "|| crate::hook::is_provider_virtual_scope_active()"
+    if marker not in fn_src:
+        raise AssertionError("抽取的函数不含 virtual 作用域分支，无法做反向验证")
+    return fn_src.replace(marker, "")
 
 
 class CallerAttributionBoundariesTest(unittest.TestCase):
@@ -197,6 +246,104 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("if app_exited || is_already_unmounted_errno(error_no)", cleanup)
         self.assertIn("if detach_mount_point(mount_point, identity)", cleanup)
         self.assertIn("matches!(error_no, libc::EINVAL | libc::ENOENT)", cleanup)
+
+
+    def test_should_passthrough_provider_allowed_parent_mkdir_boundary_guard(self) -> None:
+        # 静态边界守卫：直接读取 src/hook/ops/mutation/dir.rs 中真实函数的条件，逐维度确认
+        # should_passthrough_provider_allowed_parent_mkdir 的边界没有被改坏。即便 rustc harness
+        # 没有执行，这一层也能在条件结构被回退（例如 virtual 作用域被移除）时报警。
+        directory = read("src/hook/ops/mutation/dir.rs")
+        fn = extract_fn(directory, "should_passthrough_provider_allowed_parent_mkdir")
+
+        # redirect 是前提：非 redirect 直接放行 false。
+        self.assertIn("!redirect_result.is_redirect()", fn)
+        # mapping 重定向不走该分支。
+        self.assertIn("redirect_result.is_mapping", fn)
+        # monitor-only 不走该分支。
+        self.assertIn("hub.is_monitor_only()", fn)
+        # 修复点：作用域条件必须同时接受 passthrough 与 virtual，且以 `!(A || B)` 形式表达。
+        # 只要 is_provider_virtual_scope_active 出现在函数里，就说明 virtual-only 仍被放行，
+        # 回退成「仅 passthrough」会让该标识符消失。
+        self.assertIn("is_provider_passthrough_active()", fn)
+        self.assertIn("is_provider_virtual_scope_active()", fn)
+        normalized_scope = " ".join(
+            "!(crate::hook::is_provider_passthrough_active() || crate::hook::is_provider_virtual_scope_active())".split()
+        )
+        self.assertIn(normalized_scope, " ".join(fn.split()))
+        # 仅 system-writer 包才走该分支。
+        self.assertIn("policy::is_system_writer_package", fn)
+        # caller 必须非空且路径是其放行真实路径的父级。
+        self.assertIn("hub.get_current_caller_package()", fn)
+        self.assertIn("!caller_package.is_empty()", fn)
+        self.assertIn("is_path_parent_of_caller_allowed_real_path", fn)
+
+    def test_should_passthrough_provider_allowed_parent_mkdir_executed(self) -> None:
+        # 从真实源码抽取整个 fn，注入 harness 模板后由 rustc 独立编译运行边界真值表。
+        # 项目禁止在 src/ 内新增内联 Rust 测试，因此 harness 放在 .github/tests/harness/ 由
+        # rustc 独立编译运行。模板只含真实模块桩与类型，绝不抄写实现——真正执行的是抽取到的源码。
+        if not HARNESS.exists():
+            self.skipTest(f"harness 模板缺失: {HARNESS}")
+        rustc = shutil.which("rustc")
+        if rustc is None:
+            self.skipTest(
+                "rustc 不可用：未编译执行 stub harness，仅静态边界守卫生效 "
+                "(test_should_passthrough_provider_allowed_parent_mkdir_boundary_guard)"
+            )
+
+        directory = read("src/hook/ops/mutation/dir.rs")
+        fn_src = extract_fn(directory, "should_passthrough_provider_allowed_parent_mkdir")
+        template = HARNESS.read_text(encoding="utf-8")
+        harness_src = build_harness(template, fn_src)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            harness_path = os.path.join(tmp, "harness.rs")
+            Path(harness_path).write_text(harness_src, encoding="utf-8")
+            bin_path = os.path.join(tmp, "passthrough_harness")
+            compile_proc = subprocess.run(
+                [rustc, harness_path, "-O", "-o", bin_path],
+                capture_output=True,
+                text=True,
+            )
+            if compile_proc.returncode != 0:
+                self.fail(
+                    "harness 编译失败:\n" + compile_proc.stdout + compile_proc.stderr
+                )
+            run_proc = subprocess.run([bin_path], capture_output=True, text=True)
+            print(run_proc.stdout)
+            self.assertEqual(
+                run_proc.returncode,
+                0,
+                "harness 边界用例未全部通过:\n" + run_proc.stdout + run_proc.stderr,
+            )
+            self.assertIn("ALL", run_proc.stdout)
+
+            # 反向验证：在内存里去掉 virtual 分支再编译运行，必须非 0。
+            # 若 harness 只是空壳，去掉 virtual 分支后仍会通过；只有真正执行原函数时，
+            # virtual-only 用例才会从 TRUE 变 FALSE，使 harness 退出码非 0。
+            mutated = remove_virtual_branch(fn_src)
+            mutated_src = build_harness(template, mutated)
+            mutated_path = os.path.join(tmp, "harness_mutated.rs")
+            Path(mutated_path).write_text(mutated_src, encoding="utf-8")
+            mutated_bin = os.path.join(tmp, "passthrough_harness_mutated")
+            mut_compile = subprocess.run(
+                [rustc, mutated_path, "-O", "-o", mutated_bin],
+                capture_output=True,
+                text=True,
+            )
+            if mut_compile.returncode != 0:
+                self.fail(
+                    "反向验证 harness 编译失败:\n"
+                    + mut_compile.stdout
+                    + mut_compile.stderr
+                )
+            mut_run = subprocess.run([mutated_bin], capture_output=True, text=True)
+            print(mut_run.stdout)
+            self.assertNotEqual(
+                mut_run.returncode,
+                0,
+                "反向验证失败：去掉 virtual 分支后边界用例仍全部通过，"
+                "说明 harness 没有真正验证原函数",
+            )
 
 
 if __name__ == "__main__":

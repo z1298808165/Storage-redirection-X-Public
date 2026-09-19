@@ -17,6 +17,67 @@ def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
 
 
+def load_workflow(path: str) -> dict:
+    return yaml.safe_load(read(path))["jobs"]
+
+
+def android17_matrix_entry(jobs: dict) -> dict:
+    for entry in jobs["test-flow"]["strategy"]["matrix"]["android"]:
+        if entry.get("version") == 17:
+            return entry
+    raise AssertionError("test-flow 矩阵中未包含 Android 17 条目")
+
+
+def _assert_android17_unified(jobs: dict, label: str) -> dict:
+    """校验 Android 17 已并入统一矩阵（无独立 job），且 17 特有参数与统一门禁都正确。
+
+    返回 17 的矩阵条目，供调用方进一步断言。
+    """
+    if "test-flow-android17" in jobs:
+        raise AssertionError(f"{label}: 不应保留独立的 test-flow-android17 job")
+    entry = android17_matrix_entry(jobs)
+    if entry["api_level"] != "37.0":
+        raise AssertionError(f"{label}: api_level 应为 37.0，实际 {entry['api_level']}")
+    if "v31.0" not in entry["magisk_url"]:
+        raise AssertionError(f"{label}: magisk_url 应指向 v31.0")
+    if entry["gpu_mode"] != "swiftshader_indirect":
+        raise AssertionError(f"{label}: gpu_mode 应为 swiftshader_indirect")
+    if entry["fresh_app_per_case"] != 1:
+        raise AssertionError(f"{label}: 17 的 fresh_app_per_case 应为 1")
+    if entry["timeout_minutes"] != 50:
+        raise AssertionError(f"{label}: 17 的 timeout_minutes 应为 50")
+    if entry["boot_timeout"] != 1800:
+        raise AssertionError(f"{label}: 17 的 boot_timeout 应为 1800")
+    if entry["disable_animations"] is not False:
+        raise AssertionError(f"{label}: 17 的 disable_animations 应为 false")
+    if entry["disable_linux_hw"] is not False:
+        raise AssertionError(f"{label}: 17 的 disable_linux_hw 应为 false")
+    others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
+    if len(others) != 4:
+        raise AssertionError(f"{label}: 其余版本应为 4 个，实际 {len(others)}")
+    for e in others:
+        if e["fresh_app_per_case"] != 0:
+            raise AssertionError(f"{label}: 其余版本 fresh_app_per_case 应为 0")
+        if e["timeout_minutes"] != 45:
+            raise AssertionError(f"{label}: 其余版本 timeout_minutes 应为 45")
+        if e["boot_timeout"] != 1500:
+            raise AssertionError(f"{label}: 其余版本 boot_timeout 应为 1500")
+        if e["disable_animations"] is not True:
+            raise AssertionError(f"{label}: 其余版本 disable_animations 应为 true")
+        if e["disable_linux_hw"] != "auto":
+            raise AssertionError(f"{label}: 其余版本 disable_linux_hw 应保持上游默认 auto")
+        if e.get("magisk_url", "") != "":
+            raise AssertionError(f"{label}: 其余版本不应设置 magisk_url")
+    if jobs["test-flow"]["strategy"]["fail-fast"] is not True:
+        raise AssertionError(f"{label}: 矩阵必须跨版本 fail-fast")
+    required_needs = jobs["test-flow-required"]["needs"]
+    if "test-flow" not in required_needs:
+        raise AssertionError(f"{label}: 门禁必须校验统一的 test-flow 矩阵")
+    if "test-flow-android17" in required_needs:
+        raise AssertionError(f"{label}: 门禁不应再单列 test-flow-android17")
+    return entry
+
+
 def _const_product(source: str, name: str) -> int:
     """读取 `const NAME: T = <算式>;` 的数值结果，支持整数字面量与 `a * b` 形式。"""
     expression = re.search(
@@ -412,75 +473,140 @@ class ScenarioConsistencyTest(unittest.TestCase):
             # 版本内的快速停止仍由 SRT_FAIL_FAST 负责。
             self.assertIn("fail-fast: true", test_flow)
             self.assertIn("SRT_FAIL_FAST: 1", test_flow)
-            self.assertIn("SRT_FRESH_APP_PER_CASE: 0", test_flow)
+            # 17 并入矩阵后，SRT_FRESH_APP_PER_CASE 由矩阵字段驱动：17=1、其余=0。
+            self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
+            self.assertIn("fresh_app_per_case: 0", test_flow)
+            self.assertIn("fresh_app_per_case: 1", test_flow)
+            self.assertIn('api_level: "37.0"', test_flow)
             for version in (13, 14, 15, 16):
                 self.assertIn(f"version: {version}", test_flow)
+            self.assertIn("version: 17", test_flow)
+            # 统一门禁：校验 quality + 统一矩阵（已含 17），不再单列 android17 job。
             required = source[source.index("  test-flow-required:") :]
             self.assertIn("needs.quality.result", required)
             self.assertIn("needs.test-flow.result", required)
+            self.assertNotIn("test-flow-android17", required)
+            self.assertNotIn("needs.test-flow-android17.result", required)
 
     def test_android17_flow_is_integrated_without_diagnostic_artifact_upload(self) -> None:
         source = read(".github/workflows/ci.yml")
-        experimental = section(source, "  test-flow-android17:", "  test-flow-required:")
-        # 所有获准运行矩阵的分支均应运行 Android17，不再复制分支白名单。
-        matrix = section(source, "  test-flow:", "  test-flow-android17:")
-        matrix_condition = next(line.strip() for line in matrix.splitlines() if line.startswith("    if:"))
-        android17_condition = next(line.strip() for line in experimental.splitlines() if line.startswith("    if:"))
-        self.assertEqual(matrix_condition, android17_condition)
-        for dependency in ("quality", "prepare", "test-flow-build"):
-            self.assertIn(f"needs.{dependency}.result == 'success'", android17_condition)
-            self.assertIn(f"- {dependency}", experimental)
-        self.assertNotIn("github.ref", android17_condition)
-        self.assertNotIn("github.repository", android17_condition)
-        self.assertIn("ANDROID_TARGET: google_apis", experimental)
-        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", experimental)
-        self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", experimental)
-        self.assertIn('ANDROID_API_LEVEL: "37.0"', experimental)
-        self.assertIn("SRT_FRESH_APP_PER_CASE: 0", source)
-        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk", experimental)
-        self.assertIn("Download test-flow runtime", experimental)
-        self.assertNotIn("Upload Android 17 diagnostic artifacts", experimental)
-        self.assertNotIn("actions/upload-artifact@v7.0.1", experimental)
-        self.assertNotIn("gh release", experimental)
-        self.assertNotIn("update.json", experimental)
-        required = section(source, "  test-flow-required:", "  create-ci-release:")
-        self.assertIn("- test-flow-android17", required)
-        self.assertIn("needs.test-flow-android17.result", required)
+        # Android 17 已并入统一矩阵，不再有独立 job；门禁改用统一矩阵覆盖 17。
+        self.assertNotIn("  test-flow-android17:", source)
+        jobs = load_workflow(".github/workflows/ci.yml")
+        entry = android17_matrix_entry(jobs)
+        # 17 特有执行环境必须保留在矩阵条目中。
+        self.assertEqual("37.0", entry["api_level"])
+        self.assertIn("v31.0", entry["magisk_url"])
+        self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
+        self.assertEqual(1, entry["fresh_app_per_case"])
+        self.assertEqual(50, entry["timeout_minutes"])
+        self.assertEqual(1800, entry["boot_timeout"])
+        self.assertFalse(entry["disable_animations"])
+        self.assertFalse(entry["disable_linux_hw"])
+        # 其余版本保持原值：不设置 Magisk、复用进程、较短超时、关闭动画。
+        others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
+        self.assertEqual(4, len(others))
+        for e in others:
+            self.assertEqual(0, e["fresh_app_per_case"])
+            self.assertEqual(45, e["timeout_minutes"])
+            self.assertEqual(1500, e["boot_timeout"])
+            self.assertTrue(e["disable_animations"])
+            self.assertEqual("auto", e["disable_linux_hw"])
+            self.assertEqual("", e.get("magisk_url", ""))
+        self.assertTrue(jobs["test-flow"]["strategy"]["fail-fast"])
+        # 17 并入矩阵后，统一 job 通过 17 特有参数承载差异；env 通过矩阵字段引用。
+        test_flow = section(source, "  test-flow:", "  test-flow-required:")
+        self.assertIn("MAGISK_URL: ${{ matrix.android.magisk_url }}", test_flow)
+        self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
+        self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
+        self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
+        self.assertIn("Download test-flow runtime", test_flow)
+        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
+        # 17 不上传诊断 artifact：上传步骤必须以 matrix.android.version != 17 为条件。
+        upload_start = test_flow.index("Upload test-flow artifacts")
+        upload_block = test_flow[upload_start:]
+        self.assertIn("matrix.android.version != 17", upload_block)
+        self.assertIn("actions/upload-artifact@v7.0.1", upload_block)
+        # 门禁：统一矩阵被校验，不再单列 android17。
+        required = source[source.index("  test-flow-required:") :]
+        self.assertIn("needs.test-flow.result", required)
+        self.assertNotIn("test-flow-android17", required)
+        self.assertNotIn("needs.test-flow-android17.result", required)
 
     def test_release_android17_flow_mirrors_matrix_gate(self) -> None:
-        # Release 的 Android17 必须独立成 job、与矩阵 job 使用同一套前置条件，并被
+        # Release 的 Android17 必须并入统一矩阵（与主矩阵同一 job），被
         # Test-flow required gate 一并校验；漏掉任一处都会让 Android17 失败静默放行发布。
         source = read(".github/workflows/release.yml")
-        android17 = section(source, "  test-flow-android17:", "  test-flow-required:")
-        matrix = section(source, "  test-flow:", "  test-flow-android17:")
-        matrix_condition = next(line.strip() for line in matrix.splitlines() if line.startswith("    if:"))
-        android17_condition = next(line.strip() for line in android17.splitlines() if line.startswith("    if:"))
-        self.assertEqual(matrix_condition, android17_condition)
-        # release.yml 全 workflow 只由 v* tag 触发，矩阵 job 也未显式 gating prepare；
-        # 这里只断言两个 workflow 共有的 gating，避免把 Release 的既有条件改成 CI 的形状。
-        self.assertIn("startsWith(github.ref, 'refs/tags/v')", android17_condition)
-        for dependency in ("quality", "test-flow-build"):
-            self.assertIn(f"needs.{dependency}.result == 'success'", android17_condition)
-        for dependency in ("quality", "prepare", "test-flow-build"):
-            self.assertIn(f"- {dependency}", android17)
-        self.assertIn("ANDROID_TARGET: google_apis", android17)
-        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", android17)
-        self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", android17)
-        self.assertIn('ANDROID_API_LEVEL: "37.0"', android17)
-        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk", android17)
-        self.assertIn("Download release test-flow runtime", android17)
-        # Android17 job 不覆盖 SRT_FRESH_APP_PER_CASE，沿用场景脚本默认值；
-        # 矩阵 job 显式设为 0 以复用应用进程。
-        self.assertIn("SRT_FRESH_APP_PER_CASE: 0", source)
-        self.assertNotIn("SRT_FRESH_APP_PER_CASE", android17)
-        # Android17 只跑场景，不参与资产发布与清单更新；也不上传专用诊断 artifact。
-        self.assertNotIn("Upload Android 17 diagnostic artifacts", android17)
-        self.assertNotIn("actions/upload-artifact@v7.0.1", android17)
-        self.assertNotIn("gh release", android17)
-        self.assertNotIn("update.json", android17)
+        self.assertNotIn("  test-flow-android17:", source)
+        jobs = load_workflow(".github/workflows/release.yml")
+        entry = android17_matrix_entry(jobs)
+        # 17 特有执行环境必须保留在矩阵条目中。
+        self.assertEqual("37.0", entry["api_level"])
+        self.assertIn("v31.0", entry["magisk_url"])
+        self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
+        self.assertEqual(1, entry["fresh_app_per_case"])
+        self.assertEqual(50, entry["timeout_minutes"])
+        self.assertEqual(1800, entry["boot_timeout"])
+        self.assertFalse(entry["disable_animations"])
+        self.assertFalse(entry["disable_linux_hw"])
+        # 其余版本保持原值：不设置 Magisk、复用进程、较短超时、关闭动画。
+        others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
+        self.assertEqual(4, len(others))
+        for e in others:
+            self.assertEqual(0, e["fresh_app_per_case"])
+            self.assertEqual(45, e["timeout_minutes"])
+            self.assertEqual(1500, e["boot_timeout"])
+            self.assertTrue(e["disable_animations"])
+            self.assertEqual("auto", e["disable_linux_hw"])
+            self.assertEqual("", e.get("magisk_url", ""))
+        self.assertTrue(jobs["test-flow"]["strategy"]["fail-fast"])
+        # 17 并入矩阵后，统一 job 通过 17 特有参数承载差异；env 通过矩阵字段引用。
+        test_flow = section(source, "  test-flow:", "  test-flow-required:")
+        self.assertIn("MAGISK_URL: ${{ matrix.android.magisk_url }}", test_flow)
+        self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
+        self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
+        self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
+        self.assertIn("Download release test-flow runtime", test_flow)
+        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
+        # 17 不上传诊断 artifact：上传步骤必须以 matrix.android.version != 17 为条件。
+        upload_start = test_flow.index("Upload test-flow artifacts")
+        upload_block = test_flow[upload_start:]
+        self.assertIn("matrix.android.version != 17", upload_block)
+        self.assertIn("actions/upload-artifact@v7.0.1", upload_block)
+        # 门禁：统一矩阵被校验，不再单列 android17。
         required = section(source, "  test-flow-required:", "  publish-release:")
-        self.assertIn("- test-flow-android17", required)
-        self.assertIn("needs.test-flow-android17.result", required)
+        self.assertIn("- test-flow", required)
+        self.assertIn("needs.test-flow.result", required)
+        self.assertNotIn("test-flow-android17", required)
+        self.assertNotIn("needs.test-flow-android17.result", required)
+
+    def test_test_flow_matrix_includes_android17_with_unified_gate(self) -> None:
+        # YAML 解析级校验：Android 17 在统一矩阵内，且统一门禁覆盖（含 17）。
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            jobs = load_workflow(workflow)
+            entry = _assert_android17_unified(jobs, workflow)
+            self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
+            self.assertIn("Magisk-v31.0.apk", entry["magisk_url"])
+
+    def test_matrix_gate_rejects_dropped_android17(self) -> None:
+        # 反向验证：若 17 被错误地移出统一矩阵（回到旧的跨 job 缺口），
+        # YAML 校验必须失败。用内存副本修改，绝不触碰工作区文件或 git stash。
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            jobs = load_workflow(workflow)
+            matrix = jobs["test-flow"]["strategy"]["matrix"]["android"]
+            jobs["test-flow"]["strategy"]["matrix"]["android"] = [
+                e for e in matrix if e.get("version") != 17
+            ]
+            with self.assertRaises(AssertionError):
+                _assert_android17_unified(jobs, workflow)
+
+    def test_matrix_gate_rejects_stray_android17_job(self) -> None:
+        # 反向验证：若仍保留独立 android17 job 却未并入矩阵，校验必须失败。
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            jobs = load_workflow(workflow)
+            jobs["test-flow-android17"] = {"needs": ["quality"]}
+            with self.assertRaises(AssertionError):
+                _assert_android17_unified(jobs, workflow)
 
     def test_gradle_cache_can_be_written_by_public_builds(self) -> None:
         ci = read(".github/workflows/ci.yml")
@@ -1530,7 +1656,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         统一可检索标记而不是自由文本；自行预置夹具的场景必须显式豁免，否则断言会误报。
         """
         helper = section(self.bash, "assert_fixture_roots_empty() {", "\nclean_results() {")
-        self.assertIn("-maxdepth 2 -type f", helper)
+        self.assertIn("-type f || exit 1", helper)
+        self.assertNotIn("-maxdepth 2", helper)
+        self.assertIn("fixture_scan_failed", helper)
         self.assertIn("fixture_residue label=", helper)
         runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
         self.assertIn('assert_fixture_roots_empty "scenario-${scenario}" || return 1', runner)
@@ -1541,7 +1669,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         ps = section(self.powershell, "function Assert-FixtureRootsEmpty", "function Clear-Targets")
         self.assertIn("fixture_residue label=", ps)
-        self.assertIn("-maxdepth 2 -type f", ps)
+        self.assertIn("-type f || exit 1", ps)
+        self.assertNotIn("-maxdepth 2", ps)
+        self.assertIn("fixture_scan_failed", ps)
         ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $scenarioOk = switch")
         self.assertIn('Assert-FixtureRootsEmpty "scenario-$Scenario"', ps_runner)
         self.assertIn("-notin @(9, 10, 20, 21, 22, 28, 31)", ps_runner)

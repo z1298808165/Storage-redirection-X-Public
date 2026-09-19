@@ -1051,8 +1051,16 @@ function Assert-FixtureRootsEmpty {
     # 「未自行预置夹具的场景，清理后夹具根下必须没有文件」成立，不成立就当场停下。
     param([string]$Label)
     # 夹具目录会随场景演进增长，按 Srt* 通配动态枚举，不写死清单。
-    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do [ -d `"`$d`" ] && find `"`$d`" -maxdepth 2 -type f; done 2>/dev/null | head -20"
-    $residue = @(Invoke-Su $command | Where-Object { $_ -and $_.Trim() })
+    # 仅扫描原有 Download/Srt* 与 Download/Test 范围，不扩大枚举、不新增删除，避免误伤
+    # 未知预置夹具。扫描失败（adb 中断、find 权限错误）必须传播，不能吞成成功；移除
+    # -maxdepth 限制与 head 管道后，任何层级的残留与 find 错误都不再被掩盖。
+    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f || exit 1; fi; done"
+    $lines = @(Invoke-Su $command)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "fixture_scan_failed label=$Label"
+        return $false
+    }
+    $residue = @($lines | Where-Object { $_ -and $_.Trim() })
     if ($residue.Count -gt 0) {
         Write-Host "fixture_residue label=$Label"
         $residue | ForEach-Object { Write-Host "  residue: $_" }
@@ -1094,7 +1102,20 @@ function Clear-Targets {
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
     # 嵌套映射准备会清理 Tencent 父目录；自有私有目录必须最后准备。
-    Invoke-Su "rm -rf '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot' '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; mkdir -p '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; chmod -R 777 '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
+    # 系统 FUSE 可能拒绝 shell 清理可见自有目录，但不一定就是 FUSE 所致：可见路径删除失败时
+    # 如实记录，交由真实后端的严格清理覆盖（不声称一定是 FUSE）。
+    if (-not (Test-Su "rm -rf '$OwnPrivateDataRoot' '$OwnPrivateMediaRoot' '$OwnPrivateObbRoot'")) {
+        Write-Host "cleanup_tolerated reason=own_dir_fuse note=可见自有目录删除失败将验证后端清理"
+    }
+    # 删除 6 个 backend/sandbox 自有目录。
+    Invoke-Su "rm -rf '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'" | Out-Null
+    # 紧接上面 6 个 backend/sandbox 自有目录删除之后、重建之前，显式确认这 6 个精确目录确实
+    # 已被删除：只做存在性检查、绝不删除其它文件；adb 本身失败也要传播，避免残留被静默掩盖。
+    if ($LASTEXITCODE -ne 0) { throw "own_dir_cleanup_failed note=后端自有目录删除失败" }
+    if (-not (Test-Su "for d in '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; do if [ -e `"`$d`" ] || [ -L `"`$d`" ]; then echo `"own_dir_cleanup_failed path=`$d`" >&2; exit 1; fi; done")) {
+        throw "own_dir_verify_failed note=后端自有目录残留或设备验证失败"
+    }
+    Invoke-Su "mkdir -p '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'; chmod -R 777 '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot' 2>/dev/null || true" | Out-Null
     # 自有私有目录在应用视图里是模块锚点的 bind，权威落点是可见路径：新版本把
     # app-specific 存储放在独立卷上（Android 13 的 Android/data|obb 为独立 ext4），
     # 此时 /data/media/0 下的同名路径是另一份目录，只预置后端拷贝会让应用看到空包名根，

@@ -596,9 +596,17 @@ clean_targets() {
   prepare_backend_core_targets
   prepare_any_path_targets
   # 嵌套映射准备会删除私有父目录，随后再创建自有目录测试数据。
-  # 系统 FUSE 可能拒绝 shell 清理自有目录；缓存通知失败不代替真实后端的严格清理。
-  adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'" >/dev/null || echo "cleanup_tolerated reason=own_dir_fuse note=自有目录的 FUSE 清理受限，交由真实后端的严格清理覆盖" >&2
+  # 系统 FUSE 可能拒绝 shell 清理可见自有目录，但不一定就是 FUSE 所致：可见路径删除失败时
+  # 如实记录，交由真实后端的严格清理覆盖（不声称一定是 FUSE）。
+  adb_su "rm -rf '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'" >/dev/null || echo "cleanup_tolerated reason=own_dir_fuse note=可见自有目录删除失败将验证后端清理" >&2
   adb_su "rm -rf '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
+  # 紧接上面 6 个 backend/sandbox 自有目录删除之后、重建之前，显式确认这 6 个精确目录确实
+  # 已被删除：只做存在性检查、绝不删除其它文件；adb 本身失败也要传播（不吞成成功），
+  # 避免残留被静默掩盖、漂到后面的「不应存在」断言上才爆。
+  adb_su "for d in '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; do if [ -e \"\$d\" ] || [ -L \"\$d\" ]; then echo \"own_dir_cleanup_failed path=\$d\" >&2; exit 1; fi; done" || {
+    echo "own_dir_verify_failed note=后端自有目录残留或设备验证失败" >&2
+    return 1
+  }
   adb_su "mkdir -p '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'; chmod -R 777 '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}' 2>/dev/null || true" >/dev/null
   # 自有私有目录在应用视图里是模块锚点的 bind，权威落点是可见路径：新版本把
   # app-specific 存储放在独立卷上（Android 13 的 Android/data|obb 是独立 ext4），
@@ -621,9 +629,16 @@ clean_targets() {
 # 文件」是成立的前置条件。不成立就当场失败，把跨场景污染变成可定位的即时错误。
 assert_fixture_roots_empty() {
   local label="$1"
-  local residue
+  local residue rc=0
   # 夹具目录会随场景演进增长，因此按 Srt* 通配动态枚举，不写死清单。
-  residue="$(adb_su_timeout 45 "for d in '${REAL_ROOT}/Download'/Srt* '${REAL_ROOT}/Download/Test'; do [ -d \"\$d\" ] && find \"\$d\" -maxdepth 2 -type f; done 2>/dev/null | head -20" 2>/dev/null || true)"
+  # 仅扫描原有 Download/Srt* 与 Download/Test 范围，不扩大枚举、不新增删除：避免误伤
+  # 未知预置夹具。扫描失败（adb 中断、find 权限错误）必须传播，不能吞成成功；移除
+  # -maxdepth 限制与 head 管道后，任何层级的残留与 find 错误都不再被掩盖。
+  residue="$(adb_su_timeout 45 "for d in '${REAL_ROOT}/Download'/Srt* '${REAL_ROOT}/Download/Test'; do if [ -d \"\$d\" ]; then find \"\$d\" -type f || exit 1; fi; done")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "fixture_scan_failed label=${label}" >&2
+    return 1
+  fi
   if [ -n "$residue" ]; then
     echo "fixture_residue label=${label}" >&2
     printf '%s\n' "$residue" | sed 's/^/  residue: /' >&2

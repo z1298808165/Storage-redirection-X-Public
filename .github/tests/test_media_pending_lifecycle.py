@@ -109,6 +109,140 @@ public class PendingFixture {
             self.assertEqual(0, result.returncode, result.stderr)
 
 
+@unittest.skipUnless(JAVA and JAVAC, "需要 JDK 执行媒体提交回归")
+class MediaPublicPhysicalFallbackTest(unittest.TestCase):
+    """执行真实的 mediaStorePublicPhysicalFallback，覆盖父跟随限制与放行边界。
+
+    mediaStorePublicPhysicalFallback 是本次改动的方法：只有 pending 名称才跟随父目录
+    的 native 沙箱目标，普通放行路径即便父目录落在沙箱内也必须保留公共物理落点。
+    这里抽取 Hooker.java 中的真实方法执行，并 stub 掉 native 重写、safe/enabled/physical
+    四个依赖；pending 判据抽取 Hooker.java 内嵌 FilteringCursor 类的真实方法。
+    """
+
+    def test_fallback_follows_sandbox_parent_only_for_pending(self):
+        source = (ROOT / "java_src/org/srx/hook/Hooker.java").read_text(encoding="utf-8")
+        fallback_sig = "private static String mediaStorePublicPhysicalFallback("
+        fallback_start = source.index(fallback_sig)
+        fallback = source[fallback_start : source.index("{", fallback_start)] + function_body(
+            source, fallback_sig
+        )
+        pending_sig = "private static boolean isMediaStorePendingPath("
+        pending_start = source.index(pending_sig)
+        pending = source[pending_start : source.index("{", pending_start)] + function_body(
+            source, pending_sig
+        )
+        # 保留内嵌类的方法实现，仅开放测试夹具中的方法可见性。
+        pending = pending.replace(
+            "private static boolean isMediaStorePendingPath",
+            "public static boolean isMediaStorePendingPath",
+            1,
+        )
+        prefix = r'''
+import java.util.*;
+public class PublicFallbackFixture {
+  // stub 依赖：native 重写只对被显式登记（parent -> target）的路径返回目标。
+  static boolean redirectEnabled = true;
+  static boolean safePublic = true;
+  static final Map<String,String> nativeTargets = new HashMap<>();
+  static String resolveMediaStoreDirectPath(String path, int uid) {
+    return nativeTargets.get(path);
+  }
+  static boolean isRedirectEnabledForCallerUid(int uid) { return redirectEnabled; }
+  static boolean isSafePublicMediaValuePath(String path) { return safePublic; }
+  static int userIdFromUid(int uid) { return uid < 0 ? -1 : uid / 100000; }
+  static boolean isSrxSandboxFallbackPath(String path, int uid) {
+    return path != null && path.indexOf("/Android/data/") >= 0;
+  }
+  // mediaStorePhysicalPath 用与源码一致的 /storage/emulated -> /data/media 变换实现。
+  static String mediaStorePhysicalPath(String path, int callerUid) {
+    if (path == null || path.length() == 0) return null;
+    boolean hasFileScheme = path.startsWith("file://");
+    String value = hasFileScheme ? path.substring(6) : path;
+    int userId = userIdFromUid(callerUid);
+    if (userId < 0) return null;
+    String displayRoot = "/storage/emulated/" + userId + "/";
+    if (value.startsWith(displayRoot)) {
+      String physical = "/data/media/" + userId + "/" + value.substring(displayRoot.length());
+      return hasFileScheme ? "file://" + physical : physical;
+    }
+    String physicalRoot = "/data/media/" + userId + "/";
+    if (value.startsWith(physicalRoot)) return path;
+    return null;
+  }
+  static void check(boolean value) { if(!value) throw new AssertionError("check failed"); }
+  static class FilteringCursor {
+'''
+        main = r'''
+  public static void main(String[] args) throws Exception {
+    final int UID = 10123;
+    String sandboxParent = "/storage/emulated/0/Pictures";
+    String sandboxTarget = "/storage/emulated/0/Android/data/com.example.app/sdcard/Pictures";
+    String publicRoot = "/storage/emulated/0/";
+
+    // A: 放行的普通目录，其父 native 落在沙箱内，也必须保留公共物理落点（不跟随父）。
+    redirectEnabled = true; safePublic = true;
+    nativeTargets.clear();
+    nativeTargets.put(sandboxParent, sandboxTarget);
+    String dir = publicRoot + "Pictures/Albums";
+    String a = mediaStorePublicPhysicalFallback(dir, UID);
+    check(a != null);
+    check(a.equals("/data/media/0/Pictures/Albums"));
+    check(!a.contains("Android/data"));
+
+    // B: 放行的普通文件保持公共物理落点。
+    nativeTargets.clear();
+    String file = publicRoot + "Pictures/photo.jpg";
+    String b = mediaStorePublicPhysicalFallback(file, UID);
+    check(b != null);
+    check(b.equals("/data/media/0/Pictures/photo.jpg"));
+    check(!b.contains("Android/data"));
+
+    // C: pending 名称且父 native 落在沙箱内，跟随父目标。
+    nativeTargets.clear();
+    nativeTargets.put(sandboxParent, sandboxTarget);
+    String pendingSandbox = publicRoot + "Pictures/.pending-123-photo.jpg";
+    String c = mediaStorePublicPhysicalFallback(pendingSandbox, UID);
+    check(c != null);
+    check(c.equals("/data/media/0/Android/data/com.example.app/sdcard/Pictures/.pending-123-photo.jpg"));
+    check(c.contains("Android/data"));
+
+    // D: pending 名称但父 native 为 null，保留公共物理落点。
+    nativeTargets.clear();
+    String pendingNull = publicRoot + "Pictures/.pending-456-photo.jpg";
+    String d = mediaStorePublicPhysicalFallback(pendingNull, UID);
+    check(d != null);
+    check(d.equals("/data/media/0/Pictures/.pending-456-photo.jpg"));
+    check(!d.contains("Android/data"));
+
+    // E: 重定向未启用直接拒绝。
+    redirectEnabled = false;
+    check(mediaStorePublicPhysicalFallback(file, UID) == null);
+    redirectEnabled = true;
+
+    // F: 不安全路径直接拒绝。
+    safePublic = false;
+    check(mediaStorePublicPhysicalFallback(file, UID) == null);
+    safePublic = true;
+
+    System.out.println("OK");
+  }
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            java_text = prefix + pending + "  }\n" + main + fallback + "}\n"
+            (root / "PublicFallbackFixture.java").write_text(java_text, encoding="utf-8")
+            compile_result = subprocess.run(
+                [JAVAC, "-encoding", "UTF-8", "PublicFallbackFixture.java"],
+                cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=60,
+            )
+            self.assertEqual(0, compile_result.returncode, compile_result.stderr)
+            result = subprocess.run(
+                [JAVA, "-cp", str(root), "PublicFallbackFixture"],
+                cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=30,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+
 class MediaDirectoryScopeTest(unittest.TestCase):
     def test_column_redirect_registers_existing_scoped_cleanup(self):
         source = (ROOT / "java_src/org/srx/hook/Hooker.java").read_text(encoding="utf-8")
