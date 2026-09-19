@@ -259,8 +259,8 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("!redirect_result.is_redirect()", fn)
         # mapping 重定向不走该分支。
         self.assertIn("redirect_result.is_mapping", fn)
-        # monitor-only 不走该分支。
-        self.assertIn("hub.is_monitor_only()", fn)
+        # 系统代写预装模式同样执行 mkdir 策略，不能独立禁用祖先放行。
+        self.assertNotIn("hub.is_monitor_only()", fn)
         # 修复点：作用域条件必须同时接受 passthrough 与 virtual，且以 `!(A || B)` 形式表达。
         # 只要 is_provider_virtual_scope_active 出现在函数里，就说明 virtual-only 仍被放行，
         # 回退成「仅 passthrough」会让该标识符消失。
@@ -316,6 +316,26 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
                 "harness 边界用例未全部通过:\n" + run_proc.stdout + run_proc.stderr,
             )
             self.assertIn("ALL", run_proc.stdout)
+
+            # 恢复旧的模式拒绝条件，必须在实际运行时击中两个系统代写预装用例。
+            monitor_mutated = fn_src.replace(
+                "|| redirect_result.is_mapping",
+                "|| redirect_result.is_mapping || hub.is_monitor_only()",
+                1,
+            )
+            self.assertNotEqual(monitor_mutated, fn_src)
+            monitor_path = os.path.join(tmp, "harness_monitor_mutated.rs")
+            Path(monitor_path).write_text(build_harness(template, monitor_mutated), encoding="utf-8")
+            monitor_bin = os.path.join(tmp, "monitor_harness_mutated")
+            monitor_compile = subprocess.run(
+                [rustc, monitor_path, "-O", "-o", monitor_bin],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(monitor_compile.returncode, 0, monitor_compile.stderr)
+            monitor_run = subprocess.run([monitor_bin], capture_output=True, text=True)
+            self.assertNotEqual(monitor_run.returncode, 0)
+            self.assertIn("FAIL monitor_writer_passthrough_true", monitor_run.stdout)
+            self.assertIn("FAIL monitor_writer_virtual_true", monitor_run.stdout)
 
             # 反向验证：在内存里去掉 virtual 分支再编译运行，必须非 0。
             # 若 harness 只是空壳，去掉 virtual 分支后仍会通过；只有真正执行原函数时，

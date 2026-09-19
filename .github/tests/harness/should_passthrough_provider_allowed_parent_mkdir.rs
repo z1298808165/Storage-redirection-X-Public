@@ -98,8 +98,8 @@ impl RedirectDecision {
 // Python 注入点：从 src/hook/ops/mutation/dir.rs 抽出的整个 fn 会替换下面这行占位符。
 // __INJECT_SHOULD_PASSTHROUGH_FN__
 
-// ---- 10 个边界用例 + 真值表驱动 ----
-// 前 3 个期望 TRUE（含 virtual-only 修复点），后 7 个期望 FALSE。用 Default 只写出需要置真的字段。
+// ---- 目录路由边界用例与真值表驱动 ----
+// 同时覆盖常规与系统代写预装模式，使用 Default 只写出需要置真的字段。
 struct Case {
     name: &'static str,
     is_redirect: bool,
@@ -144,8 +144,15 @@ fn main() {
         Case { name: "not_redirect_false", provider_passthrough: true, system_writer: true, caller_nonempty: true, parent_allowed: true, expect: false, ..Default::default() },
         // mapping 重定向 -> FALSE。
         Case { name: "mapping_false", is_redirect: true, is_mapping: true, provider_passthrough: true, system_writer: true, caller_nonempty: true, parent_allowed: true, expect: false, ..Default::default() },
-        // 仅监视 -> FALSE。
-        Case { name: "monitor_only_false", is_redirect: true, monitor_only: true, provider_passthrough: true, system_writer: true, caller_nonempty: true, parent_allowed: true, expect: false, ..Default::default() },
+        // 系统代写预装模式仍执行实时目录策略，放行祖先必须保持真实。
+        Case { name: "monitor_writer_passthrough_true", is_redirect: true, monitor_only: true, provider_passthrough: true, system_writer: true, caller_nonempty: true, parent_allowed: true, expect: true, ..Default::default() },
+        Case { name: "monitor_writer_virtual_true", is_redirect: true, monitor_only: true, provider_virtual: true, system_writer: true, caller_nonempty: true, parent_allowed: true, expect: true, ..Default::default() },
+        // 预装模式不能绕过映射、作用域、调用方和真实放行祖先边界。
+        Case { name: "monitor_mapping_false", is_redirect: true, is_mapping: true, monitor_only: true, provider_virtual: true, system_writer: true, caller_nonempty: true, parent_allowed: true, ..Default::default() },
+        Case { name: "monitor_no_scope_false", is_redirect: true, monitor_only: true, system_writer: true, caller_nonempty: true, parent_allowed: true, ..Default::default() },
+        Case { name: "monitor_no_caller_false", is_redirect: true, monitor_only: true, provider_virtual: true, system_writer: true, parent_allowed: true, ..Default::default() },
+        Case { name: "monitor_non_writer_false", is_redirect: true, monitor_only: true, provider_virtual: true, caller_nonempty: true, parent_allowed: true, ..Default::default() },
+        Case { name: "monitor_not_parent_false", is_redirect: true, monitor_only: true, provider_virtual: true, system_writer: true, caller_nonempty: true, ..Default::default() },
         // 非 system-writer 包 -> FALSE。
         Case { name: "non_writer_false", is_redirect: true, provider_passthrough: true, caller_nonempty: true, parent_allowed: true, expect: false, ..Default::default() },
         // caller 包名为空 -> FALSE。

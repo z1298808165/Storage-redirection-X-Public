@@ -382,7 +382,8 @@ fn should_passthrough_provider_allowed_parent_mkdir(
 ) -> bool {
     if !redirect_result.is_redirect()
         || redirect_result.is_mapping
-        || hub.is_monitor_only()
+        // 系统代写者的 monitor-only 预装模式仍执行实时 mkdir 策略，不能禁用祖先放行。
+        // 主入口已处理无需执行代写策略的纯监视请求，此处按实际目录决策判断。
         // 正常 MediaStore insert 使用 virtual 作用域，也必须创建放行目录的真实祖先。
         // 否则祖先 mkdir 被默认重定向到沙箱，成功返回后公共父目录仍不存在。
         || !(crate::hook::is_provider_passthrough_active()
