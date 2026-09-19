@@ -143,16 +143,25 @@ impl MountPlanner {
                     if mapping_mount_point_exists(&alias) {
                         continue;
                     }
-                    if self.ensure_mapping_request_mount_point(
+                    let alias_ok = self.ensure_mapping_request_mount_point(
                         &alias,
                         storage_path,
                         options.should_chown_current_dirs,
                         options.should_create_missing_request_path,
-                    ) {
-                        log::debug!("map mount point prepared for alias {}", alias);
-                    } else {
+                    );
+                    if !alias_ok {
                         log::warn!("map alias mount point unavailable: {}", alias);
                     }
+                    // 探针方案：每个别名都单独挂一次，不再依赖 bind_overlay_mount_with_storage_aliases
+                    // 的别名展开（其非主目标别名缺失时会静默跳过，Android 13 上表现为只有后端别名落地）。
+                    let alias_mounted = self.bind_mount_overlay(&target_source, &alias, true);
+                    log::warn!(
+                        "map alias bind probe alias={} exists={} prepared={} mounted={}",
+                        alias,
+                        mapping_mount_point_exists(&alias),
+                        alias_ok,
+                        alias_mounted
+                    );
                 }
             }
 
