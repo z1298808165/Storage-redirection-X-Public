@@ -187,13 +187,13 @@ Remove-Item Env:SRT_SCENARIOS
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-37，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-37 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-37，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-37 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
 
-CI Build 和 Release 各有一个独立的 Android 17（API 37.0）模拟器 job，不并入上面的矩阵，而是与主矩阵并行且被 `Test-flow required gate` 一并校验。它执行同一套 scenario 1-37，执行环境与主矩阵有三处差异：
+Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-37。它与其他版本有三处执行环境差异：
 
 - **设备侧图形读回保护**：Android 17 系统镜像的 `mapper.ranchu` gralloc 未实现 DMA 颜色缓冲读回，而 emulator 的 gfxstream 后端仍会广播 `ReadColorBufferDMA` 特性。SystemUI 的 `RegionSampling` 与 system_server 的 `TaskSnapshotPersister` 触发读回后会命中 `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma`，并连带重启 framework。测试脚本在设备 SDK 版本为 37 时先执行 `service call window 137 i32 0` 关闭 task snapshot，再 `pm disable-user com.android.systemui` 关闭 SystemUI，并在模块安装重启 framework 后重新应用，直到确认 task snapshot 已关闭且 SystemUI 处于 disabled 状态才继续。该缺陷与 GPU 模式无关，保护逻辑仅在检测到 `ro.build.version.sdk = 37` 时生效。保护过程写入设备侧 `test-flow-graphics-state.txt`（该文件目前不在任何 job 的 artifact 上传清单内，排障需结合 job 日志中的 `android17:` 行）。
-- **注入与启动参数**：显式使用 `Magisk v31.0` 完成 rootAVD 注入（主矩阵不设置 `MAGISK_URL`，沿用安装脚本内置默认版本），模拟器启动超时放宽到 1800 秒并保留系统动画（主矩阵为 1500 秒、关闭动画）。
-- **用例粒度**：未覆盖 `SRT_FRESH_APP_PER_CASE`，因此使用脚本默认值 1（每个服务用例前冷启动应用）；主矩阵显式设为 0。
+- **注入与启动参数**：Android 17 矩阵条目显式使用 `Magisk v31.0` 完成 rootAVD 注入（其余版本不设置 `MAGISK_URL`，沿用安装脚本内置默认版本），模拟器启动超时放宽到 1800 秒并保留系统动画（其余版本为 1500 秒、关闭动画）。
+- **用例粒度**：Android 17 矩阵条目覆盖 `SRT_FRESH_APP_PER_CASE=1`（每个服务用例前冷启动应用）；其余版本显式设为 0。
 
 完整脚本覆盖以下场景：
 
