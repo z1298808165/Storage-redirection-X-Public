@@ -199,7 +199,11 @@ fix_own_private_fixture_permissions() {
     echo "own_private_fixture_permission_fix_skipped: app uid not found for $APP_ID" >&2
     return 1
   fi
-  adb_su "app_uid='$uid'; for root in '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}'; do chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+  # 沙箱内的夹具同样按应用属主修正：`${PRIVATE_ROOT}` 就是应用自己的重定向根
+  # （`Android/data/<包名>/sdcard`），root 预置的目录项会被系统 FUSE 按属主过滤，
+  # 应用在热重载后重新解析这条路径时报 ENOENT（场景 29 的 `createNewFile` 失败）。
+  # 模块自身创建沙箱目录时用的也是应用 uid，这里与之对齐，不改变夹具内容。
+  adb_su "app_uid='$uid'; for root in '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
 adb_root() {
@@ -2463,6 +2467,24 @@ run_config_hot_reload_scenario() {
   done
 
   echo "config_hot_reload_timeout scenario=${scenario} pid=${initial_pid}" >&2
+  # 写入报 ENOENT 时最关键的证据是**应用身份**看到的路径状态：守护进程以 root 运行，
+  # root 能 stat 到的路径应用未必能 stat（系统 FUSE 会按 uid 过滤可见性），只看 root 视角
+  # 会把「不可见」误判成「可见」。这里用 run-as 切到应用 uid 与它的挂载命名空间逐个核对
+  # 目标路径的父链，并真实创建一次探针文件，把结论直接写进失败现场。
+  local probe_parent="${after_request%/*}"
+  local probe_path
+  for probe_path in \
+    "$REAL_ROOT" \
+    "$REAL_ROOT/Download" \
+    "$probe_parent" \
+    "$after_request" \
+    "$after_mapped" \
+    "$after_private"; do
+    adb shell "run-as '$APP_ID' stat -c '%n mode=%a uid=%u' '$probe_path' 2>&1 || echo '$probe_path stat_failed'" |
+      sed "s|^|app_view_probe scenario=${scenario} |" || true
+  done
+  adb shell "run-as '$APP_ID' sh -c 'touch \"$probe_parent/.srx_app_probe\" && rm -f \"$probe_parent/.srx_app_probe\" && echo create_ok'" 2>&1 |
+    sed "s|^|app_view_probe scenario=${scenario} create|" || true
   return 1
 }
 

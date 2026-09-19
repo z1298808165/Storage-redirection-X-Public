@@ -1032,13 +1032,16 @@ function Fix-OwnPrivateFixturePermissions {
         Write-Warning "own_private_fixture_permission_fix_skipped: app uid not found for $AppId"
         return
     }
+    # 沙箱内的夹具同样按应用属主修正：$PrivateRoot 就是应用自己的重定向根，root 预置的
+    # 目录项会被系统 FUSE 按属主过滤，应用在热重载后重新解析这条路径时报 ENOENT。
     $roots = @(
         $BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot,
-        $OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot
+        $OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot,
+        "$PrivateRoot/Download", "$PrivateRoot/Pictures", "$PrivateRoot/DCIM", "$PrivateRoot/Documents"
     )
     $rootsArg = ($roots | ForEach-Object { "'$_'" }) -join " "
     $command = 'app_uid=' + "'" + $uid + "'" + '; for root in ' + $rootsArg +
-        '; do chown -R $app_uid:1023 $root 2>/dev/null || true; find $root -type d -exec chmod 2771 {} + 2>/dev/null || true; find $root -type f -exec chmod 0664 {} + 2>/dev/null || true; done'
+        '; do [ -e "$root" ] || continue; chown -R $app_uid:1023 $root 2>/dev/null || true; find $root -type d -exec chmod 2771 {} + 2>/dev/null || true; find $root -type f -exec chmod 0664 {} + 2>/dev/null || true; done'
     Invoke-Su $command | Out-Null
 }
 
