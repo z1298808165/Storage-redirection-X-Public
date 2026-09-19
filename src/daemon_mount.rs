@@ -1,9 +1,11 @@
 use crate::domain::PathMapping;
-use crate::fuse_redirect::{FuseRedirectConfig, mount_blocking_with_ready};
+use crate::fuse_redirect::{
+    FuseRedirectConfig, ScopedMountAttempt, ScopedMountReport, conclude_scoped_mount,
+    log_scoped_mount_roots, mount_blocking_with_ready,
+};
 use crate::fuse_supervisor::{self, EndpointHealth, RecoveryAction};
 use crate::mount::MountPlanner;
 use crate::mount_identity::{self, MountLedger, MountVerdict};
-use crate::mount_status_marker::write_mount_status_marker;
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
@@ -131,6 +133,40 @@ pub fn has_mount_state(request: &MountRequest) -> bool {
 /// 周期 reconcile 使用更严格的状态判定，额外确认记录的目标仍存在于应用 namespace。
 pub fn has_healthy_mount_state(request: &MountRequest) -> bool {
     has_mount_state_internal(request, true)
+}
+
+/// 判定「该应用的挂载已按**当前配置**建立，重挂只会叠加挂载层」。
+///
+/// 这是重挂的幂等判据：状态健康（目标仍在应用 namespace 内、FUSE 子进程存活）**且**记录下来的
+/// 配置指纹与当前配置一致。
+///
+/// 为什么需要它：重挂不会先摘除旧挂载栈，而对同一个进程重复挂载会在其命名空间里叠出多层。
+/// 应用自己 specialize 时挂一次，守护进程启动轮次里 Prewarm 与随后两轮 Full 又会各挂一次，
+/// 于是一个进程的顶层目录上会压着 2~3 层模块挂载。叠加后每层的 `root` 解析基准不同，应用
+/// 读到的目录内容随层数变化（虚增或丢失），层数也没有上限——真机上表现为微信
+/// `Android/media/com.tencent.mm/Lumenchat/plugins` 时而读到真实目录、时而读到空壳。
+///
+/// 为什么用指纹而不是 `version=`：`config_version` 是进程内自增计数器，应用侧 payload 与
+/// 守护进程各自维护一份，写进同一个状态文件时会互相跳变，据此比对必然误判。
+pub fn has_current_mount_state(request: &MountRequest) -> bool {
+    if request.operation != MountOperation::Reload {
+        return false;
+    }
+    if !has_mount_state_internal(request, true) {
+        return false;
+    }
+    let current = crate::config::SettingsHub::instance().config_fingerprint();
+    match mount_state_fingerprint(request) {
+        Some(recorded) => recorded == current,
+        // 旧版本模块写下的状态文件没有指纹字段：无法证明它对应当前配置，按需要重挂处理。
+        None => false,
+    }
+}
+
+/// 读取挂载状态文件里记录的配置指纹。
+fn mount_state_fingerprint(request: &MountRequest) -> Option<u64> {
+    let content = std::fs::read_to_string(state_file_path(request)).ok()?;
+    state_value(&content, "fingerprint=").and_then(|value| value.parse::<u64>().ok())
 }
 
 fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -> bool {
@@ -306,11 +342,239 @@ pub fn supervise_mount_request(
 
 /// 输出挂载身份与监督状态的诊断报告。
 ///
+/// 读取文件并去掉首尾空白；失败返回 None。
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+/// 判断挂载点是否覆盖给定路径。
+///
+/// 刻意不复用 `paths::starts_with`：那个实现是裸字符串前缀比较，`/a/Download` 会把
+/// `/a/Downloads` 也算作覆盖。诊断输出必须按路径分量判断，否则会给出错误的「已覆盖」结论。
+fn mount_point_covers(mount_point: &str, path: &str) -> bool {
+    let mount_point = mount_point.trim_end_matches('/');
+    path == mount_point || path.starts_with(&format!("{mount_point}/"))
+}
+
+/// 列出以该包名运行（或它的子进程）的进程。
+///
+/// Android 上进程名等于包名，子进程写作 `包名:后缀`，因此按 `cmdline` 首段匹配即可。
+fn package_processes(package_name: &str) -> Vec<(i32, String)> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let child_prefix = format!("{package_name}:");
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let cmdline = raw.split(|byte| *byte == 0).next().unwrap_or_default();
+        let Ok(cmdline) = std::str::from_utf8(cmdline) else {
+            continue;
+        };
+        if cmdline == package_name || cmdline.starts_with(child_prefix.as_str()) {
+            found.push((pid, cmdline.to_string()));
+        }
+    }
+    found.sort_by_key(|(pid, _)| *pid);
+    found
+}
+
+/// 该进程当前是否映射着本模块的库；`None` 表示读不到 maps。
+fn module_mapped_into(pid: i32) -> Option<bool> {
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+    Some(maps.contains("storage.redirect.x"))
+}
+
+/// 跨层身份快照：把「这是哪个应用」的五个口径并列输出。
+///
+/// 项目里每一层用不同口径回答同一个问题——zygisk 看进程、Java hook 看调用方 uid、native 看
+/// caller uid、FUSE 会话看会话创建时绑定的应用、namespace 看 `ns(dev:ino)+start_time`。失败几乎
+/// 都出在层间口径不一致处，而此前只有挂载账本可查，其余各层要逐条 adb 命令拼。把五层一次列清
+/// 可以让排查从「猜」变成「读表」。
+fn print_cross_layer_snapshot(package_name: &str, path: Option<&str>) {
+    println!("== module ==");
+    let prop = std::fs::read_to_string(format!("{}/module.prop", module_paths::MODULE_DIR))
+        .unwrap_or_default();
+    let version = prop
+        .lines()
+        .find_map(|line| line.strip_prefix("version="))
+        .unwrap_or("-");
+    let zygisk_lib = format!("{}/zygisk/arm64-v8a.so", module_paths::MODULE_DIR);
+    println!(
+        "version={} boot_ok={} runtime_disabled={} zygisk_lib_bytes={}",
+        version,
+        read_trimmed(&format!("{}/.boot_ok", module_paths::MODULE_DIR))
+            .unwrap_or_else(|| "-".to_string()),
+        if std::path::Path::new(module_paths::RUNTIME_DISABLE_FILE).exists() {
+            "yes"
+        } else {
+            "no"
+        },
+        std::fs::metadata(&zygisk_lib)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    );
+
+    println!("== capability ==");
+    let summary = crate::fuse_redirect::config::fuse_capability_summary();
+    let now_ms = monotonic_ms().max(0) as u64;
+    println!(
+        "state={} device_fail={} tracked_scopes={} backoff_step={} teardown_fail={} retry_at_ms={} retry_in_ms={}",
+        crate::fuse_redirect::config::fuse_capability_as_str(summary.capability),
+        summary.device_failures,
+        summary.scope_failures.len(),
+        summary.backoff_step,
+        summary.teardown_failures,
+        summary.retry_at_ms,
+        summary.retry_at_ms.saturating_sub(now_ms)
+    );
+    for (scope, count) in &summary.scope_failures {
+        println!("  scope_fail={scope}:{count}");
+    }
+    let allowed_auto = crate::fuse_redirect::config::scoped_mount_allowed_for_scope(
+        package_name,
+        crate::config::StorageBackendMode::Auto,
+    );
+    println!(
+        "gate pkg={} mode=auto allowed={} note=实际模式以 app_config 的字段为准",
+        package_name, allowed_auto
+    );
+
+    println!("== java_hook ==");
+    println!(
+        "install_state={} deferred_marker={} hot_reload_request_pending={}",
+        read_trimmed(module_paths::MEDIA_HOOK_INSTALL_STATE_FILE)
+            .unwrap_or_else(|| "-".to_string()),
+        read_trimmed(module_paths::MEDIA_HOOK_DEFERRED_FILE).unwrap_or_else(|| "-".to_string()),
+        if std::path::Path::new(module_paths::MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE).exists() {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+
+    println!("== app_config ==");
+    let config_path = format!("{}/apps/{}.json", module_paths::CONFIG_DIR, package_name);
+    match std::fs::read_to_string(&config_path) {
+        Ok(content) => println!(
+            "path={} bytes={} content={}",
+            config_path,
+            content.len(),
+            content.trim()
+        ),
+        Err(_) => println!("path={} present=false", config_path),
+    }
+
+    println!("== processes ==");
+    let processes = package_processes(package_name);
+    if processes.is_empty() {
+        println!("none");
+    }
+    for (pid, cmdline) in &processes {
+        println!(
+            "pid={} cmdline={} module_mapped_now={} start_ticks={}",
+            pid,
+            cmdline,
+            module_mapped_into(*pid)
+                .map(|mapped| mapped.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            crate::platform::process_start_time_ticks(*pid).unwrap_or_default()
+        );
+    }
+    println!(
+        "note: module_mapped_now=false 是常见现象——注入完成后模块会 dlclose 自己，启动之后再查 maps 查不到不能据此判定「没被注入」；该结论要看 install_state 与下面的 ledger。"
+    );
+
+    println!("== app_runtime_state ==");
+    let prefix = format!("{package_name}_");
+    for dir in [
+        module_paths::MOUNT_STATE_DIR,
+        module_paths::MOUNT_INTENT_DIR,
+    ] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(prefix.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            println!(
+                "{}={}",
+                path.display(),
+                read_trimmed(&path.display().to_string()).unwrap_or_default()
+            );
+        }
+    }
+
+    let Some(path) = path else {
+        return;
+    };
+    println!("== path ==");
+    let user_id = paths::extract_user_id_from_storage_path(path);
+    println!("input={} user={}", path, user_id);
+    match paths::storage_to_data_media_for_user(path, user_id) {
+        Some(backend) => println!("backend={}", backend),
+        None => println!("backend=- (不是 /storage/emulated/<user>/... 形态)"),
+    }
+    println!("note: backend 是绕过重定向层看到的真实落点；是否被重定向看下面的 ledger_mount。");
+    for ledger in mount_identity::list_ledgers() {
+        if ledger.package_name != package_name {
+            continue;
+        }
+        for mount in &ledger.mounts {
+            println!(
+                "ledger_mount point={} mount_id={} covers_input={}",
+                mount.mount_point,
+                mount.mount_id,
+                mount_point_covers(&mount.mount_point, path)
+            );
+        }
+    }
+}
+
 /// 这是一个独立进程入口，不共享 daemon 进程内的监督计数，因此只报告磁盘上可观察的事实：
 /// 账本记录的挂载身份、目标进程是否仍是同一实例、命名空间是否被替换、以及每个挂载点当前
 /// 的端点健康。用于回答"daemon 认为它挂了什么、那些挂载现在还活着吗"。
-pub fn doctor_report() -> i32 {
-    let ledgers = mount_identity::list_ledgers();
+///
+/// 用法：
+/// - `srx_daemon doctor`：报告挂载账本总体健康；
+/// - `srx_daemon doctor <包名> [路径]`：先输出该包的跨层身份快照，再只报告该包的账本。
+pub fn doctor_report(args: &[String]) -> i32 {
+    let package_name = args
+        .first()
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
+    let path = args
+        .get(1)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty());
+    if let Some(package_name) = package_name {
+        print_cross_layer_snapshot(package_name, path);
+    }
+
+    let ledgers: Vec<MountLedger> = match package_name {
+        Some(package_name) => mount_identity::list_ledgers()
+            .into_iter()
+            .filter(|ledger| ledger.package_name == package_name)
+            .collect(),
+        None => mount_identity::list_ledgers(),
+    };
     let mut unhealthy = 0usize;
     println!(
         "mount identity ledger entries={} dir={}",
@@ -626,10 +890,6 @@ pub fn execute_mount_request(request: &MountRequest) -> bool {
     );
     if is_success {
         remember_successful_mount(request);
-        if request.operation == MountOperation::Reload {
-            let _ =
-                write_mount_status_marker(&request.app_data_dir, request.pid, request.uid, true);
-        }
     }
     let total_ms = monotonic_ms().saturating_sub(started_ms);
     if total_ms >= DAEMON_MOUNT_SLOW_MS || !is_success {
@@ -1018,68 +1278,40 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     };
     if ok {
         let fuse_roots = scoped_fuse_roots;
-        if !fuse_roots.is_empty() {
-            log::info!(
-                "daemon hybrid fuse roots pkg={} pid={} count={}",
-                request.package_name,
-                request.pid,
-                fuse_roots.len()
-            );
-            for root in fuse_roots {
-                log::info!("daemon hybrid fuse root {}", root);
-            }
-        }
-        let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, fuse_roots, planner.real_storage_anchor()) {
-                Some(children) => {
-                    crate::fuse_redirect::config::record_fuse_capability_result(
-                        true,
-                        "scoped_mount_ready",
-                    );
-                    children
-                }
-                None => {
-                    crate::fuse_redirect::config::record_fuse_capability_result(
-                        false,
-                        "scoped_mount_failed",
-                    );
-                    log::warn!(
-                        "daemon hybrid fuse scoped service failed pid={} pkg={}",
-                        request.pid,
-                        request.package_name
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        let effective_backend = if !fuse_roots.is_empty() && !fuse_children.is_empty() {
-            "fuse"
-        } else {
-            "namespace"
-        };
-        let capability = crate::fuse_redirect::config::fuse_capability();
-        let selection_reason = if effective_backend == "fuse" {
-            "scoped_mount_ready"
-        } else if fuse_roots.is_empty() {
-            "capability_unavailable_or_unknown"
-        } else {
-            "scoped_mount_failed_namespace_fallback"
-        };
-        log::info!(
-            "backend_effective pkg={} pid={} requested={} effective={} capability={} selection_reason={} fuse_roots={} fuse_sessions={}",
-            request.package_name,
+        log_scoped_mount_roots(
+            "daemon hybrid fuse",
+            &request.package_name,
             request.pid,
-            request.storage_backend_mode.as_str(),
-            effective_backend,
-            crate::fuse_redirect::config::fuse_capability_as_str(capability),
-            selection_reason,
-            fuse_roots.len(),
-            fuse_children.len()
+            fuse_roots,
         );
-        let hybrid_degraded = !fuse_roots.is_empty() && fuse_children.is_empty();
-        if hybrid_degraded {
+        // 闸门判定与规划同源（`scoped_fuse_mount_roots_for_request` 内部用的是同一个函数）；
+        // 这里取出来只为让 selection_reason 如实区分「能力未放行」与「规则本来不需要 FUSE 根」。
+        let gate_allowed = crate::fuse_redirect::config::scoped_mount_allowed_for_scope(
+            &request.package_name,
+            request.storage_backend_mode,
+        );
+        let (fuse_children, attempt) = if !fuse_roots.is_empty() {
+            match start_scoped_fuse_services(request, fuse_roots, planner.real_storage_anchor()) {
+                Some(children) => (children, ScopedMountAttempt::Ready),
+                None => (Vec::new(), ScopedMountAttempt::Failed),
+            }
+        } else if gate_allowed {
+            (Vec::new(), ScopedMountAttempt::NoRootsNeeded)
+        } else {
+            (Vec::new(), ScopedMountAttempt::GateBlocked)
+        };
+        let outcome = conclude_scoped_mount(ScopedMountReport {
+            package_name: &request.package_name,
+            pid: request.pid,
+            requested_mode: request.storage_backend_mode,
+            log_prefix: "daemon hybrid fuse",
+            roots_planned: fuse_roots.len(),
+            sessions: fuse_children.len(),
+            attempt,
+            ready_reason: "scoped_mount_ready",
+            failed_reason: "scoped_mount_failed",
+        });
+        if outcome.needs_namespace_fallback {
             log::warn!(
                 "daemon hybrid fuse no scoped service mounted, fallback to mount namespace pid={} pkg={}",
                 request.pid,
@@ -1669,14 +1901,14 @@ fn clear_mount_target_stack(target: &str) -> bool {
 /// 目标（`/data/media` 下可能残留系统 MediaProvider 的 FUSE 子挂载，必须摘掉才能重新
 /// 绑定可用后端），本函数只用于状态文件里记录的、本模块自己挂上去的目标。
 ///
-/// 归属判据按以下顺序给出：
+/// 归属判据由 [`mount_identity::is_module_redirect_mount`] 给出，它同时看挂载源与 `root`：
+/// 只按挂载源判断是不够的——bind 会继承底层文件系统的源，真机上本模块每一层的 source 都是
+/// MediaProvider FUSE 的 `/dev/fuse`，因此**每一层都会被误判成外部挂载而拒绝摘除**，重挂
+/// 只能在旧层之上叠加（真机表现为同一路径 4 层、应用读到被压在最上面的沙箱层）。
 ///
-/// 1. 目标上没有挂载 → 已清除；
-/// 2. 最顶层挂载源不是本模块前缀 → 属于其它组件，保留并返回未清除，绝不为了"清干净"
-///    而摘掉别人的挂载；
-/// 3. 账本里记录了该路径、但实时最顶层的挂载 ID 与记录不一致 → 本模块的新会话已经接管，
-///    摘掉它会把正在服务的挂载打掉，保留并返回未清除；
-/// 4. 其余情况（记录一致，或账本没有记录但挂载源是本模块的）→ 是本模块的残留，摘除。
+/// 覆盖范围必须限于本模块自己挂的目标，不能扩到 `/data/media` 后端目标：那里的层虽然可能
+/// 也带沙箱 `root`，但摘除后要按 MediaProvider 语义重建，属 [`clear_mount_target_stack`] 的
+/// 职责。这里的 `target` 全部来自状态文件的 `target=` 记录，即本模块挂过的路径。
 ///
 /// 返回 true 表示该目标上已确认没有本模块的挂载层。
 fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>) -> bool {
@@ -1694,30 +1926,38 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
             }
             return true;
         };
-        if !mount_identity::is_module_mount_source(&live.source) {
+        if !mount_identity::is_module_redirect_mount(
+            &live.source,
+            &live.root,
+            target,
+            ledger.map_or("", |ledger| ledger.package_name.as_str()),
+        ) {
             log::warn!(
-                "daemon unmount skipped foreign mount target={} mount_id={} source={} fs={}",
+                "daemon unmount skipped foreign mount target={} mount_id={} source={} root={} fs={}",
                 target,
                 live.mount_id,
                 live.source,
+                live.root,
                 live.fs_type
             );
             return false;
         }
         if let Some(ledger) = ledger {
-            let recorded_point = ledger
+            // 只拦「比账本记录更新的一层」：那说明本模块的新会话已经接管这个挂载点，
+            // 摘掉它会把正在服务的挂载打掉。比记录更旧的层是本模块上一轮留下的残留，
+            // 必须一并摘净——否则每轮只能摘掉最上面一层，重挂又会补上一层，栈高永不下降。
+            let recorded_mount_id = ledger
                 .mounts
                 .iter()
-                .any(|mount| paths::eq_ignore_case(&mount.mount_point, &normalized_target));
-            let recorded_mount = ledger
-                .mounts
-                .iter()
-                .any(|mount| mount.mount_id == live.mount_id && mount.source == live.source);
-            if recorded_point && !recorded_mount {
+                .filter(|mount| paths::eq_ignore_case(&mount.mount_point, &normalized_target))
+                .map(|mount| mount.mount_id)
+                .max();
+            if recorded_mount_id.is_some_and(|recorded| live.mount_id > recorded) {
                 log::warn!(
-                    "daemon unmount skipped superseded mount target={} mount_id={} ledger_generation={}",
+                    "daemon unmount skipped superseded mount target={} mount_id={} recorded={} ledger_generation={}",
                     target,
                     live.mount_id,
+                    recorded_mount_id.unwrap_or_default(),
                     ledger.generation
                 );
                 return false;
@@ -1958,6 +2198,12 @@ fn write_mount_state(
     };
     let mut content = String::new();
     content.push_str(&format!("version={}\n", request.config_version));
+    // 配置指纹是跨进程可比的判据，`version=` 不是（两侧计数器不同域）。见
+    // `SettingsHub::config_fingerprint` 的说明；reconcile 靠它判断这份挂载是否已按当前配置建立。
+    content.push_str(&format!(
+        "fingerprint={}\n",
+        crate::config::SettingsHub::instance().config_fingerprint()
+    ));
     content.push_str(&format!("package={}\n", request.package_name));
     content.push_str(&format!("uid={}\n", request.uid));
     if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(request.pid) {
@@ -2053,65 +2299,24 @@ fn state_file_path(request: &MountRequest) -> String {
 /// 读不到任何归属明确的挂载时不写入旧记录：宁可让账本暂时没有挂载明细（后续摘除只受
 /// 挂载源约束），也不要留下一个与实际挂载不匹配的 `mount_id`——那会让下一轮恢复把本模块
 /// 自己的挂载误判成"已被新会话接管"而拒绝清理。
+/// 登记本次挂载的账本。
+///
+/// 登记纪律（何时写、何时清空、读不到归属时怎么办）由 [`crate::mount_ledger::record_mount_identity`]
+/// 统一实现，两条挂载路径共用；这里只负责把 daemon 侧的目标集合拼齐——除了规划出的挂载目标，
+/// 还要带上每个 scoped FUSE 会话自己的挂载点，否则这些会话在恢复流程里没有归属判据。
 fn record_mount_identity(
     request: &MountRequest,
     targets: &[String],
     fuse_children: &[FuseMountState],
 ) -> bool {
-    let Some(namespace) = mount_identity::namespace_identity(0) else {
-        log::warn!(
-            "daemon mount identity namespace unavailable pid={}",
-            request.pid
-        );
-        return false;
-    };
-    let target_start_time =
-        crate::platform::process_start_time_ticks(request.pid).unwrap_or_default();
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-    let mut mounts = Vec::new();
-    for target in module_paths::normalize_mount_targets(&all_targets) {
-        if let Some(identity) = mount_identity::capture_mount_identity(0, &target) {
-            mounts.push(identity);
-        }
-    }
-
-    let mut ledger =
-        mount_identity::load(&request.package_name, request.pid).unwrap_or_else(|| {
-            MountLedger::new(
-                &request.package_name,
-                request.pid,
-                target_start_time,
-                namespace,
-            )
-        });
-    ledger.target_start_time = target_start_time;
-    ledger.namespace = namespace;
-    if mounts.is_empty() && !all_targets.is_empty() {
-        // 挂载目标存在但没有一条归属明确：只保留命名空间与进程身份，清空挂载明细。
-        log::warn!(
-            "daemon mount identity no owned mount recorded pid={} pkg={} targets={}",
-            request.pid,
-            request.package_name,
-            all_targets.len()
-        );
-        ledger.clear_mounts();
-    } else {
-        ledger.record_mounts(mounts);
-    }
-    let ok = mount_identity::save(&ledger);
-    if ok {
-        log::info!(
-            "daemon mount identity saved pid={} pkg={} generation={} mounts={} ns={}:{}",
-            request.pid,
-            request.package_name,
-            ledger.generation,
-            ledger.mounts.len(),
-            ledger.namespace.dev,
-            ledger.namespace.ino
-        );
-    }
-    ok
+    crate::mount_ledger::record_mount_identity(
+        "daemon",
+        &request.package_name,
+        request.pid,
+        &all_targets,
+    )
 }
 
 fn read_mount_targets(path: &str) -> Vec<String> {

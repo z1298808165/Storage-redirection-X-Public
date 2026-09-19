@@ -15,19 +15,106 @@ pub enum FuseCapability {
     Unavailable,
 }
 
-/// scoped 挂载连续失败达到该次数后，本轮开机内不再尝试 scoped 挂载。
+/// 单个应用 scoped 挂载连续失败达到该次数后，本轮开机内该应用不再尝试 scoped 挂载。
 ///
-/// 单次失败可能来自开机竞态、目标进程正在退出或挂载点标签尚未就绪等可恢复事件，直接把
-/// 整机能力锁成 `unavailable` 会让本轮开机剩余时间全部退回 namespace。这里用少量额外
-/// 尝试换取可恢复性，达到预算后才写入 `unavailable`。
+/// 单次失败可能来自开机竞态、目标进程正在退出或挂载点标签尚未就绪等可恢复事件，因此用少量
+/// 额外尝试换取可恢复性。预算**按应用单独计**：某个应用自身的失败只影响它自己，不会让别的
+/// 应用一起退回 namespace。
 const SCOPED_MOUNT_FAILURE_BUDGET: u32 = 3;
+
+/// 升格为「设备级不支持 scoped 挂载」所需的不同应用数。
+///
+/// 单个应用反复失败说明不了设备能力：它可能是每次启动都被杀、或配置本身有问题的应用。只有当
+/// **多个不同应用**在没有成功插入的情况下接连失败，才足以判定是设备层面的问题。这样既保留
+/// 了对真实设备缺陷的快速收敛，又消除了「一个坏应用把全体拖下水」的放大器。
+const DEVICE_UNAVAILABLE_MIN_SCOPES: u32 = 2;
+
+/// 设备级退避的起点与上限（毫秒）。
+///
+/// `unavailable` 不再是终态：到期后允许一次探测性尝试，成功即整体恢复，失败则把退避加倍。
+/// 这条自愈通路取代了过去「只能靠重启恢复」的行为。
+const RETRY_BACKOFF_BASE_MS: u64 = 30_000;
+const RETRY_BACKOFF_MAX_MS: u64 = 600_000;
+
+/// 快照中记录的 scope 数量上限。
+///
+/// 每个应用进入列表后会保留到下一次任意成功或重启为止，因此需要上限防止长期运行后无限增长；
+/// 超出时丢弃最久未失败的那些（列表按最近失败时间排序）。
+const MAX_TRACKED_SCOPES: usize = 64;
 
 /// 能力快照内容。
 ///
-/// `failure_count` 统计本轮开机内连续的 scoped 挂载与收尾失败次数，任意一次成功都会清零。
+/// 快照同时承载两类计数，二者**互不替代**：
+///
+/// - `device_failures`：设备级连续失败，只在失败来自与上一次不同的应用时累加，用于把「设备
+///   不支持」与「某个应用自己有问题」区分开；
+/// - `scope_failures`：每个应用自己的连续失败数，成功即清除该应用的分桶。
+///
+/// `teardown_failures` 只统计收尾（unmount）失败，**不参与挂载准入**：一次摘不掉旧挂载说明
+/// 不了下一次 `mount(2)` 会失败，用它去关掉全设备的 FUSE 是口径错配。它保留下来只为可观测
+/// 性与 `doctor` 展示。
 struct FuseCapabilitySnapshot {
+    /// 快照文件是否解析成功（存在且 boot_id 匹配）。
+    ///
+    /// 用于区分「没有信息」（daemon 从未写过快照）与「信息就是 unknown」（daemon 已给出结论口径、
+    /// 只是还没有真实会话结果）。两者在 `Auto` 下的处置不同：前者只剩应用侧节点探测可用，后者
+    /// 必须放行尝试。
+    present: bool,
     capability: FuseCapability,
-    failure_count: u32,
+    device_failures: u32,
+    last_failed_scope: String,
+    scope_failures: Vec<(String, u32)>,
+    /// `Unavailable` 后允许下一次探测的 `CLOCK_MONOTONIC` 毫秒；`0` 表示立即可探测。
+    retry_at_ms: u64,
+    backoff_step: u32,
+    teardown_failures: u32,
+}
+
+impl Default for FuseCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            present: false,
+            capability: FuseCapability::Unknown,
+            device_failures: 0,
+            last_failed_scope: String::new(),
+            scope_failures: Vec::new(),
+            retry_at_ms: 0,
+            backoff_step: 0,
+            teardown_failures: 0,
+        }
+    }
+}
+
+impl FuseCapabilitySnapshot {
+    fn scope_failures_for(&self, scope: &str) -> u32 {
+        self.scope_failures
+            .iter()
+            .find(|(name, _)| name == scope)
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
+    }
+
+    /// 写入某个应用的失败计数，并按最近失败优先排序、按上限截断。
+    fn bump_scope_failure(&mut self, scope: &str) {
+        let count = self.scope_failures_for(scope).saturating_add(1);
+        self.scope_failures.retain(|(name, _)| name != scope);
+        self.scope_failures.insert(0, (scope.to_string(), count));
+        self.scope_failures.truncate(MAX_TRACKED_SCOPES);
+    }
+
+    fn clear_scope_failure(&mut self, scope: &str) {
+        self.scope_failures.retain(|(name, _)| name != scope);
+    }
+
+    /// 该应用是否已用完自己的 scoped 挂载预算。
+    fn scope_budget_exhausted(&self, scope: &str) -> bool {
+        self.scope_failures_for(scope) >= SCOPED_MOUNT_FAILURE_BUDGET
+    }
+
+    /// 当前是否已越过退避窗口，允许一次探测性尝试。
+    fn retry_window_open(&self, now_ms: u64) -> bool {
+        self.retry_at_ms == 0 || now_ms >= self.retry_at_ms
+    }
 }
 
 #[derive(Clone)]
@@ -114,19 +201,7 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     }
 
     let backend_mode = request.storage_backend_mode();
-    let capability_available = match backend_mode {
-        StorageBackendMode::Fuse => fuse_first_capability_available(),
-        // Unknown 只表示设备探测尚未得到真实会话结果，允许首次请求进行一次实际
-        // scoped 挂载验证；连续失败达到预算后由 record_fuse_capability_result 写成
-        // Unavailable。
-        StorageBackendMode::Auto => match fuse_capability() {
-            FuseCapability::Available => true,
-            FuseCapability::Unknown => fuse_device_present(),
-            FuseCapability::Unavailable => false,
-        },
-        StorageBackendMode::Namespace => false,
-    };
-    if !capability_available {
+    if !scoped_mount_allowed_for_scope(request.package_name(), backend_mode) {
         return Vec::new();
     }
 
@@ -169,14 +244,20 @@ pub fn fuse_device_present() -> bool {
         .unwrap_or(false)
 }
 
-/// 返回 daemon 最近一次记录的 FUSE 能力。
+/// 返回 daemon 最近一次记录的设备级 FUSE 能力。
 ///
 /// 普通应用只读取这个原子替换的快照，不直接打开 `/dev/fuse`。快照缺失或来自其它开机时
 /// 保持 `Unknown`，由规划层走保守的 namespace fallback 路径。
+///
+/// 注意这是**设备级**结论：判断某个应用自己是否还能尝试 FUSE，必须用
+/// [`scoped_mount_allowed_for_scope`]，否则会把别的应用的失败当成自己的。
 pub fn fuse_capability() -> FuseCapability {
-    read_fuse_capability_snapshot()
-        .map(|snapshot| snapshot.capability)
-        .unwrap_or(FuseCapability::Unknown)
+    load_fuse_capability_snapshot().capability
+}
+
+/// 读取当前开机的能力快照；缺失、来自其它开机或不可解析时返回默认值（`Unknown` 且无计数）。
+fn load_fuse_capability_snapshot() -> FuseCapabilitySnapshot {
+    read_fuse_capability_snapshot().unwrap_or_default()
 }
 
 /// 读取当前开机的能力快照；快照缺失、boot_id 不匹配或内容不可解析时返回 None。
@@ -188,16 +269,55 @@ fn read_fuse_capability_snapshot() -> Option<FuseCapabilitySnapshot> {
     if current_boot_id.as_deref() != snapshot_field(&content, "boot_id") {
         return None;
     }
-    Some(FuseCapabilitySnapshot {
+    let mut snapshot = FuseCapabilitySnapshot {
+        present: true,
         capability: match snapshot_field(&content, "state") {
             Some("available") => FuseCapability::Available,
             Some("unavailable") => FuseCapability::Unavailable,
             _ => FuseCapability::Unknown,
         },
-        failure_count: snapshot_field(&content, "fail_count")
+        // schema 2 的 `fail_count` 是未分桶的全局计数，按设备级计数读入即可：升级前写下的
+        // `unavailable` 会带 `retry_at_ms=0`，因此升级后第一次请求就能探测一次并自愈，
+        // 不需要等设备重启。
+        device_failures: snapshot_field(&content, "fail_count")
+            .or_else(|| snapshot_field(&content, "device_fail_count"))
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(0),
-    })
+        last_failed_scope: snapshot_field(&content, "last_failed_scope")
+            .unwrap_or_default()
+            .to_string(),
+        scope_failures: parse_scope_failures(&content),
+        retry_at_ms: snapshot_field(&content, "retry_at_ms")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0),
+        backoff_step: snapshot_field(&content, "backoff_step")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0),
+        teardown_failures: snapshot_field(&content, "teardown_fail_count")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0),
+    };
+    snapshot.scope_failures.truncate(MAX_TRACKED_SCOPES);
+    Some(snapshot)
+}
+
+/// 解析 `scope_fail=<包名>:<次数>` 行。
+///
+/// 包名不会包含冒号，因此按最后一个冒号切分即可；解析失败的行直接跳过，不让一行坏数据
+/// 使整份快照退化成默认值（那会把已经积累的退避一起丢掉）。
+fn parse_scope_failures(content: &str) -> Vec<(String, u32)> {
+    content
+        .lines()
+        .filter_map(|line| line.strip_prefix("scope_fail="))
+        .filter_map(|value| {
+            let (name, count) = value.trim().rsplit_once(':')?;
+            let count = count.parse::<u32>().ok()?;
+            if name.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), count))
+        })
+        .collect()
 }
 
 /// 从能力快照内容中读取一个 `key=value` 字段。
@@ -217,12 +337,57 @@ pub fn fuse_capability_as_str(capability: FuseCapability) -> &'static str {
     }
 }
 
+/// 某个应用是否允许尝试 scoped 挂载。
+///
+/// 判定同时看设备级状态与**该应用自己**的失败分桶，这是把「一个应用的失败」与「设备的失败」
+/// 分开的关键：
+///
+/// - `Namespace`：显式要求 namespace 后端，不尝试；
+/// - `Fuse`：用户显式选择 FUSE，只做设备节点探测，不受 `Auto` 的熔断约束；
+/// - `Auto`：设备可用即尝试；设备未知时按节点探测；设备被判 `Unavailable` 时等退避窗口到期
+///   再放行一次探测（成功即整体恢复，失败则退避加倍），不再需要重启。
+///
+/// 任何状态下，若该应用自己的失败分桶已到预算，本轮开机内它不再尝试；其它应用不受影响。
+pub fn scoped_mount_allowed_for_scope(scope: &str, mode: StorageBackendMode) -> bool {
+    match mode {
+        StorageBackendMode::Namespace => false,
+        StorageBackendMode::Fuse => fuse_first_capability_available(),
+        StorageBackendMode::Auto => {
+            let snapshot = load_fuse_capability_snapshot();
+            if snapshot.scope_budget_exhausted(scope) {
+                return false;
+            }
+            match snapshot.capability {
+                FuseCapability::Available => true,
+                // `Unknown` 只表示还没有真实会话结果，必须放行尝试：真实能力由实际挂载结果确认
+                // （`fuse_device_present` 的文档也是这么写的）。**不能**在这里退回应用侧节点探测：
+                // 这个判定同样会在应用进程里执行，而应用视角的 `/dev/fuse` 常因 SELinux 不可读
+                // （实测 HyperOS 上是 `crw------- root root`，连 stat 都被拒），据此否定会让应用
+                // 永远规划不出 FUSE 根、只能退回 namespace，且永远等不到那个能解锁的失败计数。
+                // 只有快照完全不存在（daemon 从未写过）时才退回节点探测，此时没有更好的信息源。
+                FuseCapability::Unknown => snapshot.present || fuse_device_present(),
+                FuseCapability::Unavailable => {
+                    snapshot.retry_window_open(paths::monotonic_ms().max(0) as u64)
+                }
+            }
+        }
+    }
+}
+
 /// 自动后端使用的 fallback 路径决策，应用侧与 daemon 共享同一个判断接口。
-pub fn expand_mount_fallbacks_for_mode(mode: StorageBackendMode) -> bool {
+///
+/// 设备级判定保持原语义：只要不是明确 `Available`（`Unknown` 或 `Unavailable`）就收敛通配
+/// 规则，因为这两种状态下规划拿不到可靠的 FUSE 根。在此之上叠加**该应用自己**的失败分桶：
+/// 该应用已用完预算时它必然走 namespace，它的规则必须收敛，而这一条不再改写其它应用的规则。
+pub fn expand_mount_fallbacks_for_mode(mode: StorageBackendMode, scope: &str) -> bool {
     match mode {
         StorageBackendMode::Namespace => true,
         StorageBackendMode::Fuse => false,
-        StorageBackendMode::Auto => fuse_capability() != FuseCapability::Available,
+        StorageBackendMode::Auto => {
+            let device_not_confirmed_available = fuse_capability() != FuseCapability::Available;
+            device_not_confirmed_available
+                || load_fuse_capability_snapshot().scope_budget_exhausted(scope)
+        }
     }
 }
 
@@ -257,11 +422,19 @@ pub fn expand_namespace_fallback_rules(uid: i32, rules: &[String]) -> Vec<String
     expanded
 }
 
+/// 第 `step` 次退避的等待毫秒数：基数逐次加倍，封顶 [`RETRY_BACKOFF_MAX_MS`]。
+fn retry_backoff_ms(step: u32) -> u64 {
+    let shift = step.saturating_sub(1).min(5);
+    RETRY_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << shift)
+        .min(RETRY_BACKOFF_MAX_MS)
+}
+
 fn write_fuse_capability_snapshot(
-    capability: FuseCapability,
+    snapshot: &FuseCapabilitySnapshot,
     reason: &str,
-    failure_count: u32,
 ) -> FuseCapability {
+    let capability = snapshot.capability;
     let state = match capability {
         FuseCapability::Available => "available",
         FuseCapability::Unavailable => "unavailable",
@@ -271,9 +444,17 @@ fn write_fuse_capability_snapshot(
         .ok()
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
-    let content = format!(
-        "schema=2\nboot_id={boot_id}\nstate={state}\nreason={reason}\nfail_count={failure_count}\n"
+    let mut content = format!(
+        "schema=3\nboot_id={boot_id}\nstate={state}\nreason={reason}\ndevice_fail_count={}\nlast_failed_scope={}\nretry_at_ms={}\nbackoff_step={}\nteardown_fail_count={}\n",
+        snapshot.device_failures,
+        snapshot.last_failed_scope,
+        snapshot.retry_at_ms,
+        snapshot.backoff_step,
+        snapshot.teardown_failures,
     );
+    for (scope, count) in &snapshot.scope_failures {
+        content.push_str(&format!("scope_fail={scope}:{count}\n"));
+    }
     let path = std::path::Path::new(module_paths::FUSE_CAPABILITY_FILE);
     // 快照会被 daemon 与多个 scoped 会话子进程同时写入，固定 temp 名会让并发写入
     // 互相 rename 掉对方的临时文件，这里带上 pid 与自增序号保证唯一。
@@ -289,10 +470,14 @@ fn write_fuse_capability_snapshot(
         );
     } else {
         log::info!(
-            "fuse capability snapshot state={} reason={} fail_count={}",
+            "fuse capability snapshot state={} reason={} device_fail={} scopes={} retry_at_ms={} backoff_step={} teardown_fail={}",
             state,
             reason,
-            failure_count
+            snapshot.device_failures,
+            snapshot.scope_failures.len(),
+            snapshot.retry_at_ms,
+            snapshot.backoff_step,
+            snapshot.teardown_failures
         );
     }
     capability
@@ -314,40 +499,104 @@ fn capability_snapshot_temp_path(path: &std::path::Path) -> std::path::PathBuf {
 // quality-allow(lint-suppression): 该入口由 Android daemon 二进制调用，cdylib 目标不会直接调用。
 #[allow(dead_code)]
 pub fn refresh_fuse_capability_snapshot(reason: &str) -> FuseCapability {
-    let capability = if fuse_first_capability_available() {
-        // 打开设备只能证明节点存在；避免在首次真实会话前把 HyperOS/MIUI 的
-        // FUSE 兼容性误报为 Available。首次 scoped 挂载会把状态推进到最终结果。
-        FuseCapability::Unknown
-    } else {
-        FuseCapability::Unavailable
+    // 开机 / daemon 重启时整份快照归零：设备级计数、各应用分桶与退避全部清空，让新的一轮
+    // 从「未知」重新探测。这正是「重启能恢复」的机制，现在退避窗口也提供了不开机的等价通路。
+    let snapshot = FuseCapabilitySnapshot {
+        capability: if fuse_first_capability_available() {
+            // 打开设备只能证明节点存在；避免在首次真实会话前把 HyperOS/MIUI 的
+            // FUSE 兼容性误报为 Available。首次 scoped 挂载会把状态推进到最终结果。
+            FuseCapability::Unknown
+        } else {
+            FuseCapability::Unavailable
+        },
+        ..FuseCapabilitySnapshot::default()
     };
-    write_fuse_capability_snapshot(capability, reason, 0)
+    write_fuse_capability_snapshot(&snapshot, reason)
 }
 
-/// 记录实际 scoped FUSE 挂载结果，失败按预算累积，达到预算后让后续请求走 namespace fallback。
+/// 记录实际 scoped FUSE 挂载结果。
 ///
-/// 计数只统计连续失败，任意一次成功都会清零；预算内失败写成 `Unknown`，下一次挂载请求会
-/// 重新尝试 scoped 挂载，达到 [`SCOPED_MOUNT_FAILURE_BUDGET`] 后才写成 `unavailable`。
-pub fn record_fuse_capability_result(available: bool, reason: &str) -> FuseCapability {
+/// `scope` 是发起本次挂载的应用（包名）。计数分两层，二者用途不同：
+///
+/// - **应用分桶**：该应用的连续失败次数，成功即清零；到 [`SCOPED_MOUNT_FAILURE_BUDGET`] 后
+///   只让这个应用停止尝试 FUSE，其它应用照旧；
+/// - **设备级计数**：只在失败来自与上一次**不同的应用**时累加；达到
+///   [`DEVICE_UNAVAILABLE_MIN_SCOPES`] 才把设备判为 `unavailable`，避免单个应用自己的问题
+///   （每次启动都被杀、配置异常）把整机 FUSE 一起关掉。
+///
+/// 判为 `unavailable` 时同时写入退避截止时间；到期后 [`scoped_mount_allowed_for_scope`] 会
+/// 放行一次探测，成功即整体恢复，失败则退避加倍。因此 `unavailable` 不再是终态。
+pub fn record_fuse_capability_result(available: bool, reason: &str, scope: &str) -> FuseCapability {
     // 计数是读改写序列，而 daemon 会并发处理不同应用的挂载请求；用同目录锁文件串行化，
     // 避免并发失败互相覆盖计数导致预算迟迟达不到。锁获取失败只降低计数精度，不影响写入。
     let _lock = CapabilitySnapshotLock::acquire();
-    let failure_count = if available {
-        0
+    let mut snapshot = read_fuse_capability_snapshot().unwrap_or_default();
+    if available {
+        snapshot.capability = FuseCapability::Available;
+        snapshot.device_failures = 0;
+        snapshot.last_failed_scope.clear();
+        snapshot.clear_scope_failure(scope);
+        snapshot.retry_at_ms = 0;
+        snapshot.backoff_step = 0;
     } else {
-        read_fuse_capability_snapshot()
-            .map(|snapshot| snapshot.failure_count)
-            .unwrap_or(0)
-            .saturating_add(1)
-    };
-    let capability = if available {
-        FuseCapability::Available
-    } else if failure_count >= SCOPED_MOUNT_FAILURE_BUDGET {
-        FuseCapability::Unavailable
-    } else {
-        FuseCapability::Unknown
-    };
-    write_fuse_capability_snapshot(capability, reason, failure_count)
+        if snapshot.last_failed_scope != scope {
+            snapshot.device_failures = snapshot.device_failures.saturating_add(1);
+        }
+        snapshot.last_failed_scope = scope.to_string();
+        snapshot.bump_scope_failure(scope);
+        if snapshot.device_failures >= DEVICE_UNAVAILABLE_MIN_SCOPES {
+            snapshot.capability = FuseCapability::Unavailable;
+            snapshot.backoff_step = snapshot.backoff_step.saturating_add(1);
+            // 时间基准是 `CLOCK_MONOTONIC`（Android 上按开机计），快照本身带 boot_id 校验，
+            // 因此跨进程比较是安全的；换开机后 boot_id 不匹配，整份快照直接失效。
+            let now_ms = paths::monotonic_ms().max(0) as u64;
+            snapshot.retry_at_ms = now_ms.saturating_add(retry_backoff_ms(snapshot.backoff_step));
+        } else {
+            snapshot.capability = FuseCapability::Unknown;
+            snapshot.retry_at_ms = 0;
+        }
+    }
+    write_fuse_capability_snapshot(&snapshot, reason)
+}
+
+/// 记录一次 scoped 会话收尾（unmount）失败。
+///
+/// 收尾失败**不参与**挂载准入：一次摘不掉旧挂载说明不了下一次 `mount(2)` 会失败，用它去关掉
+/// 全设备的 FUSE 属于口径错配（历史上它确实能单独把整机锁成 `unavailable`）。这里只累计计数
+/// 供 `doctor` 与日志观察；挂载准入完全由 [`record_fuse_capability_result`] 的分桶决定。
+/// 收尾本身有挂载账本与监督流程兜底，泄漏是可控且有界的。
+pub fn record_fuse_teardown_failure(reason: &str) {
+    let _lock = CapabilitySnapshotLock::acquire();
+    let mut snapshot = read_fuse_capability_snapshot().unwrap_or_default();
+    snapshot.teardown_failures = snapshot.teardown_failures.saturating_add(1);
+    write_fuse_capability_snapshot(&snapshot, reason);
+}
+
+/// 供诊断输出使用的能力快照摘要。
+// quality-allow(lint-suppression): 只被 Android daemon 二进制的 doctor 子命令使用，lib 目标不会构造它。
+#[allow(dead_code)]
+pub struct FuseCapabilitySummary {
+    pub capability: FuseCapability,
+    pub device_failures: u32,
+    pub scope_failures: Vec<(String, u32)>,
+    pub retry_at_ms: u64,
+    pub backoff_step: u32,
+    pub teardown_failures: u32,
+}
+
+/// 读取当前能力快照的摘要，供 `doctor` 展示判定依据（而不是只显示一个 state）。
+// quality-allow(lint-suppression): 同 `FuseCapabilitySummary`，只服务 daemon 的 doctor 子命令。
+#[allow(dead_code)]
+pub fn fuse_capability_summary() -> FuseCapabilitySummary {
+    let snapshot = load_fuse_capability_snapshot();
+    FuseCapabilitySummary {
+        capability: snapshot.capability,
+        device_failures: snapshot.device_failures,
+        scope_failures: snapshot.scope_failures,
+        retry_at_ms: snapshot.retry_at_ms,
+        backoff_step: snapshot.backoff_step,
+        teardown_failures: snapshot.teardown_failures,
+    }
 }
 
 /// 能力快照的跨进程互斥锁。
@@ -428,7 +677,12 @@ pub fn mount_blocking_with_ready(
     // 确认挂载点是否仍属于本次会话。
     let session_mount_source = scoped_mount_source(std::process::id());
     let metadata_dir = mount_point_metadata_dir(&mount_point, user_id);
-    if !fs::create_directory(&metadata_dir, config.uid) {
+    let metadata_uid = if crate::metadata_repair::enabled() {
+        config.uid
+    } else {
+        -1
+    };
+    if !fs::create_directory(&metadata_dir, metadata_uid) {
         log::error!(
             "fuse redirect mount point missing: {} metadata={}",
             mount_point,
@@ -620,9 +874,10 @@ fn finish_failed_session(
         return true;
     }
 
-    // 挂载点仍由本次会话持有且延迟卸载也没能摘除，说明这次 scoped 会话确实无法收尾；
-    // 记录能力失败，让 Auto 后端按失败预算决定后续是否继续尝试 scoped 挂载。
-    record_fuse_capability_result(false, "scoped_session_end_error");
+    // 挂载点仍由本次会话持有且延迟卸载也没能摘除，说明这次 scoped 会话确实无法收尾。
+    // 注意这里**不能**改动挂载准入：摘不掉旧挂载并不能说明下一次 mount(2) 会失败，用它去关掉
+    // 全设备的 FUSE 是口径错配。只累计收尾失败计数供观察，准入由应用分桶决定。
+    record_fuse_teardown_failure("scoped_session_end_error");
     log::warn!(
         "fuse redirect session ended with error mp={} app_exited={} err={}",
         mount_point,

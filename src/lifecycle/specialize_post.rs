@@ -3,19 +3,36 @@ use super::RuntimeFlow;
 use super::mount_timing;
 use crate::hook::{InterceptHub, install_fuse_fix_if_enabled};
 use crate::java_hook;
+use crate::module_mount_source::app_redirect_mounts_in;
 use crate::platform::paths::monotonic_ms;
-use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{self, anti_detect};
 use crate::redirect::policy;
 use crate::zygisk::abi;
-use libc::{O_CLOEXEC, O_RDONLY, open, read, unlink};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static PLT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// 认定挂载落定所需的连续稳定轮数。
+///
+/// 一个应用可能有多个挂载根，逐条建立。只看"出现了挂载"就返回，应用会在挂载只完成一半时
+/// 开始访问被重定向的路径。要求连续多轮看到完全相同的挂载 ID 集合再放行，用很小的延迟
+/// 换取"挂载集合已不再变化"这一判据。
+const MOUNT_SETTLE_POLLS: u32 = 4;
+
 impl RuntimeFlow {
     pub fn post_app_specialize(&mut self, _args: *const abi::AppSpecializeArgs) {
         let perf_started_ms = monotonic_ms();
+        // 历史挂载状态标记的清理放在这里：post 对每个被注入的进程都会被调用，而 pre 存在
+        // 多条会直接返回的分支（无有效配置的 fast bypass 等），放在 pre 里对那类应用永远清不到，
+        // 正是它们的遗留标记会一直累积。这里早于本函数的所有提前返回，也早于 dlclose。
+        if self.app_data_dir.is_empty() {
+            log::warn!(
+                "legacy marker sweep skipped pkg={} reason=app_data_dir_absent",
+                self.package_name
+            );
+        } else {
+            crate::legacy_mount_marker::sweep_legacy_markers(&self.app_data_dir);
+        }
         if policy::is_media_provider_package(&self.package_name) {
             java_hook::start_hot_reload_after_specialize();
         }
@@ -41,8 +58,8 @@ impl RuntimeFlow {
             } else {
                 let mount_started_ms = monotonic_ms();
                 self.send_deferred_mount_request();
-                wait_for_mount_status(
-                    &self.app_data_dir,
+                wait_for_module_mount(
+                    &self.package_name,
                     self.app_pid,
                     self.is_mount_request_sent,
                     &mut self.is_mount_applied,
@@ -51,7 +68,7 @@ impl RuntimeFlow {
             }
         } else if self.should_redirect && self.is_system_writer_hook_redirect {
             self.is_mount_applied = false;
-            log::info!("writer per-caller hook map (skip marker wait)");
+            log::info!("writer per-caller hook map (skip mount wait)");
         }
 
         let hook_started_ms = monotonic_ms();
@@ -126,76 +143,79 @@ fn should_install_process_plt_hook(flow: &RuntimeFlow, is_redirect_via_hook: boo
         || (flow.should_monitor && policy::is_saf_native_monitor_bridge_package(&flow.package_name))
 }
 
-// 轮询读取挂载状态标记文件，确认挂载是否成功
-fn wait_for_mount_status(
-    app_data_dir: &str,
+// 等待本模块的重定向挂载出现在当前进程的命名空间里。
+fn wait_for_module_mount(
+    package_name: &str,
     app_pid: i32,
     is_mount_request_sent: bool,
     is_mount_applied_out: &mut bool,
 ) {
     *is_mount_applied_out = false;
-    let mut last_errno_code = 0;
     let mount_started_ms = monotonic_ms();
 
-    if app_data_dir.is_empty() || app_pid <= 0 {
+    if app_pid <= 0 {
         log::warn!("mount ctx invalid, skip wait");
         return;
     }
 
     if !is_mount_request_sent {
-        log::warn!("mount req not sent, wait daemon marker fallback");
+        log::warn!("mount req not sent, wait daemon mount fallback");
     }
 
-    let marker_path = format!("{}/.srx_mount_status_{}", app_data_dir, app_pid);
     log::info!(
-        "wait marker {} budget_ms={} polls={} delay_us={}",
-        marker_path,
+        "wait module mount pid={} budget_ms={} polls={} delay_us={}",
+        app_pid,
         mount_timing::post_mount_status_wait_budget_ms(),
         mount_timing::POST_MOUNT_STATUS_POLL_COUNT,
         mount_timing::POST_MOUNT_STATUS_POLL_DELAY_US
     );
 
-    let Ok(c_path) = std::ffi::CString::new(marker_path.clone()) else {
-        return;
-    };
-
+    let mut settled: Vec<(u64, String)> = Vec::new();
+    let mut settle_polls = 0u32;
     let mut poll_count = 0;
+    let mut last_mount_count = 0usize;
     for _ in 0..mount_timing::POST_MOUNT_STATUS_POLL_COUNT {
         poll_count += 1;
-        let fd = unsafe { open(c_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-        if fd >= 0 {
-            let file = UniqueFd::new(fd);
-            let mut ch = [0u8; 1];
-            let n = unsafe { read(file.get(), ch.as_mut_ptr() as *mut _, 1) };
-            if n == 1 {
-                unsafe { unlink(c_path.as_ptr()) };
-                *is_mount_applied_out = ch[0] == b'1';
-                let elapsed_ms = monotonic_ms().saturating_sub(mount_started_ms);
-                log::info!(
-                    "marker read n={} val={} applied={} polls={} elapsed_ms={}",
-                    n,
-                    ch[0] as char,
-                    *is_mount_applied_out,
-                    poll_count,
-                    elapsed_ms
-                );
+        let signature = app_redirect_mounts_in(0, package_name)
+            .into_iter()
+            .map(|mount| (mount.mount_id, mount.mount_point))
+            .collect::<Vec<_>>();
+        last_mount_count = signature.len();
+        if signature.is_empty() {
+            // 挂载被摘除或尚未建立，重新开始计数，避免把一次瞬时观测当作落定。
+            settled.clear();
+            settle_polls = 0;
+        } else if signature == settled {
+            settle_polls += 1;
+            if settle_polls >= MOUNT_SETTLE_POLLS {
+                *is_mount_applied_out = true;
                 break;
             }
         } else {
-            last_errno_code = unsafe { *libc::__errno() };
+            settled = signature;
+            settle_polls = 1;
         }
+        // SAFETY: usleep 只接收整型参数，不涉及借用指针。
         unsafe { libc::usleep(mount_timing::POST_MOUNT_STATUS_POLL_DELAY_US) };
     }
 
+    let elapsed_ms = monotonic_ms().saturating_sub(mount_started_ms);
     if *is_mount_applied_out {
-        log::info!("app mount confirmed pid={}", app_pid);
+        // 这一行的措辞被测试流的挂载确认流程匹配，改动前必须同步 .github/tests 下的检测式。
+        log::info!(
+            "app mount confirmed pid={} mounts={} polls={} elapsed_ms={}",
+            app_pid,
+            last_mount_count,
+            poll_count,
+            elapsed_ms
+        );
     } else {
         log::warn!(
-            "mount unknown/failed pid={} marker={} polls={} errno={}",
+            "mount unknown/failed pid={} mounts={} polls={} elapsed_ms={}",
             app_pid,
-            marker_path,
+            last_mount_count,
             poll_count,
-            last_errno_code
+            elapsed_ms
         );
     }
 }

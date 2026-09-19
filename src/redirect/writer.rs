@@ -640,7 +640,8 @@ fn refresh_caller_real_paths_cache(
     }
 
     let config = SettingsHub::instance();
-    let expand_mount_fallbacks = expand_mount_fallbacks_for_mode(config.storage_backend_mode());
+    let expand_mount_fallbacks =
+        expand_mount_fallbacks_for_mode(config.storage_backend_mode(), caller_package);
     if let Some(profile) = get_effective_profile(config, caller_package, caller_uid) {
         // 允许规则必须保留通配符本身：仅命中的具体目录保持真实，
         // 未命中的兄弟目录仍需进入默认私有后端。父目录收敛只适用于只读边界，

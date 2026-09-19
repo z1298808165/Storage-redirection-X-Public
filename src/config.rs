@@ -250,6 +250,22 @@ impl SettingsHub {
         self.config_version.load(Ordering::Relaxed)
     }
 
+    /// 当前已加载配置的内容指纹。
+    ///
+    /// 与 [`Self::config_version`] 的区别是**跨进程可比**：`config_version` 是进程内自增计数器，
+    /// 应用进程与守护进程各自从 0 开始计数，两个域互不相干；而指纹由配置文件本身算出，任何进程
+    /// 读同一份目录都得到同一个值，重启后也稳定。
+    ///
+    /// 挂载状态文件用它回答「这份挂载是不是按当前配置建立的」。不能用 `version=` 回答：
+    /// 状态文件由应用侧 payload 与守护进程两侧分别写入，两侧的 `version` 分属不同计数器，
+    /// 同一个文件里的值会在两个域之间跳变，据此判断必然误判。
+    pub fn config_fingerprint(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .last_fingerprint
+    }
+
     fn bump_config_version(&self) {
         self.config_version.fetch_add(1, Ordering::Relaxed);
     }

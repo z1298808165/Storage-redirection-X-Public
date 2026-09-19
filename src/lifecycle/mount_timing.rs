@@ -1,5 +1,16 @@
-pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 220;
-pub(crate) const POST_MOUNT_STATUS_POLL_DELAY_US: u32 = 50 * 1000;
+// 应用侧等待「重定向挂载是否落定」的轮询预算。
+//
+// 这个等待跑在应用主线程上（zygisk specialize 之后），而 AMS 的进程启动超时约 10 秒。
+// 旧值 220 × 50ms = 11 秒，单独就超过了启动超时线：只要挂载判据没能立刻给出肯定答案
+// （命名空间后端的 bind 挂载就属于这类），应用会在等待里被 AMS 判 start timeout 杀掉，
+// 表现为所有依赖文件系统的用例超时。
+//
+// 实测挂载通常在请求发出后 ~200ms 内就已落定，这个等待实际只是「确认集合稳定」而非
+// 「等待挂载建立」——companion 路径的父进程在此之前已经等过子进程的挂载结果。因此把预算
+// 收到 600ms（20ms × 30 轮）：足够覆盖正常波动与落定确认，又远低于启动超时线，即使判据
+// 完全不成立也不会把应用拖死。
+pub(crate) const POST_MOUNT_STATUS_POLL_COUNT: i32 = 30;
+pub(crate) const POST_MOUNT_STATUS_POLL_DELAY_US: u32 = 20 * 1000;
 pub(crate) const POST_SPECIALIZE_SLOW_MS: i64 = 20;
 
 // 父进程等待挂载结果的超时。之前的 2s 在高负载/FUSE 异常场景下

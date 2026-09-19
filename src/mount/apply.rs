@@ -21,22 +21,47 @@ impl MountPlanner {
 
         if self.storage_root_is_already_redirected(&mountinfo, storage_path) {
             if self.real_storage_anchor_is_usable(&mountinfo, &real_storage_anchor) {
-                log::info!(
-                    "real storage anchor reused after redirect pkg={} storage={} anchor={}",
+                // 复用前必须确认这个锚点指向的是**真实存储根**，而不是被上一轮重定向污染成沙箱的树。
+                //
+                // 配置热更新时顶层 `/storage/emulated/<user>` 已经被上一轮的沙箱挂载覆盖，这里因此
+                // 判定「已重定向」并复用旧锚点；但旧锚点在上一轮里是从当时的 `/storage/emulated/<user>`
+                // 绑过来的，那时它已经是沙箱，于是锚点也被污染。复用污染锚点会让后继的
+                // `path_mappings` 找不到真实源目录：`apply_resolved_path_mappings` 静默返回 false，
+                // 只留下 `redirect done`，映射目标落到沙箱内而不是真实公共路径
+                // （真机上表现为场景 29 的 `file_missing .../Download/Test/srt_hot_after.txt`，
+                // 文件实际在 .../Android/data/<pkg>/sdcard/Download/Test/）。
+                //
+                // 锚点健康时它应当把真实存储根挂在自身路径上，`root` 字段形如 `/media/<user>`；
+                // 被污染时 `root` 会带 `Android/data/<包名>`。判定只排除「指向本应用沙箱」这一种
+                // 明确污染形态，其它形态仍按可用处理，避免把既有环境差异误判成污染而反复重绑。
+                if !mountinfo_root_is_app_sandbox(
+                    &mountinfo,
+                    &real_storage_anchor,
+                    &self.package_name,
+                ) {
+                    log::info!(
+                        "real storage anchor reused after redirect pkg={} storage={} anchor={}",
+                        self.package_name,
+                        storage_path,
+                        real_storage_anchor
+                    );
+                    self.real_storage_anchor = Some(real_storage_anchor.clone());
+                    return Some(real_storage_anchor.to_string());
+                }
+                log::warn!(
+                    "real storage anchor polluted by previous redirect, rebinding pkg={} anchor={}",
                     self.package_name,
-                    storage_path,
                     real_storage_anchor
                 );
-                self.real_storage_anchor = Some(real_storage_anchor.clone());
-                return Some(real_storage_anchor.to_string());
+            } else {
+                log::warn!(
+                    "real storage anchor unavailable after redirect, fallback backend pkg={} storage={} anchor={} target={}",
+                    self.package_name,
+                    storage_path,
+                    real_storage_anchor,
+                    self.redirect_target
+                );
             }
-            log::warn!(
-                "real storage anchor unavailable after redirect, fallback backend pkg={} storage={} anchor={} target={}",
-                self.package_name,
-                storage_path,
-                real_storage_anchor,
-                self.redirect_target
-            );
             let anchor = self.bind_data_media_real_storage_anchor(
                 real_storage_anchor_root,
                 &real_storage_anchor,
@@ -93,18 +118,6 @@ impl MountPlanner {
         None
     }
 
-    fn real_storage_anchor_is_usable(&self, mountinfo: &str, real_storage_anchor: &str) -> bool {
-        if !fs::is_directory(real_storage_anchor) {
-            return false;
-        }
-        if !mountinfo_has_target(mountinfo, real_storage_anchor) {
-            return false;
-        }
-        ["Android", "Download", "DCIM"]
-            .iter()
-            .any(|child| fs::is_directory(&paths::join(real_storage_anchor, child)))
-    }
-
     fn bind_data_media_real_storage_anchor(
         &self,
         real_storage_anchor_root: &str,
@@ -137,6 +150,18 @@ impl MountPlanner {
         }
 
         None
+    }
+
+    fn real_storage_anchor_is_usable(&self, mountinfo: &str, real_storage_anchor: &str) -> bool {
+        if !fs::is_directory(real_storage_anchor) {
+            return false;
+        }
+        if !mountinfo_has_target(mountinfo, real_storage_anchor) {
+            return false;
+        }
+        ["Android", "Download", "DCIM"]
+            .iter()
+            .any(|child| fs::is_directory(&paths::join(real_storage_anchor, child)))
     }
 
     fn storage_root_is_already_redirected(&self, mountinfo: &str, storage_path: &str) -> bool {
@@ -1367,6 +1392,23 @@ fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
             .map(|suffix| format!("/data/media/{suffix}"))
             .map(|source| paths::is_same_or_child(backend, &source))
             .unwrap_or(false)
+}
+
+/// 判断挂载点 `target` 上那条记录的 `root` 是否落在该应用的私有沙箱里。
+///
+/// 用于识别「锚点被上一轮重定向污染」这一种形态：健康锚点的 `root` 指向真实存储根
+/// （形如 `/media/<user>`），被污染时则带 `Android/data/<包名>`。
+fn mountinfo_root_is_app_sandbox(content: &str, target: &str, package_name: &str) -> bool {
+    if package_name.is_empty() {
+        return false;
+    }
+    mount_source_for_target_from_mountinfo(content, target)
+        .map(|root| {
+            ["Android/data/", "Android/media/", "Android/obb/"]
+                .iter()
+                .any(|prefix| root.contains(&format!("{prefix}{package_name}")))
+        })
+        .unwrap_or(false)
 }
 fn detach_mount_if_present(target: &str) {
     // 该函数会 umount2 改变挂载表，且被 bind_mount 之间反复调用，必须每次重新读取；

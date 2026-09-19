@@ -309,7 +309,8 @@ impl MountPlanner {
         // 非共享存储目标（例如当前应用的 `/data/user` 目录）不参与存储
         // fallback；只创建缺失的目录链，避免把绝对路径误转换成 storage 相对路径。
         if !paths::is_same_or_child(request_path, storage_path) {
-            let uid = if should_chown_current_dirs
+            let uid = if crate::metadata_repair::enabled()
+                && should_chown_current_dirs
                 && (request_path.starts_with("/data/user/")
                     || request_path.starts_with("/data/data/"))
             {
@@ -320,7 +321,7 @@ impl MountPlanner {
             return fs::create_directory(request_path, uid);
         }
 
-        let uid = if should_chown_current_dirs {
+        let uid = if crate::metadata_repair::enabled() && should_chown_current_dirs {
             self.app_uid
         } else {
             -1

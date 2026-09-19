@@ -211,7 +211,7 @@ pub fn normalize_redirect_directory(path: &str) {
 }
 
 pub fn fix_system_writer_android_private_owner(path: &str, include_path: bool) {
-    if path.is_empty() {
+    if !crate::metadata_repair::enabled() || path.is_empty() {
         return;
     }
 
@@ -280,7 +280,7 @@ fn fix_system_writer_mapping_target_access(path: &str) {
 /// 会按底层权限检查，导致 QQ FileProvider 等进程收到 EACCES。为显式映射
 /// 的私有别名补齐其它读写位，保持公共目录的 MediaStore 所有者不变。
 pub fn fix_mapped_private_alias_access(hub: &InterceptHub, path: &str, flags: i32) {
-    if path.is_empty() {
+    if !crate::metadata_repair::enabled() || path.is_empty() {
         return;
     }
     let package_name = hub.get_package_name();
@@ -687,6 +687,9 @@ fn resolve_redirect_dir_owner() -> Option<RedirectDirOwner> {
 }
 
 fn normalize_redirect_dir_metadata(path: &str, mode: mode_t, owner: Option<&RedirectDirOwner>) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     let Ok(c_path) = CString::new(path) else {
         return;
     };

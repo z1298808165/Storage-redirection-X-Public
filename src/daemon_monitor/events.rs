@@ -286,6 +286,9 @@ pub(super) fn repair_monitored_backend_owner(
     display_path: &str,
     backend_path: &str,
 ) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     if source == "public_owner" {
         repair_public_directory_owner(display_path, backend_path);
         return;

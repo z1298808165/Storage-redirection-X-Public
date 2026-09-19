@@ -155,6 +155,11 @@ enum ReconcileMode {
     Prewarm,
     Full,
     MissingOnly,
+    /// 显式请求触发的强制重挂。
+    ///
+    /// 与 `Full` 的区别是**不做幂等跳过**：诊断与测试流要的就是「立刻按当前配置重挂一遍」，
+    /// 若这里也跳过，显式请求会静默变成空操作。
+    Forced,
 }
 
 struct DaemonInstanceLock {
@@ -257,7 +262,10 @@ pub fn main_entry() -> i32 {
         if should_reconcile {
             wait_for_file_monitor_version(file_monitor_sync.as_ref(), current);
             policy::refresh_shared_uid_cache();
-            let mode = if control_reconcile.is_some() || pending_full_reconcile {
+            let mode = if control_reconcile.is_some() {
+                pending_full_reconcile = false;
+                ReconcileMode::Forced
+            } else if pending_full_reconcile {
                 pending_full_reconcile = false;
                 ReconcileMode::Full
             } else if should_prewarm_reconcile(round, did_reload, current, last_version, before) {
@@ -467,6 +475,12 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     }
 
     for (index, plan) in plans.iter().enumerate() {
+        // 幂等跳过必须排在其它分支之前：配置未变且挂载健康时，任何模式下的重挂都只会叠加挂载层。
+        // `Forced`（显式请求）例外——诊断与测试流要的就是无条件重挂。
+        if mode != ReconcileMode::Forced && plan.should_skip_as_current() {
+            skipped += 1;
+            continue;
+        }
         if mode == ReconcileMode::Prewarm
             && (index >= PREWARM_MAX_REQUESTS || !plan.should_run_in_prewarm())
         {
@@ -541,6 +555,8 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
 struct ReconcilePlan {
     request: MountRequest,
     has_mount_state: bool,
+    /// 状态健康且记录的配置指纹与当前配置一致：本轮配置已经落地。
+    is_mount_current: bool,
 }
 
 impl ReconcilePlan {
@@ -550,9 +566,11 @@ impl ReconcilePlan {
         } else {
             has_mount_state(&request)
         };
+        let is_mount_current = crate::daemon_mount::has_current_mount_state(&request);
         Self {
             request,
             has_mount_state,
+            is_mount_current,
         }
     }
 
@@ -562,6 +580,18 @@ impl ReconcilePlan {
 
     fn should_run_in_missing_only(&self) -> bool {
         self.request.operation == MountOperation::Reload && !self.has_mount_state
+    }
+
+    /// 幂等跳过：该应用的挂载已按当前配置建立，重挂只会叠加挂载层。
+    ///
+    /// `Full` 轮次过去没有这条判据，对每个运行中的应用无条件重挂。开机时应用自身 specialize
+    /// 挂一次、Prewarm 挂一次、随后两轮 Full 再各挂一次，同一个进程的命名空间里因此叠出
+    /// 2~3 层模块挂载；叠加层的 `root` 解析基准不同，应用读到的目录内容随层数变化。这是
+    /// 「目录内容时而正确时而错误」与「挂载层数无上限增长」的共同根因。
+    ///
+    /// 只在配置指纹变化、挂载目标消失或 FUSE 子进程死亡时才重挂——那正是需要重挂的情形。
+    fn should_skip_as_current(&self) -> bool {
+        self.is_mount_current
     }
 
     fn priority(&self) -> u8 {

@@ -120,7 +120,12 @@ impl MountPlanner {
             owner_uid
         );
         let is_existing = fs::is_directory(&metadata_path);
-        if !is_existing && !fs::create_directory(&metadata_path, owner_uid) {
+        let creation_uid = if crate::metadata_repair::enabled() {
+            owner_uid
+        } else {
+            -1
+        };
+        if !is_existing && !fs::create_directory(&metadata_path, creation_uid) {
             log::warn!(
                 "mount dir: missing and mkdir failed path={} metadata_path={}",
                 path,
@@ -150,6 +155,10 @@ impl MountPlanner {
                 &display_path,
                 &metadata_path,
             );
+        }
+
+        if !crate::metadata_repair::enabled() {
+            return true;
         }
 
         let Ok(c_path) = CString::new(metadata_path.as_str()) else {
@@ -299,7 +308,7 @@ impl MountPlanner {
         };
         let should_fix_public_metadata =
             is_data_media_shared_public_directory(&metadata_path, self.user_id);
-        let uid = if should_fix_public_metadata {
+        let uid = if should_fix_public_metadata && crate::metadata_repair::enabled() {
             MEDIA_RW_UID as i32
         } else {
             -1
@@ -313,7 +322,7 @@ impl MountPlanner {
             return false;
         }
 
-        if should_fix_public_metadata {
+        if should_fix_public_metadata && crate::metadata_repair::enabled() {
             self.fix_real_public_directory_metadata_chain(&metadata_path);
             self.fix_allowed_real_directory_metadata_chain(&metadata_path);
         }
@@ -431,7 +440,7 @@ impl MountPlanner {
                 break;
             }
 
-            if fs::is_directory(&current) {
+            if crate::metadata_repair::enabled() && fs::is_directory(&current) {
                 self.ensure_shared_mapping_directory(&current);
             }
 
@@ -444,6 +453,9 @@ impl MountPlanner {
     }
 
     fn ensure_shared_mapping_directory(&self, path: &str) {
+        if !crate::metadata_repair::enabled() {
+            return;
+        }
         let Some(metadata_path) = self.metadata_operations_path(path) else {
             return;
         };
@@ -1084,6 +1096,9 @@ fn is_android_app_private_relative_path(relative: &str) -> bool {
 }
 
 fn fix_real_public_directory_metadata(path: &str) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     let Ok(c_path) = CString::new(path) else {
         return;
     };
@@ -1113,6 +1128,9 @@ fn fix_real_public_directory_metadata(path: &str) {
 }
 
 fn fix_allowed_real_directory_metadata(path: &str) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     let Ok(c_path) = CString::new(path) else {
         return;
     };
@@ -1130,6 +1148,9 @@ fn fix_allowed_real_directory_metadata(path: &str) {
 }
 
 fn fix_read_only_public_metadata(path: &str) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     let Ok(c_path) = CString::new(path) else {
         return;
     };

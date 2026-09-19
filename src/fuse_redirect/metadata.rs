@@ -22,6 +22,9 @@ pub(super) fn fix_path_metadata(
     is_shared_public_backend: bool,
     is_dir: bool,
 ) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     let mode = adjust_metadata_mode(mode, is_shared_public_backend, is_dir);
     let effective_uid = if is_shared_public_backend {
         MEDIA_RW_UID
@@ -40,7 +43,7 @@ pub(super) fn fix_existing_path_metadata(
     owner_uid: i32,
     is_shared_public_backend: bool,
 ) {
-    if !is_shared_public_backend {
+    if !crate::metadata_repair::enabled() || !is_shared_public_backend {
         return;
     }
     let Ok(metadata) = std::fs::symlink_metadata(path) else {

@@ -154,7 +154,12 @@ impl RedirectPolicy {
             log::error!("fuse redirect target invalid: {}", config.redirect_target);
             return None;
         }
-        if !fs::create_directory(&redirect_root_string, config.uid)
+        let redirect_root_uid = if crate::metadata_repair::enabled() {
+            config.uid
+        } else {
+            -1
+        };
+        if !fs::create_directory(&redirect_root_string, redirect_root_uid)
             && !fs::is_directory(&redirect_root_string)
         {
             log::error!(
@@ -964,6 +969,9 @@ pub(super) fn monitor_event_kind_for_operation(operation_name: &str) -> &'static
 }
 
 pub(super) fn fix_mapped_dir_metadata(path: &str, owner_uid: i32) {
+    if !crate::metadata_repair::enabled() {
+        return;
+    }
     if let Ok(c_path) = CString::new(path) {
         // Android 私有外部存储由 MediaProvider 管理，已有目录的 owner/mode 不能被
         // FUSE 初始化改写；否则应用会被迫额外配置 allowed/read-only 才能访问。新建

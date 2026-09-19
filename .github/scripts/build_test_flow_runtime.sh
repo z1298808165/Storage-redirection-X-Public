@@ -6,6 +6,10 @@ set -euo pipefail
 : "${TARGET_TRIPLE:?缺少 TARGET_TRIPLE}"
 : "${MODULE_ABI:?缺少 MODULE_ABI}"
 
+if [[ "${SRX_NO_PATH_METADATA_REPAIR:-}" == "1" ]]; then
+  export RUSTFLAGS="${RUSTFLAGS:-} --cfg srx_no_path_metadata_repair"
+fi
+
 mkdir -p build/test-flow/module-bin build/test-flow/assets
 cargo test --target "$TARGET_TRIPLE" --no-run
 cargo build --target "$TARGET_TRIPLE" --release

@@ -48,6 +48,12 @@ pub(super) fn write_mount_state(
 
     let mut content = String::new();
     content.push_str(&format!("version={}\n", request.config_version));
+    // 配置指纹是跨进程可比的判据，`version=` 不是（两侧计数器不同域）。见
+    // `SettingsHub::config_fingerprint` 的说明；reconcile 靠它判断这份挂载是否已按当前配置建立。
+    content.push_str(&format!(
+        "fingerprint={}\n",
+        crate::config::SettingsHub::instance().config_fingerprint()
+    ));
     content.push_str(&format!("package={}\n", request.package_name));
     content.push_str(&format!("uid={}\n", request.uid));
     if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(request.pid) {

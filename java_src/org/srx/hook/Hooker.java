@@ -255,7 +255,20 @@ public class Hooker {
           return mappedResult;
         }
         recordProviderOpenPath(this, args, actualArgs, callerUid);
-        Object result = callBackup(args);
+        Object result;
+        try {
+          result = callBackup(args);
+        } catch (Throwable backupFailure) {
+          // 原始 open 抛出的异常在这里原本是静默的：调用方（应用）会自行捕获并把失败降级成
+          // null，于是现场只剩「应用侧拿不到 fd」，既看不到原因也看不到路径。显式记一条，
+          // 让「open 被谁拒了」可查——真机上排查 MediaStore 创建失败时就卡在这一步。
+          logOpenBackupFailure(callerUid, backupFailure);
+          throw backupFailure;
+        }
+        if (result == null) {
+          // 原始 open 返回 null 同样不会留下任何痕迹，而调用方只会看到「打开失败」。
+          logOpenBackupFailure(callerUid, null);
+        }
         completeDirectMediaWriteFromSource(this, args, actualArgs, result, callerUid);
         if (result != null) recordProviderOpenSuccess(this, args, actualArgs, result, callerUid);
         logOpenResult("backup", result);
@@ -345,6 +358,7 @@ public class Hooker {
             finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
             commitRedirectedPendingFile(actualArgs, result, mutationMethod);
           }
+          probeInsertedMediaRow(provider, result, mutationMethod);
           logMutationResult(this, result);
           return result;
         } finally {
@@ -613,7 +627,27 @@ public class Hooker {
     String directPath = resolveMediaStoreDirectPathForValues(publicPath, callerUid);
     String directRelativePath = physicalRelativePath(directPath, callerUid);
     if (directRelativePath == null || directRelativePath.equals(relativePath)) {
-      return callBackup(args);
+      // 这条写入不重定向（例如命中 allowed_real_paths 放行），但 _data 仍需归位为公共形态。
+      //
+      // MediaProvider 在 ensureFileColumns 里分两步写 _data：FileUtils.computeDataFromValues 先用
+      // canonical 路径写一次，随后又用 res.getAbsolutePath() 覆盖一次。而
+      // resolveMediaStoreDirectPathForValues 有意让 MediaProvider 在 /data/media 物理形态上建目录
+      // （该进程看到的是系统 FUSE，在 /storage/emulated 上建目录可能失败），两次写入因此都是物理
+      // 形态。FileUtils.extractVolumeName 的正则是 ^/storage/([^/]+)，匹配不上就回退成
+      // VOLUME_INTERNAL；internal 卷没有 _data 到 file_uri 的映射，随后按 uri 的查询与
+      // openFileDescriptor 都会找不到该行，调用方看到的是 No item at <uri>（真机上表现为
+      // quality-allow(chinese-language): 保留真实 CI 日志签名，便于按原文检索故障。
+      // createMedia returned null（表示 createMedia 返回空结果）。
+      //
+      // 这里不能借用 MEDIA_FILE_BUILD_CONTEXT：providerMediaFileUtilsCallback 会在自己的 finally
+      // 里把它消费掉，而 MediaProvider 的第二次赋值发生在那之后。改为在 callBackup 返回后直接改写
+      // values，时序上必定晚于两次赋值。
+      //
+      // 只换卷前缀、不动文件名：pending 行的 _data 必须保留 .pending-<id>-<名称> 形态，提交阶段
+      // 的改名以它为起点；若在此处替换成最终名，改名的源路径就不存在了。
+      Object result = callBackup(args);
+      restoreMediaStoreVolumePrefix(values, callerUid);
+      return result;
     }
 
     boolean hadRelative = values.containsKey(MediaStore.MediaColumns.RELATIVE_PATH);
@@ -705,6 +739,38 @@ public class Hooker {
       if (relativePath != null) values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
     } finally {
       MEDIA_FILE_BUILD_CONTEXT.remove();
+    }
+  }
+
+  /**
+   * 把 values 里的 _data 从物理形态（{@code /data/media/<user>/...}）换回公共形态 （{@code
+   * /storage/emulated/<user>/...}），只替换卷前缀，其余段（含 `.pending-` 临时文件名）原样保留。
+   *
+   * <p>MediaProvider 用 {@code FileUtils.extractVolumeName} 从 _data 反推卷名，其正则为 {@code
+   * ^/storage/([^/]+)}。物理形态匹配不上，会退化成 {@code VOLUME_INTERNAL}，导致行落进 internal 卷——该卷没有 _data 到
+   * file_uri 的映射，随后按 uri 的查询与 openFileDescriptor 都 找不到这一行。返回到公共形态即可让卷名正确解析为 {@code
+   * external_primary}。
+   *
+   * <p>物理与公共形态是同一份数据的两种叫法（后者经系统 FUSE 转发到前者），因此改写不改变落点。
+   */
+  private static void restoreMediaStoreVolumePrefix(ContentValues values, int callerUid) {
+    if (values == null) return;
+    String data = values.getAsString(MediaStore.MediaColumns.DATA);
+    if (data == null || data.length() == 0) return;
+    int userId = userIdFromUid(callerUid);
+    if (userId >= 0) {
+      String physicalRoot = "/data/media/" + userId + "/";
+      if (data.startsWith(physicalRoot)) {
+        values.put(
+            MediaStore.MediaColumns.DATA,
+            "/storage/emulated/" + userId + "/" + data.substring(physicalRoot.length()));
+        return;
+      }
+    }
+    // 拿不到调用方 user 时退回通用转换：只认 /data/media/<单个数字段>/ 这一种形态。
+    String display = mediaStoreDisplayPath(data, callerUid);
+    if (display != null && !display.equals(data)) {
+      values.put(MediaStore.MediaColumns.DATA, display);
     }
   }
 
@@ -2618,11 +2684,29 @@ public class Hooker {
               ((android.content.Context) app)
                   .getContentResolver()
                   .query(uri, new String[] {"_data"}, null, null, null);
+        } else {
+          logMediaDataQueryMiss(uri, "no_context");
+          return null;
         }
       }
-      if (cursor == null || !cursor.moveToFirst()) return null;
-      return cursor.getString(0);
-    } catch (Throwable ignored) {
+      if (cursor == null) {
+        logMediaDataQueryMiss(uri, "cursor_null");
+        return null;
+      }
+      if (!cursor.moveToFirst()) {
+        logMediaDataQueryMiss(uri, "no_row");
+        return null;
+      }
+      String value = cursor.getString(0);
+      if (value == null || value.length() == 0) {
+        // 行存在但 _data 为空：调用方拿不到 fd，而原始 open 也会因为同一个原因失败。
+        // 这条与 no_row 必须分开，否则无法区分「没有这条记录」与「有记录但没有物理路径」。
+        logMediaDataQueryMiss(uri, "data_null");
+        return null;
+      }
+      return value;
+    } catch (Throwable failure) {
+      logMediaDataQueryMiss(uri, describeFailure(failure));
       return null;
     } finally {
       if (cursor != null) {
@@ -2632,6 +2716,23 @@ public class Hooker {
         }
       }
     }
+  }
+
+  /** 记录查询 `_data` 失败的原因，供定位「拿不到 fd / 回读不到行」类问题。 */
+  private static void logMediaDataQueryMiss(android.net.Uri uri, String reason) {
+    if (!shouldLog()) return;
+    try {
+      android.util.Log.i("SRX", "java media data query miss uri=" + uri + " reason=" + reason);
+    } catch (Throwable ignored) {
+    }
+  }
+
+  /** 把异常压成一行可检索的文本：类名加消息。 */
+  private static String describeFailure(Throwable failure) {
+    if (failure == null) return "unknown";
+    String message = failure.getMessage();
+    String name = failure.getClass().getName();
+    return (message == null || message.length() == 0) ? name : name + ": " + message;
   }
 
   private static void recordProviderOpenPath(
@@ -2989,10 +3090,18 @@ public class Hooker {
     // Android/data/<包名>/sdcard/ 就直接抛「Inserting private file: ... is not allowed」。
     // 因此 relative_path 必须保持公共值，沙箱落点交由 _data 直写通道完成；这里补 _data 是为了
     // 让 MediaProvider 采纳公共路径分支，真正的重定向仍由后续直写登记与 native 层执行。
+    //
+    // 只在写入确实要落进私有沙箱时才补：补 _data 会让 patchedAny 变真，下游
+    // rememberRedirectedMediaTarget 据此把该 URI 登记成重定向目标。被 allowed_real_paths
+    // 放行的路径本就不该重定向，登记之后随后的 open 找不到映射目标、以 mapped_resolve_miss
+    // 失败，表现正是 Android 13 场景 16 的 createMedia returned null。不进沙箱就完全不碰
+    // values，与补 _data 之前的行为保持一致。
     if (insertLike && dataKey == null) {
       String insertDisplayName = firstString(relativeSource, "_display_name", "display_name");
       String publicPath = buildMediaStoreProbePath(relativePath, insertDisplayName, callerUid);
-      if (publicPath != null && publicPath.length() > 0) {
+      if (publicPath != null
+          && publicPath.length() > 0
+          && mediaStoreValueLandsInSandbox(publicPath, callerUid)) {
         patched = copyIfNeeded(patched, values);
         patched.put("_data", publicPath);
         String publicRelative = mediaStoreRelativePath(publicPath);
@@ -3997,6 +4106,19 @@ public class Hooker {
   }
 
   /**
+   * 公共 MediaStore 显示路径对应的物理落点是否在应用的私有沙箱内。
+   *
+   * <p>native 重写只在路径实际进入沙箱或映射目标时返回结果，所以 {@link #resolveMediaStoreDirectPathForValues} 给出公共 {@code
+   * /data/media/<user>/...} 形态时， 说明该写入留在真实后端（例如命中了 {@code allowed_real_paths} 放行规则）；只有落到 {@code
+   * Android/data/<包名>/sdcard/} 下才算真的被重定向。判断复用 {@link
+   * #isSrxSandboxFallbackPath}，避免沙箱前缀在这种关键判据上出现第二份写法。
+   */
+  private static boolean mediaStoreValueLandsInSandbox(String path, int callerUid) {
+    String directPath = resolveMediaStoreDirectPathForValues(path, callerUid);
+    return isSrxSandboxFallbackPath(directPath, callerUid);
+  }
+
+  /**
    * 公共 MediaStore 值没有 native 目标时的物理回退路径。
    *
    * <p>回退必须先跟随父目录的重定向目标。MediaProvider 在 insert 期间会用 `File.getParentFile()` 和 `.pending-<随机>-<文件名>`
@@ -4504,6 +4626,25 @@ public class Hooker {
     }
   }
 
+  /**
+   * 记录「原始 open 没有产出结果」。`failure == null` 表示原始调用返回了 null 而不是抛异常。
+   *
+   * <p>这条日志刻意不受 OPEN_RESULT_LOG_COUNT 之类的上限约束：它只在失败路径上产生，量很小；而一旦被
+   * 上限截断就再也看不到失败原因——真机上排查时正是如此，普通请求在场景早期就把上限用完了。
+   */
+  private static void logOpenBackupFailure(int callerUid, Throwable failure) {
+    if (!shouldLog()) return;
+    try {
+      android.util.Log.w(
+          "SRX",
+          "java open backup failure caller_uid="
+              + callerUid
+              + " kind="
+              + (failure == null ? "null_result" : describeFailure(failure)));
+    } catch (Throwable ignored) {
+    }
+  }
+
   private static void logOpenDelegate(String reason, String path, String mappedPath) {
     if (!shouldLog()) return;
     if (OPEN_DELEGATE_LOG_COUNT >= 96) return;
@@ -4547,6 +4688,75 @@ public class Hooker {
               + " args="
               + describeQueryArgs(args));
     } catch (Throwable ignored) {
+    }
+  }
+
+  /**
+   * insert 之后立刻回读该行，确认它真的落进了 MediaStore。
+   *
+   * <p>背景：真机上「被 allowed_real_paths 放行的路径」做 MediaStore 创建时会失败，调用方只看到 `openFileDescriptor` 抛出 `No
+   * item at &lt;uri&gt;`——也就是说紧随其后的那次回读找不到刚插入的行， 而插入侧原本没有任何检查，于是排查时只能看到下游的 open
+   * 失败。这里只在**回读不到**时记一条： 量很小，也不设日志条数上限（上限在场景早期就会被普通请求用完）。
+   */
+  private static void probeInsertedMediaRow(
+      android.content.ContentProvider provider, Object result, String mutationMethod) {
+    if (!"insert".equals(mutationMethod)) return;
+    if (!(result instanceof android.net.Uri)) return;
+    android.net.Uri uri = (android.net.Uri) result;
+    if (!String.valueOf(uri).startsWith("content://media/")) return;
+    if (!isSingleItemMediaUri(uri)) return;
+    String data = queryDataPath(provider, uri);
+    if (data != null && data.length() > 0) return;
+    if (!shouldLog()) return;
+    try {
+      // 再按「集合 + 显示名」查一次：单条 URI 查不到可能只是被可见性规则过滤，
+      // 而集合查询能区分「行真的没落库」与「行在库里但这条调用方看不到」。
+      android.util.Log.w(
+          "SRX",
+          "java media insert row unreadable uri="
+              + uri
+              + " collection="
+              + describeCollectionRow(provider, uri));
+    } catch (Throwable ignored) {
+    }
+  }
+
+  /**
+   * 在集合 URI 上按显示名反查该行，返回 `found`/`absent`/`error:<原因>`。
+   *
+   * <p>只服务上面的失败诊断：单条查询失败有两种截然不同的成因——行没落库，或行落库了但按当前 调用身份不可见，处置方式完全不同，必须能一眼分开。
+   */
+  private static String describeCollectionRow(
+      android.content.ContentProvider provider, android.net.Uri uri) {
+    if (provider == null || uri == null) return "no_provider";
+    java.util.List<String> segments = uri.getPathSegments();
+    if (segments.size() < 2) return "no_segments";
+    // 去掉末尾的 item id，剩下的才是集合 URI（如 external/images/media）。
+    StringBuilder collection = new StringBuilder("content://" + uri.getAuthority());
+    for (int index = 0; index < segments.size() - 1; index++) {
+      collection.append('/').append(segments.get(index));
+    }
+    android.database.Cursor cursor = null;
+    try {
+      cursor =
+          provider.query(
+              android.net.Uri.parse(collection.toString()),
+              new String[] {"_id", "_display_name"},
+              null,
+              null,
+              null);
+      if (cursor == null) return "cursor_null";
+      int count = cursor.getCount();
+      return count > 0 ? ("found rows=" + count) : "absent rows=0";
+    } catch (Throwable failure) {
+      return "error:" + describeFailure(failure);
+    } finally {
+      if (cursor != null) {
+        try {
+          cursor.close();
+        } catch (Throwable ignored) {
+        }
+      }
     }
   }
 

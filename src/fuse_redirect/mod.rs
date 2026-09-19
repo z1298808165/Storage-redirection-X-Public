@@ -6,12 +6,16 @@ mod metadata;
 mod perf;
 mod policy;
 mod rules;
+pub(crate) mod scoped_mount;
 pub(super) use rules::normalize_rule_list;
 
 // 公开这些配置类型供 daemon/测试流复用；部分构建目标只使用其中的函数。
 pub use config::{
     FuseRedirectConfig, MountRequestFields, fuse_config_from_request, mount_blocking_with_ready,
     scoped_fuse_mount_roots_for_request,
+};
+pub use scoped_mount::{
+    ScopedMountAttempt, ScopedMountReport, conclude_scoped_mount, log_scoped_mount_roots,
 };
 
 use crate::platform::{fs, paths};
@@ -402,7 +406,9 @@ impl FuseRedirectFs {
         if parent.is_empty() {
             return Ok(());
         }
-        let owner_uid = if backend.is_shared_public_backend {
+        let owner_uid = if !crate::metadata_repair::enabled() {
+            -1
+        } else if backend.is_shared_public_backend {
             MEDIA_RW_UID as i32
         } else {
             self.policy.uid

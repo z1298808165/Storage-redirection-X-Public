@@ -6,9 +6,11 @@ mod sys;
 use super::companion_request::CompanionMountRequest;
 use super::mount_timing;
 use crate::config::SettingsHub;
-use crate::fuse_redirect::{FuseRedirectConfig, mount_blocking_with_ready};
+use crate::fuse_redirect::{
+    FuseRedirectConfig, ScopedMountAttempt, ScopedMountReport, conclude_scoped_mount,
+    log_scoped_mount_roots, mount_blocking_with_ready,
+};
 use crate::mount::MountPlanner;
-use crate::mount_status_marker::write_mount_status_marker;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{self, paths::monotonic_ms};
 use diagnostics::log_child_diagnostics;
@@ -39,11 +41,7 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
             request.uid,
             request.pid
         );
-        let marker_started_ms = monotonic_ms();
-        let marker_ok =
-            write_mount_status_marker(&request.app_data_dir, request.pid, request.uid, false);
-        let marker_ms = monotonic_ms().saturating_sub(marker_started_ms);
-        log_companion_mount_perf(request, false, marker_ok, 0, 0, marker_ms, started_ms);
+        log_companion_mount_perf(request, false, 0, 0, started_ms);
         return false;
     }
     let wait_started_ms = monotonic_ms();
@@ -68,9 +66,6 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
     );
     let is_success = run_mount_in_forked_child(request);
     let mount_ms = monotonic_ms().saturating_sub(mount_started_ms);
-    let marker_started_ms = monotonic_ms();
-    let marker_ok =
-        write_mount_status_marker(&request.app_data_dir, request.pid, request.uid, is_success);
     crate::mount_intent::mark_state(
         &request.package_name,
         request.pid,
@@ -79,10 +74,7 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
         request.config_version,
         if is_success { "mounted" } else { "failed" },
     );
-    let marker_ms = monotonic_ms().saturating_sub(marker_started_ms);
-    log_companion_mount_perf(
-        request, is_success, marker_ok, wait_ms, mount_ms, marker_ms, started_ms,
-    );
+    log_companion_mount_perf(request, is_success, wait_ms, mount_ms, started_ms);
     is_success
 }
 
@@ -104,30 +96,26 @@ fn is_redirect_enabled_for_request(request: &CompanionMountRequest) -> bool {
 fn log_companion_mount_perf(
     request: &CompanionMountRequest,
     is_success: bool,
-    marker_ok: bool,
     wait_ms: i64,
     mount_ms: i64,
-    marker_ms: i64,
     started_ms: i64,
 ) {
     let total_ms = monotonic_ms().saturating_sub(started_ms);
-    if total_ms < mount_timing::COMPANION_MOUNT_SLOW_MS && is_success && marker_ok {
+    if total_ms < mount_timing::COMPANION_MOUNT_SLOW_MS && is_success {
         return;
     }
     log::info!(
-        "perf companion mount pkg={} pid={} uid={} ok={} marker={} allow={} ro={} map={} map_only={} wait_ms={} mount_ms={} marker_ms={} total_ms={}",
+        "perf companion mount pkg={} pid={} uid={} ok={} allow={} ro={} map={} map_only={} wait_ms={} mount_ms={} total_ms={}",
         request.package_name,
         request.pid,
         request.uid,
         is_success,
-        marker_ok,
         request.allowed_real_paths.len(),
         request.read_only_paths.len(),
         request.path_mappings.len(),
         request.is_mapping_mode_only,
         wait_ms,
         mount_ms,
-        marker_ms,
         total_ms
     );
 }
@@ -544,68 +532,40 @@ fn handle_child_process(
         );
     } else {
         let fuse_roots = scoped_fuse_roots;
-        if !fuse_roots.is_empty() {
-            log::info!(
-                "hybrid fuse roots pkg={} pid={} count={}",
-                request.package_name,
-                request.pid,
-                fuse_roots.len()
-            );
-            for root in fuse_roots {
-                log::info!("hybrid fuse root {}", root);
-            }
-        }
-        let fuse_children = if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(request, fuse_roots, mount_mgr.real_storage_anchor()) {
-                Some(children) => {
-                    crate::fuse_redirect::config::record_fuse_capability_result(
-                        true,
-                        "companion_scoped_mount_ready",
-                    );
-                    children
-                }
-                None => {
-                    crate::fuse_redirect::config::record_fuse_capability_result(
-                        false,
-                        "companion_scoped_mount_failed",
-                    );
-                    log::warn!(
-                        "hybrid fuse scoped service failed pid={} pkg={}",
-                        request.pid,
-                        request.package_name
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        let effective_backend = if !fuse_roots.is_empty() && !fuse_children.is_empty() {
-            "fuse"
-        } else {
-            "namespace"
-        };
-        let capability = crate::fuse_redirect::config::fuse_capability();
-        let selection_reason = if effective_backend == "fuse" {
-            "scoped_mount_ready"
-        } else if fuse_roots.is_empty() {
-            "capability_unavailable_or_unknown"
-        } else {
-            "scoped_mount_failed_namespace_fallback"
-        };
-        log::info!(
-            "backend_effective pkg={} pid={} requested={} effective={} capability={} selection_reason={} fuse_roots={} fuse_sessions={}",
-            request.package_name,
+        log_scoped_mount_roots(
+            "hybrid fuse",
+            &request.package_name,
             request.pid,
-            request.storage_backend_mode.as_str(),
-            effective_backend,
-            crate::fuse_redirect::config::fuse_capability_as_str(capability),
-            selection_reason,
-            fuse_roots.len(),
-            fuse_children.len()
+            fuse_roots,
         );
-        let hybrid_degraded = !fuse_roots.is_empty() && fuse_children.is_empty();
-        if hybrid_degraded {
+        // 与 daemon 侧同源：闸门判定用同一个函数，只是在这里取出来让 selection_reason 能区分
+        // 「能力未放行」与「规则本来不需要 FUSE 根」。
+        let gate_allowed = crate::fuse_redirect::config::scoped_mount_allowed_for_scope(
+            &request.package_name,
+            request.storage_backend_mode,
+        );
+        let (fuse_children, attempt) = if !fuse_roots.is_empty() {
+            match start_scoped_fuse_services(request, fuse_roots, mount_mgr.real_storage_anchor()) {
+                Some(children) => (children, ScopedMountAttempt::Ready),
+                None => (Vec::new(), ScopedMountAttempt::Failed),
+            }
+        } else if gate_allowed {
+            (Vec::new(), ScopedMountAttempt::NoRootsNeeded)
+        } else {
+            (Vec::new(), ScopedMountAttempt::GateBlocked)
+        };
+        let outcome = conclude_scoped_mount(ScopedMountReport {
+            package_name: &request.package_name,
+            pid: request.pid,
+            requested_mode: request.storage_backend_mode,
+            log_prefix: "hybrid fuse",
+            roots_planned: fuse_roots.len(),
+            sessions: fuse_children.len(),
+            attempt,
+            ready_reason: "companion_scoped_mount_ready",
+            failed_reason: "companion_scoped_mount_failed",
+        });
+        if outcome.needs_namespace_fallback {
             log::warn!(
                 "hybrid fuse no scoped service mounted, fallback to mount namespace pid={} pkg={}",
                 request.pid,
@@ -623,6 +583,24 @@ fn handle_child_process(
         if !mount_state::write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!(
                 "mount state save failed pid={} pkg={}",
+                request.pid,
+                request.package_name
+            );
+        }
+        // 账本与状态文件职责不同：状态文件回答"要摘哪些路径"，账本回答"那些挂载归谁"。
+        // 这条路径此前只写状态文件、不写账本，于是走 companion 的应用在恢复流程与 doctor 里
+        // 没有任何归属判据，只能退化成"按挂载源判定"这个较弱的判据。两条挂载路径必须都登记，
+        // 否则同一件事在两条路径上的结果不一致——这正是本项目反复踩的坑。
+        let mut identity_targets = mounted_targets.clone();
+        identity_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
+        if !crate::mount_ledger::record_mount_identity(
+            "companion",
+            &request.package_name,
+            request.pid,
+            &identity_targets,
+        ) {
+            log::warn!(
+                "mount identity save failed pid={} pkg={}",
                 request.pid,
                 request.package_name
             );

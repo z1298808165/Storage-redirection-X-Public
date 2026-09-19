@@ -184,6 +184,7 @@ impl PathRouter {
         let config = crate::config::SettingsHub::instance();
         let expand_mount_fallbacks = crate::fuse_redirect::config::expand_mount_fallbacks_for_mode(
             config.storage_backend_mode(),
+            package_name,
         );
         state.allowed_real_paths = RouterPathIndex::new(resolve_router_path_list(
             allowed_real_paths,

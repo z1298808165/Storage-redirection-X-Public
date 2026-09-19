@@ -6,6 +6,7 @@ const MIN_HOOKER_DEX_BYTES: u64 = 1024;
 
 // 执行构建配置
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(srx_no_path_metadata_repair)");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     build_hooker_dex(&target_os);
 

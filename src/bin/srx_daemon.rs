@@ -21,14 +21,18 @@ mod fuse_supervisor;
 mod log_daemon;
 #[path = "../logging.rs"]
 mod logging;
+#[path = "../metadata_repair.rs"]
+mod metadata_repair;
+#[path = "../module_mount_source.rs"]
+mod module_mount_source;
 #[path = "../mount.rs"]
 mod mount;
 #[path = "../mount_identity.rs"]
 mod mount_identity;
 #[path = "../mount_intent.rs"]
 mod mount_intent;
-#[path = "../mount_status_marker.rs"]
-mod mount_status_marker;
+#[path = "../mount_ledger.rs"]
+mod mount_ledger;
 #[path = "../platform.rs"]
 mod platform;
 #[path = "../redirect/policy.rs"]
@@ -53,7 +57,8 @@ fn main() {
         });
     }
     if command.as_deref() == Some("doctor") {
-        std::process::exit(daemon_mount::doctor_report());
+        let doctor_args: Vec<String> = args.collect();
+        std::process::exit(daemon_mount::doctor_report(&doctor_args));
     }
     if command.as_deref() == Some("control") {
         let Some(command) = args.next() else {

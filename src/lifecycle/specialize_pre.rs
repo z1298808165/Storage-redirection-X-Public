@@ -27,7 +27,6 @@ use crate::platform::module_paths;
 use crate::platform::paths::monotonic_ms;
 use crate::redirect::{PathRouter, policy};
 use crate::zygisk::{abi, jni};
-use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static MONITOR_HOOK_PROCESS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -131,6 +130,16 @@ impl RuntimeFlow {
         self.should_install_fuse_fix = false;
         self.should_skip_post_work = false;
         self.should_keep_module_loaded = false;
+
+        // 应用数据目录要在任何提前返回之前读出来：post 阶段的历史标记清理、以及挂载请求
+        // 都依赖它，而 pre 存在多条会直接返回的分支（无有效配置的 fast bypass 等）。
+        self.app_data_dir = if args.app_data_dir.is_null() {
+            String::new()
+        } else {
+            // SAFETY: Zygisk 传入的 app_data_dir 在 specialize 前已由框架提供；这里只读取其 JNI 引用，
+            // 不延长生命周期，也不写入该指针指向的对象。
+            jni::get_jstring_utf8(self.env, unsafe { *args.app_data_dir })
+        };
 
         // 系统代写进程在 specialize 后可能无法通过绝对路径访问模块目录。先保留
         // Zygisk 模块目录 FD，让 UID 归因与其余配置共用同一可访问来源。
@@ -387,15 +396,6 @@ impl RuntimeFlow {
             .unwrap_or_else(|| {
                 platform::paths::default_redirect_target(&self.package_name, user_id)
             });
-        self.app_data_dir = if args.app_data_dir.is_null() {
-            String::new()
-        } else {
-            jni::get_jstring_utf8(self.env, unsafe { *args.app_data_dir })
-        };
-
-        if !self.is_system_writer_hook_redirect {
-            clear_mount_status_marker(&self.app_data_dir, self.app_pid);
-        }
 
         RouteConfigSnapshot::configure_router(
             &self.package_name,
@@ -766,21 +766,6 @@ fn resolve_config_package_for_uid(package_name: &str, uid: i32) -> Option<String
     }
 
     None
-}
-
-// 发送挂载请求前清理当前 PID 标记，避免读取到旧结果。
-fn clear_mount_status_marker(app_data_dir: &str, app_pid: i32) {
-    if app_data_dir.is_empty() || app_pid <= 0 {
-        return;
-    }
-
-    let marker_path = format!("{}/.srx_mount_status_{}", app_data_dir, app_pid);
-    let Ok(c_path) = CString::new(marker_path.clone()) else {
-        return;
-    };
-    if unsafe { libc::unlink(c_path.as_ptr()) } == 0 {
-        log::info!("old marker cleared {}", marker_path);
-    }
 }
 
 /// 判断普通应用是否需要安装重定向 hook。
