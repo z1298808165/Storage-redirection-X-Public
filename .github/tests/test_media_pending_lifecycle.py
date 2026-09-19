@@ -111,15 +111,17 @@ public class PendingFixture {
 
 @unittest.skipUnless(JAVA and JAVAC, "需要 JDK 执行媒体提交回归")
 class MediaPublicPhysicalFallbackTest(unittest.TestCase):
-    """执行真实的 mediaStorePublicPhysicalFallback，覆盖父跟随限制与放行边界。
+    """执行真实的 mediaStorePublicPhysicalFallback，覆盖父目标跟随与放行边界。
 
-    mediaStorePublicPhysicalFallback 是本次改动的方法：只有 pending 名称才跟随父目录
-    的 native 沙箱目标，普通放行路径即便父目录落在沙箱内也必须保留公共物理落点。
+    mediaStorePublicPhysicalFallback 对**所有**没有 native 目标的公共值跟随父目录的
+    native 沙箱目标（不限 pending 名称）：MediaProvider 的 insert 对最终文件名同样会走到
+    这条回退，只跟随 pending 名称会让普通 insert 落回公共物理路径而不是沙箱。
+    "放行目录不被未放行祖先的沙箱目标覆盖"由祖先 mkdir 的路由判定负责，不在本方法内。
     这里抽取 Hooker.java 中的真实方法执行，并 stub 掉 native 重写、safe/enabled/physical
     四个依赖；pending 判据抽取 Hooker.java 内嵌 FilteringCursor 类的真实方法。
     """
 
-    def test_fallback_follows_sandbox_parent_only_for_pending(self):
+    def test_fallback_follows_sandbox_parent_for_public_values(self):
         source = (ROOT / "java_src/org/srx/hook/Hooker.java").read_text(encoding="utf-8")
         fallback_sig = "private static String mediaStorePublicPhysicalFallback("
         fallback_start = source.index(fallback_sig)
@@ -179,23 +181,31 @@ public class PublicFallbackFixture {
     String sandboxTarget = "/storage/emulated/0/Android/data/com.example.app/sdcard/Pictures";
     String publicRoot = "/storage/emulated/0/";
 
-    // A: 放行的普通目录，其父 native 落在沙箱内，也必须保留公共物理落点（不跟随父）。
+    // A: 普通目录（非 pending）的父 native 落在沙箱内，同样跟随父目标落进沙箱。
     redirectEnabled = true; safePublic = true;
     nativeTargets.clear();
     nativeTargets.put(sandboxParent, sandboxTarget);
     String dir = publicRoot + "Pictures/Albums";
     String a = mediaStorePublicPhysicalFallback(dir, UID);
     check(a != null);
-    check(a.equals("/data/media/0/Pictures/Albums"));
-    check(!a.contains("Android/data"));
+    check(a.equals("/data/media/0/Android/data/com.example.app/sdcard/Pictures/Albums"));
+    check(a.contains("Android/data"));
 
-    // B: 放行的普通文件保持公共物理落点。
+    // B: 普通最终文件名（非 pending）同样跟随父目标，避免 insert 落回公共物理路径。
     nativeTargets.clear();
+    nativeTargets.put(sandboxParent, sandboxTarget);
     String file = publicRoot + "Pictures/photo.jpg";
     String b = mediaStorePublicPhysicalFallback(file, UID);
     check(b != null);
-    check(b.equals("/data/media/0/Pictures/photo.jpg"));
-    check(!b.contains("Android/data"));
+    check(b.equals("/data/media/0/Android/data/com.example.app/sdcard/Pictures/photo.jpg"));
+    check(b.contains("Android/data"));
+
+    // B2: 父目录没有 native 目标时，普通文件名保留公共物理落点。
+    nativeTargets.clear();
+    String b2 = mediaStorePublicPhysicalFallback(file, UID);
+    check(b2 != null);
+    check(b2.equals("/data/media/0/Pictures/photo.jpg"));
+    check(!b2.contains("Android/data"));
 
     // C: pending 名称且父 native 落在沙箱内，跟随父目标。
     nativeTargets.clear();
