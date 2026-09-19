@@ -43,12 +43,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-36。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-37。CI Build 和 Release 都额外包含一个独立的 Android 17（API 37.0）模拟器 job，执行同一套 scenario 1-37；`Test-flow required gate` 会同时校验主矩阵和该 job，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
-- 当前模块跑完 scenario 1-36；如果显式设置 `RUN_FUSE_BACKEND_SCENARIOS=0`，脚本会跳过需要 FUSE 数据面的场景。旧变量 `RUN_FUSE_DAEMON_SCENARIOS` 仍作为迁移期间的别名。
+- 当前模块跑完 scenario 1-37。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
 
@@ -178,17 +178,22 @@ Remove-Item Env:SRT_SCENARIOS
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-36。 |
-| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-36。与其它场景号混用会报错。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-37。 |
+| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-37。与其它场景号混用会报错。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
 | `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
 | `SRT_SKIP_FINAL_CLEANUP=1` | 跳过脚本退出前的最终白名单清理。仅用于 CI/Release 临时模拟器；本地复用设备时通常不要开启。 |
-| `RUN_FUSE_BACKEND_SCENARIOS=0/1` | 强制跳过或强制运行 FUSE 数据面场景；默认自动探测模块是否支持。旧变量 `RUN_FUSE_DAEMON_SCENARIOS` 作为兼容别名。 |
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-36，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-36 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16 x86_64 模拟器各自执行完整 scenario 1-37，并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-37 必须在 Android 13/14/15/16 x86_64 模拟器上全部通过。
+
+CI Build 和 Release 各有一个独立的 Android 17（API 37.0）模拟器 job，不并入上面的矩阵，而是与主矩阵并行且被 `Test-flow required gate` 一并校验。它执行同一套 scenario 1-37，执行环境与主矩阵有三处差异：
+
+- **设备侧图形读回保护**：Android 17 系统镜像的 `mapper.ranchu` gralloc 未实现 DMA 颜色缓冲读回，而 emulator 的 gfxstream 后端仍会广播 `ReadColorBufferDMA` 特性。SystemUI 的 `RegionSampling` 与 system_server 的 `TaskSnapshotPersister` 触发读回后会命中 `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma`，并连带重启 framework。测试脚本在设备 SDK 版本为 37 时先执行 `service call window 137 i32 0` 关闭 task snapshot，再 `pm disable-user com.android.systemui` 关闭 SystemUI，并在模块安装重启 framework 后重新应用，直到确认 task snapshot 已关闭且 SystemUI 处于 disabled 状态才继续。该缺陷与 GPU 模式无关，保护逻辑仅在检测到 `ro.build.version.sdk = 37` 时生效。保护过程写入设备侧 `test-flow-graphics-state.txt`（该文件目前不在任何 job 的 artifact 上传清单内，排障需结合 job 日志中的 `android17:` 行）。
+- **注入与启动参数**：显式使用 `Magisk v31.0` 完成 rootAVD 注入（主矩阵不设置 `MAGISK_URL`，沿用安装脚本内置默认版本），模拟器启动超时放宽到 1800 秒并保留系统动画（主矩阵为 1500 秒、关闭动画）。
+- **用例粒度**：未覆盖 `SRT_FRESH_APP_PER_CASE`，因此使用脚本默认值 1（每个服务用例前冷启动应用）；主矩阵显式设为 0。
 
 完整脚本覆盖以下场景：
 
