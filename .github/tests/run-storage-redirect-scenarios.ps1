@@ -155,10 +155,17 @@ $script:GlobalConfigBackupReady = $false
 $script:AppConfigBackupReady = $false
 $script:CrossAppConfigBackupReady = $false
 $script:DeviceExecutionStateBackupReady = $false
+# 最近一次被确认（日志 + mountinfo 双重校验）的应用 PID。与 .sh 的 LAST_MOUNT_CONFIRMED_PID 对应：
+# 同一个 PID 且挂载点仍在时无需重新等待，只在 PID 变化或挂载点消失时重新确认。
+$script:LastMountConfirmedPid = ""
 $script:FreshAppPerCase = -not ($env:SRT_FRESH_APP_PER_CASE -match '^(0|false|FALSE|no|NO)$')
 if ($FreshAppPerCase) { $script:FreshAppPerCase = $true }
 $script:ResultPollMilliseconds = if ($env:SRT_RESULT_POLL_MS -match '^\d+$') { [Math]::Max(50, [int]$env:SRT_RESULT_POLL_MS) } else { 150 }
 $script:AppLaunchSettleMilliseconds = if ($env:SRT_APP_LAUNCH_SETTLE_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_APP_LAUNCH_SETTLE_MS) } else { 800 }
+# 默认 0 = 不等日志确认（与 .sh 默认 15000ms 不同，这里是有意保留的既有行为：
+# `.ps1` 的场景在启动应用后直接进入用例，不依赖 `app mount confirmed` 这条日志）。
+# 注意它控制的是「日志确认」；物理挂载点复核（Assert-AppMountinfoHasExpectedPaths）
+# 不受它影响，见 Ensure-CurrentAppMountConfirmed。
 $script:MountConfirmTimeoutMilliseconds = if ($env:SRT_MOUNT_CONFIRM_TIMEOUT_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_MOUNT_CONFIRM_TIMEOUT_MS) } else { 0 }
 $script:ServiceCaseSettleMilliseconds = if ($env:SRT_SERVICE_CASE_SETTLE_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_SERVICE_CASE_SETTLE_MS) } else { 50 }
 $script:FileMonitorEnabled = $env:SRT_FILE_MONITOR_ENABLED -match '^(1|true|TRUE|yes|YES)$'
@@ -528,6 +535,15 @@ exit 1
 function Wait-AppMountConfirmed {
     param([string]$Label)
 
+    # 与 run-storage-redirect-scenarios.sh 的 wait_app_mount_confirmed 保持等价：只认两条日志——
+    # 应用侧 specialize_post 的 `app mount confirmed pid=`，以及 daemon 主动重挂时的
+    # `daemon mount ... op=Reload ok=true`。这里曾经还有第三条「读挂载状态标记文件成功」，
+    # 但标记文件机制已废弃（按 PID 命名、在应用数据目录里无限累积），不要把它加回来。
+    # 只认应用侧那一条会让「仅由 daemon 重挂」的场景（例如热更新后的 reconcile）在这里空等超时。
+    #
+    # 与 .sh 仍有一处已知差异：`.sh` 在确认到 PID 后还会用 app_mountinfo_has_expected_paths
+    # 独立复核挂载点，本文件尚无该函数，日志命中即视为通过。补它需要一并移植 label→期望路径的
+    # 映射表，属独立改动。
     if ($script:MountConfirmTimeoutMilliseconds -le 0) { return $false }
 
     $timeoutSeconds = [Math]::Max(1, [Math]::Ceiling($script:MountConfirmTimeoutMilliseconds / 1000.0))
@@ -536,6 +552,7 @@ deadline=`$((`$(date +%s) + $timeoutSeconds))
 pid=""
 while [ `$(date +%s) -le `$deadline ]; do
   pid=`$(pidof '$AppId' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (`$i+0 > max) max=`$i} END {if (max != "") print max}')
+  [ -z "`$pid" ] && pid=`$(for q in /proc/[0-9]*; do c=`$(cat "`$q/cmdline" 2>/dev/null | tr '\0' '\n' | head -1); case "`$c" in '$AppId'|'$AppId':*) echo "`${q#/proc/}";; esac; done | sort -n | tail -1)
   [ -n "`$pid" ] && break
   sleep 0.1
 done
@@ -543,17 +560,29 @@ if [ -z "`$pid" ]; then
   echo "pid_not_found"
   exit 2
 fi
-pattern="app mount confirmed pid=`$pid"
+confirmed="app mount confirmed pid=`$pid"
+daemon="daemon mount pkg=$AppId pid=`$pid op=Reload ok=true"
 while [ `$(date +%s) -le `$deadline ]; do
-  logcat -d -t 200 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Fq "`$pattern" && exit 0
-  tail -120 '$LogPath' 2>/dev/null | grep -Fq "`$pattern" && exit 0
+  if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq "(`$confirmed|`$daemon)"; then echo "confirmed_pid=`$pid"; exit 0; fi
+  if tail -240 '$LogPath' 2>/dev/null | grep -Eq "(`$confirmed|`$daemon)"; then echo "confirmed_pid=`$pid"; exit 0; fi
   sleep 0.1
 done
 echo "pid=`$pid"
 exit 1
 "@
     $output = @(Invoke-Su $command)
-    if ($LASTEXITCODE -eq 0) { return $true }
+    if ($LASTEXITCODE -eq 0) {
+        # 日志只是触发器：确认到 PID 之后还要独立复核挂载点，避免把「日志出现过但挂载已被摘除」
+        # 当成通过。与 .sh 的 wait_app_mount_confirmed 一致。
+        $confirmedLine = $output | Where-Object { $_ -like "confirmed_pid=*" } | Select-Object -Last 1
+        $confirmedPid = if ($confirmedLine) { $confirmedLine.Substring("confirmed_pid=".Length).Trim() } else { "" }
+        if ($confirmedPid -and (Assert-AppMountinfoHasExpectedPaths $Label $confirmedPid)) {
+            $script:LastMountConfirmedPid = $confirmedPid
+            return $true
+        }
+        Write-Host "  mount confirm missing expected mountinfo: $Label pid=$(if ($confirmedPid) { $confirmedPid } else { 'missing' })"
+        return $false
+    }
     if ($output -contains "pid_not_found") {
         Write-Host "  mount confirm skipped: app pid not found for $Label"
     } else {
@@ -561,6 +590,110 @@ exit 1
         Write-Host "  mount confirm timeout: $Label $pidLine"
     }
     $false
+}
+
+function Get-ScenarioFromLabel {
+    # 与 .sh 的 scenario_from_label 对应。标签形态有两类：
+    # `scenario-6/write`（.ps1 内部拼接）与 `scenario-6-hot-initial-private`（.sh 风格），
+    # 因此按 `scenario-<数字>` 提取而非按分隔符切分。
+    param([string]$Label)
+
+    if ($Label -match 'scenario-(\d+)') { return [int]$Matches[1] }
+    return -1
+}
+
+function Test-LabelExpectsMount {
+    # 与 .sh 的 label_expects_mount 对应：这几个场景断言「不重定向」，不该等挂载确认，
+    # 等了反而会把正确的行为判成超时。
+    param([string]$Label)
+
+    $scenario = Get-ScenarioFromLabel $Label
+    return -not ($scenario -in @(-1, 1, 23, 31))
+}
+
+function Get-ExpectedMountPathsForLabel {
+    # 与 .sh 的 expected_mount_paths_for_label 对应：只对「挂载点可预知」的场景给出期望路径。
+    # 其余场景返回空数组，表示不做 mountinfo 复核（日志确认即可）。
+    param([string]$Label)
+
+    $scenario = Get-ScenarioFromLabel $Label
+    if ($scenario -eq 3) {
+        return @("$RealRoot/Download/SrtProbe")
+    }
+    if ($scenario -eq 4) {
+        # 父目录放行与子路径映射共存时，Auto/FUSE 只需建立一个父级会话；
+        # 子路径属于会话内的逻辑映射，不会额外出现在 mountinfo 中。
+        return @("$RealRoot/Download")
+    }
+    return @()
+}
+
+function Assert-AppMountinfoHasExpectedPaths {
+    # 与 .sh 的 app_mountinfo_has_expected_paths 对应：逐条确认期望路径确实是该进程的挂载点。
+    #
+    # 判定按**显式输出标记**（`all_present` / `missing=<path>`）而不是 `$LASTEXITCODE`：
+    # adb 确实会传递远端退出码，但 `$LASTEXITCODE` 是全局变量，任何中间的原生命令都会覆盖它，
+    # 依赖它容易在后续改动里静默失效。输出标记是确定的，也与 .sh 的判定口径一致。
+    #
+    # 参数名不能叫 `$Pid`：PowerShell 变量名大小写不敏感，`$Pid` 与只读内置变量 `$PID` 冲突
+    # （实测报 "无法覆盖变量 Pid，因为它是只读变量或常量"，且是在赋值处才炸）。
+    param([string]$Label, [string]$AppProcessId)
+
+    $expected = @(Get-ExpectedMountPathsForLabel $Label)
+    if ($expected.Count -eq 0) { return $true }
+    if ([string]::IsNullOrWhiteSpace($AppProcessId)) { return $false }
+
+    $command = "pid='$AppProcessId'; "
+    foreach ($path in $expected) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        $command += "grep -Fq ' $path ' `"/proc/`$pid/mountinfo`" || { echo missing=$path; exit 1; }; "
+    }
+    $command += "echo all_present"
+
+    $output = @(Invoke-Su $command)
+    if ($output -contains "all_present") { return [bool]$true }
+    foreach ($line in $output) {
+        if ($line -like "missing=*") { Write-Host "  mountinfo_check ${Label}: $line" }
+    }
+    return [bool]$false
+}
+
+function Ensure-CurrentAppMountConfirmed {
+    # 与 .sh 的 ensure_current_app_mount_confirmed 对应：同一个 PID 且挂载点仍在时直接复用上次确认，
+    # 否则重新确认一次。
+    #
+    # 与 .sh 的差异：`.ps1` 的 SRT_MOUNT_CONFIRM_TIMEOUT_MS 默认为 0（不等日志），
+    # 因此这里不能直接转交 Wait-AppMountConfirmed——那样会在超时为 0 时无条件返回 false，
+    # 把「物理挂载已建立」的场景判成失败。改为：
+    #   - 超时 > 0：走完整确认（日志 + 物理复核）；
+    #   - 超时 = 0：只做物理复核，这正是本函数要保证的东西。
+    param([string]$Label)
+
+    $currentPid = Get-AppPid
+    if (
+        -not [string]::IsNullOrWhiteSpace($currentPid) -and
+        $currentPid -eq $script:LastMountConfirmedPid -and
+        (Assert-AppMountinfoHasExpectedPaths $Label $currentPid)
+    ) {
+        return $true
+    }
+    if ($script:MountConfirmTimeoutMilliseconds -le 0) {
+        # 不等日志，直接按物理挂载点判定。
+        #
+        # PID 尚未出现时**不判失败**：本分支的语义就是「不等确认」，此时应用可能还在启动窗口内；
+        # 直接判失败会把正常场景打断（后续用例自己会因为应用没起来而失败，报错点更贴近现场）。
+        if ([string]::IsNullOrWhiteSpace($currentPid)) {
+            Write-Host "  mount confirm skipped: app pid not found for $Label"
+            return [bool]$true
+        }
+        $ok = Assert-AppMountinfoHasExpectedPaths $Label $currentPid
+        if ($ok) { $script:LastMountConfirmedPid = $currentPid }
+        return [bool]$ok
+    }
+    $before = if ([string]::IsNullOrWhiteSpace($script:LastMountConfirmedPid)) { "none" } else { $script:LastMountConfirmedPid }
+    $after = if ([string]::IsNullOrWhiteSpace($currentPid)) { "missing" } else { $currentPid }
+    Write-Host "  mount confirm refresh: ${Label} before=$before after=$after"
+    return (Wait-AppMountConfirmed $Label)
 }
 
 function Get-ServiceCaseTimeoutSeconds {
@@ -600,6 +733,25 @@ function Invoke-ServiceCase {
     }
     Invoke-Adb $args | Out-Null
 
+    # 与 .sh 的 run_service_case 一致：确认必须在广播**之后**——广播才会拉起应用进程，
+    # 放在之前会因为进程尚未存在而等不到 PID，把正常的场景判成失败。
+    # 场景 1/23/31 断言「不重定向」，由 Test-LabelExpectsMount 排除。
+    #
+    # 确认失败只在**有期望路径**的场景记失败（即场景 3/4）：那里的挂载点可预知，挂载没建立时
+    # 用例必然失败，在确认点报错更贴近现场。其余场景复核恒真，其返回值只当廉价存活检查用。
+    $serviceLabel = "$Scenario/$Label-service"
+    $mountConfirmed = Ensure-CurrentAppMountConfirmed $serviceLabel
+    if (
+        -not $mountConfirmed -and
+        (Test-LabelExpectsMount $serviceLabel) -and
+        (Get-ExpectedMountPathsForLabel $serviceLabel).Count -gt 0
+    ) {
+        $script:Failures.Add("$Scenario/$Label mount not confirmed before service case")
+        if ($script:FailFast) {
+            throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label/mount-confirm"
+        }
+    }
+
     $timeoutSeconds = Get-ServiceCaseTimeoutSeconds $TestCase
     $result = Wait-ServiceResult $timeoutSeconds $freshnessMarker $TestCase
     Invoke-Su "rm -f '$freshnessMarker'" | Out-Null
@@ -634,6 +786,9 @@ function Prepare-ServiceCase {
         throw "[SRT_FAIL_FAST_ITEM] $Label/fresh-app-cleanup"
     }
     Start-Sleep -Milliseconds 500
+    # 应用即将重启，之前确认过的 PID 一定失效；不清掉会让 Ensure-CurrentAppMountConfirmed
+    # 在 PID 被复用时空转（与 .sh 在 start_app_and_confirm_mount 循环里重置的含义一致）。
+    $script:LastMountConfirmedPid = ""
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
@@ -887,16 +1042,46 @@ function Fix-OwnPrivateFixturePermissions {
     Invoke-Su $command | Out-Null
 }
 
+function Assert-FixtureRootsEmpty {
+    # 场景前置断言：夹具根下不得残留任何文件。
+    #
+    # 场景 20 的 file_unexpected 就是前序场景的探针没被清掉造成的：残留文件 mtime 早于本场景
+    # 十余分钟，却被本场景的「不应存在」断言读到。清理失败过去只打一行提示就继续跑，污染因此
+    # 跨场景传播，最终在离现场很远的断言上爆掉。Clear-Targets 只建目录、不预置文件，所以
+    # 「未自行预置夹具的场景，清理后夹具根下必须没有文件」成立，不成立就当场停下。
+    param([string]$Label)
+    # 夹具目录会随场景演进增长，按 Srt* 通配动态枚举，不写死清单。
+    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do [ -d `"`$d`" ] && find `"`$d`" -maxdepth 2 -type f; done 2>/dev/null | head -20"
+    $residue = @(Invoke-Su $command | Where-Object { $_ -and $_.Trim() })
+    if ($residue.Count -gt 0) {
+        Write-Host "fixture_residue label=$Label"
+        $residue | ForEach-Object { Write-Host "  residue: $_" }
+        return $false
+    }
+    return $true
+}
+
 function Clear-Targets {
     # 先经系统 FUSE 删除共享探针，通知其失效前序场景的 inode 缓存；
     # 仅删除 /data/media 后端会让 lookup 仍命中旧文件，而随后 open 返回 ENOENT。
-    Invoke-Su "rm -f '$RealRoot/Download/SrtProbe/$TestFile' '$RealRoot/Download/Test/$TestFile' || echo '共享探针 FUSE 清理失败，继续底层清理并保留后续断言' >&2" | Out-Null
+    Invoke-Su "rm -f '$RealRoot/Download/SrtProbe/$TestFile' '$RealRoot/Download/Test/$TestFile' || echo 'cleanup_tolerated reason=probe_fuse_edom note=单文件删除被模块 FUSE 以 EDOM 拒绝，改由下面的目录级删除覆盖' >&2" | Out-Null
     # 只删探针文件不够：模块对重定向目录的 unlink 返回 EDOM（Math result not representable），
     # 该次删除不生效。必须同时删到目录本身，目录级 rm -rf 才会让模块丢弃该目录项，
     # 后续 lookup 不再命中残留（Android 17 场景 20 的 file_unexpected 即残留所致）。
+    #
+    # 覆盖范围必须按 `Srt*` 通配动态枚举，不能靠维护一份手写清单：清单漏一个目录，那个目录里
+    # 的文件就会跨场景残留，最后在离现场很远的「不应存在」断言上爆掉（场景 29 的
+    # `fixture_residue .../SrtQqAliasMapped/srt_qq_alias_existing.bin` 就是清单漏项所致）。
+    # 枚举口径与场景前置断言 Assert-FixtureRootsEmpty 保持一致，两者互为印证。
+    Invoke-Su "for d in '$RealRoot/Download'/Srt*; do [ -d `"`$d`" ] && rm -rf `"`$d`"; done 2>/dev/null; rm -rf '$RealRoot/Download/Test' 2>/dev/null || true" | Out-Null
+    # 仍保留显式列出的既有目录：通配只在目录名以 Srt 开头时才命中，历史目录名若不含该前缀
+    # （如已废弃的临时目录）需要靠这里兜住。
     Invoke-Su "rm -rf '$RealRoot/Download/SrtProbe' '$RealRoot/Download/SrtOther' '$RealRoot/Download/SrtOtherMapped' '$RealRoot/Download/SrtMapOnlyMapped' '$RealRoot/Download/SrtReadOnly' '$RealRoot/Download/SrtMapRO' '$RealRoot/Download/SrtAllow' '$RealRoot/Pictures/SrtLocked' '$RealRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
 
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
+    # 后端侧也要按通配扫一遍：下面的目录清单同样是手工维护的，漏项会让残留避开清理
+    # （可见路径已被扫过，但后端那一份是独立的目录树）。两条路径都要动态枚举才能保证不漏。
+    Invoke-Su "for d in '$BackendRoot/Download'/Srt* '$BackendRoot/Pictures'/Srt* '$BackendRoot/DCIM'/Srt* '$BackendRoot/Documents'/Srt* '$BackendRoot/Movies'/Srt* '$BackendRoot/Music'/Srt*; do [ -d `"`$d`" ] && rm -rf `"`$d`"; done 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile' '$BackendRoot/Download/Test/$TestFile' '$BackendPrivateRoot/Download/Test/$TestFile' '$BackendRoot/Download/Test/$HotBeforeFile' '$BackendRoot/Download/Test/$HotAfterFile' '$BackendPrivateRoot/Download/Test/$HotBeforeFile' '$BackendPrivateRoot/Download/Test/$HotAfterFile' '$BackendRoot/.xldownload/$TestFile' '$BackendRoot/.xlDownload/$TestFile' '$BackendPrivateRoot/.xldownload/$TestFile' '$BackendPrivateRoot/.xlDownload/$TestFile'" | Out-Null
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow/tmp' '$BackendRoot/Download/SrtLegacy/tmp' '$BackendRoot/Download/SrtQMark/Keep1' '$BackendRoot/Download/SrtQMark/Keep12' '$BackendRoot/Download/SrtLongest/Deep' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow/tmp' '$BackendPrivateRoot/Download/SrtLegacy/tmp' '$BackendPrivateRoot/Download/SrtQMark/Keep1' '$BackendPrivateRoot/Download/SrtQMark/Keep12' '$BackendPrivateRoot/Download/SrtLongest/Deep' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload'; chmod -R 777 '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/Test' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Pictures/SrtLocked' 2>/dev/null || true; chmod 777 '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' 2>/dev/null || true" | Out-Null
@@ -923,6 +1108,9 @@ function Clear-Targets {
 function Remove-TestTargetArtifacts {
     Invoke-Su "rm -rf '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
+    # 后端侧也要按通配扫一遍：下面的目录清单同样是手工维护的，漏项会让残留避开清理
+    # （可见路径已被扫过，但后端那一份是独立的目录树）。两条路径都要动态枚举才能保证不漏。
+    Invoke-Su "for d in '$BackendRoot/Download'/Srt* '$BackendRoot/Pictures'/Srt* '$BackendRoot/DCIM'/Srt* '$BackendRoot/Documents'/Srt* '$BackendRoot/Movies'/Srt* '$BackendRoot/Music'/Srt*; do [ -d `"`$d`" ] && rm -rf `"`$d`"; done 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Documents/SrtMediaRoutingProbe' '$BackendPrivateRoot/Documents/SrtMediaRoutingProbe'" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtProbe' '$BackendRoot/Download/SrtOther' '$BackendRoot/Download/SrtOtherMapped' '$BackendRoot/Download/SrtMapOnlyMapped' '$BackendRoot/Download/SrtReadOnly' '$BackendRoot/Download/SrtMapRO' '$BackendRoot/Download/SrtAllow' '$BackendRoot/Download/SrtLegacy' '$BackendRoot/Download/SrtQMark' '$BackendRoot/Download/SrtLongest' '$BackendRoot/Download/SrtLongestBase' '$BackendRoot/Download/SrtLongestDeep' '$BackendRoot/Download/SrtPriority' '$BackendRoot/Download/SrtPriorityMapped' '$BackendRoot/Download/Test' '$BackendRoot/.xldownload' '$BackendRoot/.xlDownload' '$BackendRoot/Pictures/SrtLocked' '$BackendPrivateRoot/Download/SrtProbe' '$BackendPrivateRoot/Download/SrtOther' '$BackendPrivateRoot/Download/SrtOtherMapped' '$BackendPrivateRoot/Download/SrtMapOnlyMapped' '$BackendPrivateRoot/Download/SrtReadOnly' '$BackendPrivateRoot/Download/SrtMapRO' '$BackendPrivateRoot/Download/SrtAllow' '$BackendPrivateRoot/Download/SrtLegacy' '$BackendPrivateRoot/Download/SrtQMark' '$BackendPrivateRoot/Download/SrtLongest' '$BackendPrivateRoot/Download/SrtLongestBase' '$BackendPrivateRoot/Download/SrtLongestDeep' '$BackendPrivateRoot/Download/SrtPriority' '$BackendPrivateRoot/Download/SrtPriorityMapped' '$BackendPrivateRoot/Download/Test' '$BackendPrivateRoot/.xldownload' '$BackendPrivateRoot/.xlDownload' '$BackendPrivateRoot/Pictures/SrtLocked'; rm -f '$BackendRoot/Download/$AllowPartFile' '$BackendPrivateRoot/Download/$AllowPartFile' '$BackendRoot/Download/$QMarkSingleFile' '$BackendPrivateRoot/Download/$QMarkSingleFile' '$BackendRoot/Download/$QMarkDoubleFile' '$BackendPrivateRoot/Download/$QMarkDoubleFile'" | Out-Null
     Invoke-Su "rm -f '$BackendRoot/Download/$QMarkFileSingleFile' '$BackendPrivateRoot/Download/$QMarkFileSingleFile'" | Out-Null
@@ -1149,6 +1337,11 @@ function Invoke-FileMonitorWriteSuccessCase {
                 $script:Failures.RemoveRange($failureCountBeforeAttempt, $script:Failures.Count - $failureCountBeforeAttempt)
             }
             Write-Host "  - file_monitor_write_success_retry scenario=$Scenario label=$Label attempt=$attempt"
+            # 与 .sh 的 run_file_monitor_write_success_case 一致：重试前先确认挂载仍在，
+            # 否则重试会在已摘除挂载的状态下白跑一轮。
+            # 不因确认失败而中断：该标签没有期望路径表项，复核结果只作存活检查，
+            # 真正的判定交给下面的用例结果。
+            [void](Ensure-CurrentAppMountConfirmed "scenario-$Scenario-$Label-retry")
             Prepare-ServiceCase "scenario-$Scenario-$Label-retry"
             Wait-Storage "scenario-$Scenario-$Label-retry" | Out-Null
             Start-Sleep -Milliseconds $script:ResultPollMilliseconds
@@ -1175,6 +1368,9 @@ function Invoke-FileMonitorWriteDeniedCase {
                 $script:Failures.RemoveRange($failureCountBeforeAttempt, $script:Failures.Count - $failureCountBeforeAttempt)
             }
             Write-Host "  - file_monitor_write_denied_retry scenario=$Scenario label=$Label attempt=$attempt"
+            # 与 .sh 的 run_file_monitor_write_denied_case 一致：重试前先确认挂载仍在。
+            # 同样不因确认失败而中断，理由见上。
+            [void](Ensure-CurrentAppMountConfirmed "scenario-$Scenario-$Label-retry")
             Prepare-ServiceCase "scenario-$Scenario-$Label-retry"
             Wait-Storage "scenario-$Scenario-$Label-retry" | Out-Null
             Start-Sleep -Milliseconds $script:ResultPollMilliseconds
@@ -1612,6 +1808,8 @@ function Restart-App {
     if (-not $cleanupOk -and $script:FailFast) {
         throw "[SRT_FAIL_FAST_ITEM] $Label/restart-cleanup"
     }
+    # 应用即将重启，之前确认过的 PID 一定失效（见 Prepare-ServiceCase 的同款说明）。
+    $script:LastMountConfirmedPid = ""
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     Invoke-Adb @("shell", "am", "start", "-n", "$AppId/.MainActivity") | Out-Null
@@ -2488,6 +2686,16 @@ function Invoke-Scenario {
     if ($Scenario -eq 10) { Set-MappedReadOnlyTargets }
     if ($Scenario -eq 21) { Set-MountNamespaceReadOnlySeed }
     if ($Scenario -in @(28, 31)) { Set-ReadOnlyMediaImage }
+    # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，别让污染漂到后面的断言。
+    if ($Scenario -notin @(9, 10, 20, 21, 22, 28, 31)) {
+        if (-not (Assert-FixtureRootsEmpty "scenario-$Scenario")) {
+            $script:Failures.Add("scenario-$Scenario/fixture-residue")
+            if ($script:FailFast) {
+                throw "[SRT_FAIL_FAST_ITEM] scenario-$Scenario/fixture-residue"
+            }
+            return $false
+        }
+    }
     Restart-App "scenario-$Scenario" ($Scenario -ne 1)
     $scenarioOk = switch ($Scenario) {
         8 { Invoke-RuleSandboxScenario $Scenario }

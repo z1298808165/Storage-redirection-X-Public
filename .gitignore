@@ -84,6 +84,12 @@ credentials/
 scenario-*-result.txt
 media-health.txt
 
+# 测试流在仓库根目录落下的失败诊断产物（ci.yml 按路径上传为 artifact）。
+# 只列出 `scenario-*-result.txt` 时，其余诊断文件会在本地跑测试后变成未跟踪文件，
+# 容易被 `git add -A` 误提交（其中 test-flow-logcat.txt 单个体积可达 10MB）。
+scenario-*-diag.txt
+test-flow-*.txt
+
 # 个人流程笔记
 /docs/release-workflow.md
 /docs/version-calculation-verification.md

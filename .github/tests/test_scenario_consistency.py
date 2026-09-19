@@ -17,6 +17,19 @@ def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
 
 
+def _const_product(source: str, name: str) -> int:
+    """读取 `const NAME: T = <算式>;` 的数值结果，支持整数字面量与 `a * b` 形式。"""
+    expression = re.search(
+        re.escape(name) + r"\s*:\s*\w+\s*=\s*([0-9_\s*]+);", source
+    ).group(1)
+    product = 1
+    for factor in expression.replace("_", "").split("*"):
+        factor = factor.strip()
+        if factor:
+            product *= int(factor)
+    return product
+
+
 def powershell_case_values(label: str) -> list[str]:
     condition = re.search(r"@\(([^)]+)\)", label)
     if condition:
@@ -1109,7 +1122,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         只有 _data 非空时才按该路径建父目录并跳过 relative_path 落点校验。因此守卫锁定：
         1. insert 且原本没有 _data 时必须补 _data；
         2. 补进去的 _data 与 relative_path 都必须是公共显示路径，不能带 Android/data 沙箱前缀；
-        3. 不得再引入向 relative_path 写沙箱相对段的 helper。
+        3. 不得再引入向 relative_path 写沙箱相对段的 helper；
+        4. 补 _data 必须以「物理落点在沙箱内」为前置条件。
         """
         java = read("java_src/org/srx/hook/Hooker.java")
         patch = section(java, "private static ContentValuesPatch patchContentValues(", "\n  /**")
@@ -1121,6 +1135,17 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # _data 用的必须是显示路径构造器，而不是物理路径构造器，否则同样命中私有路径校验。
         data_section = section(patch, 'if (insertLike && dataKey == null) {', "    if (!insertLike")
         self.assertNotIn("resolveMediaStoreDirectPathForValues", data_section)
+        # 补 _data 会让 patchedAny 变真，下游据此把该 URI 登记成重定向目标。被 allowed_real_paths
+        # 放行的路径本不该重定向，登记后随后的 open 会以 mapped_resolve_miss 失败，表现就是
+        # Android 13 场景 16 的 createMedia returned null。因此必须先判定写入确实进沙箱。
+        self.assertIn("&& mediaStoreValueLandsInSandbox(publicPath, callerUid)) {", data_section)
+        helper = section(
+            java,
+            "private static boolean mediaStoreValueLandsInSandbox(",
+            "\n  /**",
+        )
+        self.assertIn("resolveMediaStoreDirectPathForValues(path, callerUid)", helper)
+        self.assertIn("isSrxSandboxFallbackPath(directPath, callerUid)", helper)
 
     def test_mediastore_pending_update_replays_public_target(self) -> None:
         """发布 pending 文件的 update 必须回填公共目标，不能在 ensureFileColumns 里露出沙箱路径。
@@ -1137,6 +1162,558 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
         self.assertIn('values.put(MediaStore.MediaColumns.DATA, pendingContext.publicPath);', callback)
         self.assertIn("mediaStoreRelativePath(pendingContext.publicPath)", callback)
+
+    def test_mount_status_markers_are_not_written(self) -> None:
+        """不得再往应用数据目录写 `.srx_mount_status_<pid>` 标记文件。
+
+        旧实现按 PID 命名标记，应用每次重启都是新 PID 而清理只删「当前 PID」那一个，于是
+        历史文件在 /data/user/0/<包名>/ 下无限累积。守卫锁定：生产源码里只有遗留清理模块可以
+        提到该前缀，且它只做删除；一旦有人重新引入写路径，这里必须失败。
+        """
+        sources = sorted((ROOT / "src").rglob("*.rs"))
+        offenders = []
+        for path in sources:
+            rel = path.relative_to(ROOT).as_posix()
+            text = path.read_text(encoding="utf-8")
+            if ".srx_mount_status_" not in text:
+                continue
+            if rel != "src/legacy_mount_marker.rs":
+                offenders.append(rel)
+        self.assertEqual([], offenders, "只有遗留清理模块可以引用该前缀")
+
+        legacy = read("src/legacy_mount_marker.rs")
+        self.assertIn('const LEGACY_MARKER_PREFIX: &str = ".srx_mount_status_";', legacy)
+        # 清理模块只能删，不能建：出现 open/create/write 即说明写路径复活了。
+        for forbidden in ("O_CREAT", "fs::write", "File::create", "OpenOptions"):
+            self.assertNotIn(forbidden, legacy)
+
+    def test_mount_readiness_is_decided_from_mountinfo(self) -> None:
+        """挂载是否生效必须由应用自己读 mountinfo 判定，而不是等 daemon 写状态文件。
+
+        守卫锁定四件事，缺一条都会让应用在启动阶段被拖死或让判定失真：
+
+        1. 应用侧轮询本模块挂载并等到集合稳定；
+        2. 轮询判据覆盖两条后端——FUSE 后端源带 `srx_fuse_*` 前缀，命名空间后端源是模块私有的
+           临时锚点（`tmp/real_storage/`）；只认前缀会让命名空间后端的应用永远等不到确认；
+        3. 轮询预算必须远低于 AMS 的进程启动超时（约 10 秒）——这个等待跑在应用主线程上，
+           预算接近它就会让应用被判 `start timeout` 杀掉，真机上微信等应用都会 `failed to attach`；
+        4. daemon 侧不再写标记，测试流的挂载确认只认两条日志。
+        """
+        post = read("src/lifecycle/specialize_post.rs")
+        wait = section(post, "fn wait_for_module_mount(", "\nfn log_post_perf(")
+        self.assertIn("app_redirect_mounts_in(0, package_name)", wait)
+        self.assertIn("MOUNT_SETTLE_POLLS", wait)
+        self.assertNotIn(".srx_mount_status_", wait)
+        # 测试流按这一行确认挂载，措辞不能静默改掉。
+        self.assertIn('"app mount confirmed pid={}', post)
+
+        source = read("src/module_mount_source.rs")
+        self.assertIn("pub fn is_module_anchor_mount_source(", source)
+        self.assertIn("REAL_STORAGE_TMP_PREFIX", source)
+        self.assertIn("is_module_anchor_mount_source(&source)", source)
+        # 命名空间后端的 bind 记录里，沙箱路径在 `root` 而不是 `source`（source 是块设备），
+        # 且必须用文件系统类型把系统自己的媒体 FUSE 排除掉，否则会把「系统挂载存在」误当成
+        # 「我们的重定向已生效」。
+        self.assertIn("pub fn is_namespace_redirect_mount(", source)
+        self.assertIn("is_namespace_redirect_mount(&entry, package_name)", source)
+        namespace_redirect = section(
+            source,
+            "pub fn is_namespace_redirect_mount(",
+            "\n/// 列出目标命名空间内全部由本模块创建",
+        )
+        self.assertIn("entry.fs_type.starts_with(\"fuse\")", namespace_redirect)
+        self.assertIn("unescape_field(entry.root)", namespace_redirect)
+        # 按 source 匹配沙箱路径是错的（bind 的 source 永远是块设备），不得回归。
+        self.assertNotIn("is_app_sandbox_mount_source", source)
+        # 这个函数只负责「挂载源带固定前缀」这一条证据，不得把沙箱路径塞进来：
+        # 挂载源与沙箱路径是两个独立维度，混在一起会让调用方无法分辨用的是哪一条。
+        # 组合判据在 is_module_redirect_mount 里，由 test_mount_ownership_uses_sandbox_root_not_source_prefix 锁定。
+        ownership = section(
+            source,
+            "pub fn is_module_mount_source(",
+            "\n/// 判断挂载源是否指向模块自己的临时锚点目录。",
+        )
+        self.assertNotIn("Android/data/", ownership)
+        self.assertNotIn("REAL_STORAGE_TMP_PREFIX", ownership)
+
+        companion = read("src/lifecycle/companion_mount.rs")
+        self.assertNotIn("write_mount_status_marker", companion)
+        daemon_mount = read("src/daemon_mount.rs")
+        self.assertNotIn("write_mount_status_marker", daemon_mount)
+
+        confirm = section(self.bash, "wait_app_mount_confirmed() {", "\nscenario_from_label() {")
+        self.assertIn("app mount confirmed pid=", confirm)
+        # 变量在 shell 双引号里写作 \$pid，这里只锚定不随转义变化的部分。
+        self.assertIn("daemon mount pkg=$APP_ID", confirm)
+        self.assertIn("op=Reload ok=true", confirm)
+        self.assertNotIn(".srx_mount_status_", confirm)
+
+    def test_namespace_redirect_mount_rule_matches_real_mountinfo(self) -> None:
+        """用真机抓到的 mountinfo 样本校验命名空间后端的识别规则。
+
+        这条规则错过两次：先是只按 `source` 前缀匹配（bind 挂载的 source 是块设备，永远匹配
+        不上），后是按 `source` 里含 `Android/data/<包名>` 匹配（同样永远匹配不上）。真实形态是
+        沙箱路径在 `root` 字段，而系统自己的媒体 FUSE 挂载 `root` 里也有 `Android/data/<包名>`，
+        必须靠文件系统类型排除。
+
+        样本取自真机（Android 16 / KernelSU）上 `me.fakerqu.test.storageredirect` 的 mountinfo，
+        规则在这里重写一遍是为了对真实数据做行为校验；Rust 侧的关键判据由
+        `test_mount_readiness_is_decided_from_mountinfo` 做静态锁定。
+        """
+        package_name = "me.fakerqu.test.storageredirect"
+
+        def is_namespace_redirect(line: str) -> bool:
+            fields = line.split(" - ", 1)
+            before = fields[0].split()
+            root = before[3]
+            fs_type = fields[1].split()[0]
+            if fs_type.startswith("fuse"):
+                return False
+            return any(
+                f"{prefix}{package_name}" in root
+                for prefix in ("Android/data/", "Android/media/", "Android/obb/")
+            )
+
+        # 模块建立的命名空间绑定：root 是沙箱 sdcard 子树，类型保留底层 f2fs。
+        ours = [
+            "5419 5404 254:60 /media/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+            " /storage/emulated/0 rw,noatime - f2fs /dev/block/dm-60 rw,lazytime",
+            "5420 5084 254:60 /media/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+            " /mnt/user/0/emulated/0 rw,nosuid,nodev,noatime - f2fs /dev/block/dm-60 rw",
+        ]
+        for line in ours:
+            self.assertTrue(is_namespace_redirect(line), f"未识别为模块重定向: {line}")
+
+        # 系统自己的挂载必须排除：媒体 FUSE 的 root 里同样有 Android/data/<包名>。
+        system_mounts = [
+            "5424 5419 0:131 /0/Android/data/me.fakerqu.test.storageredirect"
+            " /storage/emulated/0/Android/data/me.fakerqu.test.storageredirect rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            "5408 5407 254:60 /user_de/0/me.fakerqu.test.storageredirect"
+            " /data/user_de/0/me.fakerqu.test.storageredirect rw,nosuid,nodev,noatime"
+            " - f2fs /dev/block/dm-60 rw,lazytime",
+            "5409 5405 254:60 /data/me.fakerqu.test.storageredirect"
+            " /data/data/me.fakerqu.test.storageredirect rw,nosuid,nodev,noatime"
+            " - f2fs /dev/block/dm-60 rw,lazytime",
+        ]
+        for line in system_mounts:
+            self.assertFalse(
+                is_namespace_redirect(line), f"系统挂载被误判为模块重定向: {line}"
+            )
+
+    def test_mount_ownership_uses_sandbox_root_not_source_prefix(self) -> None:
+        """摘除归属判据必须能认出「bind 继承掉挂载源」的层，否则重挂只会不断叠加。
+
+        真机上本模块每一层的 `source` 都是继承来的 MediaProvider FUSE 的 `/dev/fuse`
+        （进程内 `srx_fuse_` 前缀匹配数为 0），而旧判据只认固定前缀，于是：
+
+        - `clear_mount_target_stack_verified` 把最顶层判成外部挂载、直接放弃摘除；
+        - `capture_mount_identity` 恒返回 None，账本 `mounts=0`，监督永远产不出 `Owned`。
+
+        后果是同一个挂载点上累积 4 层、应用读到被压在最上面的沙箱层（场景 29 的
+        `srt_hot_after.txt` 落进沙箱而非真实 `Download/Test`）。
+
+        判据必须落在 `root` 的沙箱标记 `<包名>/sdcard` 上：系统自己的媒体 FUSE 挂载
+        `root` 只到 `Android/data/<包名>`，不含 `sdcard`，因此不会被误伤。
+        """
+        source = read("src/module_mount_source.rs")
+        self.assertIn("pub fn is_module_sandbox_root(", source)
+        self.assertIn("pub fn is_module_redirect_mount(", source)
+        sandbox_root = section(
+            source, "pub fn is_module_sandbox_root(", "\n/// 去掉 `/media` 前缀后的 `root`"
+        )
+        # 沙箱标记必须是 `<包名>/sdcard` 而不是裸 `<包名>`——后者与系统挂载同形，会误摘。
+        self.assertIn("/sdcard", sandbox_root)
+        self.assertIn("{prefix}{package_name}/sdcard", sandbox_root)
+        # 判据不得限制文件系统类型：同一轮挂载会同时产出 f2fs（从 /data/media 绑）与
+        # fuse（从 /storage/emulated 绑）两种形态，只认一种就会漏判一半的层。
+        self.assertNotIn("fs_type", sandbox_root)
+
+        # 路径映射的层从「映射目标」bind，`root` 里没有包名，必须靠
+        # 「落在 emulated 存储视图内、且不是系统自己挂的应用专属目录」兜住；
+        # 否则仅映射模式的应用永远等不到挂载确认（场景 6/7）。
+        self.assertIn("fn root_is_app_private_directory(", source)
+        self.assertIn("fn root_is_emulated_storage_view(", source)
+        private_dir = section(
+            source, "fn root_is_app_private_directory(", "\n/// 判断 `root` 是否落在 emulated 存储视图内"
+        )
+        # 系统形态必须是「恰好止于包名」：多一段（如 `/sdcard`）就是模块的层。
+        self.assertIn("!name.contains('/')", private_dir)
+        # 锚点绑定的 source 被 bind 继承成 /dev/fuse、root 是 `/0`，两者都不带模块特征，
+        # 只能按**挂载点**识别（锚点目录是模块私有路径，系统不会往那里挂）。
+        self.assertIn("pub fn is_module_anchor_mount_target(", source)
+        predicate = section(
+            source, "pub fn is_module_redirect_mount(", "\n/// 列出目标命名空间内全部由本模块创建"
+        )
+        self.assertIn("is_module_anchor_mount_target(target)", predicate)
+        self.assertIn("target: &str", predicate)
+        # 系统形态必须先排除，否则同形的模块层会被一起否掉。
+        self.assertIn("root_is_app_private_directory(root)", predicate)
+        self.assertIn("root_is_emulated_storage_view(root)", predicate)
+        # 顺序：排除项必须排在两条包含项之前，否则同形的模块层会被一起否掉。
+        self.assertLess(
+            predicate.index("root_is_app_private_directory(root)"),
+            predicate.index("is_module_sandbox_root(root, package_name)"),
+            "系统形态的排除必须排在包含判据之前",
+        )
+        # 应用侧「重定向是否生效」也必须走同一份判据。
+        app_mounts = section(
+            source, "pub fn app_redirect_mounts_in(", "\n}\n")
+        self.assertIn("is_module_redirect_mount(", app_mounts)
+        # 三个调用点都要把挂载点传进去，漏一个就会在那条路径上失配。
+        for path, anchor, target_arg in (
+            ("src/mount_ledger.rs", "pub fn capture_mount_identity(", "mount_point,"),
+            ("src/daemon_mount.rs", "fn clear_mount_target_stack_verified(", "target,"),
+        ):
+            body = section(read(path), anchor, "\n}\n")
+            call = body[body.index("is_module_redirect_mount("):]
+            call_args = call[: call.index(")") + 1]
+            self.assertIn(
+                target_arg,
+                call_args,
+                f"{path} 里的 is_module_redirect_mount 调用必须把挂载点作为参数传入",
+            )
+
+        # 摘除与账本登记都必须走同一份判据，不得退回只看挂载源。
+        daemon_mount = read("src/daemon_mount.rs")
+        clear = section(
+            daemon_mount,
+            "fn clear_mount_target_stack_verified(",
+            "\nfn is_mount_stack_cleared(",
+        )
+        self.assertIn("is_module_redirect_mount(", clear)
+        self.assertNotIn("is_module_mount_source(", clear)
+
+        ledger = read("src/mount_ledger.rs")
+        capture = section(ledger, "pub fn capture_mount_identity(", "\n/// 按本次挂载的目标集合登记账本")
+        self.assertIn("is_module_redirect_mount(", capture)
+        self.assertIn("package_name: &str", capture)
+        # `root` 是判据的唯一可靠依据，`LiveMount` 必须把它读出来。
+        self.assertIn("pub root: String", ledger)
+
+        # 判据里的 `/sdcard` 标记与 `default_redirect_target` 是同一条约定的两处表达，
+        # 沙箱目录名一旦改动必须同步，否则判据会静默失配、重挂重新开始叠加。
+        paths_source = read("src/platform/paths.rs")
+        default_target = section(
+            paths_source,
+            "pub fn default_redirect_target(",
+            "\npub fn is_default_redirect_backend_path(",
+        )
+        self.assertIn('"{}/Android/data/{}/sdcard"', default_target)
+
+    def test_sandbox_root_rule_separates_module_layers_from_system_mounts(self) -> None:
+        """用真机抓到的 mountinfo 样本校验新的归属判据。
+
+        样本取自真机（Android 16 / KernelSU）上 `me.fakerqu.test.storageredirect` 的 mountinfo。
+        模块层与系统层的区别有两处：沙箱层 `root` 带 `<包名>/sdcard`；映射层 `root` 指向
+        映射目标（不带包名，形如 `/0/Download/SrtMapOnlyMapped`）。系统层 `root` 恰好止于
+        `Android/{data,media,obb}/<包名>`。
+        """
+        package_name = "me.fakerqu.test.storageredirect"
+
+        def storage_tail(root: str):
+            rest = root[len("/media"):] if root.startswith("/media") else root
+            if not rest.startswith("/"):
+                return None
+            rest = rest[1:]
+            user, _, tail = rest.partition("/")
+            if not user or not user.isdigit():
+                return None
+            return tail
+
+        def is_app_private_directory(root: str) -> bool:
+            tail = storage_tail(root)
+            if tail is None:
+                return False
+            for prefix in ("Android/data/", "Android/media/", "Android/obb/"):
+                if tail.startswith(prefix):
+                    name = tail[len(prefix):]
+                    return bool(name) and "/" not in name
+            return False
+
+        def is_module_layer(line: str) -> bool:
+            before, after = line.split(" - ", 1)
+            root = before.split()[3]
+            source = after.split()[1]
+            if source.startswith("srx_fuse_redirect") or source.startswith("srx_fuse_host"):
+                return True
+            if is_app_private_directory(root):
+                return False
+            if f"/sdcard" in root and package_name in root:
+                return True
+            tail = storage_tail(root)
+            return tail is not None and tail != ""
+
+        ours = [
+            # 存储根：从沙箱子树 bind，源被继承成 MediaProvider FUSE 的 /dev/fuse。
+            "13661 13623 0:324 /0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+            " /storage/emulated/0 rw,nosuid,nodev,noexec,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 同一轮里从 /data/media 绑的那一份，类型是 f2fs。
+            "13638 13637 254:60 /media/0/Android/data/me.fakerqu.test.storageredirect/sdcard"
+            " /storage/emulated/0 rw,noatime - f2fs /dev/block/dm-60 rw,lazytime",
+            # 路径映射：源是沙箱里的 Download/Test。
+            "13724 13683 0:324 /0/Android/data/me.fakerqu.test.storageredirect/sdcard/Download/Test"
+            " /storage/emulated/0/Download/SrtProbe rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 恢复自有私有目录时沙箱前缀被叠了两层，仍必须认出来才能摘净。
+            "13706 13666 0:324 /0/Android/data/me.fakerqu.test.storageredirect/sdcard/Android/data"
+            "/me.fakerqu.test.storageredirect"
+            " /storage/emulated/0/Android/data/me.fakerqu.test.storageredirect rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 仅映射模式：从「映射目标」bind，root 里没有包名。
+            "12638 12635 0:324 /0/Download/SrtMapOnlyMapped"
+            " /storage/emulated/0/Download/SrtProbe rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 路径映射指向真实公共目录时的形态。
+            "13681 13661 0:324 /0/Download/Test"
+            " /storage/emulated/0/Download/SrtProbe rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+        ]
+        for line in ours:
+            self.assertTrue(is_module_layer(line), f"未识别为本模块的层: {line}")
+
+        system_mounts = [
+            # 系统 MediaProvider 在应用专属目录上的媒体 FUSE：root 恰好止于包名。
+            "13643 13638 0:324 /0/Android/data/me.fakerqu.test.storageredirect"
+            " /storage/emulated/0/Android/data/me.fakerqu.test.storageredirect rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            "13649 13638 0:324 /0/Android/media/me.fakerqu.test.storageredirect"
+            " /storage/emulated/0/Android/media/me.fakerqu.test.storageredirect rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            "13655 13638 0:324 /0/Android/obb/me.fakerqu.test.storageredirect"
+            " /storage/emulated/0/Android/obb/me.fakerqu.test.storageredirect rw,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 存储根自身的系统 FUSE 视图。
+            "13623 13479 0:324 / /storage/emulated rw,nosuid,nodev,noexec,noatime"
+            " - fuse /dev/fuse rw,lazytime,user_id=0,group_id=0,allow_other",
+            # 非 emulated 存储树的 bind（/data、/user_de）不能算作模块的层。
+            "13627 13626 254:60 /user_de/0/me.fakerqu.test.storageredirect"
+            " /data/user_de/0/me.fakerqu.test.storageredirect rw,nosuid,nodev,noatime"
+            " - f2fs /dev/block/dm-60 rw,lazytime",
+            "13628 13626 254:60 /data/me.fakerqu.test.storageredirect"
+            " /data/data/me.fakerqu.test.storageredirect rw,nosuid,nodev,noatime"
+            " - f2fs /dev/block/dm-60 rw,lazytime",
+        ]
+        for line in system_mounts:
+            self.assertFalse(is_module_layer(line), f"系统挂载被误判为本模块的层: {line}")
+
+    def test_mount_wait_budget_stays_under_process_start_timeout(self) -> None:
+        """应用主线程上的挂载等待预算必须远低于 AMS 的进程启动超时。
+
+        这个等待发生在 zygisk specialize 之后、应用主线程上；AMS 对进程启动的超时约 10 秒，
+        预算一旦接近它，任何「判据没能立刻给出肯定答案」的情况都会让应用被判 `start timeout`
+        并杀掉——真机上微信与测试应用都出现过 `failed to attach` + `start timeout`，所有依赖
+        文件系统的用例随之超时。这里把上限锁在 2 秒：既留出足够余量覆盖落定确认，又保证即使
+        判据完全不成立也不会把应用拖死。
+        """
+        timing = read("src/lifecycle/mount_timing.rs")
+        # 常量可能是 `30` 这样的字面量，也可能是 `20 * 1000` 这样的算式，两种都要能读。
+        count = _const_product(timing, "POST_MOUNT_STATUS_POLL_COUNT")
+        delay_us = _const_product(timing, "POST_MOUNT_STATUS_POLL_DELAY_US")
+        budget_ms = count * delay_us // 1000
+        self.assertLessEqual(
+            budget_ms,
+            2000,
+            f"挂载等待预算 {budget_ms}ms 过高，会把应用拖过 AMS 启动超时（约 10s）",
+        )
+        self.assertGreaterEqual(budget_ms, 200, "预算过短会让正常的落定确认来不及完成")
+        # 等待必须由短轮询实现，不得改成单次长睡眠（那样无法在挂载就绪后立刻返回）。
+        wait = section(read("src/lifecycle/specialize_post.rs"), "fn wait_for_module_mount(", "\nfn log_post_perf(")
+        self.assertIn("POST_MOUNT_STATUS_POLL_DELAY_US", wait)
+
+    def test_fixture_residue_is_rejected_before_each_scenario(self) -> None:
+        """清理后夹具根必须为空，否则跨场景残留会在离现场很远的断言上爆掉。
+
+        场景 20 的 file_unexpected 就是这么来的：前序场景的探针没被清掉，却在场景 20 的
+        「不应存在」断言上失败。守卫锁定三件事：清理后有空目录前置断言；容忍式清理失败必须留下
+        统一可检索标记而不是自由文本；自行预置夹具的场景必须显式豁免，否则断言会误报。
+        """
+        helper = section(self.bash, "assert_fixture_roots_empty() {", "\nclean_results() {")
+        self.assertIn("-maxdepth 2 -type f", helper)
+        self.assertIn("fixture_residue label=", helper)
+        runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
+        self.assertIn('assert_fixture_roots_empty "scenario-${scenario}" || return 1', runner)
+        self.assertRegex(runner, r"9\|20\|21\|22\|28\|31\) ;;")
+        # 容忍式清理必须留下统一前缀，便于在日志里统计与定位，不能只写一句自由文本。
+        self.assertIn("cleanup_tolerated reason=probe_fuse_edom", self.bash)
+        self.assertIn("cleanup_tolerated reason=own_dir_fuse", self.bash)
+
+        ps = section(self.powershell, "function Assert-FixtureRootsEmpty", "function Clear-Targets")
+        self.assertIn("fixture_residue label=", ps)
+        self.assertIn("-maxdepth 2 -type f", ps)
+        ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $scenarioOk = switch")
+        self.assertIn('Assert-FixtureRootsEmpty "scenario-$Scenario"', ps_runner)
+        self.assertIn("-notin @(9, 10, 20, 21, 22, 28, 31)", ps_runner)
+
+    def test_fixture_cleanup_sweeps_directories_by_prefix(self) -> None:
+        """夹具清理必须按 `Srt*` 通配动态枚举目录，不能只依赖手写清单。
+
+        手写清单一定会漏：场景 29 的前置断言就抓到过
+        `fixture_residue .../SrtQqAliasMapped/srt_qq_alias_existing.bin`——该目录只被定义为变量、
+        从未进入清理清单，于是场景 36 写入的文件残留到下一轮，把场景 29 卡在入口。
+        枚举口径要与场景前置断言一致（同一个 `Srt*` 通配），否则清理与断言会各说各话。
+        """
+        # bash：可见路径与后端路径各要有一条通配清扫。两条都写作 `${REAL_ROOT}/...`（该变量在
+        # 函数中途被切到后端根），所以只能按「相对切换点的位置」区分：可见那条必须在切换之前，
+        # 后端那条必须在切换之后。
+        clean = section(self.bash, "clean_targets() {", "\n}\n")
+        switch = clean.index('local REAL_ROOT="${BACKEND_ROOT}"')
+        sweeps = [index for index in range(len(clean)) if clean.startswith("'/Srt*", index)]
+        self.assertGreaterEqual(len(sweeps), 2, "可见路径与后端路径都要有 Srt* 通配清扫")
+        self.assertTrue(
+            any(index < switch for index in sweeps), "可见路径缺少 Srt* 通配清扫"
+        )
+        self.assertTrue(
+            any(index > switch for index in sweeps), "后端路径缺少 Srt* 通配清扫"
+        )
+        # 通配清扫必须在后端 mkdir 之前：清扫会把目录删掉，mkdir 负责重建。
+        self.assertLess(
+            sweeps[0], clean.index("mkdir -p '${REAL_ROOT}/Download/SrtProbe'")
+        )
+
+        # PowerShell：同样的两条。
+        clear = section(self.powershell, "function Clear-Targets {", "\nfunction Remove-TestTargetArtifacts")
+        self.assertIn("'$RealRoot/Download'/Srt*", clear)
+        self.assertIn("'$BackendRoot/Download'/Srt*", clear)
+        self.assertLess(
+            clear.index("/Srt*"), clear.index("mkdir -p '$BackendRoot/Download/SrtProbe'")
+        )
+        remove = section(self.powershell, "function Remove-TestTargetArtifacts", "\nfunction ")
+        self.assertIn("'$BackendRoot/Download'/Srt*", remove)
+
+    def test_scenario_scripts_do_not_match_volatile_diagnostic_log_fields(self) -> None:
+        """测试脚本只允许依赖稳定的对外日志串，不得匹配诊断字段。
+
+        CI（`ci.yml` → `run-android-test-flow.sh` → `run-storage-redirect-scenarios.sh`）与
+        本地真机跑的是**同一个** `run-storage-redirect-scenarios.sh`，`.ps1` 是同一脚本的
+        PowerShell 并行实现（`scripts/verify-test-flow.ps1` 与 `run-fuse-mount-stress.ps1` 用它）。
+        因此模块内部日志一旦被脚本匹配，改动它就要同时改两处脚本——而模块的归属/摘除诊断字段
+        恰恰是最常调整的部分（例如 `daemon unmount skipped foreign` 加 `root=`、
+        `skipped superseded` 把布尔换成 `recorded=<mount_id>`）。
+
+        这条守卫把「脚本只认稳定串」固定下来：`app mount confirmed pid=`、
+        `daemon mount ... op=Reload ok=true`、`backend_effective pkg=` 是挂载确认与后端结论的
+        对外接口，改动必须同步脚本；而 `unmount skipped|cleanup incomplete|anchor polluted|
+        mount identity saved|real storage anchored` 属诊断细节，**不得**被脚本匹配。
+        """
+        stable = [
+            "app mount confirmed",
+            "op=Reload ok=true",
+            "backend_effective pkg=",
+        ]
+        volatile = [
+            "unmount skipped",
+            "cleanup incomplete",
+            "anchor polluted",
+            "anchor unavailable",
+            "mount identity saved",
+            "real storage anchored",
+            "detach_attempts",
+        ]
+        for name, script in (("bash", self.bash), ("powershell", self.powershell)):
+            for token in stable:
+                self.assertIn(token, script, f"{name} 脚本缺少稳定的对外日志串 `{token}`")
+            for token in volatile:
+                self.assertNotIn(
+                    token,
+                    script,
+                    f"{name} 脚本不得匹配诊断字段 `{token}`：改它就要动脚本，"
+                    "诊断字段属实现细节，应改为匹配稳定串或断言物理状态",
+                )
+
+        # 挂载确认必须两脚本一致地认「应用侧」与「daemon 重挂」两条日志。
+        # 只认应用侧那一条时，仅由 daemon 重挂的场景（热更新后的 reconcile）会在这里空等超时——
+        # `.ps1` 曾经就是这样落后于 `.sh` 的。
+        #
+        # 断言前先剔除注释行：函数注释里也会提到这两个日志名，只断言裸串会被注释满足，
+        # 把真正的代码删掉也测不出来（反向验证踩过）。
+        confirm_bash = section(
+            self.bash, "wait_app_mount_confirmed() {", "\nscenario_from_label() {"
+        )
+        confirm_ps = section(
+            self.powershell, "function Wait-AppMountConfirmed {", "\nfunction "
+        )
+        for name, body in (("bash", confirm_bash), ("powershell", confirm_ps)):
+            code = "\n".join(
+                line for line in body.splitlines() if not line.strip().startswith("#")
+            )
+            self.assertIn(
+                "app mount confirmed pid=", code, f"{name} 缺少应用侧确认串"
+            )
+            self.assertIn(
+                "op=Reload ok=true",
+                code,
+                f"{name} 的挂载确认缺少 daemon 重挂串"
+                "（`daemon mount pkg=... op=Reload ok=true`）",
+            )
+            # 两条串必须被同一个匹配表达式用上，不能只是定义后不用。
+            # `.ps1` 在 PowerShell here-string 里写作 `` `$confirmed|`$daemon ``（`$` 被反引号转义），
+            # 因此按「同一行 grep -Eq 同时含两个变量名」判定，不比较字面写法。
+            combined = [
+                line
+                for line in code.splitlines()
+                if "grep -Eq" in line and "$confirmed" in line and "$daemon" in line
+            ]
+            self.assertTrue(combined, f"{name} 未把两条串一起用于匹配")
+
+    def test_powershell_runner_matches_bash_mountinfo_recheck(self) -> None:
+        """`.ps1` 必须与 `.sh` 一样，在挂载确认后独立复核挂载点。
+
+        `.sh` 的 `wait_app_mount_confirmed` 确认到 PID 之后会调用
+        `app_mountinfo_has_expected_paths` 再查一遍 `/proc/<pid>/mountinfo`——日志只是触发器，
+        真正要证明的是「挂载点确实存在」。`.ps1` 长期缺这一层，日志命中即视为通过，
+        于是「日志出现过但挂载已被摘除」在 `.ps1` 路径下测不出来。
+        """
+        ps = self.powershell
+        self.assertIn("function Get-ExpectedMountPathsForLabel", ps)
+        self.assertIn("function Assert-AppMountinfoHasExpectedPaths", ps)
+        self.assertIn("function Ensure-CurrentAppMountConfirmed", ps)
+
+        # 期望路径表必须与 .sh 同口径（同样只覆盖场景 3 与 4），否则两脚本复核范围不一致。
+        bash_expected = section(
+            self.bash, "expected_mount_paths_for_label() {", "\napp_mountinfo_has_expected_paths() {"
+        )
+        ps_expected = section(
+            ps, "function Get-ExpectedMountPathsForLabel {", "\nfunction Assert-AppMountinfoHasExpectedPaths"
+        )
+        for name, body in (("bash", bash_expected), ("powershell", ps_expected)):
+            code = "\n".join(
+                line for line in body.splitlines() if not line.strip().startswith("#")
+            )
+            self.assertIn("SrtProbe", code, f"{name} 的期望路径表缺少场景 3 的 SrtProbe")
+            self.assertIn("$RealRoot/Download" if name == "powershell" else "${REAL_ROOT}/Download", code,
+                          f"{name} 的期望路径表缺少场景 4 的 Download")
+
+        # 复核必须按**显式输出标记**判定，不能只看退出码：`$LASTEXITCODE` 是全局变量，
+        # 任何中间的原生命令都会覆盖它，依赖它在后续改动里容易静默失效。
+        #
+        # 断言前先剔除注释行——注释里会提到 `$LASTEXITCODE` 说明为什么不用它，
+        # 只断言裸串会被注释满足（这个坑在本文件里踩过第二次了）。
+        recheck = section(
+            ps, "function Assert-AppMountinfoHasExpectedPaths {", "\nfunction Ensure-CurrentAppMountConfirmed"
+        )
+        recheck_code = "\n".join(
+            line for line in recheck.splitlines() if not line.strip().startswith("#")
+        )
+        self.assertIn("all_present", recheck_code, "复核缺少成功标记，无法按输出判定")
+        self.assertIn("missing=", recheck_code, "复核缺少失败标记")
+        self.assertNotIn(
+            "$LASTEXITCODE",
+            recheck_code,
+            "复核不得依赖 $LASTEXITCODE（全局变量，会被中间的原生命令覆盖）",
+        )
+
+        # PowerShell 变量名大小写不敏感，`$Pid` 与只读内置 `$PID` 冲突（实测报
+        # 「无法覆盖变量 Pid，因为它是只读变量或常量」，且在赋值处才炸）。
+        ps_code = "\n".join(
+            line for line in ps.splitlines() if not line.strip().startswith("#")
+        )
+        self.assertNotRegex(
+            ps_code,
+            r"\$Pid\b",
+            "`.ps1` 不得使用 `$Pid` 作变量/参数名（与只读内置变量 `$PID` 冲突）",
+        )
 
 
 if __name__ == "__main__":

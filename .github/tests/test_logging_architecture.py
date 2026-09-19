@@ -1,8 +1,14 @@
+import re
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def section(source: str, start: str, end: str) -> str:
+    """截取从 `start` 到其后首个 `end` 之间的片段，用于把断言限定在单个函数/循环内。"""
+    return source[source.index(start) : source.index(end, source.index(start))]
 
 
 def read(path: str) -> str:
@@ -75,11 +81,19 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn(".fuse_capability", source)
         self.assertIn("backend_effective", source)
         self.assertIn("fuse_dir_cache_(config|sample)|perf_snapshot component=fuse", source)
-        daemon = read("src/daemon_mount.rs")
-        companion = read("src/lifecycle/companion_mount.rs")
-        for mount_source in (daemon, companion):
-            self.assertIn("selection_reason=", mount_source)
-            self.assertIn("capability=", mount_source)
+        # 选择契约（backend_effective / selection_reason / capability）收敛在单一实现里：
+        # 两条挂载路径此前各有一份逐字重复的判定，真机排查时同一请求在两处给出不同的
+        # selection_reason，把「能力未放行」与「规则本来不需要 FUSE 根」混成同一句话。
+        shared = read("src/fuse_redirect/scoped_mount.rs")
+        self.assertIn("pub fn conclude_scoped_mount", shared)
+        self.assertIn("backend_effective", shared)
+        self.assertIn("selection_reason=", shared)
+        self.assertIn("capability=", shared)
+        for site in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
+            source = read(site)
+            self.assertIn("conclude_scoped_mount(ScopedMountReport {", source)
+            # 站点不得再自行记录能力结果，否则能力语义又会分叉。
+            self.assertNotIn("record_fuse_capability_result", source)
 
     def test_mount_intent_cleanup_uses_process_starttime(self) -> None:
         intent = read("src/mount_intent.rs")
@@ -95,8 +109,181 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("expand_namespace_fallback_rules", config)
         self.assertIn("expand_namespace_fallback_rules", daemon)
         self.assertIn("expand_namespace_fallback_rules", companion)
-        self.assertIn("scoped_mount_failed_namespace_fallback", daemon)
-        self.assertIn("scoped_mount_failed_namespace_fallback", companion)
+        # 后端结论串只出现在单一实现里；两条挂载路径通过 needs_namespace_fallback 消费它。
+        shared = read("src/fuse_redirect/scoped_mount.rs")
+        self.assertIn("scoped_mount_failed_namespace_fallback", shared)
+        for source in (daemon, companion):
+            self.assertIn("needs_namespace_fallback", source)
+
+    def test_fuse_capability_failures_are_bucketed_per_scope(self) -> None:
+        """能力熔断不得是全设备单点：分桶、多应用升格、退避自愈三者缺一不可。
+
+        旧实现只有一个全局 fail_count，达到预算就把整机写成 unavailable，此后所有应用一起退回
+        namespace，而且因为再也不会尝试挂载，成功结果无从记录——只能靠重启恢复。真机上实测到
+        「单个应用的失败把全体拖下水」与「10 秒内 failed/ready 反复横跳」两种表现。
+        """
+        config = read("src/fuse_redirect/config.rs")
+        self.assertIn("scope_failures", config)
+        self.assertIn("fn bump_scope_failure", config)
+        self.assertIn("fn scope_budget_exhausted", config)
+        # 设备级升格必须要求多个不同应用各自失败，否则单个坏应用就能关掉全设备 FUSE。
+        self.assertIn("DEVICE_UNAVAILABLE_MIN_SCOPES", config)
+        self.assertIn("snapshot.last_failed_scope != scope", config)
+        # unavailable 必须可自愈：退避截止时间 + 到期放行一次探测。
+        self.assertIn("fn retry_window_open", config)
+        self.assertIn("RETRY_BACKOFF_BASE_MS", config)
+        self.assertIn("RETRY_BACKOFF_MAX_MS", config)
+        self.assertIn("snapshot.retry_at_ms = now_ms.saturating_add", config)
+        # 规划层必须按应用判定，而不是读全局状态。
+        planning = config[
+            config.index("pub fn scoped_fuse_mount_roots_for_request") :
+            config.index("pub fn fuse_device_present")
+        ]
+        self.assertIn("scoped_mount_allowed_for_scope(request.package_name()", planning)
+
+    def test_teardown_failure_does_not_gate_mounts(self) -> None:
+        """收尾（unmount）失败不得消耗挂载预算。
+
+        摘不掉旧挂载说明不了下一次挂载会失败；历史上 `scoped_session_end_error` 与挂载失败共用
+        同一个预算，因此一次收尾异常就能把全设备 FUSE 关掉，属于口径错配。
+        """
+        config = read("src/fuse_redirect/config.rs")
+        self.assertIn('record_fuse_teardown_failure("scoped_session_end_error")', config)
+        self.assertNotIn(
+            'record_fuse_capability_result(false, "scoped_session_end_error")', config
+        )
+        teardown = config[
+            config.index("pub fn record_fuse_teardown_failure") :
+            config.index("/// 供诊断输出使用的能力快照摘要。")
+        ]
+        self.assertNotIn("FuseCapability::Unavailable", teardown)
+        self.assertNotIn("record_fuse_capability_result", teardown)
+
+    def test_mount_fallback_expansion_is_scoped_per_app(self) -> None:
+        """通配规则收敛判定必须带上应用，不能读全局状态。
+
+        过去 `expand_mount_fallbacks_for_mode` 只看设备级能力，于是任意一个应用的失败都会改写
+        其它应用的规则展开方式。
+        """
+        for site in ("src/redirect/router.rs", "src/redirect/writer.rs"):
+            call = re.search(
+                r"expand_mount_fallbacks_for_mode\(\s*config\.storage_backend_mode\(\),\s*[a-z_]+",
+                read(site),
+            )
+            self.assertIsNotNone(call, f"{site} 必须把应用作用域传给收敛判定")
+        config = read("src/fuse_redirect/config.rs")
+        self.assertIn("pub fn expand_mount_fallbacks_for_mode(mode: StorageBackendMode, scope: &str)", config)
+
+    def test_unknown_capability_does_not_gate_on_app_side_dev_fuse(self) -> None:
+        """`Unknown` 不得退回应用侧 `/dev/fuse` 节点探测。
+
+        这个判定同样会在应用进程里执行，而应用视角的 `/dev/fuse` 在 HyperOS 上是
+        `crw------- root root`，连 stat 都被 SELinux 拒绝。据此否定会让应用永远规划不出 FUSE 根、
+        只能退回 namespace，而且永远等不到那个能解锁的失败计数。只有快照完全不存在时才退回探测。
+        """
+        config = read("src/fuse_redirect/config.rs")
+        gate = config[
+            config.index("pub fn scoped_mount_allowed_for_scope") :
+            config.index("/// 自动后端使用的 fallback 路径决策")
+        ]
+        self.assertIn("FuseCapability::Unknown => snapshot.present || fuse_device_present()", gate)
+        self.assertNotIn("FuseCapability::Unknown => fuse_device_present()", gate)
+
+    def test_mount_identity_is_recorded_on_both_mount_paths(self) -> None:
+        """两条挂载路径都必须登记挂载身份账本。
+
+        账本原本只在 daemon 路径写过（`mount_identity` 只编译在 bin 里），companion 路径只写
+        挂载状态文件。于是走 companion 的应用在恢复流程与 `doctor` 里没有任何归属判据，只能
+        退化成「按挂载源判定」这个较弱判据——真机上实测同一次挂载在两条路径上留下不同结果。
+        """
+        ledger = read("src/mount_ledger.rs")
+        for entry in (
+            "pub fn record_mount_identity(",
+            "pub fn capture_mount_identity(",
+            "pub fn namespace_identity(",
+            "pub fn load(",
+            "pub fn save(",
+        ):
+            self.assertIn(entry, ledger)
+        # 共享内核必须被 lib 与 bin 同时声明，否则 companion 路径又拿不到它。
+        self.assertIn("mod mount_ledger;", read("src/lib.rs"))
+        self.assertIn("../mount_ledger.rs", read("src/bin/srx_daemon.rs"))
+        # 恢复决策层只做再导出 + 判定，不得再留一份落盘格式。
+        identity = read("src/mount_identity.rs")
+        self.assertIn("pub use crate::mount_ledger::*;", identity)
+        self.assertNotIn("fn encode(", identity)
+        self.assertNotIn("fn decode(", identity)
+        # 两条挂载路径都必须登记，并带上各自标识以便日志区分。
+        for path, tag in (
+            ("src/daemon_mount.rs", "daemon"),
+            ("src/lifecycle/companion_mount.rs", "companion"),
+        ):
+            call = re.search(r'record_mount_identity\(\s*"%s"' % tag, read(path))
+            self.assertIsNotNone(call, f"{path} 必须登记挂载身份账本")
+
+    def test_reconcile_remount_is_idempotent(self) -> None:
+        """reconcile 重挂必须有幂等判据，否则对已收敛的应用反复叠加挂载层。
+
+        重挂不会先摘除旧挂载栈，而对同一个进程重复挂载会在其命名空间里叠出多层：应用自身
+        specialize 挂一次、Prewarm 挂一次、随后两轮 Full 再各挂一次，顶层目录上因此压着
+        2~3 层模块挂载。叠加层的 `root` 解析基准不同，应用读到的目录内容随层数变化
+        （真机表现：微信 `Android/media/com.tencent.mm/Lumenchat/plugins` 时而读到真实目录、
+        时而读到空壳），层数也没有上限。
+
+        守卫锁定：判据存在且被调用；幂等跳过排在其它分支之前；显式请求（Forced）不受跳过影响。
+        """
+        daemon = read("src/daemon.rs")
+        self.assertIn("fn should_skip_as_current(&self)", daemon)
+        self.assertIn("is_mount_current", daemon)
+        loop = section(
+            daemon,
+            "for (index, plan) in plans.iter().enumerate() {",
+            "\n    if should_log_reconcile_summary(",
+        )
+        # 跳过必须排在 Prewarm/MissingOnly 分支之前，否则那些分支会先放行。
+        self.assertLess(
+            loop.index("plan.should_skip_as_current()"),
+            loop.index("should_run_in_prewarm()"),
+        )
+        # 显式请求要能强制重挂，不能被幂等判据吞掉。
+        self.assertIn("mode != ReconcileMode::Forced && plan.should_skip_as_current()", loop)
+        self.assertIn("ReconcileMode::Forced", daemon)
+
+        # 判据本身：状态健康 + 记录的配置指纹与当前一致。
+        mount = read("src/daemon_mount.rs")
+        self.assertIn("pub fn has_current_mount_state(request: &MountRequest) -> bool", mount)
+        current = section(mount, "pub fn has_current_mount_state(", "\n/// 读取挂载状态文件里记录的配置指纹。")
+        self.assertIn("has_mount_state_internal(request, true)", current)
+        self.assertIn("config_fingerprint()", current)
+        self.assertIn("mount_state_fingerprint(request)", current)
+
+        # 指纹必须由两个写入点都写进状态文件，否则一侧写的状态永远判为「需要重挂」。
+        self.assertIn('"fingerprint={}\\n"', mount)
+        companion_state = read("src/lifecycle/companion_mount/mount_state.rs")
+        self.assertIn('"fingerprint={}\\n"', companion_state)
+
+    def test_doctor_reports_cross_layer_identity(self) -> None:
+        """doctor 必须一次给齐五层身份，而不是只报告挂载账本。"""
+        daemon = read("src/daemon_mount.rs")
+        self.assertIn("pub fn doctor_report(args: &[String]) -> i32", daemon)
+        snapshot = daemon[
+            daemon.index("fn print_cross_layer_snapshot") :
+            daemon.index("pub fn doctor_report(args: &[String]) -> i32")
+        ]
+        for layer in (
+            "== capability ==",
+            "== java_hook ==",
+            "== app_config ==",
+            "== processes ==",
+            "== path ==",
+        ):
+            self.assertIn(layer, snapshot)
+        self.assertIn("fuse_capability_summary()", snapshot)
+        self.assertIn("scoped_mount_allowed_for_scope(", snapshot)
+        # 必须在输出里点明「启动后查 maps 查不到」是常见现象，否则会重复误判为未注入。
+        self.assertIn("module_mapped_now=false", snapshot)
+        main = read("src/bin/srx_daemon.rs")
+        self.assertIn("daemon_mount::doctor_report(&doctor_args)", main)
 
     def test_diagnostic_control_rejects_unsafe_paths_without_legacy_fallback(self) -> None:
         control = read("assets/zygisk_module/bin/srxctl")

@@ -25,6 +25,7 @@ apply_config() { :; }
 apply_config_and_wait() { :; }
 wait_config_applied() { :; }
 clean_targets() { :; }
+assert_fixture_roots_empty() { :; }
 adb() { :; }
 adb_su() { echo diagnostic; }
 label_expects_mount() { :; }
