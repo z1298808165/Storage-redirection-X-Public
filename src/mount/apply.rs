@@ -62,6 +62,42 @@ impl MountPlanner {
                     self.redirect_target
                 );
             }
+            // 锚点不可用或被上一轮重定向污染时，摘除视图根上的重定向绑定，用**真实可见
+            // 视图**重建锚点，然后立刻把重定向绑回去。
+            //
+            // 顺序即安全性：摘除之后视图根会短暂回落为真实公共存储，若应用在这个窗口里
+            // 写入，本该进沙箱的文件会落到公共路径。因此下面三个动作必须紧邻执行，中间
+            // 不得插入任何 IO、目录创建或路径遍历——窗口被压缩到三次系统调用。重建用的
+            // 源是重定向目标（沙箱）路径，不经过视图根，所以可以在窗口内安全使用。
+            //
+            // 之所以不能用 /data/media 后端锚点代替：该设备上 /data/media 是 ext4 而不是
+            // FUSE，用它作为映射源会绕过 FUSE 权限层，应用对映射目标没有写权限（表现为
+            // 热重载后首次写入成功、随后连续 Permission denied）。
+            detach_mount_if_present(storage_path);
+            let rebound = self.bind_mount(storage_path, &real_storage_anchor, true);
+            let redirect_backend = self.to_data_media_backend_path(&self.redirect_target);
+            let restored = if redirect_backend.is_empty() {
+                false
+            } else {
+                self.bind_mount(&redirect_backend, storage_path, true)
+            };
+            if rebound {
+                log::info!(
+                    "real storage anchor rebound after detaching redirect pkg={} storage={} anchor={} redirect_restored={}",
+                    self.package_name,
+                    storage_path,
+                    real_storage_anchor,
+                    restored
+                );
+                self.real_storage_anchor = Some(real_storage_anchor.clone());
+                return Some(real_storage_anchor.to_string());
+            }
+            log::warn!(
+                "real storage anchor rebound failed, fallback backend pkg={} storage={} anchor={}",
+                self.package_name,
+                storage_path,
+                real_storage_anchor
+            );
             let anchor = self.bind_data_media_real_storage_anchor(
                 real_storage_anchor_root,
                 &real_storage_anchor,
