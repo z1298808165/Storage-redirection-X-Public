@@ -115,6 +115,36 @@ impl MountPlanner {
             return Some(anchor);
         }
 
+        // 走到这里说明所有可见别名源建出来的锚点都指向本应用沙箱：判为「未重定向」并不
+        // 代表视图根真的干净，热重载时 storage_root_is_already_redirected 可能漏检（run
+        // 35452820455 实测：该分支下 6 个可见源全部被判污染）。此时同样摘除视图根上的
+        // 重定向、用真实视图重建锚点、再立即绑回，而不是退回后端锚点——后端锚点在部分
+        // 设备上指向 ext4 的 /data/media，会绕过 FUSE 权限层导致 Permission denied。
+        // 三个动作紧邻执行，窗口压缩到三次系统调用，中间不得插入 IO。
+        detach_mount_if_present(storage_path);
+        let rebound = self.bind_visible_real_storage_anchor(
+            storage_path,
+            real_storage_anchor_root,
+            &real_storage_anchor,
+        );
+        let redirect_backend = self.to_data_media_backend_path(&self.redirect_target);
+        let restored = if redirect_backend.is_empty() {
+            false
+        } else {
+            self.bind_mount(&redirect_backend, storage_path, true)
+        };
+        if let Some(anchor) = rebound {
+            log::info!(
+                "real storage anchor rebound after detaching redirect (unredirected branch) pkg={} storage={} anchor={} redirect_restored={}",
+                self.package_name,
+                storage_path,
+                anchor,
+                restored
+            );
+            self.real_storage_anchor = Some(anchor.clone());
+            return Some(anchor);
+        }
+
         let anchor = self
             .bind_data_media_real_storage_anchor(real_storage_anchor_root, &real_storage_anchor);
         self.real_storage_anchor = anchor.clone();
