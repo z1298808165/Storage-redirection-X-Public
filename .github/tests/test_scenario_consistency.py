@@ -429,10 +429,22 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 self.assertIn('storage_backend_mode":"auto', self.bash)
 
     def test_workflows_run_manifest_scenarios(self) -> None:
-        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
-            values = re.findall(r'SRT_SCENARIOS:\s*"([^"]+)"', read(workflow))
-            self.assertTrue(values, workflow)
-            self.assertTrue(all(value == "all" for value in values), workflow)
+        # Release 始终全量：硬编码 SRT_SCENARIOS: "all"，不得被单场景标记收窄。
+        release_values = re.findall(
+            r'SRT_SCENARIOS:\s*"([^"]+)"', read(".github/workflows/release.yml")
+        )
+        self.assertTrue(release_values, ".github/workflows/release.yml")
+        self.assertTrue(
+            all(value == "all" for value in release_values),
+            ".github/workflows/release.yml",
+        )
+
+        # CI 的范围由 prepare outputs 统一决定，不得在 job 内硬编码全量，
+        # 也不得再用 dispatch/commit 标记就地二次解析（避免与 prepare 双源头）。
+        ci = read(".github/workflows/ci.yml")
+        self.assertIn("SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}", ci)
+        self.assertNotIn("SRT_SCENARIOS_OVERRIDE:", ci)
+        self.assertNotIn("SRT_COMMIT_MESSAGE:", ci)
 
         any_path_workflow = ROOT / ".github/workflows/ci-any-path.yml"
         if any_path_workflow.exists():
@@ -441,6 +453,35 @@ class ScenarioConsistencyTest(unittest.TestCase):
             )
             self.assertTrue(any_path_values)
             self.assertTrue(all(value == "all" for value in any_path_values))
+
+    def test_ci_limited_scope_publishes_nothing_and_uses_prepare_outputs(self) -> None:
+        # 「单场景」标记或 dispatch 收窄范围时，CI 只跑指定场景所需构建+测试+门禁，
+        # 不发布 CI 资产、不更新 update.json、不额外触发全量 CI。范围与发布开关来自
+        # prepare 的 outputs，下游统一引用，避免与 job 内就地解析双源头。
+        ci = read(".github/workflows/ci.yml")
+        prepare = section(ci, "  prepare:", "  init-ci-release:")
+        self.assertIn("parse_scenario_scope.py", prepare)
+        self.assertIn("scenarios: ${{ steps.scope.outputs.scenarios }}", prepare)
+        self.assertIn("publish_ci: ${{ steps.scope.outputs.publish_ci }}", prepare)
+
+        # 发布相关 job 在范围受限时整体跳过（publish_ci=false）。
+        self.assertIn(
+            "if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'",
+            ci,
+        )
+        self.assertIn(
+            "if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'",
+            ci,
+        )
+
+        # module/app 构建 job 在受限范围时跳过（仅保留测试流所需的 test-flow-build）。
+        module = section(ci, "  module:", "  app:")
+        app = section(ci, "  app:", "  test-flow-build:")
+        self.assertIn("needs.prepare.outputs.publish_ci == 'true'", module)
+        self.assertIn("needs.prepare.outputs.publish_ci == 'true'", app)
+
+        # 失败清理只在本就发布时才尝试删除草稿 Release。
+        self.assertIn("PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}", ci)
 
     def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
         expected_max = max(self.ids)
@@ -1860,92 +1901,116 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
 
     def test_scenario_scope_override_and_commit_message_parsing(self) -> None:
-        """场景取景必须真能收窄范围，且不带取景时不改变全量。
+        """场景取景必须真能收窄范围，且不带取景时不改变全量（仍为 all）。
 
-        逐场景修复时整轮矩阵要等约 50 分钟，窄范围回归靠取景开关把反馈压到十几分钟；
-        解析写错（例如把非数字也吃进去、把中文逗号漏掉、手动输入没覆盖提交信息）
-        会让 CI 静默跑错场景集合，因此这里直接执行执行器里的真实解析片段而不是断言字符串存在。
+        解析已上移到 ``prepare`` 的 outputs，由 ``parse_scenario_scope.py`` 统一执行；
+        下游 ``test-flow`` 直接引用 ``needs.prepare.outputs.scenarios``，不再在 runner
+        内就地二次解析。因此这里执行真实解析器，而不是只断言字符串存在。
         """
         workflow = read(".github/workflows/ci.yml")
+        # 单一来源：test-flow 引用 prepare 的 outputs，runner 内不再把提交信息/
+        # 手动输入透传给取景解析片段（避免与 prepare 双源头）。
         self.assertIn(
-            "SRT_COMMIT_MESSAGE:",
+            "SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}",
             workflow,
-            "workflow 必须把提交信息透传给执行器，否则提交信息取景无法生效",
         )
-        self.assertIn(
+        self.assertNotIn(
             "SRT_SCENARIOS_OVERRIDE:",
             workflow,
-            "workflow 必须把手动触发的取景输入透传给执行器",
+            "runner 内不应再就地解析取景，范围由 prepare 统一决定",
+        )
+        self.assertNotIn(
+            "SRT_COMMIT_MESSAGE:",
+            workflow,
+            "runner 内不应再就地解析提交标记，范围由 prepare 统一决定",
         )
         self.assertIn("workflow_dispatch:", workflow, "必须提供可复用的手动触发入口")
+        self.assertIn("parse_scenario_scope.py", workflow, "prepare 必须调用真实解析器")
         self.assertIn(
-            'SRT_SCENARIOS: "all"',
+            "scenarios: ${{ steps.scope.outputs.scenarios }}",
             workflow,
-            "默认仍必须是全量选择器，窄范围只能由取景入口覆盖",
+        )
+        # runner 仍需保留本地取景回退（不依赖 prepare），识别「单场景」标记。
+        runner = read(".github/tests/run-android-test-flow.sh")
+        self.assertIn("单场景", runner, "runner 仍需保留本地取景回退以识别「单场景」标记")
+        self.assertIn(
+            "srx-scenario-scope:begin", runner, "runner 取景回退片段不得被误删"
         )
 
-        runner = read(".github/tests/run-android-test-flow.sh")
-        snippet = section(runner, "# srx-scenario-scope:begin", "# srx-scenario-scope:end")
-        self.assertIn("SRT_SCENARIOS_OVERRIDE", snippet, "解析片段必须优先读手动输入")
-        self.assertIn("单场景", snippet, "解析片段必须识别「单场景」标记本身")
-        self.assertIn("SRT_SCENARIOS=", snippet, "解析片段必须把结果写回选择器")
-
-        # (手动输入, 提交信息, 期望结果)
+        parser = ROOT / ".github" / "scripts" / "parse_scenario_scope.py"
+        python_bin = "python" if shutil.which("python") else "python3"
+        # (手动输入, 提交信息, 期望 scenarios；空串表示无取景=全量 all)
         cases = (
-            ("", "", ""),
-            ("", "修复：热重载保留重定向根", ""),
+            ("", "", "all"),
+            ("", "修复：热重载保留重定向根", "all"),
             ("", "修复：热重载保留重定向根 单场景 29", "29"),
             ("", "修复 单场景29", "29"),
             ("", "修复 单场景: 29", "29"),
             ("", "修复 单场景：29,34", "29,34"),
             ("", "修复 单场景 29，34", "29,34"),
             ("", "修复 单场景 29 与 34", "29"),
-            ("", "修复 单场景 无编号", ""),
             # 手动输入优先于提交信息，且同样接受中文逗号。
             ("29", "修复 单场景 34", "29"),
             ("29，34", "修复：说明", "29,34"),
         )
-        # 本机 bash 收不到 stdin / 位置参数（Windows MSYS 下两者都拿不到数据），
-        # 因此把消息与执行体都落到临时脚本里，只按路径读取，避免依赖参数传递。
-        temp_root = Path("temp")
-        temp_root.mkdir(exist_ok=True)
-        work_dir = Path(tempfile.mkdtemp(dir=temp_root))
-        try:
-            for index, (override, message, expected) in enumerate(cases):
-                (work_dir / f"message-{index}.txt").write_text(
-                    message, encoding="utf-8", newline=""
-                )
-                (work_dir / f"driver-{index}.sh").write_text(
-                    f'SRT_COMMIT_MESSAGE="$(cat {bash_path(work_dir / f"message-{index}.txt")})"\n'
-                    + f'SRT_SCENARIOS_OVERRIDE="{override}"\n'
-                    + snippet
-                    # 解析片段自己会 echo 一行说明，用标记行取结果，避免混进断言。
-                    + '\nprintf "SCOPE=%s\\n" "${SRT_SCENARIOS:-}"\n',
-                    encoding="utf-8",
-                    newline="\n",
-                )
-                proc = subprocess.run(
-                    ["bash", bash_path(work_dir / f"driver-{index}.sh")],
-                    capture_output=True,
-                )
-                actual = ""
-                for line in proc.stdout.decode("utf-8", "replace").splitlines():
-                    if line.startswith("SCOPE="):
-                        actual = line[len("SCOPE=") :]
-                self.assertEqual(
-                    proc.returncode,
-                    0,
-                    f"解析片段执行失败 override={override!r} message={message!r}: "
-                    + proc.stderr.decode("utf-8", "replace"),
-                )
-                self.assertEqual(
-                    actual,
-                    expected,
-                    f"override={override!r} message={message!r} 应选择 {expected!r}，"
-                    f"实际 {actual!r}",
-                )
-        finally:
-            shutil.rmtree(work_dir, ignore_errors=True)
+        for override, message, expected in cases:
+            proc = subprocess.run(
+                [
+                    python_bin,
+                    str(parser),
+                    "--override", override,
+                    "--message", message,
+                    "--format", "github",
+                ],
+                capture_output=True,
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                f"解析失败 override={override!r} message={message!r}: "
+                + proc.stderr.decode("utf-8", "replace"),
+            )
+            scenarios = ""
+            for line in proc.stdout.decode("utf-8", "replace").splitlines():
+                if line.startswith("scenarios="):
+                    scenarios = line[len("scenarios=") :]
+            self.assertEqual(
+                scenarios, expected,
+                f"override={override!r} message={message!r} 应选择 {expected!r}，"
+                f"实际 {scenarios!r}",
+            )
+
+        # 非法范围必须显式失败，不得静默回退全量（派发输入路径）。
+        for bad in ("99", "0", "abc", "29,29"):
+            bad_proc = subprocess.run(
+                [python_bin, str(parser), "--override", bad, "--format", "github"],
+                capture_output=True,
+            )
+            self.assertNotEqual(
+                bad_proc.returncode, 0,
+                f"非法范围 {bad!r} 必须报错，不得静默跑全量",
+            )
+
+        # 提交信息标记存在但写法非法：不得偷截、不得静默回退全量。
+        for bad_message in (
+            "单场景 abc",
+            "单场景 无编号",
+            "单场景 29,abc",
+            "单场景 29,,34",
+            "单场景 29,",
+        ):
+            bad_proc = subprocess.run(
+                [
+                    python_bin,
+                    str(parser),
+                    "--message", bad_message,
+                    "--format", "github",
+                ],
+                capture_output=True,
+            )
+            self.assertNotEqual(
+                bad_proc.returncode, 0,
+                f"非法标记 {bad_message!r} 必须报错，不得静默回退全量",
+            )
 
 
 if __name__ == "__main__":

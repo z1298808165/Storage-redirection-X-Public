@@ -87,6 +87,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_code: ${{ steps.version.outputs.version_code }}
+      scenarios: ${{ steps.scope.outputs.scenarios }}
+      publish_ci: ${{ steps.scope.outputs.publish_ci }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -98,11 +100,29 @@ jobs:
         run: |
           python .github/scripts/validate_ci_transition.py --format github >> "$GITHUB_OUTPUT"
 
+      # 统一确定测试流范围与验证模式：dispatch inputs 或提交信息里的
+      # 「单场景 29」/「单场景 29,34」都能收窄范围。解析上移到这里，下游
+      # test-flow 与发布相关 job 统一引用，不再在 job 内就地二次解析。
+      # 范围受限时 publish_ci=false，发布相关 job 全部跳过（不发布 CI 资产、
+      # 不更新 update.json、不额外触发全量 CI）；非法范围直接失败，不静默全量。
+      - name: Resolve scenario scope
+        id: scope
+        env:
+          # 内部名：仅 prepare 把提交信息/dispatch 输入交给解析器，不沿用
+          # run-android-test-flow.sh 的 SRT_COMMIT_MESSAGE，避免下游再次就地解析。
+          SRT_HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          SRT_DISPATCH_SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          python .github/scripts/parse_scenario_scope.py \
+            --message "$SRT_HEAD_COMMIT_MESSAGE" \
+            --override "$SRT_DISPATCH_SCENARIOS" \
+            --format github >> "$GITHUB_OUTPUT"
+
   init-ci-release:
     needs:
       - quality
       - prepare
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -127,7 +147,7 @@ jobs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped')
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -306,7 +326,7 @@ jobs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped')
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -533,12 +553,10 @@ jobs:
       ANDROID_API_LEVEL: ${{ matrix.android.api_level }}
       MAGISK_URL: ${{ matrix.android.magisk_url }}
       EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}
-      SRT_SCENARIOS: "all"
-      # 手动触发时的场景取景；为空则保持上面的全量默认值。
-      SRT_SCENARIOS_OVERRIDE: ${{ inputs.scenarios }}
-      # 提交信息里写「单场景 29」（可逗号列举）也能收窄范围：逐场景修复时
-      # 整轮矩阵要等约 50 分钟，窄范围回归用它把反馈压到十几分钟。
-      SRT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+      # 范围由 prepare 的 outputs 统一决定（dispatch inputs 或提交「单场景 29」
+      # 标记）；无标记时 prepare 输出 all，全 5 个 Android 版本覆盖保持不变。
+      # 不再在此处就地解析提交标记，避免与 prepare 双源头。
+      SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
@@ -718,7 +736,7 @@ jobs:
           fi
 
   create-ci-release:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
     needs:
       - prepare
       - init-ci-release
@@ -808,9 +826,11 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
+      # 只有真正发布时才尝试删除草稿 Release；范围受限（不发布）时跳过。
+      PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}
     steps:
       - name: 删除失败 CI Release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && (needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success')
+        if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && (needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -850,7 +870,7 @@ jobs:
           done
 
   update-manifest:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'
     needs:
       - prepare
       - create-ci-release

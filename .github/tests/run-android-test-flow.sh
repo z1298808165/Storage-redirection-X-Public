@@ -230,7 +230,9 @@ adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE all
 export SRT_SKIP_FINAL_CLEANUP=1
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
-# 场景取景：手动触发传入的场景编号优先，其次看提交信息里的「单场景 29」（可逗号列举）。
+# 场景取景（本地/手动回退解析）：CI 已由 prepare 的 outputs 把范围解析成
+# SRT_SCENARIOS 直接传入，本块仅在本地运行或未走 prepare 时生效——此时
+# 手动触发传入的场景编号优先，其次看提交信息里的「单场景 29」（可逗号列举）。
 #
 # 逐场景修复时整轮矩阵（5 个版本 × 37 场景）要等约 50 分钟才看到结果，
 # 而验证单点修复只需要那一个场景；用这两个入口把反馈周期压到十几分钟，
