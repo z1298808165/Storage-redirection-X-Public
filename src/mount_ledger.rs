@@ -32,7 +32,12 @@ use std::path::PathBuf;
 pub use crate::module_mount_source::is_module_redirect_mount;
 
 /// 账本 schema 版本。字段增减时必须同步递增，旧版本账本按不可用处理。
-const IDENTITY_SCHEMA_VERSION: u32 = 1;
+///
+/// v1 → v2：归属判据由"别名归一化路径"改为"保留存储别名的语法路径"。旧账本把
+/// `/data/media/<user>/...` 归一化成 `/storage/emulated/<user>/...` 存储，与真实主入口
+/// 目标重合，会被新逻辑误判为同一挂载点的归属身份、进而误用于摘除后端挂载。为保守起见，
+/// 直接让 v1 账本 decode 失败（按不可用处理），由下一次成功挂载用新口径重新登记。
+const IDENTITY_SCHEMA_VERSION: u32 = 2;
 
 /// 目标进程 mount namespace 的身份。
 ///
@@ -155,15 +160,15 @@ pub fn live_mounts_at(pid: i32, mount_point: &str) -> Vec<LiveMount> {
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    let normalized = paths::normalize(mount_point);
+    // 语法层匹配：保留存储别名，不把 /data/media 折叠成 /storage/emulated，
+    // 且大小写敏感。否则不同挂载别名会被归一化到同一字符串，使缺失的主入口
+    // 误匹配到后端的 /data/media 挂载。见模块级文档中的场景 29 说明。
+    let normalized = paths::normalize_syntax(mount_point);
     let mut mounts = content
         .lines()
         .filter_map(|line| {
             let entry = mountinfo::parse_entry(line)?;
-            if !paths::eq_ignore_case(
-                &paths::normalize(&mountinfo::unescape_field(entry.target)),
-                &normalized,
-            ) {
+            if paths::normalize_syntax(&mountinfo::unescape_field(entry.target)) != normalized {
                 return None;
             }
             Some(LiveMount {
@@ -339,7 +344,10 @@ pub fn capture_mount_identity(
         return None;
     }
     Some(MountIdentity {
-        mount_point: paths::normalize(mount_point),
+        // 保存真实目标（保留存储别名），而不是别名归一化后的形式：
+        // 否则 /data/media 后端挂载会被折叠成 /storage/emulated，使缺失的主入口
+        // 误以为拥有后端挂载的归属身份。
+        mount_point: paths::normalize_syntax(mount_point),
         mount_id: live.mount_id,
         source: live.source,
     })

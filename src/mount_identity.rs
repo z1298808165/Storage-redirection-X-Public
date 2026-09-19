@@ -81,11 +81,13 @@ pub fn classify_mount(
     if current_namespace != ledger.namespace {
         return MountVerdict::StaleNamespace;
     }
-    let normalized = paths::normalize(mount_point);
+    // 语法层匹配：保留存储别名且大小写敏感，与 capture 落盘的 mount_point 口径一致。
+    // 避免 /data/media 与 /storage/emulated 被归一化后互相误匹配。
+    let normalized = paths::normalize_syntax(mount_point);
     let recorded = ledger
         .mounts
         .iter()
-        .find(|mount| paths::eq_ignore_case(&mount.mount_point, &normalized));
+        .find(|mount| mount.mount_point == normalized);
     let (Some(recorded), Some(live)) = (recorded, live) else {
         return MountVerdict::Detached;
     };

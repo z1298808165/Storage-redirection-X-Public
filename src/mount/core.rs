@@ -583,6 +583,11 @@ impl MountPlanner {
         is_recursive: bool,
     ) -> bool {
         let use_recursive = self.should_use_recursive_bind(source, target, is_recursive);
+        let previously_recorded = self
+            .mounted_targets
+            .borrow()
+            .iter()
+            .any(|item| item == target);
         if !self.bind_mount_overlay(source, target, use_recursive) {
             return false;
         }
@@ -595,7 +600,14 @@ impl MountPlanner {
         let Ok(c_target) = CString::new(target) else {
             return false;
         };
+        // SAFETY: c_target 为本次绑定目标的有效 C 字符串，调用期间保持存活。
         let ret = unsafe { umount2(c_target.as_ptr(), MNT_DETACH) };
+        if ret == 0 && !previously_recorded {
+            // 只撤销本次新增记录，保留同一路径上先前已成功安装的下层挂载。
+            self.mounted_targets
+                .borrow_mut()
+                .retain(|item| item != target);
+        }
         if ret != 0 {
             let error_no = last_errno();
             log::warn!(
@@ -859,6 +871,11 @@ impl MountPlanner {
         is_recursive: bool,
     ) -> bool {
         let use_recursive = self.should_use_recursive_bind(source, target, is_recursive);
+        let previously_recorded = self
+            .mounted_targets
+            .borrow()
+            .iter()
+            .any(|item| item == target);
         if !self.bind_mount(source, target, use_recursive) {
             return false;
         }
@@ -871,7 +888,14 @@ impl MountPlanner {
         let Ok(c_target) = CString::new(target) else {
             return false;
         };
+        // SAFETY: c_target 为本次绑定目标的有效 C 字符串，调用期间保持存活。
         let ret = unsafe { umount2(c_target.as_ptr(), MNT_DETACH) };
+        if ret == 0 && !previously_recorded {
+            // 只撤销本次新增记录，保留同一路径上先前已成功安装的下层挂载。
+            self.mounted_targets
+                .borrow_mut()
+                .retain(|item| item != target);
+        }
         if ret != 0 {
             let error_no = last_errno();
             log::warn!(
