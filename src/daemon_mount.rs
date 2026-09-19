@@ -201,6 +201,37 @@ fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -
     true
 }
 
+/// 在目标进程的挂载命名空间内核对本轮记录的目标是否可解析、是否真的挂上了。
+///
+/// 调用点位于已经 `setns` 到应用命名空间的挂载子进程里，因此 `metadata` 与
+/// `/proc/self/mountinfo` 反映的都是**应用自己的视图**，而不是守护进程的视图。热重载类
+/// 问题需要这条记录才能把两种情况分开：绑定根本没在应用视图里生效，还是生效之后又被
+/// 后续请求摘掉——后者会在下一次清理里留下 `daemon unmount ok` 记录，两条对照即可定位。
+fn log_mounted_target_view(targets: &[String]) {
+    if targets.is_empty() {
+        return;
+    }
+    let mut unreadable = 0usize;
+    let mut not_mounted = 0usize;
+    for target in targets {
+        if std::fs::metadata(target).is_err() {
+            unreadable += 1;
+            log::warn!("daemon target view unreadable target={}", target);
+            continue;
+        }
+        if current_mount_target_count(target) == 0 {
+            not_mounted += 1;
+            log::warn!("daemon target view not mounted target={}", target);
+        }
+    }
+    log::info!(
+        "daemon target view checked={} unreadable={} not_mounted={}",
+        targets.len(),
+        unreadable,
+        not_mounted
+    );
+}
+
 fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -> bool {
     let path = format!("/proc/{}/mountinfo", pid);
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1383,6 +1414,8 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             }
         }
         let mounted_targets = planner.take_mounted_targets();
+        // 仍在应用命名空间内，就地核对本轮目标的可见性，给热重载类问题留下应用视角证据。
+        log_mounted_target_view(&mounted_targets);
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
@@ -1933,6 +1966,14 @@ fn clear_mount_target_stack(target: &str) -> bool {
         // 只影响当前命名空间的挂载视图，不触碰其它命名空间。
         if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } == 0 {
             passes += 1;
+            // 单次成功摘除此前是静默的，只有摘掉多层的目标才留痕。热重载反复重挂时，
+            // "本模块自己的层被后一次请求摘掉"只能靠这条记录才看得出来。
+            log::info!(
+                "daemon unmount ok target={} remaining_before={} pass={}",
+                target,
+                mounted_count,
+                passes
+            );
             continue;
         }
 
@@ -2037,6 +2078,14 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
         // 只影响当前命名空间的挂载视图，不触碰其它命名空间。
         if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } == 0 {
             passes += 1;
+            // 单次成功摘除此前是静默的，只有摘掉多层的目标才留痕。热重载反复重挂时，
+            // "本模块自己的层被后一次请求摘掉"只能靠这条记录才看得出来。
+            log::info!(
+                "daemon unmount ok target={} mount_id={} pass={}",
+                target,
+                live.mount_id,
+                passes
+            );
             continue;
         }
 
