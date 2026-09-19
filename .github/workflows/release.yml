@@ -490,7 +490,7 @@ jobs:
       - prepare
       - test-flow-build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.android.timeout_minutes }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
@@ -498,14 +498,15 @@ jobs:
       ANDROID_ARCH: x86_64
       TARGET_TRIPLE: x86_64-linux-android
       MODULE_ABI: x86_64
-      ANDROID_API_LEVEL: ${{ matrix.android.api }}
+      ANDROID_API_LEVEL: ${{ matrix.android.api_level }}
+      MAGISK_URL: ${{ matrix.android.magisk_url }}
+      EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}
       SRT_SCENARIOS: "all"
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
-      # 每个场景入口仍会重启应用；场景内多个 service case 复用应用进程，
-      # 避免重复 force-stop/start 和 mount 确认。
-      SRT_FRESH_APP_PER_CASE: 0
+      # 17 每个服务用例前冷启动应用（脚本默认 1）；其余版本复用应用进程（0）。
+      SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
@@ -515,12 +516,54 @@ jobs:
         android:
           - api: 33
             version: 13
+            api_level: "33"
+            fresh_app_per_case: 0
+            magisk_url: ""
+            gpu_mode: ""
+            timeout_minutes: 45
+            boot_timeout: 1500
+            disable_animations: true
+            disable_linux_hw: auto
           - api: 34
             version: 14
+            api_level: "34"
+            fresh_app_per_case: 0
+            magisk_url: ""
+            gpu_mode: ""
+            timeout_minutes: 45
+            boot_timeout: 1500
+            disable_animations: true
+            disable_linux_hw: auto
           - api: 35
             version: 15
+            api_level: "35"
+            fresh_app_per_case: 0
+            magisk_url: ""
+            gpu_mode: ""
+            timeout_minutes: 45
+            boot_timeout: 1500
+            disable_animations: true
+            disable_linux_hw: auto
           - api: 36
             version: 16
+            api_level: "36"
+            fresh_app_per_case: 0
+            magisk_url: ""
+            gpu_mode: ""
+            timeout_minutes: 45
+            boot_timeout: 1500
+            disable_animations: true
+            disable_linux_hw: auto
+          - api: 37
+            version: 17
+            api_level: "37.0"
+            fresh_app_per_case: 1
+            magisk_url: "https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk"
+            gpu_mode: swiftshader_indirect
+            timeout_minutes: 50
+            boot_timeout: 1800
+            disable_animations: false
+            disable_linux_hw: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -534,9 +577,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -e /dev/kvm ]; then
-            sudo sh -c 'echo KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=kvm\" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo sh -c 'echo KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm" > /etc/udev/rules.d/99-kvm4all.rules'
             sudo udevadm control --reload-rules
             sudo udevadm trigger --name-match=kvm
+            sudo chmod 666 /dev/kvm
           fi
 
       - name: Setup Android SDK
@@ -577,19 +621,20 @@ jobs:
       - name: Run Android test-flow scenarios
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
-          api-level: ${{ matrix.android.api }}
+          api-level: ${{ matrix.android.api_level }}
           target: ${{ env.ANDROID_TARGET }}
           arch: ${{ env.ANDROID_ARCH }}
           profile: pixel_7
           disk-size: 4096M
           heap-size: 1024M
-          disable-animations: true
-          emulator-boot-timeout: 1500
+          disable-animations: ${{ matrix.android.disable_animations }}
+          emulator-boot-timeout: ${{ matrix.android.boot_timeout }}
+          disable-linux-hw-accel: ${{ matrix.android.disable_linux_hw }}
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts
-        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
+        if: always() && matrix.android.version != 17 && hashFiles('scenario-*-result.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'media-health.txt') != ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: release-test-flow-android${{ matrix.android.version }}-artifacts
@@ -605,90 +650,12 @@ jobs:
             test-flow-monitor-state.txt
             media-health.txt
 
-  test-flow-android17:
-    name: Release test-flow Android 17
-    if: startsWith(github.ref, 'refs/tags/v') && needs.quality.result == 'success' && needs.test-flow-build.result == 'success'
-    needs:
-      - quality
-      - prepare
-      - test-flow-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
-      ANDROID_TARGET: google_apis
-      ANDROID_ARCH: x86_64
-      TARGET_TRIPLE: x86_64-linux-android
-      MODULE_ABI: x86_64
-      ANDROID_API_LEVEL: "37.0"
-      MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk
-      SRT_SCENARIOS: "all"
-      SRT_FAIL_FAST: 1
-      SRT_SKIP_FINAL_CLEANUP: 1
-      SRT_SCENARIO_TIMEOUT_SECONDS: 300
-      SRT_FUSE_FIX_ENABLED: false
-      EMULATOR_GPU_MODE: swiftshader_indirect
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Download release test-flow runtime
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ github.run_id }}" --name "release-test-flow-runtime-v${{ env.VERSION }}" --dir .
-
-      - name: Enable KVM permissions
-        run: |
-          set -euo pipefail
-          if [ -e /dev/kvm ]; then
-            sudo sh -c 'echo KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm" > /etc/udev/rules.d/99-kvm4all.rules'
-            sudo udevadm control --reload-rules
-            sudo udevadm trigger --name-match=kvm
-            sudo chmod 666 /dev/kvm
-          fi
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: platform-tools
-
-      - name: Install Android 17 emulator image
-        run: |
-          set -euo pipefail
-          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
-          install_dir="$ANDROID_HOME/system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}"
-          for attempt in 1 2 3; do
-            if sdkmanager --install emulator "$package" --channel=0; then
-              exit 0
-            fi
-            test "$attempt" -lt 3
-            rm -rf "$ANDROID_HOME/.temp" "$install_dir"
-            sleep $((attempt * 5))
-          done
-
-      - name: Run Android 17 test-flow scenarios
-        uses: reactivecircus/android-emulator-runner@v2.37.0
-        with:
-          api-level: "37.0"
-          target: ${{ env.ANDROID_TARGET }}
-          arch: ${{ env.ANDROID_ARCH }}
-          profile: pixel_7
-          disk-size: 4096M
-          heap-size: 1024M
-          disable-animations: false
-          disable-linux-hw-accel: false
-          emulator-boot-timeout: 1800
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
-          script: bash .github/tests/run-android-test-flow.sh
-
   test-flow-required:
     name: Test-flow required gate
     needs:
       - quality
       - prepare
       - test-flow
-      - test-flow-android17
     if: always() && needs.prepare.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -701,10 +668,6 @@ jobs:
           fi
           if [ "${{ needs.test-flow.result }}" != "success" ]; then
             echo "test-flow matrix result: ${{ needs.test-flow.result }}" >&2
-            exit 1
-          fi
-          if [ "${{ needs.test-flow-android17.result }}" != "success" ]; then
-            echo "test-flow Android 17 result: ${{ needs.test-flow-android17.result }}" >&2
             exit 1
           fi
 
