@@ -104,8 +104,8 @@ class MountIdentitySyntaxTest(unittest.TestCase):
 
         harness_src = build_harness(template, mountinfo_fns, paths_fns, all_fns)
 
-        # 把抽取函数里的 `log::warn!` 改成 crate 根的 `warn!`（模板用 #[macro_use] 提供）。
-        harness_src = harness_src.replace("log::warn!", "warn!")
+        # 把抽取函数里的 `log::warn!` / `log::info!` 改成 crate 根的裸宏（模板用 #[macro_use] 提供）。
+        harness_src = harness_src.replace("log::warn!", "warn!").replace("log::info!", "info!")
 
         with tempfile.TemporaryDirectory() as tmp:
             harness_path = os.path.join(tmp, "harness.rs")
@@ -140,7 +140,9 @@ class MountIdentitySyntaxTest(unittest.TestCase):
             mutated_all = all_fns.replace("paths::normalize_syntax(", "__alias_fold(")
             self.assertNotEqual(mutated_all, all_fns)
             mutated_src = build_harness(template, mountinfo_fns, paths_fns, mutated_all)
-            mutated_src = mutated_src.replace("log::warn!", "warn!")
+            mutated_src = mutated_src.replace("log::warn!", "warn!").replace(
+                "log::info!", "info!"
+            )
             mutated_path = os.path.join(tmp, "harness_mutated.rs")
             Path(mutated_path).write_text(mutated_src, encoding="utf-8")
             mutated_bin = os.path.join(tmp, "mount_identity_syntax_mutated")

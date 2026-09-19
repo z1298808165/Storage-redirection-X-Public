@@ -1871,6 +1871,20 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
     let mut outcome = ClearOutcome::Cleared;
     // 目标已经按深度降序排列；先摘子挂载，避免父层摘除后查询到另一个视图。
     for target in &targets {
+        // 判定必须在摘除本目标之前完成：摘完之后"最上层"就只剩底层视图，
+        // 再也分不出那一层是本模块的沙箱根还是平台自己挂的。
+        let live = mount_identity::topmost_live_mount(0, target);
+        let live_layer = live
+            .as_ref()
+            .map(|mount| (mount.source.as_str(), mount.root.as_str()));
+        if should_keep_reload_redirect_root(target, request, &plan.scoped_fuse_roots, live_layer) {
+            log::info!(
+                "daemon unmount keep redirect root target={} mount_id={}",
+                target,
+                live.as_ref().map_or(0, |mount| mount.mount_id)
+            );
+            continue;
+        }
         if !clear_mount_target_stack_verified(target, ledger.as_ref()) {
             outcome = ClearOutcome::Unverified;
         }
@@ -1891,6 +1905,54 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
         );
     }
     outcome
+}
+
+/// 热重载时是否保留该入口上已有的重定向根绑定。
+///
+/// 存储视图根（`/storage/emulated/0`、`/mnt/user/0/emulated/0` 等）的 bind 落在系统 FUSE
+/// 的挂载点上：摘掉再重挂会在同一路径上换取另一个 dentry，而重载自身产生的 mount/umount
+/// 事件会让 MediaProvider 失效它缓存的那个 dentry（典型的 `mountinfo` 里挂着、应用行走却
+/// 落回真实存储），于是热重载后应用读到的是公共存储，沙箱里才存在的目标路径直接 ENOENT。
+///
+/// 判据刻意收得很窄：只在「本次仍是重定向、后端没有换成需要 scoped FUSE 根、该入口当前
+/// 最上层确是本应用沙箱根、且沙箱根与本次重定向目标一致」时才保留；其余情况（改沙箱
+/// 目标、改后端、非模块层、本层不在场）一律按原逻辑摘除重建。
+///
+/// `live_layer` 是该入口当前最上层挂载的 `(source, root)`；`None` 表示该入口上没有活动挂载。
+fn should_keep_reload_redirect_root(
+    target: &str,
+    request: &MountRequest,
+    scoped_fuse_roots: &[String],
+    live_layer: Option<(&str, &str)>,
+) -> bool {
+    if request.operation != MountOperation::Reload || request.redirect_target.is_empty() {
+        return false;
+    }
+    if scoped_fuse_roots
+        .iter()
+        .any(|root| paths::is_same_or_child(target, root))
+    {
+        return false;
+    }
+    let Some((source, root)) = live_layer else {
+        return false;
+    };
+    if !mount_identity::is_module_redirect_mount(source, root, target, &request.package_name) {
+        return false;
+    }
+    sandbox_root_matches_redirect_target(root, &request.redirect_target)
+}
+
+/// `root`（mountinfo 的 root 字段，`/media/<user>/...` 或 `/<user>/...` 两种等价写法）
+/// 是否是 `redirect_target`（`/storage/emulated/<user>/...`）在存储树内的同一沙箱根。
+///
+/// 只比较 `/Android/` 之后的尾部，天然兼容两种视图写法；自定义重定向目标（尾部不是
+/// `Android/...` 形态）一律返回 false，让调用方退回"摘了重建"的安全路径。
+fn sandbox_root_matches_redirect_target(root: &str, redirect_target: &str) -> bool {
+    let Some((_, tail)) = redirect_target.split_once("/Android/") else {
+        return false;
+    };
+    !tail.is_empty() && root.ends_with(&format!("/Android/{tail}"))
 }
 
 /// 清理允许真实目录在 `/data/media` 下遗留的系统 FUSE 子挂载。

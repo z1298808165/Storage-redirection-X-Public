@@ -70,8 +70,15 @@ mod module_mount_source {
 }
 
 // ---- clear_previous_mounts 的 mount_identity::load 桩：无账本。 ----
+// topmost_live_mount 桩返回 None：本 harness 只验证身份/语法口径与摘除顺序，
+// "热重载保留重定向根"的判定由 reload_keep_redirect_root harness 单独执行真实实现，
+// 这里让保留分支恒不触发，避免两处判据互相掩盖。
 mod mount_identity {
     pub fn load(_pkg: &str, _pid: i32) -> Option<crate::MountLedger> {
+        None
+    }
+
+    pub fn topmost_live_mount(_pid: i32, _target: &str) -> Option<crate::LiveMount> {
         None
     }
 }
@@ -84,11 +91,17 @@ mod __harness_fs {
     }
 }
 
-// ---- log 宏桩：clear_previous_mounts 用 warn! 记录，这里丢弃。 ----
-// 抽取函数里原本是 `log::warn!`，由 Python 在注入前替换成 `warn!`。
+// ---- log 宏桩：clear_previous_mounts 用 warn!/info! 记录，这里丢弃。 ----
+// 抽取函数里原本是 `log::warn!` / `log::info!`，由 Python 在注入前替换成裸宏调用。
 #[macro_use]
 mod log {
     macro_rules! warn {
+        ($($arg:tt)*) => {{
+            let _ = format_args!($($arg)*);
+        }};
+    }
+
+    macro_rules! info {
         ($($arg:tt)*) => {{
             let _ = format_args!($($arg)*);
         }};
@@ -174,14 +187,35 @@ pub enum MountVerdict {
 const IDENTITY_SCHEMA_VERSION: u32 = 2;
 
 // ---- clear_previous_mounts 用的桩与类型 ----
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MountOperation {
+    Reload,
+    Apply,
+    Disable,
+}
+
 pub struct MountRequest {
+    pub operation: MountOperation,
     pub package_name: String,
     pub pid: i32,
+    pub redirect_target: String,
 }
 
 pub struct MountForkPlan {
     pub state_path: String,
     pub overlay_targets: Vec<String>,
+    pub scoped_fuse_roots: Vec<String>,
+}
+
+// 保留判定的桩：真实实现见 reload_keep_redirect_root harness；这里恒 false，
+// 让 clear_previous_mounts 在本 harness 里始终走"摘除"分支。
+fn should_keep_reload_redirect_root(
+    _target: &str,
+    _request: &MountRequest,
+    _scoped_fuse_roots: &[String],
+    _live_layer: Option<(&str, &str)>,
+) -> bool {
+    false
 }
 
 #[derive(PartialEq, Debug)]
@@ -467,12 +501,15 @@ fn main() {
     ];
     CLEARED_TARGETS.lock().unwrap().clear();
     let request = MountRequest {
+        operation: MountOperation::Reload,
         package_name: "pkg".to_string(),
         pid: 1,
+        redirect_target: String::new(),
     };
     let plan = MountForkPlan {
         state_path: "/x".to_string(),
         overlay_targets: Vec::new(),
+        scoped_fuse_roots: Vec::new(),
     };
     let outcome = clear_previous_mounts(&request, &plan);
     let cleared = CLEARED_TARGETS.lock().unwrap().clone();
