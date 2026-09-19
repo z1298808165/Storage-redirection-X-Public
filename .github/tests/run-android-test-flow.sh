@@ -230,6 +230,24 @@ adb shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE all
 export SRT_SKIP_FINAL_CLEANUP=1
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
+# 场景取景：手动触发传入的场景编号优先，其次看提交信息里的「单场景 29」（可逗号列举）。
+#
+# 逐场景修复时整轮矩阵（5 个版本 × 37 场景）要等约 50 分钟才看到结果，
+# 而验证单点修复只需要那一个场景；用这两个入口把反馈周期压到十几分钟，
+# 不必为了跑窄范围而临时改写 workflow（改 workflow 容易在收尾时漏改回全量）。
+# srx-scenario-scope:begin
+scenario_scope="${SRT_SCENARIOS_OVERRIDE:-}"
+if [ -z "$scenario_scope" ]; then
+  scenario_message="${SRT_COMMIT_MESSAGE:-}"
+  if [[ "$scenario_message" =~ 单场景[：:]?[[:space:]]*([0-9]+([,，][0-9]+)*) ]]; then
+    scenario_scope="${BASH_REMATCH[1]}"
+  fi
+fi
+if [ -n "$scenario_scope" ]; then
+  export SRT_SCENARIOS="${scenario_scope//，/,}"
+  echo "scenario_scope=limited value=${SRT_SCENARIOS}"
+fi
+# srx-scenario-scope:end
 # 场景脚本的失败退出码直接透传给 job（此前 224 无任何标记），这里显式打印便于定位。
 scenario_exit=0
 bash .github/tests/run-storage-redirect-scenarios.sh || scenario_exit=$?

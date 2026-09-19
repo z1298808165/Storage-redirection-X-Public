@@ -5,6 +5,15 @@ on:
     branches: [SRX-R]
   push:
     branches: [SRX-R]
+  # 手动触发：只跑指定场景做单点回归（例如 scenarios=29），
+  # 不必为收窄范围而临时改写 workflow 或伪造提交信息。
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "只跑列出的场景编号（逗号分隔，如 29 或 29,34）；留空跑全量"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -525,6 +534,11 @@ jobs:
       MAGISK_URL: ${{ matrix.android.magisk_url }}
       EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}
       SRT_SCENARIOS: "all"
+      # 手动触发时的场景取景；为空则保持上面的全量默认值。
+      SRT_SCENARIOS_OVERRIDE: ${{ inputs.scenarios }}
+      # 提交信息里写「单场景 29」（可逗号列举）也能收窄范围：逐场景修复时
+      # 整轮矩阵要等约 50 分钟，窄范围回归用它把反馈压到十几分钟。
+      SRT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300

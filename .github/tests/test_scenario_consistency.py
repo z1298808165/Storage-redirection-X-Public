@@ -1,5 +1,9 @@
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -15,6 +19,16 @@ def read(path: str) -> str:
 
 def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
+
+
+def bash_path(path: Path) -> str:
+    """把路径转成子进程 `bash` 认得的相对形式。
+
+    Windows MSYS 下驱动器挂在 `/mnt/<盘符>/...`（不是 `/e/...`），传 `E:/...` 或
+    `/e/...` 都会被当成"脚本不存在"而以 127 假失败；子进程继承当前工作目录，
+    用相对路径在 Windows 与 Linux 上都成立。
+    """
+    return Path(os.path.relpath(Path(path), Path.cwd())).as_posix()
 
 
 def load_workflow(path: str) -> dict:
@@ -1844,6 +1858,94 @@ class ScenarioConsistencyTest(unittest.TestCase):
             r"\$Pid\b",
             "`.ps1` 不得使用 `$Pid` 作变量/参数名（与只读内置变量 `$PID` 冲突）",
         )
+
+    def test_scenario_scope_override_and_commit_message_parsing(self) -> None:
+        """场景取景必须真能收窄范围，且不带取景时不改变全量。
+
+        逐场景修复时整轮矩阵要等约 50 分钟，窄范围回归靠取景开关把反馈压到十几分钟；
+        解析写错（例如把非数字也吃进去、把中文逗号漏掉、手动输入没覆盖提交信息）
+        会让 CI 静默跑错场景集合，因此这里直接执行执行器里的真实解析片段而不是断言字符串存在。
+        """
+        workflow = read(".github/workflows/ci.yml")
+        self.assertIn(
+            "SRT_COMMIT_MESSAGE:",
+            workflow,
+            "workflow 必须把提交信息透传给执行器，否则提交信息取景无法生效",
+        )
+        self.assertIn(
+            "SRT_SCENARIOS_OVERRIDE:",
+            workflow,
+            "workflow 必须把手动触发的取景输入透传给执行器",
+        )
+        self.assertIn("workflow_dispatch:", workflow, "必须提供可复用的手动触发入口")
+        self.assertIn(
+            'SRT_SCENARIOS: "all"',
+            workflow,
+            "默认仍必须是全量选择器，窄范围只能由取景入口覆盖",
+        )
+
+        runner = read(".github/tests/run-android-test-flow.sh")
+        snippet = section(runner, "# srx-scenario-scope:begin", "# srx-scenario-scope:end")
+        self.assertIn("SRT_SCENARIOS_OVERRIDE", snippet, "解析片段必须优先读手动输入")
+        self.assertIn("单场景", snippet, "解析片段必须识别「单场景」标记本身")
+        self.assertIn("SRT_SCENARIOS=", snippet, "解析片段必须把结果写回选择器")
+
+        # (手动输入, 提交信息, 期望结果)
+        cases = (
+            ("", "", ""),
+            ("", "修复：热重载保留重定向根", ""),
+            ("", "修复：热重载保留重定向根 单场景 29", "29"),
+            ("", "修复 单场景29", "29"),
+            ("", "修复 单场景: 29", "29"),
+            ("", "修复 单场景：29,34", "29,34"),
+            ("", "修复 单场景 29，34", "29,34"),
+            ("", "修复 单场景 29 与 34", "29"),
+            ("", "修复 单场景 无编号", ""),
+            # 手动输入优先于提交信息，且同样接受中文逗号。
+            ("29", "修复 单场景 34", "29"),
+            ("29，34", "修复：说明", "29,34"),
+        )
+        # 本机 bash 收不到 stdin / 位置参数（Windows MSYS 下两者都拿不到数据），
+        # 因此把消息与执行体都落到临时脚本里，只按路径读取，避免依赖参数传递。
+        temp_root = Path("temp")
+        temp_root.mkdir(exist_ok=True)
+        work_dir = Path(tempfile.mkdtemp(dir=temp_root))
+        try:
+            for index, (override, message, expected) in enumerate(cases):
+                (work_dir / f"message-{index}.txt").write_text(
+                    message, encoding="utf-8", newline=""
+                )
+                (work_dir / f"driver-{index}.sh").write_text(
+                    f'SRT_COMMIT_MESSAGE="$(cat {bash_path(work_dir / f"message-{index}.txt")})"\n'
+                    + f'SRT_SCENARIOS_OVERRIDE="{override}"\n'
+                    + snippet
+                    # 解析片段自己会 echo 一行说明，用标记行取结果，避免混进断言。
+                    + '\nprintf "SCOPE=%s\\n" "${SRT_SCENARIOS:-}"\n',
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                proc = subprocess.run(
+                    ["bash", bash_path(work_dir / f"driver-{index}.sh")],
+                    capture_output=True,
+                )
+                actual = ""
+                for line in proc.stdout.decode("utf-8", "replace").splitlines():
+                    if line.startswith("SCOPE="):
+                        actual = line[len("SCOPE=") :]
+                self.assertEqual(
+                    proc.returncode,
+                    0,
+                    f"解析片段执行失败 override={override!r} message={message!r}: "
+                    + proc.stderr.decode("utf-8", "replace"),
+                )
+                self.assertEqual(
+                    actual,
+                    expected,
+                    f"override={override!r} message={message!r} 应选择 {expected!r}，"
+                    f"实际 {actual!r}",
+                )
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
