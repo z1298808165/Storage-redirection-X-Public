@@ -134,6 +134,28 @@ impl MountPlanner {
                 continue;
             }
 
+            // 每个存储别名视图都要有自己的挂载点：下面按别名逐个挂载，别名目录缺失时该
+            // 别名会被静默跳过，映射只在部分视图生效。实测 Android 13 上只有 /data/media
+            // 一个别名落地，应用视图 /storage/emulated/0 上没有映射挂载，应用写入因此走
+            // 重定向进沙箱而 ENOENT；Android 14 同样代码则覆盖到全部别名并通过。
+            if self.is_storage_path(&mapping.request_path, storage_path) {
+                for alias in self.expand_storage_alias_paths(&mapping.request_path) {
+                    if mapping_mount_point_exists(&alias) {
+                        continue;
+                    }
+                    if self.ensure_mapping_request_mount_point(
+                        &alias,
+                        storage_path,
+                        options.should_chown_current_dirs,
+                        options.should_create_missing_request_path,
+                    ) {
+                        log::debug!("map mount point prepared for alias {}", alias);
+                    } else {
+                        log::warn!("map alias mount point unavailable: {}", alias);
+                    }
+                }
+            }
+
             let mut is_current_path_mounted = false;
             if self.is_storage_path(&mapping.request_path, storage_path) {
                 let _ = self.bind_overlay_mount_with_storage_aliases(
