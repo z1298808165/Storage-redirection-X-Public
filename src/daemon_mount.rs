@@ -1925,6 +1925,11 @@ fn should_keep_reload_redirect_root(
     scoped_fuse_roots: &[String],
     live_layer: Option<(&str, &str)>,
 ) -> bool {
+    // 仅映射模式不走重定向根保留：从默认重定向切到仅映射模式时，旧沙箱根绑定必须按原逻辑
+    // 摘除重建，否则改了挂载方式却仍保留旧重定向根，应用读到的是上一轮重定向留下的错误视图。
+    if request.is_mapping_mode_only {
+        return false;
+    }
     if request.operation != MountOperation::Reload || request.redirect_target.is_empty() {
         return false;
     }

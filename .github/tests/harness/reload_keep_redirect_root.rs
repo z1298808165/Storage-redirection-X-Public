@@ -11,6 +11,8 @@
 //   `should_keep_reload_redirect_root` 只在本轮仍是重定向、后端没有换成需要 scoped FUSE 根、
 //   该入口最上层确是本模块层、且那一层的沙箱根与本次重定向目标一致时才保留既有绑定。
 //   放宽任何一条都会让热重载在错误时机保留旧挂载（改沙箱目标后仍指向旧沙箱）。
+//   另外：`is_mapping_mode_only` 为 true 时必须返回 false——从默认重定向切到仅映射模式
+//   时旧沙箱根绑定必须摘除重建，否则仍保留旧重定向根会让应用读到错误视图。
 
 #![allow(dead_code, unused_imports, unused_variables, unused_macros)]
 
@@ -46,6 +48,7 @@ pub struct MountRequest {
     pub operation: MountOperation,
     pub package_name: String,
     pub redirect_target: String,
+    pub is_mapping_mode_only: bool,
 }
 
 // 抽取函数里的 `paths::` / `mount_identity::` 是 crate 根模块路径，模板在同名模块内定义桩。
@@ -57,11 +60,12 @@ pub struct MountRequest {
 
 const SANDBOX_TARGET: &str = "/storage/emulated/0/Android/data/com.demo/sdcard";
 
-fn request(operation: MountOperation, redirect_target: &str) -> MountRequest {
+fn request(operation: MountOperation, redirect_target: &str, is_mapping_mode_only: bool) -> MountRequest {
     MountRequest {
         operation,
         package_name: "com.demo".to_string(),
         redirect_target: redirect_target.to_string(),
+        is_mapping_mode_only,
     }
 }
 
@@ -86,7 +90,7 @@ fn main() {
         "reload_matching_sandbox_root_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
         ),
@@ -99,7 +103,7 @@ fn main() {
         "reload_fuse_view_root_kept",
         should_keep_reload_redirect_root(
             "/mnt/user/0/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/fuse", "/0/Android/data/com.demo/sdcard")),
         ),
@@ -115,6 +119,7 @@ fn main() {
             &request(
                 MountOperation::Reload,
                 "/storage/emulated/0/Android/media/com.demo/sdcard",
+                false,
             ),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/media/com.demo/sdcard")),
@@ -128,7 +133,7 @@ fn main() {
         "reload_other_package_sandbox_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.other/sdcard")),
         ),
@@ -141,7 +146,7 @@ fn main() {
         "reload_custom_redirect_target_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, "/storage/emulated/0/SrtCustomSandbox"),
+            &request(MountOperation::Reload, "/storage/emulated/0/SrtCustomSandbox", false),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/SrtCustomSandbox")),
         ),
@@ -154,7 +159,7 @@ fn main() {
         "reload_app_private_directory_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0/Android/data/com.demo",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/fuse", "/0/Android/data/com.demo")),
         ),
@@ -168,7 +173,7 @@ fn main() {
         "reload_foreign_layer_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/fuse", "/0/Android/data/com.demo/sdcard")),
         ),
@@ -182,7 +187,7 @@ fn main() {
         "reload_absent_layer_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &no_scoped_roots,
             None,
         ),
@@ -195,7 +200,7 @@ fn main() {
         "apply_operation_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Apply, SANDBOX_TARGET),
+            &request(MountOperation::Apply, SANDBOX_TARGET, false),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
         ),
@@ -208,7 +213,7 @@ fn main() {
         "empty_redirect_target_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, ""),
+            &request(MountOperation::Reload, "", false),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
         ),
@@ -221,7 +226,7 @@ fn main() {
         "scoped_fuse_root_not_kept",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
         ),
@@ -234,11 +239,26 @@ fn main() {
         "scoped_fuse_child_root_keeps_parent",
         should_keep_reload_redirect_root(
             "/storage/emulated/0",
-            &request(MountOperation::Reload, SANDBOX_TARGET),
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
             &["/storage/emulated/0/Download".to_string()],
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
         ),
         true,
+    );
+
+    // 仅映射模式：即便本模块沙箱根与本次重定向目标一致，也不得保留旧重定向根，
+    // 否则从默认重定向切到仅映射模式后旧沙箱根仍在，应用读到错误视图。
+    // （ownership 仍为真，验证 is_mapping_mode_only 守卫优先于归属/沙箱根一致性。）
+    check(
+        &mut failures,
+        "reload_mapping_mode_only_not_kept",
+        should_keep_reload_redirect_root(
+            "/storage/emulated/0",
+            &request(MountOperation::Reload, SANDBOX_TARGET, true),
+            &no_scoped_roots,
+            Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
+        ),
+        false,
     );
 
     if failures.is_empty() {

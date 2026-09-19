@@ -130,6 +130,22 @@ class ReloadKeepRedirectRootTest(unittest.TestCase):
                 tmp, template, paths_fns, ownership_mutated, "归属守卫"
             )
 
+            # --- 反向验证三：去掉"仅映射模式不走重定向根保留"的守卫。
+            # 从默认重定向切到仅映射模式时，原反例 reload_mapping_mode_only_not_kept
+            # 必须由 false 变为 true（错误保留旧重定向根），证明该守卫确为必需，
+            # 而非空壳判据——归属与沙箱根一致本身不足以保留旧根。 ---
+            mapping_mutated = all_fns.replace(
+                "if request.is_mapping_mode_only {",
+                "if false {",
+                1,
+            )
+            self.assertNotEqual(
+                mapping_mutated, all_fns, "反向变异未生效（仅映射模式守卫）"
+            )
+            self._assert_mutation_fails(
+                tmp, template, paths_fns, mapping_mutated, "仅映射模式守卫"
+            )
+
     def _assert_mutation_fails(
         self,
         tmp: str,
