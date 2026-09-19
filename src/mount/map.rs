@@ -165,6 +165,15 @@ impl MountPlanner {
                 }
             }
 
+            log::warn!(
+                "map probe entry request={} storage={} is_storage={} aliases={} target_source={}",
+                mapping.request_path,
+                storage_path,
+                self.is_storage_path(&mapping.request_path, storage_path),
+                self.expand_storage_alias_paths(&mapping.request_path).len(),
+                target_source
+            );
+
             let mut is_current_path_mounted = false;
             if self.is_storage_path(&mapping.request_path, storage_path) {
                 let _ = self.bind_overlay_mount_with_storage_aliases(
