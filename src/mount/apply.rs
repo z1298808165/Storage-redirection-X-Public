@@ -107,6 +107,28 @@ impl MountPlanner {
             }
             detach_mount_if_present(real_storage_anchor);
             if self.bind_mount(&source_candidate, real_storage_anchor, true) {
+                // 绑定后必须复核锚点没有指向本应用沙箱：热重载时
+                // `storage_root_is_already_redirected` 可能判为「未重定向」并走到这里，
+                // 但 `/storage/emulated/<user>` 的可见内容已被上一轮重定向覆盖，绑定出来的
+                // 锚点 `root` 会带 `Android/{data,media,obb}/<包名>`，指向沙箱而不是真实存储。
+                // 用被污染的锚点解析 path_mappings 源目录，映射目标会落到沙箱内而不是真实
+                // 公共路径（场景 29 的 `Download/Test` 落点错）。复核失败就摘掉重来，由上层
+                // 回退到以 `/data/media` 为源的后端锚点，那里不受重定向影响。
+                let fresh_mountinfo = read_mountinfo().unwrap_or_default();
+                if mountinfo_root_is_app_sandbox(
+                    &fresh_mountinfo,
+                    real_storage_anchor,
+                    &self.package_name,
+                ) {
+                    log::warn!(
+                        "real storage anchor visible bind polluted, retry backend pkg={} source={} anchor={}",
+                        self.package_name,
+                        source_candidate,
+                        real_storage_anchor
+                    );
+                    detach_mount_if_present(real_storage_anchor);
+                    continue;
+                }
                 log::info!(
                     "real storage anchored visible {} -> {}",
                     source_candidate,
