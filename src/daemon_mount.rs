@@ -221,19 +221,25 @@ fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -
 /// `/proc/<pid>/mountinfo` 后转交到这里。
 fn mount_targets_present_with(content: &str, targets: &[String], request: &MountRequest) -> bool {
     let user_id = crate::platform::user_id_from_uid(request.uid);
-    let data_media_root = paths::data_media_user_root_for_user(user_id);
-    // 每个记录在案的目标映射到"健康分组"：明确符号链接入口（/sdcard、/storage/self/primary）
-    // 折叠到主入口视图；/mnt/... 是独立挂载视图、/data/media 是独立后端，二者均保持独立分组，
-    // 大小写敏感。这样后端或 /mnt 视图无法替主入口"顶包"，否则主入口缺失会被健康判据掩盖
-    // （场景二十九）。
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let alias_roots = paths::storage_alias_roots_for_user(user_id);
+    // 同一存储路径存在多个内核视图（`/storage/emulated/<user>`、`/data/media/<user>`、
+    // `/mnt/*/<user>/emulated/<user>`、`/storage/self/primary`、`/sdcard`）。它们是同一份
+    // 挂载在不同 namespace 里的别名，状态文件记录哪个别名取决于挂载当时的遍历路径，因此
+    // 必须按"别名组"判定：组内任一别名在场即视为该逻辑目标仍挂载。
+    //
+    // 若改成每个别名各自成组，就会把正常的视图差异判成整份挂载失效，每约三秒触发一次
+    // `remount pending`，反复打断正在进行的文件写入。
     let expected_groups = targets
         .iter()
-        .map(|target| canonical_health_target(target, &data_media_root))
+        .map(|target| canonical_health_target(target, &storage_root, &alias_roots))
         .collect::<HashSet<_>>();
     let present_groups = targets
         .iter()
-        .filter(|target| mount_target_count_from_mountinfo(content, target, &data_media_root) > 0)
-        .map(|target| canonical_health_target(target, &data_media_root))
+        .filter(|target| {
+            mount_target_count_from_mountinfo(content, target, &storage_root, &alias_roots) > 0
+        })
+        .map(|target| canonical_health_target(target, &storage_root, &alias_roots))
         .collect::<HashSet<_>>();
     let missing = expected_groups.difference(&present_groups).count();
     if missing == 0 {
@@ -250,53 +256,47 @@ fn mount_targets_present_with(content: &str, targets: &[String], request: &Mount
     false
 }
 
-/// 健康判据专用归一化：只把**明确是符号链接**的入口折叠到主入口视图，其余路径保持独立分组。
+/// 把一条挂载目标折算到它所属的"存储别名组"代表路径。
 ///
-/// 仅以下入口会被折叠（它们确实是符号链接，内核在不同视图里看到的是同一份挂载）：
-/// - `/sdcard`、`/storage/self/primary`：对称链接到 `/storage/emulated/<user>`；
-/// - `/data/data`：历史别名，折叠到 `/data/user/0`。
+/// 代表路径统一取 `/storage/emulated/<user>` 视图；`/data/media/<user>`、`/sdcard`、
+/// `/storage/self/primary`、`/storage/emulated/legacy` 以及各 `/mnt/<view>/.../emulated/<user>`
+/// 都经 [`paths::storage_alias_roots_for_user`] 折算到同一代表，`/data/data` 按历史别名折算到
+/// `/data/user/0`。
 ///
-/// 而 **`/mnt/...`（独立挂载视图，并非符号链接）与后端 `/data/media` 必须保持独立分组且大小写
-/// 敏感**：若把它们也折叠进 `/storage/emulated`，后端（或 /mnt 视图）就能替主入口"顶包"，使主入口
-/// 缺失被健康判据掩盖（场景二十九）。
-///
-/// 这与 [`mount_target_count_from_mountinfo`] 共用，确保"期望分组"与"在场分组"用同一口径计算。
-fn canonical_health_target(target: &str, data_media_root: &str) -> String {
-    let normalized = paths::normalize_syntax(target);
-    // 后端 /data/media 是独立的真实挂载（不是符号链接）：保持独立分组，避免替主入口"顶包"。
-    if normalized == *data_media_root || normalized.starts_with(&format!("{}/", data_media_root)) {
-        return normalized;
+/// 只在"组内任一别名在场即健康"的口径下使用：别名之间的差异属于正常 namespace 视图差异，
+/// 不能当作挂载失效。这与 [`mount_target_count_from_mountinfo`] 共用同一折算，保证
+/// "期望分组"与"在场分组"口径一致。
+fn canonical_health_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {
+    let target = paths::normalize_syntax(target);
+    let target = if target == "/data/data" {
+        "/data/user/0".to_string()
+    } else if let Some(rest) = target.strip_prefix("/data/data/") {
+        format!("/data/user/0/{}", rest)
+    } else {
+        target
+    };
+
+    // `/sdcard` 是对 `/storage/emulated/<user>` 的对称链接（`paths::normalize` 同样会折叠它），
+    // 但别名根清单里没有这一项：这里显式折算，避免记录到的 `/sdcard/...` 目标自成一组。
+    if target == "/sdcard" {
+        return storage_root.to_string();
+    }
+    if let Some(suffix) = target.strip_prefix("/sdcard/") {
+        return format!("{}/{}", storage_root, suffix);
     }
 
-    // /mnt/... 是独立挂载视图（并非符号链接）：不同 namespace 各自成组，保持独立且大小写敏感，
-    // 不能由主入口顶替，否则独立视图缺失会被主入口掩盖。
-    if normalized.starts_with("/mnt/") {
-        return normalized;
+    for alias_root in alias_roots {
+        if target == *alias_root {
+            return storage_root.to_string();
+        }
+        let Some(suffix) = target.strip_prefix(alias_root.as_str()) else {
+            continue;
+        };
+        if suffix.starts_with('/') {
+            return format!("{}{}", storage_root, suffix);
+        }
     }
-
-    // 历史兼容：/data/data 折叠到 /data/user/0。
-    if normalized == "/data/data" {
-        return "/data/user/0".to_string();
-    }
-    if let Some(rest) = normalized.strip_prefix("/data/data/") {
-        return format!("/data/user/0/{}", rest);
-    }
-
-    // 明确符号链接入口折叠到主入口视图（/storage/emulated/<user>）。
-    let storage_root = data_media_root.replacen("/data/media", "/storage/emulated", 1);
-    if normalized == "/sdcard" || normalized.starts_with("/sdcard/") {
-        return format!("{}{}", storage_root, &normalized["/sdcard".len()..]);
-    }
-    if normalized == "/storage/self/primary" || normalized.starts_with("/storage/self/primary/") {
-        return format!(
-            "{}{}",
-            storage_root,
-            &normalized["/storage/self/primary".len()..]
-        );
-    }
-
-    // 主入口 /storage/emulated/... 及其它路径保持原样（独立分组）。
-    normalized
+    target
 }
 
 /// 检查应用 namespace 内真实存储后端是否仍能响应目录访问。
@@ -1270,20 +1270,21 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     // 继续挂载只会在同一个挂载点上再叠一层：应用最终看到的是最顶层那份，而底下的死挂载
     // 仍然占用着挂载表，后续每一轮恢复都会让栈更高。这里把"摘除未验证"累计到账本，达到
     // 预算后显式拒绝注入，把问题暴露成持续可观测的状态，而不是让它无限叠加。
-    if request.operation == MountOperation::Reload && !cleanup.is_cleared() {
-        // 清理未验证时决定本次 Reload 是否允许注入。
-        // - 无可信账本（load 为 None）：没有任何归属记录可证明残留是本模块的，继续注入只会
-        //   无限叠加死挂载层，保守拒绝本次注入（场景二十九新增）。
-        // - 有账本：走既有摘除失败预算，未到 poisoned 上限前仍允许注入，保持行为不变。
-        let ledger = mount_identity::load(&request.package_name, request.pid);
-        if reload_refuse_when_unverified(request.operation, cleanup.is_cleared(), ledger.is_some())
-        {
+    if request.operation == MountOperation::Reload
+        && !cleanup.is_cleared()
+        && let Some(mut ledger) = mount_identity::load(&request.package_name, request.pid)
+    {
+        let poisoned = ledger.record_detach_failure();
+        let attempts = ledger.detach_attempts;
+        let _ = mount_identity::save(&ledger);
+        if poisoned {
             fuse_supervisor::record_action(
                 RecoveryAction::RefusePoisoned,
                 EndpointHealth::Unprobed(0),
             );
-            log::warn!(
-                "daemon mount refused reason=no_ledger_unverified pid={} pkg={}",
+            log::error!(
+                "daemon mount refused reason=detach_not_verified attempts={} pid={} pkg={}",
+                attempts,
                 request.pid,
                 request.package_name
             );
@@ -1291,27 +1292,6 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
             unsafe { close(sock) };
             return false;
-        }
-        if let Some(mut ledger) = ledger {
-            let poisoned = ledger.record_detach_failure();
-            let attempts = ledger.detach_attempts;
-            let _ = mount_identity::save(&ledger);
-            if poisoned {
-                fuse_supervisor::record_action(
-                    RecoveryAction::RefusePoisoned,
-                    EndpointHealth::Unprobed(0),
-                );
-                log::error!(
-                    "daemon mount refused reason=detach_not_verified attempts={} pid={} pkg={}",
-                    attempts,
-                    request.pid,
-                    request.package_name
-                );
-                let _ = send_mount_result(sock, -1);
-                // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
-                unsafe { close(sock) };
-                return false;
-            }
         }
     }
     clear_previous_allowed_real_backend_mounts(request);
@@ -1832,27 +1812,6 @@ impl ClearOutcome {
     }
 }
 
-/// 清理未验证时 Reload 注入的处置判定（纯函数，便于离线验证）。
-///
-/// 返回 `true` 表示应拒绝本次注入；`false` 表示允许继续（沿用既有路径）。
-///
-/// 判据：
-/// - 非 Reload 或清理已确认清空：放行。
-/// - Reload 且清理未验证、**无可信账本**（load 为 `None`）：保守拒绝——没有归属记录可证明
-///   残留是本模块的，继续注入只会无限叠加死挂载层（场景二十九）。
-/// - Reload 且清理未验证、**有账本**：放行；账本侧既有摘除失败预算会在达到上限后自行拒绝，
-///   这里不重复决定，保持行为不变。
-fn reload_refuse_when_unverified(
-    operation: MountOperation,
-    is_cleared: bool,
-    has_ledger: bool,
-) -> bool {
-    if operation != MountOperation::Reload || is_cleared {
-        return false;
-    }
-    !has_ledger
-}
-
 /// 清理上一轮挂载。
 ///
 /// 状态文件里的目标路径上可能压着本模块的挂载，也可能已被其它组件（例如系统
@@ -2104,7 +2063,7 @@ fn is_mount_stack_cleared(mounted_count: usize) -> bool {
 
 fn current_mount_target_count(target: &str) -> usize {
     std::fs::read_to_string("/proc/self/mountinfo")
-        .map(|content| mount_target_count_from_mountinfo(&content, target, ""))
+        .map(|content| mount_target_count_from_mountinfo(&content, target, "", &[]))
         .unwrap_or(0)
 }
 
@@ -2406,14 +2365,22 @@ fn read_mount_targets(path: &str) -> Vec<String> {
         .collect()
 }
 
-fn mount_target_count_from_mountinfo(content: &str, target: &str, data_media_root: &str) -> usize {
-    let canonical_target = canonical_health_target(target, data_media_root);
+fn mount_target_count_from_mountinfo(
+    content: &str,
+    target: &str,
+    storage_root: &str,
+    alias_roots: &[String],
+) -> usize {
+    let canonical_target = canonical_health_target(target, storage_root, alias_roots);
     content
         .lines()
         .filter_map(mountinfo::parse_entry)
         .filter(|entry| {
-            canonical_health_target(&mountinfo::unescape_field(entry.target), data_media_root)
-                == canonical_target
+            canonical_health_target(
+                &mountinfo::unescape_field(entry.target),
+                storage_root,
+                alias_roots,
+            ) == canonical_target
         })
         .count()
 }
