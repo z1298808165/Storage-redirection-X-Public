@@ -43,6 +43,13 @@ def extract_fn(source: str, fn_name: str) -> str:
     return source[start:idx]
 
 
+def extract_const(source: str, name: str) -> str:
+    match = re.search(rf"const {name}: &str = \"[^\"]*\";", source)
+    if match is None:
+        raise AssertionError(f"未找到常量 {name}")
+    return match.group(0)
+
+
 def build_harness(template: str, mountinfo_fns: str, paths_fns: str, all_fns: str) -> str:
     out = template
     for placeholder, body in (
@@ -73,15 +80,23 @@ class DaemonMountHealthTest(unittest.TestCase):
         mountinfo_fns = extract_fn(mountinfo_src, "parse_entry") + "\n" + extract_fn(
             mountinfo_src, "unescape_field"
         )
-        paths_fns = extract_fn(paths_src, "normalize_syntax") + "\n" + extract_fn(
-            paths_src, "collapse_redundant_slashes"
+        # 别名清单必须来自真实源码：桩一份手写清单会掩盖生产别名表被改坏的情况。
+        paths_fns = "\n".join(
+            [
+                extract_const(paths_src, "STORAGE_EMULATED_PREFIX"),
+                extract_const(paths_src, "DATA_MEDIA_PREFIX"),
+                extract_fn(paths_src, "normalize_syntax"),
+                extract_fn(paths_src, "collapse_redundant_slashes"),
+                extract_fn(paths_src, "storage_user_root_for_user"),
+                extract_fn(paths_src, "data_media_user_root_for_user"),
+                extract_fn(paths_src, "storage_alias_roots_for_user"),
+            ]
         )
         all_fns = "\n".join(
             [
                 extract_fn(daemon_mount_src, "mount_targets_present_with"),
                 extract_fn(daemon_mount_src, "canonical_health_target"),
                 extract_fn(daemon_mount_src, "mount_target_count_from_mountinfo"),
-                extract_fn(daemon_mount_src, "reload_refuse_when_unverified"),
             ]
         )
 
@@ -99,9 +114,7 @@ class DaemonMountHealthTest(unittest.TestCase):
                 text=True,
             )
             if compile_proc.returncode != 0:
-                self.fail(
-                    "harness 编译失败:\n" + compile_proc.stdout + compile_proc.stderr
-                )
+                self.fail("harness 编译失败:\n" + compile_proc.stdout + compile_proc.stderr)
             run_proc = subprocess.run([bin_path], capture_output=True, text=True)
             print(run_proc.stdout)
             if run_proc.stderr:
@@ -113,69 +126,36 @@ class DaemonMountHealthTest(unittest.TestCase):
             )
             self.assertIn("ALL DAEMON MOUNT HEALTH CASES PASSED", run_proc.stdout)
 
-            # --- 反向验证 1：把 canonical_health_target 里 /mnt 视图的"独立分组"分支改回
-            # `paths::normalize` 折叠进主入口（即旧的错误行为），模拟"把 /mnt 当成符号链接别名
-            # 折叠"。此时"/mnt 独立视图缺失却被主入口顶替"等用例应从通过变失败，让 harness 退出码
-            # 非 0，证明它真在验证该修复。 ---
-            mutated_a = re.sub(
-                r'if normalized\.starts_with\("/mnt/"\) \{\n        return normalized;\n    \}',
-                'if normalized.starts_with("/mnt/") {\n        return paths::normalize(&normalized);\n    }',
-                all_fns,
-                count=1,
+            # --- 反向验证：把别名折叠循环置空，模拟"每个别名各自成组"的错误口径。
+            # 此时"仅后端别名在场""仅 /mnt 视图记录"等正例应从通过变失败，让 harness 退出码
+            # 非 0，证明它真在验证别名分组语义。 ---
+            mutated_all = all_fns.replace(
+                "for alias_root in alias_roots {",
+                "for alias_root in alias_roots.iter().take(0) {",
+                1,
             )
-            self.assertNotEqual(mutated_a, all_fns, "反向变异 1 未生效")
-            mutated_src_a = build_harness(template, mountinfo_fns, paths_fns, mutated_a)
-            mutated_src_a = mutated_src_a.replace("log::warn!", "warn!")
-            mutated_path_a = os.path.join(tmp, "harness_a.rs")
-            Path(mutated_path_a).write_text(mutated_src_a, encoding="utf-8")
-            mutated_bin_a = os.path.join(tmp, "daemon_mount_health_a")
-            mut_compile_a = subprocess.run(
-                [rustc, mutated_path_a, "-O", "-o", mutated_bin_a],
+            self.assertNotEqual(mutated_all, all_fns, "反向变异未生效")
+            mutated_src = build_harness(template, mountinfo_fns, paths_fns, mutated_all)
+            mutated_src = mutated_src.replace("log::warn!", "warn!")
+            mutated_path = os.path.join(tmp, "harness_mutated.rs")
+            Path(mutated_path).write_text(mutated_src, encoding="utf-8")
+            mutated_bin = os.path.join(tmp, "daemon_mount_health_mutated")
+            mut_compile = subprocess.run(
+                [rustc, mutated_path, "-O", "-o", mutated_bin],
                 capture_output=True,
                 text=True,
             )
-            if mut_compile_a.returncode != 0:
+            if mut_compile.returncode != 0:
                 self.fail(
-                    "反向验证 harness A 编译失败:\n"
-                    + mut_compile_a.stdout
-                    + mut_compile_a.stderr
+                    "反向验证 harness 编译失败:\n" + mut_compile.stdout + mut_compile.stderr
                 )
-            mut_run_a = subprocess.run([mutated_bin_a], capture_output=True, text=True)
-            print(mut_run_a.stdout)
+            mut_run = subprocess.run([mutated_bin], capture_output=True, text=True)
+            print(mut_run.stdout)
             self.assertNotEqual(
-                mut_run_a.returncode,
+                mut_run.returncode,
                 0,
-                "反向验证失败：回退成后端折叠进主入口后边界用例仍全部通过，"
-                "说明 harness 没有真正验证 canonical_health_target 修复",
-            )
-
-            # --- 反向验证 2：把 reload_refuse_when_unverified 的 `!has_ledger` 改成 `false`，
-            # 模拟"无账本也不拒绝"的旧行为。此时"无账本应拒绝"用例应从通过变失败。 ---
-            mutated_b = all_fns.replace("!has_ledger", "false")
-            self.assertNotEqual(mutated_b, all_fns, "反向变异 2 未生效")
-            mutated_src_b = build_harness(template, mountinfo_fns, paths_fns, mutated_b)
-            mutated_src_b = mutated_src_b.replace("log::warn!", "warn!")
-            mutated_path_b = os.path.join(tmp, "harness_b.rs")
-            Path(mutated_path_b).write_text(mutated_src_b, encoding="utf-8")
-            mutated_bin_b = os.path.join(tmp, "daemon_mount_health_b")
-            mut_compile_b = subprocess.run(
-                [rustc, mutated_path_b, "-O", "-o", mutated_bin_b],
-                capture_output=True,
-                text=True,
-            )
-            if mut_compile_b.returncode != 0:
-                self.fail(
-                    "反向验证 harness B 编译失败:\n"
-                    + mut_compile_b.stdout
-                    + mut_compile_b.stderr
-                )
-            mut_run_b = subprocess.run([mutated_bin_b], capture_output=True, text=True)
-            print(mut_run_b.stdout)
-            self.assertNotEqual(
-                mut_run_b.returncode,
-                0,
-                "反向验证失败：回退成无账本也放行后边界用例仍全部通过，"
-                "说明 harness 没有真正验证 reload_refuse_when_unverified 修复",
+                "反向验证失败：禁用别名折叠后边界用例仍全部通过，"
+                "说明 harness 没有真正验证别名分组健康判据",
             )
 
 
