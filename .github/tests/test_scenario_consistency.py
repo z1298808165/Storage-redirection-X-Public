@@ -434,6 +434,41 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("- test-flow-android17", required)
         self.assertIn("needs.test-flow-android17.result", required)
 
+    def test_release_android17_flow_mirrors_matrix_gate(self) -> None:
+        # Release 的 Android17 必须独立成 job、与矩阵 job 使用同一套前置条件，并被
+        # Test-flow required gate 一并校验；漏掉任一处都会让 Android17 失败静默放行发布。
+        source = read(".github/workflows/release.yml")
+        android17 = section(source, "  test-flow-android17:", "  test-flow-required:")
+        matrix = section(source, "  test-flow:", "  test-flow-android17:")
+        matrix_condition = next(line.strip() for line in matrix.splitlines() if line.startswith("    if:"))
+        android17_condition = next(line.strip() for line in android17.splitlines() if line.startswith("    if:"))
+        self.assertEqual(matrix_condition, android17_condition)
+        # release.yml 全 workflow 只由 v* tag 触发，矩阵 job 也未显式 gating prepare；
+        # 这里只断言两个 workflow 共有的 gating，避免把 Release 的既有条件改成 CI 的形状。
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", android17_condition)
+        for dependency in ("quality", "test-flow-build"):
+            self.assertIn(f"needs.{dependency}.result == 'success'", android17_condition)
+        for dependency in ("quality", "prepare", "test-flow-build"):
+            self.assertIn(f"- {dependency}", android17)
+        self.assertIn("ANDROID_TARGET: google_apis", android17)
+        self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", android17)
+        self.assertIn("EMULATOR_GPU_MODE: swiftshader_indirect", android17)
+        self.assertIn('ANDROID_API_LEVEL: "37.0"', android17)
+        self.assertIn("MAGISK_URL: https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk", android17)
+        self.assertIn("Download release test-flow runtime", android17)
+        # Android17 job 不覆盖 SRT_FRESH_APP_PER_CASE，沿用场景脚本默认值；
+        # 矩阵 job 显式设为 0 以复用应用进程。
+        self.assertIn("SRT_FRESH_APP_PER_CASE: 0", source)
+        self.assertNotIn("SRT_FRESH_APP_PER_CASE", android17)
+        # Android17 只跑场景，不参与资产发布与清单更新；也不上传专用诊断 artifact。
+        self.assertNotIn("Upload Android 17 diagnostic artifacts", android17)
+        self.assertNotIn("actions/upload-artifact@v7.0.1", android17)
+        self.assertNotIn("gh release", android17)
+        self.assertNotIn("update.json", android17)
+        required = section(source, "  test-flow-required:", "  publish-release:")
+        self.assertIn("- test-flow-android17", required)
+        self.assertIn("needs.test-flow-android17.result", required)
+
     def test_gradle_cache_can_be_written_by_public_builds(self) -> None:
         ci = read(".github/workflows/ci.yml")
         release = read(".github/workflows/release.yml")
