@@ -2467,24 +2467,30 @@ run_config_hot_reload_scenario() {
   done
 
   echo "config_hot_reload_timeout scenario=${scenario} pid=${initial_pid}" >&2
-  # 写入报 ENOENT 时最关键的证据是**应用身份**看到的路径状态：守护进程以 root 运行，
-  # root 能 stat 到的路径应用未必能 stat（系统 FUSE 会按 uid 过滤可见性），只看 root 视角
-  # 会把「不可见」误判成「可见」。这里用 run-as 切到应用 uid 与它的挂载命名空间逐个核对
-  # 目标路径的父链，并真实创建一次探针文件，把结论直接写进失败现场。
-  local probe_parent="${after_request%/*}"
-  local probe_path
-  for probe_path in \
-    "$REAL_ROOT" \
-    "$REAL_ROOT/Download" \
-    "$probe_parent" \
-    "$after_request" \
-    "$after_mapped" \
-    "$after_private"; do
-    adb shell "run-as '$APP_ID' stat -c '%n mode=%a uid=%u' '$probe_path' 2>&1 || echo '$probe_path stat_failed'" |
-      sed "s|^|app_view_probe scenario=${scenario} |" || true
-  done
-  adb shell "run-as '$APP_ID' sh -c 'touch \"$probe_parent/.srx_app_probe\" && rm -f \"$probe_parent/.srx_app_probe\" && echo create_ok'" 2>&1 |
-    sed "s|^|app_view_probe scenario=${scenario} create|" || true
+  # 热重载后写入 ENOENT 的现场取证：这里必须区分"整块重定向失效"与"只有映射目标失效"。
+  #
+  # 两种形态的对策完全不同：整块失效说明存储视图根在应用视野里落回了公共存储
+  # （沙箱里才有的路径自然不存在）；只有映射失效则说明根仍指向沙箱、只是新加的
+  # 映射挂载不可见。刻意不使用 run-as：它不会进入应用的挂载命名空间，量到的是
+  # shell 的视图，此前据此得出的"可见目标是公共存储"结论已被证伪。
+  local root_probe="${REAL_ROOT}/SrtHotRootProbe.txt"
+  local root_probe_private="${PRIVATE_ROOT}/SrtHotRootProbe.txt"
+  adb_su "rm -f '$root_probe' '$root_probe_private' 2>/dev/null || true" >/dev/null
+  if run_write_case "$scenario" "hot-root-probe" "$root_probe" "$PAYLOAD"; then
+    # 落点决定结论：配置仍是启用重定向（只多了一条路径映射），非映射路径必须进沙箱。
+    file_exists "scenario-${scenario}-hot-root-probe-sandbox" "$root_probe_private"
+    check_file_missing "scenario-${scenario}-hot-root-probe-real" "$root_probe"
+  else
+    echo "hot_root_probe_failed scenario=${scenario}: 非映射路径也无法写入，重定向整体未生效" >&2
+  fi
+  # 沙箱里才存在的文件：能在应用侧读到就说明存储视图根仍指向沙箱。
+  run_service_case "$scenario" "hot-root-visible-sandbox-file" "file_read" '^PASS \[file_read\]' \
+    --es file_path "${REAL_ROOT}/Download/SrtProbe/${HOT_BEFORE_FILE}" >/dev/null 2>&1 ||
+    echo "hot_sandbox_file_unreadable scenario=${scenario} path=${REAL_ROOT}/Download/SrtProbe/${HOT_BEFORE_FILE}" >&2
+  # 被映射的目录本身是否还解析得到：区分"父目录不可见"与"父目录在但不可写"。
+  run_service_case "$scenario" "hot-mapped-dir-list" "file_list_dir" "" \
+    --es file_dir "${REAL_ROOT}/Download/SrtProbe" 2>&1 | tail -3 || true
+  adb_su "rm -f '$root_probe' '$root_probe_private' 2>/dev/null || true" >/dev/null
   return 1
 }
 

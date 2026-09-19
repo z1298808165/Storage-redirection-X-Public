@@ -1706,6 +1706,28 @@ function Invoke-ConfigHotReloadScenario {
         }
 
         $script:Failures.Add("scenario-$Scenario config hot reload did not apply while app pid stayed $initialPid")
+        # 热重载后写入 ENOENT 的现场取证：必须区分"整块重定向失效"与"只有映射目标失效"。
+        # 两种形态对策完全不同：整块失效说明存储视图根在应用视野里落回了公共存储
+        # （沙箱里才有的路径自然不存在）；只有映射失效则说明根仍指向沙箱、只是新加的
+        # 映射挂载不可见。刻意不用 run-as：它不进入应用的挂载命名空间，量到的是 shell 视图。
+        $rootProbe = "$RealRoot/SrtHotRootProbe.txt"
+        $rootProbePrivate = "$PrivateRoot/SrtHotRootProbe.txt"
+        Invoke-Su "rm -f '$rootProbe' '$rootProbePrivate' 2>/dev/null || true" | Out-Null
+        if ((Invoke-WriteCase $Scenario "hot-root-probe" $rootProbe $Payload).Ok) {
+            # 落点决定结论：配置仍是启用重定向（只多了一条路径映射），非映射路径必须进沙箱。
+            Require-File "scenario-$Scenario" "hot-root-probe-sandbox" $rootProbePrivate | Out-Null
+            Require-Missing "scenario-$Scenario" "hot-root-probe-real" $rootProbe | Out-Null
+        } else {
+            Write-Host "  - hot_root_probe_failed scenario=$Scenario 非映射路径也无法写入，重定向整体未生效"
+        }
+        # 沙箱里才存在的文件：能在应用侧读到就说明存储视图根仍指向沙箱。
+        $sandboxOnlyFile = "$RealRoot/Download/SrtProbe/$HotBeforeFile"
+        if (-not (Invoke-ServiceCase "scenario-$Scenario" "hot-root-visible-sandbox-file" "file_read" @{ file_path = $sandboxOnlyFile } "^PASS \[file_read\]").Ok) {
+            Write-Host "  - hot_sandbox_file_unreadable scenario=$Scenario path=$sandboxOnlyFile"
+        }
+        # 被映射的目录本身是否还解析得到：区分"父目录不可见"与"父目录在但不可写"。
+        Invoke-ServiceCase "scenario-$Scenario" "hot-mapped-dir-list" "file_list_dir" @{ file_dir = "$RealRoot/Download/SrtProbe" } "" | Out-Null
+        Invoke-Su "rm -f '$rootProbe' '$rootProbePrivate' 2>/dev/null || true" | Out-Null
         Require-File "scenario-$Scenario" "hot-mapped" $afterMapped | Out-Null
         Require-Missing "scenario-$Scenario" "hot-request" $afterRequest | Out-Null
         Require-Missing "scenario-$Scenario" "hot-private" $afterPrivate | Out-Null
