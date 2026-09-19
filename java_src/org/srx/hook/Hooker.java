@@ -4121,9 +4121,9 @@ public class Hooker {
   /**
    * 公共 MediaStore 值没有 native 目标时的物理回退路径。
    *
-   * <p>回退必须先跟随父目录的重定向目标。MediaProvider 在 insert 期间会用 `File.getParentFile()` 和 `.pending-<随机>-<文件名>`
-   * 临时名构造结果文件，native 路径重写未必为这个临时名返回目标；若此时 直接回退到公共物理目录，后续 mkdir 仍会被 native 改写进沙箱，公共目录本身并不存在
-   * （errno=ENOENT），MediaProvider 在它下面创建 pending 文件就会失败并让 insert 返回 null。
+   * <p>系统生成的 pending 文件回退时才跟随父目录的重定向目标。MediaProvider 在 insert 期间会用 `File.getParentFile()` 和
+   * `.pending-<随机>-<文件名>` 临时名构造结果文件，native 路径重写未必为这个临时名返回目标；若此时 直接回退到公共物理目录，后续 mkdir 仍会被 native
+   * 改写进沙箱，公共目录本身并不存在 （errno=ENOENT），MediaProvider 在它下面创建 pending 文件就会失败并让 insert 返回 null。
    *
    * <p>先跟随父目录目标可以让临时文件与最终文件落到同一棵子树，同时保留“允许写入真实公共路径” 场景下回退到 `/data/media/<user>` 公共物理路径的原行为。
    */
@@ -4134,7 +4134,9 @@ public class Hooker {
     String value = hasFileScheme ? path.substring("file://".length()) : path;
     String candidate = value;
     int end = value.lastIndexOf('/');
-    if (end > 0 && end + 1 < value.length()) {
+    // 只有系统生成的 pending 名称需要跟随父目标；普通目录无 native 目标也可能是
+    // 命中了放行规则，不能让未放行的祖先沙箱目标覆盖目录自身的放行结果。
+    if (FilteringCursor.isMediaStorePendingPath(value) && end > 0 && end + 1 < value.length()) {
       String parent = value.substring(0, end);
       String parentTarget = null;
       try {

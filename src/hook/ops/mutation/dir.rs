@@ -383,7 +383,10 @@ fn should_passthrough_provider_allowed_parent_mkdir(
     if !redirect_result.is_redirect()
         || redirect_result.is_mapping
         || hub.is_monitor_only()
-        || !crate::hook::is_provider_passthrough_active()
+        // 正常 MediaStore insert 使用 virtual 作用域，也必须创建放行目录的真实祖先。
+        // 否则祖先 mkdir 被默认重定向到沙箱，成功返回后公共父目录仍不存在。
+        || !(crate::hook::is_provider_passthrough_active()
+            || crate::hook::is_provider_virtual_scope_active())
         || !hub.with_package_name(policy::is_system_writer_package)
     {
         return false;
