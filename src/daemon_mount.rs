@@ -1507,6 +1507,19 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     }
     clear_previous_allowed_real_backend_mounts(request);
 
+    // x86_64 Android 13/14 上 native FuseFix 无法安装放行，系统 MediaProvider 的
+    // app data isolation FUSE 视图会拒绝 app-private 访问。必须在 apply 重新 bind 之前
+    // 摘掉视图根及其别名上的系统 FUSE 层：若在 apply 之后摘，新建立的映射会挂在系统
+    // FUSE 层之下，摘 FUSE 层时被 MNT_DETACH 级联 detach，映射随之失效（场景 29 首轮
+    // 修复「视图根回到 ext4 但映射失效」的教训）。摘在 apply 之前，映射才挂在 ext4 视图根
+    // 之下，与「新进程首次挂载」的干净状态一致。
+    if should_clear_system_fuse_view_for_platform() {
+        let user_id = crate::platform::user_id_from_uid(request.uid);
+        for alias in paths::storage_alias_roots_for_user(user_id) {
+            clear_system_fuse_view_layers(&alias);
+        }
+    }
+
     if request.operation == MountOperation::Disable {
         // 已确认清除时才丢弃账本：挂载明细已随卸载消失，保留它只会让后续监督把
         // "目标上没有本模块挂载"误判成需要重新注入的 Detached 状态。
@@ -1598,15 +1611,6 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         log_mounted_target_view(&mounted_targets, request);
         // 重建后再采一次，与 before_clear 对照，判断重载是否真的换掉了视图根最上层。
         log_reload_view_root_stack(request, "after_mount");
-        // x86_64 Android 13/14 上 native FuseFix 无法安装放行，系统 MediaProvider 的
-        // app data isolation FUSE 视图会拒绝 app-private 访问；重载后摘掉视图根及其别名
-        // 上的系统 FUSE 层，让模块 ext4 bind 回到最顶层（场景 29 热重载后视图根 ENOENT 的根因）。
-        if should_clear_system_fuse_view_for_platform() {
-            let user_id = crate::platform::user_id_from_uid(request.uid);
-            for alias in paths::storage_alias_roots_for_user(user_id) {
-                clear_system_fuse_view_layers(&alias);
-            }
-        }
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
