@@ -13,6 +13,12 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# git 的提交信息输出是 UTF-8；PowerShell 工具会话默认控制台编码是 GB2312，不显式切换
+# 时多字节中文会被逐字节误读，个别字节序列还会吞掉换行，使相邻 trailer 合并成一行、
+# trailer 校验随机失败（同一提交在 Bash 读出的消息完全正常）。与
+# validate-code-quality.ps1 的同款处理保持一致。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 function Invoke-Git {
     param(
         [string[]]$Arguments,
