@@ -207,10 +207,40 @@ fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -
 /// `/proc/self/mountinfo` 反映的都是**应用自己的视图**，而不是守护进程的视图。热重载类
 /// 问题需要这条记录才能把两种情况分开：绑定根本没在应用视图里生效，还是生效之后又被
 /// 后续请求摘掉——后者会在下一次清理里留下 `daemon unmount ok` 记录，两条对照即可定位。
-fn log_mounted_target_view(targets: &[String]) {
+fn log_mounted_target_view(targets: &[String], request: &MountRequest) {
     if targets.is_empty() {
         return;
     }
+    // 诊断：热重载后出现「子进程 mount 返回 0，但同 ns 的 /proc/<pid>/mountinfo 与
+    // 事后采集都看不到新挂载」的矛盾。这里一次性自证三件事——本进程当前 ns 的
+    // inode、目标应用进程 ns 的 inode、以及本进程 mountinfo 里映射目标的原始行，
+    // 用于判定 setns 目标错误、ns 内被二次摘除、还是字符串形态不匹配。
+    let self_ns = std::fs::read_link("/proc/self/ns/mnt")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unreadable".to_string());
+    let app_ns = std::fs::read_link(format!("/proc/{}/ns/mnt", request.pid))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unreadable".to_string());
+    let diag_lines = std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|content| {
+            let matched: Vec<&str> = content
+                .lines()
+                .filter(|line| line.contains("SrtProbe"))
+                .collect();
+            if matched.is_empty() {
+                "<none>".to_string()
+            } else {
+                matched.join(" | ")
+            }
+        })
+        .unwrap_or_else(|_| "<read failed>".to_string());
+    log::warn!(
+        "mount view diag self_ns={} app_ns={} app_pid={} srtprobe_lines={}",
+        self_ns,
+        app_ns,
+        request.pid,
+        diag_lines
+    );
     let mut unreadable = 0usize;
     let mut not_mounted = 0usize;
     for target in targets {
@@ -1415,7 +1445,7 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         }
         let mounted_targets = planner.take_mounted_targets();
         // 仍在应用命名空间内，就地核对本轮目标的可见性，给热重载类问题留下应用视角证据。
-        log_mounted_target_view(&mounted_targets);
+        log_mounted_target_view(&mounted_targets, request);
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
