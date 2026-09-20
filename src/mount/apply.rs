@@ -260,12 +260,27 @@ impl MountPlanner {
         if redirect_backend.is_empty() {
             return false;
         }
-        mount_source_for_target_from_mountinfo(mountinfo, storage_path)
-            .map(|source| {
-                paths::is_same_or_child(&redirect_backend, &source)
-                    || mountinfo_root_matches_data_backend(&source, &redirect_backend)
-            })
-            .unwrap_or(false)
+        let Some(root) = mount_source_for_target_from_mountinfo(mountinfo, storage_path) else {
+            return false;
+        };
+        if paths::is_same_or_child(&redirect_backend, &root) {
+            return true;
+        }
+        let matched = mountinfo_root_matches_data_backend(&root, &redirect_backend);
+        if matched {
+            // 走到归一化命中说明视图根由系统 FUSE 视图承载（`root` 写作 `/<user>/...`）。
+            // 这条记录必须与「真正未重定向」在日志里分得开：前者是复用既有锚点、映射沿用
+            // FUSE 后端权限层的前置条件；后者才是重建锚点流程的起点，而重建在当前视图根
+            // 仍指向沙箱时必然失败并退回 `/data/media` 后端锚点。
+            log::info!(
+                "storage root redirected via fuse view pkg={} target={} root={} backend={}",
+                self.package_name,
+                storage_path,
+                root,
+                redirect_backend
+            );
+        }
+        matched
     }
 
     pub fn apply_sdcard_redirect(
@@ -1473,11 +1488,39 @@ pub(super) fn mountinfo_has_target(content: &str, target: &str) -> bool {
     })
 }
 
+/// 把 `mountinfo` 的 `root` 字段归一为 `/data/media/<user>/...` 形态。
+///
+/// `root` 有两种等价写法：经系统 FUSE 视图时是 `/<user>/...`（真实记录形如
+/// `0:98 /0/Android/data/<包名>/sdcard /storage/emulated/0 ... - fuse /dev/fuse`），经
+/// `/data` 分区视图时是 `/media/<user>/...`。两者指向同一棵存储树，判定前必须归一，
+/// 否则只认得出其中一半。
+///
+/// 这不是理论差异：bind 会把源挂载的 `source` 与 `fs_type` 一并继承，视图根只要由系统
+/// FUSE 视图承载，`root` 就写作 `/0/...`。旧实现只处理 `/media/...`，于是本已重定向的
+/// 视图根被判成「未重定向」，继而按未重定向流程重建真实存储锚点：可见别名此刻全部指向
+/// 沙箱（构造上必然如此）而全部判污染，最终退回 `/data/media` 后端锚点——该锚点在 ext4
+/// 设备上绕过系统 FUSE 权限层，映射目标对普通应用不可写（Android 14 场景 29 实测
+/// `Permission denied`，Android 13 则表现为视图根被 FUSE 层覆盖后 MediaProvider 拒绝）。
+///
+/// 只接受 `<user>/<非空尾部>` 形态：`/`、`/media`、`/0` 这类没有存储子树尾部的 `root`
+/// 说明不了重定向，一律返回 `None`。
+fn mountinfo_root_as_data_media(root: &str) -> Option<String> {
+    let rest = match root.strip_prefix("/media/") {
+        Some(rest) => rest,
+        None => root.strip_prefix('/')?,
+    };
+    let (user, tail) = rest.split_once('/')?;
+    if user.is_empty() || !user.bytes().all(|byte| byte.is_ascii_digit()) || tail.is_empty() {
+        return None;
+    }
+    Some(format!("/data/media/{rest}"))
+}
+
+/// `root`（mountinfo 的 `root` 字段）是否表示 `backend`（`/data/media/<user>/...` 形态）
+/// 那棵沙箱子树。两种 `root` 写法都接受，见 [`mountinfo_root_as_data_media`]。
 fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
     paths::eq_ignore_case(root, backend)
-        || root
-            .strip_prefix("/media/")
-            .map(|suffix| format!("/data/media/{suffix}"))
+        || mountinfo_root_as_data_media(root)
             .map(|source| paths::is_same_or_child(backend, &source))
             .unwrap_or(false)
 }
