@@ -2460,6 +2460,14 @@ run_config_hot_reload_scenario() {
         echo "config_hot_reload_pid_changed_after_apply scenario=${scenario} before=${initial_pid} after=${current_pid:-missing}" >&2
         return 1
       fi
+      # 成功路径也留一份视图根挂载快照：失败侧已有诊断，只有两边都采到才能对照出
+      # 「哪一层压在视图根最上面」。Android 13 失败侧的实测是 FUSE 层压在视图根之上，
+      # 且该层 root 正好指向会被 MediaProvider 拒绝的应用专属目录；通过版本需要在同一
+      # 位置采到对应快照，否则无法证明差异确实在层序而不是别处。
+      local view_layers rejected_count
+      view_layers="$(adb_su "grep -h ' /storage/emulated/0 ' /proc/$(app_pid)/mountinfo 2>/dev/null | tr '\n' ';'" 2>/dev/null | tr -d '\r')"
+      rejected_count="$(adb logcat -d 2>/dev/null | grep -ac 'Rejected access to app-private dir' || true)"
+      echo "hot_view_root_layers scenario=${scenario} rejected=${rejected_count:-0} layers=${view_layers:-none}"
       echo "config_hot_reload_applied scenario=${scenario} pid=${initial_pid} attempt=${attempt}"
       return 0
     fi
@@ -2478,7 +2486,9 @@ run_config_hot_reload_scenario() {
   adb_su "rm -f '$root_probe' '$root_probe_private' 2>/dev/null || true" >/dev/null
   if run_write_case "$scenario" "hot-root-probe" "$root_probe" "$PAYLOAD"; then
     # 落点决定结论：配置仍是启用重定向（只多了一条路径映射），非映射路径必须进沙箱。
-    file_exists "scenario-${scenario}-hot-root-probe-sandbox" "$root_probe_private"
+    # 注意必须用 check_file_exists：脚本里没有 file_exists，此前写成 file_exists 会让这条
+    # 断言在 shell 里以 "command not found" 静默失败，落点从未被真正校验过。
+    check_file_exists "scenario-${scenario}-hot-root-probe-sandbox" "$root_probe_private"
     check_file_missing "scenario-${scenario}-hot-root-probe-real" "$root_probe"
   else
     echo "hot_root_probe_failed scenario=${scenario}: 非映射路径也无法写入，重定向整体未生效" >&2
@@ -2514,11 +2524,22 @@ run_config_hot_reload_scenario() {
     fresh_mapped="${REAL_ROOT}/Download/Test/${HOT_AFTER_FILE}"
     fresh_private="${PRIVATE_ROOT}/Download/SrtProbe/${HOT_AFTER_FILE}"
     adb_su "rm -f '$fresh_request' '$fresh_mapped' '$fresh_private' 2>/dev/null || true" >/dev/null
-    if run_write_case "$scenario" "hot-fresh-mapped" "$fresh_request" "$PAYLOAD" &&
-      file_exists "scenario-${scenario}-hot-fresh-mapped" "$fresh_mapped"; then
-      echo "hot_reload_fresh_process_ok scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程可见映射，热重载对既有进程未生效"
+    # 重启后的同一命名空间再采一次视图根层序：挂载栈若与失败时不同，说明应用启动期的
+    # 特化流程会重建视图根，这才是「重启即恢复」的原因；若层序完全相同而写入却成功，
+    # 则说明差异不在挂载栈本身。两种结果指向的修复方向完全不同，必须分清。
+    local fresh_layers fresh_rejected
+    fresh_layers="$(adb_su "grep -h ' /storage/emulated/0 ' /proc/$(app_pid)/mountinfo 2>/dev/null | tr '\n' ';'" 2>/dev/null | tr -d '\r')"
+    fresh_rejected="$(adb logcat -d 2>/dev/null | grep -ac 'Rejected access to app-private dir' || true)"
+    echo "hot_reload_fresh_view_root_layers scenario=${scenario} rejected=${fresh_rejected:-0} layers=${fresh_layers:-none}"
+    if run_write_case "$scenario" "hot-fresh-mapped" "$fresh_request" "$PAYLOAD"; then
+      # 落点才是结论：写入成功但落在公共路径，说明映射并未生效，不能算「新进程可见映射」。
+      if check_file_exists "scenario-${scenario}-hot-fresh-mapped" "$fresh_mapped"; then
+        echo "hot_reload_fresh_process_ok scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程写入并落在映射目标，热重载对既有进程未生效"
+      else
+        echo "hot_reload_fresh_process_mapping_absent scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程可写入但未落在映射目标" >&2
+      fi
     else
-      echo "hot_reload_fresh_process_failed scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程同样不可见，重载后状态本身不可用"
+      echo "hot_reload_fresh_process_failed scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程同样不可写" >&2
     fi
   else
     echo "hot_reload_fresh_process_start_failed scenario=${scenario}: 无法在映射配置下启动应用"
