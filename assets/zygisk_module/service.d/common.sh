@@ -129,6 +129,35 @@ stop_collector_by_pid_file() {
   rm -f "$pid_file"
 }
 
+# 回收本模块遗留的 logcat 采集进程。
+#
+# 采集器的形态是 `( logcat ... | awk ... | while read ... ) &`。杀子 shell 时，管道里的
+# `logcat` 往往已经被 init 收养（ppid=1）并从子 shell 的 children 列表里消失，于是
+# `stop_background_process` 的递归杀法整个漏掉它，`pgid` 又普遍是 0（进程组杀法同样无效）。
+# 结果是每触发一次 `sync_debug_collectors` 就多留一个永久孤儿：它会持续消费 logcat 环形
+# 缓冲（把应用崩溃现场冲掉、直接损害排障能力），并把同一份日志重复写进 running.log。
+#
+# 因此采集器启动时给自己的 logcat 打上 `SRX_COLLECTOR_TAG` 标记（`exec -a`），这里按该
+# 标记扫描 /proc 回收全部孤儿。标记同时也是幂等保证：不依赖 pid 文件是否被覆盖或丢失。
+SRX_COLLECTOR_TAG="srx-debug-collector"
+
+reap_stale_logcat_collectors() {
+  reaped=0
+  for proc_dir in /proc/[0-9]*; do
+    [ -r "$proc_dir/cmdline" ] || continue
+    cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)
+    case "$cmdline" in
+      "$SRX_COLLECTOR_TAG"*)
+        kill "${proc_dir#/proc/}" 2>/dev/null && reaped=$((reaped + 1))
+        ;;
+    esac
+  done
+  if [ "$reaped" -gt 0 ]; then
+    log -p i -t Boot "reaped stale logcat collectors n=$reaped"
+  fi
+  return 0
+}
+
 is_process_alive() {
   pid="$1"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null

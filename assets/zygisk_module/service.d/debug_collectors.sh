@@ -1,9 +1,17 @@
 start_debug_logcat_collector() {
+  # 先回收上一轮遗留的孤儿采集器。`stop_background_process` 依赖 /proc/<pid>/children
+  # 递归杀，而管道里的 logcat 常已被 init 收养，杀子 shell 时整个漏掉（pgid 为 0，
+  # 进程组杀法同样无效）。不先回收就会每触发一次同步多留一个永久孤儿，持续冲掉
+  # logcat 环形缓冲并重复写日志。详见 `reap_stale_logcat_collectors`。
+  reap_stale_logcat_collectors
   (
     app_line_buf=0
     trim_app_status_log_if_needed
     while true; do
-      logcat -T 1 -v threadtime -s SRX:V AndroidRuntime:E DEBUG:F libc:F 2>/dev/null |
+      # `exec -a` 给 logcat 打上可识别标记，使孤儿可被 `reap_stale_logcat_collectors`
+      # 精确回收；标记必须与 common.sh 的 SRX_COLLECTOR_TAG 保持一致。多套一层
+      # 子 shell 是因为 `exec` 会替换当前 shell，直接写在管道左侧会顶掉内层 shell。
+      ( exec -a "$SRX_COLLECTOR_TAG" /system/bin/logcat -T 1 -v threadtime -s SRX:V AndroidRuntime:E DEBUG:F libc:F ) 2>/dev/null |
       awk '
         function level_text(level_char) {
           if (level_char == "V") return "Verbose"
