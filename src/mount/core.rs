@@ -1,7 +1,7 @@
 use super::MountPlanner;
 use super::apply::{mountinfo_has_target, read_mountinfo};
 use crate::platform::errno::{last as last_errno, text as errno_text};
-use crate::platform::{fs, module_paths, paths};
+use crate::platform::{fs, module_paths, mountinfo, paths};
 use libc::{
     CLONE_NEWNS, MNT_DETACH, MS_BIND, MS_PRIVATE, MS_RDONLY, MS_REC, MS_REMOUNT, chmod, chown,
     mount, readlink, stat as c_stat, umount2, unshare,
@@ -633,12 +633,27 @@ impl MountPlanner {
             // （源与目标本身指向同一目录时就是这种情况）时，`MS_BIND | MS_REMOUNT`
             // 必然返回 EINVAL；先用一次挂载表查询把它筛掉，再走下面的直接绑定。
             let target_is_mount_point = is_mount_point(target);
-            if target_is_mount_point && self.remount_bind_read_write(target, use_recursive) {
+            // 目标最上层若是 FUSE 层（MediaProvider 视图、`root` 指向沙箱），不能走
+            // remount 短路：remount 只改权限、不换源，会保留这层被 MediaProvider 拒绝
+            // 访问的 FUSE 视图（Android 13 场景 29 热重载后视图根列举为空、所有路径
+            // ENOENT）。此时必须跳过短路，走下面正常的 ext4 绑定，在 FUSE 层之上叠一层
+            // 可访问的 ext4 视图。
+            let target_is_fuse_layer = target_is_mount_point && topmost_mount_is_fuse(target);
+            if target_is_mount_point
+                && !target_is_fuse_layer
+                && self.remount_bind_read_write(target, use_recursive)
+            {
                 self.record_mounted_target(target);
                 log::debug!("bind skip existing src={} dst={}", source, target);
                 return true;
             }
-            if target_is_mount_point {
+            if target_is_fuse_layer {
+                log::info!(
+                    "bind skip shortcut on fuse layer, force rebind src={} dst={}",
+                    source,
+                    target
+                );
+            } else if target_is_mount_point {
                 log::warn!(
                     "bind existing remount rw failed, retry bind src={} dst={}",
                     source,
@@ -1421,6 +1436,34 @@ fn is_mount_point(path: &str) -> bool {
     read_mountinfo()
         .map(|content| mountinfo_has_target(&content, path))
         .unwrap_or(false)
+}
+
+/// 判断挂载点 `target` 当前最上层记录的 `fs_type` 是否为 FUSE。
+///
+/// Android 的媒体 FUSE 实现 passthrough，`/storage/emulated/0`（FUSE 视图）与其下
+/// `/data/media/0/...`（ext4 视图）的同一目录会返回相同的 `st_ino`。`bind_mount_inner`
+/// 的同 inode 短路据此把「视图根已是这个沙箱的 FUSE 层」当成「已绑定完成」而跳过重新
+/// bind，于是被 MediaProvider 拒绝访问的 FUSE 层得以保留——Android 13 场景 29 热重载后
+/// 视图根列举为空、所有路径 ENOENT。这里把 FUSE 层识别出来，让调用方在短路前先跳过，
+/// 改走正常的 ext4 绑定在 FUSE 层之上叠一层可访问的 ext4 视图。
+fn topmost_mount_is_fuse(target: &str) -> bool {
+    let Some(content) = read_mountinfo() else {
+        return false;
+    };
+    let normalized_target = paths::normalize(target);
+    let mut is_fuse = false;
+    for line in content.lines() {
+        let Some(entry) = mountinfo::parse_entry(line) else {
+            continue;
+        };
+        if paths::eq_ignore_case(
+            &paths::normalize(&mountinfo::unescape_field(entry.target)),
+            &normalized_target,
+        ) {
+            is_fuse = entry.fs_type.starts_with("fuse");
+        }
+    }
+    is_fuse
 }
 
 fn paths_have_same_inode(left: &str, right: &str) -> bool {
