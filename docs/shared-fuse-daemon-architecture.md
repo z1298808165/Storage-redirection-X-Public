@@ -95,7 +95,25 @@ daemon 进程。因此：
   应用的 namespace 怎么换都只是重新 bind 一次；
 - **卸载一个应用的注入不会影响其它应用**：`umount` 的是 namespace 局部的 bind 挂载，
   不是共享的 FUSE 会话；
-- **服务退出是单一事件**：不再有 N 个各自独立的失败窗口，而是一个被监督的会话。
+- **服务退出是单一事件**：不再有 N 个各自独立的失败窗口，而是一个被监督的会话；
+- **应用侧不再需要"等待挂载落定"**：注入退化为一次 `MS_BIND`，原子完成，不存在
+  "挂载集合建立了一半"的中间态。当前 `specialize_post::wait_for_module_mount` 的整套
+  轮询判据（`MOUNT_SETTLE_POLLS` + 30 轮预算）由此**整体失去存在理由**，应随本阶段删除。
+  这不只是简洁性收益：多进程并发启动时，先启动进程挂好的 FUSE 根会让后启动进程在
+  **重定向本体尚未建立**时就观察到"稳定的非空挂载集合"，从而提前放行并读到未重定向的
+  视图（真机已复现：三个微信进程同秒启动，主进程在 `mounts=7` 时被放行）。
+
+#### 传播方向必须先开 shared，否则注入静默失败
+
+宿主挂载建好后，**必须把它在宿主 namespace 里显式设为 shared propagation**，各个应用
+namespace 的 `MS_BIND` 才能引用到它。只做 `MS_REC|MS_PRIVATE` 隔离宿主 namespace 是**不够**的
+——private 只切断向外传播，不会让子 namespace 得见该挂载；缺了 shared，注入会以 ENOENT 或
+挂到空目录的形式静默失败，且因为 bind 本身"成功"而不会产生错误日志。
+
+参照实现 `huniangitb/Fuse-Proxy` 的对应动作是 `ns_make_shared(pid, mount_path)`
+（`src/injector/injector.c`），它在挂载 FUSE 之后、验证就绪之前执行，用于把
+`/mnt/nsp_global` 变成可被各应用 namespace bind 的共享挂载点。本项目阶段 2 实现时
+须在 `FuseHost` 建立后补上等价调用。
 
 ### 2.2 策略必须按调用方 uid 解析（硬阻塞）
 
@@ -242,7 +260,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 | 共享会话退出影响面从单应用扩到全部应用 | 高 | 阶段 2 保留 `srx_fuse_redirect` 回退路径；阶段 3 先做监督再切默认 |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
 | 按 uid 直通回退可能漏改写 | 中 | 未命中 uid 一律回退真实后端（不改写），不猜测策略 |
-| bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE`；注入时逐个 `setns`，不改全局传播 |
+| bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE` 隔离；**同时在宿主挂载点上开 shared**，否则应用 namespace 的 bind 拿不到共享会话（见 §2.1） |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
 
