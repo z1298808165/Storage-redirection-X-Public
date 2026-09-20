@@ -2475,6 +2475,17 @@ run_config_hot_reload_scenario() {
   done
 
   echo "config_hot_reload_timeout scenario=${scenario} pid=${initial_pid}" >&2
+  # 诊断盲区补齐 1：失败侧既有进程（old_pid=initial_pid）重载后的视图根层序此前从未采样，
+  # 只能靠重启探针新进程的层序反推，导致「既有进程重载后视图根最上层是 FUSE、ext4 还是被
+  # 摘空」至今没有实测数据。这里在 initial_pid 仍存活时补采，落到一个可检索的明确标记，
+  # 并顺带 dump 完整挂载栈，用于对照 app_status.log 里 13:38:54 的旧快照是否与此刻一致。
+  local old_view_layers old_rejected
+  old_view_layers="$(adb_su "grep -h ' /storage/emulated/0 ' /proc/${initial_pid}/mountinfo 2>/dev/null | tr '\n' ';'" 2>/dev/null | tr -d '\r')"
+  old_rejected="$(adb logcat -d 2>/dev/null | grep -ac 'Rejected access to app-private dir' || true)"
+  echo "hot_reload_failed_view_root_layers scenario=${scenario} old_pid=${initial_pid} rejected=${old_rejected:-0} layers=${old_view_layers:-none}"
+  echo "--- hot_reload_failed_old_process_mountinfo scenario=${scenario} old_pid=${initial_pid} ---"
+  adb_su "cat '/proc/${initial_pid}/mountinfo' 2>/dev/null | grep -E 'SrtProbe|Download/Test|/storage/emulated/0 |/mnt/user|/mnt/pass_through|fuse|srx|Android/data' || true"
+  echo "--- end hot_reload_failed_old_process_mountinfo ---"
   # 热重载后写入 ENOENT 的现场取证：这里必须区分"整块重定向失效"与"只有映射目标失效"。
   #
   # 两种形态的对策完全不同：整块失效说明存储视图根在应用视野里落回了公共存储

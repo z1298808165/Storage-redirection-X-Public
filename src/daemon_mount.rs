@@ -279,6 +279,55 @@ fn log_mounted_target_view(targets: &[String], request: &MountRequest) {
     );
 }
 
+/// 热重载（`Reload`）前后各采一次关键挂载点的最上层挂载，直接回答「视图根/映射目标最上层
+/// 到底是 MediaProvider FUSE 层、模块 ext4 bind、还是被摘空」。
+///
+/// 此前只有成功路径采 `hot_view_root_layers`（视图根）与 [`log_mounted_target_view`]（映射
+/// 目标），失败侧既有进程重载后的挂载栈只能靠 `app_status.log` 里的旧快照反推，无法定论。
+/// 本函数在重载**摘除前**与**重建后**各跑一次，用 `topmost_live_mount(0, …)` 读当前进程（已
+/// `setns` 进应用命名空间）的 `/proc/self/mountinfo`，`fs_type` 直接区分 FUSE 与 ext4。
+fn log_reload_view_root_stack(request: &MountRequest, phase: &str) {
+    if request.operation != MountOperation::Reload {
+        return;
+    }
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let view_root = paths::storage_user_root_for_user(user_id);
+    let mut points = Vec::with_capacity(1 + request.path_mappings.len());
+    points.push(view_root);
+    // 映射的显示请求路径（`/storage/emulated/<user>/<request_path>`）是否还在、承载它的最上层
+    // 是什么，是区分「整块重定向失效」与「只有映射目标失效」的关键。
+    for mapping in &request.path_mappings {
+        let target = format!(
+            "{}/{}",
+            paths::storage_user_root_for_user(user_id),
+            mapping.request_path
+        );
+        points.push(target);
+    }
+    for point in points {
+        match mount_identity::topmost_live_mount(0, &point) {
+            Some(mount) => log::info!(
+                "reload view root stack phase={} pid={} pkg={} target={} top_source={} top_fs={} top_root={} mount_id={}",
+                phase,
+                request.pid,
+                request.package_name,
+                point,
+                mount.source,
+                mount.fs_type,
+                mount.root,
+                mount.mount_id
+            ),
+            None => log::info!(
+                "reload view root stack phase={} pid={} pkg={} target={} top=none",
+                phase,
+                request.pid,
+                request.package_name,
+                point
+            ),
+        }
+    }
+}
+
 fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -> bool {
     let path = format!("/proc/{}/mountinfo", pid);
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1335,6 +1384,9 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         return false;
     }
 
+    // 重载摘除前先采一次视图根/映射目标最上层挂载，作为「重载前基线」。
+    log_reload_view_root_stack(request, "before_clear");
+
     let cleanup = clear_previous_mounts(request, plan);
     if !cleanup.is_cleared() {
         log::warn!(
@@ -1463,6 +1515,8 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         let mounted_targets = planner.take_mounted_targets();
         // 仍在应用命名空间内，就地核对本轮目标的可见性，给热重载类问题留下应用视角证据。
         log_mounted_target_view(&mounted_targets, request);
+        // 重建后再采一次，与 before_clear 对照，判断重载是否真的换掉了视图根最上层。
+        log_reload_view_root_stack(request, "after_mount");
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
