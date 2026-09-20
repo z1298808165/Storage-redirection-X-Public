@@ -163,9 +163,23 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && !path_exists(&target) {
+                // 诊断：此出口原先完全静默。路径映射走的是本 overlay 版本（`map.rs` 调
+                // `bind_overlay_mount_with_storage_aliases`），而此前只在非 overlay 版本
+                // 加了探针，导致 Android 13 场景 29 的映射别名既没有 skip 也没有 bind
+                // 记录，无法区分「别名不存在」与「挂载未生效」。
+                log::warn!(
+                    "alias diag overlay skip missing target={} source={}",
+                    target,
+                    source
+                );
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::warn!(
+                    "alias diag overlay skip self-shadowing target={} source={}",
+                    target,
+                    source
+                );
                 log::debug!(
                     "alias: skip self-shadowing overlay src={} dst={}",
                     source,
@@ -174,7 +188,16 @@ impl MountPlanner {
                 continue;
             }
 
-            if !self.bind_mount_overlay(source, &target, is_recursive) {
+            let overlay_bind_ok = self.bind_mount_overlay(source, &target, is_recursive);
+            // 诊断：成功路径原先只有按步长节流的 debug 日志，设备侧不可见。
+            log::warn!(
+                "alias diag overlay bind target={} primary={} mounted={} source={}",
+                target,
+                is_primary_target,
+                overlay_bind_ok,
+                source
+            );
+            if !overlay_bind_ok {
                 if is_primary_target {
                     if let Some(log_text) = primary_failure_log {
                         log::warn!("alias: {} dst={}", log_text, target);
