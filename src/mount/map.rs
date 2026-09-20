@@ -134,47 +134,13 @@ impl MountPlanner {
                 continue;
             }
 
-            // 每个存储别名视图都要有自己的挂载点：下面按别名逐个挂载，别名目录缺失时该
-            // 别名会被静默跳过，映射只在部分视图生效。实测 Android 13 上只有 /data/media
-            // 一个别名落地，应用视图 /storage/emulated/0 上没有映射挂载，应用写入因此走
-            // 重定向进沙箱而 ENOENT；Android 14 同样代码则覆盖到全部别名并通过。
-            if self.is_storage_path(&mapping.request_path, storage_path) {
-                let aliases = self.expand_storage_alias_paths(&mapping.request_path);
-                log::warn!(
-                    "map alias loop begin request={} count={} target_source={}",
-                    mapping.request_path,
-                    aliases.len(),
-                    target_source
-                );
-                for alias in aliases {
-                    let existed_before = mapping_mount_point_exists(&alias);
-                    let alias_ok = if existed_before {
-                        true
-                    } else {
-                        self.ensure_mapping_request_mount_point(
-                            &alias,
-                            storage_path,
-                            options.should_chown_current_dirs,
-                            options.should_create_missing_request_path,
-                        )
-                    };
-                    let mounted = if alias_ok {
-                        self.bind_mount_overlay(&target_source, &alias, true)
-                    } else {
-                        false
-                    };
-                    log::warn!(
-                        "map alias result alias={} existed={} prepared={} mounted={}",
-                        alias,
-                        existed_before,
-                        alias_ok,
-                        mounted
-                    );
-                }
-            }
-
             let mut is_current_path_mounted = false;
             if self.is_storage_path(&mapping.request_path, storage_path) {
+                // 别名挂载由 bind_overlay_mount_with_storage_aliases 内部完成（它带
+                // should_skip_self_shadowing_alias 等保护）。此前这里额外逐别名调用
+                // bind_mount_overlay，会因为源与别名同 inode 而走「已挂载」捷径并返回
+                // true，看起来全部成功但实际没有建立任何挂载——探针据此误报 15/15 成功，
+                // 而应用 mountinfo 里只有后端别名一条。不要再逐别名自行挂载。
                 let _ = self.bind_overlay_mount_with_storage_aliases(
                     &target_source,
                     &mapping.request_path,
@@ -184,6 +150,13 @@ impl MountPlanner {
                     Some("map alias mount failed"),
                     Some("map alias ok"),
                     Some(&mut is_current_path_mounted),
+                );
+                log::warn!(
+                    "map primary result request={} target_source={} mounted={} alias_count={}",
+                    mapping.request_path,
+                    target_source,
+                    is_current_path_mounted,
+                    self.expand_storage_alias_paths(&mapping.request_path).len()
                 );
             } else {
                 let recursive = std::fs::metadata(&target_source)
