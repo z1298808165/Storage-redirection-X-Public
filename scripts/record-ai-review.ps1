@@ -177,17 +177,7 @@ finally {
     $sha.Dispose()
 }
 
-$receipt = [ordered]@{
-    schema = 1
-    tree = $tree
-    baseCommit = $baseCommit
-    reviewer = $reviewer.Trim()
-    summary = ($summary -replace '[\r\n]+', ' ')
-    reportHash = $reportHash
-    reportPath = $resolvedReport
-    reviewedAtUtc = [DateTime]::UtcNow.ToString("o")
-    files = @($stagedFiles | Sort-Object -Unique)
-}
+$receiptSummary = ($summary -replace '[\r\n]+', ' ')
 
 $gitPath = (Invoke-Git -Arguments @("rev-parse", "--git-path", "srx-ai-review.json")) | Select-Object -First 1
 if (-not [IO.Path]::IsPathRooted($gitPath)) {
@@ -196,6 +186,48 @@ if (-not [IO.Path]::IsPathRooted($gitPath)) {
 $parent = Split-Path -Parent $gitPath
 New-Item -ItemType Directory -Force -Path $parent | Out-Null
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($gitPath, ($receipt | ConvertTo-Json -Depth 5) + "`n", $utf8NoBom)
+
+# 手工拼装 JSON，不使用 ConvertTo-Json。
+#
+# pre-push 钩子通过 sh 派生本脚本（stdout/stderr 均被重定向）时，ConvertTo-Json 会抛
+# "Object reference not set to an instance of an object."——同一个有序字典在交互式
+# pwsh 下能正常序列化（实测 pwsh 7.6.6 商店版），属于该宿主下的序列化器缺陷。凭据字段
+# 固定、取值全部由本脚本控制，直接拼装更可靠。
+function ConvertTo-JsonStringLiteral {
+    param([string]$Value)
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($ch in $Value.ToCharArray()) {
+        switch ($ch) {
+            '"' { [void]$builder.Append('\"') }
+            '\' { [void]$builder.Append('\\') }
+            "`n" { [void]$builder.Append('\n') }
+            "`r" { [void]$builder.Append('\r') }
+            "`t" { [void]$builder.Append('\t') }
+            default {
+                if ([int]$ch -lt 0x20) {
+                    [void]$builder.Append(('\u{0:x4}' -f [int]$ch))
+                }
+                else {
+                    [void]$builder.Append($ch)
+                }
+            }
+        }
+    }
+    return $builder.ToString()
+}
+
+$fileLiterals = (@($stagedFiles | Sort-Object -Unique) | ForEach-Object {
+        '"' + (ConvertTo-JsonStringLiteral -Value $_) + '"'
+    }) -join ','
+$receiptJson = '{"schema":1' +
+    ',"tree":"' + (ConvertTo-JsonStringLiteral -Value $tree) + '"' +
+    ',"baseCommit":"' + (ConvertTo-JsonStringLiteral -Value $baseCommit) + '"' +
+    ',"reviewer":"' + (ConvertTo-JsonStringLiteral -Value $reviewer.Trim()) + '"' +
+    ',"summary":"' + (ConvertTo-JsonStringLiteral -Value $receiptSummary) + '"' +
+    ',"reportHash":"' + (ConvertTo-JsonStringLiteral -Value $reportHash) + '"' +
+    ',"reportPath":"' + (ConvertTo-JsonStringLiteral -Value $resolvedReport) + '"' +
+    ',"reviewedAtUtc":"' + (ConvertTo-JsonStringLiteral -Value ([DateTime]::UtcNow.ToString("o"))) + '"' +
+    ',"files":[' + $fileLiterals + ']}'
+[IO.File]::WriteAllText($gitPath, $receiptJson + "`n", $utf8NoBom)
 
 Write-Host "已记录 $reviewer 对 tree $tree 的 AI 审核。"
