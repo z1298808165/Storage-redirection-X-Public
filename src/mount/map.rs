@@ -139,40 +139,39 @@ impl MountPlanner {
             // 一个别名落地，应用视图 /storage/emulated/0 上没有映射挂载，应用写入因此走
             // 重定向进沙箱而 ENOENT；Android 14 同样代码则覆盖到全部别名并通过。
             if self.is_storage_path(&mapping.request_path, storage_path) {
-                for alias in self.expand_storage_alias_paths(&mapping.request_path) {
-                    if mapping_mount_point_exists(&alias) {
-                        continue;
-                    }
-                    let alias_ok = self.ensure_mapping_request_mount_point(
-                        &alias,
-                        storage_path,
-                        options.should_chown_current_dirs,
-                        options.should_create_missing_request_path,
-                    );
-                    if !alias_ok {
-                        log::warn!("map alias mount point unavailable: {}", alias);
-                    }
-                    // 探针方案：每个别名都单独挂一次，不再依赖 bind_overlay_mount_with_storage_aliases
-                    // 的别名展开（其非主目标别名缺失时会静默跳过，Android 13 上表现为只有后端别名落地）。
-                    let alias_mounted = self.bind_mount_overlay(&target_source, &alias, true);
+                let aliases = self.expand_storage_alias_paths(&mapping.request_path);
+                log::warn!(
+                    "map alias loop begin request={} count={} target_source={}",
+                    mapping.request_path,
+                    aliases.len(),
+                    target_source
+                );
+                for alias in aliases {
+                    let existed_before = mapping_mount_point_exists(&alias);
+                    let alias_ok = if existed_before {
+                        true
+                    } else {
+                        self.ensure_mapping_request_mount_point(
+                            &alias,
+                            storage_path,
+                            options.should_chown_current_dirs,
+                            options.should_create_missing_request_path,
+                        )
+                    };
+                    let mounted = if alias_ok {
+                        self.bind_mount_overlay(&target_source, &alias, true)
+                    } else {
+                        false
+                    };
                     log::warn!(
-                        "map alias bind probe alias={} exists={} prepared={} mounted={}",
+                        "map alias result alias={} existed={} prepared={} mounted={}",
                         alias,
-                        mapping_mount_point_exists(&alias),
+                        existed_before,
                         alias_ok,
-                        alias_mounted
+                        mounted
                     );
                 }
             }
-
-            log::warn!(
-                "map probe entry request={} storage={} is_storage={} aliases={} target_source={}",
-                mapping.request_path,
-                storage_path,
-                self.is_storage_path(&mapping.request_path, storage_path),
-                self.expand_storage_alias_paths(&mapping.request_path).len(),
-                target_source
-            );
 
             let mut is_current_path_mounted = false;
             if self.is_storage_path(&mapping.request_path, storage_path) {
