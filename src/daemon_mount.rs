@@ -234,12 +234,29 @@ fn log_mounted_target_view(targets: &[String], request: &MountRequest) {
             }
         })
         .unwrap_or_else(|_| "<read failed>".to_string());
+    // 同时记录目标应用进程视角的映射条目：`/proc/<pid>/mountinfo` 由内核按 pid
+    // 所属命名空间实时渲染，与 `read_link(ns/mnt)` 的 inode 对比互为印证，可区分
+    // 「读到的就是应用的 ns 但条目确实缺失」与「ns 不一致」两种情形。
+    let app_diag_lines = std::fs::read_to_string(format!("/proc/{}/mountinfo", request.pid))
+        .map(|content| {
+            let matched: Vec<&str> = content
+                .lines()
+                .filter(|line| line.contains("SrtProbe"))
+                .collect();
+            if matched.is_empty() {
+                "<none>".to_string()
+            } else {
+                matched.join(" | ")
+            }
+        })
+        .unwrap_or_else(|_| "<read failed>".to_string());
     log::warn!(
-        "mount view diag self_ns={} app_ns={} app_pid={} srtprobe_lines={}",
+        "mount view diag self_ns={} app_ns={} app_pid={} srtprobe_lines={} app_srtprobe_lines={}",
         self_ns,
         app_ns,
         request.pid,
-        diag_lines
+        diag_lines,
+        app_diag_lines
     );
     let mut unreadable = 0usize;
     let mut not_mounted = 0usize;
