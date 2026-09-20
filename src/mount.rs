@@ -19,6 +19,9 @@ pub struct MountPlanner {
     app_data_dir: String,
     redirect_target: String,
     mounted_targets: RefCell<Vec<String>>,
+    // 每次绑定前记录的「目标原始 inode」，供 `verify_fuse_backed_bind_landing` 判断这次
+    // stat 读到的是绑定后的视图还是绑定前那层。只在单次 `bind_mount_inner` 调用期间有效。
+    pre_bind_target_inode: RefCell<Option<(u64, u64)>>,
     is_file_monitor_enabled: bool,
     real_storage_anchor: Option<String>,
 }
@@ -290,6 +293,7 @@ impl MountPlanner {
             app_data_dir: app_data_dir.to_string(),
             redirect_target: paths::normalize(redirect_target),
             mounted_targets: RefCell::new(Vec::new()),
+            pre_bind_target_inode: RefCell::new(None),
             is_file_monitor_enabled: false,
             real_storage_anchor: None,
         }

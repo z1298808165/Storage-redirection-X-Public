@@ -665,6 +665,11 @@ impl MountPlanner {
             flags |= MS_REC;
         }
 
+        // 记录绑定前的目标 inode，供 FUSE 承载路径的落地校验判断「这次 stat 读到的究竟
+        // 是绑定后的视图还是绑定前那一层」。目标本来不存在时保持 None，调用方会跳过
+        // 「未变化」比较、只按非目录这一事实判定。
+        *self.pre_bind_target_inode.borrow_mut() = stat_inode(target);
+
         let mut ret = unsafe {
             mount(
                 c_source.as_ptr(),
@@ -707,23 +712,52 @@ impl MountPlanner {
             return false;
         }
 
-        self.record_mounted_target(target);
-
-        let bind_count = BIND_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if should_log_step(bind_count, BIND_SUCCESS_LOG_STEP) {
-            log::debug!("bind ok src={} dst={} n={}", source, target, bind_count);
-        }
-        if self.is_public_storage_alias_path(source)
+        let is_fuse_backed = self.is_public_storage_alias_path(source)
             || self.is_public_storage_alias_path(target)
             || self.is_real_storage_anchor_path(source)
-            || self.is_real_storage_anchor_path(target)
-        {
+            || self.is_real_storage_anchor_path(target);
+
+        // 记账前必须确认这层绑定在**应用行走的视图里**真的把目标变成了一个目录。
+        //
+        // mount(MS_BIND) 返回 0 只说明内核接受了这次绑定，不说明应用后续 lookup 能命中：
+        // 公共存储别名路径与真实存储锚点都压在系统 FUSE 的挂载点上，绑定源若取自本模块
+        // 沙箱锚点，就会出现「mountinfo 里有这层、应用行走进不去」的分离（Android 13
+        // 场景 29 实测）。旧实现直接 record_mounted_target 并 return true，把「syscall
+        // 成功」当成「落地有效」写进状态文件与挂载身份账本，使后续所有自检都继承这个
+        // 乐观结论，无法区分「挂载在、应用能命中」与「挂载在、应用走不进去」。
+        //
+        // 这里只把「目标不再是目录」这一确定无歧义的失效形态拦下来（应用侧表现为
+        // ENOTDIR）；判定要求 source/target 的 st_dev 与 st_ino 都不同于绑定前，避免把
+        // 「绑定未落地」误报成「绑定失败」。root 视角会被 FUSE 放行，因此本判定成功
+        // **不**代表应用可见，只代表已排除「目标被换成非目录」这一形态。
+        if is_fuse_backed {
+            let verified = self.verify_fuse_backed_bind_landing(source, target);
+            if !verified {
+                return false;
+            }
+            log::debug!(
+                "bind verify fuse-backed verified src={} dst={}",
+                source,
+                target
+            );
+            self.record_mounted_target(target);
+            let bind_count = BIND_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if should_log_step(bind_count, BIND_SUCCESS_LOG_STEP) {
+                log::debug!("bind ok src={} dst={} n={}", source, target, bind_count);
+            }
             log::debug!(
                 "bind verify skipped fuse-backed path src={} dst={}",
                 source,
                 target
             );
             return true;
+        }
+
+        self.record_mounted_target(target);
+
+        let bind_count = BIND_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if should_log_step(bind_count, BIND_SUCCESS_LOG_STEP) {
+            log::debug!("bind ok src={} dst={} n={}", source, target, bind_count);
         }
         let Ok(c_source_stat) = CString::new(source) else {
             return true;
@@ -972,6 +1006,60 @@ impl MountPlanner {
         let mut targets = self.mounted_targets.borrow_mut();
         if !targets.iter().any(|item| item == target) {
             targets.push(target.to_string());
+        }
+    }
+
+    /// 校验一次已返回成功的 FUSE 承载绑定是否真的把 `target` 换成了目录。
+    ///
+    /// 返回 `false` 时调用方必须把这层绑定当作不成立：不计账、不上报成功。
+    /// 判定委托给 [`fuse_backed_bind_landing_verdict`]，这里只负责采样与日志。
+    fn verify_fuse_backed_bind_landing(&self, source: &str, target: &str) -> bool {
+        // 绑定前没有可读 inode 时传 `None`：此时不做「未变化」比较，只按非目录这一事实判定。
+        let before = *self.pre_bind_target_inode.borrow();
+        let target_is_directory = stat_is_directory(target);
+        let target_inode_after = stat_inode(target);
+        let sample = BindLandingSample {
+            target_is_directory,
+            target_inode_after,
+            target_inode_before: before,
+        };
+        match fuse_backed_bind_landing_verdict(sample) {
+            BindLandingVerdict::Accepted => {
+                log::debug!(
+                    "bind verify fuse-backed verified src={} dst={}",
+                    source,
+                    target
+                );
+                true
+            }
+            BindLandingVerdict::Inconclusive => {
+                // stat 读不出目录性，或读数前后未变化：沿用原有「FUSE 承载路径不做 inode
+                // 校验」的口径，按成功放行。这里刻意不误杀挂载——无法判定不等于失败。
+                log::debug!(
+                    "bind verify fuse-backed inconclusive src={} dst={} reason={}",
+                    source,
+                    target,
+                    if target_is_directory.is_none() {
+                        "stat_failed"
+                    } else {
+                        "inode_unchanged"
+                    }
+                );
+                true
+            }
+            BindLandingVerdict::NotDirectory => {
+                let source_inode = stat_inode(source);
+                log::error!(
+                    "bind verify fuse-backed not directory src={} dst={} sdev={} sino={} tdev={} tino={}",
+                    source,
+                    target,
+                    source_inode.map_or(0, |item| item.0),
+                    source_inode.map_or(0, |item| item.1),
+                    target_inode_after.map_or(0, |item| item.0),
+                    target_inode_after.map_or(0, |item| item.1)
+                );
+                false
+            }
         }
     }
 
@@ -1336,22 +1424,88 @@ fn is_mount_point(path: &str) -> bool {
 }
 
 fn paths_have_same_inode(left: &str, right: &str) -> bool {
-    let Ok(c_left) = CString::new(left) else {
-        return false;
-    };
-    let Ok(c_right) = CString::new(right) else {
-        return false;
-    };
-    let mut st_left = std::mem::MaybeUninit::<c_stat>::uninit();
-    let mut st_right = std::mem::MaybeUninit::<c_stat>::uninit();
-    let left_ok = unsafe { libc::stat(c_left.as_ptr(), st_left.as_mut_ptr()) } == 0;
-    let right_ok = unsafe { libc::stat(c_right.as_ptr(), st_right.as_mut_ptr()) } == 0;
-    if !left_ok || !right_ok {
-        return false;
+    match (stat_inode(left), stat_inode(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
-    let st_left = unsafe { st_left.assume_init() };
-    let st_right = unsafe { st_right.assume_init() };
-    st_left.st_dev == st_right.st_dev && st_left.st_ino == st_right.st_ino
+}
+
+/// `stat` 一次的 `(st_dev, st_ino)`，失败返回 `None`。
+fn stat_inode(path: &str) -> Option<(u64, u64)> {
+    let c_path = CString::new(path).ok()?;
+    let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
+    // SAFETY: c_path 是以 NUL 结尾的合法路径且在调用期间保持存活；st 是正确对齐的
+    // MaybeUninit，stat 成功时已由内核写满，下面仅在返回值为 0 时才 assume_init。
+    let is_ok = unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) } == 0;
+    if !is_ok {
+        return None;
+    }
+    // SAFETY: 上一步已确认 stat 返回 0，内核写满了整个 st。
+    let st = unsafe { st.assume_init() };
+    Some((st.st_dev, st.st_ino))
+}
+
+/// 路径当前是否为目录：`stat` 成功且带 `S_IFDIR`；`stat` 失败返回 `None`。
+///
+/// 与存在性判断分开是必要的：`ENOTDIR`（路径存在但不是目录）与 `ENOENT`（路径不存在）
+/// 是两种完全不同的失效形态，混在一个布尔里就无法区分「挂载没落地」与「挂载落地但
+/// 目标被换成非目录」。
+fn stat_is_directory(path: &str) -> Option<bool> {
+    let c_path = CString::new(path).ok()?;
+    let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
+    // SAFETY: c_path 是以 NUL 结尾的合法路径且在调用期间保持存活；st 是正确对齐的
+    // MaybeUninit，stat 成功时已由内核写满，下面仅在返回值为 0 时才 assume_init。
+    let is_ok = unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) } == 0;
+    if !is_ok {
+        return None;
+    }
+    // SAFETY: 上一步已确认 stat 返回 0，内核写满了整个 st。
+    let st = unsafe { st.assume_init() };
+    Some(st.st_mode & libc::S_IFMT == libc::S_IFDIR)
+}
+
+/// 一次 FUSE 承载绑定的落地采样：`stat` 到的目标目录性，以及绑定前后的目标 inode。
+pub(super) struct BindLandingSample {
+    pub(super) target_is_directory: Option<bool>,
+    pub(super) target_inode_after: Option<(u64, u64)>,
+    pub(super) target_inode_before: Option<(u64, u64)>,
+}
+
+/// FUSE 承载绑定落地校验的结论。
+pub(super) enum BindLandingVerdict {
+    /// 目标确是目录，绑定按成功处理。
+    Accepted,
+    /// 无法判定落地效果（`stat` 失败，或目标 inode 前后未变化），按成功放行而不是误杀。
+    Inconclusive,
+    /// 目标解析成一个**非目录** inode：应用侧访问该路径必然得到 `ENOTDIR`，绑定必须判失败。
+    NotDirectory,
+}
+
+/// 由落地采样得出绑定校验结论。
+///
+/// 只把「目标不再是目录」这一**确定无歧义**的失效形态判为失败：`mount(MS_BIND)` 返回 0
+/// 只代表内核接受了绑定，而把文件当成目录挂在目标上会让应用访问直接得到 `ENOTDIR`，属于
+/// 本模块制造的错误视图，绝不能写进状态文件与挂载身份账本。
+///
+/// 误报防护：绑定本身就是同一路径换 dentry，若绑定后的 `(st_dev, st_ino)` 与绑定前完全
+/// 相同，说明这次 `stat` 读到的仍是绑定前那层（或读数被缓存挡住），此时**无法判定**，
+/// 必须归入 `Inconclusive` 放行——不能因为读不到变化就把正常挂载误杀。
+pub(super) fn fuse_backed_bind_landing_verdict(sample: BindLandingSample) -> BindLandingVerdict {
+    match sample.target_is_directory {
+        None | Some(true) => BindLandingVerdict::Accepted,
+        Some(false) => {
+            let unchanged = match (sample.target_inode_before, sample.target_inode_after) {
+                (Some(before), Some(after)) => before == after,
+                // 缺少绑定前读数时不做「未变化」比较，只按非目录这一事实判定。
+                _ => false,
+            };
+            if unchanged {
+                BindLandingVerdict::Inconclusive
+            } else {
+                BindLandingVerdict::NotDirectory
+            }
+        }
+    }
 }
 
 /// 输出目录元数据修复失败的告警。
