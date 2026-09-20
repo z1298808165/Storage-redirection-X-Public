@@ -17,6 +17,10 @@ static PLT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// 一个应用可能有多个挂载根，逐条建立。只看"出现了挂载"就返回，应用会在挂载只完成一半时
 /// 开始访问被重定向的路径。要求连续多轮看到完全相同的挂载 ID 集合再放行，用很小的延迟
 /// 换取"挂载集合已不再变化"这一判据。
+///
+/// 只数稳定轮数仍不够：多进程并发启动时（同一 uid 的 `:appbrand0`/`:appbrand1`/主进程），
+/// 先启动进程挂好的 FUSE 根会让后启动进程一进来就看到**稳定的非空集合**，于是在重定向本体
+/// 建立之前就放行。因此判据里还必须叠加"沙箱根已出现"，见 `wait_for_module_mount`。
 const MOUNT_SETTLE_POLLS: u32 = 4;
 
 impl RuntimeFlow {
@@ -62,6 +66,7 @@ impl RuntimeFlow {
                     &self.package_name,
                     self.app_pid,
                     self.is_mount_request_sent,
+                    self.is_mapping_mode_only,
                     &mut self.is_mount_applied,
                 );
                 mount_wait_ms = monotonic_ms().saturating_sub(mount_started_ms);
@@ -144,10 +149,16 @@ fn should_install_process_plt_hook(flow: &RuntimeFlow, is_redirect_via_hook: boo
 }
 
 // 等待本模块的重定向挂载出现在当前进程的命名空间里。
+//
+// **本函数整套轮询是"每个应用进程各自建立 FUSE 会话"这一实现的直接后果。共享宿主 FUSE
+// 会话落地后（见 `docs/shared-fuse-daemon-architecture.md` 阶段 2）应当整体删除**：届时
+// 应用侧只需一次 `MS_BIND` 注入，原子完成，不存在"挂载只完成了一半"的中间态，也就
+// 不需要任何落定判据。在那之前这里是最小必要的补偿，不要再往上加轮次或预算。
 fn wait_for_module_mount(
     package_name: &str,
     app_pid: i32,
     is_mount_request_sent: bool,
+    is_mapping_mode_only: bool,
     is_mount_applied_out: &mut bool,
 ) {
     *is_mount_applied_out = false;
@@ -163,31 +174,54 @@ fn wait_for_module_mount(
     }
 
     log::info!(
-        "wait module mount pid={} budget_ms={} polls={} delay_us={}",
+        "wait module mount pid={} budget_ms={} polls={} delay_us={} map_only={}",
         app_pid,
         mount_timing::post_mount_status_wait_budget_ms(),
         mount_timing::POST_MOUNT_STATUS_POLL_COUNT,
-        mount_timing::POST_MOUNT_STATUS_POLL_DELAY_US
+        mount_timing::POST_MOUNT_STATUS_POLL_DELAY_US,
+        is_mapping_mode_only
     );
 
     let mut settled: Vec<(u64, String)> = Vec::new();
     let mut settle_polls = 0u32;
     let mut poll_count = 0;
     let mut last_mount_count = 0usize;
+    let mut has_sandbox_root = false;
     for _ in 0..mount_timing::POST_MOUNT_STATUS_POLL_COUNT {
         poll_count += 1;
-        let signature = app_redirect_mounts_in(0, package_name)
+        let mounts = app_redirect_mounts_in(0, package_name);
+        // 重定向本体是否已就位：沙箱根（`<包名>/sdcard`）是唯一在所有重定向模式下都必然
+        // 出现的层，锚点与 FUSE 根都不满足这一点（前者任何模式都有但不代表重定向生效，
+        // 后者的数量取决于 `allowed_real_paths`）。只看"出现了挂载"就放行会让应用在
+        // `own private restored` 尚未执行时开始读配置——多进程并发启动时尤其容易命中，
+        // 因为先启动的进程挂好的 FUSE 根会让后启动进程一进来就看到稳定的非空签名。
+        //
+        // 仅映射模式**不建立存储根重定向**，沙箱根永远不出现；这类应用只能退回"集合稳定
+        // 即放行"，否则每个进程都要空等满预算。
+        has_sandbox_root = mounts.iter().any(|mount| mount.is_sandbox_root);
+        let is_ready = is_mapping_mode_only || has_sandbox_root;
+        let signature = mounts
             .into_iter()
             .map(|mount| (mount.mount_id, mount.mount_point))
             .collect::<Vec<_>>();
         last_mount_count = signature.len();
         if signature.is_empty() {
+            // 仅映射模式且本进程没有任何映射需求时，模块确实不会挂任何东西：空集合就是
+            // 终态，继续轮询只会白等满预算。用已轮询的轮数当作"观察过一段时间"的证据，
+            // 避免把"首轮还没挂上"误判成终态。重定向应用不适用这条：它们的沙箱根必然
+            // 出现，空集合只能是"还没开始挂"。
+            if is_mapping_mode_only && poll_count > MOUNT_SETTLE_POLLS {
+                *is_mount_applied_out = true;
+                break;
+            }
             // 挂载被摘除或尚未建立，重新开始计数，避免把一次瞬时观测当作落定。
             settled.clear();
             settle_polls = 0;
         } else if signature == settled {
             settle_polls += 1;
-            if settle_polls >= MOUNT_SETTLE_POLLS {
+            // 集合稳定且重定向本体已就位才算落定。缺后者时继续轮询（预算耗尽后按未落定
+            // 处理），避免把"挂载还没开始"误判成"挂载已经稳定"。
+            if settle_polls >= MOUNT_SETTLE_POLLS && is_ready {
                 *is_mount_applied_out = true;
                 break;
             }
@@ -202,20 +236,27 @@ fn wait_for_module_mount(
     let elapsed_ms = monotonic_ms().saturating_sub(mount_started_ms);
     if *is_mount_applied_out {
         // 这一行的措辞被测试流的挂载确认流程匹配，改动前必须同步 .github/tests 下的检测式。
+        // 检测式按 `app mount confirmed pid=` 前缀匹配，因此末尾追加字段是安全的；
+        // 但前缀本身与 `pid=` 之后紧邻的取值不能改。
         log::info!(
-            "app mount confirmed pid={} mounts={} polls={} elapsed_ms={}",
+            "app mount confirmed pid={} mounts={} polls={} elapsed_ms={} root_ready={}",
             app_pid,
             last_mount_count,
             poll_count,
-            elapsed_ms
+            elapsed_ms,
+            has_sandbox_root
         );
     } else {
+        // 预算耗尽仍未落定。对重定向应用这通常是"存储根重定向没建立起来"，应用读到的
+        // 是未重定向的真实视图；`root_ready=false` 与 `map_only=true` 要分开看。
         log::warn!(
-            "mount unknown/failed pid={} mounts={} polls={} elapsed_ms={}",
+            "mount unknown/failed pid={} mounts={} polls={} elapsed_ms={} root_ready={} map_only={}",
             app_pid,
             last_mount_count,
             poll_count,
-            elapsed_ms
+            elapsed_ms,
+            has_sandbox_root,
+            is_mapping_mode_only
         );
     }
 }

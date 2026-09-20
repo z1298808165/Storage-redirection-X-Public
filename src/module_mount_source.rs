@@ -35,6 +35,12 @@ pub struct ModuleMount {
     pub mount_id: u64,
     pub source: String,
     pub mount_point: String,
+    /// 该条记录的 `root` 是否落在本应用沙箱子树（`<包名>/sdcard`）。
+    ///
+    /// 这是"存储根重定向已建立"的判据：只有从沙箱子树 bind 出来的层才带这一段，
+    /// 锚点绑定与系统 FUSE 都不带。应用侧据此判断重定向本体（而不是全部挂载）
+    /// 是否已就位，见 `lifecycle::specialize_post::wait_for_module_mount`。
+    pub is_sandbox_root: bool,
 }
 
 /// 判断挂载源是否由本模块创建。
@@ -221,6 +227,10 @@ pub fn is_module_redirect_mount(
 ///
 /// 返回的挂载 ID 集合是幂等比较用的判据：同一命名空间内重复调用结果不变，新增挂载会带来
 /// 新 ID，据此可以等到挂载集合稳定后再认定生效。
+///
+/// 调用方若要判断**重定向本体**是否已就位（而不是"任意挂载出现了没有"），应看返回项里的
+/// [`ModuleMount::is_sandbox_root`]，不要只数条数：FUSE 根的数量取决于 `allowed_real_paths`，
+/// 只有沙箱根这一段在所有重定向模式下都必然出现。
 pub fn app_redirect_mounts_in(pid: i32, package_name: &str) -> Vec<ModuleMount> {
     let path = if pid > 0 {
         format!("/proc/{pid}/mountinfo")
@@ -252,6 +262,7 @@ pub fn app_redirect_mounts_in(pid: i32, package_name: &str) -> Vec<ModuleMount> 
                 mount_id: entry.mount_id,
                 source,
                 mount_point: paths::normalize(&mountinfo::unescape_field(entry.target)),
+                is_sandbox_root: is_module_sandbox_root(&root, package_name),
             })
         })
         .collect::<Vec<_>>();

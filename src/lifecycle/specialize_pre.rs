@@ -409,6 +409,8 @@ impl RuntimeFlow {
             &path_mappings,
             is_mapping_mode_only,
         );
+        // specialize_post 的挂载落定判据要按模式分支，这里把结论带过去。
+        self.is_mapping_mode_only = is_mapping_mode_only;
         perf_stages.route_ms = monotonic_ms().saturating_sub(route_config_started_ms);
         perf_stages.allow_count = allowed_real_paths.len();
         perf_stages.excluded_count = excluded_real_paths.len();

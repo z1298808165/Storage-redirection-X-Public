@@ -29,6 +29,11 @@ pub struct RuntimeFlow {
     app_uid: i32,
     should_redirect: bool,
     should_monitor: bool,
+    /// 本应用是否处于仅映射模式：只建立路径映射，不做存储根重定向。
+    ///
+    /// 挂载落定判据需要它：仅映射模式**不会**产生沙箱根挂载，用"沙箱根已出现"去等会导致
+    /// 每个这类应用的启动都空等满预算（见 `specialize_post::wait_for_module_mount`）。
+    is_mapping_mode_only: bool,
     is_mount_applied: bool,
     is_mount_request_sent: bool,
     deferred_mount_payload: String,
@@ -58,6 +63,7 @@ impl RuntimeFlow {
             app_uid: -1,
             should_redirect: false,
             should_monitor: false,
+            is_mapping_mode_only: false,
             is_mount_applied: false,
             is_mount_request_sent: false,
             deferred_mount_payload: String::new(),
