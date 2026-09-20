@@ -349,29 +349,49 @@ pub fn fuse_capability_as_str(capability: FuseCapability) -> &'static str {
 ///
 /// 任何状态下，若该应用自己的失败分桶已到预算，本轮开机内它不再尝试；其它应用不受影响。
 pub fn scoped_mount_allowed_for_scope(scope: &str, mode: StorageBackendMode) -> bool {
-    match mode {
+    let verdict = match mode {
         StorageBackendMode::Namespace => false,
         StorageBackendMode::Fuse => fuse_first_capability_available(),
         StorageBackendMode::Auto => {
             let snapshot = load_fuse_capability_snapshot();
             if snapshot.scope_budget_exhausted(scope) {
-                return false;
-            }
-            match snapshot.capability {
-                FuseCapability::Available => true,
-                // `Unknown` 只表示还没有真实会话结果，必须放行尝试：真实能力由实际挂载结果确认
-                // （`fuse_device_present` 的文档也是这么写的）。**不能**在这里退回应用侧节点探测：
-                // 这个判定同样会在应用进程里执行，而应用视角的 `/dev/fuse` 常因 SELinux 不可读
-                // （实测 HyperOS 上是 `crw------- root root`，连 stat 都被拒），据此否定会让应用
-                // 永远规划不出 FUSE 根、只能退回 namespace，且永远等不到那个能解锁的失败计数。
-                // 只有快照完全不存在（daemon 从未写过）时才退回节点探测，此时没有更好的信息源。
-                FuseCapability::Unknown => snapshot.present || fuse_device_present(),
-                FuseCapability::Unavailable => {
-                    snapshot.retry_window_open(paths::monotonic_ms().max(0) as u64)
+                false
+            } else {
+                match snapshot.capability {
+                    FuseCapability::Available => true,
+                    // `Unknown` 只表示还没有真实会话结果，必须放行尝试：真实能力由实际挂载结果确认
+                    // （`fuse_device_present` 的文档也是这么写的）。**不能**在这里退回应用侧节点探测：
+                    // 这个判定同样会在应用进程里执行，而应用视角的 `/dev/fuse` 常因 SELinux 不可读
+                    // （实测 HyperOS 上是 `crw------- root root`，连 stat 都被拒），据此否定会让应用
+                    // 永远规划不出 FUSE 根、只能退回 namespace，且永远等不到那个能解锁的失败计数。
+                    // 只有快照完全不存在（daemon 从未写过）时才退回节点探测，此时没有更好的信息源。
+                    FuseCapability::Unknown => snapshot.present || fuse_device_present(),
+                    FuseCapability::Unavailable => {
+                        snapshot.retry_window_open(paths::monotonic_ms().max(0) as u64)
+                    }
                 }
             }
         }
-    }
+    };
+    // 诊断：视图根上是否会有 scoped FUSE 层完全取决于这里的结论。Android 13 场景 29 的映射
+    // 只落地后端别名，而通过的 Android 14 在视图根上多一层 FUSE（0:88 vs 254:40）。
+    let snapshot = load_fuse_capability_snapshot();
+    let capability_text = match snapshot.capability {
+        FuseCapability::Unknown => "unknown",
+        FuseCapability::Available => "available",
+        FuseCapability::Unavailable => "unavailable",
+    };
+    log::warn!(
+        "scoped gate diag scope={} mode={} verdict={} capability={} present={} budget_exhausted={} scope_failures={}",
+        scope,
+        mode.as_str(),
+        verdict,
+        capability_text,
+        snapshot.present,
+        snapshot.scope_budget_exhausted(scope),
+        snapshot.scope_failures_for(scope)
+    );
+    verdict
 }
 
 /// 自动后端使用的 fallback 路径决策，应用侧与 daemon 共享同一个判断接口。
@@ -1180,6 +1200,20 @@ pub fn scoped_mount_roots_for_hybrid_rules(
             .chain(excluded_real_paths.iter().map(String::as_str))
             .chain(sandbox_include_rules)
             .chain(mapping_wildcard_rules),
+    );
+    // 诊断：混合规则下是否产生 scoped FUSE 根，直接决定视图根上会不会多一层 FUSE bind。
+    // Android 13 场景 29 的映射只落地后端别名，而通过的 Android 14 在视图根上多一层
+    // FUSE（设备号 0:88 vs 视图根的 254:40），因此需要确认该平台是否本就走不到 FUSE。
+    log::warn!(
+        "scoped roots diag uid={} map_only={} allowed={} excl={} sandbox={} ro={} mappings={} wildcard_roots={}",
+        uid,
+        is_mapping_mode_only,
+        allowed_real_paths.len(),
+        excluded_real_paths.len(),
+        sandboxed_paths.len(),
+        read_only_paths.len(),
+        path_mappings.len(),
+        roots.len()
     );
 
     if is_mapping_mode_only {
