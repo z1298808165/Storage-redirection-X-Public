@@ -79,7 +79,19 @@ impl MountPlanner {
                 continue;
             }
 
-            if !self.bind_mount(source, &target, is_recursive) {
+            let mounted = self.bind_mount(source, &target, is_recursive);
+            // 诊断：成功路径原先只有按 128 节流的 debug 日志，失败路径仅在有 log_text 时
+            // 才记录，导致设备侧无法判断某个别名究竟挂上了还是被内核拒绝。Android 13
+            // 场景 29 中应用视图别名未出现在 skip 名单却也没在 mountinfo 出现，需要用这条
+            // 记录区分「bind 返回 false」与「bind 成功但未在当前命名空间生效」。
+            log::warn!(
+                "alias diag bind target={} primary={} mounted={} source={}",
+                target,
+                is_primary_target,
+                mounted,
+                source
+            );
+            if !mounted {
                 if is_primary_target {
                     if let Some(log_text) = primary_failure_log {
                         log::warn!("alias: {} dst={}", log_text, target);
