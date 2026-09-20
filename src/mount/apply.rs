@@ -947,6 +947,49 @@ impl MountPlanner {
         true
     }
 
+    /// 摘掉系统 FUSE 视图层后，只重建 path_mappings 的 bind。
+    ///
+    /// 场景 29 热重载在 x86_64 Android 13/14 上：`apply_sdcard_redirect` 重新 bind 视图根会
+    /// 触发 MediaProvider 重建 FUSE 隔离视图，导致视图根被拒；随后摘 FUSE 层又会让挂在
+    /// FUSE 层之下的映射被 `MNT_DETACH` 级联 detach。因此必须在摘 FUSE 层之后**只重建映射
+    /// 子路径 bind**——它不碰视图根（`/storage/emulated/<user>`），不会触发 MediaProvider
+    /// 重建 FUSE（触发重建的是视图根的 detach/re-bind）。
+    ///
+    /// 复用第一次 apply 已建立的 `self.real_storage_anchor`，绝不重新走
+    /// [`prepare_real_storage_anchor`]：那个入口在视图根已被重定向时会 detach/re-bind 视图根
+    /// 来重建锚点，同样会触发 MediaProvider 重建 FUSE，与摘除的目的相悖。
+    #[allow(dead_code)] // quality-allow(lint-suppression): 该方法只在 bin 目标（srx_daemon 的 daemon_mount.rs）里调用，lib 目标（srx_core 的 companion_mount.rs）不走 daemon 的摘系统 FUSE 层路径，因此在 lib 里是死代码。
+    pub fn reapply_path_mappings_only(&self, path_mappings: &[PathMapping]) -> bool {
+        let storage_path = paths::storage_user_root_for_user(self.user_id);
+        let data_media_root = paths::data_media_user_root_for_user(self.user_id);
+        let mapping_source_roots =
+            build_mapping_source_roots(&self.real_storage_anchor, &data_media_root);
+        let resolved_mappings = self.resolve_path_mappings(path_mappings, &storage_path);
+        let namespace_mappings = namespace_mappings_outside_scoped_fuse(&resolved_mappings, &[]);
+        if namespace_mappings.is_empty() {
+            log::info!("reapply map after fuse clear: no effective mappings");
+            return false;
+        }
+        log::info!(
+            "reapply map after fuse clear in={} effective={}",
+            path_mappings.len(),
+            namespace_mappings.len()
+        );
+        self.apply_resolved_path_mappings(
+            &namespace_mappings,
+            &storage_path,
+            &mapping_source_roots,
+            &[],
+            &[],
+            &[],
+            PathMappingApplyOptions {
+                should_chown_current_dirs: true,
+                should_create_missing_request_path: true,
+                should_use_existing_target_source_only: false,
+            },
+        )
+    }
+
     fn apply_read_only_paths(
         &self,
         read_only_paths: &[String],
