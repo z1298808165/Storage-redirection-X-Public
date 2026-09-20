@@ -2490,6 +2490,39 @@ run_config_hot_reload_scenario() {
   # 被映射的目录本身是否还解析得到：区分"父目录不可见"与"父目录在但不可写"。
   run_service_case "$scenario" "hot-mapped-dir-list" "file_list_dir" "" \
     --es file_dir "${REAL_ROOT}/Download/SrtProbe" 2>&1 | tail -3 || true
+  # 视图根是否还解析得到：区分"整个视图根不可用"与"只有映射路径不可用"。
+  #
+  # 只有先确定视图根本身是否可列举，才能区分两类完全不同的成因：视图根不可列举说明
+  # 应用对 ${REAL_ROOT} 的解析整体失效（挂载栈被上层挡住，映射挂载根本不可达）；
+  # 视图根可列举而只有映射路径不可用，问题才局限在这条映射挂载本身。
+  run_service_case "$scenario" "hot-viewroot-list" "file_list_dir" "" \
+    --es file_dir "${REAL_ROOT}" 2>&1 | tail -3 || true
+  run_service_case "$scenario" "hot-download-list" "file_list_dir" "" \
+    --es file_dir "${REAL_ROOT}/Download" 2>&1 | tail -3 || true
+  # 决定性对照：同一份配置下，**新进程**是否看得见映射。
+  #
+  # 场景 3 与场景 29 使用完全相同的映射（Download/SrtProbe -> Download/Test），唯一差别是
+  # "进程先于配置存在"（29）还是"配置先于进程存在"（3）。场景 3 在 Android 13 上通过，
+  # 场景 29 连续 20 次全败，因此这条对照是区分两种成因的唯一判据：新进程可见说明热重载
+  # 未对既有进程生效；新进程同样不可见说明重载后的机器状态本身不可用。
+  # 必须放在最后：它会重启应用，此前所有诊断都必须在原进程上完成，顺序不可调换。
+  echo "hot_reload_fresh_process_probe scenario=${scenario}: 在映射已生效的配置下重启应用"
+  if start_app_and_confirm_mount "scenario-${scenario}-hot-fresh-process"; then
+    local fresh_pid fresh_request fresh_mapped fresh_private
+    fresh_pid="$(app_pid)"
+    fresh_request="${REAL_ROOT}/Download/SrtProbe/${HOT_AFTER_FILE}"
+    fresh_mapped="${REAL_ROOT}/Download/Test/${HOT_AFTER_FILE}"
+    fresh_private="${PRIVATE_ROOT}/Download/SrtProbe/${HOT_AFTER_FILE}"
+    adb_su "rm -f '$fresh_request' '$fresh_mapped' '$fresh_private' 2>/dev/null || true" >/dev/null
+    if run_write_case "$scenario" "hot-fresh-mapped" "$fresh_request" "$PAYLOAD" &&
+      file_exists "scenario-${scenario}-hot-fresh-mapped" "$fresh_mapped"; then
+      echo "hot_reload_fresh_process_ok scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程可见映射，热重载对既有进程未生效"
+    else
+      echo "hot_reload_fresh_process_failed scenario=${scenario} old_pid=${initial_pid} new_pid=${fresh_pid}: 新进程同样不可见，重载后状态本身不可用"
+    fi
+  else
+    echo "hot_reload_fresh_process_start_failed scenario=${scenario}: 无法在映射配置下启动应用"
+  fi
   adb_su "rm -f '$root_probe' '$root_probe_private' 2>/dev/null || true" >/dev/null
   return 1
 }
