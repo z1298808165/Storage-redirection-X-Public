@@ -55,9 +55,18 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && !path_exists(&target) {
+                // 诊断：该出口此前不产生任何日志，导致「别名路径不存在」与「别名已挂载」
+                // 在 CI 日志里无法区分。Android 13 场景 29 的映射只落地后端别名，需要确认
+                // 其余别名的挂载点是否在此被跳过。
+                log::warn!("alias diag skip missing target={} source={}", target, source);
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::warn!(
+                    "alias diag skip self-shadowing target={} source={}",
+                    target,
+                    source
+                );
                 log::debug!(
                     "alias: skip self-shadowing bind src={} dst={}",
                     source,
