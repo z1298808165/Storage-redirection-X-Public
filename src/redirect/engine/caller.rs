@@ -218,15 +218,17 @@ pub(super) fn resolve_system_writer_caller_context(
         effective_caller_uid,
     );
 
-    // 按路径提示恢复调用方只用于补全「没有可信调用方」的场景：MediaProvider 提交
-    // pending 文件时以自身身份发起，此时归属为空或等于 provider 自己，提示能把它
-    // 带回原应用。若本次已经拿到显式的真实调用方（has_explicit_caller_signal），
-    // 说明该调用方是直接可用的唯一事实，绝不能被历史路径提示覆盖——否则同一路径上
-    // 其他应用残留的提示会顶替真正的写入者，令 read_only 这类按调用方生效的策略失效。
-    let can_restore_recent_provider_caller = !has_explicit_caller_signal
-        && (effective_caller_package.is_empty()
-            || effective_caller_package == package_name
-            || redirect_policy::is_system_writer_package(&effective_caller_package));
+    // 用路径提示恢复调用方，仅在「当前归属不可信」时进行：归属为空、归属就是本进程
+    // （MediaProvider 自己）、或归属本身是系统代写者。这些情况下拿不到真实调用方，
+    // 只能靠 insert 阶段登记的路径提示把它带回来。
+    //
+    // 注意不要用 has_explicit_caller_signal 来收窄这个判断：它只看调用方 uid 是否落在
+    // 应用区间，包名可能并未解析出来（例如 Java 侧只给了 uid 的场景）。那样会让「uid
+    // 有效但包名为空」的写入既拿不到归属、也不允许用提示补齐，MediaStore 值改写因缺少
+    // 归属而整体失效（场景 2 的 MediaStore 写入不再进沙箱）。
+    let can_restore_recent_provider_caller = effective_caller_package.is_empty()
+        || effective_caller_package == package_name
+        || redirect_policy::is_system_writer_package(&effective_caller_package);
     if can_restore_recent_provider_caller
         && !has_external_caller_signal
         && !crate::hook::is_path_owner_inference_disabled()
