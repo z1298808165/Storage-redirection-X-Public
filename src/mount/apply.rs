@@ -958,7 +958,9 @@ impl MountPlanner {
     /// 复用第一次 apply 已建立的 `self.real_storage_anchor`，绝不重新走
     /// [`prepare_real_storage_anchor`]：那个入口在视图根已被重定向时会 detach/re-bind 视图根
     /// 来重建锚点，同样会触发 MediaProvider 重建 FUSE，与摘除的目的相悖。
-    #[allow(dead_code)] // quality-allow(lint-suppression): 该方法只在 bin 目标（srx_daemon 的 daemon_mount.rs）里调用，lib 目标（srx_core 的 companion_mount.rs）不走 daemon 的摘系统 FUSE 层路径，因此在 lib 里是死代码。
+    ///
+    /// 两条挂载路径都会调用：daemon（`daemon_mount`）与 companion
+    /// （`lifecycle::companion_mount`），顺序约束见 `crate::system_fuse_view` 模块文档。
     pub fn reapply_path_mappings_only(&self, path_mappings: &[PathMapping]) -> bool {
         let storage_path = paths::storage_user_root_for_user(self.user_id);
         let data_media_root = paths::data_media_user_root_for_user(self.user_id);

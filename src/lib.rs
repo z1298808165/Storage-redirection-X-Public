@@ -21,4 +21,5 @@ mod platform;
 mod redirect;
 mod runtime_control;
 mod runtime_stats;
+mod system_fuse_view;
 mod zygisk;

@@ -340,8 +340,13 @@ fn find_first_plt_slot(elf: &ElfImg, symbol: &str) -> *mut c_void {
         .unwrap_or(std::ptr::null_mut())
 }
 
+/// native FuseFix 在该平台装不上（安装后 MediaProvider 起 FUSE 会话会 SIGSEGV），需要跳过。
+///
+/// 判据与软件摘除门禁 [`crate::system_fuse_view::needs_system_fuse_view_clear`] 同源：
+/// 两者描述的是同一件事——「这个平台只能靠摘掉系统 FUSE 视图来兜底」。此前两处各自实现
+/// 同一个表达式，任何一处漂移都会让两边结论矛盾。
 fn should_skip_native_fuse_fix_for_platform(api_level: i32) -> bool {
-    cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
+    crate::system_fuse_view::needs_system_fuse_view_clear(api_level)
 }
 
 fn register_compare_hooks_once() {

@@ -579,6 +579,26 @@ fn handle_child_process(
                 );
             }
         }
+        // 与 daemon 侧同源、同顺序：挂载完成后按平台需要摘掉系统 MediaProvider 的 app data
+        // isolation FUSE 视图，再补回被 MNT_DETACH 级联摘掉的映射子路径 bind。摘除逻辑此前只
+        // 写在 daemon 路径里，走 companion 的应用（普通应用正是这条）在 x86_64 Android 13/14
+        // 上继续失败。顺序约束见 crate::system_fuse_view 模块文档。
+        if crate::system_fuse_view::should_clear_system_fuse_view_for_platform() {
+            crate::system_fuse_view::log_view_stack_for_package(
+                request.uid,
+                &request.package_name,
+                "before_clear",
+            );
+            crate::system_fuse_view::clear_system_fuse_view_for_uid(request.uid);
+            if !request.path_mappings.is_empty() {
+                mount_mgr.reapply_path_mappings_only(&request.path_mappings);
+            }
+            crate::system_fuse_view::log_view_stack_for_package(
+                request.uid,
+                &request.package_name,
+                "after_clear",
+            );
+        }
         let mounted_targets = mount_mgr.take_mounted_targets();
         if !mount_state::write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!(

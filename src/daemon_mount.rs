@@ -328,87 +328,6 @@ fn log_reload_view_root_stack(request: &MountRequest, phase: &str) {
     }
 }
 
-/// 摘掉视图根上系统 MediaProvider 建立的 app data isolation FUSE 视图层。
-///
-/// 模块把视图根 bind 到沙箱后，系统 MediaProvider 会响应性在视图根上建立 FUSE 视图
-/// （`0:98 /0/Android/data/<包名>/sdcard /storage/emulated/0 - fuse /dev/fuse`），其 `root`
-/// 是 FUSE 内部 app-private 路径，被 MediaProvider 的 `is_app_accessible_path` 拒绝。x86_64
-/// Android 13/14 上 native FuseFix 无法安装放行，因此重载后必须显式摘掉这些系统 FUSE 层，
-/// 让模块的 ext4 bind 回到最顶层（新进程正是「单层 ext4、无系统 FUSE 视图」的干净状态）。
-///
-/// 判据只看 `source == "/dev/fuse"` 且 `fs_type == "fuse"`：模块自己的 scoped FUSE 会话的
-/// `source` 带 `srx_fuse_redirect`/`srx_fuse_host` 前缀，不会被误摘。本函数只在平台门禁
-/// [`should_clear_system_fuse_view_for_platform`] 放行时调用，不改变其它平台语义。
-fn clear_system_fuse_view_layers(view_root: &str) -> bool {
-    let mut passes = 0usize;
-    loop {
-        let Some(top) = mount_identity::topmost_live_mount(0, view_root) else {
-            if passes > 0 {
-                log::info!(
-                    "daemon cleared system fuse view layers target={} passes={}",
-                    view_root,
-                    passes
-                );
-            }
-            return true;
-        };
-        let is_system_fuse = top.fs_type == "fuse" && top.source == "/dev/fuse";
-        if !is_system_fuse {
-            if passes > 0 {
-                log::info!(
-                    "daemon cleared system fuse view layers target={} passes={}",
-                    view_root,
-                    passes
-                );
-            }
-            return true;
-        }
-        if passes >= MAX_UNMOUNT_PASSES_PER_TARGET {
-            log::warn!(
-                "daemon clear system fuse view stack exceeded target={}",
-                view_root
-            );
-            return false;
-        }
-        let Ok(c_target) = CString::new(view_root) else {
-            return false;
-        };
-        // SAFETY: c_target 是以 NUL 结尾的合法路径且在本次调用期间保持存活；MNT_DETACH
-        // 只影响当前命名空间的挂载视图，不触碰其它命名空间。
-        if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } == 0 {
-            passes += 1;
-            log::info!(
-                "daemon cleared system fuse view layer target={} mount_id={} source={} root={} pass={}",
-                view_root,
-                top.mount_id,
-                top.source,
-                top.root,
-                passes
-            );
-            continue;
-        }
-        let errno = last_errno();
-        if errno == libc::EINVAL || errno == libc::ENOENT {
-            return true;
-        }
-        log::warn!(
-            "daemon clear system fuse view failed target={} mount_id={} errno={} {}",
-            view_root,
-            top.mount_id,
-            errno,
-            errno_text(errno)
-        );
-        return false;
-    }
-}
-
-/// x86_64 Android 13/14 模拟器上 native FuseFix 无法安装（会 SIGSEGV），系统 MediaProvider
-/// 的 app data isolation FUSE 视图会拒绝 app-private 访问，重载时需显式摘掉这些层。与
-/// `src/hook/fuse_fix.rs` 的 `should_skip_native_fuse_fix_for_platform` 跳过条件保持一致。
-fn should_clear_system_fuse_view_for_platform() -> bool {
-    cfg!(target_arch = "x86_64") && matches!(crate::platform::android_api_level(), 33 | 34)
-}
-
 fn mount_targets_present(pid: i32, targets: &[String], request: &MountRequest) -> bool {
     let path = format!("/proc/{}/mountinfo", pid);
     let Ok(content) = std::fs::read_to_string(&path) else {
@@ -1598,21 +1517,14 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         log_mounted_target_view(&mounted_targets, request);
         // 重建后再采一次，与 before_clear 对照，判断重载是否真的换掉了视图根最上层。
         log_reload_view_root_stack(request, "after_mount");
-        // x86_64 Android 13/14 上 native FuseFix 无法安装放行，系统 MediaProvider 的
-        // app data isolation FUSE 视图会拒绝 app-private 访问。摘 FUSE 层必须在 apply 之后：
-        // apply 重新 bind 视图根会触发 MediaProvider 重建 FUSE，摘在 apply 之前会被重建；
-        // 摘在 apply 之后让视图根回到 ext4，但 MNT_DETACH 会级联 detach 掉挂在 FUSE 层之下的
-        // 映射，所以摘完必须只重建映射子路径 bind——不重新 bind 视图根，就不会再次触发
-        // MediaProvider 重建 FUSE。
-        if should_clear_system_fuse_view_for_platform() {
-            let user_id = crate::platform::user_id_from_uid(request.uid);
-            for alias in paths::storage_alias_roots_for_user(user_id) {
-                clear_system_fuse_view_layers(&alias);
-            }
+        if crate::system_fuse_view::should_clear_system_fuse_view_for_platform() {
+            crate::system_fuse_view::clear_system_fuse_view_for_uid(request.uid);
             if !request.path_mappings.is_empty() {
                 planner.reapply_path_mappings_only(&request.path_mappings);
-                mounted_targets = planner.take_mounted_targets();
             }
+            // 摘除的 MNT_DETACH 可能已把旧映射挂载级联摘掉，无论重建是否成功都要重取一次，
+            // 否则状态文件会记录已不存在的挂载，后续恢复流程据此误判为“仍在场”。
+            mounted_targets = planner.take_mounted_targets();
         }
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);

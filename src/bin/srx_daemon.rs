@@ -44,6 +44,8 @@ mod redirect {
 mod runtime_control;
 #[path = "../runtime_stats.rs"]
 mod runtime_stats;
+#[path = "../system_fuse_view.rs"]
+mod system_fuse_view;
 
 fn main() {
     let mut args = std::env::args();
