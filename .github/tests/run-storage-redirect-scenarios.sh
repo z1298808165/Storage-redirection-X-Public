@@ -1398,6 +1398,11 @@ restart_media_provider_with_hook_ready() {
 print_storage_state() {
   local label="$1"
   echo "=== storage state: ${label} ==="
+  # 场景 36 这类「写入报成功但目标是空目录」的失败，光看挂载栈不足以定论：必须直接列出
+  # 请求路径、映射目标与后端三处的实际内容，才能区分「文件没落地」与「落地了但可见路径
+  # 不对」。后端用 lower FS 直读（MediaProvider 在路径被 FUSE 覆盖时走这条通道），
+  # 因此这里同时列 /data/media 侧，两边都空才是真的没落盘。
+  adb_su "for path in '${QQ_ALIAS_REQUEST_ROOT}' '${QQ_ALIAS_MAPPED_ROOT}' '${BACKEND_ROOT}/Download/SrtQqAliasMapped' '${BACKEND_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv'; do echo \"--- dir: \$path ---\"; ls -la \"\$path\" 2>&1 || true; done" || true
   adb shell "date; getprop ro.build.version.sdk; getprop ro.build.version.release; getprop sys.boot_completed; getprop dev.bootcomplete; getprop init.svc.sdcard; getprop init.svc.media; sm list-volumes all 2>/dev/null || true; df -h /storage/emulated/0 /sdcard 2>&1 || true; ls -ld /storage /storage/emulated /storage/emulated/0 /sdcard 2>&1 || true; mount | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
   adb_su "id; for path in /mnt/user/0 /mnt/user/0/emulated /mnt/user/0/emulated/0 /mnt/runtime/default/emulated/0; do if [ -e \"\$path\" ]; then ls -ld \"\$path\"; else echo optional_storage_alias_absent path=\$path; fi; done; cat /proc/mounts | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
 }
