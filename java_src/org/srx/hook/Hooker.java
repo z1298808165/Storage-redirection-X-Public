@@ -538,7 +538,9 @@ public class Hooker {
       String directFilePath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
       String directRelativePath = physicalRelativePath(directFilePath, callerUid);
       publicPath = probePath;
-      if (directRelativePath != null && !directRelativePath.equals(relativePath)) {
+      if (directRelativePath != null
+          && !trimRelativePathSlash(directRelativePath)
+              .equals(trimRelativePathSlash(relativePath))) {
         patchedArgs = replaceArgument(patchedArgs, relativeIndex, directRelativePath);
         patched = true;
       }
@@ -626,7 +628,8 @@ public class Hooker {
     String publicPath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
     String directPath = resolveMediaStoreDirectPathForValues(publicPath, callerUid);
     String directRelativePath = physicalRelativePath(directPath, callerUid);
-    if (directRelativePath == null || directRelativePath.equals(relativePath)) {
+    if (directRelativePath == null
+        || trimRelativePathSlash(directRelativePath).equals(trimRelativePathSlash(relativePath))) {
       // 这条写入不重定向（例如命中 allowed_real_paths 放行），但 _data 仍需归位为公共形态。
       //
       // MediaProvider 在 ensureFileColumns 里分两步写 _data：FileUtils.computeDataFromValues 先用
@@ -4179,6 +4182,19 @@ public class Hooker {
     String physicalRoot = "/data/media/" + userId + "/";
     if (value.startsWith(physicalRoot)) return path;
     return null;
+  }
+
+  /**
+   * 去掉相对路径的尾斜杠，供目录是否相同的比较使用。
+   *
+   * <p>RELATIVE_PATH 的尾斜杠形态并不统一：调用方通常传 DCIM/Camera，而 MediaProvider 内部算出的值带尾斜杠
+   * DCIM/Camera/。直接比较会把同一个目录判成两个，令本应放行的 真实写入误入重定向分支，_data 被改写成物理形态后按 URI 查不到对应行，调用方保存失败。
+   */
+  private static String trimRelativePathSlash(String path) {
+    if (path == null) return "";
+    int end = path.length();
+    while (end > 1 && path.charAt(end - 1) == '/') end--;
+    return path.substring(0, end);
   }
 
   private static String physicalRelativePath(String path, int callerUid) {
