@@ -139,18 +139,46 @@ class MediaStoreTestCases(
             null,
             null,
         )
-        val readBack =
-            RandomAccessFile(File(aliasPath), "rw").use { file ->
-              file.seek(0)
-              file.write(payload)
-              file.fd.sync()
-              ByteArray(seed.size).also {
-                file.seek(0)
-                file.readFully(it)
-              }
-            }
         // 再从映射的公共别名写入一次，覆盖 MediaProvider FUSE 层对写权限的校验。
+        // 声明提前到 readBack 之前，因为下面的失败取证分支也要用它来定位映射侧目录。
         val publicAliasPath = "/storage/emulated/0/Download/QQ/${File(aliasPath).name}"
+        // 打开失败时先记下异常，取证放在 try 之外做：
+        // return@measure 出现在表达式内部会让整段 try 的类型推断坏掉，
+        // 也无法顺带把「打开失败」与「内容不匹配」两种失败区分开。
+        var aliasOpenError: Exception? = null
+        val readBack: ByteArray? =
+            try {
+              RandomAccessFile(File(aliasPath), "rw").use { file ->
+                file.seek(0)
+                file.write(payload)
+                file.fd.sync()
+                ByteArray(seed.size).also {
+                  file.seek(0)
+                  file.readFully(it)
+                }
+              }
+            } catch (error: Exception) {
+              aliasOpenError = error
+              null
+            }
+        if (readBack == null) {
+          // 采集应用进程自身视角的取证。这一层证据任何外部 adb 取证都拿不到：
+          // mount namespace 是按进程隔离的，adb shell 与 MediaProvider 看到的挂载栈
+          // 和被测应用并不相同，因此「adb 里能看到文件」无法证明「应用能看到文件」。
+          // 列父目录是为了区分「映射没生效导致目录为空」与「目录有内容但属主/权限拒绝」，
+          // 列映射侧目录是为了确认写入究竟落在哪一层。
+          return@measure testCase.fail(
+              "alias open failed",
+              mapOf(
+                  "path" to aliasPath,
+                  "mappedPath" to publicAliasPath,
+                  "uri" to uri.toString(),
+                  "error" to (aliasOpenError?.toString() ?: "unknown"),
+                  "aliasDir" to describeDirectory(File(aliasPath).parentFile),
+                  "mappedDir" to describeDirectory(File(publicAliasPath).parentFile),
+              ),
+          )
+        }
         val publicReadBack =
             RandomAccessFile(File(publicAliasPath), "rw").use { file ->
               file.seek(0)
@@ -174,6 +202,34 @@ class MediaStoreTestCases(
             ),
         )
       }
+
+  /**
+   * 以被测应用自身身份描述目录内容，用于失败取证。
+   *
+   * 只看名字与长度是不够的：映射场景下同名文件可能来自不同层，因此额外带上
+   * 可读性与 lastModified，便于区分「目录根本没内容」与「有内容但当前进程读不到」。
+   * 单条 listFiles 可能因权限抛异常，所以整体包在 try 里，失败就退化成错误文本，
+   * 不能让取证本身把失败原因盖掉。
+   */
+  private fun describeDirectory(dir: File?): String {
+    if (dir == null) return "null"
+    return try {
+      val entries = dir.listFiles()
+      if (entries == null) {
+        "listFiles=null exists=${dir.exists()} canRead=${dir.canRead()}"
+      } else {
+        buildString {
+          append("exists=${dir.exists()} canRead=${dir.canRead()} count=${entries.size} [")
+          entries.sortedBy { it.name }.joinTo(this, ", ") { entry ->
+            "${entry.name}(len=${entry.length()},readable=${entry.canRead()},mtime=${entry.lastModified()})"
+          }
+          append("]")
+        }
+      }
+    } catch (error: Exception) {
+      "error=$error"
+    }
+  }
 
   fun createDownloadDenied(args: TestCaseArgs): TestResult =
       createDenied(

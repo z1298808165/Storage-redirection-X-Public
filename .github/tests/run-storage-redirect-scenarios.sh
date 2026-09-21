@@ -2967,6 +2967,11 @@ run_any_path_mapping_scenario() {
 
 clear_alias_mediastore_fixture() {
   # 与 PowerShell 一致，仅清理固定测试文件在请求、公共别名、目标三个目录的索引。
+  #
+  # 这里**不删物理文件**：用例（mediastore_create_then_file_overwrite）自己就会
+  # 按路径 delete 索引后再 insert 重建，并在写入前清理，删除物理文件既不必要，
+  # 还会让「目标目录里到底有没有文件」这一失败判据失去观测对象——场景 36
+  # 在 Android 13 上的失败取证正是靠物理文件的实际内容定位的。
   local escaped_app="${APP_ID//./\\.}"
   remove_mediastore_rows_by_pattern "content://media/external/file" \
     '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_qq_alias_existing\.bin(,|$)' \
