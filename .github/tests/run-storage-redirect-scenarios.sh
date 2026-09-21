@@ -12,6 +12,7 @@ APP_ID="${APP_ID:-me.fakerqu.test.storageredirect}"
 CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${APP_ID}.json"
 READ_ONLY_OWNER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
 GLOBAL_CONFIG="/data/adb/modules/storage.redirect.x/config/global.json"
+MOUNT_STATE_DIR="/data/adb/modules/storage.redirect.x/tmp/mount_state"
 LOG_PATH="/data/adb/modules/storage.redirect.x/logs/running.log"
 FILE_MONITOR_LOG_PATH="/data/adb/modules/storage.redirect.x/logs/file_monitor.log"
 ACTION="me.fakerqu.test.storageredirection.TEST_CASE"
@@ -1405,6 +1406,15 @@ print_storage_state() {
   adb_su "for path in '${QQ_ALIAS_REQUEST_ROOT}' '${QQ_ALIAS_MAPPED_ROOT}' '${BACKEND_ROOT}/Download/SrtQqAliasMapped' '${BACKEND_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv'; do echo \"--- dir: \$path ---\"; ls -la \"\$path\" 2>&1 || true; done" || true
   adb shell "date; getprop ro.build.version.sdk; getprop ro.build.version.release; getprop sys.boot_completed; getprop dev.bootcomplete; getprop init.svc.sdcard; getprop init.svc.media; sm list-volumes all 2>/dev/null || true; df -h /storage/emulated/0 /sdcard 2>&1 || true; ls -ld /storage /storage/emulated /storage/emulated/0 /sdcard 2>&1 || true; mount | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
   adb_su "id; for path in /mnt/user/0 /mnt/user/0/emulated /mnt/user/0/emulated/0 /mnt/runtime/default/emulated/0; do if [ -e \"\$path\" ]; then ls -ld \"\$path\"; else echo optional_storage_alias_absent path=\$path; fi; done; cat /proc/mounts | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
+  # 挂载状态文件里逐条记着本轮落盘的 target（`target=` 行），它是判定「模块认为自己挂了哪些
+  # 路径」的唯一权威来源，而它本身不在 artifact 里——日志只给出计数。run 35577498143 暴露
+  # 的差异正是计数：Android 13 走 daemon 路径落盘 targets=13，Android 14 走 companion 路径
+  # 为 41，但差额具体是哪些路径无从判断。直接把文件内容打出来，下一轮即可两条路径逐条对照，
+  # 不必再从计数反推。两个路径前缀都列（daemon 与 companion 写同一个目录、文件名后缀为 pid）。
+  adb_su "d='${MOUNT_STATE_DIR}'; for f in \$d/*.state; do [ -f \"\$f\" ] || continue; echo \"--- state: \$f ---\"; cat \"\$f\" 2>&1 || true; done" || true
+  # 目标应用自己的 mountinfo 是「应用视角」的权威证据：mount namespace 按进程隔离，
+  # 上面 adb 视角能看到的东西应用未必能看到（反之亦然），因此单列一份应用侧视图备对照。
+  adb_su "for p in \$(pidof ${APP_ID} 2>/dev/null || true); do echo \"--- app mountinfo pid=\$p ---\"; cat /proc/\$p/mountinfo 2>&1 | grep -E 'SrtQqAlias|QQfile_recv|Download/QQ' || echo '<no matched entry>'; done" || true
 }
 
 run_service_case() {
