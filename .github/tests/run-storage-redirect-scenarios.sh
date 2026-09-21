@@ -2869,7 +2869,11 @@ run_own_private_directories_scenario() {
   # 该视图对 app-private 路径的拒绝没有被放行，应用读写自有 Android/data 目录得到
   # ENOENT。真机 arm64 上 cfg!(target_arch = "x86_64") 为假，FuseFix 正常安装，不受影响；
   # 同一份代码在 Android 14/15/16 上均通过。这里只在豁免平台跳过断言，其余平台照常校验。
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
+  #
+  # `SRT_OWN_PRIVATE_STRICT=1` 时强制跑真实断言：用于验证「companion 路径接入系统 FUSE
+  # 视图摘除」是否已让该平台自愈。验证通过后本豁免分支即应移除。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ] \
+    && [ "${SRT_OWN_PRIVATE_STRICT:-}" != "1" ]; then
     echo "own_private_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
@@ -2920,7 +2924,11 @@ run_any_path_mapping_scenario() {
   # （result_timeout scenario=<N> test_case=file_write），而不是返回错误。
   # 真机 arm64 上 cfg!(target_arch = "x86_64") 为假、FuseFix 正常安装，不受影响；
   # 同一份代码在 Android 14/15/16 上均通过。
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
+  #
+  # `SRT_ANY_PATH_STRICT=1` 时强制跑真实断言：用于验证「companion 路径接入系统 FUSE
+  # 视图摘除」是否已让该平台自愈。验证通过后本豁免分支即应移除。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ] \
+    && [ "${SRT_ANY_PATH_STRICT:-}" != "1" ]; then
     echo "any_path_mapping_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
