@@ -1403,7 +1403,14 @@ print_storage_state() {
   # 请求路径、映射目标与后端三处的实际内容，才能区分「文件没落地」与「落地了但可见路径
   # 不对」。后端用 lower FS 直读（MediaProvider 在路径被 FUSE 覆盖时走这条通道），
   # 因此这里同时列 /data/media 侧，两边都空才是真的没落盘。
-  adb_su "for path in '${QQ_ALIAS_REQUEST_ROOT}' '${QQ_ALIAS_MAPPED_ROOT}' '${BACKEND_ROOT}/Download/SrtQqAliasMapped' '${BACKEND_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv'; do echo \"--- dir: \$path ---\"; ls -la \"\$path\" 2>&1 || true; done" || true
+  #
+  # 末尾两处是沙箱侧：应用视角里 `/storage/emulated/0` 的挂载 root 就是沙箱
+  # （`<BACKEND_ROOT>/Android/data/<APP_ID>/sdcard`，见应用 mountinfo）。因此应用要走到
+  # `/storage/emulated/0/Android/data/<APP_ID>/...`，中间组件 `Android`、`Android/data`
+  # 必须在**沙箱内**存在。实测失败平台在应用进程内连 `Android/data/<APP_ID>` 自身都
+  # stat 不到，而通过平台上它存在且有 5 个条目。列出沙箱根与其 `Android` 子目录，
+  # 即可直接判定「沙箱内是否缺这条中间链」，无需再从应用侧现象反推。
+  adb_su "for path in '${QQ_ALIAS_REQUEST_ROOT}' '${QQ_ALIAS_MAPPED_ROOT}' '${BACKEND_ROOT}/Download/SrtQqAliasMapped' '${BACKEND_ROOT}/Android/data/${APP_ID}/Tencent/QQfile_recv' '${BACKEND_ROOT}/Android/data/${APP_ID}/sdcard' '${BACKEND_ROOT}/Android/data/${APP_ID}/sdcard/Android'; do echo \"--- dir: \$path ---\"; ls -la \"\$path\" 2>&1 || true; done" || true
   adb shell "date; getprop ro.build.version.sdk; getprop ro.build.version.release; getprop sys.boot_completed; getprop dev.bootcomplete; getprop init.svc.sdcard; getprop init.svc.media; sm list-volumes all 2>/dev/null || true; df -h /storage/emulated/0 /sdcard 2>&1 || true; ls -ld /storage /storage/emulated /storage/emulated/0 /sdcard 2>&1 || true; mount | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
   adb_su "id; for path in /mnt/user/0 /mnt/user/0/emulated /mnt/user/0/emulated/0 /mnt/runtime/default/emulated/0; do if [ -e \"\$path\" ]; then ls -ld \"\$path\"; else echo optional_storage_alias_absent path=\$path; fi; done; cat /proc/mounts | grep -E ' /storage|/mnt/runtime|/mnt/user|sdcard|fuse|srx' || true" || true
   # 挂载状态文件里逐条记着本轮落盘的 target（`target=` 行），它是判定「模块认为自己挂了哪些
