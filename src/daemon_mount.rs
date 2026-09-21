@@ -1518,7 +1518,10 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         // 重建后再采一次，与 before_clear 对照，判断重载是否真的换掉了视图根最上层。
         log_reload_view_root_stack(request, "after_mount");
         if crate::system_fuse_view::should_clear_system_fuse_view_for_platform() {
-            crate::system_fuse_view::clear_system_fuse_view_for_uid(request.uid);
+            crate::system_fuse_view::clear_system_fuse_view_for_package(
+                request.uid,
+                &request.package_name,
+            );
             if !request.path_mappings.is_empty() {
                 planner.reapply_path_mappings_only(&request.path_mappings);
             }

@@ -589,7 +589,10 @@ fn handle_child_process(
                 &request.package_name,
                 "before_clear",
             );
-            crate::system_fuse_view::clear_system_fuse_view_for_uid(request.uid);
+            crate::system_fuse_view::clear_system_fuse_view_for_package(
+                request.uid,
+                &request.package_name,
+            );
             if !request.path_mappings.is_empty() {
                 mount_mgr.reapply_path_mappings_only(&request.path_mappings);
             }

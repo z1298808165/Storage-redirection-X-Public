@@ -130,33 +130,60 @@ pub fn clear_system_fuse_view_layers(view_root: &str) -> bool {
     }
 }
 
-/// 摘掉该用户所有存储别名上的系统 FUSE 视图层，并报告是否全部收敛。
+/// 枚举需要清理系统 FUSE 视图层的全部目标路径。
 ///
-/// 同一份存储在内核里有多个别名（`/storage/emulated/<user>`、`/data/media/<user>`、
-/// `/mnt/*/emulated/<user>` 等），MediaProvider 可能在其中任一路径上建视图，因此必须遍历
-/// [`paths::storage_alias_roots_for_user`] 逐个清理。
-pub fn clear_system_fuse_view_for_uid(uid: i32) -> bool {
+/// **必须同时包含两类目标**（CI artifact `test-flow-app-mountinfo.txt` 实测证据）：
+///
+/// 1. **存储别名根**（`/storage/emulated/<user>` 等，见 [`paths::storage_alias_roots_for_user`]）；
+/// 2. **自有包名目录**——`Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>`。
+///
+/// 第 2 类是必须的：MediaProvider 的 app-data-isolation 视图**主要不建在别名根上，而是直接建在
+/// 这些子路径上**，且每条路径会叠**两层** `source=/dev/fuse`。只摘别名根时视图根确实回到
+/// ext4（`47196 ... ext4 /dev/block/dm-34`），但子路径上的 FUSE 层仍在
+/// （`47201`/`47203 ... fuse /dev/fuse`），应用读写自有 `Android/data|media|obb` 依然被拒。
+///
+/// 返回去重后的目标列表：别名根之间可能互相包含，自有目录也可能与别名重复。
+pub fn system_fuse_view_targets_for_package(uid: i32, package_name: &str) -> Vec<String> {
     let user_id = user_id_from_uid(uid);
+    let mut targets = paths::storage_alias_roots_for_user(user_id);
+    if !package_name.is_empty() {
+        for alias in paths::storage_alias_roots_for_user(user_id) {
+            for kind in ["data", "media", "obb"] {
+                let dir = format!("{}/Android/{}/{}", alias, kind, package_name);
+                if !targets.iter().any(|target| target == &dir) {
+                    targets.push(dir);
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// 摘掉该用户所有存储别名与自有包名目录上的系统 FUSE 视图层，并报告是否全部收敛。
+///
+/// 目标枚举见 [`system_fuse_view_targets_for_package`]，那里解释了为什么自有包名目录必须包含。
+pub fn clear_system_fuse_view_for_package(uid: i32, package_name: &str) -> bool {
     let mut all_cleared = true;
-    for alias in paths::storage_alias_roots_for_user(user_id) {
-        if !clear_system_fuse_view_layers(&alias) {
+    for target in system_fuse_view_targets_for_package(uid, package_name) {
+        if !clear_system_fuse_view_layers(&target) {
             all_cleared = false;
         }
     }
     all_cleared
 }
 
-/// 采样自有包名目录与存储视图根的最上层挂载，供诊断「应用视角到底能不能访问自有目录」。
+/// 采样所有存储别名根与自有包名目录的最上层挂载，供诊断「应用视角到底能不能访问自有目录」。
 ///
 /// 场景 34/35/36 的失败点都在 `Android/data/<包名>/...`，而 `fs_type` 能直接区分最上层是
 /// 系统 MediaProvider 的 FUSE 视图（`fuse` + `/dev/fuse`）还是模块自己的 ext4 bind。摘除
 /// 前后各采一次即可定论摘除是否真的换掉了最上层——不再需要从应用侧的 ENOENT 反推。
+///
+/// 采样点必须与 [`system_fuse_view_targets_for_package`] 完全一致：诊断与摘除若各用一套目标
+/// 列表，就会出现「摘了 A 没采 B、采了 B 没摘 A」的假象，把「摘干净了」和「漏了目标」混为
+/// 一谈。两者共用同一个枚举函数是这条不变量唯一的保证。
 pub fn log_view_stack_for_package(uid: i32, package_name: &str, phase: &str) {
-    let user_id = user_id_from_uid(uid);
-    let view_root = paths::storage_user_root_for_user(user_id);
-    let own_data_dir = format!("{}/Android/data/{}", view_root, package_name);
-    for point in [&view_root, &own_data_dir] {
-        match topmost_live_mount(0, point) {
+    for point in system_fuse_view_targets_for_package(uid, package_name) {
+        match topmost_live_mount(0, &point) {
             Some(mount) => log::info!(
                 "view stack phase={} target={} top_source={} top_fs={} top_root={} mount_id={}",
                 phase,
