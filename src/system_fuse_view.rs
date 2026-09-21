@@ -65,9 +65,22 @@ pub fn should_clear_system_fuse_view_for_platform() -> bool {
 
 /// 摘掉 `view_root` 上系统 MediaProvider 建立的 app data isolation FUSE 视图层。
 ///
-/// 判据只看 `source == "/dev/fuse"` 且 `fs_type == "fuse"`：模块自己的 scoped FUSE 会话的
-/// `source` 带 `srx_fuse_redirect`/`srx_fuse_host` 前缀，不会被误摘。非系统 FUSE 的最上层
-/// （模块的 ext4 bind）视为已收敛，直接返回成功。
+/// 判据必须**同时**满足三条，缺一条就会误摘：
+///
+/// 1. `fs_type == "fuse"`；
+/// 2. `source == "/dev/fuse"`；
+/// 3. `root` 恰好是应用专属目录（[`module_mount_source::root_is_app_private_directory`]，
+///    形如 `/0/Android/data/<包名>`，止于包名且没有更深的路径段）。
+///
+/// 第 3 条不能省。摘除目标里的 `Android/{data,media,obb}/<包名>` 与模块自己的 bind **同路径**，
+/// 而 bind 会把底层的 `source` 与 `fs_type` 一并继承（真机上就是 `/dev/fuse` + `fuse`），
+/// 只看前两条会把模块自己的挂载也摘掉——应用随后写入既不落沙箱也不落后端的空视图，
+/// 表现为「写入 PASS 但可见路径与后端都查不到文件」。
+/// [`crate::module_mount_source`] 的模块文档把这条记为不可混用的判据，这里正是它的使用点。
+///
+/// 模块自己的 scoped FUSE 会话的 `source` 带 `srx_fuse_redirect`/`srx_fuse_host` 前缀，
+/// 但真机上经 fusermount 回退时该前缀不进 `source`，因此不能只依赖它。
+/// 非系统 FUSE 的最上层（模块的 bind）视为已收敛，直接返回成功。
 ///
 /// 返回 `true` 表示已无系统 FUSE 层残留（包括本来就没有）。
 pub fn clear_system_fuse_view_layers(view_root: &str) -> bool {
@@ -83,7 +96,9 @@ pub fn clear_system_fuse_view_layers(view_root: &str) -> bool {
             }
             return true;
         };
-        let is_system_fuse = top.fs_type == "fuse" && top.source == "/dev/fuse";
+        let is_system_fuse = top.fs_type == "fuse"
+            && top.source == "/dev/fuse"
+            && crate::module_mount_source::root_is_app_private_directory(&top.root);
         if !is_system_fuse {
             if passes > 0 {
                 log::info!(

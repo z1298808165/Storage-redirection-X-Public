@@ -154,7 +154,12 @@ fn storage_root_tail(root: &str) -> Option<(&str, &str)> {
 /// 模块的层永远不会是这个形态：存储根重定向与映射都从 `sdcard` 子树或映射目标 bind，
 /// `root` 一定更深（带 `/sdcard` 或别的路径段）。**这是模块层与系统层唯一的分界**，
 /// 因此判定顺序上必须先把这一形态排除掉。
-fn root_is_app_private_directory(root: &str) -> bool {
+///
+/// 公开给 `crate::system_fuse_view` 使用：摘除系统 FUSE 视图时，目标路径
+/// `Android/{data,media,obb}/<包名>` 上与系统视图**同路径**挂着模块自己的 bind，而 bind 会
+/// 继承底层的 `source`（`/dev/fuse`）与 `fs_type`（`fuse`）——只按这两者判定会把模块自己的
+/// 挂载一起摘掉，应用随即写进一个既不落沙箱也不落后端的空视图。
+pub fn root_is_app_private_directory(root: &str) -> bool {
     let Some((_, tail)) = storage_root_tail(root) else {
         return false;
     };
