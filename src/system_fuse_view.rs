@@ -145,19 +145,19 @@ pub fn clear_system_fuse_view_layers(view_root: &str) -> bool {
     }
 }
 
-/// 枚举需要清理系统 FUSE 视图层的全部目标路径。
+/// 枚举需要**观察**系统 FUSE 视图层状态的路径（供 [`log_view_stack_for_package`] 采样）。
 ///
-/// **必须同时包含两类目标**（CI artifact `test-flow-app-mountinfo.txt` 实测证据）：
+/// 包含两类：
 ///
 /// 1. **存储别名根**（`/storage/emulated/<user>` 等，见 [`paths::storage_alias_roots_for_user`]）；
 /// 2. **自有包名目录**——`Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>`。
 ///
-/// 第 2 类是必须的：MediaProvider 的 app-data-isolation 视图**主要不建在别名根上，而是直接建在
-/// 这些子路径上**，且每条路径会叠**两层** `source=/dev/fuse`。只摘别名根时视图根确实回到
-/// ext4（`47196 ... ext4 /dev/block/dm-34`），但子路径上的 FUSE 层仍在
-/// （`47201`/`47203 ... fuse /dev/fuse`），应用读写自有 `Android/data|media|obb` 依然被拒。
+/// 第 2 类**只用于观察，不用于摘除**。摘除目标与这里必须区分开，因为子路径上的系统 FUSE
+/// 视图在正常平台上正是 MediaProvider 代写通道的依托，摘掉会让写入落空；而它又是失败现场最
+/// 需要看清的地方（Android 13 的 `ENOENT` 就出在这类路径上）。见
+/// [`clear_system_fuse_view_for_package`] 里的三轮对照结论。
 ///
-/// 返回去重后的目标列表：别名根之间可能互相包含，自有目录也可能与别名重复。
+/// 返回去重后的列表：别名根之间可能互相包含，自有目录也可能与别名重复。
 pub fn system_fuse_view_targets_for_package(uid: i32, package_name: &str) -> Vec<String> {
     let user_id = user_id_from_uid(uid);
     let mut targets = paths::storage_alias_roots_for_user(user_id);
@@ -174,13 +174,37 @@ pub fn system_fuse_view_targets_for_package(uid: i32, package_name: &str) -> Vec
     targets
 }
 
-/// 摘掉该用户所有存储别名与自有包名目录上的系统 FUSE 视图层，并报告是否全部收敛。
+/// 摘掉该用户所有存储别名上的系统 FUSE 视图层，并报告是否全部收敛。
 ///
-/// 目标枚举见 [`system_fuse_view_targets_for_package`]，那里解释了为什么自有包名目录必须包含。
+/// **只摘别名根，不摘自有包名目录**——这是实测结论，不是保守选择。CI artifact
+/// `test-flow-app-mountinfo.txt` 的三轮对照：
+///
+/// | 平台 | 只摘别名根 | 连子路径一起摘 |
+/// |---|---|---|
+/// | Android 13 | 子路径各有 2 层系统 FUSE → 失败（`ENOENT`） | 子路径 0 层 → 仍失败（`no_native`） |
+/// | Android 14 | 子路径 data×6/media×2/obb×2 → **三个断言全过** | 子路径 0 层 → **三个断言全失败** |
+///
+/// 两点结论：
+///
+/// 1. **`Android/{data,media,obb}/<包名>` 上的系统 FUSE 视图不是障碍，而是 MediaProvider
+///    代写通道的依托。** 摘掉它之后 MediaProvider 的路径解析落到
+///    `rwVals no_native ... fallback=null`，写入既不落沙箱也不落后端（`file_write` 返回成功
+///    但目录为空）。Android 14 因此从全过变成全败。
+/// 2. **摘子路径对 Android 13 也无效**：该平台摘与不摘的失败形态不同（`ENOENT` vs
+///    `no_native`）但都不通过，说明它的限制另有原因，反复摘除不是解法。
+///
+/// 因此这里回到「只摘别名根」：`Android 14/15/16/17` 的正常路径依赖它，而 Android 13 需要
+/// 另行定位真正的阻塞点。诊断采样仍覆盖子路径（见 [`log_view_stack_for_package`]），
+/// 以便继续观察那两类形态。
+///
+/// `package_name` 目前不参与摘除目标，保留它是为了让两条挂载路径的调用点与诊断函数保持同一
+/// 形态，后续若要按包名区分平台策略无需再改签名。
 pub fn clear_system_fuse_view_for_package(uid: i32, package_name: &str) -> bool {
+    let _ = package_name;
+    let user_id = user_id_from_uid(uid);
     let mut all_cleared = true;
-    for target in system_fuse_view_targets_for_package(uid, package_name) {
-        if !clear_system_fuse_view_layers(&target) {
+    for alias in paths::storage_alias_roots_for_user(user_id) {
+        if !clear_system_fuse_view_layers(&alias) {
             all_cleared = false;
         }
     }
@@ -193,9 +217,10 @@ pub fn clear_system_fuse_view_for_package(uid: i32, package_name: &str) -> bool 
 /// 系统 MediaProvider 的 FUSE 视图（`fuse` + `/dev/fuse`）还是模块自己的 ext4 bind。摘除
 /// 前后各采一次即可定论摘除是否真的换掉了最上层——不再需要从应用侧的 ENOENT 反推。
 ///
-/// 采样点必须与 [`system_fuse_view_targets_for_package`] 完全一致：诊断与摘除若各用一套目标
-/// 列表，就会出现「摘了 A 没采 B、采了 B 没摘 A」的假象，把「摘干净了」和「漏了目标」混为
-/// 一谈。两者共用同一个枚举函数是这条不变量唯一的保证。
+/// 采样范围**宽于**摘除范围（摘除只动别名根，见 [`clear_system_fuse_view_for_package`]），
+/// 这是有意为之：子路径上的层虽不摘，但必须能观察到——Android 13 的 `ENOENT` 与摘除后的
+/// `no_native` 两种形态就是靠这里的采样区分出来的。诊断范围可以大于操作范围，
+/// **反过来绝不可以**（摘了却没采，会把「摘干净」与「漏目标」混为一谈）。
 pub fn log_view_stack_for_package(uid: i32, package_name: &str, phase: &str) {
     for point in system_fuse_view_targets_for_package(uid, package_name) {
         match topmost_live_mount(0, &point) {

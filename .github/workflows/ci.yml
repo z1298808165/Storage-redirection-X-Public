@@ -14,11 +14,6 @@ on:
         required: false
         default: ""
         type: string
-      own_private_strict:
-        description: "临时：强制 x86_64 Android 13 跑场景 34/35 真实断言（跳过平台豁免），验证 companion 摘除效果"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   actions: read
@@ -569,12 +564,6 @@ jobs:
       SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}
       # CI Android 测试流统一关闭 FuseFix native hook；探针属性仅用于诊断。
       SRT_FUSE_FIX_ENABLED: false
-      # 临时验证开关：强制 x86_64 Android 13 跑场景 34/35 的真实断言（跳过平台豁免），
-      # 用于验证 companion 路径接入系统 FUSE 视图摘除后的自愈效果。可经 workflow_dispatch
-      # 的 own_private_strict 输入打开，push 场景下用提交信息标记「自有目录严格断言」打开。
-      # 验证通过后，这两个开关、dispatch 输入与场景 34/35 的豁免分支一并移除。
-      SRT_OWN_PRIVATE_STRICT: ${{ inputs.own_private_strict && '1' || (contains(github.event.head_commit.message, '自有目录严格断言') && '1' || '') }}
-      SRT_ANY_PATH_STRICT: ${{ inputs.own_private_strict && '1' || (contains(github.event.head_commit.message, '自有目录严格断言') && '1' || '') }}
       PERSIST_SRX_FUSE_PROBE: ${{ contains(github.event.head_commit.message, '延迟全量探针') && 'late' || (contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, 'Fuse 探针跨重启 marker') || contains(github.event.head_commit.message, 'Fuse 探针单场景触发')) && 'all_compare' || contains(github.event.head_commit.message, '全量组合探针') && 'all' || contains(github.event.head_commit.message, '核心组探针') && 'core' || contains(github.event.head_commit.message, '扩展组探针') && 'extended' || '' }}
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。

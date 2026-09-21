@@ -2870,10 +2870,12 @@ run_own_private_directories_scenario() {
   # ENOENT。真机 arm64 上 cfg!(target_arch = "x86_64") 为假，FuseFix 正常安装，不受影响；
   # 同一份代码在 Android 14/15/16 上均通过。这里只在豁免平台跳过断言，其余平台照常校验。
   #
-  # `SRT_OWN_PRIVATE_STRICT=1` 时强制跑真实断言：用于验证「companion 路径接入系统 FUSE
-  # 视图摘除」是否已让该平台自愈。验证通过后本豁免分支即应移除。
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ] \
-    && [ "${SRT_OWN_PRIVATE_STRICT:-}" != "1" ]; then
+  # 已尝试并否证的解法：把这些子路径上的系统 FUSE 视图摘掉。三轮 artifact 对照显示
+  # Android 14 摘前三个标签全过、摘后全败（MediaProvider 失去代写通道，落
+  # `rwVals no_native fallback=null`），而 Android 13 摘与不摘都不通过（形态从 ENOENT
+  # 变成 no_native），说明该平台另有阻塞点。详见
+  # src/system_fuse_view.rs::clear_system_fuse_view_for_package 的文档。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
     echo "own_private_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
@@ -2925,10 +2927,9 @@ run_any_path_mapping_scenario() {
   # 真机 arm64 上 cfg!(target_arch = "x86_64") 为假、FuseFix 正常安装，不受影响；
   # 同一份代码在 Android 14/15/16 上均通过。
   #
-  # `SRT_ANY_PATH_STRICT=1` 时强制跑真实断言：用于验证「companion 路径接入系统 FUSE
-  # 视图摘除」是否已让该平台自愈。验证通过后本豁免分支即应移除。
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ] \
-    && [ "${SRT_ANY_PATH_STRICT:-}" != "1" ]; then
+  # 已尝试并否证的解法同场景 34：摘子路径上的系统 FUSE 视图会破坏 MediaProvider 的代写
+  # 通道（详见 src/system_fuse_view.rs::clear_system_fuse_view_for_package）。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
     echo "any_path_mapping_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
