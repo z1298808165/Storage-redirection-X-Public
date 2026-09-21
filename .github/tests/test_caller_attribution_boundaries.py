@@ -91,6 +91,59 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("has_system_writer_recent_public_caller_hint", engine)
         self.assertIn("resolve_android_private_path_owner", caller)
 
+    def test_public_media_collection_children_are_not_ownership_hints(self) -> None:
+        """公共媒体子目录不得被当作应用所有权提示。
+
+        回归背景：判定式原先只要路径存在第二级就返回真，`DCIM/Camera` 因此被认领
+        为「携带所有权」。任何应用往该目录的保存都由 MediaProvider 代写，配置了
+        以它为源映射的应用会把所有应用的保存一起收走，图片被写进自己的映射目标，
+        发起应用回读失败。这里锁定「公共集合根 + 公共媒体子目录」的组合不携带所有权。
+        """
+        merge = read("src/config/merge.rs")
+        hint_fn = extract_fn(merge, "is_specific_storage_owner_hint")
+
+        self.assertIn("is_public_media_collection_child", hint_fn)
+        self.assertNotIn("segments.next().is_some()", hint_fn)
+
+        child_fn = extract_fn(merge, "is_public_media_collection_child")
+        for segment in ("camera", "screenshot", "screenshots"):
+            self.assertIn(segment, child_fn)
+
+    def test_proxied_write_prefers_recent_caller_hint_before_mapping(self) -> None:
+        """代写归属必须先查真实调用方提示，再回退到配置映射反推。
+
+        回归背景：MediaProvider 提交 pending 文件时以自身身份发起，没有 binder
+        调用方；若直接按配置反推归属，公共目录上的并发保存会互相串味。因此归属
+        解析的第一顺位必须是按路径登记的真实调用方提示，配置映射只作兜底。
+        """
+        rewrite = read("src/hook/jni_query/rewrite.rs")
+        resolver = extract_fn(rewrite, "resolve_proxied_write_caller_context")
+
+        self.assertIn("resolve_path_hint_caller_context", resolver)
+        self.assertIn("resolve_mapping_request_caller_context", resolver)
+        self.assertLess(
+            resolver.index("resolve_path_hint_caller_context"),
+            resolver.index("resolve_mapping_request_caller_context"),
+        )
+
+        hint_ctx = extract_fn(rewrite, "resolve_path_hint_caller_context")
+        self.assertIn("infer_recent_path_caller_identity", hint_ctx)
+        self.assertIn("is_system_writer_package", hint_ctx)
+        self.assertIn("ANDROID_APP_UID_START", hint_ctx)
+
+        context = rewrite[
+            rewrite.index("fn resolve_storage_caller_context") : rewrite.index(
+                "fn resolve_mapping_request_caller_context"
+            )
+        ]
+        system_writer_branch = context[
+            context.index("let system_writer = is_system_writer_uid(caller_uid);") : context.index(
+                "let caller_package = resolve_caller_package(caller_uid, path_text);"
+            )
+        ]
+        self.assertIn("resolve_proxied_write_caller_context", system_writer_branch)
+        self.assertNotIn("resolve_mapping_request_caller_context", system_writer_branch)
+
     def test_mapping_target_owner_is_used_before_system_writer_fallback(self) -> None:
         caller = read("src/redirect/engine/caller.rs")
         resolver = caller[
