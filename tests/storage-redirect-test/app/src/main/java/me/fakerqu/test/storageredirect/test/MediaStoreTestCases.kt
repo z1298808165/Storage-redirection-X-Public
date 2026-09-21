@@ -161,21 +161,24 @@ class MediaStoreTestCases(
               aliasOpenError = error
               null
             }
+        // 无论成败都一并取回这几层目录在应用视角的实际内容。
+        //
+        // 失败侧用它区分「映射没生效」与「请求路径被中间目录挡住走不通」：路径行走要先穿过
+        // Android/data/<pkg> 那一层，若它在应用视图里被重定向到沙箱而沙箱内缺 Tencent，
+        // 整条路径就解析不出来，此时只看 QQfile_recv 一层会误判成「映射没生效」。
+        //
+        // 通过侧的同名字段是唯一的对照基准——没有它就无法判断某个目录是「本来就不存在」
+        // 还是「只在失败平台上不存在」，而这正是本轮要回答的问题。因此在 open 尝试之后、
+        // 两侧分支之前统一取一次，保证失败与成功的取值时点一致。
+        val aliasDirs =
+            mapOf(
+                "aliasDir" to describeDirectory(File(aliasPath).parentFile),
+                "aliasParentDir" to describeDirectory(File(aliasPath).parentFile?.parentFile),
+                "aliasGrandDir" to
+                    describeDirectory(File(aliasPath).parentFile?.parentFile?.parentFile),
+                "mappedDir" to describeDirectory(File(publicAliasPath).parentFile),
+            )
         if (readBack == null) {
-          // 采集应用进程自身视角的取证。这一层证据任何外部 adb 取证都拿不到：
-          // mount namespace 是按进程隔离的，adb shell 与 MediaProvider 看到的挂载栈
-          // 和被测应用并不相同，因此「adb 里能看到文件」无法证明「应用能看到文件」。
-          // 列父目录是为了区分「映射没生效导致目录为空」与「目录有内容但属主/权限拒绝」，
-          // 列映射侧目录是为了确认写入究竟落在哪一层。
-          //
-          // 再往上列两级（Tencent 与 Android/data/<pkg>）是因为实测本用例的失败形态是
-          // 「映射挂载确实在、映射侧别名也可见，但请求路径 stat 失败」：路径行走要先穿过
-          // Android/data/<pkg> 那一层，若它在应用视图里被重定向到沙箱而沙箱内没有 Tencent，
-          // 整条路径就解析不出来，此时单看 QQfile_recv 一层会误判成「映射没生效」。
-          // 上层目录的内容是区分这两种成因的唯一依据，所以必须在同一个失败点一并取回。
-          val aliasDir = File(aliasPath).parentFile
-          val aliasParentDir = aliasDir?.parentFile
-          val aliasGrandDir = aliasParentDir?.parentFile
           return@measure testCase.fail(
               "alias open failed",
               mapOf(
@@ -183,11 +186,7 @@ class MediaStoreTestCases(
                   "mappedPath" to publicAliasPath,
                   "uri" to uri.toString(),
                   "error" to (aliasOpenError?.toString() ?: "unknown"),
-                  "aliasDir" to describeDirectory(aliasDir),
-                  "aliasParentDir" to describeDirectory(aliasParentDir),
-                  "aliasGrandDir" to describeDirectory(aliasGrandDir),
-                  "mappedDir" to describeDirectory(File(publicAliasPath).parentFile),
-              ),
+              ) + aliasDirs,
           )
         }
         val publicReadBack =
@@ -210,7 +209,7 @@ class MediaStoreTestCases(
                 "uri" to uri.toString(),
                 "path" to aliasPath,
                 "bytesWritten" to payload.size.toString(),
-            ),
+            ) + aliasDirs,
         )
       }
 
