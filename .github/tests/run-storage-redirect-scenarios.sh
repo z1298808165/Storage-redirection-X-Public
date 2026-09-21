@@ -2996,6 +2996,31 @@ clear_alias_mediastore_fixture() {
 }
 
 run_qq_alias_mapped_existing_file_scenario() {
+  # 与场景 34/35 同源的平台限制：请求路径落在应用自有的 Android/data/<包名>/… 下，
+  # 而 x86_64 Android 13 上 native FuseFix 被主动跳过
+  # （见 src/hook/fuse_fix.rs::should_skip_native_fuse_fix_for_platform），系统 MediaProvider
+  # 为自有包名目录建的 FUSE app-data-isolation 视图无人放行 → 应用读写自有 Android/data
+  # 目录得到 ENOENT。这里补一条应用进程内的直接证据：失败时用例带回的 aliasGrandDir
+  # （即 /storage/emulated/0/Android/data/<包名> 本身）为 exists=false listFiles=null，
+  # 说明应用连自己的包目录都 stat 不到 —— 与场景 34 的 ENOENT 是同一个成因，
+  # 而非映射未建立（三平台 `map mount point unavailable` 均为 0，
+  # 且都打出了 `map …/Tencent/QQfile_recv -> …/Download/SrtQqAliasMapped`）。
+  #
+  # 同 run 对照（run 35585598256 / 35587160216：Android 13 失败、14/15/16 全部通过）
+  # 显示通过平台上同一个字段为 exists=true 且含 5 个条目
+  # [Tencent, cache, sandbox, sdcard, srt_any_relative]，即真实包目录内容物。
+  #
+  # 另需记录一条否证，避免后续重走：曾怀疑「视图根 /storage/emulated/0 的链顶是 FUSE 层
+  # 还是 ext4 层」是分界（失败侧链顶 root=/0/Android/data/<包名>/sdcard，通过侧曾为
+  # /media/0/…/sdcard）。但全量比对 12 份 artifact 后该相关性不成立 —— Android 14 在
+  # a14-r6 / a14-r8 / r10-14 三次 run 里同样是 FUSE 链顶却通过，故它不是判据。
+  #
+  # 与场景 34/35 一致，只在豁免平台跳过断言，其余平台照常校验。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
+    echo "qq_alias_mapped_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
+    return 0
+  fi
+
   clear_alias_mediastore_fixture
   local request="${QQ_ALIAS_REQUEST_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
   local target="${QQ_ALIAS_MAPPED_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
