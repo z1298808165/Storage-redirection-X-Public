@@ -206,10 +206,9 @@ class MediaStoreTestCases(
   /**
    * 以被测应用自身身份描述目录内容，用于失败取证。
    *
-   * 只看名字与长度是不够的：映射场景下同名文件可能来自不同层，因此额外带上
-   * 可读性与 lastModified，便于区分「目录根本没内容」与「有内容但当前进程读不到」。
-   * 单条 listFiles 可能因权限抛异常，所以整体包在 try 里，失败就退化成错误文本，
-   * 不能让取证本身把失败原因盖掉。
+   * 只看名字与长度是不够的：映射场景下同名文件可能来自不同层，因此额外带上可读性与 lastModified， 便于区分「目录根本没内容」与「有内容但当前进程读不到」。
+   *
+   * 单条 listFiles 可能因权限抛异常，所以整体包在 try 里，失败就退化成错误文本， 不能让取证本身把失败原因盖掉。
    */
   private fun describeDirectory(dir: File?): String {
     if (dir == null) return "null"
@@ -220,9 +219,11 @@ class MediaStoreTestCases(
       } else {
         buildString {
           append("exists=${dir.exists()} canRead=${dir.canRead()} count=${entries.size} [")
-          entries.sortedBy { it.name }.joinTo(this, ", ") { entry ->
-            "${entry.name}(len=${entry.length()},readable=${entry.canRead()},mtime=${entry.lastModified()})"
-          }
+          entries
+              .sortedBy { it.name }
+              .joinTo(this, ", ") { entry ->
+                "${entry.name}(len=${entry.length()},readable=${entry.canRead()},mtime=${entry.lastModified()})"
+              }
           append("]")
         }
       }
