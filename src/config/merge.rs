@@ -50,7 +50,23 @@ fn is_specific_storage_owner_hint(user_id: i32, path: &str) -> bool {
         return false;
     };
 
-    segments.next().is_some() || !is_public_storage_collection_root(first_segment)
+    // 只有第二级目录不是系统约定的公共媒体子目录时，才认定路径携带所有权。
+    // DCIM/Camera、Pictures/Screenshots 这类目录由系统为所有应用代写，任何应用
+    // 都会往这里保存，若据此认定归属，只要某一个应用配置了以它们为源的映射，
+    // 所有应用往该目录的保存都会被认领给这个应用。
+    match segments.next() {
+        Some(second_segment) => !is_public_media_collection_child(second_segment),
+        None => !is_public_storage_collection_root(first_segment),
+    }
+}
+
+// AOSP 约定的公共媒体子目录：相机与截图目录属于公共区域，
+// 不是某个应用的所有权提示。
+fn is_public_media_collection_child(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        "camera" | "screenshot" | "screenshots"
+    )
 }
 
 fn is_specific_mapping_request_owner_hint(user_id: i32, request_path: &str) -> bool {

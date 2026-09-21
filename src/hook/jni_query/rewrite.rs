@@ -122,8 +122,7 @@ fn resolve_storage_caller_context(caller_uid: i32, path_text: &str) -> (String, 
     let user_id = platform::user_id_from_uid(caller_uid);
     let system_writer = is_system_writer_uid(caller_uid);
     if system_writer
-        && let Some(context) =
-            resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
+        && let Some(context) = resolve_proxied_write_caller_context(user_id, caller_uid, path_text)
     {
         return context;
     }
@@ -154,6 +153,58 @@ fn resolve_storage_caller_context(caller_uid: i32, path_text: &str) -> (String, 
     }
 
     (caller_package, caller_uid)
+}
+
+// 代写者（MediaProvider 等）以自身身份提交文件时没有 binder 调用方可用，
+// 只能依据路径反推归属。证据强度从高到低依次尝试：
+//   1. 该路径最近一次由真实调用方发起时登记的归属提示；
+//   2. 配置中以该路径为源的映射（仅在路径确实携带所有权时成立）。
+// 提示优先可以保证公共目录上不同应用的并发保存互不串味：只靠配置映射时，
+// 任何应用往 DCIM/Camera 这类公共目录的保存都会被认领给配了映射的那个应用。
+fn resolve_proxied_write_caller_context(
+    user_id: i32,
+    caller_uid: i32,
+    path_text: &str,
+) -> Option<(String, i32)> {
+    resolve_path_hint_caller_context(user_id, path_text)
+        .or_else(|| resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true))
+}
+
+// 按路径找回最近一次真实调用方登记的归属。MediaProvider 在 insert 阶段由应用
+// 直接调用，此时可拿到真实调用方并登记提示；随后的 pending 提交由 MediaProvider
+// 自己发起，正是依靠这条提示才能把归属带回原应用。
+fn resolve_path_hint_caller_context(user_id: i32, path_text: &str) -> Option<(String, i32)> {
+    if user_id < 0 || path_text.is_empty() {
+        return None;
+    }
+    let normalized = paths::resolve_user_path(&paths::normalize(path_text), user_id);
+    if normalized.is_empty() || paths::has_unsafe_segments(&normalized) {
+        return None;
+    }
+    let identity = crate::monitor::infer_recent_path_caller_identity(&normalized, user_id)?;
+    let package_name = identity.package_name;
+    if package_name.is_empty() || policy::is_system_writer_package(&package_name) {
+        return None;
+    }
+    let uid = policy::get_fresh_uid_for_package(&package_name);
+    if uid < writer::ANDROID_APP_UID_START {
+        return None;
+    }
+    Some((package_name, uid))
+}
+
+// 登记「该公共路径属于哪个调用方」。MediaProvider 随后提交 pending 文件时，是以自身
+// 身份对公共路径发起 stat 与 rename，此时已没有 binder 调用方可用；只有依靠这条按
+// 路径的提示才能解析出原始调用方，进而把提交两侧一并重定向到沙箱。提示查询侧已支持
+// 把 `.pending-<id>-<名称>` 归一为显示名再匹配，因此登记显示名路径即可覆盖提交阶段。
+fn remember_media_caller_hint(path_text: &str, caller_package: &str, effective_uid: i32) {
+    crate::monitor::remember_public_path_caller_hint(
+        path_text,
+        caller_package,
+        effective_uid,
+        "provider_open",
+        "high",
+    );
 }
 
 fn resolve_mapping_request_caller_context(
@@ -227,6 +278,10 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
         && let Some(rewritten) =
             rewrite_media_store_mapped_value(path_text, has_file_scheme, &mapped_target)
     {
+        // 显式映射同样要登记归属。此前只有沙箱重定向分支登记，导致配了
+        // path_mappings 的应用在 pending 提交阶段查不到提示，只能退回按
+        // 配置反推归属，进而把其他应用往同一公共目录的保存也认领过来。
+        remember_media_caller_hint(path_text, &caller_package, effective_uid);
         return Some(rewritten);
     }
     if let Some(rewritten) = rewrite_default_sandbox_media_store_value(
@@ -277,17 +332,7 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
         has_file_scheme,
         false,
     );
-    // 登记「该公共路径属于哪个调用方」。MediaProvider 随后提交 pending 文件时，是以自身
-    // 身份对公共路径发起 stat 与 rename，此时已没有 binder 调用方可用；只有依靠这条按
-    // 路径的提示才能解析出原始调用方，进而把提交两侧一并重定向到沙箱。提示查询侧已支持
-    // 把 `.pending-<id>-<名称>` 归一为显示名再匹配，因此登记显示名路径即可覆盖提交阶段。
-    crate::monitor::remember_public_path_caller_hint(
-        path_text,
-        &caller_package,
-        effective_uid,
-        "provider_open",
-        "high",
-    );
+    remember_media_caller_hint(path_text, &caller_package, effective_uid);
     Some(rewritten)
 }
 
@@ -318,6 +363,7 @@ pub(crate) fn resolve_media_store_direct_path_for_caller(
                 path_text,
                 display_target
             );
+            remember_media_caller_hint(path_text, &caller_package, effective_uid);
             return Some(display_target);
         }
     }
@@ -441,8 +487,7 @@ fn resolve_media_placeholder_write_caller_context(
     let user_id = platform::user_id_from_uid(caller_uid);
     let system_writer = is_system_writer_uid(caller_uid);
     if system_writer
-        && let Some(context) =
-            resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true)
+        && let Some(context) = resolve_proxied_write_caller_context(user_id, caller_uid, path_text)
     {
         return context;
     }
