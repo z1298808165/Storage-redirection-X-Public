@@ -167,6 +167,15 @@ class MediaStoreTestCases(
           // 和被测应用并不相同，因此「adb 里能看到文件」无法证明「应用能看到文件」。
           // 列父目录是为了区分「映射没生效导致目录为空」与「目录有内容但属主/权限拒绝」，
           // 列映射侧目录是为了确认写入究竟落在哪一层。
+          //
+          // 再往上列两级（Tencent 与 Android/data/<pkg>）是因为实测本用例的失败形态是
+          // 「映射挂载确实在、映射侧别名也可见，但请求路径 stat 失败」：路径行走要先穿过
+          // Android/data/<pkg> 那一层，若它在应用视图里被重定向到沙箱而沙箱内没有 Tencent，
+          // 整条路径就解析不出来，此时单看 QQfile_recv 一层会误判成「映射没生效」。
+          // 上层目录的内容是区分这两种成因的唯一依据，所以必须在同一个失败点一并取回。
+          val aliasDir = File(aliasPath).parentFile
+          val aliasParentDir = aliasDir?.parentFile
+          val aliasGrandDir = aliasParentDir?.parentFile
           return@measure testCase.fail(
               "alias open failed",
               mapOf(
@@ -174,7 +183,9 @@ class MediaStoreTestCases(
                   "mappedPath" to publicAliasPath,
                   "uri" to uri.toString(),
                   "error" to (aliasOpenError?.toString() ?: "unknown"),
-                  "aliasDir" to describeDirectory(File(aliasPath).parentFile),
+                  "aliasDir" to describeDirectory(aliasDir),
+                  "aliasParentDir" to describeDirectory(aliasParentDir),
+                  "aliasGrandDir" to describeDirectory(aliasGrandDir),
                   "mappedDir" to describeDirectory(File(publicAliasPath).parentFile),
               ),
           )
