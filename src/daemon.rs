@@ -231,6 +231,24 @@ pub fn main_entry() -> i32 {
         log::warn!("daemon config watcher unavailable, using fingerprint polling");
     }
 
+    // 建立共享宿主 FUSE 会话骨架（阶段 2）。失败只记录并继续，不影响主循环与既有 scoped 路径。
+    let _fuse_host = match crate::fuse_host::spawn_fuse_host() {
+        Some(host) => {
+            log::info!(
+                "fuse host session established child={} mp={} source={}",
+                host.child_pid,
+                host.mount_point,
+                host.mount_source
+            );
+            crate::fuse_host::set_global(host);
+            true
+        }
+        None => {
+            log::warn!("fuse host session unavailable, scoped path remains active");
+            false
+        }
+    };
+
     let mut last_version = 0;
     let mut last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
     let mut last_periodic_reconcile_ms = crate::platform::paths::monotonic_ms();

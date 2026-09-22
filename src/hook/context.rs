@@ -354,6 +354,29 @@ pub fn is_provider_passthrough_virtual_dir(public_path: &str) -> bool {
     PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow().iter().any(|(p, _)| p == &key))
 }
 
+// 返回 Provider 变更期内登记的沙箱目标。调用方必须继续检查目标文件本身，不能把
+// 「虚拟目录存在」误当成「目录内任意候选文件都存在」。
+pub fn provider_passthrough_virtual_query_target(path: &str) -> Option<String> {
+    if (!is_provider_passthrough_active() && !is_provider_virtual_scope_active()) || path.is_empty()
+    {
+        return None;
+    }
+    let key = virtual_dir_key(path);
+    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| {
+        let dirs = dirs.borrow();
+        let (public, sandbox) = dirs
+            .iter()
+            .filter(|(public, _)| key == *public || key.starts_with(&format!("{public}/")))
+            .max_by_key(|(public, _)| public.len())?;
+        let suffix = key.strip_prefix(public)?.trim_start_matches('/');
+        if suffix.is_empty() {
+            Some(sandbox.clone())
+        } else {
+            Some(format!("{sandbox}/{suffix}"))
+        }
+    })
+}
+
 // 返回 Provider 变更期内应按虚拟目录回答查询的目录路径。MediaStore 会先创建公共父目录，
 // 随后对 .pending-* 文件执行存在性检查；两者必须落到同一份线程内登记状态。
 pub fn provider_passthrough_virtual_query_dir(path: &str) -> Option<String> {

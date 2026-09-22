@@ -13,6 +13,8 @@ mod daemon_monitor;
 mod daemon_mount;
 #[path = "../domain.rs"]
 mod domain;
+#[path = "../fuse_host.rs"]
+mod fuse_host;
 #[path = "../fuse_redirect/mod.rs"]
 mod fuse_redirect;
 #[path = "../fuse_supervisor.rs"]

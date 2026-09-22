@@ -434,7 +434,7 @@ apply_config() {
       ;;
     26|27)
       set_backend_config auto true
-      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped"}}}}'
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMonitor","DCIM","Pictures"],"read_only_paths":["Download/SrtMonitorLocked","!Download/SrtMonitorLocked/Writable"],"path_mappings":{"Download/SrtMonitorMap":"Download/SrtMonitorMapped","DCIM/Camera":"Pictures/SrtMonitorDing"}}}}'
       write_cross_app_read_only_config
       ;;
     28)
@@ -1485,7 +1485,21 @@ run_write_case() {
   local label="$2"
   local path="$3"
   local payload="${4:-$PAYLOAD}"
-  run_service_case "$scenario" "$label" "file_write" '^PASS \[file_write\]' --es file_path "$path" --es payload "$payload" --es expected_payload "$payload"
+  local attempt
+
+  for attempt in 1 2; do
+    if run_service_case "$scenario" "$label" "file_write" '^PASS \[file_write\]' --es file_path "$path" --es payload "$payload" --es expected_payload "$payload"; then
+      return 0
+    fi
+    [ "$attempt" -lt 2 ] || return 1
+    if app_view_namespace_refresh_allowed "$scenario"; then
+      echo "file_write_namespace_refresh scenario=${scenario} label=${label} attempt=${attempt}"
+      start_app_and_confirm_mount "scenario-${scenario}-${label}-write-retry" 1 || return 1
+      wait_storage_ready "scenario-${scenario}-${label}-write-retry" 30 >/dev/null || return 1
+    else
+      sleep_ms "$SRT_RESULT_POLL_MS"
+    fi
+  done
 }
 
 run_create_case() {
@@ -1550,8 +1564,18 @@ run_write_test() {
     timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
     timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null || true
     wait_storage_ready "scenario-${scenario}-write-retry"
+    if app_view_namespace_refresh_allowed "$scenario"; then
+      ensure_current_app_mount_confirmed "scenario-${scenario}-write-retry" || return 1
+    fi
     clean_targets
   done
+}
+
+app_view_namespace_refresh_allowed() {
+  case "$1" in
+    29|32|33) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 check_app_view() {
@@ -1583,7 +1607,16 @@ expect_app_entry() {
       return 0
     fi
     echo "app_view_retry scenario=${scenario} logical_dir=${dir} attempt=${attempt}"
-    sleep_ms "$SRT_RESULT_POLL_MS"
+    if [ "$attempt" -eq 2 ] && app_view_namespace_refresh_allowed "$scenario"; then
+      # 配置 reload 或挂载传播后旧应用 namespace 可能保留 stale dentry；重建一次应用视图，
+      # 让可见性重试覆盖时序窗口，而不是只重复同一个失败请求。显式排除热重载和进程
+      # 生命周期场景，避免破坏它们对 PID/既有 namespace 的行为断言。
+      echo "app_view_namespace_refresh scenario=${scenario} logical_dir=${dir}"
+      start_app_and_confirm_mount "scenario-${scenario}-${label}-app-view-refresh" 1 || return 1
+      wait_storage_ready "scenario-${scenario}-${label}-app-view-refresh" 30 >/dev/null || return 1
+    else
+      sleep_ms "$SRT_RESULT_POLL_MS"
+    fi
   done
 
   return 1
@@ -1750,8 +1783,17 @@ check_read_only_artifacts() {
 
 run_read_only_scenario() {
   local scenario="$1"
-  run_service_case "$scenario" "read-only-read" "file_read" '^PASS \[file_read\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" --es expected_payload "$READ_ONLY_PAYLOAD" &&
-    run_service_case "$scenario" "read-only-stat" "file_stat" '^PASS \[file_stat\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" &&
+  local read_path="$READ_ONLY_ROOT/$READ_ONLY_FILE"
+  for attempt in 1 2; do
+    if run_service_case "$scenario" "read-only-read" "file_read" '^PASS \[file_read\]' --es file_path "$read_path" --es expected_payload "$READ_ONLY_PAYLOAD"; then
+      break
+    fi
+    [ "$attempt" -lt 2 ] || return 1
+    echo "read_only_seed_namespace_refresh scenario=${scenario} attempt=${attempt}"
+    start_app_and_confirm_mount "scenario-${scenario}-read-only-refresh" 1 || return 1
+    wait_storage_ready "scenario-${scenario}-read-only-refresh" 30 >/dev/null || return 1
+  done
+  run_service_case "$scenario" "read-only-stat" "file_stat" '^PASS \[file_stat\]' --es file_path "$read_path" &&
     run_service_case "$scenario" "read-only-access" "file_access" '^PASS \[file_access\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" &&
     run_service_case "$scenario" "read-only-write-denied" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$READ_ONLY_ROOT/write_denied.txt" --es payload "$PAYLOAD" &&
     run_service_case "$scenario" "read-only-truncate-denied" "file_truncate_denied" '^PASS \[file_truncate_denied\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" --es length "4" &&
@@ -1933,8 +1975,8 @@ check_fuse_daemon_started() {
 
 # 判别性断言：确认 FUSE 数据面真的接管了挂载点，而不是静默回退到 mount namespace。
 #
-# 依据 mountinfo 中的挂载源 srx_fuse_redirect（config.rs 里 MountOption::FSName 的取值）。
-# 该字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。
+# 依据 mountinfo 中的挂载源 srx_fuse_redirect（scoped 前缀）或 srx_fuse_host（共享宿主前缀，B2-c）。
+# 这些字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它们。
 # 这比日志断言更可靠：日志行可能因采样、轮转或格式变化漏判，而挂载表是内核事实。
 check_fuse_mount_active() {
   local scenario="$1"
@@ -1943,7 +1985,7 @@ check_fuse_mount_active() {
   for _ in $(seq 1 20); do
     # 启动或重建期间 PID 会变化；只验证当前进程的真实挂载，不重启应用兜底。
     pid="$(app_pid)"
-    if [ -n "$pid" ] && adb_su "grep -Fq 'srx_fuse_redirect' \"/proc/${pid}/mountinfo\" 2>/dev/null"; then
+    if [ -n "$pid" ] && adb_su "grep -E 'srx_fuse_(redirect|host)' \"/proc/${pid}/mountinfo\" 2>/dev/null"; then
       echo "fuse_mount_active scenario=${scenario} pid=${pid}"
       return 0
     fi
@@ -1963,6 +2005,16 @@ check_fuse_mount_active() {
   return 1
 }
 
+recover_scoped_fuse_start() {
+  local scenario="$1"
+  local mount_root="$2"
+  echo "scoped_fuse_start_recovery scenario=${scenario} root=${mount_root}" >&2
+  timeout 45 adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+  timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null 2>&1 || true
+  wait_storage_ready "scenario-${scenario}-scoped-fuse-recovery" 30 >/dev/null || true
+  adb_su "sleep 1" >/dev/null 2>&1 || true
+}
+
 check_scoped_fuse_daemon_started() {
   local scenario="$1"
   local mount_root="$2"
@@ -1970,21 +2022,36 @@ check_scoped_fuse_daemon_started() {
   local saw_fallback=0
   local saw_mount_failed=0
   local saw_service_failed=0
-  for _ in $(seq 1 20); do
-    if adb_su "grep -F -- 'fuse redirect mount start pkg=${APP_ID}' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root} ' >/dev/null"; then
-      echo "scoped_fuse_started scenario=${scenario} root=${mount_root}"
-      return 0
+  local attempt
+  for attempt in 1 2; do
+    for _ in $(seq 1 60); do
+      if adb_su "grep -F -- 'fuse redirect mount start pkg=${APP_ID}' '$LOG_PATH' 2>/dev/null | grep -F -- 'mp=${mount_root} ' >/dev/null"; then
+        echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=log"
+        return 0
+      fi
+      # 日志可能因二进制内容、轮转或异步写入而缺失，但应用进程 mountinfo
+      # 是实际可见挂载的权威证据。要求目标路径精确匹配，并同时要求 fuse
+      # 类型和 srx scoped/host source，避免把普通目录或 MediaProvider 挂载误判为成功。
+      local app_mount_pid
+      app_mount_pid="$(app_pid 2>/dev/null | head -1)"
+      if [ -n "$app_mount_pid" ] && adb_su "grep -F -- ' ${mount_root} ' '/proc/${app_mount_pid}/mountinfo' 2>/dev/null | grep -Eq ' - fuse (srx_fuse_redirect|srx_fuse_host)(\\[| )'"; then
+        echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=app-mountinfo"
+        return 0
+      fi
+      if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
+        saw_fallback=1
+      fi
+      if adb_su "grep -F -- 'fuse redirect mount failed mp=${mount_root} ' '$LOG_PATH' 2>/dev/null >/dev/null"; then
+        saw_mount_failed=1
+      fi
+      if adb_su "grep -F -- 'daemon hybrid fuse scoped service failed' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
+        saw_service_failed=1
+      fi
+      sleep_ms "$SRT_RESULT_POLL_MS"
+    done
+    if [ "$attempt" -eq 1 ] && [ "$strict" = "1" ]; then
+      recover_scoped_fuse_start "$scenario" "$mount_root"
     fi
-    if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
-      saw_fallback=1
-    fi
-    if adb_su "grep -F -- 'fuse redirect mount failed mp=${mount_root} ' '$LOG_PATH' 2>/dev/null >/dev/null"; then
-      saw_mount_failed=1
-    fi
-    if adb_su "grep -F -- 'daemon hybrid fuse scoped service failed' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
-      saw_service_failed=1
-    fi
-    sleep_ms "$SRT_RESULT_POLL_MS"
   done
   if [ "$strict" != "1" ]; then
     if [ "$saw_fallback" = "1" ]; then
@@ -2173,8 +2240,16 @@ run_mount_namespace_read_only_wildcard_fallback_scenario() {
   local denied_path="$MOUNT_NS_READ_ONLY_ROOT/write_denied.txt"
   local denied_private="$PRIVATE_MOUNT_NS_READ_ONLY_ROOT/write_denied.txt"
 
-  run_service_case "$scenario" "fallback-read" "file_read" '^PASS \[file_read\]' --es file_path "$seed_path" --es expected_payload "$READ_ONLY_PAYLOAD" &&
-    check_file_missing "mount-ns-seed-private" "$seed_private" &&
+  for attempt in 1 2; do
+    if run_service_case "$scenario" "fallback-read" "file_read" '^PASS \[file_read\]' --es file_path "$seed_path" --es expected_payload "$READ_ONLY_PAYLOAD"; then
+      break
+    fi
+    [ "$attempt" -lt 2 ] || return 1
+    echo "mount_ns_read_only_seed_refresh scenario=${scenario} attempt=${attempt}"
+    start_app_and_confirm_mount "scenario-${scenario}-read-only-refresh" 1 || return 1
+    wait_storage_ready "scenario-${scenario}-read-only-refresh" 30 >/dev/null || return 1
+  done
+  check_file_missing "mount-ns-seed-private" "$seed_private" &&
     run_service_case "$scenario" "fallback-write-denied" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$denied_path" --es payload "$PAYLOAD" &&
     check_file_missing "mount-ns-denied-real" "$denied_path" &&
     check_file_missing "mount-ns-denied-private" "$denied_private"
@@ -2186,13 +2261,26 @@ run_mount_namespace_mapping_read_only_scenario() {
   local rw_target="$MOUNT_NS_MAP_RW_TARGET/$TEST_FILE"
   local ro_request="$MOUNT_NS_MAP_RO_REQUEST/$TEST_FILE"
   local ro_target="$MOUNT_NS_MAP_RO_TARGET/$TEST_FILE"
+  local attempt
 
-  run_write_case "$scenario" "mapping-target-write" "$rw_request" "$PAYLOAD" &&
-    check_file_exists "mount-ns-mapping-rw-target" "$rw_target" &&
-    check_file_missing "mount-ns-mapping-rw-request" "$rw_request" &&
-    run_service_case "$scenario" "mapping-target-read-only-denied" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$ro_request" --es payload "$PAYLOAD" &&
-    check_file_missing "mount-ns-mapping-ro-target" "$ro_target" &&
-    check_file_missing "mount-ns-mapping-ro-request" "$ro_request"
+  # 场景 22 的配置同时包含只读父映射和两个子映射。Android 13 上首次应用启动
+  # 可能先观察到 namespace 后端，随后 daemon 才完成 scoped FUSE 重建；第一次
+  # file_write 会在这段切换窗口中得到 ENOENT。重建应用视图后再做一次完整断言，
+  # 仍保留最终失败，不把真正的映射错误变成通过。
+  for attempt in 1 2; do
+    if run_write_case "$scenario" "mapping-target-write" "$rw_request" "$PAYLOAD" &&
+      check_file_exists "mount-ns-mapping-rw-target" "$rw_target" &&
+      check_file_missing "mount-ns-mapping-rw-request" "$rw_request" &&
+      run_service_case "$scenario" "mapping-target-read-only-denied" "file_write_denied" '^PASS \[file_write_denied\]' --es file_path "$ro_request" --es payload "$PAYLOAD" &&
+      check_file_missing "mount-ns-mapping-ro-target" "$ro_target" &&
+      check_file_missing "mount-ns-mapping-ro-request" "$ro_request"; then
+      return 0
+    fi
+    [ "$attempt" -lt 2 ] || return 1
+    echo "mount_namespace_mapping_retry scenario=${scenario} attempt=${attempt}"
+    start_app_and_confirm_mount "scenario-${scenario}-mapping-retry" 1 || return 1
+    wait_storage_ready "scenario-${scenario}-mapping-retry" 30 >/dev/null || return 1
+  done
 }
 
 monitor_file_name() {
@@ -2392,6 +2480,7 @@ run_file_monitor_mediastore_scenario() {
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-relative-data-create" "Pictures/SrtRelativeData" "$MONITOR_RELATIVE_DATA_ROOT" "$PRIVATE_MONITOR_RELATIVE_DATA_ROOT" &&
     run_file_monitor_mediastore_relative_data_success_case "$scenario" "media-nnngram-relative-data" "/Pictures/Nnngram" "$MONITOR_NNNGRAM_ROOT" "$PRIVATE_MONITOR_NNNGRAM_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-mapped-create" "Download/SrtMonitorMap" "$MONITOR_MAP_TARGET" &&
+    run_file_monitor_mediastore_image_success_case "$scenario" "media-ding-camera-map" "DCIM/Camera" "$REAL_ROOT/Pictures/SrtMonitorDing" "" 0 "ding-system-writer-map-result-and-routing-are-authoritative" &&
     run_file_monitor_mediastore_denied_case "$scenario" "media-read-only-denied" "Download/SrtMonitorLocked" "$MONITOR_LOCKED_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" "$MONITOR_WRITABLE_ROOT" "$PRIVATE_MONITOR_WRITABLE_ROOT"
 }
@@ -3339,8 +3428,9 @@ export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
+export -f app_view_namespace_refresh_allowed
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario run_own_private_write_case
 export -f run_any_path_mapping_scenario

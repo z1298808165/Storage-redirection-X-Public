@@ -39,7 +39,7 @@ use metadata::{
     utimens_path,
 };
 use perf::{DirectoryCacheMissReason, FusePerfStats};
-use policy::{BackendPath, OperationKind, RedirectPolicy};
+use policy::{BackendPath, OperationKind, PolicyRegistry, RedirectPolicy};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -79,7 +79,8 @@ thread_local! {
 }
 
 struct FuseRedirectFs {
-    policy: RedirectPolicy,
+    /// 策略注册表；每个回调按调用方 uid 取一次，未命中时回退到会话默认。
+    policy: PolicyRegistry,
     /// FUSE 请求由多个内核线程并发派发，读多写少：
     /// 使用读写锁让 read/readdir/fsync 等只读路径可以并行取句柄，避免互斥锁把并发读串行化。
     state: RwLock<FuseState>,
@@ -239,7 +240,7 @@ fn estimate_cached_dir_candidates_bytes(
 impl FuseRedirectFs {
     fn new(config: FuseRedirectConfig) -> Option<Self> {
         let package_name = config.package_name.clone();
-        let policy = RedirectPolicy::new(config)?;
+        let policy = PolicyRegistry::single(RedirectPolicy::new(config)?);
         let (dir_cache_capacity, dir_cache_max_capacity, dir_cache_byte_budget) =
             dir_candidate_cache_capacity_limits();
         let mut inodes = HashMap::new();
@@ -309,19 +310,20 @@ impl FuseRedirectFs {
         state.paths_by_inode.get(&ino.0).cloned()
     }
 
-    fn backend_for_ino(&self, ino: INodeNo) -> Result<BackendPath, Errno> {
+    fn backend_for_ino(&self, policy: &RedirectPolicy, ino: INodeNo) -> Result<BackendPath, Errno> {
         let rel = self.path_for_ino(ino).ok_or(Errno::ENOENT)?;
-        self.policy
+        policy
             .backend_for_relative(&rel, OperationKind::Read)
             .ok_or(Errno::ENOENT)
     }
 
     fn backend_for_relative(
         &self,
+        policy: &RedirectPolicy,
         rel: &str,
         operation: OperationKind,
     ) -> Result<BackendPath, Errno> {
-        self.policy
+        policy
             .backend_for_relative(rel, operation)
             .ok_or(Errno::ENOENT)
     }
@@ -344,11 +346,16 @@ impl FuseRedirectFs {
         }
     }
 
-    fn attr_for_backend(&self, ino: INodeNo, backend: &BackendPath) -> Result<FileAttr, Errno> {
+    fn attr_for_backend(
+        &self,
+        policy: &RedirectPolicy,
+        ino: INodeNo,
+        backend: &BackendPath,
+    ) -> Result<FileAttr, Errno> {
         let metadata = std::fs::symlink_metadata(&backend.path).map_err(errno_from_io)?;
         let mut attr = file_attr_from_metadata(ino, metadata);
         if backend.is_shared_public_backend {
-            attr.uid = self.policy.uid as u32;
+            attr.uid = policy.uid as u32;
             attr.gid = MEDIA_RW_GID;
             if attr.kind == FileType::Directory {
                 attr.perm = SHARED_PUBLIC_DIR_MODE as u16;
@@ -359,26 +366,21 @@ impl FuseRedirectFs {
 
     fn visible_attr_for_backend(
         &self,
+        policy: &RedirectPolicy,
         ino: INodeNo,
         backend: &BackendPath,
     ) -> Result<FileAttr, Errno> {
-        match self.attr_for_backend(ino, backend) {
+        match self.attr_for_backend(policy, ino, backend) {
             Ok(attr) => Ok(attr),
-            Err(errno)
-                if errno.code() == libc::ENOENT && self.policy.is_virtual_dir(&backend.rel) =>
-            {
-                Ok(synthetic_dir_attr(
-                    ino,
-                    self.policy.uid as u32,
-                    MEDIA_RW_GID,
-                ))
+            Err(errno) if errno.code() == libc::ENOENT && policy.is_virtual_dir(&backend.rel) => {
+                Ok(synthetic_dir_attr(ino, policy.uid as u32, MEDIA_RW_GID))
             }
             Err(errno) => Err(errno),
         }
     }
 
-    fn reply_entry_for_rel(&self, rel: &str, reply: ReplyEntry) {
-        let Some(backend) = self.policy.backend_for_relative(rel, OperationKind::Read) else {
+    fn reply_entry_for_rel(&self, policy: &RedirectPolicy, rel: &str, reply: ReplyEntry) {
+        let Some(backend) = policy.backend_for_relative(rel, OperationKind::Read) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -388,7 +390,7 @@ impl FuseRedirectFs {
             Self::add_lookup_locked(&mut state, ino);
             ino
         };
-        match self.visible_attr_for_backend(ino, &backend) {
+        match self.visible_attr_for_backend(policy, ino, &backend) {
             Ok(attr) => reply.entry(&TTL, &attr, Generation(0)),
             Err(errno) => {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -398,7 +400,11 @@ impl FuseRedirectFs {
         }
     }
 
-    fn ensure_parent_for_backend(&self, backend: &BackendPath) -> Result<(), Errno> {
+    fn ensure_parent_for_backend(
+        &self,
+        policy: &RedirectPolicy,
+        backend: &BackendPath,
+    ) -> Result<(), Errno> {
         let Some(parent) = backend.path.parent() else {
             return Ok(());
         };
@@ -411,12 +417,12 @@ impl FuseRedirectFs {
         } else if backend.is_shared_public_backend {
             MEDIA_RW_UID as i32
         } else {
-            self.policy.uid
+            policy.uid
         };
         if fs::is_directory(&parent) || fs::create_directory(&parent, owner_uid) {
             fix_path_metadata(
                 Path::new(parent.as_ref()),
-                self.policy.uid,
+                policy.uid,
                 MAPPED_DIR_MODE,
                 backend.is_shared_public_backend,
                 true,
@@ -442,7 +448,14 @@ impl FuseRedirectFs {
         }
     }
 
-    fn remove_child(&self, parent: INodeNo, name: &OsStr, is_dir: bool, reply: ReplyEmpty) {
+    fn remove_child(
+        &self,
+        policy: &RedirectPolicy,
+        parent: INodeNo,
+        name: &OsStr,
+        is_dir: bool,
+        reply: ReplyEmpty,
+    ) {
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -454,13 +467,12 @@ impl FuseRedirectFs {
                 return;
             }
         };
-        let Some(backend) = self.policy.backend_for_relative(&rel, OperationKind::Read) else {
+        let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read) else {
             reply.error(Errno::ENOENT);
             return;
         };
         if backend.is_read_only {
-            self.policy
-                .emit_monitor_read_only_deny(if is_dir { "rmdir" } else { "unlink" }, &backend);
+            policy.emit_monitor_read_only_deny(if is_dir { "rmdir" } else { "unlink" }, &backend);
             reply.error(Errno::EROFS);
             return;
         }
@@ -493,7 +505,7 @@ impl Filesystem for FuseRedirectFs {
             .store(passthrough_enabled, Ordering::Relaxed);
         log::info!(
             "fuse init pkg={} kernel_abi={} passthrough_supported={} passthrough_enabled={} stack_depth={} max_background={} congestion={} max_write={}",
-            self.policy.package_name,
+            self.policy.session().package_name,
             config.kernel_abi(),
             passthrough_supported,
             passthrough_enabled,
@@ -505,14 +517,15 @@ impl Filesystem for FuseRedirectFs {
         Ok(())
     }
 
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let _perf = self.perf.observe(&self.perf.lookup_calls);
+        let policy = self.policy.for_uid(req.uid());
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
         };
         match Self::child_rel(&parent_rel, name) {
-            Ok(rel) => self.reply_entry_for_rel(&rel, reply),
+            Ok(rel) => self.reply_entry_for_rel(&policy, &rel, reply),
             Err(errno) => reply.error(errno),
         }
     }
@@ -525,20 +538,22 @@ impl Filesystem for FuseRedirectFs {
         Self::remove_lookup_locked(&mut state, ino, nlookup);
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
+        let policy = self.policy.for_uid(req.uid());
         match self
-            .backend_for_ino(ino)
-            .and_then(|backend| self.visible_attr_for_backend(ino, &backend))
+            .backend_for_ino(&policy, ino)
+            .and_then(|backend| self.visible_attr_for_backend(&policy, ino, &backend))
         {
             Ok(attr) => reply.attr(&TTL, &attr),
             Err(errno) => reply.error(errno),
         }
     }
 
-    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+    fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
-        match self.backend_for_ino(ino).and_then(|backend| {
+        let policy = self.policy.for_uid(req.uid());
+        match self.backend_for_ino(&policy, ino).and_then(|backend| {
             std::fs::read_link(&backend.path)
                 .map(|path| path.as_os_str().as_bytes().to_vec())
                 .map_err(errno_from_io)
@@ -548,8 +563,9 @@ impl Filesystem for FuseRedirectFs {
         }
     }
 
-    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
+        let policy = self.policy.for_uid(req.uid());
         let track_dir_perf = crate::logging::is_debug_logging_enabled();
         let first_lock_started = track_dir_perf.then(std::time::Instant::now);
         let (mut rel, mut path_version) = {
@@ -565,14 +581,14 @@ impl Filesystem for FuseRedirectFs {
         let mut scan_ns = 0u64;
         let mut retries = 0u64;
         let (fh, entry_count) = loop {
-            let backend = match self.policy.backend_for_relative(&rel, OperationKind::Read) {
+            let backend = match policy.backend_for_relative(&rel, OperationKind::Read) {
                 Some(backend) => backend,
                 None => {
                     reply.error(Errno::ENOENT);
                     return;
                 }
             };
-            if !backend.path.is_dir() && !self.policy.is_virtual_dir(&rel) {
+            if !backend.path.is_dir() && !policy.is_virtual_dir(&rel) {
                 reply.error(Errno::ENOTDIR);
                 return;
             }
@@ -617,7 +633,7 @@ impl Filesystem for FuseRedirectFs {
             } else {
                 self.perf.record_dir_cache_miss(cache_miss_reason);
                 let scan_started = track_dir_perf.then(Instant::now);
-                let (candidates, sources) = collect_dir_entry_candidates(&self.policy, &rel);
+                let (candidates, sources) = collect_dir_entry_candidates(&policy, &rel);
                 scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
                 (candidates, sources, false)
             };
@@ -738,13 +754,14 @@ impl Filesystem for FuseRedirectFs {
 
     fn readdirplus(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
         let _perf = self.perf.observe(&self.perf.read_calls);
+        let policy = self.policy.for_uid(req.uid());
         let handle = fh.into();
         let entries = {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
@@ -759,13 +776,10 @@ impl Filesystem for FuseRedirectFs {
             entries
         };
         for (index, entry) in entries.iter().enumerate().skip(offset as usize) {
-            let Some(backend) = self
-                .policy
-                .backend_for_relative(&entry.rel, OperationKind::Read)
-            else {
+            let Some(backend) = policy.backend_for_relative(&entry.rel, OperationKind::Read) else {
                 continue;
             };
-            let Ok(attr) = self.visible_attr_for_backend(entry.ino, &backend) else {
+            let Ok(attr) = self.visible_attr_for_backend(&policy, entry.ino, &backend) else {
                 continue;
             };
             if reply.add(
@@ -797,9 +811,10 @@ impl Filesystem for FuseRedirectFs {
         reply.ok();
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
-        let backend = match self.backend_for_ino(ino) {
+        let policy = self.policy.for_uid(req.uid());
+        let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -807,8 +822,7 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only && open_flags_write(flags.0) {
-            self.policy
-                .emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
+            policy.emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
             reply.error(Errno::EROFS);
             return;
         }
@@ -851,7 +865,7 @@ impl Filesystem for FuseRedirectFs {
                     self.passthrough_enabled.store(false, Ordering::Relaxed);
                     log::debug!(
                         "fuse passthrough disabled after backing open failure pkg={} rel={} err={}",
-                        self.policy.package_name,
+                        policy.package_name,
                         backend.rel,
                         error
                     );
@@ -904,7 +918,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn write(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         fh: FileHandle,
         offset: u64,
@@ -915,6 +929,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyWrite,
     ) {
         let _perf = self.perf.observe(&self.perf.write_calls);
+        let policy = self.policy.for_uid(req.uid());
         let file = {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
@@ -924,18 +939,17 @@ impl Filesystem for FuseRedirectFs {
             if open_file.is_read_only {
                 let rel = open_file.rel.clone();
                 drop(state);
-                if let Some(backend) = self.policy.backend_for_relative(&rel, OperationKind::Write)
-                {
-                    self.policy.emit_monitor_read_only_deny("write", &backend);
+                if let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Write) {
+                    policy.emit_monitor_read_only_deny("write", &backend);
                 }
                 reply.error(Errno::EROFS);
                 return;
             }
             let Some(file) = open_file.file.clone() else {
                 drop(state);
-                match self.backend_for_ino(ino) {
+                match self.backend_for_ino(&policy, ino) {
                     Ok(backend) if backend.is_read_only => {
-                        self.policy.emit_monitor_read_only_deny("write", &backend);
+                        policy.emit_monitor_read_only_deny("write", &backend);
                         reply.error(Errno::EROFS);
                     }
                     _ => reply.error(Errno::ENOSYS),
@@ -1014,7 +1028,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn copy_file_range(
         &self,
-        _req: &Request,
+        req: &Request,
         _ino_in: INodeNo,
         fh_in: FileHandle,
         offset_in: u64,
@@ -1026,6 +1040,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyWrite,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
+        let policy = self.policy.for_uid(req.uid());
         if !flags.is_empty() {
             reply.error(Errno::EINVAL);
             return;
@@ -1064,12 +1079,8 @@ impl Filesystem for FuseRedirectFs {
             )
         };
         if output_read_only {
-            if let Some(backend) = self
-                .policy
-                .backend_for_relative(&output_rel, OperationKind::Write)
-            {
-                self.policy
-                    .emit_monitor_read_only_deny("copy_file_range", &backend);
+            if let Some(backend) = policy.backend_for_relative(&output_rel, OperationKind::Write) {
+                policy.emit_monitor_read_only_deny("copy_file_range", &backend);
             }
             reply.error(Errno::EROFS);
             return;
@@ -1096,7 +1107,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn create(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -1105,6 +1116,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyCreate,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
+        let policy = self.policy.for_uid(req.uid());
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1116,7 +1128,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&rel, OperationKind::Write) {
+        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1124,11 +1136,11 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only {
-            self.policy.emit_monitor_read_only_deny("create", &backend);
+            policy.emit_monitor_read_only_deny("create", &backend);
             reply.error(Errno::EROFS);
             return;
         }
-        if let Err(errno) = self.ensure_parent_for_backend(&backend) {
+        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
             reply.error(errno);
             return;
         }
@@ -1152,7 +1164,7 @@ impl Filesystem for FuseRedirectFs {
         };
         fix_path_metadata(
             &backend.path,
-            self.policy.uid,
+            policy.uid,
             create_mode,
             backend.is_shared_public_backend,
             false,
@@ -1164,7 +1176,7 @@ impl Filesystem for FuseRedirectFs {
             Self::add_lookup_locked(&mut state, ino);
             ino
         };
-        let attr = match self.attr_for_backend(ino, &backend) {
+        let attr = match self.attr_for_backend(&policy, ino, &backend) {
             Ok(attr) => attr,
             Err(errno) => {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1188,7 +1200,7 @@ impl Filesystem for FuseRedirectFs {
             state.clear_dir_candidate_cache();
             fh
         };
-        self.policy.emit_monitor_create(&backend);
+        policy.emit_monitor_create(&backend);
         if self.passthrough_enabled.load(Ordering::Relaxed) {
             match reply.open_backing(&file) {
                 Ok(backing) => {
@@ -1212,7 +1224,7 @@ impl Filesystem for FuseRedirectFs {
                     self.passthrough_enabled.store(false, Ordering::Relaxed);
                     log::debug!(
                         "fuse passthrough disabled after backing create failure pkg={} rel={} err={}",
-                        self.policy.package_name,
+                        policy.package_name,
                         backend.rel,
                         error
                     );
@@ -1238,7 +1250,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -1247,6 +1259,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEntry,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
+        let policy = self.policy.for_uid(req.uid());
         let file_type = mode & libc::S_IFMT;
         if file_type != 0 && file_type != libc::S_IFREG {
             reply.error(Errno::EPERM);
@@ -1263,7 +1276,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&rel, OperationKind::Write) {
+        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1271,12 +1284,11 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only {
-            self.policy
-                .emit_monitor_read_only_deny(stringify!(mknod), &backend);
+            policy.emit_monitor_read_only_deny(stringify!(mknod), &backend);
             reply.error(Errno::EROFS);
             return;
         }
-        if let Err(errno) = self.ensure_parent_for_backend(&backend) {
+        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
             reply.error(errno);
             return;
         }
@@ -1295,7 +1307,7 @@ impl Filesystem for FuseRedirectFs {
         drop(file);
         fix_path_metadata(
             &backend.path,
-            self.policy.uid,
+            policy.uid,
             create_mode,
             backend.is_shared_public_backend,
             false,
@@ -1307,9 +1319,9 @@ impl Filesystem for FuseRedirectFs {
             Self::add_lookup_locked(&mut state, ino);
             ino
         };
-        match self.attr_for_backend(ino, &backend) {
+        match self.attr_for_backend(&policy, ino, &backend) {
             Ok(attr) => {
-                self.policy.emit_monitor_create(&backend);
+                policy.emit_monitor_create(&backend);
                 reply.entry(&TTL, &attr, Generation(0));
             }
             Err(errno) => {
@@ -1322,7 +1334,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn mkdir(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -1330,6 +1342,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEntry,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
+        let policy = self.policy.for_uid(req.uid());
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
@@ -1341,7 +1354,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&rel, OperationKind::Write) {
+        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1349,11 +1362,11 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only {
-            self.policy.emit_monitor_read_only_deny("mkdir", &backend);
+            policy.emit_monitor_read_only_deny("mkdir", &backend);
             reply.error(Errno::EROFS);
             return;
         }
-        if let Err(errno) = self.ensure_parent_for_backend(&backend) {
+        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
             reply.error(errno);
             return;
         }
@@ -1361,7 +1374,7 @@ impl Filesystem for FuseRedirectFs {
         match std::fs::create_dir(&backend.path) {
             Ok(()) => fix_path_metadata(
                 &backend.path,
-                self.policy.uid,
+                policy.uid,
                 mode,
                 backend.is_shared_public_backend,
                 true,
@@ -1372,23 +1385,25 @@ impl Filesystem for FuseRedirectFs {
             }
         }
         self.invalidate_dir_candidate_cache();
-        self.policy.emit_monitor_create(&backend);
-        self.reply_entry_for_rel(&rel, reply);
+        policy.emit_monitor_create(&backend);
+        self.reply_entry_for_rel(&policy, &rel, reply);
     }
 
-    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+    fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        self.remove_child(parent, name, false, reply);
+        let policy = self.policy.for_uid(req.uid());
+        self.remove_child(&policy, parent, name, false, reply);
     }
 
-    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+    fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        self.remove_child(parent, name, true, reply);
+        let policy = self.policy.for_uid(req.uid());
+        self.remove_child(&policy, parent, name, true, reply);
     }
 
     fn rename(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         newparent: INodeNo,
@@ -1397,6 +1412,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEmpty,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
+        let policy = self.policy.for_uid(req.uid());
         let rename_flags = flags.bits();
         let rename_noreplace_flag = libc::RENAME_NOREPLACE as u32;
         if rename_flags & !rename_noreplace_flag != 0 {
@@ -1425,14 +1441,14 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let old_backend = match self.backend_for_relative(&old_rel, OperationKind::Write) {
+        let old_backend = match self.backend_for_relative(&policy, &old_rel, OperationKind::Write) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
                 return;
             }
         };
-        let new_backend = match self.backend_for_relative(&new_rel, OperationKind::Write) {
+        let new_backend = match self.backend_for_relative(&policy, &new_rel, OperationKind::Write) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1445,7 +1461,7 @@ impl Filesystem for FuseRedirectFs {
             } else {
                 &old_backend
             };
-            self.policy.emit_monitor_read_only_deny_with_from(
+            policy.emit_monitor_read_only_deny_with_from(
                 "rename",
                 record_backend,
                 Some(&old_backend),
@@ -1454,7 +1470,7 @@ impl Filesystem for FuseRedirectFs {
             reply.error(Errno::EROFS);
             return;
         }
-        if let Err(errno) = self.ensure_parent_for_backend(&new_backend) {
+        if let Err(errno) = self.ensure_parent_for_backend(&policy, &new_backend) {
             reply.error(errno);
             return;
         }
@@ -1467,7 +1483,7 @@ impl Filesystem for FuseRedirectFs {
             Ok(()) => {
                 fix_existing_path_metadata(
                     &new_backend.path,
-                    self.policy.uid,
+                    policy.uid,
                     new_backend.is_shared_public_backend,
                 );
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1481,7 +1497,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn setattr(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -1498,7 +1514,8 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyAttr,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let backend = match self.backend_for_ino(ino) {
+        let policy = self.policy.for_uid(req.uid());
+        let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1513,7 +1530,7 @@ impl Filesystem for FuseRedirectFs {
                 || atime.is_some()
                 || mtime.is_some())
         {
-            self.policy.emit_monitor_read_only_deny(
+            policy.emit_monitor_read_only_deny(
                 fuse_setattr_operation_name(
                     mode.is_some(),
                     uid.is_some(),
@@ -1568,14 +1585,15 @@ impl Filesystem for FuseRedirectFs {
             return;
         }
 
-        match self.attr_for_backend(ino, &backend) {
+        match self.attr_for_backend(&policy, ino, &backend) {
             Ok(attr) => reply.attr(&TTL, &attr),
             Err(errno) => reply.error(errno),
         }
     }
 
-    fn access(&self, _req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
-        let backend = match self.backend_for_ino(ino) {
+    fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        let policy = self.policy.for_uid(req.uid());
+        let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);
@@ -1583,11 +1601,7 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only && mask.contains(AccessFlags::W_OK) {
-            self.policy.emit_monitor_read_only_deny_with_errno(
-                "access:write",
-                &backend,
-                libc::EACCES,
-            );
+            policy.emit_monitor_read_only_deny_with_errno("access:write", &backend, libc::EACCES);
             reply.error(Errno::EACCES);
             return;
         }
@@ -1607,7 +1621,8 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let path = self.policy.real_root.as_path();
+        // 文件系统容量是会话级语义，与调用方身份无关，固定用会话绑定策略的真实根。
+        let path = self.policy.session().real_root.as_path();
         let c_path = match cstring_path(path) {
             Ok(path) => path,
             Err(errno) => {
@@ -1636,12 +1651,13 @@ impl Filesystem for FuseRedirectFs {
 
     fn fsyncdir(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         fh: FileHandle,
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        let policy = self.policy.for_uid(req.uid());
         {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             if !state.dirs.contains_key(&fh.into()) {
@@ -1649,7 +1665,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
-        let backend = match self.backend_for_ino(ino) {
+        let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);

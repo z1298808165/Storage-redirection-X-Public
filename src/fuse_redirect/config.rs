@@ -733,20 +733,22 @@ pub fn mount_blocking_with_ready(
     mount_options.n_threads = Some(4);
     mount_options.clone_fd = true;
 
+    // 挂载点日志描述的是会话绑定策略，与调用方 uid 无关，因此固定取注册表的会话项。
+    let session_policy = fs.policy.session();
     log::info!(
         "fuse redirect mount start pkg={} uid={} user={} mp={} rel={} real={} map_only={} allow={} excl={} sandbox={} ro={} map={}",
-        fs.policy.package_name,
-        fs.policy.uid,
+        session_policy.package_name,
+        session_policy.uid,
         user_id,
         mount_point,
-        fs.policy.mount_rel,
-        fs.policy.real_root.display(),
-        fs.policy.is_mapping_mode_only,
-        fs.policy.allowed_real_paths.len(),
-        fs.policy.excluded_real_paths.len(),
-        fs.policy.sandboxed_paths.len(),
-        fs.policy.read_only_paths.len(),
-        fs.policy.path_mappings.len()
+        session_policy.mount_rel,
+        session_policy.real_root.display(),
+        session_policy.is_mapping_mode_only,
+        session_policy.allowed_real_paths.len(),
+        session_policy.excluded_real_paths.len(),
+        session_policy.sandboxed_paths.len(),
+        session_policy.read_only_paths.len(),
+        session_policy.path_mappings.len()
     );
 
     let background = match fuser::spawn_mount2(fs, &mount_point, &mount_options) {
@@ -816,6 +818,129 @@ pub fn mount_blocking_with_ready(
                 true,
                 Some(&session_mount_identity),
             );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// 在指定宿主挂载点挂一个共享 FUSE 会话,并把它设为 shared propagation。
+///
+/// 与 [`mount_blocking_with_ready`] 的差异：宿主会话不跟随任何应用生命周期，挂载点由调用方
+/// 指定（模块私有目录，而非存储别名），挂载源用 `srx_fuse_host` 前缀，挂载稳定后额外把宿主
+/// 挂载点设为 shared，供后续各应用 namespace 用 `MS_BIND` 引用；会话常驻直到会话线程结束。
+///
+/// 阶段 2（B2-a）只搭起宿主会话骨架，应用接入仍走 scoped 路径；宿主挂载点在 daemon 自己的
+/// 私有 namespace 里，对应用不可见，因此数据面行为不变。
+// quality-allow(lint-suppression): 宿主会话挂载函数仅在 daemon 二进制路径使用,lib 目标不调用。
+#[allow(dead_code)]
+pub fn mount_host_fuse(
+    config: FuseRedirectConfig,
+    host_mount_point: &str,
+    ready_sock: Option<libc::c_int>,
+) -> bool {
+    let session_mount_source = host_mount_source(std::process::id());
+
+    let mount_uid = if crate::metadata_repair::enabled() {
+        config.uid
+    } else {
+        -1
+    };
+    if !fs::create_directory(host_mount_point, mount_uid) {
+        log::error!("fuse host mount point missing: {}", host_mount_point);
+        send_ready_result(ready_sock, -1);
+        return false;
+    }
+
+    let fs = match super::FuseRedirectFs::new(config) {
+        Some(fs) => fs,
+        None => {
+            send_ready_result(ready_sock, -1);
+            return false;
+        }
+    };
+    let mut mount_options = fuser::Config::default();
+    mount_options.mount_options = vec![
+        MountOption::FSName(session_mount_source.clone()),
+        MountOption::Subtype("srx".to_string()),
+        MountOption::RW,
+        MountOption::NoSuid,
+        MountOption::NoDev,
+        MountOption::NoAtime,
+        MountOption::Async,
+    ];
+    mount_options.acl = SessionACL::All;
+    mount_options.n_threads = Some(4);
+    mount_options.clone_fd = true;
+
+    let background = match fuser::spawn_mount2(fs, host_mount_point, &mount_options) {
+        Ok(background) => background,
+        Err(error) => {
+            send_ready_result(ready_sock, -1);
+            log::warn!(
+                "fuse host mount failed mp={} err={}",
+                host_mount_point,
+                error
+            );
+            return false;
+        }
+    };
+
+    let Some(identity) = wait_for_stable_session_mount(host_mount_point, &session_mount_source)
+    else {
+        log::warn!(
+            "fuse host mount not stable mp={} source={}",
+            host_mount_point,
+            session_mount_source
+        );
+        let identity = ScopedMountIdentity {
+            source: session_mount_source.clone(),
+            mount_id: 0,
+        };
+        finish_background_session(background, host_mount_point, false, Some(&identity));
+        send_ready_result(ready_sock, -1);
+        return false;
+    };
+
+    // 宿主挂载点必须显式设为 shared propagation：`MS_REC|MS_PRIVATE` 只切断向外传播，
+    // 不会让子 namespace 得见该挂载；缺了 shared，应用侧的 MS_BIND 会静默失败。参考
+    // huniangitb/Fuse-Proxy 的 ns_make_shared。
+    let Ok(c_point) = CString::new(host_mount_point) else {
+        finish_background_session(background, host_mount_point, false, Some(&identity));
+        send_ready_result(ready_sock, -1);
+        return false;
+    };
+    // SAFETY: c_point 是合法 NUL 结尾路径，且在调用期间保持存活。
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            c_point.as_ptr(),
+            std::ptr::null(),
+            libc::MS_SHARED,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        let errno = last_errno();
+        log::warn!(
+            "fuse host shared propagation failed mp={} errno={} {}",
+            host_mount_point,
+            errno,
+            crate::platform::errno::text(errno)
+        );
+    }
+
+    log::info!(
+        "fuse host session mount registered mp={} mount_id={} source={}",
+        host_mount_point,
+        identity.mount_id,
+        identity.source
+    );
+    send_ready_result(ready_sock, 0);
+
+    // 宿主会话常驻：不跟随任何应用生命周期，只等会话线程结束。
+    loop {
+        if background.guard.is_finished() {
+            return finish_background_session(background, host_mount_point, false, Some(&identity));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -949,12 +1074,28 @@ fn detach_mount_point(mount_point: &str, identity: Option<&ScopedMountIdentity>)
 /// 会话标识以 `[pid]` 追加在后缀里，用于区分同一路径上被新会话替换的挂载。
 const SCOPED_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_redirect";
 
+/// 共享宿主会话使用的挂载源前缀。
+///
+/// 宿主会话与 scoped 会话共存期，挂载归属与测试流按前缀区分：测试流仍只认
+/// `srx_fuse_redirect`，因此宿主会话不会影响既有场景断言；`module_mount_source.rs`
+/// 的 `MODULE_MOUNT_SOURCE_PREFIXES` 已经同时包含两个前缀，账本能按前缀判定归属。
+// quality-allow(lint-suppression): 宿主前缀常量仅在 daemon 二进制路径使用,lib 目标不调用。
+#[allow(dead_code)]
+const HOST_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_host";
+
 /// 生成本次 scoped 会话唯一的挂载源（`MountOption::FSName`）。
 ///
 /// 挂载源会作为 `mount(2)` 的 source 出现在 `/proc/self/mountinfo` 里，不参与内核的 FUSE
 /// 参数解析，因此可以安全地携带会话标识。
 fn scoped_mount_source(service_pid: u32) -> String {
     format!("{SCOPED_MOUNT_SOURCE_PREFIX}[{service_pid}]")
+}
+
+/// 生成本次共享宿主会话唯一的挂载源（`MountOption::FSName`）。
+// quality-allow(lint-suppression): 宿主挂载源生成函数仅在 daemon 二进制路径使用,lib 目标不调用。
+#[allow(dead_code)]
+pub fn host_mount_source(service_pid: u32) -> String {
+    format!("{HOST_MOUNT_SOURCE_PREFIX}[{service_pid}]")
 }
 
 /// `/proc/self/mountinfo` 中一条挂载记录里用于判定挂载归属的字段。
@@ -972,7 +1113,8 @@ impl MountEntry {
     /// （挂载源是 `/dev/fuse`）当成模块挂载。
     fn is_scoped_fuse(&self) -> bool {
         matches!(self.fs_type.as_str(), "fuse" | "fuse.srx")
-            && self.source.starts_with(SCOPED_MOUNT_SOURCE_PREFIX)
+            && (self.source.starts_with(SCOPED_MOUNT_SOURCE_PREFIX)
+                || self.source.starts_with(HOST_MOUNT_SOURCE_PREFIX))
     }
 }
 

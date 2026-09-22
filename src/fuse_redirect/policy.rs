@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::FuseRedirectConfig;
 
@@ -128,6 +128,45 @@ pub(super) struct RedirectPolicy {
     pub(super) path_mappings: Vec<PathMapping>,
     pub(super) is_mapping_mode_only: bool,
     pub(super) is_file_monitor_enabled: bool,
+}
+
+/// 会话策略注册表：把「一个 FUSE 会话绑定单一应用」扩展为「按调用方 uid 解析」。
+///
+/// FUSE 请求头自带调用方 uid（`fuser::Request::uid()` 直接读输入头的 uid 字段），
+/// 共享宿主会话要让同一个挂载点同时服务多个应用，策略解析就不能再是「会话级常量」，
+/// 必须改成「每请求按 uid 查表」。
+///
+/// 阶段 1 只建立查表能力并保持数据面行为不变：注册表仅登记会话默认策略，
+/// `for_uid` 对任何 uid 都回退到它，因此结果与改造前直读 `FuseRedirectFs.policy` 完全一致。
+/// 阶段 2 引入 `srx_fuse_host` 共享会话后，`by_uid` 才会被挂载点填成多应用表。
+pub(super) struct PolicyRegistry {
+    /// 会话创建时绑定的策略，同时是 uid 未命中时的回退。
+    session: Arc<RedirectPolicy>,
+    /// 按调用方 uid 预解析的策略表；阶段 1 恒为空。
+    by_uid: HashMap<u32, Arc<RedirectPolicy>>,
+}
+
+impl PolicyRegistry {
+    /// 用单个会话策略构造注册表（当前 scoped 会话的唯一形态）。
+    pub(super) fn single(policy: RedirectPolicy) -> Self {
+        Self {
+            session: Arc::new(policy),
+            by_uid: HashMap::new(),
+        }
+    }
+
+    /// 会话绑定策略；用于与调用方身份无关的会话级语义（`init` / `statfs`）。
+    pub(super) fn session(&self) -> &RedirectPolicy {
+        self.session.as_ref()
+    }
+
+    /// 按调用方 uid 解析策略；未命中时回退到会话默认，保证与改造前行为一致。
+    pub(super) fn for_uid(&self, uid: u32) -> Arc<RedirectPolicy> {
+        match self.by_uid.get(&uid) {
+            Some(policy) => Arc::clone(policy),
+            None => Arc::clone(&self.session),
+        }
+    }
 }
 
 impl RedirectPolicy {

@@ -508,7 +508,12 @@ unsafe extern "C" fn is_provider_virtual_path_visible(
         return jni_sys::JNI_FALSE;
     }
     let path_text = crate::zygisk::jni::get_jstring_utf8(env, path);
-    if crate::hook::provider_passthrough_virtual_query_dir(&path_text).is_some() {
+    let Some(target_dir) = crate::hook::provider_passthrough_virtual_query_target(&path_text)
+    else {
+        return jni_sys::JNI_FALSE;
+    };
+    let target_path = target_dir;
+    if crate::hook::storage_path_exists_by_syscall(&target_path) {
         jni_sys::JNI_TRUE
     } else {
         jni_sys::JNI_FALSE
