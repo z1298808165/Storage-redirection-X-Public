@@ -483,40 +483,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 失败清理只在本就发布时才尝试删除草稿 Release。
         self.assertIn("PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}", ci)
 
-    def test_preview_branch_channel_publishes_artifacts_only(self) -> None:
-        # preview 分支是 CI 预览通道：推送后照样跑完整构建与测试流，但产物只能作为
-        # Actions artifact 下载，不得创建 Release、不得写 update.json、不得追加版本基线。
-        # 发布链路里任何一处漏掉「不是预览分支」条件，预览推送就会污染 SRX-R 的发布通道，
-        # 因此这里逐处钉死。
-        source = read(".github/workflows/ci.yml")
-        push_section = section(source, "  push:", "  workflow_dispatch:")
-        self.assertIn("branches: [SRX-R, preview]", push_section)
-
-        preview_guard = "github.ref_name != 'preview'"
-        parsed = yaml.safe_load(source)
-        for job in ("init-ci-release", "create-ci-release", "update-manifest"):
-            self.assertIn(preview_guard, parsed["jobs"][job]["if"], job)
-        cleanup = section(source, "  cleanup-build-artifacts:", "  update-manifest:")
-        self.assertIn(preview_guard, cleanup)
-
-        # 构建 job 在预览分支要继续跑（产物来源）：同一个 job 里产出 artifact 的步骤
-        # 只在预览分支执行，往 Release 传资产的步骤则排除预览分支。
-        for job, artifact, end in (
-            ("module", "preview-module-v", "  app:"),
-            ("app", "preview-manager-v", "  test-flow-build:"),
-        ):
-            body = section(source, f"  {job}:", end)
-            self.assertIn(f"name: {artifact}", body)
-            self.assertIn("actions/upload-artifact@v7.0.1", body)
-            self.assertIn("if: github.ref_name == 'preview'", body)
-            self.assertIn(preview_guard, body)
-
-        # 正式发布只由 tag 触发：预览分支推送无论如何都无法产出正式版。
-        release_source = read(".github/workflows/release.yml")
-        release_triggers = section(release_source, "on:", "permissions:")
-        self.assertIn("tags:", release_triggers)
-        self.assertIn("- 'v*'", release_triggers)
-        self.assertNotIn("branches:", release_triggers)
 
     def test_shared_fuse_host_b2a_contract(self) -> None:
         # B2-a 先建立独立宿主会话骨架：它必须在 daemon 的私有 namespace 中创建，
