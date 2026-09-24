@@ -2195,6 +2195,45 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "`.ps1` 不得使用 `$Pid` 作变量/参数名（与只读内置变量 `$PID` 冲突）",
         )
 
+    def test_scenario4_mount_recheck_accepts_shared_host_layout(self) -> None:
+        """场景 4 的挂载复核必须同时接受旧 scoped 布局与共享宿主接入布局。
+
+        共享宿主接入（默认开启）下，整个存储视图根被 `srx_fuse_host[pid]` 接管，
+        放行与映射路径都是会话内的策略层逻辑路径，mountinfo 里不会再出现
+        `/Download` 挂载点；`.sh` 与 `.ps1` 的复核都必须把这种布局视为合法，
+        否则宿主接入形态在真机上会被结构性误判为「挂载未建立」。
+        """
+        bash_recheck = section(
+            self.bash,
+            "app_mountinfo_has_expected_paths() {",
+            "\nensure_current_app_mount_confirmed() {",
+        )
+        self.assertIn("srx_fuse_host", bash_recheck, "`.sh` 场景 4 复核缺少共享宿主布局分支")
+        ps_recheck = section(
+            self.powershell,
+            "function Assert-AppMountinfoHasExpectedPaths {",
+            "\nfunction Ensure-CurrentAppMountConfirmed",
+        )
+        self.assertIn("srx_fuse_host", ps_recheck, "`.ps1` 场景 4 复核缺少共享宿主布局分支")
+
+    def test_fuse_mount_checks_accept_shared_host_prefix(self) -> None:
+        """FUSE 接管与 scoped 启动判定必须识别共享宿主前缀 srx_fuse_host。
+
+        共享宿主接入（B2-c）默认开启后，应用 mountinfo 出现的是 `srx_fuse_host[pid]`
+        视图根挂载，不再有独立 scoped 会话的启动日志；只认 `srx_fuse_redirect` 的
+        判定会把成功的宿主接入误判成「静默回退 mount namespace」或 scoped 缺失。
+        """
+        bash_active = section(self.bash, "check_fuse_mount_active() {", "\ncheck_scoped_fuse_daemon_started() {")
+        self.assertRegex(
+            bash_active,
+            r"srx_fuse_\(redirect\|host\)|srx_fuse_host",
+            "`.sh` 的 FUSE 接管判定缺少共享宿主前缀",
+        )
+        ps_active = section(self.powershell, "function Test-FuseMountActive {", "\nfunction Test-ScopedFuseDaemonStarted")
+        self.assertIn("srx_fuse_host", ps_active, "`.ps1` 的 FUSE 接管判定缺少共享宿主前缀")
+        ps_scoped = section(self.powershell, "function Test-ScopedFuseDaemonStarted {", "\nfunction ")
+        self.assertIn("srx_fuse_host", ps_scoped, "`.ps1` 的 scoped 启动判定缺少共享宿主分支")
+
     def test_scenario_scope_override_and_commit_message_parsing(self) -> None:
         """场景取景必须真能收窄范围，且不带取景时不改变全量（仍为 all）。
 

@@ -621,8 +621,11 @@ function Get-ExpectedMountPathsForLabel {
         return @("$RealRoot/Download/SrtProbe")
     }
     if ($scenario -eq 4) {
-        # 父目录放行与子路径映射共存时，Auto/FUSE 只需建立一个父级会话；
-        # 子路径属于会话内的逻辑映射，不会额外出现在 mountinfo 中。
+        # 父目录放行与子路径映射共存时有两种合法布局：
+        # ① 旧 scoped/namespace 布局——放行根上有独立挂载点；
+        # ② 共享宿主接入布局——整个存储视图根被 srx_fuse_host[pid] 接管，放行与
+        #    映射都是宿主会话内的策略层逻辑路径，不会额外出现在 mountinfo 中。
+        # 两种布局任一命中即算确认成功（见 Assert-AppMountinfoHasExpectedPaths 的场景 4 分支）。
         return @("$RealRoot/Download")
     }
     return @()
@@ -642,6 +645,28 @@ function Assert-AppMountinfoHasExpectedPaths {
     $expected = @(Get-ExpectedMountPathsForLabel $Label)
     if ($expected.Count -eq 0) { return $true }
     if ([string]::IsNullOrWhiteSpace($AppProcessId)) { return $false }
+
+    if ((Get-ScenarioFromLabel $Label) -eq "4") {
+        # 与 .sh 对应：场景 4 的期望路径表保留旧布局形态（放行根挂载点）；共享宿主
+        # 接入布局下整个视图根被 srx_fuse_host[pid] 接管，放行与映射路径都是会话内
+        # 的策略层逻辑路径，不会再出现 /Download 挂载点。两种布局任一命中即证明
+        # 应用视图已被模块接管。
+        # 注意：命令必须先在赋值表达式里拼好再传给 Invoke-Su——直接在参数位置用
+        # `"a" + "b"` 拼接是参数模式语义，会产出一个带字面加号的字符串传到设备端。
+        $scenario4Command = "pid='$AppProcessId'; " +
+            "grep -Fq ' $RealRoot/Download ' `"/proc/`$pid/mountinfo`" && { echo layout_scoped; exit 0; }; " +
+            "grep -F ' $RealRoot ' `"/proc/`$pid/mountinfo`" | grep -Fq srx_fuse_host && { echo layout_fuse_host; exit 0; }; " +
+            "echo missing=$RealRoot/Download-or-fuse-host-root"
+        $output = @(Invoke-Su $scenario4Command)
+        foreach ($line in $output) {
+            if ($line -like "layout_*") { return [bool]$true }
+            if ($line -like "missing=*") {
+                Write-Host "  mountinfo_check ${Label}: $line"
+                return [bool]$false
+            }
+        }
+        return [bool]$false
+    }
 
     $command = "pid='$AppProcessId'; "
     foreach ($path in $expected) {
@@ -2431,9 +2456,10 @@ function Test-FuseDaemonStarted {
 
 # 判别性断言：确认 FUSE 数据面真的接管了挂载点，而不是静默回退到 mount namespace。
 #
-# 依据 mountinfo 中的挂载源 srx_fuse_redirect（config.rs 里 MountOption::FSName 的取值）。
-# 该字符串只有 FUSE 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。
-# 这比日志断言更可靠：日志行可能因采样、轮转或格式变化漏判，而挂载表是内核事实。
+# 依据 mountinfo 中的挂载源 srx_fuse_redirect（scoped 前缀）或 srx_fuse_host（共享宿主
+# 前缀，B2-c；与 .sh 的 `app_mountinfo_has_expected_paths` 同口径）。该字符串只有 FUSE
+# 会话建立成功才会出现；bind mount 回退方案无论如何都产生不了它。这比日志断言更可靠：
+# 日志行可能因采样、轮转或格式变化漏判，而挂载表是内核事实。
 function Test-FuseMountActive {
     param([int]$Scenario)
     $appPid = ""
@@ -2441,7 +2467,7 @@ function Test-FuseMountActive {
         # am start 返回时进程仍可能处于启动/重建窗口；每轮重新定位当前进程，
         # 只接受当前 PID 的内核挂载事实，不靠旧日志通过，也不重启应用掩盖崩溃。
         $appPid = Get-AppPid
-        if ($appPid -and (Test-Su "grep -Fq 'srx_fuse_redirect' `"/proc/$appPid/mountinfo`" 2>/dev/null")) {
+        if ($appPid -and (Test-Su "grep -Eq 'srx_fuse_redirect|srx_fuse_host' `"/proc/$appPid/mountinfo`" 2>/dev/null")) {
             Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid"
             return $true
         }
@@ -2471,7 +2497,14 @@ function Test-ScopedFuseDaemonStarted {
     param([int]$Scenario, [string]$MountRoot, [bool]$Strict = $true)
     for ($i = 0; $i -lt 20; $i++) {
         if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
-            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot"
+            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot source=log"
+            return $true
+        }
+        # 与 .sh 对齐：共享宿主接入布局下不再有独立的 scoped 会话启动日志，改为按
+        # 应用 mountinfo 里的 FUSE 挂载源（scoped 或共享宿主前缀）判定接管事实。
+        $scopedAppPid = Get-AppPid
+        if ($scopedAppPid -and (Test-Su "grep -Eq 'srx_fuse_redirect|srx_fuse_host' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null")) {
+            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot source=app-mountinfo"
             return $true
         }
         if (Test-Su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {

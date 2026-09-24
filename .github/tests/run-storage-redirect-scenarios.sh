@@ -1057,8 +1057,11 @@ expected_mount_paths_for_label() {
       printf '%s\n' "${REAL_ROOT}/Download/SrtProbe"
       ;;
     4)
-      # 父目录放行与子路径映射共存时，Auto/FUSE 只需建立一个父级会话；
-      # 子路径属于会话内的逻辑映射，不会额外出现在 mountinfo 中。
+      # 父目录放行与子路径映射共存时有两种合法布局：
+      # ① 旧 scoped/namespace 布局——放行根上有独立挂载点；
+      # ② 共享宿主接入布局——整个存储视图根被 srx_fuse_host[pid] 接管，放行与
+      #    映射都是宿主会话内的策略层逻辑路径，不会额外出现在 mountinfo 中。
+      # 两种布局任一命中即算确认成功（见 app_mountinfo_has_expected_paths 的场景 4 分支）。
       printf '%s\n' "${REAL_ROOT}/Download"
       ;;
   esac
@@ -1071,6 +1074,20 @@ app_mountinfo_has_expected_paths() {
   expected="$(expected_mount_paths_for_label "$label")"
   [ -z "$expected" ] && return 0
   [ -n "$pid" ] || return 1
+
+  if [ "$(scenario_from_label "$label")" = "4" ]; then
+    # 场景 4 的期望路径表保留旧布局形态（放行根挂载点）；共享宿主接入布局下整个
+    # 视图根被 srx_fuse_host[pid] 接管，放行与映射路径都是会话内的策略层逻辑路径，
+    # 不会再出现 /Download 挂载点。两种布局任一命中即证明应用视图已被模块接管。
+    if adb_su "pid='$pid'; grep -Fq ' ${REAL_ROOT}/Download ' /proc/\$pid/mountinfo"; then
+      return 0
+    fi
+    if adb_su "pid='$pid'; grep -F ' ${REAL_ROOT} ' /proc/\$pid/mountinfo | grep -Fq srx_fuse_host"; then
+      return 0
+    fi
+    echo "missing=${REAL_ROOT}/Download-or-fuse-host-root"
+    return 1
+  fi
 
   command="pid='$pid'; "
   while IFS= read -r path; do
