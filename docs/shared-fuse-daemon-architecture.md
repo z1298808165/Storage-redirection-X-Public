@@ -15,11 +15,11 @@ namespace 注入”的架构、根因分析和当前实现边界。早期分阶�
 ```
 zygisk specialize_pre ──connect_companion──> root companion ──> companion_mount.rs（按应用挂载）
 srx_daemon（持久）      ──reconcile 每 3s──> daemon_mount.rs
-                                              └─ 共享宿主会话：FuseHost 建立 srx_fuse_host；应用侧 setns + MS_BIND 注入，失败时回退 scoped srx_fuse_redirect
+                                              └─ 共享宿主会话：FuseHost 建立 srx_fuse_host；应用侧 open_tree + move_mount 注入，失败时回退 scoped srx_fuse_redirect
 ```
 
 - 共享宿主会话：`src/fuse_host.rs` 在 daemon 启动时建立私有 mount namespace 和宿主 FUSE 会话，挂载源为 `srx_fuse_host[<pid>]`。
-- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `setns` + `MS_BIND` 注入共享宿主；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
+- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `open_tree` + `move_mount` 注入共享宿主（默认关闭）；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
 - 旧 scoped 路径仍由 `src/fuse_redirect/config.rs` 提供兼容实现，但不再是唯一数据面。
 - 状态落盘：`src/daemon_mount.rs:1643 write_mount_state`，字段为
   `version/package/uid/app_start_time/fuse_child=<pid>:<starttime>/target=`。
@@ -95,20 +95,30 @@ daemon 进程。因此：
 - **卸载一个应用的注入不会影响其它应用**：`umount` 的是 namespace 局部的 bind 挂载，
   不是共享的 FUSE 会话；
 - **服务退出是单一事件**：不再有 N 个各自独立的失败窗口，而是一个被监督的会话；
-- **应用侧不再需要"等待挂载落定"**：注入退化为一次 `MS_BIND`，原子完成，不存在
+- **应用侧不再需要"等待挂载落定"**：注入退化为一次跨命名空间搬运（克隆 + 附着），原子完成，不存在
   "挂载集合建立了一半"的中间态。当前 `specialize_post::wait_for_module_mount` 的整套
   轮询判据（`MOUNT_SETTLE_POLLS` + 30 轮预算）由此**整体失去存在理由**，应随本阶段删除。
   这不只是简洁性收益：多进程并发启动时，先启动进程挂好的 FUSE 根会让后启动进程在
   **重定向本体尚未建立**时就观察到"稳定的非空挂载集合"，从而提前放行并读到未重定向的
   视图（真机已复现：三个微信进程同秒启动，主进程在 `mounts=7` 时被放行）。
 
-#### 传播方向：接入改用"取句柄"，不依赖传播
+#### 跨命名空间搬运：只能靠 open_tree + move_mount
 
 宿主挂载建好后，`mount_host_fuse` 会在宿主挂载点上开 shared。但**应用接入并不依赖传播**：
 宿主子进程已经对整棵树做过 `MS_REC|MS_PRIVATE`，各应用 namespace 看不到宿主的挂载点，
-只开 shared 也不会让它们"看见"。因此接入走的是显式引用——在宿主 namespace 内用 `O_PATH`
-钉住挂载点句柄，切回应用 namespace 后以 `/proc/self/fd/<n>` 为源做 `MS_BIND`。这条路径与
-传播模式无关，也不会把新挂载反向传播回宿主 namespace；shared 只作为挂载点的既有属性保留。
+只开 shared 也不会让它们"看见"。
+
+搬运也不能用 `mount(MS_BIND)`：bind 的**源挂载必须属于调用方当前的 mount namespace**
+（内核 `do_loopback` 的 `check_mnt`），源换成 `/proc/self/fd/<n>` 也绕不过去——真机实测直接
+返回 `EINVAL`。跨命名空间搬运挂载是 `open_tree(OPEN_TREE_CLONE)` + `move_mount` 这对 API 的
+用途：前者在**源命名空间**里克隆出一个不附着于任何命名空间的挂载（由 fd 携带），后者在
+**目标命名空间**里把它附着到目标路径。克隆与原挂载共享同一个 superblock，因此 FUSE 请求
+仍然全部回到同一个宿主会话。
+
+克隆会**继承宿主挂载点的 shared 传播组**（`mountinfo` 里的 `shared:N`）。照原样保留的话，
+各应用的这份挂载会结成同一个 peer group：任一应用在其下新建或摘除挂载都会传播到其它应用
+与宿主命名空间，既跨应用干扰，又与"卸载一个应用的注入不影响其它应用"的前提冲突。因此
+附着后立即把该挂载在本命名空间内改为 `MS_REC|MS_PRIVATE`，与 scoped 层的形态保持一致。
 
 参照实现 `huniangitb/Fuse-Proxy` 的做法是 `ns_make_shared(pid, mount_path)`
 （`src/injector/injector.c`），靠传播让子 namespace 得见全局挂载点；本项目**未采用该路径**，
@@ -250,12 +260,20 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - 直通会话必须显式标记为 `is_passthrough_host`：它的 `redirect_target` 就是存储根本身，而按子
   路径推导重定向根的函数对"根本身"返回 `None`，否则策略构造会直接失败（真机表现为宿主子进程
   在 `policy` 阶段退出，且旧代码在该分支没有任何日志）。
-- **应用接入的实现已落地**（`fuse_host::attach_app_to_host`），daemon 与 companion 两条挂载
-  路径共用同一份实现——这条链路上"bind 落在哪个命名空间"是唯一的要害，两处各写一份最容易
-  只改对一处，而症状（应用读到真实存储）不会报错。具体做法：在宿主 namespace 内用 `O_PATH`
-  钉住挂载点句柄 → 切回**应用自己的 namespace** → 执行 `MS_BIND` → 复核应用视图里该目标最上层
-  的挂载源等于本次会话的挂载源。bind 子进程就绪后立即退出：挂载归 mount namespace 所有，
-  常驻只会白占一个进程并拖住应用 namespace 的引用计数。
+- **应用接入的实现已落地并真机 A/B 验证**（`fuse_host::attach_app_to_host`）。daemon 与
+  companion 两条挂载路径共用同一份实现——这条链路上"挂载落在哪个命名空间、怎么搬过去"是
+  唯一的要害，两处各写一份最容易只改对一处，而症状（应用读到真实存储）不会报错。做法：
+  在宿主 namespace 内 `open_tree(OPEN_TREE_CLONE)` 克隆游离挂载 → 切回**应用自己的
+  namespace** → `move_mount` 附着 → 立刻 `MS_REC|MS_PRIVATE` 切断传播 → 复核应用视图里该
+  目标最上层的挂载源等于本次会话的挂载源。子进程附着成功即退出：挂载归 mount namespace
+  所有，常驻只会白占一个进程并拖住应用 namespace 的引用计数。
+  （`mount(MS_BIND)` 做不到跨命名空间搬运，真机直接 `EINVAL`；克隆继承的 shared 传播组
+  必须显式切断，理由见 §2.1。）
+- **登记进宿主会话的策略必须丢弃 `real_root_override`**：那是给应用命名空间内的 scoped
+  会话用的锚点别名（真实存储根先绑到 `tmp/real_storage/<user>`，绑定只存在于应用
+  namespace），宿主子进程在自己的私有命名空间里看到的是一个**空目录**。照搬覆盖会让策略
+  把真实根读成空——真机表现为仅映射模式的应用整个丢失公共存储视图，视图根只剩被沙盒化的
+  那几条路径。宿主命名空间里 `/data/media/<user>` 本来就是未经覆盖的真实存储，无需别名。
 - **挂载台账把宿主会话与 scoped 子进程分开记**：接入产生的挂载写 `fuse_host=<pid>:<start>`
   而不是 `fuse_child=`，回滚与清理只卸载、不终止任何进程——宿主会话跨应用共享，按它的 pid
   发信号等于把所有接入应用一起打成死挂载。会话死亡时 `has_dead_fuse_child` 据此把该应用的
@@ -267,9 +285,14 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - **接入只允许落在存储视图根**：宿主会话按 uid 注册策略，虚拟根只能是整个存储视图根。落在更深的
   scoped 子根时，内核会把该子树下的请求按整根解析，命中的是与本应用规则无关的真实路径——读错
   内容却不报错。因此闸门只在 `mount_root` 就是该 uid 的存储视图根时放行。
-- **接入默认关闭**，由 `SRT_FUSE_HOST_ATTACH`（`1`/`true`/`yes`）显式打开：接入把数据面从"每应用
-  一个 scoped 会话"换成"全局一个宿主会话"，在真机与 CI 双重验证通过前不接管挂载。关闭时行为与
-  改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
+- **接入默认关闭**，验证期由环境变量 `SRT_FUSE_HOST_ATTACH`（`1`/`true`/`yes`）显式打开。
+  接入把数据面从"每应用一个 scoped 会话"换成"全局一个宿主会话"，因此正式启用前必须换成
+  **应用进程可读的开关**（配置项或模块文件）：`companion_mount` 跑在应用进程内，读不到
+  daemon 的环境变量——真机实测同一应用在 daemon 侧接入已打开时，仍是应用自己启动时用
+  scoped 会话挂好的。关闭时行为与改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
+- **真机 A/B 结论**（Android 16，同一应用同一配置）：scoped 会话与宿主会话下，应用视图根
+  内容逐项一致（真实公共目录 + 被沙盒化的路径），应用在视图里的写入落在自己的沙盒、公共
+  存储无残留；`kill` 掉宿主子进程后状态判活生效，应用自动重挂到新会话。
 - 宿主会话失效后由 daemon 在 reconcile 中重建，失败时保留 scoped FUSE 回退；`srx_fuse_redirect`
   前缀路径不能删除。
 - **僵尸态必须排除**：会话线程结束时子进程自行退出（FUSE 连接被 `FUSE_DESTROY` 结束），父进程
@@ -314,7 +337,10 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 | 策略未进宿主会话就接入 | 高 | 登记改为同步应答（`(uid, 表大小)`），未确认即保持 scoped 路径，不进入接入分支 |
 | 已重建会话留下的层被当成有效层保留 | 中 | 保留判据拒绝 `is_stale_host_source` 的层，按摘除重建处理；否则保留的是一条已断开的 FUSE 连接（`ENOTCONN`） |
 | 接入落在 scoped 子根导致按整根解析 | 中 | 闸门只在 `mount_root` 就是该 uid 的存储视图根时放行；其余情况保持 scoped |
-| bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE` 隔离；接入用 `O_PATH` 句柄显式引用宿主挂载点，与传播模式无关（见 §2.1） |
+| 跨命名空间搬运挂载写成了 `mount(MS_BIND)` | 高 | bind 的源挂载必须属于调用方当前命名空间，跨命名空间时内核直接 `EINVAL`；接入改用 `open_tree(OPEN_TREE_CLONE)` + `move_mount`，并有守卫测试钉住顺序（见 §2.1） |
+| 附着进来的克隆继承了宿主挂载点的 shared 传播组 | 高 | 各应用的挂载会结成同一 peer group，互相传播挂载/卸载；附着后立即在本命名空间内改为 `MS_REC\|MS_PRIVATE` |
+| 宿主会话策略照搬应用命名空间的锚点覆盖 | 高 | 锚点绑定只存在于应用命名空间，宿主子进程看到空目录 → 仅映射模式应用丢失公共存储视图；登记时传 `real_root_override=None`，用宿主命名空间里的 `/data/media/<user>` |
+| 启用开关写在 daemon 的环境变量里 | 中 | companion 路径在应用进程内，读不到该变量，接入只在 daemon 侧重挂时生效；正式启用前换成应用进程可读的开关 |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
 
