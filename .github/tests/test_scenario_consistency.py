@@ -585,8 +585,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 2) 接入后必须**复核**，确认应用视图里那个目标最上层就是本次会话的挂载源。
         # 3) 挂载台账不得把宿主 pid 写进 `fuse_child=`：宿主会话跨应用共享，清理与回滚按
         #    这一行发信号会打掉所有接入应用的挂载。宿主会话单独记 `fuse_host=`，只判活。
-        # 4) 接入默认关闭，且只允许落在存储视图根：宿主会话按 uid 注册策略，虚拟根只能是
-        #    整个存储视图根，落在更深的 scoped 子根会把该子树的请求按整根解析。
+        # 4) 接入默认开启（开关只用于显式关闭），且只允许落在存储视图根：宿主会话按 uid
+        #    注册策略，虚拟根只能是整个存储视图根，落在更深的 scoped 子根会把该子树的请求
+        #    按整根解析（读错内容却不报错）。
         host = read("src/fuse_host.rs")
         self.assertIn("pub fn attach_app_to_host(", host)
         self.assertIn("pub fn can_attach_app(uid: i32, mount_root: &str) -> bool", host)
@@ -596,6 +597,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
             section(host, "pub fn can_attach_app(", "pub fn is_current_host_source(").split()
         )
         self.assertIn("if!host_attach_enabled(){", gate)
+        # 开关方向必须与目标形态一致：只有显式写成关闭取值才关闭，未设置即接入。
+        switch = section(host, "fn host_attach_enabled() -> bool", "/// 共享宿主会话当前")
+        self.assertIn('"0"|"false"|"no"|"off"', "".join(switch.split()))
+        self.assertIn("!disabled", switch)
+        self.assertNotIn('"1"|"true"|"yes"', "".join(switch.split()))
         self.assertIn(
             "paths::normalize_syntax(mount_root)==paths::normalize_syntax(&view_root)", gate
         )

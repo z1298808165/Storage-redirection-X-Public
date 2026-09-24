@@ -33,11 +33,15 @@ const HOST_CONTROL_STACK_SIZE: usize = 256 * 1024;
 const HOST_POLICY_ACK_TIMEOUT_MS: i64 = 2_000;
 /// 一次登记最多容忍几条不属于自己的应答，避免通道异常时无限空转。
 const HOST_POLICY_ACK_SKIP_LIMIT: usize = 8;
-/// 应用接入共享宿主会话的开关环境变量。
+/// 应用接入共享宿主会话的**关闭开关**环境变量。
 ///
-/// 接入会把「每个应用各 fork 一个 scoped 会话」换成「所有应用共享一个宿主会话」，
-/// 属于挂载实现层面的整体切换，因此在真机与 CI 都跑通之前默认关闭（未设置即为关闭），
-/// 只在显式打开时才生效。取值 `1` / `true` / `yes`（大小写不敏感）视为打开。
+/// 共享宿主会话是目标形态，因此**默认开启**：未设置即接入。显式设置成 `0` / `false` /
+/// `no` / `off`（大小写不敏感）才关闭，用于在设备上快速退回"每应用一个 scoped 会话"的
+/// 旧数据面，不必降级模块。
+///
+/// 注意它只影响**读到该变量的进程**：daemon 与其 fork 出的挂载 worker 能读到，而
+/// `companion_mount` 跑在应用进程内、读不到 daemon 的环境变量。因此它只适合做 daemon 侧
+/// 的临时开关；要做全链路开关，需把状态经能力快照之类的共享文件发布出去。
 const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";
 
 static LAST_RECOVERY_ATTEMPT_MS: AtomicI64 = AtomicI64::new(0);
@@ -457,27 +461,29 @@ fn install_host_panic_hook() {
     }));
 }
 
-/// 应用接入共享宿主会话的开关是否打开。
-///
-/// 默认关闭：接入把挂载实现从「每应用一个 scoped 会话」换成「全局一个宿主会话」，
-/// 在没有真机与 CI 双重验证之前不允许悄悄生效。
+/// 应用接入共享宿主会话是否生效（默认开启，只认显式关闭）。
 fn host_attach_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        let enabled = std::env::var(HOST_ATTACH_ENV)
+        // 只有明确写成"关闭"的取值才关闭；未设置、空值或其它内容一律按开启处理——
+        // 开关的默认方向必须与目标形态一致，否则共享宿主会话永远不会在真实环境里跑起来。
+        let configured = std::env::var(HOST_ATTACH_ENV).ok();
+        let disabled = configured
+            .as_deref()
             .map(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes"
+                    "0" | "false" | "no" | "off"
                 )
             })
             .unwrap_or(false);
         log::info!(
-            "fuse host attach switch env={} enabled={}",
+            "fuse host attach switch env={} configured={:?} disabled={} default_on=true",
             HOST_ATTACH_ENV,
-            enabled
+            configured,
+            disabled
         );
-        enabled
+        !disabled
     })
 }
 
@@ -485,8 +491,8 @@ fn host_attach_enabled() -> bool {
 ///
 /// 这是能力闸门加语义约束，两层都必须满足：
 ///
-/// 1. **能力**：宿主会话按 uid 提供策略，登记通道与拒绝回退都已就位；但接入是挂载实现的
-///    整体切换，因此由 [`HOST_ATTACH_ENV`] 显式打开，默认关闭。
+/// 1. **能力**：宿主会话按 uid 提供策略，登记通道与拒绝回退都已就位，接入**默认开启**；
+///    [`HOST_ATTACH_ENV`] 只用于显式关闭（kill switch），便于在设备上快速退回旧数据面。
 /// 2. **语义**：宿主会话的虚拟根固定是"该 uid 的整个存储视图根"，因为策略是按 uid 注册的
 ///    （一个 uid 一份规则，虚拟根只能是整根）。所以宿主挂载只能落在存储视图根上；落在更深
 ///    的 scoped 根（混合规则的子目录）时，内核会把该子目录下的请求按整根解析，命中的是与本
