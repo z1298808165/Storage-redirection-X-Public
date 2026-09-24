@@ -819,12 +819,18 @@ fn start_fuse_service_for_root(
 ) -> Option<FuseMountState> {
     // B2-b：优先尝试共享宿主会话接入。
     if let Some(host) = crate::fuse_host::get_fuse_host() {
+        // 先把该应用的策略按 uid 登记进共享宿主会话：这是应用接入的前置条件，提前登记也让
+        // 接入启用后第一帧请求就带上正确策略。虚拟根取整个存储根（mount_root=None），因为
+        // 宿主会话服务的是完整存储视图，而不是某个 scoped 子根。
+        let policy_config = fuse_config_from_request(request, None, real_root_override.clone());
+        let registered = crate::fuse_host::register_app_policy(&policy_config);
         if !crate::fuse_host::can_attach_app(request.uid) {
             // 宿主会话还没有该 uid 的策略，接入会让应用失去重定向；保持既有 scoped 路径。
             log::debug!(
-                "fuse host attach skipped pid={} pkg={} reason=policy_registration_pending",
+                "fuse host attach skipped pid={} pkg={} registered={} reason=policy_registration_pending",
                 request.pid,
-                request.package_name
+                request.package_name,
+                registered
             );
         } else if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
             return Some(state);

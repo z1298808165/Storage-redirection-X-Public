@@ -3,6 +3,7 @@ use crate::domain::PathMapping;
 use crate::platform::errno::last as last_errno;
 use crate::platform::{fs, module_paths, mountinfo, paths};
 use fuser::{MountOption, SessionACL};
+use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::io;
 use std::os::unix::fs::FileTypeExt;
@@ -117,7 +118,11 @@ impl FuseCapabilitySnapshot {
     }
 }
 
-#[derive(Clone)]
+/// 单个 FUSE 会话的完整策略配置。
+///
+/// 支持序列化：宿主共享会话的按 uid 策略在 daemon 侧构造，经控制通道以 JSON 送到持有会话的
+/// 子进程后再建策略，因此这里必须能跨进程传输（见 `fuse_host::register_app_policy`）。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FuseRedirectConfig {
     pub package_name: String,
     pub app_pid: i32,
@@ -866,6 +871,7 @@ pub fn mount_host_fuse(
     config: FuseRedirectConfig,
     host_mount_point: &str,
     ready_sock: Option<libc::c_int>,
+    control_sock: Option<libc::c_int>,
 ) -> bool {
     let session_mount_source = host_mount_source(std::process::id());
 
@@ -891,6 +897,8 @@ pub fn mount_host_fuse(
             return false;
         }
     };
+    // 交出 `fs` 之前取出按 uid 策略表句柄：宿主会话运行期靠它接收应用策略。
+    let policy_table = fs.policy_table();
     crate::fuse_host::host_stage("policy_ok");
     let mut mount_options = fuser::Config::default();
     mount_options.mount_options = vec![
@@ -988,6 +996,12 @@ pub fn mount_host_fuse(
     );
     crate::fuse_host::host_stage("ready");
     send_ready_result(ready_sock, 0);
+
+    // 就绪之后再启动按 uid 策略的控制通道：登记请求必须落在已挂载的会话上，否则策略建好却
+    // 没有会话可服务。控制线程与 FUSE 会话同生命周期，随子进程退出而结束。
+    if let Some(control_sock) = control_sock {
+        crate::fuse_host::spawn_host_control_loop(control_sock, policy_table);
+    }
 
     // 宿主会话常驻：不跟随任何应用生命周期，只等会话线程结束。
     loop {

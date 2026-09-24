@@ -9,6 +9,8 @@ mod rules;
 pub(crate) mod scoped_mount;
 pub(super) use rules::normalize_rule_list;
 
+pub(crate) use policy::SharedPolicyTable;
+
 // 公开这些配置类型供 daemon/测试流复用；部分构建目标只使用其中的函数。
 pub use config::{
     FuseRedirectConfig, MountRequestFields, fuse_config_from_request, mount_blocking_with_ready,
@@ -238,9 +240,20 @@ fn estimate_cached_dir_candidates_bytes(
 }
 
 impl FuseRedirectFs {
+    /// 取出按 uid 策略表句柄。
+    ///
+    /// 宿主共享会话在 `spawn_mount2` 交出 `FuseRedirectFs` 之后，仍需要按 uid 登记应用策略，
+    /// 因此必须在交出所有权之前把句柄取出来，交给控制通道。
+    pub(crate) fn policy_table(&self) -> SharedPolicyTable {
+        self.policy.shared_table()
+    }
+
     fn new(config: FuseRedirectConfig) -> Option<Self> {
         let package_name = config.package_name.clone();
-        let policy = PolicyRegistry::single(RedirectPolicy::new(config)?);
+        // 宿主共享会话服务的是完整存储视图：未登记 uid 必须一律拒绝，否则它会回退到直通策略，
+        // 直接读写真实存储——沙盒失效，且越权产生的落点无法靠事后清理恢复。
+        let deny_unregistered = config.is_passthrough_host;
+        let policy = PolicyRegistry::new(RedirectPolicy::new(config)?, deny_unregistered);
         let (dir_cache_capacity, dir_cache_max_capacity, dir_cache_byte_budget) =
             dir_candidate_cache_capacity_limits();
         let mut inodes = HashMap::new();

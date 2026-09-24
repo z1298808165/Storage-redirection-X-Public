@@ -1,9 +1,10 @@
 use crate::platform::paths;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub const MAX_PATH_MAPPING_DEPTH: usize = 10;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathMapping {
     pub request_path: String,
     pub final_path: String,

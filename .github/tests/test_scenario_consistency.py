@@ -522,12 +522,67 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # B2-a 不能改变现有应用 scoped 挂载路径；host 只是新增基础设施。
         self.assertIn('"srx_fuse_redirect"', config)
 
+    def test_shared_fuse_host_registers_app_policy_before_attach(self) -> None:
+        # 共享宿主会话只持有一份「直通」策略。按 uid 策略必须由 daemon 经控制通道登记进会话，
+        # 否则把宿主树 bind 到应用存储根会让应用静默失去全部重定向。这里钉死三件事：
+        # 1) 登记必须先于接入闸门判断，避免接入启用后跑在旧策略上；
+        # 2) 策略虚拟根取整个存储根（`mount_root=None`），与宿主会话服务的完整视图一致；
+        # 3) 闸门本身仍然存在——打开接入必须是一次有意的改动。
+        for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
+            source = read(path)
+            body = section(source, "fn start_fuse_service_for_root", "let mut ready_sockets")
+            compact = "".join(body.split())
+            register_at = body.index("crate::fuse_host::register_app_policy(")
+            gate_at = body.index("crate::fuse_host::can_attach_app(")
+            self.assertLess(register_at, gate_at, f"{path} 必须先登记策略再判断接入闸门")
+            self.assertIn("fuse_config_from_request(request,None,", compact)
+
+        host = read("src/fuse_host.rs")
+        self.assertIn("pub fn register_app_policy(", host)
+        self.assertIn("pub fn can_attach_app(", host)
+        self.assertIn("pub(crate) fn spawn_host_control_loop(", host)
+        self.assertIn("set_host_control_fd(control_sockets[0])", host)
+
+        policy = read("src/fuse_redirect/policy.rs")
+        self.assertIn("pub(crate) struct SharedPolicyTable", policy)
+        self.assertIn("pub(crate) fn register(&self, config: FuseRedirectConfig)", policy)
+
+        # 宿主会话的未登记 uid 必须按设计拒绝，而不是回退到直通策略。回退到直通会让调用方
+        # 直接读写真实存储（沙盒失效），而且这类越权落点无法靠事后清理恢复，只能在决策前挡住。
+        self.assertIn(
+            "pub(super) fn new(policy: RedirectPolicy, deny_unregistered: bool)", policy
+        )
+        self.assertIn("fn copied_as_deny_all(&self)", policy)
+        decision = section(
+            policy,
+            "pub(super) fn backend_for_relative(",
+            "let storage_path = self.storage_path_for_rel(",
+        )
+        self.assertIn("if self.deny_all {", decision)
+        self.assertIn("deny_all: false,", policy)
+        fs = read("src/fuse_redirect/mod.rs")
+        self.assertIn("let deny_unregistered = config.is_passthrough_host;", fs)
+
+        # 控制通道必须与会话同生命周期：挂载函数接收控制端，并在就绪之后启动读取循环。
+        config = read("src/fuse_redirect/config.rs")
+        self.assertIn("control_sock: Option<libc::c_int>", config)
+        self.assertIn(
+            "crate::fuse_host::spawn_host_control_loop(control_sock, policy_table)",
+            config,
+        )
+
     def test_fuse_policy_resolution_is_per_request_uid(self) -> None:
         # 共享宿主 FUSE 会话要让同一个挂载点服务多个应用，策略解析就必须从「会话级常量」
         # 改成「每请求按调用方 uid 查表」。这里钉死阶段 1 的收敛结果：回调与挂载点日志
         # 都不得再直读会话绑定策略的字段，一律经注册表取值。
         source = read("src/fuse_redirect/mod.rs")
-        allowed = ("self.policy.for_uid(req.uid())", "self.policy.session()")
+        # `shared_table()` 是取出按 uid 策略表句柄（交给宿主会话的控制通道登记），不是读策略
+        # 字段，因此允许；除它之外的 `self.policy.` 仍然只能走 `for_uid` / `session`。
+        allowed = (
+            "self.policy.for_uid(req.uid())",
+            "self.policy.session()",
+            "self.policy.shared_table()",
+        )
         for number, line in enumerate(source.splitlines(), 1):
             if "self.policy." not in line:
                 continue
@@ -547,15 +602,17 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 f"src/fuse_redirect/config.rs:{number} 直读策略字段：{line.strip()}",
             )
 
-        # 注册表必须同时提供两个出口，并保证 uid 未命中时回退到会话默认：
-        # 少了回退，单策略场景（当前唯一形态）的行为就会和改造前不一致。
+        # 注册表必须提供按 uid 解析与会话级策略两个出口，并保证 uid 未命中时走回退策略：
+        # 少了回退，宿主会话一旦接入就会把未登记调用方暴露在直通策略下。
         registry = read("src/fuse_redirect/policy.rs")
         self.assertIn("pub(super) struct PolicyRegistry", registry)
         self.assertIn(
             "pub(super) fn for_uid(&self, uid: u32) -> Arc<RedirectPolicy>", registry
         )
         self.assertIn("pub(super) fn session(&self) -> &RedirectPolicy", registry)
-        self.assertIn("None => Arc::clone(&self.session)", registry)
+        # 未命中 uid 必须落到回退策略（scoped 回退到会话策略，宿主回退到拒绝策略）。
+        self.assertIn("if let Ok(table) = self.by_uid.0.read()", registry)
+        self.assertIn("Arc::clone(&self.fallback)", registry)
 
     def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
         expected_max = max(self.ids)

@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use super::FuseRedirectConfig;
 
@@ -128,6 +128,11 @@ pub(super) struct RedirectPolicy {
     pub(super) path_mappings: Vec<PathMapping>,
     pub(super) is_mapping_mode_only: bool,
     pub(super) is_file_monitor_enabled: bool,
+    /// 一律拒绝：路径决策全部失败，调用方据此返回 `ENOENT`。
+    ///
+    /// 只用于宿主共享会话的"未登记 uid"回退——宁可让调用方读不到、写不进，也不能让它
+    /// 直接落到真实存储上。普通策略恒为 `false`。
+    deny_all: bool,
 }
 
 /// 会话策略注册表：把「一个 FUSE 会话绑定单一应用」扩展为「按调用方 uid 解析」。
@@ -140,18 +145,57 @@ pub(super) struct RedirectPolicy {
 /// `for_uid` 对任何 uid 都回退到它，因此结果与改造前直读 `FuseRedirectFs.policy` 完全一致。
 /// 阶段 2 引入 `srx_fuse_host` 共享会话后，`by_uid` 才会被挂载点填成多应用表。
 pub(super) struct PolicyRegistry {
-    /// 会话创建时绑定的策略，同时是 uid 未命中时的回退。
+    /// 会话创建时绑定的策略；用于与调用方身份无关的会话级语义（日志、`init`、`statfs`）。
     session: Arc<RedirectPolicy>,
-    /// 按调用方 uid 预解析的策略表；阶段 1 恒为空。
-    by_uid: HashMap<u32, Arc<RedirectPolicy>>,
+    /// 按调用方 uid 预解析的策略表。
+    ///
+    /// scoped 会话建成后不再变化；宿主共享会话需要在运行期内按 uid 接收应用策略，所以
+    /// 这张表必须能在会话对象之外继续写入：宿主会话把句柄交给控制通道，由它按需登记。
+    by_uid: SharedPolicyTable,
+    /// uid 未命中时的回退策略。
+    ///
+    /// scoped 会话回退到会话策略（与改造前一致）；**宿主共享会话回退到"一律拒绝"**：
+    /// 宿主会话服务的是完整存储视图，如果让未登记 uid 回退到直通策略，那个调用方就会看到
+    /// 真实存储、写入也会直接落到真实位置（沙盒失效），而这类越权落点无法靠事后清理恢复。
+    /// 因此宿主会话按设计拒绝未登记调用方，而不是放行。
+    fallback: Arc<RedirectPolicy>,
+}
+
+/// 宿主会话运行期可写、FUSE 回调侧只读的按 uid 策略表句柄。
+///
+/// 回调热路径只取读锁，未命中时回退会话默认策略，因此登记前后都不改变单应用的既有语义。
+#[derive(Clone)]
+pub(crate) struct SharedPolicyTable(Arc<RwLock<HashMap<u32, Arc<RedirectPolicy>>>>);
+
+impl SharedPolicyTable {
+    /// 按 uid 登记或覆盖一份策略，返回登记后的条目数。
+    ///
+    /// 策略构造沿用与 scoped 会话完全相同的 [`RedirectPolicy::new`]，因此沙盒目录准备、
+    /// 规则归一化和映射解析行为一致；构造失败（例如目标非法）时不写入，保持旧策略。
+    pub(crate) fn register(&self, config: FuseRedirectConfig) -> Option<usize> {
+        let uid = u32::try_from(config.uid).ok()?;
+        let policy = RedirectPolicy::new(config)?;
+        let mut table = self.0.write().ok()?;
+        table.insert(uid, Arc::new(policy));
+        Some(table.len())
+    }
 }
 
 impl PolicyRegistry {
-    /// 用单个会话策略构造注册表（当前 scoped 会话的唯一形态）。
-    pub(super) fn single(policy: RedirectPolicy) -> Self {
+    /// 用会话策略构造注册表。
+    ///
+    /// `deny_unregistered` 为真时（宿主共享会话），uid 未命中的回退是一份"一律拒绝"策略。
+    pub(super) fn new(policy: RedirectPolicy, deny_unregistered: bool) -> Self {
+        let session = Arc::new(policy);
+        let fallback = if deny_unregistered {
+            Arc::new(session.copied_as_deny_all())
+        } else {
+            Arc::clone(&session)
+        };
         Self {
-            session: Arc::new(policy),
-            by_uid: HashMap::new(),
+            session,
+            by_uid: SharedPolicyTable(Arc::new(RwLock::new(HashMap::new()))),
+            fallback,
         }
     }
 
@@ -160,12 +204,19 @@ impl PolicyRegistry {
         self.session.as_ref()
     }
 
-    /// 按调用方 uid 解析策略；未命中时回退到会话默认，保证与改造前行为一致。
+    /// 按调用方 uid 解析策略；未命中时回退到 [`Self::fallback`]。
     pub(super) fn for_uid(&self, uid: u32) -> Arc<RedirectPolicy> {
-        match self.by_uid.get(&uid) {
-            Some(policy) => Arc::clone(policy),
-            None => Arc::clone(&self.session),
+        if let Ok(table) = self.by_uid.0.read()
+            && let Some(policy) = table.get(&uid)
+        {
+            return Arc::clone(policy);
         }
+        Arc::clone(&self.fallback)
+    }
+
+    /// 取出可写表句柄，交给宿主会话的控制通道在运行期登记应用策略。
+    pub(super) fn shared_table(&self) -> SharedPolicyTable {
+        self.by_uid.clone()
     }
 }
 
@@ -281,7 +332,19 @@ impl RedirectPolicy {
             path_mappings,
             is_mapping_mode_only: config.is_mapping_mode_only,
             is_file_monitor_enabled: config.is_file_monitor_enabled,
+            deny_all: false,
         })
+    }
+
+    /// 复制一份"一律拒绝"策略，用作宿主会话未登记 uid 的回退。
+    ///
+    /// 只复制规则数据并翻转拒绝标志，不重复执行构造期副作用（目录准备、元数据修复），
+    /// 因此不会因为"多一份策略"而在存储上留下任何痕迹。
+    fn copied_as_deny_all(&self) -> Self {
+        Self {
+            deny_all: true,
+            ..self.clone()
+        }
     }
 
     pub(super) fn backend_for_relative(
@@ -289,6 +352,11 @@ impl RedirectPolicy {
         rel: &str,
         operation: OperationKind,
     ) -> Option<BackendPath> {
+        // 拒绝策略先于任何路径解析生效：所有调用点（lookup/getattr/create/write/readdir/…）
+        // 都把 `None` 当作失败处理，因此未登记调用方既读不到真实内容，也写不进任何位置。
+        if self.deny_all {
+            return None;
+        }
         let rel = sanitize_relative(rel)?;
         let storage_path = self.storage_path_for_rel(&rel);
         let resolved_storage_path = paths::normalize(&storage_path);
