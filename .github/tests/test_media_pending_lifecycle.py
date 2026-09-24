@@ -23,6 +23,8 @@ class MediaPendingLifecycleTest(unittest.TestCase):
             "private static void commitRedirectedPendingFile(",
             "private static ContentValues findContentValues(",
             "private static boolean isPendingFileOf(",
+            "private static java.io.File findPendingMediaFile(",
+            "private static java.io.File publicMediaParentForSandbox(",
         ]
         methods = []
         for signature in signatures:
@@ -47,6 +49,7 @@ public class PendingFixture {
   static String relativePathFromDirectoryColumns(ContentValues v) { return null; }
   static String firstString(ContentValues v,String a,String b) { return v.getAsString(a); }
   static String normalizeStorageDisplayPath(String p,int uid) { return p; }
+  static String mediaStoreDisplayPath(String p,int uid) { return p; }
   static void logInfo(String s) {}
   static void logWarn(String s,Throwable t) { throw new AssertionError(t); }
   static int findMutationUriIndex(Object[] args) {
@@ -72,8 +75,7 @@ public class PendingFixture {
     mapping="/storage/emulated/0/Pictures/photo.jpg";
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,false);
     check(REDIRECTED_MEDIA_TARGETS.isEmpty());
-    mapping=null;
-    insert.put("_data",root.resolve(".pending-123-photo.jpg").toString());
+    mapping=root.resolve(".pending-123-photo.jpg").toString();
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,true);
     check(target.toString().equals(REDIRECTED_MEDIA_TARGETS.get(uri.toString())));
     Path pending=root.resolve(".pending-123-photo.jpg");
