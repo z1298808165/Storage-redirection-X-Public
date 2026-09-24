@@ -532,13 +532,22 @@ class ScenarioConsistencyTest(unittest.TestCase):
             source = read(path)
             body = section(source, "fn start_fuse_service_for_root", "let mut ready_sockets")
             compact = "".join(body.split())
-            register_at = body.index("crate::fuse_host::register_app_policy(")
-            gate_at = body.index("crate::fuse_host::can_attach_app(")
-            self.assertLess(register_at, gate_at, f"{path} 必须先登记策略再判断接入闸门")
+            if path.endswith("daemon_mount.rs"):
+                register_at = body.index("crate::fuse_host::register_app_policy(")
+                gate_at = body.index("crate::fuse_host::can_attach_app(")
+                self.assertLess(register_at, gate_at, f"{path} 必须先登记策略再判断接入闸门")
+            else:
+                snapshot_at = body.index("read_host_session_view()")
+                gate_at = body.index("crate::fuse_host::can_attach_app(")
+                self.assertLess(snapshot_at, gate_at, f"{path} 必须先读取已登记策略再判断接入闸门")
             # 登记进宿主会话的策略必须用整根虚拟根，且**丢掉 real_root_override**：那个锚点
             # 别名只存在于应用命名空间，宿主子进程在自己的私有命名空间里看到的是空目录，
             # 照搬会把真实根读成空（仅映射模式的应用会整个丢失公共存储视图）。
-            self.assertIn("fuse_config_from_request(request,None,None)", compact)
+            if path.endswith("daemon_mount.rs"):
+                self.assertIn("fuse_config_from_request(request,None,None)", compact)
+            else:
+                self.assertNotIn("register_app_policy(", compact)
+                self.assertIn("read_host_session_view()", compact)
 
         host = read("src/fuse_host.rs")
         self.assertIn("pub fn register_app_policy(", host)
@@ -614,7 +623,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(host_ns_at, clone_at, "克隆游离挂载必须在宿主命名空间内完成")
         self.assertLess(clone_at, app_ns_at, "克隆之后要切回应用命名空间")
         self.assertLess(app_ns_at, move_at, "附着必须发生在应用命名空间内")
-        self.assertIn("live.source != host.mount_source", attach)
+        self.assertIn("live.source != view.mount_source", attach)
         # 跨命名空间搬运只能用 open_tree + move_mount：`mount(MS_BIND)` 的源挂载必须属于
         # 调用方当前命名空间，跨命名空间时直接 EINVAL（真机实测），退回 bind 会让接入静默失效。
         self.assertIn("libc::SYS_open_tree", host)
@@ -641,7 +650,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("LAST_HOST_WAIT_FAIL_MS", wait_fn)
         self.assertIn("fallback=scoped_planning", wait_fn)
         # 规划层：Auto 模式先等待宿主就绪再收敛整根；等待失败的回退保持旧规划。
+        daemon_main = read("src/daemon.rs")
+        self.assertIn("pre_register_host_policy(&plan.request)", daemon_main)
+        self.assertLess(
+            daemon_main.index("pre_register_host_policy(&plan.request)"),
+            daemon_main.index("for (index, plan) in plans.iter().enumerate()"),
+            "daemon 必须在执行挂载计划前预登记策略，供 companion 快照发现",
+        )
         daemon_src = read("src/daemon_mount.rs")
+        pre_register = section(
+            daemon_src, "pub(crate) fn pre_register_host_policy(", "fn write_mount_state("
+        )
+        self.assertIn("fuse_config_from_request(request,None,None)", "".join(pre_register.split()))
+        self.assertIn("register_app_policy(&config)", pre_register)
         collapse = section(
             daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
         )
@@ -831,6 +852,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         upload_block = test_flow[upload_start:]
         self.assertIn("matrix.android.version != 17", upload_block)
         self.assertIn("actions/upload-artifact@v7.0.1", upload_block)
+        self.assertIn("Upload shared FUSE snapshots", test_flow)
+        self.assertIn("test-flow-shared-fuse-before.txt", test_flow)
+        self.assertIn("test-flow-shared-fuse-after.txt", test_flow)
         # 门禁：统一矩阵被校验，不再单列 android17。
         required = source[source.index("  test-flow-required:") :]
         self.assertIn("needs.test-flow.result", required)
@@ -877,6 +901,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         upload_block = test_flow[upload_start:]
         self.assertIn("matrix.android.version != 17", upload_block)
         self.assertIn("actions/upload-artifact@v7.0.1", upload_block)
+        self.assertIn("Upload shared FUSE snapshots", test_flow)
+        self.assertIn("test-flow-shared-fuse-before.txt", test_flow)
+        self.assertIn("test-flow-shared-fuse-after.txt", test_flow)
         # 门禁：统一矩阵被校验，不再单列 android17。
         required = section(source, "  test-flow-required:", "  publish-release:")
         self.assertIn("- test-flow", required)
@@ -930,6 +957,23 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("build/test-flow/assets/*.zip", runtime_upload)
             self.assertIn("build/outputs/apk/**/*.apk", runtime_upload)
 
+    def test_shared_fuse_snapshot_is_lightweight_and_uploaded(self) -> None:
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn("capture_shared_fuse_snapshot_once before", script)
+        self.assertIn("capture_shared_fuse_snapshot_once after", script)
+        self.assertIn("SHARED_FUSE_BEFORE_CAPTURED", script)
+        self.assertIn("SHARED_FUSE_AFTER_CAPTURED", script)
+        self.assertIn("srx_fuse_host", script)
+        self.assertIn("fuse_host.snapshot", script)
+        self.assertIn("policy registered", script)
+        self.assertIn("capture_shared_fuse_snapshot_once after || true", script)
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            self.assertIn("Upload shared FUSE snapshots", source)
+            self.assertIn("test-flow-shared-fuse-before.txt", source)
+            self.assertIn("test-flow-shared-fuse-after.txt", source)
+            self.assertIn("hashFiles('test-flow-shared-fuse-before.txt', 'test-flow-shared-fuse-after.txt')", source)
+
     def test_workflows_share_runtime_build_and_failure_artifacts(self) -> None:
         expected_artifacts = {
             "scenario-*-result.txt",
@@ -937,6 +981,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "test-flow-logcat.txt",
             "test-flow-module-state.txt",
             "test-flow-backend-diagnostic.txt",
+            "test-flow-shared-fuse-before.txt",
+            "test-flow-shared-fuse-after.txt",
             "media-health.txt",
         }
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):

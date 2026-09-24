@@ -715,6 +715,18 @@ jobs:
             test-flow-monitor-state.txt
             media-health.txt
 
+      - name: Upload shared FUSE snapshots
+        if: always() && hashFiles('test-flow-shared-fuse-before.txt', 'test-flow-shared-fuse-after.txt') != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: test-flow-android${{ matrix.android.version }}-shared-fuse
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
+          path: |
+            test-flow-shared-fuse-before.txt
+            test-flow-shared-fuse-after.txt
+
   test-flow-required:
     name: Test-flow required gate
     needs:

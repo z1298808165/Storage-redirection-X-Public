@@ -3453,8 +3453,54 @@ release_device_run_lock() {
   device_run_lock_held=0
 }
 
+SHARED_FUSE_BEFORE_CAPTURED=0
+SHARED_FUSE_AFTER_CAPTURED=0
+
+# 轻量共享 FUSE 时间点快照：每个 Android job 只采集 before/after 各一次。
+# 只读取进程、应用 mountinfo、状态文件和关键日志，不执行 dumpsys、递归扫描或重启；
+# 采集失败只留下 warning，绝不改变场景返回码。快照保存在 runner 工作区供 artifact 上传。
+capture_shared_fuse_snapshot() {
+  local phase="$1"
+  local outfile="test-flow-shared-fuse-${phase}.txt"
+  {
+    echo "schema=1"
+    echo "phase=${phase}"
+    echo "captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "sdk=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+    echo "app_id=${APP_ID}"
+    echo "=== host_snapshot ==="
+    adb_su 'cat /data/adb/modules/storage.redirect.x/tmp/fuse_host.snapshot 2>/dev/null || echo host_snapshot_absent' || true
+    echo "=== capability ==="
+    adb_su 'cat /data/adb/modules/storage.redirect.x/.fuse_capability 2>/dev/null || echo capability_absent' || true
+    echo "=== host_processes ==="
+    adb_su 'ps -A -o PID,PPID,USER,NAME,ARGS 2>/dev/null | grep -E "srx_daemon|srx_fuse_host|srx_fuse" || true' || true
+    echo "=== host_mounts ==="
+    adb_su 'grep -h -E " - fuse srx_fuse_(host|redirect)" /proc/[0-9]*/mountinfo 2>/dev/null | head -120 || true' || true
+    echo "=== app_mountinfo ==="
+    adb_su "for p in \$(pidof '$APP_ID' 2>/dev/null || true); do echo ---app_pid=\$p---; readlink /proc/\$p/ns/mnt 2>/dev/null || true; grep -E ' - fuse srx_fuse_(host|redirect)|/storage/emulated/0 |Android/(data|media|obb)' /proc/\$p/mountinfo 2>/dev/null || true; done" || true
+    echo "=== mount_states ==="
+    adb_su 'grep -h -E "^(package|uid|fuse_host|fuse_child|target|fingerprint)=" /data/adb/modules/storage.redirect.x/tmp/mount_state/*.state 2>/dev/null || true' || true
+    echo "=== relevant_log ==="
+    adb_su 'grep -a -h -E "fuse host|srx_fuse_host|policy registered|attach (ok|skipped)|deny_all|backend_effective|fuse redirect mount (start|failed)|ENOTCONN|EIO|ENOENT|panic|error" /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -160 || true' || true
+  } >"$outfile" 2>&1 || true
+  [ -s "$outfile" ] || echo "shared_fuse_snapshot_empty phase=${phase}" >&2
+}
+
+capture_shared_fuse_snapshot_once() {
+  local phase="$1"
+  if [ "$phase" = "before" ]; then
+    [ "$SHARED_FUSE_BEFORE_CAPTURED" -eq 0 ] || return 0
+    SHARED_FUSE_BEFORE_CAPTURED=1
+  else
+    [ "$SHARED_FUSE_AFTER_CAPTURED" -eq 0 ] || return 0
+    SHARED_FUSE_AFTER_CAPTURED=1
+  fi
+  capture_shared_fuse_snapshot "$phase" || true
+}
+
 finish_test_run() {
   local status=$?
+  capture_shared_fuse_snapshot_once after || true
   # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
   if [ "$device_run_lock_held" -eq 1 ]; then
     if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
@@ -3494,6 +3540,7 @@ wait_media_provider_ready "initial"
 echo "场景脚本 preflight：ensure_media_provider_hook_ready" >&2
 ensure_media_provider_hook_ready "initial" || exit 1
 adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
+capture_shared_fuse_snapshot_once before
 
 fail=0
 build_scenario_list
@@ -3503,6 +3550,7 @@ export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTE
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
+export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
 export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
