@@ -4297,14 +4297,45 @@ public class Hooker {
     String relative = path.startsWith("/") ? path.substring(1) : path;
     if (relative.length() == 0 || relative.startsWith("/")) return null;
     String[] segments = relative.split("/", -1);
-    if (segments.length < 2 || !isPublicMediaRoot(segments[0])) return null;
     for (int i = 0; i < segments.length; i++) {
       String segment = segments[i];
       if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment)) return null;
     }
+    if (segments.length < 2 || !isPublicMediaRoot(segments[0])) {
+      return normalizeOwnPrivateRelativeDataPath(segments, callerUid);
+    }
     int userId = userIdFromUid(callerUid);
     if (userId < 0) return null;
     return "/storage/emulated/" + userId + "/" + relative;
+  }
+
+  /**
+   * 调用方自有 Android/{data,media,obb}/<pkg>/... 的相对 _data 归一为绝对显示路径。 MediaStore
+   * 的卷内校验只接受挂载点下的绝对形态；自有私有目录保持真实落点，不进沙箱、不改写目录。 他人应用的私有目录仍然拒绝归一，让 MediaProvider 自身的私有路径校验按原样拦截。
+   */
+  private static String normalizeOwnPrivateRelativeDataPath(String[] segments, int callerUid) {
+    if (segments == null || segments.length < 4 || !"Android".equals(segments[0])) return null;
+    String kind = segments[1];
+    if (!"data".equals(kind) && !"media".equals(kind) && !"obb".equals(kind)) return null;
+    String callerPackage = packageNameForUid(callerUid);
+    if (callerPackage == null
+        || callerPackage.length() == 0
+        || !callerPackage.equals(segments[2])) {
+      return null;
+    }
+    int userId = userIdFromUid(callerUid);
+    if (userId < 0) return null;
+    StringBuilder builder =
+        new StringBuilder("/storage/emulated/")
+            .append(userId)
+            .append("/Android/")
+            .append(kind)
+            .append('/')
+            .append(callerPackage);
+    for (int i = 3; i < segments.length; i++) {
+      builder.append('/').append(segments[i]);
+    }
+    return builder.toString();
   }
 
   private static boolean isSafePublicMediaValuePath(String path) {
