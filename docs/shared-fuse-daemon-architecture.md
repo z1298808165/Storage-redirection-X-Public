@@ -19,7 +19,7 @@ srx_daemon（持久）      ──reconcile 每 3s──> daemon_mount.rs
 ```
 
 - 共享宿主会话：`src/fuse_host.rs` 在 daemon 启动时建立私有 mount namespace 和宿主 FUSE 会话，挂载源为 `srx_fuse_host[<pid>]`。
-- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `open_tree` + `move_mount` 注入共享宿主（默认关闭）；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
+- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `open_tree` + `move_mount` 注入共享宿主（**默认开启**）；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
 - 旧 scoped 路径仍由 `src/fuse_redirect/config.rs` 提供兼容实现，但不再是唯一数据面。
 - 状态落盘：`src/daemon_mount.rs:1643 write_mount_state`，字段为
   `version/package/uid/app_start_time/fuse_child=<pid>:<starttime>/target=`。
@@ -252,7 +252,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   未登记 `uid 0` 读/写均为 `ENOENT`，真实存储未产生任何文件。
 - `session()`（会话绑定策略）只用于日志与 `statfs`，不参与路径决策，因此不构成内容泄漏面。
 
-### 阶段 2——共享宿主会话 + namespace 注入（会话建立已真机验证；接入实现已落地，默认关闭）
+### 阶段 2——共享宿主会话 + namespace 注入（会话建立、应用接入与多应用共享均已真机验证，默认开启）
 
 - daemon 启动时建立 `FuseHost` 共享宿主会话，挂载源为 `srx_fuse_host[<pid>]`；子进程进入私有
   namespace，挂载点为模块私有目录，并在挂载点上开 shared。**该会话已在 Android 16 真机验证
@@ -285,11 +285,23 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - **接入只允许落在存储视图根**：宿主会话按 uid 注册策略，虚拟根只能是整个存储视图根。落在更深的
   scoped 子根时，内核会把该子树下的请求按整根解析，命中的是与本应用规则无关的真实路径——读错
   内容却不报错。因此闸门只在 `mount_root` 就是该 uid 的存储视图根时放行。
-- **接入默认关闭**，验证期由环境变量 `SRT_FUSE_HOST_ATTACH`（`1`/`true`/`yes`）显式打开。
-  接入把数据面从"每应用一个 scoped 会话"换成"全局一个宿主会话"，因此正式启用前必须换成
-  **应用进程可读的开关**（配置项或模块文件）：`companion_mount` 跑在应用进程内，读不到
-  daemon 的环境变量——真机实测同一应用在 daemon 侧接入已打开时，仍是应用自己启动时用
-  scoped 会话挂好的。关闭时行为与改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
+- **接入默认开启**：共享宿主会话是目标形态，未设置环境变量即接入；`SRT_FUSE_HOST_ATTACH`
+  只作为 **kill switch**（显式写成 `0`/`false`/`no`/`off` 时退回 scoped 数据面），便于在设备上
+  快速回退。注意该变量只对 daemon 及其 fork 的 worker 可见：`companion_mount` 跑在应用进程内，
+  读不到 daemon 的环境变量，companion 侧的接入判定不依赖这个开关，而是依赖 daemon 发布的
+  宿主会话快照（见下）。关闭时行为与改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
+- **companion 跨进程发现与 daemon 预登记**：companion 进程与 daemon 不共享内存，宿主会话只能
+  通过 daemon 发布的快照文件（`tmp/fuse_host.snapshot`）发现，内容为 boot_id、宿主 pid/start、
+  挂载点、挂载源与已登记 uid 集合；快照按 boot_id 与宿主进程实例校验，失效即回退 scoped。
+  策略登记由 daemon 在 reconcile 中**预登记**（执行挂载计划前对 Auto 应用统一登记），companion
+  有界等待"本 uid 已登记"后再接入——等待发生在挂载应答返回之前，应用进程尚未恢复运行，一次
+  挂载到位，没有"先 scoped 后迁移"的中间穿透窗口；等待超时或失败冷却期内保持旧 scoped 规划。
+  真机验证（Android 16）：QQ、微信、钉钉、Nnngram 常规启动路径首次挂载即全部接入同一宿主会话，
+  无需人为干预；未配置的 MT 管理器与 Via 无任何模块挂载。
+- **Auto 模式默认收敛到存储视图根**：宿主会话按 uid 持有同一份规则，一个整根会话即可表达相同
+  语义。daemon 侧规划在宿主健康时把按目录 scoped 根收敛成该 uid 的存储视图根，常规挂载直接
+  命中接入闸门；companion 侧规划同样收敛（依赖快照等待）。namespace fallback（空规划）、
+  非 Auto 模式、规划本就是整根这三条边界不收敛。
 - **真机 A/B 结论**（Android 16，同一应用同一配置）：scoped 会话与宿主会话下，应用视图根
   内容逐项一致（真实公共目录 + 被沙盒化的路径），应用在视图里的写入落在自己的沙盒、公共
   存储无残留；`kill` 掉宿主子进程后状态判活生效，应用自动重挂到新会话。
@@ -313,6 +325,20 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   `/proc/*/comm` 匹配；进入其 namespace 用 `busybox nsenter -t <pid> -m`（toybox nsenter 会去
   读不存在的 `ns/user` 而失败）。
 
+### CI 可观测性（已落地）
+
+CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 在场景前后各采集一次
+（`test-flow-shared-fuse-before.txt` / `test-flow-shared-fuse-after.txt`），内容为宿主会话
+快照、FUSE capability、宿主进程、宿主与应用的 FUSE 挂载、mount state 关键字段，以及
+`policy registered` / `attach ok|skipped` / `backend_effective` / `ENOTCONN` / `EIO` /
+`ENOENT` / `panic` 等关键日志行。要点：
+
+- 采集只读、限制输出行数，不执行 dumpsys、递归扫描或重启，不影响场景退出码；
+- after 快照由 EXIT trap 兜底，超时或早期失败也保留现场；
+- CI 与 Release 以独立 artifact 上传（不受 Android 17 的重型诊断排除条件影响）；
+- 失败排查时用 before/after 对照可直接分层：宿主没建立 / 建立但 uid 未登记 / 登记但接入失败 /
+  仍走 scoped / 无配置应用被误接管。
+
 ### 阶段 3——监督收敛（基础能力已落地，后续增强）
 
 - 身份账本、端点探测、验证式摘除、poisoned 收敛和 `srx_daemon doctor` 已落地。
@@ -330,7 +356,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认关闭（`SRT_FUSE_HOST_ATTACH` 显式打开）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即回落 scoped fork |
+| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认开启（`SRT_FUSE_HOST_ATTACH` 仅作 kill switch）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即回落 scoped fork |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
 | 按 uid 直通回退可能漏改写 | 高 | 宿主会话未命中 uid 一律**拒绝**（`deny_all` → `ENOENT`），绝不回退直通；落点越权无法靠事后清理恢复，必须在决策前挡住 |
 | 宿主 pid 被当成 scoped 子进程记账 | 高 | 状态文件按 `host_session` 分流：宿主挂载写 `fuse_host=` 只判活、不终止；回滚对宿主挂载只卸载。守卫测试锁定"不得写进 `fuse_child=`" |
@@ -340,7 +366,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 | 跨命名空间搬运挂载写成了 `mount(MS_BIND)` | 高 | bind 的源挂载必须属于调用方当前命名空间，跨命名空间时内核直接 `EINVAL`；接入改用 `open_tree(OPEN_TREE_CLONE)` + `move_mount`，并有守卫测试钉住顺序（见 §2.1） |
 | 附着进来的克隆继承了宿主挂载点的 shared 传播组 | 高 | 各应用的挂载会结成同一 peer group，互相传播挂载/卸载；附着后立即在本命名空间内改为 `MS_REC\|MS_PRIVATE` |
 | 宿主会话策略照搬应用命名空间的锚点覆盖 | 高 | 锚点绑定只存在于应用命名空间，宿主子进程看到空目录 → 仅映射模式应用丢失公共存储视图；登记时传 `real_root_override=None`，用宿主命名空间里的 `/data/media/<user>` |
-| 启用开关写在 daemon 的环境变量里 | 中 | companion 路径在应用进程内，读不到该变量，接入只在 daemon 侧重挂时生效；正式启用前换成应用进程可读的开关 |
+| 启用开关写在 daemon 的环境变量里 | 中 | 该变量现仅作 daemon 侧 kill switch；companion 接入不依赖它，而依赖 daemon 发布的宿主会话快照（`tmp/fuse_host.snapshot`，含已登记 uid），跨进程一致性由快照与预登记保证 |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
 
