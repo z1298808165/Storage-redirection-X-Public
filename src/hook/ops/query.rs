@@ -844,14 +844,6 @@ unsafe fn reverse_readlink_result_if_visible(
     if result <= 0 || crate::hook::is_provider_passthrough_active() {
         return result;
     }
-    // 系统代写进程（MediaProvider 等）用 readlink 结果做 canonical 路径计算并写回
-    // 数据库 _data。即使当前调用方上下文是某个应用，也不能按该应用的映射视图
-    // 反解：否则 _data 会被写成映射源（如 DCIM/Camera），与物理落点（映射目标，
-    // 如 Pictures/钉钉）不一致，相册按 _data 扫描不到文件。应用进程自己的
-    // readlink 反解需求由本函数其余逻辑覆盖。
-    if InterceptHub::instance().with_package_name(policy::is_system_writer_package) {
-        return result;
-    }
     let result_len = result as usize;
     if result_len >= bufsiz {
         return result;
@@ -867,9 +859,24 @@ unsafe fn reverse_readlink_result_if_visible(
         return result;
     }
 
-    let display_path = reverse_mapping_readlink_path_for_visible_caller(
-        &writer::reverse_readlink_sandbox_path(&result_str),
-    );
+    // 系统代写进程（MediaProvider 等）用 readlink 结果做 canonical 路径计算并写回
+    // 数据库 _data。按调用方映射视图的反解必须跳过：否则 _data 会被写成映射源
+    // （如 DCIM/Camera），与物理落点（映射目标，如 Pictures/钉钉）不一致，相册
+    // 按 _data 扫描不到文件。但沙盒形态的机械反解必须保留：它只把同一物理位置
+    // 的 /data/media/<user>/Android/data/<pkg>/sdcard 前缀还原成
+    // /storage/emulated/<user> 公共形态，系统代写进程的卷内路径校验
+    // （"Requested path ... doesn't appear under"）依赖这一步，跳过会让 pending
+    // 提交在部分 OEM MediaProvider 上整体失败。应用进程自己的 readlink 反解需求
+    // 由本函数其余逻辑覆盖。
+    let is_system_writer_process =
+        InterceptHub::instance().with_package_name(policy::is_system_writer_package);
+    let display_path = if is_system_writer_process {
+        writer::reverse_readlink_sandbox_path(&result_str)
+    } else {
+        reverse_mapping_readlink_path_for_visible_caller(&writer::reverse_readlink_sandbox_path(
+            &result_str,
+        ))
+    };
     if display_path == result_str {
         log_readlink_reverse_unchanged(op_name, &result_str);
         return result;
