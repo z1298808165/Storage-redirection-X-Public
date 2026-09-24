@@ -1,6 +1,6 @@
-# FUSE-first 迁移架构
+# 自动后端与 FUSE 挂载架构
 
-本项目把普通应用的数据面收敛为自动后端：配置面固定写入 `auto`，运行时在 scoped FUSE 与 mount namespace 之间选择。
+本文记录从早期“FUSE-first”设计到当前自动后端实现的演进。当前项目并不把 FUSE 视为所有设备上的唯一优先后端：配置面固定使用 `auto`，运行时根据平台能力、规则需求和挂载状态，在 scoped FUSE、共享 FUSE 宿主会话与 mount namespace 之间选择，并保留回退路径。
 
 ## 运行方式
 
@@ -37,6 +37,13 @@
 - `fuse` 模式接管范围更大，厂商 MediaProvider、内核 FUSE 和 SELinux 差异需要真机验证。
 - FUSE 运行时属于共享链路，策略或资源泄漏的影响面大于单个应用的 bind mount。
 
-## 迁移原则
+## 当前状态与维护边界
 
 `auto` 是所有设备的唯一配置模式；测试流会记录每个场景的 `backend_effective`，并保留 FUSE cache 容量、mount intent 和原始运行日志。系统 MediaProvider/系统 writer 仍使用现有调用方识别 hook，普通应用不安装进程内 PLT hook。
+
+当前实现的关键边界如下：
+
+- 有能力且规则需要时使用 scoped FUSE；共享宿主会话可通过 `srx_fuse_host[<pid>]` 为多个应用 namespace 提供共享数据面。
+- `mount namespace` 不是待删除的旧实现，而是 `auto` 后端的正式路径和 FUSE 不可用时的兼容回退。
+- `srx_fuse_redirect` 仍是 scoped FUSE 的兼容前缀；测试、账本和诊断必须同时识别 `srx_fuse_redirect` 与 `srx_fuse_host`。
+- 只有在新的共享宿主路径、真实设备兼容性和回退行为持续通过验证后，才可以进一步收窄旧 scoped FUSE 路径；当前不应删除该回退。

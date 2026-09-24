@@ -1,7 +1,7 @@
 # 共享 FUSE daemon 架构设计
 
-本文给出把"每个应用各自起一个 FUSE 服务"改造成"一个持久共享 FUSE daemon + 独立监督与
-namespace 注入"的目标架构、根因分析、分阶段迁移计划，以及本次已落地的部分。
+本文记录 FUSE 挂载从“每个应用各自起一个服务”演进到“共享宿主会话 + 独立监督与
+namespace 注入”的架构、根因分析和当前实现边界。早期分阶段迁移计划保留作为设计历史；其中身份账本、策略注册表、共享宿主接入和基础监督已经落地，文中的“目标架构”应按当前状态阅读。
 
 参考实现：`huniangitb/Fuse-Proxy`（Android 13+ 用户态 FUSE 代理 + 挂载命名空间隔离）。
 该项目的 `injector` / `fuse_daemon` 分离结构是本方案的直接参照，差异见 §3。
@@ -15,13 +15,12 @@ namespace 注入"的目标架构、根因分析、分阶段迁移计划，以及
 ```
 zygisk specialize_pre ──connect_companion──> root companion ──> companion_mount.rs（按应用挂载）
 srx_daemon（持久）      ──reconcile 每 3s──> daemon_mount.rs
-                                              └─ fork 子进程 setns → spawn_mount2（每个挂载根一个 srx_fuse）
+                                              └─ 共享宿主会话：FuseHost 建立 srx_fuse_host；应用侧 setns + MS_BIND 注入，失败时回退 scoped srx_fuse_redirect
 ```
 
-- FUSE 会话创建：`src/fuse_redirect/config.rs:410 mount_blocking_with_ready` →
-  `fuser::spawn_mount2`，`MountOption::FSName("srx_fuse_redirect[<pid>]")`。
-- 服务进程：`src/daemon_mount.rs:1096 start_fuse_service_for_root` 为**每个挂载根** fork 一个
-  子进程（`prctl(PR_SET_NAME,"srx_fuse")`）。N 个应用 × M 个挂载根 = N×M 个独立 FUSE 会话。
+- 共享宿主会话：`src/fuse_host.rs` 在 daemon 启动时建立私有 mount namespace 和宿主 FUSE 会话，挂载源为 `srx_fuse_host[<pid>]`。
+- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `setns` + `MS_BIND` 注入共享宿主；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
+- 旧 scoped 路径仍由 `src/fuse_redirect/config.rs` 提供兼容实现，但不再是唯一数据面。
 - 状态落盘：`src/daemon_mount.rs:1643 write_mount_state`，字段为
   `version/package/uid/app_start_time/fuse_child=<pid>:<starttime>/target=`。
 - 周期 reconcile：`src/daemon.rs:420 reconcile_running_apps`，间隔 3 秒
@@ -222,34 +221,32 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - `src/daemon.rs`：reconcile 接入监督门禁与账本清理
 - `src/bin/srx_daemon.rs`：新增 `doctor` 子命令
 
-**验证方式**：`cargo check` / `cargo build --release` 通过；设备上跑现有场景 1-29
-（重点场景：重定向读写、死挂载恢复、MediaStore 物理回退、应用重启后重挂），
+**验证方式**：`cargo check` / `cargo build --release` 通过；设备和 CI 使用当前完整场景 1-37
+（重点关注重定向读写、死挂载恢复、MediaStore 代写、应用重启、共享宿主和回退路径），
 并用 `srx_daemon doctor` 观察账本与判定。
 
-### 阶段 1——策略注册表（不改数据面行为）
+### 阶段 1——策略注册表（已落地）
 
-- `FuseRedirectFs.policy` → `PolicyRegistry`，每个回调按 `req.uid()` 取策略
-- 单策略场景行为不变，场景 1-29 应全绿，作为纯重构验证
-- 未命中 uid 时直通回退，为阶段 2 的多应用共享做准备
+- `FuseRedirectFs.policy` 已改为 `PolicyRegistry`，每个回调按 `req.uid()` 取策略。
+- 单策略行为保持兼容；未命中 uid 时直通回退，为共享会话提供多应用策略解析能力。
 
-### 阶段 2——共享宿主会话 + namespace 注入
+### 阶段 2——共享宿主会话 + namespace 注入（已落地，保留回退）
 
-- daemon 启动时创建私有 namespace，`unshare(CLONE_NEWNS)` + `MS_REC|MS_PRIVATE`
-- 在私有 namespace 内把 FUSE 挂到宿主路径，`source = srx_fuse_host[<pid>]`
-- 应用挂载改为 `setns(目标 ns)` → `MS_BIND` 宿主树到 `/storage/emulated/N`
-- `srx_fuse_redirect` 与 `srx_fuse_host` 前缀共存期，账本按前缀判定归属
-- 保留 `srx_fuse_redirect` 路径作为回退，能力熔断机制不变
+- daemon 启动时创建私有 namespace，并建立 `FuseHost` 共享宿主会话，挂载源为 `srx_fuse_host[<pid>]`。
+- daemon 和 companion 优先通过 `setns(目标 ns)` → `MS_BIND` 将宿主树注入应用 namespace。
+- `srx_fuse_redirect` 与 `srx_fuse_host` 前缀共存，账本和测试流按两种前缀识别归属。
+- 宿主接入失败或能力不可用时保留 scoped FUSE 回退，不能删除旧路径。
 
-### 阶段 3——监督收敛
+### 阶段 3——监督收敛（基础能力已落地，后续增强）
 
-- 宿主会话纳入监督：会话死亡 → 摘除全部注入 → 重建会话 → 重新注入
-- 收敛条件从"3 次摘除失败"细化为按命名空间独立预算 + 指数退避
-- `service.sh` 增加轻量 respawn 兜底（daemon 自身退出后仍能被拉回）
+- 身份账本、端点探测、验证式摘除、poisoned 收敛和 `srx_daemon doctor` 已落地。
+- 共享宿主死亡后的全量注入重建、按 namespace 独立预算和指数退避仍属于后续增强方向。
+- `service.sh` 的 respawn 兜底仍需在真实设备上单独验证后再扩大范围。
 
-### 阶段 4——发现通道优化（可选）
+### 阶段 4——发现通道优化（可选，未启用）
 
-- 参考 Fuse-Proxy 的 zygisk 通知转被动模式，降低 `/proc` 扫描开销
-- 需先确认双 ABI 部署完整性，否则保留扫描兜底
+- 可参考 Fuse-Proxy 的 zygisk 通知转被动模式，降低 `/proc` 扫描开销。
+- 在双 ABI 部署完整性和兼容性得到验证前，继续保留周期扫描兜底。
 
 ---
 
@@ -270,6 +267,6 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 
 - **普通应用不安装 native/inline/PLT hook**：本改造全部走 companion mount / mount
   namespace / FUSE 路径，未新增任何进程内 hook；
-- **测试流识别 scoped 挂载按 `srx_fuse_redirect` 前缀**：阶段 0 未改动该前缀，
-  场景断言不受影响；阶段 2 引入 `srx_fuse_host` 时需同步测试流的前缀识别；
+- **测试流同时识别两类 FUSE 挂载**：`srx_fuse_redirect` 表示 scoped 回退会话，`srx_fuse_host` 表示共享宿主会话；场景断言不能只匹配其中一种。
 - **能力熔断快照语义不变**：`fuse_capability` 的 `state`/`reason`/`fail_count` 未改动。
+- **后端选择仍由 `auto` 统一控制**：文档、测试和诊断不应把 FUSE 或 namespace 单独描述成所有设备的固定后端。

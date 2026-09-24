@@ -73,7 +73,7 @@ Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩�
 .\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
 ```
 
-需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行 1-37 号设备侧场景：
+需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行当前清单中的 37 个设备侧场景（scenario 1-37）：
 
 ```bash
 bash scripts/verify-test-flow.sh

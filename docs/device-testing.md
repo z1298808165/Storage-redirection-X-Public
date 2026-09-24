@@ -43,7 +43,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-37。CI Build 和 Release 都额外包含一个独立的 Android 17（API 37.0）模拟器 job，执行同一套 scenario 1-37；`Test-flow required gate` 会同时校验主矩阵和该 job，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-37。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验五个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
