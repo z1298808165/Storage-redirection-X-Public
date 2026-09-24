@@ -102,17 +102,17 @@ daemon 进程。因此：
   **重定向本体尚未建立**时就观察到"稳定的非空挂载集合"，从而提前放行并读到未重定向的
   视图（真机已复现：三个微信进程同秒启动，主进程在 `mounts=7` 时被放行）。
 
-#### 传播方向必须先开 shared，否则注入静默失败
+#### 传播方向：接入改用"取句柄"，不依赖传播
 
-宿主挂载建好后，**必须把它在宿主 namespace 里显式设为 shared propagation**，各个应用
-namespace 的 `MS_BIND` 才能引用到它。只做 `MS_REC|MS_PRIVATE` 隔离宿主 namespace 是**不够**的
-——private 只切断向外传播，不会让子 namespace 得见该挂载；缺了 shared，注入会以 ENOENT 或
-挂到空目录的形式静默失败，且因为 bind 本身"成功"而不会产生错误日志。
+宿主挂载建好后，`mount_host_fuse` 会在宿主挂载点上开 shared。但**应用接入并不依赖传播**：
+宿主子进程已经对整棵树做过 `MS_REC|MS_PRIVATE`，各应用 namespace 看不到宿主的挂载点，
+只开 shared 也不会让它们"看见"。因此接入走的是显式引用——在宿主 namespace 内用 `O_PATH`
+钉住挂载点句柄，切回应用 namespace 后以 `/proc/self/fd/<n>` 为源做 `MS_BIND`。这条路径与
+传播模式无关，也不会把新挂载反向传播回宿主 namespace；shared 只作为挂载点的既有属性保留。
 
-参照实现 `huniangitb/Fuse-Proxy` 的对应动作是 `ns_make_shared(pid, mount_path)`
-（`src/injector/injector.c`），它在挂载 FUSE 之后、验证就绪之前执行，用于把
-`/mnt/nsp_global` 变成可被各应用 namespace bind 的共享挂载点。本项目阶段 2 实现时
-须在 `FuseHost` 建立后补上等价调用。
+参照实现 `huniangitb/Fuse-Proxy` 的做法是 `ns_make_shared(pid, mount_path)`
+（`src/injector/injector.c`），靠传播让子 namespace 得见全局挂载点；本项目**未采用该路径**，
+因为它要求挂载点在宿主 namespace 里保持可得，而我们的宿主 namespace 是刻意与外界隔离的。
 
 ### 2.2 策略必须按调用方 uid 解析（硬阻塞）
 
@@ -242,7 +242,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   未登记 `uid 0` 读/写均为 `ENOENT`，真实存储未产生任何文件。
 - `session()`（会话绑定策略）只用于日志与 `statfs`，不参与路径决策，因此不构成内容泄漏面。
 
-### 阶段 2——共享宿主会话 + namespace 注入（会话建立已落地并真机验证；应用接入未启用）
+### 阶段 2——共享宿主会话 + namespace 注入（会话建立已真机验证；接入实现已落地，默认关闭）
 
 - daemon 启动时建立 `FuseHost` 共享宿主会话，挂载源为 `srx_fuse_host[<pid>]`；子进程进入私有
   namespace，挂载点为模块私有目录，并在挂载点上开 shared。**该会话已在 Android 16 真机验证
@@ -250,11 +250,26 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - 直通会话必须显式标记为 `is_passthrough_host`：它的 `redirect_target` 就是存储根本身，而按子
   路径推导重定向根的函数对"根本身"返回 `None`，否则策略构造会直接失败（真机表现为宿主子进程
   在 `policy` 阶段退出，且旧代码在该分支没有任何日志）。
-- **应用侧 namespace 注入当前被能力闸门关闭**（`fuse_host::can_attach_app` 返回 false）。启用前
-  还需完成两件事：① 接入必须在**目标应用 namespace** 内 bind（宿主子进程已把整棵挂载树设为
-  private，应用 namespace 无法靠传播看到宿主挂载点，需在宿主 namespace 内先取挂载点句柄，
-  再进入目标 namespace 完成 bind）；② 挂载台账不能复用宿主 pid 作为 `fuse_child`——那条路径会
-  在回滚/清理时 `terminate_fuse_child`，等于杀掉共享会话。
+- **应用接入的实现已落地**（`fuse_host::attach_app_to_host`），daemon 与 companion 两条挂载
+  路径共用同一份实现——这条链路上"bind 落在哪个命名空间"是唯一的要害，两处各写一份最容易
+  只改对一处，而症状（应用读到真实存储）不会报错。具体做法：在宿主 namespace 内用 `O_PATH`
+  钉住挂载点句柄 → 切回**应用自己的 namespace** → 执行 `MS_BIND` → 复核应用视图里该目标最上层
+  的挂载源等于本次会话的挂载源。bind 子进程就绪后立即退出：挂载归 mount namespace 所有，
+  常驻只会白占一个进程并拖住应用 namespace 的引用计数。
+- **挂载台账把宿主会话与 scoped 子进程分开记**：接入产生的挂载写 `fuse_host=<pid>:<start>`
+  而不是 `fuse_child=`，回滚与清理只卸载、不终止任何进程——宿主会话跨应用共享，按它的 pid
+  发信号等于把所有接入应用一起打成死挂载。会话死亡时 `has_dead_fuse_child` 据此把该应用的
+  挂载状态判为失效并触发重挂；已被重建会话留下的层也不再按"可保留"处理（否则保留的是一条
+  已经断开的 FUSE 连接）。
+- **策略登记改为同步应答**：宿主子进程登记后回 `(uid, 表大小)`，调用方按 uid 匹配等待应答
+  （同一条控制通道被所有挂载 worker 共用，所以应答必须带 uid）；登记未确认时保持 scoped 路径，
+  避免"策略还没进会话就接入"导致整片 `ENOENT`。
+- **接入只允许落在存储视图根**：宿主会话按 uid 注册策略，虚拟根只能是整个存储视图根。落在更深的
+  scoped 子根时，内核会把该子树下的请求按整根解析，命中的是与本应用规则无关的真实路径——读错
+  内容却不报错。因此闸门只在 `mount_root` 就是该 uid 的存储视图根时放行。
+- **接入默认关闭**，由 `SRT_FUSE_HOST_ATTACH`（`1`/`true`/`yes`）显式打开：接入把数据面从"每应用
+  一个 scoped 会话"换成"全局一个宿主会话"，在真机与 CI 双重验证通过前不接管挂载。关闭时行为与
+  改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
 - 宿主会话失效后由 daemon 在 reconcile 中重建，失败时保留 scoped FUSE 回退；`srx_fuse_redirect`
   前缀路径不能删除。
 - **僵尸态必须排除**：会话线程结束时子进程自行退出（FUSE 连接被 `FUSE_DESTROY` 结束），父进程
@@ -292,10 +307,14 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| 共享会话退出影响面从单应用扩到全部应用 | 高 | 阶段 2 保留 `srx_fuse_redirect` 回退路径；阶段 3 先做监督再切默认 |
+| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认关闭（`SRT_FUSE_HOST_ATTACH` 显式打开）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即回落 scoped fork |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
 | 按 uid 直通回退可能漏改写 | 高 | 宿主会话未命中 uid 一律**拒绝**（`deny_all` → `ENOENT`），绝不回退直通；落点越权无法靠事后清理恢复，必须在决策前挡住 |
-| bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE` 隔离；**同时在宿主挂载点上开 shared**，否则应用 namespace 的 bind 拿不到共享会话（见 §2.1） |
+| 宿主 pid 被当成 scoped 子进程记账 | 高 | 状态文件按 `host_session` 分流：宿主挂载写 `fuse_host=` 只判活、不终止；回滚对宿主挂载只卸载。守卫测试锁定"不得写进 `fuse_child=`" |
+| 策略未进宿主会话就接入 | 高 | 登记改为同步应答（`(uid, 表大小)`），未确认即保持 scoped 路径，不进入接入分支 |
+| 已重建会话留下的层被当成有效层保留 | 中 | 保留判据拒绝 `is_stale_host_source` 的层，按摘除重建处理；否则保留的是一条已断开的 FUSE 连接（`ENOTCONN`） |
+| 接入落在 scoped 子根导致按整根解析 | 中 | 闸门只在 `mount_root` 就是该 uid 的存储视图根时放行；其余情况保持 scoped |
+| bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE` 隔离；接入用 `O_PATH` 句柄显式引用宿主挂载点，与传播模式无关（见 §2.1） |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
 
