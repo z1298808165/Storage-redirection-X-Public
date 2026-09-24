@@ -1220,6 +1220,7 @@ pub fn set_global(host: FuseHost) {
     let view = HostSessionView::from(&host);
     if let Ok(mut slot) = host_slot().write() {
         // 以当前宿主句柄替换旧快照，供两条挂载路径读取。
+        // quality-allow(chinese-language): 下方为解引用赋值代码行，会被块注释模式误读为文本，并非英文自然语言。
         *slot = Some(Arc::new(host));
     }
     // 新会话身份发布到快照文件：companion 进程没有本进程的内存状态，
