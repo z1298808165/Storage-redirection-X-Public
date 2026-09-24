@@ -355,8 +355,9 @@ public class Hooker {
               redirectEnabled,
               patch.patchedAny || patch.directWriteRequested);
           if (redirectEnabled) {
-            finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
+            // 提交搬运需要先消费 URI -> 沙箱目标登记；完成直写清理会删除该登记。
             commitRedirectedPendingFile(actualArgs, result, mutationMethod);
+            finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
           }
           probeInsertedMediaRow(provider, result, mutationMethod);
           logMutationResult(this, result);
@@ -3702,19 +3703,25 @@ public class Hooker {
       if (displayName == null || displayName.length() == 0) return;
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
       if (probePath == null) return;
-      String sandboxPath = rewriteMediaStorePath(probePath, callerUid);
-      // 显式路径映射已在 insert 前把 _data 改写为公共目标；此时再次按
-      // 映射解析会返回空，因此直接保存已改写的目标路径供后续 update 使用。
-      if (sandboxPath == null || sandboxPath.length() == 0) {
-        if (!wasRedirected) return;
-        sandboxPath = values.getAsString("_data");
+      // 映射目标的物理落点是公共目录（MediaProvider 自己把 pending 改名到映射目标），
+      // 登记值必须是与物理位置一致的公共显示路径；相册按 _data 扫描该路径即可见，
+      // 钉钉则经映射视图把它显示为 DCIM/Camera。此前把这里转成应用沙箱路径，
+      // 与 MediaProvider 的实际 rename 目标不一致，导致 _data 指向不存在的文件。
+      String targetPath = probePath;
+      try {
+        String rewrittenPath = rewriteMediaStorePath(probePath, callerUid);
+        if (rewrittenPath != null && rewrittenPath.length() > 0) targetPath = rewrittenPath;
+      } catch (Throwable ignored) {
+      }
+      String targetDisplay = mediaStoreDisplayPath(targetPath, callerUid);
+      if (targetDisplay == null) targetDisplay = targetPath;
+      String sandboxPath = targetDisplay;
+      {
         // Provider 回填的 _data 可能仍是 pending 临时名，登记必须保存最终显示名。
-        if (sandboxPath != null) {
-          File pendingFile = new File(sandboxPath);
-          if (isPendingFileOf(pendingFile.getName(), displayName)
-              && pendingFile.getParentFile() != null) {
-            sandboxPath = new File(pendingFile.getParentFile(), displayName).getPath();
-          }
+        File pendingFile = new File(sandboxPath);
+        if (isPendingFileOf(pendingFile.getName(), displayName)
+            && pendingFile.getParentFile() != null) {
+          sandboxPath = new File(pendingFile.getParentFile(), displayName).getPath();
         }
       }
       if (sandboxPath == null || sandboxPath.length() == 0) return;
@@ -3771,26 +3778,31 @@ public class Hooker {
       java.io.File parent = finalFile.getParentFile();
       if (parent == null) return;
       java.io.File[] children = parent.listFiles();
-      if (children == null) {
-        logInfo("media pending commit list failed parent=" + parent.getAbsolutePath());
-        return;
-      }
       String name = finalFile.getName();
-      for (java.io.File child : children) {
-        // 只接受 .pending-<id>-<最终名> 这一确切形态；用 endsWith 会让「另一个文件名恰好
-        // 以本名结尾」的 pending 文件被误改名。
-        if (!isPendingFileOf(child.getName(), name)) continue;
-        boolean renamed = child.renameTo(finalFile);
-        logInfo(
-            "media pending commit renamed="
-                + renamed
-                + " from="
-                + child.getAbsolutePath()
-                + " to="
-                + sandboxPath);
+      java.io.File candidate = findPendingMediaFile(children, name);
+      // MediaProvider 的 pending 文件先创建在公共显示目录；目标沙箱只在提交阶段接收最终文件。
+      if (candidate == null) {
+        java.io.File publicParent = publicMediaParentForSandbox(finalFile);
+        if (publicParent != null) {
+          candidate = findPendingMediaFile(publicParent.listFiles(), name);
+        }
+      }
+      if (candidate == null) {
+        logInfo("media pending commit no candidate target=" + sandboxPath);
         return;
       }
-      logInfo("media pending commit no candidate parent=" + parent.getAbsolutePath());
+      if (!parent.exists() && !parent.mkdirs()) {
+        logInfo("media pending commit mkdir failed parent=" + parent.getAbsolutePath());
+        return;
+      }
+      boolean renamed = candidate.renameTo(finalFile);
+      logInfo(
+          "media pending commit renamed="
+              + renamed
+              + " from="
+              + candidate.getAbsolutePath()
+              + " to="
+              + sandboxPath);
     } catch (Throwable t) {
       logWarn("media pending commit failed", t);
     }
@@ -3803,6 +3815,33 @@ public class Hooker {
       if (arg instanceof ContentValues) return (ContentValues) arg;
     }
     return null;
+  }
+
+  private static java.io.File findPendingMediaFile(java.io.File[] children, String displayName) {
+    if (children == null) return null;
+    java.io.File finalCandidate = null;
+    for (java.io.File child : children) {
+      if (isPendingFileOf(child.getName(), displayName)) return child;
+      // Android 16 可能已在 update 前把公共 pending 文件改成最终文件名。
+      if (displayName.equals(child.getName())) finalCandidate = child;
+    }
+    return finalCandidate;
+  }
+
+  private static java.io.File publicMediaParentForSandbox(java.io.File sandboxFile) {
+    if (sandboxFile == null) return null;
+    String path = sandboxFile.getPath();
+    String marker = "/Android/data/";
+    int markerStart = path.indexOf(marker);
+    if (markerStart < 0) return null;
+    int packageStart = markerStart + marker.length();
+    int sdcard = path.indexOf("/sdcard/", packageStart);
+    if (sdcard < 0) return null;
+    String physicalRoot = path.substring(0, markerStart);
+    String relative = path.substring(sdcard + "/sdcard/".length());
+    int slash = relative.lastIndexOf('/');
+    if (slash <= 0) return null;
+    return new java.io.File(physicalRoot + "/" + relative.substring(0, slash));
   }
 
   /** 判断 {@code fileName} 是否为 {@code displayName} 的 {@code .pending-<id>-<名称>} 中间态。 */

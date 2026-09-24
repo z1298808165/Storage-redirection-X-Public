@@ -351,20 +351,30 @@ pub(crate) fn resolve_media_store_direct_path_for_caller(
         return None;
     }
 
-    if let Some(mapped_target) =
+    let mapping_request_path =
         resolve_mapping_view_open_target(path_text, &caller_package, effective_uid)
+            .map(|_| path_text.to_string())
+            .or_else(|| {
+                reverse_map_target_to_request_path(path_text, &caller_package, effective_uid)
+            });
+    if let Some(mapping_request_path) = mapping_request_path
+        && let Some(mapped_target) =
+            resolve_mapping_view_open_target(&mapping_request_path, &caller_package, effective_uid)
     {
-        let display_target = to_public_storage_path(&mapped_target);
-        if display_target != path_text {
+        // MediaProvider 的 insert 必须继续接收公共显示路径；Android 16 会拒绝
+        // /Android/data/... 作为 MediaStore 的 primary directory。实际沙箱落点由
+        // Java 提交阶段根据同一映射规则完成，避免破坏 insert 契约。
+        let direct_target = to_public_storage_path(&mapped_target);
+        if direct_target != path_text {
             log::info!(
                 "media direct path caller={} uid={} input={} target={}",
                 caller_package,
                 effective_uid,
                 path_text,
-                display_target
+                direct_target
             );
             remember_media_caller_hint(path_text, &caller_package, effective_uid);
-            return Some(display_target);
+            return Some(direct_target);
         }
     }
 

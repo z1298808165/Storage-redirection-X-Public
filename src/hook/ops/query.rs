@@ -844,6 +844,14 @@ unsafe fn reverse_readlink_result_if_visible(
     if result <= 0 || crate::hook::is_provider_passthrough_active() {
         return result;
     }
+    // 系统代写进程（MediaProvider 等）用 readlink 结果做 canonical 路径计算并写回
+    // 数据库 _data。即使当前调用方上下文是某个应用，也不能按该应用的映射视图
+    // 反解：否则 _data 会被写成映射源（如 DCIM/Camera），与物理落点（映射目标，
+    // 如 Pictures/钉钉）不一致，相册按 _data 扫描不到文件。应用进程自己的
+    // readlink 反解需求由本函数其余逻辑覆盖。
+    if InterceptHub::instance().with_package_name(policy::is_system_writer_package) {
+        return result;
+    }
     let result_len = result as usize;
     if result_len >= bufsiz {
         return result;
