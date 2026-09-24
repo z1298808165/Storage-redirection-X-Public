@@ -122,6 +122,20 @@ pub unsafe extern "C" fn srx_should_allow_fuse_public_mapping_access(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn srx_should_allow_fuse_own_android_private_path_access(
+    path: *const libc::c_char,
+    caller_uid: u32,
+) -> bool {
+    if path.is_null() {
+        return false;
+    }
+
+    // SAFETY: 此函数只读取入参指向的 C 字符串且边界由 FFI 调用方保证，非空已在上方校验。
+    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
+    media_fuse::should_allow_own_android_private_path_access(&path, caller_uid as i32)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn srx_should_force_fuse_userspace_private_owner_sqlite(
     path: *const libc::c_char,
 ) -> bool {

@@ -323,6 +323,47 @@ pub fn should_allow_public_mapping_target_access(path: &str, caller_uid: i32) ->
     true
 }
 
+/// 放行应用访问其自身的 Android 私有外部存储目录。
+///
+/// MediaProvider 的 app-data isolation FUSE 层可能拒绝所有者对包目录的直接文件操作。
+/// 此例外严格限定为路径所属包与调用 UID 完全匹配，且处于同一 Android 用户。
+pub fn should_allow_own_android_private_path_access(path: &str, caller_uid: i32) -> bool {
+    if caller_uid < writer::ANDROID_APP_UID_START {
+        return false;
+    }
+
+    let normalized_path = normalize_storage_path(path);
+    if normalized_path.is_empty() {
+        return false;
+    }
+
+    let user_id = paths::extract_user_id_from_storage_path(&normalized_path);
+    if user_id < 0 || platform::user_id_from_uid(caller_uid) != user_id {
+        return false;
+    }
+
+    let owner_package = paths::extract_android_private_path_owner(&normalized_path);
+    if owner_package.is_empty()
+        || policy::is_media_intermediate_package(&owner_package)
+        || policy::is_system_writer_package(&owner_package)
+    {
+        return false;
+    }
+
+    let owner_uid = resolve_private_owner_uid(&owner_package);
+    let allowed = owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid;
+    log::debug!(
+        "media fuse own private path decision allowed={} caller_uid={} user_id={} owner={} owner_uid={} path={}",
+        allowed,
+        caller_uid,
+        user_id,
+        owner_package,
+        owner_uid,
+        normalized_path
+    );
+    allowed
+}
+
 pub fn should_force_userspace_for_private_owner_sqlite_path(path: &str) -> bool {
     let Some((normalized_path, owner_package, user_id)) = resolve_private_owner_sqlite_path(path)
     else {

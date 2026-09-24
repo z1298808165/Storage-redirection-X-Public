@@ -29,6 +29,8 @@ srx_should_allow_fuse_private_owner_sqlite_access(const char *path,
                                                   uint32_t uid);
 extern "C" bool srx_should_allow_fuse_public_mapping_access(const char *path,
                                                             uint32_t uid);
+extern "C" bool srx_should_allow_fuse_own_android_private_path_access(
+    const char *path, uint32_t uid);
 extern "C" bool
 srx_should_force_fuse_userspace_private_owner_sqlite(const char *path);
 extern "C" bool srx_prepare_fuse_private_owner_sqlite_sidecar(const char *path);
@@ -234,9 +236,18 @@ bool ShouldAllowPublicMappingAccess(const std::string &path, uint32_t uid) {
   return srx_should_allow_fuse_public_mapping_access(path.c_str(), uid);
 }
 
+bool ShouldAllowOwnAndroidPrivatePathAccess(const std::string &path,
+                                           uint32_t uid) {
+  if (path.empty())
+    return false;
+  return srx_should_allow_fuse_own_android_private_path_access(path.c_str(),
+                                                               uid);
+}
+
 bool ShouldAllowSrxAccessiblePath(const std::string &path, uint32_t uid) {
   return ShouldAllowPrivateOwnerSqliteAccess(path, uid) ||
-         ShouldAllowPublicMappingAccess(path, uid);
+         ShouldAllowPublicMappingAccess(path, uid) ||
+         ShouldAllowOwnAndroidPrivatePathAccess(path, uid);
 }
 
 bool ShouldForceUserspacePrivateOwnerSqlite(const std::string &path) {
