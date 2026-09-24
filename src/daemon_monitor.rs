@@ -33,6 +33,14 @@ const MAX_WATCHES_CEILING: usize = 32768;
 /// 监视线程会长时间停在排空循环内，使配置重建、溢出补偿和版本推进被无限推迟。
 /// 达到预算即返回，让调用方有机会处理重建，剩余事件留在内核队列下一轮继续读。
 const MAX_EVENTS_PER_DRAIN: usize = 4096;
+/// reconfigure 关闭旧 inotify fd 前的排空轮次上限，每轮再受 [`MAX_EVENTS_PER_DRAIN`] 约束。
+///
+/// 排空不能无限进行：大监视树（数千 watch）叠加共享 FUSE 宿主、MediaProvider 或持续
+/// 写入风暴时，内核事件队列永远排不空，无界排空会把监视线线程整个卡死在 reconfigure
+/// 内——配置版本与重建计数从此冻结（真机复现：监视线程 100% 系统时间空转、场景级
+/// `daemon file monitor config sync timeout` 连续超时）。超过上限后丢弃剩余事件：它们随
+/// 旧 fd 一起失效本来就是可接受的损失，新监视树建立后的既有文件扫描会兜底补齐。
+const MAX_PRE_RESET_DRAIN_ROUNDS: usize = 4;
 /// 两次溢出补偿全量扫描之间的最小间隔。
 ///
 /// 溢出多由写入风暴引起，而补偿扫描要遍历全树并做 owner 修复。不限流的话风暴期间
@@ -172,9 +180,13 @@ impl RegularAppMonitor {
 
         // 缺失的根目录可能触发周期性重建。关闭旧 inotify fd 前先排空队列事件，
         // 避免重建时丢失上一轮循环中观测到的创建事件。
-        // 这里紧接着就要关闭 fd，未读完的事件会随 fd 一起丢弃，因此忽略单轮预算继续读完；
-        // 饿死重建的风险不存在，本调用本身就发生在重建流程内。
-        while self.drain_events() {}
+        // 排空受 [`MAX_PRE_RESET_DRAIN_ROUNDS`] 约束：事件风暴下队列永远排不空，
+        // 无界等待会饿死整个监视线程（版本冻结、重建滞后），必须允许带着未读事件
+        // 进入重建——新监视树的既有文件扫描会补齐这部分状态。
+        let mut pre_reset_drain_rounds = 0usize;
+        while pre_reset_drain_rounds < MAX_PRE_RESET_DRAIN_ROUNDS && self.drain_events() {
+            pre_reset_drain_rounds += 1;
+        }
         self.reset();
         self.config_version = version;
         self.last_rebuild_ms = paths::monotonic_ms();
