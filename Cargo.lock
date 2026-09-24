@@ -143,6 +143,7 @@ dependencies = [
  "libc",
  "log",
  "once_cell",
+ "serde",
  "serde_json",
 ]
 
