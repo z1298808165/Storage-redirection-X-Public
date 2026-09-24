@@ -487,15 +487,6 @@ fn host_attach_enabled() -> bool {
     })
 }
 
-/// Auto 模式是否应当把挂载计划收敛到存储视图根、走共享宿主接入。
-///
-/// 两个条件都满足才收敛：接入开关打开（默认开启），且宿主会话此刻健康在位。
-/// 宿主缺席或正在退避重建时保持按目录 scoped 规划——旧数据面在自愈完成前照常服务，
-/// 自愈完成后新的挂载请求自然走回共享路径。
-pub(crate) fn shared_host_preferred() -> bool {
-    host_attach_enabled() && get_fuse_host().is_some()
-}
-
 /// 共享宿主会话当前是否可以安全承接指定调用方的挂载。
 ///
 /// 这是能力闸门加语义约束，两层都必须满足：
@@ -1243,4 +1234,63 @@ pub fn ensure_global() -> bool {
     set_global(host);
     log::info!("fuse host recovered child={} source={}", pid, source);
     true
+}
+
+/// 等待宿主会话就绪的预算与失败冷却。
+///
+/// 宿主建立实测在亚秒到两秒级完成；预算 6 秒给足余量。等待发生在 daemon 主循环的
+/// 挂载处理里，**必须有界**：无界等待会把整个 reconcile 循环卡死，开机时几十个应用
+/// 的挂载全部排队。同理，一次等待超时说明宿主在此环境里建不起来（能力缺失、内核
+/// 拒绝），继续让后续请求逐个空等只会放大延迟——30 秒冷却内的请求立即走回退路径，
+/// 冷却到期后再允许一次完整等待，宿主恢复后自然接上。
+const HOST_WAIT_BUDGET_MS: u64 = 6_000;
+const HOST_WAIT_FAIL_COOLDOWN_MS: i64 = 30_000;
+const HOST_WAIT_POLL_INTERVAL_MS: i64 = 250;
+static LAST_HOST_WAIT_FAIL_MS: AtomicI64 = AtomicI64::new(0);
+
+/// 有界等待共享宿主会话就绪，供 Auto 模式挂载规划在宿主未就绪时调用。
+///
+/// 返回 `false` 的三种情形调用方处理完全一致（保持按目录 scoped 旧规划）：
+/// 接入被显式关闭（立即返回，不等待）；等待预算内宿主仍未建立；距上次等待
+/// 超时不足一个冷却周期（避免请求风暴逐个空等）。
+///
+/// 为什么是"等待"而不是"先按旧规划挂上、事后迁移"：迁移必须在应用命名空间里
+/// 先卸旧 scoped 层、再挂新层，中间应用对该路径的访问会**穿透到真实存储**——
+/// 这是 fail-open 窗口。而等待发生在挂载应答返回之前，应用进程尚未恢复运行、
+/// 不会产生 I/O，一次挂载到位，不存在中间态。
+pub fn wait_for_host_session() -> bool {
+    if !host_attach_enabled() {
+        return false;
+    }
+    if get_fuse_host().is_some() {
+        return true;
+    }
+    let now = crate::platform::paths::monotonic_ms();
+    let last_fail = LAST_HOST_WAIT_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && now.saturating_sub(last_fail) < HOST_WAIT_FAIL_COOLDOWN_MS {
+        return false;
+    }
+    let deadline = now.saturating_add(HOST_WAIT_BUDGET_MS as i64);
+    loop {
+        // ensure_global 内部带退避；预算内它通常第一次调用就能把宿主建起来。
+        if get_fuse_host().is_some() {
+            return true;
+        }
+        let _ = ensure_global();
+        if get_fuse_host().is_some() {
+            return true;
+        }
+        let current = crate::platform::paths::monotonic_ms();
+        if current >= deadline {
+            LAST_HOST_WAIT_FAIL_MS.store(current, Ordering::Relaxed);
+            log::warn!(
+                "fuse host wait timeout budget_ms={} fallback=scoped_planning",
+                HOST_WAIT_BUDGET_MS
+            );
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            HOST_WAIT_POLL_INTERVAL_MS as u64,
+        ));
+    }
 }

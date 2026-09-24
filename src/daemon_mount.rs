@@ -1725,18 +1725,24 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
 
 fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
     let roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request);
-    // Auto 模式下共享宿主会话健康时，把按目录 scoped 根收敛成存储视图根：宿主会话按 uid
-    // 持有同一份规则，一个整根会话即可表达相同语义，不必为每个目录各 fork 一个会话。
-    // 收敛后的整根在 `start_fuse_service_for_root` 里命中接入闸门（闸门本来就只放行存储
-    // 视图根），接入失败时该函数自己回退 scoped——含整根 scoped，与部分失败收敛路径一致。
-    // 宿主缺席或接入被显式关闭时保持原规划，旧数据面行为不变。
+    // Auto 模式的目标形态是共享宿主会话：把按目录 scoped 根收敛成存储视图根，宿主会话
+    // 按 uid 持有同一份规则，一个整根会话即可表达相同语义。收敛后的整根在
+    // `start_fuse_service_for_root` 里命中接入闸门（闸门本来就只放行存储视图根），接入
+    // 失败时该函数自己回退 scoped——含整根 scoped，与部分失败收敛路径一致。
+    //
+    // 宿主未就绪时**等待建立**而不是按旧规划挂上再事后迁移：迁移要在应用命名空间里
+    // 先卸旧 scoped 层、再挂新层，中间应用对该路径的访问会穿透到真实存储（fail-open
+    // 窗口）；等待发生在挂载应答返回之前，应用进程尚未恢复运行，一次挂载到位。
+    // 接入被显式关闭、等待超时或处于失败冷却期时保持原规划——旧数据面照常服务。
     if roots.is_empty()
         || !matches!(
             request.storage_backend_mode,
             crate::config::StorageBackendMode::Auto
         )
-        || !crate::fuse_host::shared_host_preferred()
     {
+        return roots;
+    }
+    if !crate::fuse_host::wait_for_host_session() {
         return roots;
     }
     let user_id = crate::platform::user_id_from_uid(request.uid);

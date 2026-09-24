@@ -628,24 +628,30 @@ class ScenarioConsistencyTest(unittest.TestCase):
         ack = section(host, "fn await_policy_ack(", "/// 把某个应用的策略登记到共享宿主会话")
         self.assertIn("if ack_uid != uid {", ack)
 
-        # Auto 规划收敛：宿主会话健康时 daemon 侧规划把按目录 scoped 根收敛成存储视图根，
-        # 常规挂载直接命中接入闸门走共享路径；否则真实应用永远停在 per-directory scoped
-        # 会话上，共享宿主只在人为杀掉 scoped 子进程后才被用到。三条边界必须钉住：
-        # namespace fallback（空规划）不收敛、非 Auto 模式不收敛、已是整根的规划不重复收敛；
-        # companion 侧不做收敛——应用进程看不到 daemon 的宿主会话，收敛只会让它 fork 出
-        # 多余的整根 scoped 会话。
-        self.assertIn("pub(crate) fn shared_host_preferred() -> bool", host)
-        self.assertIn(
-            "host_attach_enabled() && get_fuse_host().is_some()",
-            section(host, "pub(crate) fn shared_host_preferred() -> bool", "/// 共享宿主会话当前"),
-        )
+        # 开机竞态处理必须是"等待"而不是"事后迁移"：迁移要在应用命名空间里先卸旧
+        # scoped 层、再挂新层，中间应用对该路径的访问会穿透到真实存储（fail-open 窗口）。
+        # 等待发生在挂载应答返回之前，应用进程尚未恢复运行，一次挂载到位，无中间态。
+        # 等待必须有界且带失败冷却——等待在 daemon 主循环的单线程挂载处理里执行，
+        # 无界等待或请求风暴逐个空等都会把开机挂载全部拖死。
+        self.assertIn("const HOST_WAIT_BUDGET_MS: u64 = 6_000;", host)
+        self.assertIn("const HOST_WAIT_FAIL_COOLDOWN_MS: i64 = 30_000;", host)
+        wait_pos = host.index("pub fn wait_for_host_session() -> bool")
+        wait_fn = host[wait_pos:]
+        self.assertIn("if !host_attach_enabled() {", wait_fn)
+        self.assertIn("LAST_HOST_WAIT_FAIL_MS", wait_fn)
+        self.assertIn("fallback=scoped_planning", wait_fn)
+        # 规划层：Auto 模式先等待宿主就绪再收敛整根；等待失败的回退保持旧规划。
         daemon_src = read("src/daemon_mount.rs")
         collapse = section(
             daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
         )
-        self.assertIn("crate::fuse_host::shared_host_preferred()", collapse)
+        self.assertIn("crate::fuse_host::wait_for_host_session()", collapse)
         self.assertIn("crate::config::StorageBackendMode::Auto", collapse)
         self.assertIn("vec![view_root]", collapse)
+        # 不得再出现"事后迁移"：幂等判据里没有迁移分支，宿主死亡只走既有的失效重挂。
+        self.assertNotIn("scoped_state_should_migrate_to_host", daemon_src)
+        self.assertNotIn("take_host_ready_transition", host)
+        self.assertNotIn("take_host_ready_transition", read("src/daemon.rs"))
 
         for source_path, state_path in (
             ("src/daemon_mount.rs", "src/daemon_mount.rs"),
