@@ -1724,7 +1724,34 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
 }
 
 fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
-    crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request)
+    let roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request);
+    // Auto 模式下共享宿主会话健康时，把按目录 scoped 根收敛成存储视图根：宿主会话按 uid
+    // 持有同一份规则，一个整根会话即可表达相同语义，不必为每个目录各 fork 一个会话。
+    // 收敛后的整根在 `start_fuse_service_for_root` 里命中接入闸门（闸门本来就只放行存储
+    // 视图根），接入失败时该函数自己回退 scoped——含整根 scoped，与部分失败收敛路径一致。
+    // 宿主缺席或接入被显式关闭时保持原规划，旧数据面行为不变。
+    if roots.is_empty()
+        || !matches!(
+            request.storage_backend_mode,
+            crate::config::StorageBackendMode::Auto
+        )
+        || !crate::fuse_host::shared_host_preferred()
+    {
+        return roots;
+    }
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let view_root = paths::storage_user_root_for_user(user_id);
+    if roots.len() == 1 && paths::normalize_syntax(&roots[0]) == paths::normalize_syntax(&view_root)
+    {
+        return roots;
+    }
+    log::info!(
+        "daemon fuse host preferred collapse roots={} -> view root pid={} pkg={}",
+        roots.len(),
+        request.pid,
+        request.package_name
+    );
+    vec![view_root]
 }
 
 fn start_fuse_service_for_root(

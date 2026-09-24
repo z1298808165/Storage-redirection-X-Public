@@ -628,6 +628,25 @@ class ScenarioConsistencyTest(unittest.TestCase):
         ack = section(host, "fn await_policy_ack(", "/// 把某个应用的策略登记到共享宿主会话")
         self.assertIn("if ack_uid != uid {", ack)
 
+        # Auto 规划收敛：宿主会话健康时 daemon 侧规划把按目录 scoped 根收敛成存储视图根，
+        # 常规挂载直接命中接入闸门走共享路径；否则真实应用永远停在 per-directory scoped
+        # 会话上，共享宿主只在人为杀掉 scoped 子进程后才被用到。三条边界必须钉住：
+        # namespace fallback（空规划）不收敛、非 Auto 模式不收敛、已是整根的规划不重复收敛；
+        # companion 侧不做收敛——应用进程看不到 daemon 的宿主会话，收敛只会让它 fork 出
+        # 多余的整根 scoped 会话。
+        self.assertIn("pub(crate) fn shared_host_preferred() -> bool", host)
+        self.assertIn(
+            "host_attach_enabled() && get_fuse_host().is_some()",
+            section(host, "pub(crate) fn shared_host_preferred() -> bool", "/// 共享宿主会话当前"),
+        )
+        daemon_src = read("src/daemon_mount.rs")
+        collapse = section(
+            daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
+        )
+        self.assertIn("crate::fuse_host::shared_host_preferred()", collapse)
+        self.assertIn("crate::config::StorageBackendMode::Auto", collapse)
+        self.assertIn("vec![view_root]", collapse)
+
         for source_path, state_path in (
             ("src/daemon_mount.rs", "src/daemon_mount.rs"),
             (
