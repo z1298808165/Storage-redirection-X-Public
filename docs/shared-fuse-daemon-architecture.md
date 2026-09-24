@@ -225,17 +225,39 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 （重点关注重定向读写、死挂载恢复、MediaStore 代写、应用重启、共享宿主和回退路径），
 并用 `srx_daemon doctor` 观察账本与判定。
 
-### 阶段 1——策略注册表（已落地）
+### 阶段 1——策略注册表（结构已落地，按 uid 注册未实现）
 
 - `FuseRedirectFs.policy` 已改为 `PolicyRegistry`，每个回调按 `req.uid()` 取策略。
-- 单策略行为保持兼容；未命中 uid 时直通回退，为共享会话提供多应用策略解析能力。
+- 单策略行为保持兼容；未命中 uid 时回退到会话默认策略。
+- **尚未实现**：向宿主会话登记按 uid 策略的通道。`PolicyRegistry::by_uid` 目前恒为空，
+  也没有任何写入入口，因此宿主会话实际只持有一份"直通"策略。这是应用接入的前置条件。
 
-### 阶段 2——共享宿主会话 + namespace 注入（已落地，保留回退）
+### 阶段 2——共享宿主会话 + namespace 注入（会话建立已落地并真机验证；应用接入未启用）
 
-- daemon 启动时创建私有 namespace，并建立 `FuseHost` 共享宿主会话，挂载源为 `srx_fuse_host[<pid>]`。
-- daemon 和 companion 优先通过 `setns(目标 ns)` → `MS_BIND` 将宿主树注入应用 namespace。
-- `srx_fuse_redirect` 与 `srx_fuse_host` 前缀共存，账本和测试流按两种前缀识别归属。
-- 宿主接入失败或能力不可用时保留 scoped FUSE 回退，不能删除旧路径。
+- daemon 启动时建立 `FuseHost` 共享宿主会话，挂载源为 `srx_fuse_host[<pid>]`；子进程进入私有
+  namespace，挂载点为模块私有目录，并在挂载点上开 shared。**该会话已在 Android 16 真机验证
+  可以真实建立**（`fuse host session mount registered` + `srx_fuse_host` 进程常驻）。
+- 直通会话必须显式标记为 `is_passthrough_host`：它的 `redirect_target` 就是存储根本身，而按子
+  路径推导重定向根的函数对"根本身"返回 `None`，否则策略构造会直接失败（真机表现为宿主子进程
+  在 `policy` 阶段退出，且旧代码在该分支没有任何日志）。
+- **应用侧 namespace 注入当前被能力闸门关闭**（`fuse_host::can_attach_app` 返回 false）：阶段 1
+  的按 uid 注册缺失时，把宿主树 `MS_BIND` 到应用存储根会让应用拿到纯直通视图，即静默失去全部
+  重定向。因此应用继续走已稳定的 `srx_fuse_redirect` scoped 路径，宿主会话照常建立待用。
+- 另需注意：宿主子进程的私有 namespace 已经把整棵挂载树设为 private，应用 namespace 无法通过
+  传播看到宿主挂载点；后续启用接入时需要在宿主 namespace 内先取得挂载点句柄，再进入目标
+  namespace 完成 bind。
+- 宿主会话死亡后由 daemon 在 reconcile 中重建（含 5 秒退避），失败时保留 scoped FUSE 回退；
+  `srx_fuse_redirect` 前缀路径不能删除。
+
+### 宿主会话可观测性（已落地）
+
+宿主子进程的失败原因此前完全不可见：它在私有日志通道可用之前就退出，而 `service.sh` 把 daemon
+的 stderr 丢到 `/dev/null`，panic 信息也不会留下。现在有三层取证：
+
+- 阶段文件 `tmp/fuse_host.stage`：子进程只用一个栈缓冲加系统调用逐步追加，父进程在失败时把它
+  转写到 `running.log`（`fuse host stage trace ...`）；
+- ready 通道传**阶段码**而不是布尔值：`dir` / `policy` / `mount` / `stability` / `shared`；
+- 父进程回收子进程并记录退出原因（`exit=` / `signal=`），同时区分"对端已关闭"和"等待超时"。
 
 ### 阶段 3——监督收敛（基础能力已落地，后续增强）
 
