@@ -826,7 +826,45 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
 }
 
 fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {
-    crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request)
+    let roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request);
+    // Auto 模式的目标形态是共享宿主会话，与 daemon 侧规划同一语义：把按目录 scoped 根
+    // 收敛成存储视图根。区别只在发现方式——companion 与 daemon 无共享内存，靠快照文件
+    // 等待"宿主在位 + 本 uid 已被 daemon 预登记"；等待发生在挂载应答返回之前，应用进程
+    // 尚未恢复运行，一次挂载到位，没有"先 scoped 后迁移"的 fail-open 中间态。快照缺失、
+    // 等待超时或处于失败冷却期时保持旧规划，scoped 数据面照常服务。
+    if roots.is_empty()
+        || !matches!(
+            request.storage_backend_mode,
+            crate::config::StorageBackendMode::Auto
+        )
+    {
+        return roots;
+    }
+    let Some(_view) = crate::fuse_host::wait_for_host_session_view(request.uid) else {
+        log::info!(
+            "fuse host wait not ready roots={} mode={} pid={} pkg={}",
+            roots.len(),
+            request.storage_backend_mode.as_str(),
+            request.pid,
+            request.package_name
+        );
+        return roots;
+    };
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let view_root = platform::paths::storage_user_root_for_user(user_id);
+    if roots.len() == 1
+        && platform::paths::normalize_syntax(&roots[0])
+            == platform::paths::normalize_syntax(&view_root)
+    {
+        return roots;
+    }
+    log::info!(
+        "fuse host preferred collapse roots={} -> view root pid={} pkg={}",
+        roots.len(),
+        request.pid,
+        request.package_name
+    );
+    vec![view_root]
 }
 
 fn start_fuse_service_for_root(
@@ -834,46 +872,57 @@ fn start_fuse_service_for_root(
     mount_root: &str,
     real_root_override: Option<String>,
 ) -> Option<FuseMountState> {
-    // B2-b：优先尝试共享宿主会话接入。
-    if let Some(host) = crate::fuse_host::get_fuse_host() {
-        // 先把该应用的策略按 uid 登记进共享宿主会话：这是应用接入的前置条件，提前登记也让
-        // 接入启用后第一帧请求就带上正确策略。虚拟根取整个存储根（mount_root=None），因为
-        // 宿主会话服务的是完整存储视图，而不是某个 scoped 子根。
-        //
-        // `real_root_override` 必须丢弃（传 None）：它是应用命名空间专属的锚点别名，只存在于
-        // 应用 namespace；宿主子进程在自己的私有命名空间里看到的是空目录，照搬覆盖会把真实根
-        // 读成空，仅映射模式的应用会整个丢失公共存储视图。
-        let policy_config = fuse_config_from_request(request, None, None);
-        let registered = crate::fuse_host::register_app_policy(&policy_config);
-        if !crate::fuse_host::can_attach_app(request.uid, mount_root) {
-            // 宿主会话的虚拟根只能是整个存储视图根，且默认不接管应用挂载；两种情况都保持
-            // 既有 scoped 路径，不能因为"宿主会话可用"就顺手接上。
-            log::debug!(
-                "fuse host attach skipped pid={} pkg={} target={} registered={} reason=attach_gate_closed",
-                request.pid,
-                request.package_name,
-                mount_root,
-                registered
-            );
-        } else if !registered {
-            // 策略没进宿主会话时接入会让应用拿到"未登记即拒绝"的空视图；宁可继续 scoped。
-            log::warn!(
-                "fuse host attach skipped pid={} pkg={} target={} reason=policy_registration_failed",
-                request.pid,
-                request.package_name,
-                mount_root
-            );
-        } else if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
+    // B2-b：优先尝试共享宿主会话接入（跨进程发现）。
+    //
+    // companion 是 Zygisk companion 进程，与 daemon 没有共享内存：`get_fuse_host()` 在本
+    // 进程恒为 `None`，宿主会话只能通过 daemon 发布的快照文件发现。策略登记同样由 daemon
+    // 预先完成（companion 没有控制通道），接入前用快照里的 uid 集合确认，未登记 uid 的
+    // 请求会被宿主 fail-closed 拒绝成 ENOENT。
+    //
+    // `real_root_override` 必须丢弃（传 None）：它是应用命名空间专属的锚点别名，只存在于
+    // 应用 namespace；宿主子进程在自己的私有命名空间里看到的是空目录，照搬覆盖会把真实根
+    // 读成空，仅映射模式的应用会整个丢失公共存储视图。
+    // `real_root_override` 必须丢弃：它是应用命名空间专属的锚点别名，只存在于应用 namespace；
+    // 宿主子进程在自己的私有命名空间里看到的是空目录，照搬覆盖会把真实根读成空。companion
+    // 不做登记（daemon 预登记），因此这里不构造策略配置。
+    let view = crate::fuse_host::read_host_session_view();
+    let registered = view
+        .as_ref()
+        .is_some_and(|view| view.registered_uids.contains(&(request.uid as u32)));
+    if !crate::fuse_host::can_attach_app(request.uid, mount_root) {
+        // 宿主会话的虚拟根只能是整个存储视图根，且默认不接管应用挂载；两种情况都保持
+        // 既有 scoped 路径，不能因为"宿主会话可用"就顺手接上。
+        log::debug!(
+            "fuse host attach skipped pid={} pkg={} target={} registered={} reason=attach_gate_closed",
+            request.pid,
+            request.package_name,
+            mount_root,
+            registered
+        );
+    } else if !registered {
+        // 策略没进宿主会话时接入会让应用拿到"未登记即拒绝"的空视图；宁可继续 scoped。
+        log::warn!(
+            "fuse host attach skipped pid={} pkg={} target={} reason=policy_registration_failed",
+            request.pid,
+            request.package_name,
+            mount_root
+        );
+    } else if let Some(host_view) = view.as_ref() {
+        if let Some(state) = try_bind_to_fuse_host(host_view, request, mount_root) {
             return Some(state);
-        } else {
-            log::warn!(
-                "bind to fuse host failed, falling back to scoped fork pid={} pkg={}",
-                request.pid,
-                request.package_name
-            );
         }
+        log::warn!(
+            "bind to fuse host failed, falling back to scoped fork pid={} pkg={}",
+            request.pid,
+            request.package_name
+        );
+    } else {
+        log::warn!(
+            "fuse host view disappeared before attach, falling back to scoped fork pid={} pkg={}",
+            request.pid,
+            request.package_name
+        );
     }
-
     // 回退：fork 独立 scoped 会话（B2-a 前的既有路径）。
     let mut ready_sockets = [0; 2];
     // SAFETY: socketpair 系统调用，传入有效的栈数组指针。
@@ -975,11 +1024,11 @@ fn start_fuse_service_for_root(
 /// 记账上必须与 scoped 会话区分：宿主会话跨应用共享，`child` 不能填宿主 pid，
 /// 否则回滚会把它当本应用的子进程终止掉。
 fn try_bind_to_fuse_host(
-    host: &crate::fuse_host::FuseHost,
+    view: &crate::fuse_host::HostSessionView,
     request: &CompanionMountRequest,
     mount_root: &str,
 ) -> Option<FuseMountState> {
-    let attached = crate::fuse_host::attach_app_to_host(host, mount_root)?;
+    let attached = crate::fuse_host::attach_app_to_host(view, mount_root)?;
     log::info!(
         "fuse host attach ok pid={} pkg={} target={} host={}",
         request.pid,

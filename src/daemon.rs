@@ -479,6 +479,19 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
 
     media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
 
+    // companion 与 daemon 可能同时为同一应用发起挂载。先登记本轮 Auto 应用策略，
+    // 让 companion 能从宿主快照确认 uid 后直接接入共享会话，而不是因快照尚未更新回退 scoped。
+    for plan in &plans {
+        if crate::daemon_mount::pre_register_host_policy(&plan.request) {
+            log::debug!(
+                "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
+                plan.request.pid,
+                plan.request.uid,
+                plan.request.package_name
+            );
+        }
+    }
+
     if mode == ReconcileMode::Prewarm {
         plans.sort_by_key(|plan| plan.priority());
     }

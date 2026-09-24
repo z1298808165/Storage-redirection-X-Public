@@ -10,6 +10,10 @@ pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.ru
 pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_probe";
 /// daemon 写入、普通应用只读的 FUSE 能力快照。
 pub const FUSE_CAPABILITY_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_capability";
+/// daemon 写入、companion（Zygisk companion 进程，与 daemon 无共享内存）只读的
+/// 共享宿主会话快照：宿主身份 + 已登记 uid 集合，companion 据此跨进程发现会话并接入。
+pub const FUSE_HOST_SNAPSHOT_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/tmp/fuse_host.snapshot";
 pub const MEDIA_HOOK_DEFERRED_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_hook_deferred";
 /// MediaProvider Java hook 安装结果的落盘记录。

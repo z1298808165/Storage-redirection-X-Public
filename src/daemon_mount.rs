@@ -1743,6 +1743,15 @@ fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {
         return roots;
     }
     if !crate::fuse_host::wait_for_host_session() {
+        // 诊断：回落旧规划必须留下原因（开关关闭 / 等待超时 / 失败冷却），否则
+        // "宿主明明活着却规划成按目录根"这类矛盾只能靠猜。
+        log::info!(
+            "daemon fuse host wait not ready roots={} mode={} pid={} pkg={}",
+            roots.len(),
+            request.storage_backend_mode.as_str(),
+            request.pid,
+            request.package_name
+        );
         return roots;
     }
     let user_id = crate::platform::user_id_from_uid(request.uid);
@@ -1897,7 +1906,10 @@ fn try_bind_to_fuse_host(
     request: &MountRequest,
     mount_root: &str,
 ) -> Option<FuseMountState> {
-    let attached = crate::fuse_host::attach_app_to_host(host, mount_root)?;
+    let attached = crate::fuse_host::attach_app_to_host(
+        &crate::fuse_host::HostSessionView::from(host),
+        mount_root,
+    )?;
     log::info!(
         "daemon fuse host attach ok pid={} pkg={} target={} host={}",
         request.pid,
@@ -2597,6 +2609,25 @@ fn fuse_config_from_request(
     real_root_override: Option<String>,
 ) -> FuseRedirectConfig {
     crate::fuse_redirect::fuse_config_from_request(request, mount_root, real_root_override)
+}
+
+/// 在执行具体挂载前把 Auto 应用策略预登记进共享宿主。
+///
+/// companion 与 daemon 并行处理同一应用的挂载请求；如果等 companion 进入后才登记，
+/// companion 只能看到没有该 uid 的快照并回退 scoped。预登记只写策略，不创建挂载，且
+/// 必须丢弃应用 namespace 专属的 real_root_override，保证宿主看到真实存储根。
+pub(crate) fn pre_register_host_policy(request: &MountRequest) -> bool {
+    if request.operation != MountOperation::Reload
+        || !matches!(
+            request.storage_backend_mode,
+            crate::config::StorageBackendMode::Auto
+        )
+        || !crate::fuse_host::wait_for_host_session()
+    {
+        return false;
+    }
+    let config = fuse_config_from_request(request, None, None);
+    crate::fuse_host::register_app_policy(&config)
 }
 
 fn write_mount_state(

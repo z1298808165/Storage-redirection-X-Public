@@ -7,7 +7,7 @@
 use crate::platform::paths;
 use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// 宿主挂载点：放在模块私有目录下，不落在任何存储别名上，避免与应用命名空间发生传播耦合。
 const FUSE_HOST_MOUNT_POINT: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host";
@@ -113,6 +113,40 @@ pub struct FuseHost {
     pub mount_point: String,
     /// 宿主会话挂载源（`srx_fuse_host[<pid>]`）。
     pub mount_source: String,
+}
+
+/// 宿主会话的跨进程视图。
+///
+/// daemon 持有 [`FuseHost`] 原始句柄；companion（Zygisk companion 进程）与 daemon
+/// 没有共享内存，只能通过快照文件发现会话。视图字段与 [`FuseHost`] 的宿主身份字段
+/// 一一对应，因此接入逻辑（克隆/附着/复核）对两个进程共用同一份实现。
+#[derive(Clone)]
+pub struct HostSessionView {
+    /// 持有宿主 mount namespace 的子进程 pid。
+    pub child_pid: i32,
+    /// 子进程启动时刻（clock ticks），用于区分 pid 复用。
+    pub child_start_time_ticks: u64,
+    /// 宿主挂载点。
+    pub mount_point: String,
+    /// 宿主会话挂载源（`srx_fuse_host[<pid>]`）。
+    pub mount_source: String,
+    /// 宿主会话策略表中已登记的 uid 集合。
+    ///
+    /// 未登记 uid 的请求会被 fail-closed 拒绝（`deny_all` → ENOENT），因此接入前
+    /// 必须确认本应用的 uid 已在列——companion 没有控制通道，登记由 daemon 预先完成。
+    pub registered_uids: Vec<u32>,
+}
+
+impl From<&FuseHost> for HostSessionView {
+    fn from(host: &FuseHost) -> Self {
+        Self {
+            child_pid: host.child_pid,
+            child_start_time_ticks: host.child_start_time_ticks,
+            mount_point: host.mount_point.clone(),
+            mount_source: host.mount_source.clone(),
+            registered_uids: registered_uids_snapshot(),
+        }
+    }
 }
 
 impl Drop for FuseHost {
@@ -285,7 +319,14 @@ pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) ->
         );
         return false;
     }
-    await_policy_ack(fd, config.uid)
+    if await_policy_ack(fd, config.uid) {
+        // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
+        // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
+        record_registered_uid(config.uid as u32);
+        true
+    } else {
+        false
+    }
 }
 
 /// 在宿主会话内启动按 uid 策略控制通道的读取循环。
@@ -555,7 +596,7 @@ pub struct HostAttach {
 ///
 /// 子进程在附着成功后立即退出：挂载归 mount namespace 所有，不随创建它的进程消失，
 /// 而常驻只会白占一个进程并拖住应用命名空间的引用计数（应用退出后残留挂载）。
-pub fn attach_app_to_host(host: &FuseHost, target_root: &str) -> Option<HostAttach> {
+pub fn attach_app_to_host(view: &HostSessionView, target_root: &str) -> Option<HostAttach> {
     if target_root.is_empty() {
         return None;
     }
@@ -595,7 +636,7 @@ pub fn attach_app_to_host(host: &FuseHost, target_root: &str) -> Option<HostAtta
         unsafe {
             libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
         }
-        let ok = host_attach_child_main(host, target_root, ready_sockets[1]);
+        let ok = host_attach_child_main(view, target_root, ready_sockets[1]);
         host_stage(if ok { "attach_ok" } else { "attach_failed" });
         // SAFETY: _exit 终止子进程，不跑 atexit。
         unsafe { libc::_exit(if ok { 0 } else { 1 }) };
@@ -640,8 +681,8 @@ pub fn attach_app_to_host(host: &FuseHost, target_root: &str) -> Option<HostAtta
     }
     Some(HostAttach {
         target: paths::normalize_syntax(target_root),
-        host_pid: host.child_pid,
-        host_start_time_ticks: host.child_start_time_ticks,
+        host_pid: view.child_pid,
+        host_start_time_ticks: view.child_start_time_ticks,
     })
 }
 
@@ -671,7 +712,11 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
 /// `move_mount` 这对 API 的用途：前者在**源命名空间**里克隆出一个不附着于任何命名空间的挂载
 /// （fd 携带），后者在**目标命名空间**里把它附着到目标路径。克隆与原挂载共享同一个 superblock，
 /// 因此 FUSE 请求仍然全部回到同一个宿主会话。
-fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::c_int) -> bool {
+fn host_attach_child_main(
+    view: &HostSessionView,
+    target_root: &str,
+    ready_sock: libc::c_int,
+) -> bool {
     // 1. 先钉住当前（应用）命名空间：克隆要在宿主命名空间做，句柄是唯一的回头路。
     let Ok(c_app_ns) = CString::new("/proc/self/ns/mnt") else {
         return false;
@@ -686,7 +731,7 @@ fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::
     let app_ns = UniqueFd::new(app_ns);
 
     // 2. 进入宿主命名空间做克隆。
-    let host_ns_path = format!("/proc/{}/ns/mnt", host.child_pid);
+    let host_ns_path = format!("/proc/{}/ns/mnt", view.child_pid);
     let Ok(c_host_ns) = CString::new(host_ns_path) else {
         return false;
     };
@@ -704,7 +749,7 @@ fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::
         return false;
     }
 
-    let Ok(c_mount_point) = CString::new(host.mount_point.as_str()) else {
+    let Ok(c_mount_point) = CString::new(view.mount_point.as_str()) else {
         return false;
     };
     let tree_fd = open_detached_mount(&c_mount_point);
@@ -719,7 +764,7 @@ fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::
         let errno = crate::platform::errno::last();
         log::warn!(
             "fuse host attach open_tree failed mp={} errno={} {}",
-            host.mount_point,
+            view.mount_point,
             errno,
             crate::platform::errno::text(errno)
         );
@@ -751,11 +796,11 @@ fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::
         log::warn!("fuse host attach not visible target={}", target_root);
         return false;
     };
-    if live.source != host.mount_source {
+    if live.source != view.mount_source {
         log::warn!(
             "fuse host attach source mismatch target={} expected={} actual={} fs={}",
             target_root,
-            host.mount_source,
+            view.mount_source,
             live.source,
             live.fs_type
         );
@@ -1172,9 +1217,180 @@ fn recv_host_ready(sock: libc::c_int, timeout_sec: i64) -> Option<i32> {
 
 /// 设置全局宿主会话句柄（daemon 启动时调用一次）。
 pub fn set_global(host: FuseHost) {
+    let view = HostSessionView::from(&host);
     if let Ok(mut slot) = host_slot().write() {
         // 以当前宿主句柄替换旧快照，供两条挂载路径读取。
         *slot = Some(Arc::new(host));
+    }
+    // 新会话身份发布到快照文件：companion 进程没有本进程的内存状态，
+    // 只能靠文件发现宿主会话。登记 uid 集合从空开始，随后随登记递增。
+    // quality-allow(chinese-language): 下方固定字段名属于跨进程快照协议。
+    if let Ok(mut reg) = HOST_REGISTRY.lock() {
+        *reg = Some((view.child_pid, std::collections::BTreeSet::new()));
+    }
+    publish_host_snapshot(&view);
+}
+
+/// daemon 侧登记台账：当前宿主会话 pid + 已登记 uid 集合。
+///
+/// 快照文件是唯一跨进程事实源，内存台账只是它的写入缓存；宿主会话重建时整体替换。
+static HOST_REGISTRY: Mutex<Option<(i32, std::collections::BTreeSet<u32>)>> = Mutex::new(None);
+
+fn registered_uids_snapshot() -> Vec<u32> {
+    HOST_REGISTRY
+        .lock()
+        .map(|reg| {
+            reg.as_ref()
+                .map(|(_, uids)| uids.iter().copied().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+}
+
+/// 原子重写宿主会话快照。companion 只读，必须看到自洽内容：先写临时文件再 rename。
+fn publish_host_snapshot(view: &HostSessionView) {
+    use std::io::Write;
+    let path = std::path::Path::new(crate::platform::module_paths::FUSE_HOST_SNAPSHOT_FILE);
+    let tmp = path.with_extension("snapshot.tmp");
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    let content = format!(
+        "boot_id={}\npid={}\nstart_ticks={}\nmount_point={}\nmount_source={}\nuids={}\n",
+        boot_id,
+        view.child_pid,
+        view.child_start_time_ticks,
+        view.mount_point,
+        view.mount_source,
+        view.registered_uids
+            .iter()
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let write_ok = (|| {
+        let mut file = std::fs::File::create(&tmp).ok()?;
+        file.write_all(content.as_bytes()).ok()?;
+        file.sync_all().ok()?;
+        Some(())
+    })()
+    .is_some();
+    if !write_ok {
+        log::warn!("fuse host snapshot write failed path={}", path.display());
+        return;
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        log::warn!(
+            "fuse host snapshot rename failed path={} err={}",
+            path.display(),
+            error
+        );
+    }
+}
+
+/// 登记成功后把 uid 追加进快照，供 companion 的接入前置检查读取。
+fn record_registered_uid(uid: u32) {
+    let mut need_publish = false;
+    if let Ok(mut reg) = HOST_REGISTRY.lock()
+        && let Some((_, uids)) = reg.as_mut()
+    {
+        need_publish = uids.insert(uid);
+    }
+    if need_publish && let Some(host) = get_fuse_host() {
+        publish_host_snapshot(&HostSessionView::from(host.as_ref()));
+        log::info!("fuse host snapshot updated uid={}", uid);
+    }
+}
+
+/// 读取并校验宿主会话快照（companion 侧发现入口）。
+///
+/// 快照缺失、来自其它开机（boot_id 不符）或宿主进程已死时返回 `None`——
+/// 三种情形调用方处理一致：继续 scoped 规划。
+pub fn read_host_session_view() -> Option<HostSessionView> {
+    let content =
+        std::fs::read_to_string(crate::platform::module_paths::FUSE_HOST_SNAPSHOT_FILE).ok()?;
+    let mut boot_id = String::new();
+    let mut child_pid = 0i32;
+    let mut child_start_time_ticks = 0u64;
+    let mut mount_point = String::new();
+    let mut mount_source = String::new();
+    let mut registered_uids = Vec::new();
+    for line in content.lines() {
+        let (key, value) = line.split_once('=')?;
+        match key {
+            "boot_id" => boot_id = value.to_string(),
+            "pid" => child_pid = value.parse().ok()?,
+            "start_ticks" => child_start_time_ticks = value.parse().ok()?,
+            "mount_point" => mount_point = value.to_string(),
+            "mount_source" => mount_source = value.to_string(),
+            "uids" => {
+                registered_uids = value
+                    .split(',')
+                    .filter(|value| !value.is_empty())
+                    .filter_map(|value| value.parse().ok())
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    let current_boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default();
+    if boot_id.is_empty() || boot_id != current_boot_id {
+        return None;
+    }
+    if !crate::platform::is_process_instance_alive(child_pid, child_start_time_ticks) {
+        return None;
+    }
+    Some(HostSessionView {
+        child_pid,
+        child_start_time_ticks,
+        mount_point,
+        mount_source,
+        registered_uids,
+    })
+}
+
+/// companion 侧有界等待：直到指定 uid 已被 daemon 预登记进宿主会话。
+///
+/// 预登记由 daemon 周期 reconcile 完成（约 3 秒一轮），因此等待预算必须覆盖它。
+/// 等待的是"策略就绪"而不是"会话存在"——会话在而策略未登记时接入，应用的请求
+/// 会被 fail-closed 拒绝成 ENOENT。超时或处于失败冷却期返回 `None`，调用方回退
+/// 旧 scoped 规划。
+pub fn wait_for_host_session_view(uid: i32) -> Option<HostSessionView> {
+    if !host_attach_enabled() {
+        return None;
+    }
+    if let Some(view) = read_host_session_view()
+        && view.registered_uids.contains(&(uid as u32))
+    {
+        return Some(view);
+    }
+    let now = crate::platform::paths::monotonic_ms();
+    let last_fail = LAST_HOST_WAIT_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && now.saturating_sub(last_fail) < HOST_WAIT_FAIL_COOLDOWN_MS {
+        return None;
+    }
+    let deadline = now.saturating_add(HOST_WAIT_BUDGET_MS as i64);
+    loop {
+        if let Some(view) = read_host_session_view()
+            && view.registered_uids.contains(&(uid as u32))
+        {
+            return Some(view);
+        }
+        let current = crate::platform::paths::monotonic_ms();
+        if current >= deadline {
+            LAST_HOST_WAIT_FAIL_MS.store(current, Ordering::Relaxed);
+            log::warn!(
+                "fuse host view wait timeout uid={} budget_ms={} fallback=scoped_planning",
+                uid,
+                HOST_WAIT_BUDGET_MS
+            );
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            HOST_WAIT_POLL_INTERVAL_MS as u64,
+        ));
     }
 }
 
@@ -1268,6 +1484,11 @@ pub fn wait_for_host_session() -> bool {
     let now = crate::platform::paths::monotonic_ms();
     let last_fail = LAST_HOST_WAIT_FAIL_MS.load(Ordering::Relaxed);
     if last_fail != 0 && now.saturating_sub(last_fail) < HOST_WAIT_FAIL_COOLDOWN_MS {
+        log::info!(
+            "fuse host wait skipped cooldown_ms={} last_fail_ms_ago={}",
+            HOST_WAIT_FAIL_COOLDOWN_MS,
+            now.saturating_sub(last_fail)
+        );
         return false;
     }
     let deadline = now.saturating_add(HOST_WAIT_BUDGET_MS as i64);
