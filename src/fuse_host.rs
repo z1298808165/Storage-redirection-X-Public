@@ -5,16 +5,36 @@
 
 use crate::platform::paths;
 use std::ffi::CString;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// 宿主挂载点：放在模块私有目录下，不落在任何存储别名上，避免与应用命名空间发生传播耦合。
 const FUSE_HOST_MOUNT_POINT: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host";
 
 /// 宿主会话的就绪等待上限（秒）。
 const HOST_READY_TIMEOUT_SEC: i64 = 30;
+/// 宿主恢复失败后的最短重试间隔，避免每个 reconcile 周期重复 fork。
+const HOST_RECOVERY_BACKOFF_MS: u64 = 5_000;
 
-/// 全局共享的宿主会话句柄（B2-b）。
-static FUSE_HOST: OnceLock<Arc<FuseHost>> = OnceLock::new();
+static LAST_RECOVERY_ATTEMPT_MS: AtomicI64 = AtomicI64::new(0);
+
+/// 可替换的全局共享宿主会话句柄。
+///
+/// 共享宿主子进程可能独立退出；使用可写槽位允许 daemon 在下一轮 reconcile 中
+/// 丢弃失效句柄并重建宿主，应用侧读取时仍只拿到当前有效快照。
+static FUSE_HOST: OnceLock<RwLock<Option<Arc<FuseHost>>>> = OnceLock::new();
+
+fn host_slot() -> &'static RwLock<Option<Arc<FuseHost>>> {
+    FUSE_HOST.get_or_init(|| RwLock::new(None))
+}
+
+fn host_is_alive(host: &FuseHost) -> bool {
+    crate::platform::is_process_instance_alive(host.child_pid, host.child_start_time_ticks)
+}
+
+fn host_is_dead(host: &FuseHost) -> bool {
+    !host_is_alive(host)
+}
 
 /// 已建立的共享宿主会话句柄。
 pub struct FuseHost {
@@ -214,10 +234,59 @@ fn recv_host_ready(sock: libc::c_int) -> bool {
 
 /// 设置全局宿主会话句柄（daemon 启动时调用一次）。
 pub fn set_global(host: FuseHost) {
-    let _ = FUSE_HOST.set(Arc::new(host));
+    if let Ok(mut slot) = host_slot().write() {
+        // 以当前宿主句柄替换旧快照，供两条挂载路径读取。
+        *slot = Some(Arc::new(host));
+    }
 }
 
-/// 获取全局宿主会话句柄（应用侧接入时调用）。
+pub fn clear_if_dead() -> bool {
+    host_slot()
+        .write()
+        .ok()
+        .map(|mut s| {
+            let d = s.as_ref().map_or(false, host_is_dead);
+            if d {
+                *s = None;
+            }
+            d
+        })
+        .unwrap_or(false)
+}
+
+/// 获取当前仍存活的宿主会话句柄。
 pub fn get_fuse_host() -> Option<Arc<FuseHost>> {
-    FUSE_HOST.get().cloned()
+    let slot = host_slot().read().ok()?;
+    let host = slot.as_ref()?.clone();
+    if crate::platform::is_process_instance_alive(host.child_pid, host.child_start_time_ticks) {
+        Some(host)
+    } else {
+        None
+    }
+}
+
+/// 确保共享宿主存在；宿主死亡时最多由当前 reconcile 调用方重建一次。
+pub fn ensure_global() -> bool {
+    if get_fuse_host().is_some() {
+        return true;
+    }
+    let _ = clear_if_dead();
+    let now = crate::platform::paths::monotonic_ms();
+    let last = LAST_RECOVERY_ATTEMPT_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < HOST_RECOVERY_BACKOFF_MS as i64 {
+        return false;
+    }
+    LAST_RECOVERY_ATTEMPT_MS.store(now, Ordering::Relaxed);
+    let Some(host) = spawn_fuse_host() else {
+        log::warn!(
+            "fuse host recovery failed, scoped path remains active backoff_ms={}",
+            HOST_RECOVERY_BACKOFF_MS
+        );
+        return false;
+    };
+    let pid = host.child_pid;
+    let source = host.mount_source.clone();
+    set_global(host);
+    log::info!("fuse host recovered child={} source={}", pid, source);
+    true
 }

@@ -231,23 +231,11 @@ pub fn main_entry() -> i32 {
         log::warn!("daemon config watcher unavailable, using fingerprint polling");
     }
 
-    // 建立共享宿主 FUSE 会话骨架（阶段 2）。失败只记录并继续，不影响主循环与既有 scoped 路径。
-    let _fuse_host = match crate::fuse_host::spawn_fuse_host() {
-        Some(host) => {
-            log::info!(
-                "fuse host session established child={} mp={} source={}",
-                host.child_pid,
-                host.mount_point,
-                host.mount_source
-            );
-            crate::fuse_host::set_global(host);
-            true
-        }
-        None => {
-            log::warn!("fuse host session unavailable, scoped path remains active");
-            false
-        }
-    };
+    // 建立共享宿主 FUSE 会话。失败只记录并继续，不影响主循环与既有 scoped 路径；
+    // 后续 reconcile 会在宿主子进程死亡后按需恢复，而不是继续使用失效句柄。
+    if !crate::fuse_host::ensure_global() {
+        log::warn!("fuse host session unavailable, scoped path remains active");
+    }
 
     let mut last_version = 0;
     let mut last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
@@ -444,6 +432,9 @@ fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mu
 }
 
 fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
+    // 共享宿主死亡时先尝试恢复；失败则让各挂载请求继续走 scoped FUSE 回退。
+    // 该动作只在 reconcile 入口执行一次，避免每个应用计划重复 fork 宿主。
+    let _host_ready = crate::fuse_host::ensure_global();
     let started_ms = crate::platform::paths::monotonic_ms();
     prune_stale_mount_states();
     crate::mount_intent::prune_stale();

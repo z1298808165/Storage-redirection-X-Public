@@ -516,7 +516,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("mount_host_fuse(", host)
         self.assertIn("libc::MS_SHARED", config)
         self.assertIn('"srx_fuse_host"', config)
-        self.assertIn("let _fuse_host = match crate::fuse_host::spawn_fuse_host()", daemon)
+        self.assertIn("if !crate::fuse_host::ensure_global()", daemon)
+        self.assertIn("crate::fuse_host::ensure_global()", daemon)
         self.assertIn("scoped path remains active", daemon)
         # B2-a 不能改变现有应用 scoped 挂载路径；host 只是新增基础设施。
         self.assertIn('"srx_fuse_redirect"', config)
