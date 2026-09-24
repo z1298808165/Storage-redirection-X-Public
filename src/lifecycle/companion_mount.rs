@@ -819,14 +819,22 @@ fn start_fuse_service_for_root(
 ) -> Option<FuseMountState> {
     // B2-b：优先尝试共享宿主会话接入。
     if let Some(host) = crate::fuse_host::get_fuse_host() {
-        if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
+        if !crate::fuse_host::can_attach_app(request.uid) {
+            // 宿主会话还没有该 uid 的策略，接入会让应用失去重定向；保持既有 scoped 路径。
+            log::debug!(
+                "fuse host attach skipped pid={} pkg={} reason=policy_registration_pending",
+                request.pid,
+                request.package_name
+            );
+        } else if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
             return Some(state);
+        } else {
+            log::warn!(
+                "bind to fuse host failed, falling back to scoped fork pid={} pkg={}",
+                request.pid,
+                request.package_name
+            );
         }
-        log::warn!(
-            "bind to fuse host failed, falling back to scoped fork pid={} pkg={}",
-            request.pid,
-            request.package_name
-        );
     }
 
     // 回退：fork 独立 scoped 会话（B2-a 前的既有路径）。

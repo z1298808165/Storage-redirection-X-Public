@@ -134,6 +134,11 @@ pub struct FuseRedirectConfig {
     pub read_only_paths: Vec<String>,
     pub path_mappings: Vec<PathMapping>,
     pub is_mapping_mode_only: bool,
+    /// 是否为共享宿主直通会话。
+    ///
+    /// 宿主会话把整个存储根以真实后端暴露出来，供各应用 namespace 复用同一份 FUSE 会话；
+    /// 它不做任何重定向，`redirect_target` 因此就是存储根本身。普通应用配置恒为 `false`。
+    pub is_passthrough_host: bool,
 }
 
 impl FuseRedirectConfig {
@@ -186,6 +191,7 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
         read_only_paths: request.read_only_paths().to_vec(),
         path_mappings: request.path_mappings().to_vec(),
         is_mapping_mode_only: request.is_mapping_mode_only(),
+        is_passthrough_host: false,
     }
 }
 
@@ -823,6 +829,29 @@ pub fn mount_blocking_with_ready(
     }
 }
 
+/// 宿主会话就绪阶段码。
+///
+/// 负值表示失败阶段，`0` 表示就绪。父进程据此把"未就绪"还原成具体阶段，避免只看到
+/// 一个无法定位的现象。
+pub const HOST_READY_DIR_FAILED: i32 = -10;
+pub const HOST_READY_POLICY_FAILED: i32 = -20;
+pub const HOST_READY_MOUNT_FAILED: i32 = -30;
+pub const HOST_READY_STABILITY_FAILED: i32 = -40;
+pub const HOST_READY_SHARED_FAILED: i32 = -50;
+
+/// 把宿主就绪阶段码翻译成可读阶段名，供父进程日志与阶段文件对齐。
+pub fn host_ready_stage(code: i32) -> &'static str {
+    match code {
+        0 => "ready",
+        HOST_READY_DIR_FAILED => "dir",
+        HOST_READY_POLICY_FAILED => "policy",
+        HOST_READY_MOUNT_FAILED => "mount",
+        HOST_READY_STABILITY_FAILED => "stability",
+        HOST_READY_SHARED_FAILED => "shared",
+        _ => "unknown",
+    }
+}
+
 /// 在指定宿主挂载点挂一个共享 FUSE 会话,并把它设为 shared propagation。
 ///
 /// 与 [`mount_blocking_with_ready`] 的差异：宿主会话不跟随任何应用生命周期，挂载点由调用方
@@ -847,17 +876,22 @@ pub fn mount_host_fuse(
     };
     if !fs::create_directory(host_mount_point, mount_uid) {
         log::error!("fuse host mount point missing: {}", host_mount_point);
-        send_ready_result(ready_sock, -1);
+        crate::fuse_host::host_stage("dir_failed");
+        send_ready_result(ready_sock, HOST_READY_DIR_FAILED);
         return false;
     }
+    crate::fuse_host::host_stage("dir_ok");
 
     let fs = match super::FuseRedirectFs::new(config) {
         Some(fs) => fs,
         None => {
-            send_ready_result(ready_sock, -1);
+            log::error!("fuse host policy init failed mp={}", host_mount_point);
+            crate::fuse_host::host_stage("policy_failed");
+            send_ready_result(ready_sock, HOST_READY_POLICY_FAILED);
             return false;
         }
     };
+    crate::fuse_host::host_stage("policy_ok");
     let mut mount_options = fuser::Config::default();
     mount_options.mount_options = vec![
         MountOption::FSName(session_mount_source.clone()),
@@ -875,7 +909,8 @@ pub fn mount_host_fuse(
     let background = match fuser::spawn_mount2(fs, host_mount_point, &mount_options) {
         Ok(background) => background,
         Err(error) => {
-            send_ready_result(ready_sock, -1);
+            crate::fuse_host::host_stage("mount_failed");
+            send_ready_result(ready_sock, HOST_READY_MOUNT_FAILED);
             log::warn!(
                 "fuse host mount failed mp={} err={}",
                 host_mount_point,
@@ -884,6 +919,7 @@ pub fn mount_host_fuse(
             return false;
         }
     };
+    crate::fuse_host::host_stage("mount_ok");
 
     let Some(identity) = wait_for_stable_session_mount(host_mount_point, &session_mount_source)
     else {
@@ -897,16 +933,23 @@ pub fn mount_host_fuse(
             mount_id: 0,
         };
         finish_background_session(background, host_mount_point, false, Some(&identity));
-        send_ready_result(ready_sock, -1);
+        crate::fuse_host::host_stage("stable_failed");
+        send_ready_result(ready_sock, HOST_READY_STABILITY_FAILED);
         return false;
     };
+    crate::fuse_host::host_stage("stable_ok");
 
     // 宿主挂载点必须显式设为 shared propagation：`MS_REC|MS_PRIVATE` 只切断向外传播，
     // 不会让子 namespace 得见该挂载；缺了 shared，应用侧的 MS_BIND 会静默失败。参考
     // huniangitb/Fuse-Proxy 的 ns_make_shared。
     let Ok(c_point) = CString::new(host_mount_point) else {
+        log::error!(
+            "fuse host shared propagation path invalid mp={}",
+            host_mount_point
+        );
         finish_background_session(background, host_mount_point, false, Some(&identity));
-        send_ready_result(ready_sock, -1);
+        crate::fuse_host::host_stage("shared_path_invalid");
+        send_ready_result(ready_sock, HOST_READY_SHARED_FAILED);
         return false;
     };
     // SAFETY: c_point 是合法 NUL 结尾路径，且在调用期间保持存活。
@@ -927,7 +970,15 @@ pub fn mount_host_fuse(
             errno,
             crate::platform::errno::text(errno)
         );
+        // 没有 shared propagation 时，应用侧 `MS_BIND` 引用不到宿主挂载：这种状态对外
+        // 表现为"宿主已建立但所有应用接入静默失败"，比直接判定失败更难排查，因此这里
+        // 明确按失败上报，让 daemon 退回 scoped FUSE。
+        finish_background_session(background, host_mount_point, false, Some(&identity));
+        crate::fuse_host::host_stage("shared_failed");
+        send_ready_result(ready_sock, HOST_READY_SHARED_FAILED);
+        return false;
     }
+    crate::fuse_host::host_stage("shared_ok");
 
     log::info!(
         "fuse host session mount registered mp={} mount_id={} source={}",
@@ -935,6 +986,7 @@ pub fn mount_host_fuse(
         identity.mount_id,
         identity.source
     );
+    crate::fuse_host::host_stage("ready");
     send_ready_result(ready_sock, 0);
 
     // 宿主会话常驻：不跟随任何应用生命周期，只等会话线程结束。

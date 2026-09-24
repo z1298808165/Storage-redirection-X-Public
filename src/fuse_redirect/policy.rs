@@ -179,35 +179,45 @@ impl RedirectPolicy {
             .trim_matches('/')
             .to_string();
         let real_root = real_backend_root_for_config(&config, user_id);
-        let redirect_storage = paths::resolve_user_path(
-            &paths::resolve_placeholders(
-                &paths::normalize(&config.redirect_target),
-                &config.app_data_dir,
-                &config.redirect_target,
-            ),
-            user_id,
-        );
-        let redirect_root_string =
-            paths::storage_to_data_media_for_user(&redirect_storage, user_id).unwrap_or_default();
-        if redirect_root_string.is_empty() {
-            log::error!("fuse redirect target invalid: {}", config.redirect_target);
-            return None;
-        }
-        let redirect_root_uid = if crate::metadata_repair::enabled() {
-            config.uid
+        // 共享宿主直通会话不做任何重定向，`redirect_target` 就是存储根本身；而按子路径
+        // 推导重定向根的函数对"根本身"返回 None，沿用普通流程会直接把配置判为非法。
+        // 这里显式区分该模式，并把重定向根指向真实根：即使某条路径意外走到重定向分支，
+        // 落点仍是真实后端，不会凭空多出一层沙盒目录，也不需要创建任何目录。
+        let redirect_root_string = if config.is_passthrough_host {
+            real_root.to_string_lossy().to_string()
         } else {
-            -1
-        };
-        if !fs::create_directory(&redirect_root_string, redirect_root_uid)
-            && !fs::is_directory(&redirect_root_string)
-        {
-            log::error!(
-                "fuse redirect target mkdir failed: {}",
-                redirect_root_string
+            let redirect_storage = paths::resolve_user_path(
+                &paths::resolve_placeholders(
+                    &paths::normalize(&config.redirect_target),
+                    &config.app_data_dir,
+                    &config.redirect_target,
+                ),
+                user_id,
             );
-            return None;
-        }
-        fix_mapped_dir_metadata(&redirect_root_string, config.uid);
+            let redirect_root_string =
+                paths::storage_to_data_media_for_user(&redirect_storage, user_id)
+                    .unwrap_or_default();
+            if redirect_root_string.is_empty() {
+                log::error!("fuse redirect target invalid: {}", config.redirect_target);
+                return None;
+            }
+            let redirect_root_uid = if crate::metadata_repair::enabled() {
+                config.uid
+            } else {
+                -1
+            };
+            if !fs::create_directory(&redirect_root_string, redirect_root_uid)
+                && !fs::is_directory(&redirect_root_string)
+            {
+                log::error!(
+                    "fuse redirect target mkdir failed: {}",
+                    redirect_root_string
+                );
+                return None;
+            }
+            fix_mapped_dir_metadata(&redirect_root_string, config.uid);
+            redirect_root_string
+        };
 
         let mut path_mappings = resolve_path_mappings(
             &config.path_mappings,
