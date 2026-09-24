@@ -527,7 +527,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 否则把宿主树 bind 到应用存储根会让应用静默失去全部重定向。这里钉死三件事：
         # 1) 登记必须先于接入闸门判断，避免接入启用后跑在旧策略上；
         # 2) 策略虚拟根取整个存储根（`mount_root=None`），与宿主会话服务的完整视图一致；
-        # 3) 闸门本身仍然存在——打开接入必须是一次有意的改动。
+        # 3) 闸门本身仍然存在——打开接入必须是一次有意的改动（默认由环境变量关闭）。
         for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
             source = read(path)
             body = section(source, "fn start_fuse_service_for_root", "let mut ready_sockets")
@@ -535,7 +535,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
             register_at = body.index("crate::fuse_host::register_app_policy(")
             gate_at = body.index("crate::fuse_host::can_attach_app(")
             self.assertLess(register_at, gate_at, f"{path} 必须先登记策略再判断接入闸门")
-            self.assertIn("fuse_config_from_request(request,None,", compact)
+            # 登记进宿主会话的策略必须用整根虚拟根，且**丢掉 real_root_override**：那个锚点
+            # 别名只存在于应用命名空间，宿主子进程在自己的私有命名空间里看到的是空目录，
+            # 照搬会把真实根读成空（仅映射模式的应用会整个丢失公共存储视图）。
+            self.assertIn("fuse_config_from_request(request,None,None)", compact)
 
         host = read("src/fuse_host.rs")
         self.assertIn("pub fn register_app_policy(", host)
@@ -570,6 +573,90 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "crate::fuse_host::spawn_host_control_loop(control_sock, policy_table)",
             config,
         )
+
+    def test_shared_fuse_host_attach_contract(self) -> None:
+        # 应用接入共享宿主会话的四条硬约束，任一条被放宽都会让应用静默失去重定向或让
+        # 清理流程误伤其它应用：
+        # 1) 挂载必须落在**应用自己的 mount namespace**，且只能用 `open_tree(OPEN_TREE_CLONE)`
+        #    + `move_mount` 搬运。宿主会话建立时对整棵树做过 `MS_REC|MS_PRIVATE`，应用命名空间
+        #    看不到宿主挂载点；而 `mount(MS_BIND)` 的源挂载必须属于调用方当前命名空间，跨命名
+        #    空间时内核直接返回 `EINVAL`（真机实测）。正确顺序是：进宿主命名空间克隆游离挂载
+        #    → 切回应用命名空间附着。任一处顺序写反都会让接入静默失效（应用读到真实存储）。
+        # 2) 接入后必须**复核**，确认应用视图里那个目标最上层就是本次会话的挂载源。
+        # 3) 挂载台账不得把宿主 pid 写进 `fuse_child=`：宿主会话跨应用共享，清理与回滚按
+        #    这一行发信号会打掉所有接入应用的挂载。宿主会话单独记 `fuse_host=`，只判活。
+        # 4) 接入默认关闭，且只允许落在存储视图根：宿主会话按 uid 注册策略，虚拟根只能是
+        #    整个存储视图根，落在更深的 scoped 子根会把该子树的请求按整根解析。
+        host = read("src/fuse_host.rs")
+        self.assertIn("pub fn attach_app_to_host(", host)
+        self.assertIn("pub fn can_attach_app(uid: i32, mount_root: &str) -> bool", host)
+        self.assertIn('const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";', host)
+        self.assertIn("fn host_attach_enabled() -> bool", host)
+        gate = "".join(
+            section(host, "pub fn can_attach_app(", "pub fn is_current_host_source(").split()
+        )
+        self.assertIn("if!host_attach_enabled(){", gate)
+        self.assertIn(
+            "paths::normalize_syntax(mount_root)==paths::normalize_syntax(&view_root)", gate
+        )
+
+        attach = section(host, "fn host_attach_child_main(", "fn open_detached_mount(")
+        host_ns_at = attach.index("setns(host_ns.get(), libc::CLONE_NEWNS)")
+        clone_at = attach.index("open_detached_mount(&c_mount_point)")
+        app_ns_at = attach.index("setns(app_ns.get(), libc::CLONE_NEWNS)")
+        move_at = attach.index("move_detached_mount(tree_fd.get(), &c_target)")
+        self.assertLess(host_ns_at, clone_at, "克隆游离挂载必须在宿主命名空间内完成")
+        self.assertLess(clone_at, app_ns_at, "克隆之后要切回应用命名空间")
+        self.assertLess(app_ns_at, move_at, "附着必须发生在应用命名空间内")
+        self.assertIn("live.source != host.mount_source", attach)
+        # 跨命名空间搬运只能用 open_tree + move_mount：`mount(MS_BIND)` 的源挂载必须属于
+        # 调用方当前命名空间，跨命名空间时直接 EINVAL（真机实测），退回 bind 会让接入静默失效。
+        self.assertIn("libc::SYS_open_tree", host)
+        self.assertIn("libc::SYS_move_mount", host)
+        self.assertNotIn("libc::MS_BIND", attach)
+
+        # 登记必须有应答：只按 `send` 是否成功判断，会让应用在策略尚未进宿主会话时接入，
+        # 结果是整片 ENOENT（未登记即拒绝）。应答带 uid，因为控制通道被所有挂载 worker 共用。
+        self.assertIn("fn await_policy_ack(", host)
+        self.assertIn("await_policy_ack(fd, config.uid)", host)
+        ack = section(host, "fn await_policy_ack(", "/// 把某个应用的策略登记到共享宿主会话")
+        self.assertIn("if ack_uid != uid {", ack)
+
+        for source_path, state_path in (
+            ("src/daemon_mount.rs", "src/daemon_mount.rs"),
+            (
+                "src/lifecycle/companion_mount.rs",
+                "src/lifecycle/companion_mount/mount_state.rs",
+            ),
+        ):
+            source = read(source_path)
+            # 跨命名空间的取句柄与 bind 只能有一份实现：两处各写一份时最常见的后果是只有
+            # 一处改对，而症状不会报错（挂载落在宿主命名空间，应用视图毫无变化）。
+            self.assertNotIn("fn perform_host_bind", source, f"{source_path} 不应保留独立 bind 实现")
+            self.assertIn("crate::fuse_host::attach_app_to_host(", source)
+            state = read(state_path)
+            self.assertIn("if state.host_session.is_some() {", state)
+            self.assertIn("fuse_host={}:{}", state)
+            rollback = section(
+                source, "fn rollback_scoped_fuse_services(", "fn scoped_fuse_mount_roots"
+            )
+            self.assertIn("fuse rollback keeps shared host session", rollback)
+            self.assertIn("continue;", rollback)
+
+        daemon = read("src/daemon_mount.rs")
+        self.assertIn("fn read_fuse_host_session(", daemon)
+        # 会话死亡后应用留下的是 ENOTCONN 死挂载：挂载表里看得到、访问全失败，因此判定
+        # 必须把它当成"状态失效"触发重挂，而不是当成健康。
+        dead = section(daemon, "fn has_dead_fuse_child(", "pub fn execute_mount_request(")
+        self.assertIn("read_fuse_host_session(state_path)", dead)
+        # 已被重建的宿主会话留下的层必须摘掉重建：归属判定认它是本模块的层，
+        # 但连接已断，保留只会让应用一直 ENOTCONN。
+        keep = section(
+            daemon,
+            "fn should_keep_reload_redirect_root(",
+            "fn sandbox_root_matches_redirect_target(",
+        )
+        self.assertIn("crate::fuse_host::is_stale_host_source(source)", keep)
 
     def test_fuse_policy_resolution_is_per_request_uid(self) -> None:
         # 共享宿主 FUSE 会话要让同一个挂载点服务多个应用，策略解析就必须从「会话级常量」

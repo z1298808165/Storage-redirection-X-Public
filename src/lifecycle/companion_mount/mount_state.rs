@@ -60,10 +60,21 @@ pub(super) fn write_mount_state(
         content.push_str(&format!("app_start_time={}\n", start_time_ticks));
     }
     for state in fuse_children {
+        if state.host_session.is_some() {
+            // 共享宿主会话不能写进 `fuse_child=`：清理流程会按这一行终止进程，
+            // 而宿主会话承载着所有接入应用的挂载。
+            continue;
+        }
         content.push_str(&format!(
             "fuse_child={}:{}\n",
             state.child, state.child_start_time_ticks
         ));
+    }
+    // 宿主会话单独记一行：它不参与终止，但会话死亡后本应用的挂载会变成 ENOTCONN 死挂载，
+    // 状态判活需要能读到它。
+    if let Some((host_pid, host_start)) = fuse_children.iter().find_map(|state| state.host_session)
+    {
+        content.push_str(&format!("fuse_host={}:{}\n", host_pid, host_start));
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));

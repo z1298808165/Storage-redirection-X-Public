@@ -13,6 +13,9 @@
 //   放宽任何一条都会让热重载在错误时机保留旧挂载（改沙箱目标后仍指向旧沙箱）。
 //   另外：`is_mapping_mode_only` 为 true 时必须返回 false——从默认重定向切到仅映射模式
 //   时旧沙箱根绑定必须摘除重建，否则仍保留旧重定向根会让应用读到错误视图。
+//   还有一条：挂载层来自**已被重建的共享宿主会话**时必须返回 false——那种层仍是本模块的层
+//   （归属判定为真），但它服务的那条 FUSE 连接已随旧会话断开，保留只会让应用一直拿到
+//   ENOTCONN，必须摘掉并按本轮（可能已是新会话）重新挂载。
 
 #![allow(dead_code, unused_imports, unused_variables, unused_macros)]
 
@@ -34,6 +37,24 @@ mod mount_identity {
     // 接缝：把"这一层是不是本模块的"when 结果交给调用方，隔离被测的保留判定。
     pub fn is_module_redirect_mount(_source: &str, _root: &str, _target: &str, _pkg: &str) -> bool {
         OWNERSHIP.with(|slot| slot.get())
+    }
+}
+
+mod fuse_host {
+    use std::cell::Cell;
+
+    thread_local! {
+        static STALE_HOST_SOURCE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn set_stale_host_source(value: bool) {
+        STALE_HOST_SOURCE.with(|slot| slot.set(value));
+    }
+
+    // 接缝：把"这一层是不是已被重建的宿主会话留下的"交给调用方，隔离被测的保留判定。
+    // 生产实现按挂载源与当前宿主会话比对（src/fuse_host.rs::is_stale_host_source）。
+    pub fn is_stale_host_source(_source: &str) -> bool {
+        STALE_HOST_SOURCE.with(|slot| slot.get())
     }
 }
 
@@ -257,6 +278,36 @@ fn main() {
             &request(MountOperation::Reload, SANDBOX_TARGET, true),
             &no_scoped_roots,
             Some(("/dev/block/dm-60", "/media/0/Android/data/com.demo/sdcard")),
+        ),
+        false,
+    );
+
+    // 共享宿主会话被重建后残留的层：它仍是本模块的层（归属为真），但那条 FUSE 连接已经
+    // 随旧会话断开，保留只会让应用永远拿到 ENOTCONN，必须摘掉重建到新会话。
+    fuse_host::set_stale_host_source(true);
+    check(
+        &mut failures,
+        "stale_host_session_layer_not_kept",
+        should_keep_reload_redirect_root(
+            "/storage/emulated/0",
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
+            &no_scoped_roots,
+            Some(("srx_fuse_host[100]", "/")),
+        ),
+        false,
+    );
+    fuse_host::set_stale_host_source(false);
+
+    // 当前会话的宿主层：虚拟根是整根，`root` 不是沙箱路径，因此不满足"沙箱根与重定向目标
+    // 一致"，按既有语义摘了重建（重挂会重新登记策略并接到当前会话）。
+    check(
+        &mut failures,
+        "current_host_session_layer_not_kept",
+        should_keep_reload_redirect_root(
+            "/storage/emulated/0",
+            &request(MountOperation::Reload, SANDBOX_TARGET, false),
+            &no_scoped_roots,
+            Some(("srx_fuse_host[100]", "/")),
         ),
         false,
     );

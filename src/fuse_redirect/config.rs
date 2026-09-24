@@ -1164,6 +1164,14 @@ pub fn host_mount_source(service_pid: u32) -> String {
     format!("{HOST_MOUNT_SOURCE_PREFIX}[{service_pid}]")
 }
 
+/// 挂载源是否由共享宿主会话生成（不区分该会话是否仍在服务）。
+///
+/// 与 [`host_mount_source`] 放在一起：前缀只在这一处出现，生成与识别不会各自漂移——
+/// 这类前缀一旦两处各写一份，改的时候漏一处就会让归属判定和清理流程给出相反结论。
+pub fn is_host_mount_source(source: &str) -> bool {
+    source.starts_with(HOST_MOUNT_SOURCE_PREFIX)
+}
+
 /// `/proc/self/mountinfo` 中一条挂载记录里用于判定挂载归属的字段。
 struct MountEntry {
     mount_id: u64,

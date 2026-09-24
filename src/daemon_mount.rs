@@ -11,9 +11,9 @@ use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{fs, module_paths, mountinfo, paths};
 use libc::{
-    AF_UNIX, CLONE_NEWNS, MNT_DETACH, MS_BIND, O_CLOEXEC, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
-    SIGKILL, SIGTERM, SO_RCVTIMEO, SOCK_DGRAM, SOL_SOCKET, WNOHANG, c_int, c_void, close, mount,
-    open, recv, send, setns, setsockopt, socketpair, umount2, waitpid,
+    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL,
+    SIGTERM, SO_RCVTIMEO, SOCK_DGRAM, SOL_SOCKET, WNOHANG, c_int, c_void, close, open, recv, send,
+    setns, setsockopt, socketpair, umount2, waitpid,
 };
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -993,6 +993,25 @@ fn legacy_state_owner_is_alive(pid: i32, package_name: &str, expected_uid: Optio
 /// 回收它们，`waitpid` 只会返回 ECHILD；判定存活只能查 `/proc/<pid>`。它们不会以
 /// 僵尸形式留在 daemon 名下，但 PID 仍可能被复用，因此还要比较启动时钟值。
 fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
+    // 接入共享宿主会话的挂载不写 `fuse_child=`，只有 `fuse_host=`。会话死亡时本应用留下的
+    // 是一条 ENOTCONN 死挂载：路径仍在挂载表里、状态看上去健康，但访问全部失败。必须让它
+    // 与 scoped 子进程消失走同一判定——视为状态失效，触发重挂并在重挂里换到新会话。
+    if let Some(host) = read_fuse_host_session(state_path) {
+        if host
+            .start_time_ticks
+            .is_some_and(|start| crate::platform::is_process_instance_alive(host.pid, start))
+        {
+            return false;
+        }
+        log::warn!(
+            "daemon fuse host session gone host_pid={} app_pid={} pkg={}, remount pending",
+            host.pid,
+            request.pid,
+            request.package_name
+        );
+        return true;
+    }
+
     let children = read_fuse_children(state_path);
     if children.is_empty() {
         return false;
@@ -1669,6 +1688,10 @@ fn start_scoped_fuse_services(
 /// 已成功的服务此时已经完成 FUSE mount，只终止子进程会把挂载点留在目标 mount
 /// namespace 里变成死挂载，后续访问返回 ENOTCONN 且没有任何路径会再清理它。
 /// 因此必须按启动的逆序先卸载挂载点，再终止对应子进程。
+///
+/// 接入共享宿主会话的挂载只卸载、不终止任何进程：宿主会话承载着其它应用的挂载，
+/// 按它自己的 pid 发信号会把整个模块的重定向一起打掉。宿主会话的生命周期由
+/// [`crate::fuse_host`] 的自愈逻辑单独管理。
 fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
     for state in states.iter().rev() {
         if let Ok(c_target) = CString::new(state.target.as_str()) {
@@ -1684,6 +1707,14 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
                     );
                 }
             }
+        }
+        if let Some((host_pid, _)) = state.host_session {
+            log::info!(
+                "daemon fuse rollback keeps shared host session target={} host={}",
+                state.target,
+                host_pid
+            );
+            continue;
         }
         terminate_fuse_child(
             state.child,
@@ -1706,15 +1737,31 @@ fn start_fuse_service_for_root(
         // 先把该应用的策略按 uid 登记进共享宿主会话：这是应用接入的前置条件，提前登记也让
         // 接入启用后第一帧请求就带上正确策略。虚拟根取整个存储根（mount_root=None），因为
         // 宿主会话服务的是完整存储视图，而不是某个 scoped 子根。
-        let policy_config = fuse_config_from_request(request, None, real_root_override.clone());
+        //
+        // `real_root_override` 必须丢弃（传 None）：它是**应用命名空间专属**的锚点别名
+        // （`tmp/real_storage/<user>` 上的绑定只存在于应用 namespace，供 scoped 子进程读取）。
+        // 宿主子进程活在自己的私有命名空间里，同一个路径是空目录，照搬覆盖会让策略把真实根
+        // 读成空——真机实测表现为仅映射模式的应用整个公共存储视图消失，只剩被沙盒化的那几条
+        // 路径。宿主命名空间里 `/data/media/<user>` 就是未经覆盖的真实存储，本就无需别名。
+        let policy_config = fuse_config_from_request(request, None, None);
         let registered = crate::fuse_host::register_app_policy(&policy_config);
-        if !crate::fuse_host::can_attach_app(request.uid) {
-            // 宿主会话还没有该 uid 的策略，接入会让应用失去重定向；保持既有 scoped 路径。
+        if !crate::fuse_host::can_attach_app(request.uid, mount_root) {
+            // 宿主会话的虚拟根只能是整个存储视图根，且默认不接管应用挂载；两种情况都保持
+            // 既有 scoped 路径，不能因为"宿主会话可用"就顺手接上。
             log::debug!(
-                "daemon fuse host attach skipped pid={} pkg={} registered={} reason=policy_registration_pending",
+                "daemon fuse host attach skipped pid={} pkg={} target={} registered={} reason=attach_gate_closed",
                 request.pid,
                 request.package_name,
+                mount_root,
                 registered
+            );
+        } else if !registered {
+            // 策略没进宿主会话时接入会让应用拿到"未登记即拒绝"的空视图；宁可继续 scoped。
+            log::warn!(
+                "daemon fuse host attach skipped pid={} pkg={} target={} reason=policy_registration_failed",
+                request.pid,
+                request.package_name,
+                mount_root
             );
         } else if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
             return Some(state);
@@ -1792,6 +1839,7 @@ fn start_fuse_service_for_root(
             target: mount_root.to_string(),
             child: service_child,
             child_start_time_ticks: 0,
+            host_session: None,
         }]);
         return None;
     };
@@ -1799,167 +1847,37 @@ fn start_fuse_service_for_root(
         target: mount_root.to_string(),
         child: service_child,
         child_start_time_ticks,
+        host_session: None,
     })
 }
 
-/// B2-b：通过 `setns` + `MS_BIND` 将应用接入共享宿主 FUSE 会话。
+/// B2-b：把应用接入共享宿主 FUSE 会话。
+///
+/// 跨命名空间的取句柄与 bind 都收敛在 [`crate::fuse_host::attach_app_to_host`]：daemon 与
+/// companion 两条路径必须用同一份实现，否则一处改了命名空间处理、另一处还在旧写法，
+/// 应用会因挂载落在错误命名空间而静默失去重定向。
+///
+/// 记账上要与 scoped 会话区分：宿主会话是跨应用共享的，`child` 不能填宿主 pid，
+/// 否则下一轮清理会把它当成本应用的子进程终止掉，连带打掉其它应用的挂载。
 fn try_bind_to_fuse_host(
     host: &crate::fuse_host::FuseHost,
     request: &MountRequest,
     mount_root: &str,
 ) -> Option<FuseMountState> {
-    // 构造宿主 namespace 路径。
-    let ns_path = format!("/proc/{}/ns/mnt", host.child_pid);
-    let Ok(c_ns_path) = CString::new(ns_path.as_bytes()) else {
-        log::error!("daemon host ns path invalid");
-        return None;
-    };
-
-    // fork 子进程执行 setns + MS_BIND。
-    let mut ready_sockets = [0; 2];
-    // SAFETY: socketpair 系统调用，传入有效的栈数组指针。
-    if unsafe { socketpair(AF_UNIX, SOCK_DGRAM, 0, ready_sockets.as_mut_ptr()) } != 0 {
-        log_errno("daemon host bind socketpair failed");
-        return None;
-    }
-
-    crate::logging::prepare_for_fork();
-    // SAFETY: fork 系统调用，已经通过 prepare_for_fork 避免日志通道竞态。
-    let bind_child = unsafe { libc::fork() };
-    if bind_child < 0 {
-        log_errno("daemon host bind fork failed");
-        // SAFETY: ready_sockets 是有效 fd，fork 失败后父进程负责清理。
-        unsafe {
-            close(ready_sockets[0]);
-            close(ready_sockets[1]);
-        }
-        return None;
-    }
-
-    if bind_child == 0 {
-        // SAFETY: 子进程关闭继承的 fd；prctl 设置进程名，传入 null 结尾的字节串。
-        unsafe {
-            close(ready_sockets[0]);
-            let name = b"srx_bind\0";
-            libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
-        }
-        // 子进程：setns 进入宿主 namespace，然后 MS_BIND 挂载。
-        let ok = perform_host_bind(&c_ns_path, &host.mount_point, mount_root, ready_sockets[1]);
-        // SAFETY: 子进程直接退出，不执行析构函数（避免 fork 后的资源清理问题）。
-        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
-    }
-
-    // SAFETY: 父进程关闭写端 fd。
-    unsafe { close(ready_sockets[1]) };
-    set_recv_timeout(ready_sockets[0], FUSE_READY_TIMEOUT_SEC);
-    let mut ready_result: i32 = -1;
-    let expected = std::mem::size_of::<i32>() as isize;
-    let n = recv_result(ready_sockets[0], &mut ready_result);
-    // SAFETY: 父进程关闭读端 fd。
-    unsafe { close(ready_sockets[0]) };
-    if n != expected || ready_result != 0 {
-        log::warn!(
-            "daemon host bind not ready child={} recv={} ret={} pid={} pkg={}",
-            bind_child,
-            n,
-            ready_result,
-            request.pid,
-            request.package_name
-        );
-        // SAFETY: bind_child 是有效 pid，发送 SIGTERM 终止子进程。
-        let _ = unsafe { libc::kill(bind_child, libc::SIGTERM) };
-        let mut status = 0;
-        // SAFETY: waitpid 等待子进程结束，避免僵尸进程。
-        unsafe { libc::waitpid(bind_child, &mut status, 0) };
-        return None;
-    }
-
-    // 返回宿主会话的 FuseMountState（复用宿主 pid/start_time）。
+    let attached = crate::fuse_host::attach_app_to_host(host, mount_root)?;
+    log::info!(
+        "daemon fuse host attach ok pid={} pkg={} target={} host={}",
+        request.pid,
+        request.package_name,
+        attached.target,
+        attached.host_pid
+    );
     Some(FuseMountState {
-        target: mount_root.to_string(),
-        child: host.child_pid,
-        child_start_time_ticks: host.child_start_time_ticks,
+        target: attached.target,
+        child: 0,
+        child_start_time_ticks: 0,
+        host_session: Some((attached.host_pid, attached.host_start_time_ticks)),
     })
-}
-
-/// 在子进程内执行 setns + MS_BIND + 确认挂载 + 发送 ready 信号。
-fn perform_host_bind(
-    ns_path: &CStr,
-    host_mount_point: &str,
-    app_mount_root: &str,
-    ready_sock: c_int,
-) -> bool {
-    // Step 1: setns 进入宿主 namespace。
-    // SAFETY: open 系统调用，ns_path 是有效的 C 字符串指针。
-    let fd = unsafe { open(ns_path.as_ptr(), O_RDONLY | O_CLOEXEC) };
-    if fd < 0 {
-        log_errno("daemon host bind ns open failed");
-        return false;
-    }
-    let ns_fd = UniqueFd::new(fd);
-    // SAFETY: setns 系统调用，ns_fd 是有效的 namespace 文件描述符。
-    if unsafe { setns(ns_fd.get(), CLONE_NEWNS) } != 0 {
-        log_errno("daemon host bind setns failed");
-        return false;
-    }
-
-    // Step 2: mkdir 应用挂载目标（允许已存在）。
-    let Ok(c_target) = CString::new(app_mount_root.as_bytes()) else {
-        log::error!("daemon host bind target path invalid");
-        return false;
-    };
-    // SAFETY: mkdir 系统调用，c_target 是有效的 C 字符串指针；失败时忽略（可能已存在）。
-    unsafe {
-        libc::mkdir(c_target.as_ptr(), 0o755);
-    }
-
-    // Step 3: MS_BIND 从宿主挂载点绑定到应用目标。
-    let Ok(c_source) = CString::new(host_mount_point.as_bytes()) else {
-        log::error!("daemon host bind source path invalid");
-        return false;
-    };
-    // SAFETY: mount 系统调用，c_source/c_target 是有效的 C 字符串指针。
-    if unsafe {
-        mount(
-            c_source.as_ptr(),
-            c_target.as_ptr(),
-            std::ptr::null(),
-            MS_BIND,
-            std::ptr::null(),
-        )
-    } != 0
-    {
-        log_errno("daemon host bind mount MS_BIND failed");
-        return false;
-    }
-
-    // Step 4: 确认挂载成功（通过读取 /proc/self/mounts 验证）。
-    // 简化：直接发送 ready=0，让父进程通过 FuseMountState 验证。
-
-    // Step 5: 发送 ready 信号。
-    let ready: i32 = 0;
-    // SAFETY: send 系统调用，ready_sock 是有效 fd，传入栈变量指针。
-    let sent = unsafe {
-        libc::send(
-            ready_sock,
-            &ready as *const i32 as *const libc::c_void,
-            std::mem::size_of::<i32>(),
-            0,
-        )
-    };
-    // SAFETY: close 系统调用，ready_sock 是有效 fd。
-    unsafe { close(ready_sock) };
-    if sent != std::mem::size_of::<i32>() as isize {
-        log_errno("daemon host bind send ready failed");
-        return false;
-    }
-
-    // Step 6: 保持子进程存活（否则 MS_BIND 挂载会随进程退出消失）。
-    // 等待 SIGTERM 信号（由父进程在 umount 时发送）。
-    loop {
-        // SAFETY: pause 系统调用，挂起进程等待信号。
-        unsafe { libc::pause() };
-    }
 }
 
 fn set_mount_namespace(ns_path: Option<&CStr>) -> bool {
@@ -2252,6 +2170,11 @@ fn should_keep_reload_redirect_root(
     let Some((source, root)) = live_layer else {
         return false;
     };
+    // 来自已被重建的宿主会话的层不能保留：它仍是本模块的层（归属判定会认），但 FUSE 连接
+    // 已随旧会话结束断开，保留下来应用只会一直拿到 ENOTCONN。
+    if crate::fuse_host::is_stale_host_source(source) {
+        return false;
+    }
     if !mount_identity::is_module_redirect_mount(source, root, target, &request.package_name) {
         return false;
     }
@@ -2625,8 +2548,14 @@ fn expand_storage_alias_paths_for_user(canonical_path: &str, user_id: i32) -> Ve
 #[derive(Clone)]
 struct FuseMountState {
     target: String,
+    /// 服务该挂载的 scoped FUSE 子进程；接入共享宿主会话时为 0（见 `host_session`）。
     child: i32,
     child_start_time_ticks: u64,
+    /// 该挂载由共享宿主会话承载时记录 `(pid, start_time_ticks)`。
+    ///
+    /// 与 `child` 的区别不只是字段来源：宿主会话是**跨应用共享**的，终止它等于把所有接入
+    /// 该会话的应用一起打回死挂载。因此回滚、清理、状态文件都必须按这个字段分流。
+    host_session: Option<(i32, u64)>,
 }
 
 fn fuse_config_from_request(
@@ -2670,10 +2599,21 @@ fn write_mount_state(
         content.push_str(&format!("app_start_time={}\n", start_time_ticks));
     }
     for state in fuse_children {
+        if state.host_session.is_some() {
+            // 共享宿主会话不能被写进 `fuse_child=`：清理流程会按这一行终止进程，
+            // 而宿主会话承载着所有接入应用的挂载。
+            continue;
+        }
         content.push_str(&format!(
             "fuse_child={}:{}\n",
             state.child, state.child_start_time_ticks
         ));
+    }
+    // 宿主会话单独记一行：它不参与终止，但会话死亡后本应用的挂载会变成 ENOTCONN 死挂载，
+    // 必须让健康判定能据此把这份状态视为失效并重挂。
+    if let Some((host_pid, host_start)) = fuse_children.iter().find_map(|state| state.host_session)
+    {
+        content.push_str(&format!("fuse_host={}:{}\n", host_pid, host_start));
     }
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
@@ -2833,6 +2773,25 @@ fn read_fuse_children(path: &str) -> Vec<FuseChildIdentity> {
             })
         })
         .collect()
+}
+
+/// 读取状态文件里记录的共享宿主会话身份。
+///
+/// 与 `fuse_child=` 分开存放：那一行的语义是"可以终止这个进程"，而宿主会话跨应用共享，
+/// 只能判活、不能终止。
+fn read_fuse_host_session(path: &str) -> Option<FuseChildIdentity> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let value = line.strip_prefix("fuse_host=")?;
+            let (pid, start) = value.split_once(':')?;
+            let pid: i32 = pid.parse().ok()?;
+            (pid > 0).then(|| FuseChildIdentity {
+                pid,
+                start_time_ticks: start.parse().ok(),
+            })
+        })
 }
 
 fn terminate_recorded_fuse_child(child: &FuseChildIdentity) -> bool {

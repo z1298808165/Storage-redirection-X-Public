@@ -5,7 +5,7 @@
 //! 阶段 1 的按 uid 策略注册通过会话内的控制通道补齐。
 
 use crate::platform::paths;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -14,12 +14,31 @@ const FUSE_HOST_MOUNT_POINT: &str = "/data/adb/modules/storage.redirect.x/tmp/fu
 
 /// 宿主会话的就绪等待上限（秒）。
 const HOST_READY_TIMEOUT_SEC: i64 = 30;
+/// 应用接入的就绪等待上限（秒）。
+///
+/// 接入子进程只做几次本地系统调用（取句柄、mkdir、bind、复核），正常在毫秒级完成；
+/// 这里给的时间只用于兜住内核里卡住的 `mount`，避免挂载 worker 被长期阻塞。
+const HOST_ATTACH_TIMEOUT_SEC: i64 = 10;
 /// 宿主恢复失败后的最短重试间隔，避免每个 reconcile 周期重复 fork。
 const HOST_RECOVERY_BACKOFF_MS: u64 = 5_000;
 /// 单条策略载荷上限（一次 `send` 不超过它）。
 const HOST_CONTROL_PAYLOAD_LIMIT: usize = 32 * 1024;
 /// 控制线程栈大小：要容纳与载荷等长的栈缓冲，避免在 fork 之后为读缓冲分配堆内存。
 const HOST_CONTROL_STACK_SIZE: usize = 256 * 1024;
+/// 策略登记应答的等待上限（毫秒）。
+///
+/// 登记是接入的前置条件，必须先确认宿主会话真的建好了该 uid 的策略，否则应用会拿到
+/// 「未登记即拒绝」的空视图。同一条控制通道被所有应用的挂载 worker 共用，应答因此带
+/// uid 标记，读到别人的应答就继续等自己那条。
+const HOST_POLICY_ACK_TIMEOUT_MS: i64 = 2_000;
+/// 一次登记最多容忍几条不属于自己的应答，避免通道异常时无限空转。
+const HOST_POLICY_ACK_SKIP_LIMIT: usize = 8;
+/// 应用接入共享宿主会话的开关环境变量。
+///
+/// 接入会把「每个应用各 fork 一个 scoped 会话」换成「所有应用共享一个宿主会话」，
+/// 属于挂载实现层面的整体切换，因此在真机与 CI 都跑通之前默认关闭（未设置即为关闭），
+/// 只在显式打开时才生效。取值 `1` / `true` / `yes`（大小写不敏感）视为打开。
+const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";
 
 static LAST_RECOVERY_ATTEMPT_MS: AtomicI64 = AtomicI64::new(0);
 /// 宿主会话控制端 fd（daemon 侧）；`-1` 表示当前没有可用宿主会话。
@@ -119,10 +138,31 @@ fn log_errno(tag: &str) {
 
 /// 保存宿主会话控制端 fd，并关闭被替换掉的旧 fd（宿主重建时避免 fd 泄漏）。
 fn set_host_control_fd(fd: libc::c_int) {
+    // 登记要等待应答，因此接收超时必须先设好：挂载 worker 是 fork 出来的，超时设置会随
+    // fd 一起继承，等真正登记时再设置就晚了。
+    set_socket_recv_timeout_ms(fd, HOST_POLICY_ACK_TIMEOUT_MS);
     let previous = HOST_CONTROL_FD.swap(fd, Ordering::Relaxed);
     if previous >= 0 && previous != fd {
         // SAFETY: previous 是本模块此前保存的控制端 fd，本次替换负责关闭它。
         unsafe { libc::close(previous) };
+    }
+}
+
+/// 设置 socket 接收超时，避免等待应答时无限阻塞。
+fn set_socket_recv_timeout_ms(fd: libc::c_int, timeout_ms: i64) {
+    let timeout = libc::timeval {
+        tv_sec: timeout_ms / 1000,
+        tv_usec: ((timeout_ms % 1000) * 1000) as libc::suseconds_t,
+    };
+    // SAFETY: timeout 是合法 timeval，fd 是本模块持有的 socket。
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &timeout as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
     }
 }
 
@@ -135,11 +175,73 @@ fn close_host_control_fd() {
     }
 }
 
+/// 策略登记应答：`(uid, 表大小)`，表大小为 0 表示宿主会话拒绝了这份策略。
+///
+/// 应答必须带 uid：控制通道被所有应用的挂载 worker 共用（worker 是 daemon 的 fork，
+/// 继承同一个 fd），并发登记时先到的应答未必属于本次调用。只按「收到一包就当成功」
+/// 判断，会让某个应用在策略尚未登记的情况下接入共享会话。
+fn decode_policy_ack(buffer: &[u8]) -> Option<(i32, i32)> {
+    if buffer.len() < 8 {
+        return None;
+    }
+    let uid = i32::from_ne_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+    let size = i32::from_ne_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+    Some((uid, size))
+}
+
+/// 等待宿主会话对本次登记的应答。
+fn await_policy_ack(fd: libc::c_int, uid: i32) -> bool {
+    let mut buffer = [0u8; 8];
+    for _ in 0..HOST_POLICY_ACK_SKIP_LIMIT {
+        // SAFETY: fd 是本模块持有的控制端 socket，buffer 是本地可写数组。
+        let read = unsafe {
+            libc::recv(
+                fd,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                0,
+            )
+        };
+        if read < 0 {
+            let errno = crate::platform::errno::last();
+            log::warn!(
+                "fuse host policy ack unavailable uid={} errno={} {}",
+                uid,
+                errno,
+                crate::platform::errno::text(errno)
+            );
+            return false;
+        }
+        let Some((ack_uid, table_size)) = decode_policy_ack(&buffer[..read as usize]) else {
+            continue;
+        };
+        if ack_uid != uid {
+            // 属于并发登记的另一次调用：不能代它消费，继续等自己那条。
+            log::debug!(
+                "fuse host policy ack for other uid={} expected={}",
+                ack_uid,
+                uid
+            );
+            continue;
+        }
+        if table_size <= 0 {
+            log::warn!("fuse host policy ack rejected uid={}", uid);
+            return false;
+        }
+        return true;
+    }
+    log::warn!("fuse host policy ack not received uid={}", uid);
+    false
+}
+
 /// 把某个应用的策略登记到共享宿主会话（按其 uid 生效）。
 ///
 /// 这是阶段 1「按 uid 策略注册」的 daemon 侧入口：策略在 daemon 侧构造（与 scoped 会话同一份
-/// `fuse_config_from_request`），序列化后经控制通道送到持有会话的子进程再建策略。返回 `false`
-/// 只表示本次登记没有送达，不影响调用方的 scoped 回退路径。
+/// `fuse_config_from_request`），序列化后经控制通道送到持有会话的子进程再建策略。
+///
+/// 返回 `true` 表示**宿主会话已确认建好该 uid 的策略**（收到应答），而不是"数据已发出"：
+/// 接入会让应用的存储根直接由宿主会话承载，策略没登记上去就是整片 ENOENT，因此这里必须
+/// 拿应答而不是拿 `send` 的返回值。返回 `false` 时调用方保持 scoped 路径不变。
 pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) -> bool {
     let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
     if fd < 0 {
@@ -167,17 +269,19 @@ pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) ->
             0,
         )
     };
-    if sent < 0 {
+    if sent != payload.len() as isize {
         let errno = crate::platform::errno::last();
-        log::debug!(
-            "fuse host policy send failed uid={} errno={} {}",
+        log::warn!(
+            "fuse host policy send failed uid={} sent={} bytes={} errno={} {}",
             config.uid,
+            sent,
+            payload.len(),
             errno,
             crate::platform::errno::text(errno)
         );
         return false;
     }
-    true
+    await_policy_ack(fd, config.uid)
 }
 
 /// 在宿主会话内启动按 uid 策略控制通道的读取循环。
@@ -211,20 +315,43 @@ pub(crate) fn spawn_host_control_loop(
                     Ok(config) => {
                         let uid = config.uid;
                         let package_name = config.package_name.clone();
-                        match policy_table.register(config) {
-                            Some(size) => log::info!(
+                        let size = policy_table.register(config).unwrap_or(0);
+                        if size > 0 {
+                            log::info!(
                                 "fuse host policy registered uid={} pkg={} table={}",
                                 uid,
                                 package_name,
                                 size
-                            ),
-                            None => {
-                                log::warn!(
-                                    "fuse host policy rejected uid={} pkg={}",
-                                    uid,
-                                    package_name
-                                )
-                            }
+                            );
+                        } else {
+                            log::warn!(
+                                "fuse host policy rejected uid={} pkg={}",
+                                uid,
+                                package_name
+                            );
+                        }
+                        // 应答必须发出去，否则调用方会一直等到超时再退回 scoped 路径；
+                        // 表大小为 0 也是一种明确答复（拒绝），不能省略。
+                        let mut ack = [0u8; 8];
+                        ack[..4].copy_from_slice(&uid.to_ne_bytes());
+                        ack[4..].copy_from_slice(&(size as i32).to_ne_bytes());
+                        // SAFETY: control_sock 是本次会话的控制端 fd，ack 是本地数组。
+                        let sent = unsafe {
+                            libc::send(
+                                control_sock,
+                                ack.as_ptr() as *const libc::c_void,
+                                ack.len(),
+                                0,
+                            )
+                        };
+                        if sent != ack.len() as isize {
+                            let errno = crate::platform::errno::last();
+                            log::warn!(
+                                "fuse host policy ack send failed uid={} errno={} {}",
+                                uid,
+                                errno,
+                                crate::platform::errno::text(errno)
+                            );
                         }
                     }
                     Err(error) => log::warn!("fuse host policy decode failed err={}", error),
@@ -330,18 +457,403 @@ fn install_host_panic_hook() {
     }));
 }
 
+/// 应用接入共享宿主会话的开关是否打开。
+///
+/// 默认关闭：接入把挂载实现从「每应用一个 scoped 会话」换成「全局一个宿主会话」，
+/// 在没有真机与 CI 双重验证之前不允许悄悄生效。
+fn host_attach_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var(HOST_ATTACH_ENV)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+            .unwrap_or(false);
+        log::info!(
+            "fuse host attach switch env={} enabled={}",
+            HOST_ATTACH_ENV,
+            enabled
+        );
+        enabled
+    })
+}
+
 /// 共享宿主会话当前是否可以安全承接指定调用方的挂载。
 ///
-/// 宿主会话只持有一份"直通"策略，而按 uid 注册应用策略的通道尚未实现
-/// （`PolicyRegistry::by_uid` 目前恒为空，且没有注册入口）。此时若把宿主树 `MS_BIND`
-/// 到应用存储根，应用会拿到**纯直通视图**，即完全失去重定向——而且这种回退不会报错，
-/// 只会表现为"规则莫名其妙不生效"。
+/// 这是能力闸门加语义约束，两层都必须满足：
 ///
-/// 因此这里是一道能力闸门，而不是失败兜底：在按 uid 注册落地前，应用接入一律关闭，
-/// 继续走已经稳定的 scoped FUSE 路径；宿主会话本身照常建立并保持，供后续接入使用。
-pub fn can_attach_app(uid: i32) -> bool {
-    let _ = uid;
-    false
+/// 1. **能力**：宿主会话按 uid 提供策略，登记通道与拒绝回退都已就位；但接入是挂载实现的
+///    整体切换，因此由 [`HOST_ATTACH_ENV`] 显式打开，默认关闭。
+/// 2. **语义**：宿主会话的虚拟根固定是"该 uid 的整个存储视图根"，因为策略是按 uid 注册的
+///    （一个 uid 一份规则，虚拟根只能是整根）。所以宿主挂载只能落在存储视图根上；落在更深
+///    的 scoped 根（混合规则的子目录）时，内核会把该子目录下的请求按整根解析，命中的是与本
+///    应用规则无关的真实路径——读错内容却完全不报错。这类目标一律拒绝接入，继续走 scoped。
+///
+/// 两条都不满足时返回 false 都不是失败：调用方保持既有的 scoped FUSE 路径。
+pub fn can_attach_app(uid: i32, mount_root: &str) -> bool {
+    if !host_attach_enabled() {
+        return false;
+    }
+    if mount_root.is_empty() {
+        return false;
+    }
+    let user_id = crate::platform::user_id_from_uid(uid);
+    let view_root = paths::storage_user_root_for_user(user_id);
+    paths::normalize_syntax(mount_root) == paths::normalize_syntax(&view_root)
+}
+
+/// 某个挂载源是否属于**当前仍在服务**的共享宿主会话。
+///
+/// 宿主会话会被自愈逻辑重建（新的 pid、新的挂载源）。旧会话留下的挂载层虽然仍带着
+/// `srx_fuse_host[...]` 前缀、看上去"是本模块的"，但它服务的那条 FUSE 连接已经断了，
+/// 继续当作有效层保留只会让应用访问永远 ENOTCONN。
+pub fn is_current_host_source(source: &str) -> bool {
+    get_fuse_host().is_some_and(|host| host.mount_source == source)
+}
+
+/// 应用接入留下的挂载层是否已经过期。
+///
+/// "过期"指这层来自共享宿主会话、但不再是当前仍在服务的那个会话：它既是本模块的层
+/// （归属判定会认），又已经失去后端。清理与恢复流程据此决定不保留、按重挂处理。
+pub fn is_stale_host_source(source: &str) -> bool {
+    crate::fuse_redirect::config::is_host_mount_source(source) && !is_current_host_source(source)
+}
+
+/// 一次成功的应用接入。
+pub struct HostAttach {
+    /// 已经落在应用命名空间里的挂载点。
+    pub target: String,
+    /// 承载该挂载的宿主会话身份。
+    ///
+    /// 调用方记录进挂载状态时必须与 scoped 子进程区分：宿主会话是跨应用共享的，
+    /// 按 pid 终止它会把其它应用一起打掉。
+    pub host_pid: i32,
+    pub host_start_time_ticks: u64,
+}
+
+/// 把应用的存储视图接入共享宿主会话。
+///
+/// 要点有两个，都是"看起来能跑、实际不生效"的类型：
+///
+/// 1. 挂载必须**出现在应用自己的 mount namespace 里**。宿主会话建立时对整棵树做过
+///    `MS_REC|MS_PRIVATE`，应用命名空间看不到宿主挂载点；直接在宿主命名空间里挂载只会
+///    落在宿主自己的树上，应用视图毫无变化。
+/// 2. 搬运必须用 `open_tree(OPEN_TREE_CLONE)` + `move_mount`，不能指望 `mount(MS_BIND)`：
+///    后者的源挂载必须属于调用方当前命名空间，跨命名空间时直接 `EINVAL`（真机实测）。
+///
+/// 因此子进程的顺序是：进宿主命名空间克隆游离挂载 → 切回应用命名空间附着 → 复核应用视图里
+/// 该目标的挂载源就是本次会话的挂载源。复核不是可选项：这类错误不会有任何其它症状。
+///
+/// 子进程在附着成功后立即退出：挂载归 mount namespace 所有，不随创建它的进程消失，
+/// 而常驻只会白占一个进程并拖住应用命名空间的引用计数（应用退出后残留挂载）。
+pub fn attach_app_to_host(host: &FuseHost, target_root: &str) -> Option<HostAttach> {
+    if target_root.is_empty() {
+        return None;
+    }
+    let mut ready_sockets = [0; 2];
+    // SAFETY: ready_sockets 是本地数组，长度合法，socketpair 填充两个 fd。
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_DGRAM,
+            0,
+            ready_sockets.as_mut_ptr(),
+        )
+    } != 0
+    {
+        log_errno("fuse host attach socketpair failed");
+        return None;
+    }
+
+    crate::logging::prepare_for_fork();
+    // SAFETY: fork 前已完成日志准备；子进程只做系统调用后退出。
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        log_errno("fuse host attach fork failed");
+        // SAFETY: 两个 fd 均为本次 socketpair 打开，此处是唯一清理点。
+        unsafe {
+            libc::close(ready_sockets[0]);
+            libc::close(ready_sockets[1]);
+        }
+        return None;
+    }
+
+    if child == 0 {
+        // SAFETY: 子进程关闭父端 fd；该入口只在完成或失败时返回。
+        unsafe { libc::close(ready_sockets[0]) };
+        let name = b"srx_hostbind\0";
+        // SAFETY: prctl(PR_SET_NAME) 设置线程名称，name 是 NUL 结尾的静态字节串。
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+        }
+        let ok = host_attach_child_main(host, target_root, ready_sockets[1]);
+        host_stage(if ok { "attach_ok" } else { "attach_failed" });
+        // SAFETY: _exit 终止子进程，不跑 atexit。
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+    }
+
+    // SAFETY: 父进程关闭子端 fd 后等待就绪。
+    unsafe { libc::close(ready_sockets[1]) };
+    let ready = recv_host_ready(ready_sockets[0], HOST_ATTACH_TIMEOUT_SEC);
+    // SAFETY: ready_sockets[0] 是父进程持有的有效端点。
+    unsafe { libc::close(ready_sockets[0]) };
+    // 子进程正常会立刻退出，因此这里以阻塞回收为准；异常路径改用强制回收，两者都不能留下僵尸。
+    let ok = match ready {
+        Some(0) => {
+            reap_attach_child(child);
+            true
+        }
+        Some(code) => {
+            let reason = reap_host_child(child);
+            log::warn!(
+                "fuse host attach not ready child={} code={} stage={} {}",
+                child,
+                code,
+                crate::fuse_redirect::config::host_ready_stage(code),
+                reason
+            );
+            false
+        }
+        None => {
+            let reason = reap_host_child(child);
+            log::warn!(
+                "fuse host attach unavailable child={} timeout_sec={} {}",
+                child,
+                HOST_ATTACH_TIMEOUT_SEC,
+                reason
+            );
+            false
+        }
+    };
+    if !ok {
+        log_host_stage_trace();
+        return None;
+    }
+    Some(HostAttach {
+        target: paths::normalize_syntax(target_root),
+        host_pid: host.child_pid,
+        host_start_time_ticks: host.child_start_time_ticks,
+    })
+}
+
+/// 回收已自行退出的接入子进程。
+fn reap_attach_child(pid: libc::pid_t) {
+    let mut status: libc::c_int = 0;
+    for _ in 0..50 {
+        // SAFETY: pid 是本次 fork 出的子进程，已确认就绪，回收不会阻塞。
+        if unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) } == pid {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    reap_host_child(pid);
+}
+
+/// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离（未附着到任何命名空间）的挂载。
+const OPEN_TREE_CLONE: libc::c_uint = 0x0000_0001;
+/// `move_mount(2)` 的 `MOVE_MOUNT_F_EMPTY_PATH`：源由 fd 指定（游离挂载没有路径）。
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
+
+/// 接入子进程入口：宿主命名空间克隆游离挂载 → 应用命名空间附着 → 复核。
+///
+/// **不能用 `mount(MS_BIND)` 跨命名空间绑定**。`mount(2)` 的 bind 要求源挂载属于**调用方当前的
+/// mount namespace**（内核 `do_loopback`/`check_mnt`），把源换成 `/proc/self/fd/<n>` 也绕不过去
+/// ——真机实测直接返回 `EINVAL`。跨命名空间搬运挂载是 `open_tree(OPEN_TREE_CLONE)` +
+/// `move_mount` 这对 API 的用途：前者在**源命名空间**里克隆出一个不附着于任何命名空间的挂载
+/// （fd 携带），后者在**目标命名空间**里把它附着到目标路径。克隆与原挂载共享同一个 superblock，
+/// 因此 FUSE 请求仍然全部回到同一个宿主会话。
+fn host_attach_child_main(host: &FuseHost, target_root: &str, ready_sock: libc::c_int) -> bool {
+    // 1. 先钉住当前（应用）命名空间：克隆要在宿主命名空间做，句柄是唯一的回头路。
+    let Ok(c_app_ns) = CString::new("/proc/self/ns/mnt") else {
+        return false;
+    };
+    // SAFETY: c_app_ns 是 NUL 结尾的合法路径。
+    let app_ns = unsafe { libc::open(c_app_ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if app_ns < 0 {
+        log_errno("fuse host attach app ns open failed");
+        return false;
+    }
+    // SAFETY: app_ns 是本函数打开的有效 fd，只在切回时使用。
+    let app_ns = UniqueFd::new(app_ns);
+
+    // 2. 进入宿主命名空间做克隆。
+    let host_ns_path = format!("/proc/{}/ns/mnt", host.child_pid);
+    let Ok(c_host_ns) = CString::new(host_ns_path) else {
+        return false;
+    };
+    // SAFETY: c_host_ns 是 NUL 结尾的合法路径。
+    let host_ns = unsafe { libc::open(c_host_ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if host_ns < 0 {
+        log_errno("fuse host attach host ns open failed");
+        return false;
+    }
+    // SAFETY: host_ns 是本函数打开的有效 namespace fd。
+    let host_ns = UniqueFd::new(host_ns);
+    // SAFETY: host_ns 是有效的 mount namespace fd。
+    if unsafe { libc::setns(host_ns.get(), libc::CLONE_NEWNS) } != 0 {
+        log_errno("fuse host attach setns host failed");
+        return false;
+    }
+
+    let Ok(c_mount_point) = CString::new(host.mount_point.as_str()) else {
+        return false;
+    };
+    let tree_fd = open_detached_mount(&c_mount_point);
+
+    // 3. 无论克隆成败都必须切回应用命名空间：后续 mkdir 与附着都必须在应用视图里发生。
+    // SAFETY: app_ns 是本子进程进入宿主命名空间前钉住的自身命名空间 fd。
+    if unsafe { libc::setns(app_ns.get(), libc::CLONE_NEWNS) } != 0 {
+        log_errno("fuse host attach setns app failed");
+        return false;
+    }
+    if tree_fd < 0 {
+        let errno = crate::platform::errno::last();
+        log::warn!(
+            "fuse host attach open_tree failed mp={} errno={} {}",
+            host.mount_point,
+            errno,
+            crate::platform::errno::text(errno)
+        );
+        return false;
+    }
+    // SAFETY: tree_fd 是 open_tree 返回的有效 fd。
+    let tree_fd = UniqueFd::new(tree_fd);
+
+    // 4. 目标目录：与应用挂载路径同源，允许已存在。
+    let Ok(c_target) = CString::new(target_root) else {
+        return false;
+    };
+    // SAFETY: c_target 是 NUL 结尾的合法路径；失败只可能是已存在（后续附着会给出结论）。
+    unsafe {
+        libc::mkdir(c_target.as_ptr(), 0o755);
+    }
+
+    // 5. 把游离挂载附着到应用视图里的目标路径，并立刻切断传播关系。
+    if !move_detached_mount(tree_fd.get(), &c_target) {
+        return false;
+    }
+    if !make_mount_private(&c_target) {
+        return false;
+    }
+
+    // 6. 复核。挂载源必须就是本次会话的挂载源：只靠系统调用返回 0 无法区分
+    //    "挂在应用视图里" 与 "挂在了别处"，而误判成接入成功会让应用静默失去重定向。
+    let Some(live) = crate::mount_ledger::topmost_live_mount(0, target_root) else {
+        log::warn!("fuse host attach not visible target={}", target_root);
+        return false;
+    };
+    if live.source != host.mount_source {
+        log::warn!(
+            "fuse host attach source mismatch target={} expected={} actual={} fs={}",
+            target_root,
+            host.mount_source,
+            live.source,
+            live.fs_type
+        );
+        return false;
+    }
+
+    // 7. 通知父进程，随后自行退出。
+    let ready: i32 = 0;
+    // SAFETY: ready_sock 是本次接入的有效端点，ready 是栈变量。
+    let sent = unsafe {
+        libc::send(
+            ready_sock,
+            &ready as *const i32 as *const libc::c_void,
+            std::mem::size_of::<i32>(),
+            0,
+        )
+    };
+    if sent != std::mem::size_of::<i32>() as isize {
+        log_errno("fuse host attach send ready failed");
+        return false;
+    }
+    true
+}
+
+/// 在源命名空间里克隆出一个游离挂载，返回其 fd（失败返回负值）。
+fn open_detached_mount(path: &CStr) -> libc::c_int {
+    // SAFETY: open_tree 的参数与内核一致：dfd 为 AT_FDCWD，path 是 NUL 结尾路径，
+    // 只克隆、不附着，因此不会改动任何命名空间。
+    unsafe {
+        libc::syscall(
+            libc::SYS_open_tree,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            OPEN_TREE_CLONE,
+        ) as libc::c_int
+    }
+}
+
+/// 把**本命名空间内**的挂载点改为私有，切断与其它命名空间的传播关系。
+///
+/// 宿主挂载点在宿主会话里开了 shared，克隆出来的这份会带着同一个 peer group（`mountinfo`
+/// 里的 `shared:N`）。保持共享会很危险：peer group 的成员之间会互相传播挂载/卸载事件，
+/// 于是任一应用在存储视图下新建或摘除挂载都会传播到其它应用和宿主命名空间——既跨应用干扰，
+/// 也与"卸载一个应用的注入不影响其它应用"的设计前提直接冲突。scoped 会话的挂载本来就是
+/// private，这里改私有后两条路径语义一致。
+fn make_mount_private(target: &CStr) -> bool {
+    // SAFETY: 改传播属性只需要目标路径，source/fs_type/data 均为 null；只动传播属性，
+    // 不改动任何文件内容，也不会摘除挂载。
+    let result = unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        log_errno("fuse host attach make private failed");
+        return false;
+    }
+    true
+}
+
+/// 把游离挂载附着到目标命名空间的路径上。
+fn move_detached_mount(tree_fd: libc::c_int, target: &CStr) -> bool {
+    // 空字符串是 `MOVE_MOUNT_F_EMPTY_PATH` 要求的占位：源由 fd 而非路径给出。
+    let empty = c"";
+    // SAFETY: tree_fd 是 open_tree 返回的 fd，target 是 NUL 结尾路径且在本调用期间保持存活。
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_move_mount,
+            tree_fd,
+            empty.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            MOVE_MOUNT_F_EMPTY_PATH,
+        )
+    };
+    if result != 0 {
+        log_errno("fuse host attach move_mount failed");
+        return false;
+    }
+    true
+}
+
+/// 只负责关闭 fd 的小包装：命名空间与挂载点句柄在多条失败分支上都要关闭。
+struct UniqueFd(libc::c_int);
+
+impl UniqueFd {
+    fn new(fd: libc::c_int) -> Self {
+        Self(fd)
+    }
+
+    fn get(&self) -> libc::c_int {
+        self.0
+    }
+}
+
+impl Drop for UniqueFd {
+    fn drop(&mut self) {
+        // SAFETY: fd 由本包装独占持有，Drop 是唯一关闭点。
+        unsafe { libc::close(self.0) };
+    }
 }
 
 /// 清空阶段文件：每次尝试只保留本轮痕迹，避免多轮重试互相覆盖后无法判断当轮结果。
@@ -479,7 +991,7 @@ pub fn spawn_fuse_host() -> Option<FuseHost> {
         libc::close(ready_sockets[1]);
         libc::close(control_sockets[1]);
     }
-    let ready = recv_host_ready(ready_sockets[0]);
+    let ready = recv_host_ready(ready_sockets[0], HOST_READY_TIMEOUT_SEC);
     // SAFETY: ready_sockets[0] 是父进程持有的有效 socketpair 端点。
     // 允许英文：close 是系统调用名称。
     unsafe { libc::close(ready_sockets[0]) };
@@ -607,13 +1119,13 @@ fn passthrough_host_config() -> crate::fuse_redirect::FuseRedirectConfig {
     }
 }
 
-/// 阻塞等待宿主子进程的 ready 结果，带超时。
+/// 阻塞等待子进程的 ready 结果，带超时。
 ///
-/// 返回 `Some(0)` 表示宿主已就绪；`Some(负值)` 是子进程报告的具体失败阶段；
+/// 返回 `Some(0)` 表示就绪；`Some(负值)` 是子进程报告的具体失败阶段；
 /// `None` 表示超时或对端未按约定回包（子进程在回包前就退出时会走到这里）。
-fn recv_host_ready(sock: libc::c_int) -> Option<i32> {
+fn recv_host_ready(sock: libc::c_int, timeout_sec: i64) -> Option<i32> {
     let timeout = libc::timeval {
-        tv_sec: HOST_READY_TIMEOUT_SEC,
+        tv_sec: timeout_sec,
         tv_usec: 0,
     };
     // SAFETY: timeout 是合法 timeval，sock 是有效的 socket fd。
