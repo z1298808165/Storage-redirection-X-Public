@@ -245,7 +245,7 @@ pub fn clear_if_dead() -> bool {
         .write()
         .ok()
         .map(|mut s| {
-            let d = s.as_ref().map_or(false, host_is_dead);
+            let d = s.as_ref().map_or(false, |host| host_is_dead(host));
             if d {
                 *s = None;
             }
