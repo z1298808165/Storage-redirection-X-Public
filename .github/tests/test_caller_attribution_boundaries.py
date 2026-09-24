@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = ROOT / ".github" / "tests" / "harness" / "should_passthrough_provider_allowed_parent_mkdir.rs"
+OWN_PRIVATE_HARNESS = ROOT / ".github" / "tests" / "harness" / "own_android_private_path_access.rs"
 
 
 def read(path: str) -> str:
@@ -417,6 +418,151 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
                 "反向验证失败：去掉 virtual 分支后边界用例仍全部通过，"
                 "说明 harness 没有真正验证原函数",
             )
+
+
+    def test_own_android_private_path_access_boundary_guard(self) -> None:
+        # 静态边界守卫：should_allow_own_android_private_path_access 的放行条件缺一不可——
+        # 2026-09 真机报障（微信/QQ 打开自身私有目录内文件报“权限有问题”）的修复点就在
+        # 这条判定链。任何一维被回退（owner 相等性、用户一致性、系统写入/媒体中间包排除、
+        # 存储 uid 区间）都应在这里报警，而不是等真机再次进入绑定缺失状态。
+        media_fuse = read("src/hook/media_fuse.rs")
+        fn = extract_fn(media_fuse, "should_allow_own_android_private_path_access")
+
+        # 调用 uid 必须达到应用区间。
+        self.assertIn("caller_uid < writer::ANDROID_APP_UID_START", fn)
+        # 路径必须归一化为 /storage/emulated/ 前缀。
+        self.assertIn("normalize_storage_path(path)", fn)
+        # 路径 user 与调用 uid 折算的 user 必须一致。
+        self.assertIn("paths::extract_user_id_from_storage_path", fn)
+        self.assertIn("platform::user_id_from_uid(caller_uid) != user_id", fn)
+        # 目录所属包解析 + 系统写入包与媒体中间包排除。
+        self.assertIn("paths::extract_android_private_path_owner", fn)
+        self.assertIn("policy::is_media_intermediate_package", fn)
+        self.assertIn("policy::is_system_writer_package", fn)
+        # owner uid 与调用 uid 必须完全相等才放行。
+        self.assertIn(
+            "owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid", fn
+        )
+
+        # 链路接线守卫：判定必须在 native bridge 的 accessible 链尾生效，且 hook.rs 导出
+        # 对应 C ABI；任何一环被移除，真机报障会原样复发。
+        bridge = read("native/srx_lsplant_bridge.cpp")
+        chain = bridge[
+            bridge.index("bool ShouldAllowSrxAccessiblePath(") : bridge.index(
+                "bool SrxFuseFixIsAppAccessiblePath("
+            )
+        ]
+        self.assertIn("ShouldAllowOwnAndroidPrivatePathAccess", chain)
+        hook = read("src/hook.rs")
+        self.assertIn("srx_should_allow_fuse_own_android_private_path_access", hook)
+        self.assertIn("should_allow_own_android_private_path_access", hook)
+
+    def test_own_android_private_path_access_executed(self) -> None:
+        # 从真实源码抽取 should_allow_own_android_private_path_access 及其纯函数依赖，
+        # 注入 harness 模板后由 rustc 独立编译运行边界真值表；uid 查询与包名集合用桩。
+        if not OWN_PRIVATE_HARNESS.exists():
+            self.skipTest(f"harness 模板缺失: {OWN_PRIVATE_HARNESS}")
+        rustc = shutil.which("rustc")
+        if rustc is None:
+            self.skipTest(
+                "rustc 不可用：未编译执行 own-private harness，仅静态边界守卫生效 "
+                "(test_own_android_private_path_access_boundary_guard)"
+            )
+
+        media_fuse_src = read("src/hook/media_fuse.rs")
+        paths_src = read("src/platform/paths.rs")
+        # 抽取落在 harness 的 `pub mod paths` 里，被 media_fuse 侧函数跨模块调用；
+        # extract_fn 从 "fn name(" 起抽取会丢掉源码里的 `pub ` 前缀，这里补回。
+        def pubify(fn_src: str) -> str:
+            return fn_src if fn_src.startswith("pub ") else "pub " + fn_src
+
+        media_fuse_fns = "\n".join(
+            [
+                extract_fn(media_fuse_src, "should_allow_own_android_private_path_access"),
+                extract_fn(media_fuse_src, "normalize_storage_path"),
+                extract_fn(media_fuse_src, "resolve_private_owner_uid"),
+            ]
+        )
+        paths_fns = "\n".join(
+            [
+                pubify(extract_fn(paths_src, "extract_user_id_from_storage_path")),
+                pubify(extract_fn(paths_src, "extract_android_private_path_owner")),
+                pubify(extract_fn(paths_src, "is_valid_package_name")),
+            ]
+        )
+
+        template = OWN_PRIVATE_HARNESS.read_text(encoding="utf-8")
+        harness_src = template
+        for placeholder, body in (
+            ("// __INJECT_PATHS__", paths_fns),
+            ("// __INJECT_MEDIA_FUSE__", media_fuse_fns),
+        ):
+            if placeholder not in harness_src:
+                self.fail(f"harness 模板缺少占位符: {placeholder}")
+            harness_src = harness_src.replace(placeholder, body)
+        # 把抽取函数里的 `log::debug!` 改成 crate 根的 `debug!`（模板用 #[macro_use] 提供）。
+        harness_src = harness_src.replace("log::debug!", "debug!")
+        # 后续断言与反向验证替换都以替换后的注入文本为基准：模板里已不存在
+        # 含 `log::debug!` 的原始函数文本。
+        injected_media_fuse_fns = media_fuse_fns.replace("log::debug!", "debug!")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            harness_path = os.path.join(tmp, "harness.rs")
+            Path(harness_path).write_text(harness_src, encoding="utf-8")
+            bin_path = os.path.join(tmp, "own_private_harness")
+            compile_proc = subprocess.run(
+                [rustc, harness_path, "-O", "-o", bin_path],
+                capture_output=True,
+                text=True,
+            )
+            if compile_proc.returncode != 0:
+                self.fail(
+                    "harness 编译失败:\n" + compile_proc.stdout + compile_proc.stderr
+                )
+            run_proc = subprocess.run([bin_path], capture_output=True, text=True)
+            print(run_proc.stdout)
+            self.assertEqual(
+                run_proc.returncode,
+                0,
+                "harness 边界用例未全部通过:\n" + run_proc.stdout + run_proc.stderr,
+            )
+            self.assertIn("ALL", run_proc.stdout)
+
+            # 反向验证：改坏 owner 相等判定（等效于修复合入前的形态）后，
+            # 三条 owner 放行用例必须从通过变失败，退出码非 0。
+            # 若 harness 只是空壳，改坏后仍会全过。
+            mutated = injected_media_fuse_fns.replace(
+                "owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid",
+                "false",
+            )
+            self.assertNotEqual(mutated, injected_media_fuse_fns)
+            self.assertIn(injected_media_fuse_fns, harness_src)
+            mutated_src = harness_src.replace(injected_media_fuse_fns, mutated)
+            mutated_path = os.path.join(tmp, "harness_mutated.rs")
+            Path(mutated_path).write_text(mutated_src, encoding="utf-8")
+            mutated_bin = os.path.join(tmp, "own_private_harness_mutated")
+            mut_compile = subprocess.run(
+                [rustc, mutated_path, "-O", "-o", mutated_bin],
+                capture_output=True,
+                text=True,
+            )
+            if mut_compile.returncode != 0:
+                self.fail(
+                    "反向验证 harness 编译失败:\n"
+                    + mut_compile.stdout
+                    + mut_compile.stderr
+                )
+            mut_run = subprocess.run([mutated_bin], capture_output=True, text=True)
+            print(mut_run.stdout)
+            self.assertNotEqual(
+                mut_run.returncode,
+                0,
+                "反向验证失败：改坏 owner 相等判定后边界用例仍全部通过，"
+                "说明 harness 没有真正验证原函数",
+            )
+            self.assertIn("FAIL own_media_owner_allowed", mut_run.stdout)
+            self.assertIn("FAIL own_data_owner_allowed", mut_run.stdout)
+            self.assertIn("FAIL own_obb_owner_allowed", mut_run.stdout)
 
 
 if __name__ == "__main__":

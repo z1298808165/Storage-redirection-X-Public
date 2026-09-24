@@ -1182,6 +1182,7 @@ function Remove-MediaStoreRowsByPattern {
 function Remove-RandomMediaStoreRows {
     $escapedAppId = [regex]::Escape($AppId)
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_image_\d+( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/", "_data=.*/Pictures/", "_data=.*/Android/data/$escapedAppId/sdcard/Pictures/")
+    Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_own_private_mediastore( \(\d+\))?\.jpg(,|$)") @("_data=.*/Android/media/$escapedAppId/Tencent/QQfile_recv/")
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_fuse_dcim_media( \(\d+\))?\.jpg(,|$)") @("relative_path=DCIM/SrtFuseQQ/", "_data=.*/DCIM/SrtFuseQQ/", "_data=.*/Android/data/$escapedAppId/sdcard/DCIM/SrtFuseQQ/")
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=srt_read_only_media( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/SrtReadOnlyMedia/", "_data=.*/Pictures/SrtReadOnlyMedia/", "_data=.*/Android/data/$escapedAppId/sdcard/Pictures/SrtReadOnlyMedia/")
     Remove-MediaStoreRowsByPattern "content://media/external/video/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_video_\d+( \(\d+\))?\.mp4(,|$)") @("relative_path=Movies/", "_data=.*/Movies/", "_data=.*/Android/data/$escapedAppId/sdcard/Movies/")
@@ -1986,6 +1987,14 @@ function Invoke-OwnPrivateDirectoriesScenario {
         $sandboxPath = "$($sandboxRoots[$index])/$fileName"
         $ok = (Invoke-OwnPrivateWriteCase $Scenario "own-$($labels[$index])" $requestPath $requestPath $backendPath $sandboxPath) -and $ok
     }
+    # 真机回归（2026-09 报障，修复见提交 23388f01）：直写用例只覆盖应用自身命名空间视图，
+    # 补一条经 MediaStore 的 provider 中介链路（insert(DATA=自身 Android/media/<pkg>/...)
+    # → provider 侧 pending 创建与发布 → 回读），断言真实落点存在、沙盒无残留。
+    # 与 run-storage-redirect-scenarios.sh 场景 34 的 own-private-mediastore 用例对等。
+    $mediaStoreFile = "srt_own_private_mediastore.jpg"
+    $ok = (Invoke-MediaStoreImageRelativeDataCreateCase $Scenario "own-private-mediastore" $mediaStoreFile "Android/media/$AppId/Tencent/QQfile_recv").Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "own-private-mediastore-real" "$OwnPrivateMediaRoot/$mediaStoreFile") -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "own-private-mediastore-sandbox" "$SandboxOwnPrivateMediaRoot/$mediaStoreFile") -and $ok
     $ok
 }
 

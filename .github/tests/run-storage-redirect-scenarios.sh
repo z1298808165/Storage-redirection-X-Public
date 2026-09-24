@@ -810,6 +810,7 @@ remove_mediastore_rows_by_pattern() {
 remove_random_mediastore_rows() {
   local app_regex="${APP_ID//./\\.}"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_image_[0-9]+( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/|_data=.*/Pictures/|_data=.*/Android/data/${app_regex}/sdcard/Pictures/"
+  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_own_private_mediastore( \([0-9]+\))?\.jpg(,|$)' "_data=.*/Android/media/${app_regex}/Tencent/QQfile_recv/"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_fuse_dcim_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=DCIM/SrtFuseQQ/|_data=.*/DCIM/SrtFuseQQ/|_data=.*/Android/data/${app_regex}/sdcard/DCIM/SrtFuseQQ/"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=srt_read_only_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/SrtReadOnlyMedia/|_data=.*/Pictures/SrtReadOnlyMedia/|_data=.*/Android/data/${app_regex}/sdcard/Pictures/SrtReadOnlyMedia/"
   remove_mediastore_rows_by_pattern "content://media/external/video/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_video_[0-9]+( \([0-9]+\))?\.mp4(,|$)' "relative_path=Movies/|_data=.*/Movies/|_data=.*/Android/data/${app_regex}/sdcard/Movies/"
@@ -3097,6 +3098,23 @@ run_own_private_directories_scenario() {
       return 1
     fi
   done
+
+  # 真机回归（2026-09 报障，修复见提交 23388f01）：MediaProvider 的 FuseFix accessible
+  # 判定链曾拒绝 owner 对自身 Android/{data,media,obb}/<pkg> 的 provider 中介访问，
+  # 微信/QQ 打开自身目录内图片与缓存报“权限有问题”。上方直写用例只经过应用自身
+  # 命名空间视图（模块 FUSE 直连真实落点），覆盖不到 MediaProvider 进程内的这条
+  # 判定链；这里补一条经 MediaStore 的 provider 中介链路：insert(DATA=自身
+  # Android/media/<pkg>/...) → provider 侧 pending 创建与发布 → 回读，并断言
+  # 真实落点存在、沙盒无残留。
+  local mediastore_file="srt_own_private_mediastore.jpg"
+  if ! run_mediastore_image_relative_data_create_case "$scenario" "own-private-mediastore" \
+    "$mediastore_file" "Android/media/${APP_ID}/Tencent/QQfile_recv"; then
+    return 1
+  fi
+  if ! check_file_exists "scenario-${scenario}-own-private-mediastore-real" "${OWN_PRIVATE_MEDIA_ROOT}/${mediastore_file}" ||
+    ! check_file_missing "scenario-${scenario}-own-private-mediastore-sandbox" "${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}/${mediastore_file}"; then
+    return 1
+  fi
 }
 
 run_own_private_write_case() {
