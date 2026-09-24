@@ -31,6 +31,7 @@ adb_su() { echo diagnostic; }
 label_expects_mount() { :; }
 start_app_and_confirm_mount() { :; }
 wait_storage_ready() { :; }
+wait_scenario_app_view() { :; }
 clean_results() { :; }
 prepare_read_only_media_image() { :; }
 run_standard_scenario() { echo assertion; }

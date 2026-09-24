@@ -231,6 +231,26 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.fail("big export -f list not found")
         return ""
 
+    def test_run_scenario_calls_only_exported_functions(self) -> None:
+        """run_scenario 在独立子 shell 中执行，它调用的脚本函数都必须先 export -f。
+
+        子 shell 只继承显式导出的函数；漏掉一个就会在设备上以 `command not found`
+        让每个场景失败。实测漏导出 wait_scenario_app_view 时，五个平台 × 37 个场景
+        全红，而 quality 侧完全看不出来，只有跑完整矩阵才会暴露，代价很高。
+        """
+        body = self.bash[self.bash.index("run_scenario() {") : self.bash.index("# 与 PowerShell 共用设备端锁")]
+        defined = set(re.findall(r"(?m)^([a-z_][a-z0-9_]*)\(\) \{", self.bash))
+        exported: set[str] = set()
+        for line in self.bash.splitlines():
+            if line.startswith("export -f "):
+                exported.update(line[len("export -f ") :].split())
+        missing = sorted(
+            name
+            for name in defined
+            if name not in exported and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", body)
+        )
+        self.assertEqual([], missing, f"run_scenario 会调用但未 export -f 的函数：{missing}")
+
     def test_shared_probe_invalidation_precedes_backend_cleanup(self) -> None:
         # 前序场景已查询过的文件应经系统 FUSE 删除，不能仅修改底层文件系统。
         ps = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
