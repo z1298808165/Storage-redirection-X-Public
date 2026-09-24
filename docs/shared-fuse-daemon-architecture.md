@@ -225,12 +225,22 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 （重点关注重定向读写、死挂载恢复、MediaStore 代写、应用重启、共享宿主和回退路径），
 并用 `srx_daemon doctor` 观察账本与判定。
 
-### 阶段 1——策略注册表（结构已落地，按 uid 注册未实现）
+### 阶段 1——策略注册表与按 uid 注册（已落地）
 
-- `FuseRedirectFs.policy` 已改为 `PolicyRegistry`，每个回调按 `req.uid()` 取策略。
-- 单策略行为保持兼容；未命中 uid 时回退到会话默认策略。
-- **尚未实现**：向宿主会话登记按 uid 策略的通道。`PolicyRegistry::by_uid` 目前恒为空，
-  也没有任何写入入口，因此宿主会话实际只持有一份"直通"策略。这是应用接入的前置条件。
+- `FuseRedirectFs.policy` 改为 `PolicyRegistry`，每个回调按 `req.uid()` 取策略。
+- `SharedPolicyTable`：宿主会话持有可写的按 uid 策略表句柄，daemon 在挂载前把该应用的策略
+  （`fuse_config_from_request(request, None, …)`，虚拟根取整个存储根）经**控制通道**送进会话，
+  在会话内用同一份 `RedirectPolicy::new` 构造并登记（`fuse host policy registered uid=…
+  table=N`）。控制通道是 `socketpair`，不是命名套接字，外部无法注入策略。
+- **未登记 uid 一律拒绝**：宿主会话的回退策略是"一律拒绝"（`deny_all`），不是直通。宿主会话
+  服务的是完整存储视图，若让未登记调用方回退到直通策略，它会直接读写真实存储（沙盒失效），
+  而这种越权落点**无法靠事后清理恢复**，只能在决策前挡住。scoped 会话不受影响：回退仍是会话
+  策略，与改造前一致。
+- 拒绝在 `backend_for_relative` 的最前面生效，所有调用点（lookup/getattr/create/write/readdir…）
+  都把 `None` 当失败处理，因此未登记调用方既读不到内容也写不进任何位置（表现为 `ENOENT`）。
+- 真机 A/B 取证（Android 16）：进入宿主 namespace 后，已登记 uid `10284` 能列出真实存储根；
+  未登记 `uid 0` 读/写均为 `ENOENT`，真实存储未产生任何文件。
+- `session()`（会话绑定策略）只用于日志与 `statfs`，不参与路径决策，因此不构成内容泄漏面。
 
 ### 阶段 2——共享宿主会话 + namespace 注入（会话建立已落地并真机验证；应用接入未启用）
 
@@ -240,14 +250,17 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - 直通会话必须显式标记为 `is_passthrough_host`：它的 `redirect_target` 就是存储根本身，而按子
   路径推导重定向根的函数对"根本身"返回 `None`，否则策略构造会直接失败（真机表现为宿主子进程
   在 `policy` 阶段退出，且旧代码在该分支没有任何日志）。
-- **应用侧 namespace 注入当前被能力闸门关闭**（`fuse_host::can_attach_app` 返回 false）：阶段 1
-  的按 uid 注册缺失时，把宿主树 `MS_BIND` 到应用存储根会让应用拿到纯直通视图，即静默失去全部
-  重定向。因此应用继续走已稳定的 `srx_fuse_redirect` scoped 路径，宿主会话照常建立待用。
-- 另需注意：宿主子进程的私有 namespace 已经把整棵挂载树设为 private，应用 namespace 无法通过
-  传播看到宿主挂载点；后续启用接入时需要在宿主 namespace 内先取得挂载点句柄，再进入目标
-  namespace 完成 bind。
-- 宿主会话死亡后由 daemon 在 reconcile 中重建（含 5 秒退避），失败时保留 scoped FUSE 回退；
-  `srx_fuse_redirect` 前缀路径不能删除。
+- **应用侧 namespace 注入当前被能力闸门关闭**（`fuse_host::can_attach_app` 返回 false）。启用前
+  还需完成两件事：① 接入必须在**目标应用 namespace** 内 bind（宿主子进程已把整棵挂载树设为
+  private，应用 namespace 无法靠传播看到宿主挂载点，需在宿主 namespace 内先取挂载点句柄，
+  再进入目标 namespace 完成 bind）；② 挂载台账不能复用宿主 pid 作为 `fuse_child`——那条路径会
+  在回滚/清理时 `terminate_fuse_child`，等于杀掉共享会话。
+- 宿主会话失效后由 daemon 在 reconcile 中重建，失败时保留 scoped FUSE 回退；`srx_fuse_redirect`
+  前缀路径不能删除。
+- **僵尸态必须排除**：会话线程结束时子进程自行退出（FUSE 连接被 `FUSE_DESTROY` 结束），父进程
+  若不回收，`/proc/<pid>` 仍然存在，只按 pid 判活会把它当成存活会话，自愈永远不会重建。因此
+  存活判定同时检查 `/proc/<pid>/stat` 的状态字符并在判定死亡时回收；真机 `kill -9` 宿主子进程
+  后 1 秒内完成重建（`fuse host session exited on its own` → `fuse host recovered`）。
 
 ### 宿主会话可观测性（已落地）
 
@@ -258,6 +271,9 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   转写到 `running.log`（`fuse host stage trace ...`）；
 - ready 通道传**阶段码**而不是布尔值：`dir` / `policy` / `mount` / `stability` / `shared`；
 - 父进程回收子进程并记录退出原因（`exit=` / `signal=`），同时区分"对端已关闭"和"等待超时"。
+- 真机排查时注意 `pidof srx_fuse_host` 不可用（该子进程没有独立 cmdline），应按
+  `/proc/*/comm` 匹配；进入其 namespace 用 `busybox nsenter -t <pid> -m`（toybox nsenter 会去
+  读不存在的 `ns/user` 而失败）。
 
 ### 阶段 3——监督收敛（基础能力已落地，后续增强）
 
@@ -278,7 +294,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 |---|---|---|
 | 共享会话退出影响面从单应用扩到全部应用 | 高 | 阶段 2 保留 `srx_fuse_redirect` 回退路径；阶段 3 先做监督再切默认 |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
-| 按 uid 直通回退可能漏改写 | 中 | 未命中 uid 一律回退真实后端（不改写），不猜测策略 |
+| 按 uid 直通回退可能漏改写 | 高 | 宿主会话未命中 uid 一律**拒绝**（`deny_all` → `ENOENT`），绝不回退直通；落点越权无法靠事后清理恢复，必须在决策前挡住 |
 | bind mount 的 mount propagation 影响其它 namespace | 中 | 宿主 namespace 用 `MS_REC\|MS_PRIVATE` 隔离；**同时在宿主挂载点上开 shared**，否则应用 namespace 的 bind 拿不到共享会话（见 §2.1） |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
