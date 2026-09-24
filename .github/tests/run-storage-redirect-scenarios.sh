@@ -2104,6 +2104,14 @@ check_scoped_fuse_daemon_started() {
         echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=app-mountinfo"
         return 0
       fi
+      # 共享宿主接入布局（B2-c 默认开启）下，只读等规则由宿主会话的策略层执行，
+      # 只读根（mount_root）不再产生独立挂载点——上一条精确匹配在该布局下必然落空。
+      # 此处放宽为：应用 mountinfo 的存储视图根存在 srx_fuse_host 源即判定 scoped
+      # 数据面就绪；只读强制语义由后续行为用例（write-denied 等）继续真实验证。
+      if [ -n "$app_mount_pid" ] && adb_su "grep -F -- ' ${REAL_ROOT} ' '/proc/${app_mount_pid}/mountinfo' 2>/dev/null | grep -Eq ' - fuse srx_fuse_host(\\[| )'"; then
+        echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=app-mountinfo-host"
+        return 0
+      fi
       if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
         saw_fallback=1
       fi

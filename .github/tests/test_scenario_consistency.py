@@ -2233,6 +2233,12 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("srx_fuse_host", ps_active, "`.ps1` 的 FUSE 接管判定缺少共享宿主前缀")
         ps_scoped = section(self.powershell, "function Test-ScopedFuseDaemonStarted {", "\nfunction ")
         self.assertIn("srx_fuse_host", ps_scoped, "`.ps1` 的 scoped 启动判定缺少共享宿主分支")
+        bash_scoped = section(self.bash, "check_scoped_fuse_daemon_started() {", "\nrun_fuse_daemon_allow_wildcard_scenario() {")
+        self.assertIn(
+            "srx_fuse_host",
+            bash_scoped,
+            "`.sh` 的 scoped 启动判定缺少共享宿主布局分支（只读根在策略层执行时不再有独立挂载点）",
+        )
 
     def test_scenario_scope_override_and_commit_message_parsing(self) -> None:
         """场景取景必须真能收窄范围，且不带取景时不改变全量（仍为 all）。
