@@ -112,20 +112,37 @@ class SrxRepository(
   }
 
   suspend fun readGlobalConfig(): GlobalConfig {
-    val text = readFile(GlobalConfigPath)
-    if (text.isBlank()) return GlobalConfig()
-    return SrxConfigNormalizer.normalizeGlobalConfig(
-        runCatching { json.decodeFromString<GlobalConfig>(text) }.getOrDefault(GlobalConfig()),
-    )
+    return when (
+        val result = SrxConfigDecoder.decode<GlobalConfig>(json, readFile(GlobalConfigPath))
+    ) {
+      ConfigDecodeResult.Empty -> GlobalConfig()
+      is ConfigDecodeResult.Success -> SrxConfigNormalizer.normalizeGlobalConfig(result.value)
+      is ConfigDecodeResult.Invalid -> {
+        logConfigDecodeFailure(GlobalConfigPath, result.reason)
+        GlobalConfig()
+      }
+    }
   }
 
   suspend fun readFileMonitorFilters(): FileMonitorFilters {
-    val text = readFile(FileMonitorFiltersConfigPath)
-    if (text.isBlank()) return FileMonitorFilters()
-    return SrxConfigNormalizer.normalizeFileMonitorFilters(
-        runCatching { json.decodeFromString<FileMonitorFilters>(text) }
-            .getOrDefault(FileMonitorFilters()),
-    )
+    return when (
+        val result =
+            SrxConfigDecoder.decode<FileMonitorFilters>(
+                json,
+                readFile(FileMonitorFiltersConfigPath),
+            )
+    ) {
+      ConfigDecodeResult.Empty -> FileMonitorFilters()
+      is ConfigDecodeResult.Success -> SrxConfigNormalizer.normalizeFileMonitorFilters(result.value)
+      is ConfigDecodeResult.Invalid -> {
+        logConfigDecodeFailure(FileMonitorFiltersConfigPath, result.reason)
+        FileMonitorFilters()
+      }
+    }
+  }
+
+  private fun logConfigDecodeFailure(path: String, reason: String) {
+    android.util.Log.w("SrxRepository", "config_decode_failed path=$path reason=$reason")
   }
 
   suspend fun writeFileMonitorFilters(filters: FileMonitorFilters): Boolean {
