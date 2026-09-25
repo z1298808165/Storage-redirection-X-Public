@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-36076154566-3/storage-redirect-x-manager-v1.2.60-ci.21.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-36076154566-3/storage.redirect.x-v1.2.60-ci.21.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.21`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-36051640247-1`\n- 当前提交：`7b7e243aec18`\n\n## 模块更新\n\n### 修复了什么问题\n- - ensure_redirect_parent_dirs 收口新增目标自嵌套绊线：复用调用方归因 （resolve_redirect_dir_owner）解析调用方重定向目标，剥掉存储根前缀取 目标段；目标段在待创建路径中出现达到两次即判定自嵌套，跳过父链创建并 输出可检索的告警日志，操作以 ENOENT 自然失败，让回归在场景断言层 响亮暴露而不是静默长树。 - 正常改写结果目标段仅作为前缀出现一次；自有私有目录与沙盒内合法子路径 均不触发，绊线只影响父链预创建，不改变任何改写决策。 - 守卫测试 test_redirect_parent_chain_blocks_target_self_nesting 固化： 绊线存在、先于任何创建执行、命中即返回拦截。\n\n## 其它更新\n\n### 修复了什么问题\n- - ensure_redirect_parent_dirs 收口新增目标自嵌套绊线：复用调用方归因 （resolve_redirect_dir_owner）解析调用方重定向目标，剥掉存储根前缀取 目标段；目标段在待创建路径中出现达到两次即判定自嵌套，跳过父链创建并 输出可检索的告警日志，操作以 ENOENT 自然失败，让回归在场景断言层 响亮暴露而不是静默长树。 - 正常改写结果目标段仅作为前缀出现一次；自有私有目录与沙盒内合法子路径 均不触发，绊线只影响父链预创建，不改变任何改写决策。 - 守卫测试 test_redirect_parent_chain_blocks_target_self_nesting 固化： 绊线存在、先于任何创建执行、命中即返回拦截。\n\n### 功能变化\n- - 将 capture_fuse_diagnostic_sample 补入 export -f 清单，插入位置紧邻 其调用方 capture_test_flow_artifacts。"
+    "releaseNotes": "# Storage Redirect X v1.2.60-ci.21\n\n## 模块更新\n\n### 修复与改进\n\n- 增加目录创建的自嵌套防护：路径出现异常嵌套时立即停止创建，避免应用专属目录里堆积大量空目录。\n- 修复极端情况下文件监控因目录树异常膨胀而变慢的问题。\n\n### 注意事项\n\n- 更新模块后请重启设备，使 Zygisk、媒体服务和挂载状态完整加载。\n\n## App 更新\n\n本版本没有需要单独说明的 App 功能变更。"
   },
   "releases": []
 }
