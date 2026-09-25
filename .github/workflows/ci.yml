@@ -1,12 +1,13 @@
 name: CI Build
 
 on:
-  pull_request:
-    branches: [SRX-R]
   push:
-    branches: [SRX-R]
+    branches: [SRX-R, preview]
+  pull_request:
+    branches: [SRX-R, preview]
   # 手动触发：只跑指定场景做单点回归（例如 scenarios=29），
   # 不必为收窄范围而临时改写 workflow 或伪造提交信息。
+  # preview 分支用于公开仓库验证；构建产物只上传 Actions Artifacts，不创建 Release 或更新清单。
   workflow_dispatch:
     inputs:
       scenarios:
@@ -28,7 +29,7 @@ env:
 
 jobs:
   quality:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.ref_name == 'SRX-R' || github.ref_name == 'preview') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,7 +82,7 @@ jobs:
           ./scripts/validate-code-quality.ps1 -BaseRef $baseRef -Ref HEAD
 
   prepare:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.ref_name == 'SRX-R' || github.ref_name == 'preview') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -103,7 +104,7 @@ jobs:
       # 统一确定测试流范围与验证模式：dispatch inputs 或提交信息里的
       # 「单场景 29」/「单场景 29,34」都能收窄范围。解析上移到这里，下游
       # test-flow 与发布相关 job 统一引用，不再在 job 内就地二次解析。
-      # 范围受限时 publish_ci=false，发布相关 job 全部跳过（不发布 CI 资产、
+      # preview 分支固定 publish_ci=false；范围受限时 publish_ci=false，发布相关 job 全部跳过（不发布 CI 资产、
       # 不更新 update.json、不额外触发全量 CI）；非法范围直接失败，不静默全量。
       - name: Resolve scenario scope
         id: scope
@@ -117,12 +118,15 @@ jobs:
             --message "$SRT_HEAD_COMMIT_MESSAGE" \
             --override "$SRT_DISPATCH_SCENARIOS" \
             --format github >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_NAME}" = "preview" ]; then
+            echo 'publish_ci=false' >> "$GITHUB_OUTPUT"
+          fi
 
   init-ci-release:
     needs:
       - quality
       - prepare
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -146,8 +150,7 @@ jobs:
     needs:
       - quality
       - prepare
-      - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -300,8 +303,17 @@ jobs:
           )
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 
+      - name: Upload preview module artifact
+        if: github.ref_name == 'preview'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: preview-module-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
+
       - name: Upload module to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
@@ -325,8 +337,7 @@ jobs:
     needs:
       - quality
       - prepare
-      - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -393,8 +404,17 @@ jobs:
           mkdir -p build/app
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
+      - name: Upload preview manager artifact
+        if: github.ref_name == 'preview'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: preview-manager-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
+
       - name: Upload manager APK to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
@@ -515,7 +535,7 @@ jobs:
       - name: Upload test-flow runtime
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: test-flow-runtime-v${{ env.VERSION }}
+          name: test-flow-runtime-v${{ env.VERSION }}-${{ github.ref_name }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -527,7 +547,7 @@ jobs:
         if: always() && hashFiles('tests/storage-redirect-test/app/build/reports/**', 'tests/storage-redirect-test/media-file-api/build/reports/**') != ''
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: test-flow-unit-test-reports-v${{ env.VERSION }}
+          name: test-flow-unit-test-reports-v${{ env.VERSION }}-${{ github.ref_name }}
           if-no-files-found: ignore
           retention-days: 14
           path: |
@@ -629,7 +649,7 @@ jobs:
       - name: Download test-flow runtime
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v${{ env.VERSION }}" --dir .
+        run: gh run download "${{ github.run_id }}" --name "test-flow-runtime-v${{ env.VERSION }}-${{ github.ref_name }}" --dir .
 
       - name: Enable KVM permissions
         run: |
@@ -749,7 +769,7 @@ jobs:
           fi
 
   create-ci-release:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
     needs:
       - prepare
       - init-ci-release
@@ -830,7 +850,7 @@ jobs:
       - test-flow-required
       - create-ci-release
       - update-manifest
-    if: always() && github.event_name == 'push' && needs.prepare.result == 'success'
+    if: always() && github.event_name == 'push' && github.ref_name == 'SRX-R' && needs.prepare.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -866,7 +886,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for name in \
-            "test-flow-runtime-v${VERSION}"; do
+            "test-flow-runtime-v${VERSION}-${GITHUB_REF_NAME}"; do
             mapfile -t artifact_ids < <(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
               --jq ".artifacts[] | select(.name == \"${name}\") | .id")
@@ -883,7 +903,7 @@ jobs:
           done
 
   update-manifest:
-    if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && github.ref_name == 'SRX-R' && needs.prepare.outputs.publish_ci == 'true'
     needs:
       - prepare
       - create-ci-release
