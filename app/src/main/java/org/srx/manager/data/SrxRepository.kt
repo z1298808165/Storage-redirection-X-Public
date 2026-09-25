@@ -5,7 +5,6 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
@@ -15,7 +14,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.srx.manager.root.RootShell
@@ -31,9 +29,6 @@ class SrxRepository(
     private val shell: RootShell,
 ) {
   private companion object {
-    const val BackupMagic = "storage.redirect.x.backup"
-    const val BackupSchemaVersion = 2
-    const val BackupModuleId = "storage.redirect.x"
     // 配置文件通过写入路径主动使缓存失效（invalidateConfiguredAppsCache），
     // TTL 仅作兜底；30 秒足够覆盖从 Dashboard 页导航到应用列表页的典型路径，
     // 避免连续两次 su 进程调用。
@@ -56,6 +51,11 @@ class SrxRepository(
   /** 诊断日志包导出边界：Repository 只保留业务入口。 */
   private val diagnosticExporter = DiagnosticArchiveExporter(context, shell, fileStore)
   private val moduleController = RootModuleController(shell)
+  /** 配置快照恢复边界：临时目录编排与原子替换集中在这里。 */
+  private val snapshotRestorer =
+      ConfigSnapshotRestorer(context, fileStore, moduleController, json) {
+        invalidateConfiguredAppsCache()
+      }
   private val appQuery = RootAppQuery(shell)
   private val storageBrowser = RootStorageBrowser(shell)
   private val configuredAppsCacheMutex = Mutex()
@@ -361,26 +361,7 @@ class SrxRepository(
             ui = uiPreferencesDeferred.await(),
         )
     withContext(Dispatchers.Default) {
-      val canonical = SrxConfigNormalizer.stableJson(json, data)
-      val payload =
-          BackupPayload(
-              magic = BackupMagic,
-              schema = BackupSchemaVersion,
-              module = BackupModuleInfo(id = BackupModuleId, version = versionDeferred.await()),
-              createdAt = Instant.now().toString(),
-              summary =
-                  BackupSummary(
-                      appCount = apps.size,
-                      userCount = apps.values.sumOf { it.users.size },
-                  ),
-              integrity =
-                  BackupIntegrity(
-                      algorithm = "SHA-256",
-                      value = SrxConfigNormalizer.sha256Hex(canonical),
-                  ),
-              data = data,
-          )
-      json.encodeToString(payload) + "\n"
+      BackupPayloadCodec.encode(json, data, versionDeferred.await())
     }
   }
 
@@ -388,8 +369,8 @@ class SrxRepository(
       withContext(Dispatchers.IO) { BackupArchiveCodec.encodeZip(buildBackupFileText()) }
 
   suspend fun restoreBackupFileText(text: String): Boolean {
-    val data = parseBackupPayload(text)
-    return restoreConfigSnapshot(data)
+    val data = withContext(Dispatchers.Default) { BackupPayloadCodec.decode(json, text) }
+    return snapshotRestorer.restore(data)
   }
 
   suspend fun restoreBackupFileBytes(bytes: ByteArray): Boolean {
@@ -423,44 +404,6 @@ class SrxRepository(
 
   private suspend fun touchConfig() {
     fileStore.touchConfig()
-  }
-
-  private suspend fun restoreConfigSnapshot(data: BackupData): Boolean {
-    val normalizedData = SrxConfigNormalizer.normalizeBackupData(data)
-    val token = "${System.currentTimeMillis()}_${(0..99999).random()}"
-    val stage = "/data/local/tmp/srx_restore_stage_$token"
-    val rollback = "/data/local/tmp/srx_restore_rollback_$token"
-    val stageApps = "$stage/apps"
-    try {
-      fileStore.removeTree(stage, rollback)
-      if (!fileStore.prepareCleanDir(stageApps)) return false
-      val stagedFiles = buildMap {
-        put("global.json", json.encodeToString(normalizedData.global) + "\n")
-        put(
-            "templates.json",
-            json.encodeToString(ConfigTemplateStore(normalizedData.templates)) + "\n",
-        )
-        put(
-            "file_monitor_filters.json",
-            json.encodeToString(normalizedData.monitorFilters) + "\n",
-        )
-        normalizedData.apps.filterKeys(::isSafePackageName).toSortedMap().forEach {
-            (packageName, config) ->
-          put("apps/$packageName.json", json.encodeToString(config) + "\n")
-        }
-      }
-      if (!fileStore.writeStagedFiles(stage, stagedFiles)) return false
-      val result = fileStore.restoreConfigStage(stage, rollback)
-      if (result) {
-        invalidateConfiguredAppsCache()
-        normalizedData.ui?.let { PreferencesRepository(context).restoreBackupUiPreferences(it) }
-        touchConfig()
-        moduleController.ensureLogCollectors()
-      }
-      return result
-    } finally {
-      fileStore.removeTree(stage, rollback)
-    }
   }
 
   private suspend fun readConfiguredAppConfigs(force: Boolean): Map<String, AppConfig> {
@@ -554,33 +497,6 @@ class SrxRepository(
     if (label != null) appLabelCache[key] = label
     return label
   }
-
-  private suspend fun parseBackupPayload(text: String): BackupData =
-      withContext(Dispatchers.Default) {
-        if (text.toByteArray(Charsets.UTF_8).size > BackupMaxBytes) {
-          throw IllegalArgumentException("备份文件过大")
-        }
-        val payload =
-            try {
-              json.decodeFromString<BackupPayload>(text)
-            } catch (_: SerializationException) {
-              throw IllegalArgumentException("备份文件不是有效 JSON")
-            } catch (_: IllegalArgumentException) {
-              throw IllegalArgumentException("备份文件不是有效 JSON")
-            }
-        if (payload.magic != BackupMagic) throw IllegalArgumentException("不是 Storage Redirect X 备份")
-        if (payload.schema !in 1..BackupSchemaVersion) throw IllegalArgumentException("备份格式版本不支持")
-        if (payload.module.id != BackupModuleId) throw IllegalArgumentException("备份属于其它模块")
-        val data = SrxConfigNormalizer.normalizeBackupData(payload.data)
-        val expected = SrxConfigNormalizer.backupDigestCandidates(json, data)
-        if (
-            !payload.integrity.algorithm.equals("SHA-256", ignoreCase = true) ||
-                payload.integrity.value !in expected
-        ) {
-          throw IllegalArgumentException("备份校验失败，文件可能被改动")
-        }
-        data
-      }
 
   private suspend fun loadDexAppLabels(userId: String, force: Boolean): Map<String, String> =
       dexLabelsCacheMutex.withLock {
