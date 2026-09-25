@@ -60,6 +60,8 @@ class SrxRepository(
     explicitNulls = false
   }
   private val fileStore = RootFileStore(shell)
+  /** 配置文件边界：Repository 只负责业务组合，未知字段保留和缓存失效由此委托处理。 */
+  private val configFiles = ConfigFileRepository(fileStore) { invalidateConfiguredAppsCache() }
   private val moduleController = RootModuleController(shell)
   private val appQuery = RootAppQuery(shell)
   private val storageBrowser = RootStorageBrowser(shell)
@@ -581,7 +583,7 @@ class SrxRepository(
   suspend fun listStorageDirectories(userId: String, dirRel: String): List<String> =
       storageBrowser.listDirectories(userId, dirRel)
 
-  private suspend fun readFile(path: String): String = fileStore.read(path)
+  private suspend fun readFile(path: String): String = configFiles.read(path)
 
   private suspend fun writeFile(
       path: String,
@@ -589,11 +591,8 @@ class SrxRepository(
       touchAfter: Boolean = false,
   ): Boolean = fileStore.write(path, content, touchAfter)
 
-  private suspend fun writeConfigFile(path: String, content: String): Boolean {
-    val written = fileStore.writeConfig(path, content)
-    if (written && path.startsWith("$AppsDir/")) invalidateConfiguredAppsCache()
-    return written
-  }
+  private suspend fun writeConfigFile(path: String, content: String): Boolean =
+      configFiles.write(path, content, touchAfter = true)
 
   /**
    * 把序列化结果与磁盘上的原始 JSON 浅合并后再写回。
@@ -603,10 +602,8 @@ class SrxRepository(
    *
    * 只做顶层浅合并：嵌套对象（如 `users`）由 App 完整建模并整体负责， 深合并反而会让用户删除的条目无法真正删除。
    */
-  private suspend fun writeMergedConfigFile(path: String, content: String): Boolean {
-    val existing = readFile(path)
-    return writeConfigFile(path, SrxConfigNormalizer.mergeUnknownTopLevelKeys(content, existing))
-  }
+  private suspend fun writeMergedConfigFile(path: String, content: String): Boolean =
+      configFiles.write(path, content, touchAfter = true)
 
   private suspend fun touchConfig() {
     fileStore.touchConfig()
