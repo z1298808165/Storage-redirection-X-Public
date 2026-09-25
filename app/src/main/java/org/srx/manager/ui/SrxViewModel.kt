@@ -174,9 +174,8 @@ class SrxViewModel(
         _state.value = _state.value.copy(loading = false, error = "未获得 root 权限")
         return@launch
       }
-      runCatching { repository.readDashboardSummary() }
-          .onSuccess { _state.value = _state.value.copy(dashboard = it, error = null) }
-          .onFailure { showMessage("加载概览失败：${it.message ?: "未知错误"}") }
+      loadOrReport("加载概览", "加载概览失败") { repository.readDashboardSummary() }
+          ?.let { _state.value = _state.value.copy(dashboard = it, error = null) }
       _state.value = _state.value.copy(loading = false)
       refreshDashboardCounts(force = true)
       refreshUsers()
@@ -190,9 +189,8 @@ class SrxViewModel(
 
   fun refreshDashboard() {
     viewModelScope.launch {
-      runCatching { repository.readDashboardSummary() }
-          .onSuccess { _state.value = _state.value.copy(dashboard = it, error = null) }
-          .onFailure { showMessage("加载概览失败：${it.message ?: "未知错误"}") }
+      loadOrReport("加载概览", "加载概览失败") { repository.readDashboardSummary() }
+          ?.let { _state.value = _state.value.copy(dashboard = it, error = null) }
       refreshDashboardCounts(force = true)
     }
   }
@@ -232,13 +230,12 @@ class SrxViewModel(
 
   fun refreshUsers() {
     viewModelScope.launch {
-      runCatching { repository.listUsers() }
-          .onSuccess { users ->
+      loadOrReport("加载用户列表", "加载用户列表失败") { repository.listUsers() }
+          ?.let { users ->
             val selected =
                 _state.value.selectedUser.takeIf { it in users } ?: users.firstOrNull() ?: "0"
             _state.value = _state.value.copy(users = users, selectedUser = selected)
           }
-          .onFailure { showMessage("加载用户列表失败：${it.message ?: "未知错误"}") }
     }
   }
 
@@ -496,12 +493,11 @@ class SrxViewModel(
 
   fun refreshTemplates() {
     viewModelScope.launch {
-      runCatching { repository.readTemplates() }
-          .onSuccess { templates ->
+      loadOrReport("加载配置模板", "加载配置模板失败") { repository.readTemplates() }
+          ?.let { templates ->
             _state.value = _state.value.copy(templates = templates)
             reconcileAutoTemplateFallback(templates)
           }
-          .onFailure { showMessage("加载配置模板失败：${it.message ?: "未知错误"}") }
     }
   }
 
@@ -783,9 +779,8 @@ class SrxViewModel(
 
   fun refreshFileMonitorFilters() {
     viewModelScope.launch {
-      runCatching { repository.readFileMonitorFilters() }
-          .onSuccess { filters -> _state.value = _state.value.copy(fileMonitorFilters = filters) }
-          .onFailure { showMessage("加载文件监视过滤规则失败：${it.message ?: "未知错误"}") }
+      loadOrReport("加载文件监视过滤规则", "加载文件监视过滤规则失败") { repository.readFileMonitorFilters() }
+          ?.let { filters -> _state.value = _state.value.copy(fileMonitorFilters = filters) }
     }
   }
 
@@ -1035,6 +1030,26 @@ class SrxViewModel(
     if (!allowRuleSyntax && raw.startsWith("!")) return ""
     return SrxConfigNormalizer.sanitizeEditablePath(raw, allowRuleSyntax, allowWildcards)
   }
+
+  /** 统一后台读取失败提示，避免各刷新入口重复拼接未知错误文本。 */
+  private fun reportLoadFailure(operation: String, error: Throwable, fallback: String) {
+    val detail = error.message?.takeIf { it.isNotBlank() } ?: "未知错误"
+    showMessage("${operation}失败：$detail")
+  }
+
+  private suspend fun <T> loadOrReport(
+      operation: String,
+      fallback: String,
+      block: suspend () -> T,
+  ): T? =
+      try {
+        block()
+      } catch (canceled: CancellationException) {
+        throw canceled
+      } catch (error: Throwable) {
+        reportLoadFailure(operation, error, fallback)
+        null
+      }
 
   private fun showMessage(message: String) {
     _state.value = _state.value.copy(snackbar = message)
