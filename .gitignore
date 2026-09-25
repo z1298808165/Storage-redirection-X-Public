@@ -57,7 +57,11 @@ __pycache__/
 # 编辑器与系统文件
 .idea/
 .vscode/
-/.workbuddy/
+# WorkBuddy 项目级 AI 资产：私人仓库追踪记忆与 skill，其余运行时数据不追踪
+# 公开快照同步（scripts/srx-sync-public.ps1）将整个 .workbuddy 列入排除路径。
+/.workbuddy/*
+!/.workbuddy/memory/
+!/.workbuddy/skills/
 *.code-workspace
 .DS_Store
 Thumbs.db
