@@ -21,6 +21,32 @@ pub mod platform {
             "/../../src/platform/paths.rs"
         ));
     }
+    // paths 已按职责拆出同级模块；夹具用 include! 复用同一份实现，必须与
+    // src/platform.rs 的模块清单保持一致，否则 include 进来的重导出会找不到模块。
+    pub mod paths_alias {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/paths_alias.rs"
+        ));
+    }
+    pub mod paths_roots {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/paths_roots.rs"
+        ));
+    }
+    pub mod paths_rules {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/paths_rules.rs"
+        ));
+    }
+    pub mod paths_safety {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/paths_safety.rs"
+        ));
+    }
 }
 
 pub mod domain {

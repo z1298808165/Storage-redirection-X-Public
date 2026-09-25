@@ -20,6 +20,14 @@ pub mod module_paths;
 pub mod mountinfo;
 #[path = "platform/paths.rs"]
 pub mod paths;
+#[path = "platform/paths_alias.rs"]
+pub mod paths_alias;
+#[path = "platform/paths_roots.rs"]
+pub mod paths_roots;
+#[path = "platform/paths_rules.rs"]
+pub mod paths_rules;
+#[path = "platform/paths_safety.rs"]
+pub mod paths_safety;
 #[path = "platform/unique_fd.rs"]
 pub mod unique_fd;
 

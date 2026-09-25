@@ -17,6 +17,17 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_paths_module() -> str:
+    """读取 `src/platform/paths*.rs` 的全部内容。
+
+    paths 已按职责拆出 paths_alias / paths_roots / paths_rules / paths_safety 同级
+    模块，守卫测试需要看到合并后的内容，否则抽取函数时会因文件边界而失败。
+    """
+    platform_dir = ROOT / "src" / "platform"
+    files = sorted(platform_dir.glob("paths*.rs"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
 
@@ -485,13 +496,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("publish_ci: ${{ steps.scope.outputs.publish_ci }}", prepare)
 
         # 发布相关 job 在范围受限时整体跳过（publish_ci=false）。
+        # 发布只发生在稳定通道 SRX-R：preview 分支只做验证与 Artifacts，
+        # 因此发布条件必须显式带上分支判断，不能只靠 publish_ci。
         self.assertIn(
-            "if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'",
+            "if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'",
             ci,
         )
         self.assertIn(
-            "if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'",
+            "if: github.event_name == 'push' && github.ref_name == 'SRX-R' && needs.prepare.outputs.publish_ci == 'true'",
             ci,
+        )
+        # preview 分支固定 publish_ci=false，构建产物只上传 Artifacts。
+        self.assertIn(
+            "if [ \"${GITHUB_REF_NAME}\" = \"preview\" ]; then",
+            prepare,
         )
 
         # module/app 构建 job 在受限范围时跳过（仅保留测试流所需的 test-flow-build）。
@@ -1869,7 +1887,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         # 判据里的 `/sdcard` 标记与 `default_redirect_target` 是同一条约定的两处表达，
         # 沙箱目录名一旦改动必须同步，否则判据会静默失配、重挂重新开始叠加。
-        paths_source = read("src/platform/paths.rs")
+        paths_source = read_paths_module()
         default_target = section(
             paths_source,
             "pub fn default_redirect_target(",

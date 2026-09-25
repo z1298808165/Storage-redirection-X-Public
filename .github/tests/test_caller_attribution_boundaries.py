@@ -15,6 +15,17 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_paths_module() -> str:
+    """读取 `src/platform/paths*.rs` 的全部内容。
+
+    paths 已按职责拆出 paths_alias / paths_roots / paths_rules / paths_safety 同级
+    模块，守卫测试需要看到合并后的内容，否则抽取函数时会因文件边界而失败。
+    """
+    platform_dir = ROOT / "src" / "platform"
+    files = sorted(platform_dir.glob("paths*.rs"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def extract_fn(source: str, fn_name: str) -> str:
     """用大括号计数从源码中抽出整个 fn（含签名与函数体），不依赖固定结尾标记。
 
@@ -470,7 +481,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
             )
 
         media_fuse_src = read("src/hook/media_fuse.rs")
-        paths_src = read("src/platform/paths.rs")
+        paths_src = read_paths_module()
         # 抽取落在 harness 的 `pub mod paths` 里，被 media_fuse 侧函数跨模块调用；
         # extract_fn 从 "fn name(" 起抽取会丢掉源码里的 `pub ` 前缀，这里补回。
         def pubify(fn_src: str) -> str:
