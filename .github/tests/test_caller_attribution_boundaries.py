@@ -564,6 +564,39 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
             self.assertIn("FAIL own_data_owner_allowed", mut_run.stdout)
             self.assertIn("FAIL own_obb_owner_allowed", mut_run.stdout)
 
+    def test_redirect_parent_chain_blocks_target_self_nesting(self) -> None:
+        """重定向父链创建必须先过目标自嵌套绊线。
+
+        历史事故：readlink 反解回归窗口（已修复）曾让 MediaStore 往返把目标显示
+        形态 `Android/data/<pkg>/sdcard` 再次送入改写，每轮深一层；父链的
+        mkdir -p 把中间层全部物理创建，测试应用私有树一晚长出 284 层空目录，
+        监视树重建被拖死（场景 24/25/27 全灭）。绊线要求：目标段在改写结果
+        路径中出现两次即判定自嵌套，跳过父链创建并以告警日志留痕，操作以
+        ENOENT 自然失败，让回归在场景断言层响亮暴露而不是静默长树。
+        """
+        runtime = read("src/hook/runtime.rs")
+        ensure_fn = extract_fn(runtime, "ensure_redirect_parent_dirs")
+        self.assertIn(
+            "redirect_parent_chain_contains_target_cycle",
+            ensure_fn,
+            "ensure_redirect_parent_dirs 缺少目标自嵌套绊线调用",
+        )
+        # 绊线必须在任何父链创建之前执行，否则链已经创建再告警没有防护意义。
+        self.assertLess(
+            ensure_fn.index("redirect_parent_chain_contains_target_cycle"),
+            ensure_fn.index("create_storage_parent_dirs_recursive"),
+            "目标自嵌套绊线必须先于父链创建执行",
+        )
+        cycle_fn = extract_fn(runtime, "redirect_parent_chain_contains_target_cycle")
+        self.assertIn("resolve_system_writer_redirect_target", cycle_fn)
+        self.assertIn("path.matches(target_segment).count()", cycle_fn)
+        self.assertIn("occurrences >= 2", cycle_fn)
+        # 绊线命中必须直接返回（跳过创建），不能只告警不拦截。
+        guard_block = cycle_fn[
+            cycle_fn.index("let occurrences") : cycle_fn.index("\n    false\n}")
+        ]
+        self.assertIn("return true", guard_block)
+
 
 if __name__ == "__main__":
     unittest.main()

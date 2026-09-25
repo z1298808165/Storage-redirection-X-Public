@@ -191,6 +191,10 @@ pub fn ensure_redirect_parent_dirs(path: &str, mode: mode_t) {
     }
 
     let owner = resolve_redirect_dir_owner();
+    if redirect_parent_chain_contains_target_cycle(path, owner.as_ref()) {
+        return;
+    }
+
     if path.starts_with("/storage/emulated/") {
         let underlying = paths::storage_to_data_media_path(path);
         create_storage_parent_dirs_recursive(&underlying, STORAGE_DIR_MODE, owner.as_ref());
@@ -646,6 +650,54 @@ fn private_dir_required_mode(path: &str) -> mode_t {
     } else {
         PRIVATE_CHILD_DIR_REQUIRED_MODE
     }
+}
+
+/// 检测重定向父链是否嵌入了调用方自身重定向目标的重复段。
+///
+/// 背景：一旦某条改写决策把「目标显示形态」当作普通路径再次改写（历史回归见
+/// readlink 反解窗口），结果路径里目标段 `Android/data/<pkg>/sdcard` 会出现两次；
+/// 父链的 mkdir -p 会把中间层全部物理创建，MediaStore 每轮往返再深一层，测试
+/// 应用私有树一晚长出 284 层空目录，监视树重建随之被拖死。正常改写结果里
+/// 目标段只会作为前缀出现一次；出现两次即目标自嵌套，此时继续创建父链只会
+/// 繁殖垃圾目录——跳过创建，让操作以 ENOENT 自然失败，并留下可检索的证据日志。
+fn redirect_parent_chain_contains_target_cycle(
+    path: &str,
+    owner: Option<&RedirectDirOwner>,
+) -> bool {
+    let Some(owner) = owner else {
+        return false;
+    };
+    if owner.package_name.is_empty() {
+        return false;
+    }
+    let target = writer::resolve_system_writer_redirect_target(
+        &owner.package_name,
+        owner.uid,
+        owner.user_id,
+        false,
+    );
+    if target.is_empty() {
+        return false;
+    }
+    let storage_root = paths::storage_user_root_for_user(owner.user_id);
+    let Some(target_segment) = target.strip_prefix(&storage_root) else {
+        return false;
+    };
+    let target_segment = target_segment.trim_matches('/');
+    if target_segment.is_empty() {
+        return false;
+    }
+    let occurrences = path.matches(target_segment).count();
+    if occurrences >= 2 {
+        log::warn!(
+            "redirect parent chain cycle suspected: target segment {} occurs {} times path={}",
+            target_segment,
+            occurrences,
+            path
+        );
+        return true;
+    }
+    false
 }
 
 fn resolve_redirect_dir_owner() -> Option<RedirectDirOwner> {
