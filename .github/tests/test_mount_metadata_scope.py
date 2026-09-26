@@ -19,6 +19,19 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_daemon_mount_module() -> str:
+    """读取 `src/daemon_mount*.rs` 的合并内容（主文件在前，诊断与回收模块在后）。
+
+    诊断取证与子进程回收已拆到独立模块，守卫需要看到合并后的内容，
+    否则按函数名截取片段时会因文件边界而失败。
+    """
+    files = sorted((ROOT / "src").glob("daemon_mount*.rs"))
+    ordered = [p for p in files if p.name == "daemon_mount.rs"] + [
+        p for p in files if p.name != "daemon_mount.rs"
+    ]
+    return "".join(path.read_text(encoding="utf-8") for path in ordered)
+
+
 def function_body(source: str, signature: str) -> str:
     """取出以 `signature` 开头的函数体，按花括号配对，跳过字符串字面量。"""
     start = source.index(signature)
@@ -57,7 +70,7 @@ class MountMetadataScopeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.monitor_roots = read("src/daemon_monitor/roots.rs")
-        cls.daemon_mount = read("src/daemon_mount.rs")
+        cls.daemon_mount = read_daemon_mount_module()
         cls.companion_mount = read("src/lifecycle/companion_mount.rs")
         cls.mount_core = read("src/mount/planner.rs")
         cls.fuse_mod = read("src/fuse_redirect/mod.rs")
