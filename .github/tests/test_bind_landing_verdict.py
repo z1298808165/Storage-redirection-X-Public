@@ -105,7 +105,7 @@ class BindLandingVerdictTest(unittest.TestCase):
             self.skipTest("rustc 不可用：未编译执行 stub harness，仅静态边界守卫生效")
 
         template = HARNESS.read_text(encoding="utf-8")
-        core_src = read("mount/core.rs")
+        core_src = read("mount/planner.rs")
 
         injected = strip_visibility(
             "\n".join(

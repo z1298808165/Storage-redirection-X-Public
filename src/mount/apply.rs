@@ -1492,7 +1492,7 @@ fn is_covered_by_scoped_fuse_mount(path: &str, scoped_fuse_roots: &[String]) -> 
 
 /// 读取当前进程的挂载表。
 ///
-/// `mount::core` 在重挂载之前也要用挂载表判断目标是否真的是挂载点，因此这里共享
+/// `mount::planner` 在重挂载之前也要用挂载表判断目标是否真的是挂载点，因此这里共享
 /// 同一份读取实现，避免两个模块各写一遍解析逻辑。
 pub(super) fn read_mountinfo() -> Option<String> {
     std::fs::read_to_string("/proc/self/mountinfo").ok()

@@ -59,7 +59,7 @@ class MountMetadataScopeTest(unittest.TestCase):
         cls.monitor_roots = read("src/daemon_monitor/roots.rs")
         cls.daemon_mount = read("src/daemon_mount.rs")
         cls.companion_mount = read("src/lifecycle/companion_mount.rs")
-        cls.mount_core = read("src/mount/core.rs")
+        cls.mount_core = read("src/mount/planner.rs")
         cls.fuse_mod = read("src/fuse_redirect/mod.rs")
         cls.fuse_config = read("src/fuse_redirect/config.rs")
 
