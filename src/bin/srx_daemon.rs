@@ -19,6 +19,8 @@ mod daemon_mount_reclaim;
 mod domain;
 #[path = "../fuse_host.rs"]
 mod fuse_host;
+#[path = "../fuse_host_control.rs"]
+mod fuse_host_control;
 #[path = "../fuse_redirect/mod.rs"]
 mod fuse_redirect;
 #[path = "../fuse_supervisor.rs"]

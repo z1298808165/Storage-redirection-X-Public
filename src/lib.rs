@@ -8,6 +8,7 @@ mod domain;
 // quality-allow(lint-suppression): fuse_host 由 srx_daemon 二进制通过路径模块使用，lib 目标仅共享编译该模块。
 #[allow(dead_code)]
 mod fuse_host;
+mod fuse_host_control;
 mod fuse_redirect;
 mod hook;
 mod java_hook;
