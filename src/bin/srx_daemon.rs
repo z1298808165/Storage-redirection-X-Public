@@ -11,6 +11,8 @@ mod daemon;
 mod daemon_monitor;
 #[path = "../daemon_mount.rs"]
 mod daemon_mount;
+#[path = "../daemon_mount_diag.rs"]
+mod daemon_mount_diag;
 #[path = "../domain.rs"]
 mod domain;
 #[path = "../fuse_host.rs"]
