@@ -4,6 +4,15 @@ use std::process::Command;
 
 const MIN_HOOKER_DEX_BYTES: u64 = 1024;
 
+// LSPlant 上游 master（std modules 迁移后）依赖 org.lsposed.libcxx AAR 提供
+// cxx CMake 包与 std 模块源；构件版本必须与 NDK 版本一致（std 模块 BMI 与
+// 消费方 clang 同版本编译），升级任一方时需同步更新以下三个常量与 SHA256。
+// 离线或预置环境可设置 SRX_LIBCXX_PREFIX 直接指向已解包的 AAR 根目录跳过下载。
+const LIBCXX_AAR_VERSION: &str = "30.0.16248370";
+const LIBCXX_AAR_SHA256_HEX: &str =
+    "8bb6839964cdd5b814255c2674a9bb4a7ba5a6b2e15284c307694a571e8d5f7c";
+const LIBCXX_AAR_URL: &str = "https://repo1.maven.org/maven2/org/lsposed/libcxx/libcxx/30.0.16248370/libcxx-30.0.16248370.aar";
+
 // 执行构建配置
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(srx_no_path_metadata_repair)");
@@ -48,6 +57,7 @@ fn build_lsplant_bridge(target_arch: &str) {
     println!("cargo:rerun-if-env-changed=NDK_ROOT");
     println!("cargo:rerun-if-env-changed=ANDROID_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_SDK_ROOT");
+    println!("cargo:rerun-if-env-changed=SRX_LIBCXX_PREFIX");
 
     let Some(ndk) = locate_ndk() else {
         if env::var("CARGO_CFG_CLIPPY").is_ok()
@@ -62,6 +72,21 @@ fn build_lsplant_bridge(target_arch: &str) {
         panic!("unsupported Android arch for LSPlant: {target_arch}");
     };
     let target_triple = android_target_triple(target_arch);
+
+    let libcxx_prefix = match ensure_libcxx_prefix() {
+        Ok(prefix) => prefix,
+        Err(err) => {
+            if env::var("CARGO_CFG_CLIPPY").is_ok()
+                || env::var("PROFILE").unwrap_or_default() == "debug"
+            {
+                println!(
+                    "cargo:warning=srx_core: LSPlant build skipped: libcxx AAR provisioning failed: {err}"
+                );
+                return;
+            }
+            panic!("libcxx AAR provisioning failed: {err}");
+        }
+    };
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let build_dir = out_dir.join("lsplant_cmake").join(abi);
@@ -94,7 +119,11 @@ fn build_lsplant_bridge(target_arch: &str) {
         ))
         .arg("-DLSPLANT_BUILD_SHARED=OFF")
         .arg("-DDEX_BUILDER_BUILD_SHARED=OFF")
-        .arg("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON");
+        .arg("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
+        .arg(format!("-DCMAKE_PREFIX_PATH={}", libcxx_prefix.display()))
+        // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
+        // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
+        .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
     run_command(&mut configure, "configure LSPlant");
 
     let mut build = Command::new("cmake");
@@ -184,6 +213,271 @@ fn locate_ndk() -> Option<PathBuf> {
         .collect::<Vec<_>>();
     versions.sort_by(|a, b| b.cmp(a));
     versions.into_iter().next()
+}
+
+// LSPlant 的 cxx 包来自 org.lsposed.libcxx AAR：下载到用户缓存并解包，
+// 再补一个 AGP prefab 本会生成、直接 CMake 消费所需的 cxxConfig.cmake 垫片。
+fn ensure_libcxx_prefix() -> Result<PathBuf, String> {
+    if let Some(prefix) = env::var_os("SRX_LIBCXX_PREFIX") {
+        let prefix = PathBuf::from(prefix);
+        if !is_libcxx_extracted(&prefix) {
+            return Err(format!(
+                "SRX_LIBCXX_PREFIX 指向的目录缺少 AAR 内容（prefab/modules/cxx/include）: {}",
+                prefix.display()
+            ));
+        }
+        ensure_cxx_config_shim(&prefix)?;
+        return Ok(prefix);
+    }
+    let Some(home) = home_dir() else {
+        return Err("无法定位用户主目录以缓存 libcxx AAR，请设置 SRX_LIBCXX_PREFIX".to_string());
+    };
+    let root = libcxx_cache_root_from_home(&home);
+    let aar_path = root.join(format!("libcxx-{LIBCXX_AAR_VERSION}.aar"));
+    let extracted = root.join("extracted");
+    if is_libcxx_extracted(&extracted) {
+        ensure_cxx_config_shim(&extracted)?;
+        return Ok(extracted);
+    }
+    std::fs::create_dir_all(&root)
+        .map_err(|e| format!("创建缓存目录 {} 失败: {e}", root.display()))?;
+    if !aar_path.exists() || verify_file_sha256(&aar_path)? != LIBCXX_AAR_SHA256_HEX {
+        download_libcxx_aar(&aar_path)?;
+        let actual = verify_file_sha256(&aar_path)?;
+        if !actual.eq_ignore_ascii_case(LIBCXX_AAR_SHA256_HEX) {
+            return Err(format!(
+                "libcxx AAR sha256 不符：expected {LIBCXX_AAR_SHA256_HEX}, got {actual}"
+            ));
+        }
+    }
+    let staging = root.join("extracted.staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    // AAR 内容经 sha256 钉死校验后可信，解包走系统工具即可，无需逐条目消毒。
+    extract_libcxx_aar(&aar_path, &staging)?;
+    ensure_cxx_config_shim(&staging)?;
+    let _ = std::fs::remove_dir_all(&extracted);
+    std::fs::rename(&staging, &extracted)
+        .map_err(|e| format!("落位 {} 失败: {e}", extracted.display()))?;
+    Ok(extracted)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+fn libcxx_cache_root_from_home(home: &Path) -> PathBuf {
+    home.join(".cache")
+        .join("srx")
+        .join(format!("libcxx-{LIBCXX_AAR_VERSION}"))
+}
+
+fn is_libcxx_extracted(prefix: &Path) -> bool {
+    prefix
+        .join("prefab/modules/cxx/include/prefab/cmake-config.cmake")
+        .is_file()
+}
+
+fn download_libcxx_aar(dest: &Path) -> Result<(), String> {
+    let partial = dest.with_extension("part");
+    let _ = std::fs::remove_file(&partial);
+    let status = Command::new("curl")
+        .args([
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--location",
+            "--fail",
+            "--retry",
+            "3",
+            "--connect-timeout",
+            "30",
+            "--silent",
+            "--show-error",
+        ])
+        .arg("--output")
+        .arg(&partial)
+        .arg(LIBCXX_AAR_URL)
+        .status()
+        .map_err(|e| {
+            format!(
+                "启动 curl 失败（离线环境请手动下载 {LIBCXX_AAR_URL} 后设置 SRX_LIBCXX_PREFIX）: {e}"
+            )
+        })?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!(
+            "curl 下载失败（exit {status}；离线环境请手动下载 {LIBCXX_AAR_URL} 后设置 SRX_LIBCXX_PREFIX）"
+        ));
+    }
+    std::fs::rename(&partial, dest).map_err(|e| format!("落位 {} 失败: {e}", dest.display()))
+}
+
+fn verify_file_sha256(path: &Path) -> Result<String, String> {
+    let path_text = path.display().to_string();
+    let candidates: Vec<Vec<String>> = if cfg!(windows) {
+        vec![vec![
+            "certutil".to_string(),
+            "-hashfile".to_string(),
+            path_text,
+            "SHA256".to_string(),
+        ]]
+    } else {
+        vec![
+            vec!["sha256sum".to_string(), path_text.clone()],
+            vec![
+                "shasum".to_string(),
+                "-a".to_string(),
+                "256".to_string(),
+                path_text,
+            ],
+        ]
+    };
+    for mut command in candidates {
+        let program = command.remove(0);
+        if let Ok(output) = Command::new(&program).args(&command).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(hex) = extract_sha256_hex(&stdout) {
+                return Ok(hex);
+            }
+        }
+    }
+    Err("无法计算 sha256（certutil/sha256sum/shasum 均不可用）".to_string())
+}
+
+// certutil 把哈希单独放一行；sha256sum/shasum 是 "<hex>  <path>"。
+// 两者都满足「取输出里第一个恰为 64 位十六进制的词」，避免逐工具解析。
+fn extract_sha256_hex(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find(|word| word.len() == 64 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_string)
+}
+
+fn extract_libcxx_aar(aar: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest)
+        .map_err(|e| format!("创建解包目录 {} 失败: {e}", dest.display()))?;
+    if cfg!(windows) {
+        // Windows 10+ 自带 bsdtar 可解 zip；必须显式用 System32 的 tar.exe，
+        // 避免 PATH 里 Git Bash 的 GNU tar（不支持 zip）抢先。
+        let system_tar = PathBuf::from(r"C:\Windows\System32\tar.exe");
+        let status = if system_tar.is_file() {
+            Command::new(&system_tar)
+                .arg("-xf")
+                .arg(aar)
+                .arg("-C")
+                .arg(dest)
+                .status()
+        } else {
+            Command::new("tar")
+                .arg("-xf")
+                .arg(aar)
+                .arg("-C")
+                .arg(dest)
+                .status()
+        };
+        let status = status.map_err(|e| format!("启动 tar 失败: {e}"))?;
+        if !status.success() {
+            return Err(format!("tar 解包 AAR 失败: exit {status}"));
+        }
+    } else {
+        let status = Command::new("unzip")
+            .arg("-q")
+            .arg(aar)
+            .arg("-d")
+            .arg(dest)
+            .status()
+            .map_err(|e| format!("启动 unzip 失败: {e}"))?;
+        if !status.success() {
+            return Err(format!("unzip 解包 AAR 失败: exit {status}"));
+        }
+    }
+    Ok(())
+}
+
+// AGP prefab 为该包生成的 cxxConfig.cmake 等价物：定义 cxx::cxx 并暴露捆绑的
+// libc++ 头文件，真正的 std 模块注册由 AAR 自带的 prefab/cmake-config.cmake 完成。
+fn cxx_config_shim_content() -> &'static str {
+    r#"# 由 build.rs 生成：直接 CMake 消费 org.lsposed.libcxx AAR（不经 AGP prefab）。
+get_filename_component(_srx_cxx_aar_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+add_library(cxx::cxx INTERFACE IMPORTED)
+set_target_properties(cxx::cxx PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_srx_cxx_aar_root}/prefab/modules/cxx/include")
+include("${_srx_cxx_aar_root}/prefab/modules/cxx/include/prefab/cmake-config.cmake")
+"#
+}
+
+fn ensure_cxx_config_shim(prefix: &Path) -> Result<(), String> {
+    let shim_dir = prefix.join("lib").join("cmake").join("cxx");
+    let shim = shim_dir.join("cxxConfig.cmake");
+    if shim.is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&shim_dir)
+        .map_err(|e| format!("创建 {} 失败: {e}", shim_dir.display()))?;
+    std::fs::write(&shim, cxx_config_shim_content())
+        .map_err(|e| format!("写入 {} 失败: {e}", shim.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libcxx_sha256_pinned_as_64_hex() {
+        assert_eq!(LIBCXX_AAR_SHA256_HEX.len(), 64);
+        assert!(
+            LIBCXX_AAR_SHA256_HEX
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn libcxx_url_matches_pinned_version() {
+        assert!(LIBCXX_AAR_URL.contains(LIBCXX_AAR_VERSION));
+        assert!(LIBCXX_AAR_URL.ends_with(&format!("libcxx-{LIBCXX_AAR_VERSION}.aar")));
+    }
+
+    #[test]
+    fn libcxx_cache_root_is_versioned_under_srx_cache() {
+        let root = libcxx_cache_root_from_home(Path::new("/home/dev"));
+        // ends_with 按路径组件比较，Windows 反斜杠分隔符下同样成立。
+        assert!(
+            root.ends_with(
+                Path::new(".cache")
+                    .join("srx")
+                    .join(format!("libcxx-{LIBCXX_AAR_VERSION}"))
+            )
+        );
+    }
+
+    #[test]
+    fn sha256_extraction_covers_curl_and_sha256sum_layouts() {
+        let hash = "8bb6839964cdd5b814255c2674a9bb4a7ba5a6b2e15284c307694a571e8d5f7c";
+        assert_eq!(
+            extract_sha256_hex(&format!(
+                "SHA256 hash of file C:\\x\\libcxx.aar:\n{hash}\nCertUtil: -hashfile command completed successfully."
+            )),
+            Some(hash.to_string())
+        );
+        assert_eq!(
+            extract_sha256_hex(&format!("{hash}  libcxx-30.0.16248370.aar\n")),
+            Some(hash.to_string())
+        );
+        assert_eq!(extract_sha256_hex("no digest here"), None);
+    }
+
+    #[test]
+    fn cxx_config_shim_wires_prefab_hook_and_headers() {
+        let shim = cxx_config_shim_content();
+        assert!(shim.contains("add_library(cxx::cxx INTERFACE IMPORTED)"));
+        assert!(shim.contains("INTERFACE_INCLUDE_DIRECTORIES"));
+        assert!(shim.contains("prefab/cmake-config.cmake"));
+        assert!(shim.contains("../../.."));
+    }
 }
 
 fn run_command(command: &mut Command, label: &str) {

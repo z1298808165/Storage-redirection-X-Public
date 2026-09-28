@@ -12,7 +12,7 @@ permissions:
 env:
   # 与 gradle.properties 的 srx.ndkVersion 保持一致；本地构建脚本读取该属性。
   # 版本分叉会让本地与 CI 构建出不同的 hook 实现，因此集中在这里定义。
-  SRX_NDK_VERSION: "30.0.14904198"
+  SRX_NDK_VERSION: "30.0.16248370"
   SRX_ANDROID_PLATFORM: "platforms;android-37.0"
   SRX_ANDROID_BUILD_TOOLS: "build-tools;35.0.0"
 

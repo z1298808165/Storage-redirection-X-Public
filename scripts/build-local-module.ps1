@@ -33,7 +33,7 @@ function Get-GradleProperty {
 
 # NDK 版本以 gradle.properties 的 srx.ndkVersion 为唯一来源，与 CI 使用同一取值；
 # 本地与 CI 使用不同 NDK 会构建出不同的 hook 实现。
-$PreferredNdkVersion = Get-GradleProperty -Name "srx.ndkVersion" -Fallback "30.0.14904198"
+$PreferredNdkVersion = Get-GradleProperty -Name "srx.ndkVersion" -Fallback "30.0.16248370"
 $PreferredCmakeVersion = "4.1.2"
 
 function Write-Step {
