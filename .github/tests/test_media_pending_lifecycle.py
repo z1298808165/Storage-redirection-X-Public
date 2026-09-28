@@ -10,6 +10,19 @@ import unittest
 from test_mount_metadata_scope import function_body
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_fuse_redirect_core() -> str:
+    """读取 `src/fuse_redirect` 的 mod.rs 与 callbacks.rs（mod.rs 在前）。
+
+    FUSE 回调与目录项枚举已拆到 callbacks.rs，守卫需要看到合并后的内容，
+    否则按函数名取片段时会因文件边界而失败。只合并这两个文件，
+    避免把 config/policy 等无关模块带进来影响「不得出现」类断言。
+    """
+    base = ROOT / "src" / "fuse_redirect"
+    return "".join(
+        (base / name).read_text(encoding="utf-8") for name in ("mod.rs", "callbacks.rs")
+    )
 JAVA = shutil.which("java")
 JAVAC = shutil.which("javac")
 
@@ -269,7 +282,7 @@ class MediaDirectoryScopeTest(unittest.TestCase):
 
 class FuseBackingLifetimeTest(unittest.TestCase):
     def test_both_reply_paths_retain_registration_until_release(self):
-        source = (ROOT / "src/fuse_redirect/mod.rs").read_text(encoding="utf-8")
+        source = read_fuse_redirect_core()
         self.assertIn("_backing: Option<Arc<fuser::BackingId>>", source)
         for signature, reply in (("fn open(", "reply.opened_passthrough"), ("fn create(", "reply.created_passthrough")):
             body = function_body(source, signature)

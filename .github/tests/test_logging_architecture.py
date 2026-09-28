@@ -15,6 +15,19 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_fuse_redirect_core() -> str:
+    """读取 `src/fuse_redirect` 的 mod.rs 与 callbacks.rs（mod.rs 在前）。
+
+    FUSE 回调与目录项枚举已拆到 callbacks.rs，守卫需要看到合并后的内容，
+    否则按函数名取片段时会因文件边界而失败。只合并这两个文件，
+    避免把 config/policy 等无关模块带进来影响「不得出现」类断言。
+    """
+    base = ROOT / "src" / "fuse_redirect"
+    return "".join(
+        (base / name).read_text(encoding="utf-8") for name in ("mod.rs", "callbacks.rs")
+    )
+
+
 def read_daemon_mount_module() -> str:
     """读取 `src/daemon_mount*.rs` 的全部内容。
 
@@ -421,7 +434,7 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertNotIn("this.writeRawFile(", restore)
 
     def test_native_hot_paths_keep_bounded_cache_and_polling(self) -> None:
-        fuse = read("src/fuse_redirect/mod.rs")
+        fuse = read_fuse_redirect_core()
         watcher = read("src/config/watcher.rs")
         self.assertIn("fn forget(&self", fuse)
         self.assertIn("lookup_counts: HashMap<u64, u64>", fuse)
