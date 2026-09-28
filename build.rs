@@ -96,6 +96,23 @@ fn build_lsplant_bridge(target_arch: &str) {
         env::var_os("DEP_SRX_INLINE_HOOK_INCLUDE").expect("DEP_SRX_INLINE_HOOK_INCLUDE"),
     );
 
+    let toolchain_file = ndk.join("build/cmake/android.toolchain.cmake");
+    // CMakeCache.txt 会粘住 toolchain 与编译器路径，-D 覆盖不了缓存里的旧值：
+    // cargo build 缓存跨 NDK 版本/构件前缀复用时（CI 的 actions/cache 或本地换 NDK），
+    // 旧缓存会把 configure 带向已不存在的旧 NDK 路径。用参数指纹戳识别并整目录重建。
+    let config_stamp = lsplant_cmake_stamp(&toolchain_file, abi, &libcxx_prefix);
+    let stamp_path = build_dir.join(".srx-cmake-config-stamp");
+    if build_dir.exists() {
+        let stale = std::fs::read_to_string(&stamp_path)
+            .map(|content| content != config_stamp)
+            .unwrap_or(true);
+        if stale {
+            let _ = std::fs::remove_dir_all(&build_dir);
+        }
+    }
+    std::fs::create_dir_all(&build_dir)
+        .unwrap_or_else(|err| panic!("create {} failed: {err}", build_dir.display()));
+
     let mut configure = Command::new("cmake");
     configure
         .arg("-S")
@@ -106,7 +123,7 @@ fn build_lsplant_bridge(target_arch: &str) {
         .arg("Ninja")
         .arg(format!(
             "-DCMAKE_TOOLCHAIN_FILE={}",
-            ndk.join("build/cmake/android.toolchain.cmake").display()
+            toolchain_file.display()
         ))
         .arg(format!("-DANDROID_ABI={abi}"))
         .arg("-DANDROID_PLATFORM=android-29")
@@ -125,6 +142,9 @@ fn build_lsplant_bridge(target_arch: &str) {
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
         .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
     run_command(&mut configure, "configure LSPlant");
+    // 只在 configure 完整成功后落戳，失败遗留的半配置目录下次会被识别为过期重建。
+    std::fs::write(&stamp_path, &config_stamp)
+        .unwrap_or_else(|err| panic!("write {} failed: {err}", stamp_path.display()));
 
     let mut build = Command::new("cmake");
     build
@@ -315,6 +335,16 @@ fn download_libcxx_aar(dest: &Path) -> Result<(), String> {
     std::fs::rename(&partial, dest).map_err(|e| format!("落位 {} 失败: {e}", dest.display()))
 }
 
+// LSPlant cmake 构建目录的参数指纹：toolchain、ABI、cxx 包前缀任一变化都视为缓存过期。
+fn lsplant_cmake_stamp(toolchain: &Path, abi: &str, libcxx_prefix: &Path) -> String {
+    format!(
+        "toolchain={}\nabi={}\nlibcxx_prefix={}\n",
+        toolchain.display(),
+        abi,
+        libcxx_prefix.display()
+    )
+}
+
 fn verify_file_sha256(path: &Path) -> Result<String, String> {
     let path_text = path.display().to_string();
     let candidates: Vec<Vec<String>> = if cfg!(windows) {
@@ -477,6 +507,39 @@ mod tests {
         assert!(shim.contains("INTERFACE_INCLUDE_DIRECTORIES"));
         assert!(shim.contains("prefab/cmake-config.cmake"));
         assert!(shim.contains("../../.."));
+    }
+
+    #[test]
+    fn cmake_stamp_distinguishes_toolchain_and_prefix() {
+        let a = lsplant_cmake_stamp(
+            Path::new("/ndk/a/build/cmake/android.toolchain.cmake"),
+            "arm64-v8a",
+            Path::new("/home/u/.cache/srx/libcxx-30.0.16248370/extracted"),
+        );
+        let same = lsplant_cmake_stamp(
+            Path::new("/ndk/a/build/cmake/android.toolchain.cmake"),
+            "arm64-v8a",
+            Path::new("/home/u/.cache/srx/libcxx-30.0.16248370/extracted"),
+        );
+        let new_ndk = lsplant_cmake_stamp(
+            Path::new("/ndk/b/build/cmake/android.toolchain.cmake"),
+            "arm64-v8a",
+            Path::new("/home/u/.cache/srx/libcxx-30.0.16248370/extracted"),
+        );
+        let new_prefix = lsplant_cmake_stamp(
+            Path::new("/ndk/a/build/cmake/android.toolchain.cmake"),
+            "arm64-v8a",
+            Path::new("/home/u/.cache/srx/libcxx-30.1.0/extracted"),
+        );
+        let new_abi = lsplant_cmake_stamp(
+            Path::new("/ndk/a/build/cmake/android.toolchain.cmake"),
+            "x86_64",
+            Path::new("/home/u/.cache/srx/libcxx-30.0.16248370/extracted"),
+        );
+        assert_eq!(a, same);
+        assert_ne!(a, new_ndk);
+        assert_ne!(a, new_prefix);
+        assert_ne!(a, new_abi);
     }
 }
 
