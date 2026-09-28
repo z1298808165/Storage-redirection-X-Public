@@ -4,6 +4,8 @@ use std::cell::RefCell;
 mod alias;
 #[path = "mount/apply.rs"]
 mod apply;
+#[path = "mount/apply_targets.rs"]
+mod apply_targets;
 #[path = "mount/map.rs"]
 mod map;
 #[path = "mount/planner.rs"]
