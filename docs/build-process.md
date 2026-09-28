@@ -20,7 +20,7 @@ Windows PowerShell 设备侧测试建议固定设置 NDK 和 CMake：
 
 ```powershell
 $env:ANDROID_HOME = "<Android SDK 安装目录>"
-$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.14904198"
+$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.16248370"
 $env:ANDROID_NDK_ROOT = $env:ANDROID_NDK_HOME
 $env:Path = "$env:ANDROID_HOME\cmake\4.1.2\bin;$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin;" + $env:Path
 cargo build --target aarch64-linux-android --release

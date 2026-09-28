@@ -8,11 +8,28 @@
 |------|----------|------|
 | Rust | nightly (edition 2024) | 需要 `let_chains` 等特性 |
 | Android NDK | r30+ | 用于交叉编译和 LSPlant C++ 构建 |
-| CMake | 3.22+ | LSPlant 构建依赖 |
+| CMake | 3.28+ | LSPlant C++ 模块构建依赖（Ninja 生成器） |
 | Ninja | 1.10+ | CMake 生成器 |
 | JDK | 11-21 | 编译 Hooker.java 为 class 文件 |
 | Android SDK build-tools | 31+ | 提供 d8 工具将 class 转为 dex |
+| curl | 任意现代版本 | 首次构建下载 libcxx AAR（见下） |
 | Rust targets | `aarch64-linux-android` | 真机；可选 `x86_64-linux-android` 用于模拟器 |
+
+### libcxx AAR（LSPlant std 模块依赖）
+
+LSPlant 上游迁移到 C++ 标准库模块（`import std;`）后，构建需要
+`org.lsposed.libcxx:libcxx` AAR 提供 `cxx` CMake 包与 std 模块源。
+`build.rs` 会在首次构建时自动下载（URL 与 sha256 钉死在 `build.rs` 常量里）
+到 `~/.cache/srx/libcxx-<版本>/` 并解包，无需手工准备。
+
+注意：
+
+- **AAR 版本必须与 NDK 版本一致**（std 模块与消费方 clang 同版本编译）。
+  升级任一方时必须同步更新 `build.rs` 里的 `LIBCXX_AAR_*` 常量与
+  `gradle.properties` / CI workflow 的 NDK 版本。
+- 离线或预置环境可设置 `SRX_LIBCXX_PREFIX` 指向已解包的 AAR 根目录
+  （需含 `prefab/modules/cxx/include`），跳过下载。
+- Windows 解包走系统自带的 bsdtar（`System32\tar.exe`）；Linux/macOS 走 `unzip`。
 
 ### 重要限制
 
@@ -38,7 +55,7 @@ export JAVA_HOME=<JDK 安装目录>
 
 # Windows PowerShell
 $env:ANDROID_HOME = "<Android SDK 安装目录>"
-$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.14904198"
+$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.16248370"
 $env:JAVA_HOME = "<JDK 安装目录>"
 ```
 
@@ -48,7 +65,7 @@ $env:JAVA_HOME = "<JDK 安装目录>"
 ```powershell
 [Environment]::SetEnvironmentVariable("ANDROID_HOME", "<Android SDK 安装目录>", "User")
 [Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", "<Android SDK 安装目录>", "User")
-[Environment]::SetEnvironmentVariable("ANDROID_NDK_HOME", "<Android SDK 安装目录>\ndk\30.0.14904198", "User")
+[Environment]::SetEnvironmentVariable("ANDROID_NDK_HOME", "<Android SDK 安装目录>\ndk\30.0.16248370", "User")
 [Environment]::SetEnvironmentVariable("JAVA_HOME", "<JDK 21 安装目录>", "User")
 ```
 
