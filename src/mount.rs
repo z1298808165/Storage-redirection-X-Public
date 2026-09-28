@@ -4,10 +4,10 @@ use std::cell::RefCell;
 mod alias;
 #[path = "mount/apply.rs"]
 mod apply;
-#[path = "mount/core.rs"]
-mod core;
 #[path = "mount/map.rs"]
 mod map;
+#[path = "mount/planner.rs"]
+mod planner;
 
 pub struct MountPlanner {
     should_unshare: bool,
