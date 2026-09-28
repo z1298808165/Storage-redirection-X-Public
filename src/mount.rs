@@ -8,6 +8,8 @@ mod apply;
 mod map;
 #[path = "mount/planner.rs"]
 mod planner;
+#[path = "mount/planner_paths.rs"]
+mod planner_paths;
 
 pub struct MountPlanner {
     should_unshare: bool,

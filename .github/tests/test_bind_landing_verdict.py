@@ -16,6 +16,19 @@ def read(path: str) -> str:
     return (SRC / path).read_text(encoding="utf-8")
 
 
+def read_planner_module() -> str:
+    """读取 `src/mount/planner*.rs` 的合并内容（主文件在前）。
+
+    路径归类与绑定落点判定已拆到 planner_paths.rs，守卫需要看到合并后的内容，
+    否则按类型名取片段时会因文件边界而失败。
+    """
+    files = sorted((ROOT / "src" / "mount").glob("planner*.rs"))
+    ordered = [p for p in files if p.name == "planner.rs"] + [
+        p for p in files if p.name != "planner.rs"
+    ]
+    return "".join(path.read_text(encoding="utf-8") for path in ordered)
+
+
 def extract_fn(source: str, fn_name: str) -> str:
     """用大括号计数从源码中抽出整个 fn（含签名与函数体），不依赖固定结尾标记。"""
     marker = f"fn {fn_name}"
@@ -105,7 +118,7 @@ class BindLandingVerdictTest(unittest.TestCase):
             self.skipTest("rustc 不可用：未编译执行 stub harness，仅静态边界守卫生效")
 
         template = HARNESS.read_text(encoding="utf-8")
-        core_src = read("mount/planner.rs")
+        core_src = read_planner_module()
 
         injected = strip_visibility(
             "\n".join(
