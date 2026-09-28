@@ -15,6 +15,16 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_daemon_mount_module() -> str:
+    """读取 `src/daemon_mount*.rs` 的全部内容。
+
+    诊断与快照已拆到 daemon_mount_diag.rs，守卫需要看到合并后的内容，
+    否则抽取函数或断言文本时会因文件边界而失败。
+    """
+    files = sorted((ROOT / "src").glob("daemon_mount*.rs"))
+    return "".join(path.read_text(encoding="utf-8") for path in files)
+
+
 def read_paths_module() -> str:
     """读取 `src/platform/paths*.rs` 的全部内容。
 
@@ -275,7 +285,7 @@ class LoggingArchitectureTest(unittest.TestCase):
 
     def test_doctor_reports_cross_layer_identity(self) -> None:
         """doctor 必须一次给齐五层身份，而不是只报告挂载账本。"""
-        daemon = read("src/daemon_mount.rs")
+        daemon = read_daemon_mount_module()
         self.assertIn("pub fn doctor_report(args: &[String]) -> i32", daemon)
         snapshot = daemon[
             daemon.index("fn print_cross_layer_snapshot") :
