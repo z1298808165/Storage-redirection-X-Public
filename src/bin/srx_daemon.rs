@@ -13,6 +13,8 @@ mod daemon_monitor;
 mod daemon_mount;
 #[path = "../daemon_mount_diag.rs"]
 mod daemon_mount_diag;
+#[path = "../daemon_mount_reclaim.rs"]
+mod daemon_mount_reclaim;
 #[path = "../domain.rs"]
 mod domain;
 #[path = "../fuse_host.rs"]

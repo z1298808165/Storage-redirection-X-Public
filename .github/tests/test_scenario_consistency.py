@@ -17,6 +17,19 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_daemon_mount_module() -> str:
+    """读取 `src/daemon_mount*.rs` 的合并内容（主文件在前，诊断与回收模块在后）。
+
+    诊断取证与子进程回收已拆到独立模块，守卫需要看到合并后的内容，
+    否则按函数名截取片段时会因文件边界而失败。
+    """
+    files = sorted((ROOT / "src").glob("daemon_mount*.rs"))
+    ordered = [p for p in files if p.name == "daemon_mount.rs"] + [
+        p for p in files if p.name != "daemon_mount.rs"
+    ]
+    return "".join(path.read_text(encoding="utf-8") for path in ordered)
+
+
 def read_paths_module() -> str:
     """读取 `src/platform/paths*.rs` 的全部内容。
 
@@ -675,7 +688,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             daemon_main.index("for (index, plan) in plans.iter().enumerate()"),
             "daemon 必须在执行挂载计划前预登记策略，供 companion 快照发现",
         )
-        daemon_src = read("src/daemon_mount.rs")
+        daemon_src = read_daemon_mount_module()
         pre_register = section(
             daemon_src, "pub(crate) fn pre_register_host_policy(", "fn write_mount_state("
         )
@@ -713,11 +726,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("fuse rollback keeps shared host session", rollback)
             self.assertIn("continue;", rollback)
 
-        daemon = read("src/daemon_mount.rs")
+        daemon = read_daemon_mount_module()
         self.assertIn("fn read_fuse_host_session(", daemon)
         # 会话死亡后应用留下的是 ENOTCONN 死挂载：挂载表里看得到、访问全失败，因此判定
         # 必须把它当成"状态失效"触发重挂，而不是当成健康。
-        dead = section(daemon, "fn has_dead_fuse_child(", "pub fn execute_mount_request(")
+        dead = section(daemon, "fn has_dead_fuse_child(", "fn should_skip_for_stuck_children(")
         self.assertIn("read_fuse_host_session(state_path)", dead)
         # 已被重建的宿主会话留下的层必须摘掉重建：归属判定认它是本模块的层，
         # 但连接已断，保留只会让应用一直 ENOTCONN。
@@ -1732,7 +1745,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         companion = read("src/lifecycle/companion_mount.rs")
         self.assertNotIn("write_mount_status_marker", companion)
-        daemon_mount = read("src/daemon_mount.rs")
+        daemon_mount = read_daemon_mount_module()
         self.assertNotIn("write_mount_status_marker", daemon_mount)
 
         confirm = section(self.bash, "wait_app_mount_confirmed() {", "\nscenario_from_label() {")
@@ -1869,7 +1882,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             )
 
         # 摘除与账本登记都必须走同一份判据，不得退回只看挂载源。
-        daemon_mount = read("src/daemon_mount.rs")
+        daemon_mount = read_daemon_mount_module()
         clear = section(
             daemon_mount,
             "fn clear_mount_target_stack_verified(",
