@@ -15,6 +15,17 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_paths_module() -> str:
+    """读取 `src/platform/paths*.rs` 的全部内容。
+
+    paths 已按职责拆出 paths_alias / paths_roots / paths_rules / paths_safety 同级
+    模块，守卫测试需要看到合并后的内容，否则抽取函数时会因文件边界而失败。
+    """
+    platform_dir = ROOT / "src" / "platform"
+    files = sorted(platform_dir.glob("paths*.rs"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in files)
+
+
 class LoggingArchitectureTest(unittest.TestCase):
     def test_monitor_watches_precede_slow_public_owner_scan(self) -> None:
         # 公共目录扫描期间仍须消费事件，避免新目录内的覆盖写入漏记。
@@ -427,7 +438,7 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertNotIn("repository.readFileMonitorFilters()", refresh)
 
     def test_native_fixed_capacity_caches_evict_incrementally(self) -> None:
-        paths = read("src/platform/paths.rs")
+        paths = read_paths_module()
         monitor = read("src/config/inspect.rs")
         cache = read("src/platform/lru_cache.rs")
         raw = read("src/config/raw_scan.rs")
