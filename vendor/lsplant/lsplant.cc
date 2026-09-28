@@ -2,11 +2,11 @@ module;
 
 #include "lsplant.hpp"
 
-#include <android/api-level.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <linux/ashmem.h>
 #include <sys/mman.h>
+#include <sys/system_properties.h>
 #include <sys/utsname.h>
 #include <syscall.h>
 #include <unistd.h>
@@ -73,9 +73,12 @@ consteval inline auto GetTrampoline() {
     }
     if constexpr (is_arch_v<Arch::kAArch64>) {
         return std::make_tuple(
-            "\x60\x00\x00\x58\x10\x00\x40\xf8\x00\x02\x1f\xd6\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
+            // ldr x0, #16 | ldr x16, [x0] | br x16 | nop | .quad ArtMethod*
+            // Fixed: Added 4-byte nop padding to align pointer to 8-byte boundary
+            // Fixes SIGBUS (BUS_ADRALN) crash on Android 16 in fork scenarios
+            "\x80\x00\x00\x58\x10\x00\x40\xf8\x00\x02\x1f\xd6\x1f\x20\x03\xd5\x78\x56\x34\x12\x78\x56\x34\x12"_uarr,
             // NOLINTNEXTLINE
-            uint8_t{44u}, uintptr_t{12u});
+            uint8_t{44u}, uintptr_t{16u});
     }
     if constexpr (is_arch_v<Arch::kX86>) {
         return std::make_tuple("\xb8\x78\x56\x34\x12\xff\x70\x00\xc3"_uarr,
@@ -500,7 +503,11 @@ const auto kPageMask = static_cast<uintptr_t>(kPageSize - 1);
 SharedHashSet<void *> mmap_regions;
 SharedHashSet<void *> dual_regions;
 
-auto [ashmem_device_path, use_memfd] = [] {
+auto [ashmem_device_path, use_memfd] = [] -> std::pair<std::string, bool> {
+    if (std::array<char, PROP_VALUE_MAX> prop_value;
+        __system_property_get("ro.config.knox", prop_value.data()) > 0) {
+        return {};
+    }
     if (utsname un{}; GetAndroidApiLevel() >= kSdkQ && uname(&un) == 0) [[likely]] {
         static constexpr uintptr_t kRequiredMajor = 3;
         static constexpr uintptr_t kRequiredMinor = 17;
@@ -511,7 +518,7 @@ auto [ashmem_device_path, use_memfd] = [] {
 
         if (major > kRequiredMajor || (major == kRequiredMajor && minor > kRequiredMinor))
             [[likely]] {
-            return std::pair{std::string{}, true};
+            return {{}, true};
         }
     }
     if (auto fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC, 0); fd >= 0)
@@ -522,11 +529,11 @@ auto [ashmem_device_path, use_memfd] = [] {
         if (size == boot_id.size()) {
             auto path = "/dev/ashmem"s + std::string{boot_id.data(), boot_id.size()};
             if (access(path.c_str(), F_OK) == 0) [[likely]] {
-                return std::pair{path, false};
+                return {path, {}};
             }
         }
     }
-    return std::pair{"/dev/ashmem"s, false};
+    return {"/dev/ashmem", {}};
 }();
 
 std::pair<void *, void *> CreateDualMapping(int fd) {
@@ -800,6 +807,7 @@ using ::lsplant::IsHooked;
 [[maybe_unused]] bool Init(JNIEnv *env, const InitInfo &info) {
     if (!info.inline_hooker || !info.inline_unhooker || !info.art_symbol_resolver ||
         !info.art_symbol_prefix_resolver) {
+        LOGE("Invalid init info");
         return false;
     }
     bool static kInit = InitConfig(info) && InitJNI(env) && InitNative(env, info);
