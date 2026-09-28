@@ -64,6 +64,48 @@ $title = (($message -split "`r?`n", 2)[0]).Trim()
 if ($paths.Count -gt 0 -and $message -notmatch '(?m)^(?:变更|用户影响)[：:]\s*\S') {
     throw "包含文件改动的 Commit 必须由 AI Agent 在正文中写入 变更： 或 用户影响：，供 CI/Release 更新日志直接使用。"
 }
+
+# 更新日志字段精简门禁（AGENTS.md 第 4 条的强制校验）：更新日志生成器按行解析字段，
+# 会把字段行之后的普通正文行并入该字段、也会原样保留字段值里的字面 \n 转义——
+# 这两类写法会让文件路径、代码符号和验证过程整段泄漏进用户更新日志，必须在提交时拦下。
+$changelogFieldCaps = @{
+    "变更"    = 50
+    "用户影响" = 50
+    "范围"    = 30
+    "限制"    = 30
+}
+$activeChangelogField = $null
+foreach ($rawLine in ($message -split "`r?`n")) {
+    $line = $rawLine.Trim()
+    if ($line -match '^(AI-Review-|Signed-off-by:|Co-authored-by:)') {
+        continue
+    }
+    $fieldMatch = [regex]::Match($line, '^(变更|用户影响|范围|限制|验证)[：:]\s*(.*)$')
+    if ($fieldMatch.Success) {
+        $fieldName = $fieldMatch.Groups[1].Value
+        if ($changelogFieldCaps.ContainsKey($fieldName)) {
+            $activeChangelogField = $fieldName
+            $fieldValue = $fieldMatch.Groups[2].Value
+            if ($fieldValue -match '\\n') {
+                throw "提交正文的 ${fieldName}： 字段不得包含字面 \n 转义；更新日志字段必须逐行书写，验证过程一律写入 验证： 字段。"
+            }
+            $fieldCap = $changelogFieldCaps[$fieldName]
+            if ($fieldValue.Length -gt $fieldCap) {
+                throw "提交正文的 ${fieldName}： 字段过长（$($fieldValue.Length) 字，上限 $fieldCap 字）；进入更新日志的字段只能是一句面向用户的中文短句或短语级概括，技术细节写入 验证： 字段或置于所有字段之前的正文段落。"
+            }
+        }
+        else {
+            $activeChangelogField = $null
+        }
+        continue
+    }
+    if (-not $line) {
+        continue
+    }
+    if ($activeChangelogField) {
+        throw "提交正文的 ${activeChangelogField}： 字段必须单行；其后的普通正文行会被更新日志生成器并入该字段。技术细节请写入 验证： 字段之后的续行（不会进入更新日志）。"
+    }
+}
 if ([string]::IsNullOrWhiteSpace($title)) {
     throw "Commit 标题不能为空。"
 }
