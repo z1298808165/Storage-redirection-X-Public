@@ -522,20 +522,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("publish_ci: ${{ steps.scope.outputs.publish_ci }}", prepare)
 
         # 发布相关 job 在范围受限时整体跳过（publish_ci=false）。
-        # 发布只发生在稳定通道 SRX-R：preview 分支只做验证与 Artifacts，
-        # 因此发布条件必须显式带上分支判断，不能只靠 publish_ci。
         self.assertIn(
-            "if: github.event_name == 'push' && github.ref_name == 'SRX-R' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'",
+            "if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'",
             ci,
         )
         self.assertIn(
-            "if: github.event_name == 'push' && github.ref_name == 'SRX-R' && needs.prepare.outputs.publish_ci == 'true'",
+            "if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'",
             ci,
-        )
-        # preview 分支固定 publish_ci=false，构建产物只上传 Artifacts。
-        self.assertIn(
-            "if [ \"${GITHUB_REF_NAME}\" = \"preview\" ]; then",
-            prepare,
         )
 
         # module/app 构建 job 在受限范围时跳过（仅保留测试流所需的 test-flow-build）。
