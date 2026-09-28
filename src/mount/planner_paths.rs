@@ -4,7 +4,7 @@
 // Android 私有目录判定、共享公共目录判定、只读与 allowed-real 的元数据修复。
 // 挂载动作本身留在 planner，改归类口径不会碰到挂载顺序。
 
-use super::apply::{mountinfo_has_target, read_mountinfo};
+use super::apply_targets::{mountinfo_has_target, read_mountinfo};
 use super::planner::{ALLOWED_REAL_DIR_MODE, MEDIA_RW_GID, MEDIA_RW_UID, REAL_PUBLIC_DIR_MODE};
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::{mountinfo, paths};
