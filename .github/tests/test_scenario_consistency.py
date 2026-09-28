@@ -17,6 +17,19 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def read_fuse_host_module() -> str:
+    """读取 `src/fuse_host*.rs` 的合并内容（主文件在前，控制通道模块在后）。
+
+    控制通道协议已拆到独立模块，守卫需要看到合并后的内容，
+    否则按函数名截取片段时会因文件边界而失败。
+    """
+    files = sorted((ROOT / "src").glob("fuse_host*.rs"))
+    ordered = [p for p in files if p.name == "fuse_host.rs"] + [
+        p for p in files if p.name != "fuse_host.rs"
+    ]
+    return "".join(path.read_text(encoding="utf-8") for path in ordered)
+
+
 def read_daemon_mount_module() -> str:
     """读取 `src/daemon_mount*.rs` 的合并内容（主文件在前，诊断与回收模块在后）。
 
@@ -538,7 +551,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_shared_fuse_host_b2a_contract(self) -> None:
         # B2-a 先建立独立宿主会话骨架：它必须在 daemon 的私有 namespace 中创建，
         # 使用 srx_fuse_host 前缀并设为 shared propagation；应用接入仍由后续 B2-b 完成。
-        host = read("src/fuse_host.rs")
+        host = read_fuse_host_module()
         daemon = read("src/daemon.rs")
         config = read("src/fuse_redirect/config.rs")
         self.assertIn("pub fn spawn_fuse_host() -> Option<FuseHost>", host)
@@ -580,7 +593,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 self.assertNotIn("register_app_policy(", compact)
                 self.assertIn("read_host_session_view()", compact)
 
-        host = read("src/fuse_host.rs")
+        host = read_fuse_host_module()
         self.assertIn("pub fn register_app_policy(", host)
         self.assertIn("pub fn can_attach_app(", host)
         self.assertIn("pub(crate) fn spawn_host_control_loop(", host)
@@ -628,7 +641,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 4) 接入默认开启（开关只用于显式关闭），且只允许落在存储视图根：宿主会话按 uid
         #    注册策略，虚拟根只能是整个存储视图根，落在更深的 scoped 子根会把该子树的请求
         #    按整根解析（读错内容却不报错）。
-        host = read("src/fuse_host.rs")
+        host = read_fuse_host_module()
         self.assertIn("pub fn attach_app_to_host(", host)
         self.assertIn("pub fn can_attach_app(uid: i32, mount_root: &str) -> bool", host)
         self.assertIn('const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";', host)
