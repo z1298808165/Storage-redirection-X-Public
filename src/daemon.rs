@@ -15,13 +15,16 @@ use std::collections::HashSet;
 use std::fs::{self as std_fs, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const RECONCILE_INTERVAL_MS: u64 = 1000;
 const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
+/// 状态文件清理只防「已死进程的记录无限累积」，不参与挂载正确性；
+/// 与 reconcile 的 3 秒周期解耦，避免空闲时每个周期都扫描状态目录和 /proc。
+const PRUNE_INTERVAL_MS: i64 = 30_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
 const FILE_MONITOR_POLL_MS: u64 = 100;
 /// 降级路径单轮最多连续排空的次数，避免挤占同一循环内的 reconcile。
@@ -431,14 +434,30 @@ fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mu
     config.config_version() != before
 }
 
+/// 按 [`PRUNE_INTERVAL_MS`] 节流执行三类过期记录清理。
+///
+/// reconcile 是常驻循环里唯一的空闲活动，清理要扫状态目录并对每个记录查一次
+/// `/proc/<pid>/stat`；被清理的对象本身不参与挂载正确性，延迟一个窗口没有影响，
+/// 因此把这部分开销从每 3 秒一次降到每 30 秒一次。主循环是单线程调用，
+/// 这里只用原子量记录上次执行时间即可。
+fn prune_stale_states_throttled() {
+    static LAST_PRUNE_MS: AtomicI64 = AtomicI64::new(0);
+    let now_ms = crate::platform::paths::monotonic_ms();
+    if now_ms.saturating_sub(LAST_PRUNE_MS.load(Ordering::Relaxed)) < PRUNE_INTERVAL_MS {
+        return;
+    }
+    LAST_PRUNE_MS.store(now_ms, Ordering::Relaxed);
+    prune_stale_mount_states();
+    crate::mount_intent::prune_stale();
+    crate::mount_identity::prune_stale();
+}
+
 fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     // 共享宿主死亡时先尝试恢复；失败则让各挂载请求继续走 scoped FUSE 回退。
     // 该动作只在 reconcile 入口执行一次，避免每个应用计划重复 fork 宿主。
     let _host_ready = crate::fuse_host::ensure_global();
     let started_ms = crate::platform::paths::monotonic_ms();
-    prune_stale_mount_states();
-    crate::mount_intent::prune_stale();
-    crate::mount_identity::prune_stale();
+    prune_stale_states_throttled();
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;
