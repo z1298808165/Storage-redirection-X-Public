@@ -140,6 +140,17 @@ pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) ->
     if fd < 0 {
         return false;
     }
+    // 策略构造会探测宿主命名空间里的 MediaProvider FUSE 视图（自有 Android/media/<pkg>
+    // 下 sqlite 三件套统一缓存层的前置条件），因此绑定必须先于登记完成。失败不阻断：
+    // 策略探测不到视图会自动回退直连后端的既有行为。
+    let user_id = crate::platform::user_id_from_uid(config.uid);
+    if !crate::fuse_host::ensure_host_media_fuse_view(user_id) {
+        log::debug!(
+            "fuse host media view unavailable uid={} pkg={}",
+            config.uid,
+            config.package_name
+        );
+    }
     let Ok(payload) = serde_json::to_vec(config) else {
         log::warn!("fuse host policy encode failed pkg={}", config.package_name);
         return false;

@@ -453,6 +453,261 @@ fn reap_attach_child(pid: libc::pid_t) {
     reap_host_child(pid);
 }
 
+/// 确保宿主子进程命名空间里存在 MediaProvider FUSE 视图绑定（按用户子树）。
+///
+/// 宿主对自有 `Android/media/<pkg>/` 下 sqlite 三件套的读写原本直连 f2fs，与其它
+/// 调用方（未重定向应用、MediaProvider 自身）经 MediaProvider FUSE 的内核缓存互不
+/// 感知；数据库文件删除重建后两层各持一个代际，读取撕裂表现为 `SQLITE_CORRUPT`
+/// （真机实测：支付宝内 XRadiant）。把 MediaProvider FUSE 挂载克隆进宿主命名空间后，
+/// 策略会把这类文件改经该视图访问，所有访问方共享同一份内核 inode 缓存。
+///
+/// 源挂载 `/mnt/user/<user>/emulated` 在**当前**（daemon 挂载 worker 或应用）命名空间
+/// 中必然存在——应用能发起挂载请求就说明存储已就绪；克隆必须在源命名空间内完成，
+/// 跨命名空间 `mount(MS_BIND)` 会直接 `EINVAL`（与接入逻辑同一约束）。
+///
+/// 幂等：目标用户子树已能枚举到 Android 层即视为就绪，直接返回。失败不阻断登记：
+/// 策略构造时探测不到视图会自动回退直连后端的既有行为。
+pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
+    // 落盘开关：现场排障时创建该文件即可关闭视图绑定（不用重刷模块），删除后恢复。
+    if std::path::Path::new("/data/adb/modules/storage.redirect.x/.media_view_disabled").exists() {
+        return false;
+    }
+    let Some(host) = get_fuse_host() else {
+        return false;
+    };
+    let Ok(c_source) = CString::new(format!("/mnt/user/{user_id}/emulated")) else {
+        return false;
+    };
+    // 绑定目标是 MediaProvider FUSE 挂载的**根**（其下自带 `<user>` 子树），策略侧的
+    // 视图根则是 `FUSE_HOST_MEDIA_VIEW_DIR/<user>`。这里不能把目标写成带 user 后缀：
+    // 那会让整棵 fuse 树挂进 <user> 目录，视图里多出一层用户目录导致探测永远失败。
+    let Ok(c_target) = CString::new(crate::platform::module_paths::FUSE_HOST_MEDIA_VIEW_DIR) else {
+        return false;
+    };
+    let Ok(c_probe) = CString::new(format!(
+        "{}/{}/Android",
+        crate::platform::module_paths::FUSE_HOST_MEDIA_VIEW_DIR,
+        user_id
+    )) else {
+        return false;
+    };
+
+    let mut ready_sockets = [0; 2];
+    // SAFETY: ready_sockets 是本地数组，长度合法，socketpair 填充两个 fd。
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_DGRAM,
+            0,
+            ready_sockets.as_mut_ptr(),
+        )
+    } != 0
+    {
+        log_errno("fuse host media view socketpair failed");
+        return false;
+    }
+
+    crate::logging::prepare_for_fork();
+    // SAFETY: fork 前已完成日志准备；子进程只做系统调用后退出。
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        log_errno("fuse host media view fork failed");
+        // SAFETY: 两个 fd 均为本次 socketpair 打开，此处是唯一清理点。
+        unsafe {
+            libc::close(ready_sockets[0]);
+            libc::close(ready_sockets[1]);
+        }
+        return false;
+    }
+
+    if child == 0 {
+        // SAFETY: 子进程关闭父端 fd；该入口只在完成或失败时返回。
+        unsafe { libc::close(ready_sockets[0]) };
+        let name = b"srx_hostmedia\0";
+        // SAFETY: prctl(PR_SET_NAME) 设置线程名称，name 是 NUL 结尾的静态字节串。
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+        }
+        let ok = host_media_view_child_main(
+            host.child_pid,
+            &c_source,
+            &c_target,
+            &c_probe,
+            ready_sockets[1],
+        );
+        host_stage(if ok {
+            "media_view_ok"
+        } else {
+            "media_view_failed"
+        });
+        // SAFETY: _exit 终止子进程，不跑 atexit。
+        unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+    }
+
+    // SAFETY: 父进程关闭子端 fd 后等待就绪。
+    unsafe { libc::close(ready_sockets[1]) };
+    let ready = recv_host_ready(ready_sockets[0], HOST_ATTACH_TIMEOUT_SEC);
+    // SAFETY: ready_sockets[0] 是父进程持有的有效端点。
+    unsafe { libc::close(ready_sockets[0]) };
+    let ok = match ready {
+        Some(0) => {
+            reap_attach_child(child);
+            true
+        }
+        Some(code) => {
+            let reason = reap_host_child(child);
+            log::warn!(
+                "fuse host media view not ready child={} code={} stage={} {}",
+                child,
+                code,
+                crate::fuse_redirect::config::host_ready_stage(code),
+                reason
+            );
+            false
+        }
+        None => {
+            let reason = reap_host_child(child);
+            log::warn!(
+                "fuse host media view unavailable child={} timeout_sec={} {}",
+                child,
+                HOST_ATTACH_TIMEOUT_SEC,
+                reason
+            );
+            false
+        }
+    };
+    if !ok {
+        log_host_stage_trace();
+    }
+    ok
+}
+
+/// 媒体视图绑定子进程入口：当前命名空间克隆 MediaProvider FUSE 挂载 → 宿主命名空间
+/// 附着 → 幂等复核。
+///
+/// 克隆必须发生在进入宿主命名空间**之前**：宿主命名空间里没有源挂载，`mount(MS_BIND)`
+/// 与 `open_tree` 都要求源在调用方当前命名空间内。幂等探测在附着之前做会导致克隆
+/// 白做一次（探测需要先进入宿主命名空间），代价是几次本地系统调用，可接受。
+fn host_media_view_child_main(
+    host_pid: i32,
+    c_source: &CStr,
+    c_target: &CStr,
+    c_probe: &CStr,
+    ready_sock: libc::c_int,
+) -> bool {
+    // 1. 在当前命名空间克隆游离挂载。
+    let tree_fd = open_detached_mount(c_source);
+
+    // 2. 进入宿主命名空间：目标目录与视图探测都只对宿主视图有意义。
+    host_stage("media_view_ns_entering");
+    let host_ns_path = format!("/proc/{host_pid}/ns/mnt");
+    let Ok(c_host_ns) = CString::new(host_ns_path) else {
+        return false;
+    };
+    // SAFETY: c_host_ns 是 NUL 结尾的合法路径。
+    let host_ns = unsafe { libc::open(c_host_ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if host_ns < 0 {
+        log_errno("fuse host media view ns open failed");
+        host_stage("media_view_ns_open_failed");
+        return false;
+    }
+    // SAFETY: host_ns 是本函数打开的有效 namespace fd。
+    let host_ns = UniqueFd::new(host_ns);
+    // SAFETY: host_ns 是有效的 mount namespace fd。
+    if unsafe { libc::setns(host_ns.get(), libc::CLONE_NEWNS) } != 0 {
+        log_errno("fuse host media view setns failed");
+        host_stage("media_view_setns_failed");
+        return false;
+    }
+    host_stage("media_view_ns_entered");
+
+    // 3. 幂等：目标用户子树已能枚举到 Android 层即视为绑定就绪。
+    if media_view_probe_ok(c_probe) {
+        host_stage("media_view_already_bound");
+        send_media_view_ready(ready_sock);
+        return true;
+    }
+    if tree_fd < 0 {
+        let errno = crate::platform::errno::last();
+        log::warn!(
+            "fuse host media view open_tree failed src={} errno={} {}",
+            c_source.to_string_lossy(),
+            errno,
+            crate::platform::errno::text(errno)
+        );
+        host_stage("media_view_open_tree_failed");
+        return false;
+    }
+    // SAFETY: tree_fd 是 open_tree 返回的有效 fd。
+    let tree_fd = UniqueFd::new(tree_fd);
+
+    // 4. 目标目录逐级创建（tmp/fuse_host_media 与 <user> 两层都可能不存在；
+    //    libc::mkdir 只建一层，父目录缺失会让这里静默 ENOENT，后续 move_mount
+    //    也跟着 ENOENT——这正是首次刷入后视图绑定失败的根因）。
+    let target = c_target.to_string_lossy().to_string();
+    let mut prefix = String::new();
+    for part in target.split('/').filter(|part| !part.is_empty()) {
+        prefix.push('/');
+        prefix.push_str(part);
+        let Ok(c_prefix) = CString::new(prefix.clone()) else {
+            host_stage("media_view_mkdir_path_invalid");
+            return false;
+        };
+        // SAFETY: c_prefix 是 NUL 结尾的合法路径；EEXIST 属于预期，忽略。
+        unsafe { libc::mkdir(c_prefix.as_ptr(), 0o755) };
+    }
+    host_stage("media_view_mkdir_ok");
+    if !move_detached_mount(tree_fd.get(), c_target) {
+        host_stage("media_view_move_failed");
+        return false;
+    }
+    if !make_mount_private(c_target) {
+        host_stage("media_view_private_failed");
+        return false;
+    }
+    host_stage("media_view_moved");
+
+    // 5. 复核：与接入复核同理，系统调用成功不代表视图真的可用。
+    if !media_view_probe_ok(c_probe) {
+        log::warn!(
+            "fuse host media view probe failed target={}",
+            c_probe.to_string_lossy()
+        );
+        host_stage("media_view_probe_failed");
+        return false;
+    }
+
+    // 6. 通知父进程，随后自行退出（协议与接入子进程一致）。
+    host_stage("media_view_sending_ready");
+    send_media_view_ready(ready_sock);
+    true
+}
+
+/// 向父进程发送视图绑定的就绪结果（协议与接入子进程一致）。
+fn send_media_view_ready(ready_sock: libc::c_int) -> bool {
+    let ready: i32 = 0;
+    // SAFETY: ready_sock 是本次绑定的有效端点，ready 是栈变量。
+    let sent = unsafe {
+        libc::send(
+            ready_sock,
+            &ready as *const i32 as *const libc::c_void,
+            std::mem::size_of::<i32>(),
+            0,
+        )
+    };
+    if sent != std::mem::size_of::<i32>() as isize {
+        log_errno("fuse host media view send ready failed");
+        return false;
+    }
+    true
+}
+
+/// 判断宿主命名空间内的媒体视图用户子树是否已绑定可用。
+fn media_view_probe_ok(c_target: &CStr) -> bool {
+    let target = c_target.to_string_lossy().to_string();
+    crate::platform::fs::is_directory(&paths::join(&target, "Android"))
+}
+
 /// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离（未附着到任何命名空间）的挂载。
 const OPEN_TREE_CLONE: libc::c_uint = 0x0000_0001;
 /// `move_mount(2)` 的 `MOVE_MOUNT_F_EMPTY_PATH`：源由 fd 指定（游离挂载没有路径）。

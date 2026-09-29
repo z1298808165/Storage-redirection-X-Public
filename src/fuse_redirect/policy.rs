@@ -113,6 +113,15 @@ pub(super) struct RedirectPolicy {
     // rename 会返回 ERANGE，导致依赖“写临时文件再改名”原子替换的应用安装或保存失败。
     // 私有目录本身不进 MediaStore 索引，直连 f2fs 既能绕开该缺陷又不损失系统语义。
     pub(super) private_real_root: PathBuf,
+    /// 宿主命名空间内 MediaProvider FUSE 视图根（`tmp/fuse_host_media/<user>`）。
+    ///
+    /// 自有 `Android/media/<pkg>/` 下的 sqlite 数据库与边车文件经该视图读写，与其它
+    /// 调用方（未重定向应用、MediaProvider 自身）共享同一份内核 inode 缓存：SQLite 的
+    /// WAL 依赖跨进程共享的 `-shm` mmap 与文件锁，宿主直连 f2fs 与 MediaProvider FUSE
+    /// 的内核缓存是两个互不通知的层，数据库文件删除重建后两层会各持一个代际，读取
+    /// 撕裂表现为 `SQLITE_CORRUPT`（真机实测：支付宝内 XRadiant 的 XRadiant.db）。
+    /// 为空表示宿主命名空间没有可用视图（scoped 会话、视图未绑定），保持直连行为。
+    pub(super) media_sqlite_real_root: PathBuf,
     pub(super) redirect_root: PathBuf,
     pub(super) rule_prefixes: Vec<RulePrefix>,
     pub(super) allowed_real_paths: Vec<String>,
@@ -317,6 +326,7 @@ impl RedirectPolicy {
             mount_rel,
             real_root,
             private_real_root: PathBuf::from(paths::data_media_user_root_for_user(user_id)),
+            media_sqlite_real_root: media_sqlite_view_root_for_user(user_id),
             redirect_root: PathBuf::from(redirect_root_string),
             rule_prefixes,
             allowed_real_paths,
@@ -580,7 +590,20 @@ impl RedirectPolicy {
     //
     // 分流只能放在这个唯一的物理拼接点上：real_backend_for_rel、backend_path_for_storage
     // 以及 readdir 的两处直接调用都汇聚到此，放在更上层会漏掉 readdir 一侧。
+    //
+    // 例外：自有 `Android/media/<pkg>/` 下的 sqlite 数据库与边车文件改走 MediaProvider
+    // FUSE 视图（media_sqlite_real_root）。这类文件存在"第二个视图协同方"——未重定向
+    // 的调用方（如 XRadiant 管理器）经 MediaProvider FUSE 访问同一物理文件，直连 f2fs
+    // 的写入对那层内核缓存不可见，数据库删除重建后两层各持一个代际，读取撕裂表现为
+    // `SQLITE_CORRUPT`。收窄到 sqlite 文件是为了不把 MediaProvider 对该目录下 rename
+    // 返回 ERANGE 的缺陷重新引入高频路径（sqlite 自身不做临时文件改名）。视图不可用
+    // （scoped 会话、宿主视图未绑定）时为空，自动回退直连行为。
     fn real_backend_root_for_storage_rel(&self, rel: &str) -> &PathBuf {
+        if is_own_media_sqlite_relative_path(rel, &self.package_name)
+            && !self.media_sqlite_real_root.as_os_str().is_empty()
+        {
+            return &self.media_sqlite_real_root;
+        }
         if is_android_private_storage_subtree_relative_path(rel) {
             &self.private_real_root
         } else {
@@ -608,6 +631,11 @@ impl RedirectPolicy {
         }
         [&self.real_root, &self.private_real_root]
             .iter()
+            .chain(
+                (!self.media_sqlite_real_root.as_os_str().is_empty())
+                    .then_some(&self.media_sqlite_real_root)
+                    .iter(),
+            )
             .any(|root| {
                 if rel.is_empty() {
                     path == root.as_path()
@@ -783,6 +811,21 @@ pub(super) fn real_backend_root_for_config(config: &FuseRedirectConfig, user_id:
 
 pub(super) fn real_storage_anchor_for_user(user_id: i32) -> String {
     paths::join(module_paths::REAL_STORAGE_TMP_DIR, &user_id.to_string())
+}
+
+/// 宿主命名空间内 MediaProvider FUSE 视图根；仅当视图真实可用（用户子树能枚举到
+/// Android 层，说明绑定已建立且不是空目录）时返回非空路径，否则返回空 `PathBuf`
+/// 表示保持直连 f2fs 的既有行为。
+///
+/// 探测 `Android` 子目录而不是目录本身：宿主命名空间里 `tmp/fuse_host_media/<user>`
+/// 在绑定建立前就是存在的空目录，只判目录存在会把未绑定误判为可用。
+fn media_sqlite_view_root_for_user(user_id: i32) -> PathBuf {
+    let root = PathBuf::from(module_paths::FUSE_HOST_MEDIA_VIEW_DIR).join(user_id.to_string());
+    if fs::is_directory(&paths::join(&root.to_string_lossy(), "Android")) {
+        root
+    } else {
+        PathBuf::new()
+    }
 }
 
 fn build_monitor_timestamp() -> String {
@@ -1144,5 +1187,29 @@ fn is_android_private_storage_subtree_relative_path(relative: &str) -> bool {
     match parts.next() {
         None => true,
         Some(second) => matches!(second, "data" | "media" | "obb"),
+    }
+}
+
+/// 判断相对路径是否是会话自有 `Android/media/<pkg>/` 下的 sqlite 数据库或边车文件。
+///
+/// 只有这类文件需要经 MediaProvider FUSE 视图访问：SQLite 的 WAL 依赖跨进程共享的
+/// `-shm` mmap 与文件锁，宿主直连 f2fs 与其它调用方经 MediaProvider FUSE 的内核缓存
+/// 是两个互不通知的缓存层，数据库文件删除重建后两层各持一个代际，读取撕裂表现为
+/// `SQLITE_CORRUPT`。大小写判定与 `is_android_private_storage_subtree_relative_path`
+/// 保持同一约定（rel 中目录段为规范小写/大小写）。
+fn is_own_media_sqlite_relative_path(relative: &str, package_name: &str) -> bool {
+    if package_name.is_empty() || !paths::is_sqlite_database_or_sidecar_path(relative) {
+        return false;
+    }
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    if parts.next() != Some("Android") {
+        return false;
+    }
+    if parts.next() != Some("media") {
+        return false;
+    }
+    match parts.next() {
+        Some(package) => paths::eq_ignore_case(package, package_name),
+        None => false,
     }
 }
