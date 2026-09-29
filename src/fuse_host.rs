@@ -472,6 +472,11 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
     if std::path::Path::new("/data/adb/modules/storage.redirect.x/.media_view_disabled").exists() {
         return false;
     }
+    // 失败退避：视图在某些环境持续不可用（如模拟器镜像），刚失败过就跳过本轮注册，
+    // 避免每次应用注册都阻塞整个超时周期（挂载 worker 是 fork 的，跨 worker 用文件传递）。
+    if media_view_backoff_active() {
+        return false;
+    }
     let Some(host) = get_fuse_host() else {
         return false;
     };
@@ -563,6 +568,7 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
                 crate::fuse_redirect::config::host_ready_stage(code),
                 reason
             );
+            mark_media_view_failure();
             false
         }
         None => {
@@ -573,6 +579,7 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
                 HOST_ATTACH_TIMEOUT_SEC,
                 reason
             );
+            mark_media_view_failure();
             false
         }
     };
@@ -580,6 +587,28 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
         log_host_stage_trace();
     }
     ok
+}
+
+/// 媒体视图绑定失败退避：10 分钟内不重复尝试。
+const MEDIA_VIEW_BACKOFF_MS: i64 = 10 * 60 * 1000;
+
+fn media_view_backoff_active() -> bool {
+    let Ok(text) = std::fs::read_to_string(crate::platform::module_paths::MEDIA_VIEW_BACKOFF_FILE)
+    else {
+        return false;
+    };
+    let Ok(last_failure_ms) = text.trim().parse::<i64>() else {
+        return false;
+    };
+    let elapsed = paths::monotonic_ms().saturating_sub(last_failure_ms);
+    (0..=MEDIA_VIEW_BACKOFF_MS).contains(&elapsed)
+}
+
+fn mark_media_view_failure() {
+    let _ = std::fs::write(
+        crate::platform::module_paths::MEDIA_VIEW_BACKOFF_FILE,
+        paths::monotonic_ms().to_string(),
+    );
 }
 
 /// 媒体视图绑定子进程入口：当前命名空间克隆 MediaProvider FUSE 挂载 → 宿主命名空间

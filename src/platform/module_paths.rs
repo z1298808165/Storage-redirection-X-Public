@@ -8,6 +8,10 @@ pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp
 /// inode 缓存，避免两层缓存各自持有不同代际导致 `SQLITE_CORRUPT`。
 pub const FUSE_HOST_MEDIA_VIEW_DIR: &str =
     "/data/adb/modules/storage.redirect.x/tmp/fuse_host_media";
+/// 媒体视图绑定失败的退避标记：记录上次失败的 monotonic 毫秒。视图在某些环境
+/// （如 x86_64 模拟器镜像）持续不可用，没有退避会让每次应用注册都阻塞整个超时周期。
+pub const MEDIA_VIEW_BACKOFF_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/logs/.media_view_backoff";
 // quality-allow(lint-suppression): 该常量保留给外部挂载状态检查与兼容脚本使用。
 #[allow(dead_code)]
 pub const REAL_STORAGE_TMP_PREFIX: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
