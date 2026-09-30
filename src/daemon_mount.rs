@@ -1246,14 +1246,32 @@ fn recv_result(sock: c_int, result: &mut i32) -> isize {
 }
 
 fn send_mount_result(sock: c_int, result: i32) -> bool {
-    unsafe {
+    let expected_size = std::mem::size_of::<i32>() as isize;
+    // SAFETY: send 只接收整型参数与栈上缓冲指针，不涉及借用指针。
+    let sent = unsafe {
         send(
             sock,
             &result as *const _ as *const c_void,
             std::mem::size_of::<i32>(),
             0,
-        ) == std::mem::size_of::<i32>() as isize
+        )
+    };
+    if sent != expected_size {
+        if sent < 0 {
+            let errno = last_errno();
+            log::warn!(
+                "daemon send result failed sock={} errno={} {}",
+                sock,
+                errno,
+                errno_text(errno)
+            );
+        } else {
+            log::warn!("daemon send result short sock={} sent={}", sock, sent);
+        }
+        return false;
     }
+    log::debug!("daemon send result sock={} ret={}", sock, result);
+    true
 }
 
 /// 上一轮挂载的清理结果。
@@ -1907,15 +1925,6 @@ fn state_file_path(request: &MountRequest) -> String {
     )
 }
 
-/// 登记本次挂载的身份，供后续恢复流程判断挂载归属。
-///
-/// 必须在挂载成功之后、且在本进程已经 `setns` 到目标命名空间的前提下调用：`mount_id`
-/// 只有在挂载真正生效后才会出现在挂载表里，而命名空间身份取自本进程所在的 ns，正是
-/// 本次挂载生效的那个命名空间。
-///
-/// 读不到任何归属明确的挂载时不写入旧记录：宁可让账本暂时没有挂载明细（后续摘除只受
-/// 挂载源约束），也不要留下一个与实际挂载不匹配的 `mount_id`——那会让下一轮恢复把本模块
-/// 自己的挂载误判成"已被新会话接管"而拒绝清理。
 /// 登记本次挂载的账本。
 ///
 /// 登记纪律（何时写、何时清空、读不到归属时怎么办）由 [`crate::mount_ledger::record_mount_identity`]

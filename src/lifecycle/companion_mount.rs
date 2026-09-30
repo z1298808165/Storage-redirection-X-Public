@@ -881,10 +881,8 @@ fn start_fuse_service_for_root(
     //
     // `real_root_override` 必须丢弃（传 None）：它是应用命名空间专属的锚点别名，只存在于
     // 应用 namespace；宿主子进程在自己的私有命名空间里看到的是空目录，照搬覆盖会把真实根
-    // 读成空，仅映射模式的应用会整个丢失公共存储视图。
-    // `real_root_override` 必须丢弃：它是应用命名空间专属的锚点别名，只存在于应用 namespace；
-    // 宿主子进程在自己的私有命名空间里看到的是空目录，照搬覆盖会把真实根读成空。companion
-    // 不做登记（daemon 预登记），因此这里不构造策略配置。
+    // 读成空，仅映射模式的应用会整个丢失公共存储视图。companion 不做登记（daemon 预登记），
+    // 因此这里不构造策略配置。
     let view = crate::fuse_host::read_host_session_view();
     let registered = view
         .as_ref()

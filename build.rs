@@ -261,7 +261,11 @@ fn ensure_libcxx_prefix() -> Result<PathBuf, String> {
     }
     std::fs::create_dir_all(&root)
         .map_err(|e| format!("创建缓存目录 {} 失败: {e}", root.display()))?;
-    if !aar_path.exists() || verify_file_sha256(&aar_path)? != LIBCXX_AAR_SHA256_HEX {
+    // 两处哈希比较统一忽略大小写：sha256 十六进制大小写等价，避免缓存文件
+    // 因校验工具输出大小写不同而被误判失配、多下载一次。
+    if !aar_path.exists()
+        || !verify_file_sha256(&aar_path)?.eq_ignore_ascii_case(LIBCXX_AAR_SHA256_HEX)
+    {
         download_libcxx_aar(&aar_path)?;
         let actual = verify_file_sha256(&aar_path)?;
         if !actual.eq_ignore_ascii_case(LIBCXX_AAR_SHA256_HEX) {
