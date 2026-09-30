@@ -144,8 +144,15 @@ class LoggingArchitectureTest(unittest.TestCase):
         daemon = read("src/daemon_mount.rs")
         companion = read("src/lifecycle/companion_mount.rs")
         self.assertIn("expand_namespace_fallback_rules", config)
-        self.assertIn("expand_namespace_fallback_rules", daemon)
-        self.assertIn("expand_namespace_fallback_rules", companion)
+        # 回退降级已下沉到 fuse_session 共享模块（经 MountRequestFields 泛型），
+        # 通配展开断言锚定共享实现；两条挂载路径只断言走共享入口。
+        session = read("src/fuse_session.rs")
+        self.assertIn("expand_namespace_fallback_rules", session)
+        for source, path in ((daemon, "daemon"), (companion, "companion")):
+            self.assertIn(
+                "crate::fuse_session::apply_mount_namespace_fallback(", source, path
+            )
+            self.assertNotIn("fn apply_mount_namespace_fallback(", source, path)
         # 后端结论串只出现在单一实现里；两条挂载路径通过 needs_namespace_fallback 消费它。
         shared = read("src/fuse_redirect/scoped_mount.rs")
         self.assertIn("scoped_mount_failed_namespace_fallback", shared)

@@ -119,6 +119,64 @@ pub(crate) fn start_scoped_fuse_services(
     Some(states)
 }
 
+/// scoped FUSE 不可用时的 namespace 回退降级。
+///
+/// 降级契约：主方案已装好的 bind/overlay 必须先卸载（降级路径会对同一批目标重新
+/// 执行挂载，保留旧挂载会叠加导致卸载顺序错乱）；只读路径优先保留文件监视能力，
+/// 让 MediaProvider/FUSE 仍可生成拒绝记录，锚点覆盖不了时才用强制只读绑定。
+/// 配置热重载触发的降级会走到这里，因此回滚一步不能省。
+pub(crate) fn apply_mount_namespace_fallback(
+    planner: &mut crate::mount::MountPlanner,
+    request: &(impl MountRequestFields + ?Sized),
+) -> bool {
+    let detached = planner.unmount_recorded_targets();
+    if detached > 0 {
+        log::info!(
+            "hybrid fuse namespace fallback rollback count={} pid={} pkg={}",
+            detached,
+            request.pid(),
+            request.package_name()
+        );
+    }
+    let allowed_real_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid(),
+        request.allowed_real_paths(),
+    );
+    let read_only_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
+        request.uid(),
+        request.read_only_paths(),
+    );
+    let can_record_fallback = request.is_file_monitor_enabled()
+        && planner.can_record_read_only_mapping_denials(
+            request.path_mappings(),
+            &read_only_paths,
+            request.excluded_real_paths(),
+        );
+    planner.set_file_monitor_enabled(can_record_fallback);
+    log::info!(
+        "hybrid fuse namespace fallback file_monitor={} pid={} pkg={}",
+        can_record_fallback,
+        request.pid(),
+        request.package_name()
+    );
+    if request.is_mapping_mode_only() {
+        planner.apply_path_mappings_only(
+            request.path_mappings(),
+            request.sandboxed_paths(),
+            &read_only_paths,
+            &[],
+        )
+    } else {
+        planner.apply_sdcard_redirect(
+            &allowed_real_paths,
+            request.excluded_real_paths(),
+            &read_only_paths,
+            request.path_mappings(),
+            &[],
+        )
+    }
+}
+
 /// 把 waitpid 的状态位解码为可读文本（exit=/stop sig=/sig= core=）。
 pub(crate) fn decode_wait_status(status: c_int) -> String {
     let signal = status & 0x7f;

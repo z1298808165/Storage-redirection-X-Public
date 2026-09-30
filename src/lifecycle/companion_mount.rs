@@ -504,7 +504,7 @@ fn handle_child_process(
                 request.pid,
                 request.package_name
             );
-            if !apply_mount_namespace_fallback(&mut mount_mgr, request) {
+            if !crate::fuse_session::apply_mount_namespace_fallback(&mut mount_mgr, request) {
                 log::warn!(
                     "hybrid fuse namespace fallback failed pid={} pkg={}",
                     request.pid,
@@ -586,63 +586,6 @@ fn handle_child_process(
     }
     unsafe { close(sock) };
     is_success
-}
-
-fn apply_mount_namespace_fallback(
-    mount_mgr: &mut MountPlanner,
-    request: &CompanionMountRequest,
-) -> bool {
-    // Scoped FUSE 是优先采用的可记录只读路径。当已挂载的真实存储 FUSE 锚点
-    // 能覆盖只读映射时，保留文件监视，使 MediaProvider/FUSE 仍可生成拒绝记录。
-    // 否则使用强制只读绑定，避免写入被静默放行。
-    // 主方案已经装好的 bind/overlay 必须先卸载。降级路径会对同一批目标重新执行挂载，
-    // 若保留旧挂载会在同一目标上再叠一层，导致挂载栈重复、卸载顺序错乱。
-    let detached = mount_mgr.unmount_recorded_targets();
-    if detached > 0 {
-        log::info!(
-            "hybrid fuse namespace fallback rollback count={} pid={} pkg={}",
-            detached,
-            request.pid,
-            request.package_name
-        );
-    }
-    let allowed_real_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
-        request.uid,
-        &request.allowed_real_paths,
-    );
-    let read_only_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
-        request.uid,
-        &request.read_only_paths,
-    );
-    let can_record_fallback = request.is_file_monitor_enabled
-        && mount_mgr.can_record_read_only_mapping_denials(
-            &request.path_mappings,
-            &read_only_paths,
-            &request.excluded_real_paths,
-        );
-    mount_mgr.set_file_monitor_enabled(can_record_fallback);
-    log::info!(
-        "hybrid fuse namespace fallback file_monitor={} pid={} pkg={}",
-        can_record_fallback,
-        request.pid,
-        request.package_name
-    );
-    if request.is_mapping_mode_only {
-        mount_mgr.apply_path_mappings_only(
-            &request.path_mappings,
-            &request.sandboxed_paths,
-            &read_only_paths,
-            &[],
-        )
-    } else {
-        mount_mgr.apply_sdcard_redirect(
-            &allowed_real_paths,
-            &request.excluded_real_paths,
-            &read_only_paths,
-            &request.path_mappings,
-            &[],
-        )
-    }
 }
 
 /// 按根启动 scoped FUSE 服务；单根失败只丢弃该根。
