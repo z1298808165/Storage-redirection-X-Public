@@ -87,16 +87,25 @@ impl RuntimeFlow {
         });
     }
 
-    pub fn pre_app_specialize(&mut self, args: *mut abi::AppSpecializeArgs) {
-        let mut perf_stages = SpecializePerfStages::new(monotonic_ms());
+    /// 解析 specialize 身份并完成进程级初始化：登记 MediaProvider 进入标记、复位
+    /// 状态位、读出应用数据目录、按需保留 writer 配置目录 FD、解析包名别名。
+    ///
+    /// 这些动作必须先于任何提前返回分支（fast bypass 等）：MediaProvider 的进入标记
+    /// 用于区分「从未走到 install」与「走了但失败」，app_data_dir 是 post 阶段清理与
+    /// 挂载请求的输入；身份不可解析时返回 None，调用方直接返回。
+    fn resolve_specialize_identity(
+        &mut self,
+        args: *mut abi::AppSpecializeArgs,
+    ) -> Option<ProcessIdentity> {
         if args.is_null() {
-            return;
+            return None;
         }
 
+        // SAFETY: args 由 Zygisk 框架在 specialize 前传入，非空已由上一行确认。
         let args = unsafe { &mut *args };
         let Some(process) = ProcessIdentity::from_args(self.env, args) else {
             log::warn!("nice_name empty");
-            return;
+            return None;
         };
         self.package_name = process.package_name.clone();
         self.app_uid = process.uid;
@@ -163,6 +172,56 @@ impl RuntimeFlow {
             self.package_name = config_package;
         }
 
+        Some(process)
+    }
+
+    /// 初始化配置中心并求出本应用的重定向/监视决策，按 perf 阶段记录耗时。
+    ///
+    /// `needs_writer_config_dir` 为真时先打开 writer 配置目录 FD 并设为共享 UID
+    /// 配置源；返回外层 None 表示配置初始化失败（已清理 FD，调用方直接返回），
+    /// 内层 Some/None 表示是否打开了 writer 配置目录。
+    fn init_config_and_decisions(
+        &mut self,
+        needs_writer_config_dir: bool,
+        perf_stages: &mut SpecializePerfStages,
+    ) -> Option<Option<String>> {
+        let config = SettingsHub::instance();
+        let writer_config_dir = if needs_writer_config_dir {
+            self.open_module_dir_fd_for_writer();
+            let config_dir = self.writer_config_dir();
+            policy::set_shared_uid_config_dir(&config_dir);
+            Some(config_dir)
+        } else {
+            None
+        };
+        let config_init_started_ms = monotonic_ms();
+        if !config.init(writer_config_dir.as_deref()) {
+            self.close_module_dir_fd();
+            log::warn!("config init failed");
+            return None;
+        }
+        perf_stages.config_init_ms = monotonic_ms().saturating_sub(config_init_started_ms);
+
+        let config_reload_started_ms = monotonic_ms();
+        config.reload_if_changed();
+        perf_stages.config_reload_ms = monotonic_ms().saturating_sub(config_reload_started_ms);
+        let shared_uid_started_ms = monotonic_ms();
+        policy::refresh_shared_uid_cache();
+        perf_stages.shared_uid_ms = monotonic_ms().saturating_sub(shared_uid_started_ms);
+
+        let decision_started_ms = monotonic_ms();
+        self.should_redirect = config.should_redirect(&self.package_name, self.app_uid);
+        self.should_monitor = config.should_monitor(&self.package_name, self.app_uid);
+        perf_stages.decision_ms = monotonic_ms().saturating_sub(decision_started_ms);
+        Some(writer_config_dir)
+    }
+
+    pub fn pre_app_specialize(&mut self, args: *mut abi::AppSpecializeArgs) {
+        let mut perf_stages = SpecializePerfStages::new(monotonic_ms());
+        let Some(process) = self.resolve_specialize_identity(args) else {
+            return;
+        };
+
         let is_system_writer = policy::is_system_writer_package(&self.package_name);
         let is_shared_uid_writer = policy::is_shared_uid_process(self.app_uid);
         let is_monitor_bridge = policy::is_file_monitor_bridge_package(&self.package_name);
@@ -200,34 +259,13 @@ impl RuntimeFlow {
             return;
         }
 
-        let config = SettingsHub::instance();
-        let writer_config_dir = if is_system_writer || is_shared_uid_writer || is_monitor_bridge {
-            self.open_module_dir_fd_for_writer();
-            let config_dir = self.writer_config_dir();
-            policy::set_shared_uid_config_dir(&config_dir);
-            Some(config_dir)
-        } else {
-            None
-        };
-        let config_init_started_ms = monotonic_ms();
-        if !config.init(writer_config_dir.as_deref()) {
-            self.close_module_dir_fd();
-            log::warn!("config init failed");
+        let Some(writer_config_dir) = self.init_config_and_decisions(
+            is_system_writer || is_shared_uid_writer || is_monitor_bridge,
+            &mut perf_stages,
+        ) else {
             return;
-        }
-        perf_stages.config_init_ms = monotonic_ms().saturating_sub(config_init_started_ms);
-
-        let config_reload_started_ms = monotonic_ms();
-        config.reload_if_changed();
-        perf_stages.config_reload_ms = monotonic_ms().saturating_sub(config_reload_started_ms);
-        let shared_uid_started_ms = monotonic_ms();
-        policy::refresh_shared_uid_cache();
-        perf_stages.shared_uid_ms = monotonic_ms().saturating_sub(shared_uid_started_ms);
-
-        let decision_started_ms = monotonic_ms();
-        self.should_redirect = config.should_redirect(&self.package_name, self.app_uid);
-        self.should_monitor = config.should_monitor(&self.package_name, self.app_uid);
-        perf_stages.decision_ms = monotonic_ms().saturating_sub(decision_started_ms);
+        };
+        let config = SettingsHub::instance();
 
         // 隔离进程无 FUSE 挂载和存储权限，跳过重定向
         if should_skip_isolated_uid(self.app_uid) {

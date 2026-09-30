@@ -433,18 +433,18 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
         &normalized_path,
         &mut caller_signal.effective_caller_uid,
     );
-    let has_anonymous_caller = !caller_signal.has_external_caller_signal;
-    let has_anonymous_private_owner_hint = is_write_operation
-        && has_anonymous_caller
-        && resolve_android_private_path_owner(&normalized_path).is_some();
-    let has_anonymous_mapping_request_owner_hint = has_anonymous_caller
-        && has_system_writer_mapping_request_owner_hint(user_id, &normalized_path);
-    let has_anonymous_redirect_owner_hint = has_anonymous_caller
-        && (has_anonymous_private_owner_hint
-            || has_anonymous_mapping_request_owner_hint
-            || (is_write_operation
-                && redirect_policy::is_media_provider_package(&package_name)
-                && has_system_writer_recent_public_caller_hint(user_id, &normalized_path)));
+    let hints = resolve_anonymous_owner_hints(
+        &package_name,
+        &normalized_path,
+        user_id,
+        is_write_operation,
+        caller_signal.has_external_caller_signal,
+    );
+    let AnonymousOwnerHints {
+        has_anonymous_mapping_request_owner_hint,
+        has_anonymous_redirect_owner_hint,
+        ..
+    } = hints;
     if !caller_signal.has_external_caller_signal
         && !has_anonymous_mapping_request_owner_hint
         && let Some(self_rule) = resolve_system_writer_self_explicit_rule(
@@ -617,6 +617,39 @@ fn process_system_writer_redirect(request: SystemWriterRedirectRequest<'_>) -> R
         perf_started_ms,
         is_write_operation,
     })
+}
+
+/// 匿名归属提示的汇总：无外部调用方信号时，按私有目录属主、映射请求属主与
+/// 「最近公共调用方」三条线索推断归属，供 self-rule 与 MediaProvider 自放行
+/// 判据使用——匿名场景下这三条线索是防止误拒/误放的唯一依据。
+struct AnonymousOwnerHints {
+    has_anonymous_mapping_request_owner_hint: bool,
+    has_anonymous_redirect_owner_hint: bool,
+}
+
+fn resolve_anonymous_owner_hints(
+    package_name: &str,
+    normalized_path: &str,
+    user_id: i32,
+    is_write_operation: bool,
+    has_external_caller_signal: bool,
+) -> AnonymousOwnerHints {
+    let has_anonymous_caller = !has_external_caller_signal;
+    let has_anonymous_private_owner_hint = is_write_operation
+        && has_anonymous_caller
+        && resolve_android_private_path_owner(normalized_path).is_some();
+    let has_anonymous_mapping_request_owner_hint = has_anonymous_caller
+        && has_system_writer_mapping_request_owner_hint(user_id, normalized_path);
+    let has_anonymous_redirect_owner_hint = has_anonymous_caller
+        && (has_anonymous_private_owner_hint
+            || has_anonymous_mapping_request_owner_hint
+            || (is_write_operation
+                && redirect_policy::is_media_provider_package(package_name)
+                && has_system_writer_recent_public_caller_hint(user_id, normalized_path)));
+    AnonymousOwnerHints {
+        has_anonymous_mapping_request_owner_hint,
+        has_anonymous_redirect_owner_hint,
+    }
 }
 
 pub fn record_redirect_hit(hub: &InterceptHub, op_name: &str, from_path: &str, to_path: &str) {

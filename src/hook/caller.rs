@@ -77,91 +77,27 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
         hub.with_package_name(should_reuse_recent_current_caller_for_process);
 
     if !has_caller_signal(hub) {
-        if try_reuse_recent_external_signal_for_system_writer(
+        resolve_missing_caller_signal(
             hub,
             &previous_package,
             previous_uid,
             previous_age_ms,
             previous_from_external_signal,
-            "signal_skip",
-        ) {
-            return;
-        }
-        if can_reuse_recent_caller
-            && try_reuse_recent_current_caller(
-                hub,
-                &previous_package,
-                previous_uid,
-                previous_age_ms,
-                "signal_skip",
-            )
-        {
-            return;
-        }
-        let count = CALLER_SIGNAL_SKIP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if should_log_sample(count) {
-            log::debug!(
-                "caller signal skip proc={} n={}",
-                hub.get_package_name(),
-                count
-            );
-        }
-        hub.clear_current_caller();
+            can_reuse_recent_caller,
+        );
         return;
     }
 
-    let binder_uid = resolve_caller_uid_by_binder();
-    let mut caller_uid = binder_uid;
-    let mut caller_source = "binder_uid";
-    let mut fuse_uid = -1;
-    let mut fuse_age_ms = -1;
-
-    if caller_uid < 0 {
-        fuse_uid = hub.get_fuse_caller_uid();
-        fuse_age_ms = context::get_fuse_caller_uid_age_ms();
-        let self_uid = unsafe { getuid() } as i32;
-        if fuse_uid >= ANDROID_APP_UID_START && (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age_ms)
-        {
-            if fuse_uid != self_uid {
-                caller_uid = fuse_uid;
-                caller_source = "fuse_uid";
-            } else {
-                // 共享 UID：UID 相同但 PID 不同说明来自同组的另一个进程
-                let fuse_pid = context::get_fuse_caller_pid();
-                let self_pid = unsafe { getpid() } as i32;
-                if fuse_pid > 0 && fuse_pid != self_pid {
-                    let pkg = resolve_caller_package_by_pid(fuse_pid);
-                    if !pkg.is_empty() {
-                        context::set_current_caller_from_external_signal(&pkg, fuse_uid);
-                        AuditTrail::instance().update_caller_package(&pkg);
-                        let count = CALLER_FALLBACK_HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                        if should_log_sample(count) {
-                            log::debug!(
-                                "caller fallback src=fuse_pid pkg={} uid={} fuse_pid={} n={}",
-                                pkg,
-                                fuse_uid,
-                                fuse_pid,
-                                count
-                            );
-                        }
-                        context::clear_fuse_caller_uid();
-                        return;
-                    }
-                }
-            }
-        } else if fuse_uid >= ANDROID_APP_UID_START && fuse_age_ms > FUSE_CALLER_MAX_AGE_MS {
-            let count = CALLER_FUSE_STALE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if should_log_sample(count) {
-                log::debug!(
-                    "caller skip stale fuse uid={} age_ms={} n={}",
-                    fuse_uid,
-                    fuse_age_ms,
-                    count
-                );
-            }
-        }
-        context::clear_fuse_caller_uid();
-    }
+    let Some(resolved) = resolve_caller_uid_with_fuse_fallback(hub) else {
+        return;
+    };
+    let CallerUidResolution {
+        binder_uid,
+        fuse_uid,
+        fuse_age_ms,
+        mut caller_uid,
+        mut caller_source,
+    } = resolved;
 
     let mut package_name = String::new();
     if caller_uid >= ANDROID_APP_UID_START {
@@ -289,6 +225,127 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
         );
     }
     hub.clear_current_caller();
+}
+
+/// caller UID 解析的中间产物：后续诊断日志要原样输出各来源的 UID 与年龄。
+struct CallerUidResolution {
+    binder_uid: i32,
+    fuse_uid: i32,
+    fuse_age_ms: i64,
+    caller_uid: i32,
+    caller_source: &'static str,
+}
+
+/// 无调用方信号路径：优先复用最近的代写外部信号或当前调用方；两者都不适用时
+/// 采样记一条 skip 并清空当前调用方。本函数执行完毕后调用方必须直接返回。
+fn resolve_missing_caller_signal(
+    hub: &InterceptHub,
+    previous_package: &str,
+    previous_uid: i32,
+    previous_age_ms: i64,
+    previous_from_external_signal: bool,
+    can_reuse_recent_caller: bool,
+) {
+    if try_reuse_recent_external_signal_for_system_writer(
+        hub,
+        previous_package,
+        previous_uid,
+        previous_age_ms,
+        previous_from_external_signal,
+        "signal_skip",
+    ) {
+        return;
+    }
+    if can_reuse_recent_caller
+        && try_reuse_recent_current_caller(
+            hub,
+            previous_package,
+            previous_uid,
+            previous_age_ms,
+            "signal_skip",
+        )
+    {
+        return;
+    }
+    let count = CALLER_SIGNAL_SKIP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if should_log_sample(count) {
+        log::debug!(
+            "caller signal skip proc={} n={}",
+            hub.get_package_name(),
+            count
+        );
+    }
+    hub.clear_current_caller();
+}
+
+/// 解析调用方 UID：优先 Binder UID；拿不到时用 FUSE 附加的调用方 UID 兜底。
+///
+/// 共享 UID 场景（FUSE UID 与自身相同）按 fuse_pid 归因：此时外部信号与审计
+/// 线索已在函数内更新，返回 None 让调用方直接返回。返回值同时携带各来源的
+/// 原始 UID 与年龄，供后续「unresolved」诊断日志完整输出归因链。
+fn resolve_caller_uid_with_fuse_fallback(hub: &InterceptHub) -> Option<CallerUidResolution> {
+    let binder_uid = resolve_caller_uid_by_binder();
+    let mut caller_uid = binder_uid;
+    let mut caller_source = "binder_uid";
+    let mut fuse_uid = -1;
+    let mut fuse_age_ms = -1;
+
+    if caller_uid < 0 {
+        fuse_uid = hub.get_fuse_caller_uid();
+        fuse_age_ms = context::get_fuse_caller_uid_age_ms();
+        // SAFETY: getuid 只返回调用进程的真实 UID，无指针参数与副作用。
+        let self_uid = unsafe { getuid() } as i32;
+        if fuse_uid >= ANDROID_APP_UID_START && (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age_ms)
+        {
+            if fuse_uid != self_uid {
+                caller_uid = fuse_uid;
+                caller_source = "fuse_uid";
+            } else {
+                // 共享 UID：UID 相同但 PID 不同说明来自同组的另一个进程
+                let fuse_pid = context::get_fuse_caller_pid();
+                // SAFETY: getpid 只返回调用进程的 PID，无指针参数与副作用。
+                let self_pid = unsafe { getpid() } as i32;
+                if fuse_pid > 0 && fuse_pid != self_pid {
+                    let pkg = resolve_caller_package_by_pid(fuse_pid);
+                    if !pkg.is_empty() {
+                        context::set_current_caller_from_external_signal(&pkg, fuse_uid);
+                        AuditTrail::instance().update_caller_package(&pkg);
+                        let count = CALLER_FALLBACK_HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        if should_log_sample(count) {
+                            log::debug!(
+                                "caller fallback src=fuse_pid pkg={} uid={} fuse_pid={} n={}",
+                                pkg,
+                                fuse_uid,
+                                fuse_pid,
+                                count
+                            );
+                        }
+                        context::clear_fuse_caller_uid();
+                        return None;
+                    }
+                }
+            }
+        } else if fuse_uid >= ANDROID_APP_UID_START && fuse_age_ms > FUSE_CALLER_MAX_AGE_MS {
+            let count = CALLER_FUSE_STALE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if should_log_sample(count) {
+                log::debug!(
+                    "caller skip stale fuse uid={} age_ms={} n={}",
+                    fuse_uid,
+                    fuse_age_ms,
+                    count
+                );
+            }
+        }
+        context::clear_fuse_caller_uid();
+    }
+
+    Some(CallerUidResolution {
+        binder_uid,
+        fuse_uid,
+        fuse_age_ms,
+        caller_uid,
+        caller_source,
+    })
 }
 
 fn should_preserve_unresolved_external_uid(package_name: &str, caller_uid: i32) -> bool {

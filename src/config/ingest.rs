@@ -281,181 +281,7 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
         let Some(user_obj) = user_value.as_object() else {
             continue;
         };
-
-        let mut user_profile = UserProfile {
-            is_enabled: true,
-            is_mapping_mode_only: false,
-            allowed_real_paths: Vec::new(),
-            excluded_real_paths: Vec::new(),
-            sandboxed_paths: Vec::new(),
-            read_only_paths: Vec::new(),
-            path_mappings: Vec::new(),
-        };
-
-        if let Some(enabled) = user_obj.get("enabled")
-            && let Some(flag) = enabled.as_bool()
-        {
-            user_profile.is_enabled = flag;
-        }
-
-        if let Some(mapping_mode_only) = user_obj.get("mapping_mode_only")
-            && let Some(flag) = mapping_mode_only.as_bool()
-        {
-            user_profile.is_mapping_mode_only = flag;
-        }
-
-        let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
-
-        if let Some(paths_value) = user_obj.get("allowed_real_paths")
-            && let Some(paths_list) = paths_value.as_array()
-        {
-            for item in paths_list {
-                let Some(raw) = item.as_str() else {
-                    continue;
-                };
-                let Some((is_excluded, resolved)) =
-                    resolve_allowed_path_rule_for_user(raw, &storage_root)
-                else {
-                    log::warn!(
-                        "skip allow rule (invalid, relative only): user={} path={}",
-                        user_id,
-                        raw
-                    );
-                    continue;
-                };
-                if resolved.is_empty() {
-                    continue;
-                }
-                if is_excluded {
-                    user_profile.excluded_real_paths.push(resolved);
-                } else {
-                    user_profile.allowed_real_paths.push(resolved);
-                }
-            }
-            normalize_paths(&mut user_profile.allowed_real_paths);
-            normalize_paths(&mut user_profile.excluded_real_paths);
-        }
-
-        if let Some(paths_value) = user_obj.get("excluded_real_paths")
-            && let Some(paths_list) = paths_value.as_array()
-        {
-            for item in paths_list {
-                let Some(raw) = item.as_str() else {
-                    continue;
-                };
-                let raw = raw.strip_prefix('!').unwrap_or(raw);
-                let resolved = resolve_allowed_path_for_user(raw, &storage_root);
-                if resolved.is_empty() {
-                    log::warn!(
-                        "skip excluded rule (invalid, relative only): user={} path={}",
-                        user_id,
-                        raw
-                    );
-                    continue;
-                }
-                user_profile.excluded_real_paths.push(resolved);
-            }
-            normalize_paths(&mut user_profile.excluded_real_paths);
-        }
-
-        parse_sandboxed_paths(
-            user_obj.get("sandboxed_paths"),
-            user_id,
-            &storage_root,
-            &mut user_profile.sandboxed_paths,
-        );
-        parse_read_only_paths(
-            user_obj.get("read_only_paths"),
-            user_id,
-            &storage_root,
-            &mut user_profile.read_only_paths,
-        );
-        remove_excluded_read_only_paths(
-            user_id,
-            &user_profile.excluded_real_paths,
-            &mut user_profile.read_only_paths,
-        );
-        if let Some(mappings_value) = user_obj.get("path_mappings") {
-            let mut index_by_current_path: HashMap<String, usize> = HashMap::new();
-            let mut upsert_mapping = |current_raw: &str, target_raw: &str| {
-                let resolved_current =
-                    resolve_mapping_request_path_for_user(current_raw, user_id, &storage_root);
-                if resolved_current.is_empty() {
-                    log::warn!(
-                        "skip map (current invalid): user={} path={}",
-                        user_id,
-                        current_raw
-                    );
-                    return;
-                }
-
-                let resolved_target =
-                    resolve_mapping_path_for_user(target_raw, user_id, &storage_root);
-                if resolved_target.is_empty() {
-                    log::warn!(
-                        "skip map (target invalid): user={} path={}",
-                        user_id,
-                        target_raw
-                    );
-                    return;
-                }
-                if paths::eq_ignore_case(&resolved_current, &resolved_target) {
-                    return;
-                }
-
-                let current_key = paths::match_key(&resolved_current);
-                if let Some(&idx) = index_by_current_path.get(&current_key) {
-                    if let Some(existing) = user_profile.path_mappings.get_mut(idx) {
-                        existing.final_path = resolved_target.clone();
-                    }
-                    log::warn!(
-                        "override map (current dup): user={} cur={}",
-                        user_id,
-                        resolved_current
-                    );
-                    return;
-                }
-
-                index_by_current_path.insert(current_key, user_profile.path_mappings.len());
-                user_profile
-                    .path_mappings
-                    .push(PathMapping::new(resolved_current, resolved_target));
-            };
-
-            if let Some(map) = mappings_value.as_object() {
-                for (current_key, target_value) in map {
-                    let Some(target_str) = target_value.as_str() else {
-                        continue;
-                    };
-                    upsert_mapping(current_key, target_str);
-                }
-            } else if let Some(list) = mappings_value.as_array() {
-                for item in list {
-                    let Some(obj) = item.as_object() else {
-                        continue;
-                    };
-                    let (Some(current_value), Some(target_value)) =
-                        (obj.get("request_path"), obj.get("final_path"))
-                    else {
-                        continue;
-                    };
-                    let (Some(current_str), Some(target_str)) =
-                        (current_value.as_str(), target_value.as_str())
-                    else {
-                        continue;
-                    };
-                    upsert_mapping(current_str, target_str);
-                }
-            } else {
-                log::warn!(
-                    "skip mappings (unsupported type): pkg={} user={}",
-                    package_name,
-                    user_id
-                );
-            }
-        }
-
-        user_profile.path_mappings = filter_valid_path_mapping_chains(user_profile.path_mappings);
+        let user_profile = parse_user_profile(package_name, user_id, user_obj);
         app_profile.user_profiles.insert(user_id, user_profile);
     }
 
@@ -477,6 +303,191 @@ pub fn parse_app_config(state: &mut SettingsState, package_name: &str, json_cont
         );
     }
     true
+}
+
+/// 解析单个用户的 profile：开关位、放行/排除/沙盒/只读列表与映射表。
+///
+/// 无效规则逐条告警并跳过，不让单条脏数据拖垮整个应用的配置加载。
+fn parse_user_profile(
+    package_name: &str,
+    user_id: i32,
+    user_obj: &serde_json::Map<String, Value>,
+) -> UserProfile {
+    let mut user_profile = UserProfile {
+        is_enabled: true,
+        is_mapping_mode_only: false,
+        allowed_real_paths: Vec::new(),
+        excluded_real_paths: Vec::new(),
+        sandboxed_paths: Vec::new(),
+        read_only_paths: Vec::new(),
+        path_mappings: Vec::new(),
+    };
+
+    if let Some(enabled) = user_obj.get("enabled")
+        && let Some(flag) = enabled.as_bool()
+    {
+        user_profile.is_enabled = flag;
+    }
+
+    if let Some(mapping_mode_only) = user_obj.get("mapping_mode_only")
+        && let Some(flag) = mapping_mode_only.as_bool()
+    {
+        user_profile.is_mapping_mode_only = flag;
+    }
+
+    let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+
+    if let Some(paths_value) = user_obj.get("allowed_real_paths")
+        && let Some(paths_list) = paths_value.as_array()
+    {
+        for item in paths_list {
+            let Some(raw) = item.as_str() else {
+                continue;
+            };
+            let Some((is_excluded, resolved)) =
+                resolve_allowed_path_rule_for_user(raw, &storage_root)
+            else {
+                log::warn!(
+                    "skip allow rule (invalid, relative only): user={} path={}",
+                    user_id,
+                    raw
+                );
+                continue;
+            };
+            if resolved.is_empty() {
+                continue;
+            }
+            if is_excluded {
+                user_profile.excluded_real_paths.push(resolved);
+            } else {
+                user_profile.allowed_real_paths.push(resolved);
+            }
+        }
+        normalize_paths(&mut user_profile.allowed_real_paths);
+        normalize_paths(&mut user_profile.excluded_real_paths);
+    }
+
+    if let Some(paths_value) = user_obj.get("excluded_real_paths")
+        && let Some(paths_list) = paths_value.as_array()
+    {
+        for item in paths_list {
+            let Some(raw) = item.as_str() else {
+                continue;
+            };
+            let raw = raw.strip_prefix('!').unwrap_or(raw);
+            let resolved = resolve_allowed_path_for_user(raw, &storage_root);
+            if resolved.is_empty() {
+                log::warn!(
+                    "skip excluded rule (invalid, relative only): user={} path={}",
+                    user_id,
+                    raw
+                );
+                continue;
+            }
+            user_profile.excluded_real_paths.push(resolved);
+        }
+        normalize_paths(&mut user_profile.excluded_real_paths);
+    }
+
+    parse_sandboxed_paths(
+        user_obj.get("sandboxed_paths"),
+        user_id,
+        &storage_root,
+        &mut user_profile.sandboxed_paths,
+    );
+    parse_read_only_paths(
+        user_obj.get("read_only_paths"),
+        user_id,
+        &storage_root,
+        &mut user_profile.read_only_paths,
+    );
+    remove_excluded_read_only_paths(
+        user_id,
+        &user_profile.excluded_real_paths,
+        &mut user_profile.read_only_paths,
+    );
+    if let Some(mappings_value) = user_obj.get("path_mappings") {
+        let mut index_by_current_path: HashMap<String, usize> = HashMap::new();
+        let mut upsert_mapping = |current_raw: &str, target_raw: &str| {
+            let resolved_current =
+                resolve_mapping_request_path_for_user(current_raw, user_id, &storage_root);
+            if resolved_current.is_empty() {
+                log::warn!(
+                    "skip map (current invalid): user={} path={}",
+                    user_id,
+                    current_raw
+                );
+                return;
+            }
+
+            let resolved_target = resolve_mapping_path_for_user(target_raw, user_id, &storage_root);
+            if resolved_target.is_empty() {
+                log::warn!(
+                    "skip map (target invalid): user={} path={}",
+                    user_id,
+                    target_raw
+                );
+                return;
+            }
+            if paths::eq_ignore_case(&resolved_current, &resolved_target) {
+                return;
+            }
+
+            let current_key = paths::match_key(&resolved_current);
+            if let Some(&idx) = index_by_current_path.get(&current_key) {
+                if let Some(existing) = user_profile.path_mappings.get_mut(idx) {
+                    existing.final_path = resolved_target.clone();
+                }
+                log::warn!(
+                    "override map (current dup): user={} cur={}",
+                    user_id,
+                    resolved_current
+                );
+                return;
+            }
+
+            index_by_current_path.insert(current_key, user_profile.path_mappings.len());
+            user_profile
+                .path_mappings
+                .push(PathMapping::new(resolved_current, resolved_target));
+        };
+
+        if let Some(map) = mappings_value.as_object() {
+            for (current_key, target_value) in map {
+                let Some(target_str) = target_value.as_str() else {
+                    continue;
+                };
+                upsert_mapping(current_key, target_str);
+            }
+        } else if let Some(list) = mappings_value.as_array() {
+            for item in list {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let (Some(current_value), Some(target_value)) =
+                    (obj.get("request_path"), obj.get("final_path"))
+                else {
+                    continue;
+                };
+                let (Some(current_str), Some(target_str)) =
+                    (current_value.as_str(), target_value.as_str())
+                else {
+                    continue;
+                };
+                upsert_mapping(current_str, target_str);
+            }
+        } else {
+            log::warn!(
+                "skip mappings (unsupported type): pkg={} user={}",
+                package_name,
+                user_id
+            );
+        }
+    }
+
+    user_profile.path_mappings = filter_valid_path_mapping_chains(user_profile.path_mappings);
+    user_profile.path_mappings = filter_valid_path_mapping_chains(user_profile.path_mappings);
+    user_profile
 }
 
 // 仅接受纯数字

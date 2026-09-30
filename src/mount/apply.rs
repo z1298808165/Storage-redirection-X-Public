@@ -400,122 +400,15 @@ impl MountPlanner {
         self.ensure_scoped_fuse_mount_points(scoped_fuse_roots, &storage_path);
         self.restore_own_private_directories(&storage_path, &data_media_root, scoped_fuse_roots);
 
-        let mut restored_allowed_paths: Vec<String> = Vec::new();
-        if !allowed_real_paths.is_empty() {
-            let resolved_paths = self.resolve_concrete_storage_paths(
-                allowed_real_paths,
-                &storage_path,
-                "allow",
-                "allow mount",
-            );
-
-            let mut effective_paths: Vec<String> = Vec::with_capacity(resolved_paths.len());
-            for path in resolved_paths {
-                let mut is_redundant = false;
-                for kept in &effective_paths {
-                    if paths::matches(kept, &path, true) {
-                        is_redundant = true;
-                        break;
-                    }
-                }
-                if !is_redundant {
-                    effective_paths.push(path);
-                }
-            }
-
-            for allowed_path in effective_paths {
-                if is_covered_by_scoped_fuse_mount(&allowed_path, scoped_fuse_roots) {
-                    log::info!(
-                        "skip allow mount path (handled by scoped fuse): {}",
-                        allowed_path
-                    );
-                    continue;
-                }
-
-                let Some(relative) = paths::relative_child_path(&allowed_path, &storage_path)
-                else {
-                    continue;
-                };
-
-                if !self.ensure_directory_exists(&allowed_path, true) {
-                    log::warn!("mkdir allow failed: {}", allowed_path);
-                    continue;
-                }
-
-                let mut is_restored_allowed_path = false;
-                let source_candidates = build_allowed_real_source_candidates(
-                    &real_storage_anchor,
-                    &data_media_root,
-                    relative,
-                );
-
-                for real_source in source_candidates {
-                    if !self.ensure_real_public_directory_exists(&real_source) {
-                        log::warn!("real path missing and mkdir failed: {}", real_source);
-                        continue;
-                    }
-                    self.ensure_allowed_real_existing_directory_tree_writable(
-                        &real_source,
-                        excluded_real_paths,
-                    );
-
-                    let _ = self.bind_mount_with_storage_aliases(
-                        &real_source,
-                        &allowed_path,
-                        true,
-                        super::PrimaryMountFailure::StopCurrentTarget,
-                        None,
-                        Some("allow alias restore failed"),
-                        Some("allow alias restore ok"),
-                        Some(&mut is_restored_allowed_path),
-                    );
-                    if is_restored_allowed_path {
-                        log::info!("allow restored {}", allowed_path);
-                        restored_allowed_paths.push(allowed_path);
-                        break;
-                    }
-                }
-            }
-        }
-        paths::sort_dedup_paths_longest_first_case_insensitive(&mut restored_allowed_paths);
-
-        if !excluded_real_paths.is_empty() {
-            let resolved_paths =
-                self.resolve_excluded_storage_mount_paths(excluded_real_paths, &storage_path);
-
-            for excluded_path in resolved_paths {
-                let Some(relative) = paths::relative_child_path(&excluded_path, &storage_path)
-                else {
-                    continue;
-                };
-
-                if !fs::is_directory(&excluded_path) {
-                    log::info!("exclude mount target missing, skip bind: {}", excluded_path);
-                    continue;
-                }
-
-                let sandbox_source = paths::join(&resolved_target, relative);
-                if !self.ensure_writable_mapped_directory(&sandbox_source, self.app_uid) {
-                    log::warn!("exclude sandbox mkdir failed: {}", sandbox_source);
-                    continue;
-                }
-
-                let mut is_restored_excluded_path = false;
-                let _ = self.bind_mount_with_storage_aliases(
-                    &sandbox_source,
-                    &excluded_path,
-                    true,
-                    super::PrimaryMountFailure::StopCurrentTarget,
-                    None,
-                    Some("exclude alias restore failed"),
-                    Some("exclude alias restore ok"),
-                    Some(&mut is_restored_excluded_path),
-                );
-                if is_restored_excluded_path {
-                    log::info!("exclude restored {}", excluded_path);
-                }
-            }
-        }
+        let restored_allowed_paths = self.restore_allowed_real_paths(
+            allowed_real_paths,
+            excluded_real_paths,
+            scoped_fuse_roots,
+            &real_storage_anchor,
+            &data_media_root,
+            &storage_path,
+        );
+        self.restore_excluded_sandbox_paths(excluded_real_paths, &resolved_target, &storage_path);
 
         let mapping_source_roots =
             build_mapping_source_roots(&real_storage_anchor, &data_media_root);
@@ -599,6 +492,147 @@ impl MountPlanner {
 
         log::info!("redirect done");
         true
+    }
+
+    /// 把允许真实目录按解析结果绑回应用视图，返回实际恢复成功的路径。
+    ///
+    /// 返回值按长度降序去重排序：映射解析据此判断「允许目录优先」，防止映射源
+    /// 覆盖在已放行的真实目录上。scoped FUSE 覆盖的路径跳过 bind（由会话接管）。
+    fn restore_allowed_real_paths(
+        &self,
+        allowed_real_paths: &[String],
+        excluded_real_paths: &[String],
+        scoped_fuse_roots: &[String],
+        real_storage_anchor: &Option<String>,
+        data_media_root: &str,
+        storage_path: &str,
+    ) -> Vec<String> {
+        let mut restored_allowed_paths: Vec<String> = Vec::new();
+        if allowed_real_paths.is_empty() {
+            return restored_allowed_paths;
+        }
+        let resolved_paths = self.resolve_concrete_storage_paths(
+            allowed_real_paths,
+            storage_path,
+            "allow",
+            "allow mount",
+        );
+
+        let mut effective_paths: Vec<String> = Vec::with_capacity(resolved_paths.len());
+        for path in resolved_paths {
+            let mut is_redundant = false;
+            for kept in &effective_paths {
+                if paths::matches(kept, &path, true) {
+                    is_redundant = true;
+                    break;
+                }
+            }
+            if !is_redundant {
+                effective_paths.push(path);
+            }
+        }
+
+        for allowed_path in effective_paths {
+            if is_covered_by_scoped_fuse_mount(&allowed_path, scoped_fuse_roots) {
+                log::info!(
+                    "skip allow mount path (handled by scoped fuse): {}",
+                    allowed_path
+                );
+                continue;
+            }
+
+            let Some(relative) = paths::relative_child_path(&allowed_path, storage_path) else {
+                continue;
+            };
+
+            if !self.ensure_directory_exists(&allowed_path, true) {
+                log::warn!("mkdir allow failed: {}", allowed_path);
+                continue;
+            }
+
+            let mut is_restored_allowed_path = false;
+            let source_candidates = build_allowed_real_source_candidates(
+                real_storage_anchor,
+                data_media_root,
+                relative,
+            );
+
+            for real_source in source_candidates {
+                if !self.ensure_real_public_directory_exists(&real_source) {
+                    log::warn!("real path missing and mkdir failed: {}", real_source);
+                    continue;
+                }
+                self.ensure_allowed_real_existing_directory_tree_writable(
+                    &real_source,
+                    excluded_real_paths,
+                );
+
+                let _ = self.bind_mount_with_storage_aliases(
+                    &real_source,
+                    &allowed_path,
+                    true,
+                    super::PrimaryMountFailure::StopCurrentTarget,
+                    None,
+                    Some("allow alias restore failed"),
+                    Some("allow alias restore ok"),
+                    Some(&mut is_restored_allowed_path),
+                );
+                if is_restored_allowed_path {
+                    log::info!("allow restored {}", allowed_path);
+                    restored_allowed_paths.push(allowed_path);
+                    break;
+                }
+            }
+        }
+        paths::sort_dedup_paths_longest_first_case_insensitive(&mut restored_allowed_paths);
+        restored_allowed_paths
+    }
+
+    /// 把排除目录按「沙盒可写镜像」恢复：每个排除目标在沙盒根下有对应目录，
+    /// 绑定后应用对其的写入落进沙盒而不影响真实存储。
+    fn restore_excluded_sandbox_paths(
+        &self,
+        excluded_real_paths: &[String],
+        resolved_target: &str,
+        storage_path: &str,
+    ) {
+        if excluded_real_paths.is_empty() {
+            return;
+        }
+        let resolved_paths =
+            self.resolve_excluded_storage_mount_paths(excluded_real_paths, storage_path);
+
+        for excluded_path in resolved_paths {
+            let Some(relative) = paths::relative_child_path(&excluded_path, storage_path) else {
+                continue;
+            };
+
+            if !fs::is_directory(&excluded_path) {
+                log::info!("exclude mount target missing, skip bind: {}", excluded_path);
+                continue;
+            }
+
+            let sandbox_source = paths::join(resolved_target, relative);
+            if !self.ensure_writable_mapped_directory(&sandbox_source, self.app_uid) {
+                log::warn!("exclude sandbox mkdir failed: {}", sandbox_source);
+                continue;
+            }
+
+            let mut is_restored_excluded_path = false;
+            let _ = self.bind_mount_with_storage_aliases(
+                &sandbox_source,
+                &excluded_path,
+                true,
+                super::PrimaryMountFailure::StopCurrentTarget,
+                None,
+                Some("exclude alias restore failed"),
+                Some("exclude alias restore ok"),
+                Some(&mut is_restored_excluded_path),
+            );
+            if is_restored_excluded_path {
+                log::info!("exclude restored {}", excluded_path);
+            }
+        }
     }
 
     fn prepare_redirect_android_app_directories(&self, redirect_android_path: &str) -> bool {
