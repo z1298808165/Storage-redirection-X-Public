@@ -129,13 +129,17 @@ class MountMetadataScopeTest(unittest.TestCase):
     def test_scoped_fuse_start_isolates_single_root_failure(self) -> None:
         # 单根启动失败后以存储根会话恢复规则覆盖；daemon 与 companion 行为保持一致。
         # 根会话重试同样失败时才交给 namespace 回退与能力失败记账。
+        # 启动编排已下沉到 fuse_session 共享模块（按根启动函数经闭包注入），
+        # 因此隔离不变量锚定共享实现，两侧只断言走共享入口。
+        body = function_body(read("src/fuse_session.rs"), "fn start_scoped_fuse_services(")
+        self.assertIn("failed_roots", body)
+        self.assertIn("storage_root", body)
+        self.assertIn("collapsed to storage root", body)
+        # 全部根都失败时仍要返回 None，保住"FUSE 整体不可用"的降级记账语义。
+        self.assertIn("states.is_empty()", body)
         for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
-            body = function_body(read(path), "fn start_scoped_fuse_services(")
-            self.assertIn("failed_roots", body, path)
-            self.assertIn("storage_root", body, path)
-            self.assertIn("collapsed to storage root", body, path)
-            # 全部根都失败时仍要返回 None，保住"FUSE 整体不可用"的降级记账语义。
-            self.assertIn("states.is_empty()", body, path)
+            wrapper = function_body(read(path), "fn start_scoped_fuse_services(")
+            self.assertIn("crate::fuse_session::start_scoped_fuse_services(", wrapper, path)
 
     def test_scoped_fuse_budget_preserves_dynamic_rules(self) -> None:
         # 多会话预算只控制进程/内存开销，预算超限必须折叠为单个存储根 FUSE 会话，

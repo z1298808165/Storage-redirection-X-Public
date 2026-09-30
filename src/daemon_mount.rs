@@ -878,55 +878,12 @@ fn start_scoped_fuse_services(
     roots: &[String],
     real_root_override: Option<String>,
 ) -> Option<Vec<FuseMountState>> {
-    if roots.is_empty() {
-        return Some(Vec::new());
-    }
-
-    let mut states = Vec::with_capacity(roots.len());
-    let mut failed_roots: Vec<&str> = Vec::new();
-    for root in roots {
-        match start_fuse_service_for_root(request, root, real_root_override.clone()) {
-            Some(state) => states.push(state),
-            None => failed_roots.push(root.as_str()),
-        }
-    }
-
-    if !failed_roots.is_empty() {
-        log::warn!(
-            "daemon fuse partial scoped mount pkg={} pid={} mounted={} failed={} failed_roots={}",
-            request.package_name,
-            request.pid,
-            states.len(),
-            failed_roots.len(),
-            failed_roots.join(",")
-        );
-        // 规划阶段已跳过这些预期 FUSE 根对应的 bind；部分失败时先收回已启动会话，
-        // 再以单个存储根会话保留原始规则的动态匹配，避免失败根变成无规则覆盖。
-        let user_id = crate::platform::user_id_from_uid(request.uid);
-        let storage_root = paths::storage_user_root_for_user(user_id);
-        rollback_scoped_fuse_services(&states);
-        if let Some(state) = start_fuse_service_for_root(request, &storage_root, real_root_override)
-        {
-            log::warn!(
-                "daemon fuse partial roots collapsed to storage root pkg={} pid={} failed={}",
-                request.package_name,
-                request.pid,
-                failed_roots.len()
-            );
-            return Some(vec![state]);
-        }
-        log::warn!(
-            "daemon fuse partial roots and storage-root retry failed pkg={} pid={}",
-            request.package_name,
-            request.pid
-        );
-        return None;
-    }
-
-    if states.is_empty() {
-        return None;
-    }
-    Some(states)
+    crate::fuse_session::start_scoped_fuse_services(
+        request,
+        roots,
+        real_root_override,
+        |root, real_root_override| start_fuse_service_for_root(request, root, real_root_override),
+    )
 }
 
 fn scoped_fuse_mount_roots(request: &MountRequest) -> Vec<String> {

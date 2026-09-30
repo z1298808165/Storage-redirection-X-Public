@@ -2,8 +2,10 @@
 //!
 //! daemon 侧（`daemon_mount`）与 companion 侧（`lifecycle::companion_mount`）共用：
 //! 两条挂载路径写同一份会话语义、走同一个 socket 协议收发挂载结果。历史上两处
-//! 各写一份已发生过行为分叉，因此这里收敛为单一实现，两侧只保留各自的请求建模。
+//! 各写一份已发生过行为分叉，因此这里收敛为单一实现，两侧只保留各自的请求建模
+//! 与宿主会话发现方式（daemon 进程内持有、companion 经快照发现）。
 
+use crate::fuse_redirect::MountRequestFields;
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use libc::{SO_RCVTIMEO, SOL_SOCKET, c_int, c_void, recv, send, setsockopt};
 
@@ -54,6 +56,67 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
             (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
         );
     }
+}
+
+/// 批量启动 scoped FUSE 会话；单根失败只丢弃该根，全部根失败前先回滚再收敛成存储根。
+///
+/// 部分失败的恢复契约：先收回已启动的会话，再以单个存储根会话保留原始规则的动态
+/// 匹配，避免失败根变成无规则覆盖；存储根重试同样失败才交给调用方走 namespace 回退
+/// 与能力失败记账。`start_one` 由两侧传入各自的按根启动函数（宿主会话发现方式不同）。
+pub(crate) fn start_scoped_fuse_services(
+    request: &(impl MountRequestFields + ?Sized),
+    roots: &[String],
+    real_root_override: Option<String>,
+    start_one: impl Fn(&str, Option<String>) -> Option<FuseMountState>,
+) -> Option<Vec<FuseMountState>> {
+    if roots.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut states = Vec::with_capacity(roots.len());
+    let mut failed_roots: Vec<&str> = Vec::new();
+    for root in roots {
+        match start_one(root, real_root_override.clone()) {
+            Some(state) => states.push(state),
+            None => failed_roots.push(root.as_str()),
+        }
+    }
+
+    if !failed_roots.is_empty() {
+        log::warn!(
+            "fuse partial scoped mount pkg={} pid={} mounted={} failed={} failed_roots={}",
+            request.package_name(),
+            request.pid(),
+            states.len(),
+            failed_roots.len(),
+            failed_roots.join(",")
+        );
+        // 规划阶段已跳过这些预期 FUSE 根对应的 bind；部分失败时先收回已启动会话，
+        // 再以单个存储根会话保留原始规则的动态匹配，避免失败根变成无规则覆盖。
+        let user_id = crate::platform::user_id_from_uid(request.uid());
+        let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+        rollback_scoped_fuse_services(&states);
+        if let Some(state) = start_one(&storage_root, real_root_override) {
+            log::warn!(
+                "fuse partial roots collapsed to storage root pkg={} pid={} failed={}",
+                request.package_name(),
+                request.pid(),
+                failed_roots.len()
+            );
+            return Some(vec![state]);
+        }
+        log::warn!(
+            "fuse partial roots and storage-root retry failed pkg={} pid={}",
+            request.package_name(),
+            request.pid()
+        );
+        return None;
+    }
+
+    if states.is_empty() {
+        return None;
+    }
+    Some(states)
 }
 
 /// 把 waitpid 的状态位解码为可读文本（exit=/stop sig=/sig= core=）。
