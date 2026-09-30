@@ -28,7 +28,7 @@ pub fn init(config_dir: &str) -> i32 {
         log::warn!("watch config dir failed {}", config_dir);
     }
 
-    let apps_dir = paths::join(config_dir, "apps");
+    let apps_dir = paths::join(config_dir, super::source::APPS_CONFIG_DIR);
     if !add_watch(fd, &apps_dir) {
         log::debug!("apps dir missing or unwatchable");
     }

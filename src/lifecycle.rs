@@ -151,7 +151,7 @@ impl RuntimeFlow {
 
 fn should_install_package_event_receiver(module_dir: &str) -> bool {
     let path = if module_dir.is_empty() {
-        format!("{}/global.json", module_paths::CONFIG_DIR)
+        module_paths::GLOBAL_CONFIG_FILE.to_string()
     } else {
         format!("{module_dir}/config/global.json")
     };

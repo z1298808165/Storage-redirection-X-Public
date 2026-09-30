@@ -1,3 +1,4 @@
+use super::source::{APPS_CONFIG_DIR, GLOBAL_CONFIG_FILE, MONITOR_FILTERS_CONFIG_FILE};
 use crate::platform::errno::last as last_errno;
 use crate::platform::{module_paths, paths};
 use libc::{O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open, stat};
@@ -17,10 +18,10 @@ pub fn compute_config_fingerprint_snapshot(config_dir: &str) -> ConfigFingerprin
     let started_ms = paths::monotonic_ms();
     let mut hash = FNV_OFFSET_BASIS;
     hash = fnv_update_str(hash, "srx_config_v2");
-    hash = add_file_stat(hash, &paths::join(config_dir, "global.json"));
-    hash = add_file_stat(hash, &paths::join(config_dir, "file_monitor_filters.json"));
+    hash = add_file_stat(hash, &paths::join(config_dir, GLOBAL_CONFIG_FILE));
+    hash = add_file_stat(hash, &paths::join(config_dir, MONITOR_FILTERS_CONFIG_FILE));
 
-    let apps_dir = paths::join(config_dir, "apps");
+    let apps_dir = paths::join(config_dir, APPS_CONFIG_DIR);
     let Ok(dir_entries) = fs::read_dir(&apps_dir) else {
         hash = fnv_update_str(hash, "apps_dir_missing");
         log_config_fingerprint_perf(config_dir, 0, started_ms, hash);

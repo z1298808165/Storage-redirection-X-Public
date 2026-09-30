@@ -522,7 +522,11 @@ class SrxRepository(
       } else {
         @Suppress("DEPRECATION") pm.getInstalledApplications(0)
       }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+      android.util.Log.w(
+          "SrxRepository",
+          "load_installed_apps_failed user=$userId error=${e.message}",
+      )
       emptyList()
     }
   }
@@ -536,7 +540,11 @@ class SrxRepository(
       } else {
         @Suppress("DEPRECATION") pm.getApplicationInfo(packageName, 0)
       }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+      android.util.Log.w(
+          "SrxRepository",
+          "load_app_info_failed pkg=$packageName error=${e.message}",
+      )
       null
     }
   }

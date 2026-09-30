@@ -40,6 +40,7 @@ import org.srx.manager.PageHeader
 import org.srx.manager.RoundIconAction
 import org.srx.manager.SectionTitle
 import org.srx.manager.data.AppConfig
+import org.srx.manager.data.ConfigDir
 import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.GlobalConfig
 import org.srx.manager.data.UiPreferences
@@ -294,7 +295,7 @@ internal fun SettingsScreen(
         Text("配置文件路径", fontWeight = FontWeight.Bold, fontSize = 13.sp)
         Spacer(Modifier.height(4.dp))
         Text(
-            "/data/adb/modules/storage.redirect.x/config/",
+            "$ConfigDir/",
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
             fontSize = 11.sp,
             lineHeight = 14.sp,

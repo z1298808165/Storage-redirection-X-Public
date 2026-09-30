@@ -70,7 +70,7 @@ impl SettingsHub {
             return false;
         }
 
-        let apps_dir = crate::platform::paths::join(&config_dir, "apps");
+        let apps_dir = crate::platform::paths::join(&config_dir, super::source::APPS_CONFIG_DIR);
         if fs::metadata(&apps_dir)
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false)
@@ -80,7 +80,10 @@ impl SettingsHub {
 
         config_dir != module_paths::CONFIG_DIR
             && scan_raw_apps_dir_for_enabled_user(
-                &crate::platform::paths::join(module_paths::CONFIG_DIR, "apps"),
+                &crate::platform::paths::join(
+                    module_paths::CONFIG_DIR,
+                    super::source::APPS_CONFIG_DIR,
+                ),
                 user_id,
             )
     }
@@ -192,11 +195,11 @@ fn load_raw_config_entry(
     now_ms: i64,
 ) -> CacheEntry {
     let config_path = crate::platform::paths::join(
-        &crate::platform::paths::join(config_dir, "apps"),
+        &crate::platform::paths::join(config_dir, super::source::APPS_CONFIG_DIR),
         &format!("{}.json", package_name),
     );
     let fallback_path = crate::platform::paths::join(
-        &crate::platform::paths::join(module_paths::CONFIG_DIR, "apps"),
+        &crate::platform::paths::join(module_paths::CONFIG_DIR, super::source::APPS_CONFIG_DIR),
         &format!("{}.json", package_name),
     );
 

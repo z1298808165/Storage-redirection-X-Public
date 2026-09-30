@@ -3,9 +3,11 @@ use crate::platform::paths;
 use std::fs;
 use std::io::Read;
 
-const GLOBAL_CONFIG_FILE: &str = "global.json";
-const MONITOR_FILTERS_CONFIG_FILE: &str = "file_monitor_filters.json";
-const APPS_CONFIG_DIR: &str = "apps";
+/// 配置文件与子目录的相对名统一定义；fingerprint/raw_scan/watcher 按目录参数拼接，
+/// 保证指纹计算、原始扫描与监视器引用的是同一组入口名。
+pub(super) const GLOBAL_CONFIG_FILE: &str = "global.json";
+pub(super) const MONITOR_FILTERS_CONFIG_FILE: &str = "file_monitor_filters.json";
+pub(super) const APPS_CONFIG_DIR: &str = "apps";
 const SELF_PACKAGE_NAME: &str = "com.storage.redirect.x";
 const CONFIG_LOAD_SLOW_MS: i64 = 20;
 const APP_CONFIG_SLOW_MS: i64 = 5;

@@ -85,12 +85,15 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn('fuse/mount_state', script)
 
     def test_legacy_exporters_use_the_same_bounded_windows(self) -> None:
+        # App 端 legacy 内嵌导出已删除（最低兼容模块 v1.2.55，脚本入口由模块自带）；
+        # 不变量改为：WebUI 内嵌导出器与模块诊断脚本必须使用同一组有界采集窗口，
+        # 保证不同导出面产出的诊断包可相互对照。
         for path in (
-            "app/src/main/java/org/srx/manager/data/RootFileStore.kt",
+            "assets/zygisk_module/service.d/diagnostic_archive.sh",
             "assets/zygisk_module/webroot/js/api.js",
         ):
             source = read(path)
-            self.assertLess(source.index("-t 10000"), source.index("cp -p"))
+            self.assertIn("-t 10000", source)
             self.assertIn("-t 8000", source)
             self.assertIn("logcat-buffers.txt", source)
             self.assertIn("logcat-capture.txt", source)
