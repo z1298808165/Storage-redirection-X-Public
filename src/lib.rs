@@ -10,6 +10,7 @@ mod domain;
 mod fuse_host;
 mod fuse_host_control;
 mod fuse_redirect;
+mod fuse_session;
 mod fuse_terminate;
 mod hook;
 mod java_hook;

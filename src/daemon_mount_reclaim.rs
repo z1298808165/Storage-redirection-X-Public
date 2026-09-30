@@ -5,9 +5,10 @@
 // 相关全局槽位也一并放在这里，主流程文件不再直接触碰这些状态。
 
 use crate::daemon_mount::{
-    MountOperation, MountRequest, decode_wait_status, execute_mount_request, log_errno,
-    read_fuse_children, read_fuse_host_session, terminate_recorded_fuse_child,
+    MountOperation, MountRequest, execute_mount_request, log_errno, read_fuse_children,
+    read_fuse_host_session, terminate_recorded_fuse_child,
 };
+use crate::fuse_session::decode_wait_status;
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::module_paths;
 use crate::platform::paths::monotonic_ms;

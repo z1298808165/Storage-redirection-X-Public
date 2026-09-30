@@ -10,18 +10,21 @@ use crate::fuse_redirect::{
     FuseRedirectConfig, ScopedMountAttempt, ScopedMountReport, conclude_scoped_mount,
     log_scoped_mount_roots, mount_blocking_with_ready,
 };
+use crate::fuse_session::{
+    FuseMountState, decode_wait_status, recv_result, rollback_scoped_fuse_services,
+    send_mount_result, set_recv_timeout,
+};
 use crate::mount::MountPlanner;
 use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{self, paths::monotonic_ms};
 use diagnostics::log_child_diagnostics;
 use libc::{
-    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SO_RCVTIMEO,
-    SOCK_DGRAM, SOL_SOCKET, WNOHANG, c_int, c_void, close, kill, open, read, readlink, recv, send,
-    setns, setsockopt, socketpair, umount2, waitpid,
+    AF_UNIX, CLONE_NEWNS, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SOCK_DGRAM, WNOHANG, c_int,
+    c_void, close, kill, open, read, readlink, setns, socketpair, waitpid,
 };
 use stats::update_redirect_stats;
 use std::ffi::{CStr, CString};
-use sys::{c_str, decode_wait_status, errno_text, last_errno};
+use sys::{c_str, errno_text, last_errno};
 
 // 等待目标进程就绪后在子进程中执行挂载
 pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool {
@@ -285,39 +288,6 @@ fn is_process_storage_mount_ready(pid: i32, user_id: i32) -> bool {
     false
 }
 
-fn send_mount_result(sock: c_int, result: i32) -> bool {
-    let expected_size = std::mem::size_of::<i32>() as isize;
-    let sent = unsafe {
-        send(
-            sock,
-            &result as *const _ as *const c_void,
-            std::mem::size_of::<i32>(),
-            0,
-        )
-    };
-    if sent != expected_size {
-        if sent < 0 {
-            let errno = last_errno();
-            log::warn!(
-                "send result failed sock={} errno={} {}",
-                sock,
-                errno,
-                errno_text(errno)
-            );
-        } else {
-            log::warn!(
-                "send result short sock={} sent={} want={}",
-                sock,
-                sent,
-                expected_size
-            );
-        }
-        return false;
-    }
-    log::debug!("send result sock={} ret={}", sock, result);
-    true
-}
-
 // 父进程等待子进程挂载结果并回收子进程
 fn handle_parent_process(child: i32, sock: c_int, primary_timeout_sec: i64) -> bool {
     set_recv_timeout(sock, child, primary_timeout_sec);
@@ -417,43 +387,6 @@ fn reap_child(child: i32, nonblocking: bool) {
         "child not reaped child={} status=still_running reason=nonblocking_timeout",
         child
     );
-}
-
-fn set_recv_timeout(sock: c_int, child: i32, seconds: i64) {
-    let tv = libc::timeval {
-        tv_sec: seconds,
-        tv_usec: 0,
-    };
-    let opt_ret = unsafe {
-        setsockopt(
-            sock,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &tv as *const _ as *const c_void,
-            std::mem::size_of::<libc::timeval>() as u32,
-        )
-    };
-    if opt_ret != 0 {
-        let errno = last_errno();
-        log::warn!(
-            "setsockopt failed child={} sec={} errno={} {}",
-            child,
-            seconds,
-            errno,
-            errno_text(errno)
-        );
-    }
-}
-
-fn recv_result(sock: c_int, result: &mut i32) -> isize {
-    unsafe {
-        recv(
-            sock,
-            result as *mut _ as *mut c_void,
-            std::mem::size_of::<i32>(),
-            0,
-        )
-    }
 }
 
 fn log_recv_failure(child: i32, n: isize, expected: isize, phase: &str) {
@@ -712,19 +645,6 @@ fn apply_mount_namespace_fallback(
     }
 }
 
-#[derive(Clone)]
-pub(super) struct FuseMountState {
-    pub target: String,
-    /// 服务该挂载的 scoped FUSE 子进程；接入共享宿主会话时为 0（见 `host_session`）。
-    pub child: i32,
-    pub child_start_time_ticks: u64,
-    /// 该挂载由共享宿主会话承载时记录 `(pid, start_time_ticks)`。
-    ///
-    /// 宿主会话是**跨应用共享**的：终止它会打掉所有接入该会话的应用挂载，
-    /// 因此状态文件与回滚都必须按这个字段把宿主挂载与 scoped 会话分流。
-    pub host_session: Option<(i32, u64)>,
-}
-
 /// 按根启动 scoped FUSE 服务；单根失败只丢弃该根。
 ///
 /// daemon 侧 [`crate::daemon_mount`] 有一份平行实现，两处必须保持一致：它们写入的是
@@ -784,45 +704,6 @@ fn start_scoped_fuse_services(
         return None;
     }
     Some(states)
-}
-
-/// 批量启动部分失败时回滚已成功的 FUSE 服务。
-///
-/// 已成功的服务此时已经完成 FUSE mount，只终止子进程会把挂载点留在目标 mount
-/// namespace 里变成死挂载，后续访问返回 ENOTCONN 且没有任何路径会再清理它。
-/// 因此必须按启动的逆序先卸载挂载点，再终止对应子进程。
-///
-/// 接入共享宿主会话的挂载只卸载、不终止进程：宿主会话承载着其它应用的挂载，
-/// 按它的 pid 发信号会把整个模块的重定向一起打掉。
-fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
-    for state in states.iter().rev() {
-        if let Ok(c_target) = CString::new(state.target.as_str()) {
-            // SAFETY: c_target 是以 NUL 结尾的合法路径，且在本次调用期间保持存活。
-            if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } != 0 {
-                let errno = last_errno();
-                if errno != libc::EINVAL && errno != libc::ENOENT {
-                    log::warn!(
-                        "fuse rollback umount failed target={} errno={} {}",
-                        state.target,
-                        errno,
-                        errno_text(errno)
-                    );
-                }
-            }
-        }
-        if let Some((host_pid, _)) = state.host_session {
-            log::info!(
-                "fuse rollback keeps shared host session target={} host={}",
-                state.target,
-                host_pid
-            );
-            continue;
-        }
-        crate::fuse_terminate::terminate_fuse_process(
-            state.child,
-            (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
-        );
-    }
 }
 
 fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {

@@ -23,6 +23,8 @@ mod fuse_host;
 mod fuse_host_control;
 #[path = "../fuse_redirect/mod.rs"]
 mod fuse_redirect;
+#[path = "../fuse_session.rs"]
+mod fuse_session;
 #[path = "../fuse_supervisor.rs"]
 mod fuse_supervisor;
 #[path = "../fuse_terminate.rs"]

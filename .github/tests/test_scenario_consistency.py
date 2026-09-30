@@ -720,17 +720,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
         ):
             source = read(source_path)
             # 跨命名空间的取句柄与 bind 只能有一份实现：两处各写一份时最常见的后果是只有
-            # 一处改对，而症状不会报错（挂载落在宿主命名空间，应用视图毫无变化）。
+            # 一侧改对，而症状不会报错（挂载落在宿主命名空间，应用视图毫无变化）。
             self.assertNotIn("fn perform_host_bind", source, f"{source_path} 不应保留独立 bind 实现")
             self.assertIn("crate::fuse_host::attach_app_to_host(", source)
+            # 回滚必须走共享模块：本地不得再留独立实现。
+            self.assertNotIn("fn rollback_scoped_fuse_services(", source, source_path)
+            self.assertIn("rollback_scoped_fuse_services", source, source_path)
+            self.assertIn("use crate::fuse_session::", source, source_path)
             state = read(state_path)
             self.assertIn("if state.host_session.is_some() {", state)
             self.assertIn("fuse_host={}:{}", state)
-            rollback = section(
-                source, "fn rollback_scoped_fuse_services(", "fn scoped_fuse_mount_roots"
-            )
-            self.assertIn("fuse rollback keeps shared host session", rollback)
-            self.assertIn("continue;", rollback)
+
+        # 会话回滚已下沉到共享模块：两条路径必须走同一份实现。
+        session = read("src/fuse_session.rs")
+        rollback = section(
+            session, "fn rollback_scoped_fuse_services(", "pub(crate) fn decode_wait_status("
+        )
+        self.assertIn("fuse rollback keeps shared host session", rollback)
+        self.assertIn("continue;", rollback)
 
         daemon = read_daemon_mount_module()
         self.assertIn("fn read_fuse_host_session(", daemon)
