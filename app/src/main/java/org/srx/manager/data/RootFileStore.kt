@@ -287,7 +287,7 @@ class RootFileStore(
             "if [ -r ${shellQuote(DiagnosticArchiveScriptPath)} ]; then " +
             "/system/bin/sh ${shellQuote(DiagnosticArchiveScriptPath)} $stageQ $archiveQ$progressArg; " +
             "rc=\$?; [ \$rc -eq 0 ] && exit 0; fi; "
-    return scriptCommand + buildLegacyDiagnosticArchiveCommand(stage, archive, progress)
+    return scriptCommand
   }
 
   private fun buildDiagnosticArchiveStartCommand(
@@ -381,73 +381,6 @@ class RootFileStore(
           "if [ -r \"/proc/\$worker_pid/cmdline\" ] && " +
           "grep -a -F -- \"\$worker\" \"/proc/\$worker_pid/cmdline\" >/dev/null 2>&1; " +
           "then kill \"\$worker_pid\" 2>/dev/null || true; fi ;; esac; fi; "
-
-  private fun buildLegacyDiagnosticArchiveCommand(
-      stage: String,
-      archive: String,
-      progress: String? = null,
-  ): String {
-    val stageQ = shellQuote(stage)
-    val archiveQ = shellQuote(archive)
-    return "stage=$stageQ; archive=$archiveQ; module=${shellQuote(ModuleDir)}; logs=${shellQuote(LogsDir)}; config=${shellQuote(ConfigDir)}; " +
-        progressCommand(progress, 2, "legacy", "正在使用兼容模式导出日志") +
-        "rm -rf \"\$stage\" \"\$archive\"; mkdir -p \"\$stage/logs\" \"\$stage/config\" \"\$stage/state\" || exit 1; " +
-        progressCommand(progress, 3, "logcat", "正在立即截取系统日志") +
-        "logcat_start=\$(date '+%m-%d %H:%M:%S.000' 2>/dev/null); " +
-        "{ echo \"capture_started_at=\$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)\"; echo \"logcat_start=\$logcat_start\"; echo 'context_line_limit=8000'; echo 'filtered_line_limit=10000'; echo 'events_line_limit=1500'; echo 'delta_line_limit=3000'; } > \"\$stage/state/logcat-capture.txt\"; " +
-        "logcat -g > \"\$stage/logcat-buffers.txt\" 2>&1 || true; " +
-        "logcat -b main,system,crash -d -t 10000 -v threadtime -s StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V > \"\$stage/logcat-srx-filtered.txt\" 2>&1 || true; " +
-        "logcat -b crash -d -v threadtime > \"\$stage/logcat-crash.txt\" 2>&1 || true; " +
-        "logcat -b main,system -d -t 8000 -v threadtime > \"\$stage/logcat-main-system-context.txt\" 2>&1 || true; " +
-        "logcat -b events -d -t 1500 -v threadtime > \"\$stage/logcat-events.txt\" 2>&1 || true; " +
-        "echo \"initial_capture_completed_at=\$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)\" >> \"\$stage/state/logcat-capture.txt\"; " +
-        progressCommand(progress, 18, "files", "正在复制模块日志和配置") +
-        "if [ -d \"\$logs\" ]; then find \"\$logs\" -maxdepth 1 -type f ! -name '.*.pid' ! -name '.uid_map_last_refresh' -exec cp -p {} \"\$stage/logs/\" \\; 2>/dev/null; fi; " +
-        "cp -p \"\$module/module.prop\" \"\$stage/module.prop\" 2>/dev/null || true; " +
-        "cp -p \"/data/adb/storage.redirect.x/stats\" \"\$stage/stats\" 2>/dev/null || true; " +
-        "cp -p \"\$config/global.json\" \"\$stage/config/global.json\" 2>/dev/null || true; " +
-        "cp -p \"\$config/file_monitor_filters.json\" \"\$stage/config/file_monitor_filters.json\" 2>/dev/null || true; " +
-        "cp -p \"\$config/templates.json\" \"\$stage/config/templates.json\" 2>/dev/null || true; " +
-        "mkdir -p \"\$stage/fuse/mount_state\"; " +
-        "{ echo \"mount_state_source=\$module/tmp/mount_state\"; find \"\$module/tmp/mount_state\" -maxdepth 1 -type f -name '*.state' 2>/dev/null | sort; } > \"\$stage/fuse/mount-state-index.txt\" 2>&1; " +
-        "if [ -d \"\$module/tmp/mount_state\" ]; then find \"\$module/tmp/mount_state\" -maxdepth 1 -type f -name '*.state' -exec cp -p {} \"\$stage/fuse/mount_state/\" \\; 2>/dev/null || true; fi; " +
-        "mkdir -p \"\$stage/fuse/mount_intent\"; if [ -d \"\$module/tmp/mount_intent\" ]; then find \"\$module/tmp/mount_intent\" -maxdepth 1 -type f -name '*.intent' -exec cp -p {} \"\$stage/fuse/mount_intent/\" \\; 2>/dev/null || true; fi; " +
-        "{ echo \"sample_sources=\$logs/running.log*\"; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | tail -n 240 || true; } > \"\$stage/fuse/cache-performance.txt\" 2>&1; " +
-        progressCommand(progress, 45, "state", "正在采集基础状态") +
-        "{ date; id; uname -a; getprop ro.build.fingerprint 2>/dev/null; getprop ro.product.model 2>/dev/null; getprop ro.build.version.release 2>/dev/null; } > \"\$stage/state/device.txt\" 2>&1; " +
-        "{ /system/bin/sh \"\$module/bin/srxctl\" status 2>/dev/null || true; ls -la \"\$module\" 2>/dev/null; ls -la \"\$logs\" 2>/dev/null; } > \"\$stage/state/module.txt\" 2>&1; " +
-        "{ ps -A 2>/dev/null | grep -E 'srx|zygisk|media|storage' || true; } > \"\$stage/state/processes.txt\" 2>&1; " +
-        "{ for p in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do echo \"## pidof \$p\"; pidof \"\$p\" 2>/dev/null || true; done; } > \"\$stage/state/media-pids.txt\" 2>&1; " +
-        progressCommand(progress, 88, "kernel", "正在截取内核日志") +
-        "dmesg 2>/dev/null | tail -n 1000 > \"\$stage/dmesg-tail.txt\" 2>/dev/null || true; " +
-        progressCommand(progress, 93, "logcat", "正在补充导出期间日志") +
-        "logcat -b main,system,crash -d -T \"\$logcat_start\" -v threadtime -s StorageRedirect:V SRX:V FileMonitorOp:I Stats:I AndroidRuntime:E DEBUG:F libc:F ActivityManager:I WindowManager:I MediaProvider:V ExternalStorage:V DocumentsUI:V Vold:V 2>&1 | tail -n 3000 > \"\$stage/logcat-export-period.txt\" || true; " +
-        "echo \"final_capture_completed_at=\$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null || date 2>/dev/null)\" >> \"\$stage/state/logcat-capture.txt\"; " +
-        "module_version=\$(sed -n 's/^version=//p' \"\$module/module.prop\" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-'); " +
-        "module_version_code=\$(sed -n 's/^versionCode=//p' \"\$module/module.prop\" 2>/dev/null | head -n 1 | tr -cd '0-9'); " +
-        "boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -cd 'A-Za-z0-9-'); " +
-        "runtime_status=\$(/system/bin/sh \"\$module/bin/srxctl\" status 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._:+-'); " +
-        "created_at=\$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null | tr -cd 'A-Za-z0-9._:+-'); " +
-        "mount_state_count=\$(find \"\$module/tmp/mount_state\" -maxdepth 1 -type f -name '*.state' 2>/dev/null | wc -l | tr -d ' '); " +
-        "fuse_cache_sample_count=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | wc -l | tr -d ' '); " +
-        "fuse_cache_eviction_lines=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | grep -c 'evictions=' | tr -d ' '); " +
-        "backend_effective_last=\$(grep -h 'backend_effective' \"\$logs\"/running.log* 2>/dev/null | tail -n 1 | sed -n 's/.*effective=\\([^ ]*\\).*/\\1/p' | tr -cd 'A-Za-z'); " +
-        "fuse_cache_capacity=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i ~ /^capacity=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}'); " +
-        "fuse_cache_max_capacity=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i ~ /^max_capacity=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}'); " +
-        "fuse_cache_peak_entries=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i ~ /^peak_entries=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}'); " +
-        "fuse_cache_bytes=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i ~ /^bytes=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}'); " +
-        "fuse_cache_byte_budget=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i ~ /^byte_budget=[0-9]+\$/ && \$i+0 > max) max=\$i+0} END {if (max != \"\") print max}'); " +
-        "fuse_cache_oversize_lines=\$(grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' \"\$logs\"/running.log* 2>/dev/null | grep -c 'oversize=' | tr -d ' '); " +
-        "fuse_capability_state=\$(sed -n 's/^state=//p' \"\$module/.fuse_capability\" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z'); fuse_capability_reason=\$(sed -n 's/^reason=//p' \"\$module/.fuse_capability\" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-'); " +
-        "mount_intent_count=\$(find \"\$module/tmp/mount_intent\" -maxdepth 1 -type f -name '*.intent' 2>/dev/null | wc -l | tr -d ' '); " +
-        "monitor_capacity_limited=\$(grep -h 'capacity_limited=' \"\$logs\"/running.log* 2>/dev/null | tail -n 1 | sed -n 's/.*capacity_limited=\\([^ ]*\\).*/\\1/p' | tr -cd 'A-Za-z'); " +
-        "[ -n \"\$module_version_code\" ] || module_version_code=0; [ -n \"\$mount_state_count\" ] || mount_state_count=0; [ -n \"\$fuse_cache_sample_count\" ] || fuse_cache_sample_count=0; [ -n \"\$fuse_cache_eviction_lines\" ] || fuse_cache_eviction_lines=0; [ -n \"\$backend_effective_last\" ] || backend_effective_last=unknown; [ -n \"\$fuse_cache_capacity\" ] || fuse_cache_capacity=unknown; [ -n \"\$fuse_cache_max_capacity\" ] || fuse_cache_max_capacity=unknown; [ -n \"\$fuse_cache_peak_entries\" ] || fuse_cache_peak_entries=unknown; [ -n \"\$fuse_cache_bytes\" ] || fuse_cache_bytes=unknown; [ -n \"\$fuse_cache_byte_budget\" ] || fuse_cache_byte_budget=unknown; [ -n \"\$fuse_cache_oversize_lines\" ] || fuse_cache_oversize_lines=0; [ -n \"\$fuse_capability_state\" ] || fuse_capability_state=unknown; [ -n \"\$fuse_capability_reason\" ] || fuse_capability_reason=unknown; [ -n \"\$mount_intent_count\" ] || mount_intent_count=0; [ -n \"\$monitor_capacity_limited\" ] || monitor_capacity_limited=unknown; " +
-        "media_hook_state_present=0; [ -s \"\$logs/.media_hook_install_state\" ] && media_hook_state_present=1; " +
-        "{ printf '{\\n'; printf '  \"schema\": 1,\\n'; printf '  \"archive_version\": 8,\\n'; printf '  \"created_at\": \"%s\",\\n' \"\$created_at\"; printf '  \"module_version\": \"%s\",\\n' \"\$module_version\"; printf '  \"module_version_code\": %s,\\n' \"\$module_version_code\"; printf '  \"boot_id\": \"%s\",\\n' \"\$boot_id\"; printf '  \"runtime_status\": \"%s\",\\n' \"\$runtime_status\"; printf '  \"mount_state_count\": %s,\\n' \"\$mount_state_count\"; printf '  \"fuse_cache_sample_count\": %s,\\n' \"\$fuse_cache_sample_count\"; printf '  \"fuse_cache_eviction_lines\": %s,\\n' \"\$fuse_cache_eviction_lines\"; printf '  \"backend_effective_last\": \"%s\",\\n' \"\$backend_effective_last\"; printf '  \"fuse_cache_capacity\": \"%s\",\\n' \"\$fuse_cache_capacity\"; printf '  \"fuse_cache_max_capacity\": \"%s\",\\n' \"\$fuse_cache_max_capacity\"; printf '  \"fuse_cache_peak_entries\": \"%s\",\\n' \"\$fuse_cache_peak_entries\"; printf '  \"fuse_cache_bytes\": \"%s\",\\n' \"\$fuse_cache_bytes\"; printf '  \"fuse_cache_byte_budget\": \"%s\",\\n' \"\$fuse_cache_byte_budget\"; printf '  \"fuse_cache_oversize_lines\": %s,\\n' \"\$fuse_cache_oversize_lines\"; printf '  \"fuse_capability_state\": \"%s\",\\n' \"\$fuse_capability_state\"; printf '  \"fuse_capability_reason\": \"%s\",\\n' \"\$fuse_capability_reason\"; printf '  \"mount_intent_count\": %s,\\n' \"\$mount_intent_count\"; printf '  \"monitor_capacity_limited\": \"%s\",\\n' \"\$monitor_capacity_limited\"; printf '  \"media_hook_state_present\": %s\\n' \"\$media_hook_state_present\"; printf '}\\n'; } > \"\$stage/diagnostic-summary.json\"; " +
-        progressCommand(progress, 96, "summary", "正在生成诊断摘要") +
-        progressCommand(progress, 97, "archive", "正在压缩日志包") +
-        "(cd \"\$stage\" && tar -czf \"\$archive\" *) || exit 1; chmod 644 \"\$archive\"; rm -rf \"\$stage\""
-  }
 
   private fun progressCommand(
       progress: String?,
