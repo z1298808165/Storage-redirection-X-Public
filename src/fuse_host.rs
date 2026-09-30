@@ -583,10 +583,12 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
         }
         None => {
             let reason = reap_host_child(child);
+            let stage = read_child_last_stage(child);
             log::warn!(
-                "fuse host media view unavailable child={} timeout_sec={} {}",
+                "fuse host media view unavailable child={} timeout_sec={} stage={} {}",
                 child,
                 HOST_ATTACH_TIMEOUT_SEC,
+                stage,
                 reason
             );
             mark_media_view_failure();
@@ -636,6 +638,29 @@ fn mark_media_view_failure() {
     );
 }
 
+/// 读取某个绑定/接入子进程在阶段文件里留下的最后阶段码。阶段文件是所有宿主子
+/// 进程共享的滚动记录（会被后续流程快速覆盖），失败分支把它带进日志才能事后
+/// 定位子进程实际死在哪一步——此前存在「无任何告警行、阶段码也已被覆盖」的
+/// 失败样本，无从排查。
+fn read_child_last_stage(child: i32) -> String {
+    let Ok(text) = std::fs::read_to_string(FUSE_HOST_STAGE_PATH) else {
+        return String::new();
+    };
+    let prefix = format!("pid={child} ");
+    text.lines()
+        .rev()
+        .find_map(|line| {
+            if line.starts_with(&prefix) {
+                line.split("stage=")
+                    .nth(1)
+                    .map(|stage| stage.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
 /// 媒体视图绑定子进程入口：当前命名空间克隆 MediaProvider FUSE 挂载 → 宿主命名空间
 /// 附着 → 幂等复核。
 ///
@@ -676,7 +701,7 @@ fn host_media_view_child_main(
     host_stage("media_view_ns_entered");
 
     // 3. 幂等：目标用户子树已能枚举到 Android 层即视为绑定就绪。
-    if media_view_probe_ok_with_retry(c_probe) {
+    if media_view_probe_with_retry(c_probe).is_ok() {
         host_stage("media_view_already_bound");
         send_media_view_ready(ready_sock);
         return true;
@@ -704,6 +729,7 @@ fn host_media_view_child_main(
         prefix.push('/');
         prefix.push_str(part);
         let Ok(c_prefix) = CString::new(prefix.clone()) else {
+            log::warn!("fuse host media view mkdir path invalid prefix={}", prefix);
             host_stage("media_view_mkdir_path_invalid");
             return false;
         };
@@ -722,11 +748,23 @@ fn host_media_view_child_main(
     host_stage("media_view_moved");
 
     // 5. 复核：与接入复核同理，系统调用成功不代表视图真的可用。
-    if !media_view_probe_ok_with_retry(c_probe) {
+    if let Err(errnos) = media_view_probe_with_retry(c_probe) {
+        let last_errno = errnos.last().copied().unwrap_or(0);
         log::warn!(
-            "fuse host media view probe failed target={}",
-            c_probe.to_string_lossy()
+            "fuse host media view probe failed target={} errnos={:?} last_errno={} {}",
+            c_probe.to_string_lossy(),
+            errnos,
+            last_errno,
+            crate::platform::errno::text(last_errno)
         );
+        // 现场快照：区分「克隆已挂上但内容缺失」与「读取本身报错」。
+        log_media_view_dir_snapshot("view_root", c_target.to_string_lossy().as_ref());
+        let probe_path = c_probe.to_string_lossy().to_string();
+        let user_path = probe_path
+            .strip_suffix("/Android")
+            .unwrap_or(probe_path.as_str())
+            .to_string();
+        log_media_view_dir_snapshot("view_user", &user_path);
         host_stage("media_view_probe_failed");
         // 重试后仍失败：摘除本次刚附着的挂载层。留着它有两个后果——下次绑定时
         // 在同一目标再 move_mount 一份克隆，失败不清会逐层堆叠（退避把尝试限速
@@ -763,12 +801,6 @@ fn send_media_view_ready(ready_sock: libc::c_int) -> bool {
     true
 }
 
-/// 判断宿主命名空间内的媒体视图用户子树是否已绑定可用。
-fn media_view_probe_ok(c_target: &CStr) -> bool {
-    let target = c_target.to_string_lossy().to_string();
-    crate::platform::fs::is_directory(&paths::join(&target, "Android"))
-}
-
 /// 探测重试次数与间隔。
 ///
 /// 探测是对 MediaProvider FUSE 视图的一次 `stat`，开机早期或重 IO 时可能瞬时失败
@@ -780,17 +812,72 @@ fn media_view_probe_ok(c_target: &CStr) -> bool {
 const MEDIA_VIEW_PROBE_ATTEMPTS: usize = 6;
 const MEDIA_VIEW_PROBE_INTERVAL_MS: u32 = 500;
 
-fn media_view_probe_ok_with_retry(c_target: &CStr) -> bool {
+/// 单次探测并携带 errno：排查需要区分「内容缺失」（ENOENT）、「读取被打断」
+/// （EAGAIN/ETIMEOUT 类）与「连接已死」（ENOTCONN）等形态，bool 不足以定位。
+fn media_view_probe_once(c_target: &CStr) -> Result<(), i32> {
+    let target = c_target.to_string_lossy().to_string();
+    let Ok(c_path) = CString::new(paths::join(&target, "Android")) else {
+        return Err(libc::EINVAL);
+    };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path 是 NUL 结尾的合法路径；st 指向本栈帧的未初始化缓冲。
+    let ret = unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(crate::platform::errno::last());
+    }
+    // SAFETY: stat 调用成功后缓冲已被内核填充。
+    let st = unsafe { st.assume_init() };
+    if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        Ok(())
+    } else {
+        Err(libc::ENOTDIR)
+    }
+}
+
+/// 带重试的探测：成功返回 Ok(())；全部失败返回 Err（每次尝试的 errno 序列），
+/// 供失败日志一次性打出完整形态。
+fn media_view_probe_with_retry(c_target: &CStr) -> Result<(), Vec<i32>> {
+    let mut errnos = Vec::with_capacity(MEDIA_VIEW_PROBE_ATTEMPTS);
     for attempt in 0..MEDIA_VIEW_PROBE_ATTEMPTS {
-        if media_view_probe_ok(c_target) {
-            return true;
+        match media_view_probe_once(c_target) {
+            Ok(()) => return Ok(()),
+            Err(errno) => errnos.push(errno),
         }
         if attempt + 1 < MEDIA_VIEW_PROBE_ATTEMPTS {
             // SAFETY: usleep 只接收整型参数，不涉及借用指针。
             unsafe { libc::usleep(MEDIA_VIEW_PROBE_INTERVAL_MS * 1000) };
         }
     }
-    false
+    Err(errnos)
+}
+
+/// 探测失败时的现场快照：把视图目录的实际内容打进日志，区分「克隆已挂上但
+/// 内容缺失」与「目录读取本身报错」两类形态。
+fn log_media_view_dir_snapshot(label: &str, path: &str) {
+    match std::fs::read_dir(path) {
+        Ok(entries) => {
+            let names: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .take(12)
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            log::warn!(
+                "fuse host media view snapshot label={} path={} entries={:?}",
+                label,
+                path,
+                names
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                "fuse host media view snapshot label={} path={} read_failed errno={} {}",
+                label,
+                path,
+                err.raw_os_error().unwrap_or(0),
+                err
+            );
+        }
+    }
 }
 
 /// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离（未附着到任何命名空间）的挂载。
