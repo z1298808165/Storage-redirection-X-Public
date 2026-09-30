@@ -1657,8 +1657,14 @@ function Stop-AppAndWaitFuseCleanup {
     }
 
     if ($RequireStateCleanup) {
+        # 状态文件没有应用退出时的同步删除路径，由 daemon 的 reconcile 循环按 30 秒
+        # 节流回收（src/daemon.rs 的 PRUNE_INTERVAL_MS，随 a798446d 从 3 秒放宽），
+        # reconcile 本身按 PERIODIC_RECONCILE_INTERVAL_MS=3 秒节奏跑。清理延迟上限
+        # ≈ 30s 节流余量 + 3s 周期 + 扫描耗时；等待窗口必须覆盖整个周期加余量，
+        # 否则是在赌 prune 相位：2026-09-30 的全量跑就因 6 秒窗口撞上 30 秒节流
+        # 而把正常行为误报为失败。文件消失即提前返回，正常路径不付出全额等待。
         $removed = $false
-        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        for ($attempt = 0; $attempt -lt 400; $attempt++) {
             if (Test-Su "test ! -e '$statePath'") {
                 $removed = $true
                 break
