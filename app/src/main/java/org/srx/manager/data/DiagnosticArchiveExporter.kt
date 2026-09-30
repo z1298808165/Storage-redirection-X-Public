@@ -3,6 +3,8 @@ package org.srx.manager.data
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import java.util.concurrent.Callable
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,7 +24,7 @@ internal class DiagnosticArchiveExporter(
     private val fileStore: RootFileStore,
 ) {
   private companion object {
-    /** 导出读取 root 文件的超时，与 RootShell 默认超时保持一致。 */
+    /** 导出读取 root 文件的总超时（复制与等待退出合计），与 RootShell 默认超时保持一致。 */
     const val RootFileCopyTimeoutMs = 120_000L
     /** 等待 stderr 消费线程收尾的时间，仅为回收线程，不影响导出结果。 */
     const val StderrDrainJoinMs = 1_000L
@@ -104,7 +106,9 @@ internal class DiagnosticArchiveExporter(
     // 这里不能复用 RootShell.exec：导出需要把 stdout 直接streaming 到 content URI，
     // 而 exec 会把输出收成字符串。因此在本地补上 RootShell 已有的两项保护：
     // 必须消费 stderr（否则 su 授权提示或 SELinux 告警写满管道缓冲区会让进程卡死），
-    // 且 waitFor 必须带超时（否则授权对话框无人应答时会永久阻塞，导出进度条无法取消）。
+    // 且复制与等待退出共用一个总超时（否则授权对话框无人应答时 copyTo 会永久阻塞在读取上，
+    // 导出进度条无法结束）。复制因此放到守护线程执行，调用方只按截止时间等待结果。
+    val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(RootFileCopyTimeoutMs)
     val proc =
         try {
           ProcessBuilder("su", "-c", "cat ${shellQuote(archivePath)}")
@@ -119,11 +123,24 @@ internal class DiagnosticArchiveExporter(
               isDaemon = true
               start()
             }
+    val copyTask =
+        FutureTask(
+            Callable {
+              context.contentResolver.openOutputStream(uri, "w")?.use { output ->
+                proc.inputStream.use { input -> input.copyTo(output) }
+                true
+              } ?: false
+            }
+        )
+    Thread(copyTask, "srx-diagnostic-copy").apply {
+      isDaemon = true
+      start()
+    }
     return try {
-      context.contentResolver.openOutputStream(uri, "w")?.use { output ->
-        proc.inputStream.use { input -> input.copyTo(output) }
-      } ?: return false
-      if (!proc.waitFor(RootFileCopyTimeoutMs, TimeUnit.MILLISECONDS)) {
+      if (!copyTask.get(remainingMs(deadlineNanos), TimeUnit.MILLISECONDS)) {
+        return false
+      }
+      if (!proc.waitFor(remainingMs(deadlineNanos), TimeUnit.MILLISECONDS)) {
         return false
       }
       proc.exitValue() == 0
@@ -131,9 +148,21 @@ internal class DiagnosticArchiveExporter(
       false
     } finally {
       runCatching { proc.destroyForcibly() }
+      if (!copyTask.isDone) {
+        // 超时后复制线程可能仍阻塞在管道读取上；关闭输入流促使其退出。
+        // close 本身也可能阻塞，因此同样放到守护线程，避免拖住调用方。
+        Thread { runCatching { proc.inputStream.close() } }
+            .apply {
+              isDaemon = true
+              start()
+            }
+      }
       runCatching { stderrDrain.join(StderrDrainJoinMs) }
     }
   }
+
+  private fun remainingMs(deadlineNanos: Long): Long =
+      TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime()).coerceAtLeast(0L)
 
   private suspend fun recordAppExportMonitor(targetPath: String?, kind: String) {
     val path = targetPath?.takeIf { it.isNotBlank() } ?: return
