@@ -666,7 +666,7 @@ fn host_media_view_child_main(
     host_stage("media_view_ns_entered");
 
     // 3. 幂等：目标用户子树已能枚举到 Android 层即视为绑定就绪。
-    if media_view_probe_ok(c_probe) {
+    if media_view_probe_ok_with_retry(c_probe) {
         host_stage("media_view_already_bound");
         send_media_view_ready(ready_sock);
         return true;
@@ -712,12 +712,19 @@ fn host_media_view_child_main(
     host_stage("media_view_moved");
 
     // 5. 复核：与接入复核同理，系统调用成功不代表视图真的可用。
-    if !media_view_probe_ok(c_probe) {
+    if !media_view_probe_ok_with_retry(c_probe) {
         log::warn!(
             "fuse host media view probe failed target={}",
             c_probe.to_string_lossy()
         );
         host_stage("media_view_probe_failed");
+        // 重试后仍失败：摘除本次刚附着的挂载层。留着它有两个后果——下次绑定时
+        // 在同一目标再 move_mount 一份克隆，失败不清会逐层堆叠（退避把尝试限速
+        // 到每 10 分钟一次，但长时间运行仍会累积）；以及「视图已挂上但被报告为
+        // 不可用」的不一致状态会延续到退避窗口结束，期间所有注册都拿不到视图。
+        // MNT_DETACH 只摘顶层，恰好是本次附着的这一层。
+        // SAFETY: c_target 是 NUL 结尾的合法路径；umount2 不涉及借用指针，失败仅返回负值。
+        unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
         return false;
     }
 
@@ -750,6 +757,30 @@ fn send_media_view_ready(ready_sock: libc::c_int) -> bool {
 fn media_view_probe_ok(c_target: &CStr) -> bool {
     let target = c_target.to_string_lossy().to_string();
     crate::platform::fs::is_directory(&paths::join(&target, "Android"))
+}
+
+/// 探测重试次数与间隔。
+///
+/// 探测是对 MediaProvider FUSE 视图的一次 `stat`，开机早期或重 IO 时可能瞬时失败
+/// （真机实测：挂载已经附着成功、数秒后同一探测即可通过）。单次失败即判「未绑定」
+/// 会把已就绪的视图再堆一层挂载；单次失败即判「绑定失败」会把刚挂好的可用视图
+/// 留给退避窗口浪费整整 10 分钟。这里最多重试 6 次、间隔 500ms，任一次成功即就绪；
+/// 两次探测（幂等检查与复核）都走重试时最坏耗时约 5 秒，仍在本绑定的 10 秒
+/// 父进程超时之内。
+const MEDIA_VIEW_PROBE_ATTEMPTS: usize = 6;
+const MEDIA_VIEW_PROBE_INTERVAL_MS: u32 = 500;
+
+fn media_view_probe_ok_with_retry(c_target: &CStr) -> bool {
+    for attempt in 0..MEDIA_VIEW_PROBE_ATTEMPTS {
+        if media_view_probe_ok(c_target) {
+            return true;
+        }
+        if attempt + 1 < MEDIA_VIEW_PROBE_ATTEMPTS {
+            // SAFETY: usleep 只接收整型参数，不涉及借用指针。
+            unsafe { libc::usleep(MEDIA_VIEW_PROBE_INTERVAL_MS * 1000) };
+        }
+    }
+    false
 }
 
 /// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离（未附着到任何命名空间）的挂载。
