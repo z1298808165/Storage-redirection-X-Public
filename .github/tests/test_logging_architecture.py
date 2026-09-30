@@ -376,10 +376,19 @@ class LoggingArchitectureTest(unittest.TestCase):
         post_fs = read("assets/zygisk_module/post-fs-data.sh")
         uninstall = read("assets/zygisk_module/uninstall.sh")
 
-        # stats 必须存放在模块目录之外的持久目录
-        self.assertIn('"/data/adb/storage.redirect.x/stats"', daemon)
-        self.assertIn('"/data/adb/storage.redirect.x/.stats.tmp"', daemon)
-        self.assertIn('"/data/adb/storage.redirect.x/.stats.reset.ok"', daemon)
+        # stats 必须存放在模块目录之外的持久目录；路径定义已收拢到 module_paths，
+        # daemon 侧只保留常量别名，因此锚定常量定义与引用两侧。
+        self.assertIn(
+            '"/data/adb/storage.redirect.x/stats"', read("src/platform/module_paths.rs")
+        )
+        self.assertIn('"/data/adb/storage.redirect.x/.stats.tmp"', read("src/platform/module_paths.rs"))
+        self.assertIn(
+            '"/data/adb/storage.redirect.x/.stats.reset.ok"',
+            read("src/platform/module_paths.rs"),
+        )
+        self.assertIn("module_paths::STATS_FILE", daemon)
+        self.assertIn("module_paths::STATS_TEMP_FILE", daemon)
+        self.assertIn("module_paths::STATS_RESET_ACK_FILE", daemon)
         self.assertNotIn('"/data/adb/modules/storage.redirect.x/stats"', daemon)
 
         # post-fs-data.sh 必须为持久目录做 mkdir

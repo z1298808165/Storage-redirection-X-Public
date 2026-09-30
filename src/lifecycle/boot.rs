@@ -6,8 +6,8 @@ use crate::platform::unique_fd::UniqueFd;
 use libc::{EEXIST, O_CLOEXEC, O_CREAT, O_EXCL, O_WRONLY, open};
 use std::ffi::CString;
 
-const GLOBAL_CONFIG_PATH: &str = "/data/adb/modules/storage.redirect.x/config/global.json";
-const APPS_CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config/apps";
+const GLOBAL_CONFIG_PATH: &str = module_paths::GLOBAL_CONFIG_FILE;
+const APPS_CONFIG_DIR: &str = module_paths::APPS_CONFIG_DIR;
 
 // 每次开机仅记录一次启动摘要，通过 marker 文件去重
 pub fn log_boot_summary_once() {

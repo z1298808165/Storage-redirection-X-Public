@@ -14,18 +14,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
-const RUNNING_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/running.log";
-const FILE_MONITOR_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
+const RUNNING_LOG: &str = crate::platform::module_paths::RUNNING_LOG_FILE;
+const FILE_MONITOR_LOG: &str = crate::platform::module_paths::FILE_MONITOR_LOG_FILE;
 /// 生效次数存放在模块目录之外的持久目录。
 ///
 /// 模块管理器在开机时会先删除旧模块目录再换上待更新目录，且这一步发生在
 /// 任何模块脚本之前。把累计计数放在模块目录内，会让「刷入后到重启之间」
 /// 由旧 daemon 继续累加的次数随旧目录一起丢失。放在持久目录后，旧 daemon
 /// 和新 daemon 读写同一个文件，升级不再影响计数。
-const STATS_DIR: &str = "/data/adb/storage.redirect.x";
-const STATS_FILE: &str = "/data/adb/storage.redirect.x/stats";
-const STATS_TEMP_FILE: &str = "/data/adb/storage.redirect.x/.stats.tmp";
-const STATS_RESET_ACK_FILE: &str = "/data/adb/storage.redirect.x/.stats.reset.ok";
+const STATS_DIR: &str = crate::platform::module_paths::PERSISTENT_DATA_DIR;
+const STATS_FILE: &str = crate::platform::module_paths::STATS_FILE;
+const STATS_TEMP_FILE: &str = crate::platform::module_paths::STATS_TEMP_FILE;
+const STATS_RESET_ACK_FILE: &str = crate::platform::module_paths::STATS_RESET_ACK_FILE;
 const MAX_RUNNING_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MONITOR_BYTES: u64 = 1024 * 1024;
 const LOG_BACKUPS: usize = 2;

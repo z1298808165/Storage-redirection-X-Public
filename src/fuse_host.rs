@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// 宿主挂载点：放在模块私有目录下，不落在任何存储别名上，避免与应用命名空间发生传播耦合。
-const FUSE_HOST_MOUNT_POINT: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host";
+const FUSE_HOST_MOUNT_POINT: &str = crate::platform::module_paths::FUSE_HOST_MOUNT_DIR;
 
 /// 宿主会话的就绪等待上限（秒）。
 const HOST_READY_TIMEOUT_SEC: i64 = 30;
@@ -171,7 +171,7 @@ fn log_errno(tag: &str) {
 /// stderr 丢到 `/dev/null`，panic 信息不会留下来。写文件不依赖私有日志通道，也不依赖
 /// 标准错误，因此作为最后兜底的取证手段：即使父进程只看到"未就绪"，也能从阶段行判断
 /// 子进程走到哪一步。
-const FUSE_HOST_STAGE_PATH: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host.stage";
+const FUSE_HOST_STAGE_PATH: &str = crate::platform::module_paths::FUSE_HOST_STAGE_FILE;
 
 fn append_bytes(buffer: &mut [u8], len: &mut usize, bytes: &[u8]) {
     for byte in bytes {

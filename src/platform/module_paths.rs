@@ -51,6 +51,42 @@ pub const LOG_DIR: &str = "/data/adb/modules/storage.redirect.x/logs";
 #[allow(dead_code)]
 pub const DAEMON_INSTANCE_LOCK_FILE: &str = "/data/adb/storage.redirect.x/.srx_daemon.lock";
 
+pub const GLOBAL_CONFIG_FILE: &str = "/data/adb/modules/storage.redirect.x/config/global.json";
+pub const APPS_CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config/apps";
+
+/// 共享宿主 FUSE 会话的挂载点：放在模块私有目录下，不落在任何存储别名上，
+/// 避免与应用命名空间发生传播耦合。
+// quality-allow(lint-suppression): 引用方在宿主 spawn 路径，lib 目标仅共享编译该模块。
+#[allow(dead_code)]
+pub const FUSE_HOST_MOUNT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host";
+/// 宿主子进程就绪阶段的取证文件。
+// quality-allow(lint-suppression): 引用方在宿主 spawn 路径，lib 目标仅共享编译该模块。
+#[allow(dead_code)]
+pub const FUSE_HOST_STAGE_FILE: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host.stage";
+
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const RUNNING_LOG_FILE: &str = "/data/adb/modules/storage.redirect.x/logs/running.log";
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const FILE_MONITOR_LOG_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/logs/file_monitor.log";
+
+/// 模块目录之外的持久数据目录：模块管理器开机时先删旧模块目录再换新，
+/// 升级敏感的累计数据必须放在这里才能跨升级保留。
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const PERSISTENT_DATA_DIR: &str = "/data/adb/storage.redirect.x";
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const STATS_FILE: &str = "/data/adb/storage.redirect.x/stats";
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const STATS_TEMP_FILE: &str = "/data/adb/storage.redirect.x/.stats.tmp";
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const STATS_RESET_ACK_FILE: &str = "/data/adb/storage.redirect.x/.stats.reset.ok";
+
 /// 过滤并归一化挂载点清单。
 ///
 /// daemon 挂载与 companion 挂载都需要把挂载目标写入同一份状态文件格式，
