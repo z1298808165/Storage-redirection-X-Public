@@ -465,7 +465,7 @@ fn reap_attach_child(pid: libc::pid_t) {
 /// 中必然存在——应用能发起挂载请求就说明存储已就绪；克隆必须在源命名空间内完成，
 /// 跨命名空间 `mount(MS_BIND)` 会直接 `EINVAL`（与接入逻辑同一约束）。
 ///
-/// 幂等：目标用户子树已能枚举到 Android 层即视为就绪，直接返回。失败不阻断登记：
+/// 幂等：目标用户子树已可寻址即视为就绪，直接返回。失败不阻断登记：
 /// 策略构造时探测不到视图会自动回退直连后端的既有行为。
 pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
     // 落盘开关：现场排障时创建该文件即可关闭视图绑定（不用重刷模块），删除后恢复。
@@ -500,7 +500,7 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
         return false;
     };
     let Ok(c_probe) = CString::new(format!(
-        "{}/{}/Android",
+        "{}/{}",
         crate::platform::module_paths::FUSE_HOST_MEDIA_VIEW_DIR,
         user_id
     )) else {
@@ -700,7 +700,7 @@ fn host_media_view_child_main(
     }
     host_stage("media_view_ns_entered");
 
-    // 3. 幂等：目标用户子树已能枚举到 Android 层即视为绑定就绪。
+    // 3. 幂等：目标用户子树已可寻址即视为绑定就绪。
     if media_view_probe_with_retry(c_probe).is_ok() {
         host_stage("media_view_already_bound");
         send_media_view_ready(ready_sock);
@@ -747,7 +747,10 @@ fn host_media_view_child_main(
     }
     host_stage("media_view_moved");
 
-    // 5. 复核：与接入复核同理，系统调用成功不代表视图真的可用。
+    // 5. 复核：与接入复核同理，系统调用成功不代表视图真的可用。锚点是用户子树
+    //    本身——真机实测 MediaProvider FUSE 对宿主命名空间内的顶层 Android 节点
+    //    lookup 返回 ENOENT（readdir 仍列出、其下访问待验证），用 Android 作硬锚点
+    //    会把挂载完好的视图误判为失败；Android 层的可见性降级为非致命观测。
     if let Err(errnos) = media_view_probe_with_retry(c_probe) {
         let last_errno = errnos.last().copied().unwrap_or(0);
         log::warn!(
@@ -759,12 +762,7 @@ fn host_media_view_child_main(
         );
         // 现场快照：区分「克隆已挂上但内容缺失」与「读取本身报错」。
         log_media_view_dir_snapshot("view_root", c_target.to_string_lossy().as_ref());
-        let probe_path = c_probe.to_string_lossy().to_string();
-        let user_path = probe_path
-            .strip_suffix("/Android")
-            .unwrap_or(probe_path.as_str())
-            .to_string();
-        log_media_view_dir_snapshot("view_user", &user_path);
+        log_media_view_dir_snapshot("view_user", c_probe.to_string_lossy().as_ref());
         host_stage("media_view_probe_failed");
         // 重试后仍失败：摘除本次刚附着的挂载层。留着它有两个后果——下次绑定时
         // 在同一目标再 move_mount 一份克隆，失败不清会逐层堆叠（退避把尝试限速
@@ -775,6 +773,18 @@ fn host_media_view_child_main(
         unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
         return false;
     }
+
+    // Android 层可见性观测（非致命）：仅记录，不影响绑定判定。
+    let android_path = paths::join(&c_probe.to_string_lossy(), "Android");
+    let android_visible = match CString::new(android_path.clone()) {
+        Ok(c_android) => media_view_probe_once(&c_android).is_ok(),
+        Err(_) => false,
+    };
+    log::info!(
+        "fuse host media view android anchor visible={} path={}",
+        android_visible,
+        android_path
+    );
 
     // 6. 通知父进程，随后自行退出（协议与接入子进程一致）。
     host_stage("media_view_sending_ready");
@@ -812,16 +822,13 @@ fn send_media_view_ready(ready_sock: libc::c_int) -> bool {
 const MEDIA_VIEW_PROBE_ATTEMPTS: usize = 6;
 const MEDIA_VIEW_PROBE_INTERVAL_MS: u32 = 500;
 
-/// 单次探测并携带 errno：排查需要区分「内容缺失」（ENOENT）、「读取被打断」
-/// （EAGAIN/ETIMEOUT 类）与「连接已死」（ENOTCONN）等形态，bool 不足以定位。
+/// 单次探测并携带 errno：探测给定路径本身（由调用方决定锚点），排查需要区分
+/// 「内容缺失」（ENOENT）、「读取被打断」（EAGAIN/ETIMEOUT 类）与「连接已死」
+/// （ENOTCONN）等形态，bool 不足以定位。
 fn media_view_probe_once(c_target: &CStr) -> Result<(), i32> {
-    let target = c_target.to_string_lossy().to_string();
-    let Ok(c_path) = CString::new(paths::join(&target, "Android")) else {
-        return Err(libc::EINVAL);
-    };
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: c_path 是 NUL 结尾的合法路径；st 指向本栈帧的未初始化缓冲。
-    let ret = unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) };
+    // SAFETY: c_target 是 NUL 结尾的合法路径；st 指向本栈帧的未初始化缓冲。
+    let ret = unsafe { libc::stat(c_target.as_ptr(), st.as_mut_ptr()) };
     if ret != 0 {
         return Err(crate::platform::errno::last());
     }
