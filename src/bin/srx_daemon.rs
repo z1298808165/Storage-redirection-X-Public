@@ -25,6 +25,8 @@ mod fuse_host_control;
 mod fuse_redirect;
 #[path = "../fuse_supervisor.rs"]
 mod fuse_supervisor;
+#[path = "../fuse_terminate.rs"]
+mod fuse_terminate;
 #[path = "../log_daemon.rs"]
 mod log_daemon;
 #[path = "../logging.rs"]

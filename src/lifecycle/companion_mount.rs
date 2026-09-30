@@ -818,7 +818,7 @@ fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
             );
             continue;
         }
-        terminate_fuse_service(
+        crate::fuse_terminate::terminate_fuse_process(
             state.child,
             (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
         );
@@ -993,7 +993,7 @@ fn start_fuse_service_for_root(
             request.pid,
             request.package_name
         );
-        terminate_fuse_service(service_child, None);
+        crate::fuse_terminate::terminate_fuse_process(service_child, None);
         return None;
     }
 
@@ -1042,65 +1042,6 @@ fn try_bind_to_fuse_host(
         child_start_time_ticks: 0,
         host_session: Some((attached.host_pid, attached.host_start_time_ticks)),
     })
-}
-
-fn terminate_fuse_service(pid: i32, start_time_ticks: Option<u64>) {
-    if !process_identity_alive(pid, start_time_ticks) {
-        return;
-    }
-    // SIGTERM 失败通常说明子进程已经退出成僵尸或权限受限，此时仍然必须回收；
-    // 直接返回会把僵尸进程留在伴生进程下，长期运行会耗尽进程表。
-    // SAFETY: kill 只接收整型参数，不涉及借用指针。
-    let term_failed = unsafe { kill(pid, SIGTERM) } != 0;
-    if term_failed {
-        let errno = last_errno();
-        log::debug!(
-            "fuse service SIGTERM failed child={} errno={} {}",
-            pid,
-            errno,
-            errno_text(errno)
-        );
-    }
-    for _ in 0..30 {
-        let mut status: c_int = 0;
-        let wait_ret = unsafe { waitpid(pid, &mut status as *mut _, WNOHANG) };
-        if wait_ret == pid {
-            return;
-        }
-        // `waitpid` 返回负值只说明当前进程无法回收该目标，不表示目标已经退出
-        // （FUSE 服务子进程由挂载 worker fork，worker 退出后由 init 收养，此后
-        // 固定得到 ECHILD）。把它当作已退出会直接跳过下面的 SIGKILL 升级，留下
-        // 长期存活并空转的残留服务进程；这里改用 `/proc` 存活探测。
-        if !process_identity_alive(pid, start_time_ticks) {
-            return;
-        }
-        unsafe { libc::usleep(10 * 1000) };
-    }
-    // SAFETY: kill 只接收整型参数，不涉及借用指针。
-    let _ = unsafe { kill(pid, SIGKILL) };
-    for _ in 0..30 {
-        let mut status: c_int = 0;
-        // SAFETY: status 是栈上有效的 c_int，指针在调用期间保持有效。
-        let wait_ret = unsafe { waitpid(pid, &mut status as *mut _, WNOHANG) };
-        if wait_ret == pid {
-            return;
-        }
-        // SIGKILL 之后同样不能依赖 `waitpid` 判断目标是否消失，否则会对已经退出
-        // 但无法回收的目标误报残留。
-        if !process_identity_alive(pid, start_time_ticks) {
-            return;
-        }
-        // SAFETY: usleep 只接收整型参数，不涉及借用指针。
-        unsafe { libc::usleep(10 * 1000) };
-    }
-    log::warn!("fuse service still alive after SIGKILL child={}", pid);
-}
-
-fn process_identity_alive(pid: i32, start_time_ticks: Option<u64>) -> bool {
-    match start_time_ticks {
-        Some(start) => platform::is_process_instance_alive(pid, start),
-        None => platform::process_exists(pid),
-    }
 }
 
 fn fuse_config_from_request(

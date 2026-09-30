@@ -156,13 +156,14 @@ class MountMetadataScopeTest(unittest.TestCase):
 
     def test_fuse_child_cleanup_rechecks_process_identity(self) -> None:
         # 状态文件携带启动时间后，SIGTERM/SIGKILL 两个阶段都必须重复校验 PID 身份，
-        # 避免原服务退出后把信号发给复用该 PID 的其它进程。
-        body = function_body(self.daemon_mount, "fn terminate_fuse_child(")
+        # 避免原服务退出后把信号发给复用该 PID 的其它进程。daemon 与 companion 的
+        # 终止实现已统一到共享模块，两侧回收都必须走同一入口。
+        body = function_body(read("src/fuse_terminate.rs"), "fn terminate_fuse_process(")
         self.assertIn("start_time_ticks", body)
-        self.assertIn("process_identity_alive", body)
-        companion_body = function_body(self.companion_mount, "fn terminate_fuse_service(")
-        self.assertIn("start_time_ticks", companion_body)
-        self.assertIn("process_identity_alive", companion_body)
+        self.assertIn("process_identity_alive(pid, start_time_ticks)", body)
+        self.assertIn("wait_for_exit(pid, start_time_ticks)", body)
+        for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
+            self.assertIn("crate::fuse_terminate::terminate_fuse_process(", read(path), path)
 
     def test_existing_android_private_metadata_is_preserved(self) -> None:
         # 完整隔离和 FUSE 初始化都不能对已有 Android/data、media、obb 后端目录强制
