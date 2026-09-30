@@ -477,6 +477,16 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
     if media_view_backoff_active() {
         return false;
     }
+    // 存储就绪前置检查：源挂载在应用发起挂载请求时已存在，但其内容（<user>/Android）
+    // 在开机早期可能尚未填充——真机实测开机后数分钟内不可见，探测重试（秒级）覆盖
+    // 不了分钟级窗口。这一形态是「尚未就绪」而非「绑定失败」：此时 fork 绑定子进程
+    // 只会让探测失败并写入退避标记，把一次普通的「早到」升级成 10 分钟盲窗。这里在
+    // 调用方命名空间做一次廉价的源可见性检查，不就绪就静默跳过，等下一次注册
+    // （reconcile 周期约 6 秒）重试；不写标记、不进退避。
+    let source_probe = format!("/mnt/user/{user_id}/emulated/{user_id}/Android");
+    if !crate::platform::fs::is_directory(&source_probe) {
+        return false;
+    }
     let Some(host) = get_fuse_host() else {
         return false;
     };
