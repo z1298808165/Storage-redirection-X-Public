@@ -319,7 +319,8 @@ class RootFileStoreTest {
     val invocation = shell.invocations.single()
     assertEquals(180_000L, invocation.timeoutMs)
     val command = invocation.command
-    assertTrue(command, command.contains("archive=${shellQuote(archive!!)};"))
+    // `archive=` 前缀赋值段属已删除的 legacy 分支；两个入口都以引号参数携带归档路径。
+    assertTrue(command, command.contains(shellQuote(archive!!)))
     assertTrue(command, command.startsWith("if [ -r ${shellQuote(SrxCtlPath)} ]; then "))
     assertTrue(command, command.contains("diagnostic-archive"))
     assertTrue(command, command.contains("[ \$rc -eq 2 ] || [ \$rc -eq 127 ] || exit \$rc"))
@@ -327,18 +328,12 @@ class RootFileStoreTest {
         command,
         command.contains("/system/bin/sh ${shellQuote(DiagnosticArchiveScriptPath)}"),
     )
-    assertTrue(
-        command,
-        command.contains("mkdir -p \"\$stage/logs\" \"\$stage/config\" \"\$stage/state\""),
-    )
-    assertTrue(command, command.contains("/system/bin/sh \"\$module/bin/srxctl\" status"))
-    assertTrue(command, command.contains("logcat -b main,system,crash -d -t 10000"))
-    assertTrue(command, command.contains("logcat -b main,system -d -t 8000"))
-    assertTrue(command, command.contains("logcat -b crash -d -v threadtime"))
-    assertTrue(command, command.indexOf("logcat_start=") < command.indexOf("cp -p"))
-    assertTrue(command, command.contains("-T \"\$logcat_start\""))
-    assertTrue(command, command.contains("tail -n 3000"))
-    assertTrue(command, command.contains("(cd \"\$stage\" && tar -czf \"\$archive\" *)"))
+    assertTrue(command, command.contains("[ \$rc -eq 0 ] && exit 0; fi;"))
+    // legacy 内嵌导出已删除（最低兼容模块 v1.2.55 起由模块自带脚本入口）：命令只保留
+    // srxctl 与模块脚本两个入口，回退到内嵌 shell 采集脚本属于兼容性回归，必须拦下。
+    assertFalse(command, command.contains("正在使用兼容模式导出日志"))
+    assertFalse(command, command.contains("logcat -b main,system,crash -d -t 10000"))
+    assertFalse(command, command.contains("tar -czf"))
   }
 
   @Test
