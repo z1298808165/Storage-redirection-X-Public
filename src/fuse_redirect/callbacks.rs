@@ -19,7 +19,7 @@ use super::policy::OperationKind;
 use super::{
     CachedDirCandidates, DIR_CANDIDATE_CACHE_TTL, DirEntry, DirEntryCandidate,
     DirectorySourceSignature, DirectorySourceState, FUSE_READ_BUFFER, FuseRedirectFs, FuseState,
-    MAX_READ_SIZE, MEDIA_RW_GID, MEDIA_RW_UID, OpenFile, ROOT_INO, TTL,
+    MAX_READ_SIZE, MEDIA_RW_GID, MEDIA_RW_UID, NewEntryRoute, OpenFile, ROOT_INO, TTL,
     estimate_cached_dir_candidates_bytes,
 };
 use crate::platform::paths;
@@ -663,34 +663,17 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyCreate,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
-        let Some(parent_rel) = self.path_for_ino(parent) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let rel = match Self::child_rel(&parent_rel, name) {
-            Ok(rel) => rel,
+        let NewEntryRoute {
+            policy,
+            rel,
+            backend,
+        } = match self.route_new_entry(req, parent, name, "create") {
+            Ok(route) => route,
             Err(errno) => {
                 reply.error(errno);
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
-            Ok(backend) => backend,
-            Err(errno) => {
-                reply.error(errno);
-                return;
-            }
-        };
-        if backend.is_read_only {
-            policy.emit_monitor_read_only_deny("create", &backend);
-            reply.error(Errno::EROFS);
-            return;
-        }
-        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
-            reply.error(errno);
-            return;
-        }
         let create_mode = mode & !umask;
         let file = match Self::open_backend_file(
             &backend.path,
@@ -806,39 +789,22 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEntry,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
         let file_type = mode & libc::S_IFMT;
         if file_type != 0 && file_type != libc::S_IFREG {
             reply.error(Errno::EPERM);
             return;
         }
-        let Some(parent_rel) = self.path_for_ino(parent) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let rel = match Self::child_rel(&parent_rel, name) {
-            Ok(rel) => rel,
+        let NewEntryRoute {
+            policy,
+            rel,
+            backend,
+        } = match self.route_new_entry(req, parent, name, "mknod") {
+            Ok(route) => route,
             Err(errno) => {
                 reply.error(errno);
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
-            Ok(backend) => backend,
-            Err(errno) => {
-                reply.error(errno);
-                return;
-            }
-        };
-        if backend.is_read_only {
-            policy.emit_monitor_read_only_deny(stringify!(mknod), &backend);
-            reply.error(Errno::EROFS);
-            return;
-        }
-        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
-            reply.error(errno);
-            return;
-        }
         let create_mode = mode & !libc::S_IFMT & !umask;
         let file = match Self::open_backend_file(
             &backend.path,
@@ -889,34 +855,17 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEntry,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
-        let Some(parent_rel) = self.path_for_ino(parent) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let rel = match Self::child_rel(&parent_rel, name) {
-            Ok(rel) => rel,
+        let NewEntryRoute {
+            policy,
+            rel,
+            backend,
+        } = match self.route_new_entry(req, parent, name, "mkdir") {
+            Ok(route) => route,
             Err(errno) => {
                 reply.error(errno);
                 return;
             }
         };
-        let backend = match self.backend_for_relative(&policy, &rel, OperationKind::Write) {
-            Ok(backend) => backend,
-            Err(errno) => {
-                reply.error(errno);
-                return;
-            }
-        };
-        if backend.is_read_only {
-            policy.emit_monitor_read_only_deny("mkdir", &backend);
-            reply.error(Errno::EROFS);
-            return;
-        }
-        if let Err(errno) = self.ensure_parent_for_backend(&policy, &backend) {
-            reply.error(errno);
-            return;
-        }
         let mode = mode & !umask;
         match std::fs::create_dir(&backend.path) {
             Ok(()) => fix_path_metadata(

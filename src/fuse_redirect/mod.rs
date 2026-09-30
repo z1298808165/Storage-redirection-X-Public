@@ -23,7 +23,7 @@ pub use scoped_mount::{
 
 use crate::platform::{fs, paths};
 use attrs::{file_attr_from_metadata, synthetic_dir_attr};
-use fuser::{Errno, FileAttr, FileType, Generation, INodeNo, ReplyEmpty, ReplyEntry};
+use fuser::{Errno, FileAttr, FileType, Generation, INodeNo, ReplyEmpty, ReplyEntry, Request};
 use inode::{remove_inode_path, remove_unreferenced_inode};
 use metadata::{cstring_path, errno_from_code, errno_from_io, fix_path_metadata, last_errno};
 use perf::FusePerfStats;
@@ -224,6 +224,13 @@ pub(super) fn estimate_cached_dir_candidates_bytes(
         .saturating_add(INITIAL_DIR_CANDIDATE_CACHE_BYTES / 64)
 }
 
+/// 新建条目（create/mknod/mkdir）共用的前置解析结果。
+struct NewEntryRoute {
+    policy: Arc<RedirectPolicy>,
+    rel: String,
+    backend: BackendPath,
+}
+
 impl FuseRedirectFs {
     /// 取出按 uid 策略表句柄。
     ///
@@ -342,6 +349,34 @@ impl FuseRedirectFs {
         } else {
             Ok(paths::join(parent_rel, &name_text))
         }
+    }
+
+    /// 新建条目的公共前置解析：父 inode → 子相对路径 → 写后端 → 只读拒绝 →
+    /// 确保父目录。任一步失败返回 `Errno`，由调用方以各自的 Reply 类型应答；
+    /// 只读拒绝在返回前按操作名发出监视事件，三个回调的告警语义与抽取前一致。
+    fn route_new_entry(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        operation_name: &'static str,
+    ) -> Result<NewEntryRoute, Errno> {
+        let policy = self.policy.for_uid(req.uid());
+        let Some(parent_rel) = self.path_for_ino(parent) else {
+            return Err(Errno::ENOENT);
+        };
+        let rel = Self::child_rel(&parent_rel, name)?;
+        let backend = self.backend_for_relative(&policy, &rel, OperationKind::Write)?;
+        if backend.is_read_only {
+            policy.emit_monitor_read_only_deny(operation_name, &backend);
+            return Err(Errno::EROFS);
+        }
+        self.ensure_parent_for_backend(&policy, &backend)?;
+        Ok(NewEntryRoute {
+            policy,
+            rel,
+            backend,
+        })
     }
 
     fn attr_for_backend(
