@@ -7,7 +7,13 @@
 
 use crate::fuse_redirect::MountRequestFields;
 use crate::platform::errno::{last as last_errno, text as errno_text};
-use libc::{SO_RCVTIMEO, SOL_SOCKET, c_int, c_void, recv, send, setsockopt};
+use crate::platform::fs;
+use crate::platform::module_paths;
+use libc::{
+    O_CLOEXEC, O_CREAT, O_TRUNC, O_WRONLY, SO_RCVTIMEO, SOL_SOCKET, c_int, c_void, open, recv,
+    send, setsockopt,
+};
+use std::ffi::CString;
 
 /// 一次 scoped FUSE 挂载的会话记录。
 #[derive(Clone)]
@@ -56,6 +62,131 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
             (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
         );
     }
+}
+
+/// 把本次挂载写入状态文件（原子写：临时文件 + fsync + rename）。
+///
+/// 状态行契约：`version=` 与 `fingerprint=`（指纹跨进程可比、version 计数器两侧不同域）、
+/// `fuse_child=` 只记可终止的 scoped 会话，共享宿主会话单独写 `fuse_host=`（判活用、
+/// 不可终止），`target=` 记挂载目标。写入中途失败保留上一份完整状态，避免清理流程
+/// 读到截断文件而永久漏卸挂载点。
+// quality-allow(lint-suppression): 参数即两侧共用的状态写入契约，包一层结构体只会增加一次性装配对象。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_mount_state(
+    pid: i32,
+    uid: i32,
+    package_name: &str,
+    config_version: u64,
+    state_path: &str,
+    temp_path: &str,
+    targets: &[String],
+    fuse_children: &[FuseMountState],
+) -> bool {
+    if pid <= 0 || package_name.is_empty() {
+        return false;
+    }
+    if std::fs::create_dir_all(module_paths::MOUNT_STATE_DIR).is_err() {
+        log::warn!(
+            "mount state mkdir failed dir={}",
+            module_paths::MOUNT_STATE_DIR
+        );
+        return false;
+    }
+    // 路径在 fork 之前已由两侧的 ForkPlan 算好，这里直接复用，避免子进程堆分配。
+    let Ok(c_temp_path) = CString::new(temp_path) else {
+        return false;
+    };
+    let mut content = String::new();
+    content.push_str(&format!("version={}\n", config_version));
+    content.push_str(&format!(
+        "fingerprint={}\n",
+        crate::config::SettingsHub::instance().config_fingerprint()
+    ));
+    content.push_str(&format!("package={}\n", package_name));
+    content.push_str(&format!("uid={}\n", uid));
+    if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(pid) {
+        content.push_str(&format!("app_start_time={}\n", start_time_ticks));
+    }
+    for state in fuse_children {
+        if state.host_session.is_some() {
+            // 共享宿主会话不能被写进 `fuse_child=`：清理流程会按这一行终止进程，
+            // 而宿主会话承载着所有接入应用的挂载。
+            continue;
+        }
+        content.push_str(&format!(
+            "fuse_child={}:{}\n",
+            state.child, state.child_start_time_ticks
+        ));
+    }
+    // 宿主会话单独记一行：它不参与终止，但会话死亡后本应用的挂载会变成 ENOTCONN 死挂载，
+    // 必须让健康判定能据此把这份状态视为失效并重挂。
+    if let Some((host_pid, host_start)) = fuse_children.iter().find_map(|state| state.host_session)
+    {
+        content.push_str(&format!("fuse_host={}:{}\n", host_pid, host_start));
+    }
+    let mut all_targets = targets.to_vec();
+    all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
+    for target in module_paths::normalize_mount_targets(&all_targets) {
+        content.push_str("target=");
+        content.push_str(&target);
+        content.push('\n');
+    }
+    // SAFETY: c_temp_path 在调用期间保持存活，且是以 NUL 结尾的合法路径。
+    let fd = unsafe {
+        open(
+            c_temp_path.as_ptr(),
+            O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        let errno = last_errno();
+        log::warn!(
+            "mount state open failed path={} errno={} {}",
+            temp_path,
+            errno,
+            errno_text(errno)
+        );
+        return false;
+    }
+    let mut ok = fs::write_all(fd, content.as_bytes());
+    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符。
+    if ok && unsafe { libc::fsync(fd) } != 0 {
+        let errno = last_errno();
+        log::warn!(
+            "mount state fsync failed path={} errno={} {}",
+            temp_path,
+            errno,
+            errno_text(errno)
+        );
+        ok = false;
+    }
+    // SAFETY: 同上，关闭与改权限使用的都是本函数持有的 fd 与存活字符串。
+    unsafe {
+        libc::close(fd);
+        let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
+    }
+    if ok {
+        ok = std::fs::rename(temp_path, state_path).is_ok();
+        if !ok {
+            log::warn!(
+                "mount state rename failed temp={} path={}",
+                temp_path,
+                state_path
+            );
+        }
+    }
+    if ok {
+        log::info!(
+            "mount state saved pid={} targets={} path={}",
+            pid,
+            targets.len(),
+            state_path
+        );
+    } else {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    ok
 }
 
 /// 批量启动 scoped FUSE 会话；单根失败只丢弃该根，全部根失败前先回滚再收敛成存储根。

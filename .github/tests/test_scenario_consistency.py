@@ -728,11 +728,17 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("rollback_scoped_fuse_services", source, source_path)
             self.assertIn("use crate::fuse_session::", source, source_path)
             state = read(state_path)
-            self.assertIn("if state.host_session.is_some() {", state)
-            self.assertIn("fuse_host={}:{}", state)
+            # 状态文件写入已下沉到共享模块；两侧只保留委托调用。
+            self.assertIn("crate::fuse_session::write_mount_state(", state, state_path)
+            self.assertNotIn("fuse_child={}:{}", state, state_path)
+
+        # 状态行契约集中在共享实现里锚定：宿主会话与 scoped 会话必须分流记账。
+        session = read("src/fuse_session.rs")
+        self.assertIn("if state.host_session.is_some() {", session)
+        self.assertIn("fuse_child={}:{}", session)
+        self.assertIn("fuse_host={}:{}", session)
 
         # 会话回滚已下沉到共享模块：两条路径必须走同一份实现。
-        session = read("src/fuse_session.rs")
         rollback = section(
             session, "fn rollback_scoped_fuse_services(", "pub(crate) fn decode_wait_status("
         )

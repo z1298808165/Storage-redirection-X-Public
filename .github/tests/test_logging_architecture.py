@@ -302,9 +302,12 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("mount_state_fingerprint(request)", current)
 
         # 指纹必须由两个写入点都写进状态文件，否则一侧写的状态永远判为「需要重挂」。
-        self.assertIn('"fingerprint={}\\n"', mount)
-        companion_state = read("src/lifecycle/companion_mount/mount_state.rs")
-        self.assertIn('"fingerprint={}\\n"', companion_state)
+        # 写入已下沉到 fuse_session 共享模块，两侧经委托调用共享同一写入点。
+        session = read("src/fuse_session.rs")
+        self.assertIn('"fingerprint={}\\n"', session)
+        self.assertIn("crate::fuse_session::write_mount_state(", mount)
+        mount_state = read("src/lifecycle/companion_mount/mount_state.rs")
+        self.assertIn("crate::fuse_session::write_mount_state(", mount_state)
 
     def test_doctor_reports_cross_layer_identity(self) -> None:
         """doctor 必须一次给齐五层身份，而不是只报告挂载账本。"""

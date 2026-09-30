@@ -22,10 +22,10 @@ use crate::mount_identity::{self, MountLedger, MountVerdict};
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::paths::monotonic_ms;
 use crate::platform::unique_fd::UniqueFd;
-use crate::platform::{fs, module_paths, mountinfo, paths};
+use crate::platform::{module_paths, mountinfo, paths};
 use libc::{
-    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY, SIGKILL,
-    SIGTERM, SOCK_DGRAM, c_int, close, open, setns, socketpair, umount2,
+    AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SOCK_DGRAM, c_int,
+    close, open, setns, socketpair, umount2,
 };
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -1602,113 +1602,16 @@ fn write_mount_state(
     targets: &[String],
     fuse_children: &[FuseMountState],
 ) -> bool {
-    if std::fs::create_dir_all(module_paths::MOUNT_STATE_DIR).is_err() {
-        log::warn!(
-            "daemon mount state mkdir failed dir={}",
-            module_paths::MOUNT_STATE_DIR
-        );
-        return false;
-    }
-    // 路径在 fork 之前已由 MountForkPlan 算好，直接复用，避免子进程堆分配。
-    let state_path = plan.state_path.as_str();
-    let temp_path = plan.temp_state_path.as_str();
-    let Ok(c_temp_path) = CString::new(temp_path) else {
-        return false;
-    };
-    let mut content = String::new();
-    content.push_str(&format!("version={}\n", request.config_version));
-    // 配置指纹是跨进程可比的判据，`version=` 不是（两侧计数器不同域）。见
-    // `SettingsHub::config_fingerprint` 的说明；reconcile 靠它判断这份挂载是否已按当前配置建立。
-    content.push_str(&format!(
-        "fingerprint={}\n",
-        crate::config::SettingsHub::instance().config_fingerprint()
-    ));
-    content.push_str(&format!("package={}\n", request.package_name));
-    content.push_str(&format!("uid={}\n", request.uid));
-    if let Some(start_time_ticks) = crate::platform::process_start_time_ticks(request.pid) {
-        content.push_str(&format!("app_start_time={}\n", start_time_ticks));
-    }
-    for state in fuse_children {
-        if state.host_session.is_some() {
-            // 共享宿主会话不能被写进 `fuse_child=`：清理流程会按这一行终止进程，
-            // 而宿主会话承载着所有接入应用的挂载。
-            continue;
-        }
-        content.push_str(&format!(
-            "fuse_child={}:{}\n",
-            state.child, state.child_start_time_ticks
-        ));
-    }
-    // 宿主会话单独记一行：它不参与终止，但会话死亡后本应用的挂载会变成 ENOTCONN 死挂载，
-    // 必须让健康判定能据此把这份状态视为失效并重挂。
-    if let Some((host_pid, host_start)) = fuse_children.iter().find_map(|state| state.host_session)
-    {
-        content.push_str(&format!("fuse_host={}:{}\n", host_pid, host_start));
-    }
-    let mut all_targets = targets.to_vec();
-    all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-    for target in module_paths::normalize_mount_targets(&all_targets) {
-        content.push_str("target=");
-        content.push_str(&target);
-        content.push('\n');
-    }
-    // 先写临时文件并 fsync，再原子 rename 覆盖正式文件。
-    // 这样即使中途崩溃或断电，也只会残留临时文件，正式挂载清单仍是上一轮的完整内容，
-    // 避免 clear_previous_mounts 因为读到空文件而永久漏卸挂载点。
-    // SAFETY: c_temp_path 在调用期间保持存活，且是以 NUL 结尾的合法路径。
-    let fd = unsafe {
-        open(
-            c_temp_path.as_ptr(),
-            O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        log::warn!(
-            "daemon mount state open failed path={} errno={} {}",
-            temp_path,
-            last_errno(),
-            errno_text(last_errno())
-        );
-        return false;
-    }
-    let mut ok = fs::write_all(fd, content.as_bytes());
-    // SAFETY: fd 为本函数打开且尚未关闭的有效描述符。
-    if ok && unsafe { libc::fsync(fd) } != 0 {
-        log::warn!(
-            "daemon mount state fsync failed path={} errno={} {}",
-            temp_path,
-            last_errno(),
-            errno_text(last_errno())
-        );
-        ok = false;
-    }
-    // SAFETY: 同上，关闭与改权限使用的都是本函数持有的 fd 与存活字符串。
-    unsafe {
-        libc::close(fd);
-        let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
-    }
-    if ok {
-        ok = std::fs::rename(temp_path, state_path).is_ok();
-        if !ok {
-            log::warn!(
-                "daemon mount state rename failed temp={} path={}",
-                temp_path,
-                state_path
-            );
-        }
-    }
-    if ok {
-        log::info!(
-            "daemon mount state saved pid={} targets={} path={}",
-            request.pid,
-            targets.len(),
-            state_path
-        );
-    } else {
-        let _ = std::fs::remove_file(temp_path);
-    }
-    ok
+    crate::fuse_session::write_mount_state(
+        request.pid,
+        request.uid,
+        &request.package_name,
+        request.config_version,
+        plan.state_path.as_str(),
+        plan.temp_state_path.as_str(),
+        targets,
+        fuse_children,
+    )
 }
 
 fn state_file_path(request: &MountRequest) -> String {
