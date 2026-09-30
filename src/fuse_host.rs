@@ -585,6 +585,10 @@ pub fn ensure_host_media_fuse_view(user_id: i32) -> bool {
     };
     if !ok {
         log_host_stage_trace();
+    } else {
+        // 绑定成功即清除失败标记：标记只描述「最近一次失败」，不应跨成功存续；
+        // 清掉后本开机的瞬时失败不会把退避状态带进下一次开机的判定。
+        let _ = std::fs::remove_file(crate::platform::module_paths::MEDIA_VIEW_BACKOFF_FILE);
     }
     ok
 }
@@ -600,8 +604,19 @@ fn media_view_backoff_active() -> bool {
     let Ok(last_failure_ms) = text.trim().parse::<i64>() else {
         return false;
     };
-    let elapsed = paths::monotonic_ms().saturating_sub(last_failure_ms);
-    (0..=MEDIA_VIEW_BACKOFF_MS).contains(&elapsed)
+    let now_ms = paths::monotonic_ms();
+    // 标记文件在模块目录里跨重启保留，而 monotonic 时钟每次开机归零。上次开机的
+    // 失败时间戳（随上次开机时长增长，动辄数小时）在重启后远大于当前时刻，
+    // `saturating_sub` 会把它饱和成 0 落进退避窗口：媒体视图被禁用到本开机时钟
+    // 追上旧值为止——盲窗内自有 sqlite 三件套直连 f2fs，与 MediaProvider 的另一
+    // 代内核缓存并行读写，读取撕裂在整窗内可复发。本开机内 monotonic 单调递增、
+    // 写入必然早于读取，因此「失败时间戳大于当前时刻」只可能是跨开机残留：
+    // 判为过期并顺手清理。
+    if last_failure_ms > now_ms {
+        let _ = std::fs::remove_file(crate::platform::module_paths::MEDIA_VIEW_BACKOFF_FILE);
+        return false;
+    }
+    now_ms - last_failure_ms <= MEDIA_VIEW_BACKOFF_MS
 }
 
 fn mark_media_view_failure() {
