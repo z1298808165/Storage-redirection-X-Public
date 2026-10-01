@@ -39,6 +39,16 @@ on:
         required: false
         default: "0"
         type: string
+      graphics_guard:
+        description: "1 保持 A17 图形读回保护（默认）；0 跳过保护，实测最新 A17 镜像是否已修复 ReadColorBufferDMA 崩溃"
+        required: false
+        default: "1"
+        type: string
+      fresh_app_scenarios:
+        description: "非空时按场景收窄逐用例冷启动（如 29,32,33），其余场景复用应用进程；留空保持全部冷启动"
+        required: false
+        default: ""
+        type: string
   push:
     branches: [SRX-R-ksu]
 
@@ -219,6 +229,10 @@ jobs:
       # 诊断开关：KernelSU 的 LKM 在 AVD 上打不了 sepolicy，本轮用 permissive 验证
       # 这是否为 MediaProvider hook 失效的唯一原因。正式链路恒为 0。
       SRT_KSU_SELINUX_PERMISSIVE: ${{ inputs.selinux_permissive || '0' }}
+      # A17 提速实验开关：0 = 跳过图形读回保护（实测最新镜像是否已修复）；
+      # 非空 fresh_app_scenarios = 只对这些场景逐用例冷启动，其余复用应用进程。
+      SRT_A17_GRAPHICS_GUARD: ${{ inputs.graphics_guard || '1' }}
+      SRT_FRESH_APP_SCENARIOS: ${{ inputs.fresh_app_scenarios || '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
