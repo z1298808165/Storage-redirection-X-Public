@@ -204,8 +204,9 @@ jobs:
       SRT_FRESH_APP_PER_CASE: 1
       # CI Android 测试流统一关闭 FuseFix native hook。
       SRT_FUSE_FIX_ENABLED: false
-      # KernelSU 的 su 走 `su -c`；显式指定避免场景脚本先试 Magisk 的入口。
-      ADB_ROOT_MODE: su
+      # KernelSU 的 su 只接受 `su 0 sh -c`（`su -c` 会报 invalid uid/gid），
+      # 显式指定 su0 模式，避免场景脚本先试其它入口。
+      ADB_ROOT_MODE: su0
       # 走 KernelSU 安装链路，正式矩阵仍用默认（Magisk）脚本。
       MODULE_INSTALL_SCRIPT: .github/tests/install-storage-redirect-module-ksu.sh
       KERNELSU_APK_URL: ${{ inputs.kernelsu_apk_url || 'https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk' }}
