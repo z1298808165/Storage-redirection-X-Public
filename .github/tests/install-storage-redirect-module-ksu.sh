@@ -116,14 +116,15 @@ start_emulator() {
   fi
 }
 
-# KernelSU 的 su 由 ksuinit 注入到 PATH；不同版本位置不完全一致，命令里前置
-# /data/adb/ksu/bin 兜底。远程命令用 base64 传递，避免多层引号转义出错。
+# KernelSU 的 su 不接受 `su -c`（实测报 `su: invalid uid/gid '-c'`），只有
+# `su 0 sh -c` 能拿到 root；这里以后者为首选，保留 `su -c` 兜底兼容真机上的
+# 其它 KernelSU 版本。远程命令用 base64 传递，避免多层引号转义出错。
 adb_root() {
-  local command="PATH=/data/adb/ksu/bin:/data/adb/ksu:\$PATH; $1"
+  local command="PATH=/data/adb/ksu/bin:/data/adb/ksu:/data/local/tmp:\$PATH; $1"
   local encoded runner
   encoded="$(printf '%s' "$command" | base64 | tr -d '\n')"
   runner="printf '%s' '$encoded' | base64 -d | sh"
-  adb shell "su -c '$runner'" || adb shell "su 0 sh -c '$runner'"
+  adb shell "su 0 sh -c '$runner'" || adb shell "su -c '$runner'"
 }
 
 adb_su() {
@@ -142,7 +143,35 @@ adb_write_file() {
 
 adb_ksud() {
   local args="$1"
-  adb_root "for bin in /data/adb/ksu/bin/ksud /data/adb/ksud ksud; do if [ -x \"\$bin\" ]; then \"\$bin\" $args; exit \$?; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then \"\$found\" $args; exit \$?; fi; done; echo ksud_not_found >&2; exit 127"
+  adb_root "for bin in /data/adb/ksu/bin/ksud /data/local/tmp/ksud /data/adb/ksud ksud; do if [ -x \"\$bin\" ]; then \"\$bin\" $args; exit \$?; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then \"\$found\" $args; exit \$?; fi; done; echo ksud_not_found >&2; exit 127"
+}
+
+# 实测 KernelSU v3.3 的 LKM 模式在 AVD 上并不落盘 /data/adb/ksu，设备上没有现成
+# 的 ksud。这里从同一个 KernelSU APK 里解出与模拟器架构匹配的 ksud 推上去备用，
+# 保证模块安装器一定有可用实现，且版本与已注入的 LKM 同源。
+ensure_ksud() {
+  if adb_root 'command -v ksud >/dev/null 2>&1; [ -x /data/adb/ksu/bin/ksud ]' >/dev/null 2>&1; then
+    echo "ksud 已存在于设备上。"
+    return 0
+  fi
+
+  echo "设备上没有 ksud，从 KernelSU APK 解出后推送。"
+  python3 - "$KSUAVD_DIR/KernelSU.apk" "$KSUAVD_DIR/ksud" <<'PY'
+import sys
+import zipfile
+
+apk_path, out_path = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(apk_path) as apk:
+    names = [n for n in apk.namelist() if n.endswith("/libksud.so")]
+    preferred = [n for n in names if "x86_64" in n] or names
+    if not preferred:
+        raise SystemExit("KernelSU APK 中没有 libksud.so")
+    with open(out_path, "wb") as target:
+        target.write(apk.read(preferred[0]))
+print("ksud_source=%s" % preferred[0])
+PY
+  adb push "$KSUAVD_DIR/ksud" /data/local/tmp/ksud
+  adb_root 'chmod 755 /data/local/tmp/ksud; /data/local/tmp/ksud --version 2>&1 || true'
 }
 
 wait_for_root_shell() {
@@ -167,8 +196,11 @@ dump_root_diagnostics() {
     adb shell 'getprop ro.build.version.sdk; getprop ro.build.version.release; uname -r; getprop sys.boot_completed' 2>&1 || true
     echo "=== su_probe ==="
     adb shell 'command -v su || true; ls -la /data/adb/ksu 2>/dev/null || echo ksu_dir_absent' 2>&1 || true
+    echo "=== su_forms ==="
+    adb shell 'su -c id' 2>&1 | head -3 || true
+    adb shell 'su 0 sh -c id' 2>&1 | head -3 || true
     echo "=== root_shell ==="
-    adb_root 'id; echo ksu_bin; ls -la /data/adb/ksu/bin 2>/dev/null || echo ksu_bin_absent; echo ksud_version; for bin in /data/adb/ksu/bin/ksud ksud; do [ -x "$bin" ] && { "$bin" -V 2>&1 || true; break; }; done' 2>&1 || true
+    adb_root 'id; echo adb_dir; ls -la /data/adb 2>/dev/null || echo adb_dir_absent; echo ksu_bin; ls -la /data/adb/ksu/bin 2>/dev/null || echo ksu_bin_absent; echo ksud_lookup; command -v ksud || echo ksud_not_in_path; echo ksud_version; for bin in /data/adb/ksu/bin/ksud ksud /data/local/tmp/ksud; do [ -x "$bin" ] && { "$bin" -V 2>&1 || true; break; }; done' 2>&1 || true
     echo "=== modules ==="
     adb_root 'ls -la /data/adb/modules 2>/dev/null || echo modules_absent; ls -la /data/adb/modules_update 2>/dev/null || echo modules_update_absent' 2>&1 || true
     echo "=== logcat ==="
@@ -482,7 +514,10 @@ for i in $(seq 1 "$ksu_ready_attempts"); do
   sleep 10
 done
 
-adb_root 'id; ls -la /data/adb/ksu'
+# 取证：KernelSU 在 AVD 上的落地形态尚在摸索（实测 /data/adb/ksu 未生成），
+# 这里把 root 身份、ksud 位置与 /data/adb 结构完整落盘，失败时可直接定位。
+dump_root_diagnostics
+ensure_ksud
 install_modules_with_ksud
 seed_storage_redirect_test_environment
 if [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
