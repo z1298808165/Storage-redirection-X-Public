@@ -1577,12 +1577,46 @@ fn fuse_config_from_request(
     crate::fuse_redirect::fuse_config_from_request(request, mount_root, real_root_override)
 }
 
+/// 宿主策略预登记的幂等指纹：uid -> (宿主子进程 pid, 宿主 start_ticks, 配置版本)。
+///
+/// reconcile 常驻循环每轮都会对运行中的配置应用调用 [`pre_register_host_policy`]，
+/// 而策略内容只随配置版本与宿主会话代际变化。稳态下逐轮全量重登记纯属浪费：每次
+/// 登记都要在 daemon 侧为 media 视图探测 fork 一个子进程，并在宿主子进程内做一次
+/// 完整的 `RedirectPolicy::new`（沙盒目录准备、规则归一化），还会把注册日志刷到
+/// 秒级轮转。指纹任一分量变化都会自然失效重登记：宿主换代（pid/start_ticks）、
+/// 配置变更（config_version）、MediaProvider 重启（由 reconcile 显式清空本表）。
+static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, (i32, u64, u64)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// MediaProvider 进程集合变化时清空预登记指纹表。
+///
+/// media 视图绑定指向 MediaProvider 的 FUSE 连接，其进程重启后旧连接死亡，已登记
+/// 策略里的视图根随之失效；清空指纹表让本轮预登记全量重跑，触发
+/// `ensure_host_media_fuse_view` 重新探测并重绑新连接，保留原有的自愈语义。
+pub(crate) fn invalidate_pre_registered_host_policies() {
+    if let Ok(mut registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
+        registered.clear();
+    }
+}
+
+/// 预登记调用的结果分类：区分"本次实际登记"与"指纹命中跳过"，让调用方只对
+/// 真正的登记动作记日志，避免稳态下每轮 reconcile 都刷一遍登记日志。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreRegisterOutcome {
+    /// 本次调用实际向宿主登记了策略并收到宿主确认。
+    Registered,
+    /// 指纹命中：宿主会话内该 uid 已是同版本登记状态，本次未做任何 IO。
+    AlreadyRegistered,
+    /// 不满足预登记条件，或登记失败。
+    NotApplicable,
+}
+
 /// 在执行具体挂载前把 Auto 应用策略预登记进共享宿主。
 ///
 /// companion 与 daemon 并行处理同一应用的挂载请求；如果等 companion 进入后才登记，
 /// companion 只能看到没有该 uid 的快照并回退 scoped。预登记只写策略，不创建挂载，且
 /// 必须丢弃应用 namespace 专属的 real_root_override，保证宿主看到真实存储根。
-pub(crate) fn pre_register_host_policy(request: &MountRequest) -> bool {
+pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOutcome {
     if request.operation != MountOperation::Reload
         || !matches!(
             request.storage_backend_mode,
@@ -1590,10 +1624,40 @@ pub(crate) fn pre_register_host_policy(request: &MountRequest) -> bool {
         )
         || !crate::fuse_host::wait_for_host_session()
     {
-        return false;
+        return PreRegisterOutcome::NotApplicable;
+    }
+    // 幂等跳过以快照为准：快照自身校验了 boot 归属与宿主进程存活，指纹比对覆盖
+    // 宿主换代与配置变更。跳过路径不做任何 fork、不构造策略、不发送控制消息；
+    // 指纹不匹配（配置变更或宿主换代）时重登记，并在登记获宿主确认后才更新指纹，
+    // 登记失败时保持旧指纹（下一轮会再次尝试），绝不把"未登记"误记为"已登记"。
+    if let Some(view) = crate::fuse_host::read_host_session_view()
+        && view.registered_uids.contains(&(request.uid as u32))
+    {
+        let fingerprint = (
+            view.child_pid,
+            view.child_start_time_ticks,
+            request.config_version,
+        );
+        if let Ok(registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
+            if registered.get(&(request.uid as u32)) == Some(&fingerprint) {
+                return PreRegisterOutcome::AlreadyRegistered;
+            }
+        }
+        let config = fuse_config_from_request(request, None, None);
+        if crate::fuse_host::register_app_policy(&config) {
+            if let Ok(mut registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
+                registered.insert(request.uid as u32, fingerprint);
+            }
+            return PreRegisterOutcome::Registered;
+        }
+        return PreRegisterOutcome::NotApplicable;
     }
     let config = fuse_config_from_request(request, None, None);
-    crate::fuse_host::register_app_policy(&config)
+    if crate::fuse_host::register_app_policy(&config) {
+        PreRegisterOutcome::Registered
+    } else {
+        PreRegisterOutcome::NotApplicable
+    }
 }
 
 fn write_mount_state(

@@ -5,7 +5,8 @@ mod media_hook_heal;
 use crate::daemon_monitor::RegularAppMonitor;
 use crate::daemon_mount::{
     MountOperation, MountRequest, cleanup_all_mount_states, execute_mount_request,
-    has_healthy_mount_state, has_mount_state, prune_stale_mount_states,
+    has_healthy_mount_state, has_mount_state, invalidate_pre_registered_host_policies,
+    prune_stale_mount_states,
 };
 use crate::logging::Logger;
 use crate::platform;
@@ -39,6 +40,13 @@ const UNINTERRUPTIBLE_SKIP_LOG_STEP: u64 = 32;
 const RECONCILE_SUMMARY_LOG_HEARTBEAT: u64 = 100;
 
 static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 上一轮 reconcile 观察到的 MediaProvider 进程 pid 集合（排序后）。
+///
+/// 集合变化即 MediaProvider 发生重启/换代：宿主命名空间里的 media 视图绑定仍指向
+/// 已死亡的旧 FUSE 连接，必须清空宿主策略预登记指纹表，让本轮预登记全量重跑并
+/// 重新绑定新连接。集合稳定时不清空，配合预登记指纹实现稳态零 fork。
+static LAST_MEDIA_PROVIDER_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 /// 周期 reconcile 摘要的记录状态。
 ///
@@ -498,10 +506,25 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
 
     media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
 
+    // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
+    let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
+    media_pids.sort_unstable();
+    let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *last_media_pids != media_pids {
+        *last_media_pids = media_pids;
+        drop(last_media_pids);
+        invalidate_pre_registered_host_policies();
+    }
+
     // companion 与 daemon 可能同时为同一应用发起挂载。先登记本轮 Auto 应用策略，
     // 让 companion 能从宿主快照确认 uid 后直接接入共享会话，而不是因快照尚未更新回退 scoped。
+    // 只有本次真正发生登记动作才记日志；指纹命中跳过时保持静默，避免稳态刷屏。
     for plan in &plans {
-        if crate::daemon_mount::pre_register_host_policy(&plan.request) {
+        if crate::daemon_mount::pre_register_host_policy(&plan.request)
+            == crate::daemon_mount::PreRegisterOutcome::Registered
+        {
             log::debug!(
                 "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
                 plan.request.pid,
