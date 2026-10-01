@@ -160,6 +160,10 @@ $script:DeviceExecutionStateBackupReady = $false
 $script:LastMountConfirmedPid = ""
 $script:FreshAppPerCase = -not ($env:SRT_FRESH_APP_PER_CASE -match '^(0|false|FALSE|no|NO)$')
 if ($FreshAppPerCase) { $script:FreshAppPerCase = $true }
+# 与 .sh 的 SRT_FRESH_APP_SCENARIOS 对应：非空时按场景收窄逐用例冷启动，
+# 只有列出的场景保持冷启动，其余复用应用进程；空值保持原语义。
+$script:FreshAppScenarios = if ([string]::IsNullOrWhiteSpace($env:SRT_FRESH_APP_SCENARIOS)) { @() }
+    else { ($env:SRT_FRESH_APP_SCENARIOS -replace '\s', '') -split ',' | Where-Object { $_ } }
 $script:ResultPollMilliseconds = if ($env:SRT_RESULT_POLL_MS -match '^\d+$') { [Math]::Max(50, [int]$env:SRT_RESULT_POLL_MS) } else { 150 }
 $script:AppLaunchSettleMilliseconds = if ($env:SRT_APP_LAUNCH_SETTLE_MS -match '^\d+$') { [Math]::Max(0, [int]$env:SRT_APP_LAUNCH_SETTLE_MS) } else { 800 }
 # 默认 0 = 不等日志确认（与 .sh 默认 15000ms 不同，这里是有意保留的既有行为：
@@ -803,9 +807,22 @@ function Invoke-ServiceCase {
     [pscustomobject]@{ Ok = $false; Text = "timeout"; Path = "" }
 }
 
+function Test-FreshAppEnabled {
+    # 与 .sh 的 fresh_app_enabled_for_label 对应：SRT_FRESH_APP_SCENARIOS 非空时
+    # 只有列出的场景保持逐用例冷启动。
+    param([string]$Label)
+
+    if (-not $script:FreshAppPerCase) { return $false }
+    if ($script:FreshAppScenarios.Count -gt 0) {
+        $scenario = Get-ScenarioFromLabel $Label
+        return ($scenario -in $script:FreshAppScenarios)
+    }
+    return $true
+}
+
 function Prepare-ServiceCase {
     param([string]$Label)
-    if (-not $script:FreshAppPerCase) { return }
+    if (-not (Test-FreshAppEnabled $Label)) { return }
     $cleanupOk = Stop-AppAndWaitFuseCleanup "$Label/fresh-app"
     if (-not $cleanupOk -and $script:FailFast) {
         throw "[SRT_FAIL_FAST_ITEM] $Label/fresh-app-cleanup"

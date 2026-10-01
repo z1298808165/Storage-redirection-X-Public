@@ -170,7 +170,15 @@ android17_disable_graphics_readback() {
 }
 
 prepare_device_health
-android17_disable_graphics_readback "初次启动后"
+# A17 图形读回保护开关：默认 1 保持既有行为。该缺陷来自 emulator 的 gfxstream 与
+# mapper.ranchu gralloc（与 Magisk/LSPlant 版本无关），但系统镜像可能已被 Google 修复；
+# 置 0 可跳过保护实测最新镜像是否已不再触发 ReadColorBufferDMA 崩溃。
+SRT_A17_GRAPHICS_GUARD="${SRT_A17_GRAPHICS_GUARD:-1}"
+if [ "$SRT_A17_GRAPHICS_GUARD" = "1" ]; then
+  android17_disable_graphics_readback "初次启动后"
+else
+  echo "android17: SRT_A17_GRAPHICS_GUARD=0，跳过图形读回保护（实验）"
+fi
 
 # CI 模拟器只保留 FuseFix 属性诊断，不安装 native FuseFix hook。
 export SRT_FUSE_FIX_ENABLED=false
@@ -199,7 +207,11 @@ bash "${MODULE_INSTALL_SCRIPT:-.github/tests/install-storage-redirect-module.sh}
 
 # 模块安装会重启 framework；在任何 package 枚举前立即重放图形保护，缩短
 # SystemUI/task snapshot 再次触发 ReadColorBufferDMA 崩溃的窗口。
-android17_disable_graphics_readback "模块重启后"
+if [ "$SRT_A17_GRAPHICS_GUARD" = "1" ]; then
+  android17_disable_graphics_readback "模块重启后"
+else
+  echo "android17: SRT_A17_GRAPHICS_GUARD=0，模块重启后同样跳过图形读回保护（实验）"
+fi
 
 # Android 17 可能限制普通应用的 PackageManager 可见性，记录 root 与普通 shell 的枚举差异。
 {
