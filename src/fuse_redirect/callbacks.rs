@@ -54,14 +54,22 @@ const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
 /// 失败并自锁（“共享内存不可用”→降级 TRUNCATE 仍需 checkpoint→IOERR_SHMOPEN），
 /// 且该状态无法被应用自己打破。
 ///
-/// 处置必须是**删除**而不是截断归零：ishtar 真机 15:04 实测，归零后即使
-/// MediaProvider 侧把文件扩回 32768，应用探针依然失败并再次毒化——旧 inode 在
-/// 宿主 inode 表、MediaProvider FUSE 视图与 f2fs 三层的缓存状态残留无法靠截断
-/// 清除；而删除后由应用经 O_CREAT 重建全新 inode 的路径（与人工删 shm 的治愈
-/// 手法一致）已两次实测必愈。删除对任何消费方都无损：文件内容本就是无效垃圾，
-/// SQLite 下次打开会从 `-wal` 重建 wal-index。
-fn heal_poisoned_sqlite_shm_backend(backend_path: &Path, package_name: &str, rel: &str) -> bool {
-    let Ok(metadata) = std::fs::metadata(backend_path) else {
+/// **检测必须直读 f2fs 真实路径**：毒化往往由绕过 media view 的写入造成（外部
+/// 直写、MP 侧处理路径等），此时 media view 的 fuse 节点缓存仍持有陈旧尺寸，
+/// 按 backend_path 判定会把毒化误读成健康（duchamp 18:00 实测）。删除则双管
+/// 齐下：先删 f2fs 真实文件（保证毒化数据消失），再删 media view 路径（让
+/// MediaProvider 自行失效其缓存节点，后续 O_CREAT 走全新 inode）——与人工删除
+/// shm 的治愈路径一致。对任何消费方都无损：文件内容本就是无效垃圾，SQLite
+/// 下次打开会从 `-wal` 重建 wal-index。
+fn heal_poisoned_sqlite_shm_backend(
+    user_id: i32,
+    rel: &str,
+    backend_path: &Path,
+    package_name: &str,
+) -> bool {
+    // f2fs 真实路径直读：/data/media/<user>/<rel> 与 rel 的目录结构一一对应。
+    let real_path = std::path::PathBuf::from(format!("/data/media/{user_id}/{rel}"));
+    let Ok(metadata) = std::fs::metadata(&real_path) else {
         return false;
     };
     if !metadata.is_file() {
@@ -71,34 +79,47 @@ fn heal_poisoned_sqlite_shm_backend(backend_path: &Path, package_name: &str, rel
     if size == 0 || size >= SQLITE_SHM_MIN_SIZE_BYTES {
         return false;
     }
-    let c_path = match cstring_path(backend_path) {
-        Ok(c_path) => c_path,
-        Err(_) => return false,
+
+    let Ok(c_real) = cstring_path(&real_path) else {
+        return false;
     };
-    // 必须走 unlink 而不是 truncate()：后端经 MediaProvider FUSE 视图时，独立写
-    // 权限检查会对非属主调用方返回 EPERM（真机实测），unlink 由目录侧权限裁决，
-    // 宿主 root 身份可正常执行。
-    // SAFETY: c_path 以 NUL 结尾，unlink 调用期间保持有效，仅按路径读取。
-    if unsafe { libc::unlink(c_path.as_ptr()) } == 0 {
-        log::info!(
-            "fuse sqlite shm poisoned backend removed size={} pkg={} rel={}",
-            size,
-            package_name,
-            rel
-        );
-        true
-    } else {
-        let errno = last_errno();
-        log::warn!(
-            "fuse sqlite shm poisoned backend unlink failed errno={} {} size={} pkg={} rel={}",
-            errno,
-            crate::platform::errno::text(errno),
-            size,
-            package_name,
-            rel
-        );
-        false
+    // 先删 f2fs 真实文件（宿主 root 身份直连，保证毒化数据消失）。
+    // SAFETY: c_real 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
+    let removed_real =
+        unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_real.as_ptr(), 0) } == 0;
+    // 再删 media view 路径（若后端走视图且与真实路径不同）：经 MediaProvider
+    // 处理 unlink 会同步失效其缓存节点。删除失败不影响治愈——节点缓存在
+    // attr TTL 过期后自然收敛。
+    let mut removed_view = false;
+    if backend_path != real_path.as_path()
+        && let Ok(c_view) = cstring_path(backend_path)
+    {
+        // SAFETY: c_view 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
+        removed_view =
+            unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_view.as_ptr(), 0) } == 0;
     }
+
+    if removed_real || removed_view {
+        log::info!(
+            "fuse sqlite shm poisoned backend removed real={} view={} size={} pkg={} rel={}",
+            removed_real,
+            removed_view,
+            size,
+            package_name,
+            rel
+        );
+        return true;
+    }
+    let errno = last_errno();
+    log::warn!(
+        "fuse sqlite shm poisoned backend unlink failed errno={} {} size={} pkg={} rel={}",
+        errno,
+        crate::platform::errno::text(errno),
+        size,
+        package_name,
+        rel
+    );
+    false
 }
 
 impl Filesystem for FuseRedirectFs {
@@ -136,10 +157,15 @@ impl Filesystem for FuseRedirectFs {
             Ok(rel) => {
                 // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
                 // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
-                if policy.is_own_media_sqlite_shm_rel(&rel) {
-                    if let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read) {
-                        heal_poisoned_sqlite_shm_backend(&backend.path, &policy.package_name, &rel);
-                    }
+                if policy.is_own_media_sqlite_shm_rel(&rel)
+                    && let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read)
+                {
+                    heal_poisoned_sqlite_shm_backend(
+                        policy.user_id,
+                        &rel,
+                        &backend.path,
+                        &policy.package_name,
+                    );
                 }
                 self.reply_entry_for_rel(&policy, &rel, reply)
             }
@@ -448,7 +474,12 @@ impl Filesystem for FuseRedirectFs {
         // 重开会重建全新 inode。只读打开不处置（不因读请求删文件）。
         if open_flags_write(flags.0)
             && policy.is_own_media_sqlite_shm_rel(&backend.rel)
-            && heal_poisoned_sqlite_shm_backend(&backend.path, &policy.package_name, &backend.rel)
+            && heal_poisoned_sqlite_shm_backend(
+                policy.user_id,
+                &backend.rel,
+                &backend.path,
+                &policy.package_name,
+            )
         {
             reply.error(Errno::ENOENT);
             return;
