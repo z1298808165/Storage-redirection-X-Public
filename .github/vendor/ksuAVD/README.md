@@ -34,8 +34,14 @@ LKM。CI 流程与 rootAVD 一致：先由 `android-emulator-runner` 启动模�
 - rootAVD 注入 Magisk（自带 Zygisk）；KernelSU 不带 Zygisk，因此 SRX 这类 Zygisk 模块
   必须另外安装独立的 Zygisk 实现（CI 使用 Zygisk Next，module id `zygisksu`）。
 - rootAVD 依赖 Magisk APK 版本；KernelSU-AVD 依赖模拟器内核的 KMI 是否有对应 LKM。
-  Android 17（API 37）模拟器内核为 `android16-6.12`，KernelSU v3.3.0 提供
-  `lkm-x86_64-android16-6.12_kernelsu.ko`。
+  Android 17（API 37）模拟器内核为 `android16-6.12`，对应 LKM 为
+  `x86_64-android16-6.12_kernelsu.ko`。
+- **KMI 有对应 LKM 不等于能用**：实测上游 KernelSU v3.3.0 的 LKM 在该 AVD 内核上无法
+  应用模块的 `sepolicy.rule`（安装期 `Unable to apply SELinux patches! Your kernel may not
+  support SELinux patch fully`，运行期系统进程写 hook 状态被 `avc: denied { setattr }` 拦掉）。
+  ksud 的 `sepolicy` 子命令同样走内核接口（`ksucalls::set_sepolicy`），无法在用户态补救，
+  因此只能换内核侧实现。**默认 APK 用 KernelSU-Next v3.4.0（ksud 3.4.0 / 33294）**，
+  它在同一镜像上 sepolicy 正常生效。换版本时不要只看 KMI 是否匹配。
 
 ## 升级注意事项
 
