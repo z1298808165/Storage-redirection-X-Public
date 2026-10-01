@@ -57,14 +57,14 @@ const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
 /// **检测必须直读 f2fs 真实路径**：毒化往往由绕过 media view 的写入造成（外部
 /// 直写、MP 侧处理路径等），此时 media view 的 fuse 节点缓存仍持有陈旧尺寸，
 /// 按 backend_path 判定会把毒化误读成健康（duchamp 18:00 实测）。删除则双管
-/// 齐下：先删 f2fs 真实文件（保证毒化数据消失），再删 media view 路径（让
-/// MediaProvider 自行失效其缓存节点，后续 O_CREAT 走全新 inode）——与人工删除
-/// shm 的治愈路径一致。对任何消费方都无损：文件内容本就是无效垃圾，SQLite
-/// 下次打开会从 `-wal` 重建 wal-index。
+/// 齐下：先经 media view 路径 unlink（让 MediaProvider 在自己的节点簿记里显式
+/// 失效该名称，供管理器等经 MP FUSE 的读取方保持一致），再删 f2fs 真实文件兜底
+/// （保证毒化数据消失）——与人工删除 shm 的治愈路径一致。对任何消费方都无损：
+/// 文件内容本就是无效垃圾，SQLite 下次打开会从 `-wal` 重建 wal-index。
 fn heal_poisoned_sqlite_shm_backend(
     user_id: i32,
+    view_root: Option<&Path>,
     rel: &str,
-    backend_path: &Path,
     package_name: &str,
 ) -> bool {
     // f2fs 真实路径直读：/data/media/<user>/<rel> 与 rel 的目录结构一一对应。
@@ -82,11 +82,13 @@ fn heal_poisoned_sqlite_shm_backend(
 
     // 删除顺序：先经 media view 路径 unlink——MediaProvider 会在自己的节点簿记里
     // 正确失效该名称并删除后端文件；若此步后 f2fs 真实文件仍存在（视图 unlink
-    // 失败或后端本就是 f2fs 直连），再以 root 直删兜底。顺序颠倒会让 MP 的缓存
+    // 失败或视图未绑定），再以 root 直删兜底。顺序颠倒会让 MP 的缓存
     // 节点指向已消失的文件（幽灵节点），应用后续 O_CREAT 全部失败（18:36 实测）。
     let mut removed_view = false;
     let mut removed_real = false;
-    if let Ok(c_view) = cstring_path(backend_path) {
+    if let Some(view_root) = view_root
+        && let Ok(c_view) = cstring_path(&view_root.join(rel))
+    {
         // SAFETY: c_view 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
         removed_view =
             unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_view.as_ptr(), 0) } == 0;
@@ -157,13 +159,11 @@ impl Filesystem for FuseRedirectFs {
             Ok(rel) => {
                 // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
                 // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
-                if policy.is_own_media_sqlite_shm_rel(&rel)
-                    && let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read)
-                {
+                if policy.is_own_media_sqlite_shm_rel(&rel) {
                     heal_poisoned_sqlite_shm_backend(
                         policy.user_id,
+                        policy.media_sqlite_view_root(),
                         &rel,
-                        &backend.path,
                         &policy.package_name,
                     );
                 }
@@ -476,8 +476,8 @@ impl Filesystem for FuseRedirectFs {
             && policy.is_own_media_sqlite_shm_rel(&backend.rel)
             && heal_poisoned_sqlite_shm_backend(
                 policy.user_id,
+                policy.media_sqlite_view_root(),
                 &backend.rel,
-                &backend.path,
                 &policy.package_name,
             )
         {

@@ -591,24 +591,28 @@ impl RedirectPolicy {
     // 分流只能放在这个唯一的物理拼接点上：real_backend_for_rel、backend_path_for_storage
     // 以及 readdir 的两处直接调用都汇聚到此，放在更上层会漏掉 readdir 一侧。
     //
-    // 例外：自有 `Android/media/<pkg>/` 下的 sqlite 数据库与边车文件改走 MediaProvider
-    // FUSE 视图（media_sqlite_real_root）。这类文件存在"第二个视图协同方"——未重定向
-    // 的调用方（如 XRadiant 管理器）经 MediaProvider FUSE 访问同一物理文件，直连 f2fs
-    // 的写入对那层内核缓存不可见，数据库删除重建后两层各持一个代际，读取撕裂表现为
-    // `SQLITE_CORRUPT`。收窄到 sqlite 文件是为了不把 MediaProvider 对该目录下 rename
-    // 返回 ERANGE 的缺陷重新引入高频路径（sqlite 自身不做临时文件改名）。视图不可用
-    // （scoped 会话、宿主视图未绑定）时为空，自动回退直连行为。
+    // 历史：2026-09-29 曾把自有 `Android/media/<pkg>/` 的 sqlite 三件套改走
+    // MediaProvider FUSE 视图以对齐两代缓存，但视图路由让应用写路径依赖 MP 的节点
+    // 簿记——节点表损坏后 CREATE 稳定 ENOENT（duchamp 2026-10-01 实测）。现回归
+    // f2fs 直连：内容层一致性已由 MP 侧对 private-owner sqlite 的 userspace 强制
+    // hook 覆盖；管理器等经 MP FUSE 的读取方在删除/重建后的缓存 TTL 窗口内可能
+    // 瞬时读到陈旧属性，由真机观测评估。`media_sqlite_real_root` 仍由毒化 shm 自愈
+    // 用于 view 侧 unlink（让 MP 显式失效节点），不再参与 I/O 路由。
     fn real_backend_root_for_storage_rel(&self, rel: &str) -> &PathBuf {
-        if is_own_media_sqlite_relative_path(rel, &self.package_name)
-            && !self.media_sqlite_real_root.as_os_str().is_empty()
-        {
-            return &self.media_sqlite_real_root;
-        }
         if is_android_private_storage_subtree_relative_path(rel) {
             &self.private_real_root
         } else {
             &self.real_root
         }
+    }
+
+    /// MediaProvider FUSE 视图根（未绑定或不可用时为 `None`）。
+    ///
+    /// 不再参与 sqlite 三件套的 I/O 路由，仅供毒化 shm 自愈在删除后端文件时
+    /// 走 view 侧 unlink，让 MediaProvider 显式失效自己的缓存节点。
+    pub(super) fn media_sqlite_view_root(&self) -> Option<&Path> {
+        (!self.media_sqlite_real_root.as_os_str().is_empty())
+            .then_some(self.media_sqlite_real_root.as_path())
     }
 
     /// 是否是应用自有 `Android/media/<pkg>/` 下 sqlite 数据库的 `-shm` 边车路径。
@@ -644,11 +648,6 @@ impl RedirectPolicy {
         }
         [&self.real_root, &self.private_real_root]
             .iter()
-            .chain(
-                (!self.media_sqlite_real_root.as_os_str().is_empty())
-                    .then_some(&self.media_sqlite_real_root)
-                    .iter(),
-            )
             .any(|root| {
                 if rel.is_empty() {
                     path == root.as_path()
