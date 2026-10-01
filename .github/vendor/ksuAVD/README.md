@@ -36,12 +36,13 @@ LKM。CI 流程与 rootAVD 一致：先由 `android-emulator-runner` 启动模�
 - rootAVD 依赖 Magisk APK 版本；KernelSU-AVD 依赖模拟器内核的 KMI 是否有对应 LKM。
   Android 17（API 37）模拟器内核为 `android16-6.12`，对应 LKM 为
   `x86_64-android16-6.12_kernelsu.ko`。
-- **KMI 有对应 LKM 不等于能用**：实测上游 KernelSU v3.3.0 的 LKM 在该 AVD 内核上无法
-  应用模块的 `sepolicy.rule`（安装期 `Unable to apply SELinux patches! Your kernel may not
-  support SELinux patch fully`，运行期系统进程写 hook 状态被 `avc: denied { setattr }` 拦掉）。
-  ksud 的 `sepolicy` 子命令同样走内核接口（`ksucalls::set_sepolicy`），无法在用户态补救，
-  因此只能换内核侧实现。**默认 APK 用 KernelSU-Next v3.4.0（ksud 3.4.0 / 33294）**，
-  它在同一镜像上 sepolicy 正常生效。换版本时不要只看 KMI 是否匹配。
+- **间歇性 sepolicy 现象（不要当成版本能力差异）**：run `36747429134`（官方 v3.3.0 / 32601）
+  出现过 `Unable to apply SELinux patches! Your kernel may not support SELinux patch fully`，随后
+  系统进程写 hook 状态被 `avc: denied { setattr }` 拦掉，场景 2 的 MediaProvider 代写缺失。
+  但 run `36793549753` 用**同一个官方版本**、`selinux_permissive=0`，该告警不再出现且场景 2 通过，
+  说明这是间歇现象而非版本缺失。ksud 的 `sepolicy` 子命令走内核接口
+  （`ksucalls::set_sepolicy`），无法在用户态补救；遇到该告警时**先重跑对照**再判断，
+  不要据此换内核实现或给上游提 issue。官方 v3.3.0 与 KernelSU-Next v3.4.0 均实测可用。
 
 ## 升级注意事项
 
