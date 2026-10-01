@@ -40,6 +40,67 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime};
 
+/// sqlite `-shm` 边车的最小合法尺寸（一个 wal-index 区域）。
+///
+/// 与 MediaProvider 侧 hook 的 `SQLITE_SHM_MIN_SIZE`（`hook/media_fuse.rs`）保持同一
+/// 取值；本模块被 bin 经 `#[path]` 独立重编译且不包含 hook 模块，因此这里本地定义。
+const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
+
+/// 处置被毒化的自有 media sqlite `-shm` 边车：删除后返回是否已删除。
+///
+/// `-shm` 的合法尺寸只有 0 与 ≥32KiB 两种；落在两者之间（真机实测：支付宝内
+/// XRadiant 的 `XRadiant.db-shm` 变成 3 字节全零）即为毒化态——应用侧的 WAL 能力
+/// 探针靠「ftruncate 到小尺寸观察大小是否变化」判定介质可用性，毒化后探针永远
+/// 失败并自锁（“共享内存不可用”→降级 TRUNCATE 仍需 checkpoint→IOERR_SHMOPEN），
+/// 且该状态无法被应用自己打破。
+///
+/// 处置必须是**删除**而不是截断归零：ishtar 真机 15:04 实测，归零后即使
+/// MediaProvider 侧把文件扩回 32768，应用探针依然失败并再次毒化——旧 inode 在
+/// 宿主 inode 表、MediaProvider FUSE 视图与 f2fs 三层的缓存状态残留无法靠截断
+/// 清除；而删除后由应用经 O_CREAT 重建全新 inode 的路径（与人工删 shm 的治愈
+/// 手法一致）已两次实测必愈。删除对任何消费方都无损：文件内容本就是无效垃圾，
+/// SQLite 下次打开会从 `-wal` 重建 wal-index。
+fn heal_poisoned_sqlite_shm_backend(backend_path: &Path, package_name: &str, rel: &str) -> bool {
+    let Ok(metadata) = std::fs::metadata(backend_path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    let size = metadata.len();
+    if size == 0 || size >= SQLITE_SHM_MIN_SIZE_BYTES {
+        return false;
+    }
+    let c_path = match cstring_path(backend_path) {
+        Ok(c_path) => c_path,
+        Err(_) => return false,
+    };
+    // 必须走 unlink 而不是 truncate()：后端经 MediaProvider FUSE 视图时，独立写
+    // 权限检查会对非属主调用方返回 EPERM（真机实测），unlink 由目录侧权限裁决，
+    // 宿主 root 身份可正常执行。
+    // SAFETY: c_path 以 NUL 结尾，unlink 调用期间保持有效，仅按路径读取。
+    if unsafe { libc::unlink(c_path.as_ptr()) } == 0 {
+        log::info!(
+            "fuse sqlite shm poisoned backend removed size={} pkg={} rel={}",
+            size,
+            package_name,
+            rel
+        );
+        true
+    } else {
+        let errno = last_errno();
+        log::warn!(
+            "fuse sqlite shm poisoned backend unlink failed errno={} {} size={} pkg={} rel={}",
+            errno,
+            crate::platform::errno::text(errno),
+            size,
+            package_name,
+            rel
+        );
+        false
+    }
+}
+
 impl Filesystem for FuseRedirectFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         let passthrough_supported = config.capabilities().contains(InitFlags::FUSE_PASSTHROUGH);
@@ -72,7 +133,16 @@ impl Filesystem for FuseRedirectFs {
             return;
         };
         match Self::child_rel(&parent_rel, name) {
-            Ok(rel) => self.reply_entry_for_rel(&policy, &rel, reply),
+            Ok(rel) => {
+                // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
+                // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
+                if policy.is_own_media_sqlite_shm_rel(&rel) {
+                    if let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read) {
+                        heal_poisoned_sqlite_shm_backend(&backend.path, &policy.package_name, &rel);
+                    }
+                }
+                self.reply_entry_for_rel(&policy, &rel, reply)
+            }
             Err(errno) => reply.error(errno),
         }
     }
@@ -371,6 +441,16 @@ impl Filesystem for FuseRedirectFs {
         if backend.is_read_only && open_flags_write(flags.0) {
             policy.emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
             reply.error(Errno::EROFS);
+            return;
+        }
+        // 毒化 shm 自愈兜底：内核 dcache 命中时 open 不会先走 lookup，这里补一处
+        // 同样的处置——删除后端文件并让本次 open 返回 ENOENT，应用随后的 O_CREAT
+        // 重开会重建全新 inode。只读打开不处置（不因读请求删文件）。
+        if open_flags_write(flags.0)
+            && policy.is_own_media_sqlite_shm_rel(&backend.rel)
+            && heal_poisoned_sqlite_shm_backend(&backend.path, &policy.package_name, &backend.rel)
+        {
+            reply.error(Errno::ENOENT);
             return;
         }
         let mut open_flags = flags.0 | libc::O_CLOEXEC;

@@ -611,6 +611,19 @@ impl RedirectPolicy {
         }
     }
 
+    /// 是否是应用自有 `Android/media/<pkg>/` 下 sqlite 数据库的 `-shm` 边车路径。
+    ///
+    /// 只圈定 `-shm`（不含 `.db`/`-wal`）：`-shm` 的合法形态只有「0 字节」与
+    /// 「≥32KiB」两种（由 SQLite 维护），其余尺寸都是毒化态；`.db` 小于 32KiB 是
+    /// 正常现象，`-wal` 过短时 SQLite 自己会按空日志重建，都不需要外部干预。
+    pub(super) fn is_own_media_sqlite_shm_rel(&self, rel: &str) -> bool {
+        if !is_own_media_sqlite_relative_path(rel, &self.package_name) {
+            return false;
+        }
+        let file_name = rel.rsplit('/').next().unwrap_or(rel);
+        file_name.len() > "-shm".len() && file_name.to_ascii_lowercase().ends_with("-shm")
+    }
+
     // 判断某个枚举得到的后端路径是否是该 rel 在真实侧的合法后端。
     // 真实后端根按私有子树分流后，同一父目录下的子项可能落在 real_root 或
     // private_real_root，readdir 不能再用单一路径做相等比较：列举存储根时枚举源是

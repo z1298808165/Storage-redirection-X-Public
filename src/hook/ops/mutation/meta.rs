@@ -8,6 +8,10 @@ use crate::monitor::OpKind;
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t, off_t, timespec};
 use std::ffi::CString;
 
+/// sqlite `-shm` 边车的最小合法尺寸（一个 wal-index 区域），与
+/// `hook/media_fuse.rs` 的 `SQLITE_SHM_MIN_SIZE` 保持同一取值。
+const SQLITE_SHM_MIN_SIZE: u64 = 32 * 1024;
+
 pub unsafe extern "C" fn hooked_truncate(pathname: *const c_char, length: off_t) -> c_int {
     let self_ptr = hooked_truncate as *mut c_void;
     runtime::with_hook_guard(
@@ -538,6 +542,58 @@ fn confirm_private_owner_sqlite_ftruncate(
 ) -> Option<c_int> {
     let (storage_path, backend_path, caller_uid) =
         resolve_private_owner_sqlite_backend(hub, path_for_decision)?;
+
+    // 毒化签名处置：应用 WAL 能力探针会把 `-shm` 边车截到 (0, 32KiB) 的毒化尺寸
+    // （真机实测：支付宝内 XRadiant 的 `XRadiant.db-shm` 变成 3 字节全零）。该状态
+    // 一旦落盘，应用下次打开将永久自锁（“共享内存不可用”→降级 TRUNCATE 仍需
+    // checkpoint→IOERR_SHMOPEN），且对旧 inode 的任何就地修复都无法清除其在
+    // fuse 守护进程与内核页缓存各层的残留（ishtar/duchamp 真机实测，修复后探针
+    // 依然失败并再次毒化）。
+    //
+    // 此处拦截到毒化签名时直接删除后端文件并报告截断成功：本次探针在已被解除
+    // 链接的 inode 上继续（必然失败、不留持久状态、随 fd 关闭回收），应用随后的
+    // O_CREAT 重开重建全新 inode 并从 `-wal` 回放 wal-index——与人工删除 shm 的
+    // 治愈路径完全一致（多次实测必愈）。length==0 与 ≥32KiB 的截断是 prepare
+    // 修复与 SQLite checkpoint 的正常行为，不做处置。
+    let lower_backend = backend_path.to_ascii_lowercase();
+    log::info!(
+        "media sqlite shm sig check backend={} ends_shm={} length={}",
+        backend_path,
+        lower_backend.ends_with("-shm"),
+        length
+    );
+    if lower_backend.ends_with("-shm") && length > 0 && (length as u64) < SQLITE_SHM_MIN_SIZE {
+        let Ok(c_backend) = CString::new(backend_path.as_str()) else {
+            return None;
+        };
+        // 用原始 syscall 而非 libc::unlink/unlinkat：这些符号是本进程的被 hook
+        // 入口，直呼会再次进入自身 hook。SYS_unlinkat 是 aarch64 唯一形态。
+        // SAFETY: c_backend 以 NUL 结尾，syscall 调用期间保持有效，仅按路径读取。
+        let removed =
+            unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_backend.as_ptr(), 0) }
+                == 0;
+        if removed {
+            log::info!(
+                "media sqlite shm poisoned backend removed size-sig length={} caller_uid={} storage={} backend={}",
+                length,
+                caller_uid,
+                storage_path,
+                backend_path
+            );
+        } else {
+            log::warn!(
+                "media sqlite shm poisoned backend unlink failed errno={} length={} caller_uid={} backend={}",
+                runtime::current_errno(),
+                length,
+                caller_uid,
+                backend_path
+            );
+        }
+        // 无论删除成败都报告截断成功：调用方（fuse 守护进程的 setattr 处理）
+        // 拿到成功结果后，应用侧探针在幽灵 inode 上自然失败，不影响治愈路径。
+        return Some(0);
+    }
+
     let Ok(c_path) = CString::new(backend_path.as_str()) else {
         return None;
     };
