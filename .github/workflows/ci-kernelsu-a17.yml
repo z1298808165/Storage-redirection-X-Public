@@ -45,9 +45,9 @@ on:
         default: "1"
         type: string
       fresh_app_scenarios:
-        description: "非空时按场景收窄逐用例冷启动（如 29,32,33），其余场景复用应用进程；留空保持全部冷启动"
+        description: "按场景收窄逐用例冷启动（默认 1,2,29,32,33：配置切换与生命周期场景必须冷启动，实测其余场景复用进程安全）；填 all 恢复全部冷启动"
         required: false
-        default: ""
+        default: "1,2,29,32,33"
         type: string
   push:
     branches: [SRX-R-ksu]
@@ -229,10 +229,11 @@ jobs:
       # 诊断开关：KernelSU 的 LKM 在 AVD 上打不了 sepolicy，本轮用 permissive 验证
       # 这是否为 MediaProvider hook 失效的唯一原因。正式链路恒为 0。
       SRT_KSU_SELINUX_PERMISSIVE: ${{ inputs.selinux_permissive || '0' }}
-      # A17 提速实验开关：0 = 跳过图形读回保护（实测最新镜像是否已修复）；
-      # 非空 fresh_app_scenarios = 只对这些场景逐用例冷启动，其余复用应用进程。
+      # A17 提速：冷启动只保留在配置切换与生命周期场景（1,2,29,32,33），实测
+      # 全量 37 场景通过且 job 从 30m38s 降到 25m18s；场景 2 的失败教训是
+      # 「配置从无到启用」的切换场景复用进程会让 MediaProvider 代写落真实路径。
       SRT_A17_GRAPHICS_GUARD: ${{ inputs.graphics_guard || '1' }}
-      SRT_FRESH_APP_SCENARIOS: ${{ inputs.fresh_app_scenarios || '' }}
+      SRT_FRESH_APP_SCENARIOS: ${{ inputs.fresh_app_scenarios || '1,2,29,32,33' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
