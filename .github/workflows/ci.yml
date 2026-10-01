@@ -552,6 +552,11 @@ jobs:
       MODULE_ABI: x86_64
       ANDROID_API_LEVEL: ${{ matrix.android.api_level }}
       MAGISK_URL: ${{ matrix.android.magisk_url }}
+      # A17 分片走 KernelSU 安装链路（root_method=ksu 时切换安装脚本与 su0 模式）；
+      # 其余版本为空值走 Magisk 探测，收窄变量对 fresh_app_per_case=0 的版本无效。
+      ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}
+      MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu' && '.github/tests/install-storage-redirect-module-ksu.sh' || '.github/tests/install-storage-redirect-module.sh' }}
+      SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}
       EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}
       # 范围由 prepare 的 outputs 统一决定（dispatch inputs 或提交「单场景 29」
       # 标记）；无标记时 prepare 输出 all，全 5 个 Android 版本覆盖保持不变。
@@ -560,7 +565,8 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
-      # 17 每个服务用例前冷启动应用（脚本默认 1）；其余版本复用应用进程（0）。
+      # 17 每个服务用例前冷启动应用（脚本默认 1），并按 fresh_app_scenarios 收窄到
+      # 配置切换与生命周期场景（1,2,29,32,33）；其余版本复用应用进程（0）。
       SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}
       # CI Android 测试流统一关闭 FuseFix native hook；探针属性仅用于诊断。
       SRT_FUSE_FIX_ENABLED: false
@@ -616,7 +622,12 @@ jobs:
             version: 17
             api_level: "37.0"
             fresh_app_per_case: 1
-            magisk_url: "https://github.com/topjohnwu/Magisk/releases/download/v31.0/Magisk-v31.0.apk"
+            # A17 用 KernelSU 方案（实验分支已全量验证 37 场景通过）：ksuAVD 打
+            # ramdisk，ksud 装 Zygisk Next 与 SRX 模块，root shell 走 su 0 sh -c。
+            # 图形读回保护必须保留（跳过即复现 224，最新 A17 镜像仍未修复）。
+            root_method: ksu
+            adb_root_mode: su0
+            fresh_app_scenarios: "1,2,29,32,33"
             gpu_mode: swiftshader_indirect
             timeout_minutes: 50
             boot_timeout: 1800

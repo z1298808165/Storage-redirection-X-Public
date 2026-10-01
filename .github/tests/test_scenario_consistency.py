@@ -89,8 +89,14 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
     entry = android17_matrix_entry(jobs)
     if entry["api_level"] != "37.0":
         raise AssertionError(f"{label}: api_level 应为 37.0，实际 {entry['api_level']}")
-    if "v31.0" not in entry["magisk_url"]:
-        raise AssertionError(f"{label}: magisk_url 应指向 v31.0")
+    if entry.get("root_method") != "ksu":
+        raise AssertionError(f"{label}: 17 的 root_method 应为 ksu")
+    if entry.get("adb_root_mode") != "su0":
+        raise AssertionError(f"{label}: 17 的 adb_root_mode 应为 su0")
+    if entry.get("fresh_app_scenarios") != "1,2,29,32,33":
+        raise AssertionError(f"{label}: 17 的 fresh_app_scenarios 应为 1,2,29,32,33")
+    if "magisk_url" in entry:
+        raise AssertionError(f"{label}: 17 不应保留 magisk_url")
     if entry["gpu_mode"] != "swiftshader_indirect":
         raise AssertionError(f"{label}: gpu_mode 应为 swiftshader_indirect")
     if entry["fresh_app_per_case"] != 1:
@@ -871,7 +877,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         entry = android17_matrix_entry(jobs)
         # 17 特有执行环境必须保留在矩阵条目中。
         self.assertEqual("37.0", entry["api_level"])
-        self.assertIn("v31.0", entry["magisk_url"])
+        self.assertEqual("ksu", entry["root_method"])
+        self.assertEqual("su0", entry["adb_root_mode"])
+        self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
         self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
         self.assertEqual(1, entry["fresh_app_per_case"])
         self.assertEqual(50, entry["timeout_minutes"])
@@ -895,6 +903,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
         self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
         self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
+        self.assertIn(
+            "MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu'"
+            " && '.github/tests/install-storage-redirect-module-ksu.sh'"
+            " || '.github/tests/install-storage-redirect-module.sh' }}",
+            test_flow,
+        )
+        self.assertIn("ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}", test_flow)
+        self.assertIn("SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}", test_flow)
         self.assertIn("Download test-flow runtime", test_flow)
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
         # 17 不上传诊断 artifact：上传步骤必须以 matrix.android.version != 17 为条件。
@@ -920,7 +936,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         entry = android17_matrix_entry(jobs)
         # 17 特有执行环境必须保留在矩阵条目中。
         self.assertEqual("37.0", entry["api_level"])
-        self.assertIn("v31.0", entry["magisk_url"])
+        self.assertEqual("ksu", entry["root_method"])
+        self.assertEqual("su0", entry["adb_root_mode"])
+        self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
         self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
         self.assertEqual(1, entry["fresh_app_per_case"])
         self.assertEqual(50, entry["timeout_minutes"])
@@ -944,6 +962,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
         self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
         self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
+        self.assertIn(
+            "MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu'"
+            " && '.github/tests/install-storage-redirect-module-ksu.sh'"
+            " || '.github/tests/install-storage-redirect-module.sh' }}",
+            test_flow,
+        )
+        self.assertIn("ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}", test_flow)
+        self.assertIn("SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}", test_flow)
         self.assertIn("Download release test-flow runtime", test_flow)
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
         # 17 不上传诊断 artifact：上传步骤必须以 matrix.android.version != 17 为条件。
@@ -967,7 +993,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             jobs = load_workflow(workflow)
             entry = _assert_android17_unified(jobs, workflow)
             self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
-            self.assertIn("Magisk-v31.0.apk", entry["magisk_url"])
+            self.assertEqual("ksu", entry["root_method"])
+            self.assertEqual("su0", entry["adb_root_mode"])
 
     def test_matrix_gate_rejects_dropped_android17(self) -> None:
         # 反向验证：若 17 被错误地移出统一矩阵（回到旧的跨 job 缺口），
@@ -1538,7 +1565,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_test_flow_waits_for_services_after_module_reboot(self) -> None:
         flow = read(".github/tests/run-android-test-flow.sh")
-        post_install = section(flow, "bash .github/tests/install-storage-redirect-module.sh", "adb shell appops set")
+        post_install = section(flow, 'bash "${MODULE_INSTALL_SCRIPT', "adb shell appops set")
         self.assertIn("wait_for_adb_ready", post_install)
         self.assertIn("package_service_deadline", post_install)
         self.assertIn("cmd package list packages", post_install)
@@ -1550,7 +1577,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "android17_disable_graphics_readback()",
             "prepare_device_health\n",
         )
-        post_install = section(flow, "bash .github/tests/install-storage-redirect-module.sh", "adb shell appops set")
+        post_install = section(flow, 'bash "${MODULE_INSTALL_SCRIPT', "adb shell appops set")
 
         self.assertIn("service call window 137 i32 0", workaround)
         self.assertIn("service call window 135", workaround)
