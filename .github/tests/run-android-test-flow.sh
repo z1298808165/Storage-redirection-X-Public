@@ -191,9 +191,11 @@ if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; 
   export SRT_SCENARIOS="1"
 fi
 
+# 默认走 Magisk/rootAVD 链路；KernelSU 实验通道通过 MODULE_INSTALL_SCRIPT 换成
+# install-storage-redirect-module-ksu.sh，正式矩阵不受影响。
 MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
   APP_APK="$TEST_APP_APK" \
-bash .github/tests/install-storage-redirect-module.sh
+bash "${MODULE_INSTALL_SCRIPT:-.github/tests/install-storage-redirect-module.sh}"
 
 # 模块安装会重启 framework；在任何 package 枚举前立即重放图形保护，缩短
 # SystemUI/task snapshot 再次触发 ReadColorBufferDMA 崩溃的窗口。
