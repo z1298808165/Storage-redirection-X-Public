@@ -80,23 +80,23 @@ fn heal_poisoned_sqlite_shm_backend(
         return false;
     }
 
-    let Ok(c_real) = cstring_path(&real_path) else {
-        return false;
-    };
-    // 先删 f2fs 真实文件（宿主 root 身份直连，保证毒化数据消失）。
-    // SAFETY: c_real 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
-    let removed_real =
-        unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_real.as_ptr(), 0) } == 0;
-    // 再删 media view 路径（若后端走视图且与真实路径不同）：经 MediaProvider
-    // 处理 unlink 会同步失效其缓存节点。删除失败不影响治愈——节点缓存在
-    // attr TTL 过期后自然收敛。
+    // 删除顺序：先经 media view 路径 unlink——MediaProvider 会在自己的节点簿记里
+    // 正确失效该名称并删除后端文件；若此步后 f2fs 真实文件仍存在（视图 unlink
+    // 失败或后端本就是 f2fs 直连），再以 root 直删兜底。顺序颠倒会让 MP 的缓存
+    // 节点指向已消失的文件（幽灵节点），应用后续 O_CREAT 全部失败（18:36 实测）。
     let mut removed_view = false;
-    if backend_path != real_path.as_path()
-        && let Ok(c_view) = cstring_path(backend_path)
-    {
+    let mut removed_real = false;
+    if let Ok(c_view) = cstring_path(backend_path) {
         // SAFETY: c_view 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
         removed_view =
             unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_view.as_ptr(), 0) } == 0;
+    }
+    if std::fs::metadata(&real_path).is_ok()
+        && let Ok(c_real) = cstring_path(&real_path)
+    {
+        // SAFETY: c_real 以 NUL 结尾，unlinkat 调用期间保持有效，仅按路径读取。
+        removed_real =
+            unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_real.as_ptr(), 0) } == 0;
     }
 
     if removed_real || removed_view {
