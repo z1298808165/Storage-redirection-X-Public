@@ -1,0 +1,301 @@
+name: CI KernelSU A17 实验
+
+# 实验通道：验证把 Android 17（API 37）测试流的 root 方案从 Magisk（rootAVD）
+# 换成 KernelSU（KernelSU-AVD + ksud）是否可行。
+#
+# 与正式 CI（ci.yml）的关系：
+#   - 完全独立：自带 prepare 与 build，不复用 ci.yml 的 job，也不进
+#     test-flow-required 门禁；本 workflow 失败不会拦住 CI 资产发布与正式 Release。
+#   - 不发布任何资产，不写 update.json，不创建 Release。
+#   - 只跑 Android 17 一个分片；Magisk 版 A17 分片仍在 ci.yml 里照常运行，
+#     两边结果可以直接对比。
+#
+# root 链路差异（见 .github/tests/install-storage-redirect-module-ksu.sh）：
+#   Magisk：rootAVD 打 ramdisk → magisk --install-module（自带 Zygisk）。
+#   KernelSU：ksuAVD 打 ramdisk（注入与内核 KMI 匹配的 LKM）→ ksud module install；
+#   KernelSU 不自带 Zygisk，因此额外安装 Zygisk Next（module id=zygisksu）为
+#   SRX 的 zygisk/*.so 提供加载方。
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "只跑列出的场景编号（逗号分隔）。默认 1,2,29 是证明「root+注入+重定向」的最小集；填 all 跑全量 1-37"
+        required: false
+        default: "1,2,29"
+        type: string
+      kernelsu_apk_url:
+        description: "KernelSU 管理器 APK 下载地址（ksud 从该 APK 解出）"
+        required: false
+        default: "https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk"
+        type: string
+      zygisk_next_url:
+        description: "Zygisk Next 模块 zip 下载地址（KernelSU 下的 Zygisk 实现）"
+        required: false
+        default: "https://github.com/LSPosed/ZygiskNext/releases/download/1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip"
+        type: string
+  push:
+    branches: [SRX-R-ksu]
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  # 与 gradle.properties 的 srx.ndkVersion 保持一致，和 ci.yml 同一套构建参数。
+  SRX_NDK_VERSION: "30.0.16248370"
+  SRX_ANDROID_PLATFORM: "platforms;android-37.0"
+  SRX_ANDROID_BUILD_TOOLS: "build-tools;35.0.0"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_code: ${{ steps.version.outputs.version_code }}
+      scenarios: ${{ steps.scope.outputs.scenarios }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Prepare CI version
+        id: version
+        run: |
+          python .github/scripts/validate_ci_transition.py --format github >> "$GITHUB_OUTPUT"
+
+      - name: Resolve scenario scope
+        id: scope
+        env:
+          SRT_HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          SRT_DISPATCH_SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          python .github/scripts/parse_scenario_scope.py \
+            --message "$SRT_HEAD_COMMIT_MESSAGE" \
+            --override "$SRT_DISPATCH_SCENARIOS" \
+            --format github >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build test-flow runtime
+    needs:
+      - prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java (JDK 21)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v6.1.0
+        with:
+          cache-read-only: false
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK build-tools, platform and NDK
+        run: |
+          for attempt in 1 2 3; do
+            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/$SRX_NDK_VERSION"
+            sleep $((attempt * 10))
+          done
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> $GITHUB_ENV
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-14
+          targets: x86_64-linux-android
+
+      - name: Install CMake and Ninja
+        run: |
+          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build
+          fi
+
+      - name: Configure Cargo for Android NDK
+        run: |
+          mkdir -p .cargo
+          printf '[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
+          echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Restore Cargo test-flow cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Restore Cargo test-flow target cache
+        uses: actions/cache@v5.0.5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'build.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-x86_64-
+
+      - name: Build x86_64 module zip and test app
+        run: |
+          chmod +x ./gradlew .github/tests/*.sh .github/scripts/*.sh
+          bash .github/scripts/build_test_flow_runtime.sh
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: Upload test-flow runtime
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ksu-test-flow-runtime-v${{ env.VERSION }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          path: |
+            build/test-flow/assets/*.zip
+            tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
+
+  kernelsu-a17:
+    name: KSU Test-flow Android 17
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      ANDROID_TARGET: google_apis
+      ANDROID_ARCH: x86_64
+      TARGET_TRIPLE: x86_64-linux-android
+      MODULE_ABI: x86_64
+      ANDROID_API_LEVEL: "37.0"
+      EMULATOR_GPU_MODE: swiftshader_indirect
+      SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}
+      SRT_FAIL_FAST: 1
+      SRT_SKIP_FINAL_CLEANUP: 1
+      SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      # 与 ci.yml 的 A17 分片一致：每个服务用例前冷启动应用。
+      SRT_FRESH_APP_PER_CASE: 1
+      # CI Android 测试流统一关闭 FuseFix native hook。
+      SRT_FUSE_FIX_ENABLED: false
+      # KernelSU 的 su 走 `su -c`；显式指定避免场景脚本先试 Magisk 的入口。
+      ADB_ROOT_MODE: su
+      # 走 KernelSU 安装链路，正式矩阵仍用默认（Magisk）脚本。
+      MODULE_INSTALL_SCRIPT: .github/tests/install-storage-redirect-module-ksu.sh
+      KERNELSU_APK_URL: ${{ inputs.kernelsu_apk_url || 'https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk' }}
+      ZYGISK_NEXT_URL: ${{ inputs.zygisk_next_url || 'https://github.com/LSPosed/ZygiskNext/releases/download/1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download test-flow runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --name "ksu-test-flow-runtime-v${{ env.VERSION }}" --dir .
+
+      - name: Enable KVM permissions
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then
+            sudo sh -c 'echo KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm" > /etc/udev/rules.d/99-kvm4all.rules'
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Prime Android emulator package
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if sdkmanager --install emulator --channel=0; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/emulator"
+            sleep $((attempt * 5))
+          done
+
+      - name: Prime Android system image package
+        run: |
+          set -euo pipefail
+          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
+          install_dir="$ANDROID_HOME/system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}"
+          for attempt in 1 2 3; do
+            if sdkmanager --install "$package" --channel=0; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            rm -rf "$ANDROID_HOME/.temp" "$install_dir"
+            sleep $((attempt * 5))
+          done
+
+      - name: Run Android 17 KernelSU test-flow scenarios
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: ${{ env.ANDROID_API_LEVEL }}
+          target: ${{ env.ANDROID_TARGET }}
+          arch: ${{ env.ANDROID_ARCH }}
+          profile: pixel_7
+          disk-size: 4096M
+          heap-size: 1024M
+          disable-animations: false
+          emulator-boot-timeout: 1800
+          disable-linux-hw-accel: false
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
+          script: bash .github/tests/run-android-test-flow.sh
+
+      - name: Upload KernelSU test-flow artifacts
+        if: always() && hashFiles('scenario-*-result.txt', 'test-flow-ksu-root.txt', 'test-flow-ksu-zygisk.txt', 'test-flow-preflight.txt', 'test-flow-app-mountinfo.txt', 'test-flow-fuse-sample.txt', 'test-flow-logcat.txt', 'test-flow-module-state.txt', 'test-flow-backend-diagnostic.txt', 'test-flow-monitor-state.txt', 'test-flow-graphics-state.txt', 'media-health.txt') != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ksu-test-flow-android17-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            scenario-*-result.txt
+            test-flow-ksu-root.txt
+            test-flow-ksu-zygisk.txt
+            test-flow-preflight.txt
+            test-flow-app-mountinfo.txt
+            test-flow-fuse-sample.txt
+            test-flow-logcat.txt
+            test-flow-module-state.txt
+            test-flow-backend-diagnostic.txt
+            test-flow-monitor-state.txt
+            test-flow-graphics-state.txt
+            media-health.txt
