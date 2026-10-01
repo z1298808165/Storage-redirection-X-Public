@@ -237,6 +237,12 @@ dump_root_diagnostics() {
     adb_root 'id; echo adb_dir; ls -la /data/adb 2>/dev/null || echo adb_dir_absent; echo ksu_bin; ls -la /data/adb/ksu/bin 2>/dev/null || echo ksu_bin_absent; echo ksud_lookup; command -v ksud || echo ksud_not_in_path; echo ksud_version; for bin in /data/adb/ksu/bin/ksud ksud /data/local/tmp/ksud; do [ -x "$bin" ] && { "$bin" -V 2>&1 || true; break; }; done' 2>&1 || true
     echo "=== modules ==="
     adb_root 'ls -la /data/adb/modules 2>/dev/null || echo modules_absent; ls -la /data/adb/modules_update 2>/dev/null || echo modules_update_absent' 2>&1 || true
+    echo "=== selinux_state ==="
+    adb_root 'getenforce; cat /sys/fs/selinux/enforce 2>/dev/null || echo enforce_unreadable; ls /sys/fs/selinux 2>/dev/null | head -20 || echo selinuxfs_absent' 2>&1 || true
+    echo "=== ksud_sepolicy_check ==="
+    adb_root 'for bin in /data/adb/ksud /data/adb/ksu/bin/ksud ksud; do [ -x "$bin" ] && { echo "ksud=$bin"; "$bin" sepolicy check "allow ksu_file ksu_file file setattr" 2>&1; echo "check_exit=$?"; break; }; done || echo ksud_missing' 2>&1 || true
+    echo "=== kernel_ksu_log ==="
+    adb_root 'dmesg 2>/dev/null | grep -iE "kernelsu|ksu|sepolicy|avc|lsm|symbol" | tail -60 || echo dmesg_unavailable' 2>&1 || true
     echo "=== logcat ==="
     adb logcat -d -t 300 2>/dev/null | grep -Ei 'kernelsu|ksud|zygisk|zygisksu|avc: denied|storage.redirect|srx' || true
   } >"$target" 2>&1 || true
