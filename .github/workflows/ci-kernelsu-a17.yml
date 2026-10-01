@@ -25,9 +25,9 @@ on:
         default: "1,2,29"
         type: string
       kernelsu_apk_url:
-        description: "KernelSU 管理器 APK 下载地址（ksud 从该 APK 解出）"
+        description: "KernelSU 管理器 APK 下载地址（ksud 与 LKM 都从该 APK 解出）。默认 KernelSU-Next：上游 KernelSU 的 LKM 在本 AVD 上打不了 sepolicy"
         required: false
-        default: "https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk"
+        default: "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.0/KernelSU_Next_v3.4.0_33294-release.apk"
         type: string
       zygisk_next_url:
         description: "Zygisk Next 模块 zip 下载地址（KernelSU 下的 Zygisk 实现）"
