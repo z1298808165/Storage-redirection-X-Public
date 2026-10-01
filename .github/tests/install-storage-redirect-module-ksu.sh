@@ -117,14 +117,33 @@ start_emulator() {
 }
 
 # KernelSU 的 su 不接受 `su -c`（实测报 `su: invalid uid/gid '-c'`），只有
-# `su 0 sh -c` 能拿到 root；这里以后者为首选，保留 `su -c` 兜底兼容真机上的
-# 其它 KernelSU 版本。远程命令用 base64 传递，避免多层引号转义出错。
+# `su 0 sh -c` 能拿到 root。这里先探测一次可用形态并固定下来：不能在每次调用里
+# 用 `||` 退回另一种写法——命令执行成功但内部失败时会误触发兜底，把真实退出码
+# 换成兜底命令的退出码。远程命令用 base64 传递，避免多层引号转义出错。
+ROOT_SU_FORM=""
+detect_root_su_form() {
+  if [ -n "$ROOT_SU_FORM" ]; then
+    return 0
+  fi
+  if adb shell 'su 0 sh -c id' >/dev/null 2>&1; then
+    ROOT_SU_FORM="su 0 sh -c"
+    return 0
+  fi
+  if adb shell 'su -c id' >/dev/null 2>&1; then
+    ROOT_SU_FORM="su -c"
+    return 0
+  fi
+  echo "No usable KernelSU root shell found." >&2
+  return 1
+}
+
 adb_root() {
   local command="PATH=/data/adb/ksu/bin:/data/adb/ksu:/data/local/tmp:\$PATH; $1"
   local encoded runner
+  detect_root_su_form
   encoded="$(printf '%s' "$command" | base64 | tr -d '\n')"
   runner="printf '%s' '$encoded' | base64 -d | sh"
-  adb shell "su 0 sh -c '$runner'" || adb shell "su -c '$runner'"
+  adb shell "$ROOT_SU_FORM '$runner'"
 }
 
 adb_su() {
@@ -143,20 +162,26 @@ adb_write_file() {
 
 adb_ksud() {
   local args="$1"
-  adb_root "for bin in /data/adb/ksu/bin/ksud /data/local/tmp/ksud /data/adb/ksud ksud; do if [ -x \"\$bin\" ]; then \"\$bin\" $args; exit \$?; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then \"\$found\" $args; exit \$?; fi; done; echo ksud_not_found >&2; exit 127"
+  adb_root "for bin in /data/adb/ksud /data/adb/ksu/bin/ksud /data/local/tmp/ksud ksud; do if [ -x \"\$bin\" ]; then \"\$bin\" $args; exit \$?; fi; found=\$(command -v \"\$bin\" 2>/dev/null || true); if [ -n \"\$found\" ]; then \"\$found\" $args; exit \$?; fi; done; echo ksud_not_found >&2; exit 127"
 }
 
 # 实测 KernelSU v3.3 的 LKM 模式在 AVD 上并不落盘 /data/adb/ksu，设备上没有现成
-# 的 ksud。这里从同一个 KernelSU APK 里解出与模拟器架构匹配的 ksud 推上去备用，
-# 保证模块安装器一定有可用实现，且版本与已注入的 LKM 同源。
+# 的 ksud；而 Zygisk Next 的 customize.sh 又硬编码调用 /data/adb/ksud（缺它就直接
+# `Failed to install module script`）。这里保证该路径一定有 ksud：优先复用设备上
+# 已有的 ksud，没有就从同一个 KernelSU APK 解出与模拟器架构匹配的那一份，版本与
+# 已注入的 LKM 同源。
 ensure_ksud() {
-  if adb_root 'command -v ksud >/dev/null 2>&1; [ -x /data/adb/ksu/bin/ksud ]' >/dev/null 2>&1; then
-    echo "ksud 已存在于设备上。"
+  if adb_root '[ -x /data/adb/ksud ]' >/dev/null 2>&1; then
+    echo "ksud 已在 /data/adb/ksud。"
+    adb_root '/data/adb/ksud --version 2>&1 || true'
     return 0
   fi
 
-  echo "设备上没有 ksud，从 KernelSU APK 解出后推送。"
-  python3 - "$KSUAVD_DIR/KernelSU.apk" "$KSUAVD_DIR/ksud" <<'PY'
+  local source_bin
+  source_bin="$(adb_root 'for bin in /data/adb/ksu/bin/ksud /data/local/tmp/ksud; do [ -x "$bin" ] && { echo "$bin"; break; }; done; command -v ksud 2>/dev/null || true' | tr -d '\r' | grep -E '^/' | head -1 || true)"
+  if [ -z "$source_bin" ]; then
+    echo "设备上没有 ksud，从 KernelSU APK 解出后推送。"
+    python3 - "$KSUAVD_DIR/KernelSU.apk" "$KSUAVD_DIR/ksud" <<'PY'
 import sys
 import zipfile
 
@@ -170,8 +195,12 @@ with zipfile.ZipFile(apk_path) as apk:
         target.write(apk.read(preferred[0]))
 print("ksud_source=%s" % preferred[0])
 PY
-  adb push "$KSUAVD_DIR/ksud" /data/local/tmp/ksud
-  adb_root 'chmod 755 /data/local/tmp/ksud; /data/local/tmp/ksud --version 2>&1 || true'
+    adb push "$KSUAVD_DIR/ksud" /data/local/tmp/ksud
+    source_bin="/data/local/tmp/ksud"
+  fi
+
+  echo "把 ksud 从 $source_bin 补到 /data/adb/ksud"
+  adb_root "chmod 755 '$source_bin'; cp -f '$source_bin' /data/adb/ksud; chmod 755 /data/adb/ksud; /data/adb/ksud --version 2>&1 || true"
 }
 
 wait_for_root_shell() {
