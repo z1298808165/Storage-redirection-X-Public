@@ -557,6 +557,17 @@ fi
 adb reboot
 wait_for_boot 420
 wait_for_root_shell 180
+
+# 诊断开关（仅实验通道）：KernelSU 的 LKM 在 AVD 上应用 sepolicy 失败
+# （模块安装时打印 `Unable to apply SELinux patches`），随后系统进程写
+# `.media_hook_install_state` 会被 avc denied 拦住，MediaProvider hook 装不上。
+# 这里把 SELinux 置为 permissive 只是为了验证「sepolicy 补丁缺失」是不是唯一
+# 阻塞项，不作为正式链路的行为——默认关闭，需显式打开。
+if [ "${SRT_KSU_SELINUX_PERMISSIVE:-0}" = "1" ]; then
+  echo "诊断：把 SELinux 置为 permissive（仅用于验证 sepolicy 是否为唯一阻塞项）"
+  adb_root 'setenforce 0; getenforce'
+fi
+
 assert_installed_module_files /data/adb/modules/storage.redirect.x
 
 verify_storage_redirect_module_loaded_with_reboot_retry
