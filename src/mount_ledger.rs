@@ -44,7 +44,7 @@ const IDENTITY_SCHEMA_VERSION: u32 = 2;
 /// nsfs 的 `st_dev` + `st_ino` 在同一台设备上唯一标识一个 mount namespace 实例；
 /// 应用重启后 `setns` 目标会换成新的 inode，据此可以区分"同一个命名空间里的挂载残留"
 /// 与"旧命名空间已经随进程销毁"。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NamespaceIdentity {
     pub dev: u64,
     pub ino: u64,

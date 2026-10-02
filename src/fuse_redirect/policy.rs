@@ -1,9 +1,11 @@
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
+use crate::mount_ledger::NamespaceIdentity;
 use crate::platform::{fs, module_paths, paths};
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use super::FuseRedirectConfig;
@@ -12,6 +14,8 @@ const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const READ_ONLY_DENY_EXTRA: &str = "deny_reason=read_only_rule";
 const DUPLICATE_MONITOR_CREATE_WINDOW_MS: i64 = 1500;
 const MAX_RECENT_MONITOR_CREATES: usize = 256;
+static NAMESPACE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static NAMESPACE_POLICY_MISSES: AtomicU64 = AtomicU64::new(0);
 
 static RECENT_MONITOR_CREATES: Lazy<Mutex<HashMap<String, i64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -174,19 +178,45 @@ pub(super) struct PolicyRegistry {
 ///
 /// 回调热路径只取读锁，未命中时回退会话默认策略，因此登记前后都不改变单应用的既有语义。
 #[derive(Clone)]
-pub(crate) struct SharedPolicyTable(Arc<RwLock<HashMap<u32, Arc<RedirectPolicy>>>>);
+pub(crate) struct SharedPolicyTable {
+    by_uid: Arc<RwLock<HashMap<u32, Arc<RedirectPolicy>>>>,
+    by_namespace: NamespacePolicyTable,
+}
+
+#[derive(Clone)]
+struct NamespacePolicyTable(Arc<RwLock<HashMap<NamespaceIdentity, Arc<RedirectPolicy>>>>);
 
 impl SharedPolicyTable {
-    /// 按 uid 登记或覆盖一份策略，返回登记后的条目数。
+    /// 按 uid 登记或覆盖一份策略，并记录该应用 mount namespace 对应的策略。
     ///
-    /// 策略构造沿用与 scoped 会话完全相同的 [`RedirectPolicy::new`]，因此沙盒目录准备、
-    /// 规则归一化和映射解析行为一致；构造失败（例如目标非法）时不写入，保持旧策略。
+    /// root 子进程通常继承应用的 mount namespace，但其 FUSE 请求 uid 已变成 0；namespace
+    /// 索引只绑定当前应用进程实例，不把 uid 0 全局放行给某个应用。
     pub(crate) fn register(&self, config: FuseRedirectConfig) -> Option<usize> {
         let uid = u32::try_from(config.uid).ok()?;
-        let policy = RedirectPolicy::new(config)?;
-        let mut table = self.0.write().ok()?;
-        table.insert(uid, Arc::new(policy));
-        Some(table.len())
+        let app_pid = config.app_pid;
+        let namespace = registered_mount_namespace(&config);
+        let policy = Arc::new(RedirectPolicy::new(config)?);
+        let mut table = self.by_uid.write().ok()?;
+        table.insert(uid, Arc::clone(&policy));
+        drop(table);
+        if let Some(namespace) = namespace {
+            let mut namespaces = self.by_namespace.0.write().ok()?;
+            namespaces.insert(namespace, Arc::clone(&policy));
+            log::info!(
+                "fuse policy namespace registered uid={} ns={}:{} pkg={}",
+                uid,
+                namespace.dev,
+                namespace.ino,
+                policy.package_name
+            );
+        } else {
+            log::warn!(
+                "fuse policy namespace unavailable uid={} app_pid={}",
+                uid,
+                app_pid
+            );
+        }
+        Some(self.by_uid.read().ok()?.len())
     }
 }
 
@@ -203,7 +233,10 @@ impl PolicyRegistry {
         };
         Self {
             session,
-            by_uid: SharedPolicyTable(Arc::new(RwLock::new(HashMap::new()))),
+            by_uid: SharedPolicyTable {
+                by_uid: Arc::new(RwLock::new(HashMap::new())),
+                by_namespace: NamespacePolicyTable(Arc::new(RwLock::new(HashMap::new()))),
+            },
             fallback,
         }
     }
@@ -213,20 +246,79 @@ impl PolicyRegistry {
         self.session.as_ref()
     }
 
-    /// 按调用方 uid 解析策略；未命中时回退到 [`Self::fallback`]。
-    pub(super) fn for_uid(&self, uid: u32) -> Arc<RedirectPolicy> {
-        if let Ok(table) = self.by_uid.0.read()
+    /// 按调用方 uid 与 mount namespace 解析策略；未命中时回退到 [`Self::fallback`]。
+    ///
+    /// root 子进程通常继承应用的 mount namespace，但其 FUSE 请求 uid 已变成 0。共享宿主
+    /// 不能把 uid 0 全局登记到某个应用，否则其它 root 进程会获得错误应用的策略；这里仅在
+    /// uid 未命中且请求 uid 为 root 时，用请求 pid 的 mount namespace 精确回到发起该请求的应用策略。
+    pub(super) fn for_request(&self, uid: u32, pid: u32) -> Arc<RedirectPolicy> {
+        if let Ok(table) = self.by_uid.by_uid.read()
             && let Some(policy) = table.get(&uid)
         {
             return Arc::clone(policy);
         }
+        if uid == 0 {
+            let namespace = request_mount_namespace(pid);
+            if let Some(namespace) = namespace
+                && let Ok(table) = self.by_uid.by_namespace.0.read()
+                && let Some(policy) = table.get(&namespace)
+            {
+                let count = NAMESPACE_POLICY_FALLBACKS.fetch_add(1, Ordering::Relaxed) + 1;
+                if count == 1 || count.is_multiple_of(256) {
+                    log::info!(
+                        "fuse policy namespace fallback uid={} pid={} ns={}:{} pkg={} count={}",
+                        uid,
+                        pid,
+                        namespace.dev,
+                        namespace.ino,
+                        policy.package_name,
+                        count
+                    );
+                }
+                return Arc::clone(policy);
+            }
+            let count = NAMESPACE_POLICY_MISSES.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == 1 || count.is_multiple_of(256) {
+                let namespace_text = namespace
+                    .map(|value| format!("{}:{}", value.dev, value.ino))
+                    .unwrap_or_else(|| "unavailable".to_string());
+                log::warn!(
+                    "fuse policy namespace miss uid={} pid={} ns={} count={}",
+                    uid,
+                    pid,
+                    namespace_text,
+                    count
+                );
+            }
+        }
         Arc::clone(&self.fallback)
+    }
+
+    pub(super) fn for_uid_exact(&self, uid: u32) -> Option<Arc<RedirectPolicy>> {
+        self.by_uid
+            .by_uid
+            .read()
+            .ok()
+            .and_then(|table| table.get(&uid).cloned())
     }
 
     /// 取出可写表句柄，交给宿主会话的控制通道在运行期登记应用策略。
     pub(super) fn shared_table(&self) -> SharedPolicyTable {
         self.by_uid.clone()
     }
+}
+
+fn registered_mount_namespace(config: &FuseRedirectConfig) -> Option<NamespaceIdentity> {
+    let expected_start = config.app_start_time_ticks?;
+    if crate::platform::process_start_time_ticks(config.app_pid) != Some(expected_start) {
+        return None;
+    }
+    crate::mount_ledger::namespace_identity(config.app_pid)
+}
+
+fn request_mount_namespace(pid: u32) -> Option<NamespaceIdentity> {
+    let pid = i32::try_from(pid).ok()?;
+    crate::mount_ledger::namespace_identity(pid)
 }
 
 impl RedirectPolicy {
@@ -355,6 +447,10 @@ impl RedirectPolicy {
             deny_all: true,
             ..self.clone()
         }
+    }
+
+    pub(super) fn is_deny_all(&self) -> bool {
+        self.deny_all
     }
 
     pub(super) fn backend_for_relative(

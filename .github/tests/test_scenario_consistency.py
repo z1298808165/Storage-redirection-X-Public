@@ -771,12 +771,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 改成「每请求按调用方 uid 查表」。这里钉死阶段 1 的收敛结果：回调与挂载点日志
         # 都不得再直读会话绑定策略的字段，一律经注册表取值。
         source = read("src/fuse_redirect/mod.rs")
-        # `shared_table()` 是取出按 uid 策略表句柄（交给宿主会话的控制通道登记），不是读策略
-        # 字段，因此允许；除它之外的 `self.policy.` 仍然只能走 `for_uid` / `session`。
+        # `shared_table()` 与 `for_uid_exact()` 都是注册表出口：前者交给宿主登记，后者用于
+        # root 子进程跨 namespace 接续已由 inode/path 记住的应用策略；除它们之外的 `self.policy.`
+        # 仍然只能走 `for_request` / `session`。
         allowed = (
-            "self.policy.for_uid(req.uid())",
+            "self.policy.for_request(req.uid(), req.pid())",
             "self.policy.session()",
             "self.policy.shared_table()",
+            "self.policy.for_uid_exact(cached_uid)",
         )
         for number, line in enumerate(source.splitlines(), 1):
             if "self.policy." not in line:
@@ -802,12 +804,33 @@ class ScenarioConsistencyTest(unittest.TestCase):
         registry = read("src/fuse_redirect/policy.rs")
         self.assertIn("pub(super) struct PolicyRegistry", registry)
         self.assertIn(
-            "pub(super) fn for_uid(&self, uid: u32) -> Arc<RedirectPolicy>", registry
+            "pub(super) fn for_request(&self, uid: u32, pid: u32) -> Arc<RedirectPolicy>",
+            registry,
         )
         self.assertIn("pub(super) fn session(&self) -> &RedirectPolicy", registry)
         # 未命中 uid 必须落到回退策略（scoped 回退到会话策略，宿主回退到拒绝策略）。
-        self.assertIn("if let Ok(table) = self.by_uid.0.read()", registry)
+        self.assertIn("if let Ok(table) = self.by_uid.by_uid.read()", registry)
+        self.assertIn("uid == 0", registry)
+        self.assertIn("request_mount_namespace(pid)", registry)
+        self.assertIn("registered_mount_namespace(&config)", registry)
         self.assertIn("Arc::clone(&self.fallback)", registry)
+
+        callbacks = read("src/fuse_redirect/callbacks.rs")
+        open_callback = section(callbacks, "fn open(", "fn read(")
+        self.assertIn("if open_flags_write(flags.0)", open_callback)
+        self.assertIn("self.policy_for_request(req)", open_callback)
+        self.assertIn("self.policy_for_read_request(req, Some(ino), None)", open_callback)
+        write_callback = section(callbacks, "fn write(", "fn release(")
+        self.assertIn("self.policy_for_request(req)", write_callback)
+        self.assertNotIn("policy_for_read_request", write_callback)
+
+        route = section(
+            source,
+            "fn route_new_entry(",
+            "fn attr_for_backend(",
+        )
+        self.assertIn("self.policy_for_request(req)", route)
+        self.assertNotIn("policy_for_read_request", route)
 
     def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
         expected_max = max(self.ids)

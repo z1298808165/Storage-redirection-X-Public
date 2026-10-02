@@ -42,6 +42,7 @@ pub(super) fn remove_unreferenced_inode(state: &mut FuseState, ino: u64) {
     if let Some(rel) = state.paths_by_inode.remove(&ino) {
         state.inodes.remove(&rel);
         state.inode_path_versions.remove(&ino);
+        state.inode_policy_uids.remove(&ino);
     }
 }
 
@@ -49,6 +50,7 @@ pub(super) fn remove_inode_path(state: &mut FuseState, rel: &str) {
     if let Some(ino) = state.inodes.remove(rel) {
         state.paths_by_inode.remove(&ino);
         state.inode_path_versions.remove(&ino);
+        state.inode_policy_uids.remove(&ino);
         state.lookup_counts.remove(&ino);
         state.dir_entry_refs.remove(&ino);
     }

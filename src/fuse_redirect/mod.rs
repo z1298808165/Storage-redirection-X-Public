@@ -35,7 +35,7 @@ use std::fs::File;
 use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -43,6 +43,7 @@ const TTL: Duration = Duration::from_millis(250);
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
 const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(250);
+static INODE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 const INITIAL_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
 const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
@@ -80,6 +81,9 @@ struct FuseState {
     next_fh: u64,
     inodes: HashMap<String, u64>,
     paths_by_inode: HashMap<u64, String>,
+    /// 最近一次按应用策略解析每个 FUSE 路径，用于 root 子进程跨 namespace 接续访问。
+    path_policy_uids: HashMap<String, u32>,
+    inode_policy_uids: HashMap<u64, u32>,
     inode_path_versions: HashMap<u64, u64>,
     lookup_counts: HashMap<u64, u64>,
     dir_entry_refs: HashMap<u64, u64>,
@@ -267,6 +271,8 @@ impl FuseRedirectFs {
                 next_fh: 1,
                 inodes,
                 paths_by_inode,
+                path_policy_uids: HashMap::new(),
+                inode_policy_uids: HashMap::new(),
                 inode_path_versions: HashMap::from([(ROOT_INO, 0)]),
                 lookup_counts: HashMap::new(),
                 dir_entry_refs: HashMap::new(),
@@ -279,6 +285,57 @@ impl FuseRedirectFs {
                 dir_candidate_cache_max_capacity: dir_cache_max_capacity,
             }),
         })
+    }
+
+    fn policy_for_request(&self, req: &Request) -> Arc<RedirectPolicy> {
+        self.policy.for_request(req.uid(), req.pid())
+    }
+
+    fn policy_for_read_request(
+        &self,
+        req: &Request,
+        ino: Option<INodeNo>,
+        rel: Option<&str>,
+    ) -> Arc<RedirectPolicy> {
+        let policy = self.policy_for_request(req);
+        if req.uid() != 0 || !policy.is_deny_all() {
+            return policy;
+        }
+        let cached_uid = {
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+            ino.and_then(|value| state.inode_policy_uids.get(&value.0).copied())
+                .or_else(|| rel.and_then(|value| state.path_policy_uids.get(value).copied()))
+        };
+        if let Some(cached_uid) = cached_uid
+            && let Some(cached_policy) = self.policy.for_uid_exact(cached_uid)
+        {
+            let count = INODE_POLICY_FALLBACKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == 1 || count.is_multiple_of(256) {
+                log::info!(
+                    "fuse policy inode fallback uid=0 pid={} ino={} rel={} app_uid={} pkg={} count={}",
+                    req.pid(),
+                    ino.map(|value| value.0).unwrap_or(0),
+                    rel.unwrap_or(""),
+                    cached_uid,
+                    cached_policy.package_name,
+                    count
+                );
+            }
+            return cached_policy;
+        }
+        policy
+    }
+
+    fn remember_policy_for_inode_locked(
+        state: &mut FuseState,
+        ino: INodeNo,
+        rel: &str,
+        policy: &RedirectPolicy,
+    ) {
+        state
+            .path_policy_uids
+            .insert(rel.to_string(), policy.uid as u32);
+        state.inode_policy_uids.insert(ino.0, policy.uid as u32);
     }
 
     fn ino_for_path_locked(state: &mut FuseState, rel: &str) -> INodeNo {
@@ -361,11 +418,11 @@ impl FuseRedirectFs {
         name: &OsStr,
         operation_name: &'static str,
     ) -> Result<NewEntryRoute, Errno> {
-        let policy = self.policy.for_uid(req.uid());
         let Some(parent_rel) = self.path_for_ino(parent) else {
             return Err(Errno::ENOENT);
         };
         let rel = Self::child_rel(&parent_rel, name)?;
+        let policy = self.policy_for_request(req);
         let backend = self.backend_for_relative(&policy, &rel, OperationKind::Write)?;
         if backend.is_read_only {
             policy.emit_monitor_read_only_deny(operation_name, &backend);
@@ -420,6 +477,7 @@ impl FuseRedirectFs {
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, rel);
+            Self::remember_policy_for_inode_locked(&mut state, ino, rel, policy);
             Self::add_lookup_locked(&mut state, ino);
             ino
         };

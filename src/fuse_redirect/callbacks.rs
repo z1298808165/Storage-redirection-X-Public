@@ -150,13 +150,13 @@ impl Filesystem for FuseRedirectFs {
 
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let _perf = self.perf.observe(&self.perf.lookup_calls);
-        let policy = self.policy.for_uid(req.uid());
         let Some(parent_rel) = self.path_for_ino(parent) else {
             reply.error(Errno::ENOENT);
             return;
         };
         match Self::child_rel(&parent_rel, name) {
             Ok(rel) => {
+                let policy = self.policy_for_read_request(req, Some(parent), Some(&rel));
                 // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
                 // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
                 if policy.is_own_media_sqlite_shm_rel(&rel) {
@@ -183,7 +183,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn getattr(&self, req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_read_request(req, Some(ino), None);
         match self
             .backend_for_ino(&policy, ino)
             .and_then(|backend| self.visible_attr_for_backend(&policy, ino, &backend))
@@ -195,7 +195,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_read_request(req, Some(ino), None);
         match self.backend_for_ino(&policy, ino).and_then(|backend| {
             std::fs::read_link(&backend.path)
                 .map(|path| path.as_os_str().as_bytes().to_vec())
@@ -208,7 +208,7 @@ impl Filesystem for FuseRedirectFs {
 
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_read_request(req, Some(ino), None);
         let track_dir_perf = crate::logging::is_debug_logging_enabled();
         let first_lock_started = track_dir_perf.then(std::time::Instant::now);
         let (mut rel, mut path_version) = {
@@ -404,7 +404,7 @@ impl Filesystem for FuseRedirectFs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let _perf = self.perf.observe(&self.perf.read_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_read_request(req, Some(ino), None);
         let handle = fh.into();
         let entries = {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
@@ -456,7 +456,11 @@ impl Filesystem for FuseRedirectFs {
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = if open_flags_write(flags.0) {
+            self.policy_for_request(req)
+        } else {
+            self.policy_for_read_request(req, Some(ino), None)
+        };
         let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
@@ -587,7 +591,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyWrite,
     ) {
         let _perf = self.perf.observe(&self.perf.write_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         let file = {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             let Some(open_file) = state.files.get(&fh.into()) else {
@@ -698,7 +702,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyWrite,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         if !flags.is_empty() {
             reply.error(Errno::EINVAL);
             return;
@@ -998,13 +1002,13 @@ impl Filesystem for FuseRedirectFs {
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         self.remove_child(&policy, parent, name, false, reply);
     }
 
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         self.remove_child(&policy, parent, name, true, reply);
     }
 
@@ -1019,7 +1023,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyEmpty,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         let rename_flags = flags.bits();
         let rename_noreplace_flag = libc::RENAME_NOREPLACE as u32;
         if rename_flags & !rename_noreplace_flag != 0 {
@@ -1121,7 +1125,7 @@ impl Filesystem for FuseRedirectFs {
         reply: ReplyAttr,
     ) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
@@ -1199,7 +1203,11 @@ impl Filesystem for FuseRedirectFs {
     }
 
     fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
-        let policy = self.policy.for_uid(req.uid());
+        let policy = if mask.contains(AccessFlags::W_OK) {
+            self.policy_for_request(req)
+        } else {
+            self.policy_for_read_request(req, Some(ino), None)
+        };
         let backend = match self.backend_for_ino(&policy, ino) {
             Ok(backend) => backend,
             Err(errno) => {
@@ -1267,7 +1275,7 @@ impl Filesystem for FuseRedirectFs {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        let policy = self.policy.for_uid(req.uid());
+        let policy = self.policy_for_request(req);
         {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             if !state.dirs.contains_key(&fh.into()) {
