@@ -171,6 +171,25 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.android_wrapper,
         )
 
+    def test_own_private_backend_is_stable_for_new_files(self) -> None:
+        policy = read("src/fuse_redirect/policy.rs")
+        backend = section(
+            policy,
+            "fn real_backend_root_for_storage_rel(",
+            "/// MediaProvider FUSE 视图根",
+        )
+        # 自有 Android 私有目录必须从首次创建起固定使用真实存储根，不能按数据库族
+        # 是否存在或 MediaProvider 视图状态在真实根与其它后端之间切换。
+        self.assertIn("if is_android_private_storage_subtree_relative_path(rel)", backend)
+        self.assertIn("&self.private_real_root", backend)
+        self.assertNotIn("media_sqlite_real_root", backend)
+        self.assertNotIn("exists()", backend)
+
+        decision = section(policy, "fn backend_decision(", "fn matches_any(")
+        # 用户显式映射仍由路径映射分支优先处理，自有目录的默认行为才是 Real。
+        self.assertIn("self.resolve_mapping(storage_path).is_some()", decision)
+        self.assertIn("self.is_own_private_storage_path(storage_path)", decision)
+
     def test_optional_diagnostics_accept_empty_output(self) -> None:
         body = section(self.powershell, "function Invoke-CaptureScenario2MediastoreHookDiag", "function Invoke-StandardScenario")
         # 日志轮转或过滤无匹配属于正常情况，空诊断不能中断后面的行为断言。
