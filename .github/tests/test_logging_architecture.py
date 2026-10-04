@@ -675,6 +675,15 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn('await loadLogs({ afterClear: true })', webui)
         self.assertIn('for monitor_log in "$LOGS_DIR/file_monitor.log" "$LOGS_DIR"/file_monitor.log.[0-9]*; do', archive)
 
+    def test_daemon_monitor_module_uses_a_stable_rustfmt_path(self) -> None:
+        daemon = read("src/bin/srx_daemon.rs")
+        monitor = read("src/bin/monitor/mod.rs")
+
+        self.assertIn('#[path = "monitor/mod.rs"]', daemon)
+        self.assertNotIn("mod monitor {", daemon)
+        self.assertIn('#[path = "../../monitor/hint_file.rs"]', monitor)
+        self.assertIn('#[path = "../../monitor/source_hint.rs"]', monitor)
+
 
 if __name__ == "__main__":
     unittest.main()
