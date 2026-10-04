@@ -67,6 +67,35 @@ class GenerateChangelogTest(unittest.TestCase):
         self.assertEqual(item["text"], "仅对重定向调用方登记目标")
         self.assertEqual(item["files"], ["src/daemon.rs"])
 
+    def test_collect_analysis_deduplicates_same_summary_across_components(self) -> None:
+        commit = CHANGELOG.CommitInfo(
+            sha="abc123456789",
+            subject="修复：固定共享宿主挂载顺序",
+            body="用户影响：避免应用先打开重定向沙盒中的旧文件。",
+            fields={"用户影响": "避免应用先打开重定向沙盒中的旧文件。"},
+        )
+        original = CHANGELOG.commit_changed_files
+        CHANGELOG.commit_changed_files = lambda _commit: [
+            "src/daemon_mount.rs",
+            ".github/tests/test_scenario_consistency.py",
+        ]
+        try:
+            analysis = CHANGELOG.collect_analysis(
+                "ci",
+                ["src/daemon_mount.rs", ".github/tests/test_scenario_consistency.py"],
+                [commit],
+            )
+        finally:
+            CHANGELOG.commit_changed_files = original
+        self.assertEqual(len(analysis["module"]["fixed"]), 1)
+        self.assertFalse(analysis["other"]["fixed"])
+
+    def test_summary_key_ignores_spacing_and_terminal_punctuation(self) -> None:
+        self.assertEqual(
+            CHANGELOG.summary_key("固定共享宿主挂载顺序。"),
+            CHANGELOG.summary_key("固定 共享宿主挂载顺序；"),
+        )
+
     def test_process_only_commit_is_omitted_from_release(self) -> None:
         commit = CHANGELOG.CommitInfo(
             sha="abc123456789",

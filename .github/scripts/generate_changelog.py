@@ -12,6 +12,7 @@ from pathlib import Path
 
 MAX_SECTION_ITEMS = 20
 COMPONENTS = ("module", "app", "other")
+COMPONENT_PRIORITY = {"module": 0, "app": 1, "other": 2}
 SECTIONS = ("fixed", "features", "changes", "usage", "notes")
 AUTO_MANIFEST_PREFIXES = (
     "CI：更新更新清单",
@@ -243,6 +244,7 @@ def collect_analysis(mode: str, files: list[str], commits: list[CommitInfo]) -> 
         for component in COMPONENTS
         if mode == "ci" or component != "other"
     }
+    emitted_summaries: dict[str, set[str]] = {section: set() for section in SECTIONS}
     for commit in commits:
         summary = user_summary(commit)
         if not summary:
@@ -251,16 +253,20 @@ def collect_analysis(mode: str, files: list[str], commits: list[CommitInfo]) -> 
         if section is None:
             continue
         commit_files = [path for path in commit_changed_files(commit) if path in file_set]
-        for component in COMPONENTS:
+        for component in sorted(COMPONENTS, key=lambda value: COMPONENT_PRIORITY[value]):
             if component not in analysis:
                 continue
             component_files = [path for path in commit_files if component in change_components(path)]
             if not component_files:
                 continue
+            key = summary_key(summary)
+            if key in emitted_summaries[section]:
+                continue
             add_unique(
                 analysis[component][section],
                 {"text": summary, "files": component_files},
             )
+            emitted_summaries[section].add(key)
     return analysis
 
 
@@ -270,6 +276,11 @@ def add_unique(items: list[dict[str, object]], item: dict[str, object]) -> None:
         return
     if not any(existing["text"] == text for existing in items):
         items.append({"text": text, "files": item["files"]})
+
+
+def summary_key(text: str) -> str:
+    """构造跨组件去重用的稳定文本键。"""
+    return re.sub(r"\s+", "", text).strip("。；;，,")
 
 
 def limit_analysis(analysis: dict[str, dict[str, list[dict[str, object]]]]) -> None:
