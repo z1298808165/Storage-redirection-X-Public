@@ -2249,6 +2249,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 and ("$companion" in line or "`$companion" in line)
             ]
             self.assertTrue(combined, f"{name} 未把三类串一起用于匹配")
+            self.assertNotIn("tail -240", code, f"{name} 不应截断本次启动日志，避免 companion 成功行被挤出尾部")
 
     def test_powershell_runner_matches_bash_mountinfo_recheck(self) -> None:
         """`.ps1` 必须与 `.sh` 一样，在挂载确认后独立复核挂载点。

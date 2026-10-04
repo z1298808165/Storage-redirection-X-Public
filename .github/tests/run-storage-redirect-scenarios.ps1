@@ -570,7 +570,7 @@ daemon="daemon mount pkg=$AppId pid=`$pid op=Reload ok=true"
 companion="perf companion mount pkg=$AppId pid=`$pid .* ok=true"
 while [ `$(date +%s) -le `$deadline ]; do
   if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq "(`$confirmed|`$daemon|`$companion)"; then echo "confirmed_pid=`$pid"; exit 0; fi
-  if tail -240 '$LogPath' 2>/dev/null | grep -Eq "(`$confirmed|`$daemon|`$companion)"; then echo "confirmed_pid=`$pid"; exit 0; fi
+  if grep -Eq "(`$confirmed|`$daemon|`$companion)" '$LogPath' 2>/dev/null; then echo "confirmed_pid=`$pid"; exit 0; fi
   sleep 0.1
 done
 echo "pid=`$pid"
