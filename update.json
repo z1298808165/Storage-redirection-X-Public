@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37171964625-1/storage-redirect-x-manager-v1.2.60-ci.28.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37171964625-1/storage.redirect.x-v1.2.60-ci.28.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.28`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37039027866-2`\n- 当前提交：`489a2b47956a`\n\n## 模块更新\n\n### 修复了什么问题\n- 公开 module 构建可继续进入测试流；适用范围：Android daemon 与 FUSE 决策；限制：保持现有后端决策语义。\n- 公开 CI 可恢复格式检查和模块构建；适用范围：Android daemon 构建；限制：不改变监视运行时逻辑。\n- 监视页减少重复记录并完整显示应用来源；适用范围：重定向、Provider、监视页；限制：仅合并同秒同后端的创建与写入。\n\n## App 更新\n\n### 修复了什么问题\n- 监视页减少重复记录并完整显示应用来源；适用范围：重定向、Provider、监视页；限制：仅合并同秒同后端的创建与写入。\n\n## 其它更新\n\n### 修复了什么问题\n- Android 测试流可继续执行文件监视场景；适用范围：Bash 与 PowerShell 测试流；限制：仍要求应用 PID 和 mountinfo 物理复核。\n- 公开 CI 可恢复格式检查和模块构建；适用范围：Android daemon 构建；限制：不改变监视运行时逻辑。\n- 监视页减少重复记录并完整显示应用来源；适用范围：重定向、Provider、监视页；限制：仅合并同秒同后端的创建与写入。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.28`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37039027866-2`\n- 当前提交：`489a2b47956a`\n\n## 模块更新\n\n### 修复了什么问题\n- 完善重定向文件操作的来源归属，监视记录可关联真实发起应用。\n- 合并同一文件的创建与首次写入记录，保留后续独立写入操作。\n- 修复 Linux 构建环境下监视模块路径解析失败的问题。\n\n### 功能变化\n- 文件监视记录按操作角色、来源和实际后端路径进行去重，减少同一操作的重复显示。\n\n## App 更新\n\n### 修复了什么问题\n- 监视页面减少重复记录并显示更准确的应用来源。\n- 日志清理增加完成确认，日志导出覆盖主日志和轮转日志。\n\n## 其它更新\n\n### 修复了什么问题\n- 完善文件监视场景的挂载成功判断，避免成功挂载被误报为超时。"
   },
   "releases": []
 }
