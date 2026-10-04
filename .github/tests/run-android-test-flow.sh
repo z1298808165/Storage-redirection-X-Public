@@ -252,7 +252,7 @@ export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
 # 而验证单点修复只需要那一个场景；用这两个入口把反馈周期压到十几分钟，
 # 不必为了跑窄范围而临时改写 workflow（改 workflow 容易在收尾时漏改回全量）。
 # srx-scenario-scope:begin
-scenario_scope="${SRT_SCENARIOS_OVERRIDE:-}"
+scenario_scope="${SRT_SCENARIOS_OVERRIDE:-${SRT_SCENARIOS:-}}"
 if [ -z "$scenario_scope" ]; then
   scenario_message="${SRT_COMMIT_MESSAGE:-}"
   if [[ "$scenario_message" =~ 单场景[：:]?[[:space:]]*([0-9]+([,，][0-9]+)*) ]]; then

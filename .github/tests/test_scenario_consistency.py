@@ -163,6 +163,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
         cls.ids = [item["id"] for item in cls.scenarios]
         cls.bash = read(".github/tests/run-storage-redirect-scenarios.sh")
         cls.powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
+        cls.android_wrapper = read(".github/tests/run-android-test-flow.sh")
+
+    def test_android_wrapper_preserves_prepare_scenario_scope(self) -> None:
+        self.assertIn(
+            'scenario_scope="${SRT_SCENARIOS_OVERRIDE:-${SRT_SCENARIOS:-}}"',
+            self.android_wrapper,
+        )
 
     def test_optional_diagnostics_accept_empty_output(self) -> None:
         body = section(self.powershell, "function Invoke-CaptureScenario2MediastoreHookDiag", "function Invoke-StandardScenario")
