@@ -558,9 +558,8 @@ impl RedirectPolicy {
 
     fn backend_decision(&self, storage_path: &str, operation: OperationKind) -> BackendDecision {
         let is_read_only = self.is_read_only(storage_path);
-        let kind = if self.is_monitor_only {
-            BackendKind::Real
-        } else if self.resolve_mapping(storage_path).is_some()
+        let kind = if self.is_monitor_only
+            || self.resolve_mapping(storage_path).is_some()
             || self.is_own_private_storage_path(storage_path)
         {
             BackendKind::Real
