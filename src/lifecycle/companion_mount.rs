@@ -443,6 +443,23 @@ fn handle_child_process(
     mount_mgr.set_file_monitor_enabled(request.is_file_monitor_enabled);
 
     let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
+    let cleared_system_view_before_preattach =
+        if shared_host_preattach_candidate(request, scoped_fuse_roots)
+            && crate::system_fuse_view::should_clear_system_fuse_view_for_platform()
+        {
+            crate::system_fuse_view::log_view_stack_for_package(
+                request.uid,
+                &request.package_name,
+                "before_shared_host_preattach",
+            );
+            crate::system_fuse_view::clear_system_fuse_view_for_package(
+                request.uid,
+                &request.package_name,
+            );
+            true
+        } else {
+            false
+        };
     // 共享宿主必须先于 namespace 重定向接管存储根，避免 SQLite 在接管前打开
     // 重定向沙盒中的旧副本。
     let preattached_host = preattach_shared_host(request, scoped_fuse_roots);
@@ -529,7 +546,9 @@ fn handle_child_process(
         // isolation FUSE 视图，再补回被 MNT_DETACH 级联摘掉的映射子路径 bind。摘除逻辑此前只
         // 写在 daemon 路径里，走 companion 的应用（普通应用正是这条）在 x86_64 Android 13/14
         // 上继续失败。顺序约束见 crate::system_fuse_view 模块文档。
-        if crate::system_fuse_view::should_clear_system_fuse_view_for_platform() {
+        if !cleared_system_view_before_preattach
+            && crate::system_fuse_view::should_clear_system_fuse_view_for_platform()
+        {
             crate::system_fuse_view::log_view_stack_for_package(
                 request.uid,
                 &request.package_name,
@@ -608,20 +627,11 @@ fn preattach_shared_host(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
 ) -> Option<FuseMountState> {
-    if !matches!(
-        request.storage_backend_mode,
-        crate::config::StorageBackendMode::Auto
-    ) {
+    if !shared_host_preattach_candidate(request, scoped_fuse_roots) {
         return None;
     }
     let user_id = platform::user_id_from_uid(request.uid);
     let storage_root = platform::paths::storage_user_root_for_user(user_id);
-    if scoped_fuse_roots.len() != 1
-        || platform::paths::normalize_syntax(&scoped_fuse_roots[0])
-            != platform::paths::normalize_syntax(&storage_root)
-    {
-        return None;
-    }
 
     let state = start_fuse_service_for_root(request, &storage_root, None)?;
     if state.host_session.is_some() {
@@ -636,6 +646,23 @@ fn preattach_shared_host(
         crate::fuse_session::rollback_scoped_fuse_services(std::slice::from_ref(&state));
         None
     }
+}
+
+fn shared_host_preattach_candidate(
+    request: &CompanionMountRequest,
+    scoped_fuse_roots: &[String],
+) -> bool {
+    if !matches!(
+        request.storage_backend_mode,
+        crate::config::StorageBackendMode::Auto
+    ) {
+        return false;
+    }
+    let user_id = platform::user_id_from_uid(request.uid);
+    let storage_root = platform::paths::storage_user_root_for_user(user_id);
+    scoped_fuse_roots.len() == 1
+        && platform::paths::normalize_syntax(&scoped_fuse_roots[0])
+            == platform::paths::normalize_syntax(&storage_root)
 }
 
 /// 按根启动 scoped FUSE 服务；单根失败只丢弃该根。

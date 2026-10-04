@@ -195,9 +195,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         companion = read("src/lifecycle/companion_mount.rs")
         for source, label in ((daemon, "daemon"), (companion, "companion")):
             preattach = section(source, "fn preattach_shared_host(", "\n}")
-            self.assertIn("StorageBackendMode::Auto", preattach, label)
             self.assertIn("host_session.is_some()", preattach, label)
             self.assertIn("rollback_scoped_fuse_services", preattach, label)
+            self.assertIn("StorageBackendMode::Auto", source, label)
 
             self.assertLess(
                 source.index("preattach_shared_host("),

@@ -716,6 +716,23 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     );
     planner.set_file_monitor_enabled(request.is_file_monitor_enabled);
     let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
+    let cleared_system_view_before_preattach =
+        if shared_host_preattach_candidate(request, scoped_fuse_roots)
+            && crate::system_fuse_view::should_clear_system_fuse_view_for_platform()
+        {
+            crate::system_fuse_view::log_view_stack_for_package(
+                request.uid,
+                &request.package_name,
+                "before_shared_host_preattach",
+            );
+            crate::system_fuse_view::clear_system_fuse_view_for_package(
+                request.uid,
+                &request.package_name,
+            );
+            true
+        } else {
+            false
+        };
     // 共享宿主必须先于 namespace 重定向接管存储根。否则应用在宿主挂载完成前会
     // 短暂看到 `/data/media/<user>/Android/data/<pkg>/sdcard`，SQLite 可能先打开
     // 其中的旧副本；之后宿主再覆盖同一挂载点，已打开的 inode 不会自动切换。
@@ -794,7 +811,9 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         log_mounted_target_view(&mounted_targets, request);
         // 重建后再采一次，与 before_clear 对照，判断重载是否真的换掉了视图根最上层。
         log_reload_view_root_stack(request, "after_mount");
-        if crate::system_fuse_view::should_clear_system_fuse_view_for_platform() {
+        if !cleared_system_view_before_preattach
+            && crate::system_fuse_view::should_clear_system_fuse_view_for_platform()
+        {
             crate::system_fuse_view::clear_system_fuse_view_for_package(
                 request.uid,
                 &request.package_name,
@@ -829,20 +848,11 @@ fn preattach_shared_host(
     request: &MountRequest,
     scoped_fuse_roots: &[String],
 ) -> Option<FuseMountState> {
-    if !matches!(
-        request.storage_backend_mode,
-        crate::config::StorageBackendMode::Auto
-    ) {
+    if !shared_host_preattach_candidate(request, scoped_fuse_roots) {
         return None;
     }
     let user_id = crate::platform::user_id_from_uid(request.uid);
     let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
-    if scoped_fuse_roots.len() != 1
-        || crate::platform::paths::normalize_syntax(&scoped_fuse_roots[0])
-            != crate::platform::paths::normalize_syntax(&storage_root)
-    {
-        return None;
-    }
 
     let state = start_fuse_service_for_root(request, &storage_root, None)?;
     if state.host_session.is_some() {
@@ -857,6 +867,20 @@ fn preattach_shared_host(
         crate::fuse_session::rollback_scoped_fuse_services(std::slice::from_ref(&state));
         None
     }
+}
+
+fn shared_host_preattach_candidate(request: &MountRequest, scoped_fuse_roots: &[String]) -> bool {
+    if !matches!(
+        request.storage_backend_mode,
+        crate::config::StorageBackendMode::Auto
+    ) {
+        return false;
+    }
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+    scoped_fuse_roots.len() == 1
+        && crate::platform::paths::normalize_syntax(&scoped_fuse_roots[0])
+            == crate::platform::paths::normalize_syntax(&storage_root)
 }
 
 /// 按根启动 scoped FUSE 服务；单根失败只丢弃该根。
