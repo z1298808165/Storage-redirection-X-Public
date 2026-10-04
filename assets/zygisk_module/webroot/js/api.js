@@ -25,6 +25,7 @@ const DIAGNOSTIC_ARCHIVE_SCRIPT = MODULE_DIR + "/service.d/diagnostic_archive.sh
 const LIST_APPS_DEX = MODULE_DIR + "/bin/list_apps.dex";
 const LIST_APPS_OUTPUT = "/data/Namespace-Proxy/list.config";
 const FILE_MONITOR_LOG = LOGS_DIR + "/file_monitor.log";
+const MONITOR_CLEAR_ACK_FILE = "/data/adb/storage.redirect.x/.file_monitor.clear.ok";
 const RUNTIME_STATS_SCHEMA = "2";
 const MAX_RUNTIME_ACTIVATION_COUNT = "18446744073709551615";
 const MODULE_LOG_PACKAGE = "storage.redirect.x";
@@ -2084,7 +2085,10 @@ const Api = {
       " && base=" +
       shellQuote(FILE_MONITOR_LOG) +
       '; for f in "$base".*; do suffix="${f##*.}"; case "$suffix" in ' +
-      '\'\'|*[!0-9]*) continue;; esac; rm -f "$f"; done; : > "$base"';
+      '\'\'|*[!0-9]*) continue;; esac; rm -f "$f"; done; : > "$base"; rm -f ' +
+      shellQuote(MONITOR_CLEAR_ACK_FILE) +
+      " " +
+      shellQuote(MONITOR_CLEAR_ACK_FILE + ".tmp");
     await this.exec(
       "if [ -r " +
         shellQuote(SRXCTL) +

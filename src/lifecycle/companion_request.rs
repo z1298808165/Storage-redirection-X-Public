@@ -15,6 +15,7 @@ pub struct CompanionMountRequest {
     pub read_only_paths: Vec<String>,
     pub path_mappings: Vec<PathMapping>,
     pub is_mapping_mode_only: bool,
+    pub is_monitor_only: bool,
     pub config_version: u64,
 }
 
@@ -58,6 +59,9 @@ impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
     fn is_mapping_mode_only(&self) -> bool {
         self.is_mapping_mode_only
     }
+    fn is_monitor_only(&self) -> bool {
+        self.is_monitor_only
+    }
 }
 
 // 从 JSON 负载解析挂载请求，校验必填字段
@@ -93,6 +97,10 @@ pub fn parse_companion_mount_request(payload: &str) -> Result<CompanionMountRequ
         .to_string();
     request.is_mapping_mode_only = value
         .get("mapping_mode_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    request.is_monitor_only = value
+        .get("monitor_only")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     request.config_version = value

@@ -146,6 +146,11 @@ data class LogEntry(
     val watchPackage: String = "",
     val identifyMethod: String = "",
     val identifyReliability: String = "",
+    /** request 是调用方操作，observation 是 daemon 对文件系统结果的观察。 */
+    val eventRole: String = "",
+    val correlationId: String = "",
+    val observerPackage: String = "",
+    val observationCount: Int = 0,
     val source: String = "",
     val resultGroup: String = "",
     val filterOperation: String = "",

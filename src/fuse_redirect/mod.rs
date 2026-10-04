@@ -577,6 +577,11 @@ impl FuseRedirectFs {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remove_inode_path(&mut state, &rel);
                 state.clear_dir_candidate_cache();
+                policy.emit_monitor_mutation(
+                    if is_dir { "rmdir" } else { "unlink" },
+                    &backend,
+                    None,
+                );
                 reply.ok();
             }
             Err(error) => reply.error(errno_from_io(error)),

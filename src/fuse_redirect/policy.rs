@@ -140,6 +140,7 @@ pub(super) struct RedirectPolicy {
     read_only_excluded_index: RuleIndex,
     pub(super) path_mappings: Vec<PathMapping>,
     pub(super) is_mapping_mode_only: bool,
+    pub(super) is_monitor_only: bool,
     pub(super) is_file_monitor_enabled: bool,
     /// 一律拒绝：路径决策全部失败，调用方据此返回 `ENOENT`。
     ///
@@ -433,6 +434,7 @@ impl RedirectPolicy {
             read_only_excluded_index,
             path_mappings,
             is_mapping_mode_only: config.is_mapping_mode_only,
+            is_monitor_only: config.is_monitor_only,
             is_file_monitor_enabled: config.is_file_monitor_enabled,
             deny_all: false,
         })
@@ -556,7 +558,9 @@ impl RedirectPolicy {
 
     fn backend_decision(&self, storage_path: &str, operation: OperationKind) -> BackendDecision {
         let is_read_only = self.is_read_only(storage_path);
-        let kind = if self.resolve_mapping(storage_path).is_some()
+        let kind = if self.is_monitor_only {
+            BackendKind::Real
+        } else if self.resolve_mapping(storage_path).is_some()
             || self.is_own_private_storage_path(storage_path)
         {
             BackendKind::Real
@@ -782,6 +786,30 @@ impl RedirectPolicy {
         }
     }
 
+    fn monitor_identify_method(&self) -> &'static str {
+        if self.is_monitor_only {
+            "fuse_monitor_only"
+        } else {
+            "fuse_redirect"
+        }
+    }
+
+    fn monitor_source_for_backend(&self, backend: &BackendPath) -> &'static str {
+        if self.is_monitor_only {
+            return "fuse_monitor_only";
+        }
+        let display_path = self.storage_path_for_rel(&backend.rel);
+        if self.resolve_mapping(&display_path).is_some() {
+            "path_mapping"
+        } else if display_path.contains("/Android/data/") && display_path.contains("/sdcard") {
+            "sandbox_path"
+        } else if backend.path.starts_with(&self.redirect_root) {
+            "redirect_root"
+        } else {
+            "fuse_redirect"
+        }
+    }
+
     pub(super) fn emit_monitor_create(&self, backend: &BackendPath) {
         if !self.is_file_monitor_enabled {
             return;
@@ -801,15 +829,68 @@ impl RedirectPolicy {
         ) {
             return;
         }
+        let identify_method = self.monitor_identify_method();
+        let operation = if self.is_monitor_only {
+            "fuse_monitor_create"
+        } else {
+            "fuse_create"
+        };
+        let source = self.monitor_source_for_backend(backend);
         log::info!(
             target: FILE_MONITOR_LOG_TAG,
-            "{}|{}|{}|CREATE|{}|ret=0|errno=0|identify_method=fuse_redirect|identify_reliability=high|op=fuse_create|source=fuse_redirect|backend={}",
+            "{}|{}|{}|CREATE|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|op={}|source={}|backend={}",
             build_monitor_timestamp(),
             self.package_name,
             self.package_name,
             display_path,
+            identify_method,
+            operation,
+            source,
             backend_path
         );
+    }
+
+    /// 监视专用 FUSE 的成功写入记录。
+    ///
+    /// 这里记录的是 FUSE 请求已经完成之后的结果，路径由当前请求直接解析得到；不使用
+    /// 父目录回填，也不把 inotify 的观察事件伪装成调用方事件。
+    pub(super) fn emit_monitor_mutation(
+        &self,
+        operation_name: &str,
+        backend: &BackendPath,
+        from_backend: Option<&BackendPath>,
+    ) {
+        if !self.is_file_monitor_enabled {
+            return;
+        }
+        let display_path = self.storage_path_for_rel(&backend.rel);
+        if display_path.is_empty()
+            || crate::config::SettingsHub::instance()
+                .should_filter_monitor_record(&display_path, operation_name)
+        {
+            return;
+        }
+        let backend_path = backend.path.to_string_lossy();
+        let mut line = format!(
+            "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|event_role=request|op={}|source={}|backend={}",
+            build_monitor_timestamp(),
+            self.package_name,
+            self.package_name,
+            monitor_event_kind_for_operation(operation_name),
+            display_path,
+            self.monitor_identify_method(),
+            operation_name,
+            self.monitor_source_for_backend(backend),
+            backend_path
+        );
+        if let Some(from_backend) = from_backend {
+            let from_path = self.storage_path_for_rel(&from_backend.rel);
+            if !from_path.is_empty() && from_path != display_path {
+                line.push_str("|from=");
+                line.push_str(&from_path);
+            }
+        }
+        log::info!(target: FILE_MONITOR_LOG_TAG, "{}", line);
     }
 
     pub(super) fn emit_monitor_read_only_deny(&self, operation_name: &str, backend: &BackendPath) {

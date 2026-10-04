@@ -35,6 +35,121 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun classifiesFilesystemFallbackAsObservation() {
+    val raw =
+        "2026-10-03 10:37:27|com.android.providers.media.module|com.android.providers.media.module|OPEN|" +
+            "/storage/emulated/0/Pictures/.gs_fs0/.nomedia|ret=0|errno=0|" +
+            "identify_method=media_provider_fallback|identify_reliability=fallback|" +
+            "event_role=observation|op=open:write|source=allowed_real_path|" +
+            "watch_package=com.taobao.idlefish"
+
+    val entry = parseMonitorLogEntries(raw).single()
+
+    assertEquals("observation", entry.eventRole)
+    assertEquals("com.android.providers.media.module", entry.packageName)
+    assertEquals("com.taobao.idlefish", entry.watchPackage)
+  }
+
+  @Test
+  fun infersObservationRoleForLegacyFallbackRecord() {
+    val raw =
+        "2026-10-03 10:37:27|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
+            "/storage/emulated/0/Pictures/.gs_fs0|ret=0|errno=0|" +
+            "identify_method=media_provider_fallback|identify_reliability=fallback|op=inotify|" +
+            "source=allowed_real_path|watch_package=com.taobao.idlefish"
+
+    val entry = parseMonitorLogEntries(raw).single()
+
+    assertEquals("observation", entry.eventRole)
+  }
+
+  @Test
+  fun prefersCallerOverObservation() {
+    val raw =
+        listOf(
+                "2026-10-03 10:38:56|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
+                    "/storage/emulated/0/Pictures/.gs_fs0/.0.jpg|ret=0|errno=0|" +
+                    "identify_method=media_provider_fallback|identify_reliability=fallback|" +
+                    "event_role=observation|correlation_id=p1-1|op=inotify|source=allowed_real_path|" +
+                    "observer_package=com.android.providers.media.module",
+                "2026-10-03 10:38:56|com.android.providers.media.module|com.taobao.idlefish|OPEN|" +
+                    "/storage/emulated/0/Pictures/.gs_fs0/.0.jpg|ret=194|errno=0|" +
+                    "identify_method=caller|identify_reliability=high|event_role=request|" +
+                    "correlation_id=p1-1|op=open|op_filter=open:create|flags=0x20242",
+            )
+            .joinToString("\n")
+
+    val entry = parseMonitorLogEntries(raw).single()
+
+    assertEquals("com.taobao.idlefish", entry.callerPackage)
+    assertEquals("request", entry.eventRole)
+    assertEquals("caller", entry.identifyMethod)
+    assertEquals(1, entry.observationCount)
+    assertEquals("com.android.providers.media.module", entry.observerPackage)
+  }
+
+  @Test
+  fun coalescesProviderMkdirWithUncorrelatedObservation() {
+    val raw =
+        listOf(
+                "2026-10-03 13:29:40|com.android.providers.media.module|com.taobao.idlefish|MKDIR|" +
+                    "/storage/emulated/0/Pictures/.gs/|ret=0|errno=0|" +
+                    "identify_method=provider_mkdir|identify_reliability=high|event_role=request|" +
+                    "op=mkdir|op_filter=mkdir|source=media_provider_java",
+                "2026-10-03 13:29:40|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
+                    "/storage/emulated/0/Pictures/.gs|ret=0|errno=0|" +
+                    "identify_method=media_provider_fallback|identify_reliability=fallback|" +
+                    "event_role=observation|op=inotify|source=allowed_real_path|" +
+                    "observer_package=srx_daemon",
+            )
+            .joinToString("\n")
+
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(
+        entries.joinToString("; ") {
+          "${it.eventRole}/${it.identifyMethod}/${it.path}/${it.timestamp}"
+        },
+        1,
+        entries.size,
+    )
+    val entry = entries.single()
+
+    assertEquals("com.taobao.idlefish", entry.packageName)
+    assertEquals("provider_mkdir", entry.identifyMethod)
+    assertEquals("request", entry.eventRole)
+    assertEquals(1, entry.observationCount)
+  }
+
+  @Test
+  fun coalescesMappedFuseRequestWithInotifyObservation() {
+    val raw =
+        listOf(
+                "2026-10-03 13:30:12|com.tencent.mobileqq|com.tencent.mobileqq|OPEN|" +
+                    "/storage/emulated/0/Download/QQ/storage.redirect.x.zip|ret=0|errno=0|" +
+                    "identify_method=fuse_redirect|identify_reliability=high|event_role=request|" +
+                    "op=open:write|source=path_mapping|" +
+                    "backend=/data/media/0/Download/第三方下载/QQ/storage.redirect.x.zip",
+                "2026-10-03 13:30:12|com.tencent.mobileqq|com.tencent.mobileqq|OPEN|" +
+                    "/storage/emulated/0/Download/QQ/storage.redirect.x.zip|ret=0|errno=0|" +
+                    "identify_method=daemon_inotify|identify_reliability=medium|event_role=observation|" +
+                    "op=inotify|source=path_mapping|observer_package=srx_daemon|" +
+                    "backend=/data/media/0/Download/第三方下载/QQ/storage.redirect.x.zip|" +
+                    "from=/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/QQfile_recv/storage.redirect.x.zip",
+            )
+            .joinToString("\n")
+
+    val entries = parseMonitorLogEntries(raw)
+
+    assertEquals(1, entries.size)
+    val entry = entries.single()
+    assertEquals("com.tencent.mobileqq", entry.packageName)
+    assertEquals("fuse_redirect", entry.identifyMethod)
+    assertEquals("request", entry.eventRole)
+    assertEquals(1, entry.observationCount)
+    assertEquals("srx_daemon", entry.observerPackage)
+  }
+
+  @Test
   fun parsesEntriesBeyondPreviousPreviewLimit() {
     val raw =
         (0..500).joinToString("\n") { index ->
@@ -191,6 +306,60 @@ class MonitorLogParserTest {
     assertEquals("com.tencent.mobileqq", entry.packageName)
     assertEquals("fuse_redirect", entry.identifyMethod)
     assertEquals("/data/media/0/Download/第三方下载/QQ/storage.redirect.x.zip", entry.backendPath)
+  }
+
+  @Test
+  fun coalescesFuseCreateWithSameSecondWrite() {
+    val raw =
+        listOf(
+                "2026-10-04 09:08:17|com.taobao.idlefish|com.taobao.idlefish|CREATE|" +
+                    "/storage/emulated/0/Pictures/.gs/com.taobao.idlefish/.gs_fs0/0/a.jpg|" +
+                    "ret=0|errno=0|identify_method=fuse_redirect|identify_reliability=high|" +
+                    "op=fuse_create|source=fuse_redirect|" +
+                    "backend=/data/media/0/Pictures/.gs/com.taobao.idlefish/.gs_fs0/0/a.jpg",
+                "2026-10-04 09:08:17|com.taobao.idlefish|com.taobao.idlefish|WRITE|" +
+                    "/storage/emulated/0/Pictures/.gs/com.taobao.idlefish/.gs_fs0/0/a.jpg|" +
+                    "ret=0|errno=0|identify_method=fuse_redirect|identify_reliability=high|" +
+                    "event_role=request|op=write|source=fuse_redirect|" +
+                    "backend=/data/media/0/Pictures/.gs/com.taobao.idlefish/.gs_fs0/0/a.jpg",
+            )
+            .joinToString("\n")
+
+    val entries = parseMonitorLogEntries(raw)
+
+    assertEquals(1, entries.size)
+    val entry = entries.single()
+    assertEquals("com.taobao.idlefish", entry.packageName)
+    assertEquals("fuse_create", entry.operation)
+    assertEquals("创建并写入", entry.action)
+  }
+
+  @Test
+  fun prefersMappedObservationOverFallback() {
+    val raw =
+        listOf(
+                "2026-10-04 07:12:08|com.tencent.mobileqq|com.tencent.mobileqq|CREATE|" +
+                    "/storage/emulated/0/Download/第三方下载/QQ/nt_qq_cab28b4c420bb9feb8d24642887f7579|" +
+                    "ret=0|errno=0|identify_method=daemon_inotify|identify_reliability=medium|" +
+                    "event_role=observation|op=inotify|source=path_mapping|mask=0x40000100|" +
+                    "backend=/data/media/0/Download/第三方下载/QQ/nt_qq_cab28b4c420bb9feb8d24642887f7579|" +
+                    "from=/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/QQfile_recv/nt_qq_cab28b4c420bb9feb8d24642887f7579|" +
+                    "observer_package=srx_daemon",
+                "2026-10-04 07:12:08|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
+                    "/storage/emulated/0/Download/第三方下载/QQ/nt_qq_cab28b4c420bb9feb8d24642887f7579|" +
+                    "ret=0|errno=0|identify_method=media_provider_fallback|identify_reliability=fallback|" +
+                    "event_role=observation|op=inotify|source=read_only_path|mask=0x40000100|" +
+                    "backend=/data/media/0/Download/第三方下载/QQ/nt_qq_cab28b4c420bb9feb8d24642887f7579|" +
+                    "watch_package=com.aliyun.tongyi|observer_package=srx_daemon",
+            )
+            .joinToString("\n")
+
+    val entry = parseMonitorLogEntries(raw).single()
+
+    assertEquals("com.tencent.mobileqq", entry.packageName)
+    assertEquals("daemon_inotify", entry.identifyMethod)
+    assertEquals("path_mapping", entry.source)
+    assertEquals("observation", entry.eventRole)
   }
 
   @Test

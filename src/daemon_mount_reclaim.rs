@@ -141,6 +141,7 @@ pub fn cleanup_all_mount_states() -> bool {
             sandboxed_paths: Vec::new(),
             read_only_paths: Vec::new(),
             is_mapping_mode_only: false,
+            is_monitor_only: false,
             storage_backend_mode: crate::config::StorageBackendMode::Namespace,
             is_file_monitor_enabled: false,
             config_version: 0,

@@ -44,9 +44,12 @@ private fun parseMonitorLogLine(
   val watchPkg = extras["watch_package"].orEmpty()
   val identifyMethod = extras["identify_method"].orEmpty()
   val identifyReliability = extras["identify_reliability"].orEmpty()
+  val rawOperation = extras["op"] ?: parts.getOrNull(3).orEmpty()
+  val eventRole = inferMonitorEventRole(extras["event_role"], identifyMethod, rawOperation)
+  val correlationId = extras["correlation_id"].orEmpty()
+  val observerPackage = extras["observer_package"].orEmpty()
   val source = extras["source"].orEmpty()
   val filterOperation = extras["op_filter"] ?: extras["op"] ?: parts.getOrNull(3).orEmpty()
-  val rawOperation = extras["op"] ?: parts.getOrNull(3).orEmpty()
   val operationIntent = monitorOperationIntent(filterOperation)
   val landingPath = normalizeMonitorLogPath(parts.getOrNull(4).orEmpty())
   val isModuleExport = isModuleExportRecord(extras, processPkg, callerPkg, watchPkg)
@@ -78,12 +81,36 @@ private fun parseMonitorLogLine(
       watchPackage = watchPkg,
       identifyMethod = identifyMethod,
       identifyReliability = identifyReliability,
+      eventRole = eventRole,
+      correlationId = correlationId,
+      observerPackage = observerPackage,
       source = source,
       resultGroup = resultGroup,
       filterOperation = filterOperation,
       operationIntent = operationIntent,
       isModuleWebUiExport = isModuleExport,
   )
+}
+
+private fun inferMonitorEventRole(
+    explicitRole: String?,
+    identifyMethod: String,
+    rawOperation: String,
+): String {
+  if (explicitRole == "request" || explicitRole == "observation") return explicitRole
+  if (identifyMethod == "media_provider_fallback" || identifyMethod == "daemon_inotify") {
+    return "observation"
+  }
+  if (
+      identifyMethod == "caller" ||
+          identifyMethod == "provider_open" ||
+          identifyMethod == "provider_mkdir" ||
+          identifyMethod == "saf_provider" ||
+          rawOperation.startsWith("provider_open")
+  ) {
+    return "request"
+  }
+  return "request"
 }
 
 private fun resolveCachedLabel(
@@ -248,9 +275,21 @@ private fun List<LogEntry>.coalesceMonitorLogEntries(): List<LogEntry> {
   val groupIndices = HashMap<String, Int>()
   val ordered = mutableListOf<LogEntry>()
   for (entry in this) {
+    val createWriteIndex = ordered.indexOfFirst { mergeFuseCreateWriteDuplicate(it, entry) != null }
+    if (createWriteIndex >= 0) {
+      ordered[createWriteIndex] = mergeFuseCreateWriteDuplicate(ordered[createWriteIndex], entry)!!
+      continue
+    }
     val key = entry.coalesceKey()
     if (key.isEmpty()) {
       ordered += entry
+      continue
+    }
+    val uncorrelatedIndex =
+        ordered.indexOfFirst { mergeUncorrelatedRequestObservation(it, entry) != null }
+    if (uncorrelatedIndex >= 0) {
+      ordered[uncorrelatedIndex] =
+          mergeUncorrelatedRequestObservation(ordered[uncorrelatedIndex], entry)!!
       continue
     }
     val existingIndex = groupIndices[key]
@@ -260,12 +299,52 @@ private fun List<LogEntry>.coalesceMonitorLogEntries(): List<LogEntry> {
       continue
     }
     val existing = ordered[existingIndex]
+    val correlated = mergeCorrelatedObservation(existing, entry)
+    if (correlated != null) {
+      ordered[existingIndex] = correlated
+      continue
+    }
+    val uncorrelatedObservation = mergeUncorrelatedRequestObservation(existing, entry)
+    if (uncorrelatedObservation != null) {
+      ordered[existingIndex] = uncorrelatedObservation
+      continue
+    }
     val best = preferMonitorLogEntry(existing, entry)
     if (best !== existing) {
       ordered[existingIndex] = best
     }
   }
   return ordered
+}
+
+private fun mergeFuseCreateWriteDuplicate(
+    existing: LogEntry,
+    candidate: LogEntry,
+): LogEntry? {
+  if (existing.eventRole != "request" || candidate.eventRole != "request") return null
+  if (existing.packageName != candidate.packageName) return null
+  if (existing.identifyMethod !in setOf("fuse_redirect", "fuse_monitor_only")) return null
+  if (candidate.identifyMethod != existing.identifyMethod || candidate.source != existing.source) {
+    return null
+  }
+  if (existing.timestamp.take(19) != candidate.timestamp.take(19)) return null
+  val existingBackend = existing.backendPath.normalizedMonitorPath()
+  val candidateBackend = candidate.backendPath.normalizedMonitorPath()
+  if (existingBackend.isBlank() || existingBackend != candidateBackend) return null
+  val existingOperation =
+      existing.filterOperation.ifBlank { existing.operation }.normalizedMonitorOperation()
+  val candidateOperation =
+      candidate.filterOperation.ifBlank { candidate.operation }.normalizedMonitorOperation()
+  if (setOf(existingOperation, candidateOperation) != setOf("create", "write")) return null
+  val create = if (existingOperation == "create") existing else candidate
+  val rawCreateOperation = create.filterOperation.ifBlank { create.operation }.lowercase()
+  val action =
+      if (rawCreateOperation == "create" || rawCreateOperation == "fuse_create") {
+        "创建并写入"
+      } else {
+        "打开并写入"
+      }
+  return create.copy(action = action)
 }
 
 private fun LogEntry.coalesceKey(): String {
@@ -277,11 +356,18 @@ private fun LogEntry.coalesceKey(): String {
       if (source == "mount_prep") "mount_prep"
       else if (isDiagnosticArchive) "diagnostic_export"
       else filterOperation.ifBlank { operation }.normalizedMonitorOperation()
+  val correlation = correlationId.takeIf { it.isNotBlank() }
+  if (correlation != null) {
+    // 相关 ID 是请求与文件系统观察之间的主键；两类记录的操作名、落点路径和结果字段
+    // 可能不同，不能再把这些字段放在相关 ID 之前，否则它们永远到不了合并逻辑。
+    return "correlation|$correlation"
+  }
   return listOf(
           timestamp.take(16),
           coalescePath.replace(Regex("^/storage/emulated/\\d+/"), "/storage/emulated/*/"),
           op,
           coalesceResultGroup(),
+          "*",
       )
       .joinToString("|")
 }
@@ -295,6 +381,69 @@ private fun LogEntry.coalescePathIdentity(): String {
     return fromPath.normalizedMonitorPath()
   }
   return finalPath
+}
+
+private fun mergeCorrelatedObservation(
+    existing: LogEntry,
+    candidate: LogEntry,
+): LogEntry? {
+  if (existing.correlationId.isBlank() || existing.correlationId != candidate.correlationId) {
+    return null
+  }
+  val request =
+      when {
+        existing.eventRole == "request" && candidate.eventRole == "observation" -> existing
+        existing.eventRole == "observation" && candidate.eventRole == "request" -> candidate
+        else -> return null
+      }
+  val observation = if (request === existing) candidate else existing
+  return request.copy(
+      observerPackage = observation.observerPackage.ifBlank { request.observerPackage },
+      observationCount = request.observationCount + maxOf(1, observation.observationCount),
+  )
+}
+
+private fun mergeUncorrelatedRequestObservation(
+    existing: LogEntry,
+    candidate: LogEntry,
+): LogEntry? {
+  val request =
+      when {
+        existing.eventRole == "request" && candidate.eventRole == "observation" -> existing
+        existing.eventRole == "observation" && candidate.eventRole == "request" -> candidate
+        else -> return null
+      }
+  val observation = if (request === existing) candidate else existing
+  if (request.correlationId.isNotBlank() || observation.correlationId.isNotBlank()) return null
+  if (request.identifyReliability != "high") return null
+  val isFuseRequest =
+      request.identifyMethod in setOf("fuse_redirect", "fuse_monitor_only") &&
+          request.source in
+              setOf(
+                  "path_mapping",
+                  "redirect_root",
+                  "sandbox_path",
+                  "fuse_redirect",
+                  "fuse_monitor_only",
+              )
+  val isProviderRequest =
+      request.identifyMethod in setOf("provider_open", "provider_mkdir", "saf_provider")
+  if (!isFuseRequest && !isProviderRequest) return null
+  val observationMethods =
+      if (isFuseRequest) setOf("daemon_inotify")
+      else setOf("media_provider_fallback", "daemon_inotify")
+  if (observation.identifyMethod !in observationMethods) return null
+  if (request.timestamp.take(19) != observation.timestamp.take(19)) return null
+  if (
+      request.coalescePathIdentity().normalizedStoragePathForCoalesce().trimEnd('/') !=
+          observation.coalescePathIdentity().normalizedStoragePathForCoalesce().trimEnd('/')
+  ) {
+    return null
+  }
+  return request.copy(
+      observerPackage = observation.observerPackage.ifBlank { request.observerPackage },
+      observationCount = request.observationCount + maxOf(1, observation.observationCount),
+  )
 }
 
 private fun preferMonitorLogEntry(existing: LogEntry, candidate: LogEntry): LogEntry =
@@ -330,6 +479,7 @@ private fun String?.isMediaStorePendingPath(): Boolean {
 
 private fun String.isFuseOrMappedCreateSource(): Boolean =
     this == "fuse_redirect" ||
+        this == "fuse_monitor_only" ||
         this == "path_mapping" ||
         this == "redirect_root" ||
         this == "read_only_path" ||
@@ -357,6 +507,8 @@ private fun LogEntry.logRank(): Int {
     if (isModuleWebUiExport) score += 260
   }
   if (fromPath.isNotBlank()) score += 80
+  if (source == "path_mapping" && identifyMethod == "daemon_inotify") score += 160
+  if (source == "read_only_path" && identifyMethod == "media_provider_fallback") score -= 140
   if (callerPackage.isNotBlank() && callerPackage != "-" && callerPackage != processPackage) {
     score += if (callerPackage.isIntermediateLogPackage()) 30 else 260
   }
@@ -374,6 +526,7 @@ private fun LogEntry.logRank(): Int {
         "module_export" -> 220
         "provider_open" -> 210
         "fuse_redirect" -> 205
+        "fuse_monitor_only" -> 215
         "recent_private_caller" -> 200
         "recent_private_owner" -> 185
         "recent_caller" -> 180

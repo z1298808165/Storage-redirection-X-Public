@@ -63,6 +63,7 @@
     logRenderFrame: 0,
     mediaProviderReloadRunning: false,
     pageLoadSequence: 0,
+    logLoadGeneration: 0,
   };
 
   const LICENSES = [
@@ -5911,6 +5912,7 @@
   // ═══ Logs ═══
   async function loadLogs(options) {
     const pullRefresh = !!options?.pullRefresh;
+    const loadGeneration = ++State.logLoadGeneration;
     const viewer = $("#logViewer");
     if (State.isReturningFromConfigToLogs && viewer?.children.length) {
       State.isReturningFromConfigToLogs = false;
@@ -5928,9 +5930,11 @@
         Api.readFileWithBackups(FILE_MONITOR_LOG),
         Api.readMonitorFilters({ force: true }).catch(() => State.monitorFilters || null),
       ]);
+      if (loadGeneration !== State.logLoadGeneration) return;
       if (filters) State.monitorFilters = filters;
       displayLogs(content, filters);
     } catch {
+      if (loadGeneration !== State.logLoadGeneration) return;
       if (pullRefresh) {
         Theme.showToast("刷新文件监视失败", "error");
         throw new Error("refresh failed");
@@ -6099,20 +6103,45 @@
     const backendPath = normalizeLogLandingPath(extras.backend || "");
     const displayPath = selectLogPrimaryPath(landingPath || path, backendPath, extras);
     const identifyMethod = extras.identify_method || "";
+    const eventRole = inferMonitorEventRole(extras.event_role, identifyMethod, rawOperation);
+    const correlationId = extras.correlation_id || "";
+    const observerPackage = extras.observer_package || "";
     const isModuleWebUiExport = isModuleExportLogEntry(extras, processPkg, callerPkg, watchPkg);
     const pkg = isModuleWebUiExport
       ? BACKUP_MODULE_ID
-      : selectLogDisplayPackage(processPkg, callerPkg, watchPkg, identifyMethod);
-    const appName = getLogPackageLabel(pkg);
+      : selectLogDisplayPackage(
+          processPkg,
+          callerPkg,
+          watchPkg,
+          identifyMethod,
+          eventRole,
+          extras.source || "",
+        );
+    const attributedObservation = isAttributedFilesystemObservation(
+      eventRole,
+      identifyMethod,
+      pkg,
+      extras.source || "",
+    );
+    const appName =
+      eventRole === "observation" && !isModuleWebUiExport && !attributedObservation
+        ? "文件系统观察"
+        : getLogPackageLabel(pkg);
     const operationLabel = isModuleWebUiExport
       ? "export"
-      : formatLogOperationBadge(rawOperation || filterOperation);
+      : eventRole === "observation"
+        ? "观察"
+        : formatLogOperationBadge(rawOperation || filterOperation);
     const action = isModuleWebUiExport
       ? describeModuleExportOperation(extras)
-      : describeLogOperation(eventKind, filterOperation, extras);
+      : eventRole === "observation"
+        ? describeLogObservation(eventKind, rawOperation, extras)
+        : describeLogOperation(eventKind, filterOperation, extras);
     const sourceText = isModuleWebUiExport
       ? describeModuleExportSource(extras)
-      : describeLogSource(processPkg, callerPkg, extras);
+      : eventRole === "observation"
+        ? describeLogObservationSource(processPkg, watchPkg, observerPackage, extras)
+        : describeLogSource(processPkg, callerPkg, extras);
     const status = ok ? "success" : "error";
     const statusText = ok ? "成功" : describeErrno(errno, extras);
     const timeText = timestamp.length >= 16 ? timestamp.slice(11, 16) : "--:--";
@@ -6121,6 +6150,10 @@
     if (sourceText) meta.push(sourceText);
     if (extras.identify_reliability)
       meta.push("可靠性 " + formatReliability(extras.identify_reliability));
+    if (eventRole === "observation") meta.unshift("文件系统观察");
+    if (observerPackage && eventRole === "observation") meta.push("落盘进程 " + observerPackage);
+    if (watchPkg && eventRole === "observation") meta.push("监视上下文 " + watchPkg);
+    if (correlationId) meta.push("关联 " + correlationId);
     const summaryText = meta.join(" · ");
     const searchText = [
       appName,
@@ -6133,6 +6166,10 @@
       action,
       sourceText,
       statusText,
+      eventRole,
+      attributedObservation,
+      correlationId,
+      observerPackage,
       displayPath,
       sourcePath,
       backendPath,
@@ -6162,11 +6199,33 @@
       backendPath,
       status,
       statusText,
+      eventRole,
+      attributedObservation,
+      correlationId,
+      observerPackage,
+      observationCount: 0,
       meta,
       extras,
       searchText,
       isModuleWebUiExport,
     };
+  }
+
+  function inferMonitorEventRole(explicitRole, identifyMethod, rawOperation) {
+    if (explicitRole === "request" || explicitRole === "observation") return explicitRole;
+    if (identifyMethod === "media_provider_fallback" || identifyMethod === "daemon_inotify") {
+      return "observation";
+    }
+    if (
+      identifyMethod === "caller" ||
+      identifyMethod === "provider_open" ||
+      identifyMethod === "provider_mkdir" ||
+      identifyMethod === "saf_provider" ||
+      String(rawOperation || "").startsWith("provider_open")
+    ) {
+      return "request";
+    }
+    return "request";
   }
 
   function normalizeLogMonitorFilters(filters) {
@@ -6264,29 +6323,211 @@
 
   function coalesceLogEntries(entries, mappingPaths = emptyMappingPaths()) {
     const groups = new Map();
+    const correlationIndexes = new Map();
     const ordered = [];
     entries.forEach((entry) => {
       if (!entry) return;
       if (shouldHideCompanionLogEntry(entry, mappingPaths)) return;
+      const createWriteIndex = ordered.findIndex((existing) =>
+        mergeFuseCreateWriteDuplicate(existing, entry),
+      );
+      if (createWriteIndex >= 0) {
+        const previous = ordered[createWriteIndex];
+        const merged = mergeFuseCreateWriteDuplicate(previous, entry);
+        ordered[createWriteIndex] = merged;
+        const previousKey = buildLogCoalesceKey(previous);
+        if (previousKey) groups.set(previousKey, merged);
+        return;
+      }
+      const correlationId = entry.correlationId || "";
+      const correlatedIndex = correlationId ? correlationIndexes.get(correlationId) : undefined;
+      if (correlatedIndex !== undefined) {
+        const merged = mergeCorrelatedObservation(ordered[correlatedIndex], entry);
+        if (merged) {
+          const previous = ordered[correlatedIndex];
+          ordered[correlatedIndex] = merged;
+          const previousKey = buildLogCoalesceKey(previous);
+          if (previousKey) groups.set(previousKey, merged);
+          return;
+        }
+      }
+      const uncorrelatedIndex = ordered.findIndex((existing) =>
+        mergeUncorrelatedRequestObservation(existing, entry),
+      );
+      if (uncorrelatedIndex >= 0) {
+        ordered[uncorrelatedIndex] = mergeUncorrelatedRequestObservation(
+          ordered[uncorrelatedIndex],
+          entry,
+        );
+        return;
+      }
       const key = buildLogCoalesceKey(entry);
       if (!key) {
         ordered.push(entry);
+        if (correlationId) correlationIndexes.set(correlationId, ordered.length - 1);
         return;
       }
       const existing = groups.get(key);
       if (!existing) {
         groups.set(key, entry);
         ordered.push(entry);
+        if (correlationId) correlationIndexes.set(correlationId, ordered.length - 1);
         return;
       }
       const best = pickPreferredLogEntry(existing, entry);
       if (best !== existing) {
         groups.set(key, best);
         const index = ordered.indexOf(existing);
-        if (index >= 0) ordered[index] = best;
+        if (index >= 0) {
+          ordered[index] = best;
+          if (correlationId) correlationIndexes.set(correlationId, index);
+        }
       }
     });
     return ordered;
+  }
+
+  function mergeFuseCreateWriteDuplicate(existing, candidate) {
+    if (!existing || !candidate) return null;
+    if (existing.eventRole !== "request" || candidate.eventRole !== "request") return null;
+    if (existing.pkg !== candidate.pkg) return null;
+    if (!["fuse_redirect", "fuse_monitor_only"].includes(existing.extras?.identify_method)) {
+      return null;
+    }
+    if (
+      candidate.extras?.identify_method !== existing.extras?.identify_method ||
+      candidate.extras?.source !== existing.extras?.source
+    ) {
+      return null;
+    }
+    if ((existing.timestamp || "").slice(0, 19) !== (candidate.timestamp || "").slice(0, 19)) {
+      return null;
+    }
+    const existingBackend = normalizeCompanionLogPath(existing.backendPath || "").replace(
+      /\/+$/,
+      "",
+    );
+    const candidateBackend = normalizeCompanionLogPath(candidate.backendPath || "").replace(
+      /\/+$/,
+      "",
+    );
+    if (!existingBackend || existingBackend !== candidateBackend) return null;
+    const existingOperation = normalizeMonitorCoalesceOperation(
+      existing.operationLabel || existing.extras?.op_filter || existing.extras?.op || "",
+    );
+    const candidateOperation = normalizeMonitorCoalesceOperation(
+      candidate.operationLabel || candidate.extras?.op_filter || candidate.extras?.op || "",
+    );
+    if (!(
+      (existingOperation === "create" && candidateOperation === "write") ||
+      (existingOperation === "write" && candidateOperation === "create")
+    )) {
+      return null;
+    }
+    const create = existingOperation === "create" ? existing : candidate;
+    const rawCreateOperation = String(
+      create.filterOperation || create.extras?.op_filter || create.extras?.op || "",
+    ).toLowerCase();
+    const action =
+      rawCreateOperation === "create" || rawCreateOperation === "fuse_create"
+        ? "创建并写入"
+        : "打开并写入";
+    return { ...create, action, operationLabel: "create" };
+  }
+
+  function mergeCorrelatedObservation(existing, candidate) {
+    if (
+      !existing ||
+      !candidate ||
+      !existing.correlationId ||
+      existing.correlationId !== candidate.correlationId
+    ) {
+      return null;
+    }
+    let request = null;
+    let observation = null;
+    if (existing.eventRole === "request" && candidate.eventRole === "observation") {
+      request = existing;
+      observation = candidate;
+    } else if (existing.eventRole === "observation" && candidate.eventRole === "request") {
+      request = candidate;
+      observation = existing;
+    } else if (existing.eventRole === "request" && candidate.eventRole === "request") {
+      return pickPreferredLogEntry(existing, candidate);
+    } else {
+      return existing;
+    }
+    const observer = observation.observerPackage || request.observerPackage || "";
+    const observationCount =
+      Number(request.observationCount || 0) +
+      Math.max(1, Number(observation.observationCount || 0));
+    const observationText = observer
+      ? `已关联文件系统观察 ${observationCount} 条（${observer}）`
+      : `已关联文件系统观察 ${observationCount} 条`;
+    return {
+      ...request,
+      observerPackage: observer,
+      observationCount,
+      summaryText: [request.summaryText, observationText].filter(Boolean).join(" · "),
+    };
+  }
+
+  function mergeUncorrelatedRequestObservation(existing, candidate) {
+    if (!existing || !candidate || existing.correlationId || candidate.correlationId) return null;
+    let request = null;
+    let observation = null;
+    if (existing.eventRole === "request" && candidate.eventRole === "observation") {
+      request = existing;
+      observation = candidate;
+    } else if (existing.eventRole === "observation" && candidate.eventRole === "request") {
+      request = candidate;
+      observation = existing;
+    } else {
+      return null;
+    }
+    if (request.extras?.identify_reliability !== "high") return null;
+    const isFuseRequest =
+      ["fuse_redirect", "fuse_monitor_only"].includes(request.extras?.identify_method) &&
+      [
+        "path_mapping",
+        "redirect_root",
+        "sandbox_path",
+        "fuse_redirect",
+        "fuse_monitor_only",
+      ].includes(request.extras?.source);
+    const isProviderRequest = ["provider_open", "provider_mkdir", "saf_provider"].includes(
+      request.extras?.identify_method,
+    );
+    if (!isFuseRequest && !isProviderRequest) return null;
+    const observationMethods = isFuseRequest
+      ? ["daemon_inotify"]
+      : ["media_provider_fallback", "daemon_inotify"];
+    if (!observationMethods.includes(observation.extras?.identify_method)) return null;
+    if ((request.timestamp || "").slice(0, 19) !== (observation.timestamp || "").slice(0, 19)) {
+      return null;
+    }
+    const normalizePath = (entry) =>
+      normalizeCompanionLogPath(
+        entry?.backendPath || entry?.landingPath || entry?.path || "",
+      ).replace(/\/+$/, "");
+    if (normalizePath(request) !== normalizePath(observation)) return null;
+    const observer = observation.observerPackage || request.observerPackage || "";
+    const observationCount =
+      Number(request.observationCount || 0) +
+      Math.max(1, Number(observation.observationCount || 0));
+    return {
+      ...request,
+      observerPackage: observer,
+      observationCount,
+      summaryText: [
+        request.summaryText,
+        observer
+          ? `已关联文件系统观察 ${observationCount} 条（${observer}）`
+          : `已关联文件系统观察 ${observationCount} 条`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
   }
 
   function emptyMappingPaths() {
@@ -6330,12 +6571,11 @@
   }
 
   function buildLogCoalesceKey(entry) {
-    const path =
-      entry?.extras?.source === "path_mapping"
-        ? entry?.sourcePath || entry?.landingPath || entry?.path || ""
-        : entry?.landingPath || entry?.path || entry?.sourcePath || "";
+    // 观察器可能同时提供映射源路径、展示落点和 backend 路径；只有 backend
+    // 路径能把不同观察根对同一个实际文件的记录合并，不能按 from 路径分组。
+    const path = entry?.backendPath || entry?.landingPath || entry?.path || entry?.sourcePath || "";
     if (!path) return "";
-    const finalPath = normalizeCompanionLogPath(path);
+    const finalPath = normalizeCompanionLogPath(path).replace(/\/+$/, "");
     const isDiagnosticArchive = isDiagnosticLogArchivePath(finalPath);
     const coalescePath = diagnosticArchiveCoalescePath(finalPath);
     const op = isDiagnosticArchive
@@ -6343,11 +6583,14 @@
       : normalizeMonitorCoalesceOperation(
           entry?.operationLabel || entry?.extras?.op_filter || entry?.extras?.op || "",
         );
+    const correlation = entry?.correlationId || "";
+    if (correlation) return "correlation|" + correlation;
     return [
       (entry.timestamp || "").slice(0, 16),
       coalescePath.replace(/^\/storage\/emulated\/\d+\//, "/storage/emulated/*/"),
       op,
       getLogResultGroup(entry),
+      "*",
     ].join("|");
   }
 
@@ -6363,6 +6606,7 @@
       op === "openat" ||
       op === "openat2" ||
       op === "provider_open" ||
+      op === "fuse_create" ||
       op === "inotify" ||
       op === "close_write" ||
       op === "export"
@@ -6453,6 +6697,8 @@
     const reliability = entry?.extras?.identify_reliability || "none";
     const ret = Number(entry?.extras?.ret ?? NaN);
     let score = 0;
+    if (entry?.eventRole === "observation") score -= 120;
+    if (entry?.eventRole === "request") score += 40;
     if (Number.isFinite(ret) && ret >= 0) score += 1000;
     if (isDiagnosticLogArchivePath(entry?.landingPath || entry?.path || "")) {
       if (isManagerAppPackage(entry?.pkg) || isManagerAppPackage(entry?.callerPkg)) score += 420;
@@ -6469,6 +6715,9 @@
     ) {
       score += isIntermediateLogPackage(entry.watchPkg) ? 20 : 140;
     }
+    if (entry?.extras?.source === "path_mapping" && method === "daemon_inotify") score += 160;
+    if (entry?.extras?.source === "read_only_path" && method === "media_provider_fallback")
+      score -= 140;
     if (method === "caller") score += 220;
     if (method === "module_export") score += 230;
     if (method === "provider_open") score += 210;
@@ -6550,6 +6799,18 @@
       .replace(/:create$|:write$|:read$/, "");
   }
 
+  function describeLogObservation(eventKind, rawOperation, extras) {
+    const operation = formatLogOperationBadge(rawOperation || eventKind);
+    return operation && operation !== "unknown" ? "观察到文件操作：" + operation : "文件系统观察";
+  }
+
+  function describeLogObservationSource(processPkg, watchPkg, observerPackage, extras) {
+    const observer = observerPackage || processPkg || "未知进程";
+    const watch = watchPkg && watchPkg !== "-" ? " · 监视 " + watchPkg : "";
+    const method = extras.identify_method || "daemon_inotify";
+    return "落盘进程 " + observer + watch + "（" + formatIdentifyMethod(method) + "）";
+  }
+
   function describeLogSource(processPkg, callerPkg, extras) {
     const method = extras.identify_method || "unknown";
     if (
@@ -6580,6 +6841,8 @@
       caller: "直接调用方",
       module_export: "模块导出记录",
       provider_open: "Provider 打开请求",
+      provider_mkdir: "Provider 目录创建请求",
+      fuse_monitor_only: "监视专用 FUSE 请求",
       media_provider_fallback: "MediaProvider 回退",
       path_owner: "路径归属",
       owner_uid: "文件属主",
@@ -6593,13 +6856,62 @@
       recent_private_owner: "近期私有路径归属",
       download_owner: "下载记录",
       query_access: "媒体查询记录",
+      public_path_package: "隐藏路径中的应用包名",
       shared_uid: "共享 UID 回退",
       unknown: "来源未知",
     };
     return map[method] || method;
   }
 
-  function selectLogDisplayPackage(processPkg, callerPkg, watchPkg, identifyMethod) {
+  function isAttributedFilesystemObservation(eventRole, identifyMethod, packageName, source = "") {
+    const isMappedObservation = source === "path_mapping" && identifyMethod === "daemon_inotify";
+    return (
+      eventRole === "observation" &&
+      (isMappedObservation ||
+        [
+          "provider_open",
+          "provider_mkdir",
+          "saf_provider",
+          "public_path_package",
+          "path_owner",
+          "owner_uid",
+        ].includes(identifyMethod)) &&
+      isSinglePackageName(packageName) &&
+      !isIntermediateLogPackage(packageName)
+    );
+  }
+
+  function selectLogDisplayPackage(
+    processPkg,
+    callerPkg,
+    watchPkg,
+    identifyMethod,
+    eventRole,
+    source = "",
+  ) {
+    if (eventRole === "observation") {
+      const attributed =
+        (source === "path_mapping" && identifyMethod === "daemon_inotify") ||
+        [
+          "provider_open",
+          "provider_mkdir",
+          "saf_provider",
+          "public_path_package",
+          "path_owner",
+          "owner_uid",
+        ].includes(identifyMethod);
+      const candidates = attributed
+        ? [callerPkg, watchPkg, processPkg]
+        : [processPkg, callerPkg, watchPkg];
+      return (
+        candidates.find(
+          (value) => isSinglePackageName(value) && !isIntermediateLogPackage(value),
+        ) ||
+        candidates.find(isSinglePackageName) ||
+        processPkg ||
+        ""
+      );
+    }
     return (
       [
         callerPkg !== processPkg && !isIntermediateLogPackage(callerPkg) ? callerPkg : "",
@@ -6725,7 +7037,10 @@
     const initial = (entry.appName || entry.pkg || "?").trim().charAt(0).toUpperCase() || "?";
     const timeText = formatLogTime(entry);
     const timeTitle = State.logFullTime ? "切换为仅显示时间" : "切换为日期和时间";
-    const canOpenApp = isSinglePackageName(entry.pkg) && !entry.isModuleWebUiExport;
+    const canOpenApp =
+      (entry.eventRole !== "observation" || entry.attributedObservation) &&
+      isSinglePackageName(entry.pkg) &&
+      !entry.isModuleWebUiExport;
     const iconHtml = iconSrc
       ? '<div class="log-card-icon has-image" data-initial="' +
         escapeHtml(initial) +
@@ -6754,12 +7069,24 @@
       detailParts.push(
         '<span class="log-detail-error">' + escapeHtml(entry.statusText) + "</span>",
       );
+    if (entry.eventRole === "observation") {
+      if (entry.observerPackage) detailParts.push("落盘进程：" + escapeHtml(entry.observerPackage));
+      if (entry.watchPkg) detailParts.push("监视上下文：" + escapeHtml(entry.watchPkg));
+      if (entry.correlationId) detailParts.push("关联 ID：" + escapeHtml(entry.correlationId));
+    } else if (entry.observationCount > 0) {
+      detailParts.push(
+        "已关联文件系统观察：" +
+          entry.observationCount +
+          (entry.observerPackage ? "（" + escapeHtml(entry.observerPackage) + "）" : ""),
+      );
+    }
     const detailHtml = detailParts.length
       ? '<div class="log-detail">' + detailParts.join("<br>") + "</div>"
       : "";
     return (
       '<article class="log-card ' +
       entry.status +
+      (entry.eventRole === "observation" ? " observation" : "") +
       '">' +
       '<div class="log-card-body">' +
       '<div class="log-card-head">' +
@@ -7110,10 +7437,13 @@
 
   $("#logClear")?.addEventListener("click", () => {
     Theme.confirmDelete("确认清空文件监视记录？", async () => {
+      // 先使正在进行的读取失效，避免清理完成后旧快照又覆盖空列表。
+      State.logLoadGeneration += 1;
+      displayLogs("", State.monitorFilters);
       try {
         await Api.clearFileMonitorLog();
         Theme.showToast("日志已清空", "success");
-        loadLogs();
+        await loadLogs({ afterClear: true });
       } catch {
         Theme.showToast("清空失败", "error");
       }

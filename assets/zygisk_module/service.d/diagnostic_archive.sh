@@ -113,14 +113,15 @@ collect_package_candidates() {
     add_package_candidate "$package_name"
   done
 
-  if [ -f "$LOGS_DIR/file_monitor.log" ]; then
-    tail -n 800 "$LOGS_DIR/file_monitor.log" 2>/dev/null |
+  for monitor_log in "$LOGS_DIR/file_monitor.log" "$LOGS_DIR"/file_monitor.log.[0-9]*; do
+    [ -f "$monitor_log" ] || continue
+    tail -n 800 "$monitor_log" 2>/dev/null |
       awk -F'|' 'NF >= 3 { print $2; print $3 }' |
       tr ',' '\n' |
       while IFS= read -r package_name; do
         add_package_candidate "$package_name"
       done
-  fi
+  done
 
   sort -u "$STATE_DIR/package-candidates.raw" > "$STATE_DIR/package-candidates.txt" 2>/dev/null || true
 }

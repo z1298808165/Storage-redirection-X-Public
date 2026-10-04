@@ -4,6 +4,7 @@ MODDIR="/data/adb/modules/storage.redirect.x"
 CONFIG_DIR="$MODDIR/config"
 APPS_DIR="$CONFIG_DIR/apps"
 LOGS_DIR="$MODDIR/logs"
+MONITOR_CLEAR_ACK_FILE="/data/adb/storage.redirect.x/.file_monitor.clear.ok"
 RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
 DAEMON_PID_FILE="$LOGS_DIR/.srx_daemon.pid"
 BOOT_OK_FILE="$MODDIR/.boot_ok"
@@ -327,9 +328,26 @@ build_diagnostic_archive() {
 clear_monitor_log() {
   mkdir -p "$LOGS_DIR"
   daemon_bin="$MODDIR/bin/srx_daemon"
-  if [ -x "$daemon_bin" ] && "$daemon_bin" control clear-monitor; then
-    usleep 100000 2>/dev/null || sleep 0.1
-    return 0
+  request_id="$(cat /proc/uptime 2>/dev/null | tr -d ' .')-$$"
+  if [ -x "$daemon_bin" ]; then
+    rm -f "$MONITOR_CLEAR_ACK_FILE" "$MONITOR_CLEAR_ACK_FILE.tmp"
+    if "$daemon_bin" control "clear-monitor:$request_id"; then
+      i=0
+      while [ "$i" -lt 40 ]; do
+        if [ -f "$MONITOR_CLEAR_ACK_FILE" ] &&
+          [ "$(cat "$MONITOR_CLEAR_ACK_FILE" 2>/dev/null)" = "$request_id" ]; then
+          rm -f "$MONITOR_CLEAR_ACK_FILE" "$MONITOR_CLEAR_ACK_FILE.tmp"
+          return 0
+        fi
+        usleep 50000 2>/dev/null || sleep 0.05
+        i=$((i + 1))
+      done
+    fi
+    # 兼容尚未支持清理确认令牌的旧 daemon；新版本优先走上面的握手。
+    if "$daemon_bin" control clear-monitor; then
+      usleep 100000 2>/dev/null || sleep 0.1
+      return 0
+    fi
   fi
   base="$LOGS_DIR/file_monitor.log"
   for f in "$base".*; do

@@ -16,6 +16,7 @@ pub(super) struct CompanionMountRequest<'a> {
     pub(super) read_only_paths: &'a [String],
     pub(super) path_mappings: &'a [PathMapping],
     pub(super) is_mapping_mode_only: bool,
+    pub(super) is_monitor_only: bool,
     pub(super) operation: &'a str,
     pub(super) config_version: u64,
 }
@@ -43,6 +44,7 @@ pub(super) fn build_companion_request_payload(request: &CompanionMountRequest<'_
         "sandboxed_paths": request.sandboxed_paths,
         "read_only_paths": request.read_only_paths,
         "mapping_mode_only": request.is_mapping_mode_only,
+        "monitor_only": request.is_monitor_only,
         "path_mappings": mappings,
         "config_version": request.config_version,
     });

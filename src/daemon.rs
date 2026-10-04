@@ -673,6 +673,14 @@ fn build_request(
     config_version: u64,
     snapshot: &crate::config::DaemonReconcileConfigSnapshot,
 ) -> MountRequest {
+    let is_monitor_only = snapshot
+        .resolve_profile(&proc.package_name, proc.uid)
+        .is_none()
+        && crate::config::should_capture_unconfigured_app(
+            &proc.package_name,
+            proc.uid,
+            snapshot.is_file_monitor_enabled,
+        );
     let (
         operation,
         user_id,
@@ -694,6 +702,17 @@ fn build_request(
             resolved.sandboxed_paths,
             resolved.read_only_paths,
             resolved.is_mapping_mode_only,
+        ),
+        None if is_monitor_only => (
+            MountOperation::Reload,
+            platform::user_id_from_uid(proc.uid),
+            platform::paths::storage_user_root_for_user(platform::user_id_from_uid(proc.uid)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
         ),
         None => (
             MountOperation::Disable,
@@ -721,7 +740,12 @@ fn build_request(
         sandboxed_paths,
         read_only_paths,
         is_mapping_mode_only,
-        storage_backend_mode: snapshot.storage_backend_mode,
+        is_monitor_only,
+        storage_backend_mode: if is_monitor_only {
+            crate::config::StorageBackendMode::Fuse
+        } else {
+            snapshot.storage_backend_mode
+        },
         is_file_monitor_enabled: snapshot.is_file_monitor_enabled,
         config_version,
     }

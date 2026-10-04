@@ -6,7 +6,8 @@
 
 use super::attrs::file_type_from_std;
 use super::helpers::{
-    elapsed_ns, fuse_open_operation_name, fuse_setattr_operation_name, open_flags_write, paths_eq,
+    elapsed_ns, fuse_open_operation_name, fuse_setattr_operation_name, open_flags_create,
+    open_flags_write, paths_eq,
 };
 use super::inode::{add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs};
 use super::metadata::{
@@ -456,7 +457,9 @@ impl Filesystem for FuseRedirectFs {
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let _perf = self.perf.observe(&self.perf.open_calls);
-        let policy = if open_flags_write(flags.0) {
+        let is_create = open_flags_create(flags.0);
+        let is_mutation = open_flags_write(flags.0) || is_create;
+        let policy = if is_mutation {
             self.policy_for_request(req)
         } else {
             self.policy_for_read_request(req, Some(ino), None)
@@ -468,7 +471,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        if backend.is_read_only && open_flags_write(flags.0) {
+        if backend.is_read_only && is_mutation {
             policy.emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
             reply.error(Errno::EROFS);
             return;
@@ -511,6 +514,9 @@ impl Filesystem for FuseRedirectFs {
             );
             fh
         };
+        if is_mutation {
+            policy.emit_monitor_mutation(fuse_open_operation_name(flags.0), &backend, None);
+        }
         if self.passthrough_enabled.load(Ordering::Relaxed) {
             match reply.open_backing(&file) {
                 Ok(backing) => {
@@ -621,7 +627,15 @@ impl Filesystem for FuseRedirectFs {
             file
         };
         match file.write_at(data, offset) {
-            Ok(n) => reply.written(n as u32),
+            Ok(n) => {
+                if let Some(backend) = self
+                    .path_for_ino(ino)
+                    .and_then(|rel| policy.backend_for_relative(&rel, OperationKind::Write))
+                {
+                    policy.emit_monitor_mutation("write", &backend, None);
+                }
+                reply.written(n as u32);
+            }
             Err(error) => reply.error(errno_from_io(error)),
         }
     }
@@ -1085,6 +1099,10 @@ impl Filesystem for FuseRedirectFs {
             reply.error(errno);
             return;
         }
+        // 重命名既可能把临时文件首次落到目标路径，也可能覆盖已有目标。即使用户过滤了
+        // `rename*`，目标文件本身仍应留下可检索的创建/更新记录；否则下载器常见的
+        // “临时文件 -> 最终文件”提交动作会让最终文件在监视页完全消失。
+        let destination_existed = std::fs::symlink_metadata(&new_backend.path).is_ok();
         let result = if rename_flags & rename_noreplace_flag != 0 {
             rename_noreplace(&old_backend.path, &new_backend.path)
         } else {
@@ -1100,6 +1118,16 @@ impl Filesystem for FuseRedirectFs {
                 let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
                 remap_inode_path(&mut state, &old_rel, &new_rel);
                 state.clear_dir_candidate_cache();
+                policy.emit_monitor_mutation(
+                    if destination_existed {
+                        "write"
+                    } else {
+                        "create"
+                    },
+                    &new_backend,
+                    Some(&old_backend),
+                );
+                policy.emit_monitor_mutation("rename", &new_backend, Some(&old_backend));
                 reply.ok();
             }
             Err(errno) => reply.error(errno),

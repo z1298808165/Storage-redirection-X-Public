@@ -247,6 +247,9 @@ impl RuntimeFlow {
             is_shared_uid_writer,
             is_monitor_bridge,
             has_effective_config,
+            config_file_monitor_enabled(),
+            &self.package_name,
+            self.app_uid,
         ) {
             self.should_skip_post_work = true;
             self.close_module_dir_fd();
@@ -343,8 +346,8 @@ impl RuntimeFlow {
             self.should_keep_module_loaded = true;
         }
 
-        if !self.should_redirect && !self.should_monitor && !should_install_media_provider_java_hook
-        {
+        let is_monitor_only = self.should_monitor && !self.should_redirect;
+        if !self.should_redirect && !is_monitor_only && !should_install_media_provider_java_hook {
             if !self.should_keep_module_loaded {
                 // 模块即将 dlclose，post 阶段不再做任何事，避免在转译进程里触碰匿名段
                 self.should_skip_post_work = true;
@@ -391,65 +394,91 @@ impl RuntimeFlow {
             self.should_monitor
         );
 
-        if !self.should_redirect {
-            self.log_specialize_exit(
-                "monitor_only",
-                config.get_app_count(),
-                is_system_writer,
-                &perf_stages,
-            );
-            return;
-        }
-
-        log::info!("config loaded apps={}", config.get_app_count());
         let route_config_started_ms = monotonic_ms();
-        PathRouter::instance().init();
-
-        let resolved_profile =
-            config.get_resolved_user_profile_snapshot(&self.package_name, self.app_uid);
-        let mut route_config =
-            RouteConfigSnapshot::from_resolved_profile(resolved_profile.as_ref());
-
-        route_config.log_config_summary(&self.package_name);
-        route_config.log_config_details();
-        route_config
-            .apply_writer_override(&mut writer_context, self.is_system_writer_hook_redirect);
-
-        let RouteConfigSnapshot {
+        let (
             allowed_real_paths,
             excluded_real_paths,
             sandboxed_paths,
             read_only_paths,
             path_mappings,
             is_mapping_mode_only,
-        } = route_config;
+            redirect_base,
+        ) = if self.should_redirect {
+            log::info!("config loaded apps={}", config.get_app_count());
+            PathRouter::instance().init();
 
-        let user_id = resolved_profile
-            .as_ref()
-            .map(|resolved| resolved.user_id)
-            .unwrap_or_else(|| platform::user_id_from_uid(self.app_uid));
-        let redirect_base = resolved_profile
-            .as_ref()
-            .map(|resolved| resolved.redirect_target.clone())
-            .unwrap_or_else(|| {
-                platform::paths::default_redirect_target(&self.package_name, user_id)
-            });
+            let resolved_profile =
+                config.get_resolved_user_profile_snapshot(&self.package_name, self.app_uid);
+            let mut route_config =
+                RouteConfigSnapshot::from_resolved_profile(resolved_profile.as_ref());
 
-        RouteConfigSnapshot::configure_router(
-            &self.package_name,
-            self.app_uid,
-            &redirect_base,
-            self.is_system_writer_hook_redirect,
-            &allowed_real_paths,
-            &excluded_real_paths,
-            &sandboxed_paths,
-            &read_only_paths,
-            &path_mappings,
-            is_mapping_mode_only,
-        );
+            route_config.log_config_summary(&self.package_name);
+            route_config.log_config_details();
+            route_config
+                .apply_writer_override(&mut writer_context, self.is_system_writer_hook_redirect);
+
+            let RouteConfigSnapshot {
+                allowed_real_paths,
+                excluded_real_paths,
+                sandboxed_paths,
+                read_only_paths,
+                path_mappings,
+                is_mapping_mode_only,
+            } = route_config;
+
+            let user_id = resolved_profile
+                .as_ref()
+                .map(|resolved| resolved.user_id)
+                .unwrap_or_else(|| platform::user_id_from_uid(self.app_uid));
+            let redirect_base = resolved_profile
+                .as_ref()
+                .map(|resolved| resolved.redirect_target.clone())
+                .unwrap_or_else(|| {
+                    platform::paths::default_redirect_target(&self.package_name, user_id)
+                });
+            (
+                allowed_real_paths,
+                excluded_real_paths,
+                sandboxed_paths,
+                read_only_paths,
+                path_mappings,
+                is_mapping_mode_only,
+                redirect_base,
+            )
+        } else {
+            let user_id = platform::user_id_from_uid(self.app_uid);
+            (
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+                platform::paths::storage_user_root_for_user(user_id),
+            )
+        };
+
+        if self.should_redirect {
+            RouteConfigSnapshot::configure_router(
+                &self.package_name,
+                self.app_uid,
+                &redirect_base,
+                self.is_system_writer_hook_redirect,
+                &allowed_real_paths,
+                &excluded_real_paths,
+                &sandboxed_paths,
+                &read_only_paths,
+                &path_mappings,
+                is_mapping_mode_only,
+            );
+        }
         // specialize_post 的挂载落定判据要按模式分支，这里把结论带过去。
         self.is_mapping_mode_only = is_mapping_mode_only;
-        perf_stages.route_ms = monotonic_ms().saturating_sub(route_config_started_ms);
+        perf_stages.route_ms = if self.should_redirect {
+            monotonic_ms().saturating_sub(route_config_started_ms)
+        } else {
+            0
+        };
         perf_stages.allow_count = allowed_real_paths.len();
         perf_stages.excluded_count = excluded_real_paths.len();
         perf_stages.mapping_count = path_mappings.len();
@@ -457,7 +486,9 @@ impl RuntimeFlow {
         // 仅映射模式与重定向模式的规模日志字段完全一致，只有前缀不同
         log::info!(
             "{} allow={} excl={} sandbox={} ro={} map={}",
-            if is_mapping_mode_only {
+            if is_monitor_only {
+                "monitor-only"
+            } else if is_mapping_mode_only {
                 "map-only"
             } else {
                 "redirect"
@@ -475,7 +506,11 @@ impl RuntimeFlow {
             self.should_monitor
         );
 
-        let storage_backend_mode = config.storage_backend_mode();
+        let storage_backend_mode = if is_monitor_only {
+            crate::config::StorageBackendMode::Fuse
+        } else {
+            config.storage_backend_mode()
+        };
         let is_file_monitor_enabled = config.is_file_monitor_enabled();
         let app_redirect_hook_reason = app_redirect_hook_reason_for_process();
         self.should_install_app_redirect_hook = app_redirect_hook_reason.is_some();
@@ -526,6 +561,7 @@ impl RuntimeFlow {
             read_only_paths: &read_only_paths,
             path_mappings: &path_mappings,
             is_mapping_mode_only,
+            is_monitor_only,
             operation: "apply",
             config_version: config.config_version(),
         });
@@ -753,8 +789,19 @@ fn should_fast_bypass_app_config(
     is_shared_uid_writer: bool,
     is_monitor_bridge: bool,
     has_effective_config: bool,
+    file_monitor_enabled: bool,
+    package_name: &str,
+    uid: i32,
 ) -> bool {
-    !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge && !has_effective_config
+    !is_system_writer
+        && !is_shared_uid_writer
+        && !is_monitor_bridge
+        && !has_effective_config
+        && !crate::config::should_capture_unconfigured_app(package_name, uid, file_monitor_enabled)
+}
+
+fn config_file_monitor_enabled() -> bool {
+    SettingsHub::instance().is_file_monitor_enabled()
 }
 
 fn should_open_writer_config_fd_before_uid_resolution(package_name: &str) -> bool {

@@ -364,6 +364,8 @@ body.logs-page-active .app-container { overflow: hidden; }
 .log-empty { padding: 42px 16px; text-align: center; color: var(--color-text-tertiary); font-size: 13px; }
 .log-card { position: relative; display: block; flex: 0 0 auto; max-height: 124px; padding: 14px 15px 13px; border-radius: 16px; background: var(--glass-bg-strong); border: 1px solid var(--glass-border); box-shadow: var(--glass-inner), var(--shadow-sm); overflow: hidden; animation: liftIn var(--transition-slow) both; transition: max-height var(--transition-normal), box-shadow var(--transition-normal); }
 .log-card.expanded { max-height: 320px; overflow-y: auto; }
+.log-card.observation { border-style: dashed; opacity: 0.86; }
+.log-card.observation .log-card-title { color: var(--color-text-secondary); }
 .log-card::before { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(255,255,255,0.28), transparent 36%); opacity: 0.55; pointer-events: none; }
 [data-theme="dark"] .log-card::before { background: linear-gradient(180deg, rgba(137,180,255,0.08), transparent 38%); opacity: 0.36; }
 .log-card-icon { position: relative; z-index: 1; width: 31px; height: 31px; border-radius: 13px; display: flex; align-items: center; justify-content: center; color: #fff; background: linear-gradient(135deg, rgba(143,122,246,0.92), rgba(243,182,163,0.82)); border: none; box-shadow: var(--liquid-shadow); overflow: hidden; flex: 0 0 31px; font-size: 0; }

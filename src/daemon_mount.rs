@@ -59,6 +59,7 @@ pub struct MountRequest {
     pub sandboxed_paths: Vec<String>,
     pub read_only_paths: Vec<String>,
     pub is_mapping_mode_only: bool,
+    pub is_monitor_only: bool,
     pub storage_backend_mode: crate::config::StorageBackendMode,
     pub is_file_monitor_enabled: bool,
     pub config_version: u64,
@@ -103,6 +104,9 @@ impl crate::fuse_redirect::MountRequestFields for MountRequest {
     }
     fn is_mapping_mode_only(&self) -> bool {
         self.is_mapping_mode_only
+    }
+    fn is_monitor_only(&self) -> bool {
+        self.is_monitor_only
     }
 }
 
@@ -1620,11 +1624,12 @@ pub(crate) enum PreRegisterOutcome {
 /// companion 只能看到没有该 uid 的快照并回退 scoped。预登记只写策略，不创建挂载，且
 /// 必须丢弃应用 namespace 专属的 real_root_override，保证宿主看到真实存储根。
 pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOutcome {
+    let wants_shared_host = matches!(
+        request.storage_backend_mode,
+        crate::config::StorageBackendMode::Auto
+    ) || request.is_monitor_only;
     if request.operation != MountOperation::Reload
-        || !matches!(
-            request.storage_backend_mode,
-            crate::config::StorageBackendMode::Auto
-        )
+        || !wants_shared_host
         || !crate::fuse_host::wait_for_host_session()
     {
         return PreRegisterOutcome::NotApplicable;

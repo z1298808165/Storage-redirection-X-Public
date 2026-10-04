@@ -50,6 +50,51 @@ def read_paths_module() -> str:
 
 
 class LoggingArchitectureTest(unittest.TestCase):
+    def test_redirected_mapping_fuse_requests_are_logged_before_inotify_observation(self) -> None:
+        callbacks = read_fuse_redirect_core()
+        policy = read("src/fuse_redirect/policy.rs")
+        open_section = callbacks[callbacks.index("    fn open(") : callbacks.index("    fn read(", callbacks.index("    fn open("))]
+        self.assertIn("open_flags_write(flags.0)", open_section)
+        self.assertIn("open_flags_create(flags.0)", open_section)
+        self.assertIn("let is_mutation", open_section)
+        self.assertIn("policy.emit_monitor_mutation", open_section)
+        self.assertIn("event_role=request", policy)
+        self.assertIn("self.resolve_mapping(&display_path).is_some()", policy)
+        self.assertIn('"path_mapping"', policy)
+        self.assertIn("fuse_open_operation_name(flags.0)", callbacks)
+        helpers = read("src/fuse_redirect/helpers.rs")
+        self.assertIn("pub(super) fn open_flags_create", helpers)
+        self.assertIn('"open:create"', helpers)
+        self.assertIn("destination_existed", callbacks)
+        self.assertIn('if destination_existed', callbacks)
+        self.assertIn('"write"', callbacks)
+        self.assertIn('"create"', callbacks)
+
+    def test_monitor_ui_coalesces_exact_backend_and_keeps_mapping_owner(self) -> None:
+        webui = read("assets/zygisk_module/webroot/js/app.js")
+        self.assertIn("entry?.backendPath || entry?.landingPath", webui)
+        self.assertIn('entry?.extras?.source === "path_mapping"', webui)
+        self.assertIn('entry?.extras?.source === "read_only_path"', webui)
+        self.assertIn('source === "path_mapping" && identifyMethod === "daemon_inotify"', webui)
+        self.assertIn("mergeFuseCreateWriteDuplicate", webui)
+        screen = read("app/src/main/java/org/srx/manager/ui/screen/LogsScreen.kt")
+        self.assertIn('entry.source == "path_mapping" && entry.identifyMethod == "daemon_inotify"', screen)
+
+    def test_unconfigured_apps_use_monitor_only_passthrough_without_redirecting_writes(self) -> None:
+        config = read("src/config.rs")
+        self.assertIn("pub fn should_capture_unconfigured_app", config)
+        specialize = read("src/lifecycle/specialize_pre.rs")
+        self.assertIn("let is_monitor_only = self.should_monitor && !self.should_redirect;", specialize)
+        self.assertIn("StorageBackendMode::Fuse", specialize)
+        request = read("src/lifecycle/companion_request.rs")
+        self.assertIn("pub is_monitor_only: bool", request)
+        self.assertIn('get("monitor_only")', request)
+        policy = read("src/fuse_redirect/policy.rs")
+        backend = policy[policy.index("fn backend_decision") : policy.index("fn matches_any")]
+        self.assertLess(backend.index("if self.is_monitor_only"), backend.index("BackendKind::Redirect"))
+        self.assertIn('"fuse_monitor_only"', policy)
+        self.assertIn("event_role=request", policy)
+
     def test_monitor_watches_precede_slow_public_owner_scan(self) -> None:
         # 公共目录扫描期间仍须消费事件，避免新目录内的覆盖写入漏记。
         source = read("src/daemon_monitor.rs")
@@ -585,6 +630,50 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn(
                 f"allow {target} {target} unix_dgram_socket sendto", policy
             )
+
+    def test_public_path_package_attribution_survives_daemon_filtering(self) -> None:
+        source_hint = read("src/monitor/source_hint.rs")
+        monitor = read("src/monitor.rs")
+        events = read("src/daemon_monitor/events.rs")
+        app_ui = read("app/src/main/java/org/srx/manager/ui/screen/LogsScreen.kt")
+        web_ui = read("assets/zygisk_module/webroot/js/app.js")
+
+        self.assertIn("infer_public_path_package_name", source_hint)
+        self.assertNotIn("public_path_package_alias_paths", source_hint)
+        self.assertIn("不把 `.gs/<包名>/...` 的证据向上投射", source_hint)
+        self.assertIn("RECENT_PUBLIC_PATH_PACKAGE_ALIAS_WINDOW_MS", source_hint)
+        self.assertIn('if window[0] != ".gs"', source_hint)
+        self.assertIn("uid >= ANDROID_APP_UID_START", source_hint)
+        self.assertIn('if op == "inotify"', monitor)
+        self.assertIn('"public_path_package", "high"', monitor)
+        self.assertIn('identity.identify_method == "public_path_package"', events)
+        self.assertIn('identify_method: "public_path_package"', events)
+        self.assertIn('"public_path_package" => Some("public_path_package")', read("src/monitor/hint_file.rs"))
+        self.assertIn('"public_path_package" -> "隐藏路径中的应用包名"', app_ui)
+        self.assertIn('public_path_package: "隐藏路径中的应用包名"', web_ui)
+        self.assertIn("isAttributedFilesystemObservation", web_ui)
+
+
+
+    def test_monitor_clear_waits_for_daemon_ack_and_archive_scans_backups(self) -> None:
+        paths = read("src/platform/module_paths.rs")
+        daemon = read("src/log_daemon.rs")
+        ctl = read("assets/zygisk_module/bin/srxctl")
+        webui = read("assets/zygisk_module/webroot/js/app.js")
+        archive = read("assets/zygisk_module/service.d/diagnostic_archive.sh")
+
+        self.assertIn("MONITOR_CLEAR_ACK_FILE", paths)
+        self.assertIn('const CONTROL_CLEAR_MONITOR_PREFIX: &str = "clear-monitor:"', daemon)
+        self.assertIn("self.clear_monitor(Some(token))", daemon)
+        self.assertIn("fs::rename(ack_tmp, MONITOR_CLEAR_ACK_FILE)", daemon)
+        self.assertIn("MONITOR_CLEAR_ACK_FILE=", ctl)
+        self.assertIn('control "clear-monitor:$request_id"', ctl)
+        self.assertIn('= "$request_id"', ctl)
+        self.assertIn('control clear-monitor; then', ctl)
+        self.assertIn("logLoadGeneration", webui)
+        self.assertIn('State.logLoadGeneration += 1', webui)
+        self.assertIn('await loadLogs({ afterClear: true })', webui)
+        self.assertIn('for monitor_log in "$LOGS_DIR/file_monitor.log" "$LOGS_DIR"/file_monitor.log.[0-9]*; do', archive)
 
 
 if __name__ == "__main__":

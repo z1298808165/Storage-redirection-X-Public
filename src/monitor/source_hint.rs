@@ -7,12 +7,16 @@ use crate::platform::{self, paths};
 use crate::redirect::policy;
 use once_cell::sync::Lazy;
 use std::collections::{HashSet, VecDeque};
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 const RECENT_PRIVATE_OWNER_HINT_WINDOW_MS: i64 = 30_000;
 const RECENT_PRIVATE_CALLER_HINT_WINDOW_MS: i64 = 300_000;
 const RECENT_PRIVATE_TOKEN_HINT_WINDOW_MS: i64 = 300_000;
 const RECENT_PATH_CALLER_HINT_WINDOW_MS: i64 = 30_000;
+const RECENT_PUBLIC_PATH_PACKAGE_ALIAS_WINDOW_MS: i64 = 120_000;
 const MAX_RECENT_PRIVATE_OWNER_HINTS: usize = 8;
 const MAX_RECENT_PATH_CALLER_HINTS: usize = 16;
 const ANDROID_APP_UID_START: i32 = 10_000;
@@ -39,18 +43,21 @@ pub(super) struct PathCallerHint {
     pub(super) source: &'static str,
     pub(super) confidence: &'static str,
     pub(super) op_filter: &'static str,
+    pub(super) correlation_id: String,
 }
 
 static RECENT_PRIVATE_OWNER_HINT: Lazy<Mutex<VecDeque<PrivateOwnerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
 static RECENT_PATH_CALLER_HINT: Lazy<Mutex<VecDeque<PathCallerHint>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
+static NEXT_PATH_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecentPrivateOwnerIdentity {
     pub(crate) package_name: String,
     pub(crate) source: &'static str,
     pub(crate) confidence: &'static str,
+    pub(crate) correlation_id: String,
 }
 
 struct PrivatePathHintRequest<'a> {
@@ -246,39 +253,77 @@ pub(crate) fn remember_public_path_caller_hint(
     caller_uid: i32,
     source: &'static str,
     confidence: &'static str,
-) {
+) -> String {
+    remember_public_path_caller_hint_with_op_filter(
+        normalized_path,
+        package_name,
+        caller_uid,
+        source,
+        confidence,
+        "provider_open",
+        "",
+    )
+}
+
+pub(crate) fn remember_public_path_caller_hint_with_op_filter(
+    normalized_path: &str,
+    package_name: &str,
+    caller_uid: i32,
+    source: &'static str,
+    confidence: &'static str,
+    op_filter: &str,
+    correlation_id: &str,
+) -> String {
     if caller_uid < ANDROID_APP_UID_START
         || !is_valid_package_name(package_name)
         || normalize_path_hint_source(source).is_none()
         || normalize_hint_confidence(confidence).is_none()
     {
-        return;
+        return String::new();
     }
     let user_id = paths::extract_user_id_from_storage_path(normalized_path);
     if user_id < 0 || platform::user_id_from_uid(caller_uid) != user_id {
-        return;
+        return String::new();
     }
     if !is_public_storage_hint_path(normalized_path, user_id) {
-        return;
+        return String::new();
     }
+    let Some(op_filter) = normalize_path_hint_op_filter(op_filter) else {
+        return String::new();
+    };
+    let correlation_id = if correlation_id.is_empty() {
+        new_path_correlation_id()
+    } else {
+        correlation_id.to_string()
+    };
 
+    let updated_ms = paths::monotonic_ms();
     let hint = PathCallerHint {
         user_id,
-        updated_ms: paths::monotonic_ms(),
+        updated_ms,
         package_name: package_name.to_string(),
         path: normalized_path.to_string(),
         source,
         confidence,
-        op_filter: "provider_open",
+        op_filter,
+        correlation_id: correlation_id.clone(),
     };
-
+    // 只登记调用方实际访问过的完整路径。
+    // 不把 `.gs/<包名>/...` 的证据向上投射到同级 `.gs` 或 `.gs_fs0`：
+    // 同一父目录下可能同时存在多个应用的隐藏子目录，向上投射会制造错误归因。
     let hints_to_write = if let Ok(mut hints) = RECENT_PATH_CALLER_HINT.lock() {
-        remember_path_hint_locked(&mut hints, hint.clone());
+        remember_path_hint_locked(&mut hints, hint);
         hints.iter().cloned().collect::<Vec<_>>()
     } else {
-        vec![hint.clone()]
+        vec![hint]
     };
     write_path_hint_file(&hints_to_write);
+    correlation_id
+}
+
+pub(crate) fn new_path_correlation_id() -> String {
+    let sequence = NEXT_PATH_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
+    format!("p{}-{}", paths::monotonic_ms(), sequence)
 }
 
 pub(crate) fn remember_saf_path_caller_hint(
@@ -288,25 +333,26 @@ pub(crate) fn remember_saf_path_caller_hint(
     source: &'static str,
     confidence: &'static str,
     op_filter: &str,
-) {
+) -> String {
     if caller_uid < ANDROID_APP_UID_START
         || !is_valid_package_name(package_name)
         || normalize_path_hint_source(source) != Some("saf_provider")
         || normalize_hint_confidence(confidence).is_none()
     {
-        return;
+        return String::new();
     }
     let user_id = paths::extract_user_id_from_storage_path(normalized_path);
     if user_id < 0 || platform::user_id_from_uid(caller_uid) != user_id {
-        return;
+        return String::new();
     }
     if !is_public_storage_hint_path(normalized_path, user_id) {
-        return;
+        return String::new();
     }
     let Some(op_filter) = normalize_path_hint_op_filter(op_filter) else {
-        return;
+        return String::new();
     };
 
+    let correlation_id = new_path_correlation_id();
     let hint = PathCallerHint {
         user_id,
         updated_ms: paths::monotonic_ms(),
@@ -315,6 +361,7 @@ pub(crate) fn remember_saf_path_caller_hint(
         source,
         confidence,
         op_filter,
+        correlation_id: correlation_id.clone(),
     };
 
     let hints_to_write = if let Ok(mut hints) = RECENT_PATH_CALLER_HINT.lock() {
@@ -324,6 +371,7 @@ pub(crate) fn remember_saf_path_caller_hint(
         vec![hint.clone()]
     };
     write_path_hint_file(&hints_to_write);
+    correlation_id
 }
 
 pub(crate) fn infer_recent_path_caller_identity(
@@ -394,7 +442,44 @@ pub(crate) fn infer_public_path_token_identity(
             package_name,
             source: "public_path_token",
             confidence: "medium",
+            correlation_id: String::new(),
         })
+}
+
+/// 从公开存储中的隐藏目录层级提取应用包名。
+///
+/// 部分媒体选择流程会把真实应用名保留在 `.gs/<package>/...` 层级，
+/// 但最终由 MediaProvider 在公开目录创建或观察 `.gs`、`.gs_fs0` 节点。
+/// 只有在包名格式有效且 UID 属于同一 Android 用户时才接受该线索，
+/// 避免把任意路径片段当成调用方。
+pub(crate) fn infer_public_path_package_name(
+    normalized_path: &str,
+    user_id: i32,
+) -> Option<String> {
+    if user_id < 0 || !is_public_storage_hint_path(normalized_path, user_id) {
+        return None;
+    }
+
+    let storage_root = paths::storage_user_root_for_user(user_id);
+    let relative = paths::relative_child_path(normalized_path, &storage_root)?;
+    let components = relative
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut matches = components
+        .windows(2)
+        .filter_map(|window| {
+            if window[0] != ".gs" {
+                return None;
+            }
+            let package_name = window[1];
+            is_valid_public_path_package(package_name, user_id).then(|| package_name.to_string())
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    (matches.len() == 1).then(|| matches.remove(0))
 }
 
 fn remember_hint_locked(hints: &mut VecDeque<PrivateOwnerHint>, hint: PrivateOwnerHint) {
@@ -427,7 +512,7 @@ fn remember_path_hint_locked(hints: &mut VecDeque<PathCallerHint>, hint: PathCal
     hints.push_back(hint);
     let now_ms = paths::monotonic_ms();
     hints.retain(|existing| {
-        (0..=RECENT_PATH_CALLER_HINT_WINDOW_MS)
+        (0..=path_caller_hint_window_ms(existing))
             .contains(&now_ms.saturating_sub(existing.updated_ms))
     });
     while hints.len() > MAX_RECENT_PATH_CALLER_HINTS {
@@ -463,6 +548,7 @@ fn infer_from_hints<'a>(
                 package_name,
                 source,
                 confidence,
+                correlation_id: String::new(),
             }
         })
 }
@@ -486,6 +572,7 @@ fn infer_from_path_hints<'a>(
             package_name: hint.package_name.clone(),
             source: hint.source,
             confidence: hint.confidence,
+            correlation_id: hint.correlation_id.clone(),
         })
 }
 
@@ -750,6 +837,17 @@ fn is_valid_public_path_token_package(package: &str, user_id: i32) -> bool {
     uid < 0 || platform::user_id_from_uid(uid) == user_id
 }
 
+fn is_valid_public_path_package(package: &str, user_id: i32) -> bool {
+    if !is_valid_package_name(package)
+        || policy::is_system_writer_package(package)
+        || policy::is_media_intermediate_package(package)
+    {
+        return false;
+    }
+    let uid = policy::get_uid_for_package(package);
+    uid >= ANDROID_APP_UID_START && platform::user_id_from_uid(uid) == user_id
+}
+
 fn public_path_token_package_score(package_name: &str, path_tokens: &[String]) -> i32 {
     let package_name = package_name.to_ascii_lowercase();
     path_tokens
@@ -764,6 +862,14 @@ fn public_path_token_package_score(package_name: &str, path_tokens: &[String]) -
         .sum()
 }
 
+fn path_caller_hint_window_ms(hint: &PathCallerHint) -> i64 {
+    if hint.source == "public_path_package" {
+        RECENT_PUBLIC_PATH_PACKAGE_ALIAS_WINDOW_MS
+    } else {
+        RECENT_PATH_CALLER_HINT_WINDOW_MS
+    }
+}
+
 fn path_hint_matches(
     hint: &PathCallerHint,
     user_id: i32,
@@ -773,8 +879,16 @@ fn path_hint_matches(
     if hint.user_id != user_id || !is_valid_package_name(&hint.package_name) {
         return false;
     }
+    // 兼容旧台账时仍要求 `public_path_package` 指向包含该包名的完整路径，
+    // 彻底屏蔽旧版本曾写入的 `.gs` / `.gs_fs0` 父目录别名。
+    if hint.source == "public_path_package"
+        && infer_public_path_package_name(&hint.path, user_id).as_deref()
+            != Some(hint.package_name.as_str())
+    {
+        return false;
+    }
     let age_ms = now_ms.saturating_sub(hint.updated_ms);
-    if !(0..=RECENT_PATH_CALLER_HINT_WINDOW_MS).contains(&age_ms) {
+    if !(0..=path_caller_hint_window_ms(hint)).contains(&age_ms) {
         return false;
     }
     if hint.path == normalized_path {
@@ -839,6 +953,7 @@ fn hint_rank(hint: &PrivateOwnerHint) -> i32 {
 fn path_hint_rank(hint: &PathCallerHint) -> i32 {
     let source_rank = match hint.source {
         "saf_provider" => 400,
+        "public_path_package" => 350,
         "provider_open" => 300,
         "query_access" => 200,
         _ => 0,

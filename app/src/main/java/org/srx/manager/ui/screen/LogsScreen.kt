@@ -106,6 +106,10 @@ internal fun LogsScreen(
                       it.processPackage,
                       it.callerPackage,
                       it.watchPackage,
+                      it.eventRole,
+                      it.correlationId,
+                      it.observerPackage,
+                      it.observationCount.toString(),
                       it.operation,
                       it.operationIntent,
                       it.action,
@@ -255,16 +259,29 @@ private fun LogCard(
       remember(entry.timestamp, entry.packageName, entry.path, entry.landingPath) {
         mutableStateOf(false)
       }
+  val isFilesystemObservation = entry.eventRole == "observation"
+  val isMediaProviderFallback = entry.identifyMethod == "media_provider_fallback"
+  val hasAttributedCaller = isAttributedFilesystemObservation(entry)
   val displayName =
-      if (entry.isModuleWebUiExport) {
-        entry.label.ifBlank { "存储重定向X" }
-      } else {
-        app?.label
-            ?: entry.label.takeIf { it.isNotBlank() && it != entry.packageName }
-            ?: entry.packageName.ifBlank { "未知应用" }
+      when {
+        entry.isModuleWebUiExport -> entry.label.ifBlank { "存储重定向X" }
+        hasAttributedCaller -> app?.label ?: entry.packageName
+        isFilesystemObservation -> "文件系统观察"
+        else ->
+            app?.label
+                ?: entry.label.takeIf { it.isNotBlank() && it != entry.packageName }
+                ?: entry.packageName.ifBlank { "未知应用" }
       }
   val openTarget =
-      if (entry.isModuleWebUiExport) null else app ?: entry.toInstalledAppOrNull(displayName)
+      if (
+          entry.isModuleWebUiExport ||
+              (isFilesystemObservation && !hasAttributedCaller) ||
+              isMediaProviderFallback
+      ) {
+        null
+      } else {
+        app ?: entry.toInstalledAppOrNull(displayName)
+      }
   val summary = logEntrySummary(entry)
   val primaryPath = logEntryPrimaryPath(entry)
   val requestPath = logEntryRequestPath(entry)
@@ -465,6 +482,20 @@ private fun LogTimeText(
   )
 }
 
+private fun isAttributedFilesystemObservation(entry: LogEntry): Boolean =
+    entry.eventRole == "observation" &&
+        (entry.source == "path_mapping" && entry.identifyMethod == "daemon_inotify" ||
+            entry.identifyMethod in
+                setOf(
+                    "provider_open",
+                    "saf_provider",
+                    "public_path_package",
+                    "path_owner",
+                    "owner_uid",
+                )) &&
+        entry.packageName.isSinglePackageName() &&
+        !entry.packageName.isIntermediateLogPackage()
+
 private fun logEntrySummary(entry: LogEntry): String {
   if (entry.isModuleWebUiExport) return "存储重定向X · ${entry.action.ifBlank { "模块导出" }}"
   val parts = mutableListOf<String>()
@@ -473,12 +504,50 @@ private fun logEntrySummary(entry: LogEntry): String {
   val caller = entry.callerPackage.takeIf { it.isNotBlank() && it != "-" }
   val watch = entry.watchPackage.takeIf { it.isNotBlank() && it != "-" }
   val method = logIdentifyMethodText(entry.identifyMethod)
+  val hasAttributedCaller = isAttributedFilesystemObservation(entry)
   when {
+    hasAttributedCaller -> {
+      val subject =
+          if (entry.identifyMethod in setOf("provider_open", "provider_mkdir", "saf_provider"))
+              "调用方"
+          else "源应用"
+      val attribution =
+          if (entry.identifyMethod in setOf("provider_open", "provider_mkdir", "saf_provider"))
+              "路径提示关联"
+          else method
+      parts += "$subject ${entry.packageName}（$attribution）"
+      if (watch != null && watch != process && !watch.isIntermediateLogPackage()) {
+        parts += "监视上下文 $watch"
+      }
+    }
+    entry.eventRole == "observation" -> {
+      val observer = entry.observerPackage.takeIf { it.isNotBlank() && it != "-" }
+      if (process != null) {
+        parts += "文件系统观察 · 落盘进程 $process" + method.parenthesized()
+      } else {
+        parts += "文件系统观察" + method.parenthesized()
+      }
+      if (observer != null && observer != process) parts += "观察器 $observer"
+      if (watch != null && watch != process && !watch.isIntermediateLogPackage()) {
+        parts += "监视上下文 $watch"
+      }
+      if (entry.correlationId.isNotBlank()) parts += "关联 ${entry.correlationId}"
+      if (entry.identifyMethod == "media_provider_fallback") {
+        parts += "调用方未从文件系统事件中获得"
+      }
+    }
     caller != null &&
         caller != process &&
         caller.isSinglePackageName() &&
         !caller.isIntermediateLogPackage() -> parts += "调用方 $caller" + method.parenthesized()
     caller != null && caller != process -> parts += "候选应用 $caller" + method.parenthesized()
+    entry.identifyMethod == "media_provider_fallback" -> {
+      if (process != null) parts += "落盘进程 $process" + method.parenthesized()
+      if (watch != null && watch != process && !watch.isIntermediateLogPackage()) {
+        parts += "监视上下文 $watch"
+      }
+      parts += "调用方未从文件系统事件中获得"
+    }
     entry.identifyMethod == "watch_package" &&
         watch != null &&
         watch != process &&
@@ -488,6 +557,15 @@ private fun logEntrySummary(entry: LogEntry): String {
   }
   val reliability = logReliabilityText(entry.identifyReliability)
   if (reliability.isNotBlank()) parts += "可靠性 $reliability"
+  if (entry.observationCount > 0) {
+    val observer = entry.observerPackage.takeIf { it.isNotBlank() }
+    parts +=
+        if (observer == null) {
+          "已关联文件系统观察 ${entry.observationCount} 条"
+        } else {
+          "已关联文件系统观察 ${entry.observationCount} 条（$observer）"
+        }
+  }
   return parts.joinToString(" · ")
 }
 
@@ -498,7 +576,7 @@ private fun String.isSinglePackageName(): Boolean =
 
 /** 日志条目的内容指纹，用于 LazyColumn 的稳定 key，不含列表位置信息。 */
 private fun LogEntry.contentKey(): String =
-    "$timestamp|$processPackage|$callerPackage|$packageName|$operation|$path|$ok"
+    "$timestamp|$processPackage|$callerPackage|$packageName|$eventRole|$correlationId|$observationCount|$operation|$path|$ok"
 
 private fun String.isIntermediateLogPackage(): Boolean =
     this == "com.google.android.providers.media.module" ||
@@ -525,7 +603,9 @@ private fun logIdentifyMethodText(method: String): String =
       "owner_uid" -> "文件属主"
       "download_owner" -> "下载记录"
       "query_access" -> "媒体查询记录"
+      "public_path_package" -> "隐藏路径中的应用包名"
       "module_export" -> "模块导出记录"
+      "provider_mkdir" -> "Provider 目录创建请求"
       "provider_open" -> "Provider 打开请求"
       "mount_prep" -> "挂载准备"
       "media_provider_fallback" -> "MediaProvider 回退"

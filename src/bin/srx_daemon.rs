@@ -35,6 +35,16 @@ mod log_daemon;
 mod logging;
 #[path = "../metadata_repair.rs"]
 mod metadata_repair;
+mod monitor {
+    #[path = "../../monitor/hint_file.rs"]
+    mod hint_file;
+    #[path = "../../monitor/source_hint.rs"]
+    mod source_hint;
+
+    pub(crate) use source_hint::{
+        infer_public_path_package_name, infer_recent_path_caller_identity,
+    };
+}
 #[path = "../module_mount_source.rs"]
 mod module_mount_source;
 #[path = "../mount.rs"]

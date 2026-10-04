@@ -63,6 +63,7 @@ static MONITOR_PATH_MATCH_CACHE: Lazy<Mutex<MonitorPathMatchCache>> =
 static SYSTEM_WRITER_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static BRIDGE_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static UI_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static APP_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn should_log_monitor_decision(counter: &AtomicU64) -> bool {
     let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -211,6 +212,17 @@ impl SettingsHub {
         if policy::is_file_monitor_ui_package(package_name) {
             if should_log_monitor_decision(&UI_MONITOR_LOG_COUNT) {
                 log::info!("monitor on: ui proc pkg={} uid={}", package_name, app_uid);
+            }
+            return true;
+        }
+
+        if crate::config::should_capture_unconfigured_app(package_name, app_uid, true) {
+            if should_log_monitor_decision(&APP_MONITOR_LOG_COUNT) {
+                log::info!(
+                    "monitor on: app passthrough proc pkg={} uid={} source=fuse_monitor_only",
+                    package_name,
+                    app_uid
+                );
             }
             return true;
         }

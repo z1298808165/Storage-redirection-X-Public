@@ -35,6 +35,8 @@ class SrxRepository(
     const val AppDataCacheTtlNanos = 30_000_000_000L
     /** 解析应用名称的并发分片数：loadLabel 属于 IO 密集操作，过高并发只会加剧磁盘争用。 */
     const val LabelResolveParallelism = 4
+    /** 文件监视页首屏只读取最近记录，完整日志仍保留在诊断导出中。 */
+    const val LogInitialLoadLines = 1000
   }
 
   private data class TimedCache<T>(val value: T, val loadedAtNanos: Long)
@@ -309,7 +311,7 @@ class SrxRepository(
       moduleController.restartMediaProvider()
 
   suspend fun readLogSnapshot(): MonitorLogSnapshot {
-    val raw = fileStore.readAllWithBackups(FileMonitorLogPath)
+    val raw = fileStore.readTailWithBackups(FileMonitorLogPath, LogInitialLoadLines)
     val filters = readFileMonitorFilters()
     val entries = withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, filters) }
     return MonitorLogSnapshot(entries, filters)

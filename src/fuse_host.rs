@@ -1353,6 +1353,7 @@ fn passthrough_host_config() -> crate::fuse_redirect::FuseRedirectConfig {
         read_only_paths: Vec::new(),
         path_mappings: Vec::new(),
         is_mapping_mode_only: false,
+        is_monitor_only: false,
         // 宿主会话是直通会话：`redirect_target` 取存储根本身，策略侧据此跳过重定向根推导。
         is_passthrough_host: true,
     }

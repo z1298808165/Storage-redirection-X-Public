@@ -5,6 +5,10 @@ mod stack_owner;
 mod thread_hint;
 
 pub(crate) use download_owner::infer_download_owner_package_by_path;
+#[cfg(target_os = "android")]
+// quality-allow(lint-suppression): Android 平台的公共路径归属 re-export 由 Android hook 路径消费。
+#[allow(unused_imports)]
+pub(crate) use source_hint::infer_public_path_package_name;
 pub(crate) use source_hint::{
     infer_recent_path_caller_identity, remember_private_path_caller_hint,
     remember_private_path_caller_hint_in_memory, remember_private_path_caller_uid_hint_in_memory,
@@ -218,6 +222,64 @@ impl AuditTrail {
         );
     }
 
+    pub fn record_provider_directory_path(
+        &self,
+        path: &str,
+        caller_uid: i32,
+        caller_package: &str,
+    ) -> bool {
+        if !self.is_enabled() || !SettingsHub::instance().is_file_monitor_enabled() {
+            return false;
+        }
+        if caller_uid < ANDROID_APP_UID_START {
+            return false;
+        }
+        let normalized = normalize_storage_path_locked(path);
+        if normalized.is_empty()
+            || is_filtered_media_provider_path(&normalized)
+            || SettingsHub::instance().should_filter_monitor_record(&normalized, "mkdir")
+        {
+            return false;
+        }
+        let Some(package_name) = resolve_recent_path_caller_package(caller_uid, caller_package)
+        else {
+            return false;
+        };
+        let correlation_id = source_hint::remember_public_path_caller_hint_with_op_filter(
+            &normalized,
+            &package_name,
+            caller_uid,
+            "provider_mkdir",
+            "high",
+            "mkdir",
+            "",
+        );
+        if correlation_id.is_empty() {
+            return false;
+        }
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        remember_query_access_locked(
+            &mut state,
+            normalized.clone(),
+            package_name.clone(),
+            caller_uid,
+            "provider_mkdir",
+            "high",
+        );
+        drop(state);
+        let line = format!(
+            "{}|{}|{}|MKDIR|{}|ret=0|errno=0|identify_method=provider_mkdir|identify_reliability=high|event_role=request|correlation_id={}|op=mkdir|op_filter=mkdir|source=media_provider_java|caller_uid={}",
+            build_timestamp_locked(),
+            self.package_name(),
+            package_name,
+            normalized,
+            correlation_id,
+            caller_uid
+        );
+        append_line_locked(&line);
+        true
+    }
+
     pub fn record_media_provider_open_success(
         &self,
         path: &str,
@@ -276,7 +338,7 @@ impl AuditTrail {
         if SettingsHub::instance().should_filter_monitor_record(&normalized, op_filter) {
             return false;
         }
-        remember_saf_path_caller_hint(
+        let correlation_id = remember_saf_path_caller_hint(
             &normalized,
             &package_name,
             caller_uid,
@@ -285,11 +347,12 @@ impl AuditTrail {
             op_filter,
         );
         let line = format!(
-            "{}|{}|{}|OPEN|{}|ret=0|errno=0|identify_method=saf_provider|identify_reliability=high|op=provider_open|op_filter={}|source=saf_provider|caller_uid={}",
+            "{}|{}|{}|OPEN|{}|ret=0|errno=0|identify_method=saf_provider|identify_reliability=high|event_role=request|correlation_id={}|op=provider_open|op_filter={}|source=saf_provider|caller_uid={}",
             build_timestamp_locked(),
             self.package_name(),
             package_name,
             normalized,
+            correlation_id,
             op_filter,
             caller_uid
         );
@@ -436,6 +499,13 @@ impl AuditTrail {
             shared_uid_packages: state.shared_uid_packages.clone(),
         };
         drop(state);
+        let correlation_id = remember_public_path_caller_hint_for_observation(
+            &state_snapshot,
+            &source_identity,
+            &normalized,
+            &operation_name,
+            result,
+        );
         let extra_to_write = build_monitor_extra_with_backend(
             &state_snapshot,
             &source_identity,
@@ -479,6 +549,11 @@ impl AuditTrail {
         line.push_str(&error_no.to_string());
 
         append_source_identity_meta(&mut line, &source_identity);
+        line.push_str("|event_role=request");
+        if !correlation_id.is_empty() {
+            line.push_str("|correlation_id=");
+            line.push_str(&correlation_id);
+        }
         if !extra_to_write.is_empty() {
             line.push('|');
             line.push_str(&extra_to_write);
@@ -592,6 +667,40 @@ fn append_line_locked(line: &str) {
         return;
     }
     log::info!(target: LOGCAT_OP_TAG, "{}", line);
+}
+
+fn remember_public_path_caller_hint_for_observation(
+    state: &MonitorStateSnapshot,
+    identity: &SourceIdentity,
+    normalized_path: &str,
+    operation_name: &str,
+    result: i32,
+) -> String {
+    if result < 0
+        || !policy::is_media_provider_package(&state.package_name)
+        || identity.confidence != "high"
+        || identity.package_name.is_empty()
+        || is_intermediate_caller_package(&identity.package_name)
+        || !is_monitor_write_operation(operation_name)
+        || !is_public_storage_path(normalized_path)
+    {
+        return String::new();
+    }
+
+    let caller_uid = resolve_monitor_identity_uid(state, &identity.package_name);
+    if caller_uid < ANDROID_APP_UID_START {
+        return String::new();
+    }
+
+    // MediaProvider 的 native 文件操作先于 daemon 的 inotify 观察事件完成。
+    // 将高置信度调用方写入短时路径台账，供后续观察事件回填真实来源。
+    source_hint::remember_public_path_caller_hint(
+        normalized_path,
+        &identity.package_name,
+        caller_uid,
+        "provider_open",
+        "high",
+    )
 }
 
 fn append_source_identity_meta(line: &mut String, identity: &SourceIdentity) {
@@ -983,6 +1092,13 @@ fn resolve_caller_info_for_path(
     }
 
     if can_use_recent_private_owner_hint
+        && let Some(package_name) =
+            source_hint::infer_public_path_package_name(normalized_path, user_id)
+    {
+        return SourceIdentity::new(package_name, "public_path_package", "high");
+    }
+
+    if can_use_recent_private_owner_hint
         && let Some(identity) =
             source_hint::infer_public_path_token_identity(normalized_path, user_id)
     {
@@ -1278,6 +1394,23 @@ fn duplicate_event_operation_key(kind: OpKind, operation_name: &str) -> &str {
     }
 }
 
+fn is_monitor_write_operation(op: &str) -> bool {
+    is_open_write_or_create_operation(op)
+        || matches!(
+            op,
+            "mkdir"
+                | "mkdirat"
+                | "mknod"
+                | "mknodat"
+                | "rename"
+                | "renameat"
+                | "renameat2"
+                | "unlink"
+                | "unlinkat"
+                | "rmdir"
+        )
+}
+
 fn is_open_write_or_create_operation(op: &str) -> bool {
     (op.starts_with("open") || op.starts_with("provider_open"))
         && (op.contains("create") || op.contains("write"))
@@ -1288,7 +1421,13 @@ fn is_mkdir_like_extra(extra: &str) -> bool {
 }
 
 fn should_use_recent_private_owner_hint(kind: OpKind, normalized_path: &str, op: &str) -> bool {
-    if normalized_path.is_empty() || !(op.contains("create") || op.contains("write")) {
+    if normalized_path.is_empty() {
+        return false;
+    }
+    if op == "inotify" {
+        return is_public_storage_path(normalized_path);
+    }
+    if !(op.contains("create") || op.contains("write")) {
         return false;
     }
     matches!(

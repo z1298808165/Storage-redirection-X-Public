@@ -2,6 +2,7 @@ use super::WatchNode;
 use super::inotify::{cstring_path, last_errno};
 use super::roots::map_record_from_path;
 use crate::config::SettingsHub;
+use crate::monitor::{infer_public_path_package_name, infer_recent_path_caller_identity};
 use crate::platform::{self, paths};
 use crate::redirect::policy;
 use libc::{
@@ -22,6 +23,7 @@ pub(super) struct MonitorIdentity {
     pub(super) package_name: String,
     pub(super) identify_method: &'static str,
     pub(super) identify_reliability: &'static str,
+    pub(super) correlation_id: String,
 }
 
 pub(super) struct MonitorEventPaths {
@@ -59,6 +61,12 @@ pub(super) fn should_skip_ambiguous_allowed_real_path_event(
         return false;
     }
 
+    if identity.identify_method == "public_path_package"
+        || is_exact_provider_caller_identity(identity)
+    {
+        return false;
+    }
+
     if should_keep_system_intermediate_owner_identity(identity, source, watch_package_name) {
         return false;
     }
@@ -83,6 +91,12 @@ pub(super) fn should_skip_ambiguous_read_only_path_event(
         return false;
     }
 
+    if identity.identify_method == "public_path_package"
+        || is_exact_provider_caller_identity(identity)
+    {
+        return false;
+    }
+
     if should_keep_system_intermediate_owner_identity(identity, source, watch_package_name) {
         return false;
     }
@@ -103,12 +117,27 @@ pub(super) fn should_skip_public_root_event_identity(
         return false;
     }
 
+    if identity.identify_method == "public_path_package"
+        || is_exact_provider_caller_identity(identity)
+    {
+        return false;
+    }
+
     if should_keep_system_intermediate_owner_identity(identity, source, watch_package_name) {
         return false;
     }
 
     source == "public_root"
+        && !is_exact_provider_caller_identity(identity)
         && (identity.identify_method != "owner_uid" || identity.package_name != watch_package_name)
+}
+
+fn is_exact_provider_caller_identity(identity: &MonitorIdentity) -> bool {
+    matches!(
+        identity.identify_method,
+        "provider_open" | "provider_mkdir" | "saf_provider"
+    ) && identity.identify_reliability == "high"
+        && !identity.correlation_id.is_empty()
 }
 
 pub(super) struct AndroidPrivateOwnerRepairScope {
@@ -141,7 +170,7 @@ pub(super) fn emit_monitor_event(
         "CREATE"
     };
     let mut line = format!(
-        "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability={}|op={}|source={}|mask=0x{:x}|backend={}",
+        "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=observation|op={}|source={}|mask=0x{:x}|backend={}",
         build_timestamp(),
         identity.package_name,
         identity.package_name,
@@ -158,6 +187,11 @@ pub(super) fn emit_monitor_event(
         line.push_str("|watch_package=");
         line.push_str(watch_package_name);
     }
+    if !identity.correlation_id.is_empty() {
+        line.push_str("|correlation_id=");
+        line.push_str(&identity.correlation_id);
+    }
+    line.push_str("|observer_package=srx_daemon");
     if !paths.from_path.is_empty() && paths.from_path != paths.display_path {
         line.push_str("|from=");
         line.push_str(&paths.from_path);
@@ -177,7 +211,12 @@ pub(super) fn resolve_monitor_identity(
             package_name: owner,
             identify_method: "path_owner",
             identify_reliability: "high",
+            correlation_id: String::new(),
         };
+    }
+
+    if let Some(identity) = resolve_recent_path_caller_identity(display_path, source) {
+        return identity;
     }
 
     if let Some(package_name) = resolve_package_by_owner_uid(backend_path) {
@@ -188,6 +227,17 @@ pub(super) fn resolve_monitor_identity(
             package_name,
             identify_method: "owner_uid",
             identify_reliability: "high",
+            correlation_id: String::new(),
+        };
+    }
+
+    let user_id = paths::extract_user_id_from_storage_path(display_path);
+    if let Some(package_name) = infer_public_path_package_name(display_path, user_id) {
+        return MonitorIdentity {
+            package_name,
+            identify_method: "public_path_package",
+            identify_reliability: "high",
+            correlation_id: String::new(),
         };
     }
 
@@ -196,6 +246,39 @@ pub(super) fn resolve_monitor_identity(
     }
 
     watch_package_identity(watch_package_name, "daemon_inotify", "medium")
+}
+
+fn resolve_recent_path_caller_identity(
+    display_path: &str,
+    source: &str,
+) -> Option<MonitorIdentity> {
+    if !matches!(
+        source,
+        "allowed_real_path" | "read_only_path" | "public_root"
+    ) {
+        return None;
+    }
+
+    let user_id = paths::extract_user_id_from_storage_path(display_path);
+    let identity = infer_recent_path_caller_identity(display_path, user_id)?;
+    if identity.confidence != "high"
+        || !matches!(
+            identity.source,
+            "provider_open" | "provider_mkdir" | "saf_provider"
+        )
+        || identity.package_name.is_empty()
+        || policy::is_media_intermediate_package(&identity.package_name)
+        || policy::is_system_writer_package(&identity.package_name)
+    {
+        return None;
+    }
+
+    Some(MonitorIdentity {
+        package_name: identity.package_name,
+        identify_method: identity.source,
+        identify_reliability: identity.confidence,
+        correlation_id: identity.correlation_id,
+    })
 }
 
 fn watch_package_identity(
@@ -207,6 +290,7 @@ fn watch_package_identity(
         package_name: watch_package_name.to_string(),
         identify_method,
         identify_reliability,
+        correlation_id: String::new(),
     }
 }
 
@@ -249,6 +333,7 @@ fn media_provider_fallback_identity() -> MonitorIdentity {
         package_name: policy::media_provider_record_package(),
         identify_method: "media_provider_fallback",
         identify_reliability: "fallback",
+        correlation_id: String::new(),
     }
 }
 

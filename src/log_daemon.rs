@@ -26,6 +26,7 @@ const STATS_DIR: &str = crate::platform::module_paths::PERSISTENT_DATA_DIR;
 const STATS_FILE: &str = crate::platform::module_paths::STATS_FILE;
 const STATS_TEMP_FILE: &str = crate::platform::module_paths::STATS_TEMP_FILE;
 const STATS_RESET_ACK_FILE: &str = crate::platform::module_paths::STATS_RESET_ACK_FILE;
+const MONITOR_CLEAR_ACK_FILE: &str = crate::platform::module_paths::MONITOR_CLEAR_ACK_FILE;
 const MAX_RUNNING_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MONITOR_BYTES: u64 = 1024 * 1024;
 const LOG_BACKUPS: usize = 2;
@@ -52,6 +53,7 @@ const TAG_FILE_MONITOR: &str = "FileMonitorOp";
 const TAG_STATS: &str = "Stats";
 const TAG_CONTROL: &str = "Control";
 const CONTROL_CLEAR_MONITOR: &str = "clear-monitor";
+const CONTROL_CLEAR_MONITOR_PREFIX: &str = "clear-monitor:";
 const CONTROL_FLUSH_ALL: &str = "flush-all";
 const CONTROL_RESET_STATS: &str = "reset-stats";
 const CONTROL_RECONCILE_RUNNING: &str = "reconcile-running";
@@ -421,7 +423,13 @@ impl LogState {
 
     fn handle_control(&mut self, command: &str) {
         match command {
-            CONTROL_CLEAR_MONITOR => self.monitor.clear(),
+            CONTROL_CLEAR_MONITOR => self.clear_monitor(None),
+            command if command.starts_with(CONTROL_CLEAR_MONITOR_PREFIX) => {
+                let token = command.trim_start_matches(CONTROL_CLEAR_MONITOR_PREFIX);
+                if !token.is_empty() {
+                    self.clear_monitor(Some(token));
+                }
+            }
             CONTROL_FLUSH_ALL => self.flush_pending(),
             CONTROL_RESET_STATS => self.reset_stats(),
             CONTROL_RECONCILE_RUNNING => {
@@ -440,6 +448,22 @@ impl LogState {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn clear_monitor(&mut self, token: Option<&str>) {
+        self.monitor.clear();
+        self.monitor.flush();
+        let Some(token) = token else {
+            return;
+        };
+        let Some(parent) = Path::new(MONITOR_CLEAR_ACK_FILE).parent() else {
+            return;
+        };
+        let _ = fs::create_dir_all(parent);
+        let ack_tmp = format!("{MONITOR_CLEAR_ACK_FILE}.tmp");
+        if fs::write(&ack_tmp, format!("{token}\n")).is_ok() {
+            let _ = fs::rename(ack_tmp, MONITOR_CLEAR_ACK_FILE);
         }
     }
 

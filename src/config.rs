@@ -81,6 +81,21 @@ pub struct ResolvedUserProfile {
 
 // quality-allow(lint-suppression): 仅 daemon 使用的整轮快照不会出现在 cdylib 构建中。
 #[allow(dead_code)]
+/// 判断未配置重定向的普通应用是否进入“监视专用 FUSE”数据面。
+///
+/// 该模式只用于共享存储上的文件操作审计：不改变路径后端，不安装应用侧 native hook，
+/// 由每个应用 namespace 中的 passthrough FUSE 捕获请求并把后端保持为真实存储。
+pub fn should_capture_unconfigured_app(package_name: &str, uid: i32, enabled: bool) -> bool {
+    enabled
+        && !package_name.is_empty()
+        && package_name != "com.storage.redirect.x"
+        && uid >= 10_000
+        && uid < 90_000
+        && !crate::redirect::policy::is_system_writer_package(package_name)
+        && !crate::redirect::policy::is_file_monitor_bridge_package(package_name)
+        && !crate::redirect::policy::is_file_monitor_ui_package(package_name)
+}
+
 pub struct DaemonReconcileConfigSnapshot {
     apps: HashMap<String, AppProfile>,
     pub storage_backend_mode: StorageBackendMode,

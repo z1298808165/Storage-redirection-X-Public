@@ -36,6 +36,21 @@ class RootFileStore(
         .stdout
   }
 
+  suspend fun readTailWithBackups(path: String, lines: Int): String {
+    val safeLines = lines.coerceIn(1, MaxTailLines)
+    val quotedPath = shellQuote(path)
+    return shell
+        .exec(
+            "base=$quotedPath; " +
+                "{ for f in \"\$base\".*; do [ -f \"\$f\" ] || continue; suffix=\"\${f##*.}\"; " +
+                "case \"\$suffix\" in ''|*[!0-9]*) continue;; esac; " +
+                "printf '%s\\t%s\\n' \"\$suffix\" \"\$f\"; done | sort -rn | " +
+                "while IFS=\"\$(printf '\\t')\" read -r _ f; do cat \"\$f\"; done; " +
+                "cat \"\$base\" 2>/dev/null; } | tail -n $safeLines"
+        )
+        .stdout
+  }
+
   suspend fun readConfiguredAppConfigDump(): String =
       shell
           .exec(

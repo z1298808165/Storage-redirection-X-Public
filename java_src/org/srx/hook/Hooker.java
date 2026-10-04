@@ -420,6 +420,7 @@ public class Hooker {
       if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
     }
     String sourcePath = receiver.getPath();
+    recordProviderDirectoryPath(sourcePath, callerUid);
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
     if (mappingPath == null) mappingPath = sourcePath;
     String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
@@ -466,6 +467,7 @@ public class Hooker {
       if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
     }
     String sourcePath = receiver.getPath();
+    recordProviderDirectoryPath(sourcePath, callerUid);
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
     if (mappingPath == null) mappingPath = sourcePath;
     String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
@@ -1370,6 +1372,7 @@ public class Hooker {
         scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
     if (callerUid < ANDROID_APP_UID_START) return source;
     String sourcePath = source.getPath();
+    recordProviderDirectoryPath(sourcePath, callerUid);
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
     if (mappingPath == null) mappingPath = sourcePath;
     String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
@@ -1408,6 +1411,7 @@ public class Hooker {
     if (pathIndex < 0 || sourcePath == null) return callBackup(args);
     int callerUid =
         scopedUid == null ? recentMediaDirectoryCallerUid(sourcePath) : scopedUid.intValue();
+    recordProviderDirectoryPath(sourcePath, callerUid);
     if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
     if (mappingPath == null) mappingPath = sourcePath;
@@ -1990,6 +1994,9 @@ public class Hooker {
   private static native void recordQueryAccessPath(String path, int callerUid);
 
   private static native void recordProviderOpenPath(
+      String path, int callerUid, String callerPackage);
+
+  private static native void recordProviderDirectoryPath(
       String path, int callerUid, String callerPackage);
 
   private static native void recordProviderOpenSuccess(
@@ -2806,6 +2813,19 @@ public class Hooker {
 
   private static void rememberProviderOpenPath(String path, int callerUid) {
     rememberProviderOpenPath(path, callerUid, packageNameForUid(callerUid));
+  }
+
+  /**
+   * 将 MediaProvider 实际尝试创建的目录原路径送入监视台账。
+   *
+   * <p>这里记录的是 mkdir/mkdirs/native mkdir 回调当前看到的完整路径， 不是从子目录向父目录倒推，因此同一父目录存在多个应用子目录时不会串归属。
+   */
+  private static void recordProviderDirectoryPath(String path, int callerUid) {
+    if (path == null || path.length() == 0 || callerUid < ANDROID_APP_UID_START) return;
+    try {
+      recordProviderDirectoryPath(path, callerUid, packageNameForUid(callerUid));
+    } catch (Throwable ignored) {
+    }
   }
 
   private static void rememberProviderOpenPath(String path, int callerUid, String callerPackage) {

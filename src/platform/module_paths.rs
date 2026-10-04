@@ -86,6 +86,10 @@ pub const STATS_TEMP_FILE: &str = "/data/adb/storage.redirect.x/.stats.tmp";
 // quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
 #[allow(dead_code)]
 pub const STATS_RESET_ACK_FILE: &str = "/data/adb/storage.redirect.x/.stats.reset.ok";
+/// 文件监视日志清理完成确认文件；由 daemon 原子写入，srxctl 等待对应令牌。
+// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const MONITOR_CLEAR_ACK_FILE: &str = "/data/adb/storage.redirect.x/.file_monitor.clear.ok";
 
 /// 过滤并归一化挂载点清单。
 ///

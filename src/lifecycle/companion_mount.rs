@@ -94,6 +94,12 @@ fn is_redirect_enabled_for_request(request: &CompanionMountRequest) -> bool {
     }
     config.reload_if_changed();
     config.should_redirect(&request.package_name, request.uid)
+        || (request.is_monitor_only
+            && crate::config::should_capture_unconfigured_app(
+                &request.package_name,
+                request.uid,
+                config.is_file_monitor_enabled(),
+            ))
 }
 
 fn log_companion_mount_perf(

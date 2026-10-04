@@ -6,8 +6,14 @@ pub(super) fn open_flags_write(flags: i32) -> bool {
     accmode == OpenAccMode::O_WRONLY || accmode == OpenAccMode::O_RDWR || flags & libc::O_TRUNC != 0
 }
 
+pub(super) fn open_flags_create(flags: i32) -> bool {
+    flags & libc::O_CREAT != 0 || flags & libc::O_TMPFILE == libc::O_TMPFILE
+}
+
 pub(super) fn fuse_open_operation_name(flags: i32) -> &'static str {
-    if open_flags_write(flags) {
+    if open_flags_create(flags) {
+        "open:create"
+    } else if open_flags_write(flags) {
         "open:write"
     } else {
         "open:read"

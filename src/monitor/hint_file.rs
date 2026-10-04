@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 // 提示文件格式版本，解析时用于拒绝旧格式行。
 const HINT_VERSION: &str = "3";
-const RECENT_PATH_CALLER_HINT_VERSION: &str = "2";
+const RECENT_PATH_CALLER_HINT_VERSION: &str = "3";
 
 pub(super) fn write_hint_file(hints: &[PrivateOwnerHint]) {
     let path = std::path::Path::new(module_paths::RECENT_SOURCE_HINT_FILE);
@@ -47,13 +47,14 @@ pub(super) fn write_path_hint_file(hints: &[PathCallerHint]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(mut file) = std::fs::File::create(path) else {
+    let temp_path = path.with_extension(format!("hint.tmp.{}", std::process::id()));
+    let Ok(mut file) = std::fs::File::create(&temp_path) else {
         return;
     };
     for hint in hints {
         let _ = writeln!(
             file,
-            "{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
             RECENT_PATH_CALLER_HINT_VERSION,
             hint.user_id,
             hint.updated_ms,
@@ -61,8 +62,13 @@ pub(super) fn write_path_hint_file(hints: &[PathCallerHint]) {
             hint.source,
             hint.confidence,
             hint.op_filter,
+            hint.correlation_id,
             hint.path
         );
+    }
+    if file.sync_all().is_err() || std::fs::rename(&temp_path, path).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return;
     }
     chmod_hint_file(path);
     invalidate_cached_hint_file(&RECENT_PATH_CALLER_HINT_FILE_CACHE);
@@ -234,6 +240,7 @@ pub(super) fn parse_path_hint_line(line: &str) -> Option<PathCallerHint> {
         source_part,
         confidence_part,
         op_filter_part,
+        correlation_id_part,
         path_part,
     ) = match parts.as_slice() {
         [
@@ -251,6 +258,7 @@ pub(super) fn parse_path_hint_line(line: &str) -> Option<PathCallerHint> {
             *source,
             *confidence,
             "provider_open",
+            "",
             *path,
         ),
         [
@@ -269,6 +277,27 @@ pub(super) fn parse_path_hint_line(line: &str) -> Option<PathCallerHint> {
             *source,
             *confidence,
             *op_filter,
+            "",
+            *path,
+        ),
+        [
+            "3",
+            user_id,
+            updated_ms,
+            package_name,
+            source,
+            confidence,
+            op_filter,
+            correlation_id,
+            path,
+        ] => (
+            *user_id,
+            *updated_ms,
+            *package_name,
+            *source,
+            *confidence,
+            *op_filter,
+            *correlation_id,
             *path,
         ),
         _ => return None,
@@ -291,6 +320,7 @@ pub(super) fn parse_path_hint_line(line: &str) -> Option<PathCallerHint> {
         source,
         confidence,
         op_filter,
+        correlation_id: correlation_id_part.to_string(),
     })
 }
 
@@ -306,6 +336,8 @@ pub(super) fn normalize_hint_source(value: &str) -> Option<&'static str> {
 pub(super) fn normalize_path_hint_source(value: &str) -> Option<&'static str> {
     match value {
         "provider_open" => Some("provider_open"),
+        "provider_mkdir" => Some("provider_mkdir"),
+        "public_path_package" => Some("public_path_package"),
         "saf_provider" => Some("saf_provider"),
         "query_access" => Some("query_access"),
         _ => None,
@@ -315,6 +347,7 @@ pub(super) fn normalize_path_hint_source(value: &str) -> Option<&'static str> {
 pub(super) fn normalize_path_hint_op_filter(value: &str) -> Option<&'static str> {
     match value {
         "provider_open" => Some("provider_open"),
+        "mkdir" => Some("mkdir"),
         "provider_open:create" => Some("provider_open:create"),
         "provider_open:read" => Some("provider_open:read"),
         "provider_open:write" => Some("provider_open:write"),

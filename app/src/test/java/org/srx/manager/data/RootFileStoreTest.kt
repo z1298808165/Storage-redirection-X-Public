@@ -84,6 +84,25 @@ class RootFileStoreTest {
   }
 
   @Test
+  fun readTailWithBackupsClampsLines() = runBlocking {
+    val shell = CapturingShell(ShellResult(0, "log", ""))
+    val store = RootFileStore(shell)
+
+    val output = store.readTailWithBackups(FileMonitorLogPath, 50_000)
+
+    assertEquals("log", output)
+    assertEquals(
+        "base=${shellQuote(FileMonitorLogPath)}; " +
+            "{ for f in \"\$base\".*; do [ -f \"\$f\" ] || continue; suffix=\"\${f##*.}\"; " +
+            "case \"\$suffix\" in ''|*[!0-9]*) continue;; esac; " +
+            "printf '%s\\t%s\\n' \"\$suffix\" \"\$f\"; done | sort -rn | " +
+            "while IFS=\"\$(printf '\\t')\" read -r _ f; do cat \"\$f\"; done; " +
+            "cat \"\$base\" 2>/dev/null; } | tail -n 10000",
+        shell.invocations.single().command,
+    )
+  }
+
+  @Test
   fun readsConfigDumpJsonMarkers() = runBlocking {
     val shell = CapturingShell(ShellResult(0, "dump", ""))
     val store = RootFileStore(shell)

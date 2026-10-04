@@ -55,6 +55,8 @@ const RECORD_QUERY_ACCESS_PATH_NAME: &[u8] = b"recordQueryAccessPath\0";
 const RECORD_QUERY_ACCESS_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)V\0";
 const RECORD_PROVIDER_OPEN_PATH_NAME: &[u8] = b"recordProviderOpenPath\0";
 const RECORD_PROVIDER_OPEN_PATH_SIG: &[u8] = b"(Ljava/lang/String;ILjava/lang/String;)V\0";
+const RECORD_PROVIDER_DIRECTORY_PATH_NAME: &[u8] = b"recordProviderDirectoryPath\0";
+const RECORD_PROVIDER_DIRECTORY_PATH_SIG: &[u8] = b"(Ljava/lang/String;ILjava/lang/String;)V\0";
 const RECORD_PROVIDER_OPEN_SUCCESS_NAME: &[u8] = b"recordProviderOpenSuccess\0";
 const RECORD_PROVIDER_OPEN_SUCCESS_SIG: &[u8] =
     b"(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;I)V\0";
@@ -169,6 +171,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: RECORD_PROVIDER_OPEN_PATH_NAME.as_ptr() as *mut _,
             signature: RECORD_PROVIDER_OPEN_PATH_SIG.as_ptr() as *mut _,
             fnPtr: record_provider_open_path as *mut _,
+        },
+        JNINativeMethod {
+            name: RECORD_PROVIDER_DIRECTORY_PATH_NAME.as_ptr() as *mut _,
+            signature: RECORD_PROVIDER_DIRECTORY_PATH_SIG.as_ptr() as *mut _,
+            fnPtr: record_provider_directory_path as *mut _,
         },
         JNINativeMethod {
             name: RECORD_PROVIDER_OPEN_SUCCESS_NAME.as_ptr() as *mut _,
@@ -665,6 +672,29 @@ unsafe extern "C" fn record_provider_open_path(
         crate::zygisk::jni::get_jstring_utf8(env, caller_package)
     };
     crate::monitor::AuditTrail::instance().record_provider_open_path(
+        &path_text,
+        caller_uid,
+        &package_text,
+    );
+}
+
+unsafe extern "C" fn record_provider_directory_path(
+    env: *mut JNIEnv,
+    _class: jclass,
+    path: jstring,
+    caller_uid: jni_sys::jint,
+    caller_package: jstring,
+) {
+    if env.is_null() || path.is_null() {
+        return;
+    }
+    let path_text = crate::zygisk::jni::get_jstring_utf8(env, path);
+    let package_text = if caller_package.is_null() {
+        String::new()
+    } else {
+        crate::zygisk::jni::get_jstring_utf8(env, caller_package)
+    };
+    crate::monitor::AuditTrail::instance().record_provider_directory_path(
         &path_text,
         caller_uid,
         &package_text,

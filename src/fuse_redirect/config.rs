@@ -139,6 +139,10 @@ pub struct FuseRedirectConfig {
     pub read_only_paths: Vec<String>,
     pub path_mappings: Vec<PathMapping>,
     pub is_mapping_mode_only: bool,
+    /// 是否为未配置重定向应用的监视专用直通会话。
+    ///
+    /// 该模式只记录 FUSE 请求，所有路径都落到真实共享存储，不改变应用看到的后端。
+    pub is_monitor_only: bool,
     /// 是否为共享宿主直通会话。
     ///
     /// 宿主会话把整个存储根以真实后端暴露出来，供各应用 namespace 复用同一份 FUSE 会话；
@@ -172,6 +176,7 @@ pub trait MountRequestFields {
     fn read_only_paths(&self) -> &[String];
     fn path_mappings(&self) -> &[PathMapping];
     fn is_mapping_mode_only(&self) -> bool;
+    fn is_monitor_only(&self) -> bool;
 }
 
 /// 按挂载请求构造 FUSE 重定向配置。
@@ -196,6 +201,7 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
         read_only_paths: request.read_only_paths().to_vec(),
         path_mappings: request.path_mappings().to_vec(),
         is_mapping_mode_only: request.is_mapping_mode_only(),
+        is_monitor_only: request.is_monitor_only(),
         is_passthrough_host: false,
     }
 }
@@ -204,6 +210,11 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
 pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     request: &R,
 ) -> Vec<String> {
+    if request.is_monitor_only() && request.is_file_monitor_enabled() {
+        let user_id = crate::platform::user_id_from_uid(request.uid());
+        return vec![paths::storage_user_root_for_user(user_id)];
+    }
+
     if matches!(
         request.storage_backend_mode(),
         StorageBackendMode::Namespace
