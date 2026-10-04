@@ -443,7 +443,12 @@ fn handle_child_process(
     mount_mgr.set_file_monitor_enabled(request.is_file_monitor_enabled);
 
     let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
-    let is_success = if request.is_mapping_mode_only {
+    // 共享宿主必须先于 namespace 重定向接管存储根，避免 SQLite 在接管前打开
+    // 重定向沙盒中的旧副本。
+    let preattached_host = preattach_shared_host(request, scoped_fuse_roots);
+    let is_success = if preattached_host.is_some() {
+        true
+    } else if request.is_mapping_mode_only {
         log::info!("map-only mount count={}", request.path_mappings.len());
         mount_mgr.apply_path_mappings_only(
             &request.path_mappings,
@@ -483,7 +488,9 @@ fn handle_child_process(
             &request.package_name,
             request.storage_backend_mode,
         );
-        let (fuse_children, attempt) = if !fuse_roots.is_empty() {
+        let (fuse_children, attempt) = if let Some(state) = preattached_host {
+            (vec![state], ScopedMountAttempt::Ready)
+        } else if !fuse_roots.is_empty() {
             match start_scoped_fuse_services(request, fuse_roots, mount_mgr.real_storage_anchor()) {
                 Some(children) => (children, ScopedMountAttempt::Ready),
                 None => (Vec::new(), ScopedMountAttempt::Failed),
@@ -592,6 +599,43 @@ fn handle_child_process(
     }
     unsafe { close(sock) };
     is_success
+}
+
+/// 在任何 namespace 重定向前接入共享宿主，避免应用先打开重定向沙盒中的文件。
+/// 只有 Auto 模式且规划根已经收敛为整棵用户存储视图时才提前接管；若接入函数
+/// 回退成独立 scoped 会话，则立即回滚，让调用方继续执行原有规划。
+fn preattach_shared_host(
+    request: &CompanionMountRequest,
+    scoped_fuse_roots: &[String],
+) -> Option<FuseMountState> {
+    if !matches!(
+        request.storage_backend_mode,
+        crate::config::StorageBackendMode::Auto
+    ) {
+        return None;
+    }
+    let user_id = platform::user_id_from_uid(request.uid);
+    let storage_root = platform::paths::storage_user_root_for_user(user_id);
+    if scoped_fuse_roots.len() != 1
+        || platform::paths::normalize_syntax(&scoped_fuse_roots[0])
+            != platform::paths::normalize_syntax(&storage_root)
+    {
+        return None;
+    }
+
+    let state = start_fuse_service_for_root(request, &storage_root, None)?;
+    if state.host_session.is_some() {
+        log::info!(
+            "companion shared host preattached pid={} pkg={} target={}",
+            request.pid,
+            request.package_name,
+            storage_root
+        );
+        Some(state)
+    } else {
+        crate::fuse_session::rollback_scoped_fuse_services(std::slice::from_ref(&state));
+        None
+    }
 }
 
 /// 按根启动 scoped FUSE 服务；单根失败只丢弃该根。

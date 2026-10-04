@@ -190,6 +190,22 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("self.resolve_mapping(storage_path).is_some()", decision)
         self.assertIn("self.is_own_private_storage_path(storage_path)", decision)
 
+    def test_shared_host_precedes_namespace_redirect(self) -> None:
+        daemon = read("src/daemon_mount.rs")
+        companion = read("src/lifecycle/companion_mount.rs")
+        for source, label in ((daemon, "daemon"), (companion, "companion")):
+            preattach = section(source, "fn preattach_shared_host(", "\n}")
+            self.assertIn("StorageBackendMode::Auto", preattach, label)
+            self.assertIn("host_session.is_some()", preattach, label)
+            self.assertIn("rollback_scoped_fuse_services", preattach, label)
+
+            self.assertLess(
+                source.index("preattach_shared_host("),
+                source.index("apply_sdcard_redirect(", source.index("preattach_shared_host(")),
+                f"{label} 必须先接入共享宿主再执行 namespace 重定向",
+            )
+            self.assertIn("preattached_host.is_some()", source)
+
     def test_optional_diagnostics_accept_empty_output(self) -> None:
         body = section(self.powershell, "function Invoke-CaptureScenario2MediastoreHookDiag", "function Invoke-StandardScenario")
         # 日志轮转或过滤无匹配属于正常情况，空诊断不能中断后面的行为断言。
