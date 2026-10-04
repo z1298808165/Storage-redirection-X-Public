@@ -2173,13 +2173,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
         `skipped superseded` 把布尔换成 `recorded=<mount_id>`）。
 
         这条守卫把「脚本只认稳定串」固定下来：`app mount confirmed pid=`、
-        `daemon mount ... op=Reload ok=true`、`backend_effective pkg=` 是挂载确认与后端结论的
+        `daemon mount ... op=Reload ok=true`、`perf companion mount pkg=... ok=true`、
+        `backend_effective pkg=` 是挂载确认与后端结论的
         对外接口，改动必须同步脚本；而 `unmount skipped|cleanup incomplete|anchor polluted|
         mount identity saved|real storage anchored` 属诊断细节，**不得**被脚本匹配。
         """
         stable = [
             "app mount confirmed",
             "op=Reload ok=true",
+            "perf companion mount pkg=",
             "backend_effective pkg=",
         ]
         volatile = [
@@ -2227,15 +2229,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 f"{name} 的挂载确认缺少 daemon 重挂串"
                 "（`daemon mount pkg=... op=Reload ok=true`）",
             )
-            # 两条串必须被同一个匹配表达式用上，不能只是定义后不用。
+            self.assertIn("perf companion mount pkg=", code, f"{name} 缺少 companion 挂载确认串")
+            # 三条串必须被同一个匹配表达式用上，不能只是定义后不用。
             # `.ps1` 在 PowerShell here-string 里写作 `` `$confirmed|`$daemon ``（`$` 被反引号转义），
             # 因此按「同一行 grep -Eq 同时含两个变量名」判定，不比较字面写法。
             combined = [
                 line
                 for line in code.splitlines()
-                if "grep -Eq" in line and "$confirmed" in line and "$daemon" in line
+                if "grep -Eq" in line
+                and "$confirmed" in line
+                and "$daemon" in line
+                and ("$companion" in line or "`$companion" in line)
             ]
-            self.assertTrue(combined, f"{name} 未把两条串一起用于匹配")
+            self.assertTrue(combined, f"{name} 未把三类串一起用于匹配")
 
     def test_powershell_runner_matches_bash_mountinfo_recheck(self) -> None:
         """`.ps1` 必须与 `.sh` 一样，在挂载确认后独立复核挂载点。

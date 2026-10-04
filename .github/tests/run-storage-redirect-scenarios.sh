@@ -1003,8 +1003,9 @@ wait_service_result() {
 }
 
 wait_app_mount_confirmed() {
-  # 只认两条日志：应用侧 specialize_post 的 `app mount confirmed pid=`，以及 daemon 主动重挂
-  # 时的 `daemon mount ... op=Reload ok=true`。这里曾经还有第三条「读挂载状态标记文件成功」，
+  # 认三类稳定成功日志：应用侧 specialize_post 的 `app mount confirmed pid=`、daemon 主动重挂
+  # 的 `daemon mount ... op=Reload ok=true`，以及 companion 挂载完成的
+  # `perf companion mount pkg=... pid=... ... ok=true`。这里曾经还有第三条「读挂载状态标记文件成功」，
   # 但标记文件机制已废弃（它按 PID 命名、在应用数据目录里无限累积），不要把它加回来。
   # 确认到 PID 之后仍会由 app_mountinfo_has_expected_paths 独立复核挂载点，日志只是触发器。
   local label="$1"
@@ -1018,7 +1019,7 @@ wait_app_mount_confirmed() {
   local timeout_seconds=$(((SRT_MOUNT_CONFIRM_TIMEOUT_MS + 999) / 1000))
   local host_timeout_seconds=$((timeout_seconds + 15))
   local output
-  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -z \"\$pid\" ] && pid=\$(for q in /proc/[0-9]*; do c=\$(cat \"\$q/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${q#/proc/}\";; esac; done | sort -n | tail -1); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
+  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -z \"\$pid\" ] && pid=\$(for q in /proc/[0-9]*; do c=\$(cat \"\$q/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${q#/proc/}\";; esac; done | sort -n | tail -1); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; companion=\"perf companion mount pkg=$APP_ID pid=\$pid .* ok=true\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$companion)\"; then echo confirmed_pid=\$pid; exit 0; fi; if tail -240 '$LOG_PATH' 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$companion)\"; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
     local confirmed_pid
     confirmed_pid="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
     if [ -n "$confirmed_pid" ] && app_mountinfo_has_expected_paths "$label" "$confirmed_pid"; then

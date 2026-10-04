@@ -539,9 +539,10 @@ exit 1
 function Wait-AppMountConfirmed {
     param([string]$Label)
 
-    # 与 run-storage-redirect-scenarios.sh 的 wait_app_mount_confirmed 保持等价：只认两条日志——
+    # 与 run-storage-redirect-scenarios.sh 的 wait_app_mount_confirmed 保持等价：认三类日志——
     # 应用侧 specialize_post 的 `app mount confirmed pid=`，以及 daemon 主动重挂时的
-    # `daemon mount ... op=Reload ok=true`。这里曾经还有第三条「读挂载状态标记文件成功」，
+    # `daemon mount ... op=Reload ok=true`，以及 companion 完成的
+    # `perf companion mount pkg=... pid=... ... ok=true`。这里曾经还有「读挂载状态标记文件成功」，
     # 但标记文件机制已废弃（按 PID 命名、在应用数据目录里无限累积），不要把它加回来。
     # 只认应用侧那一条会让「仅由 daemon 重挂」的场景（例如热更新后的 reconcile）在这里空等超时。
     #
@@ -566,9 +567,10 @@ if [ -z "`$pid" ]; then
 fi
 confirmed="app mount confirmed pid=`$pid"
 daemon="daemon mount pkg=$AppId pid=`$pid op=Reload ok=true"
+companion="perf companion mount pkg=$AppId pid=`$pid .* ok=true"
 while [ `$(date +%s) -le `$deadline ]; do
-  if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq "(`$confirmed|`$daemon)"; then echo "confirmed_pid=`$pid"; exit 0; fi
-  if tail -240 '$LogPath' 2>/dev/null | grep -Eq "(`$confirmed|`$daemon)"; then echo "confirmed_pid=`$pid"; exit 0; fi
+  if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq "(`$confirmed|`$daemon|`$companion)"; then echo "confirmed_pid=`$pid"; exit 0; fi
+  if tail -240 '$LogPath' 2>/dev/null | grep -Eq "(`$confirmed|`$daemon|`$companion)"; then echo "confirmed_pid=`$pid"; exit 0; fi
   sleep 0.1
 done
 echo "pid=`$pid"
