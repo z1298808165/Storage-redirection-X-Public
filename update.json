@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37209511010-3/storage-redirect-x-manager-v1.2.60-ci.30.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37209511010-3/storage.redirect.x-v1.2.60-ci.30.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.30`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37188610970-1`\n- 当前提交：`3070306bf7e0`\n\n## 模块更新\n\n### 修复了什么问题\n- 固定共享宿主与系统视图清理顺序；适用范围：Auto 模式整棵存储视图；限制：非宿主回退路径保持原有行为。\n- 消除共享存储挂载过渡窗口的数据分裂；适用范围：普通应用共享存储挂载与热重载；限制：宿主不可用时保留原有回退路径。\n\n## 其它更新\n\n### 修复了什么问题\n- 固定共享宿主与系统视图清理顺序；适用范围：Auto 模式整棵存储视图；限制：非宿主回退路径保持原有行为。\n- 消除共享存储挂载过渡窗口的数据分裂；适用范围：普通应用共享存储挂载与热重载；限制：宿主不可用时保留原有回退路径。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.30`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37188610970-1`\n- 当前提交：`3070306bf7e0`\n\n## 模块更新\n\n### 修复了什么问题\n- 固定共享宿主与系统视图清理顺序；适用范围：Auto 模式整棵存储视图；限制：非宿主回退路径保持原有行为。\n- 消除共享存储挂载过渡窗口的数据分裂；适用范围：普通应用共享存储挂载与热重载；限制：宿主不可用时保留原有回退路径。"
   },
   "releases": []
 }
