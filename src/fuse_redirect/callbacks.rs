@@ -160,7 +160,7 @@ impl Filesystem for FuseRedirectFs {
                 let policy = self.policy_for_read_request(req, Some(parent), Some(&rel));
                 // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
                 // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
-                if policy.is_own_media_sqlite_shm_rel(&rel) {
+                if policy.should_heal_media_sqlite_shm_rel(&rel) {
                     heal_poisoned_sqlite_shm_backend(
                         policy.user_id,
                         policy.media_sqlite_view_root(),
@@ -480,7 +480,7 @@ impl Filesystem for FuseRedirectFs {
         // 同样的处置——删除后端文件并让本次 open 返回 ENOENT，应用随后的 O_CREAT
         // 重开会重建全新 inode。只读打开不处置（不因读请求删文件）。
         if open_flags_write(flags.0)
-            && policy.is_own_media_sqlite_shm_rel(&backend.rel)
+            && policy.should_heal_media_sqlite_shm_rel(&backend.rel)
             && heal_poisoned_sqlite_shm_backend(
                 policy.user_id,
                 policy.media_sqlite_view_root(),
@@ -1211,6 +1211,17 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
+        let size = size.map(|requested| {
+            let file_name = backend.rel.rsplit('/').next().unwrap_or(&backend.rel);
+            let is_sqlite_shm = file_name.len() > "-shm".len()
+                && file_name.to_ascii_lowercase().ends_with("-shm")
+                && paths::is_sqlite_database_or_sidecar_path(&backend.rel);
+            if is_sqlite_shm && requested > 0 && requested < SQLITE_SHM_MIN_SIZE_BYTES {
+                SQLITE_SHM_MIN_SIZE_BYTES
+            } else {
+                requested
+            }
+        });
         if let Some(size) = size
             && let Err(errno) = truncate_path(&backend.path, size)
         {

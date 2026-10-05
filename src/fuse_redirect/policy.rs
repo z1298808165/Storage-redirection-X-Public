@@ -332,21 +332,29 @@ impl RedirectPolicy {
             .trim_matches('/')
             .to_string();
         let real_root = real_backend_root_for_config(&config, user_id);
-        // 共享宿主直通会话不做任何重定向，`redirect_target` 就是存储根本身；而按子路径
-        // 推导重定向根的函数对"根本身"返回 None，沿用普通流程会直接把配置判为非法。
-        // 这里显式区分该模式，并把重定向根指向真实根：即使某条路径意外走到重定向分支，
-        // 落点仍是真实后端，不会凭空多出一层沙盒目录，也不需要创建任何目录。
-        let redirect_root_string = if config.is_passthrough_host {
+        // 共享宿主直通和未配置应用的监视专用会话都不做任何重定向，`redirect_target`
+        // 可以是整个存储根。按子路径推导重定向根对"根本身"返回 None，沿用普通流程会
+        // 把这两类合法直通配置误判为非法，导致宿主策略拒绝 UID，应用看不到共享存储。
+        // 两种模式都把重定向根指向真实根：即使某条路径意外走到重定向分支，落点仍是真实
+        // 后端，不会凭空多出一层沙盒目录，也不需要创建任何目录。
+        let redirect_storage = paths::resolve_user_path(
+            &paths::resolve_placeholders(
+                &paths::normalize(&config.redirect_target),
+                &config.app_data_dir,
+                &config.redirect_target,
+            ),
+            user_id,
+        );
+        let is_mapping_root_passthrough = config.is_mapping_mode_only
+            && config.path_mappings.is_empty()
+            && config.sandboxed_paths.is_empty()
+            && paths::eq_ignore_case(&redirect_storage, &storage_root);
+        let redirect_root_string = if config.is_passthrough_host
+            || config.is_monitor_only
+            || is_mapping_root_passthrough
+        {
             real_root.to_string_lossy().to_string()
         } else {
-            let redirect_storage = paths::resolve_user_path(
-                &paths::resolve_placeholders(
-                    &paths::normalize(&config.redirect_target),
-                    &config.app_data_dir,
-                    &config.redirect_target,
-                ),
-                user_id,
-            );
             let redirect_root_string =
                 paths::storage_to_data_media_for_user(&redirect_storage, user_id)
                     .unwrap_or_default();
@@ -712,13 +720,21 @@ impl RedirectPolicy {
             .then_some(self.media_sqlite_real_root.as_path())
     }
 
-    /// 是否是应用自有 `Android/media/<pkg>/` 下 sqlite 数据库的 `-shm` 边车路径。
+    /// 是否应在共享 FUSE 中检查并自愈 SQLite `-shm` 边车路径。
     ///
     /// 只圈定 `-shm`（不含 `.db`/`-wal`）：`-shm` 的合法形态只有「0 字节」与
     /// 「≥32KiB」两种（由 SQLite 维护），其余尺寸都是毒化态；`.db` 小于 32KiB 是
     /// 正常现象，`-wal` 过短时 SQLite 自己会按空日志重建，都不需要外部干预。
-    pub(super) fn is_own_media_sqlite_shm_rel(&self, rel: &str) -> bool {
-        if !is_own_media_sqlite_relative_path(rel, &self.package_name) {
+    pub(super) fn should_heal_media_sqlite_shm_rel(&self, rel: &str) -> bool {
+        let is_own_media_sqlite = is_own_media_sqlite_relative_path(rel, &self.package_name);
+        let is_monitor_only_private_sqlite = self.is_monitor_only
+            && is_android_private_sqlite_relative_path(rel)
+            && matches!(
+                self.backend_decision(&self.storage_path_for_rel(rel), OperationKind::Read)
+                    .kind,
+                BackendKind::Real
+            );
+        if !is_own_media_sqlite && !is_monitor_only_private_sqlite {
             return false;
         }
         let file_name = rel.rsplit('/').next().unwrap_or(rel);
@@ -1391,4 +1407,19 @@ fn is_own_media_sqlite_relative_path(relative: &str, package_name: &str) -> bool
         Some(package) => paths::eq_ignore_case(package, package_name),
         None => false,
     }
+}
+
+/// 判断相对路径是否位于任一应用私有外部存储目录下的 SQLite 文件。
+///
+/// 监视专用会话可能代表应用读取其它应用拥有的数据库；这类跨应用访问不满足
+/// `is_own_media_sqlite_relative_path`，但损坏的 `-shm` 仍必须删除旧 inode 后重建。
+fn is_android_private_sqlite_relative_path(relative: &str) -> bool {
+    if !paths::is_sqlite_database_or_sidecar_path(relative) {
+        return false;
+    }
+    let mut parts = relative.split('/').filter(|part| !part.is_empty());
+    if parts.next() != Some("Android") {
+        return false;
+    }
+    matches!(parts.next(), Some("data" | "media" | "obb")) && parts.next().is_some()
 }

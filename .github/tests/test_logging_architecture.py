@@ -93,6 +93,12 @@ class LoggingArchitectureTest(unittest.TestCase):
         backend = policy[policy.index("fn backend_decision") : policy.index("fn matches_any")]
         self.assertLess(backend.index("if self.is_monitor_only"), backend.index("BackendKind::Redirect"))
         self.assertIn('"fuse_monitor_only"', policy)
+        constructor_start = policy.index("impl RedirectPolicy")
+        constructor = policy[constructor_start : policy.index("        let mut path_mappings", constructor_start)]
+        self.assertIn("config.is_passthrough_host", constructor)
+        self.assertIn("config.is_monitor_only", constructor)
+        self.assertIn("is_mapping_root_passthrough", constructor)
+        self.assertIn("config.is_mapping_mode_only", constructor)
         self.assertIn("event_role=request", policy)
 
     def test_monitor_watches_precede_slow_public_owner_scan(self) -> None:

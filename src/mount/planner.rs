@@ -39,7 +39,7 @@ fn should_log_step(count: u64, step: u64) -> bool {
 
 impl MountPlanner {
     // 按需 unshare，并隔离目标应用命名空间内的全部挂载传播。
-    pub(super) fn ensure_mount_namespace_prepared(&mut self) -> bool {
+    pub(crate) fn ensure_mount_namespace_prepared(&mut self) -> bool {
         if self.is_namespace_ready {
             return true;
         }

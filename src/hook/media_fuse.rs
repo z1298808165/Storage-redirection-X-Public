@@ -474,50 +474,44 @@ fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
         return true;
     }
 
-    if size > 0 {
-        let truncate_zero = unsafe { libc::ftruncate(fd, 0) };
-        if truncate_zero != 0 {
-            log::warn!(
-                "prepare sqlite shm backend reset failed errno={} size={} storage={} backend={}",
-                current_errno(),
-                size,
-                storage_path,
-                backend_path
-            );
-            unsafe {
-                libc::close(fd);
-            }
-            return false;
-        }
-    }
-
-    let result = unsafe { libc::ftruncate(fd, SQLITE_SHM_MIN_SIZE) };
-    let errno = current_errno();
-    let final_size = fd_size(fd);
+    // 小于一个完整 wal-index 页框的 sidecar 已经是毒化 inode。就地扩回尺寸
+    // 不能恢复 SQLite 的共享内存头，必须先让 MediaProvider 失效视图节点，再
+    // 删除真实后端文件，下一次 O_CREAT 才会拿到新 inode。
     unsafe {
         libc::close(fd);
     }
-
-    if result == 0 {
-        log::info!(
-            "prepare sqlite shm backend ok size={} final_size={} storage={} backend={}",
-            size,
-            final_size,
-            storage_path,
-            backend_path
-        );
-        true
+    let removed_storage = unlink_path(storage_path);
+    let removed_backend = if std::fs::metadata(backend_path).is_ok() {
+        unlink_path(backend_path)
     } else {
-        log::warn!(
-            "prepare sqlite shm backend failed errno={} size={} final_size={} storage={} backend={}",
-            errno,
+        false
+    };
+    if removed_storage || removed_backend {
+        log::info!(
+            "heal sqlite shm backend removed storage={} backend={} size={} path={} backend_path={}",
+            removed_storage,
+            removed_backend,
             size,
-            final_size,
             storage_path,
             backend_path
         );
-        false
+        return true;
     }
+    log::warn!(
+        "heal sqlite shm backend unlink failed size={} path={} backend_path={}",
+        size,
+        storage_path,
+        backend_path
+    );
+    false
+}
+
+fn unlink_path(path: &str) -> bool {
+    let Ok(c_path) = CString::new(path) else {
+        return false;
+    };
+    // SAFETY: c_path 以 NUL 结尾，并在系统调用期间保持有效。
+    unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_path.as_ptr(), 0) == 0 }
 }
 
 fn fd_size(fd: libc::c_int) -> libc::off_t {

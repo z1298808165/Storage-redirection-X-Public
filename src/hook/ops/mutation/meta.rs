@@ -5,8 +5,14 @@ use crate::hook::path as path_utils;
 use crate::hook::runtime;
 use crate::hook::stats::InterceptHub;
 use crate::monitor::OpKind;
+use crate::platform::paths;
 use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t, off_t, timespec};
 use std::ffi::CString;
+
+/// SQLite WAL 共享内存文件至少需要一个 32 KiB 页框；过小的 truncate 会让
+/// 后续 SQLite 打开数据库时把现有状态视为不可用。FUSE 后端与 system-writer
+/// 后端必须使用同一阈值，避免不同访问入口产生不同的 sidecar 内容。
+const SQLITE_SHM_MIN_SIZE: off_t = 32 * 1024;
 
 pub unsafe extern "C" fn hooked_truncate(pathname: *const c_char, length: off_t) -> c_int {
     let self_ptr = hooked_truncate as *mut c_void;
@@ -569,8 +575,9 @@ fn confirm_private_owner_sqlite_ftruncate(
         return None;
     }
 
-    // SAFETY: retry_fd 是上方 open 成功返回的有效文件描述符，ftruncate 只按 length 调整该 fd 对应文件大小。
-    let result = unsafe { libc::ftruncate(retry_fd, length) };
+    let effective_length = clamp_sqlite_shm_truncate(path_for_decision, length);
+    // SAFETY: retry_fd 是上方 open 成功返回的有效文件描述符，ftruncate 只按 effective_length 调整该 fd 对应文件大小。
+    let result = unsafe { libc::ftruncate(retry_fd, effective_length) };
     let retry_errno = runtime::current_errno();
     let backend_size = backend_fd_size(retry_fd);
     // SAFETY: retry_fd 为本函数内 open 得到的有效描述符，此处关闭后不再使用，避免泄漏。
@@ -579,7 +586,7 @@ fn confirm_private_owner_sqlite_ftruncate(
     }
     if result == 0 {
         log::debug!(
-            "{} private owner sqlite backend truncate ok ret={} errno={} fd={} fd_flags=0x{:x} caller_uid={} length={} size={} path={} storage={} backend={}",
+            "{} private owner sqlite backend truncate ok ret={} errno={} fd={} fd_flags=0x{:x} caller_uid={} length={} effective_length={} size={} path={} storage={} backend={}",
             op_name,
             original_result,
             original_errno,
@@ -587,6 +594,7 @@ fn confirm_private_owner_sqlite_ftruncate(
             fd_flags,
             caller_uid,
             length,
+            effective_length,
             backend_size,
             path_for_decision,
             storage_path,
@@ -596,7 +604,7 @@ fn confirm_private_owner_sqlite_ftruncate(
     }
 
     log::warn!(
-        "{} private owner sqlite backend truncate failed ret={} errno={} retry_errno={} fd={} fd_flags=0x{:x} caller_uid={} length={} size={} path={} storage={} backend={}",
+        "{} private owner sqlite backend truncate failed ret={} errno={} retry_errno={} fd={} fd_flags=0x{:x} caller_uid={} length={} effective_length={} size={} path={} storage={} backend={}",
         op_name,
         original_result,
         original_errno,
@@ -605,6 +613,7 @@ fn confirm_private_owner_sqlite_ftruncate(
         fd_flags,
         caller_uid,
         length,
+        effective_length,
         backend_size,
         path_for_decision,
         storage_path,
@@ -612,6 +621,18 @@ fn confirm_private_owner_sqlite_ftruncate(
     );
     runtime::set_errno(original_errno);
     None
+}
+
+fn clamp_sqlite_shm_truncate(path: &str, requested: off_t) -> off_t {
+    if requested > 0
+        && requested < SQLITE_SHM_MIN_SIZE
+        && paths::is_sqlite_database_or_sidecar_path(path)
+        && path.to_ascii_lowercase().ends_with("-shm")
+    {
+        SQLITE_SHM_MIN_SIZE
+    } else {
+        requested
+    }
 }
 
 fn confirm_private_owner_sqlite_futimens(

@@ -739,6 +739,8 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     let preattached_host = preattach_shared_host(request, scoped_fuse_roots);
     let ok = if preattached_host.is_some() {
         true
+    } else if request.is_monitor_only {
+        planner.ensure_mount_namespace_prepared()
     } else if request.is_mapping_mode_only {
         planner.apply_path_mappings_only(
             &request.path_mappings,
@@ -870,10 +872,12 @@ fn preattach_shared_host(
 }
 
 fn shared_host_preattach_candidate(request: &MountRequest, scoped_fuse_roots: &[String]) -> bool {
-    if !matches!(
+    let is_auto = matches!(
         request.storage_backend_mode,
         crate::config::StorageBackendMode::Auto
-    ) {
+    );
+    let is_monitor_only = request.is_monitor_only && request.is_file_monitor_enabled;
+    if !is_auto && !is_monitor_only {
         return false;
     }
     let user_id = crate::platform::user_id_from_uid(request.uid);

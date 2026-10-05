@@ -223,6 +223,9 @@ where
     if should_fix_system_writer_private_owner(hub, flags) {
         runtime::fix_system_writer_android_private_owner(final_path.as_ref(), false);
     }
+    if is_system_writer && is_sqlite_shm_sidecar_path(path_for_decision.as_ref()) {
+        crate::hook::media_fuse::prepare_private_owner_sqlite_sidecar(path_for_decision.as_ref());
+    }
 
     let call_target =
         OpenCallTarget::for_open(pathname, final_path.as_ref(), is_relative, is_redirected);
@@ -350,6 +353,9 @@ where
     if should_fix_system_writer_private_owner(hub, flags) {
         runtime::fix_system_writer_android_private_owner(final_path.as_ref(), false);
     }
+    if is_system_writer && is_sqlite_shm_sidecar_path(path_for_decision.as_ref()) {
+        crate::hook::media_fuse::prepare_private_owner_sqlite_sidecar(path_for_decision.as_ref());
+    }
     let mut result = call_original(call_target.dirfd, call_target.path);
     let mut error_no = runtime::errno_for_result(result);
     if let Some(retry) = maybe_retry_system_writer_read_fallback(
@@ -401,6 +407,14 @@ fn retry_fuse_fix_for_media_provider(hub: &InterceptHub) {
     } else {
         fuse_fix::retry_if_target_enabled();
     }
+}
+
+fn is_sqlite_shm_sidecar_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    (lower.ends_with(".db-shm")
+        || lower.ends_with(".sqlite-shm")
+        || lower.ends_with(".sqlite3-shm"))
+        && crate::platform::paths::is_sqlite_database_or_sidecar_path(path)
 }
 
 struct OpenCallTarget {

@@ -465,6 +465,8 @@ fn handle_child_process(
     let preattached_host = preattach_shared_host(request, scoped_fuse_roots);
     let is_success = if preattached_host.is_some() {
         true
+    } else if request.is_monitor_only {
+        mount_mgr.ensure_mount_namespace_prepared()
     } else if request.is_mapping_mode_only {
         log::info!("map-only mount count={}", request.path_mappings.len());
         mount_mgr.apply_path_mappings_only(
@@ -652,10 +654,12 @@ fn shared_host_preattach_candidate(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
 ) -> bool {
-    if !matches!(
+    let is_auto = matches!(
         request.storage_backend_mode,
         crate::config::StorageBackendMode::Auto
-    ) {
+    );
+    let is_monitor_only = request.is_monitor_only && request.is_file_monitor_enabled;
+    if !is_auto && !is_monitor_only {
         return false;
     }
     let user_id = platform::user_id_from_uid(request.uid);

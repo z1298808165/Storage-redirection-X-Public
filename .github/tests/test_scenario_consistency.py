@@ -190,6 +190,41 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("self.resolve_mapping(storage_path).is_some()", decision)
         self.assertIn("self.is_own_private_storage_path(storage_path)", decision)
 
+    def test_monitor_only_heals_cross_owner_sqlite_sidecars(self) -> None:
+        policy = read("src/fuse_redirect/policy.rs")
+        callbacks = read("src/fuse_redirect/callbacks.rs")
+        self.assertIn("should_heal_media_sqlite_shm_rel", policy)
+        self.assertIn("is_monitor_only_private_sqlite", policy)
+        self.assertIn("is_android_private_sqlite_relative_path", policy)
+        self.assertIn("policy.should_heal_media_sqlite_shm_rel(&rel)", callbacks)
+        self.assertIn("policy.should_heal_media_sqlite_shm_rel(&backend.rel)", callbacks)
+
+    def test_system_writer_preserves_minimum_sqlite_shm_size(self) -> None:
+        mutation = read("src/hook/ops/mutation/meta.rs")
+        truncate = section(
+            mutation,
+            "fn confirm_private_owner_sqlite_ftruncate(",
+            "fn clamp_sqlite_shm_truncate(",
+        )
+        self.assertIn("clamp_sqlite_shm_truncate(path_for_decision, length)", truncate)
+        self.assertIn("libc::ftruncate(retry_fd, effective_length)", truncate)
+        clamp = section(
+            mutation,
+            "fn clamp_sqlite_shm_truncate(",
+            "fn confirm_private_owner_sqlite_futimens(",
+        )
+        self.assertIn("requested < SQLITE_SHM_MIN_SIZE", clamp)
+        self.assertIn('ends_with("-shm")', clamp)
+        self.assertIn("SQLITE_SHM_MIN_SIZE", clamp)
+
+    def test_system_writer_heals_sqlite_shm_before_open(self) -> None:
+        open_source = read("src/hook/ops/open.rs")
+        media = read("src/hook/media_fuse.rs")
+        self.assertIn("prepare_private_owner_sqlite_sidecar", open_source)
+        self.assertIn("is_system_writer && is_sqlite_shm_sidecar_path", open_source)
+        self.assertIn("let removed_storage = unlink_path(storage_path)", media)
+        self.assertIn("let removed_backend =", media)
+
     def test_shared_host_precedes_namespace_redirect(self) -> None:
         daemon = read("src/daemon_mount.rs")
         companion = read("src/lifecycle/companion_mount.rs")
@@ -198,13 +233,26 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("host_session.is_some()", preattach, label)
             self.assertIn("rollback_scoped_fuse_services", preattach, label)
             self.assertIn("StorageBackendMode::Auto", source, label)
-
+            self.assertIn("request.is_monitor_only", source, label)
             self.assertLess(
                 source.index("preattach_shared_host("),
                 source.index("apply_sdcard_redirect(", source.index("preattach_shared_host(")),
                 f"{label} 必须先接入共享宿主再执行 namespace 重定向",
             )
             self.assertIn("preattached_host.is_some()", source)
+            monitor_only = source.index("else if request.is_monitor_only")
+            redirect = source.index("apply_sdcard_redirect(", source.index("preattach_shared_host("))
+            self.assertLess(monitor_only, redirect, label)
+            self.assertIn("ensure_mount_namespace_prepared()", source[monitor_only:redirect], label)
+
+    def test_mapping_only_storage_root_is_real_only_without_mapping_rules(self) -> None:
+        policy = read("src/fuse_redirect/policy.rs")
+        constructor_start = policy.index("impl RedirectPolicy")
+        constructor = policy[constructor_start : policy.index("        let mut path_mappings", constructor_start)]
+        self.assertIn("is_mapping_root_passthrough", constructor)
+        self.assertIn("config.path_mappings.is_empty()", constructor)
+        self.assertIn("config.sandboxed_paths.is_empty()", constructor)
+        self.assertIn("paths::eq_ignore_case(&redirect_storage, &storage_root)", constructor)
 
     def test_optional_diagnostics_accept_empty_output(self) -> None:
         body = section(self.powershell, "function Invoke-CaptureScenario2MediastoreHookDiag", "function Invoke-StandardScenario")
