@@ -34,7 +34,7 @@ APP_APK="${APP_APK:-$(find tests/storage-redirect-test/app/build/outputs/apk/deb
 # permissive 也跑通了场景 2，此前那次 `Unable to apply SELinux patches` 属间歇现象。
 # 换版本时用 KERNELSU_APK_URL 覆盖，并重新跑完整对照再下结论。
 KERNELSU_APK_URL="${KERNELSU_APK_URL:-https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk}"
-ZYGISK_NEXT_URL="${ZYGISK_NEXT_URL:-https://github.com/LSPosed/ZygiskNext/releases/download/1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip}"
+ZYGISK_NEXT_URL="${ZYGISK_NEXT_URL:-https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip}"
 
 KSUAVD_DIR="${RUNNER_TEMP:-/tmp}/ksuAVD"
 rm -rf "$KSUAVD_DIR"

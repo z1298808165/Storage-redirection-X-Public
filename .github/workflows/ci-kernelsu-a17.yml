@@ -32,7 +32,7 @@ on:
       zygisk_next_url:
         description: "Zygisk Next 模块 zip 下载地址（KernelSU 下的 Zygisk 实现）"
         required: false
-        default: "https://github.com/LSPosed/ZygiskNext/releases/download/1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip"
+        default: "https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip"
         type: string
       selinux_permissive:
         description: "诊断用：1 表示把 SELinux 置为 permissive，验证 sepolicy 补丁缺失是否为唯一阻塞项（正式链路不启用）"
@@ -225,7 +225,7 @@ jobs:
       # 走 KernelSU 安装链路，正式矩阵仍用默认（Magisk）脚本。
       MODULE_INSTALL_SCRIPT: .github/tests/install-storage-redirect-module-ksu.sh
       KERNELSU_APK_URL: ${{ inputs.kernelsu_apk_url || 'https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk' }}
-      ZYGISK_NEXT_URL: ${{ inputs.zygisk_next_url || 'https://github.com/LSPosed/ZygiskNext/releases/download/1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip' }}
+      ZYGISK_NEXT_URL: ${{ inputs.zygisk_next_url || 'https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip' }}
       # 诊断开关：KernelSU 的 LKM 在 AVD 上打不了 sepolicy，本轮用 permissive 验证
       # 这是否为 MediaProvider hook 失效的唯一原因。正式链路恒为 0。
       SRT_KSU_SELINUX_PERMISSIVE: ${{ inputs.selinux_permissive || '0' }}
