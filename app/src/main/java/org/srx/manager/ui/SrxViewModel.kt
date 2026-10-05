@@ -188,6 +188,7 @@ class SrxViewModel(
   }
 
   fun refreshDashboard() {
+    if (!_state.value.rootGranted) return
     viewModelScope.launch {
       loadOrReport("加载概览", "加载概览失败") { repository.readDashboardSummary() }
           ?.let { _state.value = _state.value.copy(dashboard = it, error = null) }

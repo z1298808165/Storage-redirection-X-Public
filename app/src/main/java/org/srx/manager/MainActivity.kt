@@ -232,7 +232,7 @@ private fun SrxManagerApp(
   LaunchedEffect(page) {
     if (navBackStack.lastOrNull() == SrxRoute.Main) {
       when (page) {
-        Page.Dashboard -> viewModel.refreshDashboardCounts()
+        Page.Dashboard -> viewModel.refreshDashboard()
         Page.Logs -> viewModel.refreshLogs()
         else -> Unit
       }
@@ -240,7 +240,7 @@ private fun SrxManagerApp(
   }
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
     if (page == Page.Dashboard && navBackStack.lastOrNull() == SrxRoute.Main) {
-      viewModel.refreshDashboardCounts()
+      viewModel.refreshDashboard()
     }
   }
   LaunchedEffect(page, navBackStack.size) {

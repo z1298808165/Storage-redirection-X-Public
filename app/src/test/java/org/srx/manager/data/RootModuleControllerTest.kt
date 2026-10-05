@@ -64,7 +64,12 @@ class RootModuleControllerTest {
             "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} start; else "
         ),
     )
-    assertTrue(command, command.contains("rm -f ${shellQuote(RuntimeDisablePath)}"))
+    assertTrue(
+        command,
+        command.contains(
+            "rm -f ${shellQuote(RuntimeDisablePath)} ${shellQuote(ModuleDir + "/disable")}",
+        ),
+    )
     assertTrue(
         command,
         command.contains(
@@ -90,7 +95,12 @@ class RootModuleControllerTest {
             "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} stop; else "
         ),
     )
-    assertTrue(command, command.contains("touch ${shellQuote(RuntimeDisablePath)}"))
+    assertTrue(
+        command,
+        command.contains(
+            "touch ${shellQuote(RuntimeDisablePath)} ${shellQuote(ModuleDir + "/disable")}",
+        ),
+    )
     assertTrue(
         command,
         command.contains(

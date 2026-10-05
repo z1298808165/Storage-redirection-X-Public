@@ -418,6 +418,8 @@ start_collectors_if_needed() {
 stop_runtime() {
   mkdir -p "$LOGS_DIR" "$CONFIG_DIR" "$APPS_DIR"
   touch "$RUNTIME_DISABLE_FILE"
+  # 与 KernelSU/Magisk 共用模块停用标记，避免管理器列表与运行时状态分叉。
+  touch "$MODDIR/disable"
   chmod 644 "$RUNTIME_DISABLE_FILE" 2>/dev/null
   printf '{"runtime_disabled":true}\n' > "$CONFIG_DIR/runtime_state.json"
   chmod 644 "$CONFIG_DIR/runtime_state.json" 2>/dev/null
@@ -435,6 +437,7 @@ stop_runtime() {
 
 start_runtime() {
   rm -f "$RUNTIME_DISABLE_FILE"
+  rm -f "$MODDIR/disable"
   mkdir -p "$LOGS_DIR" "$CONFIG_DIR" "$APPS_DIR"
   printf '{"runtime_disabled":false}\n' > "$CONFIG_DIR/runtime_state.json"
   chmod 644 "$CONFIG_DIR/runtime_state.json" 2>/dev/null

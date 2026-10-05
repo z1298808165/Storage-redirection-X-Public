@@ -31,6 +31,15 @@ find "$CONFIG_DIR" -type f -name '*.json' -exec chmod 644 {} \; 2>/dev/null
 mkdir -p /data/adb/storage.redirect.x
 chmod 700 /data/adb/storage.redirect.x 2>/dev/null
 
+# 运行时停用与模块管理器停用必须成对生效。旧版本只写入
+# .runtime_disabled；用户在 KernelSU/Magisk 中重新启用模块后，删除 disable
+# 即表示用户选择恢复运行，此时清理旧的运行时停用标记。
+if [ -f "$RUNTIME_DISABLE_FILE" ] && [ ! -f "$MODDIR/disable" ]; then
+  rm -f "$RUNTIME_DISABLE_FILE"
+  printf '{"runtime_disabled":false}\n' > "$CONFIG_DIR/runtime_state.json"
+  chmod 644 "$CONFIG_DIR/runtime_state.json" 2>/dev/null
+fi
+
 module_version=$(sed -n 's/^versionCode=//p; s/^version=//p' "$MODDIR/module.prop" 2>/dev/null | tr '\n' ' ')
 if [ -n "$module_version" ]; then
   printf '%s\n' "$module_version" > "$BOOT_MODULE_VERSION_FILE"

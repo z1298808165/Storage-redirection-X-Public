@@ -86,9 +86,9 @@ class RootModuleController(
     val runtimeDisabled = if (enabled) "false" else "true"
     val fallback =
         if (enabled) {
-          "mkdir -p ${shellQuote(ConfigDir)} ${shellQuote(LogsDir)} && rm -f ${shellQuote(RuntimeDisablePath)} && "
+          "mkdir -p ${shellQuote(ConfigDir)} ${shellQuote(LogsDir)} && rm -f ${shellQuote(RuntimeDisablePath)} ${shellQuote(ModuleDir + "/disable")} && "
         } else {
-          "mkdir -p ${shellQuote(ConfigDir)} && touch ${shellQuote(RuntimeDisablePath)} && "
+          "mkdir -p ${shellQuote(ConfigDir)} && touch ${shellQuote(RuntimeDisablePath)} ${shellQuote(ModuleDir + "/disable")} && "
         } +
             "printf '{\"runtime_disabled\":$runtimeDisabled}\\n' > ${shellQuote("$ConfigDir/runtime_state.json")}"
     return withSrxCtlFallback(action, fallback)

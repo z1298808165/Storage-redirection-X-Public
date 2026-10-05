@@ -2291,6 +2291,8 @@ const Api = {
           shellQuote(CONFIG_DIR) +
           " && touch " +
           shellQuote(RUNTIME_DISABLE) +
+          " " +
+          shellQuote(MODULE_DISABLE) +
           ' && printf "{\\"runtime_disabled\\":true}\\n" > ' +
           shellQuote(RUNTIME_STATE_CONFIG) +
           " && daemon=" +
@@ -2316,6 +2318,8 @@ const Api = {
           " && " +
           "rm -f " +
           shellQuote(RUNTIME_DISABLE) +
+          " " +
+          shellQuote(MODULE_DISABLE) +
           " && " +
           'printf "{\\"runtime_disabled\\":false}\\n" > ' +
           shellQuote(RUNTIME_STATE_CONFIG) +

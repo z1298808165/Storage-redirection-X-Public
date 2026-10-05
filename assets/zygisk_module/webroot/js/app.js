@@ -40,6 +40,7 @@
     dashboardCountsGeneration: 0,
     dashboardShown: false,
     dashboardDataLoaded: false,
+    dashboardModuleStateRequestId: 0,
     dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
     appListRequestId: 0,
@@ -775,6 +776,7 @@
   // ═══ Dashboard ═══
   async function loadDashboard() {
     if (State.dashboardDataLoaded) {
+      refreshDashboardModuleState();
       if (!State.dashboardCountsLoaded) refreshDashboardCounts();
       return;
     }
@@ -821,6 +823,24 @@
     } catch {
       Theme.showToast("加载状态失败", "error");
     }
+  }
+
+  // 模块管理器可能在 WebUI 外部启停模块；回到概览页或恢复前台时必须重新读取状态。
+  function refreshDashboardModuleState() {
+    if (State.currentPage !== "dashboard") return;
+    const requestPage = State.currentPage;
+    const requestId = ++State.dashboardModuleStateRequestId;
+    Promise.all([Api.getModuleStatus(), Api.getModuleVersion()])
+      .then(([status, version]) => {
+        if (State.currentPage !== requestPage || State.dashboardModuleStateRequestId !== requestId)
+          return;
+        State.moduleStatus = status;
+        if (version) $("#moduleVersionDisplay").textContent = version;
+        updatePowerButton(status);
+      })
+      .catch(() => {
+        // 保留上一次可用状态，下一次前台或页面刷新时继续重试。
+      });
   }
 
   function refreshDashboardCountsIfVisible(options) {
@@ -5976,10 +5996,16 @@
 
   function initDashboardRefreshHooks() {
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) refreshDashboardCountsIfVisible();
+      if (!document.hidden) refreshDashboardIfVisible();
     });
-    window.addEventListener("pageshow", () => refreshDashboardCountsIfVisible());
-    window.addEventListener("focus", () => refreshDashboardCountsIfVisible());
+    window.addEventListener("pageshow", () => refreshDashboardIfVisible());
+    window.addEventListener("focus", () => refreshDashboardIfVisible());
+  }
+
+  function refreshDashboardIfVisible() {
+    if (State.currentPage !== "dashboard" || document.hidden) return;
+    refreshDashboardModuleState();
+    refreshDashboardCountsIfVisible();
   }
 
   function hydrateLogPackageInfo(lines) {
