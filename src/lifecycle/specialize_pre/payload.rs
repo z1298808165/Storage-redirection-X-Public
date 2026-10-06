@@ -19,7 +19,51 @@ pub(super) struct CompanionMountRequest<'a> {
     pub(super) is_monitor_only: bool,
     pub(super) operation: &'a str,
     pub(super) config_version: u64,
-    pub(super) config_fingerprint: u64,
+}
+
+impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest<'_> {
+    fn package_name(&self) -> &str {
+        self.package_name
+    }
+    fn pid(&self) -> i32 {
+        self.pid
+    }
+    fn uid(&self) -> i32 {
+        self.uid
+    }
+    fn app_data_dir(&self) -> &str {
+        self.app_data_dir
+    }
+    fn redirect_target(&self) -> &str {
+        self.redirect_target
+    }
+    fn is_file_monitor_enabled(&self) -> bool {
+        self.is_file_monitor_enabled
+    }
+    fn storage_backend_mode(&self) -> crate::config::StorageBackendMode {
+        self.storage_backend_mode
+    }
+    fn allowed_real_paths(&self) -> &[String] {
+        self.allowed_real_paths
+    }
+    fn excluded_real_paths(&self) -> &[String] {
+        self.excluded_real_paths
+    }
+    fn sandboxed_paths(&self) -> &[String] {
+        self.sandboxed_paths
+    }
+    fn read_only_paths(&self) -> &[String] {
+        self.read_only_paths
+    }
+    fn path_mappings(&self) -> &[PathMapping] {
+        self.path_mappings
+    }
+    fn is_mapping_mode_only(&self) -> bool {
+        self.is_mapping_mode_only
+    }
+    fn is_monitor_only(&self) -> bool {
+        self.is_monitor_only
+    }
 }
 
 pub(super) fn build_companion_request_payload(request: &CompanionMountRequest<'_>) -> String {
@@ -48,7 +92,7 @@ pub(super) fn build_companion_request_payload(request: &CompanionMountRequest<'_
         "monitor_only": request.is_monitor_only,
         "path_mappings": mappings,
         "config_version": request.config_version,
-        "config_fingerprint": request.config_fingerprint,
+        "policy_fingerprint": crate::fuse_redirect::request_policy_fingerprint(request),
     });
 
     serde_json::to_string(&payload).unwrap_or_default()

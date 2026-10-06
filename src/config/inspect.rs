@@ -83,7 +83,6 @@ impl SettingsHub {
             },
             storage_backend_mode: state.storage_backend_mode,
             is_file_monitor_enabled: state.is_file_monitor_enabled,
-            config_fingerprint: state.last_fingerprint,
         };
         drop(state);
         snapshot

@@ -101,7 +101,6 @@ pub struct DaemonReconcileConfigSnapshot {
     apps: HashMap<String, AppProfile>,
     pub storage_backend_mode: StorageBackendMode,
     pub is_file_monitor_enabled: bool,
-    pub config_fingerprint: u64,
 }
 
 impl DaemonReconcileConfigSnapshot {

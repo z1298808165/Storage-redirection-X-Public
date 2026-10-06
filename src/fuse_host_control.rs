@@ -137,7 +137,7 @@ fn await_policy_ack(fd: libc::c_int, uid: i32) -> bool {
 /// 拿应答而不是拿 `send` 的返回值。返回 `false` 时调用方保持 scoped 路径不变。
 pub fn register_app_policy(
     config: &crate::fuse_redirect::FuseRedirectConfig,
-    config_fingerprint: u64,
+    policy_fingerprint: u64,
 ) -> bool {
     let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
     if fd < 0 {
@@ -191,7 +191,7 @@ pub fn register_app_policy(
     if await_policy_ack(fd, config.uid) {
         // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
         // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
-        record_registered_policy(config.uid as u32, config_fingerprint);
+        record_registered_policy(config.uid as u32, policy_fingerprint);
         true
     } else {
         false

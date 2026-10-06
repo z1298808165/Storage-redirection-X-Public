@@ -17,7 +17,7 @@ pub struct CompanionMountRequest {
     pub is_mapping_mode_only: bool,
     pub is_monitor_only: bool,
     pub config_version: u64,
-    pub config_fingerprint: u64,
+    pub policy_fingerprint: u64,
 }
 
 impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
@@ -108,8 +108,8 @@ pub fn parse_companion_mount_request(payload: &str) -> Result<CompanionMountRequ
         .get("config_version")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    request.config_fingerprint = value
-        .get("config_fingerprint")
+    request.policy_fingerprint = value
+        .get("policy_fingerprint")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 

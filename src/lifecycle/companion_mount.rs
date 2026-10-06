@@ -636,8 +636,7 @@ fn preattach_shared_host(
     let storage_root = platform::paths::storage_user_root_for_user(user_id);
 
     let view = crate::fuse_host::read_host_session_view()?;
-    if view.config_fingerprint != request.config_fingerprint
-        || !view.registered_uids.contains(&(request.uid as u32))
+    if view.policy_fingerprints.get(&(request.uid as u32)) != Some(&request.policy_fingerprint)
         || !crate::fuse_host::can_attach_app(request.uid, &storage_root)
     {
         return None;
@@ -705,7 +704,7 @@ fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {
         return roots;
     }
     let Some(_view) =
-        crate::fuse_host::wait_for_host_session_view(request.uid, request.config_fingerprint)
+        crate::fuse_host::wait_for_host_session_view(request.uid, request.policy_fingerprint)
     else {
         log::info!(
             "fuse host wait not ready roots={} mode={} pid={} pkg={}",
@@ -751,8 +750,7 @@ fn start_fuse_service_for_root(
     // 因此这里不构造策略配置。
     let view = crate::fuse_host::read_host_session_view();
     let registered = view.as_ref().is_some_and(|view| {
-        view.config_fingerprint == request.config_fingerprint
-            && view.registered_uids.contains(&(request.uid as u32))
+        view.policy_fingerprints.get(&(request.uid as u32)) == Some(&request.policy_fingerprint)
     });
     if !crate::fuse_host::can_attach_app(request.uid, mount_root) {
         // 宿主会话的虚拟根只能是整个存储视图根，且默认不接管应用挂载；两种情况都保持

@@ -206,6 +206,19 @@ pub fn fuse_config_from_request<R: MountRequestFields + ?Sized>(
     }
 }
 
+/// 计算单个 UID 策略的稳定指纹，供 daemon 与 companion 校验宿主策略新鲜度。
+pub fn request_policy_fingerprint<R: MountRequestFields + ?Sized>(request: &R) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut config = fuse_config_from_request(request, None, None);
+    config.app_pid = 0;
+    config.app_start_time_ticks = None;
+    let payload = serde_json::to_vec(&config).unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    payload.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// 计算挂载请求对应的 scoped 挂载根；未启用 FUSE daemon 重定向时返回空列表。
 pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
     request: &R,

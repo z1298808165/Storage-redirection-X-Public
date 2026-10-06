@@ -727,7 +727,7 @@ fn build_request(
         ),
     };
 
-    MountRequest {
+    let mut request = MountRequest {
         operation,
         pid: proc.pid,
         uid: proc.uid,
@@ -748,8 +748,10 @@ fn build_request(
         },
         is_file_monitor_enabled: snapshot.is_file_monitor_enabled,
         config_version,
-        config_fingerprint: snapshot.config_fingerprint,
-    }
+        policy_fingerprint: 0,
+    };
+    request.policy_fingerprint = crate::fuse_redirect::request_policy_fingerprint(&request);
+    request
 }
 
 fn should_skip_process(proc: &AppProcess) -> bool {

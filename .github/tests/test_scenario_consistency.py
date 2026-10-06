@@ -259,25 +259,37 @@ class ScenarioConsistencyTest(unittest.TestCase):
         companion = read("src/lifecycle/companion_mount.rs")
         request = read("src/lifecycle/companion_request.rs")
         payload = read("src/lifecycle/specialize_pre/payload.rs")
+        fuse_config = read("src/fuse_redirect/config.rs")
         host = read("src/fuse_host.rs")
         host_control = read("src/fuse_host_control.rs")
 
-        self.assertIn("pub config_fingerprint: u64", request)
-        self.assertIn('get("config_fingerprint")', request)
-        self.assertIn('"config_fingerprint": request.config_fingerprint', payload)
-        self.assertIn("request.config_fingerprint", companion)
-        self.assertIn("view.config_fingerprint == request.config_fingerprint", companion)
-        self.assertIn(
-            "wait_for_host_session_view(request.uid, request.config_fingerprint)", companion
+        self.assertIn("pub policy_fingerprint: u64", request)
+        self.assertIn('get("policy_fingerprint")', request)
+        self.assertIn('"policy_fingerprint": crate::fuse_redirect::request_policy_fingerprint(request)', payload)
+        fingerprint = section(
+            fuse_config,
+            "pub fn request_policy_fingerprint(",
+            "/// 计算挂载请求对应的 scoped 挂载根",
         )
-        self.assertIn("config_fingerprint={}", host)
+        self.assertIn("config.app_pid = 0", fingerprint)
+        self.assertIn("config.app_start_time_ticks = None", fingerprint)
+        self.assertIn("request.policy_fingerprint", companion)
+        self.assertIn("view.policy_fingerprints.get(&(request.uid as u32))", companion)
+        self.assertIn(
+            "wait_for_host_session_view(request.uid, request.policy_fingerprint)", companion
+        )
+        self.assertIn("policies={}", host)
         self.assertIn("registered_policy_snapshot", host)
-        self.assertIn("uids.clear()", host)
-        reset_registry = host.index("*reg = Some((host.child_pid, 0")
+        self.assertIn("BTreeMap<u32, u64>", host)
+        record = section(host, "pub(crate) fn record_registered_policy(", "pub fn read_host_session_view(")
+        self.assertIn("policies.insert(uid, policy_fingerprint)", record)
+        self.assertNotIn("policies.clear()", record)
+        self.assertIn("policy_fingerprints.insert(uid.parse().ok()?, fingerprint.parse().ok()?)", host)
+        reset_registry = host.index("*reg = Some((host.child_pid, std::collections::BTreeMap::new()))")
         snapshot_view = host.index("let view = HostSessionView::from(&host)")
         self.assertLess(reset_registry, snapshot_view)
-        self.assertIn("record_registered_policy(config.uid as u32, config_fingerprint)", host_control)
-        self.assertIn("config_fingerprint: snapshot.config_fingerprint", read("src/daemon.rs"))
+        self.assertIn("record_registered_policy(config.uid as u32, policy_fingerprint)", host_control)
+        self.assertIn("request_policy_fingerprint(&request)", read("src/daemon.rs"))
 
     def test_mapping_only_storage_root_is_real_only_without_mapping_rules(self) -> None:
         policy = read("src/fuse_redirect/policy.rs")
@@ -829,7 +841,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             daemon_src, "pub(crate) fn pre_register_host_policy(", "fn write_mount_state("
         )
         self.assertIn("fuse_config_from_request(request,None,None)", "".join(pre_register.split()))
-        self.assertIn("register_app_policy(&config, request.config_fingerprint)", pre_register)
+        self.assertIn("register_app_policy(&config, request.policy_fingerprint)", pre_register)
         collapse = section(
             daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
         )
