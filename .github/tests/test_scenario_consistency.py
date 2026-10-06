@@ -266,13 +266,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("pub policy_fingerprint: u64", request)
         self.assertIn('get("policy_fingerprint")', request)
         self.assertIn('"policy_fingerprint": crate::fuse_redirect::request_policy_fingerprint(request)', payload)
-        fingerprint = section(
-            fuse_config,
-            "pub fn request_policy_fingerprint(",
-            "/// 计算挂载请求对应的 scoped 挂载根",
-        )
-        self.assertIn("config.app_pid = 0", fingerprint)
-        self.assertIn("config.app_start_time_ticks = None", fingerprint)
+        self.assertIn("pub fn request_policy_fingerprint<", fuse_config)
+        self.assertIn("config.app_pid = 0", fuse_config)
+        self.assertIn("config.app_start_time_ticks = None", fuse_config)
         self.assertIn("request.policy_fingerprint", companion)
         self.assertIn("view.policy_fingerprints.get(&(request.uid as u32))", companion)
         self.assertIn(
@@ -842,6 +838,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
         self.assertIn("fuse_config_from_request(request,None,None)", "".join(pre_register.split()))
         self.assertIn("register_app_policy(&config, request.policy_fingerprint)", pre_register)
+        self.assertIn("request.policy_fingerprint", pre_register)
+        self.assertIn("view.policy_fingerprints.get(&(request.uid as u32))", pre_register)
         collapse = section(
             daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
         )

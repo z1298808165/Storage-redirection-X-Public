@@ -1660,17 +1660,17 @@ fn fuse_config_from_request(
     crate::fuse_redirect::fuse_config_from_request(request, mount_root, real_root_override)
 }
 
-/// 预登记指纹：宿主子进程 pid、宿主 start_ticks、登记时的配置版本。
+/// 预登记指纹：宿主子进程 pid、宿主 start_ticks、该 UID 的策略指纹。
 type PreRegisterFingerprint = (i32, u64, u64);
 
 /// 宿主策略预登记的幂等指纹表：uid -> [`PreRegisterFingerprint`]。
 ///
 /// reconcile 常驻循环每轮都会对运行中的配置应用调用 [`pre_register_host_policy`]，
-/// 而策略内容只随配置版本与宿主会话代际变化。稳态下逐轮全量重登记纯属浪费：每次
+/// 而策略内容只随该 UID 的策略与宿主会话代际变化。稳态下逐轮全量重登记纯属浪费：每次
 /// 登记都要在 daemon 侧为 media 视图探测 fork 一个子进程，并在宿主子进程内做一次
 /// 完整的 `RedirectPolicy::new`（沙盒目录准备、规则归一化），还会把注册日志刷到
 /// 秒级轮转。指纹任一分量变化都会自然失效重登记：宿主换代（pid/start_ticks）、
-/// 配置变更（config_version）、MediaProvider 重启（由 reconcile 显式清空本表）。
+/// 策略变更（policy_fingerprint）、MediaProvider 重启（由 reconcile 显式清空本表）。
 static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerprint>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -1723,9 +1723,10 @@ pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOut
         let fingerprint = (
             view.child_pid,
             view.child_start_time_ticks,
-            request.config_version,
+            request.policy_fingerprint,
         );
-        if let Ok(registered) = PRE_REGISTERED_HOST_POLICIES.lock()
+        if view.policy_fingerprints.get(&(request.uid as u32)) == Some(&request.policy_fingerprint)
+            && let Ok(registered) = PRE_REGISTERED_HOST_POLICIES.lock()
             && registered.get(&(request.uid as u32)) == Some(&fingerprint)
         {
             return PreRegisterOutcome::AlreadyRegistered;
