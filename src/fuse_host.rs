@@ -973,6 +973,15 @@ fn host_attach_child_main(
 
     // 5. 把游离挂载附着到应用视图里的目标路径，并立刻切断传播关系。
     if !move_detached_mount(tree_fd.get(), &c_target) {
+        // errno 已由 move_detached_mount 记录；这里补记本次接入所用的宿主身份，
+        // 用于区分"宿主换代后视图过期"（源是旧宿主）与"目标路径在应用命名空间里
+        // 仍被上一代死挂载覆盖"（源是新宿主但 lookup 命中死 FUSE）两类故障。
+        log::warn!(
+            "fuse host attach move_mount detail host_pid={} source={} target={}",
+            view.child_pid,
+            view.mount_source,
+            target_root
+        );
         return false;
     }
     if !make_mount_private(&c_target) {
