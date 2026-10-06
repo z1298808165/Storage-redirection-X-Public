@@ -66,36 +66,25 @@ fn host_is_alive(host: &FuseHost) -> bool {
         reap_exited_host_child(host.child_pid);
         return false;
     }
-    host_fuse_conn_alive(host)
+    true
 }
 
-/// 探测宿主会话的 FUSE 连接是否仍然可用。
+/// 终止连接已死的假活宿主并尽力回收。
 ///
-/// 宿主进程可能在 FUSE 连接失效后仍然存活（连接进入错误态而会话线程尚未退出），
-/// 只按 pid/start_ticks 判活会让 daemon 持续向死连接做接入，`move_mount` 周期性
-/// ENOTCONN 且自愈永不触发（run `37428793177`/`37434073875` 实证）。对挂载点做
-/// metadata 解析会穿过宿主 FUSE 根目录发出 getattr 请求：连接死亡时返回
-/// ENOTCONN/EIO，据此判死交给 reconcile 重建；挂载点在 daemon 视图里不可见
-/// （ENOENT）时无法探测，维持原判活结论，避免挂载传播差异造成误杀。
-fn host_fuse_conn_alive(host: &FuseHost) -> bool {
-    let error = match std::fs::metadata(&host.mount_point) {
-        Ok(_) => return true,
-        Err(error) => error,
-    };
-    match error.raw_os_error() {
-        // 连接已进入错误态：穿过宿主根目录的 getattr 必然失败，判死交由 reconcile 重建。
-        Some(libc::ENOTCONN) | Some(libc::EIO) => {
-            log::warn!(
-                "fuse host conn dead child={} source={} mp={} err={}",
-                host.child_pid,
-                host.mount_source,
-                host.mount_point,
-                error
-            );
-            false
+/// 宿主进程在 FUSE 连接失效后可能长期存活（会话线程未感知连接死亡），只清句柄会让
+/// 它带着死挂载常驻，`/proc/<pid>/ns/mnt` 也仍可进入。SIGKILL 后按僵尸回收；进程若
+/// 短暂未退出，留给下一轮判活兜底（僵尸态检测已覆盖该形态）。
+fn terminate_host_process(pid: libc::pid_t) {
+    // SAFETY: pid 是本模块 fork 出的宿主子进程，调用方已凭 pid + 启动时刻确认其身份；
+    // SIGKILL 只作用于该进程，不影响其它会话。
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let mut status: libc::c_int = 0;
+    for _ in 0..10 {
+        // SAFETY: pid 是本模块 fork 出的子进程；WNOHANG 只在它已退出时回收，不会阻塞。
+        if unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) } == pid {
+            return;
         }
-        // 挂载点在 daemon 视图不可见时无法探测，维持原判活结论，避免传播差异误杀。
-        _ => true,
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -440,6 +429,18 @@ pub fn attach_app_to_host(view: &HostSessionView, target_root: &str) -> Option<H
         }
         Some(code) => {
             let reason = reap_host_child(child);
+            if code == -libc::ENOTCONN {
+                // 接入子进程在目标路径确认可达后仍收到 move_mount ENOTCONN：宿主 FUSE
+                // 连接已死而进程未退（假活）。终止它，自愈通道在下一轮重建新会话；
+                // 本进程若无权终止（或已退出），僵尸态/实例判活会兜底。
+                log::warn!(
+                    "fuse host attach reports dead conn child={} host={} source={}",
+                    child,
+                    view.child_pid,
+                    view.mount_source
+                );
+                terminate_host_process(view.child_pid);
+            }
             log::warn!(
                 "fuse host attach not ready child={} code={} stage={} {}",
                 child,
@@ -768,7 +769,13 @@ fn host_media_view_child_main(
         unsafe { libc::mkdir(c_prefix.as_ptr(), 0o755) };
     }
     host_stage("media_view_mkdir_ok");
-    if !move_detached_mount(tree_fd.get(), c_target) {
+    if let Err(errno) = move_detached_mount(tree_fd.get(), c_target) {
+        log::warn!(
+            "fuse host media view move_mount failed target={} errno={} {}",
+            target,
+            errno,
+            crate::platform::errno::text(errno)
+        );
         host_stage("media_view_move_failed");
         return false;
     }
@@ -992,6 +999,14 @@ fn host_attach_child_main(
     // SAFETY: tree_fd 是 open_tree 返回的有效 fd。
     let tree_fd = UniqueFd::new(tree_fd);
 
+    // 3.5 目标死层清理：宿主/会话换代后，上一代挂载仍残留在应用命名空间里——接入时
+    //     `make_mount_private` 已切断传播，新会话的挂载无法传播覆盖它。死 FUSE 层会让
+    //     目标路径解析在 `move_mount` 之前就返回 ENOTCONN（内核 `do_move_mount` 本身
+    //     不产生该错误，它只能来自穿过死连接的路径解析），接入从此永远失败。返回值供
+    //     move_mount 失败时区分「目标有死层」与「目标已确认可达、ENOTCONN 只能来自
+    //     宿主连接」两类故障。
+    let target_had_dead_layers = clear_dead_srx_layers_at_target(target_root);
+
     // 4. 目标目录：与应用挂载路径同源，允许已存在。
     let Ok(c_target) = CString::new(target_root) else {
         return false;
@@ -1001,17 +1016,33 @@ fn host_attach_child_main(
         libc::mkdir(c_target.as_ptr(), 0o755);
     }
 
-    // 5. 把游离挂载附着到应用视图里的目标路径，并立刻切断传播关系。
-    if !move_detached_mount(tree_fd.get(), &c_target) {
-        // errno 已由 move_detached_mount 记录；这里补记本次接入所用的宿主身份，
-        // 用于区分"宿主换代后视图过期"（源是旧宿主）与"目标路径在应用命名空间里
-        // 仍被上一代死挂载覆盖"（源是新宿主但 lookup 命中死 FUSE）两类故障。
+    // 5. 把游离挂载附着到目标路径，并立刻切断传播关系。
+    if let Err(errno) = move_detached_mount(tree_fd.get(), &c_target) {
+        // 补记本次接入所用的宿主身份与 errno，用于区分「宿主换代后视图过期」与
+        // 「目标路径残留死挂载」两类故障。
         log::warn!(
-            "fuse host attach move_mount detail host_pid={} source={} target={}",
+            "fuse host attach move_mount detail host_pid={} source={} target={} errno={} {}",
             view.child_pid,
             view.mount_source,
-            target_root
+            target_root,
+            errno,
+            crate::platform::errno::text(errno)
         );
+        if !target_had_dead_layers && errno == libc::ENOTCONN {
+            // 目标路径清理后已确认可达（或本就无死层），ENOTCONN 只能来自宿主 FUSE
+            // 连接死亡：回报父进程终止该宿主，交由自愈通道重建。负值避免与宿主建立
+            // 阶段的正数阶段码混淆。
+            let code = -errno;
+            // SAFETY: ready_sock 是本次接入的有效端点，code 是栈变量。
+            unsafe {
+                libc::send(
+                    ready_sock,
+                    &code as *const i32 as *const libc::c_void,
+                    std::mem::size_of::<i32>(),
+                    0,
+                )
+            };
+        }
         return false;
     }
     if !make_mount_private(&c_target) {
@@ -1094,7 +1125,10 @@ fn make_mount_private(target: &CStr) -> bool {
 }
 
 /// 把游离挂载附着到目标命名空间的路径上。
-fn move_detached_mount(tree_fd: libc::c_int, target: &CStr) -> bool {
+///
+/// 失败时返回捕获到的 errno：errno 必须在写日志等后续系统调用可能改写它之前取出，
+/// 调用方据此区分死连接（ENOTCONN）与其它附着失败。
+fn move_detached_mount(tree_fd: libc::c_int, target: &CStr) -> Result<(), i32> {
     // 空字符串是 `MOVE_MOUNT_F_EMPTY_PATH` 要求的占位：源由 fd 而非路径给出。
     let empty = c"";
     // SAFETY: tree_fd 是 open_tree 返回的 fd，target 是 NUL 结尾路径且在本调用期间保持存活。
@@ -1109,10 +1143,89 @@ fn move_detached_mount(tree_fd: libc::c_int, target: &CStr) -> bool {
         )
     };
     if result != 0 {
-        log_errno("fuse host attach move_mount failed");
-        return false;
+        let errno = crate::platform::errno::last();
+        log::error!(
+            "fuse host attach move_mount failed errno={} {}",
+            errno,
+            crate::platform::errno::text(errno)
+        );
+        return Err(errno);
     }
-    true
+    Ok(())
+}
+
+/// 目标路径上单次接入最多摘除的死层层数。
+///
+/// 宿主/会话连续多次换代且每代都给同一应用留过死层的极端情况下层数会更多，8 层足够
+/// 覆盖自愈语义；超限时保留现场并让本次接入按既有失败路径处理，避免无限循环。
+const MAX_DEAD_TARGET_LAYERS: usize = 8;
+
+/// 接入前摘除目标路径上残留的本模块死挂载层。
+///
+/// 上一代宿主/会话死亡后，它的挂载层仍残留在应用命名空间里：接入时 `make_mount_private`
+/// 已切断传播，新会话的挂载无法传播覆盖它。死 FUSE 层会让目标路径的解析在 `move_mount`
+/// 之前就返回 ENOTCONN——内核 `do_move_mount` 本身不产生该错误，它只能来自穿过死连接的
+/// 路径解析——接入从此永远失败（场景 27 连续五轮复现：换代前接入过的应用全挂，全新
+/// 应用正常）。
+///
+/// 摘除条件同时要求：`stat` 穿到死连接（ENOTCONN/EIO——顶层挂载存活时 stat 走顶层、
+/// 不会命中底下的死层），且最顶层挂载确为本模块会话 FUSE（scoped 或宿主，前缀判定
+/// 统一走 `is_srx_session_fuse`）。系统挂载与尚且可达的挂载一概不碰。
+///
+/// 返回是否摘除过死层，供 `move_mount` 失败时区分目标侧与源侧故障。
+fn clear_dead_srx_layers_at_target(target: &str) -> bool {
+    let mut removed = 0;
+    while removed < MAX_DEAD_TARGET_LAYERS {
+        let errno = match std::fs::metadata(target) {
+            // 目标路径可达：无死层，或死层已在前几轮摘净。
+            Ok(_) => return removed > 0,
+            Err(error) => error.raw_os_error().unwrap_or_default(),
+        };
+        if errno != libc::ENOTCONN && errno != libc::EIO {
+            // ENOENT 等交给后续 mkdir 与 move_mount 的既有逻辑处理。
+            return removed > 0;
+        }
+        let Some(live) = crate::mount_ledger::topmost_live_mount(0, target) else {
+            log::warn!(
+                "fuse host attach dead layer invisible target={} errno={}",
+                target,
+                errno
+            );
+            return removed > 0;
+        };
+        if !crate::fuse_redirect::config::is_srx_session_fuse(&live.fs_type, &live.source) {
+            log::warn!(
+                "fuse host attach dead layer not ours target={} fs={} source={} errno={}",
+                target,
+                live.fs_type,
+                live.source,
+                errno
+            );
+            return removed > 0;
+        }
+        let Ok(c_target) = CString::new(target) else {
+            return removed > 0;
+        };
+        // SAFETY: c_target 是 NUL 结尾的合法路径；MNT_DETACH 只把该层标记为懒摘除，
+        // 不会向死连接发起任何 I/O，也不影响该挂载点之下的其它层。
+        if unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) } != 0 {
+            log_errno("fuse host attach dead layer detach failed");
+            return removed > 0;
+        }
+        removed += 1;
+        log::warn!(
+            "fuse host attach dead layer detached target={} source={} errno={}",
+            target,
+            live.source,
+            errno
+        );
+    }
+    log::warn!(
+        "fuse host attach dead layer removal limit target={} layers={}",
+        target,
+        removed
+    );
+    removed > 0
 }
 
 /// 只负责关闭 fd 的小包装：命名空间与挂载点句柄在多条失败分支上都要关闭。

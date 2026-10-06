@@ -1203,16 +1203,21 @@ struct MountEntry {
     source: String,
 }
 
+/// 判断一条挂载记录（文件系统类型 + 挂载源）是否本模块的会话 FUSE。
+///
+/// scoped 挂载在内核 `mount(2)` 直挂时文件系统类型是 `fuse`，经 fusermount 回退时由
+/// `subtype=srx` 记为 `fuse.srx`；两者都要再看挂载源前缀，避免把系统媒体 FUSE 挂载
+/// （挂载源是 `/dev/fuse`）当成模块挂载。
+pub fn is_srx_session_fuse(fs_type: &str, source: &str) -> bool {
+    matches!(fs_type, "fuse" | "fuse.srx")
+        && (source.starts_with(SCOPED_MOUNT_SOURCE_PREFIX)
+            || source.starts_with(HOST_MOUNT_SOURCE_PREFIX))
+}
+
 impl MountEntry {
     /// 判断这条记录是否本模块的 scoped FUSE 挂载。
-    ///
-    /// scoped 挂载在内核 `mount(2)` 直挂时文件系统类型是 `fuse`，经 fusermount 回退时由
-    /// `subtype=srx` 记为 `fuse.srx`；两者都要再看挂载源前缀，避免把系统媒体 FUSE 挂载
-    /// （挂载源是 `/dev/fuse`）当成模块挂载。
     fn is_scoped_fuse(&self) -> bool {
-        matches!(self.fs_type.as_str(), "fuse" | "fuse.srx")
-            && (self.source.starts_with(SCOPED_MOUNT_SOURCE_PREFIX)
-                || self.source.starts_with(HOST_MOUNT_SOURCE_PREFIX))
+        is_srx_session_fuse(&self.fs_type, &self.source)
     }
 }
 
