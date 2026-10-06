@@ -844,8 +844,8 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
 /// 在任何 namespace 重定向前接入共享宿主，避免应用先打开重定向沙盒中的文件。
 ///
 /// 只有 Auto 模式且规划根已经收敛为整棵用户存储视图时才允许提前接管；其它模式
-/// 继续走原有 scoped/namespace 挂载流程。若接入函数回退成独立 scoped 会话，立即
-/// 回滚该临时会话，让调用方继续执行原有规划，避免同一目标叠加两层 FUSE。
+/// 继续走原有 scoped/namespace 挂载流程。预接管只尝试共享宿主，失败后由后续挂载
+/// 流程启动 scoped 会话，避免先启动再回滚一份多余的 FUSE 服务。
 fn preattach_shared_host(
     request: &MountRequest,
     scoped_fuse_roots: &[String],
@@ -856,19 +856,21 @@ fn preattach_shared_host(
     let user_id = crate::platform::user_id_from_uid(request.uid);
     let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
 
-    let state = start_fuse_service_for_root(request, &storage_root, None)?;
-    if state.host_session.is_some() {
-        log::info!(
-            "daemon shared host preattached pid={} pkg={} target={}",
-            request.pid,
-            request.package_name,
-            storage_root
-        );
-        Some(state)
-    } else {
-        crate::fuse_session::rollback_scoped_fuse_services(std::slice::from_ref(&state));
-        None
+    let host = crate::fuse_host::get_fuse_host()?;
+    let policy_config = fuse_config_from_request(request, None, None);
+    if !crate::fuse_host::register_app_policy(&policy_config)
+        || !crate::fuse_host::can_attach_app(request.uid, &storage_root)
+    {
+        return None;
     }
+    let state = try_bind_to_fuse_host(&host, request, &storage_root)?;
+    log::info!(
+        "daemon shared host preattached pid={} pkg={} target={}",
+        request.pid,
+        request.package_name,
+        storage_root
+    );
+    Some(state)
 }
 
 fn shared_host_preattach_candidate(request: &MountRequest, scoped_fuse_roots: &[String]) -> bool {

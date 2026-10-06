@@ -623,8 +623,8 @@ fn handle_child_process(
 }
 
 /// 在任何 namespace 重定向前接入共享宿主，避免应用先打开重定向沙盒中的文件。
-/// 只有 Auto 模式且规划根已经收敛为整棵用户存储视图时才提前接管；若接入函数
-/// 回退成独立 scoped 会话，则立即回滚，让调用方继续执行原有规划。
+/// 只有 Auto 模式且规划根已经收敛为整棵用户存储视图时才提前接管；预接管仅尝试
+/// 共享宿主，失败后由后续挂载流程启动 scoped 会话。
 fn preattach_shared_host(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
@@ -635,19 +635,20 @@ fn preattach_shared_host(
     let user_id = platform::user_id_from_uid(request.uid);
     let storage_root = platform::paths::storage_user_root_for_user(user_id);
 
-    let state = start_fuse_service_for_root(request, &storage_root, None)?;
-    if state.host_session.is_some() {
-        log::info!(
-            "companion shared host preattached pid={} pkg={} target={}",
-            request.pid,
-            request.package_name,
-            storage_root
-        );
-        Some(state)
-    } else {
-        crate::fuse_session::rollback_scoped_fuse_services(std::slice::from_ref(&state));
-        None
+    let view = crate::fuse_host::read_host_session_view()?;
+    if !view.registered_uids.contains(&(request.uid as u32))
+        || !crate::fuse_host::can_attach_app(request.uid, &storage_root)
+    {
+        return None;
     }
+    let state = try_bind_to_fuse_host(&view, request, &storage_root)?;
+    log::info!(
+        "companion shared host preattached pid={} pkg={} target={}",
+        request.pid,
+        request.package_name,
+        storage_root
+    );
+    Some(state)
 }
 
 fn shared_host_preattach_candidate(
