@@ -34,8 +34,15 @@ const DEVICE_UNAVAILABLE_MIN_SCOPES: u32 = 2;
 ///
 /// `unavailable` 不再是终态：到期后允许一次探测性尝试，成功即整体恢复，失败则把退避加倍。
 /// 这条自愈通路取代了过去「只能靠重启恢复」的行为。
+///
+/// 上限必须显著小于宿主换代或 MediaProvider 重启引发的抖动恢复窗口之外的任何合理等待：
+/// 系统应用在这些窗口内的 scoped 失败会持续把设备判为 `unavailable`（CI 实测 backoff_step
+/// 累计到 51、锁出 10 分钟），而接入前的死层摘除自愈（`clear_dead_srx_layers_at_target`）
+/// 只能在闸门放行后执行——锁出过长会把两个自愈机制互相锁死。防重试风暴由单应用失败预算
+/// （[`SCOPED_MOUNT_FAILURE_BUDGET`]，每应用每开机至多 3 次）独立承担，设备级锁出只需覆盖
+/// 一次抖动的持续时间。
 const RETRY_BACKOFF_BASE_MS: u64 = 30_000;
-const RETRY_BACKOFF_MAX_MS: u64 = 600_000;
+const RETRY_BACKOFF_MAX_MS: u64 = 60_000;
 
 /// 快照中记录的 scope 数量上限。
 ///
