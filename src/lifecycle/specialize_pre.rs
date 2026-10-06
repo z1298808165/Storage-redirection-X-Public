@@ -564,6 +564,7 @@ impl RuntimeFlow {
             is_monitor_only,
             operation: "apply",
             config_version: config.config_version(),
+            config_fingerprint: config.config_fingerprint(),
         });
         perf_stages.payload_ms = monotonic_ms().saturating_sub(payload_started_ms);
         perf_stages.payload_bytes = payload.len();

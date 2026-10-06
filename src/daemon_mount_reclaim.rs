@@ -145,6 +145,7 @@ pub fn cleanup_all_mount_states() -> bool {
             storage_backend_mode: crate::config::StorageBackendMode::Namespace,
             is_file_monitor_enabled: false,
             config_version: 0,
+            config_fingerprint: 0,
         };
         let app_start_time =
             state_value(&content, "app_start_time=").and_then(|value| value.parse::<u64>().ok());

@@ -10,7 +10,7 @@
 //! namespace 用 `MS_BIND` 引用」。B2-a 搭起宿主会话骨架，B2-b 实现应用侧接入逻辑，
 //! 阶段 1 的按 uid 策略注册通过会话内的控制通道补齐。
 
-use crate::fuse_host::record_registered_uid;
+use crate::fuse_host::record_registered_policy;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 /// 单条策略载荷上限（一次 `send` 不超过它）。
@@ -135,7 +135,10 @@ fn await_policy_ack(fd: libc::c_int, uid: i32) -> bool {
 /// 返回 `true` 表示**宿主会话已确认建好该 uid 的策略**（收到应答），而不是"数据已发出"：
 /// 接入会让应用的存储根直接由宿主会话承载，策略没登记上去就是整片 ENOENT，因此这里必须
 /// 拿应答而不是拿 `send` 的返回值。返回 `false` 时调用方保持 scoped 路径不变。
-pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) -> bool {
+pub fn register_app_policy(
+    config: &crate::fuse_redirect::FuseRedirectConfig,
+    config_fingerprint: u64,
+) -> bool {
     let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
     if fd < 0 {
         return false;
@@ -188,7 +191,7 @@ pub fn register_app_policy(config: &crate::fuse_redirect::FuseRedirectConfig) ->
     if await_policy_ack(fd, config.uid) {
         // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
         // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
-        record_registered_uid(config.uid as u32);
+        record_registered_policy(config.uid as u32, config_fingerprint);
         true
     } else {
         false

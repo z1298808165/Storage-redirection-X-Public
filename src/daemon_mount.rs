@@ -63,6 +63,7 @@ pub struct MountRequest {
     pub storage_backend_mode: crate::config::StorageBackendMode,
     pub is_file_monitor_enabled: bool,
     pub config_version: u64,
+    pub config_fingerprint: u64,
 }
 
 impl crate::fuse_redirect::MountRequestFields for MountRequest {
@@ -858,7 +859,7 @@ fn preattach_shared_host(
 
     let host = crate::fuse_host::get_fuse_host()?;
     let policy_config = fuse_config_from_request(request, None, None);
-    if !crate::fuse_host::register_app_policy(&policy_config)
+    if !crate::fuse_host::register_app_policy(&policy_config, request.config_fingerprint)
         || !crate::fuse_host::can_attach_app(request.uid, &storage_root)
     {
         return None;
@@ -975,7 +976,8 @@ fn start_fuse_service_for_root(
         // 读成空——真机实测表现为仅映射模式的应用整个公共存储视图消失，只剩被沙盒化的那几条
         // 路径。宿主命名空间里 `/data/media/<user>` 就是未经覆盖的真实存储，本就无需别名。
         let policy_config = fuse_config_from_request(request, None, None);
-        let registered = crate::fuse_host::register_app_policy(&policy_config);
+        let registered =
+            crate::fuse_host::register_app_policy(&policy_config, request.config_fingerprint);
         if !crate::fuse_host::can_attach_app(request.uid, mount_root) {
             // 宿主会话的虚拟根只能是整个存储视图根，且默认不接管应用挂载；两种情况都保持
             // 既有 scoped 路径，不能因为"宿主会话可用"就顺手接上。
@@ -1729,7 +1731,7 @@ pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOut
             return PreRegisterOutcome::AlreadyRegistered;
         }
         let config = fuse_config_from_request(request, None, None);
-        if crate::fuse_host::register_app_policy(&config) {
+        if crate::fuse_host::register_app_policy(&config, request.config_fingerprint) {
             if let Ok(mut registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
                 registered.insert(request.uid as u32, fingerprint);
             }
@@ -1738,7 +1740,7 @@ pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOut
         return PreRegisterOutcome::NotApplicable;
     }
     let config = fuse_config_from_request(request, None, None);
-    if crate::fuse_host::register_app_policy(&config) {
+    if crate::fuse_host::register_app_policy(&config, request.config_fingerprint) {
         PreRegisterOutcome::Registered
     } else {
         PreRegisterOutcome::NotApplicable

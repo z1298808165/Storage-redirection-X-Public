@@ -121,6 +121,8 @@ pub struct HostSessionView {
     pub mount_point: String,
     /// 宿主会话挂载源（`srx_fuse_host[<pid>]`）。
     pub mount_source: String,
+    /// 已登记策略对应的跨进程配置指纹；UID 集合本身不代表策略仍是当前版本。
+    pub config_fingerprint: u64,
     /// 宿主会话策略表中已登记的 uid 集合。
     ///
     /// 未登记 uid 的请求会被 fail-closed 拒绝（`deny_all` → ENOENT），因此接入前
@@ -130,12 +132,14 @@ pub struct HostSessionView {
 
 impl From<&FuseHost> for HostSessionView {
     fn from(host: &FuseHost) -> Self {
+        let (config_fingerprint, registered_uids) = registered_policy_snapshot();
         Self {
             child_pid: host.child_pid,
             child_start_time_ticks: host.child_start_time_ticks,
             mount_point: host.mount_point.clone(),
             mount_source: host.mount_source.clone(),
-            registered_uids: registered_uids_snapshot(),
+            registered_uids,
+            config_fingerprint,
         }
     }
 }
@@ -1406,6 +1410,9 @@ fn recv_host_ready(sock: libc::c_int, timeout_sec: i64) -> Option<i32> {
 
 /// 设置全局宿主会话句柄（daemon 启动时调用一次）。
 pub fn set_global(host: FuseHost) {
+    if let Ok(mut reg) = HOST_REGISTRY.lock() {
+        *reg = Some((host.child_pid, 0, std::collections::BTreeSet::new()));
+    }
     let view = HostSessionView::from(&host);
     if let Ok(mut slot) = host_slot().write() {
         // 以当前宿主句柄替换旧快照，供两条挂载路径读取。
@@ -1413,25 +1420,23 @@ pub fn set_global(host: FuseHost) {
         *slot = Some(Arc::new(host));
     }
     // 新会话身份发布到快照文件：companion 进程没有本进程的内存状态，
-    // 只能靠文件发现宿主会话。登记 uid 集合从空开始，随后随登记递增。
+    // 只能靠文件发现宿主会话。配置指纹和 uid 集合从空开始，随后随登记递增。
     // quality-allow(chinese-language): 下方固定字段名属于跨进程快照协议。
-    if let Ok(mut reg) = HOST_REGISTRY.lock() {
-        *reg = Some((view.child_pid, std::collections::BTreeSet::new()));
-    }
     publish_host_snapshot(&view);
 }
 
 /// daemon 侧登记台账：当前宿主会话 pid + 已登记 uid 集合。
 ///
 /// 快照文件是唯一跨进程事实源，内存台账只是它的写入缓存；宿主会话重建时整体替换。
-static HOST_REGISTRY: Mutex<Option<(i32, std::collections::BTreeSet<u32>)>> = Mutex::new(None);
+static HOST_REGISTRY: Mutex<Option<(i32, u64, std::collections::BTreeSet<u32>)>> = Mutex::new(None);
 
-fn registered_uids_snapshot() -> Vec<u32> {
+fn registered_policy_snapshot() -> (u64, Vec<u32>) {
     HOST_REGISTRY
         .lock()
-        .map(|reg| {
-            reg.as_ref()
-                .map(|(_, uids)| uids.iter().copied().collect())
+        .map(|registry| {
+            registry
+                .as_ref()
+                .map(|(_, fingerprint, uids)| (*fingerprint, uids.iter().copied().collect()))
                 .unwrap_or_default()
         })
         .unwrap_or_default()
@@ -1446,12 +1451,13 @@ fn publish_host_snapshot(view: &HostSessionView) {
         .map(|value| value.trim().to_string())
         .unwrap_or_default();
     let content = format!(
-        "boot_id={}\npid={}\nstart_ticks={}\nmount_point={}\nmount_source={}\nuids={}\n",
+        "boot_id={}\npid={}\nstart_ticks={}\nmount_point={}\nmount_source={}\nconfig_fingerprint={}\nuids={}\n",
         boot_id,
         view.child_pid,
         view.child_start_time_ticks,
         view.mount_point,
         view.mount_source,
+        view.config_fingerprint,
         view.registered_uids
             .iter()
             .map(|uid| uid.to_string())
@@ -1478,17 +1484,26 @@ fn publish_host_snapshot(view: &HostSessionView) {
     }
 }
 
-/// 登记成功后把 uid 追加进快照，供 companion 的接入前置检查读取。
-pub(crate) fn record_registered_uid(uid: u32) {
+/// 登记成功后更新配置代际与 uid 集合；配置代际变化时旧 UID 策略一律失效。
+pub(crate) fn record_registered_policy(uid: u32, config_fingerprint: u64) {
     let mut need_publish = false;
     if let Ok(mut reg) = HOST_REGISTRY.lock()
-        && let Some((_, uids)) = reg.as_mut()
+        && let Some((_, registered_fingerprint, uids)) = reg.as_mut()
     {
-        need_publish = uids.insert(uid);
+        if *registered_fingerprint != config_fingerprint {
+            *registered_fingerprint = config_fingerprint;
+            uids.clear();
+            need_publish = true;
+        }
+        need_publish |= uids.insert(uid);
     }
     if need_publish && let Some(host) = get_fuse_host() {
         publish_host_snapshot(&HostSessionView::from(host.as_ref()));
-        log::info!("fuse host snapshot updated uid={}", uid);
+        log::info!(
+            "fuse host snapshot updated uid={} config_fingerprint={:x}",
+            uid,
+            config_fingerprint
+        );
     }
 }
 
@@ -1504,6 +1519,7 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
     let mut child_start_time_ticks = 0u64;
     let mut mount_point = String::new();
     let mut mount_source = String::new();
+    let mut config_fingerprint = 0u64;
     let mut registered_uids = Vec::new();
     for line in content.lines() {
         let (key, value) = line.split_once('=')?;
@@ -1513,6 +1529,7 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
             "start_ticks" => child_start_time_ticks = value.parse().ok()?,
             "mount_point" => mount_point = value.to_string(),
             "mount_source" => mount_source = value.to_string(),
+            "config_fingerprint" => config_fingerprint = value.parse().ok()?,
             "uids" => {
                 registered_uids = value
                     .split(',')
@@ -1537,6 +1554,7 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
         child_start_time_ticks,
         mount_point,
         mount_source,
+        config_fingerprint,
         registered_uids,
     })
 }
@@ -1547,11 +1565,12 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
 /// 等待的是"策略就绪"而不是"会话存在"——会话在而策略未登记时接入，应用的请求
 /// 会被 fail-closed 拒绝成 ENOENT。超时或处于失败冷却期返回 `None`，调用方回退
 /// 旧 scoped 规划。
-pub fn wait_for_host_session_view(uid: i32) -> Option<HostSessionView> {
+pub fn wait_for_host_session_view(uid: i32, config_fingerprint: u64) -> Option<HostSessionView> {
     if !host_attach_enabled() {
         return None;
     }
     if let Some(view) = read_host_session_view()
+        && view.config_fingerprint == config_fingerprint
         && view.registered_uids.contains(&(uid as u32))
     {
         return Some(view);
@@ -1564,6 +1583,7 @@ pub fn wait_for_host_session_view(uid: i32) -> Option<HostSessionView> {
     let deadline = now.saturating_add(HOST_WAIT_BUDGET_MS as i64);
     loop {
         if let Some(view) = read_host_session_view()
+            && view.config_fingerprint == config_fingerprint
             && view.registered_uids.contains(&(uid as u32))
         {
             return Some(view);

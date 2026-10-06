@@ -255,6 +255,30 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertLess(monitor_only, redirect, label)
             self.assertIn("ensure_mount_namespace_prepared()", source[monitor_only:redirect], label)
 
+    def test_companion_requires_current_shared_host_policy(self) -> None:
+        companion = read("src/lifecycle/companion_mount.rs")
+        request = read("src/lifecycle/companion_request.rs")
+        payload = read("src/lifecycle/specialize_pre/payload.rs")
+        host = read("src/fuse_host.rs")
+        host_control = read("src/fuse_host_control.rs")
+
+        self.assertIn("pub config_fingerprint: u64", request)
+        self.assertIn('get("config_fingerprint")', request)
+        self.assertIn('"config_fingerprint": request.config_fingerprint', payload)
+        self.assertIn("request.config_fingerprint", companion)
+        self.assertIn("view.config_fingerprint == request.config_fingerprint", companion)
+        self.assertIn(
+            "wait_for_host_session_view(request.uid, request.config_fingerprint)", companion
+        )
+        self.assertIn("config_fingerprint={}", host)
+        self.assertIn("registered_policy_snapshot", host)
+        self.assertIn("uids.clear()", host)
+        reset_registry = host.index("*reg = Some((host.child_pid, 0")
+        snapshot_view = host.index("let view = HostSessionView::from(&host)")
+        self.assertLess(reset_registry, snapshot_view)
+        self.assertIn("record_registered_policy(config.uid as u32, config_fingerprint)", host_control)
+        self.assertIn("config_fingerprint: snapshot.config_fingerprint", read("src/daemon.rs"))
+
     def test_mapping_only_storage_root_is_real_only_without_mapping_rules(self) -> None:
         policy = read("src/fuse_redirect/policy.rs")
         constructor_start = policy.index("impl RedirectPolicy")
@@ -805,7 +829,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             daemon_src, "pub(crate) fn pre_register_host_policy(", "fn write_mount_state("
         )
         self.assertIn("fuse_config_from_request(request,None,None)", "".join(pre_register.split()))
-        self.assertIn("register_app_policy(&config)", pre_register)
+        self.assertIn("register_app_policy(&config, request.config_fingerprint)", pre_register)
         collapse = section(
             daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
         )

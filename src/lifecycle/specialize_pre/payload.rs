@@ -19,6 +19,7 @@ pub(super) struct CompanionMountRequest<'a> {
     pub(super) is_monitor_only: bool,
     pub(super) operation: &'a str,
     pub(super) config_version: u64,
+    pub(super) config_fingerprint: u64,
 }
 
 pub(super) fn build_companion_request_payload(request: &CompanionMountRequest<'_>) -> String {
@@ -47,6 +48,7 @@ pub(super) fn build_companion_request_payload(request: &CompanionMountRequest<'_
         "monitor_only": request.is_monitor_only,
         "path_mappings": mappings,
         "config_version": request.config_version,
+        "config_fingerprint": request.config_fingerprint,
     });
 
     serde_json::to_string(&payload).unwrap_or_default()

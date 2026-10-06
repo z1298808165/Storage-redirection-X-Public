@@ -748,6 +748,7 @@ fn build_request(
         },
         is_file_monitor_enabled: snapshot.is_file_monitor_enabled,
         config_version,
+        config_fingerprint: snapshot.config_fingerprint,
     }
 }
 
