@@ -57,16 +57,46 @@ fn host_is_alive(host: &FuseHost) -> bool {
     if !crate::platform::is_process_instance_alive(host.child_pid, host.child_start_time_ticks) {
         return false;
     }
-    if !process_is_zombie(host.child_pid) {
-        return true;
+    if process_is_zombie(host.child_pid) {
+        log::warn!(
+            "fuse host session exited on its own child={} source={}",
+            host.child_pid,
+            host.mount_source
+        );
+        reap_exited_host_child(host.child_pid);
+        return false;
     }
-    log::warn!(
-        "fuse host session exited on its own child={} source={}",
-        host.child_pid,
-        host.mount_source
-    );
-    reap_exited_host_child(host.child_pid);
-    false
+    host_fuse_conn_alive(host)
+}
+
+/// 探测宿主会话的 FUSE 连接是否仍然可用。
+///
+/// 宿主进程可能在 FUSE 连接失效后仍然存活（连接进入错误态而会话线程尚未退出），
+/// 只按 pid/start_ticks 判活会让 daemon 持续向死连接做接入，`move_mount` 周期性
+/// ENOTCONN 且自愈永不触发（run `37428793177`/`37434073875` 实证）。对挂载点做
+/// metadata 解析会穿过宿主 FUSE 根目录发出 getattr 请求：连接死亡时返回
+/// ENOTCONN/EIO，据此判死交给 reconcile 重建；挂载点在 daemon 视图里不可见
+/// （ENOENT）时无法探测，维持原判活结论，避免挂载传播差异造成误杀。
+fn host_fuse_conn_alive(host: &FuseHost) -> bool {
+    let error = match std::fs::metadata(&host.mount_point) {
+        Ok(_) => return true,
+        Err(error) => error,
+    };
+    match error.raw_os_error() {
+        // 连接已进入错误态：穿过宿主根目录的 getattr 必然失败，判死交由 reconcile 重建。
+        Some(libc::ENOTCONN) | Some(libc::EIO) => {
+            log::warn!(
+                "fuse host conn dead child={} source={} mp={} err={}",
+                host.child_pid,
+                host.mount_source,
+                host.mount_point,
+                error
+            );
+            false
+        }
+        // 挂载点在 daemon 视图不可见时无法探测，维持原判活结论，避免传播差异误杀。
+        _ => true,
+    }
 }
 
 /// 判断进程是否已变成僵尸（已退出但未被回收）。
