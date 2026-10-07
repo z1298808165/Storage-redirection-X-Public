@@ -991,10 +991,11 @@ fn start_fuse_service_for_root(
         } else if !registered {
             // 策略没进宿主会话时接入会让应用拿到"未登记即拒绝"的空视图；宁可继续 scoped。
             log::warn!(
-                "daemon fuse host attach skipped pid={} pkg={} target={} reason=policy_registration_failed",
+                "daemon fuse host attach skipped pid={} pkg={} target={} request_fingerprint={:016x} reason=policy_registration_failed",
                 request.pid,
                 request.package_name,
-                mount_root
+                mount_root,
+                request.policy_fingerprint
             );
         } else if let Some(state) = try_bind_to_fuse_host(&host, request, mount_root) {
             return Some(state);

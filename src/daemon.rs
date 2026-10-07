@@ -265,6 +265,7 @@ pub fn main_entry() -> i32 {
         let did_reload = reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
         let current = config.config_version();
         let control_reconcile = crate::log_daemon::take_reconcile_request();
+        let policy_register = crate::log_daemon::take_policy_register_request();
         let periodic_reconcile = should_periodic_reconcile(&mut last_periodic_reconcile_ms);
         let should_reconcile = round < INITIAL_RECONCILE_ROUNDS
             || did_reload
@@ -309,6 +310,9 @@ pub fn main_entry() -> i32 {
                 }
             }
             last_version = current;
+        }
+        if let Some(token) = policy_register.as_deref() {
+            register_policy_for_pid_token(token, current);
         }
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {
             // 无独立监视线程的降级路径：本循环还要承担 reconcile，因此不无限排空，
@@ -752,6 +756,45 @@ fn build_request(
     };
     request.policy_fingerprint = crate::fuse_redirect::request_policy_fingerprint(&request);
     request
+}
+
+/// 处理 companion 的 `register-policy:<pkg>:<pid>` 请求：定点完成宿主策略预登记。
+///
+/// companion 发起挂载时 daemon 可能还没轮询到该应用；周期 reconcile 最坏 3s+，
+/// 应用侧裸视图窗口随之拉长。这里按 pid 定位进程后走与 reconcile 完全相同的
+/// build_request + pre_register_host_policy 路径，只登记不挂载，单次开销毫秒级。
+fn register_policy_for_pid_token(token: &str, config_version: u64) {
+    let Some((package_name, pid)) = token
+        .rsplit_once(':')
+        .and_then(|(package, pid)| pid.parse::<i32>().ok().map(|pid| (package, pid)))
+    else {
+        log::warn!("register-policy token invalid token={}", token);
+        return;
+    };
+    let Some(proc) = list_app_processes()
+        .into_iter()
+        .find(|proc| proc.pid == pid && proc.package_name == package_name)
+    else {
+        log::debug!(
+            "register-policy process gone pkg={} pid={}",
+            package_name,
+            pid
+        );
+        return;
+    };
+    if should_skip_process(&proc) {
+        return;
+    }
+    let snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
+    let request = build_request(&proc, config_version, &snapshot);
+    let outcome = crate::daemon_mount::pre_register_host_policy(&request);
+    log::info!(
+        "register-policy applied pkg={} pid={} outcome={:?} fingerprint={:016x}",
+        request.package_name,
+        request.pid,
+        outcome,
+        request.policy_fingerprint
+    );
 }
 
 fn should_skip_process(proc: &AppProcess) -> bool {

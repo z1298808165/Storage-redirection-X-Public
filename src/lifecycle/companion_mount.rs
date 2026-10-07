@@ -19,8 +19,9 @@ use crate::platform::unique_fd::UniqueFd;
 use crate::platform::{self, paths::monotonic_ms};
 use diagnostics::log_child_diagnostics;
 use libc::{
-    AF_UNIX, CLONE_NEWNS, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SOCK_DGRAM, WNOHANG, c_int,
-    c_void, close, kill, open, read, readlink, setns, socketpair, waitpid,
+    AF_UNIX, CLONE_NEWNS, MS_NODEV, MS_NOSUID, MS_PRIVATE, MS_RDONLY, MS_REC, O_CLOEXEC, O_RDONLY,
+    SIGKILL, SIGTERM, SOCK_DGRAM, WNOHANG, c_int, c_ulong, c_void, close, kill, mount, open, read,
+    readlink, setns, socketpair, waitpid,
 };
 use stats::update_redirect_stats;
 use std::ffi::{CStr, CString};
@@ -57,6 +58,29 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
     let wait_ms = monotonic_ms().saturating_sub(wait_started_ms);
     if !is_ready {
         log::warn!("wait proc not ready pid={}", request.pid);
+    }
+    // Auto 应用的宿主策略登记只能由 daemon 执行；发一条 register-policy 控制命令
+    // 让 daemon 下一轮主循环（≤1s）定点预登记，替代最坏 3s+ 的周期 reconcile 等待。
+    if matches!(
+        request.storage_backend_mode,
+        crate::config::StorageBackendMode::Auto
+    ) && crate::logging::send_control_command(&format!(
+        "register-policy:{}:{}",
+        request.package_name, request.pid
+    )) {
+        log::debug!(
+            "companion register-policy sent pkg={} pid={}",
+            request.package_name,
+            request.pid
+        );
+    }
+    // 先落 fail-closed 屏障再进入宿主握手/挂载：应用主线程的等待预算只有 600ms
+    // （AMS 启动超时约束），宿主握手最坏需要数秒，期间应用会看到未套规则的
+    // 原生全景（沙箱/隐藏规则的可见窗口）。屏障把这段窗口内的视图变成只读空
+    // 目录，FUSE 落地后压在屏障之上；挂载链路彻底失败时屏障常驻（fail-closed）。
+    let barrier_roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request);
+    if !barrier_roots.is_empty() {
+        mount_storage_view_barriers(request, &barrier_roots);
     }
     let mount_started_ms = monotonic_ms();
     crate::mount_intent::mark_state(
@@ -100,6 +124,113 @@ fn is_redirect_enabled_for_request(request: &CompanionMountRequest) -> bool {
                 request.uid,
                 config.is_file_monitor_enabled(),
             ))
+}
+
+// 应用侧裸视图窗口的 fail-closed 屏障（详见 execute_companion_mount_request 调用点注释）。
+// tmpfs 会拒绝未知挂载选项（EINVAL），标记通过可识别的 size 值体现：屏障固定 4m。
+const STORAGE_VIEW_BARRIER_DATA: &[u8] = b"size=4m\0";
+
+// 为每个 FUSE 挂载根落一个只读空 tmpfs 屏障。子进程 setns 进入应用命名空间后
+// 先整树 MS_PRIVATE，再在根上压一层只读 tmpfs：应用在此期间只能看到空目录，
+// 写入得到 EROFS 明确错误。随后的 FUSE 挂载压在屏障之上；既有卸载路径
+// （clear_mount_target_stack）逐层摘栈时会把屏障一并清理。
+fn mount_storage_view_barriers(request: &CompanionMountRequest, roots: &[String]) {
+    for root in roots {
+        if mount_one_storage_view_barrier(request, root) {
+            log::info!(
+                "storage view barrier mounted root={} pid={} pkg={}",
+                root,
+                request.pid,
+                request.package_name
+            );
+        }
+    }
+}
+
+fn mount_one_storage_view_barrier(request: &CompanionMountRequest, root: &str) -> bool {
+    let Ok(c_ns) = CString::new(format!("/proc/{}/ns/mnt", request.pid)) else {
+        return false;
+    };
+    let Ok(c_root) = CString::new(root) else {
+        return false;
+    };
+    // 先在父进程走完私有日志通道初始化，避免子进程继承初始化中的 OnceLock。
+    crate::logging::prepare_for_fork();
+    // SAFETY: fork 系统调用；子进程只做 setns/mount/_exit，日志通道已完成初始化。
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        log::warn!(
+            "storage view barrier fork failed root={} pkg={} errno={}",
+            root,
+            request.package_name,
+            last_errno()
+        );
+        return false;
+    }
+    if child == 0 {
+        // SAFETY: c_ns/c_root 均为 NUL 结尾的合法路径，生命周期覆盖本次调用；
+        // 子进程随后仅执行 setns/mount/_exit，不再触碰需要安全保证的数据结构。
+        unsafe {
+            let entered = set_mount_namespace(request.pid, Some(&c_ns));
+            if !entered {
+                libc::_exit(1);
+            }
+            let private_ok = mount(
+                std::ptr::null(),
+                b"/\0".as_ptr(),
+                std::ptr::null(),
+                (MS_REC | MS_PRIVATE) as c_ulong,
+                std::ptr::null(),
+            ) == 0;
+            if !private_ok {
+                log::warn!(
+                    "storage view barrier ms-private failed root={} pkg={} errno={}",
+                    root,
+                    request.package_name,
+                    last_errno()
+                );
+                libc::_exit(1);
+            }
+            let mounted = mount(
+                std::ptr::null(),
+                c_root.as_ptr(),
+                b"tmpfs\0".as_ptr(),
+                (MS_RDONLY | MS_NOSUID | MS_NODEV) as c_ulong,
+                STORAGE_VIEW_BARRIER_DATA.as_ptr() as *const c_void,
+            ) == 0;
+            if !mounted {
+                log::warn!(
+                    "storage view barrier mount failed root={} pkg={} errno={}",
+                    root,
+                    request.package_name,
+                    last_errno()
+                );
+                libc::_exit(1);
+            }
+            libc::_exit(0);
+        }
+    }
+    let mut status: c_int = 0;
+    // SAFETY: status 是有效的栈上整型指针，waitpid 阻塞等待本次 fork 的子进程。
+    let waited = unsafe { waitpid(child, &mut status, 0) };
+    waited == child && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+}
+
+// 该应用命名空间的存储视图根是否已被任意 srx FUSE 层覆盖（宿主或 scoped）。
+// companion 的宿主接入失败回退 scoped 之前先查一次：daemon reconcile 可能已经
+// 抢先完成 attach，此时再叠一层 scoped 会造成双重挂载与视图基准混乱。
+fn app_storage_view_already_served(mount_root: &str) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    let root = mount_root.trim_end_matches('/');
+    mounts.lines().rev().any(|line| {
+        let mut fields = line.split_whitespace();
+        let source = fields.next().unwrap_or("");
+        let mount_point = fields.next().unwrap_or("");
+        source.starts_with("srx_fuse")
+            && mount_point.replace("\\040", " ").trim_end_matches('/') == root
+    })
 }
 
 fn log_companion_mount_perf(
@@ -765,10 +896,14 @@ fn start_fuse_service_for_root(
     } else if !registered {
         // 策略没进宿主会话时接入会让应用拿到"未登记即拒绝"的空视图；宁可继续 scoped。
         log::warn!(
-            "fuse host attach skipped pid={} pkg={} target={} reason=policy_registration_failed",
+            "fuse host attach skipped pid={} pkg={} target={} request_fingerprint={:016x} snapshot_fingerprint={:?} reason=policy_registration_failed",
             request.pid,
             request.package_name,
-            mount_root
+            mount_root,
+            request.policy_fingerprint,
+            view.as_ref()
+                .and_then(|view| view.policy_fingerprints.get(&(request.uid as u32)))
+                .copied()
         );
     } else if let Some(host_view) = view.as_ref() {
         if let Some(state) = try_bind_to_fuse_host(host_view, request, mount_root) {
@@ -785,6 +920,17 @@ fn start_fuse_service_for_root(
             request.pid,
             request.package_name
         );
+    }
+    // 宿主接入失败时，daemon reconcile 可能已经为该应用挂上了共享宿主层；此时
+    // 再叠 scoped 会话只会造成双重挂载。检测到已有 srx 层就直接放弃本根。
+    if app_storage_view_already_served(mount_root) {
+        log::info!(
+            "scoped fork skipped, srx mount already present pid={} pkg={} target={}",
+            request.pid,
+            request.package_name,
+            mount_root
+        );
+        return None;
     }
     // 回退：fork 独立 scoped 会话（B2-a 前的既有路径）。
     let mut ready_sockets = [0; 2];

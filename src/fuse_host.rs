@@ -1728,10 +1728,14 @@ pub fn wait_for_host_session_view(uid: i32, policy_fingerprint: u64) -> Option<H
         let current = crate::platform::paths::monotonic_ms();
         if current >= deadline {
             LAST_HOST_WAIT_FAIL_MS.store(current, Ordering::Relaxed);
+            let snapshot_fingerprint = read_host_session_view()
+                .and_then(|view| view.policy_fingerprints.get(&(uid as u32)).copied());
             log::warn!(
-                "fuse host view wait timeout uid={} budget_ms={} fallback=scoped_planning",
+                "fuse host view wait timeout uid={} budget_ms={} request_fingerprint={:016x} snapshot_fingerprint={:?} fallback=scoped_planning",
                 uid,
-                HOST_WAIT_BUDGET_MS
+                HOST_WAIT_BUDGET_MS,
+                policy_fingerprint,
+                snapshot_fingerprint
             );
             return None;
         }

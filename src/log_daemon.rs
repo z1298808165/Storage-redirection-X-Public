@@ -57,12 +57,30 @@ const CONTROL_CLEAR_MONITOR_PREFIX: &str = "clear-monitor:";
 const CONTROL_FLUSH_ALL: &str = "flush-all";
 const CONTROL_RESET_STATS: &str = "reset-stats";
 const CONTROL_RECONCILE_RUNNING: &str = "reconcile-running";
+const CONTROL_REGISTER_POLICY_PREFIX: &str = "register-policy:";
 const STATS_SCHEMA: &str = "2";
 
 static RECONCILE_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static POLICY_REGISTER_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn reconcile_request_slot() -> &'static Mutex<Option<String>> {
     RECONCILE_REQUEST.get_or_init(|| Mutex::new(None))
+}
+
+/// companion 请求 daemon 为指定应用（`<pkg>:<pid>`）即时预登记宿主策略。
+///
+/// companion 与 daemon 没有直接控制通道，宿主策略登记只能由 daemon 执行；此前
+/// companion 只能等周期 reconcile（最坏 3s+），期间应用处于未套规则的裸视图。
+/// 该命令让 daemon 在下一轮主循环（≤1s）完成定点预登记。
+fn policy_register_request_slot() -> &'static Mutex<Option<String>> {
+    POLICY_REGISTER_REQUEST.get_or_init(|| Mutex::new(None))
+}
+
+pub fn take_policy_register_request() -> Option<String> {
+    policy_register_request_slot()
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
 }
 
 pub fn start() -> io::Result<()> {
@@ -445,6 +463,16 @@ impl LogState {
                 {
                     // quality-allow(chinese-language): token 来自控制协议，作为机器匹配字段必须保持原值。
                     *request = Some(token.to_string());
+                }
+            }
+            command if command.starts_with(CONTROL_REGISTER_POLICY_PREFIX) => {
+                let token = command
+                    .trim_start_matches(CONTROL_REGISTER_POLICY_PREFIX)
+                    .to_string();
+                if !token.is_empty()
+                    && let Ok(mut slot) = policy_register_request_slot().lock()
+                {
+                    *slot = Some(token);
                 }
             }
             _ => {}

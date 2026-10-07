@@ -179,6 +179,21 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
     }
 }
 
+/// 向 daemon 私有日志通道发送一条 Control 命令。
+///
+/// 仅供 root 侧进程（zygisk companion 等）使用：daemon 对 Control 指令做发送方
+/// uid 校验，非 root 发送会被丢弃。用于挂载链路需要 daemon 即时配合的场景
+/// （例如 `register-policy:<pkg>:<pid>` 触发宿主策略预登记），替代等待周期
+/// reconcile 的秒级延迟。
+pub fn send_control_command(command: &str) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    private_log_socket()
+        .map(|socket| socket.send(Level::Info, "Control", command))
+        .unwrap_or(false)
+}
+
 pub fn write_mount_prep_record(package_name: &str, path: &str, backend_path: &str) {
     if package_name.is_empty() || path.is_empty() {
         return;
