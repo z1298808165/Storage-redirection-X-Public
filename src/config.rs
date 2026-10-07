@@ -126,6 +126,17 @@ impl DaemonReconcileConfigSnapshot {
             path_mappings: user.path_mappings.clone(),
         })
     }
+
+    /// 枚举当前已配置（含未运行）应用的包名，供开机全量预登记宿主策略。
+    ///
+    /// 预登记按 uid 写策略、不创建挂载，因此不依赖应用进程是否运行。开机一次性
+    /// 预登记所有已配置应用后，应用任意时刻冷启动都能从宿主快照确认 uid 并直接接入
+    /// 共享会话，不必等 reconcile 轮询到该进程，也不必走 scoped 回退。
+    // quality-allow(lint-suppression): 该方法只由 daemon 二进制调用，cdylib 目标不会使用。
+    #[allow(dead_code)]
+    pub fn configured_package_names(&self) -> impl Iterator<Item = &String> {
+        self.apps.keys()
+    }
 }
 
 #[derive(Clone, Copy)]

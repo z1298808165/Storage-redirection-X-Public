@@ -16,15 +16,20 @@ use std::collections::HashSet;
 use std::fs::{self as std_fs, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const RECONCILE_INTERVAL_MS: u64 = 1000;
-const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 3_000;
+/// 周期兜底 reconcile 的间隔。应用启动由 companion 主动挂载 + register-policy 定点
+/// 登记，配置变更由 inotify 监听，开机由全量预登记兜底——这些都不依赖周期轮询。
+/// 周期轮询只剩「补挂 companion 未处理的进程 / 宿主重建后重新接入 / 清理退出残留」
+/// 等补偿职责，把间隔从 3 秒放宽到 30 秒可显著降低常驻唤醒与 /proc 扫描功耗，
+/// 补偿类场景最坏多等一个周期（30 秒），不影响事件驱动主路径的即时性。
+const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 30_000;
 /// 状态文件清理只防「已死进程的记录无限累积」，不参与挂载正确性；
-/// 与 reconcile 的 3 秒周期解耦，避免空闲时每个周期都扫描状态目录和 /proc。
+/// 独立节流，不随周期 reconcile 一起触发，避免空闲时每个周期都扫描状态目录和 /proc。
 const PRUNE_INTERVAL_MS: i64 = 30_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
 const FILE_MONITOR_POLL_MS: u64 = 100;
@@ -36,7 +41,7 @@ const PREWARM_RECONCILE_ROUNDS: usize = 1;
 const PREWARM_MAX_REQUESTS: usize = 16;
 const ANDROID_APP_UID_START: i32 = 10000;
 const UNINTERRUPTIBLE_SKIP_LOG_STEP: u64 = 32;
-/// 周期 reconcile 摘要在计数没有变化时的记录间隔（每轮 3 秒，约 5 分钟）。
+/// 周期 reconcile 摘要在计数没有变化时的记录间隔（每轮 30 秒，约 50 分钟）。
 const RECONCILE_SUMMARY_LOG_HEARTBEAT: u64 = 100;
 
 static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +52,13 @@ static UNINTERRUPTIBLE_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 /// 已死亡的旧 FUSE 连接，必须清空宿主策略预登记指纹表，让本轮预登记全量重跑并
 /// 重新绑定新连接。集合稳定时不清空，配合预登记指纹实现稳态零 fork。
 static LAST_MEDIA_PROVIDER_PIDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// 开机全量预登记是否已在 MediaProvider 就绪后补登记过一次。
+///
+/// 开机全量预登记发生在 daemon 启动早期，此时 MediaProvider 尚未重建应用私有目录、
+/// SELinux 标签也未就位，沙箱目录 mkdir 会失败，冷启动应用只能回退 scoped。等
+/// MediaProvider 进程出现后补登记一次（幂等，已成功者跳过），覆盖首次失败的应用。
+static PRE_REGISTER_ALL_AFTER_MEDIA_READY: AtomicBool = AtomicBool::new(false);
 
 /// 周期 reconcile 摘要的记录状态。
 ///
@@ -277,7 +289,12 @@ pub fn main_entry() -> i32 {
 
     // 建立共享宿主 FUSE 会话。失败只记录并继续，不影响主循环与既有 scoped 路径；
     // 后续 reconcile 会在宿主子进程死亡后按需恢复，而不是继续使用失效句柄。
-    if !crate::fuse_host::ensure_global() {
+    if crate::fuse_host::ensure_global() {
+        // 宿主就绪后立即全量预登记所有已配置应用：让应用冷启动时无需等待 reconcile
+        // 轮询到该进程，就能从宿主快照确认 uid 并接入共享会话，避免 scoped 竞态与
+        // 启动窗口。宿主未就绪时跳过（此时预登记必然失败，逐个触发等待反而拖慢启动）。
+        pre_register_all_configured_apps(&config, config.config_version());
+    } else {
         log::warn!("fuse host session unavailable, scoped path remains active");
     }
 
@@ -544,6 +561,7 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
 
     // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
+    let media_ready = !media_processes.is_empty();
     let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
     media_pids.sort_unstable();
     let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
@@ -553,6 +571,14 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
         *last_media_pids = media_pids;
         drop(last_media_pids);
         invalidate_pre_registered_host_policies();
+    }
+
+    // 开机全量预登记在 boot 早期执行时，MediaProvider 尚未重建应用私有目录、SELinux
+    // 标签未就位，沙箱目录 mkdir 会失败（冷启动应用回退 scoped）。等 MediaProvider
+    // 进程出现后补登记一次，覆盖首次失败的应用；幂等由 pre_register_host_policy 的
+    // 指纹命中保证，已成功者跳过，稳态零开销。
+    if media_ready && !PRE_REGISTER_ALL_AFTER_MEDIA_READY.swap(true, Ordering::AcqRel) {
+        pre_register_all_configured_apps(SettingsHub::instance(), config_version);
     }
 
     // companion 与 daemon 可能同时为同一应用发起挂载。先登记本轮 Auto 应用策略，
@@ -789,6 +815,51 @@ fn build_request(
     };
     request.policy_fingerprint = crate::fuse_redirect::request_policy_fingerprint(&request);
     request
+}
+
+/// 读 `/data/system/packages.list` 解析包名到 uid 的映射。
+///
+/// 开机全量预登记需要为未运行的应用解析 uid（宿主策略按 uid 注册），packages.list
+/// 是系统维护的权威映射。找不到（应用未安装或已被卸载）时跳过，应用真正启动后仍会
+/// 由 reconcile 逐轮预登记或 companion 的 register-policy 定点登记补上。
+fn read_package_uid(package_name: &str) -> Option<i32> {
+    let content = std_fs::read_to_string("/data/system/packages.list").ok()?;
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some(package_name) {
+            return fields.next().and_then(|value| value.parse::<i32>().ok());
+        }
+    }
+    None
+}
+
+/// 开机一次性预登记所有已配置应用的宿主策略。
+///
+/// 只写策略、不创建挂载，不依赖应用进程是否运行。它与 reconcile 的逐轮预登记、
+/// companion 的 register-policy 定点登记构成三层覆盖：开机全量兜底 + 运行期轮询 +
+/// 冷启动定点，使应用任何时刻启动都能从宿主快照确认 uid 并直接接入共享会话，
+/// 不再因「宿主快照还没这个 uid」回退 scoped、也不再经历 scoped 挂载竞态。
+fn pre_register_all_configured_apps(config: &SettingsHub, config_version: u64) {
+    let snapshot = config.get_daemon_reconcile_config_snapshot();
+    for package_name in snapshot.configured_package_names() {
+        let Some(uid) = read_package_uid(package_name) else {
+            continue;
+        };
+        if uid < ANDROID_APP_UID_START {
+            continue;
+        }
+        let proc = AppProcess {
+            pid: 0,
+            uid,
+            package_name: package_name.clone(),
+            is_uninterruptible: false,
+        };
+        let request = build_request(&proc, config_version, &snapshot);
+        if request.operation != MountOperation::Reload {
+            continue;
+        }
+        crate::daemon_mount::pre_register_host_policy(&request);
+    }
 }
 
 /// 处理 companion 的 `register-policy:<pkg>:<pid>` 请求：定点完成宿主策略预登记。
