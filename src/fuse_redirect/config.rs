@@ -220,6 +220,16 @@ pub fn request_policy_fingerprint<R: MountRequestFields + ?Sized>(request: &R) -
     let mut config = fuse_config_from_request(request, None, None);
     config.app_pid = 0;
     config.app_start_time_ticks = None;
+    if config.is_monitor_only {
+        // 监视专用会话的全部路径都落真实后端，路由不依赖包名与数据目录（redirect_root
+        // 强制为真实根、无路径映射），而宿主策略按 uid 登记，同一 uid 的多进程这两项
+        // 都随包名不同（如 com.google.android.gms 与 .unstable）。指纹若含进程身份，
+        // 各进程会在每轮 reconcile 互判“配置变更”交替重登记，宿主策略快照随之周期
+        // 刷屏。监视模式下把包名与数据目录归一为空串，同 uid 指纹即稳定一致；进程
+        // 归因由文件监视侧的调用方识别负责，不经策略指纹。
+        config.package_name = String::new();
+        config.app_data_dir = String::new();
+    }
     let payload = serde_json::to_vec(&config).unwrap_or_default();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     payload.hash(&mut hasher);
