@@ -763,6 +763,15 @@ impl RedirectPolicy {
         if path == expected {
             return true;
         }
+        // Android 私有子树（Android 及其 data/media/obb 子层）在 real_root 与
+        // private_real_root 下各有同名实体：real_root 是 real_storage 锚点（叠在系统
+        // MediaProvider FUSE 之上），private_real_root 直连 f2fs，二者指向同一物理目录，
+        // 但 canonicalize 无法穿透 FUSE 挂载归一（真机：inode 相同、device 不同）。分流
+        // 边界保证 rel 属 Android 私有子树时，从 real_root 枚举出的同名项必然是
+        // private_real_root 那一份，按 real_root 侧路径放行即可，否则根列表缺 Android。
+        if is_android_private_storage_subtree_relative_path(rel) {
+            return path == self.real_root.join(rel);
+        }
         // 枚举源与私有子树根可能经不同挂载别名（real_storage tmp 锚点 vs /data/media）
         // 指向同一物理目录：scoped 会话带 real_root_override 时，根列举出的 Android 项
         // 解析到 private_real_root，字符串相等判定会把它整棵丢弃（表现为根列表缺
