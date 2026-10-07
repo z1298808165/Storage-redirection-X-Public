@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37572331542-3/storage-redirect-x-manager-v1.2.60-ci.32.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37572331542-3/storage.redirect.x-v1.2.60-ci.32.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.32`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37451919472-1`\n- 当前提交：`fd13b6f4a340`\n\n## 模块更新\n\n### 修复了什么问题\n- 两处挂载字面量改为 c\"/\" 与 c\"tmpfs\"；适用范围：仅字面量表达形式，挂载语义与参数不变。\n- 监视专用会话指纹归一包名与数据目录为空串；适用范围：仅未配置应用的监视会话指纹，路由与登记行为不变。\n- companion 即挂只读 tmpfs 屏障，register-policy 命令触发定点预登记；适用范围：Auto 应用挂载链路与控制协议，视图语义不变。\n- 后端等价判定在字符串不等时回退 canonicalize 归一比较；适用范围：仅 readdir 枚举可见性，lookup 不变。\n- 根级枚举按文件名跳过这两个内部目录，lookup 不变；适用范围：仅共享宿主 readdir 候选收集，行为不变。\n\n## 其它更新\n\n### 功能变化\n- 补 export 缺失函数，用例超时后清积压 intent 并前台重驱一次；适用范围：sh/ps1 跑批器用例驱动与恢复，断言与场景定义不变。\n- 场景脚本用例驱动改为直启前台服务；适用范围：仅测试用例驱动方式，断言与模块行为不变。"
+    "releaseNotes": "# CI Build 1.2.60-ci.32\n\n## 模块更新\n\n### 修复了什么问题\n\n- 修复共享宿主目录枚举：/storage/emulated/0 根级不再显示 .transforms 与 .picker_transcoded，与原生 MediaProvider 视图一致。\n- 修复接入应用的存储根列表缺 Android 目录的问题，Android/data|media|obb 默认放行语义不变。\n- 修复重定向接管窗口的侧漏：应用启动即挂只读屏障、宿主策略即时登记，规则生效前不再短暂暴露原始视图；同 uid 多进程交替重登记导致的日志刷屏一并消除。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使新版本完整生效。"
   },
   "releases": []
 }
