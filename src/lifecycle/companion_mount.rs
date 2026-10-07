@@ -177,7 +177,7 @@ fn mount_one_storage_view_barrier(request: &CompanionMountRequest, root: &str) -
             }
             let private_ok = mount(
                 std::ptr::null(),
-                b"/\0".as_ptr(),
+                c"/".as_ptr(),
                 std::ptr::null(),
                 (MS_REC | MS_PRIVATE) as c_ulong,
                 std::ptr::null(),
@@ -194,7 +194,7 @@ fn mount_one_storage_view_barrier(request: &CompanionMountRequest, root: &str) -
             let mounted = mount(
                 std::ptr::null(),
                 c_root.as_ptr(),
-                b"tmpfs\0".as_ptr(),
+                c"tmpfs".as_ptr(),
                 (MS_RDONLY | MS_NOSUID | MS_NODEV) as c_ulong,
                 STORAGE_VIEW_BARRIER_DATA.as_ptr() as *const c_void,
             ) == 0;
