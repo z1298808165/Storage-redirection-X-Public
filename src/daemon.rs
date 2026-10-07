@@ -205,8 +205,41 @@ impl DaemonInstanceLock {
     }
 }
 
+/// 安装 daemon 主进程的 panic 钩子。
+///
+/// release 构建 `panic = "abort"`，`catch_unwind` 无法截获 panic，service.sh 又把
+/// stderr 丢到 `/dev/null`，主进程 panic 不会留下任何记录（宿主子进程有
+/// `install_host_panic_hook`，主进程没有）。钩子在 abort 之前把 panic 位置写到独立
+/// 文件，便于崩溃后定位根因；写到独立文件而非 running.log，是因为 running.log 由
+/// collector 进程按 socket 事件维护，直接写会与其文件偏移竞争。
+fn install_daemon_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|value| (*value).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(crate::platform::module_paths::DAEMON_PANIC_LOG)
+        {
+            let _ = std::io::Write::write_fmt(
+                &mut file,
+                format_args!("daemon panic at {}: {}\n", location, message),
+            );
+        }
+    }));
+}
+
 pub fn main_entry() -> i32 {
     Logger::init(Some("srx_daemon"));
+    install_daemon_panic_hook();
     let _instance_lock = match DaemonInstanceLock::acquire() {
         Ok(Some(lock)) => lock,
         Ok(None) => {

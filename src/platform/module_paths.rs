@@ -67,6 +67,11 @@ pub const FUSE_HOST_STAGE_FILE: &str = "/data/adb/modules/storage.redirect.x/tmp
 // quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
 #[allow(dead_code)]
 pub const RUNNING_LOG_FILE: &str = "/data/adb/modules/storage.redirect.x/logs/running.log";
+/// daemon 主进程 panic 落盘文件。running.log 由 collector 进程按 socket 事件维护，
+/// panic 钩子在 abort 前直接写独立文件，避免与 collector 的文件偏移竞争。
+// quality-allow(lint-suppression): 引用方 daemon 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const DAEMON_PANIC_LOG: &str = "/data/adb/modules/storage.redirect.x/logs/daemon_panic.log";
 // quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
 #[allow(dead_code)]
 pub const FILE_MONITOR_LOG_FILE: &str =
