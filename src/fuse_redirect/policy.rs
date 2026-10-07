@@ -760,7 +760,18 @@ impl RedirectPolicy {
             return false;
         }
         let expected = self.real_backend_for_storage_rel(rel);
-        path == expected
+        if path == expected {
+            return true;
+        }
+        // 枚举源与私有子树根可能经不同挂载别名（real_storage tmp 锚点 vs /data/media）
+        // 指向同一物理目录：scoped 会话带 real_root_override 时，根列举出的 Android 项
+        // 解析到 private_real_root，字符串相等判定会把它整棵丢弃（表现为根列表缺
+        // Android，但按路径访问正常）。回退到规范路径比较，bind 到同一物理目录的别名
+        // 会被 canonicalize 归一为同一路径。仅在字符串不等时触发，稳态零开销。
+        let Ok(expected_canonical) = std::fs::canonicalize(&expected) else {
+            return false;
+        };
+        std::fs::canonicalize(path).is_ok_and(|canonical| canonical == expected_canonical)
     }
 
     pub(super) fn redirect_backend_for_storage_rel(&self, rel: &str) -> PathBuf {
