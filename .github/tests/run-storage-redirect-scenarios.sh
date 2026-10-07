@@ -1531,7 +1531,12 @@ run_service_case() {
   local start_output
   # Android 17 上向刚重启的应用发 broadcast 偶发阻塞至场景级超时；包 90 秒
   # timeout 使挂起快速走 service_start_failed 路径（有输出、可重试）。
-  if ! start_output="$(timeout 90 adb shell am broadcast -n "${APP_ID}/.receiver.TestCaseReceiver" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
+  # 直接启动前台服务而非经 receiver 转发：HyperOS 实机（A16/KSU）会在用例启动
+  # 若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
+  # manifest receiver 的广播（BroadcastEnqueue skip），表现为用例永远无结果
+  # （result_timeout 雪崩）；shell 直启 FGS 不受该策略限制，且服务端的
+  # onStartCommand 按相同 action+extras 处理，语义与 receiver 转发完全一致。
+  if ! start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
     adb_su "rm -f '$freshness_marker'" >/dev/null
     echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
     printf '%s\n' "$start_output" | sed 's/^/service_start: /'

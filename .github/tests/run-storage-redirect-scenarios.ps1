@@ -758,7 +758,12 @@ function Invoke-ServiceCase {
     Clear-Results
     $freshnessMarker = "/data/local/tmp/srx-result-$([Guid]::NewGuid().ToString('N')).marker"
     Invoke-Su "touch '$freshnessMarker'" | Out-Null
-    $args = @("shell", "am", "broadcast", "-n", "$AppId/.receiver.TestCaseReceiver", "-a", $Action, "--es", "test_case", $TestCase)
+    # 直接启动前台服务而非经 receiver 转发广播：HyperOS 实机（A16/KSU）会在用例
+    # 启动若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
+    # manifest receiver 的广播，表现为用例永远无结果（result_timeout 雪崩）；
+    # shell 直启 FGS 不受该策略限制，服务端 onStartCommand 按 action+extras 处理，
+    # 与 receiver 转发语义一致（与 .sh 的 run_service_case 同步修改）。
+    $args = @("shell", "am", "start-foreground-service", "-n", "$AppId/.TestService", "-a", $Action, "--es", "test_case", $TestCase)
     foreach ($key in $Extras.Keys) {
         $args += @("--es", [string]$key, [string]$Extras[$key])
     }
