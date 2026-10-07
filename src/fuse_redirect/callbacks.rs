@@ -1407,6 +1407,17 @@ fn append_backend_dir_entries(
         if name.is_empty() {
             continue;
         }
+        // 对齐原生 FuseDaemon 的内部目录隐藏语义：.transforms 与 .picker_transcoded
+        // 是 MediaProvider 的工作目录，原生 FUSE 在存储根级对应用隐藏。后端根即
+        // /data/media/0，裸枚举会把这两个名字暴露到应用视图（例：接入共享宿主但
+        // 未配置任何规则的 MT 管理器在 /storage/emulated/0 直接可见），因此仅在
+        // 视图根级枚举时按文件名跳过（注意 is_filtered_media_provider_path 匹配
+        // 的是带斜杠的完整路径形态，裸文件名必须直接比对），不触碰深层同名用户
+        // 目录。本改动只恢复枚举可见性；按已知路径的 lookup/open 不受限，这是
+        // 刻意收窄——宿主自身与 media 视图会话仍需按路径访问这些目录。
+        if parent_rel.is_empty() && matches!(name.as_str(), ".transforms" | ".picker_transcoded") {
+            continue;
+        }
         let child_rel = if parent_rel.is_empty() {
             name.clone()
         } else {
