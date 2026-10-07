@@ -1524,49 +1524,62 @@ run_service_case() {
   local output_file="scenario-${scenario}-${label}-result.txt"
 
   prepare_service_case "scenario-${scenario}-${label}" || return 1
-  sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
-  clean_results
-  local freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
-  adb_su "touch '$freshness_marker'" >/dev/null
-  local start_output
-  # Android 17 上向刚重启的应用发 broadcast 偶发阻塞至场景级超时；包 90 秒
-  # timeout 使挂起快速走 service_start_failed 路径（有输出、可重试）。
-  # 直接启动前台服务而非经 receiver 转发：HyperOS 实机（A16/KSU）会在用例启动
-  # 若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
-  # manifest receiver 的广播（BroadcastEnqueue skip），表现为用例永远无结果
-  # （result_timeout 雪崩）；shell 直启 FGS 不受该策略限制，且服务端的
-  # onStartCommand 按相同 action+extras 处理，语义与 receiver 转发完全一致。
-  if ! start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
-    adb_su "rm -f '$freshness_marker'" >/dev/null
-    echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
-    printf '%s\n' "$start_output" | sed 's/^/service_start: /'
-    return 1
-  fi
-  if ! grep -Eq 'Broadcast completed|result=0|cmp=' <<<"$start_output"; then
-    echo "service_start_unexpected scenario=${scenario} label=${label} test_case=${test_case}"
-    printf '%s\n' "$start_output" | sed 's/^/service_start: /'
-  fi
-  if label_expects_mount "scenario-${scenario}-${label}-service"; then
-    ensure_current_app_mount_confirmed "scenario-${scenario}-${label}-service" || return 1
-  fi
 
-  local timeout_seconds
-  timeout_seconds="$(service_case_timeout_seconds "$test_case")"
-  if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then
-    adb_su "rm -f '$freshness_marker'" >/dev/null
-    cat "$output_file" >>"scenario-${scenario}-result.txt"
-    if [ -z "$pass_pattern" ]; then
-      return 0
+  # HyperOS 实机（A16/KSU）会随用例启动次数累积把 start-foreground-service 无限期
+  # 延迟（应用重启后还会重投递积压 intent）：被延迟的用例变成僵尸，或表现为本用例
+  # result_timeout，或与后续用例交错执行污染结果文件。第一轮超时后先 force-stop
+  # 清空积压 intent，再把应用前台重启一次，然后原地重驱当前用例。
+  local drive_attempt freshness_marker start_output timeout_seconds
+  for drive_attempt in 1 2; do
+    if [ "$drive_attempt" -gt 1 ]; then
+      echo "service_case_intent_recovery scenario=${scenario} label=${label} test_case=${test_case} attempt=${drive_attempt}"
+      timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
+      start_app_and_confirm_mount "scenario-${scenario}-${label}-recover" 1 || return 1
+      wait_storage_ready "scenario-${scenario}-${label}-recover" 30 >/dev/null || return 1
+      clean_results
     fi
-    if grep -q "$pass_pattern" "$output_file"; then
-      return 0
+    sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
+    clean_results
+    freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
+    adb_su "touch '$freshness_marker'" >/dev/null
+    # Android 17 上向刚重启的应用发 broadcast 偶发阻塞至场景级超时；包 90 秒
+    # timeout 使挂起快速走 service_start_failed 路径（有输出、可重试）。
+    # 直接启动前台服务而非经 receiver 转发：HyperOS 实机（A16/KSU）会在用例启动
+    # 若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
+    # manifest receiver 的广播（BroadcastEnqueue skip），表现为用例永远无结果
+    # （result_timeout 雪崩）；shell 直启 FGS 不受该策略限制，且服务端的
+    # onStartCommand 按相同 action+extras 处理，语义与 receiver 转发完全一致。
+    if ! start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
+      adb_su "rm -f '$freshness_marker'" >/dev/null
+      echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
+      printf '%s\n' "$start_output" | sed 's/^/service_start: /'
+      return 1
     fi
-    return 1
-  fi
+    if ! grep -Eq 'Broadcast completed|result=0|cmp=' <<<"$start_output"; then
+      echo "service_start_unexpected scenario=${scenario} label=${label} test_case=${test_case}"
+      printf '%s\n' "$start_output" | sed 's/^/service_start: /'
+    fi
+    if label_expects_mount "scenario-${scenario}-${label}-service"; then
+      ensure_current_app_mount_confirmed "scenario-${scenario}-${label}-service" || return 1
+    fi
 
-  adb_su "rm -f '$freshness_marker'" >/dev/null
-  echo "result_timeout scenario=${scenario} test_case=${test_case}"
-  adb shell am force-stop "$APP_ID" >/dev/null || true
+    timeout_seconds="$(service_case_timeout_seconds "$test_case")"
+    if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then
+      adb_su "rm -f '$freshness_marker'" >/dev/null
+      cat "$output_file" >>"scenario-${scenario}-result.txt"
+      if [ -z "$pass_pattern" ]; then
+        return 0
+      fi
+      if grep -q "$pass_pattern" "$output_file"; then
+        return 0
+      fi
+      return 1
+    fi
+
+    adb_su "rm -f '$freshness_marker'" >/dev/null
+    echo "result_timeout scenario=${scenario} test_case=${test_case} attempt=${drive_attempt}"
+    adb shell am force-stop "$APP_ID" >/dev/null || true
+  done
   return 1
 }
 
@@ -3621,6 +3634,7 @@ export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
 export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
+export -f fresh_app_enabled_for_label
 export -f app_view_namespace_refresh_allowed
 export -f run_quick_media_provider_restart_recovery_scenario
 export -f run_own_private_directories_scenario run_own_private_write_case

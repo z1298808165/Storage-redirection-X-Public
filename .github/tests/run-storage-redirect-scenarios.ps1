@@ -752,62 +752,82 @@ function Invoke-ServiceCase {
 
     Write-Host "  - ${Scenario}/${Label}: $TestCase"
     Prepare-ServiceCase "$Scenario/$Label"
-    if ($script:ServiceCaseSettleMilliseconds -gt 0) {
-        Start-Sleep -Milliseconds $script:ServiceCaseSettleMilliseconds
-    }
-    Clear-Results
-    $freshnessMarker = "/data/local/tmp/srx-result-$([Guid]::NewGuid().ToString('N')).marker"
-    Invoke-Su "touch '$freshnessMarker'" | Out-Null
-    # 直接启动前台服务而非经 receiver 转发广播：HyperOS 实机（A16/KSU）会在用例
-    # 启动若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
-    # manifest receiver 的广播，表现为用例永远无结果（result_timeout 雪崩）；
-    # shell 直启 FGS 不受该策略限制，服务端 onStartCommand 按 action+extras 处理，
-    # 与 receiver 转发语义一致（与 .sh 的 run_service_case 同步修改）。
-    $args = @("shell", "am", "start-foreground-service", "-n", "$AppId/.TestService", "-a", $Action, "--es", "test_case", $TestCase)
-    foreach ($key in $Extras.Keys) {
-        $args += @("--es", [string]$key, [string]$Extras[$key])
-    }
-    Invoke-Adb $args | Out-Null
 
-    # 与 .sh 的 run_service_case 一致：确认必须在广播**之后**——广播才会拉起应用进程，
-    # 放在之前会因为进程尚未存在而等不到 PID，把正常的场景判成失败。
-    # 场景 1/23/31 断言「不重定向」，由 Test-LabelExpectsMount 排除。
-    #
-    # 确认失败只在**有期望路径**的场景记失败（即场景 3/4）：那里的挂载点可预知，挂载没建立时
-    # 用例必然失败，在确认点报错更贴近现场。其余场景复核恒真，其返回值只当廉价存活检查用。
-    $serviceLabel = "$Scenario/$Label-service"
-    $mountConfirmed = Ensure-CurrentAppMountConfirmed $serviceLabel
-    if (
-        -not $mountConfirmed -and
-        (Test-LabelExpectsMount $serviceLabel) -and
-        (Get-ExpectedMountPathsForLabel $serviceLabel).Count -gt 0
-    ) {
-        $script:Failures.Add("$Scenario/$Label mount not confirmed before service case")
-        if ($script:FailFast) {
-            throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label/mount-confirm"
+    # HyperOS 实机（A16/KSU）会随用例启动次数累积把 start-foreground-service 无限期
+    # 延迟（应用重启后还会重投递积压 intent）：被延迟的用例变成僵尸，或表现为本用例
+    # result_timeout，或与后续用例交错执行污染结果文件。第一轮超时后先停止应用清空
+    # 积压 intent，再把应用前台重启一次，然后原地重驱当前用例（与 .sh 的
+    # run_service_case 清态重试同步）。
+    for ($driveAttempt = 1; $driveAttempt -le 2; $driveAttempt++) {
+        if ($driveAttempt -gt 1) {
+            Write-Host "    RECOVER $Scenario/$Label attempt=$driveAttempt"
+            Stop-AppAndWaitFuseCleanup "$Scenario/$Label/recover" $true | Out-Null
+            Start-Sleep -Milliseconds 500
+            $script:LastMountConfirmedPid = ""
+            Invoke-Adb @("logcat", "-c") | Out-Null
+            Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
+            Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+            Wait-AppMountConfirmed "$Scenario/$Label-recover" | Out-Null
+            Wait-Storage "$Scenario/$Label-recover" | Out-Null
+            Clear-Results
         }
-    }
+        if ($script:ServiceCaseSettleMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $script:ServiceCaseSettleMilliseconds
+        }
+        Clear-Results
+        $freshnessMarker = "/data/local/tmp/srx-result-$([Guid]::NewGuid().ToString('N')).marker"
+        Invoke-Su "touch '$freshnessMarker'" | Out-Null
+        # 直接启动前台服务而非经 receiver 转发广播：HyperOS 实机（A16/KSU）会在用例
+        # 启动若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
+        # manifest receiver 的广播，表现为用例永远无结果（result_timeout 雪崩）；
+        # shell 直启 FGS 不受该策略限制，服务端 onStartCommand 按 action+extras 处理，
+        # 与 receiver 转发语义一致（与 .sh 的 run_service_case 同步修改）。
+        $args = @("shell", "am", "start-foreground-service", "-n", "$AppId/.TestService", "-a", $Action, "--es", "test_case", $TestCase)
+        foreach ($key in $Extras.Keys) {
+            $args += @("--es", [string]$key, [string]$Extras[$key])
+        }
+        Invoke-Adb $args | Out-Null
 
-    $timeoutSeconds = Get-ServiceCaseTimeoutSeconds $TestCase
-    $result = Wait-ServiceResult $timeoutSeconds $freshnessMarker $TestCase
-    Invoke-Su "rm -f '$freshnessMarker'" | Out-Null
-    if ($result.Found) {
-        $ok = if ($PassRegex) { $result.Text -match $PassRegex } else { $true }
-        if (-not $ok) {
-            $script:Failures.Add("$Scenario/$Label expected $PassRegex, got: $($result.Text -replace "`n", " | ")")
-            Write-Host "    FAIL $Scenario/$Label"
+        # 与 .sh 的 run_service_case 一致：确认必须在广播**之后**——广播才会拉起应用进程，
+        # 放在之前会因为进程尚未存在而等不到 PID，把正常的场景判成失败。
+        # 场景 1/23/31 断言「不重定向」，由 Test-LabelExpectsMount 排除。
+        #
+        # 确认失败只在**有期望路径**的场景记失败（即场景 3/4）：那里的挂载点可预知，挂载没建立时
+        # 用例必然失败，在确认点报错更贴近现场。其余场景复核恒真，其返回值只当廉价存活检查用。
+        $serviceLabel = "$Scenario/$Label-service"
+        $mountConfirmed = Ensure-CurrentAppMountConfirmed $serviceLabel
+        if (
+            -not $mountConfirmed -and
+            (Test-LabelExpectsMount $serviceLabel) -and
+            (Get-ExpectedMountPathsForLabel $serviceLabel).Count -gt 0
+        ) {
+            $script:Failures.Add("$Scenario/$Label mount not confirmed before service case")
             if ($script:FailFast) {
-                throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
+                throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label/mount-confirm"
             }
-        } else {
-            Write-Host "    PASS $Scenario/$Label"
         }
-        return [pscustomobject]@{ Ok = $ok; Text = $result.Text; Path = $result.Path }
+
+        $timeoutSeconds = Get-ServiceCaseTimeoutSeconds $TestCase
+        $result = Wait-ServiceResult $timeoutSeconds $freshnessMarker $TestCase
+        Invoke-Su "rm -f '$freshnessMarker'" | Out-Null
+        if ($result.Found) {
+            $ok = if ($PassRegex) { $result.Text -match $PassRegex } else { $true }
+            if (-not $ok) {
+                $script:Failures.Add("$Scenario/$Label expected $PassRegex, got: $($result.Text -replace "`n", " | ")")
+                Write-Host "    FAIL $Scenario/$Label"
+                if ($script:FailFast) {
+                    throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
+                }
+            } else {
+                Write-Host "    PASS $Scenario/$Label"
+            }
+            return [pscustomobject]@{ Ok = $ok; Text = $result.Text; Path = $result.Path }
+        }
+        Stop-AppAndWaitFuseCleanup "$Scenario/$Label/attempt-$driveAttempt-timeout" $true | Out-Null
     }
 
     $script:Failures.Add("$Scenario/$Label result timeout for $TestCase")
     Write-Host "    TIMEOUT $Scenario/$Label"
-    Stop-AppAndWaitFuseCleanup "$Scenario/$Label/timeout" $true | Out-Null
     if ($script:FailFast) {
         throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
     }
