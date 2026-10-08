@@ -356,7 +356,7 @@ pub fn main_entry() -> i32 {
         // 宿主就绪后立即全量预登记所有已配置应用：让应用冷启动时无需等待 reconcile
         // 轮询到该进程，就能从宿主快照确认 uid 并接入共享会话，避免 scoped 竞态与
         // 启动窗口。宿主未就绪时跳过（此时预登记必然失败，逐个触发等待反而拖慢启动）。
-        pre_register_all_configured_apps(&config, config.config_version());
+        pre_register_all_configured_apps(config, config.config_version());
     }
 
     let mut last_version = 0;
@@ -528,9 +528,8 @@ fn wait_for_daemon_events(
             revents: 0,
         },
     ];
-    let nfds = if config_watch_fd >= 0 {
-        3
-    } else if control_wake_fd >= 0 {
+    // 任选 fd 缺席（负值）时 poll 会忽略对应条目；只在两者都缺席时才缩短轮询窗口。
+    let nfds = if config_watch_fd >= 0 || control_wake_fd >= 0 {
         3
     } else {
         2
