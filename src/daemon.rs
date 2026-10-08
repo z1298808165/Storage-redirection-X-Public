@@ -33,8 +33,20 @@ const PRUNE_INTERVAL_MS: i64 = 30_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
 /// 降级路径单轮最多连续排空的次数，避免挤占同一循环内的 reconcile。
 const FALLBACK_DRAIN_ROUNDS: usize = 4;
-/// 全量 reconcile 的单轮预算。超过后把剩余计划留给下一轮，给配置/控制事件让路。
-const RECONCILE_BATCH_MAX_PLANS: usize = 1;
+/// 全量 reconcile 的单轮时间预算：预算内尽可能多地执行计划，超预算的剩余计划留给
+/// 下一轮由游标续跑。此前按数量限 1 个/轮：未配置应用的计划既不 applied 也不
+/// current，27 个计划要 27 轮才排空，主循环在续跑等待为 0 的 poll 下长期高频自旋，
+/// 每轮还会重新扫 /proc 并触碰一次宿主/挂载决策。改为时间预算后 1-3 轮即可排空。
+/// 首个计划不受预算限制（保证配置变化的目标应用当轮执行）。
+const RECONCILE_BATCH_TIME_BUDGET_MS: i64 = 500;
+/// 续跑等待上限。批次未完成时主循环仍要快速续跑，但 0 毫秒的 poll 等于全速自旋；
+/// 配置、宿主与控制事件本身会立即唤醒 poll，续跑等待只兜住「排空剩余计划」，
+/// 200 毫秒足够快且把自旋开销封顶。
+const RECONCILE_CONTINUE_WAIT_MS: libc::c_int = 200;
+/// 连续多轮「有未完成批次但零计划落地」后放弃续跑，等真实事件再触发。防止个别
+/// 永远不可执行的计划把续跑变成无限循环；已执行过但失败的挂载由周期 MissingOnly
+/// 兜底重试，语义仍是有界重试。
+const RECONCILE_NO_PROGRESS_ROUND_LIMIT: u32 = 3;
 const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
@@ -218,6 +230,8 @@ struct ReconcilePlanIdentity {
 #[derive(Default)]
 struct ReconcileCursor {
     last_attempted: Option<ReconcilePlanIdentity>,
+    /// 连续「未完成批次但零落地」的轮数，用于前向进度守卫；任一轮 applied>0 清零。
+    no_progress_rounds: u32,
 }
 
 impl ReconcileCursor {
@@ -504,7 +518,11 @@ fn wait_for_daemon_events(
     host_pidfd: i32,
     control_wake_fd: i32,
 ) -> bool {
-    let timeout_ms: libc::c_int = if reconcile_pending { 0 } else { 30_000 };
+    let timeout_ms: libc::c_int = if reconcile_pending {
+        RECONCILE_CONTINUE_WAIT_MS
+    } else {
+        30_000
+    };
     if config_watch_fd < 0 && host_pidfd < 0 && control_wake_fd < 0 {
         if timeout_ms > 0 {
             thread::sleep(Duration::from_millis(timeout_ms as u64));
@@ -916,9 +934,13 @@ fn reconcile_running_apps(
             skipped += 1;
             continue;
         }
+        // 时间预算限流：首个计划无条件执行（batch_requests==0），保证配置变化的目标
+        // 应用当轮落地；之后的计划只在预算内继续，超预算的留给下一轮游标续跑。
         if !incremental_change
             && mode != ReconcileMode::Forced
-            && batch_requests >= RECONCILE_BATCH_MAX_PLANS
+            && batch_requests > 0
+            && platform::paths::monotonic_ms().saturating_sub(started_ms)
+                >= RECONCILE_BATCH_TIME_BUDGET_MS
         {
             deferred += 1;
             reconcile_incomplete = true;
@@ -926,7 +948,7 @@ fn reconcile_running_apps(
         }
         batch_requests += 1;
         // 无论后续快速更新或完整挂载成功与否，都把当前计划记为已尝试；失败由
-        // reconcile_incomplete 保证下一轮重试，但不会再次占住本轮唯一 slot。
+        // reconcile_incomplete 保证下一轮重试，但不会再次占住本轮的预算。
         if uses_batch_cursor {
             cursor.advance(plan);
         }
@@ -968,6 +990,30 @@ fn reconcile_running_apps(
                 }
             }
         }
+    }
+
+    // 前向进度守卫：批次仍不完整但连续多轮零落地时放弃续跑，等真实事件再触发。
+    // 排空型续跑（预算内逐个尝试剩余计划）通常 1-3 轮就会让 deferred 归零；一直
+    // 不归零说明剩余计划反复被拒绝或失败，继续高频重试只是在烧 CPU 并叠加挂载
+    // 干扰窗口。落过地的轮次清零计数；放弃后由周期 MissingOnly 兜底重试。
+    if reconcile_incomplete {
+        if applied > 0 || disabled > 0 {
+            cursor.no_progress_rounds = 0;
+        } else {
+            cursor.no_progress_rounds = cursor.no_progress_rounds.saturating_add(1);
+            if cursor.no_progress_rounds >= RECONCILE_NO_PROGRESS_ROUND_LIMIT {
+                log::warn!(
+                    "daemon reconcile batch stalled rounds={} attempted={} deferred={} — continue on next event",
+                    cursor.no_progress_rounds,
+                    batch_requests,
+                    deferred
+                );
+                reconcile_incomplete = false;
+                cursor.no_progress_rounds = 0;
+            }
+        }
+    } else {
+        cursor.no_progress_rounds = 0;
     }
 
     if should_log_reconcile_summary(
