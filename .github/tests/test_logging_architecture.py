@@ -332,7 +332,7 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("is_mount_current", daemon)
         loop = section(
             daemon,
-            "for (index, plan) in plans.iter().enumerate() {",
+            "for offset in 0..plans.len() {",
             "\n    if should_log_reconcile_summary(",
         )
         # 跳过必须排在 Prewarm/MissingOnly 分支之前，否则那些分支会先放行。

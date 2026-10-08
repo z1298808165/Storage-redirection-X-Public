@@ -154,6 +154,11 @@ impl RegularAppMonitor {
         self.config_version
     }
 
+    /// 返回监视器 inotify fd，供 daemon 事件循环阻塞等待文件事件。
+    pub fn event_fd(&self) -> i32 {
+        self.fd
+    }
+
     pub fn reconfigure(&mut self, config: &SettingsHub, force: bool) {
         self.refresh_max_watches();
         let version = config.config_version();

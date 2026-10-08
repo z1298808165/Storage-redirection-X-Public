@@ -12,7 +12,7 @@ pub(crate) use crate::fuse_host_control::spawn_host_control_loop;
 use crate::fuse_host_control::{close_host_control_fd, set_host_control_fd};
 use crate::platform::paths;
 use std::ffi::{CStr, CString};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// 宿主挂载点：放在模块私有目录下，不落在任何存储别名上，避免与应用命名空间发生传播耦合。
@@ -39,6 +39,8 @@ const HOST_RECOVERY_BACKOFF_MS: u64 = 5_000;
 const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";
 
 static LAST_RECOVERY_ATTEMPT_MS: AtomicI64 = AtomicI64::new(0);
+static HOST_PIDFD: AtomicI32 = AtomicI32::new(-1);
+static HOST_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// 可替换的全局共享宿主会话句柄。
 ///
 /// 共享宿主子进程可能独立退出；使用可写槽位允许 daemon 在下一轮 reconcile 中
@@ -355,6 +357,23 @@ pub struct HostAttach {
     pub host_start_time_ticks: u64,
 }
 
+/// 探测宿主自身挂载点是否仍然可达。
+///
+/// attach 上报的 ENOTCONN 有两类来源：宿主 FUSE endpoint 已死（进程假活、连接已断），
+/// 或目标应用 namespace 里残留的死挂载层（路径解析穿过它时报错，宿主本身健康）。
+/// 宿主挂载点位于 daemon/companion 自身可访问的模块目录内，stat 它不经过任何应用
+/// 视图，是区分两类故障最直接的探针。两类故障的处理完全不同：前者必须撤销快照并
+/// 终止假活宿主；后者杀宿主只会触发"恢复→再被杀"的循环，把能力快照的退避越推越深。
+fn host_endpoint_alive(view: &HostSessionView) -> bool {
+    let Ok(c_path) = CString::new(view.mount_point.as_str()) else {
+        return false;
+    };
+    let mut buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path 是 NUL 结尾的合法路径；buf 指向本栈帧的未初始化缓冲，stat 返回 0
+    // 时由内核完整写入。
+    unsafe { libc::stat(c_path.as_ptr(), buf.as_mut_ptr()) == 0 }
+}
+
 /// 把应用的存储视图接入共享宿主会话。
 ///
 /// 要点有两个，都是"看起来能跑、实际不生效"的类型：
@@ -430,16 +449,45 @@ pub fn attach_app_to_host(view: &HostSessionView, target_root: &str) -> Option<H
         Some(code) => {
             let reason = reap_host_child(child);
             if code == -libc::ENOTCONN {
-                // 接入子进程在目标路径确认可达后仍收到 move_mount ENOTCONN：宿主 FUSE
-                // 连接已死而进程未退（假活）。终止它，自愈通道在下一轮重建新会话；
-                // 本进程若无权终止（或已退出），僵尸态/实例判活会兜底。
+                // 接入子进程在目标路径确认可达后仍收到 move_mount ENOTCONN。ENOTCONN 有两类
+                // 来源：宿主 FUSE endpoint 已死（进程假活），或目标应用 namespace 里残留的
+                // 死挂载层（路径解析穿过它时报错；"dead layer invisible" 形态挂在祖先路径上，
+                // mountinfo 中没有该精确路径的条目，接入子进程既看不见也不敢清理）。
+                // 杀宿主前必须先探测宿主自己的挂载点：宿主健康时故障在目标侧，杀掉它只会
+                // 触发"恢复→再被同样的接入失败杀掉"的循环，并把能力快照的退避越推越深。
                 log::warn!(
                     "fuse host attach reports dead conn child={} host={} source={}",
                     child,
                     view.child_pid,
                     view.mount_source
                 );
-                terminate_host_process(view.child_pid);
+                if host_endpoint_alive(view) {
+                    log::warn!(
+                        "fuse host attach target-side dead layer host={} target={} host_endpoint=alive keep_session=true",
+                        view.child_pid,
+                        target_root
+                    );
+                    // 宿主存活并正在服务其它应用，本身就是设备 FUSE 能力可用的铁证。
+                    // 该应用自身的 namespace 脏（目标侧死层）不代表设备能力故障：若不在此
+                    // 复位，脏应用回退 scoped fork 的失败会按设备级失败累积，多个脏应用
+                    // 连续失败即把整机推入 Unavailable+退避；退避期间一切 FUSE 尝试被
+                    // 关闭、没有成功可以复位，窗口粘住直到退避到期，期间启动的应用全部
+                    // 被迫 namespace 回退。
+                    crate::fuse_redirect::config::record_fuse_capability_result(
+                        true,
+                        "host_alive_target_dirty",
+                        "srx_fuse_host",
+                    );
+                } else {
+                    // endpoint 已确认失效时立即撤销同代际快照并终止假活宿主，自愈通道在
+                    // 下一轮重建新会话；本进程若无权终止（或已退出），僵尸态/实例判活兜底。
+                    revoke_host_snapshot(
+                        "attach_endpoint_unreachable",
+                        view.child_pid,
+                        view.child_start_time_ticks,
+                    );
+                    terminate_host_process(view.child_pid);
+                }
             }
             log::warn!(
                 "fuse host attach not ready child={} code={} stage={} {}",
@@ -1203,19 +1251,54 @@ fn clear_dead_srx_layers_at_target(target: &str) -> bool {
             );
             return removed > 0;
         }
-        let Ok(c_target) = CString::new(target) else {
-            return removed > 0;
-        };
-        // SAFETY: c_target 是 NUL 结尾的合法路径；MNT_DETACH 只把该层标记为懒摘除，
-        // 不会向死连接发起任何 I/O，也不影响该挂载点之下的其它层。
-        if unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) } != 0 {
+
+        // 失效的系统 FUSE 主别名本身可能无法作为 umount2 的解析路径（返回 ENOTCONN），
+        // 但同一应用命名空间通常还保留 /mnt/user、/mnt/pass_through 等系统别名。它们
+        // 指向同一用户存储视图，且不穿过失效的 /storage/emulated/0 dentry；先验证别名
+        // 顶层挂载仍是本模块，再从可达别名执行 MNT_DETACH，避免按路径盲卸系统挂载。
+        let mut detach_targets = vec![target.to_string()];
+        if let Some(relative) = storage_alias_relative_path(target) {
+            for alias_root in crate::platform::paths::storage_alias_roots_for_user(0) {
+                let alias = if relative.is_empty() {
+                    alias_root
+                } else {
+                    format!("{alias_root}/{relative}")
+                };
+                if alias != target && !detach_targets.iter().any(|path| path == &alias) {
+                    detach_targets.push(alias);
+                }
+            }
+        }
+        let mut detached_target = None;
+        for candidate in detach_targets {
+            let Some(candidate_live) = crate::mount_ledger::topmost_live_mount(0, &candidate)
+            else {
+                continue;
+            };
+            if !crate::fuse_redirect::config::is_srx_session_fuse(
+                &candidate_live.fs_type,
+                &candidate_live.source,
+            ) {
+                continue;
+            }
+            let Ok(c_candidate) = CString::new(candidate.as_str()) else {
+                continue;
+            };
+            // SAFETY: c_candidate 是 NUL 结尾的合法路径；MNT_DETACH 只标记已确认归属
+            // 的本模块挂载层，不会向 FUSE endpoint 发起文件 I/O。
+            if unsafe { libc::umount2(c_candidate.as_ptr(), libc::MNT_DETACH) } == 0 {
+                detached_target = Some(candidate);
+                break;
+            }
+        }
+        let Some(detached_target) = detached_target else {
             log_errno("fuse host attach dead layer detach failed");
             return removed > 0;
-        }
+        };
         removed += 1;
         log::warn!(
             "fuse host attach dead layer detached target={} source={} errno={}",
-            target,
+            detached_target,
             live.source,
             errno
         );
@@ -1226,6 +1309,12 @@ fn clear_dead_srx_layers_at_target(target: &str) -> bool {
         removed
     );
     removed > 0
+}
+
+fn storage_alias_relative_path(target: &str) -> Option<String> {
+    let root = crate::platform::paths::storage_user_root_for_user(0);
+    let relative = target.strip_prefix(&root)?;
+    Some(relative.trim_start_matches('/').to_string())
 }
 
 /// 只负责关闭 fd 的小包装：命名空间与挂载点句柄在多条失败分支上都要关闭。
@@ -1559,6 +1648,16 @@ fn recv_host_ready(sock: libc::c_int, timeout_sec: i64) -> Option<i32> {
 
 /// 设置全局宿主会话句柄（daemon 启动时调用一次）。
 pub fn set_global(host: FuseHost) {
+    // SAFETY: SYS_pidfd_open 只按 pid 创建内核 fd，第三个实参 0u32 是无标志常量，
+    // 不接触调用方内存；返回值经 as 转换为 c_int，失败时为负 errno。
+    let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, host.child_pid, 0u32) as libc::c_int };
+    let old_pidfd = HOST_PIDFD.swap(pidfd, Ordering::AcqRel);
+    if old_pidfd >= 0 {
+        // SAFETY: old_pidfd 是此前由 pidfd_open 创建并原子换出的有效 fd；swap 之后
+        // 本进程不再持有任何引用，close 只释放该 fd，不会与其它线程竞争。
+        unsafe { libc::close(old_pidfd) };
+    }
+    HOST_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut reg) = HOST_REGISTRY.lock() {
         *reg = Some((host.child_pid, std::collections::BTreeMap::new()));
     }
@@ -1572,12 +1671,22 @@ pub fn set_global(host: FuseHost) {
     // 只能靠文件发现宿主会话。uid 策略指纹表从空开始，随后随登记递增。
     // quality-allow(chinese-language): 下方固定字段名属于跨进程快照协议。
     publish_host_snapshot(&view);
+    // 宿主会话建立即 FUSE 能力可用的最强证据：会话本身持有活的 FUSE 挂载并完成策略
+    // 注册。MediaProvider 重启触发的宿主换代期间，各应用的接入失败会快速累积设备级
+    // 失败计数与指数退避；不在新会话就绪时立即复位，换代窗口后启动的应用会继续按
+    // unavailable 走 namespace 回退，即使宿主已经健康存活。
+    crate::fuse_redirect::config::record_fuse_capability_result(
+        true,
+        "host_session_ready",
+        "srx_fuse_host",
+    );
 }
 
 /// daemon 侧登记台账：当前宿主会话 pid + 已登记 uid 集合。
 ///
 /// 快照文件是唯一跨进程事实源，内存台账只是它的写入缓存；宿主会话重建时整体替换。
 static HOST_REGISTRY: Mutex<Option<(i32, std::collections::BTreeMap<u32, u64>)>> = Mutex::new(None);
+static HOST_SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
 
 fn registered_policy_snapshot() -> std::collections::BTreeMap<u32, u64> {
     HOST_REGISTRY
@@ -1592,7 +1701,29 @@ fn registered_policy_snapshot() -> std::collections::BTreeMap<u32, u64> {
 }
 
 /// 原子重写宿主会话快照。companion 只读，必须看到自洽内容：先写临时文件再 rename。
+fn revoke_host_snapshot(reason: &str, child_pid: i32, child_start_time_ticks: u64) {
+    let _guard = HOST_SNAPSHOT_LOCK.lock().ok();
+    let path = std::path::Path::new(crate::platform::module_paths::FUSE_HOST_SNAPSHOT_FILE);
+    let expected_pid = format!("pid={child_pid}");
+    let expected_start = format!("start_ticks={child_start_time_ticks}");
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let matches_identity = content.lines().any(|line| line == expected_pid)
+        && content.lines().any(|line| line == expected_start);
+    if matches_identity {
+        let _ = std::fs::remove_file(path);
+        log::warn!(
+            "fuse host snapshot revoked reason={} pid={} start_ticks={}",
+            reason,
+            child_pid,
+            child_start_time_ticks
+        );
+    }
+}
+
 fn publish_host_snapshot(view: &HostSessionView) {
+    let _guard = HOST_SNAPSHOT_LOCK.lock().ok();
     use std::io::Write;
     let path = std::path::Path::new(crate::platform::module_paths::FUSE_HOST_SNAPSHOT_FILE);
     let tmp = path.with_extension("snapshot.tmp");
@@ -1688,7 +1819,20 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
         return None;
     }
     if !crate::platform::is_process_instance_alive(child_pid, child_start_time_ticks) {
+        revoke_host_snapshot("process_dead", child_pid, child_start_time_ticks);
         return None;
+    }
+    // 宿主进程可能仍存活，但 MediaProvider 重启后其 FUSE endpoint 已经失效；仅凭
+    // pid/start_ticks 会把旧快照继续交给 companion，最终在 move_mount 处得到 ENOTCONN。
+    // 私有宿主挂载点是最便宜且不依赖应用 namespace 的健康探针，失效时先撤销快照，
+    // 让新接入回退 scoped，等 daemon 重建并重新发布新代际后再接入共享宿主。
+    if let Err(error) = std::fs::metadata(&mount_point) {
+        let errno = error.raw_os_error();
+        if errno == Some(libc::ENOTCONN) || errno == Some(libc::EIO) || errno == Some(libc::ENOENT)
+        {
+            revoke_host_snapshot("endpoint_unreachable", child_pid, child_start_time_ticks);
+            return None;
+        }
     }
     Some(HostSessionView {
         child_pid,
@@ -1699,11 +1843,32 @@ pub fn read_host_session_view() -> Option<HostSessionView> {
     })
 }
 
+/// 等待宿主快照文件发生变化。
+///
+/// daemon 通过临时文件 rename 原子发布快照，监听其父目录才能同时覆盖新建、替换和轮换；
+/// inotify 不可用时保留有界的短暂 sleep 作为兼容 fallback。调用方每次返回后都会重新读取
+/// 并校验快照，因此事件丢失不会改变 fail-closed 语义。
+fn wait_for_host_snapshot_change(timeout_ms: i64, ready: impl Fn() -> bool) {
+    let snapshot = crate::platform::module_paths::FUSE_HOST_SNAPSHOT_FILE;
+    let Some(waiter) = crate::platform::inotify::FileChangeWaiter::new(&[snapshot]) else {
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms.max(1) as u64));
+        return;
+    };
+    // 建立 watch 之后必须复核就绪条件：调用方上次读取与 inotify_add_watch 之间发生的
+    // 发布事件会落在 watch 建立之前，不复核会把本可立即完成的登记变成一轮全额等待。
+    if ready() {
+        return;
+    }
+    let deadline = crate::platform::paths::monotonic_ms().saturating_add(timeout_ms.max(1));
+    let _ = waiter.wait_until(deadline);
+}
+
 /// companion 侧有界等待：直到指定 uid 的当前策略已被 daemon 预登记进宿主会话。
 ///
-/// 预登记由 daemon 周期 reconcile 完成（约 3 秒一轮），因此等待预算必须覆盖它。
-/// 等待的是"当前策略就绪"而不是"会话存在"或 UID 曾登记——旧策略会把配置切换后的
-/// 请求路由到错误后端。超时或处于失败冷却期返回 `None`，调用方回退旧 scoped 规划。
+/// 预登记由 daemon 周期 reconcile 与配置/控制事件唤醒共同完成，等待预算必须覆盖
+/// 事件驱动的最坏情形。等待的是"当前策略就绪"而不是"会话存在"或 UID 曾登记——
+/// 旧策略会把配置切换后的请求路由到错误后端。超时或处于失败冷却期返回 `None`，
+/// 调用方回退旧 scoped 规划。
 pub fn wait_for_host_session_view(uid: i32, policy_fingerprint: u64) -> Option<HostSessionView> {
     if !host_attach_enabled() {
         return None;
@@ -1739,19 +1904,33 @@ pub fn wait_for_host_session_view(uid: i32, policy_fingerprint: u64) -> Option<H
             );
             return None;
         }
-        std::thread::sleep(std::time::Duration::from_millis(
-            HOST_WAIT_POLL_INTERVAL_MS as u64,
-        ));
+        let remaining = deadline.saturating_sub(current);
+        wait_for_host_snapshot_change(remaining, || {
+            read_host_session_view()
+                .and_then(|view| view.policy_fingerprints.get(&(uid as u32)).copied())
+                == Some(policy_fingerprint)
+        });
     }
 }
 
 pub fn clear_if_dead() -> bool {
+    clear_if_dead_with_reason("health_check")
+}
+
+pub(crate) fn clear_if_dead_with_reason(reason: &str) -> bool {
+    let mut dead_pid = None;
     let cleared = host_slot()
         .write()
         .ok()
         .map(|mut s| {
             // 仅当槽位里的宿主句柄确实失效时才清除，避免误伤正在使用的会话。
-            let dead = s.as_ref().is_some_and(|host| host_is_dead(host));
+            let dead = s.as_ref().is_some_and(|host| {
+                let dead = host_is_dead(host);
+                if dead {
+                    dead_pid = Some(host.child_pid);
+                }
+                dead
+            });
             if dead {
                 *s = None;
             }
@@ -1761,8 +1940,37 @@ pub fn clear_if_dead() -> bool {
     if cleared {
         // 会话已死，控制端不再有对端；一并丢弃，避免后续注册请求写到死会话。
         close_host_control_fd();
+        let old_pidfd = HOST_PIDFD.swap(-1, Ordering::AcqRel);
+        if old_pidfd >= 0 {
+            // SAFETY: old_pidfd 是此前由 pidfd_open 创建并原子换出的有效 fd；swap 之后
+            // 本进程不再有任何引用，close 只释放该 fd，不会与其它线程竞争。
+            unsafe { libc::close(old_pidfd) };
+        }
+        HOST_GENERATION.fetch_add(1, Ordering::AcqRel);
+        log::warn!(
+            "fuse host invalidated reason={} child={} generation={}",
+            reason,
+            dead_pid.unwrap_or(-1),
+            HOST_GENERATION.load(Ordering::Acquire)
+        );
     }
     cleared
+}
+
+/// 返回宿主代际；宿主每次重建或失效都会变化。
+pub fn generation() -> u64 {
+    HOST_GENERATION.load(Ordering::Acquire)
+}
+
+/// 返回宿主 pidfd，供 daemon 事件循环等待宿主退出。
+pub fn pidfd() -> i32 {
+    HOST_PIDFD.load(Ordering::Acquire)
+}
+
+/// 返回 daemon 当前持有的宿主身份，用于识别应用状态文件里的旧会话。
+pub fn current_identity() -> Option<(i32, u64)> {
+    let host = host_slot().read().ok()?.as_ref()?.clone();
+    host_is_alive(&host).then_some((host.child_pid, host.child_start_time_ticks))
 }
 
 /// 获取当前仍存活的宿主会话句柄。
@@ -1812,7 +2020,6 @@ pub fn ensure_global() -> bool {
 /// 冷却到期后再允许一次完整等待，宿主恢复后自然接上。
 const HOST_WAIT_BUDGET_MS: u64 = 6_000;
 const HOST_WAIT_FAIL_COOLDOWN_MS: i64 = 30_000;
-const HOST_WAIT_POLL_INTERVAL_MS: i64 = 250;
 static LAST_HOST_WAIT_FAIL_MS: AtomicI64 = AtomicI64::new(0);
 
 /// 有界等待共享宿主会话就绪，供 Auto 模式挂载规划在宿主未就绪时调用。
@@ -1861,8 +2068,7 @@ pub fn wait_for_host_session() -> bool {
             );
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(
-            HOST_WAIT_POLL_INTERVAL_MS as u64,
-        ));
+        let remaining = deadline.saturating_sub(current);
+        wait_for_host_snapshot_change(remaining, || get_fuse_host().is_some());
     }
 }

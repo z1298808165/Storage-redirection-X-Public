@@ -829,7 +829,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("pre_register_host_policy(&plan.request)", daemon_main)
         self.assertLess(
             daemon_main.index("pre_register_host_policy(&plan.request)"),
-            daemon_main.index("for (index, plan) in plans.iter().enumerate()"),
+            daemon_main.index("let start_index = if uses_batch_cursor"),
             "daemon 必须在执行挂载计划前预登记策略，供 companion 快照发现",
         )
         daemon_src = read_daemon_mount_module()

@@ -20,8 +20,10 @@ static CHANGED_PACKAGES: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 fn changed_packages() -> &'static Mutex<BTreeSet<String>> {
     CHANGED_PACKAGES.get_or_init(|| Mutex::new(BTreeSet::new()))
 }
-const CHANGE_DEBOUNCE_MS: u64 = 100;
-const POLL_INTERVAL_MS: u64 = 25;
+/// 原子保存只接受最终 `.json` 事件，短防抖用于合并同一保存产生的 close/move 事件。
+/// 保持在单数字毫秒，避免给主 daemon 的事件循环增加可感知延迟。
+const CHANGE_DEBOUNCE_MS: u64 = 5;
+const POLL_INTERVAL_MS: u64 = 1;
 
 // 初始化 inotify 并添加监听，返回 fd（用于 exempt）
 // 必须在 pre_app_specialize 阶段调用（此时有 root 权限）
@@ -48,6 +50,12 @@ pub fn init(config_dir: &str) -> i32 {
     fd
 }
 
+/// 返回 daemon 配置 watcher fd，供阻塞式事件循环直接等待。
+#[allow(dead_code)] // quality-allow(lint-suppression): 仅 daemon 二进制目标消费，cdylib 目标不运行主循环。
+pub fn event_fd() -> i32 {
+    INOTIFY_FD.load(Ordering::Acquire)
+}
+
 // inotify_event 需要 4 字节对齐；内核保证每个事件总长度是 sizeof(int) 的倍数，
 // 因此缓冲区起始 4 字节对齐后，后续每个事件也满足对齐要求。
 // 使用 4096 字节容纳多个事件，避免 1024 字节时单次 read 截断。
@@ -65,7 +73,8 @@ impl InotifyBuf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeKind {
     None,
-    Full,
+    /// 全局配置发生变化；同时携带同批次发现的 app 包名，用于优先处理。
+    Full(Vec<String>),
     Apps(Vec<String>),
 }
 
@@ -131,18 +140,14 @@ pub fn poll_changed_with_packages() -> ChangeKind {
         return ChangeKind::None;
     }
     LAST_CHANGE_MS.store(now_ms, Ordering::Relaxed);
-    if full_change {
-        if let Ok(mut packages) = changed_packages().lock() {
-            packages.clear();
-        }
-        return ChangeKind::Full;
-    }
     let packages = changed_packages()
         .lock()
         .map(|mut values| std::mem::take(&mut *values).into_iter().collect())
         .unwrap_or_default();
+    if full_change {
+        return ChangeKind::Full(packages);
+    }
     ChangeKind::Apps(packages)
-
 }
 
 fn add_watch(fd: c_int, path: &str) -> bool {
@@ -157,7 +162,8 @@ fn add_watch_with_id(fd: c_int, path: &str) -> Option<i32> {
     (wd >= 0).then_some(wd)
 }
 
-// 仅处理非目录的 .json 文件事件
+// 仅处理非目录的最终 .json 文件事件；原子保存产生的 .tmp 事件必须忽略，
+// 否则一次 apps/<package>.json 保存会被错误升级为全量重载。
 fn is_config_event(event: &Event<'_>) -> bool {
     if (event.mask & libc::IN_ISDIR) != 0 {
         return false;
@@ -167,5 +173,5 @@ fn is_config_event(event: &Event<'_>) -> bool {
     {
         return name.trim_end_matches('\0').ends_with(".json");
     }
-    true
+    false
 }

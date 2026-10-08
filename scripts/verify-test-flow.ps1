@@ -303,6 +303,57 @@ try {
     Write-Step "运行设备场景套件"
     $env:MODULE_ZIP = $moduleZip
     $env:APP_APK = $testAppApk
+    if ($env:SRX_DETACHED_SCENARIOS -match '^(1|true|TRUE|yes|YES)$') {
+        # 脱离模式：交互式执行器约 120 秒回收其会话派生的全部进程——Start-Process 子进程
+        # 与 adb server 都在同一 Job 对象里，中途被杀后设备锁与配置恢复不会执行。彻底
+        # 方案：场景段打包成 wrapper 脚本，经 WMI Win32_Process.Create 由 WMI 服务代为
+        # 创建进程，完全脱离工具会话的进程树与 Job，可一直运行到结束。
+        # wrapper 内部用 Start-Process -Wait 隔离运行场景脚本：脚本以 `exit` 结束，
+        # 直接 & 调用会连带终止 wrapper，退出码标记将无人写入。
+        $runRoot = Join-Path $buildRoot "scenario-run"
+        New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
+        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+        $stdout = Join-Path $runRoot "stdout-$stamp.log"
+        $stderr = Join-Path $runRoot "stderr-$stamp.log"
+        $exitFile = Join-Path $runRoot "exit-$stamp.txt"
+        $wrapper = Join-Path $runRoot "wrapper-$stamp.ps1"
+        Remove-Item -LiteralPath $exitFile -Force -ErrorAction SilentlyContinue
+        $scenarioScript = Join-Path $RepoRoot ".github/tests/run-storage-redirect-scenarios.ps1"
+        $adbPath = (Get-Command adb -ErrorAction Stop).Source
+        $pwshPath = (Get-Command pwsh -ErrorAction Stop).Source
+        # WMI 进程不继承工具会话环境，PATH 与关键变量必须显式烘焙进 wrapper。
+        $escapedPath = ($env:Path -replace "'", "''")
+        $wrapperLines = @(
+            "`$ErrorActionPreference = 'Continue'",
+            "Set-Location '$RepoRoot'",
+            "`$env:Path = '$escapedPath'",
+            "`$env:SRT_FAIL_FAST = '0'"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
+            $wrapperLines += "`$env:SRT_SCENARIOS = '$($env:SRT_SCENARIOS -replace "'", "''")'"
+        }
+        $wrapperLines += @(
+            "# adb server 若由工具会话派生会随 Job 回收中途死亡；先杀掉再由本进程树重建。",
+            "& '$adbPath' kill-server 2>`$null",
+            "& '$adbPath' start-server 2>`$null",
+            "`$proc = Start-Process -FilePath '$pwshPath' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','$scenarioScript') -WindowStyle Hidden -RedirectStandardOutput '$stdout' -RedirectStandardError '$stderr' -PassThru -Wait",
+            "`$code = if (`$null -ne `$proc.ExitCode) { `$proc.ExitCode } else { 1 }",
+            "Set-Content -LiteralPath '$exitFile' -Value `$code",
+            "exit `$code"
+        )
+        Write-Utf8LfFile -Path $wrapper -Content (($wrapperLines -join "`n") + "`n")
+        $commandLine = "`"$pwshPath`" -NoProfile -ExecutionPolicy Bypass -File `"$wrapper`""
+        $creation = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
+        if ($creation.ReturnValue -ne 0) { Fail "WMI 进程创建失败 ReturnValue=$($creation.ReturnValue)" }
+        $childPid = $creation.ProcessId
+        $meta = "pid=$childPid`nexit_file=$exitFile`nstdout=$stdout`nstderr=$stderr`nwrapper=$wrapper"
+        Write-Utf8LfFile -Path (Join-Path $runRoot "run-$stamp.txt") -Content ($meta + "`n")
+        Write-Host "场景子进程已脱离启动 pid=$childPid"
+        Write-Host "stdout=$stdout"
+        Write-Host "stderr=$stderr"
+        Write-Host "exit_marker=$exitFile"
+        exit 0
+    }
     & pwsh -NoProfile -ExecutionPolicy Bypass -File ".github/tests/run-storage-redirect-scenarios.ps1"
     if ($LASTEXITCODE -ne 0) { Fail "设备场景套件执行失败。" }
 } finally {

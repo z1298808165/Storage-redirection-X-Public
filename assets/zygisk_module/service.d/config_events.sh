@@ -1126,6 +1126,48 @@ handle_config_changes() {
   rm -f "$reload_list_file"
 }
 
+wait_for_package_event_notification() {
+  # PackageEventReceiver 以追加写入事件日志，并在安装成功时覆盖 ready 文件。
+  # 正常路径阻塞在 inotifyd，不再无条件每两秒醒来；ready 文件可能在 receiver
+  # 崩溃后残留，因此每隔较长时间重新校验一次进程状态，保留 fallback 的恢复能力。
+  notification_timeout_seconds="${PACKAGE_EVENT_NOTIFICATION_TIMEOUT_SECONDS:-5}"
+  # FIFO 不放在 LOGS_DIR 内，否则目录监听会被自身创建/删除事件反复唤醒。
+  notification_fifo="$MODDIR/.package_event_notify.$$"
+  rm -f "$notification_fifo"
+  if ! mkfifo "$notification_fifo" 2>/dev/null; then
+    # 极旧系统没有 mkfifo 时，回退到短暂睡眠，调用方随后仍会执行 ready/fallback 检查。
+    sleep "$notification_timeout_seconds"
+    return 1
+  fi
+
+  inotifyd - \
+    "$LOGS_DIR":wcmdn > "$notification_fifo" 2>/dev/null &
+  notification_pid="$!"
+  notification_elapsed=0
+  notification_status=1
+  while [ "$notification_elapsed" -lt "$notification_timeout_seconds" ]; do
+    event_line=""
+    IFS= read -t 1 -r event_line < "$notification_fifo"
+    read_status="$?"
+    if [ "$read_status" -eq 0 ]; then
+      # 目录内还有 running/media/debug 日志；只有包事件日志轮换/写入或 ready
+      # 文件变化才会唤醒业务处理，避免诊断采样把 fallback collector 变成热循环。
+      case "$event_line" in
+        *"package_events.log"*|*".package_event_receiver_ready"*)
+          notification_status=0
+          break
+          ;;
+      esac
+      continue
+    fi
+    notification_elapsed=$((notification_elapsed + 1))
+  done
+  kill "$notification_pid" 2>/dev/null || true
+  wait "$notification_pid" 2>/dev/null || true
+  rm -f "$notification_fifo"
+  [ "$notification_status" -eq 0 ]
+}
+
 start_package_event_collector() {
   (
     mkdir -p "$APPS_CONFIG_DIR"
@@ -1140,6 +1182,16 @@ start_package_event_collector() {
     package_poll_ticks="$package_poll_interval_ticks"
     while true; do
       process_package_event_log_delta
+
+      if is_package_event_receiver_ready; then
+        # receiver 可用时，包事件日志是权威来源；等待文件写入事件，避免空闲轮询。
+        if ! wait_for_package_event_notification; then
+          sleep 1
+        fi
+        continue
+      fi
+
+      # receiver 尚未安装或当前失效时，保留低频包列表扫描作为外部系统兜底。
       if is_auto_new_apps_package_poll_eligible; then
         package_poll_ticks=$((package_poll_ticks + 1))
         if [ "$package_poll_ticks" -ge "$package_poll_interval_ticks" ]; then

@@ -118,8 +118,11 @@ daemon_watchdog() {
       kill_daemon_children
       sleep 1
       start_srx_daemon
+      # 重启后的第一次检查保持短间隔，尽快发现启动失败。
+      sleep 5
+      continue
     fi
-    sleep 20
+    sleep "${DAEMON_WATCHDOG_INTERVAL_SECONDS:-20}"
   done
 }
 

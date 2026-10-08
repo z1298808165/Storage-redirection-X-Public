@@ -36,6 +36,7 @@ const STUCK_MOUNT_SKIP_LOG_STEP: u64 = 32;
 static STUCK_MOUNT_CHILDREN: Lazy<Mutex<Vec<StuckMountChild>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
 static STUCK_MOUNT_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
+static STALE_HOST_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// 一个已被判定卡住、仍在等待回收的挂载子进程。
 struct StuckMountChild {
@@ -219,23 +220,115 @@ pub(crate) fn legacy_state_owner_is_alive(
 /// 随后立即退出，这些服务会被 init 收养。也就是说 daemon 既不能也不需要 `waitpid`
 /// 回收它们，`waitpid` 只会返回 ECHILD；判定存活只能查 `/proc/<pid>`。它们不会以
 /// 僵尸形式留在 daemon 名下，但 PID 仍可能被复用，因此还要比较启动时钟值。
+fn migrate_stale_shared_host_metadata(
+    state_path: &str,
+    request: &MountRequest,
+    current_identity: (i32, u64),
+) -> bool {
+    let current_source = format!("srx_fuse_host[{}]", current_identity.0);
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+    let Some(live_root) = crate::mount_identity::topmost_live_mount(request.pid, &storage_root)
+    else {
+        return false;
+    };
+    if live_root.source != current_source
+        || !crate::fuse_host::is_current_host_source(&live_root.source)
+    {
+        return false;
+    }
+    let Some(mut ledger) = crate::mount_identity::load(&request.package_name, request.pid) else {
+        return false;
+    };
+    if ledger.mounts.is_empty() {
+        return false;
+    }
+    let mut migrated_mounts = Vec::with_capacity(ledger.mounts.len());
+    for mount in &ledger.mounts {
+        let Some(live) = crate::mount_identity::topmost_live_mount(request.pid, &mount.mount_point)
+        else {
+            return false;
+        };
+        if live.source != current_source {
+            return false;
+        }
+        migrated_mounts.push(crate::mount_ledger::MountIdentity {
+            mount_point: mount.mount_point.clone(),
+            mount_id: live.mount_id,
+            source: live.source,
+        });
+    }
+    ledger.generation = ledger.generation.saturating_add(1);
+    ledger.detach_attempts = 0;
+    ledger.mounts = migrated_mounts;
+    if !crate::mount_ledger::save(&ledger) {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(state_path) else {
+        return false;
+    };
+    let updated = content
+        .lines()
+        .map(|line| {
+            if line.starts_with("fuse_host=") {
+                format!("fuse_host={}:{}", current_identity.0, current_identity.1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temp_path = format!("{state_path}.tmp");
+    if std::fs::write(&temp_path, format!("{updated}\n")).is_err()
+        || std::fs::rename(&temp_path, state_path).is_err()
+    {
+        let _ = std::fs::remove_file(&temp_path);
+        return false;
+    }
+    log::info!(
+        "daemon migrated stale shared host metadata pkg={} pid={} old_state={} current_source={} generation={}",
+        request.package_name,
+        request.pid,
+        state_path,
+        current_source,
+        ledger.generation
+    );
+    true
+}
+
 pub(crate) fn has_dead_fuse_child(state_path: &str, request: &MountRequest) -> bool {
     // 接入共享宿主会话的挂载不写 `fuse_child=`，只有 `fuse_host=`。会话死亡时本应用留下的
     // 是一条 ENOTCONN 死挂载：路径仍在挂载表里、状态看上去健康，但访问全部失败。必须让它
     // 与 scoped 子进程消失走同一判定——视为状态失效，触发重挂并在重挂里换到新会话。
     if let Some(host) = read_fuse_host_session(state_path) {
-        if host
+        let process_alive = host
             .start_time_ticks
-            .is_some_and(|start| crate::platform::is_process_instance_alive(host.pid, start))
+            .is_some_and(|start| crate::platform::is_process_instance_alive(host.pid, start));
+        let current_identity = crate::fuse_host::current_identity();
+        let belongs_to_current_host =
+            current_identity == host.start_time_ticks.map(|start| (host.pid, start));
+        if process_alive && belongs_to_current_host {
+            return false;
+        }
+        if let Some(current) = current_identity
+            && !belongs_to_current_host
+            && migrate_stale_shared_host_metadata(state_path, request, current)
         {
             return false;
         }
-        log::warn!(
-            "daemon fuse host session gone host_pid={} app_pid={} pkg={}, remount pending",
-            host.pid,
-            request.pid,
-            request.package_name
-        );
+        let log_count = STALE_HOST_LOG_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if log_count <= 8 || log_count.is_multiple_of(64) {
+            log::warn!(
+                "daemon fuse host session stale recorded_pid={} recorded_start={:?} current={:?} process_alive={} app_pid={} pkg={} remount_pending_count={}",
+                host.pid,
+                host.start_time_ticks,
+                current_identity,
+                process_alive,
+                request.pid,
+                request.package_name,
+                log_count
+            );
+        }
         return true;
     }
 

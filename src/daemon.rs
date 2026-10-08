@@ -21,11 +21,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// 主循环只负责读取 watcher/control 事件并在事件到达后调度 reconcile；实际周期兜底仍由
-/// [`PERIODIC_RECONCILE_INTERVAL_MS`] 控制，因此缩短这里不会增加空闲时的 /proc 扫描。
-/// 配置 watcher 的 debounce 为 100ms；主循环留出 250ms 轮询窗口即可保持亚秒级热重载，
-/// 同时把空闲唤醒从 10 次/秒降到 4 次/秒。周期兜底仍由 [`PERIODIC_RECONCILE_INTERVAL_MS`] 控制。
-const RECONCILE_INTERVAL_MS: u64 = 250;
 /// 周期兜底 reconcile 的间隔。应用启动由 companion 主动挂载 + register-policy 定点
 /// 登记，配置变更由 inotify 监听，开机由全量预登记兜底——这些都不依赖周期轮询。
 /// 周期轮询只剩「补挂 companion 未处理的进程 / 宿主重建后重新接入 / 清理退出残留」
@@ -36,9 +31,10 @@ const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 30_000;
 /// 独立节流，不随周期 reconcile 一起触发，避免空闲时每个周期都扫描状态目录和 /proc。
 const PRUNE_INTERVAL_MS: i64 = 30_000;
 const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
-const FILE_MONITOR_POLL_MS: u64 = 100;
 /// 降级路径单轮最多连续排空的次数，避免挤占同一循环内的 reconcile。
 const FALLBACK_DRAIN_ROUNDS: usize = 4;
+/// 全量 reconcile 的单轮预算。超过后把剩余计划留给下一轮，给配置/控制事件让路。
+const RECONCILE_BATCH_MAX_PLANS: usize = 1;
 const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
@@ -116,8 +112,19 @@ struct FileMonitorSync {
     signal_lock: Mutex<()>,
     /// 监视线程完成一轮配置同步后唤醒等待方。
     progress_signal: Condvar,
-    /// 等待方登记重建请求后唤醒监视线程。
+    /// 兼容同步等待方的请求通知；事件线程主要依赖下面的 eventfd。
     request_signal: Condvar,
+    /// eventfd 是监视线程的事件源，避免为重建请求周期性超时唤醒。
+    request_event_fd: i32,
+}
+
+impl Drop for FileMonitorSync {
+    fn drop(&mut self) {
+        if self.request_event_fd >= 0 {
+            // SAFETY: eventfd 由该同步对象创建并独占持有，Drop 后不再有等待线程使用它。
+            unsafe { libc::close(self.request_event_fd) };
+        }
+    }
 }
 
 impl FileMonitorSync {
@@ -136,6 +143,17 @@ impl FileMonitorSync {
     /// 登记重建请求后唤醒监视线程。
     fn notify_request(&self) {
         let _guard = self.lock_signal();
+        if self.request_event_fd >= 0 {
+            let value = 1u64.to_ne_bytes();
+            // SAFETY: eventfd 接受固定 8 字节计数值；fd 由 FileMonitorSync 持有至 daemon 结束。
+            unsafe {
+                libc::write(
+                    self.request_event_fd,
+                    value.as_ptr() as *const libc::c_void,
+                    value.len(),
+                );
+            }
+        }
         self.request_signal.notify_all();
     }
 
@@ -187,6 +205,45 @@ enum ReconcileMode {
     /// 与 `Full` 的区别是**不做幂等跳过**：诊断与测试流要的就是「立刻按当前配置重挂一遍」，
     /// 若这里也跳过，显式请求会静默变成空操作。
     Forced,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReconcilePlanIdentity {
+    package_name: String,
+    pid: i32,
+    uid: i32,
+    start_time_ticks: Option<u64>,
+}
+
+#[derive(Default)]
+struct ReconcileCursor {
+    last_attempted: Option<ReconcilePlanIdentity>,
+}
+
+impl ReconcileCursor {
+    fn next_start_index(&self, identities: &[ReconcilePlanIdentity]) -> usize {
+        if identities.is_empty() {
+            return 0;
+        }
+        self.last_attempted.as_ref().map_or(0, |last| {
+            identities
+                .iter()
+                .position(|identity| identity == last)
+                .map_or_else(
+                    || {
+                        identities
+                            .iter()
+                            .position(|identity| identity > last)
+                            .unwrap_or(0)
+                    },
+                    |index| (index + 1) % identities.len(),
+                )
+        })
+    }
+
+    fn advance(&mut self, plan: &ReconcilePlan) {
+        self.last_attempted = Some(plan.identity());
+    }
 }
 
 struct DaemonInstanceLock {
@@ -293,13 +350,13 @@ pub fn main_entry() -> i32 {
 
     // 建立共享宿主 FUSE 会话。失败只记录并继续，不影响主循环与既有 scoped 路径；
     // 后续 reconcile 会在宿主子进程死亡后按需恢复，而不是继续使用失效句柄。
-    if crate::fuse_host::ensure_global() {
+    if !crate::fuse_host::ensure_global() {
+        log::warn!("fuse host session unavailable, scoped path remains active");
+    } else {
         // 宿主就绪后立即全量预登记所有已配置应用：让应用冷启动时无需等待 reconcile
         // 轮询到该进程，就能从宿主快照确认 uid 并接入共享会话，避免 scoped 竞态与
         // 启动窗口。宿主未就绪时跳过（此时预登记必然失败，逐个触发等待反而拖慢启动）。
         pre_register_all_configured_apps(&config, config.config_version());
-    } else {
-        log::warn!("fuse host session unavailable, scoped path remains active");
     }
 
     let mut last_version = 0;
@@ -307,6 +364,11 @@ pub fn main_entry() -> i32 {
     let mut last_periodic_reconcile_ms = crate::platform::paths::monotonic_ms();
     let mut round: usize = 0;
     let mut pending_full_reconcile = false;
+    let mut reconcile_cursor = ReconcileCursor::default();
+    let mut last_host_generation = crate::fuse_host::generation();
+    // SAFETY: eventfd 只创建内核对象并返回 fd，不接触调用方内存；标志位均为合法常量。
+    let control_wake_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    crate::log_daemon::set_daemon_wake_eventfd(control_wake_fd);
     let file_monitor_sync = start_file_monitor_thread();
     let mut fallback_file_monitor = file_monitor_sync.is_none().then(RegularAppMonitor::new);
     loop {
@@ -316,13 +378,19 @@ pub fn main_entry() -> i32 {
             return 0;
         }
         let before = config.config_version();
-        let (did_reload, changed_packages) =
+        let (did_reload, changed_packages, full_change) =
             reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
         let current = config.config_version();
         let control_reconcile = crate::log_daemon::take_reconcile_request();
         let policy_register = crate::log_daemon::take_policy_register_request();
         let periodic_reconcile = should_periodic_reconcile(&mut last_periodic_reconcile_ms);
-        let should_reconcile = round < INITIAL_RECONCILE_ROUNDS
+        let host_generation = crate::fuse_host::generation();
+        let host_changed = host_generation != last_host_generation;
+        if host_changed {
+            last_host_generation = host_generation;
+        }
+        let should_reconcile = host_changed
+            || round < INITIAL_RECONCILE_ROUNDS
             || did_reload
             || current != last_version
             || current != before
@@ -339,9 +407,15 @@ pub fn main_entry() -> i32 {
             let mode = if control_reconcile.is_some() {
                 pending_full_reconcile = false;
                 ReconcileMode::Forced
+            } else if host_changed {
+                pending_full_reconcile = true;
+                ReconcileMode::Full
+            } else if full_change {
+                // global/filter 变化必须全量，但同批 apps 包会在计划排序时优先处理。
+                ReconcileMode::Full
             } else if changed_packages.is_some() {
-                // 单个 apps/<package>.json 变化只处理该包，不能再排队一次全量 Full。
-                pending_full_reconcile = false;
+                // 单个 apps/<package>.json 变化只处理该包；若此前已有未完成全量批次，
+                // 保留 pending 标记，待该增量事件完成后继续剩余全量计划。
                 ReconcileMode::Full
             } else if pending_full_reconcile {
                 pending_full_reconcile = false;
@@ -354,13 +428,32 @@ pub fn main_entry() -> i32 {
             } else {
                 ReconcileMode::Full
             };
-            let mounts_changed = reconcile_running_apps(current, mode, changed_packages.as_deref());
+            let (mounts_changed, reconcile_incomplete) = reconcile_running_apps(
+                current,
+                mode,
+                changed_packages.as_deref(),
+                full_change,
+                &mut reconcile_cursor,
+            );
+            if reconcile_incomplete {
+                // 仅全量路径可以安全在下一轮继续；apps/<package>.json 增量路径已限制为
+                // 目标包，不把未完成批次升级成全量重挂。
+                pending_full_reconcile = true;
+            }
             if let Some(request) = control_reconcile.as_deref() {
-                log::info!(
-                    "running app remount completed request={} applied={}",
-                    request,
-                    mounts_changed
-                );
+                if reconcile_incomplete {
+                    log::info!(
+                        "running app remount batch deferred request={} applied={}",
+                        request,
+                        mounts_changed
+                    );
+                } else {
+                    log::info!(
+                        "running app remount completed request={} applied={}",
+                        request,
+                        mounts_changed
+                    );
+                }
             }
             if mounts_changed {
                 if let Some(sync) = file_monitor_sync.as_ref() {
@@ -384,11 +477,108 @@ pub fn main_entry() -> i32 {
             }
         }
         round = round.saturating_add(1);
-        thread::sleep(Duration::from_millis(RECONCILE_INTERVAL_MS));
+        let host_exited = wait_for_daemon_events(
+            watcher::event_fd(),
+            pending_full_reconcile,
+            crate::fuse_host::pidfd(),
+            control_wake_fd,
+        );
+        if host_exited {
+            let cleared = crate::fuse_host::clear_if_dead_with_reason("pidfd");
+            pending_full_reconcile = true;
+            log::warn!(
+                "daemon shared fuse host exit event observed cleared={} recovery scheduled",
+                cleared
+            );
+        }
     }
 }
 
+/// 阻塞等待配置事件；超时后返回主循环执行低频宿主/状态兜底。
+///
+/// inotify fd 可读时下一轮会立即解析增量配置；watcher 不可用时退回有限超时，
+/// 保留 fingerprint fallback 和周期自愈，不会因事件源失效而永久停摆。
+fn wait_for_daemon_events(
+    config_watch_fd: i32,
+    reconcile_pending: bool,
+    host_pidfd: i32,
+    control_wake_fd: i32,
+) -> bool {
+    let timeout_ms: libc::c_int = if reconcile_pending { 0 } else { 30_000 };
+    if config_watch_fd < 0 && host_pidfd < 0 && control_wake_fd < 0 {
+        if timeout_ms > 0 {
+            thread::sleep(Duration::from_millis(timeout_ms as u64));
+        }
+        return false;
+    }
+    let mut fds = [
+        libc::pollfd {
+            fd: config_watch_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: host_pidfd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: control_wake_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    let nfds = if config_watch_fd >= 0 {
+        3
+    } else if control_wake_fd >= 0 {
+        3
+    } else {
+        2
+    };
+    // SAFETY: fds 指向已初始化 pollfd 数组；超时只是低频兜底，不持有 Rust 借用跨调用。
+    let result = unsafe { libc::poll(fds.as_mut_ptr(), nfds, timeout_ms) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINTR) {
+            return false;
+        }
+        log::warn!(
+            "daemon event poll failed error={} config_fd={} host_pidfd={} control_fd={}",
+            error,
+            config_watch_fd,
+            host_pidfd,
+            control_wake_fd
+        );
+        return false;
+    }
+    let host_revents = fds[1].revents;
+    if host_pidfd >= 0 && host_revents != 0 {
+        log::info!(
+            "daemon host pidfd event poll_result={} pidfd={} revents={:#x}",
+            result,
+            host_pidfd,
+            host_revents
+        );
+    }
+    if control_wake_fd >= 0 && (fds[2].revents & libc::POLLIN) != 0 {
+        let mut value = 0u64;
+        // SAFETY: eventfd read buffer固定为8字节；daemon 独占该唤醒 fd。
+        unsafe {
+            libc::read(
+                control_wake_fd,
+                &mut value as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
+    host_pidfd >= 0
+        && fds[1].fd == host_pidfd
+        && (host_revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0
+}
+
 fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
+    // SAFETY: eventfd 只创建内核对象并返回 fd，不接触调用方内存；标志位均为合法常量。
+    let request_event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     let sync = Arc::new(FileMonitorSync {
         configured_version: AtomicU64::new(0),
         requested_rebuild: AtomicU64::new(0),
@@ -396,6 +586,7 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
         signal_lock: Mutex::new(()),
         progress_signal: Condvar::new(),
         request_signal: Condvar::new(),
+        request_event_fd,
     });
     let thread_sync = Arc::clone(&sync);
     let spawn_result = thread::Builder::new()
@@ -420,7 +611,7 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                 // 达到单轮预算时队列里仍有事件，立即进入下一轮继续排空，不等轮询间隔，
                 // 避免把"防止饿死重建"变成"事件延迟一个周期"。
                 if !file_monitor.drain_events() {
-                    thread_sync.wait_new_request(Duration::from_millis(FILE_MONITOR_POLL_MS));
+                    wait_for_file_monitor_events(&thread_sync, &file_monitor);
                 }
             }
             log::info!("daemon file monitor stop reason=runtime_disabled");
@@ -430,6 +621,43 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
         return None;
     }
     Some(sync)
+}
+
+fn wait_for_file_monitor_events(sync: &FileMonitorSync, monitor: &RegularAppMonitor) {
+    if monitor.event_fd() < 0 && sync.request_event_fd < 0 {
+        std::thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let mut fds = [
+        libc::pollfd {
+            fd: monitor.event_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: sync.request_event_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // inotify 是主事件源，eventfd 唤醒配置重建；30 秒超时只作为 runtime disable 的兜底。
+    // SAFETY: fds 是本栈帧上的合法 pollfd 数组，poll 只在其中写入 revents；
+    // nfds_t 转换不会截断（数组长度恒为 2）。
+    let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 30_000) };
+    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        return;
+    }
+    if fds[1].revents & libc::POLLIN != 0 && sync.request_event_fd >= 0 {
+        let mut value = 0u64;
+        // SAFETY: eventfd read buffer固定为8字节，fd由同步状态持有。
+        unsafe {
+            libc::read(
+                sync.request_event_fd,
+                &mut value as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
 }
 
 fn request_file_monitor_rebuild(sync: &FileMonitorSync) {
@@ -465,27 +693,32 @@ fn should_prewarm_reconcile(
 fn reload_config_for_daemon(
     config: &SettingsHub,
     last_fingerprint_check_ms: &mut i64,
-) -> (bool, Option<Vec<String>>) {
+) -> (bool, Option<Vec<String>>, bool) {
     match watcher::poll_changed_with_packages() {
         watcher::ChangeKind::Apps(packages) => {
             *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
-            return (config.reload_force(), Some(packages));
+            return (config.reload_force(), Some(packages), false);
         }
-        watcher::ChangeKind::Full => {
+        watcher::ChangeKind::Full(priority_packages) => {
             *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
-            return (config.reload_force(), None);
+            return (config.reload_force(), Some(priority_packages), true);
         }
         watcher::ChangeKind::None => {}
     }
 
     let now_ms = crate::platform::paths::monotonic_ms();
     if now_ms.saturating_sub(*last_fingerprint_check_ms) < CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS {
-        return (false, None);
+        return (false, None, false);
     }
 
     *last_fingerprint_check_ms = now_ms;
     let before = config.config_version();
-    (config.config_version() != before, None)
+    let _ = config.reload_if_changed();
+    (
+        config.config_version() != before,
+        None,
+        config.config_version() != before,
+    )
 }
 
 /// 按 [`PRUNE_INTERVAL_MS`] 节流执行三类过期记录清理。
@@ -510,7 +743,9 @@ fn reconcile_running_apps(
     config_version: u64,
     mode: ReconcileMode,
     changed_packages: Option<&[String]>,
-) -> bool {
+    full_change: bool,
+    cursor: &mut ReconcileCursor,
+) -> (bool, bool) {
     // 共享宿主死亡时先尝试恢复；失败则让各挂载请求继续走 scoped FUSE 回退。
     // 该动作只在 reconcile 入口执行一次，避免每个应用计划重复 fork 宿主。
     let _host_ready = crate::fuse_host::ensure_global();
@@ -521,6 +756,8 @@ fn reconcile_running_apps(
     let mut disabled = 0usize;
     let mut skipped = 0usize;
     let mut deferred = 0usize;
+    let mut batch_requests = 0usize;
+    let mut reconcile_incomplete = false;
     let mut plans = Vec::new();
     let mut media_processes = Vec::new();
     let mut media_like_names: Vec<String> = Vec::new();
@@ -531,7 +768,8 @@ fn reconcile_running_apps(
         if !seen.insert(proc.pid) {
             continue;
         }
-        if let Some(packages) = changed_packages
+        if !full_change
+            && let Some(packages) = changed_packages
             && !packages.iter().any(|package| package == &proc.package_name)
         {
             continue;
@@ -559,20 +797,38 @@ fn reconcile_running_apps(
         ));
     }
 
-    media_hook_heal::heal_if_needed(SettingsHub::instance(), &media_processes, &media_like_names);
-
-    // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
-    let media_ready = !media_processes.is_empty();
-    let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
-    media_pids.sort_unstable();
-    let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *last_media_pids != media_pids {
-        *last_media_pids = media_pids;
-        drop(last_media_pids);
-        invalidate_pre_registered_host_policies();
-    }
+    // 单个 apps/<package>.json 增量事件不改变 MediaProvider 进程集合；跳过媒体自愈和
+    // PID 换代判定，避免一次 MT 配置切换清空全局宿主预登记缓存并触碰媒体视图。
+    let media_related_change = full_change
+        || changed_packages.is_none()
+        || changed_packages.is_some_and(|packages| {
+            packages.iter().any(|package| {
+                media_hook_heal::is_media_provider_process(package)
+                    || package.contains("providers.media")
+                    || package.contains("process.media")
+            })
+        });
+    let media_ready = if media_related_change {
+        media_hook_heal::heal_if_needed(
+            SettingsHub::instance(),
+            &media_processes,
+            &media_like_names,
+        );
+        // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
+        let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
+        media_pids.sort_unstable();
+        let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *last_media_pids != media_pids {
+            *last_media_pids = media_pids;
+            drop(last_media_pids);
+            invalidate_pre_registered_host_policies();
+        }
+        !media_processes.is_empty()
+    } else {
+        false
+    };
 
     // 开机全量预登记在 boot 早期执行时，MediaProvider 尚未重建应用私有目录、SELinux
     // 标签未就位，沙箱目录 mkdir 会失败（冷启动应用回退 scoped）。等 MediaProvider
@@ -582,35 +838,77 @@ fn reconcile_running_apps(
         pre_register_all_configured_apps(SettingsHub::instance(), config_version);
     }
 
-    // companion 与 daemon 可能同时为同一应用发起挂载。先登记本轮 Auto 应用策略，
-    // 让 companion 能从宿主快照确认 uid 后直接接入共享会话，而不是因快照尚未更新回退 scoped。
-    // 只有本次真正发生登记动作才记日志；指纹命中跳过时保持静默，避免稳态刷屏。
-    for plan in &plans {
-        if crate::daemon_mount::pre_register_host_policy(&plan.request)
-            == crate::daemon_mount::PreRegisterOutcome::Registered
-        {
-            log::debug!(
-                "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
-                plan.request.pid,
-                plan.request.uid,
-                plan.request.package_name
-            );
+    let incremental_change = changed_packages.is_some() && !full_change;
+    let uses_batch_cursor = !incremental_change && mode != ReconcileMode::Forced;
+
+    // companion 与 daemon 可能同时为同一应用发起挂载。全量路径先登记本轮 Auto 应用策略，
+    // 让 companion 能从宿主快照确认 uid 后直接接入共享会话。单包增量路径由快速热更新或
+    // 完整挂载流程各自完成一次策略注册，跳过这里，避免同一 MT 切换重复触碰宿主控制通道。
+    if !incremental_change {
+        for plan in &plans {
+            if crate::daemon_mount::pre_register_host_policy(&plan.request)
+                == crate::daemon_mount::PreRegisterOutcome::Registered
+            {
+                log::debug!(
+                    "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
+                    plan.request.pid,
+                    plan.request.uid,
+                    plan.request.package_name
+                );
+            }
         }
     }
 
-    if mode == ReconcileMode::Prewarm {
-        plans.sort_by_key(|plan| plan.priority());
+    plans.sort_by_key(|plan| plan.identity());
+    if full_change {
+        if let Some(priority_packages) = changed_packages {
+            plans.sort_by_key(|plan| {
+                (
+                    if priority_packages
+                        .iter()
+                        .any(|package| package == &plan.request.package_name)
+                    {
+                        0u8
+                    } else {
+                        1u8
+                    },
+                    plan.identity(),
+                )
+            });
+        }
+    } else if mode == ReconcileMode::Prewarm {
+        plans.sort_by_key(|plan| (plan.priority(), plan.identity()));
     }
 
-    for (index, plan) in plans.iter().enumerate() {
-        // 幂等跳过必须排在其它分支之前：配置未变且挂载健康时，任何模式下的重挂都只会叠加挂载层。
-        // `Forced`（显式请求）例外——诊断与测试流要的就是无条件重挂。
+    let start_index = if uses_batch_cursor && !(full_change && changed_packages.is_some()) {
+        cursor.next_start_index(
+            &plans
+                .iter()
+                .map(ReconcilePlan::identity)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        0
+    };
+    for offset in 0..plans.len() {
+        let index = (start_index + offset) % plans.len();
+        let plan = &plans[index];
+        // 增量配置必须先尝试共享宿主 fast update：companion 可能已经把状态文件指纹
+        // 更新为新配置，若先走幂等跳过，会把“策略尚未登记”误判成 current，宿主仍持有旧
+        // UID 策略，随后应用访问映射路径只得到 ENOENT。fast update 成功后无需重挂；失败
+        // 才继续下面的幂等判定与完整恢复路径。
+        if incremental_change && crate::daemon_mount::try_fast_update_shared_host(&plan.request) {
+            applied += 1;
+            continue;
+        }
+        // 幂等跳过必须排在完整挂载分支之前：配置未变且挂载健康时，任何模式下的重挂都只会
+        // 叠加挂载层。`Forced`（显式请求）例外——诊断与测试流要的就是无条件重挂。
         if mode != ReconcileMode::Forced && plan.should_skip_as_current() {
             skipped += 1;
             continue;
         }
         if mode == ReconcileMode::Prewarm
-            && (index >= PREWARM_MAX_REQUESTS || !plan.should_run_in_prewarm())
+            && (offset >= PREWARM_MAX_REQUESTS || !plan.should_run_in_prewarm())
         {
             deferred += 1;
             continue;
@@ -619,6 +917,22 @@ fn reconcile_running_apps(
             skipped += 1;
             continue;
         }
+        if !incremental_change
+            && mode != ReconcileMode::Forced
+            && batch_requests >= RECONCILE_BATCH_MAX_PLANS
+        {
+            deferred += 1;
+            reconcile_incomplete = true;
+            continue;
+        }
+        batch_requests += 1;
+        // 无论后续快速更新或完整挂载成功与否，都把当前计划记为已尝试；失败由
+        // reconcile_incomplete 保证下一轮重试，但不会再次占住本轮唯一 slot。
+        if uses_batch_cursor {
+            cursor.advance(plan);
+        }
+        // 共享宿主 fast update 已在幂等判定之前执行；走到这里表示宿主快速更新失败，
+        // 后续完整清理/重建路径负责恢复挂载和策略。
         // 恢复动作由账本归属与端点健康共同决定：被判定为"不摘除"或"已收敛"的命名空间
         // 不能继续注入，否则就是在死连接上叠加新的挂载层。这里在真正执行前取一次监督结论，
         // 既作为执行门禁，也把判定依据写进日志。
@@ -639,12 +953,18 @@ fn reconcile_running_apps(
                         crate::runtime_stats::record_runtime_activation();
                     }
                     applied += 1;
+                } else if uses_batch_cursor {
+                    reconcile_incomplete = true;
                 }
             }
             MountOperation::Disable => {
-                if plan.has_mount_state && execute_mount_request(&plan.request) {
-                    disabled += 1;
-                } else if !plan.has_mount_state {
+                if plan.has_mount_state {
+                    if execute_mount_request(&plan.request) {
+                        disabled += 1;
+                    } else if uses_batch_cursor {
+                        reconcile_incomplete = true;
+                    }
+                } else {
                     skipped += 1;
                 }
             }
@@ -677,11 +997,12 @@ fn reconcile_running_apps(
             log::info!("daemon supervisor {}", summary.render());
         }
     }
-    applied > 0 || disabled > 0
+    (applied > 0 || disabled > 0, reconcile_incomplete)
 }
 
 struct ReconcilePlan {
     request: MountRequest,
+    start_time_ticks: Option<u64>,
     has_mount_state: bool,
     /// 状态健康且记录的配置指纹与当前配置一致：本轮配置已经落地。
     is_mount_current: bool,
@@ -695,10 +1016,21 @@ impl ReconcilePlan {
             has_mount_state(&request)
         };
         let is_mount_current = crate::daemon_mount::has_current_mount_state(&request);
+        let start_time_ticks = crate::platform::process_start_time_ticks(request.pid);
         Self {
             request,
+            start_time_ticks,
             has_mount_state,
             is_mount_current,
+        }
+    }
+
+    fn identity(&self) -> ReconcilePlanIdentity {
+        ReconcilePlanIdentity {
+            package_name: self.request.package_name.clone(),
+            pid: self.request.pid,
+            uid: self.request.uid,
+            start_time_ticks: self.start_time_ticks,
         }
     }
 

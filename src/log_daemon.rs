@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,6 +63,24 @@ const STATS_SCHEMA: &str = "2";
 
 static RECONCILE_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static POLICY_REGISTER_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static DAEMON_WAKE_EVENTFD: AtomicI32 = AtomicI32::new(-1);
+
+pub fn set_daemon_wake_eventfd(fd: i32) {
+    DAEMON_WAKE_EVENTFD.store(fd, Ordering::Release);
+}
+
+fn wake_daemon() {
+    let fd = DAEMON_WAKE_EVENTFD.load(Ordering::Acquire);
+    if fd >= 0 {
+        let value = 1u64.to_ne_bytes();
+        // SAFETY: fd 是登记过的有效 eventfd；write 只写入 8 字节计数，即使并发
+        // 唤醒叠加也只是把计数累加，不存在缓冲区越界。失败时保留既有轮询兜底，
+        // 不需要处理返回值。
+        unsafe {
+            libc::write(fd, value.as_ptr() as *const libc::c_void, value.len());
+        }
+    }
+}
 
 fn reconcile_request_slot() -> &'static Mutex<Option<String>> {
     RECONCILE_REQUEST.get_or_init(|| Mutex::new(None))
@@ -454,6 +473,7 @@ impl LogState {
                 if let Ok(mut request) = reconcile_request_slot().lock() {
                     // quality-allow(chinese-language): legacy 是控制协议的固定请求标识，供旧调用方保留完成日志语义。
                     *request = Some("legacy".to_string());
+                    wake_daemon();
                 }
             }
             command if command.starts_with("reconcile-running:") => {
@@ -463,6 +483,7 @@ impl LogState {
                 {
                     // quality-allow(chinese-language): token 来自控制协议，作为机器匹配字段必须保持原值。
                     *request = Some(token.to_string());
+                    wake_daemon();
                 }
             }
             command if command.starts_with(CONTROL_REGISTER_POLICY_PREFIX) => {

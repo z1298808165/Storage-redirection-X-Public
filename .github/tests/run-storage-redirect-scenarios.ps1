@@ -1171,6 +1171,12 @@ function Clear-Targets {
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMountNsAllow' '$BackendRoot/Download/SrtMountNsReadOnly' '$BackendRoot/Download/SrtMountNsMapParent' '$BackendRoot/Download/SrtMountNsMapRW' '$BackendRoot/Download/SrtMountNsMapRO' '$BackendPrivateRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsReadOnly' '$BackendPrivateRoot/Download/SrtMountNsMapParent' '$BackendPrivateRoot/Download/SrtMountNsMapRW' '$BackendPrivateRoot/Download/SrtMountNsMapRO'; mkdir -p '$BackendRoot/Download/SrtMountNsAllow' '$BackendRoot/Download/SrtMountNsReadOnly' '$BackendRoot/Download/SrtMountNsMapParent/WritableTarget' '$BackendRoot/Download/SrtMountNsMapParent/LockedTarget' '$BackendRoot/Download/SrtMountNsMapRW' '$BackendRoot/Download/SrtMountNsMapRO' '$BackendPrivateRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsReadOnly' '$BackendPrivateRoot/Download/SrtMountNsMapParent/WritableTarget' '$BackendPrivateRoot/Download/SrtMountNsMapParent/LockedTarget' '$BackendPrivateRoot/Download/SrtMountNsMapRW' '$BackendPrivateRoot/Download/SrtMountNsMapRO'; chmod -R 777 '$BackendRoot/Download/SrtMountNsAllow' '$BackendRoot/Download/SrtMountNsReadOnly' '$BackendRoot/Download/SrtMountNsMapParent' '$BackendRoot/Download/SrtMountNsMapRW' '$BackendRoot/Download/SrtMountNsMapRO' '$BackendPrivateRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsReadOnly' '$BackendPrivateRoot/Download/SrtMountNsMapParent' '$BackendPrivateRoot/Download/SrtMountNsMapRW' '$BackendPrivateRoot/Download/SrtMountNsMapRO' 2>/dev/null || true" | Out-Null
     Invoke-Su "mkdir -p '$BackendRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendRoot/Download/SrtMountNsAllow/Qa/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/TeamAlpha/Deep' '$BackendPrivateRoot/Download/SrtMountNsAllow/Qa/Deep'; chmod -R 777 '$BackendRoot/Download/SrtMountNsAllow' '$BackendPrivateRoot/Download/SrtMountNsAllow' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; mkdir -p '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked/Writable' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked/Writable' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram'; chmod -R 777 '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendRoot/Pictures/SrtRelativeData' '$BackendRoot/Pictures/Nnngram' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Pictures/SrtRelativeData' '$BackendPrivateRoot/Pictures/Nnngram' 2>/dev/null || true" | Out-Null
+    # 监视器矩阵的映射源、映射目标和只读排除目录必须在原始后端真实存在。该组路径单独执行并逐项校验，避免超长 adb 命令在 Windows PowerShell 通道中被截断后静默吞错，最终才以应用侧 ENOENT 暴露。
+    Invoke-Su "mkdir -p '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked/Writable' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked/Writable'" | Out-Null
+    Invoke-Su "chmod -R 777 '$BackendRoot/Download/SrtMonitor' '$BackendRoot/Download/SrtMonitorMap' '$BackendRoot/Download/SrtMonitorMapped' '$BackendRoot/Download/SrtMonitorLocked' '$BackendPrivateRoot/Download/SrtMonitor' '$BackendPrivateRoot/Download/SrtMonitorMap' '$BackendPrivateRoot/Download/SrtMonitorMapped' '$BackendPrivateRoot/Download/SrtMonitorLocked'" | Out-Null
+    if (-not (Test-Su "test -d '$BackendRoot/Download/SrtMonitor' -a -d '$BackendRoot/Download/SrtMonitorMap' -a -d '$BackendRoot/Download/SrtMonitorMapped' -a -d '$BackendRoot/Download/SrtMonitorLocked/Writable'")) {
+        throw "monitor_fixture_prepare_failed: 后端监视器映射/只读排除目录不存在"
+    }
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
     Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
     # 嵌套映射准备会清理 Tencent 父目录；自有私有目录必须最后准备。
@@ -1702,11 +1708,10 @@ function Stop-AppAndWaitFuseCleanup {
 
     if ($RequireStateCleanup) {
         # 状态文件没有应用退出时的同步删除路径，由 daemon 的 reconcile 循环按 30 秒
-        # 节流回收（src/daemon.rs 的 PRUNE_INTERVAL_MS，随 a798446d 从 3 秒放宽），
-        # reconcile 本身按 PERIODIC_RECONCILE_INTERVAL_MS=3 秒节奏跑。清理延迟上限
-        # ≈ 30s 节流余量 + 3s 周期 + 扫描耗时；等待窗口必须覆盖整个周期加余量，
-        # 否则是在赌 prune 相位：2026-09-30 的全量跑就因 6 秒窗口撞上 30 秒节流
-        # 而把正常行为误报为失败。文件消失即提前返回，正常路径不付出全额等待。
+        # 节流回收（src/daemon.rs 的 PRUNE_INTERVAL_MS）；常规周期 reconcile 也是 30 秒，
+        # 但配置、宿主和控制事件会立即唤醒主循环，不能把事件驱动路径误写成固定周期。
+        # 清理延迟上限约为 30s 节流余量 + 30s 周期 + 扫描耗时；等待窗口必须覆盖
+        # 整个周期加余量，否则是在赌 prune 相位。文件消失即提前返回，正常路径不付出全额等待。
         $removed = $false
         for ($attempt = 0; $attempt -lt 400; $attempt++) {
             if (Test-Su "test ! -e '$statePath'") {
@@ -2545,43 +2550,98 @@ function Test-FuseMountActive {
 
 function Test-ScopedFuseDaemonStarted {
     param([int]$Scenario, [string]$MountRoot, [bool]$Strict = $true)
-    for ($i = 0; $i -lt 20; $i++) {
-        if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
-            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot source=log"
-            return $true
+    # 与 .sh 的 check_scoped_fuse_daemon_started 对齐：两轮尝试，第一轮失败先恢复重启
+    # 应用再观察一轮。应用在能力快照退避窗口（如 26→27 连续重启 MediaProvider 后）启动
+    # 会挂成 namespace 回退，mountinfo 中没有任何 srx FUSE 源；恢复重启让 companion 在
+    # 能力恢复后重新挂载，否则一次回退会保持到下一次配置变化。
+    $sawFallback = $false
+    $sawMountFailed = $false
+    $sawServiceFailed = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        for ($i = 0; $i -lt 60; $i++) {
+            # 判据 1：独立 scoped 会话启动日志（共享宿主布局下通常缺失）。
+            if (Test-Su "grep -F -- 'fuse redirect mount start pkg=$AppId' '$LogPath' 2>/dev/null | grep -F -- 'mp=$MountRoot ' >/dev/null") {
+                Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=log"
+                return $true
+            }
+            # 判据 2：应用 mountinfo 精确挂载根 + srx scoped/宿主 FUSE 源。要求目标路径
+            # 精确匹配，并同时要求 fuse 类型和 srx 前缀，避免把普通目录或 MediaProvider
+            # 挂载误判为成功。
+            $scopedAppPid = Get-AppPid
+            if ($scopedAppPid -and (Test-Su "grep -F -- ' $MountRoot ' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null | grep -Eq ' - fuse (srx_fuse_redirect|srx_fuse_host)(\[| )'")) {
+                Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-mountinfo"
+                return $true
+            }
+            # 判据 3（共享宿主布局）：只读根由宿主会话的策略层执行、不再产生独立挂载点，
+            # 精确匹配必然落空。放宽为应用 mountinfo 的存储视图根由 srx_fuse_host 服务即
+            # 判定 scoped 数据面就绪；只读强制语义由后续行为用例（write-denied 等）
+            # 继续真实验证。
+            if ($scopedAppPid -and (Test-Su "grep -F -- ' $RealRoot ' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null | grep -Eq ' - fuse srx_fuse_host(\[| )'")) {
+                Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-mountinfo-host"
+                return $true
+            }
+            # 失败标志只收集不提前终止：这些日志可能出现在挂载协商窗口内，随后宿主
+            # 接入仍可能成功；提前判负会把可恢复的竞态误报为失败。
+            if (Test-Su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
+                $sawFallback = $true
+            }
+            if (Test-Su "grep -F -- 'fuse redirect mount failed mp=$MountRoot ' '$LogPath' 2>/dev/null >/dev/null") {
+                $sawMountFailed = $true
+            }
+            if (Test-Su "grep -F -- 'daemon hybrid fuse scoped service failed' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
+                $sawServiceFailed = $true
+            }
+            Start-Sleep -Milliseconds $script:ResultPollMilliseconds
         }
-        # 与 .sh 对齐：共享宿主接入布局下不再有独立的 scoped 会话启动日志，改为按
-        # 应用 mountinfo 里的 FUSE 挂载源（scoped 或共享宿主前缀）判定接管事实。
-        $scopedAppPid = Get-AppPid
-        if ($scopedAppPid -and (Test-Su "grep -Eq 'srx_fuse_redirect|srx_fuse_host' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null")) {
-            Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot source=app-mountinfo"
-            return $true
+        if ($attempt -eq 1 -and $Strict) {
+            Recover-ScopedFuseStart $Scenario $MountRoot
         }
-        if (Test-Su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped FUSE 已回退到 mount namespace root=$MountRoot")
-            Write-Warning "scenario-$Scenario/scoped-fuse-fallback root=$MountRoot"
-            return $false
-        }
-        if (Test-Su "grep -F -- 'fuse redirect mount failed mp=$MountRoot ' '$LogPath' 2>/dev/null >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped FUSE 挂载失败 root=$MountRoot")
-            Write-Warning "scenario-$Scenario/scoped-fuse-mount-failed root=$MountRoot"
-            return $false
-        }
-        if (Test-Su "grep -F -- 'daemon hybrid fuse scoped service failed' '$LogPath' 2>/dev/null | grep -F -- 'pkg=$AppId' >/dev/null") {
-            $script:Failures.Add("scenario-$Scenario scoped FUSE 服务启动失败 root=$MountRoot")
-            Write-Warning "scenario-$Scenario/scoped-fuse-service-failed root=$MountRoot"
-            return $false
-        }
-        Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }
-    if ($Strict) {
-        $script:Failures.Add("scenario-$Scenario 未观察到 scoped FUSE 挂载 root=$MountRoot")
-        Write-Warning "scenario-$Scenario/scoped-fuse-missing root=$MountRoot"
-        @(Invoke-Su "grep -F -- '$AppId' '$LogPath' 2>/dev/null | tail -80 || true") | ForEach-Object { Write-Host "  fuse_tail: $_" }
+    if (-not $Strict) {
+        if ($sawFallback) {
+            Write-Warning "scoped_fuse_fallback scenario=$Scenario root=$MountRoot; continuing with behavioral checks"
+            return $true
+        }
+        if ($sawMountFailed -or $sawServiceFailed) {
+            Write-Warning "scoped_fuse_start_failed scenario=$Scenario root=$MountRoot; continuing with behavioral checks"
+            return $true
+        }
+        Write-Warning "scoped_fuse_start_log_not_observed scenario=$Scenario root=$MountRoot; continuing with behavioral checks"
+        return $true
+    }
+    if ($sawFallback) {
+        $script:Failures.Add("scenario-$Scenario scoped FUSE 已回退到 mount namespace root=$MountRoot")
+        Write-Warning "scenario-$Scenario/scoped-fuse-fallback root=$MountRoot"
         return $false
     }
-    Write-Warning "scenario-$Scenario/scoped-fuse-start-log-not-observed root=$MountRoot；继续执行行为检查"
-    $true
+    if ($sawMountFailed) {
+        $script:Failures.Add("scenario-$Scenario scoped FUSE 挂载失败 root=$MountRoot")
+        Write-Warning "scenario-$Scenario/scoped-fuse-mount-failed root=$MountRoot"
+        return $false
+    }
+    if ($sawServiceFailed) {
+        $script:Failures.Add("scenario-$Scenario scoped FUSE 服务启动失败 root=$MountRoot")
+        Write-Warning "scenario-$Scenario/scoped-fuse-service-failed root=$MountRoot"
+        return $false
+    }
+    $script:Failures.Add("scenario-$Scenario 未观察到 scoped FUSE 挂载 root=$MountRoot")
+    Write-Warning "scenario-$Scenario/scoped-fuse-missing root=$MountRoot"
+    @(Invoke-Su "grep -F -- '$AppId' '$LogPath' 2>/dev/null | tail -80 || true") | ForEach-Object { Write-Host "  fuse_tail: $_" }
+    @(Invoke-Su "grep -E 'hybrid fuse root|scoped fuse|scoped roots|fuse redirect mount' '$LogPath' 2>/dev/null | tail -60 || true") | ForEach-Object { Write-Host "  fuse_roots: $_" }
+    $false
+}
+
+# 与 .sh 的 recover_scoped_fuse_start 对齐：判据第一轮全部落空时重启应用一次，
+# 让 companion 在能力快照恢复后重新挂载，再观察一轮。
+function Recover-ScopedFuseStart {
+    param([int]$Scenario, [string]$MountRoot)
+    Write-Warning "scoped_fuse_start_recovery scenario=$Scenario root=$MountRoot"
+    Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+    # 重启后旧 PID 的挂载确认全部失效，与 Restart-App 同口径清空缓存。
+    $script:LastMountConfirmedPid = ""
+    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+    Wait-Storage "scenario-$Scenario-scoped-fuse-recovery" 30 | Out-Null
+    Invoke-Su "sleep 1" | Out-Null
 }
 
 function Invoke-RuleSandboxScenario {

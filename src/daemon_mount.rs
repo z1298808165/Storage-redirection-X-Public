@@ -437,6 +437,79 @@ pub(crate) fn module_mapped_into(pid: i32) -> Option<bool> {
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
     Some(maps.contains("storage.redirect.x"))
 }
+/// 在共享宿主挂载仍健康时，只更新按 UID 的宿主策略，不拆卸应用 namespace 挂载层。
+///
+/// 这是配置热重载的快速路径：宿主 FUSE 的策略是动态查表，规则变化不需要重新 fork
+/// scoped FUSE 或清理/重建整棵挂载栈。任何身份、端点或挂载源不匹配都返回 false，调用方
+/// 随后继续走完整的清理与回退流程。
+pub(crate) fn try_fast_update_shared_host(request: &MountRequest) -> bool {
+    if request.operation != MountOperation::Reload
+        || !matches!(
+            request.storage_backend_mode,
+            crate::config::StorageBackendMode::Auto
+        )
+    {
+        return false;
+    }
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+    let Some(live) = crate::mount_identity::topmost_live_mount(request.pid, &storage_root) else {
+        return false;
+    };
+    if !crate::fuse_host::is_current_host_source(&live.source)
+        || !matches!(
+            crate::fuse_supervisor::probe_endpoint(request.pid, &storage_root),
+            crate::fuse_supervisor::EndpointHealth::Healthy
+        )
+    {
+        return false;
+    }
+    let config = fuse_config_from_request(request, None, None);
+    if !crate::fuse_host::register_app_policy(&config, request.policy_fingerprint) {
+        return false;
+    }
+    if !refresh_mount_state_fingerprint(request) {
+        return false;
+    }
+    log::info!(
+        "daemon shared host policy hot-updated pid={} pkg={} source={} fingerprint={:016x}",
+        request.pid,
+        request.package_name,
+        live.source,
+        request.policy_fingerprint
+    );
+    true
+}
+
+fn refresh_mount_state_fingerprint(request: &MountRequest) -> bool {
+    let path = state_file_path(request);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let fingerprint = crate::config::SettingsHub::instance().config_fingerprint();
+    let mut replaced = false;
+    let updated = content
+        .lines()
+        .map(|line| {
+            if line.starts_with("fingerprint=") {
+                replaced = true;
+                format!("fingerprint={fingerprint}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !replaced {
+        return false;
+    }
+    let temp = format!("{path}.tmp");
+    if std::fs::write(&temp, format!("{updated}\n")).is_err() {
+        return false;
+    }
+    std::fs::rename(temp, path).is_ok()
+}
+
 pub fn execute_mount_request(request: &MountRequest) -> bool {
     let started_ms = monotonic_ms();
     let initial_state = if request.operation == MountOperation::Disable {
