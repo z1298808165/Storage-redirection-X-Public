@@ -103,12 +103,16 @@ daemon_watchdog() {
       exit 0
     fi
     daemon_alive=0
-    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
-      if [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "srx_daemon" ]; then
-        daemon_alive=1
-        break
-      fi
-    done
+    if [ -r "$daemon_pid_file" ] && daemon_process_matches "$(cat "$daemon_pid_file" 2>/dev/null)"; then
+      daemon_alive=1
+    else
+      for pid in $(pidof srx_daemon 2>/dev/null); do
+        if daemon_process_matches "$pid"; then
+          daemon_alive=1
+          break
+        fi
+      done
+    fi
     if [ "$daemon_alive" -eq 0 ]; then
       log -p w -t Boot "srx daemon watchdog: not running, cleanup and restart"
       kill_daemon_children

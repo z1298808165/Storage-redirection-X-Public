@@ -21,7 +21,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const RECONCILE_INTERVAL_MS: u64 = 1000;
+/// 主循环只负责读取 watcher/control 事件并在事件到达后调度 reconcile；实际周期兜底仍由
+/// [`PERIODIC_RECONCILE_INTERVAL_MS`] 控制，因此缩短这里不会增加空闲时的 /proc 扫描。
+/// 配置 watcher 的 debounce 为 100ms；主循环留出 250ms 轮询窗口即可保持亚秒级热重载，
+/// 同时把空闲唤醒从 10 次/秒降到 4 次/秒。周期兜底仍由 [`PERIODIC_RECONCILE_INTERVAL_MS`] 控制。
+const RECONCILE_INTERVAL_MS: u64 = 250;
 /// 周期兜底 reconcile 的间隔。应用启动由 companion 主动挂载 + register-policy 定点
 /// 登记，配置变更由 inotify 监听，开机由全量预登记兜底——这些都不依赖周期轮询。
 /// 周期轮询只剩「补挂 companion 未处理的进程 / 宿主重建后重新接入 / 清理退出残留」
@@ -312,7 +316,8 @@ pub fn main_entry() -> i32 {
             return 0;
         }
         let before = config.config_version();
-        let did_reload = reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
+        let (did_reload, changed_packages) =
+            reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
         let current = config.config_version();
         let control_reconcile = crate::log_daemon::take_reconcile_request();
         let policy_register = crate::log_daemon::take_policy_register_request();
@@ -328,11 +333,16 @@ pub fn main_entry() -> i32 {
             file_monitor.reconfigure(config, false);
         }
         if should_reconcile {
-            wait_for_file_monitor_version(file_monitor_sync.as_ref(), current);
+            // 监视器重建是后台最终一致任务，不能阻塞配置变化对应的挂载应用。
+            // 旧路径在这里同步等待最多 2 秒，正是 MT 开关后规则迟迟不生效的主要来源。
             policy::refresh_shared_uid_cache();
             let mode = if control_reconcile.is_some() {
                 pending_full_reconcile = false;
                 ReconcileMode::Forced
+            } else if changed_packages.is_some() {
+                // 单个 apps/<package>.json 变化只处理该包，不能再排队一次全量 Full。
+                pending_full_reconcile = false;
+                ReconcileMode::Full
             } else if pending_full_reconcile {
                 pending_full_reconcile = false;
                 ReconcileMode::Full
@@ -344,7 +354,7 @@ pub fn main_entry() -> i32 {
             } else {
                 ReconcileMode::Full
             };
-            let mounts_changed = reconcile_running_apps(current, mode);
+            let mounts_changed = reconcile_running_apps(current, mode, changed_packages.as_deref());
             if let Some(request) = control_reconcile.as_deref() {
                 log::info!(
                     "running app remount completed request={} applied={}",
@@ -422,38 +432,11 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
     Some(sync)
 }
 
-fn wait_for_file_monitor_version(sync: Option<&Arc<FileMonitorSync>>, version: u64) {
-    let Some(sync) = sync else {
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_millis(FILE_MONITOR_SYNC_TIMEOUT_MS as u64);
-    let synced = sync.wait_progress_until(deadline, || {
-        sync.configured_version.load(Ordering::Acquire) >= version
-    });
-    if !synced {
-        log::warn!(
-            "daemon file monitor config sync timeout expected={:x} actual={:x}",
-            version,
-            sync.configured_version.load(Ordering::Acquire)
-        );
-    }
-}
-
 fn request_file_monitor_rebuild(sync: &FileMonitorSync) {
-    let requested = sync.requested_rebuild.fetch_add(1, Ordering::AcqRel) + 1;
+    // 监视树重建只影响后续文件监视，不影响当前应用挂载策略；异步排队后立即返回，
+    // 避免把一次 MT 配置切换再阻塞在最多 2 秒的监视器 ACK 上。
+    sync.requested_rebuild.fetch_add(1, Ordering::AcqRel);
     sync.notify_request();
-    let deadline = Instant::now() + Duration::from_millis(FILE_MONITOR_SYNC_TIMEOUT_MS as u64);
-    let rebuilt = sync.wait_progress_until(deadline, || {
-        sync.completed_rebuild.load(Ordering::Acquire) >= requested
-    });
-    if !rebuilt {
-        // 超时说明监视线程这轮没能跟上，主循环会在下一轮 reconcile 再次登记请求。
-        log::warn!(
-            "daemon file monitor rebuild sync timeout requested={} completed={}",
-            requested,
-            sync.completed_rebuild.load(Ordering::Acquire)
-        );
-    }
 }
 
 fn should_periodic_reconcile(last_reconcile_ms: &mut i64) -> bool {
@@ -479,21 +462,30 @@ fn should_prewarm_reconcile(
     round < PREWARM_RECONCILE_ROUNDS || did_reload || current != last_version || current != before
 }
 
-fn reload_config_for_daemon(config: &SettingsHub, last_fingerprint_check_ms: &mut i64) -> bool {
-    if watcher::poll_changed() {
-        *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
-        return config.reload_force();
+fn reload_config_for_daemon(
+    config: &SettingsHub,
+    last_fingerprint_check_ms: &mut i64,
+) -> (bool, Option<Vec<String>>) {
+    match watcher::poll_changed_with_packages() {
+        watcher::ChangeKind::Apps(packages) => {
+            *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
+            return (config.reload_force(), Some(packages));
+        }
+        watcher::ChangeKind::Full => {
+            *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
+            return (config.reload_force(), None);
+        }
+        watcher::ChangeKind::None => {}
     }
 
     let now_ms = crate::platform::paths::monotonic_ms();
     if now_ms.saturating_sub(*last_fingerprint_check_ms) < CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS {
-        return false;
+        return (false, None);
     }
 
     *last_fingerprint_check_ms = now_ms;
     let before = config.config_version();
-    let _ = config.reload_if_changed();
-    config.config_version() != before
+    (config.config_version() != before, None)
 }
 
 /// 按 [`PRUNE_INTERVAL_MS`] 节流执行三类过期记录清理。
@@ -514,7 +506,11 @@ fn prune_stale_states_throttled() {
     crate::mount_identity::prune_stale();
 }
 
-fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
+fn reconcile_running_apps(
+    config_version: u64,
+    mode: ReconcileMode,
+    changed_packages: Option<&[String]>,
+) -> bool {
     // 共享宿主死亡时先尝试恢复；失败则让各挂载请求继续走 scoped FUSE 回退。
     // 该动作只在 reconcile 入口执行一次，避免每个应用计划重复 fork 宿主。
     let _host_ready = crate::fuse_host::ensure_global();
@@ -533,6 +529,11 @@ fn reconcile_running_apps(config_version: u64, mode: ReconcileMode) -> bool {
     for proc in list_app_processes() {
         // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
         if !seen.insert(proc.pid) {
+            continue;
+        }
+        if let Some(packages) = changed_packages
+            && !packages.iter().any(|package| package == &proc.package_name)
+        {
             continue;
         }
         // MediaProvider 走 hook 而非挂载，会被 should_skip_process 跳过；
