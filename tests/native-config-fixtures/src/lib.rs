@@ -47,6 +47,15 @@ pub mod platform {
             "/../../src/platform/paths_safety.rs"
         ));
     }
+    // inotify 的 FileChangeWaiter 经 super:: 引用 unique_fd；夹具的 platform 模块
+    // 必须同步声明，否则 include 进来的 inotify 在夹具内解析不到该模块（CI 编译失败，
+    // 而 Windows 本地因平台差异编译不出而被掩盖）。
+    pub mod unique_fd {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/unique_fd.rs"
+        ));
+    }
 }
 
 pub mod domain {

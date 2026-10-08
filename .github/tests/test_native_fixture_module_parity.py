@@ -62,6 +62,23 @@ class NativeFixtureModuleParityTest(unittest.TestCase):
                 paths,
             )
 
+    def test_included_modules_super_references_are_included(self) -> None:
+        # 夹具 include 的模块若经 `super::<模块>::` 引用兄弟模块，该兄弟必须同样
+        # 出现在夹具 include 清单里——真实 crate 的 platform 声明全量模块，而夹具
+        # 只 include 子集，漏掉时唯一暴露点是 CI 的夹具编译（Windows 本地因平台
+        # 差异编译不出而掩盖 E0433）。此守卫把该依赖提前到本地静态检查。
+        included = included_fixture_modules()
+        super_ref = re.compile(r"\bsuper::([a-z_0-9]+)::")
+        for name in sorted(included):
+            source = read(f"src/platform/{name}.rs")
+            for referenced in sorted(set(super_ref.findall(source))):
+                self.assertIn(
+                    referenced,
+                    included,
+                    f"夹具 include 的 {name}.rs 引用了 super::{referenced}，"
+                    f"但夹具未 include 该模块，CI 夹具编译会失败",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
