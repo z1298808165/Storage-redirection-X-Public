@@ -1044,12 +1044,23 @@ pub fn mount_host_fuse(
         crate::fuse_host::spawn_host_control_loop(control_sock, policy_table);
     }
 
-    // 宿主会话常驻：不跟随任何应用生命周期，只等会话线程结束。
+    // 宿主会话常驻：不跟随任何应用生命周期，只等会话线程结束。服务循环顺带
+    // 按节流把分配器空闲页归还内核——宿主承接全部接入应用的 FUSE 服务，媒体
+    // 扫描等突发会把 primary 峰值滞留在 RSS（真机实测单风暴即涨至 60MB 级，
+    // 也是用户侧"常驻内存几百兆"的主要来源），5 分钟级归还在静息期完成。
+    let mut last_purge_ms = crate::platform::paths::monotonic_ms();
     loop {
         if background.guard.is_finished() {
             return finish_background_session(background, host_mount_point, false, Some(&identity));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+        let now_ms = crate::platform::paths::monotonic_ms();
+        if now_ms.saturating_sub(last_purge_ms)
+            >= crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
+        {
+            last_purge_ms = now_ms;
+            crate::platform::allocator::release_free_pages();
+        }
     }
 }
 

@@ -783,6 +783,9 @@ fn prune_stale_states_throttled() {
     prune_stale_mount_states();
     crate::mount_intent::prune_stale();
     crate::mount_identity::prune_stale();
+    // reconcile 入口必然是相对静息的时刻（批次排空后或周期兜底轮），顺手按
+    // 5 分钟节流把分配器空闲页归还内核，控制突发负载峰值滞留的 RSS。
+    crate::platform::allocator::quiescent_purge_throttled();
 }
 
 fn reconcile_running_apps(
@@ -1040,6 +1043,9 @@ fn reconcile_running_apps(
                 );
                 incomplete_from_batch = false;
                 cursor.cycle_head = None;
+                // 批次排空即静息：立即把突发期间滞留的分配器空闲页归还内核，
+                // 不等下一个节流窗口。
+                crate::platform::allocator::release_free_pages();
             }
         }
     } else {

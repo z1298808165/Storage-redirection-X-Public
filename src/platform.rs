@@ -1,3 +1,5 @@
+#[path = "platform/allocator.rs"]
+pub mod allocator;
 #[path = "platform/anti_detect.rs"]
 pub mod anti_detect;
 #[path = "platform/elf_img.rs"]
