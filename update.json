@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37818945812-1/storage-redirect-x-manager-v1.2.60-ci.33.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37818945812-1/storage.redirect.x-v1.2.60-ci.33.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.33`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37572331542-3`\n- 当前提交：`ea22eaae3e59`\n\n## 模块更新\n\n### 修复了什么问题\n- 回退批次预算制并封顶续跑等待为 200ms；适用范围：daemon reconcile 调度。\n- 关死宿主换代竞态并保持数据面常在；适用范围：宿主生命周期、协调调度与测试脚本。\n- 按应用配置增量重载并降低后台轮询功耗；适用范围：daemon 重载、watchdog 与后台唤醒。\n- 增加 watchdog 自愈与 panic 落盘钩子；适用范围：daemon 守护与崩溃取证。\n- 对 Android 私有子树增加 real_root 侧路径放行分支；适用范围：scoped 会话根级目录枚举。\n\n### 增加了什么功能\n- 全量预登记策略、周期兜底放宽到 30 秒；适用范围：宿主策略预登记与 reconcile 调度。\n\n### 功能变化\n- 批次按时间预算排空并封顶自旋等待；适用范围：daemon reconcile 调度与续跑守卫。\n- 修正轮询窗口判定的冗余分支与多余借用；适用范围：daemon 事件等待与预登记调用。\n- 补齐夹具 unique_fd 依赖并加守卫；适用范围：native 夹具 include 与 parity 守卫。"
+    "releaseNotes": "# CI Build 1.2.60-ci.33\n\n## 模块更新\n\n### 修复与改进\n\n- 修复 MediaProvider 或系统存储服务重启期间应用挂载短暂失效的问题：新启动的应用立即接入可用的重定向会话，共享宿主换代对应用无感，不再出现保存失败或需要等待重试。\n- 应用配置修改改为毫秒级增量热重载：开关单个应用的重定向立即生效，不再触发全量重挂等待。\n- daemon 空闲时不再周期性频繁唤醒，后台功耗显著降低；包事件与配置变化按需唤醒处理。\n- 应用冷启动接入重定向更快，daemon 异常退出后自动恢复，并新增崩溃时自动落盘的取证日志。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、媒体服务和挂载状态完整加载。"
   },
   "releases": []
 }
