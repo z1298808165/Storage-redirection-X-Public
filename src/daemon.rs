@@ -699,9 +699,10 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                 // 由 IN_CREATE 事件动态扩展。此前挂载生效即强制全量重建，每次应用
                 // 冷启动都把 9862~24909 个目录的监视树整棵重走，真机实测产生
                 // 30~60 秒 100% 单核阵发（ishtar/duchamp 双机复现）。
-                thread_sync
-                    .completed_rebuild
-                    .store(thread_sync.requested_rebuild.load(Ordering::Acquire), Ordering::Release);
+                thread_sync.completed_rebuild.store(
+                    thread_sync.requested_rebuild.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
                 let pending_packages = thread_sync.take_pending_packages();
                 match pending_packages {
                     Some(packages) if !packages.is_empty() => {
