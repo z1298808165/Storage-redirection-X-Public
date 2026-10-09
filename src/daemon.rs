@@ -42,7 +42,8 @@ const RECONCILE_BATCH_MAX_PLANS: usize = 1;
 /// 续跑等待上限。批次未完成时主循环仍要尽快续跑，但 0 毫秒的 poll 等于全速自旋：
 /// 未配置应用的计划既不 applied 也不 current，一批 27 个计划要在 poll(0) 下以
 /// 每轮一次 /proc 全量扫描的速度无限排空，烧 CPU 且反复触碰挂载决策。配置、宿主
-/// 与控制事件本身会立即唤醒 poll；200ms 只兜"排空剩余计划"，足够快且封顶自旋。
+/// 与控制事件本身会立即唤醒 poll；200ms 只兜"排空剩余计划"。配合周期完成判定
+/// （轮转绕回周期起点即收口），每次触发的续跑轮数有上界，排空后主循环归位休眠。
 const RECONCILE_CONTINUE_WAIT_MS: libc::c_int = 200;
 const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
@@ -227,6 +228,9 @@ struct ReconcilePlanIdentity {
 #[derive(Default)]
 struct ReconcileCursor {
     last_attempted: Option<ReconcilePlanIdentity>,
+    /// 本触发周期首个尝试的计划身份：轮转绕回该位置即判定周期已排空，
+    /// 让未完成批次收口，避免永续 ~1Hz 续跑轮询。
+    cycle_head: Option<ReconcilePlanIdentity>,
 }
 
 impl ReconcileCursor {
@@ -250,8 +254,31 @@ impl ReconcileCursor {
         })
     }
 
+    /// `identity` 在有序计划列表中的位置；进程死亡后按插入点回退，与
+    /// `next_start_index` 的 fallback 语义保持一致，保证绕回判定不因计划
+    /// 消失而错位。
+    fn position_of(
+        &self,
+        identities: &[ReconcilePlanIdentity],
+        identity: &ReconcilePlanIdentity,
+    ) -> usize {
+        identities
+            .iter()
+            .position(|candidate| candidate == identity)
+            .unwrap_or_else(|| {
+                identities
+                    .iter()
+                    .position(|candidate| candidate > identity)
+                    .unwrap_or(0)
+            })
+    }
+
     fn advance(&mut self, plan: &ReconcilePlan) {
-        self.last_attempted = Some(plan.identity());
+        let identity = plan.identity();
+        if self.cycle_head.is_none() {
+            self.cycle_head = Some(identity.clone());
+        }
+        self.last_attempted = Some(identity);
     }
 }
 
@@ -437,11 +464,18 @@ pub fn main_entry() -> i32 {
             } else {
                 ReconcileMode::Full
             };
+            // 仅宿主换代清周期头重新完整排空：换代意味着所有接入应用都可能需要重挂，
+            // 低频且高价值。全局配置变化不重置——priority 排序已保证变化目标当轮
+            // 最先处理，其余应用由本周期轮转自然覆盖；若也在此重置，套件这类连续
+            // 触发的场景会把周期头反复清零，绕回判定永不成立，续跑退化为永续轮询
+            // （真机实测：含 full_change 时 11 分钟零次 cycle drained）。
+            let fresh_batch = host_changed;
             let (mounts_changed, reconcile_incomplete) = reconcile_running_apps(
                 current,
                 mode,
                 changed_packages.as_deref(),
                 full_change,
+                fresh_batch,
                 &mut reconcile_cursor,
             );
             if reconcile_incomplete {
@@ -756,6 +790,7 @@ fn reconcile_running_apps(
     mode: ReconcileMode,
     changed_packages: Option<&[String]>,
     full_change: bool,
+    fresh_batch: bool,
     cursor: &mut ReconcileCursor,
 ) -> (bool, bool) {
     // 共享宿主死亡时先尝试恢复；失败则让各挂载请求继续走 scoped FUSE 回退。
@@ -763,6 +798,11 @@ fn reconcile_running_apps(
     let _host_ready = crate::fuse_host::ensure_global();
     let started_ms = crate::platform::paths::monotonic_ms();
     prune_stale_states_throttled();
+    // 宿主换代或全局配置变化意味着所有应用都可能需要重新处理：清掉周期头，
+    // 让本触发周期从当前轮转位置重新完整排空一轮，而不是沿用旧周期的收尾。
+    if fresh_batch {
+        cursor.cycle_head = None;
+    }
     let mut seen = HashSet::new();
     let mut applied = 0usize;
     let mut disabled = 0usize;
@@ -770,6 +810,7 @@ fn reconcile_running_apps(
     let mut deferred = 0usize;
     let mut batch_requests = 0usize;
     let mut reconcile_incomplete = false;
+    let mut incomplete_from_batch = false;
     let mut plans = Vec::new();
     let mut media_processes = Vec::new();
     let mut media_like_names: Vec<String> = Vec::new();
@@ -892,13 +933,10 @@ fn reconcile_running_apps(
         plans.sort_by_key(|plan| (plan.priority(), plan.identity()));
     }
 
+    let identities: Vec<ReconcilePlanIdentity> =
+        plans.iter().map(ReconcilePlan::identity).collect();
     let start_index = if uses_batch_cursor && !(full_change && changed_packages.is_some()) {
-        cursor.next_start_index(
-            &plans
-                .iter()
-                .map(ReconcilePlan::identity)
-                .collect::<Vec<_>>(),
-        )
+        cursor.next_start_index(&identities)
     } else {
         0
     };
@@ -934,7 +972,7 @@ fn reconcile_running_apps(
             && batch_requests >= RECONCILE_BATCH_MAX_PLANS
         {
             deferred += 1;
-            reconcile_incomplete = true;
+            incomplete_from_batch = true;
             continue;
         }
         batch_requests += 1;
@@ -982,6 +1020,33 @@ fn reconcile_running_apps(
             }
         }
     }
+
+    // 周期完成判定：批次限流只保证「不阻塞主循环」，不能成为永续轮询的理由。
+    // 未配置或被监督拒绝的计划既不 applied 也不 current，deferred 永远不归零——
+    // 此前这让 pending 长期为真，主循环以约 1Hz 每轮全量扫 /proc 无限续跑。判据：
+    // 游标轮转已绕回本周期首个尝试计划的位置（或更早），说明本轮触发要处理的
+    // 计划都已被尝试过一次，本周期收口；被拒绝的计划等下一次真实触发（配置、
+    // 宿主、控制事件或 30 秒周期兜底）再进队。失败计划保持 reconcile_incomplete
+    // 的既有重试语义，绕回时会在新周期里再得到一次尝试。
+    if incomplete_from_batch {
+        if let Some(head) = cursor.cycle_head.clone() {
+            let next_index = cursor.next_start_index(&identities);
+            let head_index = cursor.position_of(&identities, &head);
+            if next_index <= head_index {
+                log::info!(
+                    "daemon reconcile cycle drained planned={} deferred={} — rest until next event",
+                    plans.len(),
+                    deferred
+                );
+                incomplete_from_batch = false;
+                cursor.cycle_head = None;
+            }
+        }
+    } else {
+        // 本轮没有任何批次限流（所有计划都已处理），周期自然结束。
+        cursor.cycle_head = None;
+    }
+    reconcile_incomplete = reconcile_incomplete || incomplete_from_batch;
 
     if should_log_reconcile_summary(
         mode,
