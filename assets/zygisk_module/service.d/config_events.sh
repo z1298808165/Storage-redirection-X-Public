@@ -1071,8 +1071,8 @@ handle_config_changes() {
   reload_list_file="$LOGS_DIR/.config_reload_packages.tmp"
   : > "$reload_list_file"
 
-  # 变更处理前强制刷新 UID 映射，避免新装/重装应用仍命中过期 UID。
-  refresh_uid_map force
+  # UID 映射对账已上移到事件批入口（见 start_config_event_collector）：
+  # 每批事件无条件 refresh，避免重装窗口的坏清单在 changed 为空时无法自愈。
 
   for package_name in $changed_packages; do
     is_skipped_package "$package_name" && continue
@@ -1181,6 +1181,10 @@ start_package_event_collector() {
     [ "$package_poll_interval_ticks" -lt 1 ] && package_poll_interval_ticks=1
     package_poll_ticks="$package_poll_interval_ticks"
     while true; do
+      # 周期性对账 UID 映射（非 force，自带 60 秒节流）：receiver 未就绪且
+      # auto_enable 关闭时，fallback 包列表扫描整个不可用，安装/重装后的清单
+      # 只能等下一次配置事件；此处保证清单即使无任何事件也至多 60 秒自愈。
+      refresh_uid_map
       process_package_event_log_delta
 
       if is_package_event_receiver_ready; then
@@ -1253,6 +1257,14 @@ start_config_event_collector() {
         fi
 
         build_config_state_file "$tmp_new_state"
+        # 每批配置事件都强制对账 UID 映射，与包事件 receiver 是否就绪解耦：
+        # 应用重装（卸载→安装）窗口内的任何一次 refresh 都会把「缺少该包」的
+        # 清单落盘，而 uid 反查（MediaProvider 侧改写 MediaStore 落点）只认清单。
+        # 若重装后的配置内容与旧状态一致（changed 为空），原先仅在变更处理里
+        # 才触发的刷新不会执行，坏清单会一直残留到下一次真实配置变化。
+        # 事件批入口无条件对账，保证「写配置即修正清单」；真机上 receiver 正常
+        # 时包事件通道（added/replaced 后 2 秒对账）仍作为即时通道保留。
+        refresh_uid_map force
         changed_packages=$(awk -F'|' '
           NR == FNR { old[$1] = $0; next }
           {
