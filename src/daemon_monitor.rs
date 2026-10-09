@@ -298,6 +298,90 @@ impl RegularAppMonitor {
         );
     }
 
+    /// 包级增量重建：只重建 `packages` 内应用的监视根，其余包的 watch 原地保留。
+    ///
+    /// 全量重建会把所有应用的目录树（真机实测 9862~24909 个目录）整棵重走，
+    /// 每次应用启用/配置变化都产生数十秒 100% 单核阵发。监视树按包独立构成，
+    /// 变化包的旧节点直接放弃（内核 watch 保留原位，事件因节点缺失被丢弃，
+    /// `inotify_add_watch` 对同一目录幂等返回相同 wd，重建时自动复用），只需
+    /// 重加变化包的根并展开其子树。`public_owner` 根与包配置无关，保持不动。
+    pub fn reconfigure_changed_packages(&mut self, config: &SettingsHub, packages: &[String]) {
+        self.refresh_max_watches();
+        let version = config.config_version();
+        self.config_version = version;
+        self.last_rebuild_ms = paths::monotonic_ms();
+        self.needs_rebuild = false;
+
+        let snapshot = config.get_daemon_monitor_config_snapshot();
+        if snapshot.app_specs.is_empty() {
+            return;
+        }
+        if !self.ensure_fd() {
+            self.needs_rebuild = true;
+            return;
+        }
+
+        // 放弃变化包的旧节点：内核 watch 保留，事件因查不到节点被静默丢弃。
+        self.watch_nodes.retain(|_, nodes| {
+            !nodes
+                .iter()
+                .any(|node| packages.iter().any(|package| package == &node.package_name))
+        });
+
+        let mut roots = Vec::new();
+        for spec in &snapshot.app_specs {
+            if !packages.iter().any(|package| package == &spec.package_name) {
+                continue;
+            }
+            if snapshot.is_file_monitor_enabled {
+                roots.extend(build_private_owner_repair_roots(spec));
+                roots.extend(build_watch_roots(spec));
+            }
+        }
+        dedup_roots(&mut roots);
+        sort_roots_by_monitor_priority(&mut roots);
+
+        let mut applied_roots = 0usize;
+        let mut expansion_roots = Vec::new();
+        let mut missing_watch_roots = Vec::new();
+        for root in &roots {
+            if let Some(node) = self.add_watch_root(root) {
+                applied_roots = applied_roots.saturating_add(1);
+                expansion_roots.push(node);
+            } else {
+                self.missing_roots = self.missing_roots.saturating_add(1);
+                missing_watch_roots.push(root.clone());
+            }
+            if self.watch_nodes.len() >= self.max_watches {
+                self.mark_capacity_limited();
+                break;
+            }
+        }
+        if !self.capacity_limited {
+            for node in expansion_roots {
+                let repair_existing_files = node.source == "private_owner";
+                let recurse_existing_tree = node.source != "public_owner";
+                self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
+                if self.capacity_limited {
+                    break;
+                }
+            }
+        }
+        // 先消费安装期间产生的目录创建事件，及时为新子目录登记 watch。
+        self.drain_events();
+        self.missing_watch_roots.extend(missing_watch_roots);
+        log::info!(
+            "daemon monitor packages={} roots={} applied={} missing={} watches={} capacity_limited={} version={:x}",
+            packages.len(),
+            roots.len(),
+            applied_roots,
+            self.missing_roots,
+            self.watch_nodes.len(),
+            self.capacity_limited,
+            self.config_version
+        );
+    }
+
     fn retry_missing_watch_roots(&mut self) {
         self.last_rebuild_ms = paths::monotonic_ms();
         if self.missing_watch_roots.is_empty() || self.capacity_limited {
@@ -784,8 +868,13 @@ impl RegularAppMonitor {
             return;
         }
         if inotify::is_watch_ignored(mask) {
-            self.watch_nodes.remove(&event.wd);
-            self.needs_rebuild = true;
+            // 只有仍登记在案的 watch 意外消失才要求重建；包级增量重建已放弃的旧根、
+            // 以及被删除目录自身的 watch（父目录仍在监视，删除后无覆盖缺口）都只做
+            // 节点清理。此前无条件全量重建，应用批量清理缓存目录时每删一个目录就
+            // 重走整棵监视树，形成秒级 100% 单核阵发。
+            if self.watch_nodes.remove(&event.wd).is_some() {
+                self.needs_rebuild = true;
+            }
             return;
         }
         if inotify::is_self_removed(mask) {

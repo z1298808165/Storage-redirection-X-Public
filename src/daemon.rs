@@ -118,6 +118,12 @@ struct FileMonitorSync {
     configured_version: AtomicU64,
     requested_rebuild: AtomicU64,
     completed_rebuild: AtomicU64,
+    /// 待处理的包级增量刷新请求。
+    ///
+    /// 监视树构成只取决于配置（每应用的监视根清单），与挂载状态无关；配置变化
+    /// 时只需对变化的包做增量重建，其余包的 watch 原地保留。`None` 表示仅唤醒
+    /// 线程（排空事件 + 缺失根重试），不需要触碰监视树。
+    pending_packages: Mutex<Option<Vec<String>>>,
     /// 仅用于配合下面两个条件变量，不承载业务数据。
     signal_lock: Mutex<()>,
     /// 监视线程完成一轮配置同步后唤醒等待方。
@@ -165,6 +171,25 @@ impl FileMonitorSync {
             }
         }
         self.request_signal.notify_all();
+    }
+
+    /// 登记待处理的包级增量刷新清单；`None`/空清单表示仅唤醒线程。
+    fn store_pending_packages(&self, packages: Option<Vec<String>>) {
+        if let Ok(mut slot) = self.pending_packages.lock() {
+            match (slot.as_mut(), packages) {
+                (Some(existing), Some(mut incoming)) => existing.append(&mut incoming),
+                (_, incoming) => *slot = incoming,
+            }
+        }
+    }
+
+    /// 取走待处理的包级增量刷新清单。
+    fn take_pending_packages(&self) -> Option<Vec<String>> {
+        self.pending_packages
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+            .filter(|packages| !packages.is_empty())
     }
 
     /// 等待监视线程推进一轮，最多等待 `timeout`。
@@ -510,10 +535,25 @@ pub fn main_entry() -> i32 {
                 }
             }
             if mounts_changed {
+                // 挂载生效不改变监视树构成：唤醒监视线程做轻量刷新即可，缺失根由
+                // 1 秒级重试补齐、目录内新子树由 IN_CREATE 事件动态扩展。此前这里
+                // 强制全量重建，每次应用冷启动都把整棵监视树重走一遍。
                 if let Some(sync) = file_monitor_sync.as_ref() {
-                    request_file_monitor_rebuild(sync);
+                    request_file_monitor_refresh(sync, None);
                 } else if let Some(file_monitor) = fallback_file_monitor.as_mut() {
-                    file_monitor.reconfigure(config, true);
+                    file_monitor.reconfigure(config, false);
+                }
+            }
+            if did_reload {
+                // 配置变化走包级增量重建：仅变化包重建监视根，全局变化传 None 由
+                // reconfigure 依据版本差异走全量路径。
+                if let Some(sync) = file_monitor_sync.as_ref() {
+                    let packages = if full_change {
+                        None
+                    } else {
+                        changed_packages.clone()
+                    };
+                    request_file_monitor_refresh(sync, packages);
                 }
             }
             last_version = current;
@@ -640,6 +680,7 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
         configured_version: AtomicU64::new(0),
         requested_rebuild: AtomicU64::new(0),
         completed_rebuild: AtomicU64::new(0),
+        pending_packages: Mutex::new(None),
         signal_lock: Mutex::new(()),
         progress_signal: Condvar::new(),
         request_signal: Condvar::new(),
@@ -652,18 +693,25 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
             let config = SettingsHub::instance();
             let mut file_monitor = RegularAppMonitor::new();
             while runtime_control::is_module_runtime_enabled() {
-                let requested_rebuild = thread_sync.requested_rebuild.load(Ordering::Acquire);
-                let force_rebuild =
-                    requested_rebuild > thread_sync.completed_rebuild.load(Ordering::Acquire);
-                file_monitor.reconfigure(config, force_rebuild);
+                // 请求只负责唤醒线程及时同步配置；是否重建由 reconfigure 依据配置
+                // 版本自行判定，包级变化走增量路径。挂载应用不改变监视树构成——
+                // 被挂载应用此前不存在的监视根由 1 秒级缺失重试补齐，目录内新子树
+                // 由 IN_CREATE 事件动态扩展。此前挂载生效即强制全量重建，每次应用
+                // 冷启动都把 9862~24909 个目录的监视树整棵重走，真机实测产生
+                // 30~60 秒 100% 单核阵发（ishtar/duchamp 双机复现）。
+                thread_sync
+                    .completed_rebuild
+                    .store(thread_sync.requested_rebuild.load(Ordering::Acquire), Ordering::Release);
+                let pending_packages = thread_sync.take_pending_packages();
+                match pending_packages {
+                    Some(packages) if !packages.is_empty() => {
+                        file_monitor.reconfigure_changed_packages(config, &packages);
+                    }
+                    _ => file_monitor.reconfigure(config, false),
+                }
                 thread_sync
                     .configured_version
                     .store(file_monitor.configured_version(), Ordering::Release);
-                if force_rebuild {
-                    thread_sync
-                        .completed_rebuild
-                        .store(requested_rebuild, Ordering::Release);
-                }
                 thread_sync.notify_progress();
                 // 达到单轮预算时队列里仍有事件，立即进入下一轮继续排空，不等轮询间隔，
                 // 避免把"防止饿死重建"变成"事件延迟一个周期"。
@@ -717,9 +765,10 @@ fn wait_for_file_monitor_events(sync: &FileMonitorSync, monitor: &RegularAppMoni
     }
 }
 
-fn request_file_monitor_rebuild(sync: &FileMonitorSync) {
+fn request_file_monitor_refresh(sync: &FileMonitorSync, packages: Option<Vec<String>>) {
     // 监视树重建只影响后续文件监视，不影响当前应用挂载策略；异步排队后立即返回，
     // 避免把一次 MT 配置切换再阻塞在最多 2 秒的监视器 ACK 上。
+    sync.store_pending_packages(packages);
     sync.requested_rebuild.fetch_add(1, Ordering::AcqRel);
     sync.notify_request();
 }
