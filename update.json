@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37886506337-1/storage-redirect-x-manager-v1.2.60-ci.34.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-37886506337-1/storage.redirect.x-v1.2.60-ci.34.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.34`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37818945812-1`\n- 当前提交：`f68949a1eb7c`\n\n## 模块更新\n\n### 修复了什么问题\n- 应用安装后 MediaStore 保存可靠进沙盒；适用范围：模块 service.d 采集脚本；限制：批入口通道依赖 inotifyd 管道存活。\n\n### 功能变化\n- 静息期把分配器滞留页归还内核；适用范围：daemon、宿主与 allocator 模块。\n- 批次续跑按周期排空收口并归位休眠；适用范围：daemon reconcile 调度。"
+    "releaseNotes": "# CI Build 1.2.60-ci.34\n\n## 模块更新\n\n### 修复与改进\n\n- 修复特定环境下应用安装后立即使用系统相册或下载保存时文件落到公共目录而不是应用隔离区的问题：内部映射清单现在会在安装后自动刷新，保存始终按重定向规则落位。\n- 空闲时自动释放内存高峰占用的页面，模块常驻内存明显回落；后台待机功耗同步降低。\n\n### 注意事项\n\n- 更新模块后需要重启设备，使 Zygisk、媒体服务和挂载状态完整加载。"
   },
   "releases": []
 }
