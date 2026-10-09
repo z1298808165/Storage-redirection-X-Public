@@ -217,7 +217,7 @@ enum ReconcileMode {
     Forced,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ReconcilePlanIdentity {
     package_name: String,
     pid: i32,
@@ -231,6 +231,17 @@ struct ReconcileCursor {
     /// 本触发周期首个尝试的计划身份：轮转绕回该位置即判定周期已排空，
     /// 让未完成批次收口，避免永续 ~1Hz 续跑轮询。
     cycle_head: Option<ReconcilePlanIdentity>,
+    /// 本周期内已被监督判定拒绝注入的计划。
+    ///
+    /// 监督拒绝（skip_superseded / refuse_poisoned 等）是账本状态型结论，
+    /// 200ms 续跑窗口内不会翻盘；若不登记，被拒计划会一直以「非 current」
+    /// 身份占用批次 slot，并把其余非 current 计划挤成 deferred，周期绕回
+    /// 判定（next_index <= head_index）在非 current 计划不跨数组末尾时
+    /// 永远无法成立——主循环退化为永续 200ms 全量扫 /proc（真机实测：静息
+    /// 24% 单核、活动期 91%，RSS 冲至 216MB）。拒绝集合随周期收口清空，
+    /// 下一次真实触发（配置/宿主/控制事件/30s 周期兜底）再给这些计划一次
+    /// 尝试机会，与「被拒绝的计划等下一次真实触发再进队」的设计注释一致。
+    cycle_refused: HashSet<ReconcilePlanIdentity>,
 }
 
 impl ReconcileCursor {
@@ -805,6 +816,7 @@ fn reconcile_running_apps(
     // 让本触发周期从当前轮转位置重新完整排空一轮，而不是沿用旧周期的收尾。
     if fresh_batch {
         cursor.cycle_head = None;
+        cursor.cycle_refused.clear();
     }
     let mut seen = HashSet::new();
     let mut applied = 0usize;
@@ -970,6 +982,13 @@ fn reconcile_running_apps(
             skipped += 1;
             continue;
         }
+        // 本周期已被监督拒绝的计划不再占用批次 slot：拒绝结论在本周期内
+        // 不会翻盘，重占 slot 只会把其余非 current 计划挤成 deferred，让
+        // 周期收口判定永远无法成立（死循环根因）。静默跳过不计 deferred。
+        if uses_batch_cursor && cursor.cycle_refused.contains(&plan.identity()) {
+            skipped += 1;
+            continue;
+        }
         if !incremental_change
             && mode != ReconcileMode::Forced
             && batch_requests >= RECONCILE_BATCH_MAX_PLANS
@@ -992,6 +1011,9 @@ fn reconcile_running_apps(
         if let Some(snapshot) = crate::daemon_mount::supervise_mount_request(&plan.request)
             && !snapshot.last_action.allows_inject()
         {
+            if uses_batch_cursor {
+                cursor.cycle_refused.insert(plan.identity());
+            }
             log::warn!(
                 "daemon reconcile skip inject {}",
                 crate::fuse_supervisor::render_namespace(&snapshot)
@@ -1043,6 +1065,7 @@ fn reconcile_running_apps(
                 );
                 incomplete_from_batch = false;
                 cursor.cycle_head = None;
+                cursor.cycle_refused.clear();
                 // 批次排空即静息：立即把突发期间滞留的分配器空闲页归还内核，
                 // 不等下一个节流窗口。
                 crate::platform::allocator::release_free_pages();
@@ -1051,6 +1074,7 @@ fn reconcile_running_apps(
     } else {
         // 本轮没有任何批次限流（所有计划都已处理），周期自然结束。
         cursor.cycle_head = None;
+        cursor.cycle_refused.clear();
     }
     reconcile_incomplete = reconcile_incomplete || incomplete_from_batch;
 

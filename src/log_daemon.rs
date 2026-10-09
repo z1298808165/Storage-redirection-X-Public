@@ -438,9 +438,17 @@ impl LogState {
                     ));
                 }
             }
-            _ => self
-                .running
-                .append(&format_running_line(level, tag, message)),
+            _ => {
+                // 残留发送方（如尚未重启的宿主进程）在全局 verbose 关闭后仍可能
+                // 以 Debug/Verbose 级别发送运行日志包；在接收侧按 daemon 当前配置
+                // 二次过滤，避免单个陈旧 emitter 把逐操作日志风暴维持到下一次
+                // 宿主换代。Warn/Error 与监控、统计、控制通道不受影响。
+                if matches!(level, "D" | "V") && !crate::logging::is_debug_logging_enabled() {
+                    return;
+                }
+                self.running
+                    .append(&format_running_line(level, tag, message));
+            }
         }
     }
 
