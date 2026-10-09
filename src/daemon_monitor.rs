@@ -75,14 +75,35 @@ struct WatchRoot {
     source: &'static str,
 }
 
+/// 跨节点共享的不可变字符串驻留表。
+///
+/// 监视树容量上限内的每个节点都携带包名与记录根等相同字符串，按值存储会让
+/// 上万个节点重复持有相同的堆分配；驻留后同一字符串全表只存一份，节点间
+/// 克隆退化为指针拷贝。
+fn intern_shared(value: &str) -> std::sync::Arc<str> {
+    static INTERN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::sync::Arc<str>, ()>>,
+    > = std::sync::OnceLock::new();
+    let mut table = INTERN
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some((existing, _)) = table.get_key_value(value) {
+        return existing.clone();
+    }
+    let shared: std::sync::Arc<str> = value.into();
+    table.insert(shared.clone(), ());
+    shared
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct WatchNode {
-    package_name: String,
+    package_name: std::sync::Arc<str>,
     backend_dir: String,
     display_dir: String,
-    record_display_root: String,
-    record_from_root: String,
-    excluded_roots: Vec<String>,
+    record_display_root: std::sync::Arc<str>,
+    record_from_root: std::sync::Arc<str>,
+    excluded_roots: std::sync::Arc<[String]>,
     source: &'static str,
 }
 
@@ -454,9 +475,11 @@ impl RegularAppMonitor {
 
         // 放弃变化包的旧节点：内核 watch 保留，事件因查不到节点被静默丢弃。
         self.watch_nodes.retain(|_, nodes| {
-            !nodes
-                .iter()
-                .any(|node| packages.iter().any(|package| package == &node.package_name))
+            !nodes.iter().any(|node| {
+                packages
+                    .iter()
+                    .any(|package| package.as_str() == node.package_name.as_ref())
+            })
         });
 
         let mut roots = Vec::new();
@@ -541,12 +564,12 @@ impl RegularAppMonitor {
             return false;
         };
         let node = WatchNode {
-            package_name: root.package_name.clone(),
+            package_name: intern_shared(&root.package_name),
             backend_dir: start.backend_dir,
             display_dir: start.display_dir,
-            record_display_root: root.record_display_root.clone(),
-            record_from_root: root.record_from_root.clone(),
-            excluded_roots: root.excluded_roots.clone(),
+            record_display_root: intern_shared(&root.record_display_root),
+            record_from_root: intern_shared(&root.record_from_root),
+            excluded_roots: root.excluded_roots.clone().into(),
             source: root.source,
         };
         repair_monitored_backend_owner(
@@ -582,12 +605,12 @@ impl RegularAppMonitor {
         }
 
         let node = WatchNode {
-            package_name: root.package_name.clone(),
+            package_name: intern_shared(&root.package_name),
             backend_dir: start.backend_dir,
             display_dir: start.display_dir,
-            record_display_root: root.record_display_root.clone(),
-            record_from_root: root.record_from_root.clone(),
-            excluded_roots: root.excluded_roots.clone(),
+            record_display_root: intern_shared(&root.record_display_root),
+            record_from_root: intern_shared(&root.record_from_root),
+            excluded_roots: root.excluded_roots.clone().into(),
             source: root.source,
         };
 
@@ -915,12 +938,12 @@ impl RegularAppMonitor {
                 && should_descend_into_child(&node, &event_paths.display_path)
             {
                 let child = WatchRoot {
-                    package_name: node.package_name.clone(),
+                    package_name: node.package_name.to_string(),
                     backend_root: event_paths.backend_path.clone(),
                     display_root: event_paths.display_path.clone(),
-                    record_display_root: node.record_display_root.clone(),
-                    record_from_root: node.record_from_root.clone(),
-                    excluded_roots: node.excluded_roots.clone(),
+                    record_display_root: node.record_display_root.to_string(),
+                    record_from_root: node.record_from_root.to_string(),
+                    excluded_roots: node.excluded_roots.as_ref().to_vec(),
                     source: node.source,
                 };
                 let _ = self.add_watch_tree(&child);
