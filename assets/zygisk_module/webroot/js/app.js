@@ -4188,7 +4188,7 @@
           "详细日志",
           "verboseLogging",
           State.globalConfig.verbose_logging_enabled === true,
-          "开启后立即记录 Rust、Java 和诊断采集日志",
+          "开启后 FUSE 逐操作与诊断采集全量高频记录，持续写盘并显著增加 CPU/内存开销；仅建议复现问题抓日志时临时开启，日常保持关闭",
         ) +
         switchRow(
           "新应用自动重定向",

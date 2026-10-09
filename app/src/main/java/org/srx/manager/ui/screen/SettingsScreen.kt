@@ -180,7 +180,7 @@ internal fun SettingsScreen(
         )
         CompactSwitchRow(
             title = "详细日志",
-            summary = "开启后立即记录 Rust、Java 和诊断采集日志",
+            summary = "开启后 FUSE 逐操作与诊断采集全量高频记录，持续写盘并显著增加 CPU/内存开销；" + "仅建议复现问题抓日志时临时开启，日常保持关闭",
             checked = global.verboseLoggingEnabled,
             onCheckedChange = { onGlobal(global.copy(verboseLoggingEnabled = it)) },
         )
