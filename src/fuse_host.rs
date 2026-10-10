@@ -429,7 +429,10 @@ pub fn attach_app_to_host(view: &HostSessionView, target_root: &str) -> Option<H
         unsafe {
             libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
         }
-        let ok = host_attach_child_main(view, target_root, ready_sockets[1]);
+        // SOCK_DGRAM 对端退出没有 EOF：所有正常失败都必须显式回包，避免
+        // 已退出的接入子进程仍让父进程空等 10 秒，挤占后续应用的挂载窗口。
+        let result = host_attach_child_main(view, target_root);
+        let ok = send_host_attach_result(ready_sockets[1], result) && result == 0;
         host_stage(if ok { "attach_ok" } else { "attach_failed" });
         // SAFETY: _exit 终止子进程，不跑 atexit。
         unsafe { libc::_exit(if ok { 0 } else { 1 }) };
@@ -986,20 +989,16 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
 /// `move_mount` 这对 API 的用途：前者在**源命名空间**里克隆出一个不附着于任何命名空间的挂载
 /// （fd 携带），后者在**目标命名空间**里把它附着到目标路径。克隆与原挂载共享同一个 superblock，
 /// 因此 FUSE 请求仍然全部回到同一个宿主会话。
-fn host_attach_child_main(
-    view: &HostSessionView,
-    target_root: &str,
-    ready_sock: libc::c_int,
-) -> bool {
+fn host_attach_child_main(view: &HostSessionView, target_root: &str) -> i32 {
     // 1. 先钉住当前（应用）命名空间：克隆要在宿主命名空间做，句柄是唯一的回头路。
     let Ok(c_app_ns) = CString::new("/proc/self/ns/mnt") else {
-        return false;
+        return -1;
     };
     // SAFETY: c_app_ns 是 NUL 结尾的合法路径。
     let app_ns = unsafe { libc::open(c_app_ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if app_ns < 0 {
         log_errno("fuse host attach app ns open failed");
-        return false;
+        return -1;
     }
     // SAFETY: app_ns 是本函数打开的有效 fd，只在切回时使用。
     let app_ns = UniqueFd::new(app_ns);
@@ -1007,24 +1006,24 @@ fn host_attach_child_main(
     // 2. 进入宿主命名空间做克隆。
     let host_ns_path = format!("/proc/{}/ns/mnt", view.child_pid);
     let Ok(c_host_ns) = CString::new(host_ns_path) else {
-        return false;
+        return -1;
     };
     // SAFETY: c_host_ns 是 NUL 结尾的合法路径。
     let host_ns = unsafe { libc::open(c_host_ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if host_ns < 0 {
         log_errno("fuse host attach host ns open failed");
-        return false;
+        return -1;
     }
     // SAFETY: host_ns 是本函数打开的有效 namespace fd。
     let host_ns = UniqueFd::new(host_ns);
     // SAFETY: host_ns 是有效的 mount namespace fd。
     if unsafe { libc::setns(host_ns.get(), libc::CLONE_NEWNS) } != 0 {
         log_errno("fuse host attach setns host failed");
-        return false;
+        return -1;
     }
 
     let Ok(c_mount_point) = CString::new(view.mount_point.as_str()) else {
-        return false;
+        return -1;
     };
     let tree_fd = open_detached_mount(&c_mount_point);
 
@@ -1032,7 +1031,7 @@ fn host_attach_child_main(
     // SAFETY: app_ns 是本子进程进入宿主命名空间前钉住的自身命名空间 fd。
     if unsafe { libc::setns(app_ns.get(), libc::CLONE_NEWNS) } != 0 {
         log_errno("fuse host attach setns app failed");
-        return false;
+        return -1;
     }
     if tree_fd < 0 {
         let errno = crate::platform::errno::last();
@@ -1042,7 +1041,7 @@ fn host_attach_child_main(
             errno,
             crate::platform::errno::text(errno)
         );
-        return false;
+        return -1;
     }
     // SAFETY: tree_fd 是 open_tree 返回的有效 fd。
     let tree_fd = UniqueFd::new(tree_fd);
@@ -1057,7 +1056,7 @@ fn host_attach_child_main(
 
     // 4. 目标目录：与应用挂载路径同源，允许已存在。
     let Ok(c_target) = CString::new(target_root) else {
-        return false;
+        return -1;
     };
     // SAFETY: c_target 是 NUL 结尾的合法路径；失败只可能是已存在（后续附着会给出结论）。
     unsafe {
@@ -1076,32 +1075,23 @@ fn host_attach_child_main(
             errno,
             crate::platform::errno::text(errno)
         );
-        if !target_had_dead_layers && errno == libc::ENOTCONN {
-            // 目标路径清理后已确认可达（或本就无死层），ENOTCONN 只能来自宿主 FUSE
-            // 连接死亡：回报父进程终止该宿主，交由自愈通道重建。负值避免与宿主建立
-            // 阶段的正数阶段码混淆。
-            let code = -errno;
-            // SAFETY: ready_sock 是本次接入的有效端点，code 是栈变量。
-            unsafe {
-                libc::send(
-                    ready_sock,
-                    &code as *const i32 as *const libc::c_void,
-                    std::mem::size_of::<i32>(),
-                    0,
-                )
-            };
-        }
-        return false;
+        // 保持 ENOTCONN 的既有分类：目标侧仍有死层时不得误杀健康宿主；
+        // 只有原先会回报 -ENOTCONN 的路径保留该错误码，其余失败回报通用失败。
+        return if !target_had_dead_layers && errno == libc::ENOTCONN {
+            -errno
+        } else {
+            -1
+        };
     }
     if !make_mount_private(&c_target) {
-        return false;
+        return -1;
     }
 
     // 6. 复核。挂载源必须就是本次会话的挂载源：只靠系统调用返回 0 无法区分
     //    "挂在应用视图里" 与 "挂在了别处"，而误判成接入成功会让应用静默失去重定向。
     let Some(live) = crate::mount_ledger::topmost_live_mount(0, target_root) else {
         log::warn!("fuse host attach not visible target={}", target_root);
-        return false;
+        return -1;
     };
     if live.source != view.mount_source {
         log::warn!(
@@ -1111,16 +1101,19 @@ fn host_attach_child_main(
             live.source,
             live.fs_type
         );
-        return false;
+        return -1;
     }
 
-    // 7. 通知父进程，随后自行退出。
-    let ready: i32 = 0;
-    // SAFETY: ready_sock 是本次接入的有效端点，ready 是栈变量。
+    0
+}
+
+/// 接入子进程统一回报结果，成功与失败均只发送一次。
+fn send_host_attach_result(ready_sock: libc::c_int, result: i32) -> bool {
+    // SAFETY: ready_sock 是本次接入的有效端点，result 是调用期间存活的栈变量。
     let sent = unsafe {
         libc::send(
             ready_sock,
-            &ready as *const i32 as *const libc::c_void,
+            &result as *const i32 as *const libc::c_void,
             std::mem::size_of::<i32>(),
             0,
         )
