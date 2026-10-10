@@ -895,9 +895,7 @@ fn dump_malloc_info_if_requested() {
     // SAFETY: fopen/malloc_info/fclose 均为 bionic libc 导出的稳定接口；fp
     // 生命周期限定在本函数内，malloc_info 内部仅短暂持有分配器锁。
     unsafe {
-        let path = b"/data/local/tmp/srx-meminfo.xml\0".as_ptr() as *const libc::c_char;
-        let mode = b"w\0".as_ptr() as *const libc::c_char;
-        let fp = libc::fopen(path, mode);
+        let fp = libc::fopen(c"/data/local/tmp/srx-meminfo.xml".as_ptr(), c"w".as_ptr());
         if fp.is_null() {
             log::warn!("daemon meminfo dump fopen failed");
             let _ = std::fs::remove_file(TRIGGER);

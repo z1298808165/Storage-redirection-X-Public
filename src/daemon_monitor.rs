@@ -94,7 +94,7 @@ fn read_live_watch_fds(fd: i32) -> Option<HashSet<i32>> {
         let Some(rest) = line.strip_prefix("inotify wd:") else {
             continue;
         };
-        let number = rest.trim().split_whitespace().next().unwrap_or("");
+        let number = rest.split_whitespace().next().unwrap_or("");
         if let Ok(wd) = number.parse::<i32>() {
             live.insert(wd);
         }
@@ -121,16 +121,18 @@ fn repair_monitored_backend_owner_for_watchers_dir(
     }
 }
 
+/// watcher 集合驻留表类型：按集合内容驻留，同一棵子树内所有目录的 watcher
+/// 集合与根完全一致，全树每个不同的根只存一份 Arc。
+type WatcherInternTable = std::sync::Mutex<
+    std::collections::HashMap<Vec<WatchWatcher>, std::sync::Arc<Vec<WatchWatcher>>>,
+>;
+
 /// watcher 集合驻留表：同一棵子树内所有目录的 watcher 集合与根完全一致，
 /// 按集合内容驻留后全树每个不同的根只存一份 Arc。直接 Arc::make_mut 做合并
 /// 会因「子树共享着同一份 Arc」在每次合并时深拷贝整个集合，25036 个目录各自
 /// 持有 ~20 项的副本（ishtar 实测 30MB），驻留才是正确的共享方式。
 fn intern_watchers(set: Vec<WatchWatcher>) -> std::sync::Arc<Vec<WatchWatcher>> {
-    static INTERN: std::sync::OnceLock<
-        std::sync::Mutex<
-            std::collections::HashMap<Vec<WatchWatcher>, std::sync::Arc<Vec<WatchWatcher>>>,
-        >,
-    > = std::sync::OnceLock::new();
+    static INTERN: std::sync::OnceLock<WatcherInternTable> = std::sync::OnceLock::new();
     let mut table = INTERN
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
