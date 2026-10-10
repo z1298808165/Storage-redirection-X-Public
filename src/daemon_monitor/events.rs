@@ -1,6 +1,6 @@
-use super::WatchNode;
 use super::inotify::{cstring_path, last_errno};
 use super::roots::map_record_from_path;
+use super::{WatchNode, WatchWatcher};
 use crate::config::SettingsHub;
 use crate::monitor::{infer_public_path_package_name, infer_recent_path_caller_identity};
 use crate::platform::{self, paths};
@@ -33,15 +33,15 @@ pub(super) struct MonitorEventPaths {
 }
 
 impl MonitorEventPaths {
-    pub(super) fn from_node(node: &WatchNode, name: &str) -> Self {
+    pub(super) fn from_node(node: &WatchNode, watcher: &WatchWatcher, name: &str) -> Self {
         let display_path = paths::normalize(&paths::join(&node.display_dir, name));
         Self {
             backend_path: paths::join(&node.backend_dir, name),
             display_path: display_path.clone(),
             from_path: map_record_from_path(
                 &display_path,
-                &node.record_display_root,
-                &node.record_from_root,
+                &watcher.record_display_root,
+                &watcher.record_from_root,
             ),
         }
     }

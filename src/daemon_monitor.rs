@@ -19,7 +19,7 @@ use roots::{
     dedup_roots, is_under_any_root, select_watch_start, should_descend_into_child,
     should_record_display_path, sort_roots_by_monitor_priority,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const DUPLICATE_EVENT_WINDOW_MS: i64 = 1500;
 const MISSING_ROOT_RETRY_MS: i64 = 1000;
@@ -49,6 +49,13 @@ const OVERFLOW_RESYNC_MIN_INTERVAL_MS: i64 = 30_000;
 const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
 /// 公共 owner 修复不安装 inotify watch，使用有界周期扫描覆盖运行期间新建的目录。
 const PUBLIC_OWNER_REPAIR_INTERVAL_MS: i64 = 1000;
+
+/// 死监视条目对账周期。inotify 队列溢出会丢弃 IN_IGNORED/IN_DELETE 事件，
+/// `watch_nodes` 中对应条目从此无人删除；内核复用 wd 后新目录的节点又推进
+/// 同一个 Vec，条目逐代堆积（ishtar 实测：繁忙设备 1.5 小时积到每 wd 平均
+/// ~12 个节点，监视树内存 121MB，而全新树只需 15MB）。按分钟级对账即可把
+/// 滞留控制在一个小窗口内。
+const PRUNE_DEAD_WATCHES_INTERVAL_MS: i64 = 60_000;
 /// 公共 owner 修复扫描在目录数没有变化时的记录间隔（扫描每 1 秒一轮，约 5 分钟）。
 const PUBLIC_OWNER_REPAIR_LOG_HEARTBEAT: u64 = 300;
 /// 递归展开监视树时最多访问的目录数，与 [`MAX_PUBLIC_OWNER_REPAIR_DIRS`] 对齐。
@@ -75,8 +82,68 @@ struct WatchRoot {
     source: &'static str,
 }
 
-/// 跨节点共享的不可变字符串驻留表。
+/// 读取本进程 inotify fd 的内核侧 live wd 清单。
 ///
+/// `/proc/self/fdinfo/<fd>` 的 `inotify wd:` 行就是内核 watch 表的真实内容，
+/// 任何因队列溢出丢失 IN_IGNORED 造成的用户态账本漂移都会在这里现形。
+/// 行格式为 `inotify wd:<n> ino:<hex> ...`，只取冒号后的首个空白分隔字段。
+fn read_live_watch_fds(fd: i32) -> Option<HashSet<i32>> {
+    let content = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).ok()?;
+    let mut live = HashSet::new();
+    for line in content.lines() {
+        let Some(rest) = line.strip_prefix("inotify wd:") else {
+            continue;
+        };
+        let number = rest.trim().split_whitespace().next().unwrap_or("");
+        if let Ok(wd) = number.parse::<i32>() {
+            live.insert(wd);
+        }
+    }
+    Some(live)
+}
+
+/// 对一组 watcher 执行任意路径（目录或文件）的 owner 修复。
+///
+/// 修复本身按 (source, 路径) 决定作用域，与包名无关；同一目录上多个 watcher
+/// 的修复调用次数与合并前一致，行为保持不变。
+fn repair_monitored_backend_owner_for_watchers_dir(
+    watchers: &[WatchWatcher],
+    display_path: &str,
+    backend_path: &str,
+) {
+    for watcher in watchers {
+        repair_monitored_backend_owner(
+            watcher.source,
+            &watcher.package_name,
+            display_path,
+            backend_path,
+        );
+    }
+}
+
+/// watcher 集合驻留表：同一棵子树内所有目录的 watcher 集合与根完全一致，
+/// 按集合内容驻留后全树每个不同的根只存一份 Arc。直接 Arc::make_mut 做合并
+/// 会因「子树共享着同一份 Arc」在每次合并时深拷贝整个集合，25036 个目录各自
+/// 持有 ~20 项的副本（ishtar 实测 30MB），驻留才是正确的共享方式。
+fn intern_watchers(set: Vec<WatchWatcher>) -> std::sync::Arc<Vec<WatchWatcher>> {
+    static INTERN: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<Vec<WatchWatcher>, std::sync::Arc<Vec<WatchWatcher>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    let mut table = INTERN
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(shared) = table.get(&set) {
+        return shared.clone();
+    }
+    let shared = std::sync::Arc::new(set.clone());
+    table.insert(set, shared.clone());
+    shared
+}
+
+/// 跨节点共享的不可变字符串驻留表。
 /// 监视树容量上限内的每个节点都携带包名与记录根等相同字符串，按值存储会让
 /// 上万个节点重复持有相同的堆分配；驻留后同一字符串全表只存一份，节点间
 /// 克隆退化为指针拷贝。
@@ -96,15 +163,34 @@ fn intern_shared(value: &str) -> std::sync::Arc<str> {
     shared
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct WatchNode {
+/// 单个监视根（包视角）落在同一目录上的 watcher 身份。
+///
+/// 同一物理目录（同一 wd）会被多个应用的监视根各自展开：模板配置让若干应用
+/// 共享 Download/DCIM 等公共目录，旧结构按 (包,目录) 各建一个节点并各自克隆
+/// 一份目录路径串，节点与字符串按共享包数成倍膨胀（ishtar 实测 ~6.6 倍，
+/// 监视树内存 121MB）。合并后每目录一个节点，包级信息收进 watchers。
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct WatchWatcher {
     package_name: std::sync::Arc<str>,
-    backend_dir: String,
-    display_dir: String,
     record_display_root: std::sync::Arc<str>,
     record_from_root: std::sync::Arc<str>,
     excluded_roots: std::sync::Arc<[String]>,
     source: &'static str,
+}
+
+/// 单一物理目录的监视条目。
+///
+/// `watchers` 通常只有一个；同一目录被多个包根覆盖时合并为多个 watcher，
+/// 目录路径串每目录只存一份。同一 wd 上不同 backend_dir（极少见的别名路径
+/// 指向同一 inode）仍是不同节点，保证事件路径推导不串视图。
+#[derive(Clone)]
+struct WatchNode {
+    backend_dir: String,
+    display_dir: String,
+    /// 共享的 watcher 集合：同一棵子树内所有目录的 watcher 集合与根完全一致，
+    /// Arc 共享让子节点继承退化为指针拷贝（ishtar 实测：25036 个目录若各自
+    /// 克隆 ~20 项 watcher 列表要 30MB，共享后整棵树每根只存一份）。
+    watchers: std::sync::Arc<Vec<WatchWatcher>>,
 }
 
 struct WatchStart {
@@ -134,6 +220,8 @@ pub struct RegularAppMonitor {
     /// 配置未变化而直接沿用现有监视树的次数，用于限频输出排查日志。
     unchanged_reconfigure_count: u32,
     last_public_owner_repair_ms: i64,
+    /// 上次死监视条目对账时间，用于节流。
+    last_prune_dead_ms: i64,
     /// 各公共 owner 根上次扫描到的目录数，用于只在覆盖范围变化时记录扫描摘要。
     public_owner_repair_log_dirs: HashMap<String, usize>,
     /// 公共 owner 修复扫描的记录次数，用于按心跳间隔补充摘要。
@@ -160,6 +248,7 @@ impl RegularAppMonitor {
             last_overflow_resync_ms: 0,
             unchanged_reconfigure_count: 0,
             last_public_owner_repair_ms: 0,
+            last_prune_dead_ms: 0,
             public_owner_repair_log_dirs: HashMap::new(),
             public_owner_repair_log_count: 0,
         }
@@ -188,6 +277,7 @@ impl RegularAppMonitor {
                 self.retry_missing_watch_roots();
             }
             self.repair_public_owner_roots_if_due();
+            self.prune_dead_watches_if_due();
             // 排查用：按 2 的幂限频记录一次「配置未变化、沿用现有监视树」。
             // 汇总日志缺失时需要区分两种情形：reconfigure 每轮都在走这条捷径
             // （说明监视树是早前建立的、或从未建立），还是根本没被调用。
@@ -284,8 +374,16 @@ impl RegularAppMonitor {
         let overflow_resync = std::mem::take(&mut self.overflow_resync);
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = overflow_resync || node.source == "private_owner";
-                let recurse_existing_tree = overflow_resync || node.source != "public_owner";
+                let repair_existing_files = overflow_resync
+                    || node
+                        .watchers
+                        .iter()
+                        .any(|watcher| watcher.source == "private_owner");
+                let recurse_existing_tree = overflow_resync
+                    || node
+                        .watchers
+                        .iter()
+                        .any(|watcher| watcher.source != "public_owner");
                 self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
@@ -361,8 +459,14 @@ impl RegularAppMonitor {
 
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = node.source == "private_owner";
-                let recurse_existing_tree = node.source != "public_owner";
+                let repair_existing_files = node
+                    .watchers
+                    .iter()
+                    .any(|watcher| watcher.source == "private_owner");
+                let recurse_existing_tree = node
+                    .watchers
+                    .iter()
+                    .any(|watcher| watcher.source != "public_owner");
                 self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
@@ -473,13 +577,27 @@ impl RegularAppMonitor {
             return;
         }
 
-        // 放弃变化包的旧节点：内核 watch 保留，事件因查不到节点被静默丢弃。
+        // 只移除变化包的 watcher：同目录上其它未变化包的 watcher 原地保留，
+        // 整目录所有 watcher 都被移除时才放弃该节点（内核 watch 保留原位，
+        // 事件因节点缺失被丢弃，`inotify_add_watch` 幂等复用 wd）。
         self.watch_nodes.retain(|_, nodes| {
-            !nodes.iter().any(|node| {
-                packages
-                    .iter()
-                    .any(|package| package.as_str() == node.package_name.as_ref())
-            })
+            nodes.retain_mut(|node| {
+                let mut kept = node.watchers.as_ref().clone();
+                kept.retain(|watcher| {
+                    !packages
+                        .iter()
+                        .any(|package| package.as_str() == watcher.package_name.as_ref())
+                });
+                if kept.len() == node.watchers.len() {
+                    return true;
+                }
+                if kept.is_empty() {
+                    return false;
+                }
+                node.watchers = intern_watchers(kept);
+                true
+            });
+            !nodes.is_empty()
         });
 
         let mut roots = Vec::new();
@@ -513,8 +631,14 @@ impl RegularAppMonitor {
         }
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = node.source == "private_owner";
-                let recurse_existing_tree = node.source != "public_owner";
+                let repair_existing_files = node
+                    .watchers
+                    .iter()
+                    .any(|watcher| watcher.source == "private_owner");
+                let recurse_existing_tree = node
+                    .watchers
+                    .iter()
+                    .any(|watcher| watcher.source != "public_owner");
                 self.expand_watch_tree_from(node, repair_existing_files, recurse_existing_tree);
                 if self.capacity_limited {
                     break;
@@ -564,17 +688,18 @@ impl RegularAppMonitor {
             return false;
         };
         let node = WatchNode {
-            package_name: intern_shared(&root.package_name),
             backend_dir: start.backend_dir,
             display_dir: start.display_dir,
-            record_display_root: intern_shared(&root.record_display_root),
-            record_from_root: intern_shared(&root.record_from_root),
-            excluded_roots: root.excluded_roots.clone().into(),
-            source: root.source,
+            watchers: intern_watchers(vec![WatchWatcher {
+                package_name: intern_shared(&root.package_name),
+                record_display_root: intern_shared(&root.record_display_root),
+                record_from_root: intern_shared(&root.record_from_root),
+                excluded_roots: root.excluded_roots.clone().into(),
+                source: root.source,
+            }]),
         };
-        repair_monitored_backend_owner(
-            node.source,
-            &node.package_name,
+        repair_monitored_backend_owner_for_watchers_dir(
+            &node.watchers,
             &node.display_dir,
             &node.backend_dir,
         );
@@ -596,6 +721,55 @@ impl RegularAppMonitor {
         }
     }
 
+    /// 按节流周期对账内核 live wd 集合，剪除已死亡的监视条目。
+    fn prune_dead_watches_if_due(&mut self) {
+        if self.watch_nodes.is_empty() {
+            return;
+        }
+        let now = paths::monotonic_ms();
+        if now.saturating_sub(self.last_prune_dead_ms) < PRUNE_DEAD_WATCHES_INTERVAL_MS {
+            return;
+        }
+        self.last_prune_dead_ms = now;
+        let removed = self.prune_dead_watches();
+        if removed > 0 {
+            log::info!(
+                "daemon monitor pruned dead watches removed={} remaining={}",
+                removed,
+                self.watch_nodes.len()
+            );
+        }
+    }
+
+    /// 对账内核 live wd 集合，剪除已死亡的监视条目，返回删除的条目数。
+    ///
+    /// inotify 队列溢出会丢弃 IN_IGNORED/IN_DELETE 事件，`watch_nodes` 里对应
+    /// 条目从此无人删除；内核复用 wd 后新目录的节点又推进同一个 Vec，条目逐
+    /// 代堆积。以 `/proc/self/fdinfo/<fd>` 的内核侧 wd 清单为准删除不在册的
+    /// 条目——该清单就是内核的真实 watch 表，任何丢失事件造成的漂移都会在
+    /// 这里现形。fdinfo 读取失败时跳过本轮（不能因对账失败误删全部条目）。
+    fn prune_dead_watches(&mut self) -> usize {
+        if self.fd < 0 || self.watch_nodes.is_empty() {
+            return 0;
+        }
+        let Some(live) = read_live_watch_fds(self.fd) else {
+            return 0;
+        };
+        // 防呆：对账清单为空说明 fdinfo 读取或解析异常（此时内核明明还有
+        // watch），绝不能把整张表清掉；宁可推迟到下一轮。
+        if live.is_empty() {
+            return 0;
+        }
+        let before = self.watch_nodes.len();
+        // 清单规模与账本严重不符同样视为读取异常：正常情况下两者只差本次
+        // 剪除目标（丢失事件造成的漂移），不会差一个数量级。
+        if live.len() * 4 < before {
+            return 0;
+        }
+        self.watch_nodes.retain(|wd, _| live.contains(wd));
+        before - self.watch_nodes.len()
+    }
+
     fn add_watch_root(&mut self, root: &WatchRoot) -> Option<WatchNode> {
         let start = select_watch_start(root)?;
 
@@ -604,19 +778,21 @@ impl RegularAppMonitor {
             return None;
         }
 
-        let node = WatchNode {
+        let watcher = WatchWatcher {
             package_name: intern_shared(&root.package_name),
-            backend_dir: start.backend_dir,
-            display_dir: start.display_dir,
             record_display_root: intern_shared(&root.record_display_root),
             record_from_root: intern_shared(&root.record_from_root),
             excluded_roots: root.excluded_roots.clone().into(),
             source: root.source,
         };
+        let node = WatchNode {
+            backend_dir: start.backend_dir,
+            display_dir: start.display_dir,
+            watchers: intern_watchers(vec![watcher]),
+        };
 
-        repair_monitored_backend_owner(
-            node.source,
-            &node.package_name,
+        repair_monitored_backend_owner_for_watchers_dir(
+            &node.watchers,
             &node.display_dir,
             &node.backend_dir,
         );
@@ -672,16 +848,21 @@ impl RegularAppMonitor {
                 };
                 if !file_type.is_dir() {
                     if repair_existing_files {
-                        repair_monitored_backend_owner(
-                            node.source,
-                            &node.package_name,
+                        repair_monitored_backend_owner_for_watchers_dir(
+                            &node.watchers,
                             &child_display_dir,
                             &child_backend_dir,
                         );
                     }
                     continue;
                 }
-                if !should_descend_into_child(&node, &child_display_dir) {
+                if !node.watchers.iter().any(|watcher| {
+                    should_descend_into_child(
+                        watcher.source,
+                        watcher.record_display_root.as_ref(),
+                        &child_display_dir,
+                    )
+                }) {
                     continue;
                 }
                 if self.watch_nodes.len() >= self.max_watches {
@@ -689,23 +870,21 @@ impl RegularAppMonitor {
                     break;
                 }
                 let child = WatchNode {
-                    package_name: node.package_name.clone(),
                     backend_dir: child_backend_dir,
                     display_dir: child_display_dir,
-                    record_display_root: node.record_display_root.clone(),
-                    record_from_root: node.record_from_root.clone(),
-                    excluded_roots: node.excluded_roots.clone(),
-                    source: node.source,
+                    watchers: node.watchers.clone(),
                 };
-                repair_monitored_backend_owner(
-                    child.source,
-                    &child.package_name,
+                repair_monitored_backend_owner_for_watchers_dir(
+                    &child.watchers,
                     &child.display_dir,
                     &child.backend_dir,
                 );
                 if self.add_watch_node(&child)
                     && (recurse_existing_tree
-                        || (node.source == "public_owner"
+                        || (node
+                            .watchers
+                            .iter()
+                            .any(|watcher| watcher.source == "public_owner")
                             && depth < PUBLIC_OWNER_EXISTING_WATCH_DEPTH))
                 {
                     stack.push((child, depth.saturating_add(1)));
@@ -748,20 +927,21 @@ impl RegularAppMonitor {
                     continue;
                 }
                 let child = WatchNode {
-                    package_name: node.package_name.clone(),
                     backend_dir: paths::join(&node.backend_dir, &name),
                     display_dir: paths::join(&node.display_dir, &name),
-                    record_display_root: node.record_display_root.clone(),
-                    record_from_root: node.record_from_root.clone(),
-                    excluded_roots: node.excluded_roots.clone(),
-                    source: node.source,
+                    watchers: node.watchers.clone(),
                 };
-                if !should_descend_into_child(&node, &child.display_dir) {
+                if !node.watchers.iter().any(|watcher| {
+                    should_descend_into_child(
+                        watcher.source,
+                        watcher.record_display_root.as_ref(),
+                        &child.display_dir,
+                    )
+                }) {
                     continue;
                 }
-                repair_monitored_backend_owner(
-                    child.source,
-                    &child.package_name,
+                repair_monitored_backend_owner_for_watchers_dir(
+                    &child.watchers,
                     &child.display_dir,
                     &child.backend_dir,
                 );
@@ -797,10 +977,34 @@ impl RegularAppMonitor {
             }
         };
 
-        let nodes = self.watch_nodes.entry(wd).or_default();
-        if !nodes.iter().any(|existing| existing == node) {
-            nodes.push(node.clone());
+        let entries = self.watch_nodes.entry(wd).or_default();
+        // 同一物理目录（同一 wd）被多个包根展开时合并进已有节点的 watchers，
+        // 目录路径串每目录只存一份；不同 backend_dir 指向同一 inode 的别名
+        // 场景仍是不同节点，事件路径推导不串视图。
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|existing| existing.backend_dir == node.backend_dir)
+        {
+            if existing.watchers.len() == node.watchers.len()
+                && existing
+                    .watchers
+                    .iter()
+                    .zip(node.watchers.iter())
+                    .all(|(left, right)| left == right)
+            {
+                // 集合完全一致（子树继承的共享集合），无需重建。
+                return true;
+            }
+            let mut merged: Vec<WatchWatcher> = existing.watchers.as_ref().clone();
+            for watcher in node.watchers.iter() {
+                if !merged.iter().any(|candidate| candidate == watcher) {
+                    merged.push(watcher.clone());
+                }
+            }
+            existing.watchers = intern_watchers(merged);
+            return true;
         }
+        entries.push(node.clone());
         true
     }
 
@@ -918,87 +1122,95 @@ impl RegularAppMonitor {
         };
         let is_dir = inotify::is_dir(mask);
         for node in nodes {
-            let event_paths = MonitorEventPaths::from_node(&node, &name);
+            for watcher in node.watchers.iter() {
+                let event_paths = MonitorEventPaths::from_node(&node, watcher, &name);
 
-            repair_monitored_backend_owner(
-                node.source,
-                &node.package_name,
-                &node.display_dir,
-                &node.backend_dir,
-            );
-            repair_monitored_backend_owner(
-                node.source,
-                &node.package_name,
-                &event_paths.display_path,
-                &event_paths.backend_path,
-            );
+                repair_monitored_backend_owner(
+                    watcher.source,
+                    &watcher.package_name,
+                    &node.display_dir,
+                    &node.backend_dir,
+                );
+                repair_monitored_backend_owner(
+                    watcher.source,
+                    &watcher.package_name,
+                    &event_paths.display_path,
+                    &event_paths.backend_path,
+                );
 
-            if is_dir
-                && inotify::is_created_or_moved_to(mask)
-                && should_descend_into_child(&node, &event_paths.display_path)
-            {
-                let child = WatchRoot {
-                    package_name: node.package_name.to_string(),
-                    backend_root: event_paths.backend_path.clone(),
-                    display_root: event_paths.display_path.clone(),
-                    record_display_root: node.record_display_root.to_string(),
-                    record_from_root: node.record_from_root.to_string(),
-                    excluded_roots: node.excluded_roots.as_ref().to_vec(),
-                    source: node.source,
-                };
-                let _ = self.add_watch_tree(&child);
-            }
+                if is_dir && inotify::is_created_or_moved_to(mask) {
+                    if !should_descend_into_child(
+                        watcher.source,
+                        watcher.record_display_root.as_ref(),
+                        &event_paths.display_path,
+                    ) {
+                        continue;
+                    }
+                    let child = WatchRoot {
+                        package_name: watcher.package_name.to_string(),
+                        backend_root: event_paths.backend_path.clone(),
+                        display_root: event_paths.display_path.clone(),
+                        record_display_root: watcher.record_display_root.to_string(),
+                        record_from_root: watcher.record_from_root.to_string(),
+                        excluded_roots: watcher.excluded_roots.as_ref().to_vec(),
+                        source: watcher.source,
+                    };
+                    let _ = self.add_watch_tree(&child);
+                }
 
-            if node.source == "public_owner" || node.source == "private_owner" {
-                continue;
-            }
+                if watcher.source == "public_owner" || watcher.source == "private_owner" {
+                    continue;
+                }
 
-            let operation_name = monitor_operation_from_mask(mask);
-            if !should_record_display_path(&event_paths.display_path, &node.record_display_root)
-                || should_filter_display_path(&event_paths.display_path, operation_name)
-                || is_under_any_root(&event_paths.display_path, &node.excluded_roots)
-            {
-                continue;
+                let operation_name = monitor_operation_from_mask(mask);
+                if !should_record_display_path(
+                    &event_paths.display_path,
+                    &watcher.record_display_root,
+                ) || should_filter_display_path(&event_paths.display_path, operation_name)
+                    || is_under_any_root(&event_paths.display_path, &watcher.excluded_roots)
+                {
+                    continue;
+                }
+                let identity = resolve_monitor_identity(
+                    &watcher.package_name,
+                    &event_paths.display_path,
+                    &event_paths.backend_path,
+                    watcher.source,
+                );
+                if should_skip_ambiguous_allowed_real_path_event(
+                    &identity,
+                    watcher.source,
+                    &event_paths.display_path,
+                    &watcher.package_name,
+                ) || should_skip_ambiguous_read_only_path_event(
+                    &identity,
+                    watcher.source,
+                    &watcher.package_name,
+                ) || should_skip_public_root_event_identity(
+                    &identity,
+                    watcher.source,
+                    &watcher.package_name,
+                ) {
+                    continue;
+                }
+                if self.should_skip_duplicate(
+                    &identity.package_name,
+                    &event_paths.display_path,
+                    &event_paths.from_path,
+                    operation_name,
+                    mask,
+                ) {
+                    continue;
+                }
+                emit_monitor_event(
+                    &identity,
+                    &event_paths,
+                    &watcher.package_name,
+                    watcher.source,
+                    mask,
+                    operation_name,
+                );
             }
-            let identity = resolve_monitor_identity(
-                &node.package_name,
-                &event_paths.display_path,
-                &event_paths.backend_path,
-                node.source,
-            );
-            if should_skip_ambiguous_allowed_real_path_event(
-                &identity,
-                node.source,
-                &event_paths.display_path,
-                &node.package_name,
-            ) || should_skip_ambiguous_read_only_path_event(
-                &identity,
-                node.source,
-                &node.package_name,
-            ) || should_skip_public_root_event_identity(
-                &identity,
-                node.source,
-                &node.package_name,
-            ) {
-                continue;
-            }
-            if self.should_skip_duplicate(
-                &identity.package_name,
-                &event_paths.display_path,
-                &event_paths.from_path,
-                operation_name,
-                mask,
-            ) {
-                continue;
-            }
-            emit_monitor_event(
-                &identity,
-                &event_paths,
-                &node.package_name,
-                node.source,
-                mask,
-                operation_name,
-            );
         }
     }
 

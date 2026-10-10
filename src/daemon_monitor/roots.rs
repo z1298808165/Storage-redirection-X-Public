@@ -1,4 +1,4 @@
-use super::{WatchNode, WatchRoot, WatchStart};
+use super::{WatchRoot, WatchStart};
 use crate::config::MonitorAppSpec;
 use crate::platform::paths;
 
@@ -453,12 +453,16 @@ fn strip_path_suffix(path: &str, suffix: &str) -> Option<String> {
     Some(normalized[..keep_len].trim_end_matches('/').to_string())
 }
 
-pub(super) fn should_descend_into_child(node: &WatchNode, child_display_dir: &str) -> bool {
-    if node.source == "public_owner" && is_android_app_private_path(child_display_dir) {
+pub(super) fn should_descend_into_child(
+    source: &str,
+    record_display_root: &str,
+    child_display_dir: &str,
+) -> bool {
+    if source == "public_owner" && is_android_app_private_path(child_display_dir) {
         return false;
     }
-    paths::is_same_or_child(child_display_dir, &node.record_display_root)
-        || paths::is_same_or_child(&node.record_display_root, child_display_dir)
+    paths::is_same_or_child(child_display_dir, record_display_root)
+        || paths::is_same_or_child(record_display_root, child_display_dir)
 }
 
 fn is_android_app_private_path(path: &str) -> bool {
