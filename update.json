@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-38046540072-1/storage-redirect-x-manager-v1.2.60-ci.37.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-38046540072-1/storage.redirect.x-v1.2.60-ci.37.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.37`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-37941701580-1`\n- 当前提交：`5a013886277b`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复 clippy 全目标检查的五处告警；适用范围：模块与守护进程源码；限制：行为语义保持不变。\n- 修复监视首建修复标记反置并降低写入事件期 CPU 开销；适用范围：模块文件监视线程；限制：非写入事件修复行为保持不变。\n- 修复共享宿主接入失败时挂载流程空等超时的问题；适用范围：模块 FUSE 接入子进程；限制：失败分类语义保持不变。\n\n### 功能变化\n- repair_existing_files 增加 daemon 首建门控；适用范围：daemon 文件监视树重建。\n- 修复按 source 作用域去重、动态展开不再逐文件修复；适用范围：daemon 文件监视事件处理。\n- 同目录多包节点合并、watcher 集合驻留与 live wd 对账剪除；适用范围：daemon 文件监视树存储与治理。\n- 同签名续跑轮复用缓存计划批次并加堆统计诊断导出；适用范围：daemon reconcile 主循环。\n- create_directory 失败记录 errno 并写入 policy 诊断日志；适用范围：沙盒目录创建诊断。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`1.2.60-ci.37`\n- 对比基准：上一版 CI 构建 `ci-build-37941701580-1`\n- 当前提交：`5a013886277b`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复共享宿主接入子进程失败不回包导致挂载流程空等超时的问题，错误分类与死层清理语义不变。\n- 修复文件监视首建修复标记反置，纯内容写入不再触发重复元数据修复，降低写入事件期 CPU 开销。\n- 清理 clippy 全目标检查遗留告警，恢复 CI lint 门禁。\n\n### 功能变化\n- 文件监视树按目录合并同包节点、watcher 集合驻留与内核 live wd 对账，降低监视内存与 CPU 开销。\n- reconcile 续跑轮复用计划批次消除重复全量扫描；沙盒目录创建失败记录 errno 便于诊断。\n"
   },
   "releases": []
 }
