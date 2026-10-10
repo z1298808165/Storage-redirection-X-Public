@@ -118,6 +118,12 @@ pub(super) fn is_relevant_event(mask: u32) -> bool {
         != 0
 }
 
+/// 内容写入本身不改变 owner/group/mode；创建、移入、关闭写入与属性变化仍做修复。
+/// 保留其它相关事件的历史修复行为，只去掉纯 IN_MODIFY 的重复元数据检查。
+pub(super) fn is_owner_repair_event(mask: u32) -> bool {
+    is_relevant_event(mask & !IN_MODIFY)
+}
+
 pub(super) fn is_dir(mask: u32) -> bool {
     (mask & IN_ISDIR) != 0
 }

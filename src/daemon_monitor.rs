@@ -378,7 +378,8 @@ impl RegularAppMonitor {
 
         // 溢出补偿扫描需要对全部来源重新执行 owner 修复，不能只覆盖 private_owner。
         let overflow_resync = std::mem::take(&mut self.overflow_resync);
-        let first_build = std::mem::replace(&mut self.first_build_done, true);
+        // replace 返回旧状态：只有旧值为 false 才是首次建树。
+        let first_build = !std::mem::replace(&mut self.first_build_done, true);
         if !self.capacity_limited {
             for node in expansion_roots {
                 let repair_existing_files = overflow_resync
@@ -1132,32 +1133,34 @@ impl RegularAppMonitor {
             // redirect_root 的包名，同一目录上多个同源 watcher 的修复目标完全
             // 一致——高频事件下逐 watcher 重复 lstat 是监视线程 CPU 阵发的主要
             // 来源之一（真机 perf 采样确认）。
-            let mut repaired: Vec<(&'static str, &str)> = Vec::new();
-            for watcher in node.watchers.iter() {
-                let scope_package = if watcher.source == "redirect_root" {
-                    watcher.package_name.as_ref()
-                } else {
-                    ""
-                };
-                if repaired
-                    .iter()
-                    .any(|(source, package)| *source == watcher.source && *package == scope_package)
-                {
-                    continue;
+            // IN_MODIFY 只代表内容写入，跳过重复 owner 检查；文件监视记录仍照常处理。
+            if inotify::is_owner_repair_event(mask) {
+                let mut repaired: Vec<(&'static str, &str)> = Vec::new();
+                for watcher in node.watchers.iter() {
+                    let scope_package = if watcher.source == "redirect_root" {
+                        watcher.package_name.as_ref()
+                    } else {
+                        ""
+                    };
+                    if repaired.iter().any(|(source, package)| {
+                        *source == watcher.source && *package == scope_package
+                    }) {
+                        continue;
+                    }
+                    repaired.push((watcher.source, scope_package));
+                    repair_monitored_backend_owner(
+                        watcher.source,
+                        &watcher.package_name,
+                        &node.display_dir,
+                        &node.backend_dir,
+                    );
+                    repair_monitored_backend_owner(
+                        watcher.source,
+                        &watcher.package_name,
+                        &display_path,
+                        &backend_path,
+                    );
                 }
-                repaired.push((watcher.source, scope_package));
-                repair_monitored_backend_owner(
-                    watcher.source,
-                    &watcher.package_name,
-                    &node.display_dir,
-                    &node.backend_dir,
-                );
-                repair_monitored_backend_owner(
-                    watcher.source,
-                    &watcher.package_name,
-                    &display_path,
-                    &backend_path,
-                );
             }
 
             // 目录创建/移入：合并登记新子树并一次性展开。
