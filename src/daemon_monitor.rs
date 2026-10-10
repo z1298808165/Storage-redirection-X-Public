@@ -16,8 +16,8 @@ use events::{
 };
 use roots::{
     build_private_owner_repair_roots, build_public_owner_repair_root, build_watch_roots,
-    dedup_roots, is_under_any_root, select_watch_start, should_descend_into_child,
-    should_record_display_path, sort_roots_by_monitor_priority,
+    dedup_roots, is_under_any_root, map_record_from_path, select_watch_start,
+    should_descend_into_child, should_record_display_path, sort_roots_by_monitor_priority,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -675,14 +675,6 @@ impl RegularAppMonitor {
         self.public_owner_repair_log_count = 0;
     }
 
-    fn add_watch_tree(&mut self, root: &WatchRoot) -> bool {
-        let Some(node) = self.add_watch_root(root) else {
-            return false;
-        };
-        self.expand_watch_tree_from(node, true, true);
-        true
-    }
-
     fn repair_public_owner_root(&mut self, root: &WatchRoot) -> bool {
         let Some(start) = select_watch_start(root) else {
             return false;
@@ -1122,9 +1114,28 @@ impl RegularAppMonitor {
         };
         let is_dir = inotify::is_dir(mask);
         for node in nodes {
-            for watcher in node.watchers.iter() {
-                let event_paths = MonitorEventPaths::from_node(&node, watcher, &name);
+            // 节点级事件路径：display/backend 与 watcher 无关，每事件只算一次。
+            let display_path = paths::normalize(&paths::join(&node.display_dir, &name));
+            let backend_path = paths::join(&node.backend_dir, &name);
 
+            // owner 修复按 (source, 作用域包) 去重：修复决策只取决于 source 与
+            // redirect_root 的包名，同一目录上多个同源 watcher 的修复目标完全
+            // 一致——高频事件下逐 watcher 重复 lstat 是监视线程 CPU 阵发的主要
+            // 来源之一（真机 perf 采样确认）。
+            let mut repaired: Vec<(&'static str, &str)> = Vec::new();
+            for watcher in node.watchers.iter() {
+                let scope_package = if watcher.source == "redirect_root" {
+                    watcher.package_name.as_ref()
+                } else {
+                    ""
+                };
+                if repaired
+                    .iter()
+                    .any(|(source, package)| *source == watcher.source && *package == scope_package)
+                {
+                    continue;
+                }
+                repaired.push((watcher.source, scope_package));
                 repair_monitored_backend_owner(
                     watcher.source,
                     &watcher.package_name,
@@ -1134,53 +1145,58 @@ impl RegularAppMonitor {
                 repair_monitored_backend_owner(
                     watcher.source,
                     &watcher.package_name,
-                    &event_paths.display_path,
-                    &event_paths.backend_path,
+                    &display_path,
+                    &backend_path,
                 );
+            }
 
-                if is_dir && inotify::is_created_or_moved_to(mask) {
-                    if !should_descend_into_child(
+            // 目录创建/移入：合并登记新子树并一次性展开。
+            // 此前按 watcher 逐个走 add_watch_tree 且 repair_existing_files=true，
+            // 应用启动的建目录风暴下同一子树被重走 N 次、每个新文件都 lstat 修复，
+            // 监视线程持续 ~112% 单核数十秒。运行期新建子树的文件由应用自身写入、
+            // owner 天然正确；历史遗留 owner 交给全量重配置与溢出补偿扫描兜底。
+            if is_dir
+                && inotify::is_created_or_moved_to(mask)
+                && node.watchers.iter().any(|watcher| {
+                    should_descend_into_child(
                         watcher.source,
                         watcher.record_display_root.as_ref(),
-                        &event_paths.display_path,
-                    ) {
-                        continue;
-                    }
-                    let child = WatchRoot {
-                        package_name: watcher.package_name.to_string(),
-                        backend_root: event_paths.backend_path.clone(),
-                        display_root: event_paths.display_path.clone(),
-                        record_display_root: watcher.record_display_root.to_string(),
-                        record_from_root: watcher.record_from_root.to_string(),
-                        excluded_roots: watcher.excluded_roots.as_ref().to_vec(),
-                        source: watcher.source,
-                    };
-                    let _ = self.add_watch_tree(&child);
+                        &display_path,
+                    )
+                })
+            {
+                let child = WatchNode {
+                    backend_dir: backend_path.clone(),
+                    display_dir: display_path.clone(),
+                    watchers: std::sync::Arc::clone(&node.watchers),
+                };
+                if self.add_watch_node(&child) {
+                    self.expand_watch_tree_from(child, false, true);
                 }
+            }
 
+            let operation_name = monitor_operation_from_mask(mask);
+            for watcher in node.watchers.iter() {
                 if watcher.source == "public_owner" || watcher.source == "private_owner" {
                     continue;
                 }
 
-                let operation_name = monitor_operation_from_mask(mask);
-                if !should_record_display_path(
-                    &event_paths.display_path,
-                    &watcher.record_display_root,
-                ) || should_filter_display_path(&event_paths.display_path, operation_name)
-                    || is_under_any_root(&event_paths.display_path, &watcher.excluded_roots)
+                if !should_record_display_path(&display_path, &watcher.record_display_root)
+                    || should_filter_display_path(&display_path, operation_name)
+                    || is_under_any_root(&display_path, &watcher.excluded_roots)
                 {
                     continue;
                 }
                 let identity = resolve_monitor_identity(
                     &watcher.package_name,
-                    &event_paths.display_path,
-                    &event_paths.backend_path,
+                    &display_path,
+                    &backend_path,
                     watcher.source,
                 );
                 if should_skip_ambiguous_allowed_real_path_event(
                     &identity,
                     watcher.source,
-                    &event_paths.display_path,
+                    &display_path,
                     &watcher.package_name,
                 ) || should_skip_ambiguous_read_only_path_event(
                     &identity,
@@ -1193,15 +1209,25 @@ impl RegularAppMonitor {
                 ) {
                     continue;
                 }
+                let from_path = map_record_from_path(
+                    &display_path,
+                    &watcher.record_display_root,
+                    &watcher.record_from_root,
+                );
                 if self.should_skip_duplicate(
                     &identity.package_name,
-                    &event_paths.display_path,
-                    &event_paths.from_path,
+                    &display_path,
+                    &from_path,
                     operation_name,
                     mask,
                 ) {
                     continue;
                 }
+                let event_paths = MonitorEventPaths {
+                    backend_path: backend_path.clone(),
+                    display_path: display_path.clone(),
+                    from_path,
+                };
                 emit_monitor_event(
                     &identity,
                     &event_paths,
