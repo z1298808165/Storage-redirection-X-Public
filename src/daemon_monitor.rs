@@ -212,6 +212,11 @@ pub struct RegularAppMonitor {
     needs_rebuild: bool,
     /// inotify 队列溢出后待执行的一次全量补偿扫描。
     overflow_resync: bool,
+    /// 是否已完成 daemon 启动后的首次全量建树。private_owner 根的逐文件
+    /// owner 修复只在该首次建树与溢出补偿时执行：历史遗留 owner 修过一次
+    /// 即可，后续配置变更重建再走一遍是纯浪费（auto_enable 场景每个新应用
+    /// 都写配置触发全量重建，逐文件 lstat 让监视线程持续 100% 单核）。
+    first_build_done: bool,
     last_rebuild_ms: i64,
     /// `inotify_add_watch` 非预期 errno 的累计次数，用于按 2 的幂限频告警。
     add_watch_error_count: u32,
@@ -243,6 +248,7 @@ impl RegularAppMonitor {
             capacity_limited: false,
             needs_rebuild: true,
             overflow_resync: false,
+            first_build_done: false,
             last_rebuild_ms: 0,
             add_watch_error_count: 0,
             last_overflow_resync_ms: 0,
@@ -372,13 +378,15 @@ impl RegularAppMonitor {
 
         // 溢出补偿扫描需要对全部来源重新执行 owner 修复，不能只覆盖 private_owner。
         let overflow_resync = std::mem::take(&mut self.overflow_resync);
+        let first_build = std::mem::replace(&mut self.first_build_done, true);
         if !self.capacity_limited {
             for node in expansion_roots {
                 let repair_existing_files = overflow_resync
-                    || node
-                        .watchers
-                        .iter()
-                        .any(|watcher| watcher.source == "private_owner");
+                    || (first_build
+                        && node
+                            .watchers
+                            .iter()
+                            .any(|watcher| watcher.source == "private_owner"));
                 let recurse_existing_tree = overflow_resync
                     || node
                         .watchers
@@ -459,10 +467,11 @@ impl RegularAppMonitor {
 
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = node
-                    .watchers
-                    .iter()
-                    .any(|watcher| watcher.source == "private_owner");
+                let repair_existing_files = !self.first_build_done
+                    && node
+                        .watchers
+                        .iter()
+                        .any(|watcher| watcher.source == "private_owner");
                 let recurse_existing_tree = node
                     .watchers
                     .iter()
@@ -631,10 +640,11 @@ impl RegularAppMonitor {
         }
         if !self.capacity_limited {
             for node in expansion_roots {
-                let repair_existing_files = node
-                    .watchers
-                    .iter()
-                    .any(|watcher| watcher.source == "private_owner");
+                let repair_existing_files = !self.first_build_done
+                    && node
+                        .watchers
+                        .iter()
+                        .any(|watcher| watcher.source == "private_owner");
                 let recurse_existing_tree = node
                     .watchers
                     .iter()
