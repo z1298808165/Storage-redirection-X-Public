@@ -370,9 +370,13 @@ impl RedirectPolicy {
             if !fs::create_directory(&redirect_root_string, redirect_root_uid)
                 && !fs::is_directory(&redirect_root_string)
             {
+                // errno 区分失败类别：EACCES/EPERM 多为开机期 sepolicy 未就绪的
+                // 竞态（30 秒周期重试可自愈），ENOTDIR/EEXIST 则是路径被普通
+                // 文件占用等配置或环境错误，需要用户侧介入。
                 log::error!(
-                    "fuse redirect target mkdir failed: {}",
-                    redirect_root_string
+                    "fuse redirect target mkdir failed: {} errno={}",
+                    redirect_root_string,
+                    fs::last_create_directory_errno()
                 );
                 return None;
             }

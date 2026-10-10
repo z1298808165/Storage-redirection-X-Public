@@ -99,11 +99,25 @@ pub fn is_directory(path: &str) -> bool {
 }
 
 // uid >= 0 时同步设置 owner，否则沿用默认
+//
+// 失败原因通过 [`last_create_directory_errno`] 暴露：调用方（如沙盒目标目录
+// 创建）需要把 errno 写进诊断日志，区分 SELinux 拒绝（开机竞态，稍后重试
+// 可自愈）与路径被普通文件占用（配置或环境错误）这两类完全不同的失败。
+static LAST_CREATE_DIRECTORY_ERRNO: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+/// 最近一次 [`create_directory`] 失败的 errno；成功或尚未调用时为 0。
+pub fn last_create_directory_errno() -> c_int {
+    LAST_CREATE_DIRECTORY_ERRNO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn create_directory(path: &str, uid: i32) -> bool {
     if path.is_empty() || !path.starts_with('/') {
+        LAST_CREATE_DIRECTORY_ERRNO.store(libc::EINVAL, std::sync::atomic::Ordering::Relaxed);
         return false;
     }
     if is_directory(path) {
+        LAST_CREATE_DIRECTORY_ERRNO.store(0, std::sync::atomic::Ordering::Relaxed);
         return true;
     }
 
@@ -134,6 +148,9 @@ pub fn create_directory(path: &str, uid: i32) -> bool {
         let ret = unsafe { mkdir(c_path.as_ptr(), 0o755) };
         if ret != 0 {
             if !errno_is(EEXIST) {
+                // SAFETY: __errno 返回线程局部 errno 存储的有效指针
+                let current = unsafe { *libc::__errno() };
+                LAST_CREATE_DIRECTORY_ERRNO.store(current, std::sync::atomic::Ordering::Relaxed);
                 return false;
             }
         } else if uid >= 0 {
