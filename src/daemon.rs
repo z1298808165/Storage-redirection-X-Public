@@ -250,6 +250,30 @@ struct ReconcilePlanIdentity {
     start_time_ticks: Option<u64>,
 }
 
+/// 计划批次签名：任何影响计划构造结果的输入变化都应使缓存失效。
+#[derive(Clone, PartialEq, Eq)]
+struct PlanBatchSignature {
+    mode_tag: u8,
+    config_version: u64,
+    full_change: bool,
+    changed_packages: Option<Vec<String>>,
+    config_fingerprint: u64,
+}
+
+struct CachedPlanBatch {
+    plans: Vec<ReconcilePlan>,
+    signature: PlanBatchSignature,
+}
+
+fn plan_batch_mode_tag(mode: &ReconcileMode) -> u8 {
+    match mode {
+        ReconcileMode::Prewarm => 0,
+        ReconcileMode::Full => 1,
+        ReconcileMode::MissingOnly => 2,
+        ReconcileMode::Forced => 3,
+    }
+}
+
 #[derive(Default)]
 struct ReconcileCursor {
     last_attempted: Option<ReconcilePlanIdentity>,
@@ -267,6 +291,14 @@ struct ReconcileCursor {
     /// 下一次真实触发（配置/宿主/控制事件/30s 周期兜底）再给这些计划一次
     /// 尝试机会，与「被拒绝的计划等下一次真实触发再进队」的设计注释一致。
     cycle_refused: HashSet<ReconcilePlanIdentity>,
+    /// 续跑轮复用的计划批次。
+    ///
+    /// 批次上限为 1 的周期要经历多轮 200ms 续跑；若续跑每轮都全量扫 /proc
+    /// 并重建全部计划，一个 N 计划的周期就是 N 次全量枚举（ishtar 实测：
+    /// 每 30s 周期 10~15 轮 × 全量扫描，rchar ~39MB/burst，scudo 滞留
+    /// 112MB，RSS 162MB）。缓存随周期收口清空；签名不匹配（模式/配置/
+    /// 触发范围变化）或宿主换代时重建。
+    cached_batch: Option<CachedPlanBatch>,
 }
 
 impl ReconcileCursor {
@@ -847,6 +879,35 @@ fn prune_stale_states_throttled() {
     // reconcile 入口必然是相对静息的时刻（批次排空后或周期兜底轮），顺手按
     // 5 分钟节流把分配器空闲页归还内核，控制突发负载峰值滞留的 RSS。
     crate::platform::allocator::quiescent_purge_throttled();
+    dump_malloc_info_if_requested();
+}
+
+/// 堆统计导出（诊断专用）：`/data/local/tmp/srx-meminfo.trig` 存在时，把
+/// bionic scudo 的 `malloc_info` XML 写到 `/data/local/tmp/srx-meminfo.xml`
+/// 并删除触发文件。用于区分「活对象」与「空闲页滞留」——M_PURGE 无法归还
+/// 的 RSS 是活对象，需要按尺寸类别定位具体数据结构。文件不存在时只有一次
+/// stat 成本。
+fn dump_malloc_info_if_requested() {
+    const TRIGGER: &str = "/data/local/tmp/srx-meminfo.trig";
+    if std::fs::metadata(TRIGGER).is_err() {
+        return;
+    }
+    // SAFETY: fopen/malloc_info/fclose 均为 bionic libc 导出的稳定接口；fp
+    // 生命周期限定在本函数内，malloc_info 内部仅短暂持有分配器锁。
+    unsafe {
+        let path = b"/data/local/tmp/srx-meminfo.xml\0".as_ptr() as *const libc::c_char;
+        let mode = b"w\0".as_ptr() as *const libc::c_char;
+        let fp = libc::fopen(path, mode);
+        if fp.is_null() {
+            log::warn!("daemon meminfo dump fopen failed");
+            let _ = std::fs::remove_file(TRIGGER);
+            return;
+        }
+        libc::malloc_info(0, fp);
+        libc::fclose(fp);
+    }
+    let _ = std::fs::remove_file(TRIGGER);
+    log::info!("daemon meminfo dumped to /data/local/tmp/srx-meminfo.xml");
 }
 
 fn reconcile_running_apps(
@@ -874,129 +935,158 @@ fn reconcile_running_apps(
     let mut skipped = 0usize;
     let mut deferred = 0usize;
     let mut batch_requests = 0usize;
-    let mut reconcile_incomplete = false;
     let mut incomplete_from_batch = false;
     let mut plans = Vec::new();
     let mut media_processes = Vec::new();
     let mut media_like_names: Vec<String> = Vec::new();
-    let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
-
-    for proc in list_app_processes() {
-        // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
-        if !seen.insert(proc.pid) {
-            continue;
-        }
-        if !full_change
-            && let Some(packages) = changed_packages
-            && !packages.iter().any(|package| package == &proc.package_name)
-        {
-            continue;
-        }
-        // MediaProvider 走 hook 而非挂载，会被 should_skip_process 跳过；
-        // 这里借本轮已有的枚举结果记下它，避免自愈逻辑重复扫描 /proc。
-        if media_hook_heal::is_media_provider_process(&proc.package_name) {
-            media_processes.push((proc.pid, proc.uid));
-        } else if proc.package_name.contains("providers.media")
-            || proc.package_name.contains("process.media")
-        {
-            // 名字看着像 MediaProvider 却没被判定命中：记下原始包名，
-            // 用于区分「MediaProvider 没在跑」与「判定没认出它」。
-            media_like_names.push(proc.package_name.clone());
-        }
-        if should_skip_process(&proc) {
-            skipped += 1;
-            continue;
-        }
-
-        let request = build_request(&proc, config_version, &config_snapshot);
-        plans.push(ReconcilePlan::new(
-            request,
-            mode == ReconcileMode::MissingOnly,
-        ));
-    }
-
-    // 单个 apps/<package>.json 增量事件不改变 MediaProvider 进程集合；跳过媒体自愈和
-    // PID 换代判定，避免一次 MT 配置切换清空全局宿主预登记缓存并触碰媒体视图。
-    let media_related_change = full_change
-        || changed_packages.is_none()
-        || changed_packages.is_some_and(|packages| {
-            packages.iter().any(|package| {
-                media_hook_heal::is_media_provider_process(package)
-                    || package.contains("providers.media")
-                    || package.contains("process.media")
-            })
-        });
-    let media_ready = if media_related_change {
-        media_hook_heal::heal_if_needed(
-            SettingsHub::instance(),
-            &media_processes,
-            &media_like_names,
-        );
-        // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
-        let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
-        media_pids.sort_unstable();
-        let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *last_media_pids != media_pids {
-            *last_media_pids = media_pids;
-            drop(last_media_pids);
-            invalidate_pre_registered_host_policies();
-        }
-        !media_processes.is_empty()
-    } else {
-        false
-    };
-
-    // 开机全量预登记在 boot 早期执行时，MediaProvider 尚未重建应用私有目录、SELinux
-    // 标签未就位，沙箱目录 mkdir 会失败（冷启动应用回退 scoped）。等 MediaProvider
-    // 进程出现后补登记一次，覆盖首次失败的应用；幂等由 pre_register_host_policy 的
-    // 指纹命中保证，已成功者跳过，稳态零开销。
-    if media_ready && !PRE_REGISTER_ALL_AFTER_MEDIA_READY.swap(true, Ordering::AcqRel) {
-        pre_register_all_configured_apps(SettingsHub::instance(), config_version);
-    }
-
     let incremental_change = changed_packages.is_some() && !full_change;
     let uses_batch_cursor = !incremental_change && mode != ReconcileMode::Forced;
-
-    // companion 与 daemon 可能同时为同一应用发起挂载。全量路径先登记本轮 Auto 应用策略，
-    // 让 companion 能从宿主快照确认 uid 后直接接入共享会话。单包增量路径由快速热更新或
-    // 完整挂载流程各自完成一次策略注册，跳过这里，避免同一 MT 切换重复触碰宿主控制通道。
-    if !incremental_change {
-        for plan in &plans {
-            if crate::daemon_mount::pre_register_host_policy(&plan.request)
-                == crate::daemon_mount::PreRegisterOutcome::Registered
+    let signature = PlanBatchSignature {
+        mode_tag: plan_batch_mode_tag(&mode),
+        config_version,
+        full_change,
+        changed_packages: changed_packages.map(|packages| packages.to_vec()),
+        config_fingerprint: SettingsHub::instance().config_fingerprint(),
+    };
+    // 批次上限为 1 的周期要走多轮 200ms 续跑；若续跑每轮都全量扫 /proc 重建
+    // 全部计划，一个 N 计划的周期就是 N 次全量枚举（ishtar 实测：每 30s 周期
+    // 10~15 轮 × 全量扫描，rchar ~39MB/burst，scudo 滞留 112MB）。除首轮外的
+    // 续跑轮直接复用同签名的计划批次；MediaProvider 自愈、全量预登记与逐计划
+    // 策略登记都在重建路径执行且自带幂等门禁，续跑轮一并跳过。周期内新出现的
+    // 进程由应用自身的 companion 接入路径即时处理，缓存窗口（秒级）不构成
+    // 功能缺口。
+    let mut cached = cursor.cached_batch.take();
+    let mut cache_hit = false;
+    if uses_batch_cursor
+        && !fresh_batch
+        && cached
+            .as_ref()
+            .is_some_and(|batch| batch.signature == signature)
+    {
+        // 签名已在上面校验过，unwrap 只可能因并发修改触发；缓存仅主循环可见，
+        // 若真的缺失就按缓存未命中走完整枚举，不影响正确性。
+        if let Some(batch) = cached.take() {
+            plans = batch.plans;
+            cache_hit = true;
+        }
+    }
+    drop(cached);
+    if !cache_hit {
+        let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
+        for proc in list_app_processes() {
+            // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
+            if !seen.insert(proc.pid) {
+                continue;
+            }
+            if !full_change
+                && let Some(packages) = changed_packages
+                && !packages.iter().any(|package| package == &proc.package_name)
             {
-                log::debug!(
-                    "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
-                    plan.request.pid,
-                    plan.request.uid,
-                    plan.request.package_name
-                );
+                continue;
+            }
+            // MediaProvider 走 hook 而非挂载，会被 should_skip_process 跳过；
+            // 这里借本轮已有的枚举结果记下它，避免自愈逻辑重复扫描 /proc。
+            if media_hook_heal::is_media_provider_process(&proc.package_name) {
+                media_processes.push((proc.pid, proc.uid));
+            } else if proc.package_name.contains("providers.media")
+                || proc.package_name.contains("process.media")
+            {
+                // 名字看着像 MediaProvider 却没被判定命中：记下原始包名，
+                // 用于区分「MediaProvider 没在跑」与「判定没认出它」。
+                media_like_names.push(proc.package_name.clone());
+            }
+            if should_skip_process(&proc) {
+                skipped += 1;
+                continue;
+            }
+
+            let request = build_request(&proc, config_version, &config_snapshot);
+            plans.push(ReconcilePlan::new(
+                request,
+                mode == ReconcileMode::MissingOnly,
+            ));
+        }
+
+        // 单个 apps/<package>.json 增量事件不改变 MediaProvider 进程集合；跳过媒体自愈和
+        // PID 换代判定，避免一次 MT 配置切换清空全局宿主预登记缓存并触碰媒体视图。
+        let media_related_change = full_change
+            || changed_packages.is_none()
+            || changed_packages.is_some_and(|packages| {
+                packages.iter().any(|package| {
+                    media_hook_heal::is_media_provider_process(package)
+                        || package.contains("providers.media")
+                        || package.contains("process.media")
+                })
+            });
+        let media_ready = if media_related_change {
+            media_hook_heal::heal_if_needed(
+                SettingsHub::instance(),
+                &media_processes,
+                &media_like_names,
+            );
+            // MediaProvider 换代检测必须先于预登记循环：本轮就要用重绑后的视图登记策略。
+            let mut media_pids: Vec<i32> = media_processes.iter().map(|(pid, _)| *pid).collect();
+            media_pids.sort_unstable();
+            let mut last_media_pids = LAST_MEDIA_PROVIDER_PIDS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *last_media_pids != media_pids {
+                *last_media_pids = media_pids;
+                drop(last_media_pids);
+                invalidate_pre_registered_host_policies();
+            }
+            !media_processes.is_empty()
+        } else {
+            false
+        };
+
+        // 开机全量预登记在 boot 早期执行时，MediaProvider 尚未重建应用私有目录、SELinux
+        // 标签未就位，沙箱目录 mkdir 会失败（冷启动应用回退 scoped）。等 MediaProvider
+        // 进程出现后补登记一次，覆盖首次失败的应用；幂等由 pre_register_host_policy 的
+        // 指纹命中保证，已成功者跳过，稳态零开销。
+        if media_ready && !PRE_REGISTER_ALL_AFTER_MEDIA_READY.swap(true, Ordering::AcqRel) {
+            pre_register_all_configured_apps(SettingsHub::instance(), config_version);
+        }
+
+        // companion 与 daemon 可能同时为同一应用发起挂载。全量路径先登记本轮 Auto 应用策略，
+        // 让 companion 能从宿主快照确认 uid 后直接接入共享会话。单包增量路径由快速热更新或
+        // 完整挂载流程各自完成一次策略注册，跳过这里，避免同一 MT 切换重复触碰宿主控制通道。
+        if !incremental_change {
+            for plan in &plans {
+                if crate::daemon_mount::pre_register_host_policy(&plan.request)
+                    == crate::daemon_mount::PreRegisterOutcome::Registered
+                {
+                    log::debug!(
+                        "daemon pre-registered fuse host policy pid={} uid={} pkg={}",
+                        plan.request.pid,
+                        plan.request.uid,
+                        plan.request.package_name
+                    );
+                }
             }
         }
-    }
 
-    plans.sort_by_key(|plan| plan.identity());
-    if full_change {
-        if let Some(priority_packages) = changed_packages {
-            plans.sort_by_key(|plan| {
-                (
-                    if priority_packages
-                        .iter()
-                        .any(|package| package == &plan.request.package_name)
-                    {
-                        0u8
-                    } else {
-                        1u8
-                    },
-                    plan.identity(),
-                )
-            });
+        plans.sort_by_key(|plan| plan.identity());
+        if full_change {
+            if let Some(priority_packages) = changed_packages {
+                plans.sort_by_key(|plan| {
+                    (
+                        if priority_packages
+                            .iter()
+                            .any(|package| package == &plan.request.package_name)
+                        {
+                            0u8
+                        } else {
+                            1u8
+                        },
+                        plan.identity(),
+                    )
+                });
+            }
+        } else if mode == ReconcileMode::Prewarm {
+            plans.sort_by_key(|plan| (plan.priority(), plan.identity()));
         }
-    } else if mode == ReconcileMode::Prewarm {
-        plans.sort_by_key(|plan| (plan.priority(), plan.identity()));
-    }
+    } // !cache_hit：续跑轮跳过枚举、MediaProvider 自愈、策略登记与排序
 
     let identities: Vec<ReconcilePlanIdentity> =
         plans.iter().map(ReconcilePlan::identity).collect();
@@ -1048,8 +1138,8 @@ fn reconcile_running_apps(
             continue;
         }
         batch_requests += 1;
-        // 无论后续快速更新或完整挂载成功与否，都把当前计划记为已尝试；失败由
-        // reconcile_incomplete 保证下一轮重试，但不会再次占住本轮唯一 slot。
+        // 无论后续快速更新或完整挂载成功与否，都把当前计划记为已尝试；失败计划
+        // 登记进拒绝集合，本周期不再占 slot，由下一真实触发再给一次尝试。
         if uses_batch_cursor {
             cursor.advance(plan);
         }
@@ -1079,7 +1169,13 @@ fn reconcile_running_apps(
                     }
                     applied += 1;
                 } else if uses_batch_cursor {
-                    reconcile_incomplete = true;
+                    // 执行失败的计划登记进周期拒绝集合：永久性失败（如 OEM 内核
+                    // 拒绝沙盒目录 mkdir，真机实测一台设备 10+ 应用全部失败）若
+                    // 保持 reconcile_incomplete，200ms 续跑会无限重试同一计划，
+                    // 持续 24~28% 单核并让每轮 /proc 扫描的分配滞留在 scudo 里
+                    // （用户设备 RSS 200MB+）。周期收口后清空拒绝集合，由下一次
+                    // 真实触发（30 秒周期兜底等）再给一次尝试。
+                    cursor.cycle_refused.insert(plan.identity());
                 }
             }
             MountOperation::Disable => {
@@ -1087,7 +1183,7 @@ fn reconcile_running_apps(
                     if execute_mount_request(&plan.request) {
                         disabled += 1;
                     } else if uses_batch_cursor {
-                        reconcile_incomplete = true;
+                        cursor.cycle_refused.insert(plan.identity());
                     }
                 } else {
                     skipped += 1;
@@ -1101,8 +1197,8 @@ fn reconcile_running_apps(
     // 此前这让 pending 长期为真，主循环以约 1Hz 每轮全量扫 /proc 无限续跑。判据：
     // 游标轮转已绕回本周期首个尝试计划的位置（或更早），说明本轮触发要处理的
     // 计划都已被尝试过一次，本周期收口；被拒绝的计划等下一次真实触发（配置、
-    // 宿主、控制事件或 30 秒周期兜底）再进队。失败计划保持 reconcile_incomplete
-    // 的既有重试语义，绕回时会在新周期里再得到一次尝试。
+    // 宿主、控制事件或 30 秒周期兜底）再进队。执行失败的计划同样登记进拒绝集合，绕回收口后会在新周期里再得到一次尝试。
+    let plans_len = plans.len();
     if incomplete_from_batch {
         if let Some(head) = cursor.cycle_head.clone() {
             let next_index = cursor.next_start_index(&identities);
@@ -1110,7 +1206,7 @@ fn reconcile_running_apps(
             if next_index <= head_index {
                 log::info!(
                     "daemon reconcile cycle drained planned={} deferred={} — rest until next event",
-                    plans.len(),
+                    plans_len,
                     deferred
                 );
                 incomplete_from_batch = false;
@@ -1126,12 +1222,16 @@ fn reconcile_running_apps(
         cursor.cycle_head = None;
         cursor.cycle_refused.clear();
     }
-    reconcile_incomplete = reconcile_incomplete || incomplete_from_batch;
+    if incomplete_from_batch {
+        // 周期仍在进行：把本轮计划批次放回缓存，续跑轮直接复用，不再重复
+        // 全量 /proc 扫描；排空与自然结束路径已在上方清空缓存。
+        cursor.cached_batch = Some(CachedPlanBatch { plans, signature });
+    }
 
     if should_log_reconcile_summary(
         mode,
         config_version,
-        plans.len(),
+        plans_len,
         applied,
         disabled,
         skipped,
@@ -1141,7 +1241,7 @@ fn reconcile_running_apps(
             "daemon reconcile mode={:?} version={:x} planned={} applied={} disabled={} skipped={} deferred={} ms={}",
             mode,
             config_version,
-            plans.len(),
+            plans_len,
             applied,
             disabled,
             skipped,
@@ -1154,7 +1254,7 @@ fn reconcile_running_apps(
             log::info!("daemon supervisor {}", summary.render());
         }
     }
-    (applied > 0 || disabled > 0, reconcile_incomplete)
+    (applied > 0 || disabled > 0, incomplete_from_batch)
 }
 
 struct ReconcilePlan {
