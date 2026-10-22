@@ -1117,7 +1117,110 @@ fn host_attach_child_main(view: &HostSessionView, target_root: &str) -> i32 {
         return -1;
     }
 
+    // 7. 覆盖存储别名族。主目标之外的同义存储出口（`/mnt/user/<user>/emulated/<user>` 等）
+    //    仍指向系统 MediaProvider FUSE（pass_through 甚至直通 f2fs 后端），走别名写入的
+    //    组件会完全绕开宿主策略落到真实存储。失败不回滚：主目标已成功，别名只补覆盖面。
+    attach_host_view_to_storage_aliases(target_root, view);
+
     0
+}
+
+/// 解析存储视图根路径里的用户号（`/storage/emulated/<user>` → `Some(user)`）。
+fn storage_user_id_from_view_root(target_root: &str) -> Option<i32> {
+    target_root
+        .strip_prefix("/storage/emulated/")
+        .filter(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|rest| rest.parse::<i32>().ok())
+}
+
+/// 把宿主视图同步覆盖到存储别名族（collapsed hybrid FUSE 形态的收尾步骤）。
+///
+/// 共享宿主接入默认只把视图根挂到主存储根（`/storage/emulated/<user>`）。但同一棵存储树
+/// 在应用命名空间里还有一整族等价别名（`/mnt/user/<user>/emulated/<user>`、
+/// `/mnt/installer/...`、`/mnt/androidwritable/...`、`/mnt/pass_through/...`），它们仍指向
+/// 系统 MediaProvider FUSE（pass_through 直通 f2fs 后端）。走别名写入的组件（真机实证：
+/// QQ connect SDK 的 xlog 经别名写 `Tencent/msflogs`，2026-10-22 在 `/data/media/0/Tencent`
+/// 真实落盘且零监视记录）会完全绕开宿主策略。命名空间 bind 后端经
+/// `mount::alias::bind_mount_with_storage_aliases` 覆盖同一族别名；宿主接入此前漏掉这一步。
+///
+/// 语义与 `mount::alias` 对齐：
+/// - 不存在的别名目标（lstat 失败，如 `/mnt/runtime/*`）跳过；
+/// - 解析后与主目标同真实路径的符号别名（`/storage/self/primary`、
+///   `/storage/emulated/legacy`）去重跳过；
+/// - `/data/media/<user>` 后端别名不覆盖：把宿主视图叠到真实后端上，应用命名空间内的
+///   后端直连路径会被策略视图遮蔽（bind 后端按 self-shadowing 跳过同一目标）；
+/// - 别名上残留的本模块死层先摘除（与主目标同一套 [`clear_dead_srx_layers_at_target`]）；
+/// - 单个别名失败只告警不回滚：主目标已成功，别名失败不能让整个接入作废。
+fn attach_host_view_to_storage_aliases(target_root: &str, view: &HostSessionView) {
+    let Some(user_id) = storage_user_id_from_view_root(target_root) else {
+        // 非视图根目标（按目录 scoped 根）不展开别名：scoped 会话的别名覆盖仍由
+        // 命名空间 bind 路径承担，这里不改变既有语义。
+        return;
+    };
+    let Ok(primary_real) = std::fs::canonicalize(target_root) else {
+        return;
+    };
+    for alias_root in paths::storage_alias_roots_for_user(user_id) {
+        if alias_root == target_root {
+            continue;
+        }
+        if paths::is_same_or_child(&alias_root, &paths::data_media_user_root_for_user(user_id)) {
+            continue;
+        }
+        // 存在性检查用 lstat 语义：符号别名（primary/legacy）即便悬空也进入去重判定，
+        // 不在这里对存储 FUSE 发起真实 I/O。
+        if std::fs::symlink_metadata(&alias_root).is_err() {
+            continue;
+        }
+        let Ok(alias_real) = std::fs::canonicalize(&alias_root) else {
+            continue;
+        };
+        if alias_real == primary_real {
+            continue;
+        }
+        // 幂等：顶层已是当前会话的视图就不再叠加（宿主换代重接入时同一会话源不重复 bind）。
+        if let Some(live) = crate::mount_ledger::topmost_live_mount(0, &alias_root)
+            && live.source == view.mount_source
+        {
+            continue;
+        }
+        clear_dead_srx_layers_at_target(&alias_root);
+        let Ok(c_source) = CString::new(target_root) else {
+            continue;
+        };
+        let Ok(c_alias) = CString::new(alias_root.as_str()) else {
+            continue;
+        };
+        // SAFETY: 源与目标都是 NUL 结尾的合法路径；同一命名空间内的 bind 不跨命名空间
+        // （跨命名空间 MS_BIND 会 EINVAL，见 host_attach_child_main 的说明），此时主目标
+        // 挂载已属于应用命名空间，bind 合法。
+        if unsafe {
+            libc::mount(
+                c_source.as_ptr(),
+                c_alias.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND as libc::c_ulong,
+                std::ptr::null(),
+            )
+        } != 0
+        {
+            log::warn!(
+                "fuse host attach alias bind failed target={} errno={} {}",
+                alias_root,
+                crate::platform::errno::last(),
+                crate::platform::errno::text(crate::platform::errno::last())
+            );
+            continue;
+        }
+        if !make_mount_private(&c_alias) {
+            continue;
+        }
+        log::info!(
+            "fuse host attach alias bound target={} host={}",
+            alias_root,
+            view.child_pid
+        );
+    }
 }
 
 /// 接入子进程统一回报结果，成功与失败均只发送一次。

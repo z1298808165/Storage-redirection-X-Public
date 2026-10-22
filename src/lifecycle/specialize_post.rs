@@ -3,7 +3,7 @@ use super::RuntimeFlow;
 use super::mount_timing;
 use crate::hook::{InterceptHub, install_fuse_fix_if_enabled};
 use crate::java_hook;
-use crate::module_mount_source::app_redirect_mounts_in;
+use crate::module_mount_source::{app_redirect_mounts_in, is_collapsed_host_view_root};
 use crate::platform::paths::monotonic_ms;
 use crate::platform::{self, anti_detect};
 use crate::redirect::policy;
@@ -203,15 +203,22 @@ fn wait_for_module_mount(
     for _ in 0..mount_timing::POST_MOUNT_STATUS_POLL_COUNT {
         poll_count += 1;
         let mounts = app_redirect_mounts_in(0, package_name);
-        // 重定向本体是否已就位：沙箱根（`<包名>/sdcard`）是唯一在所有重定向模式下都必然
-        // 出现的层，锚点与 FUSE 根都不满足这一点（前者任何模式都有但不代表重定向生效，
-        // 后者的数量取决于 `allowed_real_paths`）。只看"出现了挂载"就放行会让应用在
-        // `own private restored` 尚未执行时开始读配置——多进程并发启动时尤其容易命中，
-        // 因为先启动的进程挂好的 FUSE 根会让后启动进程一进来就看到稳定的非空签名。
+        // 重定向本体是否已就位：沙箱根（`<包名>/sdcard`）是命名空间 bind 后端唯一在所有
+        // 重定向模式下都必然出现的层，锚点与 FUSE 根都不满足这一点（前者任何模式都有但不
+        // 代表重定向生效，后者的数量取决于 `allowed_real_paths`）。只看"出现了挂载"就放行
+        // 会让应用在 `own private restored` 尚未执行时开始读配置——多进程并发启动时尤其容易
+        // 命中，因为先启动的进程挂好的 FUSE 根会让后启动进程一进来就看到稳定的非空签名。
+        //
+        // collapsed hybrid FUSE 形态（`backend=auto` 把 scoped 根收敛成视图根）是例外：
+        // 它按设计不创建沙箱根 bind，重定向本体就是落在 `/storage/emulated/<user>` 上的
+        // 共享宿主视图根，由 `is_collapsed_host_view_root` 认定。缺了这条判定，这一形态的
+        // 每个应用进程都会空等满预算并误报 `mount unknown/failed`。
         //
         // 仅映射模式**不建立存储根重定向**，沙箱根永远不出现；这类应用只能退回"集合稳定
         // 即放行"，否则每个进程都要空等满预算。
-        has_sandbox_root = mounts.iter().any(|mount| mount.is_sandbox_root);
+        has_sandbox_root = mounts.iter().any(|mount| {
+            mount.is_sandbox_root || is_collapsed_host_view_root(&mount.source, &mount.mount_point)
+        });
         let is_ready = is_mapping_mode_only || has_sandbox_root;
         let signature = mounts
             .into_iter()

@@ -37,9 +37,12 @@ pub struct ModuleMount {
     pub mount_point: String,
     /// 该条记录的 `root` 是否落在本应用沙箱子树（`<包名>/sdcard`）。
     ///
-    /// 这是"存储根重定向已建立"的判据：只有从沙箱子树 bind 出来的层才带这一段，
-    /// 锚点绑定与系统 FUSE 都不带。应用侧据此判断重定向本体（而不是全部挂载）
+    /// 这是命名空间 bind 后端"存储根重定向已建立"的判据：只有从沙箱子树 bind 出来的层才带
+    /// 这一段，锚点绑定与系统 FUSE 都不带。应用侧据此判断重定向本体（而不是全部挂载）
     /// 是否已就位，见 `lifecycle::specialize_post::wait_for_module_mount`。
+    ///
+    /// collapsed hybrid FUSE 形态不创建沙箱根 bind，这一判据在该形态下恒为 false；
+    /// 就绪判定须叠加 [`is_collapsed_host_view_root`]。
     pub is_sandbox_root: bool,
 }
 
@@ -51,6 +54,26 @@ pub fn is_module_mount_source(source: &str) -> bool {
     MODULE_MOUNT_SOURCE_PREFIXES
         .iter()
         .any(|prefix| source.starts_with(prefix))
+}
+
+/// 判断该挂载是否为 collapsed hybrid FUSE 形态的"重定向本体"。
+///
+/// `backend=auto` 且按目录 scoped 根被收敛成存储视图根时（见
+/// `companion_mount::scoped_fuse_mount_roots` 的收敛路径），共享宿主会话的视图根直接落在
+/// `/storage/emulated/<user>` 上，按设计**不再创建** `<包名>/sdcard` 沙箱根
+/// bind——重定向语义全部由宿主策略按请求 uid 承担（`collapsed view barrier inert`）。
+/// 因此 [`ModuleMount::is_sandbox_root`] 在这一形态下恒为 false，`wait_for_module_mount`
+/// 若只认沙箱根就会对每个进程空等满预算并误报 `mount unknown/failed`
+/// （真机 2026-10-22 实证：QQ 每次启动的全部进程都误报，单日 running.log 累计 200+ 条）。
+pub fn is_collapsed_host_view_root(source: &str, mount_point: &str) -> bool {
+    is_module_mount_source(source) && is_storage_user_view_root(mount_point)
+}
+
+/// 判断挂载点是否为某用户的存储视图根（`/storage/emulated/<user>`）。
+fn is_storage_user_view_root(mount_point: &str) -> bool {
+    mount_point
+        .strip_prefix("/storage/emulated/")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// 判断挂载源是否指向模块自己的临时锚点目录。
@@ -235,7 +258,8 @@ pub fn is_module_redirect_mount(
 ///
 /// 调用方若要判断**重定向本体**是否已就位（而不是"任意挂载出现了没有"），应看返回项里的
 /// [`ModuleMount::is_sandbox_root`]，不要只数条数：FUSE 根的数量取决于 `allowed_real_paths`，
-/// 只有沙箱根这一段在所有重定向模式下都必然出现。
+/// 沙箱根在命名空间 bind 后端的所有重定向模式下都必然出现；collapsed hybrid FUSE 形态
+/// 例外——它的本体是视图根本身，须叠加 [`is_collapsed_host_view_root`] 判定。
 pub fn app_redirect_mounts_in(pid: i32, package_name: &str) -> Vec<ModuleMount> {
     let path = if pid > 0 {
         format!("/proc/{pid}/mountinfo")
