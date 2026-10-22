@@ -161,16 +161,38 @@ class RootModuleControllerTest {
 
   @Test
   fun storageBackendStatusParsesHostStatusOutput() = runBlocking {
-    val shell = CapturingShell(ShellResult(0, "active pid=1234 policies=2\n", ""))
+    val shell =
+        CapturingShell(
+            ShellResult(0, "active pid=1234 policies=2\n", ""),
+            ShellResult(
+                0,
+                "boot_id=b\npid=1234\nstart_ticks=1\nmount_point=/m\nmount_source=s\n" +
+                    "policies=10034:1,10058:2,110034:3\n",
+                "",
+            ),
+        )
     val controller = RootModuleController(shell)
 
     assertEquals(
-        StorageBackendStatus(active = true, pid = 1234, policyCount = 2),
+        StorageBackendStatus(
+            active = true,
+            pid = 1234,
+            policyCount = 2,
+            userPolicyCounts = mapOf(0 to 2, 1 to 1),
+        ),
         controller.storageBackendStatus(),
     )
     assertEquals(
         "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} host-status; else echo unknown; fi",
-        shell.invocations.single().command,
+        shell.invocations[0].command,
+    )
+    assertTrue(
+        shell.invocations[1].command,
+        shell.invocations[1]
+            .command
+            .endsWith(
+                "if [ -r ${shellQuote("$ModuleDir/tmp/fuse_host.snapshot")} ]; then cat ${shellQuote("$ModuleDir/tmp/fuse_host.snapshot")}; fi"
+            ),
     )
   }
 
