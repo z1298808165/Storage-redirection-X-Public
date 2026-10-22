@@ -2990,10 +2990,18 @@ run_backend_endpoint_recovery_scenario() {
     echo "backend_recovery_hook_ready_failed scenario=${scenario}" >&2
     return 1
   }
-  initial_media_pid="$(media_provider_pid)" || {
-    echo "backend_recovery_media_provider_pid_cmd_failed scenario=${scenario}" >&2
-    return 1
-  }
+  # 应用重启瞬间 adb/su 调用偶发瞬时失败（pipefail 会沿 -e 终止命令替换）；
+  # provider pid 探测是幂等读，带退避重试三次。
+  initial_media_pid=""
+  local pid_attempt
+  for pid_attempt in 1 2 3; do
+    if initial_media_pid="$(media_provider_pid)" && [ -n "$initial_media_pid" ]; then
+      break
+    fi
+    echo "backend_recovery_media_provider_pid_retry scenario=${scenario} attempt=${pid_attempt}" >&2
+    initial_media_pid=""
+    sleep 2
+  done
   if [ -z "$initial_media_pid" ]; then
     echo "backend_recovery_media_provider_pid_missing scenario=${scenario}" >&2
     return 1
