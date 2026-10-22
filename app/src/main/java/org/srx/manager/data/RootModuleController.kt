@@ -110,8 +110,42 @@ class RootModuleController(
       withSrxCtlFallback("host-status", "echo unknown")
 
   /** 读取共享宿主会话状态指示；输出无法识别时返回 null，由调用方按未知处理。 */
-  suspend fun storageBackendStatus(): StorageBackendStatus? =
-      parseStorageBackendStatus(shell.exec(buildStorageBackendStatusCommand()).stdout.trim())
+  suspend fun storageBackendStatus(): StorageBackendStatus? {
+    val status =
+        parseStorageBackendStatus(shell.exec(buildStorageBackendStatusCommand()).stdout.trim())
+            ?: return null
+    if (!status.active) return status
+    // 快照仅用于按用户拆分展示；读取失败不影响总数展示，退化为不显示拆分行。
+    val userPolicyCounts =
+        runCatching {
+              parseHostSnapshotUserCounts(
+                  shell.exec(buildHostSnapshotCommand()).stdout.trim(),
+              )
+            }
+            .getOrDefault(emptyMap())
+    return status.copy(userPolicyCounts = userPolicyCounts)
+  }
+
+  private fun buildHostSnapshotCommand(): String =
+      "if [ -r ${shellQuote("$ModuleDir/tmp/fuse_host.snapshot")} ]; then cat ${shellQuote("$ModuleDir/tmp/fuse_host.snapshot")}; fi"
+
+  /**
+   * 解析共享宿主快照的 policies 行（uid:fingerprint 列表），按 Android 用户 id 分组计数； Android uid = userId * 100000 +
+   * appId。快照缺失或内容为空时返回空表。
+   */
+  private fun parseHostSnapshotUserCounts(text: String): Map<Int, Int> {
+    val policiesLine =
+        text.lineSequence().firstOrNull { it.startsWith("policies=") } ?: return emptyMap()
+    val body = policiesLine.removePrefix("policies=").trim()
+    if (body.isEmpty()) return emptyMap()
+    return body
+        .split(',')
+        .mapNotNull { entry ->
+          entry.substringBefore(':').trim().toIntOrNull()?.let { it / 100_000 }
+        }
+        .groupingBy { it }
+        .eachCount()
+  }
 
   private fun parseStorageBackendStatus(text: String): StorageBackendStatus? =
       when {
@@ -144,9 +178,10 @@ class RootModuleController(
       "if [ -r ${shellQuote(SrxCtlPath)} ]; then /system/bin/sh ${shellQuote(SrxCtlPath)} $action; else $fallback; fi"
 }
 
-/** 共享宿主会话状态指示；[pid]/[policyCount] 仅在会话活跃时有值。 */
+/** 共享宿主会话状态指示；[pid]/[policyCount] 仅在会话活跃时有值，[userPolicyCounts] 为按用户拆分的策略数。 */
 data class StorageBackendStatus(
     val active: Boolean,
     val pid: Int? = null,
     val policyCount: Int? = null,
+    val userPolicyCounts: Map<Int, Int> = emptyMap(),
 )

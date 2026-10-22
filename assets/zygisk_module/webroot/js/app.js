@@ -43,6 +43,7 @@
     dashboardModuleStateRequestId: 0,
     dashboardCountsLoaded: false,
     runtimeActivationExact: "0",
+    hostStatus: null,
     appListRequestId: 0,
     renderedApps: [],
     appListRowHeight: 67,
@@ -965,10 +966,18 @@
     else el.removeAttribute("title");
   }
 
-  /** 渲染概览页的共享宿主状态指示；读取失败时保持 --。 */
+  /** 渲染概览页的宿主策略指标；与管理 App 一致：活跃展示已登记策略数，未运行为 0，未知为 --。 */
   function renderHostStatusMetric(storageBackend) {
+    State.hostStatus = storageBackend || null;
     const state = storageBackend?.state || "unknown";
-    const display = state === "active" ? "运行中" : state === "inactive" ? "未运行" : "--";
+    const display =
+      state === "active"
+        ? storageBackend?.policies != null
+          ? String(storageBackend.policies)
+          : "--"
+        : state === "inactive"
+          ? "0"
+          : "--";
     const exact =
       state === "active" && storageBackend?.pid != null
         ? "pid=" +
@@ -978,6 +987,65 @@
             : "")
         : null;
     setDashboardCountValue("statHostStatus", display, exact);
+  }
+
+  async function showHostPolicyDetails() {
+    const backend = State.hostStatus || null;
+    const state = backend?.state || "unknown";
+    const value =
+      state === "active"
+        ? backend?.policies != null
+          ? String(backend.policies)
+          : "--"
+        : state === "inactive"
+          ? "0"
+          : "--";
+    const stateLine =
+      state === "active"
+        ? "共享宿主运行中" + (backend?.pid != null ? "，宿主进程 pid=" + backend.pid : "") + "。"
+        : state === "inactive"
+          ? "共享宿主当前未运行。"
+          : "暂时无法读取共享宿主状态。";
+    let userLines = "";
+    if (state === "active") {
+      const counts = Object.entries(await Api.readHostPolicyUserCounts()).sort(
+        (a, b) => Number(a[0]) - Number(b[0]),
+      );
+      if (counts.length > 0) {
+        userLines =
+          '<div class="modal-hint">' +
+          counts
+            .map(([user, count]) => escapeHtml("用户 " + user + "：" + count + " 个"))
+            .join("<br>") +
+          "</div>";
+      }
+    }
+    showModalWithHistory(
+      '<div class="modal-title">宿主策略</div>' +
+        '<div class="runtime-stats-exact">' +
+        escapeHtml(value) +
+        "</div>" +
+        '<div class="modal-hint">共享宿主 FUSE 会话已登记的重定向策略数量，大致对应已启用重定向的应用会话数；应用实际发起存储访问后才计入。同一应用在不同用户下分别计一条，这里显示的是所有用户合计。共享宿主未运行时显示 0，读取失败或状态未知时显示 --。</div>' +
+        userLines +
+        '<div class="modal-hint">' +
+        escapeHtml(stateLine) +
+        "</div>" +
+        '<div class="modal-actions"><button class="btn btn-primary modal-close" type="button">关闭</button></div>',
+      { backdropClose: true },
+    );
+    document.querySelector(".modal-close")?.addEventListener("click", () => closeActiveModal());
+  }
+
+  function initHostStatusMetricInteraction() {
+    const metric = document.getElementById("hostStatusMetric");
+    if (!metric) return;
+    metric.addEventListener("click", () => showHostPolicyDetails());
+    metric.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        showHostPolicyDetails();
+      }
+    });
   }
 
   function showRuntimeActivationDetails() {
@@ -7562,6 +7630,7 @@
     initPullRefreshControls();
     initDashboardRefreshHooks();
     initRuntimeActivationInteractions();
+    initHostStatusMetricInteraction();
     loadDashboard();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

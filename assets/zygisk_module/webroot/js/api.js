@@ -383,6 +383,24 @@ function parseStorageBackendStatus(output) {
   return { state: "unknown", pid: null, policies: null };
 }
 
+/** 解析共享宿主快照 policies 行（uid:fingerprint 列表），按 Android 用户 id 分组计数。 */
+function parseHostPolicyUserCounts(output) {
+  const line = String(output || "")
+    .split("\n")
+    .find((candidate) => candidate.startsWith("policies="));
+  if (!line) return {};
+  const body = line.slice("policies=".length).trim();
+  if (!body) return {};
+  const counts = {};
+  body.split(",").forEach((entry) => {
+    const uid = Number(entry.split(":")[0]);
+    if (!Number.isInteger(uid) || uid < 0) return;
+    const user = Math.floor(uid / 100000);
+    counts[user] = (counts[user] || 0) + 1;
+  });
+  return counts;
+}
+
 function isManagedTempPath(path) {
   const clean = String(path || "").replace(/\/+$/g, "");
   return (
@@ -2382,6 +2400,19 @@ const Api = {
       return parseStorageBackendStatus(out);
     } catch {
       return { state: "unknown", pid: null, policies: null };
+    }
+  },
+
+  /** 读取共享宿主快照，返回按用户拆分的已登记策略数；快照缺失或读取失败返回空对象。 */
+  async readHostPolicyUserCounts() {
+    try {
+      const path = shellQuote("/data/adb/modules/storage.redirect.x/tmp/fuse_host.snapshot");
+      const out = await this.exec("if [ -r " + path + " ]; then cat " + path + "; fi", {
+        timeoutMs: 10_000,
+      });
+      return parseHostPolicyUserCounts(out);
+    } catch {
+      return {};
     }
   },
 
