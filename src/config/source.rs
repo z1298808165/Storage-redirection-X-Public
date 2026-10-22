@@ -14,6 +14,13 @@ const APP_CONFIG_SLOW_MS: i64 = 5;
 const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
 impl SettingsHub {
+    /// 当前生效的配置目录。系统代写/桥接进程返回的是 Zygisk 保留 FD 的
+    /// `/proc/self/fd/<fd>/config` 路径（对 inotify/stat 同样可用）。
+    pub fn config_dir(&self) -> String {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.config_dir.clone()
+    }
+
     pub fn init(&self, config_dir: Option<&str>) -> bool {
         let config_dir = {
             let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
