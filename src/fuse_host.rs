@@ -361,17 +361,34 @@ pub struct HostAttach {
 ///
 /// attach 上报的 ENOTCONN 有两类来源：宿主 FUSE endpoint 已死（进程假活、连接已断），
 /// 或目标应用 namespace 里残留的死挂载层（路径解析穿过它时报错，宿主本身健康）。
-/// 宿主挂载点位于 daemon/companion 自身可访问的模块目录内，stat 它不经过任何应用
-/// 视图，是区分两类故障最直接的探针。两类故障的处理完全不同：前者必须撤销快照并
-/// 终止假活宿主；后者杀宿主只会触发"恢复→再被杀"的循环，把能力快照的退避越推越深。
+/// 宿主挂载点位于 daemon/companion 自身可访问的模块目录内，对它发起一次**必然穿透到
+/// FUSE 连接**的探测，是区分两类故障最直接的探针。两类故障的处理完全不同：前者必须
+/// 撤销快照并终止假活宿主；后者杀宿主只会触发"恢复→再被杀"的循环，把能力快照的
+/// 退避越推越深。
+///
+/// 探测不能只 `stat` 挂载点本身：根 dentry 的属性缓存在连接死亡后仍然有效，僵死的
+/// 宿主会因此被误判存活（真机实证：duchamp 2026-10-22 13:22，MediaProvider 重启后宿主
+/// media 视图连接死亡，`endpoint=alive` 误判使 attach 反复 ENOTCONN，直到宿主进程
+/// 自己退出才恢复）。这里改为 lookup 一个**必然不存在**的探测名——该操作无法走任何
+/// 缓存，必须由宿主 FUSE 连接真实应答：连接健康时返回 ENOENT，连接僵死时返回
+/// ENOTCONN/EIO 或超时。探测名意外存在同样视为存活（连接应答了请求即证明健康）。
 fn host_endpoint_alive(view: &HostSessionView) -> bool {
-    let Ok(c_path) = CString::new(view.mount_point.as_str()) else {
+    let Ok(c_path) = CString::new(format!("{}/.srx_endpoint_probe", view.mount_point)) else {
         return false;
     };
     let mut buf = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: c_path 是 NUL 结尾的合法路径；buf 指向本栈帧的未初始化缓冲，stat 返回 0
-    // 时由内核完整写入。
-    unsafe { libc::stat(c_path.as_ptr(), buf.as_mut_ptr()) == 0 }
+    // SAFETY: 探测路径是 NUL 结尾的合法路径；buf 指向本栈帧的未初始化缓冲，stat 返回
+    // 0 时由内核完整写入；探测名不存在时返回 ENOENT，不产生副作用。
+    match unsafe { libc::stat(c_path.as_ptr(), buf.as_mut_ptr()) } {
+        0 => {
+            // 探测名真实存在（历史残留）：连接应答了 lookup，宿主健康；顺手清掉残留，
+            // 恢复"探测名必然不存在"的前提。
+            // SAFETY: c_path 是 NUL 结尾的合法路径；unlink 只移除该探测名自身。
+            unsafe { libc::unlink(c_path.as_ptr()) };
+            true
+        }
+        _ => crate::platform::errno::last() == libc::ENOENT,
+    }
 }
 
 /// 把应用的存储视图接入共享宿主会话。
