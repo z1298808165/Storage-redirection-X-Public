@@ -179,10 +179,16 @@ private fun SrxManagerApp(
   var page by rememberSaveable { mutableStateOf(Page.Dashboard) }
   var pageHistory by rememberSaveable { mutableStateOf<List<Page>>(emptyList()) }
   var themeRouteOpen by rememberSaveable { mutableStateOf(false) }
-  val navBackStack =
-      rememberNavBackStack<SrxRoute>(SrxRoute.Main).apply {
-        if (themeRouteOpen) add(SrxRoute.Theme)
-      }
+  val navBackStack = rememberNavBackStack<SrxRoute>(SrxRoute.Main)
+  // 进程恢复后同步一次主题路由：栈里已有 Theme 时只回读开关，不得重复入栈
+  // （miuix-nav 的 contentKey 去重会对重复路由直接抛异常）。
+  LaunchedEffect(Unit) {
+    when {
+      themeRouteOpen && navBackStack.lastOrNull() != SrxRoute.Theme ->
+          navBackStack.add(SrxRoute.Theme)
+      !themeRouteOpen && navBackStack.lastOrNull() == SrxRoute.Theme -> themeRouteOpen = true
+    }
+  }
   var showRootDialog by remember { mutableStateOf(false) }
   var toast by remember { mutableStateOf<String?>(null) }
   var pendingRestoreUri by remember { mutableStateOf<Uri?>(null) }
