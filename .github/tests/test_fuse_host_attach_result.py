@@ -31,7 +31,12 @@ class HostAttachResultTest(unittest.TestCase):
         source = (ROOT / "src/fuse_host.rs").read_text(encoding="utf8")
         functions = "\n".join(
             extract_fn(source, name)
-            for name in ("host_attach_child_main", "send_host_attach_result")
+            for name in (
+                "host_attach_child_main",
+                "send_host_attach_result",
+                "attach_host_view_to_storage_aliases",
+                "storage_user_id_from_view_root",
+            )
         )
         dispatch = re.search(
             r"let result = host_attach_child_main\(view, target_root\);\s*"

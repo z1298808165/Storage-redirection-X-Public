@@ -5,6 +5,10 @@ extern crate self as log;
 macro_rules! warn {
     ($($token:tt)*) => {{}};
 }
+#[macro_export]
+macro_rules! info {
+    ($($token:tt)*) => {{}};
+}
 use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +20,8 @@ fn case() -> usize {
 mod libc {
     use super::*;
     pub type c_int = i32;
+    pub type c_ulong = u64;
+    pub const MS_BIND: i32 = 4096;
     pub type c_void = std::ffi::c_void;
     pub const O_RDONLY: i32 = 0;
     pub const O_CLOEXEC: i32 = 1;
@@ -39,11 +45,33 @@ mod libc {
     pub unsafe fn mkdir(_: *const i8, _: u32) -> i32 {
         0
     }
+    pub unsafe fn mount(
+        _: *const i8,
+        _: *const i8,
+        _: *const i8,
+        _: u64,
+        _: *const c_void,
+    ) -> i32 {
+        0
+    }
     pub unsafe fn send(fd: i32, data: *const c_void, size: usize, _: i32) -> isize {
         assert_eq!(fd, 99);
         assert_eq!(size, std::mem::size_of::<i32>());
         SENT.lock().unwrap().push(unsafe { *(data as *const i32) });
         if case() == 14 { -1 } else { size as isize }
+    }
+}
+mod paths {
+    // 协议用例的目标根都不是存储视图根，别名展开在 production 代码里会提前返回；
+    // 这里只提供编译所需的签名桩。
+    pub fn storage_alias_roots_for_user(_: i32) -> Vec<String> {
+        Vec::new()
+    }
+    pub fn is_same_or_child(_: &str, _: &str) -> bool {
+        false
+    }
+    pub fn data_media_user_root_for_user(_: i32) -> String {
+        String::new()
     }
 }
 mod platform {

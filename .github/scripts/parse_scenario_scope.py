@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_MAX_SCENARIO = 37
+DEFAULT_MAX_SCENARIO = 38
 # 标记「单场景」只在后接空白/冒号/数字时才算范围标记，避免把正文里
 # 「单场景运行能力」这类 incidental 提及误判为范围标记。
 MARKER_KEYWORD = re.compile(r"单场景[：:]?(?=[\s0-9])")
