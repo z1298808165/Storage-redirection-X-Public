@@ -1616,7 +1616,10 @@ run_service_case() {
   shift 4
   local output_file="scenario-${scenario}-${label}-result.txt"
 
-  prepare_service_case "scenario-${scenario}-${label}" || return 1
+  prepare_service_case "scenario-${scenario}-${label}" || {
+    echo "service_case_prepare_failed scenario=${scenario} label=${label}" >&2
+    return 1
+  }
 
   # HyperOS 实机（A16/KSU）会随用例启动次数累积把 start-foreground-service 无限期
   # 延迟（应用重启后还会重投递积压 intent）：被延迟的用例变成僵尸，或表现为本用例
@@ -2983,14 +2986,27 @@ run_backend_endpoint_recovery_scenario() {
     echo "backend_recovery_pid_missing scenario=${scenario}" >&2
     return 1
   fi
-  ensure_media_provider_hook_ready "scenario-${scenario}-before" || return 1
-  initial_media_pid="$(media_provider_pid)"
+  ensure_media_provider_hook_ready "scenario-${scenario}-before" || {
+    echo "backend_recovery_hook_ready_failed scenario=${scenario}" >&2
+    return 1
+  }
+  initial_media_pid="$(media_provider_pid)" || {
+    echo "backend_recovery_media_provider_pid_cmd_failed scenario=${scenario}" >&2
+    return 1
+  }
   if [ -z "$initial_media_pid" ]; then
     echo "backend_recovery_media_provider_pid_missing scenario=${scenario}" >&2
     return 1
   fi
-  run_mediastore_image_create_case "$scenario" "backend-before" "$before_file" "Pictures/SrtRelativeData" &&
-    check_file_exists "scenario-${scenario}-backend-before" "${expected_dir}/${before_file}" || return 1
+  echo "backend_recovery_media_pid_ok scenario=${scenario} pid=${initial_media_pid}" >&2
+  run_mediastore_image_create_case "$scenario" "backend-before" "$before_file" "Pictures/SrtRelativeData" || {
+    echo "backend_recovery_before_create_failed scenario=${scenario}" >&2
+    return 1
+  }
+  check_file_exists "scenario-${scenario}-backend-before" "${expected_dir}/${before_file}" || {
+    echo "backend_recovery_before_file_missing scenario=${scenario}" >&2
+    return 1
+  }
 
   adb shell am force-stop "$APP_ID" >/dev/null || return 1
   sleep 0.5
