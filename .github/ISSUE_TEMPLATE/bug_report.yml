@@ -20,7 +20,6 @@ body:
       options:
         - KernelSU
         - Magisk
-        - APatch
         - 其它（请在问题描述中说明）
     validations:
       required: true
