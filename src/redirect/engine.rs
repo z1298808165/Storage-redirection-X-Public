@@ -124,6 +124,49 @@ fn process_provider_passthrough_redirect(
     decision
 }
 
+fn reload_router_config_if_changed(package_name: &str) -> bool {
+    if !crate::hook::poll_config_reload_throttled() {
+        return false;
+    }
+    reconfigure_router_from_settings(package_name)
+}
+
+/// 从当前 SettingsHub 重建进程内 PathRouter；规则被整体关闭或删除时配置空路由
+/// （全部写操作回到直通判定）。供决策路径的节流轮询与 hook 配置监视线程共用。
+pub(crate) fn reconfigure_router_from_settings(package_name: &str) -> bool {
+    // SAFETY: getuid 无失败路径，返回值即当前真实 uid。
+    let uid = unsafe { libc::getuid() as i32 };
+    let user_id = platform::user_id_from_uid(uid);
+    let config = SettingsHub::instance();
+    let Some(resolved) = config.get_resolved_user_profile_snapshot(package_name, uid) else {
+        let redirect_base = platform::paths::default_redirect_target(package_name, user_id);
+        super::router::PathRouter::instance().configure(
+            package_name,
+            uid,
+            &redirect_base,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            false,
+        );
+        return true;
+    };
+    super::router::PathRouter::instance().configure(
+        package_name,
+        uid,
+        &resolved.redirect_target,
+        &resolved.allowed_real_paths,
+        &resolved.excluded_real_paths,
+        &resolved.sandboxed_paths,
+        &resolved.read_only_paths,
+        &resolved.path_mappings,
+        resolved.is_mapping_mode_only,
+    );
+    true
+}
+
 fn process_app_mount_namespace_redirect(
     package_name: &str,
     self_uid: i32,
@@ -131,6 +174,14 @@ fn process_app_mount_namespace_redirect(
     is_write_operation: bool,
     perf_started_ms: i64,
 ) -> RedirectDecision {
+    // 进程内 hook 决策的热重载：普通应用的重定向由 FUSE 会话承担（daemon 配置变更时
+    // 重挂），且它们的 PLT hook 被跳过、根本不会走到这里；而监视桥接进程（下载提供器等）
+    // 没有会话，规则完全由本进程的 PathRouter 承载。若不在这里轮询配置变更，用户在
+    // 管理界面关闭/修改规则后，运行中的桥接进程会一直沿用 specialize 时的旧规则
+    // （2026-10-22 真机：关闭下载提供器规则不生效）。轮询复用 hook::reload 的共享节流阀。
+    if reload_router_config_if_changed(package_name) {
+        log::info!("router reconfigured from settings pkg={}", package_name);
+    }
     let normalized = normalize_request_path(pathname);
     let normalized_path = normalized.path;
     let is_data_media = normalized.is_data_media_input;
@@ -349,6 +400,28 @@ fn process_redirect_path_inner(
     let is_system_writer_process =
         redirect_policy::is_system_writer_package(&package_name) || is_shared_uid;
     let is_explicit_caller_decision = crate::hook::is_explicit_caller_decision_active();
+    // 监视桥接进程自身保留重定向（is_app_redirect_owner，如下载提供器的 .xlDownload）时，
+    // 对自己沙盒路径的写入必须先按桥接进程自己的路由判定（含热重载轮询）：共享 uid 会把
+    // 这类进程判成系统代写，而按调用方归因的 writer 链路不携带 sandboxed_paths，引擎日志
+    // 目录会直接穿透真实存储（2026-10-22 真机：规则开启仍泄漏）。非沙盒路径继续走 writer
+    // 链路，保留 SAF 代写的按调用方语义。
+    if hub.is_app_redirect_owner() {
+        if reload_router_config_if_changed(&package_name) {
+            log::info!("router reconfigured from settings pkg={}", package_name);
+        }
+        let own_normalized = normalize_request_path(pathname);
+        let own_resolved =
+            paths::resolve_user_path(&own_normalized.path, platform::user_id_from_uid(self_uid));
+        if super::router::PathRouter::instance().is_path_sandboxed(&own_resolved) {
+            return process_app_mount_namespace_redirect(
+                &package_name,
+                self_uid,
+                pathname,
+                is_write_operation,
+                perf_started_ms,
+            );
+        }
+    }
     if !is_dir_create_operation
         && should_bypass_system_writer_provider_passthrough(is_system_writer_process)
     {

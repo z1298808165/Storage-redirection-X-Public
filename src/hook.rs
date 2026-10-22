@@ -1,5 +1,6 @@
 mod caller;
 pub mod companion_api;
+pub(crate) mod config_watcher;
 mod context;
 mod diagnostic;
 mod entries;
@@ -76,6 +77,16 @@ pub(crate) fn refresh_runtime_config_throttled() {
         return;
     }
     refresh_runtime_config_from_settings();
+}
+
+/// 共享节流阀的配置变更轮询，供 hook 决策路径内直接调用。
+///
+/// 不走 [`context::ReentryGuard`]：调用方本来就运行在 hook 决策内部（与
+/// `process_system_writer_redirect` 的磁盘变更检查一致），再入守卫会把每次
+/// 调用都判成重入而永远跳过轮询。返回 true 表示 SettingsHub 已重载，
+/// 调用方需要据此重建自己持有的规则视图（如 PathRouter）。
+pub(crate) fn poll_config_reload_throttled() -> bool {
+    reload::poll_or_check_throttled().did_reload()
 }
 
 fn refresh_runtime_config_from_native_reentrant() {

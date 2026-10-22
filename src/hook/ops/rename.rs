@@ -406,7 +406,7 @@ fn process_redirect_path_for_rename(
 }
 
 fn should_apply_rename_policy(hub: &crate::hook::stats::InterceptHub) -> bool {
-    should_apply_rename_policy_for_mode(hub.is_monitor_only(), &hub.get_package_name())
+    should_apply_rename_policy_for_mode(hub.effective_monitor_only(), &hub.get_package_name())
 }
 
 fn should_apply_rename_policy_for_mode(is_monitor_only: bool, package_name: &str) -> bool {

@@ -52,7 +52,17 @@ impl RuntimeFlow {
 
         let mut mount_wait_ms = 0;
         if self.should_redirect && !self.is_system_writer_hook_redirect {
-            if platform::is_isolated_uid(self.app_uid) {
+            if policy::is_file_monitor_bridge_package(&self.package_name) {
+                // 桥接进程保留自身重定向时不挂模块 FUSE 会话
+                // （scoped_fuse_mount_roots_for_request 对这类请求返回空根），
+                // 原生写入的沙盒重定向由进程内 hook 兜底（is_app_redirect_owner），
+                // 无需发送/等待挂载，应用立即恢复运行。同时启动配置监视线程，
+                // 保证用户在管理界面修改规则后秒级生效（无会话可重挂，只能靠
+                // 进程内路由重建）。
+                self.is_mount_applied = false;
+                crate::hook::config_watcher::start_for(self.package_name.clone());
+                log::info!("monitor bridge hook redirect (skip mount wait)");
+            } else if platform::is_isolated_uid(self.app_uid) {
                 self.is_mount_applied = false;
                 log::info!(
                     "isolated uid skip mount wait uid={} pid={}",
@@ -95,12 +105,17 @@ impl RuntimeFlow {
         } else if self.should_install_fuse_fix && !is_redirect_via_hook {
             install_media_runtime_hook(&self.package_name, self.should_monitor)
         } else if should_install_process_plt_hook(self, is_redirect_via_hook) {
+            // 自身配置了重定向规则的进程（如启用了 sandboxed_paths 的下载提供器）即使
+            // 走监视 profile 也要保留进程内重定向兜底：挂载层（宿主/屏障）全部失效时，
+            // 没有这一层 sandboxed_paths 的写操作会穿透到系统 FUSE 真实落盘。
+            let is_app_redirect_owner = self.should_redirect && !is_redirect_via_hook;
             install_plt_hook(
                 &self.package_name,
                 self.should_monitor,
                 is_redirect_via_hook,
                 self.is_system_writer_boot_lite,
                 self.should_install_app_redirect_hook,
+                is_app_redirect_owner,
             )
         } else {
             log::info!(
@@ -322,6 +337,7 @@ fn install_plt_hook(
     is_redirect_via_hook: bool,
     is_boot_lite: bool,
     is_app_write_redirect: bool,
+    is_app_redirect_owner: bool,
 ) -> bool {
     let is_monitor_only = !is_redirect_via_hook;
     let should_install = should_monitor || is_redirect_via_hook;
@@ -349,6 +365,12 @@ fn install_plt_hook(
         hub.init_boot_lite(package_name, should_monitor);
     } else {
         hub.init(package_name, is_monitor_only, should_monitor);
+    }
+    if is_monitor_only && is_app_redirect_owner {
+        // 自身配置了重定向规则的桥接进程：hook 符号集保持 Monitor profile，但写操作
+        // 决策链放行到 PathRouter（见 effective_monitor_only）。这是挂载层全部失效时
+        // 对 sandboxed_paths 的进程内 fail-closed 兕底。
+        hub.set_app_redirect_owner(true);
     }
     if hub.install() {
         if is_redirect_via_hook {

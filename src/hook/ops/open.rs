@@ -576,7 +576,7 @@ fn should_redirect_open_operation(
     flags: c_int,
 ) -> bool {
     should_redirect_open_operation_for_mode(
-        hub.is_monitor_only(),
+        hub.effective_monitor_only(),
         hub.is_app_write_only(),
         is_system_writer,
         flags,

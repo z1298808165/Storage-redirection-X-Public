@@ -266,6 +266,19 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
         return vec![paths::storage_user_root_for_user(user_id)];
     }
 
+    // 监视桥接进程（下载提供器/MTP/externalstorage）自身配置了重定向规则时，不挂任何
+    // 模块 FUSE 会话：这类进程的原生写入由进程内 hook 兜底重定向（见
+    // InterceptHub::effective_monitor_only）。模块会话压在存储视图上会踩 AOSP
+    // FuseDaemon 直通陷阱（rename/mkdir 返回 ENOENT/EDOM 但数据已落盘，真机表现为
+    // 应用商店下载无法合并/安装）；且 scoped 根只覆盖规则父目录时，其余视图仍被只读
+    // 屏障挡住，引擎初始化 mkdir 全量 EROFS（2026-10-22 真机：商店下载全挂）。
+    // 桥接进程走 hook 兜底后，其余路径经系统 FUSE 直通，与未装模块时等价。
+    if !request.is_monitor_only()
+        && crate::redirect::policy::is_file_monitor_bridge_package(request.package_name())
+    {
+        return Vec::new();
+    }
+
     if matches!(
         request.storage_backend_mode(),
         StorageBackendMode::Namespace

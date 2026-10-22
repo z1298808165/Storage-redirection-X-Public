@@ -230,7 +230,7 @@ where
         mode as i32,
     );
 
-    if hub.is_monitor_only() && !should_enforce_monitor_only_writer_policy(hub) {
+    if hub.effective_monitor_only() && !should_enforce_monitor_only_writer_policy(hub) {
         let result = call_original(pathname);
         let error_no = runtime::errno_for_result(result);
         monitor::record_mkdir_result(hub, op_name, path_for_decision.as_ref(), result, error_no);

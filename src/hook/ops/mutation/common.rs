@@ -203,7 +203,7 @@ fn redirect_target_extra_tail(original_path: &str, extra_tail: Option<&str>) -> 
 }
 
 pub(super) fn should_apply_mutation_policy(hub: &InterceptHub) -> bool {
-    should_apply_mutation_policy_for_mode(hub.is_monitor_only(), &hub.get_package_name())
+    should_apply_mutation_policy_for_mode(hub.effective_monitor_only(), &hub.get_package_name())
 }
 
 pub(super) fn should_apply_mutation_policy_for_mode(
