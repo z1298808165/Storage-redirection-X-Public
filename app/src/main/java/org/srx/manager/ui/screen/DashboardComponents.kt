@@ -426,14 +426,3 @@ internal fun GlassIcon(icon: ImageVector, modifier: Modifier = Modifier) {
     )
   }
 }
-
-@Composable
-internal fun SectionTitle(text: String) {
-  Text(
-      text,
-      modifier = Modifier.padding(start = 2.dp, top = 2.dp, bottom = 4.dp),
-      color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-      fontSize = 13.sp,
-      fontWeight = FontWeight.Bold,
-  )
-}

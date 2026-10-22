@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -40,9 +39,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.shadow.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -64,8 +61,11 @@ import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
+import top.yukonga.miuix.kmp.basic.LinearProgressIndicator
+import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.blur.Backdrop
@@ -546,12 +546,10 @@ internal fun BackPageHeader(
 
 @Composable
 internal fun SectionTitle(text: String) {
-  Text(
+  SmallTitle(
       text = text,
       modifier = Modifier.padding(start = 6.dp, bottom = 8.dp),
-      color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-      fontSize = 12.sp,
-      fontWeight = FontWeight.Bold,
+      insideMargin = PaddingValues(0.dp),
   )
 }
 
@@ -607,21 +605,10 @@ internal fun BusyOverlay(message: String, progress: Float? = null) {
         textAlign = TextAlign.Center,
     )
     if (safeProgress != null) {
-      Box(
-          modifier =
-              Modifier.fillMaxWidth()
-                  .height(5.dp)
-                  .clip(CircleShape)
-                  .background(capsuleContainerColor()),
-      ) {
-        Box(
-            modifier =
-                Modifier.fillMaxWidth(safeProgress.coerceAtLeast(0.02f))
-                    .height(5.dp)
-                    .clip(CircleShape)
-                    .background(srxPrimaryColor(), CircleShape),
-        )
-      }
+      LinearProgressIndicator(
+          progress = safeProgress,
+          modifier = Modifier.fillMaxWidth().height(5.dp),
+      )
     }
   }
 }
@@ -629,35 +616,15 @@ internal fun BusyOverlay(message: String, progress: Float? = null) {
 @Composable
 private fun DeterminateProgressRing(progress: Float) {
   val percentText = "${(progress * 100f).roundToInt().coerceIn(0, 100)}%"
-  val primary = srxPrimaryColor()
-  val track = capsuleContainerColor()
   Box(
       modifier = Modifier.size(44.dp),
       contentAlignment = Alignment.Center,
   ) {
-    Canvas(modifier = Modifier.size(44.dp)) {
-      val strokeWidth = 4.dp.toPx()
-      val inset = strokeWidth / 2f
-      val arcSize = size.copy(width = size.width - strokeWidth, height = size.height - strokeWidth)
-      drawArc(
-          color = track,
-          startAngle = -90f,
-          sweepAngle = 360f,
-          useCenter = false,
-          topLeft = Offset(inset, inset),
-          size = arcSize,
-          style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-      )
-      drawArc(
-          color = primary,
-          startAngle = -90f,
-          sweepAngle = 360f * progress.coerceIn(0f, 1f),
-          useCenter = false,
-          topLeft = Offset(inset, inset),
-          size = arcSize,
-          style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
-      )
-    }
+    CircularProgressIndicator(
+        progress = progress.coerceIn(0f, 1f),
+        modifier = Modifier.size(44.dp),
+        strokeWidth = 4.dp,
+    )
     Text(
         text = percentText,
         color = MiuixTheme.colorScheme.onSurface,

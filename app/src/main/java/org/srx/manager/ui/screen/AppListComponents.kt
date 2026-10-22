@@ -21,8 +21,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -56,6 +54,8 @@ import org.srx.manager.ui.component.liquidPressScale
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 // 应用列表的展示组件。
@@ -401,7 +401,7 @@ internal fun SelectionMark(selected: Boolean) {
   ) {
     if (selected) {
       Icon(
-          Icons.Rounded.Check,
+          MiuixIcons.Ok,
           contentDescription = "已选择",
           tint = Color.White,
           modifier = Modifier.size(16.dp),

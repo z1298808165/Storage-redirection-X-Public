@@ -41,8 +41,8 @@ import org.srx.manager.glassSurfaceColor
 import org.srx.manager.srxSuccessColor
 import org.srx.manager.subtleFieldLabelColor
 import org.srx.manager.ui.theme.isSrxDarkTheme
+import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
@@ -345,21 +345,16 @@ private fun MonitorFilterTabs(
             fontWeight = FontWeight.Black,
         )
         Spacer(Modifier.size(5.dp))
-        Box(
-            modifier =
-                Modifier.clip(RoundedCornerShape(6.dp))
-                    .background(
-                        if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
-                        else glassSurfaceColor(0.7f),
-                    )
-                    .padding(horizontal = 5.dp, vertical = 2.dp),
-            contentAlignment = Alignment.Center,
+        Badge(
+            containerColor =
+                if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f)
+                else glassSurfaceColor(0.7f),
+            contentColor =
+                if (active) MiuixTheme.colorScheme.primary
+                else MiuixTheme.colorScheme.onSurfaceVariantSummary,
         ) {
           Text(
               "${counts[type] ?: 0}",
-              color =
-                  if (active) MiuixTheme.colorScheme.primary
-                  else MiuixTheme.colorScheme.onSurfaceVariantSummary,
               fontSize = 9.sp,
               lineHeight = 11.sp,
               fontWeight = FontWeight.Black,
@@ -494,17 +489,14 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
-    IconButton(
-        modifier = Modifier.size(28.dp),
-        onClick = { onRemove(value) },
-    ) {
-      Icon(
-          MiuixIcons.Delete,
-          contentDescription = "删除规则",
-          tint = MiuixTheme.colorScheme.error,
-          modifier = Modifier.size(15.dp),
-      )
-    }
+    RoundIconAction(
+        MiuixIcons.Delete,
+        "删除规则",
+        { onRemove(value) },
+        danger = true,
+        size = 34.dp,
+        iconSize = 17.dp,
+    )
   }
 }
 

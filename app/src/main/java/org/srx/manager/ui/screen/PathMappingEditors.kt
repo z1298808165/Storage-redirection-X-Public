@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +35,7 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
+import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
@@ -375,7 +374,7 @@ private fun RuleRow(
         lineHeight = 16.sp,
     )
     RoundIconAction(
-        Icons.Rounded.Close,
+        MiuixIcons.Close,
         "删除",
         { onRemove(value) },
         danger = true,
@@ -425,7 +424,7 @@ private fun MappingRow(
         lineHeight = 16.sp,
     )
     RoundIconAction(
-        Icons.Rounded.Close,
+        MiuixIcons.Close,
         "删除",
         { onRemove(request) },
         danger = true,

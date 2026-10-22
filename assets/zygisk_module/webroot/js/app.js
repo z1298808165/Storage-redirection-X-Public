@@ -1682,9 +1682,7 @@
     if (!bar) {
       bar = document.createElement("div");
       bar.id = "appBatchBar";
-      bar.className = "app-batch-bar visible miuix-floating-container miuix-blur";
-      bar.dataset.miuixUi = "floating-container";
-      bar.dataset.miuixBlur = "realtime";
+      bar.className = "app-batch-bar visible";
       document.body.appendChild(bar);
     }
     bar.innerHTML =

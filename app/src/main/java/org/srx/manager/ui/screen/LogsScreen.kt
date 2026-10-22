@@ -27,8 +27,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +68,7 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Delete
+import top.yukonga.miuix.kmp.icon.extended.ExpandMore
 import top.yukonga.miuix.kmp.icon.extended.File
 import top.yukonga.miuix.kmp.icon.extended.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -658,7 +657,7 @@ private fun PathExpandButtonSurface(expanded: Boolean, enabled: Boolean, onClick
       contentAlignment = Alignment.Center,
   ) {
     Icon(
-        imageVector = Icons.Rounded.KeyboardArrowDown,
+        imageVector = MiuixIcons.ExpandMore,
         contentDescription = if (expanded) "收起详情" else "展开详情",
         tint =
             if (enabled) MiuixTheme.colorScheme.onSurface
