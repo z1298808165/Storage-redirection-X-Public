@@ -17,8 +17,7 @@ class FileTestCases(
   private val api = AndroidFileApi()
 
   /** 稳定的小体积文件；下载是否成功不是断言目标，提供器创建目标文件才是。 */
-  private val defaultDownloadUrl: String =
-      "https://dldir1.qq.com/weixin/Windows/README.txt"
+  private val defaultDownloadUrl: String = "https://dldir1.qq.com/weixin/Windows/README.txt"
   private val defaultRoot: File
     get() =
         File(
@@ -621,11 +620,9 @@ class FileTestCases(
   }
 
   /**
-   * 通过 DownloadManager 入队一个下载任务，由下载提供器（com.android.providers.downloads，
-   * 监视桥接进程）在自己的进程内创建目标文件。
+   * 通过 DownloadManager 入队一个下载任务，由下载提供器（com.android.providers.downloads， 监视桥接进程）在自己的进程内创建目标文件。
    *
-   * 这是验证「桥接进程自身配置了 sandboxed_paths」时写入必须进沙盒的触发器：
-   * 测试应用未被配置重定向，仅负责预建真实父目录并驱动入队；目标文件由提供器创建，
+   * 这是验证「桥接进程自身配置了 sandboxed_paths」时写入必须进沙盒的触发器： 测试应用未被配置重定向，仅负责预建真实父目录并驱动入队；目标文件由提供器创建，
    * 实际落点（真实公共路径 vs 提供器沙盒后端）由场景脚本断言。
    */
   fun downloadManagerEnqueue(args: TestCaseArgs): TestResult =
@@ -633,8 +630,7 @@ class FileTestCases(
         val destinationPath = args.filePath
         if (destinationPath.isNullOrBlank()) {
           return@measure TestCase.DOWNLOADMANAGER_ENQUEUE.fail(
-              message =
-                  "missing required parameter: ${TestCaseArgs.EXTRA_FILE_PATH}",
+              message = "missing required parameter: ${TestCaseArgs.EXTRA_FILE_PATH}",
           )
         }
         val url = args.url ?: defaultDownloadUrl
