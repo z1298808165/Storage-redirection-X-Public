@@ -221,6 +221,12 @@
       "config_mode": "standard",
       "bash_title": "父映射结果继续命中子映射",
       "powershell_title": "nested mapping chain applies parent result to child rule"
+    },
+    {
+      "id": 38,
+      "config_mode": "auto",
+      "bash_title": "下载提供器自身 sandboxed_paths 原生写入进沙盒",
+      "powershell_title": "download provider own sandboxed_paths native write into sandbox"
     }
   ]
 }

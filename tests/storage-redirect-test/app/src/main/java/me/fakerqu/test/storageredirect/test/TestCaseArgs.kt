@@ -17,6 +17,7 @@ data class TestCaseArgs(
     val length: Long? = null,
     val mode: Int? = null,
     val keepPending: Boolean = false,
+    val url: String? = null,
 ) {
   fun payloadOr(default: ByteArray): ByteArray = payload ?: default
 
@@ -35,6 +36,7 @@ data class TestCaseArgs(
     const val EXTRA_LENGTH = "length"
     const val EXTRA_MODE = "mode"
     const val EXTRA_KEEP_PENDING = "keep_pending"
+    const val EXTRA_URL = "url"
 
     fun fromIntent(intent: Intent?): TestCaseArgs {
       if (intent == null) return TestCaseArgs()
@@ -55,6 +57,7 @@ data class TestCaseArgs(
               intent.getStringExtra(EXTRA_KEEP_PENDING)?.lowercase()?.let {
                 it == "1" || it == "true" || it == "yes"
               } ?: false,
+          url = intent.getStringExtra(EXTRA_URL),
       )
     }
 
@@ -76,6 +79,7 @@ data class TestCaseArgs(
               EXTRA_LENGTH,
               EXTRA_MODE,
               EXTRA_KEEP_PENDING,
+              EXTRA_URL,
               me.fakerqu.test.storageredirect.receiver.TestCaseReceiver.EXTRA_TEST_CASE,
           )
           .forEach { key -> from.getStringExtra(key)?.let { to.putExtra(key, it) } }

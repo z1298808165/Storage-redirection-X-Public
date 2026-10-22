@@ -789,7 +789,16 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "paths::normalize_syntax(mount_root)==paths::normalize_syntax(&view_root)", gate
         )
 
-        attach = section(host, "fn host_attach_child_main(", "fn open_detached_mount(")
+        # 别名覆盖函数（attach_host_view_to_storage_aliases）使用同命名空间 MS_BIND，
+        # 不属于「跨命名空间 bind 回退」禁令范围，因此 MS_BIND 检查只圈定 child_main 本体。
+        attach = section(
+            host, "fn host_attach_child_main(", "fn attach_host_view_to_storage_aliases("
+        )
+        aliases = section(
+            host, "fn attach_host_view_to_storage_aliases(", "fn open_detached_mount("
+        )
+        # 别名 bind 必须带同命名空间说明（主目标挂载已属于应用命名空间，bind 合法）。
+        self.assertIn("同一命名空间内的 bind 不跨命名空间", aliases)
         host_ns_at = attach.index("setns(host_ns.get(), libc::CLONE_NEWNS)")
         clone_at = attach.index("open_detached_mount(&c_mount_point)")
         app_ns_at = attach.index("setns(app_ns.get(), libc::CLONE_NEWNS)")
@@ -2261,7 +2270,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("fixture_residue label=", helper)
         runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
         self.assertIn('assert_fixture_roots_empty "scenario-${scenario}" || return 1', runner)
-        self.assertRegex(runner, r"9\|20\|21\|22\|28\|31\) ;;")
+        # 场景 38 自行清理并预置探测目录（下载提供器沙盒夹具），与 9/20/21/22/28/31 同为豁免场景。
+        self.assertRegex(runner, r"9\|20\|21\|22\|28\|31\|38\) ;;")
         # 容忍式清理必须留下统一前缀，便于在日志里统计与定位，不能只写一句自由文本。
         self.assertIn("cleanup_tolerated reason=probe_fuse_edom", self.bash)
         self.assertIn("cleanup_tolerated reason=own_dir_fuse", self.bash)
@@ -2273,7 +2283,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("fixture_scan_failed", ps)
         ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $scenarioOk = switch")
         self.assertIn('Assert-FixtureRootsEmpty "scenario-$Scenario"', ps_runner)
-        self.assertIn("-notin @(9, 10, 20, 21, 22, 28, 31)", ps_runner)
+        self.assertIn("-notin @(9, 10, 20, 21, 22, 28, 31, 38)", ps_runner)
 
     def test_fixture_cleanup_sweeps_directories_by_prefix(self) -> None:
         """夹具清理必须按 `Srt*` 通配动态枚举目录，不能只依赖手写清单。

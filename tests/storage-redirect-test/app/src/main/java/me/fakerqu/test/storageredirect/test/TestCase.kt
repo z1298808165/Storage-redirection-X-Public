@@ -77,7 +77,8 @@ enum class TestCase(val id: String) {
   FILE_LINK("file_link"),
   FILE_LINK_DENIED("file_link_denied"),
   FILE_SYMLINK("file_symlink"),
-  FILE_SYMLINK_DENIED("file_symlink_denied");
+  FILE_SYMLINK_DENIED("file_symlink_denied"),
+  DOWNLOADMANAGER_ENQUEUE("downloadmanager_enqueue");
 
   fun getMediaType(): MediaStoreApi.MediaType? =
       when (this) {
@@ -272,6 +273,7 @@ enum class TestCase(val id: String) {
       FILE_LINK_DENIED -> file.linkDenied(args)
       FILE_SYMLINK -> file.symlink(args)
       FILE_SYMLINK_DENIED -> file.symlinkDenied(args)
+      DOWNLOADMANAGER_ENQUEUE -> file.downloadManagerEnqueue(args)
     }
   }
 

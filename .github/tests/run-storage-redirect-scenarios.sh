@@ -112,6 +112,19 @@ PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT="${PRIVATE_ROOT}/Documents/SrtMediaRouting
 RULE_SANDBOX_ROOT="${REAL_ROOT}/SrtRuleSandbox"
 BACKEND_RULE_SANDBOX_ROOT="${BACKEND_ROOT}/SrtRuleSandbox"
 PRIVATE_RULE_SANDBOX_ROOT="${PRIVATE_ROOT}/SrtRuleSandbox"
+# 场景 38：下载提供器（监视桥接进程）自身配置 sandboxed_paths 的回归夹具。
+# 提供器进程名不是包名，用包名 force-stop 即可；真实父目录由 shell 预建，
+# 目标文件由提供器在自己的进程内创建，实际落点是断言对象。
+PROVIDER_PACKAGE="com.android.providers.downloads"
+PROVIDER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${PROVIDER_PACKAGE}.json"
+# 探测路径必须用 MIUI 下载提供器允许的目标目录（隐藏目录会被 SecurityException 拒绝），
+# 因此落在 Download/SrtDlProbe；清理口径与 Assert-FixtureRootsEmpty 的 Srt* 通配一致。
+PROVIDER_PROBE_REL="Download/SrtDlProbe"
+PROVIDER_PROBE_FILE="srx_probe_download.txt"
+PROVIDER_REAL_DIR="${REAL_ROOT}/${PROVIDER_PROBE_REL}"
+PROVIDER_BACKEND_DIR="${BACKEND_ROOT}/Android/data/${PROVIDER_PACKAGE}/sdcard/${PROVIDER_PROBE_REL}"
+PROVIDER_BACKEND_FILE="${PROVIDER_BACKEND_DIR}/${PROVIDER_PROBE_FILE}"
+PROVIDER_REAL_FILE="${BACKEND_ROOT}/${PROVIDER_PROBE_REL}/${PROVIDER_PROBE_FILE}"
 RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
 BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
 PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
@@ -247,6 +260,7 @@ adb_su_timeout() {
 adb_write_file() {
   local path="$1"
   local content="$2"
+  echo "TRACE adb_write_file path=[$path] caller=${FUNCNAME[1]:-top}@${BASH_LINENO[0]:-0} provider_config=[${PROVIDER_CONFIG:-unset}]" >&2
   local encoded
   encoded="$(printf '%s' "$content" | base64 | tr -d '\n')"
   # 必须原子落盘：truncate-then-write 的写入窗口会让 daemon 的 reload 撞上半截内容，
@@ -325,6 +339,12 @@ write_cross_app_read_only_config() {
   adb_write_file "$READ_ONLY_OWNER_CONFIG" '{"users":{"0":{"enabled":true,"read_only_paths":["DCIM","Pictures"]}}}' >/dev/null
 }
 
+clear_provider_sandbox_config() {
+  # 场景 38 使用的下载提供器专属配置；其余场景不得残留，避免桥接进程
+  # 在后续场景重启时带上意外的沙盒规则。
+  adb_su "rm -f '$PROVIDER_CONFIG'" >/dev/null 2>&1 || true
+}
+
 clear_cross_app_read_only_config() {
   adb_su "rm -f '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1 || true
 }
@@ -354,6 +374,7 @@ apply_config() {
   APP_CONFIG_CONTENT=""
   set_backend_config auto
   clear_cross_app_read_only_config
+  clear_provider_sandbox_config
   case "$1" in
     1)
       adb_su "rm -f '$CONFIG'" >/dev/null
@@ -461,6 +482,14 @@ apply_config() {
     37)
       write_config "$(printf '{\"users\":{\"0\":{\"enabled\":true,\"path_mappings\":{\"/storage/emulated/0/Android/data/%s/Tencent\":\"/storage/emulated/0/Android/data/%s/sandbox\",\"/storage/emulated/0/Android/data/%s/sandbox/QQfile_recv\":\"/storage/emulated/0/Download/SrtNestedMappingQQ\"}}}}' "$APP_ID" "$APP_ID" "$APP_ID")"
       ;;
+    38)
+      set_backend_config auto
+      adb_write_file "$PROVIDER_CONFIG" '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"sandboxed_paths":["Download/SrtDlProbe"]}}}' >/dev/null
+      # 写入一份 disabled 的测试应用配置：apply_config_and_wait 的水位机制要求水位之后
+      # 必然出现一次 daemon reload 标记；提供器配置自身的 reload 在水位之前已经发生，
+      # 只靠它会让等待超时（apps 计数含提供器配置，apps=[1-9] 成立）。
+      write_config '{"users":{"0":{"enabled":false}}}'
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -538,6 +567,7 @@ scenario_title() {
     35) echo "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射" ;;
     36) echo "映射私有别名可继续写入已由 MediaProvider 创建的文件" ;;
     37) echo "父映射结果继续命中子映射" ;;
+    38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
   esac
 }
 
@@ -755,7 +785,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 37))
+      scenarios=($(seq 1 38))
       return 0
     fi
     local scenario
@@ -766,7 +796,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 37 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 38 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -1053,7 +1083,7 @@ label_expects_mount() {
   local scenario
   scenario="$(scenario_from_label "$1")"
   case "$scenario" in
-    ""|1|23|31) return 1 ;;
+    ""|1|23|31|38) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -1895,6 +1925,51 @@ run_rule_sandbox_scenario() {
     check_file_missing "scenario-${scenario}-sibling-mediastore-private" "${PRIVATE_RULE_SIBLING_ROOT}/${media_file}" &&
     check_public_directory_owner "scenario-${scenario}-dcim" "${BACKEND_ROOT}/DCIM"
 }
+
+run_provider_sandbox_scenario() {
+  local scenario="$1"
+  # 触发链：提供器配置（步骤 1 写入）→ force-stop → root content query 拉起提供器
+  # 冷启动（新配置生效）→ 轮询断言挂载请求携带沙盒规则（scoped 会话或宿主接入）。
+  # 回归背景（2026-10-21 真机）：桥接进程的挂载请求被清零规则（req sandbox=0），
+  # 宿主接入被拒（attach skipped reason=policy_registration_failed），退回零规则
+  # scoped 会话后原生写入穿透真实存储。
+  # 判定标记（与提供器由 companion 还是 daemon 路径服务无关）：
+  #   通过：`perf companion mount pkg=... ok=true`（挂载流程成功，hook 兜底拓扑）
+  #   回归：`req op=apply ... sandbox=0`、`attach skipped ... policy_registration_failed`，
+  #         或出现任何 `fuse redirect mount start pkg=下载提供器`（桥接进程不应有模块会话）
+  # 行为级验证（引擎 mkdir 落点）依赖 XL 引擎初始化，CI 模拟器无该引擎，
+  # 由真机复测协议覆盖（见 .workbuddy/memory/2026-10-21.md）。
+  echo "step 5/7 内: 清理探测目录并 force-stop 下载提供器"
+  adb_su "rm -rf '$PROVIDER_REAL_DIR' '$PROVIDER_BACKEND_DIR'; am force-stop '$PROVIDER_PACKAGE'" >/dev/null
+  sleep 2
+  adb_su "content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
+  local attempt=1
+  local assertions_ok=0
+  while [ "$attempt" -le 4 ]; do
+    sleep 5
+    if adb_su "grep -Eq 'perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true' '$LOG_PATH'"; then
+      assertions_ok=1
+      break
+    fi
+    # 本轮请求行/挂载行未出现（companion 限流或启动慢）：重启提供器再试一轮。
+    adb_su "am force-stop '${PROVIDER_PACKAGE}'; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
+    attempt=$((attempt + 1))
+  done
+  if adb_su "grep -Eq 'req op=apply pid=[0-9]+ pkg=${PROVIDER_PACKAGE} .*sandbox=0' '$LOG_PATH'" ||
+    adb_su "grep -q 'attach skipped.*pkg=${PROVIDER_PACKAGE}.*reason=policy_registration_failed' '$LOG_PATH'" ||
+    adb_su "grep -qE 'fuse redirect mount start pkg=${PROVIDER_PACKAGE}' '$LOG_PATH'"; then
+    echo "provider sandbox regression markers found (sandbox=0 request / policy_registration_failed / unexpected fuse session)" >&2
+    return 1
+  fi
+  if [ "$assertions_ok" -ne 1 ]; then
+    echo "provider sandbox positive markers not found after retries" >&2
+    return 1
+  fi
+  echo "step 5/7 内: 提供器沙盒策略标记确认"
+  adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}' '$LOG_PATH' 2>/dev/null | tail -3" || true
+  return 0
+}
+
 
 check_file_location() {
   local scenario="$1" actual expected
@@ -3520,7 +3595,7 @@ run_scenario() {
   fi
   # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，不要让污染漂到后面的断言。
   case "$scenario" in
-    9|20|21|22|28|31) ;;
+    9|20|21|22|28|31|38) ;;
     *)
       assert_fixture_roots_empty "scenario-${scenario}" || return 1
       ;;
@@ -3640,6 +3715,10 @@ run_scenario() {
     37)
       echo "step 5/7: 验证父映射结果继续命中子映射"
       run_nested_mapping_chain_scenario "$scenario"
+      ;;
+    38)
+      echo "step 5/7: 验证下载提供器自身 sandboxed_paths 原生写入进沙盒"
+      run_provider_sandbox_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -3784,6 +3863,7 @@ fail=0
 build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
+export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_PROBE_FILE PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR PROVIDER_BACKEND_FILE PROVIDER_REAL_FILE
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
@@ -3800,6 +3880,7 @@ export -f run_own_private_directories_scenario run_own_private_write_case
 export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
+export -f run_provider_sandbox_scenario clear_provider_sandbox_config
 
 failure_artifacts_captured=0
 rm -f app-view-probe-broken.flag
