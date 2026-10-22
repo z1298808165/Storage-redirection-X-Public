@@ -9,7 +9,7 @@
     <a href="https://z1298808165.github.io/Storage-redirection-X-Public/ci-latest.html"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fz1298808165%2FStorage-redirection-X-Public%2FSRX-R%2Fupdate.json&query=%24.beta.title&style=flat-square&label=CI%20%E6%9E%84%E5%BB%BA" alt="CI 构建"/></a>
     <!-- quality-allow(chinese-language): 平台徽章为 shields 机器标签，保留英文。 -->
     <a href="https://github.com/z1298808165/Storage-redirection-X-Public/releases"><img src="https://img.shields.io/badge/Android-13%20--%2017-blue?style=flat-square" alt="Android 13-17"/></a>
-    <a href="#下载与安装"><img src="https://img.shields.io/badge/Root-Magisk%20%7C%20KernelSU%20%7C%20APatch-red?style=flat-square" alt="Root"/></a>
+    <a href="#下载与安装"><img src="https://img.shields.io/badge/Root-Magisk%20%7C%20KernelSU-red?style=flat-square" alt="Root"/></a>
     <a href="#下载与安装"><img src="https://img.shields.io/badge/Zygisk-%E7%8E%AF%E5%A2%83%E5%BF%85%E9%9C%80-orange?style=flat-square" alt="Zygisk"/></a>
     <!-- quality-allow(chinese-language): 协议徽章为 shields 机器标签，保留英文。 -->
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green?style=flat-square" alt="License"/></a>
@@ -35,7 +35,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - **🧩 配置模板** —— 保存、复用、批量应用一整份应用配置，配置修改热重载。
 - **💾 备份还原** —— 导出 `.srxbak.zip` 单文件备份，管理 App 与 WebUI 互通互还原。
 - **🆕 新装应用自动重定向** —— 安装新应用后按模板自动完成配置。
-- **🖥 双端管理界面** —— 原生管理 App（液态玻璃界面）与模块内置 WebUI。
+- **🖥 双端管理界面** —— 原生管理 App（MIUIX 风格界面）与模块内置 WebUI。
 
 ## 🧭 两种工作模式
 
@@ -57,7 +57,6 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 | --- | --- |
 | Magisk | 在 Magisk 设置中开启内置「Zygisk」，或刷入 Zygisk Next 替代 |
 | KernelSU | 刷入 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)（推荐） |
-| APatch | 刷入 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext) |
 
 | 文件 | 说明 |
 | --- | --- |
@@ -67,7 +66,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 **正式版**
 
 1. 前往 [Releases](https://github.com/z1298808165/Storage-redirection-X-Public/releases) 下载模块 zip。
-2. 确认 Zygisk 环境就绪后，在 Magisk / KernelSU / APatch 管理器中刷入模块，重启设备。
+2. 确认 Zygisk 环境就绪后，在 Magisk / KernelSU 管理器中刷入模块，重启设备。
 3. 打开模块 WebUI 或安装管理 App，为需要的应用配置重定向。
 
 **CI 测试版**
@@ -583,9 +582,10 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 ## 🙏 致谢
 
 - [Storage-redirection-X-Public](https://github.com/Kindness-Kismet/Storage-redirection-X-Public)：本项目的上游来源
-- [Magisk](https://github.com/topjohnwu/Magisk) / [KernelSU](https://github.com/tiann/KernelSU) / [APatch](https://github.com/bmax121/APatch)：Root 与模块加载环境
+- [Magisk](https://github.com/topjohnwu/Magisk) / [KernelSU](https://github.com/tiann/KernelSU)：Root 与模块加载环境
 - [Zygisk](https://github.com/topjohnwu/Magisk) 与 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk 注入环境
 - [LSPlant](https://github.com/LSPosed/LSPlant)：Java 层 hook 框架
+- [Miuix](https://github.com/compose-miuix-ui/miuix)：管理 App 使用的 MIUIX 风格 Compose 组件库
 - [libfuse](https://github.com/libfuse/libfuse)：scoped FUSE 会话实现的基础
 - [Fuse-Proxy](https://github.com/huniangitb/Fuse-Proxy)：共享宿主 FUSE 会话设计的参考实现
 
