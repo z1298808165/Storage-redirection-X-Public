@@ -1484,7 +1484,7 @@ wait_media_provider_ready() {
 media_provider_pid() {
   adb_su "for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof \"\$package\" 2>/dev/null || true; done; ps -A -o PID,NAME,ARGS 2>/dev/null | awk '\$0 ~ /providers\\.media|android\\.process\\.media/ {print \$1}'" |
     tr -d '\r' |
-    awk 'NF { print $1; exit }'
+    awk 'NF && pid == "" { pid = $1 } END { if (pid != "") print pid }'
 }
 
 # MediaProvider 就绪缓存：wait_media_provider_ready 在 API<37 要顺序探测 10 个
