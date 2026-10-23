@@ -11,6 +11,15 @@ use std::sync::{Arc, Mutex, RwLock};
 use super::FuseRedirectConfig;
 use super::backend_overlay;
 
+/// 系统代写代理会话：平台用来代其它应用写私有目录的受信 provider。
+///
+/// 仅覆盖 FUSE 会话侧的包名判定；共享 UID 组成员（如 media uid 下的
+/// soundpicker）不在其列，它们的会话仍保持隔离语义。
+fn is_system_write_delegate_session(package_name: &str) -> bool {
+    crate::redirect::policy::is_media_provider_package(package_name)
+        || crate::redirect::policy::is_file_monitor_bridge_package(package_name)
+}
+
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const READ_ONLY_DENY_EXTRA: &str = "deny_reason=read_only_rule";
 const DUPLICATE_MONITOR_CREATE_WINDOW_MS: i64 = 1500;
@@ -811,6 +820,12 @@ impl RedirectPolicy {
             && !mapping_hit
             && self.matches_any(&self.sandboxed_index, storage_path)
             && !self.matches_any(&self.sandboxed_excluded_index, storage_path);
+        // 系统代写代理对其它应用私有目录的访问按真实落点放行（见
+        // is_foreign_private_storage_path 注释）；放在 else-if 链的 Real 分支
+        // 里统一收口，避免出现同体分支。
+        let delegate_foreign_private = !is_sandbox
+            && is_system_write_delegate_session(&self.package_name)
+            && self.is_foreign_private_storage_path(storage_path);
         let kind = if is_sandbox {
             BackendKind::Redirect
         } else if self.is_monitor_only
@@ -819,7 +834,9 @@ impl RedirectPolicy {
         {
             BackendKind::Real
         } else if self.is_mapping_mode_only {
-            if self.is_foreign_private_storage_path(storage_path) {
+            if self.is_foreign_private_storage_path(storage_path)
+                && !is_system_write_delegate_session(&self.package_name)
+            {
                 BackendKind::Redirect
             } else {
                 BackendKind::Real
@@ -828,6 +845,7 @@ impl RedirectPolicy {
             BackendKind::Redirect
         } else if self.matches_any(&self.read_only_excluded_index, storage_path)
             || self.matches_any(&self.allowed_real_index, storage_path)
+            || delegate_foreign_private
             || matches!(operation, OperationKind::Read)
                 && (is_read_only || self.has_real_child_rule(storage_path))
         {
@@ -876,6 +894,13 @@ impl RedirectPolicy {
     // 应用自有私有目录由上层的 is_own_private_storage_path 保持真实落点；
     // 其它应用的私有目录必须继续走 redirect 后端，使其在目录枚举和显式访问
     // 中都不会暴露真实文件。
+    //
+    // 例外：系统代写代理（MediaProvider/DownloadProvider/MTP/外部存储 provider）
+    // 本来就是平台写其它应用私有目录的受信通道——HyperOS 商店下载即依赖
+    // DownloadProvider 把安装介质代写到 `Android/data/com.xiaomi.market/` 下
+    // （真机 2026-10-23：该写被判 Redirect 吸进下载提供者沙盒，商店校验侧
+    // 读真实路径永远落空，`error=3` 无限重下）。代写会话的外来私有路径按
+    // 真实落点解析，保持与原生 MediaProvider FUSE 一致的语义。
     fn is_foreign_private_storage_path(&self, storage_path: &str) -> bool {
         let Some(relative) = paths::relative_child_path(storage_path, &self.storage_root) else {
             return false;
