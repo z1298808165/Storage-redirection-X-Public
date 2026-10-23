@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-39966710338-1/storage-redirect-x-manager-v2.1.0-ci.2.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-39966710338-1/storage.redirect.x-v2.1.0-ci.2.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.1.0-ci.2`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-39882574050-1`\n- 当前提交：`5aa8e23fce6c`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复小米商店更新下载后无法安装的无限重下循环；适用范围：src/fuse_redirect/policy.rs；限制：共享 UID 组成员不视为代理会话。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.1.0-ci.2`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-39882574050-1`\n- 当前提交：`5aa8e23fce6c`\n\n## 模块更新\n\n### 修复了什么问题\n- 修复小米商店更新下载后无法安装的无限重下循环；适用范围：src/fuse_redirect/policy.rs；限制：共享 UID 组成员不视为代理会话。\n\n## App 更新\n\n### 修复了什么问题\n- 修复日志导出弹窗中百分比数字与进度圆环错位（miuix 进度指示器内部绘制尺寸与画布不一致）；管理器 APK 已由包含该修复的构建替换，版本号与 versionCode 保持 `2.1.0-ci.2` / `2009902` 不变。\n"
   },
   "releases": []
 }
