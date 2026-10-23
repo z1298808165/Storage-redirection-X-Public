@@ -593,7 +593,9 @@ internal fun BusyOverlay(message: String, progress: Float? = null) {
       verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
     if (safeProgress == null) {
-      InfiniteProgressIndicator(modifier = Modifier.size(34.dp))
+      // miuix 进度指示器内部按 size 参数换算绘制半径，与 modifier.size 必须保持一致，
+      // 否则圆环会按默认尺寸锚定在画布左上角，造成与中心文字错位。
+      InfiniteProgressIndicator(modifier = Modifier.size(34.dp), size = 34.dp)
     } else {
       DeterminateProgressRing(safeProgress)
     }
@@ -624,6 +626,7 @@ private fun DeterminateProgressRing(progress: Float) {
         progress = progress.coerceIn(0f, 1f),
         modifier = Modifier.size(44.dp),
         strokeWidth = 4.dp,
+        size = 44.dp,
     )
     Text(
         text = percentText,
