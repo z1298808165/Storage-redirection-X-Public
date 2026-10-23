@@ -2990,21 +2990,20 @@ run_backend_endpoint_recovery_scenario() {
     echo "backend_recovery_hook_ready_failed scenario=${scenario}" >&2
     return 1
   }
-  # 应用重启瞬间 adb/su 调用偶发瞬时失败（pipefail 会沿 -e 终止命令替换）；
-  # provider pid 探测是幂等读，带退避重试三次。
+  # provider pid 探测是幂等读，带重试：SDK>=37 的 MediaProvider 是懒加载，
+  # 场景 31 关闭重定向后进程可能已退出；先 pidof，为空则用 MediaStore 查询
+  # 把 provider 拉起。实测冷启动约 10 秒（run 39875901257：3 轮 2 秒窗口
+  # 内 pidof 恒空，放弃后 provider 上线），因此用 8 轮 3 秒覆盖冷启动。
   initial_media_pid=""
   local pid_attempt
-  for pid_attempt in 1 2 3; do
+  for pid_attempt in 1 2 3 4 5 6 7 8; do
     if initial_media_pid="$(media_provider_pid)" && [ -n "$initial_media_pid" ]; then
       break
     fi
     echo "backend_recovery_media_provider_pid_retry scenario=${scenario} attempt=${pid_attempt}" >&2
-    # SDK>=37 的 MediaProvider 是懒加载：场景 31 关闭重定向后进程可能已退出，
-    # 用一次 MediaStore 查询把它拉起来，否则 pidof 恒为空、场景 32 的
-    # "Provider PID 不变"断言没有比较基线。
     media_provider_query_ready "content://media/external/images/media" >/dev/null 2>&1 || true
     initial_media_pid=""
-    sleep 2
+    sleep 3
   done
   if [ -z "$initial_media_pid" ]; then
     echo "backend_recovery_media_provider_pid_missing scenario=${scenario}" >&2
