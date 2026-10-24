@@ -258,6 +258,10 @@ impl AuditTrail {
         else {
             return false;
         };
+        // 系统 uid 私有路径强制静音（与 record_operation_result 同一门控）。
+        if should_force_filter_system_private_record(&normalized, &package_name) {
+            return false;
+        }
         let correlation_id = source_hint::remember_public_path_caller_hint_with_op_filter(
             &normalized,
             &package_name,
@@ -504,6 +508,11 @@ impl AuditTrail {
             query_access_identity,
         );
 
+        // 系统 uid 私有路径强制静音：归因完成后判定，避免淹没监视日志。
+        if should_force_filter_system_private_record(&normalized, &source_identity.package_name) {
+            return;
+        }
+
         let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
         let event_key = build_event_key_locked(
             &state,
@@ -611,6 +620,30 @@ fn normalize_storage_path_locked(path: &str) -> String {
 
 fn is_filtered_media_provider_path(path: &str) -> bool {
     paths::is_filtered_media_provider_path(path)
+}
+
+/// 系统应用私有路径的强制静音门控（不受用户过滤器配置影响）。
+///
+/// 系统 uid（platform 1000 等，含 android.media 共享组）服务的私有目录读写
+/// 频次极高（日志轮转、缓存维护），一旦系统 uid 归因链打通就会把监视日志
+/// 淹没成噪声（2026-10-24 用户定案：此类记录强制过滤，普通应用的过滤仍由
+/// 用户过滤器配置决定）。判定：路径是某应用的 Android/data|media|obb 私有
+/// 子树，且归因包名解析为系统 uid 或媒体链中间组件。
+fn should_force_filter_system_private_record(
+    normalized_path: &str,
+    identity_package: &str,
+) -> bool {
+    if paths::extract_android_private_path_owner(normalized_path).is_empty() {
+        return false;
+    }
+    if identity_package.is_empty() {
+        return false;
+    }
+    if policy::is_media_intermediate_package(identity_package) {
+        return true;
+    }
+    let uid = policy::get_uid_for_package(identity_package);
+    (0..ANDROID_APP_UID_START).contains(&uid)
 }
 
 fn should_filter_shared_uid_probe_event(
