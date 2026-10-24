@@ -515,7 +515,11 @@ fn patch_compare_hooks_direct_once() {
     );
 }
 
-fn patch_plt_slots(elf: &ElfImg, symbol: &str, replacement: *mut c_void) -> usize {
+/// 改写目标库指定符号的全部 PLT 槽位，返回成功改写的槽位数。
+///
+/// 供晚加载库的定向补丁使用（如 libfuse_jni 的 read）：绕开 srx_hook 的
+/// hook 注册体系，由调用方提供独立包装函数直调原实现。
+pub(crate) fn patch_plt_slots(elf: &ElfImg, symbol: &str, replacement: *mut c_void) -> usize {
     let mut patched = 0usize;
     for slot in elf.find_plt_slots(symbol) {
         if patch_plt_slot(slot, replacement as usize) {
