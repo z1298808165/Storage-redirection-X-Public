@@ -1521,9 +1521,6 @@ fn run_passthrough_probe(
         backend_root.trim_end_matches('/'),
         PASSTHROUGH_PROBE_REL
     );
-    // 历史残留自愈：上次探测若在删除前被中断（进程被杀、系统重启），探针文件
-    // 会遗留在存储根。先清一次旧残留再写入本次探针，保证异常路径不累积垃圾。
-    let _ = std::fs::remove_file(&probe_backend);
     if let Err(error) = std::fs::write(&probe_backend, b"srx1") {
         log::warn!(
             "passthrough probe file create failed pkg={} path={} err={}",

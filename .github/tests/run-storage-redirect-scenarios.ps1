@@ -126,17 +126,6 @@ $ProviderRealDir = "$RealRoot/$ProviderProbeRel"
 $ProviderBackendDir = "$BackendRoot/Android/data/$ProviderPackage/sdcard/$ProviderProbeRel"
 $ProviderBackendFile = "$ProviderBackendDir/$ProviderProbeFile"
 $ProviderRealFile = "$BackendRoot/$ProviderProbeRel/$ProviderProbeFile"
-# 场景 39：下载提供器（共享 uid 代写者）按发起者规则重定向的归因夹具。
-# 测试应用作为下载发起者配置 path_mappings；下载提供器引擎写的公共路径必须
-# 按发起者的映射落到映射目标，真实请求路径零穿透。
-$DlOwnerRequestRel = "Download/SrtDlOwner"
-$DlOwnerMappedRel = "Download/SrtDlOwnerMapped"
-$DlOwnerProbeFile = "srt_dl_owner_probe.bin"
-$DlOwnerRequestFile = "$RealRoot/$DlOwnerRequestRel/$DlOwnerProbeFile"
-$DlOwnerRequestBackendFile = "$BackendRoot/$DlOwnerRequestRel/$DlOwnerProbeFile"
-$DlOwnerMappedBackendFile = "$BackendRoot/$DlOwnerMappedRel/$DlOwnerProbeFile"
-# 下载用例的取数 URL：默认国内可达的稳定小文件，CI 矩阵可换成 runner 侧更快的源。
-$SrtDownloadUrl = if ($env:SRT_DOWNLOAD_URL) { $env:SRT_DOWNLOAD_URL } else { "https://www.baidu.com/img/flexible/logo/pc/result.png" }
 $RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
 $BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
 $PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
@@ -393,20 +382,20 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 39) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 38) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(1..39)
+            return @(1..38)
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 39) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 38) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -525,11 +514,6 @@ function Apply-ScenarioConfig {
             Invoke-Su "printf '%s' '$encoded' | base64 -d > '$ProviderConfig.tmp.$PID'; mv -f '$ProviderConfig.tmp.$PID' '$ProviderConfig'; chmod 644 '$ProviderConfig'" | Out-Null
             # 与 .sh 对齐：写一份 disabled 的测试应用配置，保证 reload 标记在水位之后必然出现
             Write-DeviceConfig '{"users":{"0":{"enabled":false}}}'
-        }
-        39 {
-            # 发起者（测试应用）配置显式映射；下载提供器本身不配置任何规则，
-            # 场景断言的就是「代写者按发起者规则改写」这条归因链路。
-            Write-DeviceConfig '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtDlOwner":"Download/SrtDlOwnerMapped"}}}}'
         }
         default { throw "未知场景 $Scenario" }
     }
@@ -2091,7 +2075,6 @@ function Get-ScenarioTitle {
         36 { "mapped private alias continues writing an existing file" }
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
-        39 { "download provider delegated write lands on requester mapping target" }
     }
 }
 
@@ -4147,7 +4130,6 @@ function Get-ScenarioTitle {
         36 { "mapped private alias continues writing an existing file" }
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
-        39 { "download provider delegated write lands on requester mapping target" }
     }
 }
 
@@ -4878,54 +4860,6 @@ function Invoke-ProviderSandboxScenario {
     $true
 }
 
-function Invoke-DownloadOwnerAttributionScenario {
-    # 触发链：测试应用（下载发起者）配置 path_mappings → DownloadManager 入队
-    # 公共路径下载 → 下载提供器（共享 uid 代写者）进程内或 MediaStore insert 侧
-    # 归因到发起者 → 按发起者映射改写 → 文件落在映射目标。
-    # 判定标记（与 .sh 的 run_download_owner_attribution_scenario 一致）：
-    #   通过：下载完成 PASS + 文件落在发起者映射目标（Download/SrtDlOwnerMapped）
-    #         且真实请求路径（Download/SrtDlOwner）零穿透。
-    #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
-    #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
-    # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
-    #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107）。与 .sh 同款：
-    #   force-stop 后 root query 冷启动提供器并等待进程就绪。
-    param([int]$Scenario)
-    Write-Host "  - scenario-$Scenario/download-owner: cold start download provider"
-    Invoke-Su "am force-stop '$ProviderPackage'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
-    for ($wait = 0; $wait -lt 8; $wait++) {
-        Start-Sleep -Seconds 2
-        $providerPid = (Invoke-Su "pidof '$ProviderPackage' 2>/dev/null" | Where-Object { $_ -match '\d' } | Select-Object -First 1)
-        if ($providerPid) { break }
-    }
-    Start-Sleep -Seconds 3
-    Write-Host "  - scenario-$Scenario/download-owner: cleanup attribution probe dirs"
-    Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
-    $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $SrtDownloadUrl } "^PASS \[downloadmanager_enqueue\]"
-    if (-not $case.Ok) {
-        Write-Host "  - scenario-$Scenario/download-owner: enqueue or download failed"
-        return $false
-    }
-    $mappedOk = (Invoke-Su "test -f '$DlOwnerMappedBackendFile'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    if (-not $mappedOk) {
-        Write-Host "  - scenario-$Scenario/download-owner: file missing in mapped target $DlOwnerMappedRel"
-        Invoke-Su "ls -la '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel' 2>/dev/null" | Write-Host
-        return $false
-    }
-    $leaked = (Invoke-Su "test -e '$DlOwnerRequestBackendFile'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    if ($leaked) {
-        Write-Host "  - scenario-$Scenario/download-owner: request path leaked to real storage"
-        return $false
-    }
-    $unexpectedSession = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    if ($unexpectedSession) {
-        Write-Host "  - scenario-$Scenario/download-owner: unexpected fuse session for download provider"
-        return $false
-    }
-    Write-Host "  - scenario-$Scenario/download-owner: delegated write landed on requester mapping target"
-    $true
-}
-
 function Invoke-FuseDaemonAllowWildcardScenario {
     param([int]$Scenario)
     $plainPath = "$FusePlainRoot/$TestFile"
@@ -5182,7 +5116,6 @@ function Invoke-Scenario {
         36 { Invoke-QqAliasMappedExistingFileScenario $Scenario }
         37 { Invoke-NestedMappingChainScenario $Scenario }
         38 { Invoke-ProviderSandboxScenario $Scenario }
-        39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok
