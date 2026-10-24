@@ -7,16 +7,12 @@ use libc::{RTLD_LOCAL, RTLD_NOW, c_int, c_void, dlopen, dlsym, getpid, getuid, p
 use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::{
-    Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 const ANDROID_APP_UID_START: i32 = 10000;
 const FUSE_CALLER_MAX_AGE_MS: i64 = 1500;
-/// 系统 uid FUSE 请求跨线程接力槽的取用窗口：读线程捕获到处理线程归因的
-/// 正常延迟是微秒到毫秒级，100ms 覆盖 Java 调度抖动，同时把陈旧槽串味的
-/// 风险压到最低。
-const SYSTEM_FUSE_SLOT_MAX_AGE_MS: i64 = 100;
 const BINDER_SAVED_CALLER_MAX_AGE_MS: i64 = 1500;
 const BINDER_SAVED_CALLER_HARD_LIMIT_MS: i64 = 30_000;
 const CURRENT_CALLER_MAX_AGE_MS: i64 = 500;
@@ -47,7 +43,7 @@ fn is_likely_binder_thread_cached() -> bool {
 // FUSE / Binder saved UID / Binder 线程三者皆无时调用方解析必定失败，可直接跳过
 fn has_caller_signal(hub: &InterceptHub) -> bool {
     let fuse_uid = hub.get_fuse_caller_uid();
-    if fuse_uid >= 0 {
+    if fuse_uid >= ANDROID_APP_UID_START {
         let fuse_age = context::get_fuse_caller_uid_age_ms();
         if (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age) {
             return true;
@@ -72,13 +68,6 @@ fn has_caller_signal(hub: &InterceptHub) -> bool {
 
 // 通过 Binder / FUSE / PID 多级回退解析当前线程调用方
 pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
-    // MediaProvider 的文件操作持续经过这里：借调用节流探测晚加载的
-    // FUSE 引擎 libfuse.so 并补装 read 补丁（/dev/fuse 请求的真实读取方，晚于 hook
-    // 安装）。仅媒体提供器进程探测，其它进程一次字符串比较即短路。
-    if hub.with_package_name(policy::is_media_provider_package) {
-        super::ops::read::ensure_fuse_engine_read_patch();
-    }
-
     let previous_package = hub.get_current_caller_package();
     let previous_uid = hub.get_current_caller_uid();
     let previous_age_ms = context::get_current_caller_age_ms();
@@ -257,31 +246,6 @@ fn resolve_missing_caller_signal(
     previous_from_external_signal: bool,
     can_reuse_recent_caller: bool,
 ) {
-    // 系统 uid FUSE 请求的跨线程接力：MediaProvider 读 /dev/fuse 的线程与处理
-    // 请求的线程分离时，读线程捕获的请求头经全局槽传到这里（见 context.rs）。
-    // 内核请求头的 pid 是强信号，优先于 recent 复用；cmdline 为包名形态且与
-    // 请求 uid 匹配才采信，否则槽内容作废继续走既有回退。
-    if let Some((request_uid, request_pid)) =
-        context::take_recent_system_fuse_request(SYSTEM_FUSE_SLOT_MAX_AGE_MS)
-        && request_pid > 0
-    {
-        let pkg = resolve_caller_package_by_pid(request_pid);
-        if !pkg.is_empty() && read_uid_from_proc_status(request_pid) == request_uid {
-            context::set_current_caller_from_external_signal(&pkg, request_uid);
-            AuditTrail::instance().update_caller_package(&pkg);
-            let count = CALLER_FALLBACK_HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if should_log_sample(count) {
-                log::debug!(
-                    "caller fallback src=fuse_slot pkg={} uid={} pid={} n={}",
-                    pkg,
-                    request_uid,
-                    request_pid,
-                    count
-                );
-            }
-            return;
-        }
-    }
     if try_reuse_recent_external_signal_for_system_writer(
         hub,
         previous_package,
@@ -359,68 +323,6 @@ fn resolve_caller_uid_with_fuse_fallback(hub: &InterceptHub) -> Option<CallerUid
                         context::clear_fuse_caller_uid();
                         return None;
                     }
-                }
-            }
-        } else if fuse_uid >= 0 && (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age_ms) {
-            // 系统 uid（如 system 1000）的 FUSE 请求：uid 区间解析不出包名，
-            // 但内核请求头的 pid 就是发起进程。cmdline 为包名形态且与请求
-            // uid 匹配时按发起进程归因（2026-10-24 真机：开机创建
-            // MIUI/Mirror/MainCache 的系统服务此前只能记录 unknown）。
-            let fuse_pid = context::get_fuse_caller_pid();
-            // SAFETY: getpid 只返回调用进程的 PID，无指针参数与副作用。
-            let self_pid = unsafe { getpid() } as i32;
-            if fuse_pid > 0 && fuse_pid != self_pid {
-                let mut pkg = resolve_caller_package_by_pid(fuse_pid);
-                let mut pkg_uid = if pkg.is_empty() {
-                    -1
-                } else {
-                    policy::get_uid_for_package(&pkg)
-                };
-                // MP 域读 platform 应用（如 com.xiaomi.mirror）的 /proc 被 SELinux
-                // 拒绝时（pkg 为空），按 daemon 落盘的系统进程 pid 表（root 扫描
-                // /proc 生成）反查；uid 校验同样以表内记录为准。
-                if pkg.is_empty()
-                    && let Some((table_pkg, table_uid)) = lookup_system_pid_table(fuse_pid)
-                {
-                    pkg = table_pkg;
-                    pkg_uid = table_uid;
-                }
-                if !pkg.is_empty() {
-                    // pid 归因的身份校验双通道：uid 缓存（packages.list 派生，
-                    // 不依赖 /proc 可读性）优先；缓存未命中再读 /proc status。
-                    let uid_matches = if pkg_uid >= 0 {
-                        pkg_uid == fuse_uid
-                    } else {
-                        read_uid_from_proc_status(fuse_pid) == fuse_uid
-                    };
-                    if uid_matches {
-                        context::set_current_caller_from_external_signal(&pkg, fuse_uid);
-                        AuditTrail::instance().update_caller_package(&pkg);
-                        let count = CALLER_FALLBACK_HIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                        if should_log_sample(count) {
-                            log::debug!(
-                                "caller fallback src=fuse_pid_system pkg={} uid={} fuse_pid={} n={}",
-                                pkg,
-                                fuse_uid,
-                                fuse_pid,
-                                count
-                            );
-                        }
-                        context::clear_fuse_caller_uid();
-                        return None;
-                    }
-                }
-                // 运维诊断：系统 uid 请求未归因时记录一次发起任务 id。短命进程
-                // /线程在 pid 表快照间隙消亡属已知边界；持久服务若命中此日志
-                // 则需要排查 daemon pid 表链路。
-                static MISS_LOGGED: AtomicBool = AtomicBool::new(false);
-                if !MISS_LOGGED.swap(true, Ordering::Relaxed) {
-                    log::warn!(
-                        "fuse system pid miss pid={} uid={} table_hint={:?}",
-                        fuse_pid,
-                        fuse_uid,
-                        lookup_system_pid_table(fuse_pid)
-                    );
                 }
             }
         } else if fuse_uid >= ANDROID_APP_UID_START && fuse_age_ms > FUSE_CALLER_MAX_AGE_MS {
@@ -846,7 +748,7 @@ fn read_file_by_syscall(path: &str, max_len: usize) -> String {
         return String::new();
     }
 
-    let mut buffer = vec![0u8; max_len.min(512 * 1024)];
+    let mut buffer = vec![0u8; max_len.min(16 * 1024)];
     let mut total = 0usize;
     while total < buffer.len() {
         let n = unsafe {
@@ -959,82 +861,6 @@ unsafe fn load_symbol<T>(handle: *mut c_void, name: &str) -> Option<T> {
 
 fn c_str(value: &str) -> Option<CString> {
     CString::new(value).ok()
-}
-
-/// daemon 落盘的系统进程 pid 表（tmp/system_pids，"pid uid 包名" 行）读取缓存。
-///
-/// 表由 root daemon 事件化重建（进程/线程集合变化即刷）；本缓存在 TTL 内复用，
-/// 避免高频归因反复读文件。新进程/新线程的首次存储操作可能撞上缓存窗口，
-/// 因此 miss 且缓存已具备重读条件时强制重读一次。
-struct SystemPidTable {
-    loaded_at_ms: i64,
-    entries: std::collections::HashMap<i32, (String, i32)>,
-}
-
-static SYSTEM_PID_TABLE: OnceLock<Mutex<SystemPidTable>> = OnceLock::new();
-const SYSTEM_PID_TABLE_TTL_MS: i64 = 2_000;
-/// miss 强制重读的最小缓存年龄：低于它时新表大概率也尚未落盘，直接放弃；
-/// 高于它时表文件很可能已被 daemon 刷新，重读一次能接住刚启动进程的首次写入。
-const SYSTEM_PID_TABLE_RECHECK_MIN_AGE_MS: i64 = 300;
-
-/// 按任务 id 反查 (包名, uid)：先查缓存，过期后从模块目录经 Zygisk 保留 FD
-/// 读取 daemon 写入的表并重建缓存；未命中且缓存已老于重读门槛时再强制刷新
-/// 一次。表缺失或不可读返回 None。
-fn lookup_system_pid_table(pid: i32) -> Option<(String, i32)> {
-    let table_mutex = SYSTEM_PID_TABLE.get_or_init(|| {
-        Mutex::new(SystemPidTable {
-            loaded_at_ms: -1,
-            entries: std::collections::HashMap::new(),
-        })
-    });
-    let mut table = table_mutex.lock().unwrap_or_else(|err| err.into_inner());
-    let now_ms = get_monotonic_ms();
-    let mut force_reload = table.loaded_at_ms < 0
-        || now_ms.saturating_sub(table.loaded_at_ms) >= SYSTEM_PID_TABLE_TTL_MS;
-    if let Some(entry) = table.entries.get(&pid) {
-        return Some(entry.clone());
-    }
-    // miss：缓存窗口可能盖住了 daemon 刚刷新的新表，年龄达标就强制重读一次。
-    if !force_reload
-        && now_ms.saturating_sub(table.loaded_at_ms) >= SYSTEM_PID_TABLE_RECHECK_MIN_AGE_MS
-    {
-        force_reload = true;
-    }
-    if force_reload {
-        table.entries.clear();
-        table.loaded_at_ms = now_ms;
-        let content = read_system_pid_table_file();
-        for line in content.lines() {
-            let mut fields = line.split_whitespace();
-            let Some(entry_pid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
-                continue;
-            };
-            let Some(uid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
-                continue;
-            };
-            let Some(package) = fields.next() else {
-                continue;
-            };
-            table.entries.insert(entry_pid, (package.to_string(), uid));
-        }
-        if let Some(entry) = table.entries.get(&pid) {
-            return Some(entry.clone());
-        }
-    }
-    None
-}
-
-fn get_monotonic_ms() -> i64 {
-    crate::platform::paths::monotonic_ms()
-}
-
-/// 读系统进程 pid 表：hook 进程内经 Zygisk 保留 FD（/proc/self/fd/<fd>/tmp/...）
-/// 读取；直接模块路径仅 root 可见，普通 hook 进程不可达时返回空。
-fn read_system_pid_table_file() -> String {
-    let config_dir = SettingsHub::instance().config_dir();
-    let module_dir = config_dir.strip_suffix("/config").unwrap_or(&config_dir);
-    let table_path = format!("{module_dir}/tmp/system_pids");
-    read_file_by_syscall(&table_path, 512 * 1024)
 }
 
 // clearCallingIdentity 之前提前快照 UID，供后续 restore 区间回查

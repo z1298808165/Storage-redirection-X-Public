@@ -19,15 +19,8 @@ const SHT_DYNSYM: u32 = 11;
 const SHN_UNDEF: u16 = 0;
 const SHN_LORESERVE: u16 = 0xff00;
 const SHN_HIRESERVE: u16 = 0xffff;
-// 重定位类型按 e_machine 分派：模块自身与目标库可能运行在 arm64（真机）或
-// x86_64（CI 模拟器），两架构的 ELF64 r_info 布局相同（sym 在高 32 位），
-// 仅类型常量不同。
-const EM_AARCH64: u16 = 183;
-const EM_X86_64: u16 = 62;
 const R_AARCH64_GLOB_DAT: u32 = 1025;
 const R_AARCH64_JUMP_SLOT: u32 = 1026;
-const R_X86_64_GLOB_DAT: u32 = 6;
-const R_X86_64_JUMP_SLOT: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -229,13 +222,7 @@ impl ElfImg {
                     (rel.r_offset, rel.r_info)
                 };
                 let rel_type = (r_info & 0xffff_ffff) as u32;
-                let accepted = match ehdr.e_machine {
-                    EM_X86_64 => R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT,
-                    // 其余架构（含 AArch64）按 AArch64 常量处理；未知架构的
-                    // 二进制不会出现在本模块的补丁目标里。
-                    _ => R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT,
-                };
-                if rel_type != accepted {
+                if rel_type != R_AARCH64_JUMP_SLOT && rel_type != R_AARCH64_GLOB_DAT {
                     continue;
                 }
                 let sym_idx = (r_info >> 32) as usize;

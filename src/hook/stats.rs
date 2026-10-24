@@ -524,8 +524,7 @@ impl InterceptHub {
 
     pub fn refresh_hooks_after_late_load(&self, reason: &str) {
         if !self.is_hooks_installed()
-            || !(self.is_app_write_only.load(Ordering::Relaxed)
-                || self.is_fuse_fix_only.load(Ordering::Relaxed))
+            || !self.is_app_write_only.load(Ordering::Relaxed)
             || context::ReentryGuard::is_reentrant()
         {
             return;

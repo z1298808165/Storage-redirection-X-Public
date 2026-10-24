@@ -2575,8 +2575,7 @@ public class Hooker {
     }
   }
 
-  private Object tryOpenMappedMediaFile(Object[] rawArgs, int callerUid, int callerPid)
-      throws Throwable {
+  private Object tryOpenMappedMediaFile(Object[] rawArgs, int callerUid, int callerPid) throws Throwable {
     String path = null;
     String mappedPath = null;
     OpenRequest request = null;
@@ -2777,7 +2776,11 @@ public class Hooker {
   }
 
   private static void recordProviderOpenPath(
-      Hooker hooker, Object[] rawArgs, Object[] actualArgs, int callerUid, int callerPid) {
+      Hooker hooker,
+      Object[] rawArgs,
+      Object[] actualArgs,
+      int callerUid,
+      int callerPid) {
     try {
       if (!(hooker != null && hooker.target instanceof Method)) return;
       Method method = (Method) hooker.target;
@@ -2796,7 +2799,8 @@ public class Hooker {
       } catch (Throwable ignored) {
       }
       if (mappedPath != null && mappedPath.length() > 0 && !mappedPath.equals(path)) {
-        rememberProviderOpenPath(mappedPath, callerUid, callerPid, packageNameForUid(callerUid));
+        rememberProviderOpenPath(
+            mappedPath, callerUid, callerPid, packageNameForUid(callerUid));
       }
     } catch (Throwable ignored) {
     }
@@ -2850,8 +2854,9 @@ public class Hooker {
    *
    * <p>这里记录的是 mkdir/mkdirs/native mkdir 回调当前看到的完整路径， 不是从子目录向父目录倒推，因此同一父目录存在多个应用子目录时不会串归属。
    *
-   * <p>系统 uid（如 platform 1000 的 com.xiaomi.mirror）的调用方包名无法凭 uid 解析（共享组 成员过多），callerUid 区间门槛不再前置拦截，把
-   * binder caller pid 一并交给 native 侧按 进程身份归因；应用 uid 的行为保持原语义。
+   * <p>系统 uid（如 platform 1000 的 com.xiaomi.mirror）的调用方包名无法凭 uid 解析（共享组
+   * 成员过多），callerUid 区间门槛不再前置拦截，把 binder caller pid 一并交给 native 侧按
+   * 进程身份归因；应用 uid 的行为保持原语义。
    */
   private static void recordProviderDirectoryPath(String path, int callerUid, int callerPid) {
     if (path == null || path.length() == 0 || callerUid < 0) return;
