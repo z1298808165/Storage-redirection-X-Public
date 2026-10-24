@@ -2017,11 +2017,39 @@ run_download_owner_attribution_scenario() {
     provider_wait=$((provider_wait + 1))
   done
   sleep 3
+  # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），改用 runner 侧
+  # 本地 HTTP 服务 + adb reverse 回环转发，完全脱离外部网络依赖；显式设置了
+  # SRT_DOWNLOAD_URL 时仍优先使用（真机/本地复现可自行指定外源）。
+  local dl_port=18089
+  local dl_url="$SRT_DOWNLOAD_URL"
+  local dl_server_pid=""
+  local dl_dir=""
+  if [ -z "$dl_url" ]; then
+    dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
+    echo "srt-download-probe" > "$dl_dir/srt_download.bin"
+    adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1 || true
+    (cd "$dl_dir" && python3 -m http.server "$dl_port" --bind 127.0.0.1 >/dev/null 2>&1) &
+    dl_server_pid=$!
+    dl_url="http://127.0.0.1:$dl_port/srt_download.bin"
+    sleep 1
+    echo "step 5/7 内: 本地取数服务已启动 url=$dl_url"
+  fi
+  echo "step 5/7 内: 下载取数源 url=$dl_url"
+  adb shell "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable" || true
   echo "step 5/7 内: 清理下载归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
-  if ! run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
+  local case_ok=0
+  if run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
     '^PASS \[downloadmanager_enqueue\]' \
-    --es file_path "$DL_OWNER_REQUEST_FILE" --es url "$SRT_DOWNLOAD_URL"; then
+    --es file_path "$DL_OWNER_REQUEST_FILE" --es url "$dl_url"; then
+    case_ok=1
+  fi
+  if [ -n "$dl_server_pid" ]; then
+    kill "$dl_server_pid" 2>/dev/null || true
+    adb reverse --remove "tcp:$dl_port" >/dev/null 2>&1 || true
+    rm -rf "$dl_dir"
+  fi
+  if [ "$case_ok" -ne 1 ]; then
     echo "download owner attribution: enqueue or download failed" >&2
     return 1
   fi

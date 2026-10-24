@@ -25,9 +25,6 @@ env:
   SRX_NDK_VERSION: "30.0.16248370"
   SRX_ANDROID_PLATFORM: "platforms;android-37.0"
   SRX_ANDROID_BUILD_TOOLS: "build-tools;35.0.0"
-  # 场景 39 下载用例的取数 URL：runner 对国内 CDN 不可达（下载会暂停等待网络），
-  # 改用本仓库公开分支的固定文件，runner 与真机均可覆盖为各自可达的源。
-  SRT_DOWNLOAD_URL: "https://raw.githubusercontent.com/z1298808165/Storage-redirection-X-Public/SRX-R/README.md"
 
 jobs:
   quality:

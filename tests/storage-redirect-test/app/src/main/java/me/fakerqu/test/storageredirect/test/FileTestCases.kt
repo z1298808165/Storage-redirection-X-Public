@@ -691,10 +691,15 @@ class FileTestCases(
                   )
             }
           }
+          // 等待网络（reason=1）不视为终态：CI 模拟器网络就绪可能晚于入队，
+          // DownloadManager 会在网络可用后自动恢复下载，继续轮询到截止时间。
+          val waitingForNetwork =
+              status == DownloadManager.STATUS_PAUSED &&
+                  reason == DownloadManager.PAUSED_WAITING_FOR_NETWORK
           if (
-              status == DownloadManager.STATUS_SUCCESSFUL ||
-                  status == DownloadManager.STATUS_FAILED ||
-                  status == DownloadManager.STATUS_PAUSED
+              (status == DownloadManager.STATUS_SUCCESSFUL ||
+                  status == DownloadManager.STATUS_FAILED) ||
+                  (status == DownloadManager.STATUS_PAUSED && !waitingForNetwork)
           ) {
             break
           }
