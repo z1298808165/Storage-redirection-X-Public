@@ -341,13 +341,40 @@ where
             path_for_decision,
             redirect_result.new_path
         );
-        if result == 0 || error_no == libc::EEXIST || error_no == libc::ENOTDIR {
+        if result == 0
+            || error_no == libc::EEXIST
+            || error_no == libc::ENOTDIR
+            || error_no == libc::EACCES
+        {
             runtime::normalize_redirect_directory(&redirect_result.new_path);
             if error_no == libc::EEXIST || error_no == libc::ENOTDIR {
                 log::debug!(
                     "mkdir redirect exists/notdir: returning 0 errno={} path={}",
                     error_no,
                     path_for_decision
+                );
+                monitor::record_mkdir_result_from(
+                    hub,
+                    op_name,
+                    &redirect_result.new_path,
+                    path_for_decision.as_ref(),
+                    0,
+                    0,
+                );
+                return 0;
+            }
+            if error_no == libc::EACCES
+                && crate::platform::fs::is_directory(&redirect_result.new_path)
+            {
+                // 映射改写后的 storage 路径由系统 FUSE（MediaProvider）承接，代写者
+                // uid 对发起者映射目标的 mkdir 会被拒绝；目标目录通常已由发起者按
+                // 自己的视图预建，此时原路径 mkdir 的语义已经达成，透传 EACCES
+                // 会让引擎把「目录可用」误判为创建失败（2026-10-24 真机：XL 引擎
+                // 对已预建的映射目标仍报 Failed to create target dir）。
+                log::debug!(
+                    "mkdir redirect target exists as dir: returning 0 path={} redirect={}",
+                    path_for_decision,
+                    redirect_result.new_path
                 );
                 monitor::record_mkdir_result_from(
                     hub,

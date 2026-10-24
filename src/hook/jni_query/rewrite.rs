@@ -152,7 +152,37 @@ fn resolve_storage_caller_context(caller_uid: i32, path_text: &str) -> (String, 
         return context;
     }
 
+    if let Some(context) = resolve_download_owner_caller_context(caller_uid, path_text) {
+        return context;
+    }
+
     (caller_package, caller_uid)
+}
+
+/// 下载提供器共享组的调用方未解析出具体成员时，按下载行数据反查真实发起者。
+///
+/// DownloadProvider 引擎的公共路径写入以 MediaStore insert 形式到达本进程，
+/// 调用方只有共享组 uid（2026-10-24 真机：组内消歧失败后曾误归 soundpicker）。
+/// 发起者由 downloads 表的 notificationpackage 列给出；归因成功后返回发起者
+/// 包名与 uid，使 values 改写按发起者自己的规则执行，并沿 hint 台账把归属
+/// 传递给随后的 pending 提交与后端 mkdir。
+fn resolve_download_owner_caller_context(
+    caller_uid: i32,
+    path_text: &str,
+) -> Option<(String, i32)> {
+    if !crate::monitor::caller_uid_shares_download_group(caller_uid) {
+        return None;
+    }
+
+    let owner_package = crate::monitor::infer_download_owner_package_by_path(path_text)?;
+    if owner_package.is_empty() || policy::is_media_intermediate_package(&owner_package) {
+        return None;
+    }
+    let owner_uid = policy::get_fresh_uid_for_package(&owner_package);
+    if owner_uid < writer::ANDROID_APP_UID_START {
+        return None;
+    }
+    Some((owner_package, owner_uid))
 }
 
 // 代写者（MediaProvider 等）以自身身份提交文件时没有 binder 调用方可用，
@@ -273,15 +303,17 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     if caller_package.is_empty() {
         return None;
     }
+    // 归因成功即登记归属提示：下载引擎的公共路径写入在 insert 之后还有
+    // pending 提交、后端 mkdir 等由 MediaProvider 自身线程发起的操作，
+    // 它们没有 binder 调用方可言，只能靠这里登记的路径归属找回发起者。
+    // 放行（Allow）分支同样需要，否则发起者配置放行真实路径时后续操作
+    // 会因归属缺失而再次落入未解析路径。
+    remember_media_caller_hint(path_text, &caller_package, effective_uid);
     if let Some(mapped_target) =
         resolve_mapping_view_open_target(path_text, &caller_package, effective_uid)
         && let Some(rewritten) =
             rewrite_media_store_mapped_value(path_text, has_file_scheme, &mapped_target)
     {
-        // 显式映射同样要登记归属。此前只有沙箱重定向分支登记，导致配了
-        // path_mappings 的应用在 pending 提交阶段查不到提示，只能退回按
-        // 配置反推归属，进而把其他应用往同一公共目录的保存也认领过来。
-        remember_media_caller_hint(path_text, &caller_package, effective_uid);
         return Some(rewritten);
     }
     if let Some(rewritten) = rewrite_default_sandbox_media_store_value(
@@ -332,7 +364,6 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
         has_file_scheme,
         false,
     );
-    remember_media_caller_hint(path_text, &caller_package, effective_uid);
     Some(rewritten)
 }
 

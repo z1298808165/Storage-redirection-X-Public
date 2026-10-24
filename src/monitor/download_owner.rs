@@ -6,14 +6,20 @@ use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, AtomicU32};
 
 const DOWNLOADS_URI: &str = "content://downloads/all_downloads";
 const STORAGE_PREFIX: &str = "/storage/emulated/";
-const DOWNLOAD_SEGMENT: &str = "/Download/";
+const DOWNLOAD_PROVIDER_NAME: &str = "com.android.providers.downloads";
 const FILE_SCHEME_PREFIX: &str = "file://";
 const CACHE_TTL_MS: i64 = 15_000;
 const CACHE_CAPACITY: usize = 128;
 const CACHE_QUEUE_COMPACTION_LIMIT: usize = CACHE_CAPACITY * 2;
+// 路径限定放宽后，归因链可能在批量枚举（MTP 扫描全盘等）中对大量互异路径
+// 触发查询；真实 JNI 查询按秒限流，超限直接按未命中处理，缓存仍照常登记。
+const QUERY_RATE_LIMIT_PER_SECOND: u32 = 8;
+static QUERY_WINDOW_SEC: AtomicI64 = AtomicI64::new(-1);
+static QUERY_COUNT_IN_WINDOW: AtomicU32 = AtomicU32::new(0);
 
 struct CacheEntry {
     package_name: String,
@@ -110,6 +116,10 @@ pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<Str
             continue;
         }
 
+        if !try_acquire_query_slot(now_ms) {
+            return None;
+        }
+
         let package_name = query_download_owner_package(&candidate);
         DOWNLOAD_OWNER_CACHE
             .lock()
@@ -124,8 +134,48 @@ pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<Str
     None
 }
 
+// 每秒最多 QUERY_RATE_LIMIT_PER_SECOND 次真实 JNI 查询；抢到窗口切换权的线程
+// 重置计数。限流是防御性的，切换瞬间与并发累加交错的计数误差只影响本秒余量。
+fn try_acquire_query_slot(now_ms: i64) -> bool {
+    let window_sec = now_ms / 1000;
+    let current_window = QUERY_WINDOW_SEC.load(std::sync::atomic::Ordering::Relaxed);
+    if window_sec != current_window {
+        let switched = QUERY_WINDOW_SEC
+            .compare_exchange(
+                current_window,
+                window_sec,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok();
+        if switched {
+            QUERY_COUNT_IN_WINDOW.store(1, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+    }
+    let count = QUERY_COUNT_IN_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    count <= QUERY_RATE_LIMIT_PER_SECOND
+}
+
+/// 调用方 uid 是否属于包含下载提供器的共享 uid 组。
+///
+/// DownloadProvider 引擎（XL）对公共路径的写入全部以 MediaStore insert 形式
+/// 到达 MediaProvider 进程，而不是在下载进程内直接 open；「按行数据反查发起者」
+/// 因此必须在 MediaProvider 侧的归因链上可用（2026-10-24 真机取证：查表只在
+/// 下载进程侧启用时，MediaProvider 侧对组 uid 调用方的归因恒落空）。
+pub fn caller_uid_shares_download_group(caller_uid: i32) -> bool {
+    caller_uid >= 0
+        && policy::get_packages_for_uid(caller_uid)
+            .iter()
+            .any(|pkg| pkg == DOWNLOAD_PROVIDER_NAME)
+}
+
+// 下载行的 destination 可指向任意用户存储路径（公共目录或应用私有目录），
+// 归因链只在调用方包名未解析时兜底查询，且结果有 TTL 缓存，因此不按
+// Download 段收窄：MIUI 引擎把商店等应用的下载目标写在私有目录时，
+// 按 Download 段收窄会让「行数据→发起者」关联在这些路径上全部落空。
 fn should_lookup_download_owner(path: &str) -> bool {
-    paths::starts_with(path, STORAGE_PREFIX) && path.contains(DOWNLOAD_SEGMENT)
+    paths::starts_with(path, STORAGE_PREFIX)
 }
 
 fn build_lookup_candidates(path: &str) -> Vec<String> {
@@ -310,9 +360,15 @@ fn resolve_package_by_uid(uid: jint) -> Option<String> {
     let mut packages = policy::get_packages_for_uid(uid);
     packages.sort();
     packages.dedup();
-    packages.into_iter().find(|package_name| {
+    packages.retain(|package_name| {
         !package_name.is_empty() && !policy::is_system_writer_package(package_name)
-    })
+    });
+    // 共享 uid 组内有多个候选时无法确定行属于哪个成员，返回 None 交给
+    // 调用方走后续归因路径；硬取排序首个成员会把引擎代写误归给无辜包。
+    if packages.len() == 1 {
+        return packages.pop();
+    }
+    None
 }
 
 unsafe fn close_cursor(env: *mut JNIEnv, cursor_class: jclass, cursor: jobject) {

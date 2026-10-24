@@ -274,7 +274,10 @@ pub(crate) fn remember_public_path_caller_hint_with_op_filter(
     op_filter: &str,
     correlation_id: &str,
 ) -> String {
-    if caller_uid < ANDROID_APP_UID_START
+    // 系统 uid（platform 1000 等）的公共目录操作同样登记归属：uid 属于大型
+    // 共享组时具体包名已由 caller pid 归因得出，这里只要求 uid 有效；user_id
+    // 一致性检查（uid/100000）对系统 uid 同样成立。
+    if caller_uid < 0
         || !is_valid_package_name(package_name)
         || normalize_path_hint_source(source).is_none()
         || normalize_hint_confidence(confidence).is_none()
