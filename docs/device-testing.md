@@ -43,12 +43,12 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 6. 安装本仓库内置测试 APP。
 7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-39。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验五个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-38。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验五个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
-- 当前模块跑完 scenario 1-39。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
+- 当前模块跑完 scenario 1-38。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
 
@@ -178,8 +178,8 @@ Remove-Item Env:SRT_SCENARIOS
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-39。 |
-| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-39。与其它场景号混用会报错。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-38。 |
+| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-38。与其它场景号混用会报错。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
 | `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
@@ -187,9 +187,9 @@ Remove-Item Env:SRT_SCENARIOS
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-39，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-39 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-38，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-38 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
 
-Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-39。它与其他版本有三处执行环境差异：
+Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-38。它与其他版本有三处执行环境差异：
 
 - **设备侧图形读回保护**：Android 17 系统镜像的 `mapper.ranchu` gralloc 未实现 DMA 颜色缓冲读回，而 emulator 的 gfxstream 后端仍会广播 `ReadColorBufferDMA` 特性。SystemUI 的 `RegionSampling` 与 system_server 的 `TaskSnapshotPersister` 触发读回后会命中 `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma`，并连带重启 framework。测试脚本在设备 SDK 版本为 37 时先执行 `service call window 137 i32 0` 关闭 task snapshot，再 `pm disable-user com.android.systemui` 关闭 SystemUI，并在模块安装重启 framework 后重新应用，直到确认 task snapshot 已关闭且 SystemUI 处于 disabled 状态才继续。该缺陷与 GPU 模式无关，保护逻辑仅在检测到 `ro.build.version.sdk = 37` 时生效。保护过程写入设备侧 `test-flow-graphics-state.txt`（该文件目前不在任何 job 的 artifact 上传清单内，排障需结合 job 日志中的 `android17:` 行）。
 - **注入方案与启动参数**：Android 17 矩阵条目使用 KernelSU 方案（`root_method: ksu`，AVD 镜像打 KernelSU 补丁，ksud 负责安装模块与 Zygisk Next），root shell 走 `su 0 sh -c`（`ADB_ROOT_MODE=su0`）；其余版本仍由安装脚本按 Magisk 探测完成注入。模拟器启动超时放宽到 1800 秒并保留系统动画（其余版本为 1500 秒、关闭动画），GPU 模式固定 `swiftshader_indirect`。
@@ -238,7 +238,6 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 36 | 映射应用私有别名后，仍可写入 MediaProvider 已创建的现有文件。 |
 | 37 | 父路径先映射到中间目录后，中间目录下的子路径继续命中下一条映射并落到最终目录。 |
 | 38 | 下载提供器（com.android.providers.downloads，监视桥接进程）自身配置 `sandboxed_paths` 后，挂载请求必须携带沙盒规则（`req sandbox=1`），宿主接入成功或 scoped 会话带沙盒；出现 `attach skipped ... policy_registration_failed` 或 `sandbox=0` 请求即回归（2026-10-21 真机侧漏回归）。 |
-| 39 | 下载提供器（共享 uid 代写者）经 DownloadManager 异步下载公共路径时，按发起者（测试 APP）的 `path_mappings` 把目标改写到映射目标落盘，真实请求路径零穿透；文件出现在真实请求路径或下载失败即按源归因回归（2026-10-24 真机：误归因组内成员、行数据反查未触发）。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 ## 手动运行用例

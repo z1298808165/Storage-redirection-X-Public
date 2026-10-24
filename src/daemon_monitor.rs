@@ -1163,16 +1163,6 @@ impl RegularAppMonitor {
         if !inotify::is_safe_event_name(&name) {
             return;
         }
-        // 模块自身的探测文件（passthrough 端到端探针、宿主端点探测名）由模块内部
-        // 创建并在毫秒级窗口内回收，不属于任何应用行为；观察侧记录它们只会把模块
-        // 自身动作写进用户监视日志（2026-10-24 用户反馈 .srx_passthrough_probe 污染）。
-        // 新增落盘探针时必须同步登记到这里。
-        if matches!(
-            name.as_str(),
-            ".srx_passthrough_probe" | ".srx_endpoint_probe"
-        ) {
-            return;
-        }
 
         let Some(nodes) = self.watch_nodes.get(&event.wd).cloned() else {
             return;
