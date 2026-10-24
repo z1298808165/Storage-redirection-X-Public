@@ -2036,6 +2036,12 @@ run_download_owner_attribution_scenario() {
   fi
   echo "step 5/7 内: 下载取数源 url=$dl_url"
   adb shell "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable" || true
+  # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
+  # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
+  echo "step 5/7 内: 重启测试应用（套用发起者映射）"
+  timeout 45 adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+  start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
+  wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
   echo "step 5/7 内: 清理下载归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
   local case_ok=0

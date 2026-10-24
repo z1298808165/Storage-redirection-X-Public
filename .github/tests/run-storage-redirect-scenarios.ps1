@@ -4917,6 +4917,10 @@ function Invoke-DownloadOwnerAttributionScenario {
     }
     Write-Host "  - scenario-$Scenario/download-owner: download url=$dlUrl"
     Invoke-Adb @("shell", "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable") | Write-Host
+    # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
+    # 应用不会随场景重启，这里显式重启并确认挂载。
+    Write-Host "  - scenario-$Scenario/download-owner: restart test app for requester mapping"
+    Restart-App "scenario-$Scenario/dlowner-apprestart" $true
     Write-Host "  - scenario-$Scenario/download-owner: cleanup attribution probe dirs"
     Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
     $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $dlUrl } "^PASS \[downloadmanager_enqueue\]"
