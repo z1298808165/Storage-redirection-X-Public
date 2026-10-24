@@ -4899,9 +4899,32 @@ function Invoke-DownloadOwnerAttributionScenario {
         if ($providerPid) { break }
     }
     Start-Sleep -Seconds 3
+    # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），改用本机
+    # HTTP 服务 + adb reverse 回环转发；显式设置了 SRT_DOWNLOAD_URL 时仍优先。
+    $dlUrl = $SrtDownloadUrl
+    $dlServer = $null
+    $dlDir = $null
+    $dlPort = 18089
+    if (-not $dlUrl) {
+        $dlDir = Join-Path ([IO.Path]::GetTempPath()) ("srt-dl-server-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dlDir | Out-Null
+        Set-Content -Path (Join-Path $dlDir "srt_download.bin") -Value "srt-download-probe"
+        Invoke-Adb @("reverse", "tcp:$dlPort", "tcp:$dlPort") | Out-Null
+        $dlServer = Start-Process -FilePath "python3" -ArgumentList @("-m", "http.server", "$dlPort", "--bind", "127.0.0.1", "--directory", $dlDir) -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 1
+        $dlUrl = "http://127.0.0.1:$dlPort/srt_download.bin"
+        Write-Host "  - scenario-$Scenario/download-owner: local download server url=$dlUrl"
+    }
+    Write-Host "  - scenario-$Scenario/download-owner: download url=$dlUrl"
+    Invoke-Adb @("shell", "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable") | Write-Host
     Write-Host "  - scenario-$Scenario/download-owner: cleanup attribution probe dirs"
     Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
-    $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $SrtDownloadUrl } "^PASS \[downloadmanager_enqueue\]"
+    $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $dlUrl } "^PASS \[downloadmanager_enqueue\]"
+    if ($dlServer) {
+        try { $dlServer.Kill() } catch {}
+        try { Invoke-Adb @("reverse", "--remove", "tcp:$dlPort") | Out-Null } catch {}
+        Remove-Item -Recurse -Force $dlDir -ErrorAction SilentlyContinue
+    }
     if (-not $case.Ok) {
         Write-Host "  - scenario-$Scenario/download-owner: enqueue or download failed"
         return $false
