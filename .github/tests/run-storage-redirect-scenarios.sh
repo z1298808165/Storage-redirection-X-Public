@@ -2002,6 +2002,21 @@ run_download_owner_attribution_scenario() {
   #         且真实请求路径（Download/SrtDlOwner）零穿透。
   #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
   #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
+  # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
+  #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107），直到提供器自身
+  #   重启。与场景 38 同款前置：force-stop 后 root query 冷启动提供器并等待
+  #   进程就绪，保证下载发生在新鲜的 FUSE 视图上。
+  echo "step 5/7 内: 冷启动下载提供器（刷新 FUSE 视图）"
+  adb_su "am force-stop '${PROVIDER_PACKAGE}'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
+  local provider_wait=1
+  while [ "$provider_wait" -le 8 ]; do
+    sleep 2
+    if adb_su "pidof '${PROVIDER_PACKAGE}' >/dev/null 2>&1"; then
+      break
+    fi
+    provider_wait=$((provider_wait + 1))
+  done
+  sleep 3
   echo "step 5/7 内: 清理下载归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
   if ! run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
