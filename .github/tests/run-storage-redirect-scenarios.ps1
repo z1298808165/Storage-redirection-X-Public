@@ -4887,7 +4887,18 @@ function Invoke-DownloadOwnerAttributionScenario {
     #         且真实请求路径（Download/SrtDlOwner）零穿透。
     #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
     #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
+    # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
+    #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107）。与 .sh 同款：
+    #   force-stop 后 root query 冷启动提供器并等待进程就绪。
     param([int]$Scenario)
+    Write-Host "  - scenario-$Scenario/download-owner: cold start download provider"
+    Invoke-Su "am force-stop '$ProviderPackage'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
+    for ($wait = 0; $wait -lt 8; $wait++) {
+        Start-Sleep -Seconds 2
+        $providerPid = (Invoke-Su "pidof '$ProviderPackage' 2>/dev/null" | Where-Object { $_ -match '\d' } | Select-Object -First 1)
+        if ($providerPid) { break }
+    }
+    Start-Sleep -Seconds 3
     Write-Host "  - scenario-$Scenario/download-owner: cleanup attribution probe dirs"
     Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
     $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $SrtDownloadUrl } "^PASS \[downloadmanager_enqueue\]"
