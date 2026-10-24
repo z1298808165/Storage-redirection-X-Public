@@ -17,7 +17,7 @@ class FileTestCases(
   private val api = AndroidFileApi()
 
   /** 稳定的小体积文件；下载是否成功不是断言目标，提供器创建目标文件才是。 */
-  private val defaultDownloadUrl: String = "https://www.baidu.com/img/flexible/logo/pc/result.png"
+  private val defaultDownloadUrl: String = "https://dldir1.qq.com/weixin/Windows/README.txt"
   private val defaultRoot: File
     get() =
         File(
@@ -691,15 +691,10 @@ class FileTestCases(
                   )
             }
           }
-          // 等待网络（reason=1）不视为终态：CI 模拟器网络就绪可能晚于入队，
-          // DownloadManager 会在网络可用后自动恢复下载，继续轮询到截止时间。
-          val waitingForNetwork =
-              status == DownloadManager.STATUS_PAUSED &&
-                  reason == DownloadManager.PAUSED_WAITING_FOR_NETWORK
           if (
-              (status == DownloadManager.STATUS_SUCCESSFUL ||
-                  status == DownloadManager.STATUS_FAILED) ||
-                  (status == DownloadManager.STATUS_PAUSED && !waitingForNetwork)
+              status == DownloadManager.STATUS_SUCCESSFUL ||
+                  status == DownloadManager.STATUS_FAILED ||
+                  status == DownloadManager.STATUS_PAUSED
           ) {
             break
           }

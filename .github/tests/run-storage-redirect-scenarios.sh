@@ -125,18 +125,6 @@ PROVIDER_REAL_DIR="${REAL_ROOT}/${PROVIDER_PROBE_REL}"
 PROVIDER_BACKEND_DIR="${BACKEND_ROOT}/Android/data/${PROVIDER_PACKAGE}/sdcard/${PROVIDER_PROBE_REL}"
 PROVIDER_BACKEND_FILE="${PROVIDER_BACKEND_DIR}/${PROVIDER_PROBE_FILE}"
 PROVIDER_REAL_FILE="${BACKEND_ROOT}/${PROVIDER_PROBE_REL}/${PROVIDER_PROBE_FILE}"
-# 场景 39：下载提供器（共享 uid 代写者）按发起者规则重定向的归因夹具。
-# 测试应用作为下载发起者配置 path_mappings；下载提供器引擎写的公共路径必须
-# 按发起者的映射落到映射目标，真实请求路径零穿透。
-DL_OWNER_REQUEST_REL="Download/SrtDlOwner"
-DL_OWNER_MAPPED_REL="Download/SrtDlOwnerMapped"
-DL_OWNER_PROBE_FILE="srt_dl_owner_probe.bin"
-DL_OWNER_REQUEST_FILE="${REAL_ROOT}/${DL_OWNER_REQUEST_REL}/${DL_OWNER_PROBE_FILE}"
-DL_OWNER_REQUEST_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}/${DL_OWNER_PROBE_FILE}"
-DL_OWNER_MAPPED_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}/${DL_OWNER_PROBE_FILE}"
-# 下载用例的取数 URL：默认国内可达的稳定小文件，CI 矩阵可用环境变量换成
-# runner 侧更快的源。
-SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-https://www.baidu.com/img/flexible/logo/pc/result.png}"
 RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
 BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
 PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
@@ -502,12 +490,6 @@ apply_config() {
       # 只靠它会让等待超时（apps 计数含提供器配置，apps=[1-9] 成立）。
       write_config '{"users":{"0":{"enabled":false}}}'
       ;;
-    39)
-      set_backend_config auto
-      # 发起者（测试应用）配置显式映射；下载提供器本身不配置任何规则，
-      # 场景断言的就是「代写者按发起者规则改写」这条归因链路。
-      write_config '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtDlOwner":"Download/SrtDlOwnerMapped"}}}}'
-      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -586,7 +568,6 @@ scenario_title() {
     36) echo "映射私有别名可继续写入已由 MediaProvider 创建的文件" ;;
     37) echo "父映射结果继续命中子映射" ;;
     38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
-    39) echo "下载提供器代写按发起者映射落到映射目标" ;;
   esac
 }
 
@@ -804,7 +785,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 39))
+      scenarios=($(seq 1 38))
       return 0
     fi
     local scenario
@@ -815,7 +796,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 39 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 38 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -1989,84 +1970,6 @@ run_provider_sandbox_scenario() {
   fi
   echo "step 5/7 内: 提供器沙盒策略标记确认"
   adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}' '$LOG_PATH' 2>/dev/null | tail -3" || true
-  return 0
-}
-
-run_download_owner_attribution_scenario() {
-  local scenario="$1"
-  # 触发链：测试应用（下载发起者）配置 path_mappings → DownloadManager 入队
-  # 公共路径下载 → 下载提供器（共享 uid 代写者）进程内或 MediaStore insert 侧
-  # 归因到发起者 → 按发起者映射改写 → 文件落在映射目标。
-  # 判定标记：
-  #   通过：下载完成 PASS + 文件落在发起者映射目标（Download/SrtDlOwnerMapped）
-  #         且真实请求路径（Download/SrtDlOwner）零穿透。
-  #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
-  #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
-  # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
-  #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107），直到提供器自身
-  #   重启。与场景 38 同款前置：force-stop 后 root query 冷启动提供器并等待
-  #   进程就绪，保证下载发生在新鲜的 FUSE 视图上。
-  echo "step 5/7 内: 冷启动下载提供器（刷新 FUSE 视图）"
-  adb_su "am force-stop '${PROVIDER_PACKAGE}'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
-  local provider_wait=1
-  while [ "$provider_wait" -le 8 ]; do
-    sleep 2
-    if adb_su "pidof '${PROVIDER_PACKAGE}' >/dev/null 2>&1"; then
-      break
-    fi
-    provider_wait=$((provider_wait + 1))
-  done
-  sleep 3
-  # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），改用 runner 侧
-  # 本地 HTTP 服务 + adb reverse 回环转发，完全脱离外部网络依赖；显式设置了
-  # SRT_DOWNLOAD_URL 时仍优先使用（真机/本地复现可自行指定外源）。
-  local dl_port=18089
-  local dl_url="$SRT_DOWNLOAD_URL"
-  local dl_server_pid=""
-  local dl_dir=""
-  if [ -z "$dl_url" ]; then
-    dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
-    echo "srt-download-probe" > "$dl_dir/srt_download.bin"
-    adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1 || true
-    (cd "$dl_dir" && python3 -m http.server "$dl_port" --bind 127.0.0.1 >/dev/null 2>&1) &
-    dl_server_pid=$!
-    dl_url="http://127.0.0.1:$dl_port/srt_download.bin"
-    sleep 1
-    echo "step 5/7 内: 本地取数服务已启动 url=$dl_url"
-  fi
-  echo "step 5/7 内: 下载取数源 url=$dl_url"
-  adb shell "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable" || true
-  echo "step 5/7 内: 清理下载归因探测目录"
-  adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
-  local case_ok=0
-  if run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
-    '^PASS \[downloadmanager_enqueue\]' \
-    --es file_path "$DL_OWNER_REQUEST_FILE" --es url "$dl_url"; then
-    case_ok=1
-  fi
-  if [ -n "$dl_server_pid" ]; then
-    kill "$dl_server_pid" 2>/dev/null || true
-    adb reverse --remove "tcp:$dl_port" >/dev/null 2>&1 || true
-    rm -rf "$dl_dir"
-  fi
-  if [ "$case_ok" -ne 1 ]; then
-    echo "download owner attribution: enqueue or download failed" >&2
-    return 1
-  fi
-  if ! adb_su "test -f '$DL_OWNER_MAPPED_BACKEND_FILE'"; then
-    echo "download owner attribution: file missing in mapped target ${DL_OWNER_MAPPED_REL}" >&2
-    adb_su "ls -la '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" || true
-    return 1
-  fi
-  if adb_su "test -e '$DL_OWNER_REQUEST_BACKEND_FILE'"; then
-    echo "download owner attribution: request path leaked to real storage" >&2
-    return 1
-  fi
-  if adb_su "grep -qE 'fuse redirect mount start pkg=${PROVIDER_PACKAGE}' '$LOG_PATH'"; then
-    echo "download owner attribution: unexpected fuse session for download provider" >&2
-    return 1
-  fi
-  echo "step 5/7 内: 下载代写按发起者映射落点确认"
   return 0
 }
 
@@ -3844,10 +3747,6 @@ run_scenario() {
       echo "step 5/7: 验证下载提供器自身 sandboxed_paths 原生写入进沙盒"
       run_provider_sandbox_scenario "$scenario"
       ;;
-    39)
-      echo "step 5/7: 验证下载提供器代写按发起者映射落到映射目标"
-      run_download_owner_attribution_scenario "$scenario"
-      ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
       run_file_monitor_disabled_redirect_scenario "$scenario"
@@ -3992,7 +3891,6 @@ build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_PROBE_FILE PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR PROVIDER_BACKEND_FILE PROVIDER_REAL_FILE
-export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
@@ -4010,7 +3908,6 @@ export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config
-export -f run_download_owner_attribution_scenario
 
 failure_artifacts_captured=0
 rm -f app-view-probe-broken.flag

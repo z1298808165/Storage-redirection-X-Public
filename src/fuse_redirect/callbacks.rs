@@ -1973,14 +1973,7 @@ fn append_backend_dir_entries(
         // 的是带斜杠的完整路径形态，裸文件名必须直接比对），不触碰深层同名用户
         // 目录。本改动只恢复枚举可见性；按已知路径的 lookup/open 不受限，这是
         // 刻意收窄——宿主自身与 media 视图会话仍需按路径访问这些目录。
-        // .srx_passthrough_probe 是 passthrough 端到端探针在真实后端根的临时落点
-        //（探测窗口毫秒级、事后删除），同样在根级对应用隐藏，避免枚举闪现。
-        if parent_rel.is_empty()
-            && matches!(
-                name.as_str(),
-                ".transforms" | ".picker_transcoded" | ".srx_passthrough_probe"
-            )
-        {
+        if parent_rel.is_empty() && matches!(name.as_str(), ".transforms" | ".picker_transcoded") {
             continue;
         }
         let child_rel = if parent_rel.is_empty() {

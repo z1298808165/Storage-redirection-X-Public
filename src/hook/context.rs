@@ -238,59 +238,6 @@ pub fn clear_fuse_caller_uid() {
     FUSE_CALLER_PID.with(|cell| cell.set(-1));
 }
 
-/// 系统 uid FUSE 请求的跨线程接力槽。
-///
-/// MediaProvider 侧读 /dev/fuse 的线程（libappfuse 桥）与处理请求、执行后端
-/// mkdir/open 的线程可能分离：thread-local 的 FUSE 请求头信号无法跨线程传递
-/// （2026-10-24 真机：系统服务开机创建 MIUI/Mirror 时 fuse_uid=-1）。读线程
-/// 捕获到系统 uid（<10000）的请求头时写入本槽，处理线程在归因落空时按时间
-/// 窗口取用。只对系统 uid 入槽：应用 uid 的请求已有 binder 与路径台账归因，
-/// 全局单槽在应用 IO 并发下会串味，收益不抵风险。
-struct SystemFuseRequestSlot {
-    uid: i32,
-    pid: i32,
-    at_ms: i64,
-}
-
-static SYSTEM_FUSE_REQUEST: std::sync::Mutex<SystemFuseRequestSlot> =
-    std::sync::Mutex::new(SystemFuseRequestSlot {
-        uid: -1,
-        pid: -1,
-        at_ms: -1,
-    });
-
-pub fn set_system_fuse_request(uid: i32, pid: i32) {
-    if uid < 0 || pid <= 0 {
-        return;
-    }
-    let mut slot = SYSTEM_FUSE_REQUEST
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    slot.uid = uid;
-    slot.pid = pid;
-    slot.at_ms = monotonic_ms();
-}
-
-/// 取窗口内的系统 uid FUSE 请求；取用即清，避免同一次请求被重复消费。
-pub fn take_recent_system_fuse_request(max_age_ms: i64) -> Option<(i32, i32)> {
-    let mut slot = SYSTEM_FUSE_REQUEST
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if slot.uid < 0 || slot.pid <= 0 {
-        return None;
-    }
-    let now = monotonic_ms();
-    let age = now.saturating_sub(slot.at_ms);
-    let (uid, pid) = (slot.uid, slot.pid);
-    slot.uid = -1;
-    slot.pid = -1;
-    slot.at_ms = -1;
-    if age >= 0 && age <= max_age_ms {
-        return Some((uid, pid));
-    }
-    None
-}
-
 // 在 clearCallingIdentity 之前调用，保存真实调用方 UID
 pub fn set_binder_saved_caller_uid(uid: i32) {
     BINDER_SAVED_CALLER_UID.with(|cell| cell.set(uid));

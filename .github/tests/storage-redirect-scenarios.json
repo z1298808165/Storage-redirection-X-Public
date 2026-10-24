@@ -227,12 +227,6 @@
       "config_mode": "auto",
       "bash_title": "下载提供器自身 sandboxed_paths 原生写入进沙盒",
       "powershell_title": "download provider own sandboxed_paths native write into sandbox"
-    },
-    {
-      "id": 39,
-      "config_mode": "auto",
-      "bash_title": "下载提供器代写按发起者映射落到映射目标",
-      "powershell_title": "download provider delegated write lands on requester mapping target"
     }
   ]
 }

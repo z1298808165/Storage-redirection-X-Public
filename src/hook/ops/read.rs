@@ -4,138 +4,13 @@ use super::super::runtime;
 use libc::{c_int, c_void, fstat, readlink};
 use std::ffi::CString;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 static CACHED_FUSE_FD: AtomicI32 = AtomicI32::new(-1);
 static CACHED_FUSE_FD_DEV: AtomicU64 = AtomicU64::new(0);
 static CACHED_FUSE_FD_INO: AtomicU64 = AtomicU64::new(0);
 static FUSE_CACHE_INVALIDATE_COUNT: AtomicU64 = AtomicU64::new(0);
 const FUSE_CACHE_LOG_SAMPLE_STEP: u64 = 128;
-
-/// FUSE 请求读取方的候选库（按设备形态命中其一或全部）：
-/// - MIUI 等分离形态：引擎在 DT_NEEDED 的 `libfuse.so`（fuse_session_loop），
-///   libfuse_jni 的 read 仅用于 ReadFdToString 工具函数；
-/// - AOSP 原生形态（真机/CI 模拟器）：fuse 引擎静态链接进 libfuse_jni，
-///   请求循环的 read/__read_chk 就在其 PLT 里，不存在独立 libfuse.so。
-///
-/// 两库都由 MediaProvider APK 内嵌（extractNativeLibs=false），maps 路径是
-/// APK 本体，按「文件名后缀」匹配不到已加载段，必须走 ElfImg 的 APK 内嵌
-/// ELF 通道定位。
-const LIB_FUSE_ENGINE: &str = "libfuse.so";
-const LIB_FUSE_JNI: &str = "libfuse_jni.so";
-static FUSE_ENGINE_READ_PATCHED: AtomicBool = AtomicBool::new(false);
-static FUSE_JNI_READ_PATCHED: AtomicBool = AtomicBool::new(false);
-static FUSE_ENGINE_PATCH_CHECK_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
-const FUSE_ENGINE_PATCH_CHECK_INTERVAL_MS: i64 = 500;
-
-/// 把 read 补丁装到 FUSE 请求读取方（libfuse.so 与 libfuse_jni.so 都尝试）。
-///
-/// 两库均晚于 hook 安装按需加载，install 时的符号注册覆盖不到。沿用 fuse_fix
-/// 的补装方式：ElfImg 定位（APK 内嵌 ELF 通道）后直接改写 read 与 __read_chk
-/// 的 PLT 槽，包装函数直调 libc::read 并按严格校验解析 FUSE 协议头，**完全不
-/// 进入 srx_hook 的 call_prev/with_prev_func 体系**——同一 proxy 地址被
-/// hook_partial 与 hook_single 双重注册会破坏 prev 查找链，把 MediaProvider
-/// 的全部 read 调用打崩（2026-10-24 真机事故：MP 崩溃循环，已回滚）。
-/// libfuse_jni 的 read 也会被 ReadFdToString 等普通文件读取使用，因此解析
-/// 前必须通过严格 FUSE 头校验（见 parse_fuse_header_after_read），非请求
-/// 读取不会污染调用方信号。
-pub(crate) fn ensure_fuse_engine_read_patch() {
-    if FUSE_ENGINE_READ_PATCHED.load(Ordering::Relaxed)
-        && FUSE_JNI_READ_PATCHED.load(Ordering::Relaxed)
-    {
-        return;
-    }
-    let now_ms = crate::platform::paths::monotonic_ms();
-    let last_ms = FUSE_ENGINE_PATCH_CHECK_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last_ms) < FUSE_ENGINE_PATCH_CHECK_INTERVAL_MS {
-        return;
-    }
-    if FUSE_ENGINE_PATCH_CHECK_MS
-        .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-    for (lib, patched_flag) in [
-        (LIB_FUSE_ENGINE, &FUSE_ENGINE_READ_PATCHED),
-        (LIB_FUSE_JNI, &FUSE_JNI_READ_PATCHED),
-    ] {
-        if patched_flag.load(Ordering::Relaxed) {
-            continue;
-        }
-        let Some(elf) = crate::platform::elf_img::ElfImg::load(lib) else {
-            continue;
-        };
-        // SAFETY: patch_plt_slots 只改写目标库的 GOT 槽位并把槽页恢复只读；
-        // 失败时保持原槽位不动。
-        let read_slots = fuse_fix::patch_plt_slots(&elf, "read", hooked_read_fuse as *mut c_void);
-        let read_chk_slots =
-            fuse_fix::patch_plt_slots(&elf, "__read_chk", hooked_read_chk_fuse as *mut c_void);
-        if read_slots > 0 || read_chk_slots > 0 {
-            patched_flag.store(true, Ordering::Release);
-            log::info!(
-                "fuse read patch installed lib={} read={} read_chk={}",
-                lib,
-                read_slots,
-                read_chk_slots
-            );
-        }
-    }
-}
-
-/// libfuse.so 的 read 包装：直调原函数并解析 FUSE 请求头。
-///
-/// 只读 buf 的协议头字段并更新调用方信号（thread-local 与系统 uid 接力槽），
-/// 不改写请求内容、不影响返回值；buf 有效性与长度由 libc::read 的返回值
-/// 保证（仅在成功读到至少一个协议头长度时解析）。
-unsafe extern "C" fn hooked_read_fuse(fd: c_int, buf: *mut c_void, count: usize) -> isize {
-    // SAFETY: 本模块 so 自身的 read 引用不在 hook 范围（install 时 add_ignore
-    // 了 SELF_MODULE_PATH），libc::read 直达原实现。
-    let result = libc::read(fd, buf, count);
-    parse_fuse_header_after_read(fd, buf, result);
-    result
-}
-
-/// libfuse.so 的 __read_chk 包装（FORTIFY 加固版，多一个 buf_size 参数）。
-///
-/// 直调 libc::read 跳过 abort 检查：buf_size 检查是编译期加固，调用方传入的
-/// count 不会超过自身缓冲区，行为与原实现等价。
-unsafe extern "C" fn hooked_read_chk_fuse(
-    fd: c_int,
-    buf: *mut c_void,
-    count: usize,
-    _buf_size: usize,
-) -> isize {
-    // SAFETY: 同 hooked_read_fuse，libc::read 直达原实现。
-    let result = libc::read(fd, buf, count);
-    parse_fuse_header_after_read(fd, buf, result);
-    result
-}
-
-/// FUSE 操作码上限：内核 fuse_common.h 的合法操作码都在此范围内。
-const FUSE_OPCODE_MAX: u32 = 45;
-
-unsafe fn parse_fuse_header_after_read(_fd: c_int, buf: *mut c_void, result: isize) {
-    if result < std::mem::size_of::<FuseInHeader>() as isize || buf.is_null() {
-        return;
-    }
-    // SAFETY: read 成功返回至少 FuseInHeader 大小的字节，buf 指向可读缓冲。
-    let header = std::ptr::read_unaligned(buf as *const FuseInHeader);
-    // 严格 FUSE 请求头校验：libfuse_jni 的 read 也会被普通文件读取
-    // （ReadFdToString 等）使用，误读会把文件内容当请求头污染调用方信号。
-    // 内核 FUSE 的单请求读取恰好返回 header.len 字节，加上 unique 非零与
-    // 操作码范围约束，非请求读取同时通过三项校验的概率可忽略。
-    if header.len as isize != result || header.unique == 0 || header.opcode > FUSE_OPCODE_MAX {
-        return;
-    }
-    context::set_fuse_caller_uid(header.uid as i32);
-    if header.pid > 0 && header.pid <= i32::MAX as u32 {
-        context::set_fuse_caller_pid(header.pid as i32);
-        if (header.uid as i32) < crate::redirect::writer::ANDROID_APP_UID_START {
-            context::set_system_fuse_request(header.uid as i32, header.pid as i32);
-        }
-    }
-}
 
 #[repr(C)]
 struct FuseInHeader {
@@ -195,11 +70,6 @@ pub unsafe extern "C" fn hooked_read(fd: c_int, buf: *mut c_void, count: usize) 
     context::set_fuse_caller_uid(header.uid as i32);
     if header.pid > 0 && header.pid <= i32::MAX as u32 {
         context::set_fuse_caller_pid(header.pid as i32);
-        // 系统 uid 的请求头同步写入跨线程接力槽：MediaProvider 读线程与请求
-        // 处理线程可能分离，thread-local 信号传不过去（见 context.rs 槽注释）。
-        if (header.uid as i32) < crate::redirect::writer::ANDROID_APP_UID_START {
-            context::set_system_fuse_request(header.uid as i32, header.pid as i32);
-        }
     }
 
     result
