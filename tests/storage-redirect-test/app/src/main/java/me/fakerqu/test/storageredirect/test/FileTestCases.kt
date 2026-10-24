@@ -17,8 +17,7 @@ class FileTestCases(
   private val api = AndroidFileApi()
 
   /** 稳定的小体积文件；下载是否成功不是断言目标，提供器创建目标文件才是。 */
-  private val defaultDownloadUrl: String =
-      "https://www.baidu.com/img/flexible/logo/pc/result.png"
+  private val defaultDownloadUrl: String = "https://www.baidu.com/img/flexible/logo/pc/result.png"
   private val defaultRoot: File
     get() =
         File(
