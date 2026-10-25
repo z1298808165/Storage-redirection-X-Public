@@ -24,7 +24,7 @@
 - `verbose_logging_enabled`：启用详细日志。打开后，普通 native 日志通过 `srx_daemon` 的私有 datagram 通道写入 `running.log`，并启动 Java/崩溃上下文和 MediaProvider/应用状态采集；关闭后立即停止这些详细记录。文件监视记录由 `file_monitor_enabled` 和文件监视过滤配置单独控制，概览页的轻量运行时生效计数始终启用。缺失、格式错误或不可读时，默认值为 `false`。
 
 概览页“生效次数”累计重定向运行时成功启用的次数：普通应用的 companion mount 成功启用一次计一次，daemon 为尚无 mount state 的进程首次补建重定向运行时计一次，系统写入进程的重定向 hook 成功启用一次计一次。已有 mount state 的配置重载不重复计数。它不统计每次文件访问或路径改写，也不受详细日志和文件监视开关影响。`stats` 使用带 schema 的独立格式保存精确值，存放在 `/data/adb/storage.redirect.x/stats`（模块目录之外的持久路径，模块升级不会触碰该目录）。概览页仅按 `K`、`M`、`B`、`T` 等国际短单位缩写显示，点击计数可查看精确值，长按并确认后可清零重新统计。累计计数不会因模块升级归零，刷入后延迟重启期间由旧 daemon 继续累加的次数也不会丢失；只有首次安装或用户主动清零才会从 0 开始。旧版混合口径的纯数字统计不会并入新版计数。
-- `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
+- `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成配置。卸载应用时其配置会被置回 disabled 并保留文件（不丢用户自定义规则），同时留伴生标记；重装触发的安装事件会先据此把配置恢复为 enabled 再走自动开启，因此卸载重装的应用能自动恢复开启，用户手工关闭的配置不受影响。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时，新安装应用默认只开启重定向，不附加允许路径、沙盒路径或映射规则。若模板文件被外部修改导致该 ID 不再可用，运行脚本会先按仅开启重定向生成新应用配置；APP 和 WebUI 进入设置页时会清空失效引用，并在自动配置模板状态行提示已回退。缺失、格式错误或不可读时，默认值为空字符串。
 - `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
 
@@ -127,7 +127,7 @@
 - 同一路径既作为放行又作为排除时，排除规则优先保留。
 - `path_mappings` 的源路径和目标路径不能相同，不能形成循环映射，映射链深度超过 10 层的源规则会被忽略。
 - 映射支持有限深度的嵌套链：上一条规则改写出的目标路径如果继续命中下一条规则，会继续按最长前缀规则处理，直到没有后续匹配或达到 10 层上限。
-- `Android/data`、`Android/media` 和 `Android/obb` 可以作为映射入口或目标，管理 App 的路径浏览器也可直接进入这些目录。启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 子树默认保持真实路径，不会再次套入应用沙盒；其它应用包名的同名目录不享受这条默认放行。`/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有路径请在映射输入框中直接填写绝对路径。
+- `Android/data`、`Android/media` 和 `Android/obb` 可以作为映射入口或目标，管理 App 的路径浏览器也可直接进入这些目录。启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 子树默认保持真实路径，不会再次套入应用沙盒；其它应用包名的同名目录不享受这条默认放行。MediaProvider 侧的访问校验与此独立：`Android/media/<包名>` 子树对同用户应用 uid 保留系统原生的跨应用共享语义，`Android/data` 与 `Android/obb` 仍按属主私有语义校验。`/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有路径请在映射输入框中直接填写绝对路径。
 - `/data/data/<包名>/...` 会按当前用户转换为 `/data/user/<用户>/<包名>/...`，旧配置中的这个历史别名继续有效。
 - 启用应用重定向后，未命中的公共路径默认进入该应用的沙盒目录。因此映射请求路径填写应用实际看到的公共路径，目标路径填写希望绑定的存储路径或绝对路径，不需要再把公共路径改写成沙盒完整路径。
 - `path_mappings` 可以把公共存储路径与应用私有 namespace 路径互相映射；“任意路径”仅表示在当前应用 namespace 和路径校验允许的范围内自由组合，不包含系统根目录或越权访问。

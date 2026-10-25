@@ -232,7 +232,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - `fuse_fix_enabled`：启用 SRX 内置 FuseFixer-compatible 保护，用于处理 MediaProvider/FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
 - `storage_backend_mode`：保留为配置格式字段，运行时固定为 `auto`。native 根据设备能力、规则复杂度和 FUSE 服务健康状态选择 scoped FUSE 或 mount namespace；旧版 `fuse_daemon_redirect_enabled` 不再读取，管理端和测试流也始终写入 `auto`。实际选择会记录为 `backend_effective` 并随诊断日志导出。
 - `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log` 等诊断采集，关闭后立即停止这些记录。文件监视记录和概览页的轻量运行时生效计数不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
-- `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
+- `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。卸载应用时其配置会被置回 disabled 并保留文件（不丢用户自定义规则），同时留伴生标记；重装触发的安装事件会先据此把配置恢复为 enabled 再走自动开启，因此卸载重装的应用能自动恢复开启，用户手工关闭的配置不受影响。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时使用仅开启重定向的默认配置。
 - `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
 
