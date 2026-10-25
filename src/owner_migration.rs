@@ -18,19 +18,23 @@
 
 use crate::redirect_policy as policy;
 use std::ffi::CString;
+use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 /// 完成标记。位于模块目录 tmp/ 下，随 /data 持久化；文件存在即视为迁移已完成。
-// v2：v1 迁移跑完后的设备又经「目录无 fd 通道」缺口累积了新漂移
-// （2026-10-21 用户反馈 uid=1023/2773 目录），源头修复落地后重跑一轮。
+// v3：运行期系统代写 hook 曾把 owner 已正确但 gid=1078 的私有目录改成
+// media_rw；本轮只恢复 Android/data 私有目录的 ext_data_rw 组，不触碰文件或
+// 带 other 访问位的媒体子目录。
 const MIGRATION_MARKER: &str =
-    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v2.done";
+    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v3.done";
 
 /// 漂移签名：私有树内 owner 恰好是 media_rw 的条目才修复。
 const MEDIA_RW_UID: u32 = 1023;
+/// AOSP `AID_EXT_DATA_RW`：外部存储应用私有 data 目录组。
+const EXT_DATA_RW_GID: u32 = 1078;
 /// 目标 uid 必须是普通应用 uid。
 const ANDROID_APP_UID_START: i32 = 10000;
 /// AOSP 每用户 uid 段宽度：目标 uid = appId + user_id * 100000。
@@ -52,6 +56,7 @@ const MAX_FAILURE_LOGS: usize = 8;
 struct MigrationStats {
     scanned: usize,
     repaired: usize,
+    gid_repaired: usize,
     packages: usize,
     unknown_uid_packages: usize,
     failures: usize,
@@ -93,11 +98,12 @@ fn run() {
         );
         return;
     }
-    match std::fs::write(MIGRATION_MARKER, "v2\n") {
+    match std::fs::write(MIGRATION_MARKER, "v3\n") {
         Ok(()) => log::info!(
-            "owner migration done scanned={} repaired={} mode_fixed={} packages={} unknown_uid_packages={}",
+            "owner migration done scanned={} repaired={} gid_repaired={} mode_fixed={} packages={} unknown_uid_packages={}",
             stats.scanned,
             stats.repaired,
+            stats.gid_repaired,
             stats.mode_fixed,
             stats.packages,
             stats.unknown_uid_packages
@@ -230,7 +236,9 @@ fn migrate_tree(package_root: &str, target_uid: u32, stats: &mut MigrationStats)
 /// 检查单个条目并按需修复属主。预算耗尽时置位并跳过后续修复。
 fn visit_entry(path: &str, target_uid: u32, stats: &mut MigrationStats) -> bool {
     stats.scanned = stats.scanned.saturating_add(1);
-    if stats.scanned > MAX_SCAN_ENTRIES_PER_RUN || stats.repaired > MAX_REPAIRS_PER_RUN {
+    if stats.scanned > MAX_SCAN_ENTRIES_PER_RUN
+        || stats.repaired.saturating_add(stats.gid_repaired) > MAX_REPAIRS_PER_RUN
+    {
         stats.budget_exhausted = true;
         return false;
     }
@@ -242,10 +250,55 @@ fn visit_entry(path: &str, target_uid: u32, stats: &mut MigrationStats) -> bool 
     if metadata.is_dir() && (metadata.mode() & 0o7777) == 0o2773 {
         normalize_leaked_dir_mode(path, stats);
     }
-    if metadata.uid() != MEDIA_RW_UID {
+    let owner_is_migratable = metadata.uid() == MEDIA_RW_UID;
+    let gid_is_migratable = should_restore_ext_data_gid(path, target_uid, &metadata);
+    if !owner_is_migratable && !gid_is_migratable {
         return false;
     }
-    repair_owner(path, target_uid, metadata.gid(), stats)
+    let desired_uid = if owner_is_migratable {
+        target_uid
+    } else {
+        metadata.uid()
+    };
+    let desired_gid = if gid_is_migratable {
+        EXT_DATA_RW_GID
+    } else {
+        metadata.gid()
+    };
+    repair_owner_and_group(
+        path,
+        desired_uid,
+        desired_gid,
+        owner_is_migratable,
+        gid_is_migratable,
+        stats,
+    )
+}
+
+/// 恢复被旧 hook 覆盖的 `ext_data_rw` 目录组。
+///
+/// AOSP 将 1078 定义为“外部存储应用私有 data 目录组”。设备上的 1023 仍是
+/// 合法语义：文件以及带 other 访问位的共享/媒体子目录需要 media_rw 访问，不能
+/// 全树改写。因此只处理 owner 已是应用 UID或历史漂移值 1023、当前 gid=1023、
+/// Android/data 子树且目录没有 other 权限位的条目。
+fn should_restore_ext_data_gid(path: &str, target_uid: u32, metadata: &Metadata) -> bool {
+    let owner_is_known = metadata.uid() == target_uid || metadata.uid() == MEDIA_RW_UID;
+    if !metadata.is_dir()
+        || !owner_is_known
+        || metadata.gid() != MEDIA_RW_UID
+        || metadata.mode() & 0o007 != 0
+    {
+        return false;
+    }
+    let Some(android_index) = path.rfind("/Android/data/") else {
+        return false;
+    };
+    let after = &path[android_index + "/Android/data/".len()..];
+    let mut parts = after.split('/').filter(|part| !part.is_empty());
+    let Some(package_name) = parts.next() else {
+        return false;
+    };
+    crate::platform::paths::is_valid_package_name(package_name)
 }
 
 /// 把私有树泄漏的 0o2773 目录收敛为原生 02770。
@@ -269,21 +322,36 @@ fn normalize_leaked_dir_mode(path: &str, stats: &mut MigrationStats) {
     stats.failures = stats.failures.saturating_add(1);
 }
 
-/// lchown 只改 owner，gid 保留原值；符号链接不跟随。
-fn repair_owner(path: &str, target_uid: u32, keep_gid: u32, stats: &mut MigrationStats) -> bool {
+/// lchown 按迁移判定同时修正 owner/group；符号链接不跟随。
+fn repair_owner_and_group(
+    path: &str,
+    target_uid: u32,
+    target_gid: u32,
+    owner_changed: bool,
+    gid_changed: bool,
+    stats: &mut MigrationStats,
+) -> bool {
     let Ok(c_path) = CString::new(path) else {
         return false;
     };
     // SAFETY: c_path 在调用期间保持有效并以 NUL 结尾。
-    let ret = unsafe { libc::lchown(c_path.as_ptr(), target_uid, keep_gid) };
+    // SAFETY: c_path 由 CString 保证以 NUL 结尾，target uid/gid 已由上层迁移判定限制。
+    let ret = unsafe { libc::lchown(c_path.as_ptr(), target_uid, target_gid) };
     if ret == 0 {
-        stats.repaired = stats.repaired.saturating_add(1);
+        if owner_changed {
+            stats.repaired = stats.repaired.saturating_add(1);
+        }
+        if gid_changed {
+            stats.gid_repaired = stats.gid_repaired.saturating_add(1);
+        }
         return true;
     }
     if stats.failures < MAX_FAILURE_LOGS {
         log::warn!(
-            "owner migration chown failed path={} errno={}",
+            "owner migration chown failed path={} uid={} gid={} errno={}",
             path,
+            target_uid,
+            target_gid,
             crate::platform::errno::last()
         );
     }

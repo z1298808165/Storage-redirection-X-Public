@@ -75,6 +75,8 @@ class MountMetadataScopeTest(unittest.TestCase):
         cls.mount_core = read("src/mount/planner.rs")
         cls.fuse_mod = read("src/fuse_redirect/mod.rs")
         cls.fuse_config = read("src/fuse_redirect/config.rs")
+        cls.runtime = read("src/hook/runtime.rs")
+        cls.owner_migration = read("src/owner_migration.rs")
 
     def test_mapping_mode_only_apps_skip_private_owner_repair(self) -> None:
         # 私有外部存储由 MediaProvider 管理，监视侧不应再建立任何私有目录属主修复根。
@@ -190,6 +192,30 @@ class MountMetadataScopeTest(unittest.TestCase):
         monitor = read("src/daemon_monitor/events.rs")
         self.assertNotIn("chown_android_private_path_if_needed", monitor)
         self.assertNotIn("repair_private_category_owner", monitor)
+
+    def test_system_writer_owner_fix_preserves_native_gid(self) -> None:
+        # 系统代写 hook 只负责把 owner 修回应用 UID；1078(ext_data_rw) 与
+        # 1023(media_rw) 都是设备上可能出现的原生私有目录组，不能固定覆盖。
+        body = function_body(self.runtime, "fn chown_private_path_if_needed(")
+        self.assertIn("st.st_uid == owner_uid as u32", body)
+        self.assertNotIn("st.st_uid == owner_uid as u32 && st.st_gid", body)
+        self.assertIn("owner_uid as u32, u32::MAX", body)
+
+    def test_owner_migration_restores_only_private_data_directory_gid(self) -> None:
+        # 一次性迁移只把 Android/data 下、owner 正确且无 other 权限位的目录从
+        # media_rw 组恢复到 AOSP 定义的 ext_data_rw；文件与共享媒体目录保留 1023。
+        self.assertIn("owner-migration-1023-v3.done", self.owner_migration)
+        self.assertIn("const EXT_DATA_RW_GID: u32 = 1078", self.owner_migration)
+        body = function_body(
+            self.owner_migration,
+            "fn should_restore_ext_data_gid(",
+        )
+        self.assertIn('metadata.is_dir()', body)
+        self.assertIn('metadata.uid() == target_uid || metadata.uid() == MEDIA_RW_UID', body)
+        self.assertIn('metadata.mode() & 0o007 != 0', body)
+        self.assertIn('path.rfind("/Android/data/")', body)
+        self.assertNotIn('"/Android/media/"', body)
+        self.assertNotIn('"/Android/obb/"', body)
 
     def test_storage_alias_binding_skips_source_self_bind(self) -> None:
         # 私有目录恢复会同时遍历 /storage、/mnt 和 /data/media 别名；源路径对应的

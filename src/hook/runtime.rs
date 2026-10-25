@@ -588,12 +588,18 @@ fn chown_private_path_if_needed(
         return;
     }
     let st = unsafe { st.assume_init() };
-    if st.st_uid == owner_uid as u32 && st.st_gid == MEDIA_RW_GID {
+    // owner 已经是应用 UID 时，gid 可能是 ext_data_rw（1078）或 media_rw
+    //（1023），两者都属于系统管理的原生私有目录语义，不能因为 hook 偏好
+    // media_rw 就覆盖已有组。
+    if st.st_uid == owner_uid as u32 {
         chmod_private_node_if_needed(&c_path, path, &st, owner_package, private_root);
         return;
     }
 
-    let ret = unsafe { libc::lchown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+    // 只修复 owner，保留 MediaProvider 为该层选择的 gid。companion_fchown 同样
+    // 使用 gid=-1，因此进程内成功与 root companion 回退的结果保持一致。
+    // SAFETY: c_path 由 CString 保证以 NUL 结尾；gid=u32::MAX 明确表示保留原组。
+    let ret = unsafe { libc::lchown(c_path.as_ptr(), owner_uid as u32, u32::MAX) };
     if ret == 0 {
         chmod_private_node_if_needed(&c_path, path, &st, owner_package, private_root);
         log::debug!(
