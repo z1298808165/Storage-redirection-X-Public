@@ -300,7 +300,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 日志轮转或过滤无匹配属于正常情况，空诊断不能中断后面的行为断言。
         for name in ("logcatOut", "dirOut", "runningOut", "installStateOut", "markerOut"):
             self.assertIn(f"$lines.AddRange([string[]]@(${name} | Where-Object {{ $null -ne $_ }}))", body)
-        self.assertIn("../../temp/scenario-2-mediastore-hook-diag.txt", body)
+        self.assertIn('Join-Path $script:ArtifactDir "scenario-2-mediastore-hook-diag.txt"', body)
 
     def test_private_fixture_is_prepared_after_nested_mapping_cleanup(self) -> None:
         # 场景 37 清理的父目录包含场景 34 的 data 子目录，顺序反转会产生 ENOENT。
@@ -1256,7 +1256,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("Upload shared FUSE snapshots", source)
             self.assertIn("test-flow-shared-fuse-before.txt", source)
             self.assertIn("test-flow-shared-fuse-after.txt", source)
-            self.assertIn("hashFiles('test-flow-shared-fuse-before.txt', 'test-flow-shared-fuse-after.txt')", source)
+            self.assertIn("hashFiles('temp/test-flow/**/test-flow-shared-fuse-before.txt', 'temp/test-flow/**/test-flow-shared-fuse-after.txt')", source)
 
     def test_workflows_share_runtime_build_and_failure_artifacts(self) -> None:
         expected_artifacts = {

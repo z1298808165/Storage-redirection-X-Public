@@ -4,7 +4,15 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
-PREFLIGHT_DIAGNOSTICS="test-flow-preflight.txt"
+# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：temp/test-flow/<启动时间戳>/。
+# 本脚本先建目录并注入 SRT_ARTIFACT_DIR，后续场景脚本与诊断脚本共用同一目录，
+# 同一天多轮测试互不覆盖；CI 的 artifact 上传按 temp/test-flow/ 整目录收集。
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SRT_ARTIFACT_DIR="${SRT_ARTIFACT_DIR:-${repo_root}/temp/test-flow/$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$SRT_ARTIFACT_DIR"
+export SRT_ARTIFACT_DIR
+
+PREFLIGHT_DIAGNOSTICS="${SRT_ARTIFACT_DIR}/test-flow-preflight.txt"
 
 capture_preflight_diagnostics() {
   {
@@ -89,7 +97,7 @@ android17_disable_graphics_readback() {
   # android17-release IWindowManager.aidl：135 为 isTaskSnapshotSupported，137 为
   # setTaskSnapshotEnabled。模块重启后的 framework 可能在短窗口内再次重启，因此
   # 每轮都绑定 system_server PID，稳定观察后再复核全部状态；PID 变化即从头重放。
-  local state_file="test-flow-graphics-state.txt"
+  local state_file="${SRT_ARTIFACT_DIR}/test-flow-graphics-state.txt"
   if [ "$phase" = "初次启动后" ]; then
     : >"$state_file"
   fi
@@ -223,7 +231,7 @@ fi
   adb shell "su 0 sh -c 'pm list packages -f -U --user 0 2>/dev/null'" 2>&1 || true
   echo "=== package_service ==="
   adb shell "cmd package list packages -f -U --user 0 2>/dev/null" 2>&1 || true
-} > test-flow-app-list.txt
+} > "${SRT_ARTIFACT_DIR}/test-flow-app-list.txt"
 
 # 模块重启后 system_server/package 服务可能还在恢复，进入场景脚本前再次等待。
 if ! wait_for_adb_ready; then

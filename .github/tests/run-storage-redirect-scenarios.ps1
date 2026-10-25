@@ -27,6 +27,15 @@ $MountStateDir = "/data/adb/modules/storage.redirect.x/tmp/mount_state"
 $ResultDir = "/sdcard/Android/data/$AppId/files/test_case_result"
 $InternalResultDir = "/data/data/$AppId/files/test_case_result"
 $RealRoot = "/storage/emulated/0"
+
+# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：temp/test-flow/<启动时间戳>/。
+# 诊断文件一律写到这里，不得散落在仓库根目录；同一天多轮测试互不覆盖。
+if ($env:SRT_ARTIFACT_DIR) {
+    $script:ArtifactDir = $env:SRT_ARTIFACT_DIR
+} else {
+    $script:ArtifactDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../../temp/test-flow/$(Get-Date -Format yyyyMMdd-HHmmss)"))
+}
+New-Item -ItemType Directory -Path $script:ArtifactDir -Force | Out-Null
 $PrivateRoot = "$RealRoot/Android/data/$AppId/sdcard"
 $BackendRoot = "/data/media/0"
 $BackendPrivateRoot = "$BackendRoot/Android/data/$AppId/sdcard"
@@ -2297,7 +2306,7 @@ function Expect-NoAppEntry {
 # 在 Invoke-ServiceCase 完成后、Require-File 断言前调用，
 # 此时 logcat buffer 仍包含本次 insert 的 SRX 回调日志。
 function Invoke-CaptureScenario2MediastoreHookDiag {
-    $outFile = (Join-Path $PSScriptRoot "../../temp/scenario-2-mediastore-hook-diag.txt")
+    $outFile = (Join-Path $script:ArtifactDir "scenario-2-mediastore-hook-diag.txt")
     $lines = [System.Collections.Generic.List[string]]::new()
 
     $lines.Add("===media_provider_pid===")
@@ -2656,7 +2665,7 @@ function Test-FuseMountActive {
     }
 
     # 后续行为用例会重启应用并清空日志，先保留当前挂载确认失败现场。
-    $diagnosticDir = Join-Path $PSScriptRoot "../../temp"
+    $diagnosticDir = $script:ArtifactDir
     New-Item -ItemType Directory -Path $diagnosticDir -Force | Out-Null
     $diagnosticPath = Join-Path $diagnosticDir "fuse-mount-failure-$Scenario-$(Get-Date -Format yyyyMMdd-HHmmss).log"
     Invoke-Su "ps -A -o PID,PPID,NAME,ARGS; if [ -n '$appPid' ]; then cat /proc/$appPid/stat /proc/$appPid/status /proc/$appPid/mountinfo 2>/dev/null; fi; cat '$LogPath'" |
@@ -4354,7 +4363,7 @@ function Expect-NoAppEntry {
 # 在 Invoke-ServiceCase 完成后、Require-File 断言前调用，
 # 此时 logcat buffer 仍包含本次 insert 的 SRX 回调日志。
 function Invoke-CaptureScenario2MediastoreHookDiag {
-    $outFile = (Join-Path $PSScriptRoot "../../temp/scenario-2-mediastore-hook-diag.txt")
+    $outFile = (Join-Path $script:ArtifactDir "scenario-2-mediastore-hook-diag.txt")
     $lines = [System.Collections.Generic.List[string]]::new()
 
     $lines.Add("===media_provider_pid===")
@@ -4713,7 +4722,7 @@ function Test-FuseMountActive {
     }
 
     # 后续行为用例会重启应用并清空日志，先保留当前挂载确认失败现场。
-    $diagnosticDir = Join-Path $PSScriptRoot "../../temp"
+    $diagnosticDir = $script:ArtifactDir
     New-Item -ItemType Directory -Path $diagnosticDir -Force | Out-Null
     $diagnosticPath = Join-Path $diagnosticDir "fuse-mount-failure-$Scenario-$(Get-Date -Format yyyyMMdd-HHmmss).log"
     Invoke-Su "ps -A -o PID,PPID,NAME,ARGS; if [ -n '$appPid' ]; then cat /proc/$appPid/stat /proc/$appPid/status /proc/$appPid/mountinfo 2>/dev/null; fi; cat '$LogPath'" |

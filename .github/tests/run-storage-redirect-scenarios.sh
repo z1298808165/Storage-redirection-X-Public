@@ -8,6 +8,20 @@ trap 'echo "::warning file=run-storage-redirect-scenarios.sh,line=${BASH_LINENO[
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
+# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：
+# temp/test-flow/<启动时间戳>/，结果文件与诊断文件一律写到这里，不得散落在
+# 仓库根目录或脚本 CWD。同一天多轮测试互不覆盖；上游编排器
+# （run-android-test-flow.sh / verify-test-flow.ps1）会通过 SRT_ARTIFACT_DIR
+# 注入同一目录，保证一轮测试流的全部脚本产物聚在一起。
+SRT_ARTIFACT_DIR="${SRT_ARTIFACT_DIR:-}"
+if [ -z "$SRT_ARTIFACT_DIR" ]; then
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  SRT_ARTIFACT_DIR="${repo_root}/temp/test-flow/$(date +%Y%m%d-%H%M%S)"
+fi
+mkdir -p "$SRT_ARTIFACT_DIR"
+export SRT_ARTIFACT_DIR
+
+
 APP_ID="${APP_ID:-me.fakerqu.test.storageredirect}"
 CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${APP_ID}.json"
 READ_ONLY_OWNER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
@@ -1707,7 +1721,7 @@ run_service_case() {
   local test_case="$3"
   local pass_pattern="$4"
   shift 4
-  local output_file="scenario-${scenario}-${label}-result.txt"
+  local output_file="${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt"
 
   prepare_service_case "scenario-${scenario}-${label}" || {
     echo "service_case_prepare_failed scenario=${scenario} label=${label}" >&2
@@ -1755,7 +1769,7 @@ run_service_case() {
     timeout_seconds="$(service_case_timeout_seconds "$test_case")"
     if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then
       adb_su "rm -f '$freshness_marker'" >/dev/null
-      cat "$output_file" >>"scenario-${scenario}-result.txt"
+      cat "$output_file" >>"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt"
       if [ -z "$pass_pattern" ]; then
         return 0
       fi
@@ -1894,7 +1908,7 @@ expect_app_entry() {
 
   for attempt in 1 2 3 4 5; do
     if run_service_case "$scenario" "$label" "file_list_dir" '^PASS \[file_list_dir\]' --es file_dir "$dir" &&
-      grep -q "entries=.*${TEST_FILE}" "scenario-${scenario}-${label}-result.txt"; then
+      grep -q "entries=.*${TEST_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt"; then
       echo "app_view scenario=${scenario} logical_dir=${dir} expected_entry=${TEST_FILE}"
       return 0
     fi
@@ -1921,7 +1935,7 @@ expect_no_app_entry() {
 
   for attempt in 1 2 3; do
     run_service_case "$scenario" "$label" "file_list_dir" "" --es file_dir "$dir"
-    if grep -q "entries=.*${TEST_FILE}" "scenario-${scenario}-${label}-result.txt"; then
+    if grep -q "entries=.*${TEST_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt"; then
       echo "app_view scenario=${scenario} logical_dir=${dir} forbidden_entry_visible=${TEST_FILE}"
       return 1
     fi
@@ -2429,9 +2443,9 @@ run_mediastore_read_only_query_scenario() {
   local private_path="$PRIVATE_READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
   wait_mediastore_read_only_image &&
     run_service_case "$scenario" "read-only-image-query" "mediastore_query_read_only_image" '^PASS \[mediastore_query_read_only_image\]' --es file_name "$READ_ONLY_IMAGE_FILE" --es expected_path "$logical_path" &&
-    check_mediastore_bucket_id "scenario-${scenario}-read-only-image" "scenario-${scenario}-read-only-image-query-result.txt" "$READ_ONLY_MEDIA_ROOT" &&
+    check_mediastore_bucket_id "scenario-${scenario}-read-only-image" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-read-only-image-query-result.txt" "$READ_ONLY_MEDIA_ROOT" &&
     run_service_case "$scenario" "read-only-image-list" "file_list_dir" '^PASS \[file_list_dir\]' --es file_dir "$READ_ONLY_MEDIA_ROOT" &&
-    grep -q "entries=.*${READ_ONLY_IMAGE_FILE}" "scenario-${scenario}-read-only-image-list-result.txt" &&
+    grep -q "entries=.*${READ_ONLY_IMAGE_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-read-only-image-list-result.txt" &&
     run_service_case "$scenario" "read-only-image-file-read" "file_read" '^PASS \[file_read\]' --es file_path "$logical_path" &&
     check_file_exists "read-only-media-real" "$logical_path" &&
     check_file_missing "read-only-media-private" "$private_path"
@@ -3370,7 +3384,7 @@ run_quick_media_provider_restart_recovery_scenario() {
     return 1
   fi
 
-  preserved_app_pid="$(app_pid)"
+  preserved_app_pid="$(app_pid || true)"
   if [ -z "$preserved_app_pid" ] || [ "$preserved_app_pid" != "$initial_pid" ]; then
     echo "quick_restart_app_unexpectedly_changed scenario=${scenario} before=${initial_pid} after=${preserved_app_pid:-missing}" >&2
     return 1
@@ -3383,9 +3397,9 @@ run_quick_media_provider_restart_recovery_scenario() {
 check_health() {
   wait_storage_ready "health" 30 >/dev/null || return 1
   wait_media_provider_ready "health" 60 >/dev/null || return 1
-  adb shell "count=\$(ps -A | grep -c 'com.google.android.providers.media.module' || true); echo media_count=\$count; ps -A | grep 'com.google.android.providers.media.module' || true; pid=\$(pidof com.google.android.providers.media.module 2>/dev/null || true); echo media_pid=\$pid; if [ -n \"\$pid\" ]; then echo threads=\$(ls /proc/\$pid/task 2>/dev/null | wc -l); ps -A -o PID,RSS,NAME | grep 'com.google.android.providers.media.module' || true; fi" | tee media-health.txt
+  adb shell "count=\$(ps -A | grep -c 'com.google.android.providers.media.module' || true); echo media_count=\$count; ps -A | grep 'com.google.android.providers.media.module' || true; pid=\$(pidof com.google.android.providers.media.module 2>/dev/null || true); echo media_pid=\$pid; if [ -n \"\$pid\" ]; then echo threads=\$(ls /proc/\$pid/task 2>/dev/null | wc -l); ps -A -o PID,RSS,NAME | grep 'com.google.android.providers.media.module' || true; fi" | tee "${SRT_ARTIFACT_DIR}/media-health.txt"
   local count
-  count="$(sed -n 's/^media_count=//p' media-health.txt | tail -1)"
+  count="$(sed -n 's/^media_count=//p' "${SRT_ARTIFACT_DIR}/media-health.txt" | tail -1)"
   [ -z "$count" ] || [ "$count" -le 10 ]
 }
 
@@ -3491,7 +3505,7 @@ capture_file_monitor_diagnostics() {
 # 若 hook 未装载，buffer 为空，结合 running.log 的 "writer final" 可区分
 # "未安装" 与 "安装后未触发" 两种情况。
 capture_scenario2_mediastore_hook_diag() {
-  local outfile="scenario-2-mediastore-hook-diag.txt"
+  local outfile="${SRT_ARTIFACT_DIR}/scenario-2-mediastore-hook-diag.txt"
   {
     echo "===media_provider_pid==="
     local mp_pid
@@ -3558,15 +3572,15 @@ capture_fuse_diagnostic_sample() {
     adb_su "for pid in \$(pidof srx_daemon srx_companion 2>/dev/null || true); do echo \"---pid=\$pid---\"; cat /proc/\$pid/status 2>/dev/null | grep -E '^(Name|State|Threads):' || true; for fd in /proc/\$pid/fd/*; do [ -L \"\$fd\" ] || continue; target=\$(readlink \"\$fd\" 2>/dev/null || true); case \"\$target\" in *fuse*) echo \"fd=\$(basename \"\$fd\") target=\$target\";; esac; done; done"
     echo "===module_fuse_log_tail==="
     adb_su "grep -a -h -E 'fuse|backend_effective|scoped roots|mount failed' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -160 || true"
-  } >test-flow-fuse-sample.txt 2>&1 || true
+  } >"${SRT_ARTIFACT_DIR}/test-flow-fuse-sample.txt" 2>&1 || true
 }
 
 capture_test_flow_artifacts() {
-  adb logcat -b all -d >test-flow-logcat.txt 2>/dev/null || true
-  adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; case \"\$log\" in file_monitor.log|running.log) tail -1000 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; *) tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; esac; done" >test-flow-module-state.txt 2>/dev/null || true
-  adb_su "echo schema=1; echo ===fuse_capability_snapshot===; cat /data/adb/modules/storage.redirect.x/.fuse_capability 2>/dev/null || echo state=unknown; echo; echo ===backend_effective===; grep -a -h 'backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -80 || true; echo; echo ===fuse_cache_summary===; grep -a -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -120 || true" >test-flow-backend-diagnostic.txt 2>/dev/null || true
+  adb logcat -b all -d >"${SRT_ARTIFACT_DIR}/test-flow-logcat.txt" 2>/dev/null || true
+  adb_su "echo ===global_config===; cat '$GLOBAL_CONFIG' 2>/dev/null || true; echo; echo ===app_config===; cat '$CONFIG' 2>/dev/null || true; echo; echo ===module_state===; ls -la /data/adb/modules/storage.redirect.x 2>/dev/null || true; echo; mount | grep -E 'srx|storage.redirect|fuse' || true; echo; echo ===logs===; for log in running.log app_status.log file_monitor.log media_provider_state.log; do echo ---\$log---; case \"\$log\" in file_monitor.log|running.log) tail -1000 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; *) tail -240 /data/adb/modules/storage.redirect.x/logs/\$log 2>/dev/null || true ;; esac; done" >"${SRT_ARTIFACT_DIR}/test-flow-module-state.txt" 2>/dev/null || true
+  adb_su "echo schema=1; echo ===fuse_capability_snapshot===; cat /data/adb/modules/storage.redirect.x/.fuse_capability 2>/dev/null || echo state=unknown; echo; echo ===backend_effective===; grep -a -h 'backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -80 || true; echo; echo ===fuse_cache_summary===; grep -a -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -120 || true" >"${SRT_ARTIFACT_DIR}/test-flow-backend-diagnostic.txt" 2>/dev/null || true
   capture_fuse_diagnostic_sample
-  capture_file_monitor_diagnostics >test-flow-monitor-state.txt 2>/dev/null || true
+  capture_file_monitor_diagnostics >"${SRT_ARTIFACT_DIR}/test-flow-monitor-state.txt" 2>/dev/null || true
   {
     echo "===app_exit_info==="
     adb shell dumpsys activity exit-info "$APP_ID" || true
@@ -3578,7 +3592,7 @@ capture_test_flow_artifacts() {
       echo "--- /proc/${pid}/mountinfo ---"
       adb_su "cat '/proc/${pid}/mountinfo' 2>/dev/null | grep -E 'SrtProbe|Download/Test|SrtMonitor|/storage|/mnt/runtime|/mnt/user|/mnt/installer|/mnt/androidwritable|/mnt/pass_through|fuse|srx' || true"
     done
-  } >test-flow-app-mountinfo.txt 2>/dev/null || true
+  } >"${SRT_ARTIFACT_DIR}/test-flow-app-mountinfo.txt" 2>/dev/null || true
 }
 
 run_standard_scenario() {
@@ -3870,7 +3884,7 @@ run_owner_drift_own_dir_scenario() {
 run_scenario() {
   local scenario="$1"
   local targets_prepared_before_start=0
-  : >"scenario-${scenario}-result.txt"
+  : >"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt"
   echo "step 1/7: 应用场景配置"
   adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
   apply_config "$scenario"
@@ -4123,7 +4137,7 @@ SHARED_FUSE_AFTER_CAPTURED=0
 # 采集失败只留下 warning，绝不改变场景返回码。快照保存在 runner 工作区供 artifact 上传。
 capture_shared_fuse_snapshot() {
   local phase="$1"
-  local outfile="test-flow-shared-fuse-${phase}.txt"
+  local outfile="${SRT_ARTIFACT_DIR}/test-flow-shared-fuse-${phase}.txt"
   {
     echo "schema=1"
     echo "phase=${phase}"
