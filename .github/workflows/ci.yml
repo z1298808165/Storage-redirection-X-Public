@@ -592,11 +592,11 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 诊断轮恢复 40 参与（R11 发现「zygisk 未注入」系日志窗口误判：
-            # running.log 滚动窗口仅 89 行，MP 开机期标记全被滚掉，而
-            # .media_hook_install_state 有 88 字节内容未读取——40 可能一直有
-            # 宿主）。恢复 40 拿 state 证据定位真实断点；39 形态不适用维持排除。
-            version_scenario_filter: "2,26,40"
+            # 39 已在 A14 模拟器（本地 Magisk 形态）实测通过：组内代写 mkdir 的
+            # 发起者映射在引擎层生效，下载落映射目标且真实路径零穿透，取数走脚本
+            # 内建本地 HTTP 服务（10.0.2.2）。此前「模拟器形态不可行」的判断来自
+            # 旧构建的注入失效形态（2026-10-25 复核实证），本版本恢复覆盖。
+            version_scenario_filter: "2,26,39,40"
           - api: 34
             version: 14
             api_level: "34"
@@ -607,10 +607,9 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 诊断轮恢复 40 参与（R11 发现「zygisk 未注入」系日志窗口误判，
-            # .media_hook_install_state 有内容但未读取；恢复 40 以拿 state 证据
-            # 定位真实断点，39 形态不适用维持排除）。
-            version_scenario_filter: "2,26,40"
+            # 同 A13：39 在 A14 模拟器已实测通过（官方脚本连续两轮 PASS，
+            # status=8 下载完成、落映射目标、零穿透），恢复覆盖。
+            version_scenario_filter: "2,26,39,40"
           - api: 35
             version: 15
             api_level: "35"
@@ -621,9 +620,9 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 39 在模拟器形态不适用（AOSP downloads 独立 uid 直写，R7 实证「按
-            # 发起者映射落点」依赖共享 uid downloads，真机覆盖）；40 可跑。
-            version_scenario_filter: "2,26,40"
+            # 39 与 A13/A14 同步恢复：模拟器形态可跑（取数走本地 HTTP 服务，
+            # MP 引擎层组内代写映射成立）。
+            version_scenario_filter: "2,26,39,40"
           - api: 36
             version: 16
             api_level: "36"
@@ -634,8 +633,8 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 同 A15：39 模拟器形态不适用（真机覆盖），40 可跑。
-            version_scenario_filter: "2,26,40"
+            # 同 A15：39 恢复覆盖。
+            version_scenario_filter: "2,26,39,40"
           - api: 37
             version: 17
             api_level: "37.0"
