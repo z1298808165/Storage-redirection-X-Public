@@ -2502,7 +2502,7 @@ function Invoke-OwnerDriftOwnDirScenario {
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read-denied" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } "^FAIL \[file_read\]").Ok -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write-denied" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } "^FAIL \[file_write\]").Ok -and $ok
     # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
-    $ownerIntact = Test-Su "[ \$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
+    $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
     if (-not $ownerIntact) {
         $script:Failures.Add("scenario-$Scenario/owner-drift-repaired-unexpectedly") | Out-Null
         Write-Host "  - scenario-$Scenario/owner-drift-repaired-unexpectedly backend=$driftBackend"
@@ -2910,7 +2910,7 @@ function Invoke-ProviderSandboxScenario {
     $assertionsOk = $false
     foreach ($attempt in 1..4) {
         Start-Sleep -Seconds 5
-        $mountOk = (Invoke-Su "grep -Eq 'perf companion mount pkg=$ProviderPackage pid=[0-9]+ .*ok=true' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+        $mountOk = (Invoke-Su "grep -Eq 'perf companion mount pkg=$ProviderPackage pid=[0-9]+ .*ok=true' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
         if ($mountOk) {
             $assertionsOk = $true
             break
@@ -2918,9 +2918,9 @@ function Invoke-ProviderSandboxScenario {
         # 本轮请求行/挂载行未出现（companion 限流或启动慢）：重启提供器再试一轮。
         Invoke-Su "am force-stop '$ProviderPackage'; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
     }
-    $regressionReq = (Invoke-Su "grep -Eq 'req op=apply pid=[0-9]+ pkg=$ProviderPackage .*sandbox=0' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    $regressionSkip = (Invoke-Su "grep -q 'attach skipped.*pkg=$ProviderPackage.*reason=policy_registration_failed' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    $unexpectedSession = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+    $regressionReq = (Invoke-Su "grep -Eq 'req op=apply pid=[0-9]+ pkg=$ProviderPackage .*sandbox=0' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+    $regressionSkip = (Invoke-Su "grep -q 'attach skipped.*pkg=$ProviderPackage.*reason=policy_registration_failed' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+    $unexpectedSession = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
     if ($regressionReq -or $regressionSkip -or $unexpectedSession) {
         Write-Host "  - scenario-$Scenario/provider-sandbox: regression markers found (sandbox=0 request / policy_registration_failed / unexpected fuse session)"
         return $false
@@ -4644,7 +4644,7 @@ function Invoke-OwnerDriftOwnDirScenario {
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read-denied" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } "^FAIL \[file_read\]").Ok -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write-denied" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } "^FAIL \[file_write\]").Ok -and $ok
     # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
-    $ownerIntact = Test-Su "[ \$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
+    $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
     if (-not $ownerIntact) {
         $script:Failures.Add("scenario-$Scenario/owner-drift-repaired-unexpectedly") | Out-Null
         Write-Host "  - scenario-$Scenario/owner-drift-repaired-unexpectedly backend=$driftBackend"
@@ -5050,18 +5050,28 @@ function Invoke-ProviderSandboxScenario {
     Invoke-Su "content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
     Start-Sleep -Seconds 10
     Write-Host "  - scenario-$Scenario/provider-sandbox: assert mount request carries sandbox rules"
-    $reqOk = (Invoke-Su "grep -Eq 'req op=apply pid=[0-9]+ pkg=$ProviderPackage .*sandbox=1' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    $attachOk = (Invoke-Su "grep -qE 'attach ok pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    $scopedOk = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage .*sandbox=1' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
-    $attachSkipped = (Invoke-Su "grep -q 'attach skipped.*pkg=$ProviderPackage.*reason=policy_registration_failed' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+    $reqOk = (Invoke-Su "grep -Eq 'req op=apply pid=[0-9]+ pkg=$ProviderPackage .*sandbox=1' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+    $attachSkipped = (Invoke-Su "grep -q 'attach skipped.*pkg=$ProviderPackage.*reason=policy_registration_failed' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
     # 诊断输出，不参与断言：宿主接入与重定向证据仅记录，失败形态由上面的日志断言决定。
     Invoke-Su "grep -h 'SrtDlProbe' '$FileMonitorLogPath' 2>/dev/null | tail -3; grep -h 'pkg=$ProviderPackage' '$LogPath' 2>/dev/null | grep -hE 'attach|req op=apply' | tail -5" | Write-Host
     if (-not $reqOk) {
         Write-Host "  - scenario-$Scenario/provider-sandbox: mount request did not carry sandbox rules"
         return $false
     }
-    if (-not ($attachOk -or $scopedOk)) {
-        Write-Host "  - scenario-$Scenario/provider-sandbox: neither host attach ok nor scoped sandbox session"
+    # 正向标记与回归标记与 .sh 的 run_provider_sandbox_scenario 对齐：
+    # 通过 = perf companion mount ok=true（挂载流程成功，hook 兜底拓扑）或
+    # req sandbox=1 请求行；回归 = req sandbox=0 / attach skipped
+    # policy_registration_failed / 提供器出现模块会话。companion 限流或启动
+    # 慢时按 sh 同款重试（重启提供器再试一轮）。
+    $positiveOk = $false
+    for ($round = 1; $round -le 4 -and -not $positiveOk; $round++) {
+        Start-Sleep -Seconds 5
+        $mountOk = (Invoke-Su "grep -Eq 'perf companion mount pkg=$ProviderPackage pid=[0-9]+ .*ok=true' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+        if ($mountOk) { $positiveOk = $true; break }
+        Invoke-Su "am force-stop '$ProviderPackage'; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
+    }
+    if (-not $positiveOk) {
+        Write-Host "  - scenario-$Scenario/provider-sandbox: neither companion mount ok nor sandbox request after retries"
         return $false
     }
     if ($attachSkipped) {
@@ -5092,20 +5102,40 @@ function Invoke-DownloadOwnerAttributionScenario {
         if ($providerPid) { break }
     }
     Start-Sleep -Seconds 3
-    # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），改用本机
-    # HTTP 服务 + adb reverse 回环转发；显式设置了 SRT_DOWNLOAD_URL 时仍优先。
+    # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），用 runner 侧
+    # 本地 HTTP 服务取数；显式设置了 SRT_DOWNLOAD_URL 时仍优先。
     $dlUrl = $SrtDownloadUrl
     $dlServer = $null
     $dlDir = $null
     $dlPort = 18089
+    $usedReverse = $false
     if (-not $dlUrl) {
+        # 与 .sh 对齐：模拟器（ro.kernel.qemu=1）用宿主 0.0.0.0 绑定 + 模拟器
+        # 内建路由 10.0.2.2 直达（规避 adb reverse 时序风险与 localhost 目标的
+        # 特殊语义）；真机回退 adb reverse + 127.0.0.1 回环。
+        $isEmulator = (Invoke-Adb @("shell", "getprop ro.kernel.qemu") | Out-String).Trim() -eq "1"
         $dlDir = Join-Path ([IO.Path]::GetTempPath()) ("srt-dl-server-" + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $dlDir | Out-Null
         Set-Content -Path (Join-Path $dlDir "srt_download.bin") -Value "srt-download-probe"
-        Invoke-Adb @("reverse", "tcp:$dlPort", "tcp:$dlPort") | Out-Null
-        $dlServer = Start-Process -FilePath "python3" -ArgumentList @("-m", "http.server", "$dlPort", "--bind", "127.0.0.1", "--directory", $dlDir) -PassThru -WindowStyle Hidden
+        if ($isEmulator) {
+            $bindAddr = "0.0.0.0"
+            $dlUrl = "http://10.0.2.2:$dlPort/srt_download.bin"
+        } else {
+            Invoke-Adb @("reverse", "tcp:$dlPort", "tcp:$dlPort") | Out-Null
+            $usedReverse = $true
+            $bindAddr = "127.0.0.1"
+            $dlUrl = "http://127.0.0.1:$dlPort/srt_download.bin"
+        }
+        # Windows 一般只有 python.exe / py 启动器，按 python3 → python → py -3 依次回退。
+        $dlArgs = @("-m", "http.server", "$dlPort", "--bind", $bindAddr, "--directory", $dlDir)
+        $dlExe = $null
+        foreach ($candidate in @("python3", "python")) {
+            $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
+            if ($resolved) { $dlExe = $resolved.Source; break }
+        }
+        if (-not $dlExe) { $dlExe = "py"; $dlArgs = @("-3") + $dlArgs }
+        $dlServer = Start-Process -FilePath $dlExe -ArgumentList $dlArgs -PassThru -WindowStyle Hidden
         Start-Sleep -Seconds 1
-        $dlUrl = "http://127.0.0.1:$dlPort/srt_download.bin"
         Write-Host "  - scenario-$Scenario/download-owner: local download server url=$dlUrl"
     }
     Write-Host "  - scenario-$Scenario/download-owner: download url=$dlUrl"
@@ -5119,25 +5149,27 @@ function Invoke-DownloadOwnerAttributionScenario {
     $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $dlUrl } "^PASS \[downloadmanager_enqueue\]"
     if ($dlServer) {
         try { $dlServer.Kill() } catch {}
-        try { Invoke-Adb @("reverse", "--remove", "tcp:$dlPort") | Out-Null } catch {}
+        if ($usedReverse) {
+            try { Invoke-Adb @("reverse", "--remove", "tcp:$dlPort") | Out-Null } catch {}
+        }
         Remove-Item -Recurse -Force $dlDir -ErrorAction SilentlyContinue
     }
     if (-not $case.Ok) {
         Write-Host "  - scenario-$Scenario/download-owner: enqueue or download failed"
         return $false
     }
-    $mappedOk = (Invoke-Su "test -f '$DlOwnerMappedBackendFile'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+    $mappedOk = (Invoke-Su "test -f '$DlOwnerMappedBackendFile'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
     if (-not $mappedOk) {
         Write-Host "  - scenario-$Scenario/download-owner: file missing in mapped target $DlOwnerMappedRel"
         Invoke-Su "ls -la '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel' 2>/dev/null" | Write-Host
         return $false
     }
-    $leaked = (Invoke-Su "test -e '$DlOwnerRequestBackendFile'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+    $leaked = (Invoke-Su "test -e '$DlOwnerRequestBackendFile'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
     if ($leaked) {
         Write-Host "  - scenario-$Scenario/download-owner: request path leaked to real storage"
         return $false
     }
-    $unexpectedSession = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+    $unexpectedSession = (Invoke-Su "grep -qE 'fuse redirect mount start pkg=$ProviderPackage' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
     if ($unexpectedSession) {
         Write-Host "  - scenario-$Scenario/download-owner: unexpected fuse session for download provider"
         return $false
@@ -5159,19 +5191,33 @@ function Invoke-SystemUidAttributionScenario {
     Write-Host "  - scenario-$Scenario/system-uid: cleanup attribution probe dir"
     Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
     Invoke-Su ": > '$FileMonitorLogPath' 2>/dev/null" | Out-Null
-    # 后台 shell 进程先存活 12 秒再 mkdir：进程创建即入 pid 表。
-    $bg = Start-Process -FilePath "adb" -ArgumentList @("shell", "sleep 12; mkdir -p '/storage/emulated/0/$UidAttribProbeRel'") -PassThru -WindowStyle Hidden
+    # 引擎读取补丁（fuse read patch）随 MP FuseDaemon 启动联动安装；模拟器冷启动
+    # 下场景可能早于补丁就绪（R7 实证 mkdir 先于补丁安装 → 请求头无归因信号）。
+    # 与 .sh 对齐：running.log 标记或 .media_hook_install_state 的 stage=init_ok
+    # 任一出现即视为补丁链路已建立；均缺失时按超时放行（诊断 dump 兜底）。
+    $patchReady = $false
+    for ($patchWait = 0; $patchWait -lt 15 -and -not $patchReady; $patchWait++) {
+        $patchReady = ((Invoke-Su "grep -q 'fuse read patch installed' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0") -or
+            ((Invoke-Su "grep -q 'stage=init_ok' '/data/adb/modules/storage.redirect.x/logs/.media_hook_install_state' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0")
+        if ($patchReady) { break }
+        Start-Sleep -Seconds 2
+    }
+    if (-not $patchReady) { Write-Host "  - scenario-$Scenario/system-uid: read patch marker not found (proceed after timeout)" }
     # 三次尝试任一归因即通过（单槽接力在并发系统请求下存在互覆窗口）；
     # 每次尝试用独立目录（已存在目录的 mkdir 会被记录去重跳过）。
     $found = $false
     for ($attempt = 1; $attempt -le 3 -and -not $found; $attempt++) {
         $probeRel = "$UidAttribProbeRel/attempt$attempt"
         Write-Host "  - scenario-$Scenario/system-uid: attribution attempt $attempt/3"
-        $bg = Start-Process -FilePath "adb" -ArgumentList @("shell", "sleep 12; mkdir -p '/storage/emulated/0/$probeRel'") -PassThru -WindowStyle Hidden
+        # mkdir 前必须 exec（与 .sh 同款，2026-10-24 取证）：mksh 对 -c 脚本最后
+        # 一条命令 fork 子进程执行，子进程生命周期毫秒级，daemon 事件化扫描必然
+        # 错过（table_seen=false → identify_method=unknown）。exec 让 mkdir 在已
+        # 入表的同一进程内发起，与真实系统服务的归因语义一致。
+        $bg = Start-Process -FilePath "adb" -ArgumentList @("shell", "sleep 4; exec mkdir -p '/storage/emulated/0/$probeRel'") -PassThru -WindowStyle Hidden
         $seen = $false
         for ($wait = 0; $wait -lt 14; $wait++) {
             Start-Sleep -Seconds 2
-            $dirOk = (Invoke-Su "test -d '$BackendRoot/$probeRel'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+            $dirOk = (Invoke-Su "test -d '$BackendRoot/$probeRel'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
             if ($dirOk) { $seen = $true; break }
         }
         try { $bg.WaitForExit(5000) | Out-Null } catch {}
