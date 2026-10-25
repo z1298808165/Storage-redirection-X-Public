@@ -393,6 +393,26 @@ function Test-FuseBackendScenarioSupport {
     return $true
 }
 
+function Remove-ExcludedScenarios {
+    # 版本级场景排除（语义与 sh 版的 prune_version_scenario_excludes 一致）：只剔除、
+    # 不替换，默认范围保持全场景。CI 用 sh 版，本地 pwsh 验证需要同一套排除能力，
+    # 否则模拟 A17 这类「无外网不能验证下载场景」的形态只能靠手改矩阵。
+    param([int[]]$ScenarioList)
+    $excludeRaw = $env:SRT_VERSION_SCENARIO_EXCLUDE
+    if ([string]::IsNullOrWhiteSpace($excludeRaw)) { return $ScenarioList }
+    $excluded = New-Object System.Collections.Generic.List[int]
+    foreach ($part in @($excludeRaw -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $value = 0
+        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 40) {
+            throw "无效排除场景：$part"
+        }
+        $excluded.Add($value) | Out-Null
+    }
+    $kept = @($ScenarioList | Where-Object { -not $excluded.Contains($_) })
+    Write-Host "  - version scenario exclude=$($excluded -join ',') remaining=$($kept.Count)"
+    return $kept
+}
+
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
@@ -402,7 +422,7 @@ function Get-ScenarioList {
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(1..40)
+            return @(Remove-ExcludedScenarios -ScenarioList @(1..40))
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
@@ -414,29 +434,12 @@ function Get-ScenarioList {
         }
     }
     if ($requested.Count -gt 0) {
-        return @($requested | Select-Object -Unique)
+        return @(Remove-ExcludedScenarios -ScenarioList @($requested | Select-Object -Unique))
     }
 
-    $defaultScenarios = New-Object System.Collections.Generic.List[int]
-    $fuseSupported = Test-FuseBackendScenarioSupport
-    1..7 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    $defaultScenarios.Add(8) | Out-Null
-    9..15 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    $defaultScenarios.Add(29) | Out-Null
-    $defaultScenarios.Add(30) | Out-Null
-    16..19 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    20..22 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    $defaultScenarios.Add(28) | Out-Null
-    $defaultScenarios.Add(31) | Out-Null
-    $defaultScenarios.Add(32) | Out-Null
-    $defaultScenarios.Add(33) | Out-Null
-    $defaultScenarios.Add(34) | Out-Null
-    $defaultScenarios.Add(35) | Out-Null
-    $defaultScenarios.Add(36) | Out-Null
-    $defaultScenarios.Add(37) | Out-Null
-    23..24 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    25..27 | ForEach-Object { $defaultScenarios.Add($_) | Out-Null }
-    @($defaultScenarios)
+    # 默认范围即全场景 1-40：旧实现维护了一份手写清单且停在 37，本地全量验证实际
+    # 漏跑 38-40，与 CI 的 seq 1 40 不一致。
+    @(Remove-ExcludedScenarios -ScenarioList @(1..40))
 }
 
 function Apply-ScenarioConfig {

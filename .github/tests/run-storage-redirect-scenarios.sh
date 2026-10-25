@@ -810,46 +810,95 @@ supports_fuse_backend_scenarios() {
   return 0
 }
 
+prune_version_scenario_excludes() {
+  # 版本级场景排除（CI 矩阵按版本传入，如 A17 无外网不能验证依赖下载的场景 39）。
+  # 语义是**剔除**而不是替换：默认范围仍是全场景（1-40），显式窄范围（dispatch
+  # 输入或提交信息标记）也不会被矩阵覆盖。此前用「包含列表」直接覆盖
+  # SRT_SCENARIOS，既让默认退化成窄场景，也吞掉了 dispatch 的单点回归。
+  local exclude_raw="${SRT_VERSION_SCENARIO_EXCLUDE:-}"
+  [ -n "$exclude_raw" ] || return 0
+  local normalized="${exclude_raw//,/ }"
+  normalized="${normalized//;/ }"
+  local excluded=()
+  local item
+  for item in $normalized; do
+    case "$item" in
+      ''|*[!0-9]*)
+        echo "invalid exclude scenario: $item" >&2
+        return 1
+        ;;
+    esac
+    if [ "$item" -lt 1 ] || [ "$item" -gt 40 ]; then
+      echo "invalid exclude scenario: $item" >&2
+      return 1
+    fi
+    excluded+=("$item")
+  done
+
+  local kept=()
+  local scenario skip
+  for scenario in "${scenarios[@]}"; do
+    skip=0
+    for item in "${excluded[@]}"; do
+      if [ "$scenario" = "$item" ]; then
+        skip=1
+        break
+      fi
+    done
+    if [ "$skip" -eq 0 ]; then
+      kept+=("$scenario")
+    fi
+  done
+  if [ "${#kept[@]}" -gt 0 ]; then
+    scenarios=("${kept[@]}")
+  else
+    scenarios=()
+  fi
+  echo "version scenario exclude=${excluded[*]} remaining=${#scenarios[@]}"
+  return 0
+}
+
 build_scenario_list() {
   scenarios=()
-  # 版本级场景过滤（CI 矩阵按版本传入，如 A17 排除依赖外网的场景 39）：
-  # 与 SRT_FRESH_APP_SCENARIOS 同架构的脚本内收窄，不改 prepare 的单一来源。
-  if [ -n "${SRT_VERSION_SCENARIO_FILTER:-}" ]; then
-    SRT_SCENARIOS="$SRT_VERSION_SCENARIO_FILTER"
-  fi
   if [ -n "${SRT_SCENARIOS:-}" ]; then
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
       scenarios=($(seq 1 40))
-      return 0
-    fi
-    local scenario
-    for scenario in $normalized; do
-      case "$scenario" in
-        ''|*[!0-9]*)
+    else
+      local scenario
+      for scenario in $normalized; do
+        case "$scenario" in
+          ''|*[!0-9]*)
+            echo "invalid scenario: $scenario" >&2
+            return 1
+            ;;
+        esac
+        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 40 ]; then
           echo "invalid scenario: $scenario" >&2
           return 1
-          ;;
-      esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 40 ]; then
-        echo "invalid scenario: $scenario" >&2
-        return 1
-      fi
-      scenarios+=("$scenario")
-    done
-    return 0
+        fi
+        scenarios+=("$scenario")
+      done
+    fi
+  else
+    scenarios=(1 2 3 4 5 6 7)
+    scenarios+=(8)
+    scenarios+=(9 10 11 12 13 14 15 29 30 31 32 33 34)
+    scenarios+=(16 17 18 19)
+    scenarios+=(20 21 22)
+    scenarios+=(28)
+    scenarios+=(23 24)
+    scenarios+=(25 26 27)
+    scenarios+=(35 36 37 38 39 40)
   fi
 
-  scenarios=(1 2 3 4 5 6 7)
-  scenarios+=(8)
-  scenarios+=(9 10 11 12 13 14 15 29 30 31 32 33 34)
-  scenarios+=(16 17 18 19)
-  scenarios+=(20 21 22)
-  scenarios+=(28)
-  scenarios+=(23 24)
-  scenarios+=(25 26 27)
-  scenarios+=(35 36 37)
+  prune_version_scenario_excludes || return 1
+  if [ "${#scenarios[@]}" -eq 0 ]; then
+    # 显式只请求了本版本被排除的场景：该版本不适用，跳过而不是静默假通过。
+    echo "::warning::本版本排除后无剩余场景（scenarios=${SRT_SCENARIOS:-default} exclude=${SRT_VERSION_SCENARIO_EXCLUDE:-}）"
+  fi
+  return 0
 }
 
 remove_test_target_artifacts() {

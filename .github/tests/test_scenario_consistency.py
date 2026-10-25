@@ -987,7 +987,22 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_all_selector_expands_to_every_manifest_scenario(self) -> None:
         expected_max = max(self.ids)
         self.assertIn(f"scenarios=($(seq 1 {expected_max}))", self.bash)
-        self.assertIn(f"return @(1..{expected_max})", self.powershell)
+        # PowerShell 版同样以 1..max 作为全量范围（旧实现用手写清单且停在 37，
+        # 本地全量验证会漏跑 38-40）。
+        self.assertIn(f"@(1..{expected_max})", self.powershell)
+
+    def test_version_scenario_exclude_prunes_instead_of_replacing_scope(self) -> None:
+        # 版本级限制（如 A17 无外网排除 39）只能从已确定的范围里剔除，不能替换
+        # 范围本身：旧实现直接用它覆盖 SRT_SCENARIOS，既让默认范围退化成窄场景，
+        # 也吞掉了 dispatch 输入与提交标记的单点回归（2026-10-25 修复）。
+        for body in (self.bash, self.powershell):
+            self.assertIn("SRT_VERSION_SCENARIO_EXCLUDE", body)
+            self.assertNotIn("SRT_VERSION_SCENARIO_FILTER", body)
+        self.assertIn("prune_version_scenario_excludes", self.bash)
+        self.assertIn("Remove-ExcludedScenarios", self.powershell)
+        workflow = read(".github/workflows/ci.yml")
+        self.assertIn("version_scenario_exclude:", workflow)
+        self.assertNotIn("version_scenario_filter", workflow)
 
     def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
         if not (ROOT / ".github/workflows/ci-any-path.yml").exists():

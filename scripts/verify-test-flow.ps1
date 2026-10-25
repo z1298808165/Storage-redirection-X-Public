@@ -349,6 +349,11 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
             $wrapperLines += "`$env:SRT_SCENARIOS = '$($env:SRT_SCENARIOS -replace "'", "''")'"
         }
+        # 版本级场景排除与 CI 矩阵同语义（如 A17 排除依赖外网的场景 39）：本地复现
+        # 该类形态时必须一起透传，否则默认全量会跑出与 CI 不一致的范围。
+        if (-not [string]::IsNullOrWhiteSpace($env:SRT_VERSION_SCENARIO_EXCLUDE)) {
+            $wrapperLines += "`$env:SRT_VERSION_SCENARIO_EXCLUDE = '$($env:SRT_VERSION_SCENARIO_EXCLUDE -replace "'", "''")'"
+        }
         $wrapperLines += @(
             "# adb server 若由工具会话派生会随 Job 回收中途死亡；先杀掉再由本进程树重建。",
             "& '$adbPath' kill-server 2>`$null",
