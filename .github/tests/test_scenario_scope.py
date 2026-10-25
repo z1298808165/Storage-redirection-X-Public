@@ -179,7 +179,7 @@ class ScenarioScopeParseTest(unittest.TestCase):
         # 清单存在但结构异常时抛错，不能用默认上限掩盖。
         import tempfile
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             bad = Path(tmp) / "bad.json"
             bad.write_text('{"scenarios": "not-a-list"}', encoding="utf-8")
             with self.assertRaises(SCOPE.ScenarioScopeError):

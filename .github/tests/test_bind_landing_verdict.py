@@ -132,7 +132,7 @@ class BindLandingVerdictTest(unittest.TestCase):
         harness_src = template.replace("// __INJECT_VERDICT__", injected)
         self.assertNotIn("// __INJECT_VERDICT__", harness_src, "harness 占位符未替换")
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             harness_path = os.path.join(tmp, "harness.rs")
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "bind_landing_verdict")

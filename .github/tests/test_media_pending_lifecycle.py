@@ -109,7 +109,7 @@ public class PendingFixture {
     check(Files.exists(unrelated) && REDIRECTED_MEDIA_TARGETS.isEmpty());
   }
 '''
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             uri_dir = root / "android/net"
             uri_dir.mkdir(parents=True)
@@ -252,7 +252,7 @@ public class PublicFallbackFixture {
     System.out.println("OK");
   }
 '''
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             java_text = prefix + pending + "  }\n" + main + fallback + "}\n"
             (root / "PublicFallbackFixture.java").write_text(java_text, encoding="utf-8")

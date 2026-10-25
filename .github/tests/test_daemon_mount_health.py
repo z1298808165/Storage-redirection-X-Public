@@ -115,7 +115,7 @@ class DaemonMountHealthTest(unittest.TestCase):
         # 把抽取函数里的 `log::warn!` 改成 crate 根的 `warn!`（模板用 #[macro_use] 提供）。
         harness_src = harness_src.replace("log::warn!", "warn!")
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             harness_path = os.path.join(tmp, "harness.rs")
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "daemon_mount_health")

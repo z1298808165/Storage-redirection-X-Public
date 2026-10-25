@@ -49,7 +49,7 @@ class ResolveBuildCountTest(unittest.TestCase):
 
 class BuildCountBaselineTest(unittest.TestCase):
     def test_record_version_keeps_highest_count(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             baseline_path = Path(directory) / "build-version-baseline.json"
             with mock.patch.object(RESOLVER, "BUILD_VERSION_BASELINE_PATH", baseline_path):
                 RESOLVER.write_build_count_baseline("1.2.59", 82)

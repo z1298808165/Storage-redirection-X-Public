@@ -66,7 +66,7 @@ class CiTransitionTest(unittest.TestCase):
         self.assertIn("does not trigger CI", stderr.getvalue())
 
     def test_reads_stable_manifest_version(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             path = Path(directory) / "update.json"
             path.write_text(
                 json.dumps({"stable": {"version": "1.2.57"}}),
