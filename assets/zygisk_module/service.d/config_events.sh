@@ -765,6 +765,13 @@ handle_package_added_event() {
   changed_file="$LOGS_DIR/.new_app_config_packages.tmp"
   : > "$changed_file"
 
+  # 卸载流程会把配置置回 disabled 并留标记（文件保留以免丢用户自定义规则）。
+  # 重装时先恢复这类配置，否则 auto-enable 会因「profile 已存在」跳过写入，
+  # 开关永远停在关闭态——这正是「卸载重装后不自动开启」的根因。
+  if restore_uninstall_disabled_config "$package_name"; then
+    echo "$package_name" >> "$changed_file"
+  fi
+
   user_ids=$(resolve_package_event_user_ids "$event_user_id" "$package_name")
   if [ -z "$user_ids" ]; then
     log -p w -t Boot "skip package added event: no user resolved pkg=$package_name"
@@ -933,6 +940,33 @@ disable_package_config() {
     return 1
   }
   chmod 644 "$config_file" 2>/dev/null
+  # 卸载禁用标记：配置文件保留（用户自定义规则不丢），但重装时需要据此区分
+  # 「卸载流程关的」与「用户手工关的」——前者在 added 事件时恢复 enabled，
+  # 后者保持 disabled 不受打扰。只有卸载流程会产生这个标记（唯一调用点）。
+  : > "$config_file.uninstall_disabled"
+  return 0
+}
+
+restore_uninstall_disabled_config() {
+  package_name="$1"
+  config_file="$APPS_CONFIG_DIR/$package_name.json"
+  marker_file="$config_file.uninstall_disabled"
+  [ -f "$marker_file" ] || return 1
+  rm -f "$marker_file"
+  [ -f "$config_file" ] || return 1
+  grep -Eq '"enabled"[[:space:]]*:[[:space:]]*false' "$config_file" 2>/dev/null || return 0
+
+  tmp_file="$config_file.tmp"
+  sed 's/"enabled"[[:space:]]*:[[:space:]]*false/"enabled": true/g' "$config_file" > "$tmp_file" 2>/dev/null || {
+    rm -f "$tmp_file"
+    return 1
+  }
+  mv "$tmp_file" "$config_file" || {
+    rm -f "$tmp_file"
+    return 1
+  }
+  chmod 644 "$config_file" 2>/dev/null
+  log -p i -t Boot "restored config disabled by uninstall: pkg=$package_name"
   return 0
 }
 
