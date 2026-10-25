@@ -594,7 +594,8 @@ jobs:
             disable_linux_hw: auto
             # 默认跑全场景（1-40）：39 已在 A14 模拟器实测通过（组内代写 mkdir 的
             # 发起者映射在引擎层生效，取数走脚本内建本地 HTTP 服务 10.0.2.2）。
-            # 无环境级排除项，故不设 version_scenario_exclude。
+            # 矩阵不写死场景：范围由测试流参数（SRT_SCENARIOS / dispatch 输入 /
+            # 提交信息标记）决定，如需环境级限制才用 version_scenario_exclude。
           - api: 34
             version: 14
             api_level: "34"
@@ -638,12 +639,10 @@ jobs:
             root_method: ksu
             adb_root_mode: su0
             fresh_app_scenarios: "1,2,29,32,33"
-            # A17 模拟器镜像在 runner 上网络验证失败（R2/R5/R6/R7 四轮实证：
-            # github 与 connectivity check 均不可达，-dns-server 8.8.8.8 亦无效），
-            # DownloadManager 下载将永远停在 WAITING_FOR_NETWORK，场景 39 无法
-            # 在该版本验证；环境级限制只剔除 39，其余场景仍走默认全量（真机覆盖
-            # 该场景）。待镜像网络问题定位后再移除该排除项。
-            version_scenario_exclude: "39"
+            # A17 与其他版本一致执行全量 1-40，含依赖下载的场景 39。此前曾用
+            # version_scenario_exclude 排除 39 规避镜像网络验证失败，现改为不在矩阵
+            # 里写死排除项：场景范围只由测试流参数决定，网络不可达时由 39 在 CI 直接
+            # 暴露而不是被静默跳过。
             gpu_mode: swiftshader_indirect
             timeout_minutes: 50
             boot_timeout: 1800
