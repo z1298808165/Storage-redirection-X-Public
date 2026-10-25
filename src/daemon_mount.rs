@@ -1062,10 +1062,11 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
             log::warn!("daemon mount state save failed pid={}", request.pid);
         }
-        // 自有媒体目录恢复放在所有存储根挂载动作之后（与 companion 路径同顺序）：
-        // 提前到 apply 阶段做会被随后的视图根 FUSE 挂载整体遮蔽。语义与失败留痕见
+        // 自有私有目录恢复放在所有存储根挂载动作之后（与 companion 路径同顺序）：
+        // 提前到 apply 阶段做会被随后的视图根 FUSE 挂载整体遮蔽。scoped 根透传给
+        // data/obb 的覆盖跳过判据，语义与失败留痕见
         // `MountPlanner::restore_own_private_system_view`。
-        let restored_own_private = planner.restore_own_private_system_view();
+        let restored_own_private = planner.restore_own_private_system_view(scoped_fuse_roots);
         log::info!(
             "own private system view restored count={} pkg={} pid={}",
             restored_own_private,

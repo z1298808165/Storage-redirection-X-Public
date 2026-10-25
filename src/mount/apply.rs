@@ -691,18 +691,25 @@ impl MountPlanner {
         data_media_root: &str,
         scoped_fuse_roots: &[String],
     ) -> usize {
-        // **只恢复 `Android/media/<pkg>`**（2026-10-25 真机回归）。
+        // 恢复三类自有私有目录（`Android/{data,media,obb}/<pkg>`）。
         //
-        // `Android/data/<pkg>` 是模块沙箱的宿主目录：重定向根本身就是
-        // `Android/data/<pkg>/sdcard` 及其子树。把它 bind 回系统 MediaProvider FUSE 后，
-        // 整条重定向链的源头都依赖 MediaProvider 的 FUSE 连接——MediaProvider 一旦重启
-        // （测试流 preflight 与系统自愈都会做），旧连接变死层，沙箱根立刻 ENOTCONN，
-        // 应用所有写入失败（真机实测场景 2/3/4/12 全灭，落点文件双双缺失）。
-        // `Android/obb/<pkg>` 同理保持 f2fs 直连，没有跨进程 WAL 共享需求。
+        // namespace 形态下 storage root 整体 bind 到沙箱（`Android/data/<pkg>/sdcard`），
+        // 自有私有目录若不 bind 回真实位置，应用保存/下载到自己私有目录的文件会多套
+        // 一层 sdcard/ 且真实路径缺失（CI A17 场景 34 实证：写入成功但可见层与后端
+        // 双双查无此文件）。2026-10-25 曾把恢复收窄到仅 media，依据是「data 恢复让
+        // 沙箱根在 MP 重启后 ENOTCONN（真机场景 2/3/4/12 全灭）」——该观察与同会话
+        // 后来定位的 `prepare_real_storage_anchor` 摘根缺陷同场发生，属误归因；
+        // 恢复三类目录的全量 CI（run 40167024322，场景 1-38+40 五版本）是绿的。
         //
-        // `Android/media/<pkg>` 才是「Xposed 插件与外部管理器共享数据库」这类场景的
-        // 宿主目录（XRadiant/Sen 均如此），且不参与沙箱根，才是需要统一缓存层的目标。
-        let private_roots = [format!("Android/media/{}", self.package_name)];
+        // `Android/media/<pkg>` 无条件恢复（XRadiant/Sen 这类跨进程共享数据库场景，
+        // 两层页缓存分裂见下）。`data`/`obb` 在被 scoped FUSE 覆盖时跳过：那种形态
+        // 下自有私有路径由 srx FUSE 数据面按真实路径处理，再叠 bind 会绕开引擎、
+        // 让监视记录与清理账本对不上。
+        let private_roots = [
+            format!("Android/data/{}", self.package_name),
+            format!("Android/media/{}", self.package_name),
+            format!("Android/obb/{}", self.package_name),
+        ];
         let mut restored_count = 0usize;
         // 系统 uid 没有 app-specific 外部存储语义：它们在 `/data/media/<user>/Android`
         // 下没有按包名隔离的目录，逐个 mkdir 只会在开机风暴期刷出成片告警。
@@ -721,12 +728,15 @@ impl MountPlanner {
         };
         for relative in private_roots {
             let storage_target = paths::join(storage_path, &relative);
+            let is_media = relative.starts_with("Android/media/");
             if scoped_fuse_roots
                 .iter()
                 .any(|root| paths::eq_ignore_case(&storage_target, root))
+                || (!is_media
+                    && is_covered_by_scoped_fuse_mount(&storage_target, scoped_fuse_roots))
             {
                 log::info!(
-                    "skip own private restore (dedicated scoped fuse): {}",
+                    "skip own private restore (handled by scoped fuse): {}",
                     storage_target
                 );
                 continue;
@@ -791,7 +801,13 @@ impl MountPlanner {
                 // 的话应用访问自己的媒体目录反而 EACCES（`ky2: 无法打开数据库文件`）。
                 // 原生语义下属主就是应用本身，这里一次性对齐，之后的新文件由
                 // companion fchown 链路维持。
-                self.normalize_own_media_ownership(data_media_root, &relative);
+                //
+                // **只归一化 media 子树**：`data`/`obb` 的属组漂移由一次性迁移
+                // （owner-migration）与场景 6 的「漂移不被运行期修复」契约管辖，
+                // 运行期 chown 会把注入的漂移夹具修回、破坏防回潮守卫。
+                if is_media {
+                    self.normalize_own_media_ownership(data_media_root, &relative);
+                }
                 restored_count += 1;
             } else {
                 // 失败必须留痕：这条恢复是跨进程 SQLite 共享缓存层的唯一保证，
@@ -902,7 +918,9 @@ impl MountPlanner {
     /// `/storage/emulated/0` 从 `srx_fuse_host` 变成 `254:58 /media/0/.../sdcard`）。
     /// 这里只做「从当前命名空间里未被重定向覆盖的系统视图根建一个私有锚点」，
     /// 全程不触碰存储根。
-    pub fn restore_own_private_system_view(&mut self) -> usize {
+    /// 参数 `scoped_fuse_roots` 是本轮规划的 scoped FUSE 根：`data`/`obb` 被其覆盖时
+    /// 跳过恢复（自有私有路径由 srx FUSE 数据面按真实路径处理），media 无条件恢复。
+    pub fn restore_own_private_system_view(&mut self, scoped_fuse_roots: &[String]) -> usize {
         // 系统 uid（<10000）没有 app-specific 外部存储语义，也不该去创建
         // `/data/media/<user>/Android/{data,media,obb}/<pkg>`；跳过可避免开机时整片
         // 系统服务刷出 `own private source mkdir failed`。
@@ -911,7 +929,7 @@ impl MountPlanner {
         }
         let storage_path = paths::storage_user_root_for_user(self.user_id);
         let data_media_root = paths::data_media_user_root_for_user(self.user_id);
-        self.restore_own_private_directories(&storage_path, &data_media_root, &[])
+        self.restore_own_private_directories(&storage_path, &data_media_root, scoped_fuse_roots)
     }
 
     /// 建立（或复用）指向系统存储视图的私有锚点，返回**存储根结构**的路径。

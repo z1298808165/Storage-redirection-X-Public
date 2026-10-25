@@ -1245,7 +1245,8 @@ fn handle_child_process(
         // 消费方（MediaProvider 自身、跨包管理器、Shizuku/shell）经系统 MediaProvider FUSE
         // 访问同一物理文件时属于另一层内核缓存，SQLite 的 `-shm` mmap 与页内锁跨不过去，
         // WAL 被判无效后回滚到上一次 checkpoint 的主库（真机 XRadiant 主库落到 4096B 空页）。
-        let restored_own_private = mount_mgr.restore_own_private_system_view();
+        // scoped 根透传给 data/obb 的覆盖跳过判据（FUSE 数据面自理自有私有路径）。
+        let restored_own_private = mount_mgr.restore_own_private_system_view(scoped_fuse_roots);
         log::info!(
             "own private system view restored count={} pkg={} pid={}",
             restored_own_private,
