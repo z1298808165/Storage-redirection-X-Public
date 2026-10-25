@@ -992,17 +992,34 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn(f"@(1..{expected_max})", self.powershell)
 
     def test_version_scenario_exclude_prunes_instead_of_replacing_scope(self) -> None:
-        # 版本级限制（如 A17 无外网排除 39）只能从已确定的范围里剔除，不能替换
-        # 范围本身：旧实现直接用它覆盖 SRT_SCENARIOS，既让默认范围退化成窄场景，
-        # 也吞掉了 dispatch 输入与提交标记的单点回归（2026-10-25 修复）。
+        # 版本级限制只能从已确定的范围里剔除，不能替换范围本身：旧实现直接用它
+        # 覆盖 SRT_SCENARIOS，既让默认范围退化成窄场景，也吞掉了 dispatch 输入与
+        # 提交标记的单点回归（2026-10-25 修复）。
         for body in (self.bash, self.powershell):
             self.assertIn("SRT_VERSION_SCENARIO_EXCLUDE", body)
             self.assertNotIn("SRT_VERSION_SCENARIO_FILTER", body)
         self.assertIn("prune_version_scenario_excludes", self.bash)
         self.assertIn("Remove-ExcludedScenarios", self.powershell)
-        workflow = read(".github/workflows/ci.yml")
-        self.assertIn("version_scenario_exclude:", workflow)
-        self.assertNotIn("version_scenario_filter", workflow)
+
+    def test_ci_matrix_does_not_hardcode_scenario_scope(self) -> None:
+        # 场景范围必须由测试流参数动态决定（SRT_SCENARIOS / dispatch 输入 / 提交
+        # 信息标记），矩阵只负责把版本级排除项透传给脚本。任何写死包含列表或排除
+        # 项都会让默认范围或单点回归静默失真（2026-10-25：A17 也曾写死排除 39）。
+        workflow = yaml.safe_load(read(".github/workflows/ci.yml"))
+        matrix = workflow["jobs"]["test-flow"]["strategy"]["matrix"]["android"]
+        self.assertTrue(matrix)
+        for entry in matrix:
+            version = entry.get("version")
+            self.assertNotIn("version_scenario_filter", entry, f"A{version}")
+            self.assertNotIn("version_scenario_exclude", entry, f"A{version}")
+        env = workflow["jobs"]["test-flow"]["env"]
+        self.assertIn("SRT_VERSION_SCENARIO_EXCLUDE", env)
+        self.assertNotIn("SRT_VERSION_SCENARIO_FILTER", env)
+        # 正式发布固定执行全量，不参与矩阵排除（环境问题必须在 CI 阶段暴露）。
+        release = yaml.safe_load(read(".github/workflows/release.yml"))
+        release_env = release["jobs"]["test-flow"]["env"]
+        self.assertEqual(release_env["SRT_SCENARIOS"], "all")
+        self.assertNotIn("SRT_VERSION_SCENARIO_EXCLUDE", release_env)
 
     def test_any_path_workflow_runs_all_android_test_flow_shards(self) -> None:
         if not (ROOT / ".github/workflows/ci-any-path.yml").exists():

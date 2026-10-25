@@ -10,14 +10,14 @@ CI 的 ``prepare`` job 输出，使 dispatch inputs 与提交标记成为唯一�
 
 - 非法范围（非数字、越界、重复、空元素、分隔符后缺数字、标记后无编号）必须显式
   抛错，绝不静默回退到全量。这是「非法范围不得静默跑全量」的硬保证：标记写错时
-  整条 CI 直接失败，而不是悄悄把 37 个场景全跑一遍。
+  整条 CI 直接失败，而不是悄悄把全部场景跑一遍。
 - 派发输入或提交标记写 ``all``（不区分大小写）按现有输入约定表示全量，不报错。
 - 没有标记也没有 dispatch 输入时，范围保持 ``all``、验证模式 ``full``、
   且仍走完整发布流程（publish_ci=true）。
 - 一旦范围受限，发布开关关闭（publish_ci=false），下游发布相关 job 必须跳过，
   既不发布 CI 资产，也不更新 update.json，也不会额外触发一次全量 CI。
 - 真实清单（``.github/tests/storage-redirect-scenarios.json``）存在但结构异常时
-  必须抛错，绝不用默认 37 掩盖解析失败；只在清单文件确实缺失时才回退默认上限。
+  必须抛错，绝不用默认上限掩盖解析失败；只在清单文件确实缺失时才回退默认上限。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_MAX_SCENARIO = 38
+DEFAULT_MAX_SCENARIO = 40
 # 标记「单场景」只在后接空白/冒号/数字时才算范围标记，避免把正文里
 # 「单场景运行能力」这类 incidental 提及误判为范围标记。
 MARKER_KEYWORD = re.compile(r"单场景[：:]?(?=[\s0-9])")
@@ -49,7 +49,7 @@ def max_scenario_from_json(path: Path | None = None) -> int:
     """从场景清单读取合法上限。
 
     仅在清单文件确实缺失时回退默认上限；清单存在但无法解析或结构异常时抛错，
-    绝不静默用默认 37 掩盖解析失败。
+    绝不静默用默认上限掩盖解析失败。
     """
     if path is None:
         path = Path(__file__).resolve().parents[1] / "tests" / "storage-redirect-scenarios.json"

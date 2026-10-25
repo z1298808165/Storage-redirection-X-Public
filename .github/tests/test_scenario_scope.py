@@ -176,7 +176,7 @@ class ScenarioScopeParseTest(unittest.TestCase):
         )
 
     def test_max_scenario_corrupt_manifest_raises(self) -> None:
-        # 清单存在但结构异常时抛错，不能用 37 掩盖。
+        # 清单存在但结构异常时抛错，不能用默认上限掩盖。
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
