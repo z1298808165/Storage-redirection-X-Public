@@ -78,9 +78,19 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
     // （AMS 启动超时约束），宿主握手最坏需要数秒，期间应用会看到未套规则的
     // 原生全景（沙箱/隐藏规则的可见窗口）。屏障把这段窗口内的视图变成只读空
     // 目录，FUSE 落地后压在屏障之上；挂载链路彻底失败时屏障常驻（fail-closed）。
+    //
+    // 例外：监视专用会话（未配置应用捕获）不得走 fail-closed。这类请求没有任何
+    // 沙箱/隐藏规则要保护，屏障只会在 FUSE 链路失败时把应用存储视图永久变成
+    // 空只读目录（公开 issue #3：MIUI 14/A13 零配置设备全部应用
+    // /storage/emulated/0 为空、写入 EROFS）。监视是辅助能力，失败语义必须是
+    // fail-open：清理死宿主层与历史残留屏障后保留原生 MediaProvider FUSE 视图。
     let barrier_roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(request);
     if !barrier_roots.is_empty() {
-        mount_storage_view_barriers(request, &barrier_roots);
+        if request.is_monitor_only {
+            recover_storage_view_roots_for_monitor(request, &barrier_roots);
+        } else {
+            mount_storage_view_barriers(request, &barrier_roots);
+        }
     }
     let mount_started_ms = monotonic_ms();
     crate::mount_intent::mark_state(
@@ -140,7 +150,7 @@ const STORAGE_VIEW_BARRIER_DATA: &[u8] = b"size=4m\0";
 // 就位后显式回收——见 detach_barriers_shadowed_by_view_fuse。
 fn mount_storage_view_barriers(request: &CompanionMountRequest, roots: &[String]) {
     for root in roots {
-        if mount_one_storage_view_barrier(request, root) {
+        if mount_one_storage_view_barrier(request, root, true) {
             log::info!(
                 "storage view barrier mounted root={} pid={} pkg={}",
                 root,
@@ -151,7 +161,30 @@ fn mount_storage_view_barriers(request: &CompanionMountRequest, roots: &[String]
     }
 }
 
-fn mount_one_storage_view_barrier(request: &CompanionMountRequest, root: &str) -> bool {
+/// 监视专用会话的 fail-open 恢复：只清理、不落屏障。
+///
+/// 与重定向应用不同，未配置应用的捕获会话失败后应用必须回到原生存储视图。这里
+/// 复用屏障子进程的清理段（死宿主层 + 历史残留屏障——含旧版本 fail-closed 语义
+/// 在受损设备上留下的空只读 tmpfs），随后不再压新屏障；宿主握手若仍失败，应用
+/// 命名空间里留下的就是原生 MediaProvider FUSE 视图，存储功能不受损。
+fn recover_storage_view_roots_for_monitor(request: &CompanionMountRequest, roots: &[String]) {
+    for root in roots {
+        if mount_one_storage_view_barrier(request, root, false) {
+            log::info!(
+                "storage view monitor recover cleaned root={} pid={} pkg={}",
+                root,
+                request.pid,
+                request.package_name
+            );
+        }
+    }
+}
+
+fn mount_one_storage_view_barrier(
+    request: &CompanionMountRequest,
+    root: &str,
+    install_barrier: bool,
+) -> bool {
     let Ok(c_ns) = CString::new(format!("/proc/{}/ns/mnt", request.pid)) else {
         return false;
     };
@@ -263,6 +296,10 @@ fn mount_one_storage_view_barrier(request: &CompanionMountRequest, root: &str) -
                         break;
                     }
                 }
+            }
+            if !install_barrier {
+                // fail-open 恢复模式：清理完成后立即结束，不压屏障。
+                libc::_exit(0);
             }
             let mounted = mount(
                 std::ptr::null(),
