@@ -1198,6 +1198,23 @@ fn handle_child_process(
                 "after_clear",
             );
         }
+        // 自有媒体目录恢复必须放在**所有存储根挂载动作之后**。此前它写在
+        // `apply_sdcard_redirect` 内部（早于 `start_scoped_fuse_services`），随后 srx FUSE
+        // 覆盖存储根会把子 bind 整体遮蔽——同一构建时而生效时而丢失（真机 2026-10-25：
+        // 支付宝连续几次挂载里只有 preattach 那次留下 bind）。放在这里对
+        // preattach / scoped / namespace fallback 三种形态统一生效。
+        //
+        // 语义：`Android/media/<pkg>` 若留在 srx 宿主 FUSE 内，后端是 f2fs 直连；未接管的
+        // 消费方（MediaProvider 自身、跨包管理器、Shizuku/shell）经系统 MediaProvider FUSE
+        // 访问同一物理文件时属于另一层内核缓存，SQLite 的 `-shm` mmap 与页内锁跨不过去，
+        // WAL 被判无效后回滚到上一次 checkpoint 的主库（真机 XRadiant 主库落到 4096B 空页）。
+        let restored_own_private = mount_mgr.restore_own_private_system_view();
+        log::info!(
+            "own private system view restored count={} pkg={} pid={}",
+            restored_own_private,
+            request.package_name,
+            request.pid
+        );
         let mounted_targets = mount_mgr.take_mounted_targets();
         // 新进程首次接入存储视图时的属主交接修复（挂载应答前同步执行）：原生
         // FUSE（未映射路径、namespace 回退、未挂载窗口）要求应用私有子树属主是

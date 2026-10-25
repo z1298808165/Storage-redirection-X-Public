@@ -2,6 +2,14 @@ pub const MODULE_DIR: &str = "/data/adb/modules/storage.redirect.x";
 pub const MOUNT_STATE_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_state";
 pub const MOUNT_INTENT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_intent";
 pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage";
+/// 自有私有目录恢复专用的系统视图锚点根（`tmp/system_view/<user>`）。
+///
+/// 该锚点由应用命名空间内的 `/mnt/user/<user>/emulated` **整根** bind 而来，用于把
+/// `Android/{data,media,obb}/<pkg>` 绑回系统 MediaProvider FUSE 视图（单一缓存层）。
+/// 与 [`REAL_STORAGE_TMP_DIR`] 分开存放：后者的锚点语义是「存储根结构」
+/// （`<anchor>/Android/...`），而整根 bind 之后还要多一层 `<user>`
+/// （`<anchor>/<user>/Android/...`），两者混用会拼出错误路径。
+pub const SYSTEM_VIEW_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/system_view";
 /// 宿主子进程命名空间内 MediaProvider FUSE 挂载的绑定视图（按用户子树挂在
 /// `tmp/fuse_host_media/<user>`）。宿主对自有 `Android/media/<pkg>` 下 sqlite 三件套的
 /// 读写经该视图进行，与其它调用方（未重定向应用、MediaProvider 自身）共享同一份内核
