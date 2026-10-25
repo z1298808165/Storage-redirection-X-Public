@@ -175,7 +175,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 `allowed_real_paths` 和 `path_mappings` 可以同时存在。路径映射优先级更高，所以允许 `DCIM` 同时映射 `DCIM/MyApp -> Pictures/MyApp` 时，`DCIM` 下其他内容走真实路径，`DCIM/MyApp` 走映射目标；同一路径既允许又映射时，最终走映射目标。
 
-启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>` 和 `Android/obb/<包名>` 子树默认保持真实路径。这是应用私有目录的系统语义，不等同于把整个 `Android` 目录加入 `allowed_real_paths`；其它应用包名的私有目录仍按正常规则处理。
+启用重定向时，当前应用自己的 `Android/data/<包名>`、`Android/media/<包名>` 和 `Android/obb/<包名>` 子树默认保持真实路径。这是应用私有目录的系统语义，不等同于把整个 `Android` 目录加入 `allowed_real_paths`；其它应用包名的私有目录仍按正常规则处理。其中 `Android/media/<包名>` 子树在 MediaProvider 侧保留系统原生的共享语义：同用户的其它应用访问该子树不会被按属主拒绝（插件、管理器等跨应用读取媒体与配置的场景依赖这一点）；`Android/data/<包名>` 与 `Android/obb/<包名>` 仍按属主私有语义校验。系统代写属主修复只调整 owner 并保留原生 gid；升级后的存量迁移只恢复 Android/data 下受限私有目录的 `ext_data_rw`（1078）组，不会把文件或共享媒体子目录统一改成 `media_rw`（1023）。
 
 #### 任意路径映射
 
