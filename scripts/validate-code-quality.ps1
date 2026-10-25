@@ -105,10 +105,14 @@ function Get-HumanReadableText {
     if ($Path -match '(?i)\.md$') {
         $candidate = $trimmed -replace '^#{1,6}\s*', ''
         $candidate = $candidate -replace '^(?:[-*+]\s+|\d+[.)]\s+|>\s*)', ''
+        # 纯命令行不是自然语言：除常见构建工具外，gh（Actions 查询与派发）以及
+        # `VAR=value cmd` 形式的环境前缀命令也必须识别，否则文档里可直接复制的命令
+        # 会被误判成英文自然语言（2026-10-25 窄场景命令块实测）。
         if ($candidate -match '^\|.*\|$' -or
             $candidate -match '^[-:| ]+$' -or
             $candidate -match '^(?i:Storage Redirect X)(?:\s+v?[0-9.]+)?$' -or
-            $candidate -match '^(?i:cargo|git|node|npm|pnpm|yarn|gradle|adb|powershell|bash|sh|rustup)\s+' -or
+            $candidate -match '^(?i:cargo|gh|git|node|npm|pnpm|yarn|gradle|adb|powershell|pwsh|bash|sh|rustup)\s+' -or
+            $candidate -match '^[A-Z_][A-Z0-9_]*=\S*\s+\S+' -or
             $candidate -match '^(?:[A-Za-z]:[\\/]|[./~][\\/])') {
             return ""
         }
