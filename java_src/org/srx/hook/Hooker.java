@@ -2846,9 +2846,10 @@ public class Hooker {
   }
 
   /**
-   * 将 MediaProvider 实际尝试创建的目录原路径送入监视台账。
+   * 将 MediaProvider 即将尝试创建的目录原路径登记为监视归因 hint。
    *
-   * <p>这里记录的是 mkdir/mkdirs/native mkdir 回调当前看到的完整路径， 不是从子目录向父目录倒推，因此同一父目录存在多个应用子目录时不会串归属。
+   * <p>这里登记的是 mkdir/mkdirs/native mkdir 回调当前看到的完整路径，不代表目录已经创建成功；实际结果由 native/FUSE
+   * 请求路径记录。路径不是从子目录向父目录倒推，因此同一父目录存在多个应用子目录时不会串归属。
    *
    * <p>系统 uid（如 platform 1000 的 com.xiaomi.mirror）的调用方包名无法凭 uid 解析（共享组 成员过多），callerUid 区间门槛不再前置拦截，把
    * binder caller pid 一并交给 native 侧按 进程身份归因；应用 uid 的行为保持原语义。
