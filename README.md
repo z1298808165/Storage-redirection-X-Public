@@ -448,7 +448,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 - 普通应用不因为只读配置安装 PLT hook；这是稳定性约束，避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。运行时通过应用 mount namespace 对目标目录做只读 bind mount。
 - 真实 MediaProvider/FUSE 服务端仍在现有系统 writer hook 链路里判断调用方配置；DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不进入进程内 PLT hook 链路；写入只读目录会返回 `EROFS`。
-- `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 属于应用私有外部存储。挂载恢复使用系统 FUSE 锚点，并保留已有子目录元数据；包名根仍有初始化处理。无需额外允许路径是修复目标，当前版本完整真机回归尚未完成。
+- `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 属于应用私有外部存储。挂载恢复使用系统 FUSE 锚点，并保留已有子目录元数据；包名根仍有初始化处理。其中 `Android/media/<包名>` 即使整个存储根已被共享宿主 FUSE 接管也会重新绑定回系统 MediaProvider FUSE 视图：未接管的跨进程消费方（MediaProvider 自身、管理器类应用、Shizuku/shell）与重定向应用因此共享同一份内核缓存，SQLite 的 WAL 依赖跨进程共享的 `-shm` 映射与页内锁，两层视图会让数据库回滚到上一次检查点并表现为掉登录或数据丢失。`Android/data/<包名>` 承载重定向沙箱本身、`Android/obb/<包名>` 无跨进程数据库共享需求，两者继续直连真实后端。无需额外允许路径是修复目标，当前版本完整真机回归尚未完成。
 - 只读正向规则会提供真实读取通道；即使没有配置 `allowed_real_paths`，应用也能读取该目录但不能写入。`!` 只读排除规则优先覆盖同组正向只读规则，命中后继续按沙盒、映射或显式允许规则处理。
 - 路径映射的入口或最终目标命中只读路径时，映射入口也会继承只读，不能通过映射绕过写入限制。
 - 只读路径接受相对目录、`!` 排除前缀以及 `*` / `?` 通配符；与允许路径排除规则直接冲突的正向只读路径会被忽略，只读排除规则优先于正向只读规则。

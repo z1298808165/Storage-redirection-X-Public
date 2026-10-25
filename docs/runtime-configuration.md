@@ -106,7 +106,7 @@
 ```
 
 - `read_only_paths` 支持字符串或字符串数组，运行时读取会按真实路径放行并禁止写入。
-- `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 是 MediaProvider 管理的应用私有外部存储根。挂载恢复优先使用系统 FUSE 锚点，关闭针对整棵私有树的属主修复监视，并保留已有子目录元数据；包名根仍有初始化处理。目标是不依赖额外允许路径访问自有目录，当前版本的完整真机回归尚未完成。
+- `Android/data/<包名>`、`Android/media/<包名>`、`Android/obb/<包名>` 是 MediaProvider 管理的应用私有外部存储根。挂载恢复优先使用系统 FUSE 锚点，关闭针对整棵私有树的属主修复监视，并保留已有子目录元数据；包名根仍有初始化处理。其中 `Android/media/<包名>` 在整根已由共享宿主 FUSE 接管时同样恢复为系统 MediaProvider FUSE 视图，使未接管的跨进程消费方与重定向应用共享同一份 `-shm` 映射与页内锁，避免 SQLite 因双视图回滚到旧检查点；`Android/data/<包名>` 承载重定向沙箱本身、`Android/obb/<包名>` 无跨进程数据库共享需求，两者保持直连真实后端。目标是不依赖额外允许路径访问自有目录，当前版本的完整真机回归尚未完成。
 - 普通应用通过 mount namespace 的只读 bind mount 强制生效，不会因为只读配置额外安装 PLT hook；这是稳定性约束，避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。
 - 真实 MediaProvider/FUSE 服务端仍通过现有系统 writer hook 识别调用方；DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不进入进程内 PLT hook 链路；写入只读路径会返回 `EROFS`。
 - 只读正向规则会提供真实读取通道；即使没有配置 `allowed_real_paths`，应用也能读取该目录但不能写入。`!` 只读排除规则优先覆盖同组正向只读规则，命中后继续按沙盒、映射或显式允许规则处理。
