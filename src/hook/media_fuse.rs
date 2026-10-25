@@ -351,10 +351,23 @@ pub fn should_allow_own_android_private_path_access(path: &str, caller_uid: i32)
     }
 
     let owner_uid = resolve_private_owner_uid(&owner_package);
-    let allowed = owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid;
+    // `Android/media/<pkg>` 恢复原生共享语义：媒体目录按设计就是跨应用共享
+    // （issue #2：Sen 这类插件把配置放在宿主应用的 media 目录、由不同 uid 的模块
+    // 进程读取；A17 的 MediaProvider 收紧后原生放行消失，模块直接打不开配置）。
+    // 这里对同 user 的应用 uid 放行整个 media 子树；`Android/{data,obb}` 仍是应用
+    // 私有语义，跨 UID 访问维持 owner-only，走配置化的映射/允许路径。
+    let media_prefix = format!("/Android/media/{}/", owner_package);
+    let media_root = format!("/Android/media/{}", owner_package);
+    let is_media_subtree =
+        normalized_path.contains(&media_prefix) || normalized_path.ends_with(&media_root);
+    let allowed = owner_uid >= writer::ANDROID_APP_UID_START
+        && (owner_uid == caller_uid
+            || (is_media_subtree && caller_uid >= writer::ANDROID_APP_UID_START));
     log::debug!(
-        "media fuse own private path decision allowed={} caller_uid={} user_id={} owner={} owner_uid={} path={}",
+        "media fuse own private path decision allowed={} owner_only={} media_subtree={} caller_uid={} user_id={} owner={} owner_uid={} path={}",
         allowed,
+        owner_uid == caller_uid,
+        is_media_subtree,
         caller_uid,
         user_id,
         owner_package,
@@ -469,9 +482,21 @@ fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
 
     let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
+        let errno = current_errno();
+        if errno == libc::ENOENT {
+            // 全新配置目录：`-shm` 尚未由 MediaProvider 的 O_CREAT 创建，没有毒化
+            // 可言（issue #2 日志里 216 条 warn 全是它，把真信号盖掉了）。放行给
+            // 原生链路去创建即可。
+            log::debug!(
+                "prepare sqlite shm backend absent, skip poison check storage={} backend={}",
+                storage_path,
+                backend_path
+            );
+            return false;
+        }
         log::warn!(
             "prepare sqlite shm backend open failed errno={} storage={} backend={}",
-            current_errno(),
+            errno,
             storage_path,
             backend_path
         );
