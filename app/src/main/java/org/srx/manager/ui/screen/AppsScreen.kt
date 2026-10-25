@@ -20,13 +20,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import org.srx.manager.EmptyText
 import org.srx.manager.PageHeader
+import org.srx.manager.RoundIconAction
 import org.srx.manager.data.AppFilter
 import org.srx.manager.data.InstalledApp
 import org.srx.manager.glassPanel
@@ -34,6 +37,8 @@ import org.srx.manager.ui.AppUiState
 import org.srx.manager.ui.component.SrxSearchField
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
@@ -70,6 +75,7 @@ internal fun AppsScreen(
   val pullToRefreshState = rememberPullToRefreshState()
   val refreshTexts = listOf("下拉刷新", "释放刷新", "正在刷新", "刷新完成")
   val listShape = RoundedCornerShape(24.dp)
+  val scrollScope = rememberCoroutineScope()
   Column(
       modifier =
           Modifier.fillMaxSize()
@@ -79,7 +85,23 @@ internal fun AppsScreen(
                   end = 16.dp,
               ),
   ) {
-    PageHeader("应用管理")
+    PageHeader(
+        title = "应用管理",
+        actions = {
+          // 长列表下回拉到顶部再下拉刷新成本太高，标题栏提供一个常驻入口。
+          // 刷新中禁用，避免连点反复拉起 root 查询。
+          RoundIconAction(
+              MiuixIcons.Refresh,
+              "刷新应用列表",
+              {
+                // 刷新语义包含「看最新结果」，先回到顶部，避免刷完仍停在旧位置。
+                scrollScope.launch { listState.animateScrollToItem(0) }
+                onRefresh()
+              },
+              enabled = !state.appsRefreshing,
+          )
+        },
+    )
     Spacer(Modifier.height(14.dp))
     SrxSearchField(
         query = state.search,
