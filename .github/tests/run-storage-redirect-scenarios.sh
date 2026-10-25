@@ -21,6 +21,22 @@ fi
 mkdir -p "$SRT_ARTIFACT_DIR"
 export SRT_ARTIFACT_DIR
 
+# 监视 fail-open 探测会冻结 daemon（SIGSTOP）；任何异常退出都必须 CONT 恢复，
+# 否则后续场景在冻结 daemon 上全灭。run_scenario 在 `bash -c` 子 shell 里执行，
+# 变量无法跨子 shell 回传，因此用产物目录下的 pid 文件登记冻结状态。
+export SRT_FROZEN_DAEMON_PID_FILE="${SRT_ARTIFACT_DIR}/.frozen_daemon_pid"
+cleanup_frozen_daemon() {
+  if [ -s "$SRT_FROZEN_DAEMON_PID_FILE" ]; then
+    local frozen_pid
+    frozen_pid="$(cat "$SRT_FROZEN_DAEMON_PID_FILE" 2>/dev/null | tr -d '\r' | awk 'NF {print; exit}')"
+    if [ -n "$frozen_pid" ]; then
+      adb_su "[ \"\$(cat /proc/${frozen_pid}/comm 2>/dev/null)\" = srx_daemon ] && kill -CONT ${frozen_pid} >/dev/null 2>&1 || true"
+      echo "monitor_capture_failopen resumed daemon on exit pid=${frozen_pid}" >&2
+    fi
+    rm -f "$SRT_FROZEN_DAEMON_PID_FILE"
+  fi
+}
+trap cleanup_frozen_daemon EXIT
 
 APP_ID="${APP_ID:-me.fakerqu.test.storageredirect}"
 CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${APP_ID}.json"
@@ -3003,6 +3019,89 @@ run_file_monitor_mediastore_denied_case() {
     echo "monitor_failure_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=mediastore-denied-result-is-authoritative"
 }
 
+# 监视专用捕获会话 fail-open 契约验证（公开 issue #3 回归锁）。
+#
+# 冻结 daemon 主进程制造宿主握手失败窗口：此时启动的未配置应用会走到
+# companion 挂载的屏障决策点，且挂载链路必然失败。旧 fail-closed 语义会在
+# /storage/emulated/<user> 留下只读空 tmpfs 屏障并永久遮蔽视图（应用看到空
+# 存储根、写入 EROFS）；fail-open 语义不落屏障、清理历史残留，应用保留原生
+# MediaProvider FUSE 视图。用 SIGSTOP 而不是 kill：watchdog 的 kill -0 判活
+# 对停止态进程仍成立，不会触发重启；SIGCONT 后 daemon 原地恢复，不污染
+# 后续场景。
+run_monitor_capture_failopen_scenario() {
+  local scenario="$1"
+  local daemon_pid app_pid barrier_hits view_probe status
+
+  daemon_pid="$(adb_su "for p in \$(pidof srx_daemon 2>/dev/null); do [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = 'srx_daemon' ] && { echo \"\$p\"; break; }; done" | tr -d '\r' | awk 'NF {print; exit}')"
+  if [ -z "$daemon_pid" ]; then
+    echo "monitor_capture_failopen_skipped scenario=${scenario} reason=daemon_not_running"
+    return 0
+  fi
+
+  echo "monitor_capture_failopen freeze daemon pid=${daemon_pid}"
+  if ! adb_su "kill -STOP ${daemon_pid}" >/dev/null 2>&1; then
+    echo "monitor_capture_failopen freeze failed scenario=${scenario}"
+    return 1
+  fi
+  # 登记冻结 pid：异常中止时由 EXIT trap 兜底 CONT，daemon 不得带冻结态离开本脚本。
+  printf '%s
+' "$daemon_pid" > "$SRT_FROZEN_DAEMON_PID_FILE"
+
+  status=0
+  # 冻结窗口内重启应用：挂载链路在屏障决策之后必然失败，旧语义会在存储根
+  # 留下常驻屏障，新语义不落屏障且视图保持原生存活。
+  adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+  sleep_ms 500
+  timeout 60 adb shell am start -W -n "${APP_ID}/.MainActivity" >/dev/null 2>&1 || true
+  app_pid=""
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    app_pid="$(app_pid || true)"
+    [ -n "$app_pid" ] && break
+    sleep_ms 500
+  done
+  if [ -z "$app_pid" ]; then
+    echo "monitor_capture_failopen app start failed scenario=${scenario}"
+    status=1
+  else
+    # 留出 companion 屏障决策与失败路径落地的窗口。
+    sleep_ms 2000
+    barrier_hits="$(adb_su "grep -F ' ${REAL_ROOT} ' '/proc/${app_pid}/mountinfo' 2>/dev/null | grep -c ' - tmpfs ' || true" | tr -d '\r' | awk 'NF {print; exit}')"
+    if [ "${barrier_hits:-0}" != "0" ]; then
+      echo "monitor_capture_failopen barrier lingers scenario=${scenario} hits=${barrier_hits}"
+      status=1
+    fi
+    view_probe="$(adb_su "ls '/proc/${app_pid}/root${REAL_ROOT}/' 2>/dev/null | head -1 || true" | tr -d '\r' | awk 'NF {print; exit}')"
+    if [ -z "$view_probe" ]; then
+      echo "monitor_capture_failopen view masked scenario=${scenario}"
+      status=1
+    fi
+  fi
+
+  echo "monitor_capture_failopen resume daemon pid=${daemon_pid}"
+  adb_su "kill -CONT ${daemon_pid}" >/dev/null 2>&1 || true
+  rm -f "$SRT_FROZEN_DAEMON_PID_FILE"
+
+  if [ "$status" -eq 0 ]; then
+    # 恢复后按正常路径重启应用：捕获会话应重建，存储视图保持完整。
+    if start_app_and_confirm_mount "scenario-${scenario}-failopen-recover" 0; then
+      app_pid="$(app_pid || true)"
+      view_probe="$(adb_su "ls '/proc/${app_pid}/root${REAL_ROOT}/' 2>/dev/null | head -1 || true" | tr -d '\r' | awk 'NF {print; exit}')"
+      if [ -z "$view_probe" ]; then
+        echo "monitor_capture_failopen view broken after recover scenario=${scenario}"
+        status=1
+      fi
+      # 捕获会话重建只做信息输出：共享宿主接入时机在部分设备上依赖 daemon
+      # reconcile 节奏，不做硬断言，避免把恢复节奏差异误判成功能回归。
+      adb_su "grep -F ' ${REAL_ROOT} ' '/proc/${app_pid}/mountinfo' 2>/dev/null | grep -m1 srx_fuse || true"
+    else
+      echo "monitor_capture_failopen recover restart failed scenario=${scenario}"
+      status=1
+    fi
+  fi
+
+  return "$status"
+}
+
 run_file_monitor_disabled_redirect_scenario() {
   local scenario="$1"
   local file_name
@@ -4081,7 +4180,8 @@ run_scenario() {
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
-      run_file_monitor_disabled_redirect_scenario "$scenario"
+      run_file_monitor_disabled_redirect_scenario "$scenario" &&
+        run_monitor_capture_failopen_scenario "$scenario"
       ;;
     24|25)
       echo "step 5/7: 执行普通应用文件监视记录矩阵验证"
@@ -4231,7 +4331,7 @@ export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready media_provider_query_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario run_monitor_capture_failopen_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
 export -f fresh_app_enabled_for_label
 export -f app_view_namespace_refresh_allowed

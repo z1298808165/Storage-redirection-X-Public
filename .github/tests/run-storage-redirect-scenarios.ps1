@@ -1669,6 +1669,91 @@ function Invoke-FileMonitorMediaStoreDeniedCase {
     $ok
 }
 
+function Invoke-MonitorCaptureFailOpenScenario {
+    param([int]$Scenario)
+    # 监视专用捕获会话 fail-open 契约验证（公开 issue #3 回归锁）。
+    # 冻结 daemon 主进程制造宿主握手失败窗口：此时启动的未配置应用走到 companion
+    # 挂载的屏障决策点且挂载链路必然失败。旧 fail-closed 语义会在存储根留下只读
+    # 空 tmpfs 屏障并永久遮蔽视图；fail-open 语义不落屏障且视图保持原生存活。
+    # 用 SIGSTOP 而不是 kill：watchdog 的 kill -0 判活对停止态进程仍成立，不会
+    # 触发重启；SIGCONT 后 daemon 原地恢复，不污染后续场景。
+    $daemonPid = ""
+    foreach ($line in @(Invoke-Su 'for p in $(pidof srx_daemon 2>/dev/null); do [ "$(cat /proc/$p/comm 2>/dev/null)" = "srx_daemon" ] && { echo $p; break; }; done')) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\d+$') { $daemonPid = $trimmed; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($daemonPid)) {
+        Write-Host "monitor_capture_failopen_skipped scenario=$Scenario reason=daemon_not_running"
+        return $true
+    }
+    Write-Host "monitor_capture_failopen freeze daemon pid=$daemonPid"
+    if (-not (Test-Su "kill -STOP $daemonPid")) {
+        Write-Host "monitor_capture_failopen freeze failed scenario=$Scenario"
+        return $false
+    }
+
+    $status = $true
+    try {
+        # 冻结窗口内重启应用：挂载链路在屏障决策之后必然失败，旧语义会在存储根
+        # 留下常驻屏障，新语义不落屏障且视图保持原生存活。
+        Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+        Start-Sleep -Milliseconds 500
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+        $appPid = ""
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $appPid = Get-AppPid
+            if (-not [string]::IsNullOrWhiteSpace($appPid)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ([string]::IsNullOrWhiteSpace($appPid)) {
+            Write-Host "monitor_capture_failopen app start failed scenario=$Scenario"
+            $status = $false
+        }
+        else {
+            # 留出 companion 屏障决策与失败路径落地的窗口。
+            Start-Sleep -Milliseconds 2000
+            $barrierCount = 0
+            foreach ($line in @(Invoke-Su "grep -F ' $RealRoot ' '/proc/$appPid/mountinfo' 2>/dev/null | grep -c ' - tmpfs '")) {
+                $trimmed = $line.Trim()
+                if ($trimmed -match '^\d+$') { $barrierCount = [int]$trimmed; break }
+            }
+            if ($barrierCount -ne 0) {
+                Write-Host "monitor_capture_failopen barrier lingers scenario=$Scenario hits=$barrierCount"
+                $status = $false
+            }
+            $viewProbe = @(Invoke-Su "ls '/proc/$appPid/root$RealRoot/' 2>/dev/null | head -1")
+            if (-not ($viewProbe | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+                Write-Host "monitor_capture_failopen view masked scenario=$Scenario"
+                $status = $false
+            }
+        }
+    }
+    finally {
+        Write-Host "monitor_capture_failopen resume daemon pid=$daemonPid"
+        Test-Su "kill -CONT $daemonPid" | Out-Null
+    }
+
+    if ($status) {
+        # 恢复后按正常路径重启应用：捕获会话应重建，存储视图保持完整。
+        if (Restart-App "scenario-$Scenario-failopen-recover" $false) {
+            $appPid = Get-AppPid
+            $viewProbe = @(Invoke-Su "ls '/proc/$appPid/root$RealRoot/' 2>/dev/null | head -1")
+            if (-not ($viewProbe | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+                Write-Host "monitor_capture_failopen view broken after recover scenario=$Scenario"
+                $status = $false
+            }
+            # 捕获会话重建只做信息输出：共享宿主接入时机在部分设备上依赖 daemon
+            # reconcile 节奏，不做硬断言，避免把恢复节奏差异误判成功能回归。
+            Invoke-Su "grep -F ' $RealRoot ' '/proc/$appPid/mountinfo' 2>/dev/null | grep -m1 srx_fuse || true" | ForEach-Object { Write-Host "  - capture_session $_" }
+        }
+        else {
+            Write-Host "monitor_capture_failopen recover restart failed scenario=$Scenario"
+            $status = $false
+        }
+    }
+    $status
+}
+
 function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
@@ -3726,6 +3811,91 @@ function Invoke-FileMonitorMediaStoreDeniedCase {
     $ok
 }
 
+function Invoke-MonitorCaptureFailOpenScenario {
+    param([int]$Scenario)
+    # 监视专用捕获会话 fail-open 契约验证（公开 issue #3 回归锁）。
+    # 冻结 daemon 主进程制造宿主握手失败窗口：此时启动的未配置应用走到 companion
+    # 挂载的屏障决策点且挂载链路必然失败。旧 fail-closed 语义会在存储根留下只读
+    # 空 tmpfs 屏障并永久遮蔽视图；fail-open 语义不落屏障且视图保持原生存活。
+    # 用 SIGSTOP 而不是 kill：watchdog 的 kill -0 判活对停止态进程仍成立，不会
+    # 触发重启；SIGCONT 后 daemon 原地恢复，不污染后续场景。
+    $daemonPid = ""
+    foreach ($line in @(Invoke-Su 'for p in $(pidof srx_daemon 2>/dev/null); do [ "$(cat /proc/$p/comm 2>/dev/null)" = "srx_daemon" ] && { echo $p; break; }; done')) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\d+$') { $daemonPid = $trimmed; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($daemonPid)) {
+        Write-Host "monitor_capture_failopen_skipped scenario=$Scenario reason=daemon_not_running"
+        return $true
+    }
+    Write-Host "monitor_capture_failopen freeze daemon pid=$daemonPid"
+    if (-not (Test-Su "kill -STOP $daemonPid")) {
+        Write-Host "monitor_capture_failopen freeze failed scenario=$Scenario"
+        return $false
+    }
+
+    $status = $true
+    try {
+        # 冻结窗口内重启应用：挂载链路在屏障决策之后必然失败，旧语义会在存储根
+        # 留下常驻屏障，新语义不落屏障且视图保持原生存活。
+        Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
+        Start-Sleep -Milliseconds 500
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+        $appPid = ""
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $appPid = Get-AppPid
+            if (-not [string]::IsNullOrWhiteSpace($appPid)) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ([string]::IsNullOrWhiteSpace($appPid)) {
+            Write-Host "monitor_capture_failopen app start failed scenario=$Scenario"
+            $status = $false
+        }
+        else {
+            # 留出 companion 屏障决策与失败路径落地的窗口。
+            Start-Sleep -Milliseconds 2000
+            $barrierCount = 0
+            foreach ($line in @(Invoke-Su "grep -F ' $RealRoot ' '/proc/$appPid/mountinfo' 2>/dev/null | grep -c ' - tmpfs '")) {
+                $trimmed = $line.Trim()
+                if ($trimmed -match '^\d+$') { $barrierCount = [int]$trimmed; break }
+            }
+            if ($barrierCount -ne 0) {
+                Write-Host "monitor_capture_failopen barrier lingers scenario=$Scenario hits=$barrierCount"
+                $status = $false
+            }
+            $viewProbe = @(Invoke-Su "ls '/proc/$appPid/root$RealRoot/' 2>/dev/null | head -1")
+            if (-not ($viewProbe | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+                Write-Host "monitor_capture_failopen view masked scenario=$Scenario"
+                $status = $false
+            }
+        }
+    }
+    finally {
+        Write-Host "monitor_capture_failopen resume daemon pid=$daemonPid"
+        Test-Su "kill -CONT $daemonPid" | Out-Null
+    }
+
+    if ($status) {
+        # 恢复后按正常路径重启应用：捕获会话应重建，存储视图保持完整。
+        if (Restart-App "scenario-$Scenario-failopen-recover" $false) {
+            $appPid = Get-AppPid
+            $viewProbe = @(Invoke-Su "ls '/proc/$appPid/root$RealRoot/' 2>/dev/null | head -1")
+            if (-not ($viewProbe | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+                Write-Host "monitor_capture_failopen view broken after recover scenario=$Scenario"
+                $status = $false
+            }
+            # 捕获会话重建只做信息输出：共享宿主接入时机在部分设备上依赖 daemon
+            # reconcile 节奏，不做硬断言，避免把恢复节奏差异误判成功能回归。
+            Invoke-Su "grep -F ' $RealRoot ' '/proc/$appPid/mountinfo' 2>/dev/null | grep -m1 srx_fuse || true" | ForEach-Object { Write-Host "  - capture_session $_" }
+        }
+        else {
+            Write-Host "monitor_capture_failopen recover restart failed scenario=$Scenario"
+            $status = $false
+        }
+    }
+    $status
+}
+
 function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
@@ -5263,7 +5433,7 @@ function Invoke-Scenario {
         20 { Invoke-MountNamespaceAllowWildcardFallbackScenario $Scenario }
         21 { Invoke-MountNamespaceReadOnlyWildcardFallbackScenario $Scenario }
         22 { Invoke-MountNamespaceMappingReadOnlyScenario $Scenario }
-        23 { Invoke-DisabledRedirectMonitorScenario $Scenario }
+        23 { (Invoke-DisabledRedirectMonitorScenario $Scenario) -and (Invoke-MonitorCaptureFailOpenScenario $Scenario) }
         24 { Invoke-RegularMonitorScenario $Scenario }
         25 { Invoke-RegularMonitorScenario $Scenario }
         26 { Invoke-MediaStoreMonitorScenario $Scenario }
