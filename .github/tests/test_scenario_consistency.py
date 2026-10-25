@@ -1763,6 +1763,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('getprop ro.build.version.sdk', deferred)
         self.assertIn('skip MediaProvider restart for lazy Android', deferred)
 
+    def test_package_event_wait_never_blocks_on_fifo_open(self) -> None:
+        # FIFO 的 open(O_RDONLY) 在对端缺失时会无限期阻塞，而 `read -t` 的超时只约束
+        # 读取、管不到 open：收集器一旦卡在这里就再也不会消费 package_events.log，
+        # 新装应用自动开启、卸载清理与基线更新会全部静默失效（duchamp 实测收集器
+        # wchan=wait_for_partner、offset 恒为 0，而事件已堆积在日志里）。
+        # 因此等待必须自持读写两端（fd 3）+ 监听进程存活检查，不得回到裸输入重定向。
+        events = read("assets/zygisk_module/service.d/config_events.sh")
+        wait = section(
+            events,
+            "wait_for_package_event_notification() {",
+            "\nstart_package_event_collector() {",
+        )
+        self.assertIn('exec 3<>"$notification_fifo"', wait)
+        self.assertIn('read -t 1 -r event_line <&3', wait)
+        self.assertNotIn('< "$notification_fifo"', wait)
+        self.assertIn('kill -0 "$notification_pid"', wait)
+        self.assertIn("exec 3>&-", wait)
+
     def test_test_app_install_waits_for_package_service(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")
         section_text = section(install, "install_test_app_before_module_boot()", "seed_storage_redirect_test_environment()")

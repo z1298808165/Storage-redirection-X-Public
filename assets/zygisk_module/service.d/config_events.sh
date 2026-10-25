@@ -1140,14 +1140,26 @@ wait_for_package_event_notification() {
     return 1
   fi
 
+  # 必须自己同时持有读写两端再启动监听进程。
+  # 若用裸输入重定向直接读，读端 open(O_RDONLY) 在对端缺失时会无限期阻塞
+  # （wait_for_partner），而 `read -t` 的超时只对读取生效、管不到 open。一旦
+  # inotifyd 未能在本上下文启动，收集器就永久卡在这里，包事件从此不再消费：
+  # 新装应用自动开启、卸载清理、基线更新与热重载全部静默失效。
+  # 用 fd 3 自持两端后 open 永不阻塞，配合 -t 与监听进程存活检查必定返回。
+  if ! exec 3<>"$notification_fifo" 2>/dev/null; then
+    rm -f "$notification_fifo"
+    sleep "$notification_timeout_seconds"
+    return 1
+  fi
+
   inotifyd - \
-    "$LOGS_DIR":wcmdn > "$notification_fifo" 2>/dev/null &
+    "$LOGS_DIR":wcmdn >&3 2>/dev/null &
   notification_pid="$!"
   notification_elapsed=0
   notification_status=1
   while [ "$notification_elapsed" -lt "$notification_timeout_seconds" ]; do
     event_line=""
-    IFS= read -t 1 -r event_line < "$notification_fifo"
+    IFS= read -t 1 -r event_line <&3
     read_status="$?"
     if [ "$read_status" -eq 0 ]; then
       # 目录内还有 running/media/debug 日志；只有包事件日志轮换/写入或 ready
@@ -1161,14 +1173,27 @@ wait_for_package_event_notification() {
       continue
     fi
     notification_elapsed=$((notification_elapsed + 1))
+    if ! kill -0 "$notification_pid" 2>/dev/null; then
+      # 监听进程已退出，继续空等没有意义；本次按未收到通知返回，调用方随后
+      # 会照常消费事件日志并按节奏重试，功能降级为低频轮询而不是整体停摆。
+      log -p w -t Boot "package event inotifyd exited; fallback to polling"
+      break
+    fi
   done
   kill "$notification_pid" 2>/dev/null || true
   wait "$notification_pid" 2>/dev/null || true
+  exec 3>&-
   rm -f "$notification_fifo"
   [ "$notification_status" -eq 0 ]
 }
 
 start_package_event_collector() {
+  # 上一次 boot 或异常退出可能留下失效 FIFO，文件名带 pid 不会自愈，
+  # 不清理会无限累积；这里只删管道类型，避免误删同名普通文件。
+  for stale_notify_fifo in "$MODDIR"/.package_event_notify.*; do
+    [ -p "$stale_notify_fifo" ] || continue
+    rm -f "$stale_notify_fifo"
+  done
   (
     mkdir -p "$APPS_CONFIG_DIR"
     ensure_log_file "$PACKAGE_EVENT_LOG_FILE"
