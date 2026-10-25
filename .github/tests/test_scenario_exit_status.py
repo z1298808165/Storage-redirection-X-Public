@@ -45,10 +45,15 @@ READ_ONLY_IMAGE_FILE=image.jpg
 READ_ONLY_MEDIA_ROOT=/unused
 PRIVATE_READ_ONLY_MEDIA_ROOT=/unused
 """
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            # run_scenario 的结果文件写 ${SRT_ARTIFACT_DIR}/scenario-N-result.txt；
+            # 该变量由脚本头部的仓库默认值或编排器（run-android-test-flow.sh）经
+            # 环境传入，函数体抽取后两者都不在。按编排器方式用环境变量传递，
+            # 不注入脚本文本（-c 内联脚本在 Windows/MSYS 下有命令行长度上限）。
+            env = dict(os.environ, SRT_ARTIFACT_DIR=directory)
             return subprocess.run(
                 [BASH, *options, "-c", stubs + overrides + function + f"\nrun_scenario {scenario}\n"],
-                cwd=directory, text=True, encoding="utf-8", capture_output=True, timeout=10,
+                cwd=directory, env=env, text=True, encoding="utf-8", capture_output=True, timeout=10,
             )
 
     def test_success_keeps_backend_diagnostics(self):

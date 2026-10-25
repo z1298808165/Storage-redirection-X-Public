@@ -227,13 +227,17 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertIn("eq_ignore_case(source, &target)", overlay_body)
 
     def test_own_private_restore_prefers_system_fuse_anchor(self) -> None:
-        # 自有 Android/data|media|obb 不能从 /data/media 直绑到应用视图；直绑会绕过
+        # 自有 Android 私有目录不能从 /data/media 直绑到应用视图；直绑会绕过
         # MediaProvider FUSE 并带入 media_rw_data_file 上下文，应用仍会被 SELinux 拒绝。
+        # 2026-10-25 起（f84a29dd）源改为独立的系统视图锚点 ensure_system_view_anchor，
+        # 且只恢复 Android/media/<pkg>（data 是沙箱宿主、obb 无跨进程共享需求），
+        # 锚点缺失时以 "own private system view anchor unavailable" 留痕等待重试。
         apply = read("src/mount/apply.rs")
         body = function_body(apply, "fn restore_own_private_directories(")
-        self.assertIn("real_storage_anchor", body)
+        self.assertIn("ensure_system_view_anchor", body)
         self.assertIn("backend_source", body)
-        self.assertIn("FUSE anchor unavailable", body)
+        self.assertIn("own private system view anchor unavailable", body)
+        self.assertIn('format!("Android/media/{}", self.package_name)', body)
         self.assertNotIn("unwrap_or_else(|| backend_source.clone())", body)
         self.assertNotIn('relative.starts_with("Android/data/")', body)
 

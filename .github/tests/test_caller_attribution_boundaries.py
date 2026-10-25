@@ -360,7 +360,9 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         template = HARNESS.read_text(encoding="utf-8")
         harness_src = build_harness(template, fn_src)
 
-        with tempfile.TemporaryDirectory() as tmp:
+        # Windows 上 Defender 会短暂锁定刚退出的新编译 exe，清理可能报
+        # WinError 32；断言已全部完成，清理失败不应误报为测试失败。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             harness_path = os.path.join(tmp, "harness.rs")
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "passthrough_harness")
@@ -436,6 +438,9 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         # 2026-09 真机报障（微信/QQ 打开自身私有目录内文件报“权限有问题”）的修复点就在
         # 这条判定链。任何一维被回退（owner 相等性、用户一致性、系统写入/媒体中间包排除、
         # 存储 uid 区间）都应在这里报警，而不是等真机再次进入绑定缺失状态。
+        # 2026-10-25 起（3edee7f6，公开 issue #2）：Android/media/<pkg> 子树对同 user
+        # 的应用 uid 恢复原生共享语义（Sen 这类插件读宿主 media 目录），data/obb 两个
+        # 目录维持属主私有的判定不变。
         media_fuse = read("src/hook/media_fuse.rs")
         fn = extract_fn(media_fuse, "should_allow_own_android_private_path_access")
 
@@ -450,10 +455,11 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("paths::extract_android_private_path_owner", fn)
         self.assertIn("policy::is_media_intermediate_package", fn)
         self.assertIn("policy::is_system_writer_package", fn)
-        # owner uid 与调用 uid 必须完全相等才放行。
-        self.assertIn(
-            "owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid", fn
-        )
+        # 放行链：owner uid 在应用区间内，且要么 owner 相等（data/obb 私有语义），
+        # 要么 media 子树对同 user 应用 uid 放行（原生共享语义）。
+        self.assertIn("owner_uid >= writer::ANDROID_APP_UID_START", fn)
+        self.assertIn("owner_uid == caller_uid", fn)
+        self.assertIn("is_media_subtree && caller_uid >= writer::ANDROID_APP_UID_START", fn)
 
         # 链路接线守卫：判定必须在 native bridge 的 accessible 链尾生效，且 hook.rs 导出
         # 对应 C ABI；任何一环被移除，真机报障会原样复发。
@@ -517,7 +523,9 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         # 含 `log::debug!` 的原始函数文本。
         injected_media_fuse_fns = media_fuse_fns.replace("log::debug!", "debug!")
 
-        with tempfile.TemporaryDirectory() as tmp:
+        # Windows 上 Defender 会短暂锁定刚退出的新编译 exe，清理可能报
+        # WinError 32；断言已全部完成，清理失败不应误报为测试失败。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             harness_path = os.path.join(tmp, "harness.rs")
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "own_private_harness")
@@ -539,12 +547,14 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
             )
             self.assertIn("ALL", run_proc.stdout)
 
-            # 反向验证：改坏 owner 相等判定（等效于修复合入前的形态）后，
-            # 三条 owner 放行用例必须从通过变失败，退出码非 0。
+            # 反向验证：改坏整条放行链（owner 相等 + media 共享，等效于修复合入前的
+            # 形态）后，owner 放行与 media 共享用例必须从通过变失败，退出码非 0。
             # 若 harness 只是空壳，改坏后仍会全过。
             mutated = injected_media_fuse_fns.replace(
-                "owner_uid >= writer::ANDROID_APP_UID_START && owner_uid == caller_uid",
-                "false",
+                "let allowed = owner_uid >= writer::ANDROID_APP_UID_START\n"
+                "        && (owner_uid == caller_uid\n"
+                "            || (is_media_subtree && caller_uid >= writer::ANDROID_APP_UID_START));",
+                "let allowed = false;",
             )
             self.assertNotEqual(mutated, injected_media_fuse_fns)
             self.assertIn(injected_media_fuse_fns, harness_src)
@@ -574,6 +584,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
             self.assertIn("FAIL own_media_owner_allowed", mut_run.stdout)
             self.assertIn("FAIL own_data_owner_allowed", mut_run.stdout)
             self.assertIn("FAIL own_obb_owner_allowed", mut_run.stdout)
+            self.assertIn("FAIL foreign_media_subtree_allowed", mut_run.stdout)
 
     def test_redirect_parent_chain_blocks_target_self_nesting(self) -> None:
         """重定向父链创建必须先过目标自嵌套绊线。
