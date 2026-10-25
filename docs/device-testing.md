@@ -180,7 +180,7 @@ Remove-Item Env:SRT_SCENARIOS
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
 | `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-40。 |
 | `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-40。与其它场景号混用会报错。不设置时默认也是全场景。 |
-| `SRT_VERSION_SCENARIO_EXCLUDE=39` | 版本级场景排除：从已确定的范围里剔除指定场景（默认仍是全场景）。CI 用它表达环境级限制（A17 镜像无外网不能验证依赖下载的场景 39）；它是剔除而不是替换，因此不会收窄 `SRT_SCENARIOS` 或 dispatch 输入的范围。 |
+| `SRT_VERSION_SCENARIO_EXCLUDE=39` | 版本级场景排除：从已确定的范围里剔除指定场景（默认仍是全场景）。它是剔除而不是替换，因此不会收窄 `SRT_SCENARIOS` 或 dispatch 输入的范围；仅用于某个版本确实无法验证的场景，当前矩阵未使用。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
 | `SRT_SCENARIO_TIMEOUT_SECONDS=300` | 设置单个场景超时秒数。CI/Release 默认 300 秒，本地默认 600 秒。 |
@@ -188,9 +188,25 @@ Remove-Item Env:SRT_SCENARIOS
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-40（Android 17 因镜像网络限制排除依赖下载的 scenario 39，见下），矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；除上述环境级排除外，scenario 1-40 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
+### 场景范围的触发条件
 
-Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-40，但通过矩阵字段 `version_scenario_exclude: "39"` 剔除该场景（模拟器镜像在 runner 上 connectivity 检查不可达，`DownloadManager` 会停在 `WAITING_FOR_NETWORK`；该场景由真机覆盖）。它与其他版本还有三处执行环境差异：
+范围只由运行参数决定，仓库里不写死场景清单（矩阵字段只用于「某版本确实无法验证」的剔除，且当前未使用）：
+
+| 触发入口 | 写法 | 实际范围 |
+| --- | --- | --- |
+| 默认（push、未传参） | — | 全场景 1-40 |
+| 手动触发 workflow | `workflow_dispatch` 的 `scenarios` 输入：`29`、`29,34`、`all` | 指定场景；`all` 表示全量 |
+| 提交信息标记 | 标题或正文写「单场景 29」「单场景 29,34」 | 只跑指定场景 |
+| 本地运行 | `SRT_SCENARIOS=29`（sh）或 `-Scenarios 29`（PowerShell） | 同上 |
+| 环境级限制（可选） | `SRT_VERSION_SCENARIO_EXCLUDE=39` 或矩阵字段 `version_scenario_exclude` | 从已确定范围里剔除，不改变范围定义 |
+
+优先级：`workflow_dispatch` 输入 > 提交信息标记 > 全量；范围确定后脚本再应用版本级剔除。范围受限时 `prepare` 会把 `publish_ci` 置为 false，CI 资产与 `update.json` 都不发布，只做验证。非法范围（非数字、越界、空元素、`all` 与具体编号混用）直接失败，不会静默回退全量。
+
+矩阵当前不含任何版本级排除项：Android 13/14/15/16/17 都执行全量 1-40，包含依赖下载的场景 39。
+
+CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-40，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-40 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
+
+Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-40（包含场景 39；该版本曾因镜像网络验证失败被临时排除，现已恢复）。它与其他版本还有三处执行环境差异：
 
 - **设备侧图形读回保护**：Android 17 系统镜像的 `mapper.ranchu` gralloc 未实现 DMA 颜色缓冲读回，而 emulator 的 gfxstream 后端仍会广播 `ReadColorBufferDMA` 特性。SystemUI 的 `RegionSampling` 与 system_server 的 `TaskSnapshotPersister` 触发读回后会命中 `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma`，并连带重启 framework。测试脚本在设备 SDK 版本为 37 时先执行 `service call window 137 i32 0` 关闭 task snapshot，再 `pm disable-user com.android.systemui` 关闭 SystemUI，并在模块安装重启 framework 后重新应用，直到确认 task snapshot 已关闭且 SystemUI 处于 disabled 状态才继续。该缺陷与 GPU 模式无关，保护逻辑仅在检测到 `ro.build.version.sdk = 37` 时生效。保护过程写入设备侧 `test-flow-graphics-state.txt`（该文件目前不在任何 job 的 artifact 上传清单内，排障需结合 job 日志中的 `android17:` 行）。
 - **注入方案与启动参数**：Android 17 矩阵条目使用 KernelSU 方案（`root_method: ksu`，AVD 镜像打 KernelSU 补丁，ksud 负责安装模块与 Zygisk Next），root shell 走 `su 0 sh -c`（`ADB_ROOT_MODE=su0`）；其余版本仍由安装脚本按 Magisk 探测完成注入。模拟器启动超时放宽到 1800 秒并保留系统动画（其余版本为 1500 秒、关闭动画），GPU 模式固定 `swiftshader_indirect`。
