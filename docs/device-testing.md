@@ -202,6 +202,28 @@ Remove-Item Env:SRT_SCENARIOS
 
 优先级：`workflow_dispatch` 输入 > 提交信息标记 > 全量；范围确定后脚本再应用版本级剔除。范围受限时 `prepare` 会把 `publish_ci` 置为 false，CI 资产与 `update.json` 都不发布，只做验证。非法范围（非数字、越界、空元素、`all` 与具体编号混用）直接失败，不会静默回退全量。
 
+具体操作与判据：
+
+```bash
+# 方式一（有代码改动时首选）：提交信息带标记，推送后直接用同一轮 push CI
+git commit -m "修复：修正挂载确认日志读取 单场景 24"
+# 多场景：单场景 3,24
+
+# 方式二（只复跑既有提交、没有新代码）：手动派发公开仓库的测试流
+gh workflow run ci.yml --repo z1298808165/Storage-redirection-X-Public --ref SRX-R -f scenarios=24
+# 多场景：-f scenarios=3,24；全量：-f scenarios=all
+# Actions 页面点 "Run workflow" 填写 scenarios 输入，效果相同
+
+# 确认实际范围（权威来源是 prepare 输出的范围与脚本启动打印）
+gh run view <run-id> --log | grep -E "scenario_scope|Resolve scenario scope"
+
+# 本地验证（不经 CI）
+SRT_SCENARIOS=24 bash .github/tests/run-storage-redirect-scenarios.sh
+```
+
+- 一次验证只选一种入口，禁止「带标记推送 + 手动派发」同时进行；出现两轮 run 时先确认事件来源，不要用取消第二轮掩盖范围错误。
+- 窄场景验证不产生可发布资产（`publish_ci=false`），不能作为发布门禁通过的依据；合并或发布前必须有一次全量 1-40 通过记录。
+
 矩阵当前不含任何版本级排除项：Android 13/14/15/16/17 都执行全量 1-40，包含依赖下载的场景 39。
 
 CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-40，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-40 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
