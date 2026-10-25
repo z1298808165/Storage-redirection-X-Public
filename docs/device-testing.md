@@ -409,7 +409,16 @@ adb -s $Serial shell am start-foreground-service -n me.fakerqu.test.storageredir
 
 ## 查看结果和日志
 
-测试 APP 结果文件可能出现在以下位置，场景脚本会自动查找：
+### 测试产物落盘位置
+
+测试流产生的宿主侧产物（场景结果文件 `scenario-*-result.txt`、诊断文件 `test-flow-*.txt`、`media-health.txt` 等）统一写入 `temp/test-flow/<启动时间戳>/`：
+
+- 每次运行（完整回归、窄场景、单场景）各自创建一个独立的时间戳目录，同一天的多次运行互不覆盖；
+- `run-android-test-flow.sh` 在启动时创建目录并通过 `SRT_ARTIFACT_DIR` 环境变量注入子脚本，场景脚本与诊断脚本共用同一目录；直接运行 `run-storage-redirect-scenarios.sh` 或 `run-storage-redirect-scenarios.ps1` 时由脚本自行创建；
+- CI 的 `Upload test-flow artifacts` 步骤按 `temp/test-flow/**` 收集上传；
+- 不得向仓库根目录或脚本当前目录新增产物落盘点（规范见 `AGENTS.md`「测试流产物落盘」）；`temp/` 已被 git 忽略，无需提交。
+
+设备侧结果文件可能出现在以下位置，场景脚本会自动查找：
 
 ```text
 /sdcard/Android/data/me.fakerqu.test.storageredirect/files/test_case_result
