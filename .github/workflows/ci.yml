@@ -562,10 +562,10 @@ jobs:
       # 标记）；无标记时 prepare 输出 all，全 5 个 Android 版本覆盖保持不变。
       # 不再在此处就地解析提交标记，避免与 prepare 双源头。
       SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}
-      # 版本级场景过滤（如 A17 排除依赖外网验证的场景 39）：矩阵字段直传，
-      # 由测试脚本内消费（与 SRT_FRESH_APP_SCENARIOS 同架构），不改变 prepare
-      # 对场景范围的单一来源语义。
-      SRT_VERSION_SCENARIO_FILTER: ${{ matrix.android.version_scenario_filter || '' }}
+      # 版本级场景排除（如 A17 排除依赖外网验证的场景 39）：矩阵字段直传，由测试
+      # 脚本内消费。语义是「从已确定的场景范围里剔除」而不是替换范围——默认范围
+      # 始终是全场景，dispatch 输入的窄范围也不会被矩阵覆盖。
+      SRT_VERSION_SCENARIO_EXCLUDE: ${{ matrix.android.version_scenario_exclude || '' }}
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
@@ -592,11 +592,9 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 39 已在 A14 模拟器（本地 Magisk 形态）实测通过：组内代写 mkdir 的
-            # 发起者映射在引擎层生效，下载落映射目标且真实路径零穿透，取数走脚本
-            # 内建本地 HTTP 服务（10.0.2.2）。此前「模拟器形态不可行」的判断来自
-            # 旧构建的注入失效形态（2026-10-25 复核实证），本版本恢复覆盖。
-            version_scenario_filter: "2,26,39,40"
+            # 默认跑全场景（1-40）：39 已在 A14 模拟器实测通过（组内代写 mkdir 的
+            # 发起者映射在引擎层生效，取数走脚本内建本地 HTTP 服务 10.0.2.2）。
+            # 无环境级排除项，故不设 version_scenario_exclude。
           - api: 34
             version: 14
             api_level: "34"
@@ -607,9 +605,7 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 同 A13：39 在 A14 模拟器已实测通过（官方脚本连续两轮 PASS，
-            # status=8 下载完成、落映射目标、零穿透），恢复覆盖。
-            version_scenario_filter: "2,26,39,40"
+            # 同 A13：默认全场景，39 在 A14 已实测通过，无环境级排除项。
           - api: 35
             version: 15
             api_level: "35"
@@ -620,9 +616,7 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 39 与 A13/A14 同步恢复：模拟器形态可跑（取数走本地 HTTP 服务，
-            # MP 引擎层组内代写映射成立）。
-            version_scenario_filter: "2,26,39,40"
+            # 同 A13：默认全场景，无环境级排除项。
           - api: 36
             version: 16
             api_level: "36"
@@ -633,8 +627,7 @@ jobs:
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 同 A15：39 恢复覆盖。
-            version_scenario_filter: "2,26,39,40"
+            # 同 A13：默认全场景，无环境级排除项。
           - api: 37
             version: 17
             api_level: "37.0"
@@ -648,9 +641,9 @@ jobs:
             # A17 模拟器镜像在 runner 上网络验证失败（R2/R5/R6/R7 四轮实证：
             # github 与 connectivity check 均不可达，-dns-server 8.8.8.8 亦无效），
             # DownloadManager 下载将永远停在 WAITING_FOR_NETWORK，场景 39 无法
-            # 在该版本验证；环境级限制排除 39（真机覆盖该场景），40 及其余场景
-            # 不依赖外网保持覆盖。待镜像网络问题定位后再恢复。
-            version_scenario_filter: "2,26,40"
+            # 在该版本验证；环境级限制只剔除 39，其余场景仍走默认全量（真机覆盖
+            # 该场景）。待镜像网络问题定位后再移除该排除项。
+            version_scenario_exclude: "39"
             gpu_mode: swiftshader_indirect
             timeout_minutes: 50
             boot_timeout: 1800
