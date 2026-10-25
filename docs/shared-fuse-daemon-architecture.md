@@ -231,7 +231,7 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
 - `src/daemon.rs`：reconcile 接入监督门禁与账本清理
 - `src/bin/srx_daemon.rs`：新增 `doctor` 子命令
 
-**验证方式**：`cargo check` / `cargo build --release` 通过；设备和 CI 使用当前完整场景 1-39
+**验证方式**：`cargo check` / `cargo build --release` 通过；设备和 CI 使用当前完整场景 1-40
 （重点关注重定向读写、死挂载恢复、MediaStore 代写、应用重启、共享宿主和回退路径），
 并用 `srx_daemon doctor` 观察账本与判定。
 
