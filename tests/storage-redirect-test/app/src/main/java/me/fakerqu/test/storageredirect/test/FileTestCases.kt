@@ -17,8 +17,7 @@ class FileTestCases(
   private val api = AndroidFileApi()
 
   /** 稳定的小体积文件；下载是否成功不是断言目标，提供器创建目标文件才是。 */
-  private val defaultDownloadUrl: String =
-      "https://www.baidu.com/img/flexible/logo/pc/result.png"
+  private val defaultDownloadUrl: String = "https://www.baidu.com/img/flexible/logo/pc/result.png"
   private val defaultRoot: File
     get() =
         File(
@@ -634,7 +633,9 @@ class FileTestCases(
               message = "missing required parameter: ${TestCaseArgs.EXTRA_FILE_PATH}",
           )
         }
-        val url = args.url ?: defaultDownloadUrl
+        // 空白 url 一律回退内置默认取数源：场景脚本在真机形态下不传 url，
+        // am instrument 的空串 extra 不等于缺省。
+        val url = args.url?.takeIf { it.isNotBlank() } ?: defaultDownloadUrl
         val timeoutMs = 60_000L
         val destination = File(destinationPath)
         val parent = destination.parentFile
@@ -692,10 +693,15 @@ class FileTestCases(
                   )
             }
           }
+          // 等待网络（reason=1）不视为终态：CI 模拟器网络就绪可能晚于入队，
+          // DownloadManager 会在网络可用后自动恢复下载，继续轮询到截止时间。
+          val waitingForNetwork =
+              status == DownloadManager.STATUS_PAUSED &&
+                  reason == DownloadManager.PAUSED_WAITING_FOR_NETWORK
           if (
-              status == DownloadManager.STATUS_SUCCESSFUL ||
-                  status == DownloadManager.STATUS_FAILED ||
-                  status == DownloadManager.STATUS_PAUSED
+              (status == DownloadManager.STATUS_SUCCESSFUL ||
+                  status == DownloadManager.STATUS_FAILED) ||
+                  (status == DownloadManager.STATUS_PAUSED && !waitingForNetwork)
           ) {
             break
           }
@@ -709,7 +715,13 @@ class FileTestCases(
                     "reason" to reason.toString(),
                     "destinationExists" to destination.exists().toString(),
                 )
-        if (status != DownloadManager.STATUS_SUCCESSFUL || !destination.exists()) {
+        // require_destination_visible=false 供映射形态使用：落点在映射目标，
+        // 请求路径的应用视图不可见属预期；落点正确性由场景脚本断言。
+        val destinationVisibleRequirement = args.requireDestinationVisible
+        if (
+            status != DownloadManager.STATUS_SUCCESSFUL ||
+                (destinationVisibleRequirement && !destination.exists())
+        ) {
           return@measure TestCase.DOWNLOADMANAGER_ENQUEUE.fail(
               message = "download did not produce destination file",
               metadata = metadata,

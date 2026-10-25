@@ -24,9 +24,7 @@ pub unsafe extern "C" fn hooked_rename(oldpath: *const c_char, newpath: *const c
         || call_rename(oldpath, newpath),
         |hub| {
             hub.increment_rename_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                caller::update_caller_package_for_current_thread(hub);
-            }
+            caller::update_caller_for_mutation(hub, newpath);
 
             handle_rename_like(
                 hub,
@@ -67,9 +65,7 @@ pub unsafe extern "C" fn hooked_renameat(
         || call_original(oldpath, newpath),
         |hub| {
             hub.increment_rename_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                caller::update_caller_package_for_current_thread(hub);
-            }
+            caller::update_caller_for_mutation(hub, newpath);
 
             handle_rename_like(
                 hub,
@@ -125,9 +121,7 @@ pub unsafe extern "C" fn hooked_renameat2(
         || call_original(oldpath, newpath),
         |hub| {
             hub.increment_rename_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                caller::update_caller_package_for_current_thread(hub);
-            }
+            caller::update_caller_for_mutation(hub, newpath);
 
             handle_rename_like(
                 hub,

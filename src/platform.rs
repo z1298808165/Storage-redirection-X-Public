@@ -30,6 +30,8 @@ pub mod paths_roots;
 pub mod paths_rules;
 #[path = "platform/paths_safety.rs"]
 pub mod paths_safety;
+#[path = "platform/proc_identity.rs"]
+pub mod proc_identity;
 #[path = "platform/uid.rs"]
 pub mod uid;
 #[path = "platform/unique_fd.rs"]

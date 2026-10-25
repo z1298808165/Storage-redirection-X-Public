@@ -10,6 +10,7 @@ use crate::daemon_mount::{
 };
 use crate::logging::Logger;
 use crate::platform;
+use crate::platform::proc_identity::read_proc_identity;
 use crate::redirect_policy as policy;
 use crate::runtime_control;
 use std::collections::{HashMap, HashSet};
@@ -1768,36 +1769,6 @@ fn write_system_pid_table(target: &str, staging: &str) {
     {
         let _ = std_fs::set_permissions(target, std_fs::Permissions::from_mode(0o644));
     }
-}
-
-/// 读取单个进程的 (uid, 包名)。内核线程与 cmdline 非包名形态的进程返回 None。
-fn read_proc_identity(pid: i32) -> Option<(i32, String)> {
-    let cmdline = std_fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
-    let first = cmdline.split('\0').next()?.trim().to_string();
-    let package = first.split(':').next()?.trim().to_string();
-    if package.is_empty()
-        || !package
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
-    {
-        return None;
-    }
-    let status = std_fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    for line in status.lines() {
-        let Some(rest) = line.strip_prefix("Uid:") else {
-            continue;
-        };
-        let uid = rest
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(-1);
-        if uid < 0 {
-            return None;
-        }
-        return Some((uid, package));
-    }
-    None
 }
 
 /// 开机一次性预登记所有已配置应用的宿主策略。

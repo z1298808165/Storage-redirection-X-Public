@@ -110,7 +110,7 @@ class ScenarioScopeParseTest(unittest.TestCase):
 
     def test_above_max_out_of_range_raises(self) -> None:
         with self.assertRaises(SCOPE.ScenarioScopeError):
-            SCOPE.resolve_scope("", "40")
+            SCOPE.resolve_scope("", "41")
 
     def test_duplicate_number_raises(self) -> None:
         with self.assertRaises(SCOPE.ScenarioScopeError):
@@ -167,7 +167,7 @@ class ScenarioScopeParseTest(unittest.TestCase):
         )
         # 必须真正读取清单得到上限，而不是无脑返回 DEFAULT_MAX_SCENARIO。
         self.assertEqual(SCOPE.max_scenario_from_json(), expected)
-        self.assertEqual(expected, 39)
+        self.assertEqual(expected, 40)
 
     def test_max_scenario_missing_manifest_uses_default(self) -> None:
         self.assertEqual(

@@ -233,6 +233,12 @@
       "config_mode": "auto",
       "bash_title": "下载提供器代写按发起者映射落到映射目标",
       "powershell_title": "download provider delegated write lands on requester mapping target"
+    },
+    {
+      "id": 40,
+      "config_mode": "auto",
+      "bash_title": "系统 uid 的 FUSE 写入按发起服务归因",
+      "powershell_title": "system uid fuse write attributed to originating service"
     }
   ]
 }

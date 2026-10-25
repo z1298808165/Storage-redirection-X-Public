@@ -1419,10 +1419,13 @@ fn normalize_package_text(source: &str) -> String {
         return String::new();
     }
 
-    if !value.contains('.') {
-        return String::new();
-    }
-
+    // 无点形态不清洗为空：系统 uid 归因链（pid 表 / /proc cmdline）给出的
+    // 合法身份包括 native 二进制 basename（sh、mkdir、logd 等），daemon 侧
+    // 以 basename 作为最诚实的身份落表。此前强制要求包含 '.' 会把这些身份
+    // 在记录清洗时清空，公共路径系统 uid 写的监视记录退回 unknown
+    // （2026-10-24 真机：归因成功日志在、记录仍 unknown 的最终断点）。
+    // Java 包名照常通过；本函数仅清洗归因链产物，垃圾输入已在字符白名单
+    // 处拦截。
     value.to_string()
 }
 

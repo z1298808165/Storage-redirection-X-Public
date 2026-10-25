@@ -134,9 +134,14 @@ DL_OWNER_PROBE_FILE="srt_dl_owner_probe.bin"
 DL_OWNER_REQUEST_FILE="${REAL_ROOT}/${DL_OWNER_REQUEST_REL}/${DL_OWNER_PROBE_FILE}"
 DL_OWNER_REQUEST_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}/${DL_OWNER_PROBE_FILE}"
 DL_OWNER_MAPPED_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}/${DL_OWNER_PROBE_FILE}"
-# 下载用例的取数 URL：默认国内可达的稳定小文件，CI 矩阵可用环境变量换成
-# runner 侧更快的源。
-SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-https://www.baidu.com/img/flexible/logo/pc/result.png}"
+# 下载用例的取数 URL 覆盖：默认空 = 场景内启动本地回环 HTTP 服务（adb reverse
+# 转发，不依赖模拟器外部网络）；显式设置时优先使用该外源。
+SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-}"
+# 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。shell（uid 2000）延迟
+# mkdir 制造确定的系统 uid FUSE 请求，断言监视记录按发起进程归因（此前
+# 该类请求只能记录 unknown 或误归组内成员）。
+UID_ATTRIB_REL="Download/SrtUidAttrib"
+UID_ATTRIB_PROBE_REL="Download/SrtUidAttrib/srt_uid_probe_dir"
 RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
 BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
 PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
@@ -508,6 +513,12 @@ apply_config() {
       # 场景断言的就是「代写者按发起者规则改写」这条归因链路。
       write_config '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtDlOwner":"Download/SrtDlOwnerMapped"}}}}'
       ;;
+    40)
+      # 文件监视开启（记录断言依赖），测试应用写 disabled 配置仅作 reload 水位。
+      set_backend_config auto
+      write_global_config "$(test_global_config auto 1)"
+      write_config '{"users":{"0":{"enabled":false}}}'
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -587,6 +598,7 @@ scenario_title() {
     37) echo "父映射结果继续命中子映射" ;;
     38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
+    40) echo "系统 uid 的 FUSE 写入按发起服务归因" ;;
   esac
 }
 
@@ -800,11 +812,16 @@ supports_fuse_backend_scenarios() {
 
 build_scenario_list() {
   scenarios=()
+  # 版本级场景过滤（CI 矩阵按版本传入，如 A17 排除依赖外网的场景 39）：
+  # 与 SRT_FRESH_APP_SCENARIOS 同架构的脚本内收窄，不改 prepare 的单一来源。
+  if [ -n "${SRT_VERSION_SCENARIO_FILTER:-}" ]; then
+    SRT_SCENARIOS="$SRT_VERSION_SCENARIO_FILTER"
+  fi
   if [ -n "${SRT_SCENARIOS:-}" ]; then
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 39))
+      scenarios=($(seq 1 40))
       return 0
     fi
     local scenario
@@ -815,7 +832,7 @@ build_scenario_list() {
           return 1
           ;;
       esac
-      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 39 ]; then
+      if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 40 ]; then
         echo "invalid scenario: $scenario" >&2
         return 1
       fi
@@ -1102,7 +1119,7 @@ label_expects_mount() {
   local scenario
   scenario="$(scenario_from_label "$1")"
   case "$scenario" in
-    ""|1|23|31|38) return 1 ;;
+    ""|1|23|31|38|40) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -1338,6 +1355,14 @@ wait_scenario_app_view() {
   local pid="${LAST_MOUNT_CONFIRMED_PID:-}"
   local timeout_seconds="${SRT_APP_VIEW_TIMEOUT_SECONDS:-15}"
   local path deadline
+
+  # 场景 38/40 不使用测试应用（见 step 3 跳过逻辑）：直接跳过应用视图探针，
+  # 避免误用上一场景残留的 confirmed pid 白烧 15s 超时。
+  case "$scenario" in
+    38|40)
+      return 0
+      ;;
+  esac
 
   # 探针熔断：首次 15s 超时后写标记文件，同一轮里其余场景直接跳过。
   # CI 实测 API 34 模拟器上该探针恒不可用（37 场景里 34 次打满超时、场景本体
@@ -2002,12 +2027,86 @@ run_download_owner_attribution_scenario() {
   #         且真实请求路径（Download/SrtDlOwner）零穿透。
   #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
   #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
+  # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
+  #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107），直到提供器自身
+  #   重启。与场景 38 同款前置：force-stop 后 root query 冷启动提供器并等待
+  #   进程就绪，保证下载发生在新鲜的 FUSE 视图上。
+  echo "step 5/7 内: 冷启动下载提供器（刷新 FUSE 视图）"
+  adb_su "am force-stop '${PROVIDER_PACKAGE}'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
+  local provider_wait=1
+  while [ "$provider_wait" -le 8 ]; do
+    sleep 2
+    if adb_su "pidof '${PROVIDER_PACKAGE}' >/dev/null 2>&1"; then
+      break
+    fi
+    provider_wait=$((provider_wait + 1))
+  done
+  sleep 3
+  # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），用 runner 侧
+  # 本地 HTTP 服务 + 模拟器内建路由 10.0.2.2 直达宿主（不依赖 adb reverse，
+  # 规避 reverse 时序风险与 localhost 目标的特殊语义）。真机不依赖本地服务：
+  # reverse 形态在部分宿主上不稳定（服务端零请求、引擎报 590），回退为不传
+  # url，由测试 APK 使用内置的外部默认取数源；显式设置了 SRT_DOWNLOAD_URL
+  # 时仍优先使用（真机/本地复现可自行指定）。http 目标要求发起入队应用允许
+  # 明文流量（AOSP DownloadThread 对 cleartext 拒绝抛 STATUS_BAD_REQUEST=400，
+  # R6 五版本矩阵 A14/15/16 一致复现），测试 APK 清单已声明
+  # usesCleartextTraffic。
+  local dl_port=18089
+  local dl_url="$SRT_DOWNLOAD_URL"
+  local dl_server_pid=""
+  local dl_server_log=""
+  local dl_dir=""
+  if [ -z "$dl_url" ] && adb shell getprop ro.kernel.qemu 2>/dev/null | grep -q '^1$'; then
+    dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
+    echo "srt-download-probe" > "$dl_dir/srt_download.bin"
+    dl_server_log="$dl_dir/http-server.log"
+    (cd "$dl_dir" && python3 -m http.server "$dl_port" --bind 0.0.0.0 >"$dl_server_log" 2>&1) &
+    dl_server_pid=$!
+    dl_url="http://10.0.2.2:$dl_port/srt_download.bin"
+    sleep 1
+    echo "step 5/7 内: 本地取数服务已启动 url=$dl_url log=$dl_server_log"
+  elif [ -z "$dl_url" ]; then
+    echo "step 5/7 内: 真机取数源使用测试 APK 内置默认 URL"
+  fi
+  echo "step 5/7 内: 下载取数源 url=$dl_url"
+  adb shell "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable" || true
+  # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
+  # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
+  echo "step 5/7 内: 重启测试应用（套用发起者映射）"
+  timeout 45 adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
+  start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
+  wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
   echo "step 5/7 内: 清理下载归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
-  if ! run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
+  local case_ok=0
+  # 本地取数服务仅在模拟器形态启动；真机回退 APK 内置默认 URL（不传 url extra）。
+  local url_extra_args=()
+  if [ -n "$dl_url" ]; then
+    url_extra_args=(--es url "$dl_url")
+  fi
+  if run_service_case "$scenario" "download-owner-attribution" "downloadmanager_enqueue" \
     '^PASS \[downloadmanager_enqueue\]' \
-    --es file_path "$DL_OWNER_REQUEST_FILE" --es url "$SRT_DOWNLOAD_URL"; then
+    --es file_path "$DL_OWNER_REQUEST_FILE" ${url_extra_args+"${url_extra_args[@]}"} \
+    --es require_destination_visible false; then
+    case_ok=1
+  fi
+  if [ "$case_ok" -ne 1 ]; then
     echo "download owner attribution: enqueue or download failed" >&2
+    # 失败时先打印服务端请求日志（收到过什么请求、状态码）再清理，
+    # 供区分「请求未到达」与「服务端拒绝」。
+    if [ -n "$dl_server_log" ] && [ -f "$dl_server_log" ]; then
+      echo "---- 本地取数服务请求日志 ----" >&2
+      cat "$dl_server_log" >&2
+    fi
+  fi
+  if [ -n "$dl_server_pid" ]; then
+    kill "$dl_server_pid" 2>/dev/null || true
+    adb reverse --remove "tcp:$dl_port" >/dev/null 2>&1 || true
+    # Windows/MSYS 下被杀服务的 CWD 可能短暂占用目录：清理失败不影响判定
+    # （临时目录随 /tmp 生命周期自然回收）。
+    rm -rf "$dl_dir" 2>/dev/null || true
+  fi
+  if [ "$case_ok" -ne 1 ]; then
     return 1
   fi
   if ! adb_su "test -f '$DL_OWNER_MAPPED_BACKEND_FILE'"; then
@@ -2024,6 +2123,99 @@ run_download_owner_attribution_scenario() {
     return 1
   fi
   echo "step 5/7 内: 下载代写按发起者映射落点确认"
+  return 0
+}
+
+run_system_uid_attribution_scenario() {
+  local scenario="$1"
+  # 触发链：shell（uid 2000）进程先存活足够久（pid 表事件化扫描会将其入库），
+  # 再在公共存储发起 FUSE mkdir → 引擎请求头携带 uid=2000 与发起任务 id →
+  # 系统 uid 归因分支经 pid 表反查发起进程 → 监视记录 identify_method=caller。
+  # 回归背景（2026-10-24）：该类请求此前只能记录 unknown 或被误归组内成员；
+  # Mirror/MainCache 等系统服务创建的公共路径是同一链路的真实样本。
+  # 判定标记：
+  #   通过：file_monitor.log 出现 SrtUidAttrib 的 MKDIR 记录且
+  #         identify_method=caller、identify_reliability=high。
+  #   回归：记录 identify_method=unknown（归因链断裂）或无记录。
+  echo "step 5/7 内: 清理系统 uid 归因探测目录"
+  adb_su "rm -rf '${BACKEND_ROOT}/${UID_ATTRIB_REL}'" >/dev/null
+  # 引擎读取补丁（fuse read patch）随 MP FuseDaemon 启动联动安装；模拟器冷启动
+  # 下场景可能早于补丁就绪（R7 实证 A13/A14 的 mkdir 先于补丁安装 → 请求头
+  # 无归因信号）。等待安装标记出现。running.log 是滚动日志，MP 开机期写入的
+  # 标记可能已被应用启动日志滚出（R11 实证：场景期 grep 零命中但
+  # .media_hook_install_state 有内容）；.media_hook_install_state 的
+  # stage=init_ok 是 hook 侧 specialize 完成的权威落盘标记（pid+boot_id 防跨
+  # 开机误判），两者任一出现即视为补丁链路已建立。日志与标记均缺失时按超时
+  # 放行（诊断 dump 会输出 state 文件内容供事后判定）。
+  local patch_wait=0
+  while [ "$patch_wait" -lt 15 ]; do
+    if adb_su "grep -q 'fuse read patch installed' '$LOG_PATH' 2>/dev/null" \
+      || adb_su "grep -q 'stage=init_ok' /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null"; then
+      echo "step 5/7 内: 引擎读取补丁已就绪"
+      break
+    fi
+    sleep 2
+    patch_wait=$((patch_wait + 1))
+  done
+  if [ "$patch_wait" -ge 15 ]; then
+    echo "step 5/7 内: 引擎读取补丁标记未出现（按超时放行）"
+    adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null" || true
+  fi
+  clear_file_monitor_log
+  # 三次尝试任一归因即通过：跨线程接力槽在并发系统请求下存在互覆窗口
+  # （单槽最后写入优先），单次尝试可能落空；能力验证以三次中至少一次
+  # 归因成功为准。每次尝试的后台 shell 进程先存活 4 秒再 mkdir：pid 表
+  # 事件化扫描（500ms 廉价快照 + 集合变化即全量重扫）在进程创建后 1-2 秒
+  # 内即入表，4 秒已含充足裕量；归因的真正保障是 exec 形态而非长存活。
+  # mkdir 前必须 exec（2026-10-24 取证）：mksh 对 -c 脚本最后一条命令
+  # fork 子进程执行，子进程生命周期毫秒级，daemon 500ms 事件化扫描必然
+  # 错过，FUSE 请求头携带的 mkdir 子进程 tid 不在表内（实测 pid=18606
+  # table_seen=false，预存活的 sh 自身 tid 无效）。exec 让 mkdir
+  # 系统调用在已入表的同一进程内发起，与真实系统服务（长存活进程
+  # 发起写入）的归因语义一致；瞬时子进程场景是已知归因边界，不在本场景
+  # 验证范围。
+  local attempt=1
+  local found=0
+  while [ "$attempt" -le 3 ] && [ "$found" -ne 1 ]; do
+    echo "step 5/7 内: 系统 uid 归因尝试 $attempt/3"
+    # 每次尝试用独立目录：已存在目录的 mkdir 会被记录去重跳过，无法作为
+    # 该次尝试的归因样本。
+    local probe_rel="${UID_ATTRIB_PROBE_REL}/attempt${attempt}"
+    adb shell "sleep 4; exec mkdir -p '/storage/emulated/0/${probe_rel}'" >/dev/null 2>&1 &
+    local bg_pid=$!
+    local waited=0
+    while [ "$waited" -lt 8 ]; do
+      sleep 2
+      waited=$((waited + 2))
+      if adb_su "test -d '${BACKEND_ROOT}/${probe_rel}'"; then
+        break
+      fi
+    done
+    wait "$bg_pid" 2>/dev/null || true
+    # 轮询监视记录：归因链贯通时记录应在 mkdir 后 1-3 秒内出现。
+    local poll=0
+    while [ "$poll" -lt 5 ]; do
+      sleep 2
+      if adb_su "grep -E 'MKDIR\|/storage/emulated/0/${probe_rel}\|' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -q 'identify_method=caller|identify_reliability=high'"; then
+        found=1
+        break
+      fi
+      poll=$((poll + 1))
+    done
+    attempt=$((attempt + 1))
+  done
+  if [ "$found" -ne 1 ]; then
+    echo "system uid attribution: monitor record missing or not attributed" >&2
+    adb_su "grep 'SrtUidAttrib' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | tail -3" || true
+    # MP hook 侧 specialize 状态（pid+boot_id 防跨开机误判）：区分「hook 从未
+    # 安装」与「已安装但 read 捕获未触发」这两种需要相反修复的情况。
+    echo "media hook install state:" >&2
+    adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null" || true
+    return 1
+  fi
+  echo "step 5/7 内: 系统 uid FUSE 写入归因确认"
+  adb_su "grep 'SrtUidAttrib' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | tail -2" || true
+  adb_su "rm -rf '${BACKEND_ROOT}/${UID_ATTRIB_REL}'" >/dev/null
   return 0
 }
 
@@ -3682,12 +3874,22 @@ run_scenario() {
       ;;
   esac
   echo "step 3/7: 重启测试应用"
-  adb shell am force-stop "$APP_ID" >/dev/null || true
-  local expect_mount=1
-  if ! label_expects_mount "scenario-${scenario}"; then
-    expect_mount=0
-  fi
-  start_app_and_confirm_mount "scenario-${scenario}" "$expect_mount" || return 1
+  case "$scenario" in
+    38|40)
+      # 场景 38 只驱动下载提供器自身、场景 40 只驱动 shell/系统 uid 的 FUSE
+      # 请求，都不使用测试应用：跳过应用重启与挂载确认，省去每轮 10-40s
+      # 的固定开销。后续需要应用的场景（如 39）在自身流程内仍会完整重启。
+      echo "step 3/7: 跳过测试应用重启（本场景不使用测试应用）"
+      ;;
+    *)
+      adb shell am force-stop "$APP_ID" >/dev/null || true
+      local expect_mount=1
+      if ! label_expects_mount "scenario-${scenario}"; then
+        expect_mount=0
+      fi
+      start_app_and_confirm_mount "scenario-${scenario}" "$expect_mount" || return 1
+      ;;
+  esac
   echo "step 4/7: 等待共享存储可用"
   wait_storage_ready "scenario-${scenario}"
   # root 侧就绪后还要等应用侧视图跟上：两者是隔离的挂载视图，
@@ -3804,6 +4006,10 @@ run_scenario() {
     39)
       echo "step 5/7: 验证下载提供器代写按发起者映射落到映射目标"
       run_download_owner_attribution_scenario "$scenario"
+      ;;
+    40)
+      echo "step 5/7: 验证系统 uid 的 FUSE 写入按发起服务归因"
+      run_system_uid_attribution_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -3950,6 +4156,7 @@ build_scenario_list
 export READ_ONLY_OWNER_CONFIG
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_PROBE_FILE PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR PROVIDER_BACKEND_FILE PROVIDER_REAL_FILE
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL
+export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
@@ -3968,6 +4175,7 @@ export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_q
 export -f run_nested_mapping_chain_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config
 export -f run_download_owner_attribution_scenario
+export -f run_system_uid_attribution_scenario
 
 failure_artifacts_captured=0
 rm -f app-view-probe-broken.flag

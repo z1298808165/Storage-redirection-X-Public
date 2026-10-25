@@ -30,9 +30,7 @@ pub unsafe extern "C" fn hooked_truncate(pathname: *const c_char, length: off_t)
         },
         |hub| {
             hub.increment_open_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,
@@ -77,9 +75,7 @@ pub unsafe extern "C" fn hooked_truncate64(pathname: *const c_char, length: off_
         },
         |hub| {
             hub.increment_open_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,
@@ -192,9 +188,7 @@ pub unsafe extern "C" fn hooked_chmod(pathname: *const c_char, mode: mode_t) -> 
         },
         |hub| {
             hub.increment_stat_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,
@@ -285,9 +279,7 @@ pub unsafe extern "C" fn hooked_fchmodat(
         },
         |hub| {
             hub.increment_stat_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,
@@ -346,9 +338,7 @@ pub unsafe extern "C" fn hooked_utimensat(
         },
         |hub| {
             hub.increment_stat_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,

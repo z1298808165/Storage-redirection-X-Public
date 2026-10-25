@@ -29,9 +29,7 @@ pub unsafe extern "C" fn hooked_mknod(
         },
         |hub| {
             hub.increment_mkdir_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_mknod_like(hub, "mknod", AT_FDCWD, pathname, mode, |call_path| {
                 runtime::call_prev(
@@ -73,9 +71,7 @@ pub unsafe extern "C" fn hooked_mknodat(
         },
         |hub| {
             hub.increment_mkdir_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_mknod_like(hub, "mknodat", dirfd, pathname, mode, |call_path| {
                 runtime::call_prev(

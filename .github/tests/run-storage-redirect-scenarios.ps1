@@ -135,8 +135,11 @@ $DlOwnerProbeFile = "srt_dl_owner_probe.bin"
 $DlOwnerRequestFile = "$RealRoot/$DlOwnerRequestRel/$DlOwnerProbeFile"
 $DlOwnerRequestBackendFile = "$BackendRoot/$DlOwnerRequestRel/$DlOwnerProbeFile"
 $DlOwnerMappedBackendFile = "$BackendRoot/$DlOwnerMappedRel/$DlOwnerProbeFile"
-# 下载用例的取数 URL：默认国内可达的稳定小文件，CI 矩阵可换成 runner 侧更快的源。
-$SrtDownloadUrl = if ($env:SRT_DOWNLOAD_URL) { $env:SRT_DOWNLOAD_URL } else { "https://www.baidu.com/img/flexible/logo/pc/result.png" }
+# 下载用例的取数 URL 覆盖：默认空 = 场景内启动本地回环 HTTP 服务。
+$SrtDownloadUrl = if ($env:SRT_DOWNLOAD_URL) { $env:SRT_DOWNLOAD_URL } else { "" }
+# 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。
+$UidAttribRel = "Download/SrtUidAttrib"
+$UidAttribProbeRel = "Download/SrtUidAttrib/srt_uid_probe_dir"
 $RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
 $BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
 $PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
@@ -393,20 +396,20 @@ function Test-FuseBackendScenarioSupport {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 39) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 40) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(1..39)
+            return @(1..40)
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 39) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 40) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -530,6 +533,12 @@ function Apply-ScenarioConfig {
             # 发起者（测试应用）配置显式映射；下载提供器本身不配置任何规则，
             # 场景断言的就是「代写者按发起者规则改写」这条归因链路。
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtDlOwner":"Download/SrtDlOwnerMapped"}}}}'
+        }
+        40 {
+            # 文件监视开启（记录断言依赖），测试应用写 disabled 配置仅作 reload 水位。
+            Set-BackendConfig -Mode "auto"
+            Write-GlobalConfig '{"file_monitor_enabled":true,"fuse_fix_enabled":true,"storage_backend_mode":"auto","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}'
+            Write-DeviceConfig '{"users":{"0":{"enabled":false}}}'
         }
         default { throw "未知场景 $Scenario" }
     }
@@ -659,7 +668,7 @@ function Test-LabelExpectsMount {
     param([string]$Label)
 
     $scenario = Get-ScenarioFromLabel $Label
-    return -not ($scenario -in @(-1, 1, 23, 31, 38))
+    return -not ($scenario -in @(-1, 1, 23, 31, 38, 40))
 }
 
 function Get-ExpectedMountPathsForLabel {
@@ -2092,6 +2101,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
+        40 { "system uid fuse write attributed to originating service" }
     }
 }
 
@@ -4148,6 +4158,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
+        40 { "system uid fuse write attributed to originating service" }
     }
 }
 
@@ -4887,10 +4898,48 @@ function Invoke-DownloadOwnerAttributionScenario {
     #         且真实请求路径（Download/SrtDlOwner）零穿透。
     #   回归：文件出现在真实请求路径（按源归因失效），或下载提供器出现模块会话
     #         （fuse redirect mount start pkg=下载提供器，同场景 38 边界）。
+    # 前置：前序场景（26/33 等）可能重启过 MediaProvider，下载提供器进程的命名
+    #   空间会持有陈旧 FUSE 连接（改写后的 mkdir 报 errno=107）。与 .sh 同款：
+    #   force-stop 后 root query 冷启动提供器并等待进程就绪。
     param([int]$Scenario)
+    Write-Host "  - scenario-$Scenario/download-owner: cold start download provider"
+    Invoke-Su "am force-stop '$ProviderPackage'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1" | Out-Null
+    for ($wait = 0; $wait -lt 8; $wait++) {
+        Start-Sleep -Seconds 2
+        $providerPid = (Invoke-Su "pidof '$ProviderPackage' 2>/dev/null" | Where-Object { $_ -match '\d' } | Select-Object -First 1)
+        if ($providerPid) { break }
+    }
+    Start-Sleep -Seconds 3
+    # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），改用本机
+    # HTTP 服务 + adb reverse 回环转发；显式设置了 SRT_DOWNLOAD_URL 时仍优先。
+    $dlUrl = $SrtDownloadUrl
+    $dlServer = $null
+    $dlDir = $null
+    $dlPort = 18089
+    if (-not $dlUrl) {
+        $dlDir = Join-Path ([IO.Path]::GetTempPath()) ("srt-dl-server-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dlDir | Out-Null
+        Set-Content -Path (Join-Path $dlDir "srt_download.bin") -Value "srt-download-probe"
+        Invoke-Adb @("reverse", "tcp:$dlPort", "tcp:$dlPort") | Out-Null
+        $dlServer = Start-Process -FilePath "python3" -ArgumentList @("-m", "http.server", "$dlPort", "--bind", "127.0.0.1", "--directory", $dlDir) -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 1
+        $dlUrl = "http://127.0.0.1:$dlPort/srt_download.bin"
+        Write-Host "  - scenario-$Scenario/download-owner: local download server url=$dlUrl"
+    }
+    Write-Host "  - scenario-$Scenario/download-owner: download url=$dlUrl"
+    Invoke-Adb @("shell", "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable") | Write-Host
+    # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
+    # 应用不会随场景重启，这里显式重启并确认挂载。
+    Write-Host "  - scenario-$Scenario/download-owner: restart test app for requester mapping"
+    Restart-App "scenario-$Scenario/dlowner-apprestart" $true
     Write-Host "  - scenario-$Scenario/download-owner: cleanup attribution probe dirs"
     Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
-    $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $SrtDownloadUrl } "^PASS \[downloadmanager_enqueue\]"
+    $case = Invoke-ServiceCase "scenario-$Scenario" "download-owner-attribution" "downloadmanager_enqueue" @{ file_path = $DlOwnerRequestFile; url = $dlUrl } "^PASS \[downloadmanager_enqueue\]"
+    if ($dlServer) {
+        try { $dlServer.Kill() } catch {}
+        try { Invoke-Adb @("reverse", "--remove", "tcp:$dlPort") | Out-Null } catch {}
+        Remove-Item -Recurse -Force $dlDir -ErrorAction SilentlyContinue
+    }
     if (-not $case.Ok) {
         Write-Host "  - scenario-$Scenario/download-owner: enqueue or download failed"
         return $false
@@ -4912,6 +4961,53 @@ function Invoke-DownloadOwnerAttributionScenario {
         return $false
     }
     Write-Host "  - scenario-$Scenario/download-owner: delegated write landed on requester mapping target"
+    $true
+}
+
+function Invoke-SystemUidAttributionScenario {
+    # 触发链（与 .sh 的 run_system_uid_attribution_scenario 一致）：shell（uid
+    # 2000）进程先存活足够久（pid 表事件化扫描入库）再在公共存储发起 FUSE
+    # mkdir → 引擎请求头携带 uid 与发起任务 id → 系统 uid 归因分支经 pid 表
+    # 反查发起进程 → 监视记录 identify_method=caller。
+    # 判定标记：
+    #   通过：file_monitor.log 出现 SrtUidAttrib 的 MKDIR 记录且
+    #         identify_method=caller、identify_reliability=high。
+    #   回归：记录 identify_method=unknown（归因链断裂）或无记录。
+    param([int]$Scenario)
+    Write-Host "  - scenario-$Scenario/system-uid: cleanup attribution probe dir"
+    Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
+    Invoke-Su ": > '$FileMonitorLogPath' 2>/dev/null" | Out-Null
+    # 后台 shell 进程先存活 12 秒再 mkdir：进程创建即入 pid 表。
+    $bg = Start-Process -FilePath "adb" -ArgumentList @("shell", "sleep 12; mkdir -p '/storage/emulated/0/$UidAttribProbeRel'") -PassThru -WindowStyle Hidden
+    # 三次尝试任一归因即通过（单槽接力在并发系统请求下存在互覆窗口）；
+    # 每次尝试用独立目录（已存在目录的 mkdir 会被记录去重跳过）。
+    $found = $false
+    for ($attempt = 1; $attempt -le 3 -and -not $found; $attempt++) {
+        $probeRel = "$UidAttribProbeRel/attempt$attempt"
+        Write-Host "  - scenario-$Scenario/system-uid: attribution attempt $attempt/3"
+        $bg = Start-Process -FilePath "adb" -ArgumentList @("shell", "sleep 12; mkdir -p '/storage/emulated/0/$probeRel'") -PassThru -WindowStyle Hidden
+        $seen = $false
+        for ($wait = 0; $wait -lt 14; $wait++) {
+            Start-Sleep -Seconds 2
+            $dirOk = (Invoke-Su "test -d '$BackendRoot/$probeRel'; echo exit=\$?" | Select-Object -Last 1) -eq "exit=0"
+            if ($dirOk) { $seen = $true; break }
+        }
+        try { $bg.WaitForExit(5000) | Out-Null } catch {}
+        if (-not $seen) { continue }
+        for ($poll = 0; $poll -lt 6; $poll++) {
+            Start-Sleep -Seconds 3
+            $record = Invoke-Su "grep -E 'MKDIR\|/storage/emulated/0/$probeRel\|' '$FileMonitorLogPath' 2>/dev/null | grep -E 'identify_method=caller\|identify_reliability=high' | head -1"
+            if ($record) { $found = $true; break }
+        }
+    }
+    if (-not $found) {
+        Write-Host "  - scenario-$Scenario/system-uid: monitor record missing or not attributed"
+        Invoke-Su "grep 'SrtUidAttrib' '$FileMonitorLogPath' 2>/dev/null | tail -3" | Write-Host
+        return $false
+    }
+    Write-Host "  - scenario-$Scenario/system-uid: system uid fuse write attributed to originating service"
+    Invoke-Su "grep 'SrtUidAttrib' '$FileMonitorLogPath' 2>/dev/null | tail -2" | Write-Host
+    Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
     $true
 }
 
@@ -5172,6 +5268,7 @@ function Invoke-Scenario {
         37 { Invoke-NestedMappingChainScenario $Scenario }
         38 { Invoke-ProviderSandboxScenario $Scenario }
         39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
+        40 { Invoke-SystemUidAttributionScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

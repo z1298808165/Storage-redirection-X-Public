@@ -193,6 +193,11 @@ fn install_target_if_enabled() {
                 "fuse fix native hooks skipped on Android 13/14 x86_64; Java media mutation remains active"
             );
         }
+        // 跳过的是 srx_hook 对 libfuse_jni 符号体系的 hook；归因所需的 FUSE 请求
+        // 头捕获走独立的 read patch 通道（read.rs 自带库候选、重试与限频），在此
+        // 形态（A13/A14 模拟器）请求读取方是 libappfuse.so——2026-10-25 本地
+        // 模拟器实证 libfuse_jni 不加载而 libappfuse 承载 FuseDaemon 读循环。
+        crate::hook::ops::read::ensure_fuse_engine_read_patch();
         return;
     }
     if native_probe.as_deref() == Some("late") && !crate::platform::is_boot_completed() {
@@ -223,6 +228,11 @@ fn install_target_if_enabled() {
         RETRY_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     };
+
+    // libfuse_jni 已映射 = FuseDaemon 正在启动：此刻装上 FUSE 引擎读取补丁，
+    // 消除「引擎补丁等待自身触发源」的归因空窗（引擎读取方 libfuse.so 同样
+    // 刚映射完成，窗口内的系统 uid 请求此前无法归因）。
+    crate::hook::ops::read::ensure_fuse_engine_read_patch();
 
     let is_app_accessible_path = find_any(&elf, IS_APP_ACCESSIBLE_PATH_SYMBOLS);
     let is_package_owned_path = find_any(&elf, IS_PACKAGE_OWNED_PATH_SYMBOLS);

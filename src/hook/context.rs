@@ -246,6 +246,11 @@ pub fn clear_fuse_caller_uid() {
 /// 捕获到系统 uid（<10000）的请求头时写入本槽，处理线程在归因落空时按时间
 /// 窗口取用。只对系统 uid 入槽：应用 uid 的请求已有 binder 与路径台账归因，
 /// 全局单槽在应用 IO 并发下会串味，收益不抵风险。
+///
+/// 取用资格按产品边界收窄：仅公共路径的写形态操作（经
+/// caller::update_caller_for_mutation 标记）允许取槽——MP 的高频读操作与
+/// 私有路径写会把待归因的公共路径写请求的槽内容提前消费掉（2026-10-24
+/// 真机：mkdir 槽内容被并发 stat 秒抢，监视记录全部 unknown）。
 struct SystemFuseRequestSlot {
     uid: i32,
     pid: i32,

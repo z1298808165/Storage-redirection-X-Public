@@ -712,7 +712,12 @@ impl Filesystem for FuseRedirectFs {
             fh
         };
         if is_mutation {
-            policy.emit_monitor_mutation(fuse_open_operation_name(flags.0), &backend, None);
+            policy.emit_monitor_mutation(
+                fuse_open_operation_name(flags.0),
+                &backend,
+                None,
+                self.requester_attribution(req, &policy).as_ref(),
+            );
         }
         // `-shm` 禁止 passthrough：setattr 的 ftruncate 钳制只覆盖 FUSE SETATTR 通道，
         // passthrough backing fd 上的 ftruncate 绕过宿主直落 f2fs，应用 WAL 能力探针
@@ -860,7 +865,12 @@ impl Filesystem for FuseRedirectFs {
                         .path_for_ino(ino)
                         .and_then(|rel| policy.backend_for_relative(&rel, OperationKind::Write))
                 {
-                    policy.emit_monitor_mutation("write", &backend, None);
+                    policy.emit_monitor_mutation(
+                        "write",
+                        &backend,
+                        None,
+                        self.requester_attribution(req, &policy).as_ref(),
+                    );
                 }
                 reply.written(n as u32);
             }
@@ -1395,7 +1405,7 @@ impl Filesystem for FuseRedirectFs {
             state.clear_dir_candidate_cache();
             fh
         };
-        policy.emit_monitor_create(&backend);
+        policy.emit_monitor_create(&backend, self.requester_attribution(req, &policy).as_ref());
         // 与 open 同理：新建的 `-shm` 也不得给 passthrough backing，否则应用首个
         // WAL 能力探针（自愈重建后必然紧随一次建连）就会把全新 inode 再次截成
         // 毒化尺寸，自愈循环永不收敛。
@@ -1507,7 +1517,10 @@ impl Filesystem for FuseRedirectFs {
         };
         match self.attr_for_backend(&policy, ino, &backend) {
             Ok(attr) => {
-                policy.emit_monitor_create(&backend);
+                policy.emit_monitor_create(
+                    &backend,
+                    self.requester_attribution(req, &policy).as_ref(),
+                );
                 reply.entry(&ENTRY_TTL, &attr, Generation(0));
             }
             Err(errno) => {
@@ -1554,20 +1567,34 @@ impl Filesystem for FuseRedirectFs {
             }
         }
         self.invalidate_dir_candidate_cache();
-        policy.emit_monitor_create(&backend);
+        policy.emit_monitor_create(&backend, self.requester_attribution(req, &policy).as_ref());
         self.reply_entry_for_rel(req.uid(), &policy, &rel, reply);
     }
 
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
         let policy = self.policy_for_request(req);
-        self.remove_child(&policy, parent, name, false, reply);
+        self.remove_child(
+            &policy,
+            parent,
+            name,
+            false,
+            self.requester_attribution(req, &policy).as_ref(),
+            reply,
+        );
     }
 
     fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let _perf = self.perf.observe(&self.perf.mutation_calls);
         let policy = self.policy_for_request(req);
-        self.remove_child(&policy, parent, name, true, reply);
+        self.remove_child(
+            &policy,
+            parent,
+            name,
+            true,
+            self.requester_attribution(req, &policy).as_ref(),
+            reply,
+        );
     }
 
     fn rename(
@@ -1670,8 +1697,14 @@ impl Filesystem for FuseRedirectFs {
                     },
                     &new_backend,
                     Some(&old_backend),
+                    self.requester_attribution(req, &policy).as_ref(),
                 );
-                policy.emit_monitor_mutation("rename", &new_backend, Some(&old_backend));
+                policy.emit_monitor_mutation(
+                    "rename",
+                    &new_backend,
+                    Some(&old_backend),
+                    self.requester_attribution(req, &policy).as_ref(),
+                );
                 reply.ok();
             }
             Err(errno) => reply.error(errno),

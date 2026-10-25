@@ -21,6 +21,20 @@ fn is_system_write_delegate_session(package_name: &str) -> bool {
 }
 
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
+
+/// 应用 uid 起点：低于它的 uid（shell/system/媒体服务等）走系统直通回退与
+/// 请求者归因，与 hook 侧 `src/hook/caller.rs` 的同名常量语义一致。
+pub(crate) const ANDROID_APP_UID_START: i32 = 10000;
+
+/// 系统 uid 请求者的监视归因身份（自有 FUSE 引擎内 daemon root 直读 /proc 解析）。
+#[derive(Clone, Debug)]
+pub(super) struct RequesterIdentity {
+    /// 发起者身份：包名形态取全名，native 二进制取 basename（与 daemon pid 表
+    /// 身份语义一致，见 [`crate::platform::proc_identity::read_proc_identity`]）。
+    pub package: String,
+    /// 发起者 uid（与 FUSE 请求头 uid 一致，解析时已校验）。
+    pub uid: i32,
+}
 const READ_ONLY_DENY_EXTRA: &str = "deny_reason=read_only_rule";
 const DUPLICATE_MONITOR_CREATE_WINDOW_MS: i64 = 1500;
 const MAX_RECENT_MONITOR_CREATES: usize = 256;
@@ -189,6 +203,11 @@ pub(super) struct RedirectPolicy {
     /// 只用于宿主共享会话的"未登记 uid"回退——宁可让调用方读不到、写不进，也不能让它
     /// 直接落到真实存储上。普通策略恒为 `false`。
     deny_all: bool,
+    /// 系统 uid 回退标记：标识本策略是宿主共享会话给系统 uid 的直通视图。
+    ///
+    /// 语义上 package_name 仍是宿主包名、不代表请求发起者；监视记录发射时据此
+    /// 启用请求者归因（见 [`RedirectPolicy::emit_monitor_mutation`]）。
+    pub(super) is_system_fallback: bool,
     /// 本策略由哪份配置构建（[`crate::fuse_redirect::config::fuse_config_policy_fingerprint`]）。
     /// 宿主共享会话跨配置 reload 时，异常回包（EROFS/ENOENT）带上它即可直接判定
     /// 「当时生效的是旧策略还是新策略」。
@@ -207,6 +226,14 @@ pub(super) struct RedirectPolicy {
 pub(super) struct PolicyRegistry {
     /// 会话创建时绑定的策略；用于与调用方身份无关的会话级语义（日志、`init`、`statfs`）。
     session: Arc<RedirectPolicy>,
+    /// 系统 uid（非应用 uid）请求的回退策略：仅宿主共享会话构造。
+    ///
+    /// 系统 uid（shell/system/媒体服务等）不是沙盒逃逸对象——它们本就持有系统级
+    /// 存储权限， denying 只会让 shell 管理操作与系统服务写入在宿主会话上无差别
+    /// 失败（2026-10-25 CI A13/A14 实证：shell 的 mkdir 被拒，场景 40 连记录都
+    /// 没有）。给这一区间放行会话直通视图，与 MP FuseDaemon 对系统 uid 的处理
+    /// 语义一致；未登记的应用 uid 仍一律拒绝。
+    system_fallback: Option<Arc<RedirectPolicy>>,
     /// 按调用方 uid 预解析的策略表。
     ///
     /// scoped 会话建成后不再变化；宿主共享会话需要在运行期内按 uid 接收应用策略，所以
@@ -309,6 +336,11 @@ impl PolicyRegistry {
         } else {
             Arc::clone(&session)
         };
+        let system_fallback = if deny_unregistered {
+            Some(Arc::new(session.copied_as_system_fallback()))
+        } else {
+            None
+        };
         Self {
             session,
             by_uid: SharedPolicyTable {
@@ -316,6 +348,7 @@ impl PolicyRegistry {
                 by_namespace: NamespacePolicyTable(Arc::new(RwLock::new(HashMap::new()))),
             },
             fallback,
+            system_fallback,
         }
     }
 
@@ -334,6 +367,23 @@ impl PolicyRegistry {
             && let Some(policy) = table.get(&uid)
         {
             return Arc::clone(policy);
+        }
+        // 未登记请求轨迹（2026-10-25 CI A14 场景 40 排查）：shell mkdir 在宿主
+        // 会话上零记录且 system fallback 日志零命中，需要区分「请求未到达引擎」
+        // 与「到达但走了未预期分支」。限频打印（64 次一次 + 首次），覆盖所有
+        // 未命中请求。
+        {
+            static UNRESOLVED_TRACE: AtomicU64 = AtomicU64::new(0);
+            let seen = UNRESOLVED_TRACE.fetch_add(1, Ordering::Relaxed) + 1;
+            if seen == 1 || seen.is_multiple_of(64) {
+                log::info!(
+                    "fuse policy request trace uid={} pid={} session_pkg={} fallback_deny={}",
+                    uid,
+                    pid,
+                    self.session.package_name,
+                    self.fallback.is_deny_all()
+                );
+            }
         }
         if uid == 0 {
             let namespace = request_mount_namespace(pid);
@@ -368,6 +418,27 @@ impl PolicyRegistry {
                     count
                 );
             }
+        }
+        // 系统 uid（1..应用 uid 起点）请求走系统直通回退：shell/system/媒体服务
+        // 的存储访问不经过应用沙盒（本就持有系统级权限），deny_all 回退会让系统
+        // 管理操作与系统服务写入在宿主会话上无差别失败。uid 0 保持既有 namespace
+        // 精确回退（root 子进程必须经 mount namespace 回到发起应用，不能全局放行）。
+        if uid > 0
+            && uid < ANDROID_APP_UID_START as u32
+            && let Some(system_fallback) = self.system_fallback.as_ref()
+        {
+            static SYSTEM_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+            let count = SYSTEM_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if count == 1 || count.is_multiple_of(256) {
+                log::info!(
+                    "fuse policy system fallback uid={} pid={} pkg={} count={}",
+                    uid,
+                    pid,
+                    system_fallback.package_name,
+                    count
+                );
+            }
+            return Arc::clone(system_fallback);
         }
         Arc::clone(&self.fallback)
     }
@@ -594,6 +665,7 @@ impl RedirectPolicy {
             is_monitor_only: config.is_monitor_only,
             is_file_monitor_enabled: config.is_file_monitor_enabled,
             deny_all: false,
+            is_system_fallback: false,
             fingerprint,
         })
     }
@@ -605,6 +677,18 @@ impl RedirectPolicy {
     fn copied_as_deny_all(&self) -> Self {
         Self {
             deny_all: true,
+            ..self.clone()
+        }
+    }
+
+    /// 系统 uid 直通回退策略：解除 deny_all 并打上系统回退标记。
+    ///
+    /// 生成物仅用于 [`PolicyRegistry::system_fallback`]；重定向规则、监视开关等
+    /// 会话级语义与宿主会话一致，确保系统请求的落点/记录与宿主视图等价。
+    fn copied_as_system_fallback(&self) -> Self {
+        Self {
+            deny_all: false,
+            is_system_fallback: true,
             ..self.clone()
         }
     }
@@ -1162,10 +1246,15 @@ impl RedirectPolicy {
         }
     }
 
-    pub(super) fn emit_monitor_create(&self, backend: &BackendPath) {
+    pub(super) fn emit_monitor_create(
+        &self,
+        backend: &BackendPath,
+        caller: Option<&RequesterIdentity>,
+    ) {
         if !self.is_file_monitor_enabled {
             return;
         }
+        let (caller_pkg, identify_method) = monitor_caller_fields(self, caller);
         let display_path = self.storage_path_for_rel(&backend.rel);
         if display_path.is_empty()
             || crate::config::SettingsHub::instance()
@@ -1174,14 +1263,9 @@ impl RedirectPolicy {
             return;
         }
         let backend_path = backend.path.to_string_lossy();
-        if should_skip_duplicate_monitor_create(
-            &self.package_name,
-            &display_path,
-            backend_path.as_ref(),
-        ) {
+        if should_skip_duplicate_monitor_create(caller_pkg, &display_path, backend_path.as_ref()) {
             return;
         }
-        let identify_method = self.monitor_identify_method();
         let operation = if self.is_monitor_only {
             "fuse_monitor_create"
         } else {
@@ -1192,8 +1276,8 @@ impl RedirectPolicy {
             target: FILE_MONITOR_LOG_TAG,
             "{}|{}|{}|CREATE|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|op={}|source={}|backend={}",
             build_monitor_timestamp(),
-            self.package_name,
-            self.package_name,
+            caller_pkg,
+            caller_pkg,
             display_path,
             identify_method,
             operation,
@@ -1211,10 +1295,12 @@ impl RedirectPolicy {
         operation_name: &str,
         backend: &BackendPath,
         from_backend: Option<&BackendPath>,
+        caller: Option<&RequesterIdentity>,
     ) {
         if !self.is_file_monitor_enabled {
             return;
         }
+        let (caller_pkg, identify_method) = monitor_caller_fields(self, caller);
         let display_path = self.storage_path_for_rel(&backend.rel);
         if display_path.is_empty()
             || crate::config::SettingsHub::instance()
@@ -1226,11 +1312,11 @@ impl RedirectPolicy {
         let mut line = format!(
             "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|event_role=request|op={}|source={}|backend={}",
             build_monitor_timestamp(),
-            self.package_name,
-            self.package_name,
+            caller_pkg,
+            caller_pkg,
             monitor_event_kind_for_operation(operation_name),
             display_path,
-            self.monitor_identify_method(),
+            identify_method,
             operation_name,
             self.monitor_source_for_backend(backend),
             backend_path
@@ -1427,6 +1513,22 @@ fn media_sqlite_view_root_for_user(user_id: i32) -> PathBuf {
         root
     } else {
         PathBuf::new()
+    }
+}
+
+/// 监视记录的调用方字段解析：系统请求者归因命中时以归因身份与
+/// `identify_method=caller` 呈现（与 hook 侧归因链的记录语义一致），
+/// 否则维持会话默认（宿主包名 + fuse_redirect/fuse_monitor_only）。
+fn monitor_caller_fields<'a>(
+    policy: &'a RedirectPolicy,
+    caller: Option<&'a RequesterIdentity>,
+) -> (&'a str, &'a str) {
+    match caller {
+        Some(identity) => (identity.package.as_str(), "caller"),
+        None => (
+            policy.package_name.as_str(),
+            policy.monitor_identify_method(),
+        ),
     }
 }
 

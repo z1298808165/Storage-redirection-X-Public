@@ -27,9 +27,7 @@ pub unsafe extern "C" fn hooked_mkdir(pathname: *const c_char, mode: mode_t) -> 
         },
         |hub| {
             hub.increment_mkdir_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_mkdir_like(hub, "mkdir", AT_FDCWD, pathname, mode, |call_path| {
                 runtime::call_prev(
@@ -66,9 +64,7 @@ pub unsafe extern "C" fn hooked_mkdirat(
         },
         |hub| {
             hub.increment_mkdir_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_mkdir_like(hub, "mkdirat", dirfd, pathname, mode, |call_path| {
                 runtime::call_prev(
@@ -100,9 +96,7 @@ pub unsafe extern "C" fn hooked_unlink(pathname: *const c_char) -> c_int {
         },
         |hub| {
             hub.increment_unlink_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_unlink_like(hub, "unlink", AT_FDCWD, pathname, -1, |call_path| {
                 runtime::call_prev(
@@ -144,9 +138,7 @@ pub unsafe extern "C" fn hooked_unlinkat(
         || call_original(pathname),
         |hub| {
             hub.increment_unlink_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_unlink_like(hub, "unlinkat", dirfd, pathname, flags, call_original)
         },
@@ -168,9 +160,7 @@ pub unsafe extern "C" fn hooked_rmdir(pathname: *const c_char) -> c_int {
         },
         |hub| {
             hub.increment_unlink_calls();
-            if runtime::should_resolve_caller_context(hub) {
-                crate::hook::caller::update_caller_package_for_current_thread(hub);
-            }
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
 
             handle_single_path_audit(
                 hub,

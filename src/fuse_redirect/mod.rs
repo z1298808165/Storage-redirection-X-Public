@@ -30,7 +30,10 @@ use fuser::{
 use inode::{remove_inode_path, remove_unreferenced_inode};
 use metadata::{cstring_path, errno_from_code, errno_from_io, fix_path_metadata, last_errno};
 use perf::FusePerfStats;
-use policy::{BackendPath, OperationKind, PolicyRegistry, RedirectPolicy};
+use policy::{
+    ANDROID_APP_UID_START, BackendPath, OperationKind, PolicyRegistry, RedirectPolicy,
+    RequesterIdentity,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -39,8 +42,10 @@ use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
+
+use once_cell::sync::Lazy;
 
 /// attr 有效期：与原生 MP FuseDaemon 对齐（10s）。writeback 回写模式下内核在
 /// 本地维护 inode 的 i_size，应用轮询 stat 命中未过期的内核缓存时拿到的是
@@ -51,6 +56,17 @@ const ATTR_TTL: Duration = Duration::from_secs(10);
 const ENTRY_TTL: Duration = Duration::ZERO;
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
+
+/// 系统 uid 请求者身份缓存 TTL：pid 的 /proc 身份极少变化（进程退出即失效，
+/// 重用窗口内 cmdline+uid 双校验兜底），5 秒足够吸收 write 等高频路径的重复解析。
+const SYSTEM_REQUESTER_CACHE_TTL_MS: i64 = 5_000;
+/// 缓存容量上限：系统 uid 进程数量级远小于该值，超限整表清空（简单防膨胀）。
+const SYSTEM_REQUESTER_CACHE_CAP: usize = 256;
+/// 系统 uid 请求者身份缓存条目：(解析时刻单调毫秒，身份；None 表示 pid 当时
+/// 不可归因——缓存失败结果避免 miss 风暴)。
+type SystemRequesterCacheEntry = (i64, Option<RequesterIdentity>);
+static SYSTEM_REQUESTER_CACHE: Lazy<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(250);
 static INODE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 /// 会话级 ENOENT 诊断限流：前 4 条带策略指纹落日志，用于定位「未登记 uid / 旧映射残留」。
@@ -404,6 +420,53 @@ impl FuseRedirectFs {
 
     fn policy_for_request(&self, req: &Request) -> Arc<RedirectPolicy> {
         self.policy.for_request(req.uid(), req.pid())
+    }
+
+    /// 系统 uid 请求者的监视归因（仅监视开启且走系统回退策略时解析）。
+    ///
+    /// daemon 以 root 运行，直接读 `/proc/<pid>` 反查发起者（MP 域的 SELinux 限制
+    /// 不存在），身份可信度由 status 的 Uid 行裁决；pid 是发起任务的强信号，短
+    /// TTL 缓存吸收 write 等高频路径的重复解析。非系统 uid 或未走系统回退策略
+    /// （应用 uid 命中自身策略）时返回 None，记录维持会话默认形态。
+    fn requester_attribution(
+        &self,
+        req: &Request,
+        policy: &RedirectPolicy,
+    ) -> Option<RequesterIdentity> {
+        if !policy.is_file_monitor_enabled || !policy.is_system_fallback {
+            return None;
+        }
+        let uid = req.uid() as i32;
+        if uid <= 0 || uid >= ANDROID_APP_UID_START {
+            return None;
+        }
+        let pid = req.pid() as i32;
+        if pid <= 0 {
+            return None;
+        }
+        let now_ms = crate::platform::paths::monotonic_ms();
+        if let Ok(cache) = SYSTEM_REQUESTER_CACHE.lock()
+            && let Some((at_ms, identity)) = cache.get(&pid)
+            && now_ms.saturating_sub(*at_ms) <= SYSTEM_REQUESTER_CACHE_TTL_MS
+        {
+            return match identity {
+                Some(cached) if cached.uid == uid => Some(cached.clone()),
+                _ => None,
+            };
+        }
+        let identity = crate::platform::proc_identity::read_proc_identity(pid)
+            .filter(|(proc_uid, _)| *proc_uid == uid)
+            .map(|(proc_uid, package)| RequesterIdentity {
+                package,
+                uid: proc_uid,
+            });
+        if let Ok(mut cache) = SYSTEM_REQUESTER_CACHE.lock() {
+            if cache.len() >= SYSTEM_REQUESTER_CACHE_CAP {
+                cache.clear();
+            }
+            cache.insert(pid, (now_ms, identity.clone()));
+        }
+        identity
     }
 
     fn policy_for_read_request(
@@ -867,6 +930,7 @@ impl FuseRedirectFs {
         parent: INodeNo,
         name: &OsStr,
         is_dir: bool,
+        caller: Option<&RequesterIdentity>,
         reply: ReplyEmpty,
     ) {
         let Some(parent_rel) = self.path_for_ino(parent) else {
@@ -903,6 +967,7 @@ impl FuseRedirectFs {
                     if is_dir { "rmdir" } else { "unlink" },
                     &backend,
                     None,
+                    caller,
                 );
                 reply.ok();
             }
