@@ -303,7 +303,7 @@ pub(super) fn resolve_system_writer_caller_context(
     }
 
     if effective_caller_package.is_empty()
-        && should_query_download_owner_for_writer(self_uid, package_name)
+        && should_query_download_owner_for_writer(self_uid, package_name, effective_caller_uid)
         && let Some(owner_package) = infer_download_owner_package_by_path(normalized_path)
         && !redirect_policy::is_media_intermediate_package(&owner_package)
     {
@@ -568,9 +568,16 @@ pub(super) fn resolve_mapping_request_owner_package_by_path(
     settings.resolve_mapping_target_package_by_path_for_user(user_id, normalized_path)
 }
 
-fn should_query_download_owner_for_writer(self_uid: i32, package_name: &str) -> bool {
+fn should_query_download_owner_for_writer(
+    self_uid: i32,
+    package_name: &str,
+    caller_uid: i32,
+) -> bool {
     if redirect_policy::is_media_provider_package(package_name) {
-        return false;
+        // MediaProvider 进程：调用方 uid 属于下载共享组时按行数据反查发起者。
+        // 下载引擎的公共路径写入以 MediaStore insert 与 FUSE 后端操作到达本进程，
+        // 只在下载进程内查表时这里的归因恒落空（2026-10-24 真机取证）。
+        return crate::monitor::caller_uid_shares_download_group(caller_uid);
     }
     redirect_policy::get_packages_for_uid(self_uid)
         .iter()
