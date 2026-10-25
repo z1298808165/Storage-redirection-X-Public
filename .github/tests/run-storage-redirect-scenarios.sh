@@ -2098,6 +2098,11 @@ run_download_owner_attribution_scenario() {
       echo "---- 本地取数服务请求日志 ----" >&2
       cat "$dl_server_log" >&2
     fi
+    # 下载器内部状态（status/reason 之外的 mRetries/mError 等）：区分「网络判定
+    # 中断」与「响应处理失败」需要下载器侧细节（2026-10-25 CI A14：服务端 200
+    # 已到达但 status=4 WAITING_FOR_NETWORK，矛盾需内部状态裁决）。
+    echo "---- dumpsys downloads（失败诊断） ----" >&2
+    adb shell dumpsys downloads 2>/dev/null | grep -aE "DOWNLOAD|status|reason|mRetries|num_failed|uri|title|_id=" | head -40 || true
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
