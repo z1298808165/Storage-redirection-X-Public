@@ -2226,6 +2226,12 @@ run_download_owner_attribution_scenario() {
     --es require_destination_visible false; then
     case_ok=1
   fi
+  # 成功路径也必须留现场。run 40299612388 里 A15 通过（MP 与下载器 srx 全为 0）而
+  # A17 失败（MP srx=4），两边的进程注入形态本就不同；只在失败时打印现场，等于
+  # 每次都缺掉对照样本里的一半，差异永远看不出来。
+  echo "step 5/7 内: 下载窗口现场（成败都记录）"
+  adb_su "echo ---real_download---; ls -la '${REAL_ROOT}/Download/' 2>/dev/null | grep -i srtdl; echo ---backend_download---; ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | grep -i srtdl; echo ---mapped_dir---; ls -la '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}' 2>/dev/null | head -5; echo ---request_dir---; ls -la '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' 2>/dev/null | head -3" >&2 || true
+  adb_su "echo ---alias_overlay---; grep -a 'alias diag overlay' '$LOG_DIR'/running.log* 2>/dev/null | grep -a '${DL_OWNER_REQUEST_REL##*/}' | tail -8; echo ---map_result---; grep -aE 'map primary result|mapping target' '$LOG_DIR'/running.log* 2>/dev/null | tail -4" >&2 || true
   if [ "$case_ok" -ne 1 ]; then
     echo "download owner attribution: enqueue or download failed" >&2
     # 失败时先打印服务端请求日志（收到过什么请求、状态码）再清理，
