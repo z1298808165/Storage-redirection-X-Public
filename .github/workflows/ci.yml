@@ -899,31 +899,36 @@ jobs:
       # 只有真正发布时才做草稿清理；范围受限（不发布）时跳过。
       PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}
     steps:
-      - name: 清理其它 run 遗留的过期草稿
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: 清理废弃的 CI 草稿
         if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
+          # 本轮发布环节是否成功。只有成功时才允许按「已被本轮取代」立即清理：
+          # 发布成功后版本基线已推进，其它 run 里不高于本轮版本的草稿不会再有
+          # 任何一轮复用它，留着就是同版本号不同内容的废弃副本。
+          PUBLISHED: ${{ needs.create-ci-release.result == 'success' && needs.update-manifest.result == 'success' }}
         run: |
-          # 失败的草稿 Release 是 module/app 构建产物的唯一副本：任务级重跑
-          # （gh run rerun --failed）要靠它继续发布，删掉就再也发不出去
-          # （run 40331496700 实证：attempt 1 失败时被清理删掉草稿，重跑后
-          # 发布环节既没有标签也没有资产）。所以本轮草稿一律保留，只清理其它
-          # run 遗留且超过 24 小时的草稿——单轮 CI 最长 2 小时，不会误删在跑的。
-          now="$(date -u +%s)"
-          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            --jq '.[] | select(.draft) | select(.tag_name | startswith("ci-build-")) | [.tag_name, .created_at] | @tsv' |
-          while IFS=$'\t' read -r tag created; do
-            if [ "$tag" = "$CI_TAG" ]; then
-              echo "keep current CI draft: $tag"
-              continue
-            fi
-            created_epoch="$(date -u -d "$created" +%s)"
-            if [ $((now - created_epoch)) -lt 86400 ]; then
-              echo "keep recent CI draft: $tag"
-              continue
-            fi
-            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
-          done
+          # 草稿 Release 是 module/app 构建产物的唯一副本，任务级重跑
+          # （gh run rerun --failed）要靠它续接发布，所以本轮草稿永远保留，
+          # 其余草稿的判定细则见 .github/scripts/prune_ci_drafts.py 模块文档。
+          args=()
+          if [ "$PUBLISHED" = "true" ]; then
+            args+=(--published)
+          fi
+          # 取本轮 run 的创建时间：早于它创建的草稿才可能被本轮取代，晚于它的
+          # 可能是并行轮次正在用，必须保留。取不到就只按 24 小时窗口处理。
+          run_created="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --jq '.created_at' 2>/dev/null || true)"
+          python3 .github/scripts/prune_ci_drafts.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --current-tag "$CI_TAG" \
+            --current-version "$VERSION" \
+            --current-run-created "$run_created" \
+            ${args[@]+"${args[@]}"}
 
       - name: 保留失败 CI 诊断资源
         if: needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success'

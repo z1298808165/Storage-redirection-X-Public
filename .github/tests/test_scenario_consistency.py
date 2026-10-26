@@ -704,14 +704,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_ci_failed_draft_release_survives_for_rerun(self) -> None:
         # 草稿 Release 是 module/app 构建产物的唯一副本。此前失败清理会直接删掉
         # 本轮草稿，导致「只重跑失败任务」时既没有标签、也没有资产，发布永远补
-        # 不回来（run 40331496700）。清理只允许删其它 run 遗留且超过 24 小时的
-        # 草稿：单轮 CI 最长 2 小时，不会误删正在跑的那一轮。
+        # 不回来（run 40331496700）。清理逻辑已下沉到 prune_ci_drafts.py：本轮
+        # 草稿永不删除；发布成功时才按「被本轮取代」立即清理其它轮次，未发布时
+        # 只清理超过 24 小时续发窗口的草稿（单轮 CI 最长 2 小时，不会误删在跑的）。
         ci = read(".github/workflows/ci.yml")
         cleanup = section(ci, "  cleanup-build-artifacts:", "  update-manifest:")
         self.assertNotIn('gh release delete "$CI_TAG"', cleanup)
-        self.assertIn('if [ "$tag" = "$CI_TAG" ]; then', cleanup)
-        self.assertIn("86400", cleanup)
-        self.assertIn('select(.tag_name | startswith("ci-build-"))', cleanup)
+        self.assertIn("prune_ci_drafts.py", cleanup)
+        self.assertIn('--current-tag "$CI_TAG"', cleanup)
+        self.assertIn('--current-run-created "$run_created"', cleanup)
+        # 清理逻辑在仓库脚本里，必须先 checkout，否则 cleanup 直接 command not found。
+        self.assertIn("actions/checkout@v5", cleanup)
+        # 只有发布环节成功才允许「已被本轮取代」的立即清理；失败轮一律走时间窗口。
+        self.assertIn("PUBLISHED: ${{ needs.create-ci-release.result == 'success'", cleanup)
+        self.assertIn('if [ "$PUBLISHED" = "true" ]', cleanup)
 
         # 发布前只校验资产，不再要求草稿态：完整重跑时上一轮可能已经发布过，
         # 此时 `gh release edit --draft=false` 是幂等的。
