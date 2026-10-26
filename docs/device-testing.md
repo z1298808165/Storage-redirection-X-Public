@@ -276,7 +276,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 35 | 任意路径映射矩阵：验证公共存储、`Android/data|media|obb/<包名>`、`/data/user`、`/data/data` 及公共路径之间的相对/绝对映射。 |
 | 36 | 映射应用私有别名后，仍可写入 MediaProvider 已创建的现有文件。 |
 | 37 | 父路径先映射到中间目录后，中间目录下的子路径继续命中下一条映射并落到最终目录。 |
-| 38 | 下载提供器（com.android.providers.downloads，监视桥接进程）自身配置 `sandboxed_paths` 后，挂载请求必须携带沙盒规则（`req sandbox=1`），宿主接入成功或 scoped 会话带沙盒；出现 `attach skipped ... policy_registration_failed` 或 `sandbox=0` 请求即回归（2026-10-21 真机侧漏回归）。 |
+| 38 | 下载提供器（com.android.providers.downloads）自身配置 `sandboxed_paths` 后必须由模块接管原生写入，两种拓扑都算通过：companion mount 成功（`perf companion mount pkg=... ok=true`）或进程内 per-caller hook（`hook refresh start profile=system-writer pkg=...`，此时 pre 阶段直接跳过 companion mount）。出现 `attach skipped ... policy_registration_failed`、`sandbox=0` 挂载请求，或下载提供器自己起模块 FUSE 会话即回归（2026-10-21 真机侧漏回归；2026-10-26 场景 39 让提供器改走 system-writer hook 后同步放宽判据）。 |
 | 39 | 下载提供器（共享 uid 代写者）经 DownloadManager 异步下载公共路径时，按发起者（测试 APP）的 `path_mappings` 把目标改写到映射目标落盘，真实请求路径零穿透；文件出现在真实请求路径或下载失败即按源归因回归（2026-10-24 真机：误归因组内成员、行数据反查未触发）。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。

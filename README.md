@@ -472,7 +472,7 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 
 #### 文件监控 `file_monitor_enabled`
 
-`file_monitor_enabled=true` 会启用文件创建监控，便于观察已启用应用和系统代写链路的文件操作、发起应用与最终落地路径。普通应用自身写入由 `srx_daemon` 通过 inotify 在进程外采集，不给普通应用安装 monitor/PLT hook；这是为了避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。系统代写链路只在真实 MediaProvider/FUSE 服务端保留进程内 hook，以便识别 MediaProvider/FUSE 的真实调用方；DownloadProvider、ExternalStorageProvider、MTP 等桥接进程交由 daemon 和 MediaProvider 侧记录兜底。
+`file_monitor_enabled=true` 会启用文件创建监控，便于观察已启用应用和系统代写链路的文件操作、发起应用与最终落地路径。普通应用自身写入由 `srx_daemon` 通过 inotify 在进程外采集，不给普通应用安装 monitor/PLT hook；这是为了避免普通应用因 native/图形/加固运行时兼容问题出现无法打开或闪退。系统代写链路只在真实 MediaProvider/FUSE 服务端保留进程内 hook，以便识别 MediaProvider/FUSE 的真实调用方；ExternalStorageProvider、MTP 等桥接进程交由 daemon 和 MediaProvider 侧记录兜底。下载提供器是例外：它自身要做 `mkdirs` 与 `getCanonicalPath` 这类客户端判定（代写链路的父目录判定发生在它自己的进程里），因此与 MediaProvider 一样纳入系统写入进程，按调用方做进程内路径映射，不再走 companion mount。
 
 ```json
 {
