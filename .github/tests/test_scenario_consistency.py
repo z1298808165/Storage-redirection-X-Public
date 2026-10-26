@@ -753,6 +753,43 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 诊断里不能引用不存在的变量名，否则整段静默失效（守卫发现的真实笔误）。
         self.assertNotIn("$DL_OWNER_PROBE_NAME", script)
 
+    def test_provider_sandbox_accepts_both_governance_topologies(self) -> None:
+        # 场景 38 断言「下载提供器自身的原生写入被模块接管」。提供器被纳入
+        # system-writer 后（场景 39 需要它在自己进程内解析映射请求路径），pre 阶段
+        # 直接走 `writer skip companion mount`，不再发挂载请求，于是只认
+        # `perf companion mount ... ok=true` 的判据会把修好 39 的改动判成 38 回归
+        # （2026-10-26 本地实证：单跑场景 38 稳定 EXIT=1，日志里只有
+        # `hook refresh start profile=system-writer pkg=com.android.providers.downloads`）。
+        # 因此判据必须是拓扑无关的：mount 拓扑或 per-caller hook 拓扑命中其一即通过。
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        body = section(
+            script, "run_provider_sandbox_scenario() {", "\nrun_download_owner_attribution_scenario()"
+        )
+        self.assertIn(
+            "perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true", body
+        )
+        self.assertIn(
+            "hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ", body
+        )
+        # 两条判据必须落在同一个 if 里（`||` 串联），否则等于只有一条生效。
+        lines = body.splitlines()
+        hook_index = [
+            index
+            for index, line in enumerate(lines)
+            if "hook refresh start profile=system-writer" in line and "adb_su" in line
+        ]
+        self.assertTrue(hook_index, "缺少 system-writer hook 判据")
+        # `||` 写在上一条 stderr 检查行的行尾，因此看前一行的结尾。
+        self.assertTrue(
+            lines[hook_index[0] - 1].rstrip().endswith("||"),
+            "两条拓扑判据之间必须是「或」关系",
+        )
+        # 回归守卫本身不得被放宽：零规则挂载请求、策略登记失败、提供器自起 FUSE
+        # 会话三种形态仍必须判失败。
+        self.assertIn("sandbox=0", body)
+        self.assertIn("policy_registration_failed", body)
+        self.assertIn("fuse redirect mount start pkg=${PROVIDER_PACKAGE}", body)
+
     def test_shared_fuse_host_b2a_contract(self) -> None:
         # B2-a 先建立独立宿主会话骨架：它必须在 daemon 的私有 namespace 中创建，
         # 使用 srx_fuse_host 前缀并设为 shared propagation；应用接入仍由后续 B2-b 完成。

@@ -2060,8 +2060,14 @@ run_provider_sandbox_scenario() {
   # 回归背景（2026-10-21 真机）：桥接进程的挂载请求被清零规则（req sandbox=0），
   # 宿主接入被拒（attach skipped reason=policy_registration_failed），退回零规则
   # scoped 会话后原生写入穿透真实存储。
-  # 判定标记（与提供器由 companion 还是 daemon 路径服务无关）：
-  #   通过：`perf companion mount pkg=... ok=true`（挂载流程成功，hook 兜底拓扑）
+  # 判定标记（拓扑无关，两种服务方式都算通过）：
+  #   通过 A（mount 拓扑）：`perf companion mount pkg=... ok=true`（挂载流程成功）
+  #   通过 B（per-caller hook 拓扑）：`hook refresh start profile=system-writer pkg=下载提供器`
+  #     —— 下载提供器纳入 system-writer 后，冷启动即装 full writer hook 集
+  #     （stat/realpath/mkdir 等），pre 阶段直接走 `writer skip companion mount`，
+  #     不再发挂载请求，原生写入的沙盒重定向由进程内 per-caller hook 兜底。
+  #     这是场景 39（代写链路需在提供器进程内解析映射请求路径）的同一套机制，
+  #     故此处判据必须随拓扑一起放宽，否则修好 39 就会把 38 判成回归。
   #   回归：`req op=apply ... sandbox=0`、`attach skipped ... policy_registration_failed`，
   #         或出现任何 `fuse redirect mount start pkg=下载提供器`（桥接进程不应有模块会话）
   # 行为级验证（引擎 mkdir 落点）依赖 XL 引擎初始化，CI 模拟器无该引擎，
@@ -2074,7 +2080,8 @@ run_provider_sandbox_scenario() {
   local assertions_ok=0
   while [ "$attempt" -le 4 ]; do
     sleep 5
-    if adb_su "grep -Eq 'perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true' '$LOG_PATH'"; then
+    if adb_su "grep -Eq 'perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true' '$LOG_PATH'" ||
+      adb_su "grep -Eq 'hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ' '$LOG_PATH'"; then
       assertions_ok=1
       break
     fi
@@ -2089,11 +2096,11 @@ run_provider_sandbox_scenario() {
     return 1
   fi
   if [ "$assertions_ok" -ne 1 ]; then
-    echo "provider sandbox positive markers not found after retries" >&2
+    echo "provider sandbox positive markers not found after retries (neither companion mount ok=true nor system-writer hook profile)" >&2
     return 1
   fi
   echo "step 5/7 内: 提供器沙盒策略标记确认"
-  adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}' '$LOG_PATH' 2>/dev/null | tail -3" || true
+  adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}|hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ' '$LOG_PATH' 2>/dev/null | tail -3" || true
   return 0
 }
 
