@@ -70,7 +70,7 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         self.assertIn("call_realpath_prev(proxy_fn, path, resolved)", body)
         self.assertLess(
             body.index("call_realpath_prev(proxy_fn, path, resolved)"),
-            body.index("mapped_request_realpath(&path_text)"),
+            body.index("mapped_request_realpath(hub, &path_text)"),
         )
         self.assertIn("if !ret.is_null()", body)
         self.assertIn("is_retryable_system_writer_query_error(error_no)", body)
@@ -88,7 +88,7 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         self.assertIn('*segment == "."', body)
         self.assertIn('*segment == ".."', body)
         # 未命中进程级登记时不得伪造
-        self.assertIn("crate::hook::process_mapped_dir_target(&normalized)?", body)
+        self.assertIn("crate::hook::process_mapped_dir_target(&normalized)", body)
 
     def test_realpath_writes_bounded_output(self) -> None:
         query = read("src/hook/ops/query.rs")
@@ -125,6 +125,21 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         register_index = body.index("crate::hook::remember_process_mapped_dir(")
         guard = body[:register_index]
         self.assertIn("if redirect_result.is_mapping {", guard)
+
+    def test_realpath_fallback_also_consults_configured_mappings(self) -> None:
+        # MediaProvider 的 FuseDaemon 把下层写直接打到映射目标上，不经过 hook，
+        # 进程内不会有任何登记。realpath 回退若只认进程登记表，在「下载器经 MP
+        # 代写」这条链路上永远不命中（run 40291854472 实证：整条链路只留下一条
+        # req map）。因此必须带配置驱动兜底。
+        query = read("src/hook/ops/query.rs")
+        body = function_body(query, "fn mapped_request_realpath(")
+        self.assertIn("crate::hook::process_mapped_dir_target(&normalized)", body)
+        self.assertIn("writer::resolve_system_writer_user_id(&normalized", body)
+        self.assertIn("resolve_mapping_request_owner_for_path(user_id, &normalized)", body)
+        # 进程登记优先：同进程刚做过 mkdir 重定向的路径最可靠。
+        registry_at = body.index("crate::hook::process_mapped_dir_target(&normalized)")
+        config_at = body.index("resolve_mapping_request_owner_for_path(user_id, &normalized)")
+        self.assertLess(registry_at, config_at, "进程内登记必须优先于配置兜底")
 
 
 if __name__ == "__main__":

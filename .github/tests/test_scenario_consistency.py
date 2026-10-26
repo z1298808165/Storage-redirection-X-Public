@@ -738,9 +738,18 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 门禁值由各 hook 进程启动时读取一次，不确认它，任何「某条 debug 日志不存在」
         # 的结论都不成立。
         script = read(".github/tests/run-storage-redirect-scenarios.sh")
-        self.assertIn("grep -a 'SrtDlOwner' '$LOG_PATH'", script)
+        self.assertIn("grep -a 'SrtDlOwner' '$LOG_DIR'/running.log*", script)
         self.assertIn("debug_lines=", script)
         self.assertIn("hook registered profile", script)
+        # running.log 会按大小轮转成 running.log.1（本地实测 514 : 17709 行）。只搜主
+        # 文件会把 hook 安装记录整段漏掉——run 40291854472 的 hook_registered 全空
+        # 就是这个原因，当时被误读成「hook 没装」。
+        self.assertNotIn("grep -a 'SrtDlOwner' '$LOG_PATH'", script)
+        self.assertIn("'$LOG_DIR'/running.log*", script)
+        # 「进程没加载模块」与「日志被轮转」在"没有记录"上完全同形，必须留下
+        # /proc/<pid>/maps 证据才能归因，否则只能在重定向判定里空转。
+        self.assertIn(r"grep -ac -e 'storage.redirect' -e 'libsrx_core' /proc/\$pid/maps", script)
+        self.assertIn("srx_maps=", script)
         # 诊断里不能引用不存在的变量名，否则整段静默失效（守卫发现的真实笔误）。
         self.assertNotIn("$DL_OWNER_PROBE_NAME", script)
 

@@ -1122,7 +1122,7 @@ fn process_redirect_path_for_query_fallback(
 ///
 /// 含 `.`/`..` 的路径不伪造：realpath 需要先解析这些分量，直接回显会给出错误结果，
 /// 此时保留原失败更安全。
-fn mapped_request_realpath(path_text: &str) -> Option<String> {
+fn mapped_request_realpath(hub: &InterceptHub, path_text: &str) -> Option<String> {
     if path_text.is_empty() || !path_text.starts_with('/') {
         return None;
     }
@@ -1134,8 +1134,20 @@ fn mapped_request_realpath(path_text: &str) -> Option<String> {
         return None;
     }
     let normalized = paths::normalize(path_text);
-    crate::hook::process_mapped_dir_target(&normalized)?;
-    Some(normalized)
+    // 本进程刚做过 mkdir 重定向的路径最可靠，优先采信。
+    if crate::hook::process_mapped_dir_target(&normalized).is_some() {
+        return Some(normalized);
+    }
+    // 配置驱动兜底：MediaProvider 的 FuseDaemon 是把下层写直接打到映射目标上的，
+    // 它不经过 hook，进程内不会有任何登记。只靠登记表的话，这条回退在 CI
+    // （下载提供器经 MP 代写）永远不命中——2026-10-26 run 40291854472 实证：
+    // 整条链路只留下 1 条 req map，没有任何 mkdir 登记可供 realpath 使用。
+    let mut caller_uid = hub.get_current_caller_uid();
+    let user_id = writer::resolve_system_writer_user_id(&normalized, &mut caller_uid);
+    if user_id >= 0 && !resolve_mapping_request_owner_for_path(user_id, &normalized).is_empty() {
+        return Some(normalized);
+    }
+    None
 }
 
 /// 把规范化路径写入 realpath 的输出位置。
@@ -1222,7 +1234,7 @@ unsafe fn realpath_with_mapped_fallback(
     // CI 里根本落不了盘——于是「回退没命中」与「回退不存在」在日志上完全同形
     // （run 40286639350 全库零 realpath 痕迹，无法裁决）。这条路径只有「系统写者 +
     // 可重试 ENOENT」才走到，出现频次远低于挂载类日志。
-    let Some(fake_path) = mapped_request_realpath(&path_text) else {
+    let Some(fake_path) = mapped_request_realpath(hub, &path_text) else {
         log::debug!(
             "realpath mapped miss path={} errno={} registered={}",
             path_text,
