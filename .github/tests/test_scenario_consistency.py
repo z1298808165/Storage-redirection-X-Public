@@ -2699,6 +2699,48 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 f"非法标记 {bad_message!r} 必须报错，不得静默回退全量",
             )
 
+    def test_download_probe_server_replaces_subshell_and_drops_stdin(self) -> None:
+        """取数服务必须用 exec 顶替子 shell 并断开 stdin。
+
+        `( ... python3 -m http.server ... ) &` 的 `$!` 是子 shell 的 PID，脚本
+        末尾的 `kill "$dl_server_pid"` 只杀中间层，python 变孤儿继续监听并持有
+        step 的管道。GitHub Actions 在 step 的 shell 退出后仍会等这根管道关闭，
+        表现为脚本早已失败、action 收尾日志也打完，job 却静默挂到步骤超时
+        （run 40286639350：07:45:48 之后 11 分 44 秒零输出，直到 17 分钟看门狗）。
+        """
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        line = next(
+            (item for item in script.splitlines() if "http.server" in item),
+            None,
+        )
+        self.assertIsNotNone(line, "下载取数服务的启动行已被移除，请同步本守卫")
+        self.assertIn("exec python3 -m http.server", line)
+        self.assertIn("</dev/null", line)
+        self.assertNotIn("&& python3 -m http.server", line)
+
+    def test_emulator_is_killed_only_on_watchdog_timeout(self) -> None:
+        """正常失败路径不得提前杀模拟器。
+
+        先杀模拟器会让 android-emulator-runner 收尾的 `adb emu kill` 拿到
+        Connection refused（run 40286639350 实证），收尾不干净；只有看门狗
+        超时（124）时设备侧状态才不可预期，需要主动清场。
+        """
+        script = read(".github/tests/run-android-test-flow.sh")
+        kill_lines = [
+            index
+            for index, line in enumerate(script.splitlines())
+            if "adb emu kill" in line
+        ]
+        self.assertTrue(kill_lines, "模拟器兜底 kill 被整体移除，请同步本守卫")
+        lines = script.splitlines()
+        for index in kill_lines:
+            # 向上找最近的条件判断行，必须限定在 124 超时分支内
+            window = "\n".join(lines[max(0, index - 6) : index + 1])
+            self.assertIn(
+                'scenario_exit" -eq 124', window,
+                "adb emu kill 必须只出现在看门狗超时分支内",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

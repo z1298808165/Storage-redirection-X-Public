@@ -286,12 +286,24 @@ timeout "${scenario_watchdog}s" bash .github/tests/run-storage-redirect-scenario
 if [ "$scenario_exit" -eq 124 ]; then
   echo "场景脚本执行超时（${scenario_watchdog}s 看门狗触发，场景范围=${SRT_SCENARIOS:-全量}），按失败处理以便快速重跑" >&2
 fi
-# 主动终止模拟器（带超时）：android-emulator-runner 的收尾步骤 adb emu kill
-# 没有超时，模拟器进入异常状态时会无限挂起——run 40257794067/40261786446
-# 实证：场景失败完成后 job 卡在 Terminate Emulator 二十多分钟直到被取消。
-# 这里先行终止，action 收尾时 emu kill 对已死模拟器立即返回。
-timeout 60 adb emu kill >/dev/null 2>&1 || true
+# 只在看门狗超时时主动终止模拟器：那时设备侧可能已无响应，action 收尾的
+# `adb emu kill` 会无限挂起（run 40257794067/40261786446 实证）。
+# 正常失败路径**不能**提前 kill：模拟器先死会让 action 收尾的 emu kill 拿到
+# Connection refused，收尾不干净（run 40286639350：07:45:48 结束 Terminate
+# Emulator 后静默到 17 分钟步骤超时）。正常失败交给 action 自己收尾即可，
+# 配合场景脚本里取数服务的 exec 修复，step 能在秒级结束。
+if [ "$scenario_exit" -eq 124 ]; then
+  timeout 60 adb emu kill >/dev/null 2>&1 || true
+fi
 if [ "$scenario_exit" -ne 0 ]; then
   echo "场景脚本退出码：${scenario_exit}" >&2
+  # 失败时快照宿主侧的残留进程：GitHub runner 只在 step 的所有 stdout 写端
+  # 关闭后才判定结束，任何继承管道又不退出的子进程都会让 job 静默挂到步骤
+  # 超时（run 40286639350 实证 11 分 44 秒零输出）。这段输出用于下一轮直接
+  # 判定「谁还活着」，不必再靠推测。
+  echo "---- 宿主残留进程快照（失败诊断） ----" >&2
+  ps -eo pid,ppid,stat,etime,cmd 2>/dev/null |
+    grep -aE "emulator|qemu|http\.server|adb " |
+    grep -av "grep -aE" | head -20 >&2 || true
   exit "$scenario_exit"
 fi

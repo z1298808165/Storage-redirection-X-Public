@@ -2140,7 +2140,12 @@ run_download_owner_attribution_scenario() {
     dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
     echo "srt-download-probe" > "$dl_dir/srt_download.bin"
     dl_server_log="$dl_dir/http-server.log"
-    (cd "$dl_dir" && python3 -m http.server "$dl_port" --bind 0.0.0.0 >"$dl_server_log" 2>&1) &
+    # 用 exec 把子 shell 换成 python 本身，并断开 stdin：否则 $! 拿到的是子
+    # shell，kill 只杀中间层，python 变孤儿继续监听并持有 step 的管道——CI 上
+    # 表现为脚本早已失败、action 收尾也打完日志，job 却静默挂到步骤超时
+    # （2026-10-26 run 40286639350：07:45:48 后 11 分 44 秒零输出）。
+    # 本地对照：旧写法 kill 后端口仍返回 200，exec 写法 kill 后连接失败。
+    (cd "$dl_dir" && exec python3 -m http.server "$dl_port" --bind 0.0.0.0 </dev/null >"$dl_server_log" 2>&1) &
     dl_server_pid=$!
     # 宿主别名 10.0.2.2 落在模拟器局域网网段（10.0.2.0/24），而 Android 17
     # （API 37）起对应用默认阻止「本地网络访问」：下载提供器在 A17 镜像里
