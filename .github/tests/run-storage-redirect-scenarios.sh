@@ -2194,6 +2194,13 @@ run_download_owner_attribution_scenario() {
     adb shell dumpsys connectivity 2>/dev/null | grep -aE "Active default network|Current Networks|NetworkAgentInfo|Validated:|INTERNET|NOT_INTERNET|Capabilities:|PrivateDns" | head -30 || true
     echo "---- logcat 下载与网络判定摘录 ----" >&2
     adb logcat -d -t 300 2>/dev/null | grep -aE "DownloadManager|DownloadProvider|DownloadThread|NetworkMonitor|NetworkCapabilities|privateDns" | tail -30 || true
+    # 模块侧判定与视图状态：区分「hook 重定向决策失败」与「调用方原生 DAC/FUSE 失败」。
+    echo "---- running.log 摘录（下载窗口判定） ----" >&2
+    adb_su "tail -400 '$LOG_PATH' 2>/dev/null | grep -aE 'download|downloads|redirect|attrib|own private|skip|failed' | tail -60" >&2 || true
+    echo "---- 根视图与后端 Download 列表 ----" >&2
+    adb_su "ls -la '${REAL_ROOT}/Download/' 2>/dev/null | head -15; echo ---backend---; ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -15" >&2 || true
+    echo "---- logcat 提供器与文件创建全摘录 ----" >&2
+    adb logcat -d 2>/dev/null | grep -aE "providers\.downloads|DownloadProvider|DownloadThread|FileUtils|createParent|generateFilename" | tail -40 >&2 || true
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
