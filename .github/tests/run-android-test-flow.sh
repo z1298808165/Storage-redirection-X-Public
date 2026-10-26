@@ -269,7 +269,11 @@ if [ -z "$scenario_scope" ]; then
 fi
 if [ -n "$scenario_scope" ]; then
   export SRT_SCENARIOS="${scenario_scope//，/,}"
-  echo "scenario_scope=limited value=${SRT_SCENARIOS}"
+  # 全量时 CI 传的是 `all`，它不是「受限范围」；打 limited 会误导判据核对。
+  case "$SRT_SCENARIOS" in
+    all|ALL) echo "scenario_scope=full value=all" ;;
+    *) echo "scenario_scope=limited value=${SRT_SCENARIOS}" ;;
+  esac
 fi
 # srx-scenario-scope:end
 # 场景脚本的失败退出码直接透传给 job（此前 224 无任何标记），这里显式打印便于定位。
@@ -278,8 +282,18 @@ fi
 # 修复只覆盖脚本退出之后）。预算＝15 分钟基础 + 每场景 90 秒：单场景约
 # 16.5 分钟封顶，全量 40 场景 75 分钟；超时以 124 退出并显式标注，job 快速
 # 失败进入重跑，而不是无限占用 runner。
-scenario_count="$(awk -F',' 'BEGIN{n=1} END{print (NF>0)?NF:1}' <<<"${SRT_SCENARIOS:-}")"
-[ "$scenario_count" -ge 1 ] 2>/dev/null || scenario_count=40
+#
+# 场景数必须按清单取，不能数 SRT_SCENARIOS 的字面 token：全量时该变量的值是
+# `all`（空值走脚本内默认清单），按 token 数只能算出 1，看门狗缩到 990s，
+# 全量 40 场景必被腰斩——run 40324023063 的 A14 跑到场景 29 就被 124 杀掉，
+# A17 只是刚好赶上，掩盖了这个预算错误。
+scenario_total="$(grep -c '\"id\"' "$(dirname "$0")/storage-redirect-scenarios.json" 2>/dev/null || echo 0)"
+[ "$scenario_total" -ge 1 ] 2>/dev/null || scenario_total=40
+case "${SRT_SCENARIOS:-}" in
+  ''|all|ALL) scenario_count="$scenario_total" ;;
+  *) scenario_count="$(awk -F',' 'BEGIN{n=1} END{print (NF>0)?NF:1}' <<<"${SRT_SCENARIOS}")" ;;
+esac
+[ "$scenario_count" -ge 1 ] 2>/dev/null || scenario_count="$scenario_total"
 scenario_watchdog=$((900 + scenario_count * 90))
 scenario_exit=0
 timeout "${scenario_watchdog}s" bash .github/tests/run-storage-redirect-scenarios.sh || scenario_exit=$?

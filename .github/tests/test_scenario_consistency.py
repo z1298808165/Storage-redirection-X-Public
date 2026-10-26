@@ -171,6 +171,16 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.android_wrapper,
         )
 
+    def test_watchdog_budget_counts_full_range_from_manifest(self) -> None:
+        # 看门狗预算按场景数算，而全量时 SRT_SCENARIOS 的字面值是 `all`：按逗号
+        # token 数只能得到 1，预算缩到 990s，40 场景的版本必被腰斩。run
+        # 40324023063 实证：A14 跑到场景 29 被 124 杀掉，A17 只是刚好赶上（40 场景
+        # 全过），差别只在一路快几秒。因此场景数必须回落到清单条目数。
+        self.assertIn("storage-redirect-scenarios.json", self.android_wrapper)
+        self.assertIn('scenario_total="$(grep -c', self.android_wrapper)
+        self.assertIn("''|all|ALL) scenario_count=\"$scenario_total\"", self.android_wrapper)
+        self.assertIn("scenario_watchdog=$((900 + scenario_count * 90))", self.android_wrapper)
+
     def test_own_private_backend_is_stable_for_new_files(self) -> None:
         policy = read("src/fuse_redirect/policy.rs")
         backend = section(
