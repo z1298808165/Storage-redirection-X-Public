@@ -128,12 +128,21 @@ jobs:
     timeout-minutes: 10
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
-      CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
+      # 标签只用 run_id：失败任务重跑（gh run rerun --failed）会让 run_attempt
+      # 递增，而 init-ci-release 首轮已成功、重跑时不再执行，掺了 attempt 的标签
+      # 就再也不会被创建——发布环节按新标签查不到草稿，直接 release not found
+      # （run 40331496700：attempt 1 建 `-1`，重跑 attempt 2 找 `-2`）。
+      CI_TAG: ci-build-${{ github.run_id }}
     steps:
       - name: Create draft CI release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 完整重跑（所有 job 重来）时草稿已在，复用即可：重建会清空已上传资产。
+          if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "draft CI release already exists: $CI_TAG"
+            exit 0
+          fi
           gh release create "$CI_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
@@ -305,15 +314,24 @@ jobs:
         if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
+          CI_TAG: ci-build-${{ github.run_id }}
         run: |
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if [ "$(gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+            if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               break
             fi
             if [ "$attempt" -eq 10 ]; then
-              gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" || true
-              exit 1
+              # 草稿 Release 不存在（例如重跑时 init-ci-release 已被跳过、草稿被
+              # 清理）：就地补建，让构建产物仍有落点，不要直接失败。
+              gh release create "$CI_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --target "$GITHUB_SHA" \
+                --title "CI Build $VERSION" \
+                --notes "构建与测试进行中。" \
+                --draft \
+                --prerelease \
+                --latest=false
+              continue
             fi
             sleep 2
           done
@@ -398,15 +416,23 @@ jobs:
         if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
+          CI_TAG: ci-build-${{ github.run_id }}
         run: |
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if [ "$(gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+            if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               break
             fi
             if [ "$attempt" -eq 10 ]; then
-              gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" || true
-              exit 1
+              # 同 module：草稿缺失时补建，保证资产有落点。
+              gh release create "$CI_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --target "$GITHUB_SHA" \
+                --title "CI Build $VERSION" \
+                --notes "构建与测试进行中。" \
+                --draft \
+                --prerelease \
+                --latest=false
+              continue
             fi
             sleep 2
           done
@@ -797,6 +823,7 @@ jobs:
       ci_tag: ${{ steps.release.outputs.ci_tag }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      CI_TAG: ci-build-${{ github.run_id }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -810,15 +837,12 @@ jobs:
             --mode ci \
             --version "$VERSION" \
             --output build/CHANGELOG.md
-      - name: Verify draft CI release assets
+      - name: Verify CI release assets before publishing
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          test "$(gh release view "$CI_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isDraft \
-            --jq '.isDraft')" = "true"
+          # 不校验 isDraft：完整重跑时上一轮可能已把草稿发布出去，此时资产仍在、
+          # 直接再走一次发布是幂等的；真正要保证的是模块 zip 与 APK 都在。
           gh release view "$CI_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
@@ -831,9 +855,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="ci-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-          gh release edit "$TAG" \
+          gh release edit "$CI_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "CI Build $VERSION" \
             --notes-file build/CHANGELOG.md \
@@ -841,7 +863,7 @@ jobs:
             --prerelease \
             --latest=false
 
-          echo "ci_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ci_tag=$CI_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Verify CI build assets
         env:
@@ -873,23 +895,35 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
-      CI_TAG: ci-build-${{ github.run_id }}-${{ github.run_attempt }}
-      # 只有真正发布时才尝试删除草稿 Release；范围受限（不发布）时跳过。
+      CI_TAG: ci-build-${{ github.run_id }}
+      # 只有真正发布时才做草稿清理；范围受限（不发布）时跳过。
       PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}
     steps:
-      - name: 删除失败 CI Release
-        if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && (needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success')
+      - name: 清理其它 run 遗留的过期草稿
+        if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 草稿发布可能尚未创建 tag；仅删除草稿，保留已有 tag 作为诊断锚点。
-          if gh release view "$CI_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$CI_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --yes
-          else
-            echo "failed CI release not found: $CI_TAG"
-          fi
+          # 失败的草稿 Release 是 module/app 构建产物的唯一副本：任务级重跑
+          # （gh run rerun --failed）要靠它继续发布，删掉就再也发不出去
+          # （run 40331496700 实证：attempt 1 失败时被清理删掉草稿，重跑后
+          # 发布环节既没有标签也没有资产）。所以本轮草稿一律保留，只清理其它
+          # run 遗留且超过 24 小时的草稿——单轮 CI 最长 2 小时，不会误删在跑的。
+          now="$(date -u +%s)"
+          gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft) | select(.tag_name | startswith("ci-build-")) | [.tag_name, .created_at] | @tsv' |
+          while IFS=$'\t' read -r tag created; do
+            if [ "$tag" = "$CI_TAG" ]; then
+              echo "keep current CI draft: $tag"
+              continue
+            fi
+            created_epoch="$(date -u -d "$created" +%s)"
+            if [ $((now - created_epoch)) -lt 86400 ]; then
+              echo "keep recent CI draft: $tag"
+              continue
+            fi
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes
+          done
 
       - name: 保留失败 CI 诊断资源
         if: needs.create-ci-release.result != 'success' || needs.update-manifest.result != 'success'

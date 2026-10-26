@@ -687,6 +687,38 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 失败清理只在本就发布时才尝试删除草稿 Release。
         self.assertIn("PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}", ci)
 
+    def test_ci_release_tag_is_stable_across_rerun_attempts(self) -> None:
+        # 失败任务重跑会让 github.run_attempt 递增，而 init-ci-release（唯一创建
+        # 草稿 Release 的 job）首轮已成功、重跑时不执行：标签一旦掺入 attempt，
+        # 重跑后的发布环节就按新标签查不到草稿，报 release not found（run
+        # 40331496700 实证：attempt 1 建 `-1`，重跑 attempt 2 找 `-2` 直接失败）。
+        # 标签只按 run_id 生成，五处引用必须一致；重跑命中已有草稿时复用不重建。
+        ci = read(".github/workflows/ci.yml")
+        self.assertNotIn("github.run_attempt", ci)
+        self.assertNotIn("GITHUB_RUN_ATTEMPT", ci)
+        self.assertEqual(ci.count("CI_TAG: ci-build-${{ github.run_id }}"), 5)
+        init = section(ci, "  init-ci-release:", "  module:")
+        self.assertIn('if gh release view "$CI_TAG"', init)
+        self.assertIn("draft CI release already exists", init)
+
+    def test_ci_failed_draft_release_survives_for_rerun(self) -> None:
+        # 草稿 Release 是 module/app 构建产物的唯一副本。此前失败清理会直接删掉
+        # 本轮草稿，导致「只重跑失败任务」时既没有标签、也没有资产，发布永远补
+        # 不回来（run 40331496700）。清理只允许删其它 run 遗留且超过 24 小时的
+        # 草稿：单轮 CI 最长 2 小时，不会误删正在跑的那一轮。
+        ci = read(".github/workflows/ci.yml")
+        cleanup = section(ci, "  cleanup-build-artifacts:", "  update-manifest:")
+        self.assertNotIn('gh release delete "$CI_TAG"', cleanup)
+        self.assertIn('if [ "$tag" = "$CI_TAG" ]; then', cleanup)
+        self.assertIn("86400", cleanup)
+        self.assertIn('select(.tag_name | startswith("ci-build-"))', cleanup)
+
+        # 发布前只校验资产，不再要求草稿态：完整重跑时上一轮可能已经发布过，
+        # 此时 `gh release edit --draft=false` 是幂等的。
+        release = section(ci, "  create-ci-release:", "  cleanup-build-artifacts:")
+        self.assertNotIn("--json isDraft", release)
+        self.assertIn("storage-redirect-x-manager-v${VERSION}.apk", release)
+
     def test_ci_test_flow_step_timeout_follows_scenario_scope(self) -> None:
         # 模拟器异常时编排脚本可能停在场景脚本之前的准备阶段，脚本内看门狗覆盖
         # 不到；job 级 45/50 分钟又太宽（run 40272962460 五个版本同时被拖住 33
