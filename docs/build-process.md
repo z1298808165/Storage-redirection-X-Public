@@ -95,6 +95,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 
 调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再以 Android 版本为矩阵维度（Android 13/14/15/16/17 x86_64 模拟器）各自运行完整 scenario 1-40，矩阵跨版本 fail-fast。Android 17（API 37.0）并入同一矩阵，不再单独成 job。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地完整验证默认仍执行最终白名单清理，适合复用真机或模拟器。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
 
+CI 预发布使用 `ci-build-<run_id>` 作为 Release 标签，**不掺 `run_attempt`**：任务级重跑（`gh run rerun --failed`）会让 `run_attempt` 递增，而创建草稿 Release 的 `init-ci-release` 首轮已经成功、重跑时不再执行，标签一旦带 attempt，重跑后的发布步骤就按新标签查不到草稿并直接失败（实测报 `release not found`）。草稿 Release 是模块 zip 与管理 APK 的唯一副本，因此失败时**不再删除本轮草稿**（否则只重跑失败任务时既没有标签也没有资产，发布永远补不回来），只清理其它 run 遗留且超过 24 小时的草稿；测试流偶发失败时优先重跑失败任务续接发布，不必重跑整轮。
+
 ### 版本号规则
 
 版本号采用语义化版本 `主版本.次版本.修订号`（MAJOR.MINOR.PATCH）：缺陷修复递增修订号，新增功能或较大优化递增次版本，不兼容变更或核心架构重写递增主版本；纯文档、CI 与测试流变更不递增版本号。本项目自 `v2.0.0` 起使用独立版本线，与上游项目的版本号相互独立。次版本或修订号达到 99 时必须进位到更高一位（见下方 `versionCode` 布局）。
