@@ -257,8 +257,32 @@ impl MountPlanner {
             return true;
         };
         if !fs::is_directory(&metadata_path) {
-            // 目录尚不存在时由通用修复负责创建，这里不做补建。
-            return true;
+            // 映射目标目录缺失时必须在这里补建，不能留给后续调用方：应用视图是把
+            // 该目录 bind 到请求路径，源不存在时应用侧写入直接 ENOENT；系统代写者
+            // （下载提供器）对请求路径的 mkdir 也会因为映射目标不存在被 MediaProvider
+            // 判为拒绝，表现成 DownloadManager 的 "Failed to create parent
+            // .../Download/SrtDlOwner"（run 40277331532 五版本一致实证：目标目录由
+            // 重定向在访问判定之后才被动创建）。
+            let creation_uid = if crate::metadata_repair::enabled() {
+                owner_uid
+            } else {
+                -1
+            };
+            if !fs::create_directory(&metadata_path, creation_uid) {
+                log::warn!(
+                    "mount dir: mapping target mkdir failed errno={} path={} metadata_path={}",
+                    fs::last_create_directory_errno(),
+                    path,
+                    metadata_path
+                );
+                return true;
+            }
+            log::debug!(
+                "mount dir: mapping target created path={} metadata_path={} owner={}",
+                path,
+                metadata_path,
+                owner_uid
+            );
         }
         let Ok(c_path) = CString::new(metadata_path.as_str()) else {
             return false;

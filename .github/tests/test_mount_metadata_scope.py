@@ -87,6 +87,19 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertIn("MediaProvider", body)
         self.assertIn("Vec::new()", body)
 
+    def test_mapping_target_created_when_missing(self) -> None:
+        # 映射目标目录缺失时必须在挂载阶段补建：应用视图把它 bind 到请求路径，
+        # 源不存在会让应用写入报 ENOENT，系统代写者（下载提供器）对请求路径的
+        # mkdir 也会被 MediaProvider 判为拒绝，表现成 DownloadManager 的
+        # "Failed to create parent"（run 40277331532 五版本一致实证）。
+        body = function_body(
+            self.mount_core,
+            "pub(super) fn ensure_app_owned_mapping_target(&self, path: &str, owner_uid: i32) -> bool",
+        )
+        self.assertIn("fs::create_directory(&metadata_path, creation_uid)", body)
+        self.assertIn("mapping target mkdir failed", body)
+        self.assertNotIn("这里不做补建", body)
+
     def test_stuck_mount_circuit_is_scoped_to_one_package(self) -> None:
         # 熔断判据必须带上包名，否则单个应用的挂载超时会连坐整机其它应用。
         skip_body = function_body(
