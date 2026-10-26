@@ -404,10 +404,16 @@ impl MountPlanner {
 
         log::info!("android root stays redirected unless allowed explicitly");
         self.ensure_scoped_fuse_mount_points(scoped_fuse_roots, &storage_path);
-        // 自有媒体目录恢复不在这里做：此刻 srx FUSE 还没接管存储根，先 bind 的子挂载
-        // 会被随后的视图根挂载整体遮蔽（真机 2026-10-25 实证：同一构建时而生效时而
-        // 丢失）。调用方（companion / daemon 的挂载成功分支）在所有挂载动作结束后调用
-        // [`Self::restore_own_private_system_view`]。
+        // 自有私有目录恢复必须在放行/映射 bind **之前**执行：映射目标若落在自有
+        // 目录子树下（场景 35 的 Android/data/<pkg>/... → Download/...），映射 bind
+        // 要叠在恢复 bind 之上才会生效；恢复放在末尾则会反过来遮蔽先放的映射
+        // bind（CI A17 场景 35 实证：写入成功但映射目标缺失）。namespace 形态下
+        // apply 之后没有会遮蔽存储根的挂载，这里恢复即终态；宿主接管/scoped 形态
+        // 中 apply 阶段的恢复可能被随后的视图根 FUSE 遮蔽（真机 2026-10-25 实证：
+        // 同一构建时而生效时而丢失），由调用方在全部挂载动作结束后调用
+        // [`Self::restore_own_private_system_view`] 幂等补挂（same_mount_identity
+        // 判定已恢复时不再叠层）。
+        self.restore_own_private_directories(&storage_path, &data_media_root, scoped_fuse_roots);
 
         let restored_allowed_paths = self.restore_allowed_real_paths(
             allowed_real_paths,
