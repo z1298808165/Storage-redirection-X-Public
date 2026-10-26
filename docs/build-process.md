@@ -95,7 +95,14 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 
 调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再以 Android 版本为矩阵维度（Android 13/14/15/16/17 x86_64 模拟器）各自运行完整 scenario 1-40，矩阵跨版本 fail-fast。Android 17（API 37.0）并入同一矩阵，不再单独成 job。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地完整验证默认仍执行最终白名单清理，适合复用真机或模拟器。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
 
-CI 预发布使用 `ci-build-<run_id>` 作为 Release 标签，**不掺 `run_attempt`**：任务级重跑（`gh run rerun --failed`）会让 `run_attempt` 递增，而创建草稿 Release 的 `init-ci-release` 首轮已经成功、重跑时不再执行，标签一旦带 attempt，重跑后的发布步骤就按新标签查不到草稿并直接失败（实测报 `release not found`）。草稿 Release 是模块 zip 与管理 APK 的唯一副本，因此失败时**不再删除本轮草稿**（否则只重跑失败任务时既没有标签也没有资产，发布永远补不回来），只清理其它 run 遗留且超过 24 小时的草稿；测试流偶发失败时优先重跑失败任务续接发布，不必重跑整轮。
+CI 预发布使用 `ci-build-<run_id>` 作为 Release 标签，**不掺 `run_attempt`**：任务级重跑（`gh run rerun --failed`）会让 `run_attempt` 递增，而创建草稿 Release 的 `init-ci-release` 首轮已经成功、重跑时不再执行，标签一旦带 attempt，重跑后的发布步骤就按新标签查不到草稿并直接失败（实测报 `release not found`）。草稿 Release 是模块 zip 与管理 APK 的唯一副本，因此**本轮草稿永不删除**——测试流偶发失败时优先重跑失败任务续接发布，不必重跑整轮。
+
+其余草稿由 `.github/scripts/prune_ci_drafts.py` 逐条判定。同一个版本号可能同时存在多份失败草稿（连续几轮都失败时序号不推进），所以判定按 Release 逐条进行，不按版本号去重：
+
+- 版本严格低于本轮、且创建时间早于本轮的草稿：本轮已在同一基础版本里构建更大的序号，旧那一轮的代码已被取代，直接删除；
+- 本轮发布成功时，同版本号的旧草稿一并删除，不留下同版本号不同内容的副本；
+- 本轮没发布成功时，其余草稿保留 24 小时续发窗口（单轮 CI 上限 2 小时），超过窗口仍未被任何一轮接走的视为废弃；
+- 创建时间晚于本轮的草稿可能是并行轮次正在使用，一律保留；版本号解析不出来时只按 24 小时窗口处理，宁可多留一天也不误删。
 
 ### 版本号规则
 
