@@ -2201,6 +2201,17 @@ run_download_owner_attribution_scenario() {
     adb_su "ls -la '${REAL_ROOT}/Download/' 2>/dev/null | head -15; echo ---backend---; ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -15" >&2 || true
     echo "---- logcat 提供器与文件创建全摘录 ----" >&2
     adb logcat -d 2>/dev/null | grep -aE "providers\.downloads|DownloadProvider|DownloadThread|FileUtils|createParent|generateFilename" | tail -40 >&2 || true
+    # MP FuseDaemon 的拒绝分类与提供器权限状态：区分「MP 策略拒绝」与「模块拦截」。
+    echo "---- logcat FuseDaemon/MediaProvider 拒绝摘录 ----" >&2
+    adb logcat -d 2>/dev/null | grep -aE "FuseDaemon|MediaProvider|MediaFuse" | tail -50 >&2 || true
+    echo "---- 提供器进程 logcat 全摘录 ----" >&2
+    dl_pid="$(adb shell pidof com.android.providers.downloads 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+    if [ -n "$dl_pid" ]; then
+      adb logcat -d --pid="$dl_pid" 2>/dev/null | tail -80 >&2 || true
+    fi
+    echo "---- 提供器存储权限状态 ----" >&2
+    adb shell "cmd appops get com.android.providers.downloads 2>/dev/null | grep -iE 'WRITE|READ|LEGACY' | head -10" >&2 || true
+    adb shell "dumpsys package com.android.providers.downloads 2>/dev/null | grep -aiE 'WRITE_EXTERNAL|READ_EXTERNAL|legacy|installed=true' | head -10" >&2 || true
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
