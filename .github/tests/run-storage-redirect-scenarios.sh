@@ -2199,6 +2199,22 @@ run_download_owner_attribution_scenario() {
   start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
   local case_ok=0
+  # 下载器进程是短命的：DownloadManager 的 job 一结束进程就被回收，失败诊断执行时
+  # pidof 早已为空，于是「进程没加载模块」与「进程已退出」在诊断里完全同形。
+  # 必须在触发前主动拉起并记录 maps 基线。另外 CI 上 uid 10112 的进程名是
+  # android.process.media（run 40297046836 的 logcat 实证），不是
+  # com.android.providers.downloads，只查后者等于查了个空。
+  echo "step 5/7 内: 记录下载器进程注入基线"
+  timeout 30 adb shell am start-service -n com.android.providers.downloads/.DownloadService >/dev/null 2>&1 || true
+  sleep 2
+  adb_su "for p in com.android.providers.downloads android.process.media com.google.android.providers.media.module; do pid=\$(pidof \"\$p\" 2>/dev/null | cut -d' ' -f1); if [ -z \"\$pid\" ]; then echo \"baseline \$p pid=absent\"; continue; fi; echo \"baseline \$p pid=\$pid uid=\$(stat -c %u /proc/\$pid 2>/dev/null) srx=\$(grep -ac -e 'storage.redirect' -e 'libsrx_core' /proc/\$pid/maps 2>/dev/null || echo 0) zygisk=\$(grep -ac 'zygisk' /proc/\$pid/maps 2>/dev/null || echo 0)\"; done; echo ---all_media_uids---; ps -A -o PID,USER,ARGS 2>/dev/null | grep -aiE 'media|download' | grep -vE 'grep|hardware|codec|extractor|metrics|mediaserver|drm|cas-service' | head -10" >&2 || true
+  # A17（sdk>=37）上 restart_media_provider 是 no-op（重启会 detach emulated storage），
+  # 于是 MP 从开机起一直是同一个进程，它的 hook 安装日志在 run_service_case 清空
+  # logcat 之后就永久丢失，verbose 门禁也停留在开机时的值。这里在清空之前把
+  # StorageRedirect 的历史行落到文件，诊断时按 MP 的 pid 检索，就能看到它究竟装了
+  # redirect 还是只有 monitor——这是目前唯一能看到 MP hook profile 的途径。
+  echo "step 5/7 内: 保存 MP 启动期模块日志（hook 安装 profile）"
+  adb_su "logcat -d 2>/dev/null | grep -a 'StorageRedirect:' > /data/local/tmp/srx-mp-boot.log 2>/dev/null || true; wc -l < /data/local/tmp/srx-mp-boot.log 2>/dev/null" >&2 || true
   # 本地取数服务仅在模拟器形态启动；真机回退 APK 内置默认 URL（不传 url extra）。
   local url_extra_args=()
   if [ -n "$dl_url" ]; then
@@ -2241,7 +2257,17 @@ run_download_owner_attribution_scenario() {
     # realpath mapped 一串。两种原因在日志上完全同形——进程压根没加载模块，或日志被
     # 轮转/截断——不先分清就会在重定向判定里空转。maps 是唯一能直接证伪的证据。
     echo "---- 进程注入状态（模块是否已进入 MP / 下载器 / 应用） ----" >&2
-    adb_su "for pkg in com.google.android.providers.media.module com.android.providers.downloads ${APP_ID}; do pid=\$(pidof \"\$pkg\" 2>/dev/null | awk '{print \$1}'); if [ -z \"\$pid\" ]; then echo \"\$pkg pid=absent\"; continue; fi; echo \"\$pkg pid=\$pid start=\$(stat -c %y /proc/\$pid 2>/dev/null | cut -d. -f1)\"; echo \"  srx_maps=\$(grep -ac -e 'storage.redirect' -e 'libsrx_core' /proc/\$pid/maps 2>/dev/null || echo 0) zygisk_maps=\$(grep -ac 'zygisk' /proc/\$pid/maps 2>/dev/null || echo 0) srtdlowner_mounts=\$(grep -ac 'SrtDlOwner' /proc/\$pid/mountinfo 2>/dev/null || echo 0)\"; grep -ao '/data/adb/modules[^ ]*' /proc/\$pid/maps 2>/dev/null | sort -u | head -3; done; echo ---download_related_procs---; ps -A -o pid,ppid,user,args 2>/dev/null | grep -aiE 'download' | grep -v 'grep' | head -10" >&2 || true
+    adb_su "for pkg in com.google.android.providers.media.module com.android.providers.downloads android.process.media ${APP_ID}; do pid=\$(pidof \"\$pkg\" 2>/dev/null | cut -d' ' -f1); if [ -z \"\$pid\" ]; then echo \"\$pkg pid=absent\"; continue; fi; echo \"\$pkg pid=\$pid uid=\$(stat -c %u /proc/\$pid 2>/dev/null) srx_maps=\$(grep -ac -e 'storage.redirect' -e 'libsrx_core' /proc/\$pid/maps 2>/dev/null || echo 0) zygisk_maps=\$(grep -ac 'zygisk' /proc/\$pid/maps 2>/dev/null || echo 0) srtdlowner_mounts=\$(grep -ac 'SrtDlOwner' /proc/\$pid/mountinfo 2>/dev/null || echo 0)\"; grep -ao '/data/adb/modules[^ ]*' /proc/\$pid/maps 2>/dev/null | sort -u | head -3; done; echo ---download_related_procs---; ps -A -o pid,ppid,user,args 2>/dev/null | grep -aiE 'download|media' | grep -vE 'grep|hardware|codec|extractor|metrics|mediaserver|drm|cas-service' | head -10" >&2 || true
+    # 谁真的装了 hook：把 logcat 里 StorageRedirect 的 pid 分布列出来，与上面的
+    # 进程清单对照，就能直接看出下载器进程有没有被注入（无日志≠未注入，但结合
+    # maps 就能定性）。下载窗口只有几十毫秒，日志是唯一的时间维度证据。
+    echo "---- logcat 模块日志的进程分布 ----" >&2
+    timeout 20 adb logcat -d 2>/dev/null | grep -a 'StorageRedirect:' | cut -c1-24 | sort | uniq -c | sort -rn | head -10 >&2 || true
+    # MP 从开机起不重启（A17 的 restart 是 no-op），它的 hook 安装记录只存在于
+    # 场景开始前保存的启动期快照里。这里是唯一能看到「MP 装了 redirect 还是只有
+    # monitor」的地方——没有它，「MP 没做重定向」只能靠推测。
+    echo "---- hook 安装 profile（启动期日志快照） ----" >&2
+    adb_su "mp_pid=\$(pidof com.google.android.providers.media.module 2>/dev/null | cut -d' ' -f1); echo mp_pid=\$mp_pid; if [ -n \"\$mp_pid\" ]; then echo ---mp_lines---; awk -v p=\"\$mp_pid\" '\$3==p' /data/local/tmp/srx-mp-boot.log 2>/dev/null | tail -20; fi; echo ---hook_install_all---; grep -aE 'hook install|hook registered|plt hook' /data/local/tmp/srx-mp-boot.log 2>/dev/null | tail -20" >&2 || true
     echo "---- 日志文件清单与规模（判断是否轮转/截断） ----" >&2
     adb_su "ls -la '$LOG_DIR' 2>/dev/null | head -20; for f in '$LOG_DIR'/*; do [ -f \"\$f\" ] && echo \"\$f lines=\$(wc -l < \"\$f\" 2>/dev/null)\"; done" >&2 || true
     echo "---- hook 安装记录（跨全部日志文件检索） ----" >&2
@@ -2268,7 +2294,7 @@ run_download_owner_attribution_scenario() {
     echo "---- logcat FuseDaemon/MediaProvider 拒绝摘录 ----" >&2
     timeout 20 adb logcat -d 2>/dev/null | grep -aE "FuseDaemon|MediaProvider|MediaFuse" | tail -50 >&2 || true
     echo "---- 提供器进程 logcat 全摘录 ----" >&2
-    dl_pid="$(timeout 10 adb shell pidof com.android.providers.downloads 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+    dl_pid="$(timeout 10 adb shell "pidof com.android.providers.downloads android.process.media" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
     if [ -n "$dl_pid" ]; then
       timeout 20 adb logcat -d --pid="$dl_pid" 2>/dev/null | tail -80 >&2 || true
     fi
