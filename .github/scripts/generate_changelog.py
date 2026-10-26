@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAX_SECTION_ITEMS = 20
+# CI 构建日志面向测试用户，只保留可感知的结论：每节条目上限比正式发布更紧，
+# 并额外加一道全局上限，避免「模块/App/其它」三块各堆二十条把页面撑爆
+# （2.2.0-ci.1 实测：112 条、5491 字符，全是「适用范围/限制」这类内部元数据）。
+MAX_CI_SECTION_ITEMS = 12
+MAX_CI_TOTAL_ITEMS = 24
 COMPONENTS = ("module", "app", "other")
 COMPONENT_PRIORITY = {"module": 0, "app": 1, "other": 2}
 SECTIONS = ("fixed", "features", "changes", "usage", "notes")
@@ -212,8 +217,15 @@ def subject_description(subject: str) -> str:
     return description.strip(" 。；;，,\t")
 
 
-def user_summary(commit: CommitInfo) -> str:
+def user_summary(commit: CommitInfo, mode: str = "release") -> str:
     change = commit.fields.get("用户影响") or commit.fields.get("变更") or subject_description(commit.subject)
+    change = change.strip(" 。；;，,")
+    if not change:
+        return ""
+    if mode == "ci":
+        # CI 构建日志面向测试用户：只保留一句用户可读的结论。「适用范围/限制」
+        # 是给后续排查用的提交元数据，拼进来会把每条拉长一倍还全是内部词汇。
+        return change
     parts = [change]
     scope = commit.fields.get("范围")
     limit = commit.fields.get("限制")
@@ -230,6 +242,10 @@ def section_for_commit(commit: CommitInfo, mode: str) -> str | None:
         return "fixed"
     if kind == "feature":
         return "features"
+    if kind == "process":
+        # 测试、文档、构建、CI 调整对使用者没有可感知变化，两种模式都不进日志；
+        # 完整改动始终可以从对比链接查看。
+        return None
     if kind == "change":
         return "changes"
     if mode == "ci":
@@ -239,14 +255,17 @@ def section_for_commit(commit: CommitInfo, mode: str) -> str | None:
 
 def collect_analysis(mode: str, files: list[str], commits: list[CommitInfo]) -> dict[str, dict[str, list[dict[str, object]]]]:
     file_set = set(files)
+    # 只收模块与 App（WebUI 随模块目录计）：CI、测试流与文档调整对使用者
+    # 没有可感知变化，两类日志都不收录（2.2.0-ci.1 之前 CI 日志里混有大量
+    # 「其它更新」，实测占了三分之一篇幅）。
     analysis = {
         component: {section: [] for section in SECTIONS}
         for component in COMPONENTS
-        if mode == "ci" or component != "other"
+        if component != "other"
     }
     emitted_summaries: dict[str, set[str]] = {section: set() for section in SECTIONS}
     for commit in commits:
-        summary = user_summary(commit)
+        summary = user_summary(commit, mode)
         if not summary:
             continue
         section = section_for_commit(commit, mode)
@@ -283,11 +302,30 @@ def summary_key(text: str) -> str:
     return re.sub(r"\s+", "", text).strip("。；;，,")
 
 
-def limit_analysis(analysis: dict[str, dict[str, list[dict[str, object]]]]) -> None:
+def limit_analysis(analysis: dict[str, dict[str, list[dict[str, object]]]], mode: str = "release") -> None:
+    per_section = MAX_CI_SECTION_ITEMS if mode == "ci" else MAX_SECTION_ITEMS
     for sections in analysis.values():
         for section, items in sections.items():
-            if len(items) > MAX_SECTION_ITEMS:
-                sections[section] = items[:MAX_SECTION_ITEMS]
+            if len(items) > per_section:
+                sections[section] = items[:per_section]
+    if mode != "ci":
+        return
+    total = sum(len(items) for sections in analysis.values() for items in sections.values())
+    if total <= MAX_CI_TOTAL_ITEMS:
+        return
+    # 全局上限按组件优先级（模块 → App → 其它）与节顺序截断，保证最相关的
+    # 条目留到最后一批也先被保留。
+    remaining = MAX_CI_TOTAL_ITEMS
+    for component in COMPONENTS:
+        for section in SECTIONS:
+            items = analysis.get(component, {}).get(section, [])
+            if not items:
+                continue
+            if remaining <= 0:
+                analysis[component][section] = []
+                continue
+            analysis[component][section] = items[:remaining]
+            remaining -= len(analysis[component][section])
 
 
 def render_analysis(mode: str, version: str, previous: str, current: str, analysis: dict[str, dict[str, list[dict[str, object]]]]) -> str:
@@ -321,10 +359,7 @@ def render_analysis(mode: str, version: str, previous: str, current: str, analys
             lines.extend(["", headings[section]])
             lines.extend(f"- {item['text']}。" for item in items)
     if mode == "ci":
-        commits = commit_infos(previous, current)
-        if commits:
-            lines.extend(["", "### 提交列表"])
-            lines.extend(f"- `{commit.sha}` {commit.subject}" for commit in commits)
+        # 不再罗列提交列表：使用者关心的是结论，逐笔提交交给对比链接。
         repo = os.environ.get("GITHUB_REPOSITORY", "")
         if repo:
             compare = f"https://github.com/{repo}/{('compare/' + previous + '...' + current) if previous else ('commit/' + current)}"
@@ -339,7 +374,7 @@ def write_changelog(mode: str, version: str, current: str, output: Path) -> None
     files = changed_files(previous, current)
     commits = commit_infos(previous, current)
     analysis = collect_analysis(mode, files, commits)
-    limit_analysis(analysis)
+    limit_analysis(analysis, mode)
     output.write_text(render_analysis(mode, version, previous, current, analysis), encoding="utf-8")
 
 

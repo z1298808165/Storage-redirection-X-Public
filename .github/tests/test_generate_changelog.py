@@ -88,13 +88,60 @@ class GenerateChangelogTest(unittest.TestCase):
         finally:
             CHANGELOG.commit_changed_files = original
         self.assertEqual(len(analysis["module"]["fixed"]), 1)
-        self.assertFalse(analysis["other"]["fixed"])
+        # CI/测试/文档类路径不再进入任何组件的日志。
+        self.assertNotIn("other", analysis)
 
     def test_summary_key_ignores_spacing_and_terminal_punctuation(self) -> None:
         self.assertEqual(
             CHANGELOG.summary_key("固定共享宿主挂载顺序。"),
             CHANGELOG.summary_key("固定 共享宿主挂载顺序；"),
         )
+
+    def test_ci_summary_omits_scope_and_limit_metadata(self) -> None:
+        # CI 构建日志面向测试用户：范围与限制是排查用的提交元数据，拼进条目
+        # 会把每条拉长一倍（2.2.0-ci.1 实测 5491 字符，大半是这类内容）。
+        body = """变更：仅对启用重定向的调用方登记 pending 目标。
+范围：MediaStore 重定向写入。
+限制：不改变查询路径过滤。"""
+        commit = CHANGELOG.CommitInfo(
+            sha="abc123456789",
+            subject="修复(MediaProvider)：隔离 pending 状态",
+            body=body,
+            fields=CHANGELOG.parse_body_fields(body),
+        )
+        ci_summary = CHANGELOG.user_summary(commit, "ci")
+        self.assertEqual(ci_summary, "仅对启用重定向的调用方登记 pending 目标")
+        release_summary = CHANGELOG.user_summary(commit, "release")
+        self.assertIn("适用范围：MediaStore 重定向写入", release_summary)
+        self.assertIn("限制：不改变查询路径过滤", release_summary)
+
+    def test_ci_mode_omits_process_commits(self) -> None:
+        commit = CHANGELOG.CommitInfo(
+            sha="abc123456789",
+            subject="测试：场景38判据改为拓扑无关",
+            body="变更：只调整测试判据。",
+            fields={"变更": "只调整测试判据。"},
+        )
+        original = CHANGELOG.commit_changed_files
+        CHANGELOG.commit_changed_files = lambda _commit: [".github/tests/x.sh"]
+        try:
+            analysis = CHANGELOG.collect_analysis("ci", [".github/tests/x.sh"], [commit])
+        finally:
+            CHANGELOG.commit_changed_files = original
+        self.assertFalse(any(items for sections in analysis.values() for items in sections.values()))
+
+    def test_ci_mode_enforces_global_item_cap(self) -> None:
+        analysis = {
+            "module": {section: [{"text": f"m{i}{section}", "files": ["src/a.rs"]} for i in range(12)] for section in CHANGELOG.SECTIONS},
+            "app": {section: [{"text": f"a{i}{section}", "files": ["app/b.kt"]} for i in range(12)] for section in CHANGELOG.SECTIONS},
+            "other": {section: [{"text": f"o{i}{section}", "files": ["docs/c.md"]} for i in range(12)] for section in CHANGELOG.SECTIONS},
+        }
+        CHANGELOG.limit_analysis(analysis, "ci")
+        total = sum(len(items) for sections in analysis.values() for items in sections.values())
+        self.assertEqual(total, CHANGELOG.MAX_CI_TOTAL_ITEMS)
+        # 全局截断按组件优先级：模块条目全部保留，其它组件先被裁掉。
+        self.assertEqual(len(analysis["other"]["notes"]), 0)
+        self.assertGreater(len(analysis["module"]["fixed"]), 0)
 
     def test_process_only_commit_is_omitted_from_release(self) -> None:
         commit = CHANGELOG.CommitInfo(
