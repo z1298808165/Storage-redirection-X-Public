@@ -273,8 +273,19 @@ if [ -n "$scenario_scope" ]; then
 fi
 # srx-scenario-scope:end
 # 场景脚本的失败退出码直接透传给 job（此前 224 无任何标记），这里显式打印便于定位。
+# 全局看门狗（按场景数自适应）：模拟器在场景失败后可能进入异常状态，脚本内
+# 后续 adb 调用会无限阻塞（run 40269845250 窄跑卡死 32 分钟实证；terminate
+# 修复只覆盖脚本退出之后）。预算＝15 分钟基础 + 每场景 90 秒：单场景约
+# 16.5 分钟封顶，全量 40 场景 75 分钟；超时以 124 退出并显式标注，job 快速
+# 失败进入重跑，而不是无限占用 runner。
+scenario_count="$(awk -F',' 'BEGIN{n=1} END{print (NF>0)?NF:1}' <<<"${SRT_SCENARIOS:-}")"
+[ "$scenario_count" -ge 1 ] 2>/dev/null || scenario_count=40
+scenario_watchdog=$((900 + scenario_count * 90))
 scenario_exit=0
-bash .github/tests/run-storage-redirect-scenarios.sh || scenario_exit=$?
+timeout "${scenario_watchdog}s" bash .github/tests/run-storage-redirect-scenarios.sh || scenario_exit=$?
+if [ "$scenario_exit" -eq 124 ]; then
+  echo "场景脚本执行超时（${scenario_watchdog}s 看门狗触发，场景范围=${SRT_SCENARIOS:-全量}），按失败处理以便快速重跑" >&2
+fi
 # 主动终止模拟器（带超时）：android-emulator-runner 的收尾步骤 adb emu kill
 # 没有超时，模拟器进入异常状态时会无限挂起——run 40257794067/40261786446
 # 实证：场景失败完成后 job 卡在 Terminate Emulator 二十多分钟直到被取消。
