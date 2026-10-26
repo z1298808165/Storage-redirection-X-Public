@@ -170,6 +170,14 @@ pub fn build_hook_entries() -> Vec<HookEntry> {
             profiles: PROFILE_FULL_WRITER,
         },
         HookEntry {
+            // bionic 的 realpath 逐级走内部 __lstat，PLT 侧看不到；不单独 hook 就无法
+            // 让 File.getCanonicalPath() 解析映射请求侧目录（File.mkdirs 因此返回 false）。
+            symbol: "realpath",
+            new_func: super::ops::query::hooked_realpath as *mut _,
+            is_optional: false,
+            profiles: PROFILE_FULL_WRITER,
+        },
+        HookEntry {
             symbol: "mkdir",
             new_func: super::ops::mutation::hooked_mkdir as *mut _,
             is_optional: false,

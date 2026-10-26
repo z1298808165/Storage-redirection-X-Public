@@ -318,6 +318,16 @@ where
     }
     if redirect_result.is_redirect() {
         if result == 0 || error_no == libc::EEXIST {
+            // 映射重定向成功后登记到进程级：系统写者落盘完会用**原请求路径**回查
+            // attr / realpath，而请求侧在真实存储里并不存在（只是应用视图的 bind
+            // 挂载点），没有这张表就一律 ENOENT，FUSE 会把 ENOENT 回给调用方。
+            // 线程级登记覆盖不到——回查发生在 MP 的 FUSE 读线程上。
+            if redirect_result.is_mapping {
+                crate::hook::remember_process_mapped_dir(
+                    path_for_decision.as_ref(),
+                    &redirect_result.new_path,
+                );
+            }
             cleanup_empty_redirect_source_dir_if_needed(
                 op_name,
                 path_for_decision.as_ref(),

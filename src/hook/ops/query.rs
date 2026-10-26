@@ -24,6 +24,9 @@ const STATX_TYPE_MASK: c_uint = 0x0000_0001;
 // 转发原函数时使用的签名别名，避免在调用点反复书写跨行的裸指针参数列表
 type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
 type StatxFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_uint, *mut libc::statx) -> c_int;
+type RealpathFn = unsafe extern "C" fn(*const c_char, *mut c_char) -> *mut c_char;
+// POSIX 约定 realpath 的 resolved 缓冲区至少 PATH_MAX 字节；bionic 同约定
+const REALPATH_BUFFER_LIMIT: usize = 4096;
 
 fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool {
     if !hub.with_package_name(policy::is_system_writer_package) {
@@ -148,6 +151,18 @@ fn should_attempt_system_writer_query_fallback(hub: &InterceptHub, path: Option<
         context::is_current_caller_from_external_signal(),
     ) || has_recent_mapping_request_owner_signal_for_query_fallback(hub)
         || has_mapping_request_path_signal_for_query_fallback(hub, path)
+        || has_process_mapped_dir_signal_for_query_fallback(path)
+}
+
+/// 本进程刚把该路径（或其祖先）重定向到映射目标时的放行判据。
+///
+/// 覆盖系统写者落盘之后用**原请求路径**回查 attr 的窗口：此时写请求的线程上下文
+/// 已经结束（MediaProvider 的 FUSE 读线程与处理线程分离），请求路径在真实存储里
+/// 也不存在，只有进程级登记能证明它属于一次已完成的映射重定向。
+fn has_process_mapped_dir_signal_for_query_fallback(path: Option<&str>) -> bool {
+    path.is_some_and(|value| {
+        !value.is_empty() && crate::hook::process_mapped_dir_target(value).is_some()
+    })
 }
 
 /// 冷查询（前面没有同线程写操作）时的放行判据：查询路径本身就落在某应用的映射
@@ -1090,4 +1105,147 @@ fn process_redirect_path_for_query_fallback(
     path: &str,
 ) -> crate::redirect::RedirectDecision {
     process_redirect_path(hub, path)
+}
+
+// ── realpath(3)：映射请求侧的规范化路径回退 ───────────────────────────────
+//
+// bionic 的 realpath 在 libc 内部逐级调用 `__lstat`（非导出符号，PLT 侧完全抓
+// 不到），因此请求侧目录一旦不在真实存储落地，realpath 一定失败。Java 侧
+// `File.getCanonicalFile()` 直接依赖它：失败即抛 IOException，`File.mkdirs()`
+// 随之返回 false，最终表现成 DownloadProvider 报告无法创建父目录（2026-10-26
+// A17 场景 39，与 mkdir 本身已成功重定向形成对照）。
+//
+// 回退只对**本进程内刚被映射重定向过**的请求侧路径生效，返回请求侧自己的规范化
+// 路径：调用方拿到的 canonical path 与它写入时使用的命名空间一致，映射目标不外泄。
+
+/// 命中进程级映射登记时，构造请求侧自己的规范化路径。
+///
+/// 含 `.`/`..` 的路径不伪造：realpath 需要先解析这些分量，直接回显会给出错误结果，
+/// 此时保留原失败更安全。
+fn mapped_request_realpath(path_text: &str) -> Option<String> {
+    if path_text.is_empty() || !path_text.starts_with('/') {
+        return None;
+    }
+    let segments: Vec<&str> = path_text.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| *segment == "." || *segment == "..")
+    {
+        return None;
+    }
+    let normalized = paths::normalize(path_text);
+    crate::hook::process_mapped_dir_target(&normalized)?;
+    Some(normalized)
+}
+
+/// 把规范化路径写入 realpath 的输出位置。
+///
+/// `resolved` 为 NULL 时按 bionic 契约返回 malloc 分配的内存，由调用方 free；
+/// 非 NULL 时按 POSIX 约定假定缓冲区至少 PATH_MAX 字节，并额外用 `capacity`
+/// 兜住调用方已知的上限。
+unsafe fn fill_realpath_result(
+    resolved: *mut c_char,
+    capacity: Option<usize>,
+    value: &str,
+) -> *mut c_char {
+    let length = value.len() + 1;
+    let limit = capacity.unwrap_or(REALPATH_BUFFER_LIMIT);
+    if length > limit {
+        runtime::set_errno(libc::ENAMETOOLONG);
+        return std::ptr::null_mut();
+    }
+    if resolved.is_null() {
+        // SAFETY: malloc 返回的块至少 length 字节，随后写入 value 与结尾 NUL。
+        let buffer = unsafe { libc::malloc(length) } as *mut u8;
+        if buffer.is_null() {
+            runtime::set_errno(libc::ENOMEM);
+            return std::ptr::null_mut();
+        }
+        // SAFETY: buffer 已按 length 分配，源串长度与拷贝长度一致。
+        unsafe {
+            std::ptr::copy_nonoverlapping(value.as_ptr(), buffer, value.len());
+            *buffer.add(value.len()) = 0;
+        }
+        return buffer as *mut c_char;
+    }
+    // SAFETY: 调用方按 POSIX 约定提供至少 PATH_MAX（或 capacity）字节的缓冲区。
+    unsafe {
+        let out = resolved.cast::<u8>();
+        std::ptr::copy_nonoverlapping(value.as_ptr(), out, value.len());
+        *out.add(value.len()) = 0;
+    }
+    resolved
+}
+
+unsafe fn call_realpath_prev(
+    proxy_fn: *mut c_void,
+    path: *const c_char,
+    resolved: *mut c_char,
+) -> *mut c_char {
+    runtime::call_prev(
+        proxy_fn,
+        // SAFETY: path/resolved 由调用方按 realpath 契约传入，本次调用期间有效。
+        || unsafe { libc::realpath(path, resolved) },
+        |prev| {
+            let f: RealpathFn = unsafe { std::mem::transmute(prev) };
+            // SAFETY: prev 是 realpath 原函数指针，签名与 RealpathFn 一致。
+            unsafe { f(path, resolved) }
+        },
+    )
+}
+
+unsafe fn realpath_with_mapped_fallback(
+    hub: &InterceptHub,
+    proxy_fn: *mut c_void,
+    path: *const c_char,
+    resolved: *mut c_char,
+    capacity: Option<usize>,
+) -> *mut c_char {
+    // SAFETY: 指针由 hook 调用方按 realpath 契约传入。
+    let ret = unsafe { call_realpath_prev(proxy_fn, path, resolved) };
+    if !ret.is_null() {
+        return ret;
+    }
+    let error_no = runtime::current_errno();
+    if !is_retryable_system_writer_query_error(error_no) {
+        return ret;
+    }
+    // 只服务系统写者：应用进程里请求侧由 bind 挂载点承接，realpath 本就成功。
+    if !hub.with_package_name(policy::is_system_writer_package) {
+        runtime::set_errno(error_no);
+        return ret;
+    }
+    // SAFETY: path 由 hook 原样透传，调用方保证其指向以 NUL 结尾的字符串。
+    let path_text = unsafe { c_str_to_string(path) };
+    let Some(fake_path) = mapped_request_realpath(&path_text) else {
+        runtime::set_errno(error_no);
+        return ret;
+    };
+    // SAFETY: resolved 与 capacity 由调用方按对应契约提供。
+    let filled = unsafe { fill_realpath_result(resolved, capacity, &fake_path) };
+    if filled.is_null() {
+        runtime::set_errno(error_no);
+        return ret;
+    }
+    log::debug!(
+        "realpath mapped request fallback path={} errno={}",
+        path_text,
+        error_no
+    );
+    filled
+}
+
+pub unsafe extern "C" fn hooked_realpath(
+    path: *const c_char,
+    resolved: *mut c_char,
+) -> *mut c_char {
+    let self_ptr = hooked_realpath as *mut c_void;
+    runtime::with_hook_guard(
+        // SAFETY: path/resolved 由 hook 调用方传入。
+        || unsafe { call_realpath_prev(self_ptr, path, resolved) },
+        |hub| {
+            // SAFETY: 同上，指针有效性由 hook 调用方保证。
+            unsafe { realpath_with_mapped_fallback(hub, self_ptr, path, resolved, None) }
+        },
+    )
 }

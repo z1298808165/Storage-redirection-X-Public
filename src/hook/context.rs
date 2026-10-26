@@ -480,6 +480,85 @@ pub fn provider_passthrough_virtual_query_dir(path: &str) -> Option<String> {
     }
 }
 
+// ── 进程级「映射请求路径 → 映射目标」短时登记 ─────────────────────────────
+//
+// 系统写者把 mkdir/create 落到映射目标之后，会用**原请求路径**回查 attr、做
+// realpath 校验；而请求路径在真实存储里并不存在（它只是应用视图里的 bind
+// 挂载点），这些回查一律 ENOENT，FUSE 最终把 ENOENT 回给调用方。2026-10-26
+// A17 场景 39 实证：DownloadProvider 的 mkdir 拿到 -1/ENOENT，映射目标里的
+// 目录却已由 MediaProvider 建好。
+//
+// 线程内的 PROVIDER_PASSTHROUGH_VIRTUAL_DIRS 覆盖不到这条链路：FuseDaemon 的
+// 写请求与后续回查落在不同线程上（binder 线程池 + FUSE 读线程）。这里登记到
+// 进程级并带 TTL，只用于回答查询，不改变落盘位置。
+const PROCESS_MAPPED_DIR_TTL_MS: i64 = 8000;
+// 单个下载/插入流程涉及的目录层级有限，设上限避免异常场景下无界增长
+const PROCESS_MAPPED_DIR_MAX: usize = 64;
+
+struct ProcessMappedDir {
+    request: String,
+    target: String,
+    at_ms: i64,
+}
+
+static PROCESS_MAPPED_DIRS: std::sync::Mutex<Vec<ProcessMappedDir>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 登记「本进程内刚把某请求侧目录重定向到了映射目标」。
+///
+/// 键统一折算到 /storage/emulated 路径空间，与查询侧 `virtual_dir_key` 一致。
+pub fn remember_process_mapped_dir(request_path: &str, target_path: &str) {
+    if request_path.is_empty() || target_path.is_empty() {
+        return;
+    }
+    let request = virtual_dir_key(request_path);
+    let target = crate::platform::paths::data_media_to_storage_path(target_path);
+    let now = monotonic_ms();
+    let mut dirs = PROCESS_MAPPED_DIRS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    dirs.retain(|dir| now.saturating_sub(dir.at_ms) <= PROCESS_MAPPED_DIR_TTL_MS);
+    if let Some(existing) = dirs.iter_mut().find(|dir| dir.request == request) {
+        existing.target = target;
+        existing.at_ms = now;
+        return;
+    }
+    if dirs.len() >= PROCESS_MAPPED_DIR_MAX {
+        dirs.remove(0);
+    }
+    dirs.push(ProcessMappedDir {
+        request,
+        target,
+        at_ms: now,
+    });
+}
+
+/// 登记项对应的映射目标（含子路径派生），过期项在读取时就地清理。
+///
+/// 只做纯查询：命中不代表该路径在真实存储里存在，调用方仍须自行验证目标。
+pub fn process_mapped_dir_target(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let key = virtual_dir_key(path);
+    let now = monotonic_ms();
+    let mut dirs = PROCESS_MAPPED_DIRS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    dirs.retain(|dir| now.saturating_sub(dir.at_ms) <= PROCESS_MAPPED_DIR_TTL_MS);
+    let (request, target) = dirs
+        .iter()
+        .filter(|dir| key == dir.request || key.starts_with(&format!("{}/", dir.request)))
+        .max_by_key(|dir| dir.request.len())
+        .map(|dir| (dir.request.clone(), dir.target.clone()))?;
+    let suffix = key.strip_prefix(&request)?.trim_start_matches('/');
+    if suffix.is_empty() {
+        Some(target)
+    } else {
+        Some(format!("{target}/{suffix}"))
+    }
+}
+
 pub fn set_binder_identity_cleared(cleared: bool) {
     BINDER_IDENTITY_CLEARED.with(|cell| cell.set(cleared));
 }
