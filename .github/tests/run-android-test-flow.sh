@@ -275,6 +275,11 @@ fi
 # 场景脚本的失败退出码直接透传给 job（此前 224 无任何标记），这里显式打印便于定位。
 scenario_exit=0
 bash .github/tests/run-storage-redirect-scenarios.sh || scenario_exit=$?
+# 主动终止模拟器（带超时）：android-emulator-runner 的收尾步骤 adb emu kill
+# 没有超时，模拟器进入异常状态时会无限挂起——run 40257794067/40261786446
+# 实证：场景失败完成后 job 卡在 Terminate Emulator 二十多分钟直到被取消。
+# 这里先行终止，action 收尾时 emu kill 对已死模拟器立即返回。
+timeout 60 adb emu kill >/dev/null 2>&1 || true
 if [ "$scenario_exit" -ne 0 ]; then
   echo "场景脚本退出码：${scenario_exit}" >&2
   exit "$scenario_exit"
