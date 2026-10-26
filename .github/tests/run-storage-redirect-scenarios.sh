@@ -2148,7 +2148,13 @@ run_download_owner_attribution_scenario() {
     echo "step 5/7 内: 真机取数源使用测试 APK 内置默认 URL"
   fi
   echo "step 5/7 内: 下载取数源 url=$dl_url"
-  adb shell "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable" || true
+  # A17 模拟器镜像的网络验证（captive portal）无法完成：Downloads 应用要求默认
+  # 网络带 VALIDATED 能力，验证不完成即暂停在 status=4 WAITING_FOR_NETWORK——
+  # ping 通 10.0.2.2（net_probe_host_ok）与 DNS 可用都不够，服务端日志零请求
+  # 实证请求根本没发出（run 40248635974）。关闭验证探测后 NetworkMonitor 直接
+  # 把默认网络标记为已验证，DownloadManager 立即可用；对其它版本与真机无副作用。
+  adb shell settings put global captive_portal_detection_enabled 0 || true
+  adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
   # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
   # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
   echo "step 5/7 内: 重启测试应用（套用发起者映射）"
