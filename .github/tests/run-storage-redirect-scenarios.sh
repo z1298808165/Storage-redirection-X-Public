@@ -2191,27 +2191,29 @@ run_download_owner_attribution_scenario() {
     echo "---- dumpsys downloads（失败诊断） ----" >&2
     adb shell dumpsys downloads 2>/dev/null | grep -aE "DOWNLOAD|status|reason|mRetries|num_failed|uri|title|_id=" | head -40 || true
     echo "---- dumpsys connectivity（默认网络能力与验证状态） ----" >&2
-    adb shell dumpsys connectivity 2>/dev/null | grep -aE "Active default network|Current Networks|NetworkAgentInfo|Validated:|INTERNET|NOT_INTERNET|Capabilities:|PrivateDns" | head -30 || true
+    timeout 20 adb shell dumpsys connectivity 2>/dev/null | grep -aE "Active default network|Current Networks|NetworkAgentInfo|Validated:|INTERNET|NOT_INTERNET|Capabilities:|PrivateDns" | head -30 || true
     echo "---- logcat 下载与网络判定摘录 ----" >&2
-    adb logcat -d -t 300 2>/dev/null | grep -aE "DownloadManager|DownloadProvider|DownloadThread|NetworkMonitor|NetworkCapabilities|privateDns" | tail -30 || true
+    timeout 20 adb logcat -d -t 300 2>/dev/null | grep -aE "DownloadManager|DownloadProvider|DownloadThread|NetworkMonitor|NetworkCapabilities|privateDns" | tail -30 || true
     # 模块侧判定与视图状态：区分「hook 重定向决策失败」与「调用方原生 DAC/FUSE 失败」。
     echo "---- running.log 摘录（下载窗口判定） ----" >&2
     adb_su "tail -400 '$LOG_PATH' 2>/dev/null | grep -aE 'download|downloads|redirect|attrib|own private|skip|failed' | tail -60" >&2 || true
     echo "---- 根视图与后端 Download 列表 ----" >&2
     adb_su "ls -la '${REAL_ROOT}/Download/' 2>/dev/null | head -15; echo ---backend---; ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -15" >&2 || true
     echo "---- logcat 提供器与文件创建全摘录 ----" >&2
-    adb logcat -d 2>/dev/null | grep -aE "providers\.downloads|DownloadProvider|DownloadThread|FileUtils|createParent|generateFilename" | tail -40 >&2 || true
+    timeout 20 adb logcat -d 2>/dev/null | grep -aE "providers\.downloads|DownloadProvider|DownloadThread|FileUtils|createParent|generateFilename" | tail -40 >&2 || true
     # MP FuseDaemon 的拒绝分类与提供器权限状态：区分「MP 策略拒绝」与「模块拦截」。
+    # 每条诊断都套 timeout：设备进入异常状态时 adb 调用可能长时间不返回，
+    # 诊断卡住会拖死整个测试流（run 40257794067 实证）。
     echo "---- logcat FuseDaemon/MediaProvider 拒绝摘录 ----" >&2
-    adb logcat -d 2>/dev/null | grep -aE "FuseDaemon|MediaProvider|MediaFuse" | tail -50 >&2 || true
+    timeout 20 adb logcat -d 2>/dev/null | grep -aE "FuseDaemon|MediaProvider|MediaFuse" | tail -50 >&2 || true
     echo "---- 提供器进程 logcat 全摘录 ----" >&2
-    dl_pid="$(adb shell pidof com.android.providers.downloads 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+    dl_pid="$(timeout 10 adb shell pidof com.android.providers.downloads 2>/dev/null | tr -d '\r' | awk '{print $1}')"
     if [ -n "$dl_pid" ]; then
-      adb logcat -d --pid="$dl_pid" 2>/dev/null | tail -80 >&2 || true
+      timeout 20 adb logcat -d --pid="$dl_pid" 2>/dev/null | tail -80 >&2 || true
     fi
     echo "---- 提供器存储权限状态 ----" >&2
-    adb shell "cmd appops get com.android.providers.downloads 2>/dev/null | grep -iE 'WRITE|READ|LEGACY' | head -10" >&2 || true
-    adb shell "dumpsys package com.android.providers.downloads 2>/dev/null | grep -aiE 'WRITE_EXTERNAL|READ_EXTERNAL|legacy|installed=true' | head -10" >&2 || true
+    timeout 15 adb shell "cmd appops get com.android.providers.downloads 2>/dev/null | grep -iE 'WRITE|READ|LEGACY' | head -10" >&2 || true
+    timeout 15 adb shell "dumpsys package com.android.providers.downloads 2>/dev/null | grep -aiE 'WRITE_EXTERNAL|READ_EXTERNAL|legacy|installed=true' | head -10" >&2 || true
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
