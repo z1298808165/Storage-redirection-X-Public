@@ -282,6 +282,17 @@ where
         return 0;
     }
 
+    if redirect_result.is_mapping {
+        return handle_mapping_mkdir(
+            hub,
+            op_name,
+            path_for_decision.as_ref(),
+            pathname,
+            &redirect_result,
+            call_original,
+        );
+    }
+
     let result = if redirect_result.is_redirect() {
         let redirected_path = redirect_result.new_path.clone();
         record_redirect_hit(hub, op_name, path_for_decision.as_ref(), &redirected_path);
@@ -401,6 +412,140 @@ where
         monitor::record_mkdir_result(hub, op_name, path_for_decision.as_ref(), result, error_no);
     }
     result
+}
+
+/// 映射请求路径的 mkdir：目录必须落在**请求路径自身的后端**，不能只建映射目标。
+///
+/// 映射请求路径是应用视图里的别名 bind 挂载点，只有被登记的应用 namespace 能看见；
+/// 未登记的代写链路（`android.process.media` 里的下载提供器）走的是 MediaProvider
+/// 的 FUSE 视图。此时若沿用「把 mkdir 改写到映射目标」的老路，请求路径在后端始终
+/// 没有真实目录，内核拿不到可用的 FUSE entry：daemon 侧明明返回成功
+/// （`mkdir redirect exists/notdir: returning 0`），客户端 `File.mkdirs()` 仍然
+/// `isDirectory()==false && mkdirs()==false`，最终抛
+/// `Failed to create parent for <请求路径>`
+/// （2026-10-26 A17 场景 39 在本地模拟器与 CI 上双向复现，两侧 proc maps /
+/// mountinfo 完全同形，只有「请求路径后端目录是否存在」不同）。
+///
+/// 因此这里先在请求路径的后端落盘目录，再补齐映射目标，最后按调用方语义返回：
+/// 请求路径或映射目标任一成为目录即视为成功。
+fn handle_mapping_mkdir<F>(
+    hub: &InterceptHub,
+    op_name: &str,
+    source_path: &str,
+    pathname: *const c_char,
+    redirect: &RedirectDecision,
+    call_original: F,
+) -> c_int
+where
+    F: FnOnce(*const c_char) -> c_int,
+{
+    record_redirect_hit(hub, op_name, source_path, &redirect.new_path);
+
+    let saved_errno = runtime::current_errno();
+    let request_backend = storage_backend_dir(source_path);
+
+    let (mut result, mut error_no) = if request_backend.is_empty() {
+        // 非 storage 形态（相对路径、其它挂载）保持原来的改写语义。
+        let target_c = CString::new(redirect.new_path.as_str()).ok();
+        let call_ptr = target_c
+            .as_ref()
+            .map_or(pathname, |c_string| c_string.as_ptr());
+        let call_result = call_original(call_ptr);
+        let call_errno = runtime::errno_for_result(call_result);
+        (call_result, call_errno)
+    } else {
+        let (request_result, request_errno) = create_backend_dir(&request_backend);
+        log::debug!(
+            "mkdir mapping request dir: result={} errno={} path={} backend={}",
+            request_result,
+            request_errno,
+            source_path,
+            request_backend
+        );
+        (request_result, request_errno)
+    };
+
+    runtime::ensure_redirect_parent_dirs(&redirect.new_path, 0o2773);
+    let target_backend = storage_backend_dir(&redirect.new_path);
+    if !target_backend.is_empty() {
+        let (target_result, target_errno) = create_backend_dir(&target_backend);
+        log::debug!(
+            "mkdir mapping target dir: result={} errno={} path={} backend={}",
+            target_result,
+            target_errno,
+            redirect.new_path,
+            target_backend
+        );
+        runtime::normalize_redirect_directory(&redirect.new_path);
+    }
+
+    // 映射落盘后系统写者会用**原请求路径**回查 attr / realpath，请求侧在真实存储里
+    // 只是应用视图的 bind 挂载点，必须登记才能让回查报告「存在」。
+    crate::hook::remember_process_mapped_dir(source_path, &redirect.new_path);
+    runtime::set_errno(saved_errno);
+
+    if result == 0
+        || error_no == libc::EEXIST
+        || error_no == libc::ENOTDIR
+        || (!request_backend.is_empty() && crate::platform::fs::is_directory(&request_backend))
+    {
+        log::debug!(
+            "mkdir mapping resolved: returning 0 errno={} path={} redirect={}",
+            error_no,
+            source_path,
+            redirect.new_path
+        );
+        result = 0;
+        error_no = 0;
+    }
+    monitor::record_mkdir_result_from(
+        hub,
+        op_name,
+        &redirect.new_path,
+        source_path,
+        result,
+        error_no,
+    );
+    result
+}
+
+/// 把 storage 视图路径换算成后端落盘路径；非 storage 形态返回空串。
+fn storage_backend_dir(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let normalized = paths::normalize(path);
+    if normalized.starts_with("/storage/emulated/") {
+        return paths::storage_to_data_media_path(&normalized);
+    }
+    if normalized.starts_with("/data/media/") {
+        return normalized;
+    }
+    String::new()
+}
+
+/// 在后端路径上直接建目录（已存在视为成功）。
+///
+/// 调用点位于 hook 重入保护内，`libc::mkdir` 会落到原始实现，不再次进入重定向，
+/// 因此不会把这次的请求路径又改写到映射目标上。
+fn create_backend_dir(path: &str) -> (c_int, c_int) {
+    if path.is_empty() {
+        return (-1, libc::ENOENT);
+    }
+    if crate::platform::fs::is_directory(path) {
+        return (0, 0);
+    }
+    let Ok(c_path) = CString::new(path) else {
+        return (-1, libc::EINVAL);
+    };
+    // SAFETY: c_path 由上一行 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效；
+    // mkdir 只读取该路径字符串，不保留指针。
+    let result = unsafe { libc::mkdir(c_path.as_ptr(), 0o2773) };
+    if result == 0 {
+        (0, 0)
+    } else {
+        (result, runtime::current_errno())
+    }
 }
 
 fn should_passthrough_provider_allowed_parent_mkdir(

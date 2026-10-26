@@ -142,5 +142,46 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         self.assertLess(registry_at, config_at, "进程内登记必须优先于配置兜底")
 
 
+    def test_mapping_mkdir_lands_request_dir_before_target(self) -> None:
+        # 映射场景的 mkdir 不能只改写目标：请求路径是应用视图里的 bind 挂载点，
+        # 未登记进程（下载提供器）走的是 MediaProvider 的 FUSE 视图，请求路径在
+        # 后端没有真实目录时内核拿不到可用的 FUSE entry——daemon 侧返回成功，
+        # 客户端仍然 isDirectory()==false && mkdirs()==false
+        # （2026-10-26 A17 场景 39：Failed to create parent）。
+        dir_source = read("src/hook/ops/mutation/dir.rs")
+        body = function_body(dir_source, "fn handle_mapping_mkdir<F>(")
+        self.assertIn("storage_backend_dir(source_path)", body)
+        self.assertIn("create_backend_dir(&request_backend)", body)
+        self.assertIn("create_backend_dir(&target_backend)", body)
+        # 请求路径必须先落盘，再补齐映射目标
+        self.assertLess(
+            body.index("create_backend_dir(&request_backend)"),
+            body.index("create_backend_dir(&target_backend)"),
+            "请求路径后端目录必须先于映射目标落盘",
+        )
+        # 请求路径的目录创建不得再走重定向（否则又回到只建目标的老路）：
+        # 建目录的 helper 必须直接落到后端并接受「已是目录」
+        helper = function_body(dir_source, "fn create_backend_dir(")
+        self.assertIn("crate::platform::fs::is_directory(path)", helper)
+        self.assertIn("libc::mkdir(", helper)
+        # 映射场景要提前收口，不能继续走「只 mkdir 映射目标」的统一收尾
+        outer = function_body(dir_source, "fn handle_mkdir_like<F>(")
+        self.assertIn("if redirect_result.is_mapping {", outer)
+        self.assertLess(
+            outer.index("if redirect_result.is_mapping {"),
+            outer.index("let result = if redirect_result.is_redirect() {"),
+            "映射分支必须在通用重定向收尾之前",
+        )
+
+    def test_download_provider_gets_system_writer_hooks(self) -> None:
+        # 下载提供器是下载链路里真正执行 mkdir/create/getCanonicalPath 的进程。
+        # 只把它当 monitor bridge 时，客户端路径判定拿不到映射（A17 场景 39 本地
+        # 与 CI 双复现），因此必须纳入 system-writer 候选，拿到 stat/realpath/open。
+        policy = read("src/redirect/policy.rs")
+        body = function_body(policy, "fn is_system_writer_candidate(")
+        self.assertIn("is_media_provider_candidate(package_name)", body)
+        self.assertIn("package_name == DOWNLOAD_PROVIDER", body)
+
+
 if __name__ == "__main__":
     unittest.main()

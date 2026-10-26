@@ -260,9 +260,19 @@ fn is_media_provider_candidate(package_name: &str) -> bool {
         || package_name == MEDIA_PROVIDER_LEGACY
 }
 
-// 仅 MediaProvider 是 FUSE 服务端，DP/MTP 作为客户端写入最终经过 MediaProvider
+// 系统代写者：MediaProvider 是 FUSE 服务端，下载提供器是下载链路的写入执行者。
+//
+// 下载提供器曾经只按 monitor bridge 处理（它写公共目录时最终经过 MediaProvider）。
+// 但 FUSE 服务端的路径改写救不了**客户端进程内**的路径判定：
+// `File.mkdirs()` / `File.getCanonicalPath()` 都在下载提供器进程里先跑，
+// 对映射请求路径（应用视图里的 bind 挂载点）未注入就只能是 ENOENT / 非目录，
+// 于是下载在 `Helpers.generateSaveFile` 阶段直接 FILE_ERROR
+// （2026-10-26 A17 场景 39：`Failed to create parent` → 修好目录落盘后
+// 立刻暴露 `Failed to generate filename: No such file or directory`）。
+// 给下载提供器 system-writer profile 后，它的 stat/realpath/open 都按发起者
+// 映射解析，不再依赖 bind 是否传播进它的 mount namespace。
 fn is_system_writer_candidate(package_name: &str) -> bool {
-    is_media_provider_candidate(package_name)
+    is_media_provider_candidate(package_name) || package_name == DOWNLOAD_PROVIDER
 }
 
 fn trim_ascii(value: &str) -> String {
