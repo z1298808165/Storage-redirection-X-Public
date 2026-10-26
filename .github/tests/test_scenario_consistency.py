@@ -677,6 +677,37 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 失败清理只在本就发布时才尝试删除草稿 Release。
         self.assertIn("PUBLISH_CI: ${{ needs.prepare.outputs.publish_ci }}", ci)
 
+    def test_ci_test_flow_step_timeout_follows_scenario_scope(self) -> None:
+        # 模拟器异常时编排脚本可能停在场景脚本之前的准备阶段，脚本内看门狗覆盖
+        # 不到；job 级 45/50 分钟又太宽（run 40272962460 五个版本同时被拖住 33
+        # 分钟、取消请求也不立即生效）。步骤级超时必须按 prepare 解析出的场景数
+        # 自适应：窄跑十几分钟即失败，全量仍留足预算。
+        ci = read(".github/workflows/ci.yml")
+        prepare = section(ci, "  prepare:", "  init-ci-release:")
+        self.assertIn(
+            "test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}",
+            prepare,
+        )
+        self.assertIn(
+            "timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}",
+            ci,
+        )
+        scope = read(".github/scripts/parse_scenario_scope.py")
+        self.assertIn("test_flow_timeout_minutes", scope)
+        self.assertIn("_test_flow_timeout_minutes", scope)
+
+    def test_download_scenario_avoids_local_network_on_api37(self) -> None:
+        # Android 17（API 37）起应用默认禁止「本地网络访问」：下载提供器在该镜像
+        # targetSdk=37，它连模拟器宿主别名 10.0.2.2（10.0.2.0/24 局域网段）的 TCP
+        # 连接被静默丢弃（connect 超时 + 服务端零请求），回环 127.0.0.1 与公网正常。
+        # 场景 39 因此必须在 API >= 37 走 adb reverse + 回环取数。
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn('adb reverse "tcp:$dl_port" "tcp:$dl_port"', script)
+        self.assertIn('dl_url="http://127.0.0.1:$dl_port/srt_download.bin"', script)
+        self.assertIn('if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null', script)
+        # 低版本与真机通路保持不变：A13-A16 仍用 10.0.2.2，真机仍走 APK 内置 URL。
+        self.assertIn('dl_url="http://10.0.2.2:$dl_port/srt_download.bin"', script)
+
 
     def test_shared_fuse_host_b2a_contract(self) -> None:
         # B2-a 先建立独立宿主会话骨架：它必须在 daemon 的私有 namespace 中创建，

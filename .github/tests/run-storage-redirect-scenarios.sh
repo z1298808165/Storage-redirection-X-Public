@@ -2135,13 +2135,30 @@ run_download_owner_attribution_scenario() {
   local dl_server_pid=""
   local dl_server_log=""
   local dl_dir=""
+  local dl_loopback=0
   if [ -z "$dl_url" ] && adb shell getprop ro.kernel.qemu 2>/dev/null | grep -q '^1$'; then
     dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
     echo "srt-download-probe" > "$dl_dir/srt_download.bin"
     dl_server_log="$dl_dir/http-server.log"
     (cd "$dl_dir" && python3 -m http.server "$dl_port" --bind 0.0.0.0 >"$dl_server_log" 2>&1) &
     dl_server_pid=$!
-    dl_url="http://10.0.2.2:$dl_port/srt_download.bin"
+    # 宿主别名 10.0.2.2 落在模拟器局域网网段（10.0.2.0/24），而 Android 17
+    # （API 37）起对应用默认阻止「本地网络访问」：下载提供器在 A17 镜像里
+    # targetSdk=37，它的 TCP connect 到 10.0.2.2 被静默丢弃——底层实证为
+    # 20 秒 connect 超时、服务端零请求，同 uid 连回环 127.0.0.1 与公网却正常
+    # （run 40272962460 与本地 A17 模拟器双向复现；模块停用后同样复现，
+    # 与重定向实现无关）。
+    # 回环地址不在该策略覆盖范围内，因此 API >= 37 一律改走 adb reverse +
+    # 127.0.0.1；低版本继续用 10.0.2.2（A13-A16 的既有通路，不必改动）。
+    dl_api="$(timeout 15 adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+    if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null &&
+      adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1; then
+      dl_loopback=1
+      dl_url="http://127.0.0.1:$dl_port/srt_download.bin"
+      echo "step 5/7 内: API ${dl_api} 走回环取数（已建立 adb reverse tcp:${dl_port}）"
+    else
+      dl_url="http://10.0.2.2:$dl_port/srt_download.bin"
+    fi
     sleep 1
     echo "step 5/7 内: 本地取数服务已启动 url=$dl_url log=$dl_server_log"
   elif [ -z "$dl_url" ]; then

@@ -48,6 +48,20 @@ class ScenarioScopeParseTest(unittest.TestCase):
         data = SCOPE.resolve_scope("", "29,34")
         self.assertEqual(data["scenarios"], "29,34")
 
+    def test_step_timeout_budget_follows_scenario_count(self) -> None:
+        # 步骤级超时预算按场景数自适应：窄跑要快速失败，全量留足余量。
+        # 1 个场景：15 分钟准备 + 2 分钟/场景 = 17；两个场景 = 19；全量固定 90。
+        self.assertEqual(SCOPE.resolve_scope("", "29")["test_flow_timeout_minutes"], 17)
+        self.assertEqual(
+            SCOPE.resolve_scope("", "29,34")["test_flow_timeout_minutes"], 19
+        )
+        self.assertEqual(SCOPE.resolve_scope("", "")["test_flow_timeout_minutes"], 90)
+        # 预算必须随场景数单调不减，避免场景多的窄跑比场景少的更早被误杀。
+        self.assertLess(
+            SCOPE.resolve_scope("", "29")["test_flow_timeout_minutes"],
+            SCOPE.resolve_scope("", "29,34,39")["test_flow_timeout_minutes"],
+        )
+
     def test_override_fullwidth_separator_normalized(self) -> None:
         data = SCOPE.resolve_scope("", "29，34")
         self.assertEqual(data["scenarios"], "29,34")
@@ -199,12 +213,15 @@ class ScenarioScopeParseTest(unittest.TestCase):
                     "scenario_limited": True,
                     "validation_mode": "scope",
                     "publish_ci": False,
+                    "test_flow_timeout_minutes": 17,
                 },
                 "github",
             )
         lines = buf.getvalue().splitlines()
         self.assertIn("scenarios=29", lines)
         self.assertIn("publish_ci=false", lines)
+        # 步骤级超时预算由 test-flow 的 Run 步骤直接引用，必须进 CI 输出。
+        self.assertIn("test_flow_timeout_minutes=17", lines)
         # 未使用的 scenario_limited / validation_mode 不得进入 CI 输出。
         self.assertNotIn("scenario_limited", "\n".join(lines))
         self.assertNotIn("validation_mode", "\n".join(lines))

@@ -149,12 +149,29 @@ def _extract_scope_from_message(message: str) -> str | None:
     return "".join(scope_chars)
 
 
+def _test_flow_timeout_minutes(count: int) -> int:
+    """按场景数估算 test-flow 步骤的超时预算（分钟）。
+
+    步骤级超时是「runner 被拖住」的最终兜底：编排脚本的看门狗只覆盖场景脚本
+    本体，模拟器异常时它前面的设备健康检查与模块/APK 安装同样可能无限挂起
+    （run 40272962460 实证：五个版本全部停在 Run Android test-flow scenarios、
+    33 分钟无进展，取消请求也无法立即生效）。预算＝15 分钟准备 + 每场景 2 分钟，
+    单场景约 17 分钟封顶，被拖住时快速失败并释放 runner。
+    """
+    base_minutes = 15
+    per_scenario_minutes = 2
+    if count <= 0:
+        return 90
+    return min(90, base_minutes + count * per_scenario_minutes)
+
+
 def _full_result(source: str) -> dict:
     return {
         "scenarios": "all",
         "scenario_limited": False,
         "validation_mode": "full",
         "publish_ci": True,
+        "test_flow_timeout_minutes": _test_flow_timeout_minutes(0),
         "source": source,
     }
 
@@ -165,6 +182,7 @@ def _limited_result(numbers: list[int], source: str) -> dict:
         "scenario_limited": True,
         "validation_mode": "scope",
         "publish_ci": False,
+        "test_flow_timeout_minutes": _test_flow_timeout_minutes(len(numbers)),
         "source": source,
     }
 
@@ -210,10 +228,11 @@ def resolve_scope(
 
 def _emit(data: dict, fmt: str) -> None:
     if fmt == "github":
-        # 只输出下游实际消费的两项，避免无用项（scenario_limited/validation_mode
-        # 未被任何 job 引用，不进入 CI 输出）。
         print(f"scenarios={data['scenarios']}")
         print(f"publish_ci={'true' if data['publish_ci'] else 'false'}")
+        # 步骤级超时预算：下游 test-flow 的「Run Android test-flow scenarios」
+        # 直接引用，避免固定值在窄跑时白等、在全量时误杀。
+        print(f"test_flow_timeout_minutes={data['test_flow_timeout_minutes']}")
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
 

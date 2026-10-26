@@ -89,6 +89,7 @@ jobs:
       version_code: ${{ steps.version.outputs.version_code }}
       scenarios: ${{ steps.scope.outputs.scenarios }}
       publish_ci: ${{ steps.scope.outputs.publish_ci }}
+      test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -704,6 +705,11 @@ jobs:
 
       - name: Run Android test-flow scenarios
         if: ${{ (!contains(github.event.head_commit.message, '延迟全量探针') && !contains(github.event.head_commit.message, '全量组合比较探针') && !contains(github.event.head_commit.message, '全量组合探针') && !contains(github.event.head_commit.message, '核心组探针') && !contains(github.event.head_commit.message, '扩展组探针')) || matrix.android.api == 34 || matrix.android.api == 37 }}
+        # 步骤级超时（按场景数自适应，由 prepare 从同一份范围解析结果输出）：
+        # 模拟器异常时脚本可能停在场景脚本之前的准备阶段，看门狗覆盖不到，
+        # 而 job 级 45/50 分钟太宽（run 40272962460 五版本同时被拖住 33 分钟、
+        # 取消请求也不立即生效）。这里把兜底前移到步骤级，窄跑十几分钟即失败。
+        timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
           api-level: ${{ matrix.android.api_level }}
