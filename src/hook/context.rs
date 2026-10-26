@@ -559,6 +559,19 @@ pub fn process_mapped_dir_target(path: &str) -> Option<String> {
     }
 }
 
+/// 当前有效登记条数（过期项就地清理）。
+///
+/// 只用于诊断：查询回退未命中时，`0` 说明「同进程内从没登记过这次映射」，非 `0`
+/// 则说明登记存在但路径形式对不上——这两种情况在修复动作上完全不同。
+pub fn process_mapped_dir_count() -> usize {
+    let now = monotonic_ms();
+    let mut dirs = PROCESS_MAPPED_DIRS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    dirs.retain(|dir| now.saturating_sub(dir.at_ms) <= PROCESS_MAPPED_DIR_TTL_MS);
+    dirs.len()
+}
+
 pub fn set_binder_identity_cleared(cleared: bool) {
     BINDER_IDENTITY_CLEARED.with(|cell| cell.set(cleared));
 }

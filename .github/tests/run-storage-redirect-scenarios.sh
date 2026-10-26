@@ -2179,14 +2179,24 @@ run_download_owner_attribution_scenario() {
   adb shell settings put global captive_portal_detection_enabled 0 || true
   adb shell settings put global private_dns_mode off || true
   adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
+  # 清理必须排在应用重启**之前**：应用重启会触发一轮挂载，挂载阶段负责补建映射
+  # 目标（`ensure_app_owned_mapping_target`）。先重启后清理会把刚补建出来的目录当场
+  # 删掉，等于让挂载期补建永远白做（run 40280153279 实证：07:45:03 的挂载记录里
+  # 目标目录已被建好，紧接着被这里的 rm -rf 清除）。
+  echo "step 5/7 内: 清理下载归因探测目录"
+  adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
+  # MediaProvider 必须是本轮配置生效后的新进程：hook 的 verbose 门禁在进程启动时从
+  # global.json 读取一次，常驻 MP 不会跟着 apply_config 重载，于是 hook 侧的 debug 级
+  # 决策日志在 CI 里永远落不了盘（run 40286639350 全库零 realpath/mapped 痕迹，与
+  # 「回退没生效」无法区分）。冷启动同时正是本地稳定复现 39 的条件，两者口径一致。
+  echo "step 5/7 内: 重启 MediaProvider（让 verbose 门禁生效）"
+  restart_media_provider_with_hook_ready "scenario-${scenario}-dlowner-provider" || return 1
   # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
   # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
   echo "step 5/7 内: 重启测试应用（套用发起者映射）"
   timeout 45 adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
   start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
-  echo "step 5/7 内: 清理下载归因探测目录"
-  adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
   local case_ok=0
   # 本地取数服务仅在模拟器形态启动；真机回退 APK 内置默认 URL（不传 url extra）。
   local url_extra_args=()
@@ -2217,6 +2227,19 @@ run_download_owner_attribution_scenario() {
     echo "---- logcat 下载与网络判定摘录 ----" >&2
     timeout 20 adb logcat -d -t 300 2>/dev/null | grep -aE "DownloadManager|DownloadProvider|DownloadThread|NetworkMonitor|NetworkCapabilities|privateDns" | tail -30 || true
     # 模块侧判定与视图状态：区分「hook 重定向决策失败」与「调用方原生 DAC/FUSE 失败」。
+    # verbose 门禁与 hook 注册状态必须**先于**任何"没有某条日志"的结论：debug 级
+    # 日志受 verbose_logging_enabled 门禁，门禁值由各 hook 进程在启动时读取一次。
+    # 不加这一段，跳闸与"回退实现没生效"在日志上完全同形。
+    echo "---- hook 生效状态（verbose 门禁 / 注册清单） ----" >&2
+    adb_su "{ echo global_config=; cat '$GLOBAL_CONFIG' 2>/dev/null; echo; echo debug_lines=\$(grep -ac 'RsDebug' '$LOG_PATH' 2>/dev/null || echo 0); echo warn_lines=\$(grep -ac 'RsWarn' '$LOG_PATH' 2>/dev/null || echo 0); echo ---hook_registered---; grep -aE 'hook registered profile|optional hooks unavailable|hook refresh start' '$LOG_PATH' 2>/dev/null | tail -8; echo ---media_hook_state---; cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || echo state_absent; }" >&2 || true
+    # 全文件检索而不是 tail -400：下载窗口的判定记录会被随后的调度/reconcile 日志冲出
+    # 窗口，上一轮正是因为只截尾部，才拿不到 realpath/mapped 的任何一行。
+    echo "---- SrtDlOwner 全量判定记录 ----" >&2
+    adb_su "grep -a 'SrtDlOwner' '$LOG_PATH' 2>/dev/null | grep -av 'alias diag overlay' | tail -80" >&2 || true
+    echo "---- 映射查询回退痕迹（realpath/stat/query fallback） ----" >&2
+    adb_su "grep -aE 'realpath mapped|mapped request|process mapped|query fallback|mapped dir' '$LOG_PATH' 2>/dev/null | tail -40" >&2 || true
+    echo "---- alias overlay 别名判定（请求路径在真实存储是否可见） ----" >&2
+    adb_su "grep -a 'alias diag overlay' '$LOG_PATH' 2>/dev/null | grep -a 'SrtDlOwner' | tail -24" >&2 || true
     echo "---- running.log 摘录（下载窗口判定） ----" >&2
     adb_su "tail -400 '$LOG_PATH' 2>/dev/null | grep -aE 'download|downloads|redirect|attrib|own private|skip|failed' | tail -60" >&2 || true
     echo "---- 根视图与后端 Download 列表 ----" >&2

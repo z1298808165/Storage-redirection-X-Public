@@ -709,6 +709,41 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('dl_url="http://10.0.2.2:$dl_port/srt_download.bin"', script)
 
 
+    def test_download_scenario_cleans_before_mount_restart(self) -> None:
+        # 场景 39 的探测目录清理必须排在应用重启**之前**：应用重启会触发一轮挂载，
+        # 挂载阶段负责补建映射目标（`ensure_app_owned_mapping_target`）。先重启后清理
+        # 会把刚补建出来的目录当场删掉，让挂载期补建永远白做——2026-10-26 本地实证：
+        # 顺序调换后连续两轮 PASS（653ms/611ms，文件落映射目标、请求路径零穿透）；
+        # 调换前稳定报 "Failed to create parent for /storage/emulated/0/Download/..."。
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        clean_at = script.index(
+            "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' "
+            "'${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'"
+        )
+        provider_restart_at = script.index(
+            'restart_media_provider_with_hook_ready "scenario-${scenario}-dlowner-provider"'
+        )
+        app_restart_at = script.index(
+            'start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1'
+        )
+        self.assertLess(clean_at, provider_restart_at, "清理必须先于 MediaProvider 重启")
+        self.assertLess(
+            clean_at, app_restart_at, "清理必须先于测试应用重启，否则挂载期补建被删"
+        )
+
+    def test_download_scenario_diag_proves_verbose_gate_first(self) -> None:
+        # 失败诊断不能只看 running.log 的 tail 窗口：下载窗口的判定记录会被随后的
+        # 调度/reconcile 日志冲出窗口（run 40286639350 只截尾部，于是拿不到 realpath
+        # 的任何一行，与「回退没生效」无法区分）。同时必须先验证 verbose 门禁本身：
+        # 门禁值由各 hook 进程启动时读取一次，不确认它，任何「某条 debug 日志不存在」
+        # 的结论都不成立。
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn("grep -a 'SrtDlOwner' '$LOG_PATH'", script)
+        self.assertIn("debug_lines=", script)
+        self.assertIn("hook registered profile", script)
+        # 诊断里不能引用不存在的变量名，否则整段静默失效（守卫发现的真实笔误）。
+        self.assertNotIn("$DL_OWNER_PROBE_NAME", script)
+
     def test_shared_fuse_host_b2a_contract(self) -> None:
         # B2-a 先建立独立宿主会话骨架：它必须在 daemon 的私有 namespace 中创建，
         # 使用 srx_fuse_host 前缀并设为 shared propagation；应用接入仍由后续 B2-b 完成。

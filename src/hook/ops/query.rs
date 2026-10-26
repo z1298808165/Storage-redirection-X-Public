@@ -1217,7 +1217,18 @@ unsafe fn realpath_with_mapped_fallback(
     }
     // SAFETY: path 由 hook 原样透传，调用方保证其指向以 NUL 结尾的字符串。
     let path_text = unsafe { c_str_to_string(path) };
+    // 命中日志走 W 级：hook 的 verbose 门禁取自**各进程启动时**的配置，系统写者的
+    // 常驻进程（MediaProvider / 下载提供器）不会跟着 global.json 重载，debug 级在
+    // CI 里根本落不了盘——于是「回退没命中」与「回退不存在」在日志上完全同形
+    // （run 40286639350 全库零 realpath 痕迹，无法裁决）。这条路径只有「系统写者 +
+    // 可重试 ENOENT」才走到，出现频次远低于挂载类日志。
     let Some(fake_path) = mapped_request_realpath(&path_text) else {
+        log::debug!(
+            "realpath mapped miss path={} errno={} registered={}",
+            path_text,
+            error_no,
+            crate::hook::process_mapped_dir_count()
+        );
         runtime::set_errno(error_no);
         return ret;
     };
@@ -1227,8 +1238,9 @@ unsafe fn realpath_with_mapped_fallback(
         runtime::set_errno(error_no);
         return ret;
     }
-    log::debug!(
-        "realpath mapped request fallback path={} errno={}",
+    log::warn!(
+        "realpath mapped fallback pkg={} path={} errno={}",
+        hub.get_package_name(),
         path_text,
         error_no
     );
