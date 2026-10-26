@@ -2148,12 +2148,14 @@ run_download_owner_attribution_scenario() {
     echo "step 5/7 内: 真机取数源使用测试 APK 内置默认 URL"
   fi
   echo "step 5/7 内: 下载取数源 url=$dl_url"
-  # A17 模拟器镜像的网络验证（captive portal）无法完成：Downloads 应用要求默认
-  # 网络带 VALIDATED 能力，验证不完成即暂停在 status=4 WAITING_FOR_NETWORK——
-  # ping 通 10.0.2.2（net_probe_host_ok）与 DNS 可用都不够，服务端日志零请求
-  # 实证请求根本没发出（run 40248635974）。关闭验证探测后 NetworkMonitor 直接
-  # 把默认网络标记为已验证，DownloadManager 立即可用；对其它版本与真机无副作用。
+  # A17 模拟器镜像的网络判定问题：Downloads 应用停在 status=4 WAITING_TO_RETRY
+  # 且服务端零请求——请求根本没发出，应用侧判定「无可用网络」。两层嫌疑都已
+  # 处理：1) captive portal 验证无法完成（R5/R6 已知，-dns-server 只解决 DNS 层）；
+  # 2) A17 新镜像默认 Private DNS（DNS-over-TLS）解析失败会把默认网络标记为
+  # 未验证/无 INTERNET 能力，IP 直连 URL 也不发起请求。两个设置都在取数前关闭，
+  # 对其它版本与真机无副作用。
   adb shell settings put global captive_portal_detection_enabled 0 || true
+  adb shell settings put global private_dns_mode off || true
   adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
   # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
   # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
@@ -2188,6 +2190,10 @@ run_download_owner_attribution_scenario() {
     # 已到达但 status=4 WAITING_FOR_NETWORK，矛盾需内部状态裁决）。
     echo "---- dumpsys downloads（失败诊断） ----" >&2
     adb shell dumpsys downloads 2>/dev/null | grep -aE "DOWNLOAD|status|reason|mRetries|num_failed|uri|title|_id=" | head -40 || true
+    echo "---- dumpsys connectivity（默认网络能力与验证状态） ----" >&2
+    adb shell dumpsys connectivity 2>/dev/null | grep -aE "Active default network|Current Networks|NetworkAgentInfo|Validated:|INTERNET|NOT_INTERNET|Capabilities:|PrivateDns" | head -30 || true
+    echo "---- logcat 下载与网络判定摘录 ----" >&2
+    adb logcat -d -t 300 2>/dev/null | grep -aE "DownloadManager|DownloadProvider|DownloadThread|NetworkMonitor|NetworkCapabilities|privateDns" | tail -30 || true
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
