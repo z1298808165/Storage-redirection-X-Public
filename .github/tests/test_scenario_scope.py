@@ -88,6 +88,24 @@ class ScenarioScopeParseTest(unittest.TestCase):
         data = SCOPE.resolve_scope("修复：xxx\n\n单场景 17\n\n细节说明", "")
         self.assertEqual(data["scenarios"], "17")
 
+    def test_message_duration_suffix_is_not_scope(self) -> None:
+        # 正文里的耗时描述（数字紧跟单位）不是范围标记：按标记解析会因 990 超范围
+        # 直接 fail，把整轮 CI 卡在 prepare（run 40327967419 实证）。
+        for message in (
+            "看门狗预算 单场景 990s",
+            "预算（单场景 990s、6,38 1078s→1080s）",
+            "单场景 30秒",
+        ):
+            with self.subTest(message=message):
+                data = SCOPE.resolve_scope(message, "")
+                self.assertEqual(data["scenarios"], "all")
+                self.assertFalse(data["scenario_limited"])
+
+    def test_message_scope_followed_by_spaced_unit_still_parses(self) -> None:
+        # 单位前有空格时仍是范围标记：不能因为放宽上一条而吞掉真实窄跑意图。
+        data = SCOPE.resolve_scope("单场景 39,40 秒级验证", "")
+        self.assertEqual(data["scenarios"], "39,40")
+
     def test_override_takes_precedence_over_message(self) -> None:
         data = SCOPE.resolve_scope("单场景 29", "34")
         self.assertEqual(data["scenarios"], "34")

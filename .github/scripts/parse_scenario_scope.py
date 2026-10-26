@@ -146,6 +146,13 @@ def _extract_scope_from_message(message: str) -> str | None:
             i += 1
         else:
             break
+    # 「单场景 990s」「单场景 30 秒」这类正文里的耗时描述不是范围标记：990 本就
+    # 超出合法范围，按标记处理会让整轮 CI 在 prepare 阶段直接 fail（run
+    # 40327967419 实证：提交正文写「单场景 990s、6,38 1078s」，prepare 报
+    # 「场景编号 990 超出合法范围 1-40」，五个版本的测试全部没跑）。只认紧跟数字
+    # 的单位字符，带空格的不算（「单场景 39,40 秒级验证」仍按范围解析）。
+    if i < len(message) and message[i] in ("s", "S", "秒"):
+        return None
     return "".join(scope_chars)
 
 
