@@ -2199,6 +2199,28 @@ run_download_owner_attribution_scenario() {
   start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
   local case_ok=0
+  # 映射目标必须在下发下载前就已在真实存储落地。run 40302749913 的时序证据：
+  # A14 的 `perf companion mount ... ok=true` 与 `map primary result ... mounted=true`
+  # 出现在 10:00:46，而同一次 probe 的 FAIL 早于这个时刻；失败时现场段全空
+  # （real 与 backend 两侧都没有 SrtDlOwnerMapped）。A15 只是时序刚好错开才通过。
+  # 也就是说这是「应用挂载已确认、映射目录尚未落地」的竞态，不是重定向判错——
+  # 前几轮改 realpath、改挂载时序都没触及它，原因就在这里。
+  echo "step 5/7 内: 等待映射目标就绪"
+  local dl_ready_deadline=$((SECONDS + 30))
+  local dl_ready=0
+  while [ "$SECONDS" -lt "$dl_ready_deadline" ]; do
+    if adb_su "test -d '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null 2>&1; then
+      dl_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$dl_ready" -eq 1 ]; then
+    echo "step 5/7 内: 映射目标已就绪 ${DL_OWNER_MAPPED_REL}"
+  else
+    echo "warn: 映射目标 30s 内未出现 ${DL_OWNER_MAPPED_REL}" >&2
+    adb_su "ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -8" >&2 || true
+  fi
   # 下载器进程是短命的：DownloadManager 的 job 一结束进程就被回收，失败诊断执行时
   # pidof 早已为空，于是「进程没加载模块」与「进程已退出」在诊断里完全同形。
   # 必须在触发前主动拉起并记录 maps 基线。另外 CI 上 uid 10112 的进程名是
