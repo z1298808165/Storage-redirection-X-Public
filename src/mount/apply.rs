@@ -749,13 +749,25 @@ impl MountPlanner {
             }
 
             let backend_source = paths::join(data_media_root, &relative);
-            // MediaProvider 可能尚未为包名下的任意子目录建立真实目录；先由守护进程
-            // 在当前 mount namespace 中显式创建完整后端路径，再执行元数据修正。
-            // 创建失败不致命：源探测会再判一次，缺目录时静默等待后续 reconcile。
-            if !fs::create_directory(&backend_source, self.app_uid)
-                || !self.ensure_writable_mapped_directory(&backend_source, self.app_uid)
-            {
-                log::debug!("own private backend mkdir skipped: {}", backend_source);
+            // 只恢复**已存在**的自有目录：原生行为下应用不写就不会有
+            // `Android/{data,media,obb}/<pkg>`，这里无条件 mkdir 会让每个被管理的
+            // 应用在真实后端留一个空目录（2026-10-27 issue #2 用户复测实证：
+            // `Android/media` 下出现全量空目录）。应用真正创建该目录后（经宿主
+            // 数据面的 Real 直写，属原生允许路径），下一次挂载事件/reconcile 会在
+            // 此恢复系统视图绑定，内容落点与跨进程共享语义不受影响。
+            if !fs::is_directory(&backend_source) {
+                log::debug!(
+                    "own private backend absent, skip restore: {}",
+                    backend_source
+                );
+                continue;
+            }
+            // 元数据修正只针对已存在的目录，不再承担创建职责。
+            if !self.ensure_writable_mapped_directory(&backend_source, self.app_uid) {
+                log::debug!(
+                    "own private backend metadata fix skipped: {}",
+                    backend_source
+                );
             }
             // 三类自有私有目录统一保留系统 FUSE 的访问控制与上下文：源取系统视图锚点，
             // 缺失时不把 /data/media 直接暴露给应用，保留诊断等待后续恢复。
