@@ -108,6 +108,71 @@ fn is_native_public_media_write_path(storage_path: &str) -> bool {
     NATIVE_PUBLIC_MEDIA_TOP_DIRS.contains(&top)
 }
 
+/// `Android/media/<包名>` 子树按原生共享语义放行写操作。
+///
+/// MediaProvider 对 `Android/media` 的原生判定是同 user 内跨应用共享（读写均放行，
+/// 这正是本模块 MP hook 侧 `should_allow_own_android_private_path_access` 恢复的
+/// 语义）。写门控若不放行该子树，文件管理器/插件对**其它应用** media 目录的写入
+/// 会被误拦（2026-10-27 issue #2 用户复测实证：MT 管理器写
+/// `Android/media/com.eg.android.AlipayGphone/Sen/` 与
+/// `Android/media/byseven.forest.sen/` 被拒报 ENOENT，Sen 插件配置随之失效）。
+fn is_shared_media_subtree_write_path(storage_path: &str) -> bool {
+    let owner = paths::extract_android_private_path_owner(storage_path);
+    !owner.is_empty()
+        && paths::is_valid_package_name(&owner)
+        && storage_path.contains(&format!("/Android/media/{owner}"))
+}
+
+/// 共享 UID 组内跨包名的私有目录写放行。
+///
+/// sharedUserId 应用（如微博主进程与 `com.sina.weibo.image` 共享 uid 10374）的各
+/// 进程以各自包名发起存储请求，原生 MediaProvider 按 **uid** 判定自有目录访问；
+/// 宿主会话策略按包名登记，若只比较包名会把同 uid 兄弟进程对自己组内
+/// `Android/data/<主包名>` 的写误拦（2026-10-27 实证：微博图片进程写主进程缓存
+/// 与 `wlog` 全部被拒，`wlog` 的 mmap 文件创建失败后继续使用旧映射即 SIGBUS，
+/// 图片大图加载失败同源）。这里把路径属主包名解析为 uid，与本会话 uid 一致即放行。
+fn is_same_uid_private_write_path(storage_path: &str, session_uid: i32) -> bool {
+    let owner = paths::extract_android_private_path_owner(storage_path);
+    if owner.is_empty() || !paths::is_valid_package_name(&owner) {
+        return false;
+    }
+    package_uid(&owner).is_some_and(|uid| uid == session_uid)
+}
+
+/// `/data/system/packages.list` 的包名→uid 缓存（以文件 mtime+长度为版本键）。
+type PackageUidCache = Option<((u64, u64), HashMap<String, i32>)>;
+
+fn package_uid(package: &str) -> Option<i32> {
+    const PACKAGES_LIST: &str = "/data/system/packages.list";
+    static CACHE: Lazy<Mutex<PackageUidCache>> = Lazy::new(|| Mutex::new(None));
+    let meta = std::fs::metadata(PACKAGES_LIST).ok()?;
+    let version = (
+        meta.modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos() as u64,
+        meta.len(),
+    );
+    let mut guard = CACHE.lock().ok()?;
+    if guard.as_ref().is_none_or(|(key, _)| *key != version) {
+        let content = std::fs::read_to_string(PACKAGES_LIST).ok()?;
+        let mut map = HashMap::new();
+        for line in content.lines() {
+            let mut fields = line.split_whitespace();
+            let Some(name) = fields.next() else {
+                continue;
+            };
+            let Some(uid) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+                continue;
+            };
+            map.insert(name.to_string(), uid);
+        }
+        *guard = Some((version, map));
+    }
+    guard.as_ref()?.1.get(package).copied()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BackendKind {
     Real,
@@ -771,9 +836,10 @@ impl RedirectPolicy {
         // 绕过，应用借此拿到 legacy 式的根目录写能力（2026-10-27 真机实证：
         // 支付宝在存储根创建 `alipay/`、微信创建 `tencent/`，原生下这些 mkdir
         // 会被 MP 拒绝）。这里按原生语义收紧：应用会话（非系统回退、非系统
-        // 代写）的写操作只有落在自有私有目录、自身映射目标、配置放行目录或
-        // 公共媒体集合时才允许 Real 直写，其余一律拒绝——与「完全不使用模块」
-        // 时的原生行为对齐。读操作与系统会话不受影响。
+        // 代写）的写操作只有落在自有私有目录、自身映射目标、配置放行目录、
+        // 公共媒体集合、`Android/media` 共享子树或同 UID 组兄弟包名的私有目录
+        // 时才允许 Real 直写，其余一律拒绝——与「完全不使用模块」时的原生行为
+        // 对齐。读操作与系统会话不受影响。
         if decision.kind == BackendKind::Real
             && matches!(operation, OperationKind::Write)
             && !self.is_system_fallback
@@ -782,6 +848,8 @@ impl RedirectPolicy {
             && !self.is_own_private_storage_path(&resolved_storage_path)
             && !self.matches_any(&self.allowed_real_index, &resolved_storage_path)
             && !is_native_public_media_write_path(&resolved_storage_path)
+            && !is_shared_media_subtree_write_path(&resolved_storage_path)
+            && !is_same_uid_private_write_path(&resolved_storage_path, self.uid)
         {
             log::warn!(
                 "fuse host write leak blocked pkg={} uid={} path={}",
