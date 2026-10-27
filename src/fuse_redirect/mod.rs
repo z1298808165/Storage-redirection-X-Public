@@ -766,12 +766,17 @@ impl FuseRedirectFs {
             policy.uid
         };
         let parent_path = Path::new(parent.as_ref());
-        let parent_overlaid = backend_overlay::overlay_backend_path(parent_path).is_some();
         let existed = fs::is_directory(&parent);
         if existed || fs::create_directory(&parent, owner_uid) {
             // 覆盖挂载目标（如 HyperOS apk-tmp 下载目录）由系统按下载方身份自管
             // 属主与权限，既有层级不得改写；仅本会话新建的层级按调用方身份修复。
-            if !existed || !parent_overlaid {
+            // 注意：已存在的父目录必须整体跳过——fix_path_metadata 会把 group 恒写
+            // media_rw（1023），对 Android/data 私有树的原生 ext_data_rw（1078）
+            // 语义是一次性破坏（真机 2026-10-27 实证：微信每次启动写入都会把既有
+            // MicroMsg 目录 chown 成 uid=应用 gid=1023，uid 修回后仅剩 gid=1023 漂移）。
+            // 私有树既有层级的属主归位由 owner_migration 与 runtime 代写 hook 负责，
+            // 这里只修「本会话刚创建」的层级。
+            if !existed {
                 fix_path_metadata(
                     parent_path,
                     policy.uid,

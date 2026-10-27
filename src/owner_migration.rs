@@ -28,8 +28,12 @@ use std::time::Duration;
 // v3：运行期系统代写 hook 曾把 owner 已正确但 gid=1078 的私有目录改成
 // media_rw；本轮只恢复 Android/data 私有目录的 ext_data_rw 组，不触碰文件或
 // 带 other 访问位的媒体子目录。
+// v4：fuse_redirect 宿主会话的 ensure_parent_for_backend 对已存在父目录重写
+// 元数据，把私有树既有目录 gid 恒改写为 media_rw（真机 2026-10-27 实证：微信
+// MicroMsg、QQ Tencent/qzone 等活跃写入目录 1078→1023）。修复改写源后升版
+// 重扫一次，把存量 gid=1023 目录恢复 ext_data_rw；判定条件与 v3 完全一致。
 const MIGRATION_MARKER: &str =
-    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v3.done";
+    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v4.done";
 
 /// 漂移签名：私有树内 owner 恰好是 media_rw 的条目才修复。
 const MEDIA_RW_UID: u32 = 1023;
@@ -98,7 +102,7 @@ fn run() {
         );
         return;
     }
-    match std::fs::write(MIGRATION_MARKER, "v3\n") {
+    match std::fs::write(MIGRATION_MARKER, "v4\n") {
         Ok(()) => log::info!(
             "owner migration done scanned={} repaired={} gid_repaired={} mode_fixed={} packages={} unknown_uid_packages={}",
             stats.scanned,

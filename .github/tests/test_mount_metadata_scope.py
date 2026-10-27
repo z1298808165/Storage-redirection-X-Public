@@ -217,7 +217,7 @@ class MountMetadataScopeTest(unittest.TestCase):
     def test_owner_migration_restores_only_private_data_directory_gid(self) -> None:
         # 一次性迁移只把 Android/data 下、owner 正确且无 other 权限位的目录从
         # media_rw 组恢复到 AOSP 定义的 ext_data_rw；文件与共享媒体目录保留 1023。
-        self.assertIn("owner-migration-1023-v3.done", self.owner_migration)
+        self.assertIn("owner-migration-1023-v4.done", self.owner_migration)
         self.assertIn("const EXT_DATA_RW_GID: u32 = 1078", self.owner_migration)
         body = function_body(
             self.owner_migration,
