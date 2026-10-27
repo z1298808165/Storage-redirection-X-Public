@@ -1,10 +1,10 @@
 use super::apply_targets::{
     build_allowed_real_source_candidates, build_mapping_source_roots, build_read_only_source_roots,
     collect_restored_read_only_excluded_children, detach_mount_if_present,
-    is_covered_by_scoped_fuse_mount, mount_source_for_target_from_mountinfo, mountinfo_has_target,
-    mountinfo_root_is_app_sandbox, mountinfo_root_matches_data_backend,
-    namespace_mappings_outside_scoped_fuse, path_overlaps_mapping_request,
-    path_shadows_mapping_request, read_mountinfo,
+    is_covered_by_scoped_fuse_mount, mount_source_for_target_from_mountinfo,
+    mountinfo_has_own_private_restore_layer, mountinfo_has_target, mountinfo_root_is_app_sandbox,
+    mountinfo_root_matches_data_backend, namespace_mappings_outside_scoped_fuse,
+    path_overlaps_mapping_request, path_shadows_mapping_request, read_mountinfo,
 };
 use super::map::PathMappingApplyOptions;
 use super::planner::MEDIA_RW_GID;
@@ -785,16 +785,33 @@ impl MountPlanner {
             // 幂等：热重载与 reconcile 会重复进入这里，已经指向系统视图（与源同一
             // dev+ino）时不再叠一层 bind，否则同一 target 上的层数会随重挂次数增长。
             // 已在系统视图上时属主通常也已对齐（见 restore 后的归一化），跳过扫描。
-            if same_mount_identity(&storage_target, &source) {
+            //
+            // dev+ino 之外再比 mountinfo root 形态（真机 2026-10-27 issue #2 实证）：
+            // 应用视图的 `/storage/emulated/<user>` 上叠着 MediaProvider 的二级用户
+            // FUSE 视图（fs 0:340），锚点 system_view 是 0:294 的 bind，stat 的 dev
+            // 恒不相等，仅凭 dev+ino 会把「已恢复」判成「未恢复」，每轮 reconcile
+            // 全量重 bind（单包媒体目录一小时内 18 次、含同秒并发 3 次），层数叠加
+            // 且 MP FUSE 请求风暴最终把 FuseDaemon 拖挂（`__fuse_simple_request`
+            // 永久停等 → 全局存储停摆）。root 精确等于 `/<user>/<relative>` 的记录
+            // 存在即视为已恢复；MP 若在其上重建用户视图，内容仍经其视图取自同一棵
+            // 底层树，重复 bind 只会触发下一轮重建循环。
+            let expected_restore_root = format!("/{}/{}", self.user_id, relative);
+            let restore_mountinfo = read_mountinfo().unwrap_or_default();
+            if same_mount_identity(&storage_target, &source)
+                || mountinfo_has_own_private_restore_layer(
+                    &restore_mountinfo,
+                    &storage_target,
+                    &expected_restore_root,
+                )
+            {
                 log::debug!("own private already on system view {}", storage_target);
                 restored_count += 1;
                 continue;
             }
-            let _ = self.bind_mount_with_storage_aliases(
+            let _ = self.bind_own_private_restore(
                 &source,
                 &storage_target,
                 true,
-                super::PrimaryMountFailure::StopCurrentTarget,
                 Some("own private restore failed"),
                 Some("own private alias restore failed"),
                 Some("own private alias restore ok"),

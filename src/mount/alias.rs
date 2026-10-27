@@ -33,6 +33,157 @@ impl MountPlanner {
         expanded
     }
 
+    /// 自有私有目录恢复专用的 bind：只覆盖**应用可见**的 `/storage` 别名。
+    ///
+    /// 与 [`Self::bind_mount_with_storage_aliases`] 的差异在别名范围，原因有三（真机
+    /// 2026-10-27 issue #2 日志实证）：
+    ///
+    /// 1. `/data/media/<user>` 与 `/mnt/pass_through/<user>/emulated/<user>` 是 f2fs
+    ///    直连后端，正是 MediaProvider FuseDaemon 处理 FUSE 请求时做下层 I/O 的路径。
+    ///    把 MP FUSE 视图（system_view 锚点）递归 bind 上去之后，FuseDaemon 的下层
+    ///    I/O 会经内核 VFS 重新进入同一条 FUSE 连接，请求只能由 FuseDaemon 的其它
+    ///    工作线程应答；并发稍高即线程耗尽互等，连接整体挂死——日志里的
+    ///    `__fuse_simple_request` + `fuse_dentry_revalidate` 永久停等、全局存储停摆、
+    ///    应用集体卡启动画面与关机卡黑屏就是这条链。
+    /// 2. `/mnt/*` 技术别名只服务系统进程；运行中应用的命名空间已被模块改为私有
+    ///    传播，恢复 bind 根本传不过去，逐个 bind 只产生无效 FUSE 请求。
+    /// 3. 恢复bind 的消费方是应用视图（`/storage/emulated/<user>` 与其符号链接别名），
+    ///    收窄后语义不变。
+    // quality-allow(lint-suppression): 恢复收窄版与共用实现的失败处理契约对齐，
+    // 参数列表沿用既有 alias bind 形态，避免调用方拼装底层细节。
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn bind_own_private_restore(
+        &self,
+        source: &str,
+        primary_target: &str,
+        is_recursive: bool,
+        primary_failure_log: Option<&str>,
+        alias_failure_log: Option<&str>,
+        alias_success_log: Option<&str>,
+        is_any_mounted_out: Option<&mut bool>,
+    ) -> bool {
+        let alias_targets: Vec<String> = self
+            .expand_storage_alias_paths(primary_target)
+            .into_iter()
+            .filter(|target| target.starts_with("/storage/"))
+            .collect();
+        self.bind_mount_with_storage_alias_targets(
+            source,
+            primary_target,
+            alias_targets,
+            is_recursive,
+            primary_failure_log,
+            alias_failure_log,
+            alias_success_log,
+            is_any_mounted_out,
+        )
+    }
+
+    /// 按**显式给定**的别名目标列表执行 bind（`bind_own_private_restore` 的执行核心）。
+    ///
+    /// 失败处理契约与 [`Self::bind_mount_with_storage_aliases`] 一致：主目标失败按
+    /// `StopCurrentTarget` 处理（返回 true 但不置位 `is_any_mounted_out`），别名失败仅留痕。
+    // quality-allow(lint-suppression): 显式别名列表使签名比共用实现多一参，保持与
+    // 既有 alias bind 相同的失败处理契约，避免调用方拼装底层细节。
+    #[allow(clippy::too_many_arguments)]
+    fn bind_mount_with_storage_alias_targets(
+        &self,
+        source: &str,
+        primary_target: &str,
+        alias_targets: Vec<String>,
+        is_recursive: bool,
+        primary_failure_log: Option<&str>,
+        alias_failure_log: Option<&str>,
+        alias_success_log: Option<&str>,
+        is_any_mounted_out: Option<&mut bool>,
+    ) -> bool {
+        let mut is_any_mounted = false;
+        let mut bound_keys: Vec<String> = Vec::new();
+
+        for target in alias_targets {
+            let is_primary_target = target == primary_target;
+            if paths::eq_ignore_case(source, &target) {
+                log::debug!("alias: skip self bind src={} dst={}", source, target);
+                continue;
+            }
+            let bind_key = bind_target_key(&target);
+            if bound_keys.contains(&bind_key) {
+                log::debug!(
+                    "alias: skip duplicate real path bind src={} dst={} real={}",
+                    source,
+                    target,
+                    bind_key
+                );
+                continue;
+            }
+            if !is_primary_target && !path_exists(&target) {
+                log::warn!(
+                    "alias diag skip missing target={} source={}",
+                    target,
+                    source
+                );
+                continue;
+            }
+            if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
+                log::warn!(
+                    "alias diag skip self-shadowing target={} source={}",
+                    target,
+                    source
+                );
+                log::debug!(
+                    "alias: skip self-shadowing bind src={} dst={}",
+                    source,
+                    target
+                );
+                continue;
+            }
+
+            let mounted = self.bind_mount(source, &target, is_recursive);
+            log::warn!(
+                "alias diag bind target={} primary={} mounted={} source={}",
+                target,
+                is_primary_target,
+                mounted,
+                source
+            );
+            if !mounted {
+                if is_primary_target && let Some(log_text) = primary_failure_log {
+                    log::warn!("alias: {} dst={}", log_text, target);
+                }
+                if let Some(log_text) = alias_failure_log {
+                    log::warn!("alias: {} src={} dst={}", log_text, source, target);
+                }
+                if is_primary_target {
+                    if let Some(out) = is_any_mounted_out {
+                        *out = is_any_mounted;
+                    }
+                    return true;
+                }
+                continue;
+            }
+
+            is_any_mounted = true;
+            bound_keys.push(bind_key);
+            if !is_primary_target && let Some(log_text) = alias_success_log {
+                let alias_ok_count = ALIAS_SUCCESS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_log_step(alias_ok_count, ALIAS_SUCCESS_LOG_STEP) {
+                    log::debug!(
+                        "alias: {} src={} dst={} n={}",
+                        log_text,
+                        source,
+                        target,
+                        alias_ok_count
+                    );
+                }
+            }
+        }
+
+        if let Some(out) = is_any_mounted_out {
+            *out = is_any_mounted;
+        }
+        true
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn bind_mount_with_storage_aliases(
         &self,
