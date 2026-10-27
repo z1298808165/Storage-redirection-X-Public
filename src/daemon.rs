@@ -1681,25 +1681,43 @@ fn spawn_system_pid_scanner() {
             );
             let staging = format!("{}.tmp", target);
             let mut known_tasks: HashMap<i32, HashSet<i32>> = HashMap::new();
+            let mut known_pids: HashSet<i32> = HashSet::new();
             let mut last_full_scan_ms: i64 = -1;
             loop {
                 let now_ms = crate::platform::paths::monotonic_ms();
-                let task_set_changed = match snapshot_task_sets() {
+                let due_full_scan = last_full_scan_ms < 0
+                    || now_ms.saturating_sub(last_full_scan_ms)
+                        >= SYSTEM_PID_SCAN_INTERVAL_MS as i64;
+                // 廉价探测先行：仅一次 /proc readdir 对比进程集合。pid 集未变且未到
+                // 全量周期时跳过逐进程 task 扫描（约 400 次 getdents + 哈希对比）。
+                // 真机实测（issue #2 反馈）线程级抖动在繁忙设备上几乎连续发生，
+                // 每 500ms 都做全量 task 扫描 + 落盘会把 srx-syspid 线程推到约 10%
+                // 的大核占用。线程级变化改由 2s 全量周期覆盖，新**进程**仍即时入表。
+                let pid_set_changed = match snapshot_pid_set() {
                     Some(current) => {
-                        let changed = current != known_tasks;
+                        let changed = current != known_pids;
                         if changed {
-                            known_tasks = current;
+                            known_pids = current;
                         }
                         changed
                     }
                     None => false,
                 };
-                let due_full_scan = last_full_scan_ms < 0
-                    || now_ms.saturating_sub(last_full_scan_ms)
-                        >= SYSTEM_PID_SCAN_INTERVAL_MS as i64;
-                if task_set_changed || due_full_scan {
-                    write_system_pid_table(&target, &staging);
-                    last_full_scan_ms = now_ms;
+                if pid_set_changed || due_full_scan {
+                    let task_set_changed = match snapshot_task_sets() {
+                        Some(current) => {
+                            let changed = current != known_tasks;
+                            if changed {
+                                known_tasks = current;
+                            }
+                            changed
+                        }
+                        None => false,
+                    };
+                    if task_set_changed || due_full_scan {
+                        write_system_pid_table(&target, &staging);
+                        last_full_scan_ms = now_ms;
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(
                     SYSTEM_PID_POLL_INTERVAL_MS,
@@ -1734,6 +1752,22 @@ fn snapshot_task_sets() -> Option<HashMap<i32, HashSet<i32>>> {
         result.insert(pid, tids);
     }
     Some(result)
+}
+
+/// 进程集合快照：仅一次 /proc readdir，不做逐进程 task 扫描。
+///
+/// 500ms 轮询的常态路径。进程集合稳定时（绝大多数轮次）直接跳过
+/// [`snapshot_task_sets`] 的逐进程 getdents，让轮询开销降到单次 getdents 量级；
+/// 进程增减时才升级为全量 task 扫描（新进程必然带来任务集合变化，不漏表）。
+fn snapshot_pid_set() -> Option<HashSet<i32>> {
+    let entries = std_fs::read_dir("/proc").ok()?;
+    let mut pids = HashSet::new();
+    for entry in entries.flatten() {
+        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() {
+            pids.insert(pid);
+        }
+    }
+    Some(pids)
 }
 
 /// 全量扫描并原子落盘 pid 表（进程 pid + 每进程全部线程 tid）。
