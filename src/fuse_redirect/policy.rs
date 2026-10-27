@@ -70,6 +70,44 @@ pub(super) struct BackendPath {
     pub(super) is_shared_public_backend: bool,
 }
 
+/// 原生 scoped storage 下应用 uid 允许直接写入的公共媒体集合（存储根一级目录）。
+///
+/// MediaProvider 对普通应用的 FUSE 写放行范围是「应用自有私有目录 + 公共媒体集合」；
+/// 宿主会话的数据面直连 f2fs 后端，绕过了这层判定。若不补一道等价门控，
+/// mapping/monitor 形态的应用对存储根下任意路径的创建/写入都会成功
+/// （真机 2026-10-27 实证：支付宝在存储根创建 `alipay/`、微信创建 `tencent/`，
+/// 原生行为下这些请求会被 MP 拒绝——用户感知为「API 行为回退到旧版本」）。
+const NATIVE_PUBLIC_MEDIA_TOP_DIRS: &[&str] = &[
+    "Download",
+    "DCIM",
+    "Pictures",
+    "Movies",
+    "Music",
+    "Documents",
+    "Audiobooks",
+    "Recordings",
+    "Alarms",
+    "Notifications",
+    "Podcasts",
+    "Ringtones",
+];
+
+/// 判断视图路径是否落在原生允许应用写入的公共媒体集合内。
+///
+/// 只认存储根一级目录名（`Download/...`、`DCIM/...` 等）；存储根本身、`Android/`
+/// 与其它自定义一级目录（`alipay/`、`tencent/` 等）不属于公共集合，与原生
+/// MediaProvider 的拒绝范围一致。
+fn is_native_public_media_write_path(storage_path: &str) -> bool {
+    let Some(rest) = storage_path.strip_prefix("/storage/emulated/") else {
+        return false;
+    };
+    let Some(slash) = rest.find('/') else {
+        return false;
+    };
+    let top = rest[slash + 1..].split('/').next().unwrap_or("");
+    NATIVE_PUBLIC_MEDIA_TOP_DIRS.contains(&top)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BackendKind {
     Real,
@@ -727,6 +765,31 @@ impl RedirectPolicy {
             // FileProvider 等机制把该路径交给其它应用时，对方会话可以据此在
             // 窗口内完成跨应用只读解析（见下方跨应用别名兜底）。
             record_own_mapped_handoff(&resolved_storage_path);
+        }
+        // 应用 uid 的 Real 直写门控：宿主会话数据面直连 f2fs 后端，原生
+        // MediaProvider 对「应用写自有私有目录/公共媒体集合之外」的拒绝判定被
+        // 绕过，应用借此拿到 legacy 式的根目录写能力（2026-10-27 真机实证：
+        // 支付宝在存储根创建 `alipay/`、微信创建 `tencent/`，原生下这些 mkdir
+        // 会被 MP 拒绝）。这里按原生语义收紧：应用会话（非系统回退、非系统
+        // 代写）的写操作只有落在自有私有目录、自身映射目标、配置放行目录或
+        // 公共媒体集合时才允许 Real 直写，其余一律拒绝——与「完全不使用模块」
+        // 时的原生行为对齐。读操作与系统会话不受影响。
+        if decision.kind == BackendKind::Real
+            && matches!(operation, OperationKind::Write)
+            && !self.is_system_fallback
+            && !is_system_write_delegate_session(&self.package_name)
+            && own_mapping_target.is_none()
+            && !self.is_own_private_storage_path(&resolved_storage_path)
+            && !self.matches_any(&self.allowed_real_index, &resolved_storage_path)
+            && !is_native_public_media_write_path(&resolved_storage_path)
+        {
+            log::warn!(
+                "fuse host write leak blocked pkg={} uid={} path={}",
+                self.package_name,
+                self.uid,
+                resolved_storage_path
+            );
+            return None;
         }
         let mut backend = match decision.kind {
             BackendKind::Real => match &own_mapping_target {
