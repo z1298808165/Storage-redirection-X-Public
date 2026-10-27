@@ -1080,6 +1080,12 @@ pub fn mount_host_fuse(
 ) -> bool {
     let session_mount_source = host_mount_source(std::process::id());
 
+    // 看门狗连接识别：宿主 mount namespace 里 spawn 前已存在的 FUSE 连接（MediaProvider
+    // 等系统连接）与本会话无关；spawn 后新增的那个才是本会话的连接，sysfs 的 waiting
+    // 计数按它采样。/sys/fs/fuse/connections 按 mount namespace 可见，宿主子进程恰好
+    // 是唯一能稳定看到本会话连接的地方（游离挂载不出现在 daemon 命名空间）。
+    let connections_before = list_fuse_connections();
+
     let mount_uid = if crate::metadata_repair::enabled() {
         config.uid
     } else {
@@ -1135,6 +1141,34 @@ pub fn mount_host_fuse(
         }
     };
     crate::fuse_host::host_stage("mount_ok");
+    let watchdog_conn = {
+        let after = list_fuse_connections();
+        let added: Vec<_> = after
+            .iter()
+            .filter(|n| !connections_before.contains(n))
+            .collect();
+        match added.len() {
+            1 => {
+                // 宿主子进程的 info 级日志不进 running.log（仅 warn 以上转发），armed
+                // 是看门狗可用性的唯一落盘证据，按 warn 记录。
+                log::warn!(
+                    "fuse host watchdog armed conn={} waiting={}",
+                    added[0],
+                    read_fuse_waiting(*added[0]).unwrap_or(0)
+                );
+                Some(*added[0])
+            }
+            _ => {
+                // 识别失败不阻止会话建立，只降级为无看门狗（与旧行为一致）。
+                log::warn!(
+                    "fuse host watchdog conn identify failed added={} total={}",
+                    added.len(),
+                    after.len()
+                );
+                None
+            }
+        }
+    };
 
     let Some(identity) = wait_for_stable_session_mount(host_mount_point, &session_mount_source)
     else {
@@ -1217,11 +1251,13 @@ pub fn mount_host_fuse(
     // 扫描等突发会把 primary 峰值滞留在 RSS（真机实测单风暴即涨至 60MB 级，
     // 也是用户侧"常驻内存几百兆"的主要来源），5 分钟级归还在静息期完成。
     let mut last_purge_ms = crate::platform::paths::monotonic_ms();
+    let mut watchdog = HostStallWatchdog::new(watchdog_conn);
     loop {
         if background.guard.is_finished() {
             return finish_background_session(background, host_mount_point, false, Some(&identity));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+        watchdog.tick();
         let now_ms = crate::platform::paths::monotonic_ms();
         if now_ms.saturating_sub(last_purge_ms)
             >= crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
@@ -1230,6 +1266,183 @@ pub fn mount_host_fuse(
             crate::platform::allocator::release_free_pages();
         }
     }
+}
+
+/// 看门狗判定「请求积压」的 waiting 阈值：8 个 worker 全部被占且内核队列仍有积压时
+/// waiting 至少为 1；取 6 意味着绝大多数 worker 的在途请求都还没被取走，远超突发
+/// 抖动的形态。低于该值视为正常。
+const HOST_STALL_WAITING_THRESHOLD: u64 = 6;
+/// 积压持续达到该时长即 dump 现场取证（每次停摆事件只 dump 一次）。
+const HOST_STALL_DUMP_MS: i64 = 20_000;
+/// 积压持续达到该时长即放弃本连接：内核 abort 让所有在途与后续请求立即以错误返回
+/// （等待中的应用拿到 EIO/ENOTCONN 而不是无限挂死），宿主进程随会话错误退出，由
+/// daemon 既有自愈通道重建新会话。代价是数十秒的存储不可用窗口，远好于全局停摆。
+const HOST_STALL_ABORT_MS: i64 = 60_000;
+/// 看门狗采样间隔。
+const HOST_STALL_TICK_MS: i64 = 3_000;
+/// 取证时单个线程内核栈的最大输出行数。
+const HOST_STALL_STACK_LINES: usize = 16;
+
+/// 宿主会话停摆看门狗状态。
+///
+/// 背景：`fuse_dentry_revalidate` 卡 `__fuse_simple_request` 的全局停摆（issue 用户
+/// 实测两次）形态是内核 FUSE 请求无人取走——宿主 worker 全部阻塞后，所有应用的
+/// 文件操作与 daemon 的挂载子进程一起无限期挂起，最终只能断电。看门狗以 sysfs 的
+/// `waiting` 计数（内核队列中尚未被用户态取走的请求数）为信号：读 sysfs 本身不走
+/// FUSE，绝不会自己卡住；积压持续超阈值先取证后 abort，保证有现场且不再全局停摆。
+struct HostStallWatchdog {
+    connection: Option<i32>,
+    stall_since_ms: Option<i64>,
+    dumped: bool,
+    last_tick_ms: i64,
+}
+
+impl HostStallWatchdog {
+    fn new(connection: Option<i32>) -> Self {
+        Self {
+            connection,
+            stall_since_ms: None,
+            dumped: false,
+            last_tick_ms: crate::platform::paths::monotonic_ms(),
+        }
+    }
+
+    /// 按采样间隔推进看门狗。仅在积压持续超过取证/恢复阈值时产生动作。
+    fn tick(&mut self) {
+        let Some(connection) = self.connection else {
+            return;
+        };
+        let now_ms = crate::platform::paths::monotonic_ms();
+        if now_ms.saturating_sub(self.last_tick_ms) < HOST_STALL_TICK_MS {
+            return;
+        }
+        self.last_tick_ms = now_ms;
+        let waiting = read_fuse_waiting(connection);
+        match waiting {
+            Some(waiting) if waiting >= HOST_STALL_WAITING_THRESHOLD => {
+                let since = *self.stall_since_ms.get_or_insert(now_ms);
+                let elapsed = now_ms.saturating_sub(since);
+                if elapsed >= HOST_STALL_DUMP_MS && !self.dumped {
+                    self.dumped = true;
+                    dump_stall_scene(connection, elapsed);
+                }
+                if elapsed >= HOST_STALL_ABORT_MS {
+                    log::error!(
+                        "fuse host stall aborting conn={} waiting={} elapsed_ms={}",
+                        connection,
+                        waiting,
+                        elapsed
+                    );
+                    abort_fuse_connection(connection);
+                    // abort 后内核把积压请求全部置错，worker 的 read 随即报错退出，
+                    // 常驻循环的 is_finished 检查会走既有清理路径；这里重置状态，
+                    // 若会话奇迹般存活也重新计时。
+                    self.stall_since_ms = None;
+                    self.dumped = false;
+                }
+            }
+            _ => {
+                // 恢复（或识别失败/读数失败）：回到正常态，下一次停摆重新取证。
+                self.stall_since_ms = None;
+                self.dumped = false;
+            }
+        }
+    }
+}
+
+/// 枚举本 mount namespace 可见的 FUSE 连接 id。
+fn list_fuse_connections() -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/sys/fs/fuse/connections") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .collect()
+}
+
+/// 读取指定连接的 waiting 计数（内核队列中等待被用户态取走的请求数）。
+fn read_fuse_waiting(connection: i32) -> Option<u64> {
+    std::fs::read_to_string(format!("/sys/fs/fuse/connections/{connection}/waiting"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+}
+
+/// 触发内核对指定连接的 abort：所有在途与后续请求立即以错误完成。
+fn abort_fuse_connection(connection: i32) {
+    // 写入内容任意（sysfs abort 为触发型节点），失败仅记录——会话可能刚好自愈。
+    if std::fs::write(format!("/sys/fs/fuse/connections/{connection}/abort"), b"1").is_err() {
+        log::error!("fuse host stall abort write failed conn={}", connection);
+    }
+}
+
+/// 停摆取证：把宿主全部线程与 MediaProvider 全部线程的内核栈、等待通道和连接统计
+/// 写入运行日志。调用点处于停摆已持续 20 秒的时刻，现场就是根因本身（哪个 worker
+/// 卡在哪个内核函数、谁持有不放）。
+fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
+    log::error!(
+        "fuse host stall scene begin conn={} elapsed_ms={}",
+        connection,
+        elapsed_ms
+    );
+    for (label, pid) in [("host", std::process::id() as i32)].into_iter().chain(
+        find_media_provider_pids()
+            .into_iter()
+            .map(|pid| ("mp", pid)),
+    ) {
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            log::error!("fuse host stall scene {label} pid={pid} task-list-failed");
+            continue;
+        };
+        for task in tasks.flatten().take(64) {
+            let tid_path = task.path();
+            let tid = task.file_name().to_string_lossy().to_string();
+            let comm = std::fs::read_to_string(tid_path.join("comm"))
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default();
+            let wchan = std::fs::read_to_string(tid_path.join("wchan"))
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default();
+            log::error!("fuse host stall thread {label} tid={tid} comm={comm} wchan={wchan}");
+            if let Ok(stack) = std::fs::read_to_string(tid_path.join("stack")) {
+                for line in stack.lines().take(HOST_STALL_STACK_LINES) {
+                    log::error!("fuse host stall stack {label} tid={tid} {line}");
+                }
+            }
+        }
+    }
+    if let Ok(statistics) =
+        std::fs::read_to_string(format!("/sys/fs/fuse/connections/{connection}/statistics"))
+    {
+        for line in statistics.lines() {
+            log::error!("fuse host stall conn-stat {line}");
+        }
+    }
+    log::error!("fuse host stall scene end");
+}
+
+/// 按 comm/cmdline 定位 MediaProvider 进程（取证对象：它的线程栈能区分「MP 卡死
+/// 拖累宿主」与「宿主自身停摆」）。
+fn find_media_provider_pids() -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|pid| {
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|text| text.trim().to_string())
+                .unwrap_or_default();
+            if comm.contains("media.module") {
+                return true;
+            }
+            std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                .map(|text| text.contains("com.android.providers.media.module"))
+                .unwrap_or(false)
+        })
+        .take(2)
+        .collect()
 }
 
 fn finish_background_session(
