@@ -1,0 +1,74 @@
+# issue 自动化：/reopen 回归重开、✅ Fixed 倒计时关闭、⏳ 等待信息超时关闭。
+name: issue-auto-close
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 每天 11:00 (GMT+8)
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-auto-close-${{ github.event.issue.number || 'schedule' }}
+  cancel-in-progress: false
+
+jobs:
+  reopen:
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 处理 /reopen 指令
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="${{ github.event.comment.body }}"
+          if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
+          case "$body" in
+            /reopen*)
+              if [ "${{ github.event.issue.state }}" = "closed" ]; then
+                gh api -X PATCH repos/${{ github.repository }}/issues/${{ github.event.issue.number }} \
+                  -f state=open
+                gh issue edit ${{ github.event.issue.number }} -R ${{ github.repository }} \
+                  --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
+                  --add-label "⛔ 回归" || true
+                gh issue comment ${{ github.event.issue.number }} -R ${{ github.repository }} \
+                  --body "已重新打开并标记为 \`⛔ 回归\`。请补充：模块版本（请在 App 或 WebUI 中查看）、Android 版本、场景与日志，维护者会跟进。"
+              fi
+              ;;
+          esac
+
+  close-stale-fixed:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 关闭超时的 ✅ Fixed issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh issue list -R ${{ github.repository }} --state open --label "✅ Fixed" \
+            --limit 200 --json number,updatedAt \
+            --jq '.[] | select(.updatedAt < "'"$deadline"'") | .number' | while read -r n; do
+            gh issue comment "$n" -R ${{ github.repository }} \
+              --body "标记 \`✅ Fixed\` 后 3 天无进一步反馈，自动关闭以便归档。问题仍未解决的话，评论首行以 \`/reopen\` 开头即可重新打开并标记为回归。"
+            gh issue close "$n" -R ${{ github.repository }} --reason completed
+          done
+
+  close-stale-needs-info:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 关闭超时的 ⏳ 等待信息 issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deadline=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          gh issue list -R ${{ github.repository }} --state open --label "⏳ 等待信息" \
+            --limit 200 --json number,updatedAt \
+            --jq '.[] | select(.updatedAt < "'"$deadline"'") | .number' | while read -r n; do
+            gh issue comment "$n" -R ${{ github.repository }} \
+              --body "标记 \`⏳ 等待信息\` 后 14 天内未收到补充信息，自动关闭归档。问题仍存在的话，评论补充信息（或首行以 \`/reopen\` 开头）即可重新打开。"
+            gh issue close "$n" -R ${{ github.repository }} --reason "not planned"
+          done
