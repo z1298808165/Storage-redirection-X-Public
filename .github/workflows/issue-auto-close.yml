@@ -20,17 +20,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 处理 /notfixed 与 /reopen 指令
+        # 评论正文必须经 env 传入：`${{ }}` 直接内插进 run 脚本时，正文里的反引号、
+        # 引号会破坏 shell 语法（issue #2 的修复回复含 Markdown 反引号，首轮运行
+        # 即在展开阶段失败），且构成脚本注入面。env 值由 runner 注入，不做 shell 展开。
         env:
           GH_TOKEN: ${{ github.token }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_STATE: ${{ github.event.issue.state }}
+          REPO: ${{ github.repository }}
         run: |
-          body="${{ github.event.comment.body }}"
-          num="${{ github.event.issue.number }}"
-          repo="${{ github.repository }}"
+          body="$COMMENT_BODY"
+          num="$ISSUE_NUMBER"
+          repo="$REPO"
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
           case "$body" in
             /notfixed*)
               # 未关闭期间反馈问题仍在：摘掉倒计时标签，防止 3 天后被误关为"已解决"
-              if [ "${{ github.event.issue.state }}" = "open" ]; then
+              if [ "$ISSUE_STATE" = "open" ]; then
                 gh issue edit "$num" -R "$repo" \
                   --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
                   --add-label "⛔ 回归" || true
@@ -40,7 +47,7 @@ jobs:
               ;;
             /reopen*)
               # 已关闭后要求重开
-              if [ "${{ github.event.issue.state }}" = "closed" ]; then
+              if [ "$ISSUE_STATE" = "closed" ]; then
                 gh api -X PATCH repos/$repo/issues/$num -f state=open
                 gh issue edit "$num" -R "$repo" \
                   --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
