@@ -7,12 +7,9 @@ use super::apply_targets::{
     path_overlaps_mapping_request, path_shadows_mapping_request, read_mountinfo,
 };
 use super::map::PathMappingApplyOptions;
-use super::planner::MEDIA_RW_GID;
 use super::{MountPlanner, concrete_mount_fallback_parent};
 use crate::domain::PathMapping;
 use crate::platform::{fs, module_paths, paths};
-use libc::{chmod, chown};
-use std::ffi::CString;
 
 /// Android 应用 uid 起点。低于该值的是系统 uid，不具备 app-specific 外部存储语义。
 const SYSTEM_UID_LIMIT: i32 = 10000;
@@ -831,18 +828,18 @@ impl MountPlanner {
             );
             if is_restored {
                 log::info!("own private restored {}", storage_target);
-                // bind 回系统 FUSE 后，权限层按文件属主判定：这棵树历史上被
-                // MediaProvider 代写过（真机实测全树属主是 MP 自身 uid），不归一化
-                // 的话应用访问自己的媒体目录反而 EACCES（`ky2: 无法打开数据库文件`）。
-                // 原生语义下属主就是应用本身，这里一次性对齐，之后的新文件由
-                // companion fchown 链路维持。
+                // **不做属主归一**：原生 MediaProvider FUSE 下文件的属主是创建者
+                // 应用 uid（duchamp A16 原生对照实证：9 月20 日微信经原生 FUSE 创建
+                // 的 `Android/media/com.tencent.mm` 属主为微信 uid，组 media_rw），
+                // 访问放行由 MP 权限层（media 子树共享，见 MP hook 放行）与宿主
+                // 数据面的 root 身份保证，不依赖 DAC 属主。此前的整树 chown 到
+                // 宿主包 uid 会与 companion fchown 的创建者 uid 语义来回翻转
+                // （2026-10-27 issue #2 用户实测：media 文件属主随写入/恢复交替
+                // 变化），并破坏跨应用共享场景（插件写的文件被改成宿主包 uid）。
                 //
-                // **只归一化 media 子树**：`data`/`obb` 的属组漂移由一次性迁移
-                // （owner-migration）与场景 6 的「漂移不被运行期修复」契约管辖，
-                // 运行期 chown 会把注入的漂移夹具修回、破坏防回潮守卫。
-                if is_media {
-                    self.normalize_own_media_ownership(data_media_root, &relative);
-                }
+                // **只归一化 media 子树**的历史约束随之失效一并移除；`data`/`obb`
+                // 的属组漂移仍由一次性迁移（owner-migration）与场景 6 的
+                // 「漂移不被运行期修复」契约管辖，本就未做运行期修复。
                 restored_count += 1;
             } else {
                 // 失败必须留痕：这条恢复是跨进程 SQLite 共享缓存层的唯一保证，
@@ -857,86 +854,6 @@ impl MountPlanner {
             }
         }
         restored_count
-    }
-
-    /// 递归把自有媒体目录的属主对齐到应用 uid（组 media_rw）。
-    ///
-    /// 这棵树历史上被 MediaProvider 代写过（真机实测 `XRadiant/` 全树属主是 MP 自身
-    /// uid），bind 回系统 MediaProvider FUSE 后权限层按属主判定，应用访问自己的媒体
-    /// 目录反而 EACCES（真机 2026-10-25：`ky2: 无法打开数据库文件`）。原生语义下这棵
-    /// 树的属主就是应用本身，这里一次性对齐，之后的新文件由 companion fchown 链路维持。
-    ///
-    /// 直接对 f2fs 后端路径做 chown/chmod：root 侧操作不受 MediaProvider 权限约束，
-    /// 且不用等 MediaProvider FUSE 的 attr 缓存过期。深度与条目数双重限幅，防止极端
-    /// 目录拖垮挂载子进程预算。
-    fn normalize_own_media_ownership(&self, backend_root: &str, relative: &str) {
-        let root = paths::join(backend_root, relative);
-        let (fixed, skipped) = self.fix_media_tree_ownership(&root, 0);
-        if fixed > 0 || skipped > 0 {
-            log::info!(
-                "own media ownership normalized fixed={} skipped={} root={}",
-                fixed,
-                skipped,
-                root
-            );
-        }
-    }
-
-    fn fix_media_tree_ownership(&self, path: &str, depth: usize) -> (usize, usize) {
-        use std::os::unix::fs::MetadataExt as _;
-
-        const MAX_DEPTH: usize = 8;
-        const MAX_ENTRIES: usize = 4096;
-        if depth > MAX_DEPTH {
-            return (0, 1);
-        }
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return (0, 1);
-        };
-        let mut fixed = 0usize;
-        let mut skipped = 0usize;
-        for entry in entries.flatten() {
-            if fixed + skipped >= MAX_ENTRIES {
-                log::warn!("own media ownership scan truncated at {}", path);
-                return (fixed, skipped + 1);
-            }
-            let entry_path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&entry_path) else {
-                skipped += 1;
-                continue;
-            };
-            let needs_owner = meta.uid() != self.app_uid as u32;
-            if meta.is_dir() {
-                if needs_owner {
-                    self.fix_media_entry_owner(&entry_path, true);
-                    fixed += 1;
-                }
-                let path_str = entry_path.to_string_lossy().to_string();
-                let (child_fixed, child_skipped) =
-                    self.fix_media_tree_ownership(&path_str, depth + 1);
-                fixed += child_fixed;
-                skipped += child_skipped;
-            } else if meta.is_file() && needs_owner {
-                self.fix_media_entry_owner(&entry_path, false);
-                fixed += 1;
-            }
-        }
-        (fixed, skipped)
-    }
-
-    /// 单个条目的属主/权限对齐：目录 02770、文件 0660，组固定 media_rw。
-    fn fix_media_entry_owner(&self, path: &std::path::Path, is_dir: bool) {
-        use std::os::unix::ffi::OsStrExt as _;
-
-        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
-            return;
-        };
-        // SAFETY: c_path 指向合法 NUL 结尾字符串，chown/chmod 是纯元数据操作，
-        // 不触碰文件内容，失败仅影响该条目的可见性（调用方已记录总数）。
-        unsafe {
-            chown(c_path.as_ptr(), self.app_uid as u32, MEDIA_RW_GID);
-            chmod(c_path.as_ptr(), if is_dir { 0o2770 } else { 0o660 });
-        }
     }
 
     /// 共享宿主预接入（整根由宿主 FUSE 接管）之后恢复自有私有目录的系统视图。
