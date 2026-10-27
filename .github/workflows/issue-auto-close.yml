@@ -1,4 +1,4 @@
-# issue 自动化：/reopen 回归重开、✅ Fixed 倒计时关闭、⏳ 等待信息超时关闭。
+# issue 自动化：/notfixed 与 /reopen 回归反馈、✅ Fixed 倒计时关闭、⏳ 等待信息超时关闭。
 name: issue-auto-close
 
 on:
@@ -15,25 +15,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  reopen:
+  commands:
     if: github.event_name == 'issue_comment'
     runs-on: ubuntu-latest
     steps:
-      - name: 处理 /reopen 指令
+      - name: 处理 /notfixed 与 /reopen 指令
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           body="${{ github.event.comment.body }}"
+          num="${{ github.event.issue.number }}"
+          repo="${{ github.repository }}"
           if [ "$GITHUB_ACTOR" = "github-actions[bot]" ]; then exit 0; fi
           case "$body" in
-            /reopen*)
-              if [ "${{ github.event.issue.state }}" = "closed" ]; then
-                gh api -X PATCH repos/${{ github.repository }}/issues/${{ github.event.issue.number }} \
-                  -f state=open
-                gh issue edit ${{ github.event.issue.number }} -R ${{ github.repository }} \
+            /notfixed*)
+              # 未关闭期间反馈问题仍在：摘掉倒计时标签，防止 3 天后被误关为"已解决"
+              if [ "${{ github.event.issue.state }}" = "open" ]; then
+                gh issue edit "$num" -R "$repo" \
                   --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
                   --add-label "⛔ 回归" || true
-                gh issue comment ${{ github.event.issue.number }} -R ${{ github.repository }} \
+                gh issue comment "$num" -R "$repo" \
+                  --body "已摘除 \`✅ Fixed\` 并标记为 \`⛔ 回归\`，退出自动关闭倒计时。请补充：模块版本（请在 App 或 WebUI 中查看）、Android 版本、场景与日志，维护者会跟进。"
+              fi
+              ;;
+            /reopen*)
+              # 已关闭后要求重开
+              if [ "${{ github.event.issue.state }}" = "closed" ]; then
+                gh api -X PATCH repos/$repo/issues/$num -f state=open
+                gh issue edit "$num" -R "$repo" \
+                  --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
+                  --add-label "⛔ 回归" || true
+                gh issue comment "$num" -R "$repo" \
                   --body "已重新打开并标记为 \`⛔ 回归\`。请补充：模块版本（请在 App 或 WebUI 中查看）、Android 版本、场景与日志，维护者会跟进。"
               fi
               ;;
