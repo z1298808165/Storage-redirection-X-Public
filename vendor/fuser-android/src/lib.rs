@@ -82,6 +82,7 @@ pub use crate::session::SessionACL;
 pub use crate::session::SessionUnmounter;
 
 mod access_flags;
+pub mod activity;
 mod bsd_file_flags;
 mod channel;
 mod dev_fuse;

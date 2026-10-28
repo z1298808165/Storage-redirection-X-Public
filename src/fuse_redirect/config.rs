@@ -1124,7 +1124,10 @@ pub fn mount_host_fuse(
         MountOption::Async,
     ];
     mount_options.acl = SessionACL::All;
-    mount_options.n_threads = Some(8);
+    // worker 池取 16：宿主服务全部接入应用，worker 池是停摆的第一道结构防线——
+    // 任一 worker 永久阻塞即永久占坑，池越深同等数量的阻塞点越难把服务拖停。
+    // 线程成本为栈虚拟内存与少量内核对象，宿主 RSS 主导项是分配器而非线程。
+    mount_options.n_threads = Some(16);
     mount_options.clone_fd = true;
 
     let background = match fuser::spawn_mount2(fs, host_mount_point, &mount_options) {
@@ -1251,13 +1254,12 @@ pub fn mount_host_fuse(
     // 扫描等突发会把 primary 峰值滞留在 RSS（真机实测单风暴即涨至 60MB 级，
     // 也是用户侧"常驻内存几百兆"的主要来源），5 分钟级归还在静息期完成。
     let mut last_purge_ms = crate::platform::paths::monotonic_ms();
-    let mut watchdog = HostStallWatchdog::new(watchdog_conn);
+    spawn_host_stall_watchdog(watchdog_conn);
     loop {
         if background.guard.is_finished() {
             return finish_background_session(background, host_mount_point, false, Some(&identity));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-        watchdog.tick();
         let now_ms = crate::platform::paths::monotonic_ms();
         if now_ms.saturating_sub(last_purge_ms)
             >= crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
@@ -1268,85 +1270,235 @@ pub fn mount_host_fuse(
     }
 }
 
-/// 看门狗判定「请求积压」的 waiting 阈值：8 个 worker 全部被占且内核队列仍有积压时
-/// waiting 至少为 1；取 6 意味着绝大多数 worker 的在途请求都还没被取走，远超突发
-/// 抖动的形态。低于该值视为正常。
-const HOST_STALL_WAITING_THRESHOLD: u64 = 6;
-/// 积压持续达到该时长即 dump 现场取证（每次停摆事件只 dump 一次）。
-const HOST_STALL_DUMP_MS: i64 = 20_000;
-/// 积压持续达到该时长即放弃本连接：内核 abort 让所有在途与后续请求立即以错误返回
-/// （等待中的应用拿到 EIO/ENOTCONN 而不是无限挂死），宿主进程随会话错误退出，由
-/// daemon 既有自愈通道重建新会话。代价是数十秒的存储不可用窗口，远好于全局停摆。
-const HOST_STALL_ABORT_MS: i64 = 60_000;
-/// 看门狗采样间隔。
-const HOST_STALL_TICK_MS: i64 = 3_000;
+/// 停摆判定的「无请求完成」时长：单请求处理超过该值在 f2fs 直连后端上已属异常
+/// （常规读写为毫秒级），配合 waiting 积压即为停摆候选。取 6 秒在快速确认与
+/// 「极端慢操作」误判之间平衡。
+const HOST_STALL_NO_COMPLETION_MS: i64 = 6_000;
+/// 端到端探测超时：探测子在超时内返回说明会话仍能服务（慢而活着），超时才判定
+/// 停摆。取 10 秒——真实停摆必然超时，而极端慢操作通常在此窗口内完成。
+const HOST_STALL_PROBE_TIMEOUT_MS: u32 = 10_000;
+/// 探测超时后的二次确认窗：探测失败到 abort 之间再等该时长，期间若 waiting 清零
+/// 或有请求完成则回到正常。覆盖「全 worker 忙于一个极端慢操作」的误判形态。
+const HOST_STALL_CONFIRM_MS: i64 = 4_000;
+/// 探测节流：一次探测后至少间隔该时长才允许再次探测，避免持续慢负载下反复 fork。
+const HOST_STALL_PROBE_THROTTLE_MS: i64 = 30_000;
+/// 看门狗事件循环的等待超时：空闲时兜底检查周期。
+const HOST_STALL_EPOLL_TIMEOUT_MS: i32 = 1_000;
 /// 取证时单个线程内核栈的最大输出行数。
 const HOST_STALL_STACK_LINES: usize = 16;
 
-/// 宿主会话停摆看门狗状态。
+/// 启动宿主停摆看门狗线程。
 ///
-/// 背景：`fuse_dentry_revalidate` 卡 `__fuse_simple_request` 的全局停摆（issue 用户
-/// 实测两次）形态是内核 FUSE 请求无人取走——宿主 worker 全部阻塞后，所有应用的
-/// 文件操作与 daemon 的挂载子进程一起无限期挂起，最终只能断电。看门狗以 sysfs 的
-/// `waiting` 计数（内核队列中尚未被用户态取走的请求数）为信号：读 sysfs 本身不走
-/// FUSE，绝不会自己卡住；积压持续超阈值先取证后 abort，保证有现场且不再全局停摆。
-struct HostStallWatchdog {
-    connection: Option<i32>,
-    stall_since_ms: Option<i64>,
-    dumped: bool,
-    last_tick_ms: i64,
+/// 线程阻塞在 eventfd 的 epoll 上：worker 每完成一个请求写一次 eventfd，空闲时
+/// 看门狗睡在 epoll_wait（零 CPU），仅在请求停止完成时由超时路径唤醒——发现延迟
+/// 是「无完成时长」本身，不是轮询间隔。eventfd 由本函数创建并注入 vendor 会话。
+fn spawn_host_stall_watchdog(connection: Option<i32>) {
+    let Some(connection) = connection else {
+        return;
+    };
+    // SAFETY: eventfd(0, flags) 只创建内核对象并返回 fd；标志均为合法常量。
+    let event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if event_fd < 0 {
+        log::warn!(
+            "fuse host watchdog eventfd create failed errno={}",
+            last_errno()
+        );
+        return;
+    }
+    fuser::activity::set_completion_eventfd(event_fd);
+    let spawned = std::thread::Builder::new()
+        .name("srx-stall-watchdog".to_string())
+        .spawn(move || {
+            host_stall_watchdog_main(connection, event_fd);
+            // SAFETY: event_fd 由本闭包创建、仅本线程使用，退出前是唯一清理点。
+            unsafe { libc::close(event_fd) };
+        });
+    if spawned.is_err() {
+        fuser::activity::set_completion_eventfd(-1);
+        // SAFETY: spawn 失败后 event_fd 无使用者，由本处关闭。
+        unsafe { libc::close(event_fd) };
+        log::warn!("fuse host watchdog spawn failed");
+    }
 }
 
-impl HostStallWatchdog {
-    fn new(connection: Option<i32>) -> Self {
-        Self {
-            connection,
-            stall_since_ms: None,
-            dumped: false,
-            last_tick_ms: crate::platform::paths::monotonic_ms(),
-        }
+/// 看门狗主体。
+///
+/// 判定链（全部信号都不经过 FUSE，看门狗自身不可能被停摆卡死）：
+/// 1. eventfd 停止唤醒且 sysfs `waiting` 积压——请求在内核无人取走；
+/// 2. 距上次请求完成超过 [`HOST_STALL_NO_COMPLETION_MS`]——worker 全部阻塞，
+///    不是「忙而慢」；
+/// 3. 端到端探测超时——宿主挂载点对一次 stat 请求都无法在窗口内应答。
+///
+/// 三条同时成立才 abort：内核把在途与后续请求全部置错（应用拿到 EIO 而非无限
+/// 挂死），宿主随会话退出，daemon 的 pidfd 换代通道重建新会话。
+fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
+    // SAFETY: epoll_create1(0) 只创建内核对象；epoll_ctl 挂载本函数创建的合法 fd。
+    let epfd = unsafe { libc::epoll_create1(0) };
+    if epfd < 0 {
+        log::warn!(
+            "fuse host watchdog epoll create failed errno={}",
+            last_errno()
+        );
+        return;
+    }
+    let mut event = libc::epoll_event {
+        events: libc::EPOLLIN as u32,
+        u64: 0,
+    };
+    // SAFETY: epfd 与 event_fd 均为本函数持有的合法 fd，event 指向栈上有效内存。
+    if unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, event_fd, &mut event) } != 0 {
+        log::warn!("fuse host watchdog epoll add failed errno={}", last_errno());
+        // SAFETY: epfd 由本函数创建，失败路径的清理点。
+        unsafe { libc::close(epfd) };
+        return;
     }
 
-    /// 按采样间隔推进看门狗。仅在积压持续超过取证/恢复阈值时产生动作。
-    fn tick(&mut self) {
-        let Some(connection) = self.connection else {
-            return;
+    let mut flow_seen = false;
+    let mut last_check_ms = 0i64;
+    let mut last_probe_ms = 0i64;
+    // 探测超时后的二次确认窗起点：真停摆在该窗内 waiting 不会清零、也无请求完成；
+    // 「全 worker 忙慢操作」的极端场景会在窗内完成而回到正常。没有这一步，开机
+    // 风暴的大目录遍历可能被误判为停摆。
+    let mut confirm_deadline_ms: Option<i64> = None;
+    loop {
+        let mut events = [event; 1];
+        // SAFETY: events 是栈上数组，容量 1 与传入的 1 一致。
+        let ready =
+            unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), 1, HOST_STALL_EPOLL_TIMEOUT_MS) };
+        if ready < 0 {
+            if last_errno() == libc::EINTR {
+                continue;
+            }
+            break;
+        }
+        if ready > 0 {
+            flow_seen = true;
+            // 排空 eventfd 计数：一次 read 清零，非阻塞读到 EAGAIN 为止。
+            loop {
+                let mut value: u64 = 0;
+                // SAFETY: value 是栈上可写 u64，read 到它的完整大小是 eventfd 契约。
+                let n = unsafe {
+                    libc::read(
+                        event_fd,
+                        &mut value as *mut u64 as *mut libc::c_void,
+                        std::mem::size_of::<u64>(),
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+            }
+        }
+        let now = fuser::activity::now_ms();
+        if now.saturating_sub(last_check_ms) < 1_000 {
+            continue;
+        }
+        last_check_ms = now;
+        let Some(waiting) = read_fuse_waiting(connection) else {
+            // sysfs 读失败通常意味着连接已被 abort/会话退出：看门狗随之结束。
+            break;
         };
-        let now_ms = crate::platform::paths::monotonic_ms();
-        if now_ms.saturating_sub(self.last_tick_ms) < HOST_STALL_TICK_MS {
-            return;
+        let last_completion = fuser::activity::last_completion_ms();
+        let baseline = last_completion.max(if flow_seen { 0 } else { i64::MAX });
+        let stalled = waiting > 0 && baseline != i64::MAX;
+        let no_completion_ms = if stalled {
+            now.saturating_sub(baseline)
+        } else {
+            0
+        };
+        if !stalled || no_completion_ms < HOST_STALL_NO_COMPLETION_MS {
+            // 恢复（含二次确认窗内自行完成）：回到正常态，下次停摆重新走全链路。
+            confirm_deadline_ms = None;
+            continue;
         }
-        self.last_tick_ms = now_ms;
-        let waiting = read_fuse_waiting(connection);
-        match waiting {
-            Some(waiting) if waiting >= HOST_STALL_WAITING_THRESHOLD => {
-                let since = *self.stall_since_ms.get_or_insert(now_ms);
-                let elapsed = now_ms.saturating_sub(since);
-                if elapsed >= HOST_STALL_DUMP_MS && !self.dumped {
-                    self.dumped = true;
-                    dump_stall_scene(connection, elapsed);
-                }
-                if elapsed >= HOST_STALL_ABORT_MS {
-                    log::error!(
-                        "fuse host stall aborting conn={} waiting={} elapsed_ms={}",
-                        connection,
-                        waiting,
-                        elapsed
-                    );
-                    abort_fuse_connection(connection);
-                    // abort 后内核把积压请求全部置错，worker 的 read 随即报错退出，
-                    // 常驻循环的 is_finished 检查会走既有清理路径；这里重置状态，
-                    // 若会话奇迹般存活也重新计时。
-                    self.stall_since_ms = None;
-                    self.dumped = false;
-                }
+        if let Some(deadline) = confirm_deadline_ms {
+            // 二次确认窗：条件仍成立即放弃本连接。
+            if now >= deadline {
+                log::error!(
+                    "fuse host stall confirmed conn={} waiting={} no_completion_ms={} in_flight={}",
+                    connection,
+                    waiting,
+                    no_completion_ms,
+                    fuser::activity::in_flight()
+                );
+                dump_stall_scene(connection, no_completion_ms);
+                abort_fuse_connection(connection);
+                // abort 后内核把积压请求全部置错，worker 的 read 随即报错退出，宿主
+                // 进程结束；daemon 的 pidfd 换代通道重建新会话。看门狗完成使命退出。
+                break;
             }
-            _ => {
-                // 恢复（或识别失败/读数失败）：回到正常态，下一次停摆重新取证。
-                self.stall_since_ms = None;
-                self.dumped = false;
-            }
+            continue;
         }
+        // 停摆候选：先做端到端确认，探测能应答就是「忙而慢」，放行并节流。
+        if now.saturating_sub(last_probe_ms) < HOST_STALL_PROBE_THROTTLE_MS {
+            continue;
+        }
+        last_probe_ms = now;
+        log::warn!(
+            "fuse host stall candidate conn={} waiting={} no_completion_ms={} probing",
+            connection,
+            waiting,
+            no_completion_ms
+        );
+        if probe_mount_point_alive(HOST_STALL_PROBE_TIMEOUT_MS) {
+            log::warn!(
+                "fuse host stall probe ok conn={} in_flight={} slow-but-alive",
+                connection,
+                fuser::activity::in_flight()
+            );
+            continue;
+        }
+        // 探测超时：进入二次确认窗（总延迟 ≈ 6s 冻结 + 10s 探测 + 4s 窗口）。
+        confirm_deadline_ms = Some(now + HOST_STALL_CONFIRM_MS);
+    }
+    // SAFETY: epfd 由本函数创建，线程退出是唯一清理点。
+    unsafe { libc::close(epfd) };
+}
+
+/// 端到端探测：fork 子进程对宿主挂载点做一次 stat。
+///
+/// 返回 `true` 表示探测子在超时内退出（无论 stat 结果——ENOENT 也是应答，说明
+/// 连接活着）；`false` 表示超时（stat 无限挂起，被 SIGKILL 打断）——这是停摆的
+/// 最终确认。探测请求本身也走这条 FUSE 连接，停摆时它必然与其它请求一起挂起。
+fn probe_mount_point_alive(timeout_ms: u32) -> bool {
+    crate::logging::prepare_for_fork();
+    // SAFETY: fork 前已完成日志准备；子进程只做一次 stat 后立即 _exit。
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return false;
+    }
+    if child == 0 {
+        // SAFETY: c_path 指向 NUL 结尾静态串；buf 指向栈上未初始化内存，stat 返回
+        // 时由内核完整写入。结果不检查：任何返回（含 ENOENT）都证明连接可应答。
+        unsafe {
+            if let Ok(c_path) = CString::new(crate::platform::module_paths::FUSE_HOST_MOUNT_DIR) {
+                let mut buf = std::mem::MaybeUninit::<libc::stat>::uninit();
+                libc::stat(c_path.as_ptr(), buf.as_mut_ptr());
+            }
+            libc::_exit(0);
+        }
+    }
+    let deadline = fuser::activity::now_ms() + i64::from(timeout_ms);
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: child 是本次 fork 出的子进程；WNOHANG 不阻塞。
+        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+        if waited == child {
+            return true;
+        }
+        if waited < 0 {
+            return false;
+        }
+        if fuser::activity::now_ms() >= deadline {
+            // SAFETY: child 已确认仍存活（未 waitpid 成功）；SIGKILL 只作用于它。
+            unsafe { libc::kill(child, libc::SIGKILL) };
+            // SAFETY: 回收被强制终止的子进程，避免僵尸。
+            unsafe {
+                libc::waitpid(child, &mut status, 0);
+            }
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 

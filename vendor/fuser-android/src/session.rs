@@ -640,7 +640,12 @@ impl<FS: Filesystem> SessionEventLoop<FS> {
                                 req.reply::<ReplyEmpty>().ok();
                                 return Ok(());
                             } else {
-                                req.dispatch(self)
+                                // 在途计数与完成事件供宿主停摆看门狗区分「忙而慢」与
+                                // 「已死」：worker 阻塞时在途数不回落、最后完成时刻冻结。
+                                crate::activity::begin_request();
+                                let dispatched = req.dispatch(self);
+                                crate::activity::end_request();
+                                dispatched
                             }
                         }
                         // Quit loop on illegal request
