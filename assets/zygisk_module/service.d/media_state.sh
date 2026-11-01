@@ -143,15 +143,14 @@ append_media_state_snapshot() {
 }
 
 start_media_state_collector() {
-  (
-    rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-    while true; do
-      rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-      append_media_state_snapshot
-      rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-      sleep "$DIAGNOSTIC_SNAPSHOT_INTERVAL_SECONDS"
-    done
-  ) &
-  echo "$!" > "$MEDIA_STATE_COLLECTOR_PID_FILE"
-  chmod 644 "$MEDIA_STATE_COLLECTOR_PID_FILE"
+  # 事件驱动：只在采集器启动的时刻（详细日志打开、配置变化、开机）抓一次快照。
+  #
+  # 此前是常驻 `while true; sleep 120` 周期采样。存储健康的历史曲线对排障价值有限，
+  # 而常驻采样每次唤醒都要读 /proc、跑 dumpsys meminfo 与 logcat，属于规范禁止的
+  # 周期轮询。需要现场时由两条事件按需采集：诊断日志包导出（导出脚本实时采集
+  # 挂载与进程状态）与停摆取证（daemon 侧 stall-forensics 事件触发）。
+  rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
+  append_media_state_snapshot
+  rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
+  log_collector_status "media_state snapshot captured"
 }

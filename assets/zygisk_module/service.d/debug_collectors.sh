@@ -117,9 +117,15 @@ start_debug_collectors() {
   stop_debug_logcat_collector
   stop_collector_by_pid_file "$MEDIA_STATE_COLLECTOR_PID_FILE"
   stop_collector_by_pid_file "$APP_STATUS_SNAPSHOT_PID_FILE"
+  # 启动步骤逐段落痕：这条链路由配置事件驱动，一旦中途返回就再也没有第二次机会
+  # （周期看门狗已按规范移除），所以每段开始都要留一行，现场据此定位中断点。
+  log_collector_status "debug start: logcat"
   start_debug_logcat_collector
+  log_collector_status "debug start: media snapshot"
   start_media_state_collector
+  log_collector_status "debug start: app snapshot"
   start_app_status_snapshot_collector
+  log_collector_status "debug start: ready"
 }
 
 # 应用错误环形采集器：常驻、不受 verbose 门禁。

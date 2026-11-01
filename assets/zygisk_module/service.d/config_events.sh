@@ -1300,7 +1300,10 @@ start_config_event_collector() {
           sync_monitor_collector
         fi
         if command -v sync_debug_collectors >/dev/null 2>&1; then
-          sync_debug_collectors
+          # 收敛放在子 shell 里执行：采集器启动会碰 logcat/dumpsys 等外部命令，
+          # 任何异常退出都不能连带结束这个事件循环——它现在是采集器状态的唯一
+          # 驱动源（周期看门狗已按规范移除），循环一死配置事件就再无人处理。
+          ( sync_debug_collectors ) || log_collector_status "sync failed rc=$?"
         fi
 
         case "$event_line" in

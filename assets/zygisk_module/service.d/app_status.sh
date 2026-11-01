@@ -89,15 +89,14 @@ append_app_status_snapshot() {
 }
 
 start_app_status_snapshot_collector() {
-  (
-    trim_app_status_log_if_needed
-    while true; do
-      trim_app_status_log_if_needed
-      append_app_status_snapshot
-      trim_app_status_log_if_needed
-      sleep "$DIAGNOSTIC_SNAPSHOT_INTERVAL_SECONDS"
-    done
-  ) &
-  echo "$!" > "$APP_STATUS_SNAPSHOT_PID_FILE"
-  chmod 644 "$APP_STATUS_SNAPSHOT_PID_FILE"
+  # 事件驱动：只在采集器启动的时刻（详细日志打开、配置变化、开机）抓一次快照。
+  #
+  # 此前是常驻 `while true; sleep 120` 周期采样，每次唤醒要跑 `cmd package list
+  # packages -U`、`ps -A` 并对每个已配置应用读 /proc 与 mountinfo。这类周期采样
+  # 属于规范禁止的轮询，改为按事件采集：导出诊断包时由导出脚本实时采集，发生
+  # 停摆/异常时由 daemon 的 stall-forensics 事件采集。
+  trim_app_status_log_if_needed
+  append_app_status_snapshot
+  trim_app_status_log_if_needed
+  log_collector_status "app_status snapshot captured"
 }
