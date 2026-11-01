@@ -6,7 +6,9 @@
 
 详细日志开启时，native 日志优先写入 `/data/adb/modules/storage.redirect.x/logs/running.log`，文件监视记录写入 `file_monitor.log`。`adb logcat -s "SRX" "StorageRedirect"` 主要用于查看 Java 日志、native Warn/Error 镜像和私有通道不可用时的文件监视回退，不再是完整 native 日志来源。
 
-也可以在 WebUI 或管理 App 的设置页右上角点击文件图标导出日志包。导出的 `storage-redirect-x-logs-*.tar.gz` 会包含模块日志、轮转历史、关键配置、运行状态快照、最近相关 logcat 和 dmesg tail，适合在 Issue 或排障沟通中直接提供。
+详细日志关闭时 `running.log` 只保留告警与错误、文件监视记录、概览计数和低频状态事件（挂载完成、热重载回执），逐请求的诊断轨迹（挂载视图、别名绑定、资源根展开、扫描未命中命名空间等）只在开启详细日志后写入。
+
+也可以在 WebUI 或管理 App 的设置页右上角点击文件图标导出日志包。导出的 `storage-redirect-x-logs-*.tar.gz` 会包含模块日志、轮转历史、关键配置、运行状态快照、最近相关 logcat 和 dmesg tail，适合在 Issue 或排障沟通中直接提供。公共存储视图不可写时（存储异常的典型现场），导出会自动降级把日志包写到模块目录 `logs/` 下，此时需要用 root 文件管理器或 `adb` 手动取出。导出在采集挂载与路径快照时会为可能被存储停摆拖住的命令加硬超时，超时只丢弃该段证据，不会让整包导出失败。
 
 设备侧日志目录：
 

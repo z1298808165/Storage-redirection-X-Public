@@ -273,7 +273,11 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   会话用的锚点别名（真实存储根先绑到 `tmp/real_storage/<user>`，绑定只存在于应用
   namespace），宿主子进程在自己的私有命名空间里看到的是一个**空目录**。照搬覆盖会让策略
   把真实根读成空——真机表现为仅映射模式的应用整个丢失公共存储视图，视图根只剩被沙盒化的
-  那几条路径。宿主命名空间里 `/data/media/<user>` 本来就是未经覆盖的真实存储，无需别名。
+  那几条路径。宿主侧改为使用**宿主命名空间自建的私有锚点**（`real_media_anchor/<user>`，
+  由宿主子进程在应用接入之前建立并校验为私有的 f2fs 直连根），而不是直接使用
+  `/data/media/<user>`：应用接入的 `move_mount` 会让 AOSP 存储 bind 链把同一挂载传播回宿主
+  命名空间的 `/data/media/<user>`，把后端直连根覆盖成自家 FUSE 副本，任何 backend 路径解析
+  都会命中自家连接的 dentry 重验证而死锁。
 - **挂载台账把宿主会话与 scoped 子进程分开记**：接入产生的挂载写 `fuse_host=<pid>:<start>`
   而不是 `fuse_child=`，回滚与清理只卸载、不终止任何进程——宿主会话跨应用共享，按它的 pid
   发信号等于把所有接入应用一起打成死挂载。会话死亡时 `has_dead_fuse_child` 据此把该应用的
@@ -343,7 +347,10 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 
 - 身份账本、端点探测、验证式摘除、poisoned 收敛和 `srx_daemon doctor` 已落地。
 - 共享宿主死亡后的全量注入重建、按 namespace 独立预算和指数退避仍属于后续增强方向。
-- `service.sh` 的 respawn 兜底仍需在真实设备上单独验证后再扩大范围。
+- 守护链已落地并真机验证：`service.sh` 只在开机时拉起一次 daemon，进程级看护由 daemon 自行
+  孵化的 pidfd 看门狗负责（等待退出事件后按退避重建，替代此前的固定间隔 `pidof` 轮询）；
+  软重启把 daemon 与看门狗一起带走时，由 companion 在收到挂载请求后串行兜底拉起（独立
+  respawn 锁，尊重 runtime-disabled，并清理遗留 FUSE 子进程）。
 
 ### 阶段 4——发现通道优化（可选，未启用）
 
@@ -366,7 +373,8 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 | 接入落在 scoped 子根导致按整根解析 | 中 | 闸门只在 `mount_root` 就是该 uid 的存储视图根时放行；其余情况保持 scoped |
 | 跨命名空间搬运挂载写成了 `mount(MS_BIND)` | 高 | bind 的源挂载必须属于调用方当前命名空间，跨命名空间时内核直接 `EINVAL`；接入改用 `open_tree(OPEN_TREE_CLONE)` + `move_mount`，并有守卫测试钉住顺序（见 §2.1） |
 | 附着进来的克隆继承了宿主挂载点的 shared 传播组 | 高 | 各应用的挂载会结成同一 peer group，互相传播挂载/卸载；附着后立即在本命名空间内改为 `MS_REC\|MS_PRIVATE` |
-| 宿主会话策略照搬应用命名空间的锚点覆盖 | 高 | 锚点绑定只存在于应用命名空间，宿主子进程看到空目录 → 仅映射模式应用丢失公共存储视图；登记时传 `real_root_override=None`，用宿主命名空间里的 `/data/media/<user>` |
+| 宿主会话策略照搬应用命名空间的锚点覆盖 | 高 | 锚点绑定只存在于应用命名空间，宿主子进程看到空目录 → 仅映射模式应用丢失公共存储视图；登记时传 `real_root_override=None`，由宿主子进程使用自建私有锚点 `real_media_anchor/<user>` 作为后端根 |
+| 宿主接入的挂载经 shared 传播组回写 `/data/media/<user>` | 高 | 传播副本会覆盖宿主后端直连根，backend 路径解析命中自家连接的 dentry 重验证而死锁；锚点在应用接入前建立，宿主侧解析统一经锚点与 `media_real_form_of` 回转 |
 | 启用开关写在 daemon 的环境变量里 | 中 | 该变量现仅作 daemon 侧 kill switch；companion 接入不依赖它，而依赖 daemon 发布的宿主会话快照（`tmp/fuse_host.snapshot`，含已登记 uid），跨进程一致性由快照与预登记保证 |
 | SELinux 对宿主挂载路径的标签限制 | 中 | 宿主路径放在模块目录下，沿用现有 `fs::create_directory` 的属主/模式处理 |
 | poisoned 后应用失去重定向（回退到真实存储） | 中 | 这是刻意选择的"可用性优先、拒绝叠加"策略；`doctor` 与日志显式暴露，等待摘除成功或重启 |
