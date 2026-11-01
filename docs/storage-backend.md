@@ -1,10 +1,10 @@
 # 自动后端与 FUSE 挂载架构
 
-本文记录从早期“FUSE-first”设计到当前自动后端实现的演进。当前项目并不把 FUSE 视为所有设备上的唯一优先后端：配置面固定使用 `auto`，运行时根据平台能力、规则需求和挂载状态，在 scoped FUSE、共享 FUSE 宿主会话与 mount namespace 之间选择，并保留回退路径。
+本文记录从早期“FUSE-first”设计到当前自动后端实现的演进。配置面固定使用 `auto`，运行时在**共享 FUSE 宿主会话**与 mount namespace 之间选择；per-app scoped FUSE 会话已退役（它会让应用命名空间被自己的会话进程自持，见 [共享宿主架构](shared-fuse-daemon-architecture.md)）。
 
 ## 运行方式
 
-- `auto`：设备存在可用 `/dev/fuse` 且规则需要动态匹配时使用 scoped FUSE；其它路径继续使用 mount namespace，FUSE 服务异常时自动回退。
+- `auto`：设备存在可用 `/dev/fuse` 且规则需要动态匹配时经共享宿主会话提供 FUSE 视图；接入不了（无宿主、闸门未放行、策略未登记、接入失败）就用 mount namespace，原因写进 `fuse view unavailable reason=` 日志。
 
 配置位于 `config/global.json`：
 
@@ -43,7 +43,6 @@
 
 当前实现的关键边界如下：
 
-- 有能力且规则需要时使用 scoped FUSE；共享宿主会话（`srx_fuse_host[<pid>]`）默认开启，为多个应用 namespace 提供共享数据面，Auto 模式下应用会话默认收敛到共享宿主。
-- `mount namespace` 不是待删除的旧实现，而是 `auto` 后端的正式路径和 FUSE 不可用时的兼容回退。
-- `srx_fuse_redirect` 仍是 scoped FUSE 的兼容前缀；测试、账本和诊断必须同时识别 `srx_fuse_redirect` 与 `srx_fuse_host`。
-- 只有在新的共享宿主路径、真实设备兼容性和回退行为持续通过验证后，才可以进一步收窄旧 scoped FUSE 路径；当前不应删除该回退。
+- 共享宿主会话（`srx_fuse_host[<pid>]`）是**唯一**的 FUSE 数据面，为多个应用 namespace 提供共享视图，Auto 模式下应用会话默认收敛到该会话。
+- `mount namespace` 不是待删除的旧实现，而是 `auto` 后端在宿主接入不可用时的正式路径。
+- `srx_fuse_redirect` 前缀保留用于识别旧版本遗留的 scoped 层；测试、账本和诊断必须同时识别 `srx_fuse_redirect` 与 `srx_fuse_host`。

@@ -15,12 +15,13 @@ namespace 注入”的架构、根因分析和当前实现边界。早期分阶�
 ```
 zygisk specialize_pre ──connect_companion──> root companion ──> companion_mount.rs（按应用挂载）
 srx_daemon（持久）      ──reconcile 每 3s──> daemon_mount.rs
-                                              └─ 共享宿主会话：FuseHost 建立 srx_fuse_host；应用侧 open_tree + move_mount 注入，失败时回退 scoped srx_fuse_redirect
+                                              └─ 共享宿主会话：FuseHost 建立 srx_fuse_host；应用侧 open_tree + move_mount 注入，失败时降级为 namespace bind
 ```
 
 - 共享宿主会话：`src/fuse_host.rs` 在 daemon 启动时建立私有 mount namespace 和宿主 FUSE 会话，挂载源为 `srx_fuse_host[<pid>]`。
-- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 优先通过 `open_tree` + `move_mount` 注入共享宿主（**默认开启**）；宿主接入失败时回退到原有 scoped FUSE，会话源为 `srx_fuse_redirect[<pid>]`。
-- 旧 scoped 路径仍由 `src/fuse_redirect/config.rs` 提供兼容实现，但不再是唯一数据面。
+- 应用接入：`src/daemon_mount.rs` 与 `src/lifecycle/companion_mount.rs` 通过 `open_tree` + `move_mount` 注入共享宿主（**默认开启**）；接入不了就降级为 namespace bind，不再 fork per-app 会话。
+- **per-app scoped FUSE 已退役**（原 `srx_fuse_redirect[<pid>]` 数据面）：那条 `fork` 出来的进程会 `setns` 进应用自己的 mount namespace，于是它自己就是该 namespace 的持有者——应用退出后 namespace 不销毁、它服务的挂载不消失、FUSE 连接不断开，它永远等不到「连接断开就退出」这个条件。真机实测单机累积 1198 个常驻会话（约 1.2 万线程），把 pid 号顶满后与模块无关的进程也会 `clone` EAGAIN，表现为 framework 反复重启（issue #4）。这类形态无法靠事后清理补救，只能不再产生：现在 FUSE 只有两种载体——共享宿主会话（进程不跟随应用生命周期）与 namespace bind（无进程）。
+- 升级迁移：daemon 启动时一次性清理旧版本遗留的 `srx_fuse` 进程（`retire_legacy_scoped_sessions`）。判据只有 `comm=srx_fuse`，宿主（`srx_fuse_host`）与看门狗（`srx_watchdog`）不会被误伤。`srx_fuse_redirect` 前缀常量保留，用于识别并清理旧层。
 - 状态落盘：`src/daemon_mount.rs:1643 write_mount_state`，字段为
   `version/package/uid/app_start_time/fuse_child=<pid>:<starttime>/target=`。
 - 周期 reconcile：`src/daemon.rs:420 reconcile_running_apps`，间隔 3 秒
@@ -30,6 +31,33 @@ srx_daemon（持久）      ──reconcile 每 3s──> daemon_mount.rs
   （读 `/proc/<pid>/mountinfo`）+ `backend_mount_targets_responsive`（`open()` 探测 errno）。
 - 死挂载清理：`src/fuse_redirect/config.rs:596 finish_failed_session`，ENOTCONN 不在
   `is_already_unmounted_errno`（`:643`）里，必须继续 `MNT_DETACH`。
+
+### 1.1.1 现场诊断：FUSE 视图能不能用、为什么不能用
+
+scoped 退役后只剩两条数据面（共享宿主 FUSE、namespace bind），因此「某台设备上某个应用
+没有 FUSE」必须能从日志直接判定原因，而不是靠猜。每个挂载请求都会在结论里带原因，运行时
+可检索这三类行：
+
+- 启动一次性结论（每开机一行）：
+  `fuse backend startup dev_fuse=<bool> host_session=<bool> capability=<state> legacy_scoped_retired=<n>`
+- 宿主接入被跳过（逐根）：
+  `fuse host session attach skipped pkg=<pkg> pid=<pid> root=<root> reason=<why>`
+- 规则本该走 FUSE 但视图没建起来（逐请求）：
+  `daemon|companion fuse view unavailable reason=<why> fallback=namespace_bind ... fuse_device=<bool> capability=<state> host_session=<bool>`
+- 后端结论（每请求一行，稳定可检索）：`backend_effective ... selection_reason=<reason[:why]>`
+
+`reason` 取值与含义：
+
+| reason | 含义 | 通常属于 |
+|---|---|---|
+| `no_shared_host_session` | 宿主会话不存在或已消失 | 设备/宿主启动 |
+| `attach_gate_closed` | 该根不是存储视图根，或接入开关被显式关掉 | 配置/规划 |
+| `policy_registration_failed` | 应用策略没登记进宿主会话 | 配置热重载/竞态 |
+| `no_policy_rules` | 请求本身没有任何策略规则（不需要 FUSE） | 配置 |
+| `host_attach_failed` | 登记与闸门都通过，实际接入失败（超时/errno） | 设备/内核 |
+
+原因同时写入能力快照的 `reason=` 字段（`/data/adb/modules/storage.redirect.x/.fuse_capability`），
+`doctor` 与诊断包会带上，因此用户反馈只需贴一行日志即可定位方向。
 
 ### 1.2 三个失效窗口
 
@@ -284,33 +312,33 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   挂载状态判为失效并触发重挂；已被重建会话留下的层也不再按"可保留"处理（否则保留的是一条
   已经断开的 FUSE 连接）。
 - **策略登记改为同步应答**：宿主子进程登记后回 `(uid, 表大小)`，调用方按 uid 匹配等待应答
-  （同一条控制通道被所有挂载 worker 共用，所以应答必须带 uid）；登记未确认时保持 scoped 路径，
+  （同一条控制通道被所有挂载 worker 共用，所以应答必须带 uid）；登记未确认时不接入，
   避免"策略还没进会话就接入"导致整片 `ENOENT`。
 - **接入只允许落在存储视图根**：宿主会话按 uid 注册策略，虚拟根只能是整个存储视图根。落在更深的
   scoped 子根时，内核会把该子树下的请求按整根解析，命中的是与本应用规则无关的真实路径——读错
   内容却不报错。因此闸门只在 `mount_root` 就是该 uid 的存储视图根时放行。
 - **接入默认开启**：共享宿主会话是目标形态，未设置环境变量即接入；`SRT_FUSE_HOST_ATTACH`
-  只作为 **kill switch**（显式写成 `0`/`false`/`no`/`off` 时退回 scoped 数据面），便于在设备上
+  只作为 **kill switch**（显式写成 `0`/`false`/`no`/`off` 时整体关闭接入，应用降级 namespace bind），便于在设备上
   快速回退。注意该变量只对 daemon 及其 fork 的 worker 可见：`companion_mount` 跑在应用进程内，
   读不到 daemon 的环境变量，companion 侧的接入判定不依赖这个开关，而是依赖 daemon 发布的
   宿主会话快照（见下）。关闭时行为与改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
 - **companion 跨进程发现与 daemon 预登记**：companion 进程与 daemon 不共享内存，宿主会话只能
   通过 daemon 发布的快照文件（`tmp/fuse_host.snapshot`）发现，内容为 boot_id、宿主 pid/start、
-  挂载点、挂载源与已登记 uid 集合；快照按 boot_id 与宿主进程实例校验，失效即回退 scoped。
+  挂载点、挂载源与已登记 uid 集合；快照按 boot_id 与宿主进程实例校验，失效即视为不可接入。
   策略登记由 daemon 在 reconcile 中**预登记**（执行挂载计划前对 Auto 应用统一登记），companion
   有界等待"本 uid 已登记"后再接入——等待发生在挂载应答返回之前，应用进程尚未恢复运行，一次
-  挂载到位，没有"先 scoped 后迁移"的中间穿透窗口；等待超时或失败冷却期内保持旧 scoped 规划。
+  挂载到位，没有「先挂上再迁移」的中间穿透窗口；等待超时或失败冷却期内不接入，直接降级 namespace bind。
   真机验证（Android 16）：QQ、微信、钉钉、Nnngram 常规启动路径首次挂载即全部接入同一宿主会话，
   无需人为干预；未配置的 MT 管理器与 Via 无任何模块挂载。
 - **Auto 模式默认收敛到存储视图根**：宿主会话按 uid 持有同一份规则，一个整根会话即可表达相同
-  语义。daemon 侧规划在宿主健康时把按目录 scoped 根收敛成该 uid 的存储视图根，常规挂载直接
+  语义。daemon 侧规划在宿主健康时把按目录规划根收敛成该 uid 的存储视图根，常规挂载直接
   命中接入闸门；companion 侧规划同样收敛（依赖快照等待）。namespace fallback（空规划）、
   非 Auto 模式、规划本就是整根这三条边界不收敛。
 - **真机 A/B 结论**（Android 16，同一应用同一配置）：scoped 会话与宿主会话下，应用视图根
   内容逐项一致（真实公共目录 + 被沙盒化的路径），应用在视图里的写入落在自己的沙盒、公共
   存储无残留；`kill` 掉宿主子进程后状态判活生效，应用自动重挂到新会话。
-- 宿主会话失效后由 daemon 在 reconcile 中重建，失败时保留 scoped FUSE 回退；`srx_fuse_redirect`
-  前缀路径不能删除。
+- 宿主会话失效后由 daemon 在 reconcile 中重建，期间应用按 namespace bind 正常使用存储；
+  `srx_fuse_redirect` 前缀常量不能删除——它还负责识别旧版本遗留的 scoped 层。
 - **僵尸态必须排除**：会话线程结束时子进程自行退出（FUSE 连接被 `FUSE_DESTROY` 结束），父进程
   若不回收，`/proc/<pid>` 仍然存在，只按 pid 判活会把它当成存活会话，自愈永远不会重建。因此
   存活判定同时检查 `/proc/<pid>/stat` 的状态字符并在判定死亡时回收；真机 `kill -9` 宿主子进程
@@ -363,14 +391,14 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认开启（`SRT_FUSE_HOST_ATTACH` 仅作 kill switch）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即回落 scoped fork |
+| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认开启（`SRT_FUSE_HOST_ATTACH` 仅作 kill switch）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即降级为 namespace bind |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
 | 按 uid 直通回退可能漏改写 | 高 | 宿主会话未命中 uid 一律**拒绝**（`deny_all` → `ENOENT`），绝不回退直通；落点越权无法靠事后清理恢复，必须在决策前挡住 |
 | 已登记应用对无规则路径 Real 直写绕过 MP 权限层 | 高 | 应用会话的写操作按原生 scoped storage 语义门控：仅自有私有目录、自身映射、配置放行目录与公共媒体集合（Download/DCIM 等 12 个根一级目录）可直写真实后端，其余拒绝并留痕（`fuse host write leak blocked`）；系统回退与系统代写会话豁免（2026-10-27 真机实证：支付宝/微信借宿主视图在存储根创建 `alipay/`、`tencent/`） |
 | 宿主 pid 被当成 scoped 子进程记账 | 高 | 状态文件按 `host_session` 分流：宿主挂载写 `fuse_host=` 只判活、不终止；回滚对宿主挂载只卸载。守卫测试锁定"不得写进 `fuse_child=`" |
-| 策略未进宿主会话就接入 | 高 | 登记改为同步应答（`(uid, 表大小)`），未确认即保持 scoped 路径，不进入接入分支 |
+| 策略未进宿主会话就接入 | 高 | 登记改为同步应答（`(uid, 表大小)`），未确认即不接入（降级 namespace bind） |
 | 已重建会话留下的层被当成有效层保留 | 中 | 保留判据拒绝 `is_stale_host_source` 的层，按摘除重建处理；否则保留的是一条已断开的 FUSE 连接（`ENOTCONN`） |
-| 接入落在 scoped 子根导致按整根解析 | 中 | 闸门只在 `mount_root` 就是该 uid 的存储视图根时放行；其余情况保持 scoped |
+| 接入落在子根导致按整根解析 | 中 | 闸门只在 `mount_root` 就是该 uid 的存储视图根时放行；其余情况不接入（降级 namespace bind） |
 | 跨命名空间搬运挂载写成了 `mount(MS_BIND)` | 高 | bind 的源挂载必须属于调用方当前命名空间，跨命名空间时内核直接 `EINVAL`；接入改用 `open_tree(OPEN_TREE_CLONE)` + `move_mount`，并有守卫测试钉住顺序（见 §2.1） |
 | 附着进来的克隆继承了宿主挂载点的 shared 传播组 | 高 | 各应用的挂载会结成同一 peer group，互相传播挂载/卸载；附着后立即在本命名空间内改为 `MS_REC\|MS_PRIVATE` |
 | 宿主会话策略照搬应用命名空间的锚点覆盖 | 高 | 锚点绑定只存在于应用命名空间，宿主子进程看到空目录 → 仅映射模式应用丢失公共存储视图；登记时传 `real_root_override=None`，由宿主子进程使用自建私有锚点 `real_media_anchor/<user>` 作为后端根 |
@@ -385,6 +413,6 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 
 - **普通应用不安装 native/inline/PLT hook**：本改造全部走 companion mount / mount
   namespace / FUSE 路径，未新增任何进程内 hook；
-- **测试流同时识别两类 FUSE 挂载**：`srx_fuse_redirect` 表示 scoped 回退会话，`srx_fuse_host` 表示共享宿主会话；场景断言不能只匹配其中一种。
+- **测试流识别两类 FUSE 挂载源**：`srx_fuse_host` 是当前唯一的 FUSE 数据面；`srx_fuse_redirect` 只用于识别旧版本遗留层。场景断言不能只匹配其中一种。
 - **能力熔断快照**：共享宿主改造本身未改快照语义；后续 `schema=3` 已引入按应用分桶（设备级 `unavailable` 需 ≥2 个不同应用失败）与 `retry_at_ms` 退避自愈，当前语义见 [存储后端架构](storage-backend.md)。
 - **后端选择仍由 `auto` 统一控制**：文档、测试和诊断不应把 FUSE 或 namespace 单独描述成所有设备的固定后端。
