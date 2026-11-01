@@ -1317,15 +1317,23 @@ fn handle_child_process(
         // 一样在应答前修复——真机 2026-10-18 实测 mapping_mode_only 应用的挂载
         // 普遍走本路径，只挂 daemon fork 会完全漏修。只对「无 mount identity
         if !mount_state::write_mount_state(request, plan, &mounted_targets, &fuse_children) {
-            // 状态写失败必须回滚本轮挂载：没有账本的层没有任何归属判据，后续清理只能
-            // 按路径猜。宿主会话跨应用共享，回滚只卸载目标、不终止宿主进程。
+            // 状态写失败必须按失败返回：没有账本的层没有任何归属判据，成功回包还会让
+            // 应用误判已重定向。先摘本轮 bind 层，再回滚 FUSE 目标（宿主会话跨应用
+            // 共享，回滚只卸载目标、不终止宿主进程），最后回包 -1 并结束本次挂载。
+            let detached = crate::fuse_session::detach_round_mount_targets(&mounted_targets);
             log::warn!(
-                "mount state save failed pid={} pkg={} rollback_mounts={}",
+                "mount state save failed pid={} pkg={} rollback_mounts={} rollback_targets={}",
                 request.pid,
                 request.package_name,
-                fuse_children.len()
+                fuse_children.len(),
+                detached
             );
             rollback_scoped_fuse_services(&fuse_children);
+            let _ = send_mount_result(sock, -1);
+            // SAFETY: sock 是本 fork 子进程持有的已连接控制端 fd，失败回包已发送完毕，
+            // 此处关闭后立即返回，无其它线程并发使用该 fd。
+            unsafe { close(sock) };
+            return false;
         }
         // 账本与状态文件职责不同：状态文件回答"要摘哪些路径"，账本回答"那些挂载归谁"。
         // 这条路径此前只写状态文件、不写账本，于是走 companion 的应用在恢复流程与 doctor 里
