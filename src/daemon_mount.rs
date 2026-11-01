@@ -1129,12 +1129,17 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             mounted_targets = planner.take_mounted_targets();
         }
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
-            // 状态写失败必须回滚本轮挂载：账本缺失的层没有归属判据，后续清理只能按
-            // 路径猜（宿主会话跨应用共享，回滚只卸载目标、不终止宿主进程）。
+            // 状态写失败必须回滚本轮全部挂载：state 与账本都没有记录时，这些层没有
+            // 任何归属判据，后续清理流程不知道它们存在，配置变更也无法把它们替换掉，
+            // 只能留到应用退出。先按挂载记录反序摘 bind 层，再回滚 FUSE 目标（宿主
+            // 会话跨应用共享，回滚只卸载目标、不终止宿主进程）。
+            let detached = crate::fuse_session::detach_round_mount_targets(&mounted_targets);
             log::warn!(
-                "daemon mount state save failed pid={} rollback_mounts={}",
+                "daemon mount state save failed pid={} pkg={} rollback_mounts={} rollback_targets={}",
                 request.pid,
-                fuse_children.len()
+                request.package_name,
+                fuse_children.len(),
+                detached
             );
             rollback_scoped_fuse_services(&fuse_children);
             let _ = send_mount_result(sock, -1);

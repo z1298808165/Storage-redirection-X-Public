@@ -63,6 +63,37 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
     }
 }
 
+/// 失败回滚：摘除本轮在应用命名空间里新建的挂载层，返回成功摘除的数量。
+///
+/// daemon 与 companion 两条挂载路径共用：状态写不进去时账本也不会登记，这些层
+/// 没有归属判据，后续清理与配置替换都无从得知它们存在，只能留到应用退出。
+/// 按挂载记录反序摘除（后挂的先摘），`MNT_DETACH` 保证仍有引用的层延迟消失、
+/// 不阻塞回滚；路径已不在（EINVAL/ENOENT）视为已摘除，不重复报错。
+pub(crate) fn detach_round_mount_targets(targets: &[String]) -> usize {
+    let mut detached = 0usize;
+    for target in targets.iter().rev() {
+        let Ok(c_target) = std::ffi::CString::new(target.as_str()) else {
+            continue;
+        };
+        // SAFETY: c_target 是以 NUL 结尾的合法路径且在本次调用期间保持存活；MNT_DETACH
+        // 只影响当前命名空间的挂载视图，不触碰其它命名空间。
+        if unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) } == 0 {
+            detached += 1;
+            log::info!("mount rollback detached target={}", target);
+            continue;
+        }
+        let errno = last_errno();
+        if errno != libc::EINVAL && errno != libc::ENOENT {
+            log::warn!(
+                "mount rollback detach failed target={} errno={} {}",
+                target,
+                errno,
+                errno_text(errno)
+            );
+        }
+    }
+    detached
+}
 /// 该挂载点当前可见层的挂载源（`/proc/self/mounts` 里该点的**最后一条**条目）。
 ///
 /// 栈顶才是应用当前看到的层：被残留只读屏障盖住的旧层不能算数（那会把「屏障裸奔」
