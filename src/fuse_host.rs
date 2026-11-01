@@ -1958,7 +1958,18 @@ pub(crate) fn media_real_anchor_is_valid() -> bool {
     else {
         return false;
     };
-    top.3 == "f2fs" && top.4
+    let direct_fs = is_direct_userdata_fs(&top.3);
+    direct_fs && top.4
+}
+
+/// 用户数据区直连内核文件系统的判据。
+///
+/// 锚点要的是 `/data/media` 背后的真实内核文件系统：主流真机是 f2fs，模拟器与部分
+/// 设备是 ext4。这里只排除「视图类」文件系统（FUSE 与 sdcardfs），不再写死 f2fs——
+/// 写死会让 ext4 设备与模拟器在锚点校验处直接拒绝启动宿主（CI Android 15 实测：
+/// `media anchor verification failed fs=ext4` → `startup refused`）。
+fn is_direct_userdata_fs(fs_type: &str) -> bool {
+    !fs_type.is_empty() && !fs_type.contains("fuse") && fs_type != "sdcardfs"
 }
 
 /// 建立并验证宿主数据面私有锚点。
@@ -2071,7 +2082,7 @@ pub(crate) fn establish_media_real_anchor() -> bool {
         log::error!("fuse host media anchor verification failed anchor={anchor} reason=missing");
         return false;
     };
-    if mounted.fs_type != "f2fs" {
+    if !is_direct_userdata_fs(&mounted.fs_type) {
         log::error!(
             "fuse host media anchor verification failed anchor={} fs={} root={} source={}",
             anchor,
