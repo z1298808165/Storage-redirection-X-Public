@@ -9,6 +9,7 @@ mod perf;
 mod policy;
 mod rules;
 pub(crate) mod scoped_mount;
+pub(crate) mod slow_probe;
 pub(super) use rules::normalize_rule_list;
 
 pub(crate) use policy::SharedPolicyTable;
@@ -28,7 +29,10 @@ use fuser::{
     Errno, FileAttr, FileType, FopenFlags, Generation, INodeNo, ReplyEmpty, ReplyEntry, Request,
 };
 use inode::{remove_inode_path, remove_unreferenced_inode};
-use metadata::{cstring_path, errno_from_code, errno_from_io, fix_path_metadata, last_errno};
+use metadata::{
+    apply_create_metadata, create_metadata, cstring_path, errno_from_code, errno_from_io,
+    last_errno,
+};
 use perf::FusePerfStats;
 use policy::{
     ANDROID_APP_UID_START, BackendPath, OperationKind, PolicyRegistry, RedirectPolicy,
@@ -201,6 +205,7 @@ pub(super) struct DirectorySourceSignature {
 
 impl DirectorySourceSignature {
     fn capture(path: &Path) -> Self {
+        let _slow = slow_probe::SlowFsGuard::start("readdir_source_capture", path);
         let metadata = std::fs::metadata(path).ok();
         Self {
             path: path.to_path_buf(),
@@ -210,6 +215,7 @@ impl DirectorySourceSignature {
     }
 
     fn state(&self) -> DirectorySourceState {
+        let _slow = slow_probe::SlowFsGuard::start("readdir_source_state", &self.path);
         let Some(metadata) = std::fs::metadata(&self.path).ok() else {
             return if self.modified.is_none() && self.is_dir.is_none() {
                 DirectorySourceState::Current
@@ -683,6 +689,7 @@ impl FuseRedirectFs {
         ino: INodeNo,
         backend: &BackendPath,
     ) -> Result<FileAttr, Errno> {
+        let _slow = slow_probe::SlowFsGuard::start("attr_for_backend", &backend.path);
         let metadata = std::fs::symlink_metadata(&backend.path).map_err(errno_from_io)?;
         let mut attr = file_attr_from_metadata(ino, metadata);
         if backend.is_shared_public_backend {
@@ -770,20 +777,23 @@ impl FuseRedirectFs {
         if existed || fs::create_directory(&parent, owner_uid) {
             // 覆盖挂载目标（如 HyperOS apk-tmp 下载目录）由系统按下载方身份自管
             // 属主与权限，既有层级不得改写；仅本会话新建的层级按调用方身份修复。
-            // 注意：已存在的父目录必须整体跳过——fix_path_metadata 会把 group 恒写
-            // media_rw（1023），对 Android/data 私有树的原生 ext_data_rw（1078）
-            // 语义是一次性破坏（真机 2026-10-27 实证：微信每次启动写入都会把既有
-            // MicroMsg 目录 chown 成 uid=应用 gid=1023，uid 修回后仅剩 gid=1023 漂移）。
+            // 已存在的父目录必须整体跳过：既有目录由系统原生语义和独立迁移流程负责，
+            // 不在 FUSE 新建入口重复改写其 owner/group/mode。此前这里把 Android/data
+            // 私有树的 ext_data_rw（1078）覆盖成 media_rw（1023），造成 MicroMsg
+            // 每次启动后 gid 漂移。
             // 私有树既有层级的属主归位由 owner_migration 与 runtime 代写 hook 负责，
             // 这里只修「本会话刚创建」的层级。
             if !existed {
-                fix_path_metadata(
-                    parent_path,
-                    policy.uid,
+                let metadata = create_metadata(
+                    policy.uid as u32,
+                    MEDIA_RW_GID,
+                    policy.uid as u32,
                     MAPPED_DIR_MODE,
                     backend.is_shared_public_backend,
+                    backend.is_app_private_backend,
                     true,
                 );
+                apply_create_metadata(parent_path, metadata)?;
             }
             Ok(())
         } else {
@@ -907,6 +917,7 @@ impl FuseRedirectFs {
     }
 
     fn open_backend_file(path: &Path, flags: i32, mode: u32) -> Result<File, Errno> {
+        let _slow = slow_probe::SlowFsGuard::start("open_backend_file", path);
         // FUSE writeback 回写模式下的部分页写，内核要先读原页（read-modify-write），
         // 该读仍由本 daemon 应答。backend 若照搬应用的 O_WRONLY 打开，pread 会返回
         // EBADF，内核 write_begin 失败后在应用侧呈现为诡异的 pwrite 短写（夸克下载

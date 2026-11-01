@@ -11,9 +11,9 @@ use super::helpers::{
 };
 use super::inode::{add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs};
 use super::metadata::{
-    adjust_metadata_mode, chmod_path, chown_path, cstring_path, errno_from_code, errno_from_io,
-    fix_existing_path_metadata, fix_path_metadata, last_errno, rename_noreplace, truncate_path,
-    utimens_path,
+    adjust_metadata_mode, apply_create_metadata, chmod_path, chown_path, create_metadata,
+    cstring_path, errno_from_code, errno_from_io, fix_existing_path_metadata, last_errno,
+    rename_noreplace, truncate_path, utimens_path,
 };
 use super::perf::DirectoryCacheMissReason;
 use super::policy::OperationKind;
@@ -75,7 +75,8 @@ fn heal_poisoned_sqlite_shm_backend(
     package_name: &str,
 ) -> bool {
     // f2fs 真实路径直读：/data/media/<user>/<rel> 与 rel 的目录结构一一对应。
-    let real_path = std::path::PathBuf::from(format!("/data/media/{user_id}/{rel}"));
+    let real_path =
+        std::path::PathBuf::from(paths::data_media_user_root_for_current_ns(user_id)).join(rel);
     let Ok(metadata) = std::fs::metadata(&real_path) else {
         return false;
     };
@@ -371,6 +372,7 @@ impl Filesystem for FuseRedirectFs {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
         let policy = self.policy_for_read_request(req, Some(ino), None);
         match self.backend_for_ino(&policy, ino).and_then(|backend| {
+            let _slow = super::slow_probe::SlowFsGuard::start("readlink_backend", &backend.path);
             std::fs::read_link(&backend.path)
                 .map(|path| path.as_os_str().as_bytes().to_vec())
                 .map_err(errno_from_io)
@@ -722,8 +724,9 @@ impl Filesystem for FuseRedirectFs {
         // `-shm` 禁止 passthrough：setattr 的 ftruncate 钳制只覆盖 FUSE SETATTR 通道，
         // passthrough backing fd 上的 ftruncate 绕过宿主直落 f2fs，应用 WAL 能力探针
         // 会借此反复制造毒化 inode（自愈只能救到下一次打开）。
-        let shm_userspace_only =
-            policy.should_exclude_media_sqlite_shm_passthrough_rel(&backend.rel);
+        let shm_userspace_only = policy
+            .should_exclude_media_sqlite_shm_passthrough_rel(&backend.rel)
+            || policy.should_exclude_passthrough_mmap_log_rel(&backend.rel);
         if self.passthrough_enabled.load(Ordering::Relaxed) && !shm_userspace_only {
             match reply.open_backing(&file) {
                 Ok(backing) => {
@@ -1107,13 +1110,19 @@ impl Filesystem for FuseRedirectFs {
             reply.error(errno_from_code(last_errno()));
             return;
         }
-        fix_path_metadata(
-            &backend.path,
-            policy.uid,
+        let metadata = create_metadata(
+            req.uid(),
+            req.gid(),
+            policy.uid as u32,
             0o777,
             backend.is_shared_public_backend,
+            backend.is_app_private_backend,
             false,
         );
+        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+            reply.error(errno);
+            return;
+        }
         self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1364,13 +1373,19 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        fix_path_metadata(
-            &backend.path,
-            policy.uid,
+        let metadata = create_metadata(
+            req.uid(),
+            req.gid(),
+            policy.uid as u32,
             create_mode,
             backend.is_shared_public_backend,
+            backend.is_app_private_backend,
             false,
         );
+        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+            reply.error(errno);
+            return;
+        }
         self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1409,8 +1424,9 @@ impl Filesystem for FuseRedirectFs {
         // 与 open 同理：新建的 `-shm` 也不得给 passthrough backing，否则应用首个
         // WAL 能力探针（自愈重建后必然紧随一次建连）就会把全新 inode 再次截成
         // 毒化尺寸，自愈循环永不收敛。
-        let shm_userspace_only =
-            policy.should_exclude_media_sqlite_shm_passthrough_rel(&backend.rel);
+        let shm_userspace_only = policy
+            .should_exclude_media_sqlite_shm_passthrough_rel(&backend.rel)
+            || policy.should_exclude_passthrough_mmap_log_rel(&backend.rel);
         if self.passthrough_enabled.load(Ordering::Relaxed) && !shm_userspace_only {
             match reply.open_backing(&file) {
                 Ok(backing) => {
@@ -1499,13 +1515,19 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         drop(file);
-        fix_path_metadata(
-            &backend.path,
-            policy.uid,
+        let metadata = create_metadata(
+            req.uid(),
+            req.gid(),
+            policy.uid as u32,
             create_mode,
             backend.is_shared_public_backend,
+            backend.is_app_private_backend,
             false,
         );
+        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+            reply.error(errno);
+            return;
+        }
         self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1554,13 +1576,21 @@ impl Filesystem for FuseRedirectFs {
         };
         let mode = mode & !umask;
         match std::fs::create_dir(&backend.path) {
-            Ok(()) => fix_path_metadata(
-                &backend.path,
-                policy.uid,
-                mode,
-                backend.is_shared_public_backend,
-                true,
-            ),
+            Ok(()) => {
+                let metadata = create_metadata(
+                    req.uid(),
+                    req.gid(),
+                    policy.uid as u32,
+                    mode,
+                    backend.is_shared_public_backend,
+                    backend.is_app_private_backend,
+                    true,
+                );
+                if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+                    reply.error(errno);
+                    return;
+                }
+            }
             Err(error) => {
                 reply.error(errno_from_io(error));
                 return;
@@ -1772,6 +1802,7 @@ impl Filesystem for FuseRedirectFs {
             let mode = adjust_metadata_mode(
                 mode,
                 backend.is_shared_public_backend,
+                backend.is_app_private_backend,
                 backend.path.is_dir(),
             );
             if let Err(errno) = chmod_path(&backend.path, mode) {
@@ -1990,6 +2021,7 @@ fn append_backend_dir_entries(
 ) {
     use crate::platform::paths;
     append_directory_source(backend, sources);
+    let _slow = super::slow_probe::SlowFsGuard::start("readdir_backend", backend);
     let Ok(read_dir) = std::fs::read_dir(backend) else {
         return;
     };

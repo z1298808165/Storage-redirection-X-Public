@@ -68,6 +68,7 @@ pub(super) struct BackendPath {
     pub(super) path: PathBuf,
     pub(super) is_read_only: bool,
     pub(super) is_shared_public_backend: bool,
+    pub(super) is_app_private_backend: bool,
 }
 
 /// 原生 scoped storage 下应用 uid 允许直接写入的公共媒体集合（存储根一级目录）。
@@ -694,7 +695,10 @@ impl RedirectPolicy {
         let sandbox_backend_root = if config.is_mapping_mode_only && redirect_view_rel.is_empty() {
             Some(PathBuf::from(format!(
                 "{}/Android/data/{}/sdcard",
-                paths::data_media_user_root_for_user(user_id),
+                // 宿主面 backend 根必须走锚点：原路径可能被传播副本覆盖（见
+                // data_media_user_root_for_current_ns 文档），沙盒直落解析同样
+                // 会命中自家连接的 dentry 重验证。
+                paths::data_media_user_root_for_current_ns(user_id),
                 config.package_name
             )))
         } else {
@@ -747,7 +751,7 @@ impl RedirectPolicy {
             storage_root,
             mount_rel,
             real_root,
-            private_real_root: PathBuf::from(paths::data_media_user_root_for_user(user_id)),
+            private_real_root: PathBuf::from(paths::data_media_user_root_for_current_ns(user_id)),
             media_sqlite_real_root: media_sqlite_view_root_for_user(user_id),
             redirect_root: PathBuf::from(redirect_root_string),
             redirect_view_rel,
@@ -931,11 +935,14 @@ impl RedirectPolicy {
         }
 
         let is_shared_public_backend = self.is_shared_public_backend_path(&backend);
+        let is_app_private_backend = matches!(decision.kind, BackendKind::Real)
+            && self.is_own_private_storage_path(&resolved_storage_path);
         Some(BackendPath {
             rel,
             path: backend,
             is_read_only: decision.is_read_only,
             is_shared_public_backend,
+            is_app_private_backend,
         })
     }
 
@@ -1178,7 +1185,9 @@ impl RedirectPolicy {
         // `/data/media/...` 子树（如应用商店 `.siexternal`），应用命名空间里的
         // scoped 会话按普通路径解析会落到被遮蔽的真实目录，与宿主/MP 读侧分裂。
         // 命中覆盖挂载时改写到物理源路径，未命中保持原路径（CI 断言不受影响）。
-        backend_overlay::overlay_backend_path(&joined).unwrap_or(joined)
+        // 宿主进程内路径可能已是 f2fs 直连锚点形态，查询前转回 /data/media 形式。
+        let overlay_query = paths::media_real_form_of(&joined.to_string_lossy());
+        backend_overlay::overlay_backend_path(Path::new(&overlay_query)).unwrap_or(joined)
     }
 
     // 按相对路径选择真实后端根：应用自有私有目录走 private_real_root 直连 f2fs，
@@ -1224,6 +1233,23 @@ impl RedirectPolicy {
     /// 不含尺寸）。
     pub(super) fn should_exclude_media_sqlite_shm_passthrough_rel(&self, rel: &str) -> bool {
         self.should_heal_media_sqlite_shm_rel(rel)
+    }
+
+    /// 是否应把 mmap 密集日志库的文件排除出 passthrough（强制用户态通道）。
+    ///
+    /// 实测（OnePlus/ColorOS17，内核 6.12-android16）：微博 `libwlog` 的
+    /// `statistic_wlog` 树以固定 128KiB 窗口 mmap，随后靠 ftruncate 扩展文件。
+    /// ftruncate 经 passthrough backing fd 直落 f2fs 时，FUSE 内核 inode 的
+    /// size 缓存不会同步失效，应用按 FUSE 视角 mmap 的页落在缓存 size 之外，
+    /// 稳定复现 SIGBUS BUS_ADRERR（`wlog_store` 线程、同一 so 偏移）。
+    /// 强制用户态通道后，ftruncate 变为 FUSE SETATTR，宿主同步 backend 并由
+    /// 内核更新 size，mmap 与文件长度保持一致。与 `-shm` 隔离同一机制家族：
+    /// passthrough fd 上的写路径会绕过宿主可见性。
+    pub(super) fn should_exclude_passthrough_mmap_log_rel(&self, rel: &str) -> bool {
+        rel.contains("/statistic_wlog/")
+            || rel.ends_with(".wlog")
+            || rel.ends_with(".wmmap")
+            || rel.ends_with("/mmap_cache")
     }
 
     /// 是否应在共享 FUSE 中检查并自愈 SQLite `-shm` 边车路径。
@@ -1440,6 +1466,16 @@ impl RedirectPolicy {
             return;
         }
         let backend_path = backend.path.to_string_lossy();
+        // 短窗去重：QQ 心跳类高频 open（如 `Android/.android_lq`）会在窗口内
+        // 连发同 key 的真实请求记录，监视日志只保留首条，避免刷屏。
+        if crate::platform::paths::should_suppress_duplicate_monitor_record(
+            "request",
+            monitor_event_kind_for_operation(operation_name),
+            display_path.as_str(),
+            caller_pkg,
+        ) {
+            return;
+        }
         let mut line = format!(
             "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|event_role=request|op={}|source={}|backend={}",
             build_monitor_timestamp(),
@@ -1544,11 +1580,20 @@ impl RedirectPolicy {
 
     pub(super) fn is_shared_public_backend_path(&self, path: &Path) -> bool {
         let path = path.to_string_lossy();
+        // 后端根有三族形态，必须全部识别，否则该路径上的新建条目会走透传分支、
+        // 以请求者身份（宿主会话里是 root）落盘，后续应用访问被 DAC 拒绝：
+        // - `/data/media/<user>`：daemon/scoped 会话的直连根；
+        // - `tmp/real_storage/<user>`：存储根结构锚点；
+        // - `real_media_anchor/<user>`：宿主会话的 f2fs 锚点（`real_root` 本体）。
+        // 真机 2026-11-01 duchamp 实证：宿主会话经锚点创建公共文件后 uid=0 gid=1023
+        // mode=600，应用 stat 得 EACCES、createNewFile 报 EEXIST（场景 5→6 连跑）。
+        let real_root = self.real_root.to_string_lossy();
         let relative =
             paths::relative_child_path(&path, &paths::data_media_user_root_for_user(self.user_id))
                 .or_else(|| {
                     paths::relative_child_path(&path, &real_storage_anchor_for_user(self.user_id))
-                });
+                })
+                .or_else(|| paths::relative_child_path(&path, &real_root));
         let Some(relative) = relative else {
             return false;
         };
@@ -1625,7 +1670,14 @@ pub(super) fn real_backend_root_for_config(config: &FuseRedirectConfig, user_id:
         }
         log::warn!("fuse real root override ignored: {}", root);
     }
-    PathBuf::from(paths::data_media_user_root_for_user(user_id))
+    // 宿主进程内必须走锚点而不是 /data/media/<user> 直连：挂载风暴期间本会话的
+    // FUSE 挂载会被传播回写到 /data/media/<user>（unpropagate 守卫是反应式的，
+    // 摘除前存在时间窗），直连 stat 会走进覆盖副本并在 fuse_dentry_revalidate
+    // 发出指向本会话自己连接的请求——16 个 worker 同时处于该状态即全队列死锁
+    // （2026-10-29 12:20 真机冻结现场取证定案）。锚点是 /data/media/<user> 的
+    // 私有 bind，任何传播副本都覆盖不到；daemon/scoped 进程无锚点时返回原路径，
+    // 那些命名空间里不存在该副本，行为不变。
+    PathBuf::from(paths::data_media_user_root_for_current_ns(user_id))
 }
 
 pub(super) fn real_storage_anchor_for_user(user_id: i32) -> String {
