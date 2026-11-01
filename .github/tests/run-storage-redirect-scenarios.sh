@@ -4753,6 +4753,7 @@ capture_shared_fuse_snapshot_once before
 # 运行前基线按需抓（SRT_STORAGE_SNAPSHOT_PREFLIGHT=1，用于和失败现场做前后对照）。
 # 全失败连发时默认不重复抓：同一份坏态抓 40 遍没有信息增量，只会拖长日志。
 SRT_STORAGE_SNAPSHOT_EVERY_FAILURE="${SRT_STORAGE_SNAPSHOT_EVERY_FAILURE:-0}"
+export SRT_STORAGE_SNAPSHOT_EVERY_FAILURE
 if [ "${SRT_STORAGE_SNAPSHOT_PREFLIGHT:-0}" = "1" ]; then
   capture_storage_bad_state_snapshot "preflight"
 fi

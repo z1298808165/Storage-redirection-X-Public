@@ -1800,13 +1800,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
         source = read("src/java_hook/hot_reload.rs")
         java_hook = read("src/java_hook.rs")
         specialize_post = read("src/lifecycle/specialize_post.rs")
+        module_paths = read("src/platform/module_paths.rs")
+        log_daemon = read("src/log_daemon.rs")
         srxctl = read("assets/zygisk_module/bin/srxctl")
         webui = read("assets/zygisk_module/webroot/js/api.js")
         self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE", source)
-        self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE", source)
-        self.assertIn("stage=hot_reload_ok", source)
+        # 回执文件由 daemon 代写：MP 域对模块目录无写权限，MP 侧只发 HotReload 标签。
+        self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE", module_paths)
+        self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE", log_daemon)
+        self.assertIn("stage=hot_reload_ok", log_daemon)
         self.assertIn("SIGUSR2", source)
-        self.assertIn("SIGNAL_PENDING", source)
+        # 唤醒走自管道：信号处理器只 write 一个字节，监视线程 poll 等待。
+        self.assertIn("SIGNAL_PIPE_WRITE_FD", source)
+        self.assertIn("drain_signal_pipe", source)
         self.assertIn("hot_reload_completed_count", srxctl)
         self.assertIn('boot_id=$boot_id"', srxctl)
         self.assertIn("stage=hot_reload_ok", srxctl)
@@ -2474,7 +2480,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         统一可检索标记而不是自由文本；自行预置夹具的场景必须显式豁免，否则断言会误报。
         """
         helper = section(self.bash, "assert_fixture_roots_empty() {", "\nclean_results() {")
-        self.assertIn("-type f || exit 1", helper)
+        # find 的失败必须传播（`|| exit 1`），并且输出字段供残留对照；不得用 -maxdepth 收窄。
+        self.assertIn("-type f -printf", helper)
+        self.assertIn("|| exit 1", helper)
         self.assertNotIn("-maxdepth 2", helper)
         self.assertIn("fixture_scan_failed", helper)
         self.assertIn("fixture_residue label=", helper)
@@ -2488,7 +2496,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         ps = section(self.powershell, "function Assert-FixtureRootsEmpty", "function Clear-Targets")
         self.assertIn("fixture_residue label=", ps)
-        self.assertIn("-type f || exit 1", ps)
+        # 与 SH 同口径：带输出字段的 find，且失败必须传播。
+        self.assertIn("-type f -printf", ps)
+        self.assertIn("|| exit 1", ps)
         self.assertNotIn("-maxdepth 2", ps)
         self.assertIn("fixture_scan_failed", ps)
         ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $scenarioOk = switch")
