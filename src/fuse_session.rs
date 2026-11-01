@@ -5,7 +5,6 @@
 //! 各写一份已发生过行为分叉，因此这里收敛为单一实现，两侧只保留各自的请求建模
 //! 与宿主会话发现方式（daemon 进程内持有、companion 经快照发现）。
 
-use crate::fuse_redirect::MountRequestFields;
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::fs;
 use crate::platform::module_paths;
@@ -61,6 +60,36 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
             state.child,
             (state.child_start_time_ticks != 0).then_some(state.child_start_time_ticks),
         );
+    }
+}
+
+/// 该挂载点的当前可见层是否已由本模块的 FUSE 层服务（宿主或旧版本遗留的 scoped 层）。
+///
+/// 判据是 `/proc/self/mounts` 里该挂载点**最后一条**条目的挂载源前缀：栈顶才是应用
+/// 当前看到的层，被残留只读屏障盖住的旧层不能算数（那会把「屏障裸奔」误判成会话存活）。
+/// 调用方在接入前用它避免在已挂载的路径上再叠一层。
+pub(crate) fn storage_view_already_served(mount_root: &str) -> bool {
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    let root = mount_root.trim_end_matches('/');
+    let last = mounts.lines().rev().find(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next().unwrap_or("");
+        fields
+            .next()
+            .unwrap_or("")
+            .replace("\\040", " ")
+            .trim_end_matches('/')
+            == root
+    });
+    match last {
+        Some(line) => line
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .starts_with("srx_fuse"),
+        None => false,
     }
 }
 
@@ -226,64 +255,6 @@ impl HostSessionSkip {
             Self::AttachFailed => "host_attach_failed",
         }
     }
-}
-
-/// 单根接入的落地结果。
-pub(crate) enum HostSessionAttach {
-    /// 本次新建了一条宿主挂载。
-    Mounted(FuseMountState),
-    /// 该根已经被本模块的宿主层服务（例如 daemon 的 reconcile 已先挂好）：本轮不需要
-    /// 再动作，但也不能当成失败去重新 bind——那会在已有视图之上再叠一层。
-    AlreadyServed,
-}
-
-/// 把这些根接入**共享宿主会话**，返回本次接入成功的挂载。
-///
-/// 这里只做接入，不再 fork per-app scoped 会话。历史实现会在接入失败时 fork 一个
-/// 常驻子进程进应用命名空间，而那个子进程本身就是应用命名空间的自持引用：应用退出后
-/// 命名空间仍在、它服务的 FUSE 挂载不消失、连接不断开，于是它永远等不到自己的退出
-/// 条件（issue #4 真机上累积到 1198 个常驻会话，把 pid 号与线程数顶满，最终触发
-/// framework 重启）。把生命周期绑在应用上的进程形态无法靠清理补救，只能不要它：
-/// 宿主会话不跟随任何应用生命周期，接入失败就老实降级到 namespace bind。
-///
-/// 返回 `Err(reason)` 时调用方必须按 namespace bind 继续（规划阶段已不再为这些根
-/// 预留 FUSE 覆盖，因此 bind 是完整的、可用的视图）。
-pub(crate) fn attach_shared_host_sessions(
-    request: &(impl MountRequestFields + ?Sized),
-    roots: &[String],
-    attach_one: impl Fn(&str) -> Result<HostSessionAttach, HostSessionSkip>,
-) -> Result<Vec<FuseMountState>, HostSessionSkip> {
-    if roots.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut states = Vec::with_capacity(roots.len());
-    let mut attached_any = false;
-    let mut last_skip = HostSessionSkip::NoSharedHost;
-    for root in roots {
-        match attach_one(root) {
-            Ok(HostSessionAttach::Mounted(state)) => {
-                attached_any = true;
-                states.push(state);
-            }
-            Ok(HostSessionAttach::AlreadyServed) => {
-                attached_any = true;
-            }
-            Err(reason) => {
-                last_skip = reason;
-                log::warn!(
-                    "fuse host session attach skipped pkg={} pid={} root={} reason={}",
-                    request.package_name(),
-                    request.pid(),
-                    root,
-                    reason.as_str()
-                );
-            }
-        }
-    }
-    if !attached_any {
-        return Err(last_skip);
-    }
-    Ok(states)
 }
 
 /// 把 waitpid 的状态位解码为可读文本（exit=/stop sig=/sig= core=）。

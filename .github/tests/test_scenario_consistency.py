@@ -258,7 +258,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 source.index("apply_sdcard_redirect(", source.index("preattach_shared_host(")),
                 f"{label} 必须先接入共享宿主再执行 namespace 重定向",
             )
-            self.assertIn("preattached_host.is_some()", source)
+            # 接入点唯一且返回 Result：Ok(Some(挂载)) 表示本次新建、Ok(None) 表示视图根
+            # 已由既有层服务、Err(原因) 表示本轮按 bind 继续。
+            self.assertIn("match preattached_host {", source)
+            self.assertIn("Ok(Some(state)) => (vec![state], ScopedMountAttempt::Ready", source)
+            self.assertIn("Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed", source)
             monitor_only = source.index("else if request.is_monitor_only")
             redirect = source.index("apply_sdcard_redirect(", source.index("preattach_shared_host("))
             self.assertLess(monitor_only, redirect, label)
@@ -866,9 +870,12 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 3) 闸门本身仍然存在——打开接入必须是一次有意的改动（默认由环境变量关闭）。
         for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
             source = read(path)
-            body = section(
-                source, "fn attach_host_session_for_root(", "fn try_bind_to_fuse_host("
+            end_marker = (
+                "fn preattach_skip_reason("
+                if path.endswith("daemon_mount.rs")
+                else "fn shared_host_preattach_candidate("
             )
+            body = section(source, "fn preattach_shared_host(", end_marker)
             compact = "".join(body.split())
             if path.endswith("daemon_mount.rs"):
                 register_at = body.index("crate::fuse_host::register_app_policy(")
@@ -1018,7 +1025,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("request.policy_fingerprint", pre_register)
         self.assertIn("view.policy_fingerprints.get(&(request.uid as u32))", pre_register)
         collapse = section(
-            daemon_src, "fn scoped_fuse_mount_roots(", "fn attach_host_session_for_root("
+            daemon_src, "fn scoped_fuse_mount_roots(", "fn try_bind_to_fuse_host("
         )
         self.assertIn("crate::fuse_host::wait_for_host_session()", collapse)
         self.assertIn("crate::config::StorageBackendMode::Auto", collapse)

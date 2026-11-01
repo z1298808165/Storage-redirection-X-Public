@@ -148,16 +148,26 @@ class MountMetadataScopeTest(unittest.TestCase):
         session = read("src/fuse_session.rs")
         self.assertNotIn("fn start_scoped_fuse_services(", session)
         self.assertNotIn("libc::fork()", session)
-        body = function_body(session, "fn attach_shared_host_sessions(")
-        # 逐根尝试、失败原因随 Err 上报；一个都没接上就交回调用方走 namespace bind。
-        self.assertIn("last_skip", body)
-        self.assertIn("attached_any", body)
-        self.assertIn("HostSessionSkip", body)
-        self.assertIn("HostSessionAttach", body)
+        # 不可用原因集中定义在共享模块，供两侧与日志共用同一套取值。
+        for reason in (
+            "NoSharedHost",
+            "AttachGateClosed",
+            "PolicyRegistrationFailed",
+            "NoPolicyRules",
+            "AttachFailed",
+        ):
+            self.assertIn(reason, session)
         for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
             source = read(path)
-            wrapper = function_body(source, "fn attach_host_sessions(")
-            self.assertIn("crate::fuse_session::attach_shared_host_sessions(", wrapper, path)
+            # 只允许一个接入点：接入在挂载前完成，规划阶段一律 bind。事后再接会在已 bind
+            # 的目标上叠一层 FUSE，清理时按路径只能摘栈顶，底层 bind 残留成永久叠挂。
+            self.assertEqual(
+                source.count("fn preattach_shared_host("),
+                1,
+                f"{path} 只能有一个宿主接入点",
+            )
+            self.assertNotIn("attach_shared_host_sessions", source, path)
+            self.assertIn("Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed", source, path)
             # 两条挂载路径都不得再 fork per-app 会话。
             self.assertNotIn("srx_fuse\\0", source, path)
 
