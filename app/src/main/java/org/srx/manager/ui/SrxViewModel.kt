@@ -29,6 +29,7 @@ import org.srx.manager.data.BackupArchiveCodec
 import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.DashboardState
 import org.srx.manager.data.DiagnosticArchiveProgress
+import org.srx.manager.data.DiagnosticExportResult
 import org.srx.manager.data.FileMonitorFilters
 import org.srx.manager.data.GlobalConfig
 import org.srx.manager.data.InstalledApp
@@ -916,7 +917,7 @@ class SrxViewModel(
     viewModelScope.launch {
       updateBusy(BusyStateChange.Started("正在启动日志导出", 0.01f))
       runCatching { repository.exportDiagnosticArchive(uri, ::updateDiagnosticArchiveProgress) }
-          .onSuccess { ok -> showMessage(if (ok) "日志包已保存" else "日志导出失败") }
+          .onSuccess { result -> showMessage(describeDiagnosticExport(result)) }
           .onFailure { showMessage(it.message ?: "日志导出失败") }
       updateBusy(BusyStateChange.Finished)
     }
@@ -932,11 +933,20 @@ class SrxViewModel(
                 ::updateDiagnosticArchiveProgress,
             )
           }
-          .onSuccess { ok -> showMessage(if (ok) "日志包已保存" else "日志导出失败") }
+          .onSuccess { result -> showMessage(describeDiagnosticExport(result)) }
           .onFailure { showMessage(it.message ?: "日志导出失败") }
       updateBusy(BusyStateChange.Finished)
     }
   }
+
+  /** 目标存储不可写时降级到模块目录的导出结果，需提示用户手动拷贝。 */
+  private fun describeDiagnosticExport(result: DiagnosticExportResult): String =
+      when {
+        !result.saved -> "日志导出失败"
+        result.fallbackPath != null ->
+            "目标存储不可写，日志包已保存到模块目录（请用 root 文件管理器或 adb 手动拷贝）：${result.fallbackPath}"
+        else -> "日志包已保存"
+      }
 
   private fun updateDiagnosticArchiveProgress(progress: DiagnosticArchiveProgress) {
     updateBusy(BusyStateChange.Progress(progress))

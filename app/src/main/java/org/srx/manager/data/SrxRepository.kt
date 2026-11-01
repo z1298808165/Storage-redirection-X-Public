@@ -332,13 +332,14 @@ class SrxRepository(
   suspend fun exportDiagnosticArchive(
       uri: Uri,
       onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): Boolean = diagnosticExporter.exportToUri(uri, onProgress)
+  ): DiagnosticExportResult = diagnosticExporter.exportToUri(uri, onProgress)
 
   suspend fun exportDiagnosticArchiveToDirectory(
       directoryUri: Uri,
       fileName: String,
       onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): Boolean = diagnosticExporter.exportToDirectory(directoryUri, fileName, onProgress)
+  ): DiagnosticExportResult =
+      diagnosticExporter.exportToDirectory(directoryUri, fileName, onProgress)
 
   suspend fun createDiagnosticArchive(
       onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null

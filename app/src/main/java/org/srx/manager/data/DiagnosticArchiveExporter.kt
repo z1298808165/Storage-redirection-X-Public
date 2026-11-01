@@ -12,11 +12,17 @@ import org.srx.manager.root.RootShell
 import org.srx.manager.root.isSafePackageName
 import org.srx.manager.root.shellQuote
 
+/** 诊断日志包导出结果。fallbackPath 非空表示公共存储不可写（存储挂载异常的典型 现场），日志包已降级保存到模块目录，需用户用 root 文件管理器或 adb 手动拷贝。 */
+data class DiagnosticExportResult(
+    val saved: Boolean,
+    val fallbackPath: String? = null,
+)
+
 /**
  * 诊断日志包导出边界。
  *
- * 这里集中处理「root 侧归档文件 → 用户目标位置」的写通道：content URI、SAF 文档树， 以及主存储树不可用时的 /data/media
- * 回退，并在导出成功后补记一条文件监控记录。 SrxRepository 只保留业务入口，不再承担写出细节。
+ * 这里集中处理「root 侧归档文件 → 用户目标位置」的写通道：content URI、SAF 文档树， 主存储树不可用时的 /data/media
+ * 回退，以及以上通道全部不可用时的模块目录降级， 并在导出成功后补记一条文件监控记录。 SrxRepository 只保留业务入口，不再承担写出细节。
  */
 internal class DiagnosticArchiveExporter(
     private val context: Context,
@@ -31,19 +37,31 @@ internal class DiagnosticArchiveExporter(
     /** tar.gz 需要保留双扩展名，使用通用 MIME 兼容不识别 application/gzip 的文件客户端。 */
     const val DiagnosticArchiveMimeType = "application/octet-stream"
     const val DefaultArchiveFileName = "storage-redirect-x-logs.tar.gz"
+
+    /** 模块目录降级落盘的默认命名，与导出文件名风格一致并带时间戳。 */
+    fun defaultArchiveFileName(): String =
+        "storage-redirect-x-logs-" +
+            java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) +
+            ".tar.gz"
   }
 
   suspend fun exportToUri(
       uri: Uri,
       onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): Boolean =
+  ): DiagnosticExportResult =
       withContext(Dispatchers.IO) {
-        val archivePath = fileStore.createDiagnosticArchive(onProgress) ?: return@withContext false
+        val archivePath =
+            fileStore.createDiagnosticArchive(onProgress)
+                ?: return@withContext DiagnosticExportResult(false)
         try {
           onProgress?.invoke(DiagnosticArchiveProgress(99, "copy", "正在写入目标文件"))
-          val ok = copyRootFileToUri(archivePath, uri)
-          if (ok) onProgress?.invoke(DiagnosticArchiveProgress(100, "done", "日志包已保存"))
-          ok
+          if (copyRootFileToUri(archivePath, uri)) {
+            onProgress?.invoke(DiagnosticArchiveProgress(100, "done", "日志包已保存"))
+            DiagnosticExportResult(true)
+          } else {
+            exportToModuleDirectory(archivePath, defaultArchiveFileName(), onProgress)
+          }
         } finally {
           fileStore.removeFile(archivePath)
         }
@@ -53,7 +71,7 @@ internal class DiagnosticArchiveExporter(
       directoryUri: Uri,
       fileName: String,
       onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): Boolean =
+  ): DiagnosticExportResult =
       withContext(Dispatchers.IO) {
         val safeName =
             fileName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").ifBlank {
@@ -61,7 +79,9 @@ internal class DiagnosticArchiveExporter(
             }
         val monitorTargetPath =
             resolvePrimaryTreePublicStorageDirectory(directoryUri)?.let { joinPath(it, safeName) }
-        val archivePath = fileStore.createDiagnosticArchive(onProgress) ?: return@withContext false
+        val archivePath =
+            fileStore.createDiagnosticArchive(onProgress)
+                ?: return@withContext DiagnosticExportResult(false)
         try {
           onProgress?.invoke(DiagnosticArchiveProgress(99, "copy", "正在写入目标文件"))
           val ok =
@@ -70,12 +90,36 @@ internal class DiagnosticArchiveExporter(
           if (ok) {
             onProgress?.invoke(DiagnosticArchiveProgress(100, "done", "日志包已保存"))
             recordAppExportMonitor(monitorTargetPath, "diagnostic")
+            DiagnosticExportResult(true)
+          } else {
+            exportToModuleDirectory(archivePath, safeName, onProgress)
           }
-          ok
         } finally {
           fileStore.removeFile(archivePath)
         }
       }
+
+  /** 公共存储全通道失败后的降级：日志包留在模块目录（root 直连路径，不经 FUSE 视图）。 */
+  private suspend fun exportToModuleDirectory(
+      archivePath: String,
+      fileName: String,
+      onProgress: ((DiagnosticArchiveProgress) -> Unit)?,
+  ): DiagnosticExportResult {
+    val safeName =
+        fileName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").ifBlank {
+          DefaultArchiveFileName
+        }
+    val targetPath = "$ModuleDir/$safeName"
+    val command =
+        "cp ${shellQuote(archivePath)} ${shellQuote(targetPath)} && chmod 0644 ${shellQuote(targetPath)} && [ -s ${shellQuote(targetPath)} ]"
+    val ok = shell.exec(command).isSuccess
+    if (ok) {
+      onProgress?.invoke(
+          DiagnosticArchiveProgress(100, "done", "目标存储不可写，日志包已保存到模块目录"),
+      )
+    }
+    return DiagnosticExportResult(ok, if (ok) targetPath else null)
+  }
 
   private fun exportViaDocumentTree(
       archivePath: String,
