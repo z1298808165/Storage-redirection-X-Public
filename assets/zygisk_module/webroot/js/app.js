@@ -5737,7 +5737,16 @@
       }
       loading.close();
       loading = null;
-      Theme.showToast(path ? "日志包已导出：" + path : "日志导出失败", path ? "success" : "error");
+      if (!path) {
+        Theme.showToast("日志导出失败", "error");
+      } else if (path.indexOf("/data/adb/modules/") === 0) {
+        Theme.showToast(
+          "Download 不可写，日志包已保存到模块目录（请用 root 文件管理器或 adb 手动拷贝）：" + path,
+          "success",
+        );
+      } else {
+        Theme.showToast("日志包已导出：" + path, "success");
+      }
     } catch (error) {
       loading?.close();
       if (error?.name === "AbortError") return;

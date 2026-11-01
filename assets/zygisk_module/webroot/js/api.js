@@ -1478,6 +1478,26 @@ const Api = {
           return target;
         }
       }
+      // Download 不可写（存储挂载异常时的典型现场）：降级把日志包留在模块目录
+      // （root 直连路径，不经 FUSE 视图），用户用 root 文件管理器或 adb 手动拷贝。
+      const fallbackTarget = MODULE_DIR + "/" + safeName;
+      const fallbackCopy = await this.exec(
+        "cp " + shellQuote(tmpArchive) + " " + shellQuote(fallbackTarget) + " && echo ok",
+        { timeoutMs: 30000 },
+      ).catch(() => "");
+      if (
+        String(fallbackCopy || "")
+          .trim()
+          .split(/\s+/)
+          .pop() === "ok"
+      ) {
+        options?.onProgress?.({
+          percent: 100,
+          phase: "done",
+          message: "Download 不可写，日志包已保存到模块目录",
+        });
+        return fallbackTarget;
+      }
       throw new Error("日志包写入 Download 失败");
     } finally {
       try {
