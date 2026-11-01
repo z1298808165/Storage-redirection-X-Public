@@ -319,10 +319,43 @@ fn mount_one_storage_view_barrier(
             libc::_exit(0);
         }
     }
+    // 屏障子进程正常在毫秒级完成；阻塞等待会把应用线程永久挂在一个卡死（D 态）的
+    // 子进程上。改为有界等待：超时后 SIGKILL 并记录，后续挂载会重新评估屏障；子进程
+    // 若处于 D 态无法被杀，也留下可检索的记录而不是让调用线程无限挂起。
+    const BARRIER_WAIT_TIMEOUT_MS: u64 = 2_000;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(BARRIER_WAIT_TIMEOUT_MS);
     let mut status: c_int = 0;
-    // SAFETY: status 是有效的栈上整型指针，waitpid 阻塞等待本次 fork 的子进程。
-    let waited = unsafe { waitpid(child, &mut status, 0) };
-    waited == child && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    loop {
+        // SAFETY: status 是有效的栈上整型指针，child 是本次 fork 的子进程。
+        let waited = unsafe { waitpid(child, &mut status, WNOHANG) };
+        if waited == child {
+            return libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        }
+        if waited < 0 {
+            let errno = last_errno();
+            if errno != libc::EINTR {
+                log::warn!(
+                    "storage view barrier wait failed child={} errno={} {}",
+                    child,
+                    errno,
+                    errno_text(errno)
+                );
+                return false;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            // SAFETY: child 是本次 fork 的子进程，SIGKILL 只作用于它。
+            let _ = unsafe { kill(child, SIGKILL) };
+            log::warn!(
+                "storage view barrier wait timeout child={} timeout_ms={}",
+                child,
+                BARRIER_WAIT_TIMEOUT_MS
+            );
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 // ===== 遍历感知的存储路径覆盖判定 =====
