@@ -3,6 +3,7 @@ use super::companion_request::{CompanionMountRequest, parse_companion_mount_requ
 use crate::logging::Logger;
 use crate::platform::fs;
 use libc::{SIG_IGN, SIGPIPE, c_int, signal};
+use std::path::Path;
 use std::time::Duration;
 
 const MAX_PAYLOAD_BYTES: u32 = 1024 * 1024;
@@ -116,6 +117,139 @@ fn handle_fchown_request(client_fd: c_int) {
     write_status(client_fd, if result == 0 { 1 } else { 0 });
 }
 
+/// 软重启（zygote/system_server 级）不重跑模块的 service.sh：daemon 死后
+/// companion 是唯一仍有 root 上下文的常驻入口。挂载请求到达时顺带检查并
+/// 拉起 daemon，避免模块进入"已加载但无守护进程"的半死态——监视、巡检、
+/// 自愈全部依赖 daemon（2026-10-31 issue #2 报告者实测：两次自动软重启后
+/// 监视与巡检全失效）。
+///
+/// 存活判定与 service.sh 的 `daemon_process_matches` 同口径：按 /proc/<pid>/comm
+/// 而非 exe 判定，排除 daemon fork 出来的 srx_fuse_host/srx_fuse 子进程（它们
+/// exe 同为 srx_daemon 但 comm 已被 prctl 改名）。拉起走 spawn 脱离，daemon
+/// 自行孵化看门狗并获取实例锁，companion 不参与后续管理。
+fn ensure_daemon_alive() {
+    use std::fs;
+    use std::os::fd::AsRawFd;
+
+    use crate::platform::module_paths;
+
+    if Path::new(module_paths::RUNTIME_DISABLE_FILE).exists() {
+        return;
+    }
+    let daemon_bin = module_paths::DAEMON_BIN_FILE;
+    if !Path::new(daemon_bin).exists() {
+        return;
+    }
+
+    // 挂载请求会随多应用 specialize 并发到达。把「检查 daemon 是否存活 + 拉起」串行化，
+    // 否则一次软重启会拉起多条 daemon/看门狗链。
+    let lock = match fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(module_paths::DAEMON_RESPAWN_LOCK_FILE)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            log::warn!("daemon respawn lock open failed err={}", err);
+            return;
+        }
+    };
+    // SAFETY: flock 只对刚打开的有效文件描述符加建议锁，不涉及其它内存。
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return;
+    }
+
+    // pid 文件优先（与 service.sh 同口径）。
+    let pid_file_alive = fs::read_to_string(crate::platform::module_paths::DAEMON_PID_FILE)
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+        .is_some_and(|pid| pid > 0 && daemon_comm_matches(pid));
+    if pid_file_alive {
+        return;
+    }
+
+    // pid 文件缺失/失效时的 /proc 兜底扫描。
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(pid) = name.parse::<i32>() else {
+                continue;
+            };
+            if pid > 0 && daemon_comm_matches(pid) {
+                return;
+            }
+        }
+    }
+
+    log::warn!("daemon not alive after soft reboot, respawning from companion");
+    reap_orphan_fuse_children();
+    match std::process::Command::new(daemon_bin)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            log::info!("daemon respawned by companion pid={}", child.id());
+            let _ = fs::write(
+                crate::platform::module_paths::DAEMON_PID_FILE,
+                child.id().to_string(),
+            );
+        }
+        Err(err) => log::warn!("daemon respawn failed err={}", err),
+    }
+}
+
+/// 清理软重启后由 init 收养的旧 FUSE 服务。仅在确认没有 daemon 存活后调用，
+/// 因为这些 fork 子进程会继承 daemon instance-lock fd，残留时新 daemon 会
+/// already_running 退出；进程名白名单严格限定为本模块的 FUSE 子服务。
+fn reap_orphan_fuse_children() {
+    for name in ["srx_fuse", "srx_fuse_host"] {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|value| value.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if pid <= 1 || daemon_comm_matches(pid) {
+                continue;
+            }
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"));
+            if comm.as_deref().is_ok_and(|comm| comm.trim() == name) {
+                // SAFETY: pid 来自 /proc 且 comm 与模块自有子进程名精确匹配。
+                if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                    log::warn!(
+                        "companion reaped orphan fuse child pid={} comm={}",
+                        pid,
+                        name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 与 service.sh 的 daemon_process_matches 同口径的存活判定。
+fn daemon_comm_matches(pid: i32) -> bool {
+    use std::fs;
+    if pid <= 0 {
+        return false;
+    }
+    // kill -0 等价的存活检查：/proc/<pid> 存在即可，comm 内容再校验。
+    let comm_path = format!("/proc/{pid}/comm");
+    fs::read_to_string(comm_path)
+        .map(|comm| comm.trim() == "srx_daemon")
+        .unwrap_or(false)
+}
+
 fn handle_mount_request(client_fd: c_int) {
     let payload_len = match read_payload_length(client_fd) {
         Some(len) => len,
@@ -153,6 +287,8 @@ fn handle_mount_request(client_fd: c_int) {
     if !request.package_name.is_empty() {
         Logger::init(Some(&request.package_name));
     }
+
+    ensure_daemon_alive();
 
     log_mount_request(&request);
 

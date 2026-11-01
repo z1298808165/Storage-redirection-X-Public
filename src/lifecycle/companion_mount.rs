@@ -1120,6 +1120,73 @@ fn handle_child_process(
     // 共享宿主必须先于 namespace 重定向接管存储根，避免 SQLite 在接管前打开
     // 重定向沙盒中的旧副本。
     let preattached_host = preattach_shared_host(request, scoped_fuse_roots);
+    // 无规则短路标记必须贯穿整个成功分支：短路只挡住了 planner 完整路径，
+    // 若成功分支照常执行，非空的 scoped roots（monitor_only 请求的存储视图根）
+    // 仍会驱动 start_scoped_fuse_services 接入宿主（2026-10-30 issue #2 报告者
+    // test15 实测：监视开启时 90 个未配置应用被接管、MT 写 sdcard 失败——
+    // 正是短路要阻止的行为）。
+    let no_rules_short_circuit = preattached_host.is_none()
+        && !crate::fuse_redirect::config::mount_request_has_policy_rules(request);
+    if no_rules_short_circuit {
+        // 无规则请求没有挂载需求：前面的旧 state 清理已执行，之后必须直接返回，
+        // 不进入 namespace fallback、私有目录恢复或 state/ledger 落账。若 state 缺失
+        // 但 ledger 仍登记挂载，当前 companion 清理路径无法按 mount-id/source 安全
+        // 摘层。允许从 ledger 恢复清理的前提是当前 namespace 中每个 mount point
+        // 的栈顶仍精确匹配 ledger 的 mount_id+source；否则保留账本并 fail-closed。
+        if let Some(ledger) = crate::mount_ledger::load(&request.package_name, request.pid) {
+            for recorded in &ledger.mounts {
+                let Some(top) =
+                    crate::mount_ledger::topmost_live_mount(request.pid, &recorded.mount_point)
+                else {
+                    continue;
+                };
+                if top.mount_id != recorded.mount_id || top.source != recorded.source {
+                    log::warn!(
+                        "companion no-rules cleanup refused: ledger mount not topmost-owned pid={} pkg={} target={} recorded_id={} live_id={}",
+                        request.pid,
+                        request.package_name,
+                        recorded.mount_point,
+                        recorded.mount_id,
+                        top.mount_id
+                    );
+                    return false;
+                }
+                let Ok(c_target) = CString::new(recorded.mount_point.as_str()) else {
+                    return false;
+                };
+                // SAFETY: c_target 是当前 setns 命名空间内已校验过的挂载路径。
+                if unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) } != 0 {
+                    log::warn!(
+                        "companion no-rules cleanup detach failed pid={} pkg={} target={} errno={}",
+                        request.pid,
+                        request.package_name,
+                        recorded.mount_point,
+                        last_errno()
+                    );
+                    return false;
+                }
+            }
+            let still_live = ledger.mounts.iter().any(|recorded| {
+                crate::mount_ledger::live_mounts_at(request.pid, &recorded.mount_point)
+                    .iter()
+                    .any(|live| {
+                        live.mount_id == recorded.mount_id && live.source == recorded.source
+                    })
+            });
+            if still_live {
+                return false;
+            }
+            if !crate::mount_ledger::remove(&request.package_name, request.pid) {
+                return false;
+            }
+        }
+        log::debug!(
+            "companion no-rules request skipped mount pid={} pkg={}",
+            request.pid,
+            request.package_name
+        );
+        return true;
+    }
     let is_success = if preattached_host.is_some() {
         true
     } else if request.is_monitor_only {
@@ -1398,6 +1465,24 @@ fn shared_host_preattach_candidate(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
 ) -> bool {
+    // 无任何策略规则的请求不预接宿主视图：与 daemon 侧
+    // （daemon_mount::shared_host_preattach_candidate）同源的闸门。未配置应用/
+    // 无规则系统链路接入后宿主策略 deny_all，应用视图变空目录、写入全被拒
+    // （2026-10-30 issue #2 报告者 test14 实测：未配置任何应用仍有 5 个进程
+    // 被覆盖，MT 管理器写 sdcard 失败）。监视由进程外 inotify 承担。
+    let has_policy_rules = !request.allowed_real_paths.is_empty()
+        || !request.excluded_real_paths.is_empty()
+        || !request.path_mappings.is_empty()
+        || !request.sandboxed_paths.is_empty()
+        || !request.read_only_paths.is_empty();
+    if !has_policy_rules {
+        return false;
+    }
+    // 与 daemon 侧同源的策略规则闸门：无规则的请求不预接宿主视图（接入后
+    // 宿主对无规则 uid deny_all，未配置应用空目录/写入全拒）。
+    if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
+        return false;
+    }
     let is_auto = matches!(
         request.storage_backend_mode,
         crate::config::StorageBackendMode::Auto
@@ -1541,6 +1626,15 @@ fn start_fuse_service_for_root(
             view.as_ref()
                 .and_then(|view| view.policy_fingerprints.get(&(request.uid as u32)))
                 .copied()
+        );
+    } else if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
+        // 无策略规则的请求不接宿主视图：接入后宿主对无规则 uid deny_all
+        // （未配置应用空目录/写入全拒）。scoped 路径继续兜底。
+        log::debug!(
+            "fuse host attach skipped pid={} pkg={} target={} reason=no_policy_rules",
+            request.pid,
+            request.package_name,
+            mount_root
         );
     } else if let Some(host_view) = view.as_ref() {
         if let Some(state) = try_bind_to_fuse_host(host_view, request, mount_root) {

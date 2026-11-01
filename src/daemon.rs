@@ -533,6 +533,32 @@ impl DaemonInstanceLock {
     }
 }
 
+/// daemon 自写 pid 文件：保证 watchdog 拉起的新实例也持有准确 pid，避免
+/// srxctl/WebUI 按 service.sh 遗留 pid 停止时误杀或漏杀。
+/// 写失败只告警：pid 文件消费方（srxctl/WebUI）都带 pidof 兜底。
+fn write_daemon_pid_file() {
+    let path = std::path::Path::new(crate::platform::module_paths::DAEMON_PID_FILE);
+    if let Some(parent) = path.parent() {
+        let _ = std_fs::create_dir_all(parent);
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            let _ = std::io::Write::write_fmt(&mut file, format_args!("{}\n", std::process::id()));
+            let _ = file.flush();
+            drop(file);
+            let _ =
+                std_fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
+        }
+        Err(error) => log::warn!("daemon pid file write failed error={}", error),
+    }
+}
+
 /// 安装 daemon 主进程的 panic 钩子。
 ///
 /// release 构建 `panic = "abort"`，`catch_unwind` 无法截获 panic，service.sh 又把
@@ -583,6 +609,10 @@ pub fn main_entry() -> i32 {
         log::error!("private log writer start failed error={}", error);
         return 1;
     }
+    // 尽早孵化自守护看门狗（pidfd 事件驱动）：之后任何路径的退出/崩溃都能被
+    // 立即感知并按退避拉起，取代 service.sh 的 20 秒 pidof 轮询看门狗。
+    crate::daemon_watchdog::spawn_self_watchdog();
+    write_daemon_pid_file();
     log::info!("daemon start");
 
     if !runtime_control::is_module_runtime_enabled() {
@@ -621,6 +651,11 @@ pub fn main_entry() -> i32 {
         BOOT_PRE_REGISTER_PENDING.store(true, Ordering::Release);
         log::warn!("boot pre-register deferred: media CE key not ready");
     }
+
+    // 外部 abort 兜底监控（独立线程）：宿主内停摆看门狗的探测链路自身可能被冻结
+    // 拖死（2026-10-29 真机实证），daemon 作为不服务 FUSE 的独立进程保留最后一道
+    // 解冻能力。线程自门控：无宿主心跳时空转，有硬证据才动手。
+    crate::fuse_host::spawn_external_abort_monitor();
 
     let mut last_version = 0;
     let mut last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
@@ -727,10 +762,15 @@ pub fn main_entry() -> i32 {
                         mounts_changed
                     );
                 } else {
-                    log::info!(
-                        "running app remount completed request={} applied={}",
-                        request,
-                        mounts_changed
+                    // 完成行是 srxctl 等待循环的唯一判据（running.log 计数比对），
+                    // 走 Status 专用标签避开 verbose 门禁，保证任何日志档位下可观测。
+                    crate::logging::write_log(
+                        crate::logging::Level::Info,
+                        crate::logging::STATUS_LOG_TAG,
+                        &format!(
+                            "running app remount completed request={} applied={}",
+                            request, mounts_changed
+                        ),
                     );
                 }
             }

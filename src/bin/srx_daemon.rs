@@ -15,6 +15,8 @@ mod daemon_mount;
 mod daemon_mount_diag;
 #[path = "../daemon_mount_reclaim.rs"]
 mod daemon_mount_reclaim;
+#[path = "../daemon_watchdog.rs"]
+mod daemon_watchdog;
 #[path = "../domain.rs"]
 mod domain;
 #[path = "../fuse_host.rs"]
@@ -77,6 +79,12 @@ fn main() {
     if command.as_deref() == Some("doctor") {
         let doctor_args: Vec<String> = args.collect();
         std::process::exit(daemon_mount::doctor_report(&doctor_args));
+    }
+    if command.as_deref() == Some("watchdog") {
+        // 守护进程入口：由 daemon fork+exec 出来的独立进程，进程名已改写，
+        // 不会与主 daemon 的 pidof/存活检测混淆。参数为被观察的 daemon pid。
+        let target_pid = args.next().and_then(|pid| pid.parse::<i32>().ok());
+        std::process::exit(daemon_watchdog::entry(target_pid));
     }
     if command.as_deref() == Some("control") {
         let Some(command) = args.next() else {

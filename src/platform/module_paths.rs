@@ -1,4 +1,9 @@
 pub const MODULE_DIR: &str = "/data/adb/modules/storage.redirect.x";
+/// daemon 二进制与 pid 文件：companion 在软重启后自拉起 daemon 时使用，
+/// 路径口径与 service.sh 的 start_srx_daemon 保持一致。
+pub const DAEMON_BIN_FILE: &str = "/data/adb/modules/storage.redirect.x/bin/srx_daemon";
+/// Companion 软重启自恢复的并发互斥锁，与 daemon 长持有的实例锁分开。
+pub const DAEMON_RESPAWN_LOCK_FILE: &str = "/data/adb/storage.redirect.x/.srx_daemon_respawn.lock";
 pub const MOUNT_STATE_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_state";
 pub const MOUNT_INTENT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/mount_intent";
 pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage";
@@ -54,6 +59,8 @@ pub const MEDIA_HOOK_INSTALL_STATE_FILE: &str =
 /// MediaProvider 进程内热重载请求与确认文件。
 pub const MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_provider_hot_reload.request";
+// quality-allow(lint-suppression): ack 由 daemon（bin 目标）代 MP 落盘，lib 目标仅共享编译该模块。
+#[allow(dead_code)]
 pub const MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE: &str =
     "/data/adb/modules/storage.redirect.x/logs/.media_provider_hot_reload.ack";
 pub const RECENT_SOURCE_HINT_FILE: &str =
@@ -67,6 +74,11 @@ pub const LOG_DIR: &str = "/data/adb/modules/storage.redirect.x/logs";
 // quality-allow(lint-suppression): 该路径由 daemon 二进制通过跨 crate 模块引用使用。
 #[allow(dead_code)]
 pub const DAEMON_INSTANCE_LOCK_FILE: &str = "/data/adb/storage.redirect.x/.srx_daemon.lock";
+/// daemon pid 文件：由 daemon 在取得实例锁后自写（watchdog 拉起的新实例同样生效），
+/// service.sh/WebUI 的写入仅覆盖 daemon 启动前的窗口。
+// quality-allow(lint-suppression): 引用方 daemon/watchdog 仅由 daemon 二进制编译。
+#[allow(dead_code)]
+pub const DAEMON_PID_FILE: &str = "/data/adb/modules/storage.redirect.x/logs/.srx_daemon.pid";
 
 pub const GLOBAL_CONFIG_FILE: &str = "/data/adb/modules/storage.redirect.x/config/global.json";
 pub const APPS_CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config/apps";
@@ -80,6 +92,22 @@ pub const FUSE_HOST_MOUNT_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/
 // quality-allow(lint-suppression): 引用方在宿主 spawn 路径，lib 目标仅共享编译该模块。
 #[allow(dead_code)]
 pub const FUSE_HOST_STAGE_FILE: &str = "/data/adb/modules/storage.redirect.x/tmp/fuse_host.stage";
+/// 宿主会话心跳文件：宿主进程每 2 秒原子覆写一行（waiting/最后完成时刻等），
+/// daemon 侧外部 abort 兜底监控据此判定宿主内看门狗是否已失效。
+// quality-allow(lint-suppression): 引用方在宿主 spawn 路径与 daemon 兜底监控，lib 目标仅共享编译。
+#[allow(dead_code)]
+pub const FUSE_HOST_HEARTBEAT_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/tmp/fuse_host.beat";
+
+/// 停摆取证独立文件：不参与 running.log 轮转，冻结现场双写落此，超过 2 MiB 就地截断。
+///
+/// 挂载风暴期 running.log 每秒可产生数千行（gen4 冻结现场 3 秒 19684 行），会话
+/// 启动期记录（含锚点建立结果）数分钟内即被轮出——归因被迫依赖推断。独立文件
+/// 保证停摆取证与锚点状态变迁永远可回溯。
+// quality-allow(lint-suppression): 引用方在宿主与 daemon 停摆取证路径，lib 目标仅共享编译。
+#[allow(dead_code)]
+pub const STALL_FORENSICS_LOG: &str =
+    "/data/adb/modules/storage.redirect.x/logs/stall-forensics.log";
 
 // quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
 #[allow(dead_code)]
