@@ -74,6 +74,11 @@ mod paths {
         String::new()
     }
 }
+// 别名展开用它排除 f2fs 直连后端别名；本桩的别名列表为空，运行期不会命中，
+// 只要提供同签名实现即可满足编译。
+fn is_f2fs_direct_backend_alias(_: &str, _: i32) -> bool {
+    false
+}
 mod platform {
     pub mod errno {
         pub fn last() -> i32 {
@@ -88,6 +93,14 @@ mod mount_ledger {
     pub struct Entry {
         pub source: String,
         pub fs_type: &'static str,
+    }
+    // 接入前的目标私有化只对「目标本身是挂载点」才需要。协议用例的目标根都按挂载点
+    // 处理，保持与引入该判据之前一致的私有化路径，用例才继续覆盖 mount 失败出口。
+    pub fn live_mounts_at(_: i32, _: &str) -> Vec<Entry> {
+        vec![Entry {
+            source: "本次会话".to_string(),
+            fs_type: "fuse",
+        }]
     }
     pub fn topmost_live_mount(_: i32, _: &str) -> Option<Entry> {
         if super::case() == 10 {

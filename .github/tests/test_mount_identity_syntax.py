@@ -129,7 +129,7 @@ class MountIdentitySyntaxTest(unittest.TestCase):
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "mount_identity_syntax")
             compile_proc = subprocess.run(
-                [rustc, harness_path, "-O", "-o", bin_path],
+                [rustc, "--edition=2024", harness_path, "-O", "-o", bin_path],
                 capture_output=True,
                 text=True,
             )
@@ -164,7 +164,7 @@ class MountIdentitySyntaxTest(unittest.TestCase):
             Path(mutated_path).write_text(mutated_src, encoding="utf-8")
             mutated_bin = os.path.join(tmp, "mount_identity_syntax_mutated")
             mut_compile = subprocess.run(
-                [rustc, mutated_path, "-O", "-o", mutated_bin],
+                [rustc, "--edition=2024", mutated_path, "-O", "-o", mutated_bin],
                 capture_output=True,
                 text=True,
             )

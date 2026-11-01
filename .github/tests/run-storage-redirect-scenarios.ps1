@@ -1214,7 +1214,7 @@ function Assert-FixtureRootsEmpty {
     # 仅扫描原有 Download/Srt* 与 Download/Test 范围，不扩大枚举、不新增删除，避免误伤
     # 未知预置夹具。扫描失败（adb 中断、find 权限错误）必须传播，不能吞成成功；移除
     # -maxdepth 限制与 head 管道后，任何层级的残留与 find 错误都不再被掩盖。
-    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f || exit 1; fi; done"
+    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done"
     $lines = @(Invoke-Su $command)
     if ($LASTEXITCODE -ne 0) {
         Write-Host "fixture_scan_failed label=$Label"
@@ -1224,6 +1224,20 @@ function Assert-FixtureRootsEmpty {
     if ($residue.Count -gt 0) {
         Write-Host "fixture_residue label=$Label"
         $residue | ForEach-Object { Write-Host "  residue: $_" }
+        return $false
+    }
+    # 后端层同样断言：视图与后端必须同时干净。只清视图那一份时，后续场景会从后端读到
+    # 前序场景的残留（与 Clear-Targets 的双层删除口径一致）。
+    $backendCommand = "for d in '$BackendRoot/Download'/Srt* '$BackendRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done"
+    $backendLines = @(Invoke-Su $backendCommand)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "fixture_scan_failed label=$Label layer=backend"
+        return $false
+    }
+    $backendResidue = @($backendLines | Where-Object { $_ -and $_.Trim() })
+    if ($backendResidue.Count -gt 0) {
+        Write-Host "fixture_residue label=$Label layer=backend"
+        $backendResidue | ForEach-Object { Write-Host "  residue: $_" }
         return $false
     }
     return $true
@@ -3356,7 +3370,7 @@ function Assert-FixtureRootsEmpty {
     # 仅扫描原有 Download/Srt* 与 Download/Test 范围，不扩大枚举、不新增删除，避免误伤
     # 未知预置夹具。扫描失败（adb 中断、find 权限错误）必须传播，不能吞成成功；移除
     # -maxdepth 限制与 head 管道后，任何层级的残留与 find 错误都不再被掩盖。
-    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f || exit 1; fi; done"
+    $command = "for d in '$RealRoot/Download'/Srt* '$RealRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done"
     $lines = @(Invoke-Su $command)
     if ($LASTEXITCODE -ne 0) {
         Write-Host "fixture_scan_failed label=$Label"
@@ -3366,6 +3380,20 @@ function Assert-FixtureRootsEmpty {
     if ($residue.Count -gt 0) {
         Write-Host "fixture_residue label=$Label"
         $residue | ForEach-Object { Write-Host "  residue: $_" }
+        return $false
+    }
+    # 后端层同样断言：视图与后端必须同时干净。只清视图那一份时，后续场景会从后端读到
+    # 前序场景的残留（与 Clear-Targets 的双层删除口径一致）。
+    $backendCommand = "for d in '$BackendRoot/Download'/Srt* '$BackendRoot/Download/Test'; do if [ -d `"`$d`" ]; then find `"`$d`" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done"
+    $backendLines = @(Invoke-Su $backendCommand)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "fixture_scan_failed label=$Label layer=backend"
+        return $false
+    }
+    $backendResidue = @($backendLines | Where-Object { $_ -and $_.Trim() })
+    if ($backendResidue.Count -gt 0) {
+        Write-Host "fixture_residue label=$Label layer=backend"
+        $backendResidue | ForEach-Object { Write-Host "  residue: $_" }
         return $false
     }
     return $true

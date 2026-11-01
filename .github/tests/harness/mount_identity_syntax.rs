@@ -91,6 +91,9 @@ mod mount_identity {
     pub fn topmost_live_mount(_pid: i32, _target: &str) -> Option<crate::LiveMount> {
         None
     }
+
+    // 清理路径会连带移除同 pid 的遗留登记；桩里不需要实际状态，只提供签名。
+    pub fn remove(_pkg: &str, _pid: i32) {}
 }
 
 // ---- fs 桩：返回内存里固定的 mountinfo，代替真实 /proc/<pid>/mountinfo。 ----
