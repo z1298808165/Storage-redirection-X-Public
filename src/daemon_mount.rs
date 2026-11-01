@@ -1818,7 +1818,7 @@ impl ClearOutcome {
 /// 多做一次已幂等的归属校验，不会造成叠加。
 fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearOutcome {
     let state_path = plan.state_path.as_str();
-    let fuse_children = read_fuse_children(state_path);
+    let mut fuse_children = read_fuse_children(state_path);
     let mut targets = read_mount_targets(state_path);
     // 短路场景可能没有 state 文件，但历史版本已经写过 mount_identity；
     // 仅依赖 state 会让这些挂载层永久漏清理，之后每轮 supervise 都可能继续叠挂。
@@ -1826,6 +1826,15 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
     let ledger = mount_identity::load(&request.package_name, request.pid);
     if let Some(ledger) = ledger.as_ref() {
         targets.extend(ledger.mounts.iter().map(|mount| mount.mount_point.clone()));
+        // 账本里的子进程是状态文件缺失时唯一的终止依据；与状态文件按 pid 去重。
+        for child in &ledger.fuse_children {
+            if !fuse_children.iter().any(|seen| seen.pid == child.pid) {
+                fuse_children.push(FuseChildIdentity {
+                    pid: child.pid,
+                    start_time_ticks: Some(child.start_time_ticks),
+                });
+            }
+        }
     }
     targets.extend(plan.overlay_targets.iter().cloned());
     // path_mappings 热重载必须显式覆盖全部存储别名根：旧状态文件可能来自 companion
@@ -2528,11 +2537,18 @@ fn record_mount_identity(
 ) -> bool {
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
+    // 只登记可终止的 scoped 会话；共享宿主会话跨应用复用，不能进终止名单。
+    let children: Vec<(i32, u64)> = fuse_children
+        .iter()
+        .filter(|state| state.host_session.is_none())
+        .map(|state| (state.child, state.child_start_time_ticks))
+        .collect();
     crate::mount_ledger::record_mount_identity(
         "daemon",
         &request.package_name,
         request.pid,
         &all_targets,
+        &children,
     )
 }
 

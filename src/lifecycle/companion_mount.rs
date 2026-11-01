@@ -1341,11 +1341,18 @@ fn handle_child_process(
         // 否则同一件事在两条路径上的结果不一致——这正是本项目反复踩的坑。
         let mut identity_targets = mounted_targets.clone();
         identity_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
+        // 只登记可终止的 scoped 会话；共享宿主会话跨应用复用，不能进终止名单。
+        let identity_children: Vec<(i32, u64)> = fuse_children
+            .iter()
+            .filter(|state| state.host_session.is_none())
+            .map(|state| (state.child, state.child_start_time_ticks))
+            .collect();
         if !crate::mount_ledger::record_mount_identity(
             "companion",
             &request.package_name,
             request.pid,
             &identity_targets,
+            &identity_children,
         ) {
             log::warn!(
                 "mount identity save failed pid={} pkg={}",

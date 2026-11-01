@@ -13,7 +13,7 @@
 // 被测修复点（来自主代理对 src 的修改）：
 //   1. live_mounts_at / capture_explicit_mount_identity / classify_mount 改用 normalize_syntax（保留存储别名、
 //      大小写敏感），不再把 /data/media 折叠成 /storage/emulated；
-//   2. encode 写 schema=2，decode 拒绝旧 schema；
+//   2. encode 写当前 schema 并登记 fuse_child 行，decode 拒绝 v1、兼容 v2（追加字段前的版本）；
 //   3. clear_previous_mounts 改为按"已降序的目标列表"正向遍历（不再 .rev()）。
 //
 // 反向验证：Python 在内存里把抽取函数里的 `paths::normalize_syntax` 替换成别名折叠桩
@@ -79,13 +79,13 @@ mod module_mount_source {
     }
 }
 
-// ---- clear_previous_mounts 的 mount_identity::load 桩：无账本。 ----
+// ---- clear_previous_mounts 的 mount_identity::load 桩：默认无账本，用例可注入。 ----
 // topmost_live_mount 桩返回 None：本 harness 只验证身份/语法口径与摘除顺序，
 // "热重载保留重定向根"的判定由 reload_keep_redirect_root harness 单独执行真实实现，
 // 这里让保留分支恒不触发，避免两处判据互相掩盖。
 mod mount_identity {
     pub fn load(_pkg: &str, _pid: i32) -> Option<crate::MountLedger> {
-        None
+        crate::LEDGER.lock().unwrap().clone()
     }
 
     pub fn topmost_live_mount(_pid: i32, _target: &str) -> Option<crate::LiveMount> {
@@ -125,6 +125,8 @@ mod log {
 static MOUNTINFO: Mutex<String> = Mutex::new(String::new());
 static CLEARED_TARGETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static READ_TARGETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static LEDGER: Mutex<Option<MountLedger>> = Mutex::new(None);
+static TERMINATED_CHILDREN: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 // ---- 类型（数据定义副本，非匹配实现） ----
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +151,12 @@ pub struct MountIdentity {
     pub source: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerFuseChild {
+    pub pid: i32,
+    pub start_time_ticks: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct MountLedger {
     pub package_name: String,
@@ -157,6 +165,7 @@ pub struct MountLedger {
     pub namespace: NamespaceIdentity,
     pub generation: u64,
     pub mounts: Vec<MountIdentity>,
+    pub fuse_children: Vec<LedgerFuseChild>,
     pub detach_attempts: u32,
 }
 
@@ -174,6 +183,7 @@ impl MountLedger {
             namespace,
             generation: 0,
             mounts: Vec::new(),
+            fuse_children: Vec::new(),
             detach_attempts: 0,
         }
     }
@@ -246,7 +256,13 @@ impl ClearOutcome {
     }
 }
 
-fn read_fuse_children(_state_path: &str) -> Vec<String> {
+#[derive(Clone, Copy, Debug)]
+pub struct FuseChildIdentity {
+    pub pid: i32,
+    pub start_time_ticks: Option<u64>,
+}
+
+fn read_fuse_children(_state_path: &str) -> Vec<FuseChildIdentity> {
     Vec::new()
 }
 
@@ -260,7 +276,8 @@ fn clear_mount_target_stack_verified(target: &str, _ledger: Option<&MountLedger>
     true
 }
 
-fn terminate_recorded_fuse_child(_child: &str) -> bool {
+fn terminate_recorded_fuse_child(child: &FuseChildIdentity) -> bool {
+    TERMINATED_CHILDREN.lock().unwrap().push(child.pid);
     true
 }
 
@@ -427,6 +444,7 @@ fn main() {
             mount_id: 30,
             source: "srx_fuse".to_string(),
         }],
+        fuse_children: Vec::new(),
         detach_attempts: 0,
     };
     // 主入口查询：账本记的是后端别名，live 是后端挂载；修复后必须 Detached（不可误 Own 后端）。
@@ -455,6 +473,7 @@ fn main() {
             mount_id: 5,
             source: "srx_fuse".to_string(),
         }],
+        fuse_children: Vec::new(),
         detach_attempts: 0,
     };
     let verdict_owned = classify_mount(
@@ -485,7 +504,7 @@ fn main() {
         println!("PASS classify_case_sensitive: 大小写不同视为不同挂载 Superseded");
     }
 
-    // --- 用例 6：schema 旧版拒绝 + 当前版本可用 ---
+    // --- 用例 6：schema 版本边界与子进程登记 ---
     let v1 = "schema=1\npackage=p\ntarget_pid=1\ntarget_start_time=1\nnamespace=1:1\ngeneration=0\ndetach_attempts=0\nmount=5\tsrx_fuse\t/data/media/0/Download/SrtProbe\n";
     if decode(v1).is_some() {
         println!("FAIL schema_v1_rejected: 旧 schema 账本不应被接受");
@@ -493,21 +512,49 @@ fn main() {
     } else {
         println!("PASS schema_v1_rejected: schema=1 被拒绝");
     }
+    // v2 是追加 fuse_child 之前的版本：必须仍可解析，且按"无子进程"处理。
+    let v2 = "schema=2\npackage=p\ntarget_pid=1\ntarget_start_time=1\nnamespace=1:1\ngeneration=0\ndetach_attempts=0\nmount=30\tsrx_fuse\t/data/media/0/Download/SrtProbe\n";
+    match decode(v2) {
+        Some(decoded) if decoded.fuse_children.is_empty() => {
+            println!("PASS schema_v2_compat: v2 账本可读且无子进程");
+        }
+        other => {
+            println!("FAIL schema_v2_compat: 实际 {:?}", other.map(|l| l.fuse_children.len()));
+            failures.push("schema_v2_compat");
+        }
+    }
     let mut ledger = MountLedger::new("pkg", 1, 1, ns);
     ledger.record_mounts(vec![MountIdentity {
         mount_point: "/data/media/0/Download/SrtProbe".to_string(),
         mount_id: 30,
         source: "srx_fuse".to_string(),
     }]);
+    ledger.fuse_children = vec![LedgerFuseChild {
+        pid: 4242,
+        start_time_ticks: 77,
+    }];
     let encoded = encode(&ledger);
-    if !encoded.contains("schema=2") {
-        println!("FAIL schema_v2_written: encode 应写 schema=2");
-        failures.push("schema_v2_written");
+    let schema_line = format!("schema={IDENTITY_SCHEMA_VERSION}");
+    if !encoded.contains(&schema_line) {
+        println!("FAIL schema_current_written: encode 应写 {}", schema_line);
+        failures.push("schema_current_written");
+    } else if !encoded.contains("fuse_child=4242:77") {
+        println!("FAIL child_encoded: encode 应登记 fuse_child=4242:77");
+        failures.push("child_encoded");
     } else if decode(&encoded).is_none() {
-        println!("FAIL schema_v2_accepted: 当前 schema 账本应被接受");
-        failures.push("schema_v2_accepted");
+        println!("FAIL schema_current_accepted: 当前 schema 账本应被接受");
+        failures.push("schema_current_accepted");
     } else {
-        println!("PASS schema_v2: encode 写 schema=2 且 decode 接受");
+        let decoded = decode(&encoded).unwrap();
+        if decoded.fuse_children.len() == 1
+            && decoded.fuse_children[0].pid == 4242
+            && decoded.fuse_children[0].start_time_ticks == 77
+        {
+            println!("PASS schema_current: encode 写当前 schema 且子进程可往返");
+        } else {
+            println!("FAIL child_roundtrip: 实际 {:?}", decoded.fuse_children);
+            failures.push("child_roundtrip");
+        }
     }
 
     // --- 用例 7：cleanup 按已降序列表正向遍历（排序不反转） ---
@@ -546,6 +593,28 @@ fn main() {
     } else {
         println!("PASS cleanup_order: 正向遍历保持降序（最深优先）");
     }
+
+    // --- 用例 8：状态文件缺失时，按账本登记的子进程终止旧会话 ---
+    let mut ledger_with_child = MountLedger::new("pkg", 1, 1, ns);
+    ledger_with_child.fuse_children = vec![LedgerFuseChild {
+        pid: 4242,
+        start_time_ticks: 77,
+    }];
+    *LEDGER.lock().unwrap() = Some(ledger_with_child);
+    *READ_TARGETS.lock().unwrap() = Vec::new();
+    TERMINATED_CHILDREN.lock().unwrap().clear();
+    let outcome = clear_previous_mounts(&request, &plan);
+    let terminated = TERMINATED_CHILDREN.lock().unwrap().clone();
+    if outcome != ClearOutcome::Cleared || terminated != vec![4242] {
+        println!(
+            "FAIL cleanup_ledger_child: outcome={:?} terminated={:?}",
+            outcome, terminated
+        );
+        failures.push("cleanup_ledger_child");
+    } else {
+        println!("PASS cleanup_ledger_child: 状态缺失时按账本子进程终止会话");
+    }
+    *LEDGER.lock().unwrap() = None;
 
     if failures.is_empty() {
         println!("ALL MOUNT IDENTITY SYNTAX CASES PASSED");

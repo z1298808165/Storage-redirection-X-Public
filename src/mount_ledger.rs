@@ -40,7 +40,10 @@ pub use crate::module_mount_source::is_module_redirect_mount;
 /// `/data/media/<user>/...` 归一化成 `/storage/emulated/<user>/...` 存储，与真实主入口
 /// 目标重合，会被新逻辑误判为同一挂载点的归属身份、进而误用于摘除后端挂载。为保守起见，
 /// 直接让 v1 账本 decode 失败（按不可用处理），由下一次成功挂载用新口径重新登记。
-const IDENTITY_SCHEMA_VERSION: u32 = 2;
+///
+/// v2 → v3：新增 `fuse_child=pid:start` 行登记 scoped 会话子进程。该字段是**追加**语义，
+/// v2 账本没有它也能安全解析（按"无子进程"处理），因此 decode 仍接受 v2。
+const IDENTITY_SCHEMA_VERSION: u32 = 3;
 
 /// 目标进程 mount namespace 的身份。
 ///
@@ -76,6 +79,17 @@ pub struct MountIdentity {
     pub source: String,
 }
 
+/// 账本登记的可终止 scoped 会话子进程身份。
+///
+/// 状态文件缺失时，这是唯一能证明"该会话属于本账本"的记录：清理流程据此终止会话，
+/// 不必依赖 `.state` 的 `fuse_child=` 行。宿主共享会话不在此列——它跨应用复用，
+/// 只能判活不能终止。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LedgerFuseChild {
+    pub pid: i32,
+    pub start_time_ticks: u64,
+}
+
 /// 一个命名空间的挂载身份账本。
 #[derive(Clone, Debug)]
 pub struct MountLedger {
@@ -86,6 +100,8 @@ pub struct MountLedger {
     /// 同一命名空间内的挂载代数，每成功记录一轮挂载递增。
     pub generation: u64,
     pub mounts: Vec<MountIdentity>,
+    /// 本轮挂载 fork 出的 scoped 会话子进程（不含共享宿主会话）。
+    pub fuse_children: Vec<LedgerFuseChild>,
     /// 连续摘除失败轮次；达到恢复决策层定义的收敛预算后不再允许注入。
     pub detach_attempts: u32,
 }
@@ -104,6 +120,7 @@ impl MountLedger {
             namespace,
             generation: 0,
             mounts: Vec::new(),
+            fuse_children: Vec::new(),
             detach_attempts: 0,
         }
     }
@@ -248,13 +265,20 @@ pub fn encode(ledger: &MountLedger) -> String {
             mount.mount_id, mount.source, mount.mount_point
         ));
     }
+    for child in &ledger.fuse_children {
+        content.push_str(&format!(
+            "fuse_child={}:{}\n",
+            child.pid, child.start_time_ticks
+        ));
+    }
     content
 }
 
 /// 从文本解析账本；schema 不匹配或关键字段缺失时返回 None。
 pub fn decode(content: &str) -> Option<MountLedger> {
     let schema = field(content, "schema")?.parse::<u32>().ok()?;
-    if schema != IDENTITY_SCHEMA_VERSION {
+    // v2 账本缺少 fuse_child 行，按"无子进程"解析即可；更旧的版本语义已变，按不可用处理。
+    if !(2..=IDENTITY_SCHEMA_VERSION).contains(&schema) {
         return None;
     }
     let package_name = field(content, "package")?.to_string();
@@ -290,6 +314,19 @@ pub fn decode(content: &str) -> Option<MountLedger> {
             })
         })
         .collect();
+    let fuse_children = content
+        .lines()
+        .filter_map(|line| line.strip_prefix("fuse_child="))
+        .filter_map(|value| {
+            let (pid, start) = value.split_once(':')?;
+            let pid = pid.parse::<i32>().ok()?;
+            let start_time_ticks = start.parse::<u64>().ok()?;
+            (pid > 0).then_some(LedgerFuseChild {
+                pid,
+                start_time_ticks,
+            })
+        })
+        .collect();
     Some(MountLedger {
         package_name,
         target_pid,
@@ -297,6 +334,7 @@ pub fn decode(content: &str) -> Option<MountLedger> {
         namespace,
         generation,
         mounts,
+        fuse_children,
         detach_attempts,
     })
 }
@@ -373,12 +411,15 @@ pub fn capture_explicit_mount_identity(pid: i32, mount_point: &str) -> Option<Mo
 ///   那会让下一轮恢复把本模块自己的挂载误判成"已被新会话接管"而拒绝清理。
 ///
 /// `log_tag` 标识调用方（`daemon` / `companion`），保留在日志里便于区分是哪条路径写的。
+/// `children` 是本轮 fork 出的可终止 scoped 会话（`(pid, starttime)`，不含共享宿主会话）；
+/// 它随账本一起落盘，使状态文件缺失时仍能按账本终止会话。
 /// 返回 false 表示账本落盘失败（调用方应记告警，但不影响本次挂载已生效的事实）。
 pub fn record_mount_identity(
     log_tag: &str,
     package_name: &str,
     target_pid: i32,
     targets: &[String],
+    children: &[(i32, u64)],
 ) -> bool {
     let Some(namespace) = namespace_identity(0) else {
         log::warn!(
@@ -416,15 +457,24 @@ pub fn record_mount_identity(
     } else {
         ledger.record_mounts(mounts);
     }
+    ledger.fuse_children = children
+        .iter()
+        .filter(|(pid, start)| *pid > 0 && *start != 0)
+        .map(|(pid, start)| LedgerFuseChild {
+            pid: *pid,
+            start_time_ticks: *start,
+        })
+        .collect();
     let saved = save(&ledger);
     if saved {
         log::info!(
-            "mount identity saved path={} pid={} pkg={} generation={} mounts={} ns={}:{}",
+            "mount identity saved path={} pid={} pkg={} generation={} mounts={} children={} ns={}:{}",
             log_tag,
             target_pid,
             package_name,
             ledger.generation,
             ledger.mounts.len(),
+            ledger.fuse_children.len(),
             ledger.namespace.dev,
             ledger.namespace.ino
         );
