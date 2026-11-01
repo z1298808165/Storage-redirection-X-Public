@@ -15,7 +15,7 @@ boot_guard_wait() {
       else
         echo "unknown" > "$BOOT_OK_FILE"
       fi
-      rm -f "$BOOT_PENDING_FILE"
+      rm -f "$BOOT_PENDING_FILE" "$BOOT_FAIL_COUNT_FILE"
       refresh_uid_map
       restart_media_provider_for_deferred_hooks
       start_log_collectors
@@ -32,7 +32,7 @@ boot_guard_wait() {
   else
     echo "unknown" > "$BOOT_OK_FILE"
   fi
-  rm -f "$BOOT_PENDING_FILE"
+  rm -f "$BOOT_PENDING_FILE" "$BOOT_FAIL_COUNT_FILE"
   refresh_uid_map
   start_log_collectors
   return 0

@@ -22,6 +22,7 @@ SYSTEM_WRITER_UIDS_FILE="$CONFIG_DIR/system_writer_uids.list"
 APPS_CONFIG_DIR="$CONFIG_DIR/apps"
 BOOT_PENDING_FILE="$MODDIR/.boot_pending"
 BOOT_OK_FILE="$MODDIR/.boot_ok"
+BOOT_FAIL_COUNT_FILE="$MODDIR/.boot_fail_count"
 RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
 MEDIA_HOOK_DEFERRED_FILE="$LOGS_DIR/.media_hook_deferred"
 
