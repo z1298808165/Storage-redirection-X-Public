@@ -605,6 +605,30 @@ fn retire_legacy_scoped_sessions() -> usize {
     if retired > 0 {
         log::warn!("daemon legacy scoped fuse sessions retired total={retired}");
     }
+    // SIGKILL 对 D 态进程可能延迟生效：短暂等待后复查，仍存活说明清理被内核阻塞。
+    // 留痕而不是静默返回，下一次 daemon 启动会再次尝试。
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let survivors = std::fs::read_dir("/proc")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .is_some_and(|pid| {
+                            pid > 1
+                                && std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                                    .is_ok_and(|comm| comm.trim() == LEGACY_SCOPED_COMM)
+                        })
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if survivors > 0 {
+        log::warn!("daemon legacy scoped fuse sessions survived retire count={survivors}");
+    }
     retired
 }
 
@@ -664,6 +688,9 @@ pub fn main_entry() -> i32 {
     write_daemon_pid_file();
     log::info!("daemon start");
 
+    // legacy scoped 会话清理不依赖运行开关：即使模块停用，历史泄漏的 srx_fuse 仍会占用 pid 与线程预算，启动阶段能清就清。
+    let legacy_scoped_retired = retire_legacy_scoped_sessions();
+
     if !runtime_control::is_module_runtime_enabled() {
         cleanup_all_mount_states();
         log::info!("daemon exit reason=runtime_disabled");
@@ -713,7 +740,6 @@ pub fn main_entry() -> i32 {
     // 升级后进程表里仍可能出现上一代的 `srx_fuse`：它们是应用命名空间的自持引用，既不会
     // 自己退出，也不受任何账本约束——正是 issue #4 那批常驻进程的来源。这是针对历史残留
     // 的一次性清理，不是周期性收割；当前版本不会再产生这类进程。
-    let legacy_scoped_retired = retire_legacy_scoped_sessions();
     // 一条可长期检索的能力结论：设备节点、宿主会话、能力快照与本次清理量。
     // 现场只要贴这一行，就能判断「这台设备/这个配置下 FUSE 视图到底能不能用」。
     log::info!(
@@ -740,6 +766,8 @@ pub fn main_entry() -> i32 {
     let mut fallback_file_monitor = file_monitor_sync.is_none().then(RegularAppMonitor::new);
     spawn_system_pid_scanner();
     loop {
+        // legacy scoped 会话清理不依赖运行开关：即使模块停用，历史泄漏的 srx_fuse 仍会占用 pid 与线程预算，启动阶段能清就清。
+
         if !runtime_control::is_module_runtime_enabled() {
             cleanup_all_mount_states();
             log::info!("daemon stop reason=runtime_disabled");
