@@ -7,8 +7,8 @@ pub use crate::daemon_mount_reclaim::{
     cleanup_all_mount_states, prune_stale_mount_states, reap_orphan_scoped_sessions,
 };
 use crate::daemon_mount_reclaim::{
-    has_dead_fuse_child, reap_child, remember_stuck_mount_child, should_skip_for_stuck_children,
-    state_value,
+    has_dead_fuse_child, reap_child, remember_stuck_mount_child, scoped_session_budget_exhausted,
+    should_skip_for_stuck_children, state_value,
 };
 use crate::domain::PathMapping;
 use crate::fuse_redirect::{
@@ -1055,14 +1055,26 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         let (fuse_children, attempt) = if let Some(state) = preattached_host {
             (vec![state], ScopedMountAttempt::Ready)
         } else if !fuse_roots.is_empty() {
-            match start_scoped_fuse_services(
-                request,
-                fuse_roots,
-                planner.real_storage_anchor(),
-                deadline_ms,
-            ) {
-                Some(children) => (children, ScopedMountAttempt::Ready),
-                None => (Vec::new(), ScopedMountAttempt::Failed),
+            if let Some(live) = scoped_session_budget_exhausted() {
+                // 会话总数已到全局预算：本轮不再 fork，由结论统一回退 mount namespace，
+                // 把"无限 fork"收敛成可观测的降级而不是继续逼近进程号空间上限。
+                log::warn!(
+                    "daemon scoped session budget exhausted live={} pid={} pkg={}",
+                    live,
+                    request.pid,
+                    request.package_name
+                );
+                (Vec::new(), ScopedMountAttempt::BudgetExhausted)
+            } else {
+                match start_scoped_fuse_services(
+                    request,
+                    fuse_roots,
+                    planner.real_storage_anchor(),
+                    deadline_ms,
+                ) {
+                    Some(children) => (children, ScopedMountAttempt::Ready),
+                    None => (Vec::new(), ScopedMountAttempt::Failed),
+                }
             }
         } else if gate_allowed {
             (Vec::new(), ScopedMountAttempt::NoRootsNeeded)

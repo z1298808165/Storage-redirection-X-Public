@@ -26,6 +26,10 @@ pub enum ScopedMountAttempt {
     Ready,
     /// 已尝试启动 scoped 服务但失败。
     Failed,
+    /// 全局 scoped 会话预算已满：本轮未尝试启动服务，调用方回退 mount namespace。
+    // quality-allow(lint-suppression): 仅 daemon 挂载路径构造；lib 目标共享同一枚举。
+    #[allow(dead_code)]
+    BudgetExhausted,
 }
 
 /// [`conclude_scoped_mount`] 的结论。
@@ -76,9 +80,9 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
             config::record_fuse_capability_result(false, failed_reason, package_name)
         }
         // 未尝试就不产生新证据。这里刻意不写快照：把「没试」写成一次结果会让计数失去意义。
-        ScopedMountAttempt::GateBlocked | ScopedMountAttempt::NoRootsNeeded => {
-            config::fuse_capability()
-        }
+        ScopedMountAttempt::GateBlocked
+        | ScopedMountAttempt::NoRootsNeeded
+        | ScopedMountAttempt::BudgetExhausted => config::fuse_capability(),
     };
 
     let scoped_fuse_effective = attempt == ScopedMountAttempt::Ready && sessions > 0;
@@ -92,6 +96,9 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
     } else if attempt == ScopedMountAttempt::GateBlocked {
         // 保留既有字符串：CI 诊断脚本按它检索。
         "capability_unavailable_or_unknown"
+    } else if attempt == ScopedMountAttempt::BudgetExhausted {
+        // 预算命中不是能力故障：单独一个原因串，避免被读成设备不可用。
+        "scoped_session_budget_exhausted"
     } else if attempt == ScopedMountAttempt::NoRootsNeeded {
         "rules_need_no_scoped_fuse_root"
     } else {
@@ -120,7 +127,8 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
     );
 
     ScopedMountOutcome {
-        needs_namespace_fallback: attempt == ScopedMountAttempt::Ready && sessions == 0,
+        needs_namespace_fallback: (attempt == ScopedMountAttempt::Ready && sessions == 0)
+            || attempt == ScopedMountAttempt::BudgetExhausted,
     }
 }
 

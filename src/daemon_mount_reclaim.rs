@@ -39,8 +39,9 @@ const STUCK_MOUNT_SKIP_LOG_STEP: u64 = 32;
 const SCOPED_SESSION_PROC_NAME: &[u8] = b"srx_fuse";
 /// 孤儿 scoped 会话的最小存活时长：低于该值可能是仍在握手中的新会话，不收割。
 const ORPHAN_SCOPED_MIN_AGE_SECS: u64 = 120;
-/// 存活 scoped 会话数安全阀：回收侧超过它时按启动时间从最老的孤儿继续收割，避免
-/// 异常累积把进程号空间顶满。数值按正常配置（多应用 × 多根）留足余量。
+/// 存活 scoped 会话数安全阀：回收侧超过它时按启动时间从最老的孤儿继续收割；创建侧
+/// 达到它时不再 fork，让请求回退 mount namespace。数值按正常配置（多应用 × 多根）
+/// 留足余量，只在异常累积时生效。
 const MAX_LIVE_SCOPED_SESSIONS: usize = 512;
 
 static STUCK_MOUNT_CHILDREN: Lazy<Mutex<Vec<StuckMountChild>>> =
@@ -682,4 +683,30 @@ fn terminate_scoped_session(pid: i32) -> bool {
     // SAFETY: kill 只接收整型参数；pid 来自 /proc 且已校验 comm 与 namespace。
     let ret = unsafe { libc::kill(pid, SIGKILL) };
     ret == 0
+}
+
+/// 当前存活的 scoped 会话数。创建侧预算判定用；回收侧扫描自带计数。
+fn live_scoped_session_count() -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut live = 0usize;
+    for entry in entries.flatten() {
+        let Ok(comm) = std::fs::read(entry.path().join("comm")) else {
+            continue;
+        };
+        if trim_proc_comm(&comm) == SCOPED_SESSION_PROC_NAME {
+            live = live.saturating_add(1);
+        }
+    }
+    live
+}
+
+/// scoped 会话创建预算：已满时返回当前存活数，调用方据此回退 mount namespace。
+///
+/// 单次挂载请求最多 fork 16 个会话根，但全机此前没有总量约束：泄漏或反复重挂只能靠
+/// 进程号空间兜底。预算把"无限 fork"收敛成可观测的降级。
+pub fn scoped_session_budget_exhausted() -> Option<usize> {
+    let live = live_scoped_session_count();
+    (live >= MAX_LIVE_SCOPED_SESSIONS).then_some(live)
 }
