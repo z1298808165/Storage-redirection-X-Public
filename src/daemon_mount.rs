@@ -1058,6 +1058,14 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             &request.package_name,
             request.storage_backend_mode,
         );
+        // 宿主真的把存储视图根盖住时（本轮新建或既有层已在服务），`Android/data|media|obb`
+        // 由 FUSE 数据面自理，不能再叠一层系统视图 bind；纯 bind 轮次则相反，必须恢复
+        // 私有目录。这个判据此前取自「规划根」，规划根在 bind 路径下非空会误判成已覆盖。
+        let host_covers_view = preattached_host.is_ok();
+        let view_root_for_private = {
+            let user_id = crate::platform::user_id_from_uid(request.uid);
+            crate::platform::paths::storage_user_root_for_user(user_id)
+        };
         let (fuse_children, attempt, host_skip) = match preattached_host {
             Ok(Some(state)) => (vec![state], ScopedMountAttempt::Ready, None),
             Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed, None),
@@ -1141,7 +1149,12 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         // `MountPlanner::restore_own_private_system_view`。
         // 走到这里时存储根要么已由宿主覆盖（不会执行到本行），要么就是纯 namespace bind，
         // 没有任何 FUSE 层压着 `Android/data|media|obb`，私有目录恢复应按「无覆盖」处理。
-        let restored_own_private = planner.restore_own_private_system_view(&[]);
+        let private_skip_roots: Vec<String> = if host_covers_view {
+            vec![view_root_for_private]
+        } else {
+            Vec::new()
+        };
+        let restored_own_private = planner.restore_own_private_system_view(&private_skip_roots);
         log::info!(
             "own private system view restored count={} pkg={} pid={}",
             restored_own_private,
