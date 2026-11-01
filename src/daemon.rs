@@ -1792,6 +1792,7 @@ fn spawn_system_pid_scanner() {
             let mut known_tasks: HashMap<i32, HashSet<i32>> = HashMap::new();
             let mut known_pids: HashSet<i32> = HashSet::new();
             let mut last_full_scan_ms: i64 = -1;
+            let mut last_written_digest: Option<u64> = None;
             loop {
                 let now_ms = crate::platform::paths::monotonic_ms();
                 let due_full_scan = last_full_scan_ms < 0
@@ -1824,7 +1825,7 @@ fn spawn_system_pid_scanner() {
                         None => false,
                     };
                     if task_set_changed || due_full_scan {
-                        write_system_pid_table(&target, &staging);
+                        write_system_pid_table(&target, &staging, &mut last_written_digest);
                         last_full_scan_ms = now_ms;
                     }
                 }
@@ -1880,7 +1881,11 @@ fn snapshot_pid_set() -> Option<HashSet<i32>> {
 }
 
 /// 全量扫描并原子落盘 pid 表（进程 pid + 每进程全部线程 tid）。
-fn write_system_pid_table(target: &str, staging: &str) {
+///
+/// `last_digest` 记录上一次成功落盘的内容指纹：内容不变时只做一次存在性检查就跳过写入。
+/// 全量周期（2 秒）在系统稳定期同样会走到这里，若不比对指纹就会每 2 秒重写一份数百 KB
+/// 的表，形成持续的写放大（真机实测 455KB/19.8k 行，每 2 秒一次 rename）。
+fn write_system_pid_table(target: &str, staging: &str, last_digest: &mut Option<u64>) {
     let mut lines = String::new();
     let Ok(entries) = std_fs::read_dir("/proc") else {
         return;
@@ -1906,11 +1911,19 @@ fn write_system_pid_table(target: &str, staging: &str) {
             }
         }
     }
-    if !lines.is_empty()
-        && std_fs::write(staging, lines.as_bytes()).is_ok()
-        && std_fs::rename(staging, target).is_ok()
-    {
+    if lines.is_empty() {
+        return;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&lines, &mut hasher);
+    let digest = std::hash::Hasher::finish(&hasher);
+    // 内容相同且文件仍在：跳过写入。文件被清理时靠存在性检查兜底重写。
+    if *last_digest == Some(digest) && std_fs::metadata(target).is_ok() {
+        return;
+    }
+    if std_fs::write(staging, lines.as_bytes()).is_ok() && std_fs::rename(staging, target).is_ok() {
         let _ = std_fs::set_permissions(target, std_fs::Permissions::from_mode(0o644));
+        *last_digest = Some(digest);
     }
 }
 
