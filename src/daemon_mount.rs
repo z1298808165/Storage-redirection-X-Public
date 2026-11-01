@@ -1660,6 +1660,41 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
     }
     let targets = module_paths::normalize_mount_targets(&targets);
     if targets.is_empty() && fuse_children.is_empty() {
+        // 两个账本都为空不代表命名空间干净：写状态失败、账本被外部清理或旧版本
+        // 残留都可能在目标上留下本模块的层，而这些层没有记录，后续清理不会再被
+        // 加入候选。这里按模块挂载来源做一次兜底识别与摘除，只处理判定为本应用
+        // 重定向的层；仍有无法摘除的层时保守返回 Unverified，不进入挂载。
+        let leftovers =
+            crate::module_mount_source::app_redirect_mounts_in(0, &request.package_name);
+        let mut leftover_cleared = true;
+        for mount in leftovers.iter().rev() {
+            let Ok(c_target) = CString::new(mount.mount_point.as_str()) else {
+                leftover_cleared = false;
+                continue;
+            };
+            // SAFETY: c_target 是以 NUL 结尾的合法路径且在本次调用期间保持存活；
+            // MNT_DETACH 只影响当前命名空间的挂载视图，不触碰其它命名空间。
+            if unsafe { umount2(c_target.as_ptr(), MNT_DETACH) } == 0 {
+                log::info!(
+                    "daemon unmount unrecorded layer target={} source={} mount_id={}",
+                    mount.mount_point,
+                    mount.source,
+                    mount.mount_id
+                );
+                continue;
+            }
+            let errno = last_errno();
+            if errno != libc::EINVAL && errno != libc::ENOENT {
+                log::warn!(
+                    "daemon unmount unrecorded layer failed target={} mount_id={} errno={} {}",
+                    mount.mount_point,
+                    mount.mount_id,
+                    errno,
+                    errno_text(errno)
+                );
+                leftover_cleared = false;
+            }
+        }
         let state_removed =
             std::fs::remove_file(state_path).is_ok() || std::fs::metadata(state_path).is_err();
         if state_removed
@@ -1668,7 +1703,7 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
         {
             let _ = mount_identity::remove(&request.package_name, request.pid);
         }
-        return if state_removed {
+        return if state_removed && leftover_cleared {
             ClearOutcome::Cleared
         } else {
             ClearOutcome::Unverified

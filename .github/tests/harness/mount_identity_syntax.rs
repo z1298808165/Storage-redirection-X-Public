@@ -74,8 +74,21 @@ mod platform {
 // ---- 归属判定桩：capture 只需"最顶层是不是本模块挂载"。 ----
 // 真实实现看挂载源与 root 沙箱路径；这里仅按抽取用例里使用的挂载源前缀近似。
 mod module_mount_source {
+    pub struct ModuleMount {
+        pub mount_id: u64,
+        pub source: String,
+        pub mount_point: String,
+        pub is_sandbox_root: bool,
+    }
+
     pub fn is_module_redirect_mount(source: &str, _root: &str, _target: &str, _pkg: &str) -> bool {
         source.starts_with("srx_fuse")
+    }
+
+    // 空账本分支的兜底清理会把这里的返回值当"命名空间内仍存在的模块层"逐条摘除；
+    // 本 harness 的用例只验证账本目标与顺序，返回空表示没有可兜底识别的残留。
+    pub fn app_redirect_mounts_in(_pid: i32, _package_name: &str) -> Vec<ModuleMount> {
+        Vec::new()
     }
 }
 
@@ -265,6 +278,24 @@ fn terminate_recorded_fuse_child(_child: &str) -> bool {
 }
 
 fn last_errno() -> i32 {
+    0
+}
+
+fn errno_text(_errno: i32) -> &'static str {
+    "harness"
+}
+
+// ---- 空账本兜底清理的 umount 链路桩：harness 不真正摘挂载，只验证路径与错误分类。 ----
+use std::ffi::CString;
+
+const MNT_DETACH: i32 = 2;
+
+mod libc {
+    pub const EINVAL: i32 = 22;
+    pub const ENOENT: i32 = 2;
+}
+
+unsafe fn umount2(_target: *const std::ffi::c_char, _flags: i32) -> i32 {
     0
 }
 
