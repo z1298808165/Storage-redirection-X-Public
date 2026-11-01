@@ -83,48 +83,12 @@ daemon_process_matches() {
   # 按 comm 而不是 exe 判定：daemon 的宿主会话（srx_fuse_host）与 scoped FUSE
   # 子进程（srx_fuse）都由 daemon fork 而来、exe 同样是 srx_daemon，只有 comm
   # 被 prctl 改过。若按 exe 判断，daemon 主进程崩溃后这些孤儿子进程会让存活检测
-  # 误判为「还在运行」，watchdog 永不重启，reconcile 停摆、新应用只能走 scoped。
+  # 误判为「还在运行」，pid 文件修复失效，新应用只能走 scoped。
   [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "srx_daemon" ]
 }
 
-# 清理 daemon 的遗留子进程：它们继承了 daemon 的实例锁 fd（flock），daemon 主进程
-# 崩溃后若不先杀掉，新 daemon 启动时 flock 冲突会 already_running 静默退出。
-kill_daemon_children() {
-  for child in srx_fuse_host srx_fuse; do
-    for pid in $(pidof "$child" 2>/dev/null); do
-      kill -9 "$pid" 2>/dev/null || true
-    done
-  done
-}
-
-daemon_watchdog() {
-  while true; do
-    if [ -f "$RUNTIME_DISABLE_FILE" ]; then
-      exit 0
-    fi
-    daemon_alive=0
-    if [ -r "$daemon_pid_file" ] && daemon_process_matches "$(cat "$daemon_pid_file" 2>/dev/null)"; then
-      daemon_alive=1
-    else
-      for pid in $(pidof srx_daemon 2>/dev/null); do
-        if daemon_process_matches "$pid"; then
-          daemon_alive=1
-          break
-        fi
-      done
-    fi
-    if [ "$daemon_alive" -eq 0 ]; then
-      log -p w -t Boot "srx daemon watchdog: not running, cleanup and restart"
-      kill_daemon_children
-      sleep 1
-      start_srx_daemon
-      # 重启后的第一次检查保持短间隔，尽快发现启动失败。
-      sleep 5
-      continue
-    fi
-    sleep "${DAEMON_WATCHDOG_INTERVAL_SECONDS:-20}"
-  done
-}
+# daemon 的崩溃自动重启由 daemon 自守护看门狗承担（pidfd 事件驱动，空闲零唤醒、
+# 退出即时感知），见 src/daemon_watchdog.rs；本脚本不再运行周期性 pidof 轮询。
 
 
 # 配置 WebUI
@@ -173,4 +137,3 @@ for service_name in $SERVICE_PARTS; do
 done
 
 boot_guard_wait &
-daemon_watchdog &
