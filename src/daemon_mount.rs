@@ -1114,7 +1114,19 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             mounted_targets = planner.take_mounted_targets();
         }
         if !write_mount_state(request, plan, &mounted_targets, &fuse_children) {
-            log::warn!("daemon mount state save failed pid={}", request.pid);
+            // 没有账本就没有回收依据：先回滚刚建立的 scoped 会话再报失败，否则这些
+            // 子进程会以 init 收养的形式常驻，连同每个会话约 10 个线程占用进程号空间。
+            log::warn!(
+                "daemon mount state save failed, rolling back sessions pid={} pkg={} sessions={}",
+                request.pid,
+                request.package_name,
+                fuse_children.len()
+            );
+            rollback_scoped_fuse_services(&fuse_children);
+            let _ = send_mount_result(sock, -1);
+            // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
+            unsafe { close(sock) };
+            return false;
         }
         // 自有私有目录恢复放在所有存储根挂载动作之后（与 companion 路径同顺序）：
         // 提前到 apply 阶段做会被随后的视图根 FUSE 挂载整体遮蔽。scoped 根透传给
