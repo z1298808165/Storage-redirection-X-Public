@@ -18,6 +18,8 @@
 
 主要日志会按大小轮转并保留 `.1`、`.2` 历史，例如 `file_monitor.log`、`file_monitor.log.1`、`file_monitor.log.2`。`running.log`、`file_monitor.log` 由 `srx_daemon` 私有日志接收器统一写入，默认不需要常驻 `logcat` 采集器。生效次数统计 `stats` 同样由 `srx_daemon` 写入，但存放在模块目录之外的持久路径 `/data/adb/storage.redirect.x/stats`，模块升级不会影响该文件。
 
+`media_provider_state.log` 与 `app_status.log` 不是周期采样：采集器只在详细日志打开、配置变化与开机时各抓一次快照，其余现场由诊断包导出与停摆取证按需采集。因此关闭详细日志后这两个文件不会再增长，属于预期行为。
+
 日志包会在导出一开始保存分层 logcat 快照，并在末尾补抓导出期间日志。`-t 10000` 等参数表示行数而不是秒数；可查看包内 `state/logcat-capture.txt` 判断实际截取时间。为控制体积，main/system 只保留 8000 行上下文，相关标签保留 10000 行，events 保留 1500 行；只有独立且通常较小的 crash 环形缓冲区会完整导出。
 
 ## 关键日志标记
