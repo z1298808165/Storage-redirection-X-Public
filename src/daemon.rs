@@ -1771,6 +1771,11 @@ const SYSTEM_PID_SCAN_INTERVAL_MS: u64 = 2_000;
 /// 全量扫描，让「新服务启动 → 立即写存储」的场景（如 Mirror 按需启动后建
 /// MainCache）在数百毫秒内入表，而不是等下一个全量周期。
 const SYSTEM_PID_POLL_INTERVAL_MS: u64 = 500;
+/// 空闲期放宽后的全量扫描周期：连续 [`SYSTEM_PID_IDLE_AFTER_MS`] 没有任何进程/线程
+/// 变化时使用。系统稳定期逐进程 getdents 是纯开销，放宽后按比例下降。
+const SYSTEM_PID_IDLE_SCAN_INTERVAL_MS: u64 = 5_000;
+/// 判定空闲所需的静默时长。
+const SYSTEM_PID_IDLE_AFTER_MS: i64 = 60_000;
 
 /// 周期扫描 /proc 并落盘「tid uid 包名」表（tmp/system_pids）。
 ///
@@ -1793,16 +1798,33 @@ fn spawn_system_pid_scanner() {
             let mut known_pids: HashSet<i32> = HashSet::new();
             let mut last_full_scan_ms: i64 = -1;
             let mut last_written_digest: Option<u64> = None;
+            let mut last_activity_ms: i64 = -1;
+            let mut idle_interval = false;
             loop {
                 let now_ms = crate::platform::paths::monotonic_ms();
+                // 进程/线程长时间无变化时放宽全量周期；500ms 廉价轮询不变，新进程仍即时入表，
+                // 任何变化都会把周期立即拉回 2s。
+                let idle = last_activity_ms >= 0
+                    && now_ms.saturating_sub(last_activity_ms) >= SYSTEM_PID_IDLE_AFTER_MS;
+                let mut scan_interval = SYSTEM_PID_SCAN_INTERVAL_MS;
+                if idle {
+                    scan_interval = SYSTEM_PID_IDLE_SCAN_INTERVAL_MS;
+                }
+                if idle != idle_interval {
+                    idle_interval = idle;
+                    log::info!(
+                        "system pid scanner idle={} interval_ms={}",
+                        idle,
+                        scan_interval
+                    );
+                }
                 let due_full_scan = last_full_scan_ms < 0
-                    || now_ms.saturating_sub(last_full_scan_ms)
-                        >= SYSTEM_PID_SCAN_INTERVAL_MS as i64;
+                    || now_ms.saturating_sub(last_full_scan_ms) >= scan_interval as i64;
                 // 廉价探测先行：仅一次 /proc readdir 对比进程集合。pid 集未变且未到
                 // 全量周期时跳过逐进程 task 扫描（约 400 次 getdents + 哈希对比）。
                 // 真机实测（issue #2 反馈）线程级抖动在繁忙设备上几乎连续发生，
                 // 每 500ms 都做全量 task 扫描 + 落盘会把 srx-syspid 线程推到约 10%
-                // 的大核占用。线程级变化改由 2s 全量周期覆盖，新**进程**仍即时入表。
+                // 的大核占用。线程级变化改由全量周期覆盖，新**进程**仍即时入表。
                 let pid_set_changed = match snapshot_pid_set() {
                     Some(current) => {
                         let changed = current != known_pids;
@@ -1813,6 +1835,7 @@ fn spawn_system_pid_scanner() {
                     }
                     None => false,
                 };
+                let mut changed = pid_set_changed;
                 if pid_set_changed || due_full_scan {
                     let task_set_changed = match snapshot_task_sets() {
                         Some(current) => {
@@ -1824,10 +1847,14 @@ fn spawn_system_pid_scanner() {
                         }
                         None => false,
                     };
+                    changed |= task_set_changed;
                     if task_set_changed || due_full_scan {
                         write_system_pid_table(&target, &staging, &mut last_written_digest);
                         last_full_scan_ms = now_ms;
                     }
+                }
+                if changed {
+                    last_activity_ms = now_ms;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(
                     SYSTEM_PID_POLL_INTERVAL_MS,
@@ -1840,9 +1867,8 @@ fn spawn_system_pid_scanner() {
 }
 
 /// 廉价任务集快照：每进程一次 /proc/<pid>/task readdir（约 400 次 getdents，
-/// 毫秒级），不读任何文件内容。进程或线程集合的任何变化都触发全量重扫，
-/// 使「服务启动后立刻写存储」「服务新起工作线程后写存储」都能在数百毫秒内
-/// 入表，而不是等下一个全量周期。
+/// 毫秒级），不读任何文件内容。进程集合变化由 500ms 廉价轮询即时发现；线程级变化
+/// 由全量周期覆盖（活跃期 2s，连续 60s 无变化后放宽到 5s），且只在集合变化时触发。
 fn snapshot_task_sets() -> Option<HashMap<i32, HashSet<i32>>> {
     let entries = std_fs::read_dir("/proc").ok()?;
     let mut result: HashMap<i32, HashSet<i32>> = HashMap::new();
