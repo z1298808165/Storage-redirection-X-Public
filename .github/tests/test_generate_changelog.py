@@ -173,6 +173,45 @@ class GenerateChangelogTest(unittest.TestCase):
         self.assertIn("validate_release_notes.py", release)
         self.assertNotIn('RELEASE_NOTES="docs/release-notes', ci)
 
+    def test_credit_fields_are_parsed_separately_from_verification(self) -> None:
+        body = """变更：开机守卫改为连续两次失败才停用。
+验证：三个脚本 sh -n 通过。
+思路来源：上游 PR Kindness-Kismet/Storage-redirection-X-Public#66
+贡献者：People-11（https://github.com/People-11）"""
+        fields = CHANGELOG.parse_body_fields(body)
+        self.assertEqual(fields["贡献者"], "People-11（https://github.com/People-11）")
+        self.assertIn("Kindness-Kismet/Storage-redirection-X-Public#66", fields["思路来源"])
+        # 致谢字段是独立条目，不能被上一个字段吞掉。
+        self.assertNotIn("People-11", fields["验证"])
+        self.assertNotIn("思路来源", fields["验证"])
+
+    def test_credits_are_rendered_as_dedicated_section(self) -> None:
+        commit = CHANGELOG.CommitInfo(
+            sha="abc123456789",
+            subject="修复(守护)：开机守卫连续两次失败才停用",
+            body="贡献者：People-11\n思路来源：上游 PR #66",
+            fields={"贡献者": "People-11", "思路来源": "上游 PR #66"},
+        )
+        credits = CHANGELOG.collect_credits([commit, commit], "ci")
+        self.assertEqual(len(credits), 1)
+        self.assertEqual(credits[0], "感谢 People-11，来源：上游 PR #66")
+        analysis = {component: {section: [] for section in CHANGELOG.SECTIONS} for component in ("module", "app")}
+        analysis["module"]["fixed"] = [{"text": "修复保存问题", "files": ["src/a.rs"]}]
+        markdown = CHANGELOG.render_analysis("release", "1.2.58", "v1.2.57", "abc123456789", analysis, credits)
+        self.assertIn("### 致谢", markdown)
+        self.assertIn("感谢 People-11，来源：上游 PR #66", markdown)
+        self.assertEqual(RELEASE_NOTES.validation_errors(markdown, "1.2.58"), [])
+
+    def test_ensure_credits_keeps_handwritten_section(self) -> None:
+        import tempfile
+
+        markdown = "# Storage Redirect X v1.2.58\n\n## 模块更新\n\n### 修复了什么问题\n\n- 修复保存问题。\n\n### 致谢\n\n- 感谢 People-11。\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "changelog.md"
+            path.write_text(markdown, encoding="utf-8")
+            CHANGELOG.ensure_credits(path, "release")
+            self.assertEqual(path.read_text(encoding="utf-8"), markdown)
+
     def test_release_notes_validator_accepts_final_result_sections(self) -> None:
         markdown = """# Storage Redirect X v1.2.58
 

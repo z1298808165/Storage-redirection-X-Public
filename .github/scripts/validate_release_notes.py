@@ -15,6 +15,7 @@ DETAIL_HEADINGS = {
     "功能变化",
     "新功能怎么使用",
     "注意事项",
+    "致谢",
     "其它",
 }
 FORBIDDEN_PATTERNS = (
