@@ -58,6 +58,21 @@ capture_cmd() {
   fi
 }
 
+# 有界采集：把命令输出交给调用方的重定向复用，但绝不无限等待。
+#
+# 导出的采集阶段会碰到可能被 FUSE 拖死的对象：`mount`/`df` 要扫全部挂载，
+# `ls -la /storage/emulated/0` 与 `ls -l /proc/<pid>/fd` 要对视图做路径解析。
+# 存储停摆时这些调用会停在不可中断的 dentry 查找里，整个导出卡在「正在采集存储
+# 挂载状态」直到上层 190 秒超时才失败（历史现象为此专门有一个 issue）。
+# 超时只丢这一段证据，不能让整包导出失败。
+bounded_stream() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 8 "$@" 2>/dev/null || true
+  else
+    "$@" 2>/dev/null || true
+  fi
+}
+
 copy_file_if_exists() {
   src="$1"
   dst="$2"
@@ -258,7 +273,7 @@ collect_process_state() {
 collect_mount_state() {
   {
     echo "mount:"
-    mount 2>/dev/null
+    bounded_stream mount
     echo
     echo "/proc/self/mountinfo:"
     cat /proc/self/mountinfo 2>/dev/null
@@ -267,7 +282,7 @@ collect_mount_state() {
     cat /proc/mounts 2>/dev/null
     echo
     echo "df:"
-    df 2>/dev/null
+    bounded_stream df
   } > "$STATE_DIR/mounts.txt" 2>&1
 
   {
@@ -282,8 +297,8 @@ collect_mount_state() {
       /data/media \
       /data/media/0; do
       echo "## $path"
-      ls -la "$path" 2>/dev/null || true
-      ls -laZ "$path" 2>/dev/null || true
+      bounded_stream ls -la "$path"
+      bounded_stream ls -laZ "$path"
     done
   } > "$STATE_DIR/storage-paths.txt" 2>&1
 }
@@ -321,7 +336,7 @@ collect_proc_for_pid() {
     "/proc/$pid/mountinfo" > "$prefix-mountinfo-storage.txt" 2>/dev/null || true
 
   {
-    ls -l "/proc/$pid/fd" 2>/dev/null | head -n 80
+    bounded_stream ls -l "/proc/$pid/fd" | head -n 80
   } > "$prefix-fd.txt" 2>&1
 
   {
@@ -422,7 +437,7 @@ collect_dumpsys_state() {
       com.android.documentsui \
       com.google.android.documentsui; do
       echo "## dumpsys package $package_name"
-      dumpsys package "$package_name" 2>/dev/null | head -n 180
+      bounded_stream dumpsys package "$package_name" | head -n 180
       echo
     done
   } > "$STATE_DIR/dumpsys-key-packages.txt" 2>&1
