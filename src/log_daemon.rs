@@ -455,11 +455,12 @@ impl LogState {
                     .append(&format_running_line("I", TAG_STATUS, message));
             }
             _ => {
-                // 残留发送方（如尚未重启的宿主进程）在全局 verbose 关闭后仍可能
-                // 以 Debug/Verbose 级别发送运行日志包；在接收侧按 daemon 当前配置
-                // 二次过滤，避免单个陈旧 emitter 把逐操作日志风暴维持到下一次
-                // 宿主换代。Warn/Error 与监控、统计、控制通道不受影响。
-                if matches!(level, "D" | "V") && !crate::logging::is_debug_logging_enabled() {
+                // 残留发送方（如尚未重启的宿主进程、仍在运行的应用注入侧）在全局
+                // verbose 关闭后仍可能按旧判定发送 Info/Debug/Verbose 级运行日志；
+                // 在接收侧只保留 Warn/Error，其余按 daemon 当前配置二次过滤，避免
+                // 单个陈旧 emitter 把逐操作日志继续写到下一次宿主换代。监控、统计、
+                // 控制、热重载与状态通道有独立分支，不受此门禁影响。
+                if !matches!(level, "W" | "E") && !crate::logging::is_debug_logging_enabled() {
                     return;
                 }
                 self.running

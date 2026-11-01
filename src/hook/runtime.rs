@@ -382,7 +382,9 @@ fn create_storage_parent_dirs_recursive(
     }
 
     if !fs::is_directory(&base) {
-        log::warn!(
+        // 该进程的命名空间里看不到数据媒体顶层目录（例如系统写入进程只映射了视图），
+        // 是每次写入都会复现的正常形态，不能按告警每访问一次的节奏刷屏。
+        log::debug!(
             "skip auto mkdir missing storage top dir base={} path={}",
             base,
             path

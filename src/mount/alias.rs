@@ -117,7 +117,7 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && !path_exists(&target) {
-                log::warn!(
+                log::debug!(
                     "alias diag skip missing target={} source={}",
                     target,
                     source
@@ -125,7 +125,7 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
-                log::warn!(
+                log::debug!(
                     "alias diag skip self-shadowing target={} source={}",
                     target,
                     source
@@ -139,7 +139,7 @@ impl MountPlanner {
             }
 
             let mounted = self.bind_mount(source, &target, is_recursive);
-            log::warn!(
+            log::debug!(
                 "alias diag bind target={} primary={} mounted={} source={}",
                 target,
                 is_primary_target,
@@ -220,7 +220,7 @@ impl MountPlanner {
                 // 诊断：该出口此前不产生任何日志，导致「别名路径不存在」与「别名已挂载」
                 // 在 CI 日志里无法区分。Android 13 场景 29 的映射只落地后端别名，需要确认
                 // 其余别名的挂载点是否在此被跳过。
-                log::warn!(
+                log::debug!(
                     "alias diag skip missing target={} source={}",
                     target,
                     source
@@ -228,7 +228,7 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
-                log::warn!(
+                log::debug!(
                     "alias diag skip self-shadowing target={} source={}",
                     target,
                     source
@@ -246,7 +246,7 @@ impl MountPlanner {
             // 才记录，导致设备侧无法判断某个别名究竟挂上了还是被内核拒绝。Android 13
             // 场景 29 中应用视图别名未出现在 skip 名单却也没在 mountinfo 出现，需要用这条
             // 记录区分「bind 返回 false」与「bind 成功但未在当前命名空间生效」。
-            log::warn!(
+            log::debug!(
                 "alias diag bind target={} primary={} mounted={} source={}",
                 target,
                 is_primary_target,
@@ -341,7 +341,7 @@ impl MountPlanner {
                 // `bind_overlay_mount_with_storage_aliases`），而此前只在非 overlay 版本
                 // 加了探针，导致 Android 13 场景 29 的映射别名既没有 skip 也没有 bind
                 // 记录，无法区分「别名不存在」与「挂载未生效」。
-                log::warn!(
+                log::debug!(
                     "alias diag overlay skip missing target={} source={}",
                     target,
                     source
@@ -349,7 +349,7 @@ impl MountPlanner {
                 continue;
             }
             if !is_primary_target && should_skip_self_shadowing_alias(source, &target) {
-                log::warn!(
+                log::debug!(
                     "alias diag overlay skip self-shadowing target={} source={}",
                     target,
                     source
@@ -364,7 +364,7 @@ impl MountPlanner {
 
             let overlay_bind_ok = self.bind_mount_overlay(source, &target, is_recursive);
             // 诊断：成功路径原先只有按步长节流的 debug 日志，设备侧不可见。
-            log::warn!(
+            log::debug!(
                 "alias diag overlay bind target={} primary={} mounted={} source={}",
                 target,
                 is_primary_target,

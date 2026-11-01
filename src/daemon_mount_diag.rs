@@ -379,7 +379,7 @@ pub(crate) fn log_mounted_target_view(targets: &[String], request: &MountRequest
             }
         })
         .unwrap_or_else(|_| "<read failed>".to_string());
-    log::warn!(
+    log::debug!(
         "mount view diag self_ns={} app_ns={} app_pid={} srtprobe_lines={} app_srtprobe_lines={}",
         self_ns,
         app_ns,

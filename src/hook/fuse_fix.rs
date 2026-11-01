@@ -184,7 +184,7 @@ fn install_target_if_enabled() {
             )
         });
     if let Some(probe) = native_probe.as_deref() {
-        log::warn!(
+        log::debug!(
             "fuse fix diagnostic property={} api={}",
             probe,
             crate::platform::android_api_level()

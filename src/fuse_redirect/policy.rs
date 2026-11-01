@@ -393,7 +393,9 @@ impl SharedPolicyTable {
                 policy.package_name
             );
         } else {
-            log::warn!(
+            // 应用进程尚未启动或已退出时取不到命名空间，是全量登记扫描中的正常形态；
+            // 每次扫描都会复现，按详细日志记录，避免日常日志被扫描轨迹占满。
+            log::debug!(
                 "fuse policy namespace unavailable uid={} app_pid={}",
                 uid,
                 app_pid

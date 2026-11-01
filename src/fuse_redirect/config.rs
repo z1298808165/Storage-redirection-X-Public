@@ -2492,7 +2492,8 @@ pub fn scoped_mount_roots_for_hybrid_rules(
     // 诊断：混合规则下是否产生 scoped FUSE 根，直接决定视图根上会不会多一层 FUSE bind。
     // Android 13 场景 29 的映射只落地后端别名，而通过的 Android 14 在视图根上多一层
     // FUSE（设备号 0:88 vs 视图根的 254:40），因此需要确认该平台是否本就走不到 FUSE。
-    log::warn!(
+    // 每次挂载规划都会命中，属于排查用轨迹，只在详细日志下记录。
+    log::debug!(
         "scoped roots diag uid={} map_only={} allowed={} excl={} sandbox={} ro={} mappings={} wildcard_roots={}",
         uid,
         is_mapping_mode_only,
@@ -2703,9 +2704,9 @@ fn compact_scoped_mount_roots(mut roots: Vec<String>, storage_root: &str) -> Vec
     paths::sort_dedup_paths_case_insensitive(&mut top_level);
     if !top_level.is_empty() && top_level.len() <= super::MAX_SCOPED_FUSE_ROOTS {
         // 超过软目标意味着该应用会常驻多于 TARGET 个 FUSE 会话（空闲时各自阻塞在
-        // /dev/fuse read 上不耗 CPU，但每个会话都是一个进程的内存开销）。这是
-        // 功耗/内存排查时最需要一眼看到的信号，必须在现场日志里可见。
-        log::warn!(
+        // /dev/fuse read 上不耗 CPU，但每个会话都是一个进程的内存开销）。这条轨迹
+        // 每次规划都会命中，属于功耗/内存排查信号，只在详细日志下记录。
+        log::debug!(
             "scoped roots expanded past soft target count={} raw={} list={}",
             top_level.len(),
             effective.len(),
