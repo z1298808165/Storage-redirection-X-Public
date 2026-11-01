@@ -1342,6 +1342,19 @@ fn reconcile_running_apps(
             skipped += 1;
             continue;
         }
+        // 状态缺失（没有账本）时重挂得不到不同结果，只会在同一进程上叠加会话与挂载层。
+        // 首次缺失照常放行，30 秒窗口内的重复判定跳过；`Forced`（显式请求）不参与退避。
+        if mode != ReconcileMode::Forced
+            && plan.request.operation == MountOperation::Reload
+            && crate::daemon_mount::is_mount_state_missing(&plan.request)
+            && crate::daemon_mount::state_missing_remount_backoff(
+                plan.request.pid,
+                plan.start_time_ticks.unwrap_or(0),
+            )
+        {
+            skipped += 1;
+            continue;
+        }
         if mode == ReconcileMode::Prewarm
             && (offset >= PREWARM_MAX_REQUESTS || !plan.should_run_in_prewarm())
         {

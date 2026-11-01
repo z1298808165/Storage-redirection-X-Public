@@ -40,8 +40,18 @@ const PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
 const FUSE_READY_TIMEOUT_SEC: i64 = 4;
 const DAEMON_MOUNT_SLOW_MS: i64 = 20;
 const MAX_UNMOUNT_PASSES_PER_TARGET: usize = 32;
+/// 状态缺失后的重挂退避窗口（毫秒）。
+///
+/// 状态缺失的常见来源是应用侧状态文件尚未落盘、被清理或挂载失败回滚，此时立即重挂
+/// 得不到不同结果，只会在应用 namespace 上再叠一层会话与挂载。真机现场同一进程在
+/// 数十秒内被反复重挂，会话数随之持续增长；用一次性窗口把重复决策收敛掉。
+const STATE_MISSING_REMOUNT_BACKOFF_MS: i64 = 30_000;
+/// 退避表条目上限：即使异常也不能无界增长。
+const MAX_STATE_MISSING_BACKOFF_ENTRIES: usize = 512;
 static ACTIVE_MOUNT_PIDS: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static LAST_SUCCESS_BY_PID: Lazy<Mutex<HashMap<i32, (u64, u64)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static STATE_MISSING_REMOUNT_BACKOFF: Lazy<Mutex<HashMap<(i32, u64), i64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountOperation {
@@ -119,6 +129,44 @@ pub fn has_mount_state(request: &MountRequest) -> bool {
         has_mount_state_internal(request, false),
         MountStateCheck::StateMissing
     )
+}
+
+/// 只有「状态文件缺失」这一类需要重挂退避；目标失效、子进程死亡与后端无响应都必须
+/// 立即重挂，不能被退避窗口挡住。
+pub fn is_mount_state_missing(request: &MountRequest) -> bool {
+    has_mount_state_internal(request, false) == MountStateCheck::StateMissing
+}
+
+/// 状态缺失时是否应当退避：首次缺失放行并记录时间，窗口内的重复判定返回 true。
+///
+/// 调用方只在「本轮确实打算重挂且状态缺失」时才询问它，因此首挂不会被延迟：第一次
+/// 询问必然返回 false，应用照常完成重挂；只有同一进程实例在 30 秒内再次判定为缺失时
+/// 才跳过，避免在没有账本的情况下反复叠加会话层。
+///
+/// 键是 `(pid, 启动时钟)` 而不是裸 pid：真机 pid 循环很快，窗口内 pid 被新进程复用
+/// 完全可能，按裸 pid 记账会把复用后进程的首挂误判成重复判定。
+pub fn state_missing_remount_backoff(pid: i32, start_time_ticks: u64) -> bool {
+    let now_ms = monotonic_ms();
+    let key = (pid, start_time_ticks);
+    let Ok(mut entries) = STATE_MISSING_REMOUNT_BACKOFF.lock() else {
+        return false;
+    };
+    if let Some(recorded) = entries.get(&key)
+        && now_ms.saturating_sub(*recorded) < STATE_MISSING_REMOUNT_BACKOFF_MS
+    {
+        return true;
+    }
+    // 硬上界：满则淘汰最老的一条，保证无论条目是否仍在窗口内都不会无界增长。
+    if entries.len() >= MAX_STATE_MISSING_BACKOFF_ENTRIES
+        && let Some(oldest) = entries
+            .iter()
+            .min_by_key(|(_, recorded)| **recorded)
+            .map(|(key, _)| *key)
+    {
+        entries.remove(&oldest);
+    }
+    entries.insert(key, now_ms);
+    false
 }
 
 /// 周期 reconcile 使用更严格的状态判定，额外确认记录的目标仍存在于应用 namespace。
