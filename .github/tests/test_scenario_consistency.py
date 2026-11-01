@@ -261,8 +261,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
             # 接入点唯一且返回 Result：Ok(Some(挂载)) 表示本次新建、Ok(None) 表示视图根
             # 已由既有层服务、Err(原因) 表示本轮按 bind 继续。
             self.assertIn("match preattached_host {", source)
-            self.assertIn("Ok(Some(state)) => (vec![state], ScopedMountAttempt::Ready", source)
-            self.assertIn("Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed", source)
+            self.assertIn("Ok(state) => (vec![state], ScopedMountAttempt::Ready", source)
+            # 已服务判定必须只认**当前**宿主会话：旧代际的层已经失效，仍需重新挂。
+            self.assertIn("Some(view.mount_source.as_str())", source)
             monitor_only = source.index("else if request.is_monitor_only")
             redirect = source.index("apply_sdcard_redirect(", source.index("preattach_shared_host("))
             self.assertLess(monitor_only, redirect, label)

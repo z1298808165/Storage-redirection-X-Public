@@ -1217,8 +1217,7 @@ fn handle_child_process(
             platform::paths::storage_user_root_for_user(user_id)
         };
         let (fuse_children, attempt, host_skip) = match preattached_host {
-            Ok(Some(state)) => (vec![state], ScopedMountAttempt::Ready, None),
-            Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed, None),
+            Ok(state) => (vec![state], ScopedMountAttempt::Ready, None),
             Err(reason) => {
                 if !fuse_roots.is_empty() {
                     // 规则本该有 FUSE 视图但宿主接不上：bind 已经完整表达了视图。
@@ -1427,7 +1426,7 @@ fn handle_child_process(
 fn preattach_shared_host(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
-) -> Result<Option<FuseMountState>, HostSessionSkip> {
+) -> Result<FuseMountState, HostSessionSkip> {
     if !shared_host_preattach_candidate(request, scoped_fuse_roots) {
         if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
             return Err(HostSessionSkip::NoPolicyRules);
@@ -1446,15 +1445,23 @@ fn preattach_shared_host(
     if view.policy_fingerprints.get(&(request.uid as u32)) != Some(&request.policy_fingerprint) {
         return Err(HostSessionSkip::PolicyRegistrationFailed);
     }
-    // 视图根已被本模块的层服务（daemon reconcile 抢先挂好或上一轮保留）：本轮不再叠层。
-    if crate::fuse_session::storage_view_already_served(&storage_root) {
+    // 视图根已被**当前**宿主会话服务（daemon reconcile 抢先挂好或上一轮保留）：本轮不再
+    // 叠层，但仍按宿主挂载记账，否则状态文件里没有这条目标、下一轮清理会漏摘。
+    if crate::fuse_session::storage_view_top_source(&storage_root).as_deref()
+        == Some(view.mount_source.as_str())
+    {
         log::info!(
-            "shared host preattach skipped, srx mount already present pid={} pkg={} target={}",
+            "shared host preattach skipped, current host layer already serving pid={} pkg={} target={}",
             request.pid,
             request.package_name,
             storage_root
         );
-        return Ok(None);
+        return Ok(FuseMountState {
+            target: storage_root,
+            child: 0,
+            child_start_time_ticks: 0,
+            host_session: Some((view.child_pid, view.child_start_time_ticks)),
+        });
     }
     let Some(state) = try_bind_to_fuse_host(&view, request, &storage_root) else {
         return Err(HostSessionSkip::AttachFailed);
@@ -1465,7 +1472,7 @@ fn preattach_shared_host(
         request.package_name,
         storage_root
     );
-    Ok(Some(state))
+    Ok(state)
 }
 
 fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {

@@ -167,7 +167,10 @@ class MountMetadataScopeTest(unittest.TestCase):
                 f"{path} 只能有一个宿主接入点",
             )
             self.assertNotIn("attach_shared_host_sessions", source, path)
-            self.assertIn("Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed", source, path)
+            # 已由当前宿主层服务的视图根也要按宿主挂载记账，否则状态文件缺这条目标、
+            # 下一轮清理会漏摘，挂载层失去归属判据。
+            self.assertIn("crate::fuse_session::storage_view_top_source(", source, path)
+            self.assertIn("host_session: Some((view.child_pid, view.child_start_time_ticks))", source, path)
             # 两条挂载路径都不得再 fork per-app 会话。
             self.assertNotIn("srx_fuse\\0", source, path)
 

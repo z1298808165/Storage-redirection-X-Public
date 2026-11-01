@@ -63,15 +63,12 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
     }
 }
 
-/// 该挂载点的当前可见层是否已由本模块的 FUSE 层服务（宿主或旧版本遗留的 scoped 层）。
+/// 该挂载点当前可见层的挂载源（`/proc/self/mounts` 里该点的**最后一条**条目）。
 ///
-/// 判据是 `/proc/self/mounts` 里该挂载点**最后一条**条目的挂载源前缀：栈顶才是应用
-/// 当前看到的层，被残留只读屏障盖住的旧层不能算数（那会把「屏障裸奔」误判成会话存活）。
-/// 调用方在接入前用它避免在已挂载的路径上再叠一层。
-pub(crate) fn storage_view_already_served(mount_root: &str) -> bool {
-    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
-        return false;
-    };
+/// 栈顶才是应用当前看到的层：被残留只读屏障盖住的旧层不能算数（那会把「屏障裸奔」
+/// 误判成会话存活）。调用方据此判断是否已有本模块的层在服务该路径。
+pub(crate) fn storage_view_top_source(mount_root: &str) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
     let root = mount_root.trim_end_matches('/');
     let last = mounts.lines().rev().find(|line| {
         let mut fields = line.split_whitespace();
@@ -82,15 +79,8 @@ pub(crate) fn storage_view_already_served(mount_root: &str) -> bool {
             .replace("\\040", " ")
             .trim_end_matches('/')
             == root
-    });
-    match last {
-        Some(line) => line
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .starts_with("srx_fuse"),
-        None => false,
-    }
+    })?;
+    Some(last.split_whitespace().next().unwrap_or("").to_string())
 }
 
 /// 把本次挂载写入状态文件（原子写：临时文件 + fsync + rename）。

@@ -26,9 +26,6 @@ pub enum ScopedMountAttempt {
     Ready,
     /// 已尝试启动 scoped 服务但失败。
     Failed,
-    /// 本轮不需要新建会话：该视图根已经由本模块的宿主层服务（daemon reconcile 抢先
-    /// 挂好，或上一轮热重载保留）。再挂一次会在同一路径叠层，清理时按路径只能摘栈顶。
-    AlreadyServed,
 }
 
 /// [`conclude_scoped_mount`] 的输入。
@@ -79,22 +76,19 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) {
             config::record_fuse_capability_result(false, failed_reason, package_name)
         }
         // 未尝试就不产生新证据。这里刻意不写快照：把「没试」写成一次结果会让计数失去意义。
-        ScopedMountAttempt::GateBlocked
-        | ScopedMountAttempt::NoRootsNeeded
-        | ScopedMountAttempt::AlreadyServed => config::fuse_capability(),
+        ScopedMountAttempt::GateBlocked | ScopedMountAttempt::NoRootsNeeded => {
+            config::fuse_capability()
+        }
     };
 
     let scoped_fuse_effective = attempt == ScopedMountAttempt::Ready && sessions > 0;
-    let already_served = attempt == ScopedMountAttempt::AlreadyServed;
-    let effective_backend = if scoped_fuse_effective || already_served {
+    let effective_backend = if scoped_fuse_effective {
         "fuse"
     } else {
         "namespace"
     };
     let selection_reason: String = if scoped_fuse_effective {
         "scoped_mount_ready".to_string()
-    } else if already_served {
-        "already_served_by_existing_mount".to_string()
     } else if let Some(reason) = unavailable_reason {
         // 保留既有前缀（诊断脚本按它检索），把具体原因追加在后面：日志里既有稳定
         // 关键字，也有一眼能读懂的原因。
@@ -109,8 +103,11 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) {
     };
 
     if attempt == ScopedMountAttempt::Failed {
+        // 这条已经不代表「scoped 服务失败」：per-app scoped 会话已退役，Failed 只说明
+        // 宿主 FUSE 视图没能建立，本轮按 namespace bind 继续（具体原因在
+        // `fuse view unavailable` 那行里）。
         log::warn!(
-            "{} scoped service failed pid={} pkg={}",
+            "{} no fuse view, using namespace bind pid={} pkg={}",
             log_prefix,
             pid,
             package_name

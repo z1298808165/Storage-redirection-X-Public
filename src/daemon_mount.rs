@@ -1067,8 +1067,7 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             crate::platform::paths::storage_user_root_for_user(user_id)
         };
         let (fuse_children, attempt, host_skip) = match preattached_host {
-            Ok(Some(state)) => (vec![state], ScopedMountAttempt::Ready, None),
-            Ok(None) => (Vec::new(), ScopedMountAttempt::AlreadyServed, None),
+            Ok(state) => (vec![state], ScopedMountAttempt::Ready, None),
             Err(reason) => {
                 if !fuse_roots.is_empty() {
                     // 这条规则本该有 FUSE 视图，但宿主接不上：规划阶段的 bind 已经
@@ -1188,7 +1187,7 @@ fn preattach_shared_host(
     request: &MountRequest,
     scoped_fuse_roots: &[String],
     deadline_ms: i64,
-) -> Result<Option<FuseMountState>, HostSessionSkip> {
+) -> Result<FuseMountState, HostSessionSkip> {
     if !shared_host_preattach_candidate(request, scoped_fuse_roots) {
         return Err(preattach_skip_reason(request));
     }
@@ -1240,15 +1239,25 @@ fn preattach_shared_host(
         )
         .saturating_div(1000)
         .clamp(1, crate::fuse_host::HOST_ATTACH_TIMEOUT_SEC);
-    // 视图根已被本模块的层服务（daemon reconcile 抢先挂好或上一轮保留）：本轮不再叠层。
-    if crate::fuse_session::storage_view_already_served(&storage_root) {
+    // 视图根已被**当前**宿主会话服务（daemon reconcile 抢先挂好或上一轮保留）：本轮不再
+    // 叠层，但仍要按宿主挂载记账——否则状态文件里没有这条目标，下一轮清理会漏摘，
+    // 挂载层没有任何归属判据。判据必须是「当前会话」：旧代际的层已经失效，仍需重新挂。
+    let view = crate::fuse_host::HostSessionView::from(host.as_ref());
+    if crate::fuse_session::storage_view_top_source(&storage_root).as_deref()
+        == Some(view.mount_source.as_str())
+    {
         log::info!(
-            "daemon shared host preattach skipped, srx mount already present pid={} pkg={} target={}",
+            "daemon shared host preattach skipped, current host layer already serving pid={} pkg={} target={}",
             request.pid,
             request.package_name,
             storage_root
         );
-        return Ok(None);
+        return Ok(FuseMountState {
+            target: storage_root,
+            child: 0,
+            child_start_time_ticks: 0,
+            host_session: Some((view.child_pid, view.child_start_time_ticks)),
+        });
     }
     let Some(state) = try_bind_to_fuse_host(&host, request, &storage_root, attach_timeout_sec)
     else {
@@ -1260,7 +1269,7 @@ fn preattach_shared_host(
         request.package_name,
         storage_root
     );
-    Ok(Some(state))
+    Ok(state)
 }
 
 /// 预接入闸门未放行时的原因归类（只用于日志与能力快照，不参与任何行为分支）。
