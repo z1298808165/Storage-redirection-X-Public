@@ -725,6 +725,11 @@ jobs:
           if [ -f "$RELEASE_NOTES" ]; then
             cp "$RELEASE_NOTES" build/changelog.md
           fi
+          # 覆盖正文之后仍需致谢：人工写的发布说明若漏了致谢段，按本发布周期内的
+          # 提交补齐（已有时保持人工措辞不动）。
+          python .github/scripts/generate_changelog.py \
+            --mode release \
+            --ensure-credits build/changelog.md
           python .github/scripts/validate_release_notes.py \
             --file build/changelog.md \
             --version "$VERSION"
