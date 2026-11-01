@@ -82,6 +82,8 @@ pub use crate::session::SessionACL;
 pub use crate::session::SessionUnmounter;
 
 mod access_flags;
+/// 宿主会话活动信号（本项目补丁）：请求完成时刻、在途计数与 eventfd 唤醒，
+/// 供停摆看门狗区分「忙而慢」与「已死」。
 pub mod activity;
 mod bsd_file_flags;
 mod channel;

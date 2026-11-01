@@ -143,22 +143,25 @@ pub(super) fn heal_if_needed(
     }
 
     // 没有任何应用启用重定向时，MediaProvider 本就不需要拦截，重启只有副作用。
+    // 但 MP 内的 open 钩子还是另外两个功能的触发入口：文件监视的直采通道
+    // （监视开启时）与 fuse fix 零宽修复的安装触发（fuse fix 开启时）。hook 卡
+    // 在 specialize 阶段（2026-10-30 A14 模拟器实测：daemon 晚于 MP 就绪时
+    // companion 应答缺失，重启 MP 后自愈）会让这三类已开启功能的入口一起失效，
+    // 因此任一开启时都应自愈；三者全关时 hook 无用途，跳过是正确行为。
     let has_enabled_apps = media_processes
         .iter()
         .any(|(_, uid)| config.has_effective_enabled_redirect_apps_for_user(*uid));
-    if !has_enabled_apps {
+    let monitor_needed = config.is_file_monitor_enabled();
+    let fuse_fix_needed = config.is_fuse_fix_enabled();
+    if !has_enabled_apps && !monitor_needed && !fuse_fix_needed {
         log_skip_once(
             SKIP_NO_ENABLED_APPS,
             &format!(
-                "no_enabled_redirect_apps media_pids={:?} media_uids={:?}",
+                "no_enabled_redirect_apps monitor=off fuse_fix=off media_pids={:?}",
                 media_processes
                     .iter()
                     .map(|(pid, _)| *pid)
                     .collect::<Vec<_>>(),
-                media_processes
-                    .iter()
-                    .map(|(_, uid)| *uid)
-                    .collect::<Vec<_>>()
             ),
         );
         return;

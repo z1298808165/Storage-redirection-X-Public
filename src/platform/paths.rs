@@ -1,8 +1,10 @@
 use super::lru_cache::LruCache;
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::string::String;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 pub(crate) const DATA_MEDIA_PREFIX: &str = "/data/media/";
 pub(crate) const STORAGE_EMULATED_PREFIX: &str = "/storage/emulated/";
@@ -324,4 +326,52 @@ pub fn monotonic_ms() -> i64 {
         .elapsed()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+/// 监视记录短窗去重：同（角色, 事件类型, 路径, 归因）在窗口内只记首条。
+///
+/// 背景（2026-10-30 真机实测）：同一物理写入会被多条 watch 链路各上报一条观察
+/// 记录（映射源 watch 与公共根 watch 的 `from` 不同、backend 相同）；QQ 心跳类
+/// 高频 open（`Android/.android_lq`）也会在窗口内连发同 key 记录。request 与
+/// observation 角色分开计数，保留双通道对账能力。
+const MONITOR_DEDUP_WINDOW_MS: u128 = 2_000;
+const MONITOR_DEDUP_CAPACITY: usize = 1024;
+
+type MonitorDedupMap = HashMap<(String, String, String), Instant>;
+
+fn monitor_dedup_map() -> &'static Mutex<MonitorDedupMap> {
+    static MAP: OnceLock<Mutex<MonitorDedupMap>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 返回 true 表示该记录在去重窗口内已被记录过，调用方应跳过写日志。
+pub fn should_suppress_duplicate_monitor_record(
+    role: &str,
+    kind: &str,
+    path: &str,
+    caller: &str,
+) -> bool {
+    let now = Instant::now();
+    let key = (
+        format!("{role}\u{1}{kind}"),
+        path.to_string(),
+        caller.to_string(),
+    );
+    let mut map = monitor_dedup_map()
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    if map.len() > MONITOR_DEDUP_CAPACITY {
+        map.retain(|_, ts| now.duration_since(*ts).as_millis() < MONITOR_DEDUP_WINDOW_MS);
+        if map.len() > MONITOR_DEDUP_CAPACITY {
+            // 极端洪峰下整表重置：宁可短暂多记，不丢后续全部记录。
+            map.clear();
+        }
+    }
+    match map.get(&key) {
+        Some(ts) if now.duration_since(*ts).as_millis() < MONITOR_DEDUP_WINDOW_MS => true,
+        _ => {
+            map.insert(key, now);
+            false
+        }
+    }
 }

@@ -162,6 +162,33 @@ fn await_policy_ack(fd: libc::c_int, uid: i32, budget_ms: i64) -> bool {
 /// 返回 `true` 表示**宿主会话已确认建好该 uid 的策略**（收到应答），而不是"数据已发出"：
 /// 接入会让应用的存储根直接由宿主会话承载，策略没登记上去就是整片 ENOENT，因此这里必须
 /// 拿应答而不是拿 `send` 的返回值。返回 `false` 时调用方保持 scoped 路径不变。
+/// 通知宿主子进程摘除传播副本（attach 成功、传播已发生之后调用）。
+///
+/// fire-and-forget：副本摘除只是挂载表卫生（数据面已由 f2fs 直连锚点解耦），
+/// 通知失败不影响接入流程；宿主收到后在 control 线程内同步执行摘除。
+// quality-allow(lint-suppression): 调用方在 bin 侧 daemon_mount（接入完成时通知宿主），lib 视角无调用者；与控制协议 'U' 消息配对不拆分。
+#[allow(dead_code)]
+pub(crate) fn notify_host_unpropagate() {
+    let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: fd 是本模块保存的控制端 socket，字面量在调用期间保持存活。
+    let sent = unsafe {
+        libc::send(
+            fd,
+            b"U
+"
+            .as_ptr() as *const libc::c_void,
+            2,
+            0,
+        )
+    };
+    if sent != 2 {
+        log::warn!("fuse host unpropagate notify failed sent={sent}");
+    }
+}
+
 pub fn register_app_policy(
     config: &crate::fuse_redirect::FuseRedirectConfig,
     policy_fingerprint: u64,
@@ -351,6 +378,13 @@ pub(crate) fn spawn_host_control_loop(
                     break;
                 }
                 let payload = &buffer[..read as usize];
+                // 'U' 前缀是 daemon 的传播副本摘除指令（attach 成功后触发，fire-
+                // and-forget）；'{' 开头是既有的策略登记 JSON。宿主与 daemon 同包
+                // 部署，无跨版本兼容负担。
+                if payload.first() == Some(&b'U') {
+                    crate::fuse_host::unpropagate_media_realm();
+                    continue;
+                }
                 match serde_json::from_slice::<crate::fuse_redirect::FuseRedirectConfig>(payload) {
                     Ok(config) => {
                         let uid = config.uid;

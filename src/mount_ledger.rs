@@ -314,6 +314,12 @@ pub fn load(package_name: &str, pid: i32) -> Option<MountLedger> {
     decode(&content)
 }
 
+/// 删除挂载账本；文件已不存在也视为成功。
+pub fn remove(package_name: &str, pid: i32) -> bool {
+    let path = ledger_path(package_name, pid);
+    fs::remove_file(&path).is_ok() || fs::metadata(&path).is_err()
+}
+
 /// 原子写入账本。
 ///
 /// 与挂载状态文件采用同一套写入纪律：先写临时文件并 `fsync`，再 `rename` 覆盖。

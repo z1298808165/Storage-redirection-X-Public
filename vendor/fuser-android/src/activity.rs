@@ -17,18 +17,22 @@ static LAST_COMPLETION_MS: AtomicI64 = AtomicI64::new(0);
 /// 当前在途（已取出、尚未完成）的请求数。
 pub static IN_FLIGHT: AtomicI64 = AtomicI64::new(0);
 
+/// 设置完成事件 eventfd（宿主进程在挂载成功后注入；传 -1 表示取消注入）。
 pub fn set_completion_eventfd(fd: i32) {
     COMPLETION_EVENTFD.store(fd, Ordering::Release);
 }
 
+/// 最近一次请求分发完成的时刻（`now_ms` 口径）；从未完成过时为 0。
 pub fn last_completion_ms() -> i64 {
     LAST_COMPLETION_MS.load(Ordering::Acquire)
 }
 
+/// 当前在途（已取出、尚未完成）的请求数快照。
 pub fn in_flight() -> i64 {
     IN_FLIGHT.load(Ordering::Acquire)
 }
 
+/// 当前墙钟毫秒（完成时刻的统一口径）。
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

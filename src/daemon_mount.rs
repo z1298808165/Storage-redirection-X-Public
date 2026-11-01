@@ -458,7 +458,24 @@ pub fn supervise_mount_request(
 
     if actions.is_empty() {
         // 账本还没有挂载明细（首次挂载后登记失败）：只能按命名空间身份判定。
-        let verdict = if target_is_current && current_namespace == Some(ledger.namespace) {
+        // 无策略规则的请求（未配置应用/无规则系统链路）不得判 Detached 触发
+        // 重放注入：否则未配置应用的空账本会被 reconcile 当成"挂载丢失"重新
+        // 接入宿主视图，绕过 preattach 闸门（2026-10-30 issue #2 报告者
+        // test14 实测）。无规则且账本为空 → 按过期账清理，不注入。
+        //
+        // 规则判定必须锚定"当前该 uid 是否仍应被宿主接管"（配置生效且启用），
+        // 而不是账本快照里的规则：旧版接管时代的账本残留即使配置早已删除/停用
+        // 仍带着规则字段，supervise 据此判 Detached 反复重放，把宿主 FUSE 一层层
+        // 叠挂进应用命名空间（2026-10-31 真机复现：MT 管理器的 ns 叠了 6 层
+        // srx_fuse_redirect、写 /storage/emulated/0 全部 EACCES，且 mount_state
+        // 因短路跳过而缺失，间歇性"有时能写"正是叠挂前后窗口的差异）。
+        let has_policy_rules =
+            crate::fuse_redirect::config::mount_request_has_policy_rules(request)
+                && crate::config::SettingsHub::instance()
+                    .has_effective_enabled_redirect_apps_for_user(request.uid);
+        let verdict = if !has_policy_rules {
+            MountVerdict::StaleNamespace
+        } else if target_is_current && current_namespace == Some(ledger.namespace) {
             MountVerdict::Detached
         } else {
             MountVerdict::StaleNamespace
@@ -964,6 +981,41 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     // 给它一个「剩余时间减去 scoped 回退所需」的上限，宁可提前放弃走 scoped，也不要挂在
     // 等应答上被父进程 SIGKILL。
     let preattached_host = preattach_shared_host(request, scoped_fuse_roots, deadline_ms);
+    // 无规则短路标记贯穿成功分支：短路跳过 planner 完整路径后，state 落账
+    // 也必须跳过（无挂载产物却留下 state=mounted 残留账，supervise/恢复流程
+    // 会据此误判"已在场"——与 companion 侧 no_rules_short_circuit 同因）。
+    let no_rules_short_circuit = preattached_host.is_none()
+        && !crate::fuse_redirect::config::mount_request_has_policy_rules(request);
+    if no_rules_short_circuit {
+        // 无规则请求没有挂载需求。旧 state/ledger 已在 clear_previous_mounts
+        // 中按 mount-id/source 归属验证清理；确认完成后还需确认账本记录目标上
+        // 不再有 srx FUSE 层，才删除旧 ledger 并返回。不能继续进入普通成功分支，
+        // 否则 scoped FUSE、私有目录恢复或 identity 落账会让无规则应用重新被接管。
+        let ledger_mounts_cleared = mount_identity::load(&request.package_name, request.pid)
+            .is_none_or(|ledger| {
+                ledger.mounts.iter().all(|mount| {
+                    crate::mount_ledger::live_mounts_at(request.pid, &mount.mount_point)
+                        .iter()
+                        .all(|live| !live.source.starts_with("srx_fuse"))
+                })
+            });
+        if !cleanup.is_cleared() || !ledger_mounts_cleared {
+            log::warn!(
+                "daemon no-rules request refused: previous mounts not cleared pid={} pkg={}",
+                request.pid,
+                request.package_name
+            );
+            let _ = send_mount_result(sock, -1);
+            // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
+            unsafe { close(sock) };
+            return false;
+        }
+        let _ = mount_identity::remove(&request.package_name, request.pid);
+        let _ = send_mount_result(sock, 0);
+        // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
+        unsafe { close(sock) };
+        return true;
+    }
     let ok = if preattached_host.is_some() {
         true
     } else if request.is_monitor_only {
@@ -1155,7 +1207,18 @@ fn preattach_shared_host(
     Some(state)
 }
 
+/// 请求是否携带任何策略规则（放行/排除/映射/沙箱/只读任一非空）。
+///
+/// 宿主接入由策略规则驱动：无规则的请求接入宿主只会得到 deny_all（未配置
 fn shared_host_preattach_candidate(request: &MountRequest, scoped_fuse_roots: &[String]) -> bool {
+    // 无任何策略规则的请求不预接宿主视图（2026-10-29 issue #2 test13 实测）：
+    // 未配置应用/无规则系统链路的策略登记为空，宿主对无规则 uid 一律拒绝，
+    // 接入后应用视图变空目录、文档选择器加载失败、跨路径写入全被拒。
+    // 监视能力由进程外 inotify 承担，不依赖宿主视图；规则非空的 monitor-only
+    // 请求（DownloadProvider 等已配置代写链路）仍按原设计预接。
+    if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
+        return false;
+    }
     let is_auto = matches!(
         request.storage_backend_mode,
         crate::config::StorageBackendMode::Auto
@@ -1314,6 +1377,15 @@ fn start_fuse_service_for_root(
                 mount_root,
                 request.policy_fingerprint
             );
+        } else if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
+            // 无策略规则的请求不接宿主视图：接入后宿主对无规则 uid deny_all
+            // （未配置应用空目录/写入全拒）。scoped 路径继续兜底。
+            log::debug!(
+                "daemon fuse host attach skipped pid={} pkg={} target={} reason=no_policy_rules",
+                request.pid,
+                request.package_name,
+                mount_root
+            );
         } else {
             let attach_timeout_sec = deadline_ms
                 .saturating_sub(crate::platform::paths::monotonic_ms())
@@ -1443,6 +1515,9 @@ fn try_bind_to_fuse_host(
         attached.target,
         attached.host_pid
     );
+    // move_mount 完成即传播已发生：事件通知宿主摘除 /data/media/0 副本（挂载表
+    // 卫生；数据面已由 f2fs 直连锚点解耦）。fire-and-forget，不阻塞接入。
+    crate::fuse_host_control::notify_host_unpropagate();
     maybe_probe_passthrough(request, attached.host_pid, mount_root);
     Some(FuseMountState {
         target: attached.target,
@@ -1671,6 +1746,13 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
     let state_path = plan.state_path.as_str();
     let fuse_children = read_fuse_children(state_path);
     let mut targets = read_mount_targets(state_path);
+    // 短路场景可能没有 state 文件，但历史版本已经写过 mount_identity；
+    // 仅依赖 state 会让这些挂载层永久漏清理，之后每轮 supervise 都可能继续叠挂。
+    // 先把账本登记的目标加入候选，实际摘除仍由 mount_id/source 归属校验保护。
+    let ledger = mount_identity::load(&request.package_name, request.pid);
+    if let Some(ledger) = ledger.as_ref() {
+        targets.extend(ledger.mounts.iter().map(|mount| mount.mount_point.clone()));
+    }
     targets.extend(plan.overlay_targets.iter().cloned());
     // path_mappings 热重载必须显式覆盖全部存储别名根：旧状态文件可能来自 companion
     // 或上一轮部分失败，只记录了子映射目标；若漏掉视图根，旧沙箱层会继续压在新映射层上。
@@ -1686,14 +1768,20 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
     }
     let targets = module_paths::normalize_mount_targets(&targets);
     if targets.is_empty() && fuse_children.is_empty() {
-        return if std::fs::remove_file(state_path).is_ok() || std::fs::metadata(state_path).is_err()
+        let state_removed =
+            std::fs::remove_file(state_path).is_ok() || std::fs::metadata(state_path).is_err();
+        if state_removed
+            && let Some(ledger) = ledger.as_ref()
+            && ledger.mounts.is_empty()
         {
+            let _ = mount_identity::remove(&request.package_name, request.pid);
+        }
+        return if state_removed {
             ClearOutcome::Cleared
         } else {
             ClearOutcome::Unverified
         };
     }
-    let ledger = mount_identity::load(&request.package_name, request.pid);
     let mut outcome = ClearOutcome::Cleared;
     // 目标已经按深度降序排列；先摘子挂载，避免父层摘除后查询到另一个视图。
     for target in &targets {
@@ -1729,15 +1817,17 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
             outcome = ClearOutcome::Unverified;
         }
     }
-    if outcome.is_cleared()
-        && std::fs::remove_file(state_path).is_err()
-        && std::fs::metadata(state_path).is_ok()
-    {
-        log::warn!(
-            "daemon mount state file removal failed path={} errno={}",
-            state_path,
-            last_errno()
-        );
+    if outcome.is_cleared() {
+        if std::fs::remove_file(state_path).is_err() && std::fs::metadata(state_path).is_ok() {
+            log::warn!(
+                "daemon mount state file removal failed path={} errno={}",
+                state_path,
+                last_errno()
+            );
+            outcome = ClearOutcome::Unverified;
+        } else {
+            let _ = mount_identity::remove(&request.package_name, request.pid);
+        }
     }
     outcome
 }
