@@ -852,8 +852,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('"srx_fuse_host"', config)
         self.assertIn("if !crate::fuse_host::ensure_global()", daemon)
         self.assertIn("crate::fuse_host::ensure_global()", daemon)
-        self.assertIn("scoped path remains active", daemon)
-        # B2-a 不能改变现有应用 scoped 挂载路径；host 只是新增基础设施。
+        # 宿主不可用时应用照常拿到 namespace bind 视图（scoped 会话已退役）。
+        self.assertIn("namespace bind remains active", daemon)
+        # scoped 会话退役后，`srx_fuse_redirect` 前缀仍必须保留：它用于识别并清理旧版本
+        # 遗留的 scoped 挂载层，删掉会让历史死层失去归属判据。
         self.assertIn('"srx_fuse_redirect"', config)
 
     def test_shared_fuse_host_registers_app_policy_before_attach(self) -> None:
@@ -864,7 +866,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 3) 闸门本身仍然存在——打开接入必须是一次有意的改动（默认由环境变量关闭）。
         for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
             source = read(path)
-            body = section(source, "fn start_fuse_service_for_root", "let mut ready_sockets")
+            body = section(
+                source, "fn attach_host_session_for_root(", "fn try_bind_to_fuse_host("
+            )
             compact = "".join(body.split())
             if path.endswith("daemon_mount.rs"):
                 register_at = body.index("crate::fuse_host::register_app_policy(")
@@ -1014,7 +1018,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("request.policy_fingerprint", pre_register)
         self.assertIn("view.policy_fingerprints.get(&(request.uid as u32))", pre_register)
         collapse = section(
-            daemon_src, "fn scoped_fuse_mount_roots(", "fn start_fuse_service_for_root("
+            daemon_src, "fn scoped_fuse_mount_roots(", "fn attach_host_session_for_root("
         )
         self.assertIn("crate::fuse_host::wait_for_host_session()", collapse)
         self.assertIn("crate::config::StorageBackendMode::Auto", collapse)

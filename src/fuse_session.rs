@@ -64,59 +64,6 @@ pub(crate) fn rollback_scoped_fuse_services(states: &[FuseMountState]) {
     }
 }
 
-/// scoped 服务被判定未就绪而终止后，就地摘除可能残留的会话死层。
-///
-/// 子进程在 `mount(2)` 已完成、会话收尾尚未跑完时被父进程终止（握手失败、就绪超时），
-/// 会在应用命名空间留下一条连接已断的 scoped 死挂载。应用若是常驻进程（如承载下载
-/// 管理器的 `android.process.media`），这层死挂载没有任何台账记录、无人清理，应用对
-/// 整个存储根的访问从此一直 ENOTCONN（真机 2026-10-15：应用商店更新下载全部 492）。
-/// 终止后目标顶层若仍是本模块 scoped 层且访问已断连，就地 `MNT_DETACH` 摘除。
-pub(crate) fn detach_dead_scoped_layer_after_terminate(mount_root: &str) {
-    let Some(live) = crate::mount_ledger::topmost_live_mount(0, mount_root) else {
-        return;
-    };
-    // 只认 scoped 会话源前缀：宿主会话跨应用共享，绝不在此路径上摘除。
-    if !live.source.starts_with("srx_fuse_redirect") {
-        return;
-    }
-    if !scoped_endpoint_is_dead(mount_root) {
-        return;
-    }
-    let Ok(c_target) = CString::new(mount_root) else {
-        return;
-    };
-    // SAFETY: c_target 是以 NUL 结尾的合法路径；MNT_DETACH 只摘除已确认归属且断连的层。
-    if unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) } == 0 {
-        log::warn!(
-            "fuse scoped dead layer detached after terminate target={} source={}",
-            mount_root,
-            live.source
-        );
-    }
-}
-
-/// 探测目标路径是否已断连（挂载记录在但 FUSE 服务已消失）。
-///
-/// 与 bin 侧 `fuse_supervisor::probe_endpoint` 的断连判定同口径；本模块在 lib 侧
-/// 编译，不能引用仅在 bin 声明的 `fuse_supervisor`，故在此保留最小实现。
-fn scoped_endpoint_is_dead(target: &str) -> bool {
-    let probe_path = format!("/proc/self/root{target}");
-    let Ok(c_path) = CString::new(probe_path) else {
-        return false;
-    };
-    // SAFETY: c_path 由当前作用域持有，指针在 open 调用期间有效；只读打开目录探测。
-    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
-    if fd >= 0 {
-        // SAFETY: fd 来自上面的成功 open，此处是唯一关闭路径。
-        unsafe { libc::close(fd) };
-        return false;
-    }
-    matches!(
-        last_errno(),
-        libc::ENOTCONN | libc::EIO | libc::ENODEV | libc::ESTALE
-    )
-}
-
 /// 把本次挂载写入状态文件（原子写：临时文件 + fsync + rename）。
 ///
 /// 状态行契约：`version=` 与 `fingerprint=`（指纹跨进程可比、version 计数器两侧不同域）、
@@ -249,123 +196,94 @@ pub(crate) fn write_mount_state(
     ok
 }
 
-/// 批量启动 scoped FUSE 会话；单根失败只丢弃该根，全部根失败前先回滚再收敛成存储根。
+/// FUSE 视图没能建立起来的**具体原因**，用于现场诊断「为什么这个应用没有 FUSE」。
 ///
-/// 部分失败的恢复契约：先收回已启动的会话，再以单个存储根会话保留原始规则的动态
-/// 匹配，避免失败根变成无规则覆盖；存储根重试同样失败才交给调用方走 namespace 回退
-/// 与能力失败记账。`start_one` 由两侧传入各自的按根启动函数（宿主会话发现方式不同）。
-pub(crate) fn start_scoped_fuse_services(
-    request: &(impl MountRequestFields + ?Sized),
-    roots: &[String],
-    real_root_override: Option<String>,
-    start_one: impl Fn(&str, Option<String>) -> Option<FuseMountState>,
-) -> Option<Vec<FuseMountState>> {
-    if roots.is_empty() {
-        return Some(Vec::new());
-    }
-
-    let mut states = Vec::with_capacity(roots.len());
-    let mut failed_roots: Vec<&str> = Vec::new();
-    for root in roots {
-        match start_one(root, real_root_override.clone()) {
-            Some(state) => states.push(state),
-            None => failed_roots.push(root.as_str()),
-        }
-    }
-
-    if !failed_roots.is_empty() {
-        log::warn!(
-            "fuse partial scoped mount pkg={} pid={} mounted={} failed={} failed_roots={}",
-            request.package_name(),
-            request.pid(),
-            states.len(),
-            failed_roots.len(),
-            failed_roots.join(",")
-        );
-        // 规划阶段已跳过这些预期 FUSE 根对应的 bind；部分失败时先收回已启动会话，
-        // 再以单个存储根会话保留原始规则的动态匹配，避免失败根变成无规则覆盖。
-        let user_id = crate::platform::user_id_from_uid(request.uid());
-        let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
-        rollback_scoped_fuse_services(&states);
-        if let Some(state) = start_one(&storage_root, real_root_override) {
-            log::warn!(
-                "fuse partial roots collapsed to storage root pkg={} pid={} failed={}",
-                request.package_name(),
-                request.pid(),
-                failed_roots.len()
-            );
-            return Some(vec![state]);
-        }
-        log::warn!(
-            "fuse partial roots and storage-root retry failed pkg={} pid={}",
-            request.package_name(),
-            request.pid()
-        );
-        return None;
-    }
-
-    if states.is_empty() {
-        return None;
-    }
-    Some(states)
+/// 每条原因都对应一个可以独立验证的事实（会话不存在 / 闸门不许 / 策略没登记 /
+/// 无规则 / 接入失败），而不是一句笼统的 "unavailable"。用户设备上出现不支持时，
+/// 只凭日志就能判断是设备侧、配置侧还是模块侧的问题。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HostSessionSkip {
+    /// 共享宿主会话不存在或已消失（设备不支持 / 宿主启动失败 / 尚未建立）。
+    NoSharedHost,
+    /// 宿主会话只服务整个存储视图根，该根不满足接入条件。
+    AttachGateClosed,
+    /// 策略没有登记进宿主会话（daemon 侧登记失败或 fingerprint 不匹配）。
+    PolicyRegistrationFailed,
+    /// 请求没有任何策略规则，接入宿主只会得到 deny_all 空视图。
+    NoPolicyRules,
+    /// 登记与闸门都通过，但实际接入失败（超时、errno、后端不可读）。
+    AttachFailed,
 }
 
-/// scoped FUSE 不可用时的 namespace 回退降级。
+impl HostSessionSkip {
+    /// 稳定短名：写进日志与能力快照，供现场与 issue 直接检索。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSharedHost => "no_shared_host_session",
+            Self::AttachGateClosed => "attach_gate_closed",
+            Self::PolicyRegistrationFailed => "policy_registration_failed",
+            Self::NoPolicyRules => "no_policy_rules",
+            Self::AttachFailed => "host_attach_failed",
+        }
+    }
+}
+
+/// 单根接入的落地结果。
+pub(crate) enum HostSessionAttach {
+    /// 本次新建了一条宿主挂载。
+    Mounted(FuseMountState),
+    /// 该根已经被本模块的宿主层服务（例如 daemon 的 reconcile 已先挂好）：本轮不需要
+    /// 再动作，但也不能当成失败去重新 bind——那会在已有视图之上再叠一层。
+    AlreadyServed,
+}
+
+/// 把这些根接入**共享宿主会话**，返回本次接入成功的挂载。
 ///
-/// 降级契约：主方案已装好的 bind/overlay 必须先卸载（降级路径会对同一批目标重新
-/// 执行挂载，保留旧挂载会叠加导致卸载顺序错乱）；只读路径优先保留文件监视能力，
-/// 让 MediaProvider/FUSE 仍可生成拒绝记录，锚点覆盖不了时才用强制只读绑定。
-/// 配置热重载触发的降级会走到这里，因此回滚一步不能省。
-pub(crate) fn apply_mount_namespace_fallback(
-    planner: &mut crate::mount::MountPlanner,
+/// 这里只做接入，不再 fork per-app scoped 会话。历史实现会在接入失败时 fork 一个
+/// 常驻子进程进应用命名空间，而那个子进程本身就是应用命名空间的自持引用：应用退出后
+/// 命名空间仍在、它服务的 FUSE 挂载不消失、连接不断开，于是它永远等不到自己的退出
+/// 条件（issue #4 真机上累积到 1198 个常驻会话，把 pid 号与线程数顶满，最终触发
+/// framework 重启）。把生命周期绑在应用上的进程形态无法靠清理补救，只能不要它：
+/// 宿主会话不跟随任何应用生命周期，接入失败就老实降级到 namespace bind。
+///
+/// 返回 `Err(reason)` 时调用方必须按 namespace bind 继续（规划阶段已不再为这些根
+/// 预留 FUSE 覆盖，因此 bind 是完整的、可用的视图）。
+pub(crate) fn attach_shared_host_sessions(
     request: &(impl MountRequestFields + ?Sized),
-) -> bool {
-    let detached = planner.unmount_recorded_targets();
-    if detached > 0 {
-        log::info!(
-            "hybrid fuse namespace fallback rollback count={} pid={} pkg={}",
-            detached,
-            request.pid(),
-            request.package_name()
-        );
+    roots: &[String],
+    attach_one: impl Fn(&str) -> Result<HostSessionAttach, HostSessionSkip>,
+) -> Result<Vec<FuseMountState>, HostSessionSkip> {
+    if roots.is_empty() {
+        return Ok(Vec::new());
     }
-    let allowed_real_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
-        request.uid(),
-        request.allowed_real_paths(),
-    );
-    let read_only_paths = crate::fuse_redirect::config::expand_namespace_fallback_rules(
-        request.uid(),
-        request.read_only_paths(),
-    );
-    let can_record_fallback = request.is_file_monitor_enabled()
-        && planner.can_record_read_only_mapping_denials(
-            request.path_mappings(),
-            &read_only_paths,
-            request.excluded_real_paths(),
-        );
-    planner.set_file_monitor_enabled(can_record_fallback);
-    log::info!(
-        "hybrid fuse namespace fallback file_monitor={} pid={} pkg={}",
-        can_record_fallback,
-        request.pid(),
-        request.package_name()
-    );
-    if request.is_mapping_mode_only() {
-        planner.apply_path_mappings_only(
-            request.path_mappings(),
-            request.sandboxed_paths(),
-            &read_only_paths,
-            &[],
-        )
-    } else {
-        planner.apply_sdcard_redirect(
-            &allowed_real_paths,
-            request.excluded_real_paths(),
-            &read_only_paths,
-            request.path_mappings(),
-            &[],
-        )
+    let mut states = Vec::with_capacity(roots.len());
+    let mut attached_any = false;
+    let mut last_skip = HostSessionSkip::NoSharedHost;
+    for root in roots {
+        match attach_one(root) {
+            Ok(HostSessionAttach::Mounted(state)) => {
+                attached_any = true;
+                states.push(state);
+            }
+            Ok(HostSessionAttach::AlreadyServed) => {
+                attached_any = true;
+            }
+            Err(reason) => {
+                last_skip = reason;
+                log::warn!(
+                    "fuse host session attach skipped pkg={} pid={} root={} reason={}",
+                    request.package_name(),
+                    request.pid(),
+                    root,
+                    reason.as_str()
+                );
+            }
+        }
     }
+    if !attached_any {
+        return Err(last_skip);
+    }
+    Ok(states)
 }
 
 /// 把 waitpid 的状态位解码为可读文本（exit=/stop sig=/sig= core=）。

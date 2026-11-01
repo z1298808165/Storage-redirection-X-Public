@@ -3,7 +3,7 @@ use crate::domain::{
     PathMapping, expand_namespace_path_mappings, sort_path_mappings_shortest_request_first,
 };
 use crate::platform::errno::last as last_errno;
-use crate::platform::{fs, module_paths, paths};
+use crate::platform::{fs, paths};
 
 pub(super) struct PathMappingApplyOptions {
     pub(super) should_chown_current_dirs: bool,
@@ -449,57 +449,6 @@ impl MountPlanner {
             .iter()
             .filter_map(|rule| self.resolve_mount_rule_path(rule, storage_path))
             .any(|read_only| paths::matches(&read_only, path, true))
-    }
-
-    pub fn can_record_read_only_mapping_denials(
-        &self,
-        path_mappings: &[PathMapping],
-        read_only_paths: &[String],
-        excluded_real_paths: &[String],
-    ) -> bool {
-        if path_mappings.is_empty() || read_only_paths.is_empty() {
-            return false;
-        }
-
-        let storage_path = paths::storage_user_root_for_user(self.user_id);
-        let real_storage_anchor = paths::join(
-            module_paths::REAL_STORAGE_TMP_DIR,
-            &self.user_id.to_string(),
-        );
-        let resolved_mappings = self.resolve_path_mappings(path_mappings, &storage_path);
-        let mut has_read_only_mapping = false;
-
-        for mapping in resolved_mappings {
-            if !self.is_mapping_read_only(
-                &mapping,
-                read_only_paths,
-                excluded_real_paths,
-                &storage_path,
-            ) {
-                continue;
-            }
-            has_read_only_mapping = true;
-
-            let Some(target_relative) =
-                paths::relative_child_path(&mapping.final_path, &storage_path)
-            else {
-                log::warn!(
-                    "recordable map fallback unavailable, target outside storage: {}",
-                    mapping.final_path
-                );
-                return false;
-            };
-            let anchor_source = paths::join(&real_storage_anchor, target_relative);
-            if !fs::is_directory(&anchor_source) {
-                log::warn!(
-                    "recordable map fallback unavailable, anchor source missing: {}",
-                    anchor_source
-                );
-                return false;
-            }
-        }
-
-        has_read_only_mapping
     }
 
     fn resolve_mount_rule_path(&self, path: &str, storage_path: &str) -> Option<String> {

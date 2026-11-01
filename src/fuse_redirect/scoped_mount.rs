@@ -28,12 +28,6 @@ pub enum ScopedMountAttempt {
     Failed,
 }
 
-/// [`conclude_scoped_mount`] 的结论。
-pub struct ScopedMountOutcome {
-    /// 规划了根却没有会话落地：调用方需要执行 namespace 兜底。
-    pub needs_namespace_fallback: bool,
-}
-
 /// [`conclude_scoped_mount`] 的输入。
 ///
 /// 打包成结构体而不是九参数函数：这些字段是一组同源事实（同一个请求的规划结果与尝试结果），
@@ -53,10 +47,15 @@ pub struct ScopedMountReport<'a> {
     pub ready_reason: &'a str,
     /// 写能力快照时 `Failed` 分支使用的原因串。
     pub failed_reason: &'a str,
+    /// FUSE 视图没建起来的具体原因（`None` 表示不适用：成功、闸门未放行或规则不需要）。
+    ///
+    /// 它出现在 `selection_reason` 与日志里，是现场判断「设备不支持 / 配置无规则 /
+    /// 策略没登记 / 接入失败」的唯一依据。
+    pub unavailable_reason: Option<&'a str>,
 }
 
 /// 汇总 scoped 挂载结果：写能力快照、选择后端、输出统一日志。
-pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcome {
+pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) {
     let ScopedMountReport {
         package_name,
         pid,
@@ -67,6 +66,7 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
         attempt,
         ready_reason,
         failed_reason,
+        unavailable_reason,
     } = report;
     let capability = match attempt {
         ScopedMountAttempt::Ready => {
@@ -87,15 +87,19 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
     } else {
         "namespace"
     };
-    let selection_reason = if scoped_fuse_effective {
-        "scoped_mount_ready"
+    let selection_reason: String = if scoped_fuse_effective {
+        "scoped_mount_ready".to_string()
+    } else if let Some(reason) = unavailable_reason {
+        // 保留既有前缀（诊断脚本按它检索），把具体原因追加在后面：日志里既有稳定
+        // 关键字，也有一眼能读懂的原因。
+        format!("scoped_mount_failed_namespace_fallback:{reason}")
     } else if attempt == ScopedMountAttempt::GateBlocked {
         // 保留既有字符串：CI 诊断脚本按它检索。
-        "capability_unavailable_or_unknown"
+        "capability_unavailable_or_unknown".to_string()
     } else if attempt == ScopedMountAttempt::NoRootsNeeded {
-        "rules_need_no_scoped_fuse_root"
+        "rules_need_no_scoped_fuse_root".to_string()
     } else {
-        "scoped_mount_failed_namespace_fallback"
+        "scoped_mount_failed_namespace_fallback".to_string()
     };
 
     if attempt == ScopedMountAttempt::Failed {
@@ -118,10 +122,6 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) -> ScopedMountOutcom
         roots_planned,
         sessions
     );
-
-    ScopedMountOutcome {
-        needs_namespace_fallback: attempt == ScopedMountAttempt::Ready && sessions == 0,
-    }
 }
 
 /// 打印规划出的 scoped 挂载根。

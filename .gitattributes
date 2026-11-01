@@ -16,6 +16,7 @@
 *.html text eol=lf
 *.json text eol=lf
 *.ps1 text eol=lf
+*.py text eol=lf
 /LICENSE text eol=lf
 /COPYING text eol=lf
 assets/zygisk_module/bin/srxctl text eol=lf

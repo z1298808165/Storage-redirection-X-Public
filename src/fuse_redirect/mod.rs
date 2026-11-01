@@ -16,8 +16,8 @@ pub(crate) use policy::SharedPolicyTable;
 
 // 公开这些配置类型供 daemon/测试流复用；部分构建目标只使用其中的函数。
 pub use config::{
-    FuseRedirectConfig, MountRequestFields, fuse_config_from_request, mount_blocking_with_ready,
-    request_policy_fingerprint, scoped_fuse_mount_roots_for_request,
+    FuseRedirectConfig, MountRequestFields, request_policy_fingerprint,
+    scoped_fuse_mount_roots_for_request,
 };
 pub use scoped_mount::{
     ScopedMountAttempt, ScopedMountReport, conclude_scoped_mount, log_scoped_mount_roots,

@@ -2100,10 +2100,16 @@ pub(crate) fn establish_media_real_anchor() -> bool {
         );
         return false;
     }
-    crate::fuse_redirect::config::forensics_log(&format!(
+    // 锚点建立成功是一次性正常事件：留档到独立取证文件，运行日志按信息级记录，
+    // 避免以错误级别出现让现场误判为失败（详细日志关闭时不写运行日志）。
+    crate::fuse_redirect::config::forensics_record(&format!(
         "fuse host media anchor ready source={source} anchor={anchor} private fs={} source={} root={}",
         mounted.fs_type, mounted.source, mounted.root
     ));
+    log::info!(
+        "fuse host media anchor ready anchor={anchor} fs={}",
+        mounted.fs_type
+    );
     true
 }
 

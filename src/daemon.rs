@@ -559,6 +559,55 @@ fn write_daemon_pid_file() {
     }
 }
 
+/// 清掉旧版本遗留的 per-app scoped FUSE 会话，返回清理数量。
+///
+/// scoped 会话已退役：当前版本不会再 fork `srx_fuse`（唯一 FUSE 载体是共享宿主
+/// `srx_fuse_host`，它不跟随应用生命周期）。但旧版本在真机上留下过上千个常驻会话
+/// （issue #4：把 pid 号与线程数顶满后 framework 反复重启），升级设备若不走完整重启，
+/// 这些进程仍会留在各自的旧应用命名空间里，且不受任何账本约束——它们是那个命名空间的
+/// 自持引用，永远不会自己退出。因此这里做**一次性**迁移清理。
+///
+/// 判据只有一条：`comm=srx_fuse`。共享宿主是 `srx_fuse_host`、看门狗是 `srx_watchdog`，
+/// 都不会被误伤。
+fn retire_legacy_scoped_sessions() -> usize {
+    const LEGACY_SCOPED_COMM: &str = "srx_fuse";
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut retired = 0usize;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if comm.trim() != LEGACY_SCOPED_COMM {
+            continue;
+        }
+        // SAFETY: pid 来自 /proc 且进程名与已退役的模块会话名精确匹配；SIGKILL 只作用于
+        // 这个确认属于旧版本模块的进程。
+        if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+            retired += 1;
+            log::warn!(
+                "daemon retired legacy scoped fuse session pid={} reason=scoped_backend_removed",
+                pid
+            );
+        }
+    }
+    if retired > 0 {
+        log::warn!("daemon legacy scoped fuse sessions retired total={retired}");
+    }
+    retired
+}
+
 /// 安装 daemon 主进程的 panic 钩子。
 ///
 /// release 构建 `panic = "abort"`，`catch_unwind` 无法截获 panic，service.sh 又把
@@ -636,10 +685,11 @@ pub fn main_entry() -> i32 {
         log::warn!("daemon config watcher unavailable, using fingerprint polling");
     }
 
-    // 建立共享宿主 FUSE 会话。失败只记录并继续，不影响主循环与既有 scoped 路径；
-    // 后续 reconcile 会在宿主子进程死亡后按需恢复，而不是继续使用失效句柄。
+    // 建立共享宿主 FUSE 会话。它是**唯一**的 FUSE 载体：失败只记录并继续，应用照常
+    // 拿到 namespace bind 视图；后续 reconcile 会在宿主子进程死亡后按需恢复，而不是
+    // 继续使用失效句柄。
     if !crate::fuse_host::ensure_global() {
-        log::warn!("fuse host session unavailable, scoped path remains active");
+        log::warn!("fuse host session unavailable, namespace bind remains active");
     } else if media_ce_storage_ready() {
         // 宿主就绪后立即全量预登记所有已配置应用：让应用冷启动时无需等待 reconcile
         // 轮询到该进程，就能从宿主快照确认 uid 并接入共享会话，避免 scoped 竞态与
@@ -656,6 +706,25 @@ pub fn main_entry() -> i32 {
     // 拖死（2026-10-29 真机实证），daemon 作为不服务 FUSE 的独立进程保留最后一道
     // 解冻能力。线程自门控：无宿主心跳时空转，有硬证据才动手。
     crate::fuse_host::spawn_external_abort_monitor();
+
+    // 一次性迁移：清掉旧版本遗留的 per-app scoped 会话。
+    //
+    // scoped 会话形态已退役（见 `fuse_session::attach_shared_host_sessions` 的文档）。
+    // 升级后进程表里仍可能出现上一代的 `srx_fuse`：它们是应用命名空间的自持引用，既不会
+    // 自己退出，也不受任何账本约束——正是 issue #4 那批常驻进程的来源。这是针对历史残留
+    // 的一次性清理，不是周期性收割；当前版本不会再产生这类进程。
+    let legacy_scoped_retired = retire_legacy_scoped_sessions();
+    // 一条可长期检索的能力结论：设备节点、宿主会话、能力快照与本次清理量。
+    // 现场只要贴这一行，就能判断「这台设备/这个配置下 FUSE 视图到底能不能用」。
+    log::info!(
+        "fuse backend startup dev_fuse={} host_session={} capability={} legacy_scoped_retired={}",
+        crate::fuse_redirect::config::fuse_device_present(),
+        crate::fuse_host::read_host_session_view().is_some(),
+        crate::fuse_redirect::config::fuse_capability_as_str(
+            crate::fuse_redirect::config::fuse_capability()
+        ),
+        legacy_scoped_retired
+    );
 
     let mut last_version = 0;
     let mut last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();

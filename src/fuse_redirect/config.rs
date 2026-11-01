@@ -878,157 +878,6 @@ fn pin_current_thread_to_big_cores() {
     }
 }
 
-pub fn mount_blocking_with_ready(
-    config: FuseRedirectConfig,
-    ready_sock: Option<libc::c_int>,
-) -> bool {
-    let app_pid = config.app_pid;
-    let Some(app_start_time_ticks) = config.app_start_time_ticks else {
-        log::warn!(
-            "fuse redirect app identity unavailable pkg={} app_pid={}",
-            config.package_name,
-            app_pid
-        );
-        send_ready_result(ready_sock, -1);
-        return false;
-    };
-    let package_name = config.package_name.clone();
-    let user_id = config.user_id();
-    let mount_point = fuse_mount_point(&config, user_id);
-    // 挂载源必须唯一：daemon 的重新挂载会在同一路径叠加新会话的挂载，收尾时只能靠它
-    // 确认挂载点是否仍属于本次会话。
-    let session_mount_source = scoped_mount_source(std::process::id());
-    let metadata_dir = mount_point_metadata_dir(&mount_point, user_id);
-    let metadata_uid = if crate::metadata_repair::enabled() {
-        config.uid
-    } else {
-        -1
-    };
-    if !fs::create_directory(&metadata_dir, metadata_uid) {
-        log::error!(
-            "fuse redirect mount point missing: {} metadata={}",
-            mount_point,
-            metadata_dir
-        );
-        send_ready_result(ready_sock, -1);
-        return false;
-    }
-
-    let fs = match super::FuseRedirectFs::new(config) {
-        Some(fs) => fs,
-        None => {
-            send_ready_result(ready_sock, -1);
-            return false;
-        }
-    };
-    // 事件循环线程继承调用线程亲和性：先绑大核再挂载，避免 fuser 线程被调度到 LITTLE 核。
-    pin_current_thread_to_big_cores();
-    let mut mount_options = fuser::Config::default();
-    mount_options.mount_options = vec![
-        MountOption::FSName(session_mount_source.clone()),
-        MountOption::Subtype("srx".to_string()),
-        MountOption::RW,
-        MountOption::NoSuid,
-        MountOption::NoDev,
-        MountOption::NoAtime,
-        MountOption::Async,
-    ];
-    mount_options.acl = SessionACL::All;
-    mount_options.n_threads = Some(8);
-    mount_options.clone_fd = true;
-
-    // 挂载点日志描述的是会话绑定策略，与调用方 uid 无关，因此固定取注册表的会话项。
-    let session_policy = fs.policy.session();
-    log::info!(
-        "fuse redirect mount start pkg={} uid={} user={} mp={} rel={} real={} map_only={} allow={} excl={} sandbox={} ro={} map={}",
-        session_policy.package_name,
-        session_policy.uid,
-        user_id,
-        mount_point,
-        session_policy.mount_rel,
-        session_policy.real_root.display(),
-        session_policy.is_mapping_mode_only,
-        session_policy.allowed_real_paths.len(),
-        session_policy.excluded_real_paths.len(),
-        session_policy.sandboxed_paths.len(),
-        session_policy.read_only_paths.len(),
-        session_policy.path_mappings.len()
-    );
-
-    let background = match fuser::spawn_mount2(fs, &mount_point, &mount_options) {
-        Ok(background) => background,
-        Err(error) => {
-            send_ready_result(ready_sock, -1);
-            log::warn!(
-                "fuse redirect mount failed mp={} err={}",
-                mount_point,
-                error
-            );
-            return false;
-        }
-    };
-    // spawn_mount2 返回只代表后台线程已创建；必须等待 mountinfo 出现本会话挂载，
-    // 再向父进程报告 ready，避免父进程在挂载栈尚未稳定时误判为成功。
-    let Some(session_mount_identity) =
-        wait_for_stable_session_mount(&mount_point, &session_mount_source)
-    else {
-        log::warn!(
-            "fuse redirect mount not stable mp={} source={}",
-            mount_point,
-            session_mount_source
-        );
-        // 就绪失败也按本会话身份收尾，避免卸载同路径上新建的其它会话。
-        let identity = ScopedMountIdentity {
-            source: session_mount_source.clone(),
-            mount_id: 0,
-        };
-        finish_background_session(background, &mount_point, false, Some(&identity));
-        send_ready_result(ready_sock, -1);
-        return false;
-    };
-    // 挂载后登记本次会话身份；挂载表不可读时不向父进程报告 ready。
-    log::info!(
-        "fuse redirect session mount registered mp={} mount_id={} source={}",
-        mount_point,
-        session_mount_identity.mount_id,
-        session_mount_identity.source
-    );
-    // 本连接的 BDI 脏页配额默认被内核限为 1%，回写流水线会饿死；挂载稳定后放宽。
-    set_bdi_max_ratio(&mount_point, &session_mount_identity.source);
-    send_ready_result(ready_sock, 0);
-
-    loop {
-        if background.guard.is_finished() {
-            // 会话线程先结束：此时应用可能已经退出，而应用退出会连带清掉它的挂载
-            // namespace 与这里的 scoped 挂载。必须先判断应用是否还活着，否则会把
-            // 应用退出、重启记成 scoped 会话失败，进而把整机 FUSE 能力锁成不可用。
-            let app_alive =
-                crate::platform::is_process_instance_alive(app_pid, app_start_time_ticks);
-            return finish_background_session(
-                background,
-                &mount_point,
-                !app_alive,
-                Some(&session_mount_identity),
-            );
-        }
-        if !crate::platform::is_process_instance_alive(app_pid, app_start_time_ticks) {
-            log::info!(
-                "fuse redirect app exited, unmount session pkg={} app_pid={} mp={}",
-                package_name,
-                app_pid,
-                mount_point
-            );
-            return finish_background_session(
-                background,
-                &mount_point,
-                true,
-                Some(&session_mount_identity),
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-}
-
 /// 宿主会话就绪阶段码。
 ///
 /// 负值表示失败阶段，`0` 表示就绪。父进程据此把"未就绪"还原成具体阶段，避免只看到
@@ -1054,12 +903,10 @@ pub fn host_ready_stage(code: i32) -> &'static str {
 
 /// 在指定宿主挂载点挂一个共享 FUSE 会话,并把它设为 shared propagation。
 ///
-/// 与 [`mount_blocking_with_ready`] 的差异：宿主会话不跟随任何应用生命周期，挂载点由调用方
-/// 指定（模块私有目录，而非存储别名），挂载源用 `srx_fuse_host` 前缀，挂载稳定后额外把宿主
-/// 挂载点设为 shared，供后续各应用 namespace 用 `MS_BIND` 引用；会话常驻直到会话线程结束。
-///
-/// 阶段 2（B2-a）只搭起宿主会话骨架，应用接入仍走 scoped 路径；宿主挂载点在 daemon 自己的
-/// 私有 namespace 里，对应用不可见，因此数据面行为不变。
+/// 宿主会话是**唯一**的 FUSE 载体：它不跟随任何应用生命周期，挂载点由调用方指定（模块
+/// 私有目录，而非存储别名），挂载源用 `srx_fuse_host` 前缀，挂载稳定后额外把宿主挂载点设为
+/// shared，供后续各应用 namespace 用移动挂载引用；会话常驻直到会话线程结束。宿主挂载点在
+/// daemon 自己的私有 namespace 里，对应用不可见。
 // quality-allow(lint-suppression): 宿主会话挂载函数仅在 daemon 二进制路径使用,lib 目标不调用。
 #[allow(dead_code)]
 pub fn mount_host_fuse(
@@ -1749,6 +1596,15 @@ pub(crate) fn forensics_log(line: &str) {
     append_stall_forensics(line);
 }
 
+/// 只写独立取证文件，不在运行日志里以错误级别出现。
+///
+/// 用于「正常但值得留档」的一次性状态事件（例如宿主数据面锚点建立成功）：它们必须
+/// 进 stall-forensics 供事后对照，但不是错误，按 error 级别写进 running.log 会让
+/// 现场排障误判为失败。
+pub(crate) fn forensics_record(line: &str) {
+    append_stall_forensics(line);
+}
+
 /// 追加一行（带墙钟时间戳）到独立取证文件；超限先截断再续写。
 fn append_stall_forensics(line: &str) {
     use std::io::{Seek, SeekFrom, Write as _};
@@ -2187,14 +2043,6 @@ const SCOPED_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_redirect";
 #[allow(dead_code)]
 const HOST_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_host";
 
-/// 生成本次 scoped 会话唯一的挂载源（`MountOption::FSName`）。
-///
-/// 挂载源会作为 `mount(2)` 的 source 出现在 `/proc/self/mountinfo` 里，不参与内核的 FUSE
-/// 参数解析，因此可以安全地携带会话标识。
-fn scoped_mount_source(service_pid: u32) -> String {
-    format!("{SCOPED_MOUNT_SOURCE_PREFIX}[{service_pid}]")
-}
-
 /// 生成本次共享宿主会话唯一的挂载源（`MountOption::FSName`）。
 // quality-allow(lint-suppression): 宿主挂载源生成函数仅在 daemon 二进制路径使用,lib 目标不调用。
 #[allow(dead_code)]
@@ -2377,15 +2225,6 @@ pub(super) fn fuse_mount_point(config: &FuseRedirectConfig, user_id: i32) -> Str
     } else {
         storage_root
     }
-}
-
-fn mount_point_metadata_dir(mount_point: &str, user_id: i32) -> String {
-    let storage_root = paths::storage_user_root_for_user(user_id);
-    if paths::eq_ignore_case(mount_point, &storage_root) {
-        return paths::data_media_user_root_for_user(user_id);
-    }
-    paths::storage_to_data_media_for_user(mount_point, user_id)
-        .unwrap_or_else(|| mount_point.to_string())
 }
 
 pub fn scoped_mount_roots_for_wildcard_rules<'a>(

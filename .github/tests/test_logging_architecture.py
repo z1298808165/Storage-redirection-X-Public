@@ -202,25 +202,37 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("process_start_time_ticks", intent)
         self.assertIn("mount_intent::prune_stale", daemon)
 
-    def test_namespace_fallback_reexpands_wildcard_rules_after_fuse_failure(self) -> None:
-        config = read("src/fuse_redirect/config.rs")
-        daemon = read("src/daemon_mount.rs")
-        companion = read("src/lifecycle/companion_mount.rs")
-        self.assertIn("expand_namespace_fallback_rules", config)
-        # 回退降级已下沉到 fuse_session 共享模块（经 MountRequestFields 泛型），
-        # 通配展开断言锚定共享实现；两条挂载路径只断言走共享入口。
+    def test_fuse_unavailable_reason_is_reported_per_mount(self) -> None:
+        """FUSE 视图没建起来时必须留下可判定原因。
+
+        scoped 会话退役后只剩共享宿主一种载体，宿主接入失败就直接降级成 namespace
+        bind。降级本身是对的，但如果只写一句 "unavailable"，用户设备上出现不支持时
+        无从判断是设备没有 `/dev/fuse`、配置里没有规则、策略没登记进宿主，还是接入
+        本身失败。因此要求：原因类型集中定义、挂载结论里带上原因、两条路径都打一行
+        带设备事实的结论日志。
+        """
         session = read("src/fuse_session.rs")
-        self.assertIn("expand_namespace_fallback_rules", session)
-        for source, path in ((daemon, "daemon"), (companion, "companion")):
-            self.assertIn(
-                "crate::fuse_session::apply_mount_namespace_fallback(", source, path
-            )
-            self.assertNotIn("fn apply_mount_namespace_fallback(", source, path)
-        # 后端结论串只出现在单一实现里；两条挂载路径通过 needs_namespace_fallback 消费它。
+        for reason in (
+            "NoSharedHost",
+            "AttachGateClosed",
+            "PolicyRegistrationFailed",
+            "NoPolicyRules",
+            "AttachFailed",
+        ):
+            self.assertIn(reason, session)
+        self.assertIn("no_shared_host_session", session)
+        self.assertIn("host_attach_failed", session)
         shared = read("src/fuse_redirect/scoped_mount.rs")
+        self.assertIn("unavailable_reason", shared)
         self.assertIn("scoped_mount_failed_namespace_fallback", shared)
-        for source in (daemon, companion):
-            self.assertIn("needs_namespace_fallback", source)
+        for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
+            source = read(path)
+            self.assertIn("fuse view unavailable reason=", source, path)
+            self.assertIn("fallback=namespace_bind", source, path)
+            self.assertIn("fuse_device=", source, path)
+            self.assertIn("unavailable_reason: host_skip.map(", source, path)
+            # 回退重挂的旧机制已随 scoped 退役删除，不能重新长出第二套降级实现。
+            self.assertNotIn("fn apply_mount_namespace_fallback(", source, path)
 
     def test_fuse_capability_failures_are_bucketed_per_scope(self) -> None:
         """能力熔断不得是全设备单点：分桶、多应用升格、退避自愈三者缺一不可。
