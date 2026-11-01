@@ -194,6 +194,9 @@ fn log_errno(tag: &str) {
 /// 标准错误，因此作为最后兜底的取证手段：即使父进程只看到"未就绪"，也能从阶段行判断
 /// 子进程走到哪一步。
 const FUSE_HOST_STAGE_PATH: &str = crate::platform::module_paths::FUSE_HOST_STAGE_FILE;
+/// 阶段轨迹文件的大小上限。轨迹只用于排障，不能随接入风暴无界追加（真机单次 boot 已
+/// 268KB）；超过上限时清空后继续写，保留最近阶段而不是整段历史。
+const FUSE_HOST_STAGE_MAX_BYTES: i64 = 256 * 1024;
 
 fn append_bytes(buffer: &mut [u8], len: &mut usize, bytes: &[u8]) {
     for byte in bytes {
@@ -244,7 +247,8 @@ fn host_stage_bytes(stage: &[u8]) {
     let Ok(path) = CString::new(FUSE_HOST_STAGE_PATH) else {
         return;
     };
-    // SAFETY: path 是合法 NUL 结尾路径；buffer 与 len 一致，fd 在同一块内关闭。
+    // SAFETY: path 是合法 NUL 结尾路径；buffer 与 len 一致，fd 在同一块内关闭；
+    // lseek/ftruncate 只作用于刚打开的本文件 fd。
     unsafe {
         let fd = libc::open(
             path.as_ptr(),
@@ -253,6 +257,9 @@ fn host_stage_bytes(stage: &[u8]) {
         );
         if fd < 0 {
             return;
+        }
+        if libc::lseek(fd, 0, libc::SEEK_END) >= FUSE_HOST_STAGE_MAX_BYTES {
+            libc::ftruncate(fd, 0);
         }
         libc::write(fd, buffer.as_ptr() as *const libc::c_void, len);
         libc::close(fd);
