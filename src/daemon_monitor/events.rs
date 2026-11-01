@@ -146,6 +146,16 @@ pub(super) fn emit_monitor_event(
     } else {
         "CREATE"
     };
+    // 短窗去重：同一物理写入会被多条 watch 链路（映射源 watch 与公共根 watch）
+    // 各上报一条观察记录，backend 相同、from 不同；窗口内只保留首条。
+    if crate::platform::paths::should_suppress_duplicate_monitor_record(
+        "observation",
+        event_kind,
+        &paths.backend_path,
+        identity.package_name.as_str(),
+    ) {
+        return;
+    }
     let mut line = format!(
         "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=observation|op={}|source={}|mask=0x{:x}|backend={}",
         build_timestamp(),

@@ -488,13 +488,22 @@ unsafe extern "C" fn resolve_open_path(
         return std::ptr::null_mut();
     }
     let original = crate::zygisk::jni::get_jstring_utf8(env, path);
-    let Some(rewritten) = resolve_open_storage_path_for_caller(&original, caller_uid) else {
-        return std::ptr::null_mut();
-    };
-    if rewritten.is_empty() || rewritten == original {
+    let rewritten = resolve_open_storage_path_for_caller(&original, caller_uid)
+        .filter(|rewritten| !rewritten.is_empty() && *rewritten != original);
+    // 防御：本函数必须异常中性。归因链路上的 JNI 调用若残留 pending 异常
+    // （例如 downloads 归因查询被 SecurityException 拒绝），异常会随本
+    // native 返回交给 Java 侧 resolveOpenPathSafe 兜底；但若返回前或后续
+    // 回调里再有任何 JNI 调用（如同一次 open 处理第二个候选路径时的
+    // FindClass），ART 的 AssertNoPendingException 会直接 abort 宿主进程
+    // （2026-10-29 ishtar：media.module 因此反复 SIGABRT）。就地清理并按
+    // 未命中返回。
+    if crate::zygisk::jni::clear_pending_exception(env) {
         return std::ptr::null_mut();
     }
-    new_jstring_utf8(env, &rewritten)
+    match rewritten {
+        Some(rewritten) => new_jstring_utf8(env, &rewritten),
+        None => std::ptr::null_mut(),
+    }
 }
 
 unsafe extern "C" fn storage_path_exists(

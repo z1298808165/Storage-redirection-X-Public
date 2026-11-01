@@ -523,6 +523,12 @@ fn resolve_caller_uid_with_fuse_fallback(hub: &InterceptHub) -> Option<CallerUid
                         fuse_age_ms
                     );
                 }
+                // pid 表未命中时回退到裸 uid：内核 FUSE 头的 uid 由内核按请求方
+                // fsuid 填写，仍是权威请求方（2026-10-30 A17 实测：shell 写入此前
+                // 被归因为 MediaProvider 自身 10218）；优于 resolve 调用方随后的
+                // fsuid 兜底。
+                caller_uid = fuse_uid;
+                caller_source = "fuse_uid_system_fallback";
             }
         } else if fuse_uid >= ANDROID_APP_UID_START && fuse_age_ms > FUSE_CALLER_MAX_AGE_MS {
             let count = CALLER_FUSE_STALE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;

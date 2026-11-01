@@ -133,9 +133,11 @@ fn record_open_result_with_extra(
         record_existed_before,
     );
     // 请求行补 caller_uid：daemon 日志线程据此为写入类 open 登记 path hint，
-    // 让纯映射路径的 request/观察记录也能走 10 秒窗口去重。uid 取不到（-1）
-    // 时照常输出，由登记侧校验拒绝。
-    let caller_uid = hub.get_current_caller_uid();
+    // 让纯映射路径的 request/观察记录也能走 10 秒窗口去重。CALLER_UID 未设置
+    // 时回退 fsuid（FuseDaemon 按请求 setfsuid，见
+    // context::get_effective_caller_uid_for_monitor），未配置应用经原生 FUSE
+    // 路径的写入也能归因。
+    let caller_uid = hub.get_effective_caller_uid_for_monitor();
     extra.push_str(&format!("|caller_uid={caller_uid}"));
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
@@ -308,7 +310,7 @@ fn remember_private_path_caller_hint_for_monitor(hub: &InterceptHub, pathname: &
     };
 
     let process_package = hub.get_package_name();
-    let caller_uid = hub.get_current_caller_uid();
+    let caller_uid = hub.get_effective_caller_uid_for_monitor();
     let caller_package = hub.get_current_caller_package();
     if !should_remember_monitor_private_path_caller_hint(
         &process_package,
@@ -388,7 +390,7 @@ fn record_saf_bridge_provider_path(hub: &InterceptHub, pathname: &str, op_filter
     if !hub.with_package_name(policy::is_saf_native_monitor_bridge_package) {
         return false;
     }
-    let caller_uid = hub.get_current_caller_uid();
+    let caller_uid = hub.get_effective_caller_uid_for_monitor();
     let caller_package = hub.get_current_caller_package();
     AuditTrail::instance().record_saf_provider_path(
         pathname,

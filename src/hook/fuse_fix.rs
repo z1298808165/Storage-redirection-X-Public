@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::Mutex;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 const LIB_FUSE_JNI: &str = "libfuse_jni.so";
 const EQUALS_IGNORE_CASE_NDK_SYMBOL: &str =
@@ -42,6 +42,11 @@ static TARGET_PACKAGE: RwLock<String> = RwLock::new(String::new());
 static COMPARE_PATCH_LOCK: Mutex<()> = Mutex::new(());
 static RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
 const MAX_RETRY_COUNT: u32 = 16;
+// 重试预算耗尽后的长尾重试间隔：fuse_jni 由 FuseDaemonThread 按需 dlopen，
+// 加载时机不受 MP 流量控制（2026-10-30 A17 模拟器实测：首批 open 耗尽 16 次，
+// FuseDaemonThread 启动在其后），长尾重试保证零宽修复在 fuse_jni 映射后仍能
+// 装上。只影响零宽修复自身的安装可靠性，不涉及其它功能。
+const LONG_TAIL_RETRY_INTERVAL_MS: i64 = 10 * 60 * 1000;
 
 unsafe extern "C" {
     fn srx_fuse_fix_install(
@@ -216,7 +221,15 @@ fn install_target_if_enabled() {
         register_compare_hooks_once();
     }
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {
-        return;
+        // 预算耗尽后降频长尾重试：fuse_jni 映射完成后（FuseDaemon 启动）的
+        // 下一次触发即装上零宽修复；成功后由 installed 状态短路。
+        static LONG_TAIL_RETRY_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
+        let now_ms = crate::platform::paths::monotonic_ms();
+        let last_ms = LONG_TAIL_RETRY_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) < LONG_TAIL_RETRY_INTERVAL_MS {
+            return;
+        }
+        LONG_TAIL_RETRY_MS.store(now_ms, Ordering::Relaxed);
     }
     if INSTALL_ATTEMPTED.swap(true, Ordering::AcqRel) {
         return;

@@ -18,6 +18,13 @@ const CURRENT_LOG_LEVEL: i32 = LOG_LEVEL_DEBUG;
 const DEFAULT_LOG_TAG: &str = "StorageRedirect";
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const STATS_LOG_TAG: &str = "Stats";
+/// MP 热重载完成回执标签：与 FileMonitorOp/Stats 一样不受 verbose 门禁约束——
+/// 它是低频的一次性状态事件，且是 daemon 侧补写 ack 回执的唯一触发源；
+/// MP 进程对模块目录无写权限（sepolicy），必须经该通道交由 daemon（root）落盘。
+pub const HOT_RELOAD_LOG_TAG: &str = "HotReload";
+/// 机器可校验的低频状态事件标签（如运行应用重挂载完成）：srxctl 等待循环以
+/// running.log 中的这些行作为唯一完成判据，不受 verbose 门禁约束。
+pub const STATUS_LOG_TAG: &str = "Status";
 /// MP hook 请求 daemon（root）代修属主的通道标签；与 src/log_daemon.rs 的
 const PRIVATE_LOG_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 
@@ -166,6 +173,8 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
     let is_critical = matches!(level, Level::Warn | Level::Error);
     if tag != FILE_MONITOR_LOG_TAG
         && tag != STATS_LOG_TAG
+        && tag != HOT_RELOAD_LOG_TAG
+        && tag != STATUS_LOG_TAG
         && !is_critical
         && !is_debug_logging_enabled()
     {

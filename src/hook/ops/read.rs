@@ -72,15 +72,43 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
             continue;
         }
         let Some(elf) = crate::platform::elf_img::ElfImg::load(lib) else {
-            // 运维诊断：引擎库定位失败是静默重试路径（500ms 周期），补丁长期
-            // 不安装时需要区分「库定位失败」与「PLT 槽位为零」（2026-10-25
-            // CI 实证 A13/A14 的 read patch 从未安装且无任何日志）。
-            static LAST_LOAD_FAIL_LOG_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
+            // 运维诊断：引擎库定位失败是静默重试路径，补丁长期不安装时需要
+            // 区分「库定位失败」与「PLT 槽位为零」（2026-10-25 CI 实证
+            // A13/A14 的 read patch 从未安装且无任何日志）。
+            // A17 实测（2026-10-30）：SDK 37 的 MediaProvider 进程不再加载
+            // libfuse/libfuse_jni（FUSE 服务端实现随平台演进移出 MP 进程），
+            // 5 秒周期的 warn 会持续刷屏——首次必告警并注明平台差异可能，
+            // 之后降频到 10 分钟一条；库若后来出现（延迟加载）照常打补丁。
+            static FIRST_FAIL_LOGGED: [std::sync::atomic::AtomicBool; 3] = [
+                std::sync::atomic::AtomicBool::new(false),
+                std::sync::atomic::AtomicBool::new(false),
+                std::sync::atomic::AtomicBool::new(false),
+            ];
+            static LAST_FAIL_LOG_MS: [AtomicI64; 3] = [
+                AtomicI64::new(i64::MIN / 2),
+                AtomicI64::new(i64::MIN / 2),
+                AtomicI64::new(i64::MIN / 2),
+            ];
+            const RELOAD_FAIL_LOG_INTERVAL_MS: i64 = 10 * 60 * 1000;
+            let absent_index = match lib {
+                LIB_FUSE_ENGINE => 0usize,
+                LIB_FUSE_JNI => 1usize,
+                _ => 2usize,
+            };
             let now_ms = crate::platform::paths::monotonic_ms();
-            let last_ms = LAST_LOAD_FAIL_LOG_MS.load(Ordering::Relaxed);
-            if now_ms.saturating_sub(last_ms) >= 5000 {
-                LAST_LOAD_FAIL_LOG_MS.store(now_ms, Ordering::Relaxed);
-                log::warn!("fuse engine patch load failed lib={}", lib);
+            let should_log = !FIRST_FAIL_LOGGED[absent_index].swap(true, Ordering::Relaxed) || {
+                let last = LAST_FAIL_LOG_MS[absent_index].load(Ordering::Relaxed);
+                now_ms.saturating_sub(last) >= RELOAD_FAIL_LOG_INTERVAL_MS
+                    && LAST_FAIL_LOG_MS[absent_index]
+                        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+            };
+            if should_log {
+                LAST_FAIL_LOG_MS[absent_index].store(now_ms, Ordering::Relaxed);
+                log::warn!(
+                    "fuse engine patch load failed lib={} (provider process may no longer ship this lib on newer platform releases; retry continues at low frequency)",
+                    lib
+                );
             }
             continue;
         };

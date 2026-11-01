@@ -315,6 +315,12 @@ impl InterceptHub {
         context::get_current_caller_uid()
     }
 
+    /// 监视记录专用：CALLER_UID 未设置时回退当前 fsuid（见
+    /// `context::get_effective_caller_uid_for_monitor`）。禁止用于重定向判定。
+    pub fn get_effective_caller_uid_for_monitor(&self) -> i32 {
+        context::get_effective_caller_uid_for_monitor()
+    }
+
     pub fn set_current_caller_from_mapping_request_owner(
         &self,
         caller_package: &str,

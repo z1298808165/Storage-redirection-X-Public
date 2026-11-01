@@ -31,6 +31,16 @@ static ZYGISK_MODULE_ENTRY_KEEP: unsafe extern "C" fn(*mut ApiTable, *mut jni_sy
 #[used]
 static ZYGISK_COMPANION_ENTRY_KEEP: unsafe extern "C" fn(libc::c_int) = zygisk_companion_entry;
 
+// 直写 logcat 的最小声明：entry 诊断发生在 Logger 初始化之前，不能依赖日志门面。
+unsafe extern "C" {
+    fn __android_log_print(
+        prio: libc::c_int,
+        tag: *const libc::c_char,
+        fmt: *const libc::c_char,
+        ...
+    ) -> libc::c_int;
+}
+
 // Zygisk 加载模块时调用；拿到 API 表与 env 后完成注册并触发首次 on_load
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zygisk_module_entry(table: *mut ApiTable, env: *mut jni_sys::JNIEnv) {
@@ -38,6 +48,20 @@ pub unsafe extern "C" fn zygisk_module_entry(table: *mut ApiTable, env: *mut jni
 }
 
 unsafe fn module_entry_impl(table: *mut ApiTable, env: *mut jni_sys::JNIEnv) {
+    // 诊断（2026-10-30 A14 模拟器）：Zygisk Next 加载模块 so 后入口是否真的被
+    // 调用无法从 running.log 区分（Logger 尚未初始化时 info 日志不可见），这里
+    // 直接写 logcat。tag=SrxEntry，可用 `logcat | grep SrxEntry` 直接核对。
+    const ANDROID_LOG_INFO: libc::c_int = 4;
+    let tag = b"SrxEntry\0";
+    let msg = b"zygisk_module_entry invoked\0";
+    // SAFETY: tag/msg 均为 NUL 结尾的静态字面量，__android_log_print 为变参 C 函数。
+    unsafe {
+        __android_log_print(
+            ANDROID_LOG_INFO,
+            tag.as_ptr() as *const libc::c_char,
+            msg.as_ptr() as *const libc::c_char,
+        );
+    }
     let call_index = ENTRY_CALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     Logger::init(None);
 

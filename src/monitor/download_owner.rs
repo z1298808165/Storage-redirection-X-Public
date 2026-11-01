@@ -101,6 +101,9 @@ pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<Str
     if !should_lookup_download_owner(normalized_path) {
         return None;
     }
+    if !host_process_may_query_downloads() {
+        return None;
+    }
 
     let now_ms = paths::monotonic_ms();
     let candidates = build_lookup_candidates(normalized_path);
@@ -168,6 +171,24 @@ pub fn caller_uid_shares_download_group(caller_uid: i32) -> bool {
         && policy::get_packages_for_uid(caller_uid)
             .iter()
             .any(|pkg| pkg == DOWNLOAD_PROVIDER_NAME)
+}
+
+/// 宿主进程自身是否可合法查询 downloads 提供器。
+///
+/// HyperOS 等系统把 DownloadProvider 与 MediaProvider 拆成不同 uid，
+/// media.module 宿主进程查询 content://downloads/all_downloads 会因缺
+/// ACCESS_ALL_DOWNLOADS 被 SecurityException 拒绝；共享 uid 的设备上两者
+/// 同组则允许。守卫必须看宿主进程自身的 uid 组而不是 open 调用方的 uid：
+/// 调用方属于下载组不代表本进程有查询权限（2026-10-29 ishtar 崩溃取证：
+/// FUSE open 调用方为下载组 uid、宿主 media.module 被拒后异常残留 abort）。
+/// 宿主无权限时直接跳过真实查询，归因回退到 recent path hint 台账；
+/// uid 组映射未加载（开机早期）时同样按跳过处理，属安全的降级路径。
+fn host_process_may_query_downloads() -> bool {
+    // SAFETY: libc::getuid 仅读取本进程真实凭据，无前置条件，不会失败。
+    let host_uid = unsafe { libc::getuid() } as i32;
+    policy::get_packages_for_uid(host_uid)
+        .iter()
+        .any(|pkg| pkg == DOWNLOAD_PROVIDER_NAME)
 }
 
 // 下载行的 destination 可指向任意用户存储路径（公共目录或应用私有目录），
@@ -382,7 +403,12 @@ unsafe fn find_class(env: *mut JNIEnv, name: &str) -> Option<jclass> {
     let table = *env;
     let class_name = CString::new(name).ok()?;
     let class = ((*table).v1_1.FindClass)(env, class_name.as_ptr());
-    if class.is_null() || clear_exception(env) {
+    // 必须先清理再判空：调用失败（返回 null）时异常必定 pending，
+    // 短路写法 `is_null() || clear_exception` 会在失败时跳过清理，
+    // 残留的 pending 异常会让后续 JNI 调用 abort 整个宿主进程
+    // （2026-10-29 ishtar：media.module 因此反复 SIGABRT）。
+    let threw = clear_exception(env);
+    if class.is_null() || threw {
         return None;
     }
     Some(class)
@@ -398,7 +424,8 @@ unsafe fn get_method_id(
     let method_name = CString::new(name).ok()?;
     let method_sig = CString::new(sig).ok()?;
     let method = ((*table).v1_1.GetMethodID)(env, class, method_name.as_ptr(), method_sig.as_ptr());
-    if method.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if method.is_null() || threw {
         return None;
     }
     Some(method)
@@ -415,7 +442,8 @@ unsafe fn get_static_method_id(
     let method_sig = CString::new(sig).ok()?;
     let method =
         ((*table).v1_1.GetStaticMethodID)(env, class, method_name.as_ptr(), method_sig.as_ptr());
-    if method.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if method.is_null() || threw {
         return None;
     }
     Some(method)
@@ -429,7 +457,8 @@ unsafe fn call_static_object_method(
 ) -> Option<jobject> {
     let table = *env;
     let value = ((*table).v1_1.CallStaticObjectMethodA)(env, class, method, args.as_ptr());
-    if value.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if value.is_null() || threw {
         return None;
     }
     Some(value)
@@ -443,7 +472,8 @@ unsafe fn call_object_method(
 ) -> Option<jobject> {
     let table = *env;
     let value = ((*table).v1_1.CallObjectMethodA)(env, obj, method, args.as_ptr());
-    if value.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if value.is_null() || threw {
         return None;
     }
     Some(value)
@@ -500,7 +530,8 @@ unsafe fn new_string_array(
         string_class,
         std::ptr::null_mut(),
     );
-    if array.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if array.is_null() || threw {
         return None;
     }
 

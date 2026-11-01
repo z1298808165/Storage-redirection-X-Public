@@ -53,6 +53,11 @@ const MAX_TRACKED_SENDERS: usize = 256;
 const TAG_FILE_MONITOR: &str = "FileMonitorOp";
 const TAG_STATS: &str = "Stats";
 const TAG_CONTROL: &str = "Control";
+/// MP 热重载完成回执（发送方为 MediaProvider 进程，消息仅承载 pid；request id
+/// 由本侧从请求文件读取权威值）。
+const TAG_HOT_RELOAD: &str = "HotReload";
+/// 机器可校验的低频状态事件（发送方为 daemon 自身），无条件落盘 running.log。
+const TAG_STATUS: &str = "Status";
 /// MP hook 进程请求 daemon（root）代修属主的通道标签；与 src/logging.rs 的
 /// 待代修路径队列上限：恶意/异常发送方在 per-uid 限流之外再受总量约束。
 const CONTROL_CLEAR_MONITOR: &str = "clear-monitor";
@@ -442,6 +447,13 @@ impl LogState {
                     ));
                 }
             }
+            TAG_HOT_RELOAD => {
+                self.handle_hot_reload(message);
+            }
+            TAG_STATUS => {
+                self.running
+                    .append(&format_running_line("I", TAG_STATUS, message));
+            }
             _ => {
                 // 残留发送方（如尚未重启的宿主进程）在全局 verbose 关闭后仍可能
                 // 以 Debug/Verbose 级别发送运行日志包；在接收侧按 daemon 当前配置
@@ -516,6 +528,37 @@ impl LogState {
             }
             _ => {}
         }
+    }
+
+    /// 处理 MP 热重载完成回执：无条件落盘完成行，并代写 ack 回执文件。
+    ///
+    /// MP 进程（mediaprovider 域）对模块目录（shell_data_file）无读写权限——
+    /// 请求文件读不到、ack 写不出——因此 request id 由本侧以 root 身份从请求
+    /// 文件读取权威值，ack 亦由本侧落盘。完成行不受 verbose 门禁：它是低频的
+    /// 一次性状态事件，且是 srxctl 等待循环（running.log 计数比对）的唯一判据。
+    fn handle_hot_reload(&mut self, message: &str) {
+        let pid = message
+            .split_whitespace()
+            .find_map(|item| item.strip_prefix("pid="))
+            .unwrap_or("unknown");
+        let request_id = fs::read_to_string(
+            crate::platform::module_paths::MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE,
+        )
+        .ok()
+        .and_then(|text| {
+            text.split_whitespace()
+                .find_map(|item| item.strip_prefix("request=").map(str::to_string))
+        })
+        .unwrap_or_else(|| "signal".to_string());
+        self.running.append(&format_running_line(
+            "I",
+            TAG_HOT_RELOAD,
+            &format!(
+                "media provider hot reload completed request={} pid={}",
+                request_id, pid
+            ),
+        ));
+        write_hot_reload_ack(pid, &request_id);
     }
 
     fn clear_monitor(&mut self, token: Option<&str>) {
@@ -811,6 +854,37 @@ fn parse_packet(packet: &str) -> Option<(&str, &str, &str)> {
     let tag = parts.next()?;
     let message = parts.next()?;
     (!level.is_empty() && !tag.is_empty() && !message.is_empty()).then_some((level, tag, message))
+}
+
+/// 代 MP 写热重载 ack 回执（MP 域对模块目录无写权限，必须由 root 侧落盘）。
+/// 原子写（tmp+rename）保持与旧 MP 侧实现相同的 torn-write 语义。
+fn write_hot_reload_ack(pid: &str, request_id: &str) {
+    let path = Path::new(crate::platform::module_paths::MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let boot_id = crate::platform::read_boot_id();
+    let content = format!(
+        "stage=hot_reload_ok request={} pid={} boot_id={}\n",
+        request_id,
+        pid,
+        if boot_id.is_empty() {
+            "unknown"
+        } else {
+            &boot_id
+        }
+    );
+    let temp = path.with_extension("ack.tmp");
+    if fs::write(&temp, content).is_err() {
+        return;
+    }
+    if fs::rename(&temp, path).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+    }
 }
 
 fn format_running_line(level: &str, tag: &str, message: &str) -> String {

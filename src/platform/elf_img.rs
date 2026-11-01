@@ -322,14 +322,42 @@ fn find_embedded_elf(entry_suffix: &str) -> Option<EmbeddedElf> {
         }
         apk_paths.push(path.to_string());
     }
+    if apk_paths.is_empty() {
+        // 一次性诊断（2026-10-30 A17 排查）：进程 maps 里没有任何 .apk 结尾的
+        // 路径条目，embedded 通道无从下手；正常设备上 MediaProvider 进程至少
+        // 会映射自身 APK（dex/vdex/art 条目）。
+        static EMPTY_DIAG: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !EMPTY_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("elf embedded lookup: no .apk path in self maps suffix={entry_suffix}");
+        }
+    }
 
     for apk_path in apk_paths {
         let file_path = resolve_map_path(&apk_path);
         let Ok(file) = std::fs::read(&file_path) else {
+            // 一次性诊断：APK 文件读不到（权限/路径解析失败）。
+            static READ_FAIL_DIAG: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !READ_FAIL_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "elf embedded lookup: apk read failed path={file_path} suffix={entry_suffix}"
+                );
+            }
             continue;
         };
         if let Some(embedded) = find_zip_stored_elf(&apk_path, &file, entry_suffix) {
             return Some(embedded);
+        }
+        // 一次性诊断：APK 可读但按 entry_suffix 未命中 stored 的 ELF 条目
+        // （zip 结构解析失败或条目被压缩）。
+        static ZIP_FAIL_DIAG: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !ZIP_FAIL_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!(
+                "elf embedded lookup: zip lookup missed apk_path={apk_path} suffix={entry_suffix} size={}",
+                file.len()
+            );
         }
     }
     None

@@ -121,6 +121,105 @@ pub fn get_current_caller_uid() -> i32 {
     CALLER_UID.with(|cell| cell.get())
 }
 
+/// 监视记录用的有效调用方 uid：CALLER_UID 未设置时回退当前线程 fsuid。
+///
+/// MediaProvider 的 FuseDaemon 处理每个 FUSE 请求前会 setfsuid(请求方 uid)
+/// （AOSP 标准做法，使下层文件以请求者身份创建）。未走 JNI rewrite 路径的
+/// 原生 FUSE 请求（未配置应用对 /sdcard 的直接读写）没有 CALLER_UID 上下文，
+/// 此时线程 fsuid 恰为触发请求的应用 uid，监视记录据此归因。
+///
+/// **仅用于监视记录**，不得用于重定向判定：重定向决策必须使用显式登记的
+/// 调用方上下文，fsuid 兜底会把"恰好执行 I/O 的请求方"当成重定向调用方。
+pub fn get_effective_caller_uid_for_monitor() -> i32 {
+    let uid = CALLER_UID.with(|cell| cell.get());
+    if uid >= 0 {
+        return uid;
+    }
+    fsuid_from_proc_status()
+}
+
+/// 从 /proc/self/status 的 `Uid:` 行读取当前线程 fsuid（该行四列依次为
+/// 真实/有效/保存/文件系统 uid，fsuid 为第 4 列）。
+///
+/// **为什么不用 setfsuid(-1) 惯用法**：MediaProvider 等应用进程运行在 zygote
+/// seccomp 沙箱内，`setfsuid`（arm64 syscall 151）不在白名单，调用即 SIGSYS
+/// 杀死进程（2026-10-30 真机实测，MP 崩溃循环、存储 volume 不可用）。
+/// **为什么不找 `FsUid:` 行**：status 没有 FsUid 字段（2026-10-30 duchamp
+/// 实测仅 `Uid:` 行），fsuid 是 `Uid:` 行的第 4 列。
+/// 改用 raw `SYS_openat` 直读 /proc/self/status：不经 PLT，不会被自身 hook
+/// 拦截产生递归记录。
+fn fsuid_from_proc_status() -> i32 {
+    const STATUS_PATH: &[u8] = b"/proc/self/status\0";
+    const READ_BUF_LEN: usize = 4096;
+    // 失败只告警一次：定位用，避免刷屏。
+    static FSUID_DIAG_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    // SAFETY: AT_FDCWD + NUL 结尾合法路径；raw syscall 不经 PLT，避免被自身
+    // libc hook 拦截形成递归。读取失败返回 -1，由调用方按"归因不可用"处理。
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat,
+            libc::AT_FDCWD,
+            STATUS_PATH.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        ) as libc::c_int
+    };
+    if fd < 0 {
+        if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let errno = crate::platform::errno::last();
+            log::warn!(
+                "monitor fsuid /proc/self/status open failed errno={errno} {}",
+                crate::platform::errno::text(errno)
+            );
+        }
+        return -1;
+    }
+    let mut buf = [0u8; READ_BUF_LEN];
+    // SAFETY: fd 为刚打开的合法描述符，buf 容量充足，单次读不满整个文件。
+    let read_n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, READ_BUF_LEN) };
+    // SAFETY: fd 为本函数打开的合法描述符，仅关闭一次。
+    unsafe {
+        libc::close(fd);
+    }
+    if read_n <= 0 {
+        if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("monitor fsuid /proc/self/status read failed n={read_n}");
+        }
+        return -1;
+    }
+    let text = &buf[..(read_n as usize).min(READ_BUF_LEN)];
+    for line in text.split(|b| *b == b'\n') {
+        if let Some(rest) = line.strip_prefix(b"Uid:") {
+            // Uid: real effective saved fs —— fsuid 为第 4 列；status 用制表符
+            // 分隔列，仅按空格切分会让四列粘成一列（真机实测）。
+            let fields: Vec<&[u8]> = rest
+                .split(|b| *b == b' ' || *b == b'\t')
+                .filter(|f| !f.is_empty())
+                .collect();
+            return fields
+                .get(3)
+                .and_then(|fs| std::str::from_utf8(fs).ok())
+                .and_then(|fs| fs.trim().parse().ok())
+                .unwrap_or_else(|| {
+                    if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        log::warn!(
+                            "monitor fsuid parse failed line={}",
+                            String::from_utf8_lossy(line)
+                        );
+                    }
+                    -1
+                });
+        }
+    }
+    if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!(
+            "monitor fsuid Uid line missing: {}",
+            String::from_utf8_lossy(&text[..text.len().min(256)])
+        );
+    }
+    -1
+}
+
 pub fn get_current_caller_age_ms() -> i64 {
     let now = monotonic_ms();
     CALLER_TS_MS.with(|cell| {

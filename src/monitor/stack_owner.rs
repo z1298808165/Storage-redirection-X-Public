@@ -116,7 +116,10 @@ unsafe fn find_class(env: *mut JNIEnv, name: &str) -> Option<jclass> {
     let table = *env;
     let c_name = std::ffi::CString::new(name).ok()?;
     let class = ((*table).v1_1.FindClass)(env, c_name.as_ptr());
-    if class.is_null() || clear_exception(env) {
+    // 先清理再判空：失败（null）时异常必定 pending，短路写法会跳过清理，
+    // 残留异常会让后续 JNI 调用 abort 宿主进程（与 download_owner 同因）。
+    let threw = clear_exception(env);
+    if class.is_null() || threw {
         return None;
     }
     Some(class)
@@ -132,7 +135,8 @@ unsafe fn get_method_id(
     let c_name = std::ffi::CString::new(name).ok()?;
     let c_sig = std::ffi::CString::new(sig).ok()?;
     let mid = ((*table).v1_1.GetMethodID)(env, class, c_name.as_ptr(), c_sig.as_ptr());
-    if mid.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if mid.is_null() || threw {
         return None;
     }
     Some(mid)
@@ -148,7 +152,8 @@ unsafe fn get_static_method_id(
     let c_name = std::ffi::CString::new(name).ok()?;
     let c_sig = std::ffi::CString::new(sig).ok()?;
     let mid = ((*table).v1_1.GetStaticMethodID)(env, class, c_name.as_ptr(), c_sig.as_ptr());
-    if mid.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if mid.is_null() || threw {
         return None;
     }
     Some(mid)
@@ -162,7 +167,8 @@ unsafe fn call_static_object_method(
 ) -> Option<jobject> {
     let table = *env;
     let value = ((*table).v1_1.CallStaticObjectMethodA)(env, class, mid, args.as_ptr());
-    if value.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if value.is_null() || threw {
         return None;
     }
     Some(value)
@@ -176,7 +182,8 @@ unsafe fn call_object_method(
 ) -> Option<jobject> {
     let table = *env;
     let value = ((*table).v1_1.CallObjectMethodA)(env, obj, mid, args.as_ptr());
-    if value.is_null() || clear_exception(env) {
+    let threw = clear_exception(env);
+    if value.is_null() || threw {
         return None;
     }
     Some(value)
