@@ -39,6 +39,9 @@ const PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
 const FUSE_READY_TIMEOUT_SEC: i64 = 4;
 const DAEMON_MOUNT_SLOW_MS: i64 = 20;
 const MAX_UNMOUNT_PASSES_PER_TARGET: usize = 32;
+/// 摘除预算的硬上限：越过软上限（32）后继续摘本模块可归属的层，达到该值才放弃。
+/// 深栈来自失败轮次的累积，软上限继续 fail-closed 会把残留钉到应用退出。
+const MAX_UNMOUNT_PASSES_HARD_LIMIT: usize = MAX_UNMOUNT_PASSES_PER_TARGET * 4;
 static ACTIVE_MOUNT_PIDS: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static LAST_SUCCESS_BY_PID: Lazy<Mutex<HashMap<i32, (u64, u64)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -2040,13 +2043,24 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
                 return false;
             }
         }
-        if passes >= MAX_UNMOUNT_PASSES_PER_TARGET {
+        if passes >= MAX_UNMOUNT_PASSES_HARD_LIMIT {
             log::warn!(
-                "daemon unmount stack exceeded target={} mount_id={}",
+                "daemon unmount stack exceeded hard limit target={} mount_id={} passes={}",
                 target,
-                live.mount_id
+                live.mount_id,
+                passes
             );
             return false;
+        }
+        if passes == MAX_UNMOUNT_PASSES_PER_TARGET {
+            // 软上限只告警、不放弃：深栈来自上一轮失败累积，此时 fail-closed 会把
+            // 残留钉到应用退出。硬上限继续兜底，防止异常层让清理无限循环。
+            log::warn!(
+                "daemon unmount stack exceeded soft limit target={} mount_id={} passes={}",
+                target,
+                live.mount_id,
+                passes
+            );
         }
 
         let Ok(c_target) = CString::new(target) else {
