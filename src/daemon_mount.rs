@@ -3,7 +3,9 @@ use crate::daemon_mount_diag::{
     log_child_diagnostics, log_mounted_target_view, log_reload_view_root_stack,
     read_proc_status_summary,
 };
-pub use crate::daemon_mount_reclaim::{cleanup_all_mount_states, prune_stale_mount_states};
+pub use crate::daemon_mount_reclaim::{
+    cleanup_all_mount_states, prune_stale_mount_states, reap_orphan_scoped_sessions,
+};
 use crate::daemon_mount_reclaim::{
     has_dead_fuse_child, reap_child, remember_stuck_mount_child, should_skip_for_stuck_children,
     state_value,

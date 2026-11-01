@@ -6,7 +6,7 @@ use crate::daemon_monitor::RegularAppMonitor;
 use crate::daemon_mount::{
     MountOperation, MountRequest, cleanup_all_mount_states, execute_mount_request,
     has_healthy_mount_state, has_mount_state, invalidate_pre_registered_host_policies,
-    prune_stale_mount_states,
+    prune_stale_mount_states, reap_orphan_scoped_sessions,
 };
 use crate::logging::Logger;
 use crate::platform;
@@ -1097,6 +1097,10 @@ fn prune_stale_states_throttled() {
     }
     LAST_PRUNE_MS.store(now_ms, Ordering::Relaxed);
     prune_stale_mount_states();
+    // 状态文件只覆盖"已记账"的会话；状态文件缺失或被清理后，scoped 子进程没有任何
+    // 回收依据，会以 init 收养的形式常驻并顶满进程号空间（真机实测 1198 个）。这里按
+    // comm + 账本缺失 + namespace 已无应用进程兜底收割。
+    reap_orphan_scoped_sessions();
     crate::mount_intent::prune_stale();
     crate::mount_identity::prune_stale();
     // reconcile 入口必然是相对静息的时刻（批次排空后或周期兜底轮），顺手按

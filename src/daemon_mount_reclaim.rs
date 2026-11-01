@@ -14,6 +14,7 @@ use crate::platform::module_paths;
 use crate::platform::paths::monotonic_ms;
 use libc::{SIGKILL, WNOHANG, waitpid};
 use once_cell::sync::Lazy;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +33,15 @@ const MAX_TOTAL_STUCK_MOUNT_CHILDREN: usize = 32;
 /// 列表无界增长；超出时丢弃最早登记的条目，保留较新的卡死记录。
 const MAX_TRACKED_STUCK_MOUNT_CHILDREN: usize = 64;
 const STUCK_MOUNT_SKIP_LOG_STEP: u64 = 32;
+
+/// 本模块 scoped FUSE 会话的进程名：`daemon_mount::start_scoped_fuse_services` fork
+/// 出的子进程会 `prctl(PR_SET_NAME)` 成这个名字，是回收判据的唯一来源。
+const SCOPED_SESSION_PROC_NAME: &[u8] = b"srx_fuse";
+/// 孤儿 scoped 会话的最小存活时长：低于该值可能是仍在握手中的新会话，不收割。
+const ORPHAN_SCOPED_MIN_AGE_SECS: u64 = 120;
+/// 存活 scoped 会话数安全阀：回收侧超过它时按启动时间从最老的孤儿继续收割，避免
+/// 异常累积把进程号空间顶满。数值按正常配置（多应用 × 多根）留足余量。
+const MAX_LIVE_SCOPED_SESSIONS: usize = 512;
 
 static STUCK_MOUNT_CHILDREN: Lazy<Mutex<Vec<StuckMountChild>>> =
     Lazy::new(|| Mutex::new(Vec::new()));
@@ -530,4 +540,146 @@ pub(crate) fn reap_child(child: i32, nonblocking: bool) -> bool {
     }
     log::warn!("daemon child not reaped child={}", child);
     false
+}
+
+/// 收割"没有账本归属、且所在 mount namespace 已无应用进程"的孤儿 scoped 会话。
+///
+/// 为什么不能只看 PPID：scoped 会话由挂载 worker fork 出来后 worker 立即 `_exit`，
+/// 它们的父进程**天然就是 init**，PPID=1 对在用会话同样成立，不能作为判据。
+///
+/// 真正的判据有两条：
+/// 1. 不在任何 `<pkg>_<pid>.state` 的 `fuse_child=` 账本里（没有回收依据的根源）；
+/// 2. 它所在的 mount namespace 里已经没有任何**非本模块会话**的进程——应用退出后
+///    namespace 只因会话仍持有 nsproxy 引用而不释放，这个条件正好刻画"没人用的死
+///    会话"，同时避免误杀仍在挂载或仍被应用使用的会话。
+pub fn reap_orphan_scoped_sessions() -> usize {
+    let tracked = tracked_scoped_session_pids();
+    let clk_ticks = clk_ticks_per_sec();
+    let Some(uptime_ticks) = proc_uptime_ticks(clk_ticks) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+
+    // 一次遍历同时收集：应用侧的 namespace 集合（有人用）与会话候选。
+    let mut app_namespaces: HashSet<String> = HashSet::new();
+    let mut sessions: Vec<(i32, u64, String)> = Vec::new();
+    let mut live = 0usize;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 1 {
+            continue;
+        }
+        let Ok(ns_link) = std::fs::read_link(entry.path().join("ns/mnt")) else {
+            continue;
+        };
+        let namespace = ns_link.to_string_lossy().into_owned();
+        let Ok(comm) = std::fs::read(entry.path().join("comm")) else {
+            continue;
+        };
+        if trim_proc_comm(&comm) != SCOPED_SESSION_PROC_NAME {
+            app_namespaces.insert(namespace);
+            continue;
+        }
+        live = live.saturating_add(1);
+        let Some(start_ticks) = crate::platform::process_start_time_ticks(pid) else {
+            continue;
+        };
+        sessions.push((pid, start_ticks, namespace));
+    }
+
+    let mut orphans: Vec<(i32, u64)> = Vec::new();
+    let mut young: Vec<(i32, u64)> = Vec::new();
+    for (pid, start_ticks, namespace) in &sessions {
+        if tracked.contains(pid) || app_namespaces.contains(namespace) {
+            continue;
+        }
+        let age_secs = uptime_ticks.saturating_sub(*start_ticks) / clk_ticks;
+        if age_secs >= ORPHAN_SCOPED_MIN_AGE_SECS {
+            orphans.push((*pid, *start_ticks));
+        } else {
+            young.push((*pid, *start_ticks));
+        }
+    }
+    let mut killed = 0usize;
+    for (pid, _) in &orphans {
+        if terminate_scoped_session(*pid) {
+            killed = killed.saturating_add(1);
+        }
+    }
+    if live.saturating_sub(killed) > MAX_LIVE_SCOPED_SESSIONS {
+        // 龄期已到的孤儿清完仍超安全阀：按启动时间从最老的开始继续收割。此时对方
+        // 可能仍是"年轻会话"，但进程号空间上限优先于保守策略。
+        let mut rest = orphans.clone();
+        rest.extend(young);
+        rest.sort_by_key(|(_, start_ticks)| *start_ticks);
+        for (pid, _) in rest {
+            if live.saturating_sub(killed) <= MAX_LIVE_SCOPED_SESSIONS {
+                break;
+            }
+            if terminate_scoped_session(pid) {
+                killed = killed.saturating_add(1);
+            }
+        }
+    }
+    if killed > 0 {
+        log::warn!(
+            "daemon reaped orphan scoped sessions killed={} live={}",
+            killed,
+            live
+        );
+    }
+    killed
+}
+
+/// 收集所有挂载状态文件里登记的 scoped 会话 pid（`fuse_child=` 行）。
+fn tracked_scoped_session_pids() -> HashSet<i32> {
+    let mut tracked = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(module_paths::MOUNT_STATE_DIR) else {
+        return tracked;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("state") {
+            continue;
+        }
+        for child in read_fuse_children(&path.to_string_lossy()) {
+            tracked.insert(child.pid);
+        }
+    }
+    tracked
+}
+
+/// 截掉 `/proc/<pid>/comm` 的换行与 NUL（切片没有 trim 方法）。
+fn trim_proc_comm(comm: &[u8]) -> &[u8] {
+    let end = comm
+        .iter()
+        .rposition(|&byte| byte != b'\n' && byte != 0)
+        .map_or(0, |index| index + 1);
+    &comm[..end]
+}
+
+fn clk_ticks_per_sec() -> u64 {
+    // SAFETY: sysconf 只读取系统常量，不触碰调用方内存。
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks <= 0 { 100 } else { ticks as u64 }
+}
+
+fn proc_uptime_ticks(clk_ticks: u64) -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs: f64 = text.split_whitespace().next()?.parse().ok()?;
+    Some((secs * clk_ticks as f64) as u64)
+}
+
+fn terminate_scoped_session(pid: i32) -> bool {
+    // SAFETY: kill 只接收整型参数；pid 来自 /proc 且已校验 comm 与 namespace。
+    let ret = unsafe { libc::kill(pid, SIGKILL) };
+    ret == 0
 }
