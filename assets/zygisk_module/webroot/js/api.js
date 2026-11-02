@@ -545,19 +545,43 @@ function isSafeUserId(userId) {
   return /^[0-9]+$/.test(String(userId || ""));
 }
 
+/**
+ * dex 输出中标志「该用户视角下的系统应用」的行前缀。
+ * 由 tools/list_apps/Main.java 生成，以 `#` 开头，旧读取端会整行跳过。
+ */
+const COMPAT_APP_LIST_SYSTEM_MARKER = "#system=";
+
 function parseCompatAppList(content) {
   const apps = [];
+  const systemPackages = new Set();
   String(content || "")
     .split("\n")
     .forEach((line) => {
       const text = line.trim();
-      if (!text || text.startsWith("#")) return;
+      if (!text) return;
+      if (text.startsWith(COMPAT_APP_LIST_SYSTEM_MARKER)) {
+        text
+          .slice(COMPAT_APP_LIST_SYSTEM_MARKER.length)
+          .split(/\s+/)
+          .forEach((name) => {
+            if (isSafePackageName(name)) systemPackages.add(name);
+          });
+        return;
+      }
+      if (text.startsWith("#")) return;
       const splitAt = text.indexOf("=");
       const packageName = splitAt >= 0 ? text.slice(0, splitAt).trim() : text.split(/\s+/)[0];
       const appLabel = splitAt >= 0 ? text.slice(splitAt + 1).trim() : packageName;
       if (isSafePackageName(packageName))
-        apps.push({ packageName, appLabel: appLabel || packageName, isSystem: false });
+        apps.push({ packageName, appLabel: appLabel || packageName });
     });
+  // 系统应用只在 dex 给出了标记时按用户结果覆盖；旧版 dex 没有该标记，
+  // 此时保持 isSystem 未定义，让调用方继续沿用包名前缀兜底判断。
+  if (systemPackages.size) {
+    apps.forEach((app) => {
+      app.isSystem = systemPackages.has(app.packageName);
+    });
+  }
   return apps;
 }
 
@@ -1901,7 +1925,9 @@ const Api = {
   /** 获取已安装应用列表（用户应用与系统应用） */
   async getInstalledApps(userId) {
     const safeUser = isSafeUserId(userId) ? String(userId) : "";
-    const fromKsu = this.getInstalledAppsFromKsu();
+    // KSU 的包列表接口没有用户维度，只反映当前进程视角，因此仅对主用户可用；
+    // 其它用户必须走可按用户查询的 dex/pm 通道，否则切换用户后列表不会变化。
+    const fromKsu = !safeUser || safeUser === "0" ? this.getInstalledAppsFromKsu() : [];
     if (fromKsu.length) return fromKsu;
     const fromDex = await this.getInstalledAppsFromDex(safeUser);
     if (fromDex.length) return fromDex;
