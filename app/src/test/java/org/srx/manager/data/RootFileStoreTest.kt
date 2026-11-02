@@ -111,14 +111,13 @@ class RootFileStoreTest {
 
     assertEquals("dump", output)
     val command = shell.invocations.single().command
-    assertTrue(command, command.startsWith("mkdir -p ${shellQuote(AppsDir)}; "))
-    assertTrue(command, command.contains("for f in ${shellQuote(AppsDir)}/*.json; do "))
-    assertTrue(
-        command,
-        command.contains(
-            "printf '\\n$ConfiguredAppConfigMarker%s\\n' \"\$p\"; cat \"\$f\"; printf '\\n'; done 2>/dev/null"
-        ),
-    )
+    // 配置 dump 必须是单个进程：早先逐文件 cat 会为每个应用各 fork 一次，
+    // 56 个应用就要 1.9s 以上，与输出体积无关。
+    assertTrue(command, command.contains("awk 'FILENAME != prev {"))
+    assertTrue(command, command.contains("$ConfiguredAppConfigMarker%s"))
+    assertTrue(command, command.endsWith("${shellQuote(AppsDir)}/*.json 2>/dev/null"))
+    assertFalse(command, command.contains("cat "))
+    assertFalse(command, command.contains("for f in "))
   }
 
   @Test

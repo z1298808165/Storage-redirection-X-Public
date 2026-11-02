@@ -37,7 +37,7 @@ object AppIconCache {
   fun get(info: ApplicationInfo, size: Int): Bitmap? =
       synchronized(cache) { cache.get(key(info, size)) }
 
-  suspend fun load(context: Context, info: ApplicationInfo, size: Int): Bitmap =
+  suspend fun load(context: Context, info: ApplicationInfo, size: Int): Bitmap? =
       semaphore.withPermit {
         // 排队等待期间可能已有同一图标完成加载，进入临界区后再查一次缓存。
         synchronized(cache) { cache.get(key(info, size)) }
@@ -47,7 +47,11 @@ object AppIconCache {
         withContext(Dispatchers.IO) {
           val loader =
               loaders.getOrPut(size) { AppIconLoader(size, false, context.applicationContext) }
-          val bitmap = loader.loadIcon(info.withCurrentUserUid())
+          // 图标可能来自按 APK 路径解析的包信息（分身用户独有的应用），
+          // 解析失败时返回 null 让 UI 回落占位图，而不是把异常抛进组合协程。
+          val bitmap =
+              runCatching { loader.loadIcon(info.withCurrentUserUid()) }.getOrNull()
+                  ?: return@withContext null
           val prepared =
               runCatching { bitmap.copy(Bitmap.Config.HARDWARE, false)?.also { bitmap.recycle() } }
                   .getOrNull() ?: bitmap.also { it.prepareToDraw() }

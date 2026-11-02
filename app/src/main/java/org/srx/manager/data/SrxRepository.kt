@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.srx.manager.PerfLog
 import org.srx.manager.root.RootShell
 import org.srx.manager.root.isSafePackageName
 
@@ -48,6 +49,8 @@ class SrxRepository(
     explicitNulls = false
   }
   private val fileStore = RootFileStore(shell)
+  /** 应用列表首屏快照：仅在本地缓存目录，冷启动/切用户时先出内容，真实加载完成后覆盖。 */
+  private val appListSnapshots = AppListSnapshotStore(context)
   /** 配置文件边界：Repository 只负责业务组合，未知字段保留和缓存失效由此委托处理。 */
   private val configFiles = ConfigFileRepository(fileStore) { invalidateConfiguredAppsCache() }
   /** 诊断日志包导出边界：Repository 只保留业务入口。 */
@@ -64,8 +67,15 @@ class SrxRepository(
   private val dexAppListCacheMutex = Mutex()
   private var configuredAppsCache: TimedCache<Map<String, AppConfig>>? = null
   private val dexAppListCache = mutableMapOf<String, TimedCache<DexAppList>>()
-  /** 应用名称缓存：键包含安装包路径，应用升级或卸载重装后自动失效。 */
-  private val appLabelCache = ConcurrentHashMap<String, String>()
+  /** 应用名称缓存：键为包名，值含安装包路径，应用升级或卸载重装后自动失效。 */
+  private val appLabelCache = ConcurrentHashMap<String, CachedAppLabel>()
+  /** 名称磁盘缓存：冷启动直接读出上一次的名字，省掉整机 loadLabel 的 APK 资源解析。 */
+  private val appLabelStore = AppLabelStore(context)
+  private val appLabelCacheMutex = Mutex()
+  @Volatile private var appLabelCacheLoaded = false
+  @Volatile private var appLabelCacheDirty = false
+  /** 按 APK 路径解析出的包信息：分身用户独有的应用只能从 APK 读标签与图标。 */
+  private val archiveInfoCache = ConcurrentHashMap<String, ApplicationInfo>()
 
   suspend fun checkRoot(): Boolean = shell.checkRoot()
 
@@ -268,15 +278,63 @@ class SrxRepository(
 
   suspend fun loadInstalledApps(userId: String, force: Boolean = false): List<InstalledApp> =
       coroutineScope {
+        val t0 = PerfLog.mark()
         val configs = async { readConfiguredAppConfigs(force) }
         val apps = async(Dispatchers.IO) { loadPackageManagerApps(userId) }
-        val dexApps = async { loadDexAppList(userId, force) }
-        val shellPackages = async { appQuery.listInstalledPackages(userId) }
+        val packages = async { appQuery.listUserPackages(userId) }
         val configMap = configs.await()
+        val afterConfig = PerfLog.sinceMs(t0)
         val pmApps = apps.await()
-        val dexAppList = dexApps.await()
-        buildInstalledApps(configMap, pmApps, dexAppList, shellPackages.await())
+        val afterPm = PerfLog.sinceMs(t0)
+        val userPackages = packages.await()
+        val afterShell = PerfLog.sinceMs(t0)
+        // dex 只在 shell 的 pm 查询完全不可用时兜底：它要拉起一次 app_process（实测 1.3~1.9s），
+        // 而成员、系统标记、APK 路径都能由 pm 查询拿到，标签与图标由本进程的 PackageManager 补齐。
+        val dexAppList =
+            if (userPackages.isEmpty) loadDexAppList(userId, force) else DexAppList.Empty
+        PerfLog.log(
+            "load user=$userId config=${afterConfig}ms pm=${afterPm}ms shell=${afterShell}ms " +
+                "dex=${PerfLog.sinceMs(t0)}ms (pm=${pmApps.size} " +
+                "shell=${userPackages.packageNames.size} sys=${userPackages.systemPackages.size} " +
+                "dex=${dexAppList.labels.size})"
+        )
+        val tBuild = PerfLog.mark()
+        // PackageManager 只枚举调用方用户：非主用户的应用清单必须由该用户的 root 通道决定，
+        // 否则切到分身用户后仍会把主用户的应用全部列出来。两条通道都不可用时才退回枚举结果。
+        val includePackageManagerMembers =
+            userId == "0" || (userPackages.isEmpty && dexAppList.labels.isEmpty())
+        buildInstalledApps(
+                configMap,
+                pmApps,
+                dexAppList,
+                userPackages,
+                includePackageManagerMembers,
+                userId,
+            )
+            .also {
+              PerfLog.log(
+                  "build user=$userId ${PerfLog.sinceMs(tBuild)}ms " +
+                      "total=${PerfLog.sinceMs(t0)}ms rows=${it.size}"
+              )
+              appListSnapshots.write(userId, it)
+            }
       }
+
+  /**
+   * 读取上一次成功加载的应用列表快照，用于首屏秒开。
+   *
+   * 快照不含 `ApplicationInfo`，这里用调用方 PackageManager 补齐：主用户视角能覆盖绝大多数应用， 分身用户独有的应用会短暂显示占位图标，随后由真实加载结果替换。
+   */
+  suspend fun readCachedAppList(userId: String): List<InstalledApp> {
+    val cached = appListSnapshots.read(userId) ?: return emptyList()
+    val infos =
+        withContext(Dispatchers.IO) {
+          runCatching { loadPackageManagerApps(userId).associateBy { it.packageName } }
+              .getOrDefault(emptyMap())
+        }
+    if (infos.isEmpty()) return cached
+    return cached.map { app -> infos[app.packageName]?.let { app.copy(appInfo = it) } ?: app }
+  }
 
   suspend fun loadInstalledAppsForPackages(
       packageNames: Set<String>,
@@ -287,23 +345,31 @@ class SrxRepository(
     if (safePackages.isEmpty()) return@coroutineScope emptyList()
 
     val configs = async { readConfiguredAppConfigs(force) }
-    val dexApps = async { if (userId == "0") DexAppList.Empty else loadDexAppList(userId, force) }
+    // 少数包的场景仍要走一次按用户的 pm 查询：非主用户独有的包不在调用方视角里，
+    // 需要 APK 路径才能解析标签与图标（比拉起 dex 进程快一个数量级）。
+    val packages = async { appQuery.listUserPackages(userId) }
     val configMap = configs.await()
-    val dexAppList = dexApps.await()
+    val userPackages = packages.await()
 
     withContext(Dispatchers.IO) {
+      ensureAppLabelCacheLoaded()
       // 只需要少量包信息时逐个查询，避免为几个包枚举整机应用列表。
-      safePackages.map { pkg ->
-        val info = loadPackageManagerApp(pkg)
-        InstalledApp(
-            packageName = pkg,
-            label = resolveAppLabel(pkg, info) ?: dexAppList.labels[pkg] ?: pkg,
-            isSystem = isSystemPackage(pkg, info, dexAppList),
-            appInfo = info,
-            config = configMap[pkg],
-            isInstalled = info != null,
-        )
-      }
+      val built =
+          safePackages.map { pkg ->
+            val info = loadPackageManagerApp(pkg) ?: loadArchiveAppInfo(userPackages.apkPaths[pkg])
+            InstalledApp(
+                packageName = pkg,
+                label = resolveAppLabel(pkg, info) ?: pkg,
+                isSystem = isSystemPackage(pkg, info, userPackages.systemPackages),
+                appInfo = info,
+                config = configMap[pkg],
+                // 非主用户解析不到 PackageManager 记录是正常现象，是否安装以该用户的包清单为准。
+                isInstalled = info != null || pkg in userPackages.packageNames,
+                userId = userId,
+            )
+          }
+      flushAppLabelCache()
+      built
     }
   }
 
@@ -423,11 +489,17 @@ class SrxRepository(
           ?.let {
             return@withLock it
           }
+      val t0 = PerfLog.mark()
       val out = fileStore.readConfiguredAppConfigDump()
+      val tShell = PerfLog.sinceMs(t0)
       val parsed =
           withContext(Dispatchers.Default) {
             parseConfiguredAppConfigDump(out, ConfiguredAppConfigMarker, json)
           }
+      PerfLog.log(
+          "config shell=${tShell}ms parse=${PerfLog.sinceMs(t0) - tShell}ms " +
+              "bytes=${out.length} apps=${parsed.size}"
+      )
       configuredAppsCache = TimedCache(parsed, System.nanoTime())
       parsed
     }
@@ -446,22 +518,32 @@ class SrxRepository(
       configMap: Map<String, AppConfig>,
       pmApps: List<ApplicationInfo>,
       dexAppList: DexAppList,
-      shellPackages: List<String> = emptyList(),
+      userPackages: UserPackageList = UserPackageList.Empty,
+      includePackageManagerMembers: Boolean = true,
+      userId: String = "0",
   ): List<InstalledApp> =
       withContext(Dispatchers.IO) {
         val pmByPackage = pmApps.associateBy { it.packageName }
-        val shellPackageSet = shellPackages.toSet()
+        val userPackageSet = userPackages.packageNames.toSet()
+        // 成员集合来自「该用户可用的通道」；主用户才允许用 PackageManager 枚举结果作为成员，
+        // 非主用户仅用它补充标签与图标，避免把主用户的应用带进分身用户的列表。
+        val packageManagerMembers =
+            if (includePackageManagerMembers) pmByPackage.keys else emptySet()
+        // 配置项同样按用户收敛：只在当前用户有该应用的配置档案时才纳入，
+        // 否则分身用户会把主用户「已配置但本机未安装」的应用整批列出来。
+        val configuredForUser = configMap.filterValues { it.users[userId] != null }.keys
         val allPackages =
-            (pmByPackage.keys +
+            (packageManagerMembers +
                     dexAppList.labels.keys +
-                    shellPackages +
-                    configMap.keys +
-                    context.packageName)
+                    userPackages.packageNames +
+                    configuredForUser)
                 .filter(::isSafePackageName)
+                .filter { it != context.packageName }
                 .distinct()
 
         // loadLabel 需要打开 APK 读取资源，单线程串行解析整机应用会明显拖慢首屏，
-        // 因此分片并发解析，并按安装包路径缓存名称，避免每次刷新重复解析。
+        // 因此先读磁盘名称缓存（命中率接近全量），再对剩下的新应用分片并发解析。
+        ensureAppLabelCacheLoaded()
         val chunkSize = ((allPackages.size + LabelResolveParallelism - 1) / LabelResolveParallelism)
         val built =
             if (chunkSize <= 0) {
@@ -473,15 +555,21 @@ class SrxRepository(
                         .map { chunk ->
                           async {
                             chunk.map { pkg ->
-                              val info = pmByPackage[pkg] ?: loadPackageManagerApp(pkg)
+                              // 非主用户独有的应用不在调用方视角里，退回按 APK 路径解析，
+                              // 这样分身用户也能拿到正确标签与图标，而不是显示包名占位。
+                              val info =
+                                  pmByPackage[pkg]
+                                      ?: loadPackageManagerApp(pkg)
+                                      ?: loadArchiveAppInfo(userPackages.apkPaths[pkg])
                               InstalledApp(
                                   packageName = pkg,
-                                  label =
-                                      resolveAppLabel(pkg, info) ?: dexAppList.labels[pkg] ?: pkg,
-                                  isSystem = isSystemPackage(pkg, info, dexAppList),
+                                  label = resolveAppLabel(pkg, info) ?: pkg,
+                                  isSystem =
+                                      isSystemPackage(pkg, info, userPackages.systemPackages),
                                   appInfo = info,
                                   config = configMap[pkg],
-                                  isInstalled = info != null || pkg in shellPackageSet,
+                                  isInstalled = info != null || pkg in userPackageSet,
+                                  userId = userId,
                               )
                             }
                           }
@@ -491,6 +579,7 @@ class SrxRepository(
                   .flatten()
             }
 
+        flushAppLabelCache()
         built.sortedWith(
             compareBy<InstalledApp> { statusRank(it) }
                 .thenBy { it.searchLabel }
@@ -498,29 +587,80 @@ class SrxRepository(
         )
       }
 
+  /**
+   * 按 APK 路径解析包信息。
+   *
+   * 分身用户独有的应用在调用方视角里不存在（PackageManager 只覆盖调用方用户），但 APK 本身 是全局可读的；`getPackageArchiveInfo` 能读到标签、图标与
+   * flags，避免为了几个包去拉起 dex 进程。
+   */
+  private fun loadArchiveAppInfo(apkPath: String?): ApplicationInfo? {
+    if (apkPath.isNullOrBlank() || !apkPath.startsWith("/")) return null
+    archiveInfoCache[apkPath]?.let {
+      return it
+    }
+    val info =
+        runCatching {
+              context.packageManager.getPackageArchiveInfo(apkPath, 0)?.applicationInfo?.also {
+                it.sourceDir = apkPath
+                it.publicSourceDir = apkPath
+              }
+            }
+            .getOrNull()
+    if (info != null) archiveInfoCache[apkPath] = info
+    return info
+  }
+
   /** 按安装包路径缓存应用名称：应用升级后 sourceDir 或版本会变化，缓存自然失效。 */
   private fun resolveAppLabel(packageName: String, info: ApplicationInfo?): String? {
     if (info == null) return null
-    val key = "$packageName:${info.sourceDir}"
-    appLabelCache[key]?.let {
-      return it
-    }
+    val sourceDir = info.sourceDir.orEmpty()
+    appLabelCache[packageName]
+        ?.takeIf { it.sourceDir == sourceDir }
+        ?.let {
+          return it.label
+        }
     val label = info.loadLabel(context.packageManager).toString().takeIf { it.isNotBlank() }
-    if (label != null) appLabelCache[key] = label
+    if (label != null) {
+      appLabelCache[packageName] = CachedAppLabel(sourceDir, label)
+      appLabelCacheDirty = true
+    }
     return label
   }
 
+  /** 进程内第一次解析名称前读一次磁盘缓存：整机 loadLabel 是首屏最贵的一步。 */
+  private suspend fun ensureAppLabelCacheLoaded() {
+    if (appLabelCacheLoaded) return
+    appLabelCacheMutex.withLock {
+      if (appLabelCacheLoaded) return@withLock
+      val cached = appLabelStore.read()
+      cached.forEach { (pkg, entry) ->
+        // 并发解析可能已经拿到更新的名字，不覆盖已有项。
+        appLabelCache.putIfAbsent(pkg, entry)
+      }
+      appLabelCacheLoaded = true
+    }
+  }
+
+  /** 本轮新解析出的名字落盘，下次冷启动就不用再逐个打开 APK。 */
+  private suspend fun flushAppLabelCache() {
+    if (!appLabelCacheDirty) return
+    appLabelCacheDirty = false
+    appLabelStore.write(appLabelCache.toMap())
+  }
+
   /**
-   * 系统应用判定以所选用户为准：dex 通道返回该用户视角下的系统应用集合， 调用方 PackageManager 的 FLAG_SYSTEM 只在 dex 不可用时兜底
-   * （PackageManager 只覆盖调用方用户，跨用户会给出错误的系统标记）。
+   * 系统应用判定以所选用户为准：`pm list packages -s --user` 给出该用户视角的系统应用集合， 只有拿不到该集合时才退回 PackageManager 的
+   * flags（它只覆盖调用方用户，跨用户会误判）。
    */
   private fun isSystemPackage(
       packageName: String,
       info: ApplicationInfo?,
-      dexAppList: DexAppList,
+      systemPackages: Set<String>,
   ): Boolean {
-    if (packageName in dexAppList.systemPackages) return true
-    return info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 } ?: false
+    if (systemPackages.isNotEmpty()) return packageName in systemPackages
+    val flags = info?.flags ?: return false
+    // 与 `pm list packages -s` 一致：预装应用与「已更新的预装应用」都算系统应用。
+    return flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
   }
 
   private suspend fun loadDexAppList(userId: String, force: Boolean): DexAppList =

@@ -255,10 +255,10 @@ private fun SrxManagerApp(
         selectedAppPackages = emptyList()
   }
   // 切换 Android 用户后应用列表整体换了一份，批量选择与滚动位置都属于旧用户，必须重置。
+  // 这里无条件滚到顶部：清空列表时 LazyListState 会保留旧索引，数据回填后会停在原位。
   LaunchedEffect(state.selectedUser) {
     selectedAppPackages = emptyList()
-    if (appsListState.firstVisibleItemIndex > 0 || appsListState.firstVisibleItemScrollOffset > 0)
-        appsListState.scrollToItem(0)
+    appsListState.scrollToItem(0)
   }
   LaunchedEffect(page, state.rootGranted) {
     if (!state.rootGranted) return@LaunchedEffect

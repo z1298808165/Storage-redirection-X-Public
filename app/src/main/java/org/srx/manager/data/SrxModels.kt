@@ -110,15 +110,17 @@ data class InstalledApp(
     val appInfo: ApplicationInfo?,
     val config: AppConfig?,
     val isInstalled: Boolean = appInfo != null,
+    /** 该条目按哪个 Android 用户加载：配置状态必须按同一用户判定，否则分身用户会显示主用户的启用状态。 */
+    val userId: String = "0",
 ) {
   val isConfigured: Boolean
-    get() = config != null
+    get() = config?.users?.get(userId) != null
 
   val isMissing: Boolean
     get() = isConfigured && !isInstalled
 
   val isEnabled: Boolean
-    get() = isInstalled && config?.users?.values?.any { it.enabled } == true
+    get() = isInstalled && config?.users?.get(userId)?.enabled == true
 
   // 搜索框每次输入都会重算过滤结果，逐项调用 lowercase() 会在大列表上产生大量临时字符串，
   // 因此在构造后一次性缓存小写形式供 UI 复用。

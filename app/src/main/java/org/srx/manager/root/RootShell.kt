@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import org.srx.manager.PerfLog
 
 data class ShellResult(
     val code: Int,
@@ -86,6 +87,7 @@ class RootShell() : Closeable, ShellExecutor {
       onStdoutLine: ((String) -> Unit)?,
   ): ShellResult =
       withContext(Dispatchers.IO) {
+        val startedAt = PerfLog.mark()
         val args =
             if (mountMaster) {
               listOf("su", "-M", "-c", command)
@@ -158,6 +160,9 @@ class RootShell() : Closeable, ShellExecutor {
           val stdoutText = stdoutJob.awaitOutputOrClose(proc.inputStream)
           val stderrText = stderrJob.awaitOutputOrClose(proc.errorStream)
           callbackFailure.get()?.let { throw it }
+          PerfLog.log(
+              "shell ${PerfLog.sinceMs(startedAt)}ms out=${stdoutText.length}B cmd=${command.take(48)}"
+          )
           ShellResult(proc.exitValue(), stdoutText, stderrText)
         } catch (canceled: CancellationException) {
           terminateProcess(proc, stdinJob, stdoutJob, stderrJob)
