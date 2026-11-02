@@ -1320,10 +1320,13 @@
       if (requestId !== State.appListRequestId) return null;
       const pkg = installed[i];
       const info = Api.getCachedAppInfo ? Api.getCachedAppInfo(pkg) : null;
-      const isSystem =
+      // 系统标记优先用所选用户的真实结果（dex 的 `#system=` 或 `pm list packages -s --user`）；
+      // 只有在完全没有包信息时，才退回包名前缀猜测——该猜法会把 Google 系普通应用误判成系统应用。
+      const guessedSystem =
         pkg.startsWith("com.android.") ||
         pkg.startsWith("com.google.android.") ||
         pkg.startsWith("android.");
+      const isSystem = info && typeof info.isSystem === "boolean" ? info.isSystem : guessedSystem;
       const label = info ? info.appLabel || info.label || info.name || "" : "";
       const status = configuredState.get(pkg) || "unconfigured";
       const app = {
@@ -1468,9 +1471,12 @@
       const cfg = item.config || {};
       const users = cfg.users || {};
       const profile = users[String(userId || "0")];
+      // 旧格式只有全局 enabled，对任何用户都生效；新格式按 users.<id> 判定，
+      // 当前用户没有档案时该应用不应出现在他的「已配置/缺失」集合里。
       const legacyEnabled = Object.prototype.hasOwnProperty.call(cfg, "enabled")
         ? cfg.enabled === true
-        : false;
+        : null;
+      if (!profile && legacyEnabled === null) return;
       map.set(
         item.packageName,
         (profile ? profile.enabled === true : legacyEnabled) ? "enabled" : "disabled",
@@ -1521,6 +1527,11 @@
       chip.addEventListener("click", () => {
         State.currentUserId = chip.dataset.user;
         switcher.classList.remove("open");
+        // 批量选择与滚动位置都属于上一名用户，切换后必须一并清掉并立即回到顶部。
+        exitAppSelectionMode();
+        State.appListScrollTop = 0;
+        const scroller = getAppListScroller();
+        if (scroller) setScrollerTopInstant(scroller, 0);
         renderAppUserSwitcher();
         Theme.showToast("已切换到用户 " + State.currentUserId);
         loadAppList(true);

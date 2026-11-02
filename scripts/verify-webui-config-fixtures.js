@@ -307,6 +307,25 @@ assertDeepEqual(
     true,
     "runtime-activation-count-reset-uses-native-control",
   );
+
+  // 配置 dump 必须是单进程：逐文件 `cat` 会为每个应用各 fork 一次，56 个应用就要 1.9s 以上。
+  let configDumpCommand = "";
+  sandbox.window.Api.exec = async (command) => {
+    configDumpCommand = command;
+    return '__SRX_APP_CONFIG__com.example.app\n{"users":{}}\n';
+  };
+  sandbox.window.Api._configuredAppsCache = null;
+  await sandbox.window.Api.readConfiguredAppConfigs({ force: true });
+  assertDeepEqual(
+    configDumpCommand.includes("awk 'FILENAME != prev"),
+    true,
+    "config-dump-runs-single-awk-process",
+  );
+  assertDeepEqual(
+    configDumpCommand.includes('cat "$f"'),
+    false,
+    "config-dump-has-no-per-file-fork",
+  );
   console.log("WebUI config fixtures verified");
 })().catch((error) => {
   console.error(error);

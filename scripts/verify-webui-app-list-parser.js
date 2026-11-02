@@ -60,4 +60,34 @@ const bareNames = parse("org.demo.beta Beta Label\n");
 assertEqual(bareNames.length, 1, "bare-name-app-count");
 assertEqual(bareNames[0].packageName, "org.demo.beta", "bare-name-package");
 
+// `pm list packages -f -U` + `-s` 两段输出：成员带 APK 路径（可能含 `==`），系统集合只取 `-s` 段。
+const listPackages = sandbox.parseUserPackageListing;
+if (typeof listPackages !== "function") throw new Error("parseUserPackageListing is not defined");
+
+const listing = listPackages(
+  [
+    "package:/data/app/alpha/base.apk=com.example.alpha uid:10001",
+    "package:/data/app/~~MPMDBgih6vWQNh_eSekUiA==/com.google.android.webview-6SH5==/base.apk=com.google.android.webview uid:99910173",
+    "package:/system/app/beta/base.apk=bad/pkg uid:10003",
+    "srx-system-section",
+    "package:com.google.android.webview",
+    "package:bad/pkg",
+    "",
+  ].join("\n"),
+  "srx-system-section",
+);
+assertEqual(listing.packages.length, 2, "listing-member-count");
+assertEqual(listing.packages[1], "com.google.android.webview", "listing-apk-path-with-equals");
+assertEqual(listing.system.size, 1, "listing-system-count");
+assertEqual(listing.system.has("com.google.android.webview"), true, "listing-system-membership");
+assertEqual(listing.system.has("com.example.alpha"), false, "listing-user-app-not-system");
+
+// 标记缺失时不能把 `-s` 段混进成员集合（旧实现被 sh 注释吃掉就是这样退化的）。
+const noMarker = listPackages(
+  "package:/data/app/alpha/base.apk=com.example.alpha\n",
+  "srx-system-section",
+);
+assertEqual(noMarker.packages.length, 1, "listing-without-marker-members");
+assertEqual(noMarker.system.size, 0, "listing-without-marker-system");
+
 console.log("WebUI app list parser verified");

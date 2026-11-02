@@ -585,6 +585,40 @@ function parseCompatAppList(content) {
   return apps;
 }
 
+/**
+ * 解析 `pm list packages -f -U --user <id>` 与 `pm list packages -s --user <id>` 两段输出。
+ *
+ * 判据与 Kotlin 侧 `parseUserPackageList` 一致：`-f` 段给出成员与 APK 路径，`-s` 段给出
+ * 该用户视角的系统应用；分段靠调用方显式 echo 的标记行，不靠包名前缀猜。
+ */
+function parseUserPackageListing(content, systemMarker) {
+  const packageSet = new Set();
+  const system = new Set();
+  let inSystemSection = false;
+  String(content || "")
+    .split("\n")
+    .forEach((line) => {
+      const text = line.trim();
+      if (!text) return;
+      if (text === systemMarker) {
+        inSystemSection = true;
+        return;
+      }
+      if (!text.startsWith("package:")) return;
+      const body = text.slice("package:".length);
+      if (inSystemSection) {
+        const name = body.split(/\s+/)[0].trim();
+        if (isSafePackageName(name)) system.add(name);
+        return;
+      }
+      // APK 路径里可能出现 `==`（如 /data/app/~~xxxx==/base.apk），包名只在最后一个 `=` 之后。
+      const split = body.lastIndexOf("=");
+      const name = (split >= 0 ? body.slice(split + 1) : body).split(/\s+/)[0].trim();
+      if (isSafePackageName(name)) packageSet.add(name);
+    });
+  return { packages: Array.from(packageSet), system };
+}
+
 function normalizePackageResult(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw;
@@ -1853,17 +1887,15 @@ const Api = {
     }
     try {
       const marker = "__SRX_APP_CONFIG__";
+      // 单个 awk 进程一次读完所有配置。早先逐文件 `cat` 的有 56 次 fork，
+      // 实测 1.9s 以上（输出只有 18KB），改成一条命令后降到 0.1~0.2s。
       const out = await this.exec(
-        "mkdir -p " +
-          shellQuote(APPS_DIR) +
-          "; " +
-          "for f in " +
-          shellQuote(APPS_DIR) +
-          "/*.json; do " +
-          '[ -f "$f" ] || continue; b="${f##*/}"; p="${b%.json}"; ' +
-          'printf "\\n' +
+        'awk \'FILENAME != prev { prev = FILENAME; n = FILENAME; sub(/.*\\//, "", n); ' +
+          'sub(/\\.json$/, "", n); printf "\\n' +
           marker +
-          '%s\\n" "$p"; cat "$f"; printf "\\n"; done 2>/dev/null',
+          "%s\\n\", n } { print }' " +
+          shellQuote(APPS_DIR) +
+          "/*.json 2>/dev/null",
       );
       const items = [];
       const lines = String(out || "").split("\n");
@@ -1937,15 +1969,39 @@ const Api = {
   async getInstalledAppsFromPackageManager(userId) {
     const safeUser = isSafeUserId(userId) ? String(userId) : "";
     const userArg = safeUser ? " --user " + safeUser : "";
+    // 标记必须加引号：裸写 `#srx-system` 会被 sh 当成注释，连带吃掉后面的 `-s` 查询，
+    // 系统应用集合就会静默变成空集，界面只能退化成按包名前缀猜。
+    const marker = 'echo "srx-system-section"';
     const commands = [
-      "pm list packages -f" + userArg + " 2>/dev/null",
-      "cmd package list packages -f" + userArg + " 2>/dev/null",
+      "pm list packages -f -U" +
+        userArg +
+        " 2>/dev/null; " +
+        marker +
+        "; pm list packages -s" +
+        userArg +
+        " 2>/dev/null",
+      "cmd package list packages -f -U" +
+        userArg +
+        " 2>/dev/null; " +
+        marker +
+        "; cmd package list packages -s" +
+        userArg +
+        " 2>/dev/null",
     ];
     for (const command of commands) {
       try {
-        const out = await this.exec(command + ' | sed "s/package://" | awk -F= "{print \$2}"');
-        const packages = out.split("\n").filter(Boolean).filter(isSafePackageName);
-        if (packages.length) return packages;
+        const listing = parseUserPackageListing(await this.exec(command), "srx-system-section");
+        if (!listing.packages.length) continue;
+        // 把系统标记写进包信息缓存：列表分桶直接用该用户视角的真实结果。
+        listing.packages.forEach((pkg) => {
+          const prev = this._packageInfo.get(pkg) || {};
+          this._packageInfo.set(pkg, {
+            ...prev,
+            packageName: pkg,
+            isSystem: listing.system.has(pkg),
+          });
+        });
+        return listing.packages;
       } catch {}
     }
     return [];
