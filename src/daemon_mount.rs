@@ -1100,18 +1100,6 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
                 crate::fuse_host::read_host_session_view().is_some()
             );
         }
-        conclude_scoped_mount(ScopedMountReport {
-            package_name: &request.package_name,
-            pid: request.pid,
-            requested_mode: request.storage_backend_mode,
-            log_prefix: "daemon hybrid fuse",
-            roots_planned: fuse_roots.len(),
-            sessions: fuse_children.len(),
-            attempt,
-            ready_reason: "scoped_mount_ready",
-            failed_reason: "scoped_mount_failed",
-            unavailable_reason: host_skip.map(|reason| reason.as_str()),
-        });
         let mut mounted_targets = planner.take_mounted_targets();
         // 仍在应用命名空间内，就地核对本轮目标的可见性，给热重载类问题留下应用视角证据。
         log_mounted_target_view(&mounted_targets, request);
@@ -1169,6 +1157,22 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             request.pid
         );
         record_mount_identity(request, &mounted_targets, &fuse_children);
+        // 挂载结论（能力快照与 backend_effective 选择日志）紧挨成功回包产生，不提前登记。
+        // 写状态失败会把本轮挂载整轮摘除，结论提前写下去等于宣称一个已经不存在的 backend：
+        // 现场按 `backend_effective ... effective=fuse` 判断「FUSE 已生效」就会被误导，
+        // 能力快照也会把这次失败计入成功。回滚轮次因此不产生结论行，只留回滚告警。
+        conclude_scoped_mount(ScopedMountReport {
+            package_name: &request.package_name,
+            pid: request.pid,
+            requested_mode: request.storage_backend_mode,
+            log_prefix: "daemon hybrid fuse",
+            roots_planned: fuse_roots.len(),
+            sessions: fuse_children.len(),
+            attempt,
+            ready_reason: "scoped_mount_ready",
+            failed_reason: "scoped_mount_failed",
+            unavailable_reason: host_skip.map(|reason| reason.as_str()),
+        });
         let _ = send_mount_result(sock, 0);
         unsafe { close(sock) };
         return true;

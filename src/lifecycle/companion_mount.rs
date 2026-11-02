@@ -1217,7 +1217,7 @@ fn handle_child_process(
 
     // 注意：屏障裸奔检测不能放在这里——非 preattach 路径的 FUSE 会话在成功分支内
     // 才接入，此处屏障必然裸奔，在此判定会把每次正常挂载误判为失败。检测位于成功
-    // 分支尾部（conclude_scoped_mount 之后、send_mount_result 之前），且只对真的
+    // 分支尾部（conclude_scoped_mount 之前、send_mount_result 之前），且只对真的
     // 建立了 FUSE 会话的轮次生效：纯 bind 轮次没有「等 FUSE 压上来」这个前提。
     let result = if is_success { 0 } else { -1 };
     if !is_success {
@@ -1279,18 +1279,6 @@ fn handle_child_process(
                 crate::fuse_host::read_host_session_view().is_some()
             );
         }
-        conclude_scoped_mount(ScopedMountReport {
-            package_name: &request.package_name,
-            pid: request.pid,
-            requested_mode: request.storage_backend_mode,
-            log_prefix: "hybrid fuse",
-            roots_planned: fuse_roots.len(),
-            sessions: fuse_children.len(),
-            attempt,
-            ready_reason: "companion_scoped_mount_ready",
-            failed_reason: "companion_scoped_mount_failed",
-            unavailable_reason: host_skip.map(|reason| reason.as_str()),
-        });
         // 与 daemon 侧同源、同顺序：挂载完成后按平台需要摘掉系统 MediaProvider 的 app data
         // isolation FUSE 视图，再补回被 MNT_DETACH 级联摘掉的映射子路径 bind。摘除逻辑此前只
         // 写在 daemon 路径里，走 companion 的应用（普通应用正是这条）在 x86_64 Android 13/14
@@ -1430,6 +1418,21 @@ fn handle_child_process(
                 }
             }
         }
+        // 与 daemon 侧同源、同位置：挂载结论（能力快照与 backend_effective 选择日志）紧挨
+        // 成功回包产生，不提前登记。写状态失败会把本轮挂载整轮摘除，结论提前写下去等于宣称
+        // 一个已经不存在的 backend，现场与能力快照都会被误导；回滚轮次只留回滚告警。
+        conclude_scoped_mount(ScopedMountReport {
+            package_name: &request.package_name,
+            pid: request.pid,
+            requested_mode: request.storage_backend_mode,
+            log_prefix: "hybrid fuse",
+            roots_planned: fuse_roots.len(),
+            sessions: fuse_children.len(),
+            attempt,
+            ready_reason: "companion_scoped_mount_ready",
+            failed_reason: "companion_scoped_mount_failed",
+            unavailable_reason: host_skip.map(|reason| reason.as_str()),
+        });
         if !send_mount_result(sock, 0) {
             log::warn!(
                 "child send result failed pid={} pkg={}",
