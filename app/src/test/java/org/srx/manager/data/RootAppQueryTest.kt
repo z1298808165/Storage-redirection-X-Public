@@ -45,12 +45,12 @@ class RootAppQueryTest {
     val shell = CapturingShell()
     val query = RootAppQuery(shell)
 
-    assertTrue(query.loadDexAppLabels("0;rm").isEmpty())
+    assertEquals(DexAppList.Empty, query.loadDexAppList("0;rm"))
     assertTrue(shell.invocations.isEmpty())
   }
 
   @Test
-  fun loadDexAppLabelsRunsDexAndFiltersUnsafePackages() = runBlocking {
+  fun loadDexAppListParsesLabelsAndSystemMarker() = runBlocking {
     val shell =
         CapturingShell(
             ShellResult(0, "", ""),
@@ -61,6 +61,7 @@ class RootAppQueryTest {
                 bad/pkg=Bad
                 # comment
                 org.demo.beta Beta Label
+                #system=com.android.settings org.demo.sys bad/pkg
                 """
                     .trimIndent(),
                 "",
@@ -68,14 +69,32 @@ class RootAppQueryTest {
         )
     val query = RootAppQuery(shell)
 
-    val labels = query.loadDexAppLabels("10")
+    val appList = query.loadDexAppList("10")
 
-    assertEquals(mapOf("com.example.alpha" to "Alpha", "org.demo.beta" to "org.demo.beta"), labels)
+    assertEquals(
+        mapOf("com.example.alpha" to "Alpha", "org.demo.beta" to "org.demo.beta"),
+        appList.labels,
+    )
+    assertEquals(setOf("com.android.settings", "org.demo.sys"), appList.systemPackages)
     assertEquals(2, shell.invocations.size)
     assertTrue(
         shell.invocations[0].command.contains("--user 10 > ${shellQuote(ListAppsOutputPath)}")
     )
     assertEquals("cat ${shellQuote(ListAppsOutputPath)} 2>/dev/null", shell.invocations[1].command)
+  }
+
+  @Test
+  fun dexAppListWithoutMarkerKeepsSystemSetEmpty() = runBlocking {
+    val shell =
+        CapturingShell(
+            ShellResult(0, "", ""),
+            ShellResult(0, "com.example.alpha=Alpha\n", ""),
+        )
+
+    val appList = RootAppQuery(shell).loadDexAppList("0")
+
+    assertEquals(mapOf("com.example.alpha" to "Alpha"), appList.labels)
+    assertTrue(appList.systemPackages.isEmpty())
   }
 
   @Test

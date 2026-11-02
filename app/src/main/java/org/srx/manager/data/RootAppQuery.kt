@@ -5,6 +5,19 @@ import org.srx.manager.root.isSafePackageName
 import org.srx.manager.root.isSafeUserId
 import org.srx.manager.root.shellQuote
 
+/** dex 侧应用清单：包名到标签的映射，以及「该用户视角下的系统应用」集合。 */
+data class DexAppList(
+    val labels: Map<String, String> = emptyMap(),
+    val systemPackages: Set<String> = emptySet(),
+) {
+  companion object {
+    val Empty = DexAppList()
+  }
+}
+
+/** `tools/list_apps/Main.java` 输出的系统应用标记行前缀。 旧版 dex 没有该行，读取端按「无标记」处理并退回调用方的包信息判断。 */
+private const val DexSystemMarker = "#system="
+
 class RootAppQuery(
     private val shell: ShellExecutor,
 ) {
@@ -15,8 +28,12 @@ class RootAppQuery(
     return ids.distinct().ifEmpty { listOf("0") }
   }
 
-  suspend fun loadDexAppLabels(userId: String): Map<String, String> {
-    if (!isSafeUserId(userId)) return emptyMap()
+  /**
+   * 通过 dex 通道按用户枚举应用：标签与系统应用标记都来自该用户的 PackageManager 结果。 相比 shell 的 `pm list packages
+   * --user`，这里一次进程调用即可拿到标签与系统标记。
+   */
+  suspend fun loadDexAppList(userId: String): DexAppList {
+    if (!isSafeUserId(userId)) return DexAppList.Empty
     val runDex =
         shell.exec(
             "mkdir -p /data/Namespace-Proxy; " +
@@ -28,18 +45,7 @@ class RootAppQuery(
     val text =
         if (runDex.isSuccess) shell.exec("cat ${shellQuote(ListAppsOutputPath)} 2>/dev/null").stdout
         else ""
-    return text
-        .lineSequence()
-        .mapNotNull { line ->
-          val trimmed = line.trim()
-          if (trimmed.isBlank() || trimmed.startsWith("#")) return@mapNotNull null
-          val split = trimmed.indexOf('=')
-          val pkg =
-              if (split >= 0) trimmed.substring(0, split).trim() else trimmed.substringBefore(' ')
-          if (!isSafePackageName(pkg)) null
-          else pkg to (if (split >= 0) trimmed.substring(split + 1).trim() else pkg)
-        }
-        .toMap()
+    return parseDexAppList(text)
   }
 
   /**
@@ -73,4 +79,28 @@ class RootAppQuery(
     }
     return emptyList()
   }
+}
+
+/** 解析 dex 输出：`包名=标签` 行加上末尾的 `#system=` 系统应用标记行。 */
+internal fun parseDexAppList(text: String): DexAppList {
+  val labels = LinkedHashMap<String, String>()
+  val systemPackages = LinkedHashSet<String>()
+  text.lineSequence().forEach { line ->
+    val trimmed = line.trim()
+    if (trimmed.isEmpty()) return@forEach
+    if (trimmed.startsWith(DexSystemMarker)) {
+      trimmed
+          .substring(DexSystemMarker.length)
+          .split(' ', '\t')
+          .filter { it.isNotEmpty() && isSafePackageName(it) }
+          .forEach { systemPackages.add(it) }
+      return@forEach
+    }
+    if (trimmed.startsWith("#")) return@forEach
+    val split = trimmed.indexOf('=')
+    val pkg = if (split >= 0) trimmed.substring(0, split).trim() else trimmed.substringBefore(' ')
+    if (!isSafePackageName(pkg)) return@forEach
+    labels[pkg] = if (split >= 0) trimmed.substring(split + 1).trim() else pkg
+  }
+  return DexAppList(labels = labels, systemPackages = systemPackages)
 }

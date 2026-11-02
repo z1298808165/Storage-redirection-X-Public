@@ -61,9 +61,9 @@ class SrxRepository(
   private val appQuery = RootAppQuery(shell)
   private val storageBrowser = RootStorageBrowser(shell)
   private val configuredAppsCacheMutex = Mutex()
-  private val dexLabelsCacheMutex = Mutex()
+  private val dexAppListCacheMutex = Mutex()
   private var configuredAppsCache: TimedCache<Map<String, AppConfig>>? = null
-  private val dexLabelsCache = mutableMapOf<String, TimedCache<Map<String, String>>>()
+  private val dexAppListCache = mutableMapOf<String, TimedCache<DexAppList>>()
   /** 应用名称缓存：键包含安装包路径，应用升级或卸载重装后自动失效。 */
   private val appLabelCache = ConcurrentHashMap<String, String>()
 
@@ -270,12 +270,12 @@ class SrxRepository(
       coroutineScope {
         val configs = async { readConfiguredAppConfigs(force) }
         val apps = async(Dispatchers.IO) { loadPackageManagerApps(userId) }
-        val dexApps = async { loadDexAppLabels(userId, force) }
+        val dexApps = async { loadDexAppList(userId, force) }
         val shellPackages = async { appQuery.listInstalledPackages(userId) }
         val configMap = configs.await()
         val pmApps = apps.await()
-        val dexMap = dexApps.await()
-        buildInstalledApps(configMap, pmApps, dexMap, shellPackages.await())
+        val dexAppList = dexApps.await()
+        buildInstalledApps(configMap, pmApps, dexAppList, shellPackages.await())
       }
 
   suspend fun loadInstalledAppsForPackages(
@@ -287,9 +287,9 @@ class SrxRepository(
     if (safePackages.isEmpty()) return@coroutineScope emptyList()
 
     val configs = async { readConfiguredAppConfigs(force) }
-    val dexApps = async { if (userId == "0") emptyMap() else loadDexAppLabels(userId, force) }
+    val dexApps = async { if (userId == "0") DexAppList.Empty else loadDexAppList(userId, force) }
     val configMap = configs.await()
-    val dexMap = dexApps.await()
+    val dexAppList = dexApps.await()
 
     withContext(Dispatchers.IO) {
       // 只需要少量包信息时逐个查询，避免为几个包枚举整机应用列表。
@@ -297,8 +297,8 @@ class SrxRepository(
         val info = loadPackageManagerApp(pkg)
         InstalledApp(
             packageName = pkg,
-            label = resolveAppLabel(pkg, info) ?: dexMap[pkg] ?: pkg,
-            isSystem = info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 } ?: false,
+            label = resolveAppLabel(pkg, info) ?: dexAppList.labels[pkg] ?: pkg,
+            isSystem = isSystemPackage(pkg, info, dexAppList),
             appInfo = info,
             config = configMap[pkg],
             isInstalled = info != null,
@@ -445,14 +445,18 @@ class SrxRepository(
   private suspend fun buildInstalledApps(
       configMap: Map<String, AppConfig>,
       pmApps: List<ApplicationInfo>,
-      dexMap: Map<String, String>,
+      dexAppList: DexAppList,
       shellPackages: List<String> = emptyList(),
   ): List<InstalledApp> =
       withContext(Dispatchers.IO) {
         val pmByPackage = pmApps.associateBy { it.packageName }
         val shellPackageSet = shellPackages.toSet()
         val allPackages =
-            (pmByPackage.keys + dexMap.keys + shellPackages + configMap.keys + context.packageName)
+            (pmByPackage.keys +
+                    dexAppList.labels.keys +
+                    shellPackages +
+                    configMap.keys +
+                    context.packageName)
                 .filter(::isSafePackageName)
                 .distinct()
 
@@ -472,10 +476,9 @@ class SrxRepository(
                               val info = pmByPackage[pkg] ?: loadPackageManagerApp(pkg)
                               InstalledApp(
                                   packageName = pkg,
-                                  label = resolveAppLabel(pkg, info) ?: dexMap[pkg] ?: pkg,
-                                  isSystem =
-                                      info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 }
-                                          ?: false,
+                                  label =
+                                      resolveAppLabel(pkg, info) ?: dexAppList.labels[pkg] ?: pkg,
+                                  isSystem = isSystemPackage(pkg, info, dexAppList),
                                   appInfo = info,
                                   config = configMap[pkg],
                                   isInstalled = info != null || pkg in shellPackageSet,
@@ -507,17 +510,30 @@ class SrxRepository(
     return label
   }
 
-  private suspend fun loadDexAppLabels(userId: String, force: Boolean): Map<String, String> =
-      dexLabelsCacheMutex.withLock {
-        dexLabelsCache[userId]
+  /**
+   * 系统应用判定以所选用户为准：dex 通道返回该用户视角下的系统应用集合， 调用方 PackageManager 的 FLAG_SYSTEM 只在 dex 不可用时兜底
+   * （PackageManager 只覆盖调用方用户，跨用户会给出错误的系统标记）。
+   */
+  private fun isSystemPackage(
+      packageName: String,
+      info: ApplicationInfo?,
+      dexAppList: DexAppList,
+  ): Boolean {
+    if (packageName in dexAppList.systemPackages) return true
+    return info?.let { it.flags and ApplicationInfo.FLAG_SYSTEM != 0 } ?: false
+  }
+
+  private suspend fun loadDexAppList(userId: String, force: Boolean): DexAppList =
+      dexAppListCacheMutex.withLock {
+        dexAppListCache[userId]
             ?.takeUnless { force || it.isExpired() }
             ?.value
             ?.let {
               return@withLock it
             }
-        val labels = appQuery.loadDexAppLabels(userId)
-        dexLabelsCache[userId] = TimedCache(labels, System.nanoTime())
-        labels
+        val appList = appQuery.loadDexAppList(userId)
+        dexAppListCache[userId] = TimedCache(appList, System.nanoTime())
+        appList
       }
 
   private fun TimedCache<*>.isExpired(): Boolean =
