@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-41364348601/storage-redirect-x-manager-v2.2.1-ci.8.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-41364348601/storage.redirect.x-v2.2.1-ci.8.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.2.1-ci.8`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-41323437755`\n- 当前提交：`71c887bae0a5`\n\n## 模块更新\n\n### 修复了什么问题\n- 屏障子进程卡死时应用线程不再被无限挂起。\n- 模块停用状态下启动也会清理历史泄漏会话；D 态残留不再静默。\n- 异常期日志不再无限增长。\n- 空闲时守护线程开销明显下降。\n- 空闲时不再每 2 秒重写进程表。\n- 写状态失败不再被当成挂载成功，应用不会在无账本状态下继续运行。\n- 历史深栈残留可在一次清理中收敛，不再永久留到应用退出。\n- 账本丢失后不再把残留层当作干净视图，重挂不会叠加在旧层上。\n- 磁盘异常不再残留无法清理的挂载层，配置变更后不会新旧层共存。\n\n### 致谢\n\n- 感谢 People-11（https://github.com/People-11），来源：上游 PR Kindness-Kismet/Storage-redirection-X-Public#66。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.2.1-ci.8`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-41323437755`\n- 当前提交：`71c887bae0a5`\n\n## 模块更新\n\n### 修复了什么问题\n- 屏障子进程卡死时应用线程不再被无限挂起。\n- 模块停用状态下启动也会清理历史泄漏会话；D 态残留不再静默。\n- 异常期日志不再无限增长。\n- 空闲时守护线程开销明显下降。\n- 空闲时不再每 2 秒重写进程表。\n- 写状态失败不再被当成挂载成功，应用不会在无账本状态下继续运行。\n- 历史深栈残留可在一次清理中收敛，不再永久留到应用退出。\n- 账本丢失后不再把残留层当作干净视图，重挂不会叠加在旧层上。\n- 磁盘异常不再残留无法清理的挂载层，配置变更后不会新旧层共存。\n\n### 致谢\n\n- 感谢 [PuerNya](https://github.com/PuerNya)，来源：[本项目 PR #6](https://github.com/z1298808165/Storage-redirection-X-Public/pull/6)。"
   },
   "releases": []
 }
