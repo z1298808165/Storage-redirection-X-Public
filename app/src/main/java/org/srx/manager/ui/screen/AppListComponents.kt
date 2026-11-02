@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -92,18 +93,20 @@ internal fun AppListControls(
     val stackUserSwitcher = users.size > 1 && maxWidth < 360.dp
     if (stackUserSwitcher) {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AppFilterGroup(filter = filter, onFilter = onFilter, modifier = Modifier.fillMaxWidth())
+        AppFilterGroup(filter = filter, onFilter = onFilter)
         Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
           AppUserSwitcher(users = users, selectedUser = selectedUser, onUser = onUser)
         }
       }
     } else {
+      // 筛选组按内容取宽（不再 weight 铺满），用户按钮靠右：用户列表异步到达、按钮出现时
+      // 三个标签不会跟着重排，避免「点了用户菜单，Tab 位置却变了」。
       Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
+          horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.Top,
       ) {
-        AppFilterGroup(filter = filter, onFilter = onFilter, modifier = Modifier.weight(1f))
+        AppFilterGroup(filter = filter, onFilter = onFilter)
         AppUserSwitcher(users = users, selectedUser = selectedUser, onUser = onUser)
       }
     }
@@ -128,11 +131,17 @@ internal fun AppFilterGroup(
               .padding(5.dp),
       horizontalArrangement = Arrangement.spacedBy(2.dp),
   ) {
-    FilterButton("用户", filter == AppFilter.User, Modifier.weight(1f)) { onFilter(AppFilter.User) }
-    FilterButton("系统", filter == AppFilter.System, Modifier.weight(1f)) {
+    FilterButton("用户", filter == AppFilter.User, Modifier.widthIn(min = FilterButtonMinWidth)) {
+      onFilter(AppFilter.User)
+    }
+    FilterButton("系统", filter == AppFilter.System, Modifier.widthIn(min = FilterButtonMinWidth)) {
       onFilter(AppFilter.System)
     }
-    FilterButton("已配置", filter == AppFilter.Configured, Modifier.weight(1f)) {
+    FilterButton(
+        "已配置",
+        filter == AppFilter.Configured,
+        Modifier.widthIn(min = FilterButtonMinWidth),
+    ) {
       onFilter(AppFilter.Configured)
     }
   }
@@ -506,6 +515,9 @@ internal fun StatusPill(app: InstalledApp) {
       overflow = TextOverflow.Ellipsis,
   )
 }
+
+/** 三个筛选标签的最小宽度：按内容取宽，同时保证三个胶囊等宽、不被拉伸到整行。 */
+private val FilterButtonMinWidth = 64.dp
 
 /** 用户切换菜单：宽度与点击热区按单手操作留余量，但保持窄菜单不遮挡列表。 */
 private val MenuMinWidth = 132.dp
