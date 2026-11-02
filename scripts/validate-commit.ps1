@@ -84,6 +84,21 @@ foreach ($rawLine in ($message -split "`r?`n")) {
     if ($line -match '^(AI-Review-|Signed-off-by:|Co-authored-by:)') {
         continue
     }
+    # 致谢类字段里的链接必须写成 Markdown 链接：`名称（URL）` 依赖 GitHub 自动链接，
+    # 它会把紧跟在 URL 后的中文标点并进链接，读者点开就跳到错误地址（2.2.1 更新日志实测）。
+    $creditFieldMatch = [regex]::Match($line, '^(致谢|思路来源|贡献者|上游来源|上游作者)[：:]\s*(.*)$')
+    if ($creditFieldMatch.Success) {
+        $creditValue = $creditFieldMatch.Groups[2].Value
+        foreach ($urlMatch in [regex]::Matches($creditValue, 'https?://[^\s，、；：（）()\[\]<>。]+')) {
+            $prefixStart = $urlMatch.Index - 2
+            if ($prefixStart -lt 0 -or $creditValue.Substring($prefixStart, 2) -ne '](') {
+                throw "提交正文致谢字段里的链接必须写成 Markdown 链接：[名称](URL)。当前 $($urlMatch.Value) 是裸链接或 名称（URL） 写法，GitHub 自动链接会把后面的中文标点并进地址，点开跳到错误页面。"
+            }
+        }
+        # 致谢字段是独立条目：后续正文行不会并入字段，也不该续到上一个更新日志字段里。
+        $activeChangelogField = $null
+        continue
+    }
     $fieldMatch = [regex]::Match($line, '^(变更|用户影响|范围|限制|验证)[：:]\s*(.*)$')
     if ($fieldMatch.Success) {
         $fieldName = $fieldMatch.Groups[1].Value
