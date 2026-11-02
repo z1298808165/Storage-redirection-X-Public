@@ -373,20 +373,24 @@ pub fn capture_explicit_mount_identity(pid: i32, mount_point: &str) -> Option<Mo
 ///   那会让下一轮恢复把本模块自己的挂载误判成"已被新会话接管"而拒绝清理。
 ///
 /// `log_tag` 标识调用方（`daemon` / `companion`），保留在日志里便于区分是哪条路径写的。
-/// 返回 false 表示账本落盘失败（调用方应记告警，但不影响本次挂载已生效的事实）。
+///
+/// 不返回结果：账本落盘失败**不影响本次挂载已生效的事实**，调用方也不得据此改变挂载结论；
+/// 但失败会让后续恢复与 `doctor` 退化成「按挂载源判定」的弱归属，所以必须留痕。告警收敛
+/// 在本函数内（带 `path` 标签），两条挂载路径不可能再各自漏掉一份——此前 `daemon` 侧丢弃
+/// 返回值静默失败、`companion` 侧另写一条告警，同一件事两种口径。
 pub fn record_mount_identity(
     log_tag: &str,
     package_name: &str,
     target_pid: i32,
     targets: &[String],
-) -> bool {
+) {
     let Some(namespace) = namespace_identity(0) else {
         log::warn!(
             "mount identity namespace unavailable path={} pid={}",
             log_tag,
             target_pid
         );
-        return false;
+        return;
     };
     let target_start_time =
         crate::platform::process_start_time_ticks(target_pid).unwrap_or_default();
@@ -416,18 +420,26 @@ pub fn record_mount_identity(
     } else {
         ledger.record_mounts(mounts);
     }
-    let saved = save(&ledger);
-    if saved {
-        log::info!(
-            "mount identity saved path={} pid={} pkg={} generation={} mounts={} ns={}:{}",
+    if !save(&ledger) {
+        // 落盘失败的单一口径：调用方无法再漏报，也不必分别处理。
+        log::warn!(
+            "mount identity save failed path={} pid={} pkg={} mounts={} targets={}",
             log_tag,
             target_pid,
             package_name,
-            ledger.generation,
             ledger.mounts.len(),
-            ledger.namespace.dev,
-            ledger.namespace.ino
+            targets.len()
         );
+        return;
     }
-    saved
+    log::info!(
+        "mount identity saved path={} pid={} pkg={} generation={} mounts={} ns={}:{}",
+        log_tag,
+        target_pid,
+        package_name,
+        ledger.generation,
+        ledger.mounts.len(),
+        ledger.namespace.dev,
+        ledger.namespace.ino
+    );
 }

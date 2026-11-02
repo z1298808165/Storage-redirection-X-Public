@@ -2385,14 +2385,15 @@ fn state_file_path(request: &MountRequest) -> String {
 
 /// 登记本次挂载的账本。
 ///
-/// 登记纪律（何时写、何时清空、读不到归属时怎么办）由 [`crate::mount_ledger::record_mount_identity`]
-/// 统一实现，两条挂载路径共用；这里只负责把 daemon 侧的目标集合拼齐——除了规划出的挂载目标，
-/// 还要带上每个 scoped FUSE 会话自己的挂载点，否则这些会话在恢复流程里没有归属判据。
+/// 登记纪律（何时写、何时清空、读不到归属时怎么办、失败如何留痕）由
+/// [`crate::mount_ledger::record_mount_identity`] 统一实现，两条挂载路径共用；这里只负责把
+/// daemon 侧的目标集合拼齐——除了规划出的挂载目标，还要带上每个 scoped FUSE 会话自己的
+/// 挂载点，否则这些会话在恢复流程里没有归属判据。
 fn record_mount_identity(
     request: &MountRequest,
     targets: &[String],
     fuse_children: &[FuseMountState],
-) -> bool {
+) {
     let mut all_targets = targets.to_vec();
     all_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
     crate::mount_ledger::record_mount_identity(
@@ -2400,7 +2401,7 @@ fn record_mount_identity(
         &request.package_name,
         request.pid,
         &all_targets,
-    )
+    );
 }
 
 fn read_mount_targets(path: &str) -> Vec<String> {

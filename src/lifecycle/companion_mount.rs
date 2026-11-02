@@ -1372,20 +1372,16 @@ fn handle_child_process(
         // 这条路径此前只写状态文件、不写账本，于是走 companion 的应用在恢复流程与 doctor 里
         // 没有任何归属判据，只能退化成"按挂载源判定"这个较弱的判据。两条挂载路径必须都登记，
         // 否则同一件事在两条路径上的结果不一致——这正是本项目反复踩的坑。
+        // 落盘失败的告警由 `record_mount_identity` 自己按 `path=companion` 输出，调用点不再
+        // 各自拼一份，避免两条路径的失败口径再次分叉。
         let mut identity_targets = mounted_targets.clone();
         identity_targets.extend(fuse_children.iter().map(|state| state.target.clone()));
-        if !crate::mount_ledger::record_mount_identity(
+        crate::mount_ledger::record_mount_identity(
             "companion",
             &request.package_name,
             request.pid,
             &identity_targets,
-        ) {
-            log::warn!(
-                "mount identity save failed pid={} pkg={}",
-                request.pid,
-                request.package_name
-            );
-        }
+        );
         // 坍缩形态的屏障处置：按遍历感知判定——被视图根 FUSE 遮蔽的兄弟屏障不可达
         // 且无害（Inert），只有压在同挂载点 srx FUSE 之上的残留屏障才真正回收。
         // 屏障处置无条件执行（不再以「是否存在 FUSE 会话」为前提）：纯 bind 轮次的存储根
