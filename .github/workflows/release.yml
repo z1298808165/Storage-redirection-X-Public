@@ -52,6 +52,7 @@ jobs:
           ./gradlew --no-daemon --console=plain spotlessCheck
           node scripts/verify-webui-structure.js
           node scripts/verify-webui-config-fixtures.js
+          node scripts/verify-webui-app-list-parser.js
           cargo test -p native-config-fixtures
           python -m unittest discover -s .github/tests -p "test_*.py" -v
 
