@@ -33,6 +33,16 @@ BODY_FIELD_PATTERN = re.compile(r"^(变更|用户影响|范围|限制|验证)[�
 CREDIT_FIELD_PATTERN = re.compile(r"^(致谢|思路来源|贡献者|上游来源|上游作者)[：:]\s*(.*)$")
 CREDIT_PEOPLE_LABELS = ("贡献者", "上游作者")
 CREDIT_SOURCE_LABELS = ("思路来源", "上游来源")
+# 致谢里的链接必须显式写成 Markdown 链接：GitHub 的自动链接会把紧跟在 URL 之后的
+# 中文标点（尤其全角括号）并进链接，`感谢 People-11（https://github.com/People-11），来源：上游`
+# 点开就成了 `…/People-11），来源：上游` 这样的错误地址（2.2.1 更新日志实测）。
+CREDIT_URL_PATTERN = re.compile(r"https?://[^\s，、；：（）()\[\]<>。]+")
+CREDIT_LINKED_NAME_PATTERN = re.compile(
+    r"([^\s，、；：（）()\[\]<>]+)\s*[（(]\s*(https?://[^\s，、；：（）()\[\]<>。]+)\s*[）)]"
+)
+# 依赖锁定常写成 `仓库.git@<sha>`：这种地址本身点不开（GitHub 上 404），
+# 改写成提交页地址才能落实「链接可用」的要求。
+CREDIT_GIT_PIN_PATTERN = re.compile(r"^(https?://[^/\s]+/[^/\s]+/[^/\s]+?)(?:\.git)?@([0-9a-f]{7,40})$")
 CREDITS_HEADING = "### 致谢"
 MAX_CREDITS = 10
 # CI 构建面向测试用户，致谢只保留最近的几条，避免把日志尾部拉长。
@@ -317,6 +327,35 @@ def summary_key(text: str) -> str:
     return re.sub(r"\s+", "", text).strip("。；;，,")
 
 
+def credit_url_target(url: str) -> str:
+    """返回致谢链接真正应该指向的地址，`仓库.git@<sha>` 转成可点击的提交页。"""
+    match = CREDIT_GIT_PIN_PATTERN.match(url)
+    return f"{match.group(1)}/commit/{match.group(2)}" if match else url
+
+
+def markdown_credit_links(text: str) -> str:
+    """把致谢文本里的链接统一改写成 Markdown 链接。
+
+    `名称（URL）` 与裸 URL 在 GitHub 上依赖自动链接，紧随其后的中文标点会被当成
+    URL 的一部分，读者点开就跳到错误地址。改写成 `[名称](URL)` 后链接边界由括号
+    确定，后面的中文标点留在链接外。已经是 Markdown 链接的片段原样保留。
+    """
+
+    def linked(match: re.Match[str]) -> str:
+        url = match.group(2)
+        return f"[{match.group(1)}]({credit_url_target(url)})"
+
+    text = CREDIT_LINKED_NAME_PATTERN.sub(linked, text)
+
+    def wrap_bare(match: re.Match[str]) -> str:
+        url = match.group(0)
+        if match.start() >= 2 and text[match.start() - 2 : match.start()] == "](":
+            return url
+        return f"[{url}]({credit_url_target(url)})"
+
+    return CREDIT_URL_PATTERN.sub(wrap_bare, text)
+
+
 def credit_line(commit: CommitInfo) -> str:
     """把一笔提交里的贡献者与来源拼成一行致谢文本，没有贡献信息时返回空串。"""
     people = [commit.fields[label] for label in CREDIT_PEOPLE_LABELS if commit.fields.get(label)]
@@ -328,13 +367,13 @@ def credit_line(commit: CommitInfo) -> str:
         # 没有具体贡献者时把裸链接（常见写法）补上"来源："，否则日志里只剩一串 URL。
         parts = [f"来源：{source}" for source in sources]
         parts.extend(note if not note.lower().startswith(("http", "git@")) else f"来源：{note}" for note in notes)
-        return "；".join(parts)
+        return markdown_credit_links("；".join(parts))
     text = "感谢 " + "、".join(people)
     if sources:
         text += "，来源：" + "；".join(sources)
     if notes:
         text += "，" + "；".join(notes)
-    return text
+    return markdown_credit_links(text)
 
 
 def credit_range_start(current: str) -> str:

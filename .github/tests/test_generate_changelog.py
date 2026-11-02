@@ -212,6 +212,47 @@ class GenerateChangelogTest(unittest.TestCase):
             CHANGELOG.ensure_credits(path, "release")
             self.assertEqual(path.read_text(encoding="utf-8"), markdown)
 
+    def test_credit_links_become_markdown_links(self) -> None:
+        # `名称（URL）` 写法会让 GitHub 自动链接把后面的全角标点并进 URL，点开跳错地址。
+        commit = CHANGELOG.CommitInfo(
+            sha="abc123456789",
+            subject="修复(守护)：开机守卫连续两次失败才停用",
+            body="贡献者：People-11（https://github.com/People-11）\n思路来源：上游",
+            fields={"贡献者": "People-11（https://github.com/People-11）", "思路来源": "上游"},
+        )
+        credits = CHANGELOG.collect_credits([commit], "release")
+        self.assertEqual(credits, ["感谢 [People-11](https://github.com/People-11)，来源：上游"])
+
+    def test_credit_links_keep_markdown_links_and_wrap_bare_urls(self) -> None:
+        self.assertEqual(
+            CHANGELOG.markdown_credit_links("感谢 [People-11](https://github.com/People-11)"),
+            "感谢 [People-11](https://github.com/People-11)",
+        )
+        self.assertEqual(
+            CHANGELOG.markdown_credit_links("来源：https://github.com/LSPosed/LSPosed"),
+            "来源：[https://github.com/LSPosed/LSPosed](https://github.com/LSPosed/LSPosed)",
+        )
+        # 没有贡献者、只有裸 URL 来源时同样要生成链接，不能留成裸地址；
+        # `仓库.git@<sha>` 这种锁依赖写法本身点不开，要指向提交页。
+        credits = CHANGELOG.collect_credits(
+            [
+                CHANGELOG.CommitInfo(
+                    sha="abc123456789",
+                    subject="修复：同步上游判据",
+                    body="",
+                    fields={"上游来源": "https://github.com/LSPosed/LSPlant.git@6ac2280d8d88e14f0864c26ac97c1dc96713bde1"},
+                )
+            ],
+            "ci",
+        )
+        self.assertEqual(
+            credits,
+            [
+                "来源：[https://github.com/LSPosed/LSPlant.git@6ac2280d8d88e14f0864c26ac97c1dc96713bde1]"
+                "(https://github.com/LSPosed/LSPlant/commit/6ac2280d8d88e14f0864c26ac97c1dc96713bde1)"
+            ],
+        )
+
     def test_release_notes_validator_accepts_final_result_sections(self) -> None:
         markdown = """# Storage Redirect X v1.2.58
 
