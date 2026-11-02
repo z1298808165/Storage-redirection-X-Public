@@ -332,6 +332,7 @@ body.liquid-glass-disabled {
 [data-theme="dark"] .filter-indicator { background: linear-gradient(135deg, rgba(137,180,255,0.18), rgba(106,213,198,0.08)); border-color: rgba(137,180,255,0.14); }
 
 /* 其他样式保持... */
+.page-header-actions,
 .app-config-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .app-config-action-btn { width: 42px; min-width: 42px; height: 42px; padding: 0; }
 .app-config-delete-btn { color: var(--color-danger); }

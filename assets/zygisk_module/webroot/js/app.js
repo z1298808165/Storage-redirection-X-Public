@@ -1867,6 +1867,31 @@
     });
   }
 
+  /**
+   * 应用列表标题栏刷新入口。
+   * 长列表下回到顶部再下拉刷新的成本太高，因此与模块管理器一致，在标题栏保留常驻刷新按钮。
+   */
+  function initAppListRefresh() {
+    const button = $("#appListRefresh");
+    if (!button || button._srxBound) return;
+    button._srxBound = true;
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      // 刷新语义包含「看最新结果」，先回到顶部，避免刷完仍停在旧位置。
+      const scroller = getAppListScroller();
+      if (scroller) setScrollerTopInstant(scroller, 0);
+      State.appListScrollTop = 0;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      loadAppList(true)
+        .catch(() => {})
+        .finally(() => {
+          button.disabled = false;
+          button.removeAttribute("aria-busy");
+        });
+    });
+  }
+
   function initLogSearch() {
     const input = $("#logSearchInput"),
       clearBtn = $("#logSearchClear");
@@ -7633,6 +7658,7 @@
     setupHistory();
     initNav();
     initSearch();
+    initAppListRefresh();
     initLogSearch();
     initAppIconFallback();
     initListPerformanceControls();
