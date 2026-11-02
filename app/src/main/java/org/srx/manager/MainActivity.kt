@@ -254,6 +254,12 @@ private fun SrxManagerApp(
     if (page != Page.Apps || navBackStack.lastOrNull() != SrxRoute.Main)
         selectedAppPackages = emptyList()
   }
+  // 切换 Android 用户后应用列表整体换了一份，批量选择与滚动位置都属于旧用户，必须重置。
+  LaunchedEffect(state.selectedUser) {
+    selectedAppPackages = emptyList()
+    if (appsListState.firstVisibleItemIndex > 0 || appsListState.firstVisibleItemScrollOffset > 0)
+        appsListState.scrollToItem(0)
+  }
   LaunchedEffect(page, state.rootGranted) {
     if (!state.rootGranted) return@LaunchedEffect
     when (page) {
