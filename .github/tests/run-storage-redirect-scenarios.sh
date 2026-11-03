@@ -634,7 +634,7 @@ scenario_title() {
     37) echo "父映射结果继续命中子映射" ;;
     38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
-    40) echo "系统 uid 的 FUSE 写入按发起服务归因" ;;
+    40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用" ;;
   esac
 }
 
@@ -2617,6 +2617,55 @@ run_system_uid_attribution_scenario() {
   return 0
 }
 
+run_app_caller_media_provider_attribution_scenario() {
+  local scenario="$1"
+  # 触发链：测试应用（单包应用 uid）经 MediaStore API 发起创建，MediaProvider 在
+  # 自己的进程里代为执行 pending 文件创建与 rename —— 即用户报告的「MT 管理器
+  # 复制 / 系统组件经 MediaProvider 中转创建」同一链路。监视记录的源头身份字段
+  # 必须归因到发起应用包名（identify_method=caller、reliability=high），而不是
+  # unknown、无点原生 basename 或提供器自身。
+  # 回归背景（issue #2，2026-11-03）：ColorOS 上该链路的 caller scope 捕获存在
+  # 缺口，记录退化为 unknown/none；无点原生身份（如 mtio）此前在显示层还会被
+  # 丢弃回退为提供器标签。引擎侧补强（caller_uid 反查）与显示层补强已落地，
+  # 本场景在宿主（HyperOS/duchamp）上固化「归因成功」形态，防止链路回归。
+  # 判定标记：
+  #   通过：file_monitor.log 出现 |com.android.providers.media.module|$APP_ID|OPEN|
+  #         且 identify_method=caller、identify_reliability=high 的成功记录。
+  #   回归：记录缺失，或身份退化为 unknown / 无点 basename（归因链断裂）。
+  local label="mp-caller-attribution"
+  local file_name
+  file_name="$(monitor_file_name "$scenario" "$label")"
+  prepare_file_monitor_assertion "$scenario" "$label" || return 1
+  wait_storage_ready "scenario-${scenario}-${label}-storage" 30 >/dev/null || return 1
+  media_provider_ready_cached "scenario-${scenario}-${label}-provider" 60 >/dev/null || return 1
+  if ! run_service_case "$scenario" "$label" "mediastore_create_download" '^PASS \[mediastore_create_download\]' --es file_name "$file_name"; then
+    echo "mp caller attribution: mediastore_create_download case failed scenario=${scenario}" >&2
+    return 1
+  fi
+  # 轮询监视记录：归因链贯通时记录应在创建后数秒内出现；只认「提供器进程 +
+  # 发起应用包名身份 + caller/high」的组合，pending 中间形态与 unknown 一律
+  # 不算通过。
+  local poll=0
+  local found=0
+  while [ "$poll" -lt 10 ]; do
+    if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -Fv -- 'ret=-1' | grep -F -- '|com.android.providers.media.module|$APP_ID|OPEN|' | grep -F -- 'identify_method=caller|identify_reliability=high'" >/dev/null; then
+      found=1
+      break
+    fi
+    sleep 2
+    poll=$((poll + 1))
+  done
+  if [ "$found" -ne 1 ]; then
+    echo "mp caller attribution: monitor record missing or not attributed to source app scenario=${scenario}" >&2
+    adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | tail -5" || true
+    return 1
+  fi
+  echo "step 5/7 内: 应用发起 MP 中转创建归因确认"
+  adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- '|com.android.providers.media.module|$APP_ID|' | tail -2" || true
+  adb_su "rm -f '${BACKEND_ROOT}/Download/$file_name' '${BACKEND_ROOT}/Download/'.pending-*-$file_name" >/dev/null
+  return 0
+}
+
 
 check_file_location() {
   local scenario="$1" actual expected
@@ -4569,7 +4618,9 @@ run_scenario() {
       ;;
     40)
       echo "step 5/7: 验证系统 uid 的 FUSE 写入按发起服务归因"
-      run_system_uid_attribution_scenario "$scenario"
+      run_system_uid_attribution_scenario "$scenario" &&
+        echo "step 5/7 内: 验证应用发起经 MediaProvider 中转创建的源头归因" &&
+        run_app_caller_media_provider_attribution_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -4789,6 +4840,7 @@ export -f run_nested_mapping_chain_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
 export -f run_system_uid_attribution_scenario
+export -f run_app_caller_media_provider_attribution_scenario
 # 视图失效在 clean_targets / 夹具预置里被 `bash -c` 子 shell 调用，必须导出。
 export -f invalidate_visible_view invalidate_backend_fixture_view
 # 设备级坏态取证由失败分支在独立子 shell 里调用，同样必须导出。
