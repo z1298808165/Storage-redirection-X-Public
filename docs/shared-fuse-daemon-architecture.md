@@ -322,6 +322,12 @@ zygote 上的应用彻底漏注入），本项目保留周期扫描作为兜底�
   快速回退。注意该变量只对 daemon 及其 fork 的 worker 可见：`companion_mount` 跑在应用进程内，
   读不到 daemon 的环境变量，companion 侧的接入判定不依赖这个开关，而是依赖 daemon 发布的
   宿主会话快照（见下）。关闭时行为与改造前完全一致，日志里可以看到 `reason=attach_gate_closed`。
+  设备上的 daemon 由 `service.sh` 直接拉起、没有注入环境变量的位置，因此同语义还提供落盘开关
+  `.disable_fuse_host`（存在即关闭）。
+- **kill switch 必须覆盖宿主的全部使用路径**：宿主会话建立（`ensure_global`）与外部 abort
+  兜底监控都以接入闸门为前提。闸门若只挡应用接入，宿主仍会建立、仍会被换代，而每次换代都会
+  给已附着的命名空间留下死挂载层——现场用这个开关做「宿主是不是故障来源」的 A/B 归因时，
+  看到的现象与开启时没有差别，等于没有开关。
 - **companion 跨进程发现与 daemon 预登记**：companion 进程与 daemon 不共享内存，宿主会话只能
   通过 daemon 发布的快照文件（`tmp/fuse_host.snapshot`）发现，内容为 boot_id、宿主 pid/start、
   挂载点、挂载源与已登记 uid 集合；快照按 boot_id 与宿主进程实例校验，失效即视为不可接入。
@@ -391,7 +397,8 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认开启（`SRT_FUSE_HOST_ATTACH` 仅作 kill switch）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即降级为 namespace bind |
+| 共享会话退出影响面从单应用扩到全部应用 | 高 | 接入默认开启（`SRT_FUSE_HOST_ATTACH` 仅作 kill switch，等价落盘开关 `.disable_fuse_host`）；宿主会话由 `srx_fuse_host` 自愈重建，会话死亡让状态判为失效并重挂；任一接入失败立即降级为 namespace bind |
+| 宿主把 MediaProvider 的 FUSE 变成长期依赖 | 高 | 固定化的克隆会停在旧连接上（宿主命名空间建会话时已 `MS_REC\|MS_PRIVATE`，收不到 MP 重启后的新挂载），而旧连接是「挂载记录还在、无人应答」形态——经它的 syscall 会无限期挂在 FUSE 队列里，把宿主 worker 一个个赔进去。现在宿主对 MP 视图只有**一次性**用途：`-shm` 毒化自愈时由一个一次性子进程 `setns` 进 init 命名空间 → `unshare` 私有副本 → 克隆**当前一代** MP 视图 → 删除 → 随进程退出消失（`fuse_redirect::media_view`），没有任何跨调用的挂载状态，因此不存在陈旧；调用方用 `pidfd`+`poll` 有界裁决，超时 SIGKILL，最长阻塞的是子进程而不是宿主 worker |
 | uid 感知改造触碰 35 处策略读取点 | 高 | 阶段 1 单独提交，行为不变，用场景全绿验证 |
 | 按 uid 直通回退可能漏改写 | 高 | 宿主会话未命中 uid 一律**拒绝**（`deny_all` → `ENOENT`），绝不回退直通；落点越权无法靠事后清理恢复，必须在决策前挡住 |
 | 已登记应用对无规则路径 Real 直写绕过 MP 权限层 | 高 | 应用会话的写操作按原生 scoped storage 语义门控：仅自有私有目录、自身映射、配置放行目录与公共媒体集合（Download/DCIM 等 12 个根一级目录）可直写真实后端，其余拒绝并留痕（`fuse host write leak blocked`）；系统回退与系统代写会话豁免（2026-10-27 真机实证：支付宝/微信借宿主视图在存储根创建 `alipay/`、`tencent/`） |

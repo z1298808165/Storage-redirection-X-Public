@@ -67,6 +67,57 @@
    ```
 3. 正常应看到 `java hook query ok`、目标 APP UID 对应的 `java query` / `java cursor` 日志，受限相册桶应出现 `row filter reason=hide_probe_nonexist` 或 `java cursor filter...`。若只看到目标 APP 自身 `mount confirmed`，没有 MediaProvider 中目标 UID 的 query/cursor 日志，说明 MediaStore 查询链路没有完整闭环。
 
+## 外部存储整体卡死（读取/写入长时间不返回）
+
+整机所有应用访问 `/storage/emulated/0` 都卡住（应用首屏不加载、壁纸/桌面服务 ANR、系统存储服务无响应）时，先分清是**卡死**还是**报错**——这两类现象的根因完全不同，误判会把排查带到错误方向：
+
+| 形态 | 含义 | 典型 errno |
+|------|------|-----------|
+| 访问立刻失败 | 挂载记录还在，但背后的 FUSE 连接已经断了（服务进程退出或被 abort） | `ENOTCONN`(107) / `EIO` / `ENODEV` |
+| 访问长时间不返回（进程处于 D 状态） | FUSE 连接仍在、**服务端活着但不应答**：请求排队后没人回复 | 无 errno，只有超时 |
+
+模块自己的挂载出问题属于第一种（`srx_fuse_host[...]` 的层会快速报错，由宿主自愈与重挂处理）。**整机卡死几乎总是第二种**，而 `/storage/emulated/<user>` 的服务端是系统的 `com.android.providers.media.module`（MediaProvider 的 FuseDaemon），不是模块。定位顺序如下。
+
+1. 找到哪个连接在积压：
+
+   ```bash
+   adb shell "su -c 'for c in /sys/fs/fuse/connections/*; do echo \"\$c waiting=\$(cat \$c/waiting 2>/dev/null)\"; done'"
+   ```
+
+   `waiting` 持续增长且不回落，说明该连接的请求无人应答。连接号就是 `/proc/<pid>/mountinfo` 里 `0:<N>` 的 `<N>`，据此可判断是哪个挂载点、谁在提供服务：
+
+   ```bash
+   adb shell "su -c 'grep -E \" /storage/emulated|srx_fuse\" /proc/1/mountinfo'"
+   ```
+
+   `source` 为 `srx_fuse_host[<pid>]` 的是模块宿主会话；其余 FUSE 挂载（`/dev/fuse`、`/mnt/user/...`）由系统 MediaProvider 提供。
+
+2. MediaProvider 侧取证（判断它是否卡在自己的请求里）：
+
+   ```bash
+   adb shell "su -c 'debuggerd -j \$(pidof com.android.providers.media.module)'"   # Java 栈
+   adb shell "su -c 'debuggerd -b \$(pidof com.android.providers.media.module)'"   # native 栈
+   ```
+
+   若 FuseDaemon 的工作线程停在读取下游文件系统/等待锁上，说明卡点在 MP 自身或它的下游。
+
+3. 模块侧取证：模块宿主有独立的停摆证据文件，出现停摆与换代时会写全线程栈与挂载现场：
+
+   ```bash
+   adb shell "su -c 'tail -50 /data/adb/modules/storage.redirect.x/logs/stall-forensics.log'"
+   ```
+
+   没有新的停摆记录，说明模块宿主没有参与这次停摆。
+
+4. 归因对照（确认模块是否是故障来源）：创建落盘开关后重启 daemon，模块将不再建立共享宿主会话，应用全部走 namespace bind：
+
+   ```bash
+   adb shell "su -c 'touch /data/adb/modules/storage.redirect.x/.disable_fuse_host'"
+   adb shell "su -c 'kill \$(pidof srx_daemon)'"
+   ```
+
+   创建后 `running.log` 会出现 `fuse host disabled by marker`。若卡死依旧，问题不在共享宿主数据面；判断 MediaProvider 进程内的模块 hook 是否为来源，用同样的方式对照 `.disable_mp_hooks`（跳过 MP 进程内全部模块 hook）与 `.disable_fuse_fix`（只跳过 MP 的 FUSE 修复）。这些标记文件删除后重启生效，不需要重刷模块。
+
 ## 常见崩溃原因
 
 | 症状 | 原因 | 解决 |
