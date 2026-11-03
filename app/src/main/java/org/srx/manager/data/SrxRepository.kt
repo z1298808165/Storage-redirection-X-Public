@@ -385,9 +385,16 @@ class SrxRepository(
   suspend fun readLogSnapshot(): MonitorLogSnapshot {
     val raw = fileStore.readTailWithBackups(FileMonitorLogPath, LogInitialLoadLines)
     val filters = readFileMonitorFilters()
-    val entries = withContext(Dispatchers.IO) { parseMonitorLogEntries(raw, filters) }
+    val entries =
+        withContext(Dispatchers.IO) {
+          parseMonitorLogEntries(raw, filters, callerUidResolver = ::resolveMonitorCallerUidPackage)
+        }
     return MonitorLogSnapshot(entries, filters)
   }
+
+  /** 监视记录的无点原生身份按 uid 反查兜底：仅单包 uid 可区分成员，共享组返回 null。 */
+  private fun resolveMonitorCallerUidPackage(uid: Int): String? =
+      context.packageManager.getPackagesForUid(uid)?.singleOrNull()
 
   suspend fun clearLogs(): Boolean {
     return fileStore.clearFileMonitorLog()

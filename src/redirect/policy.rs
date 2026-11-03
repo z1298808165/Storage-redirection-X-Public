@@ -385,6 +385,33 @@ fn handle_uid_cache_open_failure(state: &mut SharedUidState, fingerprint: u64) {
     state.is_loaded = true;
 }
 
+/// 仅测试注入：直接写入 uid↔包名映射（与 load_shared_uid_cache 同构）。
+#[cfg(test)]
+pub(crate) fn set_shared_uid_entries_for_tests(entries: &[(i32, &[&str])]) {
+    let mut state = SHARED_UID_STATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let mut uid_by_package = HashMap::new();
+    let mut packages_by_uid: HashMap<i32, Vec<String>> = HashMap::new();
+    for (uid, packages) in entries {
+        for package in packages.iter() {
+            uid_by_package.insert((*package).to_string(), *uid);
+            packages_by_uid
+                .entry(*uid)
+                .or_default()
+                .push((*package).to_string());
+        }
+    }
+    for packages in packages_by_uid.values_mut() {
+        packages.sort();
+        packages.dedup();
+    }
+    state.uid_by_package = uid_by_package;
+    state.packages_by_uid = packages_by_uid;
+    state.last_fingerprint = 0;
+    state.is_loaded = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

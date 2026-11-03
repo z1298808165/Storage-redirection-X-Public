@@ -7109,15 +7109,32 @@
         ""
       );
     }
+    // 无点原生身份（如 MT 管理器 root 复制时 helper 进程的 basename mtio）：
+    // 归因链已经抓到调用方，只是身份是原生 basename。落盘进程又是媒体组件时
+    // 不能退回其标签（issue #2：.boot_ok 因此显示成“媒体选择工具”），保留
+    // 原身份展示，详情里的 caller_uid / native 字段仍可核查。
+    const dotlessCallerIdentity =
+      callerPkg !== processPkg &&
+      callerPkg !== "-" &&
+      callerPkg &&
+      !isIntermediateLogPackage(callerPkg) &&
+      isIntermediateLogPackage(processPkg)
+        ? callerPkg
+        : "";
     return (
       [
         callerPkg !== processPkg && !isIntermediateLogPackage(callerPkg) ? callerPkg : "",
         identifyMethod === "watch_package" && !isIntermediateLogPackage(watchPkg) ? watchPkg : "",
         !isIntermediateLogPackage(callerPkg) ? callerPkg : "",
         !isIntermediateLogPackage(processPkg) ? processPkg : "",
+        dotlessCallerIdentity,
         callerPkg,
         processPkg,
-      ].find(isSinglePackageName) ||
+      ].find(
+        (value) =>
+          isSinglePackageName(value) ||
+          (value && value === dotlessCallerIdentity && !isIntermediateLogPackage(value)),
+      ) ||
       processPkg ||
       ""
     );

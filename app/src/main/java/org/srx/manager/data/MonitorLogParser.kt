@@ -5,13 +5,14 @@ import org.srx.manager.root.isSafePackageName
 internal fun parseMonitorLogEntries(
     raw: String,
     filters: FileMonitorFilters? = null,
+    callerUidResolver: (Int) -> String? = { null },
     labelResolver: (String) -> String = { it },
 ): List<LogEntry> {
   val labelCache = mutableMapOf<String, String>()
   val compiledFilters = filters?.let(::compileMonitorFilters)
   return raw.lineSequence()
       .filter { it.isNotBlank() }
-      .mapNotNull { parseMonitorLogLine(it, labelCache, labelResolver) }
+      .mapNotNull { parseMonitorLogLine(it, labelCache, labelResolver, callerUidResolver) }
       .filterNot { it.path.substringAfterLast('/').matches(TempJsLogPathRegex) }
       .filterNot { it.isMediaStorePendingIntermediateRecord() }
       .filterNot { compiledFilters != null && it.matchesMonitorFilters(compiledFilters) }
@@ -24,6 +25,7 @@ private fun parseMonitorLogLine(
     line: String,
     labelCache: MutableMap<String, String>,
     labelResolver: (String) -> String,
+    callerUidResolver: (Int) -> String?,
 ): LogEntry? {
   val parts = line.split('|')
   if (parts.size < 5) return null
@@ -56,6 +58,20 @@ private fun parseMonitorLogLine(
   val pkg =
       if (isModuleExport) ModulePackageName
       else selectMonitorDisplayPackage(processPkg, callerPkg, watchPkg, identifyMethod)
+  // 无点原生身份且记录带 caller_uid 时，uid 是内核层面的发起方证据：按 uid 反查
+  // 单包名补齐显示（旧记录没有 native 侧的 caller_uid 反查补强，这里兜底）。
+  // 反查结果落到中间层或共享组（多包）时维持原身份。
+  val refinedPkg =
+      if (!isModuleExport && !pkg.contains('.')) {
+        extras["caller_uid"]
+            ?.toIntOrNull()
+            ?.takeIf { it >= 10_000 }
+            ?.let(callerUidResolver)
+            ?.takeIf { resolved -> resolved.contains('.') && !resolved.isIntermediateLogPackage() }
+            ?: pkg
+      } else {
+        pkg
+      }
   // 归因不可靠、展示包又落在系统代写中间层时，不再把中间层应用当成来源。
   // 监视记录的落盘进程是 MediaProvider / 相册选择器这类代写进程：直接显示它的
   // 标签会让用户以为文件是那个系统应用写出来的（issue #2 反馈“显示为媒体选择工具”），
@@ -63,7 +79,7 @@ private fun parseMonitorLogLine(
   // 中间层进程仍通过详情里的“进程”字段保留。
   val unattributedIntermediateSource =
       !isModuleExport &&
-          pkg.isIntermediateLogPackage() &&
+          refinedPkg.isIntermediateLogPackage() &&
           (identifyMethod == "unknown" || identifyReliability == "none")
   val operation =
       if (isModuleExport) "export"
@@ -73,12 +89,12 @@ private fun parseMonitorLogLine(
       timeText = parts[0].takeIf { it.length >= 16 }?.substring(11, 16) ?: "--:--",
       processPackage = processPkg,
       callerPackage = callerPkg,
-      packageName = pkg,
+      packageName = refinedPkg,
       label =
           when {
             isModuleExport -> ModuleDisplayLabel
             unattributedIntermediateSource -> UnattributedSourceLabel
-            else -> resolveCachedLabel(pkg, labelCache, labelResolver)
+            else -> resolveCachedLabel(refinedPkg, labelCache, labelResolver)
           },
       operation = operation,
       action =
@@ -140,16 +156,30 @@ private fun selectMonitorDisplayPackage(
     callerPkg: String,
     watchPkg: String,
     identifyMethod: String,
-): String =
-    listOf(
-            callerPkg.takeIf { it != processPkg && !it.isIntermediateLogPackage() },
-            watchPkg.takeIf { identifyMethod == "watch_package" && !it.isIntermediateLogPackage() },
-            callerPkg.takeIf { !it.isIntermediateLogPackage() },
-            processPkg.takeIf { !it.isIntermediateLogPackage() },
-            callerPkg,
-            processPkg,
-        )
-        .firstOrNull { isSinglePackageName(it.orEmpty()) } ?: processPkg
+): String {
+  val callerIdentity =
+      callerPkg.takeIf {
+        it != processPkg && it != "-" && it.isNotBlank() && !it.isIntermediateLogPackage()
+      }
+  return listOf(
+          callerIdentity?.takeIf { it.contains('.') },
+          watchPkg.takeIf { identifyMethod == "watch_package" && !it.isIntermediateLogPackage() },
+          callerPkg.takeIf { !it.isIntermediateLogPackage() },
+          processPkg.takeIf { !it.isIntermediateLogPackage() },
+          // 无点原生身份（如 MT 管理器 root 复制时 helper 进程的 basename mtio）：
+          // 归因链已经抓到调用方，只是身份是原生 basename。落盘进程又是媒体组件
+          // 时不能退回其标签（issue #2：.boot_ok 因此显示成“媒体选择工具”），
+          // 保留原身份展示，详情里的 caller_uid / native 字段仍可核查。
+          callerIdentity?.takeIf { processPkg.isIntermediateLogPackage() },
+          callerPkg,
+          processPkg,
+      )
+      .firstOrNull {
+        isSinglePackageName(it.orEmpty()) ||
+            // 无点原生身份仅在落盘进程为媒体组件时入选（见上方 callerIdentity 分支）。
+            it == callerIdentity && processPkg.isIntermediateLogPackage()
+      } ?: processPkg
+}
 
 private fun isSinglePackageName(value: String): Boolean =
     isSafePackageName(value) && value.contains('.')

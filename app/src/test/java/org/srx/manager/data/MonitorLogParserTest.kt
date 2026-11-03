@@ -678,6 +678,74 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun resolvesDotlessNativeIdentityViaCallerUid() {
+    // issue #2：MT 管理器 root 复制 .boot_ok 落表为原生 basename mtio，
+    // caller_uid=10000 是内核层面的发起方证据，显示层应反查到真实包名。
+    val raw =
+        "2026-11-02 14:47:58|com.android.providers.media.module|mtio|OPEN|" +
+            "/storage/emulated/0/.boot_ok|ret=210|errno=0|" +
+            "identify_method=caller|identify_reliability=high|event_role=request|" +
+            "op=open|op_filter=open:create|flags=0x20242|caller_uid=10000"
+
+    val entry =
+        parseMonitorLogEntries(
+                raw,
+                callerUidResolver = { uid -> if (uid == 10000) "bin.mt.plus" else null },
+            ) {
+              "Label:$it"
+            }
+            .single()
+
+    assertEquals("bin.mt.plus", entry.packageName)
+    assertEquals("Label:bin.mt.plus", entry.label)
+    assertEquals("caller", entry.identifyMethod)
+  }
+
+  @Test
+  fun keepsDotlessIdentityWithoutUidResolver() {
+    // 无 PackageManager 反查（WebUI 侧）时，保留原生身份展示，不退回媒体组件标签。
+    val raw =
+        "2026-11-02 14:47:58|com.android.providers.media.module|mtio|OPEN|" +
+            "/storage/emulated/0/.boot_ok|ret=210|errno=0|" +
+            "identify_method=caller|identify_reliability=high|event_role=request|" +
+            "op=open|op_filter=open:create|flags=0x20242|caller_uid=10000"
+
+    val entry = parseMonitorLogEntries(raw) { "Label:$it" }.single()
+
+    assertEquals("mtio", entry.packageName)
+    assertEquals("Label:mtio", entry.label)
+  }
+
+  @Test
+  fun keepsDotlessIdentityForSharedUidGroup() {
+    // 共享 uid 组（多包）无法区分成员：反查返回 null，维持原身份，不猜。
+    val raw =
+        "2026-11-02 14:47:58|com.android.providers.media.module|mtio|OPEN|" +
+            "/storage/emulated/0/.boot_ok|ret=210|errno=0|" +
+            "identify_method=caller|identify_reliability=high|event_role=request|" +
+            "op=open|op_filter=open:create|flags=0x20242|caller_uid=10000"
+
+    val entry =
+        parseMonitorLogEntries(raw, callerUidResolver = { _ -> null }) { "Label:$it" }.single()
+
+    assertEquals("mtio", entry.packageName)
+  }
+
+  @Test
+  fun ignoresDotlessCallerWhenProcessPackageIsNormalApp() {
+    // 落盘进程是普通应用时维持既有优先级：显示进程包，不显示无点原生身份。
+    val raw =
+        "2026-11-02 14:47:58|com.example.app|sh|OPEN|" +
+            "/storage/emulated/0/Download/x|ret=0|errno=0|" +
+            "identify_method=caller|identify_reliability=high|event_role=request|" +
+            "op=open|op_filter=open:write|caller_uid=1000"
+
+    val entry = parseMonitorLogEntries(raw) { "Label:$it" }.single()
+
+    assertEquals("com.example.app", entry.packageName)
+  }
+
+  @Test
   fun labelsVendorPickerVariantsAsUnknownSource() {
     val raw =
         "2026-11-02 15:19:00|com.coloros.mediapicker|-|MKDIR|" +

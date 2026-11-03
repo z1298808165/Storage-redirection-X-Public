@@ -38,6 +38,13 @@ $allowed = @{
     "src/lifecycle/specialize_pre.rs" = @(
         "file_monitor_ui_bypass_covers_system_oem_and_legacy_names"
     )
+    "src/monitor.rs" = @(
+        "refines_dotless_native_identity_with_caller_uid",
+        "refines_empty_identity_to_caller_uid_method",
+        "keeps_identity_for_shared_uid_group",
+        "keeps_dot_package_identity_unchanged",
+        "keeps_identity_for_non_app_uid"
+    )
     "src/redirect/policy.rs" = @(
         "file_monitor_ui_detects_system_and_oem_file_shells",
         "media_intermediate_includes_file_ui_for_attribution"
@@ -102,4 +109,5 @@ if ($errors.Count -gt 0) {
     throw ($errors -join "`n")
 }
 
-Write-Host "Rust 内联测试白名单检查通过：已保留 6 个上游测试。"
+$allowedCount = ($allowed.Values | ForEach-Object { $_.Count } | Measure-Object -Sum).Sum
+Write-Host "Rust 内联测试白名单检查通过：已保留 $allowedCount 个登记测试。"

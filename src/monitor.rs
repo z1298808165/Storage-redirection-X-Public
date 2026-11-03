@@ -490,6 +490,27 @@ impl AuditTrail {
             query_access_identity,
         );
 
+        // 原生身份补强：caller scope 覆盖不到的写入，归因链可能只拿到原生
+        // basename（如 MT 管理器 root 复制时以其 helper 进程身份 mtio 落表）。
+        // 此时 extra 里的 caller_uid（binder / FUSE 请求发起方）是更硬的证据：
+        // uid 只对应一个包时，以该包名为真实来源，basename 降级为 native= 细节
+        // 字段保留。共享 uid 组无法区分成员，保持原样不猜（与
+        // resolve_recent_path_caller_package 同一纪律）。
+        let native_identity;
+        let source_identity = {
+            let caller_uid = extract_kv_value(extra, "caller_uid=")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .unwrap_or(-1);
+            let (identity, native) =
+                refine_native_identity_with_caller_uid(source_identity, caller_uid);
+            native_identity = native;
+            identity
+        };
+        let extra: Cow<'_, str> = match &native_identity {
+            Some(basename) => Cow::Owned(format!("{extra}|native={basename}")),
+            None => Cow::Borrowed(extra),
+        };
+
         // 系统 uid 私有路径强制静音：归因完成后判定，避免淹没监视日志。
         if should_force_filter_system_private_record(&normalized, &source_identity.package_name) {
             return;
@@ -528,7 +549,7 @@ impl AuditTrail {
             &operation_name,
             &normalized,
             result,
-            extra,
+            &extra,
         );
 
         // 预分配缓冲区以减少字符串重分配
@@ -1349,6 +1370,56 @@ fn should_prefer_direct_identity(identity: &SourceIdentity) -> bool {
         && !is_intermediate_caller_package(&identity.package_name)
 }
 
+/// 用 caller_uid 反查补强原生身份（无点 basename / 空来源）。
+///
+/// 返回 `(补强后的身份, 需保留为 native= 细节的原始 basename)`。仅当 uid 只
+/// 对应一个合法、非中间层、非系统代写的包名时才采信；共享 uid 组无法区分
+/// 成员，保持原样不猜（与 resolve_recent_path_caller_package 同一纪律）。
+/// 2026-11-03 真机（issue #2）：MT 管理器 root 复制 .boot_ok 落表为原生
+/// basename mtio，caller_uid=10000 才是真实来源，此前该信号被丢弃，显示层
+/// 退回媒体组件标签。
+fn refine_native_identity_with_caller_uid(
+    identity: SourceIdentity,
+    caller_uid: i32,
+) -> (SourceIdentity, Option<String>) {
+    let native = identity.package_name.clone();
+    let needs_refine = native.is_empty() || !native.contains('.');
+    if !needs_refine || caller_uid < ANDROID_APP_UID_START {
+        return (identity, None);
+    }
+
+    let mut packages = policy::get_packages_for_uid(caller_uid);
+    if packages.is_empty() {
+        policy::refresh_shared_uid_cache();
+        packages = policy::get_packages_for_uid(caller_uid);
+    }
+    packages.sort();
+    packages.dedup();
+    if packages.len() != 1 {
+        return (identity, None);
+    }
+    let package = packages.remove(0);
+    if !hint_file::is_valid_package_name(&package)
+        || package == native
+        || is_intermediate_caller_package(&package)
+        || policy::is_system_writer_package(&package)
+    {
+        return (identity, None);
+    }
+
+    let method = if native.is_empty() {
+        "caller_uid"
+    } else {
+        "caller"
+    };
+    let keep_native = if native.is_empty() {
+        None
+    } else {
+        Some(native)
+    };
+    (SourceIdentity::new(package, method, "high"), keep_native)
+}
+
 fn extract_caller_package(caller_package: &str) -> String {
     if caller_package.is_empty() || caller_package == "-" {
         return String::new();
@@ -1539,4 +1610,72 @@ fn should_use_recent_private_owner_hint(kind: OpKind, normalized_path: &str, op:
         kind,
         OpKind::Open | OpKind::Mkdir | OpKind::Mknod | OpKind::Rename
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_uid_cache() {
+        policy::set_shared_uid_entries_for_tests(&[
+            (10_000, &["bin.mt.plus"]),
+            (10_301, &["com.a.first", "com.b.second"]),
+        ]);
+    }
+
+    #[test]
+    fn refines_dotless_native_identity_with_caller_uid() {
+        reset_uid_cache();
+        let (identity, native) = refine_native_identity_with_caller_uid(
+            SourceIdentity::new("mtio".to_string(), "caller", "high"),
+            10_000,
+        );
+        assert_eq!(identity.package_name, "bin.mt.plus");
+        assert_eq!(identity.source, "caller");
+        assert_eq!(identity.confidence, "high");
+        assert_eq!(native.as_deref(), Some("mtio"));
+    }
+
+    #[test]
+    fn refines_empty_identity_to_caller_uid_method() {
+        reset_uid_cache();
+        let (identity, native) =
+            refine_native_identity_with_caller_uid(SourceIdentity::unknown(), 10_000);
+        assert_eq!(identity.package_name, "bin.mt.plus");
+        assert_eq!(identity.source, "caller_uid");
+        assert_eq!(native, None);
+    }
+
+    #[test]
+    fn keeps_identity_for_shared_uid_group() {
+        reset_uid_cache();
+        let (identity, native) = refine_native_identity_with_caller_uid(
+            SourceIdentity::new("mtio".to_string(), "caller", "high"),
+            10_301,
+        );
+        assert_eq!(identity.package_name, "mtio");
+        assert_eq!(native, None);
+    }
+
+    #[test]
+    fn keeps_dot_package_identity_unchanged() {
+        reset_uid_cache();
+        let (identity, native) = refine_native_identity_with_caller_uid(
+            SourceIdentity::new("com.example.app".to_string(), "caller", "high"),
+            10_000,
+        );
+        assert_eq!(identity.package_name, "com.example.app");
+        assert_eq!(native, None);
+    }
+
+    #[test]
+    fn keeps_identity_for_non_app_uid() {
+        reset_uid_cache();
+        let (identity, native) = refine_native_identity_with_caller_uid(
+            SourceIdentity::new("sh".to_string(), "caller", "high"),
+            1000,
+        );
+        assert_eq!(identity.package_name, "sh");
+        assert_eq!(native, None);
+    }
 }
