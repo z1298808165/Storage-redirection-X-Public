@@ -71,7 +71,16 @@ const SYSTEM_REQUESTER_CACHE_CAP: usize = 256;
 type SystemRequesterCacheEntry = (i64, Option<RequesterIdentity>);
 static SYSTEM_REQUESTER_CACHE: Lazy<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_millis(250);
+/// 目录候选缓存的存活时间。
+///
+/// 命中前会逐源校验目录 mtime（`DirectorySourceSignature`），文件增删都会改变父目录
+/// mtime 从而立即失效，因此这里的 TTL 只是兜底上限，不承担新鲜度判定。此前取 250ms
+/// 时，相册类应用逐个相册目录 opendir 的间隔远大于有效期，几乎每次都重新枚举：
+/// 真机实测（A16，1 万张照片 / 20 个相册目录）模块视图的树枚举 198–229ms，原生
+/// 36–70ms；单目录 500 条枚举模块 32ms、原生 1ms，会话侧 `avg_dir_scan_us≈26000`。
+/// 按目录数线性放大后（上百个相册目录）正好是用户反馈的秒级加载。放宽到 2s 后
+/// 同一目录的重复 opendir 走缓存，新增/删除仍由 mtime 校验即时失效。
+const DIR_CANDIDATE_CACHE_TTL: Duration = Duration::from_secs(2);
 static INODE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 /// 会话级 ENOENT 诊断限流：前 4 条带策略指纹落日志，用于定位「未登记 uid / 旧映射残留」。
 static OPEN_ENOENT_DIAG_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -157,12 +166,16 @@ fn dir_candidate_cache_capacity_limits() -> (usize, usize, usize) {
             })
         })
         .unwrap_or(4 * 1024 * 1024);
+    // 字节预算按设备内存分档：单个相册目录动辄上千条，原先 1MiB 预算下大目录
+    // 直接判超限（真机会话快照 `dir_cache_oversize=3`、命中率 2%），缓存等于没装。
+    // 宿主会话每设备只有一个，几 MB 的目录候选缓存换掉每目录 26ms 的重复枚举是
+    // 划算的；上限仍按条目数（256）与字节预算双重约束，不会无界增长。
     let (max_capacity, byte_budget) = if total_kib < 4 * 1024 * 1024 {
-        (64, 256 * 1024)
+        (64, 2 * 1024 * 1024)
     } else if total_kib < 8 * 1024 * 1024 {
-        (128, 512 * 1024)
+        (128, 4 * 1024 * 1024)
     } else {
-        (256, 1024 * 1024)
+        (256, 8 * 1024 * 1024)
     };
     (
         INITIAL_DIR_CANDIDATE_CACHE_ENTRIES.min(max_capacity),
