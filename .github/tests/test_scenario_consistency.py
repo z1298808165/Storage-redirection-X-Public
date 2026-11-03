@@ -219,14 +219,40 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("libc::unshare(libc::CLONE_NEWNS)", media_view)
         self.assertIn("libc::SYS_open_tree", media_view)
         self.assertIn("libc::SYS_move_mount", media_view)
-        # 有界：等内核退出事件（pidfd + poll），不是定时轮询；超时必须 SIGKILL。
+        # 有界：等内核事件（pidfd + poll，缺失时 SIGCHLD + sigtimedwait），不是定时轮询；
+        # 超时必须 SIGKILL。等待机制是可替换的实现细节，不能变成「没有 pidfd 就停用视图」
+        # 这类功能开关——视图删除是毒化 -shm 自愈唯一无副作用的路径。
         self.assertIn("libc::SYS_pidfd_open", media_view)
         self.assertIn("libc::poll(", media_view)
+        self.assertIn("libc::sigtimedwait(", media_view)
         self.assertIn("libc::SIGKILL", media_view)
+        # 不得退化成定时轮询子进程状态：`sleep` 循环既缩短不了等待，又会在连接停摆时把
+        # 宿主线程拖成轮询机。（`WNOHANG` 允许出现，但只作为一次非阻塞状态复查。）
+        self.assertNotIn("thread::sleep", media_view)
+        self.assertNotIn("std::time::Duration", media_view)
+        self.assertIn("fn pidfd_available()", media_view)
         # 不得再出现「整会话失效标记」这类长生命周期状态：视图按次重建即是自愈，
         # 一旦留下会话级毒化标记，MP 恢复后本代宿主再也用不上视图。
         self.assertNotIn("VIEW_UNUSABLE", media_view)
         self.assertNotIn("is_usable", media_view)
+
+        # 子进程泄漏面必须被结构钉死：宿主的直接子进程只能是「监督进程」（不接触任何
+        # FUSE，必在有限时间内退出），worker 由它收尸、放弃时被 init 收养——僵尸不会
+        # 跨父进程存活，也就不会在宿主名下按失败次数累积。
+        self.assertIn("fn supervise_worker(", media_view)
+        self.assertIn("fn child_view_unlink(", media_view)
+        supervisor = section(media_view, "fn supervise_worker(", "/// 读回监督进程的结论")
+        self.assertIn("libc::fork()", supervisor)
+        self.assertNotIn("SYS_open_tree", supervisor)
+        self.assertNotIn("libc::setns", supervisor)
+        # 残留进程台账：没离开进程表之前不再起新的 worker，泄漏上界钉成 1。
+        self.assertIn("PENDING_CHILD_PID", media_view)
+        self.assertIn("INFLIGHT", media_view)
+        pending = section(media_view, "fn pending_child_alive(", "/// 经 MediaProvider 视图删除")
+        self.assertIn("PENDING_CHILD_PID.load", pending)
+        self.assertIn("/proc/{pid}", pending)
+        # 任何失败都要进冷却（含起不了子进程），否则毒化反复命中会打成 fork 风暴。
+        self.assertIn("enter_fail_cooldown();", section(media_view, "ChildOutcome::Failed => {", "}\n    }\n}"))
 
         # 长生命周期绑定必须整条移除：策略里不再缓存视图根，宿主模块不再有绑定函数，
         # 登记路径也不再做绑定准备（否则又会在调用方进程内阻塞）。
