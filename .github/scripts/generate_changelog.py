@@ -377,11 +377,13 @@ def credit_line(commit: CommitInfo) -> str:
 
 
 def credit_range_start(current: str) -> str:
-    """致谢跨整个发布周期累积：同一版本内的每个 CI 构建都展示同一批贡献。
+    """正式 Release 的致谢跨整个发布周期累积。
 
-    致谢可能写进任意一笔提交，而 CI 日志的对比基准是上一个 CI tag——只按对比范围
-    取会让贡献在下一版 CI 里凭空消失。这里改以最近的 `v*` 正式发布 tag 为下界，
-    正式发布后自然清零。仓库是浅克隆或尚未打过 tag 时返回空串，退回对比范围。
+    致谢可能写进任意一笔提交，而正式发布的对比基准可能只覆盖最后一程——只按对比
+    范围取会让早期贡献在发布日志里凭空消失。这里以最近的 `v*` 正式发布 tag 为下界，
+    正式发布后自然清零。CI 构建日志不走本函数：CI 是对比区间的差异记录，致谢只认
+    对比范围内的提交（见 write_changelog）。仓库是浅克隆或尚未打过 tag 时返回空串，
+    退回对比范围。
     """
     tag = run_git(["describe", "--tags", "--abbrev=0", "--match", "v*", current], allow_fail=True)
     if not tag:
@@ -402,6 +404,9 @@ def collect_credits(commits: list[CommitInfo], mode: str = "release") -> list[st
     seen: set[str] = set()
     for commit in commits:
         text = credit_line(commit).strip(" 。；;，,")
+        # 历史提交正文里把外部建议写成「私下建议」，公开日志里建议就是建议，
+        # 输出端统一归一措辞，不追溯改写提交原文。
+        text = text.replace("私下建议", "建议")
         if not text:
             continue
         key = summary_key(text)
@@ -498,9 +503,16 @@ def write_changelog(mode: str, version: str, current: str, output: Path) -> None
     commits = commit_infos(previous, current)
     analysis = collect_analysis(mode, files, commits)
     limit_analysis(analysis, mode)
-    credit_base = credit_range_start(current)
-    earlier = commit_infos(credit_base, current) if credit_base and credit_base != previous else []
-    credits = collect_credits([*commits, *earlier], mode)
+    # 致谢取数范围按模式区分：CI 构建日志是对比区间的差异记录，致谢也只认对比
+    # 范围内的提交——按整个发布周期累积会让上一版 CI 已展示过的旧条目在后续
+    # 每版 CI 里重复出现（ci.11 曾因此带出 ci.9/ci.10 已发布的致谢）。
+    # 正式 Release 是版本周期汇总，保持周期累积不变。
+    if mode == "ci":
+        credits = collect_credits(commits, mode)
+    else:
+        credit_base = credit_range_start(current)
+        earlier = commit_infos(credit_base, current) if credit_base and credit_base != previous else []
+        credits = collect_credits([*commits, *earlier], mode)
     output.write_text(render_analysis(mode, version, previous, current, analysis, credits), encoding="utf-8")
 
 
