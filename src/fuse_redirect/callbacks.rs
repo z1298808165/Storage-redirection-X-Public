@@ -1966,10 +1966,19 @@ fn collect_dir_entry_candidates(
     let mut entries = Vec::new();
     let mut seen = HashMap::<String, usize>::new();
     let mut sources = Vec::new();
+    // 目录级短路：子项路由结果与「父后端 join 子项名」一致时，免去每条目一次
+    // 完整路由（对齐原生 FuseDaemon 单次枚举 + 轻过滤的形态）。父后端解析失败
+    // 与非短路路径同样按 None 处理，退回逐条目路由。
+    let uniform_backend = if policy.children_route_uniformly(rel) {
+        policy.backend_for_relative(rel, OperationKind::Read)
+    } else {
+        None
+    };
     append_backend_dir_entries(
         policy,
         rel,
         &policy.redirect_backend_for_rel(rel),
+        uniform_backend.as_ref(),
         &mut entries,
         &mut seen,
         &mut sources,
@@ -1978,6 +1987,7 @@ fn collect_dir_entry_candidates(
         policy,
         rel,
         &policy.real_backend_for_rel(rel),
+        uniform_backend.as_ref(),
         &mut entries,
         &mut seen,
         &mut sources,
@@ -1993,6 +2003,7 @@ fn collect_dir_entry_candidates(
                 policy,
                 rel,
                 &policy.real_backend_for_storage_rel(target_rel),
+                uniform_backend.as_ref(),
                 &mut entries,
                 &mut seen,
                 &mut sources,
@@ -2014,6 +2025,7 @@ fn append_backend_dir_entries(
     policy: &super::policy::RedirectPolicy,
     parent_rel: &str,
     backend: &Path,
+    uniform_backend: Option<&super::policy::BackendPath>,
     entries: &mut Vec<DirEntryCandidate>,
     seen: &mut HashMap<String, usize>,
     sources: &mut Vec<DirectorySourceSignature>,
@@ -2052,21 +2064,28 @@ fn append_backend_dir_entries(
         } else {
             paths::join(parent_rel, &name)
         };
-        let Some(child_backend) = policy.backend_for_relative(&child_rel, OperationKind::Read)
-        else {
-            continue;
+        // 目录级短路：children_route_uniformly 成立时，子项路由结果必然是
+        // 「父后端 join 子项名」，用一次 join 代替整条策略路由；期望后端与
+        // 枚举源不一致的条目仍按既有语义丢弃（或按虚拟目录保留）。
+        let is_expected_backend = if let Some(parent_backend) = uniform_backend {
+            paths_eq(&item.path(), &parent_backend.path.join(&name))
+        } else {
+            let Some(child_backend) = policy.backend_for_relative(&child_rel, OperationKind::Read)
+            else {
+                continue;
+            };
+            // 该子项按策略解析出的后端必须就是当前枚举源这一侧，否则跳过，避免真实侧与
+            // 重定向侧互相收录对方的条目。真实后端根按私有子树分流后，同一父目录下的子项
+            // 可能落在两个真实根之一，故真实侧改用按 rel 判定而非单一路径相等比较。
+            // 重定向根虽然位于 private_real_root 之下，但枚举项形如
+            // <redirect_root>/<rel>，与真实侧的 <真实根>/<rel> 只有在 rel 自我嵌套时才
+            // 可能相等，因此这条放宽不会让重定向侧条目被误判为真实侧后端。
+            paths_eq(&item.path(), &child_backend.path)
+                || policy.is_real_backend_path_for_storage_rel(
+                    &policy.full_storage_rel(&child_rel),
+                    &item.path(),
+                )
         };
-        // 该子项按策略解析出的后端必须就是当前枚举源这一侧，否则跳过，避免真实侧与
-        // 重定向侧互相收录对方的条目。真实后端根按私有子树分流后，同一父目录下的子项
-        // 可能落在两个真实根之一，故真实侧改用按 rel 判定而非单一路径相等比较。
-        // 重定向根虽然位于 private_real_root 之下，但枚举项形如
-        // <redirect_root>/<rel>，与真实侧的 <真实根>/<rel> 只有在 rel 自我嵌套时才
-        // 可能相等，因此这条放宽不会让重定向侧条目被误判为真实侧后端。
-        let is_expected_backend = paths_eq(&item.path(), &child_backend.path)
-            || policy.is_real_backend_path_for_storage_rel(
-                &policy.full_storage_rel(&child_rel),
-                &item.path(),
-            );
         if !is_expected_backend && !policy.is_virtual_dir(&child_rel) {
             continue;
         }

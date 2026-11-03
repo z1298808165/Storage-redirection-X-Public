@@ -319,6 +319,11 @@ pub(super) struct RedirectPolicy {
     ///
     /// 同样与请求无关，构造期算好可免去每次判定里的 `format!` 与 `to_string_lossy`。
     shared_public_roots: [String; 3],
+    /// 六套规则（放行/排除/只读/只读排除/沙箱/沙箱排除）归一化后的字面量路径全集，
+    /// 供 `children_route_uniformly` 做目录级短路判定。
+    all_literal_rule_paths: Vec<String>,
+    /// 任一规则或映射含通配符时为真：通配与文本前缀关系不可靠，目录级短路直接放弃。
+    has_wildcard_rules: bool,
     pub(super) rule_prefixes: Vec<RulePrefix>,
     pub(super) allowed_real_paths: Vec<String>,
     pub(super) read_only_paths: Vec<String>,
@@ -788,6 +793,21 @@ impl RedirectPolicy {
             real_storage_anchor_for_user(user_id),
             real_root.to_string_lossy().to_string(),
         ];
+        let all_literal_rule_paths: Vec<String> = allowed_real_paths
+            .iter()
+            .chain(excluded_real_paths.iter())
+            .chain(read_only_paths.iter())
+            .chain(read_only_excluded_paths.iter())
+            .chain(sandboxed_paths.iter())
+            .chain(sandboxed_excluded_paths.iter())
+            .cloned()
+            .collect();
+        let has_wildcard_rules = all_literal_rule_paths
+            .iter()
+            .any(|rule| paths::contains_wildcards(rule))
+            || path_mappings
+                .iter()
+                .any(|mapping| paths::contains_wildcards(&mapping.request_path));
 
         Some(Self {
             package_name: config.package_name,
@@ -802,6 +822,8 @@ impl RedirectPolicy {
             redirect_view_rel,
             own_private_roots,
             shared_public_roots,
+            all_literal_rule_paths,
+            has_wildcard_rules,
             sandbox_backend_root,
             rule_prefixes,
             allowed_real_paths,
@@ -1151,6 +1173,47 @@ impl RedirectPolicy {
         self.own_private_roots
             .iter()
             .any(|root| paths::matches(root, relative, true))
+    }
+
+    /// 目录级短路判定（对齐原生 FuseDaemon「一次枚举」的形态）：
+    /// 父目录下不存在任何**严格位于其下**的规则/映射、且不跨越自有私有根边界时，
+    /// 全部子项的路由结果必然等于「父目录后端 join 子项名」，readdir 可以免去
+    /// 每条目一次的完整路由。
+    ///
+    /// 判定口径：
+    /// - 规则等于父目录或其祖先 → 父子同判（精确索引沿祖先链回溯），允许短路；
+    /// - 规则严格位于父目录之下 → 只有部分子项命中，放弃短路；
+    /// - 映射命中父目录（或其祖先）→ 子项按同一映射换算出「映射后端 join 子项名」，
+    ///   与父后端 join 一致，允许短路；映射严格位于父目录之下 → 放弃；
+    /// - 父目录本身是某个 `Android/data|media|obb/<pkg>` 的严格前缀 → 子项会跨越
+    ///   私有/公共真实根分流，放弃（父目录在私有根之内或相等则不受影响）；
+    /// - 通配规则与文本前缀关系不可靠 → 一律放弃；存储根自身也放弃（条目少）。
+    pub(super) fn children_route_uniformly(&self, parent_rel: &str) -> bool {
+        if self.deny_all || self.has_wildcard_rules {
+            return false;
+        }
+        if parent_rel.trim_matches('/').is_empty() {
+            return false;
+        }
+        let parent_storage = self.storage_path_for_rel(parent_rel);
+        if self
+            .all_literal_rule_paths
+            .iter()
+            .any(|rule| is_strict_subpath(rule, &parent_storage))
+        {
+            return false;
+        }
+        if self
+            .path_mappings
+            .iter()
+            .any(|mapping| is_strict_subpath(&mapping.request_path, &parent_storage))
+        {
+            return false;
+        }
+        let parent_full = self.full_storage_rel(parent_rel);
+        self.own_private_roots
+            .iter()
+            .all(|root| !is_strict_subpath(root, &parent_full))
     }
 
     // mapping_mode_only 仍然可能使用覆盖整个共享存储根的 scoped FUSE。
@@ -2028,6 +2091,19 @@ fn resolve_storage_rule(
     } else {
         None
     }
+}
+
+/// 组件级严格子路径判定（ASCII 大小写不敏感）：`path` 位于 `ancestor` 目录之下
+/// 且不等于它。用于目录级短路判定里「规则/映射是否落在父目录之下」的比较。
+fn is_strict_subpath(path: &str, ancestor: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let ancestor = ancestor.trim_end_matches('/');
+    if ancestor.is_empty() || path.len() <= ancestor.len() {
+        return false;
+    }
+    path.is_char_boundary(ancestor.len())
+        && path[..ancestor.len()].eq_ignore_ascii_case(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'/'
 }
 
 pub(super) fn sanitize_relative(rel: &str) -> Option<String> {
