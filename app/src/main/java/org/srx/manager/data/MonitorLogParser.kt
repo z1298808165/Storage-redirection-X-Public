@@ -56,6 +56,15 @@ private fun parseMonitorLogLine(
   val pkg =
       if (isModuleExport) ModulePackageName
       else selectMonitorDisplayPackage(processPkg, callerPkg, watchPkg, identifyMethod)
+  // 归因不可靠、展示包又落在系统代写中间层时，不再把中间层应用当成来源。
+  // 监视记录的落盘进程是 MediaProvider / 相册选择器这类代写进程：直接显示它的
+  // 标签会让用户以为文件是那个系统应用写出来的（issue #2 反馈“显示为媒体选择工具”），
+  // 而实际调用方是当时在场、无法归因的第三方应用。这类记录统一标注来源未知，
+  // 中间层进程仍通过详情里的“进程”字段保留。
+  val unattributedIntermediateSource =
+      !isModuleExport &&
+          pkg.isIntermediateLogPackage() &&
+          (identifyMethod == "unknown" || identifyReliability == "none")
   val operation =
       if (isModuleExport) "export"
       else formatMonitorLogOperationBadge(rawOperation.ifBlank { filterOperation })
@@ -66,8 +75,11 @@ private fun parseMonitorLogLine(
       callerPackage = callerPkg,
       packageName = pkg,
       label =
-          if (isModuleExport) ModuleDisplayLabel
-          else resolveCachedLabel(pkg, labelCache, labelResolver),
+          when {
+            isModuleExport -> ModuleDisplayLabel
+            unattributedIntermediateSource -> UnattributedSourceLabel
+            else -> resolveCachedLabel(pkg, labelCache, labelResolver)
+          },
       operation = operation,
       action =
           if (isModuleExport) describeModuleExportOperation(extras)
@@ -152,7 +164,8 @@ private fun String?.isIntermediateLogPackage(): Boolean {
       value == "com.android.externalstorage" ||
       value == "com.android.mtp" ||
       value.contains(".documentsui") ||
-      value.contains(".photopicker")
+      value.contains("photopicker") ||
+      value.contains("mediapicker")
 }
 
 private fun isModuleExportRecord(
@@ -694,3 +707,4 @@ private val DiagnosticLogArchiveRegex =
     Regex("^storage-redirect-x-logs-.+\\.tar\\.gz$", RegexOption.IGNORE_CASE)
 private const val ModulePackageName = "storage.redirect.x"
 private const val ModuleDisplayLabel = "存储重定向X"
+private const val UnattributedSourceLabel = "未知来源"

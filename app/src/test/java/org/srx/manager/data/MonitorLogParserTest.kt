@@ -648,6 +648,48 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun labelsUnattributedIntermediateAsUnknownSource() {
+    val raw =
+        "2026-11-02 22:30:48|com.android.providers.media.module|-|MKDIR|" +
+            "/storage/emulated/0/MIUI/Mirror/MainCache|ret=0|errno=0|" +
+            "identify_method=unknown|identify_reliability=none|event_role=request|op=mkdir"
+
+    val entry = parseMonitorLogEntries(raw) { "Label:$it" }.single()
+
+    assertEquals("com.android.providers.media.module", entry.packageName)
+    assertEquals("未知来源", entry.label)
+    assertEquals("-", entry.callerPackage)
+    assertEquals("unknown", entry.identifyMethod)
+    assertEquals("none", entry.identifyReliability)
+  }
+
+  @Test
+  fun keepsResolvedLabelWhenIntermediateRecordHasCaller() {
+    val raw =
+        "2026-11-02 22:30:40|com.android.providers.media.module|com.miui.daemon|OPEN|" +
+            "/storage/emulated/0/MIUI/debug_log/powerinfo/result_reason|ret=168|errno=0|" +
+            "identify_method=caller|identify_reliability=high|event_role=request|" +
+            "op=open|op_filter=open:write|flags=0x20002|caller_uid=10000"
+
+    val entry = parseMonitorLogEntries(raw) { "Label:$it" }.single()
+
+    assertEquals("com.miui.daemon", entry.packageName)
+    assertEquals("Label:com.miui.daemon", entry.label)
+  }
+
+  @Test
+  fun labelsVendorPickerVariantsAsUnknownSource() {
+    val raw =
+        "2026-11-02 15:19:00|com.coloros.mediapicker|-|MKDIR|" +
+            "/storage/emulated/0/Download/update|ret=0|errno=0|" +
+            "identify_method=unknown|identify_reliability=none|event_role=request|op=mkdir"
+
+    val entry = parseMonitorLogEntries(raw) { "Label:$it" }.single()
+
+    assertEquals("未知来源", entry.label)
+  }
+
+  @Test
   fun parserLabelsExplicitModuleBackupExportAsModule() {
     val raw =
         listOf(

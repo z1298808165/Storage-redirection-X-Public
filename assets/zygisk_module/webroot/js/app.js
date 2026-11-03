@@ -6313,10 +6313,15 @@
       pkg,
       extras.source || "",
     );
+    const unattributedIntermediateSource =
+      !isModuleWebUiExport &&
+      isUnattributedIntermediateSource(pkg, identifyMethod, extras.identify_reliability || "");
     const appName =
       eventRole === "observation" && !isModuleWebUiExport && !attributedObservation
         ? "文件系统观察"
-        : getLogPackageLabel(pkg);
+        : unattributedIntermediateSource
+          ? "未知来源"
+          : getLogPackageLabel(pkg);
     const operationLabel = isModuleWebUiExport
       ? "export"
       : eventRole === "observation"
@@ -6341,6 +6346,8 @@
     if (extras.identify_reliability)
       meta.push("可靠性 " + formatReliability(extras.identify_reliability));
     if (eventRole === "observation") meta.unshift("文件系统观察");
+    if (unattributedIntermediateSource && processPkg)
+      meta.push("代写进程 " + getLogPackageLabel(processPkg));
     if (observerPackage && eventRole === "observation") meta.push("落盘进程 " + observerPackage);
     if (watchPkg && eventRole === "observation") meta.push("监视上下文 " + watchPkg);
     if (correlationId) meta.push("关联 " + correlationId);
@@ -7131,7 +7138,19 @@
       pkg === "com.android.externalstorage" ||
       pkg === "com.android.mtp" ||
       pkg.includes(".documentsui") ||
-      pkg.includes(".photopicker")
+      pkg.includes("photopicker") ||
+      pkg.includes("mediapicker")
+    );
+  }
+
+  // 归因不可靠、展示包又落在系统代写中间层时，不再把中间层应用当成来源。
+  // 落盘进程是 MediaProvider、相册选择器这类代写进程，直接显示它的标签会让用户
+  // 以为文件是那个系统应用写出来的（issue #2 反馈“显示为媒体选择工具”），而实际
+  // 调用方是当时在场、无法归因的第三方应用。中间层进程仍保留在详情行里。
+  function isUnattributedIntermediateSource(pkg, identifyMethod, identifyReliability) {
+    return (
+      isIntermediateLogPackage(pkg) &&
+      (identifyMethod === "unknown" || identifyReliability === "none" || !identifyReliability)
     );
   }
 

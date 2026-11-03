@@ -586,7 +586,8 @@ private fun String.isIntermediateLogPackage(): Boolean =
         this == "com.android.externalstorage" ||
         this == "com.android.mtp" ||
         contains(".documentsui") ||
-        contains(".photopicker")
+        contains("photopicker") ||
+        contains("mediapicker")
 
 private fun logIdentifyMethodText(method: String): String =
     when (method) {
