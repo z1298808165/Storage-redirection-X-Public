@@ -189,6 +189,34 @@ pub(crate) fn notify_host_unpropagate() {
     }
 }
 
+/// 把详细日志开关同步给宿主会话子进程。
+///
+/// 会话子进程在 fork 时继承当时的 `DEBUG_LOGGING_ENABLED`，运行期再改全局配置不会
+/// 传到它：用户在设置页打开「详细日志」后复现问题，会话侧的目录扫描/缓存指标与
+/// `perf_snapshot` 仍然一条不落，日志包里看不到媒体读取链路的任何耗时证据。
+/// 这里用与 'U' 相同的一次性控制消息（`V0`/`V1`）在开关变化时同步过去。
+///
+/// fire-and-forget：日志开关不参与挂载或策略判定，通知失败只影响取证粒度。
+pub(crate) fn notify_host_verbose(enabled: bool) {
+    let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
+    if fd < 0 {
+        return;
+    }
+    let payload: [u8; 2] = [b'V', if enabled { b'1' } else { b'0' }];
+    // SAFETY: fd 是本模块保存的控制端 socket，payload 在调用期间保持存活。
+    let sent = unsafe {
+        libc::send(
+            fd,
+            payload.as_ptr() as *const libc::c_void,
+            payload.len(),
+            0,
+        )
+    };
+    if sent != payload.len() as isize {
+        log::warn!("fuse host verbose notify failed sent={sent}");
+    }
+}
+
 pub fn register_app_policy(
     config: &crate::fuse_redirect::FuseRedirectConfig,
     policy_fingerprint: u64,
@@ -383,6 +411,15 @@ pub(crate) fn spawn_host_control_loop(
                 // 部署，无跨版本兼容负担。
                 if payload.first() == Some(&b'U') {
                     crate::fuse_host::unpropagate_media_realm();
+                    continue;
+                }
+                // 'V' 前缀是详细日志开关同步（见 notify_host_verbose）：会话子进程
+                // 继承的是 fork 时刻的取值，运行期只靠这条消息才能跟上设置页的开关。
+                if payload.first() == Some(&b'V') {
+                    let enabled = payload.get(1) == Some(&b'1');
+                    crate::logging::set_debug_logging_enabled(enabled);
+                    // 用 warn 记录：关闭后 info/debug 会被丢弃，这条是开关确实生效的唯一凭据。
+                    log::warn!("fuse host verbose updated enabled={}", enabled);
                     continue;
                 }
                 match serde_json::from_slice::<crate::fuse_redirect::FuseRedirectConfig>(payload) {

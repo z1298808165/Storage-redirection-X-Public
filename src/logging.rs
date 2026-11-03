@@ -66,7 +66,16 @@ impl Logger {
 }
 
 pub fn set_debug_logging_enabled(enabled: bool) {
-    DEBUG_LOGGING_ENABLED.store(enabled, Ordering::Relaxed);
+    let previous = DEBUG_LOGGING_ENABLED.swap(enabled, Ordering::Relaxed);
+    // 开关此前只作用于本进程：共享宿主会话子进程在 fork 时继承当时的取值，运行期
+    // 再开/关完全不影响它。于是「先在设置页打开详细日志，再复现问题」的操作在会话
+    // 侧没有任何效果——目录扫描耗时、目录缓存命中率与会话 perf_snapshot 全部落空，
+    // 而这正是「媒体读取慢」一类问题的唯一直接证据（2026-11-03 真机实测：开关打开
+    // 后 running.log 里 fuse_dir_cache_sample/perf_snapshot 计数仍为 0，重启 daemon
+    // 后才出现）。宿主控制 fd 不存在时（hook 进程、应用进程）这里是 no-op。
+    if previous != enabled {
+        crate::fuse_host_control::notify_host_verbose(enabled);
+    }
 }
 
 impl PrivateLogSocket {
