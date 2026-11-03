@@ -4,6 +4,7 @@ mod callbacks;
 pub(crate) mod config;
 mod helpers;
 mod inode;
+mod media_view;
 mod metadata;
 mod perf;
 mod policy;

@@ -15,21 +15,27 @@ pub const REAL_STORAGE_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp
 /// （`<anchor>/Android/...`），而整根 bind 之后还要多一层 `<user>`
 /// （`<anchor>/<user>/Android/...`），两者混用会拼出错误路径。
 pub const SYSTEM_VIEW_TMP_DIR: &str = "/data/adb/modules/storage.redirect.x/tmp/system_view";
-/// 宿主子进程命名空间内 MediaProvider FUSE 挂载的绑定视图（按用户子树挂在
-/// `tmp/fuse_host_media/<user>`）。宿主对自有 `Android/media/<pkg>` 下 sqlite 三件套的
-/// 读写经该视图进行，与其它调用方（未重定向应用、MediaProvider 自身）共享同一份内核
-/// inode 缓存，避免两层缓存各自持有不同代际导致 `SQLITE_CORRUPT`。
+/// MediaProvider FUSE 视图的**临时**挂载点目录。
+///
+/// 毒化 `-shm` 自愈需要经 MediaProvider 自己的视图删一遍文件（见
+/// `fuse_redirect::media_view`）。该视图不长期存在：每次用到时由一个一次性子进程在自己的
+/// 私有 mount namespace 里克隆当前一代的 MP 挂载到这里、删除、随即随进程消失，因此
+/// 目录本身只是一块空地，磁盘上不会留下任何跨调用的挂载状态。
 pub const FUSE_HOST_MEDIA_VIEW_DIR: &str =
     "/data/adb/modules/storage.redirect.x/tmp/fuse_host_media";
-/// 媒体视图绑定失败的退避标记：记录上次失败的 monotonic 毫秒。视图在某些环境
-/// （如 x86_64 模拟器镜像）持续不可用，没有退避会让每次应用注册都阻塞整个超时周期。
-pub const MEDIA_VIEW_BACKOFF_FILE: &str =
-    "/data/adb/modules/storage.redirect.x/logs/.media_view_backoff";
 // quality-allow(lint-suppression): 该常量保留给外部挂载状态检查与兼容脚本使用。
 #[allow(dead_code)]
 pub const REAL_STORAGE_TMP_PREFIX: &str = "/data/adb/modules/storage.redirect.x/tmp/real_storage/";
 pub const CONFIG_DIR: &str = "/data/adb/modules/storage.redirect.x/config";
 pub const RUNTIME_DISABLE_FILE: &str = "/data/adb/modules/storage.redirect.x/.runtime_disabled";
+/// 存在即整体关闭共享宿主 FUSE 会话（等价于把 `SRT_FUSE_HOST_ATTACH` 设成 `0`）。
+///
+/// 环境变量只有 daemon 及其 fork 的 worker 读得到，而设备上 daemon 由 `service.sh`
+/// 直接拉起、没有注入环境变量的地方，因此现场排障实际需要一条落盘开关：创建本文件
+/// 并重启 daemon 即可让模块彻底不建立宿主会话（应用全部回到 namespace bind），
+/// 用来做「宿主是不是故障来源」的 A/B 归因。
+pub const HOST_ATTACH_DISABLE_FILE: &str =
+    "/data/adb/modules/storage.redirect.x/.disable_fuse_host";
 pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_probe";
 /// 存在即禁用内核 FUSE passthrough（所有会话回退纯用户态读写）。
 /// 用途：OEM 内核 passthrough 实现缺陷的 A/B 定位与逃生口——实测某 ColorOS 设备

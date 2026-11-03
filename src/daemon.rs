@@ -715,8 +715,18 @@ pub fn main_entry() -> i32 {
     // 建立共享宿主 FUSE 会话。它是**唯一**的 FUSE 载体：失败只记录并继续，应用照常
     // 拿到 namespace bind 视图；后续 reconcile 会在宿主子进程死亡后按需恢复，而不是
     // 继续使用失效句柄。
+    //
+    // 接入被显式关闭时连宿主都不建立（见 `ensure_global` 的闸门说明）：这条路径必须
+    // 单独说清楚，否则日志会把「被开关关掉」和「建立失败」混成同一句 unavailable，
+    // 现场无法判断到底是能力缺失还是自己关的。
     if !crate::fuse_host::ensure_global() {
-        log::warn!("fuse host session unavailable, namespace bind remains active");
+        if crate::fuse_host::host_attach_enabled() {
+            log::warn!("fuse host session unavailable, namespace bind remains active");
+        } else {
+            log::warn!(
+                "fuse host disabled by switch env=SRT_FUSE_HOST_ATTACH, namespace bind remains active"
+            );
+        }
     } else if media_ce_storage_ready() {
         // 宿主就绪后立即全量预登记所有已配置应用：让应用冷启动时无需等待 reconcile
         // 轮询到该进程，就能从宿主快照确认 uid 并接入共享会话，避免 scoped 竞态与

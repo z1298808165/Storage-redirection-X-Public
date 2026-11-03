@@ -226,27 +226,10 @@ pub fn register_app_policy(
     if fd < 0 {
         return false;
     }
-    // 策略构造会探测宿主命名空间里的 MediaProvider FUSE 视图（自有 Android/media/<pkg>
-    // 下 sqlite 三件套统一缓存层的前置条件），因此绑定必须先于登记完成。失败不阻断：
-    // 策略探测不到视图会自动回退直连后端的既有行为。绑定平时亚秒完成，等待上限取
-    // 登记预算的一半：剩余留给后续应答等待与 scoped 回退，避免调用方（挂载子进程）
-    // 被 media 视图绑定拖过父进程 deadline 后遭到 SIGKILL。
-    let user_id = crate::platform::user_id_from_uid(config.uid);
-    let view_timeout_sec =
-        (ack_budget_ms / 2000).clamp(1, crate::fuse_host::HOST_ATTACH_TIMEOUT_SEC);
-    let view_start_ms = crate::platform::paths::monotonic_ms();
-    if !crate::fuse_host::ensure_host_media_fuse_view(user_id, view_timeout_sec) {
-        log::debug!(
-            "fuse host media view unavailable uid={} pkg={}",
-            config.uid,
-            config.package_name
-        );
-    }
-    // media 视图绑定与应答等待共享同一份预算：绑定实际消耗掉的时间必须从应答
-    // 预算里扣除，否则两段相加会把调用方（挂载子进程）拖过父进程 deadline，
-    // 子进程守卫会把它 SIGKILL，本轮挂载作废（真机 2026-10-16 开机期实测）。
-    let ack_remaining_ms = ack_budget_ms
-        .saturating_sub(crate::platform::paths::monotonic_ms().saturating_sub(view_start_ms));
+    // 登记本身只发一条控制消息并等应答，不再在调用方进程内做任何挂载/绑定的准备工作：
+    // 策略构造只读配置与账本，MediaProvider 视图按「用到时临时克隆」在自愈现场建立
+    // （见 `fuse_redirect::media_view`），因此这里不存在「绑定耗时吃掉应答预算」的问题，
+    // 预算全额留给应答等待。
     let Ok(payload) = serde_json::to_vec(config) else {
         log::warn!("fuse host policy encode failed pkg={}", config.package_name);
         return false;
@@ -281,7 +264,7 @@ pub fn register_app_policy(
         );
         return false;
     }
-    if await_policy_ack(fd, config.uid, ack_remaining_ms) {
+    if await_policy_ack(fd, config.uid, ack_budget_ms) {
         // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
         // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
         record_registered_policy(config.uid as u32, policy_fingerprint);

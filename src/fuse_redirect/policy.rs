@@ -291,15 +291,6 @@ pub(super) struct RedirectPolicy {
     // rename 会返回 ERANGE，导致依赖“写临时文件再改名”原子替换的应用安装或保存失败。
     // 私有目录本身不进 MediaStore 索引，直连 f2fs 既能绕开该缺陷又不损失系统语义。
     pub(super) private_real_root: PathBuf,
-    /// 宿主命名空间内 MediaProvider FUSE 视图根（`tmp/fuse_host_media/<user>`）。
-    ///
-    /// 自有 `Android/media/<pkg>/` 下的 sqlite 数据库与边车文件经该视图读写，与其它
-    /// 调用方（未重定向应用、MediaProvider 自身）共享同一份内核 inode 缓存：SQLite 的
-    /// WAL 依赖跨进程共享的 `-shm` mmap 与文件锁，宿主直连 f2fs 与 MediaProvider FUSE
-    /// 的内核缓存是两个互不通知的层，数据库文件删除重建后两层会各持一个代际，读取
-    /// 撕裂表现为 `SQLITE_CORRUPT`（真机实测：支付宝内 XRadiant 的 XRadiant.db）。
-    /// 为空表示宿主命名空间没有可用视图（scoped 会话、视图未绑定），保持直连行为。
-    pub(super) media_sqlite_real_root: PathBuf,
     pub(super) redirect_root: PathBuf,
     /// 重定向根的视图形态（相对存储根，如 `Android/data/<pkg>/sdcard`）。
     ///
@@ -817,7 +808,6 @@ impl RedirectPolicy {
             mount_rel,
             real_root,
             private_real_root: PathBuf::from(paths::data_media_user_root_for_current_ns(user_id)),
-            media_sqlite_real_root: media_sqlite_view_root_for_user(user_id),
             redirect_root: PathBuf::from(redirect_root_string),
             redirect_view_rel,
             own_private_roots,
@@ -1320,15 +1310,6 @@ impl RedirectPolicy {
         }
     }
 
-    /// MediaProvider FUSE 视图根（未绑定或不可用时为 `None`）。
-    ///
-    /// 不参与普通 I/O 路由，仅供毒化 shm 自愈在删除后端文件时走 view 侧 unlink，
-    /// 让 MediaProvider 显式失效自己的缓存节点。
-    pub(super) fn media_sqlite_view_root(&self) -> Option<&Path> {
-        (!self.media_sqlite_real_root.as_os_str().is_empty())
-            .then_some(self.media_sqlite_real_root.as_path())
-    }
-
     /// 自有 media sqlite `-shm` 是否必须走宿主用户态通道（禁止 passthrough backing）。
     ///
     /// `-shm` 的毒化防御（ftruncate 钳制）只覆盖 FUSE SETATTR 通道；passthrough
@@ -1788,21 +1769,6 @@ pub(super) fn real_backend_root_for_config(config: &FuseRedirectConfig, user_id:
 
 pub(super) fn real_storage_anchor_for_user(user_id: i32) -> String {
     paths::join(module_paths::REAL_STORAGE_TMP_DIR, &user_id.to_string())
-}
-
-/// 宿主命名空间内 MediaProvider FUSE 视图根；仅当视图真实可用（用户子树能枚举到
-/// Android 层，说明绑定已建立且不是空目录）时返回非空路径，否则返回空 `PathBuf`
-/// 表示保持直连 f2fs 的既有行为。
-///
-/// 探测 `Android` 子目录而不是目录本身：宿主命名空间里 `tmp/fuse_host_media/<user>`
-/// 在绑定建立前就是存在的空目录，只判目录存在会把未绑定误判为可用。
-fn media_sqlite_view_root_for_user(user_id: i32) -> PathBuf {
-    let root = PathBuf::from(module_paths::FUSE_HOST_MEDIA_VIEW_DIR).join(user_id.to_string());
-    if fs::is_directory(&paths::join(&root.to_string_lossy(), "Android")) {
-        root
-    } else {
-        PathBuf::new()
-    }
 }
 
 /// 监视记录的调用方字段解析：系统请求者归因命中时以归因身份与

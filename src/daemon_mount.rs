@@ -2256,18 +2256,19 @@ type PreRegisterFingerprint = (i32, u64, u64);
 ///
 /// reconcile 常驻循环每轮都会对运行中的配置应用调用 [`pre_register_host_policy`]，
 /// 而策略内容只随该 UID 的策略与宿主会话代际变化。稳态下逐轮全量重登记纯属浪费：每次
-/// 登记都要在 daemon 侧为 media 视图探测 fork 一个子进程，并在宿主子进程内做一次
-/// 完整的 `RedirectPolicy::new`（沙盒目录准备、规则归一化），还会把注册日志刷到
-/// 秒级轮转。指纹任一分量变化都会自然失效重登记：宿主换代（pid/start_ticks）、
-/// 策略变更（policy_fingerprint）、MediaProvider 重启（由 reconcile 显式清空本表）。
+/// 登记都会在宿主子进程内做一次完整的 `RedirectPolicy::new`（沙盒目录准备、规则
+/// 归一化）并把注册日志刷到秒级轮转。指纹任一分量变化都会自然失效重登记：宿主换代
+/// （pid/start_ticks）、策略变更（policy_fingerprint）、MediaProvider 重启（由
+/// reconcile 显式清空本表）。
 static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerprint>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// MediaProvider 进程集合变化时清空预登记指纹表。
 ///
-/// media 视图绑定指向 MediaProvider 的 FUSE 连接，其进程重启后旧连接死亡，已登记
-/// 策略里的视图根随之失效；清空指纹表让本轮预登记全量重跑，触发
-/// `ensure_host_media_fuse_view` 重新探测并重绑新连接，保留原有的自愈语义。
+/// 毒化 `-shm` 自愈需要经 MediaProvider 视图删除文件（`fuse_redirect::media_view`），
+/// 而视图按「用到时临时克隆」建立，MP 重启后下一次自愈自然克隆到新一代连接，不依赖
+/// 策略里缓存的任何视图状态；这里清空指纹表仍保留：MP 重启意味着宿主会话里该 uid 的
+/// 策略需要按最新配置重放一遍（例如新的 caller 归因与路径规则）。
 pub(crate) fn invalidate_pre_registered_host_policies() {
     if let Ok(mut registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
         registered.clear();
