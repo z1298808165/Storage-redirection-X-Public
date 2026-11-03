@@ -132,6 +132,12 @@ struct FuseState {
     path_policy_uids: HashMap<String, u32>,
     inode_policy_uids: HashMap<u64, u32>,
     inode_path_versions: HashMap<u64, u64>,
+    /// inode 级已解析后端（对齐原生 FuseDaemon 的 `node->GetIoPath()` 模型）：
+    /// lookup 解析过一次的条目把后端留在 inode 上，随后的 getattr/readlink/xattr
+    /// 直接复用，不再整条重跑策略路由。键是 inode 本身，生命周期与 inode 表一致
+    /// （rename 改写 `paths_by_inode` 后 rel 比对必然 miss，重新解析即可），因此
+    /// 不引入"路径缓存"那类陈旧语义。
+    inode_backends: HashMap<u64, InodeBackendCacheEntry>,
     lookup_counts: HashMap<u64, u64>,
     dir_entry_refs: HashMap<u64, u64>,
     files: HashMap<u64, OpenFile>,
@@ -142,6 +148,21 @@ struct FuseState {
     dir_candidate_cache_capacity: usize,
     dir_candidate_cache_max_capacity: usize,
 }
+
+/// inode 后端缓存条目：属主 uid + 解析结果。
+///
+/// 复用条件是**请求策略与登记时的属主一致**：跨进程 fd fstat（GETATTR 以他人
+/// 身份到达）的视图差异必须保留原语义，不能拿属主的后端顶替。
+#[derive(Clone)]
+struct InodeBackendCacheEntry {
+    owner_uid: u32,
+    backend: Arc<BackendPath>,
+}
+
+/// 条目上限：`ls -lR` 一万条目的遍历会把 inode 全部带进来，每条目两段路径字符串
+/// 约 300B，8192 上限即 2MB 量级；超限整体清空（与系统 uid 身份缓存同一兜底模式）。
+const INODE_BACKEND_CACHE_CAP: usize = 8192;
+static INODE_BACKEND_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 
 impl FuseState {
     fn next_handle(&mut self) -> u64 {
@@ -411,6 +432,7 @@ impl FuseRedirectFs {
                 path_policy_uids: HashMap::new(),
                 inode_policy_uids: HashMap::new(),
                 inode_path_versions: HashMap::from([(ROOT_INO, 0)]),
+                inode_backends: HashMap::new(),
                 lookup_counts: HashMap::new(),
                 dir_entry_refs: HashMap::new(),
                 files: HashMap::new(),
@@ -587,6 +609,26 @@ impl FuseRedirectFs {
         INodeNo(ino)
     }
 
+    /// 登记本 inode 最近一次解析出的后端（`reply_entry_for_rel` 在 lookup 锁内调用）。
+    fn remember_backend_for_inode_locked(
+        state: &mut FuseState,
+        ino: INodeNo,
+        policy: &RedirectPolicy,
+        backend: Arc<BackendPath>,
+    ) {
+        if ino.0 == ROOT_INO || state.inode_backends.len() >= INODE_BACKEND_CACHE_CAP {
+            // 超限整体清空：条目只是加速件，清空后下一轮 lookup 自然重建。
+            state.inode_backends.clear();
+        }
+        state.inode_backends.insert(
+            ino.0,
+            InodeBackendCacheEntry {
+                owner_uid: policy.uid as u32,
+                backend,
+            },
+        );
+    }
+
     fn add_lookup_locked(state: &mut FuseState, ino: INodeNo) {
         if ino.0 != ROOT_INO {
             let count = state.lookup_counts.entry(ino.0).or_default();
@@ -609,10 +651,40 @@ impl FuseRedirectFs {
         state.paths_by_inode.get(&ino.0).cloned()
     }
 
-    fn backend_for_ino(&self, policy: &RedirectPolicy, ino: INodeNo) -> Result<BackendPath, Errno> {
+    /// 按已解析后端回答 inode 元数据类请求。命中条件：登记属主与请求策略一致
+    /// 且 `paths_by_inode` 的 rel 未变（rename/unlink 会改写或移除该表，命中前
+    /// 必然先比对），否则退回完整路由并更新缓存。rel 比对让陈旧条目只会造成
+    /// 重复解析，永远不会给出错误后端。
+    fn backend_for_ino(
+        &self,
+        policy: &RedirectPolicy,
+        ino: INodeNo,
+    ) -> Result<Arc<BackendPath>, Errno> {
         let rel = self.path_for_ino(ino).ok_or(Errno::ENOENT)?;
+        {
+            let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+            if let Some(entry) = state.inode_backends.get(&ino.0)
+                && entry.owner_uid == policy.uid as u32
+                && entry.backend.rel == rel
+            {
+                let count = INODE_BACKEND_CACHE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
+                if count == 1 || count.is_multiple_of(8192) {
+                    // 会话侧 info 不进 running.log（宿主只转发 warn 以上），命中率
+                    // 取证用 warn 限频落盘。
+                    log::warn!(
+                        "fuse inode backend cache hit uid={} ino={} rel={} count={}",
+                        policy.uid,
+                        ino.0,
+                        rel,
+                        count
+                    );
+                }
+                return Ok(Arc::clone(&entry.backend));
+            }
+        }
         policy
             .backend_for_relative(&rel, OperationKind::Read)
+            .map(Arc::new)
             .ok_or(Errno::ENOENT)
     }
 
@@ -748,10 +820,12 @@ impl FuseRedirectFs {
             return;
         };
         let policy = &policy;
+        let backend = Arc::new(backend);
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, rel);
             Self::remember_policy_for_inode_locked(&mut state, ino, rel, policy);
+            Self::remember_backend_for_inode_locked(&mut state, ino, policy, Arc::clone(&backend));
             Self::add_lookup_locked(&mut state, ino);
             ino
         };
