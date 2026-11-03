@@ -2214,7 +2214,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
-        40 { "system uid fuse write attributed to originating service" }
+        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app" }
     }
 }
 
@@ -4372,7 +4372,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
-        40 { "system uid fuse write attributed to originating service" }
+        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app" }
     }
 }
 

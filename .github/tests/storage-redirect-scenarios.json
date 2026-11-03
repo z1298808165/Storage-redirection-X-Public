@@ -237,8 +237,8 @@
     {
       "id": 40,
       "config_mode": "auto",
-      "bash_title": "系统 uid 的 FUSE 写入按发起服务归因",
-      "powershell_title": "system uid fuse write attributed to originating service"
+      "bash_title": "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用",
+      "powershell_title": "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app"
     }
   ]
 }
