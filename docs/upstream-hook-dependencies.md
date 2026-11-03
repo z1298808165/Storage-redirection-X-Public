@@ -10,10 +10,10 @@
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-# quality-allow(chinese-language): 以下两行是 Cargo.toml 依赖声明原文，属机器解析的配置语法，改写会失去参考价值。
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "5ec71115c4b674d282f337bb7523ba66471bd98a" }
-# quality-allow(chinese-language): 同上，保留依赖声明原文以便直接比对 Cargo.toml。
-srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "e9abbd58e0c6ee459bb0f7724b896a70ece0a661" }
+# quality-allow(chinese-language): 以下两行是 Cargo.toml 依赖声明的原文，属机器解析的配置语法，改写会失去比对价值。
+srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "cb5b425353706efed5a6f99782f0d3ce3931150a" }
+# quality-allow(chinese-language): 同上，保留依赖声明原文，便于直接与 Cargo.toml 比对。
+srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 ```
 
 依赖按 `rev` 固定到具体 commit（而非跟随 `branch`），因此升级上游必须显式修改 `rev`，不会因上游推送而静默变化。
