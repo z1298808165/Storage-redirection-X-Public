@@ -3830,6 +3830,11 @@ check_health() {
 # 应用侧的真实视图只能从**应用进程自己的** /proc/<pid>/mountinfo 与场景结果文件里读，
 # 所以这里只做读取采集，不做「应用 uid 能不能访问」的主动探测。
 #
+# 补充（2026-11-03 实测）：KernelSU 真机上 `su <uid>` 同样不能当应用 uid 探针——它访问
+# /storage/emulated/0 被拒的根因是 su 丢弃补充组（FUSE 属组 everybody(9997)），不是
+# SELinux，也不要去 patch sepolicy；且它仍在 shell 的挂载命名空间里，看不到 per-app 挂载。
+# 归因排查时的正确姿势与命令见 docs/device-testing.md「KernelSU 设备上 `su <uid>` 探针被拒」小节。
+#
 # 采集范围按「能回答四个问题」取舍，且全部有界：不递归扫描、不跑 dumpsys 全量 dump。
 # (1) shell/root 与场景结果里的应用侧证据是否矛盾；(2) MediaProvider 自己看到的存储视图
 # 是什么；(3) 全局（init 命名空间）与关键进程命名空间的挂载层各是什么；(4) 目录的标签/

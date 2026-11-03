@@ -1982,6 +1982,8 @@ function Invoke-ConfigHotReloadScenario {
         # 两种形态对策完全不同：整块失效说明存储视图根在应用视野里落回了公共存储
         # （沙箱里才有的路径自然不存在）；只有映射失效则说明根仍指向沙箱、只是新加的
         # 映射挂载不可见。刻意不用 run-as：它不进入应用的挂载命名空间，量到的是 shell 视图。
+        # KernelSU 真机上 `su <uid>` 同理不可当应用 uid 探针：su 丢弃补充组（everybody）导致
+        # /storage 拒绝（非 SELinux），且不进入应用挂载命名空间；详见 docs/device-testing.md。
         $rootProbe = "$RealRoot/SrtHotRootProbe.txt"
         $rootProbePrivate = "$PrivateRoot/SrtHotRootProbe.txt"
         Invoke-Su "rm -f '$rootProbe' '$rootProbePrivate' 2>/dev/null || true" | Out-Null
@@ -4138,6 +4140,8 @@ function Invoke-ConfigHotReloadScenario {
         # 两种形态对策完全不同：整块失效说明存储视图根在应用视野里落回了公共存储
         # （沙箱里才有的路径自然不存在）；只有映射失效则说明根仍指向沙箱、只是新加的
         # 映射挂载不可见。刻意不用 run-as：它不进入应用的挂载命名空间，量到的是 shell 视图。
+        # KernelSU 真机上 `su <uid>` 同理不可当应用 uid 探针：su 丢弃补充组（everybody）导致
+        # /storage 拒绝（非 SELinux），且不进入应用挂载命名空间；详见 docs/device-testing.md。
         $rootProbe = "$RealRoot/SrtHotRootProbe.txt"
         $rootProbePrivate = "$PrivateRoot/SrtHotRootProbe.txt"
         Invoke-Su "rm -f '$rootProbe' '$rootProbePrivate' 2>/dev/null || true" | Out-Null
