@@ -2629,7 +2629,8 @@ run_app_caller_media_provider_attribution_scenario() {
   # 丢弃回退为提供器标签。引擎侧补强（caller_uid 反查）与显示层补强已落地，
   # 本场景在宿主（HyperOS/duchamp）上固化「归因成功」形态，防止链路回归。
   # 判定标记：
-  #   通过：file_monitor.log 出现 |com.android.providers.media.module|$APP_ID|OPEN|
+  #   通过：file_monitor.log 出现 |<提供器进程>|$APP_ID|OPEN|（提供器进程兼容
+  #         com.android / com.google.android 两种 media.module 变体）
   #         且 identify_method=caller、identify_reliability=high 的成功记录。
   #   回归：记录缺失，或身份退化为 unknown / 无点 basename（归因链断裂）。
   local label="mp-caller-attribution"
@@ -2644,11 +2645,14 @@ run_app_caller_media_provider_attribution_scenario() {
   fi
   # 轮询监视记录：归因链贯通时记录应在创建后数秒内出现；只认「提供器进程 +
   # 发起应用包名身份 + caller/high」的组合，pending 中间形态与 unknown 一律
-  # 不算通过。
+  # 不算通过。提供器进程名兼容 AOSP 与 Google 镜像两种变体
+  # （`com.android.providers.media.module` / `com.google.android.providers.media.module`，
+  # CI 模拟器为后者，HyperOS 真机为前者）。
   local poll=0
   local found=0
+  local mp_proc_re='\|(com|com\.google)\.android\.providers\.media\.module\|'
   while [ "$poll" -lt 10 ]; do
-    if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -Fv -- 'ret=-1' | grep -F -- '|com.android.providers.media.module|$APP_ID|OPEN|' | grep -F -- 'identify_method=caller|identify_reliability=high'" >/dev/null; then
+    if adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -Fv -- 'ret=-1' | grep -E -- '${mp_proc_re}${APP_ID}\|OPEN\|' | grep -F -- 'identify_method=caller|identify_reliability=high'" >/dev/null; then
       found=1
       break
     fi
@@ -2661,7 +2665,7 @@ run_app_caller_media_provider_attribution_scenario() {
     return 1
   fi
   echo "step 5/7 内: 应用发起 MP 中转创建归因确认"
-  adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -F -- '|com.android.providers.media.module|$APP_ID|' | tail -2" || true
+  adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E -- '${mp_proc_re}${APP_ID}\|' | tail -2" || true
   adb_su "rm -f '${BACKEND_ROOT}/Download/$file_name' '${BACKEND_ROOT}/Download/'.pending-*-$file_name" >/dev/null
   return 0
 }
