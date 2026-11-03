@@ -193,6 +193,11 @@ struct BackendDecision {
     /// 此时 backend 必须落到该应用私有 sdcard 沙盒根，否则 native 层创建会
     /// 绕过沙盒直落真实路径（2026-10-21 用户反馈的 .xlDownload 侧漏）。
     is_sandbox: bool,
+    /// 本应用经自身映射命中的目标路径（未命中为 `None`）。
+    ///
+    /// 决策阶段已算出该值，调用方直接复用：`resolve_mapping` 要遍历全部映射并逐条
+    /// 做前缀匹配，此前一次路由里会被调用三次（只读判定、命中判定、后端解析各一次）。
+    own_mapping_target: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -225,10 +230,28 @@ impl RuleIndex {
             .any(|rule| paths::matches(rule, storage_path, true))
     }
 
+    /// 精确规则命中判定：沿祖先链逐层回溯，命中任一层即算命中。
+    ///
+    /// `matches_any` 在单次请求里会被调用六到八次（只读、排除、沙箱、放行各一套索引），
+    /// 而目录扫描还要按条目数再乘一遍。此前每回溯一层都调用一次 `paths::match_key`
+    /// （`to_ascii_lowercase` 分配），一条深层相册路径要分配十几次；这里改为整条路径
+    /// 只小写化一次，回溯阶段全部在切片上完成。纯 ASCII 小写路径直接跳过这次分配。
     fn matches_exact(&self, storage_path: &str) -> bool {
-        let mut candidate = storage_path.trim_end_matches('/');
+        if self.exact.is_empty() {
+            return false;
+        }
+        let trimmed = storage_path.trim_end_matches('/');
+        if !trimmed.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return self.matches_exact_lowered(trimmed);
+        }
+        let lowered = paths::match_key(trimmed);
+        self.matches_exact_lowered(&lowered)
+    }
+
+    fn matches_exact_lowered(&self, lowered_path: &str) -> bool {
+        let mut candidate = lowered_path;
         loop {
-            if self.exact.contains(&paths::match_key(candidate)) {
+            if self.exact.contains(candidate) {
                 return true;
             }
             let Some(separator) = candidate.rfind('/') else {
@@ -285,6 +308,17 @@ pub(super) struct RedirectPolicy {
     /// ENAMETOOLONG）。`backend_for_relative` 用它把再进入路径折叠回根下解析。
     /// 直通/监视会话的重定向根就是存储根，此处为空串，不折叠。
     pub(super) redirect_view_rel: String,
+    /// 本应用自有私有目录（`Android/data|media|obb/<pkg>`）的规则形态，构造期算好。
+    ///
+    /// `is_own_private_storage_path` 在每次只读路由里被调用两到三次，目录扫描还要
+    /// 按条目数再乘一遍；若在判定里 `format!` 出这三条前缀，一个深层目录项就要多出
+    /// 三次字符串分配。规则由包名决定、策略建成后即为常量，因此上移到构造期。
+    own_private_roots: [String; 3],
+    /// 公共后端根的三族形态（`/data/media/<user>`、`tmp/real_storage/<user>`、
+    /// `real_root` 锚点），供 `is_shared_public_backend_path` 判定归属。
+    ///
+    /// 同样与请求无关，构造期算好可免去每次判定里的 `format!` 与 `to_string_lossy`。
+    shared_public_roots: [String; 3],
     pub(super) rule_prefixes: Vec<RulePrefix>,
     pub(super) allowed_real_paths: Vec<String>,
     pub(super) read_only_paths: Vec<String>,
@@ -743,6 +777,17 @@ impl RedirectPolicy {
         let sandboxed_excluded_index = RuleIndex::new(&sandboxed_excluded_paths);
         let read_only_index = RuleIndex::new(&read_only_paths);
         let read_only_excluded_index = RuleIndex::new(&read_only_excluded_paths);
+        // 判定期常量上移（见字段文档）：这两组根与请求无关，只在策略建成时算一次。
+        let own_private_roots = [
+            format!("Android/data/{}", config.package_name),
+            format!("Android/media/{}", config.package_name),
+            format!("Android/obb/{}", config.package_name),
+        ];
+        let shared_public_roots = [
+            paths::data_media_user_root_for_user(user_id),
+            real_storage_anchor_for_user(user_id),
+            real_root.to_string_lossy().to_string(),
+        ];
 
         Some(Self {
             package_name: config.package_name,
@@ -755,6 +800,8 @@ impl RedirectPolicy {
             media_sqlite_real_root: media_sqlite_view_root_for_user(user_id),
             redirect_root: PathBuf::from(redirect_root_string),
             redirect_view_rel,
+            own_private_roots,
+            shared_public_roots,
             sandbox_backend_root,
             rule_prefixes,
             allowed_real_paths,
@@ -826,7 +873,7 @@ impl RedirectPolicy {
         let storage_path = self.storage_path_for_rel(&rel);
         let resolved_storage_path = paths::normalize(&storage_path);
         let decision = self.backend_decision(&resolved_storage_path, operation);
-        let own_mapping_target = self.resolve_mapping(&resolved_storage_path);
+        let own_mapping_target = decision.own_mapping_target.as_deref();
         if own_mapping_target.is_some() {
             // 本应用经自身映射访问了该视图路径：登记交接信号。应用随后通过
             // FileProvider 等机制把该路径交给其它应用时，对方会话可以据此在
@@ -999,15 +1046,15 @@ impl RedirectPolicy {
         ))
     }
 
-    fn is_read_only(&self, storage_path: &str) -> bool {
-        if let Some(mapped_target) = self.resolve_mapping(storage_path) {
-            if self.matches_any(&self.excluded_real_index, &mapped_target) {
+    fn is_read_only(&self, storage_path: &str, mapped_target: Option<&str>) -> bool {
+        if let Some(mapped_target) = mapped_target {
+            if self.matches_any(&self.excluded_real_index, mapped_target) {
                 return false;
             }
-            if self.matches_any(&self.read_only_excluded_index, &mapped_target) {
+            if self.matches_any(&self.read_only_excluded_index, mapped_target) {
                 return false;
             }
-            return self.matches_any(&self.read_only_index, &mapped_target);
+            return self.matches_any(&self.read_only_index, mapped_target);
         }
         if self.matches_any(&self.excluded_real_index, storage_path) {
             return false;
@@ -1028,8 +1075,10 @@ impl RedirectPolicy {
     }
 
     fn backend_decision(&self, storage_path: &str, operation: OperationKind) -> BackendDecision {
-        let is_read_only = self.is_read_only(storage_path);
-        let mapping_hit = self.resolve_mapping(storage_path).is_some();
+        // 映射解析只做一次：只读判定、沙盒优先级、后端解析三处都要用同一结果。
+        let own_mapping_target = self.resolve_mapping(storage_path);
+        let is_read_only = self.is_read_only(storage_path, own_mapping_target.as_deref());
+        let mapping_hit = own_mapping_target.is_some();
         // sandboxed_paths 优先于监视/直通会话短路：系统代写组件（共享 media uid
         // 等监视会话）对配置沙盒路径的访问也必须重定向进私有沙盒，否则 native
         // 层创建会绕过沙盒直落真实路径。命中与排除的判定口径与下方
@@ -1077,6 +1126,7 @@ impl RedirectPolicy {
             kind,
             is_read_only,
             is_sandbox,
+            own_mapping_target,
         }
     }
 
@@ -1098,12 +1148,7 @@ impl RedirectPolicy {
         let Some(relative) = paths::relative_child_path(storage_path, &self.storage_root) else {
             return false;
         };
-        let private_roots = [
-            format!("Android/data/{}", self.package_name),
-            format!("Android/media/{}", self.package_name),
-            format!("Android/obb/{}", self.package_name),
-        ];
-        private_roots
+        self.own_private_roots
             .iter()
             .any(|root| paths::matches(root, relative, true))
     }
@@ -1577,7 +1622,6 @@ impl RedirectPolicy {
     }
 
     pub(super) fn is_shared_public_backend_path(&self, path: &Path) -> bool {
-        let path = path.to_string_lossy();
         // 后端根有三族形态，必须全部识别，否则该路径上的新建条目会走透传分支、
         // 以请求者身份（宿主会话里是 root）落盘，后续应用访问被 DAC 拒绝：
         // - `/data/media/<user>`：daemon/scoped 会话的直连根；
@@ -1585,14 +1629,15 @@ impl RedirectPolicy {
         // - `real_media_anchor/<user>`：宿主会话的 f2fs 锚点（`real_root` 本体）。
         // 真机 2026-11-01 duchamp 实证：宿主会话经锚点创建公共文件后 uid=0 gid=1023
         // mode=600，应用 stat 得 EACCES、createNewFile 报 EEXIST（场景 5→6 连跑）。
-        let real_root = self.real_root.to_string_lossy();
-        let relative =
-            paths::relative_child_path(&path, &paths::data_media_user_root_for_user(self.user_id))
-                .or_else(|| {
-                    paths::relative_child_path(&path, &real_storage_anchor_for_user(self.user_id))
-                })
-                .or_else(|| paths::relative_child_path(&path, &real_root));
-        let Some(relative) = relative else {
+        //
+        // 三族根与请求无关，构造期已算好（`shared_public_roots`），判定里不再拼接。
+        // 合法 UTF-8 路径下 `to_string_lossy` 不分配，非 UTF-8 仍沿用原打散策略。
+        let path = path.to_string_lossy();
+        let Some(relative) = self
+            .shared_public_roots
+            .iter()
+            .find_map(|root| paths::relative_child_path(&path, root))
+        else {
             return false;
         };
         !is_android_app_private_relative_path(relative)

@@ -1982,13 +1982,12 @@ fn collect_dir_entry_candidates(
         &mut seen,
         &mut sources,
     );
+    // 目录的存储路径与映射规则无关：循环内逐条重算会给每个映射多拼一次字符串。
+    let storage_path = policy.storage_path_for_rel(rel);
     for mapping in &policy.path_mappings {
-        if paths::matches(
-            &mapping.request_path,
-            &policy.storage_path_for_rel(rel),
-            true,
-        ) && let Some(target_rel) =
-            paths::relative_child_path(&mapping.final_path, &policy.storage_root)
+        if paths::matches(&mapping.request_path, &storage_path, true)
+            && let Some(target_rel) =
+                paths::relative_child_path(&mapping.final_path, &policy.storage_root)
         {
             append_backend_dir_entries(
                 policy,
