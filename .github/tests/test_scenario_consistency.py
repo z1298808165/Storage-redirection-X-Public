@@ -197,7 +197,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         decision = section(policy, "fn backend_decision(", "fn matches_any(")
         # 用户显式映射仍由路径映射分支优先处理，自有目录的默认行为才是 Real。
-        self.assertIn("self.resolve_mapping(storage_path).is_some()", decision)
+        # 映射解析在函数入口只做一次（路由热路径去重），其命中结果以 mapping_hit
+        # 参与 Real 分支判定，语义与逐处内联 resolve_mapping(...).is_some() 等价。
+        self.assertIn("let own_mapping_target = self.resolve_mapping(storage_path);", decision)
+        self.assertIn("own_mapping_target.is_some()", decision)
+        self.assertIn("|| mapping_hit", decision)
         self.assertIn("self.is_own_private_storage_path(storage_path)", decision)
 
     def test_monitor_only_heals_cross_owner_sqlite_sidecars(self) -> None:
