@@ -592,3 +592,27 @@ adb -s $Serial logcat -d -s SRX StorageRedirect | findstr /i "<package> MediaPro
 ```
 
 如果目标配置里存在 `allowed_real_paths`，例如 `DCIM`、`Pictures`、`Android`，看到或写入这些路径是符合配置的，不应误判为 MediaProvider hook 失败。
+
+### KernelSU 设备上 `su <uid>` 探针被拒：先查补充组，不是 SELinux
+
+**现象**：KernelSU 真机上执行 `su 10371 sh -c 'ls /storage/emulated/0'`（10371 为测试 APP 的 uid）报 `Permission denied`，容易误判为「ksu 域不能切到应用域」的 SELinux 拦截，进而想去 patch sepolicy。
+
+**实测归因**（2026-11-03，Android 16 KernelSU 真机，测试 APP uid=10371）：
+
+- `su 10371 id` 本身成功，uid/gid 正确，上下文保持 `u:r:ksu:s0`，不做域切换；`dmesg` 中没有任何 ksu 相关 AVC。
+- `/data/data/me.fakerqu.test.storageredirect` 可以正常读写（ksu 域放行 + DAC uid 匹配）。
+- 真正的拒绝点在 DAC：`/storage/emulated/0` 是 MediaProvider FUSE，属组 `everybody(9997)`、模式 `drwxrws---`；真实应用进程的补充组包含 `9997`（见 `/proc/<pid>/status` 的 `Groups` 行），而 `su <uid>` 默认丢弃全部补充组，只保留主组，于是被拒。
+
+**解法**：不需要改任何 sepolicy，用 ksud su 的 `-g`/`-G` 把应用进程的组补回来即可：
+
+```powershell
+# 一次性质询组列表（以设备上实际值为准，随应用权限变化）
+adb -s $Serial shell "su 0 sh -c 'grep Groups /proc/$(pidof me.fakerqu.test.storageredirect)/status'"
+
+# 带 -Z 时连 SELinux 上下文（含 MLS 类别）都对齐真实应用进程；上下文取自 /proc/<pid>/attr/current
+adb -s $Serial shell "su 10371 -Z 'u:r:untrusted_app_32:s0:c115,c257,c512,c768' -g 10371 -G 9997 -G 3003 -G 20371 -G 50371 -G 99909997 sh -c 'id; ls /storage/emulated/0'"
+```
+
+注意 `-Z` 不带 MLS 类别时（如 `u:r:untrusted_app_32:s0`），访问 `/data/data/<pkg>` 会被 mlsconstrain 拦；要么带完整类别，要么干脆留在 ksu 域。
+
+**明确的能力边界**：探针进程运行在 adb shell 的挂载命名空间里，看不到模块注入应用进程的 per-app 挂载/FUSE 会话，因此**不能用它验证重定向落点或只读拦截**——这些仍以场景脚本的 root 视角、测试 APP 结果文件和 `/proc/<pid>/mountinfo` 为准（见 `run-storage-redirect-scenarios.sh` 顶部关于 `run-as` 探针的注释，结论同样适用于本节）。它只适合验证「默认视图下 uid/组/SELinux 层面的访问控制」，例如归因某个 EACCES 是否与模块无关。
