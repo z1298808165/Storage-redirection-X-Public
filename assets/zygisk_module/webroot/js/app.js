@@ -728,7 +728,10 @@
       if (page === "dashboard") refreshDashboardCounts({ force: true });
       return;
     }
-    routeTo(page, { prioritizeNav: true });
+    // 顶级标签页之间切换不产生可回退的历史：没进二级页面时，系统返回应当一步
+    // 退出 WebUI 回到模块页面，而不是逐个退回访问过的标签页（issue #2 反馈）。
+    // 二级页面（应用配置、主题、关于、更新）仍按 push 进入，返回键逐级回退。
+    routeTo(page, { prioritizeNav: true, replaceHistory: true });
   }
 
   function initNav() {
