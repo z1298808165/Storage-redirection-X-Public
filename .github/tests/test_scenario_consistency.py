@@ -186,7 +186,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         backend = section(
             policy,
             "fn real_backend_root_for_storage_rel(",
-            "/// MediaProvider FUSE 视图根",
+            "/// 自有 media sqlite `-shm` 是否必须走宿主用户态通道",
         )
         # 自有 Android 私有目录必须从首次创建起固定使用真实存储根，不能按数据库族
         # 是否存在或 MediaProvider 视图状态在真实根与其它后端之间切换。
@@ -203,6 +203,51 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("own_mapping_target.is_some()", decision)
         self.assertIn("|| mapping_hit", decision)
         self.assertIn("self.is_own_private_storage_path(storage_path)", decision)
+
+    def test_media_view_never_outlives_the_deletion(self) -> None:
+        # 宿主对 MediaProvider 视图的唯一用途是「毒化 -shm 自愈时经 MP 删一遍文件」。
+        # 历史实现把它做成宿主命名空间里的长期绑定，由此生出两个根问题：①MP 重启 /
+        # `vold volume abort_fuse` 后宿主命名空间（建会话时已 MS_REC|MS_PRIVATE）收不到
+        # 新挂载，克隆永远停在旧连接上；②旧连接是「挂载记录还在、无人应答」形态，任何经
+        # 它的 syscall 会无限期挂在 FUSE 队列里——而这条路径在 FUSE LOOKUP 回调中，
+        # 挂住一个就是永久失去一个 worker。所以视图必须是**一次性**的：每次自愈现克隆、
+        # 用完随子进程命名空间一起消失；并且调用方必须有界等待。
+        media_view = read("src/fuse_redirect/media_view.rs")
+        self.assertIn("pub(crate) fn unlink_relative(", media_view)
+        # 一次性：进 init 命名空间（唯一保证是当前一代）→ 私有副本 → 克隆 → 删除。
+        self.assertIn('c"/proc/1/ns/mnt"', media_view)
+        self.assertIn("libc::unshare(libc::CLONE_NEWNS)", media_view)
+        self.assertIn("libc::SYS_open_tree", media_view)
+        self.assertIn("libc::SYS_move_mount", media_view)
+        # 有界：等内核退出事件（pidfd + poll），不是定时轮询；超时必须 SIGKILL。
+        self.assertIn("libc::SYS_pidfd_open", media_view)
+        self.assertIn("libc::poll(", media_view)
+        self.assertIn("libc::SIGKILL", media_view)
+        # 不得再出现「整会话失效标记」这类长生命周期状态：视图按次重建即是自愈，
+        # 一旦留下会话级毒化标记，MP 恢复后本代宿主再也用不上视图。
+        self.assertNotIn("VIEW_UNUSABLE", media_view)
+        self.assertNotIn("is_usable", media_view)
+
+        # 长生命周期绑定必须整条移除：策略里不再缓存视图根，宿主模块不再有绑定函数，
+        # 登记路径也不再做绑定准备（否则又会在调用方进程内阻塞）。
+        policy = read("src/fuse_redirect/policy.rs")
+        self.assertNotIn("media_sqlite_real_root", policy)
+        self.assertNotIn("media_sqlite_view_root", policy)
+        host = read_fuse_host_module()
+        self.assertNotIn("ensure_host_media_fuse_view", host)
+        self.assertNotIn("FUSE_HOST_MEDIA_VIEW_DIR.join", policy)
+
+        callbacks = read("src/fuse_redirect/callbacks.rs")
+        self.assertIn("super::media_view::unlink_relative(user_id, rel)", callbacks)
+        heal = section(
+            callbacks,
+            "fn heal_poisoned_sqlite_shm_backend(",
+            "fn sqlite_sidecar_wal_path(",
+        )
+        # 视图侧删除不得在回调里直接 unlinkat（那条路径等不起停摆的连接）；f2fs 直删
+        # 兜底保留，它是毒化数据消失的最终保证。
+        self.assertNotIn("c_view", heal)
+        self.assertIn("libc::SYS_unlinkat", heal)
 
     def test_monitor_only_heals_cross_owner_sqlite_sidecars(self) -> None:
         policy = read("src/fuse_redirect/policy.rs")
@@ -958,9 +1003,21 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("if!host_attach_enabled(){", gate)
         # 开关方向必须与目标形态一致：只有显式写成关闭取值才关闭，未设置即接入。
         switch = section(host, "fn host_attach_enabled() -> bool", "/// 共享宿主会话当前")
-        self.assertIn('"0"|"false"|"no"|"off"', "".join(switch.split()))
-        self.assertIn("!disabled", switch)
-        self.assertNotIn('"1"|"true"|"yes"', "".join(switch.split()))
+        compact_switch = "".join(switch.split())
+        self.assertIn('"0"|"false"|"no"|"off"', compact_switch)
+        self.assertIn("!disabled", compact_switch)
+        self.assertNotIn('"1"|"true"|"yes"', compact_switch)
+        # 开关必须覆盖宿主的**全部**使用路径，而不只是应用接入：宿主会话建立与外部
+        # abort 兜底监控只要漏掉一处，「关闭接入」就变成假关闭——宿主照样建立、照样
+        # 换代，每次换代仍会给已附着命名空间留下死挂载层，设备侧用它做 A/B 归因时
+        # 看到的现象与开启时没有差别。
+        self.assertIn("HOST_ATTACH_DISABLE_FILE", compact_switch)
+        ensure = section(host, "pub fn ensure_global() -> bool", "/// 等待宿主会话就绪的预算")
+        self.assertIn("if!host_attach_enabled(){", "".join(ensure.split()))
+        monitor = section(
+            host, "pub fn spawn_external_abort_monitor()", "fn external_abort_monitor_main("
+        )
+        self.assertIn("if!host_attach_enabled(){", "".join(monitor.split()))
         self.assertIn(
             "paths::normalize_syntax(mount_root)==paths::normalize_syntax(&view_root)", gate
         )
@@ -991,9 +1048,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         # 登记必须有应答：只按 `send` 是否成功判断，会让应用在策略尚未进宿主会话时接入，
         # 结果是整片 ENOENT（未登记即拒绝）。应答带 uid，因为控制通道被所有挂载 worker 共用；
-        # 等待受 ack 预算约束（按父进程 deadline 派生的 ack_remaining_ms），不无界阻塞。
+        # 等待受 ack 预算约束（全额用于应答等待：登记不再做任何挂载/视图绑定准备，
+        # 因此没有需要先从预算里扣除的前置耗时），不无界阻塞。
         self.assertIn("fn await_policy_ack(", host)
-        self.assertIn("await_policy_ack(fd, config.uid, ack_remaining_ms)", host)
+        self.assertIn("await_policy_ack(fd, config.uid, ack_budget_ms)", host)
         ack = section(host, "fn await_policy_ack(", "/// 把某个应用的策略登记到共享宿主会话")
         self.assertIn("if ack_uid != uid {", ack)
 
