@@ -35,6 +35,18 @@
 | `row rewrite reason=rewrite` | cursor 行路径被重写（目标存在） |
 | `row rewrite reason=rewrite_pending` | cursor 行路径被重写（目标不存在，pending 记录） |
 
+## 文件监视归因
+
+监视记录的第一列应用名来自归因结果，不是"落盘进程"。系统代写链路（MediaProvider、相册选择器、DocumentsUI 等）会以自身进程完成落盘，因此记录里的进程字段常常是这些系统组件，而真正的调用方要靠 `identify_method` / `identify_reliability` 判断：
+
+| 情况 | 显示 |
+|------|------|
+| `identify_method=caller` / `provider_open` / `provider_mkdir` 等直接信号 | 具体调用方应用名，详情行给出识别方式 |
+| `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行给出"代写进程 <包名>" |
+| 文件系统观察类记录（inotify 侧） | 显示"文件系统观察"，观察器与实际落盘进程分开列出 |
+
+"未知来源"表示这次写入确实无法归因到具体应用：典型来源是经 MediaProvider 中转、调用方信号已经失效的写入（系统后台创建的目录），以及 root 文件管理器绕过 FUSE 直接落盘的写入。它不是"没有记录"，路径、进程与结果仍然完整，可据此对照 `running.log` 与 `file_monitor.log` 定位。
+
 ## MediaStore 查询排障
 
 图库类 APP 看到真实相册时，不要只看目标 APP 自身是否已经 mount 到沙盒。相册、缩略图和计数常来自 `com.android.providers.media.module` 的 MediaStore 查询结果。
