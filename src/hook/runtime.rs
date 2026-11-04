@@ -285,12 +285,14 @@ fn fix_system_writer_mapping_target_access(path: &str) {
         return;
     }
     let mode = (st.st_mode as mode_t) & 0o7777;
-    // 对齐系统视图自己的创建口径（AOSP `pf_create`：`(mode & ~0777) | 0664`）：
-    // 组读写 + 其它只读。QQ 等调用方随后要继续经系统代写链路写同一文件，靠的是
-    // **组写**（代写进程在 media_rw/ext_data_rw 组里）；此前这里补的是 `0o006`
-    // （组写 + 其它读写），比原生多给了所有主体**写**权限——那是本模块自己发明的
-    // 放宽，原生视图从不这样放权，其它场景会不会因此出问题无从判断，故收回。
-    let required = mode | 0o064;
+    // 映射目标常由 MediaProvider 以 `media_rw:media_rw 0660/0664` 创建，属主不是
+    // 应用。namespace bind 形态下没有 MP 代做 I/O，后续访问的 DAC 检查落在调用方
+    // 自己身上：映射属主应用经系统代写链路续写同一文件（2026-11-01 场景 5/6 实证：
+    // 0600 会让应用读不到自己刚写的文件），以及另一个映射到同一公共目标的应用经
+    // 自己的别名写入——两者都既非属主、也不在 media_rw 组，只能靠 **other 读写位**。
+    // 这里补的是 `0o006`（组写 + 其它读写），不是创建口径、不能按原生 0664 收敛成
+    // 其它只读：那会把跨应用共享映射目标的写入直接打成 EACCES。
+    let required = mode | 0o006;
     // SAFETY: c_path 仍在本地作用域内有效，required 仅包含文件权限位。
     if required != mode && unsafe { libc::chmod(c_path.as_ptr(), required) } == 0 {
         log::debug!(
