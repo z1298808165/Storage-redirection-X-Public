@@ -86,13 +86,25 @@ pub(super) fn apply_create_metadata(path: &Path, metadata: CreateMetadata) -> Re
             failed = Some(errno_from_code(last_errno()));
         }
     }
+    // 符号链接绝不能走 `set_permissions`：`std::fs::set_permissions` 跟随链接，
+    // 会把 mode 打到**目标文件**上（例如链接到公共照片时就地改掉别人文件的权限），
+    // 而 Linux 没有 lchmod，`fchmodat(AT_SYMLINK_NOFOLLOW)` 恒 ENOTSUP。链接自身
+    // 没有可用的 mode 语义，跳过即可。
     if metadata.rewrite_mode
+        && !is_symlink(path)
         && let Err(error) =
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(metadata.mode))
     {
         failed.get_or_insert_with(|| errno_from_io(error));
     }
     failed.map_or(Ok(()), Err)
+}
+
+/// 路径本身是否为符号链接（不跟随）。
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 pub(super) fn fix_existing_path_metadata(
