@@ -1028,6 +1028,12 @@ fn create_parent_dirs_recursive_until(
     let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
     let ret = unsafe { libc::fstatat(AT_FDCWD, c_parent.as_ptr(), st.as_mut_ptr(), 0) };
     if ret == 0 {
+        // 父目录存在即意味着整条祖先链都在（目录不可能凭空挂在缺失的父级下），
+        // 唯一还需要往上走的原因是把祖先的元数据也归一。元数据修复关闭时这是纯开销：
+        // 原生写路径只创建缺失目录，不会回头治理已存在的父级。
+        if !crate::metadata_repair::enabled() {
+            return;
+        }
         create_parent_dirs_recursive_until(&parent, stop_dir, mode, owner);
         normalize_redirect_dir_metadata(&parent, mode, owner);
         return;

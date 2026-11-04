@@ -217,9 +217,11 @@ pub(crate) fn notify_host_verbose(enabled: bool) {
     }
 }
 
-pub fn register_app_policy(
+/// 构造策略消息、发给宿主会话并等待应答。
+///
+/// 返回 `true` 表示宿主会话已按该消息建好策略（收到应答），而不是"数据已发出"。
+fn send_policy_config(
     config: &crate::fuse_redirect::FuseRedirectConfig,
-    policy_fingerprint: u64,
     ack_budget_ms: i64,
 ) -> bool {
     let fd = HOST_CONTROL_FD.load(Ordering::Relaxed);
@@ -264,14 +266,44 @@ pub fn register_app_policy(
         );
         return false;
     }
-    if await_policy_ack(fd, config.uid, ack_budget_ms) {
-        // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
-        // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
-        record_registered_policy(config.uid as u32, policy_fingerprint);
-        true
-    } else {
-        false
+    await_policy_ack(fd, config.uid, ack_budget_ms)
+}
+
+pub fn register_app_policy(
+    config: &crate::fuse_redirect::FuseRedirectConfig,
+    policy_fingerprint: u64,
+    ack_budget_ms: i64,
+) -> bool {
+    if !send_policy_config(config, ack_budget_ms) {
+        return false;
     }
+    // 登记结果必须同步进快照：companion 据此判断"我的 uid 已登记"才敢接入，
+    // 否则未登记 uid 的请求会被宿主 fail-closed 拒绝（整片 ENOENT）。
+    record_registered_policy(config.uid as u32, policy_fingerprint);
+    true
+}
+
+/// 只登记应用 mount namespace 维度的策略，不写按 uid 表。
+///
+/// 命名空间策略按**进程实例**绑定（namespace dev+ino），而按 uid 的幂等指纹刻意不含
+/// 应用 pid：应用重启后 namespace 是一个新 inode，旧条目对新进程无效，但按 uid 的
+/// 指纹仍然命中，于是「已登记」的结论把这个变化盖住了。此后该 namespace 里的 root
+/// 调用方（挂载子进程、MediaProvider 的 root 线程）请求会落进 namespace miss +
+/// deny_all 回退，表现为整片 ENOENT——自有私有目录恢复窗口的失败正是这个形态。
+/// 因此调用方在按 uid 的幂等判断**之前**先用这里补登一次 namespace。
+///
+/// 不更新宿主快照：本次只写了 namespace 表，按 uid 的就绪状态未变；若据此标记
+/// 已登记，companion 会在 uid 表仍为空时接入（整片 ENOENT）。
+// quality-allow(lint-suppression): 调用方在 bin 侧 daemon_mount（预登记前补登 namespace），
+// lib 视角无调用者；与 `register_app_policy` 共用同一条策略消息，不拆分。
+#[allow(dead_code)]
+pub fn register_app_namespace_only(
+    config: &crate::fuse_redirect::FuseRedirectConfig,
+    ack_budget_ms: i64,
+) -> bool {
+    let mut config = config.clone();
+    config.namespace_policy_only = true;
+    send_policy_config(&config, ack_budget_ms)
 }
 
 /// 把 daemon 自身的 mount namespace 登记为共享宿主的直通策略（仅 namespace 维度）。
@@ -320,46 +352,8 @@ pub fn register_daemon_namespace_passthrough() -> bool {
         is_passthrough_host: true,
         namespace_policy_only: true,
     };
-    let Ok(payload) = serde_json::to_vec(&config) else {
-        log::warn!("daemon namespace passthrough encode failed");
-        return false;
-    };
-    if payload.len() > HOST_CONTROL_PAYLOAD_LIMIT {
-        log::warn!(
-            "daemon namespace passthrough payload too large bytes={} limit={}",
-            payload.len(),
-            HOST_CONTROL_PAYLOAD_LIMIT
-        );
-        return false;
-    }
-    // SAFETY: fd 是本模块保存的控制端 socket，payload 在调用期间保持存活。
-    let sent = unsafe {
-        libc::send(
-            fd,
-            payload.as_ptr() as *const libc::c_void,
-            payload.len(),
-            0,
-        )
-    };
-    if sent != payload.len() as isize {
-        let errno = crate::platform::errno::last();
-        log::warn!(
-            "daemon namespace passthrough send failed sent={} bytes={} errno={} {}",
-            sent,
-            payload.len(),
-            errno,
-            crate::platform::errno::text(errno)
-        );
-        return false;
-    }
     // daemon 常驻路径，不在挂载 worker 的父进程等待预算内，用最坏值即可。
-    let registered = await_policy_ack(fd, 0, HOST_POLICY_ACK_BUDGET_MAX_MS);
-    if registered {
-        log::info!("daemon namespace passthrough registered pid={}", daemon_pid);
-    } else {
-        log::warn!("daemon namespace passthrough rejected pid={}", daemon_pid);
-    }
-    registered
+    send_policy_config(&config, HOST_POLICY_ACK_BUDGET_MAX_MS)
 }
 
 /// 在宿主会话内启动按 uid 策略控制通道的读取循环。

@@ -244,7 +244,11 @@ where
 
     let call_target =
         OpenCallTarget::for_open(pathname, final_path.as_ref(), is_relative, is_redirected);
-    let existed_before = std::path::Path::new(final_path.as_ref()).exists();
+    // 「打开前是否已存在」只用于文件监视记录（record_open_result 在监视关闭时立即返回）。
+    // 监视关闭时不做这次 stat：它走应用视图里的 FUSE 路径，每次 open 都要付一次往返，
+    // 而原生 open 不做任何额外的存在性查询。
+    let existed_before =
+        hub.is_monitor_enabled() && std::path::Path::new(final_path.as_ref()).exists();
     let mut result = call_original(call_target.path);
     let mut error_no = runtime::errno_for_result(result);
 
@@ -350,7 +354,11 @@ where
         should_call_with_absolute = is_relative;
     }
 
-    let existed_before = std::path::Path::new(final_path.as_ref()).exists();
+    // 「打开前是否已存在」只用于文件监视记录（record_open_result 在监视关闭时立即返回）。
+    // 监视关闭时不做这次 stat：它走应用视图里的 FUSE 路径，每次 open 都要付一次往返，
+    // 而原生 open 不做任何额外的存在性查询。
+    let existed_before =
+        hub.is_monitor_enabled() && std::path::Path::new(final_path.as_ref()).exists();
     let call_target = OpenCallTarget::for_openat(
         dirfd,
         pathname,

@@ -2263,6 +2263,16 @@ type PreRegisterFingerprint = (i32, u64, u64);
 static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerprint>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// 已为哪个**应用进程实例**登记过 mount namespace 策略：uid -> (app_pid, start_ticks)。
+///
+/// 按 uid 的策略指纹只覆盖策略内容与宿主代际，刻意不含应用 pid；而 namespace 策略按
+/// ns inode 绑定，两者生命周期不同步：应用重启后 namespace 是新 inode，旧条目对新进程
+/// 无效，但按 uid 的指纹仍然命中，于是「已登记」的结论把这个变化盖住了。此后该
+/// namespace 里的 root 调用方（挂载子进程、MediaProvider 的 root 线程）请求会落进
+/// namespace miss + deny_all 回退，表现为整片 ENOENT。这张表专门用来发现这种不同步。
+static REGISTERED_APP_NAMESPACES: Lazy<Mutex<HashMap<u32, (i32, u64)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// MediaProvider 进程集合变化时清空预登记指纹表。
 ///
 /// 毒化 `-shm` 自愈需要经 MediaProvider 视图删除文件（`fuse_redirect::media_view`），
@@ -2272,6 +2282,11 @@ static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerpr
 pub(crate) fn invalidate_pre_registered_host_policies() {
     if let Ok(mut registered) = PRE_REGISTERED_HOST_POLICIES.lock() {
         registered.clear();
+    }
+    // 宿主换代/MediaProvider 重启会丢掉会话内整张策略表，namespace 表同样为空：
+    // 本地记录必须一起清空，否则下一轮会把「该实例已登记」当成事实而跳过补登。
+    if let Ok(mut namespaces) = REGISTERED_APP_NAMESPACES.lock() {
+        namespaces.clear();
     }
 }
 
@@ -2292,6 +2307,42 @@ pub(crate) enum PreRegisterOutcome {
 /// companion 与 daemon 并行处理同一应用的挂载请求；如果等 companion 进入后才登记，
 /// companion 只能看到没有该 uid 的快照并回退 scoped。预登记只写策略，不创建挂载，且
 /// 必须丢弃应用 namespace 专属的 real_root_override，保证宿主看到真实存储根。
+/// 按当前应用进程实例补登 mount namespace 策略（仅 namespace 维度），在按 uid 的幂等
+/// 判断之前调用：namespace 按 ns inode 绑定，而按 uid 的指纹不含应用 pid，应用重启后
+/// 两者会脱同步。同一实例只发一次控制消息，稳态零开销。
+fn register_app_namespace_ahead(request: &MountRequest) {
+    let Ok(uid) = u32::try_from(request.uid) else {
+        return;
+    };
+    let Some(start_ticks) = crate::platform::process_start_time_ticks(request.pid) else {
+        // 进程尚未启动或已退出：namespace 取不到，登记由后续请求（同一 pid 出现时）完成。
+        return;
+    };
+    let instance = (request.pid, start_ticks);
+    let already_registered = REGISTERED_APP_NAMESPACES
+        .lock()
+        .map(|table| table.get(&uid) == Some(&instance))
+        .unwrap_or(false);
+    if already_registered {
+        return;
+    }
+    let config = fuse_config_from_request(request, None, None);
+    if crate::fuse_host_control::register_app_namespace_only(
+        &config,
+        crate::fuse_host_control::HOST_POLICY_ACK_BUDGET_MAX_MS,
+    ) {
+        if let Ok(mut table) = REGISTERED_APP_NAMESPACES.lock() {
+            table.insert(uid, instance);
+        }
+        log::info!(
+            "fuse host namespace registered ahead uid={} pid={} pkg={}",
+            uid,
+            request.pid,
+            request.package_name
+        );
+    }
+}
+
 pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOutcome {
     let wants_shared_host = matches!(
         request.storage_backend_mode,
@@ -2303,6 +2354,10 @@ pub(crate) fn pre_register_host_policy(request: &MountRequest) -> PreRegisterOut
     {
         return PreRegisterOutcome::NotApplicable;
     }
+    // 命名空间补登必须早于按 uid 的幂等判断：应用重启后 namespace 换代而按 uid 指纹不变，
+    // 跳过路径会让新 namespace 一直缺席，root 请求只能靠上层重试兜住（自有私有目录恢复
+    // 窗口的 ENOENT 就是这个形态）。这里先按当前进程实例补一次 ns-only 登记。
+    register_app_namespace_ahead(request);
     // 幂等跳过以快照为准：快照自身校验了 boot 归属与宿主进程存活，指纹比对覆盖
     // 宿主换代与配置变更。跳过路径不做任何 fork、不构造策略、不发送控制消息；
     // 指纹不匹配（配置变更或宿主换代）时重登记，并在登记获宿主确认后才更新指纹，

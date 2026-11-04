@@ -1079,6 +1079,50 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("row_path_exists(&fallback_path)", compact)
         self.assertIn("row_path_exists(path_text)", compact)
 
+    def test_host_namespace_policy_registered_ahead_of_uid_idempotency(self) -> None:
+        # namespace 策略按 ns inode 绑定，而按 uid 的幂等指纹刻意不含应用 pid：应用重启后
+        # namespace 换代但指纹仍然命中，跳过路径会让新 namespace 永久缺席，该 namespace
+        # 里的 root 调用方（挂载子进程、MediaProvider 的 root 线程）请求随之落进
+        # deny_all，表现为整片 ENOENT——自有私有目录恢复窗口的失败正是这个形态。
+        # 这里钉死「补登早于按 uid 的幂等判断」，并锁定它只写 namespace 表。
+        daemon_src = read_daemon_mount_module()
+        pre_register = section(
+            daemon_src, "pub(crate) fn pre_register_host_policy(", "fn write_mount_state("
+        )
+        compact = "".join(pre_register.split())
+        self.assertIn("register_app_namespace_ahead(request);", compact)
+        self.assertLess(
+            compact.index("register_app_namespace_ahead(request);"),
+            compact.index("PreRegisterOutcome::AlreadyRegistered"),
+            "命名空间补登必须先于按 uid 的幂等跳过",
+        )
+        self.assertIn("register_app_namespace_only(", daemon_src)
+        self.assertIn("REGISTERED_APP_NAMESPACES", daemon_src)
+        control = read("src/fuse_host_control.rs")
+        self.assertIn("pub fn register_app_namespace_only(", control)
+        self.assertIn("config.namespace_policy_only = true;", control)
+        # 只写 namespace 表时不得更新宿主快照：否则 companion 会在 uid 表仍为空时接入。
+        namespace_only = section(
+            control,
+            "pub fn register_app_namespace_only(",
+            "/// 把 daemon 自身的 mount namespace",
+        )
+        self.assertNotIn("record_registered_policy(", namespace_only)
+
+
+    def test_write_parent_walk_stops_when_repair_disabled(self) -> None:
+        # 写打开的父链治理此前对每一级都 fstatat + 可能的 chmod/chown，即使父目录已存在；
+        # 原生写路径只创建缺失目录，不回头治理已存在的父级。元数据修复关闭时上溯是纯开销，
+        # 这里钉死「父目录存在且修复关闭 → 立即返回」，避免以后又被改成逐级治理。
+        runtime = read("src/hook/runtime.rs")
+        body = section(runtime, "fn create_parent_dirs_recursive_until(", "fn process_redirect_path_for_runtime(")
+        self.assertIn("if !crate::metadata_repair::enabled() {", body)
+        self.assertLess(
+            body.index("if !crate::metadata_repair::enabled() {"),
+            body.index("normalize_redirect_dir_metadata(&parent, mode, owner)"),
+            "修复关闭时必须先返回，不能继续逐级归一",
+        )
+
     def test_shared_fuse_host_attach_contract(self) -> None:
         # 应用接入共享宿主会话的四条硬约束，任一条被放宽都会让应用静默失去重定向或让
         # 清理流程误伤其它应用：
