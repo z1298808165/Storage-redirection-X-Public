@@ -798,6 +798,9 @@ impl MountPlanner {
         };
         if ret != 0 {
             let errno = last_errno();
+            // bind 失败的真实 errno 必须可回查：自有私有恢复等调用方在失败日志里
+            // 报的是 create_directory 的陈旧 errno（真机上表现为误导性的 errno=0）。
+            crate::mount::own_private_pending::note_bind_errno(errno);
             if errno == libc::ENOTCONN && self.repair_disconnected_storage_parent(target) {
                 ret = unsafe {
                     mount(

@@ -876,9 +876,10 @@ impl MountPlanner {
                     crate::mount::own_private_pending::note_failure(&self.package_name, view_ready);
                 }
                 log::warn!(
-                    "own private restore failed target={} source={} errno={}",
+                    "own private restore failed target={} source={} bind_errno={} create_errno={}",
                     storage_target,
                     source,
+                    crate::mount::own_private_pending::last_bind_errno(),
                     fs::last_create_directory_errno()
                 );
                 log::warn!(
@@ -926,16 +927,29 @@ impl MountPlanner {
             if !mount_point.starts_with("/storage/emulated") {
                 continue;
             }
-            let fs_type = fields
+            let sep = fields
                 .iter()
                 .position(|field| *field == "-")
-                .and_then(|index| fields.get(index + 1))
-                .copied()
-                .unwrap_or("?");
+                .and_then(|index| {
+                    fields
+                        .get(index + 1)
+                        .zip(fields.get(index + 2))
+                        .map(|(fs_type, source)| (*fs_type, *source))
+                });
             if !mounts.is_empty() {
                 mounts.push(',');
             }
-            mounts.push_str(&format!("{}<-{}({})", mount_point, fields[3], fs_type));
+            match sep {
+                Some((fs_type, source)) => {
+                    // source 直接区分服务方：`srx_fuse_host[pid]` 是本模块宿主会话，
+                    // `/dev/fuse` 是 MediaProvider 视图——失败到底卡在谁那里一目了然。
+                    mounts.push_str(&format!(
+                        "{}<-{}({},{})",
+                        mount_point, fields[3], fs_type, source
+                    ));
+                }
+                None => mounts.push_str(&format!("{}<-{}(?)", mount_point, fields[3])),
+            }
         }
         let root_chain = [
             "/storage",
@@ -945,16 +959,45 @@ impl MountPlanner {
             &format!("{}/Android/media", storage_path),
         ]
         .iter()
-        .map(|path| {
-            format!(
-                "{}={}",
-                path,
-                if fs::is_directory(path) { "dir" } else { "no" }
-            )
-        })
+        .map(|path| format!("{}={}", path, Self::stat_chain_entry(path)))
         .collect::<Vec<_>>()
         .join(" ");
-        format!("mounts=[{}] root_view={}", mounts, root_chain)
+        // 宿主会话的策略登记快照：uid-0 请求走 namespace 回退，若应用 uid 尚未出现在
+        // fingerprints 里，说明本轮挂载的策略登记还没落到宿主会话——恢复的 ENOENT
+        // 即 fail-closed 所致，而不是 MP 拒绝。
+        let fingerprints = crate::fuse_host::read_host_session_view()
+            .map(|view| {
+                let registered: Vec<String> = view
+                    .policy_fingerprints
+                    .keys()
+                    .map(|uid| uid.to_string())
+                    .collect();
+                format!(
+                    "uids=[{}] app_uid_registered={}",
+                    registered.join(","),
+                    view.policy_fingerprints
+                        .contains_key(&(self.app_uid as u32))
+                )
+            })
+            .unwrap_or_else(|| "host_session=none".to_string());
+        format!(
+            "mounts=[{}] root_view={} host_policy={}",
+            mounts, root_chain, fingerprints
+        )
+    }
+
+    /// 快照用的单级可达性：`dir` / `no(errno)`，errno 直接区分 ENOENT（fail-closed
+    /// 未登记）与 EACCES（MP 注册制拒绝）等成因。
+    fn stat_chain_entry(path: &str) -> String {
+        let Ok(c_path) = std::ffi::CString::new(path) else {
+            return "bad".to_string();
+        };
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: c_path 是 NUL 结尾路径，st 指向栈上未初始化空间，调用期间均有效。
+        if unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) } == 0 {
+            return "dir".to_string();
+        }
+        format!("no({})", crate::platform::errno::last())
     }
 
     fn report_unserviceable_private_entries(&self, media_root: &str) {

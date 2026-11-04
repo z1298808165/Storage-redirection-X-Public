@@ -32,6 +32,22 @@ const SCAN_INTERVAL_MS: i64 = 3_000;
 
 static LAST_SCAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
+/// 最近一次 bind(MS_BIND) 失败的真实 errno（0 = 无记录）。
+///
+/// 恢复失败的告警此前取的是 `last_create_directory_errno()`——create 早成功、bind
+/// 失败时日志会打出误导性的 errno=0。bind 侧把真实值存这里，失败日志直接引用。
+static LAST_BIND_ERRNO: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// bind 失败时记录真实 errno（planner 的 mount 失败分支调用）。
+pub fn note_bind_errno(errno: libc::c_int) {
+    LAST_BIND_ERRNO.store(errno, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 取最近一次 bind 失败的真实 errno。
+pub fn last_bind_errno() -> libc::c_int {
+    LAST_BIND_ERRNO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn pending_dir() -> String {
     paths::join(module_paths::MODULE_DIR, "tmp/own_private_pending")
 }
