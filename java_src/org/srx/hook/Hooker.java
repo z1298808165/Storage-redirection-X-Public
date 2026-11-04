@@ -1990,18 +1990,11 @@ public class Hooker {
 
   private static native boolean storagePathExistsBySyscall(String path);
 
-  /**
-   * 游标行存在性判定：与 storagePathExistsBySyscall 的区别是按父目录折叠枚举
-   * （同一目录下的成百上千行只枚举一次），只供行循环使用。
-   */
+  /** 游标行存在性判定：按父目录折叠枚举，逐行只查名字；只供行循环使用。 */
   private static native boolean pathExistsForCursorRow(String path);
 
-  /**
-   * 整行判定：返回 null 表示保留原路径，空串表示隐藏，其余为改写后的路径。
-   * 判定序列与原先 Java 侧逐项调用完全一致，只是把可整库同判的部分提前算掉。
-   */
-  private static native String cursorRowAction(
-      String path, int callerUid, boolean allowMissing);
+  /** 整行判定：null 保留原路径，空串隐藏，其余为改写后的路径。 */
+  private static native String cursorRowAction(String path, int callerUid, boolean allowMissing);
 
   private static native boolean isProviderVirtualPathVisible(String path);
 
@@ -6153,10 +6146,7 @@ public class Hooker {
       }
     }
 
-    /**
-     * 行判定的差分校验：详细日志开启时再用旧序列算一遍，不一致就记一条。
-     * 只读旧实现、不参与决策，用来在真机上证明新入口与原语义等价。
-     */
+    /** 差分校验：详细日志时用旧序列复核，只记录不参与决策。 */
     private static void verifyCursorRowAction(
         String path, String action, int callerUid, boolean allowMissingMappedTarget) {
       try {
@@ -6179,8 +6169,7 @@ public class Hooker {
     private static String legacyCursorRowAction(
         String path, int callerUid, boolean allowMissingMappedTarget) {
       String rewritten = filterPath(path, callerUid);
-      if (HIDDEN_ROW_SENTINEL.equals(rewritten)
-          || (rewritten != null && rewritten.length() == 0)) {
+      if (HIDDEN_ROW_SENTINEL.equals(rewritten) || (rewritten != null && rewritten.length() == 0)) {
         return "";
       }
       if ((rewritten == null || rewritten.equals(path))
@@ -6204,6 +6193,7 @@ public class Hooker {
       }
       return null;
     }
+
     private static boolean isMappingViewRewrite(
         String originalPath, String rewrittenPath, int callerUid) {
       try {
