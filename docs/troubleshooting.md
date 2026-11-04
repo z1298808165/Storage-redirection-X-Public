@@ -67,6 +67,44 @@
    ```
 3. 正常应看到 `java hook query ok`、目标 APP UID 对应的 `java query` / `java cursor` 日志，受限相册桶应出现 `row filter reason=hide_probe_nonexist` 或 `java cursor filter...`。若只看到目标 APP 自身 `mount confirmed`，没有 MediaProvider 中目标 UID 的 query/cursor 日志，说明 MediaStore 查询链路没有完整闭环。
 
+## 私有目录里的 SQLite 打不开（`SQLITE_CANTOPEN` / 边车 EACCES）
+
+应用把自己的 SQLite 库放在 `Android/media/<pkg>/` 下时（支付宝内的 XRadiant 就是这种），
+如果 `-wal`/`-shm` 是 **owner-only（0600）**，应用打开数据库会直接失败：
+
+```
+# quality-allow(chinese-language): 下面两行原样保留真机错误文本，供按日志关键字检索
+E/SQLiteLog: (14) os_unix.c:44191: (13) open(.../XRadiant.db-wal) -
+E/SQLiteDatabase: Failed to open database '.../XRadiant.db'.
+```
+
+随后抛 `SQLiteCantOpenDatabaseException`（`SQLITE_CANTOPEN`，落点是 `PRAGMA journal_mode`）。
+
+原因不是路径解析，而是权限位口径：MediaProvider 的 FuseDaemon 用**自身进程身份**打开下层文件
+（passthrough 只是把它自己打开的 fd 交给内核，内核不会改用调用方凭据重开），而 MediaProvider 的
+附加组只有 `media_rw`/`ext_data_rw` 一类、且没有任何 capability。因此**组位就是 MP 的可服务性**：
+
+| 模式 | MP 视图内能否打开 |
+|------|------------------|
+| `0660`/`0664` | 能 |
+| `0600`（owner-only） | 不能，连属主自己都拿 EACCES |
+
+原生 Android 不会出现这种文件：MP 的创建口径固定为 `(mode & ~0777) | 0664`（目录 `| 0775`），
+不透传应用 umask。owner-only 边车只可能来自「绕过 MP 的直连层」，典型成因是自有私有目录恢复失败
+（日志 `own private restore failed ... errno=2`）后应用在 f2fs 上按 umask 077 自建边车。
+
+现在的处置（无需手动干预）：
+
+- 模块自己的创建入口（宿主 FUSE 的 app-private 后端）按 MP 原生口径产出 `0664`/`0775`；
+- 还原系统视图前，把自有 media 子树里属于该应用的 sqlite 入口补组位（`0600 → 0660`，不动 other、
+  不动属主，幂等），日志 `own private sqlite mode normalized path=... mode=600->660`；
+- MP 侧 sqlite 干预只在 MP 自己打得开该入口时才接管，`-shm` 毒化检查改走 `O_PATH` 尺寸判定，
+  owner-only 入口不再拖垮毒化自愈链。
+
+若仍在日志里看到 `own private view mount point unavailable ... root_dir= android_dir=`，说明恢复发生在
+MP 视图就绪之前（`root_dir=false` 表示存储根当时不可见），属于已知待修项，可先重启 MediaProvider
+后让应用重新拉起，或用上面的模式判据核对文件是否已经具备组位。
+
 ## 外部存储整体卡死（读取/写入长时间不返回）
 
 整机所有应用访问 `/storage/emulated/0` 都卡住（应用首屏不加载、壁纸/桌面服务 ANR、系统存储服务无响应）时，先分清是**卡死**还是**报错**——这两类现象的根因完全不同，误判会把排查带到错误方向：
