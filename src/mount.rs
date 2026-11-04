@@ -8,6 +8,13 @@ mod apply;
 mod apply_targets;
 #[path = "mount/map.rs"]
 mod map;
+/// 自有私有目录恢复的重试队列（跨进程用标记文件承载，daemon 主循环负责排期）。
+///
+/// quality-allow(lint-suppression): 该模块的读侧（`take_due_packages`）只由 daemon
+/// 可执行档调用，库目标编译时天然无引用，需显式豁免 dead_code。
+#[allow(dead_code)]
+#[path = "mount/own_private_pending.rs"]
+pub mod own_private_pending;
 #[path = "mount/planner.rs"]
 mod planner;
 #[path = "mount/planner_paths.rs"]

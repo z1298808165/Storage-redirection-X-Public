@@ -794,6 +794,23 @@ pub fn main_entry() -> i32 {
         let before = config.config_version();
         let (did_reload, changed_packages, full_change) =
             reload_config_for_daemon(config, &mut last_fingerprint_check_ms);
+        // 自有私有目录恢复的重试排期。冷启动首轮挂载可能跑在应用视图覆盖层就位之前，
+        // 那一轮恢复会被跳过；周期 reconcile 只处理 missing 挂载，不会回头重挂已挂好的
+        // 应用，于是「跳过」会变成永久状态（自有私有目录长期留在直连层 → 两层页缓存
+        // 分裂 → SQLite `-shm` 跨不过去 → WAL 回滚空主库）。这里按退避把待重试的包名
+        // 并进本轮增量 reconcile（对该包等同一次配置变更 → 重新挂载 → 恢复幂等重试）。
+        let mut changed_packages = changed_packages;
+        let own_private_retry = crate::mount::own_private_pending::take_due_packages();
+        let own_private_retry_due = !own_private_retry.is_empty();
+        if own_private_retry_due {
+            changed_packages = Some(match changed_packages.take() {
+                Some(mut packages) => {
+                    packages.extend(own_private_retry);
+                    packages
+                }
+                None => own_private_retry,
+            });
+        }
         let current = config.config_version();
         let control_reconcile = crate::log_daemon::take_reconcile_request();
         let policy_register = crate::log_daemon::take_policy_register_request();
@@ -809,6 +826,7 @@ pub fn main_entry() -> i32 {
             || current != last_version
             || current != before
             || control_reconcile.is_some()
+            || own_private_retry_due
             || pending_full_reconcile
             || periodic_reconcile;
         if let Some(file_monitor) = fallback_file_monitor.as_mut() {

@@ -153,6 +153,29 @@ pub(super) fn mount_source_for_target_from_mountinfo(
     matched_root
 }
 
+/// 挂载点 `target` 上那条记录的 `major:minor`（superblock 身份）。
+///
+/// 用于判断两个挂载点是否属于**同一次** FUSE 连接：MediaProvider 重启、`vold`
+/// 重新拉起用户视图后，`/mnt/user/<user>/emulated` 会换成新的 minor，而旧锚点仍
+/// 绑在上一代连接上——此时 dev+ino 完全一致（同一 superblock 的根 dentry），
+/// `is_directory` 也可能为真，但实际访问会 ENOTCONN/ENOENT。
+pub(super) fn mountinfo_device_for_target(content: &str, target: &str) -> Option<String> {
+    let normalized_target = paths::normalize(target);
+    let mut matched: Option<String> = None;
+    for line in content.lines() {
+        let Some(entry) = mountinfo::parse_entry(line) else {
+            continue;
+        };
+        if paths::eq_ignore_case(
+            &paths::normalize(&mountinfo::unescape_field(entry.target)),
+            &normalized_target,
+        ) {
+            matched = Some(entry.dev.to_string());
+        }
+    }
+    matched
+}
+
 /// 只判断挂载点是否存在，命中首个匹配即返回，不解析也不分配 root 字段。
 pub(super) fn mountinfo_has_target(content: &str, target: &str) -> bool {
     let normalized_target = paths::normalize(target);

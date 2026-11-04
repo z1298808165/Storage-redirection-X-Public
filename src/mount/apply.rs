@@ -2,9 +2,10 @@ use super::apply_targets::{
     build_allowed_real_source_candidates, build_mapping_source_roots, build_read_only_source_roots,
     collect_restored_read_only_excluded_children, detach_mount_if_present,
     is_covered_by_scoped_fuse_mount, mount_source_for_target_from_mountinfo,
-    mountinfo_has_own_private_restore_layer, mountinfo_has_target, mountinfo_root_is_app_sandbox,
-    mountinfo_root_matches_data_backend, namespace_mappings_outside_scoped_fuse,
-    path_overlaps_mapping_request, path_shadows_mapping_request, read_mountinfo,
+    mountinfo_device_for_target, mountinfo_has_own_private_restore_layer, mountinfo_has_target,
+    mountinfo_root_is_app_sandbox, mountinfo_root_matches_data_backend,
+    namespace_mappings_outside_scoped_fuse, path_overlaps_mapping_request,
+    path_shadows_mapping_request, read_mountinfo,
 };
 use super::map::PathMappingApplyOptions;
 use super::{MountPlanner, concrete_mount_fallback_parent};
@@ -768,12 +769,11 @@ impl MountPlanner {
             }
             // 自有 media 子树随后会被 bind 回系统 MediaProvider 视图，而 MP 的
             // FuseDaemon 只能用自身身份打开下层文件（附加组 media_rw/ext_data_rw，
-            // CapEff=0）：owner-only 入口在 MP 视图里连属主自己都打不开。原生 MP
-            // 的创建口径是 `(mode & ~0777) | 0664`，视图里本不该存在 owner-only
-            // sqlite 入口；出现即说明它曾在降级直连 f2fs 的窗口里按应用 umask 077
-            // 建出来。这里在还原视图前把组位补回来，避免「拿回系统视图即打不开」。
+            // CapEff=0）：owner-only 入口在系统视图里连属主自己都打不开（原生同样
+            // 打不开，这是 MP 的既有语义）。这里**不改任何权限位**，只把这种
+            // 「系统视图无法服务」的入口记进诊断，便于现场按日志定位。
             if is_media {
-                self.normalize_own_private_sqlite_group_bits(&backend_source);
+                self.report_unserviceable_private_entries(&backend_source);
             }
             // 三类自有私有目录统一保留系统 FUSE 的访问控制与上下文：源取系统视图锚点，
             // 缺失时不把 /data/media 直接暴露给应用，保留诊断等待后续恢复。
@@ -782,45 +782,8 @@ impl MountPlanner {
                 log::warn!("own private system view missing: {}", source);
                 continue;
             }
-            // metadata_operations_path 将 storage alias 转到 /data/media；但在包名
-            // 根尚未挂载子目录时，需要先在当前 namespace 的可见路径创建挂载点，
-            // 否则 bind 只能覆盖包名根，应用后续创建 QQfile_recv 会得到 ENOENT。
-            //
-            // 只在换算后的后端路径上创建，不再先对视图路径直接 mkdir：apply 阶段
-            // `/storage/emulated/<user>` 可能还是沙箱 bind、或指向尚未启动的 FUSE，
-            // 对该路径 mkdir 会失败并短路掉本可成功的后端创建（真机 2026-10-25：
-            // `own private target mkdir failed` → 恢复计数恒为 0）。
-            if !self.ensure_directory_exists(&storage_target, true) {
-                log::warn!(
-                    "own private target mkdir failed: {} errno={}",
-                    storage_target,
-                    fs::last_create_directory_errno()
-                );
-                continue;
-            }
-            // 上面的 mkdir 走 `metadata_operations_path`，实际只保证**后端**目录
-            // 存在；bind 的挂载点必须存在于**当前命名空间的应用视图**里，否则
-            // mount(MS_BIND) 直接 ENOENT。真机 2026-11-04 duchamp 实证：
-            // `own private restore failed ... errno=2`，WeChat 与支付宝的
-            // `Android/media/<pkg>` 双双恢复失败，自有私有目录退回非系统视图的
-            // 直连层——正是「两层页缓存分裂 → WAL 回滚空主库 → 之后边车变 0600
-            // 打不开」那条链的上游。视图侧缺失时在这里补建挂载点（不 chown：
-            // 它随即被 bind 覆盖，模式与属主无意义）。
-            if !fs::is_directory(&storage_target) && !fs::create_directory(&storage_target, -1) {
-                log::warn!(
-                    "own private view mount point unavailable: {} errno={} view_root={} root_dir={} android_dir={}",
-                    storage_target,
-                    fs::last_create_directory_errno(),
-                    storage_path,
-                    fs::is_directory(storage_path),
-                    fs::is_directory(&format!("{}/Android", storage_path))
-                );
-            }
-
-            let mut is_restored = false;
             // 幂等：热重载与 reconcile 会重复进入这里，已经指向系统视图（与源同一
             // dev+ino）时不再叠一层 bind，否则同一 target 上的层数会随重挂次数增长。
-            // 已在系统视图上时属主通常也已对齐（见 restore 后的归一化），跳过扫描。
             //
             // dev+ino 之外再比 mountinfo root 形态（真机 2026-10-27 issue #2 实证）：
             // 应用视图的 `/storage/emulated/<user>` 上叠着 MediaProvider 的二级用户
@@ -829,21 +792,54 @@ impl MountPlanner {
             // 全量重 bind（单包媒体目录一小时内 18 次、含同秒并发 3 次），层数叠加
             // 且 MP FUSE 请求风暴最终把 FuseDaemon 拖挂（`__fuse_simple_request`
             // 永久停等 → 全局存储停摆）。root 精确等于 `/<user>/<relative>` 的记录
-            // 存在即视为已恢复；MP 若在其上重建用户视图，内容仍经其视图取自同一棵
+            // 存在即视为已恢复；MP 若在其建用户视图，内容仍经其视图取自同一棵
             // 底层树，重复 bind 只会触发下一轮重建循环。
+            //
+            // **幂等判定必须在建挂载点之前**：挂载子进程是 root，而应用视图
+            // （`/storage/emulated/<user>`）由模块自己的数据面提供，数据面对未登记
+            // uid 一律 fail-closed（`deny_all` → ENOENT）。root 的 stat 只有在 dentry
+            // 已被内核缓存的极少数情况下才成功，拿它做判据必然假阴性，于是每轮都
+            // 误判成「未恢复」。mountinfo 判据不依赖任何路径解析，放在最前。
             let expected_restore_root = format!("/{}/{}", self.user_id, relative);
-            let restore_mountinfo = read_mountinfo().unwrap_or_default();
-            if same_mount_identity(&storage_target, &source)
-                || mountinfo_has_own_private_restore_layer(
-                    &restore_mountinfo,
-                    &storage_target,
-                    &expected_restore_root,
-                )
+            if mountinfo_has_own_private_restore_layer(
+                &read_mountinfo().unwrap_or_default(),
+                &storage_target,
+                &expected_restore_root,
+            ) || same_mount_identity(&storage_target, &source)
             {
                 log::debug!("own private already on system view {}", storage_target);
+                if is_media {
+                    crate::mount::own_private_pending::note_success(&self.package_name);
+                }
                 restored_count += 1;
                 continue;
             }
+            // metadata_operations_path 将 storage alias 转到 /data/media，因此这一步
+            // 只保证**后端**目录存在（真实磁身上得先有 dentry，系统视图才有可绑的
+            // 内容），不代表应用视图里的挂载点已就绪——后者见下面的分支。
+            if !self.ensure_directory_exists(&storage_target, true) {
+                log::warn!(
+                    "own private target mkdir failed: {} errno={}",
+                    storage_target,
+                    fs::last_create_directory_errno()
+                );
+                if is_media {
+                    // 视图未就绪（root 连存储根都解析不到）是 MP 窗口内的必然失败，
+                    // 不消耗重试预算；就绪后仍失败才是要按预算放弃的真问题。
+                    let view_ready = fs::is_directory(storage_path);
+                    crate::mount::own_private_pending::note_failure(&self.package_name, view_ready);
+                }
+                continue;
+            }
+
+            let mut is_restored = false;
+            // 恢复只用 root 身份：目标挂载点在应用视图里，但它的可解析性由
+            // `/storage/emulated` 层（MediaProvider 的 FUSE）决定。MP 对**注册过的
+            // uid/pid** 才放行，对模块 fork 出的子进程（无论 root 还是降权到应用
+            // uid）在就绪窗口内一律拒绝——真机 2026-11-04 duchamp 实测：同一时刻
+            // root 逐级可达而应用 uid 整片 EACCES，且降权子进程拿到的是更严的
+            // EACCES 而非 ENOENT。因此「降权取句柄」救不了这个场景，恢复的成败
+            // 只取决于 MP 视图是否已就绪（root 侧 `root_view` 链），见重试闭环。
             let _ = self.bind_own_private_restore(
                 &source,
                 &storage_target,
@@ -855,6 +851,9 @@ impl MountPlanner {
             );
             if is_restored {
                 log::info!("own private restored {}", storage_target);
+                if is_media {
+                    crate::mount::own_private_pending::note_success(&self.package_name);
+                }
                 // **不做属主归一**：原生 MediaProvider FUSE 下文件的属主是创建者
                 // 应用 uid（duchamp A16 原生对照实证：9 月20 日微信经原生 FUSE 创建
                 // 的 `Android/media/com.tencent.mm` 属主为微信 uid，组 media_rw），
@@ -872,43 +871,102 @@ impl MountPlanner {
                 // 失败必须留痕：这条恢复是跨进程 SQLite 共享缓存层的唯一保证，
                 // 静默失败会直接回到两层页缓存分裂（真机表现为每隔若干次热重载
                 // 掉一次登录）。
+                if is_media {
+                    let view_ready = fs::is_directory(storage_path);
+                    crate::mount::own_private_pending::note_failure(&self.package_name, view_ready);
+                }
                 log::warn!(
                     "own private restore failed target={} source={} errno={}",
                     storage_target,
                     source,
                     fs::last_create_directory_errno()
                 );
+                log::warn!(
+                    "own private view snapshot pkg={} {}",
+                    self.package_name,
+                    self.describe_storage_view(storage_path)
+                );
             }
         }
         restored_count
     }
 
-    /// 把自有 media 子树里历史遗留的 owner-only sqlite 入口恢复成「组可读写」。
+    /// 只读诊断：统计自有 media 子树里「系统视图打不开」的 sqlite 入口。
     ///
-    /// 为什么必须做：MediaProvider 的 FuseDaemon 只能以自身身份打开下层文件
-    /// （AOSP `pf_open` 的 `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核），
-    /// 而 MP 的附加组只有 media_rw(1023)/ext_data_rw(1078)、`CapEff: 0000000000000000`。
-    /// owner-only 0600 入口在 MP 视图里**连属主自己都打不开**——真机 2026-11-04 duchamp
-    /// 实证：root 经 MP 视图 open 一个 0600 文件同样 EACCES，说明拒绝来自 MP 而不是
-    /// 内核 DAC。原生 MP 的创建口径是 `(mode & ~0777) | 0664`，所以系统视图里本不该
-    /// 存在 owner-only sqlite 入口；出现即说明它曾在「降级直连 f2fs」的窗口里按应用
-    /// umask 077 建出来（XRadiant.db-wal/-shm 就是这样变 0600 的，随后主库被 WAL
-    /// 回滚成 4096B）。
+    /// MediaProvider 的 FuseDaemon 用自身身份打开下层文件（AOSP `pf_open` 的
+    /// `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核），而它的附加组只有
+    /// media_rw(1023)/ext_data_rw(1078)、`CapEff: 0`。owner-only 入口在系统视图里
+    /// **连属主自己都打不开**——真机 2026-11-04 duchamp 实证：root 经 MP 视图 open
+    /// 一个 0600 文件同样 EACCES，说明拒绝来自 MP 而非内核 DAC。这是 MP 的既有语义，
+    /// 模块**不去改权限位绕开它**（改了等于替用户决定别人的文件该有什么权限，其它
+    /// 场景的后果不可预知），只把现场记进 verbose 日志，便于按 `mode=` 定位到底是
+    /// 哪个入口、由哪条绕过系统视图的写入路径产生的。
     ///
-    /// 这里只补**组位**（0600 → 0660，不动 other、不动属主），与原生 0664 同族且更
-    /// 保守；幂等，已经组可读写的入口不再改动；只处理自有 media 子树里属于本应用
-    /// uid 的 sqlite 入口（`*.db`/`-wal`/`-shm`/`-journal`），深度与条目数都有上界，
-    /// 避免在大媒体目录上做全量扫描。
-    fn normalize_own_private_sqlite_group_bits(&self, media_root: &str) {
+    /// 判据只看「属主有、组没有」这一条：组位覆盖了属主位时 MP 就能服务，无需上报。
+    /// 深度与条目数都有上界，避免在大媒体目录上做全量遍历。
+    /// 判据只看「属主有、组没有」这一条：组位覆盖了属主位时 MP 就能服务，无需上报。
+    /// 深度与条目数都有上界，避免在大媒体目录上做全量遍历。
+    /// 失败现场的存储视图快照：本进程命名空间里 `/storage/emulated*` 的挂载清单 +
+    /// root 身份逐级可达性。
+    ///
+    /// 恢复失败有两种完全不同的成因，日志必须能直接分开：
+    /// - **视图还没就位**（`root_dir=false` 且清单里没有对应挂载）→ 那是挂载时序问题，
+    ///   重试/延后才有可能成功；
+    /// - **视图在、但该名字被拒绝**（`root_dir=true`，只有目标级 errno≠0）→ 那是数据面
+    ///   或 DAC 语义问题，重试永远不会成功，必须换路径。
+    fn describe_storage_view(&self, storage_path: &str) -> String {
+        let mut mounts = String::new();
+        for line in read_mountinfo().unwrap_or_default().lines() {
+            // 字段：id parent major:minor root mountpoint options ... - fstype source super
+            let fields: Vec<&str> = line.split(' ').collect();
+            if fields.len() < 5 {
+                continue;
+            }
+            let mount_point = fields[4];
+            if !mount_point.starts_with("/storage/emulated") {
+                continue;
+            }
+            let fs_type = fields
+                .iter()
+                .position(|field| *field == "-")
+                .and_then(|index| fields.get(index + 1))
+                .copied()
+                .unwrap_or("?");
+            if !mounts.is_empty() {
+                mounts.push(',');
+            }
+            mounts.push_str(&format!("{}<-{}({})", mount_point, fields[3], fs_type));
+        }
+        let root_chain = [
+            "/storage",
+            "/storage/emulated",
+            storage_path,
+            &format!("{}/Android", storage_path),
+            &format!("{}/Android/media", storage_path),
+        ]
+        .iter()
+        .map(|path| {
+            format!(
+                "{}={}",
+                path,
+                if fs::is_directory(path) { "dir" } else { "no" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+        format!("mounts=[{}] root_view={}", mounts, root_chain)
+    }
+
+    fn report_unserviceable_private_entries(&self, media_root: &str) {
         use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         const MAX_DEPTH: usize = 4;
         const MAX_ENTRIES: usize = 512;
-        const REQUIRED_GROUP_BITS: u32 = 0o660;
 
         let mut queue = vec![(std::path::PathBuf::from(media_root), 0usize)];
         let mut visited = 0usize;
-        let mut fixed = 0usize;
+        let mut unserviceable = 0usize;
+        let mut sample = String::new();
         while let Some((dir, depth)) = queue.pop() {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
@@ -916,13 +974,12 @@ impl MountPlanner {
             for entry in entries.flatten() {
                 visited += 1;
                 if visited > MAX_ENTRIES {
-                    log::warn!(
-                        "own private sqlite mode scan truncated root={} visited={} fixed={}",
+                    log::debug!(
+                        "own private serviceability scan truncated root={} visited={}",
                         media_root,
-                        visited,
-                        fixed
+                        visited
                     );
-                    return;
+                    break;
                 }
                 let Ok(file_type) = entry.file_type() else {
                     continue;
@@ -948,26 +1005,29 @@ impl MountPlanner {
                     continue;
                 }
                 let mode = metadata.permissions().mode() & 0o7777;
-                if mode & REQUIRED_GROUP_BITS == REQUIRED_GROUP_BITS {
+                let owner_bits_for_group = (mode & 0o700) >> 3;
+                if owner_bits_for_group == 0 || mode & owner_bits_for_group == owner_bits_for_group
+                {
                     continue;
                 }
-                let fixed_mode = mode | REQUIRED_GROUP_BITS;
-                if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fixed_mode))
-                    .is_ok()
-                {
-                    fixed += 1;
-                    log::info!(
-                        "own private sqlite mode normalized path={} mode={:o}->{:o}",
-                        path.display(),
-                        mode,
-                        fixed_mode
-                    );
+                unserviceable += 1;
+                if sample.is_empty() {
+                    sample = format!("{} mode={:o}", path.display(), mode);
                 }
             }
+        }
+        if unserviceable > 0 {
+            log::debug!(
+                "own private sqlite entries unserviceable by system view count={} root={} sample={}",
+                unserviceable,
+                media_root,
+                sample
+            );
         }
     }
 
     /// 共享宿主预接入（整根由宿主 FUSE 接管）之后恢复自有私有目录的系统视图。
+    ///
     /// 预接入分支直接短路 planner，不经过 [`Self::apply_sdcard_redirect`]，因此此前
     /// 完全不会执行自有私有目录恢复：`Android/{data,media,obb}/<pkg>` 留在宿主 FUSE
     /// 内、后端是 f2fs 直连，与未接管消费方经系统 MediaProvider FUSE 的访问分成两层
@@ -1012,6 +1072,7 @@ impl MountPlanner {
             return None;
         }
         if same_mount_identity(&anchor_root, &source)
+            && anchor_generation_is_current(&anchor_root, &source)
             && fs::is_directory(&paths::join(&user_view, "Android"))
         {
             return Some(user_view);
@@ -1760,8 +1821,28 @@ fn is_sqlite_entry_name(name_lower: &str) -> bool {
         || SUFFIXES.iter().any(|suffix| name_lower.ends_with(suffix))
 }
 
-/// 两个路径是否指向同一个挂载对象。
+/// 锚点是否仍属于**当前这一代**系统视图 FUSE 连接。
 ///
+/// `same_mount_identity` 只比 dev+ino：锚点是 `source` 的 bind，两者本来就是同一个
+/// superblock 的根 dentry，所以 MediaProvider 重启、`vold` 重新拉起用户视图（minor
+/// 换代）之后这个判据依然成立——但锚点实际绑在上一代连接上，访问会 ENOTCONN 或
+/// 直接 ENOENT（真机 2026-11-03 duchamp：`bind mount failed src=.../tmp/system_view/0/0/
+/// Android/media/<pkg> errno=2`，紧接着 `own private restore failed`，自有私有目录
+/// 退回直连层，随后主库被 WAL 回滚成 4096B）。
+///
+/// 这里用 mountinfo 里两个挂载点的 `major:minor` 判定代际：任一侧取不到记录就按
+/// 「不是当前代」处理，宁可重建锚点也不复用可能已失效的连接。
+fn anchor_generation_is_current(anchor_root: &str, source: &str) -> bool {
+    let mountinfo = read_mountinfo().unwrap_or_default();
+    let anchor_dev = mountinfo_device_for_target(&mountinfo, anchor_root);
+    let source_dev = mountinfo_device_for_target(&mountinfo, source);
+    match (anchor_dev, source_dev) {
+        (Some(anchor_dev), Some(source_dev)) => anchor_dev == source_dev,
+        _ => false,
+    }
+}
+
+/// 两个路径是否指向同一个挂载对象。///
 /// 用作自有私有目录恢复的幂等判据：bind 生效后 `stat` 返回的是源侧的 dev+ino，
 /// 与源路径完全一致；未 bind 时两侧分别是存储视图与系统 FUSE 锚点，dev 必然不同。
 fn same_mount_identity(left: &str, right: &str) -> bool {
