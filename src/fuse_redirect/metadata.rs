@@ -62,9 +62,9 @@ pub(super) fn create_metadata(
         return CreateMetadata {
             uid: owner_uid,
             gid: EXT_DATA_RW_GID,
-            mode: mode & 0o7777,
+            mode: adjust_metadata_mode(mode, false, true, is_dir),
             rewrite_owner: true,
-            rewrite_mode: false,
+            rewrite_mode: true,
         };
     }
     CreateMetadata {
@@ -130,11 +130,22 @@ pub(super) fn adjust_metadata_mode(
         return SHARED_PUBLIC_DIR_MODE;
     }
     if is_app_private_backend {
-        // Android/data|media|obb 的 app-private 条目沿用原生 mode/umask：既不做
-        // owner→group 位镜像，也不强加 media_rw 那套 0770/0660 语义。私有树的属主
-        // 归位由 owner_migration 与运行时代写 hook 负责，FUSE 新建入口只负责
-        // 「新建时用对的身份与组」。
-        return mode;
+        // Android/data|media|obb 的 app-private 条目必须与 MediaProvider 的原生
+        // 创建口径逐位一致：`pf_create`/`pf_mknod` 固定 `(mode & ~0777) | 0664`，
+        // `pf_mkdir` 固定 `(mode & ~0777) | 0775`，MP 不透传调用方的 mode/umask。
+        //
+        // 此前这里沿用了调用方 mode（含应用 umask 077 的扣减），会产出 owner-only
+        // 0600 条目——而原生 MP 视图里永远不会出现这种条目。一旦同一路径改由 MP
+        // 服务（`Android/media/<pkg>` 回落系统视图，或跨进程消费方经 MP FUSE 访问），
+        // MP 只能用自身身份打开下层文件（uid 10217，附加组 media_rw/ext_data_rw，
+        // CapEff=0），owner-only 文件必然 EACCES，应用侧表现为 SQLITE_CANTOPEN
+        // （真机 2026-11-04 duchamp：XRadiant.db-wal/-shm 变 0600 后数据库打不开，
+        // 主库曾被 WAL 回滚成 4096B）。组位就是 MP 的可服务性，不能省。
+        return if is_dir {
+            (mode & 0o7000) | 0o775
+        } else {
+            (mode & 0o7000) | 0o664
+        };
     }
     // 公共后端的文件统一做 owner→group 位镜像并清 others：新建时属主被改写为
     // media_rw(1023)，若保留调用方原始 mode（应用常见 0600），应用自己就再也读不到

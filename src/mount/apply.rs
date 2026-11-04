@@ -766,6 +766,15 @@ impl MountPlanner {
                     backend_source
                 );
             }
+            // 自有 media 子树随后会被 bind 回系统 MediaProvider 视图，而 MP 的
+            // FuseDaemon 只能用自身身份打开下层文件（附加组 media_rw/ext_data_rw，
+            // CapEff=0）：owner-only 入口在 MP 视图里连属主自己都打不开。原生 MP
+            // 的创建口径是 `(mode & ~0777) | 0664`，视图里本不该存在 owner-only
+            // sqlite 入口；出现即说明它曾在降级直连 f2fs 的窗口里按应用 umask 077
+            // 建出来。这里在还原视图前把组位补回来，避免「拿回系统视图即打不开」。
+            if is_media {
+                self.normalize_own_private_sqlite_group_bits(&backend_source);
+            }
             // 三类自有私有目录统一保留系统 FUSE 的访问控制与上下文：源取系统视图锚点，
             // 缺失时不把 /data/media 直接暴露给应用，保留诊断等待后续恢复。
             let source = paths::join(&system_view, &relative);
@@ -788,6 +797,24 @@ impl MountPlanner {
                     fs::last_create_directory_errno()
                 );
                 continue;
+            }
+            // 上面的 mkdir 走 `metadata_operations_path`，实际只保证**后端**目录
+            // 存在；bind 的挂载点必须存在于**当前命名空间的应用视图**里，否则
+            // mount(MS_BIND) 直接 ENOENT。真机 2026-11-04 duchamp 实证：
+            // `own private restore failed ... errno=2`，WeChat 与支付宝的
+            // `Android/media/<pkg>` 双双恢复失败，自有私有目录退回非系统视图的
+            // 直连层——正是「两层页缓存分裂 → WAL 回滚空主库 → 之后边车变 0600
+            // 打不开」那条链的上游。视图侧缺失时在这里补建挂载点（不 chown：
+            // 它随即被 bind 覆盖，模式与属主无意义）。
+            if !fs::is_directory(&storage_target) && !fs::create_directory(&storage_target, -1) {
+                log::warn!(
+                    "own private view mount point unavailable: {} errno={} view_root={} root_dir={} android_dir={}",
+                    storage_target,
+                    fs::last_create_directory_errno(),
+                    storage_path,
+                    fs::is_directory(storage_path),
+                    fs::is_directory(&format!("{}/Android", storage_path))
+                );
             }
 
             let mut is_restored = false;
@@ -856,8 +883,91 @@ impl MountPlanner {
         restored_count
     }
 
-    /// 共享宿主预接入（整根由宿主 FUSE 接管）之后恢复自有私有目录的系统视图。
+    /// 把自有 media 子树里历史遗留的 owner-only sqlite 入口恢复成「组可读写」。
     ///
+    /// 为什么必须做：MediaProvider 的 FuseDaemon 只能以自身身份打开下层文件
+    /// （AOSP `pf_open` 的 `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核），
+    /// 而 MP 的附加组只有 media_rw(1023)/ext_data_rw(1078)、`CapEff: 0000000000000000`。
+    /// owner-only 0600 入口在 MP 视图里**连属主自己都打不开**——真机 2026-11-04 duchamp
+    /// 实证：root 经 MP 视图 open 一个 0600 文件同样 EACCES，说明拒绝来自 MP 而不是
+    /// 内核 DAC。原生 MP 的创建口径是 `(mode & ~0777) | 0664`，所以系统视图里本不该
+    /// 存在 owner-only sqlite 入口；出现即说明它曾在「降级直连 f2fs」的窗口里按应用
+    /// umask 077 建出来（XRadiant.db-wal/-shm 就是这样变 0600 的，随后主库被 WAL
+    /// 回滚成 4096B）。
+    ///
+    /// 这里只补**组位**（0600 → 0660，不动 other、不动属主），与原生 0664 同族且更
+    /// 保守；幂等，已经组可读写的入口不再改动；只处理自有 media 子树里属于本应用
+    /// uid 的 sqlite 入口（`*.db`/`-wal`/`-shm`/`-journal`），深度与条目数都有上界，
+    /// 避免在大媒体目录上做全量扫描。
+    fn normalize_own_private_sqlite_group_bits(&self, media_root: &str) {
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        const MAX_DEPTH: usize = 4;
+        const MAX_ENTRIES: usize = 512;
+        const REQUIRED_GROUP_BITS: u32 = 0o660;
+
+        let mut queue = vec![(std::path::PathBuf::from(media_root), 0usize)];
+        let mut visited = 0usize;
+        let mut fixed = 0usize;
+        while let Some((dir, depth)) = queue.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                visited += 1;
+                if visited > MAX_ENTRIES {
+                    log::warn!(
+                        "own private sqlite mode scan truncated root={} visited={} fixed={}",
+                        media_root,
+                        visited,
+                        fixed
+                    );
+                    return;
+                }
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    if depth < MAX_DEPTH {
+                        queue.push((path, depth + 1));
+                    }
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if !is_sqlite_entry_name(&name) {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                if metadata.uid() != self.app_uid as u32 {
+                    continue;
+                }
+                let mode = metadata.permissions().mode() & 0o7777;
+                if mode & REQUIRED_GROUP_BITS == REQUIRED_GROUP_BITS {
+                    continue;
+                }
+                let fixed_mode = mode | REQUIRED_GROUP_BITS;
+                if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fixed_mode))
+                    .is_ok()
+                {
+                    fixed += 1;
+                    log::info!(
+                        "own private sqlite mode normalized path={} mode={:o}->{:o}",
+                        path.display(),
+                        mode,
+                        fixed_mode
+                    );
+                }
+            }
+        }
+    }
+
+    /// 共享宿主预接入（整根由宿主 FUSE 接管）之后恢复自有私有目录的系统视图。
     /// 预接入分支直接短路 planner，不经过 [`Self::apply_sdcard_redirect`]，因此此前
     /// 完全不会执行自有私有目录恢复：`Android/{data,media,obb}/<pkg>` 留在宿主 FUSE
     /// 内、后端是 f2fs 直连，与未接管消费方经系统 MediaProvider FUSE 的访问分成两层
@@ -1624,6 +1734,30 @@ impl MountPlanner {
         }
         shadowed
     }
+}
+
+/// 文件名是否属于 sqlite 主库或边车（小写化后的文件名）。
+///
+/// 与 `hook::media_fuse` 的 sqlite 判定同源，但这里只需要布尔结论且本模块不依赖
+/// hook 模块，因此本地实现。
+fn is_sqlite_entry_name(name_lower: &str) -> bool {
+    const SUFFIXES: &[&str] = &[
+        ".db",
+        ".db-wal",
+        ".db-shm",
+        ".db-journal",
+        ".sqlite",
+        ".sqlite-wal",
+        ".sqlite-shm",
+        ".sqlite-journal",
+        ".sqlite3",
+        ".sqlite3-wal",
+        ".sqlite3-shm",
+        ".sqlite3-journal",
+    ];
+    name_lower.ends_with("-wal")
+        || name_lower.ends_with("-shm")
+        || SUFFIXES.iter().any(|suffix| name_lower.ends_with(suffix))
 }
 
 /// 两个路径是否指向同一个挂载对象。
