@@ -93,17 +93,38 @@ E/SQLiteDatabase: Failed to open database '.../XRadiant.db'.
 不透传应用 umask。owner-only 边车只可能来自「绕过 MP 的直连层」，典型成因是自有私有目录恢复失败
 （日志 `own private restore failed ... errno=2`）后应用在 f2fs 上按 umask 077 自建边车。
 
-现在的处置（无需手动干预）：
+现在的处置（不修改任何既有文件属性）：
 
-- 模块自己的创建入口（宿主 FUSE 的 app-private 后端）按 MP 原生口径产出 `0664`/`0775`；
-- 还原系统视图前，把自有 media 子树里属于该应用的 sqlite 入口补组位（`0600 → 0660`，不动 other、
-  不动属主，幂等），日志 `own private sqlite mode normalized path=... mode=600->660`；
+- 模块自己的创建入口（宿主 FUSE 的 app-private 后端）按 MP 的原生创建口径产出 `0664`/`0775`——
+  这条口径只在**新建**时决定落盘权限，等同系统视图自己建出来的结果；
+- 已存在的 owner-only 入口**不会被模块改写**：MP 打不开就是打不开，这是原生语义。模块只按
+  `own private sqlite entries unserviceable by system view count=... sample=...`（详细日志级别）
+  上报数量与样本路径，便于定位是哪个绕过系统视图的写入路径产生的；
 - MP 侧 sqlite 干预只在 MP 自己打得开该入口时才接管，`-shm` 毒化检查改走 `O_PATH` 尺寸判定，
   owner-only 入口不再拖垮毒化自愈链。
 
-若仍在日志里看到 `own private view mount point unavailable ... root_dir= android_dir=`，说明恢复发生在
-MP 视图就绪之前（`root_dir=false` 表示存储根当时不可见），属于已知待修项，可先重启 MediaProvider
-后让应用重新拉起，或用上面的模式判据核对文件是否已经具备组位。
+历史遗留 owner-only 边车的手工处置（任选其一，都由应用自己重建即可，不要手改主库权限）：
+
+```powershell
+# 删掉毒化/不可服务的 -shm，SQLite 下次打开会按 -wal 重建（无损）
+adb shell "su -c 'rm -f /storage/emulated/0/Android/media/<pkg>/<dir>/<db>.db-shm'"
+# 或让应用在系统视图里重建会话（干净关闭后重开），新边车由 MP 以 0664 创建
+```
+
+`own private view mount point unavailable ... root_dir= android_dir=` 与 `own private view
+snapshot ...`：恢复在冷启动首轮挂载时失败了。这不是权限问题——快照里如果
+`mounts=[...]` 已经列出 `/storage/emulated` 与 `/storage/emulated/0` 的 FUSE 挂载，
+说明视图本身在位，拒绝来自 **MediaProvider 的 FUSE 层**（它只服务自己注册过的
+uid/pid，模块 fork 出的挂载子进程无论 root 还是降权到应用 uid 都拿不到解析）。
+MediaProvider 就绪窗口在冷开机后可达数分钟，窗口内恢复必然失败。模块会把失败记进
+`tmp/own_private_pending/<包名>` 并按退避（3s×3→15s→30s）把该包重新排进增量挂载，
+成功后标记自动删除；日志按 `own private restore retry pkg=... round=N` /
+`own private restored` 追踪。预算分两类：窗口内的必然失败（快照里 `root_view` 链
+不可达）不消耗预算、只按轮次退避（总轮数上限 120，约 55 分钟）；视图就绪后仍失败
+才计入 20 次的放弃预算。若出现 `retry exhausted`，按 `ready_failures=` 区分：为 0
+说明是窗口过长，非 0 说明恢复存在数据面/锚点层面的真问题，需按快照进一步定位。窗口期内应用仍可经模块数据面访问自有 media 子树（功能不受影响），只是
+跨进程共享（如 XRadiant 这类被其它进程消费的 sqlite 库）要等恢复落位后才回到同一层
+内核缓存。
 
 ## 外部存储整体卡死（读取/写入长时间不返回）
 

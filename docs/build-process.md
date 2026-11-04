@@ -196,6 +196,17 @@ CI 构建成功后会把测试版信息写入 `beta`；正式 Release 成功后�
 
 如果 Hooker.dex 编译失败，Android release 构建会直接失败，避免产出缺少 Java hook 的模块。仅在 host/debug 开发场景，或显式设置 `SRX_ALLOW_EMPTY_HOOKER_DEX=1` 时，构建脚本才会写入空文件并输出 warning；此类产物不应用于日常刷入或发布。
 
+### 关闭路径元数据修复的编译开关（`srx_no_path_metadata_repair`）
+
+仓库支持用 `RUSTFLAGS="--cfg srx_no_path_metadata_repair"`（或等价 `[build] rustflags`）编出
+「不做任何路径元数据修复」的调试构建，用于二分定位「属主/权限修复引发的问题」。
+
+该开关关闭的是**全部**元数据修复，其中包含 `Android/{data,media,obb}/<pkg>` 创建时对齐系统视图
+创建口径（`(mode & ~0777) | 0664` / `| 0775`）这一步：关掉之后 app-private 新建条目会退回
+`mode & !umask` 的语义，应用 umask 077 会把 `-wal`/`-shm` 落成 owner-only `0600`——这正是
+「MediaProvider 打不开自己边车」的原始成因。**该构建只用于诊断，不要用于发布**；若必须在真机
+长期使用，请同时在日志里确认没有出现 `SQLITE_CANTOPEN`。
+
 ## Windows 注意事项
 
 ### 在主机上直接运行 `cargo test`
