@@ -142,17 +142,19 @@ pub(super) fn adjust_metadata_mode(
         return SHARED_PUBLIC_DIR_MODE;
     }
     if is_app_private_backend {
-        // Android/data|media|obb 的 app-private 条目必须与 MediaProvider 的原生
-        // 创建口径逐位一致：`pf_create`/`pf_mknod` 固定 `(mode & ~0777) | 0664`，
-        // `pf_mkdir` 固定 `(mode & ~0777) | 0775`，MP 不透传调用方的 mode/umask。
+        // 复刻**系统视图自己的创建口径**，不发明规则：MediaProvider 的 FuseDaemon 在
+        // `pf_create`/`pf_mknod` 里把 mode 归一成 `(mode & ~0777) | 0664`，在
+        // `pf_mkdir` 里归一成 `(mode & ~0777) | 0775`——它不透传调用方 umask，因为
+        // 这三类目录在原生形态下本来就由 MP 服务，权限口径属于平台约定而非应用选择。
         //
-        // 此前这里沿用了调用方 mode（含应用 umask 077 的扣减），会产出 owner-only
-        // 0600 条目——而原生 MP 视图里永远不会出现这种条目。一旦同一路径改由 MP
-        // 服务（`Android/media/<pkg>` 回落系统视图，或跨进程消费方经 MP FUSE 访问），
-        // MP 只能用自身身份打开下层文件（uid 10217，附加组 media_rw/ext_data_rw，
-        // CapEff=0），owner-only 文件必然 EACCES，应用侧表现为 SQLITE_CANTOPEN
-        // （真机 2026-11-04 duchamp：XRadiant.db-wal/-shm 变 0600 后数据库打不开，
-        // 主库曾被 WAL 回滚成 4096B）。组位就是 MP 的可服务性，不能省。
+        // 模块在这条路径上扮演的就是「系统视图」，所以必须产出同一口径：否则会话里
+        // 由模块建出来的 `-wal`/`-shm` 会是应用 umask 077 的 0600，等目录改由 MP
+        // 服务时 MP 用自身身份（附加组 media_rw/ext_data_rw、`CapEff: 0`）打不开，
+        // 应用侧就是 SQLITE_CANTOPEN（真机 2026-11-04 duchamp：XRadiant 打不开自己的
+        // -wal，主库被 WAL 回滚成 4096B）。
+        //
+        // 注意这里只在**新建**时决定落盘权限，不回头修改任何已存在文件；历史遗留的
+        // owner-only 入口只做诊断上报（见 `mount::apply::report_unserviceable_private_entries`）。
         return if is_dir {
             (mode & 0o7000) | 0o775
         } else {

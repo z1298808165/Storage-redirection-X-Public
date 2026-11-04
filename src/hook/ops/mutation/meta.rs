@@ -528,6 +528,48 @@ where
     result
 }
 
+/// 记录「按真实路径重试打开私有库后端」的失败。
+///
+/// owner-only（0600）入口上 EACCES/EPERM 是**预期结果**：MediaProvider 没有
+/// CAP_DAC_OVERRIDE，无法代开属主私有文件，这是原生语义而不是缺陷。这类失败原先
+/// 一律按 warn 落盘，会把「正常的权限拒绝」刷成告警噪声、掩盖真正的中转失败；这里
+/// 只把它们降到 debug，其它 errno（ENOENT/EIO/EROFS…）仍按 warn 留痕。
+// quality-allow(lint-suppression): 参数与调用点字段一一对应，避免为一次日志构造结构体。
+#[allow(clippy::too_many_arguments)]
+fn log_private_owner_sqlite_open_failure(
+    op_name: &str,
+    stage: &str,
+    original_result: c_int,
+    err: i32,
+    fd: c_int,
+    fd_flags: c_int,
+    caller_uid: i32,
+    path: &str,
+    storage_path: &str,
+    backend_path: &str,
+) {
+    let expected = matches!(err, libc::EACCES | libc::EPERM);
+    let line = format!(
+        "{} private owner sqlite backend {} open failed ret={} errno={} fd={} fd_flags=0x{:x} caller_uid={} expected={} path={} storage={} backend={}",
+        op_name,
+        stage,
+        original_result,
+        err,
+        fd,
+        fd_flags,
+        caller_uid,
+        expected,
+        path,
+        storage_path,
+        backend_path
+    );
+    if expected {
+        log::debug!("{}", line);
+    } else {
+        log::warn!("{}", line);
+    }
+}
+
 fn confirm_private_owner_sqlite_ftruncate(
     hub: &InterceptHub,
     op_name: &str,
@@ -554,17 +596,17 @@ fn confirm_private_owner_sqlite_ftruncate(
     // SAFETY: c_path 由上方 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效，open 只读取该路径字符串。
     let retry_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if retry_fd < 0 {
-        log::warn!(
-            "{} private owner sqlite backend truncate open failed ret={} errno={} fd={} fd_flags=0x{:x} caller_uid={} path={} storage={} backend={}",
+        log_private_owner_sqlite_open_failure(
             op_name,
+            "truncate",
             original_result,
             runtime::current_errno(),
             fd,
             fd_flags,
             caller_uid,
             path_for_decision,
-            storage_path,
-            backend_path
+            &storage_path,
+            &backend_path,
         );
         runtime::set_errno(original_errno);
         return None;
@@ -650,17 +692,17 @@ fn confirm_private_owner_sqlite_futimens(
     // SAFETY: c_path 由上方 CString::new 构造，保证以 NUL 结尾且在本次调用期间有效，open 只读取该路径字符串。
     let retry_fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if retry_fd < 0 {
-        log::warn!(
-            "{} private owner sqlite backend futimens open failed ret={} errno={} fd={} fd_flags=0x{:x} caller_uid={} path={} storage={} backend={}",
+        log_private_owner_sqlite_open_failure(
             op_name,
+            "futimens",
             original_result,
             runtime::current_errno(),
             fd,
             fd_flags,
             caller_uid,
             path_for_decision,
-            storage_path,
-            backend_path
+            &storage_path,
+            &backend_path,
         );
         runtime::set_errno(original_errno);
         return None;

@@ -1,8 +1,33 @@
 use libc::{
-    EEXIST, EINTR, POLLIN, S_IFDIR, c_int, c_void, chown, mkdir, poll, pollfd, read, stat, write,
+    EEXIST, EINTR, POLLIN, S_IFDIR, c_int, c_void, chown, mkdir, mode_t, poll, pollfd, read, stat,
+    write,
 };
 use std::ffi::CString;
 use std::time::{Duration, Instant};
+
+/// 模块自己创建、并 chown 给调用应用的映射/放行目标目录模式。
+///
+/// 与原生 MediaProvider 的公共目录口径（`02770`，`media_rw:media_rw`）只差一个
+/// **other-execute**：模块把目录属主换成应用后，直接 bind 形态下应用并不在
+/// `media_rw` 组，需要 other 穿越位才能进去；组位留给系统代写进程（代写进程在
+/// `media_rw`/`ext_data_rw` 组里）读写。
+///
+/// 这里原来写的是 `0o2773`（other 可读写）：既不是原生口径，也没有任何链路需要
+/// 「任意第三方 uid 往属主是某个应用的目录里直接写」——那等于把所有托管目录开给
+/// 全系统。收敛到 `0o2771`，与下面真实公共目录的修正目标保持一致。
+pub const MAPPED_DIR_MODE: mode_t = 0o2771;
+
+/// 已存在的真实公共目录（如 `Download`）的修正目标模式。
+///
+/// 原生是 `02770 media_rw:media_rw`；模块在 namespace bind 形态下把真实目录直接
+/// 交给应用，应用不在 `media_rw` 组，因此只补 other-execute 供穿越，其它位保持
+/// 原生语义（不补 other 读写）。
+pub const REAL_PUBLIC_DIR_MODE: mode_t = 0o2771;
+
+/// 共享媒体后端目录的**原生**口径：`02770 media_rw:media_rw`。
+///
+/// 由 `media_rw` 自己管理的后端目录不额外放权，与 AOSP 完全一致。
+pub const SHARED_PUBLIC_DIR_MODE: mode_t = 0o2770;
 
 // 带总超时的阻塞读：每次 read 前先 poll 等待可读，超出截止时间立即失败返回。
 // 用于伴生进程等只信任本地对端但仍不能被对端拖死的场景：

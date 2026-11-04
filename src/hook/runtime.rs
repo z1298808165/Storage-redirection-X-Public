@@ -34,7 +34,6 @@ fn redirect_mkdir_mode_for(path: &str, base: mode_t) -> mode_t {
     base
 }
 const PRIVATE_CHILD_DIR_REQUIRED_MODE: mode_t = 0o2751;
-const PRIVATE_CHILD_FILE_REQUIRED_MODE: mode_t = 0o664;
 
 struct RedirectDirOwner {
     uid: i32,
@@ -286,9 +285,12 @@ fn fix_system_writer_mapping_target_access(path: &str) {
         return;
     }
     let mode = (st.st_mode as mode_t) & 0o7777;
-    // MediaProvider 创建的目标文件通常为 0660/0664；QQ 等调用方随后仍需
-    // 通过系统代写链路继续写入同一文件，因此映射目标必须具备其它用户读写位。
-    let required = mode | 0o006;
+    // 对齐系统视图自己的创建口径（AOSP `pf_create`：`(mode & ~0777) | 0664`）：
+    // 组读写 + 其它只读。QQ 等调用方随后要继续经系统代写链路写同一文件，靠的是
+    // **组写**（代写进程在 media_rw/ext_data_rw 组里）；此前这里补的是 `0o006`
+    // （组写 + 其它读写），比原生多给了所有主体**写**权限——那是本模块自己发明的
+    // 放宽，原生视图从不这样放权，其它场景会不会因此出问题无从判断，故收回。
+    let required = mode | 0o064;
     // SAFETY: c_path 仍在本地作用域内有效，required 仅包含文件权限位。
     if required != mode && unsafe { libc::chmod(c_path.as_ptr(), required) } == 0 {
         log::debug!(
@@ -674,14 +676,19 @@ fn chmod_private_node_if_needed(
         return;
     }
     let file_type = st.st_mode & libc::S_IFMT as mode_t;
+    let current_mode = st.st_mode & 0o7777;
+    // 目录沿用既有的「最小可穿越 + 组可读写」口径；文件**不再写死 0664**，只把属主
+    // 已有的权限位镜像到组位：原生视图给的就是「属主能做的，服务方（media_rw/
+    // ext_data_rw 组）也能做」，不给 other 任何位，也不替属主决定更宽的权限。
+    // 此前固定 `| 0o664` 会把属主只想要的 0600 抬成 0664（多出 other 读），
+    // 属于模块自己发明的放宽。
     let required_mode = match file_type {
         mode if mode == libc::S_IFDIR as mode_t => private_dir_required_mode(path),
-        mode if mode == libc::S_IFREG as mode_t => PRIVATE_CHILD_FILE_REQUIRED_MODE,
+        mode if mode == libc::S_IFREG as mode_t => (current_mode & 0o700) >> 3,
         _ => return,
     };
-    let current_mode = st.st_mode & 0o7777;
 
-    if current_mode & required_mode == required_mode {
+    if required_mode == 0 || current_mode & required_mode == required_mode {
         return;
     }
 

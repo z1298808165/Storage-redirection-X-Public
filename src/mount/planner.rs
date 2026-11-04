@@ -22,8 +22,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
-pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
-pub(super) const REAL_PUBLIC_DIR_MODE: libc::mode_t = 0o2771;
+// 目录模式只在 `platform::fs` 定义一次，避免多处副本各自漂移（曾出现 0o2773 与
+// 0o2771 两套公共目录口径并存）。
+pub(super) use crate::platform::fs::{MAPPED_DIR_MODE, REAL_PUBLIC_DIR_MODE};
 pub(super) const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
 pub(super) const ALLOWED_REAL_TREE_METADATA_LIMIT: usize = 256;
 pub(super) const READ_ONLY_TREE_METADATA_LIMIT: usize = 512;

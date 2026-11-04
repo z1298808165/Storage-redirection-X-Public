@@ -12,10 +12,8 @@ const LOGCAT_OP_TAG: &str = "FileMonitorOp";
 const ANDROID_APP_UID_START: i32 = 10000;
 const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
-const REAL_PUBLIC_DIR_MODE: mode_t = 0o2771;
-const REDIRECT_BACKEND_DIR_REQUIRED_MODE: mode_t = 0o2773;
-const PRIVATE_CHILD_DIR_REQUIRED_MODE: mode_t = 0o2751;
-const PRIVATE_CHILD_FILE_REQUIRED_MODE: mode_t = 0o664;
+// 目录模式只在 `platform::fs` 定义一次，避免与挂载侧副本各自漂移。
+use crate::platform::fs::REAL_PUBLIC_DIR_MODE;
 
 pub(super) struct MonitorIdentity {
     pub(super) package_name: String,

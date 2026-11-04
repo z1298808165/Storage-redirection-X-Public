@@ -90,8 +90,9 @@ static CREATE_ENOENT_DIAG_COUNT: AtomicU64 = AtomicU64::new(0);
 const INITIAL_DIR_CANDIDATE_CACHE_ENTRIES: usize = 64;
 const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
-pub(super) const MAPPED_DIR_MODE: libc::mode_t = 0o2773;
-const SHARED_PUBLIC_DIR_MODE: u32 = 0o2770;
+// 目录模式只在 `platform::fs` 定义一次，避免多处副本各自漂移。
+pub(super) use crate::platform::fs::MAPPED_DIR_MODE;
+const SHARED_PUBLIC_DIR_MODE: u32 = crate::platform::fs::SHARED_PUBLIC_DIR_MODE;
 /// 一级压缩（去重、剔除被父根覆盖的子路径）后的软目标根数。
 ///
 /// 优先保持"只在通配规则命中的最小具体父目录上挂 FUSE"的设计前提，能不收敛就不收敛。
