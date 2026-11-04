@@ -1,4 +1,5 @@
 use super::super::stats::InterceptHub;
+use super::dir_snapshot::path_exists_for_cursor_row as row_path_exists;
 use super::path_util::{
     download_relative_suffix, has_unsafe_relative_path_segment, is_media_store_pending_path,
     is_probe_path, is_visibility_log_path, java_bucket_id, normalize_bucket_path_for_user,
@@ -717,8 +718,8 @@ pub(crate) fn should_hide_cursor_storage_path_for_caller(
             true,
         );
     }
-    if path_exists_by_syscall(&fallback_path)
-        || path_exists_by_syscall(&writer::storage_to_data_media_path(&fallback_path))
+    if row_path_exists(&fallback_path)
+        || row_path_exists(&writer::storage_to_data_media_path(&fallback_path))
     {
         return log(
             "fallback_exists",
@@ -731,7 +732,7 @@ pub(crate) fn should_hide_cursor_storage_path_for_caller(
 
     // 保留看似仍处于 pending 状态的 MediaStore 条目行。
     // 对调用方没有可见目标的已有公共原始条目则隐藏。
-    let original_exists = path_exists_by_syscall(path_text);
+    let original_exists = row_path_exists(path_text);
     log(
         if original_exists {
             "hide_public_original"
@@ -828,8 +829,8 @@ where
     }
     if should_keep_existing_rewrite_target(
         decision.is_mapping,
-        path_exists_by_syscall(&decision.new_path),
-        path_exists_by_syscall(&display_path),
+        row_path_exists(&decision.new_path),
+        row_path_exists(&display_path),
     ) {
         let rewritten = if has_file_scheme {
             format!("{}{}", FILE_SCHEME_PREFIX, display_path)
@@ -861,7 +862,7 @@ where
         // Download 场景常见 "先写入后可见"：若在 pending 阶段直接隐藏行，
         // caller 可能拿不到可写 URI，导致保存失败。只保留 MediaStore
         // .pending-* 临时文件，避免普通已删除媒体行继续出现在相册里。
-        if is_media_store_pending_path(path_text) && !path_exists_by_syscall(path_text) {
+        if is_media_store_pending_path(path_text) && !row_path_exists(path_text) {
             let display_path = to_public_storage_path(&decision.new_path);
             let rewritten = if has_file_scheme {
                 format!("{}{}", FILE_SCHEME_PREFIX, display_path)
@@ -1006,7 +1007,7 @@ fn rewrite_cursor_storage_path_for_mapping_view(
     if can_hide_rows
         && !mapping_view_path_exists_for_caller(&display_path, caller_package, caller_uid)
     {
-        if is_media_store_pending_path(path_text) && !path_exists_by_syscall(path_text) {
+        if is_media_store_pending_path(path_text) && !row_path_exists(path_text) {
             let rewritten = if has_file_scheme {
                 format!("{}{}", FILE_SCHEME_PREFIX, display_path)
             } else {
@@ -1096,7 +1097,7 @@ fn mapping_view_path_exists_for_caller(
     if let Some(parent) = display_path.strip_suffix("/.srx_probe") {
         return mapping_view_path_exists_for_caller(parent, caller_package, caller_uid);
     }
-    if path_exists_by_syscall(display_path) {
+    if row_path_exists(display_path) {
         return true;
     }
     let mappings = writer::get_caller_mappings(caller_package, caller_uid);
@@ -1107,14 +1108,13 @@ fn mapping_view_path_exists_for_caller(
     if mapped.is_empty() {
         return false;
     }
-    path_exists_by_syscall(&mapped)
-        || path_exists_by_syscall(&writer::storage_to_data_media_path(&mapped))
+    row_path_exists(&mapped) || row_path_exists(&writer::storage_to_data_media_path(&mapped))
 }
 
 fn mapping_target_path_exists(mapped_path: &str) -> bool {
     !mapped_path.is_empty()
-        && (path_exists_by_syscall(mapped_path)
-            || path_exists_by_syscall(&writer::storage_to_data_media_path(mapped_path)))
+        && (row_path_exists(mapped_path)
+            || row_path_exists(&writer::storage_to_data_media_path(mapped_path)))
 }
 
 fn resolve_caller_package_for_media_placeholder(
@@ -1315,6 +1315,69 @@ struct PlaceholderCandidate {
     request_len: usize,
 }
 
+/// uid→包名解析的记忆化：cursor 过滤对**同一查询**的每一行都会走到这里
+/// （issue #7：TIM 一次查询两万行，行行重付包表解析、排序去重与按包过滤）。
+/// 只记忆化「只由 uid 决定」的结果——单包 uid 的归属、以及只按启用开关过滤出的
+/// 唯一启用包；共享 uid 的按路径推断结果与行有关，绝不入缓存。
+static CALLER_PACKAGE_MEMO: std::sync::Mutex<Option<CallerPackageMemo>> =
+    std::sync::Mutex::new(None);
+const CALLER_PACKAGE_MEMO_TTL_MS: i64 = 2_000;
+
+#[derive(Default)]
+struct CallerPackageMemo {
+    uid: i32,
+    at_ms: i64,
+    /// 单包 uid 的归属（`resolve_caller_package`）。
+    resolved: Option<String>,
+    /// 只按启用开关过滤后唯一的启用包（`resolve_redirect_caller_package`）。
+    redirect_only: Option<String>,
+}
+
+fn memo_is_fresh(memo: &Option<CallerPackageMemo>, caller_uid: i32) -> bool {
+    memo.as_ref().is_some_and(|memo| {
+        memo.uid == caller_uid
+            && paths::monotonic_ms().saturating_sub(memo.at_ms) < CALLER_PACKAGE_MEMO_TTL_MS
+    })
+}
+
+fn cached_caller_package(caller_uid: i32, redirect_only: bool) -> Option<String> {
+    let memo = CALLER_PACKAGE_MEMO.lock().ok()?;
+    if !memo_is_fresh(&memo, caller_uid) {
+        return None;
+    }
+    let memo = memo.as_ref()?;
+    if redirect_only {
+        memo.redirect_only.clone()
+    } else {
+        memo.resolved.clone()
+    }
+}
+
+fn remember_caller_package(caller_uid: i32, package: &str, redirect_only: bool) {
+    if package.is_empty() {
+        return;
+    }
+    let Ok(mut memo) = CALLER_PACKAGE_MEMO.lock() else {
+        return;
+    };
+    let now_ms = paths::monotonic_ms();
+    if !memo_is_fresh(&memo, caller_uid) {
+        *memo = Some(CallerPackageMemo {
+            uid: caller_uid,
+            at_ms: now_ms,
+            ..CallerPackageMemo::default()
+        });
+    }
+    if let Some(memo) = memo.as_mut() {
+        let slot = if redirect_only {
+            &mut memo.redirect_only
+        } else {
+            &mut memo.resolved
+        };
+        *slot = Some(package.to_string());
+    }
+}
+
 fn resolve_caller_package(caller_uid: i32, path_text: &str) -> String {
     refresh_settings_snapshot();
     let current_package = InterceptHub::instance().get_current_caller_package();
@@ -1325,16 +1388,14 @@ fn resolve_caller_package(caller_uid: i32, path_text: &str) -> String {
     if is_package_uid_match(&saved_package, caller_uid) {
         return saved_package;
     }
-    let mut packages = policy::get_packages_for_uid(caller_uid);
-    if packages.is_empty() {
-        policy::refresh_shared_uid_cache();
-        packages = policy::get_packages_for_uid(caller_uid);
+    if let Some(cached) = cached_caller_package(caller_uid, false) {
+        return cached;
     }
-    packages.sort();
-    packages.dedup();
-    packages.retain(|pkg| !pkg.is_empty() && !policy::is_system_writer_package(pkg));
+    let mut packages = caller_redirect_packages(caller_uid);
     if packages.len() == 1 {
-        return packages[0].clone();
+        let package = packages.remove(0);
+        remember_caller_package(caller_uid, &package, false);
+        return package;
     }
     let inferred =
         SettingsHub::instance().resolve_redirect_package_by_path_for_user(caller_uid, path_text);
@@ -1361,15 +1422,16 @@ fn resolve_redirect_caller_package(caller_uid: i32) -> String {
     if is_package_uid_match(&saved_package, caller_uid) {
         return saved_package;
     }
-    let mut packages = policy::get_packages_for_uid(caller_uid);
-    if packages.is_empty() {
-        policy::refresh_shared_uid_cache();
-        packages = policy::get_packages_for_uid(caller_uid);
+    if let Some(cached) = cached_caller_package(caller_uid, true) {
+        return cached;
     }
-    packages.sort();
-    packages.dedup();
-    packages.retain(|pkg| !pkg.is_empty() && !policy::is_system_writer_package(pkg));
-    let mut enabled = packages
+    let resolved = resolve_redirect_caller_package_uncached(caller_uid);
+    remember_caller_package(caller_uid, &resolved, true);
+    resolved
+}
+
+fn resolve_redirect_caller_package_uncached(caller_uid: i32) -> String {
+    let mut enabled = caller_redirect_packages(caller_uid)
         .into_iter()
         .filter(|pkg| SettingsHub::instance().should_redirect(pkg, caller_uid))
         .collect::<Vec<_>>();
@@ -1378,6 +1440,19 @@ fn resolve_redirect_caller_package(caller_uid: i32) -> String {
     } else {
         String::new()
     }
+}
+
+/// 当前 uid 名下可参与重定向的包：已排序去重并剔除系统代写包。
+fn caller_redirect_packages(caller_uid: i32) -> Vec<String> {
+    let mut packages = policy::get_packages_for_uid(caller_uid);
+    if packages.is_empty() {
+        policy::refresh_shared_uid_cache();
+        packages = policy::get_packages_for_uid(caller_uid);
+    }
+    packages.sort();
+    packages.dedup();
+    packages.retain(|pkg| !pkg.is_empty() && !policy::is_system_writer_package(pkg));
+    packages
 }
 
 fn is_package_uid_match(package_name: &str, caller_uid: i32) -> bool {
@@ -1476,4 +1551,247 @@ fn sample_visibility_log(
         if target.is_empty() { "empty" } else { target },
         index + 1
     );
+}
+
+/// 调用方级行判定计划：一次查询里同一调用方的每一行都会经过这里。
+///
+/// 原生 MediaProvider 的行循环不做任何判定；模块加的判定在「该调用方没有任何
+/// 路径规则、没有任何映射」时其实是**整库同判**的——目录只影响落点前缀，是否
+/// 可见只取决于重定向后端里有没有这个文件。把这件事算一次，行级就只剩字符串
+/// 拼接与一次存在性查表，不再逐行跑完整路由。
+#[derive(Clone)]
+enum CallerRowPlan {
+    /// 没有重定向后端：行原样保留，只做一次存在性判定。
+    Pass,
+    /// 有重定向后端：行改写为 `to_public(target + 相对路径)`，可见性看后端文件。
+    Redirect { target: String },
+    /// 规则/映射与目录相关，必须逐行完整判定（行为与改动前完全一致）。
+    PerRow,
+}
+
+thread_local! {
+    static CALLER_ROW_PLAN: std::cell::RefCell<Option<(i32, String, CallerRowPlan)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn caller_row_plan(caller_package: &str, caller_uid: i32) -> CallerRowPlan {
+    let cached = CALLER_ROW_PLAN.with(|slot| {
+        let slot = slot.borrow();
+        slot.as_ref()
+            .filter(|(uid, package, _)| *uid == caller_uid && package == caller_package)
+            .map(|(_, _, plan)| plan.clone())
+    });
+    if let Some(plan) = cached {
+        return plan;
+    }
+    let plan = compute_caller_row_plan(caller_package, caller_uid);
+    CALLER_ROW_PLAN.with(|slot| {
+        *slot.borrow_mut() = Some((caller_uid, caller_package.to_string(), plan.clone()));
+    });
+    plan
+}
+
+fn compute_caller_row_plan(caller_package: &str, caller_uid: i32) -> CallerRowPlan {
+    if caller_package.is_empty() || caller_uid < 0 {
+        return CallerRowPlan::PerRow;
+    }
+    // 有任意规则或多条映射时，逐行结论可能不同：退回完整判定，语义完全不变。
+    if !writer::caller_has_no_path_rules(caller_package, caller_uid) {
+        return CallerRowPlan::PerRow;
+    }
+    if !writer::get_caller_mappings(caller_package, caller_uid).is_empty() {
+        return CallerRowPlan::PerRow;
+    }
+    let user_id = platform::user_id_from_uid(caller_uid);
+    if user_id < 0 {
+        return CallerRowPlan::PerRow;
+    }
+    let target =
+        writer::resolve_system_writer_redirect_target(caller_package, caller_uid, user_id, false);
+    if target.is_empty() {
+        CallerRowPlan::Pass
+    } else {
+        CallerRowPlan::Redirect { target }
+    }
+}
+
+/// Java 行循环的单次入口：一次调用给出「隐藏 / 原样 / 改写到某路径」。
+///
+/// 与改动前的 Java 序列严格同序（改写 → 隐藏判定 → 原始存在性 → 改写目标存在性），
+/// 差异只在于「整库同判」成立时直接给结论，不再逐行跑策略路由与存在性系统调用。
+/// 返回：
+/// - `Some("")`：隐藏该行；
+/// - `Some(path)`：保留并改写为该路径；
+/// - `None`：保留原路径。
+pub(crate) fn cursor_row_action(
+    original_text: &str,
+    caller_uid: i32,
+    allow_missing: bool,
+) -> Option<String> {
+    if caller_uid < 0 {
+        return None;
+    }
+    let (path_text, has_file_scheme) = split_storage_path(original_text)?;
+    let caller_package = resolve_caller_package(caller_uid, path_text);
+    // 归因不到包时没有改写与隐藏可言，但「文件已不存在就丢行」这条判定与调用方无关，
+    // 仍然要执行——否则未知调用方会看到已删除条目的行。
+    let plan = if caller_package.is_empty() {
+        CallerRowPlan::Pass
+    } else {
+        caller_row_plan(&caller_package, caller_uid)
+    };
+    if let Some(decision) =
+        fast_row_action(&plan, path_text, has_file_scheme, caller_uid, allow_missing)
+    {
+        return decision;
+    }
+    legacy_row_action(original_text, path_text, caller_uid, allow_missing)
+}
+
+/// 整库同判成立时的行级结论；`None` 表示该行必须退回完整判定。
+fn fast_row_action(
+    plan: &CallerRowPlan,
+    path_text: &str,
+    has_file_scheme: bool,
+    caller_uid: i32,
+    allow_missing: bool,
+) -> Option<Option<String>> {
+    // 以点开头的名字（`.pending-*`、`.srx_probe`、缩略图）与私有根都走完整判定：
+    // 它们的可见性有额外的例外分支，不能用整库同判近似。
+    if !is_plain_row_path(path_text) {
+        return None;
+    }
+    match plan {
+        CallerRowPlan::PerRow => None,
+        CallerRowPlan::Pass => {
+            if allow_missing || is_media_store_pending_path(path_text) {
+                return Some(None);
+            }
+            if storage_path_exists_for_caller(path_text, caller_uid) {
+                Some(None)
+            } else {
+                Some(Some(String::new()))
+            }
+        }
+        CallerRowPlan::Redirect { target } => {
+            let user_id = platform::user_id_from_uid(caller_uid);
+            if user_id < 0 {
+                return None;
+            }
+            let normalized = paths::resolve_user_path(&paths::normalize(path_text), user_id);
+            if normalized.is_empty() || paths::has_unsafe_segments(&normalized) {
+                return None;
+            }
+            let backend = writer::map_path_by_caller_fallback(&normalized, target, user_id);
+            if backend.is_empty() {
+                return None;
+            }
+            let display_path = to_public_storage_path(&backend);
+            if display_path.is_empty() {
+                return None;
+            }
+            if !allow_missing
+                && !is_media_store_pending_path(path_text)
+                && !row_path_exists(&display_path)
+                && !row_path_exists(&backend)
+                && !row_path_exists(&writer::storage_to_data_media_path(&backend))
+            {
+                return Some(Some(String::new()));
+            }
+            if display_path == path_text {
+                return Some(None);
+            }
+            let rewritten = if has_file_scheme {
+                format!("{}{}", FILE_SCHEME_PREFIX, display_path)
+            } else {
+                display_path
+            };
+            Some(Some(rewritten))
+        }
+    }
+}
+
+/// 行路径能否走「整库同判」：必须是存储根下的普通条目。
+fn is_plain_row_path(path_text: &str) -> bool {
+    if path_text.is_empty() || path_text.ends_with('/') {
+        return false;
+    }
+    let Some((_, name)) = path_text.rsplit_once('/') else {
+        return false;
+    };
+    if name.is_empty() || name.starts_with('.') {
+        return false;
+    }
+    // 私有根（`Android/{data,media,obb}/<pkg>`）有独立视图语义，逐行判定。
+    !path_text.contains("/Android/data/")
+        && !path_text.contains("/Android/media/")
+        && !path_text.contains("/Android/obb/")
+}
+
+/// 与 Java 行循环完全同序的完整判定：整库同判不成立时走这里。
+fn legacy_row_action(
+    original_text: &str,
+    path_text: &str,
+    caller_uid: i32,
+    allow_missing: bool,
+) -> Option<String> {
+    let rewritten = rewrite_cursor_storage_path_for_caller(original_text, caller_uid);
+    if let Some(value) = rewritten.as_deref()
+        && value.is_empty()
+    {
+        return Some(String::new());
+    }
+    let changed = rewritten
+        .as_deref()
+        .filter(|value| *value != original_text && *value != path_text);
+    if changed.is_none() && should_hide_cursor_storage_path_for_caller(original_text, caller_uid) {
+        return Some(String::new());
+    }
+    if !allow_missing
+        && !is_media_store_pending_path(path_text)
+        && !storage_path_exists_for_caller(path_text, caller_uid)
+    {
+        return Some(String::new());
+    }
+    let changed = changed?;
+    if !allow_missing {
+        let rewritten_exists = storage_path_exists_for_caller(changed, caller_uid);
+        let mapping_view = is_mapping_view_rewrite(path_text, changed, caller_uid);
+        if !rewritten_exists && (!mapping_view || !is_media_store_pending_path(path_text)) {
+            return Some(String::new());
+        }
+    }
+    Some(changed.to_string())
+}
+
+/// Java `storagePathExistsForCaller` 的等价实现：先看路径本身，再看它经重定向后的落点。
+fn storage_path_exists_for_caller(path_text: &str, caller_uid: i32) -> bool {
+    if row_path_exists(path_text) {
+        return true;
+    }
+    resolve_open_storage_path_for_caller(path_text, caller_uid)
+        .is_some_and(|mapped| !mapped.is_empty() && row_path_exists(&mapped))
+}
+
+/// Java `isMappingViewRewrite` 的等价实现：改写路径的重定向落点就是原路径。
+fn is_mapping_view_rewrite(original: &str, rewritten: &str, caller_uid: i32) -> bool {
+    let Some(open_target) = resolve_open_storage_path_for_caller(rewritten, caller_uid) else {
+        return false;
+    };
+    if open_target.is_empty() {
+        return false;
+    }
+    let user_id = platform::user_id_from_uid(caller_uid);
+    if user_id < 0 {
+        return false;
+    }
+    let left = to_public_storage_path(&paths::resolve_user_path(
+        &paths::normalize(&open_target),
+        user_id,
+    ));
+    let right = to_public_storage_path(&paths::resolve_user_path(
+        &paths::normalize(original),
+        user_id,
+    ));
+    !left.is_empty() && left == right
 }

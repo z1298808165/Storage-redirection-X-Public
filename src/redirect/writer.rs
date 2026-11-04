@@ -99,6 +99,20 @@ pub fn is_path_in_caller_mapping_request(path: &str, mappings: &[PathMapping]) -
         .any(|mapping| paths::child_suffix(path, &mapping.request_path).is_some())
 }
 
+/// 该调用方是否没有任何路径规则（放行/排除/只读/只读排除/沙箱五套列表全空）。
+///
+/// cursor 行过滤的「整库同判」需要它：只有没有任何规则时，一个目录下的所有行才
+/// 必然得到同一个判定；映射不在这组列表里，由 [`get_caller_mappings`] 单独判定。
+pub fn caller_has_no_path_rules(caller_package: &str, caller_uid: i32) -> bool {
+    with_cached_caller_allowed_cache(caller_package, caller_uid, |cache| {
+        cache.allowed_real_paths.is_empty()
+            && cache.excluded_real_paths.is_empty()
+            && cache.sandboxed_paths.is_empty()
+            && cache.read_only_paths.is_empty()
+            && cache.read_only_excluded_paths.is_empty()
+    })
+}
+
 pub fn is_path_allowed_by_caller_real_paths(
     resolved_path: &str,
     caller_package: &str,

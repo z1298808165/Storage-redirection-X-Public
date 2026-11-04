@@ -1004,6 +1004,81 @@ class ScenarioConsistencyTest(unittest.TestCase):
             config,
         )
 
+    def test_cursor_row_action_is_single_entry_and_plan_gated(self) -> None:
+        # 行循环此前每行跨 JNI 三到六次（改写 + 隐藏 + 两次存在性），并在每行跑一遍
+        # 完整策略路由；原生 MediaProvider 的行循环不做任何判定。这里钉死「整行判定
+        # 收敛为一次调用」，且「整库同判」只在没有任何规则与映射时才允许成立：
+        # 1) Java 行循环只调 cursorRowAction，原生侧同签名注册（名字/签名错会整批失败）；
+        # 2) 计划的准入条件必须同时包含「无路径规则」与「无映射」；
+        # 3) 私有根与点开头的名字不得走同判（它们有独立视图/例外分支）；
+        # 4) 详细日志下保留差分校验，用旧序列证明新入口等价。
+        java = read("java_src/org/srx/hook/Hooker.java")
+        self.assertIn(
+            "private static native String cursorRowAction(",
+            java,
+        )
+        self.assertIn("cursorRowAction(path, callerUid, allowMissingMappedTarget)", java)
+        self.assertIn("verifyCursorRowAction(", java)
+        self.assertIn("cursor row action mismatch path=", java)
+        native = read("src/java_hook/hooker_class.rs")
+        self.assertIn(
+            'b"cursorRowAction' + chr(92) + '0"',
+            native,
+        )
+        self.assertIn("(Ljava/lang/String;IZ)Ljava/lang/String;", native)
+        self.assertIn("crate::hook::cursor_row_action(&original, caller_uid, allow_missing)", native)
+        rewrite = read("src/hook/jni_query/rewrite.rs")
+        self.assertIn("pub(crate) fn cursor_row_action(", rewrite)
+        self.assertIn("writer::caller_has_no_path_rules(caller_package, caller_uid)", rewrite)
+        self.assertIn("writer::get_caller_mappings(caller_package, caller_uid).is_empty()", rewrite)
+        self.assertIn('path_text.contains("/Android/data/")', rewrite)
+        self.assertIn("name.starts_with('.')", rewrite)
+        # 退回完整判定时必须仍走原序列（改写 → 隐藏 → 原始存在性 → 改写目标存在性）。
+        legacy = section(rewrite, "fn legacy_row_action(", "fn storage_path_exists_for_caller(")
+        self.assertIn("rewrite_cursor_storage_path_for_caller(original_text", legacy)
+        self.assertIn("should_hide_cursor_storage_path_for_caller(original_text", legacy)
+        self.assertIn("storage_path_exists_for_caller(path_text", legacy)
+        self.assertIn("is_mapping_view_rewrite(path_text", legacy)
+        writer = read("src/redirect/writer.rs")
+        self.assertIn("pub fn caller_has_no_path_rules(", writer)
+        for field in (
+            "allowed_real_paths",
+            "excluded_real_paths",
+            "sandboxed_paths",
+            "read_only_paths",
+            "read_only_excluded_paths",
+        ):
+            self.assertIn(field + ".is_empty()", writer)
+
+    def test_cursor_row_existence_folds_by_directory(self) -> None:
+        # MediaStore 行循环的存在性判定必须按父目录折叠枚举：逐行 faccessat 的 FUSE
+        # 往返是 issue #7 冷启动相册首屏的主成本（实测单次约 250µs）。这里钉死三件事，
+        # 任一条丢失都会让优化悄悄退回逐行系统调用：
+        # 1) Java 行循环用的是行级入口，不是逐条 syscall 入口；
+        # 2) 原生侧该入口存在且已注册（名字/签名错会在 RegisterNatives 时整批失败）；
+        # 3) 折叠只按「父目录 + 名字」，目录不可枚举时必须退回逐条判定。
+        java = read("java_src/org/srx/hook/Hooker.java")
+        self.assertIn("private static native boolean pathExistsForCursorRow(String path);", java)
+        self.assertIn("if (pathExistsForCursorRow(path)) return true;", java)
+        native = read("src/java_hook/hooker_class.rs")
+        self.assertIn('b"pathExistsForCursorRow' + chr(92) + '0"', native)
+        self.assertIn("(Ljava/lang/String;)Z", native)
+        self.assertIn("crate::hook::path_exists_for_cursor_row(&path_text)", native)
+        snapshot = read("src/hook/jni_query/dir_snapshot.rs")
+        self.assertIn("libc::SYS_getdents64", snapshot)
+        self.assertIn("libc::X_OK", snapshot)
+        # 不可枚举必须退回逐条判定，不能把失败态当成「不存在」。
+        self.assertIn("DirState::Unlisted => return path_exists_by_syscall", snapshot)
+        self.assertIn("names.contains(name)", snapshot)
+        # 按代价切换：小分页逐条查、整库查询才枚举，避免枚举大目录反噬小分页。
+        self.assertIn("DIR_ENUMERATE_AFTER_ROWS", snapshot)
+        self.assertIn("Observation::Enumerate", snapshot)
+        rewrite = read("src/hook/jni_query/rewrite.rs")
+        compact = "".join(rewrite.split())
+        self.assertIn("use super::dir_snapshot::path_exists_for_cursor_row as row_path_exists;", rewrite)
+        self.assertIn("row_path_exists(&fallback_path)", compact)
+        self.assertIn("row_path_exists(path_text)", compact)
+
     def test_shared_fuse_host_attach_contract(self) -> None:
         # 应用接入共享宿主会话的四条硬约束，任一条被放宽都会让应用静默失去重定向或让
         # 清理流程误伤其它应用：

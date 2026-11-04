@@ -32,11 +32,11 @@ pub(crate) use context::{
     remember_process_mapped_dir, remember_provider_passthrough_virtual_dir,
 };
 pub(crate) use jni_query::{
-    is_redirect_enabled_for_caller_uid, resolve_download_media_placeholder_path_for_caller,
-    resolve_media_store_direct_path_for_caller, resolve_open_storage_path_for_caller,
-    rewrite_cursor_storage_path_for_caller, rewrite_media_store_bucket_id_for_caller,
-    rewrite_media_store_storage_path_for_caller, should_hide_cursor_storage_path_for_caller,
-    storage_path_exists_by_syscall,
+    cursor_row_action, is_redirect_enabled_for_caller_uid, path_exists_for_cursor_row,
+    resolve_download_media_placeholder_path_for_caller, resolve_media_store_direct_path_for_caller,
+    resolve_open_storage_path_for_caller, rewrite_cursor_storage_path_for_caller,
+    rewrite_media_store_bucket_id_for_caller, rewrite_media_store_storage_path_for_caller,
+    should_hide_cursor_storage_path_for_caller, storage_path_exists_by_syscall,
 };
 pub(crate) use media_fuse::{
     record_read_only_fuse_operation, should_allow_own_android_private_path_access,
