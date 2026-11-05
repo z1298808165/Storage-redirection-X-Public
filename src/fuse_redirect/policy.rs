@@ -912,12 +912,20 @@ impl RedirectPolicy {
             && !is_shared_media_subtree_write_path(&resolved_storage_path)
             && !is_same_uid_private_write_path(&resolved_storage_path, self.uid)
         {
-            log::warn!(
-                "fuse host write leak blocked pkg={} uid={} path={}",
-                self.package_name,
-                self.uid,
-                resolved_storage_path
-            );
+            // 被拦的写多是应用反复重试同一个根目录 mkdir（支付宝/微信启动时都会刷），
+            // 逐次落 warn 会挤占 running.log 的 2MB 轮转窗口；首条全量、之后每 256 次
+            // 留一条并带累计计数，足以判定「谁在越权写、频率多高」。
+            static WRITE_LEAK_BLOCKED_COUNT: AtomicU64 = AtomicU64::new(0);
+            let seen = WRITE_LEAK_BLOCKED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if seen == 1 || seen.is_multiple_of(256) {
+                log::warn!(
+                    "fuse host write leak blocked pkg={} uid={} path={} seen={}",
+                    self.package_name,
+                    self.uid,
+                    resolved_storage_path,
+                    seen
+                );
+            }
             return None;
         }
         let mut backend = match decision.kind {

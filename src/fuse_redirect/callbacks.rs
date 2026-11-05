@@ -654,14 +654,22 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only && is_mutation {
-            log::warn!(
-                "fuse open read-only deny pkg={} rel={} policy_fp={:016x} monitor_only={} op={}",
-                policy.package_name,
-                backend.rel,
-                policy.fingerprint,
-                policy.is_monitor_only,
-                fuse_open_operation_name(flags.0)
-            );
+            // policy_fp 是「宿主仍持旧策略」的判定锚点，必须留在非 verbose 日志里；但
+            // 只读拒绝由应用重试驱动、量可能很大，且每次都已写入监视记录。前 16 条全记，
+            // 之后每 256 条记一条。
+            static READ_ONLY_DENY_LOGGED: AtomicU64 = AtomicU64::new(0);
+            let seen = READ_ONLY_DENY_LOGGED.fetch_add(1, Ordering::Relaxed) + 1;
+            if seen <= 16 || seen.is_multiple_of(256) {
+                log::warn!(
+                    "fuse open read-only deny pkg={} rel={} policy_fp={:016x} monitor_only={} op={} seen={}",
+                    policy.package_name,
+                    backend.rel,
+                    policy.fingerprint,
+                    policy.is_monitor_only,
+                    fuse_open_operation_name(flags.0),
+                    seen
+                );
+            }
             policy.emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
             reply.error(Errno::EROFS);
             return;
@@ -1350,12 +1358,29 @@ impl Filesystem for FuseRedirectFs {
         ) {
             Ok(file) => file,
             Err(errno) => {
-                log::warn!(
-                    "fuse create backend open failed rel={} backend={} errno={:?}",
-                    rel,
-                    backend.path.display(),
-                    errno
-                );
+                // O_EXCL 撞已有文件、父目录缺失、权限拒绝都是应用可预期的结果，只在
+                // verbose 下留痕；其余错误罕见且有排查价值，按「前 16 条 + 每 256 条」采样。
+                let errno_value = i32::from(errno);
+                if matches!(errno_value, libc::EEXIST | libc::ENOENT | libc::EACCES) {
+                    log::debug!(
+                        "fuse create backend open failed rel={} backend={} errno={:?}",
+                        rel,
+                        backend.path.display(),
+                        errno
+                    );
+                } else {
+                    static CREATE_OPEN_FAILED_LOGGED: AtomicU64 = AtomicU64::new(0);
+                    let seen = CREATE_OPEN_FAILED_LOGGED.fetch_add(1, Ordering::Relaxed) + 1;
+                    if seen <= 16 || seen.is_multiple_of(256) {
+                        log::warn!(
+                            "fuse create backend open failed rel={} backend={} errno={:?} seen={}",
+                            rel,
+                            backend.path.display(),
+                            errno,
+                            seen
+                        );
+                    }
+                }
                 reply.error(errno);
                 return;
             }

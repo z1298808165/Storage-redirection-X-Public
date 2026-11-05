@@ -775,7 +775,8 @@ fn append_real_path_rule(
 ) {
     let resolved = if expand_mount_fallbacks && paths::contains_wildcards(&resolved) {
         if let Some(fallback) = paths::wildcard_policy_fallback_parent(&resolved, storage_root) {
-            log::warn!(
+            // 配置决定的确定性展开，每轮规划都会重复，只在 verbose 下留痕。
+            log::info!(
                 "writer fallback wildcard to mount parent: {} -> {}",
                 resolved,
                 fallback

@@ -274,12 +274,12 @@ class SrxRepository(
         // 而成员、系统标记、APK 路径都能由 pm 查询拿到，标签与图标由本进程的 PackageManager 补齐。
         val dexAppList =
             if (userPackages.isEmpty) loadDexAppList(userId, force) else DexAppList.Empty
-        PerfLog.log(
-            "load user=$userId config=${afterConfig}ms pm=${afterPm}ms shell=${afterShell}ms " +
-                "dex=${PerfLog.sinceMs(t0)}ms (pm=${pmApps.size} " +
-                "shell=${userPackages.packageNames.size} sys=${userPackages.systemPackages.size} " +
-                "dex=${dexAppList.labels.size})"
-        )
+        PerfLog.log {
+          "load user=$userId config=${afterConfig}ms pm=${afterPm}ms shell=${afterShell}ms " +
+              "dex=${PerfLog.sinceMs(t0)}ms (pm=${pmApps.size} " +
+              "shell=${userPackages.packageNames.size} sys=${userPackages.systemPackages.size} " +
+              "dex=${dexAppList.labels.size})"
+        }
         val tBuild = PerfLog.mark()
         // PackageManager 只枚举调用方用户：非主用户的应用清单必须由该用户的 root 通道决定，
         // 否则切到分身用户后仍会把主用户的应用全部列出来。两条通道都不可用时才退回枚举结果。
@@ -294,10 +294,10 @@ class SrxRepository(
                 userId,
             )
             .also {
-              PerfLog.log(
-                  "build user=$userId ${PerfLog.sinceMs(tBuild)}ms " +
-                      "total=${PerfLog.sinceMs(t0)}ms rows=${it.size}"
-              )
+              PerfLog.log {
+                "build user=$userId ${PerfLog.sinceMs(tBuild)}ms " +
+                    "total=${PerfLog.sinceMs(t0)}ms rows=${it.size}"
+              }
               appListSnapshots.write(userId, it)
             }
       }
@@ -475,10 +475,10 @@ class SrxRepository(
           withContext(Dispatchers.Default) {
             parseConfiguredAppConfigDump(out, ConfiguredAppConfigMarker, json)
           }
-      PerfLog.log(
-          "config shell=${tShell}ms parse=${PerfLog.sinceMs(t0) - tShell}ms " +
-              "bytes=${out.length} apps=${parsed.size}"
-      )
+      PerfLog.log {
+        "config shell=${tShell}ms parse=${PerfLog.sinceMs(t0) - tShell}ms " +
+            "bytes=${out.length} apps=${parsed.size}"
+      }
       configuredAppsCache = TimedCache(parsed, System.nanoTime())
       parsed
     }

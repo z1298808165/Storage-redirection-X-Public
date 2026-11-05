@@ -384,7 +384,8 @@ fn append_router_path(
     }
 
     if let Some(fallback) = paths::wildcard_policy_fallback_parent(&path, storage_root) {
-        log::warn!(
+        // 配置决定的确定性展开，每轮规划都会重复，只在 verbose 下留痕。
+        log::info!(
             "router fallback wildcard to mount parent: {} -> {}",
             path,
             fallback

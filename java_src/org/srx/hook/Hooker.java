@@ -5589,6 +5589,7 @@ public class Hooker {
   }
 
   private static int WRAP_TIMING_LOG_COUNT = 0;
+  private static int WRAP_SLOW_TIMING_LOG_COUNT = 0;
 
   private static void logCursor(
       String stage, Cursor cursor, int pathColumn, int before, int after, int callerUid) {
@@ -5790,9 +5791,17 @@ public class Hooker {
         }
         long filterCostMs = android.os.SystemClock.elapsedRealtime() - filterStartedMs;
         slowQuery = filterCostMs > 200;
-        if (slowQuery || WRAP_TIMING_LOG_COUNT < 64) {
-          if (slowQuery) WRAP_TIMING_LOG_COUNT = 0;
-          else WRAP_TIMING_LOG_COUNT++;
+        // 慢查询（>200ms）不受 verbose 开关约束，但每进程最多 32 条；常规耗时样本只在
+        // verbose 下记录前 64 条。此前慢查询会把常规计数清零，慢查询频繁时日志没有上限。
+        boolean logTiming;
+        if (slowQuery) {
+          logTiming = WRAP_SLOW_TIMING_LOG_COUNT < 32;
+          if (logTiming) WRAP_SLOW_TIMING_LOG_COUNT++;
+        } else {
+          logTiming = WRAP_TIMING_LOG_COUNT < 64 && shouldLog();
+          if (logTiming) WRAP_TIMING_LOG_COUNT++;
+        }
+        if (logTiming) {
           android.util.Log.i(
               "SRX",
               "java cursor timing caller_uid="

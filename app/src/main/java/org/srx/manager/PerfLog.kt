@@ -14,7 +14,9 @@ internal object PerfLog {
 
   fun sinceMs(mark: Long): Long = (System.nanoTime() - mark) / 1_000_000
 
-  fun log(message: String) {
-    runCatching { android.util.Log.i(Tag, message) }
+  /** 只在 debug 构建输出；release 包每次 root 调用都会经过这里，不应常驻写 logcat 或拼接消息。 */
+  inline fun log(message: () -> String) {
+    if (!BuildConfig.DEBUG) return
+    runCatching { android.util.Log.i(Tag, message()) }
   }
 }
