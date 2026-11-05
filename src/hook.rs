@@ -20,6 +20,7 @@ use std::ffi::CStr;
 
 pub(crate) use caller::{
     capture_java_binder_caller, enter_java_caller_scope, exit_java_caller_scope,
+    lookup_system_pid_table,
 };
 pub(crate) use context::{
     enter_explicit_caller_decision, enter_path_owner_inference_disabled,

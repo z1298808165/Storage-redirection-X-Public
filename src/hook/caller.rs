@@ -768,26 +768,37 @@ fn resolve_caller_pid_by_binder() -> i32 {
 }
 
 // 通过 /proc/PID/cmdline 取包名
+//
+// 先按原有语义取 argv[0]（包名形态时直接返回）；argv[0] 不是包名时（root helper
+// 常见形态 `mtio daemon @bin.mt.plus-2967573 0`），再扫描完整 argv 里的包名形态
+// token。真实发起者由内核 FUSE 头的 pid 指定，pid 对应的命令行是比 uid 更精确的
+// 证据：同一个 root helper 可能以任意 uid 运行（真机：MT 管理器 helper 以
+// fsuid=10000 写入，而 uid 10000 被某个 RRO 资源包占用，只按 uid 反查必然归错）。
 fn resolve_caller_package_by_pid(pid: i32) -> String {
     if pid <= 0 {
         return String::new();
     }
 
-    let cmdline_path = format!("/proc/{}/cmdline", pid);
-    let mut cmdline = read_single_line_by_syscall(&cmdline_path);
-    if cmdline.is_empty() {
+    let path = format!("/proc/{}/cmdline", pid);
+    // hook 侧只能用裸系统调用读文件：本进程装着 PLT hook，std::fs 会走被拦截的
+    // open/read，既可能递归也会污染监视记录（见 read_file_by_syscall 注释）。
+    let raw = read_file_by_syscall(&path, 4096);
+    if raw.is_empty() {
         return String::new();
     }
 
-    if let Some(pos) = cmdline.find('\0') {
-        cmdline.truncate(pos);
+    // 包名解析与 daemon 侧共用同一实现：优先 uid 表命中，其次 `@<pkg>-<ver>`
+    // 形态，子进程名会截断到父包（HyperOS 的 `pkg.remote`）。
+    if let Some(package) = crate::platform::proc_identity::parse_package_from_cmdline(&raw) {
+        return package;
     }
 
-    if let Some(pos) = cmdline.find(':') {
-        cmdline.truncate(pos);
+    // 兜底保持原语义：argv0 就是包名（Java 进程），否则给出 basename 形态身份。
+    let mut head = raw.split('\0').next().unwrap_or("").to_string();
+    if let Some(pos) = head.find(':') {
+        head.truncate(pos);
     }
-
-    normalize_caller_package_text(&cmdline)
+    normalize_caller_package_text(&head)
 }
 
 /// native 二进制进程的身份提取：argv0 带路径时取 basename（如 adb shell 派生
@@ -1166,7 +1177,7 @@ const SYSTEM_PID_TABLE_RECHECK_MIN_AGE_MS: i64 = 300;
 /// 按任务 id 反查 (包名, uid)：先查缓存，过期后从模块目录经 Zygisk 保留 FD
 /// 读取 daemon 写入的表并重建缓存；未命中且缓存已老于重读门槛时再强制刷新
 /// 一次。表缺失或不可读返回 None。
-fn lookup_system_pid_table(pid: i32) -> Option<(String, i32)> {
+pub(crate) fn lookup_system_pid_table(pid: i32) -> Option<(String, i32)> {
     let table_mutex = SYSTEM_PID_TABLE.get_or_init(|| {
         Mutex::new(SystemPidTable {
             loaded_at_ms: -1,

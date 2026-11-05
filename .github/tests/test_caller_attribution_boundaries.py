@@ -620,5 +620,37 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("return true", guard_block)
 
 
+    def test_cross_thread_caller_evidence_is_record_only(self) -> None:
+        """跨线程 binder 证据只能用于记录归因，不得进入归因线索或决策路径。
+
+        背景（2026-11-05 HyperOS A16 实测）：MediaProvider 的 `Transport#insert` 在
+        binder 线程上建目录，而同一次写入的 FUSE 请求由 FuseDaemon 处理，两者不是同一个
+        线程 —— Java 侧捕获的调用方 uid/pid 在 thread_local 里，记录因读不到而退回
+        MP 自己的 uid（`caller_uid=10217`），用户问"这个目录是谁建的"答不上来。
+        补法是进程级证据，但必须只影响记录：决策与归因线索仍只看 thread_local。
+        """
+        context = read("src/hook/context.rs")
+        record_fn = extract_fn(context, "record_caller_uid")
+        self.assertIn("if direct != self_uid", record_fn)
+        self.assertIn("cross_thread_caller_in_window", record_fn)
+        # 归因线索/决策用的原函数不得引用跨线程证据。
+        monitor_fn = extract_fn(context, "get_effective_caller_uid_for_monitor")
+        self.assertNotIn("cross_thread", monitor_fn)
+
+    def test_cross_thread_records_mark_evidence_and_daemon_never_guesses_uid(self) -> None:
+        """记录必须带证据来源标记，且 daemon 对多包 uid 一律放弃而不是猜一个。"""
+        monitor = read("src/hook/monitor.rs")
+        self.assertIn("caller_evidence=cross_thread", monitor)
+
+        daemon = read("src/log_daemon.rs")
+        enrich_fn = extract_fn(daemon, "enrich_monitor_record_identity")
+        self.assertIn("caller_evidence=cross_thread", enrich_fn)
+        self.assertIn("system_uid_package", enrich_fn)
+
+        uid_fn = extract_fn(daemon, "system_uid_package")
+        # 同一 uid 对应多个包时登记 None（不可用），绝不按排序挑一个。
+        self.assertIn("map.insert(package_uid, None)", uid_fn)
+
+
 if __name__ == "__main__":
     unittest.main()

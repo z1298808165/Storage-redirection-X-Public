@@ -1249,6 +1249,15 @@ fn resolve_system_caller_package(caller_uid: i32, caller_pid: i32, caller_packag
     if !caller_package.is_empty() || caller_uid >= ANDROID_APP_UID_START || caller_pid <= 0 {
         return caller_package.to_string();
     }
+    // daemon 落盘的 pid 表由 root 读取并原子替换：MP 域读不到 root/系统应用进程的
+    // /proc/<pid>（真机实测 cmdline 为空、status 的 uid 为 -1），这条是此时唯一
+    // 还能拿到身份的来源，且表内 uid 必须与账本记的 uid 一致才算命中。
+    if let Some((package, uid)) = crate::hook::lookup_system_pid_table(caller_pid)
+        && uid == caller_uid
+        && !package.is_empty()
+    {
+        return package;
+    }
     let package = read_proc_cmdline_package(caller_pid);
     if package.is_empty() || read_proc_status_uid(caller_pid) != caller_uid {
         return String::new();
@@ -1384,7 +1393,10 @@ fn refine_native_identity_with_caller_uid(
 ) -> (SourceIdentity, Option<String>) {
     let native = identity.package_name.clone();
     let needs_refine = native.is_empty() || !native.contains('.');
-    if !needs_refine || caller_uid < ANDROID_APP_UID_START {
+    // 系统 uid（< 应用起始值）也允许反解：shell(2000)、部分系统应用在 uid 表里
+    // 唯一对应一个包，丢掉它只会把「adb shell 发起的写入」记成未知来源。
+    // 多包 uid（真机 uid 1000 有 53 个包）仍然一律放弃，绝不按排序猜一个。
+    if !needs_refine || caller_uid < 0 {
         return (identity, None);
     }
 

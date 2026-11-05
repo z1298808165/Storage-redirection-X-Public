@@ -426,8 +426,12 @@ impl LogState {
             // 监控与统计的发送方是任意应用 uid，无法做身份校验，改为按发送方限流。
             TAG_FILE_MONITOR => {
                 if self.allow_from_sender(sender_uid) {
-                    self.monitor.append(message);
-                    register_request_path_hint(message);
+                    // 先按 caller_pid 补强身份，再落盘与登记 hint：两者必须用同一份
+                    // 内容，否则台账里的调用方会与记录里的身份不一致。
+                    let enriched = enrich_monitor_record_identity(message);
+                    let line = enriched.as_deref().unwrap_or(message);
+                    self.monitor.append(line);
+                    register_request_path_hint(line);
                 }
             }
             TAG_STATS => {
@@ -615,6 +619,164 @@ impl LogState {
 /// open 写形态映射到 provider_open 对应值登记），与请求侧 hint 原有登记范围
 /// 一致；行内字段带 `|` 的路径会被 hint 校验拒绝，天然安全。登记失败（包名
 /// 无效、路径非公共存储、caller_uid 非应用 uid 等）时静默跳过，不影响台账落盘。
+/// 用记录里的 `caller_pid` 补强源头身份，返回改写后的整行（不需要改写时 None）。
+///
+/// 为什么必须在 daemon 侧做：`caller_pid` 来自内核 FUSE 请求头，是「哪个进程发起
+/// 这次写入」最精确的证据；但 MediaProvider 域读不到 root / 特权 helper 的
+/// `/proc/<pid>/cmdline`（SELinux 拒绝，实测 `proc_pkg=` 空、`proc_uid=-1`），
+/// 于是「root 文件管理器 helper 往 /sdcard 写文件」这类记录在 MP 侧只能落成未知。
+/// daemon 是 root：读得到，而且记录是经 socket 实时送来的，它与请求几乎同时，
+/// 不需要依赖 pid 表快照（快照抓不住亚秒级 helper 进程）。
+///
+/// 改写范围刻意收窄：仅 `event_role=request`，且 identity 为 `-` 或非包名的
+/// basename 时才替换；已有包名身份一律不动，避免二次污染。
+/// 应用 uid 起始值（与 `daemon.rs` 的同名常量保持一致）。
+const SYSTEM_APP_UID_START: i32 = 10_000;
+
+/// 系统 uid → 包名缓存：(文件指纹, uid → 唯一包名/不可用)。
+type SystemUidPackageCache = (u64, HashMap<i32, Option<String>>);
+
+/// 系统 uid → 唯一包名。
+///
+/// 只回答「这个 uid 在系统里唯一对应哪个包」：同一 uid 对应多个包时（真机 uid 1000
+/// 有 53 个包）返回 `None`。**绝不按排序挑一个** —— 猜错比留空更糟，用户会据此
+/// 认定是某个具体应用干的。缓存按文件长度与 mtime 失效，避免每条记录都读盘。
+fn system_uid_package(uid: i32) -> Option<String> {
+    if !(0..SYSTEM_APP_UID_START).contains(&uid) {
+        return None;
+    }
+    static CACHE: OnceLock<Mutex<SystemUidPackageCache>> = OnceLock::new();
+    let path = crate::platform::module_paths::SYSTEM_WRITER_UIDS_FILE;
+    let fingerprint = fs::metadata(path)
+        .map(|meta| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            meta.len() ^ mtime
+        })
+        .unwrap_or(0);
+    let cache = CACHE.get_or_init(|| Mutex::new((0, HashMap::new())));
+    let mut guard = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if guard.0 != fingerprint || guard.1.is_empty() {
+        let mut map: HashMap<i32, Option<String>> = HashMap::new();
+        if let Ok(content) = fs::read_to_string(path) {
+            for line in content.lines() {
+                let Some((package, value)) = line.rsplit_once(':') else {
+                    continue;
+                };
+                let Ok(package_uid) = value.trim().parse::<i32>() else {
+                    continue;
+                };
+                if !(0..SYSTEM_APP_UID_START).contains(&package_uid) {
+                    continue;
+                }
+                let package = package.trim();
+                if package.is_empty() {
+                    continue;
+                }
+                match map.get(&package_uid) {
+                    // 同一 uid 对应多个包：标记不可用，宁缺勿猜。
+                    Some(existing) if existing.as_deref() != Some(package) => {
+                        map.insert(package_uid, None);
+                    }
+                    Some(_) => {}
+                    None => {
+                        map.insert(package_uid, Some(package.to_string()));
+                    }
+                }
+            }
+        }
+        guard.0 = fingerprint;
+        guard.1 = map;
+    }
+    guard.1.get(&uid).cloned().flatten()
+}
+
+/// 记录身份补强：把「谁发起了这次写入」补进目标包名列与 `identify_*` 字段。
+///
+/// 两条证据来源，置信度不同：
+/// 1. `caller_pid`：内核 FUSE 请求头里的发起线程 id。daemon 以 root 读 /proc 反查，
+///    是 helper / 特权进程写盘时唯一稳定的证据 —— `high`。
+/// 2. `caller_evidence=cross_thread` 加 `caller_uid`：MediaProvider 的 binder 线程与
+///    FuseDaemon 处理线程不是同一个线程，Java 侧捕获的调用方只能以「同进程 + 1.5 秒
+///    窗口」桥接过来（见 `hook::context::record_caller_uid`）。系统 uid 按 uid 表反查
+///    包名（多包一律放弃），应用 uid 仍按 pid 反查 —— `medium`：它是时序桥接，
+///    不像内核请求头那样权威。
+///
+/// 只补第 3 列为占位符（`-`、空、无点号）的记录：已经指出具体应用的行不再改写。
+fn enrich_monitor_record_identity(message: &str) -> Option<String> {
+    let fields: Vec<&str> = message.split('|').collect();
+    if fields.len() < 5 {
+        return None;
+    }
+    let mut event_role = "";
+    let mut caller_pid = -1;
+    let mut caller_uid = -1;
+    let mut cross_thread = false;
+    for field in fields.iter().skip(4) {
+        if let Some(value) = field.strip_prefix("caller_pid=") {
+            caller_pid = value.parse::<i32>().unwrap_or(-1);
+        } else if let Some(value) = field.strip_prefix("caller_uid=") {
+            caller_uid = value.parse::<i32>().unwrap_or(-1);
+        } else if let Some(value) = field.strip_prefix("event_role=") {
+            event_role = value;
+        } else if *field == "caller_evidence=cross_thread" {
+            cross_thread = true;
+        }
+    }
+    if event_role != "request" {
+        return None;
+    }
+    let identity = fields[2];
+    let replaceable = identity == "-" || identity.is_empty() || !identity.contains('.');
+    if !replaceable {
+        return None;
+    }
+
+    let (package, method, reliability) =
+        if cross_thread && (0..SYSTEM_APP_UID_START).contains(&caller_uid) {
+            (system_uid_package(caller_uid)?, "caller_uid", "medium")
+        } else if caller_pid > 0 {
+            let package = crate::platform::proc_identity::resolve_package_from_pid(caller_pid)?;
+            let reliability = if cross_thread { "medium" } else { "high" };
+            (package, "caller_pid", reliability)
+        } else {
+            return None;
+        };
+    if package == identity {
+        return None;
+    }
+
+    let mut rebuilt = String::with_capacity(message.len() + package.len() + 24);
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            rebuilt.push('|');
+        }
+        match index {
+            2 => rebuilt.push_str(&package),
+            _ => {
+                if field.starts_with("identify_method=") {
+                    rebuilt.push_str("identify_method=");
+                    rebuilt.push_str(method);
+                } else if field.starts_with("identify_reliability=") {
+                    rebuilt.push_str("identify_reliability=");
+                    rebuilt.push_str(reliability);
+                } else {
+                    rebuilt.push_str(field);
+                }
+            }
+        }
+    }
+    if !identity.is_empty() && identity != "-" {
+        rebuilt.push_str("|native=");
+        rebuilt.push_str(identity);
+    }
+    Some(rebuilt)
+}
+
 fn register_request_path_hint(message: &str) {
     if !message.contains("event_role=request") {
         return;
