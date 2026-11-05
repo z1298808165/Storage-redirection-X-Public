@@ -75,10 +75,16 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
             // 运维诊断：引擎库定位失败是静默重试路径，补丁长期不安装时需要
             // 区分「库定位失败」与「PLT 槽位为零」（2026-10-25 CI 实证
             // A13/A14 的 read patch 从未安装且无任何日志）。
-            // A17 实测（2026-10-30）：SDK 37 的 MediaProvider 进程不再加载
-            // libfuse/libfuse_jni（FUSE 服务端实现随平台演进移出 MP 进程），
-            // 5 秒周期的 warn 会持续刷屏——首次必告警并注明平台差异可能，
-            // 之后降频到 10 分钟一条；库若后来出现（延迟加载）照常打补丁。
+            //
+            // A17（SDK 37）不要用 /proc/<pid>/maps 判断这两个库是否加载：
+            // 它们由 MediaProvider.apk 内嵌映射（maps 路径不含库名，2026-10-24
+            // 已踩过同款误判），fuse-bpf 形态还会另拆 libfusemod_*.so 动态模块，
+            // 于是 maps 里看不到 libfuse/libfuse_jni 的字样。FUSE 服务端仍在 MP
+            // 进程内（2026-10-29 侦察：fuse_dev_do_read 线程 + "Starting fuse"
+            // + fuse-bpf enabled），ElfImg 的 APK 内嵌通道照样能定位到目标库，
+            // read patch 在 A17 bpf 模式下实测可装上并生效（2026-10-29）。
+            // 因此这里的定位失败按「库尚未映射 / 延迟加载」降噪重试：首次必
+            // 告警，之后 10 分钟一条，库延迟出现仍照常打补丁。
             static FIRST_FAIL_LOGGED: [std::sync::atomic::AtomicBool; 3] = [
                 std::sync::atomic::AtomicBool::new(false),
                 std::sync::atomic::AtomicBool::new(false),
@@ -106,7 +112,7 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
             if should_log {
                 LAST_FAIL_LOG_MS[absent_index].store(now_ms, Ordering::Relaxed);
                 log::warn!(
-                    "fuse engine patch load failed lib={} (provider process may no longer ship this lib on newer platform releases; retry continues at low frequency)",
+                    "fuse engine patch load failed lib={} (目标库尚未映射：新平台上它经 APK 内嵌通道映射、maps 不可见，10 分钟内降频重试)",
                     lib
                 );
             }
