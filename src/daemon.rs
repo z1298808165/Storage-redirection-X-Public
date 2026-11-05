@@ -1655,7 +1655,20 @@ impl ReconcilePlan {
         } else {
             has_mount_state(&request)
         };
-        let is_mount_current = crate::daemon_mount::has_current_mount_state(&request);
+        // 无规则请求不会产生任何挂载产物，也就永远不会写下状态文件：daemon 与
+        // companion 两侧都在无规则分支短路返回（留下 state=mounted 的假账会让监督与
+        // 恢复流程误判"已在场"）。若这里仍按"状态缺失＝未落地"处理，这类应用会被每个
+        // reconcile 轮次重新执行一遍完整挂载（fork 子进程 + 清理归属验证）并计成
+        // applied：真机实测 8 分钟 308 轮、其中 278 轮 applied=1 全部来自这同一批应用，
+        // 同时刷出大量 reason=StateMissing 的重挂日志。
+        //
+        // 是否真的有事可做由账本判定：账本里还有记录说明上一次挂载没被清掉，必须走一轮
+        // 让无规则短路去清理；账本也没有才是真的无事可做。`has_mount_state` 同理保留，
+        // 状态文件在而规则已删时也要给一轮清理机会。
+        let is_noop = !has_mount_state
+            && !crate::fuse_redirect::config::mount_request_has_policy_rules(&request)
+            && crate::mount_ledger::load(&request.package_name, request.pid).is_none();
+        let is_mount_current = is_noop || crate::daemon_mount::has_current_mount_state(&request);
         let start_time_ticks = crate::platform::process_start_time_ticks(request.pid);
         Self {
             request,
