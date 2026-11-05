@@ -1027,6 +1027,13 @@ impl FuseRedirectFs {
         if backend_flags & libc::O_PATH == 0 && backend_flags & libc::O_ACCMODE != libc::O_RDONLY {
             backend_flags = (backend_flags & !libc::O_ACCMODE) | libc::O_RDWR;
         }
+        // 后端绝不能带 O_APPEND：FUSE WRITE 请求携带的是内核算好的绝对偏移（writeback
+        // 回写时更是按页重写已有区段），daemon 以 pwrite(offset) 落盘；而 Linux 在
+        // O_APPEND fd 上的 pwrite 忽略 offset、一律追加到末尾。于是每次回写都把同一段
+        // 数据重复接到后端尾部（真机：视图 500 字节、后端 12750 字节，微信 xlog 视图与
+        // 后端尺寸分叉）。追加语义由内核在 FUSE 层维护（O_APPEND 打开时内核按 i_size
+        // 计算写偏移），后端只需按偏移写。
+        backend_flags &= !libc::O_APPEND;
         let c_path = cstring_path(path)?;
         // SAFETY: c_path 是合法的 NUL 结尾字符串，backend_flags/mode 为整数参数，
         // open 只在失败时返回 -1，成功返回的 fd 由 File 接管所有权。
