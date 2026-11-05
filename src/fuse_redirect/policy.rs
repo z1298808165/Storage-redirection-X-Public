@@ -390,7 +390,64 @@ pub(crate) struct SharedPolicyTable {
 }
 
 #[derive(Clone)]
-struct NamespacePolicyTable(Arc<RwLock<HashMap<NamespaceIdentity, Arc<RedirectPolicy>>>>);
+struct NamespacePolicyTable(Arc<RwLock<HashMap<NamespaceIdentity, NamespacePolicyEntry>>>);
+
+/// namespace 维度的策略登记：记下登记时的应用进程实例，用于识别已退出的条目。
+struct NamespacePolicyEntry {
+    policy: Arc<RedirectPolicy>,
+    app_pid: i32,
+    app_start_time_ticks: Option<u64>,
+}
+
+/// namespace 表达到该规模后，插入前先清理登记进程已退出的条目。
+///
+/// 每个应用进程实例登记一条，宿主会话常驻，不清理会随应用启停无界增长；nsfs inode
+/// 在命名空间销毁后还可能被复用，陈旧条目会让新 namespace 的 root 请求命中旧应用策略。
+/// 阈值以下不清理：应用主进程退出后其 root 子进程仍可能持有同一 namespace 接续访问，
+/// 只在表规模异常时才牺牲这类接续（回退 deny_all，fail-closed）。
+const NAMESPACE_POLICY_PRUNE_THRESHOLD: usize = 256;
+
+impl NamespacePolicyTable {
+    fn insert(
+        &self,
+        namespace: NamespaceIdentity,
+        policy: Arc<RedirectPolicy>,
+        app_pid: i32,
+        app_start_time_ticks: Option<u64>,
+    ) -> Option<usize> {
+        let mut namespaces = self.0.write().ok()?;
+        if namespaces.len() >= NAMESPACE_POLICY_PRUNE_THRESHOLD
+            && !namespaces.contains_key(&namespace)
+        {
+            let before = namespaces.len();
+            namespaces.retain(|_, entry| match entry.app_start_time_ticks {
+                Some(ticks) => crate::platform::is_process_instance_alive(entry.app_pid, ticks),
+                None => false,
+            });
+            log::info!(
+                "fuse policy namespace pruned before={} after={}",
+                before,
+                namespaces.len()
+            );
+        }
+        namespaces.insert(
+            namespace,
+            NamespacePolicyEntry {
+                policy,
+                app_pid,
+                app_start_time_ticks,
+            },
+        );
+        Some(namespaces.len())
+    }
+
+    fn get(&self, namespace: &NamespaceIdentity) -> Option<Arc<RedirectPolicy>> {
+        let namespaces = self.0.read().ok()?;
+        namespaces
+            .get(namespace)
+            .map(|entry| Arc::clone(&entry.policy))
+    }
+}
 
 impl SharedPolicyTable {
     /// 按 uid 登记或覆盖一份策略，并记录该应用 mount namespace 对应的策略。
@@ -400,6 +457,7 @@ impl SharedPolicyTable {
     pub(crate) fn register(&self, config: FuseRedirectConfig) -> Option<usize> {
         let uid = u32::try_from(config.uid).ok()?;
         let app_pid = config.app_pid;
+        let app_start_time_ticks = config.app_start_time_ticks;
         let namespace = registered_mount_namespace(&config);
         let policy = Arc::new(RedirectPolicy::new(config)?);
         let mut table = self.by_uid.write().ok()?;
@@ -411,8 +469,12 @@ impl SharedPolicyTable {
             *handle = Some(self.clone());
         }
         if let Some(namespace) = namespace {
-            let mut namespaces = self.by_namespace.0.write().ok()?;
-            namespaces.insert(namespace, Arc::clone(&policy));
+            self.by_namespace.insert(
+                namespace,
+                Arc::clone(&policy),
+                app_pid,
+                app_start_time_ticks,
+            )?;
             log::info!(
                 "fuse policy namespace registered uid={} ns={}:{} pkg={}",
                 uid,
@@ -441,13 +503,13 @@ impl SharedPolicyTable {
     /// 返回 namespace 表大小（>0 即登记成功，供控制通道应答）。
     pub(crate) fn register_namespace_only(&self, config: FuseRedirectConfig) -> Option<usize> {
         let namespace = registered_mount_namespace(&config)?;
+        let (app_pid, app_start_time_ticks) = (config.app_pid, config.app_start_time_ticks);
         let policy = Arc::new(RedirectPolicy::new(config)?);
         let (ns_dev, ns_ino, package_name) =
             (namespace.dev, namespace.ino, policy.package_name.clone());
-        let mut namespaces = self.by_namespace.0.write().ok()?;
-        namespaces.insert(namespace, policy);
-        drop(namespaces);
-        let table = self.by_namespace.0.read().ok()?.len();
+        let table = self
+            .by_namespace
+            .insert(namespace, policy, app_pid, app_start_time_ticks)?;
         log::info!(
             "fuse policy namespace registered (ns-only) ns={}:{} pkg={} table={}",
             ns_dev,
@@ -522,8 +584,7 @@ impl PolicyRegistry {
         if uid == 0 {
             let namespace = request_mount_namespace(pid);
             if let Some(namespace) = namespace
-                && let Ok(table) = self.by_uid.by_namespace.0.read()
-                && let Some(policy) = table.get(&namespace)
+                && let Some(policy) = self.by_uid.by_namespace.get(&namespace)
             {
                 let count = NAMESPACE_POLICY_FALLBACKS.fetch_add(1, Ordering::Relaxed) + 1;
                 if count == 1 || count.is_multiple_of(256) {
@@ -537,7 +598,7 @@ impl PolicyRegistry {
                         count
                     );
                 }
-                return Arc::clone(policy);
+                return policy;
             }
             let count = NAMESPACE_POLICY_MISSES.fetch_add(1, Ordering::Relaxed) + 1;
             if count == 1 || count.is_multiple_of(256) {

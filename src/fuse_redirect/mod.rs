@@ -164,6 +164,8 @@ struct InodeBackendCacheEntry {
 /// 条目上限：`ls -lR` 一万条目的遍历会把 inode 全部带进来，每条目两段路径字符串
 /// 约 300B，8192 上限即 2MB 量级；超限整体清空（与系统 uid 身份缓存同一兜底模式）。
 const INODE_BACKEND_CACHE_CAP: usize = 8192;
+/// 按路径属主表上限：每条为一段相对路径加 u32，16384 条约 2MB 量级。
+const PATH_POLICY_UID_CAP: usize = 16384;
 static INODE_BACKEND_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 
 impl FuseState {
@@ -594,6 +596,14 @@ impl FuseRedirectFs {
             && (!is_app_uid || (existing >= 10000 && existing != uid))
         {
             return;
+        }
+        if state.path_policy_uids.len() >= PATH_POLICY_UID_CAP
+            && !state.path_policy_uids.contains_key(rel)
+        {
+            // 按路径的属主表只在 inode 已被 forget 后兜底 root 接续访问；宿主会话常驻，
+            // 不设上限会随访问过的路径数无界增长。超限整体清空，与 inode 后端缓存同一模式，
+            // 仍存活的 inode 由 inode_policy_uids 继续承接。
+            state.path_policy_uids.clear();
         }
         state.path_policy_uids.insert(rel.to_string(), uid);
         state.inode_policy_uids.insert(ino.0, uid);

@@ -47,6 +47,8 @@ pub(super) fn remove_unreferenced_inode(state: &mut FuseState, ino: u64) {
 }
 
 pub(super) fn remove_inode_path(state: &mut FuseState, rel: &str) {
+    // 路径已被删除或被 rename 覆盖：按路径记的属主同步失效，否则同名新文件会继承旧属主。
+    state.path_policy_uids.remove(rel);
     if let Some(ino) = state.inodes.remove(rel) {
         state.paths_by_inode.remove(&ino);
         state.inode_path_versions.remove(&ino);
@@ -61,6 +63,9 @@ pub(super) fn remap_inode_path(state: &mut FuseState, old_rel: &str, new_rel: &s
         return;
     }
     remove_inode_path(state, new_rel);
+    if let Some(uid) = state.path_policy_uids.remove(old_rel) {
+        state.path_policy_uids.insert(new_rel.to_string(), uid);
+    }
     if let Some(ino) = state.inodes.remove(old_rel) {
         state.inodes.insert(new_rel.to_string(), ino);
         state.paths_by_inode.insert(ino, new_rel.to_string());
