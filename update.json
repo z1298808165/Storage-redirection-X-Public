@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-42044160201/storage-redirect-x-manager-v2.2.2-ci.2.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-42044160201/storage.redirect.x-v2.2.2-ci.2.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.2.2-ci.2`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-41980233173`\n- 当前提交：`f820f5b846a7`\n\n## 模块更新\n\n### 修复了什么问题\n- 同一文件不同大小写拼写读写一致，目录改名后内容可读。\n- 追加写入的日志类文件不再在存储中膨胀与重复。\n- 长时间运行后宿主内存不再持续上涨。\n\n### 功能变化\n- daemon 常驻 CPU 降低，系统写入归因不变。\n- 成功结论追加 view=srx_host，保留原稳定关键字。\n- 新增公共有界等待函数，替换各处子进程轮询等待。\n- 日常日志不再被重复告警刷屏。\n- 删除孤儿文件、未引用补丁与各端死函数。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.2.2-ci.2`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-41980233173`\n- 当前提交：`f820f5b846a7`\n\n## 模块更新\n\n### 修复了什么问题\n- 同一文件不同大小写拼写读写一致，目录改名后内容可读。\n- 追加写入的日志类文件不再在存储中膨胀与重复。\n- 长时间运行后宿主内存不再持续上涨。\n\n### 功能变化\n- 守护进程常驻 CPU 降低，日常日志不再被重复告警刷屏。"
   },
   "releases": []
 }
