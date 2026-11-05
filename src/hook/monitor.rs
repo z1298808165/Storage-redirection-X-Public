@@ -137,11 +137,15 @@ fn record_open_result_with_extra(
     // 时回退 fsuid（FuseDaemon 按请求 setfsuid，见
     // context::get_effective_caller_uid_for_monitor），未配置应用经原生 FUSE
     // 路径的写入也能归因。
-    let caller_uid = hub.get_effective_caller_uid_for_monitor();
+    let (caller_uid, cross_thread) = hub.record_caller_uid();
     extra.push_str(&format!("|caller_uid={caller_uid}"));
+    if cross_thread {
+        extra.push_str("|caller_evidence=cross_thread");
+    }
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         OpKind::Open,
         &caller_package,
         record_path,
@@ -272,7 +276,8 @@ fn record_media_store_pending_commit_if_needed(
     };
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         OpKind::Open,
         &caller_package,
         record.new_pathname,
@@ -467,7 +472,8 @@ fn record_mkdir_result_with_extra(
     } else {
         OpKind::Mkdir
     };
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         kind,
         &caller_package,
         pathname,
@@ -565,7 +571,8 @@ fn record_rename_result_with_extra(
     };
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         OpKind::Rename,
         &caller_package,
         record.new_pathname,
@@ -660,7 +667,8 @@ fn record_unlink_result_with_extra(
     };
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         kind,
         &caller_package,
         pathname,
@@ -691,7 +699,8 @@ pub fn record_path_operation_result(
         extra.push_str(tail);
     }
     let caller_package = hub.get_current_caller_package();
-    AuditTrail::instance().record_operation_result(
+    record_operation_with_caller(
+        hub,
         kind,
         &caller_package,
         pathname,
@@ -728,6 +737,62 @@ fn append_extra_tail(extra: &mut String, extra_tail: Option<&str>) {
         }
         extra.push_str(tail);
     }
+}
+
+/// 附带一个 `key=value` 片段；首次调用时基于 `base` 惰性构造。
+fn append_extra_kv(owned: &mut Option<String>, base: &str, kv: &str) {
+    let buffer = owned.get_or_insert_with(|| {
+        let mut value = String::with_capacity(base.len() + 48);
+        value.push_str(base);
+        value
+    });
+    buffer.push_str(kv);
+}
+
+/// 记录监视事件，并保证 extra 携带请求方 uid / pid。
+///
+/// FUSE 内核请求头里的 uid 与 pid 是这次操作真实的发起者，也是归因链唯一不需要
+/// 猜测的证据。open 路径早已把它们写进 extra，但 mkdir / rename / unlink 等
+/// mutation 路径此前漏写——真机上 MediaProvider 代建 `Download/update` 的 mkdir
+/// 记录因此只有 `identify_method=unknown`，任何后续反查（uid 表、daemon pid 表、
+/// cmdline）都拿不到输入。这里统一补齐：已有该字段时不重复追加。
+fn record_operation_with_caller(
+    hub: &InterceptHub,
+    kind: OpKind,
+    caller_package: &str,
+    pathname: &str,
+    result: i32,
+    error_no: i32,
+    extra: &str,
+) {
+    let mut owned: Option<String> = None;
+    let (caller_uid, cross_thread) = hub.record_caller_uid();
+    if !extra.contains("caller_uid=") {
+        append_extra_kv(&mut owned, extra, &format!("|caller_uid={caller_uid}"));
+        if cross_thread {
+            // 标记证据来源：daemon 侧据此按 uid（而不是按 pid 的 cmdline）归因，
+            // 并把置信度降为 medium —— 它是"同一进程内、1.5 秒窗口"的桥接，
+            // 不是内核请求头那样的权威证据。
+            append_extra_kv(&mut owned, extra, "|caller_evidence=cross_thread");
+        }
+    }
+    if !extra.contains("caller_pid=") {
+        // 请求方 pid 来自内核 FUSE 头（tid）。MP 域读不到 root / 特权进程的
+        // /proc，本进程内无法反查，但把它写进记录后 daemon（root）可以——
+        // 这是「helper 进程写盘也能说清是哪个应用」的唯一稳定证据。
+        let caller_pid = hub.record_caller_pid(cross_thread);
+        if caller_pid > 0 {
+            append_extra_kv(&mut owned, extra, &format!("|caller_pid={caller_pid}"));
+        }
+    }
+    AuditTrail::instance().record_operation_result(
+        kind,
+        caller_package,
+        pathname,
+        result,
+        error_no,
+        owned.as_deref().unwrap_or(extra),
+    );
 }
 
 fn redirect_source_name(pathname: &str, is_mapping: bool) -> &'static str {

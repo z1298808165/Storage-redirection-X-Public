@@ -321,6 +321,16 @@ impl InterceptHub {
         context::get_effective_caller_uid_for_monitor()
     }
 
+    /// 记录用调用方 uid 与"是否来自跨线程证据"（见 `context::record_caller_uid`）。
+    /// 仅在写监视记录时使用；归因线索与重定向判定仍走上一行的原函数。
+    pub fn record_caller_uid(&self) -> (i32, bool) {
+        context::record_caller_uid()
+    }
+
+    pub fn record_caller_pid(&self, cross_thread: bool) -> i32 {
+        context::record_caller_pid(cross_thread)
+    }
+
     pub fn set_current_caller_from_mapping_request_owner(
         &self,
         caller_package: &str,

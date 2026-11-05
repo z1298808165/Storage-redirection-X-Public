@@ -88,6 +88,18 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
     // 读取并复位槽取用资格标记（由写形态 hook 经 update_caller_for_mutation
     // 置位）；复位放在入口，任何退出路径都不会向后续操作泄漏。
     let system_slot_take_allowed = SYSTEM_SLOT_TAKE_ALLOWED.with(|cell| cell.replace(false));
+    // 同理复位「监视记录用请求方 uid/pid」：本次请求若拿不到 FUSE 头 pid，记录里就
+    // 不该出现上一次请求的 uid/pid（daemon 会据此反查出错误源头）。
+    //
+    // 但**处在 Java 调用方作用域内时不能复位**：MediaProvider 的 provider 入口会把
+    // binder 给出的调用方 uid/pid 先落进这两个槽（含系统 uid），随后该调用内部的
+    // 文件操作还会走一遍 FUSE 侧入口；若无条件复位，Java 侧刚捕获的证据立刻被抹掉，
+    // 记录退回 MediaProvider 自己的 uid（真机实测：shell 的 MediaStore insert 因此
+    // 记成 caller_uid=10217、identity 未知）。
+    if !context::is_current_caller_scope_active() {
+        context::set_monitor_caller_pid(-1);
+        context::set_monitor_caller_uid(-1);
+    }
     // MediaProvider 的文件操作持续经过这里：借调用节流探测晚加载的
     // FUSE 引擎 libfuse.so 并补装 read 补丁（/dev/fuse 请求的真实读取方，晚于 hook
     // 安装）。仅媒体提供器进程探测，其它进程一次字符串比较即短路。
@@ -183,8 +195,32 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
             }
         }
         if package_name.is_empty() && caller_uid < ANDROID_APP_UID_START {
-            caller_uid = -1;
+            // 系统 uid 请求（root / system 二进制）解析不出包名时，内核 FUSE 头的
+            // uid 仍是权威请求方；清成 -1 会让记录侧回退 fsuid，把「mediaprovider
+            // 自己」写成请求方（实测 caller_uid=10217）。头部有 uid 就保留它，
+            // 配合 caller_pid 一起落进记录，由 daemon 侧继续反查。
+            if caller_source != "fuse_uid_system_fallback" {
+                caller_uid = -1;
+            }
         }
+    }
+
+    // 系统 uid 且只剩头部 uid：不回退到 fsuid，直接把「权威 uid + pid」挂到
+    // 当前调用方上下文，让本条记录写出 caller_uid/caller_pid 而不是 MP 自身。
+    if package_name.is_empty() && caller_source == "fuse_uid_system_fallback" && caller_uid >= 0 {
+        context::set_current_caller_from_external_signal("", caller_uid);
+        let count = CALLER_UNRESOLVED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if should_log_sample(count) {
+            log::debug!(
+                "caller unresolved uid kept proc={} uid={} fuse_pid={} fuse_age_ms={} n={}",
+                hub.get_package_name(),
+                caller_uid,
+                caller_pid,
+                fuse_age_ms,
+                count
+            );
+        }
+        return;
     }
 
     if !package_name.is_empty() {
@@ -376,6 +412,9 @@ fn resolve_missing_caller_signal(
             context::take_recent_system_fuse_request(SYSTEM_FUSE_SLOT_MAX_AGE_MS)
         && request_pid > 0
     {
+        // 即使随后解析失败，pid 本身仍是这次请求的权威证据：写进记录后由
+        // daemon（root）反查，MP 域读不到的 /proc 才不会白丢。
+        context::set_monitor_caller_pid(request_pid);
         // 跨线程接力的权威解析走 pid 表（root daemon 落盘的快照）：MP 域对
         // shell/platform 等进程的 /proc cmdline/status 直读常被 SELinux 拒绝，
         // 只靠 /proc 会让槽内容在跨线程场景全部作废（2026-10-24 真机：同线程
@@ -445,6 +484,16 @@ fn resolve_caller_uid_with_fuse_fallback(hub: &InterceptHub) -> Option<CallerUid
     if caller_uid < 0 {
         fuse_uid = hub.get_fuse_caller_uid();
         fuse_age_ms = context::get_fuse_caller_uid_age_ms();
+        // FUSE 头的 tid 是「哪个进程发起了这次请求」的最精确证据，比 uid 反查
+        // 可靠得多（同一 uid 可能对应多个包，uid 段还可能被 RRO 资源包占位）。
+        // 解析结束时 fuse 槽会被清空，所以另存一份给监视记录用；具体反查交给
+        // daemon（root）：MP 域读不到 root / 特权 helper 的 /proc cmdline。
+        if fuse_uid >= 0 && (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age_ms) {
+            let header_pid = context::get_fuse_caller_pid();
+            if header_pid > 0 {
+                context::set_monitor_caller_pid(header_pid);
+            }
+        }
         // SAFETY: getuid 只返回调用进程的真实 UID，无指针参数与副作用。
         let self_uid = unsafe { getuid() } as i32;
         if fuse_uid >= ANDROID_APP_UID_START && (0..=FUSE_CALLER_MAX_AGE_MS).contains(&fuse_age_ms)
@@ -1197,6 +1246,20 @@ pub fn capture_binder_caller_uid_if_available() {
 }
 
 pub fn capture_java_binder_caller(caller_uid: i32, caller_pid: i32) {
+    if caller_uid < 0 {
+        return;
+    }
+    // 系统 uid（< 应用起始值）的 binder 调用方此前被整体丢弃：ColorOS/HyperOS 上大量
+    // 系统应用与共享组跑在 uid 1000/1001，它们在 MediaProvider 入口因此一条证据都留不下，
+    // 记录里只剩 MP 自己的 uid。这里只写「监视记录专用」槽（uid + pid），不进
+    // CALLER_UID / saved caller 的应用分支，重定向决策语义不变。
+    context::set_monitor_caller_uid(caller_uid);
+    if caller_pid > 0 {
+        context::set_monitor_caller_pid(caller_pid);
+    }
+    // 同一份证据再存一份进程级副本：MediaProvider 的 binder 线程与 FuseDaemon 的
+    // 处理线程不同，thread_local 到不了 FUSE 记录（见 context::remember_cross_thread_caller）。
+    context::remember_cross_thread_caller(caller_uid, caller_pid);
     if caller_uid < ANDROID_APP_UID_START {
         return;
     }
@@ -1209,6 +1272,15 @@ pub fn capture_java_binder_caller(caller_uid: i32, caller_pid: i32) {
 
 pub fn enter_java_caller_scope(caller_uid: i32, caller_pid: i32) {
     if caller_uid < ANDROID_APP_UID_START {
+        // 作用域仍按「无调用方」入栈（CALLER_UID 参与决策，不能塞系统 uid），
+        // 但把 uid/pid 交给监视记录槽，记录才能写出真实请求方。
+        if caller_uid >= 0 {
+            context::set_monitor_caller_uid(caller_uid);
+        }
+        if caller_pid > 0 {
+            context::set_monitor_caller_pid(caller_pid);
+        }
+        context::remember_cross_thread_caller(caller_uid, caller_pid);
         context::push_current_caller_scope("", -1);
         return;
     }
@@ -1232,6 +1304,16 @@ pub fn exit_java_caller_scope() {
 fn resolve_java_caller_package(caller_uid: i32, caller_pid: i32) -> Option<String> {
     let hub = InterceptHub::instance();
     if caller_pid > 0 {
+        // 系统 uid 优先查 daemon 落盘的 pid 表：表由 root 读取并原子替换，MP 域读不到
+        // root/系统应用进程的 /proc 时，这是唯一还能拿到身份的来源。表内 uid 必须与
+        // binder 给的 uid 一致，避免 pid 复用导致张冠李戴。
+        if caller_uid < ANDROID_APP_UID_START
+            && let Some((package, uid)) = lookup_system_pid_table(caller_pid)
+            && uid == caller_uid
+            && !package.is_empty()
+        {
+            return Some(package);
+        }
         let package_name = resolve_caller_package_by_pid(caller_pid);
         if !package_name.is_empty()
             && (is_package_uid_match(&package_name, caller_uid, hub)

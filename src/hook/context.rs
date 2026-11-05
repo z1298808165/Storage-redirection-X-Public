@@ -1,8 +1,98 @@
 use crate::platform::paths::monotonic_ms;
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 // 单次 MediaStore 插入涉及的目录层级有限，用作登记表容量上限
 const PROVIDER_PASSTHROUGH_VIRTUAL_DIR_MAX: usize = 16;
+
+/// 跨线程 binder 调用方证据（进程级）。
+///
+/// MediaProvider 的 binder 线程（`ContentProvider$Transport#insert`）与 FuseDaemon
+/// 的处理线程不是同一个线程：Java 侧捕获到的调用方 uid/pid 落在 `thread_local` 里，
+/// 而在 FUSE 线程上生成的记录读不到，于是退回本进程自己的 uid —— 真机实测
+/// `adb shell` 的 MediaStore insert 在记录里变成 `caller_uid=10217`（MP 自己）、
+/// 来源未知，用户看到的"谁创建了这个目录"就答不上来。
+///
+/// 因此额外保留一份进程级证据，**只用于记录归因**：
+/// - 仅在 uid 合法且不等于本进程 uid 时登记（自身的 I/O 不是"外部调用方"）；
+/// - 读取限 [`CROSS_THREAD_CALLER_WINDOW_MS`] 窗口，过期不再采信，避免把上一笔
+///   请求的调用方贴到随后无关的记录上；
+/// - 不参与任何重定向决策（决策仍只认 thread_local 的 `CALLER_UID`）。
+const CROSS_THREAD_CALLER_WINDOW_MS: i64 = 1_500;
+static CROSS_THREAD_CALLER_UID: AtomicI32 = AtomicI32::new(-1);
+static CROSS_THREAD_CALLER_PID: AtomicI32 = AtomicI32::new(-1);
+static CROSS_THREAD_CALLER_TS_MS: AtomicI64 = AtomicI64::new(-1);
+
+pub fn remember_cross_thread_caller(uid: i32, pid: i32) {
+    if uid < 0 {
+        return;
+    }
+    // SAFETY: getuid() 无参数、无副作用，只读进程真实 uid。
+    let self_uid = unsafe { libc::getuid() } as i32;
+    if uid == self_uid {
+        return;
+    }
+    CROSS_THREAD_CALLER_UID.store(uid, Ordering::Relaxed);
+    CROSS_THREAD_CALLER_PID.store(if pid > 0 { pid } else { -1 }, Ordering::Relaxed);
+    CROSS_THREAD_CALLER_TS_MS.store(monotonic_ms(), Ordering::Relaxed);
+}
+
+/// 取进程级调用方证据；未登记或已过期返回 `None`。
+pub fn cross_thread_caller_in_window() -> Option<(i32, i32)> {
+    let ts = CROSS_THREAD_CALLER_TS_MS.load(Ordering::Relaxed);
+    if ts < 0 {
+        return None;
+    }
+    let uid = CROSS_THREAD_CALLER_UID.load(Ordering::Relaxed);
+    if uid < 0 {
+        return None;
+    }
+    let now = monotonic_ms();
+    if now < ts || now - ts > CROSS_THREAD_CALLER_WINDOW_MS {
+        return None;
+    }
+    Some((uid, CROSS_THREAD_CALLER_PID.load(Ordering::Relaxed)))
+}
+
+/// 记录用调用方 uid，返回 `(uid, 是否来自跨线程证据)`。
+///
+/// 与 [`get_effective_caller_uid_for_monitor`] 的区别：后者供归因**线索**使用，
+/// 保持原有语义不变；本函数只在"记录会归到本进程自己"时追加跨线程证据，避免
+/// 把外部调用方误当成自身 I/O。
+pub fn record_caller_uid() -> (i32, bool) {
+    // SAFETY: getuid() 无参数、无副作用，只读进程真实 uid。
+    let self_uid = unsafe { libc::getuid() } as i32;
+    // 直接证据按优先级取：监视槽（binder/fuse 给出的请求方）→ CALLER_UID（决策上下文，
+    // 会被 FUSE 请求头填成本进程 uid）→ 当前线程 fsuid。
+    let direct = monitor_caller_uid_in_window()
+        .or_else(|| {
+            let uid = CALLER_UID.with(|cell| cell.get());
+            (uid >= 0).then_some(uid)
+        })
+        .unwrap_or_else(fsuid_from_proc_status);
+    if direct != self_uid {
+        return (direct, false);
+    }
+    // 归因会落到本进程自己（MediaProvider 代写）：这才是"外部调用方可能是谁"的
+    // 唯一场景，用进程级证据补上。自身 I/O 没有外部调用方，保持原值。
+    if let Some((external_uid, _)) = cross_thread_caller_in_window() {
+        return (external_uid, true);
+    }
+    (direct, false)
+}
+
+/// 记录用调用方 pid：线程局部证据优先，缺失时（且本次 uid 来自跨线程证据）
+/// 回退到同一份跨线程证据里的 pid。
+pub fn record_caller_pid(cross_thread: bool) -> i32 {
+    let pid = get_effective_caller_pid_for_monitor();
+    if pid > 0 {
+        return pid;
+    }
+    if cross_thread && let Some((_, external_pid)) = cross_thread_caller_in_window() {
+        return external_pid;
+    }
+    -1
+}
 
 thread_local! {
     static CALLER_PACKAGE: RefCell<String> = const { RefCell::new(String::new()) };
@@ -17,6 +107,15 @@ thread_local! {
     static FUSE_CALLER_UID: Cell<i32> = const { Cell::new(-1) };
     static FUSE_CALLER_UID_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static FUSE_CALLER_PID: Cell<i32> = const { Cell::new(-1) };
+    // 监视记录专用的请求方 pid：FUSE 请求头里的 tid 在解析结束时就被清掉
+    // （clear_fuse_caller_uid），而记录是在解析之后才写的，所以需要另存一份。
+    // 它不参与任何重定向决策，只用于记录里写出 caller_pid，让 daemon（root）
+    // 能替 MP 反查读不到 /proc 的特权进程。
+    static MONITOR_CALLER_PID: Cell<i32> = const { Cell::new(-1) };
+    static MONITOR_CALLER_PID_TS_MS: Cell<i64> = const { Cell::new(-1) };
+    /// 监视记录专用请求方 uid：与 CALLER_UID 分开存，理由见 set_monitor_caller_uid。
+    static MONITOR_CALLER_UID: Cell<i32> = const { Cell::new(-1) };
+    static MONITOR_CALLER_UID_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static BINDER_SAVED_CALLER_UID: Cell<i32> = const { Cell::new(-1) };
     static BINDER_SAVED_CALLER_UID_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static BINDER_SAVED_CALLER_PACKAGE: RefCell<String> = const { RefCell::new(String::new()) };
@@ -131,11 +230,33 @@ pub fn get_current_caller_uid() -> i32 {
 /// **仅用于监视记录**，不得用于重定向判定：重定向决策必须使用显式登记的
 /// 调用方上下文，fsuid 兜底会把"恰好执行 I/O 的请求方"当成重定向调用方。
 pub fn get_effective_caller_uid_for_monitor() -> i32 {
+    // 监视专用槽优先：它记录的是 binder/fuse 给出的权威请求方 uid（含系统 uid），
+    // 而 CALLER_UID 只承载「参与重定向决策」的调用方。
+    if let Some(uid) = monitor_caller_uid_in_window() {
+        return uid;
+    }
     let uid = CALLER_UID.with(|cell| cell.get());
     if uid >= 0 {
         return uid;
     }
     fsuid_from_proc_status()
+}
+
+/// 与 [`get_effective_caller_pid_for_monitor`] 同窗口的 uid 读取。
+pub fn monitor_caller_uid_in_window() -> Option<i32> {
+    const MONITOR_CALLER_UID_WINDOW_MS: i64 = 2_000;
+    let uid = MONITOR_CALLER_UID.with(|cell| cell.get());
+    if uid < 0 {
+        return None;
+    }
+    let now = monotonic_ms();
+    MONITOR_CALLER_UID_TS_MS.with(|cell| {
+        let ts = cell.get();
+        if ts < 0 || now < ts || now - ts > MONITOR_CALLER_UID_WINDOW_MS {
+            return None;
+        }
+        Some(uid)
+    })
 }
 
 /// 从 /proc/self/status 的 `Uid:` 行读取当前线程 fsuid（该行四列依次为
@@ -327,6 +448,43 @@ pub fn get_fuse_caller_uid_age_ms() -> i64 {
             return -1;
         }
         now - ts
+    })
+}
+
+/// 记下本次请求的请求方 pid（内核 FUSE 头给出的 tid），供监视记录写出
+/// `caller_pid=`。每个请求开始时由 `update_caller_package_for_current_thread`
+/// 复位，所以不会串到下一个请求；pid <= 0 视为「本次没有 pid 证据」。
+pub fn set_monitor_caller_pid(pid: i32) {
+    MONITOR_CALLER_PID.with(|cell| cell.set(pid));
+    MONITOR_CALLER_PID_TS_MS.with(|cell| cell.set(if pid > 0 { monotonic_ms() } else { -1 }));
+}
+
+/// 记录「这次请求的请求方 uid」，专供监视记录使用。
+///
+/// 为什么不写进 `CALLER_UID`：后者参与重定向决策（多处按 uid 区间早退），把系统 uid
+/// 塞进去等于改变决策输入；而记录只需要如实写出「谁发起了这次写入」。ColorOS/HyperOS
+/// 上大量系统应用与共享组跑在 uid 1000/1001（< 应用起始值），此前这些 binder 调用
+/// 被整体丢弃，记录里只剩 MediaProvider 自己的 uid。
+pub fn set_monitor_caller_uid(uid: i32) {
+    MONITOR_CALLER_UID.with(|cell| cell.set(uid));
+    MONITOR_CALLER_UID_TS_MS.with(|cell| cell.set(if uid >= 0 { monotonic_ms() } else { -1 }));
+}
+
+/// 监视记录用请求方 pid：超过窗口一律视为无证据，避免把上一次请求的 pid
+/// 贴到随后无 pid 的记录上（那会让 daemon 反查出错误的源头）。
+pub fn get_effective_caller_pid_for_monitor() -> i32 {
+    const MONITOR_CALLER_PID_WINDOW_MS: i64 = 2_000;
+    let pid = MONITOR_CALLER_PID.with(|cell| cell.get());
+    if pid <= 0 {
+        return -1;
+    }
+    let now = monotonic_ms();
+    MONITOR_CALLER_PID_TS_MS.with(|cell| {
+        let ts = cell.get();
+        if ts < 0 || now < ts || now - ts > MONITOR_CALLER_PID_WINDOW_MS {
+            return -1;
+        }
+        pid
     })
 }
 
