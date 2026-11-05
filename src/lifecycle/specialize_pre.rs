@@ -235,7 +235,8 @@ impl RuntimeFlow {
             return;
         };
 
-        let is_system_writer = policy::is_system_writer_package(&self.package_name);
+        let is_system_writer = policy::is_system_writer_package(&self.package_name)
+            || policy::is_legacy_writer_process_name(&self.package_name);
         let is_shared_uid_writer = policy::is_shared_uid_process(self.app_uid);
         let is_monitor_bridge = policy::is_file_monitor_bridge_package(&self.package_name);
         self.is_file_monitor_ui =
@@ -881,6 +882,7 @@ fn config_file_monitor_enabled() -> bool {
 
 fn should_open_writer_config_fd_before_uid_resolution(package_name: &str) -> bool {
     policy::is_system_writer_package(package_name)
+        || policy::is_legacy_writer_process_name(package_name)
         || policy::is_file_monitor_bridge_package(package_name)
 }
 

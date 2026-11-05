@@ -392,7 +392,10 @@ impl InterceptHub {
             }
         }
 
-        let is_system_writer = self.with_package_name(policy::is_system_writer_package);
+        let is_system_writer = self.with_package_name(|package_name| {
+            policy::is_system_writer_package(package_name)
+                || policy::is_legacy_writer_process_name(package_name)
+        });
         let (active_profiles, profile_name) = select_hook_profile(
             is_system_writer,
             self.is_monitor_only(),

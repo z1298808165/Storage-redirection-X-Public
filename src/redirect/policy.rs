@@ -44,6 +44,20 @@ pub fn is_system_writer_package(package_name: &str) -> bool {
     is_system_writer_candidate(package_name)
 }
 
+/// 旧版 / OEM 把下载提供器与媒体提供器合跑在 zygote 的共用进程里，进程名不是包名
+/// （HyperOS/MIUI 实测仍在跑 `android.process.media`，uid 与下载提供器同组）。
+///
+/// 这类进程同样承担"代写"职责：它写公共目录时，`File.mkdirs()` /
+/// `File.getCanonicalPath()` 都在它自己的进程里先跑，若没有 system-writer
+/// profile，对映射请求路径未注入就只能是 ENOENT（2026-10-26 A17 场景 39：
+/// 下载在 `Helpers.generateSaveFile` 阶段直接 FILE_ERROR）。
+///
+/// 只认进程名，**不**把进程名当包名参与配置解析：配置归属仍由
+/// `resolve_config_package_for_uid` 按 uid 组映射到真实包。
+pub fn is_legacy_writer_process_name(process_name: &str) -> bool {
+    process_name == "android.process.media"
+}
+
 pub fn is_media_provider_package(package_name: &str) -> bool {
     is_media_provider_candidate(package_name)
 }
