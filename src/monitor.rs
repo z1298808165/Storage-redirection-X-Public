@@ -64,7 +64,11 @@ pub enum OpKind {
 struct AuditState {
     package_name: String,
     uid: i32,
+    /// 组内含代写者时才有值：这是「组串兜底」用的候选集（写进记录的 shared_uid）。
     shared_uid_packages: String,
+    /// 任意 >=2 包的共享 UID 组（含不含代写者）：只用于组内区分
+    /// （线程名 / Java 栈帧），不参与兜底写组串。
+    multi_package_group: String,
     caller_package: String,
     caller_package_updated_ms: i64,
     recent_event_ms: HashMap<String, i64>,
@@ -99,6 +103,7 @@ struct CallerResolveSnapshot {
     package_name: String,
     uid: i32,
     shared_uid_packages: String,
+    multi_package_group: String,
     caller_package: String,
     caller_package_updated_ms: i64,
 }
@@ -109,6 +114,7 @@ impl CallerResolveSnapshot {
             package_name: state.package_name.clone(),
             uid: state.uid,
             shared_uid_packages: state.shared_uid_packages.clone(),
+            multi_package_group: state.multi_package_group.clone(),
             caller_package: state.caller_package.clone(),
             caller_package_updated_ms: state.caller_package_updated_ms,
         }
@@ -121,6 +127,7 @@ impl AuditState {
             package_name: String::new(),
             uid: -1,
             shared_uid_packages: String::new(),
+            multi_package_group: String::new(),
             caller_package: String::new(),
             caller_package_updated_ms: -1,
             recent_event_ms: HashMap::new(),
@@ -159,16 +166,41 @@ impl AuditTrail {
         } else {
             state.shared_uid_packages.clear();
         }
-
-        if !state.shared_uid_packages.is_empty() {
-            log::info!(
-                "monitor init pkg={} shared_uid={}",
-                state.package_name,
-                state.shared_uid_packages
-            );
+        // 任意 >=2 包的组都参与组内区分（线程名 / Java 栈帧）：这两条是「证据」而非
+        // 「兜底」，不该被「组内是否含代写者」这个与重定向相关的条件卡住。
+        // 实测（HyperOS 2026-11-05）：uid 1000 有 53 个包、1001 有 17 个包，
+        // 全都不含 MediaProvider，改造前这些组的记录只能靠 uid 反查，多包即放弃。
+        state.multi_package_group = if uid >= 0 {
+            policy::get_shared_uid_packages_string(uid)
         } else {
-            log::info!("monitor init pkg={}", state.package_name);
-        }
+            String::new()
+        };
+
+        // 组串只在「含代写者的组」时完整打印：任意多包组可能是几十个包（真机实测
+        // uid 1000 有 53 个），整串写进日志会把一行撑到上千字符，反而看不出重点。
+        let message = if !state.shared_uid_packages.is_empty() {
+            format!(
+                "monitor init pkg={} shared_uid={}",
+                state.package_name, state.shared_uid_packages
+            )
+        } else if !state.multi_package_group.is_empty() {
+            let members = package_group_members(&state.multi_package_group);
+            let sample = members
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "monitor init pkg={} multi_pkg_group_count={} sample={}",
+                state.package_name,
+                members.len(),
+                sample
+            )
+        } else {
+            format!("monitor init pkg={}", state.package_name)
+        };
+        log::info!("{message}");
         true
     }
 
@@ -1010,18 +1042,19 @@ fn resolve_caller_info_from_snapshot(
         return SourceIdentity::new(resolved_caller, "caller", "high");
     }
 
-    // 线程名识别：shared_uid 进程内区分 MTP
-    if !state.shared_uid_packages.is_empty()
-        && policy::is_shared_uid_process(state.uid)
+    // 线程名识别：组内区分 MTP 等固定线程名组件。
+    // 组内成员校验不可省：线程名只说明"这是哪类组件"，必须确认该组件确实在当前
+    // uid 组里，否则会把无关进程的线程名套到本记录上。
+    if !state.multi_package_group.is_empty()
         && let Some(resolution) = infer_component_from_thread_name()
+        && group_contains_package(&state.multi_package_group, &resolution.package_name)
     {
         return resolution;
     }
 
-    // Java 栈帧回溯：shared_uid 进程内按调用栈区分具体包名
-    if !state.shared_uid_packages.is_empty()
-        && policy::is_shared_uid_process(state.uid)
-        && let Some(resolution) = infer_package_from_java_stack(&state.shared_uid_packages)
+    // Java 栈帧回溯：组内按调用栈区分具体包名（函数内部按组内包名逐帧匹配）
+    if !state.multi_package_group.is_empty()
+        && let Some(resolution) = infer_package_from_java_stack(&state.multi_package_group)
     {
         return resolution;
     }
@@ -1454,6 +1487,21 @@ fn extract_caller_package(caller_package: &str) -> String {
 
 fn is_intermediate_caller_package(package_name: &str) -> bool {
     policy::is_attribution_intermediate_package(package_name)
+}
+
+/// 包名是否在当前 uid 组的候选串里（逗号分隔，见
+/// `policy::get_shared_uid_packages_string`）。组内区分只认组内成员。
+fn group_contains_package(group: &str, package: &str) -> bool {
+    !package.is_empty() && group.split(',').any(|item| item == package)
+}
+
+/// 拆分组串为成员列表（去空白、丢空项）。
+fn package_group_members(group: &str) -> Vec<&str> {
+    group
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 // 从 key=value|... 格式中提取指定 key 的值
