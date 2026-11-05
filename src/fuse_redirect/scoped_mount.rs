@@ -88,7 +88,10 @@ pub fn conclude_scoped_mount(report: ScopedMountReport<'_>) {
         "namespace"
     };
     let selection_reason: String = if scoped_fuse_effective {
-        "scoped_mount_ready".to_string()
+        // 「scoped」是 per-app 会话时代沿用的稳定关键字；per-app 会话已退役（b21c613a），
+        // Ready 实际表示应用视图已接入共享宿主会话。追加 view= 说明真实形态，避免现场
+        // 误读成「走了独立 scoped 会话、没走宿主」。
+        "scoped_mount_ready:view=srx_host".to_string()
     } else if let Some(reason) = unavailable_reason {
         // 保留既有前缀（诊断脚本按它检索），把具体原因追加在后面：日志里既有稳定
         // 关键字，也有一眼能读懂的原因。
