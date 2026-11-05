@@ -9,6 +9,8 @@ pub(super) struct SpecializePerf<'a> {
     pub(super) should_redirect: bool,
     pub(super) should_monitor: bool,
     pub(super) is_system_writer: bool,
+    /// 系统链路进程：为真时这条结论用 Warn 级别输出，绕过 verbose 门禁。
+    pub(super) is_diagnostic: bool,
     pub(super) is_hook_redirect: bool,
     pub(super) allow_count: usize,
     pub(super) excluded_count: usize,
@@ -76,35 +78,47 @@ pub(super) fn log_specialize_perf(perf: &SpecializePerf<'_>) {
         && !perf.should_redirect
         && !perf.should_monitor
         && !perf.is_system_writer
+        && !perf.is_diagnostic
         && perf.app_count < 100
     {
         return;
     }
 
-    log::info!(
-        "perf specialize pkg={} pid={} uid={} exit={} apps={} redirect={} monitor={} writer={} hook_redirect={} allow={} excl={} map={} payload={} init_ms={} reload_ms={} uid_ms={} decision_ms={} writer_ms={} enabled_scan_ms={} route_ms={} payload_ms={} send_ms={} total_ms={}",
-        perf.package_name,
-        perf.pid,
-        perf.uid,
-        perf.exit_reason,
-        perf.app_count,
-        perf.should_redirect,
-        perf.should_monitor,
-        perf.is_system_writer,
-        perf.is_hook_redirect,
-        perf.allow_count,
-        perf.excluded_count,
-        perf.mapping_count,
-        perf.payload_bytes,
-        perf.config_init_ms,
-        perf.config_reload_ms,
-        perf.shared_uid_ms,
-        perf.decision_ms,
-        perf.writer_context_ms,
-        perf.enabled_scan_ms,
-        perf.route_ms,
-        perf.payload_ms,
-        perf.send_ms,
-        perf.total_ms
-    );
+    // 系统链路（MediaProvider / 代写者 / 共享组 / 监视桥接 / 选择 UI）的 specialize
+    // 结论用 Warn 输出：这类行是排障的唯一入口，而 info 会被 verbose 门禁挡掉
+    // （真机实测 android.process.media 因此整条链路在 running.log 与 logcat 都不可见）。
+    let log_line = |level: log::Level| {
+        log::log!(
+            level,
+            "perf specialize pkg={} pid={} uid={} exit={} apps={} redirect={} monitor={} writer={} hook_redirect={} allow={} excl={} map={} payload={} init_ms={} reload_ms={} uid_ms={} decision_ms={} writer_ms={} enabled_scan_ms={} route_ms={} payload_ms={} send_ms={} total_ms={}",
+            perf.package_name,
+            perf.pid,
+            perf.uid,
+            perf.exit_reason,
+            perf.app_count,
+            perf.should_redirect,
+            perf.should_monitor,
+            perf.is_system_writer,
+            perf.is_hook_redirect,
+            perf.allow_count,
+            perf.excluded_count,
+            perf.mapping_count,
+            perf.payload_bytes,
+            perf.config_init_ms,
+            perf.config_reload_ms,
+            perf.shared_uid_ms,
+            perf.decision_ms,
+            perf.writer_context_ms,
+            perf.enabled_scan_ms,
+            perf.route_ms,
+            perf.payload_ms,
+            perf.send_ms,
+            perf.total_ms
+        );
+    };
+    if perf.is_diagnostic {
+        log_line(log::Level::Warn);
+    } else {
+        log_line(log::Level::Info);
+    }
 }

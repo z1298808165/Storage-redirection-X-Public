@@ -6,7 +6,7 @@ use log::{Level as LogLevel, LevelFilter, Log, Metadata, Record};
 use std::ffi::CString;
 use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Once, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 
 const LOG_LEVEL_VERBOSE: i32 = 0;
 const LOG_LEVEL_DEBUG: i32 = 1;
@@ -193,6 +193,13 @@ pub fn write_log(level: Level, tag: &str, message: &str) {
     let private_sent = private_log_socket()
         .map(|socket| socket.send(level, tag, message))
         .unwrap_or(false);
+    // zygote 域内连不上 daemon 的私有通道（SELinux 拒绝），pre 阶段的结论因此只能
+    // 落在 logcat；而 logcat 缓冲在开机后几十秒就会被滚掉——恰好是 MediaProvider、
+    // 代写者与共享组进程 specialize 的时段，也就是最需要复盘的那一段。这里按行暂存，
+    // 等进程 specialize 完成（post 阶段、域已切换）再补投到 running.log。
+    if !private_sent && is_critical && tag == DEFAULT_LOG_TAG && is_zygote_selinux_context() {
+        defer_log(level, message);
+    }
     if is_critical || (!private_sent && matches!(tag, FILE_MONITOR_LOG_TAG | STATS_LOG_TAG)) {
         android_log(level_to_priority(level), tag, message);
     }
@@ -300,6 +307,40 @@ fn is_zygote_selinux_context() -> bool {
     std::fs::read_to_string("/proc/self/attr/current")
         .map(|context| context.contains("zygote"))
         .unwrap_or(false)
+}
+
+/// zygote 阶段暂存的关键日志上限。这只是"开机那几十秒"的结论，正常远小于此；
+/// 设上限是为防止某个进程在 pre 阶段异常刷日志把内存带走。
+const DEFERRED_LOG_CAPACITY: usize = 32;
+
+static DEFERRED_LOGS: Mutex<Vec<(Level, String)>> = Mutex::new(Vec::new());
+
+fn defer_log(level: Level, message: &str) {
+    let mut pending = DEFERRED_LOGS.lock().unwrap_or_else(|err| err.into_inner());
+    if pending.len() >= DEFERRED_LOG_CAPACITY {
+        pending.remove(0);
+    }
+    pending.push((level, message.to_string()));
+}
+
+/// 把 zygote 阶段暂存的行补投到 daemon 私有通道（最终落 running.log）。
+///
+/// 由 post specialize 入口调用：那时进程域已切换，私有通道可用。send 失败的行
+/// 直接丢弃——它们已经写过 logcat，重复暂存会让下一次投递又带上陈旧内容。
+pub fn flush_deferred_logs() {
+    let drained: Vec<(Level, String)> = {
+        let mut pending = DEFERRED_LOGS.lock().unwrap_or_else(|err| err.into_inner());
+        if pending.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *pending)
+    };
+    let Some(socket) = private_log_socket() else {
+        return;
+    };
+    for (level, message) in drained {
+        let _ = socket.send(level, DEFAULT_LOG_TAG, &message);
+    }
 }
 
 fn sanitize_transport_message(message: &str) -> String {

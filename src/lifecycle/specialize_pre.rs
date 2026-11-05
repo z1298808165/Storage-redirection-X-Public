@@ -69,6 +69,7 @@ impl RuntimeFlow {
             should_redirect: self.should_redirect,
             should_monitor: self.should_monitor,
             is_system_writer,
+            is_diagnostic: self.is_diagnostic_process,
             is_hook_redirect: self.is_system_writer_hook_redirect,
             allow_count: stages.allow_count,
             excluded_count: stages.excluded_count,
@@ -110,6 +111,15 @@ impl RuntimeFlow {
         self.package_name = process.package_name.clone();
         self.app_uid = process.uid;
         self.app_pid = process.pid;
+
+        // 日志汇必须在任何"结论性"日志之前装上。
+        //
+        // 此前它在 configure_monitoring() 之后才 init，于是更早产生的结论全部写进了
+        // 虚空：真机实测（HyperOS 2026-11-05）`monitor init`、`module dir fd open`
+        // 各有 0 条记录，而同一次 specialize 里 `hook manager init` 有记录——差别
+        // 只在于后者发生在 init 之后。这类行恰好是"这个进程到底被判定成什么"的
+        // 唯一证据，缺了只能靠猜。ensure_log_adapter 是 Once，重复调用无副作用。
+        Logger::init(Some(&self.package_name));
 
         // MediaProvider 一进入 specialize 就登记，早于任何提前返回分支。
         //
@@ -219,6 +229,9 @@ impl RuntimeFlow {
     pub fn pre_app_specialize(&mut self, args: *mut abi::AppSpecializeArgs) {
         let mut perf_stages = SpecializePerfStages::new(monotonic_ms());
         let Some(process) = self.resolve_specialize_identity(args) else {
+            // 身份解析失败是该进程「完全没有下文」的唯一解释，必须留痕：它连
+            // package_name 都没有，后面的任何结论行都不会出现。
+            log::warn!("specialize identity unresolved");
             return;
         };
 
@@ -227,11 +240,18 @@ impl RuntimeFlow {
         let is_monitor_bridge = policy::is_file_monitor_bridge_package(&self.package_name);
         self.is_file_monitor_ui =
             is_file_monitor_ui_process(&self.package_name, &process.nice_name);
+        // 系统链路进程的 specialize 结论必须无条件留痕（见字段注释）：info 会被
+        // verbose 门禁挡掉，而这类进程一旦走 bypass，事后连"它被判成了什么"都查不到。
+        self.is_diagnostic_process = is_system_writer
+            || is_shared_uid_writer
+            || is_monitor_bridge
+            || self.is_file_monitor_ui;
         if self.is_file_monitor_ui {
             self.should_skip_post_work = true;
             self.close_module_dir_fd();
             self.request_dlclose();
-            log::info!(
+            // 这条是"该进程为什么没被 hook"的唯一结论，诊断进程必须无条件可见。
+            log::warn!(
                 "file monitor UI daemon-only bypass pkg={} nice={} uid={} pid={}",
                 self.package_name,
                 process.nice_name,
@@ -254,11 +274,19 @@ impl RuntimeFlow {
             self.should_skip_post_work = true;
             self.close_module_dir_fd();
             self.request_dlclose();
-            log::debug!(
-                "app config inactive, fast bypass pkg={} uid={}",
-                self.package_name,
-                self.app_uid
-            );
+            if self.is_diagnostic_process {
+                log::warn!(
+                    "app config inactive, fast bypass pkg={} uid={}",
+                    self.package_name,
+                    self.app_uid
+                );
+            } else {
+                log::debug!(
+                    "app config inactive, fast bypass pkg={} uid={}",
+                    self.package_name,
+                    self.app_uid
+                );
+            }
             return;
         }
 
@@ -366,7 +394,6 @@ impl RuntimeFlow {
         }
 
         self.configure_monitoring();
-        Logger::init(Some(&self.package_name));
 
         // MediaProvider 的重定向 Java hook 仍在 pre 阶段安装；SAF 来源识别
         // 走 native 文件监视路径，避免在系统 provider 内加载 LSPlant。
@@ -668,6 +695,18 @@ impl RuntimeFlow {
         let trail = AuditTrail::instance();
         if !self.should_monitor {
             trail.set_enabled(false);
+            // 「关掉监视」与「根本没走到这里」在事后完全无法区分，而系统链路的
+            // 进程恰恰最需要这个区分（真机实测 MP 从来没打过 monitor init，
+            // 到底是这里关掉了、还是更早的分支就返回了，只能靠猜）。
+            if self.is_diagnostic_process {
+                log::warn!(
+                    "monitor disabled pkg={} uid={} redirect={} hook_redirect={}",
+                    self.package_name,
+                    self.app_uid,
+                    self.should_redirect,
+                    self.is_system_writer_hook_redirect
+                );
+            }
             return;
         }
 

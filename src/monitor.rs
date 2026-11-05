@@ -200,7 +200,14 @@ impl AuditTrail {
         } else {
             format!("monitor init pkg={}", state.package_name)
         };
-        log::info!("{message}");
+        // 这一行是「该进程的监视为什么开/没开成什么样」的唯一凭据，且它发生在
+        // verbose 开关生效之前（配置还没读完），info 会被门禁吞掉；系统链路的
+        // 进程因此改用 Warn，保证无 verbose 的现场也能事后复盘。
+        if is_diagnostic_monitor_identity(&state.package_name, &state.shared_uid_packages, uid) {
+            log::warn!("{message}");
+        } else {
+            log::info!("{message}");
+        }
         true
     }
 
@@ -1502,6 +1509,27 @@ fn package_group_members(group: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// 是否属于「监视初始化结论必须无条件留痕」的系统链路身份。
+///
+/// 这些进程是归因链本身（系统代写者、共享组、监视桥接、文件选择 UI）：它们的
+/// `monitor init` 一旦丢失，就只剩"记录里没有它们"这一个模糊事实，无法区分
+/// 「没启用监视」「启用了但没归因」「根本没走到这里」三种完全不同的修法。
+/// 普通应用的同一行仍走 Info，避免把每个进程启动都刷成一条告警。
+fn is_diagnostic_monitor_identity(package_name: &str, shared_uid_packages: &str, uid: i32) -> bool {
+    if !shared_uid_packages.is_empty() {
+        return true;
+    }
+    if uid >= 0 && policy::is_shared_uid_process(uid) {
+        return true;
+    }
+    package_group_members(package_name).into_iter().any(|name| {
+        policy::is_system_writer_package(name)
+            || policy::is_media_provider_package(name)
+            || policy::is_file_monitor_bridge_package(name)
+            || policy::is_file_monitor_ui_package(name)
+    })
 }
 
 // 从 key=value|... 格式中提取指定 key 的值

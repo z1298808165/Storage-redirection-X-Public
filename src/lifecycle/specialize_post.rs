@@ -26,6 +26,9 @@ const MOUNT_SETTLE_POLLS: u32 = 4;
 impl RuntimeFlow {
     pub fn post_app_specialize(&mut self, _args: *const abi::AppSpecializeArgs) {
         let perf_started_ms = monotonic_ms();
+        // 此时进程域已切换，私有日志通道可用：把 pre（zygote 阶段）只能写进 logcat
+        // 的关键结论补投到 running.log，避免开机几十秒后 logcat 缓冲滚掉即永久丢失。
+        crate::logging::flush_deferred_logs();
         // 历史挂载状态标记的清理放在这里：post 对每个被注入的进程都会被调用，而 pre 存在
         // 多条会直接返回的分支（无有效配置的 fast bypass 等），放在 pre 里对那类应用永远清不到，
         // 正是它们的遗留标记会一直累积。这里早于本函数的所有提前返回，也早于 dlclose。
