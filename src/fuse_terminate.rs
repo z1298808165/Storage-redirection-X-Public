@@ -15,10 +15,8 @@
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use libc::{SIGKILL, SIGTERM, WNOHANG, c_int, kill, waitpid};
 
-/// SIGTERM 宽限与 SIGKILL 后等待的探测轮数；每轮 10ms，共约 300ms。
-const GRACE_POLLS: usize = 30;
-/// 每轮探测之间的休眠时长（微秒）。
-const POLL_SLEEP_USEC: u32 = 10 * 1000;
+/// SIGTERM 宽限与 SIGKILL 后各自的最长等待（毫秒），与改造前 30×10ms 同预算。
+const GRACE_WINDOW_MS: i64 = 300;
 
 /// 判定目标进程实例是否仍然存活。
 fn process_identity_alive(pid: i32, start_time_ticks: Option<u64>) -> bool {
@@ -55,21 +53,15 @@ pub(crate) fn terminate_fuse_process(pid: i32, start_time_ticks: Option<u64>) {
     }
 }
 
-/// 在宽限窗口内轮询等待目标退出：`waitpid` 回收成功或 `/proc` 探测确认消失即返回。
+/// 在宽限窗口内等待目标退出：由 pidfd 退出事件唤醒，退出后顺带尝试回收僵尸。
+///
+/// 存活判据只看 `/proc`（带启动时刻），不看 `waitpid`：目标可能已被 init 收养。
 fn wait_for_exit(pid: i32, start_time_ticks: Option<u64>) {
-    for _ in 0..GRACE_POLLS {
+    crate::platform::child_wait::wait_process_gone(pid, GRACE_WINDOW_MS, || {
+        // 目标若仍是本进程子进程，退出后是僵尸，`/proc` 仍可见；先回收再判活。
         let mut status: c_int = 0;
-        // SAFETY: status 是栈上有效的 c_int，指针在调用期间保持有效。
-        let wait_ret = unsafe { waitpid(pid, &mut status as *mut _, WNOHANG) };
-        if wait_ret == pid {
-            return;
-        }
-        // SIGTERM/SIGKILL 之后同样不能依赖 `waitpid` 判断目标是否消失，否则会对
-        // 已经退出但无法回收的目标误报残留。
-        if !process_identity_alive(pid, start_time_ticks) {
-            return;
-        }
-        // SAFETY: usleep 只接收整型参数，不涉及借用指针。
-        unsafe { libc::usleep(POLL_SLEEP_USEC) };
-    }
+        // SAFETY: status 是栈上有效的 c_int；WNOHANG 不阻塞，非子进程时返回 ECHILD。
+        let _ = unsafe { waitpid(pid, &mut status as *mut _, WNOHANG) };
+        process_identity_alive(pid, start_time_ticks)
+    });
 }

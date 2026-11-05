@@ -80,14 +80,7 @@ fn terminate_host_process(pid: libc::pid_t) {
     // SAFETY: pid 是本模块 fork 出的宿主子进程，调用方已凭 pid + 启动时刻确认其身份；
     // SIGKILL 只作用于该进程，不影响其它会话。
     unsafe { libc::kill(pid, libc::SIGKILL) };
-    let mut status: libc::c_int = 0;
-    for _ in 0..10 {
-        // SAFETY: pid 是本模块 fork 出的子进程；WNOHANG 只在它已退出时回收，不会阻塞。
-        if unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) } == pid {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    let _ = crate::platform::child_wait::wait_child_exit(pid, 100);
 }
 
 /// 判断进程是否已变成僵尸（已退出但未被回收）。
@@ -451,31 +444,18 @@ fn host_endpoint_alive(view: &HostSessionView) -> bool {
 ///
 /// 子进程可能停在不可中断的 D 态（FUSE 挂死时探测里的 stat 就会这样），所以不能阻塞
 /// waitpid：那会让调用线程陪着一起卡死，正是要避免的失效模式。这里到点即 SIGKILL，
-/// 再交给 `reap_bounded` 做有界回收。等待的唯一事件源是内核的进程退出，不是对状态的
-/// 反复查询。
+/// 再交给 `reap_bounded` 做有界回收。等待由 pidfd 退出事件驱动，不反复查询状态。
 fn wait_child_exit(child: i32, timeout_ms: i64) -> Option<i32> {
-    let deadline = paths::monotonic_ms() + timeout_ms;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本进程 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child {
-            return if libc::WIFEXITED(status) {
-                Some(libc::WEXITSTATUS(status))
-            } else {
-                None
-            };
-        }
-        if waited < 0 {
-            return None;
-        }
-        if paths::monotonic_ms() >= deadline {
+    use crate::platform::child_wait::{self, ChildExit};
+    match child_wait::wait_child_exit(child, timeout_ms) {
+        ChildExit::Exited(code) => Some(code),
+        ChildExit::Signaled(_) | ChildExit::Failed(_) => None,
+        ChildExit::TimedOut => {
             // SAFETY: child 已确认仍在运行；SIGKILL 只作用于它。
             unsafe { libc::kill(child, libc::SIGKILL) };
             reap_bounded(child, "probe");
-            return None;
+            None
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -639,13 +619,8 @@ pub fn attach_app_to_host(
 
 /// 回收已自行退出的接入子进程。
 fn reap_attach_child(pid: libc::pid_t) {
-    let mut status: libc::c_int = 0;
-    for _ in 0..50 {
-        // SAFETY: pid 是本次 fork 出的子进程，已确认就绪，回收不会阻塞。
-        if unsafe { libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) } == pid {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+    if crate::platform::child_wait::wait_child_exit(pid, 500).is_settled() {
+        return;
     }
     reap_host_child(pid);
 }
@@ -1231,28 +1206,14 @@ fn log_host_stage_trace() {
 /// 自己退出（由本次强杀收尾，即卡在某个阶段），`signal=11/6` 表示崩溃。回收是强制的，
 /// 否则每轮恢复都会留下一个僵尸进程。
 fn reap_host_child(pid: libc::pid_t) -> String {
-    let mut status: libc::c_int = 0;
-    let mut reaped = false;
-    // SAFETY: pid 来自本次 fork；先终止再回收，且回收循环带次数上限，不会无限阻塞。
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-        for _ in 0..50 {
-            if libc::waitpid(pid, &mut status as *mut libc::c_int, libc::WNOHANG) == pid {
-                reaped = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    }
-    if !reaped {
-        return "exit=unreaped".to_string();
-    }
-    if libc::WIFSIGNALED(status) {
-        format!("signal={}", libc::WTERMSIG(status))
-    } else if libc::WIFEXITED(status) {
-        format!("exit={}", libc::WEXITSTATUS(status))
-    } else {
-        "exit=unknown".to_string()
+    use crate::platform::child_wait::{self, ChildExit};
+    // SAFETY: pid 来自本次 fork；先终止再有界回收，不会无限阻塞。
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    match child_wait::wait_child_exit(pid, 1_000) {
+        ChildExit::Signaled(signal) => format!("signal={signal}"),
+        ChildExit::Exited(code) => format!("exit={code}"),
+        ChildExit::TimedOut => "exit=unreaped".to_string(),
+        ChildExit::Failed(_) => "exit=unknown".to_string(),
     }
 }
 
@@ -2471,7 +2432,7 @@ fn process_alive(pid: i32) -> bool {
 /// 4. stat 探针路径：应答（含 ENOENT）→ alive（EXIT_ANSWERED）；停摆则挂起，
 ///    由父进程按超时裁决。
 ///
-/// 父进程全程 WNOHANG 轮询，绝不阻塞：探针 SIGKILL 后仍不退出（D 态等 abort 唤醒）
+/// 父进程按 pidfd 退出事件有界等待，绝不阻塞：探针 SIGKILL 后仍不退出（D 态等 abort 唤醒）
 /// 与超时同样按 Stalled 裁决——TASK_KILLABLE 只在 FUSE 应答或 abort 时醒来，
 /// 杀不死本身就是队列已死的证据。
 fn verify_host_stall_externally(beat: &HostHeartbeat) -> ExternalVerdict {
@@ -2521,33 +2482,20 @@ fn verify_host_stall_externally(beat: &HostHeartbeat) -> ExternalVerdict {
     }
     // 父进程裁决窗：2 次采样间隔 + 探测超时 + 余量。
     let budget_ms = (EXTERNAL_ABORT_VERIFY_SAMPLE_MS * 2 + EXTERNAL_ABORT_PROBE_TIMEOUT_MS) as i64;
-    let deadline = paths::monotonic_ms() + budget_ms;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本次 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child {
-            return if libc::WIFEXITED(status) {
-                match libc::WEXITSTATUS(status) {
-                    VERIFY_EXIT_ANSWERED => ExternalVerdict::Alive("probe-answered"),
-                    VERIFY_EXIT_WAITING_CLEARED => ExternalVerdict::Alive("waiting-cleared"),
-                    VERIFY_EXIT_UNAVAILABLE => ExternalVerdict::Unavailable("ns-or-sysfs"),
-                    _ => ExternalVerdict::Unavailable("unexpected-exit"),
-                }
-            } else {
-                ExternalVerdict::Unavailable("child-signalled")
-            };
-        }
-        if waited < 0 {
-            return ExternalVerdict::Unavailable("waitpid-failed");
-        }
-        if paths::monotonic_ms() >= deadline {
+    use crate::platform::child_wait::{self, ChildExit};
+    match child_wait::wait_child_exit(child, budget_ms) {
+        ChildExit::Exited(VERIFY_EXIT_ANSWERED) => ExternalVerdict::Alive("probe-answered"),
+        ChildExit::Exited(VERIFY_EXIT_WAITING_CLEARED) => ExternalVerdict::Alive("waiting-cleared"),
+        ChildExit::Exited(VERIFY_EXIT_UNAVAILABLE) => ExternalVerdict::Unavailable("ns-or-sysfs"),
+        ChildExit::Exited(_) => ExternalVerdict::Unavailable("unexpected-exit"),
+        ChildExit::Signaled(_) => ExternalVerdict::Unavailable("child-signalled"),
+        ChildExit::Failed(_) => ExternalVerdict::Unavailable("waitpid-failed"),
+        ChildExit::TimedOut => {
             // SAFETY: child 已确认仍存活；SIGKILL 只作用于它。
             unsafe { libc::kill(child, libc::SIGKILL) };
             reap_bounded(child, "external-verify");
-            return ExternalVerdict::Stalled;
+            ExternalVerdict::Stalled
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -2576,33 +2524,23 @@ unsafe fn read_waiting_raw(c_waiting: &CString) -> Option<u64> {
         .ok()
 }
 
-/// 有界回收 fork 子进程：WNOHANG 轮询至多 3 秒，杀不死就记录状态后放弃。
+/// 有界回收 fork 子进程：至多等 3 秒退出事件，杀不死就记录状态后放弃。
 fn reap_bounded(child: i32, tag: &str) {
-    let deadline = paths::monotonic_ms() + 3_000;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本进程 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child || waited < 0 {
-            return;
-        }
-        if paths::monotonic_ms() >= deadline {
-            let state = std::fs::read_to_string(format!("/proc/{child}/stat"))
-                .ok()
-                .and_then(|text| {
-                    text.rsplit_once(')')
-                        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            crate::fuse_redirect::config::forensics_log(&format!(
-                "daemon external {tag} child unkillable pid={} state={} abandoned",
-                child, state
-            ));
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    if crate::platform::child_wait::wait_child_exit(child, 3_000).is_settled() {
+        return;
     }
+    let state = std::fs::read_to_string(format!("/proc/{child}/stat"))
+        .ok()
+        .and_then(|text| {
+            text.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    crate::fuse_redirect::config::forensics_log(&format!(
+        "daemon external {tag} child unkillable pid={} state={} abandoned",
+        child, state
+    ));
 }
 
 /// 外部 abort：fork 子进程进宿主命名空间写连接 abort 节点。
@@ -2650,24 +2588,15 @@ fn abort_host_connection_externally(beat: &HostHeartbeat) -> bool {
         }
     }
     // abort 节点是纯 sysfs 写入，不经过 FUSE 数据面，正常毫秒级；仍给有界窗口。
-    let deadline = paths::monotonic_ms() + 5_000;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本次 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child {
-            return libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
-        }
-        if waited < 0 {
-            return false;
-        }
-        if paths::monotonic_ms() >= deadline {
+    use crate::platform::child_wait::{self, ChildExit};
+    match child_wait::wait_child_exit(child, 5_000) {
+        ChildExit::TimedOut => {
             // SAFETY: child 已确认仍存活；SIGKILL 只作用于它。
             unsafe { libc::kill(child, libc::SIGKILL) };
             reap_bounded(child, "external-abort");
-            return false;
+            false
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        outcome => outcome.exited_with(0),
     }
 }
 

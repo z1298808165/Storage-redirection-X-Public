@@ -19,8 +19,8 @@ use crate::platform::{self, paths::monotonic_ms};
 use diagnostics::log_child_diagnostics;
 use libc::{
     AF_UNIX, CLONE_NEWNS, MS_NODEV, MS_NOSUID, MS_PRIVATE, MS_RDONLY, MS_REC, O_CLOEXEC, O_RDONLY,
-    SIGKILL, SIGTERM, SOCK_DGRAM, WNOHANG, c_int, c_ulong, c_void, close, kill, mount, open, read,
-    readlink, setns, socketpair, waitpid,
+    SIGKILL, SIGTERM, SOCK_DGRAM, c_int, c_ulong, c_void, close, kill, mount, open, read, readlink,
+    setns, socketpair, waitpid,
 };
 use stats::update_redirect_stats;
 use std::ffi::{CStr, CString};
@@ -322,29 +322,21 @@ fn mount_one_storage_view_barrier(
     // 屏障子进程正常在毫秒级完成；阻塞等待会把应用线程永久挂在一个卡死（D 态）的
     // 子进程上。改为有界等待：超时后 SIGKILL 并记录，后续挂载会重新评估屏障；子进程
     // 若处于 D 态无法被杀，也留下可检索的记录而不是让调用线程无限挂起。
-    const BARRIER_WAIT_TIMEOUT_MS: u64 = 2_000;
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(BARRIER_WAIT_TIMEOUT_MS);
-    let mut status: c_int = 0;
-    loop {
-        // SAFETY: status 是有效的栈上整型指针，child 是本次 fork 的子进程。
-        let waited = unsafe { waitpid(child, &mut status, WNOHANG) };
-        if waited == child {
-            return libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+    const BARRIER_WAIT_TIMEOUT_MS: i64 = 2_000;
+    use crate::platform::child_wait::{self, ChildExit};
+    match child_wait::wait_child_exit(child, BARRIER_WAIT_TIMEOUT_MS) {
+        ChildExit::Exited(code) => code == 0,
+        ChildExit::Signaled(_) => false,
+        ChildExit::Failed(errno) => {
+            log::warn!(
+                "storage view barrier wait failed child={} errno={} {}",
+                child,
+                errno,
+                errno_text(errno)
+            );
+            false
         }
-        if waited < 0 {
-            let errno = last_errno();
-            if errno != libc::EINTR {
-                log::warn!(
-                    "storage view barrier wait failed child={} errno={} {}",
-                    child,
-                    errno,
-                    errno_text(errno)
-                );
-                return false;
-            }
-        }
-        if std::time::Instant::now() >= deadline {
+        ChildExit::TimedOut => {
             // SAFETY: child 是本次 fork 的子进程，SIGKILL 只作用于它。
             let _ = unsafe { kill(child, SIGKILL) };
             log::warn!(
@@ -352,9 +344,8 @@ fn mount_one_storage_view_barrier(
                 child,
                 BARRIER_WAIT_TIMEOUT_MS
             );
-            return false;
+            false
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -954,41 +945,51 @@ fn handle_parent_process(child: i32, sock: c_int, primary_timeout_sec: i64) -> b
 }
 
 fn reap_child(child: i32, nonblocking: bool) {
-    let mut status: c_int = 0;
-    let options = if nonblocking { WNOHANG } else { 0 };
-    let attempts = if nonblocking { 20 } else { 1 };
-    for attempt in 0..attempts {
-        let wait_ret = unsafe { waitpid(child, &mut status as *mut _, options) };
-        if wait_ret < 0 {
-            let errno = last_errno();
-            log::warn!(
-                "waitpid failed child={} errno={} {}",
-                child,
-                errno,
-                errno_text(errno)
-            );
-            return;
+    use crate::platform::child_wait::{self, ChildExit};
+    if nonblocking {
+        // 有界等待约 200ms（与改造前 20×10ms 复查同预算），由 pidfd 退出事件唤醒。
+        match child_wait::wait_child_exit(child, 200) {
+            ChildExit::Exited(code) => {
+                log::info!("child reaped child={} status=exit={}", child, code);
+            }
+            ChildExit::Signaled(signal) => {
+                log::info!("child reaped child={} status=sig={}", child, signal);
+            }
+            ChildExit::Failed(errno) => {
+                log::warn!(
+                    "waitpid failed child={} errno={} {}",
+                    child,
+                    errno,
+                    errno_text(errno)
+                );
+            }
+            ChildExit::TimedOut => {
+                log::warn!(
+                    "child not reaped child={} status=still_running reason=nonblocking_timeout",
+                    child
+                );
+            }
         }
-        if wait_ret > 0 {
-            log::info!(
-                "child reaped child={} status={} raw={}",
-                child,
-                decode_wait_status(status),
-                status
-            );
-            return;
-        }
-        if !nonblocking {
-            break;
-        }
-        if attempt + 1 < attempts {
-            unsafe { libc::usleep(10 * 1000) };
-        }
+        return;
     }
-
-    log::warn!(
-        "child not reaped child={} status=still_running reason=nonblocking_timeout",
-        child
+    let mut status: c_int = 0;
+    // SAFETY: status 是栈上有效整型；child 是本次 fork 的子进程，阻塞等待它退出。
+    let wait_ret = unsafe { waitpid(child, &mut status as *mut _, 0) };
+    if wait_ret < 0 {
+        let errno = last_errno();
+        log::warn!(
+            "waitpid failed child={} errno={} {}",
+            child,
+            errno,
+            errno_text(errno)
+        );
+        return;
+    }
+    log::info!(
+        "child reaped child={} status={} raw={}",
+        child,
+        decode_wait_status(status),
+        status
     );
 }
 

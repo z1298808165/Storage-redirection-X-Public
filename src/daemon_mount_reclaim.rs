@@ -507,27 +507,25 @@ pub(crate) fn remember_stuck_mount_child(child: i32, package_name: &str) {
 }
 
 pub(crate) fn reap_child(child: i32, nonblocking: bool) -> bool {
-    let mut status = 0;
-    let options = if nonblocking { WNOHANG } else { 0 };
-    let attempts = if nonblocking { 20 } else { 1 };
-    for attempt in 0..attempts {
-        // SAFETY: status 为本作用域独占的可变 i32，waitpid 只写这一处；child 为本次 fork 返回的 pid。
-        let ret = unsafe { waitpid(child, &mut status, options) };
-        if ret < 0 {
-            log_errno("daemon waitpid failed");
-            return true;
-        }
-        if ret > 0 {
-            return true;
-        }
-        if !nonblocking {
-            break;
-        }
-        if attempt + 1 < attempts {
-            // SAFETY: usleep 无副作用、不触碰任何 Rust 内存，仅让出 10ms 再重试回收。
-            unsafe { libc::usleep(10 * 1000) };
-        }
+    if nonblocking {
+        // 有界等待约 200ms（与改造前 20×10ms 复查同预算），由 pidfd 退出事件唤醒。
+        return match crate::platform::child_wait::wait_child_exit(child, 200) {
+            crate::platform::child_wait::ChildExit::TimedOut => {
+                log::warn!("daemon child not reaped child={}", child);
+                false
+            }
+            crate::platform::child_wait::ChildExit::Failed(errno) => {
+                log::warn!("daemon waitpid failed child={} errno={}", child, errno);
+                true
+            }
+            _ => true,
+        };
     }
-    log::warn!("daemon child not reaped child={}", child);
-    false
+    let mut status = 0;
+    // SAFETY: status 为本作用域独占的可变 i32，waitpid 只写这一处；child 为本次 fork 返回的 pid。
+    let ret = unsafe { waitpid(child, &mut status, 0) };
+    if ret < 0 {
+        log_errno("daemon waitpid failed");
+    }
+    true
 }

@@ -2,6 +2,8 @@
 pub mod allocator;
 #[path = "platform/anti_detect.rs"]
 pub mod anti_detect;
+#[path = "platform/child_wait.rs"]
+pub mod child_wait;
 #[path = "platform/elf_img.rs"]
 pub mod elf_img;
 #[path = "platform/errno.rs"]

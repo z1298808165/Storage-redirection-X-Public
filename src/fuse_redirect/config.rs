@@ -1461,7 +1461,7 @@ enum ProbeOutcome {
 /// 会把「全 worker 卡死」误判为存活（用户设备实测的假阴性形态）。
 ///
 /// 探测请求本身也走这条 FUSE 连接，停摆时它必然与其它请求一起挂起。超时路径
-/// **绝不阻塞等待**：SIGKILL 之后只在有界窗口内 WNOHANG 回收，探针杀不死就记录
+/// **绝不阻塞等待**：SIGKILL 之后只在有界窗口内等待退出事件并回收，探针杀不死就记录
 /// 现场后放弃——阻塞 waitpid 曾让看门狗线程整体卡死、自愈链路失效
 /// （2026-10-29 真机冻结实证）。
 fn probe_mount_point_alive(timeout_ms: u32) -> ProbeOutcome {
@@ -1486,63 +1486,44 @@ fn probe_mount_point_alive(timeout_ms: u32) -> ProbeOutcome {
             libc::_exit(0);
         }
     }
-    let deadline = fuser::activity::now_ms() + i64::from(timeout_ms);
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本次 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child {
-            return ProbeOutcome::Alive;
-        }
-        if waited < 0 {
-            return ProbeOutcome::Unavailable("waitpid-failed");
-        }
-        if fuser::activity::now_ms() >= deadline {
-            // SAFETY: child 已确认仍存活（未 waitpid 成功）；SIGKILL 只作用于它。
+    use crate::platform::child_wait::{self, ChildExit};
+    match child_wait::wait_child_exit(child, i64::from(timeout_ms)) {
+        ChildExit::TimedOut => {
+            // SAFETY: child 已确认仍存活（未回收）；SIGKILL 只作用于它。
             unsafe { libc::kill(child, libc::SIGKILL) };
             reap_probe_child_bounded(child);
-            return ProbeOutcome::TimedOut;
+            ProbeOutcome::TimedOut
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        ChildExit::Failed(_) => ProbeOutcome::Unavailable("waitpid-failed"),
+        ChildExit::Exited(_) | ChildExit::Signaled(_) => ProbeOutcome::Alive,
     }
 }
 
-/// SIGKILL 之后的有界回收：WNOHANG 轮询最多 2 秒，绝不阻塞看门狗线程。
+/// SIGKILL 之后的有界回收：最多等 2 秒退出事件，绝不阻塞看门狗线程。
 ///
 /// 回收失败（探针陷入 D 态）不是错误路径：探针卡死在 FUSE 请求上正是停摆证据
 /// 的一部分，把它连同进程状态一起落日志，随后由连接 abort 释放。
 fn reap_probe_child_bounded(child: i32) {
     const REAP_DEADLINE_MS: i64 = 2_000;
-    let deadline = fuser::activity::now_ms() + REAP_DEADLINE_MS;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: child 是本进程 fork 出的子进程；WNOHANG 不阻塞。
-        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
-        if waited == child || waited < 0 {
-            return;
-        }
-        if fuser::activity::now_ms() >= deadline {
-            // 探针 SIGKILL 后仍未回收：读它的调度状态作为取证（D=不可中断，
-            // 只能等 FUSE abort 唤醒），随后放弃回收。僵尸由 abort 后的会话
-            // 退出统一交给 init 兜底。
-            let state = std::fs::read_to_string(format!("/proc/{child}/stat"))
-                .ok()
-                .and_then(|text| {
-                    // stat 的 comm 字段可含空格与括号，取最后一个 ')' 之后的首字段。
-                    text.rsplit_once(')')
-                        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            log::error!(
-                "fuse host stall probe child unkillable pid={} state={} released-by-abort",
-                child,
-                state
-            );
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    if crate::platform::child_wait::wait_child_exit(child, REAP_DEADLINE_MS).is_settled() {
+        return;
     }
+    // 探针 SIGKILL 后仍未回收：读它的调度状态作为取证（D=不可中断，只能等 FUSE
+    // abort 唤醒），随后放弃回收。僵尸由 abort 后的会话退出统一交给 init 兜底。
+    let state = std::fs::read_to_string(format!("/proc/{child}/stat"))
+        .ok()
+        .and_then(|text| {
+            // stat 的 comm 字段可含空格与括号，取最后一个 ')' 之后的首字段。
+            text.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    log::error!(
+        "fuse host stall probe child unkillable pid={} state={} released-by-abort",
+        child,
+        state
+    );
 }
 
 /// 枚举本 mount namespace 可见的 FUSE 连接 id。
