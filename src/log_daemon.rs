@@ -70,7 +70,6 @@ const STATS_SCHEMA: &str = "2";
 
 static RECONCILE_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static POLICY_REGISTER_REQUEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-static OWNER_FIX_REQUESTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static DAEMON_WAKE_EVENTFD: AtomicI32 = AtomicI32::new(-1);
 
 pub fn set_daemon_wake_eventfd(fd: i32) {

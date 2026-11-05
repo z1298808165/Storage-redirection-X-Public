@@ -4,16 +4,12 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -146,60 +142,6 @@ internal fun ThemeModeSelector(
             maxLines = 1,
         )
       }
-    }
-  }
-}
-
-@Composable
-internal fun AccentColorPalette(
-    selected: Int,
-    onSelect: (Int) -> Unit,
-    showDivider: Boolean = true,
-) {
-  Column(modifier = Modifier.fillMaxWidth()) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-      Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = "强调色",
-            fontSize = 16.sp,
-            lineHeight = 20.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Text(
-            text = "选择系统取色，或指定应用主题色",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-        )
-      }
-      Row(
-          modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        AccentColorOptions.forEach { (value, label) ->
-          AccentColorSwatch(
-              color = value,
-              selected = selected == value,
-              label = label,
-              onClick = { onSelect(value) },
-          )
-        }
-      }
-    }
-    if (showDivider) {
-      Box(
-          Modifier.fillMaxWidth()
-              .padding(start = 16.dp)
-              .height(1.dp)
-              .background(
-                  MiuixTheme.colorScheme.onSurface.copy(
-                      alpha = if (isSrxDarkTheme()) 0.035f else 0.045f
-                  )
-              ),
-      )
     }
   }
 }

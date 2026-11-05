@@ -1,7 +1,7 @@
 // JNI 工具函数：jstring 转 UTF-8、线程附着、类/方法查找、对象调用等通用操作
 use jni_sys::{
-    JNI_FALSE, JNI_TRUE, JNIEnv, JNINativeMethod, JavaVM, jboolean, jbyteArray, jclass, jint,
-    jmethodID, jobject, jsize, jstring, jvalue,
+    JNI_TRUE, JNIEnv, JNINativeMethod, JavaVM, jbyteArray, jclass, jint, jmethodID, jobject, jsize,
+    jstring, jvalue,
 };
 use std::ffi::CString;
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -164,7 +164,6 @@ pub fn delete_local_ref(env: *mut jni_sys::JNIEnv, value: jobject) {
 // 约定：参数 null / env 非法 → 返回 null / false；调用失败清 pending exception
 
 // FindClass：按全限定名（斜杠形式如 "java/lang/String"）查找类
-#[allow(dead_code)]
 pub fn find_class(env: *mut JNIEnv, name: &str) -> jclass {
     if env.is_null() {
         return std::ptr::null_mut();
@@ -187,7 +186,6 @@ pub fn find_class(env: *mut JNIEnv, name: &str) -> jclass {
 }
 
 // GetMethodID：按方法名 + 签名查实例方法
-#[allow(dead_code)]
 pub fn get_method_id(env: *mut JNIEnv, clazz: jclass, name: &str, sig: &str) -> jmethodID {
     if env.is_null() || clazz.is_null() {
         return std::ptr::null_mut();
@@ -213,7 +211,6 @@ pub fn get_method_id(env: *mut JNIEnv, clazz: jclass, name: &str, sig: &str) -> 
 }
 
 // GetStaticMethodID：按方法名 + 签名查静态方法
-#[allow(dead_code)]
 pub fn get_static_method_id(env: *mut JNIEnv, clazz: jclass, name: &str, sig: &str) -> jmethodID {
     if env.is_null() || clazz.is_null() {
         return std::ptr::null_mut();
@@ -238,34 +235,7 @@ pub fn get_static_method_id(env: *mut JNIEnv, clazz: jclass, name: &str, sig: &s
     }
 }
 
-// ToReflectedMethod：jmethodID → java.lang.reflect.Method jobject（lsplant Hook 的 target 要这个）
-#[allow(dead_code)]
-pub fn to_reflected_method(
-    env: *mut JNIEnv,
-    clazz: jclass,
-    method_id: jmethodID,
-    is_static: bool,
-) -> jobject {
-    if env.is_null() || clazz.is_null() || method_id.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    unsafe {
-        let table = *env;
-        if table.is_null() {
-            return std::ptr::null_mut();
-        }
-        let flag: jboolean = if is_static { JNI_TRUE } else { JNI_FALSE };
-        let obj = ((*table).v1_2.ToReflectedMethod)(env, clazz, method_id, flag);
-        if obj.is_null() {
-            clear_pending_exception(env);
-        }
-        obj
-    }
-}
-
 // NewObjectA：构造对象，args 是参数数组（无参传空切片）
-#[allow(dead_code)]
 pub fn new_object_a(env: *mut JNIEnv, clazz: jclass, ctor: jmethodID, args: &[jvalue]) -> jobject {
     if env.is_null() || clazz.is_null() || ctor.is_null() {
         return std::ptr::null_mut();
@@ -290,7 +260,6 @@ pub fn new_object_a(env: *mut JNIEnv, clazz: jclass, ctor: jmethodID, args: &[jv
 }
 
 // CallObjectMethodA：实例方法调用返回 jobject，args 无参传空切片
-#[allow(dead_code)]
 pub fn call_object_method_a(
     env: *mut JNIEnv,
     obj: jobject,
@@ -320,7 +289,6 @@ pub fn call_object_method_a(
 }
 
 // CallStaticObjectMethodA：静态方法调用返回 jobject
-#[allow(dead_code)]
 pub fn call_static_object_method_a(
     env: *mut JNIEnv,
     clazz: jclass,
@@ -350,7 +318,6 @@ pub fn call_static_object_method_a(
 }
 
 // CallStaticBooleanMethodA：静态方法调用返回 boolean
-#[allow(dead_code)]
 pub fn call_static_boolean_method_a(
     env: *mut JNIEnv,
     clazz: jclass,
@@ -380,7 +347,6 @@ pub fn call_static_boolean_method_a(
 }
 
 // NewGlobalRef：提升引用为全局，跨线程 / 跨调用保留 jobject
-#[allow(dead_code)]
 pub fn new_global_ref(env: *mut JNIEnv, obj: jobject) -> jobject {
     if env.is_null() || obj.is_null() {
         return std::ptr::null_mut();
@@ -398,38 +364,7 @@ pub fn new_global_ref(env: *mut JNIEnv, obj: jobject) -> jobject {
     }
 }
 
-// DeleteGlobalRef：释放全局引用
-#[allow(dead_code)]
-pub fn delete_global_ref(env: *mut JNIEnv, gref: jobject) {
-    if env.is_null() || gref.is_null() {
-        return;
-    }
-    unsafe {
-        let table = *env;
-        if table.is_null() {
-            return;
-        }
-        ((*table).v1_1.DeleteGlobalRef)(env, gref);
-    }
-}
-
-// IsInstanceOf：判断 obj 是否为 clazz 的实例
-#[allow(dead_code)]
-pub fn is_instance_of(env: *mut JNIEnv, obj: jobject, clazz: jclass) -> bool {
-    if env.is_null() || obj.is_null() || clazz.is_null() {
-        return false;
-    }
-    unsafe {
-        let table = *env;
-        if table.is_null() {
-            return false;
-        }
-        ((*table).v1_1.IsInstanceOf)(env, obj, clazz) == JNI_TRUE
-    }
-}
-
 // GetObjectClass：取 obj 的运行时 class
-#[allow(dead_code)]
 pub fn get_object_class(env: *mut JNIEnv, obj: jobject) -> jclass {
     if env.is_null() || obj.is_null() {
         return std::ptr::null_mut();
@@ -448,7 +383,6 @@ pub fn get_object_class(env: *mut JNIEnv, obj: jobject) -> jclass {
 }
 
 // NewByteArray：分配 Java byte[]
-#[allow(dead_code)]
 pub fn new_byte_array(env: *mut JNIEnv, len: usize) -> jbyteArray {
     if env.is_null() {
         return std::ptr::null_mut();
@@ -467,7 +401,6 @@ pub fn new_byte_array(env: *mut JNIEnv, len: usize) -> jbyteArray {
 }
 
 // SetByteArrayRegion：把 Rust 切片拷贝到 Java byte[]
-#[allow(dead_code)]
 pub fn set_byte_array_region(env: *mut JNIEnv, array: jbyteArray, data: &[u8]) -> bool {
     if env.is_null() || array.is_null() {
         return false;
@@ -489,7 +422,6 @@ pub fn set_byte_array_region(env: *mut JNIEnv, array: jbyteArray, data: &[u8]) -
 }
 
 // RegisterNatives：把 Rust 函数指针绑定到 Java native 方法；切片寿命必须覆盖调用
-#[allow(dead_code)]
 pub fn register_natives(env: *mut JNIEnv, clazz: jclass, methods: &[JNINativeMethod]) -> bool {
     if env.is_null() || clazz.is_null() || methods.is_empty() {
         return false;

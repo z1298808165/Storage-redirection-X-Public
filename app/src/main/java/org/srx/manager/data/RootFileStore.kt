@@ -402,16 +402,6 @@ class RootFileStore(
           "grep -a -F -- \"\$worker\" \"/proc/\$worker_pid/cmdline\" >/dev/null 2>&1; " +
           "then kill \"\$worker_pid\" 2>/dev/null || true; fi ;; esac; fi; "
 
-  private fun progressCommand(
-      progress: String?,
-      percent: Int,
-      phase: String,
-      message: String,
-  ): String {
-    if (progress == null) return ""
-    return "printf '%s|%s|%s\\n' ${shellQuote(percent.toString())} ${shellQuote(phase)} ${shellQuote(message)} > ${shellQuote(progress)} 2>/dev/null || true; "
-  }
-
   private fun managedTempCleanupCommand(vararg paths: String): String {
     if (paths.isEmpty() || paths.any { !isManagedTempPath(it) }) {
       throw IllegalArgumentException("托管临时路径不安全")

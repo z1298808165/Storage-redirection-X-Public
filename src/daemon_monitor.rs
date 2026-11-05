@@ -298,10 +298,6 @@ impl RegularAppMonitor {
             && paths::monotonic_ms().saturating_sub(self.last_rebuild_ms) >= MISSING_ROOT_RETRY_MS
     }
 
-    pub fn configured_version(&self) -> u64 {
-        self.config_version
-    }
-
     /// 返回监视器 inotify fd，供 daemon 事件循环阻塞等待文件事件。
     pub fn event_fd(&self) -> i32 {
         self.fd

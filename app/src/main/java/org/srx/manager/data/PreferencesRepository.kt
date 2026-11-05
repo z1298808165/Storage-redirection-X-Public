@@ -200,8 +200,6 @@ class PreferencesRepository(private val context: Context) {
     }
   }
 
-  suspend fun readPredictiveBack(): Boolean = predictiveBackCompatPref()
-
   /**
    * 写入预测式返回的兼容开关。
    *

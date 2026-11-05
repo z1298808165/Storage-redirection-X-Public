@@ -581,18 +581,6 @@ class SrxViewModel(
     }
   }
 
-  fun addTemplate(name: String) {
-    viewModelScope.launch {
-      val ok = repository.upsertTemplate(name, defaultAppConfig())
-      if (ok) {
-        _state.value = _state.value.copy(templates = repository.readTemplates())
-        showMessage("模板已添加")
-      } else {
-        showMessage("添加模板失败")
-      }
-    }
-  }
-
   fun saveTemplate(template: ConfigTemplate) {
     viewModelScope.launch {
       val ok = repository.upsertTemplate(template.name, template.config, template.id)
@@ -601,22 +589,6 @@ class SrxViewModel(
         showMessage("模板已保存")
       } else {
         showMessage("保存模板失败")
-      }
-    }
-  }
-
-  fun renameTemplate(
-      templateId: String,
-      name: String,
-  ) {
-    viewModelScope.launch {
-      val template = repository.readTemplates().firstOrNull { it.id == templateId } ?: return@launch
-      val ok = repository.upsertTemplate(name, template.config, templateId)
-      if (ok) {
-        _state.value = _state.value.copy(templates = repository.readTemplates())
-        showMessage("模板已重命名")
-      } else {
-        showMessage("重命名失败")
       }
     }
   }
@@ -919,16 +891,6 @@ class SrxViewModel(
   fun diagnosticArchiveFileName(): String {
     val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
     return "storage-redirect-x-logs-$stamp.tar.gz"
-  }
-
-  fun exportDiagnosticArchiveToUri(uri: Uri) {
-    viewModelScope.launch {
-      updateBusy(BusyStateChange.Started("正在启动日志导出", 0.01f))
-      runCatching { repository.exportDiagnosticArchive(uri, ::updateDiagnosticArchiveProgress) }
-          .onSuccess { result -> showMessage(describeDiagnosticExport(result)) }
-          .onFailure { showMessage(it.message ?: "日志导出失败") }
-      updateBusy(BusyStateChange.Finished)
-    }
   }
 
   fun exportDiagnosticArchiveToDirectory(uri: Uri) {

@@ -701,13 +701,3 @@ internal fun Modifier.appMeshBackground(): Modifier {
     )
   }
 }
-
-@Composable
-internal fun AppBackground(): Brush {
-  val dark = isSrxDarkTheme()
-  return if (dark) {
-    Brush.linearGradient(listOf(Color(0xFF05070B), Color(0xFF101827), Color(0xFF071B1A)))
-  } else {
-    Brush.linearGradient(listOf(Color(0xFFEDF2F7), Color(0xFFEAF4FF), Color(0xFFEAFBF7)))
-  }
-}

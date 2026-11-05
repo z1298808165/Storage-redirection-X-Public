@@ -13,15 +13,6 @@ pub enum ZygiskOption {
     DlcloseModuleLibrary = 1,
 }
 
-// get_flags 返回的位标志：当前进程是否拿到 root、是否在 denylist
-#[allow(dead_code)]
-#[repr(u32)]
-#[derive(Copy, Clone)]
-pub enum StateFlag {
-    ProcessGrantedRoot = 1 << 0,
-    ProcessOnDenylist = 1 << 1,
-}
-
 // Zygisk 传给模块的 API 函数表，impl_ptr 是每个回调需要的 self 参数
 #[repr(C)]
 pub struct ApiTable {
@@ -123,7 +114,6 @@ impl Api {
     }
 
     // 拿到模块目录的 fd，Zygisk 拒绝或函数缺失时返回 -1
-    #[allow(dead_code)]
     pub fn get_module_dir(&self) -> c_int {
         unsafe {
             if let Some(func) = (*self.table).get_module_dir {
@@ -143,68 +133,11 @@ impl Api {
         }
     }
 
-    // 查询当前进程状态位，ABI 缺失时返回 0
-    #[allow(dead_code)]
-    pub fn get_flags(&self) -> u32 {
-        unsafe {
-            if let Some(func) = (*self.table).get_flags {
-                func((*self.table).impl_ptr)
-            } else {
-                0
-            }
-        }
-    }
-
     // 把 fd 登记成豁免项，specialize 结束后 Zygisk 不会强制关掉它
     pub fn exempt_fd(&self, fd: c_int) -> bool {
         unsafe {
             if let Some(func) = (*self.table).exempt_fd {
                 func(fd)
-            } else {
-                false
-            }
-        }
-    }
-
-    // 批量替换 Java 类的 native 方法，Zygisk 把原实现写回每条 method 的 fnPtr
-    #[allow(dead_code)]
-    pub fn hook_jni_native_methods(
-        &self,
-        env: *mut jni_sys::JNIEnv,
-        class_name: *const c_char,
-        methods: *mut jni_sys::JNINativeMethod,
-        count: c_int,
-    ) {
-        unsafe {
-            if let Some(func) = (*self.table).hook_jni_native_methods {
-                func(env, class_name, methods, count);
-            }
-        }
-    }
-
-    // 登记一条 PLT hook；原函数指针写回 old_func，真正生效需 plt_hook_commit
-    #[allow(dead_code)]
-    pub fn plt_hook_register(
-        &self,
-        dev: dev_t,
-        inode: ino_t,
-        symbol: *const c_char,
-        new_func: *mut c_void,
-        old_func: *mut *mut c_void,
-    ) {
-        unsafe {
-            if let Some(func) = (*self.table).plt_hook_register {
-                func(dev, inode, symbol, new_func, old_func);
-            }
-        }
-    }
-
-    // 把登记过的 PLT hook 一次性刷入，任一条目失败整体返回 false
-    #[allow(dead_code)]
-    pub fn plt_hook_commit(&self) -> bool {
-        unsafe {
-            if let Some(func) = (*self.table).plt_hook_commit {
-                func()
             } else {
                 false
             }

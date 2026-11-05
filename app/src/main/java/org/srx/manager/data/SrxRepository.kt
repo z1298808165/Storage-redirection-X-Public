@@ -79,24 +79,6 @@ class SrxRepository(
 
   suspend fun checkRoot(): Boolean = shell.checkRoot()
 
-  suspend fun readDashboard(): DashboardState = coroutineScope {
-    val global = async { readGlobalConfig() }
-    val statusAndVersion = async { moduleController.statusAndVersion() }
-    val configs = async { readConfiguredAppConfigs(force = true) }
-    val runtimeActivations = async { readRuntimeActivations() }
-    val storageBackend = async { readStorageBackendStatus() }
-    val loadedConfigs = configs.await()
-    val (status, version) = statusAndVersion.await()
-    DashboardState(
-        status = status,
-        version = version,
-        globalConfig = global.await(),
-        enabledApps = countEnabledAppConfigs(loadedConfigs),
-        runtimeActivations = runtimeActivations.await(),
-        storageBackend = storageBackend.await(),
-    )
-  }
-
   suspend fun readDashboardSummary(): DashboardState = coroutineScope {
     val global = async { readGlobalConfig() }
     // 状态与版本都来自模块目录，合并为一次 root 调用；每次 exec 都要新建 su 进程，
@@ -375,8 +357,6 @@ class SrxRepository(
 
   suspend fun listUsers(): List<String> = appQuery.listUsers()
 
-  suspend fun moduleStatus(): ModuleStatus = moduleController.status()
-
   suspend fun setModuleEnabled(enabled: Boolean): Boolean = moduleController.setEnabled(enabled)
 
   suspend fun restartMediaProvider(): MediaProviderRestartResult =
@@ -401,11 +381,6 @@ class SrxRepository(
   }
 
   suspend fun resetRuntimeStats(): Boolean = fileStore.resetRuntimeStats()
-
-  suspend fun exportDiagnosticArchive(
-      uri: Uri,
-      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): DiagnosticExportResult = diagnosticExporter.exportToUri(uri, onProgress)
 
   suspend fun exportDiagnosticArchiveToDirectory(
       directoryUri: Uri,
@@ -469,9 +444,6 @@ class SrxRepository(
       content: String,
       touchAfter: Boolean = false,
   ): Boolean = fileStore.write(path, content, touchAfter)
-
-  private suspend fun writeConfigFile(path: String, content: String): Boolean =
-      configFiles.write(path, content, touchAfter = true)
 
   /**
    * 把序列化结果与磁盘上的原始 JSON 浅合并后再写回。

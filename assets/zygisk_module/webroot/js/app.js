@@ -4040,33 +4040,6 @@
     );
   }
 
-  function accentPaletteHtml(selected) {
-    return (
-      '<div class="theme-color-palette" role="radiogroup" aria-label="强调色">' +
-      WEBUI_ACCENT_COLOR_OPTIONS.map((option) => {
-        const active = option.value === selected;
-        const color = option.color || "var(--system-accent-color, var(--color-primary))";
-        return (
-          '<button class="theme-color-swatch' +
-          (active ? " active" : "") +
-          (option.value === 0 ? " system" : "") +
-          '" type="button" data-value="' +
-          option.value +
-          '" role="radio" aria-checked="' +
-          String(active) +
-          '" aria-label="' +
-          option.label +
-          '" title="' +
-          option.label +
-          '" style="--swatch-color:' +
-          color +
-          '"><span aria-hidden="true"></span></button>'
-        );
-      }).join("") +
-      "</div>"
-    );
-  }
-
   function pageScaleControlHtml(scale) {
     const percent = webUiPageScalePercent(scale);
     const progress = ((percent - 80) / 30) * 100;

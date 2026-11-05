@@ -82,8 +82,6 @@ pub const LOG_DIR: &str = "/data/adb/modules/storage.redirect.x/logs";
 pub const DAEMON_INSTANCE_LOCK_FILE: &str = "/data/adb/storage.redirect.x/.srx_daemon.lock";
 /// daemon pid 文件：由 daemon 在取得实例锁后自写（watchdog 拉起的新实例同样生效），
 /// service.sh/WebUI 的写入仅覆盖 daemon 启动前的窗口。
-// quality-allow(lint-suppression): 引用方 daemon/watchdog 仅由 daemon 二进制编译。
-#[allow(dead_code)]
 pub const DAEMON_PID_FILE: &str = "/data/adb/modules/storage.redirect.x/logs/.srx_daemon.pid";
 
 pub const GLOBAL_CONFIG_FILE: &str = "/data/adb/modules/storage.redirect.x/config/global.json";

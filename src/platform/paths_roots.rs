@@ -180,8 +180,6 @@ pub fn storage_to_data_media_path(path: &str) -> String {
 }
 
 // quality-allow(lint-suppression): 两个按用户换算的函数只被部分构建目标使用，
-// 保留 dead_code 豁免以免在缺少调用方的目标上构建失败。
-#[allow(dead_code)]
 pub fn storage_to_data_media_for_user(storage_path: &str, user_id: i32) -> Option<String> {
     let prefix = format!("{}/", storage_user_root_for_user(user_id));
     let normalized = normalize(storage_path);

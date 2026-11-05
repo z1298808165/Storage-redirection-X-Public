@@ -4,9 +4,6 @@
 #![allow(clippy::missing_const_for_thread_local)]
 
 mod config;
-// quality-allow(lint-suppression): daemon_watchdog 由 srx_daemon 二进制通过路径模块使用，lib 目标仅共享编译该模块。
-#[allow(dead_code)]
-mod daemon_watchdog;
 mod domain;
 // quality-allow(lint-suppression): fuse_host 由 srx_daemon 二进制通过路径模块使用，lib 目标仅共享编译该模块。
 #[allow(dead_code)]

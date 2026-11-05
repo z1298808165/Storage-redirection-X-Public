@@ -503,40 +503,6 @@ function diagnosticArchiveWorkerScript() {
   ].join("\n");
 }
 
-function parseDiagnosticProgress(line) {
-  const parts = String(line || "")
-    .trim()
-    .split("|");
-  if (parts.length < 3) return null;
-  const percent = Math.max(0, Math.min(100, Number.parseInt(parts[0], 10)));
-  if (!Number.isFinite(percent)) return null;
-  return {
-    percent,
-    phase: String(parts[1] || "").slice(0, 32),
-    message: parts.slice(2).join("|").slice(0, 80) || "正在导出日志",
-  };
-}
-
-function parseDiagnosticArchivePoll(stdout) {
-  let progressLine = "";
-  let doneCode = null;
-  String(stdout || "")
-    .split(/\r?\n/)
-    .forEach((line) => {
-      if (line.startsWith("__SRX_DONE__=")) {
-        const value = line.slice("__SRX_DONE__=".length).trim();
-        if (value !== "") doneCode = Number.parseInt(value, 10);
-      } else if (line.includes("|")) {
-        progressLine = line.trim();
-      }
-    });
-  return {
-    progress: parseDiagnosticProgress(progressLine),
-    progressLine,
-    doneCode: Number.isFinite(doneCode) ? doneCode : null,
-  };
-}
-
 function isSafePackageName(packageName) {
   return /^[A-Za-z0-9_.-]+$/.test(packageName || "");
 }

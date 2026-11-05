@@ -8,13 +8,8 @@ use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 
-const LOG_LEVEL_VERBOSE: i32 = 0;
-const LOG_LEVEL_DEBUG: i32 = 1;
-const LOG_LEVEL_INFO: i32 = 2;
-const LOG_LEVEL_WARN: i32 = 3;
-const LOG_LEVEL_ERROR: i32 = 4;
-
-const CURRENT_LOG_LEVEL: i32 = LOG_LEVEL_DEBUG;
+/// 进程内日志的编译期门限：Trace 一律丢弃，Debug 及以上再交给运行期 verbose 开关裁决。
+const MAX_LOG_LEVEL: LevelFilter = LevelFilter::Debug;
 const DEFAULT_LOG_TAG: &str = "StorageRedirect";
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 const STATS_LOG_TAG: &str = "Stats";
@@ -25,7 +20,6 @@ pub const HOT_RELOAD_LOG_TAG: &str = "HotReload";
 /// 机器可校验的低频状态事件标签（如运行应用重挂载完成）：srxctl 等待循环以
 /// running.log 中的这些行作为唯一完成判据，不受 verbose 门禁约束。
 pub const STATUS_LOG_TAG: &str = "Status";
-/// MP hook 请求 daemon（root）代修属主的通道标签；与 src/log_daemon.rs 的
 const PRIVATE_LOG_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 
 const ANDROID_LOG_VERBOSE: i32 = 2;
@@ -34,14 +28,13 @@ const ANDROID_LOG_INFO: i32 = 4;
 const ANDROID_LOG_WARN: i32 = 5;
 const ANDROID_LOG_ERROR: i32 = 6;
 
-#[repr(i32)]
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub enum Level {
-    Verbose = LOG_LEVEL_VERBOSE,
-    Debug = LOG_LEVEL_DEBUG,
-    Info = LOG_LEVEL_INFO,
-    Warn = LOG_LEVEL_WARN,
-    Error = LOG_LEVEL_ERROR,
+    Verbose,
+    Debug,
+    Info,
+    Warn,
+    Error,
 }
 
 static LOG_INIT: Once = Once::new();
@@ -158,7 +151,7 @@ fn format_record_message(level: Level, tag: &str, message: &str) -> String {
 fn ensure_log_adapter() {
     LOG_INIT.call_once(|| {
         let _ = log::set_logger(&LOG_ADAPTER);
-        log::set_max_level(current_level_filter());
+        log::set_max_level(MAX_LOG_LEVEL);
     });
 }
 
@@ -169,10 +162,6 @@ pub fn is_debug_logging_enabled() -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn srx_is_debug_logging_enabled() -> bool {
     is_debug_logging_enabled()
-}
-
-pub fn is_level_enabled(level: Level) -> bool {
-    (level as i32) >= CURRENT_LOG_LEVEL
 }
 
 pub fn write_log(level: Level, tag: &str, message: &str) {
@@ -270,7 +259,7 @@ fn build_file_monitor_timestamp() -> String {
 }
 
 fn is_record_enabled(metadata: &Metadata) -> bool {
-    if !is_level_enabled(map_log_level(metadata.level())) {
+    if metadata.level() > MAX_LOG_LEVEL {
         return false;
     }
     metadata.target() == FILE_MONITOR_LOG_TAG
@@ -363,17 +352,6 @@ fn map_log_level(level: LogLevel) -> Level {
         LogLevel::Info => Level::Info,
         LogLevel::Debug => Level::Debug,
         LogLevel::Trace => Level::Verbose,
-    }
-}
-
-fn current_level_filter() -> LevelFilter {
-    match CURRENT_LOG_LEVEL {
-        LOG_LEVEL_VERBOSE => LevelFilter::Trace,
-        LOG_LEVEL_DEBUG => LevelFilter::Debug,
-        LOG_LEVEL_INFO => LevelFilter::Info,
-        LOG_LEVEL_WARN => LevelFilter::Warn,
-        LOG_LEVEL_ERROR => LevelFilter::Error,
-        _ => LevelFilter::Info,
     }
 }
 

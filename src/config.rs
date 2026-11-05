@@ -79,8 +79,6 @@ pub struct ResolvedUserProfile {
     pub path_mappings: Vec<PathMapping>,
 }
 
-// quality-allow(lint-suppression): 仅 daemon 使用的整轮快照不会出现在 cdylib 构建中。
-#[allow(dead_code)]
 /// 判断未配置重定向的普通应用是否进入“监视专用 FUSE”数据面。
 ///
 /// 该模式只用于共享存储上的文件操作审计：不改变路径后端，不安装应用侧 native hook，

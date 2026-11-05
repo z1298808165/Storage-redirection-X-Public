@@ -793,12 +793,6 @@ public class Hooker {
     }
   }
 
-  private static String publicMediaStorePath(String path, int callerUid) {
-    if (path == null || path.length() == 0) return null;
-    if (path.startsWith("/storage/emulated/")) return path;
-    return mediaStoreDisplayPath(path, callerUid);
-  }
-
   private static String mediaStoreRelativePath(String path) {
     if (path == null || !path.startsWith("/storage/emulated/")) return null;
     int rootEnd = path.indexOf('/', "/storage/emulated/".length());
@@ -2247,10 +2241,6 @@ public class Hooker {
     return value instanceof Integer ? ((Integer) value).intValue() : fallback;
   }
 
-  private static boolean booleanArg(Object value, boolean fallback) {
-    return value instanceof Boolean ? ((Boolean) value).booleanValue() : fallback;
-  }
-
   private static boolean shouldAllowFuseFileOpen(FuseFileOpenRequest request) {
     if (request == null || request.callerUid < ANDROID_APP_UID_START) return false;
     // 映射目标由该应用的 path_mappings 明确产生。MediaProvider 在 FUSE 层仍按目标
@@ -2989,22 +2979,6 @@ public class Hooker {
     } catch (Throwable ignored) {
       return fieldValue(activityThread, "mInitialApplication");
     }
-  }
-
-  private static boolean isIntermediateAttributionPackage(String value) {
-    if (value == null || value.length() == 0) return true;
-    String name = value.toLowerCase(Locale.ROOT);
-    return name.equals("com.android.providers.media")
-        || name.equals("com.android.providers.media.module")
-        || name.equals("com.google.android.providers.media.module")
-        || name.equals("com.android.providers.downloads")
-        || name.equals("com.android.providers.downloads.ui")
-        || name.equals("com.android.externalstorage")
-        || name.contains(".documentsui")
-        || name.contains(".photopicker")
-        || name.contains(".filemanager")
-        || name.contains("fileexplorer")
-        || name.endsWith(".myfiles");
   }
 
   private static MutationPatchResult patchMediaStoreValues(

@@ -19,9 +19,9 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 周期兜底 reconcile 的间隔。应用启动由 companion 主动挂载 + register-policy 定点
 /// 登记，配置变更由 inotify 监听，开机由全量预登记兜底——这些都不依赖周期轮询。
@@ -47,7 +47,6 @@ const RECONCILE_BATCH_MAX_PLANS: usize = 1;
 /// 与控制事件本身会立即唤醒 poll；200ms 只兜"排空剩余计划"。配合周期完成判定
 /// （轮转绕回周期起点即收口），每次触发的续跑轮数有上界，排空后主循环归位休眠。
 const RECONCILE_CONTINUE_WAIT_MS: libc::c_int = 200;
-const FILE_MONITOR_SYNC_TIMEOUT_MS: i64 = 2_000;
 const INITIAL_RECONCILE_ROUNDS: usize = 3;
 const PREWARM_RECONCILE_ROUNDS: usize = 1;
 const PREWARM_MAX_REQUESTS: usize = 16;
@@ -236,25 +235,15 @@ fn should_log_reconcile_summary(
 
 /// daemon 主循环与文件监视线程之间的配置同步状态。
 ///
-/// 早期实现让双方各自以 10ms 步长轮询原子计数，既浪费唤醒又让重建请求最多白等一个
-/// 轮询周期。这里改成原子计数负责传值、条件变量负责唤醒：进度由监视线程通知等待方，
-/// 重建请求由等待方通知监视线程，两侧都不再忙等。
+/// 重建请求是异步排队的：主循环登记待处理清单后经 eventfd 唤醒监视线程即返回，
+/// 不等待监视线程回执（早期的进度条件变量与同步等待方已随之移除）。
 struct FileMonitorSync {
-    configured_version: AtomicU64,
-    requested_rebuild: AtomicU64,
-    completed_rebuild: AtomicU64,
     /// 待处理的包级增量刷新请求。
     ///
     /// 监视树构成只取决于配置（每应用的监视根清单），与挂载状态无关；配置变化
     /// 时只需对变化的包做增量重建，其余包的 watch 原地保留。`None` 表示仅唤醒
     /// 线程（排空事件 + 缺失根重试），不需要触碰监视树。
     pending_packages: Mutex<Option<Vec<String>>>,
-    /// 仅用于配合下面两个条件变量，不承载业务数据。
-    signal_lock: Mutex<()>,
-    /// 监视线程完成一轮配置同步后唤醒等待方。
-    progress_signal: Condvar,
-    /// 兼容同步等待方的请求通知；事件线程主要依赖下面的 eventfd。
-    request_signal: Condvar,
     /// eventfd 是监视线程的事件源，避免为重建请求周期性超时唤醒。
     request_event_fd: i32,
 }
@@ -269,21 +258,8 @@ impl Drop for FileMonitorSync {
 }
 
 impl FileMonitorSync {
-    fn lock_signal(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.signal_lock
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-    }
-
-    /// 通知等待方本轮配置同步已经推进。
-    fn notify_progress(&self) {
-        let _guard = self.lock_signal();
-        self.progress_signal.notify_all();
-    }
-
     /// 登记重建请求后唤醒监视线程。
     fn notify_request(&self) {
-        let _guard = self.lock_signal();
         if self.request_event_fd >= 0 {
             let value = 1u64.to_ne_bytes();
             // SAFETY: eventfd 接受固定 8 字节计数值；fd 由 FileMonitorSync 持有至 daemon 结束。
@@ -295,7 +271,6 @@ impl FileMonitorSync {
                 );
             }
         }
-        self.request_signal.notify_all();
     }
 
     /// 登记待处理的包级增量刷新清单；`None`/空清单表示仅唤醒线程。
@@ -315,43 +290,6 @@ impl FileMonitorSync {
             .ok()
             .and_then(|mut slot| slot.take())
             .filter(|packages| !packages.is_empty())
-    }
-
-    /// 等待监视线程推进一轮，最多等待 `timeout`。
-    ///
-    /// 通知方在持有 `signal_lock` 时才发出通知，因此这里必须先拿锁再复检原子计数，
-    /// 否则会漏掉在检查与等待之间发生的唤醒。
-    fn wait_progress_until(&self, deadline: Instant, is_done: impl Fn() -> bool) -> bool {
-        let mut guard = self.lock_signal();
-        loop {
-            if is_done() {
-                return true;
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return false;
-            };
-            let (next_guard, _) = self
-                .progress_signal
-                .wait_timeout(guard, remaining)
-                .unwrap_or_else(|error| error.into_inner());
-            guard = next_guard;
-        }
-    }
-
-    /// 等待新的重建请求，最多等待 `timeout`。
-    ///
-    /// 超时返回也要继续下一轮，监视线程仍需按轮询周期 drain 事件。
-    fn wait_new_request(&self, timeout: Duration) {
-        let guard = self.lock_signal();
-        if self.requested_rebuild.load(Ordering::Acquire)
-            > self.completed_rebuild.load(Ordering::Acquire)
-        {
-            return;
-        }
-        let _ = self
-            .request_signal
-            .wait_timeout(guard, timeout)
-            .unwrap_or_else(|error| error.into_inner());
     }
 }
 
@@ -1046,13 +984,7 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
     // SAFETY: eventfd 只创建内核对象并返回 fd，不接触调用方内存；标志位均为合法常量。
     let request_event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     let sync = Arc::new(FileMonitorSync {
-        configured_version: AtomicU64::new(0),
-        requested_rebuild: AtomicU64::new(0),
-        completed_rebuild: AtomicU64::new(0),
         pending_packages: Mutex::new(None),
-        signal_lock: Mutex::new(()),
-        progress_signal: Condvar::new(),
-        request_signal: Condvar::new(),
         request_event_fd,
     });
     let thread_sync = Arc::clone(&sync);
@@ -1068,10 +1000,6 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                 // 由 IN_CREATE 事件动态扩展。此前挂载生效即强制全量重建，每次应用
                 // 冷启动都把 9862~24909 个目录的监视树整棵重走，真机实测产生
                 // 30~60 秒 100% 单核阵发（ishtar/duchamp 双机复现）。
-                thread_sync.completed_rebuild.store(
-                    thread_sync.requested_rebuild.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
                 let pending_packages = thread_sync.take_pending_packages();
                 match pending_packages {
                     Some(packages) if !packages.is_empty() => {
@@ -1079,10 +1007,6 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                     }
                     _ => file_monitor.reconfigure(config, false),
                 }
-                thread_sync
-                    .configured_version
-                    .store(file_monitor.configured_version(), Ordering::Release);
-                thread_sync.notify_progress();
                 // 达到单轮预算时队列里仍有事件，立即进入下一轮继续排空，不等轮询间隔，
                 // 避免把"防止饿死重建"变成"事件延迟一个周期"。
                 if !file_monitor.drain_events() {
@@ -1150,7 +1074,6 @@ fn request_file_monitor_refresh(sync: &FileMonitorSync, packages: Option<Vec<Str
     // 监视树重建只影响后续文件监视，不影响当前应用挂载策略；异步排队后立即返回，
     // 避免把一次 MT 配置切换再阻塞在最多 2 秒的监视器 ACK 上。
     sync.store_pending_packages(packages);
-    sync.requested_rebuild.fetch_add(1, Ordering::AcqRel);
     sync.notify_request();
 }
 

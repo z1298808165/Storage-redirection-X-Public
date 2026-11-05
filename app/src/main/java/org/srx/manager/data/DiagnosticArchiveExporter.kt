@@ -37,35 +37,7 @@ internal class DiagnosticArchiveExporter(
     /** tar.gz 需要保留双扩展名，使用通用 MIME 兼容不识别 application/gzip 的文件客户端。 */
     const val DiagnosticArchiveMimeType = "application/octet-stream"
     const val DefaultArchiveFileName = "storage-redirect-x-logs.tar.gz"
-
-    /** 模块目录降级落盘的默认命名，与导出文件名风格一致并带时间戳。 */
-    fun defaultArchiveFileName(): String =
-        "storage-redirect-x-logs-" +
-            java.time.LocalDateTime.now()
-                .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) +
-            ".tar.gz"
   }
-
-  suspend fun exportToUri(
-      uri: Uri,
-      onProgress: ((DiagnosticArchiveProgress) -> Unit)? = null,
-  ): DiagnosticExportResult =
-      withContext(Dispatchers.IO) {
-        val archivePath =
-            fileStore.createDiagnosticArchive(onProgress)
-                ?: return@withContext DiagnosticExportResult(false)
-        try {
-          onProgress?.invoke(DiagnosticArchiveProgress(99, "copy", "正在写入目标文件"))
-          if (copyRootFileToUri(archivePath, uri)) {
-            onProgress?.invoke(DiagnosticArchiveProgress(100, "done", "日志包已保存"))
-            DiagnosticExportResult(true)
-          } else {
-            exportToModuleDirectory(archivePath, defaultArchiveFileName(), onProgress)
-          }
-        } finally {
-          fileStore.removeFile(archivePath)
-        }
-      }
 
   suspend fun exportToDirectory(
       directoryUri: Uri,
