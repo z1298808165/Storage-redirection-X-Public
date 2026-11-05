@@ -1757,26 +1757,251 @@ fn read_package_uid(package_name: &str) -> Option<i32> {
     None
 }
 
-/// 系统进程 pid 表的落盘间隔（全量兜底刷新）。
-const SYSTEM_PID_SCAN_INTERVAL_MS: u64 = 2_000;
-/// 廉价 pid 集对比轮询间隔：只 readdir /proc 比对进程集合，集合变化立即触发
-/// 全量扫描，让「新服务启动 → 立即写存储」的场景（如 Mirror 按需启动后建
-/// MainCache）在数百毫秒内入表，而不是等下一个全量周期。
+/// 已有系统进程内线程增减的兜底刷新周期（活跃期）。
+///
+/// 系统进程名册（pid → 身份）的变化在 [`SYSTEM_PID_POLL_INTERVAL_MS`] 轮询内即时落盘；
+/// 已登记进程内新建/退出的线程只在本周期重建时补齐。
+const SYSTEM_PID_SCAN_INTERVAL_MS: i64 = 2_000;
+/// 进程集合轮询间隔：一次 /proc readdir，只为新出现（或仍在稳定窗口内）的 pid 读身份。
 const SYSTEM_PID_POLL_INTERVAL_MS: u64 = 500;
-/// 空闲期放宽后的全量扫描周期：连续 [`SYSTEM_PID_IDLE_AFTER_MS`] 没有任何进程/线程
-/// 变化时使用。系统稳定期逐进程 getdents 是纯开销，放宽后按比例下降。
-const SYSTEM_PID_IDLE_SCAN_INTERVAL_MS: u64 = 5_000;
+/// 空闲期放宽后的线程级刷新周期：表内容连续 [`SYSTEM_PID_IDLE_AFTER_MS`] 未变化时使用。
+const SYSTEM_PID_IDLE_SCAN_INTERVAL_MS: i64 = 5_000;
 /// 判定空闲所需的静默时长。
 const SYSTEM_PID_IDLE_AFTER_MS: i64 = 60_000;
+/// 新进程身份的稳定窗口：fork 之后的 exec、zygote specialize 会在这段时间内改写
+/// cmdline 与 uid，窗口内每轮重读身份，过窗口后改用缓存。
+const SYSTEM_PID_IDENTITY_SETTLE_MS: i64 = 5_000;
+/// 已稳定身份的复核周期：兜底覆盖进程运行中途 exec / setuid 的少见情形。
+const SYSTEM_PID_IDENTITY_REVALIDATE_MS: i64 = 60_000;
+
+/// pid 表扫描器对单个进程的身份缓存。
+struct ScannedProcess {
+    /// `(uid, 身份串)`；内核线程、已退出或无可读身份的进程为 None。
+    identity: Option<(i32, String)>,
+    /// 身份随时可能被改写、不能缓存：zygote 家族（含 USAP 池里预先 fork、可存活
+    /// 数分钟才被特化的 `usap64`）与有 cmdline 却解析不出身份的进程
+    /// （`<pre-initialized>`）。这类进程每轮重读，数量通常只有个位数。
+    volatile: bool,
+    first_seen_ms: i64,
+    checked_ms: i64,
+}
+
+impl ScannedProcess {
+    fn read(pid: i32, now_ms: i64) -> Self {
+        let (identity, volatile) = read_scanned_identity(pid);
+        Self {
+            identity,
+            volatile,
+            first_seen_ms: now_ms,
+            checked_ms: now_ms,
+        }
+    }
+
+    fn needs_recheck(&self, now_ms: i64) -> bool {
+        self.volatile
+            || now_ms.saturating_sub(self.first_seen_ms) < SYSTEM_PID_IDENTITY_SETTLE_MS
+            || now_ms.saturating_sub(self.checked_ms) >= SYSTEM_PID_IDENTITY_REVALIDATE_MS
+    }
+
+    fn recheck(&mut self, pid: i32, now_ms: i64) {
+        let (identity, volatile) = read_scanned_identity(pid);
+        self.identity = identity;
+        self.volatile = volatile;
+        self.checked_ms = now_ms;
+    }
+
+    /// 只有系统 uid 的进程进表。全部消费方（MP hook 的系统 uid FUSE 请求归因、binder
+    /// 系统调用方解析、监视记录系统调用方反查）都要求「表内 uid == 请求 uid 且 < 10000」，
+    /// 应用 uid 的行永远不会命中，登记它们只会让表与 MP 侧的重读成本翻倍。
+    fn system_identity(&self) -> Option<(i32, &str)> {
+        match &self.identity {
+            Some((uid, package)) if *uid < ANDROID_APP_UID_START => Some((*uid, package.as_str())),
+            _ => None,
+        }
+    }
+}
+
+/// 系统进程 pid 表（tmp/system_pids，「tid uid 包名」行）的增量扫描器。
+///
+/// 早期实现把「进程集合有变化」当成全量扫描的触发条件：繁忙设备上 kworker 与
+/// 短命进程几乎每 500ms 都在增减，于是每轮都对全部约 1000 个进程重读 cmdline 与
+/// status、两遍逐进程 task readdir 并重写整张表（duchamp 实测 srx-syspid 稳态约
+/// 11% 单核）。现在按进程缓存身份，只有**系统进程名册**变化才立即重建；与表内容
+/// 无关的增减（内核线程、应用进程、启动即退出的进程）只付一次 /proc readdir。
+struct SystemPidScanner {
+    target: String,
+    staging: String,
+    processes: HashMap<i32, ScannedProcess>,
+    roster_digest: Option<u64>,
+    last_rebuild_ms: i64,
+    last_written_digest: Option<u64>,
+    last_change_ms: i64,
+    idle: bool,
+    last_table_len: usize,
+    last_pid: Option<i32>,
+}
+
+impl SystemPidScanner {
+    fn new(target: String, now_ms: i64) -> Self {
+        let staging = format!("{}.tmp", target);
+        Self {
+            target,
+            staging,
+            processes: HashMap::new(),
+            roster_digest: None,
+            last_rebuild_ms: -1,
+            last_written_digest: None,
+            last_change_ms: now_ms,
+            idle: false,
+            last_table_len: 0,
+            last_pid: None,
+        }
+    }
+
+    fn tick(&mut self, now_ms: i64) {
+        let interval_ms = if self.idle {
+            SYSTEM_PID_IDLE_SCAN_INTERVAL_MS
+        } else {
+            SYSTEM_PID_SCAN_INTERVAL_MS
+        };
+        let due =
+            self.last_rebuild_ms < 0 || now_ms.saturating_sub(self.last_rebuild_ms) >= interval_ms;
+        // 内核最近分配的 pid 没变 = 这段时间没有新建任何进程或线程，此时直接沿用已知
+        // pid 列表，省掉 /proc readdir（本线程最大的单项开销，真机 simpleperf 约 43%）。
+        // 进程退出不影响表的正确性：死 pid 不会再发请求，复用前必然先分配新 pid；
+        // 已退出条目在下一次 readdir 时清掉。exec / 特化不产生新 pid，由下面的逐条
+        // 复查覆盖（只读需要复查的那几个进程）。
+        let last_pid = read_last_allocated_pid();
+        let no_new_tasks = !due && last_pid.is_some() && last_pid == self.last_pid;
+        self.last_pid = last_pid;
+        let pids = if no_new_tasks {
+            let mut known: Vec<i32> = self.processes.keys().copied().collect();
+            known.sort_unstable();
+            known
+        } else {
+            let Some(pids) = list_proc_pids() else {
+                return;
+            };
+            let alive: HashSet<i32> = pids.iter().copied().collect();
+            self.processes.retain(|pid, _| alive.contains(pid));
+            pids
+        };
+        for &pid in &pids {
+            match self.processes.get_mut(&pid) {
+                Some(entry) => {
+                    if entry.needs_recheck(now_ms) {
+                        entry.recheck(pid, now_ms);
+                    }
+                }
+                None => {
+                    self.processes
+                        .insert(pid, ScannedProcess::read(pid, now_ms));
+                }
+            }
+        }
+        let roster_digest = self.roster_digest(&pids);
+        let roster_changed = self.roster_digest != Some(roster_digest);
+        if roster_changed || due {
+            self.roster_digest = Some(roster_digest);
+            self.last_rebuild_ms = now_ms;
+            if self.rebuild(&pids) {
+                self.last_change_ms = now_ms;
+            }
+        }
+        let idle = now_ms.saturating_sub(self.last_change_ms) >= SYSTEM_PID_IDLE_AFTER_MS;
+        if idle != self.idle {
+            self.idle = idle;
+            log::info!(
+                "system pid scanner idle={} interval_ms={}",
+                idle,
+                if idle {
+                    SYSTEM_PID_IDLE_SCAN_INTERVAL_MS
+                } else {
+                    SYSTEM_PID_SCAN_INTERVAL_MS
+                }
+            );
+        }
+    }
+
+    /// 系统进程名册（按 pid 排序的 pid/uid/身份）的指纹，不含线程。
+    fn roster_digest(&self, pids: &[i32]) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for pid in pids {
+            if let Some((uid, package)) = self
+                .processes
+                .get(pid)
+                .and_then(ScannedProcess::system_identity)
+            {
+                std::hash::Hash::hash(&(*pid, uid, package), &mut hasher);
+            }
+        }
+        std::hash::Hasher::finish(&hasher)
+    }
+
+    /// 按缓存身份重建并原子落盘整张表（进程 pid + 其全部线程 tid）。
+    ///
+    /// 内容指纹与上次落盘相同且文件仍在时跳过写入，避免稳定期每个刷新周期都重写一份
+    /// 数百 KB 的表（真机实测 455KB/19.8k 行，每 2 秒一次 rename）。返回表内容是否变化。
+    fn rebuild(&mut self, pids: &[i32]) -> bool {
+        use std::fmt::Write as _;
+        let mut lines = String::with_capacity(self.last_table_len + 4096);
+        for &pid in pids {
+            let Some((uid, package)) = self
+                .processes
+                .get(&pid)
+                .and_then(ScannedProcess::system_identity)
+            else {
+                continue;
+            };
+            let _ = writeln!(lines, "{pid} {uid} {package}");
+            if let Ok(tasks) = std_fs::read_dir(format!("/proc/{pid}/task")) {
+                for task in tasks.flatten() {
+                    if let Ok(tid) = task.file_name().to_string_lossy().parse::<i32>()
+                        && tid != pid
+                    {
+                        let _ = writeln!(lines, "{tid} {uid} {package}");
+                    }
+                }
+            }
+        }
+        self.last_table_len = lines.len();
+        if lines.is_empty() {
+            return false;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&lines, &mut hasher);
+        let digest = std::hash::Hasher::finish(&hasher);
+        let changed = self.last_written_digest != Some(digest);
+        // 内容相同且文件仍在：跳过写入。文件被清理时靠存在性检查兜底重写。
+        if !changed && std_fs::metadata(&self.target).is_ok() {
+            return false;
+        }
+        if std_fs::write(&self.staging, lines.as_bytes()).is_ok()
+            && std_fs::rename(&self.staging, &self.target).is_ok()
+        {
+            let _ = std_fs::set_permissions(&self.target, std_fs::Permissions::from_mode(0o644));
+            self.last_written_digest = Some(digest);
+        }
+        changed
+    }
+}
 
 /// 周期扫描 /proc 并落盘「tid uid 包名」表（tmp/system_pids）。
 ///
 /// 用途：MediaProvider（mediaprovider SELinux 域）读 platform 应用（如
 /// com.xiaomi.mirror）的 /proc/<pid>/cmdline 被 SELinux 拒绝，系统 uid 的
 /// FUSE 请求（内核请求头带发起任务 id）在进程内无法归因出包名。daemon 以
-/// root 运行无此限制，把全量用户态进程及其线程的身份表写给 hook 进程按任务
+/// root 运行无此限制，把系统 uid 进程及其线程的身份表写给 hook 进程按任务
 /// id 反查。内核 FUSE 请求头的 pid 是发起线程的 TID（current->pid），因此每个
-/// 进程除自身 pid 外还要登记其全部线程 tid（一次 readdir，无额外文件读取）。
+/// 进程除自身 pid 外还要登记其全部线程 tid。
+///
+/// 该表不随文件监视开关停用：MediaProvider 是系统代写者，系统 uid 请求的归因
+/// 结果会写入当前调用方并参与重定向决策（见 `runtime::should_resolve_caller_context`），
+/// binder 系统调用方解析同样不看监视开关。
+///
+/// 内核没有可供 daemon 订阅的进程创建事件源（proc connector 需 CONFIG_PROC_EVENTS，
+/// GKI 不保证开启），这里只能以 500ms 间隔对比 /proc；单轮成本已收敛到一次 readdir，
+/// 详见 [`SystemPidScanner`]。
 fn spawn_system_pid_scanner() {
     let spawn_result = std::thread::Builder::new()
         .name("srx-syspid".into())
@@ -1785,69 +2010,9 @@ fn spawn_system_pid_scanner() {
                 "{}/tmp/system_pids",
                 crate::platform::module_paths::MODULE_DIR
             );
-            let staging = format!("{}.tmp", target);
-            let mut known_tasks: HashMap<i32, HashSet<i32>> = HashMap::new();
-            let mut known_pids: HashSet<i32> = HashSet::new();
-            let mut last_full_scan_ms: i64 = -1;
-            let mut last_written_digest: Option<u64> = None;
-            let mut last_activity_ms: i64 = -1;
-            let mut idle_interval = false;
+            let mut scanner = SystemPidScanner::new(target, crate::platform::paths::monotonic_ms());
             loop {
-                let now_ms = crate::platform::paths::monotonic_ms();
-                // 进程/线程长时间无变化时放宽全量周期；500ms 廉价轮询不变，新进程仍即时入表，
-                // 任何变化都会把周期立即拉回 2s。
-                let idle = last_activity_ms >= 0
-                    && now_ms.saturating_sub(last_activity_ms) >= SYSTEM_PID_IDLE_AFTER_MS;
-                let mut scan_interval = SYSTEM_PID_SCAN_INTERVAL_MS;
-                if idle {
-                    scan_interval = SYSTEM_PID_IDLE_SCAN_INTERVAL_MS;
-                }
-                if idle != idle_interval {
-                    idle_interval = idle;
-                    log::info!(
-                        "system pid scanner idle={} interval_ms={}",
-                        idle,
-                        scan_interval
-                    );
-                }
-                let due_full_scan = last_full_scan_ms < 0
-                    || now_ms.saturating_sub(last_full_scan_ms) >= scan_interval as i64;
-                // 廉价探测先行：仅一次 /proc readdir 对比进程集合。pid 集未变且未到
-                // 全量周期时跳过逐进程 task 扫描（约 400 次 getdents + 哈希对比）。
-                // 真机实测（issue #2 反馈）线程级抖动在繁忙设备上几乎连续发生，
-                // 每 500ms 都做全量 task 扫描 + 落盘会把 srx-syspid 线程推到约 10%
-                // 的大核占用。线程级变化改由全量周期覆盖，新**进程**仍即时入表。
-                let pid_set_changed = match snapshot_pid_set() {
-                    Some(current) => {
-                        let changed = current != known_pids;
-                        if changed {
-                            known_pids = current;
-                        }
-                        changed
-                    }
-                    None => false,
-                };
-                let mut changed = pid_set_changed;
-                if pid_set_changed || due_full_scan {
-                    let task_set_changed = match snapshot_task_sets() {
-                        Some(current) => {
-                            let changed = current != known_tasks;
-                            if changed {
-                                known_tasks = current;
-                            }
-                            changed
-                        }
-                        None => false,
-                    };
-                    changed |= task_set_changed;
-                    if task_set_changed || due_full_scan {
-                        write_system_pid_table(&target, &staging, &mut last_written_digest);
-                        last_full_scan_ms = now_ms;
-                    }
-                }
-                if changed {
-                    last_activity_ms = now_ms;
-                }
+                scanner.tick(crate::platform::paths::monotonic_ms());
                 std::thread::sleep(std::time::Duration::from_millis(
                     SYSTEM_PID_POLL_INTERVAL_MS,
                 ));
@@ -1858,91 +2023,43 @@ fn spawn_system_pid_scanner() {
     }
 }
 
-/// 廉价任务集快照：每进程一次 /proc/<pid>/task readdir（约 400 次 getdents，
-/// 毫秒级），不读任何文件内容。进程集合变化由 500ms 廉价轮询即时发现；线程级变化
-/// 由全量周期覆盖（活跃期 2s，连续 60s 无变化后放宽到 5s），且只在集合变化时触发。
-fn snapshot_task_sets() -> Option<HashMap<i32, HashSet<i32>>> {
-    let entries = std_fs::read_dir("/proc").ok()?;
-    let mut result: HashMap<i32, HashSet<i32>> = HashMap::new();
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        let mut tids = HashSet::new();
-        tids.insert(pid);
-        if let Ok(tasks) = std_fs::read_dir(format!("/proc/{pid}/task")) {
-            for task in tasks.flatten() {
-                if let Ok(tid) = task.file_name().to_string_lossy().parse::<i32>() {
-                    tids.insert(tid);
-                }
-            }
-        }
-        result.insert(pid, tids);
+/// 读取扫描器使用的进程身份，并判定该身份是否可缓存（返回 `(身份, volatile)`）。
+///
+/// cmdline 为空的是内核线程（或已退出进程），身份永远为 None，可以缓存。
+fn read_scanned_identity(pid: i32) -> (Option<(i32, String)>, bool) {
+    match std_fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) if !cmdline.is_empty() => {}
+        _ => return (None, false),
     }
-    Some(result)
+    let identity = read_proc_identity(pid);
+    let volatile = identity
+        .as_ref()
+        .is_none_or(|(_, name)| is_pre_specialized_process_name(name));
+    (identity, volatile)
 }
 
-/// 进程集合快照：仅一次 /proc readdir，不做逐进程 task 扫描。
-///
-/// 500ms 轮询的常态路径。进程集合稳定时（绝大多数轮次）直接跳过
-/// [`snapshot_task_sets`] 的逐进程 getdents，让轮询开销降到单次 getdents 量级；
-/// 进程增减时才升级为全量 task 扫描（新进程必然带来任务集合变化，不漏表）。
-fn snapshot_pid_set() -> Option<HashSet<i32>> {
-    let entries = std_fs::read_dir("/proc").ok()?;
-    let mut pids = HashSet::new();
-    for entry in entries.flatten() {
-        if let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() {
-            pids.insert(pid);
-        }
-    }
-    Some(pids)
+/// zygote 家族进程名：特化前的进程以这些名字存活，特化后才改写为真实身份。
+fn is_pre_specialized_process_name(name: &str) -> bool {
+    name.starts_with("usap") || name.ends_with("zygote") || name.ends_with("zygote64")
 }
 
-/// 全量扫描并原子落盘 pid 表（进程 pid + 每进程全部线程 tid）。
+/// 内核最近分配的 pid（`/proc/loadavg` 第 5 字段），读不到返回 None。
 ///
-/// `last_digest` 记录上一次成功落盘的内容指纹：内容不变时只做一次存在性检查就跳过写入。
-/// 全量周期（2 秒）在系统稳定期同样会走到这里，若不比对指纹就会每 2 秒重写一份数百 KB
-/// 的表，形成持续的写放大（真机实测 455KB/19.8k 行，每 2 秒一次 rename）。
-fn write_system_pid_table(target: &str, staging: &str, last_digest: &mut Option<u64>) {
-    let mut lines = String::new();
-    let Ok(entries) = std_fs::read_dir("/proc") else {
-        return;
-    };
+/// 线程与进程共用 pid 空间，该值不变即说明期间没有新建任何任务。
+fn read_last_allocated_pid() -> Option<i32> {
+    let text = std_fs::read_to_string("/proc/loadavg").ok()?;
+    text.split_whitespace().nth(4)?.parse().ok()
+}
+
+/// 按 pid 升序列出 /proc 下的全部进程（含内核线程），仅一次 readdir。
+fn list_proc_pids() -> Option<Vec<i32>> {
+    let entries = std_fs::read_dir("/proc").ok()?;
     let mut pids: Vec<i32> = entries
         .flatten()
         .filter_map(|entry| entry.file_name().to_string_lossy().parse().ok())
         .collect();
     pids.sort_unstable();
-    for pid in pids {
-        let (uid, package) = match read_proc_identity(pid) {
-            Some(identity) => identity,
-            None => continue,
-        };
-        lines.push_str(&format!("{pid} {uid} {package}\n"));
-        if let Ok(tasks) = std_fs::read_dir(format!("/proc/{pid}/task")) {
-            for task in tasks.flatten() {
-                if let Ok(tid) = task.file_name().to_string_lossy().parse::<i32>()
-                    && tid != pid
-                {
-                    lines.push_str(&format!("{tid} {uid} {package}\n"));
-                }
-            }
-        }
-    }
-    if lines.is_empty() {
-        return;
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&lines, &mut hasher);
-    let digest = std::hash::Hasher::finish(&hasher);
-    // 内容相同且文件仍在：跳过写入。文件被清理时靠存在性检查兜底重写。
-    if *last_digest == Some(digest) && std_fs::metadata(target).is_ok() {
-        return;
-    }
-    if std_fs::write(staging, lines.as_bytes()).is_ok() && std_fs::rename(staging, target).is_ok() {
-        let _ = std_fs::set_permissions(target, std_fs::Permissions::from_mode(0o644));
-        *last_digest = Some(digest);
-    }
+    Some(pids)
 }
 
 /// 开机一次性预登记所有已配置应用的宿主策略。
