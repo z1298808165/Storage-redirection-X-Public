@@ -2163,7 +2163,10 @@ fn materialize_dir_entries(
         ROOT_INO
     } else {
         // quality-allow(chinese-language): ROOT_INO 是 FUSE 根 inode 的固定技术标识。
-        *state.inodes.get(&parent_rel).unwrap_or(&ROOT_INO)
+        *state
+            .inodes
+            .get(&state.inode_key(&parent_rel))
+            .unwrap_or(&ROOT_INO)
     };
     let mut entries = Vec::with_capacity(candidates.len().saturating_add(2));
     entries.push(DirEntry {

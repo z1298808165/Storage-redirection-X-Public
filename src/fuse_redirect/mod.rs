@@ -43,7 +43,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -128,7 +128,11 @@ struct FuseRedirectFs {
 struct FuseState {
     next_ino: u64,
     next_fh: u64,
+    /// 路径 → inode。键是 [`FuseState::inode_key`] 规整后的形式：后端存储根开启
+    /// casefold 时按 ASCII 小写折叠，与后端「大小写不同即同一文件」的语义一致。
     inodes: HashMap<String, u64>,
+    /// 后端是否按大小写不敏感解析路径（会话建立时探测一次存储根）。
+    casefold: bool,
     paths_by_inode: HashMap<u64, String>,
     /// 最近一次按应用策略解析每个 FUSE 路径，用于 root 子进程跨 namespace 接续访问。
     path_policy_uids: HashMap<String, u32>,
@@ -179,6 +183,37 @@ impl FuseState {
         self.dir_candidate_cache.clear();
         self.dir_candidate_cache_bytes = 0;
     }
+
+    /// inode 表的路径键。
+    ///
+    /// Android 的 /data/media 默认开启 casefold：`Tencent/x` 与 `tencent/x` 在后端是
+    /// 同一个文件。若按原样字符串分配 inode，两种拼写会得到两个 nodeid，各自有独立的
+    /// 页缓存与 i_size——writeback 下一侧写入后另一侧 fstat 的大小永远不变、read 立即
+    /// 返回 EOF，轮询日志增长的线程就会空转（真机：微信命名空间内 `Download/` 写 201
+    /// 字节，`download/` 读方停在 1 字节）。后端未开 casefold 时保持精确匹配，避免把
+    /// 两个真实不同的文件合并成一个 inode。
+    fn inode_key(&self, rel: &str) -> String {
+        if self.casefold {
+            rel.to_ascii_lowercase()
+        } else {
+            rel.to_string()
+        }
+    }
+}
+
+/// 探测后端根目录是否开启 casefold（ext4/f2fs 的 `FS_CASEFOLD_FL`）。
+///
+/// 只看存储根：Android 在建立 /data/media 时整棵树一次性设置，子目录继承。探测失败
+/// 时按不折叠处理，等价于改造前的精确匹配语义。
+fn backend_root_is_casefold(root: &Path) -> bool {
+    const FS_CASEFOLD_FL: libc::c_long = 0x4000_0000;
+    let Ok(dir) = File::open(root) else {
+        return false;
+    };
+    let mut flags: libc::c_long = 0;
+    // SAFETY: dir 是刚打开的有效目录 fd；FS_IOC_GETFLAGS 只向 flags 写入一个 long。
+    let ret = unsafe { libc::ioctl(dir.as_raw_fd(), libc::FS_IOC_GETFLAGS, &mut flags) };
+    ret == 0 && flags & FS_CASEFOLD_FL != 0
 }
 
 fn dir_candidate_cache_capacity_limits() -> (usize, usize, usize) {
@@ -413,6 +448,13 @@ impl FuseRedirectFs {
         let policy = PolicyRegistry::new(RedirectPolicy::new(config)?, deny_unregistered);
         let (dir_cache_capacity, dir_cache_max_capacity, dir_cache_byte_budget) =
             dir_candidate_cache_capacity_limits();
+        let casefold = backend_root_is_casefold(&policy.session().real_root);
+        log::info!(
+            "fuse inode keying pkg={} casefold={} real_root={}",
+            package_name,
+            casefold,
+            policy.session().real_root.display()
+        );
         let mut inodes = HashMap::new();
         let mut paths_by_inode = HashMap::new();
         inodes.insert(String::new(), ROOT_INO);
@@ -432,6 +474,7 @@ impl FuseRedirectFs {
                 next_ino: ROOT_INO + 1,
                 next_fh: 1,
                 inodes,
+                casefold,
                 paths_by_inode,
                 path_policy_uids: HashMap::new(),
                 inode_policy_uids: HashMap::new(),
@@ -610,12 +653,13 @@ impl FuseRedirectFs {
     }
 
     fn ino_for_path_locked(state: &mut FuseState, rel: &str) -> INodeNo {
-        if let Some(ino) = state.inodes.get(rel).copied() {
+        let key = state.inode_key(rel);
+        if let Some(ino) = state.inodes.get(&key).copied() {
             return INodeNo(ino);
         }
         let ino = state.next_ino;
         state.next_ino = state.next_ino.saturating_add(1).max(ROOT_INO + 1);
-        state.inodes.insert(rel.to_string(), ino);
+        state.inodes.insert(key, ino);
         state.paths_by_inode.insert(ino, rel.to_string());
         state.inode_path_versions.insert(ino, 0);
         INodeNo(ino)
