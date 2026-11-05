@@ -42,7 +42,8 @@
 | 情况 | 显示 |
 |------|------|
 | `identify_method=caller` / `provider_open` / `provider_mkdir` 等直接信号 | 具体调用方应用名，详情行给出识别方式 |
-| `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行给出"代写进程 <包名>" |
+| `identify_method=caller_pid` | 记录带 `caller_pid`（内核 FUSE 头里的请求方 tid），由 root 侧按 pid 反解出真实包名。适用于 root 文件管理器 helper 一类"进程名不是包名"的写入：识别结果就是它所属的应用，原始进程名保留在详情行的 `native=` 字段 |
+| `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行给出"代写进程 <包名>"；若详情行带 `caller_uid` / `caller_pid`，说明请求方身份是已知的，只是它不是应用（如 shell 二进制），可据此继续定位 |
 | 文件系统观察类记录（inotify 侧） | 显示"文件系统观察"，观察器与实际落盘进程分开列出 |
 
 "未知来源"表示这次写入确实无法归因到具体应用：典型来源是经 MediaProvider 中转、调用方信号已经失效的写入（系统后台创建的目录），以及 root 文件管理器绕过 FUSE 直接落盘的写入。它不是"没有记录"，路径、进程与结果仍然完整，可据此对照 `running.log` 与 `file_monitor.log` 定位。
