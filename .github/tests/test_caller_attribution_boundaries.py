@@ -91,6 +91,43 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, attribution_sources)
 
+    def test_attribution_intermediate_packages_keep_picker_ui_as_source(self) -> None:
+        """归因用「中间层」判定不得把文件/照片选择器当成中间层丢弃。
+
+        回归背景（2026-11-04 HyperOS A16 实测）：一份日志里 941 条记录全部落成未知，
+        路径都是 `Pictures/.thumbnails/thumb*.tmp`，caller_uid 明确指向
+        `com.android.photopicker`（单包、uid 唯一）。根因是 specialize 用来决定
+        「不要给这些进程装 hook」的那份 UI 包名单被复用进了归因链：命中即当作中间层
+        丢弃，于是真实发起方被抹掉。选择器自己写缩略图，它就是发起方。
+
+        这里锁定两条边界：归因判定不含 UI 名单；而「要不要装 hook」「能不能访问别人
+        私有目录」这类决策仍按原名单处理。
+        """
+        policy = read("src/redirect/policy.rs")
+        attribution_fn = extract_fn(policy, "is_attribution_intermediate_package")
+        self.assertIn("is_media_provider_candidate", attribution_fn)
+        self.assertIn("is_file_monitor_bridge_package", attribution_fn)
+        self.assertNotIn("is_file_monitor_ui_package", attribution_fn)
+
+        hook_install_fn = extract_fn(policy, "is_media_intermediate_package")
+        self.assertIn("is_file_monitor_ui_package", hook_install_fn)
+
+    def test_attribution_sites_use_attribution_variant(self) -> None:
+        """归因站点必须用归因专用判定，FUSE 访问决策仍用含 UI 名单的原判定。"""
+        for path in (
+            "src/monitor.rs",
+            "src/monitor/source_hint.rs",
+            "src/hook/monitor.rs",
+            "src/daemon_monitor/events.rs",
+        ):
+            source = read(path)
+            self.assertNotIn("policy::is_media_intermediate_package", source, path)
+            self.assertIn("policy::is_attribution_intermediate_package", source, path)
+
+        fuse_access = read("src/hook/media_fuse.rs")
+        self.assertIn("policy::is_media_intermediate_package", fuse_access)
+        self.assertNotIn("policy::is_attribution_intermediate_package", fuse_access)
+
     def test_ownership_bearing_caller_hints_remain_available(self) -> None:
         merge = read("src/config/merge.rs")
         caller = read("src/redirect/engine/caller.rs")

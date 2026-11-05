@@ -707,7 +707,7 @@ fn resolve_hint_package(
         is_valid_package_name(package)
             && package != &hint.owner_package
             && !policy::is_system_writer_package(package)
-            && !policy::is_media_intermediate_package(package)
+            && !policy::is_attribution_intermediate_package(package)
     })
 }
 
@@ -812,7 +812,8 @@ fn is_valid_private_token_package(package: &str, hint: &PrivateOwnerHint) -> boo
         && package != hint.owner_package
         && package != hint.package_name
         && !policy::is_system_writer_package(package)
-        && !policy::is_media_intermediate_package(package)
+        && !policy::is_attribution_intermediate_package(package)
+        && !policy::is_overlay_or_rro_package(package)
 }
 
 fn private_path_token_package_score(
@@ -885,21 +886,57 @@ fn best_public_path_token_package(
     path_tokens: &[String],
     user_id: i32,
 ) -> Option<String> {
+    // 只接受能唯一指向某个包的词元：像 `platform` 这样的常见英文词会同时出现在
+    // 多个包名里（真机：`srx-platform-probe*.txt` 被归到
+    // `com.android.carrierconfig.overlay.product.platform`）。唯一性把"猜"收敛成
+    // "唯一解"，仍然失败时交给上层继续找更强的证据，而不是给一个确定答案。
+    let unique_tokens = unique_public_path_tokens(&packages, path_tokens);
+    if unique_tokens.is_empty() {
+        return None;
+    }
     packages
         .into_iter()
         .filter(|package| is_valid_public_path_token_package(package, user_id))
         .filter_map(|package| {
-            let score = public_path_token_package_score(&package, path_tokens);
+            let score = public_path_token_package_score(&package, &unique_tokens);
             (score > 0).then_some((score, package))
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)))
         .map(|(_, package)| package)
 }
 
+/// 从路径词元里挑出在给定包名集合中**只出现一次**的那些。
+fn unique_public_path_tokens(packages: &[String], path_tokens: &[String]) -> Vec<String> {
+    let mut unique = Vec::new();
+    for token in path_tokens {
+        if token.len() < 5 {
+            continue;
+        }
+        let mut hits = 0usize;
+        for package in packages {
+            let name = package.to_ascii_lowercase();
+            if name
+                .split(['.', '_', '-'])
+                .any(|part| part == token.as_str())
+            {
+                hits += 1;
+                if hits > 1 {
+                    break;
+                }
+            }
+        }
+        if hits == 1 {
+            unique.push(token.clone());
+        }
+    }
+    unique
+}
+
 fn is_valid_public_path_token_package(package: &str, user_id: i32) -> bool {
     if !is_valid_package_name(package)
         || policy::is_system_writer_package(package)
-        || policy::is_media_intermediate_package(package)
+        || policy::is_attribution_intermediate_package(package)
+        || policy::is_overlay_or_rro_package(package)
     {
         return false;
     }
@@ -910,7 +947,8 @@ fn is_valid_public_path_token_package(package: &str, user_id: i32) -> bool {
 fn is_valid_public_path_package(package: &str, user_id: i32) -> bool {
     if !is_valid_package_name(package)
         || policy::is_system_writer_package(package)
-        || policy::is_media_intermediate_package(package)
+        || policy::is_attribution_intermediate_package(package)
+        || policy::is_overlay_or_rro_package(package)
     {
         return false;
     }

@@ -100,6 +100,46 @@ pub fn is_media_intermediate_package(package_name: &str) -> bool {
     is_file_monitor_bridge_package(package_name) || is_file_monitor_ui_package(package_name)
 }
 
+/// 归因用「中间层」判定：与 [`is_media_intermediate_package`] 的唯一区别是**不含**
+/// 文件/照片选择类 UI 包（DocumentsUI、PhotoPicker、下载 UI 等）。
+///
+/// 为什么必须区分：那份 UI 名单原本只回答「specialize 时要不要给这个进程装 hook」，
+/// 它不回答「它能不能成为写入的发起方」。把它复用到归因上会主动丢弃真实源头——
+/// 真机实测（HyperOS A16）相册选择器生成的 `Pictures/.thumbnails/thumb*.tmp` 共
+/// 941 条记录，caller_uid 明确指向 `com.android.photopicker`（单包、uid 唯一），
+/// 却因为命中 UI 名单被当成中间层丢弃，全部落成未知来源。选择器自己写缩略图，
+/// 它就是发起方。
+///
+/// 媒体提供器与监视桥接（MTP/外置存储）仍算中间层：它们的写入是替别的应用代写，
+/// 采信它们会把「谁发起」彻底抹掉。
+pub fn is_attribution_intermediate_package(package_name: &str) -> bool {
+    if package_name.is_empty() {
+        return false;
+    }
+
+    if is_media_provider_candidate(package_name) {
+        return true;
+    }
+
+    is_file_monitor_bridge_package(package_name)
+}
+
+/// RRO / overlay 资源包判定。
+///
+/// 这类包只有资源与清单，不含可执行代码，不可能成为文件写入的发起者；但它们在
+/// 系统里会占用低段 uid（真机见过 `com.google.android.networkstack.overlay` 占
+/// uid 10000、`com.android.carrierconfig.overlay.product.platform` 占 10044），
+/// 一旦被 uid 反查或路径词元匹配命中，就会把真实源头覆盖成一个资源包。
+pub fn is_overlay_or_rro_package(package_name: &str) -> bool {
+    if package_name.is_empty() {
+        return false;
+    }
+    let normalized = package_name.to_ascii_lowercase();
+    normalized.contains(".overlay")
+        || normalized.starts_with("android.frameworkres.overlay")
+        || normalized.ends_with(".overlayable")
+}
+
 // 文件监视桥接中间层。它们常参与 SAF、下载与 MTP 流程，但也会影响安装应用、
 // 设置和文件管理器启动。
 pub fn is_file_monitor_bridge_package(package_name: &str) -> bool {

@@ -854,7 +854,8 @@ fn resolve_caller_package_by_uid(caller_uid: i32, hub: &InterceptHub) -> String 
         if package.is_empty() || package == self_package {
             continue;
         }
-        if policy::is_system_writer_package(&package) {
+        if policy::is_system_writer_package(&package) || policy::is_overlay_or_rro_package(&package)
+        {
             continue;
         }
         candidates.push(package);

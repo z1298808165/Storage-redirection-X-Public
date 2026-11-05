@@ -642,7 +642,7 @@ fn should_force_filter_system_private_record(
     if identity_package.is_empty() {
         return false;
     }
-    if policy::is_media_intermediate_package(identity_package) {
+    if policy::is_attribution_intermediate_package(identity_package) {
         return true;
     }
     let uid = policy::get_uid_for_package(identity_package);
@@ -1415,6 +1415,7 @@ fn refine_native_identity_with_caller_uid(
         || package == native
         || is_intermediate_caller_package(&package)
         || policy::is_system_writer_package(&package)
+        || policy::is_overlay_or_rro_package(&package)
     {
         return (identity, None);
     }
@@ -1452,7 +1453,7 @@ fn extract_caller_package(caller_package: &str) -> String {
 }
 
 fn is_intermediate_caller_package(package_name: &str) -> bool {
-    policy::is_media_intermediate_package(package_name)
+    policy::is_attribution_intermediate_package(package_name)
 }
 
 // 从 key=value|... 格式中提取指定 key 的值

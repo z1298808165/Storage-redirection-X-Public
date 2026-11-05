@@ -252,7 +252,7 @@ fn resolve_recent_path_caller_identity(
             "provider_open" | "provider_mkdir" | "saf_provider"
         )
         || identity.package_name.is_empty()
-        || policy::is_media_intermediate_package(&identity.package_name)
+        || policy::is_attribution_intermediate_package(&identity.package_name)
         || policy::is_system_writer_package(&identity.package_name)
     {
         return None;
@@ -338,7 +338,7 @@ fn should_keep_system_intermediate_owner_identity(
     ) && identity.package_name != watch_package_name
         && matches!(identity.identify_method, "owner_uid" | "path_owner")
         && !policy::is_media_provider_package(&identity.package_name)
-        && policy::is_media_intermediate_package(&identity.package_name)
+        && policy::is_attribution_intermediate_package(&identity.package_name)
 }
 
 pub(super) fn should_prefer_watch_package_for_system_writer_owner(
@@ -347,7 +347,7 @@ pub(super) fn should_prefer_watch_package_for_system_writer_owner(
 ) -> bool {
     matches!(source, "path_mapping" | "sandbox_path" | "redirect_root")
         && (policy::is_system_writer_package(owner_package)
-            || policy::is_media_intermediate_package(owner_package))
+            || policy::is_attribution_intermediate_package(owner_package))
 }
 
 pub(super) fn repair_monitored_backend_owner(

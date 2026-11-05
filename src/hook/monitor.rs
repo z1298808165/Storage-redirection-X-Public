@@ -357,7 +357,7 @@ fn private_storage_owner_path(pathname: &str) -> Option<(String, String, i32)> {
     let owner_package = paths::extract_android_private_path_owner(&normalized);
     if owner_package.is_empty()
         || policy::is_system_writer_package(&owner_package)
-        || policy::is_media_intermediate_package(&owner_package)
+        || policy::is_attribution_intermediate_package(&owner_package)
     {
         return None;
     }
@@ -382,7 +382,7 @@ fn should_remember_monitor_private_path_caller_hint(
         || caller_package.is_empty()
         || caller_package == owner_package
         || policy::is_system_writer_package(caller_package)
-        || policy::is_media_intermediate_package(caller_package)
+        || policy::is_attribution_intermediate_package(caller_package)
     {
         return false;
     }
