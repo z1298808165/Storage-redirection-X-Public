@@ -54,3 +54,43 @@
 - 共享宿主会话（`srx_fuse_host[<pid>]`）是**唯一**的 FUSE 数据面，为多个应用 namespace 提供共享视图，Auto 模式下应用会话默认收敛到该会话。
 - `mount namespace` 不是待删除的旧实现，而是 `auto` 后端在宿主接入不可用时的正式路径。
 - `srx_fuse_redirect` 前缀保留用于识别旧版本遗留的 scoped 层；测试、账本和诊断必须同时识别 `srx_fuse_redirect` 与 `srx_fuse_host`。
+
+## 排查：某个应用为什么没走 FUSE
+
+先看 `backend_effective`：它给出该应用最终生效的形态与判定来源，一条就够定位方向。
+
+```
+backend_effective pkg=<包名> requested=auto effective=fuse capability=available   selection_reason=scoped_mount_ready:view=srx_host fuse_roots=1 fuse_sessions=1
+backend_effective pkg=<包名> requested=auto effective=namespace capability=available   selection_reason=scoped_mount_failed_namespace_fallback:attach_gate_closed fuse_roots=1
+```
+
+- `selection_reason=scoped_mount_ready:view=srx_host`：已接入共享宿主，后续落点由策略层决定。
+- `...failed_namespace_fallback:<reason>`：接入没成功并回落 namespace。`reason` 直接说明卡在哪一步
+  （闸门判定、策略登记、接入超时、宿主缺席）。
+- 只有 `unknown` 或失败信号才输出 `scoped gate diag`（含 `capability`、`budget_exhausted`、
+  `scope_failures`）；正常放行不打印，避免启动风暴期日志风暴。
+
+常见成因按出现频率排列：
+
+- **能力快照 `unavailable` 且设备级退避未到期**：等 `retry_at_ms` 过去，或重启让快照重置。
+- **该应用自己的失败分桶用满预算**：连续三次真实接入失败后进入 60 秒窗口，窗口过后仍会放行一次探测，
+  成功即清零；「没试」类判定（根不满足接入条件、宿主尚未就绪）不计入预算。
+- **接入超时**：宿主策略登记或 namespace 接入没在预算内完成，应用会带 `attach_gate_closed` 回落。
+
+### 判断「接管是否成功」不要看挂载源名
+
+挂载源已原生化（`/dev/fuse`），`srx_fuse_host[...]` 这类源名判据在共享宿主布局下恒落空。
+用拓扑事实判断，两种布局都覆盖：
+
+- **bind 布局**（回落 namespace）：规则落点本身是该进程的挂载点。
+- **共享宿主布局**：应用视图根 `/storage/emulated` 的超级块 dev 与 init 命名空间里系统 FUSE 的 dev
+  不同，即视图已由模块会话服务；规则落点不会在 `mountinfo` 里出现独立挂载层，这是设计目标。
+
+### 映射类问题的两个前提
+
+- **映射目标目录必须在接入前存在于真实存储**：共享宿主布局没有「建立映射挂载」这一步，
+  daemon 与 companion 两条接入路径都会在接入前预建目标目录。若目标目录缺失，
+  系统代写链路（如下载提供器）会判定父目录不存在而直接放弃。
+- **映射按链式语义解析**：父映射的结果若又命中另一条映射的请求路径，会继续解析到不动点；
+  自嵌套映射（目标落在自己请求路径的子树内）只生效一次。排查时按「最终落点」核对，
+  而不是按第一跳目标。
