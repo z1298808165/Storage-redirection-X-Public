@@ -13,6 +13,8 @@
     <a href="#下载与安装"><img src="https://img.shields.io/badge/Zygisk-%E7%8E%AF%E5%A2%83%E5%BF%85%E9%9C%80-orange?style=flat-square" alt="Zygisk"/></a>
     <!-- quality-allow(chinese-language): 协议徽章为 shields 机器标签，保留英文。 -->
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green?style=flat-square" alt="License"/></a>
+    <!-- quality-allow(chinese-language): 贡献者徽章为 shields 机器标签，保留英文。 -->
+    <a href="https://github.com/z1298808165/Storage-redirection-X-Public/graphs/contributors"><img src="https://img.shields.io/github/contributors/z1298808165/Storage-redirection-X-Public?style=flat-square&label=%E8%B4%A1%E7%8C%AE%E8%80%85" alt="Contributors"/></a>
   </p>
 </div>
 
@@ -584,6 +586,8 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 ## 🙏 致谢
 
 - [Storage-redirection-X-Public](https://github.com/Kindness-Kismet/Storage-redirection-X-Public)：本项目的上游来源
+- [srx_hook](https://github.com/PuerNya/srx_hook)（fork，上游为 [Kindness-Kismet/srx_hook](https://github.com/Kindness-Kismet/srx_hook)）与 [srx_inline_hook](https://github.com/Kindness-Kismet/srx_inline_hook)：PLT hook 与 inline hook 引擎
+- [PuerNya](https://github.com/PuerNya)：贡献统一真实路径解析、文件操作 hook 补齐与 Hyos runtime 接入
 - [Magisk](https://github.com/topjohnwu/Magisk) / [KernelSU](https://github.com/tiann/KernelSU)：Root 与模块加载环境
 - [Zygisk](https://github.com/topjohnwu/Magisk) 与 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk 注入环境
 - [LSPlant](https://github.com/LSPosed/LSPlant)：Java 层 hook 框架
