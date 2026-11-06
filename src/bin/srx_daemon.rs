@@ -7,6 +7,8 @@
 mod config;
 #[path = "../daemon.rs"]
 mod daemon;
+#[path = "../daemon_identity_query.rs"]
+mod daemon_identity_query;
 #[path = "../daemon_monitor.rs"]
 mod daemon_monitor;
 #[path = "../daemon_mount.rs"]

@@ -82,3 +82,19 @@ allow mediaprovider ksu unix_dgram_socket sendto
 allow mediaprovider_app ksu unix_dgram_socket sendto
 allow system_server ksu unix_dgram_socket sendto
 allow ksu ksu unix_dgram_socket sendto
+
+# 身份询问的回包方向：MediaProvider 等决策进程发出询问后，daemon 需要按发送方地址
+# 回一个 datagram。只有 sendto 单向权限时询问能发出、回包被拒，决策侧就只能一直
+# 落到「身份未解析」。范围限定在既有日志通道的同一批域。
+allow magisk mediaprovider unix_dgram_socket sendto
+allow magisk mediaprovider_app unix_dgram_socket sendto
+allow magisk appdomain unix_dgram_socket sendto
+allow magisk isolated_app unix_dgram_socket sendto
+allow su mediaprovider unix_dgram_socket sendto
+allow su mediaprovider_app unix_dgram_socket sendto
+allow su appdomain unix_dgram_socket sendto
+allow su isolated_app unix_dgram_socket sendto
+allow ksu mediaprovider unix_dgram_socket sendto
+allow ksu mediaprovider_app unix_dgram_socket sendto
+allow ksu appdomain unix_dgram_socket sendto
+allow ksu isolated_app unix_dgram_socket sendto

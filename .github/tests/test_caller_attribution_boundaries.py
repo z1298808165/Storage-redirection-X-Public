@@ -716,5 +716,50 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("SCOPE_RETRY_WINDOW_MS", budget_fn)
         self.assertIn("scope_last_failure_ms", budget_fn)
 
+    def test_decision_identity_uses_same_evidence_as_record(self) -> None:
+        """决策期的源头身份必须与记录侧同源：内核请求头 pid，由 root 反查 /proc。
+
+        不能按「哪个包的规则匹配这条路径」反推源头——那样一旦猜错，用户会照着错误
+        的源头去配规则。这里锁定的是：快照未命中时同步问 daemon，且 daemon 侧只用
+        /proc 与 packages.list 的客观事实（多包 uid 一律不猜）。
+        """
+        caller = read("src/hook/caller.rs")
+        resolve_fn = extract_fn(caller, "resolve_system_fuse_identity")
+        self.assertIn("daemon_identity_query::query_process_identity", resolve_fn)
+
+        query = read("src/daemon_identity_query.rs")
+        self.assertIn("read_proc_identity", query)
+        # 回包必须校验 pid 与 uid 双向一致，否则 pid 复用后的答案会被误采信。
+        parse_fn = extract_fn(query, "parse_reply")
+        self.assertIn("reply_pid != pid", parse_fn)
+        self.assertIn("reply_uid != uid", parse_fn)
+        # 同一 uid 对应多个包时不许挑一个。
+        unique_fn = extract_fn(query, "unique_package_for_uid")
+        self.assertIn("return None", unique_fn)
+
+        # 回包方向的 SELinux 权限与询问方向同样必要，否则询问永远等不到答案。
+        policy = read("assets/zygisk_module/sepolicy.rule")
+        self.assertIn("allow magisk mediaprovider unix_dgram_socket sendto", policy)
+
+    def test_pid_table_native_name_is_not_used_as_package(self) -> None:
+        """pid 表命中 native 名时必须换算，不能直接当包名用。
+
+        pid 表记录的是 /proc 命令行身份：native 进程（`sh`、`mkdir`、下载器 helper）
+        只有 basename。直接拿它查规则必然落空，写入就被当成「未配置应用」放行到真实
+        存储——2026-11-06 真机：进程刚起就写被重定向，存活超过一个扫描周期再写却泄漏，
+        差别正是「是否已进 pid 表」。两个读表站点都必须先判包名形态。
+        """
+        caller = read("src/hook/caller.rs")
+        for fn_name in ("resolve_system_fuse_identity", "resolve_java_caller_package"):
+            body = extract_fn(caller, fn_name)
+            table_at = body.index("lookup_system_pid_table(")
+            tail = body[table_at:]
+            self.assertIn(".contains('.')", tail, f"{fn_name} 读表后必须判包名形态")
+            self.assertIn(
+                "daemon_identity_query::query_process_identity",
+                tail,
+                f"{fn_name} 表内 native 名必须交给 daemon 按 uid 唯一归属换算",
+            )
+
 if __name__ == "__main__":
     unittest.main()

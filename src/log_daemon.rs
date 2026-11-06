@@ -194,7 +194,7 @@ fn run(fd: i32, mut state: LogState) {
         // 一次 poll 之后把内核队列里的 datagram 连续排空，否则突发写入时每轮只取一条，
         // 队列会持续堆积并被内核直接丢弃。
         for _ in 0..MAX_DRAIN_PER_ROUND {
-            let (size, sender_uid) = recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
+            let (size, sender_uid, sender_addr) = recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
             if size < 0 {
                 let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
                 if errno == EINTR {
@@ -211,6 +211,14 @@ fn run(fd: i32, mut state: LogState) {
             let Ok(packet) = std::str::from_utf8(&payload[..size as usize]) else {
                 continue;
             };
+            // 身份询问包：就地问一次 /proc 并回包给发送方。必须在 state.handle 之前
+            // 分流——它不带日志语义，混进日志会污染记录并触发无谓的限流计数。
+            if packet.starts_with(crate::daemon_identity_query::QUERY_PREFIX)
+                || packet.starts_with(crate::daemon_identity_query::UID_QUERY_PREFIX)
+            {
+                reply_identity_query(fd, packet, sender_addr.as_ref());
+                continue;
+            }
             state.handle(packet, sender_uid);
         }
         state.flush_if_due();
@@ -220,7 +228,42 @@ fn run(fd: i32, mut state: LogState) {
 /// 接收一条 datagram，同时提取 SCM_CREDENTIALS 中的发送方 UID。
 /// 返回 (接收字节数, 发送方 uid)；uid 仅在内核附加了合法 ucred 时为 Some。
 /// `flags` 直接传给 recvmsg；排空循环使用 MSG_DONTWAIT 避免在阻塞 socket 上卡死。
-fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> (isize, Option<u32>) {
+/// 回答一条身份询问包，回包给发送方地址。
+///
+/// 回包失败只影响那一次决策的身份解析精度（调用方按未解析回退），因此不重试、不记录
+/// 日志噪音：询问发生在每次快照未命中的写入上，失败一条就记一条会把 running.log 冲掉。
+fn reply_identity_query(
+    fd: i32,
+    packet: &str,
+    sender: Option<&(libc::sockaddr_un, libc::socklen_t)>,
+) {
+    let Some((addr, addr_len)) = sender else {
+        return;
+    };
+    let Some(reply) = crate::daemon_identity_query::answer_query(packet) else {
+        return;
+    };
+    let bytes = reply.as_bytes();
+    // SAFETY: reply 与 addr 在调用期间保持有效；addr_len 由 recvmsg 填回。
+    unsafe {
+        sendto(
+            fd,
+            bytes.as_ptr() as *const c_void,
+            bytes.len(),
+            0,
+            addr as *const _ as *const sockaddr,
+            *addr_len,
+        );
+    }
+}
+
+/// 接收一条 datagram：返回 (字节数, 发送方 uid, 发送方地址)。
+///
+/// 发送方地址用于「身份询问」的回包：日志包只是单向 sink，而询问包需要就地答复，
+/// 因此这里一并把来源地址带出来。
+type ReceivedDatagram = (isize, Option<u32>, Option<(libc::sockaddr_un, libc::socklen_t)>);
+
+fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> ReceivedDatagram {
     // 控制消息缓冲区，用于接收 SCM_CREDENTIALS（ucred）凭据。
     // 64 字节超过 CMSG_SPACE(sizeof(ucred)) 所需的约 32 字节，留有余量。
     // repr(align(8)) 保证 cmsghdr 所需的对齐要求（64 位系统 sizeof(size_t) = 8）。
@@ -238,35 +281,45 @@ fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> (is
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf.0.as_mut_ptr() as *mut c_void;
     msg.msg_controllen = cmsg_buf.0.len() as _;
+    // 来源地址：询问包需要按发送方地址回包。
+    // SAFETY: sockaddr_un 是允许零初始化的普通 C 结构体。
+    let mut peer: libc::sockaddr_un = unsafe { mem::zeroed() };
+    msg.msg_name = &mut peer as *mut _ as *mut c_void;
+    msg.msg_namelen = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
 
     // SAFETY: msg 已完整初始化，payload 有 payload.len() 字节可写空间，fd 由调用方持有。
     let size = unsafe { recvmsg(fd, &mut msg, flags) };
     if size <= 0 {
-        return (size, None);
+        return (size, None, None);
     }
+    let peer_addr = if msg.msg_namelen > 0 {
+        Some((peer, msg.msg_namelen))
+    } else {
+        None
+    };
 
     // 提取发送方 UID：查找 SOL_SOCKET / SCM_CREDENTIALS 控制消息。
     // SAFETY: CMSG_FIRSTHDR 在 msg_controllen > 0 时返回指向已初始化控制缓冲区内的指针，
     //         或在无控制消息时返回 NULL；对 NULL 的检查在下一行完成。
     let cmsg_ptr = unsafe { CMSG_FIRSTHDR(&msg) };
     if cmsg_ptr.is_null() {
-        return (size, None);
+        return (size, None, peer_addr);
     }
     // SAFETY: cmsg_ptr 非空且由 CMSG_FIRSTHDR 返回，指向已由内核初始化的 cmsghdr。
     let hdr = unsafe { &*cmsg_ptr };
     if hdr.cmsg_level != SOL_SOCKET || hdr.cmsg_type != SCM_CREDENTIALS {
-        return (size, None);
+        return (size, None, peer_addr);
     }
     // 验证 cmsg_len 足够容纳完整的 ucred，防止越界读取截断的控制消息。
     let min_len = mem::size_of::<cmsghdr>() + mem::size_of::<ucred>();
     if (hdr.cmsg_len as usize) < min_len {
-        return (size, None);
+        return (size, None, peer_addr);
     }
     // SAFETY: 已确认 cmsg_level/cmsg_type 正确且 cmsg_len 涵盖完整 ucred，
     //         CMSG_DATA 返回紧跟 cmsghdr 之后、由内核写入的 ucred 起始地址，
     //         该地址在 cmsg_buf 生命周期内始终有效。
     let creds = unsafe { &*(CMSG_DATA(cmsg_ptr) as *const ucred) };
-    (size, Some(creds.uid as u32))
+    (size, Some(creds.uid as u32), peer_addr)
 }
 
 fn bind_log_socket() -> io::Result<i32> {

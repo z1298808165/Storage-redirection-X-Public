@@ -154,6 +154,14 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
             package_name = resolve_caller_package_by_pid(caller_pid);
             if !package_name.is_empty() {
                 caller_source = "binder_pid";
+            } else if let Some((resolved_pkg, _)) =
+                resolve_system_fuse_identity(caller_uid, caller_pid)
+            {
+                // 命令行不是包名形态：这一 pid 的进程身份只能由 pid → /proc 反查给出
+                // （native 名 + uid 唯一归属时换算成包名）。与 FUSE 请求头那条路径共用
+                // 同一实现，避免两处口径漂移。
+                package_name = resolved_pkg;
+                caller_source = "pid_proc";
             }
         }
         // clearCallingIdentity 前保存的调用方 UID 作为末级回退
@@ -341,7 +349,19 @@ fn resolve_system_fuse_identity(fuse_uid: i32, fuse_pid: i32) -> Option<(String,
     if let Some((table_pkg, table_uid)) = lookup_system_pid_table(fuse_pid)
         && table_uid == fuse_uid
     {
-        return Some((table_pkg, table_uid));
+        // pid 表记的是 /proc 命令行身份：Java 进程是包名，native 进程（`sh`、下载器
+        // helper）只是 basename。后者规则必然查不到，直接采信会把写入当成「未配置
+        // 应用」放行到真实存储——2026-11-06 真机：进程存活超过一个扫描周期后入表，
+        // 立即写入被重定向、存活 2s 再写却泄漏，差别就在这里。native 名交给 daemon
+        // 按 uid 唯一归属换算；多包 uid 仍保留表内原名，不猜。
+        if table_pkg.contains('.') {
+            return Some((table_pkg, table_uid));
+        }
+        let resolved = crate::daemon_identity_query::query_process_identity(fuse_pid, fuse_uid)
+            .map(|(package, _)| package)
+            .filter(|package| package.contains('.'))
+            .unwrap_or(table_pkg);
+        return Some((resolved, table_uid));
     }
     // 表未命中：区分「表里根本没有该 pid」（daemon 扫描空窗）与「uid 不匹配」
     //（身份错误），10 秒限频记录一次供运维判断竞态边界。
@@ -349,6 +369,20 @@ fn resolve_system_fuse_identity(fuse_uid: i32, fuse_pid: i32) -> Option<(String,
     let mut pkg = resolve_caller_package_by_pid(fuse_pid);
     if pkg.is_empty() {
         pkg = resolve_native_identity_by_pid(fuse_pid);
+    }
+    // 本地 /proc 读不到（MP 域读 platform 应用的 cmdline 被 SELinux 拒绝）时同步问
+    // daemon：它是 root，读得到；而且这条证据与记录侧用的是同一份内核请求头 pid，
+    // 因此决策与事后取证不会各说一套。**这不是按规则反推源头**——答案来自 /proc。
+    let needs_remote_lookup = pkg.is_empty() || !pkg.contains('.');
+    if needs_remote_lookup
+        && let Some((remote_pkg, _)) =
+            crate::daemon_identity_query::query_process_identity(fuse_pid, fuse_uid)
+    {
+        // daemon 侧还会按 packages.list 把「native 名 + 唯一 uid」收敛成包名；多包 uid
+        // 不猜，仍回 native 名。包名形态才覆盖本地结果，否则保留本地证据。
+        if pkg.is_empty() || remote_pkg.contains('.') {
+            pkg = remote_pkg;
+        }
     }
     if pkg.is_empty() {
         static LAST_STAGE_LOG_MS: AtomicI64 = AtomicI64::new(-1);
@@ -793,12 +827,20 @@ fn resolve_caller_package_by_pid(pid: i32) -> String {
         return package;
     }
 
-    // 兜底保持原语义：argv0 就是包名（Java 进程），否则给出 basename 形态身份。
+    // 兜底保持包名语义：argv0 是包名（Java 进程）才返回；native 二进制（`sh`、
+    // 下载器 helper、`/data/local/tmp/xxx`）没有包名，这里返回空，交由调用方按 pid
+    // 继续解析。此前把 basename 当包名返回，规则必然查不到，写入就被当成「未配置
+    // 应用」放行到真实存储（2026-11-05 真机 issue #2 的泄漏路径之一）。
     let mut head = raw.split('\0').next().unwrap_or("").to_string();
     if let Some(pos) = head.find(':') {
         head.truncate(pos);
     }
-    normalize_caller_package_text(&head)
+    let head = normalize_caller_package_text(&head);
+    if head.contains('.') {
+        head
+    } else {
+        String::new()
+    }
 }
 
 /// native 二进制进程的身份提取：argv0 带路径时取 basename（如 adb shell 派生
@@ -828,7 +870,17 @@ fn resolve_native_identity_by_pid(pid: i32) -> String {
         cmdline.truncate(pos);
     }
 
-    normalize_caller_package_text(&cmdline)
+    let native = normalize_caller_package_text(&cmdline);
+    if native.is_empty() || native.contains('.') {
+        return native;
+    }
+    // native 进程名（`sh`、`mkfs`、下载器 helper）不是包名，规则必然查不到，写入会被
+    // 当成「未配置应用」放行到真实存储。只有 uid 唯一对应一个包时才换算成包名——
+    // 那是 uid 在权限模型上的客观归属；多包 uid 保持原名，宁可留未知也不猜错源头。
+    crate::daemon_identity_query::query_process_identity(pid, -1)
+        .map(|(package, _)| package)
+        .filter(|package| package.contains('.'))
+        .unwrap_or(native)
 }
 
 fn resolve_caller_package_by_uid(caller_uid: i32, hub: &InterceptHub) -> String {
@@ -1324,7 +1376,16 @@ fn resolve_java_caller_package(caller_uid: i32, caller_pid: i32) -> Option<Strin
             && uid == caller_uid
             && !package.is_empty()
         {
-            return Some(package);
+            // 表内 native 名（`sh` 之类）不是包名，规则查不到；交给 daemon 按 uid 唯一
+            // 归属换算，多包 uid 保留原名（与 FUSE 请求头那条路径同一口径）。
+            if package.contains('.') {
+                return Some(package);
+            }
+            let resolved = crate::daemon_identity_query::query_process_identity(caller_pid, uid)
+                .map(|(remote, _)| remote)
+                .filter(|remote| remote.contains('.'))
+                .unwrap_or(package);
+            return Some(resolved);
         }
         let package_name = resolve_caller_package_by_pid(caller_pid);
         if !package_name.is_empty()

@@ -4,6 +4,10 @@
 #![allow(clippy::missing_const_for_thread_local)]
 
 mod config;
+// quality-allow(lint-suppression): 该模块的 daemon 侧回包函数只被 srx_daemon 二进制使用，lib 目标共享编译。
+#[allow(dead_code)]
+#[path = "daemon_identity_query.rs"]
+mod daemon_identity_query;
 mod domain;
 // quality-allow(lint-suppression): fuse_host 由 srx_daemon 二进制通过路径模块使用，lib 目标仅共享编译该模块。
 #[allow(dead_code)]
