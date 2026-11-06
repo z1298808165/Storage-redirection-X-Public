@@ -274,6 +274,22 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertIn("scoped_mount_allowed_for_scope", body)
         self.assertNotIn("scoped_mount_roots_for_hybrid_rules", body)
 
+    def test_path_mapping_resolution_chains_to_fixpoint(self) -> None:
+        # 场景 37 的契约「父映射结果继续命中子映射」：bind 布局下两层挂载天然串联，FUSE 只在
+        # 策略层解析，因此 resolve_mapping 必须迭代到不动点。退回单跳会让中间路径落在后端不存在
+        # 的位置，应用侧表现为写入 ENOENT（CI run 42259826817 的 A17 现场即此）。
+        policy = read("src/fuse_redirect/policy.rs")
+        body = function_body(policy, "pub(super) fn resolve_mapping(&self, storage_path: &str)")
+        self.assertIn("MAX_MAPPING_HOPS", body)
+        # 双步振荡与恒等映射必须提前收敛，否则手写的 A→B / B→A 环会让解析永不停止。
+        self.assertIn("previous.as_deref() == Some(next.as_str())", body)
+        self.assertIn("next == path", body)
+        # 自嵌套映射（目标落在自己的请求路径内）只能生效一次：bind 布局下它只挂一层，
+        # 连续串联会把目录名逐跳叠加。
+        self.assertIn("self_nested", body)
+        # 单跳实现的标志：命中第一条映射就直接 return。出现即说明链式语义被改回去了。
+        self.assertNotIn("return Some(mapping.final_path.clone());", body)
+
     def test_public_directory_mode_is_repaired_only_when_deficient(self) -> None:
         # 既有共享目录（DCIM/Pictures/Android…）的权限由 MediaProvider 决定：原型可能是
         # 02773 也可能是 02771。把这些目录归一成模块常量会改写用户磁盘上的既有权限，

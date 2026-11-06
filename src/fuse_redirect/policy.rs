@@ -35,6 +35,12 @@ pub(super) struct RequesterIdentity {
     /// 发起者 uid（与 FUSE 请求头 uid 一致，解析时已校验）。
     pub uid: i32,
 }
+/// 映射链最多解析的跳数。
+///
+/// 正常配置只有 0~2 跳（父映射结果再命中子映射）；上限既是手写配置成环（`A→B` 与 `B→A`）
+/// 的兜底，也避免在请求热路径上出现无界循环。
+const MAX_MAPPING_HOPS: usize = 8;
+
 const READ_ONLY_DENY_EXTRA: &str = "deny_reason=read_only_rule";
 const DUPLICATE_MONITOR_CREATE_WINDOW_MS: i64 = 1500;
 const MAX_RECENT_MONITOR_CREATES: usize = 256;
@@ -1248,19 +1254,55 @@ impl RedirectPolicy {
     }
 
     pub(super) fn resolve_mapping(&self, storage_path: &str) -> Option<String> {
-        for mapping in self.path_mappings.iter().rev() {
-            if paths::matches(&mapping.request_path, storage_path, true) {
-                let Some(suffix) = paths::child_suffix(storage_path, &mapping.request_path) else {
-                    return Some(mapping.final_path.clone());
-                };
-                return Some(format!(
-                    "{}{}",
-                    mapping.final_path.trim_end_matches('/'),
-                    suffix
-                ));
-            }
+        if self.path_mappings.is_empty() {
+            return None;
         }
-        None
+        // 链式映射：父映射的结果可能又命中另一条映射（场景 37 的契约「父映射结果继续命中
+        // 子映射」）。bind 布局下两层挂载天然串联，而 FUSE 只在策略层解析，必须迭代到不动
+        // 点——只换一跳的话，中间路径在后端并不存在，应用侧只会看到 ENOENT。
+        //
+        // 迭代有上限并检测双步振荡：映射是手写配置，`A→B` 与 `B→A` 这类环会让解析永不收敛。
+        // 命中任意一条即算「映射命中」（与单跳语义一致），返回的是**末跳**目标——只读判定与
+        // 直写门控都基于它，那才是真实落点。
+        let mut current: Option<String> = None;
+        let mut previous: Option<String> = None;
+        let mut hit = false;
+        for _ in 0..MAX_MAPPING_HOPS {
+            let path = current.as_deref().unwrap_or(storage_path);
+            let mut candidate: Option<String> = None;
+            let mut self_nested = false;
+            for mapping in self.path_mappings.iter().rev() {
+                if !paths::matches(&mapping.request_path, path, true) {
+                    continue;
+                }
+                // 目标落在自己的请求路径之内（自嵌套映射）时只能生效一次：bind 布局下这条
+                // 规则只会在可见路径上挂一层，后端路径不会再被自身重新映射。继续串联会让
+                // 每一跳都把目录名再叠一层，直到撞上迭代上限。
+                self_nested = mapping
+                    .final_path
+                    .trim_end_matches('/')
+                    .starts_with(mapping.request_path.trim_end_matches('/'));
+                candidate = Some(match paths::child_suffix(path, &mapping.request_path) {
+                    Some(suffix) => {
+                        format!("{}{}", mapping.final_path.trim_end_matches('/'), suffix)
+                    }
+                    None => mapping.final_path.clone(),
+                });
+                break;
+            }
+            let Some(next) = candidate else { break };
+            hit = true;
+            // 指回自身（恒等映射）、自嵌套映射或双步振荡（A→B→A）：停在当前落点。
+            if next == path || self_nested || previous.as_deref() == Some(next.as_str()) {
+                break;
+            }
+            previous = current;
+            current = Some(next);
+        }
+        if !hit {
+            return None;
+        }
+        current.or_else(|| Some(storage_path.to_string()))
     }
 
     /// 在其它已登记应用策略的映射里解析跨应用只读别名目标。
