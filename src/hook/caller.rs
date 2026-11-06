@@ -870,17 +870,7 @@ fn resolve_native_identity_by_pid(pid: i32) -> String {
         cmdline.truncate(pos);
     }
 
-    let native = normalize_caller_package_text(&cmdline);
-    if native.is_empty() || native.contains('.') {
-        return native;
-    }
-    // native 进程名（`sh`、`mkfs`、下载器 helper）不是包名，规则必然查不到，写入会被
-    // 当成「未配置应用」放行到真实存储。只有 uid 唯一对应一个包时才换算成包名——
-    // 那是 uid 在权限模型上的客观归属；多包 uid 保持原名，宁可留未知也不猜错源头。
-    crate::daemon_identity_query::query_process_identity(pid, -1)
-        .map(|(package, _)| package)
-        .filter(|package| package.contains('.'))
-        .unwrap_or(native)
+    normalize_caller_package_text(&cmdline)
 }
 
 fn resolve_caller_package_by_uid(caller_uid: i32, hub: &InterceptHub) -> String {

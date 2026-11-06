@@ -23,8 +23,6 @@ use crate::platform::paths;
 /// 询问包前缀：`Q\t<pid>\t<uid>`。
 pub(crate) const QUERY_PREFIX: &str = "Q\t";
 
-/// 按 uid 询问「唯一对应哪个包」：`U\t<uid>`。
-pub(crate) const UID_QUERY_PREFIX: &str = "U\t";
 /// 回包前缀：`R\t<pid>\t<uid>\t<包名或空>\t<证据>`。
 pub(crate) const REPLY_PREFIX: &str = "R\t";
 /// 与 daemon 共享的抽象套接字名（日志通道）。
@@ -138,7 +136,10 @@ pub(crate) fn query_process_identity(pid: i32, uid: i32) -> Option<(String, i32)
     }
     let now_ms = paths::monotonic_ms();
     let mut guard = client().lock().unwrap_or_else(|err| err.into_inner());
-    if let Some(cached) = guard.cached(pid, now_ms) {
+    // 缓存按 pid 记，命中时还要核对 uid：5 秒窗口内 pid 复用给了别的 uid，旧答案不能用。
+    if let Some(cached) = guard.cached(pid, now_ms)
+        && cached.as_ref().is_none_or(|(_, cached_uid)| uid < 0 || *cached_uid == uid)
+    {
         return cached;
     }
     let value = guard.round_trip(pid, uid);
@@ -191,44 +192,6 @@ impl QueryClient {
         parse_reply(text, pid, uid)
     }
 
-    fn uid_round_trip(&mut self, uid: i32) -> Option<String> {
-        if !self.ensure_ready() {
-            return None;
-        }
-        let (daemon_addr, daemon_len) = abstract_addr(DAEMON_SOCKET_NAME)?;
-        let payload = CString::new(format!("{UID_QUERY_PREFIX}{uid}")).ok()?;
-        let bytes = payload.as_bytes();
-        // SAFETY: payload 在调用期间有效，daemon_addr 由抽象命名空间地址构造。
-        let sent = unsafe {
-            libc::sendto(
-                self.fd,
-                bytes.as_ptr() as *const _,
-                bytes.len(),
-                0,
-                &daemon_addr as *const _ as *const libc::sockaddr,
-                daemon_len,
-            )
-        };
-        if sent < 0 {
-            // SAFETY: fd 由本结构体独占持有。
-            unsafe { libc::close(self.fd) };
-            self.fd = -1;
-            self.reply_addr = None;
-            return None;
-        }
-        if !self.wait_reply() {
-            return None;
-        }
-        let mut buffer = [0u8; 512];
-        // SAFETY: buffer 有 buffer.len() 字节可写，fd 由本结构体持有。
-        let size = unsafe { libc::recv(self.fd, buffer.as_mut_ptr() as *mut _, buffer.len(), 0) };
-        if size <= 0 {
-            return None;
-        }
-        let text = std::str::from_utf8(&buffer[..size as usize]).ok()?;
-        parse_uid_reply(text, uid)
-    }
-
     fn wait_reply(&self) -> bool {
         let mut poll_fd = libc::pollfd {
             fd: self.fd,
@@ -239,33 +202,6 @@ impl QueryClient {
         let ready = unsafe { libc::poll(&mut poll_fd, 1, QUERY_TIMEOUT_MS) };
         ready > 0 && (poll_fd.revents & libc::POLLIN) != 0
     }
-}
-
-/// 询问 daemon：这个 uid 在系统里唯一对应哪个包。
-///
-/// 只回答客观事实：`packages.list` 里该 uid 只有一个包才有答案，多包（真机 uid 1000
-/// 有 53 个包）返回 `None`。用途是把 `sh`、`android.process.media` 这类 native 进程名
-/// 换算成包，从而套用该应用的规则——这不是按规则反推源头，而是 uid 在权限模型上的
-/// 归属本身。
-pub(crate) fn query_unique_package_for_uid(uid: i32) -> Option<String> {
-    if uid < 0 {
-        return None;
-    }
-    let mut guard = client().lock().unwrap_or_else(|err| err.into_inner());
-    guard.uid_round_trip(uid)
-}
-
-/// 解析 uid 询问的回包：`R\t0\t<uid>\t<包名>\t<证据>`。
-fn parse_uid_reply(text: &str, uid: i32) -> Option<String> {
-    let body = text.strip_prefix(REPLY_PREFIX)?;
-    let mut fields = body.split('\t');
-    let _pid = fields.next()?;
-    let reply_uid = fields.next()?.trim().parse::<i32>().ok()?;
-    let package = fields.next().unwrap_or("").trim();
-    if reply_uid != uid || package.is_empty() || !package.contains('.') {
-        return None;
-    }
-    Some(package.to_string())
 }
 
 /// 解析回包：`R\t<pid>\t<uid>\t<身份>\t<证据>`。
@@ -286,11 +222,6 @@ fn parse_reply(text: &str, pid: i32, uid: i32) -> Option<(String, i32)> {
 /// 只在 daemon（root）里执行，能读到任意进程的 `/proc`，这正是决策进程自己做不到
 /// 的部分（MediaProvider 域读 platform 应用的 `/proc/<pid>/cmdline` 被 SELinux 拒绝）。
 pub(crate) fn answer_query(packet: &str) -> Option<String> {
-    if let Some(body) = packet.strip_prefix(UID_QUERY_PREFIX) {
-        let uid = body.trim().parse::<i32>().ok()?;
-        let package = unique_package_for_uid(uid)?;
-        return Some(format!("{REPLY_PREFIX}0\t{uid}\t{package}\tuid_unique_package"));
-    }
     let body = packet.strip_prefix(QUERY_PREFIX)?;
     let mut fields = body.split('\t');
     let pid = fields.next()?.trim().parse::<i32>().ok()?;

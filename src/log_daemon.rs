@@ -213,9 +213,7 @@ fn run(fd: i32, mut state: LogState) {
             };
             // 身份询问包：就地问一次 /proc 并回包给发送方。必须在 state.handle 之前
             // 分流——它不带日志语义，混进日志会污染记录并触发无谓的限流计数。
-            if packet.starts_with(crate::daemon_identity_query::QUERY_PREFIX)
-                || packet.starts_with(crate::daemon_identity_query::UID_QUERY_PREFIX)
-            {
+            if packet.starts_with(crate::daemon_identity_query::QUERY_PREFIX) {
                 reply_identity_query(fd, packet, sender_addr.as_ref());
                 continue;
             }
@@ -225,9 +223,6 @@ fn run(fd: i32, mut state: LogState) {
     }
 }
 
-/// 接收一条 datagram，同时提取 SCM_CREDENTIALS 中的发送方 UID。
-/// 返回 (接收字节数, 发送方 uid)；uid 仅在内核附加了合法 ucred 时为 Some。
-/// `flags` 直接传给 recvmsg；排空循环使用 MSG_DONTWAIT 避免在阻塞 socket 上卡死。
 /// 回答一条身份询问包，回包给发送方地址。
 ///
 /// 回包失败只影响那一次决策的身份解析精度（调用方按未解析回退），因此不重试、不记录
@@ -259,8 +254,9 @@ fn reply_identity_query(
 
 /// 接收一条 datagram：返回 (字节数, 发送方 uid, 发送方地址)。
 ///
-/// 发送方地址用于「身份询问」的回包：日志包只是单向 sink，而询问包需要就地答复，
-/// 因此这里一并把来源地址带出来。
+/// 发送方 uid 取自 SCM_CREDENTIALS，仅在内核附加了合法 ucred 时为 Some。发送方地址用于
+/// 「身份询问」的回包：日志包只是单向 sink，而询问包需要就地答复。`flags` 直接传给
+/// recvmsg；排空循环使用 MSG_DONTWAIT 避免在阻塞 socket 上卡死。
 type ReceivedDatagram = (isize, Option<u32>, Option<(libc::sockaddr_un, libc::socklen_t)>);
 
 fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> ReceivedDatagram {
