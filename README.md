@@ -583,11 +583,15 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 
 设备侧回归测试 APP 已集成在 `tests/storage-redirect-test/`，场景脚本位于 `.github/tests/`。公开仓库的 PR、CI Build 和 Release workflow 会运行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块和测试 APK，再以 Android 版本为矩阵维度（Android 13/14/15/16/17 x86_64 模拟器）各自执行完整 scenario 1-40，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），单个 Android 版本内失败快速停止。Android 17（API 37.0）并入同一矩阵，不再单独成 job，仍由 `Test-flow required gate` 校验。全部场景通过后才会发布 CI 资产、更新 `update.json` 或创建正式 Release。本地需要预检或复现时，可运行 `scripts/verify-test-flow.sh`，Windows PowerShell 环境可运行 `scripts/verify-test-flow.ps1`。详见 [设备侧测试说明](docs/device-testing.md)。
 
+## 👥 贡献者
+
+<!-- quality-allow(chinese-language): 贡献者头像卡片整行为 HTML 结构标签，无自然语言内容。新增贡献者时在 tr 内复制一个 td 块并替换链接、头像与用户名即可。 -->
+<table><tr><td align="center"><a href="https://github.com/PuerNya"><img src="https://github.com/PuerNya.png?size=100" width="100px;" alt="PuerNya"/><br /><sub><b>PuerNya</b></sub></a></td></tr></table>
+
 ## 🙏 致谢
 
 - [Storage-redirection-X-Public](https://github.com/Kindness-Kismet/Storage-redirection-X-Public)：本项目的上游来源
-- [srx_hook](https://github.com/PuerNya/srx_hook)（fork，上游为 [Kindness-Kismet/srx_hook](https://github.com/Kindness-Kismet/srx_hook)）与 [srx_inline_hook](https://github.com/Kindness-Kismet/srx_inline_hook)：PLT hook 与 inline hook 引擎
-- [PuerNya](https://github.com/PuerNya)：贡献统一真实路径解析、文件操作 hook 补齐与 Hyos runtime 接入
+- [srx_hook](https://github.com/Kindness-Kismet/srx_hook) 与 [srx_inline_hook](https://github.com/Kindness-Kismet/srx_inline_hook)：PLT hook 与 inline hook 引擎
 - [Magisk](https://github.com/topjohnwu/Magisk) / [KernelSU](https://github.com/tiann/KernelSU)：Root 与模块加载环境
 - [Zygisk](https://github.com/topjohnwu/Magisk) 与 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk 注入环境
 - [LSPlant](https://github.com/LSPosed/LSPlant)：Java 层 hook 框架
