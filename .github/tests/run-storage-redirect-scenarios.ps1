@@ -149,6 +149,13 @@ $SrtDownloadUrl = if ($env:SRT_DOWNLOAD_URL) { $env:SRT_DOWNLOAD_URL } else { ""
 # 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。
 $UidAttribRel = "Download/SrtUidAttrib"
 $UidAttribProbeRel = "Download/SrtUidAttrib/srt_uid_probe_dir"
+# 场景 40 第三段：系统 uid（shell 2000）自身配置沙盒、真实目标缺失、经 MediaProvider
+# 建目录，请求路径零穿透（与 .sh 同名夹具一致）。
+$ShellPackage = "com.android.shell"
+$ShellConfig = "/data/adb/modules/storage.redirect.x/config/apps/$ShellPackage.json"
+$ShellSandboxRel = "Download/SrtShellSandbox"
+$ShellSandboxRealDir = "$BackendRoot/$ShellSandboxRel"
+$ShellSandboxBackendDir = "$BackendRoot/Android/data/$ShellPackage/sdcard/$ShellSandboxRel"
 $RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
 $BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
 $PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
@@ -2214,7 +2221,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
-        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app" }
+        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
     }
 }
 
@@ -4372,7 +4379,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider own sandboxed_paths native write into sandbox" }
         39 { "download provider delegated write lands on requester mapping target" }
-        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app" }
+        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
     }
 }
 
@@ -5277,6 +5284,51 @@ function Invoke-SystemUidAttributionScenario {
     $true
 }
 
+function Invoke-SystemUidSandboxMissingTargetScenario {
+    # 与 .sh 的 run_system_uid_sandbox_missing_target_scenario 一致：shell（uid 2000）
+    # 配置沙盒、真实与沙盒目标都预先删除，以 immediate / aged 两档交错写入，每轮都要求
+    # 真实目录零穿透、沙盒目录建出。mkdir 返回码不作判据（AOSP pf_mkdir 的 lstat 可能 ENOENT）。
+    param([int]$Scenario)
+    $shellConfigBackup = Invoke-Su "test -f '$ShellConfig' && base64 '$ShellConfig' 2>/dev/null | tr -d '[:space:]'" | Select-Object -Last 1
+    $json = "{`"users`":{`"0`":{`"enabled`":true,`"mapping_mode_only`":true,`"sandboxed_paths`":[`"$ShellSandboxRel`"]}}}"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+    Invoke-Su "printf '%s' '$encoded' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
+    Start-Sleep -Seconds 3
+    $ok = $true
+    $round = 0
+    foreach ($delay in @(4, 0, 4, 0)) {
+        $round++
+        Invoke-Su "rm -rf '$ShellSandboxRealDir' '$ShellSandboxBackendDir'" | Out-Null
+        Start-Sleep -Seconds 1
+        if ($delay -gt 0) {
+            & adb shell "sleep $delay; exec mkdir '/storage/emulated/0/$ShellSandboxRel'" 2>&1 | Out-Null
+        } else {
+            & adb shell "exec mkdir '/storage/emulated/0/$ShellSandboxRel'" 2>&1 | Out-Null
+        }
+        Start-Sleep -Seconds 2
+        $real = (Invoke-Su "test -d '$ShellSandboxRealDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+        $sandbox = (Invoke-Su "test -d '$ShellSandboxBackendDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+        Write-Host "  - scenario-$Scenario/system-uid-sandbox: round=$round delay=${delay}s real=$real sandbox=$sandbox"
+        if ($real -or -not $sandbox) {
+            if ($real) {
+                Write-Host "  - scenario-$Scenario/system-uid-sandbox: request path leaked to real storage"
+            } else {
+                Write-Host "  - scenario-$Scenario/system-uid-sandbox: sandbox directory not created"
+            }
+            Invoke-Su "grep -aE 'SrtShellSandbox' '$LogPath' 2>/dev/null | grep -av 'realpath mapped' | tail -6" | Write-Host
+            $ok = $false
+            break
+        }
+    }
+    Invoke-Su "rm -rf '$ShellSandboxRealDir' '$ShellSandboxBackendDir'" | Out-Null
+    if ($shellConfigBackup -and $shellConfigBackup -notmatch '^exit=') {
+        Invoke-Su "printf '%s' '$shellConfigBackup' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
+    } else {
+        Invoke-Su "rm -f '$ShellConfig'" | Out-Null
+    }
+    $ok
+}
+
 function Invoke-FuseDaemonAllowWildcardScenario {
     param([int]$Scenario)
     $plainPath = "$FusePlainRoot/$TestFile"
@@ -5534,7 +5586,7 @@ function Invoke-Scenario {
         37 { Invoke-NestedMappingChainScenario $Scenario }
         38 { Invoke-ProviderSandboxScenario $Scenario }
         39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
-        40 { Invoke-SystemUidAttributionScenario $Scenario }
+        40 { (Invoke-SystemUidAttributionScenario $Scenario) -and (Invoke-SystemUidSandboxMissingTargetScenario $Scenario) }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

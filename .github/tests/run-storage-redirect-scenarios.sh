@@ -173,6 +173,14 @@ SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-}"
 # 该类请求只能记录 unknown 或误归组内成员）。
 UID_ATTRIB_REL="Download/SrtUidAttrib"
 UID_ATTRIB_PROBE_REL="Download/SrtUidAttrib/srt_uid_probe_dir"
+# 场景 40 第三段：系统 uid（shell 2000）自身配置沙盒、真实目标缺失、经 MediaProvider
+# 建目录。请求路径必须零穿透，沙盒里必须建出来（2026-11-05 issue #2：sau 的
+# Download/update 在开机后又被建到真实存储）。
+SHELL_PACKAGE="com.android.shell"
+SHELL_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${SHELL_PACKAGE}.json"
+SHELL_SANDBOX_REL="Download/SrtShellSandbox"
+SHELL_SANDBOX_REAL_DIR="${BACKEND_ROOT}/${SHELL_SANDBOX_REL}"
+SHELL_SANDBOX_BACKEND_DIR="${BACKEND_ROOT}/Android/data/${SHELL_PACKAGE}/sdcard/${SHELL_SANDBOX_REL}"
 RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
 BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
 PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
@@ -634,7 +642,7 @@ scenario_title() {
     37) echo "父映射结果继续命中子映射" ;;
     38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
-    40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用" ;;
+    40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
   esac
 }
 
@@ -2623,6 +2631,74 @@ run_system_uid_attribution_scenario() {
   adb_su "grep 'SrtUidAttrib' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | tail -2" || true
   adb_su "rm -rf '${BACKEND_ROOT}/${UID_ATTRIB_REL}'" >/dev/null
   return 0
+}
+
+run_system_uid_sandbox_missing_target_scenario() {
+  local scenario="$1"
+  # 触发链：shell（uid 2000，单包 uid）配置 sandboxed_paths，真实目标与沙盒目标都预先
+  # 删除 → `adb shell` 以 uid 2000 在公共路径 mkdir → MediaProvider 代写 → 本模块按
+  # FUSE 请求头 pid 解析发起者 → 命中 shell 的沙盒规则 → 落到 Android/data/<shell>/sdcard。
+  # 两档写入形态缺一不可，且顺序打乱（「第几轮」不能与「形态」共线）：
+  #   immediate：进程刚起就写，尚未进 daemon pid 表 → 走同步身份询问。
+  #   aged：进程先存活 4 秒（已进 pid 表，表里是 native 名 `mkdir`/`sh`）再写 →
+  #         必须按 uid 唯一归属换算成包名，否则规则查不到、写入放行到真实存储。
+  #   2026-11-06 真机：修复前 immediate 8/8 泄漏、aged 全部泄漏。
+  # 判定：每一轮真实目录都不存在（零穿透），沙盒目录存在。mkdir 自身的返回码不作判据：
+  # AOSP pf_mkdir 下层成功后 make_node_entry 会对原路径 lstat，应用侧可能拿到 ENOENT。
+  backup_shell_config
+  adb_write_file "$SHELL_CONFIG" "{\"users\":{\"0\":{\"enabled\":true,\"mapping_mode_only\":true,\"sandboxed_paths\":[\"${SHELL_SANDBOX_REL}\"]}}}" >/dev/null
+  adb_su "chmod 644 '$SHELL_CONFIG'" >/dev/null 2>&1 || true
+  sleep 3
+  local status=0
+  local round=0
+  local delay
+  for delay in 4 0 4 0; do
+    round=$((round + 1))
+    adb_su "rm -rf '${SHELL_SANDBOX_REAL_DIR}' '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null
+    sleep 1
+    if [ "$delay" -gt 0 ]; then
+      adb shell "sleep ${delay}; exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || true
+    else
+      adb shell "exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || true
+    fi
+    sleep 2
+    local real=0 sandbox=0
+    adb_su "test -d '${SHELL_SANDBOX_REAL_DIR}'" && real=1
+    adb_su "test -d '${SHELL_SANDBOX_BACKEND_DIR}'" && sandbox=1
+    echo "step 5/7 内: 系统 uid 沙盒目标缺失 round=${round} delay=${delay}s real=${real} sandbox=${sandbox}"
+    if [ "$real" -ne 0 ]; then
+      echo "system uid sandbox: request path leaked to real storage (round=${round} delay=${delay}s)" >&2
+      adb_su "grep -aE 'SrtShellSandbox' '$LOG_PATH' 2>/dev/null | grep -av 'realpath mapped' | tail -6" >&2 || true
+      status=1
+      break
+    fi
+    if [ "$sandbox" -ne 1 ]; then
+      echo "system uid sandbox: sandbox directory not created (round=${round} delay=${delay}s)" >&2
+      adb_su "grep -aE 'SrtShellSandbox' '$LOG_PATH' 2>/dev/null | grep -av 'realpath mapped' | tail -6" >&2 || true
+      status=1
+      break
+    fi
+  done
+  adb_su "rm -rf '${SHELL_SANDBOX_REAL_DIR}' '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null 2>&1 || true
+  restore_shell_config
+  return "$status"
+}
+
+backup_shell_config() {
+  # 真机上 shell 可能本就有用户配置，场景结束必须原样还原（同场景 38 的教训）。
+  if adb_su "test -f '$SHELL_CONFIG'" >/dev/null 2>&1; then
+    original_shell_config_b64="$(adb_su "base64 '$SHELL_CONFIG' 2>/dev/null | tr -d '[:space:]'")"
+  else
+    original_shell_config_b64=""
+  fi
+}
+
+restore_shell_config() {
+  if [ -n "${original_shell_config_b64:-}" ]; then
+    adb_root "printf '%s' '$original_shell_config_b64' | base64 -d > '$SHELL_CONFIG.tmp.$$'; mv -f '$SHELL_CONFIG.tmp.$$' '$SHELL_CONFIG'; chmod 644 '$SHELL_CONFIG'" >/dev/null 2>&1 || true
+  else
+    adb_su "rm -f '$SHELL_CONFIG'" >/dev/null 2>&1 || true
+  fi
 }
 
 run_app_caller_media_provider_attribution_scenario() {
@@ -4632,7 +4708,9 @@ run_scenario() {
       echo "step 5/7: 验证系统 uid 的 FUSE 写入按发起服务归因"
       run_system_uid_attribution_scenario "$scenario" &&
         echo "step 5/7 内: 验证应用发起经 MediaProvider 中转创建的源头归因" &&
-        run_app_caller_media_provider_attribution_scenario "$scenario"
+        run_app_caller_media_provider_attribution_scenario "$scenario" &&
+        echo "step 5/7 内: 验证系统 uid 沙盒目标缺失时请求路径零穿透" &&
+        run_system_uid_sandbox_missing_target_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -4833,6 +4911,7 @@ export READ_ONLY_OWNER_CONFIG
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_PROBE_FILE PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR PROVIDER_BACKEND_FILE PROVIDER_REAL_FILE
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL
 export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
+export SHELL_PACKAGE SHELL_CONFIG SHELL_SANDBOX_REL SHELL_SANDBOX_REAL_DIR SHELL_SANDBOX_BACKEND_DIR
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
 export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND_OWN_PRIVATE_DATA_ROOT BACKEND_OWN_PRIVATE_MEDIA_ROOT BACKEND_OWN_PRIVATE_OBB_ROOT SANDBOX_OWN_PRIVATE_DATA_ROOT SANDBOX_OWN_PRIVATE_MEDIA_ROOT SANDBOX_OWN_PRIVATE_OBB_ROOT ANY_RELATIVE_REQUEST ANY_ABSOLUTE_USER_REQUEST ANY_USER_ID_REQUEST ANY_LEGACY_DATA_REQUEST ANY_PUBLIC_TO_PRIVATE_REQUEST ANY_RELATIVE_PUBLIC_TARGET ANY_ABSOLUTE_PUBLIC_TARGET ANY_USER_PRIVATE_TARGET ANY_LEGACY_PRIVATE_TARGET ANY_MEDIA_REQUEST ANY_MEDIA_TARGET ANY_MEDIA_FILE
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
@@ -4851,7 +4930,7 @@ export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_q
 export -f run_nested_mapping_chain_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
-export -f run_system_uid_attribution_scenario
+export -f run_system_uid_attribution_scenario run_system_uid_sandbox_missing_target_scenario backup_shell_config restore_shell_config
 export -f run_app_caller_media_provider_attribution_scenario
 # 视图失效在 clean_targets / 夹具预置里被 `bash -c` 子 shell 调用，必须导出。
 export -f invalidate_visible_view invalidate_backend_fixture_view
