@@ -741,6 +741,28 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         policy = read("assets/zygisk_module/sepolicy.rule")
         self.assertIn("allow magisk mediaprovider unix_dgram_socket sendto", policy)
 
+    def test_process_group_lineage_is_strict(self) -> None:
+        """native 子进程按内核进程组追溯发起应用，且只采信严格条件。
+
+        应用 exec 出来的 helper 继承 `uid_<uid>/pid_<发起应用>` 进程组（父进程退出、被
+        init 收养也不变），所以组首就是发起应用——多包 uid（1000 有 53 个包）也能精准
+        归因，issue #2 的 sau 即属此类。守卫锁定三条：uid 段必须与进程 uid 相同；组首
+        必须是本 uid 下真实存在的安装包；决策（daemon 回包）、pid 表与记录三处共用。
+        """
+        identity = read("src/platform/proc_identity.rs")
+        parse_fn = extract_fn(identity, "parse_process_group_leader")
+        self.assertIn("group_uid != uid", parse_fn)
+        lineage_fn = extract_fn(identity, "resolve_launching_app_by_process_group")
+        self.assertIn("leader == pid", lineage_fn)
+        self.assertIn("leader_uid != uid", lineage_fn)
+        self.assertIn("get_uid_for_package(&leader_name) != uid", lineage_fn)
+        for path in ("src/daemon_identity_query.rs", "src/daemon.rs", "src/log_daemon.rs"):
+            self.assertIn(
+                "resolve_launching_app_by_process_group",
+                read(path),
+                f"{path} 必须共用进程组追溯，否则决策、pid 表与记录会各说一套",
+            )
+
     def test_pid_table_native_name_is_not_used_as_package(self) -> None:
         """pid 表命中 native 名时必须换算，不能直接当包名用。
 

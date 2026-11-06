@@ -248,10 +248,17 @@ fn resolve_identity(pid: i32, requested_uid: Option<i32>) -> Option<((String, i3
     {
         return None;
     }
-    // cmdline 不是包名形态（native helper、`sh`、`android.process.media` 之类）时，
-    // 按系统权威映射 `packages.list` 收敛：该 uid 只对应一个安装包就报包名，
-    // 多包（真机 uid 1000 有 53 个包）保持 native 名——猜错比留空更糟。
+    // cmdline 不是包名形态（native helper、`sh`、`android.process.media` 之类）时按两条
+    // 客观事实收敛，都不成立就保留 native 名——猜错比留空更糟：
+    // 1. 内核进程组：应用派生的子进程继承 `uid_<uid>/pid_<发起应用>` 组，组首就是发起
+    //    应用。这条对多包 uid 同样成立（issue #2 的 sau 属 uid 1000，53 个包）。
+    // 2. `packages.list`：该 uid 只对应一个安装包。
     if !name.contains('.') {
+        if let Some(package) =
+            crate::platform::proc_identity::resolve_launching_app_by_process_group(pid, proc_uid)
+        {
+            return Some(((package, proc_uid), "process_group"));
+        }
         if let Some(package) = unique_package_for_uid(proc_uid) {
             return Some(((package, proc_uid), "uid_unique_package"));
         }

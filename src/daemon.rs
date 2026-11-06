@@ -2031,7 +2031,17 @@ fn read_scanned_identity(pid: i32) -> (Option<(i32, String)>, bool) {
         Ok(cmdline) if !cmdline.is_empty() => {}
         _ => return (None, false),
     }
-    let identity = read_proc_identity(pid);
+    let identity = read_proc_identity(pid).map(|(uid, name)| {
+        // native 进程（应用 exec 出来的 shell / helper）的命令名不是包名：按内核进程组
+        // 换算成发起应用写进表里。决策侧读表命中时就直接拿到包名，不必再走同步询问；
+        // 追溯不到（组首已退出、非应用派生）保留命令名，不猜。
+        if name.contains('.') {
+            return (uid, name);
+        }
+        let launched_by =
+            crate::platform::proc_identity::resolve_launching_app_by_process_group(pid, uid);
+        (uid, launched_by.unwrap_or(name))
+    });
     let volatile = identity
         .as_ref()
         .is_none_or(|(_, name)| is_pre_specialized_process_name(name));

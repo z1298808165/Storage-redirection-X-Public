@@ -788,9 +788,21 @@ fn enrich_monitor_record_identity(message: &str) -> Option<String> {
         if cross_thread && (0..SYSTEM_APP_UID_START).contains(&caller_uid) {
             (system_uid_package(caller_uid)?, "caller_uid", "medium")
         } else if caller_pid > 0 {
-            let package = crate::platform::proc_identity::resolve_package_from_pid(caller_pid)?;
             let reliability = if cross_thread { "medium" } else { "high" };
-            (package, "caller_pid", reliability)
+            if let Some(package) =
+                crate::platform::proc_identity::resolve_package_from_pid(caller_pid)
+            {
+                (package, "caller_pid", reliability)
+            } else {
+                // 命令行里没有包名（应用 exec 的 shell / helper）：按内核进程组追溯发起
+                // 应用。记录与决策共用这一条证据，用户在记录里看到的源头就是规则会匹配的源头。
+                let uid = crate::platform::proc_identity::read_proc_uid(caller_pid)
+                    .filter(|uid| caller_uid < 0 || *uid == caller_uid)?;
+                let package = crate::platform::proc_identity::resolve_launching_app_by_process_group(
+                    caller_pid, uid,
+                )?;
+                (package, "process_group", reliability)
+            }
         } else {
             return None;
         };

@@ -13,6 +13,11 @@
 pub fn read_proc_identity(pid: i32) -> Option<(i32, String)> {
     let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
     let package = resolve_identity_package(&cmdline)?;
+    Some((read_proc_uid(pid)?, package))
+}
+
+/// `/proc/<pid>/status` 里的实际 uid，读不到返回 None。
+pub fn read_proc_uid(pid: i32) -> Option<i32> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     for line in status.lines() {
         let Some(rest) = line.strip_prefix("Uid:") else {
@@ -23,10 +28,7 @@ pub fn read_proc_identity(pid: i32) -> Option<(i32, String)> {
             .next()
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(-1);
-        if uid < 0 {
-            return None;
-        }
-        return Some((uid, package));
+        return (uid >= 0).then_some(uid);
     }
     None
 }
@@ -69,6 +71,54 @@ fn resolve_identity_package(cmdline: &str) -> Option<String> {
         return None;
     }
     Some(value.to_string())
+}
+
+/// 按内核进程组追溯发起应用：`(包名, uid)`，追溯不到返回 None。
+///
+/// 应用在 zygote 派生时，system_server 会为它建 `uid_<uid>/pid_<pid>` 进程组；该应用
+/// 之后 fork/exec 出的任何子进程（`Runtime.exec` 的 shell、下载器 helper）都**继承**
+/// 这个组，父进程先退出、子进程被 init 收养也不变（真机已验证：PPid=1 的 sleep 仍在
+/// `uid_1000/pid_19452`）。所以组目录名里的 pid 就是发起应用本身——这是内核记录的
+/// 客观谱系，不是按 uid 或按规则推测。
+///
+/// 只在两个条件同时满足时才采信：
+/// - 组首 pid 不是本进程自己（否则就是 cmdline 本身，无需追溯）；
+/// - 组首的 cmdline 是包名形态、uid 与本进程一致，且能在 uid 表里命中真实包。
+///
+/// 组首已退出、cgroup 不是这种布局（旧内核 / OEM 改过路径）时一律返回 None，调用方
+/// 按原口径保留 native 名，不猜。
+pub fn resolve_launching_app_by_process_group(pid: i32, uid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let leader = parse_process_group_leader(&cgroup, uid)?;
+    if leader == pid {
+        return None;
+    }
+    let (leader_uid, leader_name) = read_proc_identity(leader)?;
+    if leader_uid != uid || !is_package_shape(&leader_name) {
+        return None;
+    }
+    if crate::redirect::policy::get_uid_for_package(&leader_name) != uid {
+        return None;
+    }
+    Some(leader_name)
+}
+
+/// 从 `/proc/<pid>/cgroup` 内容里取 cgroup v2 层级的进程组首 pid。
+///
+/// 只认 `0::/<任意>/uid_<uid>/pid_<pid>` 形态，且 uid 段必须与给定 uid 相同：uid 不符
+/// 说明这不是本 uid 的应用派生出来的进程（例如被 root 工具移进别的组），不能采信。
+fn parse_process_group_leader(cgroup: &str, uid: i32) -> Option<i32> {
+    let path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
+    let mut segments = path.trim().rsplit('/');
+    let leader = segments.next()?.strip_prefix("pid_")?.parse::<i32>().ok()?;
+    let group_uid = segments.next()?.strip_prefix("uid_")?.parse::<i32>().ok()?;
+    if group_uid != uid || leader <= 0 {
+        return None;
+    }
+    Some(leader)
 }
 
 /// 是否具备包名形态（含点、不以点开头/结尾、无连续点）。
