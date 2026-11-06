@@ -136,6 +136,8 @@ impl RuntimeFlow {
         crate::hook::refresh_runtime_config_from_settings();
         let hook_ms = monotonic_ms().saturating_sub(hook_started_ms);
 
+        let zn_available = crate::zn_api::available();
+        log::info!("zygisk next api available={zn_available}");
         let anti_started_ms = monotonic_ms();
         // Hook 安装后命名匿名可执行区域，覆盖模块代码和 hook trampoline
         let named_count = if is_plt_hook_active && !self.is_system_writer_boot_lite {

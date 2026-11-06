@@ -25,6 +25,10 @@ $allowed = @{
         "full_size_shm_size_is_not_poisoned",
         "partial_shm_size_is_poisoned"
     )
+    "src/hook/hyos.rs" = @(
+        "prepare_pre_fork_is_idempotent",
+        "empty_package_is_rejected_before_hub_init"
+    )
     "src/hook/ops/mutation/meta.rs" = @(
         "futimesat_fallback_converts_timeval"
     )
@@ -42,6 +46,14 @@ $allowed = @{
         "duplicate_slashes_are_collapsed",
         "relative_dirfd_resolves_dot_segments",
         "magic_fd_link_resolves_to_target"
+    )
+    "src/zn_api.rs" = @(
+        "hyos_identity_validation",
+        "hyos_struct_layout_matches_api",
+        "hyos_registration_accepts_only_matching_runtime",
+        "null_specialize_args_is_ignored",
+        "missing_get_runtime_is_rejected",
+        "cstr_to_string_handles_null_and_text"
     )
     "src/lifecycle/companion_mount.rs" = @(
         "collapsed_sibling_barriers_are_shadowed_and_served",
