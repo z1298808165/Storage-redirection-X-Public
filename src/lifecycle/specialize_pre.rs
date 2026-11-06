@@ -605,13 +605,10 @@ impl RuntimeFlow {
             return;
         }
 
-        crate::mount_intent::mark_planned(
-            &self.package_name,
-            self.app_pid,
-            self.app_uid,
-            storage_backend_mode,
-            config.config_version(),
-        );
+        // 这里不再写 mount intent。应用进程（zygote 域、uid 10xxx）对模块目录没有写
+        // 权限，`mark_planned` 必然失败——真机一轮开机里它留下 71 条
+        // `mount intent write failed`，而意图状态本身并没有写进去。意图从 daemon /
+        // companion 收到请求时写 `applying` 开始记录，结束后写 mounted / failed。
 
         // 预挂载路径与兜底路径的发送动作完全一致，只有额外日志和退出原因不同
         let is_pre_mount_request = !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge;

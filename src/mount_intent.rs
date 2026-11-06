@@ -5,16 +5,9 @@ use std::path::PathBuf;
 
 /// 挂载事实文件只在成功后生成；意图文件用于记录请求尚未执行或正在执行的阶段。
 /// 两者分离后，管理端可以观察到挂载前状态，也不会把失败请求误当成可卸载挂载点。
-pub fn mark_planned(
-    package_name: &str,
-    pid: i32,
-    uid: i32,
-    backend: StorageBackendMode,
-    config_version: u64,
-) {
-    write_state(package_name, pid, uid, backend, config_version, "planned");
-}
-
+///
+/// 应用进程不写意图文件：它在 zygote 域对模块目录没有写权限，写必然 EACCES，只会留下
+/// 噪音日志。意图从 daemon / companion 收到请求时的 `applying` 开始记录。
 pub fn mark_state(
     package_name: &str,
     pid: i32,
