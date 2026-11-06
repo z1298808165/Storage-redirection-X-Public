@@ -1269,35 +1269,40 @@ impl RedirectPolicy {
         let mut hit = false;
         for _ in 0..MAX_MAPPING_HOPS {
             let path = current.as_deref().unwrap_or(storage_path);
-            let mut candidate: Option<String> = None;
-            let mut self_nested = false;
+            let mut candidate: Option<(String, bool)> = None;
             for mapping in self.path_mappings.iter().rev() {
                 if !paths::matches(&mapping.request_path, path, true) {
                     continue;
                 }
-                // 目标落在自己的请求路径之内（自嵌套映射）时只能生效一次：bind 布局下这条
-                // 规则只会在可见路径上挂一层，后端路径不会再被自身重新映射。继续串联会让
-                // 每一跳都把目录名再叠一层，直到撞上迭代上限。
-                self_nested = mapping
-                    .final_path
-                    .trim_end_matches('/')
-                    .starts_with(mapping.request_path.trim_end_matches('/'));
-                candidate = Some(match paths::child_suffix(path, &mapping.request_path) {
+                // 目标落在自己请求路径的**子树**内（自嵌套映射）时只能生效一次：bind 布局
+                // 下这条规则只在可见路径挂一层，后端路径不会再被自身重新映射。
+                // 判据必须按路径分段比较，不能按字符串前缀——`Download/SrtPriority` 与
+                // `Download/SrtPriorityMapped` 仅共享前缀，并不是父子关系（场景 15 回归）。
+                let self_nested = paths::is_same_or_child(
+                    mapping.final_path.trim_end_matches('/'),
+                    mapping.request_path.trim_end_matches('/'),
+                );
+                let next = match paths::child_suffix(path, &mapping.request_path) {
                     Some(suffix) => {
                         format!("{}{}", mapping.final_path.trim_end_matches('/'), suffix)
                     }
                     None => mapping.final_path.clone(),
-                });
+                };
+                candidate = Some((next, self_nested));
                 break;
             }
-            let Some(next) = candidate else { break };
+            let Some((next, self_nested)) = candidate else {
+                break;
+            };
             hit = true;
-            // 指回自身（恒等映射）、自嵌套映射或双步振荡（A→B→A）：停在当前落点。
-            if next == path || self_nested || previous.as_deref() == Some(next.as_str()) {
-                break;
-            }
+            // 先落这一跳，再判断要不要继续：终止条件只决定「还有没有下一跳」，
+            // 不能把已经解析出的落点丢掉（否则等同于映射未命中，写到请求路径上）。
+            let stop = next == path || self_nested || previous.as_deref() == Some(next.as_str());
             previous = current;
             current = Some(next);
+            if stop {
+                break;
+            }
         }
         if !hit {
             return None;

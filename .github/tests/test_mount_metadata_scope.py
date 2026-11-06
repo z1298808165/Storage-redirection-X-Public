@@ -304,9 +304,13 @@ class MountMetadataScopeTest(unittest.TestCase):
         # 双步振荡与恒等映射必须提前收敛，否则手写的 A→B / B→A 环会让解析永不停止。
         self.assertIn("previous.as_deref() == Some(next.as_str())", body)
         self.assertIn("next == path", body)
-        # 自嵌套映射（目标落在自己的请求路径内）只能生效一次：bind 布局下它只挂一层，
-        # 连续串联会把目录名逐跳叠加。
-        self.assertIn("self_nested", body)
+        # 自嵌套映射（目标落在自己请求路径的子树内）只能生效一次：bind 布局下它只挂一层，
+        # 连续串联会把目录名逐跳叠加。判据必须按路径分段，不能按字符串前缀——`Download/X`
+        # 与 `Download/XMapped` 只共享前缀，用 starts_with 会把正常映射判成自嵌套并整跳丢失。
+        self.assertIn("paths::is_same_or_child", body)
+        self.assertNotIn("starts_with(mapping.request_path", body)
+        # 终止条件只决定「还有没有下一跳」：必须先落这一跳再判停，否则等同于映射未命中。
+        self.assertLess(body.index("previous = current;"), body.index("if stop {"))
         # 单跳实现的标志：命中第一条映射就直接 return。出现即说明链式语义被改回去了。
         self.assertNotIn("return Some(mapping.final_path.clone());", body)
 
