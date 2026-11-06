@@ -276,17 +276,23 @@ class MountMetadataScopeTest(unittest.TestCase):
 
     def test_fuse_mode_prepares_mapping_target_dirs(self) -> None:
         # bind 布局在挂载时由规划器顺带建好映射目标目录；FUSE 布局没有对应挂载动作，
-        # 必须在接入前由 daemon 以 root 预建，否则下载提供器等系统代写链路会判定目标
-        # 父目录缺失而放弃写入（CI 场景 39：Failed to create parent for …）。
-        daemon = read("src/daemon_mount.rs")
-        body = function_body(daemon, "fn prepare_mapping_target_dirs(request: &MountRequest)")
-        self.assertIn("path_mappings", body)
+        # 必须在接入前由特权进程预建，否则下载提供器等系统代写链路会判定目标父目录缺失
+        # 而放弃写入（CI 场景 39：Failed to create parent for …）。
+        planner = read("src/mount/planner.rs")
+        body = function_body(planner, "pub(crate) fn prepare_mapping_target_dirs(")
         self.assertIn("ensure_writable_mapped_directory", body)
-        # 必须在 fork 之前准备：子进程只允许 setns/mount/write，禁止堆分配与全局锁。
+        self.assertIn("final_path", body)
+        # 两条挂载路径都必须预建：daemon 执行自己那份挂载，companion 负责应用侧接入。
+        # 只补一边会让走另一边的平台继续失败（A14/A17 走 companion、A13/15/16 走 daemon）。
+        daemon = read("src/daemon_mount.rs")
+        self.assertIn("prepare_mapping_target_dirs", daemon)
+        # daemon 侧必须在 fork 之前准备：子进程只允许 setns/mount/write，禁止堆分配。
         self.assertLess(
             daemon.index("prepare_mapping_target_dirs(request);"),
             daemon.index("run_mount_in_forked_child(request);"),
         )
+        companion = read("src/lifecycle/companion_mount.rs")
+        self.assertIn("mount_mgr.prepare_mapping_target_dirs(", companion)
 
     def test_path_mapping_resolution_chains_to_fixpoint(self) -> None:
         # 场景 37 的契约「父映射结果继续命中子映射」：bind 布局下两层挂载天然串联，FUSE 只在

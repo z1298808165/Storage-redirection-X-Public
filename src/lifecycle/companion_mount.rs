@@ -1266,6 +1266,11 @@ fn handle_child_process(
         false,
     );
     mount_mgr.set_file_monitor_enabled(request.is_file_monitor_enabled);
+    // FUSE 布局没有映射挂载动作，映射目标目录必须在这里（伴生进程以 root 运行）就建好：
+    // 下载提供器等系统代写链路会先判定目标父目录是否存在，缺失即放弃写入，表现为
+    // `Failed to create parent for …`（CI 场景 39 在 A14/A17 走 companion 路径时的现场）。
+    // 与 daemon 侧同一实现，公共目录目标归 media_rw、已存在则不发任何元数据调用。
+    mount_mgr.prepare_mapping_target_dirs(&request.path_mappings, request.uid);
 
     let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
     // 残留屏障清扫（必须在挂载动作之前、setns 之后）：白名单用 barrier 集合（与

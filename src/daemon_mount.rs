@@ -666,12 +666,11 @@ fn refresh_mount_state_fingerprint(request: &MountRequest) -> bool {
 
 /// 以 daemon 身份（root）预建本次请求里每条路径映射的目标目录。
 ///
-/// 与 bind 布局的挂载规划器同一口径（`ensure_writable_mapped_directory`）：公共目录目标
-/// 归 media_rw、私有目标归应用 uid，已存在则一个元数据调用都不发。只处理共享存储内的
-/// 目标——沙盒与私有目录目标由各自的挂载/恢复链路负责，这里不越界创建。
+/// 口径与 companion 路径共用（`MountPlanner::prepare_mapping_target_dirs`）：公共目录目标
+/// 归 media_rw、私有目标归应用 uid，已存在则一个元数据调用都不发。
 ///
-/// 失败只记 debug：目录建不出来时策略仍照常生效，写请求会像以前一样报错，不能因为
-/// 「预建没成功」就把整次挂载判成失败。
+/// 两条挂载路径都必须做：daemon 负责自己执行的挂载，companion 负责应用侧接入——只补一边
+/// 会让走另一边的平台继续失败（CI 场景 39 在 A14/A17 走 companion、A13/15/16 走 daemon）。
 fn prepare_mapping_target_dirs(request: &MountRequest) {
     if request.path_mappings.is_empty() {
         return;
@@ -683,19 +682,7 @@ fn prepare_mapping_target_dirs(request: &MountRequest) {
         &request.redirect_target,
         false,
     );
-    for mapping in &request.path_mappings {
-        let target = mapping.final_path.trim_end_matches('/');
-        if target.is_empty() {
-            continue;
-        }
-        if !planner.ensure_writable_mapped_directory(target, request.uid) {
-            log::debug!(
-                "mapping target dir prepare failed pkg={} path={}",
-                request.package_name,
-                target
-            );
-        }
-    }
+    planner.prepare_mapping_target_dirs(&request.path_mappings, request.uid);
 }
 
 pub fn execute_mount_request(request: &MountRequest) -> bool {

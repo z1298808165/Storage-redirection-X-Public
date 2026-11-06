@@ -126,6 +126,34 @@ impl MountPlanner {
     }
 
     // 创建或修正映射目录的所有者，使应用可写入
+    /// 预建一批路径映射的目标目录（daemon 与 companion 共用）。
+    ///
+    /// bind 布局在建立映射挂载时由本规划器顺带把目标目录建好；FUSE 布局没有对应的挂载
+    /// 动作，策略层只做逐请求解析，因此必须在接入前显式建好——下载提供器等系统代写链路
+    /// 会先判定目标父目录是否存在，缺失即放弃写入（CI 场景 39：`Failed to create parent`）。
+    ///
+    /// 失败只记 debug：目标建不出来时策略仍照常生效，写请求会像以前一样报错，不能因为
+    /// 「预建没成功」就把整次挂载判成失败。
+    pub(crate) fn prepare_mapping_target_dirs(
+        &self,
+        mappings: &[crate::domain::PathMapping],
+        owner_uid: i32,
+    ) {
+        for mapping in mappings {
+            let target = mapping.final_path.trim_end_matches('/');
+            if target.is_empty() {
+                continue;
+            }
+            if !self.ensure_writable_mapped_directory(target, owner_uid) {
+                log::debug!(
+                    "mapping target dir prepare failed pkg={} path={}",
+                    self.package_name,
+                    target
+                );
+            }
+        }
+    }
+
     pub(crate) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: metadata skipped empty path");
