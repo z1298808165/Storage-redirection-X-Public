@@ -2552,10 +2552,28 @@ function Invoke-OwnerDriftOwnDirScenario {
     $driftVisible = "$RealRoot/Android/data/$AppId/files/SrtDrift"
     $driftBackend = "$BackendRoot/Android/data/$AppId/files/SrtDrift"
     $ok = $true
-    # 漂移目录的读与新建写入都必须被原生 DAC 拒绝：任何 PASS 都说明有链路在
-    # 改写属主或绕过 DAC 放行。
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read-denied" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } "^FAIL \[file_read\]").Ok -and $ok
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write-denied" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } "^FAIL \[file_write\]").Ok -and $ok
+    # 与 .sh 同口径：属主漂移私有目录的读写结论取决于数据面形态——bind 布局下内核按应用
+    # 凭据做 DAC 而拒绝；FUSE 布局（auto 默认）由会话服务，与系统 MediaProvider 服务
+    # emulated 视图同理，属于应用自己的私有树故放行。原生 Android 走 FUSE，因此「拒绝」
+    # 不是唯一正确形态。本场景契约是「模块不得改写私有树属主」（见下方 1023 校验）。
+    # 设备端命令先在赋值表达式里拼好再传 Invoke-Su（参数模式下 `+` 会变成字面量）。
+    $readExpect = "^FAIL \[file_read\]"
+    $writeExpect = "^FAIL \[file_write\]"
+    $driftPid = Get-AppPid
+    if ($driftPid) {
+        $devProbe = "a=`"`$(grep -m1 ' /storage/emulated ' `"/proc/$driftPid/mountinfo`" | cut -d' ' -f3)`"; " +
+            "b=`"`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3)`"; " +
+            "[ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]"
+        if (Test-Su $devProbe) {
+            Write-Host "  - scenario-$Scenario/owner-drift-layout form=fuse-served"
+            $readExpect = "^PASS \[file_read\]"
+            $writeExpect = "^PASS \[file_write\]"
+        } else {
+            Write-Host "  - scenario-$Scenario/owner-drift-layout form=bind"
+        }
+    }
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } $readExpect).Ok -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } $writeExpect).Ok -and $ok
     # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
     $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
     if (-not $ownerIntact) {
@@ -4724,10 +4742,28 @@ function Invoke-OwnerDriftOwnDirScenario {
     $driftVisible = "$RealRoot/Android/data/$AppId/files/SrtDrift"
     $driftBackend = "$BackendRoot/Android/data/$AppId/files/SrtDrift"
     $ok = $true
-    # 漂移目录的读与新建写入都必须被原生 DAC 拒绝：任何 PASS 都说明有链路在
-    # 改写属主或绕过 DAC 放行。
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read-denied" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } "^FAIL \[file_read\]").Ok -and $ok
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write-denied" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } "^FAIL \[file_write\]").Ok -and $ok
+    # 与 .sh 同口径：属主漂移私有目录的读写结论取决于数据面形态——bind 布局下内核按应用
+    # 凭据做 DAC 而拒绝；FUSE 布局（auto 默认）由会话服务，与系统 MediaProvider 服务
+    # emulated 视图同理，属于应用自己的私有树故放行。原生 Android 走 FUSE，因此「拒绝」
+    # 不是唯一正确形态。本场景契约是「模块不得改写私有树属主」（见下方 1023 校验）。
+    # 设备端命令先在赋值表达式里拼好再传 Invoke-Su（参数模式下 `+` 会变成字面量）。
+    $readExpect = "^FAIL \[file_read\]"
+    $writeExpect = "^FAIL \[file_write\]"
+    $driftPid = Get-AppPid
+    if ($driftPid) {
+        $devProbe = "a=`"`$(grep -m1 ' /storage/emulated ' `"/proc/$driftPid/mountinfo`" | cut -d' ' -f3)`"; " +
+            "b=`"`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3)`"; " +
+            "[ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]"
+        if (Test-Su $devProbe) {
+            Write-Host "  - scenario-$Scenario/owner-drift-layout form=fuse-served"
+            $readExpect = "^PASS \[file_read\]"
+            $writeExpect = "^PASS \[file_write\]"
+        } else {
+            Write-Host "  - scenario-$Scenario/owner-drift-layout form=bind"
+        }
+    }
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } $readExpect).Ok -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } $writeExpect).Ok -and $ok
     # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
     $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
     if (-not $ownerIntact) {

@@ -4552,10 +4552,26 @@ run_owner_drift_own_dir_scenario() {
   local scenario="$1"
   local drift_visible="/storage/emulated/0/Android/data/${APP_ID}/files/SrtDrift"
   local drift_backend="${BACKEND_ROOT}/Android/data/${APP_ID}/files/SrtDrift"
-  # 漂移目录的读与新建写入都必须被原生 DAC 拒绝：属主 1023 的私有目录对应用
-  # uid 只暴露 others 位。任何 PASS 都说明有链路在改写属主或绕过 DAC 放行。
-  run_service_case "$scenario" "own-drift-read-denied" "file_read" '^FAIL \[file_read\]' --es file_path "$drift_visible/srt_drift_existing.txt" || return 1
-  run_service_case "$scenario" "own-drift-write-denied" "file_write" '^FAIL \[file_write\]' --es file_path "$drift_visible/srt_drift_probe.txt" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" || return 1
+  # 属主漂移私有目录的读写结论取决于数据面形态，两种都合法：
+  # ① bind 布局：可见路径是直连 f2fs 的 bind，内核按应用凭据做 DAC → 读写被拒绝；
+  # ② FUSE 布局（auto 默认）：可见路径由会话服务——与系统 MediaProvider 服务 emulated
+  #    视图同理，服务进程凭据能看到该目录，策略层判定它属于应用自己的私有树 → 读写成功。
+  # 原生 Android 的 emulated 视图本来就走 ②，所以「拒绝」不是唯一正确形态，不能拿它当
+  # 唯一判据。本场景真正的契约是「模块不得改写私有树属主」（见下方 1023 校验）——
+  # 一旦属主被静默修好，漂移这个事实就会被掩盖。
+  local read_expect='^FAIL \[file_read\]'
+  local write_expect='^FAIL \[file_write\]'
+  local drift_pid
+  drift_pid="$(app_pid)"
+  if [ -n "$drift_pid" ] && app_view_dev_differs "$drift_pid" >/dev/null; then
+    echo "owner_drift_layout scenario=${scenario} form=fuse-served"
+    read_expect='^PASS \[file_read\]'
+    write_expect='^PASS \[file_write\]'
+  else
+    echo "owner_drift_layout scenario=${scenario} form=bind"
+  fi
+  run_service_case "$scenario" "own-drift-read" "file_read" "$read_expect" --es file_path "$drift_visible/srt_drift_existing.txt" || return 1
+  run_service_case "$scenario" "own-drift-write" "file_write" "$write_expect" --es file_path "$drift_visible/srt_drift_probe.txt" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" || return 1
   # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
   if ! adb_su "[ \"\$(stat -c %u '$drift_backend/srt_drift_existing.txt')\" = '1023' ]"; then
     echo "owner_drift_repaired_unexpectedly scenario=${scenario} backend=${drift_backend}" >&2
