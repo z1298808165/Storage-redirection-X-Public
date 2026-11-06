@@ -126,7 +126,7 @@ impl MountPlanner {
     }
 
     // 创建或修正映射目录的所有者，使应用可写入
-    pub(super) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) -> bool {
+    pub(crate) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: metadata skipped empty path");
             return false;

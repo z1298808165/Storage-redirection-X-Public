@@ -131,7 +131,7 @@ class MountMetadataScopeTest(unittest.TestCase):
         # 访问自有 Android/data|media|obb/<pkg> 的应用失去写权限。
         body = function_body(
             self.mount_core,
-            "pub(super) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) "
+            "pub(crate) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) "
             "-> bool",
         )
         self.assertIn("st.st_uid == uid", body)
@@ -190,7 +190,7 @@ class MountMetadataScopeTest(unittest.TestCase):
         # chown/chmod；这些目录由 MediaProvider 管理，改写会造成应用必须额外配置放行路径。
         mount_body = function_body(
             self.mount_core,
-            "pub(super) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) "
+            "pub(crate) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) "
             "-> bool",
         )
         self.assertIn("is_android_private_backend_path", mount_body)
@@ -273,6 +273,20 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertIn("storage_user_root_for_user(user_id)", body)
         self.assertIn("scoped_mount_allowed_for_scope", body)
         self.assertNotIn("scoped_mount_roots_for_hybrid_rules", body)
+
+    def test_fuse_mode_prepares_mapping_target_dirs(self) -> None:
+        # bind 布局在挂载时由规划器顺带建好映射目标目录；FUSE 布局没有对应挂载动作，
+        # 必须在接入前由 daemon 以 root 预建，否则下载提供器等系统代写链路会判定目标
+        # 父目录缺失而放弃写入（CI 场景 39：Failed to create parent for …）。
+        daemon = read("src/daemon_mount.rs")
+        body = function_body(daemon, "fn prepare_mapping_target_dirs(request: &MountRequest)")
+        self.assertIn("path_mappings", body)
+        self.assertIn("ensure_writable_mapped_directory", body)
+        # 必须在 fork 之前准备：子进程只允许 setns/mount/write，禁止堆分配与全局锁。
+        self.assertLess(
+            daemon.index("prepare_mapping_target_dirs(request);"),
+            daemon.index("run_mount_in_forked_child(request);"),
+        )
 
     def test_path_mapping_resolution_chains_to_fixpoint(self) -> None:
         # 场景 37 的契约「父映射结果继续命中子映射」：bind 布局下两层挂载天然串联，FUSE 只在

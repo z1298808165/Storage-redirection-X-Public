@@ -664,6 +664,40 @@ fn refresh_mount_state_fingerprint(request: &MountRequest) -> bool {
     std::fs::rename(temp, path).is_ok()
 }
 
+/// 以 daemon 身份（root）预建本次请求里每条路径映射的目标目录。
+///
+/// 与 bind 布局的挂载规划器同一口径（`ensure_writable_mapped_directory`）：公共目录目标
+/// 归 media_rw、私有目标归应用 uid，已存在则一个元数据调用都不发。只处理共享存储内的
+/// 目标——沙盒与私有目录目标由各自的挂载/恢复链路负责，这里不越界创建。
+///
+/// 失败只记 debug：目录建不出来时策略仍照常生效，写请求会像以前一样报错，不能因为
+/// 「预建没成功」就把整次挂载判成失败。
+fn prepare_mapping_target_dirs(request: &MountRequest) {
+    if request.path_mappings.is_empty() {
+        return;
+    }
+    let planner = crate::mount::MountPlanner::new(
+        &request.package_name,
+        request.uid,
+        &request.app_data_dir,
+        &request.redirect_target,
+        false,
+    );
+    for mapping in &request.path_mappings {
+        let target = mapping.final_path.trim_end_matches('/');
+        if target.is_empty() {
+            continue;
+        }
+        if !planner.ensure_writable_mapped_directory(target, request.uid) {
+            log::debug!(
+                "mapping target dir prepare failed pkg={} path={}",
+                request.package_name,
+                target
+            );
+        }
+    }
+}
+
 pub fn execute_mount_request(request: &MountRequest) -> bool {
     let started_ms = monotonic_ms();
     let initial_state = if request.operation == MountOperation::Disable {
@@ -701,6 +735,11 @@ pub fn execute_mount_request(request: &MountRequest) -> bool {
         );
         return recently_mounted(request);
     };
+    // 映射目标目录必须在接入与策略生效前落到真实存储。bind 布局由规划器在挂载时顺带建好，
+    // FUSE 布局没有对应的挂载动作承担这一步；而下载提供器等系统代写链路会先用 isDirectory
+    // 判定目标父目录，缺失即放弃写入（CI 场景 39：`Failed to create parent for …`）。
+    // 必须在父进程做：fork 之后的子进程禁止堆分配与全局锁等待。
+    prepare_mapping_target_dirs(request);
     let is_success = run_mount_in_forked_child(request);
     let final_state = if request.operation == MountOperation::Disable {
         "disabled"
