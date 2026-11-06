@@ -12,8 +12,17 @@ const LOGCAT_OP_TAG: &str = "FileMonitorOp";
 const ANDROID_APP_UID_START: i32 = 10000;
 const MEDIA_RW_UID: u32 = 1023;
 const MEDIA_RW_GID: u32 = 1023;
-// 目录模式只在 `platform::fs` 定义一次，避免与挂载侧副本各自漂移。
-use crate::platform::fs::REAL_PUBLIC_DIR_MODE;
+/// 共享公共目录被**后端**访问所需的最小能力位（属主/属组可读写进入；others 位不
+/// 要求，应用看到的是 FUSE 合成属性），以及真缺位时追加的位（含 setgid）。
+///
+/// 只做"够不够用"的判定，不做归一：系统既有目录按 MediaProvider 语义可能是 `02773`、
+/// `02771`，也可能是 `02770`，都覆盖这组位，一律不动。硬归一（例如把 `02770` 补成
+/// `02771`）会在用户磁盘上留下模块痕迹。
+const REQUIRED_PUBLIC_DIR_ACCESS_MODE: mode_t = crate::platform::fs::REAL_PUBLIC_DIR_MODE & 0o770;
+const PUBLIC_DIR_REPAIR_MODE: mode_t = crate::platform::fs::REAL_PUBLIC_DIR_MODE & 0o2770;
+const REDIRECT_BACKEND_DIR_REQUIRED_MODE: mode_t = 0o2773;
+const PRIVATE_CHILD_DIR_REQUIRED_MODE: mode_t = 0o2751;
+const PRIVATE_CHILD_FILE_REQUIRED_MODE: mode_t = 0o664;
 
 pub(super) struct MonitorIdentity {
     pub(super) package_name: String,
@@ -417,14 +426,23 @@ fn repair_public_directory_owner(display_path: &str, backend_path: &str) {
     }
 
     let current_mode = st.st_mode & 0o7777;
-    if current_mode != REAL_PUBLIC_DIR_MODE {
-        // SAFETY: c_path 在调用期间保持有效，并指向已验证的公共目录。
-        let ret = unsafe { libc::chmod(c_path.as_ptr(), REAL_PUBLIC_DIR_MODE) };
+    if current_mode & REQUIRED_PUBLIC_DIR_ACCESS_MODE != REQUIRED_PUBLIC_DIR_ACCESS_MODE {
+        let fixed_mode = current_mode | PUBLIC_DIR_REPAIR_MODE;
+        // SAFETY: c_path 在调用期间保持有效，并指向已验证的公共目录；chmod 只改权限位，
+        // 不改变文件内容与归属，失败通过返回值报告。
+        let ret = unsafe { libc::chmod(c_path.as_ptr(), fixed_mode) };
         if ret != 0 {
             log::warn!(
                 "daemon public chmod fix failed path={} errno={}",
                 backend_path,
                 last_errno()
+            );
+        } else {
+            log::info!(
+                "daemon public chmod fix path={} mode={:o} fixed={:o}",
+                backend_path,
+                current_mode,
+                fixed_mode
             );
         }
     }

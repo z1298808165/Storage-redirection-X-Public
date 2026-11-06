@@ -23,6 +23,7 @@
 //! 里是盲的。把账本内核放进 lib/bin 共用的模块后，两条路径写的是同一份格式、同一套归属判据。
 //! 只与恢复决策有关的部分（判定结果、清理、枚举）留在 bin 侧的 `mount_identity`。
 
+use crate::fuse_redirect::config::NATIVE_FUSE_SOURCE;
 use crate::platform::module_paths;
 use crate::platform::mountinfo;
 use crate::platform::paths;
@@ -36,11 +37,19 @@ pub use crate::module_mount_source::is_module_redirect_mount;
 
 /// 账本 schema 版本。字段增减时必须同步递增，旧版本账本按不可用处理。
 ///
+/// v2 → v3：`LiveMount`/`MountIdentity` 增加 `dev`（超级块设备号）。挂载源原生化之后
+/// 源不再带模块标识，"这一层是不是本模块的"只能靠超级块身份 + 挂载 ID，账本必须落盘
+/// `dev` 才能在同一次开机内反查归属。旧版本账本按不可用处理，由下一次成功挂载重新登记。
+///
 /// v1 → v2：归属判据由"别名归一化路径"改为"保留存储别名的语法路径"。旧账本把
 /// `/data/media/<user>/...` 归一化成 `/storage/emulated/<user>/...` 存储，与真实主入口
 /// 目标重合，会被新逻辑误判为同一挂载点的归属身份、进而误用于摘除后端挂载。为保守起见，
 /// 直接让 v1 账本 decode 失败（按不可用处理），由下一次成功挂载用新口径重新登记。
-const IDENTITY_SCHEMA_VERSION: u32 = 2;
+const IDENTITY_SCHEMA_VERSION: u32 = 3;
+
+/// 持久 dev 历史最多保留的代数。只需覆盖"刚换代的旧层还挂在活应用命名空间里"这一段
+/// 窗口，几代足够；无限增长会让每次归属判定都多读一堆早已消失的 dev。
+const KNOWN_DEVS_LIMIT: usize = 64;
 
 /// 目标进程 mount namespace 的身份。
 ///
@@ -63,6 +72,10 @@ pub struct LiveMount {
     pub mount_id: u64,
     /// 父挂载 ID：同挂载点叠放时即下面一层的挂载 ID，用于栈顶判定。
     pub parent_mount_id: u64,
+    /// 超级块设备号（`major:minor`）。同一宿主/会话的所有层共享它（bind 继承），
+    /// 系统 MediaProvider 的 FUSE 是另一个值——挂载源原生化之后，它是唯一能区分
+    /// "我们的层"与"系统的层"的内核事实。
+    pub dev: String,
     pub source: String,
     pub fs_type: String,
     pub root: String,
@@ -73,6 +86,8 @@ pub struct LiveMount {
 pub struct MountIdentity {
     pub mount_point: String,
     pub mount_id: u64,
+    /// 超级块设备号：与 `mount_id` 一起构成"这一层是谁的"的完整身份。
+    pub dev: String,
     pub source: String,
 }
 
@@ -183,6 +198,7 @@ pub fn live_mounts_at(pid: i32, mount_point: &str) -> Vec<LiveMount> {
             Some(LiveMount {
                 mount_id: entry.mount_id,
                 parent_mount_id: entry.parent_mount_id,
+                dev: entry.dev.to_string(),
                 source: mountinfo::unescape_field(entry.source),
                 fs_type: entry.fs_type.to_string(),
                 root: mountinfo::unescape_field(entry.root),
@@ -204,6 +220,104 @@ pub fn topmost_live_mount(pid: i32, mount_point: &str) -> Option<LiveMount> {
         |mount: &LiveMount| mount.parent_mount_id,
     )
     .cloned()
+}
+
+/// 收集本模块已知的 FUSE 超级块设备号（账本里登记过的 + 持久历史 + 当前宿主会话）。
+///
+/// 挂载源原生化之后，挂载表里不再有任何模块标识，"这一层是不是我们的"只能靠超级块身份。
+/// 判断依据是**我们自己登记过的东西**：每一个成功挂载轮次都会把 `dev` 写进账本
+/// （见 [`MountIdentity::dev`]），主机宿主会话的 `dev` 则在快照里。系统 MediaProvider 的
+/// FUSE 超级块不在其中，因此这个集合天然把"我们的层"和"系统的层"分开。
+///
+/// 也包含**已失效会话**的 dev：应用进程还活着、宿主换代时，旧层仍在它的命名空间里，
+/// 清理流程必须先能认出它才能摘掉（认不出就会一直 ENOTCONN）。
+///
+/// 因此除了活账本，还要并上 [`remember_module_fuse_devs`] 落盘的持久历史：账本是按
+/// 命名空间覆盖写的，宿主换代后同一批 pid 的新一轮挂载会用**新 dev** 重写账本，
+/// 旧 dev 只剩挂载表里的那一层还带着——只读账本必然认不出它（2026-11-02 真机：
+/// 宿主换代后每轮都 `unmount skipped foreign ... dev=<旧会话> ledger_devs=0`
+/// → `cleanup incomplete` → 死层永远叠在栈底）。
+pub fn known_module_fuse_devs() -> std::collections::HashSet<String> {
+    let mut devs = std::collections::HashSet::new();
+    if let Ok(entries) = fs::read_dir(ledger_dir()) {
+        for entry in entries.flatten() {
+            let Ok(content) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            // 复用 decode 而不是再写一遍文本解析：账本格式只在一处定义，两处各写一份
+            // 必然在字段顺序调整时漂移。schema 不匹配（旧版本账本）直接跳过。
+            let Some(ledger) = decode(&content) else {
+                continue;
+            };
+            for mount in ledger.mounts {
+                // 只收 FUSE 超级块：`alias bind` 这类层继承的是后端真实文件系统（`/data`
+                // 的 f2fs）超级块，收进来会让同盘的任何系统 bind 挂载都被判成本模块所有。
+                if !mount.dev.is_empty() && mount.source == NATIVE_FUSE_SOURCE {
+                    devs.insert(mount.dev);
+                }
+            }
+        }
+    }
+    if let Ok(content) = fs::read_to_string(known_devs_path()) {
+        for line in content.lines() {
+            let dev = line.trim();
+            if !dev.is_empty() {
+                devs.insert(dev.to_string());
+            }
+        }
+    }
+    if let Some(dev) = crate::fuse_host::current_host_dev() {
+        devs.insert(dev);
+    }
+    devs
+}
+
+/// 持久记录"这一代会话的超级块属于本模块"，跨进程/跨宿主换代保留。
+///
+/// 只写 `major:minor` 文本，不含任何路径或进程信息；同一 dev 幂等，超出
+/// [`KNOWN_DEVS_LIMIT`] 时按先进先出淘汰最老的记录——保护的是"刚换代、旧层还挂在
+/// 活着的应用命名空间里"这个窗口，不需要无限历史。
+pub fn remember_module_fuse_devs<'a>(devs: impl IntoIterator<Item = &'a str>) {
+    let mut lines: Vec<String> = fs::read_to_string(known_devs_path())
+        .map(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut changed = false;
+    for dev in devs {
+        if dev.is_empty() || lines.iter().any(|line| line == dev) {
+            continue;
+        }
+        lines.push(dev.to_string());
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    if lines.len() > KNOWN_DEVS_LIMIT {
+        let drop = lines.len() - KNOWN_DEVS_LIMIT;
+        lines.drain(0..drop);
+    }
+    if fs::create_dir_all(module_paths::MOUNT_STATE_DIR).is_err() {
+        return;
+    }
+    let path = known_devs_path();
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let temp = format!("{}.tmp", path.display());
+    if fs::write(&temp, content.as_bytes()).is_ok() && fs::rename(&temp, &path).is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+}
+
+/// 持久 dev 历史文件路径（与账本目录同级，避免被 [`known_module_fuse_devs`] 当账本解析）。
+fn known_devs_path() -> PathBuf {
+    PathBuf::from(module_paths::MOUNT_STATE_DIR).join("known_devs")
 }
 
 /// 账本文件所在目录。
@@ -242,10 +356,14 @@ pub fn encode(ledger: &MountLedger) -> String {
     ));
     content.push_str(&format!("generation={}\n", ledger.generation));
     content.push_str(&format!("detach_attempts={}\n", ledger.detach_attempts));
+    // 字段顺序必须与 decode 严格一致（id、dev、source、挂载点）。少写 dev 会让 decode
+    // 把 source 当 dev、把挂载点当 source，最后因缺字段整行被丢弃——账本看起来"存在但
+    // 没有挂载记录"，归属判定与 detach 记账会同时失效（2026-11-02 真机：重挂报
+    // completed 但运行中应用一层未换）。
     for mount in &ledger.mounts {
         content.push_str(&format!(
-            "mount={}\t{}\t{}\n",
-            mount.mount_id, mount.source, mount.mount_point
+            "mount={}\t{}\t{}\t{}\n",
+            mount.mount_id, mount.dev, mount.source, mount.mount_point
         ));
     }
     content
@@ -278,6 +396,7 @@ pub fn decode(content: &str) -> Option<MountLedger> {
         .filter_map(|value| {
             let mut parts = value.split('\t');
             let mount_id = parts.next()?.parse::<u64>().ok()?;
+            let dev = parts.next()?.to_string();
             let source = parts.next()?;
             let mount_point = parts.next()?;
             if !module_paths::is_safe_mount_target(mount_point) {
@@ -286,6 +405,7 @@ pub fn decode(content: &str) -> Option<MountLedger> {
             Some(MountIdentity {
                 mount_point: mount_point.to_string(),
                 mount_id,
+                dev,
                 source: source.to_string(),
             })
         })
@@ -343,6 +463,19 @@ pub fn save(ledger: &MountLedger) -> bool {
         log::warn!("mount identity rename failed path={}", path);
         return false;
     }
+    // 账本会被同名命名空间的下一轮挂载整体覆盖，落盘的同时把这批 dev 写进持久历史，
+    // 宿主换代后旧层才还能被认成本模块的。
+    // 只登记**FUSE 超级块**的 dev：私有目录 alias bind 之类的层继承的是后端真实文件系统
+    // 的超级块（`/data` 的 f2fs），把它当"本模块的层"会让任何同盘 bind 挂载（系统自己的
+    // `/data/media` 视图等）都被判成本模块所有，从而被误摘。挂载源原生化之后，我们的层
+    // 一律是 `/dev/fuse`，这一条就是"只认自己的超级块"的最窄判据。
+    remember_module_fuse_devs(
+        ledger
+            .mounts
+            .iter()
+            .filter(|mount| mount.source == NATIVE_FUSE_SOURCE)
+            .map(|mount| mount.dev.as_str()),
+    );
     true
 }
 
@@ -359,6 +492,7 @@ pub fn capture_explicit_mount_identity(pid: i32, mount_point: &str) -> Option<Mo
     Some(MountIdentity {
         mount_point: paths::normalize_syntax(mount_point),
         mount_id: live.mount_id,
+        dev: live.dev,
         source: live.source,
     })
 }

@@ -284,6 +284,11 @@ pub(super) struct RedirectPolicy {
     pub(super) user_id: i32,
     pub(super) storage_root: String,
     pub(super) mount_rel: String,
+    /// 视图根是否已上提一层（P5-c）：`…/emulated` 为 true，`…/emulated/<user>` 为 false。
+    ///
+    /// 上提后每个请求的相对路径都多一段 `<user>`，解析入口据此剥段；未上提时保持原口径。
+    /// 由挂载点形态唯一决定，避免另开一份配置开关与真实挂载点漂移。
+    pub(super) view_lifted: bool,
     pub(super) real_root: PathBuf,
     // 应用自有私有目录（Android/data|media|obb）专用的真实后端根，固定指向 /data/media/<user>。
     // real_root 通常是 real_storage anchor，而该 anchor 优先 bind 到 /storage/emulated/<user>，
@@ -692,6 +697,7 @@ impl RedirectPolicy {
             .trim_matches('/')
             .to_string();
         let real_root = real_backend_root_for_config(&config, user_id);
+        let view_lifted = Self::is_lifted_view_root(&mount_root);
         // 共享宿主直通和未配置应用的监视专用会话都不做任何重定向，`redirect_target`
         // 可以是整个存储根。按子路径推导重定向根对"根本身"返回 None，沿用普通流程会
         // 把这两类合法直通配置误判为非法，导致宿主策略拒绝 UID，应用看不到共享存储。
@@ -867,6 +873,7 @@ impl RedirectPolicy {
             user_id,
             storage_root,
             mount_rel,
+            view_lifted,
             real_root,
             private_real_root: PathBuf::from(paths::data_media_user_root_for_current_ns(user_id)),
             redirect_root: PathBuf::from(redirect_root_string),
@@ -927,11 +934,179 @@ impl RedirectPolicy {
         rel: &str,
         operation: OperationKind,
     ) -> Option<BackendPath> {
+        let resolved = self.resolve_relative(rel, operation);
+        self.probe_lifted_view_resolution(rel, operation, resolved.as_ref());
+        resolved
+    }
+
+    /// 视图根上提后，视图根下非本用户子树（`obb`、其它用户号）的直通解析。
+    ///
+    /// 这些子树在基线视图里是**普通目录**（不是独立挂载），必须能读到；它们在重定向视图里
+    /// 没有对应后端，所以直通到系统视图，不经过任何重定向规则。
+    ///
+    /// 路径必须按"每个用户各自一个视图根"来落：
+    /// - `obb` 属于**本用户**的 emulated 根 → `/mnt/user/<self>/emulated/obb/...`；
+    /// - 其它用户号 `<u>` → `/mnt/user/<u>/emulated/...`（那才是该用户的视图根；
+    ///   写成 `<self>/emulated/<u>` 会落到本用户视图里的同名字录，真机实测是空目录）。
+    ///
+    /// **不设只读**：本模块不改变系统原有能力。基线里普通应用能否读写这些位置由
+    /// MediaProvider 自己的策略决定；这里若强行加只读，等于让正常应用失去它本来就有的
+    /// 能力（真机 2026-11-02 实测：`obb` 在原系统里是可写的，只读直通会让 OBB 安装失败）。
+    /// 该 rel 是否落在视图根下"非本用户"的直通子树（`obb` 或其它用户号）。
+    ///
+    /// 供 readdir 判断是否要绕过策略候选收集：直通子树在这两个策略后端上没有目录，
+    /// 按常规收集恒为空，必须直接枚举直通后端。
+    pub(super) fn is_foreign_view_rel(&self, rel: &str) -> bool {
+        let head = rel.split('/').next().unwrap_or_default();
+        head == "obb" || head.parse::<i32>().ok().is_some_and(|u| u != self.user_id)
+    }
+
+    fn passthrough_foreign_view_rel(&self, rel: &str) -> Option<BackendPath> {
+        let rel = sanitize_relative(rel)?;
+        if rel.is_empty() {
+            return None;
+        }
+        let head = rel.split('/').next().unwrap_or_default();
+        if head.is_empty() {
+            return None;
+        }
+        // 直通目标是**系统视图根下的同一相对路径**：`obb` 与其它用户目录在系统视图里
+        // 可能是独立挂载（`/storage/emulated/obb` 是 OBB 的 FUSE 挂载），按父视图拼路径
+        // 取不到（真机实测 ENOENT）。会话进程自己的命名空间里 `/storage/emulated` 仍是
+        // 系统 MediaProvider/OBB 视图，不会回到本会话（本会话挂在 FUSE_HOST_MOUNT_POINT）。
+        // 只读：应用域自检实测基线行为——`obb` 写入失败（EFAULT）、其它用户目录可读 13 项
+        // 但写入 EPERM。这里放开写会让应用拿到原生下没有的能力，属于"改变系统原有语义"，
+        // 所以两者都按只读直通，与基线一致（OBB 安装走 `Android/obb/<pkg>`，不经过这里）。
+        if head == "obb" {
+            return Some(BackendPath {
+                rel: rel.to_string(),
+                path: PathBuf::from(paths::join("/storage/emulated", &rel)),
+                is_read_only: true,
+                is_shared_public_backend: false,
+                is_app_private_backend: false,
+            });
+        }
+        if let Some(other_user) = head.parse::<i32>().ok().filter(|u| *u != self.user_id) {
+            // 其它用户：目标是**那个用户自己的视图根**（`/mnt/user/<u>/emulated/<u>`）。
+            // 走 `/storage/emulated/<u>` 会落到本会话对系统视图的请求上（uid 0 无策略），
+            // 应用域自检实测表现为"目录可进但列表为空"。
+            let rest = rel.strip_prefix(head).unwrap_or("").trim_start_matches('/');
+            let root = format!("/mnt/user/{other_user}/emulated/{other_user}");
+            let path = if rest.is_empty() {
+                root
+            } else {
+                paths::join(&root, rest)
+            };
+            return Some(BackendPath {
+                rel: rel.to_string(),
+                path: PathBuf::from(path),
+                is_read_only: true,
+                is_shared_public_backend: false,
+                is_app_private_backend: false,
+            });
+        }
+        None
+    }
+
+    /// 该挂载点是否已是"上提一层"的视图根（P5-c）。
+    ///
+    /// 判据只看挂载点形态：`…/emulated` 是上提后的视图根，`…/emulated/<user>` 是传统
+    /// 用户目录级视图根。用形态而不是另开配置项，是为了让开关与真实挂载点不可能漂移。
+    pub(super) fn is_lifted_view_root(mount_root: &str) -> bool {
+        mount_root.trim_end_matches('/').ends_with("/emulated")
+    }
+
+    /// 视图根本身对应的相对路径段（P5：`…/emulated` 这一级）。
+    ///
+    /// 视图根上提一层后，挂载点从 `<alias>/emulated/<user>` 变成 `<alias>/emulated`，
+    /// 于是每个请求的相对路径都多了一段 `<user>`：`Download/a` → `0/Download/a`。
+    /// 这里给出"剥掉本用户段"的纯函数形式，既供真实解析使用，也供下面的等价性探针复用。
+    ///
+    /// 返回 `None` 表示首段不是本用户（其它用户目录、`obb` 等）：这些项在 P5 里直通系统
+    /// 视图，不参与重定向解析，调用方必须显式区分，不能当成"空路径"处理。
+    pub(super) fn lifted_view_rel<'a>(&self, rel: &'a str) -> Option<&'a str> {
+        let trimmed = rel.trim_start_matches('/');
+        let (head, rest) = match trimmed.split_once('/') {
+            Some((head, rest)) => (head, rest),
+            None => (trimmed, ""),
+        };
+        if head.is_empty() || head.parse::<i32>().ok() != Some(self.user_id) {
+            return None;
+        }
+        Some(rest)
+    }
+
+    /// 等价性探针：把当前（视图根在用户目录级）的解析结果，与"视图根上提一层"口径下的
+    /// 解析结果逐条比对，只在 debug 日志开启时工作。
+    ///
+    /// P5-c 的改动核心是让 `<user>/…` 与今天的 `…` 解析到同一个后端。这条探针就是切换前的
+    /// 验收尺：真机上把规则铺满跑一轮，差异必须为 0，否则说明剥段会改变判定（自嵌套折叠、
+    /// 映射源/目标、沙箱与只读判定都在这条路径上），切挂载点之前必须先修平。
+    fn probe_lifted_view_resolution(
+        &self,
+        rel: &str,
+        operation: OperationKind,
+        legacy: Option<&BackendPath>,
+    ) {
+        if !crate::logging::is_debug_logging_enabled() || self.deny_all {
+            return;
+        }
+        let lifted_rel = format!("{}/{}", self.user_id, rel.trim_start_matches('/'));
+        let Some(stripped) = self.lifted_view_rel(&lifted_rel) else {
+            log::warn!("p5 probe lift mismatch rel={} lifted={}", rel, lifted_rel);
+            return;
+        };
+        if stripped != rel.trim_start_matches('/') {
+            log::warn!(
+                "p5 probe lift roundtrip rel={} lifted={} stripped={}",
+                rel,
+                lifted_rel,
+                stripped
+            );
+            return;
+        }
+        let lifted = self.resolve_relative(stripped, operation);
+        let same = match (legacy, lifted.as_ref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.path == b.path,
+            _ => false,
+        };
+        if !same {
+            log::warn!(
+                "p5 probe diff rel={} legacy={:?} lifted={:?}",
+                rel,
+                legacy.map(|backend| backend.path.display().to_string()),
+                lifted
+                    .as_ref()
+                    .map(|backend| backend.path.display().to_string())
+            );
+        }
+    }
+
+    /// 相对路径 → 后端路径的唯一实现（P5 前后口径共用，探针与真实解析都走这里）。
+    fn resolve_relative(&self, rel: &str, operation: OperationKind) -> Option<BackendPath> {
         // 拒绝策略先于任何路径解析生效：所有调用点（lookup/getattr/create/write/readdir/…）
         // 都把 `None` 当作失败处理，因此未登记调用方既读不到真实内容，也写不进任何位置。
         if self.deny_all {
             return None;
         }
+        // P5-c：视图根上提后，每个请求的相对路径都多一段 `<user>`。剥掉本用户段后与原口径
+        // 等价（`p5 probe diff = 0` 已真机验证）。
+        //
+        // 三类剩余路径必须分开处理，混在一起就会出现"根目录 ENOENT"或"`obb` 凭空消失"：
+        // - rel 为空：视图根自身，等价于本用户存储根（挂载点上的 dentry 就是它）；
+        // - 首段是本用户：剥段后走原逻辑；
+        // - 首段是 `obb` / 其它用户号：**直通**系统视图（它们在基线里是普通目录而不是独立
+        //   挂载，若在这里 ENOENT，就与"隐藏"目标正好相反——基线能看到的东西我们看不到）。
+        let rel = if self.view_lifted {
+            match self.lifted_view_rel(rel) {
+                Some(rest) => rest,
+                None if rel.trim_matches('/').is_empty() => "",
+                None => return self.passthrough_foreign_view_rel(rel),
+            }
+        } else {
+            rel
+        };
         let rel = sanitize_relative(rel)?;
         // 自嵌套折叠：应用视图对重定向根自身的再进入（如 sdcard 形态重定向下的
         // Android/data/<pkg>/sdcard/<rest>）与根下 <rest> 指向同一后端，但决策路径不同，
@@ -1195,6 +1370,7 @@ impl RedirectPolicy {
             BackendKind::Redirect
         } else if self.matches_any(&self.read_only_excluded_index, storage_path)
             || self.matches_any(&self.allowed_real_index, storage_path)
+            || self.is_shared_media_subtree_path(storage_path)
             || delegate_foreign_private
             || matches!(operation, OperationKind::Read)
                 && (is_read_only || self.has_real_child_rule(storage_path))
@@ -1308,6 +1484,40 @@ impl RedirectPolicy {
         !paths::eq_ignore_case(package_name, &self.package_name)
     }
 
+    /// `Android` 与 `Android/media` 子树在原生语义下是**同 user 内跨应用共享**的公共区。
+    ///
+    /// MediaProvider 对 `/storage/emulated/<u>/Android/media/<pkg>` 的原生判定是跨应用
+    /// 共享（列举与读写均放行，`media` 不是 app-specific 私有目录）；只有
+    /// `Android/data`、`Android/obb` 才是"只列自有包名"的私有区。
+    ///
+    /// 本模块此前把三者一并按"外来私有目录"处理（走 redirect 沙盒），后果有两面，
+    /// 真机 2026-11-02 应用域实测（微信 uid=10284，进程内 readdir）：
+    ///
+    /// ```text
+    /// readdir(".../Android/media") -> ["com.tencent.mm"]   原型：9 个包目录
+    /// ```
+    ///
+    /// ① 功能面：依赖读取其它应用 `Android/media` 的组件（插件/共享素材）看不到内容；
+    /// ② 隐蔽面：应用一行 `readdir` 就能发现"这台设备只装了我一个包"。
+    fn is_shared_media_subtree_path(&self, storage_path: &str) -> bool {
+        let Some(relative) = paths::relative_child_path(storage_path, &self.storage_root) else {
+            return false;
+        };
+        let mut parts = relative.split('/').filter(|part| !part.is_empty());
+        let Some(android) = parts.next() else {
+            return false;
+        };
+        if !paths::eq_ignore_case(android, "Android") {
+            return false;
+        }
+        match parts.next() {
+            // `Android` 这一层本身是普通目录（原型 1023:1023 02771，列举 data/media/obb）。
+            // 留在沙盒里会让它显示成沙盒属性（真机实测 10284:1078 02770）。
+            None => true,
+            Some(category) => paths::eq_ignore_case(category, "media"),
+        }
+    }
+
     fn has_real_child_rule(&self, storage_path: &str) -> bool {
         self.allowed_real_paths
             .iter()
@@ -1321,22 +1531,46 @@ impl RedirectPolicy {
     }
 
     pub(super) fn is_virtual_dir(&self, rel: &str) -> bool {
+        // P5-c：按存储路径比对规则前缀自身，不按 rel 字符串。上提后 `prefix.rel` 是视图根
+        // 相对（`0/SrtRuleSandbox`），而 lookup 传入的 `backend.rel` 已被 resolve_relative
+        // 剥成用户根相对（`SrtRuleSandbox`），两者字面永不相等——规则目录在后端尚不存在时
+        // lookup 直接 ENOENT，不再合成虚拟目录（CI Test-flow 场景 8 sandbox 规则目录不可见
+        // 的根因）。`storage_path_for_rel` 已统一两种形态，这里与它同口径。
         let storage_path = self.storage_path_for_rel(rel);
         self.rule_prefixes.iter().any(|prefix| {
-            paths::eq_ignore_case(&prefix.rel, rel)
+            paths::eq_ignore_case(&prefix.storage_path, &storage_path)
                 || paths::is_child(&prefix.storage_path, &storage_path)
                 || (!prefix.full_prefix
                     && rule_has_path_prefix(&storage_path, &prefix.storage_path))
         })
     }
 
+    /// P5-c：把调用方传入的 rel 归一为「用户根相对」的存储相对路径。
+    ///
+    /// 上提后 rel 有两种来路：FUSE 直传（视图根相对，带 `<user>/` 前缀，readdir 等）
+    /// 与 resolve_relative 剥段后的用户根相对。上提会话的 `mount_rel` 为空（视图根
+    /// `/storage/emulated` 不是用户根的子路径），`real_root`/`redirect_root` 都在用户级，
+    /// 因此后端拼接只接受用户根相对形态：本用户段一律剥掉，与 `storage_path_for_rel`
+    /// 同口径。保留 `<user>/` 会拼出 `/data/media/<user>/<user>/...`——readdir 枚举恒空、
+    /// lookup 报「不是目录」（CI Test-flow 场景 4 共享宿主布局下映射目标直列失败的根因）。
+    /// obb/其它用户段不会到这里：它们在 resolve_relative 与 readdir 都走直通分支。
+    fn normalized_full_storage_rel(&self, rel: &str) -> String {
+        let rel = rel.trim_matches('/');
+        let rel = if self.view_lifted {
+            self.lifted_view_rel(rel).unwrap_or(rel)
+        } else {
+            rel
+        };
+        self.full_storage_rel(rel)
+    }
+
     pub(super) fn real_backend_for_rel(&self, rel: &str) -> PathBuf {
-        let rel = self.full_storage_rel(rel);
+        let rel = self.normalized_full_storage_rel(rel);
         self.real_backend_for_storage_rel(&rel)
     }
 
     pub(super) fn redirect_backend_for_rel(&self, rel: &str) -> PathBuf {
-        let rel = self.full_storage_rel(rel);
+        let rel = self.normalized_full_storage_rel(rel);
         self.redirect_backend_for_storage_rel(&rel)
     }
 
@@ -1527,11 +1761,21 @@ impl RedirectPolicy {
     }
 
     pub(super) fn storage_path_for_rel(&self, rel: &str) -> String {
-        let rel = self.full_storage_rel(rel);
+        // P5-c 修订：上提后 rel 有两种来路——FUSE 相对（带 `<user>/` 前缀，readdir/
+        // lookup 直通路径）与用户根相对（resolve_relative 剥段后的产物）。统一先剥本
+        // 用户段再并到用户根；原先经 full_storage_rel 的实现会把 `<user>` 再叠一次
+        // （/storage/emulated/0/0/...），allowed/mapping/readdir 的路径匹配全部失配
+        // （CI Test-flow 场景 4 全矩阵失败的根因：写入报成功但字节流落点失配）。
+        let rel = rel.trim_matches('/');
+        let rel = if self.view_lifted {
+            self.lifted_view_rel(rel).unwrap_or(rel)
+        } else {
+            rel
+        };
         if rel.is_empty() {
             self.storage_root.clone()
         } else {
-            paths::join(&self.storage_root, &rel)
+            paths::join(&self.storage_root, rel)
         }
     }
 

@@ -91,7 +91,8 @@ pub fn classify_mount(
     let (Some(recorded), Some(live)) = (recorded, live) else {
         return MountVerdict::Detached;
     };
-    if live.mount_id == recorded.mount_id && live.source == recorded.source {
+    // 身份比对用超级块（dev）+ 挂载 ID：挂载源已原生化，源文本不再区分会话。
+    if live.mount_id == recorded.mount_id && live.dev == recorded.dev {
         return MountVerdict::Owned(live.clone());
     }
     MountVerdict::Superseded(live.clone())

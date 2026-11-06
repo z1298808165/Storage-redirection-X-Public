@@ -98,20 +98,23 @@ pub(crate) fn detach_round_mount_targets(targets: &[String]) -> usize {
 ///
 /// 栈顶才是应用当前看到的层：被残留只读屏障盖住的旧层不能算数（那会把「屏障裸奔」
 /// 误判成会话存活）。调用方据此判断是否已有本模块的层在服务该路径。
-pub(crate) fn storage_view_top_source(mount_root: &str) -> Option<String> {
-    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
+/// 读取存储视图根上最顶层挂载的超级块设备号。
+///
+/// 判定"视图根是否已由某个会话服务"必须用超级块身份：挂载源已原生化成 `/dev/fuse`，
+/// 用源文本比对会把系统 MediaProvider 的挂载当成"已经挂好了"。
+pub(crate) fn storage_view_top_dev(mount_root: &str) -> Option<String> {
+    // 必须读 mountinfo：`/proc/self/mounts` 只有源与挂载点，没有超级块设备号，
+    // 而源现在与系统 MediaProvider 的 FUSE 同形，无法再用于归属判定。
+    let content = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     let root = mount_root.trim_end_matches('/');
-    let last = mounts.lines().rev().find(|line| {
-        let mut fields = line.split_whitespace();
-        fields.next().unwrap_or("");
-        fields
-            .next()
-            .unwrap_or("")
-            .replace("\\040", " ")
-            .trim_end_matches('/')
-            == root
-    })?;
-    Some(last.split_whitespace().next().unwrap_or("").to_string())
+    content
+        .lines()
+        .rev()
+        .filter_map(crate::platform::mountinfo::parse_entry)
+        .find(|entry| {
+            crate::platform::mountinfo::unescape_field(entry.target).trim_end_matches('/') == root
+        })
+        .map(|entry| entry.dev.to_string())
 }
 
 /// 把本次挂载写入状态文件（原子写：临时文件 + fsync + rename）。

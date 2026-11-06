@@ -532,6 +532,7 @@ pub(crate) fn option_group(option: &MountOption) -> MountOptionGroup {
         MountOption::DirSync => MountOptionGroup::KernelFlag,
         MountOption::Sync => MountOptionGroup::KernelFlag,
         MountOption::Async => MountOptionGroup::KernelFlag,
+        MountOption::LazyTime => MountOptionGroup::KernelFlag,
         MountOption::DefaultPermissions => MountOptionGroup::KernelOption,
     }
 }
@@ -552,6 +553,8 @@ pub(crate) fn option_to_flag(option: &MountOption) -> io::Result<nix::mount::MsF
         MountOption::Async => Ok(nix::mount::MsFlags::empty()),
         MountOption::Sync => Ok(nix::mount::MsFlags::MS_SYNCHRONOUS),
         MountOption::DirSync => Ok(nix::mount::MsFlags::MS_DIRSYNC),
+        // MS_LAZYTIME = 1 << 25；nix 的 MsFlags 没命名这一位，按原值构造。
+        MountOption::LazyTime => Ok(nix::mount::MsFlags::from_bits_retain(1 << 25)),
         option => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("Invalid mount option for flag conversion: {option:?}"),

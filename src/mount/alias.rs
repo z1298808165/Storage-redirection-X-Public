@@ -13,9 +13,54 @@ fn should_log_step(count: u64, step: u64) -> bool {
 }
 
 impl MountPlanner {
+    /// P5-c 修订：内容 bind 的落点**不再上提**，保持用户根原样。
+    ///
+    /// 根因（真机 2026-11-04，CI Test-flow 场景 2 全矩阵失败后逐提交二分定位）：用户根
+    /// `/storage/emulated/<user>` 是 OS 级寻址约定，应用永远按它读写。把内容 bind（沙盒/
+    /// 私有/只读/恢复）从用户根抬到视图根后，应用视图里多出一层未剥离的 `<user>` 段——
+    /// 应用写 `<user>/Download/x` 实际落进 `sdcard/<user>/Download/x`，harness 在
+    /// `PRIVATE_ROOT/Download/SrtProbe` 处找不到文件，companion/bind 应用全矩阵失败。
+    ///
+    /// 上提的正确作用域是 **FUSE 视图自身的挂载点**：接入根由 `host_attach_root_for_user`
+    /// 派生（fuse_host 侧），别名族的视图根展开由下方 `lifted_alias_roots` 承接（主目标
+    /// 已是视图根时仍然生效）。内容 bind 回到用户根、叠在 FUSE 之上，两种接入形态
+    /// （宿主 FUSE / companion bind）的视图都自洽：`<user>` 下是内容 bind，`<user>` 之外
+    /// （999/obb）由 FUSE 或系统视图承接。
+    fn lifted_target(&self, target: &str) -> String {
+        target.to_string()
+    }
+
+    /// 主目标若已是"上提一层"的视图根（`…/emulated`），返回它的别名等价集合。
+    ///
+    /// 只认形态（以 `/emulated` 结尾），不认配置开关：与 `RedirectPolicy::view_lifted` 同一
+    /// 套判据，避免"挂载点已上提、别名展开还按用户根"的半吊子状态。
+    fn lifted_alias_roots(&self, canonical_path: &str) -> Option<Vec<String>> {
+        let trimmed = canonical_path.trim_end_matches('/');
+        if !trimmed.ends_with("/emulated") {
+            return None;
+        }
+        let user_id = self.user_id;
+        Some(vec![
+            "/storage/emulated".to_string(),
+            format!("/mnt/user/{user_id}/emulated"),
+            format!("/mnt/installer/{user_id}/emulated"),
+            format!("/mnt/androidwritable/{user_id}/emulated"),
+        ])
+    }
+
     pub(super) fn expand_storage_alias_paths(&self, canonical_path: &str) -> Vec<String> {
         if canonical_path.is_empty() {
             return Vec::new();
+        }
+        // P5-c：主目标若是用户根，先抬成视图根再展开；`lifted_alias_roots` 负责给出别名集合。
+        let lifted = self.lifted_target(canonical_path);
+        let canonical_path = lifted.as_str();
+
+        // P5-c：视图根上提一层后，主目标变成 `…/emulated`（用户根的父级）。下面那条
+        // "与用户根同层或更深"的判据对它为假，会退化成只返回单条——`/mnt/{user,installer,
+        // androidwritable}` 三个别名会同时失效，应用经别名路径访问存储直接断。
+        if let Some(expanded) = self.lifted_alias_roots(canonical_path) {
+            return expanded;
         }
 
         let storage_root = paths::storage_user_root_for_user(self.user_id);
@@ -97,6 +142,10 @@ impl MountPlanner {
         alias_success_log: Option<&str>,
         is_any_mounted_out: Option<&mut bool>,
     ) -> bool {
+        // P5-c：直接调用本核心的路径（沙箱/只读/恢复链）不经过外层包装，抬升必须在这里也做一次；
+        // 否则同一份规则会同时产出"抬过的别名集合"和"没抬的 primary"，is_primary_target 判定失真。
+        let primary_target = self.lifted_target(primary_target);
+        let primary_target = primary_target.as_str();
         let mut is_any_mounted = false;
         let mut bound_keys: Vec<String> = Vec::new();
 
@@ -196,6 +245,8 @@ impl MountPlanner {
         alias_success_log: Option<&str>,
         is_any_mounted_out: Option<&mut bool>,
     ) -> bool {
+        let primary_target = self.lifted_target(primary_target);
+        let primary_target = primary_target.as_str();
         let mut is_any_mounted = false;
         let alias_targets = self.expand_storage_alias_paths(primary_target);
         let mut bound_keys: Vec<String> = Vec::new();

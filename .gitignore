@@ -97,3 +97,6 @@ test-flow-*.txt
 # 个人流程笔记
 /docs/release-workflow.md
 /docs/version-calculation-verification.md
+
+# 测试流熔断标记（运行时产物，不应入库）
+app-view-probe-broken.flag

@@ -6,10 +6,9 @@ mod route;
 mod writer_state;
 
 use super::RuntimeFlow;
+use super::companion_ack::send_mount_request_retaining;
 use identity::ProcessIdentity;
-use payload::{
-    CompanionMountRequest, build_companion_request_payload, send_companion_request_payload,
-};
+use payload::{CompanionMountRequest, build_companion_request_payload};
 use perf::{SpecializePerf, SpecializePerfStages, log_specialize_perf};
 use route::RouteConfigSnapshot;
 use writer_state::{
@@ -140,6 +139,7 @@ impl RuntimeFlow {
         );
 
         self.is_mount_request_sent = false;
+        self.release_mount_reply();
         self.is_mount_applied = false;
         self.deferred_mount_payload.clear();
         self.is_system_writer_hook_redirect = false;
@@ -613,7 +613,7 @@ impl RuntimeFlow {
         // 预挂载路径与兜底路径的发送动作完全一致，只有额外日志和退出原因不同
         let is_pre_mount_request = !is_system_writer && !is_shared_uid_writer && !is_monitor_bridge;
         let send_started_ms = monotonic_ms();
-        self.is_mount_request_sent = send_companion_request_payload(self.api.as_ref(), &payload);
+        self.retain_mount_reply(send_mount_request_retaining(self.api.as_ref(), &payload));
         perf_stages.send_ms = monotonic_ms().saturating_sub(send_started_ms);
         if is_pre_mount_request {
             log::info!(
@@ -636,13 +636,36 @@ impl RuntimeFlow {
         );
     }
 
+    /// 记录本次挂载请求的回执连接；旧连接先关闭，避免 fd 留在应用进程里。
+    fn retain_mount_reply(&mut self, fd: Option<libc::c_int>) {
+        self.release_mount_reply();
+        if let Some(fd) = fd {
+            self.mount_reply_fd = fd;
+            self.is_mount_request_sent = true;
+        }
+    }
+
+    /// 关闭尚未消费的回执连接（不等待结论）。
+    pub(super) fn release_mount_reply(&mut self) {
+        let fd = std::mem::replace(&mut self.mount_reply_fd, -1);
+        if fd >= 0 {
+            // SAFETY: fd 由本流程持有且只在此处关闭一次。
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// 取出回执连接，把所有权交给调用方（调用方必须等待或关闭）。
+    pub(super) fn take_mount_reply_fd(&mut self) -> libc::c_int {
+        std::mem::replace(&mut self.mount_reply_fd, -1)
+    }
+
     pub(super) fn send_deferred_mount_request(&mut self) {
         if self.deferred_mount_payload.is_empty() {
             return;
         }
 
         let payload = std::mem::take(&mut self.deferred_mount_payload);
-        self.is_mount_request_sent = send_companion_request_payload(self.api.as_ref(), &payload);
+        self.retain_mount_reply(send_mount_request_retaining(self.api.as_ref(), &payload));
         log::info!(
             "post mount request sent pkg={} sent={} payload={}",
             self.package_name,

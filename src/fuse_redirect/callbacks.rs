@@ -396,6 +396,45 @@ impl Filesystem for FuseRedirectFs {
             )
         };
         let mut lock_wait_ns = elapsed_ns(first_lock_started);
+        // P5-c：视图根上提一层后，根 inode 不再是用户根，而是 `…/emulated`。它的条目集合
+        // 必须与系统一致（`0`、`999`、`obb`），不能把用户根内容（`Download`/`DCIM`…）
+        // 直接列出来。合成必须发生在候选缓存、虚拟目录与重试循环之前，否则空 rel 会去
+        // 读后端根（= 用户根），正是"根目录内容错位"。
+        if policy.view_lifted && rel.is_empty() {
+            // 权限对齐基线：`/storage/emulated` 在原生里是 `0550 media_rw:media_rw`，
+            // 普通应用连列目录都会被内核拒（应用域自检实测：基线 `File.list()` 返回 null）。
+            // 我们的 FUSE 自己判权限，若不显式拒绝就等于凭空多给一项能力，应用据此即可
+            // 判定"这里被改过"。只放行 uid 0 与 media_rw。
+            let requester = req.uid();
+            if requester != 0 && requester != MEDIA_RW_UID {
+                log::debug!(
+                    "fuse lifted root readdir denied uid={} pkg={}",
+                    requester,
+                    policy.package_name
+                );
+                reply.error(Errno::EACCES);
+                return;
+            }
+            let candidates: Vec<DirEntryCandidate> = lifted_root_names(policy.user_id)
+                .into_iter()
+                .map(|name| DirEntryCandidate {
+                    rel: name.clone(),
+                    kind: FileType::Directory,
+                    name,
+                })
+                .collect();
+            let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+            let fh = state.next_handle();
+            let entries: Arc<[DirEntry]> =
+                materialize_dir_entries(&mut state, ino, &rel, candidates).into();
+            add_dir_entry_refs(&mut state, &entries);
+            let entry_count = entries.len();
+            state.dirs.insert(fh, entries);
+            drop(state);
+            self.perf.record_dir_scan(0, lock_wait_ns, 0, entry_count);
+            reply.opened(FileHandle(fh), FopenFlags::FOPEN_CACHE_DIR);
+            return;
+        }
         let mut scan_ns = 0u64;
         let mut retries = 0u64;
         let (fh, entry_count) = loop {
@@ -451,7 +490,24 @@ impl Filesystem for FuseRedirectFs {
             } else {
                 self.perf.record_dir_cache_miss(cache_miss_reason);
                 let scan_started = track_dir_perf.then(Instant::now);
-                let (candidates, sources) = collect_dir_entry_candidates(&policy, &rel);
+                // 直通子树（obb/其它用户号）在 redirect/real 两个策略后端上没有对应目录，
+                // 常规收集恒为空；可视性由 backend_for_relative 的直通分支决定，这里直接
+                // 枚举直通后端，不做任何策略过滤。
+                let (candidates, sources) = if policy.is_foreign_view_rel(&rel) {
+                    let mut entries = Vec::new();
+                    let mut seen = HashMap::new();
+                    let mut sources = Vec::new();
+                    append_raw_dir_entries(
+                        &rel,
+                        &backend.path,
+                        &mut entries,
+                        &mut seen,
+                        &mut sources,
+                    );
+                    (entries, sources)
+                } else {
+                    collect_dir_entry_candidates(&policy, &rel)
+                };
                 scan_ns = scan_ns.saturating_add(elapsed_ns(scan_started));
                 (candidates, sources, false)
             };
@@ -2033,6 +2089,40 @@ fn append_directory_source(path: &Path, sources: &mut Vec<DirectorySourceSignatu
     sources.push(DirectorySourceSignature::capture(path));
 }
 
+/// 直通子树的原始目录枚举：不做任何策略过滤，条目原样进入候选。
+fn append_raw_dir_entries(
+    parent_rel: &str,
+    backend: &Path,
+    entries: &mut Vec<DirEntryCandidate>,
+    seen: &mut HashMap<String, usize>,
+    sources: &mut Vec<DirectorySourceSignature>,
+) {
+    use crate::platform::paths;
+    append_directory_source(backend, sources);
+    let Ok(read_dir) = std::fs::read_dir(backend) else {
+        return;
+    };
+    for item in read_dir.flatten() {
+        let name = item.file_name().to_string_lossy().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let child_rel = paths::join(parent_rel, &name);
+        if seen.insert(child_rel.clone(), entries.len()).is_none() {
+            let kind = if item.path().is_dir() {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            };
+            entries.push(DirEntryCandidate {
+                rel: child_rel,
+                kind,
+                name,
+            });
+        }
+    }
+}
+
 fn append_backend_dir_entries(
     policy: &super::policy::RedirectPolicy,
     parent_rel: &str,
@@ -2150,6 +2240,42 @@ fn insert_dir_entry_candidate(
         name,
     });
     seen.insert(key, index);
+}
+
+/// 上提视图根的条目名：直接照抄系统视图根的目录项（`0`、`999`、`obb`…）。
+///
+/// 不能用 `/data/media` 的目录名代替：那是 f2fs 后端，多用户目录在系统视图里可能是独立
+/// 挂载而不在 `/data/media` 下（真机 2026-11-02 实测 `/data/media/999` 不存在，但基线
+/// `/storage/emulated` 里能看到 `999`）。隐藏的前提是"与基线逐项一致"，条目集合只能来自
+/// 基线本身。
+///
+/// 读取发生在会话进程自己的命名空间：那里 `/storage/emulated` 仍是系统 MediaProvider
+/// FUSE，不会回到本会话（自环）。
+fn lifted_root_names(user_id: i32) -> Vec<String> {
+    let system_root = paths::parent(&paths::storage_user_root_for_user(user_id));
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&system_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || names.contains(&name) {
+                continue;
+            }
+            let is_user_dir = name.chars().all(|ch| ch.is_ascii_digit());
+            if is_user_dir || name == "obb" {
+                names.push(name);
+            }
+        }
+    }
+    // 读不到系统视图时至少保证本用户存在：宁可少列兄弟用户，也不能把用户根内容错列成
+    // 视图根条目。
+    let self_name = user_id.to_string();
+    if !names.iter().any(|name| name == &self_name) {
+        names.insert(0, self_name);
+    }
+    if !names.iter().any(|name| name == "obb") {
+        names.push("obb".to_string());
+    }
+    names
 }
 
 fn materialize_dir_entries(

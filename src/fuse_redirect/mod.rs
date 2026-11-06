@@ -93,16 +93,6 @@ pub(super) const MEDIA_RW_GID: u32 = 1023;
 // 目录模式只在 `platform::fs` 定义一次，避免多处副本各自漂移。
 pub(super) use crate::platform::fs::MAPPED_DIR_MODE;
 const SHARED_PUBLIC_DIR_MODE: u32 = crate::platform::fs::SHARED_PUBLIC_DIR_MODE;
-/// 一级压缩（去重、剔除被父根覆盖的子路径）后的软目标根数。
-///
-/// 优先保持"只在通配规则命中的最小具体父目录上挂 FUSE"的设计前提，能不收敛就不收敛。
-pub(super) const TARGET_SCOPED_FUSE_ROOTS: usize = 4;
-/// 多 scoped 会话模式允许保留的根数上限。
-///
-/// 这个上限不是规则能力或内核约束，而是资源预算：每个根对应一个 `srx_fuse` 子进程和
-/// 一次会话，父进程的挂载等待预算也按根数线性增长。顶层根超过该预算时改用单个共享
-/// 存储根 FUSE 会话，仍由原始规则逐路径匹配，不再因为根数退回精度较弱的 namespace。
-pub(super) const MAX_SCOPED_FUSE_ROOTS: usize = 16;
 const INITIAL_DIR_CANDIDATE_CACHE_BYTES: usize = 256 * 1024;
 
 thread_local! {
@@ -824,6 +814,45 @@ impl FuseRedirectFs {
         })
     }
 
+    /// 视图根节点（挂载点本身）的展示属性对齐。
+    ///
+    /// 视图根上提后，根节点在基线里就是 `/storage/emulated`（`0550 media_rw:media_rw`），
+    /// 而它的后端是「用户存储根」（`2770`）。应用只要 `stat("/storage/emulated")` 就能看出
+    /// mode 差异，所以根的展示属性直接取系统视图根的真实值。
+    ///
+    /// 与 `attr_for_backend` 的边界：那里一律透传后端事实（**不得**把既有目录归一成模块
+    /// 常量，否则公共目录的 02773/02771 会被压平）；这里只处理"根节点本身"，且取值来自
+    /// 系统视图而非模块常量。`dev`/`ino` 是内核事实，保持我方值。
+    fn apply_view_root_attr(&self, policy: &RedirectPolicy, ino: INodeNo, attr: &mut FileAttr) {
+        if !policy.view_lifted || ino.0 != 1 {
+            return;
+        }
+        let Some(system_root) = self.lifted_root_attr(policy) else {
+            // 读不到系统视图根时保持后端属性：宁可少一次对齐，也不能让 getattr 失败。
+            return;
+        };
+        attr.perm = system_root.perm;
+        attr.uid = system_root.uid;
+        attr.gid = system_root.gid;
+        attr.nlink = system_root.nlink;
+        attr.size = system_root.size;
+        attr.blocks = system_root.blocks;
+        attr.blksize = system_root.blksize;
+    }
+
+    /// 系统视图根（`/storage/emulated`）的真实属性，用于视图根节点的展示对齐。
+    ///
+    /// 读取发生在会话进程自己的命名空间：那里 `/storage/emulated` 仍是系统
+    /// MediaProvider 视图，不会回到本会话（本会话挂在 `FUSE_HOST_MOUNT_POINT`）。
+    /// 读不到时返回 `None`，调用方保持后端属性——宁可少一次对齐，也不能让 getattr 失败。
+    fn lifted_root_attr(&self, policy: &RedirectPolicy) -> Option<FileAttr> {
+        let system_root = crate::platform::paths::parent(
+            &crate::platform::paths::storage_user_root_for_user(policy.user_id),
+        );
+        let metadata = std::fs::symlink_metadata(&system_root).ok()?;
+        Some(file_attr_from_metadata(INodeNo(1), metadata))
+    }
+
     fn attr_for_backend(
         &self,
         policy: &RedirectPolicy,
@@ -836,9 +865,14 @@ impl FuseRedirectFs {
         if backend.is_shared_public_backend {
             attr.uid = policy.uid as u32;
             attr.gid = MEDIA_RW_GID;
-            if attr.kind == FileType::Directory {
-                attr.perm = SHARED_PUBLIC_DIR_MODE as u16;
-            }
+            // **不改写目录 mode**：这里曾经无条件把目录权限压成 `SHARED_PUBLIC_DIR_MODE`
+            // (02770)，但该常量是「我们新建目录时落盘的权限」，用它覆盖**已存在**节点的
+            // 展示值会让原生形态暴露。真机 2026-11-02 应用域实测（应用进程内 stat）：
+            // `/storage/emulated/0/DCIM` 原生 `1023:1023 02773`、`Android` 原生 `02771`，
+            // 改写后统一变成 `02770` —— 只要 stat 一次公共目录就能看出来。
+            //
+            // 展示层只负责「属主归一」（见下方注释），mode/nlink/size 一律透传后端事实：
+            // 本模块新建目录落盘就是 02770，与原生新建一致；系统既有目录保持 02773/02771。
         }
         Ok(attr)
     }
@@ -850,7 +884,10 @@ impl FuseRedirectFs {
         backend: &BackendPath,
     ) -> Result<FileAttr, Errno> {
         match self.attr_for_backend(policy, ino, backend) {
-            Ok(attr) => Ok(attr),
+            Ok(mut attr) => {
+                self.apply_view_root_attr(policy, ino, &mut attr);
+                Ok(attr)
+            }
             Err(errno) if errno.code() == libc::ENOENT && policy.is_virtual_dir(&backend.rel) => {
                 Ok(synthetic_dir_attr(ino, policy.uid as u32, MEDIA_RW_GID))
             }

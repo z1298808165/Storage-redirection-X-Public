@@ -44,6 +44,28 @@ pub(super) fn collect_restored_read_only_excluded_children(
     restored_children
 }
 
+/// 真实存储锚点的**挂载点**：emulated 根结构（`tmp/real_storage/<user>`）。
+///
+/// 这一层是模块私有路径，只在本轮挂载期间存在（用完即摘，见
+/// `MountPlanner::detach_real_storage_anchor`）。
+pub(super) fn real_storage_anchor_mount_path(user_id: i32) -> String {
+    paths::join(
+        crate::platform::module_paths::REAL_STORAGE_TMP_DIR,
+        &user_id.to_string(),
+    )
+}
+
+/// 真实存储锚点的**可用根**：内容正是该用户存储根（`<anchor>/<user>`）。
+///
+/// emulated 根下面第一段才是用户存储根，因此所有"锚点相当于存储根"的既有调用点
+/// （映射源、元数据换算、扫描根）都只要拿到这一条路径即可，不需要各自再加一段。
+pub(super) fn real_storage_anchor_usable_path(user_id: i32) -> String {
+    paths::join(
+        &real_storage_anchor_mount_path(user_id),
+        &user_id.to_string(),
+    )
+}
+
 pub(super) fn build_mapping_source_roots(
     real_storage_anchor: &Option<String>,
     data_media_root: &str,
@@ -207,31 +229,6 @@ pub(super) fn mountinfo_has_target(content: &str, target: &str) -> bool {
 ///
 /// 只接受 `<user>/<非空尾部>` 形态：`/`、`/media`、`/0` 这类没有存储子树尾部的 `root`
 /// 说明不了重定向，一律返回 `None`。
-fn mountinfo_root_as_data_media(root: &str) -> Option<String> {
-    let rest = match root.strip_prefix("/media/") {
-        Some(rest) => rest,
-        None => root.strip_prefix('/')?,
-    };
-    let (user, tail) = rest.split_once('/')?;
-    if user.is_empty() || !user.bytes().all(|byte| byte.is_ascii_digit()) || tail.is_empty() {
-        return None;
-    }
-    Some(format!("/data/media/{rest}"))
-}
-
-/// `root`（mountinfo 的 `root` 字段）是否表示 `backend`（`/data/media/<user>/...` 形态）
-/// 那棵沙箱子树。两种 `root` 写法都接受，见 [`mountinfo_root_as_data_media`]。
-pub(super) fn mountinfo_root_matches_data_backend(root: &str, backend: &str) -> bool {
-    paths::eq_ignore_case(root, backend)
-        || mountinfo_root_as_data_media(root)
-            .map(|source| paths::is_same_or_child(backend, &source))
-            .unwrap_or(false)
-}
-
-/// 判断挂载点 `target` 上那条记录的 `root` 是否落在该应用的私有沙箱里。
-///
-/// 用于识别「锚点被上一轮重定向污染」这一种形态：健康锚点的 `root` 指向真实存储根
-/// （形如 `/media/<user>`），被污染时则带 `Android/data/<包名>`。
 pub(super) fn mountinfo_root_is_app_sandbox(
     content: &str,
     target: &str,

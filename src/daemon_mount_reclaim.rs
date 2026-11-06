@@ -225,15 +225,16 @@ fn migrate_stale_shared_host_metadata(
     request: &MountRequest,
     current_identity: (i32, u64),
 ) -> bool {
-    let current_source = format!("srx_fuse_host[{}]", current_identity.0);
+    // 当前会话身份改按超级块判定：挂载源已原生化，源文本不再带会话标识。
+    let current_dev = crate::fuse_host::current_host_dev();
     let user_id = crate::platform::user_id_from_uid(request.uid);
     let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
     let Some(live_root) = crate::mount_identity::topmost_live_mount(request.pid, &storage_root)
     else {
         return false;
     };
-    if live_root.source != current_source
-        || !crate::fuse_host::is_current_host_source(&live_root.source)
+    if current_dev.as_deref() != Some(live_root.dev.as_str())
+        || !crate::fuse_host::is_current_host_mount(&live_root)
     {
         return false;
     }
@@ -249,12 +250,13 @@ fn migrate_stale_shared_host_metadata(
         else {
             return false;
         };
-        if live.source != current_source {
+        if current_dev.as_deref() != Some(live.dev.as_str()) {
             return false;
         }
         migrated_mounts.push(crate::mount_ledger::MountIdentity {
             mount_point: mount.mount_point.clone(),
             mount_id: live.mount_id,
+            dev: live.dev.clone(),
             source: live.source,
         });
     }
@@ -286,11 +288,11 @@ fn migrate_stale_shared_host_metadata(
         return false;
     }
     log::info!(
-        "daemon migrated stale shared host metadata pkg={} pid={} old_state={} current_source={} generation={}",
+        "daemon migrated stale shared host metadata pkg={} pid={} old_state={} current_dev={} generation={}",
         request.package_name,
         request.pid,
         state_path,
-        current_source,
+        current_dev.as_deref().unwrap_or(""),
         ledger.generation
     );
     true

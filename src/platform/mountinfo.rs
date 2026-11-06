@@ -49,6 +49,23 @@ pub fn parse_entry(line: &str) -> Option<MountInfoEntry<'_>> {
     })
 }
 
+/// 该挂载行的可选字段里是否带指定传播标签（`shared:` / `master:` / `propagate_from:` / `unbindable`）。
+///
+/// 传播标签只出现在挂载点之后、`-` 之前的可选字段区：`shared:N` 表示该挂载参与某个
+/// 对等组（改动会外播），`master:N` 表示它是某个对等组的 slave（会接受入向事件）。
+/// 判断命名空间隔离形态时必须能读到这两个字段，否则只剩"按路径猜"这条不可靠的路。
+pub fn has_propagation_tag(line: &str, tag: &str) -> bool {
+    let Some(separator) = line.find(" - ") else {
+        return false;
+    };
+    let mut fields = line[..separator].split_whitespace();
+    // 跳过挂载 ID、父 ID、设备号、root、挂载点，剩下的都是可选字段。
+    for _ in 0..5 {
+        fields.next();
+    }
+    fields.any(|field| field.starts_with(tag))
+}
+
 /// 从同一挂载点上的多条挂载记录中选出栈顶。
 ///
 /// 内核语义：同挂载点的叠层构成父链（上层 `parent_mount_id` = 下层挂载 ID），栈顶 =

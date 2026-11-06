@@ -87,8 +87,21 @@ import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 class MainActivity : ComponentActivity() {
   private val viewModel: SrxViewModel by viewModels()
 
+  private companion object {
+    /** 自检入口的 intent extra 名与取值。 */
+    const val DIAG_EXTRA = "srx_diag"
+    const val DIAG_STORAGE_SHAPE = "storage_shape"
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 零 UI 自检入口：`am start … --es srx_diag storage_shape` 只打印存储形态后立即退出，
+    // 不进入界面。用途见 StorageShapeDiag（应用域才能量出真实视角）。
+    if (intent?.getStringExtra(DIAG_EXTRA) == DIAG_STORAGE_SHAPE) {
+      StorageShapeDiag.run()
+      finish()
+      return
+    }
     enableEdgeToEdge()
     setContent {
       val prefs by viewModel.uiPreferences.collectAsStateWithLifecycle()

@@ -589,7 +589,7 @@ pub(crate) fn try_fast_update_shared_host(request: &MountRequest) -> bool {
     let Some(live) = crate::mount_identity::topmost_live_mount(request.pid, &storage_root) else {
         return false;
     };
-    if !crate::fuse_host::is_current_host_source(&live.source)
+    if !crate::fuse_host::is_current_host_mount(&live)
         || !matches!(
             crate::fuse_supervisor::probe_endpoint(request.pid, &storage_root),
             crate::fuse_supervisor::EndpointHealth::Healthy
@@ -959,6 +959,15 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
     );
     planner.set_file_monitor_enabled(request.is_file_monitor_enabled);
     let scoped_fuse_roots = plan.scoped_fuse_roots.as_slice();
+    // 系统视图克隆：与 companion 路径同一口径，必须在**本模块任何挂载落地之前**取。
+    // 落地之后经任何路径解析 `<...>/emulated/<user>` 都会命中我们自己的宿主会话，
+    // root 请求没有会话策略（`fallback_deny`）→ ENOENT → 自有私有目录的恢复 bind 失败
+    // （真机 2026-11-02：daemon 路径下 `own private restore failed … tmp/system_view`）。
+    if let Some(clone) =
+        crate::mount::SystemViewClone::capture(crate::platform::user_id_from_uid(request.uid))
+    {
+        planner.set_system_view_clone(clone);
+    }
     let cleared_system_view_before_preattach =
         if shared_host_preattach_candidate(request, scoped_fuse_roots)
             && crate::system_fuse_view::should_clear_system_fuse_view_for_platform()
@@ -1160,6 +1169,11 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
             request.package_name,
             request.pid
         );
+        // 锚点用完即摘：它只是映射源与元数据换算的临时真实视图，不承载任何应用可见
+        // 路径。留在应用挂载表里就是一条模块私有路径（`tmp/real_storage/<user>`），
+        // 也就是 namespace 后端唯一剩下的字符串痕迹。已建立的映射层各自持有超级块与
+        // dentry 引用，摘除不影响内容与访问。
+        planner.detach_real_storage_anchor();
         record_mount_identity(request, &mounted_targets, &fuse_children);
         // 挂载结论（能力快照与 backend_effective 选择日志）紧挨成功回包产生，不提前登记。
         // 写状态失败会把本轮挂载整轮摘除，结论提前写下去等于宣称一个已经不存在的 backend：
@@ -1219,7 +1233,9 @@ fn preattach_shared_host(
         return Err(HostSessionSkip::AttachFailed);
     }
     let user_id = crate::platform::user_id_from_uid(request.uid);
-    let storage_root = crate::platform::paths::storage_user_root_for_user(user_id);
+    // 接入目标是视图根（上提模式下是 `…/emulated`），与用户根不同：用户根仍用于私有目录
+    // 恢复与状态判定，二者不能混用。
+    let attach_root = crate::fuse_redirect::config::host_attach_root_for_user(user_id);
 
     let Some(host) = crate::fuse_host::get_fuse_host() else {
         return Err(HostSessionSkip::NoSharedHost);
@@ -1237,7 +1253,7 @@ fn preattach_shared_host(
         request.policy_fingerprint,
         ack_budget_ms,
     );
-    if !crate::fuse_host::can_attach_app(request.uid, &storage_root) {
+    if !crate::fuse_host::can_attach_app(request.uid, &attach_root) {
         return Err(HostSessionSkip::AttachGateClosed);
     }
     if !registered {
@@ -1259,23 +1275,22 @@ fn preattach_shared_host(
     // 叠层，但仍要按宿主挂载记账——否则状态文件里没有这条目标，下一轮清理会漏摘，
     // 挂载层没有任何归属判据。判据必须是「当前会话」：旧代际的层已经失效，仍需重新挂。
     let view = crate::fuse_host::HostSessionView::from(host.as_ref());
-    if crate::fuse_session::storage_view_top_source(&storage_root).as_deref()
-        == Some(view.mount_source.as_str())
+    if crate::fuse_session::storage_view_top_dev(&attach_root).as_deref() == Some(view.dev.as_str())
     {
         log::info!(
             "daemon shared host preattach skipped, current host layer already serving pid={} pkg={} target={}",
             request.pid,
             request.package_name,
-            storage_root
+            attach_root
         );
         return Ok(FuseMountState {
-            target: storage_root,
+            target: attach_root,
             child: 0,
             child_start_time_ticks: 0,
             host_session: Some((view.child_pid, view.child_start_time_ticks)),
         });
     }
-    let Some(state) = try_bind_to_fuse_host(&host, request, &storage_root, attach_timeout_sec)
+    let Some(state) = try_bind_to_fuse_host(&host, request, &attach_root, attach_timeout_sec)
     else {
         return Err(HostSessionSkip::AttachFailed);
     };
@@ -1283,7 +1298,7 @@ fn preattach_shared_host(
         "daemon shared host preattached pid={} pkg={} target={}",
         request.pid,
         request.package_name,
-        storage_root
+        attach_root
     );
     Ok(state)
 }
@@ -1409,6 +1424,8 @@ fn try_bind_to_fuse_host(
     let attached = crate::fuse_host::attach_app_to_host(
         &crate::fuse_host::HostSessionView::from(host),
         mount_root,
+        crate::platform::user_id_from_uid(request.uid),
+        request.uid,
         attach_timeout_sec,
     )?;
     log::info!(
@@ -1811,7 +1828,7 @@ fn should_keep_reload_redirect_root(
     };
     // 来自已被重建的宿主会话的层不能保留：它仍是本模块的层（归属判定会认），但 FUSE 连接
     // 已随旧会话结束断开，保留下来应用只会一直拿到 ENOTCONN。
-    if crate::fuse_host::is_stale_host_source(source) {
+    if crate::fuse_host::is_stale_host_at(target) {
         return false;
     }
     if !mount_identity::is_module_redirect_mount(source, root, target, &request.package_name) {
@@ -1952,6 +1969,9 @@ fn clear_mount_target_stack(target: &str) -> bool {
 fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>) -> bool {
     let mut passes = 0usize;
     let normalized_target = paths::normalize_syntax(target);
+    // 已知会话 dev 只需算一次：清理循环每一层都要判归属，逐层重读账本目录会在
+    // 多应用批次里退化成 O(层数 x 账本数) 的磁盘读。
+    let known_devs = crate::mount_ledger::known_module_fuse_devs();
 
     loop {
         let Some(live) = mount_identity::topmost_live_mount(0, target) else {
@@ -1997,7 +2017,28 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
         // root=/、fs=tmpfs。存储子路径上不存在其它裸 tmpfs 形态，与系统挂载无重叠。
         // 它必须随 cleanup 一并摘除：留在原地会让 disable 后的应用永远看到空只读目录。
         let is_module_barrier = live.fs_type == "tmpfs" && live.root == "/";
+        // 超级块归属：源原生化成 `/dev/fuse` 之后，`source`/`root` 形态对本模块的层与系统
+        // MediaProvider 的层完全同形，`is_module_redirect_mount` 的四条判据全部落空。账本
+        // 里记录了每层落盘时的 `dev`，同 dev 即"出自本实例的会话"，这是唯一还能用的内核事实。
+        //
+        // 不能只认**本 pid 账本**里的 dev：共享宿主会话的层由 companion 在应用命名空间里挂，
+        // 账本可能还没落盘、或已被上一轮 generation 重写而不含这一层；宿主换代后旧层也会
+        // 残留在活着的应用命名空间里。因此以「本账本登记的 dev ∪ 全模块已知会话 dev」判定，
+        // 后者包含当前宿主会话与历史会话（见 `known_module_fuse_devs`）。
+        //
+        // 没有这一条时真机现象（2026-11-02）：daemon 把本模块自己的层判成 foreign → 跳过摘除
+        // → `cleanup incomplete` → 重挂请求仍回 `completed`，但运行中应用的挂载栈一层未换，
+        // 表现为**改配置不生效、必须杀进程**。
+        // 只有 FUSE 超级块才谈得上"同 dev 即同会话"：私有目录 alias bind 之类的层继承
+        // 后端 f2fs 的超级块，dev 相同并不能说明它出自本模块（系统自己的同盘 bind 也是这个
+        // dev），按 dev 认领会误摘系统挂载。
+        let is_owned_by_dev = !live.dev.is_empty()
+            && live.fs_type.starts_with("fuse")
+            && (known_devs.contains(&live.dev)
+                || ledger
+                    .is_some_and(|ledger| ledger.mounts.iter().any(|mount| mount.dev == live.dev)));
         if !is_module_barrier
+            && !is_owned_by_dev
             && !mount_identity::is_module_redirect_mount(
                 &live.source,
                 &live.root,
@@ -2021,12 +2062,14 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
                 return true;
             }
             log::warn!(
-                "daemon unmount skipped foreign mount target={} mount_id={} source={} root={} fs={}",
+                "daemon unmount skipped foreign mount target={} mount_id={} source={} root={} fs={} dev={} ledger_devs={}",
                 target,
                 live.mount_id,
                 live.source,
                 live.root,
-                live.fs_type
+                live.fs_type,
+                live.dev,
+                ledger.map_or(0, |ledger| ledger.mounts.len())
             );
             return false;
         }

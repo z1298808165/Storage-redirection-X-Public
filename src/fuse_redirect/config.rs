@@ -325,33 +325,11 @@ pub fn scoped_fuse_mount_roots_for_request<R: MountRequestFields + ?Sized>(
         return Vec::new();
     }
 
-    if matches!(backend_mode, StorageBackendMode::Fuse) {
-        let user_id = crate::platform::user_id_from_uid(request.uid());
-        return vec![paths::storage_user_root_for_user(user_id)];
-    }
-
-    // 只有 wildcard 只读规则时使用 namespace fallback。此类规则需要把通配
-    // 收敛到父目录并依赖真实存储种子；启动 scoped FUSE 会把 Download 根接管，
-    // 反而丢失 fallback 的真实文件视图。
-    if request.allowed_real_paths().is_empty()
-        && request.path_mappings().is_empty()
-        && request
-            .read_only_paths()
-            .iter()
-            .any(|rule| paths::contains_wildcards(rule))
-    {
-        return Vec::new();
-    }
-
-    scoped_mount_roots_for_hybrid_rules(
-        request.uid(),
-        request.allowed_real_paths(),
-        request.excluded_real_paths(),
-        request.sandboxed_paths(),
-        request.read_only_paths(),
-        request.path_mappings(),
-        request.is_mapping_mode_only(),
-    )
+    // 统一走 FUSE：`Auto` 的语义是「FUSE 优先」——能力可用就由本会话接管整棵视图根，
+    // 规则仍在策略层逐请求判定；能力不可用时由上面的能力门禁返回空根，挂载层回落
+    // namespace。`Fuse` 只是显式锁定，两者此处同构。
+    let user_id = crate::platform::user_id_from_uid(request.uid());
+    vec![paths::storage_user_root_for_user(user_id)]
 }
 
 /// 检查设备是否暴露可读写的 `/dev/fuse`。
@@ -852,11 +830,14 @@ fn big_core_cpu_mask() -> Option<u64> {
 /// 的系统 FUSE 由 AOSP 把该值调到 40，这就是两者持续写差距的主因。真机
 /// 2026-10-15：max_ratio 1→40 后 1M 持续写 461→1002MB/s、4K 写 559→934MB/s。
 /// 每个新连接默认回落为 1，因此必须在每次挂载成功后设置；失败只降级不影响功能。
-fn set_bdi_max_ratio(mount_point: &str, session_source: &str) {
+fn set_bdi_max_ratio(mount_point: &str, identity: &ScopedMountIdentity) {
     const TARGET_RATIO: &str = "40";
-    let device = bdi_device_for_mount(session_source);
+    let device = bdi_device_for_mount(identity);
     let Some(device) = device else {
-        log::debug!("fuse session bdi device not found mp={mount_point} source={session_source}");
+        log::debug!(
+            "fuse session bdi device not found mp={mount_point} dev={}",
+            identity.dev
+        );
         return;
     };
     let sysfs = format!("/sys/class/bdi/{device}/max_ratio");
@@ -867,32 +848,16 @@ fn set_bdi_max_ratio(mount_point: &str, session_source: &str) {
     }
 }
 
-/// 解析本会话挂载对应的 BDI 设备号（形如 0:142）。
+/// 解析本会话挂载对应的 BDI 设备号（形如 `0:142`）。
 ///
-/// 只按挂载源匹配 `/proc/self/mountinfo`——源串含本进程 pid（`srx_fuse_host[<pid>]` /
-/// scoped 形式），是唯一可归属的锚点，也天然覆盖孤儿挂载形态（mountinfo 有记录、底层
-/// 挂载点目录已被清理）。这里刻意**不** `stat` 挂载点取 `st_dev`：端点卡死时那次
-/// lookup 会把 daemon 自己拖进不可中断的 D 态，而放宽脏页配额只是性能优化，不值得
-/// 让数据面故障升级成守护进程故障。
-fn bdi_device_for_mount(session_source: &str) -> Option<String> {
-    // 不从 daemon 里去 stat FUSE 挂载点：端点卡死时这次 lookup 会把 daemon 自己拖进
-    // D 态。mountinfo 已经带着匹配 FUSE 源的后备设备，且是不碰数据面的读取路径。
-    let content = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    content.lines().find_map(|line| {
-        let separator = line.find(" - ")?;
-        let mut before = line[..separator].split_whitespace();
-        before.next()?;
-        before.next()?;
-        let dev = before.next()?;
-        let mut after = line[separator + 3..].split_whitespace();
-        let fs_type = after.next()?;
-        let source = after.next()?;
-        if fs_type == "fuse" && source == session_source {
-            Some(dev.to_string())
-        } else {
-            None
-        }
-    })
+/// 直接用会话登记下来的超级块设备号：BDI 目录名就是 `major:minor`，与 mountinfo 的
+/// `dev` 字段一致。此前按挂载源唯一匹配，源原生化之后会匹配到系统 MediaProvider 的连接，
+/// 把配额放宽到别人的连接上（自己的连接没放宽，写入吞吐收益丢失）。
+///
+/// 刻意**不** `stat` 挂载点取 `st_dev`：端点卡死时那次 lookup 会把 daemon 拖进不可中断的
+/// D 态，而这只是性能优化，不值得让数据面故障升级成守护进程故障。
+fn bdi_device_for_mount(identity: &ScopedMountIdentity) -> Option<String> {
+    (!identity.dev.is_empty()).then(|| identity.dev.clone())
 }
 
 fn pin_current_thread_to_big_cores() {
@@ -992,13 +957,20 @@ pub fn mount_host_fuse(
     // 与 scoped 会话同口径：宿主事件循环线程同样继承大核亲和性。
     pin_current_thread_to_big_cores();
     let mut mount_options = fuser::Config::default();
+    // 与系统 MediaProvider 的挂载选项逐项对齐：应用把自己的存储根与同目录下的其它
+    // MediaProvider 视图（`/storage/emulated`、`/mnt/*/0/emulated`）放在一起看时，
+    // `nosuid,nodev,noexec,noatime` 与超级选项 `lazytime` 必须一模一样——少任何一项
+    // 本身就是"这个挂载不是系统建的"的判据（`lazytime` 是通过 vendored fuser 的
+    // `MountOption::LazyTime` 传的）。绑定到应用命名空间的视图与别名 bind 会继承这份
+    // mnt_flags，因此只在这里配一次。
     mount_options.mount_options = vec![
         MountOption::FSName(session_mount_source.clone()),
-        MountOption::Subtype("srx".to_string()),
         MountOption::RW,
         MountOption::NoSuid,
         MountOption::NoDev,
+        MountOption::NoExec,
         MountOption::NoAtime,
+        MountOption::LazyTime,
         MountOption::Async,
     ];
     mount_options.acl = SessionACL::All;
@@ -1051,16 +1023,15 @@ pub fn mount_host_fuse(
         }
     };
 
-    let Some(identity) = wait_for_stable_session_mount(host_mount_point, &session_mount_source)
-    else {
+    let Some(identity) = wait_for_stable_session_mount(host_mount_point) else {
         log::warn!(
             "fuse host mount not stable mp={} source={}",
             host_mount_point,
             session_mount_source
         );
         let identity = ScopedMountIdentity {
-            source: session_mount_source.clone(),
             mount_id: 0,
+            dev: String::new(),
         };
         finish_background_session(background, host_mount_point, false, Some(&identity));
         crate::fuse_host::host_stage("stable_failed");
@@ -1069,7 +1040,7 @@ pub fn mount_host_fuse(
     };
     crate::fuse_host::host_stage("stable_ok");
     // 与 scoped 会话同口径：宿主连接的 BDI 脏页配额同样默认被限为 1%。
-    set_bdi_max_ratio(host_mount_point, &identity.source);
+    set_bdi_max_ratio(host_mount_point, &identity);
 
     // 宿主挂载点必须显式设为 shared propagation：`MS_REC|MS_PRIVATE` 只切断向外传播，
     // 不会让子 namespace 得见该挂载；缺了 shared，应用侧的 MS_BIND 会静默失败。参考
@@ -1113,10 +1084,11 @@ pub fn mount_host_fuse(
     crate::fuse_host::host_stage("shared_ok");
 
     log::info!(
-        "fuse host session mount registered mp={} mount_id={} source={}",
+        "fuse host session mount registered mp={} mount_id={} dev={} source={}",
         host_mount_point,
         identity.mount_id,
-        identity.source
+        identity.dev,
+        session_mount_source
     );
     crate::fuse_host::host_stage("ready");
     send_ready_result(ready_sock, 0);
@@ -2050,34 +2022,25 @@ fn detach_mount_point(mount_point: &str, identity: Option<&ScopedMountIdentity>)
     is_already_unmounted_errno(last_errno())
 }
 
-/// scoped 挂载使用的挂载源前缀。
+/// 本模块所有 FUSE 会话使用的挂载源。
 ///
-/// 测试流按该前缀在 `/proc/<pid>/mountinfo` 中识别本模块的 scoped 挂载，格式不能改动；
-/// 会话标识以 `[pid]` 追加在后缀里，用于区分同一路径上被新会话替换的挂载。
-const SCOPED_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_redirect";
-
-/// 共享宿主会话使用的挂载源前缀。
+/// 取系统 MediaProvider FUSE 的同一个源（`/dev/fuse`）：挂载表里任何一条记录都不再
+/// 带模块标识。归属判定因此完全改由内核事实承担——超级块设备号（`dev`）+ 挂载 ID，
+/// 登记在账本与宿主快照里（见 `mount_ledger::known_module_fuse_devs` 与
+/// `fuse_host::current_host_dev`）。
 ///
-/// 宿主会话与 scoped 会话共存期，挂载归属与测试流按前缀区分：测试流仍只认
-/// `srx_fuse_redirect`，因此宿主会话不会影响既有场景断言；`module_mount_source.rs`
-/// 的 `MODULE_MOUNT_SOURCE_PREFIXES` 已经同时包含两个前缀，账本能按前缀判定归属。
-// quality-allow(lint-suppression): 宿主前缀常量仅在 daemon 二进制路径使用,lib 目标不调用。
-#[allow(dead_code)]
-const HOST_MOUNT_SOURCE_PREFIX: &str = "srx_fuse_host";
+/// **不要再往这里加会话标识**（例如 `srx_fuse_host[<pid>]`）：那正是"被接管应用一读
+/// 挂载表就能认出本模块"的根源，而且会让"挂载源"同时承担身份与诊断两种职责，改任何
+/// 一处都要连带改十几处判定。
+pub const NATIVE_FUSE_SOURCE: &str = "/dev/fuse";
 
-/// 生成本次共享宿主会话唯一的挂载源（`MountOption::FSName`）。
+/// 生成共享宿主会话的挂载源（`MountOption::FSName`）。
+///
+/// 保留函数形态只为让调用点语义清晰（"这次会话的源"）；取值恒为 [`NATIVE_FUSE_SOURCE`]。
 // quality-allow(lint-suppression): 宿主挂载源生成函数仅在 daemon 二进制路径使用,lib 目标不调用。
 #[allow(dead_code)]
-pub fn host_mount_source(service_pid: u32) -> String {
-    format!("{HOST_MOUNT_SOURCE_PREFIX}[{service_pid}]")
-}
-
-/// 挂载源是否由共享宿主会话生成（不区分该会话是否仍在服务）。
-///
-/// 与 [`host_mount_source`] 放在一起：前缀只在这一处出现，生成与识别不会各自漂移——
-/// 这类前缀一旦两处各写一份，改的时候漏一处就会让归属判定和清理流程给出相反结论。
-pub fn is_host_mount_source(source: &str) -> bool {
-    source.starts_with(HOST_MOUNT_SOURCE_PREFIX)
+pub fn host_mount_source(_service_pid: u32) -> String {
+    NATIVE_FUSE_SOURCE.to_string()
 }
 
 /// `/proc/self/mountinfo` 中一条挂载记录里用于判定挂载归属的字段。
@@ -2086,61 +2049,74 @@ struct MountEntry {
     mount_id: u64,
     /// 父挂载 ID：同挂载点叠放时即下面一层的挂载 ID，用于栈顶判定。
     parent_mount_id: u64,
+    /// 超级块设备号：bind/克隆继承同一超级块，是"哪一层的文件系统"的身份。
+    dev: String,
     fs_type: String,
-    source: String,
-}
-
-/// 判断一条挂载记录（文件系统类型 + 挂载源）是否本模块的会话 FUSE。
-///
-/// scoped 挂载在内核 `mount(2)` 直挂时文件系统类型是 `fuse`，经 fusermount 回退时由
-/// `subtype=srx` 记为 `fuse.srx`；两者都要再看挂载源前缀，避免把系统媒体 FUSE 挂载
-/// （挂载源是 `/dev/fuse`）当成模块挂载。
-pub fn is_srx_session_fuse(fs_type: &str, source: &str) -> bool {
-    matches!(fs_type, "fuse" | "fuse.srx")
-        && (source.starts_with(SCOPED_MOUNT_SOURCE_PREFIX)
-            || source.starts_with(HOST_MOUNT_SOURCE_PREFIX))
 }
 
 impl MountEntry {
-    /// 判断这条记录是否本模块的 scoped FUSE 挂载。
-    fn is_scoped_fuse(&self) -> bool {
-        is_srx_session_fuse(&self.fs_type, &self.source)
+    /// 判断这条记录是否本模块的 FUSE 挂载（任一 scoped 会话或共享宿主会话）。
+    ///
+    /// 判据是超级块身份而不是挂载源：挂载源已原生化成 `/dev/fuse`，与系统 MediaProvider
+    /// 的 FUSE 完全同形；"是不是我们的"只能靠本模块自己登记过的 dev 集合。
+    fn is_module_fuse(&self) -> bool {
+        self.fs_type.starts_with("fuse")
+            && !self.dev.is_empty()
+            && crate::mount_ledger::known_module_fuse_devs().contains(&self.dev)
     }
 }
 
 /// scoped 会话在挂载后登记的挂载身份。
 ///
-/// 收尾时必须确认挂载点仍由本次会话持有，因此保存本次会话唯一的挂载源；`mount_id` 只用于
-/// 诊断日志。
+/// 收尾时必须确认挂载点仍由本次会话持有。挂载源已原生化，无法再用源文本认领，
+/// 因此只保留超级块身份：`mount_id` 区分叠放层次，`dev` 区分"哪一代会话"。
+#[derive(Clone, PartialEq, Eq)]
 struct ScopedMountIdentity {
-    source: String,
     mount_id: u64,
+    dev: String,
 }
 
 impl ScopedMountIdentity {
-    /// 挂载完成后登记本次会话身份；挂载表不可读或最顶层挂载不是本次会话时返回 None。
-    fn capture(mount_point: &str, source: &str) -> Option<Self> {
+    /// 挂载完成后登记本次会话身份。
+    ///
+    /// 必须在 `spawn_mount2` 成功返回之后调用：此时该挂载点最顶层就是刚挂上的这一层，
+    /// 因此"取最顶层"本身就是"取本次会话"。挂载源原生化之后无法再用源文本认领，
+    /// 超级块身份（mount_id + dev）是唯一还能区分"本轮挂载"与"系统挂载"的事实。
+    fn capture(mount_point: &str) -> Option<Self> {
         let entry = topmost_mount_entry(mount_point)?;
-        (entry.source == source).then(|| Self {
-            source: source.to_string(),
+        if entry.dev.is_empty() || !entry.fs_type.starts_with("fuse") {
+            return None;
+        }
+        Some(Self {
             mount_id: entry.mount_id,
+            dev: entry.dev,
         })
     }
 }
 
 /// 在有限窗口内连续确认本会话挂载，避免启动后立即报告不稳定状态。
-fn wait_for_stable_session_mount(mount_point: &str, source: &str) -> Option<ScopedMountIdentity> {
+fn wait_for_stable_session_mount(mount_point: &str) -> Option<ScopedMountIdentity> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+    let mut stable: Option<ScopedMountIdentity> = None;
     let mut consecutive_matches = 0;
     while std::time::Instant::now() < deadline {
-        let identity = ScopedMountIdentity::capture(mount_point, source);
-        if identity.is_some() {
-            consecutive_matches += 1;
-            if consecutive_matches >= 2 {
-                return identity;
+        match ScopedMountIdentity::capture(mount_point) {
+            // 连续两轮看到同一个超级块身份，才认为这一层稳定落定（首轮的身份就是本次会话：
+            // 挂载刚成功返回，最顶层必然是它）。
+            Some(identity) if stable.as_ref() == Some(&identity) => {
+                consecutive_matches += 1;
+                if consecutive_matches >= 2 {
+                    return Some(identity);
+                }
             }
-        } else {
-            consecutive_matches = 0;
+            Some(identity) => {
+                stable = Some(identity);
+                consecutive_matches = 1;
+            }
+            None => {
+                stable = None;
+                consecutive_matches = 0;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -2169,8 +2145,8 @@ fn mount_entries_at(mount_point: &str) -> Vec<MountEntry> {
             Some(MountEntry {
                 mount_id: entry.mount_id,
                 parent_mount_id: entry.parent_mount_id,
+                dev: entry.dev.to_string(),
                 fs_type: entry.fs_type.to_string(),
-                source: mountinfo::unescape_field(entry.source),
             })
         })
         .collect()
@@ -2199,10 +2175,11 @@ fn mount_ownership(mount_point: &str, identity: Option<&ScopedMountIdentity>) ->
         return MountOwnership::Released;
     };
     let owned_by_session = match identity {
-        Some(identity) => entry.source == identity.source,
-        // 未能登记会话身份（挂载时挂载表不可读）时退回按 scoped 挂载特征判断，至少不会把
+        // 挂载 ID + 超级块双重比对：ID 随命名空间内的挂载存在，dev 保证"同一超级块"。
+        Some(identity) => entry.mount_id == identity.mount_id && entry.dev == identity.dev,
+        // 未能登记会话身份（挂载时挂载表不可读）时退回按超级块归属判断，至少不会把
         // 系统媒体 FUSE 挂载当成模块挂载。
-        None => entry.is_scoped_fuse(),
+        None => entry.is_module_fuse(),
     };
     if owned_by_session {
         MountOwnership::Session
@@ -2231,370 +2208,59 @@ impl MountOwnership {
     }
 }
 
+/// P5-c 总开关：视图根是否上提一层（`…/emulated` 取代 `…/emulated/<user>`）。
+///
+/// 置 true 时必须与 `apply.rs` 的主挂载目标同步改动，两者不一致会让"会话挂载点"和
+/// "策略里认定的视图根"错位（策略侧 `view_lifted` 由挂载点形态派生）。改这里等于同时
+/// 打开 C2 的剥段与 C3 的根条目合成，必须整轮真机验证。
+pub(crate) const VIEW_ROOT_LIFTED: bool = true;
+
+/// 共享宿主会话的接入目标：上提模式下是视图根（`…/emulated`），否则是用户根。
+///
+/// daemon 与 companion 两条接入路径都只从这里取，绝不各自推导：两侧各写一份的后果是
+/// "一侧抬了、另一侧没抬"，症状是应用静默失去重定向且没有任何报错。
+pub(crate) fn host_attach_root_for_user(user_id: i32) -> String {
+    let user_root = crate::platform::paths::storage_user_root_for_user(user_id);
+    if VIEW_ROOT_LIFTED {
+        crate::platform::paths::parent(&user_root)
+    } else {
+        user_root
+    }
+}
+
 pub(super) fn fuse_mount_point(config: &FuseRedirectConfig, user_id: i32) -> String {
     let storage_root = paths::storage_user_root_for_user(user_id);
     let Some(raw_mount_root) = config.mount_root.as_deref() else {
-        return storage_root;
+        return lifted_view_root(&storage_root);
     };
     let mut mount_root = paths::resolve_user_path(&paths::normalize(raw_mount_root), user_id);
     if !paths::is_absolute(&mount_root) {
         mount_root = paths::normalize(&paths::join(&storage_root, &mount_root));
     }
-    if paths::eq_ignore_case(&mount_root, &storage_root)
-        || paths::is_child(&mount_root, &storage_root)
-    {
+    if paths::eq_ignore_case(&mount_root, &storage_root) {
+        // 整体重定向（根就是用户根）：上提模式下换成父级视图根。
+        lifted_view_root(&storage_root)
+    } else if paths::is_child(&mount_root, &storage_root) {
+        // scoped 子路径会话（hybrid 映射）：保持原位，局部会话不上提。
         mount_root
     } else {
-        storage_root
+        lifted_view_root(&storage_root)
     }
 }
 
-pub fn scoped_mount_roots_for_wildcard_rules<'a>(
-    uid: i32,
-    rules: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    let user_id = crate::platform::user_id_from_uid(uid);
-    let storage_root = paths::storage_user_root_for_user(user_id);
-    let mut roots = Vec::new();
-    for raw in rules {
-        let raw = raw.trim_start();
-        let raw = raw.strip_prefix('!').unwrap_or(raw).trim_start();
-        let mut resolved = paths::resolve_user_path(&paths::normalize(raw), user_id);
-        if resolved.is_empty()
-            || paths::has_unsafe_segments(&resolved)
-            || !paths::contains_wildcards(&resolved)
-        {
-            continue;
-        }
-        if !paths::is_absolute(&resolved) {
-            resolved = paths::normalize(&paths::join(&storage_root, &resolved));
-        }
-        if !paths::is_child(&resolved, &storage_root)
-            && !paths::eq_ignore_case(&resolved, &storage_root)
-        {
-            continue;
-        }
-        let prefix = paths::concrete_prefix_before_wildcard(&resolved);
-        if let Some(root) = scoped_mount_root_for_wildcard_prefix(&prefix, &storage_root) {
-            roots.push(root);
-        }
-    }
-    compact_scoped_mount_roots(roots, &storage_root)
-}
-
-fn scoped_mount_root_for_wildcard_prefix(prefix: &str, storage_root: &str) -> Option<String> {
-    if prefix.is_empty() || !paths::is_child(prefix, storage_root) {
-        return Some(storage_root.to_string());
-    }
-    if let Some(root) = public_collection_mount_root(prefix, storage_root) {
-        return Some(root);
-    }
-    Some(prefix.to_string())
-}
-
-fn public_collection_mount_root(prefix: &str, storage_root: &str) -> Option<String> {
-    public_collection_name(prefix, storage_root).map(|first| paths::join(storage_root, first))
-}
-
-fn public_collection_name<'a>(prefix: &'a str, storage_root: &str) -> Option<&'a str> {
-    let rel = paths::relative_child_path(prefix, storage_root)?;
-    let first = rel.split('/').find(|part| !part.is_empty())?;
-    match first {
-        "Alarms" | "Audiobooks" | "DCIM" | "Documents" | "Download" | "Movies" | "Music"
-        | "Notifications" | "Pictures" | "Podcasts" | "Recordings" | "Ringtones" => Some(first),
-        _ => None,
-    }
-}
-
-pub fn scoped_mount_roots_for_hybrid_rules(
-    uid: i32,
-    allowed_real_paths: &[String],
-    excluded_real_paths: &[String],
-    sandboxed_paths: &[String],
-    read_only_paths: &[String],
-    path_mappings: &[crate::domain::PathMapping],
-    is_mapping_mode_only: bool,
-) -> Vec<String> {
-    let user_id = crate::platform::user_id_from_uid(uid);
-    let storage_root = paths::storage_user_root_for_user(user_id);
-    // 映射源中的通配也依赖动态目录匹配，不能仅交给 namespace 的启动时展开。
-    // 先复用映射校验，避免无效目标或 namespace 外路径扩大 FUSE 接管范围。
-    let scoped_path_mappings = resolve_scoped_path_mappings(path_mappings, user_id, &storage_root);
-    let mapping_wildcard_rules = scoped_path_mappings
-        .iter()
-        .map(|(request, _)| request.as_str());
-    let scoped_allowed_rules = allowed_real_paths.iter().map(String::as_str);
-    let sandbox_include_rules = sandboxed_paths
-        .iter()
-        .filter(|rule| !rule.trim_start().starts_with('!'))
-        .map(String::as_str);
-    let mut roots = scoped_mount_roots_for_wildcard_rules(
-        uid,
-        scoped_allowed_rules
-            .chain(excluded_real_paths.iter().map(String::as_str))
-            .chain(sandbox_include_rules)
-            .chain(mapping_wildcard_rules),
-    );
-    // 请求侧在共享存储之外、目标侧在共享存储之内的映射不会成为通配根，但其目标侧
-    // 正是应用实际访问的路径，必须显式成为 scoped FUSE 根，否则该路径不在 FUSE
-    // 视图内：规则表里查不到映射、目标侧目录也不会被创建，应用一律 ENOENT。
-    for (request, final_path) in &scoped_path_mappings {
-        if paths::contains_wildcards(request) || paths::is_same_or_child(request, &storage_root) {
-            continue;
-        }
-        if paths::contains_wildcards(final_path)
-            || paths::eq_ignore_case(final_path, &storage_root)
-            || !paths::is_child(final_path, &storage_root)
-        {
-            continue;
-        }
-        roots.push(final_path.clone());
-    }
-    // 诊断：混合规则下是否产生 scoped FUSE 根，直接决定视图根上会不会多一层 FUSE bind。
-    // Android 13 场景 29 的映射只落地后端别名，而通过的 Android 14 在视图根上多一层
-    // FUSE（设备号 0:88 vs 视图根的 254:40），因此需要确认该平台是否本就走不到 FUSE。
-    // 每次挂载规划都会命中，属于排查用轨迹，只在详细日志下记录。
-    log::debug!(
-        "scoped roots diag uid={} map_only={} allowed={} excl={} sandbox={} ro={} mappings={} wildcard_roots={}",
-        uid,
-        is_mapping_mode_only,
-        allowed_real_paths.len(),
-        excluded_real_paths.len(),
-        sandboxed_paths.len(),
-        read_only_paths.len(),
-        path_mappings.len(),
-        roots.len()
-    );
-
-    if is_mapping_mode_only {
-        for sandboxed_path in sandboxed_paths {
-            if sandboxed_path.trim_start().starts_with('!') {
-                continue;
-            }
-            let sandboxed_root =
-                resolve_concrete_scoped_rule_parent(sandboxed_path, user_id, &storage_root);
-            if !sandboxed_root.is_empty() {
-                roots.push(sandboxed_root);
-            }
-        }
-    }
-
-    for allowed_path in allowed_real_paths {
-        // 放行规则以自身为 scoped 根，而不是父目录。取父目录会带来两个问题：顶层规则
-        // （如 DCIM、Pictures）的父目录就是存储根，会让整个存储被 FUSE 接管并在压缩时
-        // 吞并其余更精确的根；而 Download/SrtMonitor 这类规则取到的 Download 也会吞并
-        // 同配置下的兄弟目录（如只读的 Download/SrtMonitorLocked），使其拿不到独立挂载点。
-        // 以规则自身为根即可覆盖该目录下的放行需求，且与兄弟根共存。
-        // mapping_mode_only 的 sandboxed 分支仍沿用父目录，其语义要求按父目录整体接管。
-        let allowed_root = resolve_scoped_rule_path(allowed_path, user_id, &storage_root);
-        if allowed_root.is_empty()
-            || paths::contains_wildcards(&allowed_root)
-            || paths::eq_ignore_case(&allowed_root, &storage_root)
-            || !paths::is_child(&allowed_root, &storage_root)
-        {
-            continue;
-        }
-        roots.push(allowed_root);
-    }
-
-    // 仅有通配只读规则时不单独启动 scoped FUSE：namespace fallback 会把规则收敛到
-    // 具体父目录，既能保留真实文件可读性，也避免 FUSE 根覆盖后无法准备真实种子目录。
-    let normalized_read_only_paths = super::normalize_rule_list(read_only_paths.to_vec(), user_id);
-    let (read_only_includes, _) = paths::split_exclusion_rules(&normalized_read_only_paths);
-    // 具体只读规则一律由 scoped FUSE 就地承接，而不是在 namespace 里把可见路径改绑到
-    // 真实后端：`/data/media/<user>` 后端带 media_rw_data_file 上下文，普通应用即使
-    // 目录属于自身 UID 也会被 SELinux 拒绝列举该目录（应用侧表现为 listFiles 返回 null，
-    // 目录列举为空）。交给 FUSE 后可见路径仍是应用可访问的视图，内容直接读真实后端，
-    // 只读仍按 open-for-write、truncate、chmod、link、rename、delete 与 W_OK 逐条判定。
-    // 带排除子项或嵌套映射的规则还需要运行期动态目录匹配，同样必须依赖 scoped FUSE。
-    for read_only_root in &read_only_includes {
-        if read_only_root.is_empty() || paths::contains_wildcards(read_only_root) {
-            continue;
-        }
-        roots.push(read_only_root.clone());
-    }
-
-    // 挂载根的三级降级（去重剔子路径、退化顶层、退化整个存储根）只输出最终结果，
-    // 一旦降级就看不出是哪条规则贡献了多余的根。这里在压缩前后各记录一次：该函数只在
-    // 应用挂载时执行一次，频率极低。
-    log::info!(
-        "scoped roots raw count={} list={}",
-        roots.len(),
-        roots.join(",")
-    );
-    let compacted = compact_scoped_mount_roots(roots, &storage_root);
-    log::info!(
-        "scoped roots compacted count={} list={}",
-        compacted.len(),
-        compacted.join(",")
-    );
-    compacted
-}
-
-/// 一条映射在 scoped FUSE 侧是否可用，以及它为挂载根贡献的路径。
-///
-/// 两侧都在共享存储之内的映射按常规处理，由请求侧承接（请求侧本身在 FUSE
-/// 视图内）。请求侧在共享存储之外、但目标侧落在共享存储之内的映射（典型形态：
-/// `/data/user/0/<pkg>/cache` → `Android/data/<pkg>/cache`）不能整条丢弃——应用
-/// 访问的是目标侧路径，丢弃后目标侧目录不会进入 FUSE 视图，应用读目标侧得到
-/// ENOENT（真机：TG 读不到 `Android/data/nu.gpu.nagram/cache/*.jpg`，全部
-/// open failed: ENOENT）。这类映射由目标侧提供挂载根，使目标侧路径进入 FUSE
-/// 视图并解析到真实后端。
-///
-/// 目标侧在共享存储之外的映射一律返回 `None`（维持既有丢弃行为）：scoped FUSE
-/// 的后端以共享存储为根，无法表达存储外目标，策略层的 `resolve_storage_rule`
-/// 同样会拒绝；若在这里放行，带通配的请求侧会经通配根推导在公共目录上扩大
-/// FUSE 接管范围，而策略表里却没有对应规则。这类映射仍由挂载层 namespace bind
-/// 直接承接（`mount/map.rs` 不做存储内归属过滤），行为与改动前一致。
-///
-/// 返回 `None` 表示该映射无法由 scoped FUSE 承接。
-fn scoped_mapping_mount_contribution(
-    request_path: &str,
-    final_path: &str,
-    storage_root: &str,
-) -> Option<Option<String>> {
-    let request_in_storage = paths::is_same_or_child(request_path, storage_root);
-    let final_in_storage = paths::is_same_or_child(final_path, storage_root);
-    match (request_in_storage, final_in_storage) {
-        (true, true) => Some(Some(request_path.to_string())),
-        (false, true) => Some(Some(final_path.to_string())),
-        (true, false) | (false, false) => None,
-    }
-}
-
-fn resolve_scoped_path_mappings(
-    path_mappings: &[crate::domain::PathMapping],
-    user_id: i32,
-    storage_root: &str,
-) -> Vec<(String, String)> {
-    let mut resolved = Vec::with_capacity(path_mappings.len());
-    for mapping in path_mappings {
-        let request_path = resolve_scoped_rule_path_allowing_private_data(
-            &mapping.request_path,
-            user_id,
-            storage_root,
-        );
-        let final_path = resolve_scoped_rule_path(&mapping.final_path, user_id, storage_root);
-        if request_path.is_empty()
-            || final_path.is_empty()
-            || paths::is_application_private_root(&request_path)
-            || paths::eq_ignore_case(&request_path, &final_path)
-            || scoped_mapping_mount_contribution(&request_path, &final_path, storage_root).is_none()
-        {
-            continue;
-        }
-        resolved.push((request_path, final_path));
-    }
-    resolved
-}
-
-fn resolve_concrete_scoped_rule_parent(path: &str, user_id: i32, storage_root: &str) -> String {
-    let resolved = resolve_scoped_rule_path(path, user_id, storage_root);
-    if resolved.is_empty()
-        || paths::contains_wildcards(&resolved)
-        || paths::eq_ignore_case(&resolved, storage_root)
-    {
-        return String::new();
-    }
-
-    let parent = paths::parent(&resolved);
-    if paths::eq_ignore_case(&parent, storage_root) || paths::is_child(&parent, storage_root) {
-        parent
+/// 用户根 → 视图根：上提模式下是父级 `…/emulated`，否则原样返回用户根。
+fn lifted_view_root(storage_root: &str) -> String {
+    let lifted = if VIEW_ROOT_LIFTED {
+        paths::parent(storage_root)
     } else {
-        String::new()
-    }
-}
-
-fn resolve_scoped_rule_path(path: &str, user_id: i32, storage_root: &str) -> String {
-    let resolved = resolve_scoped_rule_path_allowing_private_data(path, user_id, storage_root);
-    if resolved.is_empty() {
-        return String::new();
-    }
-    if !paths::is_child(&resolved, storage_root) && !paths::eq_ignore_case(&resolved, storage_root)
-    {
-        return String::new();
-    }
-    resolved
-}
-
-/// 与 [`resolve_scoped_rule_path`] 相同，但允许解析结果落在共享存储之外。
-///
-/// 用于「请求侧在应用私有数据目录、目标侧在共享存储」的映射：请求侧
-/// （`/data/user/0/<pkg>/<sub>`）本就必须在存储外才有意义，若沿用要求结果
-/// 落在存储根之内的解析，规则会在进入挂载根判定之前就被清空，映射被整条
-/// 丢弃。这里只放宽归属要求，不放宽路径安全检查。
-fn resolve_scoped_rule_path_allowing_private_data(
-    path: &str,
-    user_id: i32,
-    storage_root: &str,
-) -> String {
-    let mut resolved = paths::resolve_user_path(&paths::normalize(path), user_id);
-    if resolved.is_empty() || paths::has_unsafe_segments(&resolved) {
-        return String::new();
-    }
-    if !paths::is_absolute(&resolved) {
-        resolved = paths::normalize(&paths::join(storage_root, &resolved));
-    }
-    resolved
-}
-
-fn compact_scoped_mount_roots(mut roots: Vec<String>, storage_root: &str) -> Vec<String> {
-    paths::sort_dedup_paths_case_insensitive(&mut roots);
-    roots.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-    let mut effective: Vec<String> = Vec::new();
-    for root in roots {
-        if effective
-            .iter()
-            .any(|kept| paths::eq_ignore_case(kept, &root) || paths::is_child(&root, kept))
-        {
-            continue;
-        }
-        effective.push(root);
-    }
-
-    if effective.len() <= super::TARGET_SCOPED_FUSE_ROOTS {
-        return effective;
-    }
-
-    // 第二级压缩到顶层子目录；超出硬预算时使用单个存储根会话。
-    // 预算只限制会话数量，不应改变原规则的动态匹配语义。
-    let mut top_level: Vec<String> = effective
-        .iter()
-        .filter_map(|root| top_level_storage_child(root, storage_root))
-        .collect();
-    paths::sort_dedup_paths_case_insensitive(&mut top_level);
-    if !top_level.is_empty() && top_level.len() <= super::MAX_SCOPED_FUSE_ROOTS {
-        // 超过软目标意味着该应用会常驻多于 TARGET 个 FUSE 会话（空闲时各自阻塞在
-        // /dev/fuse read 上不耗 CPU，但每个会话都是一个进程的内存开销）。这条轨迹
-        // 每次规划都会命中，属于功耗/内存排查信号，只在详细日志下记录。
-        log::debug!(
-            "scoped roots expanded past soft target count={} raw={} list={}",
-            top_level.len(),
-            effective.len(),
-            top_level.join(",")
-        );
-        return top_level;
-    }
-
-    // 自定义顶层目录数量没有固定上限；返回空列表会静默退回 namespace，
-    // 丢失之后新建目录的通配映射。存储根会话仍逐路径应用原始规则。
+        storage_root.to_string()
+    };
     log::warn!(
-        "scoped roots exceed limit after top-level fallback: effective={} top_level={} limit={}, \
-         collapse to single storage-root fuse session",
-        effective.len(),
-        top_level.len(),
-        super::MAX_SCOPED_FUSE_ROOTS
+        "p5 fuse mount point storage_root={} lifted={}",
+        storage_root,
+        lifted
     );
-    vec![storage_root.to_string()]
-}
-
-fn top_level_storage_child(path: &str, storage_root: &str) -> Option<String> {
-    if paths::eq_ignore_case(path, storage_root) {
-        return None;
-    }
-    let rel = paths::relative_child_path(path, storage_root)?;
-    let first = rel.split('/').find(|part| !part.is_empty())?;
-    Some(paths::join(storage_root, first))
+    lifted
 }
 
 fn send_ready_result(sock: Option<libc::c_int>, result: i32) {

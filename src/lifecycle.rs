@@ -1,5 +1,6 @@
 mod boot;
 mod companion;
+mod companion_ack;
 mod companion_mount;
 mod companion_request;
 mod mount_timing;
@@ -32,10 +33,15 @@ pub struct RuntimeFlow {
     /// 本应用是否处于仅映射模式：只建立路径映射，不做存储根重定向。
     ///
     /// 挂载落定判据需要它：仅映射模式**不会**产生沙箱根挂载，用"沙箱根已出现"去等会导致
-    /// 每个这类应用的启动都空等满预算（见 `specialize_post::wait_for_module_mount`）。
+    /// 每个这类应用的启动都空等满预算（见 `specialize_post::conclude_mount_readiness`）。
     is_mapping_mode_only: bool,
     is_mount_applied: bool,
     is_mount_request_sent: bool,
+    /// 挂载请求的回执连接（-1 表示没有）。由发送方保留、由 specialize 收尾时消费并关闭。
+    ///
+    /// 回执是"重定向是否已生效"唯一的权威证据：它由真正执行挂载的进程在挂载落定后发出，
+    /// 与任何模块标识无关，因此挂载源原生化之后判据依然成立。
+    mount_reply_fd: std::os::unix::io::RawFd,
     deferred_mount_payload: String,
     is_system_writer_hook_redirect: bool,
     should_install_app_redirect_hook: bool,
@@ -73,6 +79,7 @@ impl RuntimeFlow {
             is_mapping_mode_only: false,
             is_mount_applied: false,
             is_mount_request_sent: false,
+            mount_reply_fd: -1,
             deferred_mount_payload: String::new(),
             is_system_writer_hook_redirect: false,
             should_install_app_redirect_hook: false,

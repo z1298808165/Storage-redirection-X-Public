@@ -5,7 +5,7 @@ use crate::config::SettingsHub;
 use crate::monitor::AuditTrail;
 use crate::platform::paths;
 use crate::redirect::policy;
-use libc::{RTLD_LOCAL, RTLD_NOW, c_char, c_int, c_void, dlopen, dlsym, getpid, getuid, prctl};
+use libc::{RTLD_LOCAL, RTLD_NOW, c_char, c_void, dlopen, dlsym, getpid, getuid, prctl};
 use std::cell::Cell;
 use std::ffi::CString;
 use std::sync::{
@@ -999,114 +999,19 @@ fn is_likely_binder_thread() -> bool {
 
 // 直接走 syscall，避免触发自身 Hook
 fn read_single_line_by_syscall(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-
-    let Ok(c_path) = CString::new(path) else {
+    // 裸系统调用直读见 `platform::proc_direct`：这里只取首行，故给一个足够容纳
+    // 单行身份的最大读取量，超出部分由内核截断、不影响首行结果。
+    let Some(text) = crate::platform::proc_direct::read_proc_file(path, 256) else {
         return String::new();
     };
-
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat,
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        ) as c_int
-    };
-    if fd < 0 {
-        return String::new();
-    }
-
-    let mut buffer = [0u8; 256];
-    let mut total = 0usize;
-    while total < buffer.len() - 1 {
-        let n = unsafe {
-            libc::read(
-                fd,
-                buffer[total..].as_mut_ptr() as *mut c_void,
-                buffer.len() - 1 - total,
-            )
-        };
-        if n <= 0 {
-            break;
-        }
-
-        total += n as usize;
-        if buffer[..total]
-            .iter()
-            .any(|b| *b == 0 || *b == b'\n' || *b == b'\r')
-        {
-            break;
-        }
-    }
-
-    unsafe { libc::close(fd) };
-    if total == 0 {
-        return String::new();
-    }
-
-    let mut end = 0usize;
-    while end < total {
-        let ch = buffer[end];
-        if ch == 0 || ch == b'\n' || ch == b'\r' {
-            break;
-        }
-        end += 1;
-    }
-
-    if end == 0 {
-        return String::new();
-    }
-
-    String::from_utf8_lossy(&buffer[..end]).to_string()
+    text.split(['\0', '\n', '\r'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn read_file_by_syscall(path: &str, max_len: usize) -> String {
-    if path.is_empty() || max_len == 0 {
-        return String::new();
-    }
-
-    let Ok(c_path) = CString::new(path) else {
-        return String::new();
-    };
-
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat,
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        ) as c_int
-    };
-    if fd < 0 {
-        return String::new();
-    }
-
-    let mut buffer = vec![0u8; max_len.min(512 * 1024)];
-    let mut total = 0usize;
-    while total < buffer.len() {
-        let n = unsafe {
-            libc::read(
-                fd,
-                buffer[total..].as_mut_ptr() as *mut c_void,
-                buffer.len() - total,
-            )
-        };
-        if n <= 0 {
-            break;
-        }
-        total += n as usize;
-    }
-
-    unsafe { libc::close(fd) };
-    if total == 0 {
-        return String::new();
-    }
-    String::from_utf8_lossy(&buffer[..total]).to_string()
+    crate::platform::proc_direct::read_proc_file(path, max_len).unwrap_or_default()
 }
 
 fn normalize_caller_package_text(text: &str) -> String {

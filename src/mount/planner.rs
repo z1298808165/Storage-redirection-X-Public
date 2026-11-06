@@ -11,10 +11,10 @@ use super::planner_paths::{
     stat_is_directory, storage_emulated_repair_mount, topmost_mount_is_fuse,
 };
 use crate::platform::errno::{last as last_errno, text as errno_text};
-use crate::platform::{fs, module_paths, paths};
+use crate::platform::{fs, paths};
 use libc::{
-    CLONE_NEWNS, MNT_DETACH, MS_BIND, MS_PRIVATE, MS_REC, chmod, chown, mount, readlink,
-    stat as c_stat, umount2, unshare,
+    CLONE_NEWNS, MNT_DETACH, MS_BIND, MS_REC, chmod, chown, mount, readlink, stat as c_stat,
+    umount2, unshare,
 };
 use std::collections::VecDeque;
 use std::ffi::CString;
@@ -24,8 +24,7 @@ pub(super) const MEDIA_RW_UID: u32 = 1023;
 pub(super) const MEDIA_RW_GID: u32 = 1023;
 // 目录模式只在 `platform::fs` 定义一次，避免多处副本各自漂移（曾出现 0o2773 与
 // 0o2771 两套公共目录口径并存）。
-pub(super) use crate::platform::fs::{MAPPED_DIR_MODE, REAL_PUBLIC_DIR_MODE};
-pub(super) const ALLOWED_REAL_DIR_MODE: libc::mode_t = MAPPED_DIR_MODE;
+pub(super) use crate::platform::fs::MAPPED_DIR_MODE;
 pub(super) const ALLOWED_REAL_TREE_METADATA_LIMIT: usize = 256;
 pub(super) const READ_ONLY_TREE_METADATA_LIMIT: usize = 512;
 const BIND_SUCCESS_LOG_STEP: u64 = 128;
@@ -37,6 +36,17 @@ static BIND_VERIFY_PASS_COUNT: AtomicU64 = AtomicU64::new(0);
 fn should_log_step(count: u64, step: u64) -> bool {
     count == 1 || count.is_multiple_of(step)
 }
+
+/// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离挂载（fd 携带，不附着命名空间）。
+const OPEN_TREE_CLONE: libc::c_uint = 0x0000_0001;
+/// `open_tree(2)` 的 `AT_RECURSIVE`：连同子树一起克隆。
+const AT_RECURSIVE: libc::c_uint = 0x0000_8000;
+/// `move_mount(2)` 的 `MOVE_MOUNT_F_EMPTY_PATH`：源由 fd 指定。
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
+/// `move_mount(2)` 的 `MOVE_MOUNT_T_EMPTY_PATH`：目标由 fd 指定。
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x0000_0040;
+/// `AID_EVERYBODY`：`/storage` 是 `shell:everybody 0710`，应用都在该组里，工作进程必须补上。
+const AID_EVERYBODY: libc::gid_t = 9997;
 
 impl MountPlanner {
     // 按需 unshare，并隔离目标应用命名空间内的全部挂载传播。
@@ -53,24 +63,25 @@ impl MountPlanner {
             }
         }
 
-        // 重定向同时覆盖 /storage、/data/media 与 /mnt 下的多个存储别名。只隔离
-        // 部分父挂载会让 scoped FUSE 经未隔离的别名传播，服务退出后其它应用便会
-        // 继承 ENOTCONN 挂载。进入目标应用命名空间后一次性私有化整棵挂载树。
-        let Ok(root) = CString::new("/") else {
-            return false;
-        };
-        let ret = unsafe {
-            mount(
-                std::ptr::null(),
-                root.as_ptr(),
-                std::ptr::null(),
-                (MS_REC | MS_PRIVATE) as libc::c_ulong,
-                std::ptr::null(),
-            )
-        };
-        if ret != 0 {
-            log::error!("mount ns: / MS_PRIVATE failed errno={}", last_errno());
-            return false;
+        // 重定向同时覆盖 /storage、/data/media 与 /mnt 下的多个存储别名，因此必须
+        // 切断两类传播：本命名空间新建的挂载不得外播，存储别名子树不得接受入向传播
+        // （MediaProvider 重启/切用户会把真实存储叠到我们的视图层之上）。
+        //
+        // 这两项目标只需要「全部 shared 挂载 + 存储别名子树」私有化即可达成，不能沿用
+        // 整树 `MS_REC|MS_PRIVATE /`：那会把内核里既有的 slave 关系一并切断，使应用
+        // 命名空间的 mountinfo 里一行 `master:` 标签都不剩（真机实测 111 行 → 0 行），
+        // 成为比任何字符串都明显的结构性差异。见 `mount::propagation` 模块文档。
+        if !super::propagation::isolate_storage_mounts(self.user_id) {
+            // 复核不通过（仍有 shared 挂载，或存储子树仍带传播关系）：退回整树私有化。
+            // 这是安全性兜底，隐藏性因此降级，日志留痕便于定位是哪台设备不满足目标。
+            log::warn!(
+                "mount ns: storage isolation incomplete pkg={} user={}",
+                self.package_name,
+                self.user_id
+            );
+            if !super::propagation::make_tree_private_fallback() {
+                return false;
+            }
         }
 
         let mut buf = [0u8; 256];
@@ -722,6 +733,117 @@ impl MountPlanner {
         false
     }
 
+    /// 以**应用的身份**执行一段路径相关操作：切 fsuid + 补上 `everybody` 组。
+    ///
+    /// 为什么两个都要切（真机 2026-11-04）：
+    /// - `fsuid`：视图是 FUSE，会话只按 uid 登记策略；用 root 解析视图内路径会被 fail-closed 兜底拒。
+    /// - 补充组：`/storage` 是 `drwx--x--- shell everybody`（0710），应用因为在 `everybody(9997)`
+    ///   组里才能穿过；工作进程只有 root 的组，于是遍历 `/storage` 直接 EACCES —— 这正是
+    ///   `bind via fds: target open failed … errno=13 app_uid=10284` 的成因。
+    ///
+    /// 只切 fsuid 与组：挂载权限仍由 euid=0 的 capability 保证，`mount(2)`/`move_mount(2)` 不受影响。
+    fn with_app_credentials<T>(&self, action: impl FnOnce() -> T) -> T {
+        // SAFETY: getgroups 只读取当前进程的补充组。
+        let mut previous = [0 as libc::gid_t; 64];
+        let previous_count =
+            unsafe { libc::getgroups(previous.len() as libc::c_int, previous.as_mut_ptr()) };
+        // SAFETY: setfsuid 只影响文件权限检查使用的 fsuid，返回旧值用于恢复。
+        let prev_fsuid = unsafe { libc::syscall(libc::SYS_setfsuid, self.app_uid as u32) as i64 };
+        // SAFETY: setgroups 需要 CAP_SETGID（euid 仍为 0），失败不致命：退化为仅切 fsuid。
+        let groups = [AID_EVERYBODY];
+        unsafe { libc::setgroups(groups.len(), groups.as_ptr()) };
+        let output = action();
+        // SAFETY: 恢复补充组与 fsuid，顺序与设置相反。
+        if previous_count > 0 {
+            unsafe { libc::setgroups(previous_count as usize, previous.as_ptr()) };
+        }
+        // SAFETY: 恢复调用前的 fsuid。
+        unsafe { libc::syscall(libc::SYS_setfsuid, prev_fsuid as u32) };
+        output
+    }
+
+    /// 用 fd 搬运完成绑定：源以 root 打开（`/data/adb` 只有 root 能进），目标以**应用凭据**
+    /// 打开（视图只有应用 uid 的策略能解析，且 `/storage` 需要 everybody 组），再 `move_mount`
+    /// 把两者接起来。`mount(MS_BIND)` 做不到这件事：它用同一份凭据解析两侧。
+    fn bind_mount_via_fds(&self, source: &str, target: &str, recursive: bool) -> bool {
+        let Ok(c_source) = CString::new(source) else {
+            return false;
+        };
+        let mut open_flags = OPEN_TREE_CLONE;
+        if recursive {
+            open_flags |= AT_RECURSIVE;
+        }
+        // SAFETY: c_source 是 NUL 结尾的合法路径；open_tree 只克隆挂载，不改动源。
+        let src_fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
+                c_source.as_ptr(),
+                open_flags as libc::c_uint,
+            ) as libc::c_int
+        };
+        if src_fd < 0 {
+            log::debug!(
+                "bind via fds: open_tree failed src={} errno={}",
+                source,
+                last_errno()
+            );
+            return false;
+        }
+        let dst_fd = self.with_app_credentials(|| {
+            let Ok(c_target) = CString::new(target) else {
+                return -1;
+            };
+            // O_PATH|O_DIRECTORY|O_CLOEXEC：只取目录句柄，不触发 FUSE 的 OPEN。
+            const O_PATH: libc::c_int = 0o10000000;
+            const O_DIRECTORY: libc::c_int = 0o200000;
+            // SAFETY: c_target 是 NUL 结尾的合法路径。
+            unsafe {
+                libc::open(c_target.as_ptr(), O_PATH | O_DIRECTORY | libc::O_CLOEXEC) as libc::c_int
+            }
+        });
+        if dst_fd < 0 {
+            log::debug!(
+                "bind via fds: target open failed dst={} errno={} app_uid={}",
+                target,
+                last_errno(),
+                self.app_uid
+            );
+            // SAFETY: src_fd 由上方 open_tree 打开，此处是唯一清理点。
+            unsafe { libc::close(src_fd) };
+            return false;
+        }
+        let empty = c"";
+        // SAFETY: src_fd/dst_fd 都是有效 fd；两端都走 EMPTY_PATH，不做路径解析。
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_move_mount,
+                src_fd,
+                empty.as_ptr(),
+                dst_fd,
+                empty.as_ptr(),
+                (MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH) as libc::c_uint,
+            ) as libc::c_int
+        };
+        let errno = last_errno();
+        // SAFETY: 两个 fd 由本函数打开，搬运用完即关。
+        unsafe {
+            libc::close(src_fd);
+            libc::close(dst_fd);
+        }
+        if ret != 0 {
+            log::debug!(
+                "bind via fds: move_mount failed src={} dst={} errno={} {}",
+                source,
+                target,
+                errno,
+                errno_text(errno)
+            );
+            return false;
+        }
+        true
+    }
+
     fn bind_mount_inner(
         &self,
         source: &str,
@@ -787,14 +909,22 @@ impl MountPlanner {
         // 「未变化」比较、只按非目录这一事实判定。
         *self.pre_bind_target_inode.borrow_mut() = stat_inode(target);
 
-        let mut ret = unsafe {
-            mount(
-                c_source.as_ptr(),
-                c_target.as_ptr(),
-                std::ptr::null(),
-                flags as libc::c_ulong,
-                std::ptr::null(),
-            )
+        // 优先用 fd 搬运：`mount(MS_BIND)` 无法同时满足源（root 可见）与目标（应用凭据可见）
+        // 的要求，见 `bind_mount_via_fds`。失败再回落到传统路径绑定。
+        let mut ret = if self.bind_mount_via_fds(source, target, use_recursive) {
+            0
+        } else {
+            // SAFETY: c_source/c_target 为 NUL 结尾的合法路径，调用期间保持存活；
+            // 这是回落路径，语义与改动前完全一致。
+            unsafe {
+                mount(
+                    c_source.as_ptr(),
+                    c_target.as_ptr(),
+                    std::ptr::null(),
+                    flags as libc::c_ulong,
+                    std::ptr::null(),
+                )
+            }
         };
         if ret != 0 {
             let errno = last_errno();
@@ -1207,10 +1337,8 @@ impl MountPlanner {
         paths::is_same_or_child(path, &self.real_storage_anchor_root())
     }
 
+    /// 锚点的**可用根**（内容 = 该用户存储根），与建立时的口径同源。
     fn real_storage_anchor_root(&self) -> String {
-        paths::join(
-            module_paths::REAL_STORAGE_TMP_DIR,
-            &self.user_id.to_string(),
-        )
+        super::apply_targets::real_storage_anchor_usable_path(self.user_id)
     }
 }

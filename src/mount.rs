@@ -19,6 +19,108 @@ pub mod own_private_pending;
 mod planner;
 #[path = "mount/planner_paths.rs"]
 mod planner_paths;
+#[path = "mount/propagation.rs"]
+pub(crate) mod propagation;
+
+/// `open_tree(2)` 的 `OPEN_TREE_CLONE`：克隆出一个游离（未附着到任何命名空间）的挂载。
+const OPEN_TREE_CLONE: libc::c_uint = 0x0000_0001;
+/// `move_mount(2)` 的 `MOVE_MOUNT_F_EMPTY_PATH`：源由 fd 指定（游离挂载没有路径）。
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
+
+/// 系统存储视图的**游离克隆**（`open_tree(OPEN_TREE_CLONE)`）。
+///
+/// 用途：自有私有目录（`Android/{data,media,obb}/<pkg>`）的恢复 bind 需要一个**纯系统视图**
+/// 作为源。这个源必须在本模块任何挂载落地**之前**取——一旦别名视图 `.../emulated/<user>`
+/// 被本模块接管，经任何路径解析 `<...>/emulated/<user>/...` 都会走到我们自己的宿主会话上，
+/// 而 root 请求没有对应会话策略（`fuse policy namespace miss uid=0` → `fallback_deny`），
+/// lookup 直接 ENOENT，恢复 bind 随之失败（真机 2026-11-02 实测
+/// `own private system view restored count=0` + `bind … errno=2`）。
+///
+/// 克隆与源挂载共享同一个 superblock，因此经它读到的是真正的 MediaProvider FUSE 视图；
+/// 且它不附着于任何命名空间，用完 `close` 即可，不留下任何挂载痕迹。
+pub struct SystemViewClone {
+    fd: libc::c_int,
+}
+
+impl SystemViewClone {
+    /// 克隆 `/mnt/user/<user_id>/emulated`（emulated 根：本模块从不覆盖它）。
+    pub fn capture(user_id: i32) -> Option<Self> {
+        // 别名族把 `/mnt/user/<u>/emulated` 整族换成了本模块视图，它不再是干净的系统视图；
+        // 改克隆**直通后端**（本模块刻意不覆盖它），结构与 emulated 根相同、内容是数据真身。
+        let source = format!("/mnt/pass_through/{user_id}/emulated");
+        let c_source = std::ffi::CString::new(source.clone()).ok()?;
+        // SAFETY: open_tree 的参数与内核一致（dfd=AT_FDCWD、NUL 结尾路径、只克隆不附着），
+        // 因此不会改动任何命名空间。
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                libc::AT_FDCWD,
+                c_source.as_ptr(),
+                OPEN_TREE_CLONE,
+            )
+        } as libc::c_int;
+        if fd < 0 {
+            let errno = crate::platform::errno::last();
+            log::warn!(
+                "system view clone failed src={} errno={} {}",
+                source,
+                errno,
+                crate::platform::errno::text(errno)
+            );
+            return None;
+        }
+        log::debug!("system view cloned src={} fd={}", source, fd);
+        Some(Self { fd })
+    }
+
+    /// 把游离克隆附着到 `target`（一次性消费该挂载）。
+    ///
+    /// **不能**拿 `/proc/self/fd/<n>/...` 当 bind 源：`mount(MS_BIND)` 要求源挂载属于
+    /// 调用方当前命名空间（内核 `do_loopback` 的 `check_mnt`），而游离克隆不在任何命名
+    /// 空间里——真机实测 `bind … errno=22 EINVAL`。搬运游离/跨命名空间挂载只能走
+    /// `move_mount`：它把克隆直接附着到目标路径，附着之后它就是本命名空间的挂载点。
+    ///
+    /// 附着成功即消费 fd（本结构体的 Drop 会再 close 一次，返回 EBADF 属正常）。
+    pub fn attach_at(&self, target: &str) -> bool {
+        let Ok(c_target) = std::ffi::CString::new(target) else {
+            return false;
+        };
+        let Ok(c_empty) = std::ffi::CString::new("") else {
+            return false;
+        };
+        // SAFETY: 源由 fd 指定（MOVE_MOUNT_F_EMPTY_PATH），target 是 NUL 结尾的合法路径；
+        // 成功后该挂载归属目标命名空间。
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_move_mount,
+                self.fd,
+                c_empty.as_ptr(),
+                libc::AT_FDCWD,
+                c_target.as_ptr(),
+                MOVE_MOUNT_F_EMPTY_PATH,
+            )
+        };
+        if ret != 0 {
+            let errno = crate::platform::errno::last();
+            log::warn!(
+                "system view clone attach failed target={} errno={} {}",
+                target,
+                errno,
+                crate::platform::errno::text(errno)
+            );
+            return false;
+        }
+        log::debug!("system view clone attached target={}", target);
+        true
+    }
+}
+
+impl Drop for SystemViewClone {
+    fn drop(&mut self) {
+        // SAFETY: fd 由 capture 创建且只在此处关闭一次。
+        unsafe { libc::close(self.fd) };
+    }
+}
 
 pub struct MountPlanner {
     should_unshare: bool,
@@ -35,6 +137,13 @@ pub struct MountPlanner {
     pre_bind_target_inode: RefCell<Option<(u64, u64)>>,
     is_file_monitor_enabled: bool,
     real_storage_anchor: Option<String>,
+    /// 由调用方在**挂载之前**捕获的系统视图克隆（见 [`SystemViewClone`]）。
+    ///
+    /// 存在时自有私有目录的恢复锚点改由它附着而来：源必须是"本模块挂载落地之前"的
+    /// 系统视图快照，否则 `<anchor>/<user>` 会解析到我们自己的宿主会话上（root 请求
+    /// 无会话策略 → `fallback_deny` → ENOENT），恢复 bind 稳定失败
+    /// （真机 2026-11-02：`own private system view restored count=0`）。
+    system_view_clone: std::cell::RefCell<Option<SystemViewClone>>,
 }
 
 #[derive(Copy, Clone)]
@@ -307,7 +416,13 @@ impl MountPlanner {
             pre_bind_target_inode: RefCell::new(None),
             is_file_monitor_enabled: false,
             real_storage_anchor: None,
+            system_view_clone: std::cell::RefCell::new(None),
         }
+    }
+
+    /// 设置调用方在挂载之前捕获的系统视图克隆（见 [`SystemViewClone`]）。
+    pub fn set_system_view_clone(&mut self, clone: SystemViewClone) {
+        *self.system_view_clone.borrow_mut() = Some(clone);
     }
 
     pub fn set_file_monitor_enabled(&mut self, enabled: bool) {

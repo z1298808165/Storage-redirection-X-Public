@@ -5,11 +5,24 @@
 // 挂载动作本身留在 planner，改归类口径不会碰到挂载顺序。
 
 use super::apply_targets::{mountinfo_has_target, read_mountinfo};
-use super::planner::{ALLOWED_REAL_DIR_MODE, MEDIA_RW_GID, MEDIA_RW_UID, REAL_PUBLIC_DIR_MODE};
+use super::planner::{MEDIA_RW_GID, MEDIA_RW_UID};
 use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::{mountinfo, paths};
 use libc::{MS_BIND, MS_RDONLY, MS_REC, MS_REMOUNT, chmod, chown, mount, stat as c_stat};
 use std::ffi::CString;
+
+/// 共享存储里的真实目录（公共目录与映射目标）被**后端**访问所需的最小能力位：
+/// 属主与属组可读写进入。others 位刻意不要求：应用看到的是 FUSE 合成属性，
+/// 真实目录只服务于以 media_rw 身份读写的后端。
+///
+/// 不写成"目标常量"：系统既有目录的权限由 MediaProvider 决定（`DCIM` 等 `02773`、
+/// `Android`/`MIUI/Mirror` 等 `02771`/`02770`），这些形态都覆盖上面这组位，一律不动。
+/// 归一成常量会改写既有目录，在用户磁盘上留下模块痕迹。
+/// 从系统原生口径（`platform::fs::REAL_PUBLIC_DIR_MODE`，全仓唯一定义）取交集派生，
+/// 保证"够不够用"的门槛与原生同源，不会与挂载侧各自漂移。
+const REQUIRED_PUBLIC_DIR_MODE: libc::mode_t = crate::platform::fs::REAL_PUBLIC_DIR_MODE & 0o770;
+/// 真的缺能力位时追加的位（含 setgid，保证组继承；不追加 others 任何位）。
+const PUBLIC_DIR_REPAIR_MODE: libc::mode_t = crate::platform::fs::REAL_PUBLIC_DIR_MODE & 0o2770;
 
 pub(super) fn shared_storage_root(path: &str) -> Option<String> {
     paths::storage_user_root(path).or_else(|| paths::data_media_user_root(path))
@@ -116,13 +129,14 @@ pub(super) fn fix_real_public_directory_metadata(path: &str) {
     }
 
     let mode = (st.st_mode as libc::mode_t) & 0o7777;
-    if mode != REAL_PUBLIC_DIR_MODE {
-        // SAFETY: c_path 指向本作用域内以 NUL 结尾的合法路径，chmod 只改权限位。
-        let ret = unsafe { chmod(c_path.as_ptr(), REAL_PUBLIC_DIR_MODE) };
-        if ret != 0 {
-            log_metadata_fix_failure("real public chmod", path);
-        }
-    }
+    repair_missing_mode_bits(
+        &c_path,
+        path,
+        mode,
+        REQUIRED_PUBLIC_DIR_MODE,
+        PUBLIC_DIR_REPAIR_MODE,
+        "real public chmod",
+    );
 }
 
 pub(super) fn fix_allowed_real_directory_metadata(path: &str) {
@@ -133,16 +147,71 @@ pub(super) fn fix_allowed_real_directory_metadata(path: &str) {
         return;
     };
 
-    let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
-    if ret != 0 {
-        log_metadata_fix_failure("allowed real chown", path);
+    // 先 stat：既有目录绝大多数属主与能力位都已就位，这类目录一个元数据系统调用都不发。
+    // 过去这里无条件 chmod 成 02773，等于把系统按自己语义创建的既有目录（如 02771）
+    // 改写成模块常量，在用户磁盘上留下可观测差异。
+    let mut st = std::mem::MaybeUninit::<c_stat>::uninit();
+    // SAFETY: st 为本作用域独占的 MaybeUninit，c_stat 成功时才会初始化它。
+    if unsafe { c_stat(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        log_metadata_fix_failure("allowed real stat", path);
+        return;
+    }
+    // SAFETY: 上一步返回 0，st 已被完整初始化。
+    let st = unsafe { st.assume_init() };
+
+    if st.st_uid != MEDIA_RW_UID || st.st_gid != MEDIA_RW_GID {
+        let ret = unsafe { chown(c_path.as_ptr(), MEDIA_RW_UID, MEDIA_RW_GID) };
+        if ret != 0 {
+            log_metadata_fix_failure("allowed real chown", path);
+        }
     }
 
-    // SAFETY: c_path 指向本作用域内以 NUL 结尾的合法路径，chmod 只改权限位。
-    let ret = unsafe { chmod(c_path.as_ptr(), ALLOWED_REAL_DIR_MODE) };
-    if ret != 0 {
-        log_metadata_fix_failure("allowed real chmod", path);
+    let mode = (st.st_mode as libc::mode_t) & 0o7777;
+    repair_missing_mode_bits(
+        &c_path,
+        path,
+        mode,
+        REQUIRED_PUBLIC_DIR_MODE,
+        PUBLIC_DIR_REPAIR_MODE,
+        "allowed real chmod",
+    );
+}
+
+/// 只在能力位不足时补位，绝不回收既有位。
+///
+/// 既有共享目录由系统 MediaProvider 按它自己的语义创建（`DCIM`/`Pictures` 等原型是
+/// `02773`，`Android` 是 `02771`），两者都满足访问所需的位。把它们统一归一成模块常量
+/// 会在 `/data/media/<user>` 上留下与系统不一致的权限——那是应用侧可观测的模块痕迹，
+/// 也会改写用户数据目录的既有语义。因此这里只做"够不够用"的判定：
+/// 缺位才追加，位齐全（无论是否等于常量）一律不动。
+///
+/// 返回值表示是否真的发起了 chmod，供调用方保持原有日志口径。
+pub(super) fn repair_missing_mode_bits(
+    c_path: &CString,
+    path: &str,
+    mode: libc::mode_t,
+    required: libc::mode_t,
+    repair: libc::mode_t,
+    label: &str,
+) -> bool {
+    if mode & required == required {
+        return false;
     }
+    let fixed_mode = mode | repair;
+    // SAFETY: c_path 在调用期间保持有效且以 NUL 结尾，chmod 只改权限位。
+    let ret = unsafe { chmod(c_path.as_ptr(), fixed_mode) };
+    if ret != 0 {
+        log_metadata_fix_failure(label, path);
+        return false;
+    }
+    log::info!(
+        "mount dir: {} repaired path={} mode={:o} fixed={:o}",
+        label,
+        path,
+        mode,
+        fixed_mode
+    );
+    true
 }
 
 pub(super) fn fix_read_only_public_metadata(path: &str) {

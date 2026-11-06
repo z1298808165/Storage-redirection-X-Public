@@ -68,6 +68,12 @@ pub enum MountOption {
     Sync,
     /// All I/O will be done asynchronously
     Async,
+    /// 时间戳只在特定场合回写（内核 `MS_LAZYTIME`）。
+    ///
+    /// 上游 fuser 没有这个变体，但系统 MediaProvider 的 FUSE 挂载带 `lazytime`，
+    /// 挂载表的超级选项里少这一项就是"这层不是系统建的"的判据，因此在本仓库的
+    /// vendored fork 里补上（只影响 super options，不改变 FUSE 行为）。
+    LazyTime,
     /* libfuse library options, such as "direct_io", are not included since they are specific
     to libfuse, and not part of the kernel ABI */
 }
@@ -137,6 +143,8 @@ fn conflicts_with(option: &MountOption) -> Vec<MountOption> {
         MountOption::NoAtime => vec![MountOption::Atime],
         MountOption::Sync => vec![MountOption::Async],
         MountOption::Async => vec![MountOption::Sync],
+        // 时间戳回写策略没有互斥项（内核里是独立的一位）。
+        MountOption::LazyTime => vec![],
     }
 }
 
@@ -162,5 +170,6 @@ pub(crate) fn option_to_string(option: &MountOption) -> String {
         MountOption::DirSync => "dirsync".to_string(),
         MountOption::Sync => "sync".to_string(),
         MountOption::Async => "async".to_string(),
+        MountOption::LazyTime => "lazytime".to_string(),
     }
 }
