@@ -52,8 +52,8 @@ mod fuse_host {
     }
 
     // 接缝：把"这一层是不是已被重建的宿主会话留下的"交给调用方，隔离被测的保留判定。
-    // 生产实现按挂载源与当前宿主会话比对（src/fuse_host.rs::is_stale_host_source）。
-    pub fn is_stale_host_source(_source: &str) -> bool {
+    // 生产实现按超级块身份与当前宿主会话比对（src/fuse_host.rs::is_stale_host_at）。
+    pub fn is_stale_host_at(_target: &str) -> bool {
         STALE_HOST_SOURCE.with(|slot| slot.get())
     }
 }

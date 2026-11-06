@@ -13,7 +13,7 @@
 // 被测修复点（来自主代理对 src 的修改）：
 //   1. live_mounts_at / capture_explicit_mount_identity / classify_mount 改用 normalize_syntax（保留存储别名、
 //      大小写敏感），不再把 /data/media 折叠成 /storage/emulated；
-//   2. encode 写 schema=2，decode 拒绝旧 schema；
+//   2. encode 写 schema=3 且与 decode 逐字段往返一致，decode 拒绝旧 schema；
 //   3. clear_previous_mounts 改为按"已降序的目标列表"正向遍历（不再 .rev()）。
 //
 // 反向验证：Python 在内存里把抽取函数里的 `paths::normalize_syntax` 替换成别名折叠桩
@@ -150,6 +150,7 @@ pub struct NamespaceIdentity {
 pub struct LiveMount {
     pub mount_id: u64,
     pub parent_mount_id: u64,
+    pub dev: String,
     pub source: String,
     pub fs_type: String,
     pub root: String,
@@ -159,6 +160,7 @@ pub struct LiveMount {
 pub struct MountIdentity {
     pub mount_point: String,
     pub mount_id: u64,
+    pub dev: String,
     pub source: String,
 }
 
@@ -329,6 +331,7 @@ fn mk_live(mount_id: u64, source: &str, root: &str) -> LiveMount {
     LiveMount {
         mount_id,
         parent_mount_id: 0,
+        dev: "0:1".to_string(),
         source: source.to_string(),
         fs_type: "fuse.srx".to_string(),
         root: root.to_string(),
@@ -456,6 +459,7 @@ fn main() {
         mounts: vec![MountIdentity {
             mount_point: "/data/media/0/Download/SrtProbe".to_string(),
             mount_id: 30,
+            dev: "0:1".to_string(),
             source: "srx_fuse".to_string(),
         }],
         detach_attempts: 0,
@@ -484,6 +488,7 @@ fn main() {
         mounts: vec![MountIdentity {
             mount_point: "/storage/emulated/0/Download/SrtProbe".to_string(),
             mount_id: 5,
+            dev: "0:1".to_string(),
             source: "srx_fuse".to_string(),
         }],
         detach_attempts: 0,
@@ -528,17 +533,33 @@ fn main() {
     ledger.record_mounts(vec![MountIdentity {
         mount_point: "/data/media/0/Download/SrtProbe".to_string(),
         mount_id: 30,
+        dev: "0:1".to_string(),
         source: "srx_fuse".to_string(),
     }]);
     let encoded = encode(&ledger);
-    if !encoded.contains("schema=2") {
-        println!("FAIL schema_v2_written: encode 应写 schema=2");
-        failures.push("schema_v2_written");
-    } else if decode(&encoded).is_none() {
-        println!("FAIL schema_v2_accepted: 当前 schema 账本应被接受");
-        failures.push("schema_v2_accepted");
+    if !encoded.contains("schema=3") {
+        println!("FAIL schema_v3_written: encode 应写 schema=3");
+        failures.push("schema_v3_written");
+    } else if let Some(decoded) = decode(&encoded) {
+        // 往返必须逐字段相等。encode/decode 字段顺序漂移时 decode 会因缺字段把整条
+        // mount 行丢弃，账本"存在但 mounts 为空"——归属判定与 detach 记账同时失效，
+        // 真机表现为重挂请求回 completed 而运行中应用一层未换。只断言 is_some() 抓不到。
+        let roundtrip_ok = decoded.mounts.len() == 1
+            && decoded.mounts[0].mount_id == 30
+            && decoded.mounts[0].dev == "0:1"
+            && decoded.mounts[0].source == "srx_fuse"
+            && decoded.mounts[0].mount_point == "/data/media/0/Download/SrtProbe";
+        if !roundtrip_ok {
+            println!("FAIL ledger_roundtrip: 实际 {:?}", decoded.mounts);
+            failures.push("ledger_roundtrip");
+        } else {
+            println!(
+                "PASS schema_v3_roundtrip: encode 写 schema=3 且 id/dev/source/挂载点往返一致"
+            );
+        }
     } else {
-        println!("PASS schema_v2: encode 写 schema=2 且 decode 接受");
+        println!("FAIL schema_v3_accepted: 当前 schema 账本应被接受");
+        failures.push("schema_v3_accepted");
     }
 
     // --- 用例 7：cleanup 按已降序列表正向遍历（排序不反转） ---

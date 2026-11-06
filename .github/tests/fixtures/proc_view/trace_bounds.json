@@ -1,0 +1,68 @@
+{
+  "note": "被接管应用视角下的 /proc/self/mountinfo 痕迹登记表（基线采集，真机实测）。leak_* 是上限，只允许减少；parity_* 是下限，只允许增加。痕迹回升或出现新类别即失败——这是隐藏能力唯一的机械门禁，不靠人工复查。每次重新采集基线都必须同步调整这里的数值。",
+  "capture": {
+    "device": "duchamp (2311DRK48C)",
+    "android_release": "16",
+    "sdk": 36,
+    "module_version": "v2.2.1-ci.1（源原生化 + 屏障不落地 + 锚点临时化 + 选项对齐）",
+    "proc_mount_options": "rw,relatime,master:4 - proc proc rw,gid=3009,hidepid=invisible",
+    "captured_at": "2026-11-02（第四轮：P4 生效，mountinfo 与原型同形）",
+    "method": "su -c 'cat /proc/<pid>/mountinfo'，即该进程 mount namespace 的完整视图，与它自己读 /proc/self/mountinfo 等价",
+    "note": "两份 fixture 来自同一台设备同一开机周期、同一次模块构建，只差「是否被本模块接管」，因此可直接相减做对照。/proc/self/mounts 由同一份挂载表派生，未单独采集。",
+    "multi_user": "2026-11-02 另采集第二用户（XSpace，user 999）一对基线：stock=com.miui.analytics(99910136)、redirected=com.tencent.mobileqq(99910288)。两者形态与 user 0 同构，用于锁住「隐蔽性与用户无关」"
+  },
+  "stock": {
+    "file": "stock_app_mountinfo.txt",
+    "package": "com.miui.home",
+    "note": "未被接管应用的对照基线：任何 leak_* 计数都必须为 0，它同时提供 parity_* 的参考值"
+  },
+  "redirected": {
+    "file": "redirected_app_mountinfo.txt",
+    "package": "com.tencent.mm",
+    "note": "共享宿主坍缩形态的被接管进程：视图根 + 三个存储别名各一条 FUSE（与系统 MediaProvider 的层同形：同 fstype、同源 /dev/fuse、同挂载选项、同超级选项），外加应用自有媒体目录的一条恢复 bind。模块路径、模块源串、fail-closed 屏障均已归零"
+  },
+  "bounds": {
+    "leak_module_fuse_source": {
+      "max": 0,
+      "desc": "挂载源带 srx_fuse 前缀的行。已归零：所有 FUSE 会话的 FSName 都取系统 MediaProvider 同一个值 /dev/fuse，挂载表里不再有任何模块标识。归属判定完全改由超级块设备号（dev）+ 挂载 ID 承担（账本 known_module_fuse_devs + 宿主快照 dev）。这条现在是硬门禁：任何一行回升都说明又往挂载源里塞了标识"
+    },
+    "leak_module_path": {
+      "max": 0,
+      "desc": "挂载点/root/源指向 /data/adb 模块目录。FUSE 后端已归零（系统视图锚点改为临时挂载，bind 用完立即 MNT_DETACH）；namespace 后端也已归零（真实存储锚点改为非递归 bind emulated 根 + 用完即摘）。硬门禁：任何一行回升都说明又有常驻的模块路径挂载"
+    },
+    "leak_barrier_tmpfs": {
+      "max": 0,
+      "desc": "只读空 tmpfs 屏障（4 MiB，source=none）。已归零：屏障只在「请求发出 → 视图接管落地」这段窗口内存在，挂载子进程在接入视图**之前**按 /proc/<pid>/root 抓的 fd 逐个 MNT_DETACH（视图根一落，屏障既不能按路径也不能按 fd 摘除——内核会重新爬到栈顶），失败时由父进程重新压回屏障。硬门禁：任何一条回升都说明屏障又常驻了"
+    },
+    "leak_alias_dev_mismatch": {
+      "max": 0,
+      "desc": "同一用户的存储根经主视图（/storage/emulated/<u>）与别名（/mnt/user/<u>/emulated/<u>）访问落在不同超级块上的用户数。原型设备上两者是同一个 MediaProvider FUSE（同为 0:131），应用 stat 两端即可发现不一致——这条不需要任何字符串痕迹、也不需要参照基线，是最强的判据。别名 bind 生效后两侧同为 0:203；只在两端都由 FUSE 服务时比较，无存储权限的应用落回根挂载则跳过"
+    },
+    "parity_master_tag_lines": {
+      "min": 105,
+      "target_min": 111,
+      "desc": "带 master: 传播标签的行数。对照基线 111 行，实测 111 行：最小传播隔离只非递归私有化 4 个存储视图挂载（/storage/emulated 与三个别名根），其余保持克隆态。min=105 是回归门禁（掉下来说明又有整树私有化或通用祖先私有化混进来），target_min=111 是与原型逐条一致的目标"
+    }
+  },
+  "mount_set": {
+    "redirected_extra": [
+      "/mnt/androidwritable/0/emulated/0",
+      "/mnt/installer/0/emulated/0",
+      "/mnt/user/0/emulated/0",
+      "/storage/emulated/0",
+      "/storage/emulated/0/Android/media/com.tencent.mm"
+    ],
+    "desc": "存储路径上的挂载集合差异（被接管 − 原型），必须与登记完全相等：多一条就是新增痕迹，少一条就是丢了重定向出口。前四条是重定向本体（视图根 + 三个别名的 FUSE 层，选项与系统 MediaProvider 逐项一致）；第五条是自有媒体目录的系统视图恢复 bind（应用创建 Android/media/<pkg> 后才出现，用于把跨进程 SQLite 共享收敛到同一个超级块的缓存层）。 user999_extra 是第二用户的同一组（本轮该进程尚未出现自有媒体目录恢复 bind，故为 4 条）",
+    "user999_extra": [
+      "/mnt/androidwritable/999/emulated/999",
+      "/mnt/installer/999/emulated/999",
+      "/mnt/user/999/emulated/999",
+      "/storage/emulated/999"
+    ]
+  },
+  "namespace": {
+    "file": "namespace_app_mountinfo.txt",
+    "package": "com.tencent.mm",
+    "note": "namespace 兜底后端（用户手选 / 宿主不可用 / MediaProvider 重启回落）的被接管进程：存储根与规则目录是 f2fs 沙箱 bind，映射目标是从 MediaProvider FUSE 视图克隆的游离挂载（源 /dev/fuse、root /0/...，与原生映射同形）。这一形态过去必然带一条 tmp/real_storage/<user> 模块路径，现已归零"
+  }
+}

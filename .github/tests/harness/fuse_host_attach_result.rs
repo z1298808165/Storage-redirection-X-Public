@@ -9,6 +9,10 @@ macro_rules! warn {
 macro_rules! info {
     ($($token:tt)*) => {{}};
 }
+#[macro_export]
+macro_rules! debug {
+    ($($token:tt)*) => {{}};
+}
 use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,6 +49,27 @@ mod libc {
     pub unsafe fn mkdir(_: *const i8, _: u32) -> i32 {
         0
     }
+    pub type c_uint = u32;
+    pub const EACCES: i32 = 13;
+    pub unsafe fn close(_: i32) -> i32 {
+        0
+    }
+    pub type gid_t = u32;
+    pub const MS_SLAVE: i32 = 1 << 18;
+    pub const MNT_DETACH: i32 = 2;
+    pub const SYS_setfsuid: i64 = 0;
+    pub unsafe fn umount2(_: *const i8, _: i32) -> i32 {
+        0
+    }
+    pub unsafe fn getgroups(_: i32, _: *mut gid_t) -> i32 {
+        0
+    }
+    pub unsafe fn setgroups(_: usize, _: *const gid_t) -> i32 {
+        0
+    }
+    pub unsafe fn syscall(_: i64, _: u32) -> i64 {
+        0
+    }
     pub unsafe fn mount(
         _: *const i8,
         _: *const i8,
@@ -73,6 +98,11 @@ mod paths {
     pub fn data_media_user_root_for_user(_: i32) -> String {
         String::new()
     }
+    // 符号别名去重用的词法归一：只是去掉尾部斜杠，足够本用例（别名列表为空、
+    // 运行期不会走到绑定分支）。
+    pub fn normalize(path: &str) -> String {
+        path.trim_end_matches('/').to_string()
+    }
 }
 // 别名展开用它排除 f2fs 直连后端别名；本桩的别名列表为空，运行期不会命中，
 // 只要提供同签名实现即可满足编译。
@@ -91,6 +121,8 @@ mod platform {
 }
 mod mount_ledger {
     pub struct Entry {
+        pub mount_id: u64,
+        pub dev: String,
         pub source: String,
         pub fs_type: &'static str,
     }
@@ -98,6 +130,8 @@ mod mount_ledger {
     // 处理，保持与引入该判据之前一致的私有化路径，用例才继续覆盖 mount 失败出口。
     pub fn live_mounts_at(_: i32, _: &str) -> Vec<Entry> {
         vec![Entry {
+            mount_id: 1,
+            dev: "0:1".to_string(),
             source: "本次会话".to_string(),
             fs_type: "fuse",
         }]
@@ -106,13 +140,16 @@ mod mount_ledger {
         if super::case() == 10 {
             None
         } else {
+            // 归属判定已改按超级块身份：case 11 模拟"上一次会话留下的层"（不同 dev），
+            // 其余 case 与本次会话同一超级块。挂载源不再参与判定，保持同形即可。
             Some(Entry {
-                source: if super::case() == 11 {
-                    "旧会话"
+                mount_id: 1,
+                dev: if super::case() == 11 {
+                    "0:2".to_string()
                 } else {
-                    "本次会话"
-                }
-                .to_string(),
+                    "0:1".to_string()
+                },
+                source: "本次会话".to_string(),
                 fs_type: "fuse",
             })
         }
@@ -122,6 +159,8 @@ struct HostSessionView {
     child_pid: i32,
     mount_point: String,
     mount_source: String,
+    mount_id: u64,
+    dev: String,
 }
 struct UniqueFd(i32);
 impl UniqueFd {
@@ -146,12 +185,27 @@ fn move_detached_mount(_: i32, _: &CStr) -> Result<(), i32> {
         _ => Ok(()),
     }
 }
+// P5-d：视图根的传播属性设置。桩只用于验证回包契约，传播属性本身不在断言范围。
+// quality-allow(lint-suppression): 该桩由门禁按需注入，生产侧调用点不在本文件内，故需抑制 dead_code。
+#[allow(dead_code)]
+// 替换策略的传播降级桩：本组用例的目标根都不是视图根，运行期不会走到该分支。
+fn make_mount_slave_only(_: &CStr) -> bool {
+    true
+}
+
+fn make_mount_slave(_: &CStr) -> bool {
+    true
+}
+
 fn make_mount_private(_: &CStr) -> bool {
     case() != 9
 }
 // __PRODUCTION_FUNCTIONS__
 fn run(view: &HostSessionView, target_root: &str) -> bool {
     let ready_sockets = [0, 99];
+    let user_id: i32 = 0;
+    // 视图根替换的可用性探针需要应用 uid；本组用例不进入该分支，取值不影响断言。
+    let app_uid: i32 = 10000;
     // __PRODUCTION_DISPATCH__
     ok
 }
@@ -163,6 +217,8 @@ fn main() {
             child_pid: 42,
             mount_point: if id == 12 { "\0" } else { "/宿主" }.to_string(),
             mount_source: "本次会话".to_string(),
+            mount_id: 1,
+            dev: "0:1".to_string(),
         };
         let ok = run(&view, if id == 13 { "\0" } else { "/应用" });
         assert_eq!(ok, id == 0, "错误路径不应报告成功：{id}");

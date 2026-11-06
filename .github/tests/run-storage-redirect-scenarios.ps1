@@ -732,10 +732,15 @@ function Assert-AppMountinfoHasExpectedPaths {
         # 应用视图已被模块接管。
         # 注意：命令必须先在赋值表达式里拼好再传给 Invoke-Su——直接在参数位置用
         # `"a" + "b"` 拼接是参数模式语义，会产出一个带字面加号的字符串传到设备端。
-        $scenario4Command = "pid='$AppProcessId'; " +
-            "grep -Fq ' $RealRoot/Download ' `"/proc/`$pid/mountinfo`" && { echo layout_scoped; exit 0; }; " +
-            "grep -F ' $RealRoot ' `"/proc/`$pid/mountinfo`" | grep -Fq srx_fuse_host && { echo layout_fuse_host; exit 0; }; " +
-            "echo missing=$RealRoot/Download-or-fuse-host-root"
+        # 挂载源已原生化（NATIVE_FUSE_SOURCE=/dev/fuse，见 config.rs），srx_fuse_host
+        # 源名判定失效。接管证明改为拓扑事实：① bind 布局——用户根本身是挂载点；
+        # ② 共享宿主布局——应用视图根 dev 与 init 命名空间的系统 FUSE 不同
+        # （内容由 FUSE 策略层服务，挂载点不落用户根）。pid 由本地插值。
+        $scenario4Command = "grep -Fq ' $RealRoot ' `"/proc/$AppProcessId/mountinfo`" && { echo layout_bind; exit 0; }; " +
+            "a=`"`$(grep -m1 ' /storage/emulated ' `"/proc/$AppProcessId/mountinfo`" | cut -d' ' -f3)`"; " +
+            "b=`"`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3)`"; " +
+            "[ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ] && { echo layout_shared_host; exit 0; }; " +
+            "echo missing=app_dev=`$a init_dev=`$b"
         $output = @(Invoke-Su $scenario4Command)
         foreach ($line in $output) {
             if ($line -like "layout_*") { return [bool]$true }
@@ -1199,6 +1204,7 @@ function Fix-OwnPrivateFixturePermissions {
     # 沙箱内的夹具同样按应用属主修正：$PrivateRoot 就是应用自己的重定向根，root 预置的
     # 目录项会被系统 FUSE 按属主过滤，应用在热重载后重新解析这条路径时报 ENOENT。
     $roots = @(
+        "$BackendRoot/Android/data/$AppId", "$BackendRoot/Android/media/$AppId", "$BackendRoot/Android/obb/$AppId",
         $BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot,
         $OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot,
         "$PrivateRoot/Download", "$PrivateRoot/Pictures", "$PrivateRoot/DCIM", "$PrivateRoot/Documents"
@@ -2769,6 +2775,12 @@ function Test-FuseMountActive {
             Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid"
             return $true
         }
+        # 挂载源原生化（/dev/fuse）后源名判据恒落空：应用视图根 dev 与 init 命名空间系统
+        # FUSE 不同即已接管（与 .sh 的 app_view_dev_differs 同一判据）。
+        if ($appPid -and (Test-Su "a=`$(grep -m1 ' /storage/emulated ' /proc/$appPid/mountinfo | cut -d' ' -f3); b=`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3); [ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]")) {
+            Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid source=app-view-dev"
+            return $true
+        }
         Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }
 
@@ -2821,6 +2833,13 @@ function Test-ScopedFuseDaemonStarted {
             # 继续真实验证。
             if ($scopedAppPid -and (Test-Su "grep -F -- ' $RealRoot ' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null | grep -Eq ' - fuse srx_fuse_host(\[| )'")) {
                 Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-mountinfo-host"
+                return $true
+            }
+            # 判据 4（原生化挂载源）：挂载源已是 /dev/fuse，判据 2/3 的 srx_fuse_* 源名在
+            # 共享宿主布局下恒落空。改用拓扑事实：应用视图根 dev 与 init 命名空间系统 FUSE
+            # 不同即已接管（与场景 4 接管断言同一判据）。
+            if ($scopedAppPid -and (Test-Su "a=`$(grep -m1 ' /storage/emulated ' /proc/$scopedAppPid/mountinfo | cut -d' ' -f3); b=`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3); [ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]")) {
+                Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-view-dev"
                 return $true
             }
             # 失败标志只收集不提前终止：这些日志可能出现在挂载协商窗口内，随后宿主
@@ -3357,6 +3376,7 @@ function Fix-OwnPrivateFixturePermissions {
     # 沙箱内的夹具同样按应用属主修正：$PrivateRoot 就是应用自己的重定向根，root 预置的
     # 目录项会被系统 FUSE 按属主过滤，应用在热重载后重新解析这条路径时报 ENOENT。
     $roots = @(
+        "$BackendRoot/Android/data/$AppId", "$BackendRoot/Android/media/$AppId", "$BackendRoot/Android/obb/$AppId",
         $BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot,
         $OwnPrivateDataRoot, $OwnPrivateMediaRoot, $OwnPrivateObbRoot,
         "$PrivateRoot/Download", "$PrivateRoot/Pictures", "$PrivateRoot/DCIM", "$PrivateRoot/Documents"
@@ -4927,6 +4947,12 @@ function Test-FuseMountActive {
             Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid"
             return $true
         }
+        # 挂载源原生化（/dev/fuse）后源名判据恒落空：应用视图根 dev 与 init 命名空间系统
+        # FUSE 不同即已接管（与 .sh 的 app_view_dev_differs 同一判据）。
+        if ($appPid -and (Test-Su "a=`$(grep -m1 ' /storage/emulated ' /proc/$appPid/mountinfo | cut -d' ' -f3); b=`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3); [ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]")) {
+            Write-Host "  - scenario-$Scenario/fuse-mount-active pid=$appPid source=app-view-dev"
+            return $true
+        }
         Start-Sleep -Milliseconds $script:ResultPollMilliseconds
     }
 
@@ -4979,6 +5005,13 @@ function Test-ScopedFuseDaemonStarted {
             # 继续真实验证。
             if ($scopedAppPid -and (Test-Su "grep -F -- ' $RealRoot ' `"/proc/$scopedAppPid/mountinfo`" 2>/dev/null | grep -Eq ' - fuse srx_fuse_host(\[| )'")) {
                 Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-mountinfo-host"
+                return $true
+            }
+            # 判据 4（原生化挂载源）：挂载源已是 /dev/fuse，判据 2/3 的 srx_fuse_* 源名在
+            # 共享宿主布局下恒落空。改用拓扑事实：应用视图根 dev 与 init 命名空间系统 FUSE
+            # 不同即已接管（与场景 4 接管断言同一判据）。
+            if ($scopedAppPid -and (Test-Su "a=`$(grep -m1 ' /storage/emulated ' /proc/$scopedAppPid/mountinfo | cut -d' ' -f3); b=`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3); [ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]")) {
+                Write-Host "  - scoped_fuse_started scenario=$Scenario root=$MountRoot attempt=$attempt source=app-view-dev"
                 return $true
             }
             # 失败标志只收集不提前终止：这些日志可能出现在挂载协商窗口内，随后宿主

@@ -338,7 +338,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("match preattached_host {", source)
             self.assertIn("Ok(state) => (vec![state], ScopedMountAttempt::Ready", source)
             # 已服务判定必须只认**当前**宿主会话：旧代际的层已经失效，仍需重新挂。
-            self.assertIn("Some(view.mount_source.as_str())", source)
+            # 判据是超级块身份（dev）——挂载源已原生化，源文本不再能区分代际。
+            self.assertIn("Some(view.dev.as_str())", source)
             monitor_only = source.index("else if request.is_monitor_only")
             redirect = source.index("apply_sdcard_redirect(", source.index("preattach_shared_host("))
             self.assertLess(monitor_only, redirect, label)
@@ -929,14 +930,21 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("libc::MS_REC | libc::MS_PRIVATE", host)
         self.assertIn("mount_host_fuse(", host)
         self.assertIn("libc::MS_SHARED", config)
-        self.assertIn('"srx_fuse_host"', config)
         self.assertIn("if !crate::fuse_host::ensure_global()", daemon)
         self.assertIn("crate::fuse_host::ensure_global()", daemon)
         # 宿主不可用时应用照常拿到 namespace bind 视图（scoped 会话已退役）。
         self.assertIn("namespace bind remains active", daemon)
-        # scoped 会话退役后，`srx_fuse_redirect` 前缀仍必须保留：它用于识别并清理旧版本
-        # 遗留的 scoped 挂载层，删掉会让历史死层失去归属判据。
-        self.assertIn('"srx_fuse_redirect"', config)
+        # 挂载源必须与系统 MediaProvider 的 FUSE 同形：任何会话标识前缀都会让应用一读
+        # 挂载表就认出本模块。归属改由超级块身份（dev + mount_id）承担，见账本的
+        # known_module_fuse_devs 与宿主快照的 dev 字段。
+        self.assertIn('pub const NATIVE_FUSE_SOURCE: &str = "/dev/fuse";', config)
+        self.assertNotIn('"srx_fuse_host"', config)
+        self.assertNotIn('"srx_fuse_redirect"', config)
+        self.assertIn("pub fn known_module_fuse_devs(", read("src/mount_ledger.rs"))
+        # 旧版本留下的 scoped/宿主死层仍要能识别并清理：机读判据保留在
+        # module_mount_source 的固定前缀里（只用于识别历史层，不再用于生成）。
+        self.assertIn('"srx_fuse_redirect"', read("src/module_mount_source.rs"))
+        self.assertIn('"srx_fuse_host"', read("src/module_mount_source.rs"))
 
     def test_shared_fuse_host_registers_app_policy_before_attach(self) -> None:
         # 共享宿主会话只持有一份「直通」策略。按 uid 策略必须由 daemon 经控制通道登记进会话，
@@ -1143,7 +1151,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('const HOST_ATTACH_ENV: &str = "SRT_FUSE_HOST_ATTACH";', host)
         self.assertIn("fn host_attach_enabled() -> bool", host)
         gate = "".join(
-            section(host, "pub fn can_attach_app(", "pub fn is_current_host_source(").split()
+            section(host, "pub fn can_attach_app(", "pub fn is_current_host_mount(").split()
         )
         self.assertIn("if!host_attach_enabled(){", gate)
         # 开关方向必须与目标形态一致：只有显式写成关闭取值才关闭，未设置即接入。
@@ -1163,9 +1171,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
             host, "pub fn spawn_external_abort_monitor()", "fn external_abort_monitor_main("
         )
         self.assertIn("if!host_attach_enabled(){", "".join(monitor.split()))
-        self.assertIn(
-            "paths::normalize_syntax(mount_root)==paths::normalize_syntax(&view_root)", gate
-        )
+        # P5-c：接入目标上提一层后有两种合法形态（用户根 / 视图根），闸门必须同时放行；
+        # 只认其中一种会让整族接入被判"根不允许接入"并静默回退 scoped。
+        self.assertIn("normalized==paths::normalize_syntax(&view_root)", gate)
+        self.assertIn("normalized==paths::normalize_syntax(&lifted_root)", gate)
+        self.assertIn("host_attach_root_for_user(user_id)", gate)
 
         # 别名覆盖函数（attach_host_view_to_storage_aliases）使用同命名空间 MS_BIND，
         # 不属于「跨命名空间 bind 回退」禁令范围，因此 MS_BIND 检查只圈定 child_main 本体。
@@ -1184,7 +1194,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(host_ns_at, clone_at, "克隆游离挂载必须在宿主命名空间内完成")
         self.assertLess(clone_at, app_ns_at, "克隆之后要切回应用命名空间")
         self.assertLess(app_ns_at, move_at, "附着必须发生在应用命名空间内")
-        self.assertIn("live.source != view.mount_source", attach)
+        # 复核判据是超级块身份（dev），不是挂载源文本：源原生化之后文本与系统
+        # MediaProvider 的 FUSE 完全同形，按源比较会把"挂在别处"判成接入成功。
+        self.assertIn("live.dev != view.dev", attach)
+        self.assertNotIn("live.source != view.mount_source", attach)
         # 跨命名空间搬运只能用 open_tree + move_mount：`mount(MS_BIND)` 的源挂载必须属于
         # 调用方当前命名空间，跨命名空间时直接 EINVAL（真机实测），退回 bind 会让接入静默失效。
         self.assertIn("libc::SYS_open_tree", host)
@@ -1290,7 +1303,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "fn should_keep_reload_redirect_root(",
             "fn sandbox_root_matches_redirect_target(",
         )
-        self.assertIn("crate::fuse_host::is_stale_host_source(source)", keep)
+        # 判据按超级块身份（`is_stale_host_at` 读该路径当前服务层的 dev），不按挂载源
+        # 文本：源原生化之后文本不再带会话标识，按源比较会把"上一代会话的层"判成健康。
+        self.assertIn("crate::fuse_host::is_stale_host_at(target)", keep)
 
     def test_fuse_policy_resolution_is_per_request_uid(self) -> None:
         # 共享宿主 FUSE 会话要让同一个挂载点服务多个应用，策略解析就必须从「会话级常量」
@@ -2350,25 +2365,59 @@ class ScenarioConsistencyTest(unittest.TestCase):
         for forbidden in ("O_CREAT", "fs::write", "File::create", "OpenOptions"):
             self.assertNotIn(forbidden, legacy)
 
-    def test_mount_readiness_is_decided_from_mountinfo(self) -> None:
-        """挂载是否生效必须由应用自己读 mountinfo 判定，而不是等 daemon 写状态文件。
+    def test_mount_readiness_follows_executor_ack(self) -> None:
+        """挂载是否生效必须由**挂载执行方的回执**判定，而不是应用自己认模块标识。
 
-        守卫锁定四件事，缺一条都会让应用在启动阶段被拖死或让判定失真：
+        历史教训有两条，方向相反、必须同时守住：
 
-        1. 应用侧轮询本模块挂载并等到集合稳定；
-        2. 轮询判据覆盖两条后端——FUSE 后端源带 `srx_fuse_*` 前缀，命名空间后端源是模块私有的
-           临时锚点（`tmp/real_storage/`）；只认前缀会让命名空间后端的应用永远等不到确认；
-        3. 轮询预算必须远低于 AMS 的进程启动超时（约 10 秒）——这个等待跑在应用主线程上，
-           预算接近它就会让应用被判 `start timeout` 杀掉，真机上微信等应用都会 `failed to attach`；
-        4. daemon 侧不再写标记，测试流的挂载确认只认两条日志。
+        1. 早期靠 daemon 写状态文件，文件写失败或进程被杀就让应用永远等不到确认；
+        2. 后来改成应用自己读 mountinfo 认领挂载，但那要求挂载表里留着模块标识
+           （`srx_fuse_*` 源、`tmp/real_storage` 锚点）。标识一旦被隐藏/原生化，判据会
+           **静默失效**，应用只能空等满预算被 AMS 判启动超时——这条守卫因此改为锁定回执。
+
+        回执的可靠性来自三点，缺一条都会退回"猜"：
+        1. 请求由应用发出时保留连接（`send_mount_request_retaining`），带 `'M'` 类型头；
+        2. 执行方（companion / daemon）在挂载落定、账本登记之后用 `send_mount_result`
+           在同一连接上回 4 字节结论；
+        3. 应用侧用一次阻塞读消费该结论，拿不到时才做一次观测兜底，**不得回到轮询**。
         """
         post = read("src/lifecycle/specialize_post.rs")
-        wait = section(post, "fn wait_for_module_mount(", "\nfn log_post_perf(")
+        wait = section(post, "fn conclude_mount_readiness(", "\nfn log_post_perf(")
+        self.assertIn("await_mount_ack(", wait)
+        # 回执缺失时才观测一次；轮询既耗电又会掩盖真实结论，不得回归。
         self.assertIn("app_redirect_mounts_in(0, package_name)", wait)
-        self.assertIn("MOUNT_SETTLE_POLLS", wait)
-        self.assertNotIn(".srx_mount_status_", wait)
-        # 测试流按这一行确认挂载，措辞不能静默改掉。
+        self.assertNotIn("MOUNT_SETTLE_POLLS", wait)
+        self.assertNotIn("usleep", wait)
+        self.assertNotIn("thread::sleep", wait)
+        # 结论必须落成可被测试流匹配的稳定日志串。
         self.assertIn('"app mount confirmed pid={}', post)
+        self.assertIn('"mount unknown/failed pid={}', post)
+
+        # 回执连接的所有权必须在 post 的每条返回路径上被消费，否则 fd 会留在应用进程里。
+        flow = read("src/lifecycle.rs")
+        self.assertIn("mount_reply_fd:", flow)
+        pre = read("src/lifecycle/specialize_pre.rs")
+        self.assertIn("send_mount_request_retaining(", pre)
+        self.assertIn("fn retain_mount_reply(", pre)
+        self.assertIn("fn take_mount_reply_fd(", pre)
+        self.assertIn("fn release_mount_reply(", pre)
+        self.assertIn("self.take_mount_reply_fd()", post)
+        # 执行方必须在同一连接上回结论（'M' 请求的应答一直是 4 字节状态）。
+        for path in ("src/lifecycle/companion_mount.rs", "src/daemon_mount.rs"):
+            self.assertIn("send_mount_result(", read(path))
+
+        ack = read("src/lifecycle/companion_ack.rs")
+        self.assertIn("enum CompanionMountAck", ack)
+        self.assertIn("fn await_mount_ack(", ack)
+        self.assertIn("fn discard_mount_reply(", ack)
+        # 等待必须是一次性阻塞读（poll + 裸 SYS_read 读满 4 字节），不是周期检查：
+        # 既不能用会吞掉 EAGAIN 的通用读超时封装（真机实测会提前 500ms 判超时），
+        # 也不能走被本模块 read hook 覆盖的 libc 路径。
+        self.assertIn("libc::poll(", ack)
+        self.assertIn("libc::SYS_read", ack)
+        self.assertIn("EAGAIN", ack)
+        self.assertNotIn("usleep", ack)
+        self.assertNotIn("thread::sleep", ack)
 
         source = read("src/module_mount_source.rs")
         self.assertIn("pub fn is_module_anchor_mount_source(", source)
@@ -2677,19 +2726,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
         判据完全不成立也不会把应用拖死。
         """
         timing = read("src/lifecycle/mount_timing.rs")
-        # 常量可能是 `30` 这样的字面量，也可能是 `20 * 1000` 这样的算式，两种都要能读。
-        count = _const_product(timing, "POST_MOUNT_STATUS_POLL_COUNT")
-        delay_us = _const_product(timing, "POST_MOUNT_STATUS_POLL_DELAY_US")
-        budget_ms = count * delay_us // 1000
+        # 常量可能是 `600` 这样的字面量，也可能是算式，两种都要能读。
+        budget_ms = _const_product(timing, "POST_MOUNT_ACK_WAIT_MS")
         self.assertLessEqual(
             budget_ms,
             2000,
             f"挂载等待预算 {budget_ms}ms 过高，会把应用拖过 AMS 启动超时（约 10s）",
         )
         self.assertGreaterEqual(budget_ms, 200, "预算过短会让正常的落定确认来不及完成")
-        # 等待必须由短轮询实现，不得改成单次长睡眠（那样无法在挂载就绪后立刻返回）。
-        wait = section(read("src/lifecycle/specialize_post.rs"), "fn wait_for_module_mount(", "\nfn log_post_perf(")
-        self.assertIn("POST_MOUNT_STATUS_POLL_DELAY_US", wait)
+        # 等待必须由「一次性阻塞读回执」实现：既不能改成单次长睡眠（醒来仍是猜），
+        # 也不能退回周期轮询（耗电且掩盖真实结论）。
+        wait = section(
+            read("src/lifecycle/specialize_post.rs"),
+            "fn conclude_mount_readiness(",
+            "\nfn log_post_perf(",
+        )
+        self.assertIn("await_mount_ack(reply_fd, budget_ms)", wait)
+        self.assertNotIn("usleep", wait)
+        self.assertNotIn("thread::sleep", wait)
 
     def test_fixture_residue_is_rejected_before_each_scenario(self) -> None:
         """清理后夹具根必须为空，否则跨场景残留会在离现场很远的断言上爆掉。
@@ -2913,13 +2967,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "app_mountinfo_has_expected_paths() {",
             "\nensure_current_app_mount_confirmed() {",
         )
-        self.assertIn("srx_fuse_host", bash_recheck, "`.sh` 场景 4 复核缺少共享宿主布局分支")
+        self.assertIn("form=shared-host", bash_recheck, "`.sh` 场景 4 复核缺少共享宿主布局分支")
+        self.assertIn("form=bind-layout", bash_recheck, "`.sh` 场景 4 复核缺少 bind 布局分支")
         ps_recheck = section(
             self.powershell,
             "function Assert-AppMountinfoHasExpectedPaths {",
             "\nfunction Ensure-CurrentAppMountConfirmed",
         )
-        self.assertIn("srx_fuse_host", ps_recheck, "`.ps1` 场景 4 复核缺少共享宿主布局分支")
+        self.assertIn("layout_shared_host", ps_recheck, "`.ps1` 场景 4 复核缺少共享宿主布局分支")
+        self.assertIn("layout_bind", ps_recheck, "`.ps1` 场景 4 复核缺少 bind 布局分支")
 
     def test_fuse_mount_checks_accept_shared_host_prefix(self) -> None:
         """FUSE 接管与 scoped 启动判定必须识别共享宿主前缀 srx_fuse_host。

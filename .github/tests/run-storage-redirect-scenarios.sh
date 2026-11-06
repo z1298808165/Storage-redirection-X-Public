@@ -272,11 +272,16 @@ fix_own_private_fixture_permissions() {
     echo "own_private_fixture_permission_fix_skipped: app uid not found for $APP_ID" >&2
     return 1
   fi
+  # 自有私有目录在应用视图里是**直连 f2fs bind**（不是模块 FUSE），DAC 由内核按应用
+  # 凭据判定：夹具用 root 的 `mkdir -p` 预置时，中间目录（如 `Android/media/<包名>/Tencent`）
+  # 会带上 root:media_rw 与 2750，应用在其下建文件直接 EACCES（CI Test-flow 场景 34
+  # `own-media` 四连失败的根因）。因此这里连 `<包名>` 整棵私有根一起归一，与真机上
+  # 这三个目录本来归应用所有一致。
   # 沙箱内的夹具同样按应用属主修正：`${PRIVATE_ROOT}` 就是应用自己的重定向根
   # （`Android/data/<包名>/sdcard`），root 预置的目录项会被系统 FUSE 按属主过滤，
   # 应用在热重载后重新解析这条路径时报 ENOENT（场景 29 的 `createNewFile` 失败）。
   # 模块自身创建沙箱目录时用的也是应用 uid，这里与之对齐，不改变夹具内容。
-  adb_su "app_uid='$uid'; for root in '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+  adb_su "app_uid='$uid'; for root in '${BACKEND_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/obb/${APP_ID}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
 adb_root() {
@@ -1349,16 +1354,22 @@ app_mountinfo_has_expected_paths() {
   [ -n "$pid" ] || return 1
 
   if [ "$(scenario_from_label "$label")" = "4" ]; then
-    # 场景 4 的期望路径表保留旧布局形态（放行根挂载点）；共享宿主接入布局下整个
-    # 视图根被 srx_fuse_host[pid] 接管，放行与映射路径都是会话内的策略层逻辑路径，
-    # 不会再出现 /Download 挂载点。两种布局任一命中即证明应用视图已被模块接管。
-    if adb_su "pid='$pid'; grep -Fq ' ${REAL_ROOT}/Download ' /proc/\$pid/mountinfo"; then
+    # 挂载源已原生化（NATIVE_FUSE_SOURCE=/dev/fuse，见 config.rs），源名判定失效。
+    # 接管证明改为拓扑事实，两条任一命中：
+    # 1. bind 布局：用户根 /storage/emulated/<user> 本身是挂载点（沙盒/放行/映射落点）；
+    # 2. 共享宿主布局：应用视图根 /storage/emulated 的 dev 与 init 命名空间里系统
+    #    MediaProvider FUSE 不同——内容由 FUSE 策略层服务，挂载点不落用户根。
+    # dev 比对见 app_view_dev_differs。
+    if adb_su "grep -Fq ' ${REAL_ROOT} ' /proc/$pid/mountinfo"; then
+      echo "takeover_proven scenario=4 pid=$pid form=bind-layout"
       return 0
     fi
-    if adb_su "pid='$pid'; grep -F ' ${REAL_ROOT} ' /proc/\$pid/mountinfo | grep -Fq srx_fuse_host"; then
+    local dev_pair
+    if dev_pair="$(app_view_dev_differs "$pid")"; then
+      echo "takeover_proven scenario=4 pid=$pid form=shared-host ${dev_pair}"
       return 0
     fi
-    echo "missing=${REAL_ROOT}/Download-or-fuse-host-root"
+    echo "missing=${dev_pair}"
     return 1
   fi
 
@@ -3014,6 +3025,12 @@ check_fuse_mount_active() {
       echo "fuse_mount_active scenario=${scenario} pid=${pid}"
       return 0
     fi
+    # 挂载源原生化后上一条源名判据恒落空，以视图根 dev 比对为准。
+    local dev_pair
+    if [ -n "$pid" ] && dev_pair="$(app_view_dev_differs "$pid")"; then
+      echo "fuse_mount_active scenario=${scenario} pid=${pid} source=app-view-dev ${dev_pair}"
+      return 0
+    fi
     sleep_ms "$SRT_RESULT_POLL_MS"
   done
 
@@ -3069,6 +3086,15 @@ check_scoped_fuse_daemon_started() {
       # 数据面就绪；只读强制语义由后续行为用例（write-denied 等）继续真实验证。
       if [ -n "$app_mount_pid" ] && adb_su "grep -F -- ' ${REAL_ROOT} ' '/proc/${app_mount_pid}/mountinfo' 2>/dev/null | grep -Eq ' - fuse srx_fuse_host(\\[| )'"; then
         echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=app-mountinfo-host"
+        return 0
+      fi
+      # 挂载源原生化（NATIVE_FUSE_SOURCE=/dev/fuse）后上面两条按 srx_fuse_* 源名的判据
+      # 在共享宿主布局下恒落空：宿主挂在视图根 /storage/emulated、源与系统 FUSE 相同。
+      # 改用拓扑事实：应用视图根的 dev 与 init 命名空间系统 FUSE 的 dev 不同，即视图根
+      # 已由模块会话接管（与场景 4 接管断言同一判据；grep+cut、pid 本地插值）。
+      local dev_pair
+      if [ -n "$app_mount_pid" ] && dev_pair="$(app_view_dev_differs "$app_mount_pid")"; then
+        echo "scoped_fuse_started scenario=${scenario} root=${mount_root} attempt=${attempt} source=app-view-dev ${dev_pair}"
         return 0
       fi
       if adb_su "grep -F -- 'daemon hybrid fuse no scoped service mounted' '$LOG_PATH' 2>/dev/null | grep -F -- 'pkg=${APP_ID}' >/dev/null"; then
@@ -3599,6 +3625,21 @@ run_file_monitor_mediastore_scenario() {
     run_file_monitor_mediastore_image_success_case "$scenario" "media-ding-camera-map" "DCIM/Camera" "$REAL_ROOT/Pictures/SrtMonitorDing" "" 0 "ding-system-writer-map-result-and-routing-are-authoritative" &&
     run_file_monitor_mediastore_denied_case "$scenario" "media-read-only-denied" "Download/SrtMonitorLocked" "$MONITOR_LOCKED_ROOT" &&
     run_file_monitor_mediastore_success_case "$scenario" "media-read-only-excluded-create" "Download/SrtMonitorLocked/Writable" "$MONITOR_WRITABLE_ROOT" "$PRIVATE_MONITOR_WRITABLE_ROOT"
+}
+
+app_view_dev_differs() {
+  # 应用视图根是否已由模块会话接管。挂载源已原生化（NATIVE_FUSE_SOURCE=/dev/fuse，见
+  # config.rs），srx_fuse_* 源名判据失效；改比对应用与 init 命名空间里
+  # /storage/emulated 的超级块 dev——共享宿主布局下两者不同即已接管。始终输出 dev 对
+  # 供日志定位，返回码表示是否不同。只用 grep+cut：awk 正则经 adb_su 双层包装会坏引号，
+  # toybox grep 的 -o 不可用（真机实证）。
+  local pid="$1" app_dev init_dev
+  if [ -n "$pid" ]; then
+    app_dev="$(adb_su "grep -m1 ' /storage/emulated ' /proc/${pid}/mountinfo | cut -d' ' -f3" 2>/dev/null || true)"
+  fi
+  init_dev="$(adb_su "grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3" 2>/dev/null || true)"
+  echo "app_dev=${app_dev:-none} init_dev=${init_dev:-none}"
+  [ -n "$app_dev" ] && [ -n "$init_dev" ] && [ "$app_dev" != "$init_dev" ]
 }
 
 app_pid() {
@@ -4918,7 +4959,7 @@ export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
-export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready device_sdk_level media_provider_query_ready media_provider_queries_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario run_monitor_capture_failopen_scenario app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
+export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready device_sdk_level media_provider_query_ready media_provider_queries_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario run_monitor_capture_failopen_scenario app_view_dev_differs app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
 export -f fresh_app_enabled_for_label
 export -f app_view_namespace_refresh_allowed

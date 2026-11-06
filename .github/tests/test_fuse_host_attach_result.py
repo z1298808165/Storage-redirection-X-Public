@@ -35,11 +35,12 @@ class HostAttachResultTest(unittest.TestCase):
                 "host_attach_child_main",
                 "send_host_attach_result",
                 "attach_host_view_to_storage_aliases",
+                "alias_is_symbolic_duplicate",
                 "storage_user_id_from_view_root",
             )
         )
         dispatch = re.search(
-            r"let result = host_attach_child_main\(view, target_root\);\s*"
+            r"let result = host_attach_child_main\(view, target_root, user_id, app_uid\);\s*"
             r"let ok = send_host_attach_result\(ready_sockets\[1\], result\) && result == 0;",
             source,
         )

@@ -339,10 +339,11 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
 
     def test_enotconn_cleanup_detaches_owned_dead_fuse_mount(self) -> None:
         rust = read("src/fuse_redirect/config.rs")
+        # 区间到 mount_ownership 为止：覆盖 finish_failed_session / detach_mount_point /
+        # is_already_unmounted_errno 三个收尾判定。原结尾标记是 scoped 挂载源前缀常量，
+        # 挂载源原生化后该常量已删除（源不再参与归属判定），改用下一个稳定锚点。
         cleanup = rust[
-            rust.index("fn finish_failed_session") : rust.index(
-                "/// scoped 挂载使用的挂载源前缀"
-            )
+            rust.index("fn finish_failed_session") : rust.index("fn mount_ownership(")
         ]
 
         self.assertIn("if app_exited || is_already_unmounted_errno(error_no)", cleanup)
