@@ -224,7 +224,11 @@ where
             hub.get_package_name(),
             dirfd,
             self_uid,
-            if raw_path.is_empty() { "-" } else { raw_path.as_str() }
+            if raw_path.is_empty() {
+                "-"
+            } else {
+                raw_path.as_str()
+            }
         );
     }
 

@@ -138,7 +138,9 @@ pub(crate) fn query_process_identity(pid: i32, uid: i32) -> Option<(String, i32)
     let mut guard = client().lock().unwrap_or_else(|err| err.into_inner());
     // 缓存按 pid 记，命中时还要核对 uid：5 秒窗口内 pid 复用给了别的 uid，旧答案不能用。
     if let Some(cached) = guard.cached(pid, now_ms)
-        && cached.as_ref().is_none_or(|(_, cached_uid)| uid < 0 || *cached_uid == uid)
+        && cached
+            .as_ref()
+            .is_none_or(|(_, cached_uid)| uid < 0 || *cached_uid == uid)
     {
         return cached;
     }

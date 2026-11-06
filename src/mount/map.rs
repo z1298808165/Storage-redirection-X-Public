@@ -352,10 +352,8 @@ impl MountPlanner {
         // 重定向后端目录仍在此补建：那是本模块的私有落点，与请求路径是否会出现在
         // 公共目录无关；不建它后续 bind 的源侧会缺失。
         if let Some(current_relative) = paths::relative_child_path(request_path, storage_path) {
-            let current_fallback = self.normalize_path(&paths::join(
-                &self.redirect_target,
-                current_relative,
-            ));
+            let current_fallback =
+                self.normalize_path(&paths::join(&self.redirect_target, current_relative));
             if !self.ensure_directory_exists(&current_fallback, should_chown_current_dirs) {
                 log::warn!(
                     "map redirect backend unavailable request={} backend={}",

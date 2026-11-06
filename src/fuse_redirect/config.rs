@@ -127,7 +127,8 @@ impl FuseCapabilitySnapshot {
         let count = self.scope_failures_for(scope).saturating_add(1);
         let now_ms = paths::monotonic_ms().max(0) as u64;
         self.scope_failures.retain(|(name, _, _)| name != scope);
-        self.scope_failures.insert(0, (scope.to_string(), count, now_ms));
+        self.scope_failures
+            .insert(0, (scope.to_string(), count, now_ms));
         self.scope_failures.truncate(MAX_TRACKED_SCOPES);
     }
 
@@ -434,7 +435,10 @@ fn parse_scope_failures(content: &str) -> Vec<(String, u32, u64)> {
             let mut fields = value.trim().split(':');
             let name = fields.next()?;
             let count = fields.next()?.parse::<u32>().ok()?;
-            let last_ms = fields.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            let last_ms = fields
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
             if name.is_empty() {
                 return None;
             }
