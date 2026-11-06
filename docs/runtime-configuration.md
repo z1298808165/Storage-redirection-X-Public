@@ -50,21 +50,34 @@
 - `mapping_mode_only=false`、字段缺失、字段为空或不是 bool：保持旧行为，即 `enabled=true` 时继续执行完整隔离重定向，并在其上叠加 `path_mappings`。
 - 该模式同样覆盖 `com.android.providers.media.module` 等系统代写进程的按调用方重定向逻辑，适合只希望媒体服务代写特定映射目录、不希望整包路径被隔离的场景。
 
-## FUSE 规划根数与功耗
+## FUSE 规划根与功耗
 
-`storage_backend_mode = auto` 下，native 会把一条应用的规则集合收敛为最少个数的 FUSE 规划根。规划根只用于诊断与接入尝试：**真正承载数据面的只有一个共享宿主会话**（`srx_fuse_host`），不再为每个根 fork 独立会话进程。两级阈值：
-
-- **软目标 4**（`TARGET_SCOPED_FUSE_ROOTS`）：规则去重、剔除子路径后的根数不超过 4 时直接使用，绝大多数配置收敛在这一档。
-- **规划根上限 16**（`MAX_SCOPED_FUSE_ROOTS`）：超过软目标时先把各根收敛到顶层存储子目录；如果顶层目录仍超过 16，折叠为一个存储视图根。宿主会话按 uid 持有整份规则，仍按原始规则逐路径匹配，保持通配符对后续新建目录的动态语义。
+`storage_backend_mode = auto` 的语义是 **FUSE 优先**：能力可用时，一条应用的规划根恒定为该用户的
+存储视图根（`/storage/emulated/<user>`），由唯一的共享宿主会话（`srx_fuse_host`）承载，映射、通配、
+沙盒、只读、放行与排除全部在策略层逐请求判定。因此**不存在「规划根个数」这个维度**，也没有按根
+折叠、按根 fork 会话或按根计预算的路径——历史上的软目标 4 / 上限 16 两档阈值与相应的规划日志已随
+改造删除，不要再按它们排查。
 
 功耗与性能特征：
 
-- **空闲成本为零**：每个会话是单线程阻塞在 `/dev/fuse` read 上，无 IO 时不产生 CPU 唤醒；成本只是每个会话一个进程的内存占用。
-- **IO 直通**：会话建立时与内核协商 FUSE passthrough（Android GKI 内核已回移植），协商成功后文件读写直连 backing fd，不回用户态；只有 lookup/元数据走 FUSE 转发。协商结果写入 `fuse init ... passthrough_enabled=` 日志。
-- **随应用退出回收**：应用进程退出后由会话自身卸载挂载点并退出（`fuse redirect app exited, unmount session` 日志），会话数不随应用生命周期累积。
-- **失败根精确回退**：某根启动失败时先记录失败根并尝试单个存储根 FUSE 会话（`fuse partial roots collapsed to storage root`）；只有该重试也失败时才使用 namespace 回退。这样不会出现规划阶段跳过 bind、运行阶段又没有 FUSE 接管的空档。
+- **空闲成本为零**：会话是单线程阻塞在 `/dev/fuse` read 上，无 IO 时不产生 CPU 唤醒；成本只是每个
+  宿主会话一个进程的内存占用，不随应用数线性增长。
+- **IO 直通**：会话建立时与内核协商 FUSE passthrough（Android GKI 内核已回移植），协商成功后文件
+  读写直连 backing fd，不回用户态；只有 lookup/元数据走 FUSE 转发。协商结果写入
+  `fuse init ... passthrough_enabled=` 日志。
+- **随应用退出回收**：应用进程退出后摘除其命名空间内的接入层，会话本身由宿主统一持有。
+- **失败回退是本应用级别的**：能力探测判不可用、或该应用接入失败时返回空根，由挂载层回落
+  namespace bind。失败受**按应用分桶**的预算约束：连续 3 次失败后进入 60s 退避窗口，窗口内不再
+  尝试，窗口过后放行一次探测，成功即清零；「没试」（根不满足接入条件、宿主尚未就绪）不计入预算。
+  单个应用的失败不会让其它应用一起退回 namespace。
 
-排查功耗异常时，先看 `scoped roots expanded past soft target count=` 日志：出现表示一级压缩后的最小根数超过 4，随后可能按顶层目录合并；该日志不等于最终会话数超过 4。若最终仍超过多会话预算，日志会出现 `collapse to single storage-root fuse session`，规则精度保持不变，但单个会话覆盖范围更大、内存成本更低。
+排查功耗或「某个应用没走 FUSE」时看两条日志：
+
+- `backend_effective ... requested=auto effective=<fuse|namespace> capability=<state> selection_reason=...`：
+  给出该应用最终生效的形态与原因（`scoped_mount_ready:view=srx_host` 表示已接入共享宿主，
+  `scoped_mount_failed_namespace_fallback:<reason>` 表示回落 namespace 及原因）。
+- `scoped gate diag ...`：只在闸门否定或带失败信号时输出（正常放行不打印，避免启动风暴期日志风暴），
+  带上 `capability`、`budget_exhausted`、`scope_failures` 等现场证据。
 
 ## 局部沙盒路径
 

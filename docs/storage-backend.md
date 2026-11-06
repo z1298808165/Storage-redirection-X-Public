@@ -21,9 +21,14 @@
 
 ## 会话归属与能力熔断
 
-- 每个 scoped 会话使用唯一的挂载源（`MountOption::FSName`，形如 `srx_fuse_redirect[<pid>]`），挂载完成后记录该挂载的挂载 ID。收尾时先确认挂载点最顶层仍是本次会话的挂载源；同路径已被新会话替换或已被摘除时跳过卸载，不会摘掉接管者的挂载。
-- 挂载归属按挂载源前缀判断，不按文件系统类型判断：内核 `mount(2)` 直挂的 scoped 挂载类型是 `fuse`，只有经 fusermount 回退时才出现 `fuse.srx`。
-- scoped 挂载启动或会话收尾失败受按应用分桶的预算约束；设备级 `unavailable` 需要 ≥2 个不同应用的失败（`schema=3` 能力快照，含 `state`、`reason`、`device_fail_count`、`last_failed_scope` 等），单应用失败不会锁出整机。设备级锁出后按 `retry_at_ms` 退避自愈（30s 起倍增封顶 10 分钟，无需重启），任意成功都会清零回 FUSE；daemon 启动会重置快照。管理端、WebUI 与诊断归档只读取 `state` 与 `reason`。
+- 挂载源已原生化：共享宿主视图根与系统 MediaProvider 的 FUSE 同形（源 `/dev/fuse`，类型 `fuse`），
+  挂载表里不再出现模块私有源名。「哪个挂载是本模块的」改由模块私有账本（`mount_ledger` 的 dev
+  集合，持久化在模块目录下）记录，应用侧读不到。per-app scoped 会话（`srx_fuse_redirect[<pid>]`）
+  已退役，历史残留由 daemon 启动时一次性清理。
+- 收尾按账本里记录的挂载 ID 与顶层 dev 确认归属；同路径已被回收替换或已摘除时跳过卸载，不会摘掉
+  接管者的挂载。
+- 接入失败受按应用分桶的预算约束（连续 3 次后 60s 退避窗口，窗口过后放行一次探测、成功即清零；
+  「没试」类判定不计入）；设备级 `unavailable` 需要 ≥2 个不同应用的失败（`schema=3` 能力快照，含 `state`、`reason`、`device_fail_count`、`last_failed_scope` 等），单应用失败不会锁出整机。设备级锁出后按 `retry_at_ms` 退避自愈（30s 起倍增封顶 10 分钟，无需重启），任意成功都会清零回 FUSE；daemon 启动会重置快照。管理端、WebUI 与诊断归档只读取 `state` 与 `reason`。
 
 ## 优点
 
