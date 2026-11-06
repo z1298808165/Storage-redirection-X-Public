@@ -760,7 +760,33 @@ function Assert-AppMountinfoHasExpectedPaths {
     $command += "echo all_present"
 
     $output = @(Invoke-Su $command)
-    if ($output -contains "all_present") { return [bool]$true }
+    if ($output -contains "all_present") {
+        Write-Host "  takeover_proven ${Label} form=bind-layout"
+        return [bool]$true
+    }
+
+    # 共享宿主布局：auto 的语义是 FUSE 优先，整棵存储视图根由会话接管，规则落点只存在于
+    # FUSE 策略层，mountinfo 里不再出现路径级挂载点（设计目标而非缺陷）。此时改用与场景 4
+    # 相同的拓扑事实作为接管证明：应用视图根 dev ≠ init 命名空间的系统 FUSE dev。
+    # 命令同样先拼好再传参（参数模式下 `+` 会变成字面量）。
+    $devCommand = "a=`"`$(grep -m1 ' /storage/emulated ' `"/proc/$AppProcessId/mountinfo`" | cut -d' ' -f3)`"; " +
+        "b=`"`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3)`"; " +
+        "echo app_dev=`$a init_dev=`$b"
+    $devOutput = @(Invoke-Su $devCommand)
+    foreach ($line in $devOutput) {
+        if ($line -notlike "app_dev=*") { continue }
+        $pair = $line -replace '^app_dev=', "" -split ' init_dev='
+        if (
+            $pair.Count -eq 2 -and
+            -not [string]::IsNullOrWhiteSpace($pair[0]) -and
+            -not [string]::IsNullOrWhiteSpace($pair[1]) -and
+            $pair[0] -ne $pair[1]
+        ) {
+            Write-Host "  takeover_proven ${Label} form=shared-host $line"
+            return [bool]$true
+        }
+        Write-Host "  mountinfo_check ${Label}: $line"
+    }
     foreach ($line in $output) {
         if ($line -like "missing=*") { Write-Host "  mountinfo_check ${Label}: $line" }
     }

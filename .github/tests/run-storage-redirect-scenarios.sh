@@ -1380,9 +1380,20 @@ app_mountinfo_has_expected_paths() {
   done <<<"$expected"
 
   if output="$(adb_su "$command")"; then
+    echo "takeover_proven ${label} pid=$pid form=bind-layout"
+    return 0
+  fi
+
+  # 共享宿主布局：auto 的语义是 FUSE 优先，整棵存储视图根由会话接管，规则落点只存在于
+  # FUSE 策略层，mountinfo 里不再出现路径级挂载点（这是设计目标，不是缺陷）。此时改用
+  # 与场景 4 相同的拓扑事实作为接管证明：应用视图根 dev ≠ init 命名空间的系统 FUSE dev。
+  local dev_pair
+  if dev_pair="$(app_view_dev_differs "$pid")"; then
+    echo "takeover_proven ${label} pid=$pid form=shared-host ${dev_pair}"
     return 0
   fi
   printf '%s\n' "$output" | sed "s/^/mountinfo_check ${label}: /"
+  echo "missing=${dev_pair}"
   return 1
 }
 
@@ -3262,6 +3273,8 @@ set_mount_namespace_read_only_seed() {
   adb_su "mkdir -p '$root'; rm -f '$root/write_denied.txt'; printf '%s' '$READ_ONLY_PAYLOAD' > '$root/$READ_ONLY_FILE'; chmod -R 777 '$root' 2>/dev/null || true" >/dev/null
 }
 
+# 通配放行在 auto（FUSE 优先）下由策略层逐请求匹配；只有接入失败回落 namespace 时才走
+# 「通配收敛到父目录 + 真实存储种子」的旧路径。两种形态的落点断言相同，故不区分实现。
 run_mount_namespace_allow_wildcard_fallback_scenario() {
   local scenario="$1"
   local control_path="$REAL_ROOT/Download/SrtProbe/$TEST_FILE"
@@ -4683,15 +4696,15 @@ run_scenario() {
       run_fuse_daemon_multi_wildcard_scenario "$scenario"
       ;;
     20)
-      echo "step 5/7: 执行默认 mount namespace 允许路径通配符回退验证"
+      echo "step 5/7: 执行通配符放行验证（auto 为 FUSE 优先，接入失败回落 namespace）"
       run_mount_namespace_allow_wildcard_fallback_scenario "$scenario"
       ;;
     21)
-      echo "step 5/7: 执行默认 mount namespace 只读路径通配符回退验证"
+      echo "step 5/7: 执行通配符只读路径拒绝验证（auto 为 FUSE 优先，接入失败回落 namespace）"
       run_mount_namespace_read_only_wildcard_fallback_scenario "$scenario"
       ;;
     22)
-      echo "step 5/7: 执行默认 mount namespace 映射最终目标只读判定验证"
+      echo "step 5/7: 执行映射最终目标只读判定验证（auto 为 FUSE 优先，接入失败回落 namespace）"
       run_mount_namespace_mapping_read_only_scenario "$scenario"
       ;;
     28)
