@@ -4,9 +4,12 @@ use crate::hook::monitor;
 use crate::hook::path as path_utils;
 use crate::hook::runtime;
 use crate::hook::stats::InterceptHub;
+use crate::hook::util::c_str_to_string;
 use crate::monitor::OpKind;
 use crate::platform::paths;
-use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t, off_t, timespec};
+use libc::{
+    AT_FDCWD, c_char, c_int, c_void, gid_t, mode_t, off_t, timespec, timeval, uid_t, utimbuf,
+};
 use std::ffi::CString;
 
 /// SQLite WAL 共享内存文件至少需要一个 32 KiB 页框；过小的 truncate 会让
@@ -41,7 +44,7 @@ pub unsafe extern "C" fn hooked_truncate(pathname: *const c_char, length: off_t)
                     pathname,
                     log_flags: 0,
                     extra_tail: Some(format!("length={}", length)),
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -86,7 +89,7 @@ pub unsafe extern "C" fn hooked_truncate64(pathname: *const c_char, length: off_
                     pathname,
                     log_flags: 0,
                     extra_tail: Some(format!("length={}", length)),
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -199,7 +202,7 @@ pub unsafe extern "C" fn hooked_chmod(pathname: *const c_char, mode: mode_t) -> 
                     pathname,
                     log_flags: mode as i32,
                     extra_tail: Some(format!("mode=0{:o}", mode)),
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -290,7 +293,7 @@ pub unsafe extern "C" fn hooked_fchmodat(
                     pathname,
                     log_flags: flags,
                     extra_tail: Some(format!("mode=0{:o}|flags=0x{:x}", mode, flags)),
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -349,7 +352,7 @@ pub unsafe extern "C" fn hooked_utimensat(
                     pathname,
                     log_flags: flags,
                     extra_tail: Some(format!("flags=0x{:x}", flags)),
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -764,4 +767,830 @@ fn confirm_private_owner_sqlite_futimens(
     );
     runtime::set_errno(original_errno);
     None
+}
+pub unsafe extern "C" fn hooked_chown(
+    pathname: *const c_char,
+    owner: uid_t,
+    group: gid_t,
+) -> c_int {
+    let self_ptr = hooked_chown as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::chown(pathname, owner, group),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, uid_t, gid_t) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, owner, group)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "chown",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("owner={}|group={}", owner, group)),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::chown(call_path, owner, group),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, uid_t, gid_t) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, owner, group)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_lchown(
+    pathname: *const c_char,
+    owner: uid_t,
+    group: gid_t,
+) -> c_int {
+    let self_ptr = hooked_lchown as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::lchown(pathname, owner, group),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, uid_t, gid_t) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, owner, group)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "lchown",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("owner={}|group={}", owner, group)),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::lchown(call_path, owner, group),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, uid_t, gid_t) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, owner, group)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_fchownat(
+    dirfd: c_int,
+    pathname: *const c_char,
+    owner: uid_t,
+    group: gid_t,
+    flags: c_int,
+) -> c_int {
+    let self_ptr = hooked_fchownat as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::fchownat(dirfd, pathname, owner, group, flags),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        c_int,
+                        *const c_char,
+                        uid_t,
+                        gid_t,
+                        c_int,
+                    ) -> c_int = std::mem::transmute(prev);
+                    f(dirfd, pathname, owner, group, flags)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "fchownat",
+                    dirfd,
+                    pathname,
+                    log_flags: flags,
+                    extra_tail: Some(format!(
+                        "owner={}|group={}|flags=0x{:x}",
+                        owner, group, flags
+                    )),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::fchownat(dirfd, call_path, owner, group, flags),
+                        |prev| {
+                            let f: unsafe extern "C" fn(
+                                c_int,
+                                *const c_char,
+                                uid_t,
+                                gid_t,
+                                c_int,
+                            ) -> c_int = std::mem::transmute(prev);
+                            f(dirfd, call_path, owner, group, flags)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_utime(pathname: *const c_char, times: *const utimbuf) -> c_int {
+    let self_ptr = hooked_utime as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::utime(pathname, times),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *const utimbuf) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, times)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Utimens,
+                    op_name: "utime",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: None,
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::utime(call_path, times),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, *const utimbuf) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, times)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_utimes(pathname: *const c_char, times: *const timeval) -> c_int {
+    let self_ptr = hooked_utimes as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::utimes(pathname, times),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *const timeval) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, times)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Utimens,
+                    op_name: "utimes",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: None,
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::utimes(call_path, times),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, *const timeval) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, times)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_setxattr(
+    pathname: *const c_char,
+    name: *const c_char,
+    value: *const c_void,
+    size: libc::size_t,
+    flags: c_int,
+) -> c_int {
+    let self_ptr = hooked_setxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::setxattr(pathname, name, value, size, flags),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *const c_char,
+                        *const c_void,
+                        libc::size_t,
+                        c_int,
+                    ) -> c_int = std::mem::transmute(prev);
+                    f(pathname, name, value, size, flags)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "setxattr",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: flags,
+                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::setxattr(call_path, name, value, size, flags),
+                        |prev| {
+                            let f: unsafe extern "C" fn(
+                                *const c_char,
+                                *const c_char,
+                                *const c_void,
+                                libc::size_t,
+                                c_int,
+                            ) -> c_int = std::mem::transmute(prev);
+                            f(call_path, name, value, size, flags)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_lsetxattr(
+    pathname: *const c_char,
+    name: *const c_char,
+    value: *const c_void,
+    size: libc::size_t,
+    flags: c_int,
+) -> c_int {
+    let self_ptr = hooked_lsetxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::lsetxattr(pathname, name, value, size, flags),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *const c_char,
+                        *const c_void,
+                        libc::size_t,
+                        c_int,
+                    ) -> c_int = std::mem::transmute(prev);
+                    f(pathname, name, value, size, flags)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "lsetxattr",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: flags,
+                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::lsetxattr(call_path, name, value, size, flags),
+                        |prev| {
+                            let f: unsafe extern "C" fn(
+                                *const c_char,
+                                *const c_char,
+                                *const c_void,
+                                libc::size_t,
+                                c_int,
+                            ) -> c_int = std::mem::transmute(prev);
+                            f(call_path, name, value, size, flags)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_removexattr(pathname: *const c_char, name: *const c_char) -> c_int {
+    let self_ptr = hooked_removexattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::removexattr(pathname, name),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, name)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "removexattr",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::removexattr(call_path, name),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, name)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_lremovexattr(
+    pathname: *const c_char,
+    name: *const c_char,
+) -> c_int {
+    let self_ptr = hooked_lremovexattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::lremovexattr(pathname, name),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, name)
+                },
+            )
+        },
+        |hub| {
+            hub.increment_open_calls();
+            crate::hook::caller::update_caller_for_mutation(hub, pathname);
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Chmod,
+                    op_name: "lremovexattr",
+                    dirfd: AT_FDCWD,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || libc::lremovexattr(call_path, name),
+                        |prev| {
+                            let f: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int =
+                                std::mem::transmute(prev);
+                            f(call_path, name)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_getxattr(
+    pathname: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: libc::size_t,
+) -> libc::ssize_t {
+    let self_ptr = hooked_getxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::getxattr(pathname, name, value, size),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *const c_char,
+                        *mut c_void,
+                        libc::size_t,
+                    ) -> libc::ssize_t = std::mem::transmute(prev);
+                    f(pathname, name, value, size)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "getxattr", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::getxattr(call_path, name, value, size),
+                    |prev| {
+                        let f: unsafe extern "C" fn(
+                            *const c_char,
+                            *const c_char,
+                            *mut c_void,
+                            libc::size_t,
+                        ) -> libc::ssize_t = std::mem::transmute(prev);
+                        f(call_path, name, value, size)
+                    },
+                )
+            })
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_lgetxattr(
+    pathname: *const c_char,
+    name: *const c_char,
+    value: *mut c_void,
+    size: libc::size_t,
+) -> libc::ssize_t {
+    let self_ptr = hooked_lgetxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::lgetxattr(pathname, name, value, size),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *const c_char,
+                        *mut c_void,
+                        libc::size_t,
+                    ) -> libc::ssize_t = std::mem::transmute(prev);
+                    f(pathname, name, value, size)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "lgetxattr", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::lgetxattr(call_path, name, value, size),
+                    |prev| {
+                        let f: unsafe extern "C" fn(
+                            *const c_char,
+                            *const c_char,
+                            *mut c_void,
+                            libc::size_t,
+                        ) -> libc::ssize_t = std::mem::transmute(prev);
+                        f(call_path, name, value, size)
+                    },
+                )
+            })
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_listxattr(
+    pathname: *const c_char,
+    list: *mut c_char,
+    size: libc::size_t,
+) -> libc::ssize_t {
+    let self_ptr = hooked_listxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::listxattr(pathname, list, size),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *mut c_char,
+                        libc::size_t,
+                    ) -> libc::ssize_t = std::mem::transmute(prev);
+                    f(pathname, list, size)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "listxattr", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::listxattr(call_path, list, size),
+                    |prev| {
+                        let f: unsafe extern "C" fn(
+                            *const c_char,
+                            *mut c_char,
+                            libc::size_t,
+                        ) -> libc::ssize_t = std::mem::transmute(prev);
+                        f(call_path, list, size)
+                    },
+                )
+            })
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_llistxattr(
+    pathname: *const c_char,
+    list: *mut c_char,
+    size: libc::size_t,
+) -> libc::ssize_t {
+    let self_ptr = hooked_llistxattr as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::llistxattr(pathname, list, size),
+                |prev| {
+                    let f: unsafe extern "C" fn(
+                        *const c_char,
+                        *mut c_char,
+                        libc::size_t,
+                    ) -> libc::ssize_t = std::mem::transmute(prev);
+                    f(pathname, list, size)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "llistxattr", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::llistxattr(call_path, list, size),
+                    |prev| {
+                        let f: unsafe extern "C" fn(
+                            *const c_char,
+                            *mut c_char,
+                            libc::size_t,
+                        ) -> libc::ssize_t = std::mem::transmute(prev);
+                        f(call_path, list, size)
+                    },
+                )
+            })
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_statfs(pathname: *const c_char, buf: *mut libc::statfs) -> c_int {
+    let self_ptr = hooked_statfs as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::statfs(pathname, buf),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *mut libc::statfs) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, buf)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "statfs", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::statfs(call_path, buf),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char, *mut libc::statfs) -> c_int =
+                            std::mem::transmute(prev);
+                        f(call_path, buf)
+                    },
+                )
+            })
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_statvfs(pathname: *const c_char, buf: *mut libc::statvfs) -> c_int {
+    let self_ptr = hooked_statvfs as *mut c_void;
+    runtime::with_hook_guard(
+        || {
+            runtime::call_prev(
+                self_ptr,
+                || libc::statvfs(pathname, buf),
+                |prev| {
+                    let f: unsafe extern "C" fn(*const c_char, *mut libc::statvfs) -> c_int =
+                        std::mem::transmute(prev);
+                    f(pathname, buf)
+                },
+            )
+        },
+        |hub| {
+            runtime::with_redirected_path(hub, "statvfs", AT_FDCWD, pathname, |call_path| {
+                runtime::call_prev(
+                    self_ptr,
+                    || libc::statvfs(call_path, buf),
+                    |prev| {
+                        let f: unsafe extern "C" fn(*const c_char, *mut libc::statvfs) -> c_int =
+                            std::mem::transmute(prev);
+                        f(call_path, buf)
+                    },
+                )
+            })
+        },
+    )
+}
+
+fn futimesat_fallback(dirfd: c_int, pathname: *const c_char, times: *const timeval) -> c_int {
+    // bionic 的 futimesat 本身是 utimensat/futimens 的兼容层；libc crate 没有
+    // 导出它，所以 fallback 按同样语义转换 timeval → timespec。
+    let converted = if times.is_null() {
+        None
+    } else {
+        // SAFETY: futimesat 合约要求 times 指向两个 timeval。
+        let tv = unsafe { std::slice::from_raw_parts(times, 2) };
+        Some([
+            timespec {
+                tv_sec: tv[0].tv_sec,
+                tv_nsec: tv[0].tv_usec as i64 * 1000,
+            },
+            timespec {
+                tv_sec: tv[1].tv_sec,
+                tv_nsec: tv[1].tv_usec as i64 * 1000,
+            },
+        ])
+    };
+    let times_ptr = converted
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr());
+    // SAFETY: dirfd/pathname 由 futimesat 调用方保证；times_ptr 指向本地
+    // 数组或为空指针，libc 调用期间有效。
+    unsafe {
+        if pathname.is_null() {
+            libc::futimens(dirfd, times_ptr)
+        } else {
+            libc::utimensat(dirfd, pathname, times_ptr, 0)
+        }
+    }
+}
+
+unsafe fn call_futimesat_prev(
+    proxy: *mut c_void,
+    dirfd: c_int,
+    pathname: *const c_char,
+    times: *const timeval,
+) -> c_int {
+    runtime::call_prev(
+        proxy,
+        || futimesat_fallback(dirfd, pathname, times),
+        |prev| {
+            let f: unsafe extern "C" fn(c_int, *const c_char, *const timeval) -> c_int =
+                std::mem::transmute(prev);
+            f(dirfd, pathname, times)
+        },
+    )
+}
+
+pub unsafe extern "C" fn hooked_futimesat(
+    dirfd: c_int,
+    pathname: *const c_char,
+    times: *const timeval,
+) -> c_int {
+    let self_ptr = hooked_futimesat as *mut c_void;
+    runtime::with_hook_guard(
+        || call_futimesat_prev(self_ptr, dirfd, pathname, times),
+        |hub| {
+            if pathname.is_null() {
+                return call_futimesat_prev(self_ptr, dirfd, pathname, times);
+            }
+            handle_single_path_audit(
+                hub,
+                SinglePathAuditRequest {
+                    kind: OpKind::Utimens,
+                    op_name: "futimesat",
+                    dirfd,
+                    pathname,
+                    log_flags: 0,
+                    extra_tail: None,
+                    redirect_mutation: hub.is_redirect_via_hook(),
+                },
+                |call_path| {
+                    runtime::call_prev(
+                        self_ptr,
+                        || futimesat_fallback(dirfd, call_path, times),
+                        |prev| {
+                            let f: unsafe extern "C" fn(
+                                c_int,
+                                *const c_char,
+                                *const timeval,
+                            ) -> c_int = std::mem::transmute(prev);
+                            f(dirfd, call_path, times)
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! test_require {
+        ($result:expr, $context:literal) => {
+            match $result {
+                Ok(value) => value,
+                Err(error) => panic!("{}: {:?}", $context, error),
+            }
+        };
+    }
+
+    #[test]
+    fn futimesat_fallback_converts_timeval() {
+        let path = std::env::temp_dir().join(format!(
+            "srx-futimesat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ));
+        test_require!(std::fs::write(&path, b"x"), "write");
+        let c_path = test_require!(
+            std::ffi::CString::new(path.to_string_lossy().as_bytes()),
+            "c path"
+        );
+        let times = [
+            timeval {
+                tv_sec: 100,
+                tv_usec: 250_000,
+            },
+            timeval {
+                tv_sec: 200,
+                tv_usec: 500_000,
+            },
+        ];
+        let rc = futimesat_fallback(AT_FDCWD, c_path.as_ptr(), times.as_ptr());
+        assert_eq!(rc, 0);
+        let metadata = test_require!(std::fs::metadata(&path), "metadata");
+        let mtime = test_require!(
+            test_require!(metadata.modified(), "mtime").duration_since(std::time::UNIX_EPOCH),
+            "epoch"
+        )
+        .as_secs();
+        assert_eq!(mtime, 200);
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -59,6 +59,7 @@ pub struct InterceptHub {
     is_fuse_fix_only: AtomicBool,
     is_boot_lite: AtomicBool,
     is_app_write_only: AtomicBool,
+    is_redirect_via_hook: AtomicBool,
     is_monitor_only: AtomicBool,
     is_monitor_enabled: AtomicBool,
     is_app_redirect_owner: AtomicBool,
@@ -243,6 +244,16 @@ impl InterceptHub {
 
     pub fn is_app_write_only(&self) -> bool {
         self.is_app_write_only.load(Ordering::Relaxed)
+    }
+
+    /// 本进程的重定向是否由进程内 hook 承担（系统代写 / app redirect hook）。
+    /// mount/FUSE 后端为 false；此时写类 hook 才需要改写目标路径。
+    pub fn set_redirect_via_hook(&self, enabled: bool) {
+        self.is_redirect_via_hook.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn is_redirect_via_hook(&self) -> bool {
+        self.is_redirect_via_hook.load(Ordering::Relaxed)
     }
 
     pub fn refresh_monitor_runtime_config(&self) {
@@ -756,6 +767,7 @@ static INTERCEPT_HUB: InterceptHub = InterceptHub {
     is_fuse_fix_only: AtomicBool::new(false),
     is_boot_lite: AtomicBool::new(false),
     is_app_write_only: AtomicBool::new(false),
+    is_redirect_via_hook: AtomicBool::new(false),
     is_monitor_only: AtomicBool::new(false),
     is_monitor_enabled: AtomicBool::new(false),
     is_app_redirect_owner: AtomicBool::new(false),

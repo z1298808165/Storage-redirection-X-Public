@@ -3,7 +3,7 @@ use super::{caller, context, diagnostic, monitor, path as path_utils};
 use crate::config::SettingsHub;
 use crate::platform::{self, fs, paths};
 use crate::redirect::{policy, process_redirect_path, record_redirect_hit, writer};
-use libc::{AT_FDCWD, c_char, c_void, mode_t};
+use libc::{AT_FDCWD, c_char, c_int, c_void, mode_t};
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,7 +56,7 @@ fn log_call_prev_fallback(site: &str) {
 
 #[inline]
 fn should_bypass_hook_in_fork_child(hub: &InterceptHub) -> bool {
-    if !srx_hook::is_forked_child() {
+    if !srx_hook::is_forked_child() || srx_hook::fork_safe() {
         return false;
     }
 
@@ -916,6 +916,7 @@ fn package_matches_owner(package_name: &str, owner: &RedirectDirOwner) -> bool {
 pub fn with_redirected_path<F, R>(
     hub: &InterceptHub,
     op_name: &str,
+    dirfd: c_int,
     pathname: *const c_char,
     call_original: F,
 ) -> R
@@ -935,30 +936,38 @@ where
         return call_original(pathname);
     }
 
-    if !path_utils::is_relevant_storage_path(hub, &path_text) {
-        diagnostic::record_fast_bypass(op_name, &path_text);
+    // 相对路径必须先按 dirfd/cwd 解析成绝对形态；绝对路径也要先折叠
+    // `.`/`..` 与重复斜杠，再做存储前缀判断，否则 //storage 或
+    // /storage/../storage 写法会绕过整条决策链。
+    let decision_path = if path_text.starts_with('/') {
+        path_utils::normalize_decision_path(&path_text)
+    } else {
+        path_utils::resolve_path_for_dirfd(dirfd, &path_text)
+    };
+    if decision_path.is_empty() || !path_utils::is_relevant_storage_path(hub, &decision_path) {
+        diagnostic::record_fast_bypass(op_name, &decision_path);
         return call_original(pathname);
     }
 
-    diagnostic::log_diag_path_event(hub, op_name, "input", &path_text, -1);
+    diagnostic::log_diag_path_event(hub, op_name, "input", &decision_path, -1);
 
-    let redirect_result = process_redirect_path_for_runtime(hub, &path_text);
-    diagnostic::log_diag_redirect_decision(hub, op_name, &path_text, &redirect_result);
+    let redirect_result = process_redirect_path_for_runtime(hub, &decision_path);
+    diagnostic::log_diag_redirect_decision(hub, op_name, &decision_path, &redirect_result);
     // MediaStore 提交阶段对 .pending- 文件的存在性检查决定了改名能否找到源文件，
     // 而常规决策日志按操作类型采样输出，stat 这类高频操作几乎不会命中。这里对
     // pending 形态单独无条件记录一次：该形态仅在 MediaStore 提交时出现，频率极低。
-    if paths::media_store_pending_display_path(&path_text).is_some() {
+    if paths::media_store_pending_display_path(&decision_path).is_some() {
         log::info!(
             "pending probe op={} path={} action={:?} new={}",
             op_name,
-            path_text,
+            decision_path,
             redirect_result.action,
             redirect_result.new_path
         );
     }
 
     if redirect_result.is_redirect() {
-        record_redirect_hit(hub, op_name, &path_text, &redirect_result.new_path);
+        record_redirect_hit(hub, op_name, &decision_path, &redirect_result.new_path);
         if let Ok(c_path) = CString::new(redirect_result.new_path) {
             return call_original(c_path.as_ptr());
         }

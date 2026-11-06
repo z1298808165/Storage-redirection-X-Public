@@ -362,6 +362,7 @@ fn install_plt_hook(
     );
 
     let hub = InterceptHub::instance();
+    hub.set_redirect_via_hook(is_redirect_via_hook);
     if is_app_write_redirect {
         hub.init_app_write_redirect(package_name, should_monitor);
     } else if is_boot_lite {

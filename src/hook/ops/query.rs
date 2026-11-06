@@ -383,7 +383,7 @@ pub unsafe extern "C" fn hooked_stat(pathname: *const c_char, statbuf: *mut libc
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "stat", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "stat", AT_FDCWD, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::stat(final_path, statbuf),
@@ -439,7 +439,7 @@ pub unsafe extern "C" fn hooked_lstat(pathname: *const c_char, statbuf: *mut lib
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "lstat", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "lstat", AT_FDCWD, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::lstat(final_path, statbuf),
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn hooked_fstatat(
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "fstatat", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "fstatat", dirfd, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::fstatat(dirfd, final_path, statbuf, flags),
@@ -566,7 +566,7 @@ pub unsafe extern "C" fn hooked_access(pathname: *const c_char, mode: c_int) -> 
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "access", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "access", AT_FDCWD, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::access(final_path, mode),
@@ -630,7 +630,7 @@ pub unsafe extern "C" fn hooked_faccessat(
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "faccessat", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "faccessat", dirfd, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::faccessat(dirfd, final_path, mode, flags),
@@ -700,7 +700,7 @@ pub unsafe extern "C" fn hooked_statx(
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "statx", pathname, |final_path| {
+            runtime::with_redirected_path(hub, "statx", dirfd, pathname, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || call_statx_syscall(dirfd, final_path, flags, mask, statxbuf),
@@ -761,7 +761,7 @@ pub unsafe extern "C" fn hooked_opendir(name: *const c_char) -> *mut libc::DIR {
                     )
                 });
             }
-            runtime::with_redirected_path(hub, "opendir", name, |final_path| {
+            runtime::with_redirected_path(hub, "opendir", AT_FDCWD, name, |final_path| {
                 runtime::call_prev(
                     self_ptr,
                     || libc::opendir(final_path),
@@ -807,7 +807,7 @@ pub unsafe extern "C" fn hooked_readlink(
                     },
                 )
             } else {
-                runtime::with_redirected_path(hub, "readlink", pathname, |final_path| {
+                runtime::with_redirected_path(hub, "readlink", AT_FDCWD, pathname, |final_path| {
                     runtime::call_prev(
                         self_ptr,
                         || libc::readlink(final_path, buf, bufsiz),
@@ -867,7 +867,7 @@ pub unsafe extern "C" fn hooked_readlinkat(
                     },
                 )
             } else {
-                runtime::with_redirected_path(hub, "readlinkat", pathname, |final_path| {
+                runtime::with_redirected_path(hub, "readlinkat", dirfd, pathname, |final_path| {
                     runtime::call_prev(
                         self_ptr,
                         || libc::readlinkat(dirfd, final_path, buf, bufsiz),

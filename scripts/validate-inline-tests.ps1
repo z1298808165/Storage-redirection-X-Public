@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$Ref = ":"
 )
@@ -24,6 +24,24 @@ $allowed = @{
         "zero_size_shm_is_not_poisoned",
         "full_size_shm_size_is_not_poisoned",
         "partial_shm_size_is_poisoned"
+    )
+    "src/hook/ops/mutation/meta.rs" = @(
+        "futimesat_fallback_converts_timeval"
+    )
+    "src/hook/ops/open.rs" = @(
+        "resolve_beneath_and_in_root_keep_original_dirfd",
+        "nofollow_only_rejects_actual_symlink",
+        "final_path_only_resolve_flags_can_still_redirect"
+    )
+    "src/hook/ops/rename.rs" = @(
+        "exchange_or_whiteout_across_boundary_is_exdev",
+        "noreplace_is_left_to_kernel_target_check"
+    )
+    "src/hook/path.rs" = @(
+        "dot_segments_resolve_against_existing_parent",
+        "duplicate_slashes_are_collapsed",
+        "relative_dirfd_resolves_dot_segments",
+        "magic_fd_link_resolves_to_target"
     )
     "src/lifecycle/companion_mount.rs" = @(
         "collapsed_sibling_barriers_are_shadowed_and_served",

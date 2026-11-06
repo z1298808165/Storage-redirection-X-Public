@@ -6,3 +6,4 @@ mod path_prepare;
 pub mod query;
 pub mod read;
 pub mod rename;
+pub mod stdio;

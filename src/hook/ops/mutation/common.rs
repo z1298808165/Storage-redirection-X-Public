@@ -49,6 +49,26 @@ where
     if request.pathname.is_null() {
         return call_original(request.pathname);
     }
+    // AT_EMPTY_PATH：pathname 为空但操作对象由 dirfd 决定。至少按 fd 的
+    // 真实目标做只读保护；不能把空路径当成“非存储路径”直接放行。
+    // SAFETY: 调用方保证 pathname 为有效 C 字符串；这里只读取其内容。
+    let empty_path_text = unsafe { c_str_to_string(request.pathname) };
+    if empty_path_text.is_empty() {
+        let fd_path = path_utils::resolve_fd_target(request.dirfd);
+        if !fd_path.is_empty()
+            && should_apply_mutation_policy(hub)
+            && deny_read_only_single_path_if_needed(
+                hub,
+                request.kind,
+                request.op_name,
+                &fd_path,
+                request.extra_tail.as_deref(),
+            )
+        {
+            return -1;
+        }
+        return call_original(request.pathname);
+    }
 
     let PreparedPath::Ready {
         path_for_decision, ..
@@ -397,7 +417,24 @@ where
     {
         return -1;
     }
-    let result = call_original(request.oldpath, request.newpath);
+    // hook-only 写模式下，硬链接目标也必须落进沙盒；mount/FUSE 后端由
+    // 内核路径映射负责，这里只在 AppWrite 模式改写新路径。
+    let mut new_path_owner = None;
+    if hub.is_redirect_via_hook() && should_apply_mutation_policy(hub) {
+        let decision = process_write_redirect_path(hub, path_for_decision.as_ref());
+        if decision.is_denied() {
+            return -1;
+        }
+        if decision.is_redirect()
+            && let Ok(c_path) = CString::new(decision.new_path)
+        {
+            new_path_owner = Some(c_path);
+        }
+    }
+    let call_new = new_path_owner
+        .as_ref()
+        .map_or(request.newpath, |path| path.as_ptr());
+    let result = call_original(request.oldpath, call_new);
     let current_errno = runtime::current_errno();
     monitor::record_path_operation_result(
         hub,
