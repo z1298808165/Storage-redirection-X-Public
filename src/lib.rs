@@ -9,6 +9,7 @@ mod config;
 #[path = "daemon_identity_query.rs"]
 mod daemon_identity_query;
 mod domain;
+mod zn_api;
 // quality-allow(lint-suppression): fuse_host 由 srx_daemon 二进制通过路径模块使用，lib 目标仅共享编译该模块。
 #[allow(dead_code)]
 mod fuse_host;

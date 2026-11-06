@@ -34,7 +34,10 @@ impl HookProfileSet {
 const PROFILE_RW_MONITORED: HookProfileSet = HookProfileSet::from_profile(HookProfile::Full)
     .with(HookProfile::Monitor)
     .with(HookProfile::SystemWriter)
-    .with(HookProfile::SystemWriterBootLite);
+    .with(HookProfile::SystemWriterBootLite)
+    // AppWrite 是 hook-only 写重定向模式，写类 mutation 也必须安装；
+    // 否则只有 open 被改写，mkdir/rename/link/chmod 仍落到真实路径。
+    .with(HookProfile::AppWrite);
 const PROFILE_OPEN_MONITORED: HookProfileSet = PROFILE_RW_MONITORED.with(HookProfile::AppWrite);
 const PROFILE_FULL_WRITER: HookProfileSet = HookProfileSet::from_profile(HookProfile::Full)
     .with(HookProfile::SystemWriter)
@@ -294,6 +297,132 @@ pub fn build_hook_entries() -> Vec<HookEntry> {
         HookEntry {
             symbol: "futimens",
             new_func: super::ops::mutation::hooked_futimens as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "chown",
+            new_func: super::ops::mutation::hooked_chown as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "lchown",
+            new_func: super::ops::mutation::hooked_lchown as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "fchownat",
+            new_func: super::ops::mutation::hooked_fchownat as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "utime",
+            new_func: super::ops::mutation::hooked_utime as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "utimes",
+            new_func: super::ops::mutation::hooked_utimes as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "setxattr",
+            new_func: super::ops::mutation::hooked_setxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "lsetxattr",
+            new_func: super::ops::mutation::hooked_lsetxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "removexattr",
+            new_func: super::ops::mutation::hooked_removexattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "lremovexattr",
+            new_func: super::ops::mutation::hooked_lremovexattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "getxattr",
+            new_func: super::ops::mutation::hooked_getxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "lgetxattr",
+            new_func: super::ops::mutation::hooked_lgetxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "listxattr",
+            new_func: super::ops::mutation::hooked_listxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "llistxattr",
+            new_func: super::ops::mutation::hooked_llistxattr as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "statfs",
+            new_func: super::ops::mutation::hooked_statfs as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "statvfs",
+            new_func: super::ops::mutation::hooked_statvfs as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "fopen",
+            new_func: super::ops::stdio::hooked_fopen as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "fopen64",
+            new_func: super::ops::stdio::hooked_fopen64 as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "freopen",
+            new_func: super::ops::stdio::hooked_freopen as *mut _,
+            is_optional: true,
+            profiles: PROFILE_OPEN_MONITORED,
+        },
+        HookEntry {
+            symbol: "remove",
+            new_func: super::ops::mutation::hooked_remove as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "mkfifo",
+            new_func: super::ops::mutation::hooked_mkfifo as *mut _,
+            is_optional: true,
+            profiles: PROFILE_RW_MONITORED,
+        },
+        HookEntry {
+            symbol: "futimesat",
+            new_func: super::ops::mutation::hooked_futimesat as *mut _,
             is_optional: true,
             profiles: PROFILE_RW_MONITORED,
         },

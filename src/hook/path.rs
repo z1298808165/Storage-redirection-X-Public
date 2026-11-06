@@ -49,13 +49,68 @@ pub fn resolve_current_working_directory() -> String {
     String::from_utf8_lossy(&buffer[..len as usize]).to_string()
 }
 
+/// 把路径折叠为“决策用绝对形态”：先按内核语义折叠 `.` / `..` 与重复斜杠，
+/// 再解析存储别名。所有基于字符串的前缀/规则判断都应使用这一形态，避免
+/// `//storage/...`、`/storage/../storage/...` 这类写法绕过快速筛选。
+pub fn normalize_decision_path(pathname: &str) -> String {
+    if pathname.is_empty() {
+        return String::new();
+    }
+    // 含点段/重复斜杠时，内核会先解析符号链接再处理 `..`。纯词法折叠在
+    // `/storage/.../link/../file` 这类形态下会得到错误目标，因此优先用
+    // realpath 语义（canonicalize）；目标不存在时只 canonicalize 父目录，
+    // 保留最后一段不跟随（与创建型 open 的语义一致）。
+    // magic link 的前缀本身不是存储路径，但内核会解析到 fd/root 的真实目标；
+    // 这里先 canonicalize，让后续策略看到真实绝对路径，而不是把 /proc 当非存储。
+    let is_magic_link = pathname.starts_with("/proc/self/fd/")
+        || pathname.starts_with("/proc/thread-self/fd/")
+        || pathname.starts_with("/dev/fd/")
+        || pathname.starts_with("/proc/self/root")
+        || pathname.starts_with("/proc/thread-self/root");
+    if is_magic_link && let Ok(real) = std::fs::canonicalize(pathname) {
+        return paths::normalize(&real.to_string_lossy());
+    }
+    if paths::needs_dot_segment_collapse(pathname)
+        || pathname.starts_with("//")
+        || pathname.contains("//")
+    {
+        if let Ok(real) = std::fs::canonicalize(pathname) {
+            return paths::normalize(&real.to_string_lossy());
+        }
+        let path = std::path::Path::new(pathname);
+        if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+            && let Ok(real_parent) = std::fs::canonicalize(parent)
+        {
+            return paths::normalize(&real_parent.join(name).to_string_lossy());
+        }
+        // 整条链都不存在时退回词法折叠，保证 create 场景仍能进入策略判断。
+        let collapsed = paths::collapse_dot_segments(pathname);
+        return paths::normalize(&collapsed);
+    }
+    paths::normalize(pathname)
+}
+
+/// 解析 dirfd 当前指向的真实绝对路径；用于 `AT_EMPTY_PATH` 这类没有
+/// pathname、但操作对象由 fd 决定的调用。失败返回空串。
+pub fn resolve_fd_target(dirfd: i32) -> String {
+    if dirfd == AT_FDCWD {
+        return String::new();
+    }
+    let raw = resolve_dirfd_path(dirfd);
+    if raw.starts_with('/') {
+        normalize_decision_path(&raw)
+    } else {
+        String::new()
+    }
+}
+
 pub fn resolve_path_for_dirfd(dirfd: i32, pathname: &str) -> String {
     if pathname.is_empty() {
         return String::new();
     }
 
     if pathname.starts_with('/') {
-        return paths::normalize(pathname);
+        return normalize_decision_path(pathname);
     }
 
     let dirfd_path = if dirfd == AT_FDCWD {
@@ -72,7 +127,7 @@ pub fn resolve_path_for_dirfd(dirfd: i32, pathname: &str) -> String {
         merged.push('/');
     }
     merged.push_str(pathname);
-    paths::normalize(&merged)
+    normalize_decision_path(&merged)
 }
 
 pub fn is_storage_path_fast(pathname: &str) -> bool {
@@ -141,4 +196,102 @@ pub fn is_relevant_storage_path(hub: &InterceptHub, pathname: &str) -> bool {
 pub fn is_normalized_relevant_storage_path(hub: &InterceptHub, pathname: &str) -> bool {
     paths::starts_with(pathname, "/storage/emulated/")
         || (hub.is_redirect_enabled() && paths::starts_with(pathname, "/data/media/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::FromRawFd;
+
+    macro_rules! test_require {
+        ($result:expr, $context:literal) => {
+            match $result {
+                Ok(value) => value,
+                Err(error) => panic!("{}: {:?}", $context, error),
+            }
+        };
+    }
+
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "srx-path-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ));
+        test_require!(std::fs::create_dir_all(base.join("a")), "create a");
+        test_require!(std::fs::create_dir_all(base.join("b")), "create b");
+        base
+    }
+
+    #[test]
+    fn dot_segments_resolve_against_existing_parent() {
+        let base = test_dir("dot");
+        let raw = format!("{}/a/../b/missing", base.display());
+        let expected = format!(
+            "{}/b/missing",
+            test_require!(std::fs::canonicalize(&base), "base").display()
+        );
+        assert_eq!(normalize_decision_path(&raw), expected);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn duplicate_slashes_are_collapsed() {
+        let base = test_dir("slash");
+        let raw = format!("{}//a//missing", base.display());
+        let expected = format!(
+            "{}/a/missing",
+            test_require!(std::fs::canonicalize(&base), "base").display()
+        );
+        assert_eq!(normalize_decision_path(&raw), expected);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn relative_dirfd_resolves_dot_segments() {
+        let base = test_dir("dirfd");
+        let c_path = test_require!(
+            std::ffi::CString::new(base.to_string_lossy().as_bytes()),
+            "c path"
+        );
+        // SAFETY: c_path 指向有效的 NUL 结尾路径，open 不保留指针。
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        let resolved = resolve_path_for_dirfd(fd, "a/../b/missing");
+        let expected = format!(
+            "{}/b/missing",
+            test_require!(std::fs::canonicalize(&base), "base").display()
+        );
+        assert_eq!(resolved, expected);
+        // SAFETY: fd 由上面的 open 返回且未被其它对象接管。
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn magic_fd_link_resolves_to_target() {
+        let base = test_dir("magic");
+        let c_path = test_require!(
+            std::ffi::CString::new(base.to_string_lossy().as_bytes()),
+            "c path"
+        );
+        // SAFETY: c_path 指向有效的 NUL 结尾路径，open 不保留指针。
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        let raw = format!("/proc/self/fd/{fd}");
+        let resolved = normalize_decision_path(&raw);
+        assert_eq!(
+            resolved,
+            test_require!(std::fs::canonicalize(&base), "base")
+                .to_string_lossy()
+                .to_string()
+        );
+        // SAFETY: fd 由上面的 open 返回且未被其它对象接管。
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+        let _ = std::fs::remove_dir_all(base);
+    }
 }

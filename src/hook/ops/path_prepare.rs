@@ -49,15 +49,16 @@ pub unsafe fn prepare_relevant_path(
         };
     }
 
-    if !path_utils::is_relevant_storage_path(hub, &path_text) {
+    let decision = path_utils::normalize_decision_path(&path_text);
+    if !path_utils::is_relevant_storage_path(hub, &decision) {
         if record_fast_bypass {
-            diagnostic::record_fast_bypass(op_name, &path_text);
+            diagnostic::record_fast_bypass(op_name, &decision);
         }
         return PreparedPath::Bypass;
     }
 
     PreparedPath::Ready {
-        path_for_decision: path_text.into_owned(),
+        path_for_decision: decision,
         is_relative,
     }
 }

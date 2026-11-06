@@ -5,6 +5,7 @@ mod context;
 mod diagnostic;
 mod entries;
 mod fuse_fix;
+pub mod hyos;
 mod jni_query;
 mod media_fuse;
 mod monitor;

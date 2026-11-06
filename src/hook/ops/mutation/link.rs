@@ -142,7 +142,7 @@ pub unsafe extern "C" fn hooked_symlink(target: *const c_char, linkpath: *const 
                     pathname: linkpath,
                     log_flags: 0,
                     extra_tail: extra,
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn hooked_symlinkat(
                     pathname: linkpath,
                     log_flags: 0,
                     extra_tail: extra,
-                    redirect_mutation: false,
+                    redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
                     runtime::call_prev(
