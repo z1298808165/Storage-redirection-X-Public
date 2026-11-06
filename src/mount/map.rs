@@ -2,7 +2,6 @@ use super::MountPlanner;
 use crate::domain::{
     PathMapping, expand_namespace_path_mappings, sort_path_mappings_shortest_request_first,
 };
-use crate::platform::errno::last as last_errno;
 use crate::platform::{fs, paths};
 
 pub(super) struct PathMappingApplyOptions {
@@ -333,78 +332,42 @@ impl MountPlanner {
             return true;
         }
 
-        // 非共享存储目标（例如当前应用的 `/data/user` 目录）不参与存储
-        // fallback；只创建缺失的目录链，避免把绝对路径误转换成 storage 相对路径。
+        // 非共享存储目标（例如当前应用的 `/data/user` 目录）同样不创建：请求路径是
+        // 映射视图里的挂载点，缺它就说明这条映射本轮无法成立，补一个空目录只是把
+        // 「规则没生效」伪装成「规则已生效」。
         if !paths::is_same_or_child(request_path, storage_path) {
-            let uid = if crate::metadata_repair::enabled()
-                && should_chown_current_dirs
-                && (request_path.starts_with("/data/user/")
-                    || request_path.starts_with("/data/data/"))
-            {
-                self.app_uid
-            } else {
-                -1
-            };
-            return fs::create_directory(request_path, uid);
-        }
-
-        let uid = if crate::metadata_repair::enabled() && should_chown_current_dirs {
-            self.app_uid
-        } else {
-            -1
-        };
-        if fs::create_directory(request_path, uid) {
-            return true;
-        }
-        let direct_errno = last_errno();
-
-        // 代理应用写入时，这次公共路径 mkdir 会被本模块的写入重定向接管，落到重定向
-        // 目标目录，请求路径本身仍然缺失。此时改用真实存储后端创建挂载点再复查；
-        // 否则随后的 bind 一定以 ENOENT 失败，映射会一直无法生效。
-        if self.ensure_real_public_directory_exists(request_path)
-            && mapping_mount_point_exists(request_path)
-        {
-            log::debug!(
-                "map mount point prepared via real backend request={} direct_errno={}",
-                request_path,
-                direct_errno
-            );
-            return true;
-        }
-
-        let Some(current_relative) = paths::relative_child_path(request_path, storage_path) else {
-            return false;
-        };
-        let current_fallback = if should_prefer_redirect_fallback {
-            paths::join(&self.redirect_target, current_relative)
-        } else {
-            paths::join(
-                &paths::data_media_user_root_for_user(self.user_id),
-                current_relative,
-            )
-        };
-        let current_fallback = self.normalize_path(&current_fallback);
-        if self.ensure_directory_exists(&current_fallback, should_chown_current_dirs) {
-            // 重定向后端目录就绪不代表挂载点可用：请求路径仍然缺失时继续绑定只会
-            // 得到 ENOENT，这里按未准备处理，让调用方跳过这次映射。
-            if mapping_mount_point_exists(request_path) {
-                log::debug!(
-                    "map mount point prepared via backend fallback request={} backend={} direct_errno={}",
-                    request_path,
-                    current_fallback,
-                    direct_errno
-                );
-                return true;
-            }
             log::warn!(
-                "map mount point missing after backend fallback request={} backend={} direct_errno={}",
-                request_path,
-                current_fallback,
-                direct_errno
+                "map mount point missing outside storage, skip bind: {}",
+                request_path
             );
             return false;
         }
 
+        // 共享存储上的请求路径**永远不创建**，创建它等于在用户可见的公共目录里凭空
+        // 留一个空目录（用户配置映射/沙盒就是为了不让它出现）。bind 挂载点必须存在于
+        // 目标命名空间，所以这条路径缺失时 namespace bind 在语义上无法表达该规则：
+        // 这里按「本次映射未应用」返回，规则由共享宿主 FUSE 视图（虚拟呈现该路径）
+        // 或进程内重定向 hook 承接，两条都不改动真实存储。
+        //
+        // 重定向后端目录仍在此补建：那是本模块的私有落点，与请求路径是否会出现在
+        // 公共目录无关；不建它后续 bind 的源侧会缺失。
+        if let Some(current_relative) = paths::relative_child_path(request_path, storage_path) {
+            let current_fallback = self.normalize_path(&paths::join(
+                &self.redirect_target,
+                current_relative,
+            ));
+            if !self.ensure_directory_exists(&current_fallback, should_chown_current_dirs) {
+                log::warn!(
+                    "map redirect backend unavailable request={} backend={}",
+                    request_path,
+                    current_fallback
+                );
+            }
+        }
+        log::warn!(
+            "map mount point missing, skip bind (request path must not be created): {}",
+            request_path
+        );
         false
     }
 

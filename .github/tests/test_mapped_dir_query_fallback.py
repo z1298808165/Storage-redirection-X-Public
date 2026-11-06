@@ -142,29 +142,24 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         self.assertLess(registry_at, config_at, "进程内登记必须优先于配置兜底")
 
 
-    def test_mapping_mkdir_lands_request_dir_before_target(self) -> None:
-        # 映射场景的 mkdir 不能只改写目标：请求路径是应用视图里的 bind 挂载点，
-        # 未登记进程（下载提供器）走的是 MediaProvider 的 FUSE 视图，请求路径在
-        # 后端没有真实目录时内核拿不到可用的 FUSE entry——daemon 侧返回成功，
-        # 客户端仍然 isDirectory()==false && mkdirs()==false
-        # （2026-10-26 A17 场景 39：Failed to create parent）。
+    def test_mapping_mkdir_never_creates_request_path(self) -> None:
+        # 映射请求路径是用户可见公共目录里的「不该存在的空目录」：用户配置映射正是为了
+        # 让它消失，因此任何一层都不得在真实存储创建它。此前的实现把「先把请求路径落盘，
+        # 再补映射目标」当成修复（真机场景 39），代价是 Download 下凭空多出一个空目录，
+        # 也直接违背这条产品不变量（2026-11-05 issue #2 复核）。
         dir_source = read("src/hook/ops/mutation/dir.rs")
         body = function_body(dir_source, "fn handle_mapping_mkdir<F>(")
-        self.assertIn("storage_backend_dir(source_path)", body)
-        self.assertIn("create_backend_dir(&request_backend)", body)
-        self.assertIn("create_backend_dir(&target_backend)", body)
-        # 请求路径必须先落盘，再补齐映射目标
-        self.assertLess(
-            body.index("create_backend_dir(&request_backend)"),
-            body.index("create_backend_dir(&target_backend)"),
-            "请求路径后端目录必须先于映射目标落盘",
+        self.assertNotIn(
+            "create_backend_dir(&request_backend)",
+            body,
+            "映射 mkdir 不得在真实存储创建请求路径",
         )
-        # 请求路径的目录创建不得再走重定向（否则又回到只建目标的老路）：
-        # 建目录的 helper 必须直接落到后端并接受「已是目录」
-        helper = function_body(dir_source, "fn create_backend_dir(")
-        self.assertIn("crate::platform::fs::is_directory(path)", helper)
-        self.assertIn("libc::mkdir(", helper)
-        # 映射场景要提前收口，不能继续走「只 mkdir 映射目标」的统一收尾
+        self.assertIn("create_backend_dir(&target_backend)", body)
+        # 映射目标仍是这次 mkdir 唯一的真实产物，它失败时必须把 errno 交回调用方。
+        self.assertIn("result = target_result;", body)
+        # 调用方随后的 isDirectory/realpath 由进程内登记表承接。
+        self.assertIn("remember_process_mapped_dir(source_path, &redirect.new_path)", body)
+        # 映射分支要提前收口，不能继续走「只 mkdir 映射目标」的统一收尾
         outer = function_body(dir_source, "fn handle_mkdir_like<F>(")
         self.assertIn("if redirect_result.is_mapping {", outer)
         self.assertLess(
@@ -172,6 +167,19 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
             outer.index("let result = if redirect_result.is_redirect() {"),
             "映射分支必须在通用重定向收尾之前",
         )
+
+    def test_mapping_mount_point_never_creates_request_path(self) -> None:
+        # 挂载点侧同一条不变量：请求路径缺失时按「本次映射未应用」返回，交给共享宿主
+        # FUSE 虚拟呈现或进程内重定向，不允许在 /data/media 下补建真实目录。
+        source = read("src/mount/map.rs")
+        body = function_body(source, "fn ensure_mapping_request_mount_point(")
+        self.assertNotIn(
+            "ensure_real_public_directory_exists(request_path)",
+            body,
+            "映射挂载点不得在真实存储创建请求路径",
+        )
+        self.assertNotIn("fs::create_directory(request_path, uid)", body)
+        self.assertIn("request path must not be created", body)
 
     def test_download_provider_gets_system_writer_hooks(self) -> None:
         # 下载提供器是下载链路里真正执行 mkdir/create/getCanonicalPath 的进程。

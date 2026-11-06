@@ -444,6 +444,10 @@ where
     let saved_errno = runtime::current_errno();
     let request_backend = storage_backend_dir(source_path);
 
+    // 请求路径在真实存储里**绝不创建**：它是映射视图里的挂载点，用户配置映射正是为了
+    // 不让它出现在公共目录。这里只落映射目标，调用方随后的 isDirectory/realpath 由
+    // 进程内登记的「请求路径→映射目标」短时表承接（见 `remember_process_mapped_dir`
+    // 与 `hooked_realpath`），因此不再需要真实请求目录来喂内核 FUSE entry。
     let (mut result, mut error_no) = if request_backend.is_empty() {
         // 非 storage 形态（相对路径、其它挂载）保持原来的改写语义。
         let target_c = CString::new(redirect.new_path.as_str()).ok();
@@ -454,15 +458,12 @@ where
         let call_errno = runtime::errno_for_result(call_result);
         (call_result, call_errno)
     } else {
-        let (request_result, request_errno) = create_backend_dir(&request_backend);
         log::debug!(
-            "mkdir mapping request dir: result={} errno={} path={} backend={}",
-            request_result,
-            request_errno,
+            "mkdir mapping request dir skipped (request path must not be created) path={} backend={}",
             source_path,
             request_backend
         );
-        (request_result, request_errno)
+        (0, 0)
     };
 
     runtime::ensure_redirect_parent_dirs(&redirect.new_path, 0o2773);
@@ -476,6 +477,12 @@ where
             redirect.new_path,
             target_backend
         );
+        // 请求路径不再落盘，映射目标就是这次 mkdir 唯一的真实产物：它建不出来时
+        // 必须把失败原样交回调用方，不能因为「请求侧跳过」就报成功。
+        if !request_backend.is_empty() {
+            result = target_result;
+            error_no = target_errno;
+        }
         runtime::normalize_redirect_directory(&redirect.new_path);
     }
 
@@ -484,11 +491,7 @@ where
     crate::hook::remember_process_mapped_dir(source_path, &redirect.new_path);
     runtime::set_errno(saved_errno);
 
-    if result == 0
-        || error_no == libc::EEXIST
-        || error_no == libc::ENOTDIR
-        || (!request_backend.is_empty() && crate::platform::fs::is_directory(&request_backend))
-    {
+    if result == 0 || error_no == libc::EEXIST || error_no == libc::ENOTDIR {
         log::debug!(
             "mkdir mapping resolved: returning 0 errno={} path={} redirect={}",
             error_no,

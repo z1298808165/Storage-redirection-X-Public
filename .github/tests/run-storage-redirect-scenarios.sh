@@ -2516,6 +2516,14 @@ run_download_owner_attribution_scenario() {
     echo "download owner attribution: request path leaked to real storage" >&2
     return 1
   fi
+  # 目录级同样零穿透：请求路径是用户可见公共目录里「不该存在」的那一项，曾经的实现
+  # 为了让内核拿到 FUSE entry 而在后端补建这个目录，文件级断言查不出它（2026-11-05
+  # issue #2 复核）。
+  if adb_su "test -d '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}'"; then
+    echo "download owner attribution: request directory leaked to real storage" >&2
+    adb_su "ls -la '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}'" >&2 || true
+    return 1
+  fi
   if adb_su "grep -qE 'fuse redirect mount start pkg=${PROVIDER_PACKAGE}' '$LOG_PATH'"; then
     echo "download owner attribution: unexpected fuse session for download provider" >&2
     return 1
