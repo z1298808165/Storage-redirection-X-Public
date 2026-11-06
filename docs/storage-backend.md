@@ -4,7 +4,10 @@
 
 ## 运行方式
 
-- `auto`：设备存在可用 `/dev/fuse` 且规则需要动态匹配时经共享宿主会话提供 FUSE 视图；接入不了（无宿主、闸门未放行、策略未登记、接入失败）就用 mount namespace，原因写进 `fuse view unavailable reason=` 日志。
+- `auto`：**FUSE 优先**——设备存在可用 `/dev/fuse` 时，整棵存储视图根由共享宿主 FUSE
+  会话接管，映射、通配、沙盒、只读等规则全部在策略层逐请求判定；只有能力探测判定不可用
+  （或该应用自己的失败预算耗尽）时才返回空根，由挂载层回落 namespace bind。
+- 用户选择面已收敛：配置里只写 `auto`，历史 `fuse` / `namespace` 值按 `auto` 处理。
 
 配置位于 `config/global.json`：
 
@@ -27,14 +30,14 @@
 - FUSE 请求在文件操作开始时执行策略，通配、动态文件和只读排除不依赖挂载时的目录快照。
 - 挂载请求会先写入 `tmp/mount_intent/*.intent`，再更新为 `applying`、`mounted` 或 `failed`；正式 mount state 仍只保存可清理的已生效目标。
 - 路径映射、只读和沙盒规则共用一个数据面，减少 namespace 多层 bind mount 的组合复杂度。
-- Android 13 及以上通过能力探测选择后端；未知厂商实现自动回到 namespace。
+- 能力探测只决定「能不能用 FUSE」：可用即接管整根视图，不可用才回落 namespace。
 - mount namespace 仍作为自动回退路径，便于跨厂商设备保持兼容。
 
 ## 缺点
 
 - FUSE 引入用户态往返，随机读写和高频小文件操作可能增加延迟；启用 passthrough 只能优化已允许文件的数据面，不能消除策略判断开销。
 - FUSE 服务退出会影响对应挂载根，必须依赖健康检查、熔断和 namespace 回退。
-- `fuse` 模式接管范围更大，厂商 MediaProvider、内核 FUSE 和 SELinux 差异需要真机验证。
+- 整根接管后所有应用 IO 都经 FUSE，厂商 MediaProvider、内核 FUSE 与 SELinux 差异需要真机验证。
 - FUSE 运行时属于共享链路，策略或资源泄漏的影响面大于单个应用的 bind mount。
 
 ## 当前状态与维护边界
