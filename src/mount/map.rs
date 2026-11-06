@@ -103,6 +103,9 @@ impl MountPlanner {
         options: PathMappingApplyOptions,
     ) -> bool {
         let mut is_any_applied = false;
+        // 本轮已挂上的映射（请求路径, 目标源）。映射按请求路径由短到长处理，嵌套映射的
+        // 深层请求路径会落在父映射的 bind 视图里，挂载点要在父映射目标里准备。
+        let mut mounted_mappings: Vec<(String, String)> = Vec::new();
 
         for mapping in resolved_mappings {
             let Some((target_source, should_fix_target_permissions)) = self
@@ -130,11 +133,20 @@ impl MountPlanner {
                 continue;
             }
 
+            let covering_mount = mounted_mappings
+                .iter()
+                .filter(|(request, _)| {
+                    request != &mapping.request_path
+                        && paths::is_same_or_child(&mapping.request_path, request)
+                })
+                .max_by_key(|(request, _)| request.len())
+                .map(|(request, target)| (request.as_str(), target.as_str()));
             if !self.ensure_mapping_request_mount_point(
                 &mapping.request_path,
                 storage_path,
                 options.should_chown_current_dirs,
                 options.should_create_missing_request_path,
+                covering_mount,
             ) {
                 log::warn!("map mount point unavailable: {}", mapping.request_path);
                 continue;
@@ -174,6 +186,7 @@ impl MountPlanner {
 
             if is_current_path_mounted {
                 is_any_applied = true;
+                mounted_mappings.push((mapping.request_path.clone(), target_source.clone()));
                 log::info!("map {} -> {}", mapping.request_path, mapping.final_path);
 
                 if preferred_target_source_roots
@@ -323,6 +336,7 @@ impl MountPlanner {
         storage_path: &str,
         should_chown_current_dirs: bool,
         should_prefer_redirect_fallback: bool,
+        covering_mount: Option<(&str, &str)>,
     ) -> bool {
         if !should_prefer_redirect_fallback {
             return mapping_mount_point_exists(request_path);
@@ -330,6 +344,32 @@ impl MountPlanner {
 
         if mapping_mount_point_exists(request_path) {
             return true;
+        }
+
+        // 嵌套映射（`A -> X` 与 `A/B -> Y`）：父映射已经把 X bind 到 A 上，A/B 在当前
+        // 视图里实际解析到 X/B——这是父映射的目标、应用的映射落点，不是真实公共目录里的
+        // 请求路径。在父映射目标里补建 X/B 作为深层映射的挂载点，真实存储的 A/B 依然
+        // 不会出现。不补建的话深层映射因缺挂载点被跳过，写入落到父映射目标（场景 14）。
+        if let Some((covering_request, covering_target)) = covering_mount
+            && let Some(remainder) = paths::relative_child_path(request_path, covering_request)
+        {
+            let mount_point_source = self.normalize_path(&paths::join(covering_target, remainder));
+            if self.ensure_directory_exists(&mount_point_source, should_chown_current_dirs)
+                && mapping_mount_point_exists(request_path)
+            {
+                log::debug!(
+                    "map nested mount point prepared in covering target request={} source={}",
+                    request_path,
+                    mount_point_source
+                );
+                return true;
+            }
+            log::warn!(
+                "map nested mount point unavailable request={} source={}",
+                request_path,
+                mount_point_source
+            );
+            return false;
         }
 
         // 非共享存储目标（例如当前应用的 `/data/user` 目录）同样不创建：请求路径是

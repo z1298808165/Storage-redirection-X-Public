@@ -180,6 +180,10 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         )
         self.assertNotIn("fs::create_directory(request_path, uid)", body)
         self.assertIn("request path must not be created", body)
+        # 嵌套映射的深层挂载点只能在父映射目标里补建（那是映射落点，不是公共目录里的
+        # 请求路径）；去掉这条会让 `A/B` 因缺挂载点被跳过，写入落进父映射（场景 14）。
+        self.assertIn("covering_mount", body)
+        self.assertIn("paths::join(covering_target, remainder)", body)
 
     def test_download_provider_gets_system_writer_hooks(self) -> None:
         # 下载提供器是下载链路里真正执行 mkdir/create/getCanonicalPath 的进程。
