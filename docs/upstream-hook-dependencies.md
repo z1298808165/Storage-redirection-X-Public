@@ -2,17 +2,21 @@
 
 本项目的核心 hook 能力依赖两个上游 Rust 库：
 
-- `srx_hook`：<https://github.com/Kindness-Kismet/srx_hook>
+- `srx_hook`：使用 [`PuerNya/srx_hook`](https://github.com/PuerNya/srx_hook) fork，其上游来源为 <https://github.com/Kindness-Kismet/srx_hook>
 - `srx_inline_hook`：<https://github.com/Kindness-Kismet/srx_inline_hook>
+
+`srx_hook` 采用 fork 的原因是该 fork 在原上游基础上补齐了 fork-safe 能力（`ForkMutex` 全局锁与 `pthread_atfork` 重置、子进程 proxy 分发）。原上游没有这些能力，而系统代写进程与 shared-uid 进程的 fork 子进程会进入完整重定向决策链，存在继承「已加锁」同步原语而永久阻塞的风险。fork 与官方上游保持同一 API 面，本仓库使用 hook 的代码无需区分来源。
+
+同步 fork 维护时需同时关注官方上游的推进：先确认 fork 已合入官方上游对应修复，再考虑切回官方仓库；在此之前不得直接改回 `Kindness-Kismet/srx_hook`，否则会丢掉 fork-safe 能力。
 
 ## 引用方式
 
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-# quality-allow(chinese-language): 以下两行是 Cargo.toml 依赖声明的原文，属机器解析的配置语法，改写会失去比对价值。
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "cb5b425353706efed5a6f99782f0d3ce3931150a" }
-# quality-allow(chinese-language): 同上，保留依赖声明原文，便于直接与 Cargo.toml 比对。
+# quality-allow(chinese-language): 紧随其后一行是 Cargo.toml 依赖声明原文，属机器解析的配置语法，改写会失去比对价值。
+srx_hook = { git = "https://github.com/PuerNya/srx_hook.git", rev = "8b564e9e665a54239a3d3ea2a16ecf995a29083a" }
+# quality-allow(chinese-language): 紧随其后一行同为依赖声明原文，保留原样便于直接与 Cargo.toml 比对。
 srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 ```
 
@@ -88,5 +92,5 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 
 不修改的理由是收益与风险不对称：修复需触及整条决策链十余处锁语义，改错会导致热路径死锁或重定向被错误放行，比原风险更严重；而该竞态无法用外置测试构造，测试流也覆盖不到（普通应用不装进程内 hook，系统代写进程的 fork 时序不可控），缺乏验证手段。
 
-**上游能力现状**：`srx_hook` 提供 `is_forked_child()`，实现为纯 pid 比较（`getpid() != INSTALL_PID`），async-signal-safe，可在 fork 子进程中安全调用；但**没有** `pthread_atfork` 注册能力。若将来出现确实会 fork 的系统代写进程（例如厂商定制 MediaProvider）而需要在子进程侧标记「仅走原函数」，则需要上游新增 atfork 钩子注册 API；在此之前不需要上游更新。
+**上游能力现状**：`srx_hook` 的官方上游提供 `is_forked_child()`，实现为纯 pid 比较（`getpid() != INSTALL_PID`），async-signal-safe，可在 fork 子进程中安全调用，但**没有** `pthread_atfork` 注册能力。本仓库当前使用的 `PuerNya/srx_hook` fork 已补齐该缺口：`src/runtime/fork_lock.rs` 提供 `ForkMutex`（原子自旋锁）并注册 `pthread_atfork`，prepare 阶段获取全部全局锁、parent 释放、child 清零后重建状态，避免子进程继承「已加锁」的 pthread mutex。因此上面那条「需要上游新增 atfork 钩子注册 API」的待办已由该 fork 满足；若后续需要子进程侧标记「仅走原函数」，仍应在 fork 或上游补相应标记接口。
 
