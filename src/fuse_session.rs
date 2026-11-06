@@ -266,6 +266,16 @@ pub(crate) enum HostSessionSkip {
 }
 
 impl HostSessionSkip {
+    /// 是否算一次「真的尝试过并失败」。
+    ///
+    /// 失败预算只该记录真尝试：闸门未放行（该根不满足接入条件）、宿主尚未就绪、
+    /// 请求无规则，都属「没试」——把它们计进预算会让开机风暴期的十余次判定把该
+    /// 应用整轮开机的重试机会一次烧光（真机 2026-11-05：sau 的沙盒因此永久退回
+    /// namespace bind，而 bind 无法表达一个并不存在的请求路径）。
+    pub(crate) fn counts_as_attempt_failure(self) -> bool {
+        matches!(self, Self::AttachFailed | Self::PolicyRegistrationFailed)
+    }
+
     /// 稳定短名：写进日志与能力快照，供现场与 issue 直接检索。
     pub(crate) fn as_str(self) -> &'static str {
         match self {

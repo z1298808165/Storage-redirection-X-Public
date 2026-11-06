@@ -688,6 +688,33 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         # 同一 uid 对应多个包时登记 None（不可用），绝不按排序挑一个。
         self.assertIn("map.insert(package_uid, None)", uid_fn)
 
+    def test_budget_separates_not_attempted_from_real_failure(self) -> None:
+        """「没试」不得计进失败预算，且预算耗尽后必须留探测窗口。
+
+        attach_gate_closed 的含义是「这条规则本轮不是宿主接入候选」，与挂载是否可行
+        无关；把它记成一次失败，会让开机风暴期的十余次判定把该应用整轮开机的重试
+        机会烧光（2026-11-05 真机：com.oplus.sau 的沙盒因此永久退回 namespace bind，
+        而 bind 无法表达一个并不存在的请求路径）。
+        """
+        session = read("src/fuse_session.rs")
+        gate_fn = extract_fn(session, "counts_as_attempt_failure")
+        self.assertIn("Self::AttachFailed", gate_fn)
+        self.assertIn("Self::PolicyRegistrationFailed", gate_fn)
+        self.assertNotIn("AttachGateClosed", gate_fn)
+
+        for path in ("src/daemon_mount.rs", "src/lifecycle/companion_mount.rs"):
+            source = read(path)
+            self.assertIn(
+                "reason.counts_as_attempt_failure()",
+                source,
+                f"{path} 必须按「是否真的尝试过」决定是否计入失败预算",
+            )
+
+        # 预算耗尽后窗口到期要放行探测，不能把整轮开机锁成终态。
+        config = read("src/fuse_redirect/config.rs")
+        budget_fn = extract_fn(config, "scope_budget_exhausted")
+        self.assertIn("SCOPE_RETRY_WINDOW_MS", budget_fn)
+        self.assertIn("scope_last_failure_ms", budget_fn)
 
 if __name__ == "__main__":
     unittest.main()

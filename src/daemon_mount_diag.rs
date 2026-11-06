@@ -128,8 +128,8 @@ fn print_cross_layer_snapshot(package_name: &str, path: Option<&str>) {
         summary.retry_at_ms,
         summary.retry_at_ms.saturating_sub(now_ms)
     );
-    for (scope, count) in &summary.scope_failures {
-        println!("  scope_fail={scope}:{count}");
+    for (scope, count, last_ms) in &summary.scope_failures {
+        println!("  scope_fail={scope}:{count}:{last_ms}");
     }
     let allowed_auto = crate::fuse_redirect::config::scoped_mount_allowed_for_scope(
         package_name,

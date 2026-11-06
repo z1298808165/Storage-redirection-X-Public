@@ -1253,9 +1253,13 @@ fn handle_child_process(
         let (fuse_children, attempt, host_skip) = match preattached_host {
             Ok(state) => (vec![state], ScopedMountAttempt::Ready, None),
             Err(reason) => {
-                if !fuse_roots.is_empty() {
-                    // 规则本该有 FUSE 视图但宿主接不上：bind 已经完整表达了视图。
+                if !fuse_roots.is_empty() && reason.counts_as_attempt_failure() {
+                    // 规则本该有 FUSE 视图，而且这次是真的尝试过并失败：计入预算。
                     (Vec::new(), ScopedMountAttempt::Failed, Some(reason))
+                } else if !fuse_roots.is_empty() {
+                    // 根不满足接入条件 / 宿主尚未就绪：属「没试」，不计失败预算，
+                    // 否则一次开机风暴就能把该应用的后续尝试全部锁死。
+                    (Vec::new(), ScopedMountAttempt::GateBlocked, Some(reason))
                 } else if gate_allowed {
                     (Vec::new(), ScopedMountAttempt::NoRootsNeeded, None)
                 } else {

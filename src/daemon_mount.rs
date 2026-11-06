@@ -1072,10 +1072,14 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         let (fuse_children, attempt, host_skip) = match preattached_host {
             Ok(state) => (vec![state], ScopedMountAttempt::Ready, None),
             Err(reason) => {
-                if !fuse_roots.is_empty() {
-                    // 这条规则本该有 FUSE 视图，但宿主接不上：规划阶段的 bind 已经
-                    // 完整表达了视图，直接按 bind 继续并记下原因。
+                if !fuse_roots.is_empty() && reason.counts_as_attempt_failure() {
+                    // 这条规则本该有 FUSE 视图，而且这次是真的尝试过并失败：计入预算。
                     (Vec::new(), ScopedMountAttempt::Failed, Some(reason))
+                } else if !fuse_roots.is_empty() {
+                    // 根不满足接入条件 / 宿主尚未就绪：属「没试」，不计失败预算。开机
+                    // 风暴期这类判定可能连发十余次，计进预算会让该应用整轮开机都不再
+                    // 尝试 FUSE——真机 2026-11-05 的 sau 沙盒正是这样被锁死的。
+                    (Vec::new(), ScopedMountAttempt::GateBlocked, Some(reason))
                 } else if gate_allowed {
                     (Vec::new(), ScopedMountAttempt::NoRootsNeeded, None)
                 } else {

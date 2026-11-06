@@ -41,6 +41,12 @@ const DEVICE_UNAVAILABLE_MIN_SCOPES: u32 = 2;
 /// 只能在闸门放行后执行——锁出过长会把两个自愈机制互相锁死。防重试风暴由单应用失败预算
 /// （[`SCOPED_MOUNT_FAILURE_BUDGET`]，每应用每开机至多 3 次）独立承担，设备级锁出只需覆盖
 /// 一次抖动的持续时间。
+/// 应用分桶预算耗尽后的探测窗口（毫秒）。
+///
+/// 与设备级退避同量级：窗口内不再尝试，窗口过后放行一次探测。失败会刷新时间戳并
+/// 继续按窗口退避，因此稳态下开销只有「每窗口一次挂载尝试」。
+const SCOPE_RETRY_WINDOW_MS: u64 = 60_000;
+
 const RETRY_BACKOFF_BASE_MS: u64 = 30_000;
 const RETRY_BACKOFF_MAX_MS: u64 = 60_000;
 
@@ -71,7 +77,12 @@ struct FuseCapabilitySnapshot {
     capability: FuseCapability,
     device_failures: u32,
     last_failed_scope: String,
-    scope_failures: Vec<(String, u32)>,
+    /// 每个应用的分桶：(包名, 连续失败数, 最近一次失败的 `CLOCK_MONOTONIC` 毫秒)。
+    ///
+    /// 带上时间戳是为了让「预算耗尽」不再是整轮开机的终态：窗口过后允许一次探测，
+    /// 成功即清零，失败则继续退避。此前只在开机时清零，一次启动风暴就能让某个应用
+    /// 整轮开机都不再尝试 FUSE。
+    scope_failures: Vec<(String, u32, u64)>,
     /// `Unavailable` 后允许下一次探测的 `CLOCK_MONOTONIC` 毫秒；`0` 表示立即可探测。
     retry_at_ms: u64,
     backoff_step: u32,
@@ -97,26 +108,48 @@ impl FuseCapabilitySnapshot {
     fn scope_failures_for(&self, scope: &str) -> u32 {
         self.scope_failures
             .iter()
-            .find(|(name, _)| name == scope)
-            .map(|(_, count)| *count)
+            .find(|(name, _, _)| name == scope)
+            .map(|(_, count, _)| *count)
+            .unwrap_or(0)
+    }
+
+    /// 该应用最近一次失败的 `CLOCK_MONOTONIC` 毫秒（无记录为 0）。
+    fn scope_last_failure_ms(&self, scope: &str) -> u64 {
+        self.scope_failures
+            .iter()
+            .find(|(name, _, _)| name == scope)
+            .map(|(_, _, last_ms)| *last_ms)
             .unwrap_or(0)
     }
 
     /// 写入某个应用的失败计数，并按最近失败优先排序、按上限截断。
     fn bump_scope_failure(&mut self, scope: &str) {
         let count = self.scope_failures_for(scope).saturating_add(1);
-        self.scope_failures.retain(|(name, _)| name != scope);
-        self.scope_failures.insert(0, (scope.to_string(), count));
+        let now_ms = paths::monotonic_ms().max(0) as u64;
+        self.scope_failures.retain(|(name, _, _)| name != scope);
+        self.scope_failures.insert(0, (scope.to_string(), count, now_ms));
         self.scope_failures.truncate(MAX_TRACKED_SCOPES);
     }
 
     fn clear_scope_failure(&mut self, scope: &str) {
-        self.scope_failures.retain(|(name, _)| name != scope);
+        self.scope_failures.retain(|(name, _, _)| name != scope);
     }
 
     /// 该应用是否已用完自己的 scoped 挂载预算。
+    ///
+    /// 预算耗尽后仍按 `SCOPE_RETRY_WINDOW_MS` 周期性放行一次探测：真实失败往往集中
+    /// 在开机风暴期（宿主尚未就绪、存储未解密完），把它当成整轮开机的终态会让应用
+    /// 在系统稳定后也永远等不到 FUSE 视图。
     fn scope_budget_exhausted(&self, scope: &str) -> bool {
-        self.scope_failures_for(scope) >= SCOPED_MOUNT_FAILURE_BUDGET
+        if self.scope_failures_for(scope) < SCOPED_MOUNT_FAILURE_BUDGET {
+            return false;
+        }
+        let last_ms = self.scope_last_failure_ms(scope);
+        if last_ms == 0 {
+            return false;
+        }
+        let now_ms = paths::monotonic_ms().max(0) as u64;
+        now_ms.saturating_sub(last_ms) < SCOPE_RETRY_WINDOW_MS
     }
 
     /// 当前是否已越过退避窗口，允许一次探测性尝试。
@@ -391,17 +424,21 @@ fn read_fuse_capability_snapshot() -> Option<FuseCapabilitySnapshot> {
 ///
 /// 包名不会包含冒号，因此按最后一个冒号切分即可；解析失败的行直接跳过，不让一行坏数据
 /// 使整份快照退化成默认值（那会把已经积累的退避一起丢掉）。
-fn parse_scope_failures(content: &str) -> Vec<(String, u32)> {
+fn parse_scope_failures(content: &str) -> Vec<(String, u32, u64)> {
     content
         .lines()
         .filter_map(|line| line.strip_prefix("scope_fail="))
         .filter_map(|value| {
-            let (name, count) = value.trim().rsplit_once(':')?;
-            let count = count.parse::<u32>().ok()?;
+            // 包名不含冒号（与写入侧同一约定），因此按冒号顺序切分即可；
+            // 旧快照只有两段（包名:次数），此时按「立即允许探测」处理。
+            let mut fields = value.trim().split(':');
+            let name = fields.next()?;
+            let count = fields.next()?.parse::<u32>().ok()?;
+            let last_ms = fields.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             if name.is_empty() {
                 return None;
             }
-            Some((name.to_string(), count))
+            Some((name.to_string(), count, last_ms))
         })
         .collect()
 }
@@ -564,8 +601,8 @@ fn write_fuse_capability_snapshot(
         snapshot.backoff_step,
         snapshot.teardown_failures,
     );
-    for (scope, count) in &snapshot.scope_failures {
-        content.push_str(&format!("scope_fail={scope}:{count}\n"));
+    for (scope, count, last_ms) in &snapshot.scope_failures {
+        content.push_str(&format!("scope_fail={scope}:{count}:{last_ms}\n"));
     }
     let path = std::path::Path::new(module_paths::FUSE_CAPABILITY_FILE);
     // 快照会被 daemon 与多个 scoped 会话子进程同时写入，固定 temp 名会让并发写入
@@ -690,7 +727,7 @@ pub fn record_fuse_teardown_failure(reason: &str) {
 pub struct FuseCapabilitySummary {
     pub capability: FuseCapability,
     pub device_failures: u32,
-    pub scope_failures: Vec<(String, u32)>,
+    pub scope_failures: Vec<(String, u32, u64)>,
     pub retry_at_ms: u64,
     pub backoff_step: u32,
     pub teardown_failures: u32,
