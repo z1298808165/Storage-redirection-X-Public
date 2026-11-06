@@ -204,6 +204,30 @@ where
         return call_original(pathname);
     }
 
+    // 入口留痕：只在诊断进程（MediaProvider / 代写者等系统链路）上开，用来回答
+    // 「这次 mkdir 到底有没有进到本模块」。没有这一层，hook 未被调用与 hook 判成
+    // 放行在日志上完全同形——真机 2026-11-05 排查 sau 沙盒时正是卡在这里。
+    let is_diagnostic_caller = {
+        let pkg = hub.get_package_name();
+        crate::redirect::policy::is_media_provider_package(&pkg)
+            || crate::redirect::policy::is_system_writer_package(&pkg)
+    };
+    if is_diagnostic_caller {
+        // SAFETY: pathname 已判空；c_str_to_string 按 NUL 结尾读取，指针有效期由
+        // hook 调用方保证。
+        let raw_path = unsafe { crate::hook::util::c_str_to_string(pathname) };
+        // SAFETY: getuid 无参数、无副作用，只读取当前进程的实际 uid。
+        let self_uid = unsafe { libc::getuid() };
+        log::debug!(
+            "{} entry pkg={} dirfd={} self_uid={} path={}",
+            op_name,
+            hub.get_package_name(),
+            dirfd,
+            self_uid,
+            if raw_path.is_empty() { "-" } else { raw_path.as_str() }
+        );
+    }
+
     // SAFETY: pathname 已在上方判空，prepare_relevant_path 会按 NUL 结尾读取该 C 字符串并解析路径，指针有效性由 hook 调用方保证。
     let PreparedPath::Ready {
         path_for_decision, ..
@@ -243,6 +267,23 @@ where
         path_for_decision.as_ref(),
         &redirect_result,
     );
+    if is_diagnostic_caller {
+        // 决策结果无条件留痕：入口有日志、决策没有，就说明这次直接走了「放行到真实
+        // 存储」。两者必须成对出现才能判定是「没进 hook」还是「进了但判成放行」。
+        log::debug!(
+            "{} decision pkg={} redirect={} denied={} mapping={} to={}",
+            op_name,
+            hub.get_package_name(),
+            redirect_result.is_redirect(),
+            redirect_result.is_denied(),
+            redirect_result.is_mapping,
+            if redirect_result.new_path.is_empty() {
+                "-"
+            } else {
+                redirect_result.new_path.as_str()
+            }
+        );
+    }
     if redirect_result.is_denied() {
         return deny_read_only_mkdir(
             hub,
