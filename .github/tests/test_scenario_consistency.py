@@ -101,8 +101,10 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
         raise AssertionError(f"{label}: gpu_mode 应为 swiftshader_indirect")
     if entry["fresh_app_per_case"] != 1:
         raise AssertionError(f"{label}: 17 的 fresh_app_per_case 应为 1")
-    if entry["timeout_minutes"] != 50:
-        raise AssertionError(f"{label}: 17 的 timeout_minutes 应为 50")
+    if "timeout_minutes" in entry:
+        raise AssertionError(
+            f"{label}: 17 不应在矩阵写死 timeout_minutes——job 级预算由 prepare 按场景数自适应产出"
+        )
     if entry["boot_timeout"] != 1800:
         raise AssertionError(f"{label}: 17 的 boot_timeout 应为 1800")
     if entry["disable_animations"] is not False:
@@ -115,8 +117,10 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
     for e in others:
         if e["fresh_app_per_case"] != 0:
             raise AssertionError(f"{label}: 其余版本 fresh_app_per_case 应为 0")
-        if e["timeout_minutes"] != 45:
-            raise AssertionError(f"{label}: 其余版本 timeout_minutes 应为 45")
+        if "timeout_minutes" in e:
+            raise AssertionError(
+                f"{label}: 其余版本不应在矩阵写死 timeout_minutes——job 级预算由 prepare 自适应产出"
+            )
         if e["boot_timeout"] != 1500:
             raise AssertionError(f"{label}: 其余版本 boot_timeout 应为 1500")
         if e["disable_animations"] is not True:
@@ -808,22 +812,360 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_ci_test_flow_step_timeout_follows_scenario_scope(self) -> None:
         # 模拟器异常时编排脚本可能停在场景脚本之前的准备阶段，脚本内看门狗覆盖
-        # 不到；job 级 45/50 分钟又太宽（run 40272962460 五个版本同时被拖住 33
-        # 分钟、取消请求也不立即生效）。步骤级超时必须按 prepare 解析出的场景数
-        # 自适应：窄跑十几分钟即失败，全量仍留足预算。
+        # 不到；写死的 job 级 45/50 分钟又比 40 场景的看门狗（75 分钟）还小，
+        # 结果看门狗永不触发、永远被 job 硬杀（run 40272962460 五个版本同时被
+        # 拖住 33 分钟、取消请求也不立即生效）。步骤级与 job 级超时必须都由
+        # prepare 按场景数自适应产出，且 job 严格大于 step，场景增加时自动跟上。
         ci = read(".github/workflows/ci.yml")
+        release = read(".github/workflows/release.yml")
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            source = read(workflow)
+            self.assertIn(
+                "timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}",
+                source,
+                workflow,
+            )
+            self.assertIn(
+                "timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_job_timeout_minutes) }}",
+                source,
+                workflow,
+            )
+            # 矩阵不得再写死 job 级超时，否则会盖住自适应预算。
+            parsed = yaml.safe_load(source)["jobs"]
+            for entry in parsed["test-flow"]["strategy"]["matrix"]["android"]:
+                self.assertNotIn("timeout_minutes", entry, workflow)
         prepare = section(ci, "  prepare:", "  init-ci-release:")
         self.assertIn(
             "test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}",
             prepare,
         )
         self.assertIn(
-            "timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}",
-            ci,
+            "test_flow_job_timeout_minutes: ${{ steps.scope.outputs.test_flow_job_timeout_minutes }}",
+            prepare,
         )
+        self.assertIn("test_flow_job_timeout_minutes", release)
         scope = read(".github/scripts/parse_scenario_scope.py")
         self.assertIn("test_flow_timeout_minutes", scope)
         self.assertIn("_test_flow_timeout_minutes", scope)
+        self.assertIn("_test_flow_job_timeout_minutes", scope)
+
+    def test_setup_phase_budget_covers_pre_scenario_hangs(self) -> None:
+        # 「还没开跑就卡住」发生在场景循环之前（设备健康检查、模块安装、包服务
+        # 恢复），层叠的场景看门狗覆盖不到，只能靠独立的基础设置预算兜底；
+        # 没有这道预算就只能等 step/job 级超时硬杀，拿不到 preflight 快照。
+        flow = read(".github/tests/run-android-test-flow.sh")
+        self.assertIn("SETUP_BUDGET_SECONDS=", flow)
+        self.assertIn("run_setup_phase()", flow)
+        # 非整数（如 15m）会让算术展开报 "arithmetic expression" 这种看不出根因的
+        # 错误，必须有显式校验并给出可读信息。
+        self.assertIn("*[!0-9]*)", flow)
+        self.assertIn("SETUP_BUDGET_SECONDS 必须是非负整数秒", flow)
+        # 模块安装必须以基础设置预算包裹，它是这段里最容易无限阻塞的一步。
+        self.assertIn('run_setup_phase "模块安装"', flow)
+        # timeout 超时回 124，--kill-after 升级 SIGKILL 时回 137（实测确认）；
+        # 只认 124 会把「卡死」误报成「阶段失败」，两个码都必须判成超时。
+        self.assertIn('[ "$code" -eq 124 ] || [ "$code" -eq 137 ]', flow)
+        # 各等待函数自己的固定上限必须被压到基础设置预算内，否则预算只是「边界处
+        # 检查」，wait_for_adb_ready(300s)/wait_for_emulated_storage(180s) 仍能在
+        # 预算用尽后继续跑，把「15 分钟内判定」拖成 20 分钟。
+        self.assertIn("setup_bounded_seconds()", flow)
+        self.assertIn("$(setup_bounded_seconds 300)", flow)
+        self.assertIn('setup_bounded_seconds "${1:-120}"', flow)
+        # 预算把等待裁到 0 秒 ≠ 设备真不可用：三处设备等待的失败归因必须区分，
+        # 否则排查会照着设备方向走错路（实测预算归零时原本只报「设备未进入可用状态」）。
+        self.assertIn("report_device_wait_failure()", flow)
+        self.assertIn("期间已用尽 ${SETUP_BUDGET_SECONDS}s 预算", flow)
+        # A17 分片有意不上传诊断资产（ci.yml 的 `matrix.android.version != 17`），
+        # preflight 快照必须同时打到 step 日志，否则那一版失败时看不到任何现场。
+        self.assertIn('cat "$PREFLIGHT_DIAGNOSTICS" >&2', flow)
+        for call in (
+            'report_device_wait_failure "等待设备就绪"',
+            'report_device_wait_failure "模拟器重启恢复"',
+            'report_device_wait_failure "模块重启后等待设备恢复"',
+        ):
+            self.assertIn(call, flow)
+        # 预算耗尽的判定必须在场景脚本启动之前。
+        self.assertLess(
+            flow.index("基础设置超时：场景循环开始前已用尽"),
+            flow.index('"${scenario_watchdog}s" bash'),
+        )
+        # 基础设置区间内的 adb 调用必须**全部**带超时：设备半死时 adb 客户端自身
+        # 就可能无限阻塞，而等待函数只在两轮之间检查 deadline——单次调用被挂住，
+        # 15 分钟预算就永远走不到判定点，「预算权威」只是名义上的。
+        region = flow[flow.index("setup_started=") : flow.index("scenario_watchdog=$((")]
+        unbounded = [
+            line.strip()
+            for line in region.splitlines()
+            if not line.lstrip().startswith("#")
+            and re.search(r"\badb\b", line)
+            and "timeout" not in line
+            and "adb_bounded" not in line
+        ]
+        self.assertEqual(unbounded, [], "基础设置区间存在无超时的 adb 调用")
+        self.assertIn("adb_bounded()", flow)
+        self.assertIn('timeout "${SETUP_ADB_TIMEOUT_SECONDS}s" adb "$@"', flow)
+        # 包枚举三条（普通/root/cmd）也各带上限，且必须被剩余预算裁剪。裁剪不能
+        # 直接用 setup_bounded_seconds：GNU `timeout 0` 表示「不设超时」，预算耗尽时会
+        # 把「立即失败」变成「无限等待」，正好反过来——所以要走下限 1 秒的包装。
+        self.assertIn("setup_bounded_timeout()", flow)
+        self.assertIn('[ "$left" -ge 1 ] || left=1', flow)
+        self.assertEqual(
+            flow.count('timeout "$(setup_bounded_timeout 60)" adb shell'),
+            3,
+            "包枚举三条都要被预算裁剪",
+        )
+        # 包服务等待同样要被预算裁剪：否则预算耗尽后它还能再跑满 120 秒，
+        # 把「15 分钟内判定」拖成 17 分钟，并吃掉留给 step 的收尾余量。
+        self.assertIn(
+            'setup_bounded_seconds "${PACKAGE_SERVICE_TIMEOUT_SECONDS:-120}"', flow
+        )
+        for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+            # 用解析后的值断言，避免「注释里写了同样的字」也算通过。
+            env = yaml.safe_load(read(workflow))["jobs"]["test-flow"]["env"]
+            self.assertEqual(env["SETUP_BUDGET_SECONDS"], 900, workflow)
+
+    def test_release_test_flow_mirrors_ci_test_flow(self) -> None:
+        """发布测试流必须与 CI 测试流共用同一套执行环境。
+
+        两条链路跑的是同一份编排脚本，任何一侧参数漂移都会造成「CI 全绿、发布
+        失败」或反向的假阳性。历史上 release 曾缺 `-dns-server`（A17 镜像网络
+        验证）与步骤级超时，CI 早已修好却传不过去；这里把两侧钉死，避免再次漂移。
+        """
+        ci = yaml.safe_load(read(".github/workflows/ci.yml"))["jobs"]
+        release = yaml.safe_load(read(".github/workflows/release.yml"))["jobs"]
+
+        def emulator_step(jobs: dict) -> dict:
+            return next(
+                step
+                for step in jobs["test-flow"]["steps"]
+                if "emulator-runner" in str(step.get("uses", ""))
+            )
+
+        ci_emulator = emulator_step(ci)
+        release_emulator = emulator_step(release)
+        # 用解析后的值断言，避免「注释里写了同样的表达式」也算通过。
+        self.assertEqual(
+            ci_emulator.get("timeout-minutes"),
+            "${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}",
+        )
+        self.assertEqual(
+            ci["test-flow"]["timeout-minutes"],
+            "${{ fromJSON(needs.prepare.outputs.test_flow_job_timeout_minutes) }}",
+        )
+        self.assertEqual(ci_emulator.get("with"), release_emulator.get("with"))
+        self.assertEqual(
+            ci_emulator.get("timeout-minutes"),
+            release_emulator.get("timeout-minutes"),
+        )
+        self.assertEqual(
+            ci["test-flow"]["timeout-minutes"],
+            release["test-flow"]["timeout-minutes"],
+        )
+        self.assertEqual(
+            ci["test-flow"]["env"]["SETUP_BUDGET_SECONDS"],
+            release["test-flow"]["env"]["SETUP_BUDGET_SECONDS"],
+        )
+        # 发布侧 job 级预算引用 prepare 输出，必须显式要求 prepare 成功，
+        # 否则 prepare 未成功时表达式拿到空值会直接解析失败。
+        self.assertIn("needs.prepare.result == 'success'", release["test-flow"]["if"])
+
+    def test_only_ci_uses_concurrency_group(self) -> None:
+        # 两侧并发策略相反且都是有意的：
+        # - CI：新 push 取代旧验证，用并发组取消挂起的旧 run，避免新旧各自占满
+        #   5 个模拟器 runner。
+        # - 发布：tag 触发的一次性发布必须完整跑完，取消会留下资产不全的半成品
+        #   Release 与未更新的 update.json。
+        # 这条断言把「有意不设」固化下来，避免后人当成遗漏顺手补上。
+        self.assertIn("concurrency", yaml.safe_load(read(".github/workflows/ci.yml")))
+        self.assertNotIn(
+            "concurrency", yaml.safe_load(read(".github/workflows/release.yml"))
+        )
+
+    def test_scenario_timeout_kills_whole_process_group(self) -> None:
+        """单场景超时必须整组终止，否则 adb 孙进程成孤儿并占住 stdout。
+
+        `timeout --foreground` 不建新进程组、只终止直接子进程；场景内拉起的 adb
+        会变成孤儿并继续持有 stdout 写端，GitHub runner 判定 step 未结束、job
+        静默挂到步骤超时（run 40286639350：11 分 44 秒零输出）。宿主侧同形命令
+        实测：--foreground 下管道要等孙进程结束才关（15s vs 2s）。
+        """
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn(
+            'timeout --kill-after=30s "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -e -o pipefail',
+            script,
+        )
+        self.assertNotIn(
+            'timeout --foreground "${SRT_SCENARIO_TIMEOUT_SECONDS}s"', script
+        )
+        # 唯一允许保留 --foreground 的是 adb_su_timeout：包的是单个 adb 客户端进程
+        # （自身不派生子进程），且处于 happy path；其余超时一律整组终止。
+        foreground = [
+            line.strip()
+            for line in script.splitlines()
+            if "timeout --foreground" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(len(foreground), 1, foreground)
+        self.assertIn("ADB_ROOT_TIMEOUT_SECONDS", foreground[0])
+
+    def test_download_server_killed_even_on_early_return(self) -> None:
+        """取数服务必须在早退时也被关闭，否则 python 孤儿占住 stdout。
+
+        从 `exec python3 -m http.server` 启动点到线性 kill 之间还有
+        `restart_media_provider_with_hook_ready` / `start_app_and_confirm_mount` /
+        `wait_storage_ready` 三处 `|| return 1`；任何一处失败都会跳过 kill，python
+        继续监听并持有 step 的 stdout 写端 —— 表现为「场景脚本早就失败、action
+        收尾也打完日志，job 却静默挂到步骤超时」。
+
+        2026-10-26 run 40272962460 就是这个形态：五版本同时挂 45-50 分钟，取消时
+        清理出 adb / bash / python3 三个孤儿，而场景在 68 秒时就已经失败了。
+
+        **trap 引用的变量不能是函数 local**：`dl_server_pid` 是
+        `run_download_owner_attribution_scenario` 的 local，`return 1` 之后作用域
+        立即弹出，而 EXIT trap 是在子 shell 退出时才求值——那时取到空值，trap 成了
+        空壳（本地实测：这种写法的后台进程存活、换全局镜像变量后被正常收掉）。
+        这类「写了但没生效」只能靠真跑一遍发现，所以下面既断言结构、也实际执行。
+        """
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        trap_match = re.search(r"trap '([^']*kill[^']*)' EXIT", script)
+        self.assertIsNotNone(trap_match, "取数服务的 EXIT trap 已缺失")
+        assert trap_match is not None
+        body = trap_match.group(1)
+        self.assertIn("SRT_DL_SERVER_PID", body, "trap 必须引用非 local 的镜像变量")
+        self.assertNotIn(
+            "dl_server_pid", body, "trap 不得引用函数 local——早退后它已不在作用域"
+        )
+        # 镜像变量必须真的被赋值，并在正常收尾后清空（避免对已回收的 PID 再 kill）。
+        self.assertIn('SRT_DL_SERVER_PID="$dl_server_pid"', script)
+        self.assertIn('SRT_DL_SERVER_PID=""', script)
+        self.assertLess(
+            script.index('SRT_DL_SERVER_PID="$dl_server_pid"'),
+            script.index(trap_match.group(0)),
+            "镜像变量必须在使用它的 trap 之前赋值",
+        )
+        # 该 trap 只在场景子进程里生效（run_scenario 由 `bash -c` 拉起、trap 不继承），
+        # 不会顶掉父进程的 cleanup_frozen_daemon / finish_test_run。
+        self.assertIn("'run_scenario \"$1\"' _ \"$scenario\"", script)
+        self.assertIn("trap cleanup_frozen_daemon EXIT", script)
+        self.assertIn("trap finish_test_run EXIT", script)
+        # 行为验证：用与脚本同形的结构（函数 local + export -f + bash -c）实际跑一遍。
+        self.assertIn("CLEANED", self._run_exit_trap_probe(body))
+
+    def _run_exit_trap_probe(self, trap_body: str) -> str:
+        """在真实 bash 里复现「函数 local + EXIT trap + 早退」，返回 CLEANED/LEAKED。
+
+        结构必须与脚本一致：函数内 `local dl_server_pid`、装 trap、设镜像变量、
+        `return 1`，再由 `bash -c` 调用——只有这样 trap 才会在函数作用域弹出之后
+        求值，才测得出「变量取不到值」这类空壳 trap。
+        """
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash 不可用：本次仅做结构断言")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            pid_file = Path(tmp) / "pid.txt"
+            probe = Path(tmp) / "probe.sh"
+            probe.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "probe() {\n"
+                '  local dl_server_pid=""\n'
+                "  ( exec sleep 300 </dev/null >/dev/null 2>&1 ) &\n"
+                "  dl_server_pid=$!\n"
+                '  SRT_DL_SERVER_PID="$dl_server_pid"\n'
+                f"  trap '{trap_body}' EXIT\n"
+                f'  echo "$dl_server_pid" > "{pid_file.as_posix()}"\n'
+                "  return 1\n"
+                "}\n"
+                "export -f probe\n"
+                "bash -e -o pipefail -c 'probe' || true\n"
+                "sleep 1\n"
+                f'pid=$(cat "{pid_file.as_posix()}")\n'
+                'if kill -0 "$pid" 2>/dev/null; then\n'
+                "  echo LEAKED\n"
+                '  kill -9 "$pid" 2>/dev/null || true\n'
+                "else\n"
+                "  echo CLEANED\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [bash, str(probe)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return proc.stdout
+
+    def test_exit_path_adb_calls_are_bounded(self) -> None:
+        """退出路径上的 adb 调用必须带超时，否则脚本结束时卡住、只能等看门狗硬杀。
+
+        `cleanup_frozen_daemon` 与 `release_device_run_lock` 都由 EXIT trap 触发。
+        设备半死时 `adb shell` 客户端会无限阻塞：trap 卡住 = 脚本不退出 = job 干等到
+        看门狗（全量 75 分钟）才被杀——正是本批要消灭的「脚本早该结束、job 却干等」
+        形态。两处都必须走 `adb_su_timeout <秒>`，不能用裸 `adb_su`。
+        """
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        self.assertIn("adb_su_timeout() {", script)
+        for name in ("cleanup_frozen_daemon", "release_device_run_lock"):
+            start = script.index(f"{name}() {{")
+            body = script[start : script.index("\n}\n", start)]
+            self.assertIn(
+                "adb_su_timeout 20", body, f"{name} 的 adb 调用必须带超时"
+            )
+            self.assertNotIn(
+                'adb_su "', body, f"{name} 不允许无超时的裸 adb_su（会阻塞 EXIT trap）"
+            )
+
+    def test_ci_files_do_not_reference_private_paths(self) -> None:
+        """AGENTS.md：持久内容不得引用公开快照不可见的文件。
+
+        代码注释与 workflow 都会随公开快照长期留存，因此同样不得出现
+        `github-actions-failure-notes.md`、`.workbuddy/`、`upstream-sync-baseline.json`
+        这类私有路径——它们不上传或随时会被删除，引用会永久失效。要留可核查锚点，
+        只写 run id、提交哈希、日志关键行这些仓库内或设备上可长期复现的内容。
+        """
+        forbidden = (
+            "github-actions-failure-notes",
+            "upstream-sync-baseline",
+            ".workbuddy/",
+        )
+        offenders = []
+        for path in sorted(ROOT.glob(".github/**/*")):
+            if not path.is_file() or path.suffix not in {".py", ".sh", ".yml"}:
+                continue
+            if "__pycache__" in path.parts:
+                continue
+            # 测试文件本身要写出「被禁的 token」才能做断言，跳过（断言范围是
+            # 会被长期留存的脚本/工作流/工具，不含测试）。
+            if path.name.startswith("test_"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            offenders += [
+                f"{path.relative_to(ROOT).as_posix()}: {token}"
+                for token in forbidden
+                if token in text
+            ]
+        self.assertEqual(offenders, [], "代码/工作流里引用了非公开文件")
+
+    def test_ci_concurrency_isolates_self_pushed_commits(self) -> None:
+        """并发组必须把 workflow 自己 push 的维护提交隔离出去。
+
+        `update-manifest` 会 push `CI：更新更新清单`，发布链路会 push
+        `发布：更新更新清单`——这两个提交都会再触发一次 CI。它们触发的 run 所有
+        job 都被 if 守卫跳过（纯空跑），若与产出它们的上一轮同组，空跑会把上一轮
+        取消，而上一轮此刻可能正在 create-ci-release / cleanup-build-artifacts。
+        调用方必须确保这类提交走独立分组。
+        """
+        ci = yaml.safe_load(read(".github/workflows/ci.yml"))
+        group = ci["concurrency"]["group"]
+        self.assertTrue(ci["concurrency"]["cancel-in-progress"])
+        for prefix in ("CI：更新更新清单", "Releases:", "发布：更新更新清单"):
+            self.assertIn(prefix, group, prefix)
+        # 分组必须真的按前缀分叉，而不是只把前缀写进注释/常量里。
+        self.assertIn("maintenance", group)
+        self.assertIn("build", group)
 
     def test_download_scenario_avoids_local_network_on_api37(self) -> None:
         # Android 17（API 37）起应用默认禁止「本地网络访问」：下载提供器在该镜像
@@ -1483,7 +1825,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
         self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
         self.assertEqual(1, entry["fresh_app_per_case"])
-        self.assertEqual(50, entry["timeout_minutes"])
+        self.assertNotIn("timeout_minutes", entry)
         self.assertEqual(1800, entry["boot_timeout"])
         self.assertFalse(entry["disable_animations"])
         self.assertFalse(entry["disable_linux_hw"])
@@ -1492,7 +1834,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertEqual(4, len(others))
         for e in others:
             self.assertEqual(0, e["fresh_app_per_case"])
-            self.assertEqual(45, e["timeout_minutes"])
+            self.assertNotIn("timeout_minutes", e)
             self.assertEqual(1500, e["boot_timeout"])
             self.assertTrue(e["disable_animations"])
             self.assertEqual("auto", e["disable_linux_hw"])
@@ -1542,7 +1884,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
         self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
         self.assertEqual(1, entry["fresh_app_per_case"])
-        self.assertEqual(50, entry["timeout_minutes"])
+        self.assertNotIn("timeout_minutes", entry)
         self.assertEqual(1800, entry["boot_timeout"])
         self.assertFalse(entry["disable_animations"])
         self.assertFalse(entry["disable_linux_hw"])
@@ -1551,7 +1893,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertEqual(4, len(others))
         for e in others:
             self.assertEqual(0, e["fresh_app_per_case"])
-            self.assertEqual(45, e["timeout_minutes"])
+            self.assertNotIn("timeout_minutes", e)
             self.assertEqual(1500, e["boot_timeout"])
             self.assertTrue(e["disable_animations"])
             self.assertEqual("auto", e["disable_linux_hw"])
@@ -2190,7 +2532,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_test_flow_waits_for_services_after_module_reboot(self) -> None:
         flow = read(".github/tests/run-android-test-flow.sh")
-        post_install = section(flow, 'bash "${MODULE_INSTALL_SCRIPT', "adb shell appops set")
+        post_install = section(
+            flow, 'bash "${MODULE_INSTALL_SCRIPT', "appops set me.fakerqu.test.storageredirect"
+        )
         self.assertIn("wait_for_adb_ready", post_install)
         self.assertIn("package_service_deadline", post_install)
         self.assertIn("cmd package list packages", post_install)
@@ -2202,7 +2546,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "android17_disable_graphics_readback()",
             "prepare_device_health\n",
         )
-        post_install = section(flow, 'bash "${MODULE_INSTALL_SCRIPT', "adb shell appops set")
+        post_install = section(
+            flow, 'bash "${MODULE_INSTALL_SCRIPT', "appops set me.fakerqu.test.storageredirect"
+        )
 
         self.assertIn("service call window 137 i32 0", workaround)
         self.assertIn("service call window 135", workaround)
@@ -2263,8 +2609,12 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("local uris=(\"content://media/external_primary/file\")", readiness)
         hook = section(flow, "ensure_media_provider_hook_ready()", "restart_media_provider_with_hook_ready()")
         self.assertIn("if media_provider_is_lazy; then", hook)
-        self.assertIn("timeout --foreground 120s bash -c 'check_health'", flow)
-        self.assertIn("timeout --foreground 180s bash -c 'capture_test_flow_artifacts'", flow)
+        # 这两个兜底调用必须带超时（防止模拟器半死后无限挂起），且用整组终止而不是
+        # --foreground：后者只杀直接子进程，adb 孙进程会占住 stdout 让 job 静默挂住。
+        self.assertIn("timeout --kill-after=30s 120s bash -c 'check_health'", flow)
+        self.assertIn(
+            "timeout --kill-after=30s 180s bash -c 'capture_test_flow_artifacts'", flow
+        )
         pid = section(flow, "media_provider_pid()", "wait_media_provider_hook_ready()")
         self.assertIn("ps -A -o PID,NAME,ARGS", pid)
 
@@ -3154,6 +3504,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 'scenario_exit" -eq 124', window,
                 "adb emu kill 必须只出现在看门狗超时分支内",
             )
+        # --kill-after 升级 SIGKILL 时 timeout 回 137（实测确认），仍属看门狗触发：
+        # 只认 124 会让「忽略 TERM 的挂死」走正常失败路径，少做一次清场与快照。
+        self.assertIn(
+            '[ "$scenario_exit" -eq 124 ] || [ "$scenario_exit" -eq 137 ]', script
+        )
+        # 看门狗自身也必须有界，否则被 TERM 后不退的 adb 子进程会把它拖成无限等待。
+        self.assertIn('timeout --kill-after=60s "${scenario_watchdog}s"', script)
 
 
 if __name__ == "__main__":
