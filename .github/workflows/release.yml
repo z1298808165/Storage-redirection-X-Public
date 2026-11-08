@@ -9,6 +9,11 @@ permissions:
   actions: read
   contents: write
 
+# 发布链路**有意不设 concurrency**：本 workflow 由版本 tag 触发，一次 tag 只有
+# 一次发布机会。加了 cancel-in-progress 后，同一 tag 的重跑或紧邻的另一次发布
+# 会把正在 publish-release 的运行打断，留下半成品 GitHub Release（资产不全、
+# update.json 未更新）。CI 侧用并发组是为了「新 push 取代旧验证」，而发布必须
+# 完整跑完，因此两侧策略相反。
 env:
   # 与 gradle.properties 的 srx.ndkVersion 保持一致；本地构建脚本读取该属性。
   # 版本分叉会让本地与 CI 构建出不同的 hook 实现，因此集中在这里定义。
@@ -656,7 +661,11 @@ jobs:
           disable-animations: ${{ matrix.android.disable_animations }}
           emulator-boot-timeout: ${{ matrix.android.boot_timeout }}
           disable-linux-hw-accel: ${{ matrix.android.disable_linux_hw }}
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan
+          # 与 CI 同款：A17 镜像在 runner 上网络验证失败（github 不可达、下载停在
+          # WAITING_FOR_NETWORK），显式指定公共 DNS 让 connectivity check 可完成；
+          # 对其它版本无副作用。发布链路同样要跑全量场景（含依赖下载的场景 39），
+          # 缺这一项会让发布的 A17 分片卡在网络验证。
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan -dns-server 8.8.8.8
           script: bash .github/tests/run-android-test-flow.sh
 
       - name: Upload test-flow artifacts

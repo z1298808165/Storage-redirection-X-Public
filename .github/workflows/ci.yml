@@ -19,6 +19,22 @@ permissions:
   actions: read
   contents: write
 
+# 同一分支只保留最新一次 CI：旧 run 会被取消，避免挂起的 run 与新 run 同时各占
+# 5 个模拟器 runner（此前无并发组，一次卡死最长可占 6 小时且阻塞后续 push 的判读）。
+#
+# 但本 workflow 会自己 push 提交：`update-manifest` 末尾推送 `CI：更新更新清单`，
+# 发布链路也会推 `Releases:` / `发布：更新更新清单`。这些提交触发的 run 所有 job
+# 都被下方 if 守卫跳过（纯空跑），却和产出它的上一轮同属一个 ref——若共用分组，
+# 空跑会把上一轮取消，而上一轮此刻可能正在 create-ci-release 或
+# cleanup-build-artifacts，结果是「构建全绿却显示 cancelled」且资产/草稿没清干净。
+# 因此把这类维护提交分到独立分组：它们立刻空跑结束，不打扰上一轮。
+# 按 ref 分组而不是全局：PR 与分支推送互不打断。
+# 人工 workflow_dispatch 与普通推送同组：窄跑诊断取代同 ref 的旧 run 是有意的，
+# 目的就是不让挂起的旧 run 和新 run 同时占满 runner；操作者能看到被取消的那一轮。
+concurrency:
+  group: ci-${{ github.ref }}-${{ (startsWith(github.event.head_commit.message || '', 'CI：更新更新清单') || startsWith(github.event.head_commit.message || '', 'Releases:') || startsWith(github.event.head_commit.message || '', '发布：更新更新清单')) && 'maintenance' || 'build' }}
+  cancel-in-progress: true
+
 env:
   # 与 gradle.properties 的 srx.ndkVersion 保持一致；本地构建脚本读取该属性。
   # 版本分叉会让本地与 CI 构建出不同的 hook 实现，因此集中在这里定义。
