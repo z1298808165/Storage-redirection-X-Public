@@ -335,6 +335,36 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 2026-11-08 那次失败的诊断 grep 一行都没命中就是这个原因。
         self.assertIn("logcat -d -b crash", fn)
 
+    def test_module_verify_skips_wait_when_post_fs_data_missed(self) -> None:
+        """post-fs-data 本轮没执行时不许等满 300 秒。
+
+        `.boot_pending` 由 post-fs-data.sh 一进来就写，`.boot_ok` 在其收尾时写；两者都
+        不等于本轮 boot_id，就说明这一轮根本没执行到 post-fs-data——再等也不会起来。
+        实证：run 42432117917 的 A16 与 run 42308773787 的 A13 都白等满 300 秒，而重启
+        后 30 秒内就 ready。magisk 与 ksu 两个安装器都要有这条早退。
+        """
+        for path in (
+            ".github/tests/install-storage-redirect-module.sh",
+            ".github/tests/install-storage-redirect-module-ksu.sh",
+        ):
+            script = read(path)
+            marker = section(
+                script, "module_boot_marker_state()", "verify_storage_redirect_module_loaded()"
+            )
+            self.assertIn(".boot_pending", marker, path)
+            self.assertIn("ran | missed", marker, path)
+            verify = section(
+                script,
+                "verify_storage_redirect_module_loaded()",
+                "verify_storage_redirect_module_loaded_with_reboot_retry()",
+            )
+            self.assertIn('"$(module_boot_marker_state)" = "missed"', verify, path)
+            self.assertIn("本次开机未执行 post-fs-data", verify, path)
+            # 早退必须排在轮询之前，否则等于没早退。
+            self.assertLess(
+                verify.index("module_boot_marker_state"), verify.index("sleep 2"), path
+            )
+
     def test_kernelsu_zygisk_next_default_urls_match_release_tag(self) -> None:
         # KernelSU 实验 workflow 已于 2026-10-16 移除，Zygisk Next 的默认地址只剩
         # 安装脚本一处；A17 分片在正式矩阵里仍按 root_method=ksu 调用该脚本。

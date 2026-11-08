@@ -278,19 +278,44 @@ seed_storage_redirect_test_environment() {
   done
 }
 
+# 本次开机 post-fs-data 到底有没有被 Magisk 执行过。
+#   ran     —— `.boot_ok` 或 `.boot_pending` 等于本轮 boot_id（post-fs-data 至少开始过）
+#   missed  —— 两者都不是本轮 boot_id：连「开始」都没写，本轮不可能再起来
+#   unknown —— adb 查询失败，不能据此下结论（调用方继续等）
+# `.boot_pending` 由 post-fs-data.sh 一进来就写、`.boot_ok` 在其收尾时写，
+# 所以「都不等于本轮 boot_id」等价于「这一轮根本没执行到 post-fs-data」。
+module_boot_marker_state() {
+  local out
+  out="$(adb_su 'module_dir=/data/adb/modules/storage.redirect.x; boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); boot_ok=$(cat "$module_dir/.boot_ok" 2>/dev/null); boot_pending=$(cat "$module_dir/.boot_pending" 2>/dev/null); if [ -n "$boot_id" ] && { [ "$boot_ok" = "$boot_id" ] || [ "$boot_pending" = "$boot_id" ]; }; then echo ran; else echo missed; fi' 2>/dev/null | tr -d '\r' | awk 'NF {print; exit}')"
+  case "$out" in
+    ran | missed) printf '%s' "$out" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 verify_storage_redirect_module_loaded() {
   local timeout_seconds="${VERIFY_MODULE_TIMEOUT_SECONDS:-300}"
   local deadline=$((SECONDS + timeout_seconds))
+  local reason="等待 ${timeout_seconds}s 内未上报"
 
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if adb_su "module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); test -d \"\$module_dir\" && test ! -e \"\$module_dir/disable\" && test -d \"\$module_dir/config/apps\" && test -d \"\$logs_dir\" && { [ -z \"\$boot_id\" ] || [ \"\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true)\" = \"\$boot_id\" ] || test -f \"\$logs_dir/boot_\${boot_id}.marker\"; } && { [ -n \"\$daemon_pid\" ] && kill -0 \"\$daemon_pid\" 2>/dev/null || pidof srx_daemon >/dev/null 2>&1; }" >/dev/null 2>&1; then
-      adb_su "module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; echo module_state=ready; cat \"\$module_dir/module.prop\"; echo boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_ok=\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true); echo daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); ps -A | grep srx_daemon || true; ls -la \"\$logs_dir\""
-      return 0
-    fi
-    sleep 2
-  done
+  # 早退：本次开机 post-fs-data 压根没执行时，等到上限也等不到——直接用剩下的一次
+  # 干净重启机会。实证：run 42432117917 的 A16、run 42308773787 的 A13 都是这个形态
+  # （模块目录与 logs 都在，`.boot_ok`/`.boot_pending` 都不是本轮 boot_id、也没有 daemon），
+  # 各白等满 300 秒才重启，而重启后 30 秒内就 ready。post-fs-data 由 Magisk 在开机
+  # 早期执行一次，开机完成（本函数只在 wait_for_boot 之后调用）时还没写就不会再补。
+  if [ "$(module_boot_marker_state)" = "missed" ]; then
+    reason="本次开机未执行 post-fs-data（.boot_ok/.boot_pending 均不是本轮 boot_id）"
+  else
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if adb_su "module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); test -d \"\$module_dir\" && test ! -e \"\$module_dir/disable\" && test -d \"\$module_dir/config/apps\" && test -d \"\$logs_dir\" && { [ -z \"\$boot_id\" ] || [ \"\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true)\" = \"\$boot_id\" ] || test -f \"\$logs_dir/boot_\${boot_id}.marker\"; } && { [ -n \"\$daemon_pid\" ] && kill -0 \"\$daemon_pid\" 2>/dev/null || pidof srx_daemon >/dev/null 2>&1; }" >/dev/null 2>&1; then
+        adb_su "module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; echo module_state=ready; cat \"\$module_dir/module.prop\"; echo boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_ok=\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true); echo daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); ps -A | grep srx_daemon || true; ls -la \"\$logs_dir\""
+        return 0
+      fi
+      sleep 2
+    done
+  fi
 
-  echo "Storage Redirect X module did not report the expected boot and daemon state."
+  echo "Storage Redirect X module did not report the expected boot and daemon state.（$reason）"
   adb_su "id; module_dir=/data/adb/modules/storage.redirect.x; logs_dir=\"\$module_dir/logs\"; echo boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); echo boot_ok=\$(cat \"\$module_dir/.boot_ok\" 2>/dev/null || true); echo boot_pending=\$(cat \"\$module_dir/.boot_pending\" 2>/dev/null || true); echo daemon_pid=\$(cat \"\$logs_dir/.srx_daemon.pid\" 2>/dev/null || true); ps -A | grep -E 'srx_daemon|zygisk' || true; ls -la /data/adb/modules; ls -la \"\$module_dir\"; ls -la \"\$logs_dir\" 2>/dev/null || true; mount | grep -E 'srx|storage.redirect|zygisk|fuse' || true; cat /proc/mounts | grep -E 'srx|storage.redirect|zygisk|fuse' || true" || true
   adb logcat -d -t 500 | grep -Ei 'magisk|zygisk|storage.redirect|srx|avc: denied|linker|fatal' || true
   return 1
