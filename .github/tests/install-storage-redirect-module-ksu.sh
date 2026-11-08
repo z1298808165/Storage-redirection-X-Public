@@ -34,8 +34,11 @@ APP_APK="${APP_APK:-$(find tests/storage-redirect-test/app/build/outputs/apk/deb
 # 但未发现官方版的能力缺失：官方 v3.3.0（32601，uapi 2）在 run 36793549753 上未开
 # permissive 也跑通了场景 2，此前那次 `Unable to apply SELinux patches` 属间歇现象。
 # 换版本时用 KERNELSU_APK_URL 覆盖，并重新跑完整对照再下结论。
-KERNELSU_APK_URL="${KERNELSU_APK_URL:-https://github.com/tiann/KernelSU/releases/download/v3.3.0/KernelSU_v3.3.0_32601-release.apk}"
-ZYGISK_NEXT_URL="${ZYGISK_NEXT_URL:-https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip}"
+#
+# 2026-11-08 升到各自最新正式版：KernelSU v3.3.1（32680）、Zygisk Next v1.5.3（880）。
+# 升级后必须重跑 A17 全量对照再下结论——ksuAVD 打 ramdisk 与 ksud 模块安装都对版本敏感。
+KERNELSU_APK_URL="${KERNELSU_APK_URL:-https://github.com/tiann/KernelSU/releases/download/v3.3.1/KernelSU_v3.3.1_32680-release.apk}"
+ZYGISK_NEXT_URL="${ZYGISK_NEXT_URL:-https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.3/Zygisk-Next-1.5.3-880-22a1bf5-release.zip}"
 
 KSUAVD_DIR="${RUNNER_TEMP:-/tmp}/ksuAVD"
 rm -rf "$KSUAVD_DIR"

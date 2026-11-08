@@ -314,12 +314,32 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("let removed_storage = unlink_path(storage_path)", media)
         self.assertIn("let removed_backend =", media)
 
-    def test_kernelsu_zygisk_next_default_uses_existing_release_tag(self) -> None:
+    def test_kernelsu_zygisk_next_default_urls_match_release_tag(self) -> None:
         # KernelSU 实验 workflow 已于 2026-10-16 移除，Zygisk Next 的默认地址只剩
         # 安装脚本一处；A17 分片在正式矩阵里仍按 root_method=ksu 调用该脚本。
+        #
+        # 这里**不钉死版本号**：钉死的话每次升级都要改测试，容易只改脚本一半就推，
+        # 反而把门禁变成绊脚石。真正要守的是「下载 URL 的 tag 与文件名版本一致、
+        # 且带 v 前缀」——那正是历史上踩过的坑（`releases/download/1.5.0/` 少了 v，
+        # 链接 404，A17 分片整个装不上）。
         installer = read(".github/tests/install-storage-redirect-module-ksu.sh")
-        expected = "https://github.com/LSPosed/ZygiskNext/releases/download/v1.5.0/Zygisk-Next-1.5.0-843-5217106-release.zip"
-        self.assertIn(expected, installer)
+        ksu = re.search(
+            r"KERNELSU_APK_URL=.*?/download/(v[\d.]+)/(KernelSU_(v[\d.]+)_\d+-release\.apk)",
+            installer,
+        )
+        self.assertIsNotNone(ksu, "KernelSU 默认地址格式已变更，请同步本守卫")
+        assert ksu is not None
+        self.assertEqual(ksu.group(1), ksu.group(3), "KernelSU 的 tag 与文件名版本不一致")
+
+        zygisk = re.search(
+            r"ZYGISK_NEXT_URL=.*?/download/(v[\d.]+)/(Zygisk-Next-([\d.]+)-\d+-[0-9a-f]+-release\.zip)",
+            installer,
+        )
+        self.assertIsNotNone(zygisk, "Zygisk Next 默认地址格式已变更，请同步本守卫")
+        assert zygisk is not None
+        self.assertEqual(
+            zygisk.group(1), "v" + zygisk.group(3), "Zygisk Next 的 tag 与文件名版本不一致"
+        )
         self.assertNotIn("releases/download/1.5.0/", installer)
 
     def test_shared_host_precedes_namespace_redirect(self) -> None:
