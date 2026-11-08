@@ -314,6 +314,27 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("let removed_storage = unlink_path(storage_path)", media)
         self.assertIn("let removed_backend =", media)
 
+    def test_module_install_syncs_and_retries_after_push(self) -> None:
+        """模块安装 push 之后必须落盘并允许一次重试。
+
+        `magisk --install-module` 直接读刚 push 进去的文件；页缓存还没写回时可能读到
+        残缺 zip，在 guest 里表现为 magisk 段错误（run 42428597589 的 A15：push 后 160
+        毫秒内两次 Segmentation fault，而包大小与上一轮成功轮完全一致，说明包没坏）。
+        一次瞬时崩溃会因 fail-fast 连带取消其余四个分片，代价远大于一次重试。
+        """
+        installer = read(".github/tests/install-storage-redirect-module.sh")
+        fn = section(
+            installer,
+            "install_storage_redirect_module()",
+            "install_test_app_before_module_boot()",
+        )
+        self.assertIn("adb_root 'sync'", fn, "push 之后必须显式落盘")
+        self.assertIn("for attempt in 1 2; do", fn, "安装失败必须重试一次")
+        self.assertIn("Magisk module install attempt ${attempt}/2 failed", fn)
+        # 原生崩溃落在 crash 缓冲区：不带 -b crash 的 logcat 抓不到崩溃栈，
+        # 2026-11-08 那次失败的诊断 grep 一行都没命中就是这个原因。
+        self.assertIn("logcat -d -b crash", fn)
+
     def test_kernelsu_zygisk_next_default_urls_match_release_tag(self) -> None:
         # KernelSU 实验 workflow 已于 2026-10-16 移除，Zygisk Next 的默认地址只剩
         # 安装脚本一处；A17 分片在正式矩阵里仍按 root_method=ksu 调用该脚本。

@@ -185,16 +185,34 @@ assert_installed_module_files() {
 
 install_storage_redirect_module() {
   adb push "$MODULE_ZIP" /data/local/tmp/storage-redirect-x.zip
+  # push 完必须显式落盘：`magisk --install-module` 直接读这个文件，若页缓存还没写回，
+  # 装到一半读到的可能是残缺 zip，在 guest 里表现为 magisk 段错误。run 42428597589 的
+  # A15 就是这个形态：push 后 160 毫秒内两次 Segmentation fault，紧接着安装失败，
+  # 而同一次 push 的大小与上一轮成功的 ci.2 完全一致（2330205 字节），说明包本身没坏。
+  adb_root 'sync' >/dev/null 2>&1 || true
 
-  if adb_root 'magisk --install-module /data/local/tmp/storage-redirect-x.zip'; then
-    assert_installed_module_files /data/adb/modules_update/storage.redirect.x
-    adb_root 'rm -f /data/local/tmp/storage-redirect-x.zip' >/dev/null 2>&1 || true
-    return
-  fi
+  # 段错误属瞬时故障，重试一次通常就过；真是 zip 缺文件会连败两次，结论不变。
+  # 一次瞬时崩溃就让整轮 5 个分片全部连带取消（fail-fast）代价太大，值得一次重试。
+  local attempt
+  for attempt in 1 2; do
+    if adb_root 'magisk --install-module /data/local/tmp/storage-redirect-x.zip'; then
+      assert_installed_module_files /data/adb/modules_update/storage.redirect.x
+      adb_root 'rm -f /data/local/tmp/storage-redirect-x.zip' >/dev/null 2>&1 || true
+      return
+    fi
+    echo "Magisk module install attempt ${attempt}/2 failed"
+    if [ "$attempt" -eq 1 ]; then
+      sleep 3
+    fi
+  done
 
   echo "Magisk module install failed."
   adb_root 'id; command -v magisk || true; magisk -V || true; ls -la /data/adb; ls -la /data/adb/magisk; ls -la /data/adb/modules; ls -la /data/adb/modules_update' || true
   adb logcat -d -t 300 | grep -Ei 'magisk|zygisk|avc: denied|storage.redirect' || true
+  # 原生崩溃（段错误）落在 crash 缓冲区，普通 logcat 看不到——上面那条 grep 之所以在
+  # 2026-11-08 那次失败里一行都没抓到，就是因为没带 `-b crash`。补上才拿得到崩溃栈。
+  adb logcat -d -b crash -t 200 || true
+  adb_root 'dmesg | tail -30' || true
   exit 1
 }
 
