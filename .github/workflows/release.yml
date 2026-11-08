@@ -70,11 +70,22 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       version_code: ${{ steps.version.outputs.version_code }}
       release_branch: ${{ steps.version.outputs.release_branch }}
+      test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}
+      test_flow_job_timeout_minutes: ${{ steps.scope.outputs.test_flow_job_timeout_minutes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      # 发布固定跑全量，但超时预算仍走与 CI 同一份解析脚本，保证两边同源：
+      # 场景数增长时步骤级与 job 级预算一起自适应，不必手工同步两处数字。
+      - name: Resolve scenario scope
+        id: scope
+        run: |
+          python .github/scripts/parse_scenario_scope.py \
+            --message "" --override all --format github |
+            grep -E '^test_flow_' >> "$GITHUB_OUTPUT"
 
       - name: Prepare release version
         id: version
@@ -485,13 +496,17 @@ jobs:
 
   test-flow:
     name: Release test-flow Android ${{ matrix.android.version }}
-    if: startsWith(github.ref, 'refs/tags/v') && needs.quality.result == 'success' && needs.test-flow-build.result == 'success'
+    # 必须显式要求 prepare 成功：job 级 timeout-minutes 直接引用 prepare 的
+    # 预算输出，prepare 未成功时该输出为空，表达式会解析失败。
+    if: startsWith(github.ref, 'refs/tags/v') && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
     needs:
       - quality
       - prepare
       - test-flow-build
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ matrix.android.timeout_minutes }}
+    # 与 CI 同源：job 级预算＝步骤预算 + 15 分钟作业开销，上限 360 分钟，
+    # 必须严格大于步骤预算才能让步骤内收尾跑完。
+    timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_job_timeout_minutes) }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
@@ -528,7 +543,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -538,7 +552,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -548,7 +561,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -558,7 +570,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -573,7 +584,6 @@ jobs:
             adb_root_mode: su0
             fresh_app_scenarios: "1,2,29,32,33"
             gpu_mode: swiftshader_indirect
-            timeout_minutes: 50
             boot_timeout: 1800
             disable_animations: false
             disable_linux_hw: false
@@ -632,6 +642,9 @@ jobs:
           done
 
       - name: Run Android test-flow scenarios
+        # 步骤级预算：与 CI 同源，覆盖场景脚本之前的准备阶段（模拟器启动后、
+        # 模块安装与健康检查期间的挂起脚本内看门狗管不到）。
+        timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}
         uses: reactivecircus/android-emulator-runner@v2.37.0
         with:
           api-level: ${{ matrix.android.api_level }}

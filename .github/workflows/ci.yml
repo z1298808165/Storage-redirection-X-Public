@@ -91,6 +91,7 @@ jobs:
       scenarios: ${{ steps.scope.outputs.scenarios }}
       publish_ci: ${{ steps.scope.outputs.publish_ci }}
       test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}
+      test_flow_job_timeout_minutes: ${{ steps.scope.outputs.test_flow_job_timeout_minutes }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -570,7 +571,12 @@ jobs:
       - test-flow-build
     if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
     runs-on: ubuntu-26.04
-    timeout-minutes: ${{ matrix.android.timeout_minutes }}
+    # job 级预算由 prepare 按场景数自适应产出（步骤预算 + 15 分钟作业开销，上限
+    # 360 分钟＝GitHub job 上限）。不再写死 45/50：场景数增加时预算自动跟上，
+    # 全量跑到场景上限附近仍留有作业开销余量；同时必须严格大于步骤预算，
+    # 否则步骤内已成功的收尾会被 job 级截断（旧值 45/50 甚至小于脚本自带的
+    # 75 分钟场景看门狗，导致看门狗永不触发、清理逻辑拿不到执行机会）。
+    timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_job_timeout_minutes) }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
@@ -622,7 +628,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -636,7 +641,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -647,7 +651,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -658,7 +661,6 @@ jobs:
             fresh_app_per_case: 0
             magisk_url: ""
             gpu_mode: ""
-            timeout_minutes: 45
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
@@ -678,7 +680,6 @@ jobs:
             # 里写死排除项：场景范围只由测试流参数决定，网络不可达时由 39 在 CI 直接
             # 暴露而不是被静默跳过。
             gpu_mode: swiftshader_indirect
-            timeout_minutes: 50
             boot_timeout: 1800
             disable_animations: false
             disable_linux_hw: false
