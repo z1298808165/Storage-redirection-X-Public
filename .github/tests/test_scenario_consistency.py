@@ -335,6 +335,26 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 2026-11-08 那次失败的诊断 grep 一行都没命中就是这个原因。
         self.assertIn("logcat -d -b crash", fn)
 
+    def test_ksu_emulator_death_is_detected_and_retried(self) -> None:
+        """KSU 自启的模拟器崩掉时要立刻发现并重试，不能对着死进程等满超时。
+
+        实测一次 `nohup "$ANDROID_HOME/emulator/emulator" ... Segmentation fault
+        (core dumped)`：旧代码继续 `wait_for_boot 420`，空等 7 分钟、期间零输出，最后
+        只报「模块安装失败」，看不出是模拟器崩了；而一次崩溃会让 fail-fast 连带取消
+        其余四个分片。
+        """
+        script = read(".github/tests/install-storage-redirect-module-ksu.sh")
+        start = section(script, "start_emulator()", "start_emulator_and_boot()")
+        self.assertIn("EMULATOR_PID=$!", start, "必须记下自启模拟器的 pid")
+        boot = section(script, "wait_for_boot()", "wait_for_emulator_shutdown()")
+        self.assertIn('kill -0 "$EMULATOR_PID"', boot, "等待开机时要检查进程是否还活着")
+        self.assertIn("return 2", boot, "进程死亡要用独立返回码区别于普通超时")
+        retry = section(script, "start_emulator_and_boot()", "detect_root_su_form()")
+        self.assertIn("for attempt in 1 2; do", retry, "启动失败要重试一次")
+        self.assertIn("wait_for_boot 300", retry)
+        # 调用点必须走带重试的入口，不能再裸调 start_emulator + wait_for_boot。
+        self.assertNotIn("start_emulator\nwait_for_boot 300", script)
+
     def test_module_verify_skips_wait_when_post_fs_data_missed(self) -> None:
         """post-fs-data 本轮没执行时不许等满 300 秒。
 

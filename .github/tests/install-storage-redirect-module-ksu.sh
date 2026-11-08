@@ -70,6 +70,18 @@ wait_for_boot() {
   local boot_completed=""
 
   while [ "$SECONDS" -lt "$deadline" ]; do
+    # 自己拉起的模拟器进程若已退出（实测过一次 SIGSEGV：`nohup emulator ... Segmentation
+    # fault (core dumped)`），再等下去毫无意义——旧代码会把剩下的 420 秒全部等完，
+    # 期间一行日志都没有，最后只报「模块安装失败」，看不出是模拟器崩了。
+    # 这里用独立的返回码 2 让调用方区分「进程死了」与「进程活着但没开机完成」。
+    if [ -n "${EMULATOR_PID:-}" ] && ! kill -0 "$EMULATOR_PID" 2>/dev/null; then
+      echo "模拟器进程已退出（pid=$EMULATOR_PID），不再等待开机。"
+      if [ -n "${EMULATOR_LOG:-}" ] && [ -f "$EMULATOR_LOG" ]; then
+        echo "=== emulator log tail ==="
+        tail -80 "$EMULATOR_LOG" || true
+      fi
+      return 2
+    fi
     timeout 10s adb wait-for-device >/dev/null 2>&1 || true
     boot_completed="$(timeout 10s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
     if [ "$boot_completed" = "1" ]; then
@@ -107,6 +119,8 @@ wait_for_emulator_shutdown() {
   return 1
 }
 
+EMULATOR_PID=""
+
 start_emulator() {
   local avd_name="${AVD_NAME:-test}"
   local emulator_port="${EMULATOR_PORT:-5554}"
@@ -119,10 +133,34 @@ start_emulator() {
   fi
 
   nohup "$ANDROID_HOME/emulator/emulator" -port "$emulator_port" -avd "$avd_name" "${ramdisk_args[@]}" -no-window -gpu "$gpu_mode" -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim >"$EMULATOR_LOG" 2>&1 &
+  # 记下 pid，供 wait_for_boot 判断进程是否还活着（见那里的注释）。
+  EMULATOR_PID=$!
   sleep 5
   if [ -f "$EMULATOR_LOG" ]; then
     tail -80 "$EMULATOR_LOG" || true
   fi
+}
+
+# 启动模拟器并等它开机；进程自己崩掉（返回 2）时重试一次。
+# 实测过一次 SIGSEGV 崩溃：不重试的话整轮 5 个分片会被 fail-fast 连带取消，
+# 代价远大于一次重启；崩溃可复现时第二次同样会失败，结论不受影响。
+start_emulator_and_boot() {
+  local attempt rc
+  for attempt in 1 2; do
+    start_emulator
+    rc=0
+    wait_for_boot 300 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$rc" -ne 2 ] || [ "$attempt" -eq 2 ]; then
+      return 1
+    fi
+    echo "模拟器启动后立即退出，重试一次（第 ${attempt}/2 次）。"
+    wait_for_emulator_shutdown 30 || true
+    adb kill-server >/dev/null 2>&1 || true
+  done
+  return 1
 }
 
 # KernelSU 的 su 不接受 `su -c`（实测报 `su: invalid uid/gid '-c'`），只有
@@ -559,8 +597,10 @@ fi
 
 wait_for_emulator_shutdown 90
 adb kill-server >/dev/null 2>&1 || true
-start_emulator
-wait_for_boot 300
+if ! start_emulator_and_boot; then
+  echo "模拟器启动后未能完成开机（日志见上方 emulator log tail），按失败处理。" >&2
+  exit 1
+fi
 
 echo "Waiting for KernelSU to initialize..."
 
