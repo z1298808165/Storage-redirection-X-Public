@@ -188,6 +188,24 @@ Remove-Item Env:SRT_SCENARIOS
 | `SRT_FILE_MONITOR_ENABLED=1` | 调试非监控场景时也开启全局文件监控；正式回归通常保持默认。 |
 | `SRT_RESULT_POLL_MS`、`SRT_APP_LAUNCH_SETTLE_MS`、`SRT_SERVICE_CASE_SETTLE_MS`、`SRT_MOUNT_CONFIRM_TIMEOUT_MS` | 调整结果轮询、启动缓冲、用例间缓冲和等待 mount 日志的时间。 |
 
+### 超时预算（四层嵌套）
+
+测试流的超时是四层，必须严格满足 `job > step > (基础设置 + 场景看门狗) > 单场景`。顺序一旦颠倒，先触发的
+那一层会直接硬杀进程，脚本自己的模拟器清场与残留进程快照就跑不到，只剩一条「超时」结论。
+
+| 层 | 预算 | 来源 | 作用 |
+| --- | --- | --- | --- |
+| 单场景 | CI/Release 300 秒，本地默认 600 秒 | `SRT_SCENARIO_TIMEOUT_SECONDS` | 单个场景卡死时按退出码 124 失败并留下现场 |
+| 基础设置 | 900 秒（15 分钟） | `SETUP_BUDGET_SECONDS`（`run-android-test-flow.sh`） | 场景循环之前的一切准备：设备健康检查、模块安装、包服务恢复。各等待函数自身的上限会被压进该预算，预算耗尽立即失败，而不是再等一整个默认上限 |
+| 场景看门狗 | `900 + 90 × 场景数` 秒（15 + 1.5n 分钟） | `run-android-test-flow.sh` | 覆盖场景脚本本体。场景失败后 adb 调用可能无限阻塞，超时以 124 退出并标注场景范围，交给重跑而不是占满 runner |
+| 步骤级 | `33 + 1.5n` 分钟，上限 345 分钟 | `.github/scripts/parse_scenario_scope.py` | 兜住编排脚本之外的挂起（runner 卡在设备等待或安装阶段），由 `prepare` 按本次实际场景数产出 |
+| job 级 | 步骤级 + 15 分钟作业开销，上限 360 分钟 | 同上 | 保证 job 严格大于 step；360 分钟是 GitHub 的硬上限，抬不动 |
+
+- 场景数按场景清单条目数取，**不能**数字面 token：全量时 `SRT_SCENARIOS` 的值是 `all`，按 token 数只能算出 1，看门狗会被压到 990 秒而把全量跑腰斩。
+- 步骤级与 job 级由 `prepare` 的 `Resolve scenario scope` 步骤按同一次范围产出，CI 与 Release 共用同一份解析脚本，所以场景数增长时两边一起自适应，不必手工同步数字。
+- `step > 基础设置 + 看门狗` 只在模拟器启动不超过 3 分钟收尾余量时成立；启动慢到 `emulator-boot-timeout`（A13-A16 1500 秒、A17 1800 秒）量级时 action 会先自己失败，不会被 step 误杀。
+- 嵌套关系在约 209 个场景时失效（step 已触顶 345 分钟，看门狗仍在按 1.5n 增长）。当前 40 个场景远未到边界，但场景加到 200 个之前必须把矩阵拆成多个 test-flow job 分片，而不是继续抬高上限。
+
 ### 场景范围的触发条件
 
 范围只由运行参数决定，仓库里不写死场景清单（矩阵字段只用于「某版本确实无法验证」的剔除，且当前未使用）：
@@ -244,7 +262,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 3 | `path_mappings` 将 `Download/SrtProbe` 映射到 `Download/Test`。 |
 | 4 | 路径映射叠加真实路径放行时，映射优先。 |
 | 5 | `allowed_real_paths=["Download"]` 时保持真实路径写入。 |
-| 6 | `mapping_mode_only=true` 且未命中映射时保持真实路径写入。 |
+| 6 | `mapping_mode_only=true` 且未命中映射时保持真实路径写入；后端属主必须仍是注入的 1023，被静默修好即按回归失败。属主漂移的可见性按数据面形态判定：bind 布局由内核按应用凭据做 DAC，期望拒绝；FUSE 布局由会话服务，期望放行（与原生 MediaProvider 服务 emulated 视图同理），并输出 `owner_drift_layout form=` 便于事后判断走的是哪条（2026-11-07 FUSE 优先后：属主漂移不再必然 EACCES）。 |
 | 7 | `mapping_mode_only=true` 且命中映射时写入映射目标。 |
 | 8 | `mapping_mode_only` 加 `sandboxed_paths=[".xlDownload"]` 时验证 `.xlDownload`/`.xldownload` 沙盒化。 |
 | 9 | `read_only_paths` 允许读取、`stat`、`access`，但拒绝写入、truncate、ftruncate、chmod、fchmod、link、symlink、删除、mkdir、rename。 |
@@ -278,6 +296,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 37 | 父路径先映射到中间目录后，中间目录下的子路径继续命中下一条映射并落到最终目录。 |
 | 38 | 下载提供器（com.android.providers.downloads）自身配置 `sandboxed_paths` 后必须由模块接管原生写入，两种拓扑都算通过：companion mount 成功（`perf companion mount pkg=... ok=true`）或进程内 per-caller hook（`hook refresh start profile=system-writer pkg=...`，此时 pre 阶段直接跳过 companion mount）。出现 `attach skipped ... policy_registration_failed`、`sandbox=0` 挂载请求，或下载提供器自己起模块 FUSE 会话即回归（2026-10-21 真机侧漏回归；2026-10-26 场景 39 让提供器改走 system-writer hook 后同步放宽判据）。 |
 | 39 | 下载提供器（共享 uid 代写者）经 DownloadManager 异步下载公共路径时，按发起者（测试 APP）的 `path_mappings` 把目标改写到映射目标落盘，真实请求路径零穿透；文件出现在真实请求路径或下载失败即按源归因回归（2026-10-24 真机：误归因组内成员、行数据反查未触发）。 |
+| 40 | 系统 uid 的 FUSE 写入按发起服务归因；应用经 MediaProvider 中转创建的文件归因到源头应用；系统 uid 的沙盒目标缺失时零穿透，不得落到真实路径。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 ## 手动运行用例

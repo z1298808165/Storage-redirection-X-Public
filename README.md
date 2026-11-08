@@ -22,7 +22,7 @@
 
 ---
 
-Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、MediaProvider query hook、系统媒体服务代写路径处理和路径过滤。通过 mount namespace 与 scoped FUSE 双后端，把应用在公共存储的读写改写到应用私有目录，同时保留配置模板、备份还原、文件监视与管理界面等完整配套。
+Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、MediaProvider query hook、系统媒体服务代写路径处理和路径过滤。通过共享宿主 FUSE 与 mount namespace 双后端，把应用在公共存储的读写改写到应用私有目录，同时保留配置模板、备份还原、文件监视与管理界面等完整配套。
 
 > **本仓库是深度定制版。** 基于原作者在正式开源前提供的早期源码，并在此基础上进行了大量功能性修改。改动范围远超常规 PR 所能覆盖，与原作者后续开源的 [正式版本](https://github.com/Kindness-Kismet/Storage-redirection-X-Public) 存在较大差异，因此作为个人深度定制分支独立维护，不适合直接向原仓库发起 Pull Request。
 
@@ -32,7 +32,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - **🎯 精准路径映射** —— 公共路径与应用私有目录（含 `/data/data`、`/data/user` namespace 路径）之间按需互相映射，支持嵌套映射链与 `*`、`?` 通配。
 - **🔓 真实路径放行** —— `allowed_real_paths` 按需恢复真实目录，支持 `!` 排除规则。
 - **🔒 只读保护** —— 指定目录保持可读、禁止写入，映射入口同样继承只读语义。
-- **⚙️ 双存储后端** —— 按设备能力与规则复杂度在 scoped FUSE 与 mount namespace 之间自动选择，多应用会话收敛到共享宿主进程。
+- **⚙️ 双存储后端** —— FUSE 优先：能力可用时整棵存储视图根由共享宿主 FUSE 接管，映射、通配、沙盒与只读全部在策略层逐请求判定；能力不可用或该应用接入失败时回落 mount namespace。
 - **📝 文件监视** —— 记录应用与系统代写链路的文件操作、发起应用与最终落点，支持按应用与操作过滤。
 - **🧩 配置模板** —— 保存、复用、批量应用一整份应用配置，配置修改热重载。
 - **💾 备份还原** —— 导出 `.srxbak.zip` 单文件备份，管理 App 与 WebUI 互通互还原。
@@ -108,7 +108,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 | [构建流程](docs/build-process.md) | 版本号规则与构建链路 |
 | [构建环境](docs/build-environment.md) | 本地开发环境搭建 |
 | [模块打包](docs/module-packaging.md) | 刷入包内容与结构 |
-| [存储后端架构](docs/storage-backend.md) | scoped FUSE / 共享宿主 / namespace 的自动选择与维护边界 |
+| [存储后端架构](docs/storage-backend.md) | FUSE 优先后端选择、共享宿主维护边界与失效判别 |
 | [共享宿主 FUSE 架构设计](docs/shared-fuse-daemon-architecture.md) | 共享 FUSE 会话的设计、失效窗口分析与落地边界 |
 | [上游 Hook 依赖说明](docs/upstream-hook-dependencies.md) | native hook 能力的上游依赖 |
 
@@ -232,7 +232,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 - `file_monitor_enabled`：启用文件创建监控；普通应用由 `srx_daemon` 在进程外监控隔离目录、放行真实路径和路径映射目标，`read_only_paths` 也会被纳入 daemon 监控。普通应用不安装进程内 PLT hook，因为不同应用的 native/图形/加固运行时兼容性不可控，安装后可能导致应用无法打开或闪退；真实 MediaProvider/FUSE 服务端仍使用 hook 保留调用方识别。DownloadProvider、ExternalStorageProvider、MTP、DocumentsUI、PhotoPicker 和厂商文件管理 UI 不再安装进程内 PLT hook，避免安装应用、设置、文件管理器和导出日志等系统存储链路被卡住。缺失、格式错误或不可读时，默认值为 `false`。
 - `fuse_fix_enabled`：启用 SRX 内置 FuseFixer-compatible 保护，用于处理 MediaProvider/FUSE 路径检查中的默认可忽略 Unicode 码点。缺失、格式错误或不可读时，默认值为 `true`。
-- `storage_backend_mode`：保留为配置格式字段，运行时固定为 `auto`。native 根据设备能力、规则复杂度和 FUSE 服务健康状态选择 scoped FUSE 或 mount namespace；旧版 `fuse_daemon_redirect_enabled` 不再读取，管理端和测试流也始终写入 `auto`。实际选择会记录为 `backend_effective` 并随诊断日志导出。
+- `storage_backend_mode`：保留为配置格式字段，运行时固定为 `auto`。native 根据设备能力、失败预算与共享宿主会话健康状态选择共享宿主 FUSE 或 mount namespace（per-app scoped FUSE 已退役）；旧版 `fuse_daemon_redirect_enabled` 不再读取，管理端和测试流也始终写入 `auto`。实际选择会记录为 `backend_effective` 并随诊断日志导出。
 - `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log` 等诊断采集，关闭后立即停止这些记录。文件监视记录和概览页的轻量运行时生效计数不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。卸载应用时其配置会被置回 disabled 并保留文件（不丢用户自定义规则），同时留伴生标记；重装触发的安装事件会先据此把配置恢复为 enabled 再走自动开启，因此卸载重装的应用能自动恢复开启，用户手工关闭的配置不受影响。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时使用仅开启重定向的默认配置。
@@ -455,7 +455,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - 只读正向规则会提供真实读取通道；即使没有配置 `allowed_real_paths`，应用也能读取该目录但不能写入。`!` 只读排除规则优先覆盖同组正向只读规则，命中后继续按沙盒、映射或显式允许规则处理。
 - 路径映射的入口或最终目标命中只读路径时，映射入口也会继承只读，不能通过映射绕过写入限制。
 - 只读路径接受相对目录、`!` 排除前缀以及 `*` / `?` 通配符；与允许路径排除规则直接冲突的正向只读路径会被忽略，只读排除规则优先于正向只读规则。
-- 自动模式下，设备支持且规则需要动态匹配时使用 scoped FUSE；FUSE 不可用、服务启动失败或规则不需要用户态转发时使用 mount namespace。最终后端和 FUSE 会话信息会写入运行日志。
+- 自动模式下，设备存在可用 `/dev/fuse` 时整棵存储视图根由共享宿主 FUSE 接管：能力可用即 FUSE 优先，规则是否需要用户态转发不再是选路条件；能力探测不可用或该应用自己的失败预算耗尽时返回空根，由挂载层回落 mount namespace。最终后端和 FUSE 会话信息会写入运行日志。
 - 只读 mount 会在允许路径、排除路径和显式映射之后应用，确保只读层尽量成为最终生效层。
 
 #### FuseFixer 兼容保护
@@ -550,7 +550,7 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 
 同一应用下，排除规则优先于普通放行规则。也就是说，先允许 `Pictures`，再排除 `Pictures/Private`，最终 `Pictures/Private` 仍会进入应用沙盒。
 
-自动模式下，动态通配规则优先使用 scoped FUSE；设备缺少能力或 FUSE 会话异常时回退到 mount namespace，并记录 `backend_effective`。
+自动模式下 FUSE 优先：能力可用时通配规则与映射由共享宿主 FUSE 在策略层逐请求判定；设备缺少能力或该应用接入失败时回退到 mount namespace，并记录 `backend_effective`。
 
 通配符说明：
 
@@ -585,8 +585,8 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 
 ## 👥 贡献者
 
-<!-- quality-allow(chinese-language): 贡献者头像卡片整行为 HTML 结构标签，无自然语言内容。新增贡献者时在 tr 内复制一个 td 块并替换链接、头像与用户名即可。 -->
-<table><tr><td align="center"><a href="https://github.com/PuerNya"><img src="https://github.com/PuerNya.png?size=100" width="100px;" alt="PuerNya"/><br /><sub><b>PuerNya</b></sub></a></td></tr></table>
+<!-- quality-allow(chinese-language): 贡献者头像卡片整行为 HTML 结构标签，无自然语言内容。新增贡献者时在 tr 内复制一个 td 块并替换链接、头像与用户名即可；头像尺寸同时改 `?size=` 与 `width`，两者必须一致否则会被拉伸。 -->
+<table><tr><td align="center"><a href="https://github.com/PuerNya"><img src="https://github.com/PuerNya.png?size=64" width="64px;" alt="PuerNya"/><br /><sub><b>PuerNya</b></sub></a></td></tr></table>
 
 ## 🙏 致谢
 
@@ -596,7 +596,7 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 - [Zygisk](https://github.com/topjohnwu/Magisk) 与 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk 注入环境
 - [LSPlant](https://github.com/LSPosed/LSPlant)：Java 层 hook 框架
 - [Miuix](https://github.com/compose-miuix-ui/miuix)：管理 App 使用的 MIUIX 风格 Compose 组件库
-- [libfuse](https://github.com/libfuse/libfuse)：scoped FUSE 会话实现的基础
+- [libfuse](https://github.com/libfuse/libfuse)：共享宿主 FUSE 会话实现的基础
 - [Fuse-Proxy](https://github.com/huniangitb/Fuse-Proxy)：共享宿主 FUSE 会话设计的参考实现
 
 ## 📄 开源协议
