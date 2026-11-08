@@ -30,7 +30,11 @@ cleanup_frozen_daemon() {
     local frozen_pid
     frozen_pid="$(cat "$SRT_FROZEN_DAEMON_PID_FILE" 2>/dev/null | tr -d '\r' | awk 'NF {print; exit}')"
     if [ -n "$frozen_pid" ]; then
-      adb_su "[ \"\$(cat /proc/${frozen_pid}/comm 2>/dev/null)\" = srx_daemon ] && kill -CONT ${frozen_pid} >/dev/null 2>&1 || true"
+      # 必须带超时：这是 EXIT trap 里的 adb 调用，而设备半死时 `adb shell` 客户端会
+      # 无限阻塞——trap 卡住就等于脚本不退出，只能等看门狗（全量 75 分钟）硬杀，
+      # 正是本批要消灭的「脚本早该结束、job 却干等」形态。带超时后最多多等 20 秒；
+      # CONT 没打成也不影响判定（这台设备本就要被回收，daemon 由下一轮重新拉起）。
+      adb_su_timeout 20 "[ \"\$(cat /proc/${frozen_pid}/comm 2>/dev/null)\" = srx_daemon ] && kill -CONT ${frozen_pid} >/dev/null 2>&1 || true"
       echo "monitor_capture_failopen resumed daemon on exit pid=${frozen_pid}" >&2
     fi
     rm -f "$SRT_FROZEN_DAEMON_PID_FILE"
@@ -294,6 +298,9 @@ adb_root() {
   # adb_su 累计占到真机全场景耗时的三成以上。
   local runner='eval "$(cat)"'
   if [ -n "${ADB_ROOT_TIMEOUT_SECONDS:-}" ]; then
+    # 全脚本**唯一**保留 --foreground 的地方：它包的是单个 adb 客户端进程（自身不派
+    # 生子进程），且处于 happy path，改成整组终止会波及每一条 adb root 调用。
+    # 其余 timeout（单场景、失败诊断、健康检查）都已去掉 --foreground，见下方说明。
     timeout_command=(timeout --foreground "${ADB_ROOT_TIMEOUT_SECONDS}s")
   fi
   case "$ADB_ROOT_MODE" in
@@ -2261,7 +2268,7 @@ run_provider_sandbox_scenario() {
   #   回归：`req op=apply ... sandbox=0`、`attach skipped ... policy_registration_failed`，
   #         或出现任何 `fuse redirect mount start pkg=下载提供器`（桥接进程不应有模块会话）
   # 行为级验证（引擎 mkdir 落点）依赖 XL 引擎初始化，CI 模拟器无该引擎，
-  # 由真机复测协议覆盖（见 .workbuddy/memory/2026-10-21.md）。
+  # 由真机复测协议覆盖：引擎就绪后按 `req op=apply` 与 mkdir 落点双判。
   echo "step 5/7 内: 清理探测目录并 force-stop 下载提供器"
   adb_su "rm -rf '$PROVIDER_REAL_DIR' '$PROVIDER_BACKEND_DIR'; am force-stop '$PROVIDER_PACKAGE'" >/dev/null
   sleep 2
@@ -2345,6 +2352,26 @@ run_download_owner_attribution_scenario() {
     # 本地对照：旧写法 kill 后端口仍返回 200，exec 写法 kill 后连接失败。
     (cd "$dl_dir" && exec python3 -m http.server "$dl_port" --bind 0.0.0.0 </dev/null >"$dl_server_log" 2>&1) &
     dl_server_pid=$!
+    # 早退兜底：从启动到下方线性 kill 之间还有 `restart_media_provider_with_hook_ready`、
+    # `start_app_and_confirm_mount`、`wait_storage_ready` 三处 `|| return 1`，任何一处
+    # 失败都会跳过 kill——python 取数服务变孤儿并继续持有 step 的 stdout 写端，表现为
+    # 「场景脚本早就失败、action 收尾也打完日志，job 却静默挂到超时」。
+    # 2026-10-26 同一天三次实证同一形态（取消时都清理出 adb / bash / python3 三个孤儿）：
+    #   - run 40269845250 / 40272962460（窄跑场景 39）：场景 68 秒就失败，job 挂满 45/50 分钟；
+    #   - run 40286639350：07:45:21 打完「场景脚本退出码：1」、07:45:31 action 收尾也打完
+    #     （Terminate Emulator 拿到 Connection refused），随后静默 12.1 分钟才被 step 超时杀掉。
+    # 每个场景都在独立的 `bash -c` 进程里执行，这里的 EXIT trap 只作用于本场景；
+    # 只 kill 本地进程、不调 adb（trap 里再挂一个 adb 会引入新的挂起源）。
+    #
+    # **必须用一个非 local 的镜像变量，不能用上面的 `dl_server_pid`**：
+    # `dl_server_pid` 是本函数的 local，函数 `return 1` 后立刻失效，而 EXIT trap
+    # 是在**子 shell 退出时**才求值——那时函数作用域早已弹出，`${dl_server_pid:-}`
+    # 取到空值，trap 变成一个什么都不做的空壳，python 照样变孤儿。
+    # 实测（与真实结构同形：函数内 local + `trap … EXIT` + `return 1` +
+    # `export -f` 后在 `bash -c` 里调用）：local 版的后台进程**存活**，
+    # 换成全局镜像变量后被正常杀掉。这正是「trap 写了但没生效」的形态。
+    SRT_DL_SERVER_PID="$dl_server_pid"
+    trap '[ -n "${SRT_DL_SERVER_PID:-}" ] && kill "$SRT_DL_SERVER_PID" 2>/dev/null || true' EXIT
     # 宿主别名 10.0.2.2 落在模拟器局域网网段（10.0.2.0/24），而 Android 17
     # （API 37）起对应用默认阻止「本地网络访问」：下载提供器在 A17 镜像里
     # targetSdk=37，它的 TCP connect 到 10.0.2.2 被静默丢弃——底层实证为
@@ -2529,6 +2556,9 @@ run_download_owner_attribution_scenario() {
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
+    # 走完正常收尾就清掉镜像变量，避免 EXIT trap 再对已被回收的 PID 做一次 kill
+    # （PID 可能已被系统复用给别的进程）。
+    SRT_DL_SERVER_PID=""
     adb reverse --remove "tcp:$dl_port" >/dev/null 2>&1 || true
     # Windows/MSYS 下被杀服务的 CWD 可能短暂占用目录：清理失败不影响判定
     # （临时目录随 /tmp 生命周期自然回收）。
@@ -4863,7 +4893,10 @@ reclaim_stale_device_run_lock() {
 
 release_device_run_lock() {
   [ "$device_run_lock_held" -eq 1 ] || return 0
-  if ! adb_su "test \"\$(cat '$device_run_lock_path/owner' 2>/dev/null)\" = '$device_run_lock_token' && rm '$device_run_lock_path/owner' && rmdir '$device_run_lock_path'" >/dev/null; then
+  # 与 cleanup_frozen_daemon 同理：退出路径上的 adb 不许无限阻塞，否则脚本结束时
+  # 卡住、只能等看门狗硬杀。超时后按「释放失败」处理并保留现场——设备端陈旧锁有
+  # 4 小时 mtime 回收兜底（reclaim_stale_device_run_lock），CI 每轮又是全新模拟器。
+  if ! adb_su_timeout 20 "test \"\$(cat '$device_run_lock_path/owner' 2>/dev/null)\" = '$device_run_lock_token' && rm '$device_run_lock_path/owner' && rmdir '$device_run_lock_path'" >/dev/null; then
     echo "设备测试锁释放失败或归属已变更，保留现场：$device_run_lock_path" >&2
   fi
   device_run_lock_held=0
@@ -5012,21 +5045,27 @@ storage_snapshot_captured=0
 rm -f app-view-probe-broken.flag
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"
-  if ! timeout --foreground "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -e -o pipefail -c 'run_scenario "$1"' _ "$scenario"; then
+  # 这里**不加** `--foreground`：它会让 timeout 不建独立进程组、只终止直接子进程，
+  # 场景内拉起的 adb 孙进程就成了孤儿并继续持有 stdout 写端，GitHub runner 判定
+  # step 还没结束、job 静默挂到步骤超时（run 40286639350：11 分 44 秒零输出即此形态）。
+  # 宿主侧同形命令实测：`timeout --foreground 2s bash -c 'sleep 15 & sleep 15'` 的
+  # 管道要到 15s 才关闭，去掉 --foreground 后 2s 关闭（孙进程随进程组一起收掉）。
+  # `--kill-after` 兜住「整组忽略 TERM」的情况，30 秒后升级 SIGKILL。
+  if ! timeout --kill-after=30s "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -e -o pipefail -c 'run_scenario "$1"' _ "$scenario"; then
     echo "scenario ${scenario}: failed or timed out"
     # 设备级坏态（全应用 uid 访问共享存储被拒、shell/root 正常）的表现与应用侧断言
     # 失败完全同形，而现场证据只在这一刻可得：随后的健康探测、下一场景清理、任何重启
     # 或配置改动都会把它抹掉。因此**先**抓 MP 侧与全局 mountinfo，再谈其它诊断。
     if [ "${SRT_STORAGE_SNAPSHOT_EVERY_FAILURE}" = "1" ] || [ "$storage_snapshot_captured" -eq 0 ]; then
-      timeout --foreground 120s bash -c 'capture_storage_bad_state_snapshot "$1"' _ "scenario-${scenario}" || true
+      timeout --kill-after=30s 120s bash -c 'capture_storage_bad_state_snapshot "$1"' _ "scenario-${scenario}" || true
       storage_snapshot_captured=1
     fi
     # 在健康探测或下一场景清理之前保存首个失败现场；采集失败仍保留场景失败状态。
     if [ "$failure_artifacts_captured" -eq 0 ]; then
-      timeout --foreground 180s bash -c 'capture_test_flow_artifacts' || true
+      timeout --kill-after=30s 180s bash -c 'capture_test_flow_artifacts' || true
       failure_artifacts_captured=1
     fi
-    timeout --foreground 90s bash -c 'print_diagnostics "$1"' _ "$scenario" || true
+    timeout --kill-after=30s 90s bash -c 'print_diagnostics "$1"' _ "$scenario" || true
     fail=1
     if [ "$SRT_FAIL_FAST" = "1" ]; then
       echo "SRT_FAIL_FAST=1: stop after first failed scenario in this shard"
@@ -5036,11 +5075,11 @@ for scenario in "${scenarios[@]}"; do
   fi
   echo "::endgroup::"
 done
-if ! timeout --foreground 120s bash -c 'check_health'; then
+if ! timeout --kill-after=30s 120s bash -c 'check_health'; then
   echo "health check timed out or failed"
   fail=1
 fi
-if [ "$failure_artifacts_captured" -eq 0 ] && ! timeout --foreground 180s bash -c 'capture_test_flow_artifacts'; then
+if [ "$failure_artifacts_captured" -eq 0 ] && ! timeout --kill-after=30s 180s bash -c 'capture_test_flow_artifacts'; then
   echo "test-flow artifact capture timed out"
 fi
 
