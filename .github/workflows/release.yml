@@ -511,6 +511,7 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      SETUP_BUDGET_SECONDS: 900
       # 17 每个服务用例前冷启动应用（脚本默认 1），并按 fresh_app_scenarios 收窄到
       # 配置切换与生命周期场景（1,2,29,32,33）；其余版本复用应用进程（0）。
       SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}

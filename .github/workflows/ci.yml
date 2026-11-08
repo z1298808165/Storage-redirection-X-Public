@@ -597,6 +597,12 @@ jobs:
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
+      # 基础设置阶段（设备健康检查、模块安装、包服务恢复）总预算：这一段跑在
+      # 场景循环之前，层叠的场景看门狗覆盖不到，设备半死时会无限阻塞。
+      # 实测 118-477 秒（跨 5 个成功 run、35 个分片），900 秒约 1.9 倍余量；
+      # 超时即显式失败并留下 preflight 快照。必须与 parse_scenario_scope.py 的
+      # SETUP_BUDGET_MINUTES 保持一致。
+      SETUP_BUDGET_SECONDS: 900
       # 17 每个服务用例前冷启动应用（脚本默认 1），并按 fresh_app_scenarios 收窄到
       # 配置切换与生命周期场景（1,2,29,32,33）；其余版本复用应用进程（0）。
       SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}
