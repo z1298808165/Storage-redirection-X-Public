@@ -4785,8 +4785,7 @@ public class Hooker {
   /**
    * 记录「映射 open 的准备工作抛异常」。这条日志不受 {@link #shouldLog()} 与任何计数上限约束：
    *
-   * <p>它只在失败路径产生（量小），而一旦被吞掉，调用方只会看到「创建/打开媒体失败」，现场
-   * 没有任何指向真正原因的信息——真机排查时整条链路只剩一条 ENOENT。
+   * <p>它只在失败路径产生（量小），而一旦被吞掉，调用方只会看到「创建/打开媒体失败」，现场 没有任何指向真正原因的信息——真机排查时整条链路只剩一条 ENOENT。
    */
   private static void logMappedOpenPrepFailure(int callerUid, Throwable failure) {
     try {
