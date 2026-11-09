@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-BASH = os.environ.get("SRX_TEST_BASH") or shutil.which("bash")
+BASH = shutil.which("bash")
 
 
 @unittest.skipUnless(BASH, "需要 Bash 执行夹具扫描回归")

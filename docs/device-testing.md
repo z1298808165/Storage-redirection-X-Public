@@ -19,29 +19,29 @@ me.fakerqu.test.storageredirection.TEST_CASE
 
 ## 总体流程
 
-本地 Rust 编译、Rust 测试和 Gradle APK 构建/测试在 WSL 中执行；设备侧场景在 Windows PowerShell 中通过 Windows ADB 直接运行。两个阶段共享仓库里的构建产物，不需要把 Windows ADB 转发给 WSL。普通排障也可以只针对设备当前已安装的模块运行 Windows 设备脚本。
+普通本地排障可以只针对设备当前已安装的 Storage Redirect X 模块运行测试 APP 和场景脚本；需要在本地预检或复现 GitHub Actions 失败时，再使用完整验证脚本验证当前工作区产物。
 
-在 WSL 中构建模块、编译 Android 测试二进制、运行 Gradle 单元测试并打包模块 zip：
+完整验证脚本有可用 Bash 时使用：
 
 ```bash
-RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
+bash scripts/verify-test-flow.sh
 ```
 
-也可以从 Windows PowerShell 启动完整本地流程：
+Windows PowerShell 环境可以使用同等入口：
 
 ```powershell
-.\scripts\verify-test-flow.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 ```
 
-该入口先在 WSL 中执行同一构建和测试阶段，并强制关闭设备场景；成功后由 Windows PowerShell 使用本机 ADB 安装产物并运行设备套件。默认会安装模块并重启设备；设置 `$env:SRX_TEST_INSTALL_MODULE = "0"` 可跳过模块安装和重启。ADB 不会转发到 WSL。
+该脚本默认会：
 
-另行运行可在主机执行的 Rust fixture 测试：
-
-```bash
-cargo test -p native-config-fixtures
-```
-
-CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试流。
+1. 解析当前本地测试版本号。
+2. 构建 Android 目标 Rust 测试二进制和 release 模块二进制。
+3. 打包测试用模块 zip。
+4. 运行管理 APP 单元测试、测试 APP 单元测试，并构建测试 APP debug APK。
+5. 将刚构建的模块 zip 刷入在线 root 测试设备，重启并确认模块启用、启动脚本完成、`srx_daemon` 存活。
+6. 安装本仓库内置测试 APP。
+7. 运行 `.github/tests/run-storage-redirect-scenarios.sh` 或 PowerShell 等价脚本。
 
 公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-40。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验五个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
@@ -60,24 +60,54 @@ CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试
 
 ```powershell
 adb devices
-$Serial = "<Windows ADB serial>"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
 ```
 
-完整设备套件的顺序是：安装并重启 WSL 构建的模块、安装 WSL 构建的测试 APP、再按“运行完整回归”一节从 Windows PowerShell 启动设备场景。只针对当前已安装模块复测时，可以跳过构建和模块安装。
+Bash 可用时也可以直接运行 `bash scripts/verify-test-flow.sh`。
+
+如果测试设备是 x86_64 模拟器，可切换目标：
+
+```powershell
+$env:SRX_TEST_TARGET_TRIPLE = "x86_64-linux-android"
+$env:SRX_TEST_MODULE_ABI = "x86_64"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:SRX_TEST_TARGET_TRIPLE
+Remove-Item Env:SRX_TEST_MODULE_ABI
+```
+
+完整验证脚本默认会刷入当前构建模块并重启设备。只在本地定位测试 APP 或脚本问题时，才临时跳过模块刷入或设备场景：
+
+```powershell
+# 只验证构建和测试 APK，不跑设备场景。
+$env:RUN_DEVICE_SCENARIOS = "0"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:RUN_DEVICE_SCENARIOS
+
+# 使用设备上已安装模块跑场景。
+$env:SRX_TEST_INSTALL_MODULE = "0"
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+Remove-Item Env:SRX_TEST_INSTALL_MODULE
+```
 
 ## 构建并刷入模块
 
-模块二进制和测试流 zip 由 WSL 构建入口生成。需要在 Windows 单独打包已有 Android target 产物时，使用 `-SkipBuild`，避免在 Windows 调用 Cargo；如不传 `-NoAdb`，脚本会询问是否通过 `ksud module install` 刷入并重启。
+单独构建模块 zip 时，Windows PowerShell 下推荐在本仓库根目录使用脚本。脚本会编译 Android release 目标、生成可刷入 zip、校验 zip 条目和 LF 换行；如不传 `-NoAdb`，还会询问是否通过 `ksud module install` 刷入并重启。
 
 ```powershell
-# 只打包 WSL 已生成的 target 产物，不执行 cargo build，也不访问设备
+# 构建模块 zip，可按提示刷入设备
+.\scripts\build-local-module.ps1
+
+# 只构建 zip，不执行 ADB 安装
+.\scripts\build-local-module.ps1 -NoAdb
+
+# 只打包已有 target 产物，不执行 cargo build，也不检查 adb
 .\scripts\build-local-module.ps1 -SkipBuild -NoAdb
 ```
 
 手动刷入 zip 时，必须推送完整 zip，不要直接覆盖 `/data/adb/modules/storage.redirect.x` 下的 `.so` 或 daemon：
 
 ```powershell
-adb -s $Serial push build\test-flow\assets\storage.redirect.x-v<version>-arm64-v8a.zip /data/local/tmp/storage.redirect.x-local.zip
+adb -s $Serial push build\storage.redirect.x-v<version>.zip /data/local/tmp/storage.redirect.x-local.zip
 adb -s $Serial shell "su -c 'rm -rf /data/adb/modules_update/storage.redirect.x'"
 adb -s $Serial shell "su -c '/data/adb/ksu/bin/ksud module install /data/local/tmp/storage.redirect.x-local.zip'"
 adb -s $Serial reboot
@@ -90,18 +120,10 @@ adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/module.pro
 
 ## 构建并安装测试 APP
 
-测试 APP 已作为主 Gradle build 的独立模块接入。在 WSL 仓库根目录构建并运行单元测试：
-
-```bash
-./gradlew --no-daemon --console=plain --stacktrace \
-  :storageRedirectTestApp:testDebugUnitTest \
-  :storageRedirectTestMediaFileApi:testDebugUnitTest \
-  :storageRedirectTestApp:assembleDebug
-```
-
-在 Windows 中用 ADB 安装 WSL 生成的 APK：
+测试 APP 已作为主 Gradle build 的独立模块接入。Windows 下在本仓库根目录执行：
 
 ```powershell
+.\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
 adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debug\storageRedirectTestApp-debug.apk
 ```
 
@@ -272,7 +294,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 35 | 任意路径映射矩阵：验证公共存储、`Android/data|media|obb/<包名>`、`/data/user`、`/data/data` 及公共路径之间的相对/绝对映射。 |
 | 36 | 映射应用私有别名后，仍可写入 MediaProvider 已创建的现有文件。 |
 | 37 | 父路径先映射到中间目录后，中间目录下的子路径继续命中下一条映射并落到最终目录。 |
-| 38 | 下载提供器自身 `sandboxed_paths` 接管标记：companion mount 成功（`perf companion mount pkg=... ok=true`）或进程内 system-writer hook（`hook refresh start profile=system-writer pkg=...`）其一即可；`sandbox=0` 请求、`attach skipped ... policy_registration_failed` 或提供器自建模块 FUSE 会话判为回归。该场景脚本只检查接管拓扑，不提交提供器原生写入；实际沙盒落点需由单独设备用例验证，CI 模拟器不含所需 XL 引擎。 |
+| 38 | 下载提供器（com.android.providers.downloads）自身配置 `sandboxed_paths` 后必须由模块接管原生写入，两种拓扑都算通过：companion mount 成功（`perf companion mount pkg=... ok=true`）或进程内 per-caller hook（`hook refresh start profile=system-writer pkg=...`，此时 pre 阶段直接跳过 companion mount）。出现 `attach skipped ... policy_registration_failed`、`sandbox=0` 挂载请求，或下载提供器自己起模块 FUSE 会话即回归（2026-10-21 真机侧漏回归；2026-10-26 场景 39 让提供器改走 system-writer hook 后同步放宽判据）。 |
 | 39 | 下载提供器（共享 uid 代写者）经 DownloadManager 异步下载公共路径时，按发起者（测试 APP）的 `path_mappings` 把目标改写到映射目标落盘，真实请求路径零穿透；文件出现在真实请求路径或下载失败即按源归因回归（2026-10-24 真机：误归因组内成员、行数据反查未触发）。 |
 | 40 | 系统 uid 的 FUSE 写入按发起服务归因；应用经 MediaProvider 中转创建的文件归因到源头应用；系统 uid 的沙盒目标缺失时零穿透，不得落到真实路径。 |
 
@@ -548,7 +570,7 @@ adb -s $Serial shell "su -c 'find /data/adb/modules -maxdepth 1 -inum <inode> -e
 不要用目录安装模块，也不要用 PowerShell `Compress-Archive` 直接打包。应使用 `scripts/build-local-module.ps1` 生成 store/no compression zip，再安装，避免设备侧安装器在部分环境中把脚本条目解成 0 字节：
 
 ```powershell
-adb -s $Serial push build\test-flow\assets\storage.redirect.x-v<version>-arm64-v8a.zip /data/local/tmp/storage.redirect.x-local.zip
+adb -s $Serial push build\storage.redirect.x-v<version>.zip /data/local/tmp/storage.redirect.x-local.zip
 adb -s $Serial shell "su -c 'rm -rf /data/adb/modules_update/storage.redirect.x'"
 adb -s $Serial shell "su -c '/data/adb/ksu/bin/ksud module install /data/local/tmp/storage.redirect.x-local.zip'"
 ```

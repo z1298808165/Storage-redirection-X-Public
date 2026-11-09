@@ -12,13 +12,6 @@ $BuildDir = if ([string]::IsNullOrWhiteSpace($env:SRX_TEST_BUILD_DIR)) { "build/
 $TestAppApkDir = Join-Path $RepoRoot "tests/storage-redirect-test/app/build/outputs/apk/debug"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
-if ($TargetTriple -notin @("aarch64-linux-android", "x86_64-linux-android")) {
-    throw "不支持的 Android target：$TargetTriple"
-}
-if ($ModuleAbi -notin @("arm64-v8a", "x86_64")) {
-    throw "不支持的模块 ABI：$ModuleAbi"
-}
-
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message"
@@ -41,6 +34,17 @@ function Invoke-Checked {
     }
 }
 
+function Get-CargoTargetDirectory {
+    $metadataJson = & cargo metadata --format-version 1 --no-deps
+    if ($LASTEXITCODE -ne 0) { Fail "无法解析 Cargo 目标目录。" }
+
+    $metadata = $metadataJson | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$metadata.target_directory)) {
+        Fail "Cargo metadata 未提供目标目录。"
+    }
+    return [System.IO.Path]::GetFullPath([string]$metadata.target_directory)
+}
+
 function Resolve-BuildPath {
     param([string]$Path)
     if ([System.IO.Path]::IsPathRooted($Path)) {
@@ -49,10 +53,37 @@ function Resolve-BuildPath {
     return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $Path))
 }
 
+function Assert-UnderPath {
+    param([string]$Path, [string]$Parent)
+
+    $parentFull = [System.IO.Path]::GetFullPath($Parent).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $pathFull = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if (-not $pathFull.StartsWith($parentFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail "拒绝操作预期目录以外的路径：$pathFull"
+    }
+}
+
+function Remove-BuildPath {
+    param([string]$Path, [string]$ExpectedParent)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    Assert-UnderPath -Path $Path -Parent $ExpectedParent
+    Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
 function Write-Utf8LfFile {
     param([string]$Path, [string]$Content)
     $lf = $Content.Replace("`r`n", "`n").Replace("`r", "`n")
     [System.IO.File]::WriteAllText($Path, $lf, $Utf8NoBom)
+}
+
+function Normalize-TextFile {
+    param([string]$Path)
+    [byte[]]$bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        if ($bytes.Length -eq 3) { $bytes = [byte[]]::new(0) } else { $bytes = $bytes[3..($bytes.Length - 1)] }
+    }
+    $content = [System.Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($Path, $content, $Utf8NoBom)
 }
 
 function Get-PythonCommand {
@@ -88,6 +119,89 @@ function Get-ResolvedVersionData {
     return $data
 }
 
+function New-ModulePackage {
+    param(
+        [string]$Version,
+        [string]$VersionCode,
+        [string]$SoFile,
+        [string]$DaemonFile,
+        [string]$OutputZip,
+        [string]$Abi,
+        [string]$WorkDir
+    )
+
+    if ($Abi -notin @("arm64-v8a", "x86_64")) { Fail "不支持的模块 ABI：$Abi" }
+    if (-not (Test-Path -LiteralPath $SoFile)) { Fail "缺少模块库：$SoFile" }
+    if (-not (Test-Path -LiteralPath $DaemonFile)) { Fail "缺少 daemon 二进制文件：$DaemonFile" }
+
+    $packageDir = Join-Path $WorkDir "module-package"
+    Remove-BuildPath -Path $packageDir -ExpectedParent $WorkDir
+    Remove-BuildPath -Path $OutputZip -ExpectedParent $WorkDir
+    New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "assets/zygisk_module") -Destination $packageDir -Recurse -Force
+    $templateRoot = Join-Path $packageDir "zygisk_module"
+    if (Test-Path -LiteralPath $templateRoot) {
+        Get-ChildItem -LiteralPath $templateRoot -Force | ForEach-Object {
+            Move-Item -LiteralPath $_.FullName -Destination $packageDir -Force
+        }
+        Remove-Item -LiteralPath $templateRoot -Force
+    }
+
+    Remove-Item -LiteralPath (Join-Path $packageDir "action.sh") -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $packageDir "LICENSE") -Force
+    Copy-Item -LiteralPath (Join-Path $RepoRoot "COPYING") -Destination (Join-Path $packageDir "COPYING") -Force
+
+    New-Item -ItemType Directory -Path (Join-Path $packageDir "zygisk") -Force | Out-Null
+    Copy-Item -LiteralPath $SoFile -Destination (Join-Path $packageDir "zygisk/$Abi.so") -Force
+    New-Item -ItemType Directory -Path (Join-Path $packageDir "bin") -Force | Out-Null
+    Copy-Item -LiteralPath $DaemonFile -Destination (Join-Path $packageDir "bin/srx_daemon") -Force
+
+    $moduleProp = @(
+        "id=storage.redirect.x",
+        "name=Storage Redirect X",
+        "version=v$Version",
+        "versionCode=$VersionCode",
+        "author=Kindness-Kismet",
+        "description=Storage Redirect X Core Module",
+        "webui=1"
+    ) -join "`n"
+    Write-Utf8LfFile -Path (Join-Path $packageDir "module.prop") -Content ($moduleProp + "`n")
+
+    $srxctlPath = (Join-Path $packageDir "bin/srxctl")
+    $separator = [System.IO.Path]::DirectorySeparatorChar
+    Get-ChildItem -LiteralPath $packageDir -Recurse -File | Where-Object {
+        $_.Extension -in @(".sh", ".prop", ".rule") -or
+        $_.FullName.Contains("${separator}META-INF${separator}") -or
+        $_.FullName -eq $srxctlPath
+    } | ForEach-Object { Normalize-TextFile -Path $_.FullName }
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::Open($OutputZip, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $root = (Resolve-Path -LiteralPath $packageDir).Path
+        Get-ChildItem -LiteralPath $packageDir -Recurse -File | ForEach-Object {
+            $relativePath = $_.FullName.Substring($root.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
+            $keepUncompressed =
+                $_.Extension -in @(".sh", ".prop", ".rule") -or
+                $relativePath.StartsWith("META-INF/", [System.StringComparison]::Ordinal) -or
+                $relativePath -eq "bin/srxctl"
+            $compression = if ($keepUncompressed) {
+                [System.IO.Compression.CompressionLevel]::NoCompression
+            } else {
+                [System.IO.Compression.CompressionLevel]::Optimal
+            }
+            $entry = $zip.CreateEntry($relativePath, $compression)
+            $entryStream = $entry.Open()
+            $fileStream = [System.IO.File]::OpenRead($_.FullName)
+            try { $fileStream.CopyTo($entryStream) } finally { $fileStream.Dispose(); $entryStream.Dispose() }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
 function Get-TestAppApk {
     if (-not (Test-Path -LiteralPath $TestAppApkDir)) { return $null }
     Get-ChildItem -LiteralPath $TestAppApkDir -Filter "*-debug.apk" | Select-Object -First 1 -ExpandProperty FullName
@@ -121,27 +235,43 @@ id; module_dir=/data/adb/modules/storage.redirect.x; logs_dir="$module_dir/logs"
 
 Push-Location $RepoRoot
 try {
-    Write-Step "在 WSL 中构建并测试 Rust/Android 产物"
-    $wsl = Get-Command wsl.exe -ErrorAction Stop
-    Invoke-Checked -FilePath $wsl.Source -Arguments @(
-        "--cd", $RepoRoot, "--exec", "bash", "-lc",
-        'build_dir=$(wslpath -a "$1") || exit; shift; exec env SRX_TEST_BUILD_DIR="$build_dir" "$@"',
-        "_", (Resolve-BuildPath $BuildDir),
-        "RUN_DEVICE_SCENARIOS=0",
-        "SRX_TEST_TARGET_TRIPLE=$TargetTriple",
-        "SRX_TEST_MODULE_ABI=$ModuleAbi",
-        "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android29-clang",
-        "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=x86_64-linux-android29-clang",
-        "bash", "scripts/verify-test-flow.sh"
-    )
-
     $versionData = Get-ResolvedVersionData
     $version = [string]$versionData.version
+    $versionCode = [string]$versionData.version_code
+
     $buildRoot = Resolve-BuildPath $BuildDir
+    New-Item -ItemType Directory -Path (Join-Path $buildRoot "module-bin") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $buildRoot "assets") -Force | Out-Null
+
+    Write-Step "为 $TargetTriple 构建 Rust 测试二进制文件"
+    Invoke-Checked -FilePath "cargo" -Arguments @("test", "--target", $TargetTriple, "--no-run")
+
+    Write-Step "为 $TargetTriple 构建 SRX 模块二进制文件"
+    Invoke-Checked -FilePath "cargo" -Arguments @("build", "--target", $TargetTriple, "--release")
+
+    $moduleBinDir = Join-Path $buildRoot "module-bin"
+    $releaseDir = Join-Path (Join-Path (Get-CargoTargetDirectory) $TargetTriple) "release"
+    $libSource = Join-Path $releaseDir "libsrx_core.so"
+    $daemonSource = Join-Path $releaseDir "srx_daemon"
+    $libDest = Join-Path $moduleBinDir "libsrx_core.so"
+    $daemonDest = Join-Path $moduleBinDir "srx_daemon"
+    Copy-Item -LiteralPath $libSource -Destination $libDest -Force
+    Copy-Item -LiteralPath $daemonSource -Destination $daemonDest -Force
+
+    Write-Step "打包测试流模块 zip"
     $moduleZip = Join-Path $buildRoot "assets/storage.redirect.x-v$version-$ModuleAbi.zip"
-    if (-not (Test-Path -LiteralPath $moduleZip -PathType Leaf)) {
-        Fail "WSL 未生成测试模块 zip：$moduleZip"
-    }
+    New-ModulePackage -Version $version -VersionCode $versionCode -SoFile $libDest -DaemonFile $daemonDest -OutputZip $moduleZip -Abi $ModuleAbi -WorkDir $buildRoot
+
+    Write-Step "运行 Android 单元测试并构建测试 APK"
+    $gradle = if (Test-Path -LiteralPath (Join-Path $RepoRoot "gradlew.bat")) { Join-Path $RepoRoot "gradlew.bat" } else { "gradle" }
+    Invoke-Checked -FilePath $gradle -Arguments @(
+        "--no-daemon", "--console=plain", "--stacktrace",
+        ":app:testDebugUnitTest",
+        ":storageRedirectTestApp:testDebugUnitTest",
+        ":storageRedirectTestMediaFileApi:testDebugUnitTest",
+        ":storageRedirectTestApp:assembleDebug"
+    )
+
     $testAppApk = Get-TestAppApk
     if ([string]::IsNullOrWhiteSpace($testAppApk)) { Fail "在 $TestAppApkDir 下找不到测试应用 debug APK。" }
 

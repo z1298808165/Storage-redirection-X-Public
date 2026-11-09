@@ -10,7 +10,7 @@
 - 默认提交标题使用 `类型(可选范围)：中文描述`，可以保留必要的英文技术名词、包名、命令和文件名。
 - 项目自维护的文档、代码注释、PR/Issue、发布说明、界面文案和诊断文本默认使用中文。API、类名、命令、路径、协议字段、产品名、机器解析日志键、固定错误文本和测试标识等必要技术内容可以保留英文；第三方源码、许可证、SPDX 标识和上游补丁原文保持原样。确需保留其它英文自然语言时，必须紧邻写明 `quality-allow(chinese-language): <中文具体原因>`。
 - 推送前必须运行 `git status --short --branch`，确认当前分支、工作区状态、待推送提交和远端跟踪关系。
-- 推送前必须运行必要验证；本地在 WSL 中运行 Cargo/Gradle 构建与测试，在 Windows PowerShell 中直接运行 ADB 设备套件。本仓库主模块构建命令是 `cargo build --target aarch64-linux-android --release`。无法运行时，必须在最终说明中写明原因。
+- 推送前必须运行必要验证；本仓库主验证命令是 `cargo build --target aarch64-linux-android --release`。无法运行时，必须在最终说明中写明原因。
 - 推送前必须检查 `.github/workflows/*.yml`，确认本次推送触发的是 CI Build 还是 Release workflow。
 - 推送前必须运行 `git log --oneline origin/main..HEAD`，确认待推送提交标题符合中文提交规范。
 - 不要重写已经推送到远端的历史，除非用户明确批准 force push。

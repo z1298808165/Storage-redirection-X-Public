@@ -2,18 +2,20 @@
 
 本项目的核心 hook 能力依赖两个上游 Rust 库：
 
-- `srx_hook`：<https://github.com/Kindness-Kismet/srx_hook>
+- `srx_hook`：使用 [`PuerNya/srx_hook`](https://github.com/PuerNya/srx_hook) fork，其上游来源为 <https://github.com/Kindness-Kismet/srx_hook>
 - `srx_inline_hook`：<https://github.com/Kindness-Kismet/srx_inline_hook>
 
-`srx_hook` 固定到官方仓库的具体 commit。锁定版本提供独立的运行时管理状态、fork 后状态发布保护，以及能够报告注册和清理结果的 checked API。
+`srx_hook` 采用 fork 的原因是该 fork 在原上游基础上补齐了 fork-safe 能力（`ForkMutex` 全局锁与 `pthread_atfork` 重置、子进程 proxy 分发）。原上游没有这些能力，而系统代写进程与 shared-uid 进程的 fork 子进程会进入完整重定向决策链，存在继承「已加锁」同步原语而永久阻塞的风险。fork 与官方上游保持同一 API 面，本仓库使用 hook 的代码无需区分来源。
+
+同步 fork 维护时需同时关注官方上游的推进：先确认 fork 已合入官方上游对应修复，再考虑切回官方仓库；在此之前不得直接改回 `Kindness-Kismet/srx_hook`，否则会丢掉 fork-safe 能力。
 
 ## 引用方式
 
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-# quality-allow(chinese-language): 紧随其后一行同步 Cargo.toml 中固定版本的依赖声明，保留原文便于直接核对。
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "99e27c0cc720ca3969a0efa14741e4bbded8a03a" }
+# quality-allow(chinese-language): 紧随其后一行是 Cargo.toml 依赖声明原文，属机器解析的配置语法，改写会失去比对价值。
+srx_hook = { git = "https://github.com/PuerNya/srx_hook.git", rev = "8b564e9e665a54239a3d3ea2a16ecf995a29083a" }
 # quality-allow(chinese-language): 紧随其后一行同为依赖声明原文，保留原样便于直接与 Cargo.toml 比对。
 srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 ```
@@ -39,17 +41,12 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 - caller、callee、ignore 路径规则和模块身份识别。
 - dlopen/dlclose 触发的自动刷新，以及 ELF 遍历和重定位处理。
 - hook 递归防护、fork child 检测、信号保护等运行时能力。
-- `hook_single_checked`、`hook_partial_checked`、`hook_all_checked` 返回状态、可选 stub 和模块错误；`stub` 存在时任务已经注册，即使调用同时返回错误。
-- `hook_batch_checked` 先校验整批请求，再以一次状态发布注册；错误结果中的 stub 按请求顺序列出已发布任务。
-- `clear_checked` 返回移除的 slot、剩余 slot、待恢复页面数量及模块错误。
-
-`fork_safe()` 只表示库的 `pthread_atfork` 处理器已注册成功。普通 `fork()` 后，库为子进程创建独立的运行时管理状态并保留继承调用链；Automatic 模式可通过再次调用 `init()` 为子进程恢复 monitor。若 `fork()` 与 loader 或初始化调用重叠，子进程的管理 API 会返回 `ForkContextUnavailable`，此时再次调用 `init()` 也无法恢复管理。该保证不覆盖调用方自己的锁、直接 `clone`/syscall、`vfork()` 或异步信号处理中的任意 API 调用。
 
 本项目主要在以下位置使用它：
 
-- `src/hook/stats.rs`：初始化 hook 引擎、批量注册 open/stat/access/mkdir/rename/read 等 PLT hook，并处理 checked 注册和清理结果。
+- `src/hook/stats.rs`：初始化 hook 引擎、注册 open/stat/access/mkdir/rename/read 等 PLT hook。
 - `src/hook/runtime.rs`：通过 `with_prev_func` 回调原函数，并判断 fork child 场景。
-- `src/hook/fuse_fix.rs`：对 MediaProvider/FUSE 相关 native 比较函数安装 PLT hook，并保留已提交的 checked 注册任务。
+- `src/hook/fuse_fix.rs`：对 MediaProvider/FUSE 相关 native 比较函数安装 hook。
 
 ### `srx_inline_hook`
 
@@ -87,7 +84,13 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 
 ## 已判定的能力边界
 
-### fork 子进程中的调用方锁
+### fork 子进程中的配置锁：暂不需要上游 atfork 能力
 
-`should_bypass_hook_in_fork_child`（`src/hook/runtime.rs`）对系统 writer、SAF native bridge 和 shared-UID 进程继续执行 hook 决策；这些路径会访问 `SettingsHub` 的阻塞锁（`src/config/inspect.rs`、`src/config/raw_scan.rs`）和 `PathRouter` 的读锁（`src/redirect/router.rs`）。这些 SRX 调用方锁不由 `srx_hook` 的 atfork 处理器重置或保护。
+`should_bypass_hook_in_fork_child`（`src/hook/runtime.rs`）对系统代写进程与 shared-uid 进程**不**绕过 hook，因此这两类进程的 fork 子进程会进入完整重定向决策链，而链上使用阻塞锁：`SettingsHub` 的 `state.lock()`（`src/config/inspect.rs` 十余处、`src/config/raw_scan.rs`）与 `PathRouter` 的 `state.read()`（`src/redirect/router.rs`）。若 fork 恰好发生在另一线程持锁重载配置期间，子进程中该锁处于永久占用状态，第一次被拦截的 open 就会永久阻塞。`PATH_NORMALIZE_CACHE` 使用 `try_lock`（`src/platform/paths.rs`）说明该风险此前已被意识到。
+
+**真机实测结论：该竞态的前提条件不成立，因此不改。** 在 Android 16（SDK 36、KernelSU）真机上用 `strace -f -e trace=clone,fork,vfork` 观测 MediaProvider（38 个线程）共 55 秒：25 秒 MediaStore 查询负载下 clone 调用 0 次；30 秒混合负载（文件写入、MediaStore 查询、媒体扫描广播）下同样 0 次。strace 本身工作正常（日志含 `Process <pid> detached`），进程快照也确认 MediaProvider 无子进程。模块日志中 shared-uid 相关记录同为 0。即「系统代写进程 fork」这一前提在实际环境中未观测到。
+
+不修改的理由是收益与风险不对称：修复需触及整条决策链十余处锁语义，改错会导致热路径死锁或重定向被错误放行，比原风险更严重；而该竞态无法用外置测试构造，测试流也覆盖不到（普通应用不装进程内 hook，系统代写进程的 fork 时序不可控），缺乏验证手段。
+
+**上游能力现状**：`srx_hook` 的官方上游提供 `is_forked_child()`，实现为纯 pid 比较（`getpid() != INSTALL_PID`），async-signal-safe，可在 fork 子进程中安全调用，但**没有** `pthread_atfork` 注册能力。本仓库当前使用的 `PuerNya/srx_hook` fork 已补齐该缺口：`src/runtime/fork_lock.rs` 提供 `ForkMutex`（原子自旋锁）并注册 `pthread_atfork`，prepare 阶段获取全部全局锁、parent 释放、child 清零后重建状态，避免子进程继承「已加锁」的 pthread mutex。因此上面那条「需要上游新增 atfork 钩子注册 API」的待办已由该 fork 满足；若后续需要子进程侧标记「仅走原函数」，仍应在 fork 或上游补相应标记接口。
 

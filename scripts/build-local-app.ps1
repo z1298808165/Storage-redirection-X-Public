@@ -72,26 +72,25 @@ function Add-PathPrefix {
     }
 }
 
-function Initialize-AdbEnvironment {
-    if (Get-Command adb -ErrorAction SilentlyContinue) { return }
+function Initialize-AndroidEnvironment {
     $sdk = Get-FirstExistingPath @(
         $env:ANDROID_HOME,
         $env:ANDROID_SDK_ROOT,
         (Join-Path $env:LOCALAPPDATA "Android\Sdk")
     )
 
-    if ($sdk) { Add-PathPrefix (Join-Path $sdk "platform-tools") }
-}
+    if (-not $sdk) {
+        Fail "未找到 Android SDK。请设置 ANDROID_HOME，或通过 Android Studio 安装 SDK。"
+    }
+    $env:ANDROID_HOME = $sdk
+    $env:ANDROID_SDK_ROOT = $sdk
+    Add-PathPrefix (Join-Path $sdk "platform-tools")
 
-function Invoke-WslGradle {
-    param([string]$Version, [int]$VersionCode)
+    if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+        Fail "PATH 中未找到 Java。请安装 JDK 21 并设置 JAVA_HOME。"
+    }
 
-    $wsl = Get-Command wsl.exe -ErrorAction Stop
-    Invoke-Checked -FilePath $wsl.Source -Arguments @(
-        "--cd", $RepoRoot, "--exec", "bash", "-lc",
-        'export VERSION="$1" VERSION_CODE="$2"; shift 2; exec ./gradlew "$@"',
-        "_", $Version, [string]$VersionCode, "--console=plain", ":app:assembleRelease"
-    )
+    return @{ Sdk = $sdk }
 }
 
 function Get-CargoPackageVersion {
@@ -244,9 +243,6 @@ function Test-ReleaseApk {
     param([string]$ApkPath)
 
     if (-not (Test-Path -LiteralPath $ApkPath)) {
-        if (Test-Path -LiteralPath ($ApkPath -replace '\.apk$', '-unsigned.apk')) {
-            Fail "Gradle 只生成了未签名 release APK；请先在 WSL 配置 release 签名，见 docs/build-process.md。"
-        }
         Fail "缺少 release APK：$ApkPath"
     }
 
@@ -301,9 +297,23 @@ function Invoke-AdbChecked {
     }
 }
 
+function Restore-EnvVar {
+    param(
+        [string]$Name,
+        [bool]$HadValue,
+        [string]$OldValue
+    )
+
+    if ($HadValue) {
+        Set-Item -Path "Env:\$Name" -Value $OldValue
+    } else {
+        Remove-Item -Path "Env:\$Name" -ErrorAction SilentlyContinue
+    }
+}
+
 Push-Location $RepoRoot
 try {
-    if (-not $NoAdb) { Initialize-AdbEnvironment }
+    $buildEnvironment = Initialize-AndroidEnvironment
 
     $baseVersion = Get-CargoPackageVersion
     $resolved = Resolve-LocalVersion -BaseVersion $baseVersion
@@ -325,10 +335,29 @@ try {
     Write-Host "版本：        v$Version"
     Write-Host "版本代码：    $VersionCode"
     Write-Host "输出目录：    $outputRoot"
+    Write-Host "Android SDK： $($buildEnvironment.Sdk)"
+    Write-Host "Java：        $env:JAVA_HOME"
 
     if (-not $SkipBuild) {
-        Write-Step "在 WSL 中构建 release 应用"
-        Invoke-WslGradle -Version $Version -VersionCode $VersionCode
+        $gradlePath = Join-Path $RepoRoot "gradlew.bat"
+        if (-not (Test-Path -LiteralPath $gradlePath)) {
+            Fail "缺少 Gradle wrapper：$gradlePath"
+        }
+
+        Write-Step "构建 release 应用"
+        $hadVersion = Test-Path Env:\VERSION
+        $oldVersion = $env:VERSION
+        $hadVersionCode = Test-Path Env:\VERSION_CODE
+        $oldVersionCode = $env:VERSION_CODE
+
+        $env:VERSION = $Version
+        $env:VERSION_CODE = [string]$VersionCode
+        try {
+            Invoke-Checked -FilePath $gradlePath -Arguments @("--console=plain", ":app:assembleRelease")
+        } finally {
+            Restore-EnvVar -Name "VERSION" -HadValue $hadVersion -OldValue $oldVersion
+            Restore-EnvVar -Name "VERSION_CODE" -HadValue $hadVersionCode -OldValue $oldVersionCode
+        }
     } else {
         Write-Step "跳过构建并使用现有 release APK"
     }

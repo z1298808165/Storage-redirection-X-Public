@@ -99,7 +99,7 @@ find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './M
 
 ## Windows PowerShell 打包示例
 
-下例可在没有 `bash`、`zip`、`dos2unix` 的 Windows 环境中，将已构建的 Android 产物打成可刷入 zip。按本地构建流程在 WSL 编译后，可用 `scripts/build-local-module.ps1 -SkipBuild -NoAdb` 只做打包。
+下例可在没有 `bash`、`zip`、`dos2unix` 的 Windows 环境中生成可刷入 zip。实际本地打包推荐直接使用 `scripts/build-local-module.ps1`。
 
 ```powershell
 $versionData = py .github\scripts\resolve_build_version.py --include-dirty --format json | ConvertFrom-Json
