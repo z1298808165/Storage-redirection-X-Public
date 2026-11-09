@@ -75,7 +75,68 @@ backend_effective pkg=<包名> requested=auto effective=namespace capability=ava
 - **能力快照 `unavailable` 且设备级退避未到期**：等 `retry_at_ms` 过去，或重启让快照重置。
 - **该应用自己的失败分桶用满预算**：连续三次真实接入失败后进入 60 秒窗口，窗口过后仍会放行一次探测，
   成功即清零；「没试」类判定（根不满足接入条件、宿主尚未就绪）不计入预算。
-- **接入超时**：宿主策略登记或 namespace 接入没在预算内完成，应用会带 `attach_gate_closed` 回落。
+- **接入超时**：宿主策略登记或 namespace 接入没在预算内完成，应用会带 `host_attach_failed` 回落。
+  注意与另外两种「没接入」区分：`no_explicit_rules`（全隔离配置，按设计走 namespace bind，
+  更省电）与 `attach_gate_closed`（有显式规则但规划根/映射不适合 FUSE）。
+- **接入探针超时但挂载已就位**：接入子进程最后一步会用应用凭据 stat 一次刚附着的视图根，
+  那是一次同步 FUSE 往返，而设备上单条请求偶发 20~60 秒。现在超时后会**先读 mountinfo
+  比对会话设备号**：已就位即判成功（日志 `fuse host attach probe timeout but mount landed`），
+  不再误判成失败后回落 bind 而叠出第二层。
+
+### 挂载结论分两级，且是「观测」不是「等待」
+
+应用侧 specialize_post 的结论只有两种：`app mount confirmed`（观测到重定向已生效）与
+`app mount unconcluded`（**这一刻**观测不到证据——没有结论，不是失败，info）。`unconcluded`
+在应用启动快于挂载落定时会出现，而应用随后通常就能看见自己的视图（真机实测：同一次启动里
+该 pid 稍后 `/storage/emulated` 的设备号就是本会话的）。两条都带 `pkg=`，`unconcluded` 另带
+`map_only=` 与 `sent=`（请求是否真的发出去过）。
+
+**执行方的结论由执行方自己记**：`perf companion mount ... ok=true|false`、
+`companion fuse view unavailable reason=...`、`daemon fuse view unavailable reason=...`。
+应用侧不再有「失败」这一级，因为它拿不到执行方的结论（见下条）。
+
+### 为什么应用侧不等「挂载执行方回执」
+
+曾经的设计是：应用发出挂载请求时保留那条连接，伴生进程挂载落定后写回 4 字节结论，应用侧阻塞
+读一次。**这条通道在本项目里不可能成立**——不是实现问题，而是 SELinux 的域迁移：
+
+- 请求在 `pre_app_specialize` 发出，此时进程属 `u:r:zygote:s0`，socket 也由该域创建；
+- 应用 specialize 后整个进程切到 `u:r:untrusted_app:s0`，此后读这条继承来的 socket 会被直接
+  拒绝。真机 AVC 原文：
+
+  - 请求行：`avc: denied { read } for comm="one:gpu_process" path="socket:[207528]" dev="sockfs"`
+  - 上下文：`scontext=u:r:untrusted_app:s0:c18,c257,c512,c768 tcontext=u:r:zygote:s0`
+  - 对象类：`tclass=unix_stream_socket permissive=0`
+
+应用侧拿到的是 `-EACCES`，而执行方在同一毫秒里已经 `companion ack sent status=1`——数据确实写
+出来了，只是读不到。`recv`/`readv`/`splice` 走同一个 `file_permission` 钩子，换读法无用。
+
+所以现在**发完即关**：连接不在应用进程里多留一个 fd、不跨域边界，应用侧也就不会因为一次注定
+失败的读而在 dmesg 里留下可观测的审计行。判据回到「挂载表里能不能看见自己的视图」：
+
+- 沙箱根挂在 `root` 字段（命名空间 bind 后端）；
+- 或者视图根的**设备号**与系统媒体 FUSE 不同（共享宿主会话已接管，见下条）。
+
+三条判据都不含模块标识，且不等待、不轮询、不占预算。
+
+### 视图根判据必须比对设备号，不能只看「这一层是 fuse」
+
+Android 11 起 vold 自己就用 fuse 挂 `/storage/emulated`，所以「视图根是 fuse 挂载」在每台
+现代设备上都恒为真。真机实测（2026-11-09）：一个回落 `namespace_bind` 的应用因此被判成
+`app mount confirmed`——判据根本没区分系统视图和我们会话。
+
+正确对照物是**系统媒体 FUSE 的超级块设备号**：`/mnt/user/<user>/emulated` 上最先出现的
+那一层（vold 开机挂的那层），我们的会话是叠在它上面的新层。同一路径的最顶层才是应用看到的
+视图，两者设备号不同即已接管。同一台设备同一时刻的两组样本：
+
+```text
+已接管：/storage/emulated        -> 0:142（本会话）
+       /mnt/user/0/emulated 首层 -> 0:131（系统）
+未接管：/storage/emulated        -> 0:131（系统）
+       /mnt/user/0/emulated 首层 -> 0:131（系统）
+```
+
+
 
 ### 判断「接管是否成功」不要看挂载源名
 

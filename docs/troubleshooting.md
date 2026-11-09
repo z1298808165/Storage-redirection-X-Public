@@ -48,6 +48,23 @@
 
 "未知来源"表示这次写入确实无法归因到具体应用：典型来源是经 MediaProvider 中转、调用方信号已经失效的写入（系统后台创建的目录），以及 root 文件管理器绕过 FUSE 直接落盘的写入。它不是"没有记录"，路径、进程与结果仍然完整，可据此对照 `running.log` 与 `file_monitor.log` 定位。
 
+## MediaStore 写入返回 null（`createMedia returned null`）
+
+应用侧 `MediaStore.insert()` 返回 null / 抛 `FileNotFoundException` 时，**先分清两种完全不同的成因**，否则会把环境竞态当成数据面缺陷：
+
+1. **卷还没挂上**（最常见，尤其刚重启 MediaProvider）：MP 日志里有
+   - 首行：`E MediaProvider: Volume external_primary not found, calling identity: UserHandle{0},`
+   - 续行：`attached volumes: {MediaVolume name: [internal] ..., MediaVolume name: [external_primary] id: [emulated;999] ...}`
+   - 异常：`E DatabaseUtils: java.lang.IllegalArgumentException: Volume external_primary not found`
+   `attached volumes` 里没有 user 0 的 `external_primary`，就说明是重启窗口内的竞态：`insert` 直接抛异常，应用侧只表现为 `createMedia returned null`。等 1~3 秒重试即可成功（集成测试对创建类用例已做有界重试，日志里会出现 `mediastore_create_retry ... reason=create_media_null`）。
+2. **文件已重定向但打开失败**：MP 日志是 `Open with FUSE. FilePath: ...` 之后
+   `java open backup failure ... FileNotFoundException: open failed: ENOENT`，且
+   `running.log` / logcat 里应能看到 `java mapped open prep failed caller_uid=... kind=...`
+   （或 `media redirect target uri=...` 缺失，说明 insert 阶段的重定向登记没发生）。
+   这才是模块数据面的线索，按路径解析/归因继续查。
+
+排查时**先看 MP 自己的卷状态**，再看我们的 hook 日志——两者的用户可见现象完全一样。
+
 ## MediaStore 查询排障
 
 图库类 APP 看到真实相册时，不要只看目标 APP 自身是否已经 mount 到沙盒。相册、缩略图和计数常来自 `com.android.providers.media.module` 的 MediaStore 查询结果。

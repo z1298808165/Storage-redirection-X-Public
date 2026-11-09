@@ -54,7 +54,13 @@ scoped 退役后只剩两条数据面（共享宿主 FUSE、namespace bind），
 | `attach_gate_closed` | 该根不是存储视图根，或接入开关被显式关掉 | 配置/规划 |
 | `policy_registration_failed` | 应用策略没登记进宿主会话 | 配置热重载/竞态 |
 | `no_policy_rules` | 请求本身没有任何策略规则（不需要 FUSE） | 配置 |
+| `no_explicit_rules` | 全隔离配置（`enabled` 且非 mapping_mode_only），但五个规则数组全空 | 配置（按设计走 namespace bind） |
 | `host_attach_failed` | 登记与闸门都通过，实际接入失败（超时/errno） | 设备/内核 |
+
+`no_explicit_rules` 单独成项的原因：全隔离是**有意义的策略**（整棵视图→应用沙盒），一条
+namespace bind 就能等价表达且全程在内核态（零用户态开销），因此闸门按「是否有显式路径规则」
+判定时不放行它——这是**更省电**的选择，不是功能缺失。此前它与 `attach_gate_closed` 混用，
+后者读起来像「挂载根不允许接入」，实测把排查方向带偏（2026-11-09）。
 
 原因同时写入能力快照的 `reason=` 字段（`/data/adb/modules/storage.redirect.x/.fuse_capability`），
 `doctor` 与诊断包会带上，因此用户反馈只需贴一行日志即可定位方向。
@@ -390,6 +396,38 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 
 - 可参考 Fuse-Proxy 的 zygisk 通知转被动模式，降低 `/proc` 扫描开销。
 - 在双 ABI 部署完整性和兼容性得到验证前，继续保留周期扫描兜底。
+
+### entry 缓存有效期（`ENTRY_TTL`）：实测数据与保持 0 的理由
+
+`ENTRY_TTL` 现为 `Duration::ZERO`（`src/fuse_redirect/mod.rs`），与 AOSP MediaProvider 的
+FuseDaemon 一致：**每次路径解析都向本会话重新确认**。零点值下每个中间路径组件也要重新确认，所以
+一次 `stat()` 在视图里是 3~4 次 LOOKUP 往返。
+
+这不是"感觉"，真机量过（2311DRK48C / A16；用 `nsenter -t <应用pid> -m` 在同一命名空间里跑
+`ls -l`/`ls -ld`，统计 `running.log` 里的 `LOOKUP name`）：
+
+| 探针 | `ENTRY_TTL=ZERO` | `ENTRY_TTL=1s` | 差异 |
+|---|---|---|---|
+| 同一路径重复 stat ×200 | 800 次 LOOKUP | 24 次 LOOKUP | **33×** |
+| 目录 `ls -l` ×10（271 条目） | 2780 次 | 2713 次 | −2.4% |
+| 视图之外删除后，应用侧还能看到多久 | 0（下一次 stat 即消失） | **915 ms** | 陈旧窗口 |
+| 视图之外新建后，应用侧多久可见 | 立即 | 立即 | 无差异（负查询不缓存） |
+
+**结论：保持 0。** 理由不是"没测过"，而是三个权衡：
+
+1. **一致性责任在 MediaProvider。** 我们的视图叠在系统 MP 之上，而 MP 会绕过我们直接写
+   `/data/media`（MediaStore 增删、其他应用的代写）。entry 缓存一旦打开，"谁负责失效"就变得
+   含混——AOSP 靠 MP 自己的失效通告闭环，我们没有这条通道。
+2. **收益形态很窄。** 33× 只出现在"反复 stat 同一路径"的形态（下载器量尺寸、轮询探活）；目录
+   扫描类（相册、文件管理器）只有 2.4%，因为每个名字每次只查一次，缓存命不中。
+3. **陈旧窗口恰好落在删除/改名上**（≤TTL），而集成测试正是靠"下一次 lookup 即失效"
+   （夹具 `invalidate_visible_view`）来收口"后端被直改、视图未变"的窗口。打开后这条契约失效，
+   会把真实缺陷掩盖成跨场景 flake。
+
+要开的话必须满足两个前提，缺一不可：① 有一条**真正的**失效通道（媒体侧变更 → 对本会话
+`Notifier::inval_entry`/`delete`），而不是靠 TTL 猜；② 回归覆盖 2/3/5/14 + 29（热更新）+
+32/33（MediaProvider 重启与热重载）。此时把常量改成 `Duration::from_secs(1)` 即可，代码路径
+无需其他改动（`reply.entry(&ENTRY_TTL, ...)` 已在四处统一引用）。
 
 ---
 

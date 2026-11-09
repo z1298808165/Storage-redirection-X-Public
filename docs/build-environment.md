@@ -37,6 +37,18 @@ LSPlant 上游迁移到 C++ 标准库模块（`import std;`）后，构建需要
 - **使用 CI 同款 JDK 21**。`build.rs` 使用 `--release 11` 编译 Hooker.java，Gradle 仍需满足自身的 Java 运行时要求。
 - **构建工具必须安装在 WSL 中**。Windows 的 Cargo、Gradle 和 Android NDK 不参与本地构建或测试；Windows 侧只需可用的 ADB。
 
+### 前置缺失时的典型报错
+
+WSL 侧缺 SDK 变量或 Linux 版 NDK 时，构建入口会在构建阶段直接停下，报错与原因一一对应：
+
+| 报错 | 原因 | 修法 |
+|------|------|------|
+| `ANDROID_HOME: parameter null or not set` | WSL 内没有导出 `ANDROID_HOME` / `ANDROID_SDK_ROOT` | 按上文「环境变量配置」写入 WSL shell profile 后重开终端 |
+| `Android NDK <版本> not found in WSL SDK` | 该 SDK 目录下没有对应版本 NDK，或该 NDK 只装了 Windows 主机二进制 | 在 Linux 侧用 `sdkmanager "ndk;<版本>"` 安装，并确认 `prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang` 存在 |
+
+Windows 主机上装的 NDK 不能给 WSL 复用：`toolchains/llvm/prebuilt/` 按宿主平台分发，只有 `windows-x86_64`
+一个目录时，必须在 WSL 内重新安装对应版本。
+
 ## 安装 Rust targets
 
 ```bash
