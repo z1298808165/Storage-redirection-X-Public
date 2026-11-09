@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 pub mod platform {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub mod inotify {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
