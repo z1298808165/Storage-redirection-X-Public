@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 MONITOR = ROOT / "src" / "daemon_monitor.rs"
 
 
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
 class MonitorResourceBoundariesTest(unittest.TestCase):
     def test_production_repair_flags_execute(self) -> None:
         """执行生产源码中的首次建树标记与修复条件，覆盖连续重建和溢出补偿。"""
@@ -145,6 +149,24 @@ fn main() {
                 [str(binary)], capture_output=True, text=True, encoding="utf-8"
             )
             self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+
+    def test_missing_roots_contribute_next_wakeup_deadline(self) -> None:
+        """missing root 的重试截止点必须进入 monitor waiter，而非等五分钟 idle timeout。"""
+        source = MONITOR.read_text(encoding="utf-8")
+        self.assertIn("pub fn next_wakeup_deadline_ms(&self) -> Option<i64>", source)
+        deadline = source[
+            source.index("pub fn next_wakeup_deadline_ms(&self) -> Option<i64>"):
+            source.index("fn retry_missing_watch_roots(")
+        ]
+        self.assertIn("MISSING_ROOT_RETRY_MS", deadline)
+        self.assertIn("last_rebuild_ms.saturating_add", deadline)
+        daemon = read("src/daemon.rs")
+        wait = daemon[
+            daemon.index("fn wait_for_file_monitor_events("):
+            daemon.index("fn request_file_monitor_refresh(")
+        ]
+        self.assertIn("next_wakeup_deadline_ms()", wait)
+        self.assertNotIn("pending_flush_delay_ms()", wait)
 
     def test_event_recording_is_outside_owner_repair_gate(self) -> None:
         """修复节流只包住 owner 检查，不吞掉写入事件或新目录的监视登记。"""

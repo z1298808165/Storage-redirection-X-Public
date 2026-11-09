@@ -421,6 +421,35 @@ class LoggingArchitectureTest(unittest.TestCase):
             self.assertIn("127", source)
             self.assertNotIn("eq 64", source)
 
+    def test_retry_deadlines_do_not_restore_fixed_polling(self) -> None:
+        pending = read("src/mount/own_private_pending.rs")
+        self.assertIn("pub fn next_due_delay_ms() -> Option<i64>", pending)
+        self.assertIn("backoff_ms(rounds).saturating_sub(age_ms)", pending)
+        self.assertIn("wake_daemon();", pending)
+        self.assertNotIn("SCAN_INTERVAL_MS", pending)
+        daemon = read("src/daemon.rs")
+        self.assertIn("own_private_pending::next_due_delay_ms()", daemon)
+        self.assertIn("own_private_pending::set_daemon_wake_eventfd(control_wake_fd)", daemon)
+        self.assertIn("RegularAppMonitor::next_wakeup_deadline_ms", daemon)
+        wait = section(daemon, "fn wait_for_file_monitor_events(", "fn request_file_monitor_refresh(")
+        self.assertIn("next_wakeup_deadline_ms()", wait)
+        self.assertNotIn("event_fd() < 0 && sync.request_event_fd < 0", wait)
+
+    def test_config_event_reader_stops_on_poll_error_events(self) -> None:
+        watcher = read("src/config/watcher.rs")
+        reader = section(watcher, "fn event_reader_loop(", "fn publish_change(")
+        error_branch = section(reader, "if (poll_fd.revents & (", "if ready == 0")
+        for flag in ("POLLNVAL", "POLLERR", "POLLHUP"):
+            self.assertIn(f"libc::{flag}", error_branch)
+        self.assertIn("break;", error_branch)
+        self.assertNotIn("continue;", error_branch)
+        # 退出必须降级，且不让下次热路径在同一个坏 fd 上反复重建线程。
+        cleanup = reader[reader.index("publish_change(kind);"):]
+        self.assertIn("EVENTS_LIVE.store(false, Ordering::Release)", cleanup)
+        self.assertIn("INOTIFY_FD.compare_exchange(fd, -1", cleanup)
+        self.assertIn("(poll_fd.revents & libc::POLLIN) == 0", reader)
+        self.assertIn("drain_changed_packages()", reader)
+
     def test_default_collectors_do_not_subscribe_to_native_hot_tags(self) -> None:
         collectors = read("assets/zygisk_module/service.d/log_collectors.sh") + read(
             "assets/zygisk_module/service.d/debug_collectors.sh"
@@ -538,9 +567,22 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("dir_entry_refs: HashMap<u64, u64>", fuse)
         self.assertIn("dirs: HashMap<u64, Arc<[DirEntry]>>", fuse)
         self.assertIn("remove_unreferenced_inode", fuse)
-        self.assertIn("const POLL_INTERVAL_MS", watcher)
-        self.assertIn("LAST_POLL_MS", watcher)
-        self.assertIn("compare_exchange", watcher)
+        # 配置变更热路径不得再做系统调用：inotify fd 由**单个**阻塞线程独占读取
+        # （空闲零唤醒），结论发布到待取槽，热路径只做一次原子判断再取走。这里是每次
+        # 被拦截操作都会走到的路径，任何「每次操作读一次 fd」的实现都会按流量放大。
+        self.assertIn("fn event_reader_loop(", watcher)
+        self.assertIn("libc::poll(&mut poll_fd, 1, -1)", watcher)
+        self.assertNotIn("CHANGE_DEBOUNCE_MS", watcher)
+        self.assertIn("static PENDING_READY: AtomicBool", watcher)
+        hot = watcher[
+            watcher.index("pub fn poll_changed_with_packages") :
+            watcher.index("pub fn poll_changed_unthrottled_with_packages")
+        ]
+        self.assertNotIn("libc::read", hot)
+        self.assertIn("take_published_change()", hot)
+        # 只有事件驱动的等待方（daemon 主循环）直接读 fd，且必须不节流：它已经阻塞在
+        # 该 fd 上，把事件挡回去会立刻再次被唤醒，退化成忙循环。
+        self.assertIn("fn drain_changed_packages() -> ChangeKind", watcher)
 
     def test_manager_log_refresh_uses_one_filter_snapshot(self) -> None:
         repository = read("app/src/main/java/org/srx/manager/data/SrxRepository.kt")

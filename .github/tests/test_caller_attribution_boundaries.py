@@ -764,25 +764,22 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
                 f"{path} 必须共用进程组追溯，否则决策、pid 表与记录会各说一套",
             )
 
-    def test_pid_table_native_name_is_not_used_as_package(self) -> None:
-        """pid 表命中 native 名时必须换算，不能直接当包名用。
-
-        pid 表记录的是 /proc 命令行身份：native 进程（`sh`、`mkdir`、下载器 helper）
-        只有 basename。直接拿它查规则必然落空，写入就被当成「未配置应用」放行到真实
-        存储——2026-11-06 真机：进程刚起就写被重定向，存活超过一个扫描周期再写却泄漏，
-        差别正是「是否已进 pid 表」。两个读表站点都必须先判包名形态。
-        """
+    def test_system_uid_identity_is_revalidated_by_daemon(self) -> None:
+        """系统 uid 的包名不能直接来自旧 pid 快照，daemon 必须核验当前进程身份。"""
         caller = read("src/hook/caller.rs")
         for fn_name in ("resolve_system_fuse_identity", "resolve_java_caller_package"):
             body = extract_fn(caller, fn_name)
-            table_at = body.index("lookup_system_pid_table(")
-            tail = body[table_at:]
-            self.assertIn(".contains('.')", tail, f"{fn_name} 读表后必须判包名形态")
             self.assertIn(
                 "daemon_identity_query::query_process_identity",
-                tail,
-                f"{fn_name} 表内 native 名必须交给 daemon 按 uid 唯一归属换算",
+                body,
+                f"{fn_name} 必须把系统 uid 身份交给 daemon 实时验证",
             )
+        monitor = extract_fn(read("src/monitor.rs"), "resolve_system_caller_package")
+        self.assertIn("daemon_identity_query::query_process_identity", monitor)
+        query = read("src/daemon_identity_query.rs")
+        self.assertNotIn("CACHE_TTL_MS", query)
+        self.assertIn("reply_nonce != nonce", extract_fn(query, "parse_reply"))
+        self.assertIn("process_start_time_ticks(pid)", extract_fn(query, "resolve_identity"))
 
 if __name__ == "__main__":
     unittest.main()

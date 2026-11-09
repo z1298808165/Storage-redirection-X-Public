@@ -62,11 +62,14 @@ def section(source: str, start: str, end: str) -> str:
 def bash_path(path: Path) -> str:
     """把路径转成子进程 `bash` 认得的相对形式。
 
-    Windows MSYS 下驱动器挂在 `/mnt/<盘符>/...`（不是 `/e/...`），传 `E:/...` 或
-    `/e/...` 都会被当成"脚本不存在"而以 127 假失败；子进程继承当前工作目录，
-    用相对路径在 Windows 与 Linux 上都成立。
+    子进程继承当前工作目录，用相对路径在 Windows 与 Linux 上都成立；跨盘符时
+    `os.path.relpath` 无解（Windows 会抛 ValueError），此时退回绝对路径，由调用方
+    保证该路径在目标 bash 中可见。
     """
-    return Path(os.path.relpath(Path(path), Path.cwd())).as_posix()
+    try:
+        return Path(os.path.relpath(Path(path), Path.cwd())).as_posix()
+    except ValueError:
+        return Path(path).resolve().as_posix()
 
 
 def load_workflow(path: str) -> dict:
@@ -1218,8 +1221,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             pid_file = Path(tmp) / "pid.txt"
             probe = Path(tmp) / "probe.sh"
-            pid_path = bash_path(pid_file)
-            probe_path = bash_path(probe)
+            # 子进程以临时目录为工作目录，脚本内全部使用相对文件名，避免 Windows
+            # 跨盘符路径在 bash 里出现 127 假失败。
+            pid_path = pid_file.name
+            probe_path = probe.name
             probe.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
@@ -1247,6 +1252,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             )
             proc = subprocess.run(
                 [bash, probe_path],
+                cwd=tmp,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -2447,6 +2453,19 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 source.index("fuse redirect mount failed"),
             )
 
+    def test_external_abort_file_heartbeat_survives_eventfd_failure(self) -> None:
+        host = read("src/fuse_host.rs")
+        monitor = section(host, "fn external_abort_monitor_main(", "/// 判定一次心跳")
+        self.assertIn("let install_wake_fd = crate::platform::host_beat::ensure_wake_fd();", monitor)
+        self.assertNotIn("wait_ms = -1;", monitor)
+        # 不论共享页是否可用都读取心跳，文件降级需由陈旧/冷却截止点驱动。
+        self.assertIn("let now = paths::monotonic_ms();", monitor)
+        self.assertIn("read_beat_preferring_shared()", monitor)
+        self.assertIn("read_beat_preferring_shared()", monitor)
+        wait = section(host, "fn wait_for_host_beat_signal(", "/// 读取并解析宿主心跳文件")
+        self.assertIn("if fd < 0", wait)
+        self.assertIn("timeout_ms.clamp(1_000, 60_000)", wait)
+
     def test_media_monitor_waits_for_restarted_provider_hook(self) -> None:
         bash_wait = section(
             self.bash,
@@ -2509,12 +2528,37 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn("MediaProvider hook readiness deferred until first app access", self.bash)
         self.assertLess(
             bash_standard.index("ensure_media_provider_hook_ready"),
-            bash_standard.index('run_service_case "$scenario" "mediastore-sandbox-only"'),
+            bash_standard.index('run_mediastore_create_case "$scenario" "mediastore-sandbox-only"'),
         )
         self.assertLess(
             ps_standard.index("Confirm-MediaProviderHookReady"),
-            ps_standard.index('Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only"'),
+            ps_standard.index("Invoke-MediaStoreCreateCase $Scenario"),
         )
+
+    def test_mediastore_create_case_retries_volume_attach_race(self) -> None:
+        """MediaStore 创建用例必须在「卷还没 attach 完」的窗口里重试，而不是直接判失败。
+
+        真机实证（2026-11-09）：MediaProvider 刚被重启、user 0 的 `external_primary` 卷
+        尚未 attach 时，insert 会抛 `IllegalArgumentException: Volume external_primary
+        not found`，应用侧只看到 `createMedia returned null`——与「文件被重定向后打开失败」
+        在产物里长得一模一样。若用例不重试，环境竞态就会被当成数据面缺陷（本次排查就因为
+        这一点绕了很久）。
+
+        守卫锁定三件事（两套运行器都要有）：① 存在重试包装；② 重试留痕串可检索；
+        ③ 重试次数有界（不得无限重试把真实失败吞掉）。
+        """
+        for name, text, case_fn in (
+            ("bash", self.bash, "run_mediastore_create_case() {"),
+            ("ps", self.powershell, "function Invoke-MediaStoreCreateCase {"),
+        ):
+            self.assertIn(case_fn, text, name)
+            wrapper = text[text.index(case_fn) :]
+            wrapper = wrapper[: wrapper.index("\n}")]
+            self.assertIn("mediastore_create_retry", wrapper, name)
+            self.assertIn("SRT_MEDIASTORE_CREATE_ATTEMPTS", wrapper, name)
+            self.assertIn("create_media_null", wrapper, name)
+        # 失败仍需如实报出，且只在重试耗尽后。
+        self.assertIn("mediastore_create_failed", self.bash)
 
     def test_backend_endpoint_recovery_keeps_app_pid(self) -> None:
         bash_scenario = section(
@@ -2774,16 +2818,43 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # wchan=wait_for_partner、offset 恒为 0，而事件已堆积在日志里）。
         # 因此等待必须自持读写两端（fd 3）+ 监听进程存活检查，不得回到裸输入重定向。
         events = read("assets/zygisk_module/service.d/config_events.sh")
-        wait = section(
+        collector = section(
             events,
-            "wait_for_package_event_notification() {",
-            "\nstart_package_event_collector() {",
+            "start_package_event_collector() {",
+            "\nstart_config_event_collector() {",
         )
-        self.assertIn('exec 3<>"$notification_fifo"', wait)
-        self.assertIn('read -t 1 -r event_line <&3', wait)
-        self.assertNotIn('< "$notification_fifo"', wait)
-        self.assertIn('kill -0 "$notification_pid"', wait)
-        self.assertIn("exec 3>&-", wait)
+        # 自持读写两端：裸输入重定向（`< "$notification_fifo"`）会在对端缺失时阻塞在
+        # wait_for_partner，收集器从此不再消费事件日志。
+        self.assertIn('exec 3<>"$notification_fifo"', collector)
+        self.assertIn('read -t "$event_wait_seconds" -r event_line <&3', collector)
+        self.assertNotIn('< "$notification_fifo"', collector)
+        # 监听进程存活检查：它退出时要能跳出内层循环重新拉起，而不是继续空等到下个
+        # 自愈周期。
+        self.assertIn('kill -0 "$watcher_pid"', collector)
+        # 监听进程整个生命周期只建一次：每轮自愈都重建一次 inotifyd + FIFO，等于把
+        # 「事件驱动」退化成每 5 秒一轮的 fork/exec 风暴（空闲期最大的常驻开销）。
+        self.assertIn("watcher_ready", collector)
+        self.assertIn("mkfifo", collector)
+        self.assertEqual(collector.count('mkfifo "$notification_fifo"'), 1)
+        # 没有 mkfifo 的极旧系统必须仍有降级路径，功能不降级。
+        self.assertIn("legacy polling path", collector)
+
+    def test_package_event_deadline_ignores_unrelated_log_events(self) -> None:
+        events = read("assets/zygisk_module/service.d/config_events.sh")
+        collector = section(
+            events,
+            "start_package_event_collector() {",
+            "\nstart_config_event_collector() {",
+        )
+        self.assertIn('inotifyd - "$LOGS_DIR":wcmdn', collector)
+        self.assertIn("event_wait_deadline=$((deadline_now + event_wait_budget))", events)
+        self.assertIn("event_wait_seconds=$((event_wait_deadline - deadline_now))", collector)
+        self.assertIn('*)', collector)
+        self.assertIn('package_event_slow_path', collector)
+        self.assertIn('while [ "$debounce_rounds" -lt 16 ]', collector)
+        self.assertIn("compute_package_event_wait_budget", collector)
+        self.assertNotIn('event_wait_seconds="${PACKAGE_EVENT_IDLE_WAIT_SECONDS:-1800}"', collector)
+        self.assertNotIn('event_wait_seconds="${PACKAGE_EVENT_FALLBACK_WAIT_SECONDS:-10}"', collector)
 
     def test_test_app_install_waits_for_package_service(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")
@@ -3047,59 +3118,78 @@ class ScenarioConsistencyTest(unittest.TestCase):
         for forbidden in ("O_CREAT", "fs::write", "File::create", "OpenOptions"):
             self.assertNotIn(forbidden, legacy)
 
-    def test_mount_readiness_follows_executor_ack(self) -> None:
-        """挂载是否生效必须由**挂载执行方的回执**判定，而不是应用自己认模块标识。
+    def test_mount_readiness_is_observed_not_awaited(self) -> None:
+        """应用侧的就位判定必须是**一次观测**：不等回执、不轮询、不睡眠、不把 fd 带过域边界。
 
-        历史教训有两条，方向相反、必须同时守住：
+        历史教训三条，方向各不相同，必须同时守住：
 
         1. 早期靠 daemon 写状态文件，文件写失败或进程被杀就让应用永远等不到确认；
-        2. 后来改成应用自己读 mountinfo 认领挂载，但那要求挂载表里留着模块标识
-           （`srx_fuse_*` 源、`tmp/real_storage` 锚点）。标识一旦被隐藏/原生化，判据会
-           **静默失效**，应用只能空等满预算被 AMS 判启动超时——这条守卫因此改为锁定回执。
+        2. 之后改成应用自己读 mountinfo 认领挂载，但判据挂在模块标识（`srx_fuse_*` 源、
+           `tmp/real_storage` 锚点）上，标识一旦被隐藏/原生化，判据就**静默失效**；
+        3. 再之后改成「应用发请求时保留连接、执行方回 4 字节回执」。这条通道在本项目里
+           **不可能成立**：socket 由 zygote 域创建，应用 specialize 之后属于 untrusted_app
+           域，`read` 被 SELinux 直接拒绝（真机 AVC：`denied { read } ... dev="sockfs"
+           tcontext=u:r:zygote:s0 tclass=unix_stream_socket`）。应用侧拿到 `-EACCES`，而
+           执行方在同一毫秒写成功——每次启动白等 50~60ms，还留下一条可观测的审计行。
 
-        回执的可靠性来自三点，缺一条都会退回"猜"：
-        1. 请求由应用发出时保留连接（`send_mount_request_retaining`），带 `'M'` 类型头；
-        2. 执行方（companion / daemon）在挂载落定、账本登记之后用 `send_mount_result`
-           在同一连接上回 4 字节结论；
-        3. 应用侧用一次阻塞读消费该结论，拿不到时才做一次观测兜底，**不得回到轮询**。
+        现在的判据只依赖「挂载表里能不能看见自己的视图」（沙箱根 / 本会话的 fuse 视图根），
+        与模块标识无关，且判定不做任何等待。
         """
         post = read("src/lifecycle/specialize_post.rs")
         wait = section(post, "fn conclude_mount_readiness(", "\nfn log_post_perf(")
-        self.assertIn("await_mount_ack(", wait)
-        # 回执缺失时才观测一次；轮询既耗电又会掩盖真实结论，不得回归。
         self.assertIn("app_redirect_mounts_in(0, package_name)", wait)
-        self.assertNotIn("MOUNT_SETTLE_POLLS", wait)
-        self.assertNotIn("usleep", wait)
-        self.assertNotIn("thread::sleep", wait)
-        # 结论必须落成可被测试流匹配的稳定日志串。
+        # 判定不得引入任何形式的等待/轮询。
+        for forbidden in ("poll(", "usleep", "thread::sleep", "await_mount_ack", "budget_ms"):
+            self.assertNotIn(forbidden, wait)
+        # 结论只有「观测到」与「没结论」两级：应用侧没有执行方回执，"失败"无从判定，
+        # 执行方的结论由它自己记（`perf companion mount ... ok=`）。
         self.assertIn('"app mount confirmed pid={}', post)
-        self.assertIn('"mount unknown/failed pid={}', post)
+        self.assertIn('"app mount unconcluded pid={}', post)
+        self.assertNotIn('"app mount failed pid={}', post)
+        for prefix in ('"app mount confirmed pid={}', '"app mount unconcluded pid={}'):
+            start = post.index(prefix)
+            end = post.index(');', start)
+            self.assertIn('pkg={}', post[start:end])
+        # 旧的混淆措辞不得回归。
+        self.assertNotIn("mount unknown/failed", post)
 
-        # 回执连接的所有权必须在 post 的每条返回路径上被消费，否则 fd 会留在应用进程里。
+        # 回执通道整套机制必须保持删除状态：留一个 fd 跨域边界既是泄漏面，也是可观测痕迹。
+        self.assertFalse(
+            (ROOT / "src/lifecycle/companion_ack.rs").exists(),
+            "回执通道在 SELinux 域迁移下不可能成立，不得复活",
+        )
         flow = read("src/lifecycle.rs")
-        self.assertIn("mount_reply_fd:", flow)
+        self.assertNotIn("mount_reply_fd", flow)
         pre = read("src/lifecycle/specialize_pre.rs")
-        self.assertIn("send_mount_request_retaining(", pre)
-        self.assertIn("fn retain_mount_reply(", pre)
-        self.assertIn("fn take_mount_reply_fd(", pre)
-        self.assertIn("fn release_mount_reply(", pre)
-        self.assertIn("self.take_mount_reply_fd()", post)
-        # 执行方必须在同一连接上回结论（'M' 请求的应答一直是 4 字节状态）。
+        self.assertIn("send_mount_request(", pre)
+        for removed in (
+            "send_mount_request_retaining",
+            "retain_mount_reply",
+            "take_mount_reply_fd",
+            "release_mount_reply",
+            "take_latest_reply",
+            "discard_mount_reply",
+        ):
+            self.assertNotIn(removed, pre)
+            self.assertNotIn(removed, post)
+        # 发完即关；证据写进代码注释，避免后来者把这条通道"修好"。
+        request = read("src/lifecycle/mount_request.rs")
+        self.assertIn("libc::close(fd)", request)
+        self.assertIn("unix_stream_socket", request)
+        self.assertNotIn("SYS_read", request)
+        # 视图根判据必须**比对设备号**：只判「这一层是 fuse」会把 vold 自己的媒体 FUSE
+        # 误判成我们的会话（真机实证：回落 namespace_bind 的应用也被判 `confirmed`）。
+        view_rule = section(
+            read("src/module_mount_source.rs"),
+            "pub fn storage_view_root_is_module_session(",
+            "\n/// 判断挂载源是否指向模块自己的临时锚点目录。",
+        )
+        self.assertIn("view != system", view_rule)
+        self.assertIn("/mnt/user/", view_rule)
+        # 执行方仍按协议在 'M' 请求上写 4 字节结论（'F' fchown 通道有真实消费者）。
+        self.assertIn("write_status(", read("src/lifecycle/companion.rs"))
         for path in ("src/lifecycle/companion_mount.rs", "src/daemon_mount.rs"):
             self.assertIn("send_mount_result(", read(path))
-
-        ack = read("src/lifecycle/companion_ack.rs")
-        self.assertIn("enum CompanionMountAck", ack)
-        self.assertIn("fn await_mount_ack(", ack)
-        self.assertIn("fn discard_mount_reply(", ack)
-        # 等待必须是一次性阻塞读（poll + 裸 SYS_read 读满 4 字节），不是周期检查：
-        # 既不能用会吞掉 EAGAIN 的通用读超时封装（真机实测会提前 500ms 判超时），
-        # 也不能走被本模块 read hook 覆盖的 libc 路径。
-        self.assertIn("libc::poll(", ack)
-        self.assertIn("libc::SYS_read", ack)
-        self.assertIn("EAGAIN", ack)
-        self.assertNotIn("usleep", ack)
-        self.assertNotIn("thread::sleep", ack)
 
         source = read("src/module_mount_source.rs")
         self.assertIn("pub fn is_module_anchor_mount_source(", source)
@@ -3398,34 +3488,29 @@ class ScenarioConsistencyTest(unittest.TestCase):
         for line in system_mounts:
             self.assertFalse(is_module_layer(line), f"系统挂载被误判为本模块的层: {line}")
 
-    def test_mount_wait_budget_stays_under_process_start_timeout(self) -> None:
-        """应用主线程上的挂载等待预算必须远低于 AMS 的进程启动超时。
+    def test_no_mount_wait_on_app_main_thread(self) -> None:
+        """应用主线程上不得有任何挂载等待：不等待就不可能拖过 AMS 的启动超时。
 
-        这个等待发生在 zygisk specialize 之后、应用主线程上；AMS 对进程启动的超时约 10 秒，
-        预算一旦接近它，任何「判据没能立刻给出肯定答案」的情况都会让应用被判 `start timeout`
-        并杀掉——真机上微信与测试应用都出现过 `failed to attach` + `start timeout`，所有依赖
-        文件系统的用例随之超时。这里把上限锁在 2 秒：既留出足够余量覆盖落定确认，又保证即使
-        判据完全不成立也不会把应用拖死。
+        历史上有两版等待，都被真机打回过：
+
+        1. 220 × 50ms = 11 秒的轮询，单独就越过 AMS 约 10 秒的进程启动超时（真机上微信与
+           测试应用出现 `failed to attach` + `start timeout`）；
+        2. 600ms 阻塞读回执。SELinux 域迁移下那条连接永远读不到（见
+           `test_mount_readiness_is_observed_not_awaited`），白等 50~60ms，还在 dmesg 里
+           留下一条 `avc: denied { read } ... unix_stream_socket` 审计行。
+
+        守卫锁定：预算常量不得复活，判定函数里不得出现任何阻塞原语。
         """
         timing = read("src/lifecycle/mount_timing.rs")
-        # 常量可能是 `600` 这样的字面量，也可能是算式，两种都要能读。
-        budget_ms = _const_product(timing, "POST_MOUNT_ACK_WAIT_MS")
-        self.assertLessEqual(
-            budget_ms,
-            2000,
-            f"挂载等待预算 {budget_ms}ms 过高，会把应用拖过 AMS 启动超时（约 10s）",
-        )
-        self.assertGreaterEqual(budget_ms, 200, "预算过短会让正常的落定确认来不及完成")
-        # 等待必须由「一次性阻塞读回执」实现：既不能改成单次长睡眠（醒来仍是猜），
-        # 也不能退回周期轮询（耗电且掩盖真实结论）。
+        self.assertNotIn("POST_MOUNT_ACK_WAIT_MS", timing)
+        self.assertNotIn("post_mount_ack_wait_budget_ms", timing)
         wait = section(
             read("src/lifecycle/specialize_post.rs"),
             "fn conclude_mount_readiness(",
             "\nfn log_post_perf(",
         )
-        self.assertIn("await_mount_ack(reply_fd, budget_ms)", wait)
-        self.assertNotIn("usleep", wait)
-        self.assertNotIn("thread::sleep", wait)
+        for forbidden in ("poll(", "usleep", "thread::sleep", "nanosleep"):
+            self.assertNotIn(forbidden, wait)
 
     def test_fixture_residue_is_rejected_before_each_scenario(self) -> None:
         """清理后夹具根必须为空，否则跨场景残留会在离现场很远的断言上爆掉。

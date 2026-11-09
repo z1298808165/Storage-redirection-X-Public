@@ -875,6 +875,28 @@ function Get-ServiceCaseTimeoutSeconds {
     75
 }
 
+# MediaStore 创建用例（带环境竞态重试）。
+#
+# 与 bash 版 run_mediastore_create_case 同口径：MediaProvider 刚被重启、user 0 的
+# external_primary 卷尚未 attach 时会抛 IllegalArgumentException: Volume external_primary
+# not found，应用侧只看到 createMedia returned null。有界重试并留痕，避免把环境竞态
+# 误判成数据面缺陷（重试后仍失败才算失败）。
+function Invoke-MediaStoreCreateCase {
+    param([int]$Scenario, [string]$Label, [hashtable]$Extras)
+    $max = 3
+    if ($env:SRT_MEDIASTORE_CREATE_ATTEMPTS) { $max = [int]$env:SRT_MEDIASTORE_CREATE_ATTEMPTS }
+    for ($attempt = 1; $attempt -le $max; $attempt++) {
+        $result = Invoke-ServiceCase "scenario-$Scenario" $Label "mediastore_create_file" $Extras "^PASS \[mediastore_create_file\]"
+        if ($result -and $result.Ok) { return $result }
+        if ($attempt -ge $max) {
+            Write-Host "mediastore_create_failed scenario=$Scenario label=$Label attempts=$attempt"
+            return $result
+        }
+        Write-Host "mediastore_create_retry scenario=$Scenario label=$Label attempt=$attempt reason=create_media_null"
+        Start-Sleep -Seconds 2
+    }
+}
+
 function Invoke-ServiceCase {
     param(
         [string]$Scenario,
@@ -2553,7 +2575,7 @@ function Invoke-StandardScenario {
             $ok = (Require-Missing "scenario-$Scenario" "real-request" "$RealRoot/Download/SrtProbe/$TestFile") -and $ok
             $mediaFile = "srt_mediastore_sandbox_only.txt"
             if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-before-mediastore")) { return $false }
-            $mediaResult = Invoke-ServiceCase "scenario-$Scenario" "mediastore-sandbox-only" "mediastore_create_file" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" } "^PASS \[mediastore_create_file\]"
+            $mediaResult = Invoke-MediaStoreCreateCase $Scenario "mediastore-sandbox-only" @{ file_name = $mediaFile; relative_path = "Documents/SrtMediaRoutingProbe" }
             $ok = $mediaResult.Ok -and $ok
             # 断言前立即采集 hook 证据，此时 logcat buffer 仍覆盖本次 insert。
             Invoke-CaptureScenario2MediastoreHookDiag
