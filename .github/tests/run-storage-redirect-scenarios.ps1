@@ -152,6 +152,12 @@ $ShellConfig = "/data/adb/modules/storage.redirect.x/config/apps/$ShellPackage.j
 $ShellSandboxRel = "Download/SrtShellSandbox"
 $ShellSandboxRealDir = "$BackendRoot/$ShellSandboxRel"
 $ShellSandboxBackendDir = "$BackendRoot/Android/data/$ShellPackage/sdcard/$ShellSandboxRel"
+# 场景 41：模块自建沙盒根（重定向根 `Android/data/<pkg>/sdcard`）的原生元数据与系统代写
+# 零穿透夹具。沙盒根由模块在 FUSE 会话初始化时创建，组必须来自父目录 setgid 继承；否则
+# 系统代写进程（MediaProvider，附加组 media_rw/ext_data_rw）遍历时 EACCES，写入回退到
+# 真实公共路径——真机 2026-11-09 的 `Documents/ringtone/gamefree/...` 即此形态。
+$SandboxRootMetadataRel = "Documents/SrtSandboxRootProbe"
+$SandboxRootMetadataFile = "srt_sandbox_root_probe.txt"
 $RuleSiblingRoot = "$RealRoot/DCIM/SrtRuleSibling"
 $BackendRuleSiblingRoot = "$BackendRoot/DCIM/SrtRuleSibling"
 $PrivateRuleSiblingRoot = "$BackendPrivateRoot/DCIM/SrtRuleSibling"
@@ -451,7 +457,7 @@ function Remove-ExcludedScenarios {
     $excluded = New-Object System.Collections.Generic.List[int]
     foreach ($part in @($excludeRaw -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $value = 0
-        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 40) {
+        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 41) {
             throw "无效排除场景：$part"
         }
         $excluded.Add($value) | Out-Null
@@ -464,20 +470,20 @@ function Remove-ExcludedScenarios {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 40) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 41) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(Remove-ExcludedScenarios -ScenarioList @(1..40))
+            return @(Remove-ExcludedScenarios -ScenarioList @(1..41))
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 40) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 41) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -487,7 +493,7 @@ function Get-ScenarioList {
 
     # 默认范围即全场景 1-40：旧实现维护了一份手写清单且停在 37，本地全量验证实际
     # 漏跑 38-40，与 CI 的 seq 1 40 不一致。
-    @(Remove-ExcludedScenarios -ScenarioList @(1..40))
+    @(Remove-ExcludedScenarios -ScenarioList @(1..41))
 }
 
 function Apply-ScenarioConfig {
@@ -590,6 +596,11 @@ function Apply-ScenarioConfig {
             Set-BackendConfig -Mode "auto"
             Write-GlobalConfig '{"file_monitor_enabled":true,"fuse_fix_enabled":true,"storage_backend_mode":"auto","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}'
             Write-DeviceConfig '{"users":{"0":{"enabled":false}}}'
+        }
+        41 {
+            # 与场景 2 同一条默认重定向（沙盒根就是重定向根），差别在于本场景在重启应用
+            # 之前把沙盒根删掉，让模块按原生语义重建它，再验证系统代写链路。
+            Write-DeviceConfig '{"users":{"0":{"enabled":true}}}'
         }
         default { throw "未知场景 $Scenario" }
     }
@@ -2320,6 +2331,7 @@ function Get-ScenarioTitle {
         38 { "download provider sandboxed_paths takeover topology markers" }
         39 { "download provider delegated write lands on requester mapping target" }
         40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
+        41 { "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak" }
     }
 }
 
@@ -3536,6 +3548,99 @@ function Invoke-MediaStoreOpenTypedCollectionScenario {
     $result.Ok
 }
 
+# 校验模块自建沙盒根（重定向根 `Android/data/<pkg>/sdcard`）的元数据形态，与 .sh
+# 的 check_sandbox_root_metadata 同口径：
+#
+# 1) 两种数据面布局都必须成立的硬判据：组**不能**是应用自己的 uid（模块曾用
+#    chown(uid, uid) 覆盖父目录 setgid 继承来的组，于是 other 位为 0、组里又没有系统
+#    代写进程，MediaProvider 遍历必然 EACCES 并回退到真实公共路径）；other 位不得可写。
+# 2) FUSE 布局再收紧到原生口径：组 == 父目录的组、mode == 02770。这里不写死 1078——
+#    原生关系是「父目录 setgid 继承」本身。namespace bind 布局由挂载规划器建目录
+#    （属主归应用、组 media_rw、mode 02771），只保留上面的硬判据。
+function Test-SandboxRootMetadata {
+    param([int]$Scenario, [string]$Label)
+    $form = ((Invoke-Su "stat -c '%a %u %g' '$BackendPrivateRoot' 2>/dev/null") -join " ").Trim()
+    if ([string]::IsNullOrEmpty($form)) {
+        $script:Failures.Add("scenario-$Scenario/$Label sandbox root missing: $BackendPrivateRoot") | Out-Null
+        Write-Host "  - scenario-$Scenario/$Label sandbox-root-missing path=$BackendPrivateRoot"
+        return $false
+    }
+    $parts = $form -split '\s+'
+    $mode = $parts[0]
+    $owner = $parts[1]
+    $group = $parts[2]
+    $appUid = Test-AppUid
+    $parentGid = ((Invoke-Su "stat -c %g '$BackendRoot/Android/data/$AppId' 2>/dev/null") -join "").Trim()
+    Write-Host "  - scenario-$Scenario/$Label sandbox-root mode=$mode owner=$owner group=$group app_uid=$appUid parent_gid=$parentGid"
+    $ok = $true
+    if ($appUid -and $owner -ne $appUid) {
+        $script:Failures.Add("scenario-$Scenario/$Label owner not app uid: owner=$owner app_uid=$appUid") | Out-Null
+        $ok = $false
+    }
+    if ($appUid -and $group -eq $appUid) {
+        $script:Failures.Add("scenario-$Scenario/$Label group leaked to app uid: group=$group (system writer not in group, other bits cleared)") | Out-Null
+        $ok = $false
+    }
+    if ($group -ne $parentGid -and $group -ne "1023" -and $group -ne "1078") {
+        $script:Failures.Add("scenario-$Scenario/$Label group unusable by system writer: group=$group parent_gid=$parentGid") | Out-Null
+        $ok = $false
+    }
+    if (([Convert]::ToInt32($mode, 8) -band 2) -ne 0) {
+        $script:Failures.Add("scenario-$Scenario/$Label other-writable sandbox root: mode=$mode") | Out-Null
+        $ok = $false
+    }
+    if ($mode -ne "2770" -and $mode -ne "2771") {
+        $script:Failures.Add("scenario-$Scenario/$Label mode not native: mode=$mode expected 2770 or 2771") | Out-Null
+        $ok = $false
+    }
+    $ok
+}
+
+# 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透（与 .sh 同契约）。
+#
+# 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
+# `2770 应用uid:应用uid`，系统代写进程既非属主也不在组、other 位为 0，穿越直接
+# EACCES；重定向目标不可达后写入回退到真实公共路径，公共存储里凭空长出
+# `Documents/ringtone/gamefree/jly*/a`。本场景把「删掉沙盒根 → 应用重启 → 模块重建」
+# 作为固定前置，再用一条真实 MediaStore 创建证明穿透为零。
+function Invoke-SandboxRootMetadataScenario {
+    param([int]$Scenario)
+    $label = "scenario-$Scenario"
+    $publicParent = "$BackendRoot/$SandboxRootMetadataRel"
+    $sandboxFile = "$BackendPrivateRoot/$SandboxRootMetadataRel/$SandboxRootMetadataFile"
+    $timeoutSeconds = 30
+    if ($env:SRT_SANDBOX_ROOT_TIMEOUT_SECONDS) { $timeoutSeconds = [int]$env:SRT_SANDBOX_ROOT_TIMEOUT_SECONDS }
+    # 模块只在 FUSE 会话初始化时建重定向根：步骤 2 已删掉它，步骤 3 的应用重启就是重建
+    # 时机。只等这一件确定会发生的事；等不到就是缺陷本身，不能跳过断言。
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while ((Get-Date) -lt $deadline -and -not (Test-Su "test -d '$BackendPrivateRoot'")) {
+        Start-Sleep -Seconds 1
+    }
+    if (-not (Test-Su "test -d '$BackendPrivateRoot'")) {
+        $script:Failures.Add("scenario-$Scenario/sandbox-root-not-recreated path=$BackendPrivateRoot") | Out-Null
+        Write-Host "  - scenario-$Scenario/sandbox-root-not-recreated path=$BackendPrivateRoot timeout_s=$timeoutSeconds"
+        return $false
+    }
+    $ok = (Test-SandboxRootMetadata $Scenario "sandbox-root-rebuild")
+    # 应用侧写入：重建出来的沙盒根必须仍能被应用自己写入。落点选在存储根下（即沙盒根内），
+    # 不依赖任何预置子目录——本场景刚刚把整个沙盒根删掉，预置的子目录已随之消失。
+    $appWriteFile = "srt_sandbox_root_appwrite.txt"
+    $ok = (Invoke-WriteCase $Scenario "sandbox-root-app-write" "$RealRoot/$appWriteFile" $Payload).Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "sandbox-root-app-write-private" "$BackendPrivateRoot/$appWriteFile") -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sandbox-root-app-write-public" "$BackendRoot/$appWriteFile") -and $ok
+    # 端到端：沙盒根不可穿越时这条 MediaStore 创建会以 createMedia returned null 失败，
+    # 并在真实公共路径补建父目录。
+    if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-sandbox-root" 60)) { $ok = $false }
+    $create = Invoke-MediaStoreCreateCase $Scenario "sandbox-root-mediastore" @{ file_name = $SandboxRootMetadataFile; relative_path = $SandboxRootMetadataRel }
+    $ok = $create.Ok -and $ok
+    $ok = (Require-File "scenario-$Scenario" "sandbox-root-file" $sandboxFile) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sandbox-root-public-parent" $publicParent) -and $ok
+    $ok = (Require-Missing "scenario-$Scenario" "sandbox-root-public-file" "$publicParent/$SandboxRootMetadataFile") -and $ok
+    # 代写链路不得把组改回应用 uid，也不得把 other 写位加回来。
+    $ok = (Test-SandboxRootMetadata $Scenario "sandbox-root-post-write") -and $ok
+    $ok
+}
+
 function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
@@ -3556,6 +3661,12 @@ function Invoke-Scenario {
     if ($Scenario -eq 10) { Set-MappedReadOnlyTargets }
     if ($Scenario -eq 21) { Set-MountNamespaceReadOnlySeed }
     if ($Scenario -in @(28, 31)) { Set-ReadOnlyMediaImage }
+    # 场景 41：沙盒根（重定向根）必须在**应用重启之前**删掉——模块只在 FUSE 会话初始化
+    # 时创建它，重启就是重建时机；删除放在 Clear-Targets/Fix-SharedFixturePermissions 之后，
+    # 避免清理流程自己把目录建回来（那样测到的就不是模块的创建结果）。
+    if ($Scenario -eq 41) {
+        Invoke-Su "rm -rf '$BackendPrivateRoot'; rm -f '$RealRoot/srt_sandbox_root_appwrite.txt' '$BackendRoot/srt_sandbox_root_appwrite.txt'" | Out-Null
+    }
     # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，别让污染漂到后面的断言。
     if ($Scenario -notin @(9, 10, 20, 21, 22, 28, 31, 38)) {
         if (-not (Assert-FixtureRootsEmpty "scenario-$Scenario")) {
@@ -3604,6 +3715,7 @@ function Invoke-Scenario {
         38 { Invoke-ProviderSandboxScenario $Scenario }
         39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
         40 { (Invoke-SystemUidAttributionScenario $Scenario) -and (Invoke-AppCallerMediaProviderAttributionScenario $Scenario) -and (Invoke-SystemUidSandboxMissingTargetScenario $Scenario) }
+        41 { Invoke-SandboxRootMetadataScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

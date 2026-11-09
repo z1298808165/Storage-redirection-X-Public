@@ -216,9 +216,11 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertIn("owner_uid as u32, u32::MAX", body)
 
     def test_owner_migration_restores_only_private_data_directory_gid(self) -> None:
-        # 一次性迁移只把 Android/data 下、owner 正确且无 other 权限位的目录从
-        # media_rw 组恢复到 AOSP 定义的 ext_data_rw；文件与共享媒体目录保留 1023。
-        self.assertIn("owner-migration-1023-v4.done", self.owner_migration)
+        # 一次性迁移只把 Android/data 下、owner 正确且无 other 权限位的目录恢复到
+        # AOSP 定义的 ext_data_rw；文件与共享媒体目录保留 1023。两种漂移都要收：
+        # gid=media_rw(1023)（旧 hook 覆盖了继承来的组）与 gid=应用自身 uid
+        # （目录创建入口 chown(uid, uid) 的产物，系统代写进程连穿越都做不到）。
+        self.assertIn("owner-migration-1023-v5.done", self.owner_migration)
         self.assertIn("const EXT_DATA_RW_GID: u32 = 1078", self.owner_migration)
         body = function_body(
             self.owner_migration,
@@ -226,7 +228,10 @@ class MountMetadataScopeTest(unittest.TestCase):
         )
         self.assertIn('metadata.is_dir()', body)
         self.assertIn('metadata.uid() == target_uid || metadata.uid() == MEDIA_RW_UID', body)
-        self.assertIn('metadata.mode() & 0o007 != 0', body)
+        self.assertIn('metadata.gid() == MEDIA_RW_UID || metadata.gid() == target_uid', body)
+        self.assertIn('metadata.mode() & 0o007 == 0', body)
+        # 「02773 + 组漂移」双重污染必须能在同一次扫描里收敛，因此判据按收敛后的形态取。
+        self.assertIn('0o2773', body)
         self.assertIn('path.rfind("/Android/data/")', body)
         self.assertNotIn('"/Android/media/"', body)
         self.assertNotIn('"/Android/obb/"', body)

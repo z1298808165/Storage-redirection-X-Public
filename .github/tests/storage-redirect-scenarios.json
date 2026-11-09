@@ -239,6 +239,12 @@
       "config_mode": "auto",
       "bash_title": "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透",
       "powershell_title": "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak"
+    },
+    {
+      "id": 41,
+      "config_mode": "standard",
+      "bash_title": "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透",
+      "powershell_title": "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak"
     }
   ]
 }

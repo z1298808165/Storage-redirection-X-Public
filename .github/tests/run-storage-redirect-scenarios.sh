@@ -180,6 +180,12 @@ SHELL_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${SHELL_PACKAGE}.
 SHELL_SANDBOX_REL="Download/SrtShellSandbox"
 SHELL_SANDBOX_REAL_DIR="${BACKEND_ROOT}/${SHELL_SANDBOX_REL}"
 SHELL_SANDBOX_BACKEND_DIR="${BACKEND_ROOT}/Android/data/${SHELL_PACKAGE}/sdcard/${SHELL_SANDBOX_REL}"
+# 场景 41：模块自建沙盒根（`Android/data/<pkg>/sdcard`）的原生元数据与系统代写零穿透夹具。
+# 沙盒根由模块在 FUSE 会话初始化时创建；它的组必须来自父目录 setgid 继承，否则系统代写
+# 进程（MediaProvider，附加组 media_rw/ext_data_rw）在此处逐级遍历就会 EACCES，写入回退
+# 到真实公共路径——真机 2026-11-09 的 `Documents/ringtone/gamefree/...` 就是这么长出来的。
+SANDBOX_ROOT_METADATA_REL="Documents/SrtSandboxRootProbe"
+SANDBOX_ROOT_METADATA_FILE="srt_sandbox_root_probe.txt"
 RULE_SIBLING_ROOT="${REAL_ROOT}/DCIM/SrtRuleSibling"
 BACKEND_RULE_SIBLING_ROOT="${BACKEND_ROOT}/DCIM/SrtRuleSibling"
 PRIVATE_RULE_SIBLING_ROOT="${PRIVATE_ROOT}/DCIM/SrtRuleSibling"
@@ -459,6 +465,11 @@ apply_config() {
     2|29|30|34)
       write_config '{"users":{"0":{"enabled":true}}}'
       ;;
+    41)
+      # 与场景 2 同一条默认重定向（沙盒根就是重定向根），差别在于本场景在重启应用
+      # 之前把沙盒根删掉，让模块按原生语义重建它，再验证系统代写链路。
+      write_config '{"users":{"0":{"enabled":true}}}'
+      ;;
     3)
       write_config '{"users":{"0":{"enabled":true,"path_mappings":{"Download/SrtProbe":"Download/Test"}}}}'
       ;;
@@ -659,6 +670,7 @@ scenario_title() {
     38) echo "下载提供器自身 sandboxed_paths 接管拓扑标记" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
     40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
+    41) echo "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透" ;;
   esac
 }
 
@@ -993,7 +1005,7 @@ prune_version_scenario_excludes() {
         return 1
         ;;
     esac
-    if [ "$item" -lt 1 ] || [ "$item" -gt 40 ]; then
+    if [ "$item" -lt 1 ] || [ "$item" -gt 41 ]; then
       echo "invalid exclude scenario: $item" >&2
       return 1
     fi
@@ -1029,7 +1041,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 40))
+      scenarios=($(seq 1 41))
     else
       local scenario
       for scenario in $normalized; do
@@ -1039,7 +1051,7 @@ build_scenario_list() {
             return 1
             ;;
         esac
-        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 40 ]; then
+        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 41 ]; then
           echo "invalid scenario: $scenario" >&2
           return 1
         fi
@@ -1588,10 +1600,11 @@ wait_scenario_app_view() {
   local timeout_seconds="${SRT_APP_VIEW_TIMEOUT_SECONDS:-15}"
   local path deadline
 
-  # 场景 38/40 不使用测试应用（见 step 3 跳过逻辑）：直接跳过应用视图探针，
-  # 避免误用上一场景残留的 confirmed pid 白烧 15s 超时。
+  # 场景 38/40 不使用测试应用（见 step 3 跳过逻辑）；场景 41 自己在删掉沙盒根后重建，
+  # 预置的 `Download/Srt*` 目录已随沙盒根一起消失，探针注定超时并写熔断标记——都会
+  # 误伤本轮剩余场景，因此直接跳过应用视图探针。
   case "$scenario" in
-    38|40)
+    38|40|41)
       return 0
       ;;
   esac
@@ -4628,6 +4641,115 @@ run_owner_drift_own_dir_scenario() {
   echo "owner_drift_inert scenario=${scenario}"
 }
 
+# 读取沙盒根（重定向根 `Android/data/<pkg>/sdcard`）的 `mode uid gid` 三元组。
+sandbox_root_form() {
+  adb_su "stat -c '%a %u %g' '${BACKEND_PRIVATE_ROOT}' 2>/dev/null" | tr -d '\r'
+}
+
+# 校验模块自建沙盒根的元数据形态。
+#
+# 契约按「系统代写进程能不能进」表述，而不是按「哪个创建者」分叉：沙盒根的创建者随
+# 数据面形态变化（模块会话的策略初始化 → 原生口径 `应用uid:父目录组:02770`；挂载规划器
+# 在 namespace bind 布局下 → `应用uid:media_rw:02771`），两种都合法，因此判据取两者
+# 的交集，同时精确排除回归形态：
+#
+# 1) 组**不能**是应用自己的 uid。这是本次修的回归形态——模块曾用 `chown(uid, uid)`
+#    覆盖父目录 setgid 继承来的组，于是 other 位为 0、组里又没有系统代写进程，
+#    MediaProvider 逐级遍历必然 EACCES，写入回退到真实公共路径。
+# 2) 组必须落在系统代写进程实际持有的组上：父目录的组（setgid 继承）或
+#    `media_rw(1023)`/`ext_data_rw(1078)`。
+# 3) other 位不得可写（`02773` 是同一类放宽留下的签名），mode 只允许私有树原生
+#    `02770` 或映射目录口径 `02771`。
+check_sandbox_root_metadata() {
+  local label="$1"
+  local app_uid parent_gid form mode owner group rc=0
+  app_uid="$(test_app_uid)"
+  parent_gid="$(adb_su "stat -c %g '${BACKEND_ROOT}/Android/data/${APP_ID}' 2>/dev/null" | tr -d '\r')"
+  form="$(sandbox_root_form)"
+  if [ -z "$form" ]; then
+    echo "sandbox_root_missing label=${label} path=${BACKEND_PRIVATE_ROOT}" >&2
+    return 1
+  fi
+  mode="${form%% *}"
+  owner="$(printf '%s' "$form" | cut -d' ' -f2)"
+  group="$(printf '%s' "$form" | cut -d' ' -f3)"
+  echo "sandbox_root_metadata label=${label} mode=${mode} owner=${owner} group=${group} app_uid=${app_uid:-unknown} parent_gid=${parent_gid:-unknown}"
+
+  if [ -n "$app_uid" ] && [ "$owner" != "$app_uid" ]; then
+    echo "sandbox_root_owner_mismatch label=${label} owner=${owner} app_uid=${app_uid}" >&2
+    rc=1
+  fi
+  if [ -n "$app_uid" ] && [ "$group" = "$app_uid" ]; then
+    echo "sandbox_root_group_leaked_to_app_uid label=${label} group=${group} —— 系统代写进程不在该组、other 位为 0，必然 EACCES 并回退到真实公共路径" >&2
+    rc=1
+  fi
+  if [ "$group" != "${parent_gid:-}" ] && [ "$group" != "1023" ] && [ "$group" != "1078" ]; then
+    echo "sandbox_root_group_unusable label=${label} group=${group} parent_gid=${parent_gid:-unknown} —— 组必须是父目录组或 media_rw(1023)/ext_data_rw(1078)" >&2
+    rc=1
+  fi
+  if [ $((8#$mode & 8#002)) -ne 0 ]; then
+    echo "sandbox_root_other_writable label=${label} mode=${mode} —— 私有沙盒根不得对 other 开放写权限" >&2
+    rc=1
+  fi
+  if [ "$mode" != "2770" ] && [ "$mode" != "2771" ]; then
+    echo "sandbox_root_mode_not_native label=${label} mode=${mode} —— 只允许 02770（私有树原生）或 02771（映射目录口径）" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透。
+#
+# 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
+# `2770 应用uid:应用uid`，系统代写进程（MediaProvider，附加组
+# media_rw/ext_data_rw）既非属主也不在组、other 位为 0，穿越直接 EACCES；
+# 重定向目标不可达后写入回退到真实公共路径，公共存储里凭空长出
+# `Documents/ringtone/gamefree/jly*/a`。同一形态在当轮 79 个沙盒根里命中 15 个。
+#
+# 本场景把「删掉沙盒根 → 应用重启 → 模块重建」作为固定前置，再用一条真实的
+# MediaStore 创建（写入由 MediaProvider 代写）证明穿透为零。
+run_sandbox_root_metadata_scenario() {
+  local scenario="$1"
+  local label="scenario-${scenario}"
+  local rel="$SANDBOX_ROOT_METADATA_REL"
+  local file="$SANDBOX_ROOT_METADATA_FILE"
+  local public_parent="${BACKEND_ROOT}/${rel}"
+  local sandbox_file="${PRIVATE_ROOT}/${rel}/${file}"
+  local timeout_seconds="${SRT_SANDBOX_ROOT_TIMEOUT_SECONDS:-30}"
+  local deadline
+
+  # 模块只在 FUSE 会话初始化时建重定向根：步骤 2 已删掉它，步骤 3 的应用重启就是
+  # 重建时机。这里只等这一件确定会发生的事；等不到就是缺陷本身，不能跳过断言。
+  deadline=$((SECONDS + timeout_seconds))
+  while [ "$SECONDS" -lt "$deadline" ] && ! adb_su "test -d '${BACKEND_PRIVATE_ROOT}'"; do
+    sleep 1
+  done
+  if ! adb_su "test -d '${BACKEND_PRIVATE_ROOT}'"; then
+    echo "sandbox_root_not_recreated label=${label} path=${BACKEND_PRIVATE_ROOT} timeout_s=${timeout_seconds}" >&2
+    return 1
+  fi
+
+  check_sandbox_root_metadata "${label}-rebuild" || return 1
+
+  # 应用侧写入：重建出来的沙盒根必须仍能被应用自己写入。落点选在存储根下（即沙盒根内），
+  # 不依赖任何预置子目录——本场景刚刚把整个沙盒根删掉，clean_targets 预置的子目录已随之消失。
+  local app_write_file="srt_sandbox_root_appwrite.txt"
+  run_write_case "$scenario" "sandbox-root-app-write" "${REAL_ROOT}/${app_write_file}" "$PAYLOAD" || return 1
+  check_file_exists "${label}-app-write-private" "${PRIVATE_ROOT}/${app_write_file}" || return 1
+  check_file_missing "${label}-app-write-public" "${BACKEND_ROOT}/${app_write_file}" || return 1
+
+  # 端到端：沙盒根不可穿越时，这条 MediaStore 创建会以
+  # `createMedia returned null` 失败，并在真实公共路径补建父目录。
+  ensure_media_provider_hook_ready "${label}-sandbox-root" || return 1
+  run_mediastore_create_case "$scenario" "sandbox-root-mediastore" --es file_name "$file" --es relative_path "$rel" || return 1
+  check_file_exists "${label}-sandbox-root-file" "$sandbox_file" || return 1
+  check_file_missing "${label}-sandbox-root-public-parent" "$public_parent" || return 1
+  check_file_missing "${label}-sandbox-root-public-file" "${public_parent}/${file}" || return 1
+
+  # 代写链路不得把组改回应用 uid，也不得把 other 写位加回来：那正是被修的泄漏形态。
+  check_sandbox_root_metadata "${label}-post-write"
+}
+
 run_scenario() {
   local scenario="$1"
   local targets_prepared_before_start=0
@@ -4673,6 +4795,15 @@ run_scenario() {
       if [ "$scenario" = "21" ]; then
         set_mount_namespace_read_only_seed
       fi
+      targets_prepared_before_start=1
+      ;;
+    41)
+      # 沙盒根（重定向根）必须在**应用重启之前**删掉：模块只在 FUSE 会话初始化时
+      # 创建它，重启就是重建时机。删除放在 clean_targets 之后，避免清理流程自己
+      # 再把目录建回来（那样测到的就不是模块的创建结果）。
+      echo "step 2/7: 清理夹具并删除沙盒根，交由模块在应用重启时重建"
+      clean_targets
+      adb_su "rm -rf '${BACKEND_PRIVATE_ROOT}'; rm -f '${REAL_ROOT}/srt_sandbox_root_appwrite.txt' '${BACKEND_ROOT}/srt_sandbox_root_appwrite.txt'" >/dev/null
       targets_prepared_before_start=1
       ;;
   esac
@@ -4829,6 +4960,10 @@ run_scenario() {
         run_app_caller_media_provider_attribution_scenario "$scenario" &&
         echo "step 5/7 内: 验证系统 uid 沙盒目标缺失时请求路径零穿透" &&
         run_system_uid_sandbox_missing_target_scenario "$scenario"
+      ;;
+    41)
+      echo "step 5/7: 验证沙盒根原生元数据与媒体代写零穿透"
+      run_sandbox_root_metadata_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -5038,7 +5173,7 @@ export OWN_PRIVATE_DATA_ROOT OWN_PRIVATE_MEDIA_ROOT OWN_PRIVATE_OBB_ROOT BACKEND
 export -f write_cross_app_read_only_config clear_cross_app_read_only_config
 
 export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
-export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
+export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE SANDBOX_ROOT_METADATA_REL SANDBOX_ROOT_METADATA_FILE
 export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready device_sdk_level media_provider_query_ready media_provider_queries_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_mediastore_create_case run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario run_monitor_capture_failopen_scenario app_view_dev_differs app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
 export -f fix_shared_fixture_permissions
@@ -5050,6 +5185,7 @@ export -f run_own_private_directories_scenario run_own_private_write_case
 export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
+export -f sandbox_root_form check_sandbox_root_metadata run_sandbox_root_metadata_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
 export -f run_system_uid_attribution_scenario run_system_uid_sandbox_missing_target_scenario backup_shell_config restore_shell_config
