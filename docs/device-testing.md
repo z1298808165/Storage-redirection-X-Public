@@ -237,7 +237,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 3 | `path_mappings` 将 `Download/SrtProbe` 映射到 `Download/Test`。 |
 | 4 | 路径映射叠加真实路径放行时，映射优先。 |
 | 5 | `allowed_real_paths=["Download"]` 时保持真实路径写入。 |
-| 6 | `mapping_mode_only=true` 且未命中映射时保持真实路径写入；后端属主必须仍是注入的 1023，被静默修好即按回归失败。属主漂移的可见性按数据面形态判定：bind 布局由内核按应用凭据做 DAC，期望拒绝；FUSE 布局由会话服务，期望放行（与原生 MediaProvider 服务 emulated 视图同理），并输出 `owner_drift_layout form=` 便于事后判断走的是哪条（2026-11-07 FUSE 优先后：属主漂移不再必然 EACCES）。 |
+| 6 | `mapping_mode_only=true` 且未命中映射时保持真实路径写入；后端属主必须仍是注入的 1023，被静默修好即按回归失败。属主漂移的可见性按数据面形态判定：bind 布局由内核按应用凭据做 DAC，期望拒绝；FUSE 布局由会话服务，期望放行（与原生 MediaProvider 服务 emulated 视图同理），并输出 `owner_drift_layout form=` 便于事后判断走的是哪条（2026-11-07 FUSE 优先后：属主漂移不再必然 EACCES）。形态判据必须同时满足「视图根 dev 与 init 不同」且「`Android/data/<pkg>` 没有被单独 bind 回来」（`private_bind=`），只看 dev 会在「根 FUSE + 私有树系统视图 bind」的混合视图上误判（2026-11-09 A14 CI 腿实证）。 |
 | 7 | `mapping_mode_only=true` 且命中映射时写入映射目标。 |
 | 8 | `mapping_mode_only` 加 `sandboxed_paths=[".xlDownload"]` 时验证 `.xlDownload`/`.xldownload` 沙盒化。 |
 | 9 | `read_only_paths` 允许读取、`stat`、`access`，但拒绝写入、truncate、ftruncate、chmod、fchmod、link、symlink、删除、mkdir、rename。 |
