@@ -94,15 +94,20 @@ fn decode_policy_ack(buffer: &[u8]) -> Option<(i32, i32)> {
 /// 等待宿主会话对本次登记的应答，总耗时不超过 `budget_ms`。
 ///
 /// `budget_ms` 由调用方按「自己还能等多久」给出：挂载 worker 用父进程等待预算的剩余量，
-/// 常驻 daemon 用 [`HOST_POLICY_ACK_BUDGET_MAX_MS`]。剩余预算不足一轮超时时直接放弃——
-/// 与其等到超时后被父进程 SIGKILL（这一轮挂载彻底作废，还要留下死层待清理），不如立刻
-/// 返回失败让父进程拿到确定结果并回退 scoped 路径。
+/// 常驻 daemon 用 [`HOST_POLICY_ACK_BUDGET_MAX_MS`]。预算不足一整轮时**不再直接放弃**，
+/// 而是把本轮接收超时收敛到剩余时间：宿主侧是同一会话里的阻塞 `recv` + 立刻回包，
+/// 正常应答是毫秒级，历史实现却要求「剩余 ≥ 一轮超时」才肯尝试，于是「预算紧一点、
+/// 但完全来得及」的轮次被判成登记失败并整轮回退 namespace bind。
+/// 真机实证（2026-11-09，Android 14 CI 腿）：热重载在清理旧层之后才开始接入，剩余预算
+/// 落在 4–6 秒区间时必然命中该分支，`policy_registration_failed` 会让本该由宿主服务的
+/// 视图降级成 bind，应用随即看到「根 FUSE + Android/data 系统视图 bind」的混合视图。
+/// 预算真的耗尽（剩余 ≤ 0）时才放弃，保证父进程仍能拿到确定结果。
 fn await_policy_ack(fd: libc::c_int, uid: i32, budget_ms: i64) -> bool {
     let mut buffer = [0u8; 8];
     let deadline_ms = crate::platform::paths::monotonic_ms().saturating_add(budget_ms.max(0));
     for _ in 0..HOST_POLICY_ACK_SKIP_LIMIT {
         let remaining_ms = deadline_ms.saturating_sub(crate::platform::paths::monotonic_ms());
-        if remaining_ms < HOST_POLICY_ACK_TIMEOUT_MS {
+        if remaining_ms <= 0 {
             log::warn!(
                 "fuse host policy ack budget exhausted uid={} budget_ms={} remaining_ms={}",
                 uid,
@@ -111,6 +116,8 @@ fn await_policy_ack(fd: libc::c_int, uid: i32, budget_ms: i64) -> bool {
             );
             return false;
         }
+        // 本轮最多等一轮完整超时，预算不够就按剩余时间收，避免「来不及整轮」等于「不试」。
+        set_socket_recv_timeout_ms(fd, remaining_ms.min(HOST_POLICY_ACK_TIMEOUT_MS));
         // SAFETY: fd 是本模块持有的控制端 socket，buffer 是本地可写数组。
         let read = unsafe {
             libc::recv(
@@ -120,6 +127,9 @@ fn await_policy_ack(fd: libc::c_int, uid: i32, budget_ms: i64) -> bool {
                 0,
             )
         };
+        // 下一轮（含继续等自己的应答、跳过他人应答）恢复正常超时，避免被上一轮的
+        // 收敛值长期粘住。
+        set_socket_recv_timeout_ms(fd, HOST_POLICY_ACK_TIMEOUT_MS);
         if read < 0 {
             let errno = crate::platform::errno::last();
             log::warn!(

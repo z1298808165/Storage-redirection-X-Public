@@ -871,6 +871,16 @@ impl MountForkPlan {
 /// 预接入共享宿主所需的最小剩余时间（毫秒）；不足则跳过预接入走 scoped。
 const PREATTACH_MIN_REMAINING_MS: i64 = 1_500;
 
+/// 预接入时给「拿到策略应答之后」预留的时间（毫秒）：接入本身、状态落账与结果回包。
+///
+/// 历史上这里扣的是一整个 `FUSE_READY_TIMEOUT_SEC`，理由是失败后要回退 scoped 会话、
+/// 而 scoped 会话要等一个 FUSE_READY 周期。per-app scoped 会话退役后回退只剩 namespace
+/// bind（毫秒级），继续按 4 秒预留会把「剩余 4–6 秒」的轮次一律算成应答预算不足：
+/// 真机实证（2026-11-09，Android 14 CI 腿）热重载正好落在这个区间，
+/// `policy_registration_failed` 让本该由宿主服务的视图降级成 bind，随后
+/// `Android/data` 被 bind 成系统视图，应用对自己的私有树得到 EACCES。
+const PREATTACH_ACK_RESERVE_MS: i64 = 2_000;
+
 /// 父进程等待本次挂载结果的预算（秒）。
 fn parent_recv_timeout_sec(scoped_fuse_roots: &[String]) -> i64 {
     PARENT_RECV_TIMEOUT_SEC
@@ -1098,8 +1108,10 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
         );
         // 宿主真的把存储视图根盖住时（本轮新建或既有层已在服务），`Android/data|media|obb`
         // 由 FUSE 数据面自理，不能再叠一层系统视图 bind；纯 bind 轮次则相反，必须恢复
-        // 私有目录。这个判据此前取自「规划根」，规划根在 bind 路径下非空会误判成已覆盖。
-        let host_covers_view = preattached_host.is_ok();
+        // 私有目录。这个判据此前取自「规划根」，规划根在 bind 路径下非空会误判成已覆盖，
+        // 现在改为**事实判定**：本轮接入成功，或当前宿主会话仍在该应用的视图根上服务。
+        let host_covers_view =
+            preattached_host.is_ok() || host_session_serves_view_root(request.uid);
         let view_root_for_private = {
             let user_id = crate::platform::user_id_from_uid(request.uid);
             crate::platform::paths::storage_user_root_for_user(user_id)
@@ -1232,6 +1244,23 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
 /// 只有 Auto 模式且规划根已经收敛为整棵用户存储视图时才允许提前接管；其它模式
 /// 继续走原有 scoped/namespace 挂载流程。预接管只尝试共享宿主，失败后由后续挂载
 /// 流程启动 scoped 会话，避免先启动再回滚一份多余的 FUSE 服务。
+/// 当前宿主会话是否已经在服务该应用的存储视图根。
+///
+/// 与 [`preattach_shared_host`] 里「当前宿主层已在服务」的判据同源：比对视图根最上层的
+/// 超级块 dev 与当前宿主会话的 dev。热重载失败回退 namespace bind 时，上一轮宿主层往往
+/// 仍在位；此时若按「无覆盖」恢复 `Android/data|media|obb` 的系统视图 bind，就会造出
+/// 「根 FUSE + 私有树系统视图」的混合视图——读取自己私有树里属主漂移的条目会经系统视图
+/// 得到 EACCES，而同一路径在宿主会话里本是可读的（真机 2026-11-09 Android 14 CI 腿实证）。
+fn host_session_serves_view_root(uid: i32) -> bool {
+    let Some(view) = crate::fuse_host::read_host_session_view() else {
+        return false;
+    };
+    let attach_root = crate::fuse_redirect::config::host_attach_root_for_user(
+        crate::platform::user_id_from_uid(uid),
+    );
+    crate::fuse_session::storage_view_top_dev(&attach_root).as_deref() == Some(view.dev.as_str())
+}
+
 /// 预接入共享宿主。整段必须在 `deadline_ms`（父进程等待本轮挂载的截止时刻）之前完成。
 ///
 /// 这里有两处会阻塞：策略登记要等宿主应答（共用控制通道，应答可能被别的 worker 取走），
@@ -1267,10 +1296,12 @@ fn preattach_shared_host(
         return Err(HostSessionSkip::NoSharedHost);
     };
     let policy_config = fuse_config_from_request(request, None, None);
-    // 登记应答预算：给 scoped 回退留出一个 FUSE_READY 周期。
+    // 登记应答预算：只给接入与落账留出 [`PREATTACH_ACK_RESERVE_MS`]。宿主侧应答是同一会话
+    // 内的阻塞 recv + 立刻回包，正常是毫秒级；预算紧也不能直接判失败（见
+    // `await_policy_ack` 的收敛逻辑），否则会把「来得及」的热重载降级成 namespace bind。
     let ack_budget_ms = deadline_ms
         .saturating_sub(crate::platform::paths::monotonic_ms())
-        .saturating_sub(FUSE_READY_TIMEOUT_SEC.saturating_mul(1000))
+        .saturating_sub(PREATTACH_ACK_RESERVE_MS)
         .clamp(0, crate::fuse_host_control::HOST_POLICY_ACK_BUDGET_MAX_MS);
     // 登记先执行（宿主会话按 uid 持有策略，是接入的前置），再判闸门与登记结果：
     // 两个失败原因必须分开上报，否则现场无法区分「这个根不允许接入」与「策略没进会话」。
