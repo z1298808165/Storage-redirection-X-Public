@@ -50,3 +50,20 @@ Commit 正文必须使用以下结构，按改动实际需要保留章节；至�
 - 纯空提交没有代码差异，可以跳过 AI 代码审核；任何包含文件改动的 Commit 都不能跳过。
 
 `quality-allow(<rule>): <具体原因>` 只用于静态规则的确切误报，必须紧邻对应代码。它不能豁免 AI 语义审核，也不能作为保留无用代码、测试残留或未完成实现的理由。
+
+### 中文语言门禁自动排除的技术行
+
+`chinese-language` 规则只针对**人类可读文本**。下列内容属于技术写法，天然不参与判定，也不需要写
+`quality-allow` 豁免：
+
+- 命令行：以 `cargo`、`gh`、`git`、`node`、`npm`、`pnpm`、`yarn`、`gradle`、`adb`、`powershell`、
+  `pwsh`、`bash`、`sh`、`rustup`、`cp`、`export` 开头的行；
+- Gradle 任务续行：形如 `:module:taskName \` 的行；
+- 变量赋值：形如 `$Serial = "<值>"` 的行；
+- `.ps1`、`.sh`、`.py`、`.yml`、`.properties` 与 `.githooks/` 中形如 `#[...]` 的 Rust 属性——它是
+  夹具里的属性文本，不是注释；
+- 既有排除项：Markdown 表格行、代码路径、全大写技术标识、`SPDX-License-Identifier`、URL，以及
+  `NAME=value command` 形式的环境变量前缀。
+
+判定规则本身由 `scripts/test-validate-code-quality.ps1` 的用例守住：改动 `validate-code-quality.ps1`
+时必须同步增删对应用例，并用该脚本回归，避免"为消除一个误报又放开一整类"。
