@@ -50,6 +50,7 @@ CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试
 - `basic/all` 通过。
 - 当前模块跑完 scenario 1-40。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
+- PowerShell 入口在应用停止后确认进程退出及旧独占 FUSE 子进程回收；死进程的状态账本由 daemon 按五分钟节流异步清理，不以账本文件立即消失作为退出判据。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
 
 本项目不使用参考实现中的 `/dev/srx_config` 共享挂载作为模块加载信号。配置目录固定为 `/data/adb/modules/storage.redirect.x/config`，运行期通过 inotify 和指纹轮询热更新；安装阶段只验证模块目录未禁用、关键文件存在、当前 boot 的 `.boot_ok` 或 `logs/boot_<boot_id>.marker` 已写入，以及 `srx_daemon` 正在运行。具体重定向、挂载和配置热更新是否生效由后续场景，尤其是 scenario 29，进行端到端验证。
@@ -102,19 +103,9 @@ adb -s $Serial shell "su -c 'cat /data/adb/modules/storage.redirect.x/module.pro
 adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debug\storageRedirectTestApp-debug.apk
 ```
 
-授予测试 APP 必要权限：
+两个场景入口在获取设备锁后，首先通过 `grant-storage-test-permissions.sh` 准备测试 APP 权限：按 Android 版本授予 APK 已声明的存储读写、照片、视频、音频、选定照片和通知权限，Android 17 还处理本地网络权限；同时允许媒体读写、所有文件访问和媒体管理 AppOps，覆盖应用与 UID 两层。
 
-```powershell
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.READ_EXTERNAL_STORAGE
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.WRITE_EXTERNAL_STORAGE
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.READ_MEDIA_IMAGES
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.READ_MEDIA_VIDEO
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.READ_MEDIA_AUDIO
-adb -s $Serial shell pm grant me.fakerqu.test.storageredirect android.permission.POST_NOTIFICATIONS
-adb -s $Serial shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow
-```
-
-部分 Android 版本会拒绝旧权限或通知权限，脚本会容忍这类失败；手动执行时以不阻断测试为准。
+脚本回读权限及 AppOps 状态；授权失败时在修改测试配置和运行场景前终止，并释放设备锁。系统特权权限不通过 `pm grant` 补入。PowerShell 下载服务会验证 Python 解释器可运行且版本至少为 3.7，避免误用未安装解释器的 Windows 应用执行别名。
 
 ## 运行完整回归
 
