@@ -432,29 +432,38 @@ fn register_compare_hooks_once() {
         return;
     }
 
-    let strcasecmp_stub = srx_hook::hook_single(
-        LIB_FUSE_JNI,
-        None,
+    let strcasecmp_stub = super::stats::take_checked_hook_stub(
         "strcasecmp",
-        srx_fuse_fix_strcasecmp as *mut c_void,
-        None,
-        std::ptr::null_mut(),
+        srx_hook::hook_single_checked(
+            LIB_FUSE_JNI,
+            None,
+            "strcasecmp",
+            srx_fuse_fix_strcasecmp as *mut c_void,
+            None,
+            std::ptr::null_mut(),
+        ),
     );
-    let equals_ndk_stub = srx_hook::hook_single(
-        LIB_FUSE_JNI,
-        None,
+    let equals_ndk_stub = super::stats::take_checked_hook_stub(
         EQUALS_IGNORE_CASE_NDK_SYMBOL,
-        srx_fuse_fix_equals_ignore_case as *mut c_void,
-        None,
-        std::ptr::null_mut(),
+        srx_hook::hook_single_checked(
+            LIB_FUSE_JNI,
+            None,
+            EQUALS_IGNORE_CASE_NDK_SYMBOL,
+            srx_fuse_fix_equals_ignore_case as *mut c_void,
+            None,
+            std::ptr::null_mut(),
+        ),
     );
-    let equals_std_stub = srx_hook::hook_single(
-        LIB_FUSE_JNI,
-        None,
+    let equals_std_stub = super::stats::take_checked_hook_stub(
         EQUALS_IGNORE_CASE_STD_SYMBOL,
-        srx_fuse_fix_equals_ignore_case as *mut c_void,
-        None,
-        std::ptr::null_mut(),
+        srx_hook::hook_single_checked(
+            LIB_FUSE_JNI,
+            None,
+            EQUALS_IGNORE_CASE_STD_SYMBOL,
+            srx_fuse_fix_equals_ignore_case as *mut c_void,
+            None,
+            std::ptr::null_mut(),
+        ),
     );
 
     if strcasecmp_stub.is_none() && equals_ndk_stub.is_none() && equals_std_stub.is_none() {
