@@ -32,8 +32,15 @@ use std::time::Duration;
 // 元数据，把私有树既有目录 gid 恒改写为 media_rw（真机 2026-10-27 实证：微信
 // MicroMsg、QQ Tencent/qzone 等活跃写入目录 1078→1023）。修复改写源后升版
 // 重扫一次，把存量 gid=1023 目录恢复 ext_data_rw；判定条件与 v3 完全一致。
+// v5：`platform::fs::create_directory` 曾用 `chown(uid, uid)` 覆盖父目录 setgid
+// 继承来的组，把模块自建的沙盒根 `Android/data/<pkg>/sdcard` 落成
+// `应用uid:应用uid:02770`（真机 2026-11-09：王者荣耀等 20 个应用）。这类目录对
+// 系统代写进程（MediaProvider，附加组 media_rw/ext_data_rw）既非属主也不在组、
+// other 位为 0，写入被 EACCES 拒后回退到真实公共路径，公共存储里凭空长出
+// `Documents/ringtone/...`。创建源已改为不覆盖组，本轮把存量 `gid==应用uid`
+// 的私有目录一并收敛回 ext_data_rw。
 const MIGRATION_MARKER: &str =
-    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v4.done";
+    "/data/adb/modules/storage.redirect.x/tmp/owner-migration-1023-v5.done";
 
 /// 漂移签名：私有树内 owner 恰好是 media_rw 的条目才修复。
 const MEDIA_RW_UID: u32 = 1023;
@@ -283,15 +290,23 @@ fn visit_entry(path: &str, target_uid: u32, stats: &mut MigrationStats) -> bool 
 ///
 /// AOSP 将 1078 定义为“外部存储应用私有 data 目录组”。设备上的 1023 仍是
 /// 合法语义：文件以及带 other 访问位的共享/媒体子目录需要 media_rw 访问，不能
-/// 全树改写。因此只处理 owner 已是应用 UID或历史漂移值 1023、当前 gid=1023、
-/// Android/data 子树且目录没有 other 权限位的条目。
+/// 全树改写。因此只处理 owner 已是应用 UID或历史漂移值 1023、Android/data 子树
+/// 且目录没有 other 权限位的条目。
+///
+/// 两种漂移签名都要收：`gid=media_rw(1023)`（旧 hook 把继承来的 1078 覆盖掉）
+/// 与 `gid=应用自己的 uid`（`create_directory` 旧实现 `chown(uid, uid)` 的产物）。
+/// 后者危害更大：组里没有系统代写进程，other 位又是 0，MediaProvider 连穿越都
+/// 做不到。判据只看「组不是 AOSP 为该类别定义的组」这一件事，不去推算「父目录
+/// 当前的组」——`Android/data` 本身的组是 media_rw，而它的包目录原生是 1078，
+/// 逐级继承在包目录这一层就会算错。
 fn should_restore_ext_data_gid(path: &str, target_uid: u32, metadata: &Metadata) -> bool {
     let owner_is_known = metadata.uid() == target_uid || metadata.uid() == MEDIA_RW_UID;
-    if !metadata.is_dir()
-        || !owner_is_known
-        || metadata.gid() != MEDIA_RW_UID
-        || metadata.mode() & 0o007 != 0
-    {
+    let gid_is_drifted = metadata.gid() == MEDIA_RW_UID || metadata.gid() == target_uid;
+    // other 位必须已经清零；唯一的例外是泄漏形态 `0o2773`——同一次扫描里
+    // `normalize_leaked_dir_mode` 会把它收敛成 02770，这里按收敛后的形态判定，
+    // 否则「2773 + 组漂移」这种双重污染会被 mode 判据挡在门外。
+    let others_clear = metadata.mode() & 0o007 == 0 || metadata.mode() & 0o7777 == 0o2773;
+    if !metadata.is_dir() || !owner_is_known || !gid_is_drifted || !others_clear {
         return false;
     }
     let Some(android_index) = path.rfind("/Android/data/") else {

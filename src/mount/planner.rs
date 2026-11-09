@@ -438,6 +438,51 @@ impl MountPlanner {
         self.ensure_writable_directory_chain(path, owner_uid);
     }
 
+    /// 把**本次新建**的私有树目录归位成原生形态：属主是应用、组保持父目录 setgid 继承、
+    /// mode 原生 `02770`。
+    ///
+    /// 为什么必须在这里补：`create_directory` 以 `uid < 0` 建目录时只 mkdir 不改属主
+    /// （留下 root），而紧随其后的 `ensure_writable_mapped_directory` 会因「既有私有目录
+    /// 不得改写」整体跳过——两者叠加就把重定向根落成 `root:media_rw 2750`：组位只有 r-x，
+    /// 系统代写进程（MediaProvider，附加组 media_rw/ext_data_rw）在沙盒里建不出目录，
+    /// 写入回退到真实公共路径（2026-11-10 真机：场景 41 重建沙盒根后实测该形态）。
+    ///
+    /// 只对该次新建的目录调用；既有目录仍由系统原生语义与 owner_migration 负责，不在挂载
+    /// 流程里重复改写。组不写死常量：`Android/data|media|obb` 的原生组由父目录 setgid 继承，
+    /// 父目录给什么就是什么。
+    pub(super) fn ensure_native_private_dir_owner(&self, path: &str, owner_uid: i32) {
+        if !crate::metadata_repair::enabled() || owner_uid < 0 {
+            return;
+        }
+        let Some(metadata_path) = self.metadata_operations_path(path) else {
+            return;
+        };
+        if !is_android_private_backend_path(&metadata_path, self.user_id) {
+            return;
+        }
+        let Ok(c_path) = CString::new(metadata_path.as_str()) else {
+            return;
+        };
+        // SAFETY: c_path 以 NUL 结尾并在调用期间保持有效；gid 传 -1 表示不改组。
+        let chown_ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, u32::MAX) };
+        if chown_ret != 0 {
+            log::warn!(
+                "mount dir: native private chown failed errno={} path={}",
+                last_errno(),
+                metadata_path
+            );
+        }
+        // SAFETY: 同上，chmod 只依赖 NUL 结尾路径与 mode。
+        let chmod_ret = unsafe { chmod(c_path.as_ptr(), 0o2770) };
+        if chmod_ret != 0 {
+            log::warn!(
+                "mount dir: native private chmod failed errno={} path={}",
+                last_errno(),
+                metadata_path
+            );
+        }
+    }
+
     pub(super) fn ensure_real_public_directory_exists(&self, path: &str) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: real public mkdir skipped empty path");

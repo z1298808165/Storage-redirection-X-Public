@@ -218,9 +218,16 @@ impl MountPlanner {
             return false;
         }
 
+        let redirect_root_preexisting = fs::is_directory(&resolved_target);
         if !self.ensure_directory_exists(&resolved_target, false) {
             log::error!("mkdir redirect failed: {}", resolved_target);
             return false;
+        }
+        // 本次新建的重定向根必须当场归位成原生形态（应用属主 + 继承组 + 02770）：
+        // 随后两处「已存在的私有目录不得改写」守卫会把新建目录一并跳过，属主就固定成
+        // 了运行本流程的 root，系统代写进程只剩组 r-x、进不了沙盒。
+        if !redirect_root_preexisting {
+            self.ensure_native_private_dir_owner(&resolved_target, self.app_uid);
         }
 
         if !self.ensure_writable_mapped_directory(&resolved_target, self.app_uid) {

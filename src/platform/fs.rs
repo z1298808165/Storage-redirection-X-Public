@@ -149,6 +149,8 @@ pub fn last_create_directory_errno() -> c_int {
     LAST_CREATE_DIRECTORY_ERRNO.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 逐级创建目录（`mkdir -p` 语义）。`uid >= 0` 时只把新建层级的属主改成 `uid`，
+/// 组保持父目录 setgid 继承的结果；`uid < 0` 时不做任何属主改动。
 pub fn create_directory(path: &str, uid: i32) -> bool {
     if path.is_empty() || !path.starts_with('/') {
         LAST_CREATE_DIRECTORY_ERRNO.store(libc::EINVAL, std::sync::atomic::Ordering::Relaxed);
@@ -192,8 +194,19 @@ pub fn create_directory(path: &str, uid: i32) -> bool {
                 return false;
             }
         } else if uid >= 0 {
+            // 只改属主，**不动组**：新建目录的组由父目录 setgid 位继承，这与
+            // 原生 MediaProvider 建目录的结果一致（`Android/data/<pkg>` 是
+            // `应用uid:ext_data_rw(1078):02770`，其子目录 mkdir 后组自动是 1078）。
+            // 历史上这里写成 `chown(uid, uid)`，把继承来的组覆盖成应用自己的 uid，
+            // 于是模块自建的沙盒根 `<pkg>/sdcard` 落成 `应用uid:应用uid:02770`：
+            // 系统代写进程（MediaProvider，附加组 media_rw/ext_data_rw，不含该
+            // 应用 uid）在 other 位为 0 的目录上连穿越都做不到，重定向目标不可达
+            // 后写入回退到真实公共路径，公共存储里凭空多出
+            // `Documents/ringtone/gamefree/...` 这类目录（2026-11-09 真机实证）。
+            // 继承是原生意图本身；写死 1078 只是把原生结果抄一遍，遇到
+            // Android/{media,obb} 或厂商改动就会再次偏离。
             unsafe {
-                chown(c_path.as_ptr(), uid as u32, uid as u32);
+                chown(c_path.as_ptr(), uid as u32, u32::MAX);
             }
         }
 
