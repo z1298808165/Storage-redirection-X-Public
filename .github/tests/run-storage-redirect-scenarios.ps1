@@ -267,6 +267,14 @@ function Test-Su {
     $LASTEXITCODE -eq 0
 }
 
+function Grant-TestAppStoragePermissions {
+    $helper = Get-Content -LiteralPath (Join-Path $PSScriptRoot "grant-storage-test-permissions.sh") -Raw
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($helper.Replace("`r", "")))
+    $escapedAppId = $AppId.Replace("'", "'\''")
+    Invoke-Adb @("shell", "printf '%s' '$encoded' | base64 -d | sh -s -- '$escapedAppId'") | Write-Host
+    if ($LASTEXITCODE -ne 0) { throw "测试应用存储权限准备失败：$AppId" }
+}
+
 # 两种运行器共用设备端原子目录锁；先持锁再备份，清理完成后才释放。
 # 中断后遗留锁宁可阻止新测试，也不自动抢占仍在清理的会话。
 $script:DeviceRunLockPath = "/data/local/tmp/srx-test-flow.lock"
@@ -917,7 +925,7 @@ function Invoke-ServiceCase {
     for ($driveAttempt = 1; $driveAttempt -le 2; $driveAttempt++) {
         if ($driveAttempt -gt 1) {
             Write-Host "    RECOVER $Scenario/$Label attempt=$driveAttempt"
-            Stop-AppAndWaitFuseCleanup "$Scenario/$Label/recover" $true | Out-Null
+            Stop-AppAndWaitFuseCleanup "$Scenario/$Label/recover" | Out-Null
             Start-Sleep -Milliseconds 500
             $script:LastMountConfirmedPid = ""
             Invoke-Adb @("logcat", "-c") | Out-Null
@@ -985,7 +993,7 @@ function Invoke-ServiceCase {
             }
             return [pscustomobject]@{ Ok = $ok; Text = $result.Text; Path = $result.Path }
         }
-        Stop-AppAndWaitFuseCleanup "$Scenario/$Label/attempt-$driveAttempt-timeout" $true | Out-Null
+        Stop-AppAndWaitFuseCleanup "$Scenario/$Label/attempt-$driveAttempt-timeout" | Out-Null
     }
 
     $script:Failures.Add("$Scenario/$Label result timeout for $TestCase")
@@ -1965,7 +1973,7 @@ function Get-ProcessStartTimeTicks {
 }
 
 function Stop-AppAndWaitFuseCleanup {
-    param([string]$Label, [bool]$RequireStateCleanup = $false)
+    param([string]$Label)
     $appPid = Get-AppPid
     if ([string]::IsNullOrWhiteSpace($appPid)) {
         Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
@@ -1980,7 +1988,7 @@ function Stop-AppAndWaitFuseCleanup {
     Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
 
     $ok = $true
-    if ($Label -like "*quick-initial-app*" -and -not (Wait-AppProcessStopped)) {
+    if (-not (Wait-AppProcessStopped)) {
         $script:Failures.Add("$Label 应用进程未在启动前退出 app_pid=$appPid")
         $ok = $false
     }
@@ -2002,25 +2010,7 @@ function Stop-AppAndWaitFuseCleanup {
         }
     }
 
-    if ($RequireStateCleanup) {
-        # 状态文件没有应用退出时的同步删除路径，由 daemon 的 reconcile 循环按 30 秒
-        # 节流回收（src/daemon.rs 的 PRUNE_INTERVAL_MS）；常规周期 reconcile 也是 30 秒，
-        # 但配置、宿主和控制事件会立即唤醒主循环，不能把事件驱动路径误写成固定周期。
-        # 清理延迟上限约为 30s 节流余量 + 30s 周期 + 扫描耗时；等待窗口必须覆盖
-        # 整个周期加余量，否则是在赌 prune 相位。文件消失即提前返回，正常路径不付出全额等待。
-        $removed = $false
-        for ($attempt = 0; $attempt -lt 400; $attempt++) {
-            if (Test-Su "test ! -e '$statePath'") {
-                $removed = $true
-                break
-            }
-            Start-Sleep -Milliseconds 100
-        }
-        if (-not $removed) {
-            $script:Failures.Add("$Label 挂载状态未在应用退出后清理 path=$statePath")
-            $ok = $false
-        }
-    }
+    # 死进程的状态账本由 daemon 按 5 分钟节流清理，不作为应用退出或 FUSE 会话存活判据。
     if ($ok -and $identities.Count -gt 0) {
         Write-Host "  - fuse_sessions_cleaned label=$Label app_pid=$appPid count=$($identities.Count)"
     }
@@ -2207,7 +2197,7 @@ function Invoke-QuickMediaProviderRestartRecoveryScenario {
 }
 
 function Invoke-TestArtifactCleanup {
-    if ($script:CleanupDone) { return }
+    if ($script:CleanupDone -or -not $script:GlobalConfigBackupReady) { return }
     $script:CleanupDone = $true
     Write-Host "== 清理测试产物 =="
     try { Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null } catch { Write-Warning "force-stop 清理失败：$_" }
@@ -3107,11 +3097,16 @@ function Invoke-DownloadOwnerAttributionScenario {
             }
             $dlArgs = @("-m", "http.server", "$dlPort", "--bind", $bindAddr, "--directory", $dlDir)
             $dlExe = $null
-            foreach ($candidate in @("python3", "python")) {
+            foreach ($candidate in @("python3", "python", "py")) {
                 $resolved = Get-Command $candidate -ErrorAction SilentlyContinue
-                if ($resolved) { $dlExe = $resolved.Source; break }
+                if (-not $resolved) { continue }
+                $pythonArgs = @()
+                if ($candidate -eq "py") { $pythonArgs = @("-3") }
+                # Windows 的应用执行别名可能存在但没有可用解释器；--directory 需要 Python 3.7。
+                & $resolved.Source @pythonArgs -c "import sys; sys.exit(sys.version_info < (3, 7))" 2>$null
+                if ($LASTEXITCODE -eq 0) { $dlExe = $resolved.Source; $dlArgs = $pythonArgs + $dlArgs; break }
             }
-            if (-not $dlExe) { $dlExe = "py"; $dlArgs = @("-3") + $dlArgs }
+            if (-not $dlExe) { throw "本地下载服务需要可运行的 Python 3.7 或更新版本。" }
             $serverStart = [System.Diagnostics.ProcessStartInfo]::new()
             $serverStart.FileName = $dlExe
             $serverStart.UseShellExecute = $false
@@ -3540,7 +3535,7 @@ function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
     $before = $script:Failures.Count
-    $ok = Stop-AppAndWaitFuseCleanup "scenario-$Scenario/transition" $true
+    $ok = Stop-AppAndWaitFuseCleanup "scenario-$Scenario/transition"
     if (-not $ok -and $script:FailFast) {
         throw "[SRT_FAIL_FAST_ITEM] scenario-$Scenario/transition-cleanup"
     }
@@ -3609,7 +3604,7 @@ function Invoke-Scenario {
     $ok = [bool]$scenarioOk -and $ok
     Write-Host "  - scenario-$Scenario/backend-effective"
     Invoke-Su "grep -h 'backend_effective' '$LogPath' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LogPath' 2>/dev/null | tail -3 || true" | Write-Host
-    $ok = (Stop-AppAndWaitFuseCleanup "scenario-$Scenario/finalize" $true) -and $ok
+    $ok = (Stop-AppAndWaitFuseCleanup "scenario-$Scenario/finalize") -and $ok
     if (-not $ok -and $script:Failures.Count -eq $before) {
         $script:Failures.Add("scenario-$Scenario returned false without a detailed failure")
     }
@@ -3652,17 +3647,12 @@ function Invoke-BasicAll {
 $script:ExitCode = 0
 Enter-DeviceRunLock
 try {
+    Grant-TestAppStoragePermissions
     Backup-GlobalConfig
     Backup-AppConfig
     Backup-CrossAppConfig
     Backup-DeviceExecutionState
     Prepare-DeviceExecutionState
-    Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_EXTERNAL_STORAGE") | Out-Null
-    Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.WRITE_EXTERNAL_STORAGE") | Out-Null
-    Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_MEDIA_IMAGES") | Out-Null
-    Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_MEDIA_VIDEO") | Out-Null
-    Invoke-Adb @("shell", "pm", "grant", $AppId, "android.permission.READ_MEDIA_AUDIO") | Out-Null
-    Invoke-Adb @("shell", "appops", "set", $AppId, "MANAGE_EXTERNAL_STORAGE", "allow") | Out-Null
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
     Restart-MediaProvider
@@ -3682,7 +3672,7 @@ try {
             Invoke-Scenario $scenario
         } catch {
             if (-not $_.Exception.Message.StartsWith("[SRT_FAIL_FAST_ITEM]")) { throw }
-            Stop-AppAndWaitFuseCleanup "scenario-$scenario/abort" $true | Out-Null
+            Stop-AppAndWaitFuseCleanup "scenario-$scenario/abort" | Out-Null
             $script:Summary.Add([pscustomobject]@{
                 Scenario = $scenario
                 Title = (Get-ScenarioTitle $scenario)

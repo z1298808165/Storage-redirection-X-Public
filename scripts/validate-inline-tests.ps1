@@ -92,7 +92,7 @@ function Invoke-Git {
 }
 
 if ($Ref -eq ":") {
-    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", "src/*.rs", "src/**/*.rs")
+    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", ":(glob)src/**/*.rs")
 } else {
     $files = Invoke-Git -Arguments @("ls-tree", "-r", "--name-only", $Ref) |
         Where-Object {

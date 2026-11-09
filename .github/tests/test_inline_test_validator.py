@@ -10,7 +10,7 @@ class InlineTestValidatorTest(unittest.TestCase):
         validator = (ROOT / "scripts/validate-inline-tests.ps1").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"src/*.rs", "src/**/*.rs"', validator)
+        self.assertIn('":(glob)src/**/*.rs"', validator)
         self.assertIn(
             'StartsWith("src/", [StringComparison]::Ordinal)', validator
         )
