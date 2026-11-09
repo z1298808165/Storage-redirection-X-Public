@@ -1,3 +1,5 @@
+#![cfg(any(target_os = "android", target_os = "linux"))]
+
 use native_config_fixtures::platform::inotify::for_each_event;
 
 #[test]

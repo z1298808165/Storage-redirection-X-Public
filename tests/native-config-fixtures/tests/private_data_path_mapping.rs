@@ -50,7 +50,7 @@ fn scoped_mapping_is_admitted(rule: &PathMapping, storage_root: &str) -> bool {
 /// 路径），使其进入 FUSE 视图并按映射规则路由。
 #[test]
 fn private_data_request_mapping_survives_scoped_root_filter() {
-    let rules = vec![
+    let rules = [
         mapping(
             "/data/user/0/nu.gpu.nagram/cache",
             "/storage/emulated/0/Android/data/nu.gpu.nagram/cache",
@@ -116,7 +116,7 @@ fn storage_request_with_outside_target_stays_rejected() {
 /// 请求侧在存储内的常规映射不受影响。
 #[test]
 fn scoped_root_filter_keeps_storage_request_mapping() {
-    let rules = vec![mapping(
+    let rules = [mapping(
         "/storage/emulated/0/Android/data/nu.gpu.nagram/files/Telegram/Telegram Files",
         "/storage/emulated/0/Download/Nagram",
     )];
