@@ -5181,7 +5181,7 @@ finish_test_run() {
   capture_shared_fuse_snapshot_once after || true
   # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
   if [ "$device_run_lock_held" -eq 1 ]; then
-    if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
+    if [ "$global_config_backup_ready" -eq 1 ] && [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
       cleanup_test_artifacts || true
     fi
     release_device_run_lock
@@ -5204,17 +5204,13 @@ export ADB_ROOT_MODE
 
 wait_boot_completed
 acquire_device_run_lock
+adb shell sh -s -- "$APP_ID" < "$(dirname "${BASH_SOURCE[0]}")/grant-storage-test-permissions.sh"
 backup_global_config
 backup_app_config
 backup_cross_app_config
 backup_provider_config
 backup_device_execution_state
 prepare_device_execution_state
-adb shell pm grant "$APP_ID" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
-adb shell pm grant "$APP_ID" android.permission.WRITE_EXTERNAL_STORAGE >/dev/null 2>&1 || true
-adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_IMAGES >/dev/null 2>&1 || true
-adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1 || true
-adb shell pm grant "$APP_ID" android.permission.READ_MEDIA_AUDIO >/dev/null 2>&1 || true
 fix_private_backend_permissions || true
 echo "场景脚本 preflight：restart_media_provider" >&2
 restart_media_provider

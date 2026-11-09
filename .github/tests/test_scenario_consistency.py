@@ -757,10 +757,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn(lock_path, self.bash)
         ps_start = self.powershell[self.powershell.index("$script:ExitCode = 0") :]
         self.assertLess(ps_start.index("Enter-DeviceRunLock"),
+                        ps_start.index("Grant-TestAppStoragePermissions"))
+        self.assertLess(ps_start.index("Grant-TestAppStoragePermissions"),
                         ps_start.index("Backup-GlobalConfig"))
         self.assertIn("try { Invoke-TestArtifactCleanup } finally { Exit-DeviceRunLock }", ps_start)
         bash_start = self.bash[self.bash.index("trap finish_test_run EXIT") :]
         self.assertLess(bash_start.index("acquire_device_run_lock"),
+                        bash_start.index("/grant-storage-test-permissions.sh"))
+        self.assertLess(bash_start.index("/grant-storage-test-permissions.sh"),
                         bash_start.index("backup_global_config"))
         finish = section(self.bash, "finish_test_run() {", "cleanup_done=0")
         self.assertIn('if [ "$device_run_lock_held" -eq 1 ]', finish)
@@ -2341,7 +2345,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("adb reboot", recovery)
         self.assertIn('wait_storage_ready "initial-reboot" 120', recovery)
         self.assertLess(recovery.index("wait_storage_ready"), recovery.index("adb reboot"))
-        startup = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\nbackup_global_config") :]
+        startup = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\n") :]
         self.assertIn("ensure_initial_storage_ready", startup)
         self.assertLess(startup.index("backup_global_config"), startup.index("ensure_initial_storage_ready"))
 
@@ -2400,7 +2404,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('",${APP_ID},"', self.bash)
         self.assertIn("original_app_inactive", self.bash)
 
-        ps_start = self.powershell[self.powershell.index("try {\n    Backup-GlobalConfig") :]
+        ps_start = self.powershell[self.powershell.index("try {\n    Grant-TestAppStoragePermissions") :]
         self.assertLess(
             ps_start.index("Backup-DeviceExecutionState"),
             ps_start.index("Prepare-DeviceExecutionState"),
@@ -2415,7 +2419,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             ps_cleanup.index("Restore-DeviceExecutionState"),
         )
 
-        bash_start = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\nbackup_global_config") :]
+        bash_start = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\n") :]
         self.assertLess(
             bash_start.index("backup_device_execution_state"),
             bash_start.index("prepare_device_execution_state"),
@@ -2669,7 +2673,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('quick-initial-app', bash_start)
         self.assertIn("app_pid", bash_wait)
         self.assertIn("Wait-AppProcessStopped", ps_stop)
-        self.assertIn('quick-initial-app', ps_stop)
+        self.assertNotIn('RequireStateCleanup', ps_stop)
+        self.assertNotIn('test ! -e', ps_stop)
 
         quick_bash = section(self.bash, "run_quick_media_provider_restart_recovery_scenario()", "check_health()")
         quick_ps = section(self.powershell, "function Invoke-QuickMediaProviderRestartRecoveryScenario", "function Get-TargetPath")
