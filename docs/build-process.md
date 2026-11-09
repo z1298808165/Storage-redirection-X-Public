@@ -6,7 +6,7 @@
 
 ### 模块二进制构建
 
-用于刷入设备的常规构建：
+本地 Rust 编译在 WSL 中执行。Windows PowerShell 入口可以调用 WSL 构建；设备安装与场景执行使用 Windows ADB。用于刷入设备的常规构建：
 
 ```bash
 cargo build --target aarch64-linux-android --release
@@ -15,18 +15,6 @@ cargo build --target aarch64-linux-android --release
 产物位于 `target/aarch64-linux-android/release/libsrx_core.so`。
 
 模块二进制不再区分 debug/release 两套日志能力。`FileMonitorOp`、native 详细日志和概览页轻量运行时生效计数通过 `srx_daemon` 私有 datagram 通道落盘，避免默认常驻 `logcat` 以及普通日志反复经过 Android `logd`。运行时生效计数始终启用；需要普通 Rust/Java 调试日志和诊断快照时，在管理 App 或模块 WebUI 的设置页“模块设置”中打开“详细日志”，详细模式仅保留 Java/崩溃上下文所需的一条合并 `logcat` 管道。
-
-Windows PowerShell 设备侧测试建议固定设置 NDK 和 CMake：
-
-```powershell
-$env:ANDROID_HOME = "<Android SDK 安装目录>"
-$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.16248370"
-$env:ANDROID_NDK_ROOT = $env:ANDROID_NDK_HOME
-$env:Path = "$env:ANDROID_HOME\cmake\4.1.2\bin;$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin;" + $env:Path
-cargo build --target aarch64-linux-android --release
-```
-
-如果命令通过管道写法（例如 `2>&1 | Select-Object ...`）截取输出，PowerShell 可能把 cargo 写到 stderr 的进度信息显示成 `NativeCommandError`。判断编译是否成功时，以最终的 `Finished release profile`、命令真实退出码，以及 `target/aarch64-linux-android/release/libsrx_core.so` / `srx_daemon` 时间戳为准。
 
 ### 管理 App release 构建与签名
 
@@ -48,17 +36,17 @@ keyPassword=<key 密码>
 
 仓库根目录的 `keystore.properties`、`*.jks` 和用户目录私有配置都不应提交。若需要临时指定其他配置文件，可设置 `SRX_APP_SIGNING_PROPERTIES` 或 Gradle property `srx.signing.propertiesFile`。
 
-```powershell
-.\gradlew.bat --console=plain :app:assembleRelease
+```bash
+./gradlew --console=plain :app:assembleRelease
 ```
 
 本地连续构建默认复用 Gradle daemon 和配置缓存。首次构建、构建脚本变化或缓存失效后，
 Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩短。CI 仍使用 `--no-daemon`，
 避免一次性 runner 留存进程。需要排查停顿时可临时增加 `--info`，并查看当前 daemon：
 
-```powershell
-.\gradlew.bat --status
-.\gradlew.bat --console=plain --info :app:assembleRelease
+```bash
+./gradlew --status
+./gradlew --console=plain --info :app:assembleRelease
 ```
 
 本地构建只读取 `.github/build-version-baseline.json` 计算下一个 CI 风格版本，不会回写该文件。
@@ -67,33 +55,41 @@ Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩�
 
 ### 集成测试流构建
 
-测试流 APP 已集成在本仓库 `tests/storage-redirect-test/`，Gradle 模块名为 `:storageRedirectTestApp` 和 `:storageRedirectTestMediaFileApi`。构建并运行测试 APP 单元测试：
-
-```powershell
-.\gradlew.bat --no-daemon --console=plain --stacktrace :storageRedirectTestApp:testDebugUnitTest :storageRedirectTestMediaFileApi:testDebugUnitTest :storageRedirectTestApp:assembleDebug
-```
-
-需要在本地预检或复现 GitHub Actions 失败时，可以运行完整测试流验证。默认会构建当前模块、刷入测试设备、重启设备、安装测试 APP 并执行当前清单中的 40 个设备侧场景（scenario 1-40）。只验证个别场景时用 `SRT_SCENARIOS=29`（可逗号列举）收窄，CI 侧的窄场景触发方式与判据见 [设备侧测试说明](device-testing.md) 的「场景范围的触发条件」：
+测试流 APP 已集成在本仓库 `tests/storage-redirect-test/`，Gradle 模块名为 `:storageRedirectTestApp` 和 `:storageRedirectTestMediaFileApi`。在 WSL 中运行管理 App 与测试 APP 单元测试，并构建测试 APK：
 
 ```bash
-bash scripts/verify-test-flow.sh
+./gradlew --no-daemon --console=plain --stacktrace \
+  :app:testDebugUnitTest \
+  :storageRedirectTestApp:testDebugUnitTest \
+  :storageRedirectTestMediaFileApi:testDebugUnitTest \
+  :storageRedirectTestApp:assembleDebug
 ```
 
-Windows PowerShell 环境没有可用 Bash 时使用同等入口：
+本地完整验证分为两个阶段：在 WSL 中构建并测试，随后在 Windows PowerShell 中用 Windows ADB 运行设备套件。WSL 阶段可复用完整构建入口，但必须关闭设备场景，避免在 WSL 侧调用 ADB：
 
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```bash
+RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
 ```
 
-默认目标是 `aarch64-linux-android` / `arm64-v8a`。如果使用 x86_64 模拟器测试，可以设置：
+可在主机运行的 Rust fixture 测试需在 WSL 中单独执行：
 
-```powershell
-$env:SRX_TEST_TARGET_TRIPLE = "x86_64-linux-android"
-$env:SRX_TEST_MODULE_ABI = "x86_64"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-test-flow.ps1
+```bash
+cargo test -p native-config-fixtures
 ```
 
-调试测试 APP 构建问题时可以临时设置 `RUN_DEVICE_SCENARIOS=0`。公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再以 Android 版本为矩阵维度（Android 13/14/15/16/17 x86_64 模拟器）各自运行完整 scenario 1-40，矩阵跨版本 fail-fast。Android 17（API 37.0）并入同一矩阵，不再单独成 job。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地完整验证默认仍执行最终白名单清理，适合复用真机或模拟器。超时不止单场景这一层：`prepare` 的 `Resolve scenario scope` 步骤会用 `.github/scripts/parse_scenario_scope.py` 按本次实际场景数产出步骤级与 job 级预算，与基础设置预算（`SETUP_BUDGET_SECONDS`，900 秒）和场景看门狗（`900 + 90 × 场景数` 秒）共同构成 `job > step > (基础设置 + 看门狗) > 单场景` 的四层嵌套；CI 与 Release 共用同一份解析，场景数增长时自动跟上，不要再在各处写死 45/50 分钟这类数字。各层取值与失效边界见[设备侧测试说明](device-testing.md#超时预算四层嵌套)。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
+接着在 Windows 上使用构建产物，并直接运行 PowerShell 设备脚本；安装和设备场景步骤见[设备侧测试说明](device-testing.md#本地完整验证)。不要把 Windows ADB 转发给 WSL。CI/Release 继续在 Linux runner 中使用完整 shell 测试流，在其 Android 模拟器上运行设备场景。
+
+也可从 Windows PowerShell 运行 `scripts/verify-test-flow.ps1`：该入口先在 WSL 中完成上述 build/test 阶段，再回到 Windows 使用本机 ADB 执行设备阶段，见[设备侧测试说明](device-testing.md#总体流程)。
+
+默认目标是 `aarch64-linux-android` / `arm64-v8a`。若在 WSL 中构建 x86_64 模拟器产物：
+
+```bash
+SRX_TEST_TARGET_TRIPLE=x86_64-linux-android \
+SRX_TEST_MODULE_ABI=x86_64 \
+RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
+```
+
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁；CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再以 Android 版本为矩阵维度（Android 13/14/15/16/17 x86_64 模拟器）各自运行完整 scenario 1-40，矩阵跨版本 fail-fast。Android 17（API 37.0）并入同一矩阵，不再单独成 job。CI 测试流默认启用 `SRT_FAIL_FAST=1` 和 300 秒单场景超时，并在临时模拟器中设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理；本地设备脚本默认仍执行最终白名单清理，适合复用真机或模拟器。超时不止单场景这一层：`prepare` 的 `Resolve scenario scope` 步骤会用 `.github/scripts/parse_scenario_scope.py` 按本次实际场景数产出步骤级与 job 级预算，与基础设置预算（`SETUP_BUDGET_SECONDS`，900 秒）和场景看门狗（`900 + 90 × 场景数` 秒）共同构成 `job > step > (基础设置 + 看门狗) > 单场景` 的四层嵌套；CI 与 Release 共用同一份解析，场景数增长时自动跟上，不要再在各处写死 45/50 分钟这类数字。各层取值与失效边界见[设备侧测试说明](device-testing.md#超时预算四层嵌套)。CI/Release 只有在测试流全部通过后才会继续发布资产、更新 `update.json` 或创建正式 Release。
 
 CI 预发布使用 `ci-build-<run_id>` 作为 Release 标签，**不掺 `run_attempt`**：任务级重跑（`gh run rerun --failed`）会让 `run_attempt` 递增，而创建草稿 Release 的 `init-ci-release` 首轮已经成功、重跑时不再执行，标签一旦带 attempt，重跑后的发布步骤就按新标签查不到草稿并直接失败（实测报 `release not found`）。草稿 Release 是模块 zip 与管理 APK 的唯一副本，因此**本轮草稿永不删除**——测试流偶发失败时优先重跑失败任务续接发布，不必重跑整轮。
 
@@ -148,9 +144,9 @@ https://raw.githubusercontent.com/<owner>/<repo>/<branch>/update.json
 
 本地在 `SRX-R` 分支构建下游仓库时，默认会检查该下游仓库 `SRX-R` 分支的 `update.json`。如果需要临时固定到某个来源，可以显式指定：
 
-```powershell
-$env:SRX_UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/z1298808165/Storage-redirection-X-Public/SRX-R/update.json"
-.\gradlew.bat --no-daemon --console=plain :app:assembleRelease
+```bash
+export SRX_UPDATE_MANIFEST_URL="https://raw.githubusercontent.com/z1298808165/Storage-redirection-X-Public/SRX-R/update.json"
+./gradlew --no-daemon --console=plain :app:assembleRelease
 ```
 
 CI 构建成功后会把测试版信息写入 `beta`；正式 Release 成功后会把正式版信息写入 `stable`。下游同步本文件后，只要在自己的仓库运行同样的 CI/Release，`update.json` 会自动写成下游自己的 `GITHUB_REPOSITORY` 和资产地址，使用下游编译出的 App 仍会检查下游仓库的更新。
@@ -207,51 +203,22 @@ CI 构建成功后会把测试版信息写入 `beta`；正式 Release 成功后�
 「MediaProvider 打不开自己边车」的原始成因。**该构建只用于诊断，不要用于发布**；若必须在真机
 长期使用，请同时在日志里确认没有出现 `SQLITE_CANTOPEN`。
 
-## Windows 注意事项
+## 主机与 Windows 注意事项
 
 ### 在主机上直接运行 `cargo test`
 
-`srx_hook` 是 Android-only 依赖，在 Windows host 直接执行普通 `cargo test` 可能报：
+`srx_hook` 是 Android-only 依赖，在 Windows 或 WSL host 直接执行根 crate 的普通 `cargo test` 可能报：
 
 ```text
 srx_hook supports Android only (use cargo clippy/test/doc on host for development)
 ```
 
-这不代表 Android 目标构建失败。设备侧行为的主验证命令仍是 `cargo build --target aarch64-linux-android --release`；若要在 host 跑单元测试，需要先为相关依赖补 host cfg 或拆出纯逻辑测试。
+这不代表 Android 目标构建失败。WSL 中用 `cargo test --target aarch64-linux-android --no-run` 编译 Android 测试二进制，用 `cargo build --target aarch64-linux-android --release` 构建设备模块；可在主机执行的 fixture 测试用 `cargo test -p native-config-fixtures` 运行。
 
 ### d8 内部类文件名问题
 
-Windows 上 `d8.bat` 可能无法正确处理包含 `$` 的文件名，例如 `Hooker$FilteringCursor.class`。症状是 `Hooker.dex` 只有几百字节，而正常应接近 12KB。
-
-处理方式是把 `build.rs` 里的 d8 调用改成 `@argfile` 传参：
-
-```rust
-let argfile = out_dir.join("d8_args.txt");
-let argfile_content = class_files
-    .iter()
-    .map(|p| p.display().to_string())
-    .collect::<Vec<_>>()
-    .join("\n");
-std::fs::write(&argfile, &argfile_content)?;
-
-let mut d8_cmd = Command::new(&d8);
-d8_cmd
-    .arg(format!("@{}", argfile.display()))
-    .args(["--min-api", "31"])
-    .arg("--output")
-    .arg(out_dir);
-```
+`build.rs` 在 Windows host 上直接通过 `java -cp d8.jar com.android.tools.r8.D8` 调用 D8，避免 `d8.bat` 处理内部类文件名中的 `$`。WSL 构建使用 SDK 的 `d8` 可执行文件，无需修改源码。
 
 ### JDK 版本兼容
 
-如果使用 JDK 22+，将 `build.rs` 里 javac 参数从下面这组：
-
-```rust
-.args(["-source", "8", "-target", "8"])
-```
-
-改成：
-
-```rust
-.args(["--release", "11"])
-```
+`build.rs` 已使用 `javac --release 11` 生成 Java hook 字节码。本地 Gradle 构建使用 WSL 中的 JDK 21，与 CI 保持一致。
