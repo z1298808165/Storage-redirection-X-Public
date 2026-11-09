@@ -144,6 +144,41 @@ MediaProvider 就绪窗口在冷开机后可达数分钟，窗口内恢复必然
 跨进程共享（如 XRadiant 这类被其它进程消费的 sqlite 库）要等恢复落位后才回到同一层
 内核缓存。
 
+## 公共存储里凭空多出应用自己的目录（沙盒根组漂移）
+
+现象：应用明明开启了重定向（`enabled: true`），公共存储里却持续长出新目录，例如
+`/storage/emulated/0/Documents/ringtone/gamefree/jly4/a/tone.xml`；应用侧 `open` 报
+`EACCES`，`running.log` 里成对出现：
+
+```
+# quality-allow(chinese-language): 以下两行是模块日志原文，按原样保留供关键字检索
+[RsWarn] auto mkdir storage parent failed .../<pkg>/sdcard/Documents/... errno=13
+[RsWarn] redirect parent mkdir failed op=open dir=... errno=13
+```
+
+排查顺序：
+
+1. 看沙盒根（重定向根）的组，不看它的属主：
+
+   ```powershell
+   adb shell "su -c 'ls -ldn /data/media/0/Android/data/<pkg> /data/media/0/Android/data/<pkg>/sdcard'"
+   ```
+
+   正常形态是 `<pkg>` 与 `<pkg>/sdcard` 的**组**都是 `ext_data_rw(1078)`（或某条同样可被
+   MediaProvider 使用的组），`sdcard` 为 `2770`。
+2. 对照 MediaProvider 的凭据：`grep -E '^(Uid|Groups)' /proc/$(pidof com.android.providers.media.module)/status`
+   里只有 `media_rw(1023)`/`ext_data_rw(1078)` 这类附加组，没有任何应用 uid。
+3. 若 `sdcard` 的组等于**应用自己的 uid**，就是组漂移：系统代写进程既非属主也不在组，
+   `2770` 的 other 位又是 0，逐级遍历必然 `EACCES`；重定向目标不可达后写入回退到真实公共
+   路径，目录就这样被建出来。`file_monitor.log` 同一时刻会给出 `open:write ret=-1 errno=13`
+   与一条对真实路径的成功观察。
+
+成因与修复：目录创建入口曾用 `chown(uid, uid)` 把父目录 setgid 继承来的组覆盖成应用 uid。
+现在只改属主、组交给继承（等同原生 MediaProvider 的创建结果），存量由一次性迁移把
+`Android/data` 下 `gid=应用 uid` 或 `gid=1023` 的无 other 权限位目录恢复为 `ext_data_rw`。
+现场可先用 `chgrp 1078 <pkg>/sdcard` 临时验证：改完立刻正确落沙盒、零 `EACCES`，
+不需要重启设备。回归由测试流场景 41 覆盖（删沙盒根 → 应用重启重建 → 元数据断言 + 媒体代写零穿透）。
+
 ## 外部存储整体卡死（读取/写入长时间不返回）
 
 整机所有应用访问 `/storage/emulated/0` 都卡住（应用首屏不加载、壁纸/桌面服务 ANR、系统存储服务无响应）时，先分清是**卡死**还是**报错**——这两类现象的根因完全不同，误判会把排查带到错误方向：
