@@ -620,10 +620,9 @@ class FileTestCases(
   }
 
   /**
-   * 通过 DownloadManager 入队一个下载任务，由下载提供器（com.android.providers.downloads， 监视桥接进程）在自己的进程内创建目标文件。
+   * 通过 DownloadManager 入队下载，由下载提供器在自己的进程内创建目标文件。
    *
-   * 这是验证「桥接进程自身配置了 sandboxed_paths」时写入必须进沙盒的触发器： 测试应用未被配置重定向，仅负责预建真实父目录并驱动入队；目标文件由提供器创建，
-   * 实际落点（真实公共路径 vs 提供器沙盒后端）由场景脚本断言。
+   * 测试 APP 负责准备目标父目录并轮询下载状态；文件落点由场景脚本断言。
    */
   fun downloadManagerEnqueue(args: TestCaseArgs): TestResult =
       TestCase.DOWNLOADMANAGER_ENQUEUE.measure {

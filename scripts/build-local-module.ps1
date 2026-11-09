@@ -31,10 +31,7 @@ function Get-GradleProperty {
     return $Fallback
 }
 
-# NDK 版本以 gradle.properties 的 srx.ndkVersion 为唯一来源，与 CI 使用同一取值；
-# 本地与 CI 使用不同 NDK 会构建出不同的 hook 实现。
 $PreferredNdkVersion = Get-GradleProperty -Name "srx.ndkVersion" -Fallback "30.0.16248370"
-$PreferredCmakeVersion = "4.1.2"
 
 function Write-Step {
     param([string]$Message)
@@ -66,19 +63,6 @@ function Invoke-Checked {
     }
 }
 
-function Get-CargoTargetDirectory {
-    $metadataJson = & cargo metadata --format-version 1 --no-deps
-    if ($LASTEXITCODE -ne 0) {
-        Fail "无法解析 Cargo 目标目录"
-    }
-
-    $metadata = $metadataJson | ConvertFrom-Json
-    if ([string]::IsNullOrWhiteSpace([string]$metadata.target_directory)) {
-        Fail "Cargo metadata 未返回目标目录"
-    }
-    return [System.IO.Path]::GetFullPath([string]$metadata.target_directory)
-}
-
 function Get-FirstExistingPath {
     param([string[]]$Paths)
 
@@ -92,41 +76,6 @@ function Get-FirstExistingPath {
     }
 
     return $null
-}
-
-function Get-LatestChildDirectory {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return $null
-    }
-
-    $dirs = Get-ChildItem -LiteralPath $Path -Directory | Sort-Object {
-        try {
-            [version]$_.Name
-        } catch {
-            [version]"0.0.0"
-        }
-    } -Descending
-
-    if ($dirs.Count -eq 0) {
-        return $null
-    }
-
-    return $dirs[0].FullName
-}
-
-function Get-PreferredChildDirectory {
-    param(
-        [string]$Path,
-        [string]$PreferredName
-    )
-
-    $preferred = Join-Path $Path $PreferredName
-    if (Test-Path -LiteralPath $preferred -PathType Container) {
-        return (Resolve-Path -LiteralPath $preferred).Path
-    }
-    return Get-LatestChildDirectory -Path $Path
 }
 
 function Add-PathPrefix {
@@ -143,53 +92,24 @@ function Add-PathPrefix {
     }
 }
 
-function Initialize-AndroidEnvironment {
+function Initialize-AdbEnvironment {
+    if (Get-Command adb -ErrorAction SilentlyContinue) { return }
     $sdk = Get-FirstExistingPath @(
         $env:ANDROID_HOME,
         $env:ANDROID_SDK_ROOT,
         (Join-Path $env:LOCALAPPDATA "Android\Sdk")
     )
 
-    if (-not $sdk) {
-        Fail "未找到 Android SDK。请设置 ANDROID_HOME，或通过 Android Studio 安装 SDK。"
-    }
-    $env:ANDROID_HOME = $sdk
-    $env:ANDROID_SDK_ROOT = $sdk
-    Add-PathPrefix (Join-Path $sdk "platform-tools")
+    if ($sdk) { Add-PathPrefix (Join-Path $sdk "platform-tools") }
+}
 
-    $cmakeDir = Get-PreferredChildDirectory -Path (Join-Path $sdk "cmake") -PreferredName $PreferredCmakeVersion
-    if (-not $cmakeDir -or -not (Test-Path -LiteralPath (Join-Path $cmakeDir "bin\ninja.exe") -PathType Leaf)) {
-        Fail "Android SDK 中缺少可用的 CMake/Ninja。请安装 CMake $PreferredCmakeVersion。"
-    }
-    Add-PathPrefix (Join-Path $cmakeDir "bin")
-
-    $ndk = Get-FirstExistingPath @(
-        (Join-Path $sdk "ndk\$PreferredNdkVersion"),
-        $env:ANDROID_NDK_HOME,
-        $env:ANDROID_NDK_ROOT,
-        (Get-LatestChildDirectory (Join-Path $sdk "ndk"))
+function Invoke-WslCargoBuild {
+    $wsl = Get-Command wsl.exe -ErrorAction Stop
+    Invoke-Checked -FilePath $wsl.Source -Arguments @(
+        "--cd", $RepoRoot, "--exec", "bash", "-lc",
+        'ndk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}/ndk/$1"; test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" || { echo "Android NDK $1 not found in WSL SDK" >&2; exit 1; }; shift; exec env ANDROID_NDK_HOME="$ndk" ANDROID_NDK_ROOT="$ndk" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" "$@"',
+        "_", $PreferredNdkVersion, "cargo", "build", "--target-dir", "target", "--target", "aarch64-linux-android", "--release"
     )
-
-    if (-not $ndk) {
-        Fail "Android SDK 中缺少可用的 NDK。请安装 NDK $PreferredNdkVersion。"
-    }
-    $llvmBin = Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin"
-    if (-not (Test-Path -LiteralPath (Join-Path $llvmBin "aarch64-linux-android29-clang.cmd") -PathType Leaf)) {
-        Fail "NDK 工具链不完整：缺少 aarch64-linux-android29-clang.cmd，当前目录为 $ndk"
-    }
-    $env:ANDROID_NDK_HOME = $ndk
-    $env:ANDROID_NDK_ROOT = $ndk
-    Add-PathPrefix $llvmBin
-
-    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-        Fail "PATH 中未找到 cargo。请安装仓库 rust-toolchain.toml 指定的 Rust 工具链。"
-    }
-
-    return @{
-        Sdk = $sdk
-        Ndk = $ndk
-        Cmake = $cmakeDir
-    }
 }
 
 function Get-CargoPackageVersion {
@@ -373,7 +293,7 @@ function Build-ModuleZip {
     )
 
     $templateDir = Join-Path $RepoRoot "assets\zygisk_module"
-    $releaseDir = Join-Path (Join-Path (Get-CargoTargetDirectory) "aarch64-linux-android") "release"
+    $releaseDir = Join-Path (Join-Path $RepoRoot "target\aarch64-linux-android") "release"
     $soFile = Join-Path $releaseDir "libsrx_core.so"
     $daemonFile = Join-Path $releaseDir "srx_daemon"
 
@@ -644,7 +564,7 @@ function Get-DeviceKsudPath {
 
 Push-Location $RepoRoot
 try {
-    $buildEnvironment = Initialize-AndroidEnvironment
+    if (-not $NoAdb) { Initialize-AdbEnvironment }
 
     $baseVersion = Get-CargoPackageVersion
     $resolved = Resolve-LocalVersion -BaseVersion $baseVersion
@@ -662,18 +582,10 @@ try {
     Write-Host "版本:        v$Version"
     Write-Host "版本号:      $VersionCode"
     Write-Host "输出目录:    $outputRoot"
-    Write-Host "Android SDK: $($buildEnvironment.Sdk)"
-    Write-Host "Android NDK: $($buildEnvironment.Ndk)"
-    Write-Host "CMake:       $($buildEnvironment.Cmake)"
-    Write-Host "Java:        $env:JAVA_HOME"
 
     if (-not $SkipBuild) {
         Write-Step "编译 Android 模块二进制文件"
-        if ([string]::IsNullOrWhiteSpace($env:CXXFLAGS)) {
-            $env:CXXFLAGS = "-Wno-error=unused-but-set-variable"
-        }
-        Remove-Item Env:\SRX_BUILD_DEBUG -ErrorAction SilentlyContinue
-        Invoke-Checked -FilePath "cargo" -Arguments @("build", "--target", "aarch64-linux-android", "--release")
+        Invoke-WslCargoBuild
     } else {
         Write-Step "跳过构建，使用现有的目标输出"
     }

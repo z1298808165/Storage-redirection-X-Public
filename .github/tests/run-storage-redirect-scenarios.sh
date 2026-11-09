@@ -147,19 +147,14 @@ PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT="${PRIVATE_ROOT}/Documents/SrtMediaRouting
 RULE_SANDBOX_ROOT="${REAL_ROOT}/SrtRuleSandbox"
 BACKEND_RULE_SANDBOX_ROOT="${BACKEND_ROOT}/SrtRuleSandbox"
 PRIVATE_RULE_SANDBOX_ROOT="${PRIVATE_ROOT}/SrtRuleSandbox"
-# 场景 38：下载提供器（监视桥接进程）自身配置 sandboxed_paths 的回归夹具。
-# 提供器进程名不是包名，用包名 force-stop 即可；真实父目录由 shell 预建，
-# 目标文件由提供器在自己的进程内创建，实际落点是断言对象。
+# 场景 38：下载提供器自身 sandboxed_paths 接管拓扑夹具目录。
+# 提供器进程名不是包名，用包名 force-stop 即可。
 PROVIDER_PACKAGE="com.android.providers.downloads"
 PROVIDER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${PROVIDER_PACKAGE}.json"
-# 探测路径必须用 MIUI 下载提供器允许的目标目录（隐藏目录会被 SecurityException 拒绝），
-# 因此落在 Download/SrtDlProbe；清理口径与 Assert-FixtureRootsEmpty 的 Srt* 通配一致。
+# 使用清理口径可覆盖的 Srt* 路径。
 PROVIDER_PROBE_REL="Download/SrtDlProbe"
-PROVIDER_PROBE_FILE="srx_probe_download.txt"
 PROVIDER_REAL_DIR="${REAL_ROOT}/${PROVIDER_PROBE_REL}"
 PROVIDER_BACKEND_DIR="${BACKEND_ROOT}/Android/data/${PROVIDER_PACKAGE}/sdcard/${PROVIDER_PROBE_REL}"
-PROVIDER_BACKEND_FILE="${PROVIDER_BACKEND_DIR}/${PROVIDER_PROBE_FILE}"
-PROVIDER_REAL_FILE="${BACKEND_ROOT}/${PROVIDER_PROBE_REL}/${PROVIDER_PROBE_FILE}"
 # 场景 39：下载提供器（共享 uid 代写者）按发起者规则重定向的归因夹具。
 # 测试应用作为下载发起者配置 path_mappings；下载提供器引擎写的公共路径必须
 # 按发起者的映射落到映射目标，真实请求路径零穿透。
@@ -286,6 +281,12 @@ fix_own_private_fixture_permissions() {
   # 应用在热重载后重新解析这条路径时报 ENOENT（场景 29 的 `createNewFile` 失败）。
   # 模块自身创建沙箱目录时用的也是应用 uid，这里与之对齐，不改变夹具内容。
   adb_su "app_uid='$uid'; for root in '${BACKEND_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/obb/${APP_ID}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+}
+
+fix_shared_fixture_permissions() {
+  # 公共夹具由 root shell 创建；应用的 emulated-storage 视图要求这些条目归 media_rw。
+  # 首次 lookup 前统一属主和权限，否则应用侧会把夹具看成 ENOENT。
+  adb_su "for root in '${BACKEND_ROOT}/Download'/Srt* '${BACKEND_ROOT}/Pictures'/Srt* '${BACKEND_ROOT}/DCIM'/Srt* '${BACKEND_ROOT}/Documents'/Srt* '${BACKEND_ROOT}/Movies'/Srt* '${BACKEND_ROOT}/Music'/Srt* '${BACKEND_ROOT}/Download/Test' '${BACKEND_ROOT}/.xldownload' '${BACKEND_ROOT}/.xlDownload' '${BACKEND_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}'; do [ -e \"\$root\" ] || continue; chown -R 1023:1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
 adb_root() {
@@ -435,7 +436,7 @@ test_global_config() {
     1|true|TRUE|yes|YES) file_monitor_enabled=true ;;
     *) file_monitor_enabled=false ;;
   esac
-  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"storage_backend_mode":"auto","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}' "$file_monitor_enabled"
+  printf '{"file_monitor_enabled":%s,"fuse_fix_enabled":true,"storage_backend_mode":"%s","verbose_logging_enabled":true,"auto_enable_redirect_for_new_apps":false,"auto_enable_new_apps_template_id":"","app_config_auto_save":false}' "$file_monitor_enabled" "$storage_backend_mode"
 }
 
 set_backend_config() {
@@ -652,7 +653,7 @@ scenario_title() {
     35) echo "任意路径映射矩阵：Android 私有目录、data/user、data/data 与公共路径双向映射" ;;
     36) echo "映射私有别名可继续写入已由 MediaProvider 创建的文件" ;;
     37) echo "父映射结果继续命中子映射" ;;
-    38) echo "下载提供器自身 sandboxed_paths 原生写入进沙盒" ;;
+    38) echo "下载提供器自身 sandboxed_paths 接管拓扑标记" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
     40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
   esac
@@ -710,7 +711,7 @@ invalidate_visible_view() {
 invalidate_backend_fixture_view() {
   local label="$1" backend_path listing="" rel
   local -a visible_paths=()
-  listing="$(adb_su "for d in '${BACKEND_ROOT}/Download' '${BACKEND_ROOT}/Pictures' '${BACKEND_ROOT}/DCIM' '${BACKEND_ROOT}/Documents' '${BACKEND_ROOT}/Movies' '${BACKEND_ROOT}/Music'; do for p in \"\$d\"/Srt*; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done; done; for p in '${BACKEND_ROOT}/Download/Test' '${BACKEND_ROOT}/.xldownload' '${BACKEND_ROOT}/.xlDownload'; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done" 2>/dev/null || true)"
+  listing="$(adb_su "for d in '${BACKEND_ROOT}/Download' '${BACKEND_ROOT}/Pictures' '${BACKEND_ROOT}/DCIM' '${BACKEND_ROOT}/Documents' '${BACKEND_ROOT}/Movies' '${BACKEND_ROOT}/Music'; do for p in \"\$d\"/Srt*; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done; done; for p in '${BACKEND_ROOT}/SrtRuleSandbox' '${BACKEND_ROOT}/DCIM/SrtRuleSibling' '${BACKEND_ROOT}/Download/Test' '${BACKEND_ROOT}/.xldownload' '${BACKEND_ROOT}/.xlDownload'; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done" 2>/dev/null || true)"
   while IFS= read -r backend_path; do
     if [ -z "$backend_path" ]; then
       continue
@@ -811,6 +812,7 @@ clean_targets() {
   fi
   fix_own_private_fixture_permissions
   fix_private_backend_permissions
+  fix_shared_fixture_permissions
   # 收尾动作：以上所有后端直删与重建之后，必须让承接视图的会话把受影响的每个名字
   # 重新解析一次。缺了它，清理结束时的状态就是「后端已变、视图未变」——这个窗口过去
   # 只能等下一个场景撞上才暴露（并伪装成产品缺陷）。
@@ -1747,10 +1749,6 @@ wait_media_provider_ready() {
   local label="$1"
   local timeout_seconds="${2:-120}"
   local deadline=$((SECONDS + timeout_seconds))
-  if media_provider_is_lazy; then
-    echo "MediaProvider readiness deferred until first app access: ${label}"
-    return 0
-  fi
   local sdk
   sdk="$(device_sdk_level)"
   local uris=("content://media/external_primary/file")
@@ -1858,10 +1856,8 @@ wait_media_provider_hook_ready() {
 
 ensure_media_provider_hook_ready() {
   local label="$1"
-  if media_provider_is_lazy; then
-    echo "MediaProvider hook readiness deferred until first app access: ${label}"
-    return 0
-  fi
+  # API 37+ 的 MediaProvider 采用惰性启动。先通过只读查询拉起进程，再确认新 PID 的 hook 就绪。
+  wait_media_provider_ready "${label}-provider" 60 >/dev/null || return 1
   if wait_media_provider_hook_ready "${label}-current" 3; then
     return 0
   fi
@@ -1933,7 +1929,7 @@ run_service_case() {
   # 延迟（应用重启后还会重投递积压 intent）：被延迟的用例变成僵尸，或表现为本用例
   # result_timeout，或与后续用例交错执行污染结果文件。第一轮超时后先 force-stop
   # 清空积压 intent，再把应用前台重启一次，然后原地重驱当前用例。
-  local drive_attempt freshness_marker start_output timeout_seconds
+  local drive_attempt freshness_marker start_output start_status timeout_seconds
   for drive_attempt in 1 2; do
     if [ "$drive_attempt" -gt 1 ]; then
       echo "service_case_intent_recovery scenario=${scenario} label=${label} test_case=${test_case} attempt=${drive_attempt}"
@@ -1946,20 +1942,21 @@ run_service_case() {
     clean_results
     freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
     adb_su "touch '$freshness_marker'" >/dev/null
-    # Android 17 上向刚重启的应用发 broadcast 偶发阻塞至场景级超时；包 90 秒
-    # timeout 使挂起快速走 service_start_failed 路径（有输出、可重试）。
+    # Android 17 上向刚重启的应用发 broadcast 偶发阻塞；90 秒 timeout 限定 adb 调用。
+    # adb 非零退出不代表 intent 未送达，后续以带 freshness marker 的结果文件判定。
     # 直接启动前台服务而非经 receiver 转发：HyperOS 实机（A16/KSU）会在用例启动
     # 若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
     # manifest receiver 的广播（BroadcastEnqueue skip），表现为用例永远无结果
     # （result_timeout 雪崩）；shell 直启 FGS 不受该策略限制，且服务端的
     # onStartCommand 按相同 action+extras 处理，语义与 receiver 转发完全一致。
-    if ! start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)"; then
-      adb_su "rm -f '$freshness_marker'" >/dev/null
-      echo "service_start_failed scenario=${scenario} label=${label} test_case=${test_case}"
+    start_status=0
+    start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)" || start_status=$?
+    if [ "$start_status" -ne 0 ]; then
+      # adb 退出非零时 Android 仍可能已分发 intent；只有带 freshness marker 的结果能确认服务是否实际运行。
+      echo "service_start_status_nonzero scenario=${scenario} label=${label} test_case=${test_case} status=${start_status}; checking result"
       printf '%s\n' "$start_output" | sed 's/^/service_start: /'
-      return 1
     fi
-    if ! grep -Eq 'Broadcast completed|result=0|cmp=' <<<"$start_output"; then
+    if [ "$start_status" -eq 0 ] && ! grep -Eq 'Broadcast completed|result=0|cmp=' <<<"$start_output"; then
       echo "service_start_unexpected scenario=${scenario} label=${label} test_case=${test_case}"
       printf '%s\n' "$start_output" | sed 's/^/service_start: /'
     fi
@@ -2340,100 +2337,71 @@ run_download_owner_attribution_scenario() {
   local dl_server_pid=""
   local dl_server_log=""
   local dl_dir=""
-  local dl_loopback=0
-  if [ -z "$dl_url" ] && adb shell getprop ro.kernel.qemu 2>/dev/null | grep -q '^1$'; then
+  local dl_reverse_port=""
+  local device_is_emulator=0
+  local dl_api=0
+  if adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' | grep -q '^1$'; then
+    device_is_emulator=1
+    dl_api="$(timeout 15 adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
+  fi
+  if [ -z "$dl_url" ] && [ "$device_is_emulator" -eq 1 ]; then
     dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
     echo "srt-download-probe" > "$dl_dir/srt_download.bin"
     dl_server_log="$dl_dir/http-server.log"
-    # 用 exec 把子 shell 换成 python 本身，并断开 stdin：否则 $! 拿到的是子
-    # shell，kill 只杀中间层，python 变孤儿继续监听并持有 step 的管道——CI 上
-    # 表现为脚本早已失败、action 收尾也打完日志，job 却静默挂到步骤超时
-    # （2026-10-26 run 40286639350：07:45:48 后 11 分 44 秒零输出）。
-    # 本地对照：旧写法 kill 后端口仍返回 200，exec 写法 kill 后连接失败。
+    # 使用 exec 让后台 PID 指向服务进程，便于清理监听进程。
     (cd "$dl_dir" && exec python3 -m http.server "$dl_port" --bind 0.0.0.0 </dev/null >"$dl_server_log" 2>&1) &
     dl_server_pid=$!
-    # 早退兜底：从启动到下方线性 kill 之间还有 `restart_media_provider_with_hook_ready`、
-    # `start_app_and_confirm_mount`、`wait_storage_ready` 三处 `|| return 1`，任何一处
-    # 失败都会跳过 kill——python 取数服务变孤儿并继续持有 step 的 stdout 写端，表现为
-    # 「场景脚本早就失败、action 收尾也打完日志，job 却静默挂到超时」。
-    # 2026-10-26 同一天三次实证同一形态（取消时都清理出 adb / bash / python3 三个孤儿）：
-    #   - run 40269845250 / 40272962460（窄跑场景 39）：场景 68 秒就失败，job 挂满 45/50 分钟；
-    #   - run 40286639350：07:45:21 打完「场景脚本退出码：1」、07:45:31 action 收尾也打完
-    #     （Terminate Emulator 拿到 Connection refused），随后静默 12.1 分钟才被 step 超时杀掉。
-    # 每个场景都在独立的 `bash -c` 进程里执行，这里的 EXIT trap 只作用于本场景；
-    # 只 kill 本地进程、不调 adb（trap 里再挂一个 adb 会引入新的挂起源）。
-    #
-    # **必须用一个非 local 的镜像变量，不能用上面的 `dl_server_pid`**：
-    # `dl_server_pid` 是本函数的 local，函数 `return 1` 后立刻失效，而 EXIT trap
-    # 是在**子 shell 退出时**才求值——那时函数作用域早已弹出，`${dl_server_pid:-}`
-    # 取到空值，trap 变成一个什么都不做的空壳，python 照样变孤儿。
-    # 实测（与真实结构同形：函数内 local + `trap … EXIT` + `return 1` +
-    # `export -f` 后在 `bash -c` 里调用）：local 版的后台进程**存活**，
-    # 换成全局镜像变量后被正常杀掉。这正是「trap 写了但没生效」的形态。
+    # EXIT 在函数局部变量失效后执行，因此清理句柄存入全局变量。
     SRT_DL_SERVER_PID="$dl_server_pid"
-    trap '[ -n "${SRT_DL_SERVER_PID:-}" ] && kill "$SRT_DL_SERVER_PID" 2>/dev/null || true' EXIT
-    # 宿主别名 10.0.2.2 落在模拟器局域网网段（10.0.2.0/24），而 Android 17
-    # （API 37）起对应用默认阻止「本地网络访问」：下载提供器在 A17 镜像里
-    # targetSdk=37，它的 TCP connect 到 10.0.2.2 被静默丢弃——底层实证为
-    # 20 秒 connect 超时、服务端零请求，同 uid 连回环 127.0.0.1 与公网却正常
-    # （run 40272962460 与本地 A17 模拟器双向复现；模块停用后同样复现，
-    # 与重定向实现无关）。
-    # 回环地址不在该策略覆盖范围内，因此 API >= 37 一律改走 adb reverse +
-    # 127.0.0.1；低版本继续用 10.0.2.2（A13-A16 的既有通路，不必改动）。
-    dl_api="$(timeout 15 adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
-    if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null &&
-      adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1; then
-      dl_loopback=1
+    SRT_DL_REVERSE_PORT=""
+    SRT_DL_TMP_DIR="$dl_dir"
+    trap 'if [ -n "${SRT_DL_SERVER_PID:-}" ]; then kill "$SRT_DL_SERVER_PID" 2>/dev/null || true; wait "$SRT_DL_SERVER_PID" 2>/dev/null || true; fi; if [ -n "${SRT_DL_REVERSE_PORT:-}" ]; then timeout 15 adb reverse --remove "tcp:$SRT_DL_REVERSE_PORT" >/dev/null 2>&1 || true; fi; if [ -n "${SRT_DL_TMP_DIR:-}" ]; then rm -rf "$SRT_DL_TMP_DIR" 2>/dev/null || true; fi' EXIT
+    sleep 1
+    if ! kill -0 "$dl_server_pid" 2>/dev/null; then
+      echo "下载探测服务启动失败" >&2
+      return 1
+    fi
+    # API 37+ 模拟器通过 adb reverse 使用回环地址；旧版模拟器使用 10.0.2.2。
+    if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null; then
+      if ! timeout 15 adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1; then
+        echo "无法建立下载探测 adb reverse 映射" >&2
+        return 1
+      fi
+      dl_reverse_port="$dl_port"
+      SRT_DL_REVERSE_PORT="$dl_reverse_port"
       dl_url="http://127.0.0.1:$dl_port/srt_download.bin"
       echo "step 5/7 内: API ${dl_api} 走回环取数（已建立 adb reverse tcp:${dl_port}）"
     else
       dl_url="http://10.0.2.2:$dl_port/srt_download.bin"
     fi
-    sleep 1
     echo "step 5/7 内: 本地取数服务已启动 url=$dl_url log=$dl_server_log"
   elif [ -z "$dl_url" ]; then
     echo "step 5/7 内: 真机取数源使用测试 APK 内置默认 URL"
   fi
   echo "step 5/7 内: 下载取数源 url=$dl_url"
-  # A17 模拟器镜像的网络判定问题：Downloads 应用停在 status=4 WAITING_TO_RETRY
-  # 且服务端零请求——请求根本没发出，应用侧判定「无可用网络」。两层嫌疑都已
-  # 处理：1) captive portal 验证无法完成（R5/R6 已知，-dns-server 只解决 DNS 层）；
-  # 2) A17 新镜像默认 Private DNS（DNS-over-TLS）解析失败会把默认网络标记为
-  # 未验证/无 INTERNET 能力，IP 直连 URL 也不发起请求。两个设置都在取数前关闭，
-  # 对其它版本与真机无副作用。
-  adb shell settings put global captive_portal_detection_enabled 0 || true
-  adb shell settings put global private_dns_mode off || true
-  adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
-  # 清理必须排在应用重启**之前**：应用重启会触发一轮挂载，挂载阶段负责补建映射
-  # 目标（`ensure_app_owned_mapping_target`）。先重启后清理会把刚补建出来的目录当场
-  # 删掉，等于让挂载期补建永远白做（run 40280153279 实证：07:45:03 的挂载记录里
-  # 目标目录已被建好，紧接着被这里的 rm -rf 清除）。
+  if [ "$device_is_emulator" -eq 1 ] && [ "${dl_api:-0}" -ge 37 ] 2>/dev/null; then
+    adb shell settings put global captive_portal_detection_enabled 0 || true
+    adb shell settings put global private_dns_mode off || true
+  fi
+  if [ "$device_is_emulator" -eq 1 ]; then
+    adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
+  fi
+  # 应用挂载会创建映射目标，因此必须先清理再重启应用。
   echo "step 5/7 内: 清理下载归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null
-  # MediaProvider 必须是本轮配置生效后的新进程：hook 的 verbose 门禁在进程启动时从
-  # global.json 读取一次，常驻 MP 不会跟着 apply_config 重载，于是 hook 侧的 debug 级
-  # 决策日志在 CI 里永远落不了盘（run 40286639350 全库零 realpath/mapped 痕迹，与
-  # 「回退没生效」无法区分）。冷启动同时正是本地稳定复现 39 的条件，两者口径一致。
   echo "step 5/7 内: 重启 MediaProvider（让 verbose 门禁生效）"
   restart_media_provider_with_hook_ready "scenario-${scenario}-dlowner-provider" || return 1
-  # 测试应用视图必须已套用本场景的映射（发起者规则）：fresh_app=0 的矩阵里
-  # 应用不会随场景重启，这里显式重启并确认挂载，保证其视图包含映射 bind。
   echo "step 5/7 内: 重启测试应用（套用发起者映射）"
   timeout 45 adb shell am force-stop "$APP_ID" >/dev/null 2>&1 || true
   start_app_and_confirm_mount "scenario-${scenario}-dlowner-apprestart" 1 || return 1
   wait_storage_ready "scenario-${scenario}-dlowner-apprestart" 30 >/dev/null || return 1
   local case_ok=0
-  # 映射目标必须在下发下载前就已在真实存储落地。run 40302749913 的时序证据：
-  # A14 的 `perf companion mount ... ok=true` 与 `map primary result ... mounted=true`
-  # 出现在 10:00:46，而同一次 probe 的 FAIL 早于这个时刻；失败时现场段全空
-  # （real 与 backend 两侧都没有 SrtDlOwnerMapped）。A15 只是时序刚好错开才通过。
-  # 也就是说这是「应用挂载已确认、映射目录尚未落地」的竞态，不是重定向判错——
-  # 前几轮改 realpath、改挂载时序都没触及它，原因就在这里。
+  # 应用挂载完成时，映射目标仍可能尚未创建。
   echo "step 5/7 内: 等待映射目标就绪"
   local dl_ready_deadline=$((SECONDS + 30))
   local dl_ready=0
   while [ "$SECONDS" -lt "$dl_ready_deadline" ]; do
-    if adb_su "test -d '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null 2>&1; then
+    if adb_su_timeout 10 "test -d '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" >/dev/null 2>&1; then
       dl_ready=1
       break
     fi
@@ -2442,8 +2410,9 @@ run_download_owner_attribution_scenario() {
   if [ "$dl_ready" -eq 1 ]; then
     echo "step 5/7 内: 映射目标已就绪 ${DL_OWNER_MAPPED_REL}"
   else
-    echo "warn: 映射目标 30s 内未出现 ${DL_OWNER_MAPPED_REL}" >&2
-    adb_su "ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -8" >&2 || true
+    echo "error: 映射目标 30s 内未出现 ${DL_OWNER_MAPPED_REL}" >&2
+    adb_su_timeout 10 "ls -la '${BACKEND_ROOT}/Download/' 2>/dev/null | head -8" >&2 || true
+    return 1
   fi
   # 下载器进程是短命的：DownloadManager 的 job 一结束进程就被回收，失败诊断执行时
   # pidof 早已为空，于是「进程没加载模块」与「进程已退出」在诊断里完全同形。
@@ -2556,13 +2525,13 @@ run_download_owner_attribution_scenario() {
   fi
   if [ -n "$dl_server_pid" ]; then
     kill "$dl_server_pid" 2>/dev/null || true
-    # 走完正常收尾就清掉镜像变量，避免 EXIT trap 再对已被回收的 PID 做一次 kill
-    # （PID 可能已被系统复用给别的进程）。
     SRT_DL_SERVER_PID=""
-    adb reverse --remove "tcp:$dl_port" >/dev/null 2>&1 || true
-    # Windows/MSYS 下被杀服务的 CWD 可能短暂占用目录：清理失败不影响判定
-    # （临时目录随 /tmp 生命周期自然回收）。
     rm -rf "$dl_dir" 2>/dev/null || true
+    SRT_DL_TMP_DIR=""
+  fi
+  if [ -n "$dl_reverse_port" ]; then
+    timeout 15 adb reverse --remove "tcp:$dl_reverse_port" >/dev/null 2>&1 || true
+    SRT_DL_REVERSE_PORT=""
   fi
   if [ "$case_ok" -ne 1 ]; then
     return 1
@@ -4797,7 +4766,7 @@ run_scenario() {
       run_nested_mapping_chain_scenario "$scenario"
       ;;
     38)
-      echo "step 5/7: 验证下载提供器自身 sandboxed_paths 原生写入进沙盒"
+      echo "step 5/7: 验证下载提供器自身 sandboxed_paths 接管拓扑标记"
       run_provider_sandbox_scenario "$scenario"
       ;;
     39)
@@ -5011,7 +4980,7 @@ fail=0
 build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
-export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_PROBE_FILE PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR PROVIDER_BACKEND_FILE PROVIDER_REAL_FILE
+export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL
 export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
 export SHELL_PACKAGE SHELL_CONFIG SHELL_SANDBOX_REL SHELL_SANDBOX_REAL_DIR SHELL_SANDBOX_BACKEND_DIR
@@ -5023,6 +4992,7 @@ export SHARED_FUSE_BEFORE_CAPTURED SHARED_FUSE_AFTER_CAPTURED
 export APP_ID CONFIG GLOBAL_CONFIG MOUNT_STATE_DIR LOG_DIR LOG_PATH FILE_MONITOR_LOG_PATH ACTION RESULT_DIR INTERNAL_RESULT_DIR REAL_ROOT BACKEND_ROOT PRIVATE_ROOT BACKEND_PRIVATE_ROOT BACKEND_RESULT_DIR SANDBOX_RESULT_DIR TEST_FILE HOT_BEFORE_FILE HOT_AFTER_FILE READ_ONLY_FILE ALLOW_KEEP_FILE ALLOW_PART_FILE QMARK_SINGLE_FILE QMARK_DOUBLE_FILE QMARK_FILE_SINGLE_FILE MOUNT_NS_STAR_MEDIA_FILE MOUNT_NS_QMARK_MEDIA_FILE FUSE_STAR_MEDIA_FILE FUSE_STAR_MISS_MEDIA_FILE FUSE_QMARK_MEDIA_FILE FUSE_QMARK_MISS_MEDIA_FILE FUSE_DCIM_MEDIA_FILE READ_ONLY_HARDLINK READ_ONLY_SYMLINK READ_ONLY_IMAGE_FILE PAYLOAD READ_ONLY_PAYLOAD READ_ONLY_IMAGE_B64 READ_ONLY_ROOT BACKEND_READ_ONLY_ROOT READ_ONLY_MEDIA_ROOT PRIVATE_READ_ONLY_MEDIA_ROOT MAPPED_READ_ONLY_REQUEST MAPPED_READ_ONLY_TARGET ALLOW_ROOT PRIVATE_ALLOW_ROOT LEGACY_ROOT PRIVATE_LEGACY_ROOT QMARK_ROOT PRIVATE_QMARK_ROOT FUSE_PLAIN_ROOT PRIVATE_FUSE_PLAIN_ROOT FUSE_DCIM_ROOT PRIVATE_FUSE_DCIM_ROOT FUSE_DCIM_ALLOWED_ROOT PRIVATE_FUSE_DCIM_ALLOWED_ROOT FUSE_DCIM_OTHER_ROOT PRIVATE_FUSE_DCIM_OTHER_ROOT FUSE_QMARK_ROOT PRIVATE_FUSE_QMARK_ROOT FUSE_QMARK_MISS_ROOT PRIVATE_FUSE_QMARK_MISS_ROOT FUSE_QMARK_MEDIA_ROOT PRIVATE_FUSE_QMARK_MEDIA_ROOT FUSE_STAR_MEDIA_ROOT PRIVATE_FUSE_STAR_MEDIA_ROOT FUSE_EXCLUDE_ROOT PRIVATE_FUSE_EXCLUDE_ROOT FUSE_MAP_PARENT FUSE_MAP_RW_REQUEST FUSE_MAP_RO_REQUEST FUSE_MAP_RW_TARGET FUSE_MAP_RO_TARGET FUSE_MULTI_ROOT PRIVATE_FUSE_MULTI_ROOT MOUNT_NS_ALLOW_ROOT PRIVATE_MOUNT_NS_ALLOW_ROOT MOUNT_NS_READ_ONLY_ROOT PRIVATE_MOUNT_NS_READ_ONLY_ROOT MOUNT_NS_MAP_PARENT MOUNT_NS_MAP_RW_REQUEST MOUNT_NS_MAP_RO_REQUEST MOUNT_NS_MAP_RW_TARGET MOUNT_NS_MAP_RO_TARGET MONITOR_BASE_ROOT PRIVATE_MONITOR_BASE_ROOT MONITOR_MAP_REQUEST MONITOR_MAP_TARGET MONITOR_LOCKED_ROOT MONITOR_WRITABLE_ROOT PRIVATE_MONITOR_WRITABLE_ROOT MONITOR_RELATIVE_DATA_ROOT PRIVATE_MONITOR_RELATIVE_DATA_ROOT MONITOR_NNNGRAM_ROOT PRIVATE_MONITOR_NNNGRAM_ROOT RULE_SANDBOX_ROOT BACKEND_RULE_SANDBOX_ROOT PRIVATE_RULE_SANDBOX_ROOT RULE_SIBLING_ROOT BACKEND_RULE_SIBLING_ROOT PRIVATE_RULE_SIBLING_ROOT QQ_ALIAS_MAPPED_ROOT QQ_ALIAS_MAPPED_FILE QQ_ALIAS_REQUEST_ROOT SRT_FRESH_APP_PER_CASE SRT_FRESH_APP_SCENARIOS SRT_RESULT_POLL_MS SRT_APP_LAUNCH_SETTLE_MS SRT_MOUNT_CONFIRM_TIMEOUT_MS SRT_APP_MOUNT_CONFIRM_RETRIES SRT_CONFIG_APPLY_TIMEOUT_MS SRT_SERVICE_CASE_SETTLE_MS SRT_FILE_MONITOR_ENABLED SRT_FAIL_FAST SRT_SCENARIO_TIMEOUT_SECONDS LAST_MOUNT_CONFIRMED_PID ADB_ROOT_MODE
 export -f detect_adb_root_mode adb_root adb_su adb_su_timeout adb_write_file test_app_uid fix_private_backend_permissions fix_own_private_fixture_permissions wait_boot_completed restart_media_provider recover_scoped_fuse_start write_config write_global_config test_global_config set_backend_config apply_config apply_config_and_wait target_path logical_dir expected_path scenario_title prepare_backend_core_targets prepare_any_path_targets assert_fixture_roots_empty clean_targets clean_results latest_result wait_service_result wait_app_mount_confirmed scenario_from_label label_expects_mount expected_mount_paths_for_label app_mountinfo_has_expected_paths ensure_current_app_mount_confirmed wait_config_applied service_case_timeout_seconds sleep_ms prepare_service_case start_app_and_confirm_mount wait_storage_ready wait_scenario_app_view ensure_initial_storage_ready device_sdk_level media_provider_query_ready media_provider_queries_ready wait_media_provider_ready media_provider_ready_cached media_provider_pid wait_media_provider_hook_ready ensure_media_provider_hook_ready restart_media_provider_with_hook_ready print_storage_state run_service_case run_write_case run_create_case run_mediastore_download_create_case run_mediastore_image_create_case run_mediastore_image_relative_data_create_case run_mediastore_download_create_denied_case run_write_test check_app_view expect_app_entry expect_no_app_entry find_written_file check_file_exists check_file_missing check_own_private_real_landing check_public_directory_owner run_rule_sandbox_scenario check_file_location seed_read_only_targets check_read_only_artifacts run_read_only_scenario wait_mediastore_read_only_image prepare_read_only_media_image run_mediastore_read_only_query_scenario java_bucket_id check_mediastore_bucket_id prepare_mapped_read_only_targets run_mapped_read_only_scenario run_allow_exclusion_scenario run_legacy_exclusion_scenario run_qmark_wildcard_scenario check_fuse_daemon_started check_fuse_mount_active check_scoped_fuse_daemon_started run_fuse_daemon_allow_wildcard_scenario run_fuse_daemon_read_only_exclusion_scenario run_fuse_daemon_mapping_read_only_scenario run_fuse_daemon_multi_wildcard_scenario set_mount_namespace_read_only_seed run_mount_namespace_allow_wildcard_fallback_scenario run_mount_namespace_read_only_wildcard_fallback_scenario run_mount_namespace_mapping_read_only_scenario ensure_monitor_collector clear_file_monitor_log file_monitor_watch_capacity_limited assert_file_monitor_enabled_for_scenario prepare_file_monitor_assertion wait_file_monitor_log_line expect_file_monitor_success_record expect_file_monitor_failure_record expect_no_read_only_failure_record monitor_file_name run_file_monitor_write_success_case run_file_monitor_write_denied_case run_file_monitor_existing_write_case run_file_monitor_mediastore_success_case run_file_monitor_mediastore_image_success_case run_file_monitor_mediastore_relative_data_success_case run_file_monitor_mediastore_denied_case run_file_monitor_disabled_redirect_scenario run_file_monitor_regular_scenario run_file_monitor_mediastore_scenario run_monitor_capture_failopen_scenario app_view_dev_differs app_pid resume_hot_reload_app run_config_hot_reload_scenario run_backend_endpoint_recovery_scenario run_mediastore_open_typed_collection_scenario check_health capture_file_monitor_diagnostics capture_read_only_diagnostics capture_own_private_diagnostics capture_scenario2_mediastore_hook_diag print_diagnostics capture_fuse_diagnostic_sample capture_test_flow_artifacts run_standard_scenario run_any_path_mapping_scenario run_scenario
 export -f media_provider_is_lazy
+export -f fix_shared_fixture_permissions
 export -f fresh_app_enabled_for_label
 export -f app_view_namespace_refresh_allowed
 export -f run_quick_media_provider_restart_recovery_scenario

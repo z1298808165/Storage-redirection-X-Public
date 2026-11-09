@@ -1,19 +1,20 @@
 # 构建环境
 
-本文只描述本地编译 `srx_core` 需要准备的工具与环境变量。构建流程请见 [构建流程](build-process.md)。
+本文描述本地 WSL 构建 `srx_core` 所需的工具与环境变量。Rust/Cargo 和 Android Gradle 构建、测试均在 WSL 执行；Windows PowerShell 入口可调用 WSL 完成这些步骤，设备安装和场景执行使用 Windows ADB，不向 WSL 转发 ADB。构建流程请见 [构建流程](build-process.md)。
 
 ## 工具要求
 
 | 工具 | 最低版本 | 说明 |
 |------|----------|------|
-| Rust | nightly (edition 2024) | 需要 `let_chains` 等特性 |
-| Android NDK | r30+ | 用于交叉编译和 LSPlant C++ 构建 |
-| CMake | 3.28+ | LSPlant C++ 模块构建依赖（Ninja 生成器） |
-| Ninja | 1.10+ | CMake 生成器 |
-| JDK | 11-21 | 编译 Hooker.java 为 class 文件 |
-| Android SDK build-tools | 31+ | 提供 d8 工具将 class 转为 dex |
-| curl | 任意现代版本 | 首次构建下载 libcxx AAR（见下） |
+| Rust | nightly (edition 2024) | WSL 中需要 `let_chains` 等特性 |
+| Android NDK | r30+ | WSL 中用于交叉编译和 LSPlant C++ 构建 |
+| CMake | 3.28+ | WSL 中 LSPlant C++ 模块构建依赖（Ninja 生成器） |
+| Ninja | 1.10+ | WSL 中的 CMake 生成器 |
+| JDK | 21 | WSL 中编译 Hooker.java、运行 Gradle |
+| Android SDK build-tools | 31+ | WSL 中提供 d8，将 class 转为 dex |
+| curl | 任意现代版本 | WSL 首次构建下载 libcxx AAR（见下） |
 | Rust targets | `aarch64-linux-android` | 真机；可选 `x86_64-linux-android` 用于模拟器 |
+| Windows ADB | platform-tools | Windows PowerShell 直接连接设备并运行场景套件 |
 
 ### libcxx AAR（LSPlant std 模块依赖）
 
@@ -29,12 +30,12 @@ LSPlant 上游迁移到 C++ 标准库模块（`import std;`）后，构建需要
   `gradle.properties` / CI workflow 的 NDK 版本。
 - 离线或预置环境可设置 `SRX_LIBCXX_PREFIX` 指向已解包的 AAR 根目录
   （需含 `prefab/modules/cxx/include`），跳过下载。
-- Windows 解包走系统自带的 bsdtar（`System32\tar.exe`）；Linux/macOS 走 `unzip`。
+- WSL 解包使用 `unzip`；Windows 侧不参与模块编译。
 
 ### 重要限制
 
-- **推荐 JDK 21 或以下版本**。`build.rs` 现在使用 `--release 11` 编译 Hooker.java；如果本机 JDK 版本更高，仍建议优先使用 CI 同款 JDK 21 以减少工具链差异。
-- **Windows 上 d8 对 `$` 文件名有问题**。内部类文件名如 `Hooker$FilteringCursor.class` 中的 `$` 可能被 cmd/bat 解释为变量，导致 dex 只生成一部分内容。这个问题的处理方式见 [构建流程](build-process.md#windows-注意事项)。
+- **使用 CI 同款 JDK 21**。`build.rs` 使用 `--release 11` 编译 Hooker.java，Gradle 仍需满足自身的 Java 运行时要求。
+- **构建工具必须安装在 WSL 中**。Windows 的 Cargo、Gradle 和 Android NDK 不参与本地构建或测试；Windows 侧只需可用的 ADB。
 
 ## 安装 Rust targets
 
@@ -48,45 +49,22 @@ rustup target add x86_64-linux-android  # 可选，模拟器用
 编译前需设置以下环境变量：
 
 ```bash
-# Linux/macOS
-export ANDROID_NDK_HOME=<Android NDK 安装目录>
-export ANDROID_HOME=<Android SDK 安装目录>
-export JAVA_HOME=<JDK 安装目录>
-
-# Windows PowerShell
-$env:ANDROID_HOME = "<Android SDK 安装目录>"
-$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\30.0.16248370"
-$env:JAVA_HOME = "<JDK 安装目录>"
+export ANDROID_HOME="/path/to/android-sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
+export JAVA_HOME="/path/to/jdk-21"
+export PATH="$ANDROID_HOME/cmake/4.1.2/bin:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 ```
 
-上述 `$env:...` 只修改当前 PowerShell 进程，关闭终端后不会保留。需要在 Windows
-用户环境中持久化时，可执行一次：
-
-```powershell
-[Environment]::SetEnvironmentVariable("ANDROID_HOME", "<Android SDK 安装目录>", "User")
-[Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", "<Android SDK 安装目录>", "User")
-[Environment]::SetEnvironmentVariable("ANDROID_NDK_HOME", "<Android SDK 安装目录>\ndk\30.0.16248370", "User")
-[Environment]::SetEnvironmentVariable("JAVA_HOME", "<JDK 21 安装目录>", "User")
-```
-
-Windows 会把用户环境复制给新启动的进程；已经运行的终端、IDE 和 Codex 不会自动刷新，
-设置后需要完全退出并重新打开。仓库的本地构建脚本仍会在每次运行时检查 SDK、NDK、
-CMake、Ninja、Java 和 Rust 工具链，避免环境变量存在但安装目录不完整时表现为长时间无输出。
-
-确保 `ninja` 在 PATH 中。Android SDK 自带 ninja：
-
-```powershell
-# Windows - 添加 SDK 自带的 cmake/ninja 到 PATH
-$env:PATH = "$env:ANDROID_HOME\cmake\4.1.2\bin;" + $env:PATH
-```
+将环境变量加入 WSL shell profile，重新打开 WSL shell 后生效。
 
 ## .cargo/config.toml
 
 需要为 Android target 配置 linker。推荐先复制仓库模板，再把 NDK LLVM bin 加入 PATH：
 
-```powershell
-Copy-Item .cargo/config.example.toml .cargo/config.toml
-$env:PATH = "$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin;" + $env:PATH
+```bash
+cp .cargo/config.example.toml .cargo/config.toml
+export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 ```
 
 模板内容使用不含本机绝对路径的命令名：
