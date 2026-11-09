@@ -4597,12 +4597,26 @@ run_owner_drift_own_dir_scenario() {
   local write_expect='^FAIL \[file_write\]'
   local drift_pid
   drift_pid="$(app_pid)"
-  if [ -n "$drift_pid" ] && app_view_dev_differs "$drift_pid" >/dev/null; then
+  # 形态判定必须同时看两件事，任一不满足就不能按「宿主服务」期望成功：
+  # ① 视图根确实换了超级块（`app_view_dev_differs`）：说明 `/storage/emulated` 不再是
+  #    init 里那层系统 FUSE；
+  # ② 私有树**没有**被单独 bind 一层：模块在「宿主没有覆盖视图根」的轮次会把
+  #    `Android/data|media|obb/<pkg>` 从系统视图 bind 回来，此时读写由系统视图承接，
+  #    内核/系统侧按属主做 DAC，属主漂移的条目就该被拒绝。
+  # 只看 ① 会在「根是宿主 FUSE（或上一轮残留的宿主层）+ 私有树被 bind 回系统视图」的
+  # 混合视图上误判成 fuse-served——真机实证（2026-11-09 Android 14 CI 腿）：热重载因
+  # 策略应答失败降级到 namespace bind，dev 仍与 init 不同，于是把本应 EACCES 的读取
+  # 判成 PASS 期望，场景直接报错。
+  local private_bind_present=0
+  if [ -n "$drift_pid" ] && adb_su "grep -Fq ' /storage/emulated/0/Android/data/${APP_ID} ' /proc/${drift_pid}/mountinfo" 2>/dev/null; then
+    private_bind_present=1
+  fi
+  if [ -n "$drift_pid" ] && [ "$private_bind_present" -eq 0 ] && app_view_dev_differs "$drift_pid" >/dev/null; then
     echo "owner_drift_layout scenario=${scenario} form=fuse-served"
     read_expect='^PASS \[file_read\]'
     write_expect='^PASS \[file_write\]'
   else
-    echo "owner_drift_layout scenario=${scenario} form=bind"
+    echo "owner_drift_layout scenario=${scenario} form=bind private_bind=${private_bind_present}"
   fi
   run_service_case "$scenario" "own-drift-read" "file_read" "$read_expect" --es file_path "$drift_visible/srt_drift_existing.txt" || return 1
   run_service_case "$scenario" "own-drift-write" "file_write" "$write_expect" --es file_path "$drift_visible/srt_drift_probe.txt" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" || return 1

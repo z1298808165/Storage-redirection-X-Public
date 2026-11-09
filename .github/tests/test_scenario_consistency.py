@@ -3929,6 +3929,47 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 看门狗自身也必须有界，否则被 TERM 后不退的 adb 子进程会把它拖成无限等待。
         self.assertIn('timeout --kill-after=60s "${scenario_watchdog}s"', script)
 
+    def test_owner_drift_form_detection_requires_private_bind_guard(self) -> None:
+        # 属主漂移场景的读写期望取决于数据面形态，而「视图根 dev 与 init 不同」不足以下结论：
+        # 热重载降级成 namespace bind 时，上一轮宿主层可能仍留在同一命名空间的
+        # `/storage/emulated` 上（dev 依旧不同），但 `Android/data/<pkg>` 已被 bind 回系统
+        # 视图，读写按系统侧 DAC 判定。run 42617148478（Android 14 腿）实证：期望被抬成
+        # PASS，实际 EACCES，场景直接失败。因此判据必须叠加「私有树没有被单独 bind」。
+        body = section(
+            self.bash,
+            "run_owner_drift_own_dir_scenario() {",
+            "run_scenario() {",
+        )
+        self.assertIn("private_bind_present", body)
+        self.assertIn("/proc/${drift_pid}/mountinfo", body)
+        self.assertIn('[ "$private_bind_present" -eq 0 ]', body)
+
+    def test_host_view_coverage_uses_live_session_fact(self) -> None:
+        # 「宿主是否盖住视图根」不能只看本轮接入是否成功：接入因预算/应答失败而回退时，
+        # 既有宿主层可能仍在服务，此时再恢复 `Android/data|media|obb` 的系统视图 bind
+        # 会叠出混合视图（同一次实证里应用读自己私有树得到 EACCES）。
+        mount = read_daemon_mount_module()
+        self.assertIn("fn host_session_serves_view_root(", mount)
+        self.assertIn(
+            "preattached_host.is_ok() || host_session_serves_view_root(request.uid);",
+            mount,
+        )
+
+    def test_policy_ack_uses_remaining_budget(self) -> None:
+        # 应答等待不能因为「剩余预算不足一整轮超时」就直接判失败：预接入的预算算法
+        # 在剩余 4–6 秒时正好落进这个分支，让本该由宿主服务的视图降级成 bind。
+        control = read_fuse_host_module()
+        ack = section(
+            control,
+            "fn await_policy_ack(",
+            "/// 把某个应用的策略登记到共享宿主会话",
+        )
+        self.assertIn(
+            "set_socket_recv_timeout_ms(fd, remaining_ms.min(HOST_POLICY_ACK_TIMEOUT_MS));",
+            ack,
+        )
+        self.assertNotIn("if remaining_ms < HOST_POLICY_ACK_TIMEOUT_MS {", ack)
+
 
 if __name__ == "__main__":
     unittest.main()
