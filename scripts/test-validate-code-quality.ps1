@@ -93,8 +93,14 @@ try {
     Invoke-StagedCase -Name "中文理由豁免" -Path "src/allowed.rs" -Text "// quality-allow(chinese-language): 上游接口要求保留原始英文说明`n// Keep this upstream wording unchanged.`n" -ShouldPass $true
     Invoke-StagedCase -Name "英文文档" -Path "docs/english.md" -Text "# Build instructions for contributors`n" -ShouldPass $false
     Invoke-StagedCase -Name "文档命令" -Path "docs/command.md" -Text "git status --short --branch`n" -ShouldPass $true
+    Invoke-StagedCase -Name "文档环境变量命令" -Path "docs/export.md" -Text 'export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"' -ShouldPass $true
+    Invoke-StagedCase -Name "文档复制命令" -Path "docs/copy.md" -Text "cp .cargo/config.example.toml .cargo/config.toml`n" -ShouldPass $true
+    Invoke-StagedCase -Name "文档 Gradle 任务续行" -Path "docs/gradle.md" -Text "  :storageRedirectTestApp:testDebugUnitTest \`n" -ShouldPass $true
+    Invoke-StagedCase -Name "Gradle 任务后的英文说明" -Path "docs/gradle-english.md" -Text ":app:testDebugUnitTest Run the unit tests`n" -ShouldPass $false
+    Invoke-StagedCase -Name "文档 PowerShell 变量赋值" -Path "docs/variable.md" -Text '$Serial = "<Windows ADB serial>"' -ShouldPass $true
     Invoke-StagedCase -Name "技术标识" -Path "src/identifier.rs" -Text "// HTTP_API_V2`n" -ShouldPass $true
     Invoke-StagedCase -Name "Rust 属性" -Path "src/attribute.rs" -Text "#[cfg(target_os = \"android\")]`n" -ShouldPass $true
+    Invoke-StagedCase -Name "Python 夹具内嵌 Rust 属性" -Path ".github/tests/attribute.py" -Text "#[derive(Debug)]`n#[derive(Default)]`n" -ShouldPass $true
     Invoke-StagedCase -Name "C 预处理器" -Path "native/include/example.h" -Text "#include <stdint.h>`n" -ShouldPass $true
     Invoke-StagedCase -Name "英文 PowerShell 注释" -Path "scripts/english.ps1" -Text "# Validate the generated archive before upload.`n" -ShouldPass $false
     Invoke-StagedCase -Name "许可证标识" -Path "src/license.rs" -Text "// SPDX-License-Identifier: Apache-2.0`n" -ShouldPass $true

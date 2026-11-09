@@ -1344,7 +1344,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "function Invoke-SystemUidAttributionScenario",
         )
         self.assertIn("Confirm-MediaProviderHookReady", ps_download)
-        # Older emulators keep the host alias route.
+        # 较旧的模拟器继续使用宿主机别名路由。
         self.assertIn('dl_url="http://10.0.2.2:$dl_port/srt_download.bin"', script)
         self.assertIn('$dlUrl = "http://10.0.2.2:$dlPort/srt_download.bin"', powershell)
 
