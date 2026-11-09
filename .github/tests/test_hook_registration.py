@@ -1,4 +1,4 @@
-"""执行生产 hook 结果处理函数，验证已提交任务和清理后的安装状态。"""
+"""执行生产 hook 结果处理与调用方筛选，验证安装状态及注入器排除。"""
 
 import os
 import shutil
@@ -22,7 +22,7 @@ def extract_function(source: str, name: str) -> str:
 
 
 class HookRegistrationTest(unittest.TestCase):
-    def test_committed_stubs_and_cleanup_state(self) -> None:
+    def test_registration_cleanup_and_caller_filter(self) -> None:
         rustc = shutil.which("rustc")
         if rustc is None:
             self.skipTest("环境缺少 rustc，执行验证已跳过")
@@ -30,6 +30,15 @@ class HookRegistrationTest(unittest.TestCase):
         single = extract_function(source, "take_checked_hook_stub")
         batch = extract_function(source, "take_checked_hook_batch_stubs")
         cleanup = extract_function(source, "cleanup_after_install_failure")
+        caller_filter = "\n".join(
+            extract_function(source, name) for name in (
+                "should_hook_caller_module", "is_runtime_generated_or_java_artifact",
+                "is_java_artifact_module", "is_hook_sensitive_render_module",
+            )
+        )
+        caller_filter += "\n" + next(
+            line for line in source.splitlines() if line.startswith("const ZYGISK_MODULE_BASENAME:")
+        )
         harness = r'''
 extern crate self as log;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,11 +83,17 @@ impl InterceptHub {
 }
 // __SINGLE__
 // __BATCH__
+// __CALLER_FILTER__
 fn module_errors() -> Vec<srx_hook::RefreshError> {
     vec![srx_hook::RefreshError { module_path: "libtest.so".into(), errno: 1 }]
 }
 fn main() {
     use srx_hook::*;
+    assert!(!should_hook_caller_module("/data/adb/modules/zygisksu/lib64/libzygisk.so"));
+    assert!(!should_hook_caller_module("/data/adb/modules/zygisksu/lib/libzygisk.so"));
+    assert!(should_hook_caller_module("/system/lib64/libfuse.so"));
+    assert!(should_hook_caller_module("/system/lib64/libappfuse.so"));
+    assert!(should_hook_caller_module("/system/lib64/libnotzygisk.so"));
     assert_eq!(take_checked_hook_stub("open", Ok(7)), Some(7));
     assert_eq!(take_checked_hook_stub("open", Err(HookError {
         status: 1, stub: Some(7), errors: module_errors(),
@@ -110,6 +125,7 @@ fn main() {
 '''
         harness = harness.replace("// __SINGLE__", single).replace("// __BATCH__", batch)
         harness = harness.replace("// __CLEANUP__", cleanup)
+        harness = harness.replace("// __CALLER_FILTER__", caller_filter)
         with tempfile.TemporaryDirectory(prefix="hook-registration-") as tmp:
             path = Path(tmp) / "harness.rs"
             binary = Path(tmp) / ("registration.exe" if os.name == "nt" else "registration")

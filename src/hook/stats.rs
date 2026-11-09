@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 const SELF_MODULE_PATH: &str = "libsrx_core.so";
 const SQLITE_MODULE_BASENAME: &str = "libsqlite.so";
+const ZYGISK_MODULE_BASENAME: &str = "libzygisk.so";
 const HOOK_SENSITIVE_RENDER_MODULES: &[&str] = &[
     "libhwui.so",
     "libvulkan.so",
@@ -384,19 +385,15 @@ impl InterceptHub {
             return false;
         }
 
-        let ignore_errno = srx_hook::add_ignore(SELF_MODULE_PATH);
-        if !ignore_errno.is_ok() {
-            log::warn!("add_ignore failed err={:?}", ignore_errno);
-        }
-        let sqlite_ignore_errno = srx_hook::add_ignore(SQLITE_MODULE_BASENAME);
-        if !sqlite_ignore_errno.is_ok() {
-            log::warn!(
-                "add_ignore failed path={} err={:?}",
-                SQLITE_MODULE_BASENAME,
-                sqlite_ignore_errno
-            );
-        }
-        for module in HOOK_SENSITIVE_RENDER_MODULES {
+        // 注入器不属于文件操作调用方，也不保证能从应用的 linker namespace 取得租约。
+        for module in [
+            SELF_MODULE_PATH,
+            SQLITE_MODULE_BASENAME,
+            ZYGISK_MODULE_BASENAME,
+        ]
+        .iter()
+        .chain(HOOK_SENSITIVE_RENDER_MODULES)
+        {
             let ignore_errno = srx_hook::add_ignore(module);
             if !ignore_errno.is_ok() {
                 log::warn!("add_ignore failed path={} err={:?}", module, ignore_errno);
@@ -933,7 +930,7 @@ fn should_hook_caller_module(pathname: &str) -> bool {
     if lower.ends_with("libsrx_core.so") || lower.ends_with("libsrx_hook.so") {
         return false;
     }
-    if basename == "libsqlite.so" {
+    if basename == "libsqlite.so" || basename == ZYGISK_MODULE_BASENAME {
         return false;
     }
     !is_hook_sensitive_render_module(&lower)
