@@ -111,7 +111,9 @@ function Get-HumanReadableText {
         if ($candidate -match '^\|.*\|$' -or
             $candidate -match '^[-:| ]+$' -or
             $candidate -match '^(?i:Storage Redirect X)(?:\s+v?[0-9.]+)?$' -or
-            $candidate -match '^(?i:cargo|gh|git|node|npm|pnpm|yarn|gradle|adb|powershell|pwsh|bash|sh|rustup)\s+' -or
+            $candidate -match '^(?i:cargo|gh|git|node|npm|pnpm|yarn|gradle|adb|powershell|pwsh|bash|sh|rustup|cp|export)\s+' -or
+            $candidate -match '^:[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)+(?:\s*\\)?$' -or
+            $candidate -match '^\$[A-Za-z_][A-Za-z0-9_]*\s*=' -or
             $candidate -match '^[A-Z_][A-Z0-9_]*=\S*\s+\S+' -or
             $candidate -match '^(?:[A-Za-z]:[\\/]|[./~][\\/])') {
             return ""
@@ -128,7 +130,7 @@ function Get-HumanReadableText {
 
     if (($Path -match '(?i)\.(?:ps1|psm1|psd1|sh|bash|py|yml|yaml|properties)$' -or
         $Path -match '^\.githooks/') -and
-        $trimmed -match '^#(?!\!)(.*)$') {
+        $trimmed -match '^#(?![!\[])(.*)$') {
         return $matches[1].Trim()
     }
 
