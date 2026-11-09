@@ -26,13 +26,35 @@ use std::time::Duration;
 /// 周期兜底 reconcile 的间隔。应用启动由 companion 主动挂载 + register-policy 定点
 /// 登记，配置变更由 inotify 监听，开机由全量预登记兜底——这些都不依赖周期轮询。
 /// 周期轮询只剩「补挂 companion 未处理的进程 / 宿主重建后重新接入 / 清理退出残留」
-/// 等补偿职责，把间隔从 3 秒放宽到 30 秒可显著降低常驻唤醒与 /proc 扫描功耗，
-/// 补偿类场景最坏多等一个周期（30 秒），不影响事件驱动主路径的即时性。
-const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 30_000;
+/// 等补偿职责。
+///
+/// 这类补偿**没有可订阅的事件源**（外部 umount 不会通知任何人），因此不能做成纯事件
+/// 驱动；但它的触发条件本身极罕见（根因 MS_BIND 传播已用 MS_PRIVATE 根治），为它持续
+/// 付出高频扫描不划算。现在取 5 分钟：补偿类场景最坏多等一个周期，事件驱动主路径的即时性
+/// 完全不受影响（那部分走的仍是 inotify / pidfd / control eventfd）。
+const PERIODIC_RECONCILE_INTERVAL_MS: i64 = 300_000;
 /// 状态文件清理只防「已死进程的记录无限累积」，不参与挂载正确性；
-/// 独立节流，不随周期 reconcile 一起触发，避免空闲时每个周期都扫描状态目录和 /proc。
-const PRUNE_INTERVAL_MS: i64 = 30_000;
-const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 10_000;
+/// 独立节流，不随周期 reconcile 一起触发。它每次要扫状态目录并对每条记录查一次
+/// `/proc/<pid>/stat`，而清理对象本身不参与任何正确性判定，因此取 5 分钟。
+const PRUNE_INTERVAL_MS: i64 = 300_000;
+/// 配置指纹兜底复查间隔：只在事件通道不可用时启用。
+///
+/// 稳态由 inotify 驱动，不做周期扫描；故障降级时每秒先做廉价目录/root-file stat，
+/// 只有发现变化才执行完整目录枚举。该降级仅覆盖 SELinux 拒绝 watch、fd 失效等情况。
+const CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS: i64 = 1_000;
+/// 文件监视线程的空闲等待上限。
+///
+/// 该线程的两个输入（被监视树的 inotify、配置重建请求 eventfd）都是事件源；运行开关
+/// 由主循环的模块目录 watch 负责，检测到停用后 daemon 直接返回、本线程随进程结束。
+/// 因此这里只作为「事件源整体失效」时的兜底节拍，取 5 分钟。
+const FILE_MONITOR_IDLE_WAIT_MS: u64 = 300_000;
+/// 主循环空闲等待上限（运行开关目录已监听时）。
+///
+/// 此时「开关被改写」是一个事件，主循环只需要睡到下一次周期工作（周期 reconcile 5 分钟
+/// 或指纹兜底 10 分钟）的截止点；上限留 10 分钟兜住时钟异常。
+const IDLE_WAIT_WITH_SWITCH_WATCH_MS: i64 = 600_000;
+/// 主循环空闲等待上限（运行开关没有事件源时）：必须保留固定节拍探询开关文件。
+const IDLE_WAIT_WITHOUT_SWITCH_WATCH_MS: i64 = 30_000;
 /// 降级路径单轮最多连续排空的次数，避免挤占同一循环内的 reconcile。
 const FALLBACK_DRAIN_ROUNDS: usize = 4;
 /// 全量 reconcile 的单轮预算。超过后把剩余计划留给下一轮，给配置/控制事件让路。
@@ -649,6 +671,14 @@ pub fn main_entry() -> i32 {
     if config_watch_fd < 0 {
         log::warn!("daemon config watcher unavailable, using fingerprint polling");
     }
+    // 运行开关（WebUI 写的标记文件）没有 IPC 通道，唯一的事件源就是模块目录本身。
+    // 加上这个 watch 之后，主循环不再需要任何固定节拍去「看一眼开关」。
+    let runtime_switch_watched =
+        watcher::add_wakeup_watch(crate::platform::module_paths::MODULE_DIR);
+    crate::runtime_control::set_disable_watch_active(runtime_switch_watched);
+    if !runtime_switch_watched {
+        log::warn!("runtime switch watch unavailable, keep periodic fallback");
+    }
 
     // 建立共享宿主 FUSE 会话。它是**唯一**的 FUSE 载体：失败只记录并继续，应用照常
     // 拿到 namespace bind 视图；后续 reconcile 会在宿主子进程死亡后按需恢复，而不是
@@ -710,6 +740,7 @@ pub fn main_entry() -> i32 {
     // SAFETY: eventfd 只创建内核对象并返回 fd，不接触调用方内存；标志位均为合法常量。
     let control_wake_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     crate::log_daemon::set_daemon_wake_eventfd(control_wake_fd);
+    crate::mount::own_private_pending::set_daemon_wake_eventfd(control_wake_fd);
     let file_monitor_sync = start_file_monitor_thread();
     let mut fallback_file_monitor = file_monitor_sync.is_none().then(RegularAppMonitor::new);
     spawn_system_pid_scanner();
@@ -874,11 +905,29 @@ pub fn main_entry() -> i32 {
             }
         }
         round = round.saturating_add(1);
+        // 下一次**必须**醒来的时刻：只由真正要做周期工作的两件事决定（周期 reconcile
+        // 与指纹兜底）。此外的唤醒全部来自事件：配置目录、运行开关目录、宿主 pidfd、
+        // 控制 eventfd。因此这里可以按截止点睡，而不是按固定节拍空转。
+        let next_periodic_ms = last_periodic_reconcile_ms
+            .saturating_add(PERIODIC_RECONCILE_INTERVAL_MS)
+            .min(last_fingerprint_check_ms.saturating_add(CONFIG_FINGERPRINT_FALLBACK_INTERVAL_MS))
+            .min(
+                crate::mount::own_private_pending::next_due_delay_ms()
+                    .map(|delay| crate::platform::paths::monotonic_ms().saturating_add(delay))
+                    .unwrap_or(i64::MAX),
+            )
+            .min(
+                fallback_file_monitor
+                    .as_ref()
+                    .and_then(RegularAppMonitor::next_wakeup_deadline_ms)
+                    .unwrap_or(i64::MAX),
+            );
         let host_exited = wait_for_daemon_events(
             watcher::event_fd(),
             pending_full_reconcile,
             crate::fuse_host::pidfd(),
             control_wake_fd,
+            next_periodic_ms,
         );
         if host_exited {
             let cleared = crate::fuse_host::clear_if_dead_with_reason("pidfd");
@@ -891,24 +940,42 @@ pub fn main_entry() -> i32 {
     }
 }
 
-/// 阻塞等待配置事件；超时后返回主循环执行低频宿主/状态兜底。
+/// 阻塞等待事件；超时后返回主循环执行下一次周期工作。
 ///
-/// inotify fd 可读时下一轮会立即解析增量配置；watcher 不可用时退回有限超时，
-/// 保留 fingerprint fallback 和周期自愈，不会因事件源失效而永久停摆。
+/// 这里**没有固定节拍**：配置目录、运行开关目录、宿主 pidfd、控制 eventfd 都有事件源，
+/// 唯一的「时间驱动」是周期 reconcile 与指纹兜底的截止点（由调用方算出并传进来）。
+///
+/// 运行开关目录的 watch 不可用（inotify 建不起来）时，才退回固定节拍探询开关文件——
+/// 那是纯降级路径，不进稳态。
 fn wait_for_daemon_events(
     config_watch_fd: i32,
     reconcile_pending: bool,
     host_pidfd: i32,
     control_wake_fd: i32,
+    next_periodic_ms: i64,
 ) -> bool {
     let timeout_ms: libc::c_int = if reconcile_pending {
         RECONCILE_CONTINUE_WAIT_MS
     } else if BOOT_PRE_REGISTER_PENDING.load(Ordering::Acquire) {
-        // 挂起的开机预登记等待 CE 密钥就绪：1 秒粒度轮询，密钥就绪后 ~1 秒内补跑，
-        // 避免 30 秒周期兜底带来的启动登记延迟。挂起态只存在于开机后一两分钟。
+        // 挂起的开机预登记等待 CE 密钥就绪：1 秒粒度轮询，密钥就绪后 ~1 秒内补跑。
+        // 挂起态只存在于开机后一两分钟，且这是内核文件系统状态，没有事件可订阅。
         1_000
     } else {
-        30_000
+        // 只有**全部**事件源都在位时才允许长睡：缺一个就必须保留固定节拍，
+        // 否则那一类事件（宿主退出、控制请求、运行开关）要等到下一次周期工作
+        // （最长 10 分钟）才被发现。
+        let all_event_sources_ready = crate::runtime_control::disable_watch_active()
+            && config_watch_fd >= 0
+            && host_pidfd >= 0
+            && control_wake_fd >= 0;
+        let max_idle_ms = if all_event_sources_ready {
+            IDLE_WAIT_WITH_SWITCH_WATCH_MS
+        } else {
+            IDLE_WAIT_WITHOUT_SWITCH_WATCH_MS
+        };
+        next_periodic_ms
+            .saturating_sub(crate::platform::paths::monotonic_ms())
+            .clamp(1, max_idle_ms) as libc::c_int
     };
     if config_watch_fd < 0 && host_pidfd < 0 && control_wake_fd < 0 {
         if timeout_ms > 0 {
@@ -1023,15 +1090,16 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
 }
 
 fn wait_for_file_monitor_events(sync: &FileMonitorSync, monitor: &RegularAppMonitor) {
-    if monitor.event_fd() < 0 && sync.request_event_fd < 0 {
-        std::thread::sleep(Duration::from_secs(30));
-        return;
-    }
-    // 待裁决观察事件的到期点优先：延迟裁决最长数百毫秒，不能等 30 秒轮询。
+    // 待裁决观察事件的到期点优先：延迟裁决最长数百毫秒，必须按截止点醒。
+    // 没有待裁决事件时，这里**没有**任何需要固定节拍的工作：inotify 与请求 eventfd
+    // 都是事件源，运行开关由主循环的目录 watch 负责（主循环检测到停用即返回，
+    // 本线程随进程退出）。因此默认超时可以放到分钟级。
+    let now_ms = crate::platform::paths::monotonic_ms();
     let poll_timeout_ms = monitor
-        .pending_flush_delay_ms()
-        .map(|delay| delay.clamp(20, 30_000))
-        .unwrap_or(30_000);
+        .next_wakeup_deadline_ms()
+        .map(|deadline| deadline.saturating_sub(now_ms).clamp(1, i64::MAX) as u64)
+        .unwrap_or(FILE_MONITOR_IDLE_WAIT_MS)
+        .min(FILE_MONITOR_IDLE_WAIT_MS);
     let mut fds = [
         libc::pollfd {
             fd: monitor.event_fd(),
@@ -1104,7 +1172,7 @@ fn reload_config_for_daemon(
     config: &SettingsHub,
     last_fingerprint_check_ms: &mut i64,
 ) -> (bool, Option<Vec<String>>, bool) {
-    match watcher::poll_changed_with_packages() {
+    match watcher::poll_changed_unthrottled_with_packages() {
         watcher::ChangeKind::Apps(packages) => {
             *last_fingerprint_check_ms = crate::platform::paths::monotonic_ms();
             return (config.reload_force(), Some(packages), false);
@@ -1757,17 +1825,15 @@ fn read_package_uid(package_name: &str) -> Option<i32> {
     None
 }
 
-/// 已有系统进程内线程增减的兜底刷新周期（活跃期）。
+/// 名册维护周期：**只在长期没有任何人询问时**才走到的一次全量对账。
 ///
-/// 系统进程名册（pid → 身份）的变化在 [`SYSTEM_PID_POLL_INTERVAL_MS`] 轮询内即时落盘；
-/// 已登记进程内新建/退出的线程只在本周期重建时补齐。
-const SYSTEM_PID_SCAN_INTERVAL_MS: i64 = 2_000;
-/// 进程集合轮询间隔：一次 /proc readdir，只为新出现（或仍在稳定窗口内）的 pid 读身份。
-const SYSTEM_PID_POLL_INTERVAL_MS: u64 = 500;
-/// 空闲期放宽后的线程级刷新周期：表内容连续 [`SYSTEM_PID_IDLE_AFTER_MS`] 未变化时使用。
-const SYSTEM_PID_IDLE_SCAN_INTERVAL_MS: i64 = 5_000;
-/// 判定空闲所需的静默时长。
-const SYSTEM_PID_IDLE_AFTER_MS: i64 = 60_000;
+/// 唯一职责是兜住「表文件被外部删掉」与「噪声条目长期累积」这两种退化，因此可以放到
+/// 10 分钟级（0.0017 Hz）。刷新本身完全由需求驱动：`answer_query` 每回答一次询问就写
+/// 一次需求信号，扫描线程随即刷新一轮——有人问才刷，没人问就不动。
+const SYSTEM_PID_MAINTENANCE_INTERVAL_MS: i64 = 600_000;
+/// 需求信号的合并窗口：一次新应用冷启动会连续触发多次询问，若每次全量重建就是自找
+/// CPU 峰值，这里把窗口内的重复需求合并成一次刷新。
+const SYSTEM_PID_DEMAND_COALESCE_MS: i64 = 2_000;
 /// 新进程身份的稳定窗口：fork 之后的 exec、zygote specialize 会在这段时间内改写
 /// cmdline 与 uid，窗口内每轮重读身份，过窗口后改用缓存。
 const SYSTEM_PID_IDENTITY_SETTLE_MS: i64 = 5_000;
@@ -1835,14 +1901,14 @@ struct SystemPidScanner {
     roster_digest: Option<u64>,
     last_rebuild_ms: i64,
     last_written_digest: Option<u64>,
-    last_change_ms: i64,
-    idle: bool,
     last_table_len: usize,
     last_pid: Option<i32>,
+    /// 最近一次刷新的时刻（用于合并短时间内的重复需求）。
+    last_tick_ms: i64,
 }
 
 impl SystemPidScanner {
-    fn new(target: String, now_ms: i64) -> Self {
+    fn new(target: String) -> Self {
         let staging = format!("{}.tmp", target);
         Self {
             target,
@@ -1851,19 +1917,26 @@ impl SystemPidScanner {
             roster_digest: None,
             last_rebuild_ms: -1,
             last_written_digest: None,
-            last_change_ms: now_ms,
-            idle: false,
             last_table_len: 0,
             last_pid: None,
+            last_tick_ms: i64::MIN / 2,
         }
     }
 
-    fn tick(&mut self, now_ms: i64) {
-        let interval_ms = if self.idle {
-            SYSTEM_PID_IDLE_SCAN_INTERVAL_MS
-        } else {
-            SYSTEM_PID_SCAN_INTERVAL_MS
-        };
+    /// 刷新一轮名册（只在「有需求」或「到维护周期」时被调用）。
+    ///
+    /// 节拍由调用方决定，这里不再自己给出间隔：空闲期这个函数根本不会被调用。
+    ///
+    /// `force_rebuild` 由「有人问过身份」置位。它必须强制重建，因为**线程增减不进
+    /// 名册指纹**：`roster_digest` 只看 (pid, uid, 包名)，而表里还要登记每个系统进程
+    /// 的全部 tid（内核 FUSE 请求头里的 pid 其实是发起线程的 tid）。若只在名册变化时
+    /// 重建，一个已有进程新建线程后表里查不到该 tid，归因就只能一直走按需询问——
+    /// 询问又会再次触发需求信号，于是「越问越不刷」。因此需求驱动的刷新一律重建；
+    /// 频率由调用方的合并窗口（[`SYSTEM_PID_DEMAND_COALESCE_MS`]）约束，最坏与旧实现
+    /// 的 2 秒固定周期同量级，但只在真有人查表时才付。
+    fn tick(&mut self, now_ms: i64, force_rebuild: bool) {
+        self.last_tick_ms = now_ms;
+        let interval_ms = SYSTEM_PID_MAINTENANCE_INTERVAL_MS;
         let due =
             self.last_rebuild_ms < 0 || now_ms.saturating_sub(self.last_rebuild_ms) >= interval_ms;
         // 内核最近分配的 pid 没变 = 这段时间没有新建任何进程或线程，此时直接沿用已知
@@ -1880,6 +1953,7 @@ impl SystemPidScanner {
             known
         } else {
             let Some(pids) = list_proc_pids() else {
+                // /proc 不可读：本轮放弃，不能因此退出扫描线程（下一次需求或维护再试）。
                 return;
             };
             let alive: HashSet<i32> = pids.iter().copied().collect();
@@ -1901,26 +1975,16 @@ impl SystemPidScanner {
         }
         let roster_digest = self.roster_digest(&pids);
         let roster_changed = self.roster_digest != Some(roster_digest);
-        if roster_changed || due {
+        if roster_changed || due || force_rebuild {
             self.roster_digest = Some(roster_digest);
             self.last_rebuild_ms = now_ms;
-            if self.rebuild(&pids) {
-                self.last_change_ms = now_ms;
-            }
+            self.rebuild(&pids);
         }
-        let idle = now_ms.saturating_sub(self.last_change_ms) >= SYSTEM_PID_IDLE_AFTER_MS;
-        if idle != self.idle {
-            self.idle = idle;
-            log::info!(
-                "system pid scanner idle={} interval_ms={}",
-                idle,
-                if idle {
-                    SYSTEM_PID_IDLE_SCAN_INTERVAL_MS
-                } else {
-                    SYSTEM_PID_SCAN_INTERVAL_MS
-                }
-            );
-        }
+    }
+
+    /// 最近一次刷新的时刻。
+    fn last_tick_ms(&self) -> i64 {
+        self.last_tick_ms
     }
 
     /// 系统进程名册（按 pid 排序的 pid/uid/身份）的指纹，不含线程。
@@ -1941,8 +2005,8 @@ impl SystemPidScanner {
     /// 按缓存身份重建并原子落盘整张表（进程 pid + 其全部线程 tid）。
     ///
     /// 内容指纹与上次落盘相同且文件仍在时跳过写入，避免稳定期每个刷新周期都重写一份
-    /// 数百 KB 的表（真机实测 455KB/19.8k 行，每 2 秒一次 rename）。返回表内容是否变化。
-    fn rebuild(&mut self, pids: &[i32]) -> bool {
+    /// 数百 KB 的表（真机实测 455KB/19.8k 行，早期实现每 2 秒一次 rename）。
+    fn rebuild(&mut self, pids: &[i32]) {
         use std::fmt::Write as _;
         let mut lines = String::with_capacity(self.last_table_len + 4096);
         for &pid in pids {
@@ -1966,7 +2030,7 @@ impl SystemPidScanner {
         }
         self.last_table_len = lines.len();
         if lines.is_empty() {
-            return false;
+            return;
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&lines, &mut hasher);
@@ -1974,7 +2038,7 @@ impl SystemPidScanner {
         let changed = self.last_written_digest != Some(digest);
         // 内容相同且文件仍在：跳过写入。文件被清理时靠存在性检查兜底重写。
         if !changed && std_fs::metadata(&self.target).is_ok() {
-            return false;
+            return;
         }
         if std_fs::write(&self.staging, lines.as_bytes()).is_ok()
             && std_fs::rename(&self.staging, &self.target).is_ok()
@@ -1982,7 +2046,6 @@ impl SystemPidScanner {
             let _ = std_fs::set_permissions(&self.target, std_fs::Permissions::from_mode(0o644));
             self.last_written_digest = Some(digest);
         }
-        changed
     }
 }
 
@@ -1999,28 +2062,89 @@ impl SystemPidScanner {
 /// 结果会写入当前调用方并参与重定向决策（见 `runtime::should_resolve_caller_context`），
 /// binder 系统调用方解析同样不看监视开关。
 ///
-/// 内核没有可供 daemon 订阅的进程创建事件源（proc connector 需 CONFIG_PROC_EVENTS，
-/// GKI 不保证开启），这里只能以 500ms 间隔对比 /proc；单轮成本已收敛到一次 readdir，
-/// 详见 [`SystemPidScanner`]。
+/// 内核没有可供 daemon 订阅的进程创建事件源（proc connector 需 `CONFIG_PROC_EVENTS`，
+/// GKI 不保证开启；`/proc` 也不产生 inotify 事件），因此这张表的**新鲜度由需求驱动**：
+/// 每回答一次身份询问就刷新一轮，没人问的时候只按 [`SYSTEM_PID_RECONCILE_INTERVAL_MS`]
+/// 做维护对账。表本身是缓存性质，未命中由 hook 的按需询问兜底，所以「空闲期不刷新」
+/// 不会影响任何决策正确性——这正是把兜底从「持续轮询」改成「被需要时才动」的关键。
 fn spawn_system_pid_scanner() {
+    // 需求信号：daemon 内部 eventfd，`answer_query` 每回答一次就写一字节。
+    // SAFETY: eventfd 只创建内核对象并返回 fd，标志位均为合法常量。
+    let demand_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if demand_fd >= 0 {
+        crate::daemon_identity_query::set_demand_eventfd(demand_fd);
+    } else {
+        log::warn!("system pid scanner demand eventfd unavailable; periodic only");
+    }
     let spawn_result = std::thread::Builder::new()
         .name("srx-syspid".into())
-        .spawn(|| {
+        .spawn(move || {
             let target = format!(
                 "{}/tmp/system_pids",
                 crate::platform::module_paths::MODULE_DIR
             );
-            let mut scanner = SystemPidScanner::new(target, crate::platform::paths::monotonic_ms());
+            let mut scanner = SystemPidScanner::new(target);
+            // 下一次等待的长度：默认是维护周期，需求合并窗口内则缩到窗口剩余时间。
+            let mut wait_ms = SYSTEM_PID_MAINTENANCE_INTERVAL_MS;
+            // 合并窗口内被推迟（而不是丢弃）的需求。
+            let mut demand_pending = false;
             loop {
-                scanner.tick(crate::platform::paths::monotonic_ms());
-                std::thread::sleep(std::time::Duration::from_millis(
-                    SYSTEM_PID_POLL_INTERVAL_MS,
-                ));
+                // 空闲期无限期睡在这里：唯一的唤醒源是「有人问过身份」或维护周期。
+                let woken_by_demand = wait_for_identity_demand(demand_fd, wait_ms);
+                let now_ms = crate::platform::paths::monotonic_ms();
+                if woken_by_demand {
+                    // 合并窗口：一次冷启动会连续问很多次，逐次全量重扫是自找 CPU 峰值。
+                    // 但需求**不能丢**——丢掉意味着表要等到 10 分钟维护周期才更新，期间
+                    // 每个 miss 都要走一次按需询问。所以窗口内只把它记下来，并把下一次
+                    // 等待缩到窗口剩余时间，到点补一次。
+                    let since_last = now_ms.saturating_sub(scanner.last_tick_ms());
+                    if since_last < SYSTEM_PID_DEMAND_COALESCE_MS {
+                        wait_ms = SYSTEM_PID_DEMAND_COALESCE_MS - since_last;
+                        demand_pending = true;
+                        continue;
+                    }
+                }
+                scanner.tick(now_ms, woken_by_demand || demand_pending);
+                demand_pending = false;
+                wait_ms = SYSTEM_PID_MAINTENANCE_INTERVAL_MS;
             }
         });
     if let Err(error) = spawn_result {
         log::warn!("system pid scanner spawn failed err={}", error);
     }
+}
+
+/// 等待「有人问过身份」的需求信号，或等到维护周期。返回是否由需求信号唤醒。
+///
+/// 这个线程在空闲期**只有一处**唤醒源之外的等待：需求信号（来自 `answer_query`）与
+/// 10 分钟一次的维护周期，此外没有任何周期性动作。没有可用 eventfd 时退化为纯周期
+/// 等待，功能不受影响。
+fn wait_for_identity_demand(demand_fd: i32, timeout_ms: i64) -> bool {
+    if demand_fd < 0 {
+        thread::sleep(Duration::from_millis(timeout_ms.max(1) as u64));
+        return false;
+    }
+    let mut poll_fd = libc::pollfd {
+        fd: demand_fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout = timeout_ms.clamp(1, i32::MAX as i64) as libc::c_int;
+    // SAFETY: poll_fd 指向本栈帧上已初始化的 pollfd；超时值已夹到 i32 范围。
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
+    if ready <= 0 {
+        return false;
+    }
+    let mut value: u64 = 0;
+    // SAFETY: value 是本栈帧可写的 u64，eventfd 读契约正是 8 字节计数。
+    unsafe {
+        libc::read(
+            demand_fd,
+            &mut value as *mut u64 as *mut libc::c_void,
+            std::mem::size_of::<u64>(),
+        );
+    }
+    true
 }
 
 /// 读取扫描器使用的进程身份，并判定该身份是否可缓存（返回 `(身份, volatile)`）。

@@ -1681,10 +1681,7 @@ fn preattach_shared_host(
     scoped_fuse_roots: &[String],
 ) -> Result<FuseMountState, HostSessionSkip> {
     if !shared_host_preattach_candidate(request, scoped_fuse_roots) {
-        if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
-            return Err(HostSessionSkip::NoPolicyRules);
-        }
-        return Err(HostSessionSkip::AttachGateClosed);
+        return Err(preattach_skip_reason(request));
     }
     let user_id = platform::user_id_from_uid(request.uid);
     // 与 daemon 侧同源：接入目标取视图根，用户根只用于私有目录恢复与状态判定。
@@ -1788,6 +1785,23 @@ fn scoped_fuse_mount_roots(request: &CompanionMountRequest) -> Vec<String> {
     vec![view_root]
 }
 
+/// 预接入闸门未放行时的原因归类（只用于日志与能力快照，不参与任何行为分支）。
+///
+/// 三个原因的区分很关键，否则现场只能看到一句 `attach_gate_closed`：
+/// - `no_policy_rules`：请求本身没有任何策略（mapping_mode_only / monitor_only 且无规则）；
+/// - `no_explicit_rules`：全隔离配置（deny-all + 沙盒），是**有意义的策略**，但当前闸门不放行；
+/// - `attach_gate_closed`：有显式规则却仍不是候选——规划根不是整棵存储视图根，
+///   或含必须靠 namespace bind 才能表达的私有 fs 侧映射。
+fn preattach_skip_reason(request: &CompanionMountRequest) -> HostSessionSkip {
+    if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
+        return HostSessionSkip::NoPolicyRules;
+    }
+    if !crate::fuse_redirect::config::mount_request_has_explicit_rules(request) {
+        return HostSessionSkip::NoExplicitRules;
+    }
+    HostSessionSkip::AttachGateClosed
+}
+
 fn shared_host_preattach_candidate(
     request: &CompanionMountRequest,
     scoped_fuse_roots: &[String],
@@ -1797,12 +1811,7 @@ fn shared_host_preattach_candidate(
     // 无规则系统链路接入后宿主策略 deny_all，应用视图变空目录、写入全被拒
     // （2026-10-30 issue #2 报告者 test14 实测：未配置任何应用仍有 5 个进程
     // 被覆盖，MT 管理器写 sdcard 失败）。监视由进程外 inotify 承担。
-    let has_policy_rules = !request.allowed_real_paths.is_empty()
-        || !request.excluded_real_paths.is_empty()
-        || !request.path_mappings.is_empty()
-        || !request.sandboxed_paths.is_empty()
-        || !request.read_only_paths.is_empty();
-    if !has_policy_rules {
+    if !crate::fuse_redirect::config::mount_request_has_explicit_rules(request) {
         return false;
     }
     // 与 daemon 侧同源的策略规则闸门：无规则的请求不预接宿主视图（接入后

@@ -14,6 +14,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::SystemTime;
 
+use log::debug;
 use log::error;
 use log::warn;
 
@@ -123,7 +124,18 @@ impl ReplyRaw {
         let sender = self.sender.take().unwrap();
         let res = response.with_iovec(self.unique, |iov| sender.send(iov));
         if let Err(err) = res {
-            error!("Failed to send FUSE reply: {err}");
+            // 回执写不回去几乎总是「内核已经把这条请求撤掉」（应用被杀/挂载点被摘/
+            // 会话 abort），调用方没有任何补救动作——它是结果、不是待办。真机实测
+            // 一次应用启动会成串出现十几条完全相同的行（2026-11-09），把轮转窗口填
+            // 满。保留前 3 条原样，之后按累计次数降级为 debug。
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static FAILED_REPLIES: AtomicUsize = AtomicUsize::new(0);
+            let seen = FAILED_REPLIES.fetch_add(1, Ordering::Relaxed) + 1;
+            if seen <= 3 {
+                error!("Failed to send FUSE reply: {err} (count={seen})");
+            } else {
+                debug!("Failed to send FUSE reply: {err} (throttled count={seen})");
+            }
         }
     }
     pub(crate) fn send_ll(mut self, response: &impl Response) {

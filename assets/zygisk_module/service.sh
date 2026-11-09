@@ -119,6 +119,13 @@ APP_STATUS_SNAPSHOT_PID_FILE="$LOGS_DIR/.app_status_snapshot.pid"
 STATS_COLLECTOR_PID_FILE="$LOGS_DIR/.stats_collector.pid"
 APP_ERROR_RING_PID_FILE="$LOGS_DIR/.app_error_ring.pid"
 APP_ERROR_RING_LOG_FILE="$LOGS_DIR/app-errors.log"
+# 主缓冲「按需窗口采集」的产物与状态（见 debug_collectors.sh）。
+APP_ERROR_WINDOW_PID_FILE="$LOGS_DIR/.app_error_window.pid"
+APP_ERROR_WINDOW_LOG_FILE="$LOGS_DIR/app-errors-window.log"
+# 应用错误 ring 的过滤器版本。改动过滤器语义时必须改这个值，下一次启动会清掉
+# 旧过滤器攒下的 ring（内容口径不同，混在一起无法判读）。v1 = `*:E` 全量（噪声）；
+# v2 = 白名单 + `*:S` 默认静音。
+APP_ERROR_RING_FILTER_VERSION="v2-whitelist"
 COLLECTOR_STATUS_LOG_FILE="$LOGS_DIR/collector_status.log"
 DEBUG_COLLECTORS_STATE_FILE="$LOGS_DIR/.debug_collectors_state"
 MEDIA_STATE_LAST_PID_FILE="$LOGS_DIR/.media_state_last_pid"

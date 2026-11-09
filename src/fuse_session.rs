@@ -264,6 +264,15 @@ pub(crate) enum HostSessionSkip {
     PolicyRegistrationFailed,
     /// 请求没有任何策略规则，接入宿主只会得到 deny_all 空视图。
     NoPolicyRules,
+    /// 请求是「全隔离」配置（enabled 且非 mapping_mode_only / monitor_only），但
+    /// `allowed_real_paths` / `excluded_real_paths` / `path_mappings` /
+    /// `sandboxed_paths` / `read_only_paths` 全为空。
+    ///
+    /// 这是一种**有意义的**策略（整棵存储都应落进沙盒），但当前闸门按「显式规则
+    /// 数组是否非空」判定，因此这类应用一律走 namespace bind。单独列出这个原因，
+    /// 是为了不再把它混进 `attach_gate_closed`——后者读起来像「挂载根不允许接入」，
+    /// 与实际原因完全不同，现场排查会被带偏（真机 2026-11-09 复现）。
+    NoExplicitRules,
     /// 登记与闸门都通过，但实际接入失败（超时、errno、后端不可读）。
     AttachFailed,
 }
@@ -286,6 +295,7 @@ impl HostSessionSkip {
             Self::AttachGateClosed => "attach_gate_closed",
             Self::PolicyRegistrationFailed => "policy_registration_failed",
             Self::NoPolicyRules => "no_policy_rules",
+            Self::NoExplicitRules => "no_explicit_rules",
             Self::AttachFailed => "host_attach_failed",
         }
     }

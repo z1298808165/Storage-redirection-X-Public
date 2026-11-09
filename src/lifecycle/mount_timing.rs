@@ -1,10 +1,8 @@
-// 应用侧等待「挂载执行方回执」的预算。
-//
-// 这个等待跑在应用主线程上（zygisk specialize 之后），而 AMS 的进程启动超时约 10 秒。
-// 旧实现用 220 × 50ms = 11 秒的轮询，单独就超过启动超时线；现在改为阻塞等待伴生进程的
-// 4 字节回执（`poll` + 一次读满），预算 600ms：实测挂载在请求发出后 ~200ms 内落定，
-// 600ms 覆盖正常波动，又远低于启动超时线，即使回执永远不来也不会把应用拖死。
-pub(crate) const POST_MOUNT_ACK_WAIT_MS: i64 = 600;
+// 应用主线程上**没有任何**挂载等待预算：请求发出后立刻关闭连接，就位判定是一次观测
+// （不睡眠、不轮询）。历史上这里有过 220 × 50ms = 11 秒的轮询（超过 AMS 的启动超时线，
+// 真机表现为 `failed to attach` + `start timeout`）与后来的 600ms 阻塞读回执（那条通道
+// 受 SELinux 域迁移阻断，见 `mount_request` 模块头注释）。两版都已删除——最省电、最不
+// 可能把应用拖死的等待，是不等待。
 
 pub(crate) const POST_SPECIALIZE_SLOW_MS: i64 = 20;
 
@@ -17,10 +15,6 @@ pub(crate) const COMPANION_PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
 pub(crate) const COMPANION_PROCESS_READY_TIMEOUT_MS: i32 = 5000;
 pub(crate) const COMPANION_MOUNT_SLOW_MS: i64 = 20;
 pub(crate) const FUSE_READY_TIMEOUT_SEC: i64 = 4;
-
-pub(crate) fn post_mount_ack_wait_budget_ms() -> i64 {
-    POST_MOUNT_ACK_WAIT_MS
-}
 
 pub(crate) fn companion_parent_recv_budget_sec(scoped_fuse_root_count: usize) -> i64 {
     companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count)

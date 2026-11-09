@@ -53,12 +53,17 @@ const MAX_PRE_RESET_DRAIN_ROUNDS: usize = 4;
 const OVERFLOW_RESYNC_MIN_INTERVAL_MS: i64 = 30_000;
 const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
 
-/// 死监视条目对账周期。inotify 队列溢出会丢弃 IN_IGNORED/IN_DELETE 事件，
-/// `watch_nodes` 中对应条目从此无人删除；内核复用 wd 后新目录的节点又推进
-/// 同一个 Vec，条目逐代堆积（ishtar 实测：繁忙设备 1.5 小时积到每 wd 平均
-/// ~12 个节点，监视树内存 121MB，而全新树只需 15MB）。按分钟级对账即可把
-/// 滞留控制在一个小窗口内。
-const PRUNE_DEAD_WATCHES_INTERVAL_MS: i64 = 60_000;
+/// 死条目对账的**重试**窗口（不是周期）。
+///
+/// 漂移的根因只有一个：inotify 队列溢出会丢弃 `IN_IGNORED`/`IN_DELETE` 事件，
+/// `watch_nodes` 里对应条目从此无人删除；内核复用 wd 后新目录的节点又推进同一个
+/// Vec，条目逐代堆积（ishtar 实测：繁忙设备 1.5 小时积到每 wd 平均 ~12 个节点，
+/// 监视树内存 121MB，而全新树只需 15MB）。
+///
+/// 也就是说「溢出」本身就是漂移的充分条件，而它也是**一个可观测的事件**。因此对账
+/// 不再按固定周期跑（那是每 60 秒读一次最长可达 1 MB 的 `fdinfo`、解析数万行白工），
+/// 改由溢出事件打标记触发；本常量只限制对账**失败后**的重试频率。
+const DRIFT_PRUNE_RETRY_MS: i64 = 60_000;
 /// 公共 owner 修复扫描在目录数没有变化时的记录间隔（建树与事件驱动轮次，约 5 分钟）。
 const PUBLIC_OWNER_REPAIR_LOG_HEARTBEAT: u64 = 300;
 /// 创建/写入观察事件的延迟裁决窗口：请求行（hook→socket→日志线程登记 hint）
@@ -71,7 +76,31 @@ const MAX_PENDING_OBSERVATIONS: usize = 4096;
 const MAX_EXISTING_TREE_REPAIR_DIRS: usize = 32768;
 const PUBLIC_OWNER_EXISTING_WATCH_DEPTH: usize = 2;
 
+/// 内核 inotify 配额（`/proc/sys/fs/inotify/max_user_watches`）的读取缓存时长。
+///
+/// 该值只在系统属性被改写时才变，而 `reconfigure` 每一轮都要问一次；此前每次重建
+/// 都读一遍 `/proc`，在写入风暴（每轮事件都要重建判定）时被按事件批次放大。带 TTL
+/// 的缓存让稳态下每分钟只读一次。
+const MAX_WATCHES_CACHE_TTL_MS: i64 = 60_000;
+static MAX_WATCHES_CACHE_MS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(i64::MIN / 2);
+static MAX_WATCHES_CACHED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_WATCHES);
+
 fn runtime_max_watches() -> usize {
+    let now_ms = paths::monotonic_ms();
+    if now_ms.saturating_sub(MAX_WATCHES_CACHE_MS.load(std::sync::atomic::Ordering::Relaxed))
+        < MAX_WATCHES_CACHE_TTL_MS
+    {
+        return MAX_WATCHES_CACHED.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    let value = compute_runtime_max_watches();
+    MAX_WATCHES_CACHED.store(value, std::sync::atomic::Ordering::Relaxed);
+    MAX_WATCHES_CACHE_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    value
+}
+
+fn compute_runtime_max_watches() -> usize {
     std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -242,6 +271,8 @@ pub struct RegularAppMonitor {
     last_rebuild_ms: i64,
     /// `inotify_add_watch` 非预期 errno 的累计次数，用于按 2 的幂限频告警。
     add_watch_error_count: u32,
+    /// 是否观测到「可能造成账本漂移」的队列溢出（对账的唯一触发条件）。
+    drift_suspected: bool,
     /// 上次登记溢出补偿全量扫描的时间，用于限流。
     last_overflow_resync_ms: i64,
     /// 配置未变化而直接沿用现有监视树的次数，用于限频输出排查日志。
@@ -283,6 +314,7 @@ impl RegularAppMonitor {
             first_build_done: false,
             last_rebuild_ms: 0,
             add_watch_error_count: 0,
+            drift_suspected: false,
             last_overflow_resync_ms: 0,
             unchanged_reconfigure_count: 0,
             last_prune_dead_ms: 0,
@@ -296,6 +328,23 @@ impl RegularAppMonitor {
         !self.capacity_limited
             && self.missing_roots > 0
             && paths::monotonic_ms().saturating_sub(self.last_rebuild_ms) >= MISSING_ROOT_RETRY_MS
+    }
+
+    /// 返回最近一项监视维护工作的绝对单调截止时间。
+    /// 缺失根重试 1 秒截止；已停车的观察事件按自身 250ms 截止。
+    pub fn next_wakeup_deadline_ms(&self) -> Option<i64> {
+        let missing_deadline = (!self.capacity_limited && self.missing_roots > 0)
+            .then(|| self.last_rebuild_ms.saturating_add(MISSING_ROOT_RETRY_MS));
+        let observation_deadline = self
+            .pending_observations
+            .iter()
+            .map(|item| item.parked_at_ms.saturating_add(OBSERVATION_PARK_WINDOW_MS))
+            .min();
+        match (missing_deadline, observation_deadline) {
+            (Some(missing), Some(observation)) => Some(missing.min(observation)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
     }
 
     /// 返回监视器 inotify fd，供 daemon 事件循环阻塞等待文件事件。
@@ -458,10 +507,10 @@ impl RegularAppMonitor {
     }
 
     fn retry_missing_watch_roots(&mut self) {
-        self.last_rebuild_ms = paths::monotonic_ms();
         if self.missing_watch_roots.is_empty() || self.capacity_limited {
             return;
         }
+        self.last_rebuild_ms = paths::monotonic_ms();
         if !self.ensure_fd() {
             self.needs_rebuild = true;
             return;
@@ -743,21 +792,25 @@ impl RegularAppMonitor {
 
     /// 按节流周期对账内核 live wd 集合，剪除已死亡的监视条目。
     fn prune_dead_watches_if_due(&mut self) {
-        if self.watch_nodes.is_empty() {
+        if !self.drift_suspected || self.watch_nodes.is_empty() {
             return;
         }
         let now = paths::monotonic_ms();
-        if now.saturating_sub(self.last_prune_dead_ms) < PRUNE_DEAD_WATCHES_INTERVAL_MS {
+        if now.saturating_sub(self.last_prune_dead_ms) < DRIFT_PRUNE_RETRY_MS {
             return;
         }
         self.last_prune_dead_ms = now;
-        let removed = self.prune_dead_watches();
-        if removed > 0 {
-            log::info!(
-                "daemon monitor pruned dead watches removed={} remaining={}",
-                removed,
-                self.watch_nodes.len()
-            );
+        // fdinfo 不可读时 `prune_dead_watches` 返回 None：本轮放弃对账，保留漂移标记
+        // 等下个重试窗口，绝不误删账本。
+        if let Some(removed) = self.prune_dead_watches() {
+            self.drift_suspected = false;
+            if removed > 0 {
+                log::info!(
+                    "daemon monitor pruned dead watches removed={} remaining={}",
+                    removed,
+                    self.watch_nodes.len()
+                );
+            }
         }
     }
 
@@ -768,26 +821,24 @@ impl RegularAppMonitor {
     /// 代堆积。以 `/proc/self/fdinfo/<fd>` 的内核侧 wd 清单为准删除不在册的
     /// 条目——该清单就是内核的真实 watch 表，任何丢失事件造成的漂移都会在
     /// 这里现形。fdinfo 读取失败时跳过本轮（不能因对账失败误删全部条目）。
-    fn prune_dead_watches(&mut self) -> usize {
+    fn prune_dead_watches(&mut self) -> Option<usize> {
         if self.fd < 0 || self.watch_nodes.is_empty() {
-            return 0;
+            return Some(0);
         }
-        let Some(live) = read_live_watch_fds(self.fd) else {
-            return 0;
-        };
+        let live = read_live_watch_fds(self.fd)?;
         // 防呆：对账清单为空说明 fdinfo 读取或解析异常（此时内核明明还有
         // watch），绝不能把整张表清掉；宁可推迟到下一轮。
         if live.is_empty() {
-            return 0;
+            return None;
         }
         let before = self.watch_nodes.len();
         // 清单规模与账本严重不符同样视为读取异常：正常情况下两者只差本次
         // 剪除目标（丢失事件造成的漂移），不会差一个数量级。
         if live.len() * 4 < before {
-            return 0;
+            return None;
         }
         self.watch_nodes.retain(|wd, _| live.contains(wd));
-        before - self.watch_nodes.len()
+        Some(before - self.watch_nodes.len())
     }
 
     fn add_watch_root(&mut self, root: &WatchRoot) -> Option<WatchNode> {
@@ -1119,6 +1170,9 @@ impl RegularAppMonitor {
     fn handle_event(&mut self, event: &Event<'_>) {
         let mask = event.mask;
         if inotify::is_queue_overflow(mask) {
+            // 溢出会丢掉 `IN_IGNORED`，账本可能与内核真实 watch 表不一致——这是死条目
+            // 对账的唯一触发条件（正常路径在事件里就地删除）。
+            self.drift_suspected = true;
             // 溢出说明内核已经丢弃了数量未知的事件，只重建监视集无法补回这批事件对应的
             // owner 修复与路径记录，因此需要一次全量补偿扫描。
             self.needs_rebuild = true;
@@ -1394,8 +1448,8 @@ impl RegularAppMonitor {
         }
     }
 
-    /// 距离最近一条待裁决观察事件到期还剩多少毫秒；无待裁决事件时返回 None。
-    /// 供监视线程把 poll 超时压到到期点，避免延迟裁决被 30 秒轮询拖长。
+    /// 最近一次待裁决观察到期所剩毫秒；仅供旧调用者/诊断，不包含 missing-root 重试。
+    /// 新等待逻辑应使用 `next_wakeup_deadline_ms` 合并所有真实截止点。
     pub fn pending_flush_delay_ms(&self) -> Option<u64> {
         let now_ms = paths::monotonic_ms();
         self.pending_observations

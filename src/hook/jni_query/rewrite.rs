@@ -26,7 +26,11 @@ const READ_ONLY_DENIED_SENTINEL_PREFIX: &str = "__SRX_READ_ONLY_DENIED__:";
 
 // MediaProvider cursor 行可能非常频繁地命中此路径。保留 inotify 作为快路径，
 // 并使用限流的指纹检查，避免监视事件遗漏或初始快照为空导致调用方查询过滤失效。
-const REWRITE_FINGERPRINT_RELOAD_INTERVAL_MS: i64 = 1000;
+//
+// 节流值与 `hook::reload`、`redirect::engine` 共用同一个判据：事件通道在线时该判据为
+// 「永不复查」（丢事件由 `IN_Q_OVERFLOW` 精确覆盖），通道不可用时才退回 1 秒。这三处若
+// 各用 1 秒，同一进程每秒就要算三次「readdir + 每个应用配置一次 stat」的指纹。
+
 static LAST_REWRITE_FINGERPRINT_CHECK_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
 
 fn refresh_settings_snapshot() {
@@ -38,7 +42,7 @@ fn refresh_settings_snapshot() {
 
     let now_ms = paths::monotonic_ms();
     let last_ms = LAST_REWRITE_FINGERPRINT_CHECK_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last_ms) < REWRITE_FINGERPRINT_RELOAD_INTERVAL_MS {
+    if now_ms.saturating_sub(last_ms) < crate::hook::fallback_reload_interval_ms() {
         return;
     }
     if LAST_REWRITE_FINGERPRINT_CHECK_MS

@@ -12,6 +12,8 @@ pub mod errno;
 pub mod fs;
 #[path = "platform/gnu_debugdata.rs"]
 pub mod gnu_debugdata;
+#[path = "platform/host_beat.rs"]
+pub mod host_beat;
 #[path = "platform/inotify.rs"]
 pub mod inotify;
 #[path = "platform/linker.rs"]

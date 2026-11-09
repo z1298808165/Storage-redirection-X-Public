@@ -153,11 +153,15 @@ pub unsafe extern "C" fn zygisk_companion_entry(client: libc::c_int) {
 unsafe fn companion_entry_impl(client: libc::c_int) {
     Logger::init(None);
     if !runtime_control::is_module_runtime_enabled() {
+        // 早退也要给对端一个字节组：否则应用侧等到的是一次静默 EOF，与"执行方明确失败"
+        // 无法区分（`ack=unavailable`），排查时会被引向错误方向。
+        crate::lifecycle::write_companion_status(client, 0);
         log::info!("companion exit reason=runtime_disabled");
         return;
     }
     let api_level = platform::android_api_level();
     if api_level < platform::MIN_SUPPORTED_API_LEVEL {
+        crate::lifecycle::write_companion_status(client, 0);
         log::info!(
             "companion exit reason=unsupported_android api={} min={}",
             api_level,

@@ -646,14 +646,60 @@ pub fn attach_app_to_host(
             false
         }
         None => {
-            let reason = reap_host_child(child);
-            log::warn!(
-                "fuse host attach unavailable child={} timeout_sec={} {}",
-                child,
-                timeout_sec,
-                reason
-            );
-            false
+            // 探针超时**不等于**接入失败。
+            //
+            // 子进程在 step 5.5 用应用凭据 stat 一次刚附着的视图根来做可用性验证，
+            // 那是一次穿过本会话的同步 FUSE 往返。而设备上单条 FUSE 请求偶发 20~60 秒
+            // （真机实测 `no_completion_ms=60551`，同一窗口内 attach 预算只有 5 秒），
+            // 于是「接入其实已经成功、只是验证没回来」会被判成失败，应用回落
+            // namespace bind —— 而且此时目标上已经叠了本会话的层，还会多出一层。
+            //
+            // 「挂载有没有就位」这件事不需要走 FUSE：读本进程命名空间的 mountinfo 即可
+            // （子进程挂在应用命名空间里，父进程同命名空间，看得到）。就位即成功。
+            let landed = crate::fuse_session::storage_view_top_dev(target_root).as_deref()
+                == Some(view.dev.as_str());
+            if landed {
+                // 子进程若恰好停在 move_mount 与传播关系设置之间，层已就位但仍是
+                // shared。父进程与子进程同命名空间，这里幂等地补一次（slave 对已是
+                // slave 的目标无副作用），把「多传出去一层」的可能性彻底关掉。
+                if let Ok(c_target) = CString::new(target_root) {
+                    let fixed = if target_root.trim_end_matches('/').ends_with("/emulated") {
+                        make_mount_slave(&c_target)
+                    } else {
+                        make_mount_private(&c_target)
+                    };
+                    if !fixed {
+                        log::warn!(
+                            "fuse host attach landed but propagate fix failed target={}",
+                            target_root
+                        );
+                    }
+                }
+                let reason = reap_host_child(child);
+                log::warn!(
+                    "fuse host attach probe timeout but mount landed child={} host={} target={} timeout_sec={} {}",
+                    child,
+                    view.child_pid,
+                    target_root,
+                    timeout_sec,
+                    reason
+                );
+                crate::fuse_redirect::config::record_fuse_capability_result(
+                    true,
+                    "host_attach_probe_timeout_but_landed",
+                    "srx_fuse_host",
+                );
+            } else {
+                log_attach_child_blocked_point(child, target_root, app_uid, timeout_sec);
+                let reason = reap_host_child(child);
+                log::warn!(
+                    "fuse host attach unavailable child={} timeout_sec={} {}",
+                    child,
+                    timeout_sec,
+                    reason
+                );
+            }
+            landed
         }
     };
     if !ok {
@@ -1442,6 +1488,57 @@ fn log_host_stage_trace() {
 /// 退出原因本身也是关键证据：`exit=1` 表示子进程走到了失败返回，`signal=9` 表示它没有
 /// 自己退出（由本次强杀收尾，即卡在某个阶段），`signal=11/6` 表示崩溃。回收是强制的，
 /// 否则每轮恢复都会留下一个僵尸进程。
+/// 接入子进程超时且挂载未就位时，把它的阻塞点落盘。
+///
+/// 5 秒窗口里一个 `srx_hostbind` 子进程只活一瞬，现场无法用外部采样抓到（实测轮询
+/// 50ms 也经常错过），所以必须由父进程在**杀掉它之前**自己取证：内核栈 + 等待通道 +
+/// 当前系统调用编号。这三个正是判断「卡在 FUSE 路径解析 / 卡在 setns / 卡在 open_tree」
+/// 的全部依据；没有它，这类失败只会留下一句 `unavailable`。
+fn log_attach_child_blocked_point(
+    child: libc::pid_t,
+    target_root: &str,
+    app_uid: i32,
+    timeout_sec: i64,
+) {
+    let base = format!("/proc/{child}");
+    let read = |name: &str| std::fs::read_to_string(format!("{base}/{name}")).unwrap_or_default();
+    let state = read("stat")
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or("?")
+        .to_string();
+    let wchan = read("wchan").trim().to_string();
+    let syscall = read("syscall").trim().to_string();
+    let mut stack = String::new();
+    for line in read("stack").lines().take(6) {
+        stack.push_str(line.trim());
+        stack.push('|');
+    }
+    log::warn!(
+        "fuse host attach child blocked child={} target={} uid={} timeout_sec={} state={} wchan={} syscall={} stack={}",
+        child,
+        target_root,
+        app_uid,
+        timeout_sec,
+        state,
+        if wchan.is_empty() {
+            "?"
+        } else {
+            wchan.as_str()
+        },
+        if syscall.is_empty() {
+            "?"
+        } else {
+            syscall.as_str()
+        },
+        if stack.is_empty() {
+            "?"
+        } else {
+            stack.as_str()
+        }
+    );
+}
+
 fn reap_host_child(pid: libc::pid_t) -> String {
     use crate::platform::child_wait::{self, ChildExit};
     // SAFETY: pid 来自本次 fork；先终止再有界回收，不会无限阻塞。
@@ -1494,6 +1591,11 @@ pub fn spawn_fuse_host() -> Option<FuseHost> {
     }
 
     reset_host_stage();
+    // 心跳共享页必须在 fork 之前建立：子进程继承同一份 MAP_SHARED 映射，心跳从此不需要
+    // 落盘（见 `platform::host_beat`）。失败只降级为文件心跳，不影响挂载。
+    if !crate::platform::host_beat::install() {
+        log::warn!("host beat shared page unavailable; fallback to file heartbeat");
+    }
     crate::logging::prepare_for_fork();
     // SAFETY: fork 前已完成日志/信号准备，匹配现有 daemon 挂载的 fork 模式。
     // 允许英文：fork 是系统调用名称。
@@ -2519,10 +2621,12 @@ pub fn wait_for_host_session() -> bool {
 // 宿主内看门狗先于本监控触发（阈值更短），因此本路径只在看门狗失效时才可能
 // 走到 abort——这正是它的设计定位。
 
-/// 心跳轮询间隔。
-const EXTERNAL_ABORT_POLL_MS: u64 = 2_000;
-/// 心跳陈旧阈值：宿主心跳线程每 2 秒覆写一次，超过该值未更新说明宿主进程整体
-/// 冻结（所有线程含非 FUSE 线程都停了）或已退出（退出场景由 pid 活性检查排除）。
+/// 心跳陈旧阈值（**下限**）：超过该值未更新说明宿主进程整体冻结（所有线程含非 FUSE
+/// 线程都停了）或已退出（退出场景由 pid 活性检查排除）。
+///
+/// 20 秒 = 活跃期 4 个心跳周期，足以排除调度抖动，又明显短于「冻结到用户可感知」的
+/// 量级。写方在空闲期会把间隔拉长到 60 秒，此时实际阈值按
+/// [`EXTERNAL_ABORT_BEAT_STALE_INTERVALS`] × 心跳里携带的间隔计算，但仍不低于本值。
 const EXTERNAL_ABORT_BEAT_STALE_MS: i64 = 20_000;
 /// 无完成时长阈值：心跳里 last_completion 距今超过该值且 waiting 积压，视为
 /// 停摆嫌疑。必须大于宿主内看门狗的全链路延迟（6s+10s+4s），保证看门狗健康时
@@ -2536,6 +2640,14 @@ const EXTERNAL_ABORT_PROBE_TIMEOUT_MS: u64 = 12_000;
 const EXTERNAL_ABORT_VERIFY_THROTTLE_MS: i64 = 60_000;
 /// abort 之后的冷却窗：换代重建需要时间，期间心跳必然异常，禁止重复动手。
 const EXTERNAL_ABORT_COOLDOWN_MS: i64 = 120_000;
+/// 模块停用后的等待上限：此时本线程很快随 daemon 退出，不需要做任何工作。
+const EXTERNAL_ABORT_DISABLED_WAIT_MS: i64 = 30_000;
+/// 陈旧阈值相对写方心跳间隔的倍数。
+///
+/// 写方空闲时把间隔拉长到 60 秒（见 `HOST_HEARTBEAT_IDLE_INTERVAL_MS`），阈值为其两倍
+/// 才能容忍一次错过的写入而不会误判；活跃期间隔 5 秒，两倍仍低于
+/// [`EXTERNAL_ABORT_BEAT_STALE_MS`] 的下限，因此活跃期判据不会被放松。
+const EXTERNAL_ABORT_BEAT_STALE_INTERVALS: i64 = 2;
 
 /// 验证子进程退出码：探测应答（alive）。
 const VERIFY_EXIT_ANSWERED: i32 = 0;
@@ -2544,15 +2656,22 @@ const VERIFY_EXIT_WAITING_CLEARED: i32 = 2;
 /// 验证子进程退出码：命名空间/sysfs 不可达（证据不足，放弃）。
 const VERIFY_EXIT_UNAVAILABLE: i32 = 3;
 
-/// 宿主心跳内容（解析自 [`crate::platform::module_paths::FUSE_HOST_HEARTBEAT_FILE`]）。
+/// 宿主心跳内容。
+///
+/// 两个来源：`platform::host_beat` 的父子共享页（正常路径，零系统调用、零磁盘 I/O），
+/// 以及模块目录下的心跳文件（共享页不可用时的退路，含上次开机的残留）。
 #[derive(Debug)]
 struct HostHeartbeat {
+    /// 仅文件来源有意义：共享页是每次开机新建的匿名映射，不存在跨启动残留。
     boot_id: String,
+    from_shared_page: bool,
     host_pid: i32,
     conn: i32,
     waiting: u64,
     last_completion_ms: i64,
     wall_ms: i64,
+    /// 写方本次使用的心跳间隔；0 表示旧格式（按活跃档处理，取保守值）。
+    interval_ms: i64,
 }
 
 /// 外部 abort 兜底验证结论。
@@ -2586,90 +2705,190 @@ pub fn spawn_external_abort_monitor() {
 
 fn external_abort_monitor_main() {
     log::info!("daemon external abort monitor started");
+    // 唤醒源由 `platform::host_beat` 持有：**daemon 在 fork 宿主之前**建立的 eventfd，
+    // 因此宿主也能写它。两条边沿会叫醒本线程：共享页建立（从「没有会话」进入「有会话」）
+    // 与宿主「空闲→活跃」。
+    let install_wake_fd = crate::platform::host_beat::ensure_wake_fd();
+    if install_wake_fd < 0 {
+        log::warn!("host beat wake fd unavailable; fallback to timed waits");
+    }
     let mut last_verify_ms = 0i64;
     let mut cooldown_until_ms = 0i64;
+    // 上一轮是否由事件唤醒：若是，这一轮不能按「空闲间隔 × 2」长期睡下去——事件意味着
+    // 状态刚变过，必须按活跃阈值重新评估。
+    let mut event_woken = false;
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(EXTERNAL_ABORT_POLL_MS));
+        let mut wait_ms = EXTERNAL_ABORT_BEAT_STALE_MS as i32;
         if !crate::runtime_control::is_module_runtime_enabled() {
-            continue;
-        }
-        let now = paths::monotonic_ms();
-        if now < cooldown_until_ms {
-            continue;
-        }
-        let Some(beat) = read_host_heartbeat() else {
-            continue;
-        };
-        // 上次开机的残留心跳（文件写在模块目录，重启后仍在）：boot_id 不符即忽略。
-        if beat.boot_id != read_own_boot_id() {
-            continue;
-        }
-        // 宿主进程已退出（正常换代/崩溃）：交给既有 pidfd 换代通道，不归本监控管。
-        if !process_alive(beat.host_pid) {
-            continue;
-        }
-        let wall_now = wall_ms();
-        let beat_age = wall_now.saturating_sub(beat.wall_ms);
-        let completion_age = if beat.last_completion_ms > 0 {
-            wall_now.saturating_sub(beat.last_completion_ms)
+            // 模块停用后本线程会随 daemon 一起退出，这里只需低频醒着、不做任何工作。
+            wait_ms = EXTERNAL_ABORT_DISABLED_WAIT_MS as i32;
         } else {
-            0
-        };
-        let beat_stale = beat_age > EXTERNAL_ABORT_BEAT_STALE_MS;
-        let completion_stalled =
-            beat.waiting > 0 && completion_age > EXTERNAL_ABORT_NO_COMPLETION_MS;
-        if !beat_stale && !completion_stalled {
-            continue;
+            // 即使共享页尚未建立也读取文件通道：mmap 失败时宿主仍用文件心跳，不能仅
+            // 因 wake eventfd 存在就无限等待一个永远不会到来的共享页建立事件。
+            let now = paths::monotonic_ms();
+            if now < cooldown_until_ms {
+                wait_ms = (cooldown_until_ms - now).clamp(1_000, 60_000) as i32;
+            } else if let Some(beat) = read_beat_preferring_shared() {
+                // 上次开机的残留心跳（文件写在模块目录，重启后仍在）：boot_id 不符即
+                // 忽略。共享页是本次开机新建的映射，无需该校验。
+                if !beat.from_shared_page && beat.boot_id != read_own_boot_id() {
+                    // 文件通道只可能是升级前的残留：等下次再看。
+                    wait_ms = EXTERNAL_ABORT_BEAT_STALE_MS as i32;
+                } else if !process_alive(beat.host_pid) {
+                    // 宿主进程已退出（正常换代/崩溃）：交给既有 pidfd 换代通道，这里只等
+                    // 新会话开始写心跳。
+                    wait_ms = EXTERNAL_ABORT_BEAT_STALE_MS as i32;
+                } else {
+                    wait_ms = evaluate_beat_and_schedule(
+                        &beat,
+                        &mut last_verify_ms,
+                        &mut cooldown_until_ms,
+                    );
+                }
+            }
+            // 共享页已建立但还没有心跳：等一个陈旧窗口再来问。
         }
-        if now.saturating_sub(last_verify_ms) < EXTERNAL_ABORT_VERIFY_THROTTLE_MS {
-            continue;
+        if event_woken && wait_ms > 0 {
+            // 事件唤醒后的这一轮只按活跃阈值重评，不按「空闲间隔 × 2」继续长睡。
+            wait_ms = wait_ms.min(EXTERNAL_ABORT_BEAT_STALE_MS as i32).max(1);
         }
-        last_verify_ms = now;
-        log::warn!(
-            "daemon external stall suspicion host_pid={} conn={} waiting={} beat_age_ms={} completion_age_ms={} trigger={} verifying",
-            beat.host_pid,
-            beat.conn,
-            beat.waiting,
-            beat_age,
-            completion_age,
-            if beat_stale {
-                "beat-stale"
-            } else {
-                "no-completion"
-            }
-        );
-        match verify_host_stall_externally(&beat) {
-            ExternalVerdict::Alive(reason) => {
-                log::warn!(
-                    "daemon external stall verdict=alive host_pid={} conn={} reason={}",
-                    beat.host_pid,
-                    beat.conn,
-                    reason
-                );
-            }
-            ExternalVerdict::Unavailable(reason) => {
-                log::warn!(
-                    "daemon external stall verdict=unavailable host_pid={} conn={} reason={}",
-                    beat.host_pid,
-                    beat.conn,
-                    reason
-                );
-            }
-            ExternalVerdict::Stalled => {
-                crate::fuse_redirect::config::forensics_log(&format!(
-                    "daemon external stall confirmed host_pid={} conn={} waiting={} beat_age_ms={} completion_age_ms={} action=abort",
-                    beat.host_pid, beat.conn, beat.waiting, beat_age, completion_age
-                ));
-                dump_external_stall_forensics(&beat);
-                let aborted = abort_host_connection_externally(&beat);
-                crate::fuse_redirect::config::forensics_log(&format!(
-                    "daemon external abort done host_pid={} conn={} aborted={} effect=requests-error-out host-exits generation-rebuild",
-                    beat.host_pid, beat.conn, aborted
-                ));
-                cooldown_until_ms = paths::monotonic_ms() + EXTERNAL_ABORT_COOLDOWN_MS;
-            }
+        event_woken = wait_for_host_beat_signal(install_wake_fd, wait_ms);
+    }
+}
+
+/// 判定一次心跳，返回下一次需要再看的等待毫秒数。
+///
+/// 关键在于「什么时候值得看」：判据只有两条——心跳自身变陈旧（超过
+/// [`EXTERNAL_ABORT_BEAT_STALE_MS`]，宿主整进程冻结时写线程也停了）、以及「队列有
+/// 积压但长时间没有请求完成」。第一条只在**当前这条心跳的陈旧截止点**之后才可能成立，
+/// 因此下一次唤醒直接排到那个时刻，而不是按固定 5 秒节拍空看。
+fn evaluate_beat_and_schedule(
+    beat: &HostHeartbeat,
+    last_verify_ms: &mut i64,
+    cooldown_until_ms: &mut i64,
+) -> i32 {
+    let wall_now = wall_ms();
+    let beat_age = wall_now.saturating_sub(beat.wall_ms);
+    let completion_age = if beat.last_completion_ms > 0 {
+        wall_now.saturating_sub(beat.last_completion_ms)
+    } else {
+        0
+    };
+    // 陈旧阈值跟着写方的心跳间隔走：写方空闲时会把间隔拉长（60 秒），阈值必须至少是
+    // 两倍间隔，否则「心跳变慢」会被误判成「宿主冻结」。下限仍是
+    // `EXTERNAL_ABORT_BEAT_STALE_MS`（20 秒），保证活跃期判据不放松。
+    let stale_threshold_ms = EXTERNAL_ABORT_BEAT_STALE_MS.max(
+        beat.interval_ms
+            .max(1)
+            .saturating_mul(EXTERNAL_ABORT_BEAT_STALE_INTERVALS),
+    );
+    let beat_stale = beat_age > stale_threshold_ms;
+    let completion_stalled = beat.waiting > 0 && completion_age > EXTERNAL_ABORT_NO_COMPLETION_MS;
+    if !beat_stale && !completion_stalled {
+        // 这条心跳仍然新鲜：下一次有意义的检查是它变陈旧的那一刻。
+        let beat_wait_ms = beat
+            .wall_ms
+            .saturating_add(stale_threshold_ms)
+            .saturating_sub(wall_now)
+            .clamp(1_000, stale_threshold_ms.max(1_000));
+        // 队列里有积压时，「无完成」判定会在 `last_completion_ms + 25 秒` 处成立，因此
+        // 那一刻必须能看见它，否则停摆的发现会被推迟到下一次心跳陈旧为止（最多多等
+        // 一个心跳窗口）。没有积压时不存在这个判定，只按上面的心跳截止点醒。
+        if beat.waiting > 0 && beat.last_completion_ms > 0 {
+            let completion_wait_ms = beat
+                .last_completion_ms
+                .saturating_add(EXTERNAL_ABORT_NO_COMPLETION_MS)
+                .saturating_sub(wall_now)
+                .clamp(1_000, stale_threshold_ms.max(1_000));
+            return completion_wait_ms.min(beat_wait_ms) as i32;
+        }
+        return beat_wait_ms as i32;
+    }
+    let now = paths::monotonic_ms();
+    if now.saturating_sub(*last_verify_ms) < EXTERNAL_ABORT_VERIFY_THROTTLE_MS {
+        // 嫌疑已在验证节流窗口内：等窗口过去再看，别空转。
+        return EXTERNAL_ABORT_VERIFY_THROTTLE_MS
+            .saturating_sub(now.saturating_sub(*last_verify_ms))
+            .clamp(1_000, 60_000) as i32;
+    }
+    *last_verify_ms = now;
+    log::warn!(
+        "daemon external stall suspicion host_pid={} conn={} waiting={} beat_age_ms={} completion_age_ms={} trigger={} verifying",
+        beat.host_pid,
+        beat.conn,
+        beat.waiting,
+        beat_age,
+        completion_age,
+        if beat_stale {
+            "beat-stale"
+        } else {
+            "no-completion"
+        }
+    );
+    match verify_host_stall_externally(beat) {
+        ExternalVerdict::Alive(reason) => {
+            log::warn!(
+                "daemon external stall verdict=alive host_pid={} conn={} reason={}",
+                beat.host_pid,
+                beat.conn,
+                reason
+            );
+        }
+        ExternalVerdict::Unavailable(reason) => {
+            log::warn!(
+                "daemon external stall verdict=unavailable host_pid={} conn={} reason={}",
+                beat.host_pid,
+                beat.conn,
+                reason
+            );
+        }
+        ExternalVerdict::Stalled => {
+            crate::fuse_redirect::config::forensics_log(&format!(
+                "daemon external stall confirmed host_pid={} conn={} waiting={} beat_age_ms={} completion_age_ms={} action=abort",
+                beat.host_pid, beat.conn, beat.waiting, beat_age, completion_age
+            ));
+            dump_external_stall_forensics(beat);
+            let aborted = abort_host_connection_externally(beat);
+            crate::fuse_redirect::config::forensics_log(&format!(
+                "daemon external abort done host_pid={} conn={} aborted={} effect=requests-error-out host-exits generation-rebuild",
+                beat.host_pid, beat.conn, aborted
+            ));
+            *cooldown_until_ms = paths::monotonic_ms() + EXTERNAL_ABORT_COOLDOWN_MS;
         }
     }
+    EXTERNAL_ABORT_BEAT_STALE_MS as i32
+}
+
+/// 等待下一次检查：只由「共享页建立 / 空闲→活跃」事件或超时唤醒。
+///
+/// `timeout_ms < 0` 表示无限等待（此时只有事件能叫醒它）。返回是否由事件唤醒。
+fn wait_for_host_beat_signal(fd: i32, timeout_ms: i32) -> bool {
+    if fd < 0 {
+        // eventfd 不可用（极端情形）：退回睡眠，语义不变。
+        let sleep_ms = timeout_ms.clamp(1_000, 60_000) as u64;
+        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+        return false;
+    }
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd 指向本栈帧已初始化的 pollfd；超时值由调用方夹在合理范围。
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready <= 0 {
+        return false;
+    }
+    let mut value: u64 = 0;
+    // SAFETY: value 是本栈帧可写的 u64，eventfd 读契约正是 8 字节计数。
+    unsafe {
+        libc::read(
+            fd,
+            &mut value as *mut u64 as *mut libc::c_void,
+            std::mem::size_of::<u64>(),
+        );
+    }
+    true
 }
 
 /// 读取并解析宿主心跳文件；缺失或格式不符返回 None（静默：宿主未建会话是常态）。
@@ -2677,17 +2896,46 @@ fn read_host_heartbeat() -> Option<HostHeartbeat> {
     let text =
         std::fs::read_to_string(crate::platform::module_paths::FUSE_HOST_HEARTBEAT_FILE).ok()?;
     let fields: Vec<&str> = text.trim().split('|').collect();
-    if fields.len() != 7 || fields[0] != "srx_beat" {
+    // 7 段是老格式（没有 interval），按活跃档处理；8 段带写方间隔。
+    if (fields.len() != 7 && fields.len() != 8) || fields[0] != "srx_beat" {
         return None;
     }
     Some(HostHeartbeat {
         boot_id: fields[1].to_string(),
+        from_shared_page: false,
         host_pid: fields[2].parse().ok()?,
         conn: fields[3].parse().ok()?,
         waiting: fields[4].parse().ok()?,
         last_completion_ms: fields[5].parse().ok()?,
         wall_ms: fields[6].parse().ok()?,
+        interval_ms: fields
+            .get(7)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(EXTERNAL_ABORT_BEAT_STALE_MS),
     })
+}
+
+/// 读一次宿主心跳：优先共享页（零系统调用、零磁盘 I/O），其次心跳文件。
+///
+/// 顺序不能反过来：共享页是新路径，正常情况下文件心跳根本不会被写入（宿主的写线程在
+/// 共享页可用时不会落盘），因此「文件陈旧」不代表宿主有问题，只有共享页读不到时才回退。
+fn read_beat_preferring_shared() -> Option<HostHeartbeat> {
+    if crate::platform::host_beat::installed() {
+        // 共享页已建立：心跳只可能来自它。此时若读不到（宿主尚未开始写），按「没有
+        // 心跳」处理，绝不回退到文件——那份文件是升级前的残留，会被误判为当前心跳。
+        let beat = crate::platform::host_beat::read_beat()?;
+        return Some(HostHeartbeat {
+            boot_id: String::new(),
+            from_shared_page: true,
+            host_pid: beat.host_pid,
+            conn: beat.conn,
+            waiting: beat.waiting.max(0) as u64,
+            last_completion_ms: beat.last_completion_ms,
+            wall_ms: beat.wall_ms,
+            interval_ms: beat.interval_ms,
+        });
+    }
+    read_host_heartbeat()
 }
 
 /// 当前墙钟毫秒（与宿主心跳的 wall_ms 同口径，宿主与 daemon 共享系统墙钟）。

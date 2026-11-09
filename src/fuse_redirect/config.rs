@@ -980,7 +980,23 @@ pub fn mount_host_fuse(
     mount_options.n_threads = Some(16);
     mount_options.clone_fd = true;
 
-    let background = match fuser::spawn_mount2(fs, host_mount_point, &mount_options) {
+    // 会话退出事件：vendor 的 fuser-bg 线程返回时写一字节。有了这条边沿，宿主服务
+    // 循环不必再轮询 `guard.is_finished()`，空闲时可以一直睡到下一个定时任务截止点。
+    // SAFETY: eventfd 只创建内核对象并返回 fd；标志均为合法常量。
+    let exit_event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    // RAII：离开函数时关闭该 fd（会话线程此时已被 join，不存在写到复用 fd 的竞态）。
+    let _exit_guard = OwnedFd(exit_event_fd);
+    if exit_event_fd < 0 {
+        log::warn!(
+            "fuse host exit eventfd unavailable, fallback to polling session state errno={}",
+            last_errno()
+        );
+    }
+    let background = match if exit_event_fd >= 0 {
+        fuser::spawn_mount2_with_exit_notify(fs, host_mount_point, &mount_options, exit_event_fd)
+    } else {
+        fuser::spawn_mount2(fs, host_mount_point, &mount_options)
+    } {
         Ok(background) => background,
         Err(error) => {
             crate::fuse_host::host_stage("mount_failed");
@@ -1109,17 +1125,78 @@ pub fn mount_host_fuse(
     if let Some(heartbeat_conn) = watchdog_conn {
         spawn_host_heartbeat_writer(heartbeat_conn);
     }
+    // 服务循环：**事件驱动**。三件事（会话结束、锚点自愈、空闲页归还）里有两件是定时
+    // 任务、一件是外部事件，因此唯一正确的等待方式是「睡到最近的截止点，或睡到事件到达」。
+    //
+    // 会话结束由 vendor 的 `spawn_with_exit_notify` 通过 [`OwnedFd`] 通知；若无
+    // eventfd（创建失败），退回按 [`HOST_SESSION_TICK_MS`] 探询 `guard.is_finished()`。
+    // 活动边沿 eventfd：请求「从空闲进入在途」与「在途清零」时各写一次。锚点校验与
+    // 空闲页归还都挂在这条边沿上——它们只在「真的要服务 I/O」时有意义，因此完全不需要
+    // 独立定时器。空闲（没有任何在途请求）时服务循环以无限超时阻塞。
+    // SAFETY: eventfd 只创建内核对象并返回 fd；标志均为合法常量。
+    let wake_event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    let _wake_guard = ActivityWakeGuard(wake_event_fd);
+    if wake_event_fd >= 0 {
+        fuser::activity::set_wake_eventfd(wake_event_fd);
+    }
+    let wake_epfd = if exit_event_fd >= 0 && wake_event_fd >= 0 {
+        // SAFETY: epoll_create1(0) 只创建内核对象；epoll_ctl 挂本函数创建的合法 fd。
+        let epfd = unsafe { libc::epoll_create1(0) };
+        if epfd >= 0 {
+            let mut exit_event = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: EPollTag::Exit as u64,
+            };
+            let mut wake_event = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: EPollTag::Wake as u64,
+            };
+            // SAFETY: epfd、exit_event_fd 都是本函数刚创建并校验过返回值的合法 fd，
+            // epoll_event 是栈上结构体、生命周期覆盖本次调用。
+            let added_exit = unsafe {
+                libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, exit_event_fd, &mut exit_event)
+            };
+            // SAFETY: 同上；wake_event_fd 与 wake_event 也都是本函数创建的合法对象。
+            let added_wake = unsafe {
+                libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, wake_event_fd, &mut wake_event)
+            };
+            if added_exit == 0 && added_wake == 0 {
+                Some(epfd)
+            } else {
+                // SAFETY: epfd 由本函数创建，失败路径的清理点。
+                unsafe { libc::close(epfd) };
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let _wake_epfd_guard = OwnedFd(wake_epfd.unwrap_or(-1));
+    // 「自上次归还以来真的分配过」：决定空闲期是否需要为一次归还而醒来。
+    //
+    // 归还空闲页只在**刚发生过批量分配**之后才有意义；若空闲期也按 5 分钟醒一次，
+    // 等于用一次唤醒换一次空操作。反过来，如果完全不醒，一轮突发之后的 RSS 会永久
+    // 滞留在峰值（用户侧「常驻内存几百兆」）。因此只在「有过 I/O」时安排一次归还。
+    let mut purge_pending = false;
     loop {
-        if background.guard.is_finished() {
+        // 只有没有事件源时才需要探询线程状态。
+        if _wake_epfd_guard.0 < 0 && background.guard.is_finished() {
             return finish_background_session(background, host_mount_point, false, Some(&identity));
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
         let now_ms = crate::platform::paths::monotonic_ms();
+        let in_flight = fuser::activity::in_flight();
+        if in_flight > 0 {
+            // 有在途请求 = 正在分配：安排一次突发结束后的归还。
+            purge_pending = true;
+        }
         if now_ms.saturating_sub(last_purge_ms)
             >= crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
         {
             last_purge_ms = now_ms;
             crate::platform::allocator::release_free_pages();
+            purge_pending = false;
         }
         // 锚点存在性周期校验（10 秒，降低窗口期）：数据面 real_root 现在依赖锚点 bind，
         // 而 gen4 冻结现场实证 bind 会静默消失（mount info 无条目；根因为 MS_BIND 复制
@@ -1163,8 +1240,138 @@ pub fn mount_host_fuse(
                 }
             }
         }
+        // 睡到「下一个截止点」或者「会话退出事件」，两者谁先到就醒谁。
+        //
+        // 会话结束现在有真正的边沿（vendor 在 fuser-bg 线程返回时写 eventfd），因此
+        // 空闲期不需要任何定期探询：下一次唤醒就是 10 秒后的锚点校验。没有 eventfd
+        // 的退化路径才按 [`HOST_SESSION_TICK_MS`] 探询线程状态。
+        let wait_now_ms = crate::platform::paths::monotonic_ms();
+        let deadline_ms = HOST_ANCHOR_CHECK_INTERVAL_MS
+            .saturating_sub(wait_now_ms.saturating_sub(last_anchor_check_ms))
+            .min(
+                crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
+                    .saturating_sub(wait_now_ms.saturating_sub(last_purge_ms)),
+            )
+            .max(1);
+        if _wake_epfd_guard.0 >= 0 {
+            // 空闲（无在途请求）时无限期阻塞：唤醒只可能来自「请求边沿」或「会话退出」。
+            // 有在途请求时才按截止点醒来做锚点/归还检查——这正是「有活才醒」。
+            // 唯一的例外是「上一轮活动还欠一次归还」：那时睡到归还截止点醒一次，做完
+            // 就回到无限期阻塞（一轮突发只多一次唤醒）。
+            let timeout_ms = if in_flight > 0 {
+                deadline_ms.min(i32::MAX as i64) as i32
+            } else if purge_pending {
+                crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS
+                    .saturating_sub(now_ms.saturating_sub(last_purge_ms))
+                    .clamp(1, crate::platform::allocator::QUIESCENT_PURGE_INTERVAL_MS)
+                    .min(i32::MAX as i64) as i32
+            } else {
+                // 空闲上限不是无限：边沿只覆盖「有请求被取走」，若边沿通路本身失效
+                // （eventfd 被替换、vendor 侧写入失败），无限等待会让锚点自愈与空闲页
+                // 归还永久停摆。10 分钟一次（0.0017 Hz）属于纯保险，代价可忽略。
+                HOST_SESSION_IDLE_MAX_MS
+            };
+            let mut events = [
+                libc::epoll_event { events: 0, u64: 0 },
+                libc::epoll_event { events: 0, u64: 0 },
+            ];
+            // SAFETY: epfd 与 events 均为本作用域拥有的合法对象，超时已算好。
+            let ready =
+                unsafe { libc::epoll_wait(_wake_epfd_guard.0, events.as_mut_ptr(), 2, timeout_ms) };
+            if ready > 0 {
+                let mut exit_fired = false;
+                for event in events.iter().take(ready as usize) {
+                    if event.u64 == EPollTag::Exit as u64 {
+                        exit_fired = true;
+                    } else {
+                        drain_eventfd(wake_event_fd);
+                    }
+                }
+                if exit_fired {
+                    drain_eventfd(exit_event_fd);
+                    log::info!("fuse host session loop exited mp={}", host_mount_point);
+                    return finish_background_session(
+                        background,
+                        host_mount_point,
+                        false,
+                        Some(&identity),
+                    );
+                }
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(
+                deadline_ms.min(HOST_SESSION_TICK_MS) as u64,
+            ));
+        }
     }
 }
+
+/// 服务循环 epoll 的事件标签。
+#[repr(u64)]
+enum EPollTag {
+    Exit = 1,
+    Wake = 2,
+}
+
+/// 排空一个非阻塞 eventfd 的累计计数。
+fn drain_eventfd(fd: libc::c_int) {
+    if fd < 0 {
+        return;
+    }
+    loop {
+        let mut value: u64 = 0;
+        // SAFETY: fd 是本进程创建的 eventfd，读 8 字节计数是其契约。
+        let n = unsafe {
+            libc::read(
+                fd,
+                &mut value as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            )
+        };
+        if n <= 0 {
+            return;
+        }
+    }
+}
+
+/// 活动边沿 eventfd 的独占持有：离开作用域时**先解绑再关闭**。
+///
+/// 顺序很重要：vendor 侧保存的是裸 fd 号，若先关闭再留着号码，后续请求完成时的边沿
+/// 写入会落到一个可能已被复用的 fd 上（写 8 字节到别人的管道/socket 就是数据损坏）。
+struct ActivityWakeGuard(libc::c_int);
+
+impl Drop for ActivityWakeGuard {
+    fn drop(&mut self) {
+        fuser::activity::set_wake_eventfd(-1);
+        if self.0 >= 0 {
+            // SAFETY: fd 由本结构体独占持有，且已先从 vendor 侧解绑。
+            unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+/// 独占的 fd（eventfd / epoll 实例）：离开作用域时关闭。
+///
+/// 会话结束 eventfd 与 epoll 实例的持有语义完全一致，无需分成两个类型。
+struct OwnedFd(libc::c_int);
+
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            // SAFETY: fd 由本结构体独占持有，此处是唯一关闭点。
+            unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+/// 服务循环空闲期的最大等待时长（毫秒）：纯保险，正常路径靠边沿唤醒。
+const HOST_SESSION_IDLE_MAX_MS: i32 = 600_000;
+
+/// 服务循环的退化探询节拍（毫秒）。
+///
+/// 只有 eventfd/epoll 创建失败时才会用到：那时无法收到「会话结束」的边沿，只能按这个
+/// 节拍查一次 `guard.is_finished()`。正常路径下这个常量不参与任何唤醒。
+const HOST_SESSION_TICK_MS: i64 = 1_000;
 
 /// 停摆判定的「无请求完成」时长：单请求处理超过该值在 f2fs 直连后端上已属异常
 /// （常规读写为毫秒级），配合 waiting 积压即为停摆候选。取 6 秒在快速确认与
@@ -1178,15 +1385,54 @@ const HOST_STALL_PROBE_TIMEOUT_MS: u32 = 10_000;
 const HOST_STALL_CONFIRM_MS: i64 = 4_000;
 /// 探测节流：一次探测后至少间隔该时长才允许再次探测，避免持续慢负载下反复 fork。
 const HOST_STALL_PROBE_THROTTLE_MS: i64 = 30_000;
-/// 看门狗事件循环的等待超时：空闲时兜底检查周期。
+/// 看门狗事件循环的等待超时：活跃期的检查节拍。
 const HOST_STALL_EPOLL_TIMEOUT_MS: i32 = 1_000;
+/// 空闲期（无在途、无近期完成）的兜底检查节拍。
+///
+/// 边沿信号只覆盖「worker 取走了请求」，覆盖不了「请求在内核队列里没人取」。这个
+/// 节拍是那种形态的唯一发现手段，因此必须是有限值；60 秒 = 0.017 Hz，与心跳同量级。
+const HOST_STALL_IDLE_POLL_MS: i32 = 60_000;
+/// 最后一个请求完成之后仍保持该节拍的时长。
+///
+/// 停摆只可能发生在「有请求在飞」的时候：内核队列为空时 `waiting` 恒为 0，读它没有
+/// 任何信息量。因此空闲期看门狗改为无限期睡在 eventfd 上（零唤醒），由
+/// `fuser::activity` 的 0→1 边沿唤醒；这个宽限窗口覆盖「刚完成、可能还有后续请求
+/// 正在排队」的那一小段，避免在活动收尾的瞬间把节拍断掉。
+const HOST_STALL_IDLE_GRACE_MS: i64 = 10_000;
+/// candidate（未确认）阶段取证的最小间隔。
+///
+/// 只约束误报路径：真停摆的 confirmed 取证不受它限制。取 10 分钟是为了「一个会话
+/// 生命周期内至少留下一份可比对的现场」，同时把误报造成的落盘量压到可忽略。
+const HOST_STALL_SCENE_THROTTLE_MS: i64 = 600_000;
 /// 取证时单个线程内核栈的最大输出行数。
-const HOST_STALL_STACK_LINES: usize = 16;
+const HOST_STALL_STACK_LINES: usize = 6;
 
-/// 宿主心跳文件写入间隔：daemon 侧外部 abort 兜底监控按它判定宿主是否仍在
-/// 自主观测。2 秒粒度足够兜底判定（兜底阈值以 20 秒计），写放大可忽略。
-const HOST_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
-/// 心跳写失败日志节流：会话拆除窗口内 sysfs/文件系统可能短暂不可写，避免每 2 秒刷屏。
+/// 活跃期的心跳间隔。
+///
+/// 写的是 `platform::host_beat` 的父子共享页（纯内存写，零系统调用、零磁盘 I/O），
+/// 因此这个间隔只决定「frozen 检测的粒度」，不产生任何写放大；共享页不可用时才退回
+/// 「写临时文件 + rename」的文件心跳。
+///
+/// 判据侧：daemon 的陈旧阈值取 `max(EXTERNAL_ABORT_BEAT_STALE_MS=20s, 2 × 本间隔)`，
+/// 且只在这条心跳的陈旧截止点醒来；「无请求完成」判定（25 秒）用的是心跳里携带的
+/// 采样值，采样只会让判定偏晚，不会提前误判。
+const HOST_HEARTBEAT_ACTIVE_INTERVAL_MS: u64 = 5_000;
+/// 空闲期的心跳间隔。
+///
+/// 心跳的唯一职责是「向进程外的观察者证明我还活着」。空闲时没有请求可服务，一次冻结
+/// 的代价只是「下一个请求会挂住」，因此不需要 5 秒级的证明粒度；把它拉长到 60 秒，
+/// 空闲期这条脉冲就从 0.2 Hz 降到 0.017 Hz。
+///
+/// 心跳里会带上**本次使用的间隔**（`interval_ms`），daemon 按「2 倍间隔」推算陈旧
+/// 阈值，因此间隔变长不会造成误判；而一旦有在途请求/积压，下一轮立刻回到
+/// [`HOST_HEARTBEAT_ACTIVE_INTERVAL_MS`]，把发现延迟压回 20 秒。
+const HOST_HEARTBEAT_IDLE_INTERVAL_MS: u64 = 60_000;
+/// 判定「仍算活跃」的完成宽限：最后一次请求完成之后的这段时间内仍按活跃节奏心跳。
+///
+/// 必须覆盖 daemon 的「无完成」判据窗（25 秒）加上采样误差，否则突发刚结束就把间隔
+/// 拉长，可能让 daemon 用活跃阈值去看一条由空闲间隔写出的心跳。
+const HOST_HEARTBEAT_ACTIVE_GRACE_MS: i64 = 30_000;
+/// 心跳写失败日志节流：会话拆除窗口内 sysfs/文件系统可能短暂不可写，避免每次心跳刷屏。
 const HOST_HEARTBEAT_FAIL_LOG_THROTTLE_MS: i64 = 30_000;
 /// 锚点存在性周期校验间隔：私有化后（bind 即 MS_PRIVATE，脱离一切传播组）锚点
 /// 理论上不会再被系统侧 umount 传播摘除，本校验降级为最后防线——10 秒粒度在
@@ -1210,12 +1456,22 @@ fn spawn_host_heartbeat_writer(connection: i32) {
     }
 }
 
-/// 宿主心跳主循环：原子覆写心跳文件（tmp + rename，避免 daemon 读到半行）。
+/// 宿主心跳主循环：优先写父子共享页；共享页不可用时退回文件心跳（tmp + rename）。
 ///
-/// 字段（竖线分隔）：`srx_beat|boot_id|host_pid|conn|waiting|last_completion_ms|wall_ms`。
-/// `last_completion_ms` 为墙钟口径（与 [`fuser::activity::now_ms`] 同源），daemon 与
-/// 宿主共享墙钟，可直接计算无完成时长；boot_id 供 daemon 剔除上次开机的残留文件。
+/// 共享页字段与文件里的竖线格式一一对应：`host_pid|conn|waiting|last_completion_ms|
+/// wall_ms|interval_ms`。`last_completion_ms` 为墙钟口径（与 [`fuser::activity::now_ms`]
+/// 同源），daemon 与宿主共享墙钟，可直接计算无完成时长；`boot_id` 只在文件通道里
+/// 有意义，用于让 daemon 剔除上次开机的残留文件。
+///
+/// 间隔**按活跃度自适应**：有在途请求、内核队列有积压、或刚有请求完成时用
+/// [`HOST_HEARTBEAT_ACTIVE_INTERVAL_MS`]，否则用
+/// [`HOST_HEARTBEAT_IDLE_INTERVAL_MS`]。间隔本身写进心跳，daemon 据此推算陈旧阈值。
 fn host_heartbeat_loop(connection: i32) {
+    // SAFETY: eventfd 只创建内核对象并返回 fd，标志均为合法常量；返回值在下面统一判负。
+    let heartbeat_event_fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if heartbeat_event_fd >= 0 {
+        fuser::activity::set_heartbeat_eventfd(heartbeat_event_fd);
+    }
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map(|text| text.trim().to_string())
         .unwrap_or_default();
@@ -1223,16 +1479,53 @@ fn host_heartbeat_loop(connection: i32) {
     let tmp_path =
         std::path::Path::new("/data/adb/modules/storage.redirect.x/tmp/.fuse_host.beat.tmp");
     let mut last_fail_log_ms = 0i64;
+    // 上一轮是否处于活跃档：只在「空闲→活跃」边沿唤醒 daemon，不在每次心跳上打扰它。
+    let mut was_active = false;
     loop {
         let waiting = read_fuse_waiting(connection).unwrap_or(0);
+        let last_completion_ms = fuser::activity::last_completion_ms();
+        let wall_ms = fuser::activity::now_ms();
+        let in_flight = fuser::activity::in_flight();
+        // 活跃度：有在途请求、内核队列有积压、或刚有请求完成。
+        let active = in_flight > 0
+            || waiting > 0
+            || (last_completion_ms > 0
+                && wall_ms.saturating_sub(last_completion_ms) < HOST_HEARTBEAT_ACTIVE_GRACE_MS);
+        let interval_ms = if active {
+            HOST_HEARTBEAT_ACTIVE_INTERVAL_MS
+        } else {
+            HOST_HEARTBEAT_IDLE_INTERVAL_MS
+        };
+        if active && !was_active {
+            // 空闲→活跃：daemon 此刻可能正按「空闲间隔 × 2」的长时限睡着，必须立刻
+            // 叫醒它改按活跃阈值评估，否则活跃期冻结的发现会被推迟到 120 秒。
+            crate::platform::host_beat::signal_activity();
+        }
+        was_active = active;
+        // 共享页优先：daemon fork 之前建立的同一页映射，写入是纯内存操作，不产生任何
+        // 系统调用与磁盘 I/O（模块唯一一处空闲期落盘就此消失）。共享页不可用时退回
+        // 文件心跳，语义完全相同。
+        let shared_ok = crate::platform::host_beat::write_beat(crate::platform::host_beat::Beat {
+            host_pid: std::process::id() as i32,
+            conn: connection,
+            waiting: waiting as i64,
+            last_completion_ms,
+            wall_ms,
+            interval_ms: interval_ms as i64,
+        });
+        if shared_ok {
+            wait_for_heartbeat_activity(heartbeat_event_fd, interval_ms);
+            continue;
+        }
         let line = format!(
-            "srx_beat|{}|{}|{}|{}|{}|{}",
+            "srx_beat|{}|{}|{}|{}|{}|{}|{}",
             boot_id,
             std::process::id(),
             connection,
             waiting,
-            fuser::activity::last_completion_ms(),
-            fuser::activity::now_ms()
+            last_completion_ms,
+            wall_ms,
+            interval_ms
         );
         let write_result = (|| -> io::Result<()> {
             std::fs::write(tmp_path, line.as_bytes())?;
@@ -1249,15 +1542,41 @@ fn host_heartbeat_loop(connection: i32) {
                 );
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(HOST_HEARTBEAT_INTERVAL_MS));
+        wait_for_heartbeat_activity(heartbeat_event_fd, interval_ms);
+    }
+}
+
+fn wait_for_heartbeat_activity(fd: i32, interval_ms: u64) {
+    if fd < 0 {
+        std::thread::sleep(std::time::Duration::from_millis(interval_ms));
+        return;
+    }
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd 是栈上结构体，n=1 与实参一致；超时已限幅到 i32 可表示范围。
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, interval_ms.min(i32::MAX as u64) as i32) };
+    if ready > 0 && (poll_fd.revents & libc::POLLIN) != 0 {
+        let mut value = 0u64;
+        // SAFETY: fd 是本函数开头校验过的读端，value 是栈上 u64，读取长度与之相同。
+        unsafe {
+            libc::read(
+                fd,
+                &mut value as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
     }
 }
 
 /// 启动宿主停摆看门狗线程。
 ///
-/// 线程阻塞在 eventfd 的 epoll 上：worker 每完成一个请求写一次 eventfd，空闲时
-/// 看门狗睡在 epoll_wait（零 CPU），仅在请求停止完成时由超时路径唤醒——发现延迟
-/// 是「无完成时长」本身，不是轮询间隔。eventfd 由本函数创建并注入 vendor 会话。
+/// 线程阻塞在 eventfd 的 epoll 上：worker 只在「在途从 0 变 1」与「在途清零」两条
+/// 边沿写一次 eventfd（见 `fuser::activity`），连续大流量下不再每请求写一次；空闲时
+/// 看门狗睡在 epoll_wait（零 CPU），判定依赖 1 秒节拍的 `waiting` 读取与完成时刻，
+/// 因此发现延迟是「无完成时长」本身，不是轮询间隔。eventfd 由本函数创建并注入会话。
 fn spawn_host_stall_watchdog(connection: Option<i32>) {
     let Some(connection) = connection else {
         return;
@@ -1319,23 +1638,55 @@ fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
         return;
     }
 
-    let mut flow_seen = false;
+    // 看门狗启动时刻：作为「本会话从未完成过任何请求」时的无完成时长基线。
+    // 缺了它，`last_completion_ms == 0` 会让 `now - 0` 变成一个天文数字（真机实测
+    // 1794191806031 ms），于是会话刚建立、第一个请求还在飞时就必然被判成候选停摆
+    // ——每次开机都白白做一次取证 + 一次探针 fork。
+    let watchdog_start_ms = fuser::activity::now_ms();
     let mut last_check_ms = 0i64;
-    let mut last_probe_ms = 0i64;
-    // 本轮停摆事件内是否已做过 candidate 现场取证：candidate 阶段（探测之前）就
+    let mut last_probe_ms = 0i64; // 本轮停摆事件内是否已做过 candidate 现场取证：candidate 阶段（探测之前）就
     // 必须落盘，因为探测子进程自身可能陷入 D 态拖住看门狗线程——2026-10-29 真机
     // 冻结中 confirmed 永远没到、现场全缺，正是只有 confirmed 才 dump 的漏洞。
     // 条件恢复（stalled 归零）时复位，保证下次停摆重新取证。
     let mut scene_dumped = false;
+    // 上一次 candidate 取证的时刻。
+    //
+    // 取证体积本身就意味着必须限频：真机实测 `/proc/self/mountinfo` 有 700 行、约
+    // 130 KiB，而「单个请求慢 20 秒」这类误报在开机与媒体扫描期很常见（实测 10 分钟内
+    // 两次，每次 probe 都判定 slow-but-alive）。若每个 candidate 都全量落盘，光日志
+    // 就会顶到轮转、把真正的冻结现场冲掉——反而与取证初衷相反。因此 candidate 阶段的
+    // 取证按 `HOST_STALL_SCENE_THROTTLE_MS` 限频；confirmed（真停摆）阶段不受限制。
+    let mut last_scene_dump_ms = 0i64;
     // 探测超时后的二次确认窗起点：真停摆在该窗内 waiting 不会清零、也无请求完成；
     // 「全 worker 忙慢操作」的极端场景会在窗内完成而回到正常。没有这一步，开机
     // 风暴的大目录遍历可能被误判为停摆。
     let mut confirm_deadline_ms: Option<i64> = None;
     loop {
         let mut events = [event; 1];
-        // SAFETY: events 是栈上数组，容量 1 与传入的 1 一致。
-        let ready =
-            unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), 1, HOST_STALL_EPOLL_TIMEOUT_MS) };
+        // 等待超时：只有「确实可能有停摆」的时候才按 1 秒节拍醒来。
+        //
+        // 判据是「有在途请求」「探测/确认进行中」或「刚刚还有请求完成」
+        // （[`HOST_STALL_IDLE_GRACE_MS`]）。都不成立时线程以
+        // [`HOST_STALL_IDLE_POLL_MS`]（60 秒）超时睡在 eventfd 上——**不是**无限。
+        //
+        // 为什么留一个 60 秒兜底而不是无限等待：`fuser::activity` 的边沿只覆盖
+        // 「worker 取走了请求」（`begin_request` 在 dispatch 之前打点），覆盖不了
+        // 「请求已在内核队列里但没有任何 worker 去取」这种形态（分发线程自身被冻结、
+        // 内核没能唤醒读端）。那种情况下 `in_flight` 恒为 0、没有任何边沿可等，只有
+        // 亲眼看一眼 `waiting` 才发现。60 秒一次 sysfs 读（0.017 Hz）与心跳同量级，
+        // 换来「不存在任何无法发现的停摆形态」，值得。
+        let idle_now = fuser::activity::now_ms();
+        let idle_timeout_ms = if fuser::activity::in_flight() > 0
+            || confirm_deadline_ms.is_some()
+            || idle_now.saturating_sub(fuser::activity::last_completion_ms())
+                < HOST_STALL_IDLE_GRACE_MS
+        {
+            HOST_STALL_EPOLL_TIMEOUT_MS
+        } else {
+            HOST_STALL_IDLE_POLL_MS
+        };
+        // SAFETY: events 是栈上数组，容量 1 与传入的 maxevents=1 一致；epfd 由本线程创建并已校验。
+        let ready = unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), 1, idle_timeout_ms) };
         if ready < 0 {
             if last_errno() == libc::EINTR {
                 continue;
@@ -1343,7 +1694,6 @@ fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
             break;
         }
         if ready > 0 {
-            flow_seen = true;
             // 排空 eventfd 计数：一次 read 清零，非阻塞读到 EAGAIN 为止。
             loop {
                 let mut value: u64 = 0;
@@ -1376,8 +1726,12 @@ fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
             break;
         };
         let last_completion = fuser::activity::last_completion_ms();
-        let baseline = last_completion.max(if flow_seen { 0 } else { i64::MAX });
-        let stalled = waiting > 0 && baseline != i64::MAX;
+        let baseline = if last_completion > 0 {
+            last_completion
+        } else {
+            watchdog_start_ms
+        };
+        let stalled = waiting > 0;
         let no_completion_ms = if stalled {
             now.saturating_sub(baseline)
         } else {
@@ -1399,7 +1753,7 @@ fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
                     no_completion_ms,
                     fuser::activity::in_flight()
                 );
-                dump_stall_scene(connection, no_completion_ms);
+                dump_stall_scene(connection, no_completion_ms, true);
                 abort_fuse_connection(connection);
                 // abort 后内核把积压请求全部置错，worker 的 read 随即报错退出，宿主
                 // 进程结束；daemon 的 pidfd 换代通道重建新会话。看门狗完成使命退出。
@@ -1424,7 +1778,16 @@ fn host_stall_watchdog_main(connection: i32, event_fd: i32) {
         // confirmed 才 dump，真机实证冻结场景下现场会整场缺席。
         if !scene_dumped {
             scene_dumped = true;
-            dump_stall_scene(connection, no_completion_ms);
+            if now.saturating_sub(last_scene_dump_ms) >= HOST_STALL_SCENE_THROTTLE_MS {
+                last_scene_dump_ms = now;
+                dump_stall_scene(connection, no_completion_ms, false);
+            } else {
+                log::warn!(
+                    "fuse host stall scene skipped (throttled) conn={} no_completion_ms={}",
+                    connection,
+                    no_completion_ms
+                );
+            }
         }
         match probe_mount_point_alive(HOST_STALL_PROBE_TIMEOUT_MS) {
             ProbeOutcome::Alive => {
@@ -1552,9 +1915,85 @@ fn list_fuse_connections() -> Vec<i32> {
 
 /// 读取指定连接的 waiting 计数（内核队列中等待被用户态取走的请求数）。
 fn read_fuse_waiting(connection: i32) -> Option<u64> {
-    std::fs::read_to_string(format!("/sys/fs/fuse/connections/{connection}/waiting"))
-        .ok()
-        .and_then(|text| text.trim().parse::<u64>().ok())
+    // **不分配堆**：这条路径属于停摆看门狗，而它要面对的正是「进程可能已经死锁」的
+    // 现场——最典型的就是分配器锁被某个卡住的线程占着。`format!` / `read_to_string`
+    // 都会走分配器，一旦死锁在里面，看门狗自己也停摆，第一道防线当场失效（2026-10-29
+    // 现场正是「看门狗探测链路被一起拖死」）。因此这里只用栈缓冲 + 裸系统调用。
+    let path = fuse_sysfs_path(connection, b"waiting")?;
+    let mut buffer = [0u8; 32];
+    // SAFETY: path 是 NUL 结尾的栈缓冲；open 只读，失败返回负值。
+    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd 由本函数打开、buffer 为栈上可写区间且长度取自该数组。
+    let read_len = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+    // SAFETY: fd 是本函数私有，关闭一次。
+    unsafe { libc::close(fd) };
+    if read_len <= 0 {
+        return None;
+    }
+    parse_decimal_u64(&buffer[..read_len as usize])
+}
+
+/// 把 `/sys/fs/fuse/connections/<conn>/<leaf>` 拼进栈缓冲（无堆分配）。
+fn fuse_sysfs_path(connection: i32, leaf: &[u8]) -> Option<[u8; 64]> {
+    const PREFIX: &[u8] = b"/sys/fs/fuse/connections/";
+    let mut path = [0u8; 64];
+    let mut len = 0usize;
+    let mut push = |bytes: &[u8]| -> Option<()> {
+        let end = len.checked_add(bytes.len())?;
+        if end >= path.len() {
+            return None;
+        }
+        path[len..end].copy_from_slice(bytes);
+        len = end;
+        Some(())
+    };
+    push(PREFIX)?;
+    if connection < 0 {
+        return None;
+    }
+    // 十进制展开，最多 10 位。
+    let mut digits = [0u8; 10];
+    let mut count = 0usize;
+    let mut value = connection as u32;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    for index in (0..count).rev() {
+        push(&[digits[index]])?;
+    }
+    push(b"/")?;
+    push(leaf)?;
+    // path 剩余部分是 0，天然 NUL 结尾。
+    Some(path)
+}
+
+/// 解析十进制（跳过前后空白），**不分配**、不依赖标准库解析器。
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    let mut value: u64 = 0;
+    let mut seen = false;
+    for byte in bytes {
+        match byte {
+            b'0'..=b'9' => {
+                value = value.checked_mul(10)?.checked_add((byte - b'0') as u64)?;
+                seen = true;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                if seen {
+                    break;
+                }
+            }
+            _ => return None,
+        }
+    }
+    seen.then_some(value)
 }
 
 /// [`read_fuse_waiting`] 的带日志版本：读失败时先落一条含 errno 的 error 再返回
@@ -1573,8 +2012,26 @@ fn read_fuse_waiting_logged(connection: i32) -> Option<u64> {
 
 /// 触发内核对指定连接的 abort：所有在途与后续请求立即以错误完成。
 fn abort_fuse_connection(connection: i32) {
-    // 写入内容任意（sysfs abort 为触发型节点），失败仅记录——会话可能刚好自愈。
-    if std::fs::write(format!("/sys/fs/fuse/connections/{connection}/abort"), b"1").is_err() {
+    // 同样不分配堆：解冻动作必须能在「堆可能已死锁」的现场执行，否则第一道防线在
+    // 最关键的一步上仍然会卡住。写入内容任意（sysfs abort 为触发型节点）。
+    let Some(path) = fuse_sysfs_path(connection, b"abort") else {
+        log::error!(
+            "fuse host stall abort path build failed conn={}",
+            connection
+        );
+        return;
+    };
+    // SAFETY: path 是 NUL 结尾的栈缓冲；open 只写，失败返回负值。
+    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        log::error!("fuse host stall abort open failed conn={}", connection);
+        return;
+    }
+    // SAFETY: fd 由本函数打开；写入 1 字节常量。
+    let written = unsafe { libc::write(fd, b"1".as_ptr().cast(), 1) };
+    // SAFETY: fd 是本函数私有，关闭一次。
+    unsafe { libc::close(fd) };
+    if written <= 0 {
         log::error!("fuse host stall abort write failed conn={}", connection);
     }
 }
@@ -1632,11 +2089,62 @@ fn append_stall_forensics(line: &str) {
     let _ = writeln!(file, "{timestamp} {line}");
 }
 
+/// 单次场景取证的行数预算。
+///
+/// 一次场景要覆盖宿主 + 全部 MediaProvider 线程（每线程 comm/wchan/syscall/栈），不设
+/// 上限时真机实测一次就是 900 余行、约 110 KiB——而**未确认**的候选场景在开机与媒体
+/// 扫描期很常见（实测每 5~10 分钟一次）。这不只是磁盘写放大：它会把 running.log 的
+/// 2 MiB 轮转窗口一次吃掉十分之一，真正出问题时反而翻不到更早的记录。200 行足够
+/// 覆盖「哪些线程卡在哪个内核函数」这个核心问题。
+/// 候选（未确认）场景的行数预算。
+///
+/// 候选阶段是**高频**的（单个请求慢十几秒就会触发，实测 5~10 分钟一次），而它的结论
+/// 绝大多数是「忙而慢」。所以只留足够定位「谁在等、等在哪」的量：锚点、宿主各线程、
+/// MediaProvider 前若干线程、D 态名单、连接统计。
+const HOST_STALL_SCENE_LINE_BUDGET_CANDIDATE: usize = 80;
+/// 确认（真停摆）场景的行数预算。真停摆是灾难级且极罕见，这里可以给足。
+const HOST_STALL_SCENE_LINE_BUDGET_CONFIRMED: usize = 600;
+/// 当前场景已输出的行数（每次场景开始时清零）。
+static SCENE_LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 当前场景的行数预算（候选/确认两档，由 [`dump_stall_scene`] 在开始时设定）。
+static SCENE_BUDGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(HOST_STALL_SCENE_LINE_BUDGET_CANDIDATE);
+
+/// 场景取证专用落盘：受 [`HOST_STALL_SCENE_LINE_BUDGET`] 约束。
+///
+/// 与 [`forensics_log`] 分开，是因为后者还被「确认停摆」「锚点建立」等一次性事件使用，
+/// 那些不该被场景预算截断。
+fn scene_log(line: &str) {
+    use std::sync::atomic::Ordering;
+    let budget = SCENE_BUDGET.load(Ordering::Relaxed);
+    let index = SCENE_LINES.fetch_add(1, Ordering::Relaxed);
+    if index < budget {
+        forensics_log(line);
+    } else if index == budget {
+        forensics_log(&format!(
+            "fuse host stall scene truncated at_lines={budget}"
+        ));
+    }
+}
+
 /// 停摆取证：把宿主全部线程与 MediaProvider 全部线程的内核栈、等待通道和连接统计
 /// 写入运行日志。调用点处于停摆已持续 20 秒的时刻，现场就是根因本身（哪个 worker
 /// 卡在哪个内核函数、谁持有不放）。
-fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
-    forensics_log(&format!(
+fn dump_stall_scene(connection: i32, elapsed_ms: i64, detailed: bool) {
+    use std::sync::atomic::Ordering;
+    SCENE_LINES.store(0, Ordering::Relaxed);
+    SCENE_BUDGET.store(
+        if detailed {
+            HOST_STALL_SCENE_LINE_BUDGET_CONFIRMED
+        } else {
+            HOST_STALL_SCENE_LINE_BUDGET_CANDIDATE
+        },
+        Ordering::Relaxed,
+    );
+    if !detailed {
+        scene_log("fuse host stall scene detail=candidate (confirmed 场景才会带完整线程栈)");
+    }
+    scene_log(&format!(
         "fuse host stall scene begin conn={} elapsed_ms={}",
         connection, elapsed_ms
     ));
@@ -1646,11 +2154,11 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
     match crate::platform::paths::media_real_anchor_root() {
         Some(anchor) => {
             let mounted = crate::mount_ledger::topmost_live_mount(0, anchor).is_some();
-            forensics_log(&format!(
+            scene_log(&format!(
                 "fuse host stall scene anchor present root={anchor} mounted={mounted}"
             ));
         }
-        None => forensics_log("fuse host stall scene anchor absent"),
+        None => scene_log("fuse host stall scene anchor absent"),
     }
     for (label, pid) in [("host", std::process::id() as i32)].into_iter().chain(
         find_media_provider_pids()
@@ -1658,7 +2166,7 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
             .map(|pid| ("mp", pid)),
     ) {
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            forensics_log(&format!(
+            scene_log(&format!(
                 "fuse host stall scene {label} pid={pid} task-list-failed"
             ));
             continue;
@@ -1672,7 +2180,7 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
             let wchan = std::fs::read_to_string(tid_path.join("wchan"))
                 .map(|text| text.trim().to_string())
                 .unwrap_or_default();
-            forensics_log(&format!(
+            scene_log(&format!(
                 "fuse host stall thread {label} tid={tid} comm={comm} wchan={wchan}"
             ));
             // 当前系统调用号与参数（一线一行）：与 wchan/stack 互补——stack 受
@@ -1680,14 +2188,14 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
             if let Ok(syscall) = std::fs::read_to_string(tid_path.join("syscall")) {
                 let syscall = syscall.trim();
                 if !syscall.is_empty() {
-                    forensics_log(&format!(
+                    scene_log(&format!(
                         "fuse host stall syscall {label} tid={tid} {syscall}"
                     ));
                 }
             }
             if let Ok(stack) = std::fs::read_to_string(tid_path.join("stack")) {
                 for line in stack.lines().take(HOST_STALL_STACK_LINES) {
-                    forensics_log(&format!("fuse host stall stack {label} tid={tid} {line}"));
+                    scene_log(&format!("fuse host stall stack {label} tid={tid} {line}"));
                 }
             }
         }
@@ -1699,23 +2207,28 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
                     || line.starts_with("Threads:")
                     || line.starts_with("VmRSS:")
                 {
-                    forensics_log(&format!("fuse host stall status {label} pid={pid} {line}"));
+                    scene_log(&format!("fuse host stall status {label} pid={pid} {line}"));
                 }
             }
         }
     }
-    // 全系统 D 态任务扫描（有界）：真机冻结实证系统应用（permissioncontroller、QQ
-    // 等）集体陷入 D 态——这张名单是判断「底层存储停滞」还是「仅本会话再入」
-    // 的关键证据，此前只能靠 daemon 侧的零散日志拼凑。
-    dump_system_dstate_tasks();
-    // 内核日志过滤尾（尽力而为）：f2fs/I/O 错误、hung task、OOM 等底层证据在
-    // 重启后会被覆盖，冻结瞬间抓一次比事后翻 dmesg 可靠。
-    dump_kmsg_forensics();
+    // 全系统 D 态任务扫描与内核日志尾**只在已确认的停摆里收集**。
+    //
+    // 两者回答的是同一个问题：「这是底层存储停滞（整机在等 I/O），还是只有本会话
+    // 再入？」——候选阶段还没到这一步：那一刻探针子进程（下几步才 fork）往往会判定
+    // slow-but-alive。真机实测（2026-11-09）一次候选场景因此写出 80 行场景 + 64 行
+    // D 态 + 64 行 kmsg ≈ 41 KiB，而结论是「忙而慢」。这两个集合与行数预算无关（走
+    // `forensics_log`），不受 `HOST_STALL_SCENE_LINE_BUDGET_CANDIDATE` 约束，是候选
+    // 场景体积失控的真正来源。
+    if detailed {
+        dump_system_dstate_tasks();
+        dump_kmsg_forensics();
+    }
     if let Ok(statistics) =
         std::fs::read_to_string(format!("/sys/fs/fuse/connections/{connection}/statistics"))
     {
         for line in statistics.lines() {
-            forensics_log(&format!("fuse host stall conn-stat {line}"));
+            scene_log(&format!("fuse host stall conn-stat {line}"));
         }
     }
     // 宿主命名空间全量挂载表：用户设备第二次停摆实证 worker 卡在 f2fs 直连路径
@@ -1723,12 +2236,64 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64) {
     // 恢复——宿主 ns 的挂载/dcache 形态是唯一未取证面（此前的死层取证在 attach
     // 子进程即应用 ns）。全量输出避免按关键字过滤漏掉 sdcardfs/overlay 等非 fuse
     // 但参与路径解析的挂载层。
-    if let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") {
-        for line in mountinfo.lines() {
-            forensics_log(&format!("fuse host stall host-mountinfo {line}"));
+    dump_host_mountinfo();
+    scene_log("fuse host stall scene end");
+}
+
+/// 宿主命名空间挂载表取证（**有界**）。
+///
+/// 原始 `/proc/self/mountinfo` 在真机上有 700 行左右（约 130 KiB），其中绝大多数是
+/// `debugfs` / `sysfs` / `tmpfs` 的系统内部挂载，与「路径解析走了哪一层」无关。整份
+/// 落盘的问题有两个：真机上每次停摆候选都会写出 130 KiB（一次开机就足够把 running.log
+/// 顶到轮转），而真正需要的证据只占十几行。
+///
+/// 因此按「是否可能参与存储路径解析」优先输出：命中 `storage` / `/data` / `fuse` /
+/// `emulated` / 模块目录的行先写，其余按剩余额度补足，总量封顶
+/// [`HOST_STALL_MOUNTINFO_LINES`]。截断时显式写一行 `truncated`，避免事后误判为
+/// 「挂载表就这么长」。
+fn dump_host_mountinfo() {
+    const HOST_STALL_MOUNTINFO_LINES: usize = 48;
+    let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        scene_log("fuse host stall host-mountinfo-unreadable");
+        return;
+    };
+    let relevant = |line: &str| {
+        line.contains("storage")
+            || line.contains("/data")
+            || line.contains("fuse")
+            || line.contains("emulated")
+    };
+    let mut emitted = 0usize;
+    let mut total = 0usize;
+    for line in mountinfo.lines() {
+        total += 1;
+        if !relevant(line) {
+            continue;
         }
+        if emitted >= HOST_STALL_MOUNTINFO_LINES {
+            break;
+        }
+        emitted += 1;
+        scene_log(&format!("fuse host stall host-mountinfo {line}"));
     }
-    forensics_log("fuse host stall scene end");
+    // 剩余额度给非存储相关挂载：保留「未命中关键字但其实参与解析」的兜底（例如
+    // overlay / sdcardfs 这类不含上述关键字的层），但绝不无界输出。
+    for line in mountinfo.lines() {
+        if emitted >= HOST_STALL_MOUNTINFO_LINES {
+            break;
+        }
+        if relevant(line) {
+            continue;
+        }
+        emitted += 1;
+        scene_log(&format!("fuse host stall host-mountinfo-other {line}"));
+    }
+    if emitted < total {
+        scene_log(&format!(
+            "fuse host stall host-mountinfo truncated emitted={} total={}",
+            emitted, total
+        ));
+    }
 }
 
 /// 全系统 D 态任务扫描（有界 64 条）：pid、comm、内核等待通道。
@@ -1753,6 +2318,11 @@ pub(crate) fn dump_system_dstate_tasks() {
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
             continue;
         };
+        // 内核线程（`cmdline` 为空）天生「永远 D 态」：`wdtk-*`、`hang_detect`、
+        // `ccci_poll` 这类在真机上占满整张名单，而它们与存储停摆无关——恰好把真正
+        // 需要的用户态任务挤出去（2026-11-09 实测 10 条里 10 条是这类）。cmdline 按
+        // pid 惰性读一次，不按键程放大。
+        let mut is_kernel_thread: Option<bool> = None;
         for task in tasks.flatten() {
             let tid_path = task.path();
             // /proc/<pid>/stat 第二字段为状态字符；comm 可含空格，从右往左取更稳。
@@ -1767,6 +2337,14 @@ pub(crate) fn dump_system_dstate_tasks() {
                 continue;
             };
             if state != "D" {
+                continue;
+            }
+            let kernel_thread = *is_kernel_thread.get_or_insert_with(|| {
+                std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                    .map(|text| text.trim_matches('\0').trim().is_empty())
+                    .unwrap_or(true)
+            });
+            if kernel_thread {
                 continue;
             }
             let comm = std::fs::read_to_string(tid_path.join("comm"))
@@ -1815,20 +2393,41 @@ pub(crate) fn dump_kmsg_forensics() {
         );
         return;
     }
-    const KEYWORDS: [&str; 12] = [
-        "blocked",
-        "hung",
-        "f2fs",
-        "I/O error",
-        "fuse",
-        "oom",
-        "Out of memory",
-        "segfault",
-        "Read-only",
-        "timeout",
-        "dm-",
-        "EXT4-fs error",
-    ];
+    // 命中判定：**先排除系统噪音，再匹配存储停摆关键词**。
+    //
+    // 真机实测（2026-11-09）上一版关键词表命中 64 条，`logged=64` 里**没有一条**与
+    // 存储相关：`dm-` 是为了盯 device-mapper 报错加进去的，结果把每一条 SELinux 审计
+    // 行的 `dev="dm-60"` 都吸了进来；`timeout` 则把 wlan 的省电日志全捞了。这类噪音
+    // 除了挤占轮转窗口没有任何价值——它恰好把「真正该看的那几行」挤掉了。
+    fn is_stall_kmsg_line(line: &str) -> bool {
+        // 与存储停摆无关但高频的系统日志：审计拒绝（`avc:`/`audit(`）、wlan 省电、
+        // 唤醒源与水印统计。它们在每个取证窗口都占满配额，必须先剔除。
+        const NOISE: [&str; 6] = [
+            "avc:",
+            "audit(",
+            "[wlan]",
+            "Pending Wakeup Sources",
+            "PowerDet:",
+            "active wake lock",
+        ];
+        if NOISE.iter().any(|noise| line.contains(noise)) {
+            return false;
+        }
+        const KEYWORDS: [&str; 10] = [
+            "blocked for more than",
+            "hung_task",
+            "task:",
+            "f2fs",
+            "I/O error",
+            "FUSE",
+            "fuse",
+            "oom",
+            "Out of memory",
+            "Read-only file system",
+        ];
+        KEYWORDS.iter().any(|keyword| line.contains(keyword))
+    }
+
     let mut buffer = [0u8; 4096];
     let mut pending: Vec<u8> = Vec::with_capacity(1024);
     // 命中行环形保留最近 64 条：kmsg 从最旧开始流出，冻结时刻的相关日志在缓冲
@@ -1849,7 +2448,7 @@ pub(crate) fn dump_kmsg_forensics() {
             if *byte == b'\n' {
                 lines_scanned += 1;
                 let line = String::from_utf8_lossy(&pending);
-                if KEYWORDS.iter().any(|keyword| line.contains(keyword)) {
+                if is_stall_kmsg_line(&line) {
                     if recent.len() >= KEEP_MATCHED {
                         recent.pop_front();
                     }
@@ -2255,8 +2854,11 @@ fn lifted_view_root(storage_root: &str) -> String {
     } else {
         storage_root.to_string()
     };
-    log::warn!(
-        "p5 fuse mount point storage_root={} lifted={}",
+    // 这里是纯计算辅助函数，每次挂载点推导都会调用一次（重试轮次里一轮几十次）。
+    // 曾经是 warn 级诊断，真机实测一天能刷出上万行、并持续触发落盘与日志轮转——
+    // 这正是「空闲也在写盘」的典型形态。需要现场排查时打开 verbose 即可看到。
+    log::debug!(
+        "fuse mount point storage_root={} lifted={}",
         storage_root,
         lifted
     );
@@ -2290,6 +2892,20 @@ fn send_ready_result(sock: Option<libc::c_int>, result: i32) {
 /// 既非仅监视也非仅映射的请求是完整重定向：五类列表全空时语义为“整个共享
 /// 存储进入应用私有空间”，本身就是挂载需求，不能按无规则短路。未配置应用
 /// 只会以仅监视形态发出请求，不受此分支影响。
+/// 请求是否带**显式路径规则**（五个规则数组任一非空）。
+///
+/// 与 [`mount_request_has_policy_rules`] 的区别：后者把「全隔离」（`enabled` 且非
+/// mapping_mode_only）也算作有规则，因为 deny-all + 沙盒本身就是一种策略；而本函数
+/// 只承认写出来的规则。共享宿主接入闸门当前用本函数，因此全隔离应用不会接入 FUSE，
+/// 而是走 namespace bind（原因单独上报为 `no_explicit_rules`）。
+pub fn mount_request_has_explicit_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
+    !request.allowed_real_paths().is_empty()
+        || !request.excluded_real_paths().is_empty()
+        || !request.path_mappings().is_empty()
+        || !request.sandboxed_paths().is_empty()
+        || !request.read_only_paths().is_empty()
+}
+
 pub fn mount_request_has_policy_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
     (!request.is_monitor_only() && !request.is_mapping_mode_only())
         || !request.allowed_real_paths().is_empty()

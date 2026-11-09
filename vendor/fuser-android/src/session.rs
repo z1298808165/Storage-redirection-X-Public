@@ -222,13 +222,40 @@ impl<FS: Filesystem> Session<FS> {
     /// Run the session loop in a background thread. If the returned handle is dropped,
     /// the filesystem is unmounted and the given session ends.
     pub fn spawn(self) -> io::Result<BackgroundSession> {
+        self.spawn_inner(None)
+    }
+
+    /// 与 [`spawn`](Self::spawn) 相同，但会话循环退出时向 `exit_eventfd` 写一次计数。
+    ///
+    /// 用途：宿主服务循环原本只能靠「周期性探询 guard.is_finished()」得知会话结束，
+    /// 空闲时也在空转；有了这条退出边沿，它可以一直阻塞在 epoll 上，只在「会话结束」
+    /// 或真正到期的定时任务上醒来。写入失败（fd 已关闭等）不影响会话本身。
+    pub fn spawn_with_exit_notify(self, exit_eventfd: i32) -> io::Result<BackgroundSession> {
+        self.spawn_inner(Some(exit_eventfd))
+    }
+
+    fn spawn_inner(self, exit_eventfd: Option<i32>) -> io::Result<BackgroundSession> {
         let sender = self.ch.sender();
         // Take the fuse_session, so that we can unmount it
         let mount = std::mem::take(&mut *self.mount.mount.lock());
         let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
         let guard = thread::Builder::new()
             .name("fuser-bg".to_string())
-            .spawn(move || self.run_with_startup(Some(startup_sender)));
+            .spawn(move || {
+                let result = self.run_with_startup(Some(startup_sender));
+                if let Some(fd) = exit_eventfd {
+                    // SAFETY: fd 由调用方创建为合法 eventfd；写 8 字节计数是 eventfd 契约。
+                    unsafe {
+                        let value: u64 = 1;
+                        libc::write(
+                            fd,
+                            &value as *const u64 as *const libc::c_void,
+                            std::mem::size_of::<u64>(),
+                        );
+                    }
+                }
+                result
+            });
         let guard = match guard {
             Ok(guard) => guard,
             Err(error) => {

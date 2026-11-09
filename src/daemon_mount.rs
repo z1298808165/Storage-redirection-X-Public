@@ -1334,6 +1334,11 @@ fn preattach_skip_reason(request: &MountRequest) -> HostSessionSkip {
     if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
         return HostSessionSkip::NoPolicyRules;
     }
+    // 全隔离（规则数组全空但语义是 deny-all + 沙盒）：闸门按「显式规则」判定，
+    // 因此不接入 FUSE。单独上报，避免与下面那种「根/映射不允许」混为一谈。
+    if !crate::fuse_redirect::config::mount_request_has_explicit_rules(request) {
+        return HostSessionSkip::NoExplicitRules;
+    }
     // 有规则却没成为候选：模式不是 auto/monitor、规划根不是整棵存储视图根，或含
     // 必须靠 namespace bind 才能表达的 fs 侧映射。
     HostSessionSkip::AttachGateClosed

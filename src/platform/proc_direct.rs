@@ -99,3 +99,56 @@ pub fn read_proc_file(path: &str, max_bytes: usize) -> Option<String> {
     buffer.truncate(total);
     Some(String::from_utf8_lossy(&buffer).into_owned())
 }
+
+/// 文件身份（设备号 / inode / 大小 / mtime）。
+///
+/// 用途是「内容有没有变化」的廉价判定：原子替换（tmp + rename）会换掉 inode，
+/// 原地改写会改变大小或 mtime，因此一次 stat 就能判断是否值得把整个文件读回来。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub mtime_ns: i64,
+}
+
+/// 用 `stat` 取文件身份（设备号 / inode / 大小 / mtime）。
+///
+/// 与 [`read_proc_file`] 的目标相同——不被本进程内的 PLT hook 改写——但这里走 libc
+/// 包装而不是裸系统调用：`fstatat` 在 arm64 上的系统调用号没有稳定导出，而
+/// `config::fingerprint` 早已在 hook 进程里对模块目录路径按秒调用 `libc::stat`，
+/// 那条路径不落在任何重定向判定范围（`/data/adb/modules/...` 不是共享存储），
+/// 因此不会被本模块的路径改写 hook 拦下，也不会递归回调用方。失败返回 `None`。
+pub fn stat_file_identity(path: &str) -> Option<FileIdentity> {
+    if path.is_empty() {
+        return None;
+    }
+    let c_path = CString::new(path).ok()?;
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: c_path 以 NUL 结尾且在本作用域内保持存活；st 由内核在成功时完整填充。
+    let ret = unsafe { libc::stat(c_path.as_ptr(), st.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    // SAFETY: 返回 0 表示内核已完整写入 stat 结构。
+    let st = unsafe { st.assume_init() };
+    Some(FileIdentity {
+        dev: st.st_dev,
+        inode: st.st_ino,
+        size: st.st_size as u64,
+        mtime_ns: st
+            .st_mtime
+            .saturating_mul(1_000_000_000)
+            .saturating_add(stat_mtime_nsec(&st)),
+    })
+}
+
+#[cfg(target_os = "android")]
+fn stat_mtime_nsec(st: &libc::stat) -> i64 {
+    st.st_mtime_nsec
+}
+
+#[cfg(not(target_os = "android"))]
+fn stat_mtime_nsec(_st: &libc::stat) -> i64 {
+    0
+}

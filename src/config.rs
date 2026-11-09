@@ -283,6 +283,13 @@ struct SettingsState {
     is_loaded: bool,
     should_log_summary: bool,
     last_fingerprint: u64,
+    /// 最近一次成功载入时看到的**廉价指纹**（目录 + 两个根配置文件的 stat）。
+    /// 非空时用它做「有没有人改过配置」的一秒级判定，避免每秒做完整指纹。
+    last_quick_fingerprint: Option<u64>,
+    /// 最近一次做**完整指纹**（readdir + 每个应用配置一次 stat）的时刻。
+    /// 廉价指纹只覆盖「目录被碰过」的写入形态；就地覆盖写不会改目录 mtime，因此仍需
+    /// 按分钟级做一次完整指纹兜底，不能让廉价判据把这类写入永久漏掉。
+    last_full_fingerprint_ms: i64,
     invalid_packages: HashSet<String>,
 }
 
@@ -299,6 +306,8 @@ impl SettingsState {
             is_loaded: false,
             should_log_summary: true,
             last_fingerprint: 0,
+            last_quick_fingerprint: None,
+            last_full_fingerprint_ms: 0,
             invalid_packages: HashSet::new(),
         }
     }

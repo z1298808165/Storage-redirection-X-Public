@@ -21,7 +21,6 @@ use std::ffi::CStr;
 
 pub(crate) use caller::{
     capture_java_binder_caller, enter_java_caller_scope, exit_java_caller_scope,
-    lookup_system_pid_table,
 };
 pub(crate) use context::{
     enter_explicit_caller_decision, enter_path_owner_inference_disabled,
@@ -80,6 +79,13 @@ pub(crate) fn refresh_runtime_config_throttled() {
         return;
     }
     refresh_runtime_config_from_settings();
+}
+
+/// 配置指纹复查间隔：事件通道在线时永不复查，不可用时退回 1 秒。
+///
+/// 供写入侧自检与 jni 查询路径共用，保证三处只有一套节流判据。
+pub(crate) fn fallback_reload_interval_ms() -> i64 {
+    reload::fallback_reload_interval_ms()
 }
 
 /// 共享节流阀的配置变更轮询，供 hook 决策路径内直接调用。

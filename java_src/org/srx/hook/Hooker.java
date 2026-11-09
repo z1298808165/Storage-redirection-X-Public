@@ -2609,6 +2609,11 @@ public class Hooker {
     } catch (FileNotFoundException denied) {
       throw denied;
     } catch (Throwable ignored) {
+      // 过去这里完全静默：任何异常都让本次 open 退回 MediaProvider 自己的路径，而文件已经
+      // 被重定向进沙箱时，那条路径必然 ENOENT——调用方只看到 `createMedia returned null`，
+      // 失败原因（归因/查询/解析哪一步炸的）无从得知。真机排查（2026-11-09）就卡在这一层。
+      // 与 logOpenBackupFailure 同口径：失败路径量小，且不受 verbose 门禁约束。
+      logMappedOpenPrepFailure(callerUid, ignored);
       return null;
     }
 
@@ -4777,6 +4782,24 @@ public class Hooker {
    * false（实测反馈设备上 MediaProvider 进程整个生命周期静默，open 失败完全不可见）。失败日志是排查
    * 「图片加载不了」类问题的唯一线索，量又小（仅失败路径），必须始终落盘。
    */
+  /**
+   * 记录「映射 open 的准备工作抛异常」。这条日志不受 {@link #shouldLog()} 与任何计数上限约束：
+   *
+   * <p>它只在失败路径产生（量小），而一旦被吞掉，调用方只会看到「创建/打开媒体失败」，现场
+   * 没有任何指向真正原因的信息——真机排查时整条链路只剩一条 ENOENT。
+   */
+  private static void logMappedOpenPrepFailure(int callerUid, Throwable failure) {
+    try {
+      android.util.Log.w(
+          "SRX",
+          "java mapped open prep failed caller_uid="
+              + callerUid
+              + " kind="
+              + describeFailure(failure));
+    } catch (Throwable ignored) {
+    }
+  }
+
   private static void logOpenBackupFailure(int callerUid, Throwable failure) {
     try {
       android.util.Log.w(

@@ -4,7 +4,8 @@ use super::super::runtime;
 use libc::{c_int, c_void, fstat, readlink};
 use std::ffi::CString;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 static CACHED_FUSE_FD: AtomicI32 = AtomicI32::new(-1);
 static CACHED_FUSE_FD_DEV: AtomicU64 = AtomicU64::new(0);
@@ -30,8 +31,96 @@ const LIB_FUSE_APP: &str = "libappfuse.so";
 static FUSE_ENGINE_READ_PATCHED: AtomicBool = AtomicBool::new(false);
 static FUSE_JNI_READ_PATCHED: AtomicBool = AtomicBool::new(false);
 static FUSE_APP_READ_PATCHED: AtomicBool = AtomicBool::new(false);
-static FUSE_ENGINE_PATCH_CHECK_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
-const FUSE_ENGINE_PATCH_CHECK_INTERVAL_MS: i64 = 500;
+/// 每个目标库的下一次尝试时刻（单调毫秒）与连续失败次数。
+///
+/// 这里是**每个 read 调用**都会走到的热路径：不同 ROM 只映射其中一到两个库（例如
+/// 模拟器只有 `libappfuse`、MIUI 才有独立 `libfuse`），只要有一个库永远不出现，固定
+/// 500ms 的重试就会让该进程**永久**每两秒做一次 ELF 定位（dlopen / APK 内嵌段扫描），
+/// 单次成本远高于一次 read。改为按库指数退避：500ms 起、连续失败倍增、上限 30 秒；
+/// 库定位成功且补丁装上后该库不再被尝试。
+///
+/// 「定位成功但 PLT 无槽位」（A13/A14 实证的静默分支）同样计入失败，否则它会以
+/// 2Hz 永久重试。
+static PATCH_NEXT_ATTEMPT_MS: [AtomicI64; 3] = [
+    AtomicI64::new(i64::MIN / 2),
+    AtomicI64::new(i64::MIN / 2),
+    AtomicI64::new(i64::MIN / 2),
+];
+static PATCH_FAIL_COUNT: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+const PATCH_RETRY_BASE_MS: i64 = 500;
+/// 退避上限。正常路径根本不靠它——目标库晚加载是一个**事件**（`dlopen` 钩子，见
+/// `ops::dlopen`），那一刻会重置退避并立刻重试。这里的定时重试只是兜住「库以我们
+/// 拦不到的方式被映射」这种极端情形，因此放到 5 分钟（0.003 Hz）。
+const PATCH_RETRY_MAX_MS: i64 = 300_000;
+/// 晚加载补装的合并窗口：启动期 dlopen 成批发生，2 秒内只补一次。
+const LATE_LOAD_RETRY_MERGE_MS: i64 = 2_000;
+static LATE_LOAD_RETRY_PENDING: AtomicBool = AtomicBool::new(false);
+static LATE_LOAD_RETRY_LAST_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
+static LATE_LOAD_RETRY_LOCK: Mutex<()> = Mutex::new(());
+
+/// 有库刚被 `dlopen`：重置退避并立刻补一次补丁（含零宽修复）。
+///
+/// 这是把「库晚加载」从定时重试变成事件驱动的关键：`ops::dlopen` 在每次成功 dlopen 后
+/// 调用本函数，因此库什么时候出现、就在什么时候补一次，不再依赖周期探测。
+///
+/// 2 秒合并窗口：启动期 dlopen 常常成批发生（几十次），每次都做一轮 ELF 定位是没必要的
+/// 重复劳动；窗口只会让补装最多推迟 2 秒，而这条路径的定时兜底本来就是分钟级。
+pub(crate) fn retry_after_late_load() {
+    let _guard = LATE_LOAD_RETRY_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now_ms = crate::platform::paths::monotonic_ms();
+    let last_ms = LATE_LOAD_RETRY_LAST_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last_ms) < LATE_LOAD_RETRY_MERGE_MS {
+        if !LATE_LOAD_RETRY_PENDING.swap(true, Ordering::AcqRel) {
+            let delay_ms = LATE_LOAD_RETRY_MERGE_MS - now_ms.saturating_sub(last_ms);
+            let _ = std::thread::Builder::new()
+                .name("srx-fuse-patch-retry".to_string())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+                    let _guard = LATE_LOAD_RETRY_LOCK
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if !LATE_LOAD_RETRY_PENDING.swap(false, Ordering::AcqRel) {
+                        return;
+                    }
+                    let now_ms = crate::platform::paths::monotonic_ms();
+                    LATE_LOAD_RETRY_LAST_MS.store(now_ms, Ordering::Relaxed);
+                    reset_patch_backoff();
+                    ensure_fuse_engine_read_patch();
+                    fuse_fix::retry_if_target_enabled();
+                });
+        }
+        return;
+    }
+    LATE_LOAD_RETRY_LAST_MS.store(now_ms, Ordering::Relaxed);
+    LATE_LOAD_RETRY_PENDING.store(false, Ordering::Release);
+    reset_patch_backoff();
+    ensure_fuse_engine_read_patch();
+    // 零宽修复的目标库（libfuse_jni）同样是按需 dlopen 的，一起补。
+    fuse_fix::retry_if_target_enabled();
+}
+
+/// 目标库刚被 `dlopen`：清掉退避状态，让紧接着的检查立刻重试。
+fn reset_patch_backoff() {
+    for index in 0..PATCH_NEXT_ATTEMPT_MS.len() {
+        PATCH_NEXT_ATTEMPT_MS[index].store(i64::MIN / 2, Ordering::Relaxed);
+        PATCH_FAIL_COUNT[index].store(0, Ordering::Relaxed);
+    }
+}
+
+/// 记一次失败并按指数推迟该库的下一次尝试（500ms 起、倍增、上限 5 分钟）。
+fn patch_backoff(index: usize, now_ms: i64) {
+    let fails = PATCH_FAIL_COUNT[index]
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1)
+        .min(16);
+    // 从 500ms 开始倍增，第十次后封顶 5 分钟，避免永远不出现的库持续触发 ELF 扫描。
+    let delay = PATCH_RETRY_BASE_MS
+        .saturating_mul(1i64 << fails.saturating_sub(1).min(10))
+        .min(PATCH_RETRY_MAX_MS);
+    PATCH_NEXT_ATTEMPT_MS[index].store(now_ms.saturating_add(delay), Ordering::Relaxed);
+}
 
 /// 把 read 补丁装到 FUSE 请求读取方（libfuse.so / libfuse_jni.so / libappfuse.so
 /// 都尝试）。
@@ -53,22 +142,33 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
         return;
     }
     let now_ms = crate::platform::paths::monotonic_ms();
-    let last_ms = FUSE_ENGINE_PATCH_CHECK_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last_ms) < FUSE_ENGINE_PATCH_CHECK_INTERVAL_MS {
-        return;
-    }
-    if FUSE_ENGINE_PATCH_CHECK_MS
-        .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
-    {
-        return;
-    }
-    for (lib, patched_flag) in [
+    for (index, (lib, patched_flag)) in [
         (LIB_FUSE_ENGINE, &FUSE_ENGINE_READ_PATCHED),
         (LIB_FUSE_JNI, &FUSE_JNI_READ_PATCHED),
         (LIB_FUSE_APP, &FUSE_APP_READ_PATCHED),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if patched_flag.load(Ordering::Relaxed) {
+            continue;
+        }
+        // 该库仍在退避窗口内：一次比较即返回（热路径成本约 1ns）。
+        if now_ms < PATCH_NEXT_ATTEMPT_MS[index].load(Ordering::Relaxed) {
+            continue;
+        }
+        // CAS 占取本轮尝试，避免并发 read 同时做 ELF 定位。
+        let next_attempt_ms = PATCH_NEXT_ATTEMPT_MS[index].load(Ordering::Relaxed);
+        if now_ms < next_attempt_ms
+            || PATCH_NEXT_ATTEMPT_MS[index]
+                .compare_exchange(
+                    next_attempt_ms,
+                    i64::MAX,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
             continue;
         }
         let Some(elf) = crate::platform::elf_img::ElfImg::load(lib) else {
@@ -96,11 +196,8 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
                 AtomicI64::new(i64::MIN / 2),
             ];
             const RELOAD_FAIL_LOG_INTERVAL_MS: i64 = 10 * 60 * 1000;
-            let absent_index = match lib {
-                LIB_FUSE_ENGINE => 0usize,
-                LIB_FUSE_JNI => 1usize,
-                _ => 2usize,
-            };
+            let absent_index = index;
+            patch_backoff(index, now_ms);
             let now_ms = crate::platform::paths::monotonic_ms();
             let should_log = !FIRST_FAIL_LOGGED[absent_index].swap(true, Ordering::Relaxed) || {
                 let last = LAST_FAIL_LOG_MS[absent_index].load(Ordering::Relaxed);
@@ -125,6 +222,7 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
             fuse_fix::patch_plt_slots(&elf, "__read_chk", hooked_read_chk_fuse as *mut c_void);
         if read_slots > 0 || read_chk_slots > 0 {
             patched_flag.store(true, Ordering::Release);
+            PATCH_FAIL_COUNT[index].store(0, Ordering::Relaxed);
             log::info!(
                 "fuse read patch installed lib={} read={} read_chk={}",
                 lib,
@@ -134,6 +232,8 @@ pub(crate) fn ensure_fuse_engine_read_patch() {
         } else {
             // 运维诊断：库定位成功但 PLT 无可改槽位（A13/A14 实证的静默分支，
             // 引擎可能静态链接 read 或符号不走 PLT），长期重试需要可见。
+            // 定位成功但没有可改槽位：同样退避，否则会重复 ELF 定位 + 改写尝试。
+            patch_backoff(index, now_ms);
             static LAST_ZERO_SLOT_LOG_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
             let now_ms = crate::platform::paths::monotonic_ms();
             let last_ms = LAST_ZERO_SLOT_LOG_MS.load(Ordering::Relaxed);

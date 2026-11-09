@@ -20,6 +20,30 @@
 //! 静态表不会回传父进程；磁盘是两侧唯一共享的载体。
 
 use crate::platform::{module_paths, paths};
+use std::sync::atomic::{AtomicI32, Ordering};
+
+static DAEMON_WAKE_EVENTFD: AtomicI32 = AtomicI32::new(-1);
+
+/// 由 daemon 主循环注入唤醒 fd；挂载子进程 fork 后继承同一个 eventfd。
+pub fn set_daemon_wake_eventfd(fd: i32) {
+    DAEMON_WAKE_EVENTFD.store(fd, Ordering::Release);
+}
+
+fn wake_daemon() {
+    let fd = DAEMON_WAKE_EVENTFD.load(Ordering::Acquire);
+    if fd >= 0 {
+        let value = 1u64;
+        // SAFETY: fd 已校验为非负的 eventfd 写端，value 是栈上 u64，长度与写入请求一致；
+        // 写失败（含 EAGAIN）只是漏一次唤醒，daemon 仍会按截止点醒来，故忽略返回值。
+        unsafe {
+            libc::write(
+                fd,
+                &value as *const u64 as *const libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
+}
 
 /// 视图**就绪后**仍失败的重试上限：这种失败换时间没用，20 次足够区分「偶发竞态」
 /// 与「稳定故障」，到顶放弃并留一条 warn。
@@ -27,11 +51,6 @@ const MAX_READY_FAILURES: u32 = 20;
 /// 含窗口期轮次的总轮数上限：窗口期轮次不烧预算，但也不能无界轮询。按下面的退避
 /// （3s×3 → 15s×17 → 30s×100）展开约 55 分钟，远超任何实测 MP 就绪窗口。
 const MAX_ROUNDS: u32 = 120;
-/// 扫描节流：daemon 主循环最快 1 秒一轮，标记目录本身很小，3 秒一次足够。
-const SCAN_INTERVAL_MS: i64 = 3_000;
-
-static LAST_SCAN_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
-
 /// 最近一次 bind(MS_BIND) 失败的真实 errno（0 = 无记录）。
 ///
 /// 恢复失败的告警此前取的是 `last_create_directory_errno()`——create 早成功、bind
@@ -58,6 +77,33 @@ fn marker_path(package: &str) -> Option<String> {
         return None;
     }
     Some(paths::join(&pending_dir(), package))
+}
+
+/// 返回距离最近待办到期的毫秒数；无 marker 时返回 None。
+///
+/// 只在 daemon 准备阻塞时扫描小型 marker 目录，不使用周期唤醒；marker 新建/刷新则由
+/// `note_failure` 写 eventfd 立刻打断当前等待。此处使用 file mtime 的 elapsed 时长，
+/// 调用方再换算为单调时钟 deadline，避免混用墙钟时间戳与 CLOCK_MONOTONIC。
+pub fn next_due_delay_ms() -> Option<i64> {
+    let entries = std::fs::read_dir(pending_dir()).ok()?;
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            let (rounds, ready_failures) = read_marker(&path.to_string_lossy());
+            if ready_failures > MAX_READY_FAILURES || rounds >= MAX_ROUNDS {
+                return 0;
+            }
+            let age_ms = entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.elapsed().ok())
+                .map(|elapsed| elapsed.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            backoff_ms(rounds).saturating_sub(age_ms).max(0)
+        })
+        .min()
 }
 
 /// 第 `rounds` 轮重试前的退避间隔：前三次 3 秒（覆盖热重载与短窗口），窗口期拉长到
@@ -112,6 +158,7 @@ pub fn note_failure(package: &str, view_ready: bool) {
     let _ = std::fs::create_dir_all(pending_dir());
     // 写入内容同时刷新 mtime：mtime 是「上次尝试时刻」，内容是两类计数的当前值。
     if std::fs::write(&path, format!("{rounds} {ready_failures}")).is_ok() {
+        wake_daemon();
         log::debug!(
             "own private restore retry scheduled pkg={} round={} ready_failures={} view_ready={}",
             package,
@@ -135,13 +182,6 @@ pub fn note_success(package: &str) {
 /// 每个到期项都会把轮数 +1 并刷新 mtime，因此 daemon 主循环即使用户配置没有任何
 /// 变化，也会按 `backoff_ms` 的节奏把该包推进一轮挂载；两类计数任一到顶即放弃。
 pub fn take_due_packages() -> Vec<String> {
-    let now = paths::monotonic_ms();
-    let last = LAST_SCAN_MS.load(std::sync::atomic::Ordering::Relaxed);
-    if now.saturating_sub(last) < SCAN_INTERVAL_MS {
-        return Vec::new();
-    }
-    LAST_SCAN_MS.store(now, std::sync::atomic::Ordering::Relaxed);
-
     let Ok(entries) = std::fs::read_dir(pending_dir()) else {
         return Vec::new();
     };
@@ -150,14 +190,14 @@ pub fn take_due_packages() -> Vec<String> {
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         let (rounds, ready_failures) = read_marker(&path.to_string_lossy());
-        // mtime 缺失（刚创建）按「已到期」处理，让挂载后立即重试一次。
+        // mtime 缺失/读取失败时按 0 计龄，下一次退避截止点再试。
         let age_ms = entry
             .metadata()
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.elapsed().ok())
-            .map(|elapsed| elapsed.as_millis() as i64)
-            .unwrap_or(SCAN_INTERVAL_MS);
+            .map(|elapsed| elapsed.as_millis().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
         if age_ms < backoff_ms(rounds) {
             continue;
         }

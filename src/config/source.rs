@@ -127,11 +127,41 @@ impl SettingsHub {
         loaded_state.monitor_filters = state.monitor_filters.clone();
     }
 
+    /// 完整指纹的最大陈旧时长。
+    ///
+    /// 廉价指纹（4 次 stat）只能看到「配置目录/根配置文件被碰过」——原子替换与 WebUI 的
+    /// `touch` 都会触发它。但**就地覆盖写**（truncate-then-write）不改目录 mtime，因此
+    /// 必须按分钟级补一次完整指纹，否则这类写入会被永久漏掉。60 秒与「事件通道不可用时的
+    /// 指纹周期」同量级，用户不可感知。
+    const FULL_FINGERPRINT_MAX_AGE_MS: i64 = 60_000;
+
     fn reload_from_dir(&self, config_dir: &str, force: bool) -> bool {
-        let (is_loaded, last_fingerprint) = {
+        let (is_loaded, last_fingerprint, last_quick_fingerprint, last_full_ms) = {
             let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
-            (state.is_loaded, state.last_fingerprint)
+            (
+                state.is_loaded,
+                state.last_fingerprint,
+                state.last_quick_fingerprint,
+                state.last_full_fingerprint_ms,
+            )
         };
+        let now_ms = paths::monotonic_ms();
+
+        // 廉价早退：只有「配置目录或根配置文件被碰过」才值得做完整指纹。
+        // 配置写入要么 tmp+rename（更新目标目录 mtime），要么 WebUI 显式 `touch` 目录，
+        // 因此这一层判定足以覆盖全部写入路径；而它的代价是 4 次 stat。
+        //
+        // 这一层是给「inotify 在应用域建不起来」的机型兜底的：那种机型上事件通道永远
+        // 不可用，只能靠 1 秒级复查——完整指纹（readdir + 每个应用配置一次 stat）在这里
+        // 太贵，廉价指纹把它降到可忽略。
+        let quick_fingerprint = super::fingerprint::quick_config_fingerprint(config_dir);
+        if !force
+            && is_loaded
+            && last_quick_fingerprint == Some(quick_fingerprint)
+            && now_ms.saturating_sub(last_full_ms) < Self::FULL_FINGERPRINT_MAX_AGE_MS
+        {
+            return true;
+        }
 
         let fp_started_ms = paths::monotonic_ms();
         let fingerprint_snapshot =
@@ -139,6 +169,12 @@ impl SettingsHub {
         let fp_ms = paths::monotonic_ms().saturating_sub(fp_started_ms);
         let fingerprint = fingerprint_snapshot.hash;
         if !force && is_loaded && fingerprint == last_fingerprint {
+            // 内容其实没变（只是目录 mtime 被碰了一下）：把廉价指纹对齐，避免下一次
+            // 又要做一遍完整指纹。
+            if let Ok(mut state) = self.state.lock() {
+                state.last_quick_fingerprint = Some(quick_fingerprint);
+                state.last_full_fingerprint_ms = now_ms;
+            }
             return true;
         }
 
@@ -172,6 +208,8 @@ impl SettingsHub {
         let apps_ms = paths::monotonic_ms().saturating_sub(apps_started_ms);
         loaded_state.is_loaded = true;
         loaded_state.last_fingerprint = fingerprint;
+        loaded_state.last_quick_fingerprint = Some(quick_fingerprint);
+        loaded_state.last_full_fingerprint_ms = now_ms;
         log_config_load_perf(
             "reload",
             &loaded_state,

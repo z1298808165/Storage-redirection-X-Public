@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const WRITER_ALLOWED_LOG_STEP: u64 = 256;
 const REDIRECT_SLOW_MS: i64 = 5;
 const REDIRECT_SAMPLE_STEP: u64 = 2048;
-const WRITER_CONFIG_RELOAD_INTERVAL_MS: i64 = 1000;
 static WRITER_ALLOWED_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static REDIRECT_DECISION_COUNT: AtomicU64 = AtomicU64::new(0);
 static WRITER_LAST_CONFIG_RELOAD_CHECK_MS: AtomicU64 = AtomicU64::new(0);
@@ -741,7 +740,9 @@ pub fn record_redirect_hit(hub: &InterceptHub, op_name: &str, from_path: &str, t
 
 fn reload_writer_config_by_fingerprint(reload_started_ms: i64) -> i64 {
     let last_ms = WRITER_LAST_CONFIG_RELOAD_CHECK_MS.load(Ordering::Relaxed) as i64;
-    if reload_started_ms.saturating_sub(last_ms) < WRITER_CONFIG_RELOAD_INTERVAL_MS {
+    // 与 `hook::reload` 共用同一套节流判断：事件通道在线时该判据是「永不复查」，
+    // 否则两条独立的 1 秒指纹（各自一次 readdir + 几十次 stat）会同时跑。
+    if reload_started_ms.saturating_sub(last_ms) < crate::hook::fallback_reload_interval_ms() {
         return 0;
     }
     if WRITER_LAST_CONFIG_RELOAD_CHECK_MS

@@ -1,25 +1,54 @@
-//! 进程内配置监视线程：hook 兜底拓扑（监视桥接进程保留自身重定向）的规则即时生效。
+//! 进程内配置监视：hook 兜底拓扑（监视桥接进程保留自身重定向）的规则即时生效。
 //!
 //! 这类进程没有 FUSE 会话，规则完全由进程内 [`crate::redirect::router::PathRouter`]
 //! 承载；若只在决策路径上节流轮询，空闲期（无下载活动）延迟可能长达数分钟。
 //!
-//! 为什么不用 inotify：桥接进程运行在应用 SELinux 域，对 `/data/adb/modules/...`
-//! 目录的 inotify watch 被 SELinux 拒绝（真机实测 errno=13 EACCES；配置读取本身
-//! 走 Zygisk 保留 FD 的 `/proc/self/fd/<fd>/config` 路径，文件读可用而目录 watch
-//! 不可用）。因此退化为专用线程对自身配置与全局配置做 1 秒级指纹比对
-//! （size + mtime + inode，tmp+rename 原子写会同时改变三者），变更立即触发
-//! SettingsHub 重载 + PathRouter 重建，实测秒级生效且不依赖下载活动。
+//! 为什么不自己在本进程建 inotify watch：桥接进程运行在应用 SELinux 域，对
+//! `/data/adb/modules/...` 目录的 inotify watch 被 SELinux 拒绝（真机实测 errno=13
+//! EACCES；配置读取本身走 Zygisk 保留 FD 的 `/proc/self/fd/<fd>/config` 路径，文件读
+//! 可用而目录 watch 不可用）。
+//!
+//! 但**本进程并不需要自己建 watch**：root 在 specialize 之前已经建好配置目录的
+//! inotify fd（`config::watcher::init`），该 fd 随 Zygisk 保留被本进程继承。因此：
+//!
+//! - 事件通道可用（`watcher::events_live()`）时，直接订阅它的变更回调——事件线程阻塞
+//!   在 `poll(-1)` 上，空闲期**零唤醒、零系统调用**，配置改动到达即重载；
+//! - 只有事件通道不可用（init 或目录 watch 建立失败、读取线程退出）时，才退回对自身
+//!   配置与全局配置做 1 秒一次的指纹比对（size + mtime + inode，tmp + rename 原子写
+//!   会同时改变三者）——这是纯降级路径，正常机型不会走到。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-const CHECK_INTERVAL_MS: u64 = 1000;
+use crate::config::watcher::{self, ChangeKind};
 
-/// 启动配置监视线程；失败仅告警，决策路径上的节流轮询仍作为兜底。
+/// 退化路径（事件通道不可用）的指纹复查间隔。
+const FALLBACK_CHECK_INTERVAL_MS: u64 = 1000;
+
+/// 启动配置监视；失败仅告警，决策路径上的节流轮询仍作为兜底。
 pub(crate) fn start_for(package_name: String) {
-    // 配置目录取自 SettingsHub：桥接进程拿到的是 Zygisk 保留 FD 的
-    // /proc/self/fd/<fd>/config 路径。
+    if watcher::events_live() {
+        // 事件驱动：把「配置变更」事件直接接到本进程的重载上，不再有任何轮询。
+        let name = package_name.clone();
+        watcher::set_change_callback(Arc::new(move |kind| {
+            if change_touches_package(kind, &name) {
+                apply_reload(&name);
+            }
+        }));
+        watcher::start_event_reader();
+        log::info!("config watch event-driven pkg={}", package_name);
+        return;
+    }
+
+    // 降级路径：没有可用事件源时只能比对指纹。配置目录取自 SettingsHub，桥接进程拿到
+    // 的是 Zygisk 保留 FD 的 /proc/self/fd/<fd>/config 路径。
+    log::warn!(
+        "config watch fallback to fingerprint pkg={} interval_ms={}",
+        package_name,
+        FALLBACK_CHECK_INTERVAL_MS
+    );
     let config_dir = crate::config::SettingsHub::instance().config_dir();
     let result = std::thread::Builder::new()
         .name("srx-cfg-watch".to_string())
@@ -29,12 +58,26 @@ pub(crate) fn start_for(package_name: String) {
     }
 }
 
+/// 一次变更是否可能影响本进程的规则。
+///
+/// `Full` 表示全局配置、或事件无法定位到具体包（含 inotify 队列溢出）——按最坏情况
+/// 重载；`Apps` 只在名单为空或命中本进程包名时才重载。
+fn change_touches_package(kind: &ChangeKind, package_name: &str) -> bool {
+    match kind {
+        ChangeKind::None => false,
+        ChangeKind::Full(_) => true,
+        ChangeKind::Apps(packages) => {
+            packages.is_empty() || packages.iter().any(|name| name == package_name)
+        }
+    }
+}
+
 fn watch_loop(package_name: String, config_dir: String) {
     let app_config_path = format!("{config_dir}/apps/{package_name}.json");
     let global_config_path = format!("{config_dir}/global.json");
     let mut last = snapshot(&app_config_path, &global_config_path);
     loop {
-        std::thread::sleep(Duration::from_millis(CHECK_INTERVAL_MS));
+        std::thread::sleep(Duration::from_millis(FALLBACK_CHECK_INTERVAL_MS));
         let current = snapshot(&app_config_path, &global_config_path);
         if current == last {
             continue;

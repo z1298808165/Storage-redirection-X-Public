@@ -556,6 +556,8 @@ collect_diagnostic_summary() {
   [ -s "$LOGS_DIR/.media_hook_install_state" ] && media_hook_state_present=1
   app_error_ring_present=0
   [ -s "$LOGS_DIR/app-errors.log" ] && app_error_ring_present=1
+  app_error_window_present=0
+  [ -s "$LOGS_DIR/app-errors-window.log" ] && app_error_window_present=1
   {
     printf '{\n'
     printf '  "schema": 1,\n'
@@ -581,6 +583,7 @@ collect_diagnostic_summary() {
     printf '  "monitor_capacity_limited": "%s",\n' "$monitor_capacity_limited"
     printf '  "media_hook_state_present": %s,\n' "$media_hook_state_present"
     printf '  "app_error_ring_present": %s\n' "$app_error_ring_present"
+    printf '  "app_error_window_present": %s\n' "$app_error_window_present"
     printf '}\n'
   } > "$stage/diagnostic-summary.json"
 }

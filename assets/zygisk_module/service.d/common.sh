@@ -143,10 +143,16 @@ SRX_COLLECTOR_TAG="srx-debug-collector"
 # 应用错误环形采集器使用独立标记：它不受 verbose 门禁、常驻运行，
 # 不能被 debug 采集器的例行重启（reap + 重启）误杀。
 SRX_APP_ERROR_COLLECTOR_TAG="srx-apperror-collector"
+# 主缓冲按需窗口采集器的标记（与常驻 crash ring 区分，便于现场辨认）。
+SRX_APP_WINDOW_COLLECTOR_TAG="srx-apperror-window"
 
 reap_stale_logcat_collectors() {
   reaped=0
-  for collector_tag in "$SRX_COLLECTOR_TAG" "$SRX_APP_ERROR_COLLECTOR_TAG"; do
+  # 只回收 debug 采集器自己的孤儿。**不要**把常驻的 crash ring 纳入回收：本函数由
+  # `start_debug_logcat_collector` 调用，而后者会被「verbose 开关翻转」这类配置事件
+  # 触发——一并回收就等于每次改配置都静默杀掉常驻采集器（且不会重建），崩溃现场
+  # 从此丢失。crash ring 的生命周期由自己的 pid 文件 + 幂等启动管理。
+  for collector_tag in "$SRX_COLLECTOR_TAG"; do
     for proc_dir in /proc/[0-9]*; do
       [ -r "$proc_dir/cmdline" ] || continue
       cmdline=$(tr '\0' ' ' < "$proc_dir/cmdline" 2>/dev/null)

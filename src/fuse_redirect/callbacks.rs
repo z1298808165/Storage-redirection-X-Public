@@ -123,15 +123,25 @@ fn heal_poisoned_sqlite_shm_backend(user_id: i32, rel: &str, package_name: &str)
         );
         return true;
     }
+    // 失败分支限频：中毒的 `-shm` 会被应用按 LOOKUP 反复访问，失败时逐次落 warn
+    // 会把 running.log 的轮转窗口吃掉（真机实测该日志被应用重试驱动，量可以很大）。
+    // 前 16 条全记，之后每 256 条留一条并带累计计数。
+    static SHM_UNLINK_FAILED_LOGGED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let seen = SHM_UNLINK_FAILED_LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if seen > 16 && !seen.is_multiple_of(256) {
+        return false;
+    }
     let errno = last_errno();
     log::warn!(
-        "fuse sqlite shm poisoned backend unlink failed errno={} {} size={} stale_wal_index={} pkg={} rel={}",
+        "fuse sqlite shm poisoned backend unlink failed errno={} {} size={} stale_wal_index={} pkg={} rel={} seen={}",
         errno,
         crate::platform::errno::text(errno),
         size,
         stale_wal_index,
         package_name,
-        rel
+        rel,
+        seen
     );
     false
 }

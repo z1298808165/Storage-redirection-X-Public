@@ -1289,10 +1289,10 @@ fn resolve_system_caller_package(caller_uid: i32, caller_pid: i32, caller_packag
     if !caller_package.is_empty() || caller_uid >= ANDROID_APP_UID_START || caller_pid <= 0 {
         return caller_package.to_string();
     }
-    // daemon 落盘的 pid 表由 root 读取并原子替换：MP 域读不到 root/系统应用进程的
-    // /proc/<pid>（真机实测 cmdline 为空、status 的 uid 为 -1），这条是此时唯一
-    // 还能拿到身份的来源，且表内 uid 必须与账本记的 uid 一致才算命中。
-    if let Some((package, uid)) = crate::hook::lookup_system_pid_table(caller_pid)
+    // pid 表仅作周期快照，不能规避同 uid 的 pid 复用。系统域读不到 /proc 时由 daemon
+    // 按当前进程身份验证，且返回 uid 必须与账本记录一致。
+    if let Some((package, uid)) =
+        crate::daemon_identity_query::query_process_identity(caller_pid, caller_uid)
         && uid == caller_uid
         && !package.is_empty()
     {

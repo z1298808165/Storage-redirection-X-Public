@@ -43,7 +43,9 @@ pub unsafe extern "C" fn hooked_dlopen(filename: *const c_char, flags: c_int) ->
         call_dlopen(filename, flags)
     };
     if !result.is_null() {
-        InterceptHub::instance().refresh_hooks_after_late_load("dlopen");
+        let hub = InterceptHub::instance();
+        hub.refresh_hooks_after_late_load("dlopen");
+        retry_fuse_engine_patch_after_late_load(hub);
     }
     result
 }
@@ -62,7 +64,24 @@ pub unsafe extern "C" fn hooked_android_dlopen_ext(
         call_android_dlopen_ext(filename, flags, extinfo)
     };
     if !result.is_null() {
-        InterceptHub::instance().refresh_hooks_after_late_load("android_dlopen_ext");
+        let hub = InterceptHub::instance();
+        hub.refresh_hooks_after_late_load("android_dlopen_ext");
+        retry_fuse_engine_patch_after_late_load(hub);
     }
     result
+}
+
+/// 刚有库被 `dlopen` 成功：媒体提供器进程立即重置并重试 FUSE 引擎 read 补丁。
+///
+/// 目标库（`libfuse.so` / `libfuse_jni.so` / `libappfuse.so`）都是晚于 hook 安装按需
+/// 加载的。以前靠「每次 read 检查一次、固定周期重试」来抓这个时机，代价是库永远不
+/// 出现的 ROM 上会永久重试。现在把「库出现」这个事件当触发条件：dlopen 成功即重置
+/// 退避并立刻试一次，定时重试只作为极端情形的兜底（5 分钟一次）。
+///
+/// 只对媒体提供器进程生效：其它进程不会去读 `/dev/fuse` 请求，做 ELF 定位纯属浪费。
+fn retry_fuse_engine_patch_after_late_load(hub: &InterceptHub) {
+    if !hub.with_package_name(crate::redirect::policy::is_media_provider_package) {
+        return;
+    }
+    super::read::retry_after_late_load();
 }

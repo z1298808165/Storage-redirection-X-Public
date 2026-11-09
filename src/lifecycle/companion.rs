@@ -24,6 +24,7 @@ pub fn run_companion_pipeline(client_fd: c_int) {
     let mut request_type = [0u8; 1];
     if !fs::read_all_timeout(client_fd, &mut request_type, READ_TIMEOUT) {
         log::error!("request type read failed");
+        write_status(client_fd, 0);
         return;
     }
     match request_type[0] {
@@ -254,7 +255,10 @@ fn handle_mount_request(client_fd: c_int) {
     let payload_len = match read_payload_length(client_fd) {
         Some(len) => len,
         None => {
+            // 连请求都没读完就回执：对端已经半途放弃，写不进去也无妨，但协议纪律是
+            // 「每一条分支都给结论」，漏掉这条会让应用侧的失败永远无法定位。
             log::error!("payload length read failed");
+            write_status(client_fd, 0);
             return;
         }
     };
@@ -297,7 +301,27 @@ fn handle_mount_request(client_fd: c_int) {
     } else {
         0
     };
-    write_status(client_fd, status);
+    // 结论仍按协议写回（4 字节状态），但对 `'M'` 请求它已经是**尽力而为**：应用侧发完即关，
+    // 那条连接在应用进程里不存在了（为什么必须这样，见 `mount_request` 模块头注释——SELinux
+    // 域迁移让应用侧永远读不到）。因此 `EPIPE` 是常态而非故障，只记 debug；应用侧的结论改用
+    // 挂载表观测，执行方的结论就在本进程的日志里（`perf companion mount ... ok=`）。
+    match write_status(client_fd, status) {
+        true => log::debug!(
+            "companion ack sent fd={} status={} pkg={} pid={}",
+            client_fd,
+            status,
+            request.package_name,
+            request.pid
+        ),
+        false => log::debug!(
+            "companion ack write skipped fd={} status={} pkg={} pid={} errno={}",
+            client_fd,
+            status,
+            request.package_name,
+            request.pid,
+            crate::platform::errno::last()
+        ),
+    }
 }
 
 fn read_payload_length(client_fd: c_int) -> Option<u32> {
@@ -325,8 +349,15 @@ fn read_payload_data(client_fd: c_int, payload_len: u32) -> Option<String> {
     }
 }
 
-fn write_status(client_fd: c_int, status: i32) {
-    let _ = fs::write_all(client_fd, &status.to_ne_bytes());
+/// 给一次 companion 连接写 4 字节结论。
+///
+/// 协议纪律：**每一个**分支（含"还没走到挂载就退出"的早退）都写，保持「有请求就有应答」
+/// 这条协议不破。但对 `'M'`（挂载请求）它已是尽力而为——应用侧发完就关闭连接，那条连接
+/// 不存在于应用进程里了（SELinux 域迁移让应用侧永远读不到，见 `mount_request` 模块头注释），
+/// 所以 `EPIPE` 是常态、只记 debug。真正的消费者是 `'F'`（fchown）：它在应用域里新建连接，
+/// 同域读写不受域迁移影响。
+pub(crate) fn write_status(client_fd: c_int, status: i32) -> bool {
+    fs::write_all(client_fd, &status.to_ne_bytes())
 }
 
 fn log_mount_request(request: &CompanionMountRequest) {

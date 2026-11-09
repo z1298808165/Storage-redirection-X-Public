@@ -107,7 +107,9 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
         super::ops::read::ensure_fuse_engine_read_patch();
     }
 
-    let previous_package = hub.get_current_caller_package();
+    // 这几个「上一次的调用方」快照只在**解析失败**的回退路径上才用得到，而它们里的
+    // 包名是一次 `String` 分配。这条函数每被拦截一次文件操作就调用一次（媒体扫描时
+    // 每秒数千次），把分配推迟到真正需要它的分支即可，语义完全不变。
     let previous_uid = hub.get_current_caller_uid();
     let previous_age_ms = context::get_current_caller_age_ms();
     let previous_from_external_signal = context::is_current_caller_from_external_signal();
@@ -116,6 +118,8 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
         hub.with_package_name(should_reuse_recent_current_caller_for_process);
 
     if !has_caller_signal(hub) {
+        // 只有走到这里才需要上一次的包名。
+        let previous_package = hub.get_current_caller_package();
         resolve_missing_caller_signal(
             hub,
             &previous_package,
@@ -254,16 +258,17 @@ pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
     }
 
     let count = CALLER_UNRESOLVED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if can_reuse_recent_caller
-        && try_reuse_recent_current_caller(
+    if can_reuse_recent_caller {
+        let previous_package = hub.get_current_caller_package();
+        if try_reuse_recent_current_caller(
             hub,
             &previous_package,
             previous_uid,
             previous_age_ms,
             "unresolved",
-        )
-    {
-        return;
+        ) {
+            return;
+        }
     }
     if should_preserve_unresolved_external_uid(&hub.get_package_name(), caller_uid) {
         context::set_current_caller_from_external_signal("", caller_uid);
@@ -346,26 +351,15 @@ pub fn update_caller_for_mutation(hub: &InterceptHub, pathname: *const c_char) {
 /// 返回 (包名, uid)。MP 域读 platform/shell 等进程的 /proc 常被 SELinux 拒绝，
 /// 此时 pid 表是唯一可信来源。
 fn resolve_system_fuse_identity(fuse_uid: i32, fuse_pid: i32) -> Option<(String, i32)> {
-    if let Some((table_pkg, table_uid)) = lookup_system_pid_table(fuse_pid)
-        && table_uid == fuse_uid
-    {
-        // pid 表记的是 /proc 命令行身份：Java 进程是包名，native 进程（`sh`、下载器
-        // helper）只是 basename。后者规则必然查不到，直接采信会把写入当成「未配置
-        // 应用」放行到真实存储——2026-11-06 真机：进程存活超过一个扫描周期后入表，
-        // 立即写入被重定向、存活 2s 再写却泄漏，差别就在这里。native 名交给 daemon
-        // 按 uid 唯一归属换算；多包 uid 仍保留表内原名，不猜。
-        if table_pkg.contains('.') {
-            return Some((table_pkg, table_uid));
-        }
-        let resolved = crate::daemon_identity_query::query_process_identity(fuse_pid, fuse_uid)
-            .map(|(package, _)| package)
-            .filter(|package| package.contains('.'))
-            .unwrap_or(table_pkg);
-        return Some((resolved, table_uid));
-    }
-    // 表未命中：区分「表里根本没有该 pid」（daemon 扫描空窗）与「uid 不匹配」
-    //（身份错误），10 秒限频记录一次供运维判断竞态边界。
+    // 共享 uid 下 pid 复用仍可能保持 uid 不变，因此周期快照不能证明当前任务身份。
+    // 实时 root 查询是权威证据；表仅用于诊断快照是否曾见过该 pid。
     let table_seen = lookup_system_pid_table(fuse_pid).is_some();
+    if let Some((remote_pkg, remote_uid)) =
+        crate::daemon_identity_query::query_process_identity(fuse_pid, fuse_uid)
+        && remote_uid == fuse_uid
+    {
+        return Some((remote_pkg, remote_uid));
+    }
     let mut pkg = resolve_caller_package_by_pid(fuse_pid);
     if pkg.is_empty() {
         pkg = resolve_native_identity_by_pid(fuse_pid);
@@ -1108,65 +1102,100 @@ fn c_str(value: &str) -> Option<CString> {
 
 /// daemon 落盘的系统进程 pid 表（tmp/system_pids，"pid uid 包名" 行）读取缓存。
 ///
-/// 表由 root daemon 事件化重建（进程/线程集合变化即刷）；本缓存在 TTL 内复用，
-/// 避免高频归因反复读文件。新进程/新线程的首次存储操作可能撞上缓存窗口，
-/// 因此 miss 且缓存已具备重读条件时强制重读一次。
+/// 表由 root daemon 周期性重建（进程/线程集合变化即刷）；缓存只在 miss 且**文件身份
+/// 变化**时重读，既不会被「过期」触发无谓重读，也不会错过 daemon 的每一次刷新。
 struct SystemPidTable {
-    loaded_at_ms: i64,
+    /// 最近一次成功载入时的文件身份；`None` 表示还没读成功过。
+    loaded_identity: Option<crate::platform::proc_direct::FileIdentity>,
+    /// 最近一次 stat 的时刻，用于给 miss 风暴下的 stat 本身设上限。
+    last_stat_ms: i64,
+    /// 最近一次整表重读的时刻。仅当 stat 不可用（拿不到文件身份）时用作时间兜底，
+    /// 否则可能退化成「每次 miss 都重读 512 KiB」。
+    last_reload_ms: i64,
     entries: std::collections::HashMap<i32, (String, i32)>,
 }
 
 static SYSTEM_PID_TABLE: OnceLock<Mutex<SystemPidTable>> = OnceLock::new();
-const SYSTEM_PID_TABLE_TTL_MS: i64 = 2_000;
-/// miss 强制重读的最小缓存年龄：低于它时新表大概率也尚未落盘，直接放弃；
-/// 高于它时表文件很可能已被 daemon 刷新，重读一次能接住刚启动进程的首次写入。
-const SYSTEM_PID_TABLE_RECHECK_MIN_AGE_MS: i64 = 300;
+/// miss 路径上最短的 stat 间隔。
+///
+/// 命中路径完全不碰文件（与旧实现一致），所以这里只约束「未命中时先看一眼文件有没有
+/// 变」这一条路径：200ms 足够把同一批 miss 合并成一次 stat，又不会让刚启动进程的
+/// 首次写入等太久（真正决定延迟的是 daemon 的产表节奏）。
+const SYSTEM_PID_TABLE_STAT_FLOOR_MS: i64 = 200;
+/// stat 不可用时的重读下限。
+///
+/// 文件身份是「内容有没有变」的等价判据（daemon 走 tmp + rename，inode 必变）；只有在
+/// stat 本身失败（表文件尚不存在、权限异常）时才会失去这个判据，此时退化成时间节流，
+/// 避免每次 miss 都把整张表读一遍。
+const SYSTEM_PID_TABLE_TIME_FALLBACK_MS: i64 = 2_000;
 
-/// 按任务 id 反查 (包名, uid)：先查缓存，过期后从模块目录经 Zygisk 保留 FD
-/// 读取 daemon 写入的表并重建缓存；未命中且缓存已老于重读门槛时再强制刷新
-/// 一次。表缺失或不可读返回 None。
+/// 按任务 id 反查 (包名, uid)。
+///
+/// 语义与旧实现一致：**命中直接返回**（不做任何 IO），未命中才考虑刷新缓存。区别只在
+/// 刷新判据——旧实现是「按时间重读整张表」，现在是「按文件身份重读」：
+///
+/// 旧实现每次 miss 且距上次重读 ≥300ms 就把 512 KiB 的表读回来、解析近两万行、每行
+/// 做一次 `String` 分配。开机与装应用的进程风暴期，miss 会把这件事放大到每秒数次，
+/// 而读到的内容绝大多数时候与内存里一模一样。表由 daemon 通过 tmp + rename 原子替换，
+/// inode 必然变化，因此 stat 一次就能判定是否需要重读，精度不变、读取量降到接近零。
 pub(crate) fn lookup_system_pid_table(pid: i32) -> Option<(String, i32)> {
     let table_mutex = SYSTEM_PID_TABLE.get_or_init(|| {
         Mutex::new(SystemPidTable {
-            loaded_at_ms: -1,
+            loaded_identity: None,
+            last_stat_ms: i64::MIN / 2,
+            last_reload_ms: i64::MIN / 2,
             entries: std::collections::HashMap::new(),
         })
     });
     let mut table = table_mutex.lock().unwrap_or_else(|err| err.into_inner());
-    let now_ms = get_monotonic_ms();
-    let mut force_reload = table.loaded_at_ms < 0
-        || now_ms.saturating_sub(table.loaded_at_ms) >= SYSTEM_PID_TABLE_TTL_MS;
     if let Some(entry) = table.entries.get(&pid) {
         return Some(entry.clone());
     }
-    // miss：缓存窗口可能盖住了 daemon 刚刷新的新表，年龄达标就强制重读一次。
-    if !force_reload
-        && now_ms.saturating_sub(table.loaded_at_ms) >= SYSTEM_PID_TABLE_RECHECK_MIN_AGE_MS
+    let now_ms = get_monotonic_ms();
+    // stat 节流对**所有** miss 生效（包括「一次都没读成功过」的情形）：表文件缺席时
+    // 每次 miss 都 stat 一遍同样是被流量放大的白工，而首次尝试不会被挡——初始的
+    // `last_stat_ms` 是极小值。
+    if now_ms.saturating_sub(table.last_stat_ms) < SYSTEM_PID_TABLE_STAT_FLOOR_MS {
+        return None;
+    }
+    table.last_stat_ms = now_ms;
+    let identity = crate::platform::proc_direct::stat_file_identity(&system_pid_table_path());
+    if identity.is_some() && identity == table.loaded_identity {
+        // 文件没变：缓存仍然有效，本次 miss 就是「表里确实还没有这个 pid」。
+        // 调用方会退回按需询问（`daemon_identity_query`），结果同样来自 /proc。
+        return None;
+    }
+    if identity.is_none()
+        && table.loaded_identity.is_none()
+        && now_ms.saturating_sub(table.last_reload_ms) < SYSTEM_PID_TABLE_TIME_FALLBACK_MS
     {
-        force_reload = true;
+        // 拿不到文件身份（表文件还不存在等）：没有廉价的「变没变」判据，只能用时间节流。
+        return None;
     }
-    if force_reload {
-        table.entries.clear();
-        table.loaded_at_ms = now_ms;
-        let content = read_system_pid_table_file();
-        for line in content.lines() {
-            let mut fields = line.split_whitespace();
-            let Some(entry_pid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
-                continue;
-            };
-            let Some(uid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
-                continue;
-            };
-            let Some(package) = fields.next() else {
-                continue;
-            };
-            table.entries.insert(entry_pid, (package.to_string(), uid));
-        }
-        if let Some(entry) = table.entries.get(&pid) {
-            return Some(entry.clone());
-        }
+    // 先读内容再决定是否记录文件身份：读失败/读到空内容时**不能**把 identity 记成
+    // 「已载入」，否则下一次 miss 会认为「文件没变、缓存有效」而永远不再重读，
+    // 整张表会一直保持为空（直到 daemon 下次真的改写文件）。
+    let content = read_system_pid_table_file();
+    if content.is_empty() {
+        return None;
     }
-    None
+    table.entries.clear();
+    table.loaded_identity = identity;
+    table.last_reload_ms = now_ms;
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(entry_pid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Some(uid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
+            continue;
+        };
+        let Some(package) = fields.next() else {
+            continue;
+        };
+        table.entries.insert(entry_pid, (package.to_string(), uid));
+    }
+    table.entries.get(&pid).cloned()
 }
 
 fn get_monotonic_ms() -> i64 {
@@ -1176,10 +1205,13 @@ fn get_monotonic_ms() -> i64 {
 /// 读系统进程 pid 表：hook 进程内经 Zygisk 保留 FD（/proc/self/fd/<fd>/tmp/...）
 /// 读取；直接模块路径仅 root 可见，普通 hook 进程不可达时返回空。
 fn read_system_pid_table_file() -> String {
+    read_file_by_syscall(&system_pid_table_path(), 512 * 1024)
+}
+
+fn system_pid_table_path() -> String {
     let config_dir = SettingsHub::instance().config_dir();
     let module_dir = config_dir.strip_suffix("/config").unwrap_or(&config_dir);
-    let table_path = format!("{module_dir}/tmp/system_pids");
-    read_file_by_syscall(&table_path, 512 * 1024)
+    format!("{module_dir}/tmp/system_pids")
 }
 
 // clearCallingIdentity 之前提前快照 UID，供后续 restore 区间回查
@@ -1263,24 +1295,15 @@ pub fn exit_java_caller_scope() {
 fn resolve_java_caller_package(caller_uid: i32, caller_pid: i32) -> Option<String> {
     let hub = InterceptHub::instance();
     if caller_pid > 0 {
-        // 系统 uid 优先查 daemon 落盘的 pid 表：表由 root 读取并原子替换，MP 域读不到
-        // root/系统应用进程的 /proc 时，这是唯一还能拿到身份的来源。表内 uid 必须与
-        // binder 给的 uid 一致，避免 pid 复用导致张冠李戴。
-        if caller_uid < ANDROID_APP_UID_START
-            && let Some((package, uid)) = lookup_system_pid_table(caller_pid)
-            && uid == caller_uid
-            && !package.is_empty()
-        {
-            // 表内 native 名（`sh` 之类）不是包名，规则查不到；交给 daemon 按 uid 唯一
-            // 归属换算，多包 uid 保留原名（与 FUSE 请求头那条路径同一口径）。
-            if package.contains('.') {
+        // 系统 uid 的命中也必须按当前 /proc 身份验证，不能直接采信周期 pid 表中的旧包名。
+        if caller_uid < ANDROID_APP_UID_START {
+            if let Some((package, resolved_uid)) =
+                crate::daemon_identity_query::query_process_identity(caller_pid, caller_uid)
+                && resolved_uid == caller_uid
+            {
                 return Some(package);
             }
-            let resolved = crate::daemon_identity_query::query_process_identity(caller_pid, uid)
-                .map(|(remote, _)| remote)
-                .filter(|remote| remote.contains('.'))
-                .unwrap_or(package);
-            return Some(resolved);
+            return None;
         }
         let package_name = resolve_caller_package_by_pid(caller_pid);
         if !package_name.is_empty()

@@ -14,6 +14,26 @@ pub struct ConfigFingerprint {
     pub app_packages: Vec<String>,
 }
 
+/// 廉价变更指纹：只看**目录本身**与两个根配置文件，共 4 次 `stat`，零分配（除两个路径拼接）。
+///
+/// 为什么这足够：配置写入要么是「临时文件 + rename」（原子替换会更新目标目录的 mtime），
+/// 要么由 WebUI 显式 `touch` 配置目录（`writeFile` 的 `cp` 之后紧跟 `touch APPS_DIR`）。
+/// 两条路径都会让 `apps/` 或 `config/` 目录的 mtime/inode 变化，因此一次目录 stat 就能
+/// 判定「有没有人写过配置」，不必每秒 readdir + 逐个应用配置 stat 一遍。
+///
+/// 调用方在**指纹未变**时直接早退；只有变了才去做完整的
+/// [`compute_config_fingerprint_snapshot`]（readdir + 每文件 stat + 包名列表）。
+/// 这解决了「inotify 在应用域建不起来」的机型上、1 秒级兜底复查过贵的问题。
+pub fn quick_config_fingerprint(config_dir: &str) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv_update_str(hash, "srx_config_quick_v1");
+    hash = add_file_stat(hash, config_dir);
+    hash = add_file_stat(hash, &paths::join(config_dir, APPS_CONFIG_DIR));
+    hash = add_file_stat(hash, &paths::join(config_dir, GLOBAL_CONFIG_FILE));
+    hash = add_file_stat(hash, &paths::join(config_dir, MONITOR_FILTERS_CONFIG_FILE));
+    hash
+}
+
 pub fn compute_config_fingerprint_snapshot(config_dir: &str) -> ConfigFingerprint {
     let started_ms = paths::monotonic_ms();
     let mut hash = FNV_OFFSET_BASIS;

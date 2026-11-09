@@ -76,6 +76,10 @@ pub fn set_daemon_wake_eventfd(fd: i32) {
     DAEMON_WAKE_EVENTFD.store(fd, Ordering::Release);
 }
 
+pub fn wake_daemon_for_retry() {
+    wake_daemon();
+}
+
 fn wake_daemon() {
     let fd = DAEMON_WAKE_EVENTFD.load(Ordering::Acquire);
     if fd >= 0 {
@@ -175,24 +179,193 @@ fn send_control_packet(fd: i32, command: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// 日志落盘定时器：把「每 2 秒醒一次看有没有东西要刷」换成「有东西要刷才武装 2 秒定时器」。
+///
+/// 空闲时没有任何日志进来，线程就一直阻塞在 poll 上（无限等待，零唤醒）；只有真的
+/// 收到运行日志/监视记录才武装一次，到点落盘后解除武装。落盘时效与原来的周期 flush
+/// 完全一致（最多延迟 [`FLUSH_INTERVAL_MS`]），但不再在没人说话时定时醒来。
+/// timerfd 创建失败时退回旧的固定超时路径，功能不降级。
+struct FlushTimer {
+    fd: i32,
+    armed: bool,
+}
+
+impl FlushTimer {
+    fn new() -> Self {
+        // SAFETY: timerfd_create 只创建内核对象并返回描述符，不涉及借用内存。
+        let fd = unsafe {
+            libc::timerfd_create(
+                libc::CLOCK_MONOTONIC,
+                libc::TFD_NONBLOCK | libc::TFD_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            log::warn!(
+                "log flush timerfd unavailable, fallback to periodic poll errno={}",
+                io::Error::last_os_error()
+            );
+        }
+        Self { fd, armed: false }
+    }
+
+    /// 武装一次 2 秒定时器；已武装或没有 timerfd 时什么都不做。
+    ///
+    /// 返回是否已武装。`timerfd_settime` 在合法 spec 下不会失败，但一旦失败而调用方
+    /// 不知道，线程就会以无限超时睡下去、记录再也不落盘——因此返回布尔值让调用方
+    /// 可以立刻落盘兜底。
+    fn arm(&mut self) -> bool {
+        if self.fd < 0 {
+            return false;
+        }
+        if self.armed {
+            return true;
+        }
+        let spec = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: timespec_from_ms(FLUSH_INTERVAL_MS),
+        };
+        // SAFETY: spec 指向本栈帧上已初始化的 itimerspec，fd 由本结构体独占持有。
+        let result = unsafe { libc::timerfd_settime(self.fd, 0, &spec, std::ptr::null_mut()) };
+        if result != 0 {
+            // 真机实证：`tv_nsec` 必须 < 1e9，直接把「毫秒 × 1e6」塞进去会拿到 EINVAL。
+            // 这条告警限频，否则一次定时器失效就会把日志刷成新的热循环。
+            warn_throttled(
+                "log flush timer arm failed",
+                io::Error::last_os_error().raw_os_error().unwrap_or(0),
+            );
+            return false;
+        }
+        self.armed = true;
+        true
+    }
+
+    /// 解除武装：落盘完成，下一次有日志时重新武装。
+    fn disarm(&mut self) {
+        if self.fd < 0 || !self.armed {
+            return;
+        }
+        let spec = libc::itimerspec {
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+        };
+        // SAFETY: 同 arm：fd 有效、spec 指向有效初始化内存。
+        let _ = unsafe { libc::timerfd_settime(self.fd, 0, &spec, std::ptr::null_mut()) };
+        self.armed = false;
+    }
+
+    /// 读掉一次到期计数（不读的话 poll 会一直报告可读）。
+    fn consume(&mut self) {
+        if self.fd < 0 {
+            return;
+        }
+        let mut expirations: u64 = 0;
+        // SAFETY: expirations 是本栈帧上可写的 u64，timerfd 的读契约正是 8 字节计数。
+        unsafe {
+            libc::read(
+                self.fd,
+                &mut expirations as *mut u64 as *mut libc::c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+    }
+
+    /// poll 超时：有 timerfd 时无限等待（唤醒只由套接字与定时器驱动）。
+    fn poll_timeout_ms(&self) -> libc::c_int {
+        if self.fd >= 0 { -1 } else { FLUSH_INTERVAL_MS }
+    }
+}
+
+/// 毫秒 → `timespec`。
+///
+/// `tv_nsec` 必须落在 `[0, 1e9)`：`FLUSH_INTERVAL_MS` 是 2000 毫秒，直接乘 1e6 得到
+/// 2e9 会被内核以 EINVAL 拒绝（真机实测），定时器于是永远武装不上。
+fn timespec_from_ms(ms: i32) -> libc::timespec {
+    let clamped = ms.max(0) as i64;
+    libc::timespec {
+        tv_sec: clamped / 1_000,
+        tv_nsec: (clamped % 1_000) * 1_000_000,
+    }
+}
+
+/// 限频告警：同一类失败最多每 [`WARN_THROTTLE_MS`] 输出一条。
+fn warn_throttled(label: &str, errno: i32) {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
+    const WARN_THROTTLE_MS: i64 = 60_000;
+    let now_ms = crate::platform::paths::monotonic_ms();
+    let last_ms = LAST_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last_ms) < WARN_THROTTLE_MS {
+        return;
+    }
+    if LAST_MS
+        .compare_exchange(last_ms, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    log::warn!("{label} errno={errno}");
+}
+
 fn run(fd: i32, mut state: LogState) {
     let mut payload = [0u8; RECV_BUFFER_SIZE];
+    let mut timer = FlushTimer::new();
 
     loop {
-        let mut poll_fd = pollfd {
-            fd,
-            events: POLLIN,
-            revents: 0,
-        };
-        // SAFETY: poll_fd 在调用期间指向一个已初始化的 pollfd。
-        let ready = unsafe { poll(&mut poll_fd, 1, FLUSH_INTERVAL_MS) };
-        if ready <= 0 {
+        let mut fds = [
+            pollfd {
+                fd,
+                events: POLLIN,
+                revents: 0,
+            },
+            pollfd {
+                fd: timer.fd,
+                events: POLLIN,
+                revents: 0,
+            },
+        ];
+        // 无 timerfd 时 nfds 取 1，poll 会忽略被截断的定时器条目。
+        let nfds: libc::nfds_t = if timer.fd >= 0 { 2 } else { 1 };
+        // SAFETY: fds 是调用期间有效的已初始化 pollfd 数组，长度与 nfds 一致。
+        let ready = unsafe { poll(fds.as_mut_ptr(), nfds, timer.poll_timeout_ms()) };
+        if ready < 0 {
+            let errno = io::Error::last_os_error();
+            if errno.raw_os_error() == Some(EINTR) {
+                continue;
+            }
+            log::warn!(
+                "log daemon poll failed errno={}",
+                errno.raw_os_error().unwrap_or(0)
+            );
+            // 非 EINTR 的错误会让 poll 立刻返回，直接 continue 会变成忙循环；这里只是
+            // 故障路径的退避（正常路径永不触发），不是稳态轮询。
             state.flush_pending();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            continue;
+        }
+        // 定时器到点：落盘并解除武装。
+        if timer.fd >= 0 && (fds[1].revents & POLLIN) != 0 {
+            timer.consume();
+            timer.disarm();
+            state.flush_pending();
+        }
+        if (fds[0].revents & POLLIN) == 0 {
+            // 仅超时（无 timerfd 的降级路径）或仅定时器事件：走一次到期检查兜底。
+            state.flush_if_due();
             continue;
         }
 
         // 一次 poll 之后把内核队列里的 datagram 连续排空，否则突发写入时每轮只取一条，
         // 队列会持续堆积并被内核直接丢弃。
+        let mut buffered_record = false;
         for _ in 0..MAX_DRAIN_PER_ROUND {
             let (size, sender_uid, sender_addr) =
                 recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
@@ -219,6 +392,13 @@ fn run(fd: i32, mut state: LogState) {
                 continue;
             }
             state.handle(packet, sender_uid);
+            // 只有真正进过 state 的记录才可能产生待落盘内容（身份询问包在上面的
+            // 分支已 continue）。武装一次定时器即可，已在武装中不重复设置。
+            buffered_record = true;
+        }
+        if buffered_record && !timer.arm() {
+            // 定时器不可用：直接落盘，绝不留下「有数据但永远不写」的状态。
+            state.flush_pending();
         }
         state.flush_if_due();
     }

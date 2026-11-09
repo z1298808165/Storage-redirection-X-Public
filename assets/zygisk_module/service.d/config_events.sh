@@ -1160,65 +1160,44 @@ handle_config_changes() {
   rm -f "$reload_list_file"
 }
 
-wait_for_package_event_notification() {
-  # PackageEventReceiver 以追加写入事件日志，并在安装成功时覆盖 ready 文件。
-  # 正常路径阻塞在 inotifyd，不再无条件每两秒醒来；ready 文件可能在 receiver
-  # 崩溃后残留，因此每隔较长时间重新校验一次进程状态，保留 fallback 的恢复能力。
-  notification_timeout_seconds="${PACKAGE_EVENT_NOTIFICATION_TIMEOUT_SECONDS:-5}"
-  # FIFO 不放在 LOGS_DIR 内，否则目录监听会被自身创建/删除事件反复唤醒。
-  notification_fifo="$MODDIR/.package_event_notify.$$"
-  rm -f "$notification_fifo"
-  if ! mkfifo "$notification_fifo" 2>/dev/null; then
-    # 极旧系统没有 mkfifo 时，回退到短暂睡眠，调用方随后仍会执行 ready/fallback 检查。
-    sleep "$notification_timeout_seconds"
-    return 1
+# 包事件慢路径：只在「长周期自愈复查」或「receiver 不可用」时执行。
+#
+# 此前这段工作放在 5 秒一轮的主循环里无条件执行，等于长期每秒 fork/exec 十几次
+# （awk/grep/tr/sed/kill…）并 1 Hz 唤醒 CPU，是整机空闲期最重的一处常驻开销。
+# 现在只在 inotifyd 超时（就绪时默认 60 秒一次）或 receiver 缺失时才会走到这里。
+package_event_slow_path() {
+  # 非 force 的 UID 映射对账自带 60 秒节流：保证「完全没有文件事件」时清单也能在
+  # 一个节拍内自愈，不依赖安装/配置事件。
+  refresh_uid_map
+  if ! is_auto_new_apps_package_poll_eligible; then
+    return 0
   fi
-
-  # 必须自己同时持有读写两端再启动监听进程。
-  # 若用裸输入重定向直接读，读端 open(O_RDONLY) 在对端缺失时会无限期阻塞
-  # （wait_for_partner），而 `read -t` 的超时只对读取生效、管不到 open。一旦
-  # inotifyd 未能在本上下文启动，收集器就永久卡在这里，包事件从此不再消费：
-  # 新装应用自动开启、卸载清理、基线更新与热重载全部静默失效。
-  # 用 fd 3 自持两端后 open 永不阻塞，配合 -t 与监听进程存活检查必定返回。
-  if ! exec 3<>"$notification_fifo" 2>/dev/null; then
-    rm -f "$notification_fifo"
-    sleep "$notification_timeout_seconds"
-    return 1
+  if [ "${AUTO_NEW_APPS_PACKAGE_POLL_REQUIRE_INTERACTIVE:-0}" = "1" ] &&
+    ! is_device_interactive_for_package_poll; then
+    return 0
   fi
+  log -p i -t Boot "run new app package poll fallback: default receiver not ready"
+  poll_auto_new_apps_from_package_list
+}
 
-  inotifyd - \
-    "$LOGS_DIR":wcmdn >&3 2>/dev/null &
-  notification_pid="$!"
-  notification_elapsed=0
-  notification_status=1
-  while [ "$notification_elapsed" -lt "$notification_timeout_seconds" ]; do
-    event_line=""
-    IFS= read -t 1 -r event_line <&3
-    read_status="$?"
-    if [ "$read_status" -eq 0 ]; then
-      # 目录内还有 running/media/debug 日志；只有包事件日志轮换/写入或 ready
-      # 文件变化才会唤醒业务处理，避免诊断采样把 fallback collector 变成热循环。
-      case "$event_line" in
-        *"package_events.log"*|*".package_event_receiver_ready"*)
-          notification_status=0
-          break
-          ;;
-      esac
-      continue
-    fi
-    notification_elapsed=$((notification_elapsed + 1))
-    if ! kill -0 "$notification_pid" 2>/dev/null; then
-      # 监听进程已退出，继续空等没有意义；本次按未收到通知返回，调用方随后
-      # 会照常消费事件日志并按节奏重试，功能降级为低频轮询而不是整体停摆。
-      log -p w -t Boot "package event inotifyd exited; fallback to polling"
-      break
-    fi
-  done
-  kill "$notification_pid" 2>/dev/null || true
-  wait "$notification_pid" 2>/dev/null || true
-  exec 3>&-
-  rm -f "$notification_fifo"
-  [ "$notification_status" -eq 0 ]
+# 评估本轮等待预算：receiver 就绪（正常情形）时只做长周期自愈；未就绪时才需要
+# 兜底轮询。兜底轮询的成本是每次 `cmd package list` 一次 binder 往返（system_server
+# 侧要枚举全部包），2 秒一次的代价远高于「新装应用晚几秒被自动开启」，因此
+# 未就绪时取 10 秒：仍保证开机/装应用后一个节拍内自动开启。
+# 同时记录绝对截止时刻（uptime）：LOGS_DIR 里 running/media/debug 等诊断日志的
+# 写入也会唤醒监听，若每次唤醒都把 read 超时重新计满，持续的诊断采样会让自愈
+# 周期永远不到。截止时刻只在真正超时后重新评估，不被无关事件重置。
+compute_package_event_wait_budget() {
+  if is_package_event_receiver_ready; then
+    event_wait_budget="${PACKAGE_EVENT_IDLE_WAIT_SECONDS:-1800}"
+  else
+    event_wait_budget="${PACKAGE_EVENT_FALLBACK_WAIT_SECONDS:-10}"
+  fi
+  deadline_now=$(get_uptime_seconds)
+  case "$deadline_now" in
+    ''|*[!0-9]*) event_wait_deadline=0 ;;
+    *) event_wait_deadline=$((deadline_now + event_wait_budget)) ;;
+  esac
 }
 
 start_package_event_collector() {
@@ -1234,40 +1213,114 @@ start_package_event_collector() {
     sync_auto_new_apps_startup_state
     sync_uninstalled_app_configs
 
-    package_event_sleep_seconds="${PACKAGE_EVENT_COLLECTOR_SLEEP_SECONDS:-2}"
-    package_poll_interval_seconds="${AUTO_NEW_APPS_PACKAGE_POLL_INTERVAL_SECONDS:-2}"
-    package_poll_interval_ticks=$((package_poll_interval_seconds / package_event_sleep_seconds))
-    [ "$package_poll_interval_ticks" -lt 1 ] && package_poll_interval_ticks=1
-    package_poll_ticks="$package_poll_interval_ticks"
+    # 事件驱动：整个生命周期只建一次 FIFO，主循环阻塞在 `read -t` 上，由 inotifyd
+    # 的目录事件唤醒。此前是「每 5 秒重建 FIFO + 重启一次 inotifyd + 1 秒粒度
+    # read 循环」，稳态下约 3 次 fork/exec 每秒且恒定 1 Hz 唤醒；现在空闲期只剩
+    # 30 分钟一次的自愈复查（见 package_event_slow_path）——它只兜「receiver 静默
+    # 死亡」「uid 映射清单长期无人刷新」这类没有事件可依赖的退化，不需要更高频率：
+    # 安装/卸载本身走包事件日志，配置改动走 inotifyd，正常路径一次都不依赖它。
+    #
+    # FIFO 不放在 LOGS_DIR 内，否则目录监听会被自身创建/删除事件反复唤醒；只在启动
+    # 时建一次，也让这类自激事件从「每 5 秒一轮」变成「整个生命周期一次」。
+    notification_fifo="$MODDIR/.package_event_notify.$$"
+    rm -f "$notification_fifo"
+    # 必须自己同时持有读写两端再启动监听进程：裸输入重定向的 open(O_RDONLY) 在对端
+    # 缺失时会无限期阻塞（wait_for_partner），而 `read -t` 的超时管不到 open。一旦
+    # inotifyd 未能在本上下文启动，收集器就永久卡住，新装应用自动开启、卸载清理、
+    # 基线更新与热重载全部静默失效。自持两端后 open 永不阻塞。
+    watcher_ready=0
+    if mkfifo "$notification_fifo" 2>/dev/null; then
+      if exec 3<>"$notification_fifo" 2>/dev/null; then
+        watcher_ready=1
+      fi
+    fi
+    if [ "$watcher_ready" -ne 1 ]; then
+      log -p w -t Boot "package event watcher unavailable; legacy polling path"
+      rm -f "$notification_fifo"
+      # 退化路径（极旧系统/无 mkfifo）：保留原有的低频轮询，功能不降级。
+      while true; do
+        package_event_slow_path
+        process_package_event_log_delta
+        sleep "${PACKAGE_EVENT_COLLECTOR_SLEEP_SECONDS:-2}"
+      done
+    fi
+
     while true; do
-      # 周期性对账 UID 映射（非 force，自带 60 秒节流）：receiver 未就绪且
-      # auto_enable 关闭时，fallback 包列表扫描整个不可用，安装/重装后的清单
-      # 只能等下一次配置事件；此处保证清单即使无任何事件也至多 60 秒自愈。
-      refresh_uid_map
-      process_package_event_log_delta
+      # w=写入关闭 c=内容修改 m=新建 d=删除 n=移入
+      inotifyd - "$LOGS_DIR":wcmdn >&3 2>/dev/null &
+      watcher_pid="$!"
 
-      if is_package_event_receiver_ready; then
-        # receiver 可用时，包事件日志是权威来源；等待文件写入事件，避免空闲轮询。
-        if ! wait_for_package_event_notification; then
-          sleep 1
-        fi
-        continue
-      fi
+      # 等待预算与绝对截止时刻：见 compute_package_event_wait_budget。
+      compute_package_event_wait_budget
 
-      # receiver 尚未安装或当前失效时，保留低频包列表扫描作为外部系统兜底。
-      if is_auto_new_apps_package_poll_eligible; then
-        package_poll_ticks=$((package_poll_ticks + 1))
-        if [ "$package_poll_ticks" -ge "$package_poll_interval_ticks" ]; then
-          if [ "${AUTO_NEW_APPS_PACKAGE_POLL_REQUIRE_INTERACTIVE:-0}" != "1" ] || is_device_interactive_for_package_poll; then
-            log -p i -t Boot "run new app package poll fallback: default receiver not ready"
-            poll_auto_new_apps_from_package_list
-          fi
-          package_poll_ticks=0
+      while true; do
+        # 每轮 read 的超时从绝对截止时刻倒推剩余时间：无关日志事件只消耗剩余
+        # 时间，不重置它，持续的诊断写入不会把慢路径自愈饿死。uptime 不可读的
+        # 极端环境退回「每次事件后重新计满」的旧行为（功能不受影响）。
+        event_wait_seconds="$event_wait_budget"
+        if [ "$event_wait_deadline" -gt 0 ]; then
+          deadline_now=$(get_uptime_seconds)
+          case "$deadline_now" in
+            ''|*[!0-9]*) ;;
+            *)
+              event_wait_seconds=$((event_wait_deadline - deadline_now))
+              [ "$event_wait_seconds" -lt 1 ] && event_wait_seconds=1
+              ;;
+          esac
         fi
-      else
-        package_poll_ticks="$package_poll_interval_ticks"
-      fi
-      sleep "$package_event_sleep_seconds"
+
+        event_line=""
+        if IFS= read -t "$event_wait_seconds" -r event_line <&3; then
+          case "$event_line" in
+            *"package_events.log"*|*".package_event_receiver_ready"*) ;;
+            # 目录里还有 running/media/debug 等诊断日志：它们的事件不触发业务处理，
+            # 否则诊断采样会把收集器重新变成热循环。截止时刻已到时仍执行慢路径，
+            # 避免持续高频无关事件让 read 永远不等到超时返回。
+            *)
+              if [ "$event_wait_deadline" -gt 0 ]; then
+                deadline_now=$(get_uptime_seconds)
+                case "$deadline_now" in
+                  ''|*[!0-9]*) ;;
+                  *)
+                    if [ "$deadline_now" -ge "$event_wait_deadline" ]; then
+                      package_event_slow_path
+                      process_package_event_log_delta
+                      compute_package_event_wait_budget
+                    fi
+                    ;;
+                esac
+              fi
+              continue
+              ;;
+          esac
+          # 去抖：合并 1 秒内的后续事件一起处理。轮数必须封顶——去抖窗口若被
+          # 持续到达的事件无限延长，等待中的事件处理会被无限推迟（与超时被重置
+          # 是同一类饿死问题）；封顶之后超出窗口的事件按 offset 在下一批补读。
+          debounce_rounds=0
+          while [ "$debounce_rounds" -lt 16 ] && IFS= read -t 1 -r _ <&3; do
+            debounce_rounds=$((debounce_rounds + 1))
+          done
+          refresh_uid_map
+          process_package_event_log_delta
+          continue
+        fi
+        # 超时：到达绝对截止时刻后的自愈复查，并重新评估预算与截止时刻。这里的
+        # 周期是「没有相关事件时的兜底」，事件到达时会立刻被上面的分支处理，且
+        # 不重置截止时刻——只有真正等满一个周期才续期。
+        package_event_slow_path
+        process_package_event_log_delta
+        compute_package_event_wait_budget
+        if ! kill -0 "$watcher_pid" 2>/dev/null; then
+          # 监听进程已退出：跳出内层重启它。退出期间的包事件不会丢——消费侧按
+          # offset 读日志文件本身，重启后一次补读即可。
+          break
+        fi
+      done
+
+      kill "$watcher_pid" 2>/dev/null || true
+      wait "$watcher_pid" 2>/dev/null || true
+      log -p w -t Boot "package event watcher exited; restarting after backoff"
+      sleep 5
     done
   ) &
   echo "$!" > "$PACKAGE_EVENT_COLLECTOR_PID_FILE"
