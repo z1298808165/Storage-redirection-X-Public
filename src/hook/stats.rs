@@ -415,11 +415,11 @@ impl InterceptHub {
             self.is_app_write_only.load(Ordering::Relaxed),
         );
 
-        let entries = build_hook_entries();
-        let selected_hook_count = entries
-            .iter()
+        let selected_entries: Vec<_> = build_hook_entries()
+            .into_iter()
             .filter(|entry| is_hook_enabled(active_profiles, entry.profiles))
-            .count();
+            .collect();
+        let selected_hook_count = selected_entries.len();
         log::info!(
             "hook profile={} count={}",
             profile_name,
@@ -435,43 +435,60 @@ impl InterceptHub {
             hook_caller_allow_filter
         };
 
-        for entry in entries {
-            if !is_hook_enabled(active_profiles, entry.profiles) {
-                continue;
+        let requests: Vec<_> = selected_entries
+            .iter()
+            .map(|entry| srx_hook::HookRequest {
+                caller: srx_hook::HookCaller::Partial {
+                    filter: caller_allow_filter,
+                    arg: std::ptr::null_mut(),
+                },
+                callee_path_name: None,
+                sym_name: entry.symbol,
+                new_func: entry.new_func,
+                hooked: None,
+                hooked_arg: std::ptr::null_mut(),
+            })
+            .collect();
+        let stubs = take_checked_hook_batch_stubs(
+            srx_hook::hook_batch_checked(&requests),
+            profile_name,
+            &self.get_package_name(),
+        );
+        match stubs {
+            Some(stubs) if stubs.len() == selected_entries.len() => {
+                hook_list.extend(selected_entries.iter().map(|entry| entry.symbol));
             }
-
-            let stub = srx_hook::hook_partial(
-                caller_allow_filter,
-                std::ptr::null_mut(),
-                None,
-                entry.symbol,
-                entry.new_func,
-                None,
-                std::ptr::null_mut(),
-            );
-
-            if stub.is_none() {
-                if entry.is_optional {
-                    optional_missing.push(entry.symbol);
-                    log::warn!(
-                        "optional hook unavailable sym={} profile={} pkg={}",
-                        entry.symbol,
-                        profile_name,
-                        self.get_package_name()
-                    );
-                    continue;
-                }
-                required_failed.push(entry.symbol);
-                log::warn!(
-                    "hook register failed sym={} required=true profile={} pkg={}",
-                    entry.symbol,
+            Some(stubs) => {
+                log::error!(
+                    "hook batch stub count mismatch profile={} pkg={} expected={} actual={}",
                     profile_name,
-                    self.get_package_name()
+                    self.get_package_name(),
+                    selected_entries.len(),
+                    stubs.len()
                 );
-                continue;
+                return self.cleanup_after_install_failure("hook_batch_stub_count");
             }
-
-            hook_list.push(entry.symbol);
+            None => {
+                for entry in &selected_entries {
+                    if entry.is_optional {
+                        optional_missing.push(entry.symbol);
+                        log::warn!(
+                            "optional hook unavailable sym={} profile={} pkg={}",
+                            entry.symbol,
+                            profile_name,
+                            self.get_package_name()
+                        );
+                    } else {
+                        required_failed.push(entry.symbol);
+                        log::warn!(
+                            "hook register failed sym={} required=true profile={} pkg={}",
+                            entry.symbol,
+                            profile_name,
+                            self.get_package_name()
+                        );
+                    }
+                }
+            }
         }
 
         if !required_failed.is_empty() {
@@ -484,8 +501,7 @@ impl InterceptHub {
                 hook_list.len(),
                 selected_hook_count
             );
-            srx_hook::clear();
-            return false;
+            return self.cleanup_after_install_failure("required_hook_registration");
         }
 
         let hook_list_text = hook_list.join(", ");
@@ -543,13 +559,58 @@ impl InterceptHub {
                 profile_name,
                 self.get_package_name()
             );
-            srx_hook::clear();
-            return false;
+            return self.cleanup_after_install_failure("hook_refresh");
         }
 
         self.is_hooks_installed.store(true, Ordering::Relaxed);
         log::info!("hook install done");
         true
+    }
+
+    fn cleanup_after_install_failure(&self, reason: &str) -> bool {
+        let (status, report) = match srx_hook::clear_checked() {
+            Ok(report) => (None, report),
+            Err(error) => (Some(error.status), error.report),
+        };
+        self.is_hooks_installed.store(false, Ordering::Relaxed);
+        for (index, detail) in report.errors.iter().enumerate() {
+            log::warn!(
+                "hook cleanup detail reason={} index={} total={} path={} err={:?}",
+                reason,
+                index + 1,
+                report.errors.len(),
+                detail.module_path,
+                detail.errno
+            );
+        }
+        if let Some(status) = status {
+            log::error!(
+                "hook cleanup failed reason={} err={:?} revision={} removed={} remaining={} protections={}",
+                reason,
+                status,
+                report.revision,
+                report.removed_slots,
+                report.remaining_slots,
+                report.remaining_protections
+            );
+        } else if report.remaining_slots != 0 || report.remaining_protections != 0 {
+            log::error!(
+                "hook cleanup incomplete reason={} revision={} removed={} remaining={} protections={}",
+                reason,
+                report.revision,
+                report.removed_slots,
+                report.remaining_slots,
+                report.remaining_protections
+            );
+        } else {
+            return false;
+        }
+        log::error!(
+            "hook module unavailable after incomplete cleanup reason={} pkg={}",
+            reason,
+            self.get_package_name()
+        );
+        false
     }
 
     pub fn refresh_hooks_after_late_load(&self, reason: &str) {
@@ -636,6 +697,67 @@ impl InterceptHub {
     pub fn increment_total_redirected(&self) {
         if crate::logging::is_debug_logging_enabled() {
             self.stats.total_redirected.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub(crate) fn take_checked_hook_stub(
+    symbol: &str,
+    result: Result<srx_hook::HookStub, srx_hook::HookError>,
+) -> Option<srx_hook::HookStub> {
+    match result {
+        Ok(stub) => Some(stub),
+        Err(error) => {
+            log::warn!(
+                "hook registration result sym={} err={:?} stub={:?} module_errors={}",
+                symbol,
+                error.status,
+                error.stub,
+                error.errors.len()
+            );
+            for (index, detail) in error.errors.iter().enumerate() {
+                log::warn!(
+                    "hook registration module error sym={} index={} total={} path={} err={:?}",
+                    symbol,
+                    index + 1,
+                    error.errors.len(),
+                    detail.module_path,
+                    detail.errno
+                );
+            }
+            error.stub
+        }
+    }
+}
+
+fn take_checked_hook_batch_stubs(
+    result: Result<Vec<srx_hook::HookStub>, srx_hook::HookBatchError>,
+    profile_name: &str,
+    package_name: &str,
+) -> Option<Vec<srx_hook::HookStub>> {
+    match result {
+        Ok(stubs) => Some(stubs),
+        Err(error) => {
+            log::warn!(
+                "hook batch registration result profile={} pkg={} err={:?} committed_count={} module_errors={}",
+                profile_name,
+                package_name,
+                error.status,
+                error.stubs.len(),
+                error.errors.len()
+            );
+            for (index, detail) in error.errors.iter().enumerate() {
+                log::warn!(
+                    "hook batch module error profile={} pkg={} index={} total={} path={} err={:?}",
+                    profile_name,
+                    package_name,
+                    index + 1,
+                    error.errors.len(),
+                    detail.module_path,
+                    detail.errno
+                );
+            }
+            (!error.stubs.is_empty()).then_some(error.stubs)
         }
     }
 }

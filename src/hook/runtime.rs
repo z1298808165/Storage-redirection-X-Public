@@ -56,6 +56,7 @@ fn log_call_prev_fallback(site: &str) {
 
 #[inline]
 fn should_bypass_hook_in_fork_child(hub: &InterceptHub) -> bool {
+    // fork_safe 只覆盖 srx_hook 自身状态，SRX 自有锁仍需单独处理 fork 生命周期。
     if !srx_hook::is_forked_child() || srx_hook::fork_safe() {
         return false;
     }
