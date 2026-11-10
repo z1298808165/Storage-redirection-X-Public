@@ -1295,6 +1295,9 @@ function Fix-OwnPrivateFixturePermissions {
     }
     # 沙箱内的夹具同样按应用属主修正：$PrivateRoot 就是应用自己的重定向根，root 预置的
     # 目录项会被系统 FUSE 按属主过滤，应用在热重载后重新解析这条路径时报 ENOENT。
+    # 只改属主、**不动组**：`Android/data|media|obb/<包名>` 三支的原生组各不相同
+    # （ext_data_rw 1078 / media_rw 1023 / ext_obb_rw 1079），统一写成 1023 会让夹具
+    # 先把真机形态改成测试形态，后续所有「组是多少」的判断都得先扣掉这层影响。
     $roots = @(
         "$BackendRoot/Android/data/$AppId", "$BackendRoot/Android/media/$AppId", "$BackendRoot/Android/obb/$AppId",
         $BackendOwnPrivateDataRoot, $BackendOwnPrivateMediaRoot, $BackendOwnPrivateObbRoot,
@@ -1303,7 +1306,7 @@ function Fix-OwnPrivateFixturePermissions {
     )
     $rootsArg = ($roots | ForEach-Object { "'$_'" }) -join " "
     $command = 'app_uid=' + "'" + $uid + "'" + '; for root in ' + $rootsArg +
-        '; do [ -e "$root" ] || continue; chown -R $app_uid:1023 $root 2>/dev/null || true; find $root -type d -exec chmod 2771 {} + 2>/dev/null || true; find $root -type f -exec chmod 0664 {} + 2>/dev/null || true; done'
+        '; do [ -e "$root" ] || continue; chown -R $app_uid $root 2>/dev/null || true; find $root -type d -exec chmod 2771 {} + 2>/dev/null || true; find $root -type f -exec chmod 0664 {} + 2>/dev/null || true; done'
     Invoke-Su $command | Out-Null
 }
 

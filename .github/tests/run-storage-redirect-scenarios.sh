@@ -262,7 +262,12 @@ fix_private_backend_permissions() {
     echo "private_backend_permission_fix_skipped: app uid not found for $APP_ID" >&2
     return 1
   fi
-  adb_su "app_uid='$uid'; app_root='${BACKEND_ROOT}/Android/data/${APP_ID}'; sandbox='${BACKEND_PRIVATE_ROOT}'; mkdir -p \"\$sandbox\"; chown -R \"\$app_uid\":1023 \"\$app_root\" 2>/dev/null || true; find \"\$app_root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$app_root\" -type f -exec chmod 0664 {} + 2>/dev/null || true" >/dev/null
+  # 只改属主，**不动组**：`Android/data/<包名>` 的原生组是父目录 setgid 继承来的
+  # `ext_data_rw(1078)`（真机实测原生应用即 `10307:1078 02770`），这里曾经写死
+  # `:1023` 把组改成 media_rw，于是模块随后建的沙盒根继承到 1023、与真机形态不一致，
+  # 也让所有「组是多少」的结论都要先扣掉夹具的影响。mode 仍补 other-execute：
+  # root 预置的目录要靠它才能被应用穿越，这是夹具的真实约束。
+  adb_su "app_uid='$uid'; app_root='${BACKEND_ROOT}/Android/data/${APP_ID}'; sandbox='${BACKEND_PRIVATE_ROOT}'; mkdir -p \"\$sandbox\"; chown -R \"\$app_uid\" \"\$app_root\" 2>/dev/null || true; find \"\$app_root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$app_root\" -type f -exec chmod 0664 {} + 2>/dev/null || true" >/dev/null
 }
 
 # 自有私有目录夹具的属主修正：Android 13 上应用的自有私有目录视图经系统 FUSE 锚点
@@ -285,8 +290,11 @@ fix_own_private_fixture_permissions() {
   # 沙箱内的夹具同样按应用属主修正：`${PRIVATE_ROOT}` 就是应用自己的重定向根
   # （`Android/data/<包名>/sdcard`），root 预置的目录项会被系统 FUSE 按属主过滤，
   # 应用在热重载后重新解析这条路径时报 ENOENT（场景 29 的 `createNewFile` 失败）。
-  # 模块自身创建沙箱目录时用的也是应用 uid，这里与之对齐，不改变夹具内容。
-  adb_su "app_uid='$uid'; for root in '${BACKEND_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/obb/${APP_ID}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\":1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+  # 模块自身创建沙箱目录时用的是应用 uid，这里与之对齐，不改变夹具内容。
+  # 组同样不写死：`Android/data|media|obb/<包名>` 三支的原生组各不相同
+  # （1078 / 1023 / 1079），统一 `chown -R uid:1023` 会把 media、obb 两支之外
+  # 的形态也一起改成 1023，与真机不一致。只改属主即可，组保留原样。
+  adb_su "app_uid='$uid'; for root in '${BACKEND_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/obb/${APP_ID}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\" \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
 fix_shared_fixture_permissions() {
