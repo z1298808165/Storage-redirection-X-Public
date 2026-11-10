@@ -11,6 +11,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 FLOW = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
 BASH = os.environ.get("SRX_TEST_BASH") or shutil.which("bash")
+PWSH = shutil.which("pwsh")
 
 
 @unittest.skipUnless(BASH, "需要 Bash 执行场景入口回归")
@@ -91,6 +92,66 @@ PRIVATE_READ_ONLY_MEDIA_ROOT=/unused
         result = self.run_case(31, "check_file_missing() { return 19; }\n")
         self.assertEqual(19, result.returncode, result.stderr)
         self.assertNotIn("step 6/7", result.stdout)
+
+    def test_system_uid_attribution_requires_current_hook_and_monitor_record(self):
+        function = FLOW[FLOW.index("run_system_uid_attribution_scenario() {") : FLOW.index("run_system_uid_sandbox_missing_target_scenario() {")]
+        for ready, recorded in ((False, True), (True, False), (True, True)):
+            with self.subTest(ready=ready, recorded=recorded):
+                stubs = f"""
+ensure_media_provider_hook_ready() {{ return {0 if ready else 1}; }}
+adb_su() {{
+  case "$1" in
+    *MKDIR*) return {0 if recorded else 1} ;;
+  esac
+}}
+adb() {{ :; }}
+sleep() {{ :; }}
+clear_file_monitor_log() {{ echo 开始探测; }}
+BACKEND_ROOT=/backend
+UID_ATTRIB_REL=SrtUidAttrib
+UID_ATTRIB_PROBE_REL=SrtUidAttrib/probe
+FILE_MONITOR_LOG_PATH=/monitor
+"""
+                result = subprocess.run(
+                    [BASH, "-eu", "-c", stubs + function + "\nrun_system_uid_attribution_scenario 40"],
+                    text=True, encoding="utf-8", capture_output=True, timeout=10,
+                )
+                self.assertEqual(0 if ready and recorded else 1, result.returncode, result.stderr)
+                self.assertEqual(ready, "开始探测" in result.stdout)
+
+    @unittest.skipUnless(PWSH, "需要 PowerShell 执行系统 uid 归因回归")
+    def test_powershell_system_uid_attribution_requires_current_hook_and_monitor_record(self):
+        source = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
+        function = source[source.index("function Invoke-SystemUidAttributionScenario {") : source.index("function Invoke-AppCallerMediaProviderAttributionScenario {")]
+        for ready, recorded in ((False, True), (True, False), (True, True)):
+            with self.subTest(ready=ready, recorded=recorded):
+                stubs = """
+function Confirm-MediaProviderHookReady { READY }
+function Invoke-Su {
+    param([string]$Command)
+    if ($Command -like '*test -d*') { 'exit=0' }
+    elseif ($Command -like '*MKDIR*' -and RECORDED) { '匹配记录' }
+}
+function Start-Process {
+    Write-Host '开始探测'
+    [pscustomobject]@{} | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {} -PassThru
+}
+function Start-Sleep {}
+$BackendRoot='/backend'
+$UidAttribRel='SrtUidAttrib'
+$UidAttribProbeRel='SrtUidAttrib/probe'
+$FileMonitorLogPath='/monitor'
+$Serial='stub'
+""".replace("READY", "$true" if ready else "$false").replace("RECORDED", "$true" if recorded else "$false")
+                with tempfile.TemporaryDirectory() as directory:
+                    script = Path(directory) / "system_uid.ps1"
+                    script.write_text(stubs + function + "\nif (Invoke-SystemUidAttributionScenario 40) { exit 0 }; exit 1", encoding="utf-8")
+                    result = subprocess.run(
+                        [PWSH, "-NoProfile", "-File", str(script)],
+                        text=True, encoding="utf-8", capture_output=True, timeout=20,
+                    )
+                self.assertEqual(0 if ready and recorded else 1, result.returncode, result.stderr)
+                self.assertEqual(ready, "开始探测" in result.stdout)
 
     def test_private_cleanup_distinguishes_fuse_and_backend_failures(self):
         clean = FLOW[FLOW.index("clean_targets() {") : FLOW.index("clean_results() {")]

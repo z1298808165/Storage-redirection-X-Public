@@ -2609,28 +2609,8 @@ run_system_uid_attribution_scenario() {
   #   回归：记录 identify_method=unknown（归因链断裂）或无记录。
   echo "step 5/7 内: 清理系统 uid 归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${UID_ATTRIB_REL}'" >/dev/null
-  # 引擎读取补丁（fuse read patch）随 MP FuseDaemon 启动联动安装；模拟器冷启动
-  # 下场景可能早于补丁就绪（R7 实证 A13/A14 的 mkdir 先于补丁安装 → 请求头
-  # 无归因信号）。等待安装标记出现。running.log 是滚动日志，MP 开机期写入的
-  # 标记可能已被应用启动日志滚出（R11 实证：场景期 grep 零命中但
-  # .media_hook_install_state 有内容）；.media_hook_install_state 的
-  # stage=init_ok 是 hook 侧 specialize 完成的权威落盘标记（pid+boot_id 防跨
-  # 开机误判），两者任一出现即视为补丁链路已建立。日志与标记均缺失时按超时
-  # 放行（诊断 dump 会输出 state 文件内容供事后判定）。
-  local patch_wait=0
-  while [ "$patch_wait" -lt 15 ]; do
-    if adb_su "grep -q 'fuse read patch installed' '$LOG_PATH' 2>/dev/null" \
-      || adb_su "grep -q 'stage=init_ok' /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null"; then
-      echo "step 5/7 内: 引擎读取补丁已就绪"
-      break
-    fi
-    sleep 2
-    patch_wait=$((patch_wait + 1))
-  done
-  if [ "$patch_wait" -ge 15 ]; then
-    echo "step 5/7 内: 引擎读取补丁标记未出现（按超时放行）"
-    adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null" || true
-  fi
+  # Java 初始化只证明当前进程可用；原生 FUSE 归因仍由后续监视记录断言验证。
+  ensure_media_provider_hook_ready "scenario-${scenario}-uid-attribution" || return 1
   clear_file_monitor_log
   # 三次尝试任一归因即通过：跨线程接力槽在并发系统请求下存在互覆窗口
   # （单槽最后写入优先），单次尝试可能落空；能力验证以三次中至少一次
@@ -2677,8 +2657,7 @@ run_system_uid_attribution_scenario() {
   if [ "$found" -ne 1 ]; then
     echo "system uid attribution: monitor record missing or not attributed" >&2
     adb_su "grep 'SrtUidAttrib' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | tail -3" || true
-    # MP hook 侧 specialize 状态（pid+boot_id 防跨开机误判）：区分「hook 从未
-    # 安装」与「已安装但 read 捕获未触发」这两种需要相反修复的情况。
+    # 此状态仅记录 Java 初始化结果，不能证明原生读取补丁已安装或触发。
     echo "media hook install state:" >&2
     adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null" || true
     return 1
