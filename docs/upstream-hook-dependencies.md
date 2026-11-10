@@ -2,18 +2,18 @@
 
 本项目的核心 hook 能力依赖两个上游 Rust 库：
 
-- `srx_hook`：<https://github.com/Kindness-Kismet/srx_hook>
+- `srx_hook`：<https://github.com/Kindness-Kismet/srx_hook>（当前临时指向 fork，见下文「当前临时指向 fork」一节）
 - `srx_inline_hook`：<https://github.com/Kindness-Kismet/srx_inline_hook>
 
-`srx_hook` 固定到官方仓库的具体 commit。锁定版本提供独立的运行时管理状态、fork 后状态发布保护，以及能够报告注册和清理结果的 checked API。
+`srx_hook` 固定到具体 commit（平时指向官方仓库，当前临时指向 fork 的修复提交）。锁定版本提供独立的运行时管理状态、fork 后状态发布保护，以及能够报告注册和清理结果的 checked API。
 
 ## 引用方式
 
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-# quality-allow(chinese-language): 紧随其后一行同步 Cargo.toml 中固定版本的依赖声明，保留原文便于直接核对。
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "99e27c0cc720ca3969a0efa14741e4bbded8a03a" }
+# quality-allow(chinese-language): 紧随其后一行同步 Cargo.toml 中固定版本的依赖声明（当前临时指向 fork），保留原文便于直接核对。
+srx_hook = { git = "https://github.com/z1298808165/srx_hook.git", rev = "88e54766a6117cf6bbb2f6e38254d297afdf41d2" }
 # quality-allow(chinese-language): 紧随其后一行同为依赖声明原文，保留原样便于直接与 Cargo.toml 比对。
 srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 ```
@@ -91,3 +91,14 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 
 `should_bypass_hook_in_fork_child`（`src/hook/runtime.rs`）对系统 writer、SAF native bridge 和 shared-UID 进程继续执行 hook 决策；这些路径会访问 `SettingsHub` 的阻塞锁（`src/config/inspect.rs`、`src/config/raw_scan.rs`）和 `PathRouter` 的读锁（`src/redirect/router.rs`）。这些 SRX 调用方锁不由 `srx_hook` 的 atfork 处理器重置或保护。
 
+## 临时依赖状态（待回收）
+
+**这是过渡状态，不是长期依赖来源。** `srx_hook` 目前指向 fork 的修复提交，而不是官方仓库；`srx_inline_hook` 不受影响，仍指向官方仓库。`Cargo.toml` 中该声明用「【临时过渡，待回收】」标注，可用检索标记 `待回收 srx_hook fork` 定位。
+
+- fork 分支：`fix/maps-only-module-ranges`
+- 提交：`88e54766a6117cf6bbb2f6e38254d297afdf41d2`
+- 上游 PR：<https://github.com/Kindness-Kismet/srx_hook/pull/2>
+
+修复内容：上游 `enumerate_modules` 把 `dl_iterate_phdr` 与 `/proc/self/maps` 的结果取并集，而 `bionic_module_ranges` 只遍历前者。注入框架用自有 linker 映射的库（如 Zygisk Next 的 `libzygisk.so`）不在 bionic 的 solist 里，于是「有模块、无段范围」，被判定为模块租约不可用，导致整批 refresh 失败并回滚已提交的 hook。修复改为从 `/proc/self/maps` 为这类模块补齐 PT_LOAD 范围，使它们正常参与 hook。
+
+回收条件：上游 PR 合并后，把依赖声明改回官方仓库 URL、`rev` 换成合并后的提交，同步 `Cargo.lock`，并删除本节。
