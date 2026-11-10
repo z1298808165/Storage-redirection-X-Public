@@ -3228,18 +3228,8 @@ function Invoke-SystemUidAttributionScenario {
     Write-Host "  - scenario-$Scenario/system-uid: cleanup attribution probe dir"
     Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
     Invoke-Su ": > '$FileMonitorLogPath' 2>/dev/null" | Out-Null
-    # 引擎读取补丁（fuse read patch）随 MP FuseDaemon 启动联动安装；模拟器冷启动
-    # 下场景可能早于补丁就绪（R7 实证 mkdir 先于补丁安装 → 请求头无归因信号）。
-    # 与 .sh 对齐：running.log 标记或 .media_hook_install_state 的 stage=init_ok
-    # 任一出现即视为补丁链路已建立；均缺失时按超时放行（诊断 dump 兜底）。
-    $patchReady = $false
-    for ($patchWait = 0; $patchWait -lt 15 -and -not $patchReady; $patchWait++) {
-        $patchReady = ((Invoke-Su "grep -q 'fuse read patch installed' '$LogPath' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0") -or
-            ((Invoke-Su "grep -q 'stage=init_ok' '/data/adb/modules/storage.redirect.x/logs/.media_hook_install_state' 2>/dev/null; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0")
-        if ($patchReady) { break }
-        Start-Sleep -Seconds 2
-    }
-    if (-not $patchReady) { Write-Host "  - scenario-$Scenario/system-uid: read patch marker not found (proceed after timeout)" }
+    # Java 初始化只证明当前进程可用；原生 FUSE 归因仍由后续监视记录断言验证。
+    if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-uid-attribution")) { return $false }
     # 三次尝试任一归因即通过（单槽接力在并发系统请求下存在互覆窗口）；
     # 每次尝试用独立目录（已存在目录的 mkdir 会被记录去重跳过）。
     $found = $false
