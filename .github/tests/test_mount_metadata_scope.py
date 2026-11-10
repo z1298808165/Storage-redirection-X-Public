@@ -136,10 +136,29 @@ class MountMetadataScopeTest(unittest.TestCase):
         )
         self.assertIn("st.st_uid == uid", body)
         keep_index = body.index("st.st_uid == uid")
-        chmod_index = body.index("chmod(c_path.as_ptr(), MAPPED_DIR_MODE)")
+        chmod_index = body.index("chmod(c_path.as_ptr(), target_mode)")
         self.assertLess(keep_index, chmod_index)
         # 属主已正确时必须在 chown/chmod 之前直接返回，跳过整段元数据修正。
         self.assertIn("return true", body[keep_index:chmod_index])
+
+        # 组与 mode 按路径形态二选一：私有树回到原生口径（组交给父目录 setgid 继承、
+        # mode 02770），公共映射目标沿用 media_rw(1023) + 02771。写死 1023 会让
+        # Android/data 一支长期偏离真机形态，也让 owner_migration 每次开机都要改回来。
+        target_body = function_body(
+            self.mount_core, "fn mapped_dir_target(&self, backend_path: &str)"
+        )
+        self.assertIn("is_android_private_backend_path(backend_path, self.user_id)", target_body)
+        self.assertIn("(u32::MAX, 0o2770)", target_body)
+        self.assertIn("(MEDIA_RW_GID, MAPPED_DIR_MODE)", target_body)
+        # 两个写入点都必须用派生值，不能再各自写常量。
+        self.assertIn("chown(c_path.as_ptr(), uid, target_gid)", body)
+        self.assertNotIn("chown(c_path.as_ptr(), uid, MEDIA_RW_GID)", body)
+        owned_body = function_body(
+            self.mount_core,
+            "pub(super) fn ensure_app_owned_mapping_target(&self, path: &str, owner_uid: i32)",
+        )
+        self.assertIn("chown(c_path.as_ptr(), owner_uid as u32, target_gid)", owned_body)
+        self.assertIn("chmod(c_path.as_ptr(), target_mode)", owned_body)
 
     def test_scoped_fuse_sessions_are_retired(self) -> None:
         # per-app scoped FUSE 会话已退役：它是应用命名空间的自持引用，应用退出后仍在

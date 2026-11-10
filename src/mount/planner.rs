@@ -154,6 +154,22 @@ impl MountPlanner {
         }
     }
 
+    /// 映射目录的「组 / mode」目标值，按路径形态二选一。
+    ///
+    /// - **私有树**（`Android/data|media|obb/<pkg>` 之下）：回到原生口径——组交给父目录
+    ///   setgid 继承（`gid` 传 `u32::MAX` 即「不改」），mode 用私有树原生 `02770`。
+    ///   这三支的原生组各不相同（1078 / 1023 / 1079），写死 `media_rw(1023)` 会让目录
+    ///   长期偏离原生形态，也让 `owner_migration` 每次开机都要把它改回来。
+    /// - **公共目标**（`Download` 等映射目标）：沿用映射目录口径——组 `media_rw(1023)`、
+    ///   mode `02771`（other-execute 供直连后端时穿越）。
+    fn mapped_dir_target(&self, backend_path: &str) -> (u32, libc::mode_t) {
+        if is_android_private_backend_path(backend_path, self.user_id) {
+            (u32::MAX, 0o2770)
+        } else {
+            (MEDIA_RW_GID, MAPPED_DIR_MODE)
+        }
+    }
+
     pub(crate) fn ensure_writable_mapped_directory(&self, path: &str, owner_uid: i32) -> bool {
         if path.is_empty() {
             log::warn!("mount dir: metadata skipped empty path");
@@ -170,6 +186,7 @@ impl MountPlanner {
             owner_uid
         );
         let is_existing = fs::is_directory(&metadata_path);
+        let (target_gid, target_mode) = self.mapped_dir_target(&metadata_path);
         let creation_uid = if crate::metadata_repair::enabled() {
             owner_uid
         } else {
@@ -251,8 +268,9 @@ impl MountPlanner {
         }
 
         if let Some(uid) = effective_uid {
-            // SAFETY: chown 只依赖 c_path 指向的有效 NUL 结尾字符串，无借用指针参数。
-            let ret = unsafe { chown(c_path.as_ptr(), uid, MEDIA_RW_GID) };
+            // SAFETY: chown 只依赖 c_path 指向的有效 NUL 结尾字符串，无借用指针参数；
+            // `target_gid` 取 `u32::MAX` 时是 chown 的标准「不改组」语义。
+            let ret = unsafe { chown(c_path.as_ptr(), uid, target_gid) };
             if ret != 0 {
                 let error_no = last_errno();
                 log::warn!(
@@ -265,8 +283,9 @@ impl MountPlanner {
             }
         }
 
-        // 仅在目录新创建或属主刚被修正时才覆盖映射目录模式。
-        let ret = unsafe { chmod(c_path.as_ptr(), MAPPED_DIR_MODE) };
+        // 仅在目录新创建或属主刚被修正时才覆盖目标模式。
+        // SAFETY: chmod 只依赖 NUL 结尾路径与 mode，`target_mode` 由 mapped_dir_target 派生。
+        let ret = unsafe { chmod(c_path.as_ptr(), target_mode) };
         if ret != 0 {
             let error_no = last_errno();
             log::warn!(
@@ -335,11 +354,13 @@ impl MountPlanner {
         // SAFETY: 上一步返回 0 表示 st 已被完整初始化。
         let st = unsafe { st.assume_init() };
         let current_mode = st.st_mode & 0o7777;
-        if st.st_uid == owner_uid as u32 && current_mode == MAPPED_DIR_MODE {
+        let (target_gid, target_mode) = self.mapped_dir_target(&metadata_path);
+        if st.st_uid == owner_uid as u32 && current_mode == target_mode {
             return true;
         }
-        // SAFETY: chown 只依赖 c_path 指向的有效 NUL 结尾字符串，无借用指针参数。
-        let chown_ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, MEDIA_RW_GID) };
+        // SAFETY: chown 只依赖 c_path 指向的有效 NUL 结尾字符串，无借用指针参数；
+        // `target_gid` 取 `u32::MAX` 时是 chown 的标准「不改组」语义。
+        let chown_ret = unsafe { chown(c_path.as_ptr(), owner_uid as u32, target_gid) };
         if chown_ret != 0 {
             let error_no = last_errno();
             log::warn!(
@@ -350,8 +371,9 @@ impl MountPlanner {
                 metadata_path
             );
         }
-        // SAFETY: chmod 只依赖 c_path 指向的有效 NUL 结尾字符串，无借用指针参数。
-        let chmod_ret = unsafe { chmod(c_path.as_ptr(), MAPPED_DIR_MODE) };
+        // SAFETY: chmod 只依赖 c_path 指向的有效 NUL 结尾字符串与 mode，无借用指针参数；
+        // `target_mode` 由 mapped_dir_target 按路径形态派生。
+        let chmod_ret = unsafe { chmod(c_path.as_ptr(), target_mode) };
         if chmod_ret != 0 {
             let error_no = last_errno();
             log::warn!(
