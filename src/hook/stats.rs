@@ -783,16 +783,6 @@ fn is_ignorable_refresh_failure(
     {
         return true;
     }
-    // media-runtime（MediaProvider）：2026-10-25 本地 A14 模拟器实证，refresh 的
-    // 解析失败清单全部是 lazy stub/裁剪段表的系统小库（libdl、libnativeloader_lazy、
-    // libandroid_runtime_lazy 等），FUSE 归因链真正依赖的目标库（libfuse_jni/
-    // libappfuse/libfuse）解析成功；这些失败不清 hooks 时 mkdir 等写链路 hook 才
-    // 能在宿主形态上生效（此前 refresh 整体失败 → srx_hook::clear → 记录链断裂）。
-    if profile_name == "media-runtime"
-        && is_module_parse_refresh_failure(refresh_errno, refresh_errors)
-    {
-        return true;
-    }
     if refresh_errno != srx_hook::SrxHookErrno::Format {
         return false;
     }
@@ -818,7 +808,7 @@ fn is_module_parse_refresh_failure(
 }
 
 fn should_use_bridge_caller_filter(profile_name: &str) -> bool {
-    profile_name.starts_with("system-writer") || profile_name == "monitor"
+    profile_name.starts_with("system-writer") || matches!(profile_name, "monitor" | "media-runtime")
 }
 
 fn is_deleted_jit_memfd_module(module_path: &str) -> bool {
