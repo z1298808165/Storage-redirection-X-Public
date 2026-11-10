@@ -102,6 +102,16 @@ impl Api {
         Self { table }
     }
 
+    /// 暴露底层表指针，供调用方在使用前判断该表所在映射是否仍然有效。
+    ///
+    /// 表由注入框架（Zygisk Next 的 libzygisk.so）持有。该库在 specialize 结束后
+    /// 可能被卸载（2026-11-10 A17 实测：`linker=system` 下 MediaProvider 进程里
+    /// libzygisk.so 完全不在 /proc/self/maps，`linker=builtin` 下仍在），届时表
+    /// 指针成为悬垂指针，任何解引用都会 SIGSEGV。调用方必须先校验再使用。
+    pub(crate) fn table_ptr(&self) -> *mut ApiTable {
+        self.table
+    }
+
     // 连接 companion 子进程，返回通信 socket 的 fd
     pub fn connect_companion(&self) -> c_int {
         unsafe {

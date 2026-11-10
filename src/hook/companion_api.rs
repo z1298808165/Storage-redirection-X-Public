@@ -8,24 +8,71 @@
 use crate::zygisk::abi;
 use std::os::unix::io::RawFd;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use libc::c_int;
 
 struct CompanionApi(abi::Api);
-// SAFETY: api 的 table 指针由 zygisk 框架提供且进程生命周期内有效（MP 进程
-// 不 dlclose 模块），跨线程调用仅触达 zygisk 的线程安全入口。
+// SAFETY: api 的 table 指针由 zygisk 框架提供，使用前由 api_table_resident 校验其
+// 映射仍然存在（注入框架可能已卸载持有该表的库），跨线程调用仅触达 zygisk 的
+// 线程安全入口。
 unsafe impl Send for CompanionApi {}
 unsafe impl Sync for CompanionApi {}
 
 static MP_API: OnceLock<CompanionApi> = OnceLock::new();
+/// 注入框架卸载后只提示一次，避免每次属主修复都刷日志。
+static API_TABLE_RELEASED_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// 保存 zygisk api 以供 hook 运行期连接 companion（on_load 时调用一次）。
 pub fn save_companion_api(api: &abi::Api) {
     let _ = MP_API.set(CompanionApi(*api));
 }
 
+/// api 表所在页当前是否仍处于映射状态。
+///
+/// 表由注入框架的 libzygisk.so 持有：`linker=system` 下该库在本进程 specialize
+/// 结束后可能被卸载，此时表指针悬垂，解引用即 SIGSEGV（2026-11-10 A17 实测：
+/// MediaProvider 崩溃在 connect_companion 的取表指令上，卷随之丢失、媒体写入
+/// 全面失败）。mincore 只查询映射状态、不触碰目标内存，已卸载时返回 ENOMEM，
+/// 因此可安全地用作解引用前的守卫。
+fn api_table_resident(api: &abi::Api) -> bool {
+    let table = api.table_ptr();
+    if table.is_null() {
+        return false;
+    }
+    // SAFETY: sysconf 无副作用；page 为系统页大小，按页对齐后取一页做存在性查询。
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return false;
+    }
+    let page_size = page_size as usize;
+    let addr = (table as usize) & !(page_size - 1);
+    let mut residency: libc::c_uchar = 0;
+    // SAFETY: addr 按页对齐、长度为整页，vec 指向栈上一个字节，mincore 只写入该字节。
+    let ret = unsafe {
+        libc::mincore(
+            addr as *mut libc::c_void,
+            page_size,
+            &mut residency as *mut libc::c_uchar,
+        )
+    };
+    ret == 0
+}
+
+fn note_api_table_released() {
+    if !API_TABLE_RELEASED_LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!(
+            "companion api table is no longer mapped (loader unloaded); fall back to in-process owner fix"
+        );
+    }
+}
+
 fn connect_companion() -> Option<RawFd> {
     let api = MP_API.get()?;
+    if !api_table_resident(&api.0) {
+        note_api_table_released();
+        return None;
+    }
     let fd = api.0.connect_companion();
     if fd < 0 {
         return None;
