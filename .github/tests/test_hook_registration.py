@@ -34,11 +34,14 @@ class HookRegistrationTest(unittest.TestCase):
             extract_function(source, name) for name in (
                 "should_hook_caller_module", "is_runtime_generated_or_java_artifact",
                 "is_java_artifact_module", "is_hook_sensitive_render_module",
+                "should_hook_system_writer_caller_module", "should_use_bridge_caller_filter",
             )
         )
         caller_filter += "\n" + next(
             line for line in source.splitlines() if line.startswith("const ZYGISK_MODULE_BASENAME:")
         )
+        start = source.index("const UNSTABLE_CALLER_MODULE_BASENAMES:")
+        caller_filter += "\n" + source[start:source.index("];", start) + 2]
         harness = r'''
 extern crate self as log;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,6 +97,28 @@ fn main() {
     assert!(should_hook_caller_module("/system/lib64/libfuse.so"));
     assert!(should_hook_caller_module("/system/lib64/libappfuse.so"));
     assert!(should_hook_caller_module("/system/lib64/libnotzygisk.so"));
+    for profile in ["system-writer", "system-writer-monitor", "monitor", "media-runtime"] {
+        assert!(should_use_bridge_caller_filter(profile), "{profile}");
+    }
+    for profile in ["app-write", "fuse-fix", "full"] {
+        assert!(!should_use_bridge_caller_filter(profile), "{profile}");
+    }
+    for path in [
+        "/apex/com.android.art/lib64/libandroidio.so",
+        "/system/lib64/libandroid_runtime_lazy.so",
+        "/system/lib64/libnativebridge_lazy.so",
+        "/system/lib64/libnativeloader_lazy.so",
+        "/system/lib64/libvndksupport.so",
+    ] {
+        assert!(!should_hook_system_writer_caller_module(path), "{path}");
+    }
+    for path in [
+        "/system/lib64/libfuse.so",
+        "/system/lib64/libappfuse.so",
+        "/apex/com.android.mediaprovider/MediaProvider.apk!/lib/x86_64/libfuse_jni.so",
+    ] {
+        assert!(should_hook_system_writer_caller_module(path), "{path}");
+    }
     assert_eq!(take_checked_hook_stub("open", Ok(7)), Some(7));
     assert_eq!(take_checked_hook_stub("open", Err(HookError {
         status: 1, stub: Some(7), errors: module_errors(),
