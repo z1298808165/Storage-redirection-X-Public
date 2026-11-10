@@ -3599,6 +3599,61 @@ function Test-SandboxRootMetadata {
     $ok
 }
 
+# 私有树祖先链的原生形态校验（与 .sh 的 check_private_tree_native_metadata 同契约）：
+# `Android/data/<包名>` 与 `<包名>/sdcard` 两层都必须满足「应用属主 + 组等于父目录继承值 +
+# other 不可写 + mode 02770/02771」。
+#
+# 逐层查的原因：`sdcard` 的组曾被 chown(uid, uid) 覆盖成应用 uid；`<包名>` 的组曾被挂载
+# 规划器写成 media_rw(1023)，与 Android/data 的原生组 ext_data_rw(1078) 不一致。任一层组错，
+# 系统代写进程就在那一层 EACCES 并回退到真实公共路径。逐层断言能指出是哪一层回归。
+function Test-PrivateTreeMetadata {
+    param([int]$Scenario, [string]$Label)
+    $appUid = Test-AppUid
+    $layers = @(
+        @{ Path = "$BackendRoot/Android/data/$AppId"; Parent = "$BackendRoot/Android/data" },
+        @{ Path = $BackendPrivateRoot; Parent = "$BackendRoot/Android/data/$AppId" }
+    )
+    $ok = $true
+    foreach ($layer in $layers) {
+        $form = ((Invoke-Su "stat -c '%a %u %g' '$($layer.Path)' 2>/dev/null") -join " ").Trim()
+        $parentGid = ((Invoke-Su "stat -c %g '$($layer.Parent)' 2>/dev/null") -join "").Trim()
+        if ([string]::IsNullOrEmpty($form)) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree missing: $($layer.Path)") | Out-Null
+            $ok = $false
+            continue
+        }
+        $parts = $form -split '\s+'
+        $mode = $parts[0]
+        $owner = $parts[1]
+        $group = $parts[2]
+        Write-Host "  - scenario-$Scenario/$Label private-tree path=$($layer.Path) mode=$mode owner=$owner group=$group parent=$($layer.Parent) parent_gid=$parentGid"
+        if ($appUid -and $owner -ne $appUid) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree owner mismatch: $($layer.Path) owner=$owner app_uid=$appUid") | Out-Null
+            $ok = $false
+        }
+        if ($appUid -and $group -eq $appUid) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree group leaked to app uid: $($layer.Path) group=$group") | Out-Null
+            $ok = $false
+        }
+        if ([string]::IsNullOrEmpty($parentGid)) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree parent unreadable: $($layer.Parent)") | Out-Null
+            $ok = $false
+        } elseif ($group -ne $parentGid) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree group not inherited: $($layer.Path) group=$group parent_gid=$parentGid") | Out-Null
+            $ok = $false
+        }
+        if (([Convert]::ToInt32($mode, 8) -band 2) -ne 0) {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree other-writable: $($layer.Path) mode=$mode") | Out-Null
+            $ok = $false
+        }
+        if ($mode -ne "2770" -and $mode -ne "2771") {
+            $script:Failures.Add("scenario-$Scenario/$Label private tree mode not native: $($layer.Path) mode=$mode") | Out-Null
+            $ok = $false
+        }
+    }
+    $ok
+}
+
 # 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透（与 .sh 同契约）。
 #
 # 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
@@ -3625,6 +3680,8 @@ function Invoke-SandboxRootMetadataScenario {
         return $false
     }
     $ok = (Test-SandboxRootMetadata $Scenario "sandbox-root-rebuild")
+    # 沙盒根只是链路末端：祖先链每一层都必须是原生形态。
+    $ok = (Test-PrivateTreeMetadata $Scenario "private-tree-rebuild") -and $ok
     # 应用侧写入：重建出来的沙盒根必须仍能被应用自己写入。落点选在存储根下（即沙盒根内），
     # 不依赖任何预置子目录——本场景刚刚把整个沙盒根删掉，预置的子目录已随之消失。
     $appWriteFile = "srt_sandbox_root_appwrite.txt"
@@ -3641,6 +3698,7 @@ function Invoke-SandboxRootMetadataScenario {
     $ok = (Require-Missing "scenario-$Scenario" "sandbox-root-public-file" "$publicParent/$SandboxRootMetadataFile") -and $ok
     # 代写链路不得把组改回应用 uid，也不得把 other 写位加回来。
     $ok = (Test-SandboxRootMetadata $Scenario "sandbox-root-post-write") -and $ok
+    $ok = (Test-PrivateTreeMetadata $Scenario "private-tree-post-write") -and $ok
     $ok
 }
 

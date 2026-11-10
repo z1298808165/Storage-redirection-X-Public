@@ -4668,6 +4668,70 @@ sandbox_root_form() {
 #    `media_rw(1023)`/`ext_data_rw(1078)`。
 # 3) other 位不得可写（`02773` 是同一类放宽留下的签名），mode 只允许私有树原生
 #    `02770` 或映射目录口径 `02771`。
+# 私有树祖先链的原生形态校验：`Android/data/<包名>` 与 `<包名>/sdcard` 两层都必须满足
+# 「应用属主 + 组等于父目录继承值 + other 不可写 + mode 02770/02771」。
+#
+# 为什么要逐层查而不是只看沙盒根：这条链上任一层被写成常量组都出过事——`sdcard` 的组曾被
+# `chown(uid, uid)` 覆盖成应用自己的 uid；`<包名>` 的组曾被挂载规划器写成 media_rw(1023)，
+# 与 Android/data 的原生组 ext_data_rw(1078) 不一致。任何一层组错，系统代写进程就在那一层
+# 拿到 EACCES，写入随后回退到真实公共路径。逐层断言能直接指出是哪一层回归，而不是只报
+# 「根不对」；将来若有人把 1078 或「不改组」的写法改回常量，这条用例会当场失败。
+check_private_tree_native_metadata() {
+  local label="$1"
+  local app_uid parent_gid form mode owner group path parent rc=0
+  app_uid="$(test_app_uid)"
+  # 显式给出每层的父目录，避免在设备端拼 dirname（双层引号易坏）。
+  local -a layer_paths=(
+    "${BACKEND_ROOT}/Android/data/${APP_ID}"
+    "${BACKEND_PRIVATE_ROOT}"
+  )
+  local -a layer_parents=(
+    "${BACKEND_ROOT}/Android/data"
+    "${BACKEND_ROOT}/Android/data/${APP_ID}"
+  )
+  local index=0
+  while [ "$index" -lt "${#layer_paths[@]}" ]; do
+    path="${layer_paths[$index]}"
+    parent="${layer_parents[$index]}"
+    index=$((index + 1))
+    form="$(adb_su "stat -c '%a %u %g' '$path' 2>/dev/null" | tr -d '\r')"
+    parent_gid="$(adb_su "stat -c %g '$parent' 2>/dev/null" | tr -d '\r')"
+    if [ -z "$form" ]; then
+      echo "private_tree_missing label=${label} path=${path}" >&2
+      rc=1
+      continue
+    fi
+    mode="${form%% *}"
+    owner="$(printf '%s' "$form" | cut -d' ' -f2)"
+    group="$(printf '%s' "$form" | cut -d' ' -f3)"
+    echo "private_tree_metadata label=${label} path=${path} mode=${mode} owner=${owner} group=${group} parent=${parent} parent_gid=${parent_gid:-unknown}"
+    if [ -n "$app_uid" ] && [ "$owner" != "$app_uid" ]; then
+      echo "private_tree_owner_mismatch label=${label} path=${path} owner=${owner} app_uid=${app_uid}" >&2
+      rc=1
+    fi
+    if [ -n "$app_uid" ] && [ "$group" = "$app_uid" ]; then
+      echo "private_tree_group_leaked_to_app_uid label=${label} path=${path} group=${group}" >&2
+      rc=1
+    fi
+    if [ -z "$parent_gid" ]; then
+      echo "private_tree_parent_unreadable label=${label} path=${path} parent=${parent}" >&2
+      rc=1
+    elif [ "$group" != "$parent_gid" ]; then
+      echo "private_tree_group_not_inherited label=${label} path=${path} group=${group} parent_gid=${parent_gid}" >&2
+      rc=1
+    fi
+    if [ $((8#$mode & 8#002)) -ne 0 ]; then
+      echo "private_tree_other_writable label=${label} path=${path} mode=${mode}" >&2
+      rc=1
+    fi
+    if [ "$mode" != "2770" ] && [ "$mode" != "2771" ]; then
+      echo "private_tree_mode_not_native label=${label} path=${path} mode=${mode}" >&2
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
 check_sandbox_root_metadata() {
   local label="$1"
   local app_uid parent_gid form mode owner group rc=0
@@ -4738,6 +4802,9 @@ run_sandbox_root_metadata_scenario() {
   fi
 
   check_sandbox_root_metadata "${label}-rebuild" || return 1
+  # 沙盒根只是链路末端：祖先链每一层都必须是原生形态，任何一层被写成常量组都会让系统
+  # 代写在该层 EACCES。
+  check_private_tree_native_metadata "${label}-rebuild" || return 1
 
   # 应用侧写入：重建出来的沙盒根必须仍能被应用自己写入。落点选在存储根下（即沙盒根内），
   # 不依赖任何预置子目录——本场景刚刚把整个沙盒根删掉，clean_targets 预置的子目录已随之消失。
@@ -4755,7 +4822,8 @@ run_sandbox_root_metadata_scenario() {
   check_file_missing "${label}-sandbox-root-public-file" "${public_parent}/${file}" || return 1
 
   # 代写链路不得把组改回应用 uid，也不得把 other 写位加回来：那正是被修的泄漏形态。
-  check_sandbox_root_metadata "${label}-post-write"
+  check_sandbox_root_metadata "${label}-post-write" &&
+    check_private_tree_native_metadata "${label}-post-write"
 }
 
 run_scenario() {
@@ -5193,7 +5261,7 @@ export -f run_own_private_directories_scenario run_own_private_write_case
 export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
-export -f sandbox_root_form check_sandbox_root_metadata run_sandbox_root_metadata_scenario
+export -f sandbox_root_form check_sandbox_root_metadata check_private_tree_native_metadata run_sandbox_root_metadata_scenario
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
 export -f run_system_uid_attribution_scenario run_system_uid_sandbox_missing_target_scenario backup_shell_config restore_shell_config
