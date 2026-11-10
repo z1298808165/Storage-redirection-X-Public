@@ -218,6 +218,33 @@ pub(super) fn resolve_system_writer_caller_context(
         effective_caller_uid,
     );
 
+    // 代写者在映射目标上执行后续操作（pending 提交、后端 mkdir、文件 open）时已无
+    // binder 调用方可用，只能靠路径反查归属。这里优先用「显式配置的映射源/目标」
+    // 反查：映射目标唯一对应一个配置方时归属是确定的，比按路径提示更可靠——提示
+    // 台账可能被代写者自身登记污染，也可能只是过期残留。
+    if effective_caller_package.is_empty()
+        && can_infer_caller_by_path
+        && redirect_policy::is_system_writer_package(package_name)
+    {
+        let mapping_owner = resolve_mapping_request_owner_package_by_path(user_id, normalized_path);
+        if !mapping_owner.is_empty()
+            && !redirect_policy::is_attribution_intermediate_package(&mapping_owner)
+        {
+            let owner_uid = redirect_policy::get_fresh_uid_for_package(&mapping_owner);
+            if owner_uid >= writer::ANDROID_APP_UID_START {
+                effective_caller_uid = owner_uid;
+            }
+            log::debug!(
+                "writer: mapping owner caller={} uid={} path={}",
+                mapping_owner,
+                effective_caller_uid,
+                normalized_path
+            );
+            effective_caller_package = mapping_owner;
+            is_caller_from_inferred = true;
+        }
+    }
+
     // 用路径提示恢复调用方，仅在「当前归属不可信」时进行：归属为空、归属就是本进程
     // （MediaProvider 自己）、或归属本身是系统代写者。这些情况下拿不到真实调用方，
     // 只能靠 insert 阶段登记的路径提示把它带回来。
@@ -235,6 +262,7 @@ pub(super) fn resolve_system_writer_caller_context(
         && redirect_policy::is_media_provider_package(package_name)
         && let Some(path_identity) =
             crate::monitor::infer_recent_path_caller_identity(normalized_path, user_id)
+        && !redirect_policy::is_attribution_intermediate_package(&path_identity.package_name)
     {
         let inferred_uid = redirect_policy::get_fresh_uid_for_package(&path_identity.package_name);
         if inferred_uid >= writer::ANDROID_APP_UID_START {

@@ -161,6 +161,14 @@ fn resolve_storage_caller_context(caller_uid: i32, path_text: &str) -> (String, 
         return context;
     }
 
+    // 代写者以自身身份走到这里时，「找到的就是自己」不构成任何归因线索，反而会
+    // 让 writer 决策把有效归属改写成代写者并判定为未启用重定向，从而放行请求
+    // 路径（2026-11-10 A17 场景 39：文件物理落在 SrtDlOwner、映射目标为空）。
+    // 返回空归属，交给上层按 uid / 下载行继续反查，或按未解析路径处理。
+    if system_writer && policy::is_system_writer_package(&caller_package) {
+        return (String::new(), caller_uid);
+    }
+
     (caller_package, caller_uid)
 }
 
@@ -203,6 +211,28 @@ fn resolve_proxied_write_caller_context(
 ) -> Option<(String, i32)> {
     resolve_path_hint_caller_context(user_id, path_text)
         .or_else(|| resolve_mapping_request_caller_context(user_id, caller_uid, path_text, true))
+        .or_else(|| resolve_mapping_target_caller_context(user_id, path_text))
+}
+
+/// 用「映射目标」反查归属应用。
+///
+/// 代写者在映射目标上执行后续操作（pending 提交、后端 mkdir、文件 open）时没有
+/// binder 调用方，请求路径提示又可能已被污染或过期；显式配置的映射目标唯一对应
+/// 一个配置方，是确定性证据。冲突目标由配置侧返回空串，保持匿名公共路径边界。
+fn resolve_mapping_target_caller_context(user_id: i32, path_text: &str) -> Option<(String, i32)> {
+    if user_id < 0 || path_text.is_empty() {
+        return None;
+    }
+    let package_name =
+        SettingsHub::instance().resolve_mapping_target_package_by_path_for_user(user_id, path_text);
+    if package_name.is_empty() || policy::is_attribution_intermediate_package(&package_name) {
+        return None;
+    }
+    let uid = policy::get_fresh_uid_for_package(&package_name);
+    if uid < writer::ANDROID_APP_UID_START {
+        return None;
+    }
+    Some((package_name, uid))
 }
 
 // 按路径找回最近一次真实调用方登记的归属。MediaProvider 在 insert 阶段由应用
@@ -313,7 +343,14 @@ pub(crate) fn rewrite_media_store_storage_path_for_caller(
     // 它们没有 binder 调用方可言，只能靠这里登记的路径归属找回发起者。
     // 放行（Allow）分支同样需要，否则发起者配置放行真实路径时后续操作
     // 会因归属缺失而再次落入未解析路径。
-    remember_media_caller_hint(path_text, &caller_package, effective_uid);
+    //
+    // 但代写者以自身身份回退时不得登记：这种「归属＝代写者自己」的提示对后续归因
+    // 毫无价值，还会盖掉真实发起者的台账，让系统代写归因把有效归属改写成代写者，
+    // 进而判定为「未启用重定向」而放行请求路径（2026-11-10 A17 场景 39：
+    // SrtDlOwner 物理落点留在请求路径、MediaStore 记录却指向映射目标）。
+    if !policy::is_attribution_intermediate_package(&caller_package) {
+        remember_media_caller_hint(path_text, &caller_package, effective_uid);
+    }
     if let Some(mapped_target) =
         resolve_mapping_view_open_target(path_text, &caller_package, effective_uid)
         && let Some(rewritten) =
