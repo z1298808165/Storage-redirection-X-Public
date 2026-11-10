@@ -21,7 +21,7 @@
     "prerelease": true,
     "downloadUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-42774810831/storage-redirect-x-manager-v2.3.0-ci.4.apk",
     "moduleUrl": "https://github.com/z1298808165/Storage-redirection-X-Public/releases/download/ci-build-42774810831/storage.redirect.x-v2.3.0-ci.4.zip",
-    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.3.0-ci.4`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-42762996864`\n- 当前提交：`a47d6a6e0e4a`\n\n## 模块更新\n\n### 修复了什么问题\n- 代写者不再把自己写成归属并补映射目标反查。\n\n### 功能变化\n- srx_hook 依赖临时指向 fork 修复提交。"
+    "releaseNotes": "## CI 构建更新日志\n\n- 当前版本：`2.3.0-ci.4`\n- 对比基准：上一版 CI 或 Release 构建 `ci-build-42762996864`\n- 当前提交：`a47d6a6e0e4a`\n\n## 模块更新\n\n### 修复了什么问题\n- Android 17 上系统媒体代写未按发起应用重定向、文件落到原请求路径的问题。\n"
   },
   "releases": []
 }
