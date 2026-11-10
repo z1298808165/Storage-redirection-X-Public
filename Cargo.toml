@@ -24,16 +24,7 @@ serde_json = "1.0"
 once_cell = "1.21"
 # hook 依赖固定到具体 commit，避免上游 main 推进后本地与 CI 构建出不同的 hook 实现。
 # 升级 hook 能力时需同步更新这里的 rev 与 Cargo.lock。
-#
-# 【临时过渡，待回收】srx_hook 暂时指向 fork 的修复提交（maps-only 模块段范围补齐），
-# 只用于在上游 PR 合并前让 CI 能拉到修复代码，不是长期依赖来源，请勿据此认为本项目
-# 已改为依赖 fork。
-# 回收条件：https://github.com/Kindness-Kismet/srx_hook/pull/2 合并后，把下面的 URL
-# 改回 https://github.com/Kindness-Kismet/srx_hook.git ，并把 rev 换成合并后的提交；
-# 同时更新 Cargo.lock 与 docs/upstream-hook-dependencies.md，并删掉该文档里对应的
-# 「当前临时指向 fork」小节。
-# 检索标记：待回收 srx_hook fork
-srx_hook = { git = "https://github.com/z1298808165/srx_hook.git", rev = "88e54766a6117cf6bbb2f6e38254d297afdf41d2" }
+srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "bfb02a7b731157898fe7ad2b5108f02b0a742284" }
 srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 log = "0.4"
 fuser = { version = "0.17", default-features = false }
