@@ -167,6 +167,7 @@ DL_OWNER_MAPPED_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}/${DL_OWNER_
 # 下载用例的取数 URL 覆盖：默认空 = 场景内启动本地回环 HTTP 服务（adb reverse
 # 转发，不依赖模拟器外部网络）；显式设置时优先使用该外源。
 SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-}"
+SRT_DOWNLOAD_NETWORK_HELPER="$(base64 < "$(dirname "${BASH_SOURCE[0]}")/prepare-download-test-network.sh" | tr -d '\n')"
 # 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。shell（uid 2000）延迟
 # mkdir 制造确定的系统 uid FUSE 请求，断言监视记录按发起进程归因（此前
 # 该类请求只能记录 unknown 或误归组内成员）。
@@ -2354,6 +2355,10 @@ run_provider_sandbox_scenario() {
   return 0
 }
 
+set_download_test_network() {
+  adb_su_timeout 60 "printf %s '$SRT_DOWNLOAD_NETWORK_HELPER' | base64 -d | sh -s -- '$1'"
+}
+
 run_download_owner_attribution_scenario() {
   local scenario="$1"
   # 触发链：测试应用（下载发起者）配置 path_mappings → DownloadManager 入队
@@ -2396,6 +2401,10 @@ run_download_owner_attribution_scenario() {
   local dl_reverse_port=""
   local device_is_emulator=0
   local dl_api=0
+  SRT_DL_SERVER_PID="$dl_server_pid"
+  SRT_DL_REVERSE_PORT=""
+  SRT_DL_TMP_DIR=""
+  trap 'if [ -n "${SRT_DL_SERVER_PID:-}" ]; then kill "$SRT_DL_SERVER_PID" 2>/dev/null || true; wait "$SRT_DL_SERVER_PID" 2>/dev/null || true; fi; if [ -n "${SRT_DL_REVERSE_PORT:-}" ]; then timeout 15 adb reverse --remove "tcp:$SRT_DL_REVERSE_PORT" >/dev/null 2>&1 || true; fi; if [ -n "${SRT_DL_TMP_DIR:-}" ]; then rm -rf "$SRT_DL_TMP_DIR" 2>/dev/null || true; fi; set_download_test_network restore' EXIT
   if adb shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r' | grep -q '^1$'; then
     device_is_emulator=1
     dl_api="$(timeout 15 adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r' || true)"
@@ -2409,9 +2418,7 @@ run_download_owner_attribution_scenario() {
     dl_server_pid=$!
     # EXIT 在函数局部变量失效后执行，因此清理句柄存入全局变量。
     SRT_DL_SERVER_PID="$dl_server_pid"
-    SRT_DL_REVERSE_PORT=""
     SRT_DL_TMP_DIR="$dl_dir"
-    trap 'if [ -n "${SRT_DL_SERVER_PID:-}" ]; then kill "$SRT_DL_SERVER_PID" 2>/dev/null || true; wait "$SRT_DL_SERVER_PID" 2>/dev/null || true; fi; if [ -n "${SRT_DL_REVERSE_PORT:-}" ]; then timeout 15 adb reverse --remove "tcp:$SRT_DL_REVERSE_PORT" >/dev/null 2>&1 || true; fi; if [ -n "${SRT_DL_TMP_DIR:-}" ]; then rm -rf "$SRT_DL_TMP_DIR" 2>/dev/null || true; fi' EXIT
     sleep 1
     if ! kill -0 "$dl_server_pid" 2>/dev/null; then
       echo "下载探测服务启动失败" >&2
@@ -2435,10 +2442,7 @@ run_download_owner_attribution_scenario() {
     echo "step 5/7 内: 真机取数源使用测试 APK 内置默认 URL"
   fi
   echo "step 5/7 内: 下载取数源 url=$dl_url"
-  if [ "$device_is_emulator" -eq 1 ] && [ "${dl_api:-0}" -ge 37 ] 2>/dev/null; then
-    adb shell settings put global captive_portal_detection_enabled 0 || true
-    adb shell settings put global private_dns_mode off || true
-  fi
+  set_download_test_network prepare || return 1
   if [ "$device_is_emulator" -eq 1 ]; then
     adb shell ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable
   fi
@@ -2589,6 +2593,7 @@ run_download_owner_attribution_scenario() {
     timeout 15 adb reverse --remove "tcp:$dl_reverse_port" >/dev/null 2>&1 || true
     SRT_DL_REVERSE_PORT=""
   fi
+  set_download_test_network restore || return 1
   if [ "$case_ok" -ne 1 ]; then
     return 1
   fi
@@ -4229,6 +4234,11 @@ capture_scenario2_mediastore_hook_diag() {
     fi
     echo
 
+    echo "===test_app_uid_map==="
+    echo "package_manager_uid=$(test_app_uid)"
+    adb_su "grep -F '${APP_ID}:' /data/adb/modules/storage.redirect.x/config/system_writer_uids.list || echo uid_map_entry_missing" || true
+    echo
+
     echo "===sandbox_dir_content==="
     # 沙箱目录实际内容：有无 .pending- 残留文件，以及最终文件是否存在。
     adb_su "ls -la '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/' 2>/dev/null || echo dir_missing" || true
@@ -4850,7 +4860,8 @@ run_scenario() {
       # 再把目录建回来（那样测到的就不是模块的创建结果）。
       echo "step 2/7: 清理夹具并删除沙盒根，交由模块在应用重启时重建"
       clean_targets
-      adb_su "rm -rf '${BACKEND_PRIVATE_ROOT}'; rm -f '${REAL_ROOT}/srt_sandbox_root_appwrite.txt' '${BACKEND_ROOT}/srt_sandbox_root_appwrite.txt'" >/dev/null
+      # 先准备已有包目录的继承组夹具，再检查模块新建 sdcard 的结果。
+      adb_su "parent_gid=\$(stat -c %g '${BACKEND_ROOT}/Android/data') && chgrp \"\$parent_gid\" '${BACKEND_ROOT}/Android/data/${APP_ID}' && rm -rf '${BACKEND_PRIVATE_ROOT}' && rm -f '${REAL_ROOT}/srt_sandbox_root_appwrite.txt' '${BACKEND_ROOT}/srt_sandbox_root_appwrite.txt'" >/dev/null
       targets_prepared_before_start=1
       ;;
   esac
@@ -5152,6 +5163,7 @@ finish_test_run() {
   capture_shared_fuse_snapshot_once after || true
   # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
   if [ "$device_run_lock_held" -eq 1 ]; then
+    set_download_test_network restore || status=1
     if [ "$global_config_backup_ready" -eq 1 ] && [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
       cleanup_test_artifacts || true
     fi
@@ -5208,7 +5220,8 @@ build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR
-export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL
+export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL SRT_DOWNLOAD_NETWORK_HELPER
+export -f set_download_test_network
 export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
 export SHELL_PACKAGE SHELL_CONFIG SHELL_SANDBOX_REL SHELL_SANDBOX_REAL_DIR SHELL_SANDBOX_BACKEND_DIR
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT

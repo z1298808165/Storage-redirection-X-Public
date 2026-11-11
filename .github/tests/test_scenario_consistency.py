@@ -1215,6 +1215,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             probe.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
+                "set_download_test_network() { :; }\n"
                 "probe() {\n"
                 '  local dl_server_pid=""\n'
                 "  ( exec sleep 300 </dev/null >/dev/null 2>&1 ) &\n"
@@ -1224,7 +1225,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 f'  echo "$dl_server_pid" > "{pid_path}"\n'
                 "  return 1\n"
                 "}\n"
-                "export -f probe\n"
+                "export -f probe set_download_test_network\n"
                 "bash -e -o pipefail -c 'probe' || true\n"
                 "sleep 1\n"
                 f'pid=$(cat "{pid_path}")\n'
@@ -2913,7 +2914,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(restart, service)
         self.assertIn("AddSeconds(30)", code)
         self.assertIn("Invoke-AdbWithTimeout", code[restart:service])
-        self.assertIn("-and $deviceSdk -ge 37", code)
+        self.assertIn("Set-DownloadTestNetwork prepare", code)
+        self.assertIn("Set-DownloadTestNetwork restore", code[finally_block:])
         self.assertIn("$isEmulator", code)
         self.assertIn("$dlServer.Kill()", code[finally_block:])
         self.assertIn("$dlServer.WaitForExit(5000)", code[finally_block:])
@@ -2925,6 +2927,34 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("SRT_DL_REVERSE_PORT=\"$dl_reverse_port\"", bash_scenario)
         self.assertIn("timeout 15 adb reverse --remove", bash_scenario)
         self.assertIn('SRT_DL_TMP_DIR="$dl_dir"', bash_scenario)
+        self.assertIn("set_download_test_network prepare || return 1", bash_scenario)
+        self.assertIn("set_download_test_network restore", bash_scenario)
+
+    def test_sandbox_rebuild_prepares_parent_group_before_module_start(self) -> None:
+        bash_case = section(
+            self.bash, "    41)\n      # 沙盒根", "      ;;"
+        )
+        ps_case = section(
+            self.powershell, "    if ($Scenario -eq 41) {", "    # 未自行预置夹具"
+        )
+        for fixture in (bash_case, ps_case):
+            self.assertIn("parent_gid=", fixture)
+            self.assertIn("stat -c %g", fixture)
+            self.assertLess(fixture.index("chgrp"), fixture.index("rm -rf"))
+            self.assertNotIn("chown -R", fixture)
+        bash_check = section(
+            self.bash, "run_sandbox_root_metadata_scenario() {", "run_scenario() {"
+        )
+        ps_check = section(
+            self.powershell, "function Invoke-SandboxRootMetadataScenario {",
+            "function Invoke-Scenario {",
+        )
+        for checks in (bash_check, ps_check):
+            self.assertNotIn("chgrp", checks)
+        self.assertIn('check_private_tree_native_metadata "${label}-rebuild"', bash_check)
+        self.assertIn('check_private_tree_native_metadata "${label}-post-write"', bash_check)
+        self.assertIn('Test-PrivateTreeMetadata $Scenario "private-tree-rebuild"', ps_check)
+        self.assertIn('Test-PrivateTreeMetadata $Scenario "private-tree-post-write"', ps_check)
 
     def test_android17_diagnostics_do_not_report_expected_missing_files(self) -> None:
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")

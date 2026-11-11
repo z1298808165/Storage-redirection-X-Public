@@ -281,6 +281,16 @@ function Grant-TestAppStoragePermissions {
     if ($LASTEXITCODE -ne 0) { throw "测试应用存储权限准备失败：$AppId" }
 }
 
+function Set-DownloadTestNetwork {
+    param([ValidateSet("prepare", "restore")][string]$Action)
+    $helper = Get-Content -LiteralPath (Join-Path $PSScriptRoot "prepare-download-test-network.sh") -Raw
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($helper.Replace("`r", "")))
+    $command = "printf %s $encoded | base64 -d | sh -s -- $Action"
+    $result = Invoke-AdbWithTimeout -Arguments @("shell", "su -c '$command'") -TimeoutSeconds 60
+    $result.Output | Write-Host
+    if ($result.ExitCode -ne 0) { throw "下载测试网络 $Action 失败：$($result.Output)" }
+}
+
 # 两种运行器共用设备端原子目录锁；先持锁再备份，清理完成后才释放。
 # 中断后遗留锁宁可阻止新测试，也不自动抢占仍在清理的会话。
 $script:DeviceRunLockPath = "/data/local/tmp/srx-test-flow.lock"
@@ -3145,11 +3155,7 @@ function Invoke-DownloadOwnerAttributionScenario {
             Write-Host "  - scenario-$Scenario/download-owner: using the test app default download URL"
         }
         Write-Host "  - scenario-$Scenario/download-owner: download url=$dlUrl"
-        # 仅 API 37+ 模拟器需要调整网络验证设置；真机及旧版模拟器保持原配置。
-        if ($isEmulator -and $deviceSdk -ge 37) {
-            Invoke-Adb @("shell", "settings put global captive_portal_detection_enabled 0") | Write-Host
-            Invoke-Adb @("shell", "settings put global private_dns_mode off") | Write-Host
-        }
+        Set-DownloadTestNetwork prepare
         if ($isEmulator) {
             Invoke-Adb @("shell", "ping -c 1 -W 2 10.0.2.2 >/dev/null 2>&1 && echo net_probe_host_ok || echo net_probe_host_unreachable") | Write-Host
         }
@@ -3190,6 +3196,7 @@ function Invoke-DownloadOwnerAttributionScenario {
             try { [void](Invoke-AdbWithTimeout -Arguments @("reverse", "--remove", "tcp:$dlPort") -TimeoutSeconds 15) } catch {}
         }
         if ($dlDir) { Remove-Item -LiteralPath $dlDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Set-DownloadTestNetwork restore
     }
     if (-not $case.Ok) {
         Write-Host "  - scenario-$Scenario/download-owner: enqueue or download failed"
@@ -3711,7 +3718,10 @@ function Invoke-Scenario {
     # 时创建它，重启就是重建时机；删除放在 Clear-Targets/Fix-SharedFixturePermissions 之后，
     # 避免清理流程自己把目录建回来（那样测到的就不是模块的创建结果）。
     if ($Scenario -eq 41) {
-        Invoke-Su "rm -rf '$BackendPrivateRoot'; rm -f '$RealRoot/srt_sandbox_root_appwrite.txt' '$BackendRoot/srt_sandbox_root_appwrite.txt'" | Out-Null
+        # 先准备已有包目录的继承组夹具，再检查模块新建 sdcard 的结果。
+        if (-not (Test-Su "parent_gid=`$(stat -c %g '$BackendRoot/Android/data') && chgrp `"`$parent_gid`" '$BackendRoot/Android/data/$AppId' && rm -rf '$BackendPrivateRoot' && rm -f '$RealRoot/srt_sandbox_root_appwrite.txt' '$BackendRoot/srt_sandbox_root_appwrite.txt'")) {
+            throw "场景 41 的包目录夹具准备失败"
+        }
     }
     # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，别让污染漂到后面的断言。
     if ($Scenario -notin @(9, 10, 20, 21, 22, 28, 31, 38)) {
