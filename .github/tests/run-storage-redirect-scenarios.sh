@@ -3743,17 +3743,9 @@ run_config_hot_reload_scenario() {
   # 是正常的，失败只出现在切换之后。本门禁让 A13 失去「热更新切换」这一项的覆盖，
   # 该覆盖由 Android 14/15/16/17 提供；真机 arm64 上 FuseFix 正常安装，不受影响。
   local scenario="$1"
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && {
-    [ "${ANDROID_API_LEVEL:-}" = "33" ] ||
-    [ "${ANDROID_API_LEVEL:-}" = "35" ] ||
-    [ "${ANDROID_API_LEVEL:-}" = "36" ]
-  }; then
-    # API 33/35/36 x86_64 模拟器的系统 FUSE 对已运行进程的根挂载 dentry
-    # 不支持可靠热切换：基线旧提交 b649202f 的 API 36 同样失败，映射目标
-    # 已挂载且新进程通过，只有旧 PID 请求路径持续残留。arm64 真机与其他 API
-    # 继续执行完整断言，避免把平台限制扩散到产品覆盖范围。
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
     # quality-allow(chinese-language): 该行输出的是 CI 日志检索用的英文标记，必须保持英文原样。
-    echo "config_hot_reload_skipped scenario=${scenario} reason=x86_64-api${ANDROID_API_LEVEL}-system-fuse-hot-reload-limit"
+    echo "config_hot_reload_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
   local previous_fresh_app_per_case="$SRT_FRESH_APP_PER_CASE"
