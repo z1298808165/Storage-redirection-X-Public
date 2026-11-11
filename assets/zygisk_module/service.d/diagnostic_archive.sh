@@ -238,13 +238,16 @@ collect_device_state() {
 }
 
 collect_process_state() {
+  # `ps` 用绝对路径：busybox 的 ash 会把 `ps` 解析成 busybox applet，而它不认大写
+  # `-o PID`（rc=1），三级 fallback 会一路跌到 `ps -A`，导出格式与列序全变。
+  # 详见 common.sh 里 reap_tagged_processes 上方的说明。
   {
-    ps -A -o PID,PPID,USER,NAME,ARGS 2>/dev/null ||
-      ps -A -o PID,USER,ARGS 2>/dev/null ||
-      ps -A 2>/dev/null
+    /system/bin/ps -A -o PID,PPID,USER,NAME,ARGS 2>/dev/null ||
+      /system/bin/ps -A -o PID,USER,ARGS 2>/dev/null ||
+      /system/bin/ps -A 2>/dev/null
   } > "$STATE_DIR/processes.txt" 2>&1
 
-  ps -A -o PID,NAME 2>/dev/null > "$STATE_DIR/process-names.txt" 2>/dev/null || true
+  /system/bin/ps -A -o PID,NAME 2>/dev/null > "$STATE_DIR/process-names.txt" 2>/dev/null || true
 
   {
     echo "media provider pids:"

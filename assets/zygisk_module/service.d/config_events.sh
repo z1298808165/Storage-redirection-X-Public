@@ -1336,9 +1336,18 @@ start_config_event_collector() {
     mkdir -p "$APPS_CONFIG_DIR"
 
     # inotifyd 监听配置目录，事件通过管道传给处理循环。
-    # w=写入关闭 c=内容修改 m=新建 d=删除 n=移入
+    # w=写入关闭 c=内容修改 m=移入 d=删除 n=移入 y=移入目标（MOVED_TO）
+    #
+    # `y` 不能省：配置保存的原子写法是「写临时文件 → rename 覆盖目标」，
+    # 这条路径只会产生 m（MOVED_FROM，路径是临时文件名）和 y（MOVED_TO，路径才是
+    # global.json）。只监听 wcmdn 时两半都收不到——m 的文件名对不上 .json，y 根本
+    # 不上报。实测（A17 inotifyd）：掩码 wcmdn 下 rename 只吐出 `m <dir> stage.txt`，
+    # 扩到 wcmdny 才有 `y <dir> renamed.json`。WebUI 的 restoreConfigSnapshot 正是
+    # 用 `mv "$stage/global.json" "$config/global.json"` 落盘的。
+    # 不加 `e`（ATTRIB）：chmod/touch 只改元数据，不代表配置内容变化，为本不存在的
+    # 变更跑一次完整 sync 不划算。
     while true; do
-      inotifyd - "$APPS_CONFIG_DIR":wcmdn "$CONFIG_DIR":wcmdn 2>/dev/null |
+      inotifyd - "$APPS_CONFIG_DIR":wcmdny "$CONFIG_DIR":wcmdny 2>/dev/null |
       while IFS= read -r event_line; do
         # 仅处理 .json 文件事件
         case "$event_line" in

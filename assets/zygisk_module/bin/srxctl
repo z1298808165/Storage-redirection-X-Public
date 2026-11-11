@@ -447,12 +447,16 @@ start_collectors_if_needed() {
 
   if is_pid_file_alive "$LOGS_DIR/.config_event_collector.pid" \
     && is_pid_file_alive "$LOGS_DIR/.package_event_collector.pid"; then
+    # verbose 开启时只校验常驻的 debug 采集器。
+    #
+    # media_state / app_status 快照是**一次性后台任务**（跑完即退），把它们当成
+    # 「必须在位」会让每次配置保存都判成「采集器缺失」，进而重启整个 service.sh
+    # ——白白中断采集几秒，还会短暂出现两套事件循环。`.running_collector.pid` 与
+    # `.app_status_collector.pid` 由同一个 `start_debug_logcat_collector` 写入、
+    # 指向同一进程，查一个就够。
     if is_daemon_alive \
       && { ! is_verbose_logging_enabled \
-      || { is_pid_file_alive "$LOGS_DIR/.running_collector.pid" \
-        && is_pid_file_alive "$LOGS_DIR/.media_state_collector.pid" \
-        && is_pid_file_alive "$LOGS_DIR/.app_status_collector.pid" \
-        && is_pid_file_alive "$LOGS_DIR/.app_status_snapshot.pid"; }; }; then
+      || is_pid_file_alive "$LOGS_DIR/.running_collector.pid"; }; then
       return 0
     fi
   fi

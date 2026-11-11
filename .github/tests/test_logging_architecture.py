@@ -450,6 +450,89 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("(poll_fd.revents & libc::POLLIN) == 0", reader)
         self.assertIn("drain_changed_packages()", reader)
 
+    def test_config_watch_mask_includes_moved_to(self) -> None:
+        """配置目录的 inotifyd 掩码必须含 `y`（IN_MOVED_TO）。
+
+        配置的原子保存写法是「写临时文件 → rename 覆盖目标」，这条路径只产生
+        m（MOVED_FROM，路径是临时文件名）和 y（MOVED_TO，路径才是 global.json）。
+        只监听 `wcmdn` 时两半都收不到：m 的文件名对不上 `.json` 过滤，y 压根不上报，
+        于是「保存了配置但开关不生效」。A17 实测：掩码 wcmdn 下 rename 只吐
+        `m <dir> stage.txt`；扩到 wcmdny 才有 `y <dir> renamed.json`，开关从
+        「40 秒无反应」变成 2 秒内生效。WebUI 的 restoreConfigSnapshot 正是
+        `mv "$stage/global.json" "$config/global.json"` 落盘。
+
+        不加 `e`（IN_ATTRIB）：chmod/touch 只改元数据，不代表配置内容变化。
+        """
+        events = read("assets/zygisk_module/service.d/config_events.sh")
+        watch_lines = [
+            line for line in events.splitlines() if "inotifyd - " in line and "CONFIG" in line
+        ]
+        self.assertTrue(watch_lines, "未找到配置目录的 inotifyd 监听")
+        for line in watch_lines:
+            self.assertIn(":wcmdny", line, line)
+            self.assertNotIn(":wcmdn ", line, line)
+
+    def test_srxctl_does_not_require_one_shot_snapshot_pids(self) -> None:
+        """`srxctl ensure-collectors` 不得把一次性快照的 pid 当作「必须在位」。
+
+        media_state / app_status 快照是后台一次性任务，跑完即退。把它们列进存活条件，
+        每次配置保存都会被判成「采集器缺失」并重启整个 `service.sh`——白中断采集几秒，
+        还会短暂出现两套事件循环。常驻的只有 debug 采集器（`.running_collector.pid`）。
+        """
+        srxctl = read("assets/zygisk_module/bin/srxctl")
+        body = section(srxctl, "start_collectors_if_needed() {", "service collectors restart requested")
+        self.assertIn(".running_collector.pid", body)
+        for one_shot in (".media_state_collector.pid", ".app_status_snapshot.pid"):
+            self.assertNotIn(one_shot, body, f"{one_shot} 是一次性任务，不能作为存活条件")
+
+    def test_process_listing_uses_absolute_ps_path(self) -> None:
+        """带 `-o` 的 `ps` 调用必须写 `/system/bin/ps`。
+
+        模块脚本有两条启动路径：开机 `busybox sh service.sh`（ash）与
+        `srxctl ensure-collectors` 的 `sh service.sh`（mksh）。busybox 的 ash 把
+        applet 当内建命令，`ps` 解析成 **busybox 版**，而它只认小写 `-o pid`：
+        `ps -A -o PID,ARGS` 直接 `bad -o argument 'PID'` 且 rc=1。错误被
+        `2>/dev/null` 吞掉之后，唯一表现就是「选不出进程、什么都没杀」。
+        A17 实测：busybox 路径下 `victims` 恒空、每轮开关泄漏一个 logcat；
+        同一份代码在 mksh 路径下正常。绝对路径让两种 shell 都落到 toybox。
+        """
+        files = [
+            "assets/zygisk_module/service.d/common.sh",
+            "assets/zygisk_module/service.d/media_state.sh",
+            "assets/zygisk_module/service.d/app_status.sh",
+            "assets/zygisk_module/service.d/diagnostic_archive.sh",
+            "assets/zygisk_module/uninstall.sh",
+        ]
+        offenders = []
+        for path in files:
+            for lineno, line in enumerate(read(path).splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or "echo " in stripped:
+                    continue
+                if re.search(r"(?<!/system/bin/)\bps\s+-[A-Za-z]*\s*-o\b", stripped):
+                    offenders.append(f"{path}:{lineno}: {stripped}")
+        self.assertEqual(offenders, [], "这些 ps 调用没有用绝对路径:\n" + "\n".join(offenders))
+
+    def test_service_scripts_have_no_duplicate_function_definitions(self) -> None:
+        """同一个脚本文件内不得重复定义同名函数。
+
+        shell 里后定义的函数会静默覆盖前一个，没有 warning。2026-11-11 精简 reap 时就
+        踩了：把 `reap_tagged_processes` 合并进 `reap_stale_logcat_collectors` 之后，
+        文件后面还留着旧的薄封装 `reap_stale_logcat_collectors() { reap_tagged_processes ... }`
+        ——它覆盖了新实现，而 `reap_tagged_processes` 已删，于是运行时 `job not found`、
+        reap 完全失效。`sh -n` 通过、原有断言也通过（只检查了前一个定义），只有这条能拦。
+
+        跨文件同名是允许的：`uninstall.sh` 独立执行、不 source `common.sh`，它自带
+        `stop_background_process` / `stop_collector_by_pid_file` 的副本。
+        """
+        pattern = re.compile(r"^([a-z_][a-z0-9_]*)\(\) \{", re.MULTILINE)
+        for path in sorted((ROOT / "assets" / "zygisk_module").rglob("*.sh")):
+            names = pattern.findall(path.read_text(encoding="utf-8"))
+            duplicates = sorted({name for name in names if names.count(name) > 1})
+            self.assertEqual(
+                duplicates, [], f"{path.name} 内重复定义函数: {duplicates}"
+            )
+
     def test_default_collectors_do_not_subscribe_to_native_hot_tags(self) -> None:
         collectors = read("assets/zygisk_module/service.d/log_collectors.sh") + read(
             "assets/zygisk_module/service.d/debug_collectors.sh"
@@ -458,6 +541,182 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertNotIn("Stats:I", collectors)
         self.assertNotIn("StorageRedirect:V", collectors)
         self.assertEqual(collectors.count("logcat -T 1"), 1)
+
+    def test_debug_collector_stop_kills_subshell_before_reaping(self) -> None:
+        """停止详细日志采集器必须「SIGKILL 子 shell → 按 tag 收 logcat」。
+
+        子 shell 是 mksh 且阻塞在管道 `read` 上，SIGTERM 会被延后到该次读返回才处理，
+        而关闭 verbose 后 SRX 行可能长时间没有一条：发过 SIGTERM 在运行期等价于没杀，
+        随后状态被写成 off 就再也没有路径重试。只按 tag reap 同样无效——子 shell 会在
+        1 秒内重建 logcat。
+        """
+        debug = read("assets/zygisk_module/service.d/debug_collectors.sh")
+        common = read("assets/zygisk_module/service.d/common.sh")
+        stop = section(debug, "stop_debug_logcat_collector() {", "start_debug_collectors() {")
+        self.assertIn('stop_background_process "$pid" KILL', stop)
+        self.assertIn("reap_stale_logcat_collectors KILL", stop)
+        # 顺序固定：先让子 shell 死掉，再收管道里的 logcat。
+        self.assertLess(
+            stop.index('stop_background_process "$pid" KILL'),
+            stop.index("reap_stale_logcat_collectors KILL"),
+        )
+        self.assertEqual(stop.count('stop_background_process "$pid"'), 1)
+        reap = section(common, "reap_stale_logcat_collectors() {", "log -p i -t Boot")
+        self.assertIn('reap_signal="${1:-KILL}"', reap)
+        self.assertIn("kill_with_signal", reap)
+        # 采集进程清单必须一次 `ps` 取全表：逐个读 `/proc/<pid>/cmdline` 时，目标进程若在
+        # 读取过程中消失会让读端自旋不返回，而本函数跑在配置事件循环里。
+        self.assertIn("ps -A -o PID,ARGS", reap)
+        self.assertNotIn("/proc/$proc_dir/cmdline", reap)
+        # 前缀匹配而非子串：`awk`/`ps` 自己的 argv 里也会出现该标记。
+        self.assertIn("index(args, tag) == 1", reap)
+        self.assertLess(reap.index("victims=$(/system/bin/ps -A"), reap.index("for victim in $victims"))
+        # 递归停止不得用全局变量存目标 pid：递归会覆盖它，父 shell 从此收不到信号。
+        stopper = section(common, "stop_background_process() {", "stop_collector_by_pid_file() {")
+        self.assertNotIn('target_pid="$1"', stopper)
+        self.assertIn("kill_with_signal \"$1\"", stopper)
+
+    def test_uninstall_uses_same_collector_stop_semantics(self) -> None:
+        """卸载脚本里的停止逻辑是副本，必须与运行时同款，否则卸载会留下 logcat。"""
+        uninstall = read("assets/zygisk_module/uninstall.sh")
+        common = read("assets/zygisk_module/service.d/common.sh")
+        tag = re.search(r'SRX_COLLECTOR_TAG="([^"]+)"', common)
+        self.assertIsNotNone(tag)
+        self.assertIn(f'SRX_COLLECTOR_TAG="{tag.group(1)}"', uninstall)
+        self.assertIn("ps -A -o PID,ARGS", uninstall)
+        self.assertIn("index(args, tag) == 1", uninstall)
+        self.assertNotIn("/proc/$proc_dir/cmdline", uninstall)
+        self.assertIn('stop_background_process "$pid" KILL', uninstall)
+        self.assertNotIn('target_pid="$1"', uninstall)
+
+    def test_uninstall_skips_pid_files_from_previous_boot(self) -> None:
+        """卸载脚本也只能清理本 boot 启动的采集器。
+
+        pid 号会被复用：跨重启后 pid 文件里的数字可能是无关进程，照它 SIGKILL 就是误杀。
+        判据用 `logs/.boot_ok` 与当前 boot_id 比较（A14 实测两分支：跨重启时无关进程
+        存活且打出提示，同一 boot 内正常清理）。读不到当前 boot_id 时保持原行为。
+        """
+        uninstall = read("assets/zygisk_module/uninstall.sh")
+        self.assertIn('recorded_boot_id=$(cat "$MODDIR/.boot_ok" 2>/dev/null)', uninstall)
+        self.assertIn('[ "$current_boot_id" != "$recorded_boot_id" ]', uninstall)
+        guard = uninstall.index('if [ "$pid_files_from_previous_boot" -eq 0 ]; then')
+        self.assertLess(uninstall.index("pid_files_from_previous_boot=0"), guard)
+        self.assertGreater(
+            uninstall.index('stop_collector_by_pid_file "$RUNNING_COLLECTOR_PID_FILE"'),
+            guard,
+        )
+        # 回收 logcat 不受该判断约束：只按 tag 精确定位，pid 号复用不会误伤。
+        self.assertGreater(uninstall.index("reap_collector_processes", guard), guard)
+
+    def test_debug_collector_reader_splits_with_quoted_pipe(self) -> None:
+        """读循环必须用引号化的 `|` 模式拆分，否则采集器永远不落盘。
+
+        Android 的 `/system/bin/sh` 是 mksh（R59 起带 ksh 风格扩展模式），裸写的
+        `${x%%|*}` 会被当成「空模式或任意」剥掉整个字符串、`${x#*|}` 一个字符都不剥，
+        于是 `kind` 恒为空、下面的 `case` 一个分支都进不去：采集器活着、读到数据
+        （wchar>0）却从不写 `running.log` / `app_status.log`。引号化后 mksh 与 POSIX
+        shell 都按字面量 `|` 处理（A14 实机对照：未加引号 0 字节，加引号 100 行全部落盘）。
+        """
+        debug = read("assets/zygisk_module/service.d/debug_collectors.sh")
+        self.assertIn('kind=${tagged_line%%"|"*}', debug)
+        self.assertIn('line=${tagged_line#*"|"}', debug)
+        self.assertNotIn("${tagged_line%%|*}", debug)
+        self.assertNotIn("${tagged_line#*|}", debug)
+        # threadtime 把 tag 补齐到 8 列并单列一个 ":"，短 tag 时不能把冒号拼进消息。
+        self.assertIn('if ($7 == ":") msg_start = 8', debug)
+        self.assertIn("line_text = join_from(msg_start)", debug)
+
+    def test_boot_clears_stale_collector_pid_files(self) -> None:
+        """本 boot 首次运行服务时必须清掉上一次开机留下的采集器 pid 与状态文件。
+
+        pid 号会被复用：拿旧 pid 判活会静默跳过采集器启动，拿旧 pid 停止会杀掉无关进程
+        （A14 实测：`state=on` + 旧 pid 存活 → 整个 boot 没有采集器；关闭开关时 SIGKILL
+        打到复用的 pid）。daemon 的 pid 文件不在此列，它自带 comm 校验。
+        """
+        boot = read("assets/zygisk_module/service.d/boot.sh")
+        body = boot[boot.index("boot_guard_wait() {") :]
+        self.assertIn('[ ! -f "$LOGS_DIR/boot_${boot_id}.marker" ]', body)
+        rm_block = body[body.index("rm -f \"$MONITOR_COLLECTOR_PID_FILE\"") : body.index("timeout=180")]
+        for pid_file in (
+            "MONITOR_COLLECTOR_PID_FILE",
+            "CONFIG_EVENT_COLLECTOR_PID_FILE",
+            "PACKAGE_EVENT_COLLECTOR_PID_FILE",
+            "RUNNING_COLLECTOR_PID_FILE",
+            "MEDIA_STATE_COLLECTOR_PID_FILE",
+            "APP_STATUS_COLLECTOR_PID_FILE",
+            "APP_STATUS_SNAPSHOT_PID_FILE",
+            "STATS_COLLECTOR_PID_FILE",
+            "APP_ERROR_RING_PID_FILE",
+            "APP_ERROR_WINDOW_PID_FILE",
+            "DEBUG_COLLECTORS_STATE_FILE",
+        ):
+            self.assertIn(f'"${pid_file}"', rm_block)
+        self.assertNotIn("srx_daemon.pid", rm_block)
+        # 清理必须发生在启动采集器之前。
+        self.assertLess(body.index("rm -f \"$MONITOR_COLLECTOR_PID_FILE\""), body.index("start_log_collectors"))
+
+    def test_event_driven_snapshots_do_not_block_config_event_loop(self) -> None:
+        """两个一次性快照采集器必须后台执行，不能让 `dumpsys` 按住配置事件循环。
+
+        media 快照里的 `dumpsys meminfo` / `logcat -d` 在 A17 上实测 47-58 秒（A14 上
+        8-10 秒），app 快照的 `cmd package list packages -U` 另有 8 秒。它们同步跑在
+        `start_debug_collectors` 里，等于每次翻转详细日志开关都阻塞事件循环近一分钟，
+        期间所有配置事件排队——现场表现就是「开关按了没反应」。
+        快照只写自己的日志文件、不依赖调用方上下文，后台化不改变语义；pid 落盘是为了
+        让下一轮 `start_debug_collectors` 的「先停旧」能收掉还没返回的上一轮。
+        """
+        cases = (
+            ("assets/zygisk_module/service.d/media_state.sh", "start_media_state_collector() {",
+             "append_media_state_snapshot", "MEDIA_STATE_COLLECTOR_PID_FILE"),
+            ("assets/zygisk_module/service.d/app_status.sh", "start_app_status_snapshot_collector() {",
+             "append_app_status_snapshot", "APP_STATUS_SNAPSHOT_PID_FILE"),
+        )
+        for path, header, snapshot_call, pid_file in cases:
+            source = read(path)
+            marker = f'echo "$!" > "${pid_file}"'
+            body = section(source, header, marker)
+            self.assertIn(") </dev/null >/dev/null 2>&1 &", body, path)
+            self.assertLess(
+                body.index(snapshot_call),
+                body.index(") </dev/null >/dev/null 2>&1 &"),
+                f"{path}: 快照调用必须位于后台子 shell 内",
+            )
+            self.assertIn(marker, source, path)
+
+        # 三段启动之间不得夹任何等待：这条链路由配置事件驱动，等待就是排队。
+        starters = section(
+            read("assets/zygisk_module/service.d/debug_collectors.sh"),
+            "start_debug_collectors() {",
+            "start_app_status_snapshot_collector",
+        )
+        for forbidden in ("sleep", "wait "):
+            self.assertNotIn(forbidden, starters, "start_debug_collectors 不得阻塞")
+
+    def test_collector_stop_terminates_child_processes_without_argv_marking(self) -> None:
+        """停止采集器必须能收掉子进程，且不得靠改 argv[0] 打标记。
+
+        两件事都是实测定下来的：
+        1. `/proc/<pid>/task/<pid>/children` 在 A14 雷电与 A17 AvdLite 上都不存在，
+           旧实现遇到就跳过整段递归，管道里的 inotifyd / awk 会留成孤儿——所以要退化为
+           `ps` 的 PPID 列，并且**先取清单再杀**（先杀父会让子进程被 init 收养）。
+        2. `/system/bin/inotifyd` 是 toybox 的符号链接，toybox 靠 argv[0] 分派 applet；
+           用 `exec -a` 改掉 argv[0] 后它直接起不来，配置事件整条链路静默失效
+           （2026-11-11 在 A17 上踩到，且表面上像「进程起来又停掉」）。
+        """
+        common = read("assets/zygisk_module/service.d/common.sh")
+        events = read("assets/zygisk_module/service.d/config_events.sh")
+        stopper = section(common, "stop_background_process() {", "stop_collector_by_pid_file() {")
+        self.assertIn('child_pids=$(/system/bin/ps -A -o PID,PPID', stopper)
+        self.assertIn("$2 == root", stopper)
+        self.assertLess(stopper.index("child_pids=$(/system/bin/ps -A"), stopper.index('kill_with_signal "$1"'))
+        self.assertIn('for child_pid in $child_pids', stopper)
+        # toybox applet 不得被打标记
+        self.assertNotIn("exec -a", events)
+        self.assertNotIn("SRX_CONFIG_EVENT_TAG", common)
+        self.assertNotIn("SRX_PACKAGE_EVENT_TAG", common)
+        # 按 pid 文件停止时默认 KILL（TERM 会被阻塞中的 read 延后）
+        by_pid = section(common, "stop_collector_by_pid_file() {", "reap_stale_logcat_collectors() {")
+        self.assertIn('stop_background_process "$pid" "${2:-KILL}"', by_pid)
 
     def test_private_writer_owns_monitor_and_stats(self) -> None:
         daemon = read("src/log_daemon.rs")

@@ -36,6 +36,13 @@ start_debug_logcat_collector() {
           level_char = $5
           tag = $6
           sub(/:$/, "", tag)
+          # threadtime 格式会把 tag 左对齐补齐到 8 列并在其后加冒号。tag 短于 8 字符时
+          # （例如 `SRX`），冒号会被空格隔成独立字段 $7，直接 join_from(7) 会把
+          # ": " 一起拼进消息，产出 `[JvInfo] : [JvInfo] xxx` 这类重复前缀；
+          # tag 不短于 8 字符时（如 `AndroidRuntime`）冒号紧贴 tag（已被 sub 去掉），
+          # 消息直接从 $7 开始。两种形态都实测过。
+          msg_start = 7
+          if ($7 == ":") msg_start = 8
 
           if (tag == "SRX") {
             if (date_text !~ /^[0-9][0-9]-[0-9][0-9]$/) next
@@ -43,7 +50,7 @@ start_debug_logcat_collector() {
             if (level_char !~ /^[VDIWEAF]$/) next
             gsub("-", "/", date_text)
             sub(/\..*$/, "", time_text)
-            line_text = join_from(7)
+            line_text = join_from(msg_start)
             if (line_text == "") next
             if (line_text ~ /^\[(Rs|Kt|Jv)(Verbose|Debug|Info|Warn|Error|Fatal)\][[:space:]]/) {
               printf "R|%s %s %s\n", date_text, time_text, line_text
@@ -60,8 +67,14 @@ start_debug_logcat_collector() {
       ' |
       while IFS= read -r tagged_line; do
         [ -n "$tagged_line" ] || continue
-        kind=${tagged_line%%|*}
-        line=${tagged_line#*|}
+        # 模式里的 `|` 必须加引号。Android 的 /system/bin/sh 是 mksh（R59 起含 ksh 风格
+        # 扩展模式），裸写的 `${x%%|*}` 会被当成「空模式或任意」并剥掉整个字符串，
+        # `${x#*|}` 则一个字符都不剥——两处都实测（A14 模拟器 + mksh R59）：
+        # 未加引号时 kind 恒为空，下面的 case 一个分支都进不去，于是采集器虽然活着、
+        # 也读到了数据，却从不写 running.log / app_status.log（wchar=0）。
+        # 引号化后 `${x%%"|"*}` / `${x#*"|"}` 在 mksh 与 POSIX shell 上都是字面量 `|`。
+        kind=${tagged_line%%"|"*}
+        line=${tagged_line#*"|"}
         case "$kind" in
           R)
             [ -n "$line" ] || continue
@@ -81,7 +94,9 @@ start_debug_logcat_collector() {
       done
       # 管道退出到这里意味着 logcat/awk/读循环异常终止（正常情况下永不退出）。
       # 留痕后由外层 while 重启——若反复出现，说明该设备环境持续杀死管道。
-      log_collector_status "debug pipeline exited; restarting pid=$debug_logcat_pid"
+      # 不打印 pid：这里在子 shell 内，外层记录的 `debug_logcat_pid` 尚未赋值（恒为空），
+      # 打出来只会误导排障。
+      log_collector_status "debug pipeline exited; restarting"
       sleep 1
     done
   ) &
@@ -102,12 +117,20 @@ stop_debug_logcat_collector() {
     case "$stopped_pids" in
       *" $pid "*) ;;
       *)
-        stop_background_process "$pid"
+        # 必须 SIGKILL。子 shell 是 mksh，`SigCgt` 带 SIGTERM，而它平时阻塞在管道的
+        # `read` 上：A14 模拟器实测发完 SIGTERM 后子 shell、logcat、awk 三者全部存活，
+        # 而这里紧接着就会把状态写成 off、把 pid 文件删掉，之后没有任何路径会再尝试
+        # 停止它们（`debug_collectors_sync_to off` 的 state 早退），泄漏锁定到下次开机。
+        stop_background_process "$pid" KILL
         stopped_pids="$stopped_pids$pid "
         ;;
     esac
     rm -f "$pid_file"
   done
+  # 子 shell 已经死掉，没人会再重建管道，这时才能按 tag 收掉管道里的 logcat。
+  # 顺序不能反：先 reap 只会杀掉 logcat，子 shell 会在 1 秒内拉起新的（实测 8032 → 8468）。
+  # awk 不单独处理：logcat 死后它读到 EOF 自行退出（实测 1 秒内）。
+  reap_stale_logcat_collectors KILL
   log_collector_status "debug_collector stopped"
 }
 
@@ -119,6 +142,10 @@ start_debug_collectors() {
   stop_collector_by_pid_file "$APP_STATUS_SNAPSHOT_PID_FILE"
   # 启动步骤逐段落痕：这条链路由配置事件驱动，一旦中途返回就再也没有第二次机会
   # （周期看门狗已按规范移除），所以每段开始都要留一行，现场据此定位中断点。
+  #
+  # 三段都必须是「起进程就返回」：logcat 采集器本来就是后台子 shell，两个快照
+  # 采集器也已在各自函数内后台化。整段返回时间因此与设备上的 dumpsys 速度无关
+  # ——这点很关键，A17 上一轮 sync 曾耗时 58 秒，期间所有配置事件都在排队。
   log_collector_status "debug start: logcat"
   start_debug_logcat_collector
   log_collector_status "debug start: media snapshot"

@@ -98,7 +98,7 @@ append_media_state_snapshot() {
   } | append_media_state_output "$now_text"
 
   echo "$now_text -- ps -A -o PID,USER,ARGS media" >> "$MEDIA_STATE_LOG_FILE"
-  ps -A -o PID,USER,ARGS 2>/dev/null |
+  /system/bin/ps -A -o PID,USER,ARGS 2>/dev/null |
     awk 'NR == 1 || $0 ~ /providers\.media|android\.process\.media/' |
     append_media_state_output "$now_text"
 
@@ -149,8 +149,26 @@ start_media_state_collector() {
   # 而常驻采样每次唤醒都要读 /proc、跑 dumpsys meminfo 与 logcat，属于规范禁止的
   # 周期轮询。需要现场时由两条事件按需采集：诊断日志包导出（导出脚本实时采集
   # 挂载与进程状态）与停摆取证（daemon 侧 stall-forensics 事件触发）。
-  rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-  append_media_state_snapshot
-  rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
-  log_collector_status "media_state snapshot captured"
+  #
+  # **必须后台执行。** 快照里的 `dumpsys meminfo` / `logcat -d` 在 A17 上实测耗时
+  # 47-58 秒（A14 上 8-10 秒），而调用方是配置事件循环：同步跑等于把「改配置」这件事
+  # 按住近一分钟，期间的开开关关全部排队，看起来就像「开关没反应」。后台化不改变语义
+  # ——快照只写自己的日志文件、不需要调用方上下文、也不是常驻进程。
+  # pid 落盘是为了让下一轮 `start_debug_collectors` 的「先停旧」能收掉还没返回的上一轮。
+  #
+  # `</dev/null` 不是可选项：后台子 shell 默认继承调用方的 stdin，而调用方是配置事件
+  # 循环——它的 stdin 正是 inotifyd 的管道。快照链路里任何一处裸 `read`（`append_media_
+  # state_output` 的 `while read` 虽在管道内、但后续维护很容易写出裸 read）都会从那条
+  # 管道抢走配置事件，表现为「开关偶尔失灵」。显式断开 stdin 把这类耦合一次性掐死。
+  (
+    snapshot_started=$(date +%s 2>/dev/null)
+    rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
+    append_media_state_snapshot
+    rotate_log_file_if_needed "$MEDIA_STATE_LOG_FILE" "$MAX_MEDIA_STATE_LOG_BYTES" "$LOG_ROTATE_BACKUPS"
+    # 带上耗时：后台化之后「何时跑完」不再有日志时间戳可推断，而这条耗时正是判断
+    # `dumpsys meminfo` 有没有恶化的唯一现场数据（A17 首次 47-58 秒，稳态 3 秒）。
+    log_collector_status "media_state snapshot captured in $(( $(date +%s 2>/dev/null) - ${snapshot_started:-0} ))s"
+  ) </dev/null >/dev/null 2>&1 &
+  echo "$!" > "$MEDIA_STATE_COLLECTOR_PID_FILE"
+  chmod 644 "$MEDIA_STATE_COLLECTOR_PID_FILE" 2>/dev/null || true
 }

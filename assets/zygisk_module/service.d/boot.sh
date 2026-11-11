@@ -4,6 +4,24 @@ boot_guard_wait() {
     boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
   fi
 
+  # 重启后，上一次开机留下的采集器 pid 文件与采集器状态文件一律不可信：pid 号会被
+  # 复用，旧 pid 可能已经属于一个无关进程。两头的后果都实测过（A14 模拟器）：
+  #   - 用它判活 → 本 boot 静默跳过采集器启动（state=on + 旧 pid 存活时，连
+  #     `sync: starting debug collectors` 都不会出现，详细日志静默缺失）；
+  #   - 用它停止 → 关闭开关时把无关进程 SIGKILL 掉。
+  # pid 文件只能证明「本 boot 内启动过」，所以在本 boot 首次运行服务、且尚未启动任何
+  # 采集器时清空它们（本函数是 service.sh 里最早接触采集器的位置）。服务被 srxctl
+  # 重跑时本 boot 的 marker 已存在，不会清掉正在运行的采集器记录。
+  # daemon 的 pid 文件不在此列：start_srx_daemon 按 comm 校验自愈，且它先于本函数执行。
+  if [ -n "$boot_id" ] && [ ! -f "$LOGS_DIR/boot_${boot_id}.marker" ]; then
+    rm -f "$MONITOR_COLLECTOR_PID_FILE" "$CONFIG_EVENT_COLLECTOR_PID_FILE" \
+      "$PACKAGE_EVENT_COLLECTOR_PID_FILE" "$RUNNING_COLLECTOR_PID_FILE" \
+      "$MEDIA_STATE_COLLECTOR_PID_FILE" "$APP_STATUS_COLLECTOR_PID_FILE" \
+      "$APP_STATUS_SNAPSHOT_PID_FILE" "$STATS_COLLECTOR_PID_FILE" \
+      "$APP_ERROR_RING_PID_FILE" "$APP_ERROR_WINDOW_PID_FILE" \
+      "$DEBUG_COLLECTORS_STATE_FILE"
+  fi
+
   timeout=180
   i=0
   while [ $i -lt $timeout ]; do
