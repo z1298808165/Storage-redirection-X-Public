@@ -372,7 +372,7 @@ impl MountPlanner {
             return false;
         }
 
-        // 非共享存储目标（例如当前应用的 `/data/user` 目录）同样不创建：请求路径是
+        // 非共享存储请求路径（例如当前应用的 `/data/user` 目录）同样不创建：请求路径是
         // 映射视图里的挂载点，缺它就说明这条映射本轮无法成立，补一个空目录只是把
         // 「规则没生效」伪装成「规则已生效」。
         if !paths::is_same_or_child(request_path, storage_path) {
@@ -383,14 +383,8 @@ impl MountPlanner {
             return false;
         }
 
-        // 共享存储上的请求路径**永远不创建**，创建它等于在用户可见的公共目录里凭空
-        // 留一个空目录（用户配置映射/沙盒就是为了不让它出现）。bind 挂载点必须存在于
-        // 目标命名空间，所以这条路径缺失时 namespace bind 在语义上无法表达该规则：
-        // 这里按「本次映射未应用」返回，规则由共享宿主 FUSE 视图（虚拟呈现该路径）
-        // 或进程内重定向 hook 承接，两条都不改动真实存储。
-        //
-        // 重定向后端目录仍在此补建：那是本模块的私有落点，与请求路径是否会出现在
-        // 公共目录无关；不建它后续 bind 的源侧会缺失。
+        // 不在真实公共存储创建请求目录。整根已重定向时，只需在私有后端补建目录，
+        // 请求路径就能作为 bind 挂载点；补建后仍不可见则本轮跳过该映射。
         if let Some(current_relative) = paths::relative_child_path(request_path, storage_path) {
             let current_fallback =
                 self.normalize_path(&paths::join(&self.redirect_target, current_relative));
@@ -400,6 +394,8 @@ impl MountPlanner {
                     request_path,
                     current_fallback
                 );
+            } else if mapping_mount_point_exists(request_path) {
+                return true;
             }
         }
         log::warn!(

@@ -1420,7 +1420,7 @@ function Clear-Targets {
         throw "monitor_fixture_prepare_failed: 后端监视器映射/只读排除目录不存在"
     }
     Invoke-Su "rm -rf '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; mkdir -p '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia'; chmod -R 777 '$BackendRoot/Pictures/SrtReadOnlyMedia' '$BackendPrivateRoot/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" | Out-Null
-    Invoke-Su "rm -rf '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
+    Invoke-Su "rm -rf '$BackendPrivateRoot/Download/SrtAnyPublicToPrivate' '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$AnyRelativeRequest/srt_any_relative.txt' '$AnyAbsoluteUserRequest/srt_any_absolute.txt' '$AnyUserIdRequest/srt_any_user_id.txt' '$AnyLegacyDataRequest/srt_any_legacy.txt' '$AnyUserPrivateTarget/srt_any_public_private.txt' '$AnyLegacyPrivateTarget/srt_any_legacy.txt'; mkdir -p '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget'; chmod -R 777 '$AnyRelativePublicTarget' '$AnyAbsolutePublicTarget' '$AnyPublicToPrivateRequest' '$AnyMediaRequest' '$AnyMediaTarget' '$NestedMappingRequestRoot' '$NestedMappingStageRoot' '$NestedMappingTargetRoot' '$BackendRoot/Android/data/$AppId/cache' '$BackendRoot/Android/data/$AppId/srt_any_relative' '$BackendRoot/Android/media/$AppId/cache' '$AnyAbsoluteUserRequest' '$AnyUserIdRequest' '$AnyLegacyDataRequest' '$AnyUserPrivateTarget' 2>/dev/null || true" | Out-Null
     # 嵌套映射准备会清理 Tencent 父目录；自有私有目录必须最后准备。
     # 系统 FUSE 可能拒绝 shell 清理可见自有目录，但不一定就是 FUSE 所致：可见路径删除失败时
     # 如实记录，交由真实后端的严格清理覆盖（不声称一定是 FUSE）。
@@ -2406,7 +2406,7 @@ function Invoke-AnyPathMappingScenario {
         @{ Label = "absolute-data-user-to-public"; Request = "$AnyAbsoluteUserRequest/srt_any_absolute.txt"; Expected = "$AnyAbsolutePublicTarget/srt_any_absolute.txt"; Source = "$AnyAbsoluteUserRequest/srt_any_absolute.txt" },
         @{ Label = "user-id-data-user-to-private"; Request = "$AnyUserIdRequest/srt_any_user_id.txt"; Expected = "$BackendRoot/Android/data/$AppId/cache/srt_any_user_id.txt"; Source = "$AnyUserIdRequest/srt_any_user_id.txt" },
         @{ Label = "legacy-data-data-to-private"; Request = "$AnyLegacyDataRequest/srt_any_legacy.txt"; Expected = "$BackendRoot/Android/media/$AppId/cache/srt_any_legacy.txt"; Source = "$AnyLegacyDataRequest/srt_any_legacy.txt" },
-        @{ Label = "public-to-absolute-private"; Request = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Expected = "$AnyUserPrivateTarget/srt_any_public_private.txt"; Source = "$AnyPublicToPrivateRequest/srt_any_public_private.txt" },
+        @{ Label = "public-to-absolute-private"; Request = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Expected = "$AnyUserPrivateTarget/srt_any_public_private.txt"; Source = "$AnyPublicToPrivateRequest/srt_any_public_private.txt"; Shadow = "$BackendPrivateRoot/Download/SrtAnyPublicToPrivate/srt_any_public_private.txt" },
         @{ Label = "mapped-mediastore-target"; Request = "$AnyMediaRequest/$AnyMediaFile"; Expected = "$AnyMediaTarget/$AnyMediaFile"; Source = "$AnyMediaRequest/$AnyMediaFile"; MediaStore = $true }
     )
     $ok = $true
@@ -2419,6 +2419,9 @@ function Invoke-AnyPathMappingScenario {
         }
         $ok = (Require-File "scenario-$Scenario" "$($case.Label)-target" $case.Expected) -and $ok
         $ok = (Require-Missing "scenario-$Scenario" "$($case.Label)-source" $case.Source) -and $ok
+        if ($case.Shadow) {
+            $ok = (Require-Missing "scenario-$Scenario" "$($case.Label)-shadow" $case.Shadow) -and $ok
+        }
     }
     $ok
 }

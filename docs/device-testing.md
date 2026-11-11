@@ -259,7 +259,7 @@ Android 17（API 37.0）有三处执行环境差异：
 | 32 | 真实后端端点短暂恢复后，应用重启仍能完成挂载，不要求重启 MediaProvider。 |
 | 33 | MediaProvider 热重启后保留应用挂载，并继续完成图片保存。 |
 | 34 | 启用重定向时，当前应用自己的 `Android/data|media|obb/<包名>` 子树保持真实路径，不再次套入应用沙盒。 |
-| 35 | 任意路径映射矩阵：验证公共存储、`Android/data|media|obb/<包名>`、`/data/user`、`/data/data` 及公共路径之间的相对/绝对映射。 |
+| 35 | 任意路径映射矩阵：验证公共存储、`Android/data|media|obb/<包名>`、`/data/user`、`/data/data` 及公共路径之间的相对/绝对映射；公共到应用私有目录从空沙盒开始，目标文件必须存在，公共源和沙盒不得残留文件。 |
 | 36 | 映射应用私有别名后，仍可写入 MediaProvider 已创建的现有文件。 |
 | 37 | 父路径先映射到中间目录后，中间目录下的子路径继续命中下一条映射并落到最终目录；应用通过请求路径枚举目录时必须看到最终目标中的文件。 |
 | 38 | 下载提供器自身 `sandboxed_paths` 接管标记：companion mount 成功（`perf companion mount pkg=... ok=true`）或进程内 system-writer hook（`hook refresh start profile=system-writer pkg=...`）其一即可；`sandbox=0` 请求、`attach skipped ... policy_registration_failed` 或提供器自建模块 FUSE 会话判为回归。该场景脚本只检查接管拓扑，不提交提供器原生写入；实际沙盒落点需由单独设备用例验证，CI 模拟器不含所需 XL 引擎。 |

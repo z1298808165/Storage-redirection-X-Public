@@ -695,7 +695,7 @@ prepare_backend_core_targets() {
 }
 
 prepare_any_path_targets() {
-  adb_su "rm -rf '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
+  adb_su "rm -rf '${BACKEND_PRIVATE_ROOT}/Download/SrtAnyPublicToPrivate' '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
 }
 
 # 直删后端之后的显式视图失效。
@@ -4560,15 +4560,8 @@ run_any_path_mapping_scenario() {
   #
   # 已尝试并否证的解法同场景 34：摘子路径上的系统 FUSE 视图会破坏 MediaProvider 的代写
   # 通道（详见 src/system_fuse_view.rs::clear_system_fuse_view_for_package）。
-  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && {
-    [ "${ANDROID_API_LEVEL:-}" = "33" ] ||
-    [ "${ANDROID_API_LEVEL:-}" = "35" ] ||
-    [ "${ANDROID_API_LEVEL:-}" = "36" ]
-  }; then
-    # API 33 已有 FuseFix ABI 豁免；API 35/36 的基线与历史全量记录显示
-    # MediaStore 映射请求在 x86_64 模拟器上偶发/稳定落双份，目标与请求源同时存在，
-    # 不属于模块 FUSE 映射缺失。arm64 与其他 API 继续执行完整矩阵。
-    echo "any_path_mapping_skipped scenario=${scenario} reason=x86_64-api${ANDROID_API_LEVEL}-mediastore-mapping-limit"
+  if [ "${ANDROID_ARCH:-}" = "x86_64" ] && [ "${ANDROID_API_LEVEL:-}" = "33" ]; then
+    echo "any_path_mapping_skipped scenario=${scenario} reason=x86_64-api33-fuse-fix-abi-limit"
     return 0
   fi
 
@@ -4593,6 +4586,7 @@ run_any_path_mapping_scenario() {
     run_write_case "$scenario" "public-to-absolute-private" "$public_private_file" "$PAYLOAD" &&
     check_file_exists "scenario-${scenario}-public-private-target" "${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt" &&
     check_file_missing "scenario-${scenario}-public-private-source" "$public_private_file" &&
+    check_file_missing "scenario-${scenario}-public-private-shadow" "${BACKEND_PRIVATE_ROOT}/Download/SrtAnyPublicToPrivate/srt_any_public_private.txt" &&
     run_mediastore_download_create_case "$scenario" "mapped-mediastore-target" "$ANY_MEDIA_FILE" "Download/SrtAnyMediaRequest" &&
     check_file_exists "scenario-${scenario}-mapped-mediastore-target" "${ANY_MEDIA_TARGET}/${ANY_MEDIA_FILE}" &&
     check_file_missing "scenario-${scenario}-mapped-mediastore-source" "${ANY_MEDIA_REQUEST}/${ANY_MEDIA_FILE}"
