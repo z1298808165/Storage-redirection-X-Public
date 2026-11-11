@@ -475,7 +475,7 @@ function Remove-ExcludedScenarios {
     $excluded = New-Object System.Collections.Generic.List[int]
     foreach ($part in @($excludeRaw -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $value = 0
-        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 41) {
+        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 42) {
             throw "无效排除场景：$part"
         }
         $excluded.Add($value) | Out-Null
@@ -488,20 +488,20 @@ function Remove-ExcludedScenarios {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 41) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 42) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(Remove-ExcludedScenarios -ScenarioList @(1..41))
+            return @(Remove-ExcludedScenarios -ScenarioList @(1..42))
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 41) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 42) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -509,9 +509,8 @@ function Get-ScenarioList {
         return @(Remove-ExcludedScenarios -ScenarioList @($requested | Select-Object -Unique))
     }
 
-    # 默认范围即全场景 1-40：旧实现维护了一份手写清单且停在 37，本地全量验证实际
-    # 漏跑 38-40，与 CI 的 seq 1 40 不一致。
-    @(Remove-ExcludedScenarios -ScenarioList @(1..41))
+    # 默认范围与显式 all 使用同一完整范围，避免手写清单漏掉新增场景。
+    @(Remove-ExcludedScenarios -ScenarioList @(1..42))
 }
 
 function Apply-ScenarioConfig {
@@ -619,6 +618,9 @@ function Apply-ScenarioConfig {
             # 与场景 2 同一条默认重定向（沙盒根就是重定向根），差别在于本场景在重启应用
             # 之前把沙盒根删掉，让模块按原生语义重建它，再验证系统代写链路。
             Write-DeviceConfig '{"users":{"0":{"enabled":true}}}'
+        }
+        42 {
+            Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMutationAllowed"],"path_mappings":{"Download/SrtMutationRequest":"Download/SrtMutationMapped"}}}}'
         }
         default { throw "未知场景 $Scenario" }
     }
@@ -1379,6 +1381,7 @@ function Assert-FixtureRootsEmpty {
 }
 
 function Clear-Targets {
+    Invoke-Su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '$BackendRoot/Download/SrtMutation'`$name '$BackendPrivateRoot/Download/SrtMutation'`$name; done" | Out-Null
     # 先经系统 FUSE 删除共享探针，通知其失效前序场景的 inode 缓存；
     # 仅删除 /data/media 后端会让 lookup 仍命中旧文件，而随后 open 返回 ENOENT。
     Invoke-Su "rm -f '$RealRoot/Download/SrtProbe/$TestFile' '$RealRoot/Download/Test/$TestFile' || echo 'cleanup_tolerated reason=probe_fuse_edom note=单文件删除被模块 FUSE 以 EDOM 拒绝，改由下面的目录级删除覆盖' >&2" | Out-Null
@@ -1445,6 +1448,7 @@ function Clear-Targets {
 }
 
 function Remove-TestTargetArtifacts {
+    Invoke-Su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '$BackendRoot/Download/SrtMutation'`$name '$BackendPrivateRoot/Download/SrtMutation'`$name; done" | Out-Null
     Invoke-Su "rm -rf '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     # 后端侧也要按通配扫一遍：下面的目录清单同样是手工维护的，漏项会让残留避开清理
@@ -2335,6 +2339,7 @@ function Get-ScenarioTitle {
         39 { "download provider delegated write lands on requester mapping target" }
         40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
         41 { "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak" }
+        42 { "file mutation, metadata and symlink semantics across sandbox, allow, mapping and prefix sibling" }
     }
 }
 
@@ -2446,6 +2451,7 @@ function Invoke-NestedMappingChainScenario {
     $target = "$NestedMappingTargetRoot/nested.bin"
     $result = Invoke-WriteCase $Scenario "nested-mapping-chain" $file $Payload
     $ok = $result.Ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "nested-mapping-list" "file_list_dir" @{ file_dir = "$NestedMappingRequestRoot/QQfile_recv" } '^PASS \[file_list_dir\].*entries=nested\.bin$').Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "nested-mapping-target" $target) -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "nested-mapping-request" $file) -and $ok
     $ok
@@ -2578,6 +2584,156 @@ grep -aE 'java hook|writer final|writer init|writer boot|boot_lite|specialize' \
     }
 }
 
+function Invoke-FileMutationLifecycleScenario {
+    param([int]$Scenario)
+    $ok = $true
+    foreach ($kind in @("Sandbox", "Allowed", "Request", "RequestSibling")) {
+        $request = "$RealRoot/Download/SrtMutation$kind"
+        $expected = "$BackendPrivateRoot/Download/SrtMutation$kind"
+        $shadow = "$BackendRoot/Download/SrtMutation$kind"
+        if ($kind -eq "Allowed") {
+            $expected = "$BackendRoot/Download/SrtMutationAllowed"
+            $shadow = "$BackendPrivateRoot/Download/SrtMutationAllowed"
+        } elseif ($kind -eq "Request") {
+            $expected = "$BackendRoot/Download/SrtMutationMapped"
+            $shadow = "$BackendPrivateRoot/Download/SrtMutationRequest"
+        }
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind" "file_mutation_lifecycle" @{ file_dir = $request } '^PASS \[file_mutation_lifecycle\]'
+        $ok = $result.Ok -and $ok
+        if (-not (Test-Su "test `"`$(ls -A '$expected')`" = complete.txt && test `"`$(cat '$expected/complete.txt')`" = srx-mutation-lifecycle-v1 && test `"`$(wc -c < '$expected/complete.txt')`" -eq 25")) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind physical content mismatch: $expected") | Out-Null
+            $ok = $false
+        }
+        if (-not (Test-Su "test ! -e '$shadow' || { test -d '$shadow' && entries=`$(ls -A '$shadow') && test -z `"`$entries`"; }")) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind shadow contains leaked entries: $shadow") | Out-Null
+            $ok = $false
+        }
+    }
+    foreach ($unused in @("$BackendRoot/Download/SrtMutationRequest", "$BackendPrivateRoot/Download/SrtMutationMapped")) {
+        if (-not (Test-Su "entries=`$(ls -A '$unused') && test -z `"`$entries`"")) {
+            $script:Failures.Add("scenario-$Scenario/mutation unused path missing or not empty: $unused") | Out-Null
+            $ok = $false
+        }
+    }
+    return $ok
+}
+
+function Invoke-FileMutationMetadataScenario {
+    param([int]$Scenario)
+    $ok = $true
+    $symlinkDeniedRoutes = New-Object System.Collections.Generic.List[string]
+    $hardlinkDeniedRoutes = New-Object System.Collections.Generic.List[string]
+    foreach ($kind in @("Sandbox", "Allowed", "Request", "RequestSibling")) {
+        $request = "$RealRoot/Download/SrtMutation$kind"
+        $expected = "$BackendPrivateRoot/Download/SrtMutation$kind"
+        $shadow = "$BackendRoot/Download/SrtMutation$kind"
+        $chmodMode = "440"
+        $fchmodMode = "220"
+        if ($kind -eq "Allowed") {
+            $expected = "$BackendRoot/Download/SrtMutationAllowed"
+            $shadow = "$BackendPrivateRoot/Download/SrtMutationAllowed"
+        } elseif ($kind -eq "Request") {
+            $expected = "$BackendRoot/Download/SrtMutationMapped"
+            $shadow = "$BackendPrivateRoot/Download/SrtMutationRequest"
+        }
+
+        $file = "$request/metadata.txt"
+        $linkTarget = "$request/link-target.txt"
+        $link = "$request/symbolic-link"
+        $hardlink = "$request/hard-link"
+        $hardlinkCreated = $false
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-metadata-create" "file_create" @{ file_path = $file; payload = $Payload } '^PASS \[file_create\]'
+        $ok = $result.Ok -and $ok
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-chmod" "file_chmod" @{ file_path = $file; mode = "0400" } '^PASS \[file_chmod\]'
+        $ok = $result.Ok -and $ok
+        $actualMode = ((Invoke-Su "stat -c %a '$expected/metadata.txt'") -join "").Trim()
+        if ($actualMode -ne $chmodMode) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind chmod mode mismatch expected=$chmodMode actual=$actualMode") | Out-Null
+            $ok = $false
+        }
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-fchmod" "file_fchmod" @{ file_path = $file; mode = "0200" } '^PASS \[file_fchmod\]'
+        $ok = $result.Ok -and $ok
+        $actualMode = ((Invoke-Su "stat -c %a '$expected/metadata.txt'") -join "").Trim()
+        if ($actualMode -ne $fchmodMode) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind fchmod mode mismatch expected=$fchmodMode actual=$actualMode") | Out-Null
+            $ok = $false
+        }
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-chmod-restore" "file_chmod" @{ file_path = $file; mode = "0664" } '^PASS \[file_chmod\]'
+        $ok = $result.Ok -and $ok
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-link-target-create" "file_create" @{ file_path = $linkTarget; payload = $Payload } '^PASS \[file_create\]'
+        $ok = $result.Ok -and $ok
+        $symlinkCreated = $false
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-symlink" "file_symlink" @{ file_path = "link-target.txt"; target_file_path = $link } ""
+        if ($result.Text -match 'PASS \[file_symlink\] link succeeded') {
+            $symlinkCreated = $true
+            $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-readlink" "file_readlink" @{ file_path = $link; expected_path = "link-target.txt" } '^PASS \[file_readlink\]'
+            $ok = $result.Ok -and $ok
+            $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-symlink-read" "file_read" @{ file_path = $link; expected_payload = $Payload } '^PASS \[file_read\]'
+            $ok = $result.Ok -and $ok
+        } elseif ($result.Text -match 'FAIL \[file_symlink\] link failed' -and $result.Text -match 'EACCES|Permission denied') {
+            $symlinkDeniedRoutes.Add($kind) | Out-Null
+            Write-Host "  - symlink_boundary scenario=$Scenario route=$kind result=EACCES"
+        } else {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind symlink boundary changed: $($result.Text -replace "`n", " | ")") | Out-Null
+            $ok = $false
+        }
+
+        $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-hardlink-boundary" "file_link" @{ file_path = $linkTarget; target_file_path = $hardlink } ""
+        if ($result.Text -match 'PASS \[file_link\] link succeeded') {
+            $hardlinkCreated = $true
+            if (-not (Test-Su "test '$expected/hard-link' -ef '$expected/link-target.txt' && test `"`$(cat '$expected/hard-link')`" = '$Payload'")) {
+                $script:Failures.Add("scenario-$Scenario/mutation-$kind hardlink content mismatch: $expected/hard-link") | Out-Null
+                $ok = $false
+            }
+            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=created"
+        } elseif ($result.Text -match 'FAIL \[file_link\] link failed' -and $result.Text -match 'EPERM|Operation not permitted') {
+            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=EPERM"
+        } elseif ($result.Text -match 'FAIL \[file_link\] link failed' -and $result.Text -match 'EACCES|Permission denied') {
+            $hardlinkDeniedRoutes.Add($kind) | Out-Null
+            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=EACCES"
+        } else {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind hardlink boundary changed: $($result.Text -replace "`n", " | ")") | Out-Null
+            $ok = $false
+        }
+
+        $entries = ((Invoke-Su "ls -A '$expected' | sort | tr '\n' '|' ") -join "").TrimEnd("`r", "`n")
+        $expectedEntries = "complete.txt|"
+        if ($hardlinkCreated) { $expectedEntries += "hard-link|" }
+        $expectedEntries += "link-target.txt|metadata.txt|"
+        if ($symlinkCreated) { $expectedEntries += "symbolic-link|" }
+        if ($entries -ne $expectedEntries) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind physical entries mismatch path=$expected entries=$entries") | Out-Null
+            $ok = $false
+        }
+        if (-not (Test-Su "test `"`$(cat '$expected/metadata.txt')`" = '$Payload' && test `"`$(cat '$expected/link-target.txt')`" = '$Payload' && test ! -e '$shadow/hard-link' && test ! -L '$shadow/hard-link' && test ! -e '$shadow/metadata.txt' && test ! -e '$shadow/link-target.txt' && test ! -e '$shadow/symbolic-link' && test ! -L '$shadow/symbolic-link'")) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind content or shadow path mismatch: $expected") | Out-Null
+            $ok = $false
+        }
+        $symlinkPathValid = if ($symlinkCreated) {
+            (Test-Su "test -L '$expected/symbolic-link'") -and ((Invoke-Su "readlink '$expected/symbolic-link'") -join "").Trim() -eq "link-target.txt"
+        } else {
+            Test-Su "test ! -e '$expected/symbolic-link' && test ! -L '$expected/symbolic-link'"
+        }
+        if (-not $symlinkPathValid) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind symlink physical path mismatch: $expected/symbolic-link") | Out-Null
+            $ok = $false
+        }
+        if ($kind -eq "Request" -and -not (Test-Su "test ! -e '$BackendRoot/Download/SrtMutationRequest/hard-link' && test -z `"`$(ls -A '$BackendRoot/Download/SrtMutationRequest' 2>/dev/null)`" && test -z `"`$(ls -A '$BackendPrivateRoot/Download/SrtMutationMapped' 2>/dev/null)`"")) {
+            $script:Failures.Add("scenario-$Scenario/mutation-$kind unexpected hardlink or unused mapped path entry") | Out-Null
+            $ok = $false
+        }
+    }
+    if ($symlinkDeniedRoutes.Count -gt 0 -and -not $symlinkDeniedRoutes.Contains("Allowed")) {
+        $script:Failures.Add("scenario-$Scenario/symlink EACCES was not reproduced by the allowed-path control") | Out-Null
+        $ok = $false
+    }
+    if ($hardlinkDeniedRoutes.Count -gt 0 -and -not $hardlinkDeniedRoutes.Contains("Allowed")) {
+        $script:Failures.Add("scenario-$Scenario/hardlink EACCES was not reproduced by the allowed-path control") | Out-Null
+        $ok = $false
+    }
+    return $ok
+}
+
 function Invoke-StandardScenario {
     param([int]$Scenario)
     $ok = (Invoke-WriteCase $Scenario "write" (Get-TargetPath $Scenario) $Payload).Ok
@@ -2687,6 +2843,7 @@ function Invoke-ReadOnlyScenario {
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "mkdir-denied" "file_mkdir_denied" @{ file_dir = "$ReadOnlyRoot/newdir" } "^PASS \[file_mkdir_denied\]").Ok -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "rename-denied" "file_rename_denied" @{ file_path = "$ReadOnlyRoot/$ReadOnlyFile"; target_file_path = "$ReadOnlyRoot/renamed.txt" } "^PASS \[file_rename_denied\]").Ok -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "delete-denied" "file_delete_denied" @{ file_path = "$ReadOnlyRoot/$ReadOnlyFile" } "^PASS \[file_delete_denied\]").Ok -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "read-after-denials" "file_read" @{ file_path = "$ReadOnlyRoot/$ReadOnlyFile"; expected_payload = $ReadOnlyPayload } "^PASS \[file_read\]").Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "seed-still-exists" "$ReadOnlyRoot/$ReadOnlyFile") -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "write-target" "$ReadOnlyRoot/write_denied.txt") -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "hardlink-target" "$ReadOnlyRoot/$ReadOnlyHardlink") -and $ok
@@ -3709,6 +3866,11 @@ function Invoke-Scenario {
     Clear-Targets
     # 后端清理和夹具创建结束后重新校正属主，确保应用首次访问前完成。
     Fix-SharedFixturePermissions
+    if ($Scenario -eq 42) {
+        if (-not (Test-Su "for name in Sandbox Allowed Request RequestSibling Mapped; do mkdir -p '$BackendRoot/Download/SrtMutation'`$name '$BackendPrivateRoot/Download/SrtMutation'`$name; chmod 777 '$BackendRoot/Download/SrtMutation'`$name '$BackendPrivateRoot/Download/SrtMutation'`$name; done")) {
+            throw "场景 42 的文件变更夹具准备失败"
+        }
+    }
     if ($Scenario -eq 9) { Set-ReadOnlySeed }
     if ($Scenario -eq 6) { Set-OwnerDriftFixture "scenario-$Scenario" }
     if ($Scenario -eq 10) { Set-MappedReadOnlyTargets }
@@ -3772,6 +3934,7 @@ function Invoke-Scenario {
         39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
         40 { (Invoke-SystemUidAttributionScenario $Scenario) -and (Invoke-AppCallerMediaProviderAttributionScenario $Scenario) -and (Invoke-SystemUidSandboxMissingTargetScenario $Scenario) }
         41 { Invoke-SandboxRootMetadataScenario $Scenario }
+        42 { (Invoke-FileMutationLifecycleScenario $Scenario) -and (Invoke-FileMutationMetadataScenario $Scenario) }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = [bool]$scenarioOk -and $ok

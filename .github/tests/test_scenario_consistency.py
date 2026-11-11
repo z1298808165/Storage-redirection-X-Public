@@ -1957,6 +1957,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 本地全量验证会漏跑 38-40）。
         self.assertIn(f"@(1..{expected_max})", self.powershell)
 
+    @unittest.skipUnless(shutil.which("bash"), "需要 Bash 校验场景选择")
+    def test_default_and_explicit_all_execute_same_complete_scope(self) -> None:
+        functions = section(
+            self.bash, "prune_version_scenario_excludes() {", "remove_test_target_artifacts() {"
+        )
+        for selector in ("", "all"):
+            with self.subTest(selector=selector):
+                result = subprocess.run(
+                    ["bash", "-eu", "-c", functions + '\nSRT_SCENARIOS=$1\n'
+                     'SRT_VERSION_SCENARIO_EXCLUDE=\nbuild_scenario_list\nprintf "%s\\n" "${scenarios[@]}"',
+                     "test-scope", selector], text=True, capture_output=True, check=True, timeout=10,
+                )
+                self.assertEqual(self.ids, [int(value) for value in result.stdout.splitlines()])
+
     def test_version_scenario_exclude_prunes_instead_of_replacing_scope(self) -> None:
         # 版本级限制只能从已确定的范围里剔除，不能替换范围本身：旧实现直接用它
         # 覆盖 SRT_SCENARIOS，既让默认范围退化成窄场景，也吞掉了 dispatch 输入与

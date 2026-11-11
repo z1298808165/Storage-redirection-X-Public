@@ -406,6 +406,18 @@ class FileTestCases(
         )
       }
 
+  fun mutationLifecycle(args: TestCaseArgs): TestResult =
+      TestCase.FILE_MUTATION_LIFECYCLE.measure {
+        val root =
+            args.requireFileDirOrPath(TestCase.FILE_MUTATION_LIFECYCLE)
+                ?: return@measure args.missingDirOrPathResult(TestCase.FILE_MUTATION_LIFECYCLE)
+        runFileMutationLifecycle(File(root))
+        TestCase.FILE_MUTATION_LIFECYCLE.pass(
+            message = "mutation lifecycle completed",
+            metadata = pathMetadata(root),
+        )
+      }
+
   fun atomicSave(args: TestCaseArgs): TestResult =
       TestCase.FILE_ATOMIC_SAVE.measure {
         val targetPath =

@@ -245,6 +245,12 @@
       "config_mode": "standard",
       "bash_title": "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透",
       "powershell_title": "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak"
+    },
+    {
+      "id": 42,
+      "config_mode": "standard",
+      "bash_title": "文件变更生命周期：沙盒、放行、映射与前缀相邻路径的变更、元数据和链接语义",
+      "powershell_title": "file mutation, metadata and symlink semantics across sandbox, allow, mapping and prefix sibling"
     }
   ]
 }

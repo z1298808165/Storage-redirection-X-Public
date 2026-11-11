@@ -599,6 +599,9 @@ apply_config() {
       write_global_config "$(test_global_config auto 1)"
       write_config '{"users":{"0":{"enabled":false}}}'
       ;;
+    42)
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMutationAllowed"],"path_mappings":{"Download/SrtMutationRequest":"Download/SrtMutationMapped"}}}}'
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -680,6 +683,7 @@ scenario_title() {
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
     40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
     41) echo "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透" ;;
+    42) echo "文件变更生命周期：沙盒、放行、映射与前缀相邻路径的变更、元数据和链接语义" ;;
   esac
 }
 
@@ -749,6 +753,7 @@ invalidate_backend_fixture_view() {
 }
 
 clean_targets() {
+  adb_su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '${BACKEND_ROOT}/Download/SrtMutation'\$name '${BACKEND_PRIVATE_ROOT}/Download/SrtMutation'\$name; done" >/dev/null
   # 共享探针与夹具目录的删除必须走**可见路径**：该路径由模块 FUSE 承接，删除请求会经
   # 模块通知系统 FUSE 失效前序场景查询过的 inode 缓存；只删后端那一份会让后续 lookup
   # 继续命中旧文件。删不掉时如实报错，但不能因此中断清理（内层 `|| echo` 保证退出码 0）。
@@ -1014,7 +1019,7 @@ prune_version_scenario_excludes() {
         return 1
         ;;
     esac
-    if [ "$item" -lt 1 ] || [ "$item" -gt 41 ]; then
+    if [ "$item" -lt 1 ] || [ "$item" -gt 42 ]; then
       echo "invalid exclude scenario: $item" >&2
       return 1
     fi
@@ -1050,7 +1055,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 41))
+      scenarios=($(seq 1 42))
     else
       local scenario
       for scenario in $normalized; do
@@ -1060,7 +1065,7 @@ build_scenario_list() {
             return 1
             ;;
         esac
-        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 41 ]; then
+        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 42 ]; then
           echo "invalid scenario: $scenario" >&2
           return 1
         fi
@@ -1068,15 +1073,7 @@ build_scenario_list() {
       done
     fi
   else
-    scenarios=(1 2 3 4 5 6 7)
-    scenarios+=(8)
-    scenarios+=(9 10 11 12 13 14 15 29 30 31 32 33 34)
-    scenarios+=(16 17 18 19)
-    scenarios+=(20 21 22)
-    scenarios+=(28)
-    scenarios+=(23 24)
-    scenarios+=(25 26 27)
-    scenarios+=(35 36 37 38 39 40)
+    scenarios=($(seq 1 42))
   fi
 
   prune_version_scenario_excludes || return 1
@@ -1088,6 +1085,7 @@ build_scenario_list() {
 }
 
 remove_test_target_artifacts() {
+  adb_su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '${BACKEND_ROOT}/Download/SrtMutation'\$name '${BACKEND_PRIVATE_ROOT}/Download/SrtMutation'\$name; done" >/dev/null
   adb_su "rm -rf '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
   adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'" >/dev/null
@@ -2891,6 +2889,7 @@ run_read_only_scenario() {
     run_service_case "$scenario" "read-only-mkdir-denied" "file_mkdir_denied" '^PASS \[file_mkdir_denied\]' --es file_dir "$READ_ONLY_ROOT/newdir" &&
     run_service_case "$scenario" "read-only-rename-denied" "file_rename_denied" '^PASS \[file_rename_denied\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" --es target_file_path "$READ_ONLY_ROOT/renamed.txt" &&
     run_service_case "$scenario" "read-only-delete-denied" "file_delete_denied" '^PASS \[file_delete_denied\]' --es file_path "$READ_ONLY_ROOT/$READ_ONLY_FILE" &&
+    run_service_case "$scenario" "read-after-denials" "file_read" '^PASS \[file_read\]' --es file_path "$read_path" --es expected_payload "$READ_ONLY_PAYLOAD" &&
     check_read_only_artifacts
 }
 
@@ -4310,6 +4309,128 @@ capture_test_flow_artifacts() {
   } >"${SRT_ARTIFACT_DIR}/test-flow-app-mountinfo.txt" 2>/dev/null || true
 }
 
+run_file_mutation_lifecycle_scenario() {
+  local scenario="$1"
+  local kind request expected shadow
+  for kind in Sandbox Allowed Request RequestSibling; do
+    request="${REAL_ROOT}/Download/SrtMutation${kind}"
+    case "$kind" in
+      Allowed) expected="${BACKEND_ROOT}/Download/SrtMutationAllowed"; shadow="${BACKEND_PRIVATE_ROOT}/Download/SrtMutationAllowed" ;;
+      Request) expected="${BACKEND_ROOT}/Download/SrtMutationMapped"; shadow="${BACKEND_PRIVATE_ROOT}/Download/SrtMutationRequest" ;;
+      *) expected="${BACKEND_PRIVATE_ROOT}/Download/SrtMutation${kind}"; shadow="${BACKEND_ROOT}/Download/SrtMutation${kind}" ;;
+    esac
+    run_service_case "$scenario" "mutation-${kind}" file_mutation_lifecycle '^PASS \[file_mutation_lifecycle\]' --es file_dir "$request" || return 1
+    adb_su "test \"\$(ls -A '${expected}')\" = complete.txt && test \"\$(cat '${expected}/complete.txt')\" = srx-mutation-lifecycle-v1 && test \"\$(wc -c < '${expected}/complete.txt')\" -eq 25" || return 1
+    adb_su "test ! -e '${shadow}' || { test -d '${shadow}' && entries=\$(ls -A '${shadow}') && test -z \"\$entries\"; }" || return 1
+  done
+  for shadow in "${BACKEND_ROOT}/Download/SrtMutationRequest" "${BACKEND_PRIVATE_ROOT}/Download/SrtMutationMapped"; do
+    adb_su "entries=\$(ls -A '${shadow}') && test -z \"\$entries\"" || return 1
+  done
+}
+
+run_file_mutation_metadata_scenario() {
+  local scenario="$1"
+  local kind request expected shadow file link_target link hardlink result_file entries expected_entries hardlink_created symlink_created
+  local chmod_mode=440 fchmod_mode=220
+  local -a symlink_denied_routes=() hardlink_denied_routes=()
+  for kind in Sandbox Allowed Request RequestSibling; do
+    request="${REAL_ROOT}/Download/SrtMutation${kind}"
+    case "$kind" in
+      Allowed) expected="${BACKEND_ROOT}/Download/SrtMutationAllowed"; shadow="${BACKEND_PRIVATE_ROOT}/Download/SrtMutationAllowed" ;;
+      Request) expected="${BACKEND_ROOT}/Download/SrtMutationMapped"; shadow="${BACKEND_PRIVATE_ROOT}/Download/SrtMutationRequest" ;;
+      *) expected="${BACKEND_PRIVATE_ROOT}/Download/SrtMutation${kind}"; shadow="${BACKEND_ROOT}/Download/SrtMutation${kind}" ;;
+    esac
+    file="${request}/metadata.txt"
+    link_target="${request}/link-target.txt"
+    link="${request}/symbolic-link"
+    hardlink="${request}/hard-link"
+    hardlink_created=0
+    run_service_case "$scenario" "mutation-${kind}-metadata-create" file_create '^PASS \[file_create\]' --es file_path "$file" --es payload "$PAYLOAD" || return 1
+    run_service_case "$scenario" "mutation-${kind}-chmod" file_chmod '^PASS \[file_chmod\]' --es file_path "$file" --es mode 0400 || return 1
+    if ! adb_su "test \"\$(stat -c %a '${expected}/metadata.txt')\" = '${chmod_mode}'"; then
+      echo "mutation_metadata_mode_mismatch scenario=${scenario} kind=${kind} operation=chmod expected=${chmod_mode}" >&2
+      adb_su "stat -c %a '${expected}/metadata.txt'" >&2 || true
+      return 1
+    fi
+    run_service_case "$scenario" "mutation-${kind}-fchmod" file_fchmod '^PASS \[file_fchmod\]' --es file_path "$file" --es mode 0200 || return 1
+    if ! adb_su "test \"\$(stat -c %a '${expected}/metadata.txt')\" = '${fchmod_mode}'"; then
+      echo "mutation_metadata_mode_mismatch scenario=${scenario} kind=${kind} operation=fchmod expected=${fchmod_mode}" >&2
+      adb_su "stat -c %a '${expected}/metadata.txt'" >&2 || true
+      return 1
+    fi
+    run_service_case "$scenario" "mutation-${kind}-chmod-restore" file_chmod '^PASS \[file_chmod\]' --es file_path "$file" --es mode 0664 || return 1
+    run_service_case "$scenario" "mutation-${kind}-link-target-create" file_create '^PASS \[file_create\]' --es file_path "$link_target" --es payload "$PAYLOAD" || return 1
+    symlink_created=0
+    run_service_case "$scenario" "mutation-${kind}-symlink" file_symlink "" --es file_path link-target.txt --es target_file_path "$link" || return 1
+    result_file="${SRT_ARTIFACT_DIR}/scenario-${scenario}-mutation-${kind}-symlink-result.txt"
+    if grep -Fq 'PASS [file_symlink] link succeeded' "$result_file"; then
+      symlink_created=1
+      run_service_case "$scenario" "mutation-${kind}-readlink" file_readlink '^PASS \[file_readlink\]' --es file_path "$link" --es expected_path link-target.txt || return 1
+      run_service_case "$scenario" "mutation-${kind}-symlink-read" file_read '^PASS \[file_read\]' --es file_path "$link" --es expected_payload "$PAYLOAD" || return 1
+    elif grep -Fq 'FAIL [file_symlink] link failed' "$result_file" && grep -Eq 'EACCES|Permission denied' "$result_file"; then
+      symlink_denied_routes+=("$kind")
+      echo "symlink_boundary scenario=${scenario} route=${kind} result=EACCES"
+    else
+      echo "symlink_boundary_unexpected scenario=${scenario} route=${kind}" >&2
+      cat "$result_file" >&2
+      return 1
+    fi
+
+    run_service_case "$scenario" "mutation-${kind}-hardlink-boundary" file_link "" --es file_path "$link_target" --es target_file_path "$hardlink" || return 1
+    result_file="${SRT_ARTIFACT_DIR}/scenario-${scenario}-mutation-${kind}-hardlink-boundary-result.txt"
+    if grep -Fq 'PASS [file_link] link succeeded' "$result_file"; then
+      hardlink_created=1
+      adb_su "test '${expected}/hard-link' -ef '${expected}/link-target.txt' && test \"\$(cat '${expected}/hard-link')\" = '${PAYLOAD}'" || return 1
+      echo "hardlink_boundary scenario=${scenario} route=${kind} result=created"
+    elif grep -Fq 'FAIL [file_link] link failed' "$result_file" && grep -Eq 'EPERM|Operation not permitted' "$result_file"; then
+      echo "hardlink_boundary scenario=${scenario} route=${kind} result=EPERM"
+    elif grep -Fq 'FAIL [file_link] link failed' "$result_file" && grep -Eq 'EACCES|Permission denied' "$result_file"; then
+      hardlink_denied_routes+=("$kind")
+      echo "hardlink_boundary scenario=${scenario} route=${kind} result=EACCES"
+    else
+      echo "hardlink_boundary_unexpected scenario=${scenario} route=${kind}" >&2
+      cat "$result_file" >&2
+      return 1
+    fi
+
+    entries="$(adb_su "ls -A '${expected}' | sort | tr '\\n' '|'" | tr -d '\r')"
+    expected_entries="complete.txt|"
+    if [ "$hardlink_created" -eq 1 ]; then
+      expected_entries+="hard-link|"
+    fi
+    expected_entries+="link-target.txt|metadata.txt|"
+    if [ "$symlink_created" -eq 1 ]; then expected_entries+="symbolic-link|"; fi
+    if [ "$entries" != "$expected_entries" ]; then
+      echo "mutation_metadata_entries_mismatch scenario=${scenario} kind=${kind} path=${expected} entries=${entries}" >&2
+      return 1
+    fi
+    if ! adb_su "test \"\$(cat '${expected}/metadata.txt')\" = '${PAYLOAD}' && test \"\$(cat '${expected}/link-target.txt')\" = '${PAYLOAD}' && test ! -e '${shadow}/hard-link' && test ! -L '${shadow}/hard-link' && test ! -e '${shadow}/metadata.txt' && test ! -e '${shadow}/link-target.txt' && test ! -e '${shadow}/symbolic-link' && test ! -L '${shadow}/symbolic-link'"; then
+      echo "mutation_metadata_content_or_shadow_mismatch scenario=${scenario} kind=${kind} path=${expected} shadow=${shadow}" >&2
+      return 1
+    fi
+    if [ "$symlink_created" -eq 1 ]; then
+      adb_su "test -L '${expected}/symbolic-link' && test \"\$(readlink '${expected}/symbolic-link')\" = link-target.txt" || return 1
+    else
+      adb_su "test ! -e '${expected}/symbolic-link' && test ! -L '${expected}/symbolic-link'" || return 1
+    fi
+    case "$kind" in
+      Request) adb_su "test ! -e '${BACKEND_ROOT}/Download/SrtMutationRequest/hard-link' && test -z \"\$(ls -A '${BACKEND_ROOT}/Download/SrtMutationRequest' 2>/dev/null)\" && test -z \"\$(ls -A '${BACKEND_PRIVATE_ROOT}/Download/SrtMutationMapped' 2>/dev/null)\"" || return 1 ;;
+    esac
+  done
+  if [ "${#symlink_denied_routes[@]}" -gt 0 ]; then
+    case " ${symlink_denied_routes[*]} " in
+      *" Allowed "*) ;;
+      *) echo "symlink_eacces_without_allowed_control scenario=${scenario}" >&2; return 1 ;;
+    esac
+  fi
+  if [ "${#hardlink_denied_routes[@]}" -gt 0 ]; then
+    case " ${hardlink_denied_routes[*]} " in
+      *" Allowed "*) ;;
+      *) echo "hardlink_eacces_without_allowed_control scenario=${scenario}" >&2; return 1 ;;
+    esac
+  fi
+}
+
 run_standard_scenario() {
   local scenario="$1"
   echo "step 5/7: 从应用进程写入文件"
@@ -4545,6 +4666,7 @@ run_nested_mapping_chain_scenario() {
   local file="${NESTED_MAPPING_REQUEST_ROOT}/QQfile_recv/nested.bin"
   local target="${NESTED_MAPPING_TARGET_ROOT}/nested.bin"
   run_write_case "$scenario" "nested-mapping-chain" "$file" "$PAYLOAD" &&
+    run_service_case "$scenario" "nested-mapping-list" file_list_dir '^PASS \[file_list_dir\].*entries=nested\.bin$' --es file_dir "${NESTED_MAPPING_REQUEST_ROOT}/QQfile_recv" &&
     check_file_exists "scenario-${scenario}-nested-mapping-target" "$target" &&
     check_file_missing "scenario-${scenario}-nested-mapping-request" "$file"
 }
@@ -4870,6 +4992,9 @@ run_scenario() {
     clean_targets
     targets_prepared_before_start=1
   fi
+  if [ "$scenario" = 42 ]; then
+    adb_su "for name in Sandbox Allowed Request RequestSibling Mapped; do mkdir -p '${BACKEND_ROOT}/Download/SrtMutation'\$name '${BACKEND_PRIVATE_ROOT}/Download/SrtMutation'\$name; chmod 777 '${BACKEND_ROOT}/Download/SrtMutation'\$name '${BACKEND_PRIVATE_ROOT}/Download/SrtMutation'\$name; done" >/dev/null
+  fi
   # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，不要让污染漂到后面的断言。
   case "$scenario" in
     9|20|21|22|28|31|38) ;;
@@ -5022,6 +5147,10 @@ run_scenario() {
     41)
       echo "step 5/7: 验证沙盒根原生元数据与媒体代写零穿透"
       run_sandbox_root_metadata_scenario "$scenario"
+      ;;
+    42)
+      run_file_mutation_lifecycle_scenario "$scenario" &&
+        run_file_mutation_metadata_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -5222,6 +5351,8 @@ export READ_ONLY_OWNER_CONFIG
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL SRT_DOWNLOAD_NETWORK_HELPER
 export -f set_download_test_network
+export -f run_file_mutation_lifecycle_scenario
+export -f run_file_mutation_metadata_scenario
 export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
 export SHELL_PACKAGE SHELL_CONFIG SHELL_SANDBOX_REL SHELL_SANDBOX_REAL_DIR SHELL_SANDBOX_BACKEND_DIR
 export MEDIASTORE_ROUTING_PROBE_ROOT PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT NESTED_MAPPING_REQUEST_ROOT NESTED_MAPPING_STAGE_ROOT NESTED_MAPPING_TARGET_ROOT
