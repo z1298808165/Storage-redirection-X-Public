@@ -43,7 +43,7 @@ cargo test -p native-config-fixtures
 
 CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试流。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 13/14/15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-41。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验五个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-41。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验三个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
@@ -169,7 +169,7 @@ Remove-Item Env:SRT_SCENARIOS
 
 - 场景数按场景清单条目数取，**不能**数字面 token：全量时 `SRT_SCENARIOS` 的值是 `all`，按 token 数只能算出 1，看门狗会被压到 990 秒而把全量跑腰斩。
 - 步骤级与 job 级由 `prepare` 的 `Resolve scenario scope` 步骤按同一次范围产出，CI 与 Release 共用同一份解析脚本，所以场景数增长时两边一起自适应，不必手工同步数字。
-- `step > 基础设置 + 看门狗` 只在模拟器启动不超过 3 分钟收尾余量时成立；启动慢到 `emulator-boot-timeout`（A13-A16 1500 秒、A17 1800 秒）量级时 action 会先自己失败，不会被 step 误杀。
+- 步骤预算在基础设置与场景看门狗之外预留 3 分钟；模拟器启动也占用步骤预算，单独的 `emulator-boot-timeout`（A15/A16 1500 秒、A17 1800 秒）不扩大步骤预算。
 - 嵌套关系在约 209 个场景时失效（step 已触顶 345 分钟，看门狗仍在按 1.5n 增长）。当前 41 个场景远未到边界，但场景加到 200 个之前必须把矩阵拆成多个 test-flow job 分片，而不是继续抬高上限。
 
 ### 场景范围的触发条件
@@ -208,14 +208,16 @@ SRT_SCENARIOS=24 bash .github/tests/run-storage-redirect-scenarios.sh
 - 一次验证只选一种入口，禁止「带标记推送 + 手动派发」同时进行；出现两轮 run 时先确认事件来源，不要用取消第二轮掩盖范围错误。
 - 窄场景验证不产生可发布资产（`publish_ci=false`），不能作为发布门禁通过的依据；合并或发布前必须有一次全量 1-41 通过记录。
 
-矩阵当前不含任何版本级排除项：Android 13/14/15/16/17 都执行全量 1-41，包含依赖下载的场景 39。
+CI/Release 在 Android 15/16/17 x86_64 模拟器上各自执行完整场景 1-41，无版本级排除项；任一版本失败即取消其余版本，单个版本内按场景顺序快速失败。测试流全部通过后才发布资产。
 
-CI/Release 以 Android 版本为矩阵维度运行测试流：Android 13/14/15/16/17 x86_64 模拟器各自执行完整 scenario 1-41，矩阵跨版本 fail-fast（任一版本失败即取消其余版本），并在单个 Android 版本内按场景顺序快速失败。这只改变执行调度，不减少覆盖范围；scenario 1-41 必须在 Android 13/14/15/16/17 x86_64 模拟器上全部通过。
+CI/Release 统一由 KernelSU-AVD 打 ramdisk 补丁，使用 ksud 依次安装 Zygisk Next 与 SRX，root shell 走 `su 0 sh -c`（`ADB_ROOT_MODE=su0`）。Zygisk Next 与 KernelSU 在恢复缓存前查询 GitHub 最新稳定版，按版本和上游 SHA-256 选择缓存；缓存和下载文件均校验摘要与归档内容，校验通过后才交给安装器。
 
-Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与主矩阵一同被 `Test-flow required gate` 校验并执行同一套 scenario 1-41（包含场景 39；该版本曾因镜像网络验证失败被临时排除，现已恢复）。它与其他版本还有三处执行环境差异：
+Android Emulator 在恢复缓存前查询 Google 稳定渠道 revision，安装后核对 `source.properties`。系统镜像使用 [PuerNya/AvdLite 的 images release](https://github.com/PuerNya/AvdLite/releases/tag/images) 中 API 35、36、37.0 的 `AvdLiteWithoutKsu` 4K ZIP；每轮先查询资产 SHA-256，再选择缓存，资产被替换时自动使用新缓存键。导入前核对 API、架构、4K 页大小和上游启动报告，资产内导入器验证文件摘要并创建独立 AVD；开机后再次要求 `PAGE_SIZE=4096`。CI/Release 共用本仓库启动器，避免 SDK 安装步骤覆盖 AvdLite。只缓存原始 ZIP，不缓存打过 KernelSU 补丁的镜像或 AVD 数据。版本查询或校验失败时停止准备，不回退到旧版。项目依赖、Rust/Gradle 与 NDK/libcxx 仍使用仓库锁定版本。
+
+Android 17（API 37.0）有三处执行环境差异：
 
 - **设备侧图形读回保护**：Android 17 系统镜像的 `mapper.ranchu` gralloc 未实现 DMA 颜色缓冲读回，而 emulator 的 gfxstream 后端仍会广播 `ReadColorBufferDMA` 特性。SystemUI 的 `RegionSampling` 与 system_server 的 `TaskSnapshotPersister` 触发读回后会命中 `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma`，并连带重启 framework。测试脚本在设备 SDK 版本为 37 时先执行 `service call window 137 i32 0` 关闭 task snapshot，再 `pm disable-user com.android.systemui` 关闭 SystemUI，并在模块安装重启 framework 后重新应用，直到确认 task snapshot 已关闭且 SystemUI 处于 disabled 状态才继续。该缺陷与 GPU 模式无关，保护逻辑仅在检测到 `ro.build.version.sdk = 37` 时生效。保护过程写入设备侧 `test-flow-graphics-state.txt`（该文件目前不在任何 job 的 artifact 上传清单内，排障需结合 job 日志中的 `android17:` 行）。
-- **注入方案与启动参数**：Android 17 矩阵条目使用 KernelSU 方案（`root_method: ksu`，AVD 镜像打 KernelSU 补丁，ksud 负责安装模块与 Zygisk Next），root shell 走 `su 0 sh -c`（`ADB_ROOT_MODE=su0`）；其余版本仍由安装脚本按 Magisk 探测完成注入。模拟器启动超时放宽到 1800 秒并保留系统动画（其余版本为 1500 秒、关闭动画），GPU 模式固定 `swiftshader_indirect`。
+- **启动参数**：Android 17 的模拟器启动超时放宽到 1800 秒并保留系统动画（其余版本为 1500 秒、关闭动画），GPU 模式固定 `swiftshader_indirect`。
 - **用例粒度**：Android 17 矩阵条目覆盖 `SRT_FRESH_APP_PER_CASE=1`（每个服务用例前冷启动应用），并经 `SRT_FRESH_APP_SCENARIOS` 收窄到配置切换与生命周期场景（1,2,29,32,33）；其余版本显式设为 0。
 
 完整脚本覆盖以下场景：
@@ -266,6 +268,7 @@ Android 17（API 37.0）已并入上面的矩阵（不再是独立 job），与�
 | 41 | 沙盒根（重定向根 `Android/data/<包名>/sdcard`）在应用重启时由模块重建：属主必须是应用、**组不得是应用自己的 uid**，只能取父目录的组（setgid 继承）或 `media_rw`(1023)/`ext_data_rw`(1078)；other 位不得可写，mode 只允许 `02770`/`02771`。随后应用自己写一个文件、再由 MediaProvider 代写一条 `Documents/SrtSandboxRootProbe`，两者都必须落在沙盒内，真实公共路径不得出现该目录或文件（2026-11-09 真机：沙盒根 gid 被写成应用 uid，系统代写 EACCES 后回退到真实公共路径，公共存储凭空长出 `Documents/ringtone/...`）。 |
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
+
 ## 手动运行用例
 
 最小配置表示为测试 APP 开启完整隔离：

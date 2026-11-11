@@ -37,10 +37,7 @@ capture_preflight_diagnostics() {
 # 基础设置阶段总预算（秒，可覆盖）：从脚本启动到场景循环开始前的全部准备工作
 # ——设备健康检查、模块安装、包服务恢复。
 #
-# 取值依据（跨 5 个成功 run、35 个分片实测）：这一段耗时 118-477 秒，最坏是
-# A13/A14 的 Magisk 打补丁 + framework 重启路径（470s / 477s），A17 走 KernelSU
-# 打 ramdisk 只要 176-195 秒。取 900 秒约 1.9 倍余量，既能容纳慢镜像的波动，
-# 又能在真正卡死时 15 分钟内判定。
+# 统一限制 KernelSU 打补丁、重启与服务恢复的等待，避免准备阶段无限阻塞。
 #
 # 这一段是「还没开跑就卡住」的唯一有界防线：场景看门狗只覆盖场景脚本本体，
 # 模块安装与 adb 调用在设备半死时会无限阻塞（run 40272962460 五版本停在
@@ -204,7 +201,7 @@ prepare_device_health() {
 # 而当前 emulator 的 gfxstream 后端仍会广播 ReadColorBufferDMA 特性。SystemUI 的
 # RegionSampling 与 system_server 的 TaskSnapshotPersister 都会触发读回，随后命中
 # `Assertion failed: !rcEnc->featureInfo()->hasReadColorBufferDma` 并连带重启 framework。
-# 该缺陷与 GPU 模式无关；API 37 测试流必须同时关闭两个入口，并在 rootAVD/模块重启
+# 该缺陷与 GPU 模式无关；API 37 测试流必须同时关闭两个入口，并在模拟器/模块重启
 # 后重新应用，因为 task snapshot 开关是 system_server 进程内状态。
 android17_disable_graphics_readback() {
   local phase="${1:-设备启动后}"
@@ -306,7 +303,7 @@ android17_disable_graphics_readback() {
 
 prepare_device_health
 # A17 图形读回保护开关：默认 1 保持既有行为。该缺陷来自 emulator 的 gfxstream 与
-# mapper.ranchu gralloc（与 Magisk/LSPlant 版本无关），但系统镜像可能已被 Google 修复；
+# mapper.ranchu gralloc，但系统镜像可能已被 Google 修复；
 # 置 0 可跳过保护实测最新镜像是否已不再触发 ReadColorBufferDMA 崩溃。
 SRT_A17_GRAPHICS_GUARD="${SRT_A17_GRAPHICS_GUARD:-1}"
 if [ "$SRT_A17_GRAPHICS_GUARD" = "1" ]; then
@@ -325,23 +322,12 @@ if [ -z "$TEST_APP_APK" ]; then
   exit 1
 fi
 
-if [ "${ANDROID_API_LEVEL:-}" = "34" ] && [ -n "${PERSIST_SRX_FUSE_PROBE:-}" ]; then
-  adb_bounded shell setprop persist.debug.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE" >/dev/null 2>&1 || true
-  adb_bounded shell setprop debug.srx.fuse_probe "$PERSIST_SRX_FUSE_PROBE" >/dev/null 2>&1 || true
-  probe_value="$(adb_bounded shell getprop debug.srx.fuse_probe 2>/dev/null | tr -d '\r' || true)"
-  persist_probe_value="$(adb_bounded shell getprop persist.debug.srx.fuse_probe 2>/dev/null | tr -d '\r' || true)"
-  echo "fuse_probe_property=$probe_value persist_fuse_probe_property=$persist_probe_value"
-  export SRT_SCENARIOS="1"
-fi
-
-# 默认走 Magisk/rootAVD 链路；KernelSU 实验通道通过 MODULE_INSTALL_SCRIPT 换成
-# install-storage-redirect-module-ksu.sh，正式矩阵不受影响。
 # 用基础设置预算包住：这一步内部有多轮 adb install / framework 重启等待，设备
 # 半死时会静默无限阻塞，是「还没开跑就卡住」最集中的位置。
 if ! run_setup_phase "模块安装" env \
   MODULE_ZIP="build/test-flow/assets/storage.redirect.x-v${VERSION}-${MODULE_ABI}.zip" \
   APP_APK="$TEST_APP_APK" \
-  bash "${MODULE_INSTALL_SCRIPT:-.github/tests/install-storage-redirect-module.sh}"; then
+  bash .github/tests/install-storage-redirect-module.sh; then
   capture_preflight_diagnostics || true
   echo "模块安装失败，按失败处理" >&2
   exit 1
@@ -393,9 +379,7 @@ export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
 # SRT_SCENARIOS 直接传入，本块仅在本地运行或未走 prepare 时生效——此时
 # 手动触发传入的场景编号优先，其次看提交信息里的「单场景 29」（可逗号列举）。
 #
-# 逐场景修复时整轮矩阵（5 个版本 × 40 场景）要等约 50 分钟才看到结果，
-# 而验证单点修复只需要那一个场景；用这两个入口把反馈周期压到十几分钟，
-# 不必为了跑窄范围而临时改写 workflow（改 workflow 容易在收尾时漏改回全量）。
+# 验证单点修复时通过这两个入口收窄范围，避免临时改写 workflow。
 # srx-scenario-scope:begin
 scenario_scope="${SRT_SCENARIOS_OVERRIDE:-${SRT_SCENARIOS:-}}"
 if [ -z "$scenario_scope" ]; then

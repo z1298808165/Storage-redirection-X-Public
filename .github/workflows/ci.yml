@@ -20,7 +20,7 @@ permissions:
   contents: write
 
 # 同一分支只保留最新一次 CI：旧 run 会被取消，避免挂起的 run 与新 run 同时各占
-# 5 个模拟器 runner（此前无并发组，一次卡死最长可占 6 小时且阻塞后续 push 的判读）。
+# 3 个模拟器 runner。
 #
 # 但本 workflow 会自己 push 提交：`update-manifest` 末尾推送 `CI：更新更新清单`，
 # 发布链路也会推 `Releases:` / `发布：更新更新清单`。这些提交触发的 run 所有 job
@@ -44,7 +44,7 @@ env:
 
 jobs:
   quality:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: (github.event_name == 'workflow_dispatch' || github.repository == 'z1298808165/Storage-redirection-X-Public') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -98,7 +98,7 @@ jobs:
           ./scripts/validate-code-quality.ps1 -BaseRef $baseRef -Ref HEAD
 
   prepare:
-    if: github.repository == 'z1298808165/Storage-redirection-X-Public' && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
+    if: (github.event_name == 'workflow_dispatch' || github.repository == 'z1298808165/Storage-redirection-X-Public') && (github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'Releases:') && !startsWith(github.event.head_commit.message, 'CI：更新更新清单') && !startsWith(github.event.head_commit.message, '发布：更新更新清单')))
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
@@ -201,19 +201,10 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android SDK build-tools, platform and NDK
-        run: |
-          for attempt in 1 2 3; do
-            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/$SRX_NDK_VERSION"
-            sleep $((attempt * 10))
-          done
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> $GITHUB_ENV
+      - name: 准备原生构建缓存
+        uses: ./.github/actions/setup-native-cache
+        with:
+          target: aarch64-linux-android
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -230,13 +221,6 @@ jobs:
 
       - name: Verify logging architecture
         run: python .github/tests/test_logging_architecture.py -v
-
-      - name: Install CMake and Ninja
-        run: |
-          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y cmake ninja-build
-          fi
 
       - name: Configure Cargo for Android NDK
         run: |
@@ -286,6 +270,10 @@ jobs:
           cp target/aarch64-linux-android/release/srx_daemon build/module-bin/srx_daemon
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: 显示 C/C++ 缓存命中统计
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-stats
 
       - name: Verify Hooker.dex
         run: |
@@ -495,32 +483,16 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android SDK build-tools, platform and NDK
-        run: |
-          for attempt in 1 2 3; do
-            if sdkmanager "$SRX_ANDROID_PLATFORM" "$SRX_ANDROID_BUILD_TOOLS" "ndk;$SRX_NDK_VERSION"; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/ndk/$SRX_NDK_VERSION"
-            sleep $((attempt * 10))
-          done
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$SRX_NDK_VERSION" >> $GITHUB_ENV
+      - name: 准备原生构建缓存
+        uses: ./.github/actions/setup-native-cache
+        with:
+          target: x86_64-linux-android
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-14
           targets: x86_64-linux-android
-
-      - name: Install CMake and Ninja
-        run: |
-          if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y cmake ninja-build
-          fi
 
       - name: Configure Cargo for Android NDK
         run: |
@@ -556,6 +528,10 @@ jobs:
           bash .github/scripts/build_test_flow_runtime.sh
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
+
+      - name: 显示 C/C++ 缓存命中统计
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-stats
 
       - name: Upload test-flow runtime
         uses: actions/upload-artifact@v7.0.1
@@ -596,32 +572,26 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
-      ANDROID_TARGET: google_apis
+      ANDROID_TARGET: AvdLiteWithoutKsu
+      AVD_NAME: AvdLiteWithoutKsu
       ANDROID_ARCH: x86_64
       TARGET_TRIPLE: x86_64-linux-android
       MODULE_ABI: x86_64
       ANDROID_API_LEVEL: ${{ matrix.android.api_level }}
-      MAGISK_URL: ${{ matrix.android.magisk_url }}
-      # A17 分片走 KernelSU 安装链路（root_method=ksu 时切换安装脚本与 su0 模式）；
-      # 其余版本为空值走 Magisk 探测，收窄变量对 fresh_app_per_case=0 的版本无效。
-      ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}
-      MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu' && '.github/tests/install-storage-redirect-module-ksu.sh' || '.github/tests/install-storage-redirect-module.sh' }}
+      ADB_ROOT_MODE: su0
       SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}
       EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}
       # 范围由 prepare 的 outputs 统一决定（dispatch inputs 或提交「单场景 29」
-      # 标记）；无标记时 prepare 输出 all，全 5 个 Android 版本覆盖保持不变。
+      # 标记）；无标记时 prepare 输出 all，覆盖 A15-A17 三个 Android 版本。
       # 不再在此处就地解析提交标记，避免与 prepare 双源头。
       SRT_SCENARIOS: ${{ needs.prepare.outputs.scenarios }}
-      # 版本级场景排除（如 A17 排除依赖外网验证的场景 39）：矩阵字段直传，由测试
-      # 脚本内消费。语义是「从已确定的场景范围里剔除」而不是替换范围——默认范围
-      # 始终是全场景，dispatch 输入的窄范围也不会被矩阵覆盖。
+      # 版本级排除只从已确定的范围里剔除场景，不替换 dispatch 指定的范围。
       SRT_VERSION_SCENARIO_EXCLUDE: ${{ matrix.android.version_scenario_exclude || '' }}
       SRT_FAIL_FAST: 1
       SRT_SKIP_FINAL_CLEANUP: 1
       SRT_SCENARIO_TIMEOUT_SECONDS: 300
       # 基础设置阶段（设备健康检查、模块安装、包服务恢复）总预算：这一段跑在
       # 场景循环之前，层叠的场景看门狗覆盖不到，设备半死时会无限阻塞。
-      # 实测 118-477 秒（跨 5 个成功 run、35 个分片），900 秒约 1.9 倍余量；
       # 超时即显式失败并留下 preflight 快照。必须与 parse_scenario_scope.py 的
       # SETUP_BUDGET_MINUTES 保持一致。
       SETUP_BUDGET_SECONDS: 900
@@ -634,67 +604,31 @@ jobs:
     strategy:
       # 任一 Android 版本失败即取消其余版本，尽快释放模拟器资源并缩短反馈周期。
       # SRT_FAIL_FAST 仍为 1，单个版本内首个场景失败即停止，不会跑完全部场景。
-      # 需要跨版本对比证据时，用不带 --failed 的完整重跑单独获取；探针模式统一仅验证 Android14 场景1，扩展组用于独立隔离四类 SQLite/透传 hook。
+      # 需要跨版本对比证据时，用不带 --failed 的完整重跑单独获取；探针模式验证 A15 与 A17 的场景1，扩展组用于隔离四类 SQLite/透传 hook。
       fail-fast: true
       matrix:
         android:
-          - api: 33
-            version: 13
-            api_level: "33"
-            fresh_app_per_case: 0
-            magisk_url: ""
-            gpu_mode: ""
-            boot_timeout: 1500
-            disable_animations: true
-            disable_linux_hw: auto
-            # 默认跑全场景（1-40）：39 已在 A14 模拟器实测通过（组内代写 mkdir 的
-            # 发起者映射在引擎层生效，取数走脚本内建本地 HTTP 服务 10.0.2.2）。
-            # 矩阵不写死场景：范围由测试流参数（SRT_SCENARIOS / dispatch 输入 /
-            # 提交信息标记）决定，如需环境级限制才用 version_scenario_exclude。
-          - api: 34
-            version: 14
-            api_level: "34"
-            fresh_app_per_case: 0
-            magisk_url: ""
-            gpu_mode: ""
-            boot_timeout: 1500
-            disable_animations: true
-            disable_linux_hw: auto
-            # 同 A13：默认全场景，39 在 A14 已实测通过，无环境级排除项。
           - api: 35
             version: 15
             api_level: "35"
             fresh_app_per_case: 0
-            magisk_url: ""
             gpu_mode: ""
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 同 A13：默认全场景，无环境级排除项。
           - api: 36
             version: 16
             api_level: "36"
             fresh_app_per_case: 0
-            magisk_url: ""
             gpu_mode: ""
             boot_timeout: 1500
             disable_animations: true
             disable_linux_hw: auto
-            # 同 A13：默认全场景，无环境级排除项。
           - api: 37
             version: 17
             api_level: "37.0"
             fresh_app_per_case: 1
-            # A17 用 KernelSU 方案（实验分支已全量验证 37 场景通过）：ksuAVD 打
-            # ramdisk，ksud 装 Zygisk Next 与 SRX 模块，root shell 走 su 0 sh -c。
-            # 图形读回保护必须保留（跳过即复现 224，最新 A17 镜像仍未修复）。
-            root_method: ksu
-            adb_root_mode: su0
             fresh_app_scenarios: "1,2,29,32,33"
-            # A17 与其他版本一致执行全量 1-40，含依赖下载的场景 39。此前曾用
-            # version_scenario_exclude 排除 39 规避镜像网络验证失败，现改为不在矩阵
-            # 里写死排除项：场景范围只由测试流参数决定，网络不可达时由 39 在 CI 直接
-            # 暴露而不是被静默跳过。
             gpu_mode: swiftshader_indirect
             boot_timeout: 1800
             disable_animations: false
@@ -723,51 +657,54 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Prime Android emulator package
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if sdkmanager --install emulator --channel=0; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/emulator"
-            sleep $((attempt * 5))
-          done
+      - name: 检查 Zygisk Next 最新稳定版
+        id: zygisk-next-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/resolve_test_release.py zygisk-next >> "$GITHUB_OUTPUT"
 
-      - name: Prime Android system image package
-        run: |
-          set -euo pipefail
-          package="system-images;android-${ANDROID_API_LEVEL};${ANDROID_TARGET};${ANDROID_ARCH}"
-          install_dir="$ANDROID_HOME/system-images/android-${ANDROID_API_LEVEL}/${ANDROID_TARGET}/${ANDROID_ARCH}"
-          for attempt in 1 2 3; do
-            if sdkmanager --install "$package" --channel=0; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            rm -rf "$ANDROID_HOME/.temp" "$install_dir"
-            sleep $((attempt * 5))
-          done
+      - name: 缓存 Zygisk Next
+        uses: ./.github/actions/cache-release-asset
+        with:
+          name: zygisk-next
+          url: ${{ steps.zygisk-next-release.outputs.url }}
+          version: ${{ steps.zygisk-next-release.outputs.version }}
+          asset: ${{ steps.zygisk-next-release.outputs.asset }}
+          sha256: ${{ steps.zygisk-next-release.outputs.sha256 }}
+          env-name: ZYGISK_NEXT_CACHE_ZIP
+          required-entries: module.prop,lib/x86_64/libzygisk.so
+
+      - name: 检查 KernelSU 最新稳定版
+        id: kernelsu-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/resolve_test_release.py kernelsu >> "$GITHUB_OUTPUT"
+
+      - name: 缓存 KernelSU APK
+        uses: ./.github/actions/cache-release-asset
+        with:
+          name: kernelsu
+          url: ${{ steps.kernelsu-release.outputs.url }}
+          version: ${{ steps.kernelsu-release.outputs.version }}
+          asset: ${{ steps.kernelsu-release.outputs.asset }}
+          sha256: ${{ steps.kernelsu-release.outputs.sha256 }}
+          env-name: KERNELSU_APK_CACHE
+          required-entries: AndroidManifest.xml,lib/x86_64/libksud.so
+
+      - name: 准备 Android 模拟器缓存
+        uses: ./.github/actions/setup-android-emulator
+        with:
+          api-level: ${{ matrix.android.api_level }}
 
       - name: Run Android test-flow scenarios
-        if: ${{ (!contains(github.event.head_commit.message, '延迟全量探针') && !contains(github.event.head_commit.message, '全量组合比较探针') && !contains(github.event.head_commit.message, '全量组合探针') && !contains(github.event.head_commit.message, '核心组探针') && !contains(github.event.head_commit.message, '扩展组探针')) || matrix.android.api == 34 || matrix.android.api == 37 }}
+        if: ${{ (!contains(github.event.head_commit.message, '延迟全量探针') && !contains(github.event.head_commit.message, '全量组合比较探针') && !contains(github.event.head_commit.message, '全量组合探针') && !contains(github.event.head_commit.message, '核心组探针') && !contains(github.event.head_commit.message, '扩展组探针')) || matrix.android.api == 35 || matrix.android.api == 37 }}
         # 步骤级超时（按场景数自适应，由 prepare 从同一份范围解析结果输出）：
         # 模拟器异常时脚本可能停在场景脚本之前的准备阶段，看门狗覆盖不到，
         # 而 job 级 45/50 分钟太宽（run 40272962460 五版本同时被拖住 33 分钟、
         # 取消请求也不立即生效）。这里把兜底前移到步骤级，窄跑十几分钟即失败。
         timeout-minutes: ${{ fromJSON(needs.prepare.outputs.test_flow_timeout_minutes) }}
-        uses: reactivecircus/android-emulator-runner@v2.37.0
+        uses: ./.github/actions/run-android-emulator
         with:
-          api-level: ${{ matrix.android.api_level }}
-          target: ${{ env.ANDROID_TARGET }}
-          arch: ${{ env.ANDROID_ARCH }}
-          profile: pixel_7
-          disk-size: 4096M
-          heap-size: 1024M
           disable-animations: ${{ matrix.android.disable_animations }}
           emulator-boot-timeout: ${{ matrix.android.boot_timeout }}
           disable-linux-hw-accel: ${{ matrix.android.disable_linux_hw }}
@@ -775,10 +712,9 @@ jobs:
           # github 不可达、下载停在 WAITING_FOR_NETWORK），显式指定公共 DNS
           # 让 connectivity check 可完成；对其它版本无副作用。
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim -no-metrics -feature -Vulkan -dns-server 8.8.8.8
-          script: bash .github/tests/run-android-test-flow.sh
 
       - name: Skip non-target probe shard
-        if: ${{ (contains(github.event.head_commit.message, '延迟全量探针') || contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, '全量组合探针') || contains(github.event.head_commit.message, '核心组探针') || contains(github.event.head_commit.message, '扩展组探针')) && matrix.android.api != 34 && matrix.android.api != 37 }}
+        if: ${{ (contains(github.event.head_commit.message, '延迟全量探针') || contains(github.event.head_commit.message, '全量组合比较探针') || contains(github.event.head_commit.message, '全量组合探针') || contains(github.event.head_commit.message, '核心组探针') || contains(github.event.head_commit.message, '扩展组探针')) && matrix.android.api != 35 && matrix.android.api != 37 }}
         run: echo "仅验证 Fuse 探针：跳过 Android ${{ matrix.android.version }} 测试分片"
 
       - name: Upload test-flow artifacts

@@ -1,7 +1,7 @@
 # 内置第三方脚本：KernelSU-AVD
 
 本目录存放 CI 测试流使用的第三方 root 工具，用途是给 Android Studio 虚拟设备（AVD）
-打上 KernelSU，替代 rootAVD + Magisk 的 root 方案。
+打上 KernelSU，供 A15-A17 x86_64 测试矩阵使用。
 
 ## 来源
 
@@ -26,16 +26,15 @@
    `ramdisk.img.backup`；随后安装 KernelSU 管理器 APK。
 
 因此该工具**需要一台已经在跑的模拟器**，且模拟器需要能访问网络以下载与 KMI 匹配的
-LKM。CI 流程与 rootAVD 一致：先由 `android-emulator-runner` 启动模拟器，打完补丁后
+LKM。CI 先由本仓库的 AvdLite 启动器启动模拟器，打完补丁后
 关掉模拟器再用 patched ramdisk 冷启动。
 
-## 与 rootAVD 的差异
+## 注入依赖
 
-- rootAVD 注入 Magisk（自带 Zygisk）；KernelSU 不带 Zygisk，因此 SRX 这类 Zygisk 模块
+- KernelSU 不带 Zygisk，因此 SRX 这类 Zygisk 模块
   必须另外安装独立的 Zygisk 实现（CI 使用 Zygisk Next，module id `zygisksu`）。
-- rootAVD 依赖 Magisk APK 版本；KernelSU-AVD 依赖模拟器内核的 KMI 是否有对应 LKM。
-  Android 17（API 37）模拟器内核为 `android16-6.12`，对应 LKM 为
-  `x86_64-android16-6.12_kernelsu.ko`。
+- KernelSU-AVD 从运行中的模拟器查询 KMI 并传给 `ksud boot-patch`，所用 KernelSU
+  release 必须提供与镜像 KMI 匹配的 LKM。
 - **间歇性 sepolicy 现象（不要当成版本能力差异）**：run `36747429134`（官方 v3.3.0 / 32601）
   出现过 `Unable to apply SELinux patches! Your kernel may not support SELinux patch fully`，随后
   系统进程写 hook 状态被 `avc: denied { setattr }` 拦掉，场景 2 的 MediaProvider 代写缺失。
@@ -47,6 +46,6 @@ LKM。CI 流程与 rootAVD 一致：先由 `android-emulator-runner` 启动模�
 ## 升级注意事项
 
 - 更新时整文件替换 `ksuAVD.sh`，同步更新本文件的「引入提交」，并保持脚本头部注释完整。
-- 上游为 2026-09-30 首次发布的单日新项目，API 与参数可能变动；升级后必须先在收窄范围的
-  A17 分片上验证（`ci.yml` 的 `scenarios` 派发输入，配合 `KERNELSU_APK_URL` /
-  `ZYGISK_NEXT_URL` 覆盖资产地址），再考虑进入正式测试矩阵。
+- CI/Release 自动选择最新稳定版 KernelSU 与 Zygisk Next，校验后传给安装器；缓存规则见
+  [设备侧测试说明](../../../docs/device-testing.md)。独立调用安装脚本时可用
+  `KERNELSU_APK_URL` / `ZYGISK_NEXT_URL` 覆盖默认资产地址，已传入的缓存优先。
