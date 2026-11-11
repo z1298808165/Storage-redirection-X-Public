@@ -168,6 +168,74 @@
   （`start_app_error_window_capture [分钟]`，诊断包字段 `app_error_window_present`），
   成本与「确实要看日志」严格对齐。另外 `reap_stale_logcat_collectors` 只回收 debug 采集器
   自己的孤儿——把常驻 crash ring 纳入回收会让「verbose 开关翻转」静默杀掉它且不再重建。
+- **关闭详细日志时的停止动作必须是「先杀子 shell、再收管道」，且子 shell 用 SIGKILL**：
+  采集器是 `( logcat | awk | while read ) &`，子 shell 是 mksh 且阻塞在管道的 `read` 上，
+  `SigCgt` 里带 SIGTERM，因此 SIGTERM 会被延后到该次读返回才处理——verbose 关掉后 SRX 行
+  可能长时间一条都没有，运行期等价于「没杀」。而停止后紧接着就会把状态写成 `off`、删掉 pid
+  文件，此后没有任何配置事件会再尝试停止（`debug_collectors_sync_to off` 的 state 早退），
+  泄漏锁定到下次开机。同理，只按 tag reap 也停不下来：子 shell 会在 1 秒内把 logcat 重建
+  回来（实测 pid 8032 → 8468）。顺序因此固定为「SIGKILL 子 shell → 按 tag SIGKILL logcat」，
+  awk 随输入 EOF 自行退出。`stop_background_process` 的递归段依赖
+  `/proc/<pid>/task/<pid>/children`，该文件并非所有内核都提供（A14 模拟器上不存在），
+  不能把「子进程会被顺带杀掉」当作前提。
+- **所有管道型采集器都必须能真正停掉，且子进程不能留成孤儿**：这条不限于
+  详细日志采集器。config / package 两个事件收集器同样是「子 shell + 管道成员」，杀掉子
+  shell 只让它不再重建——A14 实测：config 收集器被 SIGKILL 后，它的**读循环仍在处理配置
+  事件**、`inotifyd` 仍在喂数据，等于两套事件处理器并存（每条事件处理两次，含一次
+  `cmd package list` 级别的 UID 对账）。
+  **不要用 `exec -a` 给 `inotifyd` 打标记**：`/system/bin/inotifyd` 在部分机型上只是
+  toybox 的符号链接，而 toybox 靠 `argv[0]` 分派 applet——改掉 argv[0] 后它直接起不来，
+  整条配置事件链静默失效（A17 实测；表面现象像「进程起来又停掉」，极易误判）。正确做法是
+  在 `stop_background_process` 里按 PPID 递归收子进程：`/proc/<pid>/task/<pid>/children`
+  不可用时退化为一次 `ps -A -o PID,PPID` 快照取子进程，并且**先取清单再杀**——先杀父会让
+  孙进程立刻被 init 收养，之后再也找不到。`exec -a` 只保留给 `logcat` 这种真正的 ELF。
+  `stop_collector_by_pid_file` 默认信号是 KILL，因为 TERM 会被延后到这些循环阻塞的
+  `read` 返回才处理（旧实现「先停旧再起新」的停因此从未生效过）；KILL 之后 `wait` 必定
+  立即返回，调用方不会再被挂住。
+- **配置目录的 inotifyd 掩码必须含 `y`（MOVED_TO）**：配置的原子保存写法是「写临时文件 →
+  rename 覆盖目标」，这条路径只产生 `m`（MOVED_FROM，路径是临时文件名）和 `y`（MOVED_TO，
+  路径才是 `global.json`）。只监听 `wcmdn` 时两半都收不到：`m` 的文件名过不了 `*".json"`
+  过滤，`y` 根本不上报——结果是「配置确实写进去了，但开关毫无反应」。A17 实测：掩码
+  `wcmdn` 下 rename 只吐出 `m <dir> stage.txt`；扩到 `wcmdny` 才有 `y <dir> renamed.json`，
+  开关从「40 秒无反应」变成 2 秒内生效。WebUI 的 `restoreConfigSnapshot` 正是
+  `mv "$stage/global.json" "$config/global.json"`。**不加 `e`（ATTRIB）**：`chmod`/`touch`
+  只改元数据，不代表配置内容变化，为本不存在的变更跑一次完整 sync 不划算。
+- **两个一次性快照采集器必须后台执行**：`media_state` 快照里的 `dumpsys meminfo` /
+  `logcat -d` 在 A17 上首次实测 47-58 秒（A14 上 8-10 秒），`app_status` 的
+  `cmd package list packages -U` 另有数秒。它们同步跑在 `start_debug_collectors` 里就等于把
+  配置事件循环按住整段时间，期间所有开关操作排队——现场表现正是「按了开关很久没反应」。
+  快照只写自己的日志文件、不依赖调用方上下文，后台化不改变语义；pid 落盘是为了让下一轮
+  `start_debug_collectors` 的「先停旧」能收掉还没返回的上一轮。后台化后 `debug start: logcat`
+  到 `debug start: ready` 实测 1 秒内完成，`snapshot captured` 反而出现在 `ready` 之后。
+- **同一份脚本会被两种解释器执行，代码不能依赖其中一种的实现细节**：开机时框架用
+  `busybox sh service.sh`（ash）启动，而 `srxctl ensure-collectors` 用 `sh "$MODDIR/service.sh"`
+  （`/system/bin/sh` = mksh）重启。两条路径的解释器不同，任何一边的方言差异都会变成「有时
+  生效、有时不生效」。`srxctl` 自身的 shebang 也是 `#!/system/bin/sh`。
+- **所有带 `-o` 的 `ps` 调用必须写 `/system/bin/ps`**：busybox 的 ash 把 applet 当内建命令，
+  `ps` 会解析成 **busybox 版**，而它只认小写 `-o pid`——`ps -A -o PID,ARGS` 直接报
+  `bad -o argument 'PID'` 且 `rc=1`。错误被 `2>/dev/null` 吞掉之后，唯一表现就是「选不出
+  任何进程、什么都没杀」：A17 实测 boot 路径下 `reap_tagged_processes` 的 `victims` 恒空、
+  每轮开关泄漏一个 logcat（tagged 1→6），同一份代码在 mksh 路径下完全正常。同一个坑还打掉了
+  `stop_background_process` 的 PPID 递归段，使管道成员（读循环 / inotifyd）全成孤儿。
+  受影响文件：`common.sh`、`media_state.sh`、`app_status.sh`、`diagnostic_archive.sh`、
+  `uninstall.sh`。改完由守卫 `test_process_listing_uses_absolute_ps_path` 拦住回归。
+
+- **读循环里的参数展开模式必须给 `|` 加引号**：Android 的 `/system/bin/sh` 是 mksh
+  （R59 起带 ksh 风格扩展模式），裸写 `${x%%|*}` 会被当成「空模式或任意」剥掉整个字符串、
+  `${x#*|}` 一个字符都不剥（A14 实测）。于是 `kind` 恒为空、`case` 一个分支都进不去——
+  采集器活着、也读到了数据（管道成员 `wchar` 非 0），却从不写 `running.log` /
+  `app_status.log`。写成 `${x%%"|"*}` / `${x#*"|"}` 后在 mksh 与 POSIX shell 上都是字面量。
+  同一处还要注意 threadtime 把 tag 补齐到 8 列并在其后单独留一个 `:` 字段：tag 短于
+  8 字符（如 `SRX`）时该冒号是独立的 `$7`，不跳过就会产出 `[JvInfo] : [JvInfo] 消息`
+  这类重复前缀。
+- **上一次开机留下的采集器 pid 与状态文件必须在本 boot 首次运行服务时清空**：pid 号会被
+  复用，旧 pid 可能已属于无关进程。用它判活会让本 boot 静默跳过采集器启动（实测：
+  `state=on` + 旧 pid 存活 → 连 `sync: starting debug collectors` 都不出现）；用它停止则
+  会把无关进程杀掉（实测：关闭开关时信号打到复用的 pid）。清理以
+  `logs/boot_<boot_id>.marker` 是否已存在为判据——服务被 `srxctl` 重跑时 marker 已在，
+  不会清掉正在运行的采集器记录；daemon 的 pid 文件不在此列，它自带 `comm` 校验。
+  卸载脚本是同一不变量的另一处落点：它用 `logs/.boot_ok` 与当前 boot_id 比较，不一致就
+  跳过按 pid 文件清理（只保留按 tag 回收 logcat，那条不依赖 pid 号）。
 
 ## 局部沙盒路径
 
