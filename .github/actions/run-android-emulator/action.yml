@@ -1,0 +1,28 @@
+name: 运行已导入的 Android 模拟器
+description: 启动 AvdLite 并执行测试流，退出时回收模拟器
+inputs:
+  emulator-boot-timeout:
+    description: Boot timeout in seconds
+    required: true
+  disable-animations:
+    description: Disable Android animations
+    required: true
+  disable-linux-hw-accel:
+    description: Disable hardware acceleration
+    required: true
+  emulator-options:
+    description: Emulator launch arguments
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: 启动并运行测试流
+      shell: bash
+      env:
+        BOOT_TIMEOUT: ${{ inputs.emulator-boot-timeout }}
+        DISABLE_ANIMATIONS: ${{ inputs.disable-animations }}
+        DISABLE_HW_ACCEL: ${{ inputs.disable-linux-hw-accel }}
+        EMULATOR_OPTIONS: ${{ inputs.emulator-options }}
+        EMULATOR_PORT: "5554"
+        ANDROID_SERIAL: emulator-5554
+      run: bash .github/scripts/run_avdlite.sh

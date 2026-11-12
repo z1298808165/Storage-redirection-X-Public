@@ -45,6 +45,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -137,6 +138,7 @@ struct FuseState {
     lookup_counts: HashMap<u64, u64>,
     dir_entry_refs: HashMap<u64, u64>,
     files: HashMap<u64, OpenFile>,
+    backings: HashMap<(u64, u64), RegisteredBacking>,
     dirs: HashMap<u64, Arc<[DirEntry]>>,
     dir_candidate_cache: HashMap<String, CachedDirCandidates>,
     dir_candidate_cache_bytes: usize,
@@ -234,14 +236,30 @@ fn dir_candidate_cache_capacity_limits() -> (usize, usize, usize) {
     )
 }
 
+#[derive(Clone)]
 struct OpenFile {
-    // quality-allow(lint-suppression): rel字段保留供调试和诊断输出使用，当前未被读取但不应删除。
-    #[allow(dead_code)]
-    rel: String,
-    file: Option<Arc<File>>,
-    // backing 注册必须覆盖整个打开句柄生命周期；提前注销会让内核 passthrough 返回 EIO。
-    _backing: Option<Arc<fuser::BackingId>>,
-    is_read_only: bool,
+    ino: INodeNo,
+    public_uid: Option<u32>,
+    backend: Arc<BackendPath>,
+    file: Arc<File>,
+    backing_key: Option<(u64, u64)>,
+}
+
+impl OpenFile {
+    fn attr(&self) -> Result<FileAttr, Errno> {
+        let mut attr =
+            file_attr_from_metadata(self.ino, self.file.metadata().map_err(errno_from_io)?);
+        if let Some(uid) = self.public_uid {
+            attr.uid = uid;
+            attr.gid = MEDIA_RW_GID;
+        }
+        Ok(attr)
+    }
+}
+
+struct RegisteredBacking {
+    id: Arc<fuser::BackingId>,
+    handles: usize,
 }
 
 #[derive(Clone)]
@@ -473,6 +491,7 @@ impl FuseRedirectFs {
                 lookup_counts: HashMap::new(),
                 dir_entry_refs: HashMap::new(),
                 files: HashMap::new(),
+                backings: HashMap::new(),
                 dirs: HashMap::new(),
                 dir_candidate_cache: HashMap::new(),
                 dir_candidate_cache_bytes: 0,
@@ -494,6 +513,45 @@ impl FuseRedirectFs {
         } else {
             FopenFlags::empty()
         }
+    }
+
+    // 同一后端 inode 的并存句柄复用注册，直到最后一个 release 才注销。
+    fn backing_for_open_file(
+        &self,
+        fh: u64,
+        file: &File,
+        register: impl FnOnce() -> std::io::Result<fuser::BackingId>,
+    ) -> std::io::Result<Arc<fuser::BackingId>> {
+        let metadata = file.metadata()?;
+        let key = (metadata.dev(), metadata.ino());
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+        if !state.files.contains_key(&fh) {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+        }
+        let backing = match state.backings.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(RegisteredBacking {
+                id: Arc::new(register()?),
+                handles: 0,
+            }),
+        };
+        backing.handles += 1;
+        let id = Arc::clone(&backing.id);
+        if let Some(open_file) = state.files.get_mut(&fh) {
+            open_file.backing_key = Some(key);
+        }
+        Ok(id)
+    }
+
+    // rename 覆盖或 unlink 后路径已失效，fd 属性仍从打开的后端文件读取。
+    fn open_file_for_inode(&self, ino: INodeNo, fh: Option<fuser::FileHandle>) -> Option<OpenFile> {
+        let state = self.state.read().unwrap_or_else(|err| err.into_inner());
+        if let Some(fh) = fh {
+            state.files.get(&fh.0).filter(|file| file.ino == ino)
+        } else {
+            state.files.values().find(|file| file.ino == ino)
+        }
+        .cloned()
     }
 
     fn policy_for_request(&self, req: &Request) -> Arc<RedirectPolicy> {

@@ -58,6 +58,8 @@ fn build_lsplant_bridge(target_arch: &str) {
     println!("cargo:rerun-if-env-changed=ANDROID_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_SDK_ROOT");
     println!("cargo:rerun-if-env-changed=SRX_LIBCXX_PREFIX");
+    println!("cargo:rerun-if-env-changed=CMAKE_C_COMPILER_LAUNCHER");
+    println!("cargo:rerun-if-env-changed=CMAKE_CXX_COMPILER_LAUNCHER");
 
     let Some(ndk) = locate_ndk() else {
         if env::var("CARGO_CFG_CLIPPY").is_ok()
@@ -141,6 +143,10 @@ fn build_lsplant_bridge(target_arch: &str) {
         // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
         .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
+    // 显式覆盖空值，避免复用 CMake 缓存时残留已撤下的编译启动器。
+    for name in ["CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER"] {
+        configure.arg(format!("-D{name}={}", env::var(name).unwrap_or_default()));
+    }
     run_command(&mut configure, "configure LSPlant");
     // 只在 configure 完整成功后落戳，失败遗留的半配置目录下次会被识别为过期重建。
     std::fs::write(&stamp_path, &config_stamp)

@@ -93,14 +93,10 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
     entry = android17_matrix_entry(jobs)
     if entry["api_level"] != "37.0":
         raise AssertionError(f"{label}: api_level 应为 37.0，实际 {entry['api_level']}")
-    if entry.get("root_method") != "ksu":
-        raise AssertionError(f"{label}: 17 的 root_method 应为 ksu")
-    if entry.get("adb_root_mode") != "su0":
-        raise AssertionError(f"{label}: 17 的 adb_root_mode 应为 su0")
+    if jobs["test-flow"]["env"].get("ADB_ROOT_MODE") != "su0":
+        raise AssertionError(f"{label}: 统一 KernelSU root shell 应为 su0")
     if entry.get("fresh_app_scenarios") != "1,2,29,32,33":
         raise AssertionError(f"{label}: 17 的 fresh_app_scenarios 应为 1,2,29,32,33")
-    if "magisk_url" in entry:
-        raise AssertionError(f"{label}: 17 不应保留 magisk_url")
     if entry["gpu_mode"] != "swiftshader_indirect":
         raise AssertionError(f"{label}: gpu_mode 应为 swiftshader_indirect")
     if entry["fresh_app_per_case"] != 1:
@@ -116,8 +112,8 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
     if entry["disable_linux_hw"] is not False:
         raise AssertionError(f"{label}: 17 的 disable_linux_hw 应为 false")
     others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
-    if len(others) != 4:
-        raise AssertionError(f"{label}: 其余版本应为 4 个，实际 {len(others)}")
+    if sorted(e["version"] for e in others) != [15, 16]:
+        raise AssertionError(f"{label}: 矩阵应仅覆盖 A15-A17")
     for e in others:
         if e["fresh_app_per_case"] != 0:
             raise AssertionError(f"{label}: 其余版本 fresh_app_per_case 应为 0")
@@ -131,8 +127,6 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
             raise AssertionError(f"{label}: 其余版本 disable_animations 应为 true")
         if e["disable_linux_hw"] != "auto":
             raise AssertionError(f"{label}: 其余版本 disable_linux_hw 应保持上游默认 auto")
-        if e.get("magisk_url", "") != "":
-            raise AssertionError(f"{label}: 其余版本不应设置 magisk_url")
     if jobs["test-flow"]["strategy"]["fail-fast"] is not True:
         raise AssertionError(f"{label}: 矩阵必须跨版本 fail-fast")
     required_needs = jobs["test-flow-required"]["needs"]
@@ -318,36 +312,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("let removed_storage = unlink_path(storage_path)", media)
         self.assertIn("let removed_backend =", media)
 
-    def test_module_install_syncs_and_retries_after_push(self) -> None:
-        """模块安装 push 之后必须落盘并允许一次重试。
-
-        `magisk --install-module` 直接读刚 push 进去的文件；页缓存还没写回时可能读到
-        残缺 zip，在 guest 里表现为 magisk 段错误（run 42428597589 的 A15：push 后 160
-        毫秒内两次 Segmentation fault，而包大小与上一轮成功轮完全一致，说明包没坏）。
-        一次瞬时崩溃会因 fail-fast 连带取消其余四个分片，代价远大于一次重试。
-        """
-        installer = read(".github/tests/install-storage-redirect-module.sh")
-        fn = section(
-            installer,
-            "install_storage_redirect_module()",
-            "install_test_app_before_module_boot()",
-        )
-        self.assertIn("adb_root 'sync'", fn, "push 之后必须显式落盘")
-        self.assertIn("for attempt in 1 2; do", fn, "安装失败必须重试一次")
-        self.assertIn("Magisk module install attempt ${attempt}/2 failed", fn)
-        # 原生崩溃落在 crash 缓冲区：不带 -b crash 的 logcat 抓不到崩溃栈，
-        # 2026-11-08 那次失败的诊断 grep 一行都没命中就是这个原因。
-        self.assertIn("logcat -d -b crash", fn)
-
     def test_ksu_emulator_death_is_detected_and_retried(self) -> None:
-        """KSU 自启的模拟器崩掉时要立刻发现并重试，不能对着死进程等满超时。
-
-        实测一次 `nohup "$ANDROID_HOME/emulator/emulator" ... Segmentation fault
-        (core dumped)`：旧代码继续 `wait_for_boot 420`，空等 7 分钟、期间零输出，最后
-        只报「模块安装失败」，看不出是模拟器崩了；而一次崩溃会让 fail-fast 连带取消
-        其余四个分片。
-        """
-        script = read(".github/tests/install-storage-redirect-module-ksu.sh")
+        """开机等待须检测模拟器提前退出，并只对此类失败重试一次。"""
+        script = read(".github/tests/install-storage-redirect-module.sh")
         start = section(script, "start_emulator()", "start_emulator_and_boot()")
         self.assertIn("EMULATOR_PID=$!", start, "必须记下自启模拟器的 pid")
         boot = section(script, "wait_for_boot()", "wait_for_emulator_shutdown()")
@@ -359,63 +326,79 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 调用点必须走带重试的入口，不能再裸调 start_emulator + wait_for_boot。
         self.assertNotIn("start_emulator\nwait_for_boot 300", script)
 
+    @unittest.skipUnless(shutil.which("bash"), "需要 Bash 验证模拟器重启恢复")
+    def test_ksu_reboot_requires_new_stable_boot_and_recovers_emulator_death(self) -> None:
+        script = read(".github/tests/install-storage-redirect-module.sh")
+        reboot = section(script, "wait_for_reboot() {", "# 先固定可用的 su 形式")
+        root_wait = section(script, "wait_for_root_shell() {", "dump_root_diagnostics() {")
+        self.assertIn("previous_boot_id", reboot)
+        self.assertIn('current_boot_id" != "$previous_boot_id"', reboot)
+        self.assertIn("stable_attempts", reboot)
+        self.assertIn("start_emulator_and_boot", reboot)
+        self.assertIn("start_emulator_and_boot", root_wait)
+        self.assertEqual(3, script.count("wait_for_reboot 420"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boot_id = root / "boot-id"
+            boot_id.write_text("old\n", encoding="utf-8")
+            adb = root / "adb"
+            adb.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  reboot) kill -TERM \"$EMULATOR_PID\" 2>/dev/null || true ;;\n"
+                "  'shell cat /proc/sys/kernel/random/boot_id') cat \"$MOCK_BOOT_ID\" ;;\n"
+                "  'shell getprop sys.boot_completed') printf '1\\n' ;;\n"
+                "  'kill-server') : ;;\n"
+                "  *) echo \"unexpected adb call: $*\" >&2; exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            adb.chmod(0o755)
+            harness = (
+                f"export PATH={root}:$PATH MOCK_BOOT_ID={boot_id}\n"
+                "export CURRENT_BOOT=old\n"
+                "sleep() { command sleep 0.01; }\n"
+                "wait_for_emulator_shutdown() { wait \"$EMULATOR_PID\" 2>/dev/null || true; }\n"
+                "start_emulator_and_boot() {\n"
+                "  (command sleep 30) & EMULATOR_PID=$!\n"
+                "  export EMULATOR_PID\n"
+                "  CURRENT_BOOT=new; export CURRENT_BOOT\n"
+                "  printf 'new\\n' > \"$MOCK_BOOT_ID\"\n"
+                "}\n"
+                "(command sleep 30) & EMULATOR_PID=$!; export EMULATOR_PID\n"
+                + reboot
+                + "\nwait_for_reboot 20\n"
+                "kill \"$EMULATOR_PID\" 2>/dev/null || true\n"
+                "wait \"$EMULATOR_PID\" 2>/dev/null || true\n"
+            )
+            result = subprocess.run(
+                [shutil.which("bash"), "-eu", "-c", harness],
+                text=True, capture_output=True, timeout=15,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("重新启动已打补丁的 AVD", result.stderr)
+            self.assertIn("boot_id=new", result.stdout)
+
     def test_module_verify_skips_wait_when_post_fs_data_missed(self) -> None:
-        """post-fs-data 本轮没执行时不许等满 300 秒。
+        script = read(".github/tests/install-storage-redirect-module.sh")
+        marker = section(script, "module_boot_marker_state()", "verify_storage_redirect_module_loaded()")
+        self.assertIn(".boot_pending", marker)
+        self.assertIn("ran | missed", marker)
+        verify = section(script, "verify_storage_redirect_module_loaded()", "verify_storage_redirect_module_loaded_with_reboot_retry()")
+        self.assertIn('"$(module_boot_marker_state)" = "missed"', verify)
+        self.assertIn("本次开机未执行 post-fs-data", verify)
+        self.assertLess(verify.index("module_boot_marker_state"), verify.index("sleep 2"))
 
-        `.boot_pending` 由 post-fs-data.sh 一进来就写，`.boot_ok` 在其收尾时写；两者都
-        不等于本轮 boot_id，就说明这一轮根本没执行到 post-fs-data——再等也不会起来。
-        实证：run 42432117917 的 A16 与 run 42308773787 的 A13 都白等满 300 秒，而重启
-        后 30 秒内就 ready。magisk 与 ksu 两个安装器都要有这条早退。
-        """
-        for path in (
-            ".github/tests/install-storage-redirect-module.sh",
-            ".github/tests/install-storage-redirect-module-ksu.sh",
+    def test_installer_asset_urls_match_release_tags(self) -> None:
+        installer = read(".github/tests/install-storage-redirect-module.sh")
+        for variable, pattern in (
+            ("KERNELSU_APK_URL", r"/download/(v[\d.]+)/(KernelSU_(v[\d.]+)_\d+-release\.apk)"),
+            ("ZYGISK_NEXT_URL", r"/download/(v[\d.]+)/(Zygisk-Next-([\d.]+)-\d+-[0-9a-f]+-release\.zip)"),
         ):
-            script = read(path)
-            marker = section(
-                script, "module_boot_marker_state()", "verify_storage_redirect_module_loaded()"
-            )
-            self.assertIn(".boot_pending", marker, path)
-            self.assertIn("ran | missed", marker, path)
-            verify = section(
-                script,
-                "verify_storage_redirect_module_loaded()",
-                "verify_storage_redirect_module_loaded_with_reboot_retry()",
-            )
-            self.assertIn('"$(module_boot_marker_state)" = "missed"', verify, path)
-            self.assertIn("本次开机未执行 post-fs-data", verify, path)
-            # 早退必须排在轮询之前，否则等于没早退。
-            self.assertLess(
-                verify.index("module_boot_marker_state"), verify.index("sleep 2"), path
-            )
-
-    def test_kernelsu_zygisk_next_default_urls_match_release_tag(self) -> None:
-        # KernelSU 实验 workflow 已于 2026-10-16 移除，Zygisk Next 的默认地址只剩
-        # 安装脚本一处；A17 分片在正式矩阵里仍按 root_method=ksu 调用该脚本。
-        #
-        # 这里**不钉死版本号**：钉死的话每次升级都要改测试，容易只改脚本一半就推，
-        # 反而把门禁变成绊脚石。真正要守的是「下载 URL 的 tag 与文件名版本一致、
-        # 且带 v 前缀」——那正是历史上踩过的坑（`releases/download/1.5.0/` 少了 v，
-        # 链接 404，A17 分片整个装不上）。
-        installer = read(".github/tests/install-storage-redirect-module-ksu.sh")
-        ksu = re.search(
-            r"KERNELSU_APK_URL=.*?/download/(v[\d.]+)/(KernelSU_(v[\d.]+)_\d+-release\.apk)",
-            installer,
-        )
-        self.assertIsNotNone(ksu, "KernelSU 默认地址格式已变更，请同步本守卫")
-        assert ksu is not None
-        self.assertEqual(ksu.group(1), ksu.group(3), "KernelSU 的 tag 与文件名版本不一致")
-
-        zygisk = re.search(
-            r"ZYGISK_NEXT_URL=.*?/download/(v[\d.]+)/(Zygisk-Next-([\d.]+)-\d+-[0-9a-f]+-release\.zip)",
-            installer,
-        )
-        self.assertIsNotNone(zygisk, "Zygisk Next 默认地址格式已变更，请同步本守卫")
-        assert zygisk is not None
-        self.assertEqual(
-            zygisk.group(1), "v" + zygisk.group(3), "Zygisk Next 的 tag 与文件名版本不一致"
-        )
-        self.assertNotIn("releases/download/1.5.0/", installer)
+            match = re.search(variable + "=.*?" + pattern, installer)
+            self.assertIsNotNone(match, variable)
+            self.assertEqual(match.group(1).removeprefix("v"), match.group(3).removeprefix("v"))
 
     def test_shared_host_precedes_namespace_redirect(self) -> None:
         daemon = read("src/daemon_mount.rs")
@@ -769,7 +752,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         finish = section(self.bash, "finish_test_run() {", "cleanup_done=0")
         self.assertIn('if [ "$device_run_lock_held" -eq 1 ]', finish)
         self.assertLess(finish.index("cleanup_test_artifacts"), finish.index("release_device_run_lock"))
-        self.assertIn('return "$status"', finish)
+        self.assertIn('exit "$status"', finish)
 
     def test_manifest_is_contiguous_and_unique(self) -> None:
         self.assertEqual(list(range(1, max(self.ids) + 1)), self.ids)
@@ -1100,7 +1083,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             return next(
                 step
                 for step in jobs["test-flow"]["steps"]
-                if "emulator-runner" in str(step.get("uses", ""))
+                if step.get("uses") == "./.github/actions/run-android-emulator"
             )
 
         ci_emulator = emulator_step(ci)
@@ -1134,7 +1117,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_only_ci_uses_concurrency_group(self) -> None:
         # 两侧并发策略相反且都是有意的：
         # - CI：新 push 取代旧验证，用并发组取消挂起的旧 run，避免新旧各自占满
-        #   5 个模拟器 runner。
+        #   3 个模拟器 runner。
         # - 发布：tag 触发的一次性发布必须完整跑完，取消会留下资产不全的半成品
         #   Release 与未更新的 update.json。
         # 这条断言把「有意不设」固化下来，避免后人当成遗漏顺手补上。
@@ -1232,6 +1215,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             probe.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
+                "set_download_test_network() { :; }\n"
                 "probe() {\n"
                 '  local dl_server_pid=""\n'
                 "  ( exec sleep 300 </dev/null >/dev/null 2>&1 ) &\n"
@@ -1241,7 +1225,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 f'  echo "$dl_server_pid" > "{pid_path}"\n'
                 "  return 1\n"
                 "}\n"
-                "export -f probe\n"
+                "export -f probe set_download_test_network\n"
                 "bash -e -o pipefail -c 'probe' || true\n"
                 "sleep 1\n"
                 f'pid=$(cat "{pid_path}")\n'
@@ -1463,7 +1447,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_scenario_40_runs_all_attribution_checks_in_both_runners(self) -> None:
         bash_runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
-        ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $ok = [bool]$scenarioOk")
+        ps_runner = section(self.powershell, "function Invoke-Scenario {", "\nfunction Invoke-BasicAll {")
         for name in (
             "run_system_uid_attribution_scenario",
             "run_app_caller_media_provider_attribution_scenario",
@@ -1973,6 +1957,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 本地全量验证会漏跑 38-40）。
         self.assertIn(f"@(1..{expected_max})", self.powershell)
 
+    @unittest.skipUnless(shutil.which("bash"), "需要 Bash 校验场景选择")
+    def test_default_and_explicit_all_execute_same_complete_scope(self) -> None:
+        functions = section(
+            self.bash, "prune_version_scenario_excludes() {", "remove_test_target_artifacts() {"
+        )
+        for selector in ("", "all"):
+            with self.subTest(selector=selector):
+                result = subprocess.run(
+                    ["bash", "-eu", "-c", functions + '\nSRT_SCENARIOS=$1\n'
+                     'SRT_VERSION_SCENARIO_EXCLUDE=\nbuild_scenario_list\nprintf "%s\\n" "${scenarios[@]}"',
+                     "test-scope", selector], text=True, capture_output=True, check=True, timeout=10,
+                )
+                self.assertEqual(self.ids, [int(value) for value in result.stdout.splitlines()])
+
     def test_version_scenario_exclude_prunes_instead_of_replacing_scope(self) -> None:
         # 版本级限制只能从已确定的范围里剔除，不能替换范围本身：旧实现直接用它
         # 覆盖 SRT_SCENARIOS，既让默认范围退化成窄场景，也吞掉了 dispatch 输入与
@@ -2048,7 +2046,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("fresh_app_per_case: 0", test_flow)
             self.assertIn("fresh_app_per_case: 1", test_flow)
             self.assertIn('api_level: "37.0"', test_flow)
-            for version in (13, 14, 15, 16):
+            for version in (15, 16):
                 self.assertIn(f"version: {version}", test_flow)
             self.assertIn("version: 17", test_flow)
             # 统一门禁：校验 quality + 统一矩阵（已含 17），不再单列 android17 job。
@@ -2063,42 +2061,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # Android 17 已并入统一矩阵，不再有独立 job；门禁改用统一矩阵覆盖 17。
         self.assertNotIn("  test-flow-android17:", source)
         jobs = load_workflow(".github/workflows/ci.yml")
-        entry = android17_matrix_entry(jobs)
-        # 17 特有执行环境必须保留在矩阵条目中。
-        self.assertEqual("37.0", entry["api_level"])
-        self.assertEqual("ksu", entry["root_method"])
-        self.assertEqual("su0", entry["adb_root_mode"])
-        self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
-        self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
-        self.assertEqual(1, entry["fresh_app_per_case"])
-        self.assertNotIn("timeout_minutes", entry)
-        self.assertEqual(1800, entry["boot_timeout"])
-        self.assertFalse(entry["disable_animations"])
-        self.assertFalse(entry["disable_linux_hw"])
-        # 其余版本保持原值：不设置 Magisk、复用进程、较短超时、关闭动画。
-        others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
-        self.assertEqual(4, len(others))
-        for e in others:
-            self.assertEqual(0, e["fresh_app_per_case"])
-            self.assertNotIn("timeout_minutes", e)
-            self.assertEqual(1500, e["boot_timeout"])
-            self.assertTrue(e["disable_animations"])
-            self.assertEqual("auto", e["disable_linux_hw"])
-            self.assertEqual("", e.get("magisk_url", ""))
-        self.assertTrue(jobs["test-flow"]["strategy"]["fail-fast"])
+        _assert_android17_unified(jobs, "A15-A17")
         # 17 并入矩阵后，统一 job 通过 17 特有参数承载差异；env 通过矩阵字段引用。
         test_flow = section(source, "  test-flow:", "  test-flow-required:")
-        self.assertIn("MAGISK_URL: ${{ matrix.android.magisk_url }}", test_flow)
+        self.assertNotIn("MAGISK_URL", test_flow)
         self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
         self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
         self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
-        self.assertIn(
-            "MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu'"
-            " && '.github/tests/install-storage-redirect-module-ksu.sh'"
-            " || '.github/tests/install-storage-redirect-module.sh' }}",
-            test_flow,
-        )
-        self.assertIn("ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}", test_flow)
+        self.assertNotIn("MODULE_INSTALL_SCRIPT", test_flow)
+        self.assertIn("ADB_ROOT_MODE: su0", test_flow)
         self.assertIn("SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}", test_flow)
         self.assertIn("Download test-flow runtime", test_flow)
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
@@ -2122,42 +2093,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
         source = read(".github/workflows/release.yml")
         self.assertNotIn("  test-flow-android17:", source)
         jobs = load_workflow(".github/workflows/release.yml")
-        entry = android17_matrix_entry(jobs)
-        # 17 特有执行环境必须保留在矩阵条目中。
-        self.assertEqual("37.0", entry["api_level"])
-        self.assertEqual("ksu", entry["root_method"])
-        self.assertEqual("su0", entry["adb_root_mode"])
-        self.assertEqual("1,2,29,32,33", entry["fresh_app_scenarios"])
-        self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
-        self.assertEqual(1, entry["fresh_app_per_case"])
-        self.assertNotIn("timeout_minutes", entry)
-        self.assertEqual(1800, entry["boot_timeout"])
-        self.assertFalse(entry["disable_animations"])
-        self.assertFalse(entry["disable_linux_hw"])
-        # 其余版本保持原值：不设置 Magisk、复用进程、较短超时、关闭动画。
-        others = [e for e in jobs["test-flow"]["strategy"]["matrix"]["android"] if e["version"] != 17]
-        self.assertEqual(4, len(others))
-        for e in others:
-            self.assertEqual(0, e["fresh_app_per_case"])
-            self.assertNotIn("timeout_minutes", e)
-            self.assertEqual(1500, e["boot_timeout"])
-            self.assertTrue(e["disable_animations"])
-            self.assertEqual("auto", e["disable_linux_hw"])
-            self.assertEqual("", e.get("magisk_url", ""))
-        self.assertTrue(jobs["test-flow"]["strategy"]["fail-fast"])
+        _assert_android17_unified(jobs, "A15-A17")
         # 17 并入矩阵后，统一 job 通过 17 特有参数承载差异；env 通过矩阵字段引用。
         test_flow = section(source, "  test-flow:", "  test-flow-required:")
-        self.assertIn("MAGISK_URL: ${{ matrix.android.magisk_url }}", test_flow)
+        self.assertNotIn("MAGISK_URL", test_flow)
         self.assertIn("EMULATOR_GPU_MODE: ${{ matrix.android.gpu_mode }}", test_flow)
         self.assertIn('ANDROID_API_LEVEL: ${{ matrix.android.api_level }}', test_flow)
         self.assertIn("SRT_FRESH_APP_PER_CASE: ${{ matrix.android.fresh_app_per_case }}", test_flow)
-        self.assertIn(
-            "MODULE_INSTALL_SCRIPT: ${{ matrix.android.root_method == 'ksu'"
-            " && '.github/tests/install-storage-redirect-module-ksu.sh'"
-            " || '.github/tests/install-storage-redirect-module.sh' }}",
-            test_flow,
-        )
-        self.assertIn("ADB_ROOT_MODE: ${{ matrix.android.adb_root_mode || '' }}", test_flow)
+        self.assertNotIn("MODULE_INSTALL_SCRIPT", test_flow)
+        self.assertIn("ADB_ROOT_MODE: su0", test_flow)
         self.assertIn("SRT_FRESH_APP_SCENARIOS: ${{ matrix.android.fresh_app_scenarios || '' }}", test_flow)
         self.assertIn("Download release test-flow runtime", test_flow)
         self.assertIn("emulator-options: -no-window -gpu swiftshader_indirect", test_flow)
@@ -2182,8 +2126,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
             jobs = load_workflow(workflow)
             entry = _assert_android17_unified(jobs, workflow)
             self.assertEqual("swiftshader_indirect", entry["gpu_mode"])
-            self.assertEqual("ksu", entry["root_method"])
-            self.assertEqual("su0", entry["adb_root_mode"])
 
     def test_matrix_gate_rejects_dropped_android17(self) -> None:
         # 反向验证：若 17 被错误地移出统一矩阵（回到旧的跨 job 缺口），
@@ -2294,7 +2236,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             source = read(workflow)
             self.assertEqual(1, source.count(version), workflow)
             self.assertIn('SRX_NDK_VERSION: "%s"' % version, source)
-            self.assertIn('"ndk;$SRX_NDK_VERSION"', source)
+            self.assertIn("./.github/actions/setup-native-cache", source)
+        self.assertIn('"ndk;$SRX_NDK_VERSION"', read(".github/actions/setup-native-cache/action.yml"))
         script = read("scripts/build-local-module.ps1")
         self.assertIn('Get-GradleProperty -Name "srx.ndkVersion"', script)
 
@@ -2540,17 +2483,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
 
     def test_mediastore_create_case_retries_volume_attach_race(self) -> None:
-        """MediaStore 创建用例必须在「卷还没 attach 完」的窗口里重试，而不是直接判失败。
-
-        真机实证（2026-11-09）：MediaProvider 刚被重启、user 0 的 `external_primary` 卷
-        尚未 attach 时，insert 会抛 `IllegalArgumentException: Volume external_primary
-        not found`，应用侧只看到 `createMedia returned null`——与「文件被重定向后打开失败」
-        在产物里长得一模一样。若用例不重试，环境竞态就会被当成数据面缺陷（本次排查就因为
-        这一点绕了很久）。
-
-        守卫锁定三件事（两套运行器都要有）：① 存在重试包装；② 重试留痕串可检索；
-        ③ 重试次数有界（不得无限重试把真实失败吞掉）。
-        """
+        """MediaStore 创建重试次数有界，并输出可检索的重试与最终失败标记。"""
         for name, text, case_fn in (
             ("bash", self.bash, "run_mediastore_create_case() {"),
             ("ps", self.powershell, "function Invoke-MediaStoreCreateCase {"),
@@ -2560,8 +2493,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             wrapper = wrapper[: wrapper.index("\n}")]
             self.assertIn("mediastore_create_retry", wrapper, name)
             self.assertIn("SRT_MEDIASTORE_CREATE_ATTEMPTS", wrapper, name)
-            self.assertIn("create_media_null", wrapper, name)
-        # 失败仍需如实报出，且只在重试耗尽后。
+            self.assertIn("create_media_failed", wrapper, name)
+        # Bash 包装在重试耗尽后输出最终失败标记。
         self.assertIn("mediastore_create_failed", self.bash)
 
     def test_backend_endpoint_recovery_keeps_app_pid(self) -> None:
@@ -2768,15 +2701,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", wait)
         self.assertIn('wait_media_provider_hook_ready "module-boot" 60', recovery)
         self.assertIn('wait_media_provider_hook_ready "module-restart" 60', recovery)
-        self.assertIn("adb reboot", recovery)
+        self.assertIn("wait_for_reboot 420", recovery)
         self.assertIn('wait_media_provider_hook_ready "module-clean-boot" 120', recovery)
-        self.assertEqual(1, recovery.count("adb reboot"))
+        self.assertEqual(1, recovery.count("wait_for_reboot 420"))
         self.assertLess(
             recovery.index('wait_media_provider_hook_ready "module-boot"'),
-            recovery.index("adb reboot"),
+            recovery.index("wait_for_reboot 420"),
         )
         self.assertLess(
-            recovery.index("adb reboot"),
+            recovery.index("wait_for_reboot 420"),
             recovery.index('wait_media_provider_hook_ready "module-clean-boot"'),
         )
         # 进程级自愈必须先于整机重启：先重启 MediaProvider 进程重新走 specialize，
@@ -2792,7 +2725,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
         self.assertLess(
             recovery.index('wait_media_provider_hook_ready "module-restart"'),
-            recovery.index("adb reboot"),
+            recovery.index("wait_for_reboot 420"),
         )
         self.assertLess(
             install.index("restart_media_provider_process() {"),
@@ -2863,7 +2796,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_test_app_install_waits_for_package_service(self) -> None:
         install = read(".github/tests/install-storage-redirect-module.sh")
-        section_text = section(install, "install_test_app_before_module_boot()", "seed_storage_redirect_test_environment()")
+        section_text = section(install, "install_test_app_before_module_boot()", "ensure_test_app_available()")
         self.assertIn("cmd package list packages", section_text)
         self.assertIn("APP_INSTALL_ATTEMPTS", section_text)
         self.assertIn("adb reconnect", section_text)
@@ -2871,7 +2804,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_test_flow_waits_for_services_after_module_reboot(self) -> None:
         flow = read(".github/tests/run-android-test-flow.sh")
         post_install = section(
-            flow, 'bash "${MODULE_INSTALL_SCRIPT', "appops set me.fakerqu.test.storageredirect"
+            flow, 'bash .github/tests/install-storage-redirect-module.sh', "appops set me.fakerqu.test.storageredirect"
         )
         self.assertIn("wait_for_adb_ready", post_install)
         self.assertIn("package_service_deadline", post_install)
@@ -2885,7 +2818,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "prepare_device_health\n",
         )
         post_install = section(
-            flow, 'bash "${MODULE_INSTALL_SCRIPT', "appops set me.fakerqu.test.storageredirect"
+            flow, 'bash .github/tests/install-storage-redirect-module.sh', "appops set me.fakerqu.test.storageredirect"
         )
 
         self.assertIn("service call window 137 i32 0", workaround)
@@ -2936,7 +2869,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         nonzero = service.index('if [ "$start_status" -ne 0 ]; then', start)
         nonzero_end = service.index('\n    fi\n    if [ "$start_status" -eq 0 ]', nonzero)
         result = service.index(
-            'if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then',
+            'if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" >"$output_file"; then',
             nonzero_end,
         )
 
@@ -2985,7 +2918,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(restart, service)
         self.assertIn("AddSeconds(30)", code)
         self.assertIn("Invoke-AdbWithTimeout", code[restart:service])
-        self.assertIn("-and $deviceSdk -ge 37", code)
+        self.assertIn("Set-DownloadTestNetwork prepare", code)
+        self.assertIn("Set-DownloadTestNetwork restore", code[finally_block:])
         self.assertIn("$isEmulator", code)
         self.assertIn("$dlServer.Kill()", code[finally_block:])
         self.assertIn("$dlServer.WaitForExit(5000)", code[finally_block:])
@@ -2997,15 +2931,40 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("SRT_DL_REVERSE_PORT=\"$dl_reverse_port\"", bash_scenario)
         self.assertIn("timeout 15 adb reverse --remove", bash_scenario)
         self.assertIn('SRT_DL_TMP_DIR="$dl_dir"', bash_scenario)
+        self.assertIn("set_download_test_network prepare || return 1", bash_scenario)
+        self.assertIn("set_download_test_network restore", bash_scenario)
+
+    def test_sandbox_rebuild_prepares_parent_group_before_module_start(self) -> None:
+        bash_case = section(
+            self.bash, "    41)\n      # 沙盒根", "      ;;"
+        )
+        ps_case = section(
+            self.powershell, "    if ($Scenario -eq 41) {", "    # 未自行预置夹具"
+        )
+        for fixture in (bash_case, ps_case):
+            self.assertIn("parent_gid=", fixture)
+            self.assertIn("stat -c %g", fixture)
+            self.assertLess(fixture.index("chgrp"), fixture.index("rm -rf"))
+            self.assertNotIn("chown -R", fixture)
+        bash_check = section(
+            self.bash, "run_sandbox_root_metadata_scenario() {", "run_scenario() {"
+        )
+        ps_check = section(
+            self.powershell, "function Invoke-SandboxRootMetadataScenario {",
+            "function Invoke-Scenario {",
+        )
+        for checks in (bash_check, ps_check):
+            self.assertNotIn("chgrp", checks)
+        self.assertIn('check_private_tree_native_metadata "${label}-rebuild"', bash_check)
+        self.assertIn('check_private_tree_native_metadata "${label}-post-write"', bash_check)
+        self.assertIn('Test-PrivateTreeMetadata $Scenario "private-tree-rebuild"', ps_check)
+        self.assertIn('Test-PrivateTreeMetadata $Scenario "private-tree-post-write"', ps_check)
 
     def test_android17_diagnostics_do_not_report_expected_missing_files(self) -> None:
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")
         storage = section(flow, "print_storage_state()", "run_service_case()")
-        rootavd = read(".github/vendor/rootAVD/rootAVD.sh")
 
         self.assertIn("optional_storage_alias_absent path=", storage)
-        self.assertIn('if ! $BB wget -q --no-check-certificate $SRCURL$JSON || [ ! -s "$JSON" ]', rootavd)
-        self.assertLess(rootavd.index('[ ! -s "$JSON" ]'), rootavd.index('VER=$(json_value "version" < $JSON)'))
 
     def test_media_provider_readiness_rejects_query_errors_and_uses_ps_fallback(self) -> None:
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")
@@ -3948,6 +3907,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("private_bind_present", body)
         self.assertIn("/proc/${drift_pid}/mountinfo", body)
         self.assertIn('[ "$private_bind_present" -eq 0 ]', body)
+        ps = section(self.powershell, "function Invoke-OwnerDriftOwnDirScenario {", "function Set-ReadOnlySeed {")
+        self.assertIn("$privateBind = Test-Su", ps)
+        self.assertIn("-not $privateBind -and", ps)
+        self.assertIn("/proc/$driftPid/mountinfo", ps)
 
     def test_host_view_coverage_uses_live_session_fact(self) -> None:
         # 「宿主是否盖住视图根」不能只看本轮接入是否成功：接入因预算/应答失败而回退时，

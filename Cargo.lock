@@ -391,7 +391,7 @@ dependencies = [
 [[package]]
 name = "srx_hook"
 version = "1.1.1"
-source = "git+https://github.com/Kindness-Kismet/srx_hook.git?rev=bfb02a7b731157898fe7ad2b5108f02b0a742284#bfb02a7b731157898fe7ad2b5108f02b0a742284"
+source = "git+https://github.com/Kindness-Kismet/srx_hook.git?rev=481c45ac2ab10c2a5f15c4fad91485d4639b8dc5#481c45ac2ab10c2a5f15c4fad91485d4639b8dc5"
 dependencies = [
  "libc",
  "once_cell",

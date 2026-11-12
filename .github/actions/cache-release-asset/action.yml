@@ -1,0 +1,81 @@
+name: 缓存校验过的 GitHub release 资产
+description: 按 release 版本和 SHA-256 恢复或下载并缓存单个 APK/ZIP
+inputs:
+  name:
+    description: Cache namespace
+    required: true
+  url:
+    description: Release asset URL
+    required: true
+  version:
+    description: Release tag
+    required: true
+  asset:
+    description: Release asset filename
+    required: true
+  sha256:
+    description: Expected lowercase SHA-256
+    required: true
+  env-name:
+    description: GITHUB_ENV variable receiving the verified asset path
+    required: true
+  required-entries:
+    description: Optional comma-separated ZIP entries that must exist
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: 恢复 release 资产缓存
+      id: restore
+      uses: actions/cache/restore@v5.0.5
+      with:
+        path: ${{ runner.temp }}/release-assets/${{ inputs.name }}/${{ inputs.asset }}
+        key: ${{ runner.os }}-${{ inputs.name }}-${{ inputs.version }}-${{ inputs.sha256 }}
+
+    - name: 校验或下载 release 资产
+      shell: bash
+      env:
+        ASSET_CACHE_NAME: ${{ inputs.name }}
+        ASSET_URL: ${{ inputs.url }}
+        ASSET_NAME: ${{ inputs.asset }}
+        ASSET_SHA256: ${{ inputs.sha256 }}
+        ASSET_ENV_NAME: ${{ inputs.env-name }}
+        ASSET_REQUIRED_ENTRIES: ${{ inputs.required-entries }}
+      run: |
+        set -euo pipefail
+        [[ "$ASSET_CACHE_NAME" =~ ^[a-z0-9-]+$ ]]
+        [[ "$ASSET_ENV_NAME" =~ ^[A-Z][A-Z0-9_]*$ ]]
+        [[ "$ASSET_NAME" =~ ^[A-Za-z0-9._+-]+$ ]]
+        [[ "$ASSET_SHA256" =~ ^[0-9a-f]{64}$ ]]
+        case "$ASSET_URL" in
+          https://github.com/*/releases/download/*/"$ASSET_NAME") ;;
+          *) echo "Invalid GitHub release asset URL" >&2; exit 1 ;;
+        esac
+        cache_dir="$RUNNER_TEMP/release-assets/$ASSET_CACHE_NAME"
+        asset="$cache_dir/$ASSET_NAME"
+        mkdir -p "$cache_dir"
+        if [ ! -f "$asset" ] || ! echo "$ASSET_SHA256  $asset" | sha256sum --check --status; then
+          rm -f "$asset"
+          curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors "$ASSET_URL" -o "$asset.part"
+          echo "$ASSET_SHA256  $asset.part" | sha256sum --check
+          mv "$asset.part" "$asset"
+        fi
+        python3 - "$asset" "$ASSET_REQUIRED_ENTRIES" <<'PY'
+        import sys
+        import zipfile
+
+        with zipfile.ZipFile(sys.argv[1]) as archive:
+            required = set(filter(None, sys.argv[2].split(",")))
+            missing = required - set(archive.namelist())
+            if missing or archive.testzip() is not None:
+                raise SystemExit(f"Invalid release archive; missing={sorted(missing)}")
+        PY
+        echo "$ASSET_ENV_NAME=$asset" >> "$GITHUB_ENV"
+
+    - name: 保存 release 资产缓存
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5.0.5
+      with:
+        path: ${{ runner.temp }}/release-assets/${{ inputs.name }}/${{ inputs.asset }}
+        key: ${{ runner.os }}-${{ inputs.name }}-${{ inputs.version }}-${{ inputs.sha256 }}

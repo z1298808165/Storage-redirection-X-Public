@@ -283,13 +283,22 @@ class MediaDirectoryScopeTest(unittest.TestCase):
 class FuseBackingLifetimeTest(unittest.TestCase):
     def test_both_reply_paths_retain_registration_until_release(self):
         source = read_fuse_redirect_core()
-        self.assertIn("_backing: Option<Arc<fuser::BackingId>>", source)
+        self.assertIn("backings: HashMap<(u64, u64), RegisteredBacking>", source)
+        registration = function_body(source, "fn backing_for_open_file(")
+        self.assertIn("(metadata.dev(), metadata.ino())", registration)
+        self.assertIn("state.backings.entry(key)", registration)
+        self.assertIn("backing.handles += 1", registration)
+        self.assertIn("open_file.backing_key = Some(key)", registration)
         for signature, reply in (("fn open(", "reply.opened_passthrough"), ("fn create(", "reply.created_passthrough")):
             body = function_body(source, signature)
-            self.assertIn("_backing: None", body)
-            self.assertIn("open_file._backing = Some(Arc::clone(&backing))", body)
-            self.assertLess(body.index("open_file._backing ="), body.index(reply))
-        self.assertIn("state.files.remove", function_body(source, "fn release("))
+            self.assertIn("backing_key: None", body)
+            self.assertIn("self.backing_for_open_file(fh, &file, || reply.open_backing(&file))", body)
+            self.assertLess(body.index("self.backing_for_open_file("), body.index(reply))
+        release = function_body(source, "fn release(")
+        self.assertIn("state.files.remove", release)
+        self.assertIn("backing.handles -= 1", release)
+        self.assertIn("if backing.handles == 0", release)
+        self.assertIn("state.backings.remove(&key)", release)
 
 
 if __name__ == "__main__":

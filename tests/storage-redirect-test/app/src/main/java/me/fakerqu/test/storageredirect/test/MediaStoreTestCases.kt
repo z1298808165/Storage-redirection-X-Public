@@ -497,14 +497,22 @@ class MediaStoreTestCases(
         val payload = args.payloadOr(TestFixtures.initialPayload(mediaType))
         val fileName = args.fileName ?: TestFixtures.fileName(mediaType)
         val uri =
-            api.createMedia(
-                mediaType,
-                volume,
-                fileName,
-                payload,
-                args.relativePath,
-                args.keepPending,
-            )
+            try {
+              api.createMedia(
+                  mediaType,
+                  volume,
+                  fileName,
+                  payload,
+                  args.relativePath,
+                  args.keepPending,
+              )
+            } catch (e: Exception) {
+              if (!isAccessDenied(e)) throw e
+              return@measure testCase.pass(
+                  message = "create denied as expected",
+                  metadata = mapOf("fileName" to fileName, "error" to e.message.orEmpty()),
+              )
+            }
         if (uri != null) {
           return@measure testCase.fail(
               message = "createMedia unexpectedly succeeded",
@@ -516,8 +524,8 @@ class MediaStoreTestCases(
                   ),
           )
         }
-        testCase.pass(
-            message = "create denied as expected",
+        testCase.fail(
+            message = "creation failed without an access-denial reason",
             metadata =
                 mapOf(
                     "fileName" to fileName,

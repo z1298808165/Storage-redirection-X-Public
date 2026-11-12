@@ -1,0 +1,78 @@
+name: Android 模拟器与 AvdLite 4K 缓存
+description: 查询稳定版模拟器和 AvdLite 4K 资产，校验缓存后导入独立 AVD
+inputs:
+  api-level:
+    description: Android API level
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: 检查 Android Emulator 最新稳定版
+      id: revisions
+      shell: bash
+      run: python3 .github/scripts/android_sdk_revision.py >> "$GITHUB_OUTPUT"
+
+    - name: 准备 Android Emulator 缓存目录权限
+      shell: bash
+      run: |
+        if [ -d "$ANDROID_HOME/emulator" ]; then
+          sudo chown -R "$(id -u):$(id -g)" "$ANDROID_HOME/emulator"
+        fi
+
+    - name: 恢复 Android 模拟器程序缓存
+      id: emulator-cache
+      uses: actions/cache/restore@v5.0.5
+      with:
+        path: ${{ env.ANDROID_HOME }}/emulator
+        key: ${{ runner.os }}-android-emulator-${{ steps.revisions.outputs.emulator }}
+
+    - name: 安装 Android 模拟器程序
+      if: steps.emulator-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        for attempt in 1 2 3; do
+          if sdkmanager --install emulator --channel=0; then
+            break
+          fi
+          if [ "$attempt" -eq 3 ]; then
+            exit 1
+          fi
+          rm -rf "$ANDROID_HOME/.temp" "$ANDROID_HOME/emulator"
+          sleep $((attempt * 5))
+        done
+
+    - name: 核对已安装 Android Emulator revision
+      shell: bash
+      env:
+        EMULATOR_REVISION: ${{ steps.revisions.outputs.emulator }}
+      run: python3 .github/scripts/android_sdk_revision.py verify "$ANDROID_HOME/emulator/source.properties" "$EMULATOR_REVISION"
+
+    - name: 保存 Android 模拟器程序缓存
+      if: steps.emulator-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5.0.5
+      with:
+        path: ${{ env.ANDROID_HOME }}/emulator
+        key: ${{ runner.os }}-android-emulator-${{ steps.revisions.outputs.emulator }}
+
+    - name: 检查 AvdLite 4K 当前资产
+      id: image
+      shell: bash
+      env:
+        ANDROID_API_LEVEL: ${{ inputs.api-level }}
+        GH_TOKEN: ${{ github.token }}
+      run: python3 .github/scripts/resolve_test_release.py "avdlite-$ANDROID_API_LEVEL" >> "$GITHUB_OUTPUT"
+
+    - name: 缓存 AvdLite 4K
+      uses: ./.github/actions/cache-release-asset
+      with:
+        name: avdlite-4k
+        url: ${{ steps.image.outputs.url }}
+        version: ${{ steps.image.outputs.version }}
+        asset: ${{ steps.image.outputs.asset }}
+        sha256: ${{ steps.image.outputs.sha256 }}
+        env-name: AVDLITE_CACHE_ZIP
+        required-entries: manifest.json,verification.json,SHA256SUMS,import-avd.py,avd-config.json,x86_64/system.img,x86_64/ramdisk.img,x86_64/kernel-ranchu
+
+    - name: 导入 AvdLite 4K
+      shell: bash
+      run: python3 .github/scripts/import_avdlite.py

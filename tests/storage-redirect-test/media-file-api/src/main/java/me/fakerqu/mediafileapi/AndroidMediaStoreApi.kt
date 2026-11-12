@@ -20,6 +20,7 @@ import androidx.core.database.getStringOrNull
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 
 class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
@@ -45,7 +46,7 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
         resultList.add(it.mapToColumnListRow())
       }
       resultList
-    } ?: emptyList()
+    } ?: throw IOException("MediaStore query returned no cursor: $uri")
   }
 
   override fun loadThumbnail(uri: Uri, size: Size): Bitmap? {
@@ -127,12 +128,7 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             )
           }
         }
-    val uri =
-        try {
-          context.contentResolver.insert(collectionUri, pendingValues)
-        } catch (_: Exception) {
-          null
-        } ?: return null
+    val uri = context.contentResolver.insert(collectionUri, pendingValues) ?: return null
     val written =
         try {
           context.contentResolver.openFileDescriptor(uri, "w")?.use { fd ->
@@ -142,8 +138,11 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             }
             true
           } ?: false
-        } catch (_: Exception) {
-          false
+        } catch (e: Exception) {
+          try {
+            context.contentResolver.delete(uri, null, null)
+          } catch (_: Exception) {}
+          throw e
         }
     if (!written) {
       try {
@@ -158,14 +157,16 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             put(MediaStore.MediaColumns.SIZE, content.size.toLong())
           }
       return try {
-        context.contentResolver.update(uri, publishedValues, null, null)
+        check(context.contentResolver.update(uri, publishedValues, null, null) == 1) {
+          "media publication did not update exactly one row: $uri"
+        }
         uri
-      } catch (_: Exception) {
+      } catch (e: Exception) {
         try {
           context.contentResolver.delete(uri, null, null)
         } catch (_: Exception) {}
         deleteExistingMediaRows(collectionUri, targetRelativePath, fileName)
-        null
+        throw e
       }
     }
     // 保持记录处于待处理状态，使所属应用能在媒体扫描器重新索引前立即重新打开 URI，
@@ -204,12 +205,7 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             )
           }
         }
-    val uri =
-        try {
-          context.contentResolver.insert(collectionUri, values)
-        } catch (_: Exception) {
-          null
-        } ?: return null
+    val uri = context.contentResolver.insert(collectionUri, values) ?: return null
     val written =
         try {
           context.contentResolver.openOutputStream(uri, "w")?.use { stream ->
@@ -217,8 +213,11 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             stream.flush()
             true
           } ?: false
-        } catch (_: Exception) {
-          false
+        } catch (e: Exception) {
+          try {
+            context.contentResolver.delete(uri, null, null)
+          } catch (_: Exception) {}
+          throw e
         }
     if (!written) {
       try {
@@ -233,14 +232,16 @@ class AndroidMediaStoreApi(private val context: Context) : MediaStoreApi {
             put(MediaStore.MediaColumns.SIZE, content.size.toLong())
           }
       return try {
-        context.contentResolver.update(uri, publishedValues, null, null)
+        check(context.contentResolver.update(uri, publishedValues, null, null) == 1) {
+          "media publication did not update exactly one row: $uri"
+        }
         uri
-      } catch (_: Exception) {
+      } catch (e: Exception) {
         try {
           context.contentResolver.delete(uri, null, null)
         } catch (_: Exception) {}
         deleteExistingMediaRows(collectionUri, relativePath, fileName)
-        null
+        throw e
       }
     }
     return uri
