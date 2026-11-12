@@ -99,6 +99,13 @@ foreach ($rawLine in ($message -split "`r?`n")) {
         $activeChangelogField = $null
         continue
     }
+    # `文档同交：` 与致谢字段同类：它是说明性元数据，不是更新日志字段，不能并进上一个
+    # 更新日志字段（否则放在 `范围：` 之后会被吞掉，判据就失效）。做成独立条目后，
+    # 它在正文任意位置都有效。
+    if ($line -match '^文档同交[：:]') {
+        $activeChangelogField = $null
+        continue
+    }
     $fieldMatch = [regex]::Match($line, '^(变更|用户影响|范围|限制|验证)[：:]\s*(.*)$')
     if ($fieldMatch.Success) {
         $fieldName = $fieldMatch.Groups[1].Value
@@ -151,7 +158,24 @@ if ($match.Success) {
 
     $pathKinds = @($paths | Where-Object { $_ } | ForEach-Object { Get-PathKind -Path $_ } | Sort-Object -Unique)
     if ($pathKinds.Count -gt 1 -and $pathKinds -contains "docs") {
-        throw "文档与非文档改动必须按目的拆分。"
+        # AGENTS.md 提交信息规范允许「配套文档只有在无法独立理解或会导致提交不可用时
+        # 才可与实现同交，并应在提交正文说明原因」。校验必须与规范一致：混装本身不是
+        # 拒绝理由，缺「原因说明」才是。原因由提交正文的「文档同交：」字段承载，值须是
+        # 具体原因；该字段应放在其它更新日志字段之前，避免被字段续行规则并入。
+        $coCommitReason = $null
+        foreach ($line in ($message -split "`r?`n")) {
+            $reasonMatch = [regex]::Match($line, '^文档同交[：:]\s*(.*)$')
+            if ($reasonMatch.Success) {
+                $coCommitReason = $reasonMatch.Groups[1].Value.Trim()
+                break
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($coCommitReason)) {
+            throw "文档与非文档改动同交时，正文必须写「文档同交：<原因>」说明为什么配套文档无法独立成笔（见 AGENTS.md 提交信息规范）；否则请按目的拆分。"
+        }
+        if ($coCommitReason.Length -lt 6) {
+            throw "「文档同交：」的原因必须是具体说明，不能是占位词。"
+        }
     }
     $isDocumentationType = $title -match '^\u6587\u6863(?:\(|\uFF1A)'
     $isCiType = $title -match '^CI(?:\(|\uFF1A)'

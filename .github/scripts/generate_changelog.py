@@ -31,6 +31,10 @@ BODY_FIELD_PATTERN = re.compile(r"^(变更|用户影响|范围|限制|验证)[�
 # 致谢类字段：提交正文里记录外部思路来源与贡献者，必须同样出现在 CI 与发布日志里。
 # 它们不是普通正文，不能并进上一个字段（否则会被「验证」吞掉，日志里永远看不到）。
 CREDIT_FIELD_PATTERN = re.compile(r"^(致谢|思路来源|贡献者|上游来源|上游作者)[：:]\s*(.*)$")
+# 说明性元数据字段：既不进更新日志，也不能并进上一个更新日志字段。
+# `文档同交：` 用来声明「本笔的配套文档无法独立成笔」的原因（见 AGENTS.md 提交信息规范），
+# 与 validate-commit.ps1 的同名判据对应。
+STANDALONE_META_FIELD_PATTERN = re.compile(r"^文档同交[：:]")
 CREDIT_PEOPLE_LABELS = ("贡献者", "上游作者")
 CREDIT_SOURCE_LABELS = ("思路来源", "上游来源")
 # 致谢里的链接必须显式写成 Markdown 链接：GitHub 的自动链接会把紧跟在 URL 之后的
@@ -146,6 +150,11 @@ def parse_body_fields(body: str) -> dict[str, str]:
         if match:
             fields.setdefault(match.group(1), []).append(match.group(2).strip())
             # 致谢字段是独立条目：随后的正文行不能再续到上一个字段里。
+            current_field = ""
+            continue
+        # `文档同交：` 与致谢字段同类：说明性元数据，不是更新日志字段，也不能并进上一个
+        # 更新日志字段（否则放在 `范围：` 之后会被吞掉，日志里出现莫名内容）。
+        if STANDALONE_META_FIELD_PATTERN.match(line):
             current_field = ""
             continue
         match = BODY_FIELD_PATTERN.match(line)
