@@ -647,10 +647,13 @@ impl MountPlanner {
             // 自有 media 子树随后会被 bind 回系统 MediaProvider 视图，而 MP 的
             // FuseDaemon 只能用自身身份打开下层文件（附加组 media_rw/ext_data_rw，
             // CapEff=0）：owner-only 入口在系统视图里连属主自己都打不开（原生同样
-            // 打不开，这是 MP 的既有语义）。这里**不改任何权限位**，只把这种
-            // 「系统视图无法服务」的入口记进诊断，便于现场按日志定位。
+            // 打不开，这是 MP 的既有语义）。这里在把目录交回共享视图**之前**把组位
+            // 归一到「属主位的镜像」并复核，否则「拿回系统视图即打不开」，应用侧就是
+            // PRAGMA journal_mode 阶段的 SQLITE_CANTOPEN（真机 2026-11-12 duchamp）。
+            // 位置必须在幂等判据之前：已经恢复过的目录会走 `continue`，那恰好是最需要
+            // 归一的已落地场景。
             if is_media {
-                self.report_unserviceable_private_entries(&backend_source);
+                self.normalize_own_private_sqlite_access(&backend_source);
             }
             // 三类自有私有目录统一保留系统 FUSE 的访问控制与上下文：源取系统视图锚点，
             // 缺失时不把 /data/media 直接暴露给应用，保留诊断等待后续恢复。
@@ -769,21 +772,6 @@ impl MountPlanner {
         restored_count
     }
 
-    /// 只读诊断：统计自有 media 子树里「系统视图打不开」的 sqlite 入口。
-    ///
-    /// MediaProvider 的 FuseDaemon 用自身身份打开下层文件（AOSP `pf_open` 的
-    /// `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核），而它的附加组只有
-    /// media_rw(1023)/ext_data_rw(1078)、`CapEff: 0`。owner-only 入口在系统视图里
-    /// **连属主自己都打不开**——真机 2026-11-04 duchamp 实证：root 经 MP 视图 open
-    /// 一个 0600 文件同样 EACCES，说明拒绝来自 MP 而非内核 DAC。这是 MP 的既有语义，
-    /// 模块**不去改权限位绕开它**（改了等于替用户决定别人的文件该有什么权限，其它
-    /// 场景的后果不可预知），只把现场记进 verbose 日志，便于按 `mode=` 定位到底是
-    /// 哪个入口、由哪条绕过系统视图的写入路径产生的。
-    ///
-    /// 判据只看「属主有、组没有」这一条：组位覆盖了属主位时 MP 就能服务，无需上报。
-    /// 深度与条目数都有上界，避免在大媒体目录上做全量遍历。
-    /// 判据只看「属主有、组没有」这一条：组位覆盖了属主位时 MP 就能服务，无需上报。
-    /// 深度与条目数都有上界，避免在大媒体目录上做全量遍历。
     /// 失败现场的存储视图快照：本进程命名空间里 `/storage/emulated*` 的挂载清单 +
     /// root 身份逐级可达性。
     ///
@@ -792,6 +780,8 @@ impl MountPlanner {
     ///   重试/延后才有可能成功；
     /// - **视图在、但该名字被拒绝**（`root_dir=true`，只有目标级 errno≠0）→ 那是数据面
     ///   或 DAC 语义问题，重试永远不会成功，必须换路径。
+    ///
+    /// 判据只看「属主有、组没有」这一条：组位覆盖了属主位时 MP 就能服务，无需上报。
     fn describe_storage_view(&self, storage_path: &str) -> String {
         let mut mounts = String::new();
         for line in read_mountinfo().unwrap_or_default().lines() {
@@ -877,14 +867,40 @@ impl MountPlanner {
         format!("no({})", crate::platform::errno::last())
     }
 
-    fn report_unserviceable_private_entries(&self, media_root: &str) {
+    /// 让自有 media 子树里的 sqlite 入口对系统视图可服务：补齐组位、复核、留痕。
+    ///
+    /// MediaProvider 的 FuseDaemon 用自身身份打开下层文件（AOSP `pf_open` 的
+    /// `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核，内核不会改用调用方
+    /// 凭据重开），而它的附加组只有 media_rw(1023)/ext_data_rw(1078)、`CapEff: 0`。
+    /// 于是**组位就是可服务性**：`0660` 能开，owner-only 一律 EACCES——而且连属主自己
+    /// 也打不开，因为这次 `open()` 是 MP 代发的。真机 2026-11-12 duchamp 实证：root 经
+    /// MP 视图读 0600 的 `-wal`/`-shm` 得 EACCES，管理器侧就是
+    /// `SQLITE_CANTOPEN (code 14) while compiling: PRAGMA journal_mode`（一次冷启 16 条）。
+    ///
+    /// owner-only 只可能来自绕过 MP 的写入路径：SQLite 自建边车按 umask 077 落 0600，
+    /// 而 f2fs 直连层不会像 MP 那样把 mode 归一到 0664。这条产地已在写入侧关闭
+    /// （恢复源改回 MediaProvider FUSE 视图，见 `mount::SystemViewClone`）：本函数因此是
+    /// **历史遗留清理**，同时给「将来又以别的路径产出 owner-only 入口」留一道幂等兜底。
+    ///
+    /// 只做**组位镜像**（`mode |= (mode & 0o700) >> 3`）：不改属主、不动 other 位，也不
+    /// 给「属主自己只读」的入口额外授予写权限。`chmod` 会同时把继承来的 ACL mask 抬到
+    /// 新组位——媒体目录带 MediaProvider 的默认 ACL，0600 创建时内核把 `mask` 压成 `---`，
+    /// 光改 `group::` 条目无效，必须靠 chmod 重置 mask 才让 `group:media_rw` 真正生效。
+    /// 幂等：组位已覆盖属主位时不再改动；只处理属主就是本应用、名字属于 sqlite 的入口。
+    ///
+    /// 深度与条目数都有上界（与恢复主链路同源），避免在大媒体目录上做全量遍历。
+    /// 归一失败不回退任何挂载：`metadata_repair` 关闭的实验构建仍然只复核不修改。
+    fn normalize_own_private_sqlite_access(&self, media_root: &str) {
         use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
         const MAX_DEPTH: usize = 4;
         const MAX_ENTRIES: usize = 512;
+        let can_repair = crate::metadata_repair::enabled();
 
         let mut queue = vec![(std::path::PathBuf::from(media_root), 0usize)];
         let mut visited = 0usize;
+        let mut normalized = 0usize;
+        let mut truncated = false;
         let mut unserviceable = 0usize;
         let mut sample = String::new();
         while let Some((dir, depth)) = queue.pop() {
@@ -894,11 +910,7 @@ impl MountPlanner {
             for entry in entries.flatten() {
                 visited += 1;
                 if visited > MAX_ENTRIES {
-                    log::debug!(
-                        "own private serviceability scan truncated root={} visited={}",
-                        media_root,
-                        visited
-                    );
+                    truncated = true;
                     break;
                 }
                 let Ok(file_type) = entry.file_type() else {
@@ -911,6 +923,8 @@ impl MountPlanner {
                     }
                     continue;
                 }
+                // 只认普通文件：符号链接的 mode 无意义（`set_permissions` 会打到链接目标
+                // 上），设备/管道也不是 sqlite 入口。
                 if !file_type.is_file() {
                     continue;
                 }
@@ -930,14 +944,55 @@ impl MountPlanner {
                 {
                     continue;
                 }
+                if can_repair {
+                    let fixed_mode = mode | owner_bits_for_group;
+                    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fixed_mode))
+                        .is_ok()
+                    {
+                        normalized += 1;
+                    }
+                }
+                // 复核读回的 mode 才是 MP 实际会看到的值：chmod 成功后语义由它决定，
+                // 失败时这里仍然会命中，两步不需要各写一份判据。
+                let verified = std::fs::symlink_metadata(&path)
+                    .map(|metadata| metadata.permissions().mode() & 0o7777)
+                    .unwrap_or(mode);
+                if verified & owner_bits_for_group == owner_bits_for_group {
+                    continue;
+                }
                 unserviceable += 1;
                 if sample.is_empty() {
-                    sample = format!("{} mode={:o}", path.display(), mode);
+                    sample = format!("{} mode={:o}", path.display(), verified);
                 }
             }
+            // 预算耗尽后队列里剩下的目录不再逐层 read_dir：`break` 只跳出内层循环，
+            // 内层已判定 truncated 时继续 pop 只会白扫一遍剩余目录。
+            if truncated {
+                break;
+            }
+        }
+        if normalized > 0 {
+            // 用 warn 而不是 info：`is_record_enabled` 只放行 warn/error（verbose 关闭时
+            // info 一律丢弃），而这条正是「应用曾经绕过系统视图写过 sqlite 入口」的唯一
+            // 事后证据——本次故障之所以只能靠应用侧 SQLITE_CANTOPEN 反推，就是因为模块
+            // 全程无声。修好即幂等，不会每次挂载重复刷。
+            log::warn!(
+                "own private sqlite access repaired count={} root={}",
+                normalized,
+                media_root
+            );
+        }
+        if truncated {
+            log::debug!(
+                "own private serviceability scan truncated root={} visited={}",
+                media_root,
+                visited
+            );
         }
         if unserviceable > 0 {
-            log::debug!(
+            // 提升到 warn：这条曾经是 debug，verbose 关闭时模块全程无声，现场只能靠
+            // 应用侧 SQLITE_CANTOPEN 反推。
+            log::warn!(
                 "own private sqlite entries unserviceable by system view count={} root={} sample={}",
                 unserviceable,
                 media_root,
@@ -1008,11 +1063,13 @@ impl MountPlanner {
             log::warn!("system view clone attach unusable root={}", anchor_root);
             detach_mount_if_present(&anchor_root);
         }
-        // 回退：没有克隆（例如 daemon 路径）时按原样从系统视图 bind 一个锚点。
-        // 这条回退在坍缩形态下可能失败——那时锚点里的 `<user>` 已被本模块别名视图接管
-        // （root 请求无会话策略 → `fallback_deny` → ENOENT）；有克隆时不会走到这里。
-        // 与 SystemViewClone::capture 同源：`/mnt/user/<u>/emulated` 已被本模块别名视图覆盖。
-        let source = format!("/mnt/pass_through/{}/emulated", self.user_id);
+        // 回退：没有克隆时按原样 bind 一个锚点。源必须是**系统视图**：应用命名空间里
+        // `/mnt/user/<user>/emulated` 已被本模块 FUSE 覆盖，所以这里借 `/proc/1/root`
+        // 在 init 命名空间里解析同一条路径（模块从不挂载 init 命名空间），拿到的才是
+        // MediaProvider 的 FUSE 视图。退化成 `/mnt/pass_through/...`（f2fs）会让自有私有
+        // 目录里的 SQLite 边车按 umask 落 0600，MP 打不开 → `SQLITE_CANTOPEN`（真机
+        // 2026-11-12 duchamp：管理器一次冷启 16 条）。
+        let source = format!("/proc/1/root/mnt/user/{}/emulated", self.user_id);
         if !fs::is_directory(&source) {
             log::warn!("system view source unavailable: {}", source);
             return None;

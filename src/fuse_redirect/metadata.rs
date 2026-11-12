@@ -154,7 +154,8 @@ pub(super) fn adjust_metadata_mode(
         // -wal，主库被 WAL 回滚成 4096B）。
         //
         // 注意这里只在**新建**时决定落盘权限，不回头修改任何已存在文件；历史遗留的
-        // owner-only 入口只做诊断上报（见 `mount::apply::report_unserviceable_private_entries`）。
+        // owner-only 入口由 `mount::apply::normalize_own_private_sqlite_access` 在把
+        // 自有 media 子树交回系统视图之前按组位镜像补齐。
         return if is_dir {
             (mode & 0o7000) | 0o775
         } else {
