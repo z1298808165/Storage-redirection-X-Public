@@ -511,11 +511,18 @@ class SystemViewCloneTest(unittest.TestCase):
         body = self.apply[start : self.apply.index("struct SystemViewAnchor", start)]
         self.assertIn("system_view_clone.borrow_mut().take()", body)
         self.assertIn("clone.attach_at(&anchor_root)", body)
-        # 克隆优先：其分支必须早于回退用的 /mnt/user 源。
+        # 克隆优先：其分支必须早于回退源。
+        #
+        # 回退源必须是**系统视图**：借 `/proc/1/root` 在 init 命名空间里解析同一条路径
+        # （模块从不挂载 init 命名空间，那里的 `/mnt/user/<user>/emulated` 恒为
+        # MediaProvider 的 FUSE）。不得退回 `/mnt/pass_through/...` 这类 f2fs 直连后端——
+        # 那样自有私有目录里的 SQLite 边车会按调用方 umask 落 0600，MP 用自身身份打不开，
+        # 跨进程读同一份库的一方即 `SQLITE_CANTOPEN`（真机 2026-11-12 duchamp 实测）。
+        self.assertNotIn('format!("/mnt/pass_through/', body)
         self.assertLess(
             body.index("system_view_clone.borrow_mut().take()"),
-            body.index('format!("/mnt/pass_through/{}/emulated"'),
-            "克隆锚点必须优先于旧的回退源",
+            body.index('format!("/proc/1/root/mnt/user/{}/emulated"'),
+            "克隆锚点必须优先于回退的系统视图源",
         )
 
 
