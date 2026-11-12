@@ -697,18 +697,39 @@ fn locate_android_jar() -> Option<PathBuf> {
         .or_else(|_| env::var("ANDROID_SDK_ROOT"))
         .ok()?;
     let platforms = PathBuf::from(sdk).join("platforms");
-    let mut best: Option<(u32, PathBuf)> = None;
+    let mut best: Option<((u32, u32), PathBuf)> = None;
     for entry in std::fs::read_dir(&platforms).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(api) = name.strip_prefix("android-").and_then(|s| s.parse().ok()) else {
+        // 平台目录名有两种形态：`android-<api>`，以及 SDK 36.1/37.0 起的
+        // `android-<api>.<minor>`（小版本单独成目录）。只按整数解析会把后者整片跳过——
+        // 新装的 SDK 往往只有 `android-37.0`，于是这里报 `android.jar not found` 直接
+        // 构建失败；即使同时存在 `android-36`，也会静默退回更老的平台 jar。两种形态都认，
+        // 按 (api, minor) 取最高。
+        let Some(rest) = name.strip_prefix("android-") else {
             continue;
         };
+        let mut segments = rest.split('.');
+        let Some(api) = segments.next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let minor = match segments.next() {
+            Some(text) => match text.parse::<u32>() {
+                Ok(value) => value,
+                // `android-37.2-beta1` 这类预览目录没有稳定的 API 语义，跳过。
+                Err(_) => continue,
+            },
+            None => 0,
+        };
+        if segments.next().is_some() {
+            continue;
+        }
         let jar = entry.path().join("android.jar");
         if !jar.exists() {
             continue;
         }
-        if best.as_ref().is_none_or(|(v, _)| api > *v) {
-            best = Some((api, jar));
+        let key = (api, minor);
+        if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
+            best = Some((key, jar));
         }
     }
     best.map(|(_, p)| p)
