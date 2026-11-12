@@ -1147,6 +1147,83 @@ function Require-OwnPrivateRealLanding {
     $false
 }
 
+function Get-SuValue {
+    param([string]$Command)
+    (@(Invoke-Su $Command) | Select-Object -Last 1) -replace '\s', ''
+}
+
+# 回归守卫（2026-11-12 真机事故后的固化断言）：自有私有目录 `Android/{data,media,obb}/<pkg>`
+# 的恢复源必须是**系统存储视图**（MediaProvider 的 FUSE），不能退化成 f2fs 直连后端。
+#
+# 为什么必须单独断言：恢复源错层时目录内容仍落在同一份后端，"文件写进去了/沙盒没有残留"
+# 这类断言**全部照过**——数据不分叉，分叉的是**服务方**与因此失效的 mode 归一。真实伤害是：
+# 应用在该目录新建的 SQLite 边车按自身 umask 落 `0600`，MP 用自身身份（附加组 media_rw /
+# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（duchamp
+# 2026-11-12：恢复源误取 `/mnt/pass_through/...`，管理器一次冷启 16 条）。
+#
+# 判据自校准，不写死设备号：
+# - 应用侧 `/proc/<pid>/root<path>` 与 init 命名空间 `/proc/1/root<path>` 的超级块设备号；
+#   模块从不挂载 init 命名空间，那里的同一路径恒为系统视图；
+# - f2fs 后端口令取 `/data/media/0` 的设备号，用来识别"被判据误当成系统视图"的直连 bind。
+# 于是：可见目录**不能**等于 f2fs 后端；而当 init 那边确实是系统视图（≠ f2fs）时，应用侧
+# 必须与它同一个 dev——这正是"恢复源取自系统视图"的机器可判定形式。
+function Require-OwnPrivateSystemViewIdentity {
+    param([string]$Scenario, [string]$Label, [string]$VisiblePath, [string]$CreatedFile)
+    $appPid = Get-AppPid
+    if ([string]::IsNullOrWhiteSpace($appPid)) {
+        $script:Failures.Add("$Scenario/$Label app process missing while checking own private view identity")
+        return $false
+    }
+    $appDev = Get-SuValue "stat -c %d '/proc/$appPid/root$VisiblePath' 2>/dev/null"
+    $systemDev = Get-SuValue "stat -c %d '/proc/1/root$VisiblePath' 2>/dev/null"
+    $backendDev = Get-SuValue "stat -c %d '/data/media/0' 2>/dev/null"
+    if ([string]::IsNullOrWhiteSpace($appDev)) {
+        $script:Failures.Add("$Scenario/$Label own private dir unreadable from app namespace: $VisiblePath")
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($systemDev) -or [string]::IsNullOrWhiteSpace($backendDev)) {
+        # 部分版本自有私有目录是独立卷（Android 13 的 Android/data|obb），init 命名空间里
+        # 没有同名路径，判据在这里取不到数：留一条可检索的跳过标记，不伪造结论。
+        Write-Host "  - own_private_view_identity_skipped label=$Label system='$systemDev' backend='$backendDev' path=$VisiblePath"
+        $systemDev = ""
+    }
+    $ok = $true
+    if ($appDev -eq $backendDev) {
+        # 主判据：可见目录直接落在 f2fs 后端上 = 恢复源退化成直连 bind。这条不受挂载传播影响
+        # （真机自证：在应用命名空间里手工 bind 后端会把 init 侧的参照一起改掉，只有比后端
+        # 设备号才抓得住）。
+        $script:Failures.Add("$Scenario/$Label own private dir served by f2fs backend app_dev=$appDev backend_dev=${backendDev}: $VisiblePath")
+        @(Invoke-Su "grep -E ' $VisiblePath ' /proc/$appPid/mountinfo 2>/dev/null || true") | ForEach-Object { Write-Host "  mount: $_" }
+        $ok = $false
+    } elseif (-not [string]::IsNullOrWhiteSpace($systemDev)) {
+        if ($systemDev -ne $backendDev -and $appDev -ne $systemDev) {
+            $script:Failures.Add("$Scenario/$Label own private dir not on the same system view app_dev=$appDev system_dev=${systemDev}: $VisiblePath")
+            @(Invoke-Su "grep -E ' $VisiblePath ' /proc/$appPid/mountinfo 2>/dev/null || true") | ForEach-Object { Write-Host "  mount: $_" }
+            $ok = $false
+        } else {
+            Write-Host "  - own_private_system_view label=$Label dev=$appDev path=$VisiblePath"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CreatedFile)) {
+        $mode = Get-SuValue "stat -c '%a' '$CreatedFile' 2>/dev/null"
+        if ([string]::IsNullOrWhiteSpace($mode) -or $mode -notmatch '^[0-7]{3,4}$') {
+            $script:Failures.Add("$Scenario/$Label own private file mode unreadable '$mode': $CreatedFile")
+            $ok = $false
+        } else {
+            # 系统视图（MP）写入会把 mode 归一到 0664；绕过 MP 的 f2fs 写入按调用方 umask
+            # 落 0600 —— 组位全 0 就是错层签名，也正是跨进程 SQLITE_CANTOPEN 的成因。
+            $perm = [Convert]::ToInt32($mode, 8)
+            if (($perm -band 0x38) -eq 0) {
+                $script:Failures.Add("$Scenario/$Label own private file is owner-only mode=$mode (expected group bits, MP normalises to 0664): $CreatedFile")
+                $ok = $false
+            } else {
+                Write-Host "  - own_private_system_view_mode label=$Label mode=$mode path=$CreatedFile"
+            }
+        }
+    }
+    $ok
+}
+
 function Test-PublicDirectoryOwner {
     param([string]$Scenario, [string]$Label, [string]$Path)
     $actual = ""
@@ -1544,6 +1621,11 @@ function Remove-RandomMediaStoreRows {
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_own_private_mediastore( \(\d+\))?\.jpg(,|$)") @("_data=.*/Android/media/$escapedAppId/Tencent/QQfile_recv/")
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_fuse_dcim_media( \(\d+\))?\.jpg(,|$)") @("relative_path=DCIM/SrtFuseQQ/", "_data=.*/DCIM/SrtFuseQQ/", "_data=.*/Android/data/$escapedAppId/sdcard/DCIM/SrtFuseQQ/")
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=srt_read_only_media( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/SrtReadOnlyMedia/", "_data=.*/Pictures/SrtReadOnlyMedia/", "_data=.*/Android/data/$escapedAppId/sdcard/Pictures/SrtReadOnlyMedia/")
+    # 夹具**根目录**会在 `file` 表留下目录行（`_data=…/Pictures/SrtReadOnlyMedia`，无扩展名），
+    # 与图片行名字不同、上面的模式匹配不到。复用设备上它一旦残留，场景 28 的图片查询就会
+    # `rowCount=1` 命中目录行并判定 `media row not found`（2026-11-12 A17 复用模拟器实测
+    # `_id=1027`；CI 每次新模拟器所以从未暴露）。
+    Remove-MediaStoreRowsByPattern "content://media/external/file" @("_display_name=SrtReadOnlyMedia( \(\d+\))?(,|$)") @("_data=.*/Pictures/SrtReadOnlyMedia(,|$)")
     Remove-MediaStoreRowsByPattern "content://media/external/video/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_video_\d+( \(\d+\))?\.mp4(,|$)") @("relative_path=Movies/", "_data=.*/Movies/", "_data=.*/Android/data/$escapedAppId/sdcard/Movies/")
     Remove-MediaStoreRowsByPattern "content://media/external/audio/media" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_audio_\d+( \(\d+\))?\.mp3(,|$)") @("relative_path=Music/", "_data=.*/Music/", "_data=.*/Android/data/$escapedAppId/sdcard/Music/")
     Remove-MediaStoreRowsByPattern "content://media/external/file" @("_display_name=(\.pending-\d+-|\.trashed-\d+-)?srt_file_\d+( \(\d+\))?\.txt(,|$)") @("relative_path=Documents/", "_data=.*/Documents/", "_data=.*/Android/data/$escapedAppId/sdcard/Documents/")
@@ -2439,6 +2521,13 @@ function Invoke-OwnPrivateDirectoriesScenario {
         $sandboxPath = "$($sandboxRoots[$index])/$fileName"
         $ok = (Invoke-OwnPrivateWriteCase $Scenario "own-$($labels[$index])" $requestPath $requestPath $backendPath $sandboxPath) -and $ok
     }
+    # 服务方守卫（2026-11-12 真机回归）：三类自有私有目录都必须由**系统视图**服务，
+    # 且应用在其中新建的文件不得是 owner-only。写用例本身只能证明"数据落对了地方"，
+    # 而恢复源退化成 f2fs 直连时数据照样落对，坏的是服务方与 mode 归一 —— 必须单独断言。
+    for ($index = 0; $index -lt $labels.Count; $index++) {
+        $createdFile = "$($backendRoots[$index])/srt_qqfile_recv_$($labels[$index]).txt"
+        $ok = (Require-OwnPrivateSystemViewIdentity "scenario-$Scenario" "own-$($labels[$index])-view" $requestRoots[$index] $createdFile) -and $ok
+    }
     # 真机回归（2026-09 报障，修复见提交 23388f01）：直写用例只覆盖应用自身命名空间视图，
     # 补一条经 MediaStore 的 provider 中介链路（insert(DATA=自身 Android/media/<pkg>/...)
     # → provider 侧 pending 创建与发布 → 回读），断言真实落点存在、沙盒无残留。
@@ -3007,6 +3096,7 @@ function Set-ReadOnlyMediaImage {
     $backendPath = "$backendDir/$ReadOnlyImageFile"
     $privatePath = Convert-ToBackendPath "$PrivateReadOnlyMediaRoot/$ReadOnlyImageFile"
     Remove-MediaStoreRowsByPattern "content://media/external/images/media" @("_display_name=srt_read_only_media( \(\d+\))?\.jpg(,|$)") @("relative_path=Pictures/SrtReadOnlyMedia/", "_data=.*/Pictures/SrtReadOnlyMedia/")
+    Remove-MediaStoreRowsByPattern "content://media/external/file" @("_display_name=SrtReadOnlyMedia( \(\d+\))?(,|$)") @("_data=.*/Pictures/SrtReadOnlyMedia(,|$)")
     Invoke-Su "mkdir -p '$backendDir'; rm -f '$privatePath'; printf '%s' '$ReadOnlyImageBase64' | base64 -d > '$backendPath'; chmod -R 777 '$backendDir' 2>/dev/null || true" | Out-Null
     Invoke-Adb @("shell", "content", "insert", "--uri", "content://media/external/images/media", "--bind", "_data:s:$ReadOnlyMediaRoot/$ReadOnlyImageFile", "--bind", "_display_name:s:$ReadOnlyImageFile", "--bind", "mime_type:s:image/jpeg") | Out-Null
     Invoke-Adb @("shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file://$ReadOnlyMediaRoot/$ReadOnlyImageFile") | Out-Null

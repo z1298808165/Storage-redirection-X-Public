@@ -1122,6 +1122,10 @@ remove_random_mediastore_rows() {
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_own_private_mediastore( \([0-9]+\))?\.jpg(,|$)' "_data=.*/Android/media/${app_regex}/Tencent/QQfile_recv/"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_fuse_dcim_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=DCIM/SrtFuseQQ/|_data=.*/DCIM/SrtFuseQQ/|_data=.*/Android/data/${app_regex}/sdcard/DCIM/SrtFuseQQ/"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=srt_read_only_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/SrtReadOnlyMedia/|_data=.*/Pictures/SrtReadOnlyMedia/|_data=.*/Android/data/${app_regex}/sdcard/Pictures/SrtReadOnlyMedia/"
+  # 夹具根目录会在 `file` 表留下目录行（无扩展名），与图片行名字不同、上面匹配不到；
+  # 复用设备上残留会让场景 28 的图片查询 `rowCount=1` 命中目录行并判定 row-not-found
+  # （2026-11-12 A17 复用模拟器实测 `_id=1027`）。
+  remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=SrtReadOnlyMedia( \([0-9]+\))?(,|$)' "_data=.*/Pictures/SrtReadOnlyMedia(,|$)"
   remove_mediastore_rows_by_pattern "content://media/external/video/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_video_[0-9]+( \([0-9]+\))?\.mp4(,|$)' "relative_path=Movies/|_data=.*/Movies/|_data=.*/Android/data/${app_regex}/sdcard/Movies/"
   remove_mediastore_rows_by_pattern "content://media/external/audio/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_audio_[0-9]+( \([0-9]+\))?\.mp3(,|$)' "relative_path=Music/|_data=.*/Music/|_data=.*/Android/data/${app_regex}/sdcard/Music/"
   remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_file_[0-9]+( \([0-9]+\))?\.txt(,|$)' "relative_path=Documents/|_data=.*/Documents/|_data=.*/Android/data/${app_regex}/sdcard/Documents/"
@@ -2312,6 +2316,71 @@ check_own_private_real_landing() {
   return 1
 }
 
+# 回归守卫（2026-11-12 真机事故后的固化断言）：自有私有目录 `Android/{data,media,obb}/<pkg>`
+# 的恢复源必须是**系统存储视图**（MediaProvider 的 FUSE），不能退化成 f2fs 直连后端。
+#
+# 为什么要单独断言：恢复源错层时目录内容仍落在同一份后端，"文件写进去了 / 沙盒没有残留"
+# 这类判定**全部照过**——数据不分叉，分叉的是**服务方**与因此失效的 mode 归一。真实伤害是
+# 应用在该目录新建的 SQLite 边车按自身 umask 落 `0600`，MP 用自身身份（附加组 media_rw /
+# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（duchamp
+# 2026-11-12：恢复源误取 `/mnt/pass_through/...`，管理器一次冷启 16 条）。
+#
+# 判据自校准、不写死设备号：可见目录的超级块设备号 vs init 命名空间同一路径（模块从不挂载
+# 那里，恒为系统视图）vs f2fs 后端口令（`/data/media/0`）。可见目录不能等于 f2fs 后端；
+# init 那边确实是系统视图时必须与它同 dev。另断言新建文件不是 owner-only（组位全 0 即
+# 绕过 MP 的错层签名）。
+require_own_private_system_view_identity() {
+  local label="$1" visible_path="$2" created_file="$3"
+  local app_pid app_dev system_dev backend_dev mode perm
+  app_pid="$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r' | awk '{print $NF}')"
+  if [ -z "$app_pid" ]; then
+    echo "own_private_view_identity_failed label=${label} reason=app-process-missing" >&2
+    return 1
+  fi
+  app_dev="$(adb_su "stat -c %d '/proc/${app_pid}/root${visible_path}' 2>/dev/null" | tail -1 | tr -d '[:space:]')"
+  system_dev="$(adb_su "stat -c %d '/proc/1/root${visible_path}' 2>/dev/null" | tail -1 | tr -d '[:space:]')"
+  backend_dev="$(adb_su "stat -c %d '/data/media/0' 2>/dev/null" | tail -1 | tr -d '[:space:]')"
+  if [ -z "$app_dev" ]; then
+    echo "own_private_view_identity_failed label=${label} reason=app-dir-unreadable path=${visible_path}" >&2
+    return 1
+  fi
+  if [ -z "$system_dev" ] || [ -z "$backend_dev" ]; then
+    # 部分版本自有私有目录是独立卷（Android 13 的 Android/data|obb）：init 命名空间里没有
+    # 同名路径，判据取不到数，留可检索的跳过标记，不伪造结论。
+    echo "own_private_view_identity_skipped label=${label} system=${system_dev:-missing} backend=${backend_dev:-missing} path=${visible_path}"
+  elif [ "$app_dev" = "$backend_dev" ]; then
+    # 主判据：可见目录直接落在 f2fs 后端上 = 恢复源退化成直连 bind。这条不受挂载传播影响
+    # （真机自证：在应用命名空间里手工 bind 后端会把 init 侧的参照一起改掉，只有比后端设备号
+    # 才抓得住）。
+    echo "own_private_view_identity_failed label=${label} reason=f2fs-backend app_dev=${app_dev} backend_dev=${backend_dev} path=${visible_path}" >&2
+    adb_su "grep -E ' ${visible_path} ' /proc/${app_pid}/mountinfo 2>/dev/null || true" >&2 || true
+    return 1
+  elif [ "$system_dev" != "$backend_dev" ] && [ "$app_dev" != "$system_dev" ]; then
+    echo "own_private_view_identity_failed label=${label} reason=view-split app_dev=${app_dev} system_dev=${system_dev} path=${visible_path}" >&2
+    adb_su "grep -E ' ${visible_path} ' /proc/${app_pid}/mountinfo 2>/dev/null || true" >&2 || true
+    return 1
+  else
+    echo "own_private_system_view label=${label} dev=${app_dev} path=${visible_path}"
+  fi
+  if [ -n "$created_file" ]; then
+    mode="$(adb_su "stat -c '%a' '$created_file' 2>/dev/null" | tail -1 | tr -d '[:space:]')"
+    case "$mode" in
+      [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+      *)
+        echo "own_private_view_identity_failed label=${label} reason=file-mode-unreadable mode=${mode:-missing} path=${created_file}" >&2
+        return 1
+        ;;
+    esac
+    perm=$((8#$mode))
+    if [ $((perm & 070)) -eq 0 ]; then
+      echo "own_private_view_identity_failed label=${label} reason=owner-only-file mode=${mode} expected=group-bits path=${created_file}" >&2
+      return 1
+    fi
+    echo "own_private_system_view_mode label=${label} mode=${mode} path=${created_file}"
+  fi
+  return 0
+}
+
 check_public_directory_owner() {
   local label="$1"
   local path="$2"
@@ -2964,6 +3033,7 @@ prepare_read_only_media_image() {
   local backend_path="$backend_dir/$READ_ONLY_IMAGE_FILE"
   local logical_path="$READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
   remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=srt_read_only_media( \([0-9]+\))?\.jpg(,|$)' 'relative_path=Pictures/SrtReadOnlyMedia/|_data=.*/Pictures/SrtReadOnlyMedia/'
+  remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=SrtReadOnlyMedia( \([0-9]+\))?(,|$)' '_data=.*/Pictures/SrtReadOnlyMedia(,|$)'
   adb_su "mkdir -p '$backend_dir'; rm -f '$BACKEND_PRIVATE_ROOT/Pictures/SrtReadOnlyMedia/$READ_ONLY_IMAGE_FILE'; printf '%s' '$READ_ONLY_IMAGE_B64' | base64 -d > '$backend_path'; chmod -R 777 '$backend_dir' 2>/dev/null || true" >/dev/null
   adb shell content insert --uri content://media/external/images/media --bind _data:s:"$logical_path" --bind _display_name:s:"$READ_ONLY_IMAGE_FILE" --bind mime_type:s:image/jpeg >/dev/null 2>&1 || true
   adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://${logical_path}" >/dev/null 2>&1 || true
@@ -4607,6 +4677,16 @@ run_own_private_directories_scenario() {
     sandbox_path="${sandbox_roots[$index]}/${file_name}"
     if ! run_own_private_write_case "$scenario" "own-${labels[$index]}" \
       "$visible_path" "$visible_path" "$backend_path" "$sandbox_path"; then
+      return 1
+    fi
+  done
+
+  # 服务方守卫（2026-11-12 真机回归）：三类自有私有目录都必须由系统视图服务，
+  # 且应用在其中新建的文件不得是 owner-only。写用例只能证明数据落对了地方 ——
+  # 恢复源退化成 f2fs 直连时数据照样落对，坏的是服务方与 mode 归一。
+  for index in "${!labels[@]}"; do
+    if ! require_own_private_system_view_identity "own-${labels[$index]}-view" \
+      "${request_roots[$index]}" "${backend_roots[$index]}/srt_qqfile_recv_${labels[$index]}.txt"; then
       return 1
     fi
   done
