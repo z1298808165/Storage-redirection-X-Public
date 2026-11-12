@@ -1611,23 +1611,31 @@ enum CallerRowPlan {
 }
 
 thread_local! {
-    static CALLER_ROW_PLAN: std::cell::RefCell<Option<(i32, String, CallerRowPlan)>> =
+    static CALLER_ROW_PLAN: std::cell::RefCell<Option<(i32, String, u64, CallerRowPlan)>> =
         const { std::cell::RefCell::new(None) };
 }
 
 fn caller_row_plan(caller_package: &str, caller_uid: i32) -> CallerRowPlan {
+    let version = SettingsHub::instance().config_version();
     let cached = CALLER_ROW_PLAN.with(|slot| {
         let slot = slot.borrow();
         slot.as_ref()
-            .filter(|(uid, package, _)| *uid == caller_uid && package == caller_package)
-            .map(|(_, _, plan)| plan.clone())
+            .filter(|(uid, package, cached_version, _)| {
+                *uid == caller_uid && package == caller_package && *cached_version == version
+            })
+            .map(|(_, _, _, plan)| plan.clone())
     });
     if let Some(plan) = cached {
         return plan;
     }
     let plan = compute_caller_row_plan(caller_package, caller_uid);
     CALLER_ROW_PLAN.with(|slot| {
-        *slot.borrow_mut() = Some((caller_uid, caller_package.to_string(), plan.clone()));
+        *slot.borrow_mut() = Some((
+            caller_uid,
+            caller_package.to_string(),
+            version,
+            plan.clone(),
+        ));
     });
     plan
 }
