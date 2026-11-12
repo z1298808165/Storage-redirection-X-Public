@@ -51,7 +51,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 ## 📥 下载与安装
 
-**支持的版本：Android 13 ~ 17**（公开测试流对 Android 17 模拟器使用 KernelSU 方案，真机以实际验证为准）。
+**支持的版本：Android 13 ~ 17**。
 
 **环境要求：已解锁 Bootloader 并获取 Root，且具备可用的 Zygisk 环境。** 本模块不支持无 Root 环境。
 

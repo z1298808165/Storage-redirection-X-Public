@@ -108,16 +108,26 @@ E/SQLiteDatabase: Failed to open database '.../XRadiant.db'.
 | `0600`（owner-only） | 不能，连属主自己都拿 EACCES |
 
 原生 Android 不会出现这种文件：MP 的创建口径固定为 `(mode & ~0777) | 0664`（目录 `| 0775`），
-不透传应用 umask。owner-only 边车只可能来自「绕过 MP 的直连层」，典型成因是自有私有目录恢复失败
-（日志 `own private restore failed ... errno=2`）后应用在 f2fs 上按 umask 077 自建边车。
+不透传应用 umask。owner-only 边车只可能来自「绕过 MP 的直连层」，两条路径都要看：
 
-现在的处置（不修改任何既有文件属性）：
+- 自有私有目录**恢复失败**（日志 `own private restore failed ... errno=2`）后应用在 f2fs 上按
+  umask 077 自建边车；
+- 恢复**源取错层**：若恢复源不是 MediaProvider 的 FUSE 而是 f2fs 直连后端
+  （`/mnt/pass_through/<user>/emulated`），目录内容虽落在同一份后端、但服务方不是 MP，
+  应用在其中新建的边车同样按自身 umask 落 `0600`。恢复源现在固定取自 **init 命名空间**的
+  系统视图（模块从不挂载该命名空间，那里的 `/mnt/user/<user>/emulated` 恒为 MP 的 FUSE），
+  因此正常情况下不再出现这一形态。
+
+现在的处置：
 
 - 模块自己的创建入口（宿主 FUSE 的 app-private 后端）按 MP 的原生创建口径产出 `0664`/`0775`——
   这条口径只在**新建**时决定落盘权限，等同系统视图自己建出来的结果；
-- 已存在的 owner-only 入口**不会被模块改写**：MP 打不开就是打不开，这是原生语义。模块只按
+- 把自有 media 子树交回系统视图之前，模块会把该子树里 MP 打不开的 sqlite 边车按**组位镜像**
+  补齐（日志 `own private sqlite access repaired count=... root=...`，warn 级），使 MP 能以
+  自身身份打开；这一步只补组位、不改属主，也不触碰主库内容，历史遗留边车因此无需手工处理；
+- 补不齐的（例如被其它绕过系统视图的写入路径持续产生）仍按
   `own private sqlite entries unserviceable by system view count=... sample=...`（详细日志级别）
-  上报数量与样本路径，便于定位是哪个绕过系统视图的写入路径产生的；
+  上报数量与样本路径，便于定位来源；
 - MP 侧 sqlite 干预只在 MP 自己打得开该入口时才接管，`-shm` 毒化检查改走 `O_PATH` 尺寸判定，
   owner-only 入口不再拖垮毒化自愈链。
 
