@@ -604,25 +604,50 @@ class ScenarioConsistencyTest(unittest.TestCase):
         return ""
 
     def test_run_scenario_calls_only_exported_functions(self) -> None:
-        """场景进程及其清理前置函数调用的脚本函数都必须先 export -f。
+        """场景进程会触达的脚本函数都必须先 export -f。
 
-        子 shell 只继承显式导出的函数；漏掉一个会使对应路径调用失败。
+        子 shell 只继承显式导出的函数；漏掉一个会使对应路径调用失败，而且**症状极其隐蔽**：
+        调用点被当成外部命令，shell 打一行 `command not found` 就继续往下跑，断言从未真正
+        执行过（真机 2026-11-12：新加的 `require_own_private_system_view_identity` 漏了导出，
+        场景 34 在 A15 上以 `environment: line 23: ...: command not found` 失败）。
+
+        判据取**传递闭包**而非只扫 `run_scenario` 那一段：场景主体在 `run_scenario` 里，
+        但它调用到的场景函数（如 `run_own_private_directories_scenario`）定义在别处、也会
+        在子 shell 里执行，它们的调用同样受导出约束。此前的实现只扫 `run_scenario` 段与
+        `clean_targets`，段外函数的漏导出检不出来。
         """
-        body = self.bash[self.bash.index("run_scenario() {") : self.bash.index("# 与 PowerShell 共用设备端锁")]
-        setup = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
-        bodies = (body, setup)
-        defined = set(re.findall(r"(?m)^([a-z_][a-z0-9_]*)\(\) \{", self.bash))
+        # 函数体表：名字 -> 源码片段（以顶层 `名字() {` 起，到下一个顶层定义前止）。
+        definitions = list(re.finditer(r"(?m)^([a-z_][a-z0-9_]*)\(\) \{", self.bash))
+        bodies: dict[str, str] = {}
+        for index, match in enumerate(definitions):
+            start = match.end()
+            end = definitions[index + 1].start() if index + 1 < len(definitions) else len(self.bash)
+            bodies[match.group(1)] = self.bash[start:end]
+        defined = set(bodies)
+
         exported: set[str] = set()
         for line in self.bash.splitlines():
             if line.startswith("export -f "):
                 exported.update(line[len("export -f ") :].split())
-        missing = sorted(
-            name
-            for name in defined
-            if name not in exported
-            and any(re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", candidate) for candidate in bodies)
-        )
-        self.assertEqual([], missing, f"run_scenario 会调用但未 export -f 的函数：{missing}")
+
+        # 从场景入口出发做可达性遍历：只沿**已导出**函数继续下钻（未导出的函数在子 shell 里
+        # 根本不存在，其内部调用无从谈起，必须先把自身报出来）。
+        reachable = {"run_scenario", "clean_targets"}
+        pending = list(reachable)
+        while pending:
+            current = pending.pop()
+            body = bodies.get(current)
+            if body is None:
+                continue
+            for name in defined:
+                if name in reachable:
+                    continue
+                if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", body):
+                    reachable.add(name)
+                    pending.append(name)
+
+        missing = sorted(name for name in reachable if name != "run_scenario" and name not in exported)
+        self.assertEqual([], missing, f"场景进程会调用但未 export -f 的函数：{missing}")
 
     def test_shared_probe_invalidation_precedes_backend_cleanup(self) -> None:
         # 前序场景已查询过的文件应经系统 FUSE 删除，不能仅修改底层文件系统。
