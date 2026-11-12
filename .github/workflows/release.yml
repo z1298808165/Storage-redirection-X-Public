@@ -547,7 +547,21 @@ jobs:
       - name: Download release test-flow runtime
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ github.run_id }}" --name "release-test-flow-runtime-v${{ env.VERSION }}" --dir .
+        run: |
+          # 同 ci.yml：产物出网会被 GitHub 偶发限流（`503 Egress is over the account limit`），
+          # `gh run download` 自身的约 25 秒重试窗口不够，这里按仓库既有退避写法重试，
+          # 重试前清掉半成品目录，最后一次仍失败才退出。
+          artifact="release-test-flow-runtime-v${{ env.VERSION }}"
+          for attempt in 1 2 3 4 5; do
+            if gh run download "${{ github.run_id }}" --name "$artifact" --dir .; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            rm -rf build/test-flow/assets tests/storage-redirect-test/app/build/outputs/apk
+            sleep $((attempt * 20))
+          done
 
       - name: Enable KVM permissions
         run: |

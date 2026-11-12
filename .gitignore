@@ -100,3 +100,7 @@ test-flow-*.txt
 
 # 测试流熔断标记（运行时产物，不应入库）
 app-view-probe-broken.flag
+
+# `test_download_test_network` 在 Windows 上会把临时目录路径当文件名落到
+# `.github/tests/` 下（形如 `C:Users...tmpXXXXdownload-network`），属本机运行残留。
+.github/tests/C:Users*tmp*download-network
