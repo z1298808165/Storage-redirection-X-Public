@@ -126,6 +126,7 @@ FILE_MONITOR_LOG_PATH=/monitor
         for ready, recorded in ((False, True), (True, False), (True, True)):
             with self.subTest(ready=ready, recorded=recorded):
                 stubs = """
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 function Confirm-MediaProviderHookReady { READY }
 function Invoke-Su {
     param([string]$Command)

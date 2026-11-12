@@ -43,6 +43,7 @@ class TestCaseReceiver : BroadcastReceiver() {
 
     /** 用例 id，见 [me.fakerqu.test.storageredirect.test.TestCase] */
     const val EXTRA_TEST_CASE = "test_case"
+    const val EXTRA_RESULT_TOKEN = "result_token"
 
     /** 与 [TestCaseArgs] 中 EXTRA_* 同名，通过广播 --es 传入 */
     val EXTRA_MEDIA_URI: String

@@ -41,6 +41,7 @@ interface MediaStoreApi {
     fun isNull(): Boolean = ColumnType.NULL == columnType || value == null
   }
 
+  /** 查询结果可为空列表；提供器未返回游标或查询失败时向调用方抛出异常。 */
   fun getMedia(
       mediaType: MediaType,
       volumeType: VolumeType,
@@ -57,7 +58,10 @@ interface MediaStoreApi {
   /**
    * 在 MediaStore 中创建新媒体条目并写入 [content]。
    *
-   * @return 成功时返回新条目的 content URI，失败返回 null
+   * 提供器和 I/O 异常向调用方传播，供其区分权限拒绝与其它错误。
+   *
+   * @return 成功时返回新条目的 content URI；参数无效或提供器返回空结果时返回 null。
+   * @throws IllegalStateException 发布条目时未恰好更新一行。
    */
   fun createMedia(
       mediaType: MediaType,
@@ -68,6 +72,7 @@ interface MediaStoreApi {
       keepPending: Boolean = false,
   ): Uri?
 
+  /** 以相对 DATA 路径创建媒体；返回值和异常语义见 [createMedia]。 */
   fun createMediaWithRelativeData(
       mediaType: MediaType,
       volumeType: VolumeType,

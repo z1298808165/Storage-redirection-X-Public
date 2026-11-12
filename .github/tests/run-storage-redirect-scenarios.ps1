@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$AppId = "me.fakerqu.test.storageredirect",
     [switch]$SkipBasicAll,
@@ -310,7 +310,9 @@ function Enter-DeviceRunLock {
 function Exit-DeviceRunLock {
     if (-not $script:DeviceRunLockHeld) { return }
     if (-not (Test-Su "test `"`$(cat '$script:DeviceRunLockPath/owner' 2>/dev/null)`" = '$script:DeviceRunLockToken' && rm '$script:DeviceRunLockPath/owner' && rmdir '$script:DeviceRunLockPath'")) {
-        Write-Warning "设备测试锁释放失败或归属已变更，保留现场：$script:DeviceRunLockPath"
+        $script:ExitCode = 1
+        $script:Failures.Add("cleanup/device_lock: 设备测试锁释放失败或归属已变更")
+        Write-Host "FAIL [cleanup] step=device_lock path=$script:DeviceRunLockPath"
     }
     $script:DeviceRunLockHeld = $false
 }
@@ -381,7 +383,7 @@ function Backup-GlobalConfig {
 function Restore-GlobalConfig {
     if (-not $script:GlobalConfigBackupReady) { return }
     if ($script:OriginalGlobalConfigExists -and -not [string]::IsNullOrWhiteSpace($script:OriginalGlobalConfigBase64)) {
-        Invoke-Su "printf '%s' '$script:OriginalGlobalConfigBase64' | base64 -d > '$GlobalConfig'; chmod 644 '$GlobalConfig'" | Out-Null
+        Invoke-Su "printf '%s' '$script:OriginalGlobalConfigBase64' | base64 -d > '$GlobalConfig' && chmod 644 '$GlobalConfig'" | Out-Null
     } else {
         Invoke-Su "rm -f '$GlobalConfig'" | Out-Null
     }
@@ -402,7 +404,7 @@ function Backup-AppConfig {
 function Restore-AppConfig {
     if (-not $script:AppConfigBackupReady) { return }
     if ($script:OriginalAppConfigExists -and -not [string]::IsNullOrWhiteSpace($script:OriginalAppConfigBase64)) {
-        Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$script:OriginalAppConfigBase64' | base64 -d > '$Config'; chmod 644 '$Config'" | Out-Null
+        Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps && printf '%s' '$script:OriginalAppConfigBase64' | base64 -d > '$Config' && chmod 644 '$Config'" | Out-Null
     } else {
         Invoke-Su "rm -f '$Config'" | Out-Null
     }
@@ -423,7 +425,7 @@ function Backup-CrossAppConfig {
 function Restore-CrossAppConfig {
     if (-not $script:CrossAppConfigBackupReady) { return }
     if ($script:OriginalCrossAppConfigExists -and -not [string]::IsNullOrWhiteSpace($script:OriginalCrossAppConfigBase64)) {
-        Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$script:OriginalCrossAppConfigBase64' | base64 -d > '$ReadOnlyOwnerConfig'; chmod 644 '$ReadOnlyOwnerConfig'" | Out-Null
+        Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps && printf '%s' '$script:OriginalCrossAppConfigBase64' | base64 -d > '$ReadOnlyOwnerConfig' && chmod 644 '$ReadOnlyOwnerConfig'" | Out-Null
     } else {
         Clear-CrossAppReadOnlyConfig
     }
@@ -449,15 +451,19 @@ function Prepare-DeviceExecutionState {
 
 function Restore-DeviceExecutionState {
     if (-not $script:DeviceExecutionStateBackupReady) { return }
+    $ok = $true
     if (-not $script:OriginalDeviceIdleWhitelist) {
         Invoke-Adb @("shell", "cmd", "deviceidle", "whitelist", "-$AppId") | Out-Null
+        $ok = ($LASTEXITCODE -eq 0) -and $ok
     }
     Invoke-Adb @("shell", "am", "set-inactive", $AppId, $script:OriginalAppInactive.ToString().ToLowerInvariant()) | Out-Null
+    $ok = ($LASTEXITCODE -eq 0) -and $ok
     if ([string]::IsNullOrWhiteSpace($script:OriginalStayOnWhilePluggedIn) -or $script:OriginalStayOnWhilePluggedIn -eq "null") {
         Invoke-Adb @("shell", "settings", "delete", "global", "stay_on_while_plugged_in") | Out-Null
     } else {
         Invoke-Adb @("shell", "settings", "put", "global", "stay_on_while_plugged_in", $script:OriginalStayOnWhilePluggedIn) | Out-Null
     }
+    if ($LASTEXITCODE -ne 0 -or -not $ok) { throw "设备执行状态恢复失败" }
 }
 
 function Test-FuseBackendScenarioSupport {
@@ -640,22 +646,39 @@ function Wait-ServiceResult {
 
     $pollSeconds = [Math]::Max(0.05, $script:ResultPollMilliseconds / 1000.0).ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
     $command = @"
-marker_mtime=`$(stat -c %Y '$FreshnessMarker' 2>/dev/null || echo 0)
+test -f '$FreshnessMarker' || exit 1
 deadline=`$(date +%s); deadline=`$((deadline + $TimeoutSeconds));
 while [ `$(date +%s) -lt `$deadline ]; do
   for file in '$ResultDir/result_current.txt' '$InternalResultDir/result_current.txt' '$BackendResultDir/result_current.txt' '$SandboxResultDir/result_current.txt' `$(find '$BackendRoot/Android/data/$AppId' '/data/data/$AppId' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do
-    if [ -s "`$file" ]; then
-      file_mtime=`$(stat -c %Y "`$file" 2>/dev/null || echo 0)
-      [ "`$file_mtime" -ge "`$marker_mtime" ] || continue
-      if [ '$ExpectedTestCase' != 'all' ]; then
-        line_count=`$(grep -cve '^[[:space:]]*`$' "`$file" 2>/dev/null || true)
-        grep -Eq '^(PASS|FAIL) \[$ExpectedTestCase\]' "`$file" || continue
-        [ "`$line_count" -eq 1 ] || continue
-      fi
-      printf '%s\n' "__SRT_RESULT_PATH__=`$file"
-      cat "`$file"
-      exit 0
-    fi
+    [ -s "`$file" ] && [ "`$file" -nt '$FreshnessMarker' ] || continue
+    result=`$(awk -v expected='$ExpectedTestCase' -v expected_token='$FreshnessMarker' '
+      { text=text `$0 "\n" }
+      /^__SRT_RESULT_TOKEN__=/ {
+        if (token++ || complete != 1 || `$0 != "__SRT_RESULT_TOKEN__=" expected_token) invalid=1
+        next
+      }
+      /^__SRT_RESULT_END__=[0-9]+`$/ {
+        if (complete++ || `$0 != "__SRT_RESULT_END__=" count || count < 1) invalid=1
+        next
+      }
+      {
+        if (`$0 ~ /[[:cntrl:]]/) invalid=1
+        if (complete || `$0 !~ /^(PASS|FAIL) \[[a-z_]+\] / || seen[`$2]++) invalid=1
+        if (expected != "all" && `$2 != "[" expected "]") invalid=1
+        if (expected == "all") {
+          if (`$1 == "FAIL" && `$2 == "[all]") fatal=1
+          else if (`$2 !~ /^\[(mediastore_(create|read|write)_(image|video|audio|file|download)|file_(list_dir|create|read|write|write_then_overwrite|overwrite|stat|access|truncate|ftruncate))\]$/) invalid=1
+        }
+        count++
+      }
+      END {
+        if (invalid || complete != 1 || token != 1 || count != (expected == "all" && !fatal ? 25 : 1)) exit 1
+        printf "%s", text
+      }
+    ' "`$file") || continue
+    printf '%s\n' "__SRT_RESULT_PATH__=`$file"
+    printf '%s\n' "`$result"
+    exit 0
   done
   sleep $pollSeconds
 done
@@ -667,6 +690,9 @@ exit 1
         return [pscustomobject]@{ Found = $false; Path = ""; Text = "" }
     }
     $pathLine = $lines | Where-Object { $_ -like "__SRT_RESULT_PATH__=*" } | Select-Object -First 1
+    if (-not $pathLine -or $pathLine.Length -le "__SRT_RESULT_PATH__=".Length) {
+        return [pscustomobject]@{ Found = $false; Path = ""; Text = "" }
+    }
     $path = if ($pathLine) { $pathLine.Substring("__SRT_RESULT_PATH__=".Length) } else { "" }
     $text = ($lines | Where-Object { $_ -notlike "__SRT_RESULT_PATH__=*" }) -join "`n"
     [pscustomobject]@{ Found = $true; Path = $path; Text = $text }
@@ -906,12 +932,7 @@ function Get-ServiceCaseTimeoutSeconds {
     75
 }
 
-# MediaStore 创建用例（带环境竞态重试）。
-#
-# 与 bash 版 run_mediastore_create_case 同口径：MediaProvider 刚被重启、user 0 的
-# external_primary 卷尚未 attach 时会抛 IllegalArgumentException: Volume external_primary
-# not found，应用侧只看到 createMedia returned null。有界重试并留痕，避免把环境竞态
-# 误判成数据面缺陷（重试后仍失败才算失败）。
+# MediaStore 创建失败时有界重试，并保留各次断言结果。
 function Invoke-MediaStoreCreateCase {
     param([int]$Scenario, [string]$Label, [hashtable]$Extras)
     $max = 3
@@ -923,7 +944,7 @@ function Invoke-MediaStoreCreateCase {
             Write-Host "mediastore_create_failed scenario=$Scenario label=$Label attempts=$attempt"
             return $result
         }
-        Write-Host "mediastore_create_retry scenario=$Scenario label=$Label attempt=$attempt reason=create_media_null"
+        Write-Host "mediastore_create_retry scenario=$Scenario label=$Label attempt=$attempt reason=create_media_failed"
         Start-Sleep -Seconds 2
     }
 }
@@ -938,6 +959,7 @@ function Invoke-ServiceCase {
     )
 
     Write-Host "  - ${Scenario}/${Label}: $TestCase"
+    $failuresBefore = $script:Failures.Count
     Prepare-ServiceCase "$Scenario/$Label"
 
     # HyperOS 实机（A16/KSU）会随用例启动次数累积把 start-foreground-service 无限期
@@ -966,6 +988,11 @@ function Invoke-ServiceCase {
         Clear-Results
         $freshnessMarker = "/data/local/tmp/srx-result-$([Guid]::NewGuid().ToString('N')).marker"
         Invoke-Su "touch '$freshnessMarker'" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $script:Failures.Add("$Scenario/$Label freshness marker failed")
+            Write-Host "FAIL [$TestCase] scenario=$Scenario label=$Label reason=freshness_marker_failed"
+            return [pscustomobject]@{ Ok = $false; Text = ""; Path = "" }
+        }
         # 直接启动前台服务而非经 receiver 转发广播：HyperOS 实机（A16/KSU）会在用例
         # 启动若干次后按「Background execution not allowed」策略在入队时静默丢弃发往
         # manifest receiver 的广播，表现为用例永远无结果（result_timeout 雪崩）；
@@ -975,6 +1002,7 @@ function Invoke-ServiceCase {
         foreach ($key in $Extras.Keys) {
             $args += @("--es", [string]$key, [string]$Extras[$key])
         }
+        $args += @("--es", "result_token", $freshnessMarker)
         # adb 超时或退出非零时，仍以 freshness marker 对应的服务结果确认 intent 是否已执行。
         $startResult = Invoke-AdbWithTimeout -Arguments $args -TimeoutSeconds 90
         if ($startResult.ExitCode -ne 0) {
@@ -1004,15 +1032,24 @@ function Invoke-ServiceCase {
         $result = Wait-ServiceResult $timeoutSeconds $freshnessMarker $TestCase
         Invoke-Su "rm -f '$freshnessMarker'" | Out-Null
         if ($result.Found) {
-            $ok = if ($PassRegex) { $result.Text -match $PassRegex } else { $true }
+            $rawResult = Join-Path $script:ArtifactDir "$Scenario-$Label-result.txt"
+            Set-Content -LiteralPath $rawResult -Value $result.Text -Encoding utf8
+            $result.Text -split "`n" | ForEach-Object {
+                Write-Host ($_ -replace '^(PASS|FAIL) (\[[^]]*\]) ', 'OBSERVED $2 app_status=$1 ')
+            }
+            $ok = if ($PassRegex) { $result.Text -match "(?m)$PassRegex" } else { $true }
+            if ($TestCase -eq "all" -and $result.Text -match '(?m)^FAIL ') { $ok = $false }
+            $ok = $ok -and $script:Failures.Count -eq $failuresBefore
             if (-not $ok) {
                 $script:Failures.Add("$Scenario/$Label expected $PassRegex, got: $($result.Text -replace "`n", " | ")")
-                Write-Host "    FAIL $Scenario/$Label"
+                Write-Host "FAIL [$TestCase] scenario=$Scenario label=$Label assertion=app_result reason=mismatch expected=$PassRegex raw_result=$rawResult"
                 if ($script:FailFast) {
                     throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
                 }
+            } elseif (-not $PassRegex) {
+                Write-Host "PENDING [$TestCase] scenario=$Scenario label=$Label raw_result=$rawResult"
             } else {
-                Write-Host "    PASS $Scenario/$Label"
+                Write-Host "PASS [$TestCase] scenario=$Scenario label=$Label assertion=app_result raw_result=$rawResult"
             }
             return [pscustomobject]@{ Ok = $ok; Text = $result.Text; Path = $result.Path }
         }
@@ -1020,7 +1057,7 @@ function Invoke-ServiceCase {
     }
 
     $script:Failures.Add("$Scenario/$Label result timeout for $TestCase")
-    Write-Host "    TIMEOUT $Scenario/$Label"
+    Write-Host "FAIL [$TestCase] scenario=$Scenario label=$Label reason=result_timeout"
     if ($script:FailFast) {
         throw "[SRT_FAIL_FAST_ITEM] $Scenario/$Label"
     }
@@ -1071,12 +1108,13 @@ function Test-FileExists {
 
 function Test-PathMissing {
     param([string]$Path)
-    Test-Su "test ! -e '$(Convert-ToBackendPath $Path)'"
+    $backendPath = Convert-ToBackendPath $Path
+    Test-Su "test ! -e '$backendPath' && test ! -L '$backendPath'"
 }
 
 function Convert-ToBackendPath {
     param([string]$Path)
-    if ($Path.StartsWith($RealRoot)) {
+    if ($Path -ceq $RealRoot -or $Path.StartsWith("$RealRoot/", [StringComparison]::Ordinal)) {
         return $BackendRoot + $Path.Substring($RealRoot.Length)
     }
     $Path
@@ -1837,8 +1875,8 @@ function Invoke-MonitorCaptureFailOpenScenario {
         if ($trimmed -match '^\d+$') { $daemonPid = $trimmed; break }
     }
     if ([string]::IsNullOrWhiteSpace($daemonPid)) {
-        Write-Host "monitor_capture_failopen_skipped scenario=$Scenario reason=daemon_not_running"
-        return $true
+        Write-Host "FAIL [monitor_capture_failopen] scenario=$Scenario reason=daemon_not_running"
+        return $false
     }
     Write-Host "monitor_capture_failopen freeze daemon pid=$daemonPid"
     if (-not (Test-Su "kill -STOP $daemonPid")) {
@@ -2228,18 +2266,31 @@ function Invoke-TestArtifactCleanup {
     if ($script:CleanupDone -or -not $script:GlobalConfigBackupReady) { return }
     $script:CleanupDone = $true
     Write-Host "== 清理测试产物 =="
-    try { Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null } catch { Write-Warning "force-stop 清理失败：$_" }
-    try { Restore-CrossAppConfig } catch { Write-Warning "跨应用只读配置恢复失败：$_" }
-    try { Restore-AppConfig } catch { Write-Warning "应用配置恢复失败：$_" }
-    try { Restore-GlobalConfig } catch { Write-Warning "全局配置恢复失败：$_" }
-    try { Clear-Results } catch { Write-Warning "结果清理失败：$_" }
-    try { Invoke-Su "rm -f /data/local/tmp/srx-result-*.marker" | Out-Null } catch { Write-Warning "结果标记清理失败：$_" }
-    try { Remove-TestTargetArtifacts } catch { Write-Warning "目标产物清理失败：$_" }
-    try { Clear-AliasMediaStoreFixture } catch { Write-Warning "别名测试媒体行清理失败：$_" }
-    try { Remove-RandomMediaStoreRows } catch { Write-Warning "MediaStore 清理失败：$_" }
-    try { Remove-RandomPhysicalMediaFiles } catch { Write-Warning "物理文件清理失败：$_" }
-    try { Restart-MediaProvider } catch { Write-Warning "MediaProvider 重启失败：$_" }
-    try { Restore-DeviceExecutionState } catch { Write-Warning "设备执行状态恢复失败：$_" }
+    $steps = [ordered]@{
+        force_stop = { Invoke-Adb @("shell", "am", "force-stop", $AppId) }
+        cross_app_config = { Restore-CrossAppConfig }
+        app_config = { Restore-AppConfig }
+        global_config = { Restore-GlobalConfig }
+        results = { Clear-Results }
+        result_markers = { Invoke-Su "rm -f /data/local/tmp/srx-result-*.marker" }
+        targets = { Remove-TestTargetArtifacts }
+        alias_media = { Clear-AliasMediaStoreFixture }
+        media_rows = { Remove-RandomMediaStoreRows }
+        media_files = { Remove-RandomPhysicalMediaFiles }
+        media_provider = { Restart-MediaProvider }
+        device_state = { Restore-DeviceExecutionState }
+    }
+    foreach ($step in $steps.GetEnumerator()) {
+        try {
+            $global:LASTEXITCODE = 0
+            & $step.Value | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "exit=$LASTEXITCODE" }
+        } catch {
+            $script:ExitCode = 1
+            $script:Failures.Add("cleanup/$($step.Key): $_")
+            Write-Host "FAIL [cleanup] step=$($step.Key) error=$_"
+        }
+    }
     if ($script:Failures.Count -eq 0) {
         Remove-Item -LiteralPath (Join-Path $PSScriptRoot "../../temp/scenario-2-mediastore-hook-diag.txt") -Force -ErrorAction SilentlyContinue
     }
@@ -2517,15 +2568,29 @@ function Expect-AppEntry {
     param([int]$Scenario, [string]$Label, [string]$Dir, [string]$FileName)
     $result = Invoke-ServiceCase "scenario-$Scenario" $Label "file_list_dir" @{ file_dir = $Dir } "^PASS \[file_list_dir\]"
     if (-not $result.Ok) { return $false }
-    if ($result.Text -match "entries=.*$([regex]::Escape($FileName))") { return $true }
+    if ($result.Text -match '(?m)listedCount=([0-9]+), entries=([^\r\n]*)$') {
+        $entries = if ($Matches[2]) { @($Matches[2] -split '\|') } else { @() }
+        if ($entries -ccontains $FileName) { return $true }
+    }
     $script:Failures.Add("scenario-$Scenario/$Label app view missing $FileName in $Dir :: $($result.Text -replace "`n", " | ")")
     $false
 }
 
 function Expect-NoAppEntry {
     param([int]$Scenario, [string]$Label, [string]$Dir, [string]$FileName)
-    $result = Invoke-ServiceCase "scenario-$Scenario" $Label "file_list_dir" @{ file_dir = $Dir } ""
-    if ($result.Text -match "entries=.*$([regex]::Escape($FileName))") {
+    $result = Invoke-ServiceCase "scenario-$Scenario" $Label "file_list_dir" @{ file_dir = $Dir } '^PASS \[file_list_dir\]'
+    if (-not $result.Ok) { return $false }
+    if ($result.Text -notmatch '(?m)listedCount=([0-9]+), entries=([^\r\n]*)$') {
+        $script:Failures.Add("scenario-$Scenario/$Label missing listing metadata")
+        return $false
+    }
+    $listedCount = $Matches[1]
+    $entries = if ($Matches[2]) { @($Matches[2] -split '\|') } else { @() }
+    if ("$($entries.Count)" -cne $listedCount) {
+        $script:Failures.Add("scenario-$Scenario/$Label incomplete listing")
+        return $false
+    }
+    if ($entries -ccontains $FileName) {
         $script:Failures.Add("scenario-$Scenario/$Label app view unexpectedly sees $FileName in $Dir")
         return $false
     }
@@ -2607,7 +2672,7 @@ function Invoke-FileMutationLifecycleScenario {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind physical content mismatch: $expected") | Out-Null
             $ok = $false
         }
-        if (-not (Test-Su "test ! -e '$shadow' || { test -d '$shadow' && entries=`$(ls -A '$shadow') && test -z `"`$entries`"; }")) {
+        if (-not (Test-Su "test ! -L '$shadow' && { test ! -e '$shadow' || { test -d '$shadow' && entries=`$(ls -A '$shadow') && test -z `"`$entries`"; }; }")) {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind shadow contains leaked entries: $shadow") | Out-Null
             $ok = $false
         }
@@ -2621,11 +2686,49 @@ function Invoke-FileMutationLifecycleScenario {
     return $ok
 }
 
+function Invoke-FileLinkControl {
+    Apply-ScenarioConfig 1
+    Clear-Targets
+    if (-not (Test-Su "mkdir -p '$BackendRoot/Download/SrtMutationAllowed'")) { return $false }
+    Fix-SharedFixturePermissions
+    if (-not (Restart-App "scenario-1-link-control" $false)) { return $false }
+    $controlPid = Get-AppPid
+    if (-not $controlPid -or -not (Test-Su "a=`$(awk '`$5 == `"/storage/emulated`" {print `$3; exit}' /proc/$controlPid/mountinfo); b=`$(awk '`$5 == `"/storage/emulated`" {print `$3; exit}' /proc/1/mountinfo); test -n `"`$a`" && test `"`$a`" = `"`$b`"")) {
+        Write-Host "FAIL [file_link_control] reason=unredirected_view_unconfirmed"
+        return $false
+    }
+    $control = "$RealRoot/Download/SrtMutationAllowed"
+    $result = Invoke-ServiceCase "scenario-1" "link-control-target" "file_create" @{ file_path = "$control/link-target.txt"; payload = $Payload } '^PASS \[file_create\]'
+    if (-not $result.Ok) { return $false }
+    foreach ($operation in @("symlink", "link")) {
+        $from = if ($operation -eq "symlink") { "link-target.txt" } else { "$control/link-target.txt" }
+        $result = Invoke-ServiceCase "scenario-1" "link-control-$operation" "file_$operation" @{ file_path = $from; target_file_path = "$control/native-$operation" } ""
+        if (-not $result.Ok) { return $false }
+        if ($result.Text -match "^PASS \[file_$operation\] link succeeded") {
+            $outcome = "created"
+            if (-not (Test-Su "test -e '$BackendRoot/Download/SrtMutationAllowed/native-$operation'")) { return $false }
+        } elseif ($result.Text -match "(?m)^FAIL \[file_$operation\] link failed .*error=($operation failed: )?EACCES( \([^()]*\))?$") {
+            $outcome = "EACCES"
+        } elseif ($operation -eq "link" -and $result.Text -match '(?m)^FAIL \[file_link\] link failed .*error=(link failed: )?EPERM( \([^()]*\))?$') {
+            $outcome = "EPERM"
+        } else {
+            Write-Host "FAIL [file_link_control] operation=$operation reason=unexpected_result`n$($result.Text)"
+            return $false
+        }
+        if ($outcome -ne "created" -and -not (Test-Su "test ! -e '$BackendRoot/Download/SrtMutationAllowed/native-$operation' && test ! -L '$BackendRoot/Download/SrtMutationAllowed/native-$operation'")) { return $false }
+        if ($operation -eq "symlink") { $script:NativeSymlinkResult = $outcome } else { $script:NativeHardlinkResult = $outcome }
+        Write-Host "OBSERVED [file_link_control] operation=$operation redirect=disabled outcome=$outcome"
+    }
+    return $true
+}
+
 function Invoke-FileMutationMetadataScenario {
     param([int]$Scenario)
     $ok = $true
+    $failureCount = $script:Failures.Count
     $symlinkDeniedRoutes = New-Object System.Collections.Generic.List[string]
     $hardlinkDeniedRoutes = New-Object System.Collections.Generic.List[string]
+    $linkResults = New-Object System.Collections.Generic.List[string]
     foreach ($kind in @("Sandbox", "Allowed", "Request", "RequestSibling")) {
         $request = "$RealRoot/Download/SrtMutation$kind"
         $expected = "$BackendPrivateRoot/Download/SrtMutation$kind"
@@ -2650,14 +2753,14 @@ function Invoke-FileMutationMetadataScenario {
         $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-chmod" "file_chmod" @{ file_path = $file; mode = "0400" } '^PASS \[file_chmod\]'
         $ok = $result.Ok -and $ok
         $actualMode = ((Invoke-Su "stat -c %a '$expected/metadata.txt'") -join "").Trim()
-        if ($actualMode -ne $chmodMode) {
+        if ($LASTEXITCODE -ne 0 -or $actualMode -ne $chmodMode) {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind chmod mode mismatch expected=$chmodMode actual=$actualMode") | Out-Null
             $ok = $false
         }
         $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-fchmod" "file_fchmod" @{ file_path = $file; mode = "0200" } '^PASS \[file_fchmod\]'
         $ok = $result.Ok -and $ok
         $actualMode = ((Invoke-Su "stat -c %a '$expected/metadata.txt'") -join "").Trim()
-        if ($actualMode -ne $fchmodMode) {
+        if ($LASTEXITCODE -ne 0 -or $actualMode -ne $fchmodMode) {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind fchmod mode mismatch expected=$fchmodMode actual=$actualMode") | Out-Null
             $ok = $false
         }
@@ -2667,44 +2770,53 @@ function Invoke-FileMutationMetadataScenario {
         $ok = $result.Ok -and $ok
         $symlinkCreated = $false
         $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-symlink" "file_symlink" @{ file_path = "link-target.txt"; target_file_path = $link } ""
+        $ok = $result.Ok -and $ok
         if ($result.Text -match 'PASS \[file_symlink\] link succeeded') {
             $symlinkCreated = $true
             $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-readlink" "file_readlink" @{ file_path = $link; expected_path = "link-target.txt" } '^PASS \[file_readlink\]'
             $ok = $result.Ok -and $ok
             $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-symlink-read" "file_read" @{ file_path = $link; expected_payload = $Payload } '^PASS \[file_read\]'
             $ok = $result.Ok -and $ok
-        } elseif ($result.Text -match 'FAIL \[file_symlink\] link failed' -and $result.Text -match 'EACCES|Permission denied') {
+            $linkResults.Add("[file_symlink_boundary] scenario=$Scenario route=$kind outcome=created")
+        } elseif ($result.Text -match '(?m)^FAIL \[file_symlink\] link failed .*error=(symlink failed: )?EACCES( \([^()]*\))?$') {
             $symlinkDeniedRoutes.Add($kind) | Out-Null
-            Write-Host "  - symlink_boundary scenario=$Scenario route=$kind result=EACCES"
+            $linkResults.Add("[file_symlink_boundary] scenario=$Scenario route=$kind outcome=denied errno=EACCES control=unredirected,Allowed")
         } else {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind symlink boundary changed: $($result.Text -replace "`n", " | ")") | Out-Null
+            Write-Host "FAIL [file_symlink_boundary] scenario=$Scenario route=$kind reason=unexpected_result`n$($result.Text)"
             $ok = $false
         }
 
         $result = Invoke-ServiceCase "scenario-$Scenario" "mutation-$kind-hardlink-boundary" "file_link" @{ file_path = $linkTarget; target_file_path = $hardlink } ""
+        $ok = $result.Ok -and $ok
         if ($result.Text -match 'PASS \[file_link\] link succeeded') {
             $hardlinkCreated = $true
             if (-not (Test-Su "test '$expected/hard-link' -ef '$expected/link-target.txt' && test `"`$(cat '$expected/hard-link')`" = '$Payload'")) {
                 $script:Failures.Add("scenario-$Scenario/mutation-$kind hardlink content mismatch: $expected/hard-link") | Out-Null
                 $ok = $false
             }
-            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=created"
-        } elseif ($result.Text -match 'FAIL \[file_link\] link failed' -and $result.Text -match 'EPERM|Operation not permitted') {
-            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=EPERM"
-        } elseif ($result.Text -match 'FAIL \[file_link\] link failed' -and $result.Text -match 'EACCES|Permission denied') {
+            $linkResults.Add("[file_link_boundary] scenario=$Scenario route=$kind outcome=created")
+        } elseif ($result.Text -match '(?m)^FAIL \[file_link\] link failed .*error=(link failed: )?EPERM( \([^()]*\))?$') {
+            if ($script:NativeHardlinkResult -ne "EPERM") {
+                $script:Failures.Add("scenario-$Scenario/mutation-$kind EPERM was not reproduced by the unredirected control") | Out-Null
+                $ok = $false
+            }
+            $linkResults.Add("[file_link_boundary] scenario=$Scenario route=$kind outcome=denied errno=EPERM control=unredirected")
+        } elseif ($result.Text -match '(?m)^FAIL \[file_link\] link failed .*error=(link failed: )?EACCES( \([^()]*\))?$') {
             $hardlinkDeniedRoutes.Add($kind) | Out-Null
-            Write-Host "  - hardlink_boundary scenario=$Scenario route=$kind result=EACCES"
+            $linkResults.Add("[file_link_boundary] scenario=$Scenario route=$kind outcome=denied errno=EACCES control=unredirected,Allowed")
         } else {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind hardlink boundary changed: $($result.Text -replace "`n", " | ")") | Out-Null
+            Write-Host "FAIL [file_link_boundary] scenario=$Scenario route=$kind reason=unexpected_result`n$($result.Text)"
             $ok = $false
         }
 
-        $entries = ((Invoke-Su "ls -A '$expected' | sort | tr '\n' '|' ") -join "").TrimEnd("`r", "`n")
+        $entries = ((Invoke-Su "entries=`$(ls -A '$expected') || exit 1; if [ -n `"`$entries`" ]; then printf '%s\n' `"`$entries`" | sort | tr '\n' '|'; fi") -join "").TrimEnd("`r", "`n")
         $expectedEntries = "complete.txt|"
         if ($hardlinkCreated) { $expectedEntries += "hard-link|" }
         $expectedEntries += "link-target.txt|metadata.txt|"
         if ($symlinkCreated) { $expectedEntries += "symbolic-link|" }
-        if ($entries -ne $expectedEntries) {
+        if ($LASTEXITCODE -ne 0 -or $entries -cne $expectedEntries) {
             $script:Failures.Add("scenario-$Scenario/mutation-$kind physical entries mismatch path=$expected entries=$entries") | Out-Null
             $ok = $false
         }
@@ -2713,7 +2825,10 @@ function Invoke-FileMutationMetadataScenario {
             $ok = $false
         }
         $symlinkPathValid = if ($symlinkCreated) {
-            (Test-Su "test -L '$expected/symbolic-link'") -and ((Invoke-Su "readlink '$expected/symbolic-link'") -join "").Trim() -eq "link-target.txt"
+            if (Test-Su "test -L '$expected/symbolic-link'") {
+                $actualLink = ((Invoke-Su "readlink '$expected/symbolic-link'") -join "").Trim()
+                $LASTEXITCODE -eq 0 -and $actualLink -ceq "link-target.txt"
+            } else { $false }
         } else {
             Test-Su "test ! -e '$expected/symbolic-link' && test ! -L '$expected/symbolic-link'"
         }
@@ -2726,13 +2841,23 @@ function Invoke-FileMutationMetadataScenario {
             $ok = $false
         }
     }
-    if ($symlinkDeniedRoutes.Count -gt 0 -and -not $symlinkDeniedRoutes.Contains("Allowed")) {
-        $script:Failures.Add("scenario-$Scenario/symlink EACCES was not reproduced by the allowed-path control") | Out-Null
+    if ($symlinkDeniedRoutes.Count -gt 0 -and ($script:NativeSymlinkResult -ne "EACCES" -or -not $symlinkDeniedRoutes.Contains("Allowed"))) {
+        $script:Failures.Add("scenario-$Scenario/symlink EACCES was not reproduced by both controls") | Out-Null
+        Write-Host "FAIL [file_symlink_boundary] scenario=$Scenario reason=eacces_without_matching_controls"
         $ok = $false
     }
-    if ($hardlinkDeniedRoutes.Count -gt 0 -and -not $hardlinkDeniedRoutes.Contains("Allowed")) {
-        $script:Failures.Add("scenario-$Scenario/hardlink EACCES was not reproduced by the allowed-path control") | Out-Null
+    if ($hardlinkDeniedRoutes.Count -gt 0 -and ($script:NativeHardlinkResult -ne "EACCES" -or -not $hardlinkDeniedRoutes.Contains("Allowed"))) {
+        $script:Failures.Add("scenario-$Scenario/hardlink EACCES was not reproduced by both controls") | Out-Null
+        Write-Host "FAIL [file_link_boundary] scenario=$Scenario reason=eacces_without_matching_controls"
         $ok = $false
+    }
+    $ok = $ok -and $script:Failures.Count -eq $failureCount
+    if ($ok) {
+        foreach ($result in $linkResults) {
+            Write-Host "PASS $result checks=physical,content,zero_shadow"
+        }
+    } else {
+        Write-Host "FAIL [file_mutation_metadata] scenario=$Scenario reason=verification_failed"
     }
     return $ok
 }
@@ -2797,14 +2922,15 @@ function Invoke-OwnerDriftOwnDirScenario {
     # emulated 视图同理，属于应用自己的私有树故放行。原生 Android 走 FUSE，因此「拒绝」
     # 不是唯一正确形态。本场景契约是「模块不得改写私有树属主」（见下方 1023 校验）。
     # 设备端命令先在赋值表达式里拼好再传 Invoke-Su（参数模式下 `+` 会变成字面量）。
-    $readExpect = "^FAIL \[file_read\]"
-    $writeExpect = "^FAIL \[file_write\]"
+    $readExpect = '^FAIL \[file_read\].*error=.*open failed: EACCES( \([^()]*\))?$'
+    $writeExpect = '^FAIL \[file_write\].*error=.*open failed: EACCES( \([^()]*\))?$'
     $driftPid = Get-AppPid
     if ($driftPid) {
         $devProbe = "a=`"`$(grep -m1 ' /storage/emulated ' `"/proc/$driftPid/mountinfo`" | cut -d' ' -f3)`"; " +
             "b=`"`$(grep -m1 ' /storage/emulated ' /proc/1/mountinfo | cut -d' ' -f3)`"; " +
             "[ -n `"`$a`" ] && [ -n `"`$b`" ] && [ `"`$a`" != `"`$b`" ]"
-        if (Test-Su $devProbe) {
+        $privateBind = Test-Su "grep -Fq ' /storage/emulated/0/Android/data/$AppId ' /proc/$driftPid/mountinfo"
+        if (-not $privateBind -and (Test-Su $devProbe)) {
             Write-Host "  - scenario-$Scenario/owner-drift-layout form=fuse-served"
             $readExpect = "^PASS \[file_read\]"
             $writeExpect = "^PASS \[file_write\]"
@@ -2812,13 +2938,17 @@ function Invoke-OwnerDriftOwnDirScenario {
             Write-Host "  - scenario-$Scenario/owner-drift-layout form=bind"
         }
     }
-    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt" } $readExpect).Ok -and $ok
+    $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-read" "file_read" @{ file_path = "$driftVisible/srt_drift_existing.txt"; expected_payload = "srt-drift-payload" } $readExpect).Ok -and $ok
     $ok = (Invoke-ServiceCase "scenario-$Scenario" "own-drift-write" "file_write" @{ file_path = "$driftVisible/srt_drift_probe.txt"; payload = $Payload; expected_payload = $Payload } $writeExpect).Ok -and $ok
     # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
-    $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ]"
+    $ownerIntact = Test-Su "[ `$(stat -c %u '$driftBackend/srt_drift_existing.txt') -eq 1023 ] && [ `"`$(cat '$driftBackend/srt_drift_existing.txt')`" = srt-drift-payload ]"
     if (-not $ownerIntact) {
         $script:Failures.Add("scenario-$Scenario/owner-drift-repaired-unexpectedly") | Out-Null
         Write-Host "  - scenario-$Scenario/owner-drift-repaired-unexpectedly backend=$driftBackend"
+        return $false
+    }
+    if ($writeExpect.StartsWith('^FAIL ') -and -not (Test-Su "test ! -e '$driftBackend/srt_drift_probe.txt' && test ! -L '$driftBackend/srt_drift_probe.txt'")) {
+        $script:Failures.Add("scenario-$Scenario/owner-drift denied write left a file") | Out-Null
         return $false
     }
     Write-Host "  - scenario-$Scenario/owner-drift-inert"
@@ -3323,7 +3453,7 @@ function Invoke-DownloadOwnerAttributionScenario {
         Invoke-Su "rm -rf '$BackendRoot/$DlOwnerRequestRel' '$BackendRoot/$DlOwnerMappedRel'" | Out-Null
         if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-dlowner-provider")) { return $false }
         Write-Host "  - scenario-$Scenario/download-owner: restart test app for requester mapping"
-        Restart-App "scenario-$Scenario/dlowner-apprestart" $true
+        if (-not (Restart-App "scenario-$Scenario/dlowner-apprestart" $true)) { return $false }
         $targetDeadline = (Get-Date).AddSeconds(30)
         $targetReady = $false
         while ((Get-Date) -lt $targetDeadline) {
@@ -3840,8 +3970,7 @@ function Invoke-SandboxRootMetadataScenario {
     $ok = (Invoke-WriteCase $Scenario "sandbox-root-app-write" "$RealRoot/$appWriteFile" $Payload).Ok -and $ok
     $ok = (Require-File "scenario-$Scenario" "sandbox-root-app-write-private" "$BackendPrivateRoot/$appWriteFile") -and $ok
     $ok = (Require-Missing "scenario-$Scenario" "sandbox-root-app-write-public" "$BackendRoot/$appWriteFile") -and $ok
-    # 端到端：沙盒根不可穿越时这条 MediaStore 创建会以 createMedia returned null 失败，
-    # 并在真实公共路径补建父目录。
+    # MediaStore 代写后同时校验沙盒落点和公共路径零残留。
     if (-not (Wait-MediaProviderHookReady "scenario-$Scenario-sandbox-root" 60)) { $ok = $false }
     $create = Invoke-MediaStoreCreateCase $Scenario "sandbox-root-mediastore" @{ file_name = $SandboxRootMetadataFile; relative_path = $SandboxRootMetadataRel }
     $ok = $create.Ok -and $ok
@@ -3864,6 +3993,11 @@ function Invoke-Scenario {
     }
     if ($Scenario -in @(8, 16, 17, 18, 19, 38)) {
         Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
+    }
+    if ($Scenario -eq 42) {
+        $script:NativeSymlinkResult = ""
+        $script:NativeHardlinkResult = ""
+        if (-not (Invoke-FileLinkControl)) { throw "场景 42 的未重定向链接对照失败" }
     }
     Apply-ScenarioConfig $Scenario
     Clear-Targets
@@ -3902,7 +4036,7 @@ function Invoke-Scenario {
         Write-Host "  - scenario-${Scenario}: skip test app restart"
         Wait-Storage "scenario-$Scenario" | Out-Null
     } else {
-        Restart-App "scenario-$Scenario" ($Scenario -ne 1)
+        $ok = (Restart-App "scenario-$Scenario" ($Scenario -ne 1)) -and $ok
     }
     $scenarioOk = switch ($Scenario) {
         8 { Invoke-RuleSandboxScenario $Scenario }
@@ -3940,7 +4074,7 @@ function Invoke-Scenario {
         42 { (Invoke-FileMutationLifecycleScenario $Scenario) -and (Invoke-FileMutationMetadataScenario $Scenario) }
         default { Invoke-StandardScenario $Scenario }
     }
-    $ok = [bool]$scenarioOk -and $ok
+    $ok = ($scenarioOk -is [bool] -and $scenarioOk) -and $ok
     Write-Host "  - scenario-$Scenario/backend-effective"
     Invoke-Su "grep -h 'backend_effective' '$LogPath' 2>/dev/null | tail -3 || true; grep -h -E 'fuse_dir_cache_(config|sample)|perf_snapshot component=fuse' '$LogPath' 2>/dev/null | tail -3 || true" | Write-Host
     $ok = (Stop-AppAndWaitFuseCleanup "scenario-$Scenario/finalize") -and $ok
@@ -3948,16 +4082,17 @@ function Invoke-Scenario {
         $script:Failures.Add("scenario-$Scenario returned false without a detailed failure")
     }
     $newFailures = $script:Failures.Count - $before
+    if ($ok -and $newFailures -eq 0) { Write-Host "PASS [scenario] id=$Scenario" } else { Write-Host "FAIL [scenario] id=$Scenario" }
     $script:Summary.Add([pscustomobject]@{ Scenario = $Scenario; Title = (Get-ScenarioTitle $Scenario); Passed = ($ok -and $newFailures -eq 0); NewFailures = $newFailures }) | Out-Null
 }
 
 function Invoke-BasicAll {
+    $before = $script:Failures.Count
     Write-Host "== basic suite with default redirect enabled =="
     Set-BackendConfig -Mode "auto"
     Write-DeviceConfig '{"users":{"0":{"enabled":true}}}'
     Clear-Targets
-    Restart-App "all-basic"
-    $before = $script:Failures.Count
+    $setupOk = Restart-App "all-basic"
     $result = Invoke-ServiceCase "basic" "all" "all" @{} "^PASS "
     $failedLines = @()
     if ($result.Text) {
@@ -3966,7 +4101,7 @@ function Invoke-BasicAll {
     foreach ($line in $failedLines) {
         $script:Failures.Add("basic/all $line")
     }
-    $ok = $result.Ok -and $failedLines.Count -eq 0
+    $ok = $setupOk -and $result.Ok -and $failedLines.Count -eq 0
 
     $queryCases = @(
         "mediastore_query_image",
@@ -3980,6 +4115,8 @@ function Invoke-BasicAll {
         $ok = $queryResult.Ok -and $ok
     }
 
+    $ok = $ok -and $script:Failures.Count -eq $before
+    if ($ok) { Write-Host "PASS [basic]" } else { Write-Host "FAIL [basic]" }
     $script:Summary.Add([pscustomobject]@{ Scenario = "basic"; Title = "deterministic all + query smoke"; Passed = $ok; NewFailures = ($script:Failures.Count - $before) }) | Out-Null
 }
 
@@ -4044,11 +4181,10 @@ try {
             Select-Object -Last 160 |
             ForEach-Object { Write-Host $_.Line }
         $script:ExitCode = 1
-    } else {
-        Write-Host "ALL_SCENARIOS_PASSED"
     }
 } finally {
     try { Invoke-TestArtifactCleanup } finally { Exit-DeviceRunLock }
 }
 
+if ($script:ExitCode -eq 0) { Write-Host "ALL_SCENARIOS_PASSED" }
 exit $script:ExitCode

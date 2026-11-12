@@ -20,6 +20,7 @@ import me.fakerqu.test.storageredirect.test.StorageRedirectTestRunner
 import me.fakerqu.test.storageredirect.test.TestCase
 import me.fakerqu.test.storageredirect.test.TestCaseArgs
 import me.fakerqu.test.storageredirect.test.TestResult
+import me.fakerqu.test.storageredirect.test.writeTestResultFile
 
 class TestService : Service() {
   private val executor = Executors.newSingleThreadExecutor()
@@ -45,16 +46,17 @@ class TestService : Service() {
       return START_NOT_STICKY
     }
 
+    val testCase = TestCase.fromId(intent.getStringExtra(TestCaseReceiver.EXTRA_TEST_CASE))
+    val resultToken = intent.getStringExtra(TestCaseReceiver.EXTRA_RESULT_TOKEN).orEmpty()
     try {
       promoteToForeground()
     } catch (e: Throwable) {
       Log.e(TAG, "startForeground failed", e)
-      writeImmediateFailure("startForeground", e)
+      writeImmediateFailure("startForeground", e, testCase, resultToken)
       stopSelfResult(startId)
       return START_NOT_STICKY
     }
 
-    val testCase = TestCase.fromId(intent.getStringExtra(TestCaseReceiver.EXTRA_TEST_CASE))
     val args = TestCaseArgs.fromIntent(intent)
     executor.execute {
       try {
@@ -74,7 +76,7 @@ class TestService : Service() {
               )
             }
         val failed = results.count { !it.passed }
-        reportResults(results)
+        reportResults(results, resultToken)
 
         if (failed > 0) {
           Log.w(
@@ -161,7 +163,7 @@ class TestService : Service() {
    * 返回的可见路径尚不可建， 直接写入会抛 `FileNotFoundException: ENOENT`。该异常一旦逃出执行器线程会终止整个
    * 进程，导致所有候选目录都拿不到结果文件，设备测试流只能超时失败。因此这里显式吞掉 单个目录的失败并回退到内部 `filesDir`，两处路径都在测试脚本的结果扫描范围内。
    */
-  private fun reportResults(results: List<TestResult>) {
+  private fun reportResults(results: List<TestResult>, resultToken: String) {
     val targets = ArrayList<File>(2)
     getExternalFilesDir("test_case_result")?.let { targets.add(it) }
     targets.add(File(filesDir, "test_case_result"))
@@ -173,8 +175,12 @@ class TestService : Service() {
         if (!ensureResultDir(target)) {
           throw IOException("结果目录不可用: ${target.absolutePath}")
         }
-        writeResultFile(File(target, "result_${System.currentTimeMillis()}.txt"), results)
-        writeCurrentResultFile(target, results)
+        writeTestResultFile(
+            File(target, "result_${System.currentTimeMillis()}.txt"),
+            results,
+            resultToken,
+        )
+        writeCurrentResultFile(target, results, resultToken)
         succeeded = true
       } catch (e: Throwable) {
         lastError = e
@@ -192,49 +198,37 @@ class TestService : Service() {
     return dir.isDirectory
   }
 
-  private fun writeResultFile(
-      file: File,
-      results: List<TestResult>,
-  ) {
-    file.parentFile?.mkdirs()
-    file.bufferedWriter().use { writer ->
-      results.forEach { result ->
-        writer.write(result.toLogLine())
-        writer.write("\n")
-      }
-      writer.flush()
-    }
-  }
-
   private fun writeCurrentResultFile(
       resultDir: File,
       results: List<TestResult>,
+      resultToken: String,
   ) {
     resultDir.mkdirs()
     val file = File(resultDir, RESULT_CURRENT_FILE)
     val temp = File(resultDir, "$RESULT_CURRENT_FILE.tmp")
     if (temp.exists()) temp.delete()
-    writeResultFile(temp, results)
-    if (file.exists()) file.delete()
+    writeTestResultFile(temp, results, resultToken)
     if (!temp.renameTo(file)) {
-      writeResultFile(file, results)
       temp.delete()
+      throw IOException("结果文件发布失败: ${file.absolutePath}")
     }
   }
 
   private fun writeImmediateFailure(
       stage: String,
       error: Throwable,
+      testCase: TestCase,
+      resultToken: String,
   ) {
     val result =
         TestResult(
-            testCase = TestCase.ALL_EXCEPT_DELETE,
+            testCase = testCase,
             passed = false,
             message = "$stage failed: ${error.javaClass.simpleName}",
             error = error.stackTraceToString(),
         )
     try {
-      reportResults(listOf(result))
+      reportResults(listOf(result), resultToken)
     } catch (e: Throwable) {
       Log.e(TAG, "上报即时失败结果异常", e)
     }

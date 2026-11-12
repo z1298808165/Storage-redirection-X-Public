@@ -90,6 +90,7 @@ data class TestCaseArgs(
               EXTRA_URL,
               EXTRA_REQUIRE_DESTINATION_VISIBLE,
               me.fakerqu.test.storageredirect.receiver.TestCaseReceiver.EXTRA_TEST_CASE,
+              me.fakerqu.test.storageredirect.receiver.TestCaseReceiver.EXTRA_RESULT_TOKEN,
           )
           .forEach { key -> from.getStringExtra(key)?.let { to.putExtra(key, it) } }
     }

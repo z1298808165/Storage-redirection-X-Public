@@ -51,7 +51,7 @@ CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试
 - 当前模块跑完 scenario 1-42。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - PowerShell 入口在应用停止后确认进程退出及旧独占 FUSE 子进程回收；死进程的状态账本由 daemon 按五分钟节流异步清理，不以账本文件立即消失作为退出判据。
-- 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理，避免清理耗时或清理阶段误报影响测试结论。
+- 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理。
 
 本项目不使用参考实现中的 `/dev/srx_config` 共享挂载作为模块加载信号。配置目录固定为 `/data/adb/modules/storage.redirect.x/config`，运行期通过 inotify 和指纹轮询热更新；安装阶段只验证模块目录未禁用、关键文件存在、当前 boot 的 `.boot_ok` 或 `logs/boot_<boot_id>.marker` 已写入，以及 `srx_daemon` 正在运行。具体重定向、挂载和配置热更新是否生效由后续场景，尤其是 scenario 29，进行端到端验证。
 
@@ -270,7 +270,13 @@ Android 17（API 37.0）有三处执行环境差异：
 
 场景 42 验证独占创建、二进制读写、追加、截断与零扩展、文件和非空目录改名、子孙路径与打开描述符在改名后的读写、旧路径重用、前缀相邻目录隔离、原子覆盖、覆盖/删除后的描述符读回及同名文件重建隔离。覆盖非空目录、移入自身子目录和删除非空目录必须被拒绝；`chmod`/`fchmod` 分别校验 `0440`/`0220` 的后端模式。
 
-符号链接成功时校验 `readlink`、跟随读取和物理落点；只有真实路径放行对照也返回 `EACCES` 时，其余路径才接受相同拒绝，且不得创建或泄漏链接。硬链接成功时校验后端落点、同一 inode 和内容；`EPERM` 或由放行对照复现的 `EACCES` 必须没有创建目标，其它错误均失败。各目标最终只保留 `complete.txt`、`metadata.txt`、`link-target.txt` 和创建成功的链接，由 root 校验物理落点及其余路径零残留。
+场景 42 先关闭测试应用的重定向，在原生共享存储上记录链接创建或拒绝结果，再启用场景配置。符号链接成功时校验 `readlink`、跟随读取和物理落点；只有未重定向对照与真实路径放行对照都返回 `EACCES` 时，其余路径才接受相同拒绝，且不得创建或泄漏链接。硬链接成功时校验后端落点、同一 inode 和内容；`EPERM` 必须由未重定向对照复现，`EACCES` 必须由两个对照复现，且均不得创建目标；其它错误均失败。各目标最终只保留 `complete.txt`、`metadata.txt`、`link-target.txt` 和创建成功的链接，由 root 校验物理落点及其余路径零残留。
+
+服务用例以 `OBSERVED [...] app_status=PASS/FAIL` 保留 APP 的实际结果和错误细节，并将原始文本保存在产物目录的 `scenario-*-result.txt` 中。`PASS/FAIL [...] assertion=app_result` 表示该项 APP 结果是否符合断言；由调用方继续校验的结果先输出 `PENDING`。链接操作完成全部路由、对照和物理断言后，才输出 `PASS [file_symlink_boundary]` / `PASS [file_link_boundary]`，并以 `outcome=created` 或 `outcome=denied` 区分实际创建与拒绝边界通过；后者不代表验证过成功创建。`PASS/FAIL [scenario] id=N` 是整个场景的最终判定，错误、超时、残留或对照不符均不得通过。最终清理失败会输出 `FAIL [cleanup]` 并返回非零退出码；PowerShell 入口仅在场景和清理全部成功后输出 `ALL_SCENARIOS_PASSED`。
+
+APP 将消息和元数据中的控制字符转义为 `\uXXXX`，避免诊断内容伪造结果行；每份结果以 `__SRT_RESULT_END__=N` 记录条数，随后以 `__SRT_RESULT_TOKEN__` 回传本次调用的 `result_token`，并在写入临时文件后原子重命名发布。采集器只接受严格晚于本次标记文件、调用令牌与用例标识匹配、条数相符且没有重复或额外行的完整结果；`all` 正常执行时必须包含全部 25 个独立用例，任一失败均使聚合断言失败。服务启动或聚合执行异常产生的单条 `FAIL [all]` 直接判失败，不等待超时；单条 `PASS [all]` 和混入聚合结果的致命错误记录均不接受。更新采集器时必须同步安装测试 APP。
+
+文件列举失败不得按空目录处理。拒绝类文件用例捕获到异常时，只接受明确的访问拒绝；MediaStore 创建异常向调用方传播，单独返回 `null` 不能证明权限拒绝。`EIO`、`ENOENT` 和 `ENOSPC` 等错误均不能冒充拒绝成功。
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 

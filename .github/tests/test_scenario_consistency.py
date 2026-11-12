@@ -752,7 +752,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         finish = section(self.bash, "finish_test_run() {", "cleanup_done=0")
         self.assertIn('if [ "$device_run_lock_held" -eq 1 ]', finish)
         self.assertLess(finish.index("cleanup_test_artifacts"), finish.index("release_device_run_lock"))
-        self.assertIn('return "$status"', finish)
+        self.assertIn('exit "$status"', finish)
 
     def test_manifest_is_contiguous_and_unique(self) -> None:
         self.assertEqual(list(range(1, max(self.ids) + 1)), self.ids)
@@ -1447,7 +1447,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_scenario_40_runs_all_attribution_checks_in_both_runners(self) -> None:
         bash_runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
-        ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $ok = [bool]$scenarioOk")
+        ps_runner = section(self.powershell, "function Invoke-Scenario {", "\nfunction Invoke-BasicAll {")
         for name in (
             "run_system_uid_attribution_scenario",
             "run_app_caller_media_provider_attribution_scenario",
@@ -2483,17 +2483,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         )
 
     def test_mediastore_create_case_retries_volume_attach_race(self) -> None:
-        """MediaStore 创建用例必须在「卷还没 attach 完」的窗口里重试，而不是直接判失败。
-
-        真机实证（2026-11-09）：MediaProvider 刚被重启、user 0 的 `external_primary` 卷
-        尚未 attach 时，insert 会抛 `IllegalArgumentException: Volume external_primary
-        not found`，应用侧只看到 `createMedia returned null`——与「文件被重定向后打开失败」
-        在产物里长得一模一样。若用例不重试，环境竞态就会被当成数据面缺陷（本次排查就因为
-        这一点绕了很久）。
-
-        守卫锁定三件事（两套运行器都要有）：① 存在重试包装；② 重试留痕串可检索；
-        ③ 重试次数有界（不得无限重试把真实失败吞掉）。
-        """
+        """MediaStore 创建重试次数有界，并输出可检索的重试与最终失败标记。"""
         for name, text, case_fn in (
             ("bash", self.bash, "run_mediastore_create_case() {"),
             ("ps", self.powershell, "function Invoke-MediaStoreCreateCase {"),
@@ -2503,8 +2493,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
             wrapper = wrapper[: wrapper.index("\n}")]
             self.assertIn("mediastore_create_retry", wrapper, name)
             self.assertIn("SRT_MEDIASTORE_CREATE_ATTEMPTS", wrapper, name)
-            self.assertIn("create_media_null", wrapper, name)
-        # 失败仍需如实报出，且只在重试耗尽后。
+            self.assertIn("create_media_failed", wrapper, name)
+        # Bash 包装在重试耗尽后输出最终失败标记。
         self.assertIn("mediastore_create_failed", self.bash)
 
     def test_backend_endpoint_recovery_keeps_app_pid(self) -> None:
@@ -2879,7 +2869,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         nonzero = service.index('if [ "$start_status" -ne 0 ]; then', start)
         nonzero_end = service.index('\n    fi\n    if [ "$start_status" -eq 0 ]', nonzero)
         result = service.index(
-            'if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then',
+            'if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" >"$output_file"; then',
             nonzero_end,
         )
 
@@ -3917,6 +3907,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("private_bind_present", body)
         self.assertIn("/proc/${drift_pid}/mountinfo", body)
         self.assertIn('[ "$private_bind_present" -eq 0 ]', body)
+        ps = section(self.powershell, "function Invoke-OwnerDriftOwnDirScenario {", "function Set-ReadOnlySeed {")
+        self.assertIn("$privateBind = Test-Su", ps)
+        self.assertIn("-not $privateBind -and", ps)
+        self.assertIn("/proc/$driftPid/mountinfo", ps)
 
     def test_host_view_coverage_uses_live_session_fact(self) -> None:
         # 「宿主是否盖住视图根」不能只看本轮接入是否成功：接入因预算/应答失败而回退时，

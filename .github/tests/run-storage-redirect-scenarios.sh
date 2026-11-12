@@ -407,15 +407,17 @@ restore_device_execution_state() {
   if [ "${device_execution_state_backup_ready:-0}" -ne 1 ]; then
     return 0
   fi
+  local status=0
   if [ "${original_deviceidle_whitelist:-0}" -eq 0 ]; then
-    adb shell cmd deviceidle whitelist -"$APP_ID" >/dev/null 2>&1 || true
+    adb shell cmd deviceidle whitelist -"$APP_ID" >/dev/null || status=1
   fi
-  adb shell am set-inactive "$APP_ID" "${original_app_inactive:-false}" >/dev/null 2>&1 || true
+  adb shell am set-inactive "$APP_ID" "${original_app_inactive:-false}" >/dev/null || status=1
   if [ -z "${original_stay_on_while_plugged_in:-}" ] || [ "$original_stay_on_while_plugged_in" = "null" ]; then
-    adb shell settings delete global stay_on_while_plugged_in >/dev/null 2>&1 || true
+    adb shell settings delete global stay_on_while_plugged_in >/dev/null || status=1
   else
-    adb shell settings put global stay_on_while_plugged_in "$original_stay_on_while_plugged_in" >/dev/null 2>&1 || true
+    adb shell settings put global stay_on_while_plugged_in "$original_stay_on_while_plugged_in" >/dev/null || status=1
   fi
+  return "$status"
 }
 
 write_config() {
@@ -911,10 +913,10 @@ restore_global_config() {
     return 0
   fi
   if [ "${original_global_config_exists:-0}" -eq 1 ] && [ -n "${original_global_config_b64:-}" ]; then
-    adb_root "printf '%s' '$original_global_config_b64' | base64 -d > '$GLOBAL_CONFIG'" >/dev/null 2>&1 || true
-    adb_su "chmod 644 '$GLOBAL_CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
+    adb_root "printf '%s' '$original_global_config_b64' | base64 -d > '$GLOBAL_CONFIG'" >/dev/null || return 1
+    adb_su "chmod 644 '$GLOBAL_CONFIG'" >/dev/null
   else
-    adb_su "rm -f '$GLOBAL_CONFIG'" >/dev/null 2>&1 || true
+    adb_su "rm -f '$GLOBAL_CONFIG'" >/dev/null
   fi
 }
 
@@ -935,11 +937,11 @@ restore_app_config() {
     return 0
   fi
   if [ "${original_app_config_exists:-0}" -eq 1 ] && [ -n "${original_app_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null 2>&1 || true
-    adb_root "printf '%s' '$original_app_config_b64' | base64 -d > '$CONFIG'" >/dev/null 2>&1 || true
-    adb_su "chmod 644 '$CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
+    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
+    adb_root "printf '%s' '$original_app_config_b64' | base64 -d > '$CONFIG'" >/dev/null || return 1
+    adb_su "chmod 644 '$CONFIG'" >/dev/null
   else
-    adb_su "rm -f '$CONFIG'" >/dev/null 2>&1 || true
+    adb_su "rm -f '$CONFIG'" >/dev/null
   fi
 }
 
@@ -963,11 +965,11 @@ restore_provider_config() {
     return 0
   fi
   if [ "${original_provider_config_exists:-0}" -eq 1 ] && [ -n "${original_provider_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null 2>&1 || true
-    adb_root "printf '%s' '$original_provider_config_b64' | base64 -d > '$PROVIDER_CONFIG'" >/dev/null 2>&1 || true
-    adb_su "chmod 644 '$PROVIDER_CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
+    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
+    adb_root "printf '%s' '$original_provider_config_b64' | base64 -d > '$PROVIDER_CONFIG'" >/dev/null || return 1
+    adb_su "chmod 644 '$PROVIDER_CONFIG'" >/dev/null
   else
-    adb_su "rm -f '$PROVIDER_CONFIG'" >/dev/null 2>&1 || true
+    adb_su "rm -f '$PROVIDER_CONFIG'" >/dev/null
   fi
 }
 
@@ -988,9 +990,9 @@ restore_cross_app_config() {
     return 0
   fi
   if [ "${original_cross_app_config_exists:-0}" -eq 1 ] && [ -n "${original_cross_app_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null 2>&1 || true
-    adb_root "printf '%s' '$original_cross_app_config_b64' | base64 -d > '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1 || true
-    adb_su "chmod 644 '$READ_ONLY_OWNER_CONFIG' 2>/dev/null || true" >/dev/null 2>&1 || true
+    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
+    adb_root "printf '%s' '$original_cross_app_config_b64' | base64 -d > '$READ_ONLY_OWNER_CONFIG'" >/dev/null || return 1
+    adb_su "chmod 644 '$READ_ONLY_OWNER_CONFIG'" >/dev/null
   else
     clear_cross_app_read_only_config
   fi
@@ -1277,20 +1279,20 @@ cleanup_test_artifacts() {
     return "$status"
   fi
   cleanup_done=1
-  set +e
   echo "== cleanup test artifacts =="
-  adb shell am force-stop "$APP_ID" >/dev/null 2>&1
-  restore_cross_app_config >/dev/null 2>&1
-  restore_provider_config >/dev/null 2>&1
-  restore_app_config >/dev/null 2>&1
-  restore_global_config >/dev/null 2>&1
-  clean_results >/dev/null 2>&1
-  remove_test_target_artifacts >/dev/null 2>&1
-  clear_alias_mediastore_fixture >/dev/null 2>&1
-  remove_random_mediastore_rows >/dev/null 2>&1
-  remove_random_physical_media_files >/dev/null 2>&1
-  restart_media_provider >/dev/null 2>&1
-  restore_device_execution_state >/dev/null 2>&1
+  if ! adb shell am force-stop "$APP_ID"; then
+    echo "FAIL [cleanup] step=force_stop" >&2
+    status=1
+  fi
+  local step
+  for step in restore_cross_app_config restore_provider_config restore_app_config restore_global_config \
+    clean_results remove_test_target_artifacts clear_alias_mediastore_fixture \
+    remove_random_mediastore_rows remove_random_physical_media_files restart_media_provider restore_device_execution_state; do
+    if ! "$step"; then
+      echo "FAIL [cleanup] step=${step}" >&2
+      status=1
+    fi
+  done
   return "$status"
 }
 
@@ -1307,7 +1309,43 @@ wait_service_result() {
   local remainder=$((SRT_RESULT_POLL_MS % 1000))
   local poll_delay
   printf -v poll_delay '%d.%03d' "$seconds" "$remainder"
-  adb_su_timeout "$host_timeout_seconds" "marker_mtime=\$(stat -c %Y '$freshness_marker' 2>/dev/null || echo 0); deadline=\$(date +%s); deadline=\$((deadline + $timeout_seconds)); while [ \$(date +%s) -lt \$deadline ]; do for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do if [ -s \"\$file\" ]; then file_mtime=\$(stat -c %Y \"\$file\" 2>/dev/null || echo 0); [ \"\$file_mtime\" -ge \"\$marker_mtime\" ] || continue; if [ '$expected_test_case' != 'all' ]; then line_count=\$(grep -cve '^[[:space:]]*\$' \"\$file\" 2>/dev/null || true); grep -Eq '^(PASS|FAIL) \\[$expected_test_case\\]' \"\$file\" || continue; [ \"\$line_count\" -eq 1 ] || continue; fi; cat \"\$file\"; exit 0; fi; done; sleep $poll_delay; done; exit 1"
+  adb_su_timeout "$host_timeout_seconds" "
+test -f '$freshness_marker' || exit 1
+deadline=\$((\$(date +%s) + $timeout_seconds))
+while [ \$(date +%s) -lt \$deadline ]; do
+  for file in '$RESULT_DIR/result_current.txt' '$INTERNAL_RESULT_DIR/result_current.txt' '$BACKEND_RESULT_DIR/result_current.txt' '$SANDBOX_RESULT_DIR/result_current.txt' \$(find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result/result_current.txt' -type f 2>/dev/null); do
+    [ -s \"\$file\" ] && [ \"\$file\" -nt '$freshness_marker' ] || continue
+    result=\$(awk -v expected='$expected_test_case' -v expected_token='$freshness_marker' '
+      { text=text \$0 \"\\n\" }
+      /^__SRT_RESULT_TOKEN__=/ {
+        if (token++ || complete != 1 || \$0 != \"__SRT_RESULT_TOKEN__=\" expected_token) invalid=1
+        next
+      }
+      /^__SRT_RESULT_END__=[0-9]+\$/ {
+        if (complete++ || \$0 != \"__SRT_RESULT_END__=\" count || count < 1) invalid=1
+        next
+      }
+      {
+        if (\$0 ~ /[[:cntrl:]]/) invalid=1
+        if (complete || \$0 !~ /^(PASS|FAIL) \\[[a-z_]+\\] / || seen[\$2]++) invalid=1
+        if (expected != \"all\" && \$2 != \"[\" expected \"]\") invalid=1
+        if (expected == \"all\") {
+          if (\$1 == \"FAIL\" && \$2 == \"[all]\") fatal=1
+          else if (\$2 !~ /^\\[(mediastore_(create|read|write)_(image|video|audio|file|download)|file_(list_dir|create|read|write|write_then_overwrite|overwrite|stat|access|truncate|ftruncate))\\]$/) invalid=1
+        }
+        count++
+      }
+      END {
+        if (invalid || complete != 1 || token != 1 || count != (expected == \"all\" && !fatal ? 25 : 1)) exit 1
+        printf \"%s\", text
+      }
+    ' \"\$file\") || continue
+    printf '%s\\n' \"\$result\"
+    exit 0
+  done
+  sleep $poll_delay
+done
+exit 1"
 }
 
 wait_app_mount_confirmed() {
@@ -1935,18 +1973,7 @@ print_storage_state() {
   adb_su "for p in \$(pidof ${APP_ID} 2>/dev/null || true); do echo \"--- app mountinfo pid=\$p ---\"; cat /proc/\$p/mountinfo 2>&1 | grep -E 'SrtQqAlias|QQfile_recv|Download/QQ' || echo '<no matched entry>'; done" || true
 }
 
-# MediaStore 创建用例（带环境竞态重试）。
-#
-# 真机实证（2026-11-09，2311DRK48C / A16）：MediaProvider 刚被重启、user 0 的
-# `external_primary` 卷还没 attach 完的窗口里，任何 MediaStore insert 都会抛
-# `IllegalArgumentException: Volume external_primary not found`（日志里对应的是
-# `E MediaProvider: Volume external_primary not found ... attached volumes:` 之后紧跟
-# `{MediaVolume name: [external_primary] id: [emulated;999] user: [UserHandle{999}]}`），应用侧看到的
-# 只是 `createMedia returned null`。这与「文件被重定向后打开失败」在产物里长得一模一样，
-# 会把环境竞态误判成数据面缺陷。
-#
-# 因此这里给创建类用例留有限次重试，并把每次重试单独打一行——重试后仍失败才算失败，
-# 而日志能一眼区分「抖了一下」与「稳定坏」。
+# MediaStore 创建失败时有界重试，每次仍执行完整结果断言。
 run_mediastore_create_case() {
   local scenario="$1"
   local label="$2"
@@ -1961,7 +1988,7 @@ run_mediastore_create_case() {
       echo "mediastore_create_failed scenario=${scenario} label=${label} attempts=${attempt}" >&2
       return 1
     fi
-    echo "mediastore_create_retry scenario=${scenario} label=${label} attempt=${attempt} reason=create_media_null" >&2
+    echo "mediastore_create_retry scenario=${scenario} label=${label} attempt=${attempt} reason=create_media_failed" >&2
     attempt=$((attempt + 1))
     sleep 2
   done
@@ -1996,7 +2023,10 @@ run_service_case() {
     sleep_ms "$SRT_SERVICE_CASE_SETTLE_MS"
     clean_results
     freshness_marker="/data/local/tmp/srx-result-$$-${scenario}-${RANDOM}.marker"
-    adb_su "touch '$freshness_marker'" >/dev/null
+    if ! adb_su "touch '$freshness_marker'" >/dev/null; then
+      echo "FAIL [${test_case}] scenario=${scenario} label=${label} reason=freshness_marker_failed" >&2
+      return 1
+    fi
     # Android 17 上向刚重启的应用发 broadcast 偶发阻塞；90 秒 timeout 限定 adb 调用。
     # adb 非零退出不代表 intent 未送达，后续以带 freshness marker 的结果文件判定。
     # 直接启动前台服务而非经 receiver 转发：HyperOS 实机（A16/KSU）会在用例启动
@@ -2005,7 +2035,7 @@ run_service_case() {
     # （result_timeout 雪崩）；shell 直启 FGS 不受该策略限制，且服务端的
     # onStartCommand 按相同 action+extras 处理，语义与 receiver 转发完全一致。
     start_status=0
-    start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" 2>&1)" || start_status=$?
+    start_output="$(timeout 90 adb shell am start-foreground-service -n "${APP_ID}/.TestService" -a "$ACTION" --es test_case "$test_case" "$@" --es result_token "$freshness_marker" 2>&1)" || start_status=$?
     if [ "$start_status" -ne 0 ]; then
       # adb 退出非零时 Android 仍可能已分发 intent；只有带 freshness marker 的结果能确认服务是否实际运行。
       echo "service_start_status_nonzero scenario=${scenario} label=${label} test_case=${test_case} status=${start_status}; checking result"
@@ -2020,15 +2050,20 @@ run_service_case() {
     fi
 
     timeout_seconds="$(service_case_timeout_seconds "$test_case")"
-    if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" | tee "$output_file"; then
+    if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" >"$output_file"; then
       adb_su "rm -f '$freshness_marker'" >/dev/null
-      cat "$output_file" >>"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt"
+      cat "$output_file" >>"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt" || return 1
+      sed -E 's/^(PASS|FAIL) (\[[^]]*\]) /OBSERVED \2 app_status=\1 /' "$output_file" || return 1
       if [ -z "$pass_pattern" ]; then
+        echo "PENDING [${test_case}] scenario=${scenario} label=${label} raw_result=${output_file}"
         return 0
       fi
-      if grep -q "$pass_pattern" "$output_file"; then
+      if grep -Eq "$pass_pattern" "$output_file" &&
+        { [ "$test_case" != all ] || ! grep -q '^FAIL ' "$output_file"; }; then
+        echo "PASS [${test_case}] scenario=${scenario} label=${label} assertion=app_result raw_result=${output_file}"
         return 0
       fi
+      echo "FAIL [${test_case}] scenario=${scenario} label=${label} assertion=app_result reason=mismatch expected=${pass_pattern} raw_result=${output_file}" >&2
       return 1
     fi
 
@@ -2036,6 +2071,7 @@ run_service_case() {
     echo "result_timeout scenario=${scenario} test_case=${test_case} attempt=${drive_attempt}"
     adb shell am force-stop "$APP_ID" >/dev/null || true
   done
+  echo "FAIL [${test_case}] scenario=${scenario} label=${label} reason=result_timeout" >&2
   return 1
 }
 
@@ -2161,7 +2197,7 @@ expect_app_entry() {
 
   for attempt in 1 2 3 4 5; do
     if run_service_case "$scenario" "$label" "file_list_dir" '^PASS \[file_list_dir\]' --es file_dir "$dir" &&
-      grep -q "entries=.*${TEST_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt"; then
+      sed -n 's/^PASS \[file_list_dir\] .*listedCount=[0-9][0-9]*, entries=//p' "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt" | tr '|' '\n' | grep -Fxq "$TEST_FILE"; then
       echo "app_view scenario=${scenario} logical_dir=${dir} expected_entry=${TEST_FILE}"
       return 0
     fi
@@ -2185,13 +2221,28 @@ expect_no_app_entry() {
   local scenario="$1"
   local label="$2"
   local dir="$3"
+  local line listed_count entry
+  local -a entries=()
 
   for attempt in 1 2 3; do
-    run_service_case "$scenario" "$label" "file_list_dir" "" --es file_dir "$dir"
-    if grep -q "entries=.*${TEST_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt"; then
-      echo "app_view scenario=${scenario} logical_dir=${dir} forbidden_entry_visible=${TEST_FILE}"
+    run_service_case "$scenario" "$label" "file_list_dir" '^PASS \[file_list_dir\]' --es file_dir "$dir" || return 1
+    line="$(grep '^PASS \[file_list_dir\] ' "${SRT_ARTIFACT_DIR}/scenario-${scenario}-${label}-result.txt")" || return 1
+    if [[ ! $line =~ listedCount=([0-9]+),\ entries=(.*)$ ]]; then
+      echo "FAIL [app_view] scenario=${scenario} reason=missing_listing_metadata" >&2
       return 1
     fi
+    listed_count="${BASH_REMATCH[1]}"
+    IFS='|' read -r -a entries <<<"${BASH_REMATCH[2]}"
+    if [[ ${#entries[@]} != "$listed_count" ]]; then
+      echo "FAIL [app_view] scenario=${scenario} reason=incomplete_listing" >&2
+      return 1
+    fi
+    for entry in "${entries[@]}"; do
+      if [[ $entry == "$TEST_FILE" ]]; then
+        echo "FAIL [app_view] scenario=${scenario} logical_dir=${dir} forbidden_entry_visible=${TEST_FILE}" >&2
+        return 1
+      fi
+    done
     sleep_ms "$SRT_RESULT_POLL_MS"
   done
 
@@ -2232,7 +2283,7 @@ check_file_missing() {
   elif [ "$path" = "$REAL_ROOT" ]; then
     backend_path="$BACKEND_ROOT"
   fi
-  if adb_su "test ! -e '$backend_path'"; then
+  if adb_su "test ! -e '$backend_path' && test ! -L '$backend_path'"; then
     echo "file_absent label=${label} path=${path} backend=${backend_path}"
     return 0
   fi
@@ -2972,7 +3023,7 @@ run_mediastore_read_only_query_scenario() {
     run_service_case "$scenario" "read-only-image-query" "mediastore_query_read_only_image" '^PASS \[mediastore_query_read_only_image\]' --es file_name "$READ_ONLY_IMAGE_FILE" --es expected_path "$logical_path" &&
     check_mediastore_bucket_id "scenario-${scenario}-read-only-image" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-read-only-image-query-result.txt" "$READ_ONLY_MEDIA_ROOT" &&
     run_service_case "$scenario" "read-only-image-list" "file_list_dir" '^PASS \[file_list_dir\]' --es file_dir "$READ_ONLY_MEDIA_ROOT" &&
-    grep -q "entries=.*${READ_ONLY_IMAGE_FILE}" "${SRT_ARTIFACT_DIR}/scenario-${scenario}-read-only-image-list-result.txt" &&
+    sed -n 's/^PASS \[file_list_dir\] .*listedCount=[0-9][0-9]*, entries=//p' "${SRT_ARTIFACT_DIR}/scenario-${scenario}-read-only-image-list-result.txt" | tr '|' '\n' | grep -Fxq "$READ_ONLY_IMAGE_FILE" &&
     run_service_case "$scenario" "read-only-image-file-read" "file_read" '^PASS \[file_read\]' --es file_path "$logical_path" &&
     check_file_exists "read-only-media-real" "$logical_path" &&
     check_file_missing "read-only-media-private" "$private_path"
@@ -3562,8 +3613,8 @@ run_monitor_capture_failopen_scenario() {
 
   daemon_pid="$(adb_su "for p in \$(pidof srx_daemon 2>/dev/null); do [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = 'srx_daemon' ] && { echo \"\$p\"; break; }; done" | tr -d '\r' | awk 'NF {print; exit}')"
   if [ -z "$daemon_pid" ]; then
-    echo "monitor_capture_failopen_skipped scenario=${scenario} reason=daemon_not_running"
-    return 0
+    echo "FAIL [monitor_capture_failopen] scenario=${scenario} reason=daemon_not_running" >&2
+    return 1
   fi
 
   echo "monitor_capture_failopen freeze daemon pid=${daemon_pid}"
@@ -4321,18 +4372,57 @@ run_file_mutation_lifecycle_scenario() {
     esac
     run_service_case "$scenario" "mutation-${kind}" file_mutation_lifecycle '^PASS \[file_mutation_lifecycle\]' --es file_dir "$request" || return 1
     adb_su "test \"\$(ls -A '${expected}')\" = complete.txt && test \"\$(cat '${expected}/complete.txt')\" = srx-mutation-lifecycle-v1 && test \"\$(wc -c < '${expected}/complete.txt')\" -eq 25" || return 1
-    adb_su "test ! -e '${shadow}' || { test -d '${shadow}' && entries=\$(ls -A '${shadow}') && test -z \"\$entries\"; }" || return 1
+    adb_su "test ! -L '${shadow}' && { test ! -e '${shadow}' || { test -d '${shadow}' && entries=\$(ls -A '${shadow}') && test -z \"\$entries\"; }; }" || return 1
   done
   for shadow in "${BACKEND_ROOT}/Download/SrtMutationRequest" "${BACKEND_PRIVATE_ROOT}/Download/SrtMutationMapped"; do
     adb_su "entries=\$(ls -A '${shadow}') && test -z \"\$entries\"" || return 1
   done
 }
 
+run_file_link_control() {
+  apply_config 1 || return 1
+  clean_targets || return 1
+  adb_su "mkdir -p '${BACKEND_ROOT}/Download/SrtMutationAllowed'" || return 1
+  fix_shared_fixture_permissions || return 1
+  start_app_and_confirm_mount scenario-1-link-control 0 || return 1
+  wait_storage_ready scenario-1-link-control || return 1
+  local control="${REAL_ROOT}/Download/SrtMutationAllowed" operation from result_file outcome control_pid
+  control_pid="$(app_pid)"
+  if [ -z "$control_pid" ] || ! adb_su "a=\$(awk '\$5 == \"/storage/emulated\" {print \$3; exit}' /proc/${control_pid}/mountinfo); b=\$(awk '\$5 == \"/storage/emulated\" {print \$3; exit}' /proc/1/mountinfo); test -n \"\$a\" && test \"\$a\" = \"\$b\""; then
+    echo "FAIL [file_link_control] reason=unredirected_view_unconfirmed" >&2
+    return 1
+  fi
+  run_service_case 1 link-control-target file_create '^PASS \[file_create\]' --es file_path "$control/link-target.txt" --es payload "$PAYLOAD" || return 1
+  for operation in symlink link; do
+    from="$control/link-target.txt"
+    if [ "$operation" = symlink ]; then from=link-target.txt; fi
+    run_service_case 1 "link-control-${operation}" "file_${operation}" "" --es file_path "$from" --es target_file_path "$control/native-${operation}" || return 1
+    result_file="${SRT_ARTIFACT_DIR}/scenario-1-link-control-${operation}-result.txt"
+    if grep -Eq "^PASS \\[file_${operation}\\] link succeeded" "$result_file"; then
+      outcome=created
+      adb_su "test -e '${BACKEND_ROOT}/Download/SrtMutationAllowed/native-${operation}'" || return 1
+    elif grep -Eq "^FAIL \\[file_${operation}\\] link failed .*error=(${operation} failed: )?EACCES( \([^()]*\))?$" "$result_file"; then
+      outcome=EACCES
+    elif [ "$operation" = link ] && grep -Eq '^FAIL \[file_link\] link failed .*error=(link failed: )?EPERM( \([^()]*\))?$' "$result_file"; then
+      outcome=EPERM
+    else
+      echo "FAIL [file_link_control] operation=${operation} reason=unexpected_result" >&2
+      cat "$result_file" >&2
+      return 1
+    fi
+    if [ "$outcome" != created ]; then
+      adb_su "test ! -e '${BACKEND_ROOT}/Download/SrtMutationAllowed/native-${operation}' && test ! -L '${BACKEND_ROOT}/Download/SrtMutationAllowed/native-${operation}'" || return 1
+    fi
+    if [ "$operation" = symlink ]; then native_symlink_result="$outcome"; else native_hardlink_result="$outcome"; fi
+    echo "OBSERVED [file_link_control] operation=${operation} redirect=disabled outcome=${outcome}"
+  done
+}
+
 run_file_mutation_metadata_scenario() {
   local scenario="$1"
-  local kind request expected shadow file link_target link hardlink result_file entries expected_entries hardlink_created symlink_created
+  local kind request expected shadow file link_target link hardlink result_file entries expected_entries hardlink_created symlink_created result
   local chmod_mode=440 fchmod_mode=220
-  local -a symlink_denied_routes=() hardlink_denied_routes=()
+  local -a symlink_denied_routes=() hardlink_denied_routes=() link_results=()
   for kind in Sandbox Allowed Request RequestSibling; do
     request="${REAL_ROOT}/Download/SrtMutation${kind}"
     case "$kind" in
@@ -4367,11 +4457,12 @@ run_file_mutation_metadata_scenario() {
       symlink_created=1
       run_service_case "$scenario" "mutation-${kind}-readlink" file_readlink '^PASS \[file_readlink\]' --es file_path "$link" --es expected_path link-target.txt || return 1
       run_service_case "$scenario" "mutation-${kind}-symlink-read" file_read '^PASS \[file_read\]' --es file_path "$link" --es expected_payload "$PAYLOAD" || return 1
-    elif grep -Fq 'FAIL [file_symlink] link failed' "$result_file" && grep -Eq 'EACCES|Permission denied' "$result_file"; then
+      link_results+=("[file_symlink_boundary] scenario=${scenario} route=${kind} outcome=created")
+    elif grep -Eq '^FAIL \[file_symlink\] link failed .*error=(symlink failed: )?EACCES( \([^()]*\))?$' "$result_file"; then
       symlink_denied_routes+=("$kind")
-      echo "symlink_boundary scenario=${scenario} route=${kind} result=EACCES"
+      link_results+=("[file_symlink_boundary] scenario=${scenario} route=${kind} outcome=denied errno=EACCES control=unredirected,Allowed")
     else
-      echo "symlink_boundary_unexpected scenario=${scenario} route=${kind}" >&2
+      echo "FAIL [file_symlink_boundary] scenario=${scenario} route=${kind} reason=unexpected_result" >&2
       cat "$result_file" >&2
       return 1
     fi
@@ -4381,19 +4472,23 @@ run_file_mutation_metadata_scenario() {
     if grep -Fq 'PASS [file_link] link succeeded' "$result_file"; then
       hardlink_created=1
       adb_su "test '${expected}/hard-link' -ef '${expected}/link-target.txt' && test \"\$(cat '${expected}/hard-link')\" = '${PAYLOAD}'" || return 1
-      echo "hardlink_boundary scenario=${scenario} route=${kind} result=created"
-    elif grep -Fq 'FAIL [file_link] link failed' "$result_file" && grep -Eq 'EPERM|Operation not permitted' "$result_file"; then
-      echo "hardlink_boundary scenario=${scenario} route=${kind} result=EPERM"
-    elif grep -Fq 'FAIL [file_link] link failed' "$result_file" && grep -Eq 'EACCES|Permission denied' "$result_file"; then
+      link_results+=("[file_link_boundary] scenario=${scenario} route=${kind} outcome=created")
+    elif grep -Eq '^FAIL \[file_link\] link failed .*error=(link failed: )?EPERM( \([^()]*\))?$' "$result_file"; then
+      if [ "${native_hardlink_result:-}" != EPERM ]; then
+        echo "FAIL [file_link_boundary] scenario=${scenario} route=${kind} reason=eperm_without_unredirected_control" >&2
+        return 1
+      fi
+      link_results+=("[file_link_boundary] scenario=${scenario} route=${kind} outcome=denied errno=EPERM control=unredirected")
+    elif grep -Eq '^FAIL \[file_link\] link failed .*error=(link failed: )?EACCES( \([^()]*\))?$' "$result_file"; then
       hardlink_denied_routes+=("$kind")
-      echo "hardlink_boundary scenario=${scenario} route=${kind} result=EACCES"
+      link_results+=("[file_link_boundary] scenario=${scenario} route=${kind} outcome=denied errno=EACCES control=unredirected,Allowed")
     else
-      echo "hardlink_boundary_unexpected scenario=${scenario} route=${kind}" >&2
+      echo "FAIL [file_link_boundary] scenario=${scenario} route=${kind} reason=unexpected_result" >&2
       cat "$result_file" >&2
       return 1
     fi
 
-    entries="$(adb_su "ls -A '${expected}' | sort | tr '\\n' '|'" | tr -d '\r')"
+    entries="$(adb_su "entries=\$(ls -A '${expected}') || exit 1; if [ -n \"\$entries\" ]; then printf '%s\\n' \"\$entries\" | sort | tr '\\n' '|'; fi" | tr -d '\r')" || return 1
     expected_entries="complete.txt|"
     if [ "$hardlink_created" -eq 1 ]; then
       expected_entries+="hard-link|"
@@ -4418,17 +4513,28 @@ run_file_mutation_metadata_scenario() {
     esac
   done
   if [ "${#symlink_denied_routes[@]}" -gt 0 ]; then
+    if [ "${native_symlink_result:-}" != EACCES ]; then
+      echo "FAIL [file_symlink_boundary] scenario=${scenario} reason=eacces_without_unredirected_control" >&2
+      return 1
+    fi
     case " ${symlink_denied_routes[*]} " in
       *" Allowed "*) ;;
-      *) echo "symlink_eacces_without_allowed_control scenario=${scenario}" >&2; return 1 ;;
+      *) echo "FAIL [file_symlink_boundary] scenario=${scenario} reason=eacces_without_allowed_control" >&2; return 1 ;;
     esac
   fi
   if [ "${#hardlink_denied_routes[@]}" -gt 0 ]; then
+    if [ "${native_hardlink_result:-}" != EACCES ]; then
+      echo "FAIL [file_link_boundary] scenario=${scenario} reason=eacces_without_unredirected_control" >&2
+      return 1
+    fi
     case " ${hardlink_denied_routes[*]} " in
       *" Allowed "*) ;;
-      *) echo "hardlink_eacces_without_allowed_control scenario=${scenario}" >&2; return 1 ;;
+      *) echo "FAIL [file_link_boundary] scenario=${scenario} reason=eacces_without_allowed_control" >&2; return 1 ;;
     esac
   fi
+  for result in "${link_results[@]}"; do
+    echo "PASS ${result} checks=physical,content,zero_shadow"
+  done
 }
 
 run_standard_scenario() {
@@ -4711,8 +4817,8 @@ run_owner_drift_own_dir_scenario() {
   # 原生 Android 的 emulated 视图本来就走 ②，所以「拒绝」不是唯一正确形态，不能拿它当
   # 唯一判据。本场景真正的契约是「模块不得改写私有树属主」（见下方 1023 校验）——
   # 一旦属主被静默修好，漂移这个事实就会被掩盖。
-  local read_expect='^FAIL \[file_read\]'
-  local write_expect='^FAIL \[file_write\]'
+  local read_expect='^FAIL \[file_read\].*error=.*open failed: EACCES( \([^()]*\))?$'
+  local write_expect='^FAIL \[file_write\].*error=.*open failed: EACCES( \([^()]*\))?$'
   local drift_pid
   drift_pid="$(app_pid)"
   # 形态判定必须同时看两件事，任一不满足就不能按「宿主服务」期望成功：
@@ -4736,11 +4842,15 @@ run_owner_drift_own_dir_scenario() {
   else
     echo "owner_drift_layout scenario=${scenario} form=bind private_bind=${private_bind_present}"
   fi
-  run_service_case "$scenario" "own-drift-read" "file_read" "$read_expect" --es file_path "$drift_visible/srt_drift_existing.txt" || return 1
+  run_service_case "$scenario" "own-drift-read" "file_read" "$read_expect" --es file_path "$drift_visible/srt_drift_existing.txt" --es expected_payload srt-drift-payload || return 1
   run_service_case "$scenario" "own-drift-write" "file_write" "$write_expect" --es file_path "$drift_visible/srt_drift_probe.txt" --es payload "$PAYLOAD" --es expected_payload "$PAYLOAD" || return 1
   # 后端属主必须保持注入的 1023：守护与应用都不得改写私有树属主（拆除契约）。
-  if ! adb_su "[ \"\$(stat -c %u '$drift_backend/srt_drift_existing.txt')\" = '1023' ]"; then
+  if ! adb_su "[ \"\$(stat -c %u '$drift_backend/srt_drift_existing.txt')\" = '1023' ] && [ \"\$(cat '$drift_backend/srt_drift_existing.txt')\" = srt-drift-payload ]"; then
     echo "owner_drift_repaired_unexpectedly scenario=${scenario} backend=${drift_backend}" >&2
+    return 1
+  fi
+  if [[ "$write_expect" == '^FAIL '* ]] && ! adb_su "test ! -e '$drift_backend/srt_drift_probe.txt' && test ! -L '$drift_backend/srt_drift_probe.txt'"; then
+    echo "FAIL [owner_drift] scenario=${scenario} reason=denied_write_left_file" >&2
     return 1
   fi
   echo "owner_drift_inert scenario=${scenario}"
@@ -4910,8 +5020,7 @@ run_sandbox_root_metadata_scenario() {
   check_file_exists "${label}-app-write-private" "${PRIVATE_ROOT}/${app_write_file}" || return 1
   check_file_missing "${label}-app-write-public" "${BACKEND_ROOT}/${app_write_file}" || return 1
 
-  # 端到端：沙盒根不可穿越时，这条 MediaStore 创建会以
-  # `createMedia returned null` 失败，并在真实公共路径补建父目录。
+  # MediaStore 代写后同时校验沙盒落点和公共路径零残留。
   ensure_media_provider_hook_ready "${label}-sandbox-root" || return 1
   run_mediastore_create_case "$scenario" "sandbox-root-mediastore" --es file_name "$file" --es relative_path "$rel" || return 1
   check_file_exists "${label}-sandbox-root-file" "$sandbox_file" || return 1
@@ -4926,9 +5035,11 @@ run_sandbox_root_metadata_scenario() {
 run_scenario() {
   local scenario="$1"
   local targets_prepared_before_start=0
+  local native_symlink_result="" native_hardlink_result=""
   : >"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt"
   echo "step 1/7: 应用场景配置"
   adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
+  if [ "$scenario" = 42 ]; then run_file_link_control || return 1; fi
   apply_config "$scenario"
   if [ "$scenario" != "1" ]; then
     apply_config_and_wait "scenario-${scenario}"
@@ -5231,7 +5342,9 @@ release_device_run_lock() {
   # 卡住、只能等看门狗硬杀。超时后按「释放失败」处理并保留现场——设备端陈旧锁有
   # 4 小时 mtime 回收兜底（reclaim_stale_device_run_lock），CI 每轮又是全新模拟器。
   if ! adb_su_timeout 20 "test \"\$(cat '$device_run_lock_path/owner' 2>/dev/null)\" = '$device_run_lock_token' && rm '$device_run_lock_path/owner' && rmdir '$device_run_lock_path'" >/dev/null; then
-    echo "设备测试锁释放失败或归属已变更，保留现场：$device_run_lock_path" >&2
+    echo "FAIL [cleanup] step=device_lock path=$device_run_lock_path" >&2
+    device_run_lock_held=0
+    return 1
   fi
   device_run_lock_held=0
 }
@@ -5288,11 +5401,11 @@ finish_test_run() {
   if [ "$device_run_lock_held" -eq 1 ]; then
     set_download_test_network restore || status=1
     if [ "$global_config_backup_ready" -eq 1 ] && [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
-      cleanup_test_artifacts || true
+      cleanup_test_artifacts || status=1
     fi
-    release_device_run_lock
+    release_device_run_lock || status=1
   fi
-  return "$status"
+  exit "$status"
 }
 
 cleanup_done=0
@@ -5346,6 +5459,7 @@ export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PRO
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL SRT_DOWNLOAD_NETWORK_HELPER
 export -f set_download_test_network
 export -f run_file_mutation_lifecycle_scenario
+export -f run_file_link_control
 export -f run_file_mutation_metadata_scenario
 export UID_ATTRIB_REL UID_ATTRIB_PROBE_REL
 export SHELL_PACKAGE SHELL_CONFIG SHELL_SANDBOX_REL SHELL_SANDBOX_REAL_DIR SHELL_SANDBOX_BACKEND_DIR
@@ -5388,6 +5502,7 @@ for scenario in "${scenarios[@]}"; do
   # 管道要到 15s 才关闭，去掉 --foreground 后 2s 关闭（孙进程随进程组一起收掉）。
   # `--kill-after` 兜住「整组忽略 TERM」的情况，30 秒后升级 SIGKILL。
   if ! timeout --kill-after=30s "${SRT_SCENARIO_TIMEOUT_SECONDS}s" bash -e -o pipefail -c 'run_scenario "$1"' _ "$scenario"; then
+    echo "FAIL [scenario] id=${scenario}"
     echo "scenario ${scenario}: failed or timed out"
     # 设备级坏态（全应用 uid 访问共享存储被拒、shell/root 正常）的表现与应用侧断言
     # 失败完全同形，而现场证据只在这一刻可得：随后的健康探测、下一场景清理、任何重启
@@ -5408,6 +5523,8 @@ for scenario in "${scenarios[@]}"; do
       echo "::endgroup::"
       break
     fi
+  else
+    echo "PASS [scenario] id=${scenario}"
   fi
   echo "::endgroup::"
 done
@@ -5421,10 +5538,10 @@ fi
 
 if [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
   trap - EXIT
-  cleanup_test_artifacts
+  cleanup_test_artifacts || fail=1
   # 撤掉 EXIT trap 后 finish_test_run 不再执行，必须在这里释放设备锁；
   # 否则正常跑完也会残留锁目录，下一次运行被拒（需手工 rm -rf）。
-  release_device_run_lock
+  release_device_run_lock || fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then
