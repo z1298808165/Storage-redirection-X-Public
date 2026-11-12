@@ -12,8 +12,8 @@
 这两个库不是把源码复制到本仓库中维护，而是在 `Cargo.toml` 中以 Cargo git 依赖方式引用：
 
 ```toml
-# quality-allow(chinese-language): 紧随其后一行同步 Cargo.toml 中固定版本的依赖声明，保留原文便于直接核对。
-srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "bfb02a7b731157898fe7ad2b5108f02b0a742284" }
+# quality-allow(chinese-language): 下一行保留 Cargo.toml 的 srx_hook 固定提交声明，便于逐字核对。
+srx_hook = { git = "https://github.com/Kindness-Kismet/srx_hook.git", rev = "481c45ac2ab10c2a5f15c4fad91485d4639b8dc5" }
 # quality-allow(chinese-language): 紧随其后一行同为依赖声明原文，保留原样便于直接与 Cargo.toml 比对。
 srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.git", rev = "c8abb2e7249dc72f5e1113c3eb1def202fa0d3cb" }
 ```
@@ -91,16 +91,13 @@ srx_inline_hook = { git = "https://github.com/Kindness-Kismet/srx_inline_hook.gi
 
 `should_bypass_hook_in_fork_child`（`src/hook/runtime.rs`）对系统 writer、SAF native bridge 和 shared-UID 进程继续执行 hook 决策；这些路径会访问 `SettingsHub` 的阻塞锁（`src/config/inspect.rs`、`src/config/raw_scan.rs`）和 `PathRouter` 的读锁（`src/redirect/router.rs`）。这些 SRX 调用方锁不由 `srx_hook` 的 atfork 处理器重置或保护。
 
-## 上游 bfb02a7b：批量 hook 扫描只覆盖有租期的模块
+## 当前版本的 API 与模块扫描边界
 
-`select_tasks` 现在对 `All` / `Partial`（含调用方过滤）只挑选 `snapshot.ranges` 里有段范围、
-即由 bionic loader 管理并具备卸载保护的模块；显式 `Single` 目标仍保留租期错误。
+从 `bfb02a7b` 升级到 `481c45ac` 的变更仅将 Rust 完整路径改为先导入再引用：公共 API 无新增或移除，参数、返回类型、错误码、数据结构和运行时行为不变。`hook_single_checked`、`hook_partial_checked`、`hook_all_checked` 的返回类型由 `crate::api::HookError` 简写为同一类型 `HookError`；本项目的注册、批量提交、刷新、清理、原函数调用和 fork 检测均沿用原有接口。
 
-原因：`enumerate_modules` 是 `dl_iterate_phdr` 与 `/proc/self/maps` 的并集，注入框架用自有
-linker 映射的模块（如 Zygisk Next 的 `libzygisk.so`）只在 maps 里可见、拿不到段范围。它们没有
-卸载保护，一旦被选进批量任务，整批 refresh 就会因 `ModuleLeaseUnavailable` 回滚（Android 17
-上 MediaProvider 因此完全没有原生 hook，代写写入既不重定向也不产生监视记录）。
+`select_tasks` 对 `All` / `Partial`（含调用方过滤）只挑选 `snapshot.ranges` 里有段范围、
+即由 bionic loader 管理并具备卸载保护的模块；显式 `Single` 目标仍保留 `ModuleLeaseUnavailable` 错误。
 
-对本项目的影响：注入框架自身的库不再被 PLT hook，bionic 模块的 hook 集不变（实测
-MediaProvider 仍注册 55 条）。同时这类库可能在 specialize 之后被卸载，因此本项目在使用 Zygisk
-api 表前会校验其映射是否仍然存在（见 `hook/companion_api.rs` 的 `api_table_resident`）。
+`enumerate_modules` 合并 `dl_iterate_phdr` 与 `/proc/self/maps`。仅在 maps 中可见、没有 Bionic 段范围的自有 linker 模块不具备上述卸载保护，因此不参与批量扫描。
+
+本项目同时通过 ignore 规则与 caller 过滤器排除注入器自身的 `libzygisk.so`，并在使用 Zygisk API 表前校验其映射是否仍然存在（见 `hook/companion_api.rs` 的 `api_table_resident`）。
