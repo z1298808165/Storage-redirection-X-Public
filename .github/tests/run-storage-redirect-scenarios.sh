@@ -4299,6 +4299,21 @@ capture_own_private_diagnostics() {
   adb_su "for path in '${ANY_LEGACY_DATA_REQUEST}' '/data/user/0/${APP_ID}/code_cache' '/data/user/0/${APP_ID}/cache' '/data/user/0/${APP_ID}/files' '${ANY_LEGACY_PRIVATE_TARGET}' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache'; do printf '%s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; ls -la \"\$path\" 2>&1 | head -12; echo; done"
   echo "---app_mountinfo_full---"
   adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/mountinfo 2>/dev/null; else echo app_not_running; fi"
+  # 应用命名空间内的真实视图与一次性写探针。
+  #
+  # 上面的 stat 全部跑在 root shell 自己的命名空间里，看不到应用那层的 bind：
+  # 同一个路径在两侧可以是完全不同的东西。`/proc/<pid>/root` 穿过应用命名空间，
+  # 是无需 nsenter 也能拿到应用视图的通道，因此这里补两块——
+  #   (1) 应用视图里映射请求路径与目标的 dev/ino 与内容。dev 是 FUSE 还是块设备，
+  #       直接区分「bind 生效」与「bind 成了孤儿挂在被替换掉的挂载点上」。
+  #   (2) 从应用视图写一个探针文件，再回到 root 命名空间看它落在后端还是下层目录。
+  #       这是功能性判据：孤儿挂载与「挂载正常但被服务方拒绝」在 (1) 里都表现为
+  #       dev 异常，只有实际写一次才能把两者分开——前者写进下层目录，后者要么
+  #       落到后端、要么直接报错。
+  echo "---app_namespace_view---"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then for path in '/data/data/${APP_ID}/code_cache' '/data/data/${APP_ID}/cache' '/data/data/${APP_ID}/files' '/storage/emulated/0/Android/media/${APP_ID}/cache'; do printf 'APPVIEW %s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"/proc/\$pid/root\$path\" 2>&1 || true; ls -la \"/proc/\$pid/root\$path\" 2>&1 | head -8; echo; done; echo \"data_symlink=\$(readlink /proc/\$pid/root/data/data 2>/dev/null || echo not_a_symlink)\"; else echo app_not_running; fi"
+  echo "---app_view_write_probe---"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then probe='/proc/'\$pid'/root/data/data/${APP_ID}/code_cache/srt_diag_probe.txt'; if printf 'probe\n' > \"\$probe\" 2>/dev/null; then echo probe_written; else echo probe_write_failed; fi; stat -c 'probe dev=%D ino=%i uid=%u gid=%g size=%s' \"\$probe\" 2>&1 || true; echo '--- backend media cache after probe ---'; ls -la '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' 2>&1 | head -8; echo '--- underlying code_cache after probe ---'; ls -la '/data/user/0/${APP_ID}/code_cache' 2>&1 | head -8; rm -f \"\$probe\" 2>/dev/null || true; else echo app_not_running; fi"
   echo "---daemon_own_private_log---"
   adb_su "grep -aE 'own private|scoped fuse|anchor|backend_effective|companion mount' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true"
   echo
