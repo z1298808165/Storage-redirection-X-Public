@@ -513,9 +513,7 @@ class SystemViewCloneTest(unittest.TestCase):
         self.assertIn("clone.attach_at(&anchor_root)", body)
         # 克隆优先：其分支必须早于回退源。
         #
-        # 回退源必须是**系统视图**：借 `/proc/1/root` 在 init 命名空间里解析同一条路径
-        # （模块从不挂载 init 命名空间，那里的 `/mnt/user/<user>/emulated` 恒为
-        # MediaProvider 的 FUSE）。不得退回 `/mnt/pass_through/...` 这类 f2fs 直连后端——
+        # 回退源必须是**系统视图**：不得退回 `/mnt/pass_through/...` 这类 f2fs 直连后端——
         # 那样自有私有目录里的 SQLite 边车会按调用方 umask 落 0600，MP 用自身身份打不开，
         # 跨进程读同一份库的一方即 `SQLITE_CANTOPEN`（真机 2026-11-12 duchamp 实测）。
         self.assertNotIn('format!("/mnt/pass_through/', body)
@@ -524,6 +522,33 @@ class SystemViewCloneTest(unittest.TestCase):
             body.index('format!("/proc/1/root/mnt/user/{}/emulated"'),
             "克隆锚点必须优先于回退的系统视图源",
         )
+
+    def test_anchor_fallback_recaptures_instead_of_binding(self) -> None:
+        """回退分支必须**重新克隆**，不得退化成 bind。
+
+        本函数被 companion 与 daemon 各调用一次，而首次的克隆随 `move_mount` 一次性消费
+        （第二次进入时 `system_view_clone` 已被 `take` 走），所以第二次必然落到回退分支。
+        此时若把 `/proc/1/root/mnt/user/<user>/emulated` 当作 bind 源：
+
+        - 内核 `do_loopback` 的 `check_mnt` 要求挂载源属于调用方**当前命名空间**，
+          而 `/proc/1/root/...` 是**跨命名空间** magic link，`mount(MS_BIND)` 恒失败；
+        - 锚点拿不到 → 自有私有目录整段未交回系统视图 → 映射目标缺失。
+
+        真机 2026-11-13 AVD(A15) 实测：首次调用走克隆成功，第二次落到回退并报
+        `system view anchor bind failed source=/proc/1/root/mnt/user/0/emulated`，
+        随即 `own private system view restored count=0`，场景 35
+        `legacy-data-data-to-private` 判 `file_missing`。修复后同点位
+        `restored count=3`。
+        """
+        start = self.apply.index("fn create_transient_system_view_anchor(")
+        body = self.apply[start : self.apply.index("struct SystemViewAnchor", start)]
+        # 回退分支内必须再取一次克隆并附着，二者缺一即回退失效。
+        fallback = body[body.index('format!("/proc/1/root/mnt/user/{}/emulated"') :]
+        self.assertIn("SystemViewClone::capture(", fallback)
+        self.assertIn("clone.attach_at(&anchor_root)", fallback)
+        # 不得把跨命名空间 magic link 当挂载源：它是只读探针，只用于取数比较。
+        self.assertNotIn("self.bind_mount(&probe", fallback)
+        self.assertNotIn("bind_mount(&source", fallback)
 
 
 class AndroidMediaVisibilityTest(unittest.TestCase):

@@ -281,8 +281,18 @@ class MountMetadataScopeTest(unittest.TestCase):
         self.assertNotIn('relative.starts_with("Android/data/")', body)
 
         # 锚点必须"建立→用完即摘"：守卫靠 Drop 保证任何提前返回也不会把它留在命名空间里。
+        #
+        # 两条分支都必须走 **克隆**（`open_tree(OPEN_TREE_CLONE)` + `move_mount`），
+        # 不得退化成 `bind_mount`：本函数被 companion 与 daemon 各调用一次，克隆随
+        # `move_mount` 一次性消费，第二次必然进回退分支；而 `mount(MS_BIND)` 的源必须
+        # 属于调用方**当前命名空间**（内核 `do_loopback` 的 `check_mnt`），跨命名空间的
+        # `/proc/1/root/...` magic link 作源恒失败——锚点拿不到，自有私有目录就整段
+        # 没交回系统视图（真机 2026-11-13 AVD(A15)：`restored count=0`，场景 35 判
+        # `file_missing`）。修复后同点位 `restored count=3`。
         anchor_body = function_body(apply, "fn create_transient_system_view_anchor(")
-        self.assertIn("bind_mount(&source, &anchor_root, false)", anchor_body)
+        self.assertIn("clone.attach_at(&anchor_root)", anchor_body)
+        self.assertIn("SystemViewClone::capture(", anchor_body)
+        self.assertNotIn("bind_mount(&source", anchor_body)
         self.assertIn("detach_mount_if_present(&anchor_root)", anchor_body)
         drop_body = function_body(apply, "impl Drop for SystemViewAnchor {")
         self.assertIn("detach_mount_if_present(&self.root)", drop_body)

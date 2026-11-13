@@ -7,7 +7,7 @@ use super::apply_targets::{
     path_shadows_mapping_request, read_mountinfo,
 };
 use super::map::PathMappingApplyOptions;
-use super::{MountPlanner, concrete_mount_fallback_parent};
+use super::{MountPlanner, SystemViewClone, concrete_mount_fallback_parent};
 use crate::domain::PathMapping;
 use crate::platform::{fs, module_paths, paths};
 
@@ -1063,19 +1063,25 @@ impl MountPlanner {
             log::warn!("system view clone attach unusable root={}", anchor_root);
             detach_mount_if_present(&anchor_root);
         }
-        // 回退：没有克隆时按原样 bind 一个锚点。源必须是**系统视图**：应用命名空间里
-        // `/mnt/user/<user>/emulated` 已被本模块 FUSE 覆盖，所以这里借 `/proc/1/root`
-        // 在 init 命名空间里解析同一条路径（模块从不挂载 init 命名空间），拿到的才是
-        // MediaProvider 的 FUSE 视图。退化成 `/mnt/pass_through/...`（f2fs）会让自有私有
-        // 目录里的 SQLite 边车按 umask 落 0600，MP 打不开 → `SQLITE_CANTOPEN`（真机
-        // 2026-11-12 duchamp：管理器一次冷启 16 条）。
-        let source = format!("/proc/1/root/mnt/user/{}/emulated", self.user_id);
-        if !fs::is_directory(&source) {
-            log::warn!("system view source unavailable: {}", source);
+        // 回退：本函数会被 companion 与 daemon 各调用一次，而克隆随 `move_mount` 一次性
+        // 消费（第二次进入时 `system_view_clone` 已被 `take` 走），因此这里**重新克隆**。
+        //
+        // 不能退化成 `bind_mount`：`mount(MS_BIND)` 的源必须属于调用方**当前命名空间**
+        // （内核 `do_loopback` 的 `check_mnt`），而 `/proc/1/root/...` 是**跨命名空间**
+        // magic link，bind 必然失败。真机 2026-11-13 AVD(A15) 实测：首次调用走克隆成功，
+        // 第二次落到回退分支并报
+        // `system view anchor bind failed source=/proc/1/root/mnt/user/0/emulated`，
+        // 随即 `own private system view restored count=0`——自有私有目录整段未交回系统视图，
+        // 场景 35 的映射目标（`Android/media/<pkg>/cache`）因此缺失。
+        //
+        // `/proc/1/root/...` 只用于**取数比较**（`stat` 跨 ns 可读），不作为挂载源。
+        let probe = format!("/proc/1/root/mnt/user/{}/emulated", self.user_id);
+        if !fs::is_directory(&probe) {
+            log::warn!("system view source unavailable: {}", probe);
             return None;
         }
-        if same_mount_identity(&anchor_root, &source)
-            && anchor_generation_is_current(&anchor_root, &source)
+        if same_mount_identity(&anchor_root, &probe)
+            && anchor_generation_is_current(&anchor_root, &probe)
             && fs::is_directory(&paths::join(&user_view, "Android"))
         {
             // 既有锚点仍指向当前系统视图：直接复用，避免每轮摘挂抖动。返回值是
@@ -1092,18 +1098,15 @@ impl MountPlanner {
             log::warn!("system view anchor mkdir failed: {}", anchor_root);
             return None;
         }
-        // **必须非递归 bind**：模块会把 `/mnt/user/<user>/emulated/<user>` 换成自己的
-        // FUSE（别名路径也要走重定向），递归 bind 会把这个子挂载一并复制到锚点里，
-        // 锚点下的 `<user>` 仍然是模块层，取的还是 f2fs 直连后端——等于没恢复（真机
-        // 2026-10-25 实测：`tmp/system_view/0/0` 变成 `srx_fuse_host[...]`）。
-        // 非递归 bind 只复制该挂载本身，锚点内 `<user>` 回落到 MediaProvider FUSE 的
-        // 普通目录节点，正是需要的干净系统视图。
-        if !self.bind_mount(&source, &anchor_root, false) {
-            log::warn!(
-                "system view anchor bind failed anchor={} source={}",
-                anchor_root,
-                source
-            );
+        // 与首选分支同一机制：`setns(/proc/1/ns/mnt)` → `open_tree(OPEN_TREE_CLONE)` →
+        // `SCM_RIGHTS` 交回宿主 → `move_mount` 附着。init 命名空间里模块从不挂载，
+        // 那里的 `/mnt/user/<user>/emulated` 恒为 MediaProvider 的 FUSE 视图。
+        let Some(clone) = SystemViewClone::capture(self.user_id) else {
+            log::warn!("system view anchor recapture failed user={}", self.user_id);
+            return None;
+        };
+        if !clone.attach_at(&anchor_root) {
+            log::warn!("system view anchor attach failed anchor={}", anchor_root);
             return None;
         }
         if !fs::is_directory(&paths::join(&user_view, "Android")) {
