@@ -4301,19 +4301,18 @@ capture_own_private_diagnostics() {
   adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/mountinfo 2>/dev/null; else echo app_not_running; fi"
   # 应用命名空间内的真实视图与一次性写探针。
   #
-  # 上面的 stat 全部跑在 root shell 自己的命名空间里，看不到应用那层的 bind：
-  # 同一个路径在两侧可以是完全不同的东西。`/proc/<pid>/root` 穿过应用命名空间，
-  # 是无需 nsenter 也能拿到应用视图的通道，因此这里补两块——
+  # 必须用 `nsenter -m` 而不是 `/proc/<pid>/root`：后者只保证起点是目标进程的根，
+  # 之后的路径解析是否沿用目标的挂载表并不由调用方决定，实测在挂载传播场景下
+  # 会读出与目标命名空间不一致的结果（本轮据此一度误判为「孤儿挂载」，直到确认
+  # `rmdir` 在任何命名空间都会因 dentry 级 DCACHE_MOUNTED 返回 EBUSY、挂载点根本
+  # 无法被跨命名空间删除才发现判据本身有问题）。nsenter 进的是目标命名空间本体。
   #   (1) 应用视图里映射请求路径与目标的 dev/ino 与内容。dev 是 FUSE 还是块设备，
-  #       直接区分「bind 生效」与「bind 成了孤儿挂在被替换掉的挂载点上」。
+  #       直接区分「bind 已生效」与「bind 尚未落到这条路径」。
   #   (2) 从应用视图写一个探针文件，再回到 root 命名空间看它落在后端还是下层目录。
-  #       这是功能性判据：孤儿挂载与「挂载正常但被服务方拒绝」在 (1) 里都表现为
-  #       dev 异常，只有实际写一次才能把两者分开——前者写进下层目录，后者要么
-  #       落到后端、要么直接报错。
   echo "---app_namespace_view---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then for path in '/data/data/${APP_ID}/code_cache' '/data/data/${APP_ID}/cache' '/data/data/${APP_ID}/files' '/storage/emulated/0/Android/media/${APP_ID}/cache'; do printf 'APPVIEW %s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"/proc/\$pid/root\$path\" 2>&1 || true; ls -la \"/proc/\$pid/root\$path\" 2>&1 | head -8; echo; done; echo \"data_symlink=\$(readlink /proc/\$pid/root/data/data 2>/dev/null || echo not_a_symlink)\"; else echo app_not_running; fi"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then for path in '/data/data/${APP_ID}/code_cache' '/data/data/${APP_ID}/cache' '/data/data/${APP_ID}/files' '/storage/emulated/0/Android/media/${APP_ID}/cache'; do printf 'NSENTER %s ' \"\$path\"; nsenter -t \"\$pid\" -m -- stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; nsenter -t \"\$pid\" -m -- ls -la \"\$path\" 2>&1 | head -8; echo; done; else echo app_not_running; fi"
   echo "---app_view_write_probe---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then probe='/proc/'\$pid'/root/data/data/${APP_ID}/code_cache/srt_diag_probe.txt'; if printf 'probe\n' > \"\$probe\" 2>/dev/null; then echo probe_written; else echo probe_write_failed; fi; stat -c 'probe dev=%D ino=%i uid=%u gid=%g size=%s' \"\$probe\" 2>&1 || true; echo '--- backend media cache after probe ---'; ls -la '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' 2>&1 | head -8; echo '--- underlying code_cache after probe ---'; ls -la '/data/user/0/${APP_ID}/code_cache' 2>&1 | head -8; rm -f \"\$probe\" 2>/dev/null || true; else echo app_not_running; fi"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then if nsenter -t \"\$pid\" -m -- sh -c 'printf probe > /data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null; then echo probe_written; else echo probe_write_failed; fi; nsenter -t \"\$pid\" -m -- stat -c 'probe dev=%D ino=%i uid=%u gid=%g size=%s' '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>&1 || true; echo '--- backend media cache after probe ---'; ls -la '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' 2>&1 | head -8; echo '--- underlying code_cache after probe ---'; ls -la '/data/user/0/${APP_ID}/code_cache' 2>&1 | head -8; nsenter -t \"\$pid\" -m -- rm -f '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null || true; else echo app_not_running; fi"
   echo "---daemon_own_private_log---"
   adb_su "grep -aE 'own private|scoped fuse|anchor|backend_effective|companion mount' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true"
   echo
