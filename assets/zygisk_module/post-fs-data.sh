@@ -114,6 +114,12 @@ if command -v chcon >/dev/null 2>&1; then
   chcon -R u:object_r:shell_data_file:s0 "$CONFIG_DIR" 2>/dev/null
 fi
 
+# system_server 经保留的模块目录 FD 创建查询端点；目录仅向 system_server 与 root 开放。
+mkdir -p "$MODDIR/tmp/package_query"
+chown 1000:1000 "$MODDIR/tmp/package_query"
+chmod 700 "$MODDIR/tmp/package_query"
+chcon u:object_r:shell_data_file:s0 "$MODDIR/tmp/package_query" 2>/dev/null
+
 # 路径映射字段重命名迁移：current_path/target_path → request_path/final_path
 MAPPING_MIGRATION_MARKER="$MODDIR/.mapping_fields_v1"
 APPS_DIR="$CONFIG_DIR/apps"

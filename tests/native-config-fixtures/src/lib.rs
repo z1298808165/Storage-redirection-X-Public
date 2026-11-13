@@ -3,6 +3,12 @@
 use std::collections::HashMap;
 
 pub mod platform {
+    pub mod packages {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/packages.rs"
+        ));
+    }
     #[cfg(any(target_os = "android", target_os = "linux"))]
     pub mod mount_namespace {
         include!(concat!(

@@ -335,7 +335,7 @@ fn trim_ascii(value: &str) -> String {
 }
 
 // 格式: "包名:UID"
-fn parse_line(line: &str) -> Option<(String, i32)> {
+pub(crate) fn parse_line(line: &str) -> Option<(String, i32)> {
     let trimmed = trim_ascii(line);
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return None;

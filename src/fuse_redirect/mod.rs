@@ -356,34 +356,22 @@ struct NewEntryRoute {
     backend: BackendPath,
 }
 
-/// MediaProvider 应用 uid：宿主 daemon 以 root 运行，直接解析 packages.list
-/// （系统维护的权威映射；不同设备/用户 profile 的分配值不构成契约），
-/// 解析失败回退 A16/A17 观测值。
-fn media_provider_uid() -> u32 {
-    static MEDIA_PROVIDER_UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *MEDIA_PROVIDER_UID.get_or_init(|| {
-        let parsed = std::fs::read_to_string("/data/system/packages.list")
-            .ok()
-            .and_then(|content| {
-                content.lines().find_map(|line| {
-                    let mut fields = line.split_whitespace();
-                    if fields.next() == Some("com.android.providers.media.module") {
-                        fields.next().and_then(|value| value.parse::<i32>().ok())
-                    } else {
-                        None
-                    }
-                })
-            })
-            .filter(|uid| *uid >= 10000);
-        parsed.map(|uid| uid as u32).unwrap_or(10217)
-    })
-}
-
 /// 宿主共享会话的「系统读取者」白名单：MediaProvider 应用 uid 与 media/media_rw
 /// 系统身份。这些调用方按路径访问应用重定向树是系统扫描/元数据协商的正常路径，
 /// 不属于 scoped storage 越权；其余应用 uid 一律维持 deny_all。
 fn is_system_reader_uid(uid: u32) -> bool {
-    uid == media_provider_uid() || uid == 1013 || uid == 1023
+    uid == 1013
+        || uid == 1023
+        || [
+            "com.android.providers.media.module",
+            "com.google.android.providers.media.module",
+            "com.android.providers.media",
+        ]
+        .iter()
+        .any(|package| {
+            policy::package_uid(package)
+                .is_some_and(|app_id| app_id >= 10000 && uid % 100000 == app_id as u32 % 100000)
+        })
 }
 
 impl FuseRedirectFs {

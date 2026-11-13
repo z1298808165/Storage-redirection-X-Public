@@ -722,7 +722,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
 
         不能按「哪个包的规则匹配这条路径」反推源头——那样一旦猜错，用户会照着错误
         的源头去配规则。这里锁定的是：快照未命中时同步问 daemon，且 daemon 侧只用
-        /proc 与 packages.list 的客观事实（多包 uid 一律不猜）。
+        /proc 与 PackageManager 的客观事实（多包 uid 一律不猜）。
         """
         caller = read("src/hook/caller.rs")
         resolve_fn = extract_fn(caller, "resolve_system_fuse_identity")

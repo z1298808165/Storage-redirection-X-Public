@@ -28,6 +28,8 @@ pub mod module_paths;
 pub mod mount_namespace;
 #[path = "platform/mountinfo.rs"]
 pub mod mountinfo;
+#[path = "platform/packages.rs"]
+pub mod packages;
 #[path = "platform/paths.rs"]
 pub mod paths;
 #[path = "platform/paths_alias.rs"]

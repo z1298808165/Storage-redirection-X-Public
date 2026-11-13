@@ -118,6 +118,10 @@ adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debu
 
 该夹具用模拟 API 表调用真实模块回调，在 root 测试进程中建立 namespace 后降 UID/GID；它不验证 Hyos 加载器本身、应用 SELinux 域或设备是否提供独立 namespace。配置视图要求目标进程独占挂载 namespace；无法满足时回调以 126 退出，避免在共享 spawner 视图中挂载。未配置且未启用监视时允许直通。
 
+模块在 `system_server` 中始终安装包事件接收器与查询端，自动配置新应用仍由模板设置控制。Android 13 及更新版本按 PackageManager 状态版本使查询缓存失效；Android 12 仅在包快照有效时按快照对象身份缓存，失效或重建期间直接查询。包事件也会使缓存失效；下次请求时再取当前 PM 状态。companion 身份校验与 daemon 进程扫描不依赖 shell 异步生成的 UID 文件。连接验证 UID 与 SELinux 域，请求受两秒截止点和回复大小上限约束；服务未就绪或查询失败时不使用旧版本缓存身份。
+
+`srx_daemon package-query` 输出完整用户 UID；`package-query P <user> <package>` 查询单包，`package-query U <uid>` 查询共享 UID 的全部包。shell 将全量结果归一为 appId，原子更新 hook 使用的 `system_writer_uids.list`。FUSE 热路径读取该快照；它不是 companion 的授权依据。系统服务重启后随注入重建查询端。
+
 ### 应用场景
 
 完整回归优先使用本仓库内置脚本。bash 版是 CI 使用的主入口：

@@ -3,7 +3,6 @@ use super::companion_request::CompanionMountRequest;
 use super::hyos_request::{self, REQUEST_SIZE};
 use crate::config::{SettingsHub, StorageBackendMode};
 use crate::platform::{fs, paths, proc_identity};
-use crate::redirect::policy;
 use std::time::Duration;
 
 pub(super) fn handle_request(fd: i32, caller: &libc::ucred) -> bool {
@@ -24,15 +23,22 @@ pub(super) fn apply_for_caller(package: &str, process: &str, caller: &libc::ucre
     let Ok(uid) = i32::try_from(caller.uid) else {
         return false;
     };
-    let package_uid = policy::get_fresh_uid_for_package(package);
+    let package_uid = match crate::platform::packages::uid_for_package(package, uid / 100000) {
+        Ok(uid) => uid.unwrap_or(-1),
+        Err(error) => {
+            log::warn!("hyos package query failed pkg={} error={}", package, error);
+            return false;
+        }
+    };
     if !super::companion_policy::package_uid_matches(uid, package_uid)
         || proc_identity::read_proc_uid(caller.pid) != Some(uid)
     {
         log::warn!(
-            "hyos identity rejected pkg={} pid={} uid={}",
+            "hyos identity rejected pkg={} pid={} uid={} package_uid={}",
             package,
             caller.pid,
-            uid
+            uid,
+            package_uid
         );
         return false;
     }

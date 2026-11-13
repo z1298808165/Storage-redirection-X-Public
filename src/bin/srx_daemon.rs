@@ -71,6 +71,25 @@ fn main() {
     let mut args = std::env::args();
     let _ = args.next();
     let command = args.next();
+    if command.as_deref() == Some("package-query") {
+        let fields: Vec<String> = args.collect();
+        let request = if fields.is_empty() {
+            "L".to_owned()
+        } else {
+            fields.join("\t")
+        };
+        match platform::packages::query(&request).and_then(|reply| {
+            platform::packages::parse_uids(&reply)?;
+            Ok(reply)
+        }) {
+            Ok(reply) => print!("{reply}"),
+            Err(error) => {
+                eprintln!("package query failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if command.as_deref() == Some("cleanup-mounts") {
         std::process::exit(if daemon_mount::cleanup_all_mount_states() {
             0

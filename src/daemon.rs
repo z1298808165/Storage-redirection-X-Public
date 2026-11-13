@@ -1809,22 +1809,6 @@ fn build_request(
     request
 }
 
-/// 读 `/data/system/packages.list` 解析包名到 uid 的映射。
-///
-/// 开机全量预登记需要为未运行的应用解析 uid（宿主策略按 uid 注册），packages.list
-/// 是系统维护的权威映射。找不到（应用未安装或已被卸载）时跳过，应用真正启动后仍会
-/// 由 reconcile 逐轮预登记或 companion 的 register-policy 定点登记补上。
-fn read_package_uid(package_name: &str) -> Option<i32> {
-    let content = std_fs::read_to_string("/data/system/packages.list").ok()?;
-    for line in content.lines() {
-        let mut fields = line.split_whitespace();
-        if fields.next() == Some(package_name) {
-            return fields.next().and_then(|value| value.parse::<i32>().ok());
-        }
-    }
-    None
-}
-
 /// 名册维护周期：**只在长期没有任何人询问时**才走到的一次全量对账。
 ///
 /// 唯一职责是兜住「表文件被外部删掉」与「噪声条目长期累积」这两种退化，因此可以放到
@@ -2204,29 +2188,44 @@ fn list_proc_pids() -> Option<Vec<i32>> {
 /// 不再因「宿主快照还没这个 uid」回退 scoped、也不再经历 scoped 挂载竞态。
 fn pre_register_all_configured_apps(config: &SettingsHub, config_version: u64) {
     let snapshot = config.get_daemon_reconcile_config_snapshot();
-    for package_name in snapshot.configured_package_names() {
-        let Some(uid) = read_package_uid(package_name) else {
-            continue;
-        };
+    let package_uids = match platform::packages::read_uids() {
+        Ok(packages) => packages,
+        Err(error) => {
+            BOOT_PRE_REGISTER_PENDING.store(true, Ordering::Release);
+            log::warn!(
+                "package query unavailable during pre-register error={}",
+                error
+            );
+            return;
+        }
+    };
+    let configured: std::collections::HashSet<String> =
+        snapshot.configured_package_names().cloned().collect();
+    for (uid, packages) in package_uids {
         if uid < ANDROID_APP_UID_START {
             continue;
         }
-        let proc = AppProcess {
-            pid: 0,
-            uid,
-            package_name: package_name.clone(),
-            is_uninterruptible: false,
-        };
-        let request = build_request(&proc, config_version, &snapshot);
-        if request.operation != MountOperation::Reload {
-            continue;
-        }
-        if crate::daemon_mount::pre_register_host_policy(&request)
-            == crate::daemon_mount::PreRegisterOutcome::NotApplicable
-        {
-            // 竞态窗口失败（典型：FBE 密钥未就绪 errno=126 整批被拒）：进重试队列，
-            // 由周期 reconcile 逐轮补登记，避免应用永久落入 deny_all 空视图。
-            enqueue_policy_retry(&request.package_name, request.uid);
+        for package_name in packages {
+            if !configured.contains(&package_name) {
+                continue;
+            }
+            let proc = AppProcess {
+                pid: 0,
+                uid,
+                package_name: package_name.clone(),
+                is_uninterruptible: false,
+            };
+            let request = build_request(&proc, config_version, &snapshot);
+            if request.operation != MountOperation::Reload {
+                continue;
+            }
+            if crate::daemon_mount::pre_register_host_policy(&request)
+                == crate::daemon_mount::PreRegisterOutcome::NotApplicable
+            {
+                // 竞态窗口失败（典型：FBE 密钥未就绪 errno=126 整批被拒）：进重试队列，
+                // 由周期 reconcile 逐轮补登记，避免应用永久落入 deny_all 空视图。
+                enqueue_policy_retry(&request.package_name, request.uid);
+            }
         }
     }
 }
@@ -2317,6 +2316,16 @@ struct AppProcess {
 fn list_app_processes() -> Vec<AppProcess> {
     let mut processes = Vec::new();
     let registered = crate::mount_intent::registered_processes();
+    let package_uids = match platform::packages::read_uids() {
+        Ok(packages) => packages,
+        Err(error) => {
+            log::warn!(
+                "package query unavailable during process scan error={}",
+                error
+            );
+            return processes;
+        }
+    };
     let Ok(entries) = std_fs::read_dir("/proc") else {
         return processes;
     };
@@ -2342,8 +2351,9 @@ fn list_app_processes() -> Vec<AppProcess> {
         };
         let package_name = read_process_package(pid)
             .filter(|package| {
-                let package_uid = policy::get_uid_for_package(package);
-                package_uid >= 0 && uid % 100000 == package_uid % 100000
+                package_uids
+                    .get(&uid)
+                    .is_some_and(|names| names.contains(package))
             })
             .or_else(|| {
                 let mut candidates = registered.iter().filter(|record| {
@@ -2351,7 +2361,14 @@ fn list_app_processes() -> Vec<AppProcess> {
                         && record.matches(
                             uid,
                             platform::process_start_time_ticks(pid),
-                            policy::get_uid_for_package(&record.package),
+                            if package_uids
+                                .get(&uid)
+                                .is_some_and(|names| names.contains(&record.package))
+                            {
+                                uid
+                            } else {
+                                -1
+                            },
                         )
                 });
                 let record = candidates.next()?;

@@ -265,13 +265,12 @@ refresh_uid_map() {
   mkdir -p "$CONFIG_DIR"
   tmp_uids_file="${SYSTEM_WRITER_UIDS_FILE}.tmp"
 
-  # package 查询走 binder，boot 早期 PMS 未就绪时可能长时间阻塞；该函数被
-  # config 事件批与包事件循环同步调用，一旦阻塞会拖死整条采集循环。超时后
-  # 本轮不落盘（entry_count 为空保护仍在），等待下一次对账重试。
+  # 查询端限定 IPC 截止点；失败时不覆盖上一份快照。缓存保持 appId 格式供
+  # 无 root 通道的 hook 读取，companion 授权始终另行查询完整 UID。
   {
     echo "# package:uid"
-    timeout "${UID_MAP_QUERY_TIMEOUT_SECONDS:-10}" cmd package list packages -U 2>/dev/null |
-      sed -n 's/^package:\([^ ]*\).* uid:\([0-9][0-9]*\).*/\1:\2/p' |
+    "$MODDIR/bin/srx_daemon" package-query 2>/dev/null |
+      awk -F: '{ printf "%s:%d\n", $1, $2 % 100000 }' |
       sort -u
   } > "$tmp_uids_file"
 

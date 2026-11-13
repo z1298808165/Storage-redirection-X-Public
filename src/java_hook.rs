@@ -28,7 +28,7 @@ pub fn dex_len() -> usize {
     HOOKER_DEX.len()
 }
 
-pub fn install_package_event_receiver(env: *mut JNIEnv, module_dir: &str) -> bool {
+pub fn install_package_services(env: *mut JNIEnv, module_dir: &str) -> bool {
     if PACKAGE_EVENT_RECEIVER_DEX.is_empty() || env.is_null() || module_dir.is_empty() {
         return false;
     }

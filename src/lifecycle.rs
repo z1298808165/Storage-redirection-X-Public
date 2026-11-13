@@ -14,13 +14,6 @@ use crate::java_hook;
 use crate::logging::Logger;
 use crate::platform::module_paths;
 use crate::zygisk::{abi, jni};
-use serde::Deserialize;
-
-#[derive(Default, Deserialize)]
-struct ServerGlobalConfig {
-    #[serde(default)]
-    auto_enable_redirect_for_new_apps: bool,
-}
 
 pub(crate) use companion::{run_companion_pipeline, write_status as write_companion_status};
 pub(crate) use hyos_request::specialize as specialize_hyos;
@@ -113,15 +106,10 @@ impl RuntimeFlow {
     pub fn post_server_specialize(&mut self, _args: *const abi::ServerSpecializeArgs) {
         Logger::init(Some("system_server"));
         let module_dir = self.server_module_dir_path();
-        if should_install_package_event_receiver(&module_dir) {
-            if java_hook::install_package_event_receiver(self.env, &module_dir) {
-                log::info!("package event receiver installed");
-            } else {
-                log::warn!("package event receiver install failed");
-                self.close_server_module_dir_fd();
-            }
+        if java_hook::install_package_services(self.env, &module_dir) {
+            log::info!("package services installed");
         } else {
-            log::info!("package event receiver skipped: auto new apps disabled");
+            log::warn!("package services install failed");
             self.close_server_module_dir_fd();
         }
         if let Some(api) = self.api.as_ref() {
@@ -163,22 +151,4 @@ impl RuntimeFlow {
             libc::close(fd);
         }
     }
-}
-
-fn should_install_package_event_receiver(module_dir: &str) -> bool {
-    let path = if module_dir.is_empty() {
-        module_paths::GLOBAL_CONFIG_FILE.to_string()
-    } else {
-        format!("{module_dir}/config/global.json")
-    };
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
-    };
-    parse_auto_enable_redirect_for_new_apps(&content)
-}
-
-fn parse_auto_enable_redirect_for_new_apps(content: &str) -> bool {
-    serde_json::from_str::<ServerGlobalConfig>(content)
-        .map(|config| config.auto_enable_redirect_for_new_apps)
-        .unwrap_or(false)
 }

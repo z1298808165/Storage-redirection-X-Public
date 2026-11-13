@@ -372,7 +372,7 @@ fn resolve_system_fuse_identity(fuse_uid: i32, fuse_pid: i32) -> Option<(String,
         && let Some((remote_pkg, _)) =
             crate::daemon_identity_query::query_process_identity(fuse_pid, fuse_uid)
     {
-        // daemon 侧还会按 packages.list 把「native 名 + 唯一 uid」收敛成包名；多包 uid
+        // daemon 侧还会通过 PackageManager 把「native 名 + 唯一 uid」收敛成包名；多包 uid
         // 不猜，仍回 native 名。包名形态才覆盖本地结果，否则保留本地证据。
         if pkg.is_empty() || remote_pkg.contains('.') {
             pkg = remote_pkg;

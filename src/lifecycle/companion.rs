@@ -64,12 +64,15 @@ fn handle_fchown_request(client_fd: c_int, caller: &libc::ucred) {
         return;
     }
     let uid = i32::from_ne_bytes(uid_buffer);
-    crate::redirect::policy::refresh_shared_uid_cache();
     let authorized = caller.uid == 0
         || i32::try_from(caller.uid).ok().is_some_and(|uid| {
-            crate::redirect::policy::get_packages_for_uid(uid % 100000)
-                .iter()
-                .any(|package| crate::redirect::policy::is_system_writer_package(package))
+            crate::platform::packages::packages_for_uid(uid)
+                .ok()
+                .is_some_and(|packages| {
+                    packages
+                        .iter()
+                        .any(|package| crate::redirect::policy::is_system_writer_package(package))
+                })
         });
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: stat 指向可写结构，file 在请求处理期间保持打开。
@@ -92,10 +95,10 @@ fn handle_fchown_request(client_fd: c_int, caller: &libc::ucred) {
         None
     };
     let target_valid = package.is_some_and(|package| {
-        super::companion_policy::package_uid_matches(
-            uid,
-            crate::redirect::policy::get_uid_for_package(&package),
-        )
+        crate::platform::packages::uid_for_package(&package, uid / 100000)
+            .ok()
+            .flatten()
+            == Some(uid)
     });
     if !authorized || !target_valid {
         log::error!("fchown request uid invalid uid={}", uid);

@@ -22,6 +22,7 @@ restore() {
   if [ "$backed_up" -eq 1 ]; then
     cp "$scratch/global.json" "$module/config/global.json" || restored=0
     if [ -f "$scratch/app.json" ]; then cp "$scratch/app.json" "$config" || restored=0; else rm -f "$config" || restored=0; fi
+    if [ -f "$scratch/uid-map" ]; then cp "$scratch/uid-map" "$module/config/system_writer_uids.list" || restored=0; fi
     rm -f "$module/.runtime_disabled" || result=1
     rm -rf "$source_dir" "$target_dir" "$sandbox_dir" || result=1
   fi
@@ -81,10 +82,22 @@ run_case() {
     passed=$((passed + 1))
   else
     echo "FAIL [zn_$name] expected_exit=$expected actual_exit=$result evidence=$evidence" >&2
+    "$module/bin/srx_daemon" package-query P 0 "$package" >&2 || true
+    grep -F "$package:" "$module/config/system_writer_uids.list" >&2 || true
     failed=$((failed + 1))
   fi
 }
 run_case passthrough 0 private "$app" '' ''
+if [ -f "$module/config/system_writer_uids.list" ]; then
+  cp "$module/config/system_writer_uids.list" "$scratch/uid-map"
+  awk -F: -v app="$app" '$1 != app' "$scratch/uid-map" > "$scratch/uid-map-without-app"
+  cp "$scratch/uid-map-without-app" "$module/config/system_writer_uids.list"
+  run_case uncached_identity 0 private "$app" '' ''
+  cp "$scratch/uid-map" "$module/config/system_writer_uids.list"
+  rm "$scratch/uid-map"
+else
+  run_case uncached_identity 0 private "$app" '' ''
+fi
 printf '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/%s":"Download/%s"}}}}\n' "$source_name" "$target_name" > "$config"
 run_case mapping 0 private "$app" "/storage/emulated/0/Download/$source_name/result.txt" "$target_dir/result.txt"
 if [ -e "$source_dir/result.txt" ]; then echo 'FAIL [zn_mapping_source] unexpected physical source' >&2; failed=$((failed + 1)); fi
