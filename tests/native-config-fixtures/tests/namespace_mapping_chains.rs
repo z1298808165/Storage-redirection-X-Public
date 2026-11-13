@@ -47,3 +47,45 @@ fn exact_chains_use_terminal_targets_and_cycles_are_dropped() {
     assert!(result.contains(&mapping("/b", "/c")));
     assert!(expand_namespace_path_mappings(&[mapping("/a", "/b"), mapping("/b", "/a")]).is_empty());
 }
+
+#[test]
+fn private_data_mounts_cover_both_primary_user_entries_after_chain_resolution() {
+    let rules = [
+        mapping(
+            "/data/user/0/com.example/cache",
+            "/storage/emulated/0/Stage",
+        ),
+        mapping(
+            "/storage/emulated/0/Stage/nested",
+            "/storage/emulated/0/Final",
+        ),
+        mapping(
+            "/data/user/10/com.example/cache",
+            "/storage/emulated/10/Cache",
+        ),
+        mapping(
+            "/data/user/01/com.example/cache",
+            "/storage/emulated/1/Cache",
+        ),
+    ];
+    let result = expand_namespace_path_mappings(&rules);
+    for prefix in ["/data/user/0", "/data/data"] {
+        assert!(result.contains(&mapping(
+            &format!("{prefix}/com.example/cache"),
+            "/storage/emulated/0/Stage",
+        )));
+        assert!(result.contains(&mapping(
+            &format!("{prefix}/com.example/cache/nested"),
+            "/storage/emulated/0/Final",
+        )));
+    }
+    assert_eq!(
+        result
+            .iter()
+            .filter(|rule| rule.request_path.starts_with("/data/data/"))
+            .count(),
+        2
+    );
+    assert!(result.contains(&rules[2]));
+    assert!(result.contains(&rules[3]));
+}

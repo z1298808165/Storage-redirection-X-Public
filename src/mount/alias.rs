@@ -761,7 +761,7 @@ fn append_unique(list: &mut Vec<String>, value: String) {
 /// 相同的 bind（真机 mountinfo 实测：同一目标出现两条记录，后一条的父挂载就是前一条）。
 /// 内容一致所以不会立刻出错，但白白多占一层，并让「同挂载点取栈顶」的判定出现并列项。
 /// 这里用真实路径去重，保证同一真实目标在一轮别名绑定里只挂一次。
-fn bind_target_key(target: &str) -> String {
+pub(super) fn bind_target_key(target: &str) -> String {
     std::fs::canonicalize(target)
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| target.to_string())

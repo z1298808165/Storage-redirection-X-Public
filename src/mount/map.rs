@@ -1,6 +1,7 @@
 use super::MountPlanner;
 use crate::domain::{
-    PathMapping, expand_namespace_path_mappings, sort_path_mappings_shortest_request_first,
+    PathMapping, dedup_path_mappings_by_request_case_insensitive, expand_namespace_path_mappings,
+    sort_path_mappings_shortest_request_first,
 };
 use crate::platform::{fs, paths};
 
@@ -84,8 +85,16 @@ impl MountPlanner {
         }
 
         let mut resolved = expand_namespace_path_mappings(&resolved);
-
+        for mapping in &mut resolved {
+            if mapping.request_path.starts_with("/data/user/0/")
+                || mapping.request_path.starts_with("/data/data/")
+            {
+                // 符号链接只对应一个挂载点；bind 别名即使同 inode 也须分别保留。
+                mapping.request_path = super::alias::bind_target_key(&mapping.request_path);
+            }
+        }
         sort_path_mappings_shortest_request_first(&mut resolved);
+        dedup_path_mappings_by_request_case_insensitive(&mut resolved);
 
         resolved
     }

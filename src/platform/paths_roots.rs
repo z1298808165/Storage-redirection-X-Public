@@ -7,24 +7,6 @@ use crate::platform::paths::{
     DATA_MEDIA_PREFIX, STORAGE_EMULATED_PREFIX, join, normalize, normalize_syntax, starts_with,
 };
 
-/// `/data/data` 是否为指向 `/data/user/0` 的符号链接。
-///
-/// 是符号链接时两种写法解析到同一个 vfsmount，归一化是等价变换；是真实目录时
-/// （AOSP 上 `/data/user/0` 是 `/data/data` 的派生 bind）两者是**不同的 vfsmount**，
-/// 而挂载按 (父 vfsmount, dentry) 索引——归一化会让挂载落在应用不会走的那条路径上，
-/// 表现为映射静默失效（应用写入成功、后端没有文件）。
-///
-/// 该形态由 init 在启动时建立、之后不再变化，因此缓存一次。取不到元信息时按符号链接
-/// 处理，保持本函数改动前的行为。
-fn data_data_is_symlink() -> bool {
-    static IS_SYMLINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *IS_SYMLINK.get_or_init(|| {
-        std::fs::symlink_metadata("/data/data")
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(true)
-    })
-}
-
 /// 把主用户路径改写为指定用户的路径。
 ///
 /// 只替换路径**前缀**：此前用的是整串 `replace`，会改写路径中间出现的同名字面量。
@@ -32,11 +14,8 @@ fn data_data_is_symlink() -> bool {
 /// （备份类目录里确实会出现该字面量）时两处都被改写，得到的路径与真实文件不符，
 /// 后续只读与映射判定就作用在错误的对象上。
 pub fn resolve_user_path(path: &str, user_id: i32) -> String {
-    // `/data/data` 是 `/data/user/0` 的历史别名。只有在两者确实是同一个 vfsmount
-    // （`/data/data` 为符号链接）时才归一化；是真实目录时保持字面形态，否则挂载会落到
-    // 应用访问不到的路径上，映射静默失效。
-    if data_data_is_symlink()
-        && let Some(rest) = path.strip_prefix("/data/data")
+    // 规则统一按当前用户解析；挂载层另为主用户补齐 `/data/data` 入口。
+    if let Some(rest) = path.strip_prefix("/data/data")
         && (rest.is_empty() || rest.starts_with('/'))
     {
         return format!("/data/user/{user_id}{rest}");

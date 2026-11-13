@@ -81,6 +81,26 @@ fn native_runtime_rejects_private_roots_but_keeps_private_children() {
 }
 
 #[test]
+fn duplicate_private_alias_rules_keep_the_last_target_for_both_paths() {
+    for user in [0, 10] {
+        for (first, last) in [
+            ("/data/data", "/data/user/0"),
+            ("/data/user/0", "/data/data"),
+        ] {
+            let input = serde_json::json!({"users":{user.to_string():{"path_mappings":[
+                {"request_path":format!("{first}/com.example/cache"),"final_path":"Download/first"},
+                {"request_path":format!("{last}/com.example/cache"),"final_path":"Download/last"}
+            ]}}});
+            let normalized = normalize_app_config("com.example", &input.to_string());
+            assert_eq!(
+                normalized["users"][user.to_string()]["path_mappings"],
+                serde_json::json!({format!("/data/user/{user}/com.example/cache"):"Download/last"})
+            );
+        }
+    }
+}
+
+#[test]
 fn mapping_chain_rewrites_parent_result_into_nested_rule() {
     let mappings = vec![
         PathMapping::new(

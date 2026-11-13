@@ -359,22 +359,14 @@ fn mount_targets_present_with(content: &str, targets: &[String], request: &Mount
 ///
 /// 代表路径统一取 `/storage/emulated/<user>` 视图；`/data/media/<user>`、`/sdcard`、
 /// `/storage/self/primary`、`/storage/emulated/legacy` 以及各 `/mnt/<view>/.../emulated/<user>`
-/// 都经 [`paths::storage_alias_roots_for_user`] 折算到同一代表，`/data/data` 按历史别名折算到
-/// `/data/user/0`。
+/// 都经 [`paths::storage_alias_roots_for_user`] 折算到同一代表。
+/// 私有数据目录的 bind 别名分别计数，避免漏判入口丢失或卸载另一入口的挂载。
 ///
 /// 只在"组内任一别名在场即健康"的口径下使用：别名之间的差异属于正常 namespace 视图差异，
 /// 不能当作挂载失效。这与 [`mount_target_count_from_mountinfo`] 共用同一折算，保证
 /// "期望分组"与"在场分组"口径一致。
 fn canonical_health_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {
     let target = paths::normalize_syntax(target);
-    let target = if target == "/data/data" {
-        "/data/user/0".to_string()
-    } else if let Some(rest) = target.strip_prefix("/data/data/") {
-        format!("/data/user/0/{}", rest)
-    } else {
-        target
-    };
-
     // `/sdcard` 是对 `/storage/emulated/<user>` 的对称链接（`paths::normalize` 同样会折叠它），
     // 但别名根清单里没有这一项：这里显式折算，避免记录到的 `/sdcard/...` 目标自成一组。
     if target == "/sdcard" {
