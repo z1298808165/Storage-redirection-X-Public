@@ -216,6 +216,13 @@ try {
             "`$env:Path = '$escapedPath'",
             "`$env:SRT_FAIL_FAST = '0'"
         )
+        # 场景脚本每次 adb 都带 `-s $Serial`，而 `$Serial` 默认取自 `$env:ANDROID_SERIAL`；
+        # 本机同时连着模拟器与真机（实测 `emulator-5556` + 真机 `ASUS_AI2501_A`）时，
+        # 不显式透传会让子进程以「检测到多个设备」直接退出，表现为场景一条未跑就失败。
+        # WMI 不继承工具会话环境，只能在 wrapper 里显式烘焙。
+        if (-not [string]::IsNullOrWhiteSpace($env:ANDROID_SERIAL)) {
+            $wrapperLines += "`$env:ANDROID_SERIAL = '$($env:ANDROID_SERIAL -replace "'", "''")'"
+        }
         if (-not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
             $wrapperLines += "`$env:SRT_SCENARIOS = '$($env:SRT_SCENARIOS -replace "'", "''")'"
         }
