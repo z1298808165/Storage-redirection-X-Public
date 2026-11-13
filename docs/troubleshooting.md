@@ -117,6 +117,16 @@ E/SQLiteDatabase: Failed to open database '.../XRadiant.db'.
   应用在其中新建的边车同样按自身 umask 落 `0600`。恢复源现在固定取自 **init 命名空间**的
   系统视图（模块从不挂载该命名空间，那里的 `/mnt/user/<user>/emulated` 恒为 MP 的 FUSE），
   因此正常情况下不再出现这一形态。
+- 恢复**锚点没建起来**：锚点只有一种合法取法——在 init 命名空间里
+  `setns(/proc/1/ns/mnt)` → `open_tree(OPEN_TREE_CLONE)` → `SCM_RIGHTS` 交回宿主 →
+  `move_mount` 附着。**不得用 `mount(MS_BIND)` 替代**：内核 `do_loopback` 的 `check_mnt`
+  要求挂载源属于调用方**当前命名空间**，而 `/proc/1/root/...` 是跨命名空间 magic link，
+  bind 必然失败，锚点拿不到、自有私有目录就整段没交回系统视图（真机 2026-11-13 AVD(A15)
+  实测：回退分支 `bind failed source=/proc/1/root/mnt/user/0/emulated` 之后
+  `own private system view restored count=0`，场景 35 判 `file_missing`）。
+  锚点建立函数被 companion 与 daemon 各调用一次，而克隆随 `move_mount` 一次性消费，
+  第二次必然落到回退分支，所以**回退分支也必须重新克隆**，`/proc/1/root/...` 只作 `stat` 探针。
+  与恢复失败同类判据：`own private restored` 的 `count=0` 即整段未恢复。
 
 现在的处置：
 
