@@ -6,10 +6,87 @@ import subprocess
 import tempfile
 import unittest
 
+import pwsh_case_driver
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = os.environ.get("SRX_TEST_BASH") or shutil.which("bash")
 PWSH = shutil.which("pwsh")
+
+
+def powershell_case_script(script, tail):
+    """把抽取函数与尾部断言包成 runspace 用例脚本。
+
+    `pwsh -File` 每用例起一个进程约 0.75s，其中大头是重复解析编译被抽取的函数体
+    （实测 216 个用例合计重复解析约 1.2MB PowerShell 源码）。改成单进程 + 每用例一个
+    runspace 后约 0.03s/case，且 runspace 各自持有独立 `$script:`/`$global:` 作用域，
+    等价于原来的进程级隔离。语义差异与约束见 `pwsh_case_driver` 模块文档。
+
+    尾部断言**不得使用 `exit`**：runspace 里 `exit` 会被静默吞掉（不抛异常、不改退出码），
+    会让用例假通过。改用 `$global:SRX_CASE_RC = <退出码>`。
+    """
+    return script + "\n" + tail + "\n"
+
+
+SERVICE_CASE_PWSH_STUBS = r'''
+param([string]$ArtifactDir)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ErrorActionPreference = 'Stop'
+$script:ArtifactDir = $ArtifactDir
+$script:Failures = [System.Collections.Generic.List[string]]::new()
+$script:ServiceCaseSettleMilliseconds = 0
+$script:FailFast = $env:SRX_REPORT_FAULT -eq 'fail-fast'
+function Prepare-ServiceCase { if ($env:SRX_REPORT_FAULT -eq 'prepare') { $script:Failures.Add('prepare failed') } }
+function Clear-Results {}
+function Invoke-Su {
+    param([string]$Command)
+    $global:LASTEXITCODE = if ($env:SRX_REPORT_FAULT -eq 'marker' -and $Command.StartsWith('touch ')) { 1 } else { 0 }
+}
+function Invoke-Adb {}
+function Invoke-AdbWithTimeout {
+    param($Arguments)
+    if ($Arguments[-3] -ne '--es' -or $Arguments[-2] -ne 'result_token' -or $Arguments[-1] -notlike '/data/local/tmp/srx-result-*.marker') {
+        throw 'missing invocation token'
+    }
+    [pscustomobject]@{ ExitCode = [int]$env:SRX_REPORT_START_EXIT; Output = 'cmp=stub' }
+}
+function Ensure-CurrentAppMountConfirmed { $env:SRX_REPORT_FAULT -ne 'mount' }
+function Get-ExpectedMountPathsForLabel { @('/expected/mount') }
+function Get-ServiceCaseTimeoutSeconds { 0 }
+function Stop-AppAndWaitFuseCleanup {}
+function Start-Sleep {}
+function Test-LabelExpectsMount { $env:SRX_REPORT_FAULT -eq 'mount' }
+function Wait-Storage {}
+function Wait-ServiceResult {
+    $script:Attempt++
+    if ($env:SRX_REPORT_FAULT -eq 'retry-failure' -or ($env:SRX_REPORT_FAULT -eq 'retry-success' -and $script:Attempt -eq 1)) {
+        return [pscustomobject]@{ Found = $false; Path = ''; Text = '' }
+    }
+    [pscustomobject]@{ Found = $env:SRX_REPORT_FOUND -eq '1'; Path = '/device/result'; Text = $env:SRX_REPORT_RAW }
+}
+'''
+
+
+def run_service_cases(combinations, bases, function, extension):
+    """把 service 用例整批交给单进程 runspace 驱动跑完。"""
+    entries = []
+    for index, (pattern, raw, found, start_exit, _passed, fault) in enumerate(combinations):
+        base = bases[index]
+        case = "all" if "\n" in raw or raw.startswith("FAIL [all]") else "file_symlink"
+        command = f"Invoke-ServiceCase scenario-42 probe {case} @{{}} '{pattern}'"
+        tail = "$result = " + command + "\nif (-not $result.Ok) { $global:SRX_CASE_RC = 1 }"
+        (base / f"report.{extension}").write_text(
+            powershell_case_script(SERVICE_CASE_PWSH_STUBS + function, tail),
+            encoding="utf-8", newline="\n")
+        entries.append({
+            "name": str(index),
+            "script": str(base / "report.ps1"),
+            "args": [str(base)],
+            "env": {"SRX_REPORT_RAW": raw, "SRX_REPORT_FOUND": "1" if found else "0",
+                    "SRX_REPORT_FAULT": fault, "SRX_REPORT_START_EXIT": str(start_exit)},
+        })
+    batch = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+    return [batch[str(index)] for index in range(len(combinations))]
 
 
 class ScenarioResultReportingTest(unittest.TestCase):
@@ -153,32 +230,45 @@ global_config_backup_ready=1
         steps = ("Invoke-Adb", "Restore-CrossAppConfig", "Restore-AppConfig", "Restore-GlobalConfig", "Clear-Results", "Invoke-Su",
                  "Remove-TestTargetArtifacts", "Clear-AliasMediaStoreFixture", "Remove-RandomMediaStoreRows",
                  "Remove-RandomPhysicalMediaFiles", "Restart-MediaProvider", "Restore-DeviceExecutionState")
-        for failure, mode in itertools.product(("none", *steps), ("exit", "throw")):
-            with self.subTest(failure=failure, mode=mode), tempfile.TemporaryDirectory() as directory:
-                stubs = '\n'.join(f'''function {step} {{
+        combinations = list(itertools.product(("none", *steps), ("exit", "throw")))
+        stubs = '\n'.join(f'''function {step} {{
     Add-Content -LiteralPath $env:SRX_CLEANUP_TRACE -Value '{step}'
     if ($env:SRX_CLEANUP_FAULT -eq '{step}') {{
         if ($env:SRX_CLEANUP_MODE -eq 'throw') {{ throw 'injected cleanup error' }}
         $global:LASTEXITCODE=7
     }}
 }}''' for step in steps)
-                script = '''
+        stub = '''
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $script:CleanupDone=$false
 $script:GlobalConfigBackupReady=$true
 $script:ExitCode=0
 $script:Failures=[Collections.Generic.List[string]]::new()
-''' + stubs + '\n' + cleanup + '\nInvoke-TestArtifactCleanup\nexit $script:ExitCode\n'
-                base = Path(directory)
-                path = base / "cleanup.ps1"
-                path.write_text(script, encoding="utf-8")
-                result = subprocess.run([PWSH, "-NoProfile", "-File", str(path)], text=True, capture_output=True, timeout=15,
-                                        env={**os.environ, "SRX_CLEANUP_FAULT": failure, "SRX_CLEANUP_MODE": mode,
-                                             "SRX_CLEANUP_TRACE": str(base / "trace")})
-                self.assertEqual(failure == "none", result.returncode == 0, result.stdout + result.stderr)
-                self.assertEqual(list(steps), (base / "trace").read_text().splitlines())
-                self.assertEqual(0 if failure == "none" else 1, (result.stdout + result.stderr).count("FAIL [cleanup]"))
+''' + stubs + '\n' + cleanup
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            entries = []
+            for index, (failure, mode) in enumerate(combinations):
+                path = base / f"cleanup-{index}.ps1"
+                # 原脚本用 `exit $script:ExitCode` 传退出码；runspace 下 exit 会被静默吞掉，
+                # 改写成驱动可读的 SRX_CASE_RC。
+                body = stub + '\nInvoke-TestArtifactCleanup\n$global:SRX_CASE_RC = $script:ExitCode\n'
+                path.write_text(body, encoding="utf-8", newline="\n")
+                entries.append({
+                    "name": str(index),
+                    "script": str(path),
+                    "env": {"SRX_CLEANUP_FAULT": failure, "SRX_CLEANUP_MODE": mode,
+                            "SRX_CLEANUP_TRACE": str(base / f"trace-{index}")},
+                })
+            results = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+
+            for index, (failure, mode) in enumerate(combinations):
+                with self.subTest(failure=failure, mode=mode):
+                    result = results[str(index)]
+                    self.assertEqual(failure == "none", result.returncode == 0, result.stdout + result.stderr)
+                    self.assertEqual(list(steps), (base / f"trace-{index}").read_text().splitlines())
+                    self.assertEqual(0 if failure == "none" else 1, (result.stdout + result.stderr).count("FAIL [cleanup]"))
         self.assertGreater(source.index('Write-Host "ALL_SCENARIOS_PASSED"'), source.index('try { Invoke-TestArtifactCleanup }'))
 
     @unittest.skipUnless(BASH and os.name != "nt", "需要 POSIX 链接验证残留检查")
@@ -248,12 +338,7 @@ function Test-Su { param($Command) & bash -c $Command; $LASTEXITCODE -eq 0 }
         diagnostics = source.index('    Write-Host "  - scenario-$Scenario/backend-effective"')
         start = source.rfind("    $ok =", source.index("function Invoke-Scenario {"), diagnostics)
         tail = source[start:source.index("function Invoke-BasicAll {")]
-        for expression, setup, cleanup, failure in itertools.product(
-            ("$true", "$false", "@($true, $false)", "@($false, $true)", "@($true, $true)", "$null", "'true'"),
-            (True, False), (True, False), (True, False),
-        ):
-            with self.subTest(expression=expression, setup=setup, cleanup=cleanup, failure=failure), tempfile.TemporaryDirectory() as directory:
-                script = r'''
+        stub = r'''
 $Scenario = 42
 $ok = $env:SRX_SUMMARY_SETUP -eq 'True'
 $before = 0
@@ -264,15 +349,34 @@ function Stop-AppAndWaitFuseCleanup { $env:SRX_SUMMARY_CLEANUP -eq 'True' }
 function Get-ScenarioTitle { 'test' }
 if ($env:SRX_SUMMARY_FAILURE -eq 'True') { $script:Failures.Add('physical evidence mismatch') }
 '''
-                path = Path(directory) / "summary.ps1"
-                path.write_text(script + f"$scenarioOk = {expression}\nfunction Test-Summary {{\n" + tail +
-                                "\nTest-Summary\nif (-not $script:Summary[0].Passed) { exit 1 }\n", encoding="utf-8")
-                result = subprocess.run([PWSH, "-NoProfile", "-File", str(path)], text=True, capture_output=True, timeout=15,
-                                        env={**os.environ, "SRX_SUMMARY_SETUP": str(setup), "SRX_SUMMARY_CLEANUP": str(cleanup),
-                                             "SRX_SUMMARY_FAILURE": str(failure)})
-                passed = expression == "$true" and setup and cleanup and not failure
-                self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
-                self.assertIn(("PASS" if passed else "FAIL") + " [scenario] id=42", result.stdout)
+        combinations = list(itertools.product(
+            ("$true", "$false", "@($true, $false)", "@($false, $true)", "@($true, $true)", "$null", "'true'"),
+            (True, False), (True, False), (True, False),
+        ))
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            entries = []
+            for index, (expression, setup, cleanup, failure) in enumerate(combinations):
+                path = base / f"summary-{index}.ps1"
+                path.write_text(
+                    stub + f"$scenarioOk = {expression}\nfunction Test-Summary {{\n" + tail +
+                    "\nTest-Summary\nif (-not $script:Summary[0].Passed) { $global:SRX_CASE_RC = 1 }\n",
+                    encoding="utf-8", newline="\n",
+                )
+                entries.append({
+                    "name": str(index),
+                    "script": str(path),
+                    "env": {"SRX_SUMMARY_SETUP": str(setup), "SRX_SUMMARY_CLEANUP": str(cleanup),
+                            "SRX_SUMMARY_FAILURE": str(failure)},
+                })
+            results = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+
+            for index, (expression, setup, cleanup, failure) in enumerate(combinations):
+                with self.subTest(expression=expression, setup=setup, cleanup=cleanup, failure=failure):
+                    result = results[str(index)]
+                    passed = expression == "$true" and setup and cleanup and not failure
+                    self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
+                    self.assertIn(("PASS" if passed else "FAIL") + " [scenario] id=42", result.stdout)
 
     def test_directory_absence_requires_a_successful_listing(self):
         for runner in ("bash", "pwsh"):
@@ -485,14 +589,20 @@ function Invoke-ServiceCase {
             cases.append((r"^PASS \[file_symlink\]", success, True, 0, fault == "retry-success", fault))
         for raw, found in ((success, True), (denied, True), (success, False)):
             cases.append((r"^PASS \[file_symlink\]", raw, found, 0, raw == success and found, "fail-fast"))
-        for pattern, raw, found, start_exit, passed, fault in cases:
-            with self.subTest(pattern=pattern, raw=raw, found=found, start_exit=start_exit, fault=fault), tempfile.TemporaryDirectory() as directory:
-                base = Path(directory)
-                if fault == "artifact":
-                    (base / "scenario-42-probe-result.txt").mkdir()
-                case = "all" if "\n" in raw or raw.startswith("FAIL [all]") else "file_symlink"
-                if runner == "bash":
-                    stubs = r'''
+        combinations = list(cases)
+        # 每个用例独立子目录：断言依赖写到该目录下的产物文件（结果文件、adb-args）。
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        root = Path(workspace.name)
+        bases = []
+        for index, (_pattern, _raw, _found, _start_exit, _passed, fault) in enumerate(combinations):
+            base = root / f"case-{index}"
+            base.mkdir()
+            if fault == "artifact":
+                (base / "scenario-42-probe-result.txt").mkdir()
+            bases.append(base)
+
+        bash_stubs = r"""
 set -euo pipefail
 SRT_ARTIFACT_DIR=$1
 SRT_SERVICE_CASE_SETTLE_MS=0
@@ -516,56 +626,28 @@ wait_service_result() {
   if [[ $SRX_REPORT_FAULT == retry-failure || ( $SRX_REPORT_FAULT == retry-success && $attempt == 0 ) ]]; then return 1; fi
   printf '%s\n' "$SRX_REPORT_RAW"; test "$SRX_REPORT_FOUND" = 1
 }
-'''
-                    command = f"run_service_case 42 probe {case} '{pattern}'"
-                    script = stubs + function + "\n" + command + "\n"
-                    executable = [BASH, "-eu", str(base / "report.sh"), str(base)]
-                else:
-                    stubs = r'''
-param([string]$ArtifactDir)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$ErrorActionPreference = 'Stop'
-$script:ArtifactDir = $ArtifactDir
-$script:Failures = [System.Collections.Generic.List[string]]::new()
-$script:ServiceCaseSettleMilliseconds = 0
-$script:FailFast = $env:SRX_REPORT_FAULT -eq 'fail-fast'
-function Prepare-ServiceCase { if ($env:SRX_REPORT_FAULT -eq 'prepare') { $script:Failures.Add('prepare failed') } }
-function Clear-Results {}
-function Invoke-Su {
-    param([string]$Command)
-    $global:LASTEXITCODE = if ($env:SRX_REPORT_FAULT -eq 'marker' -and $Command.StartsWith('touch ')) { 1 } else { 0 }
-}
-function Invoke-Adb {}
-function Invoke-AdbWithTimeout {
-    param($Arguments)
-    if ($Arguments[-3] -ne '--es' -or $Arguments[-2] -ne 'result_token' -or $Arguments[-1] -notlike '/data/local/tmp/srx-result-*.marker') {
-        throw 'missing invocation token'
-    }
-    [pscustomobject]@{ ExitCode = [int]$env:SRX_REPORT_START_EXIT; Output = 'cmp=stub' }
-}
-function Ensure-CurrentAppMountConfirmed { $env:SRX_REPORT_FAULT -ne 'mount' }
-function Get-ExpectedMountPathsForLabel { @('/expected/mount') }
-function Get-ServiceCaseTimeoutSeconds { 0 }
-function Stop-AppAndWaitFuseCleanup {}
-function Start-Sleep {}
-function Test-LabelExpectsMount { $env:SRX_REPORT_FAULT -eq 'mount' }
-function Wait-Storage {}
-function Wait-ServiceResult {
-    $script:Attempt++
-    if ($env:SRX_REPORT_FAULT -eq 'retry-failure' -or ($env:SRX_REPORT_FAULT -eq 'retry-success' -and $script:Attempt -eq 1)) {
-        return [pscustomobject]@{ Found = $false; Path = ''; Text = '' }
-    }
-    [pscustomobject]@{ Found = $env:SRX_REPORT_FOUND -eq '1'; Path = '/device/result'; Text = $env:SRX_REPORT_RAW }
-}
-'''
-                    command = f"Invoke-ServiceCase scenario-42 probe {case} @{{}} '{pattern}'"
-                    script = stubs + function + "\n$result = " + command + "\nif (-not $result.Ok) { exit 1 }\n"
-                    executable = [PWSH, "-NoProfile", "-File", str(base / "report.ps1"), str(base)]
-                (base / f"report.{extension}").write_text(script, encoding="utf-8", newline="\n")
-                result = subprocess.run(executable, text=True, encoding="utf-8", errors="backslashreplace", capture_output=True, timeout=20,
-                                        env={**os.environ, "SRX_REPORT_RAW": raw, "SRX_REPORT_FOUND": "1" if found else "0",
-                                             "SRX_REPORT_FAULT": fault,
-                                             "SRX_REPORT_START_EXIT": str(start_exit)})
+"""
+
+        results = []
+        if runner == "bash":
+            for index, (pattern, raw, found, start_exit, _passed, fault) in enumerate(combinations):
+                base = bases[index]
+                case = "all" if "\n" in raw or raw.startswith("FAIL [all]") else "file_symlink"
+                command = f"run_service_case 42 probe {case} '{pattern}'"
+                (base / f"report.{extension}").write_text(
+                    bash_stubs + function + "\n" + command + "\n", encoding="utf-8", newline="\n")
+                results.append(subprocess.run(
+                    [BASH, "-eu", str(base / "report.sh"), str(base)],
+                    text=True, encoding="utf-8", errors="backslashreplace", capture_output=True, timeout=20,
+                    env={**os.environ, "SRX_REPORT_RAW": raw, "SRX_REPORT_FOUND": "1" if found else "0",
+                         "SRX_REPORT_FAULT": fault, "SRX_REPORT_START_EXIT": str(start_exit)}))
+        else:
+            results = run_service_cases(combinations, bases, function, extension)
+
+        for index, (pattern, raw, found, start_exit, passed, fault) in enumerate(combinations):
+            with self.subTest(pattern=pattern, raw=raw, found=found, start_exit=start_exit, fault=fault):
+                base = bases[index]
+                result = results[index]
                 if fault in ("prepare", "marker", "mount", "artifact", "retry-failure"):
                     self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
                     self.assertNotRegex(result.stdout, r"(?m)^PASS \[")
@@ -593,6 +675,7 @@ function Wait-ServiceResult {
                     if runner == "bash":
                         self.assertIn("--es result_token /data/local/tmp/srx-result-", (base / "adb-args.txt").read_text())
 
+
     @unittest.skipUnless(PWSH, "需要 PowerShell 验证链接边界最终结果")
     def test_powershell_boundary_verdict_requires_all_evidence(self):
         source = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
@@ -602,9 +685,7 @@ function Wait-ServiceResult {
             ("chmod", "fchmod", "stat-error", "wrong-symlink", "case-symlink", "readlink-error", "missing-entry", "case-entry", "extra-entry", "listing-error", "content", "inode", "shadow"),
             ("Sandbox", "Allowed", "Request", "RequestSibling"),
         ))
-        for case, route in cases:
-            with self.subTest(case=case, route=route), tempfile.TemporaryDirectory() as directory:
-                script = r'''
+        stub = r'''
 $ErrorActionPreference = 'Stop'
 $RealRoot = '/storage/emulated/0'
 $BackendRoot = '/data/media/0'
@@ -666,22 +747,35 @@ function Test-Su {
     return -not ($env:SRX_REPORT_CASE -eq 'leak' -and $kind -eq 'RequestSibling')
 }
 '''
-                path = Path(directory) / "boundary.ps1"
-                path.write_text(script + function + "\nif (-not (Invoke-FileMutationMetadataScenario 42)) { exit 1 }\n", encoding="utf-8")
-                result = subprocess.run([PWSH, "-NoProfile", "-File", str(path)], text=True, encoding="utf-8",
-                                        capture_output=True, timeout=20, env={**os.environ, "SRX_REPORT_CASE": case, "SRX_REPORT_ROUTE": route})
-                passed = case in ("denied", "created")
-                self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
-                verdicts = [line for line in result.stdout.splitlines() if line.startswith("PASS [file_") and "_boundary]" in line]
-                self.assertEqual(8 if passed else 0, len(verdicts), result.stdout)
-                if passed:
-                    self.assertNotIn("FAIL [", result.stdout)
-                    self.assertGreater(result.stdout.index(verdicts[0]), result.stdout.rindex("PENDING ["))
-                    outcome = "created" if case == "created" else "denied errno=EACCES control=unredirected,Allowed"
-                    self.assertIn(f"PASS [file_symlink_boundary] scenario=42 route=RequestSibling outcome={outcome}", result.stdout)
-                else:
-                    self.assertIn("FAIL [", result.stdout)
-                    if case == "control-mismatch":
-                        self.assertIn("reason=eacces_without_matching_controls", result.stdout)
-                    if case == "unexpected":
-                        self.assertIn("error=EIO", result.stdout)
+        tail = "if (-not (Invoke-FileMutationMetadataScenario 42)) { $global:SRX_CASE_RC = 1 }"
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            entries = []
+            for index, (case, route) in enumerate(cases):
+                path = base / f"boundary-{index}.ps1"
+                path.write_text(powershell_case_script(stub + function, tail), encoding="utf-8", newline="\n")
+                entries.append({
+                    "name": str(index),
+                    "script": str(path),
+                    "env": {"SRX_REPORT_CASE": case, "SRX_REPORT_ROUTE": route},
+                })
+            results = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+
+            for index, (case, route) in enumerate(cases):
+                with self.subTest(case=case, route=route):
+                    result = results[str(index)]
+                    passed = case in ("denied", "created")
+                    self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
+                    verdicts = [line for line in result.stdout.splitlines() if line.startswith("PASS [file_") and "_boundary]" in line]
+                    self.assertEqual(8 if passed else 0, len(verdicts), result.stdout)
+                    if passed:
+                        self.assertNotIn("FAIL [", result.stdout)
+                        self.assertGreater(result.stdout.index(verdicts[0]), result.stdout.rindex("PENDING ["))
+                        outcome = "created" if case == "created" else "denied errno=EACCES control=unredirected,Allowed"
+                        self.assertIn(f"PASS [file_symlink_boundary] scenario=42 route=RequestSibling outcome={outcome}", result.stdout)
+                    else:
+                        self.assertIn("FAIL [", result.stdout)
+                        if case == "control-mismatch":
+                            self.assertIn("reason=eacces_without_matching_controls", result.stdout)
+                        if case == "unexpected":
+                            self.assertIn("error=EIO", result.stdout)

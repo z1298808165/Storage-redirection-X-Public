@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+import pwsh_case_driver
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = os.environ.get("SRX_TEST_BASH") or shutil.which("bash")
@@ -103,41 +105,52 @@ class ScenarioResultCollectionTest(unittest.TestCase):
                 ("function Wait-ServiceResult {", "function Wait-AppMountConfirmed {")
             )
             function = source[source.index(start):source.index(end)]
-            for case, (raw, delta, accepted) in cases.items():
-                with self.subTest(runner=runner, case=case), tempfile.TemporaryDirectory() as directory:
-                    base = Path(directory)
-                    marker = base / "marker"
-                    token = f"__SRT_RESULT_TOKEN__={marker.as_posix()}"
-                    if raw is not None and case != "missing-token":
-                        raw += "\n" + (token + "-old" if case == "wrong-token" else token)
-                        if case == "duplicate-token":
-                            raw += "\n" + token
-                    marker.write_text("marker")
-                    timestamp = 1_700_000_000_500_000_000
-                    os.utime(marker, ns=(timestamp, timestamp))
-                    if case == "missing-marker":
-                        marker.unlink()
-                    for name in ("public", "internal", "backend", "sandbox"):
-                        (base / name).mkdir()
-                    if raw is not None:
-                        result = base / "public/result_current.txt"
-                        result.write_text(raw, encoding="utf-8")
-                        os.utime(result, ns=(timestamp + delta, timestamp + delta))
-                        if marker.exists():
-                            self.assertEqual(delta > 0, result.stat().st_mtime_ns > marker.stat().st_mtime_ns)
-                    if case == "later-valid-file":
-                        result = base / "internal/result_current.txt"
-                        result.write_text("PASS [file_read] current result\n__SRT_RESULT_END__=1\n" + token, encoding="utf-8")
-                        os.utime(result, ns=(timestamp + 1_000_000, timestamp + 1_000_000))
-                    prelude = r'''
+            prelude = r'''
 date() { local tick=0; if [[ -f $SRX_CLOCK_FILE ]]; then read -r tick < "$SRX_CLOCK_FILE"; fi; printf '%s\n' "$((tick + 1))" > "$SRX_CLOCK_FILE"; echo "$tick"; }
 sleep() { :; }
 find() { :; }
 awk() { if [[ $SRX_COLLECTION_CASE == read-error && ${*: -1} == */result_current.txt ]]; then return 1; fi; command awk "$@"; }
 export -f date sleep find awk
 '''
-                    if runner == "bash":
-                        script = prelude + r'''
+            workspace = tempfile.TemporaryDirectory()
+            self.addCleanup(workspace.cleanup)
+            root = Path(workspace.name)
+            # 与既有断言保持一致：`missing-path` 仅在 bash 下被视为通过。
+            expectations = {}
+            for index, case in enumerate(cases):
+                base = root / f"case-{index}"
+                base.mkdir()
+                raw, delta, accepted = cases[case]
+                marker = base / "marker"
+                token = f"__SRT_RESULT_TOKEN__={marker.as_posix()}"
+                if raw is not None and case != "missing-token":
+                    raw += "\n" + (token + "-old" if case == "wrong-token" else token)
+                    if case == "duplicate-token":
+                        raw += "\n" + token
+                marker.write_text("marker")
+                timestamp = 1_700_000_000_500_000_000
+                os.utime(marker, ns=(timestamp, timestamp))
+                if case == "missing-marker":
+                    marker.unlink()
+                for name in ("public", "internal", "backend", "sandbox"):
+                    (base / name).mkdir()
+                if raw is not None:
+                    result = base / "public/result_current.txt"
+                    result.write_text(raw, encoding="utf-8")
+                    os.utime(result, ns=(timestamp + delta, timestamp + delta))
+                    if marker.exists():
+                        self.assertEqual(delta > 0, result.stat().st_mtime_ns > marker.stat().st_mtime_ns)
+                if case == "later-valid-file":
+                    result = base / "internal/result_current.txt"
+                    result.write_text("PASS [file_read] current result\n__SRT_RESULT_END__=1\n" + token, encoding="utf-8")
+                    os.utime(result, ns=(timestamp + 1_000_000, timestamp + 1_000_000))
+                expectations[case] = accepted or (case == "missing-path" and runner == "bash")
+
+            if runner == "bash":
+                results = {}
+                for index, case in enumerate(cases):
+                    base = root / f"case-{index}"
+                    script = prelude + r'''
 SRT_RESULT_POLL_MS=0
 RESULT_DIR=$1/public
 INTERNAL_RESULT_DIR=$1/internal
@@ -150,11 +163,17 @@ adb_su_timeout() {
   [[ $SRX_COLLECTION_CASE != transport-error ]]
 }
 ''' + function + '\nwait_service_result 2 "$1/marker" "$SRX_EXPECTED_CASE"\n'
-                        path = base / "collect.sh"
-                        path.write_text(script, encoding="utf-8", newline="\n")
-                        command = [BASH, "-eu", str(path), base.as_posix()]
-                    else:
-                        script = r'''
+                    path = base / "collect.sh"
+                    path.write_text(script, encoding="utf-8", newline="\n")
+                    results[case] = subprocess.run(
+                        [BASH, "-eu", str(path), base.as_posix()],
+                        text=True, encoding="utf-8", capture_output=True, timeout=15,
+                        env={**os.environ, "SRX_CLOCK_FILE": (base / "clock").as_posix(),
+                             "SRX_EXPECTED_CASE": "all" if case.startswith("all-") else "file_read",
+                             "SRX_COLLECTION_BASH": BASH,
+                             "SRX_COLLECTION_CASE": case, "SRX_COLLECTION_PRELUDE": prelude})
+            else:
+                stub = r'''
 param([string]$BasePath)
 $ErrorActionPreference='Stop'
 $ResultDir="$BasePath/public"
@@ -170,16 +189,30 @@ function Invoke-Su {
         Where-Object { $env:SRX_COLLECTION_CASE -ne 'missing-path' -or $_ -notlike '__SRT_RESULT_PATH__=*' }
     if ($env:SRX_COLLECTION_CASE -eq 'transport-error') { $global:LASTEXITCODE=7 }
 }
-''' + function + '\n$result = Wait-ServiceResult 2 "$BasePath/marker" $env:SRX_EXPECTED_CASE\nif (-not $result.Found) { exit 1 }; Write-Output $result.Text\n'
-                        path = base / "collect.ps1"
-                        path.write_text(script, encoding="utf-8")
-                        command = [PWSH, "-NoProfile", "-File", str(path), base.as_posix()]
-                    result = subprocess.run(command, text=True, encoding="utf-8", capture_output=True, timeout=15,
-                                            env={**os.environ, "SRX_CLOCK_FILE": (base / "clock").as_posix(),
-                                                 "SRX_EXPECTED_CASE": "all" if case.startswith("all-") else "file_read",
-                                                 "SRX_COLLECTION_BASH": BASH,
-                                                 "SRX_COLLECTION_CASE": case, "SRX_COLLECTION_PRELUDE": prelude})
-                    expected = accepted or (case == "missing-path" and runner == "bash")
+'''
+                entries = []
+                for index, case in enumerate(cases):
+                    base = root / f"case-{index}"
+                    tail = ('$result = Wait-ServiceResult 2 "$BasePath/marker" $env:SRX_EXPECTED_CASE\n'
+                            'if (-not $result.Found) { $global:SRX_CASE_RC = 1 }\n'
+                            'Write-Output $result.Text')
+                    (base / "collect.ps1").write_text(
+                        stub + function + "\n" + tail + "\n", encoding="utf-8", newline="\n")
+                    entries.append({
+                        "name": case,
+                        "script": str(base / "collect.ps1"),
+                        "args": [base.as_posix()],
+                        "env": {"SRX_CLOCK_FILE": (base / "clock").as_posix(),
+                                "SRX_EXPECTED_CASE": "all" if case.startswith("all-") else "file_read",
+                                "SRX_COLLECTION_BASH": BASH,
+                                "SRX_COLLECTION_CASE": case, "SRX_COLLECTION_PRELUDE": prelude},
+                    })
+                results = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+
+            for case in cases:
+                with self.subTest(runner=runner, case=case):
+                    result = results[case]
+                    expected = expectations[case]
                     self.assertEqual(expected, result.returncode == 0, result.stdout + result.stderr)
                     if expected:
                         identity = "all" if case == "all-fatal-failure" else "file_read"

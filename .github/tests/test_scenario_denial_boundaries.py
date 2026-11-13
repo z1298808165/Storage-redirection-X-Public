@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+import pwsh_case_driver
+
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = os.environ.get("SRX_TEST_BASH") or shutil.which("bash")
@@ -23,12 +25,18 @@ class DenialBoundaryTest(unittest.TestCase):
                 ("function Invoke-OwnerDriftOwnDirScenario {", "function Set-ReadOnlySeed {")
             )
             function = source[source.index(start):source.index(end)]
-            for layout in ("bind", "fuse", "mixed"):
-                for fault in ("none", "EIO", "ENOENT", "errno-in-path", "false-success", "changed-owner", "changed-content", "residue"):
-                    with self.subTest(runner=runner, layout=layout, fault=fault), tempfile.TemporaryDirectory() as directory:
-                        base = Path(directory)
-                        if runner == "bash":
-                            stub = r'''
+            combinations = [
+                (layout, fault)
+                for layout in ("bind", "fuse", "mixed")
+                for fault in ("none", "EIO", "ENOENT", "errno-in-path", "false-success",
+                              "changed-owner", "changed-content", "residue")
+            ]
+            workspace = tempfile.TemporaryDirectory()
+            self.addCleanup(workspace.cleanup)
+            root = Path(workspace.name)
+            results = {}
+            if runner == "bash":
+                stub = r'''
 APP_ID=test.app
 BACKEND_ROOT=/data/media/0
 PAYLOAD=payload
@@ -58,10 +66,18 @@ run_service_case() {
   [[ $raw =~ $pattern ]]
 }
 '''
-                            script = stub + function + "\nrun_owner_drift_own_dir_scenario 6\n"
-                            command = [BASH, "-eu", str(base / "drift.sh")]
-                        else:
-                            stub = r'''
+                for index, (layout, fault) in enumerate(combinations):
+                    base = root / f"case-{index}"
+                    base.mkdir()
+                    (base / f"drift.{extension}").write_text(
+                        stub + function + "\nrun_owner_drift_own_dir_scenario 6\n",
+                        encoding="utf-8", newline="\n")
+                    results[f"{layout}|{fault}"] = subprocess.run(
+                        [BASH, "-eu", str(base / "drift.sh")],
+                        text=True, capture_output=True, timeout=15,
+                        env={**os.environ, "SRX_DRIFT_LAYOUT": layout, "SRX_DRIFT_FAULT": fault})
+            else:
+                stub = r'''
 $ErrorActionPreference = 'Stop'
 $AppId='test.app'
 $RealRoot='/storage/emulated/0'
@@ -93,10 +109,23 @@ function Invoke-ServiceCase {
     [pscustomobject]@{ Ok = $raw -match $PassRegex; Text = $raw }
 }
 '''
-                            script = stub + function + "\nif (-not (Invoke-OwnerDriftOwnDirScenario 6)) { exit 1 }\n"
-                            command = [PWSH, "-NoProfile", "-File", str(base / "drift.ps1")]
-                        (base / f"drift.{extension}").write_text(script, encoding="utf-8", newline="\n")
-                        result = subprocess.run(command, text=True, capture_output=True, timeout=15,
-                                                env={**os.environ, "SRX_DRIFT_LAYOUT": layout, "SRX_DRIFT_FAULT": fault})
-                        passed = fault == "none" or (layout == "fuse" and fault in ("false-success", "residue"))
-                        self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
+                entries = []
+                for index, (layout, fault) in enumerate(combinations):
+                    base = root / f"case-{index}"
+                    base.mkdir()
+                    (base / f"drift.{extension}").write_text(
+                        stub + function + "\nif (-not (Invoke-OwnerDriftOwnDirScenario 6)) { $global:SRX_CASE_RC = 1 }\n",
+                        encoding="utf-8", newline="\n")
+                    entries.append({
+                        "name": f"{layout}|{fault}",
+                        "script": str(base / "drift.ps1"),
+                        "env": {"SRX_DRIFT_LAYOUT": layout, "SRX_DRIFT_FAULT": fault},
+                    })
+                batch = pwsh_case_driver.run_pwsh_cases(entries, PWSH)
+                results = dict(batch)
+
+            for layout, fault in combinations:
+                with self.subTest(runner=runner, layout=layout, fault=fault):
+                    result = results[f"{layout}|{fault}"]
+                    passed = fault == "none" or (layout == "fuse" and fault in ("false-success", "residue"))
+                    self.assertEqual(passed, result.returncode == 0, result.stdout + result.stderr)
