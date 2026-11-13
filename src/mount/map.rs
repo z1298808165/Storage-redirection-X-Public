@@ -17,29 +17,6 @@ fn mapping_mount_point_exists(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 判断是否需要按字面的 `/data/data` 请求路径再补一层映射。
-///
-/// 只在「归一化确实换了路径」且 `/data/data` 是真实目录时返回该字面路径。取不到
-/// `/data/data` 的元信息时按真实目录处理：宁可多挂一层，也不要让映射在这条路径上
-/// 静默失效——失效的表现是应用写入成功、后端却没有文件，排查成本远高于多一层挂载。
-fn literal_request_alias(literal: &str, resolved: &str) -> Option<String> {
-    const DATA_DATA: &str = "/data/data";
-    if literal == resolved {
-        return None;
-    }
-    let rest = literal.strip_prefix(DATA_DATA)?;
-    if !(rest.is_empty() || rest.starts_with('/')) {
-        return None;
-    }
-    if !paths::is_absolute(literal) || !paths::is_safe_namespace_path(literal) {
-        return None;
-    }
-    match std::fs::symlink_metadata(DATA_DATA) {
-        Ok(metadata) if metadata.file_type().is_symlink() => None,
-        _ => Some(literal.to_string()),
-    }
-}
-
 impl MountPlanner {
     pub(super) fn resolve_path_mappings(
         &self,
@@ -49,9 +26,9 @@ impl MountPlanner {
         let mut resolved = Vec::with_capacity(path_mappings.len());
 
         for mapping in path_mappings {
-            let literal_request =
-                self.resolve_placeholders(&self.normalize_path(&mapping.request_path));
-            let mut current_path = self.resolve_user_path(&literal_request);
+            let mut current_path = self.resolve_user_path(
+                &self.resolve_placeholders(&self.normalize_path(&mapping.request_path)),
+            );
             let mut target_path = self.resolve_user_path(
                 &self.resolve_placeholders(&self.normalize_path(&mapping.final_path)),
             );
@@ -101,26 +78,6 @@ impl MountPlanner {
 
             if paths::eq_ignore_case(&current_path, &target_path) {
                 continue;
-            }
-
-            // `/data/data` 是 `/data/user/0` 的历史别名，`resolve_user_path` 会把它归一化到
-            // 后者：两者指向同一份目录。但**同一份目录不等于同一个 vfsmount**——设备上
-            // `/data/user/0` 通常是从 `/data/data` 派生的独立 bind（`master:` slave），而挂载
-            // 按 (父 vfsmount, dentry) 索引：挂在 `/data/user/0/<包名>/x` 上的那层，对从
-            // `/data/data/<包名>/x` 进来的访问不可见（那条路径走的是 `/data` 自己的
-            // vfsmount）；slave 只接收传播、不向外发送，所以也不会被复制过去。
-            //
-            // 应用按字面路径访问时就绕过了映射，表现为「写入返回成功、目标后端没有文件」
-            // ——CI 场景 35 的 `legacy-data-data-to-private` 正是这个形态：同一批三条映射里，
-            // 请求路径写成 `/data/user/0/...` 的两条都落到后端，只有写成 `/data/data/...`
-            // 的那条落进了下层目录。
-            //
-            // 因此按字面路径再补一条映射。只在「归一化确实换了路径」且 `/data/data` 是真实
-            // 目录（不是指向 `/data/user/0` 的符号链接）时补：符号链接形态下两者解析到同一
-            // vfsmount，补挂只会多出一层同 dentry 的无用挂载。两层挂载都随应用命名空间
-            // 消亡，不需要额外拆除。
-            if let Some(alias_request) = literal_request_alias(&literal_request, &current_path) {
-                resolved.push(PathMapping::new(alias_request, target_path.clone()));
             }
 
             resolved.push(PathMapping::new(current_path, target_path));
