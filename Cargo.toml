@@ -4,7 +4,7 @@ version = "2.3.0"
 edition = "2024"
 
 [workspace]
-members = ["tests/native-config-fixtures"]
+members = ["tests/native-config-fixtures", "tests/zn-runtime-fixture"]
 default-members = ["."]
 resolver = "3"
 

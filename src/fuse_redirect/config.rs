@@ -2882,32 +2882,24 @@ fn send_ready_result(sock: Option<libc::c_int>, result: i32) {
     unsafe { libc::close(sock) };
 }
 
-/// 请求是否携带任何策略规则（完整重定向，或放行/排除/映射/沙箱/只读任一非空）。
+/// 请求是否有显式路径规则或已启用的监视专用视图。
 ///
-/// 宿主接入由策略规则驱动：无规则的请求接入宿主只会得到 deny_all（未配置
-/// 应用空目录、写入全拒，2026-10-30 issue #2 报告者 test14 实测）。preattach
-/// 快捷路径与 planner 完整路径都必须以本判定作为接入前置；daemon 与
-/// companion 两条挂载链路、lib 与 bin 两套编译副本共用本判定。
-///
-/// 既非仅监视也非仅映射的请求是完整重定向：五类列表全空时语义为“整个共享
-/// 存储进入应用私有空间”，本身就是挂载需求，不能按无规则短路。未配置应用
-/// 只会以仅监视形态发出请求，不受此分支影响。
-/// 请求是否带**显式路径规则**（五个规则数组任一非空）。
-///
-/// 与 [`mount_request_has_policy_rules`] 的区别：后者把「全隔离」（`enabled` 且非
-/// mapping_mode_only）也算作有规则，因为 deny-all + 沙盒本身就是一种策略；而本函数
-/// 只承认写出来的规则。共享宿主接入闸门当前用本函数，因此全隔离应用不会接入 FUSE，
-/// 而是走 namespace bind（原因单独上报为 `no_explicit_rules`）。
+/// 与 [`mount_request_has_policy_rules`] 不同，无路径规则的全隔离请求不算显式规则。
 pub fn mount_request_has_explicit_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
-    !request.allowed_real_paths().is_empty()
+    (request.is_monitor_only() && request.is_file_monitor_enabled())
+        || !request.allowed_real_paths().is_empty()
         || !request.excluded_real_paths().is_empty()
         || !request.path_mappings().is_empty()
         || !request.sandboxed_paths().is_empty()
         || !request.read_only_paths().is_empty()
 }
 
+/// 请求是否需要重定向策略或已启用的监视专用视图。
+///
+/// 非监视且非仅映射的全隔离请求即使没有路径规则，也属于有效策略。
 pub fn mount_request_has_policy_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
-    (!request.is_monitor_only() && !request.is_mapping_mode_only())
+    (request.is_monitor_only() && request.is_file_monitor_enabled())
+        || (!request.is_monitor_only() && !request.is_mapping_mode_only())
         || !request.allowed_real_paths().is_empty()
         || !request.excluded_real_paths().is_empty()
         || !request.path_mappings().is_empty()

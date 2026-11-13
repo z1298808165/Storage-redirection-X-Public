@@ -2316,6 +2316,7 @@ struct AppProcess {
 
 fn list_app_processes() -> Vec<AppProcess> {
     let mut processes = Vec::new();
+    let registered = crate::mount_intent::registered_processes();
     let Ok(entries) = std_fs::read_dir("/proc") else {
         return processes;
     };
@@ -2339,7 +2340,29 @@ fn list_app_processes() -> Vec<AppProcess> {
         let Some((uid, is_uninterruptible)) = read_process_status(pid) else {
             continue;
         };
-        let Some(package_name) = read_process_package(pid) else {
+        let package_name = read_process_package(pid)
+            .filter(|package| {
+                let package_uid = policy::get_uid_for_package(package);
+                package_uid >= 0 && uid % 100000 == package_uid % 100000
+            })
+            .or_else(|| {
+                let mut candidates = registered.iter().filter(|record| {
+                    record.pid == pid
+                        && record.matches(
+                            uid,
+                            platform::process_start_time_ticks(pid),
+                            policy::get_uid_for_package(&record.package),
+                        )
+                });
+                let record = candidates.next()?;
+                if candidates.next().is_some() {
+                    return None;
+                }
+                // native 进程可能在登记后 fork；重载时重新拒绝共享视图。
+                let _namespace = platform::mount_namespace::private_mount_namespace(pid)?;
+                Some(record.package.clone())
+            });
+        let Some(package_name) = package_name else {
             continue;
         };
         if uid < ANDROID_APP_UID_START && !policy::is_media_provider_package(&package_name) {

@@ -87,7 +87,7 @@ pub fn should_capture_unconfigured_app(package_name: &str, uid: i32, enabled: bo
     enabled
         && !package_name.is_empty()
         && package_name != "com.storage.redirect.x"
-        && (10_000..90_000).contains(&uid)
+        && (10_000..90_000).contains(&(uid % platform::ANDROID_USER_ID_OFFSET))
         && !crate::redirect::policy::is_system_writer_package(package_name)
         && !crate::redirect::policy::is_file_monitor_bridge_package(package_name)
         && !crate::redirect::policy::is_file_monitor_ui_package(package_name)

@@ -11,7 +11,7 @@ if [[ "${SRX_NO_PATH_METADATA_REPAIR:-}" == "1" ]]; then
 fi
 
 mkdir -p build/test-flow/module-bin build/test-flow/assets
-cargo test --target "$TARGET_TRIPLE" --no-run
+bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" build/test-flow/native
 cargo build --target "$TARGET_TRIPLE" --release
 cp "target/${TARGET_TRIPLE}/release/libsrx_core.so" build/test-flow/module-bin/libsrx_core.so
 cp "target/${TARGET_TRIPLE}/release/srx_daemon" build/test-flow/module-bin/srx_daemon

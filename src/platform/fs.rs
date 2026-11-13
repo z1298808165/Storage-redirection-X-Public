@@ -188,8 +188,7 @@ pub fn create_directory(path: &str, uid: i32) -> bool {
         let ret = unsafe { mkdir(c_path.as_ptr(), 0o755) };
         if ret != 0 {
             if !errno_is(EEXIST) {
-                // SAFETY: __errno 返回线程局部 errno 存储的有效指针
-                let current = unsafe { *libc::__errno() };
+                let current = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
                 LAST_CREATE_DIRECTORY_ERRNO.store(current, std::sync::atomic::Ordering::Relaxed);
                 return false;
             }
@@ -221,5 +220,5 @@ pub fn create_directory(path: &str, uid: i32) -> bool {
 }
 
 fn errno_is(target: c_int) -> bool {
-    unsafe { *libc::__errno() == target }
+    std::io::Error::last_os_error().raw_os_error() == Some(target)
 }

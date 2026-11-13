@@ -194,7 +194,7 @@ fn mount_one_storage_view_barrier(
     root: &str,
     install_barrier: bool,
 ) -> bool {
-    let Ok(c_ns) = CString::new(format!("/proc/{}/ns/mnt", request.pid)) else {
+    let Ok(c_ns) = CString::new(request.mount_namespace_path()) else {
         return false;
     };
     let Ok(c_root) = CString::new(root) else {
@@ -1238,7 +1238,6 @@ fn cleanup_previous_companion_mounts(state_path: &str, request: &CompanionMountR
 fn handle_child_process(
     request: &CompanionMountRequest,
     plan: &CompanionMountForkPlan,
-    sock: c_int,
     barrier_fds: &[c_int],
 ) -> bool {
     if !set_mount_namespace(request.pid, plan.mount_namespace_path.as_deref()) {
@@ -1247,8 +1246,6 @@ fn handle_child_process(
             request.pid,
             request.package_name
         );
-        let _ = send_mount_result(sock, -1);
-        unsafe { close(sock) };
         return false;
     }
 
@@ -1412,7 +1409,6 @@ fn handle_child_process(
     // 才接入，此处屏障必然裸奔，在此判定会把每次正常挂载误判为失败。检测位于成功
     // 分支尾部（conclude_scoped_mount 之前、send_mount_result 之前），且只对真的
     // 建立了 FUSE 会话的轮次生效：纯 bind 轮次没有「等 FUSE 压上来」这个前提。
-    let result = if is_success { 0 } else { -1 };
     if !is_success {
         log::warn!(
             "child mount failed pid={} pkg={} map_only={}",
@@ -1552,10 +1548,6 @@ fn handle_child_process(
                 detached
             );
             rollback_scoped_fuse_services(&fuse_children);
-            let _ = send_mount_result(sock, -1);
-            // SAFETY: sock 是本 fork 子进程持有的已连接控制端 fd，失败回包已发送完毕，
-            // 此处关闭后立即返回，无其它线程并发使用该 fd。
-            unsafe { close(sock) };
             return false;
         }
         // 账本与状态文件职责不同：状态文件回答"要摘哪些路径"，账本回答"那些挂载归谁"。
@@ -1623,10 +1615,6 @@ fn handle_child_process(
                         request.pid,
                         mounts_at_check
                     );
-                    let _ = send_mount_result(sock, -1);
-                    // SAFETY: sock 是本 fork 子进程持有的已连接控制端 fd，失败回包
-                    // 已发送完毕，此处关闭后立即返回，无其它线程并发使用该 fd。
-                    unsafe { close(sock) };
                     return false;
                 }
             }
@@ -1646,14 +1634,6 @@ fn handle_child_process(
             failed_reason: "companion_scoped_mount_failed",
             unavailable_reason: host_skip.map(|reason| reason.as_str()),
         });
-        if !send_mount_result(sock, 0) {
-            log::warn!(
-                "child send result failed pid={} pkg={}",
-                request.pid,
-                request.package_name
-            );
-        }
-        unsafe { close(sock) };
         return true;
     }
     log::info!(
@@ -1662,14 +1642,6 @@ fn handle_child_process(
         request.pid
     );
 
-    if !send_mount_result(sock, result) {
-        log::warn!(
-            "child send result failed pid={} pkg={}",
-            request.pid,
-            request.package_name
-        );
-    }
-    unsafe { close(sock) };
     is_success
 }
 
@@ -1810,7 +1782,7 @@ fn shared_host_preattach_candidate(
     // （daemon_mount::shared_host_preattach_candidate）同源的闸门。未配置应用/
     // 无规则系统链路接入后宿主策略 deny_all，应用视图变空目录、写入全被拒
     // （2026-10-30 issue #2 报告者 test14 实测：未配置任何应用仍有 5 个进程
-    // 被覆盖，MT 管理器写 sdcard 失败）。监视由进程外 inotify 承担。
+    // 被覆盖，MT 管理器写 sdcard 失败）。监视专用请求由显式监视策略放行并保持真实后端。
     if !crate::fuse_redirect::config::mount_request_has_explicit_rules(request) {
         return false;
     }
@@ -1921,7 +1893,7 @@ impl CompanionMountForkPlan {
             barrier_roots,
             state_path,
             temp_state_path,
-            mount_namespace_path: CString::new(format!("/proc/{}/ns/mnt", request.pid)).ok(),
+            mount_namespace_path: CString::new(request.mount_namespace_path()).ok(),
         }
     }
 }
@@ -1993,7 +1965,18 @@ fn run_mount_in_forked_child(request: &CompanionMountRequest, barrier_fds: &[c_i
     );
     unsafe { close(sockets[0]) };
     let sock = sockets[1];
-    let is_success = handle_child_process(request, &plan, sock, barrier_fds);
+    let is_success = handle_child_process(request, &plan, barrier_fds);
+    // 所有早退共用一次回执和关闭，避免无规则等分支让父进程空等到超时。
+    let replied = send_mount_result(sock, if is_success { 0 } else { -1 });
+    // SAFETY: sock 仅属于当前 fork 子进程，发送结论后不再使用。
+    unsafe { close(sock) };
+    if !replied {
+        log::warn!(
+            "child send result failed pid={} pkg={}",
+            request.pid,
+            request.package_name
+        );
+    }
     unsafe { libc::_exit(if is_success { 0 } else { 1 }) };
 }
 

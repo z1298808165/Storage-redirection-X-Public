@@ -1,7 +1,10 @@
 mod boot;
 mod companion;
 mod companion_mount;
+mod companion_policy;
 mod companion_request;
+mod hyos;
+pub(crate) mod hyos_request;
 mod mount_request;
 mod mount_timing;
 mod specialize_post;
@@ -20,6 +23,7 @@ struct ServerGlobalConfig {
 }
 
 pub(crate) use companion::{run_companion_pipeline, write_status as write_companion_status};
+pub(crate) use hyos_request::specialize as specialize_hyos;
 
 pub struct RuntimeFlow {
     api: Option<abi::Api>,

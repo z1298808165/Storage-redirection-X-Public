@@ -372,6 +372,10 @@ while [ "$SECONDS" -lt "$package_service_deadline" ]; do
 done
 
 adb_bounded shell appops set me.fakerqu.test.storageredirect MANAGE_EXTERNAL_STORAGE allow || true
+if ! run_setup_phase "native 单元与 ZN 回调测试" bash .github/tests/run-native-tests.sh build/test-flow/native "$MODULE_ABI"; then
+  capture_preflight_diagnostics || true
+  exit 1
+fi
 export SRT_SKIP_FINAL_CLEANUP=1
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"

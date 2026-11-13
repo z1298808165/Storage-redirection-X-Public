@@ -187,6 +187,19 @@ try {
     Write-Step "安装测试 APK"
     Invoke-Checked -FilePath "adb" -Arguments @("install", "-r", $testAppApk)
 
+    Write-Step "运行 native 单元与 ZN 回调测试"
+    $nativeRemote = (& adb shell mktemp -d /data/local/tmp/srx-native-tests.XXXXXX | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $nativeRemote -notmatch '^/data/local/tmp/srx-native-tests\.[A-Za-z0-9]+$') {
+        Fail "无法创建设备 native 测试目录。"
+    }
+    try {
+        Invoke-Checked -FilePath "adb" -Arguments @("push", "$(Join-Path $buildRoot 'native')/.", "$nativeRemote/")
+        Invoke-Checked -FilePath "adb" -Arguments @("push", ".github/tests/run-zn-runtime-fixture.sh", ".github/tests/grant-storage-test-permissions.sh", "$nativeRemote/")
+        Invoke-AdbSu "sh '$nativeRemote/run-zn-runtime-fixture.sh' '$nativeRemote/zn-runtime-fixture' '/data/adb/modules/storage.redirect.x/zygisk/$ModuleAbi.so' '$nativeRemote/grant-storage-test-permissions.sh' '$nativeRemote/srx_core-tests' '$nativeRemote/srx_daemon-tests'"
+    } finally {
+        Invoke-Checked -FilePath "adb" -Arguments @("shell", "rm", "-rf", $nativeRemote)
+    }
+
     Write-Step "运行设备场景套件"
     $env:MODULE_ZIP = $moduleZip
     $env:APP_APK = $testAppApk

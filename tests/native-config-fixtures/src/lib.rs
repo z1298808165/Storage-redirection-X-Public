@@ -4,6 +4,27 @@ use std::collections::HashMap;
 
 pub mod platform {
     #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub mod mount_namespace {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/mount_namespace.rs"
+        ));
+    }
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub mod companion_socket {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/companion_socket.rs"
+        ));
+    }
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    pub mod fs {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/fs.rs"
+        ));
+    }
+    #[cfg(any(target_os = "android", target_os = "linux"))]
     pub mod inotify {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -66,6 +87,29 @@ pub mod platform {
             "/../../src/platform/unique_fd.rs"
         ));
     }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub mod hyos_request {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/lifecycle/hyos_request.rs"
+    ));
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub mod companion_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/lifecycle/companion_policy.rs"
+    ));
+}
+
+pub mod registered_process {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/mount_intent/identity.rs"
+    ));
 }
 
 pub mod domain {
