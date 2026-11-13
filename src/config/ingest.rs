@@ -447,33 +447,9 @@ fn parse_user_profile(
             }
 
             index_by_current_path.insert(current_key, user_profile.path_mappings.len());
-            user_profile.path_mappings.push(PathMapping::new(
-                resolved_current.clone(),
-                resolved_target.clone(),
-            ));
-
-            // `/data/data` 是 `/data/user/0` 的历史别名，上面按用户解析时会被归一化到后者。
-            // 两者指向同一份目录，但**同一份目录不等于同一个 vfsmount**：设备上
-            // `/data/user/0` 通常是从 `/data/data` 派生的独立 bind（`master:` slave），而挂载
-            // 按 (父 vfsmount, dentry) 索引——只挂在 `/data/user/0/<包名>/x` 上的那层，对从
-            // `/data/data/<包名>/x` 进来的访问不可见（那条路径走 `/data` 自己的 vfsmount），
-            // slave 只接收传播、不向外发送，也不会被复制过去。应用按字面路径访问时就绕过了
-            // 映射，表现为「写入返回成功、后端却没有文件」。
-            //
-            // CI 场景 35 的 `legacy-data-data-to-private` 即此形态：同一批三条映射里，配置写
-            // `/data/user/0/...` 的两条都落到后端，只有写 `/data/data/...` 的那条落进下层目录。
-            // 因此这里按字面路径再展开一条同目标的映射，让两种访问路径都能命中。
-            if let Some(alias_current) = literal_data_data_alias(current_raw, &resolved_current) {
-                let alias_key = paths::match_key(&alias_current);
-                if let std::collections::hash_map::Entry::Vacant(entry) =
-                    index_by_current_path.entry(alias_key)
-                {
-                    entry.insert(user_profile.path_mappings.len());
-                    user_profile
-                        .path_mappings
-                        .push(PathMapping::new(alias_current, resolved_target));
-                }
-            }
+            user_profile
+                .path_mappings
+                .push(PathMapping::new(resolved_current, resolved_target));
         };
 
         if let Some(map) = mappings_value.as_object() {
@@ -743,28 +719,4 @@ fn resolve_mapping_request_path_for_user(
         return String::new();
     }
     resolved
-}
-
-/// 判断是否需要按字面的 `/data/data` 请求路径再展开一条映射。
-///
-/// 只在「归一化确实换了路径」且 `/data/data` 是真实目录时返回该字面路径。取不到
-/// `/data/data` 的元信息时按真实目录处理：宁可多一条映射，也不要让配置在这条路径上
-/// 静默失效——失效的表现是应用写入成功、后端却没有文件，排查成本远高于多挂一层。
-fn literal_data_data_alias(literal: &str, resolved: &str) -> Option<String> {
-    const DATA_DATA: &str = "/data/data";
-    let literal = paths::normalize(literal);
-    if literal == resolved {
-        return None;
-    }
-    let rest = literal.strip_prefix(DATA_DATA)?;
-    if !(rest.is_empty() || rest.starts_with('/')) {
-        return None;
-    }
-    if !paths::is_absolute(&literal) || paths::has_unsafe_segments(&literal) {
-        return None;
-    }
-    match std::fs::symlink_metadata(DATA_DATA) {
-        Ok(metadata) if metadata.file_type().is_symlink() => None,
-        _ => Some(literal),
-    }
 }
