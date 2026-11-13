@@ -1,6 +1,11 @@
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+
+from test_caller_attribution_boundaries import extract_fn
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,6 +115,52 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn("is_mapping_root_passthrough", constructor)
         self.assertIn("config.is_mapping_mode_only", constructor)
         self.assertIn("event_role=request", policy)
+
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_monitor_only_eligibility_preserves_app_id_and_package_exclusions_for_all_users(self):
+        policy = read("src/redirect/policy.rs")
+        predicates = "\n".join("pub " + extract_fn(policy, name) for name in (
+            "is_system_writer_package", "is_system_writer_candidate", "is_media_provider_candidate",
+            "is_file_monitor_bridge_package", "is_file_monitor_ui_package",
+        ))
+        constants = "\n".join(line for line in policy.splitlines() if line.startswith("const "))
+        uid_source = (ROOT / "src/platform/uid.rs").as_posix()
+        fixture = f'''
+mod platform {{ include!("{uid_source}"); }}
+mod redirect {{ pub mod policy {{ {constants}\n{predicates} }} }}
+{extract_fn(read("src/config.rs"), "should_capture_unconfigured_app")}
+fn main() {{
+    for user in [0, 1, 10, 999, 21473] {{
+        for app_id in [10000, 10123, 89999] {{
+            let uid = user * platform::ANDROID_USER_ID_OFFSET + app_id;
+            assert!(should_capture_unconfigured_app("com.example.app", uid, true));
+            assert!(!should_capture_unconfigured_app("com.example.app", uid, false));
+            for package in ["", "com.storage.redirect.x", "com.google.android.providers.media.module",
+                "com.android.providers.media.module", "com.android.providers.media",
+                "com.android.providers.downloads", "com.android.mtp", "com.android.externalstorage",
+                "com.android.providers.downloads.ui", "com.android.documentsui",
+                "com.android.photopicker", "com.example.filemanager", "com.example.fileexplorer",
+                "com.example.myfiles"] {{
+                assert!(!should_capture_unconfigured_app(package, uid, true), "{{package}} {{uid}}");
+            }}
+        }}
+        for app_id in [0, 1000, 9999, 90000, 99000, 99999] {{
+            assert!(!should_capture_unconfigured_app("com.example.app", user * 100000 + app_id, true));
+        }}
+    }}
+    for uid in [-1, -10000, -10123, i32::MIN] {{
+        assert!(!should_capture_unconfigured_app("com.example.app", uid, true));
+    }}
+}}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "monitor_eligibility.rs"
+            source.write_text(fixture, encoding="utf-8")
+            binary = root / "monitor_eligibility"
+            subprocess.run(["rustc", "--edition=2024", "-A", "dead_code", str(source), "-o", str(binary)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=10)
 
     def test_monitor_watches_precede_slow_public_owner_scan(self) -> None:
         # 公共目录扫描期间仍须消费事件，避免新目录内的覆盖写入漏记。

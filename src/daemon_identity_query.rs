@@ -307,7 +307,7 @@ fn resolve_identity(pid: i32, requested_uid: Option<i32>) -> Option<((String, i3
     // 客观事实收敛，都不成立就保留 native 名——猜错比留空更糟：
     // 1. 内核进程组：应用派生的子进程继承 `uid_<uid>/pid_<发起应用>` 组，组首就是发起
     //    应用。这条对多包 uid 同样成立（issue #2 的 sau 属 uid 1000，53 个包）。
-    // 2. `packages.list`：该 uid 只对应一个安装包。
+    // 2. PackageManager：该 uid 只对应一个安装包。
     let result = if !name.contains('.') {
         if let Some(package) =
             crate::platform::proc_identity::resolve_launching_app_by_process_group(pid, proc_uid)
@@ -324,7 +324,7 @@ fn resolve_identity(pid: i32, requested_uid: Option<i32>) -> Option<((String, i3
     (crate::platform::process_start_time_ticks(pid) == Some(start_before)).then_some(result)
 }
 
-/// `uid` 在 `packages.list` 里唯一对应的包名。
+/// PackageManager 为 `uid` 返回的唯一包名。
 ///
 /// 多包 uid 返回 `None`：这条判定的用途是「把 native 进程名换算成包名」，一旦 uid 下
 /// 有多个包，任何挑选都是猜，宁可保留原始进程名让记录如实显示未知。
@@ -332,24 +332,9 @@ fn unique_package_for_uid(uid: i32) -> Option<String> {
     if uid < 0 {
         return None;
     }
-    let content = std::fs::read_to_string("/data/system/packages.list").ok()?;
-    let mut matched: Option<String> = None;
-    for line in content.lines() {
-        let mut fields = line.split_whitespace();
-        let Some(package) = fields.next() else {
-            continue;
-        };
-        let Some(line_uid) = fields.next().and_then(|v| v.parse::<i32>().ok()) else {
-            continue;
-        };
-        if line_uid != uid {
-            continue;
-        }
-        match &matched {
-            Some(existing) if existing != package => return None,
-            Some(_) => {}
-            None => matched = Some(package.to_string()),
-        }
+    let packages = crate::platform::packages::packages_for_uid(uid).ok()?;
+    if packages.len() != 1 {
+        return None;
     }
-    matched
+    packages.into_iter().next()
 }

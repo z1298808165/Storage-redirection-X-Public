@@ -4,6 +4,8 @@ pub mod allocator;
 pub mod anti_detect;
 #[path = "platform/child_wait.rs"]
 pub mod child_wait;
+#[path = "platform/companion_socket.rs"]
+pub mod companion_socket;
 #[path = "platform/elf_img.rs"]
 pub mod elf_img;
 #[path = "platform/errno.rs"]
@@ -22,8 +24,12 @@ pub mod linker;
 pub mod lru_cache;
 #[path = "platform/module_paths.rs"]
 pub mod module_paths;
+#[path = "platform/mount_namespace.rs"]
+pub mod mount_namespace;
 #[path = "platform/mountinfo.rs"]
 pub mod mountinfo;
+#[path = "platform/packages.rs"]
+pub mod packages;
 #[path = "platform/paths.rs"]
 pub mod paths;
 #[path = "platform/paths_alias.rs"]

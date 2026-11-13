@@ -1,8 +1,10 @@
 use super::companion_mount::execute_companion_mount_request;
 use super::companion_request::{CompanionMountRequest, parse_companion_mount_request};
 use crate::logging::Logger;
+use crate::platform::companion_socket;
 use crate::platform::fs;
 use libc::{SIG_IGN, SIGPIPE, c_int, signal};
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Duration;
 
@@ -18,21 +20,26 @@ pub fn run_companion_pipeline(client_fd: c_int) {
         signal(SIGPIPE, SIG_IGN);
     }
 
-    // 协议 v2：首字节为请求类型；'M' 为挂载请求（其后为旧的长度+JSON 负载），
-    // 'F' 为 fchown 请求（fd 经 SCM_RIGHTS 传递）。与挂载请求合并连接后按
-    // 类型分发，两端同仓库同版本升级，无兼容包袱。
+    // 首字节携带发送时的内核凭据：M 为长度+JSON，F 为 uid+FD，H 为固定大小身份。
     let mut request_type = [0u8; 1];
-    if !fs::read_all_timeout(client_fd, &mut request_type, READ_TIMEOUT) {
+    if !companion_socket::configure(client_fd, 10) {
+        return;
+    }
+    let Ok((1, caller, None)) = companion_socket::receive(client_fd, &mut request_type) else {
         log::error!("request type read failed");
         write_status(client_fd, 0);
         return;
-    }
+    };
     match request_type[0] {
         b'F' => {
-            handle_fchown_request(client_fd);
+            handle_fchown_request(client_fd, &caller);
         }
         b'M' => {
-            handle_mount_request(client_fd);
+            handle_mount_request(client_fd, &caller);
+        }
+        b'H' => {
+            let ok = super::hyos::handle_request(client_fd, &caller);
+            write_status(client_fd, i32::from(ok));
         }
         other => {
             log::error!("unknown request type 0x{:02x}", other);
@@ -44,68 +51,62 @@ pub fn run_companion_pipeline(client_fd: c_int) {
 /// 处理 fchown 请求：recvmsg 收 4 字节 uid 与 SCM_RIGHTS 携带的 fd，以 root
 /// 身份 fchown 后回写状态。fd 由 MP hook 在 open:create 应答前传递，文件在
 /// 应用拿到 fd 之前即为正确属主。
-fn handle_fchown_request(client_fd: c_int) {
+fn handle_fchown_request(client_fd: c_int, caller: &libc::ucred) {
     let mut uid_buffer = [0u8; 4];
-    let mut fd_buffer = [-1i32; 1];
-    // SAFETY: uid_buffer/fd_buffer 为栈上有效缓冲；msg 名称为空，iovec 指向
-    // uid_buffer；control 缓冲用于内核写入 SCM_RIGHTS。
-    let received = unsafe {
-        let iov = libc::iovec {
-            iov_base: uid_buffer.as_mut_ptr() as *mut libc::c_void,
-            iov_len: uid_buffer.len(),
-        };
-        // SAFETY: CMSG_SPACE 为纯常量计算，无运行时副作用。
-        let mut cmsg_buffer =
-            [0u8; unsafe { libc::CMSG_SPACE(std::mem::size_of::<c_int>() as u32) } as usize];
-        let mut msg: libc::msghdr = libc::msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &iov as *const libc::iovec as *mut libc::iovec,
-            msg_iovlen: 1,
-            msg_control: cmsg_buffer.as_mut_ptr() as *mut libc::c_void,
-            msg_controllen: cmsg_buffer.len(),
-            msg_flags: 0,
-        };
-        let received = libc::recvmsg(client_fd, &mut msg, 0);
-        if received < 0 {
-            false
-        } else {
-            let mut received_fd = -1i32;
-            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-            while !cmsg.is_null() {
-                if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                    let available = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
-                        / std::mem::size_of::<c_int>();
-                    if available >= 1 {
-                        std::ptr::copy_nonoverlapping(
-                            libc::CMSG_DATA(cmsg) as *const c_int,
-                            fd_buffer.as_mut_ptr(),
-                            1,
-                        );
-                        received_fd = fd_buffer[0];
-                    }
-                }
-                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
-            }
-            let _ = received_fd;
-            received_fd >= 0
-        }
-    };
-    if !received {
+    let Ok((received, sender, Some(file))) = companion_socket::receive(client_fd, &mut uid_buffer)
+    else {
         log::error!("fchown request fd receive failed");
+        write_status(client_fd, 0);
+        return;
+    };
+    if received != uid_buffer.len() || sender.pid != caller.pid || sender.uid != caller.uid {
         write_status(client_fd, 0);
         return;
     }
     let uid = i32::from_ne_bytes(uid_buffer);
-    if uid < 0 {
+    let authorized = caller.uid == 0
+        || i32::try_from(caller.uid).ok().is_some_and(|uid| {
+            crate::platform::packages::packages_for_uid(uid)
+                .ok()
+                .is_some_and(|packages| {
+                    packages
+                        .iter()
+                        .any(|package| crate::redirect::policy::is_system_writer_package(package))
+                })
+        });
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: stat 指向可写结构，file 在请求处理期间保持打开。
+    let stat_ok = unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } == 0;
+    let target = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok();
+    let package = if stat_ok {
+        // SAFETY: fstat 成功写满结构。
+        target
+            .as_ref()
+            .and_then(|path| path.to_str())
+            .and_then(|path| {
+                super::companion_policy::chown_target_package(
+                    path,
+                    uid,
+                    // SAFETY: 此分支仅在 fstat 成功写满结构后执行。
+                    unsafe { stat.assume_init() }.st_mode,
+                )
+            })
+    } else {
+        None
+    };
+    let target_valid = package.is_some_and(|package| {
+        crate::platform::packages::uid_for_package(&package, uid / 100000)
+            .ok()
+            .flatten()
+            == Some(uid)
+    });
+    if !authorized || !target_valid {
         log::error!("fchown request uid invalid uid={}", uid);
         write_status(client_fd, 0);
         return;
     }
-    // SAFETY: fd_buffer[0] 为对端经 SCM_RIGHTS 传入的本进程 fd，fchown 后关闭。
-    let result = unsafe { libc::fchown(fd_buffer[0], uid as u32, u32::MAX) };
-    // SAFETY: 同上，fd 归本进程所有。
-    unsafe { libc::close(fd_buffer[0]) };
+    // SAFETY: file 独占接收到的 FD，所有返回路径均由 OwnedFd 关闭。
+    let result = unsafe { libc::fchown(file.as_raw_fd(), uid as u32, u32::MAX) };
     if result == 0 {
         log::info!("companion fchown ok uid={}", uid);
     } else {
@@ -128,7 +129,7 @@ fn handle_fchown_request(client_fd: c_int) {
 /// 而非 exe 判定，排除 daemon fork 出来的 srx_fuse_host/srx_fuse 子进程（它们
 /// exe 同为 srx_daemon 但 comm 已被 prctl 改名）。拉起走 spawn 脱离，daemon
 /// 自行孵化看门狗并获取实例锁，companion 不参与后续管理。
-fn ensure_daemon_alive() {
+pub(super) fn ensure_daemon_alive() {
     use std::fs;
     use std::os::fd::AsRawFd;
 
@@ -251,7 +252,7 @@ fn daemon_comm_matches(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
-fn handle_mount_request(client_fd: c_int) {
+fn handle_mount_request(client_fd: c_int, caller: &libc::ucred) {
     let payload_len = match read_payload_length(client_fd) {
         Some(len) => len,
         None => {
@@ -287,6 +288,23 @@ fn handle_mount_request(client_fd: c_int) {
             return;
         }
     };
+
+    if caller.uid != 0 && caller.pid == request.pid && caller.uid == request.uid as u32 {
+        // post-specialize 的延后请求来自应用 UID，路径规则必须从 root 配置重新生成。
+        let ok = super::hyos::apply_for_caller(&request.package_name, "zygisk", caller);
+        write_status(client_fd, i32::from(ok));
+        return;
+    }
+    if !super::companion_policy::mount_caller_matches(caller, request.pid) {
+        log::warn!(
+            "mount request caller rejected pid={} uid={} target={}",
+            caller.pid,
+            caller.uid,
+            request.pid
+        );
+        write_status(client_fd, 0);
+        return;
+    }
 
     if !request.package_name.is_empty() {
         Logger::init(Some(&request.package_name));
@@ -354,10 +372,9 @@ fn read_payload_data(client_fd: c_int, payload_len: u32) -> Option<String> {
 /// 协议纪律：**每一个**分支（含"还没走到挂载就退出"的早退）都写，保持「有请求就有应答」
 /// 这条协议不破。但对 `'M'`（挂载请求）它已是尽力而为——应用侧发完就关闭连接，那条连接
 /// 不存在于应用进程里了（SELinux 域迁移让应用侧永远读不到，见 `mount_request` 模块头注释），
-/// 所以 `EPIPE` 是常态、只记 debug。真正的消费者是 `'F'`（fchown）：它在应用域里新建连接，
-/// 同域读写不受域迁移影响。
+/// 所以 `EPIPE` 是常态、只记 debug。F 与 H 在特化后新建连接，同步读取该状态。
 pub(crate) fn write_status(client_fd: c_int, status: i32) -> bool {
-    fs::write_all(client_fd, &status.to_ne_bytes())
+    companion_socket::send(client_fd, &status.to_ne_bytes(), None)
 }
 
 fn log_mount_request(request: &CompanionMountRequest) {

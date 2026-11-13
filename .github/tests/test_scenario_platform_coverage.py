@@ -41,12 +41,19 @@ check_file_missing() { echo "missing:$1"; test "$1" != "${FAIL_LABEL:-}"; }
         expected_writes = [
             "write:relative-android-data-to-public",
             "write:absolute-data-user-to-public",
+            "write:absolute-legacy-alias-to-public",
             "write:user-id-data-user-to-private",
+            "write:user-id-legacy-alias-to-private",
             "write:legacy-data-data-to-private",
+            "write:legacy-canonical-alias-to-private",
             "write:public-to-absolute-private",
         ]
         for arch, api in (("x86_64", 33), ("x86_64", 35), ("x86_64", 36), ("x86_64", 37), ("aarch64", 33)):
-            for fail_label in ("", "scenario-35-relative-public", "scenario-35-public-private-shadow"):
+            for fail_label in (
+                "", "scenario-35-relative-public", "scenario-35-absolute-alias-public",
+                "scenario-35-user-id-alias-private", "scenario-35-legacy-alias-private",
+                "scenario-35-public-private-shadow",
+            ):
                 with self.subTest(arch=arch, api=api, fail_label=fail_label):
                     result = subprocess.run(
                         [BASH, "-eu", "-c", script],
@@ -58,13 +65,18 @@ check_file_missing() { echo "missing:$1"; test "$1" != "${FAIL_LABEL:-}"; }
                     lines = result.stdout.splitlines()
                     writes = [line for line in lines if line.startswith("write:")]
                     expected = [] if skipped else expected_writes
-                    if fail_label == "scenario-35-relative-public":
-                        expected = expected[:1]
+                    stop_after = {
+                        "scenario-35-relative-public": 1,
+                        "scenario-35-absolute-alias-public": 3,
+                        "scenario-35-user-id-alias-private": 5,
+                        "scenario-35-legacy-alias-private": 7,
+                    }.get(fail_label, len(expected))
+                    expected = expected[:stop_after]
                     self.assertEqual(expected, writes)
                     self.assertEqual(not skipped and not fail_label, "media:mapped-mediastore-target" in lines)
                     if not skipped and not fail_label:
-                        self.assertEqual(6, sum(line.startswith("exists:") for line in lines))
-                        self.assertEqual(7, sum(line.startswith("missing:") for line in lines))
+                        self.assertEqual(9, sum(line.startswith("exists:") for line in lines))
+                        self.assertEqual(10, sum(line.startswith("missing:") for line in lines))
 
     def test_supported_versions_enter_hot_reload_assertions(self) -> None:
         source = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")

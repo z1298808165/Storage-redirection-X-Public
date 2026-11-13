@@ -139,20 +139,22 @@ fn is_shared_media_subtree_write_path(storage_path: &str) -> bool {
 /// 与 `wlog` 全部被拒，`wlog` 的 mmap 文件创建失败后继续使用旧映射即 SIGBUS，
 /// 图片大图加载失败同源）。这里把路径属主包名解析为 uid，与本会话 uid 一致即放行。
 fn is_same_uid_private_write_path(storage_path: &str, session_uid: i32) -> bool {
+    if paths::extract_user_id_from_storage_path(storage_path) != session_uid / 100000 {
+        return false;
+    }
     let owner = paths::extract_android_private_path_owner(storage_path);
     if owner.is_empty() || !paths::is_valid_package_name(&owner) {
         return false;
     }
-    package_uid(&owner).is_some_and(|uid| uid == session_uid)
+    package_uid(&owner).is_some_and(|app_id| app_id % 100000 == session_uid % 100000)
 }
 
-/// `/data/system/packages.list` 的包名→uid 缓存（以文件 mtime+长度为版本键）。
 type PackageUidCache = Option<((u64, u64), HashMap<String, i32>)>;
 
-fn package_uid(package: &str) -> Option<i32> {
-    const PACKAGES_LIST: &str = "/data/system/packages.list";
+/// 宿主单独缓存 PM 生成的快照，不继承 daemon 使用的共享 UID 锁。
+pub(super) fn package_uid(package: &str) -> Option<i32> {
     static CACHE: Lazy<Mutex<PackageUidCache>> = Lazy::new(|| Mutex::new(None));
-    let meta = std::fs::metadata(PACKAGES_LIST).ok()?;
+    let meta = std::fs::metadata(module_paths::SYSTEM_WRITER_UIDS_FILE).ok()?;
     let version = (
         meta.modified()
             .ok()?
@@ -163,18 +165,11 @@ fn package_uid(package: &str) -> Option<i32> {
     );
     let mut guard = CACHE.lock().ok()?;
     if guard.as_ref().is_none_or(|(key, _)| *key != version) {
-        let content = std::fs::read_to_string(PACKAGES_LIST).ok()?;
-        let mut map = HashMap::new();
-        for line in content.lines() {
-            let mut fields = line.split_whitespace();
-            let Some(name) = fields.next() else {
-                continue;
-            };
-            let Some(uid) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
-                continue;
-            };
-            map.insert(name.to_string(), uid);
-        }
+        let content = std::fs::read_to_string(module_paths::SYSTEM_WRITER_UIDS_FILE).ok()?;
+        let map = content
+            .lines()
+            .filter_map(crate::redirect::policy::parse_line)
+            .collect();
         *guard = Some((version, map));
     }
     guard.as_ref()?.1.get(package).copied()

@@ -2225,6 +2225,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             artifact = test_flow[test_flow.index("          path: |") :]
 
             self.assertIn("bash .github/scripts/build_test_flow_runtime.sh", build)
+            self.assertIn("build/test-flow/native/*", source)
             self.assertIn("SRT_FAIL_FAST: 1", test_flow)
             self.assertIn("SRT_SKIP_FINAL_CLEANUP: 1", test_flow)
             self.assertIn("SRT_SCENARIO_TIMEOUT_SECONDS: 300", test_flow)
@@ -2232,9 +2233,15 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 self.assertIn(path, artifact)
 
         script = read(".github/scripts/build_test_flow_runtime.sh")
-        self.assertIn('cargo test --target "$TARGET_TRIPLE" --no-run', script)
+        self.assertIn('bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" build/test-flow/native', script)
         self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
         self.assertIn(":storageRedirectTestApp:assembleDebug", script)
+        native_build = read(".github/scripts/build_native_tests.sh")
+        self.assertIn('cargo test -p srx_core --target "$target" --no-run --message-format=json', native_build)
+        self.assertIn('item.get("executable")', native_build)
+        self.assertIn('bash .github/tests/run-native-tests.sh build/test-flow/native "$MODULE_ABI"', read(".github/tests/run-android-test-flow.sh"))
+        self.assertIn("run-zn-runtime-fixture.sh", read("scripts/verify-test-flow.ps1"))
+        self.assertIn('bash .github/tests/run-native-tests.sh "$BUILD_DIR/native" "$MODULE_ABI"', read("scripts/verify-test-flow.sh"))
 
     def test_every_job_is_bounded_and_build_jobs_wait_for_quality(self) -> None:
         # 缺少 timeout-minutes 的 job 会用 GitHub 的 6 小时默认值，一次挂起就吃满额度

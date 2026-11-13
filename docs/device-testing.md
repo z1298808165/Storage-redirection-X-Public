@@ -33,7 +33,7 @@ RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
 .\scripts\verify-test-flow.ps1
 ```
 
-该入口先在 WSL 中执行同一构建和测试阶段，并强制关闭设备场景；成功后由 Windows PowerShell 使用本机 ADB 安装产物并运行设备套件。默认会安装模块并重启设备；设置 `$env:SRX_TEST_INSTALL_MODULE = "0"` 可跳过模块安装和重启。ADB 不会转发到 WSL。
+该入口先在 WSL 中执行同一构建和测试阶段，并强制关闭设备场景；成功后由 Windows PowerShell 使用本机 ADB 安装产物，依次执行 native 测试和设备场景。默认会安装模块并重启设备；设置 `$env:SRX_TEST_INSTALL_MODULE = "0"` 可跳过模块安装和重启。ADB 不会转发到 WSL。
 
 另行运行可在主机执行的 Rust fixture 测试：
 
@@ -48,6 +48,7 @@ CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
+- native Rust 单元测试与 ZN 回调夹具通过，输出 `ZN_FIXTURE_SUMMARY` 且 `failed=0`。
 - 当前模块跑完 scenario 1-42。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - PowerShell 入口在应用停止后确认进程退出及旧独占 FUSE 子进程回收；死进程的状态账本由 daemon 按五分钟节流异步清理，不以账本文件立即消失作为退出判据。
@@ -108,6 +109,20 @@ adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debu
 脚本回读权限及 AppOps 状态；授权失败时在修改测试配置和运行场景前终止，并释放设备锁。系统特权权限不通过 `pm grant` 补入。PowerShell 下载服务会验证 Python 解释器可运行且版本至少为 3.7，避免误用未安装解释器的 Windows 应用执行别名。
 
 ## 运行完整回归
+
+### Native 单元测试与 ZN 回调夹具
+
+构建入口通过 `.github/scripts/build_native_tests.sh` 将 Cargo 本次报告的 `srx_core`、`srx_daemon` 测试可执行文件和 `zn-runtime-fixture` 放入 `build/test-flow/native/`。本地完整入口与 CI/Release 在场景开始前将它们推送到设备；Android Rust 测试在设备上执行，不仅检查能否编译。
+
+`run-zn-runtime-fixture.sh` 使用与场景套件相同的设备锁，先准备测试 APP 存储权限，再备份配置、运行 Rust 测试和回调用例。夹具加载已安装模块的 `.so`，调用实际导出的 `zn_module` 和 `zn_companion_module`，以测试 APP UID 执行特化回调，验证直通、映射物理落点、空映射、全隔离、共享 namespace 拒绝、未知包拒绝、连接失败、注册后运行时禁用、禁用配置、运行中配置重载与监视记录。结束时恢复配置并清理本次目录；预期拒绝会按预期退出码记为通过。
+
+该夹具用模拟 API 表调用真实模块回调，在 root 测试进程中建立 namespace 后降 UID/GID；它不验证 Hyos 加载器本身、应用 SELinux 域或设备是否提供独立 namespace。配置视图要求目标进程独占挂载 namespace；无法满足时回调以 126 退出，避免在共享 spawner 视图中挂载。未配置且未启用监视时允许直通。
+
+模块在 `system_server` 中始终安装包事件接收器与查询端，自动配置新应用仍由模板设置控制。Android 13 及更新版本按 PackageManager 状态版本使查询缓存失效；Android 12 仅在包快照有效时按快照对象身份缓存，失效或重建期间直接查询。包事件也会使缓存失效；下次请求时再取当前 PM 状态。companion 身份校验与 daemon 进程扫描不依赖 shell 异步生成的 UID 文件。连接验证 UID 与 SELinux 域，请求受两秒截止点和回复大小上限约束；服务未就绪或查询失败时不使用旧版本缓存身份。
+
+`srx_daemon package-query` 输出完整用户 UID；`package-query P <user> <package>` 查询单包，`package-query U <uid>` 查询共享 UID 的全部包。shell 将全量结果归一为 appId，原子更新 hook 使用的 `system_writer_uids.list`。FUSE 热路径读取该快照；它不是 companion 的授权依据。系统服务重启后随注入重建查询端。
+
+### 应用场景
 
 完整回归优先使用本仓库内置脚本。bash 版是 CI 使用的主入口：
 

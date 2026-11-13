@@ -33,7 +33,6 @@
 //! 执行方自己记（`perf companion mount ... ok=` / `companion fuse view unavailable
 //! reason=`），两边各自诚实。
 
-use crate::platform::fs;
 use crate::zygisk::abi;
 
 /// 发送挂载请求（协议 v2：首字节 `'M'` + 4 字节长度 + JSON 负载），发送后立即关闭连接。
@@ -55,9 +54,10 @@ pub(crate) fn send_mount_request(api: Option<&abi::Api>, payload: &str) -> bool 
     }
 
     let payload_len = payload.len() as u32;
-    let sent = fs::write_all(fd, b"M")
-        && fs::write_all(fd, &payload_len.to_ne_bytes())
-        && fs::write_all(fd, payload.as_bytes());
+    let sent = crate::platform::companion_socket::configure(fd, 10)
+        && crate::platform::companion_socket::send(fd, b"M", None)
+        && crate::platform::companion_socket::send(fd, &payload_len.to_ne_bytes(), None)
+        && crate::platform::companion_socket::send(fd, payload.as_bytes(), None);
     // 立刻关闭：AF_UNIX 流式 socket 上，已写出的字节留在对端接收队列里，关闭本端不影响
     // 对端读取（对端读完才会看到 EOF）。保留读端毫无意义且有害，理由见模块头注释。
     // SAFETY: fd 是本次 connect_companion 得到的合法描述符，只在此处关闭一次。

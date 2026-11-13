@@ -503,7 +503,10 @@ fn build_hooker_dex(target_os: &str) {
 
     let receiver_source = java_src_dir.join("org/srx/hook/PackageEventReceiver.java");
     match compile_dex_sources(
-        &[receiver_source],
+        &[
+            receiver_source,
+            java_src_dir.join("org/srx/hook/PackageQuery.java"),
+        ],
         &out_dir,
         "package_event_receiver_classes",
         &receiver_dex_out,

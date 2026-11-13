@@ -334,6 +334,7 @@ function Build-ModuleZip {
     $srxctlPath = Join-Path $PackageDir "bin\srxctl"
     Get-ChildItem -LiteralPath $PackageDir -Recurse -File | Where-Object {
         $_.Extension -in ".sh", ".prop", ".rule" -or
+        $_.Name -eq "zn_modules.txt" -or
         $_.FullName.Contains("\META-INF\") -or
         $_.FullName -eq $srxctlPath
     } | ForEach-Object {
@@ -350,6 +351,7 @@ function Build-ModuleZip {
             $relativePath = $_.FullName.Substring($pkgRoot.Length).TrimStart([char]92, [char]47).Replace([char]92, [char]47)
             $keepUncompressed =
                 $_.Extension -in @(".sh", ".prop", ".rule") -or
+                $relativePath -eq "zn_modules.txt" -or
                 $relativePath.StartsWith("META-INF/", [System.StringComparison]::Ordinal) -or
                 $relativePath -eq "bin/srxctl"
             $compression = if ($keepUncompressed) {
@@ -381,7 +383,7 @@ function Test-ModuleZip {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
         $names = @($zip.Entries | ForEach-Object { $_.FullName })
-        foreach ($required in @("LICENSE", "COPYING", "module.prop", "customize.sh", "zygisk/arm64-v8a.so", "bin/srx_daemon", "webroot/index.html")) {
+        foreach ($required in @("LICENSE", "COPYING", "module.prop", "customize.sh", "zn_modules.txt", "zygisk/arm64-v8a.so", "bin/srx_daemon", "webroot/index.html")) {
             if ($names -notcontains $required) {
                 Fail "Zip 文件缺失必需的条目: $required"
             }

@@ -162,6 +162,7 @@ fn map_mapping_chain(path: &str, mappings: &[PathMapping], reverse: bool) -> Str
 
 /// 将链式路径规则展开为独立挂载点，保留直接入口并补齐每个父映射下的子入口。
 /// 所有最终目标仍由原规则按最长前缀解析，沿用循环检测和链深度边界。
+/// 输入须已按用户解析；主用户私有目录同时生成 `/data/data` 挂载入口。
 pub fn expand_namespace_path_mappings(mappings: &[PathMapping]) -> Vec<PathMapping> {
     let mut expanded = Vec::new();
     let mut seen = HashSet::new();
@@ -196,6 +197,17 @@ pub fn expand_namespace_path_mappings(mappings: &[PathMapping]) -> Vec<PathMappi
             }
         }
     }
+    // 传播隔离后两个私有目录入口的子挂载互不传播，不能只挂规范入口。
+    let legacy_entries: Vec<_> = expanded
+        .iter()
+        .filter_map(|mapping| {
+            let suffix = mapping.request_path.strip_prefix("/data/user/0/")?;
+            let request = format!("/data/data/{suffix}");
+            seen.insert(paths::match_key(&request))
+                .then(|| PathMapping::new(request, mapping.final_path.clone()))
+        })
+        .collect();
+    expanded.extend(legacy_entries);
     expanded
 }
 

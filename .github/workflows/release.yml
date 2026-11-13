@@ -462,6 +462,7 @@ jobs:
           compression-level: 0
           path: |
             build/test-flow/assets/*.zip
+            build/test-flow/native/*
             tests/storage-redirect-test/app/build/outputs/apk/**/*.apk
 
       - name: Upload release test-flow unit test reports

@@ -42,6 +42,7 @@ public final class PackageEventReceiver extends BroadcastReceiver {
       return false;
     }
     File logsDir = new File(moduleDir, "logs");
+    PackageQuery.install(moduleDir);
     eventFile = new File(logsDir, "package_events.log");
     readyFile = new File(logsDir, ".package_event_receiver_ready");
 
@@ -145,6 +146,7 @@ public final class PackageEventReceiver extends BroadcastReceiver {
     if (!isSafePackageName(packageName)) {
       return;
     }
+    PackageQuery.invalidate();
 
     boolean replacing = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false);
     int uid = intent.getIntExtra(Intent.EXTRA_UID, -1);

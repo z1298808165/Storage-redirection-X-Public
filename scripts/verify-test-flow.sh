@@ -45,7 +45,7 @@ fi
 mkdir -p "$BUILD_DIR/module-bin" "$BUILD_DIR/assets"
 
 echo "==> Build Rust test binaries for $TARGET_TRIPLE"
-cargo test --target "$TARGET_TRIPLE" --no-run
+bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" "$BUILD_DIR/native"
 
 echo "==> Build SRX module binaries for $TARGET_TRIPLE"
 cargo build --target "$TARGET_TRIPLE" --release
@@ -115,6 +115,9 @@ verify_module_runtime_state
 
 echo "==> Install test APK"
 adb install -r "$TEST_APP_APK"
+
+echo "==> Run native unit and ZN callback tests"
+bash .github/tests/run-native-tests.sh "$BUILD_DIR/native" "$MODULE_ABI"
 
 echo "==> Run device scenario suite"
 MODULE_ZIP="$MODULE_ZIP" APP_APK="$TEST_APP_APK" \

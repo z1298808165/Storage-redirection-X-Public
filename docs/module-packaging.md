@@ -23,6 +23,7 @@ module.zip
 ├── service.sh
 ├── uninstall.sh
 ├── sepolicy.rule
+├── zn_modules.txt
 ├── service.d/
 │   ├── app_status.sh
 │   ├── boot.sh
@@ -44,142 +45,45 @@ module.zip
 5. 生成 `module.prop`，版本号按 [构建流程](build-process.md#版本号规则) 从 `Cargo.toml` 基础版本和当前构建序号解析。
 6. 打包为 zip。更新日志保留在 CI 记录或 GitHub Release 正文中，不写入刷入包。
 
+`zn_modules.txt` 选择 `/system_ext/bin/hyos_spawner`，并声明 companion 与同 ABI 的 `zygisk/<abi>.so`。shell 打包入口将模板的 arm64 路径替换为目标 ABI，PowerShell 入口固定打包 arm64。该库同时导出 ZN API v4 的 `zn_module`、`zn_companion_module`，在 Hyos runtime v1 注册特化回调；回调通过 companion 按 root 配置建立应用存储视图，不在特化子进程中初始化 Java/native hook。测试覆盖与运行边界见 [设备侧测试说明](device-testing.md#native-单元测试与-zn-回调夹具)。
+
 ## 打包注意事项
 
 - **zip 内路径必须使用正斜杠 `/`**。Windows 的 `Compress-Archive` 或 `ZipFile.CreateFromDirectory` 会使用反斜杠 `\`，Android recovery/KernelSU 无法识别。需要使用 `ZipArchive.CreateEntry` 手动指定正斜杠路径。
-- **安装关键文本条目保持不压缩**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对压缩文本条目的兼容性不稳定，可能把脚本解成 0 字节。因此 `*.sh`、`*.prop`、`*.rule`、`META-INF/*` 和 `bin/srxctl` 在 Linux/macOS 使用 Store，在 PowerShell 使用 `CompressionLevel.NoCompression`；体积较大的 native 二进制、WebUI 和其它资源使用 Deflate 压缩。
+- **安装关键文本条目保持不压缩**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对压缩文本条目的兼容性不稳定，可能把脚本解成 0 字节。因此 `*.sh`、`*.prop`、`*.rule`、`zn_modules.txt`、`META-INF/*` 和 `bin/srxctl` 在 Linux/macOS 使用 Store，在 PowerShell 使用 `CompressionLevel.NoCompression`；体积较大的 native 二进制、WebUI 和其它资源使用 Deflate 压缩。
 - **shell 脚本必须使用 Unix 换行符 (LF)**。Windows 编辑器可能保存为 CRLF，导致 `\r` 被 shell 解释为命令的一部分而报错。
 - **shell 脚本不能有 UTF-8 BOM**。BOM (`EF BB BF`) 会导致 shebang 行无法识别。
 - **不要包含 `config/`、`logs/`、`tmp/` 目录**。这些是运行时生成的，由 manager app 管理。
 
 ## Linux/macOS 打包示例
 
+在仓库根目录使用维护中的打包入口；第六个参数选择 ABI，arm64 默认可省略，x86_64 必须显式传入：
+
 ```bash
-#!/bin/bash
 while IFS='=' read -r key value; do
   case "$key" in
     version) VERSION="$value" ;;
     version_code) VERSION_CODE="$value" ;;
   esac
-done < <(python .github/scripts/resolve_build_version.py --include-dirty --format github)
-OUT_DIR="build/module"
-rm -rf "$OUT_DIR"
-
-# 复制模板
-cp -r assets/zygisk_module/* "$OUT_DIR/"
-cp LICENSE "$OUT_DIR/LICENSE"
-cp COPYING "$OUT_DIR/COPYING"
-
-# 复制 so 和 daemon
-mkdir -p "$OUT_DIR/zygisk"
-cp target/aarch64-linux-android/release/libsrx_core.so "$OUT_DIR/zygisk/arm64-v8a.so"
-mkdir -p "$OUT_DIR/bin"
-cp target/aarch64-linux-android/release/srx_daemon "$OUT_DIR/bin/srx_daemon"
-chmod 755 "$OUT_DIR/bin/srx_daemon"
-
-# 生成 module.prop
-cat > "$OUT_DIR/module.prop" << EOF
-id=storage.redirect.x
-name=Storage Redirect X
-version=$VERSION
-versionCode=$VERSION_CODE
-author=Storage Redirect Team
-description=Storage Redirect X module.
-EOF
-
-# 打包（关键安装文本使用 Store，其余条目使用 Deflate）
-cd "$OUT_DIR"
-find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' \) -exec dos2unix {} \;
-OUTPUT_ZIP="../../storage.redirect.x-v${VERSION}.zip"
-rm -f "$OUTPUT_ZIP"
-zip -9 -r "$OUTPUT_ZIP" . -x '*.sh' '*.prop' '*.rule' 'META-INF/*' 'bin/srxctl'
-find . -type f \( -name '*.sh' -o -name '*.prop' -o -name '*.rule' -o -path './META-INF/*' -o -path './bin/srxctl' \) \
-  -print | zip -0 "$OUTPUT_ZIP" -@
+done < <(python3 .github/scripts/resolve_build_version.py --include-dirty --format github) # 读取仓库版本
+bash .github/scripts/package_module.sh "$VERSION" "$VERSION_CODE" ./target/aarch64-linux-android/release/libsrx_core.so ./target/aarch64-linux-android/release/srx_daemon "build/storage.redirect.x-v${VERSION}.zip" arm64-v8a
 ```
 
 ## Windows PowerShell 打包示例
 
-下例可在没有 `bash`、`zip`、`dos2unix` 的 Windows 环境中，将已构建的 Android 产物打成可刷入 zip。按本地构建流程在 WSL 编译后，可用 `scripts/build-local-module.ps1 -SkipBuild -NoAdb` 只做打包。
+使用 WSL 已构建的 arm64 产物，只执行打包与 zip 校验：
 
 ```powershell
-$versionData = py .github\scripts\resolve_build_version.py --include-dirty --format json | ConvertFrom-Json
-$version = $versionData.version
-$versionCode = [int]$versionData.version_code
-$templateDir = "assets\zygisk_module"
-$soFile = "target\aarch64-linux-android\release\libsrx_core.so"
-$daemonFile = "target\aarch64-linux-android\release\srx_daemon"
-$pkgDir = "build\module"
-$zipPath = "build\storage.redirect.x-v${version}.zip"
-
-# 准备目录
-Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue
-Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
-Copy-Item -Recurse $templateDir $pkgDir
-Copy-Item LICENSE "$pkgDir\LICENSE"
-Copy-Item COPYING "$pkgDir\COPYING"
-New-Item -ItemType Directory -Path "$pkgDir\zygisk" -Force | Out-Null
-Copy-Item $soFile "$pkgDir\zygisk\arm64-v8a.so"
-New-Item -ItemType Directory -Path "$pkgDir\bin" -Force | Out-Null
-Copy-Item $daemonFile "$pkgDir\bin\srx_daemon"
-Remove-Item -Force "$pkgDir\action.sh" -ErrorAction SilentlyContinue
-
-# 生成 module.prop。必须使用 LF，避免 id 被 KernelSU 读成 storage.redirect.x\r。
-$moduleProp = "id=storage.redirect.x`nname=Storage Redirect X`nversion=v${version}`nversionCode=${versionCode}`nauthor=Kindness-Kismet`ndescription=Storage Redirect X Core Module`nwebui=1`n"
-[System.IO.File]::WriteAllText("$pkgDir\module.prop", $moduleProp, [System.Text.UTF8Encoding]::new($false))
-
-# 修复换行符和 BOM
-$textFiles = Get-ChildItem -Recurse $pkgDir -File | Where-Object {
-    $_.Extension -in ".sh", ".prop", ".rule" -or $_.FullName -like "*\META-INF\*"
-}
-foreach ($file in $textFiles) {
-    $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        $bytes = $bytes[3..($bytes.Length - 1)]
-    }
-    $content = [System.Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n", "`n")
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($file.FullName, $content, $utf8NoBom)
-}
-
-# 打包（使用正斜杠路径，并让安装关键文本保持 no compression）
-Add-Type -AssemblyName System.IO.Compression
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
-$pkgRoot = (Resolve-Path $pkgDir).Path
-Get-ChildItem -Recurse $pkgDir -File | ForEach-Object {
-    $relativePath = $_.FullName.Substring($pkgRoot.Length).TrimStart([char]92).Replace([char]92, [char]47)
-    $keepUncompressed = $_.Extension -in @(".sh", ".prop", ".rule") -or
-        $relativePath.StartsWith("META-INF/") -or $relativePath -eq "bin/srxctl"
-    $compression = if ($keepUncompressed) {
-        [System.IO.Compression.CompressionLevel]::NoCompression
-    } else {
-        [System.IO.Compression.CompressionLevel]::Optimal
-    }
-    $entry = $zip.CreateEntry($relativePath, $compression)
-    $entryStream = $entry.Open()
-    $fileStream = [System.IO.File]::OpenRead($_.FullName)
-    $fileStream.CopyTo($entryStream)
-    $fileStream.Close()
-    $entryStream.Close()
-}
-$zip.Dispose()
-
-# 验证关键 entry 名必须使用 /，不能出现 zygisk\arm64-v8a.so。
-$zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-try {
-    $names = $zip.Entries | Select-Object -ExpandProperty FullName
-    if ($names -notcontains "zygisk/arm64-v8a.so") { throw "missing zygisk/arm64-v8a.so" }
-    if ($names | Where-Object { $_ -match "\\" }) { throw "zip contains backslash entry" }
-} finally {
-    $zip.Dispose()
-}
+.\scripts\build-local-module.ps1 -SkipBuild -NoAdb
 ```
+
+该入口统一处理许可证、模块版本、正斜杠条目、文本编码及压缩方式；布局规则由脚本维护。
 
 ## Windows PowerShell 打包注意事项
 
 - 如果 PATH 中没有 `bash`，请使用上文的 PowerShell 打包流程，不要尝试运行 `.github/scripts/package_module.sh`。
 - 不要依赖 `Compress-Archive` 或 `ZipFile.CreateFromDirectory` 创建可刷入的模块 zip。它们可能生成 `zygisk\arm64-v8a.so` 之类的条目；KernelSU 随后会解压出名称中包含反斜杠的文件，安装器则会报告 `missing arm64-v8a lib path=.../zygisk/arm64-v8a.so`。
-- 压缩前，请将 `.sh`、`.prop`、`.rule` 和 `META-INF` 文件转换为不带 BOM 的 UTF-8 编码，并使用 LF 换行。CRLF 或 BOM 可能导致设备上的 shell 执行失败。
+- 压缩前，请将 `.sh`、`.prop`、`.rule`、`zn_modules.txt` 和 `META-INF` 文件转换为不带 BOM 的 UTF-8 编码，并使用 LF 换行。CRLF 或 BOM 可能导致设备上的 shell 执行失败。
 - `module.prop` 必须采用不带 BOM 的 UTF-8 编码，并使用 LF 换行。如果 `id=storage.redirect.x` 以 `\r` 结尾，KernelSU 可能会创建名为 `storage.redirect.x\r` 的第二个模块目录。
 - 刷入包应移除 `action.sh`，但保留 `service.d/debug_collectors.sh`、`service.d/media_state.sh` 和 `service.d/app_status.sh`。这些脚本只会在运行时打开“详细日志”后开始记录。
 - 必需的二进制文件布局为：`libsrx_core.so` 位于 `zygisk/arm64-v8a.so`，`srx_daemon` 位于 `bin/srx_daemon`。

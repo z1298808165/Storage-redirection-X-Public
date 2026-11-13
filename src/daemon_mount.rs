@@ -359,22 +359,14 @@ fn mount_targets_present_with(content: &str, targets: &[String], request: &Mount
 ///
 /// 代表路径统一取 `/storage/emulated/<user>` 视图；`/data/media/<user>`、`/sdcard`、
 /// `/storage/self/primary`、`/storage/emulated/legacy` 以及各 `/mnt/<view>/.../emulated/<user>`
-/// 都经 [`paths::storage_alias_roots_for_user`] 折算到同一代表，`/data/data` 按历史别名折算到
-/// `/data/user/0`。
+/// 都经 [`paths::storage_alias_roots_for_user`] 折算到同一代表。
+/// 私有数据目录的 bind 别名分别计数，避免漏判入口丢失或卸载另一入口的挂载。
 ///
 /// 只在"组内任一别名在场即健康"的口径下使用：别名之间的差异属于正常 namespace 视图差异，
 /// 不能当作挂载失效。这与 [`mount_target_count_from_mountinfo`] 共用同一折算，保证
 /// "期望分组"与"在场分组"口径一致。
 fn canonical_health_target(target: &str, storage_root: &str, alias_roots: &[String]) -> String {
     let target = paths::normalize_syntax(target);
-    let target = if target == "/data/data" {
-        "/data/user/0".to_string()
-    } else if let Some(rest) = target.strip_prefix("/data/data/") {
-        format!("/data/user/0/{}", rest)
-    } else {
-        target
-    };
-
     // `/sdcard` 是对 `/storage/emulated/<user>` 的对称链接（`paths::normalize` 同样会折叠它），
     // 但别名根清单里没有这一项：这里显式折算，避免记录到的 `/sdcard/...` 目标自成一组。
     if target == "/sdcard" {
@@ -1375,15 +1367,9 @@ fn preattach_skip_reason(request: &MountRequest) -> HostSessionSkip {
     HostSessionSkip::AttachGateClosed
 }
 
-/// 请求是否携带任何策略规则（放行/排除/映射/沙箱/只读任一非空）。
-///
-/// 宿主接入由策略规则驱动：无规则的请求接入宿主只会得到 deny_all（未配置
+/// 只为带有重定向规则或显式启用监视的请求预接宿主视图。
 fn shared_host_preattach_candidate(request: &MountRequest, scoped_fuse_roots: &[String]) -> bool {
-    // 无任何策略规则的请求不预接宿主视图（2026-10-29 issue #2 test13 实测）：
-    // 未配置应用/无规则系统链路的策略登记为空，宿主对无规则 uid 一律拒绝，
-    // 接入后应用视图变空目录、文档选择器加载失败、跨路径写入全被拒。
-    // 监视能力由进程外 inotify 承担，不依赖宿主视图；规则非空的 monitor-only
-    // 请求（DownloadProvider 等已配置代写链路）仍按原设计预接。
+    // 监视专用请求登记直通策略；其余无策略 UID 不得接入 deny-all 的宿主视图。
     if !crate::fuse_redirect::config::mount_request_has_policy_rules(request) {
         return false;
     }

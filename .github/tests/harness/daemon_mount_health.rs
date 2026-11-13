@@ -99,8 +99,7 @@ fn main() {
     }
 
     // --- 用例 2：记录主入口、只有后端 /data/media 别名在场 -> 仍健康（同一别名组）。 ---
-    let mi_backend =
-        "200 99 0:1 /Download/X /data/media/0/Download/X - fuse.srx srx_fuse\n";
+    let mi_backend = "200 99 0:1 /Download/X /data/media/0/Download/X - fuse.srx srx_fuse\n";
     if !mount_targets_present_with(
         mi_backend,
         &["/storage/emulated/0/Download/X".to_string()],
@@ -132,18 +131,27 @@ fn main() {
         println!("PASS health_sdcard_alias_group");
     }
 
-    // --- 用例 5：/data/data 历史别名按 /data/user/0 折叠。 ---
+    // --- 用例 5：私有数据 bind 别名必须分别存在、分别计数。 ---
     let mi_user0 = "200 99 0:1 /pkg/cache /data/user/0/pkg/cache - fuse.srx srx_fuse\n";
-    if !mount_targets_present_with(mi_user0, &["/data/data/pkg/cache".to_string()], &req) {
-        println!("FAIL health_data_data_alias: /data/data 折叠到 /data/user/0 后应命中");
+    let private_targets = vec![
+        "/data/user/0/pkg/cache".to_string(),
+        "/data/data/pkg/cache".to_string(),
+    ];
+    let mi_private =
+        format!("{mi_user0}201 99 0:1 /pkg/cache /data/data/pkg/cache - fuse.srx srx_fuse\n");
+    if mount_targets_present_with(mi_user0, &private_targets, &req)
+        || !mount_targets_present_with(&mi_private, &private_targets, &req)
+        || mount_target_count_from_mountinfo(&mi_private, "/data/data/pkg/cache", "", &[]) != 1
+        || mount_target_count_from_mountinfo(&mi_private, "/data/user/0/pkg/cache", "", &[]) != 1
+    {
+        println!("FAIL health_data_data_alias: 私有数据入口缺失与独立挂载计数必须准确");
         failures.push("health_data_data_alias");
     } else {
         println!("PASS health_data_data_alias");
     }
 
     // --- 用例 6：整组缺失（现场只剩无关路径）-> 必须判为不健康。 ---
-    let mi_unrelated =
-        "200 99 0:1 /Other/Y /storage/emulated/0/Other/Y - fuse.srx srx_fuse\n";
+    let mi_unrelated = "200 99 0:1 /Other/Y /storage/emulated/0/Other/Y - fuse.srx srx_fuse\n";
     if mount_targets_present_with(
         mi_unrelated,
         &["/storage/emulated/0/Download/X".to_string()],

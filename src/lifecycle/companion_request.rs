@@ -2,6 +2,7 @@ use crate::domain::PathMapping;
 
 #[derive(Default)]
 pub struct CompanionMountRequest {
+    pub mount_namespace: Option<std::os::fd::OwnedFd>,
     pub pid: i32,
     pub uid: i32,
     pub package_name: String,
@@ -18,6 +19,16 @@ pub struct CompanionMountRequest {
     pub is_monitor_only: bool,
     pub config_version: u64,
     pub policy_fingerprint: u64,
+}
+
+impl CompanionMountRequest {
+    pub(super) fn mount_namespace_path(&self) -> String {
+        use std::os::fd::AsRawFd;
+        match self.mount_namespace.as_ref() {
+            Some(namespace) => format!("/proc/self/fd/{}", namespace.as_raw_fd()),
+            None => format!("/proc/{}/ns/mnt", self.pid),
+        }
+    }
 }
 
 impl crate::fuse_redirect::MountRequestFields for CompanionMountRequest {
@@ -71,8 +82,16 @@ pub fn parse_companion_mount_request(payload: &str) -> Result<CompanionMountRequ
     let value: serde_json::Value =
         serde_json::from_str(payload).map_err(|e| format!("json parse failed: {}", e))?;
 
-    request.pid = value.get("pid").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
-    request.uid = value.get("uid").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+    request.pid = value
+        .get("pid")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(-1);
+    request.uid = value
+        .get("uid")
+        .and_then(|v| v.as_i64())
+        .and_then(|v| i32::try_from(v).ok())
+        .unwrap_or(-1);
     request.package_name = value
         .get("package")
         .and_then(|v| v.as_str())
@@ -197,3 +216,7 @@ fn parse_path_mappings(value: Option<&serde_json::Value>) -> Vec<PathMapping> {
 
     mappings
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-runtime/companion_request.rs"]
+mod tests;
