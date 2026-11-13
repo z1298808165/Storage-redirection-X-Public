@@ -4286,6 +4286,19 @@ capture_own_private_diagnostics() {
   adb_su "for path in '${REAL_ROOT}/Android/data' '${REAL_ROOT}/Android/obb' '${REAL_ROOT}/Android/media' '${BACKEND_ROOT}/Android/data'; do printf '%s dev=' \"\$path\"; stat -c '%D' \"\$path\" 2>&1 || true; grep -aF \" \$path \" /proc/self/mountinfo 2>/dev/null | head -3 || true; done"
   echo "---app_mount_entries---"
   adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'Android/(data|media|obb)|/storage/emulated/0 ' /proc/\$pid/mountinfo 2>/dev/null | tail -40 || echo no_matching_mount_entry; else echo app_not_running; fi"
+  # 映射落点与挂载可达性。场景 35 的失败形态是「写入返回成功、后端没有文件」，
+  # 而上面的采集只到包名根目录这一层：既看不到映射目标子目录里的真实内容，
+  # 也看不到承载私有映射的那层父挂载。这里补三件事——
+  #   (1) 映射链每一跳的 stat 与目录内容：真实请求路径、应用可见目标、后端目标。
+  #       若写入没走 bind，真实 code_cache 里会留下同名的文件，这是可直接判定的物证。
+  #   (2) `/data/data` 是 `/data/user/0` 的符号链接，bind 挂在后者上；两边都看才能
+  #       确认 bind 是否作用于应用实际访问的那条路径。
+  #   (3) 应用命名空间的完整挂载表。映射项的父挂载 id 未必落在上面 tail -40 的窗口里，
+  #       而「父挂载在不在本命名空间」直接决定这层 bind 是否可达。
+  echo "---path_mapping_targets---"
+  adb_su "for path in '${ANY_LEGACY_DATA_REQUEST}' '/data/user/0/${APP_ID}/code_cache' '/data/user/0/${APP_ID}/cache' '/data/user/0/${APP_ID}/files' '${ANY_LEGACY_PRIVATE_TARGET}' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache'; do printf '%s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; ls -la \"\$path\" 2>&1 | head -12; echo; done"
+  echo "---app_mountinfo_full---"
+  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/mountinfo 2>/dev/null; else echo app_not_running; fi"
   echo "---daemon_own_private_log---"
   adb_su "grep -aE 'own private|scoped fuse|anchor|backend_effective|companion mount' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true"
   echo
