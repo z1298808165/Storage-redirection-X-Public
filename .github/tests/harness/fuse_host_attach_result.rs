@@ -18,6 +18,23 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 static CASE: AtomicUsize = AtomicUsize::new(0);
 static SENT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+// 目标路径上的挂载层数。接入按「替换而非叠加」实现：逐个摘到空再挂，所以桩必须能
+// 表达「摘掉就少一层」，否则 `detach_all_layers_at_target` 的循环永远摘不完。
+static LAYERS: AtomicUsize = AtomicUsize::new(1);
+fn layers() -> usize {
+    LAYERS.load(Ordering::Relaxed)
+}
+fn reset_layers() {
+    LAYERS.store(1, Ordering::Relaxed);
+}
+fn drop_layer() -> bool {
+    LAYERS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+        .is_ok()
+}
+fn attach_layer() {
+    LAYERS.store(1, Ordering::Relaxed);
+}
 fn case() -> usize {
     CASE.load(Ordering::Relaxed)
 }
@@ -59,7 +76,7 @@ mod libc {
     pub const MNT_DETACH: i32 = 2;
     pub const SYS_setfsuid: i64 = 0;
     pub unsafe fn umount2(_: *const i8, _: i32) -> i32 {
-        0
+        if super::drop_layer() { 0 } else { -1 }
     }
     pub unsafe fn getgroups(_: i32, _: *mut gid_t) -> i32 {
         0
@@ -129,12 +146,14 @@ mod mount_ledger {
     // 接入前的目标私有化只对「目标本身是挂载点」才需要。协议用例的目标根都按挂载点
     // 处理，保持与引入该判据之前一致的私有化路径，用例才继续覆盖 mount 失败出口。
     pub fn live_mounts_at(_: i32, _: &str) -> Vec<Entry> {
-        vec![Entry {
-            mount_id: 1,
-            dev: "0:1".to_string(),
-            source: "本次会话".to_string(),
-            fs_type: "fuse",
-        }]
+        (0..super::layers())
+            .map(|index| Entry {
+                mount_id: index as u64 + 1,
+                dev: "0:1".to_string(),
+                source: "本次会话".to_string(),
+                fs_type: "fuse",
+            })
+            .collect()
     }
     pub fn topmost_live_mount(_: i32, _: &str) -> Option<Entry> {
         if super::case() == 10 {
@@ -182,7 +201,10 @@ fn move_detached_mount(_: i32, _: &CStr) -> Result<(), i32> {
     match case() {
         6 | 7 => Err(107),
         8 => Err(5),
-        _ => Ok(()),
+        _ => {
+            attach_layer();
+            Ok(())
+        }
     }
 }
 // P5-d：视图根的传播属性设置。桩只用于验证回包契约，传播属性本身不在断言范围。
@@ -200,6 +222,7 @@ fn make_mount_slave(_: &CStr) -> bool {
 fn make_mount_private(_: &CStr) -> bool {
     case() != 9
 }
+// __PRODUCTION_CONSTS__
 // __PRODUCTION_FUNCTIONS__
 fn run(view: &HostSessionView, target_root: &str) -> bool {
     let ready_sockets = [0, 99];
@@ -213,6 +236,7 @@ fn main() {
     for id in 0..15 {
         CASE.store(id, Ordering::Relaxed);
         SENT.lock().unwrap().clear();
+        reset_layers();
         let view = HostSessionView {
             child_pid: 42,
             mount_point: if id == 12 { "\0" } else { "/宿主" }.to_string(),

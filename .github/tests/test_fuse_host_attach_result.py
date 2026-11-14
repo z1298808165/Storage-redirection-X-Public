@@ -11,6 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def extract_const(source: str, name: str) -> str:
+    """抽取生产侧常量（含类型与值），供桩注入使用。"""
+    match = re.search(rf"const {re.escape(name)}:[^;]+;", source)
+    if match is None:
+        raise AssertionError(f"缺少生产常量 {name}")
+    return match.group(0)
+
+
 def extract_fn(source: str, name: str) -> str:
     start = source.index(f"fn {name}(")
     brace = source.index("{", start)
@@ -37,8 +45,11 @@ class HostAttachResultTest(unittest.TestCase):
                 "attach_host_view_to_storage_aliases",
                 "alias_is_symbolic_duplicate",
                 "storage_user_id_from_view_root",
+                "detach_all_layers_at_target",
             )
         )
+        # 接入按「替换而非叠加」实现后，摘层上限是注入函数的一部分依赖。
+        consts = extract_const(source, "MAX_VIEW_LAYERS")
         dispatch = re.search(
             r"let result = host_attach_child_main\(view, target_root, user_id, app_uid\);\s*"
             r"let ok = send_host_attach_result\(ready_sockets\[1\], result\) && result == 0;",
@@ -48,8 +59,10 @@ class HostAttachResultTest(unittest.TestCase):
         template = (
             ROOT / ".github/tests/harness/fuse_host_attach_result.rs"
         ).read_text(encoding="utf8")
-        harness = template.replace("// __PRODUCTION_FUNCTIONS__", functions).replace(
-            "// __PRODUCTION_DISPATCH__", dispatch.group(0)
+        harness = (
+            template.replace("// __PRODUCTION_CONSTS__", consts)
+            .replace("// __PRODUCTION_FUNCTIONS__", functions)
+            .replace("// __PRODUCTION_DISPATCH__", dispatch.group(0))
         )
         temp_root = ROOT / "temp"
         temp_root.mkdir(exist_ok=True)
