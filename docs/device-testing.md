@@ -43,13 +43,13 @@ cargo test -p native-config-fixtures
 
 CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试流。
 
-公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-42。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验三个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
+公开仓库 PR、CI Build 和 Release workflow 会强制执行测试流门禁。CI/Release 会先构建一次 x86_64 测试模块 zip 和测试 APK，再把 Android 15/16/17 模拟器组成并行矩阵运行，每个 Android 版本各自执行完整 scenario 1-44。Android 17（API 37.0）已经并入同一测试矩阵，不再是独立 job；`Test-flow required gate` 统一校验三个平台，任一失败都会拦住 CI 资产发布与正式 Release。CI/Release 只有在全部测试流场景通过后才会继续发布 CI 资产、更新 `update.json` 或创建正式 Release。测试流失败时保留 GitHub Actions 失败记录、日志和已上传的排障 artifact，由后续提交修复。
 
 完整设备侧通过标准是：
 
 - `basic/all` 通过。
 - native Rust 单元测试与 ZN 回调夹具通过，输出 `ZN_FIXTURE_SUMMARY` 且 `failed=0`。
-- 当前模块跑完 scenario 1-42。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
+- 当前模块跑完 scenario 1-44。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - PowerShell 入口在应用停止后确认进程退出及旧独占 FUSE 子进程回收；死进程的状态账本由 daemon 按五分钟节流异步清理，不以账本文件立即消失作为退出判据。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理。
@@ -159,8 +159,8 @@ Remove-Item Env:SRT_SCENARIOS
 | 变量或参数 | 用途 |
 | --- | --- |
 | `-SkipBasicAll` | 跳过 `basic/all`，只跑场景脚本。 |
-| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-42。 |
-| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-42。与其它场景号混用会报错。不设置时默认也是全场景。 |
+| `-Scenarios 9,17` / `SRT_SCENARIOS=9,17` | 只跑指定场景，范围为 1-44。 |
+| `SRT_SCENARIOS=all` | 按当前场景清单执行全部场景；当前等价于 1-44。与其它场景号混用会报错。不设置时默认也是全场景。 |
 | `SRT_VERSION_SCENARIO_EXCLUDE=39` | 版本级场景排除：从已确定的范围里剔除指定场景（默认仍是全场景）。它是剔除而不是替换，因此不会收窄 `SRT_SCENARIOS` 或 dispatch 输入的范围；仅用于某个版本确实无法验证的场景，当前矩阵未使用。 |
 | `-FreshAppPerCase` / `SRT_FRESH_APP_PER_CASE=1` | 每个服务用例前都冷启动测试 APP，这是默认行为，用于避免跨用例进程状态污染。需要调试复用进程时可设 `SRT_FRESH_APP_PER_CASE=0`；scenario 29 会临时保持同一进程以验证配置热更新。 |
 | `SRT_FAIL_FAST=1` | 某个场景失败后立即停止当前 Android 测试 job。CI/Release 默认开启，便于尽快暴露首个失败点。 |
@@ -185,7 +185,7 @@ Remove-Item Env:SRT_SCENARIOS
 - 场景数按场景清单条目数取，**不能**数字面 token：全量时 `SRT_SCENARIOS` 的值是 `all`，按 token 数只能算出 1，看门狗会被压到 990 秒而把全量跑腰斩。
 - 步骤级与 job 级由 `prepare` 的 `Resolve scenario scope` 步骤按同一次范围产出，CI 与 Release 共用同一份解析脚本，所以场景数增长时两边一起自适应，不必手工同步数字。
 - 步骤预算在基础设置与场景看门狗之外预留 3 分钟；模拟器启动也占用步骤预算，单独的 `emulator-boot-timeout`（A15/A16 1500 秒、A17 1800 秒）不扩大步骤预算。
-- 嵌套关系在约 209 个场景时失效（step 已触顶 345 分钟，看门狗仍在按 1.5n 增长）。当前 42 个场景远未到边界，但场景加到 200 个之前必须把矩阵拆成多个 test-flow job 分片，而不是继续抬高上限。
+- 嵌套关系在约 209 个场景时失效（step 已触顶 345 分钟，看门狗仍在按 1.5n 增长）。当前 44 个场景远未到边界，但场景加到 200 个之前必须把矩阵拆成多个 test-flow job 分片，而不是继续抬高上限。
 
 ### 场景范围的触发条件
 
@@ -193,7 +193,7 @@ Remove-Item Env:SRT_SCENARIOS
 
 | 触发入口 | 写法 | 实际范围 |
 | --- | --- | --- |
-| 默认（push、未传参） | — | 全场景 1-42 |
+| 默认（push、未传参） | — | 全场景 1-44 |
 | 手动触发 workflow | `workflow_dispatch` 的 `scenarios` 输入：`29`、`29,34`、`all` | 指定场景；`all` 表示全量 |
 | 提交信息标记 | 标题或正文写「单场景 29」「单场景 29,34」 | 只跑指定场景 |
 | 本地运行 | `SRT_SCENARIOS=29`（sh）或 `-Scenarios 29`（PowerShell） | 同上 |
@@ -221,7 +221,7 @@ SRT_SCENARIOS=24 bash .github/tests/run-storage-redirect-scenarios.sh
 ```
 
 - 一次验证只选一种入口，禁止「带标记推送 + 手动派发」同时进行；出现两轮 run 时先确认事件来源，不要用取消第二轮掩盖范围错误。
-- 窄场景验证不产生可发布资产（`publish_ci=false`），不能作为发布门禁通过的依据；合并或发布前必须有一次全量 1-42 通过记录。
+- 窄场景验证不产生可发布资产（`publish_ci=false`），不能作为发布门禁通过的依据；合并或发布前必须有一次全量 1-44 通过记录。
 
 CI/Release 在 Android 15/16/17 x86_64 模拟器上各自执行完整场景 1-42，无版本级排除项；任一版本失败即取消其余版本，单个版本内按场景顺序快速失败。测试流全部通过后才发布资产。
 
@@ -262,7 +262,7 @@ Android 17（API 37.0）有三处执行环境差异：
 | 20 | 自动模式下，`allowed_real_paths` 的 `*`/`?` 通配规则执行动态匹配或 namespace 回退，命中路径保持真实路径，并记录最终后端。 |
 | 21 | namespace 数据面下，`read_only_paths` 通配规则执行具体路径回退，并保持读取允许、写入拒绝语义。 |
 | 22 | namespace 数据面下，路径映射和只读规则共同存在时仍由映射最终目标决定写权限。 |
-| 23 | 启用 `file_monitor_enabled` 且测试 APP 配置 `enabled=false` 时，普通公共路径写入和 MediaStore 系统代写成功后仍应记录成功监控日志。 |
+| 23 | 启用 `file_monitor_enabled` 且测试 APP 配置 `enabled=false` 时，普通公共路径写入和 MediaStore 系统代写成功后仍应记录成功监控日志；同时断言该形态**不会**被接入模块视图（`st_dev` 与系统视图一致、根列表无 `.transforms`/`.picker_transcoded`）——monitor-only 只对完全没有配置的应用成立，停用配置走的是 `Disable`。 |
 | 24 | 启用文件监控且使用 namespace 数据面时，普通应用映射成功、最终只读失败、只读排除成功。 |
 | 25 | 启用文件监控且使用 FUSE 数据面时，普通应用直写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
 | 26 | 启用文件监控且使用 namespace 数据面时，MediaStore 系统代写覆盖放行成功、映射成功、最终只读失败、只读排除成功。 |
@@ -282,6 +282,12 @@ Android 17（API 37.0）有三处执行环境差异：
 | 40 | 系统 uid 的 FUSE 写入按发起服务归因；应用经 MediaProvider 中转创建的文件归因到源头应用；系统 uid 的沙盒目标缺失时零穿透，不得落到真实路径。 |
 | 41 | 沙盒根（重定向根 `Android/data/<包名>/sdcard`）在应用重启时由模块重建：属主必须是应用、**组不得是应用自己的 uid**，只能取父目录的组（setgid 继承）或 `media_rw`(1023)/`ext_data_rw`(1078)；other 位不得可写，mode 只允许 `02770`/`02771`。随后应用自己写一个文件、再由 MediaProvider 代写一条 `Documents/SrtSandboxRootProbe`，两者都必须落在沙盒内，真实公共路径不得出现该目录或文件（2026-11-09 真机：沙盒根 gid 被写成应用 uid，系统代写 EACCES 后回退到真实公共路径，公共存储凭空长出 `Documents/ringtone/...`）。 |
 | 42 | 在沙盒、真实路径放行、映射和前缀相邻路径验证文件与目录变更、打开描述符、权限及链接边界，并检查物理落点与零穿透。 |
+| 43 | 存储视图根的条目集合必须与系统视图逐项一致：根级不出现 MediaProvider 内部目录（`.transforms`、`.picker_transcoded`）与模块探针残留，readdir 不返回 `.`/`..`，名字级的对照点目录仍可见，深层同名目录仍可见；配置变更触发 reconcile 后内容保持不变。 |
+| 44 | 监视接管链路：应用没有任何配置、只开文件监视，冷启动停在系统视图；改「另一个应用」的规则触发 reconcile 后它被接入模块视图，此时根条目集合仍须与系统视图逐项一致（无内部目录、无点条目、单层挂载）。 |
+
+场景 44 复刻「没开重定向的应用在别人改规则后突然看见内部目录」的现场。它与场景 43 互补而不是重复：43 的应用**有配置**（通配放行整根），启动即被模块会话接管；44 的应用**没有任何配置**，应用侧只在 `should_redirect` 时为真才发挂载请求，因此冷启动一定停在系统视图，接管发生在 daemon 因**别的应用**规则变化而做全量 reconcile 的那一刻——这正是 MT 的现象链。断言先用 `st_dev` 锁定基线（必须仍等于系统视图，否则说明上一轮会话没清干净、断言会失去意义），再用一份与目标应用无关的配置（`com.srx.test.monitor.trigger.json`）触发 reconcile，随后复用 43 的逐项一致性断言；结束时删除触发器配置。
+
+场景 43 用「通配放行整根」（`allowed_real_paths=["*"]`）让视图根由模块 FUSE 接管，同时根目录枚举逐条落到真实后端——只有走真实后端枚举，根级隐藏判据才会被触发（`.transforms` 泄漏的现场路径）。断言先用 `/storage/emulated/0` 的 `st_dev` 确认应用确实被模块会话接管（未接管时两侧天然一致，断言会空转），再要求视图根 `/storage/emulated` 上**只有一层**挂载（接入按「替换而非叠加」实现，叠加与基线不一致且让上层归属不可判定），然后逐项比对应用命名空间与系统视图的 `ls -a` 结果；`.SrtRootDotVisible` 是反向对照，防止把根级过滤写成「藏掉所有点条目」。视图根上提后用户根在视图里是 `<user>` 这一级，根级判据必须按归一后的存储相对路径判空，否则整条隐藏会被跳过（2026-11-14 回归）。配置变更触发 reconcile 后会再断言一次，保证内容与挂载层数都不随重挂变化。
 
 场景 42 验证独占创建、二进制读写、追加、截断与零扩展、文件和非空目录改名、子孙路径与打开描述符在改名后的读写、旧路径重用、前缀相邻目录隔离、原子覆盖、覆盖/删除后的描述符读回及同名文件重建隔离。覆盖非空目录、移入自身子目录和删除非空目录必须被拒绝；`chmod`/`fchmod` 分别校验 `0440`/`0220` 的后端模式。
 
@@ -545,6 +551,15 @@ adb -s $Serial pull /data/anr/trace_XX trace_storage_redirect.txt
    ```
 
 3. 如果卡在 MediaStore 用例，抓 MediaProvider 栈并查看 FUSE 线程是否卡在 native `read`。
+
+4. 全量场景**每个**用例都 `result_timeout`、但手动 `am start-foreground-service` 立刻能写出结果时，先怀疑设备上装的是旧测试 APP：结果校验要求文件里带 `__SRT_RESULT_TOKEN__` / `__SRT_RESULT_END__` 行（token 协议加入后才是这个格式），旧 APK 只写 `PASS`/`FAIL` 行，脚本会判成超时。核对办法：
+
+   ```powershell
+   adb -s $Serial shell "su -c 'cat /sdcard/Android/data/me.fakerqu.test.storageredirect/files/test_case_result/result_current.txt'"
+   adb -s $Serial shell dumpsys package me.fakerqu.test.storageredirect | Select-String lastUpdateTime
+   ```
+
+   结果文件没有 token 行就重装：`.\gradlew.bat :storageRedirectTestApp:assembleDebug` → `adb install -r -g tests/storage-redirect-test/app/build/outputs/apk/debug/storageRedirectTestApp-debug.apk`（签名变更被拒时先 `adb uninstall`）。
 
 ### 模块目录出现重复
 

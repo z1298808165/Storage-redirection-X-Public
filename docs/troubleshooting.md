@@ -259,6 +259,27 @@ MediaProvider 就绪窗口在冷开机后可达数分钟，窗口内恢复必然
 | android.process.media SIGBUS | Java hook 安装在非 MediaProvider 的 shared UID 进程中 | 检查 `is_media_provider_package` 逻辑 |
 | 模块加载后无任何日志 | NDK/LSPlant 未正确链接 | 验证 so 大小大于等于 1.8MB |
 
+## 文件管理器里能看到 `.transforms` / `.picker_transcoded`
+
+**现象**：某个应用（典型是文件管理器，如 MT 管理器）的存储根列表里出现 `.transforms` 或
+`.picker_transcoded`，而系统自己的文件管理器看不到；关掉应用重开又恢复正常。
+
+**原因**：这两个目录是 MediaProvider 的工作目录，系统 FUSE 视图在**根级**对应用隐藏。模块视图
+若按错误的坐标系判根（视图根未上提时挂载根就是用户根，上提后用户根变成 `<user>` 这一级），
+整条隐藏会被静默跳过。2026-11-14 的回归正是这个形态：应用本身没有开启重定向，只是在“别的应用
+改了规则”触发的那一轮 reconcile 里被监视会话**首次**接入模块视图，于是立刻暴露。
+
+**自查**：
+
+```bash
+# 应用此刻在系统视图还是模块视图：两个设备号不同即已接管
+adb shell "su -c 'pid=\$(pidof <包名>); stat -c %d /storage/emulated/0; nsenter -t \$pid -m -- stat -c %d /storage/emulated/0'"
+```
+
+**处理**：升级到包含该修复的版本（根级判据按归一后的存储相对路径判空、readdir 不合成点条目）。
+升级后仍能复现时，抓 `running.log` 的 `fuse host attach` / `backend_effective` 片段与
+`/proc/<pid>/mountinfo` 一起反馈——需要区分“视图根上有多层挂载”和“根级过滤未命中”两种成因。
+
 ## 禁用模块
 
 如果模块导致设备 bootloop，可创建 `disable` 文件禁用模块：
