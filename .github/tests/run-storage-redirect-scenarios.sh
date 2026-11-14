@@ -443,6 +443,29 @@ clear_cross_app_read_only_config() {
   adb_su "rm -f '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1 || true
 }
 
+# 场景 44 的「另一个应用」配置。
+#
+# 必须落在一个**已安装**包的配置路径上：daemon 只统计能解析出包名的配置
+# （实测给不存在的包写配置时 `app configs found n=0`，指纹不变、也就不会
+# reconcile）。这里借用跨应用只读夹具的包（com.android.settings），但两份载荷
+# 都是 enabled:false，不会给它建立任何挂载，场景结束即删除。
+MONITOR_TRIGGER_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
+# step 1 与 step 5 交替写入的两份载荷：内容必须不同才会改变配置指纹。
+MONITOR_TRIGGER_PAYLOAD_A='{"users":{"0":{"enabled":false}}}'
+MONITOR_TRIGGER_PAYLOAD_B='{"users":{"0":{"enabled":false,"excluded_real_paths":["Download"]}}}'
+
+write_monitor_trigger_config() {
+  local payload="${1:-}"
+  if [ -z "$payload" ]; then
+    payload="$MONITOR_TRIGGER_PAYLOAD_A"
+  fi
+  adb_write_file "$MONITOR_TRIGGER_CONFIG" "$payload" >/dev/null
+}
+
+clear_monitor_trigger_config() {
+  adb_su "rm -f '$MONITOR_TRIGGER_CONFIG'" >/dev/null 2>&1 || true
+}
+
 write_global_config() {
   local content="$1"
   adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config" >/dev/null
@@ -604,6 +627,22 @@ apply_config() {
     42)
       write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMutationAllowed"],"path_mappings":{"Download/SrtMutationRequest":"Download/SrtMutationMapped"}}}}'
       ;;
+    43)
+      # 根级可见性对齐：通配放行整根 → 视图根由模块 FUSE 接管，且根目录枚举逐条落到
+      # 真实后端（`allowed_real_paths` 命中即 Real）。这正是「MT 管理器看到 .transforms」
+      # 的那条枚举路径：只有走真实后端枚举时，根级隐藏判据才会被触发。
+      write_config '{"users":{"0":{"enabled":true,"allowed_real_paths":["*"]}}}'
+      ;;
+    44)
+      # 现场链路：应用**没有**配置文件（不是 enabled:false——那种被判为 Disable，
+      # 设计上就停在系统视图），只靠全局文件监视被 daemon 以 monitor-only 会话接管。
+      # 接管时机在「别的应用规则变化触发 reconcile」那一刻，正是 MT 的现象。
+      set_backend_config auto true
+      adb_su "rm -f '$CONFIG'" >/dev/null
+      # 触发器必须在 step 1 就存在：配置生效的等待只认 `config reloaded ... apps=[1-9]`，
+      # 而本场景的目标应用刻意没有配置，没有这份“别的应用”配置就永远等不到信号。
+      write_monitor_trigger_config
+      ;;
     *)
       echo "unknown scenario: $1" >&2
       return 1
@@ -686,6 +725,8 @@ scenario_title() {
     40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
     41) echo "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透" ;;
     42) echo "文件变更生命周期：沙盒、放行、映射与前缀相邻路径的变更、元数据和链接语义" ;;
+    43) echo "存储视图根条目集合与系统视图逐项一致：根级隐藏 MediaProvider 内部目录且不返回点条目" ;;
+    44) echo "监视接管：未配置规则的应用在他人规则变更后被接入模块视图，其根条目集合仍与系统视图逐项一致" ;;
   esac
 }
 
@@ -844,6 +885,9 @@ clean_targets() {
   fix_own_private_fixture_permissions
   fix_private_backend_permissions
   fix_shared_fixture_permissions
+  # 场景 43 的根级对照目录名（`.SrtRootDotVisible`）落在存储根，不在任何 `Srt*` 通配范围内，
+  # 必须显式清理，否则它会留到后续场景的根列表断言里。
+  adb_su "rm -rf '${REAL_ROOT}/.SrtRootDotVisible' '${BACKEND_ROOT}/.SrtRootDotVisible' '${REAL_ROOT}/Download/SrtViewParity' '${BACKEND_ROOT}/Download/SrtViewParity' 2>/dev/null || true" >/dev/null
   # 收尾动作：以上所有后端直删与重建之后，必须让承接视图的会话把受影响的每个名字
   # 重新解析一次。缺了它，清理结束时的状态就是「后端已变、视图未变」——这个窗口过去
   # 只能等下一个场景撞上才暴露（并伪装成产品缺陷）。
@@ -1021,7 +1065,7 @@ prune_version_scenario_excludes() {
         return 1
         ;;
     esac
-    if [ "$item" -lt 1 ] || [ "$item" -gt 42 ]; then
+    if [ "$item" -lt 1 ] || [ "$item" -gt 44 ]; then
       echo "invalid exclude scenario: $item" >&2
       return 1
     fi
@@ -1057,7 +1101,7 @@ build_scenario_list() {
     local normalized="${SRT_SCENARIOS//,/ }"
     normalized="${normalized//;/ }"
     if [ "$(printf '%s' "$normalized" | awk '{$1=$1; print}')" = "all" ]; then
-      scenarios=($(seq 1 42))
+      scenarios=($(seq 1 44))
     else
       local scenario
       for scenario in $normalized; do
@@ -1067,7 +1111,7 @@ build_scenario_list() {
             return 1
             ;;
         esac
-        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 42 ]; then
+        if [ "$scenario" -lt 1 ] || [ "$scenario" -gt 44 ]; then
           echo "invalid scenario: $scenario" >&2
           return 1
         fi
@@ -1075,7 +1119,7 @@ build_scenario_list() {
       done
     fi
   else
-    scenarios=($(seq 1 42))
+    scenarios=($(seq 1 44))
   fi
 
   prune_version_scenario_excludes || return 1
@@ -1088,6 +1132,7 @@ build_scenario_list() {
 
 remove_test_target_artifacts() {
   adb_su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '${BACKEND_ROOT}/Download/SrtMutation'\$name '${BACKEND_PRIVATE_ROOT}/Download/SrtMutation'\$name; done" >/dev/null
+  adb_su "rm -rf '${REAL_ROOT}/.SrtRootDotVisible' '${BACKEND_ROOT}/.SrtRootDotVisible' '${REAL_ROOT}/Download/SrtViewParity' '${BACKEND_ROOT}/Download/SrtViewParity'" >/dev/null
   adb_su "rm -rf '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${SANDBOX_OWN_PRIVATE_DATA_ROOT}' '${SANDBOX_OWN_PRIVATE_MEDIA_ROOT}' '${SANDBOX_OWN_PRIVATE_OBB_ROOT}'" >/dev/null
   adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'" >/dev/null
@@ -1099,6 +1144,8 @@ remove_test_target_artifacts() {
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtFuseQa' '${REAL_ROOT}/Download/SrtFuseQab' '${REAL_ROOT}/Download/SrtFuseQb' '${REAL_ROOT}/Download/SrtFuseMediaAlpha' '${BACKEND_PRIVATE_ROOT}/Download/SrtFuseQa' '${BACKEND_PRIVATE_ROOT}/Download/SrtFuseQab' '${BACKEND_PRIVATE_ROOT}/Download/SrtFuseQb' '${BACKEND_PRIVATE_ROOT}/Download/SrtFuseMediaAlpha'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMountNsAllow' '${REAL_ROOT}/Download/SrtMountNsReadOnly' '${REAL_ROOT}/Download/SrtMountNsMapParent' '${REAL_ROOT}/Download/SrtMountNsMapRW' '${REAL_ROOT}/Download/SrtMountNsMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsAllow' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapParent' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapRW' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapRO'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'" >/dev/null
+  # 场景 44 的 reconcile 触发器：残留会在后续场景的配置指纹里多算一份"别的应用"。
+  clear_monitor_trigger_config
 }
 
 remove_mediastore_rows_by_pattern() {
@@ -1395,7 +1442,9 @@ label_expects_mount() {
   local scenario
   scenario="$(scenario_from_label "$1")"
   case "$scenario" in
-    ""|1|23|31|38|40) return 1 ;;
+    # 44 是监视链路：没有配置的应用冷启动一定停在系统视图，接管要等 reconcile，
+    # 所以这里不能按「启动即挂载」等待（等不到会白烧 45 秒并误判失败）。
+    ""|1|23|31|38|40|44) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -1514,6 +1563,11 @@ apply_config_and_wait() {
   esac
   if [ -n "${APP_CONFIG_CONTENT:-}" ]; then
     write_config "$APP_CONFIG_CONTENT"
+  elif [ "$(scenario_from_label "$label")" = "44" ]; then
+    # 44 的目标应用刻意没有任何配置（否则就不是监视链路了），没有「重写同一份
+    # 应用配置」这个必然发生的 reload。改成重写触发器，并换一份载荷——内容不同
+    # 才保证配置指纹变化，daemon 一定会重新加载并执行 reconcile。
+    write_monitor_trigger_config '{"users":{"0":{"enabled":false,"excluded_real_paths":["Download"]}}}'
   fi
   wait_config_applied "$label" "$watermark"
 }
@@ -2020,7 +2074,12 @@ run_service_case() {
     if [ "$drive_attempt" -gt 1 ]; then
       echo "service_case_intent_recovery scenario=${scenario} label=${label} test_case=${test_case} attempt=${drive_attempt}"
       timeout 45 adb shell am force-stop "$APP_ID" >/dev/null || true
-      start_app_and_confirm_mount "scenario-${scenario}-${label}-recover" 1 || return 1
+      # 恢复只负责把应用带到「它本该处于的视图」：不挂载的场景（1/23/31/38/40）本就
+      # 不该等挂载确认，写死 1 会让一次结果超时直接升级成硬失败（ps1 侧用的是
+      # Test-LabelExpectsMount，这里对齐同一判据）。
+      local recover_expect_mount=0
+      label_expects_mount "scenario-${scenario}-${label}-recover" && recover_expect_mount=1
+      start_app_and_confirm_mount "scenario-${scenario}-${label}-recover" "$recover_expect_mount" || return 1
       wait_storage_ready "scenario-${scenario}-${label}-recover" 30 >/dev/null || return 1
       clean_results
     fi
@@ -2093,7 +2152,9 @@ run_write_case() {
     [ "$attempt" -lt 2 ] || return 1
     if app_view_namespace_refresh_allowed "$scenario"; then
       echo "file_write_namespace_refresh scenario=${scenario} label=${label} attempt=${attempt}"
-      start_app_and_confirm_mount "scenario-${scenario}-${label}-write-retry" 1 || return 1
+      local retry_expect_mount=0
+      label_expects_mount "scenario-${scenario}-${label}-write-retry" && retry_expect_mount=1
+      start_app_and_confirm_mount "scenario-${scenario}-${label}-write-retry" "$retry_expect_mount" || return 1
       wait_storage_ready "scenario-${scenario}-${label}-write-retry" 30 >/dev/null || return 1
     else
       sleep_ms "$SRT_RESULT_POLL_MS"
@@ -3754,6 +3815,8 @@ run_monitor_capture_failopen_scenario() {
 run_file_monitor_disabled_redirect_scenario() {
   local scenario="$1"
   local file_name
+  # 先钉住这个形态的视图前提：停用配置不得被监视会话接管（详见函数注释）。
+  assert_disabled_profile_not_captured "scenario-${scenario}-disabled-profile-view" || return 1
   file_name="$(monitor_file_name "$scenario" "disabled_regular")"
   local media_file="srt_mediastore_public_only.txt"
   run_file_monitor_write_success_case "$scenario" "disabled-regular-write" "$MONITOR_BASE_ROOT/$file_name" "$MONITOR_BASE_ROOT/$file_name" "$PRIVATE_MONITOR_BASE_ROOT/$file_name" 1 0 &&
@@ -5148,6 +5211,201 @@ run_sandbox_root_metadata_scenario() {
     check_private_tree_native_metadata "${label}-post-write"
 }
 
+# 场景 43：存储视图根的条目集合必须与系统视图逐项一致。
+#
+# 覆盖两条曾经失守、且都属于「视图根上提后口径没跟上」的回归：
+# 1. 根级隐藏：`.transforms` / `.picker_transcoded` 是 MediaProvider 的工作目录，原生
+#    FUSE 在根级对应用隐藏。模块的根级判据必须按**归一后的存储相对路径**判空；上提后
+#    用户根在视图里是 `<user>` 这一级，按 `rel.is_empty()` 判会把整条隐藏跳过。
+# 2. 点条目：系统视图的 readdir 不返回 `.`/`..`，模块视图若返回，应用只要比对
+#    getdents 结果就能分辨存储被接管。
+#
+# 视图必须是**模块会话**才算覆盖到（应用停在系统视图时两边天然一致，断言会空转），
+# 因此先用 `/storage/emulated/0` 的 st_dev 区分：模块会话是独立 FUSE 超级块。
+storage_root_view_snapshot() {
+  local pid="$1"
+  adb_su "nsenter -t ${pid} -m -- ls -a '${REAL_ROOT}' 2>/dev/null | sort" || true
+}
+
+# 当前测试应用主进程 pid（无进程时为空）。场景 43 的断言与等待共用同一取法。
+app_process_pid() {
+  adb_su "pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'" | tr -d '[:space:]'
+}
+
+assert_storage_root_view_parity() {
+  local label="$1"
+  local pid app_list sys_list app_dev sys_dev deep list name layers
+  local timeout_seconds="${SRT_ROOT_VIEW_TIMEOUT_SECONDS:-60}"
+  local deadline=$((SECONDS + timeout_seconds))
+  # 应用侧接管是异步的：等这个进程的视图根切成模块会话（st_dev 与系统视图不同），
+  # 不按日志等。等不到就是缺陷本身——未接管时两侧条目天然一致，断言会空转。
+  while :; do
+    pid="$(app_process_pid)"
+    sys_dev="$(adb shell "stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '\r' | tr -d '[:space:]')"
+    if [ -n "$pid" ] && [ -n "$sys_dev" ]; then
+      app_dev="$(adb_su "nsenter -t ${pid} -m -- stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '[:space:]')"
+      if [ -n "$app_dev" ] && [ "$app_dev" != "$sys_dev" ]; then
+        break
+      fi
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      # 应用没被模块会话接管时本场景的断言会恒真，必须显式失败，否则等于没测。
+      echo "FAIL [root_view] label=${label} reason=module_view_not_attached pid=${pid:-missing} app_dev=${app_dev:-?} sys_dev=${sys_dev:-?} timeout_s=${timeout_seconds}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  app_list="$(storage_root_view_snapshot "$pid")"
+  sys_list="$(adb shell "ls -a '${REAL_ROOT}' 2>/dev/null | sort" | tr -d '\r')"
+  if [ -z "$app_list" ] || [ -z "$sys_list" ]; then
+    echo "FAIL [root_view] label=${label} reason=listing_unavailable pid=${pid}" >&2
+    return 1
+  fi
+  # 单层不变式：视图根上只能有本会话一层。叠加（系统视图层 + 模块层）会与基线不一致，
+  # 也让「哪一层在服务请求」变得不可判定；接入路径按替换实现，这里把它钉成断言。
+  layers="$(adb_su "nsenter -t ${pid} -m -- awk -v t='/storage/emulated' '\$5 == t' /proc/self/mountinfo | wc -l" | tr -d '[:space:]')"
+  if [ "${layers:-0}" != "1" ]; then
+    echo "FAIL [root_view] label=${label} reason=view_layer_stack layers=${layers:-0} pid=${pid}" >&2
+    adb_su "nsenter -t ${pid} -m -- awk -v t='/storage/emulated' '\$5 == t {print \"  layer:\", \$1, \$3, \$9}' /proc/self/mountinfo" >&2 || true
+    return 1
+  fi
+  for name in .transforms .picker_transcoded .srx_passthrough_probe; do
+    if printf '%s\n' "$app_list" | grep -qxF -- "$name"; then
+      echo "FAIL [root_view] label=${label} reason=root_hidden_name_leaked name=${name} pid=${pid}" >&2
+      return 1
+    fi
+  done
+  for name in . ..; do
+    if printf '%s\n' "$app_list" | grep -qxF -- "$name"; then
+      echo "FAIL [root_view] label=${label} reason=dot_entry_in_listing name=${name} pid=${pid}" >&2
+      return 1
+    fi
+  done
+  if ! printf '%s\n' "$app_list" | grep -qxF -- '.SrtRootDotVisible'; then
+    # 反向判据：根级过滤只认那两个名字，不能顺手把所有点条目一起藏掉。
+    echo "FAIL [root_view] label=${label} reason=control_dot_entry_missing pid=${pid}" >&2
+    return 1
+  fi
+  if [ "$app_list" != "$sys_list" ]; then
+    echo "FAIL [root_view] label=${label} reason=root_listing_mismatch pid=${pid}" >&2
+    diff <(printf '%s\n' "$sys_list") <(printf '%s\n' "$app_list") | sed 's/^/  root_view_diff: /' >&2
+    return 1
+  fi
+  deep="$(adb_su "nsenter -t ${pid} -m -- ls -a '${REAL_ROOT}/Download/SrtViewParity' 2>/dev/null")"
+  list="$(printf '%s\n' "$deep" | grep -v '^[[:space:]]*$')"
+  if ! printf '%s\n' "$list" | grep -qxF -- '.transforms'; then
+    # 深层同名目录必须保持可见：过滤只作用于视图根，不能连用户自己的同名目录一起藏。
+    echo "FAIL [root_view] label=${label} reason=deep_same_name_hidden pid=${pid}" >&2
+    printf '%s\n' "$list" | sed 's/^/  deep_listing: /' >&2
+    return 1
+  fi
+  echo "root_view_parity_ok label=${label} pid=${pid} entries=$(printf '%s\n' "$app_list" | grep -c .)"
+}
+
+# 停用配置（配置文件存在但 enabled=false）在监视开启时**不得**被接入模块视图：
+# `resolve_profile` 返回 Some(disabled) → `MountOperation::Disable`，monitor-only 只在
+# 完全无配置（`resolve_profile == None`）时成立。这里断言应用仍停在系统视图、根列表里
+# 没有 MediaProvider 内部目录——将来若把 disabled 也当成监视接管，会在这里变红，
+# 而不是等用户在自己的文件管理器里看见 `.transforms`。
+assert_disabled_profile_not_captured() {
+  local label="$1"
+  local pid sys_dev app_dev list name
+  local deadline=$((SECONDS + 15))
+  while :; do
+    pid="$(app_process_pid)"
+    if [ -n "$pid" ]; then
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "FAIL [root_view] label=${label} reason=app_not_running" >&2
+      return 1
+    fi
+    sleep_ms 200
+  done
+  sys_dev="$(adb shell "stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '\r' | tr -d '[:space:]')"
+  app_dev="$(adb_su "nsenter -t ${pid} -m -- stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '[:space:]')"
+  if [ -z "$sys_dev" ] || [ -z "$app_dev" ]; then
+    echo "FAIL [root_view] label=${label} reason=view_probe_failed pid=${pid}" >&2
+    return 1
+  fi
+  if [ "$app_dev" != "$sys_dev" ]; then
+    echo "FAIL [root_view] label=${label} reason=disabled_profile_attached pid=${pid} app_dev=${app_dev} sys_dev=${sys_dev}" >&2
+    return 1
+  fi
+  list="$(storage_root_view_snapshot "$pid")"
+  for name in .transforms .picker_transcoded .srx_passthrough_probe; do
+    if printf '%s\n' "$list" | grep -qxF -- "$name"; then
+      echo "FAIL [root_view] label=${label} reason=root_hidden_name_leaked name=${name} pid=${pid}" >&2
+      return 1
+    fi
+  done
+  echo "disabled_profile_view_ok label=${label} pid=${pid} dev=${sys_dev} entries=$(printf '%s\n' "$list" | grep -c .)"
+}
+
+prepare_root_view_parity_fixtures() {
+  # 根级夹具直接落在存储根的可见路径（root shell 走系统视图，落点仍是后端根）。
+  adb_su "mkdir -p '${REAL_ROOT}/.SrtRootDotVisible' '${REAL_ROOT}/Download/SrtViewParity/.transforms' && chmod 777 '${REAL_ROOT}/.SrtRootDotVisible' '${REAL_ROOT}/Download/SrtViewParity' '${REAL_ROOT}/Download/SrtViewParity/.transforms'" >/dev/null
+}
+
+run_storage_root_view_parity_scenario() {
+  local scenario="$1"
+  local label="scenario-${scenario}"
+  assert_storage_root_view_parity "${label}-initial" || return 1
+  # 再写一次同一份配置：配置变更会让 daemon 做一轮全量 reconcile（含宿主会话重接），
+  # 应用视图内容必须与变更前逐项一致——内容层面不允许出现「重启前后不一样」。
+  apply_config_and_wait "${label}-reconcile" || return 1
+  assert_storage_root_view_parity "${label}-after-reconcile"
+}
+
+# 场景 44：复刻「没开重定向的应用在别人改规则后突然看见内部目录」的现场。
+#
+# 链路差别（与场景 43 互补，不是重复）：
+# - 43 的应用**有配置**（通配放行整根），启动即被模块会话接管；
+# - 44 的应用**没有配置**，只有全局文件监视开启。应用侧只在 `should_redirect`
+#   时才发挂载请求，所以冷启动一定停在系统视图；接管发生在 daemon 因**别的应用**
+#   规则变化而做全量 reconcile 那一刻。这正是 MT 的现象链：改完规则回到 MT，
+#   它已经在模块视图里，而修复前根级隐藏判据按视图相对路径判空、整条被跳过。
+#
+# 因此本场景先锁定基线（必须仍在系统视图，否则说明会话没清干净、断言会失去意义），
+# 再用一份与目标应用无关的配置触发 reconcile，最后复用 43 的逐项一致性断言。
+run_monitor_capture_root_view_scenario() {
+  local scenario="$1"
+  local label="scenario-${scenario}"
+  local pid sys_dev app_dev
+  pid="$(app_process_pid)"
+  if [ -z "$pid" ]; then
+    echo "FAIL [root_view] label=${label} reason=app_not_running" >&2
+    return 1
+  fi
+  sys_dev="$(adb shell "stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '\r' | tr -d '[:space:]')"
+  app_dev="$(adb_su "nsenter -t ${pid} -m -- stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '[:space:]')"
+  if [ -z "$sys_dev" ] || [ -z "$app_dev" ] || [ "$app_dev" != "$sys_dev" ]; then
+    # 基线必须停在系统视图：本场景要验证的是「改规则后才被接管」，
+    # 一上来就已接管，后面的断言就不再对应这条链路。
+    echo "FAIL [root_view] label=${label} reason=baseline_not_system_view pid=${pid} app_dev=${app_dev:-?} sys_dev=${sys_dev:-?}" >&2
+    clear_monitor_trigger_config
+    return 1
+  fi
+  echo "monitor_capture_baseline label=${label} pid=${pid} dev=${sys_dev}"
+  # 夹具在这里再补一次：44 的接管发生在运行中途，而 step 2 预置的对照目录可能被
+  # 上一场景的收尾清掉；缺夹具时断言会因为「对照条目不见」而变红，那是假失败。
+  prepare_root_view_parity_fixtures
+  if ! adb_su "test -d '${REAL_ROOT}/.SrtRootDotVisible' && test -d '${REAL_ROOT}/Download/SrtViewParity/.transforms'" >/dev/null; then
+    echo "FAIL [root_view] label=${label} reason=fixture_missing" >&2
+    clear_monitor_trigger_config
+    return 1
+  fi
+  # 触发「全量」reconcile：只写某个应用的配置走的是增量路径（计划被过滤到那个包，
+  # 目标应用不在里面就是 planned=0），全量必须由全局配置变化触发——WebUI 保存规则时
+  # 同样是写应用配置 + 触碰 global.json，现场链路就是这么走到全量的。
+  write_global_config "$(test_global_config auto 1)"
+  if ! assert_storage_root_view_parity "${label}-captured"; then
+    clear_monitor_trigger_config
+    return 1
+  fi
+  clear_monitor_trigger_config
+}
+
 run_scenario() {
   local scenario="$1"
   local targets_prepared_before_start=0
@@ -5207,6 +5465,22 @@ run_scenario() {
       adb_su "parent_gid=\$(stat -c %g '${BACKEND_ROOT}/Android/data') && chgrp \"\$parent_gid\" '${BACKEND_ROOT}/Android/data/${APP_ID}' && rm -rf '${BACKEND_PRIVATE_ROOT}' && rm -f '${REAL_ROOT}/srt_sandbox_root_appwrite.txt' '${BACKEND_ROOT}/srt_sandbox_root_appwrite.txt'" >/dev/null
       targets_prepared_before_start=1
       ;;
+    43)
+      # 根级夹具必须在应用重启前落地：应用侧会话是新的，首次枚举一定看到；
+      # 落盘后再补夹具会让模块与系统两侧的目录缓存各持一份旧视图。
+      echo "step 2/7: 清理并预置根级可见性夹具"
+      clean_targets
+      prepare_root_view_parity_fixtures
+      targets_prepared_before_start=1
+      ;;
+    44)
+      # 与 43 共用同一组夹具（根级对照点目录 + 深层同名目录），差别只在接管方式：
+      # 这里没有应用配置，接管由 step 5 写「别的应用」配置触发。
+      echo "step 2/7: 清理并预置根级可见性夹具"
+      clean_targets
+      prepare_root_view_parity_fixtures
+      targets_prepared_before_start=1
+      ;;
   esac
   if [ "$targets_prepared_before_start" -eq 0 ]; then
     echo "step 2/7: 清理并预置测试目标"
@@ -5218,7 +5492,7 @@ run_scenario() {
   fi
   # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，不要让污染漂到后面的断言。
   case "$scenario" in
-    9|20|21|22|28|31|38) ;;
+    9|20|21|22|28|31|38|43|44) ;;
     *)
       assert_fixture_roots_empty "scenario-${scenario}" || return 1
       ;;
@@ -5372,6 +5646,14 @@ run_scenario() {
     42)
       run_file_mutation_lifecycle_scenario "$scenario" &&
         run_file_mutation_metadata_scenario "$scenario"
+      ;;
+    43)
+      echo "step 5/7: 验证存储视图根条目集合与系统视图逐项一致"
+      run_storage_root_view_parity_scenario "$scenario"
+      ;;
+    44)
+      echo "step 5/7: 验证监视接管后视图根条目集合仍与系统视图逐项一致"
+      run_monitor_capture_root_view_scenario "$scenario"
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
@@ -5571,6 +5853,7 @@ fail=0
 build_scenario_list
 
 export READ_ONLY_OWNER_CONFIG
+export MONITOR_TRIGGER_CONFIG MONITOR_TRIGGER_PAYLOAD_A MONITOR_TRIGGER_PAYLOAD_B
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL SRT_DOWNLOAD_NETWORK_HELPER
 export -f set_download_test_network
@@ -5597,6 +5880,7 @@ export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 export -f sandbox_root_form check_sandbox_root_metadata check_private_tree_native_metadata run_sandbox_root_metadata_scenario
+export -f storage_root_view_snapshot app_process_pid assert_storage_root_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
 export -f run_system_uid_attribution_scenario run_system_uid_sandbox_missing_target_scenario backup_shell_config restore_shell_config

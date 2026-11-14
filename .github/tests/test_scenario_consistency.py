@@ -3524,8 +3524,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("fixture_residue label=", helper)
         runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
         self.assertIn('assert_fixture_roots_empty "scenario-${scenario}" || return 1', runner)
-        # 场景 38 自行清理并预置探测目录（下载提供器沙盒夹具），与 9/20/21/22/28/31 同为豁免场景。
-        self.assertRegex(runner, r"9\|20\|21\|22\|28\|31\|38\) ;;")
+        # 场景 38 自行清理并预置探测目录（下载提供器沙盒夹具），场景 43/44 自行预置根级
+        # 对照目录，与 9/20/21/22/28/31 同为豁免场景。
+        self.assertRegex(runner, r"9\|20\|21\|22\|28\|31\|38\|43\|44\) ;;")
         # 容忍式清理必须留下统一前缀，便于在日志里统计与定位，不能只写一句自由文本。
         self.assertIn("cleanup_tolerated reason=probe_fuse_edom", self.bash)
         self.assertIn("cleanup_tolerated reason=own_dir_fuse", self.bash)

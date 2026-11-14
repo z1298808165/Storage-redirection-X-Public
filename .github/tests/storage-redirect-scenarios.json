@@ -251,6 +251,18 @@
       "config_mode": "standard",
       "bash_title": "文件变更生命周期：沙盒、放行、映射与前缀相邻路径的变更、元数据和链接语义",
       "powershell_title": "file mutation, metadata and symlink semantics across sandbox, allow, mapping and prefix sibling"
+    },
+    {
+      "id": 43,
+      "config_mode": "auto",
+      "bash_title": "存储视图根条目集合与系统视图逐项一致：根级隐藏 MediaProvider 内部目录且不返回点条目",
+      "powershell_title": "storage root listing matches system view entry by entry; mediaprovider internal dirs hidden and no dot entries"
+    },
+    {
+      "id": 44,
+      "config_mode": "auto",
+      "bash_title": "监视接管：未配置规则的应用在他人规则变更后被接入模块视图，其根条目集合仍与系统视图逐项一致",
+      "powershell_title": "monitor-captured app: after another app's rule change the app is attached to the module view and its root listing still matches the system view"
     }
   ]
 }

@@ -20,6 +20,10 @@ if ([string]::IsNullOrWhiteSpace($Serial)) {
 $Action = "me.fakerqu.test.storageredirection.TEST_CASE"
 $Config = "/data/adb/modules/storage.redirect.x/config/apps/$AppId.json"
 $ReadOnlyOwnerConfig = "/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
+# 场景 44 的「另一个应用」配置。必须落在**已安装**包的配置路径上：daemon 只统计能解析
+# 出包名的配置（给不存在的包写配置时 `app configs found n=0`，指纹不变、不会 reconcile）。
+# 这里借用跨应用只读夹具的包，但两份载荷都是 enabled:false，不会给它建立挂载。
+$MonitorTriggerConfig = "/data/adb/modules/storage.redirect.x/config/apps/com.android.settings.json"
 $GlobalConfig = "/data/adb/modules/storage.redirect.x/config/global.json"
 $LogPath = "/data/adb/modules/storage.redirect.x/logs/running.log"
 $FileMonitorLogPath = "/data/adb/modules/storage.redirect.x/logs/file_monitor.log"
@@ -336,6 +340,20 @@ function Clear-CrossAppReadOnlyConfig {
     Invoke-Su "rm -f '$ReadOnlyOwnerConfig'" | Out-Null
 }
 
+function Write-MonitorTriggerConfig {
+    # 与目标应用无关的一份配置：配置指纹变化 → daemon 走全量 reconcile，
+    # 未配置规则的应用在那一轮被 monitor-only 会话接管（应用侧只在 should_redirect
+    # 时才发挂载请求，冷启动不会自己接管）。
+    # 默认载荷只用于让 step 1 的配置生效等待拿到 apps≥1 的信号；触发接管时要换成
+    # 另一份载荷，内容不同才会真正改变指纹。
+    param([string]$Json = '{"users":{"0":{"enabled":false}}}')
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json))
+    Invoke-Su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps; printf '%s' '$encoded' | base64 -d > '$MonitorTriggerConfig.tmp.$PID'; mv -f '$MonitorTriggerConfig.tmp.$PID' '$MonitorTriggerConfig'; chmod 644 '$MonitorTriggerConfig'" | Out-Null
+}
+function Clear-MonitorTriggerConfig {
+    Invoke-Su "rm -f '$MonitorTriggerConfig'" | Out-Null
+}
+
 function Clear-ProviderSandboxConfig {
     # 场景 38 使用的下载提供器专属配置；其余场景不得残留，避免桥接进程
     # 在后续场景重启时带上意外的沙盒规则。
@@ -481,7 +499,7 @@ function Remove-ExcludedScenarios {
     $excluded = New-Object System.Collections.Generic.List[int]
     foreach ($part in @($excludeRaw -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $value = 0
-        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 42) {
+        if (-not [int]::TryParse($part, [ref]$value) -or $value -lt 1 -or $value -gt 44) {
             throw "无效排除场景：$part"
         }
         $excluded.Add($value) | Out-Null
@@ -494,20 +512,20 @@ function Remove-ExcludedScenarios {
 function Get-ScenarioList {
     $requested = New-Object System.Collections.Generic.List[int]
     foreach ($scenario in $Scenarios) {
-        if ($scenario -lt 1 -or $scenario -gt 42) { throw "无效场景：$scenario" }
+        if ($scenario -lt 1 -or $scenario -gt 44) { throw "无效场景：$scenario" }
         $requested.Add($scenario) | Out-Null
     }
     if ($requested.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
         $parts = @($env:SRT_SCENARIOS -split "[,\s;]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         if ($parts.Count -eq 1 -and $parts[0] -eq "all") {
-            return @(Remove-ExcludedScenarios -ScenarioList @(1..42))
+            return @(Remove-ExcludedScenarios -ScenarioList @(1..44))
         }
         if ($parts -contains "all") {
             throw "all 选择器不能与其它场景号混用"
         }
         foreach ($part in $parts) {
             $scenario = [int]$part
-            if ($scenario -lt 1 -or $scenario -gt 42) { throw "无效场景：$scenario" }
+            if ($scenario -lt 1 -or $scenario -gt 44) { throw "无效场景：$scenario" }
             $requested.Add($scenario) | Out-Null
         }
     }
@@ -516,7 +534,7 @@ function Get-ScenarioList {
     }
 
     # 默认范围与显式 all 使用同一完整范围，避免手写清单漏掉新增场景。
-    @(Remove-ExcludedScenarios -ScenarioList @(1..42))
+    @(Remove-ExcludedScenarios -ScenarioList @(1..44))
 }
 
 function Apply-ScenarioConfig {
@@ -627,6 +645,20 @@ function Apply-ScenarioConfig {
         }
         42 {
             Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["Download/SrtMutationAllowed"],"path_mappings":{"Download/SrtMutationRequest":"Download/SrtMutationMapped"}}}}'
+        }
+        43 {
+            # 通配放行整根：视图根由模块 FUSE 接管，且根目录枚举逐条落到真实后端，
+            # 正是根级隐藏判据被触发的那条路径。
+            Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["*"]}}}'
+        }
+        44 {
+            # 现场链路：应用没有配置文件（不是 enabled:false——那种被判为 Disable，
+            # 设计上就停在系统视图），只靠全局文件监视被 daemon 以 monitor-only 会话接管。
+            # 触发器必须在 step 1 就存在：配置生效等待只认 `apps=[1-9]`，而本场景的
+            # 目标应用刻意没有配置。
+            Write-GlobalConfig (Get-TestGlobalConfig 'auto' $true)
+            Invoke-Su "rm -f '$Config'" | Out-Null
+            Write-MonitorTriggerConfig
         }
         default { throw "未知场景 $Scenario" }
     }
@@ -774,7 +806,9 @@ function Test-LabelExpectsMount {
     param([string]$Label)
 
     $scenario = Get-ScenarioFromLabel $Label
-    return -not ($scenario -in @(-1, 1, 23, 31, 38, 40))
+    # 44 是监视链路：无配置应用冷启动一定停在系统视图，接管要等 reconcile 触发，
+    # 不能按「启动即挂载」等待。
+    return -not ($scenario -in @(-1, 1, 23, 31, 38, 40, 44))
 }
 
 function Get-ExpectedMountPathsForLabel {
@@ -1564,6 +1598,10 @@ function Clear-Targets {
 
 function Remove-TestTargetArtifacts {
     Invoke-Su "for name in Sandbox Allowed Request RequestSibling Mapped; do rm -rf '$BackendRoot/Download/SrtMutation'`$name '$BackendPrivateRoot/Download/SrtMutation'`$name; done" | Out-Null
+    # 场景 43 的根级对照目录不在任何 Srt* 通配范围内，必须显式清理。
+    Invoke-Su "rm -rf '$RealRoot/.SrtRootDotVisible' '$BackendRoot/.SrtRootDotVisible' '$RealRoot/Download/SrtViewParity' '$BackendRoot/Download/SrtViewParity'" | Out-Null
+    # 场景 44 的 reconcile 触发器：残留会在后续场景的配置指纹里多算一份「别的应用」。
+    Clear-MonitorTriggerConfig
     Invoke-Su "rm -rf '$BackendOwnPrivateDataRoot' '$BackendOwnPrivateMediaRoot' '$BackendOwnPrivateObbRoot' '$SandboxOwnPrivateDataRoot' '$SandboxOwnPrivateMediaRoot' '$SandboxOwnPrivateObbRoot'" | Out-Null
     Invoke-Su "rm -rf '$BackendRuleSandboxRoot' '$PrivateRuleSandboxRoot' '$BackendRuleSiblingRoot' '$PrivateRuleSiblingRoot'" | Out-Null
     # 后端侧也要按通配扫一遍：下面的目录清单同样是手工维护的，漏项会让残留避开清理
@@ -2030,6 +2068,8 @@ function Invoke-MonitorCaptureFailOpenScenario {
 
 function Invoke-DisabledRedirectMonitorScenario {
     param([string]$Scenario)
+    # 先钉住这个形态的视图前提：停用配置不得被监视会话接管（详见函数注释）。
+    if (-not (Assert-DisabledProfileNotCaptured "scenario-$Scenario-disabled-profile-view")) { return $false }
     $fileName = "srt_monitor_${Scenario}_disabled_regular.bin"
     $ok = Invoke-FileMonitorWriteSuccessCase $Scenario "disabled-regular-write" "$MonitorBaseRoot/$fileName" "$MonitorBaseRoot/$fileName" "$PrivateMonitorBaseRoot/$fileName" $true $false
     $ok = (Invoke-FileMonitorMediaStoreSuccessCase $Scenario "disabled-system-writer-create" "Download/SrtMonitor" $MonitorBaseRoot $PrivateMonitorBaseRoot $false "disabled-profile-mediastore-create-result-and-routing-are-authoritative") -and $ok
@@ -2473,6 +2513,8 @@ function Get-ScenarioTitle {
         40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
         41 { "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak" }
         42 { "file mutation, metadata and symlink semantics across sandbox, allow, mapping and prefix sibling" }
+        43 { "storage root listing matches system view entry by entry; mediaprovider internal dirs hidden and no dot entries" }
+        44 { "monitor-captured app: after another app's rule change the app is attached to the module view and its root listing still matches the system view" }
     }
 }
 
@@ -4029,6 +4071,183 @@ function Test-PrivateTreeMetadata {
     $ok
 }
 
+# 场景 43：存储视图根的条目集合必须与系统视图逐项一致（与 .sh 同契约）。
+#
+# 覆盖两条「视图根上提后口径没跟上」的回归：
+# 1. 根级隐藏：`.transforms` / `.picker_transcoded` 是 MediaProvider 的工作目录，原生
+#    FUSE 在根级对应用隐藏；判据必须按归一后的存储相对路径判空，按视图相对路径判空
+#    会在上提会话里整条跳过隐藏。
+# 2. 点条目：系统视图的 readdir 不返回 `.`/`..`，模块视图若返回，应用比对 getdents
+#    就能分辨存储被接管。
+function Assert-StorageRootViewParity {
+    param([string]$Label)
+
+    # 应用侧接管是异步的：等这个进程的视图根切成模块会话（st_dev 与系统视图不同），
+    # 不按日志等。等不到就是缺陷本身——未接管时两侧条目天然一致，断言会空转。
+    $deadline = (Get-Date).AddSeconds(60)
+    $appDev = ""
+    $sysDev = ""
+    $appPid = ""
+    while ($true) {
+        $appPid = ((Invoke-Su "pidof '$AppId' 2>/dev/null | awk '{print `$1}'") -join "").Trim()
+        $sysDev = ((Invoke-Adb @("shell", "stat -c %d '$RealRoot' 2>/dev/null")) -join "").Trim()
+        if (-not [string]::IsNullOrWhiteSpace($appPid) -and -not [string]::IsNullOrWhiteSpace($sysDev)) {
+            $appDev = ((Invoke-Su "nsenter -t $appPid -m -- stat -c %d '$RealRoot' 2>/dev/null") -join "").Trim()
+            if (-not [string]::IsNullOrWhiteSpace($appDev) -and $appDev -ne $sysDev) { break }
+        }
+        if ((Get-Date) -ge $deadline) {
+            $script:Failures.Add("$Label module view not attached app_dev=$appDev sys_dev=$sysDev")
+            return $false
+        }
+        Start-Sleep -Seconds 1
+    }
+    $appList = @(Invoke-Su "nsenter -t $appPid -m -- ls -a '$RealRoot' 2>/dev/null | sort" | Where-Object { $_ -ne "" })
+    $sysList = @(Invoke-Adb @("shell", "ls -a '$RealRoot' 2>/dev/null | sort") | Where-Object { $_ -ne "" })
+    if ($appList.Count -eq 0 -or $sysList.Count -eq 0) {
+        $script:Failures.Add("$Label root listing unavailable")
+        return $false
+    }
+    # 单层不变式：视图根上只能有本会话一层。叠加会与基线不一致，也让「哪一层在服务请求」
+    # 不可判定；接入路径按替换实现，这里把它钉成断言。
+    $layers = @(Invoke-Su "nsenter -t $appPid -m -- awk -v t='/storage/emulated' '`$5 == t' /proc/self/mountinfo" | Where-Object { $_ -ne "" })
+    if ($layers.Count -ne 1) {
+        $script:Failures.Add("$Label view layer stack layers=$($layers.Count): $($layers -join ' | ')")
+        return $false
+    }
+    foreach ($name in @(".transforms", ".picker_transcoded", ".srx_passthrough_probe")) {
+        if ($appList -contains $name) {
+            $script:Failures.Add("$Label root hidden name leaked: $name")
+            return $false
+        }
+    }
+    foreach ($name in @(".", "..")) {
+        if ($appList -contains $name) {
+            $script:Failures.Add("$Label dot entry in listing: $name")
+            return $false
+        }
+    }
+    # 反向判据：根级过滤只认那两个名字，不能顺手把所有点条目一起藏掉。
+    if (-not ($appList -contains ".SrtRootDotVisible")) {
+        $script:Failures.Add("$Label control dot entry missing")
+        return $false
+    }
+    if (($appList -join "`n") -ne ($sysList -join "`n")) {
+        $script:Failures.Add("$Label root listing mismatch app=[$($appList -join ',')] sys=[$($sysList -join ',')]")
+        return $false
+    }
+    $deep = @(Invoke-Su "nsenter -t $appPid -m -- ls -a '$RealRoot/Download/SrtViewParity' 2>/dev/null" | Where-Object { $_ -ne "" })
+    if (-not ($deep -contains ".transforms")) {
+        $script:Failures.Add("$Label deep same-name hidden: [$($deep -join ',')]")
+        return $false
+    }
+    Write-Host "  root_view_parity_ok label=$Label pid=$appPid entries=$($appList.Count)"
+    return $true
+}
+
+# 停用配置（配置文件存在但 enabled=false）在监视开启时不得被接入模块视图：
+# resolve_profile 返回 Some(disabled) → MountOperation::Disable，monitor-only 只在完全
+# 无配置时成立。断言应用仍停在系统视图、根列表里没有 MediaProvider 内部目录——将来若把
+# disabled 也当成监视接管，会在这里变红，而不是等用户在自己的文件管理器里看见 .transforms。
+function Assert-DisabledProfileNotCaptured {
+    param([string]$Label)
+
+    $deadline = (Get-Date).AddSeconds(15)
+    $appPid = ""
+    while ($true) {
+        $appPid = ((Invoke-Su "pidof '$AppId' 2>/dev/null | awk '{print `$1}'") -join "").Trim()
+        if (-not [string]::IsNullOrWhiteSpace($appPid)) { break }
+        if ((Get-Date) -ge $deadline) {
+            $script:Failures.Add("$Label app not running for disabled profile view")
+            return $false
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $sysDev = ((Invoke-Adb @("shell", "stat -c %d '$RealRoot' 2>/dev/null")) -join "").Trim()
+    $appDev = ((Invoke-Su "nsenter -t $appPid -m -- stat -c %d '$RealRoot' 2>/dev/null") -join "").Trim()
+    if ([string]::IsNullOrWhiteSpace($sysDev) -or [string]::IsNullOrWhiteSpace($appDev)) {
+        $script:Failures.Add("$Label view probe failed")
+        return $false
+    }
+    if ($appDev -ne $sysDev) {
+        $script:Failures.Add("$Label disabled profile attached to module view app_dev=$appDev sys_dev=$sysDev")
+        return $false
+    }
+    $list = @(Invoke-Su "nsenter -t $appPid -m -- ls -a '$RealRoot' 2>/dev/null" | Where-Object { $_ -ne "" })
+    foreach ($name in @(".transforms", ".picker_transcoded", ".srx_passthrough_probe")) {
+        if ($list -contains $name) {
+            $script:Failures.Add("$Label root hidden name leaked: $name")
+            return $false
+        }
+    }
+    Write-Host "  disabled_profile_view_ok label=$Label pid=$appPid dev=$sysDev entries=$($list.Count)"
+    return $true
+}
+
+function Invoke-StorageRootViewParityScenario {
+    param([int]$Scenario)
+
+    $label = "scenario-$Scenario"
+    $fixture = "$RealRoot/Download/SrtViewParity"
+    # 根级对照目录与深层同名目录：前者证明过滤是名字级而不是「藏掉所有点条目」，
+    # 后者证明过滤只作用于视图根。
+    Invoke-Su "mkdir -p '$RealRoot/.SrtRootDotVisible' '$fixture/.transforms' && chmod 777 '$RealRoot/.SrtRootDotVisible' '$fixture' '$fixture/.transforms'" | Out-Null
+    $ok = Assert-StorageRootViewParity "$label-initial"
+    # 再写一次**同一份**配置：触发一轮全量 reconcile（含宿主会话重接）后内容必须不变。
+    # 这里不能写 disabled 配置——那会把应用从模块会话上摘下来，断言换成系统视图后
+    # 就失去意义（实测会看到真实文件系统的 `.`/`..`）。
+    Write-DeviceConfig '{"users":{"0":{"enabled":true,"allowed_real_paths":["*"]}}}'
+    Start-Sleep -Seconds 3
+    $ok = (Assert-StorageRootViewParity "$label-after-reconcile") -and $ok
+    Invoke-Su "rm -rf '$RealRoot/.SrtRootDotVisible' '$fixture'" | Out-Null
+    return $ok
+}
+
+# 场景 44：复刻「没开重定向的应用在别人改规则后突然看见内部目录」的现场（与 .sh 同契约）。
+#
+# 与 43 的差别在接管方式：43 的应用有配置（通配放行整根）、启动即被接管；44 的应用
+# **没有任何配置**，只有全局文件监视开启，应用侧只在 should_redirect 时才发挂载请求，
+# 所以冷启动一定停在系统视图，接管发生在 daemon 因**别的应用**规则变化而做全量
+# reconcile 那一刻——这正是 MT 的现象链。
+function Invoke-MonitorCaptureRootViewScenario {
+    param([int]$Scenario)
+
+    $label = "scenario-$Scenario"
+    $fixture = "$RealRoot/Download/SrtViewParity"
+    Invoke-Su "mkdir -p '$RealRoot/.SrtRootDotVisible' '$fixture/.transforms' && chmod 777 '$RealRoot/.SrtRootDotVisible' '$fixture' '$fixture/.transforms'" | Out-Null
+    # 接管发生在运行中途，夹具必须在这一刻确实存在：缺了会让断言因为「对照条目不见」
+    # 而变红，那是假失败，必须与「过滤失效」区分开。
+    if (-not (Test-Su "test -d '$RealRoot/.SrtRootDotVisible' && test -d '$fixture/.transforms'")) {
+        $script:Failures.Add("$Label fixture missing")
+        Clear-MonitorTriggerConfig
+        return $false
+    }
+
+    $appPid = ((Invoke-Su "pidof '$AppId' 2>/dev/null | awk '{print `$1}'") -join "").Trim()
+    if ([string]::IsNullOrWhiteSpace($appPid)) {
+        $script:Failures.Add("$Label app not running for monitor capture")
+        return $false
+    }
+    $sysDev = ((Invoke-Adb @("shell", "stat -c %d '$RealRoot' 2>/dev/null")) -join "").Trim()
+    $appDev = ((Invoke-Su "nsenter -t $appPid -m -- stat -c %d '$RealRoot' 2>/dev/null") -join "").Trim()
+    # 基线必须停在系统视图：本场景验证的是「改规则后才被接管」，一上来就已接管
+    # 说明上个场景的会话没清干净，后面的断言不再对应这条链路。
+    if ([string]::IsNullOrWhiteSpace($sysDev) -or [string]::IsNullOrWhiteSpace($appDev) -or $appDev -ne $sysDev) {
+        $script:Failures.Add("$Label baseline not system view app_dev=$appDev sys_dev=$sysDev")
+        Clear-MonitorTriggerConfig
+        return $false
+    }
+    Write-Host "  monitor_capture_baseline label=$label pid=$appPid dev=$sysDev"
+
+    # 触发「全量」reconcile：只写某个应用的配置走的是增量路径（计划被过滤到那个包，
+    # 目标应用不在里面就什么也不做），全量必须由全局配置变化触发——WebUI 保存规则时
+    # 同样是写应用配置 + 触碰 global.json。
+    Write-GlobalConfig (Get-TestGlobalConfig 'auto' $true)
+    $ok = Assert-StorageRootViewParity "$label-captured"
+    Clear-MonitorTriggerConfig
+    Invoke-Su "rm -rf '$RealRoot/.SrtRootDotVisible' '$fixture'" | Out-Null
+    return $ok
+}
+
 # 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透（与 .sh 同契约）。
 #
 # 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
@@ -4165,6 +4384,8 @@ function Invoke-Scenario {
         40 { (Invoke-SystemUidAttributionScenario $Scenario) -and (Invoke-AppCallerMediaProviderAttributionScenario $Scenario) -and (Invoke-SystemUidSandboxMissingTargetScenario $Scenario) }
         41 { Invoke-SandboxRootMetadataScenario $Scenario }
         42 { (Invoke-FileMutationLifecycleScenario $Scenario) -and (Invoke-FileMutationMetadataScenario $Scenario) }
+        43 { Invoke-StorageRootViewParityScenario $Scenario }
+        44 { Invoke-MonitorCaptureRootViewScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
     }
     $ok = ($scenarioOk -is [bool] -and $scenarioOk) -and $ok

@@ -307,7 +307,7 @@ class ScenarioScopeParseTest(unittest.TestCase):
         )
         # 必须真正读取清单得到上限，而不是无脑返回 DEFAULT_MAX_SCENARIO。
         self.assertEqual(SCOPE.max_scenario_from_json(), expected)
-        self.assertEqual(expected, 42)
+        self.assertEqual(expected, 44)
 
     def test_max_scenario_missing_manifest_uses_default(self) -> None:
         self.assertEqual(
