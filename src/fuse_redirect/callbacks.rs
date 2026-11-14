@@ -453,8 +453,7 @@ impl Filesystem for FuseRedirectFs {
                 .collect();
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let fh = state.next_handle();
-            let entries: Arc<[DirEntry]> =
-                materialize_dir_entries(&mut state, ino, &rel, candidates).into();
+            let entries: Arc<[DirEntry]> = materialize_dir_entries(&mut state, candidates).into();
             add_dir_entry_refs(&mut state, &entries);
             let entry_count = entries.len();
             state.dirs.insert(fh, entries);
@@ -616,9 +615,9 @@ impl Filesystem for FuseRedirectFs {
                     .record_dir_cache_peak_entries(state.dir_candidate_cache.len());
             }
             let fh = state.next_handle();
-            let entry_count = candidates.len().saturating_add(2);
-            let entries: Arc<[DirEntry]> =
-                materialize_dir_entries(&mut state, ino, &rel, candidates).into();
+            // 条目数不再额外 +2：readdir 不合成 `.`/`..`（与系统视图一致），统计口径同步。
+            let entry_count = candidates.len();
+            let entries: Arc<[DirEntry]> = materialize_dir_entries(&mut state, candidates).into();
             add_dir_entry_refs(&mut state, &entries);
             state.dirs.insert(fh, entries);
             break (fh, entry_count);
@@ -2159,6 +2158,9 @@ fn append_backend_dir_entries(
     let Ok(read_dir) = std::fs::read_dir(backend) else {
         return;
     };
+    // 根级判定只与 parent_rel 有关，循环外算一次：归一化要拼字符串，逐条目重算会让
+    // 大目录枚举多出 O(entries) 次分配。
+    let is_storage_root = policy.is_storage_root_view_rel(parent_rel);
     for item in read_dir.flatten() {
         let name = item.file_name().to_string_lossy().to_string();
         if name.is_empty() {
@@ -2174,11 +2176,13 @@ fn append_backend_dir_entries(
         // 刻意收窄——宿主自身与 media 视图会话仍需按路径访问这些目录。
         // .srx_passthrough_probe 是 passthrough 端到端探针在真实后端根的临时落点
         //（探测窗口毫秒级、事后删除），同样在根级对应用隐藏，避免枚举闪现。
-        if parent_rel.is_empty()
-            && matches!(
-                name.as_str(),
-                ".transforms" | ".picker_transcoded" | ".srx_passthrough_probe"
-            )
+        // 判据必须按归一后的存储相对路径判空（`is_storage_root_view_rel`）：视图根上提后
+        // 用户根在视图里是 `<user>` 这一级，`parent_rel.is_empty()` 只在未上提会话成立，
+        // 上提会话会整条跳过隐藏、把这两个目录暴露回根列表（2026-11-14 实测）。
+        if is_storage_root
+            && (crate::platform::paths_safety::MEDIA_PROVIDER_INTERNAL_DIR_NAMES
+                .contains(&name.as_str())
+                || name == ".srx_passthrough_probe")
         {
             continue;
         }
@@ -2299,43 +2303,26 @@ fn lifted_root_names(user_id: i32) -> Vec<String> {
     names
 }
 
+/// 把候选条目物化为带 inode 的目录项列表。
+///
+/// 不合成 `.` 与 `..`：系统 MediaProvider 的 FUSE 视图在 readdir 里不返回这两个条目
+/// （真机/A17 模拟器 `ls -a` 实测：基线根与子目录都没有点条目），模块视图若返回，
+/// 应用只要比对 `getdents` 结果就能分辨存储被接管。VFS 的路径解析自行处理 `.`/`..`，
+/// 不依赖文件系统在 readdir 里给出它们。
 fn materialize_dir_entries(
     state: &mut FuseState,
-    ino: INodeNo,
-    rel: &str,
     candidates: Vec<DirEntryCandidate>,
 ) -> Vec<DirEntry> {
-    let parent_rel = paths::parent(rel);
-    let parent_ino = if rel.is_empty() {
-        ROOT_INO
-    } else {
-        // quality-allow(chinese-language): ROOT_INO 是 FUSE 根 inode 的固定技术标识。
-        *state
-            .inodes
-            .get(&state.inode_key(&parent_rel))
-            .unwrap_or(&ROOT_INO)
-    };
-    let mut entries = Vec::with_capacity(candidates.len().saturating_add(2));
-    entries.push(DirEntry {
-        ino,
-        kind: FileType::Directory,
-        name: ".".to_string(),
-        rel: rel.to_string(),
-    });
-    entries.push(DirEntry {
-        ino: INodeNo(parent_ino),
-        kind: FileType::Directory,
-        name: "..".to_string(),
-        rel: parent_rel.clone(),
-    });
-    entries.extend(candidates.into_iter().map(|candidate| {
-        let ino = FuseRedirectFs::ino_for_path_locked(state, &candidate.rel);
-        DirEntry {
-            ino,
-            kind: candidate.kind,
-            name: candidate.name,
-            rel: candidate.rel,
-        }
-    }));
-    entries
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let ino = FuseRedirectFs::ino_for_path_locked(state, &candidate.rel);
+            DirEntry {
+                ino,
+                kind: candidate.kind,
+                name: candidate.name,
+                rel: candidate.rel,
+            }
+        })
+        .collect()
 }

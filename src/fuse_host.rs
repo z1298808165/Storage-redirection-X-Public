@@ -813,19 +813,22 @@ fn host_attach_child_main(
         libc::mkdir(c_target.as_ptr(), 0o755);
     }
 
-    // 4.5 替换而非叠加：摘掉系统视图层，让本会话成为该路径上唯一的一层。
+    // 4.5 替换而非叠加：清空该路径上的既有层，让本会话成为唯一的一层。
     //
     // 动机（应用域自检实测）：叠加会多出一条挂载、且为防外播必须私有化下层（其
     // `master:` 标签随之丢失）。基线应用在该路径上只有一条带 `master:` 的 fuse 层。
     //
-    // 前置条件已就绪：媒体目录恢复的 bind 已修好（fd 搬运 + 应用凭据），此前导致
-    // 首次尝试失败的根因不再是阻塞。
+    // 为什么必须**逐层摘到空**而不是摘一次：目标路径上可能同时压着不止一层——上一代
+    // 会话留下的层与系统视图层并存时，只摘栈顶会让底层留下来，应用命名空间里于是出现
+    // 两条同路径挂载（`0:73` 与 `0:74` 并排、父链仍指向系统层，真机实测）。层数在
+    // 接入前就确定的，摘到空再挂是本函数唯一能保证「挂载栈与基线同为一条」的做法。
     //
-    // 安全网：摘层前用 `open_tree` 克隆系统层作为回滚句柄；附着后验证失败就摘掉本会话层、
-    // 把系统层放回——宁可本轮不接管，也不能让应用失去存储。
-    let had_system_layer = !crate::mount_ledger::live_mounts_at(0, target_root).is_empty();
+    // 安全网：摘层前用 `open_tree` 克隆**原栈顶**（应用启动时看到的那个视图）作为回滚
+    // 句柄；附着或校验失败就把本会话层摘掉、把备份放回——宁可本轮不接管，也不能让
+    // 应用失去存储。
+    let had_existing_layer = !crate::mount_ledger::live_mounts_at(0, target_root).is_empty();
     let mut system_backup_fd = -1;
-    if had_system_layer {
+    if had_existing_layer {
         if !make_mount_slave_only(&c_target) {
             log::warn!(
                 "fuse host attach replace propagate failed target={}",
@@ -834,19 +837,34 @@ fn host_attach_child_main(
             return -1;
         }
         system_backup_fd = open_detached_mount(&c_target);
-        // SAFETY: c_target 是 NUL 结尾的合法路径；MNT_DETACH 只摘本命名空间这一份拷贝。
-        let removed = unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
-        if removed != 0 {
-            log::warn!(
-                "fuse host attach replace umount failed target={} errno={}",
-                target_root,
-                crate::platform::errno::last()
-            );
-            if system_backup_fd >= 0 {
-                // SAFETY: 回滚句柄由上方 open_detached_mount 打开。
-                unsafe { libc::close(system_backup_fd) };
+        match detach_all_layers_at_target(target_root, &c_target) {
+            Ok(layers) => {
+                if layers > 1 {
+                    log::info!(
+                        "fuse host attach replace detached extra layers target={} layers={}",
+                        target_root,
+                        layers
+                    );
+                }
             }
-            return -1;
+            Err(detached) => {
+                log::warn!(
+                    "fuse host attach replace umount failed target={} detached={} errno={}",
+                    target_root,
+                    detached,
+                    crate::platform::errno::last()
+                );
+                // 已经摘掉若干层时必须把原栈顶放回去：否则应用在剩下的下层上继续跑，
+                // 那一层的归属与内容都不可预期（最坏是空的 tmpfs 目录 → 存储消失）。
+                if detached > 0 && system_backup_fd >= 0 {
+                    let _ = move_detached_mount(system_backup_fd, &c_target);
+                }
+                if system_backup_fd >= 0 {
+                    // SAFETY: 回滚句柄由上方 open_detached_mount 打开（放回后即失效）。
+                    unsafe { libc::close(system_backup_fd) };
+                }
+                return -1;
+            }
         }
     }
 
@@ -880,9 +898,31 @@ fn host_attach_child_main(
         return -1;
     }
 
+    // 5.2 单层不变式：视图根上只允许本会话这一层。
+    //
+    // 4.5 已经把既有层摘到空，正常情况下这里恒为 1。判断仍然要做：摘层与 `move_mount`
+    // 之间没有互斥，系统侧（MediaProvider 的按应用 FUSE 视图）完全可能在这段时间里
+    // 重新建一层；一旦成立，应用 `mountinfo` 里就是两条同路径挂载，与基线不一致，且
+    // 上层归属不可判定。此时整体回滚（摘净、放回备份），宁可本轮不接管也不留下叠层。
+    // 校验必须放在 5.5 之前：那里的探测通过后会关闭回滚句柄，之后就不能再回滚了。
+    let layer_count = crate::mount_ledger::live_mounts_at(0, target_root).len();
+    if layer_count != 1 {
+        log::warn!(
+            "fuse host attach layer stack unexpected target={} layers={}",
+            target_root,
+            layer_count
+        );
+        if system_backup_fd >= 0 && detach_all_layers_at_target(target_root, &c_target).is_ok() {
+            let _ = move_detached_mount(system_backup_fd, &c_target);
+            // SAFETY: 回滚句柄放回后即失效。
+            unsafe { libc::close(system_backup_fd) };
+        }
+        return -1;
+    }
+
     // 5.5 替换后的可用性验证：以**应用凭据**（fsuid + everybody 组）探测视图根。
     //     `EACCES` 说明会话已接住请求（活着），只有 ENOENT/ENOTCONN 等"没人应答"才回滚。
-    if had_system_layer && target_root.trim_end_matches('/').ends_with("/emulated") {
+    if had_existing_layer && target_root.trim_end_matches('/').ends_with("/emulated") {
         // SAFETY: getgroups 只读取当前进程的补充组。
         let mut previous_groups = [0 as libc::gid_t; 64];
         let previous_count = unsafe {
@@ -921,13 +961,19 @@ fn host_attach_child_main(
                 "fuse host attach replace tree unusable target={}",
                 target_root
             );
-            // SAFETY: 摘掉刚附着的本会话层。
-            let removed = unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
-            let restored = if removed == 0 {
-                move_detached_mount(system_backup_fd, &c_target).is_ok()
-            } else {
-                false
-            };
+            // 没有可用备份时不得摘层：摘掉本会话层后目标就空了，应用会直接失去存储。
+            // 这种情况下宁可保留本会话层（它至少能服务请求）并如实报失败。
+            if system_backup_fd < 0 {
+                log::warn!(
+                    "fuse host attach replace unusable without backup target={}",
+                    target_root
+                );
+                return -1;
+            }
+            // SAFETY: 摘掉刚附着的本会话层（以及任何同期出现的额外层）。
+            let detached = detach_all_layers_at_target(target_root, &c_target);
+            let restored =
+                detached.is_ok() && move_detached_mount(system_backup_fd, &c_target).is_ok();
             // SAFETY: 回滚句柄放回后即失效。
             unsafe { libc::close(system_backup_fd) };
             log::warn!(
@@ -1173,6 +1219,38 @@ fn open_detached_mount(path: &CStr) -> libc::c_int {
             OPEN_TREE_CLONE,
         ) as libc::c_int
     }
+}
+
+/// 视图根上允许同时存在的层数。
+///
+/// 基线在该路径只有一条 fuse 层，所以接入后的目标状态恒为 1；这里的上限只用于把
+/// 「未知来源的异常堆叠」收敛掉，而不是允许它存在。
+const MAX_VIEW_LAYERS: usize = 8;
+
+/// 逐层摘除 `target` 上的**所有**挂载。
+///
+/// 成功返回摘除层数；超过 [`MAX_VIEW_LAYERS`] 或任一次 `umount` 失败返回
+/// `Err(已摘掉的层数)`——调用方据此决定是否要把备份的栈顶放回去（摘了一层以上就必须
+/// 回滚，否则应用会落到归属不明的下层）。
+///
+/// 为什么不能只摘一次：`umount2(path)` 只摘该路径上最顶层的挂载，底层会立刻露出来。
+/// 目标路径上同时有上一代会话层与系统视图层时，只摘一次就让底层留在应用命名空间里，
+/// 接入后又多出本会话层——应用 `mountinfo` 里出现两条同路径挂载，与基线不一致（真机
+/// 实测 `0:73`/`0:74` 并排、父链指向系统层）。接入要求「替换」，就得摘到空为止。
+fn detach_all_layers_at_target(target_root: &str, target: &CStr) -> Result<usize, usize> {
+    let mut detached = 0usize;
+    while !crate::mount_ledger::live_mounts_at(0, target_root).is_empty() {
+        if detached >= MAX_VIEW_LAYERS {
+            return Err(detached);
+        }
+        // SAFETY: target 是 NUL 结尾的合法路径；MNT_DETACH 只摘本命名空间这一份拷贝。
+        let removed = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+        if removed != 0 {
+            return Err(detached);
+        }
+        detached += 1;
+    }
+    Ok(detached)
 }
 
 /// 把**本命名空间内**的挂载点改为私有，切断与其它命名空间的传播关系。

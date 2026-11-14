@@ -1469,7 +1469,9 @@ impl RedirectPolicy {
         if self.deny_all || self.has_wildcard_rules {
             return false;
         }
-        if parent_rel.trim_matches('/').is_empty() {
+        // 存储根自身放弃短路（条目少，逐条路由更稳）。判据必须与根级隐藏同口径：
+        // 视图根上提后用户根在视图里是 `<user>` 这一级，只判空串会把它当普通子目录。
+        if self.is_storage_root_view_rel(parent_rel) {
             return false;
         }
         let parent_storage = self.storage_path_for_rel(parent_rel);
@@ -1604,6 +1606,16 @@ impl RedirectPolicy {
             rel
         };
         self.full_storage_rel(rel)
+    }
+
+    /// 视图相对路径是否就是**用户存储根**。
+    ///
+    /// 两种视图口径必须同时覆盖：视图根未上提时挂载根就是用户根（rel 为空），上提后挂载根是
+    /// `…/emulated`、用户根变成 `<user>` 这一级。根级语义（隐藏 MediaProvider 内部目录等）
+    /// 只判 `rel.is_empty()` 会把上提会话里的用户根当成普通子目录（`0`），整条根级过滤
+    /// 静默失效；按归一口径判空才对两种形态等价。
+    pub(super) fn is_storage_root_view_rel(&self, rel: &str) -> bool {
+        self.normalized_full_storage_rel(rel).is_empty()
     }
 
     pub(super) fn real_backend_for_rel(&self, rel: &str) -> PathBuf {

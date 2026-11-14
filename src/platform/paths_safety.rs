@@ -6,11 +6,30 @@
 use crate::platform::paths::{STORAGE_EMULATED_PREFIX, is_absolute, normalize};
 use crate::platform::paths_roots::is_valid_package_name;
 
+/// MediaProvider 在存储根下自建的内部目录名。
+///
+/// 原生 FUSE 在存储根级对应用隐藏它们，模块侧有两处判定必须用同一份名字表：
+/// 监控/配置路径过滤（[`is_filtered_media_provider_path`]）与根级目录枚举
+/// （`fuse_redirect::callbacks`）。分开各写一份会漂移——2026-11 的 `.transforms`
+/// 根级泄漏就出在枚举侧另写了一份判据。
+pub const MEDIA_PROVIDER_INTERNAL_DIR_NAMES: [&str; 2] = [".transforms", ".picker_transcoded"];
+
 pub fn is_filtered_media_provider_path(path: &str) -> bool {
-    path.contains("/.transforms/")
-        || path.ends_with("/.transforms")
-        || path.contains("/.picker_transcoded/")
-        || path.ends_with("/.picker_transcoded")
+    MEDIA_PROVIDER_INTERNAL_DIR_NAMES
+        .iter()
+        .any(|name| contains_dir_name(path, name))
+}
+
+/// `path` 是否含有名为 `name` 的完整路径段（`/name` 结尾或 `/<name>/…`）。
+///
+/// 不认裸文件名、不认 `name` 作为更长的段前缀：与旧实现的
+/// `contains("/<name>/") || ends_with("/<name>")` 逐字节等价，但不做字符串拼接。
+fn contains_dir_name(path: &str, name: &str) -> bool {
+    path.match_indices('/').any(|(index, _)| {
+        path[index + 1..]
+            .strip_prefix(name)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with('/'))
+    })
 }
 
 /// 把 MediaStore 未提交文件的 `.pending-<id>-<显示名>` 路径还原为显示名路径。
