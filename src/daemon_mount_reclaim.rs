@@ -13,9 +13,8 @@ use crate::platform::errno::{last as last_errno, text as errno_text};
 use crate::platform::module_paths;
 use crate::platform::paths::monotonic_ms;
 use libc::{SIGKILL, WNOHANG, waitpid};
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 const MAX_STUCK_MOUNT_CHILDREN: usize = 2;
 /// 卡死子进程计入熔断的时长窗口。
@@ -33,8 +32,8 @@ const MAX_TOTAL_STUCK_MOUNT_CHILDREN: usize = 32;
 const MAX_TRACKED_STUCK_MOUNT_CHILDREN: usize = 64;
 const STUCK_MOUNT_SKIP_LOG_STEP: u64 = 32;
 
-static STUCK_MOUNT_CHILDREN: Lazy<Mutex<Vec<StuckMountChild>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
+static STUCK_MOUNT_CHILDREN: LazyLock<Mutex<Vec<StuckMountChild>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 static STUCK_MOUNT_SKIP_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static STALE_HOST_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 

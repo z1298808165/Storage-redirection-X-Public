@@ -26,12 +26,11 @@ use crate::platform::paths::monotonic_ms;
 use crate::platform::{self, paths};
 use crate::redirect::{policy, writer, writer::ANDROID_APP_UID_START};
 use libc::{time, tm};
-use once_cell::sync::Lazy;
 use stack_owner::infer_package_from_java_stack;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
-    Mutex,
+    LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use thread_hint::infer_component_from_thread_name;
@@ -637,7 +636,7 @@ impl AuditTrail {
     }
 }
 
-static AUDIT_TRAIL: Lazy<AuditTrail> = Lazy::new(|| AuditTrail {
+static AUDIT_TRAIL: LazyLock<AuditTrail> = LazyLock::new(|| AuditTrail {
     is_enabled: AtomicBool::new(true),
     state: Mutex::new(AuditState::new()),
 });

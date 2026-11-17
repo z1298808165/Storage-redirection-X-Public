@@ -1,12 +1,11 @@
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
 use crate::mount_ledger::NamespaceIdentity;
 use crate::platform::{fs, module_paths, paths};
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::FuseRedirectConfig;
 use super::backend_overlay;
@@ -47,16 +46,16 @@ const MAX_RECENT_MONITOR_CREATES: usize = 256;
 static NAMESPACE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static NAMESPACE_POLICY_MISSES: AtomicU64 = AtomicU64::new(0);
 
-static RECENT_MONITOR_CREATES: Lazy<Mutex<HashMap<String, i64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static RECENT_MONITOR_CREATES: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 跨应用只读别名兜底的会话表句柄：共享宿主进程内所有已登记应用的策略。
 ///
 /// 由 [`SharedPolicyTable::register`] 首次按 uid 登记时挂入，始终指向同一份活表，
 /// 应用策略的新增与覆盖对兜底解析即时可见。scoped 独立会话进程不经过按 uid 登记，
 /// 表中「其它应用」集合为空，跨应用兜底自然不生效，行为与改动前一致。
-static CROSS_SESSION_POLICY_TABLE: Lazy<Mutex<Option<SharedPolicyTable>>> =
-    Lazy::new(|| Mutex::new(None));
+static CROSS_SESSION_POLICY_TABLE: LazyLock<Mutex<Option<SharedPolicyTable>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// 跨应用只读别名兜底的交接信号窗口与容量。
 ///
@@ -66,8 +65,8 @@ static CROSS_SESSION_POLICY_TABLE: Lazy<Mutex<Option<SharedPolicyTable>>> =
 /// 窗口只用于吸收 B 侧多轮探测与重试的间隔；容量上限防止长会话进程内无界增长。
 const CROSS_APP_HANDOFF_TTL_MS: i64 = 60_000;
 const CROSS_APP_HANDOFF_CAPACITY: usize = 256;
-static RECENT_CROSS_APP_HANDOFFS: Lazy<Mutex<HashMap<String, i64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static RECENT_CROSS_APP_HANDOFFS: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(super) struct BackendPath {
     pub(super) rel: String,
@@ -153,7 +152,7 @@ type PackageUidCache = Option<((u64, u64), HashMap<String, i32>)>;
 
 /// 宿主单独缓存 PM 生成的快照，不继承 daemon 使用的共享 UID 锁。
 pub(super) fn package_uid(package: &str) -> Option<i32> {
-    static CACHE: Lazy<Mutex<PackageUidCache>> = Lazy::new(|| Mutex::new(None));
+    static CACHE: LazyLock<Mutex<PackageUidCache>> = LazyLock::new(|| Mutex::new(None));
     let meta = std::fs::metadata(module_paths::SYSTEM_WRITER_UIDS_FILE).ok()?;
     let version = (
         meta.modified()

@@ -33,6 +33,7 @@ build_module_dir() {
       ;;
   esac
   cp "$SO_FILE" "$module_dir/zygisk/${MODULE_ABI}.so"
+  sha256sum "$module_dir/zygisk/${MODULE_ABI}.so" | awk '{print $1}' > "$module_dir/zygisk/${MODULE_ABI}.so.sha256"
   sed -i "s|zygisk/arm64-v8a.so|zygisk/${MODULE_ABI}.so|g" "$module_dir/zn_modules.txt"
   mkdir -p "$module_dir/bin"
   if [[ -d assets/zygisk_module/bin ]]; then

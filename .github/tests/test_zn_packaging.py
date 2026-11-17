@@ -1,3 +1,4 @@
+import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +26,9 @@ class ZnPackagingTest(unittest.TestCase):
                     )
                     with zipfile.ZipFile(archive) as package:
                         manifest = package.read("zn_modules.txt")
+                        library = package.read(f"zygisk/{abi}.so")
+                        checksum = package.read(f"zygisk/{abi}.so.sha256").decode().strip()
                         self.assertEqual(manifest, f"path=/system_ext/bin/hyos_spawner companion zygisk/{abi}.so\n".encode())
                         self.assertIn(f"zygisk/{abi}.so", package.namelist())
+                        self.assertEqual(checksum, hashlib.sha256(library).hexdigest())
                         self.assertEqual(package.getinfo("zn_modules.txt").compress_type, zipfile.ZIP_STORED)

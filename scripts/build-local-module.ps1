@@ -108,7 +108,7 @@ function Invoke-WslCargoBuild {
     Invoke-Checked -FilePath $wsl.Source -Arguments @(
         "--cd", $RepoRoot, "--exec", "bash", "-lc",
         'ndk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?}}/ndk/$1"; test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" || { echo "Android NDK $1 not found in WSL SDK" >&2; exit 1; }; shift; exec env ANDROID_NDK_HOME="$ndk" ANDROID_NDK_ROOT="$ndk" CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" "$@"',
-        "_", $PreferredNdkVersion, "cargo", "build", "--target-dir", "target", "--target", "aarch64-linux-android", "--release"
+        "_", $PreferredNdkVersion, "cargo", "build", "--locked", "--target-dir", "target", "--target", "aarch64-linux-android", "--release"
     )
 }
 

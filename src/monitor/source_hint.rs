@@ -5,10 +5,9 @@ use super::hint_file::{
 };
 use crate::platform::{self, paths};
 use crate::redirect::policy;
-use once_cell::sync::Lazy;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
-    Mutex,
+    LazyLock, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -46,10 +45,10 @@ pub(super) struct PathCallerHint {
     pub(super) correlation_id: String,
 }
 
-static RECENT_PRIVATE_OWNER_HINT: Lazy<Mutex<VecDeque<PrivateOwnerHint>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
-static RECENT_PATH_CALLER_HINT: Lazy<Mutex<VecDeque<PathCallerHint>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
+static RECENT_PRIVATE_OWNER_HINT: LazyLock<Mutex<VecDeque<PrivateOwnerHint>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static RECENT_PATH_CALLER_HINT: LazyLock<Mutex<VecDeque<PathCallerHint>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
 static NEXT_PATH_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]

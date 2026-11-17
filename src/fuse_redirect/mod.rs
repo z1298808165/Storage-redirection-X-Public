@@ -48,10 +48,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
-
-use once_cell::sync::Lazy;
 
 /// attr 有效期：与原生 MP FuseDaemon 对齐（10s）。writeback 回写模式下内核在
 /// 本地维护 inode 的 i_size，应用轮询 stat 命中未过期的内核缓存时拿到的是
@@ -71,8 +69,8 @@ const SYSTEM_REQUESTER_CACHE_CAP: usize = 256;
 /// 系统 uid 请求者身份缓存条目：(解析时刻单调毫秒，身份；None 表示 pid 当时
 /// 不可归因——缓存失败结果避免 miss 风暴)。
 type SystemRequesterCacheEntry = (i64, Option<RequesterIdentity>);
-static SYSTEM_REQUESTER_CACHE: Lazy<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static SYSTEM_REQUESTER_CACHE: LazyLock<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// 目录候选缓存的存活时间。
 ///
 /// 命中前会逐源校验目录 mtime（`DirectorySourceSignature`），文件增删都会改变父目录

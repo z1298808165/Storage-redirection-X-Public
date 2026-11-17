@@ -4,9 +4,9 @@
 
 ## 工具要求
 
-| 工具 | 最低版本 | 说明 |
+| 工具 | 版本或最低版本 | 说明 |
 |------|----------|------|
-| Rust | nightly (edition 2024) | WSL 中需要 `let_chains` 等特性 |
+| Rust | 见 `rust-toolchain.toml` | WSL 构建使用仓库固定的 nightly（edition 2024） |
 | Android NDK | r30+ | WSL 中用于交叉编译和 LSPlant C++ 构建 |
 | CMake | 3.28+ | WSL 中 LSPlant C++ 模块构建依赖（Ninja 生成器） |
 | Ninja | 1.10+ | WSL 中的 CMake 生成器 |

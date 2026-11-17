@@ -2220,10 +2220,21 @@ class ScenarioConsistencyTest(unittest.TestCase):
         }
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             source = read(workflow)
+            test_flow_build = section(source, "  test-flow-build:", "  test-flow:")
+            rust_toolchain = section(
+                test_flow_build,
+                "      - name: Install pinned Rust toolchain",
+                "      - name: Configure Cargo for Android NDK",
+            )
             build = section(source, "      - name: Build x86_64 module zip and test app", "      - name: Upload")
             test_flow = section(source, "  test-flow:", "  test-flow-required:")
             artifact = test_flow[test_flow.index("          path: |") :]
 
+            self.assertIn("components: clippy", rust_toolchain)
+            self.assertIn(
+                "cargo clippy --target x86_64-linux-android --release --all-targets --locked",
+                test_flow_build,
+            )
             self.assertIn("bash .github/scripts/build_test_flow_runtime.sh", build)
             self.assertIn("build/test-flow/native/*", source)
             self.assertIn("SRT_FAIL_FAST: 1", test_flow)
@@ -2235,6 +2246,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         script = read(".github/scripts/build_test_flow_runtime.sh")
         self.assertIn('bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" build/test-flow/native', script)
         self.assertIn('cargo build --target "$TARGET_TRIPLE" --release', script)
+        self.assertIn('cargo metadata --format-version 1 --no-deps --locked', script)
+        self.assertIn('${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/libsrx_core.so', script)
         self.assertIn(":storageRedirectTestApp:assembleDebug", script)
         native_build = read(".github/scripts/build_native_tests.sh")
         self.assertIn('cargo test -p srx_core --target "$target" --no-run --message-format=json', native_build)
@@ -2279,6 +2292,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("function Invoke-WslCargoBuild", module)
         self.assertIn("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=", module)
         self.assertIn('"cargo", "build"', module)
+        self.assertIn('"build", "--locked"', module)
         self.assertNotIn('Invoke-Checked -FilePath "cargo"', module)
         self.assertIn("function Invoke-WslGradle", app)
         self.assertIn('exec ./gradlew "$@"', app)

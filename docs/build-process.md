@@ -9,7 +9,7 @@
 本地 Rust 编译在 WSL 中执行。Windows PowerShell 入口可以调用 WSL 构建；设备安装与场景执行使用 Windows ADB。用于刷入设备的常规构建：
 
 ```bash
-cargo build --target aarch64-linux-android --release
+cargo build --target aarch64-linux-android --release --locked
 ```
 
 产物位于 `target/aarch64-linux-android/release/libsrx_core.so`。
@@ -70,7 +70,7 @@ RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
 可在主机运行的 Rust fixture 测试需在 WSL 中单独执行：
 
 ```bash
-cargo test -p native-config-fixtures
+cargo test -p native-config-fixtures --locked
 ```
 
 接着在 Windows 上使用构建产物，并直接运行 PowerShell 设备脚本；安装和设备场景步骤见[设备侧测试说明](device-testing.md#本地完整验证)。不要把 Windows ADB 转发给 WSL。CI/Release 继续在 Linux runner 中使用完整 shell 测试流，在其 Android 模拟器上运行设备场景。
@@ -203,13 +203,7 @@ CI 构建成功后会把测试版信息写入 `beta`；正式 Release 成功后�
 
 ### 在主机上直接运行 `cargo test`
 
-`srx_hook` 是 Android-only 依赖，在 Windows 或 WSL host 直接执行根 crate 的普通 `cargo test` 可能报：
-
-```text
-srx_hook supports Android only (use cargo clippy/test/doc on host for development)
-```
-
-这不代表 Android 目标构建失败。WSL 中用 `cargo test --target aarch64-linux-android --no-run` 编译 Android 测试二进制，用 `cargo build --target aarch64-linux-android --release` 构建设备模块；可在主机执行的 fixture 测试用 `cargo test -p native-config-fixtures` 运行。
+根库通过 crate-level `cfg(target_os = "android")` 限定为 Android，主 crate 的依赖（包括 `srx_hook`）也只声明在 Android target dependencies 中。因此 Windows 或 WSL host 不会编译 Android-only 部分。WSL 中用 `cargo test --target aarch64-linux-android --no-run --locked` 编译 Android 测试二进制，用 `cargo build --target aarch64-linux-android --release --locked` 构建设备模块；可在主机执行的 fixture 测试用 `cargo test -p native-config-fixtures --locked` 运行。
 
 ### d8 内部类文件名问题
 

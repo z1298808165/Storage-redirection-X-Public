@@ -2036,7 +2036,7 @@ fn abort_fuse_connection(connection: i32) {
     }
 }
 
-/// 停摆取证双写落盘：running.log 之外独立追加一份到 [`STALL_FORENSICS_LOG`]。
+/// 停摆取证双写落盘：running.log 之外独立追加一份到 `STALL_FORENSICS_LOG`。
 ///
 /// running.log 按体积轮转且挂载风暴期每秒可产生数千行——gen4 冻结现场的会话
 /// 启动期记录（含锚点建立结果）在数分钟内即被轮出丢失，归因被迫依赖推断。独立
@@ -2110,7 +2110,7 @@ static SCENE_LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 static SCENE_BUDGET: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(HOST_STALL_SCENE_LINE_BUDGET_CANDIDATE);
 
-/// 场景取证专用落盘：受 [`HOST_STALL_SCENE_LINE_BUDGET`] 约束。
+/// 场景取证专用落盘：受当前场景行数预算约束。
 ///
 /// 与 [`forensics_log`] 分开，是因为后者还被「确认停摆」「锚点建立」等一次性事件使用，
 /// 那些不该被场景预算截断。
@@ -2249,7 +2249,7 @@ fn dump_stall_scene(connection: i32, elapsed_ms: i64, detailed: bool) {
 ///
 /// 因此按「是否可能参与存储路径解析」优先输出：命中 `storage` / `/data` / `fuse` /
 /// `emulated` / 模块目录的行先写，其余按剩余额度补足，总量封顶
-/// [`HOST_STALL_MOUNTINFO_LINES`]。截断时显式写一行 `truncated`，避免事后误判为
+/// `HOST_STALL_MOUNTINFO_LINES`。截断时显式写一行 `truncated`，避免事后误判为
 /// 「挂载表就这么长」。
 fn dump_host_mountinfo() {
     const HOST_STALL_MOUNTINFO_LINES: usize = 48;

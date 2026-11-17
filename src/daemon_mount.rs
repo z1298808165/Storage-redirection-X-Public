@@ -28,11 +28,10 @@ use libc::{
     AF_UNIX, CLONE_NEWNS, MNT_DETACH, O_CLOEXEC, O_RDONLY, SIGKILL, SIGTERM, SOCK_DGRAM, c_int,
     close, open, setns, socketpair, umount2,
 };
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 const PARENT_RECV_TIMEOUT_SEC: i64 = 5;
 const PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
@@ -42,9 +41,10 @@ const MAX_UNMOUNT_PASSES_PER_TARGET: usize = 32;
 /// 摘除预算的硬上限：越过软上限（32）后继续摘本模块可归属的层，达到该值才放弃。
 /// 深栈来自失败轮次的累积，软上限继续 fail-closed 会把残留钉到应用退出。
 const MAX_UNMOUNT_PASSES_HARD_LIMIT: usize = MAX_UNMOUNT_PASSES_PER_TARGET * 4;
-static ACTIVE_MOUNT_PIDS: Lazy<Mutex<HashSet<i32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static LAST_SUCCESS_BY_PID: Lazy<Mutex<HashMap<i32, (u64, u64)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static ACTIVE_MOUNT_PIDS: LazyLock<Mutex<HashSet<i32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static LAST_SUCCESS_BY_PID: LazyLock<Mutex<HashMap<i32, (u64, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountOperation {
     Reload,
@@ -2355,8 +2355,8 @@ type PreRegisterFingerprint = (i32, u64, u64);
 /// 归一化）并把注册日志刷到秒级轮转。指纹任一分量变化都会自然失效重登记：宿主换代
 /// （pid/start_ticks）、策略变更（policy_fingerprint）、MediaProvider 重启（由
 /// reconcile 显式清空本表）。
-static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerprint>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static PRE_REGISTERED_HOST_POLICIES: LazyLock<Mutex<HashMap<u32, PreRegisterFingerprint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 已为哪个**应用进程实例**登记过 mount namespace 策略：uid -> (app_pid, start_ticks)。
 ///
@@ -2365,8 +2365,8 @@ static PRE_REGISTERED_HOST_POLICIES: Lazy<Mutex<HashMap<u32, PreRegisterFingerpr
 /// 无效，但按 uid 的指纹仍然命中，于是「已登记」的结论把这个变化盖住了。此后该
 /// namespace 里的 root 调用方（挂载子进程、MediaProvider 的 root 线程）请求会落进
 /// namespace miss + deny_all 回退，表现为整片 ENOENT。这张表专门用来发现这种不同步。
-static REGISTERED_APP_NAMESPACES: Lazy<Mutex<HashMap<u32, (i32, u64)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static REGISTERED_APP_NAMESPACES: LazyLock<Mutex<HashMap<u32, (i32, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// MediaProvider 进程集合变化时清空预登记指纹表。
 ///

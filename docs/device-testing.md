@@ -38,7 +38,7 @@ RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
 另行运行可在主机执行的 Rust fixture 测试：
 
 ```bash
-cargo test -p native-config-fixtures
+cargo test -p native-config-fixtures --locked
 ```
 
 CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试流。

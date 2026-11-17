@@ -23,10 +23,9 @@
 // - 目录不可枚举（权限不足、条目过多）→ 退回逐条存在性检查，结论与改动前一致。
 
 use crate::platform::paths;
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 /// 枚举结果的有效期：与内核 dentry/属性缓存、FUSE 侧目录候选缓存同一量级。
 /// 它只决定「新增文件最迟多久可见」，窗口外的判定与逐条 faccessat 等价。
@@ -85,7 +84,8 @@ struct SnapshotCache {
 /// MediaProvider 的查询会并发跑在多个线程上，而同一批行通常落在同一批目录：
 /// 共享一份缓存比每线程各枚举一次更省，也让缓存的规模只由目录数与目录条目数
 /// 决定（两者都有上限）。逐行的锁只做一次哈希查表，未命中时才在锁外做系统调用。
-static SNAPSHOTS: Lazy<Mutex<SnapshotCache>> = Lazy::new(|| Mutex::new(SnapshotCache::default()));
+static SNAPSHOTS: LazyLock<Mutex<SnapshotCache>> =
+    LazyLock::new(|| Mutex::new(SnapshotCache::default()));
 
 /// 游标行存在性判定：按目录折叠枚举，逐行只做一次名字查表。
 pub(crate) fn path_exists_for_cursor_row(path: &str) -> bool {

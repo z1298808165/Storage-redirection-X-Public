@@ -1,10 +1,9 @@
 use crate::domain::PathMapping;
 use crate::platform;
 use crate::platform::module_paths;
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 /// 普通应用存储数据面的内部规划模式。
 ///
@@ -356,4 +355,4 @@ impl SettingsHub {
     }
 }
 
-static SETTINGS_HUB: Lazy<SettingsHub> = Lazy::new(SettingsHub::new);
+static SETTINGS_HUB: LazyLock<SettingsHub> = LazyLock::new(SettingsHub::new);

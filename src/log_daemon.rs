@@ -296,7 +296,7 @@ fn timespec_from_ms(ms: i32) -> libc::timespec {
     }
 }
 
-/// 限频告警：同一类失败最多每 [`WARN_THROTTLE_MS`] 输出一条。
+/// 限频告警：同一类失败最多每 `WARN_THROTTLE_MS` 输出一条。
 fn warn_throttled(label: &str, errno: i32) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);

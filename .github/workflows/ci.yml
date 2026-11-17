@@ -68,8 +68,8 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
-          components: rustfmt
+          toolchain: nightly-2026-11-17
+          components: rustfmt, clippy
 
       - name: Verify source formatting
         run: |
@@ -79,10 +79,11 @@ jobs:
 
       - name: Run fast repository tests
         run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
           node scripts/verify-webui-structure.js
           node scripts/verify-webui-config-fixtures.js
           node scripts/verify-webui-app-list-parser.js
-          cargo test -p native-config-fixtures
+          cargo test -p native-config-fixtures --locked
           python -m unittest discover -s .github/tests -p "test_*.py" -v
 
       - name: Verify inline tests and incremental quality
@@ -209,7 +210,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
+          toolchain: nightly-2026-11-17
           targets: aarch64-linux-android
           components: clippy
 
@@ -253,18 +254,21 @@ jobs:
       # 用 --all-targets 覆盖 src/bin 与内联测试：此前只查 --lib，二进制目标下的
       # 告警长期无人发现（log_daemon.rs 的 manual_inspect 即由此漏出）。
       - name: Run clippy lint gate
-        run: cargo clippy --target aarch64-linux-android --release --all-targets -- -D warnings
+        run: cargo clippy --target aarch64-linux-android --release --all-targets --locked -- -D warnings
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
+      - name: Verify Android rustdoc without warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --target aarch64-linux-android --no-deps --locked
+
       - name: Build Rust test binaries
-        run: cargo test --target aarch64-linux-android --no-run
+        run: cargo test --target aarch64-linux-android --no-run --locked
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Build module binaries
         run: |
-          cargo build --target aarch64-linux-android --release
+          cargo build --target aarch64-linux-android --release --locked
           mkdir -p build/module-bin
           cp target/aarch64-linux-android/release/libsrx_core.so build/module-bin/libsrx_core.so
           cp target/aarch64-linux-android/release/srx_daemon build/module-bin/srx_daemon
@@ -491,8 +495,9 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
+          toolchain: nightly-2026-11-17
           targets: x86_64-linux-android
+          components: clippy
 
       - name: Configure Cargo for Android NDK
         run: |
@@ -521,6 +526,11 @@ jobs:
           key: ${{ runner.os }}-cargo-target-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'build.rs') }}
           restore-keys: |
             ${{ runner.os }}-cargo-target-x86_64-
+
+      - name: Run x86_64 Clippy lint gate
+        run: cargo clippy --target x86_64-linux-android --release --all-targets --locked -- -D warnings
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Build x86_64 module zip and test app
         run: |

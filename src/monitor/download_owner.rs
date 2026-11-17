@@ -2,11 +2,10 @@ use crate::platform::paths;
 use crate::redirect::policy;
 use crate::zygisk::jni;
 use jni_sys::{JNIEnv, jclass, jint, jmethodID, jobject, jobjectArray, jstring, jvalue};
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU32};
+use std::sync::{LazyLock, Mutex};
 
 const DOWNLOADS_URI: &str = "content://downloads/all_downloads";
 const STORAGE_PREFIX: &str = "/storage/emulated/";
@@ -93,8 +92,8 @@ impl DownloadOwnerCache {
     }
 }
 
-static DOWNLOAD_OWNER_CACHE: Lazy<Mutex<DownloadOwnerCache>> =
-    Lazy::new(|| Mutex::new(DownloadOwnerCache::new()));
+static DOWNLOAD_OWNER_CACHE: LazyLock<Mutex<DownloadOwnerCache>> =
+    LazyLock::new(|| Mutex::new(DownloadOwnerCache::new()));
 
 // 按下载目标路径反查发起下载的应用包名
 pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<String> {

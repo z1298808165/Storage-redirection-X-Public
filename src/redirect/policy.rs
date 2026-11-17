@@ -1,10 +1,9 @@
 // 系统代写与共享 UID 策略
 use crate::platform::module_paths::SYSTEM_WRITER_UIDS_FILE;
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
 const MEDIA_PROVIDER_GOOGLE: &str = "com.google.android.providers.media.module";
@@ -37,8 +36,8 @@ impl Default for SharedUidState {
     }
 }
 
-static SHARED_UID_STATE: Lazy<Mutex<SharedUidState>> =
-    Lazy::new(|| Mutex::new(SharedUidState::default()));
+static SHARED_UID_STATE: LazyLock<Mutex<SharedUidState>> =
+    LazyLock::new(|| Mutex::new(SharedUidState::default()));
 
 pub fn is_system_writer_package(package_name: &str) -> bool {
     is_system_writer_candidate(package_name)

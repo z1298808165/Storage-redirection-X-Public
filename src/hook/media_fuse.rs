@@ -4,10 +4,9 @@ use crate::config::SettingsHub;
 use crate::monitor::{AuditTrail, OpKind};
 use crate::platform::{self, paths};
 use crate::redirect::{policy, writer};
-use once_cell::sync::Lazy;
 use std::collections::VecDeque;
 use std::ffi::CString;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 const READ_ONLY_DENY_REASON: &str = "deny_reason=read_only_rule";
 const FUSE_CALLER_MAX_AGE_MS: i64 = 1500;
@@ -30,8 +29,9 @@ struct RecentPrivateOwnerSqliteAccess {
     updated_ms: i64,
 }
 
-static RECENT_PRIVATE_OWNER_SQLITE_ACCESS: Lazy<Mutex<VecDeque<RecentPrivateOwnerSqliteAccess>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
+static RECENT_PRIVATE_OWNER_SQLITE_ACCESS: LazyLock<
+    Mutex<VecDeque<RecentPrivateOwnerSqliteAccess>>,
+> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 pub fn record_read_only_fuse_operation(
     kind_code: i32,

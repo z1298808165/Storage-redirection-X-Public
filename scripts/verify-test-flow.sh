@@ -48,8 +48,8 @@ echo "==> Build Rust test binaries for $TARGET_TRIPLE"
 bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" "$BUILD_DIR/native"
 
 echo "==> Build SRX module binaries for $TARGET_TRIPLE"
-cargo build --target "$TARGET_TRIPLE" --release
-CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps | "${python_cmd[@]}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+cargo build --target "$TARGET_TRIPLE" --release --locked
+CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps --locked | "${python_cmd[@]}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/libsrx_core.so" "$BUILD_DIR/module-bin/libsrx_core.so"
 cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/srx_daemon" "$BUILD_DIR/module-bin/srx_daemon"
 
