@@ -1,8 +1,4 @@
-// 应用主线程上**没有任何**挂载等待预算：请求发出后立刻关闭连接，就位判定是一次观测
-// （不睡眠、不轮询）。历史上这里有过 220 × 50ms = 11 秒的轮询（超过 AMS 的启动超时线，
-// 真机表现为 `failed to attach` + `start timeout`）与后来的 600ms 阻塞读回执（那条通道
-// 受 SELinux 域迁移阻断，见 `mount_request` 模块头注释）。两版都已删除——最省电、最不
-// 可能把应用拖死的等待，是不等待。
+// Zygisk 应用主线程只观测挂载就绪，不阻塞等待；Hyos 同步请求使用 companion 给出的预算。
 
 pub(crate) const POST_SPECIALIZE_SLOW_MS: i64 = 20;
 
@@ -15,6 +11,19 @@ pub(crate) const COMPANION_PARENT_RECV_GRACE_TIMEOUT_SEC: i64 = 1;
 pub(crate) const COMPANION_PROCESS_READY_TIMEOUT_MS: i32 = 5000;
 pub(crate) const COMPANION_MOUNT_SLOW_MS: i64 = 20;
 pub(crate) const FUSE_READY_TIMEOUT_SEC: i64 = 4;
+pub(crate) const BARRIER_WAIT_TIMEOUT_MS: i64 = 2_000;
+
+/// Hyos 的同步等待覆盖就绪、宿主登记、两轮屏障与挂载子进程预算，另留两秒收尾。
+pub(crate) fn hyos_mount_timeout_ms(roots: usize, host_wait_ms: u64) -> Option<i32> {
+    let roots = i64::try_from(roots).ok()?;
+    let barriers = roots.checked_mul(BARRIER_WAIT_TIMEOUT_MS)?.checked_mul(2)?;
+    let total = i64::from(COMPANION_PROCESS_READY_TIMEOUT_MS)
+        .checked_add(i64::try_from(host_wait_ms).ok()?)?
+        .checked_add(companion_parent_recv_budget_sec(roots as usize).checked_mul(1000)?)?
+        .checked_add(barriers)?
+        .checked_add(2_000)?;
+    i32::try_from(total).ok()
+}
 
 pub(crate) fn companion_parent_recv_budget_sec(scoped_fuse_root_count: usize) -> i64 {
     companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count)
@@ -25,3 +34,7 @@ pub(crate) fn companion_parent_recv_primary_timeout_sec(scoped_fuse_root_count: 
     COMPANION_PARENT_RECV_PRIMARY_TIMEOUT_SEC
         .saturating_add(FUSE_READY_TIMEOUT_SEC.saturating_mul(scoped_fuse_root_count as i64))
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/mount_timing.rs"]
+mod tests;

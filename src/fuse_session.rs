@@ -13,6 +13,15 @@ use libc::{
     send, setsockopt,
 };
 use std::ffi::CString;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static MOUNT_STATE_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn mount_state_temp_path(state_path: &str) -> String {
+    // daemon 与 companion 可能同时写同一应用的挂载状态。
+    let sequence = MOUNT_STATE_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{state_path}.tmp.{}.{}", std::process::id(), sequence)
+}
 
 /// 一次 scoped FUSE 挂载的会话记录。
 #[derive(Clone)]
@@ -227,13 +236,17 @@ pub(crate) fn write_mount_state(
         let _ = libc::chmod(c_temp_path.as_ptr(), 0o600);
     }
     if ok {
-        ok = std::fs::rename(temp_path, state_path).is_ok();
-        if !ok {
-            log::warn!(
-                "mount state rename failed temp={} path={}",
-                temp_path,
-                state_path
-            );
+        match std::fs::rename(temp_path, state_path) {
+            Ok(()) => {}
+            Err(error) => {
+                log::warn!(
+                    "mount state rename failed temp={} path={} error={}",
+                    temp_path,
+                    state_path,
+                    error
+                );
+                ok = false;
+            }
         }
     }
     if ok {
@@ -391,3 +404,7 @@ pub(crate) fn send_mount_result(sock: c_int, result: i32) -> bool {
     log::debug!("send result sock={} ret={}", sock, result);
     true
 }
+
+#[cfg(test)]
+#[path = "../tests/native-unit/mount_state.rs"]
+mod tests;

@@ -1,5 +1,6 @@
 pub const IDENTITY_CAPACITY: usize = 256;
 pub const REQUEST_SIZE: usize = IDENTITY_CAPACITY * 2;
+pub const REQUEST_TIMEOUT_SEC: i64 = 5;
 
 /// 子进程只做固定大小的消息交换；配置、日志和挂载留在 companion 中。
 pub fn specialize(fd: i32, payload: &[u8; REQUEST_SIZE]) -> bool {
@@ -10,11 +11,30 @@ pub fn specialize(fd: i32, payload: &[u8; REQUEST_SIZE]) -> bool {
     use std::os::fd::AsRawFd;
     let fd = connection.as_raw_fd();
     let mut status = [0; 4];
-    companion_socket::configure(fd, 5)
-        && companion_socket::send(fd, b"H", None)
-        && companion_socket::send(fd, payload, None)
-        && fs::read_all_timeout(fd, &mut status, std::time::Duration::from_secs(5))
-        && i32::from_ne_bytes(status) == 1
+    if !companion_socket::configure(fd, REQUEST_TIMEOUT_SEC)
+        || !companion_socket::send(fd, b"H", None)
+        || !companion_socket::send(fd, payload, None)
+        || !fs::read_all_timeout(
+            fd,
+            &mut status,
+            std::time::Duration::from_secs(REQUEST_TIMEOUT_SEC as u64),
+        )
+    {
+        return false;
+    }
+    let status_code = i32::from_ne_bytes(status);
+    // 负值是 root 按本次规划给出的挂载预算（毫秒）；最多再读一次最终状态。
+    if status_code < 0 {
+        let Some(timeout_ms) = status_code.checked_neg() else {
+            return false;
+        };
+        return fs::read_all_timeout(
+            fd,
+            &mut status,
+            std::time::Duration::from_millis(timeout_ms as u64),
+        ) && i32::from_ne_bytes(status) == 1;
+    }
+    status_code == 1
 }
 
 pub fn valid_identity(package: &str, process: &str) -> bool {

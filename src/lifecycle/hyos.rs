@@ -7,16 +7,25 @@ use std::time::Duration;
 
 pub(super) fn handle_request(fd: i32, caller: &libc::ucred) -> bool {
     let mut data = [0; REQUEST_SIZE];
-    if !fs::read_all_timeout(fd, &mut data, Duration::from_secs(5)) {
+    if !fs::read_all_timeout(
+        fd,
+        &mut data,
+        Duration::from_secs(hyos_request::REQUEST_TIMEOUT_SEC as u64),
+    ) {
         return false;
     }
     let Some((package, process)) = hyos_request::decode(&data) else {
         return false;
     };
-    apply_for_caller(package, process, caller)
+    apply_for_caller(package, process, caller, Some(fd))
 }
 
-pub(super) fn apply_for_caller(package: &str, process: &str, caller: &libc::ucred) -> bool {
+pub(super) fn apply_for_caller(
+    package: &str,
+    process: &str,
+    caller: &libc::ucred,
+    reply_fd: Option<i32>,
+) -> bool {
     if !hyos_request::valid_identity(package, process) {
         return false;
     }
@@ -80,6 +89,14 @@ pub(super) fn apply_for_caller(package: &str, process: &str, caller: &libc::ucre
     }
     // 在共享 spawner/init 的命名空间挂载会污染其它应用，必须在任何挂载操作前拒绝。
     let Some(mount_namespace) = mount_namespace else {
+        if monitor_only {
+            log::warn!(
+                "hyos monitor skipped shared namespace pkg={} pid={}",
+                package,
+                caller.pid
+            );
+            return true;
+        }
         log::error!(
             "hyos storage view rejected shared namespace pkg={} pid={}",
             package,
@@ -115,6 +132,19 @@ pub(super) fn apply_for_caller(package: &str, process: &str, caller: &libc::ucre
         request.is_mapping_mode_only = profile.is_mapping_mode_only;
     }
     request.policy_fingerprint = crate::fuse_redirect::request_policy_fingerprint(&request);
+    if let Some(fd) = reply_fd {
+        let roots = crate::fuse_redirect::scoped_fuse_mount_roots_for_request(&request).len();
+        let Some(timeout_ms) = super::mount_timing::hyos_mount_timeout_ms(
+            roots,
+            crate::fuse_host::HOST_WAIT_BUDGET_MS,
+        ) else {
+            return false;
+        };
+        // 预算发送失败就不启动挂载，避免客户端退出后仍修改其命名空间。
+        if !super::companion::write_status(fd, -timeout_ms) {
+            return false;
+        }
+    }
     let installed = execute_companion_mount_request(&request);
     log::info!(
         "hyos storage view pkg={} proc={} pid={} uid={} installed={}",
@@ -124,5 +154,6 @@ pub(super) fn apply_for_caller(package: &str, process: &str, caller: &libc::ucre
         uid,
         installed
     );
-    installed
+    // 监视失败不终止已核验且未配置隔离策略的进程。
+    installed || monitor_only
 }

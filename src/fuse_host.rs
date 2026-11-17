@@ -2631,7 +2631,7 @@ pub fn ensure_global() -> bool {
 /// 的挂载全部排队。同理，一次等待超时说明宿主在此环境里建不起来（能力缺失、内核
 /// 拒绝），继续让后续请求逐个空等只会放大延迟——30 秒冷却内的请求立即走回退路径，
 /// 冷却到期后再允许一次完整等待，宿主恢复后自然接上。
-const HOST_WAIT_BUDGET_MS: u64 = 6_000;
+pub(crate) const HOST_WAIT_BUDGET_MS: u64 = 6_000;
 const HOST_WAIT_FAIL_COOLDOWN_MS: i64 = 30_000;
 static LAST_HOST_WAIT_FAIL_MS: AtomicI64 = AtomicI64::new(0);
 

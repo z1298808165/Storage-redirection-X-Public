@@ -279,7 +279,7 @@ fn migrate_stale_shared_host_metadata(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let temp_path = format!("{state_path}.tmp");
+    let temp_path = crate::fuse_session::mount_state_temp_path(state_path);
     if std::fs::write(&temp_path, format!("{updated}\n")).is_err()
         || std::fs::rename(&temp_path, state_path).is_err()
     {

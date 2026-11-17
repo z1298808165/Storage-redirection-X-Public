@@ -649,11 +649,14 @@ fn refresh_mount_state_fingerprint(request: &MountRequest) -> bool {
         return false;
     }
     let updated = lines.join("\n");
-    let temp = format!("{path}.tmp");
-    if std::fs::write(&temp, format!("{updated}\n")).is_err() {
+    let temp = crate::fuse_session::mount_state_temp_path(&path);
+    if std::fs::write(&temp, format!("{updated}\n")).is_err()
+        || std::fs::rename(&temp, path).is_err()
+    {
+        let _ = std::fs::remove_file(&temp);
         return false;
     }
-    std::fs::rename(temp, path).is_ok()
+    true
 }
 
 /// 以 daemon 身份（root）预建本次请求里每条路径映射的目标目录。
@@ -848,7 +851,7 @@ struct MountForkPlan {
 impl MountForkPlan {
     fn build(request: &MountRequest, parent_timeout_sec: i64) -> Self {
         let state_path = state_file_path(request);
-        let temp_state_path = format!("{}.tmp", state_path);
+        let temp_state_path = crate::fuse_session::mount_state_temp_path(&state_path);
         Self {
             scoped_fuse_roots: scoped_fuse_mount_roots(request),
             state_path,
