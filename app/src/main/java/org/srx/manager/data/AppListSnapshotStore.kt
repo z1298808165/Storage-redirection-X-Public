@@ -92,11 +92,7 @@ internal object AppListSnapshotCodec {
   }
 }
 
-/**
- * 快照文件读写。
- *
- * 冷启动与非主用户的首次切换都要等一次 root 查询（后者还要拉起 dex 进程）才能出结果， 先渲染上一次的列表可以把「空列表 + 转圈」压到几十毫秒，随后真实加载完成再整体替换。
- */
+/** 按 Android 用户保存应用列表快照，供当前清单加载完成前显示。 */
 internal class AppListSnapshotStore(private val context: Context) {
   private fun snapshotFile(userId: String) =
       File(File(context.cacheDir, AppListCacheDirName), "user_$userId.json")

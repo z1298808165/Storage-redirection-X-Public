@@ -140,6 +140,9 @@ fn should_fix_system_writer_private_owner_for_query_error(error_no: c_int) -> bo
 }
 
 fn should_attempt_system_writer_query_fallback(hub: &InterceptHub, path: Option<&str>) -> bool {
+    if context::is_caller_attribution_stopped() {
+        return false;
+    }
     if context::is_current_caller_scope_active() {
         return true;
     }
@@ -1057,6 +1060,9 @@ fn writer_fallback_redirect(hub: &InterceptHub, path_text: &str) -> Option<Strin
 ///
 /// 已有真实应用归属时不覆盖：那种情况下归属比路径推断更可信。
 fn register_mapping_request_owner_for_query_fallback(hub: &InterceptHub, path_text: &str) {
+    if context::is_caller_attribution_stopped() {
+        return;
+    }
     let caller_package = hub.get_current_caller_package();
     let caller_uid = hub.get_current_caller_uid();
     if caller_uid >= writer::ANDROID_APP_UID_START
@@ -1075,7 +1081,7 @@ fn register_mapping_request_owner_for_query_fallback(hub: &InterceptHub, path_te
     if owner.is_empty() {
         return;
     }
-    let mut owner_uid = policy::get_fresh_uid_for_package(&owner);
+    let mut owner_uid = policy::get_fresh_uid_for_package_in_user(&owner, user_id);
     if owner_uid < writer::ANDROID_APP_UID_START {
         // 启动早期 uid 缓存文件可能还没有该应用的条目，此时拿不到真实 uid。
         // 归属的作用是让重定向决策按包名解析映射，user_id 与真实值一致即可，

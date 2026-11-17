@@ -38,6 +38,8 @@ class MediaPendingLifecycleTest(unittest.TestCase):
             "private static boolean isPendingFileOf(",
             "private static java.io.File findPendingMediaFile(",
             "private static java.io.File publicMediaParentForSandbox(",
+            "private static CallerIdentity currentCallerIdentity()",
+            "private static String callerResourceKey(Object resource)",
         ]
         methods = []
         for signature in signatures:
@@ -52,6 +54,11 @@ public class PendingFixture {
   static final int ANDROID_APP_UID_START = 10000;
   static final int REDIRECTED_MEDIA_TARGET_LIMIT = 256;
   static final LinkedHashMap<String,String> REDIRECTED_MEDIA_TARGETS = new LinkedHashMap<>();
+  static final ThreadLocal<ArrayDeque<CallerIdentity>> CALLER_IDENTITIES = new ThreadLocal<>();
+  static class CallerIdentity {
+    final int uid; final String packageName;
+    CallerIdentity(int uid, String packageName) { this.uid=uid; this.packageName=packageName; }
+  }
   static class ContentValues extends HashMap<String,Object> {
     String getAsString(String k) { return (String)get(k); }
     Integer getAsInteger(String k) { return (Integer)get(k); }
@@ -65,20 +72,37 @@ public class PendingFixture {
   static String mediaStoreDisplayPath(String p,int uid) { return p; }
   static void logInfo(String s) {}
   static void logWarn(String s,Throwable t) { throw new AssertionError(t); }
+  static String packageNameForUid(int uid) {
+    CallerIdentity identity=currentCallerIdentity();
+    return identity!=null && identity.uid==uid ? identity.packageName : "";
+  }
+  static void enterCallerScope(int uid,String packageName) {
+    ArrayDeque<CallerIdentity> stack=CALLER_IDENTITIES.get();
+    if(stack==null) { stack=new ArrayDeque<>(); CALLER_IDENTITIES.set(stack); }
+    stack.push(new CallerIdentity(uid,packageName));
+  }
+  static void exitCallerScope() {
+    ArrayDeque<CallerIdentity> stack=CALLER_IDENTITIES.get();
+    stack.pop(); if(stack.isEmpty()) CALLER_IDENTITIES.remove();
+  }
   static int findMutationUriIndex(Object[] args) {
     for(int i=0;i<args.length;i++) if(args[i] instanceof android.net.Uri) return i;
     return -1;
   }
-  static void check(boolean value) { if(!value) throw new AssertionError(); }
+  static void check(boolean value) {
+    if(!value) throw new AssertionError("check failed at line "+Thread.currentThread().getStackTrace()[2].getLineNumber());
+  }
   public static void main(String[] args) throws Exception {
     Path root=Paths.get(args[0]);
     Path target=root.resolve("photo.jpg");
     android.net.Uri uri=new android.net.Uri("content://media/external/file/1");
+    enterCallerScope(10123,"test.owner");
+    String resourceKey=callerResourceKey(uri);
     ContentValues insert=new ContentValues();
     insert.put("relative_path","Pictures/"); insert.put("_display_name","photo.jpg");
     mapping=target.toString();
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,false);
-    check(mapping.equals(REDIRECTED_MEDIA_TARGETS.get(uri.toString())));
+    check(mapping.equals(REDIRECTED_MEDIA_TARGETS.get(resourceKey)));
     REDIRECTED_MEDIA_TARGETS.clear();
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",false,true);
     check(REDIRECTED_MEDIA_TARGETS.isEmpty());
@@ -90,23 +114,28 @@ public class PendingFixture {
     check(REDIRECTED_MEDIA_TARGETS.isEmpty());
     mapping=root.resolve(".pending-123-photo.jpg").toString();
     rememberRedirectedMediaTarget(new Object[]{insert},uri,10123,"insert",true,true);
-    check(target.toString().equals(REDIRECTED_MEDIA_TARGETS.get(uri.toString())));
+    check(target.toString().equals(REDIRECTED_MEDIA_TARGETS.get(resourceKey)));
     Path pending=root.resolve(".pending-123-photo.jpg");
     Path unrelated=root.resolve(".pending-124-other-photo.jpg");
     Files.writeString(pending,"payload"); Files.writeString(unrelated,"other");
     ContentValues update=new ContentValues();
     Object[] mutation={uri,update};
     commitRedirectedPendingFile(mutation,1,"update");
-    check(REDIRECTED_MEDIA_TARGETS.containsKey(uri.toString()) && Files.exists(pending));
+    check(REDIRECTED_MEDIA_TARGETS.containsKey(resourceKey) && Files.exists(pending));
     update.put("is_pending",1);
     commitRedirectedPendingFile(mutation,1,"update");
     check(Files.exists(pending));
     update.put("is_pending",0);
     commitRedirectedPendingFile(mutation,0,"update");
-    check(REDIRECTED_MEDIA_TARGETS.containsKey(uri.toString()) && Files.exists(pending));
+    check(REDIRECTED_MEDIA_TARGETS.containsKey(resourceKey) && Files.exists(pending));
+    enterCallerScope(10124,"test.other");
+    commitRedirectedPendingFile(mutation,1,"update");
+    check(REDIRECTED_MEDIA_TARGETS.containsKey(resourceKey) && Files.exists(pending));
+    exitCallerScope();
     commitRedirectedPendingFile(mutation,1,"update");
     check(Files.readString(target).equals("payload") && !Files.exists(pending));
     check(Files.exists(unrelated) && REDIRECTED_MEDIA_TARGETS.isEmpty());
+    exitCallerScope();
   }
 '''
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:

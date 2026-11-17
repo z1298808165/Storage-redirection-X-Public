@@ -1,9 +1,8 @@
 use super::lru_cache::LruCache;
-use once_cell::sync::Lazy;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::string::String;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 pub(crate) const DATA_MEDIA_PREFIX: &str = "/data/media/";
@@ -32,8 +31,8 @@ impl PathNormalizeCache {
     }
 }
 
-static PATH_NORMALIZE_CACHE: Lazy<Mutex<PathNormalizeCache>> =
-    Lazy::new(|| Mutex::new(PathNormalizeCache::new()));
+static PATH_NORMALIZE_CACHE: LazyLock<Mutex<PathNormalizeCache>> =
+    LazyLock::new(|| Mutex::new(PathNormalizeCache::new()));
 
 // 同一线程连续处理相同别名路径时，先走这一项缓存，避免重复竞争全局锁。
 struct LastNormalizedPath {

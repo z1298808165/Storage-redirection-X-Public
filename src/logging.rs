@@ -218,12 +218,15 @@ pub fn write_mount_prep_record(package_name: &str, path: &str, backend_path: &st
         return;
     }
     let mut line = format!(
-        "{}|{}|{}|MKDIR|{}|ret=0|errno=0|identify_method=mount_prep|identify_reliability=high|op=mkdir|source=mount_prep",
-        timestamp, package_name, package_name, path,
+        "{}|{}|{}|MKDIR|{}|field_encoding=percent|ret=0|errno=0|identify_method=mount_prep|identify_reliability=high|op=mkdir|source=mount_prep",
+        timestamp,
+        package_name,
+        package_name,
+        crate::platform::log_fields::encode(path),
     );
     if !backend_path.is_empty() {
         line.push_str("|backend=");
-        line.push_str(backend_path);
+        line.push_str(&crate::platform::log_fields::encode(backend_path));
     }
     write_log(Level::Info, FILE_MONITOR_LOG_TAG, &line);
 }

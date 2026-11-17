@@ -47,18 +47,19 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
-          components: rustfmt
+          toolchain: nightly-2026-11-17
+          components: rustfmt, clippy
 
       - name: Run release quality gate
         run: |
           chmod +x ./gradlew
           cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
           ./gradlew --no-daemon --console=plain spotlessCheck
           node scripts/verify-webui-structure.js
           node scripts/verify-webui-config-fixtures.js
           node scripts/verify-webui-app-list-parser.js
-          cargo test -p native-config-fixtures
+          cargo test -p native-config-fixtures --locked
           python -m unittest discover -s .github/tests -p "test_*.py" -v
 
       - name: Verify inline tests and source quality
@@ -175,7 +176,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
+          toolchain: nightly-2026-11-17
           targets: aarch64-linux-android
 
       - name: Run build script tests
@@ -192,6 +193,9 @@ jobs:
           mkdir -p .cargo
           printf '[target.aarch64-linux-android]\nlinker = "aarch64-linux-android29-clang"\n\n[target.x86_64-linux-android]\nlinker = "x86_64-linux-android29-clang"\n' > .cargo/config.toml
           echo "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Verify Android rustdoc without warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --target aarch64-linux-android --no-deps --locked
 
       - name: Restore Cargo build cache
         uses: actions/cache@v5.0.5
@@ -216,13 +220,13 @@ jobs:
             ${{ runner.os }}-cargo-target-aarch64-
 
       - name: Build Rust test binaries
-        run: cargo test --target aarch64-linux-android --no-run
+        run: cargo test --target aarch64-linux-android --no-run --locked
         env:
           CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Build module binaries
         run: |
-          cargo build --target aarch64-linux-android --release
+          cargo build --target aarch64-linux-android --release --locked
           mkdir -p build/module-bin
           cp target/aarch64-linux-android/release/libsrx_core.so build/module-bin/libsrx_core.so
           cp target/aarch64-linux-android/release/srx_daemon build/module-bin/srx_daemon
@@ -411,8 +415,9 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-07-14
+          toolchain: nightly-2026-11-17
           targets: x86_64-linux-android
+          components: clippy
 
       - name: Configure Cargo for Android NDK
         run: |
@@ -441,6 +446,11 @@ jobs:
           key: ${{ runner.os }}-cargo-target-x86_64-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'build.rs') }}
           restore-keys: |
             ${{ runner.os }}-cargo-target-x86_64-
+
+      - name: Run x86_64 Clippy lint gate
+        run: cargo clippy --target x86_64-linux-android --release --all-targets --locked -- -D warnings
+        env:
+          CXXFLAGS: "-Wno-error=unused-but-set-variable"
 
       - name: Build x86_64 module zip and test app
         run: |

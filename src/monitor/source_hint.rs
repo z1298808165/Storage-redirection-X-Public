@@ -5,10 +5,9 @@ use super::hint_file::{
 };
 use crate::platform::{self, paths};
 use crate::redirect::policy;
-use once_cell::sync::Lazy;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
-    Mutex,
+    LazyLock, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -46,10 +45,10 @@ pub(super) struct PathCallerHint {
     pub(super) correlation_id: String,
 }
 
-static RECENT_PRIVATE_OWNER_HINT: Lazy<Mutex<VecDeque<PrivateOwnerHint>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
-static RECENT_PATH_CALLER_HINT: Lazy<Mutex<VecDeque<PathCallerHint>>> =
-    Lazy::new(|| Mutex::new(VecDeque::new()));
+static RECENT_PRIVATE_OWNER_HINT: LazyLock<Mutex<VecDeque<PrivateOwnerHint>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static RECENT_PATH_CALLER_HINT: LazyLock<Mutex<VecDeque<PathCallerHint>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
 static NEXT_PATH_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +175,9 @@ fn remember_private_path_hint(
 }
 
 fn remember_private_path_hint_inner(request: PrivatePathHintRequest<'_>) {
+    if super::is_caller_attribution_stopped() {
+        return;
+    }
     let has_package_name = is_valid_package_name(request.package_name);
     let has_caller_uid = request.source == "recent_private_caller"
         && request.caller_uid >= ANDROID_APP_UID_START
@@ -277,7 +279,9 @@ pub(crate) fn remember_public_path_caller_hint_with_op_filter(
     // 系统 uid（platform 1000 等）的公共目录操作同样登记归属：uid 属于大型
     // 共享组时具体包名已由 caller pid 归因得出，这里只要求 uid 有效；user_id
     // 一致性检查（uid/100000）对系统 uid 同样成立。
-    if caller_uid < 0
+    if super::is_caller_attribution_stopped()
+        || caller_uid < 0
+        || matches!(caller_uid, 0 | 2000)
         || !is_valid_package_name(package_name)
         || normalize_path_hint_source(source).is_none()
         || normalize_hint_confidence(confidence).is_none()
@@ -630,9 +634,19 @@ fn infer_from_path_hints<'a>(
     saf_only: bool,
 ) -> Option<RecentPrivateOwnerIdentity> {
     let now_ms = paths::monotonic_ms();
-    hints
+    let matching = hints
         .filter(|hint| !saf_only || hint.source == "saf_provider")
         .filter(|hint| path_hint_matches(hint, user_id, normalized_path, now_ms))
+        .collect::<Vec<_>>();
+    let package_name = matching.first()?.package_name.as_str();
+    if matching
+        .iter()
+        .any(|hint| hint.package_name != package_name)
+    {
+        return None;
+    }
+    matching
+        .into_iter()
         .max_by(|left, right| {
             path_hint_rank(left)
                 .cmp(&path_hint_rank(right))
@@ -703,7 +717,10 @@ fn resolve_hint_package(
     }
     packages.sort();
     packages.dedup();
-    packages.into_iter().find(|package| {
+    if packages.len() != 1 {
+        return None;
+    }
+    packages.into_iter().next().filter(|package| {
         is_valid_package_name(package)
             && package != &hint.owner_package
             && !policy::is_system_writer_package(package)
@@ -940,7 +957,7 @@ fn is_valid_public_path_token_package(package: &str, user_id: i32) -> bool {
     {
         return false;
     }
-    let uid = policy::get_uid_for_package(package);
+    let uid = policy::get_uid_for_package_in_user(package, user_id);
     uid < 0 || platform::user_id_from_uid(uid) == user_id
 }
 
@@ -952,7 +969,7 @@ fn is_valid_public_path_package(package: &str, user_id: i32) -> bool {
     {
         return false;
     }
-    let uid = policy::get_uid_for_package(package);
+    let uid = policy::get_uid_for_package_in_user(package, user_id);
     uid >= ANDROID_APP_UID_START && platform::user_id_from_uid(uid) == user_id
 }
 
@@ -1165,3 +1182,7 @@ fn is_generic_token(token: &str) -> bool {
             | "tmp"
     )
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/source_hint.rs"]
+mod tests;

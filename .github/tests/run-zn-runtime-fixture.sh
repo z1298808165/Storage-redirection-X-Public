@@ -43,6 +43,20 @@ trap restore EXIT
 trap 'exit 130' INT TERM HUP
 # 权限准备先于任何配置修改与测试。
 sh "$permissions" "$app"
+wait_for_media_provider() {
+  timeout 120 sh -c '
+    while :; do
+      output=$(content query --uri content://media/external_primary/file --projection _id --where "_id=-1" 2>&1) || { sleep 2; continue; }
+      if ! printf "%s" "$output" | grep -Eiq "Error while accessing provider:media|Volume [^ ]+ not found|IllegalArgumentException|Unknown URL|Unsupported Uri"; then exit 0; fi
+      sleep 2
+    done
+  '
+}
+# boot_completed 不保证 MediaProvider 已开始处理共享存储请求。
+if ! wait_for_media_provider; then
+  echo 'FAIL [zn_media_provider_ready] provider query unavailable' >&2
+  exit 1
+fi
 uid="$(cmd package list packages -U "$app" | sed -n 's/.* uid://p')"
 case "$uid" in ''|*[!0-9]*) echo 'ZN fixture: test application UID unavailable' >&2; exit 1 ;; esac
 test ! -e "$module/.runtime_disabled"
@@ -140,12 +154,20 @@ rm -f "$config"
 printf '%s\n' '{"file_monitor_enabled":true,"verbose_logging_enabled":true}' > "$module/config/global.json"
 monitor_name="monitor-$$.txt"
 run_case monitor_only 0 private "$app" "/storage/emulated/0/Download/$source_name/$monitor_name" "$source_dir/$monitor_name"
+run_case monitor_shared_namespace 0 shared "$app" '' ''
 recorded=0
 for attempt in 1 2 3; do
-  if grep -F "$monitor_name" "$module/logs/file_monitor.log" | grep -Fq "$app"; then recorded=1; break; fi
+  if grep -F "$monitor_name" "$module/logs/file_monitor.log" |
+    grep -F '|identify_method=executor|identify_reliability=high|' |
+    grep -F "|caller_uid=$uid|" |
+    grep -E '\|caller_pid=[1-9][0-9]*\|' |
+    grep -E '\|caller_start_time=[1-9][0-9]*\|' |
+    grep -E '\|caller_context=u:r:(su|magisk|ksu|kernelsu):' |
+    grep -F '|caller_boundary=privileged|' |
+    grep -Fq '|native=zn-runtime-fixture'; then recorded=1; break; fi
   sleep 1
 done
-if [ "$recorded" -eq 1 ]; then echo 'PASS [zn_monitor_record] application identity recorded'; passed=$((passed + 1)); else echo 'FAIL [zn_monitor_record] application record missing' >&2; failed=$((failed + 1)); fi
+if [ "$recorded" -eq 1 ]; then echo 'PASS [zn_monitor_record] privileged executor identity recorded'; passed=$((passed + 1)); else echo 'FAIL [zn_monitor_record] privileged executor record missing' >&2; failed=$((failed + 1)); fi
 # 运行时开关会触发 daemon 拆除视图，放在其它用例之后避免异步清理污染重载判据。
 printf '%s\n' '{"file_monitor_enabled":false,"verbose_logging_enabled":true}' > "$module/config/global.json"
 printf '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/%s":"Download/%s"}}}}\n' "$source_name" "$target_name" > "$config"

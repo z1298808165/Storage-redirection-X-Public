@@ -905,7 +905,10 @@ fn resolve_config_package_for_uid(package_name: &str, uid: i32) -> Option<String
     }
 
     if package_name == "android.process.media"
-        && policy::get_uid_for_package("com.android.providers.downloads") == uid
+        && policy::get_uid_for_package_in_user(
+            "com.android.providers.downloads",
+            platform::user_id_from_uid(uid),
+        ) == uid
     {
         return Some("com.android.providers.downloads".to_string());
     }

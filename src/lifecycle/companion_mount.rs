@@ -73,8 +73,8 @@ pub fn execute_companion_mount_request(request: &CompanionMountRequest) -> bool 
             request.pid
         );
     }
-    // 先落 fail-closed 屏障再进入宿主握手/挂载：应用主线程的等待预算只有 600ms
-    // （AMS 启动超时约束），宿主握手最坏需要数秒，期间应用会看到未套规则的
+    // 先落 fail-closed 屏障再进入宿主握手/挂载：Zygisk 应用主线程不等待挂载，
+    // 宿主握手最坏需要数秒，期间应用会看到未套规则的
     // 原生全景（沙箱/隐藏规则的可见窗口）。屏障把这段窗口内的视图变成只读空
     // 目录，FUSE 落地后压在屏障之上；挂载链路彻底失败时屏障常驻（fail-closed）。
     //
@@ -349,7 +349,7 @@ fn mount_one_storage_view_barrier(
     // 屏障子进程正常在毫秒级完成；阻塞等待会把应用线程永久挂在一个卡死（D 态）的
     // 子进程上。改为有界等待：超时后 SIGKILL 并记录，后续挂载会重新评估屏障；子进程
     // 若处于 D 态无法被杀，也留下可检索的记录而不是让调用线程无限挂起。
-    const BARRIER_WAIT_TIMEOUT_MS: i64 = 2_000;
+    use super::mount_timing::BARRIER_WAIT_TIMEOUT_MS;
     use crate::platform::child_wait::{self, ChildExit};
     match child_wait::wait_child_exit(child, BARRIER_WAIT_TIMEOUT_MS) {
         ChildExit::Exited(code) => code == 0,
@@ -1882,7 +1882,7 @@ struct CompanionMountForkPlan {
 impl CompanionMountForkPlan {
     fn build(request: &CompanionMountRequest) -> Self {
         let state_path = mount_state::state_file_path(request);
-        let temp_state_path = format!("{}.tmp", state_path);
+        let temp_state_path = crate::fuse_session::mount_state_temp_path(&state_path);
         // barrier 集合必须与 execute 层 mount_storage_view_barriers 的挂载集合同源
         // （scoped_fuse_mount_roots_for_request 的原始按目录结果），而不是本结构体的
         // scoped_fuse_roots——后者在 Auto+宿主在位时会收敛成存储视图根，白名单若用它，

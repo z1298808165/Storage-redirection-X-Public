@@ -84,9 +84,9 @@ fn primary_user_path_is_unchanged() {
 fn storage_alias_roots_include_backend_and_public_paths() {
     let aliases = paths::storage_alias_roots_for_user(0);
 
-    assert!(aliases.contains(&"/storage/emulated/0".to_string()));
-    assert!(aliases.contains(&"/data/media/0".to_string()));
-    assert!(aliases.contains(&"/storage/self/primary".to_string()));
+    assert!(aliases.iter().any(|alias| alias == "/storage/emulated/0"));
+    assert!(aliases.iter().any(|alias| alias == "/data/media/0"));
+    assert!(aliases.iter().any(|alias| alias == "/storage/self/primary"));
     assert_eq!(
         aliases.len(),
         aliases

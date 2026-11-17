@@ -4,10 +4,9 @@ use crate::domain::{
     sort_path_mappings_longest_request_first_case_insensitive,
 };
 use crate::platform::{self, paths};
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RedirectAction {
@@ -319,7 +318,7 @@ impl PathRouter {
     }
 }
 
-static PATH_ROUTER: Lazy<PathRouter> = Lazy::new(PathRouter::new);
+static PATH_ROUTER: LazyLock<PathRouter> = LazyLock::new(PathRouter::new);
 
 fn resolve_router_path_list(
     paths_in: &[String],

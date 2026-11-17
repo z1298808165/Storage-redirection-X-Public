@@ -264,13 +264,12 @@ class DirectReadChannelTest(unittest.TestCase):
         for polling in ("thread::sleep", "usleep", "Instant::now"):
             self.assertNotIn(polling, channel, f"直读通道不得包含等待逻辑 {polling}")
 
-    def test_raw_syscall_reader_has_single_implementation(self) -> None:
+    def test_process_identity_is_revalidated_by_root_daemon(self) -> None:
         caller = read_source("hook/caller.rs")
-        self.assertNotIn("SYS_openat", caller, "调方应复用 platform::proc_direct，不要自带一份")
-        for name in ("fn read_single_line_by_syscall", "fn read_file_by_syscall"):
-            start = caller.index(name)
-            body = caller[start : caller.index("\n}\n", start)]
-            self.assertIn("proc_direct::read_proc_file(", body, f"{name} 必须复用直读通道")
+        self.assertNotIn("SYS_openat", caller, "调用方不得自行读取进程身份")
+        self.assertNotIn("fn read_single_line_by_syscall", caller)
+        self.assertNotIn("fn read_file_by_syscall", caller)
+        self.assertIn("daemon_identity_query::query_process_identity", caller)
 
 
 class PropagationParityTest(unittest.TestCase):

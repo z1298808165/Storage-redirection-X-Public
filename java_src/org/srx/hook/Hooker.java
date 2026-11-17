@@ -22,7 +22,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -104,7 +103,6 @@ public class Hooker {
   private static int MEDIA_SOURCE_CAPTURE_LOG_COUNT;
   private static int DIRECT_MEDIA_WRITE_LOG_COUNT;
   private static int BUCKET_ID_REWRITE_LOG_COUNT;
-  private static final HashMap<Integer, SourceFdCapture> RECENT_MEDIA_SOURCE_FDS = new HashMap<>();
 
   /**
    * URI 到重定向后沙箱路径的映射，用于把 insert 阶段的落点带到提交阶段。
@@ -178,8 +176,7 @@ public class Hooker {
     }
     int callerUid = android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
-    captureBinderCaller(callerUid, callerPid);
-    enterCallerScope(callerUid, callerPid);
+    enterProviderCallerScope(args, callerUid, callerPid);
     try {
       if (!isRedirectEnabledForCallerUid(callerUid)) {
         return callBackupPassthrough(args);
@@ -220,8 +217,7 @@ public class Hooker {
     if (isInsideProviderInternalCall()) return callBackupWithProviderPassthrough(args);
     int callerUid = android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
-    captureBinderCaller(callerUid, callerPid);
-    enterCallerScope(callerUid, callerPid);
+    enterProviderCallerScope(args, callerUid, callerPid);
     try {
       Object[] actualArgs = unwrapArgs(args);
       logOpenArgs(this, actualArgs, callerUid, callerPid);
@@ -317,8 +313,7 @@ public class Hooker {
     }
     int callerUid = android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
-    captureBinderCaller(callerUid, callerPid);
-    enterCallerScope(callerUid, callerPid);
+    enterProviderCallerScope(args, callerUid, callerPid);
     try {
       Object[] actualArgs = unwrapArgs(args);
       if (!isMediaProviderHookerOrReceiver(this, args)
@@ -337,6 +332,8 @@ public class Hooker {
         patchPendingMediaUpdatePath(args, actualArgs);
       }
       logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
+      Integer previousUid = MEDIA_PROVIDER_CALLER_UID.get();
+      String previousMethod = MEDIA_PROVIDER_MUTATION_METHOD.get();
       MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
       MEDIA_PROVIDER_MUTATION_METHOD.set(mutationMethod);
       enterProviderVirtualScope();
@@ -377,8 +374,10 @@ public class Hooker {
           return result;
         } finally {
           exitProviderInternalCall();
-          MEDIA_PROVIDER_MUTATION_METHOD.remove();
-          MEDIA_PROVIDER_CALLER_UID.remove();
+          if (previousMethod == null) MEDIA_PROVIDER_MUTATION_METHOD.remove();
+          else MEDIA_PROVIDER_MUTATION_METHOD.set(previousMethod);
+          if (previousUid == null) MEDIA_PROVIDER_CALLER_UID.remove();
+          else MEDIA_PROVIDER_CALLER_UID.set(previousUid);
         }
       } finally {
         exitProviderVirtualScope();
@@ -397,7 +396,6 @@ public class Hooker {
           ? callBackupWithProviderPassthrough(args)
           : callBackup(args);
     }
-    captureBinderCaller(request.callerUid, -1);
     enterCallerScope(request.callerUid, -1);
     try {
       if (recordReadOnlyFuseOperation(
@@ -426,12 +424,16 @@ public class Hooker {
     }
     File receiver = directoryReceiver(args);
     if (receiver == null) return callBackup(args);
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
-    if (scopedUid == null) {
-      int hintedUid = recentMediaDirectoryCallerUid(receiver.getPath());
-      if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
+    boolean enteredScope = enterDirectoryCallerScope(receiver.getPath());
+    try {
+      return providerDirectoryCallbackScoped(args, receiver, currentCallerIdentity().uid);
+    } finally {
+      if (enteredScope) exitCallerScope();
     }
+  }
+
+  private Object providerDirectoryCallbackScoped(Object[] args, File receiver, int callerUid)
+      throws Throwable {
     String sourcePath = receiver.getPath();
     recordProviderDirectoryPath(sourcePath, callerUid, android.os.Binder.getCallingPid());
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
@@ -473,12 +475,16 @@ public class Hooker {
     if (!isInsertLikeMutation(MEDIA_PROVIDER_MUTATION_METHOD.get())) return callBackup(args);
     File receiver = directoryReceiver(args);
     if (receiver == null) return callBackup(args);
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    int callerUid = scopedUid == null ? android.os.Binder.getCallingUid() : scopedUid.intValue();
-    if (scopedUid == null) {
-      int hintedUid = recentMediaDirectoryCallerUid(receiver.getPath());
-      if (hintedUid >= ANDROID_APP_UID_START) callerUid = hintedUid;
+    boolean enteredScope = enterDirectoryCallerScope(receiver.getPath());
+    try {
+      return providerFileParentCallbackScoped(args, receiver, currentCallerIdentity().uid);
+    } finally {
+      if (enteredScope) exitCallerScope();
     }
+  }
+
+  private Object providerFileParentCallbackScoped(Object[] args, File receiver, int callerUid)
+      throws Throwable {
     String sourcePath = receiver.getPath();
     recordProviderDirectoryPath(sourcePath, callerUid, android.os.Binder.getCallingPid());
     String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
@@ -523,60 +529,61 @@ public class Hooker {
         && !"buildNonUniqueFile".equals(methodName)) {
       return callBackup(args);
     }
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
     Object[] actualArgs = unwrapArgs(args);
     int parentIndex = firstFileArgumentIndex(actualArgs);
     if (parentIndex < 0) return callBackup(args);
     File publicParent = (File) actualArgs[parentIndex];
-    int callerUid =
-        scopedUid == null
-            ? recentMediaDirectoryCallerUid(publicParent.getPath())
-            : scopedUid.intValue();
-    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
-    String directParentPath =
-        resolveMediaStoreDirectPathForValues(publicParent.getPath(), callerUid);
-    Object[] patchedArgs = args;
-    boolean patched = false;
-    if (directParentPath != null && !directParentPath.equals(publicParent.getPath())) {
-      patchedArgs = replaceFileArgument(patchedArgs, parentIndex, new File(directParentPath));
-      patched = true;
-    }
-    int relativeIndex = parentIndex + 1;
-    int displayNameIndex = parentIndex + 2;
-    String publicPath = null;
-    if (relativeIndex < actualArgs.length
-        && actualArgs[relativeIndex] instanceof String
-        && displayNameIndex < actualArgs.length
-        && actualArgs[displayNameIndex] instanceof String) {
-      String relativePath = (String) actualArgs[relativeIndex];
-      String displayName = (String) actualArgs[displayNameIndex];
-      String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
-      String directFilePath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
-      String directRelativePath = physicalRelativePath(directFilePath, callerUid);
-      publicPath = probePath;
-      if (directRelativePath != null
-          && !trimRelativePathSlash(directRelativePath)
-              .equals(trimRelativePathSlash(relativePath))) {
-        patchedArgs = replaceArgument(patchedArgs, relativeIndex, directRelativePath);
+    boolean enteredScope = enterDirectoryCallerScope(publicParent.getPath());
+    try {
+      int callerUid = mediaDirectoryCallerUid();
+      if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+      String directParentPath =
+          resolveMediaStoreDirectPathForValues(publicParent.getPath(), callerUid);
+      Object[] patchedArgs = args;
+      boolean patched = false;
+      if (directParentPath != null && !directParentPath.equals(publicParent.getPath())) {
+        patchedArgs = replaceFileArgument(patchedArgs, parentIndex, new File(directParentPath));
         patched = true;
       }
+      int relativeIndex = parentIndex + 1;
+      int displayNameIndex = parentIndex + 2;
+      String publicPath = null;
+      if (relativeIndex < actualArgs.length
+          && actualArgs[relativeIndex] instanceof String
+          && displayNameIndex < actualArgs.length
+          && actualArgs[displayNameIndex] instanceof String) {
+        String relativePath = (String) actualArgs[relativeIndex];
+        String displayName = (String) actualArgs[displayNameIndex];
+        String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
+        String directFilePath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
+        String directRelativePath = physicalRelativePath(directFilePath, callerUid);
+        publicPath = probePath;
+        if (directRelativePath != null
+            && !trimRelativePathSlash(directRelativePath)
+                .equals(trimRelativePathSlash(relativePath))) {
+          patchedArgs = replaceArgument(patchedArgs, relativeIndex, directRelativePath);
+          patched = true;
+        }
+      }
+      if (!patched) return callBackup(args);
+      Object result = callBackup(patchedArgs);
+      if (!(result instanceof File)) return result;
+      File directFile = (File) result;
+      if (publicPath == null) {
+        publicPath = publicParent.getPath() + File.separator + directFile.getName();
+      }
+      MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
+      logInfo(
+          "media direct FileUtils method="
+              + methodName
+              + " from="
+              + publicPath
+              + " to="
+              + directFile.getPath());
+      return result;
+    } finally {
+      if (enteredScope) exitCallerScope();
     }
-    if (!patched) return callBackup(args);
-    Object result = callBackup(patchedArgs);
-    if (!(result instanceof File)) return result;
-    File directFile = (File) result;
-    if (publicPath == null) {
-      publicPath = publicParent.getPath() + File.separator + directFile.getName();
-    }
-    MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
-    logInfo(
-        "media direct FileUtils method="
-            + methodName
-            + " from="
-            + publicPath
-            + " to="
-            + directFile.getPath());
-    return result;
   }
 
   private Object providerMediaFileUtilsDirectoryCallback(Object[] args, String methodName)
@@ -585,25 +592,28 @@ public class Hooker {
     int fileIndex = firstFileArgumentIndex(actualArgs);
     if (fileIndex < 0) return callBackup(args);
     File source = (File) actualArgs[fileIndex];
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    int callerUid =
-        scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
-    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
-    String mappingPath = mediaStoreDisplayPath(source.getPath(), callerUid);
-    if (mappingPath == null) mappingPath = source.getPath();
-    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
-    if (directPath == null || directPath.equals(source.getPath())) return callBackup(args);
-    Object result = callBackup(replaceFileArgument(args, fileIndex, new File(directPath)));
-    logInfo(
-        "media direct FileUtils directory method="
-            + methodName
-            + " from="
-            + source.getPath()
-            + " to="
-            + directPath
-            + " result="
-            + result);
-    return result;
+    boolean enteredScope = enterDirectoryCallerScope(source.getPath());
+    try {
+      int callerUid = mediaDirectoryCallerUid();
+      if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+      String mappingPath = mediaStoreDisplayPath(source.getPath(), callerUid);
+      if (mappingPath == null) mappingPath = source.getPath();
+      String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+      if (directPath == null || directPath.equals(source.getPath())) return callBackup(args);
+      Object result = callBackup(replaceFileArgument(args, fileIndex, new File(directPath)));
+      logInfo(
+          "media direct FileUtils directory method="
+              + methodName
+              + " from="
+              + source.getPath()
+              + " to="
+              + directPath
+              + " result="
+              + result);
+      return result;
+    } finally {
+      if (enteredScope) exitCallerScope();
+    }
   }
 
   public Object providerMediaFileColumnCallback(Object[] args) throws Throwable {
@@ -821,8 +831,7 @@ public class Hooker {
           ? callBackupWithProviderPassthrough(args)
           : callBackup(args);
     }
-    captureBinderCaller(request.callerUid, -1);
-    enterCallerScope(request.callerUid, -1);
+    enterCallerScope(request.callerUid, request.callerTid);
     try {
       FusePathPatch patch = patchFuseFileOpenArgs(args, actualArgs, request);
       Object result;
@@ -1168,13 +1177,8 @@ public class Hooker {
 
   private static synchronized void installMutationFallback(Class<?> clazz) {
     if (clazz == null) return;
+    // Transport 完成权限检查并设置归因后才进入 provider，避免拒绝请求提前污染提示。
     installMutationOn(clazz);
-    try {
-      Class<?> transport = Class.forName("android.content.ContentProvider$Transport");
-      installMutationOn(transport);
-    } catch (Throwable t) {
-      logWarn("java hook transport mutation fallback failed", t);
-    }
   }
 
   private static synchronized void tryInstallFuseHook(Class<?> clazz) {
@@ -1374,9 +1378,7 @@ public class Hooker {
 
   private static File rewriteFileSystemNativeDirectory(File source) {
     if (source == null) return null;
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
-    int callerUid =
-        scopedUid == null ? recentMediaDirectoryCallerUid(source.getPath()) : scopedUid.intValue();
+    int callerUid = mediaDirectoryCallerUid();
     if (callerUid < ANDROID_APP_UID_START) return source;
     String sourcePath = source.getPath();
     recordProviderDirectoryPath(sourcePath, callerUid, android.os.Binder.getCallingPid());
@@ -1388,9 +1390,12 @@ public class Hooker {
     return new File(directPath);
   }
 
+  private static boolean enterFileSystemNativeDirectoryCallerScope(File source) {
+    return source != null && enterDirectoryCallerScope(source.getPath());
+  }
+
   public Object providerNativeDirectoryCallback(Object[] args) throws Throwable {
     if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
-    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
     Object[] actualArgs = unwrapArgs(args);
     if (actualArgs == null) return callBackup(args);
     int pathIndex = -1;
@@ -1416,35 +1421,39 @@ public class Hooker {
       }
     }
     if (pathIndex < 0 || sourcePath == null) return callBackup(args);
-    int callerUid =
-        scopedUid == null ? recentMediaDirectoryCallerUid(sourcePath) : scopedUid.intValue();
-    recordProviderDirectoryPath(sourcePath, callerUid, android.os.Binder.getCallingPid());
-    if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
-    String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
-    if (mappingPath == null) mappingPath = sourcePath;
-    String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
-    if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
-    Object sourceArg = actualArgs[pathIndex];
-    Object replacement =
-        sourceArg instanceof File
-            ? new File(directPath)
-            : sourceArg instanceof Path ? Paths.get(directPath) : directPath;
-    replaceActualArg(args, actualArgs, pathIndex, replacement);
-    DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
+    boolean enteredScope = enterDirectoryCallerScope(sourcePath);
     try {
-      Object result = callBackup(args);
-      logInfo(
-          "media native directory method="
-              + (target instanceof Method ? ((Method) target).getName() : null)
-              + " from="
-              + sourcePath
-              + " to="
-              + directPath
-              + " result="
-              + result);
-      return result;
+      int callerUid = mediaDirectoryCallerUid();
+      recordProviderDirectoryPath(sourcePath, callerUid, android.os.Binder.getCallingPid());
+      if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
+      String mappingPath = mediaStoreDisplayPath(sourcePath, callerUid);
+      if (mappingPath == null) mappingPath = sourcePath;
+      String directPath = resolveMediaStoreDirectPathForValues(mappingPath, callerUid);
+      if (directPath == null || directPath.equals(sourcePath)) return callBackup(args);
+      Object sourceArg = actualArgs[pathIndex];
+      Object replacement =
+          sourceArg instanceof File
+              ? new File(directPath)
+              : sourceArg instanceof Path ? Paths.get(directPath) : directPath;
+      replaceActualArg(args, actualArgs, pathIndex, replacement);
+      DIRECTORY_REDIRECT_ACTIVE.set(Boolean.TRUE);
+      try {
+        Object result = callBackup(args);
+        logInfo(
+            "media native directory method="
+                + (target instanceof Method ? ((Method) target).getName() : null)
+                + " from="
+                + sourcePath
+                + " to="
+                + directPath
+                + " result="
+                + result);
+        return result;
+      } finally {
+        DIRECTORY_REDIRECT_ACTIVE.remove();
+      }
     } finally {
-      DIRECTORY_REDIRECT_ACTIVE.remove();
+      if (enteredScope) exitCallerScope();
     }
   }
 
@@ -2030,11 +2039,87 @@ public class Hooker {
 
   private static native boolean isRedirectEnabledForCallerUid(int callerUid);
 
-  private static native void captureBinderCaller(int callerUid, int callerPid);
+  private static final ThreadLocal<java.util.ArrayDeque<CallerIdentity>> CALLER_IDENTITIES =
+      new ThreadLocal<>();
 
-  private static native void enterCallerScope(int callerUid, int callerPid);
+  private static final class CallerIdentity {
+    final int uid;
+    final int pid;
+    final String packageName;
+    final String snapshot;
+    final boolean restorable;
+    SourceFdCapture sourceFd;
 
-  private static native void exitCallerScope();
+    CallerIdentity(int uid, int pid, String snapshot) {
+      org.json.JSONObject fields;
+      try {
+        fields = new org.json.JSONObject(snapshot == null ? "{}" : snapshot);
+      } catch (org.json.JSONException invalid) {
+        fields = new org.json.JSONObject();
+      }
+      this.uid = fields.optInt("uid", uid);
+      this.pid = fields.optInt("pid", pid);
+      this.packageName = fields.optString("package", "");
+      this.snapshot = snapshot;
+      this.restorable =
+          this.pid > 0
+              && fields.optLong("start_time", 0) > 0
+              && fields.optString("boundary", "unverified").equals("none")
+              && this.packageName.length() > 0;
+    }
+  }
+
+  private static CallerIdentity currentCallerIdentity() {
+    java.util.ArrayDeque<CallerIdentity> stack = CALLER_IDENTITIES.get();
+    return stack == null || stack.isEmpty() ? null : stack.peek();
+  }
+
+  private static String callerResourceKey(Object resource) {
+    CallerIdentity identity = currentCallerIdentity();
+    return (identity == null ? "" : identity.uid + ":" + identity.packageName) + ":" + resource;
+  }
+
+  private static void enterProviderCallerScope(Object[] args, int uid, int pid) {
+    android.content.ContentProvider provider = providerReceiver(args);
+    // getCallingPackage 同时验证包名属于 Binder UID；共享 UID 内仍是请求声明的包名。
+    String packageName = provider == null ? "" : provider.getCallingPackage();
+    enterCallerScope(uid, pid, packageName);
+  }
+
+  private static void enterCallerScope(int uid, int pid) {
+    enterCallerScope(uid, pid, "");
+  }
+
+  private static void enterCallerScope(int uid, int pid, String packageName) {
+    enterCallerScope(uid, pid, packageName, null);
+  }
+
+  private static void enterCallerScope(int uid, int pid, String packageName, String captured) {
+    java.util.ArrayDeque<CallerIdentity> stack = CALLER_IDENTITIES.get();
+    if (stack == null) {
+      stack = new java.util.ArrayDeque<>();
+      CALLER_IDENTITIES.set(stack);
+    }
+    stack.push(
+        new CallerIdentity(uid, pid, nativeEnterCallerScope(uid, pid, packageName, captured)));
+  }
+
+  private static void exitCallerScope() {
+    try {
+      nativeExitCallerScope();
+    } finally {
+      java.util.ArrayDeque<CallerIdentity> stack = CALLER_IDENTITIES.get();
+      if (stack != null) {
+        if (!stack.isEmpty()) closeQuietly(stack.pop().sourceFd);
+        if (stack.isEmpty()) CALLER_IDENTITIES.remove();
+      }
+    }
+  }
+
+  private static native String nativeEnterCallerScope(
+      int uid, int pid, String packageName, String captured);
+
+  private static native void nativeExitCallerScope();
 
   private static native void enterProviderPassthrough();
 
@@ -2206,7 +2291,8 @@ public class Hooker {
       return null;
     int uid = intArg(args[2], -1);
     boolean forWrite = isFuseFileOpenForWrite(args);
-    return new FuseFileOpenRequest(method, (String) args[0], (String) args[1], uid, forWrite);
+    return new FuseFileOpenRequest(
+        method, (String) args[0], (String) args[1], uid, intArg(args[3], -1), forWrite);
   }
 
   private static boolean isFuseFileOpenForWrite(Object[] args) {
@@ -2540,14 +2626,16 @@ public class Hooker {
     final String path;
     final String ioPath;
     final int callerUid;
+    final int callerTid;
     final boolean forWrite;
 
     FuseFileOpenRequest(
-        Method method, String path, String ioPath, int callerUid, boolean forWrite) {
+        Method method, String path, String ioPath, int callerUid, int callerTid, boolean forWrite) {
       this.method = method;
       this.path = path == null ? "" : path;
       this.ioPath = ioPath == null ? "" : ioPath;
       this.callerUid = callerUid;
+      this.callerTid = callerTid;
       this.forWrite = forWrite;
     }
   }
@@ -2858,7 +2946,12 @@ public class Hooker {
   private static void recordProviderDirectoryPath(String path, int callerUid, int callerPid) {
     if (path == null || path.length() == 0 || callerUid < 0) return;
     try {
-      recordProviderDirectoryPath(path, callerUid, callerPid, packageNameForUid(callerUid));
+      CallerIdentity identity = currentCallerIdentity();
+      recordProviderDirectoryPath(
+          path,
+          callerUid,
+          identity != null && identity.uid == callerUid ? identity.pid : callerPid,
+          packageNameForPath(path, callerUid));
     } catch (Throwable ignored) {
     }
   }
@@ -2897,7 +2990,13 @@ public class Hooker {
   }
 
   private static void rememberMediaDirectoryCaller(String path, int callerUid) {
-    if (path == null || path.length() == 0 || callerUid < ANDROID_APP_UID_START) return;
+    if (path == null || path.length() == 0) return;
+    CallerIdentity current = currentCallerIdentity();
+    CallerIdentity identity =
+        current != null && current.uid == callerUid && current.restorable
+            ? new CallerIdentity(current.uid, current.pid, current.snapshot)
+            : null;
+    path = mediaDirectoryCallerPath(path);
     long now = android.os.SystemClock.elapsedRealtime();
     synchronized (RECENT_MEDIA_DIRECTORY_CALLERS) {
       Iterator<String> stale = RECENT_MEDIA_DIRECTORY_CALLERS.keySet().iterator();
@@ -2907,28 +3006,68 @@ public class Hooker {
           stale.remove();
         }
       }
-      while (RECENT_MEDIA_DIRECTORY_CALLERS.size() >= RECENT_MEDIA_DIRECTORY_CALLER_LIMIT) {
-        Iterator<String> oldest = RECENT_MEDIA_DIRECTORY_CALLERS.keySet().iterator();
-        if (!oldest.hasNext()) break;
-        oldest.next();
-        oldest.remove();
+      DirectoryCallerHint previous = RECENT_MEDIA_DIRECTORY_CALLERS.get(path);
+      if (previous != null
+          && (previous.identity == null
+              || identity == null
+              || !previous.identity.snapshot.equals(identity.snapshot))) {
+        RECENT_MEDIA_DIRECTORY_CALLERS.put(path, new DirectoryCallerHint(null, now));
+        return;
       }
-      RECENT_MEDIA_DIRECTORY_CALLERS.put(path, new DirectoryCallerHint(callerUid, now));
+      // 容量压力不能清除尚未过期的冲突；新路径缺少缓存时保持未解析。
+      if (previous == null
+          && RECENT_MEDIA_DIRECTORY_CALLERS.size() >= RECENT_MEDIA_DIRECTORY_CALLER_LIMIT) return;
+      RECENT_MEDIA_DIRECTORY_CALLERS.put(path, new DirectoryCallerHint(identity, now));
     }
   }
 
-  private static int recentMediaDirectoryCallerUid(String path) {
-    if (path == null || path.length() == 0) return -1;
+  private static DirectoryCallerHint recentMediaDirectoryCaller(String path) {
+    if (path == null || path.length() == 0) return null;
+    path = mediaDirectoryCallerPath(path);
     long now = android.os.SystemClock.elapsedRealtime();
     synchronized (RECENT_MEDIA_DIRECTORY_CALLERS) {
       DirectoryCallerHint hint = RECENT_MEDIA_DIRECTORY_CALLERS.get(path);
-      if (hint == null) return -1;
+      if (hint == null) return null;
       if (now - hint.elapsedMs > RECENT_MEDIA_DIRECTORY_CALLER_TTL_MS) {
         RECENT_MEDIA_DIRECTORY_CALLERS.remove(path);
-        return -1;
+        return null;
       }
-      return hint.callerUid;
+      return hint.identity == null ? null : hint;
     }
+  }
+
+  private static int mediaDirectoryCallerUid() {
+    CallerIdentity identity = currentCallerIdentity();
+    if (identity != null) return identity.uid;
+    Integer scopedUid = MEDIA_PROVIDER_CALLER_UID.get();
+    return scopedUid == null ? -1 : scopedUid.intValue();
+  }
+
+  private static String mediaDirectoryCallerPath(String path) {
+    String prefix = "/data/media/";
+    return path.startsWith(prefix) ? "/storage/emulated/" + path.substring(prefix.length()) : path;
+  }
+
+  private static boolean enterDirectoryCallerScope(String path) {
+    if (currentCallerIdentity() != null) return false;
+    int uid = android.os.Binder.getCallingUid();
+    int pid = android.os.Binder.getCallingPid();
+    if (uid == android.os.Process.myUid() && pid == android.os.Process.myPid()) {
+      DirectoryCallerHint hint = recentMediaDirectoryCaller(path);
+      if (hint != null) {
+        CallerIdentity identity = hint.identity;
+        enterCallerScope(identity.uid, identity.pid, identity.packageName, identity.snapshot);
+        return true;
+      }
+    }
+    enterCallerScope(uid, pid);
+    return true;
+  }
+
+  private static String packageNameForPath(String path, int uid) {
+    CallerIdentity identity = currentCallerIdentity();
+    if (identity != null && identity.uid == uid) return identity.packageName;
+    return packageNameForUid(uid);
   }
 
   private static String mediaStoreMutationHintPath(
@@ -2952,7 +3091,11 @@ public class Hooker {
   }
 
   private static String packageNameForUid(int uid) {
-    if (uid < ANDROID_APP_UID_START) return "";
+    java.util.ArrayDeque<CallerIdentity> stack = CALLER_IDENTITIES.get();
+    if (stack != null && !stack.isEmpty() && stack.peek().uid == uid) {
+      return stack.peek().packageName;
+    }
+    if (uid < 0) return "";
     try {
       Object thread = currentActivityThread();
       if (thread == null) return "";
@@ -3161,7 +3304,7 @@ public class Hooker {
       if (uriIndex < 0 || !(actualArgs[uriIndex] instanceof android.net.Uri)) return;
       String publicPath;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
-        publicPath = REDIRECTED_MEDIA_TARGETS.get(actualArgs[uriIndex].toString());
+        publicPath = REDIRECTED_MEDIA_TARGETS.get(callerResourceKey(actualArgs[uriIndex]));
       }
       if (publicPath == null || publicPath.length() == 0) return;
       ContentValues original = findContentValues(actualArgs);
@@ -3200,7 +3343,7 @@ public class Hooker {
     android.net.Uri uri = (android.net.Uri) actualArgs[uriIndex];
     String expectedPath;
     synchronized (REDIRECTED_MEDIA_TARGETS) {
-      expectedPath = REDIRECTED_MEDIA_TARGETS.get(uri.toString());
+      expectedPath = REDIRECTED_MEDIA_TARGETS.get(callerResourceKey(uri));
     }
     if (expectedPath == null || expectedPath.length() == 0) return null;
     String committedPath = queryDataPath(provider, uri);
@@ -3571,10 +3714,13 @@ public class Hooker {
       SourceFdCapture capture =
           new SourceFdCapture(
               dup, sourceFileDescriptorPath(dup), size, android.os.SystemClock.elapsedRealtime());
-      synchronized (RECENT_MEDIA_SOURCE_FDS) {
-        SourceFdCapture old = RECENT_MEDIA_SOURCE_FDS.put(callerUid, capture);
-        closeQuietly(old);
+      CallerIdentity identity = currentCallerIdentity();
+      if (identity == null || identity.uid != callerUid) {
+        closeQuietly(capture);
+        return;
       }
+      closeQuietly(identity.sourceFd);
+      identity.sourceFd = capture;
       logMediaSourceCapture(callerUid, capture);
     } catch (Throwable ignored) {
     }
@@ -3595,6 +3741,7 @@ public class Hooker {
       if (receiver instanceof android.content.ContentProvider) {
         path = queryDataPath((android.content.ContentProvider) receiver, (android.net.Uri) result);
       }
+      if (packageNameForUid(callerUid).isEmpty()) return;
       PendingDirectMediaWrite pending =
           new PendingDirectMediaWrite(path, callerUid, android.os.SystemClock.elapsedRealtime());
       synchronized (PENDING_DIRECT_MEDIA_WRITES) {
@@ -3614,7 +3761,7 @@ public class Hooker {
           oldest.next();
           oldest.remove();
         }
-        PENDING_DIRECT_MEDIA_WRITES.put(result.toString(), pending);
+        PENDING_DIRECT_MEDIA_WRITES.put(callerResourceKey(result), pending);
       }
       logDirectMediaWrite("register", callerUid, String.valueOf(result), path, 0, null);
     } catch (Throwable ignored) {
@@ -3692,7 +3839,7 @@ public class Hooker {
           peekPendingDirectMediaWrite((android.net.Uri) actualArgs[uriIndex]);
       if (pending == null || pending.bytes <= 0) return;
       synchronized (PENDING_DIRECT_MEDIA_WRITES) {
-        PENDING_DIRECT_MEDIA_WRITES.remove(String.valueOf(actualArgs[uriIndex]));
+        PENDING_DIRECT_MEDIA_WRITES.remove(callerResourceKey(actualArgs[uriIndex]));
       }
     } catch (Throwable ignored) {
     }
@@ -3754,6 +3901,7 @@ public class Hooker {
       if (!wasRedirected
           && normalizeStorageDisplayPath(probePath, callerUid)
               .equals(normalizeStorageDisplayPath(sandboxPath, callerUid))) return;
+      if (packageNameForUid(callerUid).isEmpty()) return;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
         // 逐条淘汰最旧记录，不整表清空：批量导入时后到的写入不应清掉尚未提交的改名记录。
         while (REDIRECTED_MEDIA_TARGETS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
@@ -3762,7 +3910,7 @@ public class Hooker {
           oldest.next();
           oldest.remove();
         }
-        REDIRECTED_MEDIA_TARGETS.put(result.toString(), sandboxPath);
+        REDIRECTED_MEDIA_TARGETS.put(callerResourceKey(result), sandboxPath);
       }
       logInfo("media redirect target uri=" + result + " sandbox=" + sandboxPath);
     } catch (Throwable ignored) {
@@ -3795,7 +3943,7 @@ public class Hooker {
       if (uriValue == null) return;
       String sandboxPath;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
-        sandboxPath = REDIRECTED_MEDIA_TARGETS.remove(uriValue.toString());
+        sandboxPath = REDIRECTED_MEDIA_TARGETS.remove(callerResourceKey(uriValue));
       }
       if (sandboxPath == null || sandboxPath.length() == 0) return;
 
@@ -3887,11 +4035,11 @@ public class Hooker {
   private static PendingDirectMediaWrite peekPendingDirectMediaWrite(android.net.Uri uri) {
     if (uri == null) return null;
     synchronized (PENDING_DIRECT_MEDIA_WRITES) {
-      PendingDirectMediaWrite pending = PENDING_DIRECT_MEDIA_WRITES.get(uri.toString());
+      PendingDirectMediaWrite pending = PENDING_DIRECT_MEDIA_WRITES.get(callerResourceKey(uri));
       if (pending == null) return null;
       long age = android.os.SystemClock.elapsedRealtime() - pending.elapsedMs;
       if (age > PENDING_DIRECT_MEDIA_WRITE_TTL_MS) {
-        PENDING_DIRECT_MEDIA_WRITES.remove(uri.toString());
+        PENDING_DIRECT_MEDIA_WRITES.remove(callerResourceKey(uri));
         return null;
       }
       return pending;
@@ -3899,10 +4047,10 @@ public class Hooker {
   }
 
   private static SourceFdCapture takeRecentMediaSourceFd(int callerUid) {
-    SourceFdCapture source;
-    synchronized (RECENT_MEDIA_SOURCE_FDS) {
-      source = RECENT_MEDIA_SOURCE_FDS.remove(callerUid);
-    }
+    CallerIdentity identity = currentCallerIdentity();
+    if (identity == null || identity.uid != callerUid) return null;
+    SourceFdCapture source = identity.sourceFd;
+    identity.sourceFd = null;
     if (source == null) return null;
     long age = android.os.SystemClock.elapsedRealtime() - source.elapsedMs;
     if (age > 30000L) {
@@ -4071,11 +4219,11 @@ public class Hooker {
   }
 
   private static final class DirectoryCallerHint {
-    final int callerUid;
+    final CallerIdentity identity;
     final long elapsedMs;
 
-    DirectoryCallerHint(int callerUid, long elapsedMs) {
-      this.callerUid = callerUid;
+    DirectoryCallerHint(CallerIdentity identity, long elapsedMs) {
+      this.identity = identity;
       this.elapsedMs = elapsedMs;
     }
   }
@@ -4110,43 +4258,49 @@ public class Hooker {
 
   private static String rewriteStoragePathForValues(String path, int callerUid) {
     if (path == null || path.length() == 0) return null;
-    String rewritten = null;
+    boolean enteredScope = enterDirectoryCallerScope(path);
     try {
-      rewritten = rewriteMediaStorePath(path, callerUid);
-    } catch (Throwable ignored) {
-    }
-    if (rewritten != null) {
-      if (rewritten.equals(path)) {
-        String unchangedFallback = mediaStoreDisplayPath(path, callerUid);
-        if (unchangedFallback == null)
-          unchangedFallback = normalizeRelativeDataPath(path, callerUid);
-        if (unchangedFallback != null && !unchangedFallback.equals(path)) {
-          logDebug("rwVals unchanged_native path=" + path + " fallback=" + unchangedFallback);
-          return unchangedFallback;
-        }
+      String rewritten = null;
+      try {
+        rewritten = rewriteMediaStorePath(path, callerUid);
+      } catch (Throwable ignored) {
       }
-      ensureSandboxParentDir(rewritten);
-      String displayPath = mediaStoreDisplayPath(rewritten, callerUid);
-      String result = displayPath != null ? displayPath : rewritten;
-      logDebug(
-          "rwVals sandbox_in="
-              + path
-              + " rewritten="
-              + rewritten
-              + " displayPath="
-              + displayPath
-              + " result="
-              + result);
-      return result;
+      if (rewritten != null) {
+        if (rewritten.equals(path)) {
+          String unchangedFallback = mediaStoreDisplayPath(path, callerUid);
+          if (unchangedFallback == null)
+            unchangedFallback = normalizeRelativeDataPath(path, callerUid);
+          if (unchangedFallback != null && !unchangedFallback.equals(path)) {
+            logDebug("rwVals unchanged_native path=" + path + " fallback=" + unchangedFallback);
+            return unchangedFallback;
+          }
+        }
+        ensureSandboxParentDir(rewritten);
+        String displayPath = mediaStoreDisplayPath(rewritten, callerUid);
+        String result = displayPath != null ? displayPath : rewritten;
+        logDebug(
+            "rwVals sandbox_in="
+                + path
+                + " rewritten="
+                + rewritten
+                + " displayPath="
+                + displayPath
+                + " result="
+                + result);
+        return result;
+      }
+      String fallback = mediaStoreDisplayPath(path, callerUid);
+      if (fallback == null) fallback = normalizeRelativeDataPath(path, callerUid);
+      logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
+      return fallback;
+    } finally {
+      if (enteredScope) exitCallerScope();
     }
-    String fallback = mediaStoreDisplayPath(path, callerUid);
-    if (fallback == null) fallback = normalizeRelativeDataPath(path, callerUid);
-    logDebug("rwVals no_native path=" + path + " fallback=" + fallback);
-    return fallback;
   }
 
   private static String resolveMediaStoreDirectPathForValues(String path, int callerUid) {
     if (path == null || path.length() == 0) return null;
+    boolean enteredScope = enterDirectoryCallerScope(path);
     try {
       String directPath = resolveMediaStoreDirectPath(path, callerUid);
       if (directPath == null || directPath.length() == 0) {
@@ -4170,6 +4324,8 @@ public class Hooker {
       return physicalPath == null ? directPath : physicalPath;
     } catch (Throwable ignored) {
       return null;
+    } finally {
+      if (enteredScope) exitCallerScope();
     }
   }
 

@@ -100,9 +100,9 @@ class FileMutationScenarioTest(unittest.TestCase):
         bash = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
         powershell = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
         self.assertIn('export -f run_file_mutation_lifecycle_scenario', bash)
-        self.assertIn('run_file_mutation_lifecycle_scenario "$scenario"', bash)
+        self.assertIn('run_file_mutation_lifecycle_scenario "$1"', bash)
         self.assertIn(
-            '42 { (Invoke-FileMutationLifecycleScenario $Scenario) -and (Invoke-FileMutationMetadataScenario $Scenario) }',
+            '42 { Invoke-ScenarioChecks $Scenario @({ Invoke-FileMutationLifecycleScenario $Scenario }, { Invoke-FileMutationMetadataScenario $Scenario }) }',
             powershell,
         )
 

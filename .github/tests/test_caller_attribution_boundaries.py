@@ -50,6 +50,22 @@ def extract_fn(source: str, fn_name: str) -> str:
     return source[start:idx]
 
 
+def extract_java_method(source: str, signature: str) -> str:
+    start = source.index(signature)
+    brace_start = source.index("{", start)
+    depth = 0
+    idx = brace_start
+    while idx < len(source):
+        if source[idx] == "{":
+            depth += 1
+        elif source[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+        idx += 1
+    raise AssertionError(f"unterminated Java method: {signature}")
+
+
 def build_harness(template: str, fn_src: str) -> str:
     """把抽出的真实 fn 注入 harness 模板的占位符处。"""
     placeholder = "// __INJECT_SHOULD_PASSTHROUGH_FN__"
@@ -71,6 +87,138 @@ def remove_virtual_branch(fn_src: str) -> str:
 
 
 class CallerAttributionBoundariesTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_binder_lookup_never_initializes_thread_state(self) -> None:
+        from test_mount_metadata_scope import function_body
+
+        source = read("src/hook/caller.rs")
+        self.assertIn("_ZN7android14IPCThreadState10selfOrNullEv", source)
+        for creating_api in ("IPCThreadState4selfEv", "AIBinder_getCallingUid", "AIBinder_getCallingPid"):
+            self.assertNotIn(creating_api, source)
+        declarations = "\n".join(
+            signature + function_body(source, signature)
+            for signature in ("struct CallerBinderSymbols", "impl CallerBinderSymbols")
+        )
+        tests = ROOT / "tests/native-unit/binder_caller.rs"
+        harness = (
+            "use std::ffi::c_void;\n#[derive(Default)]\n"
+            + declarations
+            + f'\n#[path = "{tests.as_posix()}"] mod tests;\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="srx-binder-caller-") as directory:
+            rust = Path(directory) / "main.rs"
+            binary = Path(directory) / ("binder.exe" if os.name == "nt" else "binder")
+            rust.write_text(harness, encoding="utf-8")
+            subprocess.run(["rustc", "--edition=2024", "--test", str(rust), "-o", str(binary)], check=True, capture_output=True, text=True)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            self.assertIn("2 passed; 0 failed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_download_companion_fallback_requires_an_absent_exact_row(self) -> None:
+        source = read("src/monitor/download_owner.rs")
+        implementation = "\n".join(extract_fn(source, name) for name in (
+            "infer_download_owner_identity_by_path", "should_lookup_download_owner", "build_lookup_candidates",
+            "normalize_companion_download_path", "unique_download_owner", "download_owner_identity_matches",
+            "package_uid_matches_download_row",
+        ))
+        harness = read(".github/tests/harness/download_owner_lookup.rs").replace(
+            "// __DOWNLOAD_OWNER_LOOKUP__", implementation
+        )
+        with tempfile.TemporaryDirectory(prefix="srx-download-owner-") as directory:
+            rust = Path(directory) / "main.rs"
+            binary = Path(directory) / ("lookup.exe" if os.name == "nt" else "lookup")
+            rust.write_text(harness, encoding="utf-8")
+            subprocess.run(["rustc", "--edition=2024", str(rust), "-o", str(binary)], check=True, capture_output=True, text=True)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            self.assertIn("DOWNLOAD OWNER LOOKUP CASES PASSED", result.stdout)
+
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_storage_scope_precedes_shared_writer_history(self) -> None:
+        implementation = extract_fn(read("src/hook/jni_query/rewrite.rs"), "resolve_storage_caller_context")
+        harness = read(".github/tests/harness/storage_caller_scope.rs").replace(
+            "// __STORAGE_CALLER_SCOPE__", implementation
+        )
+        with tempfile.TemporaryDirectory(prefix="srx-storage-caller-scope-") as directory:
+            rust = Path(directory) / "main.rs"
+            binary = Path(directory) / ("scope.exe" if os.name == "nt" else "scope")
+            rust.write_text(harness, encoding="utf-8")
+            subprocess.run(["rustc", "--edition=2024", "-A", "dead_code", str(rust), "-o", str(binary)], check=True, capture_output=True, text=True)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            self.assertIn("STORAGE CALLER SCOPE CASES PASSED", result.stdout)
+
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_shared_uid_read_only_rules_use_the_explicit_request_package(self) -> None:
+        source = read("src/hook/media_fuse.rs")
+        implementation = "\n".join(extract_fn(source, name) for name in (
+            "record_read_only_fuse_operation", "resolve_read_only_caller_package", "resolve_recent_read_only_owner"
+        ))
+        harness = read(".github/tests/harness/media_read_only_identity.rs").replace(
+            "// __MEDIA_READ_ONLY_IMPLEMENTATION__", implementation
+        )
+        with tempfile.TemporaryDirectory(prefix="srx-read-only-identity-") as directory:
+            rust = Path(directory) / "main.rs"
+            binary = Path(directory) / ("readonly.exe" if os.name == "nt" else "readonly")
+            rust.write_text(harness, encoding="utf-8")
+            subprocess.run(["rustc", "--edition=2024", "-A", "dead_code", str(rust), "-o", str(binary)], check=True, capture_output=True, text=True)
+            result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
+            self.assertIn("MEDIA READ-ONLY IDENTITY CASES PASSED", result.stdout)
+
+    @unittest.skipUnless(shutil.which("javac") and shutil.which("java"), "需要 JDK")
+    def test_directory_identity_cache_preserves_tasks_and_rejects_external_replays(self) -> None:
+        source = read("java_src/org/srx/hook/Hooker.java")
+        declarations = [
+            "private static final class DirectoryCallerHint",
+            "private static void rememberMediaDirectoryCaller(",
+            "private static DirectoryCallerHint recentMediaDirectoryCaller(",
+            "private static String mediaDirectoryCallerPath(",
+            "private static boolean enterDirectoryCallerScope(",
+        ]
+        implementation = "\n".join(extract_java_method(source, declaration) for declaration in declarations)
+        harness = read(".github/tests/harness/MediaDirectoryIdentityHarness.java").replace(
+            "// __DIRECTORY_IDENTITY_IMPLEMENTATION__", implementation
+        )
+        with tempfile.TemporaryDirectory(prefix="srx-directory-identity-") as directory:
+            java = Path(directory) / "MediaDirectoryIdentityHarness.java"
+            java.write_text(harness, encoding="utf-8")
+            subprocess.run(["javac", "-d", directory, str(java)], check=True, capture_output=True, text=True)
+            result = subprocess.run(["java", "-cp", directory, "MediaDirectoryIdentityHarness"], check=True, capture_output=True, text=True)
+            self.assertIn("DIRECTORY IDENTITY CASES PASSED", result.stdout)
+
+    def test_native_directory_scope_spans_the_original_operation_and_preserves_exceptions(self) -> None:
+        native = extract_fn(read("src/java_hook/hooker_class.rs"), "hooked_file_system_create_directory")
+        self.assertLess(native.index("let entered_scope"), native.index("let result = unsafe { original"))
+        self.assertLess(native.index("let result = unsafe { original"), native.index("CallStaticVoidMethodA"))
+        self.assertLess(native.index("ExceptionOccurred"), native.index("CallStaticVoidMethodA"))
+        self.assertLess(native.index("CallStaticVoidMethodA"), native.index(".Throw"))
+        rewrite = extract_java_method(read("java_src/org/srx/hook/Hooker.java"), "private static File rewriteFileSystemNativeDirectory(")
+        self.assertNotIn("exitCallerScope", rewrite)
+
+    def test_provider_scope_preserves_verified_package_for_shared_uid(self) -> None:
+        hooker = read("java_src/org/srx/hook/Hooker.java")
+        provider_scope = extract_java_method(
+            hooker, "private static void enterProviderCallerScope("
+        )
+        caller_scope = extract_java_method(
+            hooker, "private static void enterCallerScope(int uid, int pid, String packageName)"
+        )
+        package_lookup = extract_java_method(
+            hooker, "private static String packageNameForUid(int uid)"
+        )
+        self.assertIn("provider.getCallingPackage()", provider_scope)
+        self.assertIn("enterCallerScope(uid, pid, packageName)", provider_scope)
+        self.assertIn("enterCallerScope(uid, pid, packageName, null)", caller_scope)
+        self.assertIn("nativeEnterCallerScope(uid, pid, packageName, captured)", hooker)
+        self.assertNotIn("sharedUserIdForUid", hooker)
+        self.assertIn("stack.peek().uid == uid", package_lookup)
+        self.assertIn("packages.length == 1", package_lookup)
+        query = read("java_src/org/srx/hook/PackageQuery.java")
+        self.assertIn('fields[0].equals("S")', query)
+        self.assertIn('packageCall(pm, "getPackageInfo", name, uid / 100000)', query)
+        self.assertIn("info.applicationInfo.uid != uid", query)
+        self.assertIn("info.sharedUserId", query)
+        resolver = read("src/monitor.rs")
+        self.assertIn('SourceIdentity::new(shared_user_id.to_string(), "shared_uid", "fallback")', resolver)
+
     def test_access_policy_rules_do_not_infer_anonymous_callers(self) -> None:
         attribution_sources = "\n".join(
             read(path)
@@ -223,6 +371,93 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("fix_mapped_private_alias_access", runtime)
         self.assertIn("mode | 0o006", runtime)
         self.assertGreaterEqual(open_hook.count("fix_mapped_private_alias_access"), 2)
+
+    def test_download_owner_package_is_bound_to_row_uid_and_user(self) -> None:
+        source = read("src/monitor/download_owner.rs")
+        lookup = extract_fn(source, "query_download_owner_identity_impl")
+        resolve = extract_fn(source, "infer_download_owner_identity_by_path")
+        validate = extract_fn(source, "download_owner_identity_matches")
+        uid_match = extract_fn(source, "package_uid_matches_download_row")
+
+        self.assertIn('["notificationpackage", "uid"]', lookup)
+        self.assertIn("read_download_owner_rows(env, cursor_class, cursor)", lookup)
+        self.assertIn("!policy::is_system_writer_package(&owner.0)", resolve)
+        self.assertIn("unique_download_owner(rows)", extract_fn(source, "read_download_owner_rows"))
+        self.assertNotIn("DownloadOwnerCache", source)
+        self.assertNotIn("resolve_package_by_uid", source)
+        self.assertEqual(1, resolve.count("download_owner_identity_matches"))
+        self.assertIn("get_fresh_uid_for_package_in_user", validate)
+        self.assertIn("package_uid == row_uid", uid_match)
+        self.assertIn("user_id_from_uid(row_uid) == expected_user_id", uid_match)
+        owner_rows = extract_fn(source, "read_download_owner_rows")
+        self.assertIn('"moveToNext"', owner_rows)
+        self.assertIn("unique_download_owner(rows)", owner_rows)
+        self.assertNotIn("CACHE_TTL_MS", source)
+        self.assertNotIn("QUERY_RATE_LIMIT_PER_SECOND", source)
+        self.assertIn(
+            "infer_download_owner_identity_by_path(normalized_path, user_id)",
+            read("src/redirect/engine/caller.rs"),
+        )
+        self.assertIn(
+            "infer_download_owner_identity_by_path(path_text, user_id)",
+            read("src/hook/jni_query/rewrite.rs"),
+        )
+
+    def test_deferred_media_path_uses_the_bound_package_hint(self) -> None:
+        hooker = read("java_src/org/srx/hook/Hooker.java")
+        enter_scope = extract_java_method(
+            hooker, "private static boolean enterDirectoryCallerScope("
+        )
+        rewrite_values = extract_java_method(
+            hooker, "private static String rewriteStoragePathForValues("
+        )
+        direct_path = extract_java_method(
+            hooker, "private static String resolveMediaStoreDirectPathForValues("
+        )
+        record_directory = extract_java_method(
+            hooker, "private static void recordProviderDirectoryPath("
+        )
+
+        self.assertIn("uid == android.os.Process.myUid() && pid == android.os.Process.myPid()", enter_scope)
+        self.assertIn("enterCallerScope(identity.uid, identity.pid, identity.packageName, identity.snapshot)", enter_scope)
+        self.assertIn("enterCallerScope(uid, pid)", enter_scope)
+        self.assertIn("enterDirectoryCallerScope(path)", rewrite_values)
+        self.assertIn("finally", rewrite_values)
+        self.assertIn("exitCallerScope()", rewrite_values)
+        self.assertIn("enterDirectoryCallerScope(path)", direct_path)
+        self.assertIn("finally", direct_path)
+        self.assertIn("exitCallerScope()", direct_path)
+        self.assertIn("packageNameForPath(path, callerUid)", record_directory)
+        self.assertIn(
+            '"/data/media/"',
+            extract_java_method(hooker, "private static String mediaDirectoryCallerPath("),
+        )
+
+    def test_proc_request_identity_never_uses_a_different_process_credential(self) -> None:
+        identity = read("src/platform/proc_identity.rs")
+        request_identity = extract_fn(identity, "read_proc_identity_for_request")
+        resolve_request = extract_fn(identity, "resolve_request_package")
+
+        self.assertIn("resolve_request_package(&cmdline, request_uid", request_identity)
+        self.assertIn("resolve_launching_app_by_process_group(pid, request_uid)", request_identity)
+        self.assertIn("packages_for_uid(request_uid)", request_identity)
+        self.assertLess(request_identity.index("read_request_task"), request_identity.index("packages_for_uid(request_uid)"))
+        self.assertIn("request_uid_is_task_credential", extract_fn(identity, "read_request_task"))
+        self.assertIn("packages.len() != 1", extract_fn(identity, "unique_request_package"))
+        self.assertNotIn("uids.iter().find_map", request_identity)
+        self.assertIn("package_uid(&package) == request_uid", resolve_request)
+        self.assertIn("request_package_must_match_the_uid_used_by_that_operation", read("tests/native-unit/proc_identity.rs"))
+
+    def test_path_hint_conflicts_are_not_resolved_by_recency(self) -> None:
+        source = read("src/monitor/source_hint.rs")
+        start = source.index("fn infer_from_path_hints<'a>")
+        end = source.index("#[derive(Default)]", start)
+        infer = source[start:end]
+
+        self.assertIn("let package_name = matching.first()?.package_name.as_str()", infer)
+        self.assertIn("hint.package_name != package_name", infer)
+        self.assertIn("return None", infer)
+        self.assertIn("conflicting_packages_for_one_path_remain_unresolved", read("tests/native-unit/source_hint.rs"))
 
     def test_media_file_columns_keep_mapping_during_pending_publish(self) -> None:
         hooker = read("java_src/org/srx/hook/Hooker.java")
@@ -659,35 +894,41 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
 
 
     def test_cross_thread_caller_evidence_is_record_only(self) -> None:
-        """跨线程 binder 证据只能用于记录归因，不得进入归因线索或决策路径。
+        """跨线程 binder 证据只补监视记录，不参与重定向判定。
 
         背景（2026-11-05 HyperOS A16 实测）：MediaProvider 的 `Transport#insert` 在
         binder 线程上建目录，而同一次写入的 FUSE 请求由 FuseDaemon 处理，两者不是同一个
-        线程 —— Java 侧捕获的调用方 uid/pid 在 thread_local 里，记录因读不到而退回
-        MP 自己的 uid（`caller_uid=10217`），用户问"这个目录是谁建的"答不上来。
-        补法是进程级证据，但必须只影响记录：决策与归因线索仍只看 thread_local。
+        线程。Java 侧在 provider 入口登记调用方包名，记录侧只按匹配的 uid/pid 取回；
+        冲突和过期证据不得猜测。重定向仍使用当前线程内的显式调用方上下文。
         """
         context = read("src/hook/context.rs")
-        record_fn = extract_fn(context, "record_caller_uid")
-        self.assertIn("if direct != self_uid", record_fn)
-        self.assertIn("cross_thread_caller_in_window", record_fn)
-        # 归因线索/决策用的原函数不得引用跨线程证据。
+        record_fn = extract_fn(context, "record_caller_evidence")
+        self.assertIn("cross_thread_caller(direct, pid)", record_fn)
+        self.assertIn("cross_thread_caller(fuse_uid, fuse_pid)", record_fn)
+        record_identity_fn = extract_fn(context, "record_caller_identity_with_evidence")
+        self.assertIn("record_caller_evidence()", record_identity_fn)
+        self.assertIn("Option<RequestIdentity>", record_identity_fn)
+        self.assertIn("Some(caller.identity)", record_identity_fn)
+        cache_fn = extract_fn(context, "remember_cross_thread_caller")
+        self.assertIn("identity: identity.clone()", cache_fn)
+        self.assertIn("caller.identity.same_task(identity)", cache_fn)
+        self.assertNotIn("record_cross_thread_caller", context)
+        # 重定向输入不得查询跨线程记录。
         monitor_fn = extract_fn(context, "get_effective_caller_uid_for_monitor")
         self.assertNotIn("cross_thread", monitor_fn)
 
     def test_cross_thread_records_mark_evidence_and_daemon_never_guesses_uid(self) -> None:
         """记录必须带证据来源标记，且 daemon 对多包 uid 一律放弃而不是猜一个。"""
-        monitor = read("src/hook/monitor.rs")
+        monitor = extract_fn(read("src/monitor.rs"), "monitor_request_extra")
         self.assertIn("caller_evidence=cross_thread", monitor)
 
-        daemon = read("src/log_daemon.rs")
+        daemon = read("src/log_daemon/identity.rs")
         enrich_fn = extract_fn(daemon, "enrich_monitor_record_identity")
-        self.assertIn("caller_evidence=cross_thread", enrich_fn)
-        self.assertIn("system_uid_package", enrich_fn)
-
-        uid_fn = extract_fn(daemon, "system_uid_package")
-        # 同一 uid 对应多个包时登记 None（不可用），绝不按排序挑一个。
-        self.assertIn("map.insert(package_uid, None)", uid_fn)
+        self.assertIn('monitor_field(message, "caller_evidence")', enrich_fn)
+        self.assertIn("read_proc_identity_for_request(pid, uid)", enrich_fn)
+        self.assertIn('"medium"', enrich_fn)
+        self.assertIn("identity.shared_user_id", enrich_fn)
+        self.assertNotIn("resolve_package_from_pid", daemon)
 
     def test_budget_separates_not_attempted_from_real_failure(self) -> None:
         """「没试」不得计进失败预算，且预算耗尽后必须留探测窗口。
@@ -725,18 +966,16 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         /proc 与 PackageManager 的客观事实（多包 uid 一律不猜）。
         """
         caller = read("src/hook/caller.rs")
-        resolve_fn = extract_fn(caller, "resolve_system_fuse_identity")
+        resolve_fn = extract_fn(caller, "update_caller_package_for_current_thread")
         self.assertIn("daemon_identity_query::query_process_identity", resolve_fn)
-
         query = read("src/daemon_identity_query.rs")
-        self.assertIn("read_proc_identity", query)
-        # 回包必须校验 pid 与 uid 双向一致，否则 pid 复用后的答案会被误采信。
         parse_fn = extract_fn(query, "parse_reply")
-        self.assertIn("reply_pid != pid", parse_fn)
-        self.assertIn("reply_uid != uid", parse_fn)
-        # 同一 uid 对应多个包时不许挑一个。
-        unique_fn = extract_fn(query, "unique_package_for_uid")
-        self.assertIn("return None", unique_fn)
+        for check in ("reply_pid != pid", "reply_uid != uid", "reply_nonce != nonce"):
+            self.assertIn(check, parse_fn)
+        self.assertIn("read_proc_identity_for_request", query)
+        self.assertIn("recv_from_root", query)
+        identity = read("src/platform/proc_identity.rs")
+        self.assertIn("packages.len() != 1", extract_fn(identity, "unique_request_package"))
 
         # 回包方向的 SELinux 权限与询问方向同样必要，否则询问永远等不到答案。
         policy = read("assets/zygisk_module/sepolicy.rule")
@@ -756,30 +995,29 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         lineage_fn = extract_fn(identity, "resolve_launching_app_by_process_group")
         self.assertIn("leader == pid", lineage_fn)
         self.assertIn("leader_uid != uid", lineage_fn)
-        self.assertIn("get_uid_for_package(&leader_name) != uid", lineage_fn)
-        for path in ("src/daemon_identity_query.rs", "src/daemon.rs", "src/log_daemon.rs"):
-            self.assertIn(
-                "resolve_launching_app_by_process_group",
-                read(path),
-                f"{path} 必须共用进程组追溯，否则决策、pid 表与记录会各说一套",
-            )
+        self.assertIn("package_uid_matches(&leader_name, uid)", lineage_fn)
+        package_uid_fn = extract_fn(identity, "package_uid_matches")
+        self.assertIn("get_uid_for_package_in_user", package_uid_fn)
+        self.assertIn("read_request_task(leader, uid)", lineage_fn)
+        self.assertIn("task.same_task(after)", lineage_fn)
+        self.assertIn("resolve_launching_app_by_process_group", extract_fn(identity, "read_proc_identity_for_request"))
+        for path in ("src/daemon_identity_query.rs", "src/log_daemon/identity.rs"):
+            self.assertIn("read_proc_identity_for_request", read(path))
 
     def test_system_uid_identity_is_revalidated_by_daemon(self) -> None:
         """系统 uid 的包名不能直接来自旧 pid 快照，daemon 必须核验当前进程身份。"""
         caller = read("src/hook/caller.rs")
-        for fn_name in ("resolve_system_fuse_identity", "resolve_java_caller_package"):
-            body = extract_fn(caller, fn_name)
-            self.assertIn(
-                "daemon_identity_query::query_process_identity",
-                body,
-                f"{fn_name} 必须把系统 uid 身份交给 daemon 实时验证",
-            )
+        update_fn = extract_fn(caller, "update_caller_package_for_current_thread")
+        self.assertIn("query_process_identity(pid, uid)", update_fn)
+        self.assertIn("set_request_identity(Some(identity))", update_fn)
         monitor = extract_fn(read("src/monitor.rs"), "resolve_system_caller_package")
         self.assertIn("daemon_identity_query::query_process_identity", monitor)
+        self.assertIn("!identity.is_terminal()", monitor)
         query = read("src/daemon_identity_query.rs")
         self.assertNotIn("CACHE_TTL_MS", query)
         self.assertIn("reply_nonce != nonce", extract_fn(query, "parse_reply"))
-        self.assertIn("process_start_time_ticks(pid)", extract_fn(query, "resolve_identity"))
+        self.assertIn("read_proc_identity_for_request(pid, uid)", extract_fn(query, "answer_query"))
+        self.assertIn("process_start_time_ticks(pid)", read("src/platform/proc_identity.rs"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,11 +6,28 @@ state=/data/local/tmp/srx-test-flow.lock/download-network
 reconnect_network() {
   if [ "$mobile_data" = 1 ]; then
     svc data disable
-    svc data enable
   fi
   if [ "$wifi_on" = 1 ]; then
     svc wifi disable
+  fi
+  # 等旧网络真正断开再重连，避免异步开关合并后沿用旧的验证状态。
+  disconnected=0
+  for attempt in $(seq 1 15); do
+    if networks=$(dumpsys connectivity) && ! printf '%s\n' "$networks" | grep '^  NetworkAgentInfo' | grep -Eq 'Transports: (CELLULAR|WIFI)'; then
+      disconnected=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$mobile_data" = 1 ]; then
+    svc data enable
+  fi
+  if [ "$wifi_on" = 1 ]; then
     svc wifi enable
+  fi
+  if [ "$disconnected" != 1 ]; then
+    echo "下载测试网络在 15 秒内未断开" >&2
+    return 1
   fi
 }
 

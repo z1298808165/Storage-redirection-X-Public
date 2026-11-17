@@ -1,67 +1,326 @@
-// /proc 进程身份读取：cmdline 身份 + status 实际 uid。
-//
-// 独立成模块是因为两个 root 进程上下文需要同一语义：daemon 的系统 pid 表落盘
-// （全量扫描）与自有 FUSE 引擎的系统请求者即时归因（单 pid 查询）。daemon.rs
-// 原有实现语义保持不变，仅物理搬迁共享。
-
-/// 读取单个进程的 (uid, 包名)。内核线程与无法提取可读名的进程返回 None。
+/// 读取 Linux `/proc/<pid>/stat` 的进程启动时钟值（字段 22）。
 ///
-/// argv0 带路径的本地二进制（如 adb shell 派生的 /system/bin/sh）取其
-/// basename 作为身份：native 系统二进制没有包名形态，basename 是能给出的
-/// 最诚实身份；Java 进程的 argv0 本就是包名，不受影响。status 的 Uid 行是
-/// 身份可信的最终裁决（cmdline 可被进程自改，uid 不可）。
+/// PID 会被复用；需要跨异步清理周期识别同一个进程实例时，必须同时比较该值。
+pub fn process_start_time_ticks(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+    let after_name = stat.rsplit_once(')')?.1.trim_start();
+    after_name.split_whitespace().nth(19)?.parse().ok()
+}
+
+// 请求任务的凭据与包身份；执行者边界先于包名、进程组和 UID 回退判定。
+
+/// 停止向发起应用追溯的原因；普通应用切换进程名或非特权域不会触发边界。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionBoundary {
+    #[default]
+    None,
+    Root,
+    Shell,
+    Privileged,
+    Unverified,
+}
+
+impl AttributionBoundary {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Root => "root",
+            Self::Shell => "shell",
+            Self::Privileged => "privileged",
+            Self::Unverified => "unverified",
+        }
+    }
+}
+
+/// 同一任务实例的身份快照；`uid` 保留请求 UID，包名与共享组标签分别存储。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestIdentity {
+    pub uid: i32,
+    pub pid: i32,
+    pub start_time: u64,
+    pub native: String,
+    pub selinux_context: String,
+    pub boundary: AttributionBoundary,
+    pub package: String,
+    pub shared_user_id: String,
+}
+
+impl RequestIdentity {
+    pub fn same_task(&self, other: &Self) -> bool {
+        self.pid == other.pid
+            && self.uid == other.uid
+            && self.start_time == other.start_time
+            && self.native == other.native
+            && self.selinux_context == other.selinux_context
+            && self.boundary == other.boundary
+    }
+    pub fn is_terminal(&self) -> bool {
+        self.boundary != AttributionBoundary::None
+    }
+
+    /// 跨 UID 代写能力只授予已核验的系统提供器；旧进程名还须匹配 PM 的 UID 组。
+    pub fn is_system_writer(&self) -> bool {
+        !self.is_terminal()
+            && (crate::redirect::policy::is_system_writer_package(&self.package)
+                || crate::redirect::policy::is_legacy_writer_process_name(&self.native)
+                    && crate::redirect::policy::get_packages_for_uid(self.uid)
+                        .iter()
+                        .any(|package| crate::redirect::policy::is_system_writer_package(package)))
+    }
+
+    /// 监视标签、来源与可信度；核验失败保留未知，共享组只作回退显示。
+    pub fn monitor_identity(&self) -> (&str, &'static str, &'static str) {
+        match self.boundary {
+            AttributionBoundary::Unverified => ("-", "unknown", "none"),
+            AttributionBoundary::Root
+            | AttributionBoundary::Shell
+            | AttributionBoundary::Privileged => (&self.native, "executor", "high"),
+            AttributionBoundary::None if !self.package.is_empty() => {
+                (&self.package, "caller", "high")
+            }
+            AttributionBoundary::None if !self.shared_user_id.is_empty() => {
+                (&self.shared_user_id, "shared_uid", "fallback")
+            }
+            AttributionBoundary::None => ("-", "unknown", "none"),
+        }
+    }
+
+    /// 无法读取任务时仍保留内核请求身份；未知凭据不得作为 App 来源使用。
+    pub fn unresolved(uid: i32, pid: i32) -> Self {
+        Self {
+            uid,
+            pid,
+            native: match uid {
+                0 => "root",
+                2000 => "shell",
+                _ => "",
+            }
+            .to_owned(),
+            boundary: match uid {
+                0 => AttributionBoundary::Root,
+                2000 => AttributionBoundary::Shell,
+                _ => AttributionBoundary::Unverified,
+            },
+            ..Self::default()
+        }
+    }
+
+    /// 任务已失效时保留原始快照，只关闭包身份与后续归因回退。
+    pub fn invalidate(&mut self) {
+        self.boundary = AttributionBoundary::Unverified;
+        self.package.clear();
+        self.shared_user_id.clear();
+    }
+
+    /// 异步恢复只接受同一任务；原请求的终止边界不随任务退出或凭据变化撤销。
+    pub fn revalidate(&mut self, current: Option<&Self>) {
+        if !self.is_terminal() && current.is_none_or(|current| !self.same_task(current)) {
+            self.invalidate();
+        }
+    }
+
+    /// 原始任务字段用于核查执行者，不把共享组名或 native 名称当作包名。
+    pub fn log_fields(&self) -> String {
+        format!(
+            "|caller_uid={}|caller_pid={}|caller_start_time={}|caller_context={}|caller_boundary={}|native={}",
+            self.uid,
+            self.pid,
+            self.start_time,
+            crate::platform::log_fields::encode(&self.selinux_context),
+            self.boundary.as_str(),
+            crate::platform::log_fields::encode(&self.native)
+        )
+    }
+
+    /// 替换附加字段中的任务快照，避免解析器对重复键取值不一致。
+    pub fn with_log_fields(&self, extra: &str) -> String {
+        let mut fields = extra
+            .split('|')
+            .filter(|field| {
+                !matches!(
+                    field.split_once('=').map(|(key, _)| key),
+                    Some(
+                        "caller_uid"
+                            | "caller_pid"
+                            | "caller_start_time"
+                            | "caller_context"
+                            | "caller_boundary"
+                            | "native"
+                    )
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        fields.push_str(&self.log_fields());
+        fields.trim_start_matches('|').to_owned()
+    }
+}
+
+pub(crate) fn attribution_boundary(uids: &[i32; 4], context: &str) -> AttributionBoundary {
+    if uids.contains(&0) {
+        AttributionBoundary::Root
+    } else if uids.contains(&2000) || context.split(':').nth(2) == Some("shell") {
+        AttributionBoundary::Shell
+    } else if matches!(
+        context.split(':').nth(2),
+        Some("su" | "magisk" | "ksu" | "kernelsu")
+    ) {
+        AttributionBoundary::Privileged
+    } else if context.is_empty() {
+        AttributionBoundary::Unverified
+    } else {
+        AttributionBoundary::None
+    }
+}
+
+fn native_name(cmdline: &str) -> String {
+    cmdline
+        .split('\0')
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .char_indices()
+        .take_while(|(offset, ch)| offset + ch.len_utf8() <= 255)
+        .map(|(_, ch)| ch)
+        .collect()
+}
+
+/// 读取真实 UID 与 argv0 名称供进程名册使用；无可读名称时返回 None。
+/// 名称可以是 native basename，不代表已核验包；请求归因使用任务快照接口。
 pub fn read_proc_identity(pid: i32) -> Option<(i32, String)> {
     let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
-    let package = resolve_identity_package(&cmdline)?;
-    Some((read_proc_uid(pid)?, package))
+    let uid = read_proc_uid(pid)?;
+    let package = resolve_identity_package(&cmdline, uid)?;
+    Some((uid, package))
 }
 
 /// `/proc/<pid>/status` 里的实际 uid，读不到返回 None。
 pub fn read_proc_uid(pid: i32) -> Option<i32> {
+    read_proc_uids(pid).map(|uids| uids[0])
+}
+
+fn read_proc_uids(pid: i32) -> Option<[i32; 4]> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    parse_proc_uids(&status)
+}
+
+fn parse_proc_uids(status: &str) -> Option<[i32; 4]> {
     for line in status.lines() {
         let Some(rest) = line.strip_prefix("Uid:") else {
             continue;
         };
-        let uid = rest
-            .split_whitespace()
-            .next()
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(-1);
-        return (uid >= 0).then_some(uid);
+        let mut fields = rest.split_whitespace();
+        let uids = [
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+        ];
+        return uids.iter().all(|uid| *uid >= 0).then_some(uids);
     }
     None
 }
 
-/// pid 表与系统请求者归因使用的身份串。
-///
-/// 解析顺序刻意收窄，避免把「命令行参数里恰好出现的包名」当成进程身份：
-/// 1. argv0 是包名形态且能在 uid 表命中 —— 直接采用（绝大多数 Java 进程）；
-/// 2. argv0 是包名形态但表里查不到 —— 按 `<package>.<suffix>` 截到真实父包。
-///    HyperOS 上这类形态很常见（`com.miui.securitycenter.remote`），不截断就会
-///    留下一个"查无此包"的名字：用它反查 uid、读应用配置全部落空，监视记录里也会
-///    显示一个系统里并不存在的应用；
-/// 3. argv0 不是包名形态（`sh`、`mtio` 这类 native/helper）—— 才去扫完整命令行里的
-///    `@<package>-<version>` 形态（MT 管理器的 `mtio daemon @bin.mt.plus-3162069`）；
-/// 4. 都解析不出就回退 argv0 的 basename：pid 表必须能给每个进程一个身份，这里的
-///    诚实做法是进程名，而不是编造包名。
-fn resolve_identity_package(cmdline: &str) -> Option<String> {
+/// 查询任务对应的已安装包，保留内核为本次操作报告的 UID；任务的 fsuid 可与包 UID 不同。
+#[cfg(unix)]
+pub fn read_proc_identity_for_request(pid: i32, request_uid: i32) -> Option<RequestIdentity> {
+    if pid <= 0 || request_uid < 0 {
+        return None;
+    }
+    let mut identity = read_request_task(pid, request_uid)?;
+    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    let user_id = crate::platform::user_id_from_uid(request_uid);
+    if !identity.is_terminal() {
+        identity.package = resolve_request_package(&cmdline, request_uid, |name| {
+            crate::redirect::policy::get_uid_for_package_in_user(name, user_id)
+        })
+        .or_else(|| resolve_launching_app_by_process_group(pid, request_uid))
+        .or_else(|| {
+            crate::platform::packages::packages_for_uid(request_uid)
+                .ok()
+                .and_then(unique_request_package)
+        })
+        .unwrap_or_default();
+        if identity.package.is_empty() {
+            identity.shared_user_id =
+                crate::platform::packages::shared_user_id_for_uid(request_uid)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+        }
+    }
+    read_request_task(pid, request_uid)
+        .filter(|after| identity.same_task(after))
+        .map(|_| identity)
+}
+
+/// 只读取原请求任务的内核身份，不查询 PackageManager；用于缓存命中前核验。
+pub fn read_request_task(pid: i32, request_uid: i32) -> Option<RequestIdentity> {
+    if pid <= 0 || request_uid < 0 {
+        return None;
+    }
+    let start_before = crate::platform::process_start_time_ticks(pid)?;
+    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
+    let uids = read_proc_uids(pid)?;
+    if !request_uid_is_task_credential(&uids, request_uid) {
+        return None;
+    }
+    let selinux_context = std::fs::read_to_string(format!("/proc/{pid}/attr/current"))
+        .unwrap_or_default()
+        .trim_matches(['\0', '\n', '\r'])
+        .to_string();
+    let identity = RequestIdentity {
+        uid: request_uid,
+        pid,
+        start_time: start_before,
+        native: native_name(&cmdline),
+        boundary: attribution_boundary(&uids, &selinux_context),
+        selinux_context,
+        ..RequestIdentity::default()
+    };
+    (crate::platform::process_start_time_ticks(pid) == Some(start_before)).then_some(identity)
+}
+
+fn unique_request_package(packages: std::collections::HashSet<String>) -> Option<String> {
+    if packages.len() != 1 {
+        return None;
+    }
+    packages
+        .into_iter()
+        .next()
+        .filter(|name| is_package_shape(name))
+}
+
+fn resolve_request_package(
+    cmdline: &str,
+    request_uid: i32,
+    package_uid: impl Fn(&str) -> i32,
+) -> Option<String> {
+    let package = resolve_identity_package(cmdline, request_uid)?;
+    (is_package_shape(&package) && package_uid(&package) == request_uid).then_some(package)
+}
+
+/// pid 表保留 argv0 的包名或原生命令名；命令行参数不作为包身份来源。
+fn resolve_identity_package(cmdline: &str, uid: i32) -> Option<String> {
     let first = cmdline.split('\0').next()?.trim();
     let mut value = first.split(':').next()?.trim();
     if let Some(basename) = value.rsplit('/').next() {
         value = basename;
     }
     if is_package_shape(value) {
-        if crate::redirect::policy::get_uid_for_package(value) >= 0 {
+        if package_uid_matches(value, uid) {
             return Some(value.to_string());
         }
-        if let Some(parent) = truncate_to_known_package(value) {
+        if let Some(parent) = truncate_to_known_package_for_uid(value, uid) {
             return Some(parent);
         }
         return Some(value.to_string());
-    }
-    if let Some(package) = parse_package_from_cmdline(cmdline) {
-        return Some(package);
     }
     if value.is_empty()
         || !value
@@ -73,20 +332,8 @@ fn resolve_identity_package(cmdline: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// 按内核进程组追溯发起应用：`(包名, uid)`，追溯不到返回 None。
-///
-/// 应用在 zygote 派生时，system_server 会为它建 `uid_<uid>/pid_<pid>` 进程组；该应用
-/// 之后 fork/exec 出的任何子进程（`Runtime.exec` 的 shell、下载器 helper）都**继承**
-/// 这个组，父进程先退出、子进程被 init 收养也不变（真机已验证：PPid=1 的 sleep 仍在
-/// `uid_1000/pid_19452`）。所以组目录名里的 pid 就是发起应用本身——这是内核记录的
-/// 客观谱系，不是按 uid 或按规则推测。
-///
-/// 只在两个条件同时满足时才采信：
-/// - 组首 pid 不是本进程自己（否则就是 cmdline 本身，无需追溯）；
-/// - 组首的 cmdline 是包名形态、uid 与本进程一致，且能在 uid 表里命中真实包。
-///
-/// 组首已退出、cgroup 不是这种布局（旧内核 / OEM 改过路径）时一律返回 None，调用方
-/// 按原口径保留 native 名，不猜。
+/// 从 cgroup v2 的 `uid_<uid>/pid_<pid>` 组首解析已安装包。
+/// 组首须仍为同一任务、未触发执行者边界且包 UID 匹配；布局不符或组首退出返回 None。
 pub fn resolve_launching_app_by_process_group(pid: i32, uid: i32) -> Option<String> {
     if pid <= 0 {
         return None;
@@ -96,14 +343,20 @@ pub fn resolve_launching_app_by_process_group(pid: i32, uid: i32) -> Option<Stri
     if leader == pid {
         return None;
     }
+    let task = read_request_task(leader, uid)?;
+    if task.is_terminal() {
+        return None;
+    }
     let (leader_uid, leader_name) = read_proc_identity(leader)?;
     if leader_uid != uid || !is_package_shape(&leader_name) {
         return None;
     }
-    if crate::redirect::policy::get_uid_for_package(&leader_name) != uid {
+    if !package_uid_matches(&leader_name, uid) {
         return None;
     }
-    Some(leader_name)
+    read_request_task(leader, uid)
+        .filter(|after| task.same_task(after))
+        .map(|_| leader_name)
 }
 
 /// 从 `/proc/<pid>/cgroup` 内容里取 cgroup v2 层级的进程组首 pid。
@@ -126,103 +379,31 @@ fn is_package_shape(value: &str) -> bool {
     value.contains('.') && !value.starts_with('.') && !value.ends_with('.') && !value.contains("..")
 }
 
-/// 读取单个进程的「真实源头包名」，读不到返回 None。
-///
-/// 与 [`read_proc_identity`] 的区别：后者服务 pid 表（要求能给出 uid 与任意身份），
-/// 本函数只回答「这个进程属于哪个安装包」，解析不出就返回 None。daemon 在把带
-/// `caller_pid` 的监视记录落盘前用它对 root / 特权 helper 做反查——这些进程的
-/// `/proc` 在 MediaProvider 域被 SELinux 拒绝，只有 root 侧读得到。
-// quality-allow(lint-suppression): 引用方 log_daemon 仅由 daemon 二进制编译。
-#[allow(dead_code)]
-pub fn resolve_package_from_pid(pid: i32) -> Option<String> {
-    if pid <= 0 {
-        return None;
-    }
-    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).ok()?;
-    parse_package_from_cmdline(&cmdline)
-}
-
-/// 从 cmdline 原始内容解析安装包名，解析不出返回 None。
-///
-/// 覆盖真机上出现的三类形态：
-/// - Java 进程：argv0 本身就是包名（`com.tencent.mm`）；
-/// - 分叉 helper：`<helper> daemon @<package>-<version>`（MT 管理器的
-///   `mtio daemon @bin.mt.plus-3162069`）；
-/// - 子进程名：`<package>:<suffix>`，以及 HyperOS 上大量存在的
-///   `<package>.<suffix>`（`com.miui.securitycenter.remote`）。
-///
-/// 纪律：优先返回能在 uid 表命中的候选（那才是真实安装包）；其次是 `@<pkg>-<ver>`
-/// 这种显式标了归属的候选。两者都没有就返回 None——宁可让上游降级成 basename 或
-/// 未知，也不能把进程名当成包名写进监视记录。纯函数，不读 /proc，供 hook 侧
-/// （只能走裸系统调用读文件）与 daemon 侧共用。
-pub fn parse_package_from_cmdline(cmdline: &str) -> Option<String> {
-    let mut helper_hit: Option<String> = None;
-    for token in cmdline.split('\0') {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let from_helper = trimmed.starts_with('@');
-        let candidate = normalize_package_token(trimmed);
-        if candidate.is_empty() {
-            continue;
-        }
-        if crate::redirect::policy::get_uid_for_package(&candidate) >= 0 {
-            return Some(candidate);
-        }
-        if let Some(parent) = truncate_to_known_package(&candidate) {
-            return Some(parent);
-        }
-        if from_helper && helper_hit.is_none() && candidate.matches('.').count() >= 2 {
-            helper_hit = Some(candidate);
-        }
-    }
-    helper_hit
-}
-
-/// 把单个 cmdline token 归一化成包名形态候选：去路径、去 `:` 后缀、去 `@` 前缀、
-/// 去 `-<纯数字版本>` 后缀。不像包名时返回空串。
-fn normalize_package_token(token: &str) -> String {
-    let mut value = token.trim_start_matches('@');
-    if let Some(basename) = value.rsplit('/').next() {
-        value = basename;
-    }
-    value = value.split(':').next().unwrap_or("");
-    if let Some(index) = value.rfind('-') {
-        let suffix = &value[index + 1..];
-        if index > 0 && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) {
-            value = &value[..index];
-        }
-    }
-    if value.is_empty()
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-')
-    {
-        return String::new();
-    }
-    if !value.contains('.')
-        || value.starts_with('.')
-        || value.ends_with('.')
-        || value.contains("..")
-    {
-        return String::new();
-    }
-    value.to_string()
-}
-
-/// 逐段截断到能在 uid 表命中的父包（`com.miui.securitycenter.remote` →
-/// `com.miui.securitycenter`）。至少保留两段，避免把 `com.foo` 截成 `com`。
-fn truncate_to_known_package(candidate: &str) -> Option<String> {
+fn truncate_to_known_package_for_uid(candidate: &str, uid: i32) -> Option<String> {
     let mut remaining = candidate;
     while let Some(index) = remaining.rfind('.') {
         remaining = &remaining[..index];
         if remaining.matches('.').count() < 1 {
             break;
         }
-        if crate::redirect::policy::get_uid_for_package(remaining) >= 0 {
+        if package_uid_matches(remaining, uid) {
             return Some(remaining.to_string());
         }
     }
     None
 }
+
+fn package_uid_matches(package_name: &str, uid: i32) -> bool {
+    crate::redirect::policy::get_uid_for_package_in_user(
+        package_name,
+        crate::platform::user_id_from_uid(uid),
+    ) == uid
+}
+
+fn request_uid_is_task_credential(uids: &[i32; 4], request_uid: i32) -> bool {
+    request_uid >= 0 && uids.contains(&request_uid)
+}
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/proc_identity.rs"]
+mod tests;

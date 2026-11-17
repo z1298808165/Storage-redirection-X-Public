@@ -1,3 +1,12 @@
+#[path = "log_daemon/identity.rs"]
+mod identity;
+#[cfg(test)]
+#[path = "../tests/native-unit/log_reply.rs"]
+mod reply_tests;
+use identity::{
+    enrich_monitor_record_identity, monitor_sender_is_trusted, register_request_path_hint,
+    rewrite_monitor_identity,
+};
 use libc::{
     AF_UNIX, CMSG_DATA, CMSG_FIRSTHDR, EAGAIN, EINTR, EWOULDBLOCK, MSG_DONTWAIT, POLLIN,
     SCM_CREDENTIALS, SO_PASSCRED, SO_RCVBUF, SOCK_CLOEXEC, SOCK_DGRAM, SOL_SOCKET, bind, c_void,
@@ -38,16 +47,15 @@ const FLUSH_INTERVAL_MS: i32 = 2_000;
 /// 接收循环长期不返回、迟迟不执行 flush 与统计落盘。
 const MAX_DRAIN_PER_ROUND: usize = 512;
 const SOCKET_RECV_BUFFER_BYTES: libc::c_int = 512 * 1024;
-/// 单个发送方 uid 在一个限流窗口内允许写入的监控/统计记录条数。
+/// 单个发送方 uid 在一个限流窗口内允许的监控、统计和身份查询总数。
 ///
-/// 监控记录由被 hook 的应用进程和 FUSE daemon 发出，发送方是任意应用 uid，
-/// 无法按 uid 做身份校验（对比 Control 命令只允许 root）。因此改为限流：
-/// 抽象命名空间套接字没有文件权限门槛，任何能连上的进程都可写入，若不限流
-/// 就能用几 MB 垃圾把 1 MiB 上限的真实监控记录整体挤出轮转窗口。
+/// 被 hook 的应用与系统代写者都需要使用此通道，不能只允许 root；具体请求另按
+/// 内核凭据核验权限。抽象套接字没有文件权限门槛，限流避免单个 UID 的请求洪峰
+/// 占满接收处理或用几 MB 记录挤出 1 MiB 上限的监视轮转窗口。
 const MAX_RECORDS_PER_UID_WINDOW: u32 = 4096;
 /// 限流窗口长度。窗口结束后计数清零。
 const RATE_LIMIT_WINDOW_MS: i64 = 10_000;
-/// 限流表最多跟踪的发送方数量，防止伪造 uid 时表本身无界增长。
+/// 限流表最多跟踪的发送方数量，限制多 UID 请求高峰时的内存占用。
 const MAX_TRACKED_SENDERS: usize = 256;
 
 const TAG_FILE_MONITOR: &str = "FileMonitorOp";
@@ -296,7 +304,7 @@ fn timespec_from_ms(ms: i32) -> libc::timespec {
     }
 }
 
-/// 限频告警：同一类失败最多每 [`WARN_THROTTLE_MS`] 输出一条。
+/// 限频告警：同一类失败最多每 `WARN_THROTTLE_MS` 输出一条。
 fn warn_throttled(label: &str, errno: i32) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
@@ -367,8 +375,7 @@ fn run(fd: i32, mut state: LogState) {
         // 队列会持续堆积并被内核直接丢弃。
         let mut buffered_record = false;
         for _ in 0..MAX_DRAIN_PER_ROUND {
-            let (size, sender_uid, sender_addr) =
-                recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
+            let (size, sender, sender_addr) = recv_with_credentials(fd, &mut payload, MSG_DONTWAIT);
             if size < 0 {
                 let errno = io::Error::last_os_error().raw_os_error().unwrap_or(0);
                 if errno == EINTR {
@@ -386,12 +393,16 @@ fn run(fd: i32, mut state: LogState) {
                 continue;
             };
             // 身份询问包：就地问一次 /proc 并回包给发送方。必须在 state.handle 之前
-            // 分流——它不带日志语义，混进日志会污染记录并触发无谓的限流计数。
+            // 分流；查询同样按内核发送方限流，且答复前核验跨 UID 访问权限。
             if packet.starts_with(crate::daemon_identity_query::QUERY_PREFIX) {
-                reply_identity_query(fd, packet, sender_addr.as_ref());
+                if sender.is_some() && state.allow_from_sender(sender.map(|(uid, _)| uid)) {
+                    reply_identity_query(fd, packet, sender, sender_addr.as_ref());
+                }
+                // 查询本身不落盘，限流窗口切换产生的告警仍需按时刷新。
+                buffered_record |= state.running.pending_lines > 0;
                 continue;
             }
-            state.handle(packet, sender_uid);
+            state.handle(packet, sender);
             // 只有真正进过 state 的记录才可能产生待落盘内容（身份询问包在上面的
             // 分支已 continue）。武装一次定时器即可，已在武装中不重复设置。
             buffered_record = true;
@@ -411,12 +422,13 @@ fn run(fd: i32, mut state: LogState) {
 fn reply_identity_query(
     fd: i32,
     packet: &str,
+    credentials: Option<(u32, i32)>,
     sender: Option<&(libc::sockaddr_un, libc::socklen_t)>,
 ) {
     let Some((addr, addr_len)) = sender else {
         return;
     };
-    let Some(reply) = crate::daemon_identity_query::answer_query(packet) else {
+    let Some(reply) = crate::daemon_identity_query::answer_query(packet, credentials) else {
         return;
     };
     let bytes = reply.as_bytes();
@@ -426,7 +438,7 @@ fn reply_identity_query(
             fd,
             bytes.as_ptr() as *const c_void,
             bytes.len(),
-            0,
+            MSG_DONTWAIT,
             addr as *const _ as *const sockaddr,
             *addr_len,
         );
@@ -440,7 +452,7 @@ fn reply_identity_query(
 /// recvmsg；排空循环使用 MSG_DONTWAIT 避免在阻塞 socket 上卡死。
 type ReceivedDatagram = (
     isize,
-    Option<u32>,
+    Option<(u32, i32)>,
     Option<(libc::sockaddr_un, libc::socklen_t)>,
 );
 
@@ -500,7 +512,7 @@ fn recv_with_credentials(fd: i32, payload: &mut [u8], flags: libc::c_int) -> Rec
     //         CMSG_DATA 返回紧跟 cmsghdr 之后、由内核写入的 ucred 起始地址，
     //         该地址在 cmsg_buf 生命周期内始终有效。
     let creds = unsafe { &*(CMSG_DATA(cmsg_ptr) as *const ucred) };
-    (size, Some(creds.uid as u32), peer_addr)
+    (size, Some((creds.uid as u32, creds.pid)), peer_addr)
 }
 
 fn bind_log_socket() -> io::Result<i32> {
@@ -612,7 +624,7 @@ impl LogState {
         };
         let now_ms = crate::platform::paths::monotonic_ms();
 
-        // 表满时清理已过窗口的条目，避免伪造 uid 让表无界增长。
+        // 表满时只回收过期项，不能通过新 UID 挤掉其它发送方尚有效的配额。
         if self.sender_quotas.len() >= MAX_TRACKED_SENDERS && !self.sender_quotas.contains_key(&uid)
         {
             self.sender_quotas.retain(|_, quota| {
@@ -651,20 +663,39 @@ impl LogState {
         true
     }
 
-    fn handle(&mut self, packet: &str, sender_uid: Option<u32>) {
+    fn handle(&mut self, packet: &str, sender: Option<(u32, i32)>) {
+        let sender_uid = sender.map(|(uid, _)| uid);
         let Some((level, tag, message)) = parse_packet(packet) else {
             return;
         };
         match tag {
-            // 监控与统计的发送方是任意应用 uid，无法做身份校验，改为按发送方限流。
+            // 监控按内核发送方凭据核验来源，并与统计一起按 UID 限流。
             TAG_FILE_MONITOR => {
                 if self.allow_from_sender(sender_uid) {
                     // 先按 caller_pid 补强身份，再落盘与登记 hint：两者必须用同一份
                     // 内容，否则台账里的调用方会与记录里的身份不一致。
-                    let enriched = enrich_monitor_record_identity(message);
+                    let trusted = monitor_sender_is_trusted(message, sender);
+                    let enriched = if trusted {
+                        enrich_monitor_record_identity(message)
+                    } else {
+                        let (uid, pid) = sender
+                            .map(|(uid, pid)| (uid as i32, pid))
+                            .unwrap_or((-1, -1));
+                        let identity =
+                            crate::platform::proc_identity::RequestIdentity::unresolved(uid, pid);
+                        Some(rewrite_monitor_identity(
+                            message,
+                            "-",
+                            "unknown",
+                            "none",
+                            Some(&identity),
+                        ))
+                    };
                     let line = enriched.as_deref().unwrap_or(message);
                     self.monitor.append(line);
-                    register_request_path_hint(line);
+                    if trusted {
+                        register_request_path_hint(line);
+                    }
                 }
             }
             TAG_STATS => {
@@ -837,239 +868,6 @@ impl LogState {
             self.flush_pending();
         }
     }
-}
-
-/// 从台账行登记请求侧 path hint。
-///
-/// `.recent_path_caller_hint` 此前设计为由 MediaProvider 进程在记录台账时直写
-/// （temp+rename），但 logs 目录为 root 属主且 SELinux 标签对 MediaProvider 域
-/// 不可写，直写始终静默失败，daemon 监视侧
-/// `has_recent_public_path_request` 的「请求已记录则抑制观察记录」去重因此从未
-/// 生效。台账行本身经私有日志通道进入本进程（root），在此对请求侧写入类记录
-/// 补登记 hint：MediaProvider 侧直写保留为兜底，跨进程去重以本路径为准。
-///
-/// 只处理写入类 op_filter（mkdir / provider_open 写形态 / 原生 open 写形态，
-/// open 写形态映射到 provider_open 对应值登记），与请求侧 hint 原有登记范围
-/// 一致；行内字段带 `|` 的路径会被 hint 校验拒绝，天然安全。登记失败（包名
-/// 无效、路径非公共存储、caller_uid 非应用 uid 等）时静默跳过，不影响台账落盘。
-/// 用记录里的 `caller_pid` 补强源头身份，返回改写后的整行（不需要改写时 None）。
-///
-/// 为什么必须在 daemon 侧做：`caller_pid` 来自内核 FUSE 请求头，是「哪个进程发起
-/// 这次写入」最精确的证据；但 MediaProvider 域读不到 root / 特权 helper 的
-/// `/proc/<pid>/cmdline`（SELinux 拒绝，实测 `proc_pkg=` 空、`proc_uid=-1`），
-/// 于是「root 文件管理器 helper 往 /sdcard 写文件」这类记录在 MP 侧只能落成未知。
-/// daemon 是 root：读得到，而且记录是经 socket 实时送来的，它与请求几乎同时，
-/// 不需要依赖 pid 表快照（快照抓不住亚秒级 helper 进程）。
-///
-/// 改写范围刻意收窄：仅 `event_role=request`，且 identity 为 `-` 或非包名的
-/// basename 时才替换；已有包名身份一律不动，避免二次污染。
-/// 应用 uid 起始值（与 `daemon.rs` 的同名常量保持一致）。
-const SYSTEM_APP_UID_START: i32 = 10_000;
-
-/// 系统 uid → 包名缓存：(文件指纹, uid → 唯一包名/不可用)。
-type SystemUidPackageCache = (u64, HashMap<i32, Option<String>>);
-
-/// 系统 uid → 唯一包名。
-///
-/// 只回答「这个 uid 在系统里唯一对应哪个包」：同一 uid 对应多个包时（真机 uid 1000
-/// 有 53 个包）返回 `None`。**绝不按排序挑一个** —— 猜错比留空更糟，用户会据此
-/// 认定是某个具体应用干的。缓存按文件长度与 mtime 失效，避免每条记录都读盘。
-fn system_uid_package(uid: i32) -> Option<String> {
-    if !(0..SYSTEM_APP_UID_START).contains(&uid) {
-        return None;
-    }
-    static CACHE: OnceLock<Mutex<SystemUidPackageCache>> = OnceLock::new();
-    let path = crate::platform::module_paths::SYSTEM_WRITER_UIDS_FILE;
-    let fingerprint = fs::metadata(path)
-        .map(|meta| {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            meta.len() ^ mtime
-        })
-        .unwrap_or(0);
-    let cache = CACHE.get_or_init(|| Mutex::new((0, HashMap::new())));
-    let mut guard = cache.lock().unwrap_or_else(|err| err.into_inner());
-    if guard.0 != fingerprint || guard.1.is_empty() {
-        let mut map: HashMap<i32, Option<String>> = HashMap::new();
-        if let Ok(content) = fs::read_to_string(path) {
-            for line in content.lines() {
-                let Some((package, value)) = line.rsplit_once(':') else {
-                    continue;
-                };
-                let Ok(package_uid) = value.trim().parse::<i32>() else {
-                    continue;
-                };
-                if !(0..SYSTEM_APP_UID_START).contains(&package_uid) {
-                    continue;
-                }
-                let package = package.trim();
-                if package.is_empty() {
-                    continue;
-                }
-                match map.get(&package_uid) {
-                    // 同一 uid 对应多个包：标记不可用，宁缺勿猜。
-                    Some(existing) if existing.as_deref() != Some(package) => {
-                        map.insert(package_uid, None);
-                    }
-                    Some(_) => {}
-                    None => {
-                        map.insert(package_uid, Some(package.to_string()));
-                    }
-                }
-            }
-        }
-        guard.0 = fingerprint;
-        guard.1 = map;
-    }
-    guard.1.get(&uid).cloned().flatten()
-}
-
-/// 记录身份补强：把「谁发起了这次写入」补进目标包名列与 `identify_*` 字段。
-///
-/// 两条证据来源，置信度不同：
-/// 1. `caller_pid`：内核 FUSE 请求头里的发起线程 id。daemon 以 root 读 /proc 反查，
-///    是 helper / 特权进程写盘时唯一稳定的证据 —— `high`。
-/// 2. `caller_evidence=cross_thread` 加 `caller_uid`：MediaProvider 的 binder 线程与
-///    FuseDaemon 处理线程不是同一个线程，Java 侧捕获的调用方只能以「同进程 + 1.5 秒
-///    窗口」桥接过来（见 `hook::context::record_caller_uid`）。系统 uid 按 uid 表反查
-///    包名（多包一律放弃），应用 uid 仍按 pid 反查 —— `medium`：它是时序桥接，
-///    不像内核请求头那样权威。
-///
-/// 只补第 3 列为占位符（`-`、空、无点号）的记录：已经指出具体应用的行不再改写。
-fn enrich_monitor_record_identity(message: &str) -> Option<String> {
-    let fields: Vec<&str> = message.split('|').collect();
-    if fields.len() < 5 {
-        return None;
-    }
-    let mut event_role = "";
-    let mut caller_pid = -1;
-    let mut caller_uid = -1;
-    let mut cross_thread = false;
-    for field in fields.iter().skip(4) {
-        if let Some(value) = field.strip_prefix("caller_pid=") {
-            caller_pid = value.parse::<i32>().unwrap_or(-1);
-        } else if let Some(value) = field.strip_prefix("caller_uid=") {
-            caller_uid = value.parse::<i32>().unwrap_or(-1);
-        } else if let Some(value) = field.strip_prefix("event_role=") {
-            event_role = value;
-        } else if *field == "caller_evidence=cross_thread" {
-            cross_thread = true;
-        }
-    }
-    if event_role != "request" {
-        return None;
-    }
-    let identity = fields[2];
-    let replaceable = identity == "-" || identity.is_empty() || !identity.contains('.');
-    if !replaceable {
-        return None;
-    }
-
-    let (package, method, reliability) = if cross_thread
-        && (0..SYSTEM_APP_UID_START).contains(&caller_uid)
-    {
-        (system_uid_package(caller_uid)?, "caller_uid", "medium")
-    } else if caller_pid > 0 {
-        let reliability = if cross_thread { "medium" } else { "high" };
-        if let Some(package) = crate::platform::proc_identity::resolve_package_from_pid(caller_pid)
-        {
-            (package, "caller_pid", reliability)
-        } else {
-            // 命令行里没有包名（应用 exec 的 shell / helper）：按内核进程组追溯发起
-            // 应用。记录与决策共用这一条证据，用户在记录里看到的源头就是规则会匹配的源头。
-            let uid = crate::platform::proc_identity::read_proc_uid(caller_pid)
-                .filter(|uid| caller_uid < 0 || *uid == caller_uid)?;
-            let package = crate::platform::proc_identity::resolve_launching_app_by_process_group(
-                caller_pid, uid,
-            )?;
-            (package, "process_group", reliability)
-        }
-    } else {
-        return None;
-    };
-    if package == identity {
-        return None;
-    }
-
-    let mut rebuilt = String::with_capacity(message.len() + package.len() + 24);
-    for (index, field) in fields.iter().enumerate() {
-        if index > 0 {
-            rebuilt.push('|');
-        }
-        match index {
-            2 => rebuilt.push_str(&package),
-            _ => {
-                if field.starts_with("identify_method=") {
-                    rebuilt.push_str("identify_method=");
-                    rebuilt.push_str(method);
-                } else if field.starts_with("identify_reliability=") {
-                    rebuilt.push_str("identify_reliability=");
-                    rebuilt.push_str(reliability);
-                } else {
-                    rebuilt.push_str(field);
-                }
-            }
-        }
-    }
-    if !identity.is_empty() && identity != "-" {
-        rebuilt.push_str("|native=");
-        rebuilt.push_str(identity);
-    }
-    Some(rebuilt)
-}
-
-fn register_request_path_hint(message: &str) {
-    if !message.contains("event_role=request") {
-        return;
-    }
-    // 行格式：时间戳|进程包名|目标包名|OP|路径|ret=..|k=v...；额外字段从下标 5 起。
-    let fields: Vec<&str> = message.split('|').collect();
-    if fields.len() < 6 {
-        return;
-    }
-    let Some(op_filter) = fields
-        .iter()
-        .skip(5)
-        .find_map(|field| field.strip_prefix("op_filter="))
-    else {
-        return;
-    };
-    let (source, hint_op_filter) = match op_filter {
-        "mkdir" => ("provider_mkdir", "mkdir"),
-        "provider_open" | "provider_open:create" | "provider_open:write" => {
-            ("provider_open", op_filter)
-        }
-        // 原生 hook 的写入类 open（映射路径等场景）：请求行本就是台账对这次
-        // 写入的记录，映射到 provider_open 写形态登记 hint，让纯映射路径的
-        // request/观察记录也走同一套 10 秒窗口去重。
-        "open:create" => ("provider_open", "provider_open:create"),
-        "open:write" => ("provider_open", "provider_open:write"),
-        _ => return,
-    };
-    let caller_uid = fields
-        .iter()
-        .skip(5)
-        .find_map(|field| field.strip_prefix("caller_uid="))
-        .and_then(|value| value.parse::<i32>().ok())
-        .unwrap_or(-1);
-    let correlation_id = fields
-        .iter()
-        .skip(5)
-        .find_map(|field| field.strip_prefix("correlation_id="))
-        .unwrap_or("");
-    crate::monitor::remember_public_path_caller_hint_with_op_filter(
-        fields[4],
-        fields[2],
-        caller_uid,
-        source,
-        "high",
-        hint_op_filter,
-        correlation_id,
-    );
 }
 
 struct RollingLog {

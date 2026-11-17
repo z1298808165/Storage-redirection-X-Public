@@ -7,6 +7,188 @@ import org.junit.Test
 
 class MonitorLogParserTest {
   @Test
+  fun escapedFileNamesKeepResultAndCaller() {
+    for (name in listOf("普通文件.txt", "file|ret=0|caller_uid=0", "%7C%0A%25", "first\r\nsecond")) {
+      val path = "/storage/emulated/0/Download/$name"
+      val encoded = encodeMonitorLogField(path)
+      val entry =
+          parseMonitorLogEntries(
+                  "2026-11-16 12:34:00|com.example.app|com.example.app|OPEN|$encoded|field_encoding=percent|ret=-1|errno=13|identify_method=caller|caller_uid=10123|op=open|from=$encoded"
+              )
+              .single()
+      assertEquals(path, entry.path)
+      assertEquals(path, entry.fromPath)
+      assertFalse(entry.ok)
+      assertEquals(10123, entry.callerUid)
+    }
+    val legacy =
+        parseMonitorLogEntries(
+                "2026-11-16 12:34:00|com.example.app|com.example.app|OPEN|/storage/emulated/0/Download/%7C|ret=0"
+            )
+            .single()
+    assertTrue(legacy.path.endsWith("/%7C"))
+  }
+
+  @Test
+  fun conflictingLogFieldsKeepTheResultUnknown() {
+    for (fields in
+        listOf(
+            "ret=-1|ret=0",
+            "ret=0|ret=-1",
+            "ret=0|caller_uid=0|caller_uid=10123",
+            "ret=0|record_integrity=ambiguous",
+        )) {
+      val entry =
+          parseMonitorLogEntries(
+                  "2026-11-16 12:34:00|com.example.app|com.example.app|OPEN|/storage/emulated/0/Download/file|$fields"
+              )
+              .single()
+      assertFalse(entry.ok)
+      assertEquals("结果未知：日志字段冲突", entry.errorText)
+      assertEquals("unknown", entry.identifyMethod)
+      assertEquals("unverified", entry.callerBoundary)
+      assertEquals("未知来源", entry.label)
+    }
+  }
+
+  @Test
+  fun distinctRequestTasksAndBoundariesNeverCoalesce() {
+    val base = "2026-11-16 12:34:01|com.android.providers.media.module|"
+    val tail =
+        "|OPEN|/storage/emulated/0/Download/identity.txt|ret=3|errno=0|event_role=request|op=open:write|"
+    val app =
+        base +
+            "com.example.app" +
+            tail +
+            "identify_method=caller|identify_reliability=high|caller_uid=10123|caller_pid=42|caller_start_time=55"
+    val variants =
+        listOf(
+            base +
+                "su" +
+                tail +
+                "identify_method=executor|caller_uid=0|caller_pid=43|caller_boundary=root|native=su",
+            base + "android.uid.test" + tail + "identify_method=shared_uid|caller_uid=10123",
+            base +
+                "-" +
+                tail +
+                "identify_method=unknown|caller_uid=10123|caller_boundary=unverified",
+            app.replace("caller_pid=42", "caller_pid=43"),
+            app.replace("caller_start_time=55", "caller_start_time=56"),
+            app.replace("caller_uid=10123", "caller_uid=110123"),
+            "$app|native=changed-native",
+            "$app|caller_context=u:r:another_app:s0",
+        )
+    for (other in variants) {
+      for (records in listOf(listOf(app, other), listOf(other, app))) {
+        assertEquals(2, parseMonitorLogEntries(records.joinToString("\n")).size)
+      }
+    }
+    assertEquals(1, parseMonitorLogEntries("$app\n$app").size)
+  }
+
+  @Test
+  fun correlationDoesNotHideDistinctRequestsOrResults() {
+    val success =
+        "2026-11-16 12:34:01|com.example.app|com.example.app|OPEN|" +
+            "/storage/emulated/0/Download/a.txt|ret=3|errno=0|event_role=request|" +
+            "op=open|identify_method=caller|identify_reliability=high|caller_uid=10123|" +
+            "caller_pid=42|caller_start_time=55|correlation_id=p1-1"
+    val failure = success.replace("ret=3|errno=0", "ret=-1|errno=13")
+    for (other in listOf(failure, failure.replace("caller_pid=42", "caller_pid=43"))) {
+      for (raw in listOf("$success\n$other", "$other\n$success")) {
+        val entries = parseMonitorLogEntries(raw)
+        assertEquals(2, entries.size)
+        assertEquals(1, entries.count { !it.ok })
+      }
+    }
+    assertEquals(1, parseMonitorLogEntries("$success\n$success").size)
+  }
+
+  @Test
+  fun successfulCreateDoesNotHideFailedWrite() {
+    val create =
+        "2026-11-16 12:34:01|com.example.app|com.example.app|CREATE|" +
+            "/storage/emulated/0/Download/a.txt|ret=0|errno=0|event_role=request|" +
+            "op=fuse_create|identify_method=fuse_redirect|identify_reliability=high|" +
+            "source=fuse_redirect|backend=/data/media/0/Download/a.txt"
+    val write =
+        create.replace("op=fuse_create", "op=write").replace("ret=0|errno=0", "ret=-1|errno=30")
+    for (raw in listOf("$create\n$write", "$write\n$create")) {
+      val entries = parseMonitorLogEntries(raw)
+      assertEquals(2, entries.size)
+      assertEquals(1, entries.count { !it.ok })
+      assertEquals("write", entries.single { !it.ok }.operation)
+    }
+  }
+
+  @Test
+  fun executorBoundaryKeepsRawTask() {
+    for (boundary in listOf("root", "shell", "privileged", "unverified")) {
+      val raw =
+          "2026-11-16 00:00:00|com.android.providers.media.module|sh|OPEN|" +
+              "/storage/emulated/0/Download/test|ret=0|errno=0|event_role=request|op=open:write|" +
+              "identify_method=executor|identify_reliability=high|caller_uid=10123|caller_pid=42|" +
+              "caller_start_time=55|caller_context=u:r:su:s0|caller_boundary=$boundary|native=sh"
+      val entry =
+          parseMonitorLogEntries(
+                  raw,
+                  callerUidResolver = { error("Executor must not resolve an App") },
+                  labelResolver = { error("Executor must keep its native name") },
+              )
+              .single()
+      assertEquals("sh", entry.packageName)
+      assertEquals(10123, entry.callerUid)
+      assertEquals(42, entry.callerPid)
+      assertEquals(55L, entry.callerStartTime)
+      assertEquals("u:r:su:s0", entry.callerContext)
+      assertEquals(boundary, entry.callerBoundary)
+      assertEquals("sh", entry.nativeIdentity)
+      assertFalse(entry.hasApplicationIdentity)
+    }
+  }
+
+  @Test
+  fun encodedExecutorsKeepColumnsAndStayNative() {
+    for (name in listOf("复制+worker", "worker!", "a|ret=0\r\n%7C")) {
+      val encoded = encodeMonitorLogField(name)
+      val entry =
+          parseMonitorLogEntries(
+                  "2026-11-16 00:00:00|$encoded|$encoded|OPEN|/storage/emulated/0/Download/test|" +
+                      "field_encoding=percent|ret=-1|errno=13|event_role=request|op=open:write|" +
+                      "identify_method=executor|caller_boundary=root|caller_uid=0|native=$encoded",
+                  callerUidResolver = { error("Executor must not resolve an App") },
+                  labelResolver = { error("Executor must keep its name") },
+              )
+              .single()
+      assertEquals(name, entry.processPackage)
+      assertEquals(name, entry.callerPackage)
+      assertEquals(name, entry.nativeIdentity)
+      assertEquals(name, entry.label)
+      assertFalse(entry.ok)
+      assertFalse(entry.hasApplicationIdentity)
+    }
+  }
+
+  @Test
+  fun sharedUserLabelIsNotAnApplication() {
+    val raw =
+        "2026-11-16 00:00:00|com.android.providers.media.module|android.uid.system|OPEN|" +
+            "/storage/emulated/0/Download/test|ret=0|errno=0|event_role=request|op=open:write|" +
+            "identify_method=shared_uid|identify_reliability=fallback|caller_uid=1000"
+    val entry =
+        parseMonitorLogEntries(
+                raw,
+                callerUidResolver = { error("Group must not resolve an App") },
+                labelResolver = { error("Group must keep its PackageManager label") },
+            )
+            .single()
+    assertEquals("android.uid.system", entry.packageName)
+    assertEquals("android.uid.system", entry.label)
+    assertEquals("fallback", entry.identifyReliability)
+    assertFalse(entry.hasApplicationIdentity)
+  }
+
+  @Test
   fun keepsGalleryCreatorForOuaClassifierDirectories() {
     val raw =
         listOf(
@@ -183,7 +365,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun coalescesSameMinutePath() {
+  fun keepsRequestsFromDifferentStorageUsers() {
     val raw =
         listOf(
                 "2026-06-10 10:20:01.000|com.android.providers.media.module|com.android.providers.media.module|open|" +
@@ -196,8 +378,12 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw)
 
-    assertEquals(1, entries.size)
-    val entry = entries.single()
+    assertEquals(2, entries.size)
+    assertEquals(
+        setOf("/storage/emulated/0/DCIM/a.jpg", "/storage/emulated/10/DCIM/a.jpg"),
+        entries.map { it.path }.toSet(),
+    )
+    val entry = entries.single { it.packageName == "com.example.camera" }
     assertEquals("com.example.camera", entry.packageName)
     assertEquals("com.example.camera", entry.callerPackage)
     assertEquals("/data/media/10/DCIM/a.jpg", entry.fromPath)
@@ -225,7 +411,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun coalescesAppOpenWriteBeforeProviderCreate() {
+  fun keepsUncorrelatedProviderObservation() {
     val raw =
         listOf(
                 "2026-06-23 12:10:04|com.android.providers.media.module|com.android.providers.media.module|CREATE|" +
@@ -241,8 +427,9 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw) { "Label:$it" }
 
-    assertEquals(1, entries.size)
-    val entry = entries.single()
+    assertEquals(2, entries.size)
+    assertEquals(setOf("request", "observation"), entries.map { it.eventRole }.toSet())
+    val entry = entries.single { it.eventRole == "request" }
     assertEquals("xyz.nextalone.nnngram", entry.packageName)
     assertEquals("Label:xyz.nextalone.nnngram", entry.label)
     assertEquals("open", entry.operation)
@@ -279,7 +466,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun coalescesFuseCreateWithBackendInotify() {
+  fun keepsUncorrelatedFuseCreateAndLaterObservation() {
     val raw =
         listOf(
                 "2026-06-23 18:33:13|com.tencent.mobileqq|com.tencent.mobileqq|CREATE|" +
@@ -301,7 +488,10 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    assertEquals(1, entries.count { it.eventRole == "observation" })
+    val entry = entries.single { it.eventRole == "request" }
 
     assertEquals("com.tencent.mobileqq", entry.packageName)
     assertEquals("fuse_redirect", entry.identifyMethod)
@@ -363,7 +553,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun keepsRequestPathForProviderOpen() {
+  fun keepsUncorrelatedMappedObservation() {
     val raw =
         listOf(
                 "2026-06-26 16:52:45|com.android.providers.media.module|com.tencent.mm|OPEN|" +
@@ -379,7 +569,10 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    assertEquals("open", entries.single { it.eventRole == "request" }.operation)
+    val entry = entries.single { it.eventRole == "observation" }
 
     assertEquals("com.tencent.mm", entry.packageName)
     assertEquals("inotify", entry.operation)
@@ -758,7 +951,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun parserLabelsExplicitModuleBackupExportAsModule() {
+  fun keepsBackupExportAndProviderRequest() {
     val raw =
         listOf(
                 "2026-06-24 12:06:52|com.android.providers.media.module|com.android.providers.media.module|OPEN|" +
@@ -772,7 +965,9 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "storage.redirect.x" }
 
     assertTrue(entry.isModuleWebUiExport)
     assertEquals("storage.redirect.x", entry.packageName)
@@ -813,7 +1008,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun coalescesManagerArchiveBeforeWebUi() {
+  fun keepsManagerArchiveAndProviderRequest() {
     val raw =
         listOf(
                 "2026-06-18 18:30:22|com.android.providers.media.module|-|OPEN|" +
@@ -827,15 +1022,15 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw) { "Label:$it" }
 
-    assertEquals(1, entries.size)
-    val entry = entries.single()
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "org.srx.manager" }
     assertFalse(entry.isModuleWebUiExport)
     assertEquals("org.srx.manager", entry.packageName)
     assertEquals("Label:org.srx.manager", entry.label)
   }
 
   @Test
-  fun coalescesManagerArchiveAcrossMappedDownload() {
+  fun keepsMappedArchiveRequests() {
     val raw =
         listOf(
                 "2026-06-18 18:30:22|com.android.providers.media.module|-|OPEN|" +
@@ -849,13 +1044,16 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw)
 
-    assertEquals(1, entries.size)
-    assertFalse(entries.single().isModuleWebUiExport)
-    assertEquals("org.srx.manager", entries.single().packageName)
+    assertEquals(2, entries.size)
+    assertFalse(entries.single { it.packageName == "org.srx.manager" }.isModuleWebUiExport)
+    assertEquals(
+        "org.srx.manager",
+        entries.single { it.packageName == "org.srx.manager" }.packageName,
+    )
   }
 
   @Test
-  fun usesAppExportMarkerBeforeProvider() {
+  fun keepsAppExportAndProviderRequest() {
     val raw =
         listOf(
                 "2026-06-24 18:30:22|com.android.providers.media.module|-|OPEN|" +
@@ -870,8 +1068,8 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw) { "Label:$it" }
 
-    assertEquals(1, entries.size)
-    val entry = entries.single()
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "org.srx.manager" }
     assertFalse(entry.isModuleWebUiExport)
     assertEquals("org.srx.manager", entry.packageName)
     assertEquals("Label:org.srx.manager", entry.label)
@@ -879,7 +1077,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun prefersPrivateOwnerOverDownloadProvider() {
+  fun keepsPrivateOwnerAndDownloadProvider() {
     val raw =
         listOf(
                 "2026-06-18 18:30:02|com.android.providers.media.module|com.eg.android.AlipayGphone|OPEN|" +
@@ -895,13 +1093,19 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw)
 
-    assertEquals(1, entries.size)
-    assertEquals("com.eg.android.AlipayGphone", entries.single().packageName)
-    assertEquals("recent_private_owner", entries.single().identifyMethod)
+    assertEquals(2, entries.size)
+    assertEquals(
+        "com.eg.android.AlipayGphone",
+        entries.single { it.packageName == "com.eg.android.AlipayGphone" }.packageName,
+    )
+    assertEquals(
+        "recent_private_owner",
+        entries.single { it.packageName == "com.eg.android.AlipayGphone" }.identifyMethod,
+    )
   }
 
   @Test
-  fun coalescesSafCreateAndAnonymousExport() {
+  fun keepsSafAndAnonymousRequests() {
     val raw =
         listOf(
                 "2026-06-23 17:07:53|com.android.providers.media.module|com.eg.android.AlipayGphone|OPEN|" +
@@ -917,13 +1121,19 @@ class MonitorLogParserTest {
 
     val entries = parseMonitorLogEntries(raw)
 
-    assertEquals(1, entries.size)
-    assertEquals("com.eg.android.AlipayGphone", entries.single().packageName)
-    assertEquals("recent_private_owner", entries.single().identifyMethod)
+    assertEquals(2, entries.size)
+    assertEquals(
+        "com.eg.android.AlipayGphone",
+        entries.single { it.packageName == "com.eg.android.AlipayGphone" }.packageName,
+    )
+    assertEquals(
+        "recent_private_owner",
+        entries.single { it.packageName == "com.eg.android.AlipayGphone" }.identifyMethod,
+    )
   }
 
   @Test
-  fun prefersProviderOpenOverPrivateOwner() {
+  fun keepsProviderAndPrivateOwnerRequests() {
     val raw =
         listOf(
                 "2026-06-23 17:07:53|com.android.providers.media.module|com.eg.android.AlipayGphone|OPEN|" +
@@ -937,14 +1147,16 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "com.leo.xposed.xradiant" }
 
     assertEquals("com.leo.xposed.xradiant", entry.packageName)
     assertEquals("provider_open", entry.identifyMethod)
   }
 
   @Test
-  fun prefersSafOpenOverEarlierProviderCreate() {
+  fun keepsSafAndEarlierProviderRequests() {
     val raw =
         listOf(
                 "2026-06-24 12:06:52|com.android.providers.media.module|com.android.providers.media.module|OPEN|" +
@@ -958,7 +1170,9 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "org.srx.manager" }
 
     assertEquals("org.srx.manager", entry.packageName)
     assertEquals("org.srx.manager", entry.callerPackage)
@@ -993,7 +1207,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun prefersPrivateCallerOverAnonymousExport() {
+  fun keepsPrivateAndAnonymousRequests() {
     val raw =
         listOf(
                 "2026-06-23 18:33:31|com.android.providers.media.module|com.leo.xposed.xradiant|OPEN|" +
@@ -1007,14 +1221,16 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "com.leo.xposed.xradiant" }
 
     assertEquals("com.leo.xposed.xradiant", entry.packageName)
     assertEquals("recent_private_caller", entry.identifyMethod)
   }
 
   @Test
-  fun prefersPrivateCallerOverPrivateOwner() {
+  fun keepsDistinctPrivateCallerRequests() {
     val raw =
         listOf(
                 "2026-06-23 18:33:31|com.android.providers.media.module|com.eg.android.AlipayGphone|OPEN|" +
@@ -1028,7 +1244,9 @@ class MonitorLogParserTest {
             )
             .joinToString("\n")
 
-    val entry = parseMonitorLogEntries(raw).single()
+    val entries = parseMonitorLogEntries(raw)
+    assertEquals(2, entries.size)
+    val entry = entries.single { it.packageName == "com.leo.xposed.xradiant" }
 
     assertEquals("com.leo.xposed.xradiant", entry.packageName)
     assertEquals("recent_private_caller", entry.identifyMethod)

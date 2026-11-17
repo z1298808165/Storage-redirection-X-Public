@@ -272,8 +272,8 @@ fn wait_for_process_exit(pid: c_int) {
     }
 }
 
-/// 当前系统启动以来的时钟滴答（/proc/uptime，Android USER_HZ=100 与
-/// /proc/<pid>/stat 的 starttime 同刻度）。
+/// 当前系统启动以来的时钟滴答（`/proc/uptime`，Android USER_HZ=100 与
+/// `/proc/<pid>/stat` 的 starttime 同刻度）。
 fn boot_ticks_now() -> u64 {
     let Ok(uptime) = std::fs::read_to_string("/proc/uptime") else {
         return 0;
@@ -288,7 +288,7 @@ fn boot_ticks_now() -> u64 {
     seconds.unwrap_or(0)
 }
 
-/// 进程启动时刻（时钟滴答）；/proc/<pid>/stat 第 22 字段，comm 含空格时需
+/// 进程启动时刻（时钟滴答）；`/proc/<pid>/stat` 第 22 字段，comm 含空格时需
 /// 跳过最后一个 ')' 再解析。
 fn proc_start_ticks(pid: c_int) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;

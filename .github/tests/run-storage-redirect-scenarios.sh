@@ -30,11 +30,8 @@ cleanup_frozen_daemon() {
     local frozen_pid
     frozen_pid="$(cat "$SRT_FROZEN_DAEMON_PID_FILE" 2>/dev/null | tr -d '\r' | awk 'NF {print; exit}')"
     if [ -n "$frozen_pid" ]; then
-      # 必须带超时：这是 EXIT trap 里的 adb 调用，而设备半死时 `adb shell` 客户端会
-      # 无限阻塞——trap 卡住就等于脚本不退出，只能等看门狗（全量 75 分钟）硬杀，
-      # 正是本批要消灭的「脚本早该结束、job 却干等」形态。带超时后最多多等 20 秒；
-      # CONT 没打成也不影响判定（这台设备本就要被回收，daemon 由下一轮重新拉起）。
-      adb_su_timeout 20 "[ \"\$(cat /proc/${frozen_pid}/comm 2>/dev/null)\" = srx_daemon ] && kill -CONT ${frozen_pid} >/dev/null 2>&1 || true"
+      # 恢复失败时保留标记供最终清理重试，单次 adb 不得阻塞整套退出。
+      adb_su_timeout 20 "if [ \"\$(cat /proc/${frozen_pid}/comm 2>/dev/null)\" = srx_daemon ]; then kill -CONT ${frozen_pid}; fi" || return 1
       echo "monitor_capture_failopen resumed daemon on exit pid=${frozen_pid}" >&2
     fi
     rm -f "$SRT_FROZEN_DAEMON_PID_FILE"
@@ -173,9 +170,7 @@ SRT_DOWNLOAD_NETWORK_HELPER="$(base64 < "$(dirname "${BASH_SOURCE[0]}")/prepare-
 # 该类请求只能记录 unknown 或误归组内成员）。
 UID_ATTRIB_REL="Download/SrtUidAttrib"
 UID_ATTRIB_PROBE_REL="Download/SrtUidAttrib/srt_uid_probe_dir"
-# 场景 40 第三段：系统 uid（shell 2000）自身配置沙盒、真实目标缺失、经 MediaProvider
-# 建目录。请求路径必须零穿透，沙盒里必须建出来（2026-11-05 issue #2：sau 的
-# Download/update 在开机后又被建到真实存储）。
+# 场景 40 第三段：shell 执行者不借用 com.android.shell 的应用沙盒规则。
 SHELL_PACKAGE="com.android.shell"
 SHELL_CONFIG="/data/adb/modules/storage.redirect.x/config/apps/${SHELL_PACKAGE}.json"
 SHELL_SANDBOX_REL="Download/SrtShellSandbox"
@@ -722,7 +717,7 @@ scenario_title() {
     37) echo "父映射结果继续命中子映射" ;;
     38) echo "下载提供器自身 sandboxed_paths 接管拓扑标记" ;;
     39) echo "下载提供器代写按发起者映射落到映射目标" ;;
-    40) echo "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透" ;;
+    40) echo "shell 的 FUSE 写入保留执行者；应用经 MediaProvider 创建保留源头；shell 不借用应用沙盒规则" ;;
     41) echo "沙盒根按父目录 setgid 继承重建，媒体代写写入落沙盒且真实公共路径零穿透" ;;
     42) echo "文件变更生命周期：沙盒、放行、映射与前缀相邻路径的变更、元数据和链接语义" ;;
     43) echo "存储视图根条目集合与系统视图逐项一致：根级隐藏 MediaProvider 内部目录且不返回点条目" ;;
@@ -1043,12 +1038,12 @@ restore_cross_app_config() {
 }
 
 supports_fuse_backend_scenarios() {
-  # 所有场景都使用 auto；实际后端由运行时日志和 mountinfo 记录。
+  # 不按 FUSE 能力预先跳过场景；实际后端以运行时日志和 mountinfo 为准。
   return 0
 }
 
 prune_version_scenario_excludes() {
-  # 版本级场景排除（CI 矩阵按版本传入，如 A17 无外网不能验证依赖下载的场景 39）。
+  # 只剔除调用方指定的场景，不替换默认范围。
   # 语义是**剔除**而不是替换：默认范围仍是全场景（1-40），显式窄范围（dispatch
   # 输入或提交信息标记）也不会被矩阵覆盖。此前用「包含列表」直接覆盖
   # SRT_SCENARIOS，既让默认退化成窄场景，也吞掉了 dispatch 的单点回归。
@@ -2803,32 +2798,13 @@ run_download_owner_attribution_scenario() {
 
 run_system_uid_attribution_scenario() {
   local scenario="$1"
-  # 触发链：shell（uid 2000）进程先存活足够久（pid 表事件化扫描会将其入库），
-  # 再在公共存储发起 FUSE mkdir → 引擎请求头携带 uid=2000 与发起任务 id →
-  # 系统 uid 归因分支经 pid 表反查发起进程 → 监视记录 identify_method=caller。
-  # 回归背景（2026-10-24）：该类请求此前只能记录 unknown 或被误归组内成员；
-  # Mirror/MainCache 等系统服务创建的公共路径是同一链路的真实样本。
-  # 判定标记：
-  #   通过：file_monitor.log 出现 SrtUidAttrib 的 MKDIR 记录且
-  #         identify_method=caller、identify_reliability=high。
-  #   回归：记录 identify_method=unknown（归因链断裂）或无记录。
+  # shell 是执行者边界，记录保留原始 UID/PID、域与 native 名称。
   echo "step 5/7 内: 清理系统 uid 归因探测目录"
   adb_su "rm -rf '${BACKEND_ROOT}/${UID_ATTRIB_REL}'" >/dev/null
   # Java 初始化只证明当前进程可用；原生 FUSE 归因仍由后续监视记录断言验证。
   ensure_media_provider_hook_ready "scenario-${scenario}-uid-attribution" || return 1
   clear_file_monitor_log
-  # 三次尝试任一归因即通过：跨线程接力槽在并发系统请求下存在互覆窗口
-  # （单槽最后写入优先），单次尝试可能落空；能力验证以三次中至少一次
-  # 归因成功为准。每次尝试的后台 shell 进程先存活 4 秒再 mkdir：pid 表
-  # 事件化扫描（500ms 廉价快照 + 集合变化即全量重扫）在进程创建后 1-2 秒
-  # 内即入表，4 秒已含充足裕量；归因的真正保障是 exec 形态而非长存活。
-  # mkdir 前必须 exec（2026-10-24 取证）：mksh 对 -c 脚本最后一条命令
-  # fork 子进程执行，子进程生命周期毫秒级，daemon 500ms 事件化扫描必然
-  # 错过，FUSE 请求头携带的 mkdir 子进程 tid 不在表内（实测 pid=18606
-  # table_seen=false，预存活的 sh 自身 tid 无效）。exec 让 mkdir
-  # 系统调用在已入表的同一进程内发起，与真实系统服务（长存活进程
-  # 发起写入）的归因语义一致；瞬时子进程场景是已知归因边界，不在本场景
-  # 验证范围。
+  # exec 保留预存活任务的 PID，并使原生名称变为 mkdir，便于核对执行者快照。
   local attempt=1
   local found=0
   while [ "$attempt" -le 3 ] && [ "$found" -ne 1 ]; do
@@ -2851,7 +2827,7 @@ run_system_uid_attribution_scenario() {
     local poll=0
     while [ "$poll" -lt 5 ]; do
       sleep 2
-      if adb_su "grep -E 'MKDIR\|/storage/emulated/0/${probe_rel}\|' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -q 'identify_method=caller|identify_reliability=high'"; then
+      if adb_su "grep -F '|MKDIR|/storage/emulated/0/${probe_rel}|' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E 'identify_method=executor\|identify_reliability=high' | grep -E '(^|\|)caller_uid=2000(\||$)' | grep -E '(^|\|)caller_pid=[1-9][0-9]*(\||$)' | grep -E '(^|\|)caller_start_time=[1-9][0-9]*(\||$)' | grep -F '|caller_context=u:r:shell:s0|' | grep -F '|caller_boundary=shell|' | grep -F '|native=mkdir' | grep -qF '|ret=0|'"; then
         found=1
         break
       fi
@@ -2873,18 +2849,9 @@ run_system_uid_attribution_scenario() {
   return 0
 }
 
-run_system_uid_sandbox_missing_target_scenario() {
+run_shell_executor_boundary_scenario() {
   local scenario="$1"
-  # 触发链：shell（uid 2000，单包 uid）配置 sandboxed_paths，真实目标与沙盒目标都预先
-  # 删除 → `adb shell` 以 uid 2000 在公共路径 mkdir → MediaProvider 代写 → 本模块按
-  # FUSE 请求头 pid 解析发起者 → 命中 shell 的沙盒规则 → 落到 Android/data/<shell>/sdcard。
-  # 两档写入形态缺一不可，且顺序打乱（「第几轮」不能与「形态」共线）：
-  #   immediate：进程刚起就写，尚未进 daemon pid 表 → 走同步身份询问。
-  #   aged：进程先存活 4 秒（已进 pid 表，表里是 native 名 `mkdir`/`sh`）再写 →
-  #         必须按 uid 唯一归属换算成包名，否则规则查不到、写入放行到真实存储。
-  #   2026-11-06 真机：修复前 immediate 8/8 泄漏、aged 全部泄漏。
-  # 判定：每一轮真实目录都不存在（零穿透），沙盒目录存在。mkdir 自身的返回码不作判据：
-  # AOSP pf_mkdir 下层成功后 make_node_entry 会对原路径 lstat，应用侧可能拿到 ENOENT。
+  # 交错执行立即与延迟写入，确认执行者边界不随进程存活时间改变。
   backup_shell_config
   adb_write_file "$SHELL_CONFIG" "{\"users\":{\"0\":{\"enabled\":true,\"mapping_mode_only\":true,\"sandboxed_paths\":[\"${SHELL_SANDBOX_REL}\"]}}}" >/dev/null
   adb_su "chmod 644 '$SHELL_CONFIG'" >/dev/null 2>&1 || true
@@ -2894,31 +2861,29 @@ run_system_uid_sandbox_missing_target_scenario() {
   local delay
   for delay in 4 0 4 0; do
     round=$((round + 1))
-    adb_su "rm -rf '${SHELL_SANDBOX_REAL_DIR}' '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null
+    # 经 FUSE 删除同一个名称，避免直删后端留下正目录项缓存。
+    if ! adb shell "rm -rf '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null; then status=1; break; fi
+    adb_su "rm -rf '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null
     sleep 1
+    local command_exit=0
     if [ "$delay" -gt 0 ]; then
-      adb shell "sleep ${delay}; exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || true
+      adb shell "sleep ${delay}; exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || command_exit=$?
     else
-      adb shell "exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || true
+      adb shell "exec mkdir '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || command_exit=$?
     fi
     sleep 2
     local real=0 sandbox=0
     adb_su "test -d '${SHELL_SANDBOX_REAL_DIR}'" && real=1
     adb_su "test -d '${SHELL_SANDBOX_BACKEND_DIR}'" && sandbox=1
-    echo "step 5/7 内: 系统 uid 沙盒目标缺失 round=${round} delay=${delay}s real=${real} sandbox=${sandbox}"
-    if [ "$real" -ne 0 ]; then
-      echo "system uid sandbox: request path leaked to real storage (round=${round} delay=${delay}s)" >&2
-      adb_su "grep -aE 'SrtShellSandbox' '$LOG_PATH' 2>/dev/null | grep -av 'realpath mapped' | tail -6" >&2 || true
-      status=1
-      break
-    fi
-    if [ "$sandbox" -ne 1 ]; then
-      echo "system uid sandbox: sandbox directory not created (round=${round} delay=${delay}s)" >&2
+    echo "step 5/7 内: shell 执行者边界 round=${round} delay=${delay}s exit=${command_exit} real=${real} sandbox=${sandbox}"
+    if [ "$command_exit" -ne 0 ] || [ "$real" -ne 1 ] || [ "$sandbox" -ne 0 ]; then
+      echo "shell executor: unexpected directory state (round=${round} delay=${delay}s)" >&2
       adb_su "grep -aE 'SrtShellSandbox' '$LOG_PATH' 2>/dev/null | grep -av 'realpath mapped' | tail -6" >&2 || true
       status=1
       break
     fi
   done
+  adb shell "rm -rf '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || status=1
   adb_su "rm -rf '${SHELL_SANDBOX_REAL_DIR}' '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null 2>&1 || true
   restore_shell_config
   return "$status"
@@ -3749,14 +3714,12 @@ run_monitor_capture_failopen_scenario() {
   fi
 
   echo "monitor_capture_failopen freeze daemon pid=${daemon_pid}"
+  # 先登记再冻结；子项退出与整套退出都可据此恢复同一 daemon。
+  printf '%s\n' "$daemon_pid" > "$SRT_FROZEN_DAEMON_PID_FILE"
   if ! adb_su "kill -STOP ${daemon_pid}" >/dev/null 2>&1; then
     echo "monitor_capture_failopen freeze failed scenario=${scenario}"
     return 1
   fi
-  # 登记冻结 pid：异常中止时由 EXIT trap 兜底 CONT，daemon 不得带冻结态离开本脚本。
-  printf '%s
-' "$daemon_pid" > "$SRT_FROZEN_DAEMON_PID_FILE"
-
   status=0
   # 冻结窗口内重启应用：挂载链路在屏障决策之后必然失败，旧语义会在存储根
   # 留下常驻屏障，新语义不落屏障且视图保持原生存活。
@@ -3788,8 +3751,7 @@ run_monitor_capture_failopen_scenario() {
   fi
 
   echo "monitor_capture_failopen resume daemon pid=${daemon_pid}"
-  adb_su "kill -CONT ${daemon_pid}" >/dev/null 2>&1 || true
-  rm -f "$SRT_FROZEN_DAEMON_PID_FILE"
+  cleanup_frozen_daemon || return 1
 
   if [ "$status" -eq 0 ]; then
     # 恢复后按正常路径重启应用：捕获会话应重建，存储视图保持完整。
@@ -5410,6 +5372,7 @@ run_scenario() {
   local scenario="$1"
   local targets_prepared_before_start=0
   local native_symlink_result="" native_hardlink_result=""
+  export native_symlink_result native_hardlink_result
   : >"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt"
   echo "step 1/7: 应用场景配置"
   adb_su ": > '$LOG_PATH' 2>/dev/null || true" >/dev/null
@@ -5633,19 +5596,23 @@ run_scenario() {
       ;;
     40)
       echo "step 5/7: 验证系统 uid 的 FUSE 写入按发起服务归因"
-      run_system_uid_attribution_scenario "$scenario" &&
-        echo "step 5/7 内: 验证应用发起经 MediaProvider 中转创建的源头归因" &&
-        run_app_caller_media_provider_attribution_scenario "$scenario" &&
-        echo "step 5/7 内: 验证系统 uid 沙盒目标缺失时请求路径零穿透" &&
-        run_system_uid_sandbox_missing_target_scenario "$scenario"
+      local status=0
+      bash -e -o pipefail -c 'run_system_uid_attribution_scenario "$1"' _ "$scenario" || status=1
+      echo "step 5/7 内: 验证应用发起经 MediaProvider 中转创建的源头归因"
+      bash -e -o pipefail -c 'run_app_caller_media_provider_attribution_scenario "$1"' _ "$scenario" || status=1
+      echo "step 5/7 内: 验证 shell 执行者不借用应用沙盒规则"
+      bash -e -o pipefail -c 'trap restore_shell_config EXIT; run_shell_executor_boundary_scenario "$1"' _ "$scenario" || status=1
+      [ "$status" -eq 0 ]
       ;;
     41)
       echo "step 5/7: 验证沙盒根原生元数据与媒体代写零穿透"
       run_sandbox_root_metadata_scenario "$scenario"
       ;;
     42)
-      run_file_mutation_lifecycle_scenario "$scenario" &&
-        run_file_mutation_metadata_scenario "$scenario"
+      local status=0
+      bash -e -o pipefail -c 'run_file_mutation_lifecycle_scenario "$1"' _ "$scenario" || status=1
+      bash -e -o pipefail -c 'run_file_mutation_metadata_scenario "$1"' _ "$scenario" || status=1
+      [ "$status" -eq 0 ]
       ;;
     43)
       echo "step 5/7: 验证存储视图根条目集合与系统视图逐项一致"
@@ -5657,8 +5624,10 @@ run_scenario() {
       ;;
     23)
       echo "step 5/7: 执行未启用重定向普通应用与系统代写文件监视记录验证"
-      run_file_monitor_disabled_redirect_scenario "$scenario" &&
-        run_monitor_capture_failopen_scenario "$scenario"
+      local status=0
+      bash -e -o pipefail -c 'run_file_monitor_disabled_redirect_scenario "$1"' _ "$scenario" || status=1
+      bash -e -o pipefail -c 'trap cleanup_frozen_daemon EXIT; run_monitor_capture_failopen_scenario "$1"' _ "$scenario" || status=1
+      [ "$status" -eq 0 ]
       ;;
     24|25)
       echo "step 5/7: 执行普通应用文件监视记录矩阵验证"
@@ -5794,6 +5763,7 @@ capture_shared_fuse_snapshot_once() {
 
 finish_test_run() {
   local status=$?
+  cleanup_frozen_daemon || status=1
   capture_shared_fuse_snapshot_once after || true
   # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
   if [ "$device_run_lock_held" -eq 1 ]; then
@@ -5883,7 +5853,7 @@ export -f sandbox_root_form check_sandbox_root_metadata check_private_tree_nativ
 export -f storage_root_view_snapshot app_process_pid assert_storage_root_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
-export -f run_system_uid_attribution_scenario run_system_uid_sandbox_missing_target_scenario backup_shell_config restore_shell_config
+export -f run_system_uid_attribution_scenario run_shell_executor_boundary_scenario backup_shell_config restore_shell_config cleanup_frozen_daemon
 export -f run_app_caller_media_provider_attribution_scenario
 # 视图失效在 clean_targets / 夹具预置里被 `bash -c` 子 shell 调用，必须导出。
 export -f invalidate_visible_view invalidate_backend_fixture_view
@@ -5916,6 +5886,7 @@ for scenario in "${scenarios[@]}"; do
       timeout --kill-after=30s 180s bash -c 'capture_test_flow_artifacts' || true
       failure_artifacts_captured=1
     fi
+    cleanup_frozen_daemon || echo "FAIL [daemon_resume] scenario=${scenario}" >&2
     timeout --kill-after=30s 90s bash -c 'print_diagnostics "$1"' _ "$scenario" || true
     fail=1
     if [ "$SRT_FAIL_FAST" = "1" ]; then

@@ -38,7 +38,7 @@ RUN_DEVICE_SCENARIOS=0 bash scripts/verify-test-flow.sh
 另行运行可在主机执行的 Rust fixture 测试：
 
 ```bash
-cargo test -p native-config-fixtures
+cargo test -p native-config-fixtures --locked
 ```
 
 CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试流。
@@ -49,10 +49,14 @@ CI/Release 仍由 Linux runner 在 Android 模拟器上运行完整 shell 测试
 
 - `basic/all` 通过。
 - native Rust 单元测试与 ZN 回调夹具通过，输出 `ZN_FIXTURE_SUMMARY` 且 `failed=0`。
-- 当前模块跑完 scenario 1-44。场景脚本不按 FUSE 支持能力跳过任何场景，全部使用 `auto` 后端，实际后端由运行时日志和 mountinfo 记录。
+- 当前模块跑完 scenario 1-44。场景脚本不按 FUSE 支持能力跳过场景，后端按各场景配置选择，实际后端由运行时日志和 mountinfo 记录。
 - 脚本最后输出 `ALL_SCENARIOS_PASSED`。
 - PowerShell 入口在应用停止后确认进程退出及旧独占 FUSE 子进程回收；死进程的状态账本由 daemon 按五分钟节流异步清理，不以账本文件立即消失作为退出判据。
 - 本地完整回归退出前执行白名单清理，恢复原全局配置和测试 APP 配置，并重启 MediaProvider；CI/Release 使用临时模拟器，设置 `SRT_SKIP_FINAL_CLEANUP=1` 跳过最终清理。
+
+场景 40 分别验证 shell 执行者、应用经 MediaProvider 中转的来源，以及 shell 不套用应用沙盒规则。场景 42 以未重定向的链接操作作对照，再比较各路由的链接结果；平台原生拒绝不等同于模块失败。未开启 fail-fast 时，组合场景会保留失败并继续执行其他独立子项；冻结 daemon 的探测在退出时执行恢复。
+
+PowerShell 的测试应用活动启动命令设置 90 秒超时。准备阶段异常也会保留场景终态与汇总；关闭 fail-fast 后继续后续场景，异常清理失败不会覆盖原始错误。
 
 本项目不使用参考实现中的 `/dev/srx_config` 共享挂载作为模块加载信号。配置目录固定为 `/data/adb/modules/storage.redirect.x/config`，运行期通过 inotify 和指纹轮询热更新；安装阶段只验证模块目录未禁用、关键文件存在、当前 boot 的 `.boot_ok` 或 `logs/boot_<boot_id>.marker` 已写入，以及 `srx_daemon` 正在运行。具体重定向、挂载和配置热更新是否生效由后续场景，尤其是 scenario 29，进行端到端验证。
 
@@ -116,11 +120,17 @@ adb -s $Serial install -r tests\storage-redirect-test\app\build\outputs\apk\debu
 
 `run-zn-runtime-fixture.sh` 使用与场景套件相同的设备锁，先准备测试 APP 存储权限，再备份配置、运行 Rust 测试和回调用例。夹具加载已安装模块的 `.so`，调用实际导出的 `zn_module` 和 `zn_companion_module`，以测试 APP UID 执行特化回调，验证直通、映射物理落点、空映射、全隔离、共享 namespace 拒绝、未知包拒绝、连接失败、注册后运行时禁用、禁用配置、运行中配置重载与监视记录。结束时恢复配置并清理本次目录；预期拒绝会按预期退出码记为通过。
 
-该夹具用模拟 API 表调用真实模块回调，在 root 测试进程中建立 namespace 后降 UID/GID；它不验证 Hyos 加载器本身、应用 SELinux 域或设备是否提供独立 namespace。配置视图要求目标进程独占挂载 namespace；无法满足时回调以 126 退出，避免在共享 spawner 视图中挂载。未配置且未启用监视时允许直通。
+该夹具用模拟 API 表调用真实模块回调，在 root 测试进程中建立 namespace 后降 UID/GID；它不验证 Hyos 加载器本身、应用 SELinux 域或设备是否提供独立 namespace。配置隔离视图要求目标进程独占挂载 namespace；无法满足时回调以 126 退出，避免在共享 spawner 视图中挂载。未配置且未启用监视时允许直通；仅监视时共享 namespace 会跳过挂载，挂载失败也不终止进程，身份核验失败仍拒绝。
 
-模块在 `system_server` 中始终安装包事件接收器与查询端，自动配置新应用仍由模板设置控制。Android 13 及更新版本按 PackageManager 状态版本使查询缓存失效；Android 12 仅在包快照有效时按快照对象身份缓存，失效或重建期间直接查询。包事件也会使缓存失效；下次请求时再取当前 PM 状态。companion 身份校验与 daemon 进程扫描不依赖 shell 异步生成的 UID 文件。连接验证 UID 与 SELinux 域，请求受两秒截止点和回复大小上限约束；服务未就绪或查询失败时不使用旧版本缓存身份。
+Hyos 客户端先在五秒内读取 companion 回复。需要挂载时，companion 先回复本次规划的等待预算，再执行挂载并返回最终状态；预算覆盖进程就绪、宿主登记、屏障和挂载子进程等待。协议回归验证延迟超过原五秒窗口仍能收到成功、预算不能重复延长，以及失败或不完整回复不会被视为成功。
 
-`srx_daemon package-query` 输出完整用户 UID；`package-query P <user> <package>` 查询单包，`package-query U <uid>` 查询共享 UID 的全部包。shell 将全量结果归一为 appId，原子更新 hook 使用的 `system_writer_uids.list`。FUSE 热路径读取该快照；它不是 companion 的授权依据。系统服务重启后随注入重建查询端。
+模块在 `system_server` 中始终安装包事件接收器与查询端，自动配置新应用仍由模板设置控制。Android 13 及更新版本按 PackageManager 状态版本使包查询缓存失效；Android 12 仅在包快照有效时按快照对象身份缓存，失效或重建期间直接查询。包事件也会使缓存失效；下次请求时再取当前 PM 状态。用户清单 `T` 与全用户包清单 `L` 始终实时查询，因为增删用户不保证推进 PM 包代次或触发包广播。companion 身份校验与 daemon 进程扫描不依赖 shell 异步生成的 UID 文件。连接验证 UID 与 SELinux 域，请求受两秒截止点和回复大小上限约束；服务未就绪或查询失败时不使用旧版本缓存身份。
+
+`srx_daemon package-query` 输出完整用户 UID；`package-query P <user> <package>` 查询单包，`package-query U <uid>` 查询共享 UID 的全部包，`package-query S <uid>` 查询该完整 UID 的真实共享用户标签（无法确定时输出为空）。shell 保留完整 UID，原子更新 hook 使用的 `system_writer_uids.list`，避免不同用户的安装记录混用。FUSE 热路径读取该快照；它不是 companion 的授权依据。系统服务重启后随注入重建查询端。
+
+身份回归覆盖普通应用与非特权 native 子进程、root/应用 fsuid、shell、已知特权域、非特权域变化、UID/PID 不匹配、PID 复用、嵌套作用域与 Binder 身份恢复。日志回归检查终止边界及共享组标签不会经命令行、UID、路径提示或 UI 回退成为具体应用，失败操作与低可信度记录不派生高可信度公共路径提示。设备场景结束后可对照原始 `file_monitor.log` 的请求字段与管理 App 解析结果；文件落点仍以实际后端文件为准。
+
+异步目录回归需区分宿主内部调用与外部 Binder 请求，并检查提示冲突、过期、任务退出和凭据变化；原始 UID/PID、启动时钟及域不能被宿主身份替代。共享 UID 的只读回归分别检查显式成员、无具体成员及另一成员的近期路径提示。管理 App 与 WebUI 同时验证不同请求保留、重复请求去重及请求/观察关联，日志字段往返后 `unverified` 必须仍为未知来源。套接字队列满时，身份查询与日志回复都应有界返回。
 
 ### 应用场景
 
@@ -223,7 +233,7 @@ SRT_SCENARIOS=24 bash .github/tests/run-storage-redirect-scenarios.sh
 - 一次验证只选一种入口，禁止「带标记推送 + 手动派发」同时进行；出现两轮 run 时先确认事件来源，不要用取消第二轮掩盖范围错误。
 - 窄场景验证不产生可发布资产（`publish_ci=false`），不能作为发布门禁通过的依据；合并或发布前必须有一次全量 1-44 通过记录。
 
-CI/Release 在 Android 15/16/17 x86_64 模拟器上各自执行完整场景 1-42，无版本级排除项；任一版本失败即取消其余版本，单个版本内按场景顺序快速失败。测试流全部通过后才发布资产。
+CI/Release 在 Android 15/16/17 x86_64 模拟器上各自执行完整场景 1-44，无版本级排除项；任一版本失败即取消其余版本，单个版本内按场景顺序快速失败。测试流全部通过后才发布资产。
 
 CI/Release 统一由 KernelSU-AVD 打 ramdisk 补丁，使用 ksud 依次安装 Zygisk Next 与 SRX，root shell 走 `su 0 sh -c`（`ADB_ROOT_MODE=su0`）。Zygisk Next 与 KernelSU 在恢复缓存前查询 GitHub 最新稳定版，按版本和上游 SHA-256 选择缓存；缓存和下载文件均校验摘要与归档内容，校验通过后才交给安装器。
 
@@ -294,6 +304,8 @@ Android 17（API 37.0）有三处执行环境差异：
 场景 42 先关闭测试应用的重定向，在原生共享存储上记录链接创建或拒绝结果，再启用场景配置。符号链接成功时校验 `readlink`、跟随读取和物理落点；只有未重定向对照与真实路径放行对照都返回 `EACCES` 时，其余路径才接受相同拒绝，且不得创建或泄漏链接。硬链接成功时校验后端落点、同一 inode 和内容；`EPERM` 必须由未重定向对照复现，`EACCES` 必须由两个对照复现，且均不得创建目标；其它错误均失败。各目标最终只保留 `complete.txt`、`metadata.txt`、`link-target.txt` 和创建成功的链接，由 root 校验物理落点及其余路径零残留。
 
 服务用例以 `OBSERVED [...] app_status=PASS/FAIL` 保留 APP 的实际结果和错误细节，并将原始文本保存在产物目录的 `scenario-*-result.txt` 中。`PASS/FAIL [...] assertion=app_result` 表示该项 APP 结果是否符合断言；由调用方继续校验的结果先输出 `PENDING`。链接操作完成全部路由、对照和物理断言后，才输出 `PASS [file_symlink_boundary]` / `PASS [file_link_boundary]`，并以 `outcome=created` 或 `outcome=denied` 区分实际创建与拒绝边界通过；后者不代表验证过成功创建。`PASS/FAIL [scenario] id=N` 是整个场景的最终判定，错误、超时、残留或对照不符均不得通过。最终清理失败会输出 `FAIL [cleanup]` 并返回非零退出码；PowerShell 入口仅在场景和清理全部成功后输出 `ALL_SCENARIOS_PASSED`。
+
+PowerShell 入口固定使用 UTF-8 输出，重定向到文件时不依赖宿主控制台代码页。场景 40 的 shell 执行者探针经同一 FUSE 可见路径删除、重建目录，避免直删后端留下正目录项缓存；判定同时检查命令退出码、真实落点与沙箱落点，缺少真实目录不会被描述为已经路由到沙箱。
 
 APP 将消息和元数据中的控制字符转义为 `\uXXXX`，避免诊断内容伪造结果行；每份结果以 `__SRT_RESULT_END__=N` 记录条数，随后以 `__SRT_RESULT_TOKEN__` 回传本次调用的 `result_token`，并在写入临时文件后原子重命名发布。采集器只接受严格晚于本次标记文件、调用令牌与用例标识匹配、条数相符且没有重复或额外行的完整结果；`all` 正常执行时必须包含全部 25 个独立用例，任一失败均使聚合断言失败。服务启动或聚合执行异常产生的单条 `FAIL [all]` 直接判失败，不等待超时；单条 `PASS [all]` 和混入聚合结果的致命错误记录均不接受。更新采集器时必须同步安装测试 APP。
 

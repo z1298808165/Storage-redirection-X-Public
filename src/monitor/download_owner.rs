@@ -2,162 +2,70 @@ use crate::platform::paths;
 use crate::redirect::policy;
 use crate::zygisk::jni;
 use jni_sys::{JNIEnv, jclass, jint, jmethodID, jobject, jobjectArray, jstring, jvalue};
-use once_cell::sync::Lazy;
-use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, AtomicU32};
 
 const DOWNLOADS_URI: &str = "content://downloads/all_downloads";
 const STORAGE_PREFIX: &str = "/storage/emulated/";
 const DOWNLOAD_PROVIDER_NAME: &str = "com.android.providers.downloads";
 const FILE_SCHEME_PREFIX: &str = "file://";
-const CACHE_TTL_MS: i64 = 15_000;
-const CACHE_CAPACITY: usize = 128;
-const CACHE_QUEUE_COMPACTION_LIMIT: usize = CACHE_CAPACITY * 2;
-// 路径限定放宽后，归因链可能在批量枚举（MTP 扫描全盘等）中对大量互异路径
-// 触发查询；真实 JNI 查询按秒限流，超限直接按未命中处理，缓存仍照常登记。
-const QUERY_RATE_LIMIT_PER_SECOND: u32 = 8;
-static QUERY_WINDOW_SEC: AtomicI64 = AtomicI64::new(-1);
-static QUERY_COUNT_IN_WINDOW: AtomicU32 = AtomicU32::new(0);
 
-struct CacheEntry {
-    package_name: String,
-    expires_at_ms: i64,
-    generation: u64,
-}
-
-struct DownloadOwnerCache {
-    values: HashMap<String, CacheEntry>,
-    order: VecDeque<(String, u64)>,
-    next_generation: u64,
-}
-
-impl DownloadOwnerCache {
-    fn new() -> Self {
-        Self {
-            values: HashMap::new(),
-            order: VecDeque::new(),
-            next_generation: 0,
-        }
-    }
-
-    fn get(&mut self, key: &str, now_ms: i64) -> Option<Option<String>> {
-        let entry = self.values.get(key)?;
-
-        if entry.expires_at_ms <= now_ms {
-            self.values.remove(key);
-            return None;
-        }
-
-        if entry.package_name.is_empty() {
-            return Some(None);
-        }
-        Some(Some(entry.package_name.clone()))
-    }
-
-    fn put(&mut self, key: String, package_name: Option<String>, now_ms: i64) {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        let generation = self.next_generation;
-        self.order.push_back((key.clone(), generation));
-
-        self.values.insert(
-            key,
-            CacheEntry {
-                package_name: package_name.unwrap_or_default(),
-                expires_at_ms: now_ms + CACHE_TTL_MS,
-                generation,
-            },
-        );
-
-        while self.values.len() > CACHE_CAPACITY {
-            let Some((expired_key, generation)) = self.order.pop_front() else {
-                break;
-            };
-            if self
-                .values
-                .get(&expired_key)
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                self.values.remove(&expired_key);
-            }
-        }
-
-        if self.order.len() > CACHE_QUEUE_COMPACTION_LIMIT {
-            self.order.retain(|(queued_key, generation)| {
-                self.values
-                    .get(queued_key)
-                    .is_some_and(|entry| entry.generation == *generation)
-            });
-        }
-    }
-}
-
-static DOWNLOAD_OWNER_CACHE: Lazy<Mutex<DownloadOwnerCache>> =
-    Lazy::new(|| Mutex::new(DownloadOwnerCache::new()));
-
-// 按下载目标路径反查发起下载的应用包名
-pub fn infer_download_owner_package_by_path(normalized_path: &str) -> Option<String> {
+// 按下载目标路径反查下载行中的包名和调用 UID。
+pub fn infer_download_owner_identity_by_path(
+    normalized_path: &str,
+    expected_user_id: i32,
+) -> Option<(String, i32)> {
     if !should_lookup_download_owner(normalized_path) {
         return None;
     }
-    if !host_process_may_query_downloads() {
+    if expected_user_id < 0 || !host_process_may_query_downloads() {
         return None;
     }
 
-    let now_ms = paths::monotonic_ms();
     let candidates = build_lookup_candidates(normalized_path);
     for candidate in candidates {
-        if let Some(cached) = DOWNLOAD_OWNER_CACHE
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .get(&candidate, now_ms)
-        {
-            if cached.is_some() {
-                return cached;
-            }
+        // 目标路径可被其它下载复用，每次读取当前下载行的归属。
+        let Some(owner) = query_download_owner_identity(&candidate)? else {
             continue;
-        }
-
-        if !try_acquire_query_slot(now_ms) {
-            return None;
-        }
-
-        let package_name = query_download_owner_package(&candidate);
-        DOWNLOAD_OWNER_CACHE
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .put(candidate, package_name.clone(), now_ms);
-
-        if package_name.is_some() {
-            return package_name;
-        }
+        };
+        // 已存在的行不再尝试别名，冲突或失效证据不能借用另一文件的归属。
+        return (!policy::is_system_writer_package(&owner.0)
+            && download_owner_identity_matches(&owner.0, owner.1, expected_user_id))
+        .then_some(owner);
     }
 
     None
 }
 
-// 每秒最多 QUERY_RATE_LIMIT_PER_SECOND 次真实 JNI 查询；抢到窗口切换权的线程
-// 重置计数。限流是防御性的，切换瞬间与并发累加交错的计数误差只影响本秒余量。
-fn try_acquire_query_slot(now_ms: i64) -> bool {
-    let window_sec = now_ms / 1000;
-    let current_window = QUERY_WINDOW_SEC.load(std::sync::atomic::Ordering::Relaxed);
-    if window_sec != current_window {
-        let switched = QUERY_WINDOW_SEC
-            .compare_exchange(
-                current_window,
-                window_sec,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok();
-        if switched {
-            QUERY_COUNT_IN_WINDOW.store(1, std::sync::atomic::Ordering::Relaxed);
-            return true;
+fn download_owner_identity_matches(
+    package_name: &str,
+    row_uid: i32,
+    expected_user_id: i32,
+) -> bool {
+    package_uid_matches_download_row(
+        row_uid,
+        policy::get_fresh_uid_for_package_in_user(package_name, expected_user_id),
+        expected_user_id,
+    )
+}
+
+fn package_uid_matches_download_row(row_uid: i32, package_uid: i32, expected_user_id: i32) -> bool {
+    row_uid >= crate::redirect::writer::ANDROID_APP_UID_START
+        && crate::platform::user_id_from_uid(row_uid) == expected_user_id
+        && package_uid == row_uid
+}
+
+fn unique_download_owner(
+    rows: impl IntoIterator<Item = Option<(String, i32)>>,
+) -> Option<Option<(String, i32)>> {
+    let mut owner = None;
+    for row in rows {
+        let row = row?;
+        if owner.as_ref().is_some_and(|current| current != &row) {
+            return None;
         }
+        owner = Some(row);
     }
-    let count = QUERY_COUNT_IN_WINDOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    count <= QUERY_RATE_LIMIT_PER_SECOND
+    Some(owner)
 }
 
 /// 调用方 uid 是否属于包含下载提供器的共享 uid 组。
@@ -173,16 +81,7 @@ pub fn caller_uid_shares_download_group(caller_uid: i32) -> bool {
             .any(|pkg| pkg == DOWNLOAD_PROVIDER_NAME)
 }
 
-/// 宿主进程自身是否可合法查询 downloads 提供器。
-///
-/// HyperOS 等系统把 DownloadProvider 与 MediaProvider 拆成不同 uid，
-/// media.module 宿主进程查询 content://downloads/all_downloads 会因缺
-/// ACCESS_ALL_DOWNLOADS 被 SecurityException 拒绝；共享 uid 的设备上两者
-/// 同组则允许。守卫必须看宿主进程自身的 uid 组而不是 open 调用方的 uid：
-/// 调用方属于下载组不代表本进程有查询权限（2026-10-29 ishtar 崩溃取证：
-/// FUSE open 调用方为下载组 uid、宿主 media.module 被拒后异常残留 abort）。
-/// 宿主无权限时直接跳过真实查询，归因回退到 recent path hint 台账；
-/// uid 组映射未加载（开机早期）时同样按跳过处理，属安全的降级路径。
+/// 仅在宿主自身 UID 组包含 DownloadProvider 时查询下载表；请求者属于该组不足以授权宿主。
 fn host_process_may_query_downloads() -> bool {
     // SAFETY: libc::getuid 仅读取本进程真实凭据，无前置条件，不会失败。
     let host_uid = unsafe { libc::getuid() } as i32;
@@ -192,7 +91,7 @@ fn host_process_may_query_downloads() -> bool {
 }
 
 // 下载行的 destination 可指向任意用户存储路径（公共目录或应用私有目录），
-// 归因链只在调用方包名未解析时兜底查询，且结果有 TTL 缓存，因此不按
+// 归因链只在调用方包名未解析时查询当前下载行，因此不按
 // Download 段收窄：MIUI 引擎把商店等应用的下载目标写在私有目录时，
 // 按 Download 段收窄会让「行数据→发起者」关联在这些路径上全部落空。
 fn should_lookup_download_owner(path: &str) -> bool {
@@ -224,11 +123,16 @@ fn normalize_companion_download_path(path: &str) -> Option<String> {
     Some(format!("{}/{}", parent, normalized_name))
 }
 
-fn query_download_owner_package(path: &str) -> Option<String> {
-    jni::with_env(|env| unsafe { query_download_owner_package_impl(env, path) }).flatten()
+// Some(None) 仅表示没有下载行；查询失败、行无效或归属冲突返回 None。
+fn query_download_owner_identity(path: &str) -> Option<Option<(String, i32)>> {
+    // SAFETY: with_env 提供当前已附加线程的有效 JNIEnv，查询不在闭包外保存局部引用。
+    jni::with_env(|env| unsafe { query_download_owner_identity_impl(env, path) }).flatten()
 }
 
-unsafe fn query_download_owner_package_impl(env: *mut JNIEnv, path: &str) -> Option<String> {
+unsafe fn query_download_owner_identity_impl(
+    env: *mut JNIEnv,
+    path: &str,
+) -> Option<Option<(String, i32)>> {
     let activity_thread_class = find_class(env, "android/app/ActivityThread")?;
     let application_class = find_class(env, "android/app/Application")?;
     let content_resolver_class = find_class(env, "android/content/ContentResolver")?;
@@ -302,52 +206,7 @@ unsafe fn query_download_owner_package_impl(env: *mut JNIEnv, path: &str) -> Opt
         ],
     )?;
 
-    let move_to_first = get_method_id(env, cursor_class, "moveToFirst", "()Z")?;
-    let moved = call_boolean_method(env, cursor, move_to_first, &[])?;
-    if !moved {
-        close_cursor(env, cursor_class, cursor);
-        clear_local_refs(
-            env,
-            &[
-                uri_text as jobject,
-                selection as jobject,
-                sort_order as jobject,
-                application,
-                resolver,
-                uri,
-                projection as jobject,
-                selection_args as jobject,
-                cursor,
-                activity_thread_class as jobject,
-                application_class as jobject,
-                content_resolver_class as jobject,
-                uri_class as jobject,
-                cursor_class as jobject,
-                string_class as jobject,
-            ],
-        );
-        return None;
-    }
-
-    let get_string = get_method_id(env, cursor_class, "getString", "(I)Ljava/lang/String;")?;
-    let get_int = get_method_id(env, cursor_class, "getInt", "(I)I")?;
-
-    let package_name = call_object_method(env, cursor, get_string, &[jvalue { i: 0 }])
-        .map(|value| {
-            let text = jni::get_jstring_utf8(env, value as jstring);
-            jni::delete_local_ref(env, value);
-            text
-        })
-        .filter(|value| !value.is_empty())
-        .filter(|value| !policy::is_system_writer_package(value));
-
-    let package_name = if package_name.is_some() {
-        package_name
-    } else {
-        let uid = call_int_method(env, cursor, get_int, &[jvalue { i: 1 }])?;
-        resolve_package_by_uid(uid)
-    };
-
+    let owner = read_download_owner_rows(env, cursor_class, cursor);
     close_cursor(env, cursor_class, cursor);
     clear_local_refs(
         env,
@@ -370,26 +229,38 @@ unsafe fn query_download_owner_package_impl(env: *mut JNIEnv, path: &str) -> Opt
         ],
     );
 
-    package_name
+    owner
 }
 
-fn resolve_package_by_uid(uid: jint) -> Option<String> {
-    if uid < 0 {
-        return None;
+unsafe fn read_download_owner_rows(
+    env: *mut JNIEnv,
+    cursor_class: jclass,
+    cursor: jobject,
+) -> Option<Option<(String, i32)>> {
+    let move_to_first = get_method_id(env, cursor_class, "moveToFirst", "()Z")?;
+    let move_to_next = get_method_id(env, cursor_class, "moveToNext", "()Z")?;
+    let get_string = get_method_id(env, cursor_class, "getString", "(I)Ljava/lang/String;")?;
+    let get_int = get_method_id(env, cursor_class, "getInt", "(I)I")?;
+    if !call_boolean_method(env, cursor, move_to_first, &[])? {
+        return Some(None);
     }
 
-    let mut packages = policy::get_packages_for_uid(uid);
-    packages.sort();
-    packages.dedup();
-    packages.retain(|package_name| {
-        !package_name.is_empty() && !policy::is_system_writer_package(package_name)
-    });
-    // 共享 uid 组内有多个候选时无法确定行属于哪个成员，返回 None 交给
-    // 调用方走后续归因路径；硬取排序首个成员会把引擎代写误归给无辜包。
-    if packages.len() == 1 {
-        return packages.pop();
+    let mut rows = Vec::new();
+    loop {
+        let package_name = call_object_method(env, cursor, get_string, &[jvalue { i: 0 }])
+            .map(|value| {
+                let text = jni::get_jstring_utf8(env, value as jstring);
+                jni::delete_local_ref(env, value);
+                text
+            })
+            .filter(|value| !value.is_empty());
+        let uid = call_int_method(env, cursor, get_int, &[jvalue { i: 1 }])?;
+        rows.push(package_name.map(|package_name| (package_name, uid)));
+        if !call_boolean_method(env, cursor, move_to_next, &[])? {
+            break;
+        }
     }
-    None
+    unique_download_owner(rows)
 }
 
 unsafe fn close_cursor(env: *mut JNIEnv, cursor_class: jclass, cursor: jobject) {
@@ -565,3 +436,7 @@ unsafe fn clear_local_refs(env: *mut JNIEnv, values: &[jobject]) {
         jni::delete_local_ref(env, *value);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/download_owner.rs"]
+mod tests;

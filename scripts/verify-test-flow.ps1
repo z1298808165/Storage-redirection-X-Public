@@ -2,6 +2,8 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $RunDeviceScenarios = if ([string]::IsNullOrWhiteSpace($env:RUN_DEVICE_SCENARIOS)) { "1" } else { $env:RUN_DEVICE_SCENARIOS }
@@ -11,6 +13,7 @@ $ModuleAbi = if ([string]::IsNullOrWhiteSpace($env:SRX_TEST_MODULE_ABI)) { "arm6
 $BuildDir = if ([string]::IsNullOrWhiteSpace($env:SRX_TEST_BUILD_DIR)) { "build/test-flow" } else { $env:SRX_TEST_BUILD_DIR }
 $TestAppApkDir = Join-Path $RepoRoot "tests/storage-redirect-test/app/build/outputs/apk/debug"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$script:AdbSuMode = $null
 
 if ($TargetTriple -notin @("aarch64-linux-android", "x86_64-linux-android")) {
     throw "不支持的 Android target：$TargetTriple"
@@ -93,23 +96,40 @@ function Get-TestAppApk {
     Get-ChildItem -LiteralPath $TestAppApkDir -Filter "*-debug.apk" | Select-Object -First 1 -ExpandProperty FullName
 }
 
+function Resolve-AdbSuMode {
+    if ($script:AdbSuMode) { return $script:AdbSuMode }
+
+    foreach ($mode in @("su0", "su")) {
+        $probe = if ($mode -eq "su0") { "su 0 sh -c 'id -u'" } else { "su -c 'id -u'" }
+        $output = & adb shell $probe 2>$null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0 -and (($output -join "`n").Trim() -eq "0")) {
+            $script:AdbSuMode = $mode
+            return $mode
+        }
+    }
+    Fail "设备没有可用的 adb su shell。"
+}
+
 function Invoke-AdbSu {
     param([string]$Command)
     $escaped = $Command.Replace("'", "'\''")
-    & adb shell "su 0 sh -c '$escaped'"
-    if ($LASTEXITCODE -eq 0) { return }
-    & adb shell "su -c '$escaped'"
-    if ($LASTEXITCODE -ne 0) { Fail "adb su 命令执行失败：$Command" }
+    $mode = Resolve-AdbSuMode
+    $remoteCommand = if ($mode -eq "su0") { "su 0 sh -c '$escaped'" } else { "su -c '$escaped'" }
+    $output = & adb shell $remoteCommand
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { Fail "adb su 命令执行失败：$Command" }
+    $output
 }
 
 function Wait-DeviceBootCompleted {
     Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")
-    for ($attempt = 1; $attempt -le 90; $attempt++) {
+    for ($attempt = 1; $attempt -le 450; $attempt++) {
         $bootCompleted = (& adb shell getprop sys.boot_completed | Out-String).Trim()
         if ($LASTEXITCODE -eq 0 -and $bootCompleted -eq "1") { return }
         Start-Sleep -Seconds 2
     }
-    Fail "设备在 180 秒内未完成启动。"
+    Fail "设备在 900 秒内未完成启动。"
 }
 
 function Assert-ModuleRuntimeState {
@@ -229,18 +249,14 @@ try {
             "`$env:Path = '$escapedPath'",
             "`$env:SRT_FAIL_FAST = '0'"
         )
-        # 场景脚本每次 adb 都带 `-s $Serial`，而 `$Serial` 默认取自 `$env:ANDROID_SERIAL`；
-        # 本机同时连着模拟器与真机（实测 `emulator-5556` + 真机 `ASUS_AI2501_A`）时，
-        # 不显式透传会让子进程以「检测到多个设备」直接退出，表现为场景一条未跑就失败。
-        # WMI 不继承工具会话环境，只能在 wrapper 里显式烘焙。
+        # 场景脚本从 ANDROID_SERIAL 选定设备；WMI 子进程需要显式接收该变量。
         if (-not [string]::IsNullOrWhiteSpace($env:ANDROID_SERIAL)) {
             $wrapperLines += "`$env:ANDROID_SERIAL = '$($env:ANDROID_SERIAL -replace "'", "''")'"
         }
         if (-not [string]::IsNullOrWhiteSpace($env:SRT_SCENARIOS)) {
             $wrapperLines += "`$env:SRT_SCENARIOS = '$($env:SRT_SCENARIOS -replace "'", "''")'"
         }
-        # 版本级场景排除与 CI 矩阵同语义（如 A17 排除依赖外网的场景 39）：本地复现
-        # 该类形态时必须一起透传，否则默认全量会跑出与 CI 不一致的范围。
+        # 显式透传调用方指定的场景排除项。
         if (-not [string]::IsNullOrWhiteSpace($env:SRT_VERSION_SCENARIO_EXCLUDE)) {
             $wrapperLines += "`$env:SRT_VERSION_SCENARIO_EXCLUDE = '$($env:SRT_VERSION_SCENARIO_EXCLUDE -replace "'", "''")'"
         }

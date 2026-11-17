@@ -29,7 +29,6 @@
 # Android/Java 临时产物
 *.class
 *.dex
-!assets/zygisk_module/bin/list_apps.dex
 *.apk
 *.aab
 *.ap_

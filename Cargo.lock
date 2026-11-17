@@ -142,7 +142,6 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "log",
- "once_cell",
  "serde",
  "serde_json",
 ]
@@ -381,7 +380,6 @@ dependencies = [
  "jni-sys",
  "libc",
  "log",
- "once_cell",
  "serde",
  "serde_json",
  "srx_hook",

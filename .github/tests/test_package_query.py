@@ -113,6 +113,7 @@ public class GenerationFixture {
         fixture = r'''
 import java.util.*;
 import java.util.concurrent.atomic.*;
+import java.nio.charset.StandardCharsets;
 public class CacheFixture {
   static final int MAX_REPLY = 4 * 1024 * 1024;
   static final AtomicLong EVENTS = new AtomicLong();
@@ -162,15 +163,20 @@ METHOD
     int before=calls;
     check(query("U\t10123").equals(live));
     check(calls == before+1);
+    String changing = "P\t0\tcom.changed";
     epoch.incrementAndGet();
     changeDuringQuery=true;
-    query("L");
-    check(!CACHE.containsKey("L"));
-    query("L");
-    check(CACHE.containsKey("L"));
+    query(changing);
+    check(!CACHE.containsKey(changing));
+    query(changing);
+    check(CACHE.containsKey(changing));
+    before=calls;
+    query("T"); query("T"); query("L"); query("L");
+    check(calls == before+4);
+    check(!CACHE.containsKey("T") && !CACHE.containsKey("L"));
     epoch=null; // 平台不暴露版本时必须实时查询。
     before=calls;
-    query("L"); query("L");
+    query(changing); query(changing);
     check(calls == before+2);
     epoch=new AtomicInteger(100);
     live="x".repeat(MAX_REPLY);
@@ -182,6 +188,13 @@ METHOD
     live="x".repeat(MAX_REPLY/2+1);
     query("large1"); query("large2");
     check(cachedBytes <= MAX_REPLY);
+    live="中".repeat(MAX_REPLY/2+1);
+    query("unicode-oversized");
+    check(!CACHE.containsKey("unicode-oversized"));
+    epoch.incrementAndGet();
+    live="标签";
+    query("unicode-sized");
+    check(cachedBytes == live.getBytes(StandardCharsets.UTF_8).length);
     System.out.println("PASS package cache generation, failure and size boundaries");
   }
 }
@@ -195,6 +208,18 @@ METHOD
                                     check=True, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.stdout.strip(), "PASS package cache generation, failure and size boundaries")
 
+    def test_receiver_ready_marker_requires_all_user_registration(self):
+        source = (ROOT / "java_src/org/srx/hook/PackageEventReceiver.java").read_text(encoding="utf-8")
+        signature = "private static boolean tryInstall(boolean logFailure)"
+        body = function_body(source, signature)
+        self.assertIn("allUsersRegistered = registerForAllUsers(context, newReceiver, filter)", body)
+        self.assertIn("if (!allUsersRegistered) {\n        registerForCurrentUser", body)
+        self.assertIn("if (allUsersRegistered) {\n        writeReadySignal();", body)
+        self.assertRegex(
+            body,
+            r"if \(!INSTALLED\.compareAndSet\(false, true\)\) \{\s*if \(allUsersRegistered\) \{\s*writeReadySignal\(\);",
+        )
+
     def test_interface_variants_and_request_boundaries(self):
         source = (ROOT / "java_src/org/srx/hook/PackageQuery.java").read_text(encoding="utf-8")
         methods = []
@@ -202,6 +227,9 @@ METHOD
             "private static Object call(",
             "private static Object packageCall(",
             "private static List<?> users(",
+            "private static Object systemPackageManager(",
+            "private static String applicationLabel(",
+            "private static String encodeField(",
             "private static String readRequest(",
             "private static int nonnegative(",
             "private static String queryPackageManager(",
@@ -213,20 +241,49 @@ METHOD
             with self.subTest(flags=flags_type, users=user_args), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 sources = {
+                    "android/app/ActivityThread.java": """
+package android.app;
+public class ActivityThread {
+  public static ActivityThread currentActivityThread() { return new ActivityThread(); }
+  public static ActivityThread systemMain() { return new ActivityThread(); }
+  public android.content.Context getSystemContext() { return new android.content.Context(); }
+}
+""",
+                    "android/content/Context.java": """
+package android.content;
+public class Context {
+  public android.content.pm.PackageManager getPackageManager() { return new android.content.pm.PackageManager(); }
+}
+""",
+                    "android/content/pm/PackageManager.java": """
+package android.content.pm;
+public class PackageManager {}
+""",
                     "android/content/pm/IPackageManager.java": f"""
 package android.content.pm;
 public interface IPackageManager {{
   int getPackageUid(String name, {flags_type} flags, int user);
   Object getInstalledApplications({flags_type} flags, int user);
   String[] getPackagesForUid(int uid);
+  PackageInfo getPackageInfo(String name, {flags_type} flags, int user);
 }}
 """,
                     "android/content/pm/ApplicationInfo.java": """
 package android.content.pm;
 public class ApplicationInfo {
+  public static final int FLAG_SYSTEM=1, FLAG_UPDATED_SYSTEM_APP=128;
   public String packageName;
-  public int uid;
-  public ApplicationInfo(String name, int value) { packageName=name; uid=value; }
+  public String sourceDir;
+  public int uid, flags;
+  public ApplicationInfo(String name, int value) { packageName=name; uid=value; sourceDir="/data/app/"+name+"/base.apk"; flags=name.endsWith("sibling") ? 1 : 0; }
+  public CharSequence loadLabel(PackageManager pm) { return "Label "+packageName; }
+}
+""",
+                    "android/content/pm/PackageInfo.java": """
+package android.content.pm;
+public class PackageInfo {
+  public ApplicationInfo applicationInfo;
+  public String packageName, sharedUserId;
 }
 """,
                     "android/os/IUserManager.java": f"""
@@ -236,11 +293,16 @@ public interface IUserManager {{ java.util.List<?> getUsers({user_args}); }}
                     "QueryFixture.java": """
 import java.io.*;
 import java.lang.reflect.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 public class QueryFixture {
 """ + "\n".join(methods) + f"""
   static boolean fail, empty;
+  static int groupFault;
+  static boolean mismatchedUserUid;
   static Object service(String name, String stub) {{
     if (!name.equals("user")) throw new AssertionError();
     return new Users();
@@ -250,6 +312,16 @@ public class QueryFixture {
       if (flags != 0 || user != 10) throw new AssertionError();
       if (fail) throw new IllegalStateException("backend unavailable");
       return name.equals("com.example.app") ? 1010123 : -1;
+    }}
+    public PackageInfo getPackageInfo(String name, {flags_type} flags, int user) {{
+      if (flags != 0 || user != 10) throw new AssertionError("wrong shared user lookup");
+      PackageInfo info = new PackageInfo();
+      info.packageName = groupFault == 1 ? "com.wrong" : name;
+      info.applicationInfo = new ApplicationInfo(name, groupFault == 2 ? 10123 : 1010123);
+      info.sharedUserId = groupFault == 3 ? null : groupFault == 4 ? "invalid-label" :
+          groupFault == 5 && name.endsWith("sibling") ? "android.uid.other" : "android.uid.test";
+      if (groupFault == 6) info.applicationInfo = null;
+      return info;
     }}
     public Object getInstalledApplications({flags_type} flags, int user) {{
       if (flags != 0 || (user != 0 && user != 10)) throw new AssertionError();
@@ -263,7 +335,7 @@ public class QueryFixture {
   }}
   public static final class Slice {{
     final int uid;
-    Slice(int user) {{ uid=user*100000+10123; }}
+    Slice(int user) {{ uid=mismatchedUserUid ? 10123 : user*100000+10123; }}
     public List<?> getList() {{
       return empty ? Collections.emptyList() : Arrays.asList(
           new ApplicationInfo("com.example.sibling",uid),
@@ -289,14 +361,29 @@ public class QueryFixture {
     check(query("P\\t10\\tcom.missing.app").isEmpty());
     check(query("U\\t1010123").equals("com.example.app:1010123\\ncom.example.sibling:1010123\\n"));
     check(query("U\\t12345").isEmpty());
+    check(query("S\\t1010123").equals("android.uid.test\\n"));
+    check(query("S\\t12345").isEmpty());
+    for (groupFault = 1; groupFault <= 6; groupFault++) check(query("S\\t1010123").isEmpty());
+    groupFault = 0;
+    String appList = query("A\\t10");
+    if (!appList.equals(
+        "10\\t1010123\\t0\\tcom.example.app\\tLabel%20com.example.app\\t%2Fdata%2Fapp%2Fcom.example.app%2Fbase.apk\\n" +
+        "10\\t1010123\\t1\\tcom.example.sibling\\tLabel%20com.example.sibling\\t%2Fdata%2Fapp%2Fcom.example.sibling%2Fbase.apk\\n"))
+      throw new AssertionError("application inventory: " + appList);
+    mismatchedUserUid=true;
+    try {{ query("A\\t10"); throw new AssertionError("mismatched user UID accepted"); }}
+    catch (IllegalStateException expected) {{}}
+    mismatchedUserUid=false;
+    String userList = query("T");
+    if (!userList.equals("0\\n10\\n")) throw new AssertionError("user inventory: " + userList);
     check(query("L").equals("com.example.app:1010123\\ncom.example.app:10123\\ncom.example.sibling:1010123\\ncom.example.sibling:10123\\n"));
-    for (String request : new String[] {{"", "L\\t", "P\\t10", "U\\t", "X", "U\\t-1", "U\\t4294967296", "P\\t-1\\tcom.example.app", "P\\t10\\t../bad", "P\\t10\\tcom..app"}})
+    for (String request : new String[] {{"", "L\\t", "P\\t10", "U\\t", "A", "A\\t", "A\\t-1", "A\\t4294967296", "A\\t1\\textra", "T\\textra", "X", "U\\t-1", "U\\t4294967296", "S\\t-1", "S\\t4294967296", "S\\t1\\textra", "P\\t-1\\tcom.example.app", "P\\t10\\t../bad", "P\\t10\\tcom..app"}})
       rejects(() -> query(request));
     empty=true;
     try {{ query("L"); throw new AssertionError(); }} catch (IllegalStateException expected) {{}}
     empty=false;
     fail=true;
-    for(String request : new String[] {{"L", "P\\t10\\tcom.example.app", "U\\t1010123"}}) {{
+    for(String request : new String[] {{"L", "P\\t10\\tcom.example.app", "U\\t1010123", "S\\t1010123", "A\\t10"}}) {{
       try {{ query(request); throw new AssertionError(); }} catch (InvocationTargetException expected) {{
         check(expected.getCause() instanceof IllegalStateException);
       }}
@@ -319,10 +406,12 @@ public class QueryFixture {
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(text, encoding="utf-8")
-                subprocess.run(["javac", "--release", "11", *sources], cwd=root, check=True,
-                               capture_output=True, text=True, timeout=30)
+                compiled = subprocess.run(["javac", "--release", "11", *sources], cwd=root,
+                                          check=False, capture_output=True, text=True, timeout=30)
+                self.assertEqual(compiled.returncode, 0, compiled.stderr)
                 result = subprocess.run(["java", "-cp", str(root), "QueryFixture"],
-                                        check=True, capture_output=True, text=True, timeout=10)
+                                        check=False, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), "PASS package query interface and request boundaries")
 
     def test_same_uid_cache_comparison_is_scoped_to_android_user(self):

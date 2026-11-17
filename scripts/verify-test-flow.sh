@@ -48,8 +48,8 @@ echo "==> Build Rust test binaries for $TARGET_TRIPLE"
 bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" "$BUILD_DIR/native"
 
 echo "==> Build SRX module binaries for $TARGET_TRIPLE"
-cargo build --target "$TARGET_TRIPLE" --release
-CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps | "${python_cmd[@]}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+cargo build --target "$TARGET_TRIPLE" --release --locked
+CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps --locked | "${python_cmd[@]}" -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/libsrx_core.so" "$BUILD_DIR/module-bin/libsrx_core.so"
 cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/srx_daemon" "$BUILD_DIR/module-bin/srx_daemon"
 
@@ -84,11 +84,31 @@ echo "==> Verify connected device and installed module state"
 adb wait-for-device
 adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
 
+ADB_SU_MODE=""
+
+resolve_adb_su_mode() {
+  [[ -n "$ADB_SU_MODE" ]] && return 0
+  local probe
+  if probe="$(adb shell "su 0 sh -c 'id -u'" 2>/dev/null | tr -d '\r')" && [[ "$probe" == "0" ]]; then
+    ADB_SU_MODE="su0"
+  elif probe="$(adb shell "su -c 'id -u'" 2>/dev/null | tr -d '\r')" && [[ "$probe" == "0" ]]; then
+    ADB_SU_MODE="su"
+  else
+    echo "No usable adb root shell found." >&2
+    return 1
+  fi
+}
+
 adb_su() {
   local command="$1"
   local quoted
   quoted="$(printf '%s' "$command" | sed "s/'/'\\''/g")"
-  adb shell "su 0 sh -c '$quoted'" || adb shell "su -c '$quoted'"
+  resolve_adb_su_mode
+  if [[ "$ADB_SU_MODE" == "su0" ]]; then
+    adb shell "su 0 sh -c '$quoted'"
+  else
+    adb shell "su -c '$quoted'"
+  fi
 }
 
 verify_module_runtime_state() {

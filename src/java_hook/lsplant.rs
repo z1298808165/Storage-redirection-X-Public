@@ -1,8 +1,7 @@
 use crate::platform::elf_img::ElfImg;
 use jni_sys::{JNIEnv, jobject};
-use once_cell::sync::Lazy;
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 unsafe extern "C" {
     fn srx_lsplant_init(env: *mut JNIEnv) -> bool;
@@ -21,7 +20,7 @@ unsafe extern "C" {
     fn srx_lsplant_unhook(env: *mut JNIEnv, target_method: jobject) -> bool;
 }
 
-static ART_ELF: Lazy<Mutex<Option<ElfImg>>> = Lazy::new(|| Mutex::new(None));
+static ART_ELF: LazyLock<Mutex<Option<ElfImg>>> = LazyLock::new(|| Mutex::new(None));
 
 pub fn init(env: *mut JNIEnv) -> bool {
     if env.is_null() {

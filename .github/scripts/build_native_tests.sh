@@ -4,8 +4,8 @@ set -euo pipefail
 target="${1:?missing Android target}"
 output="${2:?missing output directory}"
 mkdir -p "$output"
-cargo test -p srx_core --target "$target" --no-run --message-format=json > "$output/artifacts.jsonl"
-cargo build -p zn-runtime-fixture --target "$target" --release --message-format=json >> "$output/artifacts.jsonl"
+cargo test -p srx_core --target "$target" --no-run --message-format=json --locked > "$output/artifacts.jsonl"
+cargo build -p zn-runtime-fixture --target "$target" --release --message-format=json --locked >> "$output/artifacts.jsonl"
 # 只复制本次 Cargo 明确报告的可执行文件，避免通配符选中缓存中的旧测试。
 python3 - "$output" <<'PY'
 import json

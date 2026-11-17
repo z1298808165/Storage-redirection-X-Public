@@ -33,6 +33,7 @@ build_module_dir() {
       ;;
   esac
   cp "$SO_FILE" "$module_dir/zygisk/${MODULE_ABI}.so"
+  sha256sum "$module_dir/zygisk/${MODULE_ABI}.so" | awk '{print $1}' > "$module_dir/zygisk/${MODULE_ABI}.so.sha256"
   sed -i "s|zygisk/arm64-v8a.so|zygisk/${MODULE_ABI}.so|g" "$module_dir/zn_modules.txt"
   mkdir -p "$module_dir/bin"
   if [[ -d assets/zygisk_module/bin ]]; then
@@ -41,7 +42,6 @@ build_module_dir() {
   cp "$DAEMON_FILE" "$module_dir/bin/srx_daemon"
   chmod 755 "$module_dir/bin/srx_daemon"
   [[ -f "$module_dir/bin/srxctl" ]] && chmod 755 "$module_dir/bin/srxctl"
-  [[ -f "$module_dir/bin/list_apps.dex" ]] && chmod 644 "$module_dir/bin/list_apps.dex"
 
   printf 'id=storage.redirect.x\nname=Storage Redirect X\nversion=v%s\nversionCode=%s\nauthor=Kindness-Kismet\ndescription=Storage Redirect X Core Module\nwebui=1\n' \
     "$VERSION" "$VERSION_CODE" > "$module_dir/module.prop"

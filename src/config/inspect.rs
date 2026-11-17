@@ -6,11 +6,10 @@ use crate::config::{
 use crate::platform;
 use crate::platform::lru_cache::LruCache;
 use crate::redirect::policy;
-use once_cell::sync::Lazy;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 const SELF_PACKAGE_NAME: &str = "com.storage.redirect.x";
 
@@ -58,8 +57,8 @@ thread_local! {
     static MONITOR_CACHE_KEY_BUF: RefCell<String> = RefCell::new(String::new());
 }
 
-static MONITOR_PATH_MATCH_CACHE: Lazy<Mutex<MonitorPathMatchCache>> =
-    Lazy::new(|| Mutex::new(MonitorPathMatchCache::new()));
+static MONITOR_PATH_MATCH_CACHE: LazyLock<Mutex<MonitorPathMatchCache>> =
+    LazyLock::new(|| Mutex::new(MonitorPathMatchCache::new()));
 static SYSTEM_WRITER_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static BRIDGE_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static UI_MONITOR_LOG_COUNT: AtomicU64 = AtomicU64::new(0);

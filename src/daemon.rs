@@ -2036,7 +2036,7 @@ impl SystemPidScanner {
 /// 周期扫描 /proc 并落盘「tid uid 包名」表（tmp/system_pids）。
 ///
 /// 用途：MediaProvider（mediaprovider SELinux 域）读 platform 应用（如
-/// com.xiaomi.mirror）的 /proc/<pid>/cmdline 被 SELinux 拒绝，系统 uid 的
+/// com.xiaomi.mirror）的 `/proc/<pid>/cmdline` 被 SELinux 拒绝，系统 uid 的
 /// FUSE 请求（内核请求头带发起任务 id）在进程内无法归因出包名。daemon 以
 /// root 运行无此限制，把系统 uid 进程及其线程的身份表写给 hook 进程按任务
 /// id 反查。内核 FUSE 请求头的 pid 是发起线程的 TID（current->pid），因此每个
@@ -2048,7 +2048,7 @@ impl SystemPidScanner {
 ///
 /// 内核没有可供 daemon 订阅的进程创建事件源（proc connector 需 `CONFIG_PROC_EVENTS`，
 /// GKI 不保证开启；`/proc` 也不产生 inotify 事件），因此这张表的**新鲜度由需求驱动**：
-/// 每回答一次身份询问就刷新一轮，没人问的时候只按 [`SYSTEM_PID_RECONCILE_INTERVAL_MS`]
+/// 每回答一次身份询问就刷新一轮，没人问的时候只按 [`SYSTEM_PID_MAINTENANCE_INTERVAL_MS`]
 /// 做维护对账。表本身是缓存性质，未命中由 hook 的按需询问兜底，所以「空闲期不刷新」
 /// 不会影响任何决策正确性——这正是把兜底从「持续轮询」改成「被需要时才动」的关键。
 fn spawn_system_pid_scanner() {

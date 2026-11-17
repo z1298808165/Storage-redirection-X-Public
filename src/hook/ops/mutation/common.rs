@@ -212,7 +212,10 @@ fn resolve_mutation_redirect_target(
 }
 
 fn redirect_target_extra_tail(original_path: &str, extra_tail: Option<&str>) -> Option<String> {
-    let mut tail = format!("from={original_path}");
+    let mut tail = format!(
+        "from={}",
+        crate::platform::log_fields::encode(original_path)
+    );
     if let Some(extra) = extra_tail
         && !extra.is_empty()
     {
@@ -399,12 +402,19 @@ where
         if from_path.is_empty() {
             Some(format!("flags=0x{:x}", request.flags))
         } else {
-            Some(format!("flags=0x{:x}|from={}", request.flags, from_path))
+            Some(format!(
+                "flags=0x{:x}|from={}",
+                request.flags,
+                crate::platform::log_fields::encode(&from_path)
+            ))
         }
     } else if from_path.is_empty() {
         None
     } else {
-        Some(format!("from={}", from_path))
+        Some(format!(
+            "from={}",
+            crate::platform::log_fields::encode(&from_path)
+        ))
     };
     if should_apply_mutation_policy(hub)
         && deny_read_only_single_path_if_needed(
@@ -546,7 +556,7 @@ pub(super) fn read_only_extra_tail(
             tail.push('|');
         }
         tail.push_str("read_only_path=");
-        tail.push_str(read_only_path);
+        tail.push_str(&crate::platform::log_fields::encode(read_only_path));
     }
     if tail.is_empty() { None } else { Some(tail) }
 }

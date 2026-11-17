@@ -8,9 +8,8 @@
 
 use super::source_hint::{PathCallerHint, PrivateOwnerHint, is_public_storage_hint_path};
 use crate::platform::module_paths;
-use once_cell::sync::Lazy;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 // 提示文件格式版本，解析时用于拒绝旧格式行。
 const HINT_VERSION: &str = "3";
@@ -406,8 +405,8 @@ impl<T> Default for CachedHintFile<T> {
     }
 }
 
-static RECENT_SOURCE_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PrivateOwnerHint>>> =
-    Lazy::new(|| Mutex::new(CachedHintFile::default()));
+static RECENT_SOURCE_HINT_FILE_CACHE: LazyLock<Mutex<CachedHintFile<PrivateOwnerHint>>> =
+    LazyLock::new(|| Mutex::new(CachedHintFile::default()));
 
-static RECENT_PATH_CALLER_HINT_FILE_CACHE: Lazy<Mutex<CachedHintFile<PathCallerHint>>> =
-    Lazy::new(|| Mutex::new(CachedHintFile::default()));
+static RECENT_PATH_CALLER_HINT_FILE_CACHE: LazyLock<Mutex<CachedHintFile<PathCallerHint>>> =
+    LazyLock::new(|| Mutex::new(CachedHintFile::default()));

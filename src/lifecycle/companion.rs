@@ -291,7 +291,7 @@ fn handle_mount_request(client_fd: c_int, caller: &libc::ucred) {
 
     if caller.uid != 0 && caller.pid == request.pid && caller.uid == request.uid as u32 {
         // post-specialize 的延后请求来自应用 UID，路径规则必须从 root 配置重新生成。
-        let ok = super::hyos::apply_for_caller(&request.package_name, "zygisk", caller);
+        let ok = super::hyos::apply_for_caller(&request.package_name, "zygisk", caller, None);
         write_status(client_fd, i32::from(ok));
         return;
     }

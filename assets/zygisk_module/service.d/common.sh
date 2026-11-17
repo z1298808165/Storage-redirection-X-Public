@@ -265,12 +265,10 @@ refresh_uid_map() {
   mkdir -p "$CONFIG_DIR"
   tmp_uids_file="${SYSTEM_WRITER_UIDS_FILE}.tmp"
 
-  # 查询端限定 IPC 截止点；失败时不覆盖上一份快照。缓存保持 appId 格式供
-  # 无 root 通道的 hook 读取，companion 授权始终另行查询完整 UID。
+  # 保留完整 UID，避免工作资料和其它用户的成员表混入 user 0。
   {
     echo "# package:uid"
     "$MODDIR/bin/srx_daemon" package-query 2>/dev/null |
-      awk -F: '{ printf "%s:%d\n", $1, $2 % 100000 }' |
       sort -u
   } > "$tmp_uids_file"
 

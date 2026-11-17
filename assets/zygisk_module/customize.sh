@@ -219,7 +219,6 @@ if [ -d "$MODPATH/zygisk" ]; then
 fi
 if [ -d "$MODPATH/bin" ]; then
   set_perm_recursive $MODPATH/bin 0 0 0755 0755
-  [ -f "$MODPATH/bin/list_apps.dex" ] && chmod 644 "$MODPATH/bin/list_apps.dex"
   [ -f "$MODPATH/bin/srxctl" ] && chmod 755 "$MODPATH/bin/srxctl"
 fi
 

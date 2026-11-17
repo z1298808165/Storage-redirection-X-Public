@@ -12,9 +12,10 @@ fi
 
 mkdir -p build/test-flow/module-bin build/test-flow/assets
 bash .github/scripts/build_native_tests.sh "$TARGET_TRIPLE" build/test-flow/native
-cargo build --target "$TARGET_TRIPLE" --release
-cp "target/${TARGET_TRIPLE}/release/libsrx_core.so" build/test-flow/module-bin/libsrx_core.so
-cp "target/${TARGET_TRIPLE}/release/srx_daemon" build/test-flow/module-bin/srx_daemon
+cargo build --target "$TARGET_TRIPLE" --release --locked
+CARGO_TARGET_DIR_RESOLVED="$(cargo metadata --format-version 1 --no-deps --locked | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/libsrx_core.so" build/test-flow/module-bin/libsrx_core.so
+cp "${CARGO_TARGET_DIR_RESOLVED}/${TARGET_TRIPLE}/release/srx_daemon" build/test-flow/module-bin/srx_daemon
 bash .github/scripts/package_module.sh \
   "$VERSION" "$VERSION_CODE" \
   build/test-flow/module-bin/libsrx_core.so \

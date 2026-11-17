@@ -51,18 +51,18 @@ pub fn data_media_user_root_for_user(user_id: i32) -> String {
 
 /// 宿主进程内数据面 f2fs 直连根的锚点（仅宿主子进程建立后为 `Some`）。
 ///
-/// 背景：应用接入把宿主挂载 move_mount 到应用命名空间的 /storage/emulated/<user>
+/// 背景：应用接入把宿主挂载 move_mount 到应用命名空间的 `/storage/emulated/<user>`
 /// 后，AOSP 存储 bind 链的 shared 传播组会把同一挂载**传播回宿主命名空间的
-/// /data/media/<user>**（用户设备 mountinfo 实证 master:104 的 fuse 副本条目）。
+/// `/data/media/<user>`**（用户设备 mountinfo 实证 master:104 的 fuse 副本条目）。
 /// 该路径是宿主数据面 backend 的直连 f2fs 真身，被覆盖后任何 backend stat 的
 /// 路径解析都会命中自家连接的 dentry 重验证（请求发回自己的连接、无人应答），
 /// 全部 worker 死锁。锚点在宿主子进程启动早期（任何应用接入之前）把
-/// /data/media/<user> bind 到模块私有目录：bind 记录的是当时的 f2fs 挂载实例，
-/// 之后 /data/media/<user> 被传播副本覆盖也不影响经锚点的路径解析，数据面与
+/// `/data/media/<user>` bind 到模块私有目录：bind 记录的是当时的 f2fs 挂载实例，
+/// 之后 `/data/media/<user>` 被传播副本覆盖也不影响经锚点的路径解析，数据面与
 /// 被污染路径彻底解耦。
 static MEDIA_REAL_ANCHOR_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// 宿主子进程建立锚点后调用，登记锚点根（/data/media/<user> 的映像目录）。
+/// 宿主子进程建立锚点后调用，登记锚点根（`/data/media/<user>` 的映像目录）。
 pub fn set_media_real_anchor_root(anchor_root: String) {
     let _ = MEDIA_REAL_ANCHOR_ROOT.set(anchor_root);
 }
@@ -74,7 +74,7 @@ pub fn media_real_anchor_root() -> Option<&'static str> {
 }
 
 /// 数据面 f2fs 直连根：宿主进程返回锚点（未被传播副本污染），其余上下文
-/// （daemon、scoped 会话 worker）返回原路径 /data/media/<user>——那些命名
+/// （daemon、scoped 会话 worker）返回原路径 `/data/media/<user>`——那些命名
 /// 空间里不存在该副本，原路径始终安全。
 pub fn data_media_user_root_for_current_ns(user_id: i32) -> String {
     match (MEDIA_REAL_ANCHOR_ROOT.get(), user_id) {

@@ -18,18 +18,21 @@ mod util;
 use crate::platform;
 use std::ffi::CStr;
 
-pub(crate) use caller::{
-    capture_java_binder_caller, enter_java_caller_scope, exit_java_caller_scope,
-};
+pub(crate) use caller::{enter_java_caller_scope, exit_java_caller_scope};
+#[cfg(test)]
+pub(crate) use context::set_request_identity;
 pub(crate) use context::{
-    enter_explicit_caller_decision, enter_path_owner_inference_disabled,
+    current_request_identity, enter_explicit_caller_decision, enter_path_owner_inference_disabled,
     enter_provider_passthrough, enter_provider_virtual_scope, exit_provider_passthrough,
     exit_provider_virtual_scope, get_binder_saved_caller_package,
-    is_explicit_caller_decision_active, is_path_owner_inference_disabled,
-    is_provider_passthrough_active, is_provider_virtual_scope_active, process_mapped_dir_count,
+    get_current_caller_shared_user_id, is_binder_identity_cleared, is_caller_attribution_stopped,
+    is_current_caller_scope_active, is_explicit_caller_decision_active,
+    is_path_owner_inference_disabled, is_provider_passthrough_active,
+    is_provider_virtual_scope_active, pop_current_caller_scope, process_mapped_dir_count,
     process_mapped_dir_target, provider_passthrough_virtual_dir_target,
     provider_passthrough_virtual_query_dir, provider_passthrough_virtual_query_target,
-    remember_process_mapped_dir, remember_provider_passthrough_virtual_dir,
+    push_current_caller_scope, remember_process_mapped_dir,
+    remember_provider_passthrough_virtual_dir,
 };
 pub(crate) use jni_query::{
     cursor_row_action, is_redirect_enabled_for_caller_uid, path_exists_for_cursor_row,

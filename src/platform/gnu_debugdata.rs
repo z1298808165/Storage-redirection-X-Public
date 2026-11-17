@@ -1,7 +1,7 @@
 use super::android_api_level;
 use libc::{c_int, c_void};
-use once_cell::sync::OnceCell;
 use std::ffi::CStr;
+use std::sync::OnceLock;
 
 const LIBLZMA_PATHS_64: [&CStr; 4] = [
     c"/apex/com.android.art/lib64/liblzma.so",
@@ -161,7 +161,7 @@ extern "C" fn lzma_free_alloc(_p: *const ISzAlloc, address: *mut c_void) {
 }
 
 fn lzma_api() -> Option<&'static LzmaApi> {
-    static API: OnceCell<Option<LzmaApi>> = OnceCell::new();
+    static API: OnceLock<Option<LzmaApi>> = OnceLock::new();
     API.get_or_init(load_lzma_api).as_ref()
 }
 

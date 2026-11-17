@@ -43,7 +43,7 @@ pub const FUSE_PROBE_FILE: &str = "/data/adb/modules/storage.redirect.x/.fuse_pr
 pub const FUSE_PASSTHROUGH_DISABLE_FILE: &str =
     "/data/adb/modules/storage.redirect.x/.fuse_passthrough_disabled";
 /// passthrough 端到端探针的结果快照（boot 绑定）：daemon 在首次共享宿主挂载后
-/// 以应用身份经 /proc/<pid>/root 做一次真实 open，EIO 即判定内核 passthrough 缺陷。
+/// 以应用身份经 `/proc/<pid>/root` 做一次真实 open，EIO 即判定内核 passthrough 缺陷。
 pub const FUSE_PASSTHROUGH_STATE_FILE: &str =
     "/data/adb/modules/storage.redirect.x/.fuse_passthrough_state";
 /// daemon 写入、普通应用只读的 FUSE 能力快照。

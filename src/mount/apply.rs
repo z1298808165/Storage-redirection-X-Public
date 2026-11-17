@@ -1393,7 +1393,7 @@ impl MountPlanner {
     /// 重建 FUSE（触发重建的是视图根的 detach/re-bind）。
     ///
     /// 复用第一次 apply 已建立的 `self.real_storage_anchor`，绝不重新走
-    /// [`prepare_real_storage_anchor`]：那个入口在视图根已被重定向时会 detach/re-bind 视图根
+    /// `prepare_real_storage_anchor`：那个入口在视图根已被重定向时会 detach/re-bind 视图根
     /// 来重建锚点，同样会触发 MediaProvider 重建 FUSE，与摘除的目的相悖。
     ///
     /// 两条挂载路径都会调用：daemon（`daemon_mount`）与 companion

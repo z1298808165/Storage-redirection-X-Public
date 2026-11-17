@@ -773,7 +773,7 @@ fn resolve_mapping_request_mkdir_redirect(
     if caller_package.is_empty() {
         return None;
     }
-    let mut caller_uid = policy::get_fresh_uid_for_package(&caller_package);
+    let mut caller_uid = policy::get_fresh_uid_for_package_in_user(&caller_package, user_id);
     if caller_uid < writer::ANDROID_APP_UID_START {
         caller_uid = user_id
             .saturating_mul(platform::ANDROID_USER_ID_OFFSET)

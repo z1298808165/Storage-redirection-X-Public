@@ -1,15 +1,18 @@
 use crate::domain::{PathMapping, sort_path_mappings_shortest_request_first};
 use crate::mount_ledger::NamespaceIdentity;
 use crate::platform::{fs, module_paths, paths};
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use super::FuseRedirectConfig;
 use super::backend_overlay;
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/fuse_monitor.rs"]
+mod monitor_tests;
 
 /// 系统代写代理会话：平台用来代其它应用写私有目录的受信 provider。
 ///
@@ -23,18 +26,10 @@ fn is_system_write_delegate_session(package_name: &str) -> bool {
 const FILE_MONITOR_LOG_TAG: &str = "FileMonitorOp";
 
 /// 应用 uid 起点：低于它的 uid（shell/system/媒体服务等）走系统直通回退与
-/// 请求者归因，与 hook 侧 `src/hook/caller.rs` 的同名常量语义一致。
+/// 请求者归因；应用 UID 的完整用户编号另由策略解析。
 pub(crate) const ANDROID_APP_UID_START: i32 = 10000;
 
-/// 系统 uid 请求者的监视归因身份（自有 FUSE 引擎内 daemon root 直读 /proc 解析）。
-#[derive(Clone, Debug)]
-pub(super) struct RequesterIdentity {
-    /// 发起者身份：包名形态取全名，native 二进制取 basename（与 daemon pid 表
-    /// 身份语义一致，见 [`crate::platform::proc_identity::read_proc_identity`]）。
-    pub package: String,
-    /// 发起者 uid（与 FUSE 请求头 uid 一致，解析时已校验）。
-    pub uid: i32,
-}
+pub(super) use crate::platform::proc_identity::RequestIdentity as RequesterIdentity;
 /// 映射链最多解析的跳数。
 ///
 /// 正常配置只有 0~2 跳（父映射结果再命中子映射）；上限既是手写配置成环（`A→B` 与 `B→A`）
@@ -47,16 +42,16 @@ const MAX_RECENT_MONITOR_CREATES: usize = 256;
 static NAMESPACE_POLICY_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static NAMESPACE_POLICY_MISSES: AtomicU64 = AtomicU64::new(0);
 
-static RECENT_MONITOR_CREATES: Lazy<Mutex<HashMap<String, i64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static RECENT_MONITOR_CREATES: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 跨应用只读别名兜底的会话表句柄：共享宿主进程内所有已登记应用的策略。
 ///
 /// 由 [`SharedPolicyTable::register`] 首次按 uid 登记时挂入，始终指向同一份活表，
 /// 应用策略的新增与覆盖对兜底解析即时可见。scoped 独立会话进程不经过按 uid 登记，
 /// 表中「其它应用」集合为空，跨应用兜底自然不生效，行为与改动前一致。
-static CROSS_SESSION_POLICY_TABLE: Lazy<Mutex<Option<SharedPolicyTable>>> =
-    Lazy::new(|| Mutex::new(None));
+static CROSS_SESSION_POLICY_TABLE: LazyLock<Mutex<Option<SharedPolicyTable>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// 跨应用只读别名兜底的交接信号窗口与容量。
 ///
@@ -66,8 +61,8 @@ static CROSS_SESSION_POLICY_TABLE: Lazy<Mutex<Option<SharedPolicyTable>>> =
 /// 窗口只用于吸收 B 侧多轮探测与重试的间隔；容量上限防止长会话进程内无界增长。
 const CROSS_APP_HANDOFF_TTL_MS: i64 = 60_000;
 const CROSS_APP_HANDOFF_CAPACITY: usize = 256;
-static RECENT_CROSS_APP_HANDOFFS: Lazy<Mutex<HashMap<String, i64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static RECENT_CROSS_APP_HANDOFFS: LazyLock<Mutex<HashMap<String, i64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(super) struct BackendPath {
     pub(super) rel: String,
@@ -153,7 +148,7 @@ type PackageUidCache = Option<((u64, u64), HashMap<String, i32>)>;
 
 /// 宿主单独缓存 PM 生成的快照，不继承 daemon 使用的共享 UID 锁。
 pub(super) fn package_uid(package: &str) -> Option<i32> {
-    static CACHE: Lazy<Mutex<PackageUidCache>> = Lazy::new(|| Mutex::new(None));
+    static CACHE: LazyLock<Mutex<PackageUidCache>> = LazyLock::new(|| Mutex::new(None));
     let meta = std::fs::metadata(module_paths::SYSTEM_WRITER_UIDS_FILE).ok()?;
     let version = (
         meta.modified()
@@ -343,8 +338,7 @@ pub(super) struct RedirectPolicy {
     deny_all: bool,
     /// 系统 uid 回退标记：标识本策略是宿主共享会话给系统 uid 的直通视图。
     ///
-    /// 语义上 package_name 仍是宿主包名、不代表请求发起者；监视记录发射时据此
-    /// 启用请求者归因（见 [`RedirectPolicy::emit_monitor_mutation`]）。
+    /// package_name 仍是宿主包名；监视使用本次请求者快照，不把宿主当作来源。
     pub(super) is_system_fallback: bool,
     /// 本策略由哪份配置构建（[`crate::fuse_redirect::config::fuse_config_policy_fingerprint`]）。
     /// 宿主共享会话跨配置 reload 时，异常回包（EROFS/ENOENT）带上它即可直接判定
@@ -1865,7 +1859,7 @@ impl RedirectPolicy {
         if !self.is_file_monitor_enabled {
             return;
         }
-        let (caller_pkg, identify_method) = monitor_caller_fields(self, caller);
+        let (caller_pkg, identify_method, reliability) = monitor_caller_fields(self, caller);
         let display_path = self.storage_path_for_rel(&backend.rel);
         if display_path.is_empty()
             || crate::config::SettingsHub::instance()
@@ -1874,7 +1868,12 @@ impl RedirectPolicy {
             return;
         }
         let backend_path = backend.path.to_string_lossy();
-        if should_skip_duplicate_monitor_create(caller_pkg, &display_path, backend_path.as_ref()) {
+        if should_skip_duplicate_monitor_create(
+            caller_pkg,
+            &display_path,
+            backend_path.as_ref(),
+            caller,
+        ) {
             return;
         }
         let operation = if self.is_monitor_only {
@@ -1885,15 +1884,17 @@ impl RedirectPolicy {
         let source = self.monitor_source_for_backend(backend);
         log::info!(
             target: FILE_MONITOR_LOG_TAG,
-            "{}|{}|{}|CREATE|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|op={}|source={}|backend={}",
+            "{}|{}|{}|CREATE|{}|field_encoding=percent|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=request|op={}|source={}|backend={}{}",
             build_monitor_timestamp(),
-            caller_pkg,
-            caller_pkg,
-            display_path,
+            crate::platform::log_fields::encode(caller.map(|identity| identity.native.as_str()).unwrap_or(caller_pkg)),
+            crate::platform::log_fields::encode(caller_pkg),
+            crate::platform::log_fields::encode(&display_path),
             identify_method,
+            reliability,
             operation,
             source,
-            backend_path
+            crate::platform::log_fields::encode(&backend_path),
+            caller.map(RequesterIdentity::log_fields).unwrap_or_default()
         );
     }
 
@@ -1911,7 +1912,7 @@ impl RedirectPolicy {
         if !self.is_file_monitor_enabled {
             return;
         }
-        let (caller_pkg, identify_method) = monitor_caller_fields(self, caller);
+        let (caller_pkg, identify_method, reliability) = monitor_caller_fields(self, caller);
         let display_path = self.storage_path_for_rel(&backend.rel);
         if display_path.is_empty()
             || crate::config::SettingsHub::instance()
@@ -1926,34 +1927,58 @@ impl RedirectPolicy {
             "request",
             monitor_event_kind_for_operation(operation_name),
             display_path.as_str(),
-            caller_pkg,
+            &format!(
+                "{caller_pkg}{}",
+                caller
+                    .map(RequesterIdentity::log_fields)
+                    .unwrap_or_default()
+            ),
         ) {
             return;
         }
         let mut line = format!(
-            "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability=high|event_role=request|op={}|source={}|backend={}",
+            "{}|{}|{}|{}|{}|field_encoding=percent|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=request|op={}|source={}|backend={}{}",
             build_monitor_timestamp(),
-            caller_pkg,
-            caller_pkg,
+            crate::platform::log_fields::encode(
+                caller
+                    .map(|identity| identity.native.as_str())
+                    .unwrap_or(caller_pkg)
+            ),
+            crate::platform::log_fields::encode(caller_pkg),
             monitor_event_kind_for_operation(operation_name),
-            display_path,
+            crate::platform::log_fields::encode(&display_path),
             identify_method,
+            reliability,
             operation_name,
             self.monitor_source_for_backend(backend),
-            backend_path
+            crate::platform::log_fields::encode(&backend_path),
+            caller
+                .map(RequesterIdentity::log_fields)
+                .unwrap_or_default()
         );
         if let Some(from_backend) = from_backend {
             let from_path = self.storage_path_for_rel(&from_backend.rel);
             if !from_path.is_empty() && from_path != display_path {
                 line.push_str("|from=");
-                line.push_str(&from_path);
+                line.push_str(&crate::platform::log_fields::encode(&from_path));
             }
         }
         log::info!(target: FILE_MONITOR_LOG_TAG, "{}", line);
     }
 
-    pub(super) fn emit_monitor_read_only_deny(&self, operation_name: &str, backend: &BackendPath) {
-        self.emit_monitor_read_only_deny_with_from(operation_name, backend, None, libc::EROFS);
+    pub(super) fn emit_monitor_read_only_deny(
+        &self,
+        operation_name: &str,
+        backend: &BackendPath,
+        caller: Option<&RequesterIdentity>,
+    ) {
+        self.emit_monitor_read_only_deny_with_from(
+            operation_name,
+            backend,
+            None,
+            libc::EROFS,
+            caller,
+        );
     }
 
     pub(super) fn emit_monitor_read_only_deny_with_errno(
@@ -1961,8 +1986,9 @@ impl RedirectPolicy {
         operation_name: &str,
         backend: &BackendPath,
         error_no: i32,
+        caller: Option<&RequesterIdentity>,
     ) {
-        self.emit_monitor_read_only_deny_with_from(operation_name, backend, None, error_no);
+        self.emit_monitor_read_only_deny_with_from(operation_name, backend, None, error_no, caller);
     }
 
     pub(super) fn emit_monitor_read_only_deny_with_from(
@@ -1971,10 +1997,15 @@ impl RedirectPolicy {
         backend: &BackendPath,
         from_backend: Option<&BackendPath>,
         error_no: i32,
+        caller: Option<&RequesterIdentity>,
     ) {
-        let Some(line) =
-            self.monitor_read_only_deny_line(operation_name, backend, from_backend, error_no)
-        else {
+        let Some(line) = self.monitor_read_only_deny_line(
+            operation_name,
+            backend,
+            from_backend,
+            error_no,
+            caller,
+        ) else {
             return;
         };
         log::info!(target: FILE_MONITOR_LOG_TAG, "{}", line);
@@ -1986,6 +2017,7 @@ impl RedirectPolicy {
         backend: &BackendPath,
         from_backend: Option<&BackendPath>,
         error_no: i32,
+        caller: Option<&RequesterIdentity>,
     ) -> Option<String> {
         if !self.is_file_monitor_enabled {
             return None;
@@ -1997,25 +2029,35 @@ impl RedirectPolicy {
         {
             return None;
         }
+        let (caller_pkg, method, reliability) = monitor_caller_fields(self, caller);
         let backend_path = backend.path.to_string_lossy();
         let event_kind = monitor_event_kind_for_operation(operation_name);
         let mut line = format!(
-            "{}|{}|{}|{}|{}|ret=-1|errno={}|identify_method=fuse_redirect|identify_reliability=high|op={}|source=fuse_redirect|backend={}|{}",
+            "{}|{}|{}|{}|{}|field_encoding=percent|ret=-1|errno={}|identify_method={}|identify_reliability={}|event_role=request|op={}|source=fuse_redirect|backend={}|{}{}",
             build_monitor_timestamp(),
-            self.package_name,
-            self.package_name,
+            crate::platform::log_fields::encode(
+                caller
+                    .map(|identity| identity.native.as_str())
+                    .unwrap_or(self.package_name.as_str())
+            ),
+            crate::platform::log_fields::encode(caller_pkg),
             event_kind,
-            display_path,
+            crate::platform::log_fields::encode(&display_path),
             error_no,
+            method,
+            reliability,
             operation_name,
-            backend_path,
-            READ_ONLY_DENY_EXTRA
+            crate::platform::log_fields::encode(&backend_path),
+            READ_ONLY_DENY_EXTRA,
+            caller
+                .map(RequesterIdentity::log_fields)
+                .unwrap_or_default()
         );
         if let Some(from_backend) = from_backend {
             let from_path = self.storage_path_for_rel(&from_backend.rel);
             if !from_path.is_empty() && from_path != display_path {
                 line.push_str("|from=");
-                line.push_str(&from_path);
+                line.push_str(&crate::platform::log_fields::encode(&from_path));
             }
         }
         Some(line)
@@ -2138,18 +2180,17 @@ pub(super) fn real_storage_anchor_for_user(user_id: i32) -> String {
     paths::join(module_paths::REAL_STORAGE_TMP_DIR, &user_id.to_string())
 }
 
-/// 监视记录的调用方字段解析：系统请求者归因命中时以归因身份与
-/// `identify_method=caller` 呈现（与 hook 侧归因链的记录语义一致），
-/// 否则维持会话默认（宿主包名 + fuse_redirect/fuse_monitor_only）。
+/// 请求者快照区分应用、共享组、执行者和未知；无快照时维持会话默认。
 fn monitor_caller_fields<'a>(
     policy: &'a RedirectPolicy,
     caller: Option<&'a RequesterIdentity>,
-) -> (&'a str, &'a str) {
+) -> (&'a str, &'a str, &'a str) {
     match caller {
-        Some(identity) => (identity.package.as_str(), "caller"),
+        Some(identity) => identity.monitor_identity(),
         None => (
             policy.package_name.as_str(),
             policy.monitor_identify_method(),
+            "high",
         ),
     }
 }
@@ -2188,11 +2229,20 @@ fn should_skip_duplicate_monitor_create(
     package_name: &str,
     display_path: &str,
     backend_path: &str,
+    caller: Option<&RequesterIdentity>,
 ) -> bool {
     if package_name.is_empty() || display_path.is_empty() || backend_path.is_empty() {
         return false;
     }
-    let key = format!("{}|{}|{}", package_name, display_path, backend_path);
+    let key = format!(
+        "{}|{}|{}{}",
+        package_name,
+        display_path,
+        backend_path,
+        caller
+            .map(RequesterIdentity::log_fields)
+            .unwrap_or_default()
+    );
     let now_ms = paths::monotonic_ms();
     // 该函数可能在 fork 出来的 FUSE 子进程里执行，阻塞获取全局锁会因为父进程线程持锁而永久卡死；
     // 去重只是优化项，拿不到锁时按未去重处理即可。
@@ -2211,6 +2261,9 @@ fn should_skip_duplicate_monitor_create(
         recent.retain(|_, last_ms| {
             now_ms.saturating_sub(*last_ms) < DUPLICATE_MONITOR_CREATE_WINDOW_MS
         });
+        if recent.len() >= MAX_RECENT_MONITOR_CREATES {
+            return false;
+        }
     }
     recent.insert(key, now_ms);
     false

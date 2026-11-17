@@ -26,7 +26,7 @@
 //!
 //! 1. `MountPlanner::apply_*` 完成挂载；
 //! 2. [`should_clear_system_fuse_view_for_platform`] 放行时调用
-//!    [`clear_system_fuse_view_for_uid`]；
+//!    [`clear_system_fuse_view_for_package`]；
 //! 3. 若有 `path_mappings`，调用 `MountPlanner::reapply_path_mappings_only` 补回映射。
 //!
 //! 顺序不能变：`apply` 重新 bind 视图根会触发 MediaProvider 重建 FUSE，摘在 apply 之前等于
@@ -49,7 +49,7 @@ const MAX_UNMOUNT_PASSES_PER_TARGET: usize = 32;
 ///
 /// 入参显式传入而非内部读属性，便于测试注入；生产调用取
 /// [`should_clear_system_fuse_view_for_platform`]。判据与 native FuseFix 的平台跳过条件
-/// 必须永远一致，因此 [`crate::hook::fuse_fix`] 也复用本函数，避免两处独立实现漂移。
+/// 必须永远一致，因此 `crate::hook::fuse_fix` 也复用本函数，避免两处独立实现漂移。
 pub fn needs_system_fuse_view_clear(api_level: i32) -> bool {
     cfg!(target_arch = "x86_64") && matches!(api_level, 33 | 34)
 }
@@ -69,7 +69,7 @@ pub fn should_clear_system_fuse_view_for_platform() -> bool {
 ///
 /// 1. `fs_type == "fuse"`；
 /// 2. `source == "/dev/fuse"`；
-/// 3. `root` 恰好是应用专属目录（[`module_mount_source::root_is_app_private_directory`]，
+/// 3. `root` 恰好是应用专属目录（[`crate::module_mount_source::root_is_app_private_directory`]，
 ///    形如 `/0/Android/data/<包名>`，止于包名且没有更深的路径段）。
 ///
 /// 第 3 条不能省。摘除目标里的 `Android/{data,media,obb}/<包名>` 与模块自己的 bind **同路径**，

@@ -21,9 +21,8 @@ const MODULE_BOOT_OK = MODULE_DIR + "/.boot_ok";
 const MODULE_BOOT_VERSION = MODULE_DIR + "/.boot_module_version";
 const MODULE_PROP = MODULE_DIR + "/module.prop";
 const SRXCTL = MODULE_DIR + "/bin/srxctl";
+const SRX_DAEMON = MODULE_DIR + "/bin/srx_daemon";
 const DIAGNOSTIC_ARCHIVE_SCRIPT = MODULE_DIR + "/service.d/diagnostic_archive.sh";
-const LIST_APPS_DEX = MODULE_DIR + "/bin/list_apps.dex";
-const LIST_APPS_OUTPUT = "/data/Namespace-Proxy/list.config";
 const FILE_MONITOR_LOG = LOGS_DIR + "/file_monitor.log";
 const MONITOR_CLEAR_ACK_FILE = "/data/adb/storage.redirect.x/.file_monitor.clear.ok";
 const RUNTIME_STATS_SCHEMA = "2";
@@ -378,7 +377,11 @@ function parseStorageBackendStatus(output) {
   if (text === "inactive") return { state: "inactive", pid: null, policies: null };
   const match = /^active pid=(\d+) policies=(\d+)$/.exec(text);
   if (match) {
-    return { state: "active", pid: Number(match[1]), policies: Number(match[2]) };
+    return {
+      state: "active",
+      pid: Number(match[1]),
+      policies: Number(match[2]),
+    };
   }
   return { state: "unknown", pid: null, policies: null };
 }
@@ -511,78 +514,62 @@ function isSafeUserId(userId) {
   return /^[0-9]+$/.test(String(userId || ""));
 }
 
-/**
- * dex 输出中标志「该用户视角下的系统应用」的行前缀。
- * 由 tools/list_apps/Main.java 生成，以 `#` 开头，旧读取端会整行跳过。
- */
-const COMPAT_APP_LIST_SYSTEM_MARKER = "#system=";
+function parsePackageUsers(content) {
+  const users = String(content || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[0-9]+$/.test(line));
+  return Array.from(new Set(users));
+}
 
-function parseCompatAppList(content) {
+function parseSystemServerAppList(content, expectedUser) {
+  const userId = String(expectedUser);
+  if (!isSafeUserId(userId)) return null;
   const apps = [];
-  const systemPackages = new Set();
-  String(content || "")
-    .split("\n")
-    .forEach((line) => {
-      const text = line.trim();
-      if (!text) return;
-      if (text.startsWith(COMPAT_APP_LIST_SYSTEM_MARKER)) {
-        text
-          .slice(COMPAT_APP_LIST_SYSTEM_MARKER.length)
-          .split(/\s+/)
-          .forEach((name) => {
-            if (isSafePackageName(name)) systemPackages.add(name);
-          });
-        return;
-      }
-      if (text.startsWith("#")) return;
-      const splitAt = text.indexOf("=");
-      const packageName = splitAt >= 0 ? text.slice(0, splitAt).trim() : text.split(/\s+/)[0];
-      const appLabel = splitAt >= 0 ? text.slice(splitAt + 1).trim() : packageName;
-      if (isSafePackageName(packageName))
-        apps.push({ packageName, appLabel: appLabel || packageName });
-    });
-  // 系统应用只在 dex 给出了标记时按用户结果覆盖；旧版 dex 没有该标记，
-  // 此时保持 isSystem 未定义，让调用方继续沿用包名前缀兜底判断。
-  if (systemPackages.size) {
-    apps.forEach((app) => {
-      app.isSystem = systemPackages.has(app.packageName);
+  const packages = new Set();
+  for (const line of String(content || "").split(/\r?\n/)) {
+    if (!line) continue;
+    const fields = line.split("\t");
+    const uid = Number(fields[1]);
+    if (
+      fields.length !== 6 ||
+      fields[0] !== userId ||
+      !/^[0-9]+$/.test(fields[1]) ||
+      !Number.isSafeInteger(uid) ||
+      uid > 2147483647 ||
+      Math.floor(uid / 100000) !== Number(userId) ||
+      (fields[2] !== "0" && fields[2] !== "1") ||
+      !isSafePackageName(fields[3]) ||
+      packages.has(fields[3]) ||
+      !/^(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*$/.test(fields[4]) ||
+      !/^(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})*$/.test(fields[5])
+    ) {
+      return null;
+    }
+    let label;
+    let apkPath;
+    try {
+      label = decodeURIComponent(fields[4]);
+      apkPath = decodeURIComponent(fields[5]);
+    } catch {
+      return null;
+    }
+    if (!label || (apkPath && !apkPath.startsWith("/"))) return null;
+    packages.add(fields[3]);
+    apps.push({
+      userId,
+      uid,
+      isSystem: fields[2] === "1",
+      packageName: fields[3],
+      appLabel: label,
+      apkPath,
     });
   }
   return apps;
 }
 
-/**
- * 解析 `pm list packages -f -U --user <id>` 与 `pm list packages -s --user <id>` 两段输出。
- *
- * 判据与 Kotlin 侧 `parseUserPackageList` 一致：`-f` 段给出成员与 APK 路径，`-s` 段给出
- * 该用户视角的系统应用；分段靠调用方显式 echo 的标记行，不靠包名前缀猜。
- */
-function parseUserPackageListing(content, systemMarker) {
-  const packageSet = new Set();
-  const system = new Set();
-  let inSystemSection = false;
-  String(content || "")
-    .split("\n")
-    .forEach((line) => {
-      const text = line.trim();
-      if (!text) return;
-      if (text === systemMarker) {
-        inSystemSection = true;
-        return;
-      }
-      if (!text.startsWith("package:")) return;
-      const body = text.slice("package:".length);
-      if (inSystemSection) {
-        const name = body.split(/\s+/)[0].trim();
-        if (isSafePackageName(name)) system.add(name);
-        return;
-      }
-      // APK 路径里可能出现 `==`（如 /data/app/~~xxxx==/base.apk），包名只在最后一个 `=` 之后。
-      const split = body.lastIndexOf("=");
-      const name = (split >= 0 ? body.slice(split + 1) : body).split(/\s+/)[0].trim();
-      if (isSafePackageName(name)) packageSet.add(name);
-    });
-  return { packages: Array.from(packageSet), system };
+function packageInfoCacheKey(packageName, userId) {
+  return String(userId || "0") + "\t" + packageName;
 }
 
 function normalizePackageResult(raw) {
@@ -667,7 +654,9 @@ function normalizeMonitorFilterPathList(list) {
   const seen = new Set();
   const out = [];
   items.forEach((item) => {
-    const value = normalizeMonitorFilterPathValue(item, { allowLegacyAbsolute: true });
+    const value = normalizeMonitorFilterPathValue(item, {
+      allowLegacyAbsolute: true,
+    });
     if (!value || seen.has(value)) return;
     seen.add(value);
     out.push(value);
@@ -788,7 +777,10 @@ function manifestReleaseEntries(manifest) {
   if (manifest?.stable && hasReleaseVersion(manifest.stable))
     entries.push({ channel: "Stable", release: manifest.stable });
   if (manifest?.beta && hasReleaseVersion(manifest.beta))
-    entries.push({ channel: "Beta", release: Object.assign({ prerelease: true }, manifest.beta) });
+    entries.push({
+      channel: "Beta",
+      release: Object.assign({ prerelease: true }, manifest.beta),
+    });
   (Array.isArray(manifest?.releases) ? manifest.releases : []).forEach((release) => {
     if (!hasReleaseVersion(release)) return;
     const version = parseSemVersion(release.version || release.tag);
@@ -903,8 +895,6 @@ function formatCompactRuntimeActivationCount(raw) {
 
 const Api = {
   _packageInfo: new Map(),
-  _compatAppListCache: new Map(),
-  _compatAppListPrepared: new Set(),
   _configuredAppsCache: null,
   _configuredAppsCacheAt: 0,
   _globalConfigCache: null,
@@ -1171,6 +1161,11 @@ const Api = {
 
   async recordModuleExportMonitor(path, kind) {
     const target = normalizePublicStoragePath(path);
+    const encodedTarget = target
+      .replace(/%/g, "%25")
+      .replace(/\|/g, "%7C")
+      .replace(/\r/g, "%0D")
+      .replace(/\n/g, "%0A");
     const exportKind = kind === "backup" ? "backup" : "diagnostic";
     const source = exportKind === "backup" ? "webui_backup" : "webui_export";
     if (!target) return false;
@@ -1184,9 +1179,9 @@ const Api = {
           MODULE_LOG_PACKAGE +
           "|" +
           MODULE_LOG_PACKAGE +
-          '|OPEN|%s|ret=0|errno=0|identify_method=module_export|identify_reliability=high|op=provider_open|op_filter=provider_open:write|source=%s|export_kind=%s\\n" ' +
+          '|OPEN|%s|field_encoding=percent|ret=0|errno=0|identify_method=module_export|identify_reliability=high|op=provider_open|op_filter=provider_open:write|source=%s|export_kind=%s\\n" ' +
           '"${ts:-unknown}" ' +
-          shellQuote(target) +
+          shellQuote(encodedTarget) +
           " " +
           shellQuote(source) +
           " " +
@@ -1367,7 +1362,11 @@ const Api = {
 
   async runDiagnosticArchive(stage, archive, progress, done, runLog, pid, options) {
     // 后台执行 + 轮询进度文件
-    options?.onProgress?.({ percent: 1, phase: "start", message: "正在启动日志导出" });
+    options?.onProgress?.({
+      percent: 1,
+      phase: "start",
+      message: "正在启动日志导出",
+    });
 
     const script = DIAGNOSTIC_ARCHIVE_SCRIPT;
     const startCommand =
@@ -1456,7 +1455,11 @@ const Api = {
       }
     }
 
-    options?.onProgress?.({ percent: 99, phase: "verify", message: "正在确认日志包" });
+    options?.onProgress?.({
+      percent: 99,
+      phase: "verify",
+      message: "正在确认日志包",
+    });
     const exists = await this.exec(shellCommand("[ -s", archive) + " ] && echo 1 || echo 0", {
       timeoutMs: 10000,
     }).catch(() => "0");
@@ -1494,10 +1497,18 @@ const Api = {
     const pid = progress + ".pid";
     try {
       await this.runDiagnosticArchive(stage, tmpArchive, progress, done, runLog, pid, options);
-      options?.onProgress?.({ percent: 99, phase: "copy", message: "正在写入目标文件" });
+      options?.onProgress?.({
+        percent: 99,
+        phase: "copy",
+        message: "正在写入目标文件",
+      });
       for (const target of candidates) {
         if (await this.copyDiagnosticArchiveToPublicPath(tmpArchive, target)) {
-          options?.onProgress?.({ percent: 100, phase: "done", message: "日志包已保存" });
+          options?.onProgress?.({
+            percent: 100,
+            phase: "done",
+            message: "日志包已保存",
+          });
           await this.recordModuleExportMonitor(target, "diagnostic");
           return target;
         }
@@ -1560,11 +1571,19 @@ const Api = {
     const pid = progress + ".pid";
     try {
       await this.runDiagnosticArchive(stage, tmpArchive, progress, done, runLog, pid, options);
-      options?.onProgress?.({ percent: 99, phase: "copy", message: "正在写入目标文件" });
+      options?.onProgress?.({
+        percent: 99,
+        phase: "copy",
+        message: "正在写入目标文件",
+      });
       if (!(await this.copyDiagnosticArchiveToPublicPath(tmpArchive, target))) {
         throw new Error("日志包写入所选目录失败");
       }
-      options?.onProgress?.({ percent: 100, phase: "done", message: "日志包已保存" });
+      options?.onProgress?.({
+        percent: 100,
+        phase: "done",
+        message: "日志包已保存",
+      });
       await this.recordModuleExportMonitor(target, "diagnostic");
       return target;
     } finally {
@@ -1894,133 +1913,33 @@ const Api = {
       flush();
       this._configuredAppsCache = items;
       this._configuredAppsCacheAt = now;
-      return items.map((item) => ({ packageName: item.packageName, config: item.config }));
+      return items.map((item) => ({
+        packageName: item.packageName,
+        config: item.config,
+      }));
     } catch {
       return [];
-    }
-  },
-
-  /** 列出设备上可用的 Android 用户 ID。 */
-  async listUsers() {
-    try {
-      const out = await this.exec("cmd user list 2>/dev/null || pm list users 2>/dev/null");
-      const ids = [];
-      String(out || "").replace(/UserInfo\{([0-9]+):/g, (_, id) => {
-        ids.push(id);
-        return "";
-      });
-      if (!ids.length)
-        String(out || "").replace(/\{([0-9]+):/g, (_, id) => {
-          ids.push(id);
-          return "";
-        });
-      return Array.from(new Set(ids.length ? ids : ["0"]));
-    } catch {
-      return ["0"];
     }
   },
 
   /** 获取已安装应用列表（用户应用与系统应用） */
   async getInstalledApps(userId) {
-    const safeUser = isSafeUserId(userId) ? String(userId) : "";
-    // KSU 的包列表接口没有用户维度，只反映当前进程视角，因此仅对主用户可用；
-    // 其它用户必须走可按用户查询的 dex/pm 通道，否则切换用户后列表不会变化。
-    const fromKsu = !safeUser || safeUser === "0" ? this.getInstalledAppsFromKsu() : [];
-    if (fromKsu.length) return fromKsu;
-    const fromDex = await this.getInstalledAppsFromDex(safeUser);
-    if (fromDex.length) return fromDex;
-    return await this.getInstalledAppsFromPackageManager(safeUser);
-  },
-
-  async getInstalledAppsFromPackageManager(userId) {
-    const safeUser = isSafeUserId(userId) ? String(userId) : "";
-    const userArg = safeUser ? " --user " + safeUser : "";
-    // 标记必须加引号：裸写 `#srx-system` 会被 sh 当成注释，连带吃掉后面的 `-s` 查询，
-    // 系统应用集合就会静默变成空集，界面只能退化成按包名前缀猜。
-    const marker = 'echo "srx-system-section"';
-    const commands = [
-      "pm list packages -f -U" +
-        userArg +
-        " 2>/dev/null; " +
-        marker +
-        "; pm list packages -s" +
-        userArg +
-        " 2>/dev/null",
-      "cmd package list packages -f -U" +
-        userArg +
-        " 2>/dev/null; " +
-        marker +
-        "; cmd package list packages -s" +
-        userArg +
-        " 2>/dev/null",
-    ];
-    for (const command of commands) {
-      try {
-        const listing = parseUserPackageListing(await this.exec(command), "srx-system-section");
-        if (!listing.packages.length) continue;
-        // 把系统标记写进包信息缓存：列表分桶直接用该用户视角的真实结果。
-        listing.packages.forEach((pkg) => {
-          const prev = this._packageInfo.get(pkg) || {};
-          this._packageInfo.set(pkg, {
-            ...prev,
-            packageName: pkg,
-            isSystem: listing.system.has(pkg),
-          });
-        });
-        return listing.packages;
-      } catch {}
-    }
-    return [];
-  },
-  async prepareCompatAppList(userId, force) {
-    if (typeof ksu !== "undefined" && ksu.listPackages) return false;
     const safeUser = isSafeUserId(userId) ? String(userId) : "0";
-    const cacheKey = safeUser || "0";
-    if (!force && this._compatAppListPrepared.has(cacheKey)) return true;
-    const apps = await this.getInstalledAppsFromDex(safeUser, { force: true });
-    if (apps.length) {
-      this._compatAppListPrepared.add(cacheKey);
-      return true;
-    }
-    return false;
+    const output = await this.exec(shellQuote(SRX_DAEMON) + " package-query A " + safeUser);
+    const apps = parseSystemServerAppList(output, safeUser);
+    if (!apps) throw new Error("Invalid PackageManager app inventory");
+    apps.forEach((app) => {
+      this._packageInfo.set(packageInfoCacheKey(app.packageName, safeUser), app);
+    });
+    return apps.map((app) => app.packageName);
   },
 
-  getInstalledAppsFromKsu() {
-    if (typeof ksu === "undefined" || !ksu.listPackages) return [];
+  async listUsers() {
     try {
-      const userRaw = normalizePackageResult(ksu.listPackages("user"));
-      const systemRaw = normalizePackageResult(ksu.listPackages("system"));
-      const rememberInfo = (item, isSystem) => {
-        const pkg = getPackageNameFromInfo(item);
-        if (!isSafePackageName(pkg)) return;
-        if (item && typeof item === "object") {
-          item.isSystem = item.isSystem ?? isSystem;
-          this._packageInfo.set(pkg, item);
-        } else {
-          this._packageInfo.set(pkg, { packageName: pkg, isSystem });
-        }
-      };
-      userRaw.forEach((item) => rememberInfo(item, false));
-      systemRaw.forEach((item) => rememberInfo(item, true));
-      [...userRaw, ...systemRaw].forEach((item) => {
-        if (item && typeof item === "object") {
-          const pkg = getPackageNameFromInfo(item);
-          if (isSafePackageName(pkg)) this._packageInfo.set(pkg, item);
-        }
-      });
-      const names = Array.from(
-        new Set(
-          [...userRaw, ...systemRaw]
-            .map((item) => {
-              return getPackageNameFromInfo(item);
-            })
-            .filter(isSafePackageName),
-        ),
-      );
-      this.populatePackageInfo(names);
-      return names;
+      const users = parsePackageUsers(await this.exec(shellQuote(SRX_DAEMON) + " package-query T"));
+      return users.length ? users : ["0"];
     } catch {
-      return [];
+      return ["0"];
     }
   },
 
@@ -2043,41 +1962,10 @@ const Api = {
     } catch {}
   },
 
-  async getInstalledAppsFromDex(userId, options) {
-    const safeUser = isSafeUserId(userId) ? String(userId) : "0";
-    const cacheKey = safeUser || "0";
-    if (!options?.force && this._compatAppListCache.has(cacheKey)) {
-      return this._compatAppListCache.get(cacheKey).slice();
-    }
-    try {
-      await this.exec(
-        "mkdir -p /data/Namespace-Proxy; if [ -f " +
-          shellQuote(LIST_APPS_DEX) +
-          " ]; then /system/bin/app_process64 -Djava.class.path=" +
-          shellQuote(LIST_APPS_DEX) +
-          " / Main --user " +
-          safeUser +
-          " > " +
-          shellQuote(LIST_APPS_OUTPUT) +
-          " 2>/dev/null; fi",
-      );
-      const out = await this.readFile(LIST_APPS_OUTPUT);
-      const apps = parseCompatAppList(out).map((item) => {
-        this._packageInfo.set(item.packageName, item);
-        return item.packageName;
-      });
-      this._compatAppListCache.set(cacheKey, apps);
-      this._compatAppListPrepared.add(cacheKey);
-      return apps.slice();
-    } catch {
-      return [];
-    }
-  },
-
   /** 获取指定软件包的应用标签 */
-  async getAppLabel(packageName) {
+  async getAppLabel(packageName, userId) {
     if (!isSafePackageName(packageName)) return packageName;
-    const cached = this._packageInfo.get(packageName);
+    const cached = this.getCachedAppInfo(packageName, userId);
     if (cached) return cached.appLabel || cached.label || cached.name || packageName;
     try {
       return await this.exec(
@@ -2092,8 +1980,12 @@ const Api = {
     }
   },
 
-  getCachedAppInfo(packageName) {
-    return this._packageInfo.get(packageName) || null;
+  getCachedAppInfo(packageName, userId) {
+    return (
+      this._packageInfo.get(packageInfoCacheKey(packageName, userId)) ||
+      this._packageInfo.get(packageName) ||
+      null
+    );
   },
 
   getAppIconSrc(packageName) {
@@ -2585,6 +2477,11 @@ const Api = {
   },
 
   async _mockExec(cmd) {
+    if (cmd.includes("package-query T")) return "0\n10\n";
+    if (cmd.includes("package-query A 10"))
+      return "10\t1010123\t0\tcom.example.work\tWork%20App\t%2Fdata%2Fapp%2Fwork%2Fbase.apk\n";
+    if (cmd.includes("package-query A 0"))
+      return "0\t10123\t0\tcom.tencent.mm\tWeChat\t%2Fdata%2Fapp%2Fwechat%2Fbase.apk\n0\t1000\t1\tcom.android.settings\tSettings\t%2Fsystem%2Fpriv-app%2FSettings%2Fbase.apk\n";
     if (cmd.includes(FILE_MONITOR_LOG) && (cmd.includes(": >") || cmd.includes('echo "" >'))) {
       this._mockStore.fileMonitorLogCleared = true;
       return "";

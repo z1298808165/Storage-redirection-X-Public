@@ -18,9 +18,8 @@ const val StatsPath = "$StatsPersistDir/stats"
 const val RuntimeDisablePath = "$ModuleDir/.runtime_disabled"
 const val BootModuleVersionPath = "$ModuleDir/.boot_module_version"
 const val SrxCtlPath = "$ModuleDir/bin/srxctl"
+const val SrxDaemonPath = "$ModuleDir/bin/srx_daemon"
 const val DiagnosticArchiveScriptPath = "$ModuleDir/service.d/diagnostic_archive.sh"
-const val ListAppsDexPath = "$ModuleDir/bin/list_apps.dex"
-const val ListAppsOutputPath = "/data/Namespace-Proxy/list.config"
 const val FileMonitorLogPath = "$LogsDir/file_monitor.log"
 const val BackupMaxBytes = 8 * 1024 * 1024
 
@@ -148,6 +147,12 @@ data class LogEntry(
     val watchPackage: String = "",
     val identifyMethod: String = "",
     val identifyReliability: String = "",
+    val callerUid: Int? = null,
+    val callerPid: Int? = null,
+    val callerStartTime: Long? = null,
+    val callerContext: String = "",
+    val callerBoundary: String = "",
+    val nativeIdentity: String = "",
     /** request 是调用方操作，observation 是 daemon 对文件系统结果的观察。 */
     val eventRole: String = "",
     val correlationId: String = "",
@@ -158,7 +163,10 @@ data class LogEntry(
     val filterOperation: String = "",
     val operationIntent: String = "",
     val isModuleWebUiExport: Boolean = false,
-)
+) {
+  val hasApplicationIdentity: Boolean
+    get() = identifyMethod !in setOf("shared_uid", "executor") && callerBoundary.isBlank()
+}
 
 data class DashboardState(
     val status: ModuleStatus = ModuleStatus.Unknown,

@@ -15,11 +15,14 @@ unsafe fn call_clear_calling_identity(this: *mut c_void) -> i64 {
 
 // 清除身份前抢先快照 UID，后续 hook 仍能溯源真实调用方
 pub unsafe extern "C" fn hooked_clear_calling_identity(this: *mut c_void) -> i64 {
+    let previous = context::binder_identity_snapshot();
     super::super::caller::capture_binder_caller_uid_if_available();
     context::set_binder_identity_cleared(true);
     let saved_uid = context::get_binder_saved_caller_uid();
     log::debug!("binder identity cleared saved_uid={}", saved_uid);
-    call_clear_calling_identity(this)
+    let token = call_clear_calling_identity(this);
+    context::remember_binder_identity(token, previous);
+    token
 }
 
 unsafe fn call_restore_calling_identity(this: *mut c_void, token: i64) {
@@ -38,8 +41,7 @@ pub unsafe extern "C" fn hooked_restore_calling_identity(this: *mut c_void, toke
     let saved_uid = context::get_binder_saved_caller_uid();
     let age_ms = context::get_binder_saved_caller_uid_age_ms();
     call_restore_calling_identity(this, token);
-    context::clear_binder_saved_caller_uid();
-    context::set_binder_identity_cleared(false);
+    context::restore_binder_identity(token);
     log::debug!(
         "binder identity restored saved_uid={} age_ms={}",
         saved_uid,

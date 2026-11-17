@@ -31,14 +31,11 @@ use fuser::{
 };
 use inode::{remove_inode_path, remove_unreferenced_inode};
 use metadata::{
-    apply_create_metadata, create_metadata, cstring_path, errno_from_code, errno_from_io,
-    last_errno,
+    STAGING_DIR_PREFIX, StagedEntry, apply_create_metadata, create_metadata, cstring_path,
+    errno_from_code, errno_from_io, last_errno,
 };
 use perf::FusePerfStats;
-use policy::{
-    ANDROID_APP_UID_START, BackendPath, OperationKind, PolicyRegistry, RedirectPolicy,
-    RequesterIdentity,
-};
+use policy::{BackendPath, OperationKind, PolicyRegistry, RedirectPolicy, RequesterIdentity};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -48,10 +45,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
-
-use once_cell::sync::Lazy;
 
 /// attr 有效期：与原生 MP FuseDaemon 对齐（10s）。writeback 回写模式下内核在
 /// 本地维护 inode 的 i_size，应用轮询 stat 命中未过期的内核缓存时拿到的是
@@ -63,16 +58,12 @@ const ENTRY_TTL: Duration = Duration::ZERO;
 const ROOT_INO: u64 = 1;
 const MAX_READ_SIZE: usize = 256 * 1024;
 
-/// 系统 uid 请求者身份缓存 TTL：pid 的 /proc 身份极少变化（进程退出即失效，
-/// 重用窗口内 cmdline+uid 双校验兜底），5 秒足够吸收 write 等高频路径的重复解析。
+/// 包解析缓存只在原任务的 UID、启动时间、命令名、域与边界均未变化时复用。
 const SYSTEM_REQUESTER_CACHE_TTL_MS: i64 = 5_000;
-/// 缓存容量上限：系统 uid 进程数量级远小于该值，超限整表清空（简单防膨胀）。
 const SYSTEM_REQUESTER_CACHE_CAP: usize = 256;
-/// 系统 uid 请求者身份缓存条目：(解析时刻单调毫秒，身份；None 表示 pid 当时
-/// 不可归因——缓存失败结果避免 miss 风暴)。
-type SystemRequesterCacheEntry = (i64, Option<RequesterIdentity>);
-static SYSTEM_REQUESTER_CACHE: Lazy<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+type SystemRequesterCacheEntry = (i64, RequesterIdentity);
+static SYSTEM_REQUESTER_CACHE: LazyLock<Mutex<HashMap<i32, SystemRequesterCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// 目录候选缓存的存活时间。
 ///
 /// 命中前会逐源校验目录 mtime（`DirectorySourceSignature`），文件增删都会改变父目录
@@ -546,51 +537,38 @@ impl FuseRedirectFs {
         self.policy.for_request(req.uid(), req.pid())
     }
 
-    /// 系统 uid 请求者的监视归因（仅监视开启且走系统回退策略时解析）。
-    ///
-    /// daemon 以 root 运行，直接读 `/proc/<pid>` 反查发起者（MP 域的 SELinux 限制
-    /// 不存在），身份可信度由 status 的 Uid 行裁决；pid 是发起任务的强信号，短
-    /// TTL 缓存吸收 write 等高频路径的重复解析。非系统 uid 或未走系统回退策略
-    /// （应用 uid 命中自身策略）时返回 None，记录维持会话默认形态。
+    /// 保留每次 FUSE 请求的执行者；缓存命中前重新核验任务，root 也记录但不追溯 App。
     fn requester_attribution(
         &self,
         req: &Request,
         policy: &RedirectPolicy,
     ) -> Option<RequesterIdentity> {
-        if !policy.is_file_monitor_enabled || !policy.is_system_fallback {
+        if !policy.is_file_monitor_enabled {
             return None;
         }
         let uid = req.uid() as i32;
-        if uid <= 0 || uid >= ANDROID_APP_UID_START {
-            return None;
-        }
         let pid = req.pid() as i32;
-        if pid <= 0 {
-            return None;
-        }
-        let now_ms = crate::platform::paths::monotonic_ms();
+        let task = crate::platform::proc_identity::read_request_task(pid, uid);
+        let Some(task) = task else {
+            return Some(RequesterIdentity::unresolved(uid, pid));
+        };
+        let now_ms = paths::monotonic_ms();
         if let Ok(cache) = SYSTEM_REQUESTER_CACHE.lock()
-            && let Some((at_ms, identity)) = cache.get(&pid)
+            && let Some((at_ms, cached)) = cache.get(&pid)
             && now_ms.saturating_sub(*at_ms) <= SYSTEM_REQUESTER_CACHE_TTL_MS
+            && cached.same_task(&task)
         {
-            return match identity {
-                Some(cached) if cached.uid == uid => Some(cached.clone()),
-                _ => None,
-            };
+            return Some(cached.clone());
         }
-        let identity = crate::platform::proc_identity::read_proc_identity(pid)
-            .filter(|(proc_uid, _)| *proc_uid == uid)
-            .map(|(proc_uid, package)| RequesterIdentity {
-                package,
-                uid: proc_uid,
-            });
+        let identity = crate::platform::proc_identity::read_proc_identity_for_request(pid, uid)
+            .unwrap_or_else(|| RequesterIdentity::unresolved(uid, pid));
         if let Ok(mut cache) = SYSTEM_REQUESTER_CACHE.lock() {
             if cache.len() >= SYSTEM_REQUESTER_CACHE_CAP {
                 cache.clear();
             }
             cache.insert(pid, (now_ms, identity.clone()));
         }
-        identity
+        Some(identity)
     }
 
     fn policy_for_read_request(
@@ -818,6 +796,9 @@ impl FuseRedirectFs {
         {
             return Err(Errno::EINVAL);
         }
+        if name_bytes.starts_with(STAGING_DIR_PREFIX.as_bytes()) {
+            return Err(Errno::EPERM);
+        }
         let name_text = String::from_utf8_lossy(name_bytes).to_string();
         if parent_rel.is_empty() {
             Ok(name_text)
@@ -849,7 +830,11 @@ impl FuseRedirectFs {
             backend.path = resolved;
         }
         if backend.is_read_only {
-            policy.emit_monitor_read_only_deny(operation_name, &backend);
+            policy.emit_monitor_read_only_deny(
+                operation_name,
+                &backend,
+                self.requester_attribution(req, &policy).as_ref(),
+            );
             return Err(Errno::EROFS);
         }
         self.ensure_parent_for_backend(&policy, &backend)?;
@@ -1173,6 +1158,39 @@ impl FuseRedirectFs {
         }
     }
 
+    fn open_backend_file_for_create(
+        path: &Path,
+        flags: i32,
+        mode: u32,
+        metadata: metadata::CreateMetadata,
+    ) -> Result<File, Errno> {
+        if flags & libc::O_EXCL == 0 {
+            match Self::open_backend_file(path, flags & !libc::O_CREAT, mode) {
+                Ok(file) => {
+                    apply_create_metadata(path, metadata)?;
+                    return Ok(file);
+                }
+                Err(errno) if i32::from(errno) == libc::ENOENT => {}
+                Err(errno) => return Err(errno),
+            }
+        }
+
+        let staged = StagedEntry::new(path)?;
+        let file =
+            Self::open_backend_file(staged.path(), flags | libc::O_CREAT | libc::O_EXCL, mode)?;
+        apply_create_metadata(staged.path(), metadata)?;
+        match staged.publish(path) {
+            Ok(()) => Ok(file),
+            Err(errno) if flags & libc::O_EXCL == 0 && i32::from(errno) == libc::EEXIST => {
+                drop(file);
+                let file = Self::open_backend_file(path, flags, mode)?;
+                apply_create_metadata(path, metadata)?;
+                Ok(file)
+            }
+            Err(errno) => Err(errno),
+        }
+    }
+
     fn remove_child(
         &self,
         policy: &RedirectPolicy,
@@ -1198,7 +1216,11 @@ impl FuseRedirectFs {
             return;
         };
         if backend.is_read_only {
-            policy.emit_monitor_read_only_deny(if is_dir { "rmdir" } else { "unlink" }, &backend);
+            policy.emit_monitor_read_only_deny(
+                if is_dir { "rmdir" } else { "unlink" },
+                &backend,
+                caller,
+            );
             reply.error(Errno::EROFS);
             return;
         }
@@ -1224,3 +1246,7 @@ impl FuseRedirectFs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/fuse_staging.rs"]
+mod tests;

@@ -8,6 +8,19 @@ pub const MAX_REPLY: usize = 4 * 1024 * 1024;
 /// 按完整 Android UID 索引的包名集合；共享 UID 保留全部包名。
 pub type PackageUids = HashMap<i32, HashSet<String>>;
 
+/// 一个 Android 用户下由 PackageManager 枚举出的应用元数据。
+// quality-allow(lint-suppression): daemon 的 PackageManager 查询会构造此类型，其他入口不直接使用。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageApp {
+    pub user_id: i32,
+    pub uid: i32,
+    pub is_system: bool,
+    pub package_name: String,
+    pub label: String,
+    pub apk_path: String,
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -18,6 +31,123 @@ fn valid_package(package: &str) -> bool {
         && package.split('.').all(|part| {
             !part.is_empty() && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
         })
+}
+
+// quality-allow(lint-suppression): 这些数字字段解析器只由 daemon 的包清单请求使用。
+#[allow(dead_code)]
+fn decimal(value: &str, field: &str) -> io::Result<i32> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid(field));
+    }
+    value.parse::<i32>().map_err(|_| invalid(field))
+}
+
+// quality-allow(lint-suppression): 转义解码器只由 daemon 的 PackageManager 清单解析流程调用。
+#[allow(dead_code)]
+fn decode_field(value: &str) -> io::Result<String> {
+    let input = value.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            let high = input
+                .get(index + 1)
+                .copied()
+                .and_then(hex_digit)
+                .ok_or_else(|| invalid("package field escape"))?;
+            let low = input
+                .get(index + 2)
+                .copied()
+                .and_then(hex_digit)
+                .ok_or_else(|| invalid("package field escape"))?;
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            let byte = input[index];
+            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'~')) {
+                return Err(invalid("package field encoding"));
+            }
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| invalid("package field UTF-8"))
+}
+
+// quality-allow(lint-suppression): 十六进制转换仅供 PackageManager 字段转义解码器使用。
+#[allow(dead_code)]
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 解析一位用户的 `user\tuid\tsystem\tpackage\tlabel\tapk_path` 清单。
+// quality-allow(lint-suppression): daemon 的 A 查询使用它解析指定用户的 PackageManager 清单。
+#[allow(dead_code)]
+pub fn parse_app_inventory(content: &str, expected_user: i32) -> io::Result<Vec<PackageApp>> {
+    if expected_user < 0 {
+        return Err(invalid("package user"));
+    }
+    let mut apps = Vec::new();
+    let mut packages = HashSet::new();
+    for line in content.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 6 {
+            return Err(invalid("package app row"));
+        }
+        let user_id = decimal(fields[0], "package user")?;
+        let uid = decimal(fields[1], "package UID")?;
+        let is_system = match fields[2] {
+            "0" => false,
+            "1" => true,
+            _ => return Err(invalid("package system marker")),
+        };
+        let package_name = fields[3];
+        let label = decode_field(fields[4])?;
+        let apk_path = decode_field(fields[5])?;
+        if user_id != expected_user
+            || uid < 0
+            || uid / 100_000 != expected_user
+            || !valid_package(package_name)
+            || label.is_empty()
+            || (!apk_path.is_empty() && !apk_path.starts_with('/'))
+            || !packages.insert(package_name)
+        {
+            return Err(invalid("package app identity"));
+        }
+        apps.push(PackageApp {
+            user_id,
+            uid,
+            is_system,
+            package_name: package_name.to_owned(),
+            label,
+            apk_path,
+        });
+    }
+    Ok(apps)
+}
+
+/// 解析 `system_server` 返回的 Android 用户 ID 清单。
+// quality-allow(lint-suppression): daemon 的 T 查询使用它解析 PackageManager 用户清单。
+#[allow(dead_code)]
+pub fn parse_users(content: &str) -> io::Result<Vec<i32>> {
+    let mut users = Vec::new();
+    let mut seen = HashSet::new();
+    for line in content.lines() {
+        let user = decimal(line, "package user row")?;
+        if user < 0 || !seen.insert(user) {
+            return Err(invalid("package user identity"));
+        }
+        users.push(user);
+    }
+    if users.is_empty() {
+        return Err(invalid("empty user inventory"));
+    }
+    Ok(users)
 }
 
 /// 解析 `package:uid` 行；保留多用户与共享 UID，任一畸形行都会拒绝整份结果。
@@ -92,6 +222,26 @@ pub fn packages_for_uid(uid: i32) -> io::Result<HashSet<String>> {
         return Err(invalid("mismatched UID reply"));
     }
     Ok(names)
+}
+
+/// 查询完整 UID 的 PM 共享用户标签；无法确定组名时返回 `None`，不选择组内成员。
+#[cfg(unix)]
+pub fn shared_user_id_for_uid(uid: i32) -> io::Result<Option<String>> {
+    if uid < 0 {
+        return Err(invalid("UID request"));
+    }
+    parse_shared_user_id(&query(&format!("S\t{uid}"))?)
+}
+
+pub fn parse_shared_user_id(reply: &str) -> io::Result<Option<String>> {
+    if reply.is_empty() {
+        return Ok(None);
+    }
+    let value = reply.strip_suffix('\n').unwrap_or(reply);
+    if !value.contains('.') || !valid_package(value) {
+        return Err(invalid("shared user identity"));
+    }
+    Ok(Some(value.to_owned()))
 }
 
 /// 通过独立连接查询 `system_server`；仅 root 可用，单次连接受两秒绝对期限约束。
