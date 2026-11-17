@@ -8,11 +8,15 @@ use fuser::{Errno, TimeOrNow};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 /// 应用私有树（Android/data|media|obb）新建条目使用的扩展数据组。
 const EXT_DATA_RW_GID: u32 = 1078;
+/// 保留此前缀，避免把元数据尚未应用的暂存目录暴露给 FUSE 客户端。
+pub(super) const STAGING_DIR_PREFIX: &str = ".srx-staging-";
+static NEXT_STAGING_DIR: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn cstring_path(path: &Path) -> Result<CString, Errno> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| Errno::EINVAL)
@@ -25,6 +29,54 @@ pub(super) struct CreateMetadata {
     pub mode: u32,
     pub rewrite_owner: bool,
     pub rewrite_mode: bool,
+}
+
+pub(super) struct StagedEntry {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedEntry {
+    pub(super) fn new(destination: &Path) -> Result<Self, Errno> {
+        let parent = destination.parent().ok_or(Errno::EINVAL)?;
+        for _ in 0..16 {
+            let sequence = NEXT_STAGING_DIR.fetch_add(1, Ordering::Relaxed);
+            let directory = parent.join(format!(
+                "{STAGING_DIR_PREFIX}{}-{sequence}",
+                std::process::id()
+            ));
+            let c_directory = cstring_path(&directory)?;
+            // SAFETY: c_directory 以 NUL 结尾，权限掩码只允许当前属主访问暂存目录。
+            if unsafe { libc::mkdir(c_directory.as_ptr(), 0o700) } == 0 {
+                return Ok(Self {
+                    path: directory.join("entry"),
+                    directory,
+                });
+            }
+            let errno = last_errno();
+            if errno != libc::EEXIST {
+                return Err(errno_from_code(errno));
+            }
+        }
+        Err(Errno::EEXIST)
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn publish(self, destination: &Path) -> Result<(), Errno> {
+        rename_noreplace(&self.path, destination)
+    }
+}
+
+impl Drop for StagedEntry {
+    fn drop(&mut self) {
+        if std::fs::remove_file(&self.path).is_err() {
+            let _ = std::fs::remove_dir(&self.path);
+        }
+        let _ = std::fs::remove_dir(&self.directory);
+    }
 }
 
 pub(super) fn create_metadata(
@@ -80,9 +132,17 @@ pub(super) fn apply_create_metadata(path: &Path, metadata: CreateMetadata) -> Re
     let mut failed = None;
     if metadata.rewrite_owner {
         let c_path = cstring_path(path)?;
-        // SAFETY: c_path 是 NUL 结尾的合法路径；uid/gid 来自当前 FUSE 策略
-        // （共享媒体常量或 app-private 的属主），不来自不可信输入。
-        if unsafe { libc::chown(c_path.as_ptr(), metadata.uid, metadata.gid) } != 0 {
+        // SAFETY: c_path 在调用期间有效，uid/gid 来自 FUSE 策略；不跟随符号链接。
+        if unsafe {
+            libc::fchownat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                metadata.uid,
+                metadata.gid,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
             failed = Some(errno_from_code(last_errno()));
         }
     }

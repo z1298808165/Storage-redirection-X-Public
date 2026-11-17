@@ -31,8 +31,8 @@ use fuser::{
 };
 use inode::{remove_inode_path, remove_unreferenced_inode};
 use metadata::{
-    apply_create_metadata, create_metadata, cstring_path, errno_from_code, errno_from_io,
-    last_errno,
+    STAGING_DIR_PREFIX, StagedEntry, apply_create_metadata, create_metadata, cstring_path,
+    errno_from_code, errno_from_io, last_errno,
 };
 use perf::FusePerfStats;
 use policy::{BackendPath, OperationKind, PolicyRegistry, RedirectPolicy, RequesterIdentity};
@@ -796,6 +796,9 @@ impl FuseRedirectFs {
         {
             return Err(Errno::EINVAL);
         }
+        if name_bytes.starts_with(STAGING_DIR_PREFIX.as_bytes()) {
+            return Err(Errno::EPERM);
+        }
         let name_text = String::from_utf8_lossy(name_bytes).to_string();
         if parent_rel.is_empty() {
             Ok(name_text)
@@ -1155,6 +1158,39 @@ impl FuseRedirectFs {
         }
     }
 
+    fn open_backend_file_for_create(
+        path: &Path,
+        flags: i32,
+        mode: u32,
+        metadata: metadata::CreateMetadata,
+    ) -> Result<File, Errno> {
+        if flags & libc::O_EXCL == 0 {
+            match Self::open_backend_file(path, flags & !libc::O_CREAT, mode) {
+                Ok(file) => {
+                    apply_create_metadata(path, metadata)?;
+                    return Ok(file);
+                }
+                Err(errno) if i32::from(errno) == libc::ENOENT => {}
+                Err(errno) => return Err(errno),
+            }
+        }
+
+        let staged = StagedEntry::new(path)?;
+        let file =
+            Self::open_backend_file(staged.path(), flags | libc::O_CREAT | libc::O_EXCL, mode)?;
+        apply_create_metadata(staged.path(), metadata)?;
+        match staged.publish(path) {
+            Ok(()) => Ok(file),
+            Err(errno) if flags & libc::O_EXCL == 0 && i32::from(errno) == libc::EEXIST => {
+                drop(file);
+                let file = Self::open_backend_file(path, flags, mode)?;
+                apply_create_metadata(path, metadata)?;
+                Ok(file)
+            }
+            Err(errno) => Err(errno),
+        }
+    }
+
     fn remove_child(
         &self,
         policy: &RedirectPolicy,
@@ -1210,3 +1246,7 @@ impl FuseRedirectFs {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/fuse_staging.rs"]
+mod tests;

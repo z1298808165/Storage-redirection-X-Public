@@ -11,9 +11,9 @@ use super::helpers::{
 };
 use super::inode::{add_dir_entry_refs, remap_inode_path, remove_dir_entry_refs};
 use super::metadata::{
-    adjust_metadata_mode, apply_create_metadata, chmod_path, chown_path, create_metadata,
-    cstring_path, errno_from_code, errno_from_io, fix_existing_path_metadata, last_errno,
-    rename_noreplace, truncate_path, utimens_path,
+    STAGING_DIR_PREFIX, StagedEntry, adjust_metadata_mode, apply_create_metadata, chmod_path,
+    chown_path, create_metadata, cstring_path, errno_from_code, errno_from_io,
+    fix_existing_path_metadata, last_errno, rename_noreplace, truncate_path, utimens_path,
 };
 use super::perf::DirectoryCacheMissReason;
 use super::policy::OperationKind;
@@ -1162,7 +1162,14 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let c_path = match cstring_path(&backend.path) {
+        let staged = match StagedEntry::new(&backend.path) {
+            Ok(staged) => staged,
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+        let c_path = match cstring_path(staged.path()) {
             Ok(path) => path,
             Err(errno) => {
                 reply.error(errno);
@@ -1184,7 +1191,11 @@ impl Filesystem for FuseRedirectFs {
             backend.is_app_private_backend,
             false,
         );
-        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+        if let Err(errno) = apply_create_metadata(staged.path(), metadata) {
+            reply.error(errno);
+            return;
+        }
+        if let Err(errno) = staged.publish(&backend.path) {
             reply.error(errno);
             return;
         }
@@ -1421,10 +1432,20 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         let create_mode = mode & !umask;
-        let file = match Self::open_backend_file(
+        let metadata = create_metadata(
+            req.uid(),
+            req.gid(),
+            policy.uid as u32,
+            create_mode,
+            backend.is_shared_public_backend,
+            backend.is_app_private_backend,
+            false,
+        );
+        let file = match Self::open_backend_file_for_create(
             &backend.path,
             flags | libc::O_CREAT | libc::O_CLOEXEC,
             create_mode,
+            metadata,
         ) {
             Ok(file) => file,
             Err(errno) => {
@@ -1455,19 +1476,6 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        let metadata = create_metadata(
-            req.uid(),
-            req.gid(),
-            policy.uid as u32,
-            create_mode,
-            backend.is_shared_public_backend,
-            backend.is_app_private_backend,
-            false,
-        );
-        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
-            reply.error(errno);
-            return;
-        }
         self.invalidate_dir_candidate_cache();
         let ino = {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -1582,8 +1590,16 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         let create_mode = mode & !libc::S_IFMT & !umask;
+        let staged = match StagedEntry::new(&backend.path) {
+            Ok(staged) => staged,
+            Err(errno) => {
+                Self::log_unexpected_open_errno(&policy, &backend.rel, errno);
+                reply.error(errno);
+                return;
+            }
+        };
         let file = match Self::open_backend_file(
-            &backend.path,
+            staged.path(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
             create_mode,
         ) {
@@ -1594,7 +1610,6 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         };
-        drop(file);
         let metadata = create_metadata(
             req.uid(),
             req.gid(),
@@ -1604,7 +1619,12 @@ impl Filesystem for FuseRedirectFs {
             backend.is_app_private_backend,
             false,
         );
-        if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
+        if let Err(errno) = apply_create_metadata(staged.path(), metadata) {
+            reply.error(errno);
+            return;
+        }
+        drop(file);
+        if let Err(errno) = staged.publish(&backend.path) {
             reply.error(errno);
             return;
         }
@@ -1655,26 +1675,33 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         let mode = mode & !umask;
-        match std::fs::create_dir(&backend.path) {
-            Ok(()) => {
-                let metadata = create_metadata(
-                    req.uid(),
-                    req.gid(),
-                    policy.uid as u32,
-                    mode,
-                    backend.is_shared_public_backend,
-                    backend.is_app_private_backend,
-                    true,
-                );
-                if let Err(errno) = apply_create_metadata(&backend.path, metadata) {
-                    reply.error(errno);
-                    return;
-                }
-            }
-            Err(error) => {
-                reply.error(errno_from_io(error));
+        let staged = match StagedEntry::new(&backend.path) {
+            Ok(staged) => staged,
+            Err(errno) => {
+                reply.error(errno);
                 return;
             }
+        };
+        if let Err(error) = std::fs::create_dir(staged.path()) {
+            reply.error(errno_from_io(error));
+            return;
+        }
+        let metadata = create_metadata(
+            req.uid(),
+            req.gid(),
+            policy.uid as u32,
+            mode,
+            backend.is_shared_public_backend,
+            backend.is_app_private_backend,
+            true,
+        );
+        if let Err(errno) = apply_create_metadata(staged.path(), metadata) {
+            reply.error(errno);
+            return;
+        }
+        if let Err(errno) = staged.publish(&backend.path) {
+            reply.error(errno);
+            return;
         }
         self.invalidate_dir_candidate_cache();
         policy.emit_monitor_create(&backend, self.requester_attribution(req, &policy).as_ref());
@@ -2198,10 +2225,11 @@ fn append_backend_dir_entries(
         // 判据必须按归一后的存储相对路径判空（`is_storage_root_view_rel`）：视图根上提后
         // 用户根在视图里是 `<user>` 这一级，`parent_rel.is_empty()` 只在未上提会话成立，
         // 上提会话会整条跳过隐藏、把这两个目录暴露回根列表（2026-11-14 实测）。
-        if is_storage_root
-            && (crate::platform::paths_safety::MEDIA_PROVIDER_INTERNAL_DIR_NAMES
-                .contains(&name.as_str())
-                || name == ".srx_passthrough_probe")
+        if name.starts_with(STAGING_DIR_PREFIX)
+            || (is_storage_root
+                && (crate::platform::paths_safety::MEDIA_PROVIDER_INTERNAL_DIR_NAMES
+                    .contains(&name.as_str())
+                    || name == ".srx_passthrough_probe"))
         {
             continue;
         }
