@@ -237,8 +237,8 @@
     {
       "id": 40,
       "config_mode": "auto",
-      "bash_title": "系统 uid 的 FUSE 写入按发起服务归因；应用发起经 MediaProvider 中转创建归因到源头应用；系统 uid 沙盒目标缺失时零穿透",
-      "powershell_title": "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak"
+      "bash_title": "shell 的 FUSE 写入保留执行者；应用经 MediaProvider 创建保留源头；shell 不借用应用沙盒规则",
+      "powershell_title": "shell fuse write keeps executor; mediaprovider creation keeps source app; shell does not use App sandbox rules"
     },
     {
       "id": 41,

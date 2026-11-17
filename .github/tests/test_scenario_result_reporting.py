@@ -43,6 +43,7 @@ function Invoke-Su {
     $global:LASTEXITCODE = if ($env:SRX_REPORT_FAULT -eq 'marker' -and $Command.StartsWith('touch ')) { 1 } else { 0 }
 }
 function Invoke-Adb {}
+function Start-TestApp {}
 function Invoke-AdbWithTimeout {
     param($Arguments)
     if ($Arguments[-3] -ne '--es' -or $Arguments[-2] -ne 'result_token' -or $Arguments[-1] -notlike '/data/local/tmp/srx-result-*.marker') {
@@ -90,6 +91,22 @@ def run_service_cases(combinations, bases, function, extension):
 
 
 class ScenarioResultReportingTest(unittest.TestCase):
+    @unittest.skipUnless(PWSH, "需要 PowerShell 验证重定向输出编码")
+    def test_entrypoints_override_non_utf8_console_encoding(self):
+        for relative, end in (
+            (".github/tests/run-storage-redirect-scenarios.ps1", "if ([string]::IsNullOrWhiteSpace($Serial))"),
+            ("scripts/verify-test-flow.ps1", "$RepoRoot ="),
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8-sig")
+            prefix = source[:source.index(end)]
+            script = "[Console]::OutputEncoding = [Text.ASCIIEncoding]::new()\n& {\n" + prefix + "\nWrite-Host '测试原始记录'\n}\n"
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "encoding.ps1"
+                path.write_text(script, encoding="utf-8")
+                result = subprocess.run([PWSH, "-NoProfile", "-File", str(path)], capture_output=True, timeout=20)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("测试原始记录", result.stdout.decode("utf-8"))
+
     def test_lock_release_failure_invalidates_run(self):
         for runner in ("bash", "pwsh"):
             if not (BASH if runner == "bash" else PWSH):
@@ -206,6 +223,7 @@ function Invoke-Adb { $script:Attempt++; $global:LASTEXITCODE=if ($script:Attemp
                 script = 'set -euo pipefail\nAPP_ID=test.app\ncleanup_done=0\n' + stubs + '\n' + cleanup
                 script += '''
 capture_shared_fuse_snapshot_once() { :; }
+cleanup_frozen_daemon() { :; }
 set_download_test_network() { :; }
 release_device_run_lock() { echo unlock >> "$SRX_CLEANUP_TRACE"; }
 device_run_lock_held=1

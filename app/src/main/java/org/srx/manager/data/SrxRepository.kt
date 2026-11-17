@@ -2,9 +2,7 @@ package org.srx.manager.data
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
@@ -64,9 +62,7 @@ class SrxRepository(
   private val appQuery = RootAppQuery(shell)
   private val storageBrowser = RootStorageBrowser(shell)
   private val configuredAppsCacheMutex = Mutex()
-  private val dexAppListCacheMutex = Mutex()
   private var configuredAppsCache: TimedCache<Map<String, AppConfig>>? = null
-  private val dexAppListCache = mutableMapOf<String, TimedCache<DexAppList>>()
   /** 应用名称缓存：键为包名，值含安装包路径，应用升级或卸载重装后自动失效。 */
   private val appLabelCache = ConcurrentHashMap<String, CachedAppLabel>()
   /** 名称磁盘缓存：冷启动直接读出上一次的名字，省掉整机 loadLabel 的 APK 资源解析。 */
@@ -262,35 +258,18 @@ class SrxRepository(
       coroutineScope {
         val t0 = PerfLog.mark()
         val configs = async { readConfiguredAppConfigs(force) }
-        val apps = async(Dispatchers.IO) { loadPackageManagerApps(userId) }
         val packages = async { appQuery.listUserPackages(userId) }
         val configMap = configs.await()
         val afterConfig = PerfLog.sinceMs(t0)
-        val pmApps = apps.await()
-        val afterPm = PerfLog.sinceMs(t0)
         val userPackages = packages.await()
-        val afterShell = PerfLog.sinceMs(t0)
-        // dex 只在 shell 的 pm 查询完全不可用时兜底：它要拉起一次 app_process（实测 1.3~1.9s），
-        // 而成员、系统标记、APK 路径都能由 pm 查询拿到，标签与图标由本进程的 PackageManager 补齐。
-        val dexAppList =
-            if (userPackages.isEmpty) loadDexAppList(userId, force) else DexAppList.Empty
         PerfLog.log {
-          "load user=$userId config=${afterConfig}ms pm=${afterPm}ms shell=${afterShell}ms " +
-              "dex=${PerfLog.sinceMs(t0)}ms (pm=${pmApps.size} " +
-              "shell=${userPackages.packageNames.size} sys=${userPackages.systemPackages.size} " +
-              "dex=${dexAppList.labels.size})"
+          "load user=$userId config=${afterConfig}ms package_query=${PerfLog.sinceMs(t0)}ms " +
+              "(packages=${userPackages.packageNames.size} system=${userPackages.systemPackages.size})"
         }
         val tBuild = PerfLog.mark()
-        // PackageManager 只枚举调用方用户：非主用户的应用清单必须由该用户的 root 通道决定，
-        // 否则切到分身用户后仍会把主用户的应用全部列出来。两条通道都不可用时才退回枚举结果。
-        val includePackageManagerMembers =
-            userId == "0" || (userPackages.isEmpty && dexAppList.labels.isEmpty())
         buildInstalledApps(
                 configMap,
-                pmApps,
-                dexAppList,
                 userPackages,
-                includePackageManagerMembers,
                 userId,
             )
             .also {
@@ -305,17 +284,21 @@ class SrxRepository(
   /**
    * 读取上一次成功加载的应用列表快照，用于首屏秒开。
    *
-   * 快照不含 `ApplicationInfo`，这里用调用方 PackageManager 补齐：主用户视角能覆盖绝大多数应用， 分身用户独有的应用会短暂显示占位图标，随后由真实加载结果替换。
+   * 快照不含 `ApplicationInfo`，这里用 system_server 返回的 APK 路径补齐图标。
    */
   suspend fun readCachedAppList(userId: String): List<InstalledApp> {
     val cached = appListSnapshots.read(userId) ?: return emptyList()
-    val infos =
-        withContext(Dispatchers.IO) {
-          runCatching { loadPackageManagerApps(userId).associateBy { it.packageName } }
-              .getOrDefault(emptyMap())
-        }
-    if (infos.isEmpty()) return cached
-    return cached.map { app -> infos[app.packageName]?.let { app.copy(appInfo = it) } ?: app }
+    val packages = runCatching { appQuery.listUserPackages(userId) }.getOrNull() ?: return cached
+    return withContext(Dispatchers.IO) {
+      cached.map { app ->
+        val info =
+            loadArchiveAppInfo(packages.apkPaths[app.packageName], packages.uids[app.packageName])
+        app.copy(
+            label = packages.labels[app.packageName] ?: app.label,
+            appInfo = info,
+        )
+      }
+    }
   }
 
   suspend fun loadInstalledAppsForPackages(
@@ -327,8 +310,6 @@ class SrxRepository(
     if (safePackages.isEmpty()) return@coroutineScope emptyList()
 
     val configs = async { readConfiguredAppConfigs(force) }
-    // 少数包的场景仍要走一次按用户的 pm 查询：非主用户独有的包不在调用方视角里，
-    // 需要 APK 路径才能解析标签与图标（比拉起 dex 进程快一个数量级）。
     val packages = async { appQuery.listUserPackages(userId) }
     val configMap = configs.await()
     val userPackages = packages.await()
@@ -338,15 +319,14 @@ class SrxRepository(
       // 只需要少量包信息时逐个查询，避免为几个包枚举整机应用列表。
       val built =
           safePackages.map { pkg ->
-            val info = loadPackageManagerApp(pkg) ?: loadArchiveAppInfo(userPackages.apkPaths[pkg])
+            val info = loadArchiveAppInfo(userPackages.apkPaths[pkg], userPackages.uids[pkg])
             InstalledApp(
                 packageName = pkg,
-                label = resolveAppLabel(pkg, info) ?: pkg,
-                isSystem = isSystemPackage(pkg, info, userPackages.systemPackages),
+                label = userPackages.labels[pkg] ?: resolveAppLabel(pkg, info) ?: pkg,
+                isSystem = pkg in userPackages.systemPackages,
                 appInfo = info,
                 config = configMap[pkg],
-                // 非主用户解析不到 PackageManager 记录是正常现象，是否安装以该用户的包清单为准。
-                isInstalled = info != null || pkg in userPackages.packageNames,
+                isInstalled = pkg in userPackages.packageNames,
                 userId = userId,
             )
           }
@@ -495,33 +475,20 @@ class SrxRepository(
 
   private suspend fun buildInstalledApps(
       configMap: Map<String, AppConfig>,
-      pmApps: List<ApplicationInfo>,
-      dexAppList: DexAppList,
-      userPackages: UserPackageList = UserPackageList.Empty,
-      includePackageManagerMembers: Boolean = true,
+      userPackages: UserPackageList,
       userId: String = "0",
   ): List<InstalledApp> =
       withContext(Dispatchers.IO) {
-        val pmByPackage = pmApps.associateBy { it.packageName }
-        val userPackageSet = userPackages.packageNames.toSet()
-        // 成员集合来自「该用户可用的通道」；主用户才允许用 PackageManager 枚举结果作为成员，
-        // 非主用户仅用它补充标签与图标，避免把主用户的应用带进分身用户的列表。
-        val packageManagerMembers =
-            if (includePackageManagerMembers) pmByPackage.keys else emptySet()
         // 配置项同样按用户收敛：只在当前用户有该应用的配置档案时才纳入，
         // 否则分身用户会把主用户「已配置但本机未安装」的应用整批列出来。
         val configuredForUser = configMap.filterValues { it.users[userId] != null }.keys
         val allPackages =
-            (packageManagerMembers +
-                    dexAppList.labels.keys +
-                    userPackages.packageNames +
-                    configuredForUser)
+            (userPackages.packageNames + configuredForUser)
                 .filter(::isSafePackageName)
                 .filter { it != context.packageName }
                 .distinct()
 
-        // loadLabel 需要打开 APK 读取资源，单线程串行解析整机应用会明显拖慢首屏，
-        // 因此先读磁盘名称缓存（命中率接近全量），再对剩下的新应用分片并发解析。
+        // 分片并发读取 APK 图标；磁盘名称缓存只补清单中缺少的标签。
         ensureAppLabelCacheLoaded()
         val chunkSize = ((allPackages.size + LabelResolveParallelism - 1) / LabelResolveParallelism)
         val built =
@@ -534,20 +501,19 @@ class SrxRepository(
                         .map { chunk ->
                           async {
                             chunk.map { pkg ->
-                              // 非主用户独有的应用不在调用方视角里，退回按 APK 路径解析，
-                              // 这样分身用户也能拿到正确标签与图标，而不是显示包名占位。
                               val info =
-                                  pmByPackage[pkg]
-                                      ?: loadPackageManagerApp(pkg)
-                                      ?: loadArchiveAppInfo(userPackages.apkPaths[pkg])
+                                  loadArchiveAppInfo(
+                                      userPackages.apkPaths[pkg],
+                                      userPackages.uids[pkg],
+                                  )
                               InstalledApp(
                                   packageName = pkg,
-                                  label = resolveAppLabel(pkg, info) ?: pkg,
-                                  isSystem =
-                                      isSystemPackage(pkg, info, userPackages.systemPackages),
+                                  label =
+                                      userPackages.labels[pkg] ?: resolveAppLabel(pkg, info) ?: pkg,
+                                  isSystem = pkg in userPackages.systemPackages,
                                   appInfo = info,
                                   config = configMap[pkg],
-                                  isInstalled = info != null || pkg in userPackageSet,
+                                  isInstalled = pkg in userPackages.packageNames,
                                   userId = userId,
                               )
                             }
@@ -566,27 +532,22 @@ class SrxRepository(
         )
       }
 
-  /**
-   * 按 APK 路径解析包信息。
-   *
-   * 分身用户独有的应用在调用方视角里不存在（PackageManager 只覆盖调用方用户），但 APK 本身 是全局可读的；`getPackageArchiveInfo` 能读到标签、图标与
-   * flags，避免为了几个包去拉起 dex 进程。
-   */
-  private fun loadArchiveAppInfo(apkPath: String?): ApplicationInfo? {
+  /** 按 APK 路径读取图标信息；用户归属、标签和系统标记来自 system_server 清单。 */
+  private fun loadArchiveAppInfo(apkPath: String?, uid: Int?): ApplicationInfo? {
     if (apkPath.isNullOrBlank() || !apkPath.startsWith("/")) return null
-    archiveInfoCache[apkPath]?.let {
-      return it
-    }
     val info =
-        runCatching {
-              context.packageManager.getPackageArchiveInfo(apkPath, 0)?.applicationInfo?.also {
-                it.sourceDir = apkPath
-                it.publicSourceDir = apkPath
-              }
-            }
-            .getOrNull()
-    if (info != null) archiveInfoCache[apkPath] = info
-    return info
+        archiveInfoCache[apkPath]
+            ?: runCatching {
+                  context.packageManager.getPackageArchiveInfo(apkPath, 0)?.applicationInfo?.also {
+                    it.sourceDir = apkPath
+                    it.publicSourceDir = apkPath
+                  }
+                }
+                .getOrNull()
+                ?.also { archiveInfoCache[apkPath] = it }
+            ?: return null
+    return uid?.takeIf { it != info.uid }?.let { ApplicationInfo(info).apply { this.uid = it } }
+        ?: info
   }
 
   /** 按安装包路径缓存应用名称：应用升级后 sourceDir 或版本会变化，缓存自然失效。 */
@@ -627,71 +588,8 @@ class SrxRepository(
     appLabelStore.write(appLabelCache.toMap())
   }
 
-  /**
-   * 系统应用判定以所选用户为准：`pm list packages -s --user` 给出该用户视角的系统应用集合， 只有拿不到该集合时才退回 PackageManager 的
-   * flags（它只覆盖调用方用户，跨用户会误判）。
-   */
-  private fun isSystemPackage(
-      packageName: String,
-      info: ApplicationInfo?,
-      systemPackages: Set<String>,
-  ): Boolean {
-    if (systemPackages.isNotEmpty()) return packageName in systemPackages
-    val flags = info?.flags ?: return false
-    // 与 `pm list packages -s` 一致：预装应用与「已更新的预装应用」都算系统应用。
-    return flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
-  }
-
-  private suspend fun loadDexAppList(userId: String, force: Boolean): DexAppList =
-      dexAppListCacheMutex.withLock {
-        dexAppListCache[userId]
-            ?.takeUnless { force || it.isExpired() }
-            ?.value
-            ?.let {
-              return@withLock it
-            }
-        val appList = appQuery.loadDexAppList(userId)
-        dexAppListCache[userId] = TimedCache(appList, System.nanoTime())
-        appList
-      }
-
   private fun TimedCache<*>.isExpired(): Boolean =
       System.nanoTime() - loadedAtNanos >= AppDataCacheTtlNanos
-
-  private fun loadPackageManagerApps(userId: String): List<ApplicationInfo> {
-    val pm = context.packageManager
-    return try {
-      if (Build.VERSION.SDK_INT >= 33) {
-        pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
-      } else {
-        @Suppress("DEPRECATION") pm.getInstalledApplications(0)
-      }
-    } catch (e: Exception) {
-      android.util.Log.w(
-          "SrxRepository",
-          "load_installed_apps_failed user=$userId error=${e.message}",
-      )
-      emptyList()
-    }
-  }
-
-  private fun loadPackageManagerApp(packageName: String): ApplicationInfo? {
-    if (!isSafePackageName(packageName)) return null
-    val pm = context.packageManager
-    return try {
-      if (Build.VERSION.SDK_INT >= 33) {
-        pm.getApplicationInfo(packageName, PackageManager.ApplicationInfoFlags.of(0))
-      } else {
-        @Suppress("DEPRECATION") pm.getApplicationInfo(packageName, 0)
-      }
-    } catch (e: Exception) {
-      android.util.Log.w(
-          "SrxRepository",
-          "load_app_info_failed pkg=$packageName error=${e.message}",
-      )
-      null
-    }
-  }
 
   private suspend fun moduleVersion(): String = moduleController.version()
 

@@ -197,7 +197,7 @@ internal fun LogsScreen(
               contentType = { _, entry -> if (entry.ok) "success" else "error" },
           ) { _, entry ->
             val app =
-                if (entry.isModuleWebUiExport) null
+                if (entry.isModuleWebUiExport || !entry.hasApplicationIdentity) null
                 else
                     appsByPackage[entry.packageName]
                         ?: appsByPackage[entry.callerPackage]
@@ -274,6 +274,7 @@ private fun LogCard(
   val openTarget =
       if (
           entry.isModuleWebUiExport ||
+              !entry.hasApplicationIdentity ||
               (isFilesystemObservation && !hasAttributedCaller) ||
               isMediaProviderFallback
       ) {
@@ -420,6 +421,7 @@ private fun LogAppIdentityAction(
 }
 
 private fun LogEntry.toInstalledAppOrNull(displayName: String): InstalledApp? {
+  if (!hasApplicationIdentity) return null
   val targetPackage = packageName.takeIf(::isSafePackageName) ?: return null
   return InstalledApp(
       packageName = targetPackage,
@@ -505,6 +507,9 @@ private fun logEntrySummary(entry: LogEntry): String {
   val method = logIdentifyMethodText(entry.identifyMethod)
   val hasAttributedCaller = isAttributedFilesystemObservation(entry)
   when {
+    entry.identifyMethod == "shared_uid" -> parts += "共享 UID 组 ${entry.packageName}"
+    entry.identifyMethod == "executor" || entry.callerBoundary.isNotBlank() ->
+        parts += "执行者 ${entry.nativeIdentity.ifBlank { entry.callerPackage }}"
     hasAttributedCaller -> {
       val subject =
           if (entry.identifyMethod in setOf("provider_open", "provider_mkdir", "saf_provider"))
@@ -555,6 +560,10 @@ private fun logEntrySummary(entry: LogEntry): String {
     method.isNotBlank() -> parts += method
   }
   val reliability = logReliabilityText(entry.identifyReliability)
+  entry.callerUid?.let { parts += "UID $it" }
+  entry.callerPid?.let { parts += "PID/TID $it" }
+  if (entry.callerContext.isNotBlank()) parts += "SELinux ${entry.callerContext}"
+  if (entry.callerBoundary.isNotBlank()) parts += "追溯边界 ${entry.callerBoundary}"
   if (reliability.isNotBlank()) parts += "可靠性 $reliability"
   if (entry.observationCount > 0) {
     val observer = entry.observerPackage.takeIf { it.isNotBlank() }

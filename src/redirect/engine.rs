@@ -398,6 +398,14 @@ fn process_redirect_path_inner(
     let is_shared_uid = redirect_policy::is_shared_uid_process(self_uid);
     let is_system_writer_process =
         redirect_policy::is_system_writer_package(&package_name) || is_shared_uid;
+    // 仅停止代写链路的 App 来源推断；自有 FUSE 的命名空间规则不经过这里。
+    if is_system_writer_process && crate::hook::is_caller_attribution_stopped() {
+        return RedirectDecision {
+            action: RedirectAction::Allow,
+            new_path: String::new(),
+            is_mapping: false,
+        };
+    }
     let is_explicit_caller_decision = crate::hook::is_explicit_caller_decision_active();
     // 监视桥接进程自身保留重定向（is_app_redirect_owner，如下载提供器的 .xlDownload）时，
     // 对自己沙盒路径的写入必须先按桥接进程自己的路由判定（含热重载轮询）：共享 uid 会把
@@ -1053,8 +1061,8 @@ fn resolve_android_private_path_owner(normalized_path: &str) -> Option<String> {
     }
 }
 
-fn resolve_package_uid(package_name: &str) -> i32 {
-    redirect_policy::get_fresh_uid_for_package(package_name)
+fn resolve_package_uid(package_name: &str, user_id: i32) -> i32 {
+    redirect_policy::get_fresh_uid_for_package_in_user(package_name, user_id)
 }
 
 struct PrivateOwnerBackendRule {
@@ -1084,7 +1092,7 @@ fn resolve_disabled_caller_private_owner_backend_rule(
         return None;
     }
 
-    let owner_uid = resolve_package_uid(&owner_package);
+    let owner_uid = resolve_package_uid(&owner_package, user_id);
     if owner_uid < writer::ANDROID_APP_UID_START || platform::user_id_from_uid(owner_uid) != user_id
     {
         return None;

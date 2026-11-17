@@ -1077,9 +1077,9 @@ should_queue_hot_reload_by_state() {
   return 1
 }
 
-get_uid_by_package() {
+get_uids_by_package() {
   package_name="$1"
-  awk -F':' -v target="$package_name" '$1 == target { print $2; exit }' "$SYSTEM_WRITER_UIDS_FILE" 2>/dev/null
+  awk -F':' -v target="$package_name" '$1 == target { print $2 }' "$SYSTEM_WRITER_UIDS_FILE" 2>/dev/null
 }
 
 get_packages_by_uid() {
@@ -1109,45 +1109,48 @@ handle_config_changes() {
   # 每批事件无条件 refresh，避免重装窗口的坏清单在 changed 为空时无法自愈。
 
   for package_name in $changed_packages; do
-    is_skipped_package "$package_name" && continue
+    source_package_name="$package_name"
+    is_skipped_package "$source_package_name" && continue
 
-    old_line=$(get_state_line "$old_state_file" "$package_name")
-    new_line=$(get_state_line "$new_state_file" "$package_name")
+    old_line=$(get_state_line "$old_state_file" "$source_package_name")
+    new_line=$(get_state_line "$new_state_file" "$source_package_name")
     should_reload_source=0
     if should_queue_hot_reload_by_state "$old_line" "$new_line"; then
       should_reload_source=1
-      echo "$package_name" >> "$reload_list_file"
+      echo "$source_package_name" >> "$reload_list_file"
     fi
 
-    uid=$(get_uid_by_package "$package_name")
-    if [ -z "$uid" ]; then
+    uids=$(get_uids_by_package "$source_package_name")
+    if [ -z "$uids" ]; then
       continue
     fi
 
-    # 共享 UID 只扩展到有配置记录的包，避免误伤同 UID 的无关系统组件。
-    for shared_package in $(get_packages_by_uid "$uid"); do
-      [ "$shared_package" = "$package_name" ] && continue
-      is_skipped_package "$shared_package" && continue
+    # 逐用户扩展共享 UID，只纳入有配置记录的包。
+    for uid in $uids; do
+      for shared_package in $(get_packages_by_uid "$uid"); do
+        [ "$shared_package" = "$source_package_name" ] && continue
+        is_skipped_package "$shared_package" && continue
 
-      shared_old_line=$(get_state_line "$old_state_file" "$shared_package")
-      shared_new_line=$(get_state_line "$new_state_file" "$shared_package")
-      if [ -z "$shared_old_line" ] && [ -z "$shared_new_line" ]; then
-        continue
-      fi
-
-      # 同 UID 配置保持生效时，来源包生效变更也会触发热重载，避免进程状态不一致。
-      if should_queue_hot_reload_by_state "$shared_old_line" "$shared_new_line"; then
-        echo "$shared_package" >> "$reload_list_file"
-        continue
-      fi
-
-      if [ "$should_reload_source" -eq 1 ]; then
-        shared_old_effective=$(get_state_effective "$shared_old_line")
-        shared_new_effective=$(get_state_effective "$shared_new_line")
-        if [ "$shared_old_effective" -eq 1 ] || [ "$shared_new_effective" -eq 1 ]; then
-          echo "$shared_package" >> "$reload_list_file"
+        shared_old_line=$(get_state_line "$old_state_file" "$shared_package")
+        shared_new_line=$(get_state_line "$new_state_file" "$shared_package")
+        if [ -z "$shared_old_line" ] && [ -z "$shared_new_line" ]; then
+          continue
         fi
-      fi
+
+        # 同 UID 配置保持生效时，来源包生效变更也会触发热重载，避免进程状态不一致。
+        if should_queue_hot_reload_by_state "$shared_old_line" "$shared_new_line"; then
+          echo "$shared_package" >> "$reload_list_file"
+          continue
+        fi
+
+        if [ "$should_reload_source" -eq 1 ]; then
+          shared_old_effective=$(get_state_effective "$shared_old_line")
+          shared_new_effective=$(get_state_effective "$shared_new_line")
+          if [ "$shared_old_effective" -eq 1 ] || [ "$shared_new_effective" -eq 1 ]; then
+            echo "$shared_package" >> "$reload_list_file"
+          fi
+        fi
+      done
     done
   done
 

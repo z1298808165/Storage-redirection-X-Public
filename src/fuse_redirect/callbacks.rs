@@ -753,7 +753,11 @@ impl Filesystem for FuseRedirectFs {
                     seen
                 );
             }
-            policy.emit_monitor_read_only_deny(fuse_open_operation_name(flags.0), &backend);
+            policy.emit_monitor_read_only_deny(
+                fuse_open_operation_name(flags.0),
+                &backend,
+                self.requester_attribution(req, &policy).as_ref(),
+            );
             reply.error(Errno::EROFS);
             return;
         }
@@ -902,7 +906,11 @@ impl Filesystem for FuseRedirectFs {
                 let rel = open_file.backend.rel.clone();
                 drop(state);
                 if let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Write) {
-                    policy.emit_monitor_read_only_deny("write", &backend);
+                    policy.emit_monitor_read_only_deny(
+                        "write",
+                        &backend,
+                        self.requester_attribution(req, &policy).as_ref(),
+                    );
                 }
                 reply.error(Errno::EROFS);
                 return;
@@ -1053,7 +1061,11 @@ impl Filesystem for FuseRedirectFs {
         };
         if output_read_only {
             if let Some(backend) = policy.backend_for_relative(&output_rel, OperationKind::Write) {
-                policy.emit_monitor_read_only_deny("copy_file_range", &backend);
+                policy.emit_monitor_read_only_deny(
+                    "copy_file_range",
+                    &backend,
+                    self.requester_attribution(req, &policy).as_ref(),
+                );
             }
             reply.error(Errno::EROFS);
             return;
@@ -1760,6 +1772,7 @@ impl Filesystem for FuseRedirectFs {
                 record_backend,
                 Some(&old_backend),
                 libc::EROFS,
+                self.requester_attribution(req, &policy).as_ref(),
             );
             reply.error(Errno::EROFS);
             return;
@@ -1875,6 +1888,7 @@ impl Filesystem for FuseRedirectFs {
                     mtime.is_some(),
                 ),
                 &backend,
+                self.requester_attribution(req, &policy).as_ref(),
             );
             reply.error(Errno::EROFS);
             return;
@@ -1968,7 +1982,12 @@ impl Filesystem for FuseRedirectFs {
             }
         };
         if backend.is_read_only && mask.contains(AccessFlags::W_OK) {
-            policy.emit_monitor_read_only_deny_with_errno("access:write", &backend, libc::EACCES);
+            policy.emit_monitor_read_only_deny_with_errno(
+                "access:write",
+                &backend,
+                libc::EACCES,
+                self.requester_attribution(req, &policy).as_ref(),
+            );
             reply.error(Errno::EACCES);
             return;
         }

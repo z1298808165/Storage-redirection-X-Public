@@ -19,7 +19,6 @@
     allApps: [],
     availableUsers: ["0"],
     moduleStatus: "unknown",
-    compatAppListPreparedUsers: new Set(),
     appListScrollTop: 0,
     shouldRestoreAppListScroll: false,
     logListScrollTop: 0,
@@ -453,7 +452,11 @@
           template || {
             id: event.state.templateId,
             name: "",
-            config: { users: { [String(State.currentUserId || "0")]: createDefaultProfile() } },
+            config: {
+              users: {
+                [String(State.currentUserId || "0")]: createDefaultProfile(),
+              },
+            },
           },
           {
             skipHistory: true,
@@ -1156,8 +1159,18 @@
         description: "刷新已配置应用的重定向挂载并同步媒体进程",
         action: restartMediaProviderWithLoading,
       },
-      { icon: "download", label: "检查更新", description: "查看模块的新版本", page: "update" },
-      { icon: "file", label: "关于与开源协议", description: "版本信息与依赖许可", page: "about" },
+      {
+        icon: "download",
+        label: "检查更新",
+        description: "查看模块的新版本",
+        page: "update",
+      },
+      {
+        icon: "file",
+        label: "关于与开源协议",
+        description: "版本信息与依赖许可",
+        page: "about",
+      },
     ];
     items.forEach((item) => {
       const el = document.createElement("button");
@@ -1297,7 +1310,12 @@
   let appListCache = { user: [], system: [] };
   let appListCacheUser = "0";
   let currentFilter = "all";
-  const appStatusOrder = { enabled: 0, missing: 1, disabled: 2, unconfigured: 3 };
+  const appStatusOrder = {
+    enabled: 0,
+    missing: 1,
+    disabled: 2,
+    unconfigured: 3,
+  };
 
   function compareAppsByStatus(a, b) {
     const diff =
@@ -1322,9 +1340,8 @@
     for (let i = 0; i < installed.length; i += 1) {
       if (requestId !== State.appListRequestId) return null;
       const pkg = installed[i];
-      const info = Api.getCachedAppInfo ? Api.getCachedAppInfo(pkg) : null;
-      // 系统标记优先用所选用户的真实结果（dex 的 `#system=` 或 `pm list packages -s --user`）；
-      // 只有在完全没有包信息时，才退回包名前缀猜测——该猜法会把 Google 系普通应用误判成系统应用。
+      const info = Api.getCachedAppInfo ? Api.getCachedAppInfo(pkg, State.currentUserId) : null;
+      // PackageManager 清单提供所选用户的系统应用标记；包名前缀只用于旧/缺失元数据兜底。
       const guessedSystem =
         pkg.startsWith("com.android.") ||
         pkg.startsWith("com.google.android.") ||
@@ -1952,8 +1969,12 @@
   function initListPerformanceControls() {
     const appList = $("#appList");
     const logViewer = $("#logViewer");
-    appList?.addEventListener("scroll", scheduleAppListWindowRender, { passive: true });
-    logViewer?.addEventListener("scroll", scheduleLogListAppend, { passive: true });
+    appList?.addEventListener("scroll", scheduleAppListWindowRender, {
+      passive: true,
+    });
+    logViewer?.addEventListener("scroll", scheduleLogListAppend, {
+      passive: true,
+    });
     window.addEventListener("resize", () => {
       State.appListWindowStart = -1;
       scheduleAppListWindowRender();
@@ -1988,7 +2009,7 @@
       '<div class="loading-state"><div class="spinner"></div><span>加载配置...</span></div>';
     try {
       const [label, config, globalConfig] = await Promise.all([
-        Api.getAppLabel(packageName).catch(() => ""),
+        Api.getAppLabel(packageName, State.configUserId).catch(() => ""),
         Api.readAppConfig(packageName),
         Api.readGlobalConfig().catch(() => null),
       ]);
@@ -2740,7 +2761,9 @@
         const toggle = event.currentTarget;
         toggle.classList.toggle("on");
         saveUpdatePrefs(
-          Object.assign({}, updatePrefs(), { autoCheckUpdates: toggle.classList.contains("on") }),
+          Object.assign({}, updatePrefs(), {
+            autoCheckUpdates: toggle.classList.contains("on"),
+          }),
         );
         Theme.showToast("设置已保存", "success");
       });
@@ -3378,7 +3401,10 @@
       return { valid: false, msg: "路径不能包含 . 或 .." };
     if (/[<>:"|?*\x00-\x1f]/.test(body)) return { valid: false, msg: "路径包含非法字符" };
     if (!options?.allowApplicationPrivateRoot && isApplicationPrivateRootPath(text)) {
-      return { valid: false, msg: "不能直接映射应用私有目录根路径，请填写其下的子路径" };
+      return {
+        valid: false,
+        msg: "不能直接映射应用私有目录根路径，请填写其下的子路径",
+      };
     }
     return { valid: true, msg: "路径格式正确" };
   }
@@ -3454,7 +3480,10 @@
     const unsafeRe = allowWildcards ? /[<>:"|\x00-\x1f]/ : /[<>:"|?*\x00-\x1f]/;
     if (unsafeRe.test(pathPart)) return { valid: false, msg: "路径包含非法字符" };
     if (options?.disallowPrivateAndroidTarget && isAndroidDataOrObbPath(pathPart)) {
-      return { valid: false, msg: "映射目标不能位于 Android/data 或 Android/obb" };
+      return {
+        valid: false,
+        msg: "映射目标不能位于 Android/data 或 Android/obb",
+      };
     }
     return { valid: true, msg: "路径格式正确" };
   }
@@ -3500,10 +3529,18 @@
       .replace(/\/+/g, "/");
     if (!value) return { valid: false, value: "", msg: "路径不能为空" };
     if (hasMonitorFilterStorageRootPrefix(value))
-      return { valid: false, value: "", msg: "不能带存储根目录，请输入相对路径" };
+      return {
+        valid: false,
+        value: "",
+        msg: "不能带存储根目录，请输入相对路径",
+      };
     if (value.startsWith("/")) {
       if (!allowLegacyAbsolute)
-        return { valid: false, value: "", msg: "不能使用绝对路径，请输入相对路径" };
+        return {
+          valid: false,
+          value: "",
+          msg: "不能使用绝对路径，请输入相对路径",
+        };
       value = value.replace(/^\/+/, "");
     }
     value = value.replace(/^\/+|\/+$/g, "");
@@ -3514,7 +3551,11 @@
     if (value.split("/").some((part) => part === "." || part === ".."))
       return { valid: false, value: "", msg: "路径不能包含 . 或 .." };
     if (hasMonitorFilterStorageRootPrefix(value))
-      return { valid: false, value: "", msg: "不能带存储根目录，请输入相对路径" };
+      return {
+        valid: false,
+        value: "",
+        msg: "不能带存储根目录，请输入相对路径",
+      };
     if (/[<>:"|\x00-\x1f]/.test(value)) return { valid: false, value: "", msg: "路径包含非法字符" };
     return { valid: true, value, msg: "路径格式正确" };
   }
@@ -3523,7 +3564,9 @@
     const seen = new Set();
     const out = [];
     (Array.isArray(list) ? list : []).forEach((item) => {
-      const result = validateMonitorFilterPath(item, { allowLegacyAbsolute: true });
+      const result = validateMonitorFilterPath(item, {
+        allowLegacyAbsolute: true,
+      });
       if (!result.valid || seen.has(result.value)) return;
       seen.add(result.value);
       out.push(result.value);
@@ -3570,7 +3613,9 @@
       inputEl.classList.remove("invalid");
       return false;
     }
-    const result = validateMonitorFilterPath(inputEl.value, { allowLegacyAbsolute: false });
+    const result = validateMonitorFilterPath(inputEl.value, {
+      allowLegacyAbsolute: false,
+    });
     hintEl.textContent = result.msg;
     hintEl.className = "path-validation " + (result.valid ? "valid" : "invalid");
     inputEl.classList.toggle("invalid", !result.valid);
@@ -3624,7 +3669,11 @@
     const splitInputPath = (value) => {
       const normalized = normalizeRelative(value);
       if (!normalized || normalized.endsWith("/")) {
-        return { dirRel: normalized.replace(/\/$/, ""), query: "", prefix: normalized };
+        return {
+          dirRel: normalized.replace(/\/$/, ""),
+          query: "",
+          prefix: normalized,
+        };
       }
       const slash = normalized.lastIndexOf("/");
       if (slash === -1) return { dirRel: "", query: normalized.toLowerCase(), prefix: "" };
@@ -3747,7 +3796,11 @@
   function showAddPathDialog(packageName, users, type, editOptions) {
     const originalPath = editOptions?.originalPath || "";
     const isEdit = !!originalPath;
-    const titles = { allow: "添加允许路径", sandbox: "添加沙盒路径", readonly: "添加只读路径" };
+    const titles = {
+      allow: "添加允许路径",
+      sandbox: "添加沙盒路径",
+      readonly: "添加只读路径",
+    };
     const hints = {
       allow: "直接输入路径可放行；仅支持共享存储根下的相对路径；加 ! 前缀可排除子路径。",
       sandbox: "仅映射模式下，未命中映射时进入沙盒；支持 *、? 通配及 ! 排除子路径。",
@@ -4364,7 +4417,11 @@
           {
             id: createTemplateId(),
             name: "\u65b0\u914d\u7f6e\u6a21\u677f",
-            config: { users: { [String(State.currentUserId || "0")]: createDefaultProfile() } },
+            config: {
+              users: {
+                [String(State.currentUserId || "0")]: createDefaultProfile(),
+              },
+            },
           },
           { originPage: "settings" },
         );
@@ -5078,7 +5135,10 @@
     rawReadOnly.forEach((item) =>
       pushUniquePath(
         readOnlyPaths,
-        sanitizeBackupPath(item, { allowRuleSyntax: true, allowWildcards: true }),
+        sanitizeBackupPath(item, {
+          allowRuleSyntax: true,
+          allowWildcards: true,
+        }),
       ),
     );
     profile.allowed_real_paths = sortPathRules(
@@ -5105,7 +5165,10 @@
     rawSandboxed.forEach((item) =>
       pushUniquePath(
         sandboxed,
-        sanitizeBackupPath(item, { allowRuleSyntax: true, allowWildcards: true }),
+        sanitizeBackupPath(item, {
+          allowRuleSyntax: true,
+          allowWildcards: true,
+        }),
       ),
     );
     profile.sandboxed_paths = sortPathRules(sandboxed);
@@ -5557,7 +5620,10 @@
         return await window.showSaveFilePicker({
           suggestedName: fileName,
           types: [
-            { description: "Storage Redirect X Backup", accept: { "application/zip": [".zip"] } },
+            {
+              description: "Storage Redirect X Backup",
+              accept: { "application/zip": [".zip"] },
+            },
           ],
         });
       } catch (error) {
@@ -5592,7 +5658,9 @@
 
   async function saveBackupWithDirectoryHandle(dirHandle, fileName, bytes) {
     if (!dirHandle) return false;
-    const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+    const fileHandle = await dirHandle.getFileHandle(fileName, {
+      create: true,
+    });
     await writeBackupToFileHandle(fileHandle, bytes);
     return true;
   }
@@ -5929,7 +5997,12 @@
         verboseOptions.forEach((verboseOption) => {
           uiOptions.forEach((uiOption) => {
             templateOptions.forEach((templateOption) => {
-              optionSets.push({ ...autoOption, ...verboseOption, ...uiOption, ...templateOption });
+              optionSets.push({
+                ...autoOption,
+                ...verboseOption,
+                ...uiOption,
+                ...templateOption,
+              });
             });
           });
         });
@@ -5944,7 +6017,9 @@
       );
     };
     const baseDigests = await buildDigestCandidates(data);
-    const legacyMonitorData = cloneForBackupDigest(data, { legacyDefaultMonitorOperations: true });
+    const legacyMonitorData = cloneForBackupDigest(data, {
+      legacyDefaultMonitorOperations: true,
+    });
     const legacyMonitorDigests =
       stableJson(legacyMonitorData) === stableJson(data)
         ? []
@@ -5956,7 +6031,9 @@
       stableJson(legacyFullMonitorData) === stableJson(data)
         ? []
         : await buildDigestCandidates(legacyFullMonitorData);
-    const noMonitorData = cloneForBackupDigest(data, { includeMonitorFilters: false });
+    const noMonitorData = cloneForBackupDigest(data, {
+      includeMonitorFilters: false,
+    });
     const monitorCompatDigests = await buildDigestCandidates(noMonitorData);
     if (
       ![
@@ -6127,8 +6204,7 @@
       .map(parseLogLine)
       .filter(Boolean)
       .filter((entry) => !shouldFilterMonitorLogEntry(entry, filters));
-    const mappingPaths = collectMappingPaths(entries);
-    return coalesceLogEntries(entries, mappingPaths);
+    return coalesceLogEntries(entries);
   }
 
   function initDashboardRefreshHooks() {
@@ -6151,6 +6227,8 @@
     lines.forEach((line) => {
       const parts = String(line || "").split("|");
       const extras = parseLogExtras(parts.slice(5));
+      if (extras.caller_boundary || ["shared_uid", "executor"].includes(extras.identify_method))
+        return;
       [parts[1], parts[2], extras.watch_package].forEach((pkg) => {
         if (pkg && pkg !== "-" && /^[A-Za-z0-9_.-]+$/.test(pkg)) packages.add(pkg);
       });
@@ -6245,20 +6323,22 @@
   }
 
   function parseLogLine(line) {
-    const parts = String(line || "").split("|");
+    let parts = String(line || "").split("|");
+    const extras = parseLogExtras(parts.slice(5));
+    if (extras.field_encoding === "percent") parts = parts.map(decodeLogField);
     const timestamp = parts[0] || "";
     const processPkg = parts[1] || "";
-    const callerPkg = parts[2] || "";
+    const callerPkg = extras.record_integrity === "ambiguous" ? "-" : parts[2] || "";
     const eventKind = parts[3] || "";
     const path = parts[4] || extractPathFromLog(line);
-    const extras = parseLogExtras(parts.slice(5));
     const filterOperation = extras.op_filter || extras.op || eventKind;
     const rawOperation = extras.op || eventKind;
     const operationIntent = monitorOperationIntent(filterOperation);
     if (extras.op === "monitor_watch") return null;
     const ret = Number(extras.ret ?? NaN);
     const errno = Number(extras.errno ?? NaN);
-    const ok = Number.isFinite(ret) ? ret >= 0 : !/error|fail|denied/i.test(line);
+    const ambiguous = extras.record_integrity === "ambiguous";
+    const ok = !ambiguous && (Number.isFinite(ret) ? ret >= 0 : !/error|fail|denied/i.test(line));
     const watchPkg = extras.watch_package || "";
     const fromPath = extras.from || "";
     const landingPath = normalizeLogLandingPath(path);
@@ -6266,20 +6346,25 @@
     const backendPath = normalizeLogLandingPath(extras.backend || "");
     const displayPath = selectLogPrimaryPath(landingPath || path, backendPath, extras);
     const identifyMethod = extras.identify_method || "";
+    const hasApplicationIdentity =
+      !extras.caller_boundary && !["shared_uid", "executor"].includes(identifyMethod);
     const eventRole = inferMonitorEventRole(extras.event_role, identifyMethod, rawOperation);
     const correlationId = extras.correlation_id || "";
     const observerPackage = extras.observer_package || "";
-    const isModuleWebUiExport = isModuleExportLogEntry(extras, processPkg, callerPkg, watchPkg);
+    const isModuleWebUiExport =
+      !ambiguous && isModuleExportLogEntry(extras, processPkg, callerPkg, watchPkg);
     const pkg = isModuleWebUiExport
       ? BACKUP_MODULE_ID
-      : selectLogDisplayPackage(
-          processPkg,
-          callerPkg,
-          watchPkg,
-          identifyMethod,
-          eventRole,
-          extras.source || "",
-        );
+      : !hasApplicationIdentity
+        ? callerPkg || "-"
+        : selectLogDisplayPackage(
+            processPkg,
+            callerPkg,
+            watchPkg,
+            identifyMethod,
+            eventRole,
+            extras.source || "",
+          );
     const attributedObservation = isAttributedFilesystemObservation(
       eventRole,
       identifyMethod,
@@ -6294,7 +6379,9 @@
         ? "文件系统观察"
         : unattributedIntermediateSource
           ? "未知来源"
-          : getLogPackageLabel(pkg);
+          : !hasApplicationIdentity
+            ? pkg
+            : getLogPackageLabel(pkg);
     const operationLabel = isModuleWebUiExport
       ? "export"
       : eventRole === "observation"
@@ -6311,7 +6398,11 @@
         ? describeLogObservationSource(processPkg, watchPkg, observerPackage, extras)
         : describeLogSource(processPkg, callerPkg, extras);
     const status = ok ? "success" : "error";
-    const statusText = ok ? "成功" : describeErrno(errno, extras);
+    const statusText = ambiguous
+      ? "结果未知：日志字段冲突"
+      : ok
+        ? "成功"
+        : describeErrno(errno, extras);
     const timeText = timestamp.length >= 16 ? timestamp.slice(11, 16) : "--:--";
     const meta = [];
     if (operationIntent) meta.push(monitorIntentLabel(operationIntent));
@@ -6374,6 +6465,7 @@
       correlationId,
       observerPackage,
       observationCount: 0,
+      hasApplicationIdentity,
       meta,
       extras,
       searchText,
@@ -6383,7 +6475,11 @@
 
   function inferMonitorEventRole(explicitRole, identifyMethod, rawOperation) {
     if (explicitRole === "request" || explicitRole === "observation") return explicitRole;
-    if (identifyMethod === "media_provider_fallback" || identifyMethod === "daemon_inotify") {
+    if (
+      identifyMethod === "media_provider_fallback" ||
+      identifyMethod === "daemon_inotify" ||
+      rawOperation === "inotify"
+    ) {
       return "observation";
     }
     if (
@@ -6451,7 +6547,9 @@
   }
 
   function monitorPathFilterMatches(rule, path) {
-    const result = validateMonitorFilterPath(rule, { allowLegacyAbsolute: true });
+    const result = validateMonitorFilterPath(rule, {
+      allowLegacyAbsolute: true,
+    });
     if (!result.valid) return false;
     const pattern = result.value;
     const relative = monitorFilterRelativeLogPath(path);
@@ -6491,13 +6589,13 @@
     return new RegExp("^" + escaped + "$").test(String(value || ""));
   }
 
-  function coalesceLogEntries(entries, mappingPaths = emptyMappingPaths()) {
+  function coalesceLogEntries(entries) {
     const groups = new Map();
     const correlationIndexes = new Map();
     const ordered = [];
     entries.forEach((entry) => {
       if (!entry) return;
-      if (shouldHideCompanionLogEntry(entry, mappingPaths)) return;
+      if (shouldHideCompanionLogEntry(entry)) return;
       const createWriteIndex = ordered.findIndex((existing) =>
         mergeFuseCreateWriteDuplicate(existing, entry),
       );
@@ -6518,6 +6616,8 @@
           ordered[correlatedIndex] = merged;
           const previousKey = buildLogCoalesceKey(previous);
           if (previousKey) groups.set(previousKey, merged);
+          const mergedKey = buildLogCoalesceKey(merged);
+          if (mergedKey) groups.set(mergedKey, merged);
           return;
         }
       }
@@ -6529,6 +6629,8 @@
           ordered[uncorrelatedIndex],
           entry,
         );
+        const mergedKey = buildLogCoalesceKey(ordered[uncorrelatedIndex]);
+        if (mergedKey) groups.set(mergedKey, ordered[uncorrelatedIndex]);
         return;
       }
       const key = buildLogCoalesceKey(entry);
@@ -6559,7 +6661,9 @@
 
   function mergeFuseCreateWriteDuplicate(existing, candidate) {
     if (!existing || !candidate) return null;
+    if (existing.status !== "success" || candidate.status !== "success") return null;
     if (existing.eventRole !== "request" || candidate.eventRole !== "request") return null;
+    if (logRequestIdentityKey(existing) !== logRequestIdentityKey(candidate)) return null;
     if (existing.pkg !== candidate.pkg) return null;
     if (!["fuse_redirect", "fuse_monitor_only"].includes(existing.extras?.identify_method)) {
       return null;
@@ -6622,10 +6726,8 @@
     } else if (existing.eventRole === "observation" && candidate.eventRole === "request") {
       request = candidate;
       observation = existing;
-    } else if (existing.eventRole === "request" && candidate.eventRole === "request") {
-      return pickPreferredLogEntry(existing, candidate);
     } else {
-      return existing;
+      return null;
     }
     const observer = observation.observerPackage || request.observerPackage || "";
     const observationCount =
@@ -6700,44 +6802,10 @@
     };
   }
 
-  function emptyMappingPaths() {
-    return { sources: new Set(), targets: new Set() };
-  }
-
-  function collectMappingPaths(entries) {
-    const mappingPaths = emptyMappingPaths();
-    entries.forEach((entry) => {
-      if (!entry || entry.status !== "success") return;
-      if (entry?.extras?.source !== "path_mapping") return;
-      const sourcePath = entry?.sourcePath || entry?.fromPath || "";
-      const targetPath = entry?.landingPath || entry?.path || "";
-      if (sourcePath) mappingPaths.sources.add(sourcePath);
-      if (targetPath) mappingPaths.targets.add(targetPath);
-    });
-    return mappingPaths;
-  }
-
-  function shouldHideCompanionLogEntry(entry, mappingPaths = emptyMappingPaths()) {
+  function shouldHideCompanionLogEntry(entry) {
     const path = entry?.originalPath || entry?.landingPath || entry?.path || "";
     const name = path.split("/").pop() || "";
-    if (/^\.[^/]+\.js$/i.test(name)) return true;
-    if (entry?.status !== "error") return false;
-    const sources = mappingPaths?.sources || new Set();
-    const targets = mappingPaths?.targets || new Set();
-    if (!sources.size && !targets.size) return false;
-    const sourcePath = entry?.sourcePath || entry?.fromPath || "";
-    const targetPath = entry?.landingPath || entry?.path || "";
-    if (!sourcePath || !targetPath) return false;
-    if (!sources.has(sourcePath) || !targets.has(targetPath)) return false;
-    const opFilter = String(
-      entry?.extras?.op_filter || entry?.extras?.op || entry?.operationLabel || "",
-    ).toLowerCase();
-    return (
-      opFilter.includes("open") ||
-      opFilter.includes("provider_open") ||
-      opFilter.includes("create") ||
-      opFilter.includes("write")
-    );
+    return /^\.[^/]+\.js$/i.test(name);
   }
 
   function buildLogCoalesceKey(entry) {
@@ -6754,17 +6822,42 @@
           entry?.operationLabel || entry?.extras?.op_filter || entry?.extras?.op || "",
         );
     const correlation = entry?.correlationId || "";
-    if (correlation) return "correlation|" + correlation;
+    if (correlation)
+      return [
+        "correlation",
+        correlation,
+        logRequestIdentityKey(entry),
+        getLogResultGroup(entry),
+      ].join("|");
     return [
       (entry.timestamp || "").slice(0, 16),
       coalescePath.replace(/^\/storage\/emulated\/\d+\//, "/storage/emulated/*/"),
       op,
       getLogResultGroup(entry),
-      "*",
+      logRequestIdentityKey(entry),
     ].join("|");
   }
 
+  function logRequestIdentityKey(entry) {
+    if (entry.eventRole !== "request") return "*";
+    const extra = entry.extras || {};
+    return [
+      "request",
+      entry.pkg,
+      extra.caller_uid,
+      extra.caller_pid,
+      extra.caller_start_time,
+      extra.caller_context,
+      extra.caller_boundary,
+      extra.native,
+      ["shared_uid", "executor"].includes(extra.identify_method) ? extra.identify_method : "app",
+    ]
+      .map((value) => value ?? "")
+      .join(":");
+  }
+
   function getLogResultGroup(entry) {
+    if (entry?.extras?.record_integrity === "ambiguous") return "unknown:log_fields";
     if (!entry || entry.status === "success") return "ok";
     if (entry.extras?.deny_reason === "read_only_rule") return "deny:read_only_rule";
     return "error:" + (entry.statusText || "unknown");
@@ -6933,9 +7026,11 @@
     const intent = monitorOperationIntent(syscallOp);
     if (op === "provider_open") {
       return (
-        { read: "Provider 读取请求", write: "Provider 写入请求", create: "Provider 创建请求" }[
-          intent
-        ] || "Provider 打开请求"
+        {
+          read: "Provider 读取请求",
+          write: "Provider 写入请求",
+          create: "Provider 创建请求",
+        }[intent] || "Provider 打开请求"
       );
     }
     if (op === "open" || op === "openat" || op === "openat2") {
@@ -6983,6 +7078,10 @@
 
   function describeLogSource(processPkg, callerPkg, extras) {
     const method = extras.identify_method || "unknown";
+    if (extras.caller_boundary === "unverified") return "来源未知（任务未核验）";
+    if (extras.caller_boundary || method === "executor")
+      return "执行者 " + (extras.native || callerPkg || "-");
+    if (method === "shared_uid") return "共享用户 " + callerPkg + "（共享 UID 回退）";
     if (
       callerPkg &&
       callerPkg !== "-" &&
@@ -7175,12 +7274,34 @@
 
   function parseLogExtras(parts) {
     const out = {};
+    let ambiguous = false;
     parts.forEach((part) => {
       const index = part.indexOf("=");
       if (index <= 0) return;
-      out[part.slice(0, index)] = part.slice(index + 1);
+      const key = part.slice(0, index);
+      if (Object.prototype.hasOwnProperty.call(out, key)) ambiguous = true;
+      else out[key] = part.slice(index + 1);
     });
+    if (out.field_encoding === "percent") {
+      Object.keys(out).forEach((key) => {
+        out[key] = decodeLogField(out[key]);
+      });
+    }
+    if (ambiguous || out.record_integrity === "ambiguous") {
+      out.record_integrity = "ambiguous";
+      out.caller_boundary = "unverified";
+      out.identify_method = "unknown";
+      out.identify_reliability = "none";
+    }
     return out;
+  }
+
+  function decodeLogField(value) {
+    return value
+      .replace(/%7C/g, "|")
+      .replace(/%0D/g, "\r")
+      .replace(/%0A/g, "\n")
+      .replace(/%25/g, "%");
   }
 
   function extractPathFromLog(line) {
@@ -7232,11 +7353,13 @@
   }
 
   function renderLogCard(entry) {
-    const iconSrc = Api.getAppIconSrc ? Api.getAppIconSrc(entry.pkg) : "";
+    const iconSrc =
+      entry.hasApplicationIdentity && Api.getAppIconSrc ? Api.getAppIconSrc(entry.pkg) : "";
     const initial = (entry.appName || entry.pkg || "?").trim().charAt(0).toUpperCase() || "?";
     const timeText = formatLogTime(entry);
     const timeTitle = State.logFullTime ? "切换为仅显示时间" : "切换为日期和时间";
     const canOpenApp =
+      entry.hasApplicationIdentity &&
       (entry.eventRole !== "observation" || entry.attributedObservation) &&
       isSinglePackageName(entry.pkg) &&
       !entry.isModuleWebUiExport;
@@ -7259,6 +7382,17 @@
         "</button>"
       : '<div class="log-app-identity is-disabled">' + identityContent + "</div>";
     const detailParts = [];
+    for (const [key, label] of [
+      ["caller_uid", "请求 UID"],
+      ["caller_pid", "请求 PID/TID"],
+      ["caller_start_time", "任务启动时钟"],
+      ["caller_context", "SELinux 域"],
+      ["caller_boundary", "归因边界"],
+      ["native", "原生执行者"],
+    ]) {
+      const value = entry.extras?.[key];
+      if (value != null && value !== "") detailParts.push(label + "：" + escapeHtml(String(value)));
+    }
     const requestPath = requestPathForLogEntry(entry);
     if (entry.backendPath && entry.backendPath !== entry.path)
       detailParts.push("实际路径：" + escapeHtml(entry.backendPath));
@@ -7547,8 +7681,14 @@
     const addCurrentValue = async () => {
       const result =
         activeType === `path`
-          ? validateMonitorFilterPath(input.value, { allowLegacyAbsolute: false })
-          : { valid: true, value: String(input.value || String()).trim(), msg: String() };
+          ? validateMonitorFilterPath(input.value, {
+              allowLegacyAbsolute: false,
+            })
+          : {
+              valid: true,
+              value: String(input.value || String()).trim(),
+              msg: String(),
+            };
       if (!result.valid || !result.value) {
         Theme.showToast(result.msg || `规则不能为空`, `error`);
         if (activeType === `path`) showMonitorFilterPathValidation(input, validation);
@@ -7666,6 +7806,9 @@
       normalizeUsersConfig,
       logOperationCopyValue,
       parseLogLine,
+      parseMonitorLogEntries,
+      renderLogCard,
+      coalesceLogEntries,
       shouldFilterMonitorLogEntry,
       splitMonitorOperationRules,
       setToggleBusy,

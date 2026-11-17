@@ -164,18 +164,18 @@ pub(super) fn emit_monitor_event(
         return;
     }
     let mut line = format!(
-        "{}|{}|{}|{}|{}|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=observation|op={}|source={}|mask=0x{:x}|backend={}",
+        "{}|{}|{}|{}|{}|field_encoding=percent|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=observation|op={}|source={}|mask=0x{:x}|backend={}",
         build_timestamp(),
         identity.package_name,
         identity.package_name,
         event_kind,
-        paths.display_path,
+        crate::platform::log_fields::encode(&paths.display_path),
         identity.identify_method,
         identity.identify_reliability,
         operation_name,
         source,
         mask,
-        paths.backend_path
+        crate::platform::log_fields::encode(&paths.backend_path)
     );
     if watch_package_name != identity.package_name {
         line.push_str("|watch_package=");
@@ -188,7 +188,7 @@ pub(super) fn emit_monitor_event(
     line.push_str("|observer_package=srx_daemon");
     if !paths.from_path.is_empty() && paths.from_path != paths.display_path {
         line.push_str("|from=");
-        line.push_str(&paths.from_path);
+        line.push_str(&crate::platform::log_fields::encode(&paths.from_path));
     }
     log::info!(target: LOGCAT_OP_TAG, "{}", line);
 }

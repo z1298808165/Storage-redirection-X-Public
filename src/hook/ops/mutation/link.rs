@@ -131,7 +131,10 @@ pub unsafe extern "C" fn hooked_symlink(target: *const c_char, linkpath: *const 
             let extra = if target_text.is_empty() {
                 None
             } else {
-                Some(format!("from={}", target_text))
+                Some(format!(
+                    "from={}",
+                    crate::platform::log_fields::encode(&target_text)
+                ))
             };
             handle_single_path_audit(
                 hub,
@@ -187,7 +190,10 @@ pub unsafe extern "C" fn hooked_symlinkat(
             let extra = if target_text.is_empty() {
                 None
             } else {
-                Some(format!("from={}", target_text))
+                Some(format!(
+                    "from={}",
+                    crate::platform::log_fields::encode(&target_text)
+                ))
             };
             handle_single_path_audit(
                 hub,

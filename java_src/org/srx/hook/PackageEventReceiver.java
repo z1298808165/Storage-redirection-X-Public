@@ -33,6 +33,7 @@ public final class PackageEventReceiver extends BroadcastReceiver {
   private static volatile File eventFile;
   private static volatile File readyFile;
   private static volatile PackageEventReceiver receiver;
+  private static volatile boolean allUsersRegistered;
 
   private PackageEventReceiver() {}
 
@@ -55,7 +56,9 @@ public final class PackageEventReceiver extends BroadcastReceiver {
 
   private static boolean tryInstall(boolean logFailure) {
     if (!INSTALLED.compareAndSet(false, true)) {
-      writeReadySignal();
+      if (allUsersRegistered) {
+        writeReadySignal();
+      }
       Log.i(TAG, "receiver already installed");
       return true;
     }
@@ -78,11 +81,14 @@ public final class PackageEventReceiver extends BroadcastReceiver {
       filter.addDataScheme("package");
 
       PackageEventReceiver newReceiver = new PackageEventReceiver();
-      if (!registerForAllUsers(context, newReceiver, filter)) {
+      allUsersRegistered = registerForAllUsers(context, newReceiver, filter);
+      if (!allUsersRegistered) {
         registerForCurrentUser(context, newReceiver, filter);
       }
       receiver = newReceiver;
-      writeReadySignal();
+      if (allUsersRegistered) {
+        writeReadySignal();
+      }
       Log.i(TAG, "receiver installed");
       return true;
     } catch (Throwable t) {

@@ -15,7 +15,9 @@ const EXTERNAL_STORAGE_PROVIDER: &str = "com.android.externalstorage";
 const MTP_PACKAGE: &str = "com.android.mtp";
 
 struct SharedUidState {
-    uid_by_package: HashMap<String, i32>,
+    // appId 仅用于跨用户的配置分组；请求身份始终使用完整 UID。
+    app_id_by_package: HashMap<String, i32>,
+    uids_by_package: HashMap<(String, i32), i32>,
     packages_by_uid: HashMap<i32, Vec<String>>,
     system_writer_shared_uids: HashSet<i32>,
     uid_file_path: String,
@@ -26,7 +28,8 @@ struct SharedUidState {
 impl Default for SharedUidState {
     fn default() -> Self {
         Self {
-            uid_by_package: HashMap::new(),
+            app_id_by_package: HashMap::new(),
+            uids_by_package: HashMap::new(),
             packages_by_uid: HashMap::new(),
             system_writer_shared_uids: HashSet::new(),
             uid_file_path: SYSTEM_WRITER_UIDS_FILE.to_string(),
@@ -93,7 +96,7 @@ pub fn media_provider_record_package() -> String {
         MEDIA_PROVIDER_GOOGLE,
         MEDIA_PROVIDER_LEGACY,
     ] {
-        if get_uid_for_package(candidate) >= 0 {
+        if get_app_id_for_package(candidate) >= 0 {
             return candidate.to_string();
         }
     }
@@ -227,23 +230,25 @@ pub fn get_shared_group_members(package_name: &str) -> Vec<String> {
     let state = SHARED_UID_STATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let Some(uid) = state.uid_by_package.get(package_name) else {
+    let Some(app_id) = state.app_id_by_package.get(package_name) else {
         return vec![];
     };
-    if !is_shared_uid(*uid, &state.packages_by_uid) {
-        return vec![];
+    let mut members = state
+        .packages_by_uid
+        .iter()
+        .filter(|(full_uid, _)| **full_uid % 100000 == *app_id)
+        .flat_map(|(_, names)| names.iter().cloned())
+        .collect::<Vec<_>>();
+    members.sort();
+    members.dedup();
+    if members.len() < 2 {
+        members.clear();
     }
-    state.packages_by_uid.get(uid).cloned().unwrap_or_default()
+    members
 }
 
 pub fn is_shared_group_package(package_name: &str) -> bool {
-    let state = SHARED_UID_STATE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let Some(uid) = state.uid_by_package.get(package_name) else {
-        return false;
-    };
-    is_shared_uid(*uid, &state.packages_by_uid)
+    !get_shared_group_members(package_name).is_empty()
 }
 
 pub fn get_packages_for_uid(uid: i32) -> Vec<String> {
@@ -260,13 +265,13 @@ pub fn get_all_package_names() -> Vec<String> {
     let state = SHARED_UID_STATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let mut packages = state.uid_by_package.keys().cloned().collect::<Vec<_>>();
+    let mut packages = state.app_id_by_package.keys().cloned().collect::<Vec<_>>();
     packages.sort();
     packages.dedup();
     packages
 }
 
-pub fn get_uid_for_package(package_name: &str) -> i32 {
+pub fn get_app_id_for_package(package_name: &str) -> i32 {
     if package_name.is_empty() {
         return -1;
     }
@@ -274,18 +279,30 @@ pub fn get_uid_for_package(package_name: &str) -> i32 {
         .lock()
         .unwrap_or_else(|err| err.into_inner());
     state
-        .uid_by_package
+        .app_id_by_package
         .get(package_name)
         .copied()
         .unwrap_or(-1)
 }
 
-pub fn get_fresh_uid_for_package(package_name: &str) -> i32 {
-    if package_name.is_empty() {
+/// 返回指定用户已安装包的完整 UID；不存在时返回 -1，不借用其它用户的安装记录。
+pub fn get_uid_for_package_in_user(package_name: &str, user_id: i32) -> i32 {
+    if package_name.is_empty() || user_id < 0 {
         return -1;
     }
+    let state = SHARED_UID_STATE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    state
+        .uids_by_package
+        .get(&(package_name.to_owned(), user_id))
+        .copied()
+        .unwrap_or(-1)
+}
+
+pub fn get_fresh_uid_for_package_in_user(package_name: &str, user_id: i32) -> i32 {
     refresh_shared_uid_cache();
-    get_uid_for_package(package_name)
+    get_uid_for_package_in_user(package_name, user_id)
 }
 
 // 格式: "pkg1,pkg2,pkg3"
@@ -358,13 +375,6 @@ pub(crate) fn parse_line(line: &str) -> Option<(String, i32)> {
     Some((package_value, uid))
 }
 
-fn is_shared_uid(uid: i32, packages_by_uid: &HashMap<i32, Vec<String>>) -> bool {
-    packages_by_uid
-        .get(&uid)
-        .map(|packages| packages.len() >= 2)
-        .unwrap_or(false)
-}
-
 fn uid_file_path_for_config_dir(config_dir: &str) -> String {
     SYSTEM_WRITER_UIDS_FILE.replacen(crate::platform::module_paths::CONFIG_DIR, config_dir, 1)
 }
@@ -391,15 +401,31 @@ fn load_shared_uid_cache(state: &mut SharedUidState, fingerprint: u64) {
         return;
     };
 
-    let mut uid_by_package = HashMap::new();
+    let mut app_id_by_package = HashMap::new();
+    let mut uids_by_package = HashMap::new();
     let mut packages_by_uid: HashMap<i32, Vec<String>> = HashMap::new();
 
     let reader = BufReader::new(file);
-    for line in reader.lines().map_while(Result::ok) {
-        let Some((package, uid)) = parse_line(&line) else {
-            continue;
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            return;
         };
-        uid_by_package.insert(package.clone(), uid);
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((package, uid)) = parse_line(&line) else {
+            return;
+        };
+        let app_id = uid % 100000;
+        if app_id_by_package
+            .insert(package.clone(), app_id)
+            .is_some_and(|old| old != app_id)
+            || uids_by_package
+                .insert((package.clone(), uid / 100000), uid)
+                .is_some_and(|old| old != uid)
+        {
+            return;
+        }
         packages_by_uid.entry(uid).or_default().push(package);
     }
 
@@ -418,7 +444,8 @@ fn load_shared_uid_cache(state: &mut SharedUidState, fingerprint: u64) {
         }
     }
 
-    state.uid_by_package = uid_by_package;
+    state.app_id_by_package = app_id_by_package;
+    state.uids_by_package = uids_by_package;
     state.packages_by_uid = packages_by_uid;
     state.system_writer_shared_uids = system_writer_shared_uids;
     state.last_fingerprint = fingerprint;
@@ -426,12 +453,13 @@ fn load_shared_uid_cache(state: &mut SharedUidState, fingerprint: u64) {
 }
 
 fn handle_uid_cache_open_failure(state: &mut SharedUidState, fingerprint: u64) {
-    if state.is_loaded && !state.uid_by_package.is_empty() {
+    if state.is_loaded && !state.app_id_by_package.is_empty() {
         state.last_fingerprint = fingerprint;
         return;
     }
 
-    state.uid_by_package.clear();
+    state.app_id_by_package.clear();
+    state.uids_by_package.clear();
     state.packages_by_uid.clear();
     state.system_writer_shared_uids.clear();
     state.last_fingerprint = fingerprint;
@@ -444,11 +472,13 @@ pub(crate) fn set_shared_uid_entries_for_tests(entries: &[(i32, &[&str])]) {
     let mut state = SHARED_UID_STATE
         .lock()
         .unwrap_or_else(|err| err.into_inner());
-    let mut uid_by_package = HashMap::new();
+    let mut app_id_by_package = HashMap::new();
+    let mut uids_by_package = HashMap::new();
     let mut packages_by_uid: HashMap<i32, Vec<String>> = HashMap::new();
     for (uid, packages) in entries {
         for package in packages.iter() {
-            uid_by_package.insert((*package).to_string(), *uid);
+            app_id_by_package.insert((*package).to_string(), *uid % 100000);
+            uids_by_package.insert(((*package).to_string(), *uid / 100000), *uid);
             packages_by_uid
                 .entry(*uid)
                 .or_default()
@@ -459,7 +489,8 @@ pub(crate) fn set_shared_uid_entries_for_tests(entries: &[(i32, &[&str])]) {
         packages.sort();
         packages.dedup();
     }
-    state.uid_by_package = uid_by_package;
+    state.app_id_by_package = app_id_by_package;
+    state.uids_by_package = uids_by_package;
     state.packages_by_uid = packages_by_uid;
     state.last_fingerprint = 0;
     state.is_loaded = true;

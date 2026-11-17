@@ -1476,20 +1476,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
         for name in (
             "run_system_uid_attribution_scenario",
             "run_app_caller_media_provider_attribution_scenario",
-            "run_system_uid_sandbox_missing_target_scenario",
+            "run_shell_executor_boundary_scenario",
         ):
             self.assertIn(name, bash_runner)
         for name in (
             "Invoke-SystemUidAttributionScenario",
             "Invoke-AppCallerMediaProviderAttributionScenario",
-            "Invoke-SystemUidSandboxMissingTargetScenario",
+            "Invoke-ShellExecutorBoundaryScenario",
         ):
             self.assertIn(name, ps_runner)
         self.assertIn("if ($Scenario -in @(38, 40))", ps_runner)
         ps_app_caller = section(
             self.powershell,
             "function Invoke-AppCallerMediaProviderAttributionScenario {",
-            "\nfunction Invoke-SystemUidSandboxMissingTargetScenario",
+            "\nfunction Invoke-ShellExecutorBoundaryScenario",
         )
         self.assertIn("mediastore_create_download", ps_app_caller)
         self.assertIn("identify_method=caller|identify_reliability=high", ps_app_caller)
@@ -2360,12 +2360,32 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn('Invoke-Checked -FilePath "cargo"', script)
         self.assertNotIn("gradlew.bat", script)
 
+    def test_test_flow_selects_su_syntax_before_running_remote_commands(self) -> None:
+        script = read("scripts/verify-test-flow.ps1")
+        resolve = section(script, "function Resolve-AdbSuMode", "function Invoke-AdbSu")
+        invoke = section(script, "function Invoke-AdbSu", "function Wait-DeviceBootCompleted")
+        self.assertIn("su 0 sh -c 'id -u'", resolve)
+        self.assertIn("su -c 'id -u'", resolve)
+        self.assertIn("$script:AdbSuMode = $mode", resolve)
+        self.assertEqual(1, invoke.count("& adb shell"))
+        self.assertNotIn("if ($LASTEXITCODE -eq 0)", invoke)
+
+        shell = read("scripts/verify-test-flow.sh")
+        resolve_shell = section(shell, "resolve_adb_su_mode()", "adb_su()")
+        invoke_shell = section(shell, "adb_su()", "verify_module_runtime_state()")
+        self.assertIn("su 0 sh -c 'id -u'", resolve_shell)
+        self.assertIn("su -c 'id -u'", resolve_shell)
+        self.assertIn("ADB_SU_MODE", resolve_shell)
+        self.assertNotRegex(invoke_shell, r"adb shell .*\|\|\s*adb shell")
+
     def test_windows_test_flow_polls_boot_property_without_remote_shell_expression(self) -> None:
         script = read("scripts/verify-test-flow.ps1")
         wait = section(script, "function Wait-DeviceBootCompleted", "function Assert-ModuleRuntimeState")
         self.assertIn('Invoke-Checked -FilePath "adb" -Arguments @("wait-for-device")', wait)
         self.assertIn("adb shell getprop sys.boot_completed", wait)
         self.assertIn('$bootCompleted -eq "1"', wait)
+        self.assertIn("$attempt -le 450", wait)
+        self.assertIn("设备在 900 秒内未完成启动", wait)
         self.assertNotIn("while [", script)
         self.assertEqual(2, script.count("Wait-DeviceBootCompleted\n"))
 

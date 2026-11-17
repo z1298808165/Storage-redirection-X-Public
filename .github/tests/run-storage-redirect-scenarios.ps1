@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 
 if ([string]::IsNullOrWhiteSpace($Serial)) {
     $devices = @(& adb devices | Select-Object -Skip 1 | Where-Object { $_ -match "`tdevice" })
@@ -149,8 +151,7 @@ $SrtDownloadUrl = if ($env:SRT_DOWNLOAD_URL) { $env:SRT_DOWNLOAD_URL } else { ""
 # 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。
 $UidAttribRel = "Download/SrtUidAttrib"
 $UidAttribProbeRel = "Download/SrtUidAttrib/srt_uid_probe_dir"
-# 场景 40 第三段：系统 uid（shell 2000）自身配置沙盒、真实目标缺失、经 MediaProvider
-# 建目录，请求路径零穿透（与 .sh 同名夹具一致）。
+# 场景 40 第三段：shell 执行者不借用 com.android.shell 的应用沙盒规则。
 $ShellPackage = "com.android.shell"
 $ShellConfig = "/data/adb/modules/storage.redirect.x/config/apps/$ShellPackage.json"
 $ShellSandboxRel = "Download/SrtShellSandbox"
@@ -260,6 +261,14 @@ function Invoke-AdbWithTimeout {
     } finally {
         $process.Dispose()
     }
+}
+
+function Start-TestApp {
+    param([switch]$Wait)
+    $arguments = @("shell", "am", "start")
+    if ($Wait) { $arguments += "-W" }
+    $result = Invoke-AdbWithTimeout -Arguments ($arguments + @("-n", "$AppId/.MainActivity")) -TimeoutSeconds 90
+    if ($result.ExitCode -ne 0) { throw "测试应用启动失败 exit=$($result.ExitCode)：$($result.Output)" }
 }
 
 function Invoke-Su {
@@ -485,14 +494,12 @@ function Restore-DeviceExecutionState {
 }
 
 function Test-FuseBackendScenarioSupport {
-    # 所有场景都使用 auto；是否实际启用 FUSE 由运行时日志和 mountinfo 记录。
+    # 不按 FUSE 能力预先跳过场景；实际后端以运行时日志和 mountinfo 为准。
     return $true
 }
 
 function Remove-ExcludedScenarios {
-    # 版本级场景排除（语义与 sh 版的 prune_version_scenario_excludes 一致）：只剔除、
-    # 不替换，默认范围保持全场景。CI 用 sh 版，本地 pwsh 验证需要同一套排除能力，
-    # 否则模拟 A17 这类「无外网不能验证下载场景」的形态只能靠手改矩阵。
+    # 与 sh 版一致：只剔除调用方指定的场景，不替换默认范围。
     param([int[]]$ScenarioList)
     $excludeRaw = $env:SRT_VERSION_SCENARIO_EXCLUDE
     if ([string]::IsNullOrWhiteSpace($excludeRaw)) { return $ScenarioList }
@@ -1009,7 +1016,7 @@ function Invoke-ServiceCase {
             $script:LastMountConfirmedPid = ""
             Invoke-Adb @("logcat", "-c") | Out-Null
             Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
-            Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+            Start-TestApp -Wait
             if (Test-LabelExpectsMount "$Scenario/$Label-recover") {
                 Wait-AppMountConfirmed "$Scenario/$Label-recover" | Out-Null
             }
@@ -1124,7 +1131,7 @@ function Prepare-ServiceCase {
     $script:LastMountConfirmedPid = ""
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
-    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+    Start-TestApp -Wait
     $confirmed = $true
     if (Test-LabelExpectsMount $Label) {
         $confirmed = Wait-AppMountConfirmed $Label
@@ -2010,7 +2017,7 @@ function Invoke-MonitorCaptureFailOpenScenario {
         # 留下常驻屏障，新语义不落屏障且视图保持原生存活。
         Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
         Start-Sleep -Milliseconds 500
-        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+        Start-TestApp -Wait
         $appPid = ""
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             $appPid = Get-AppPid
@@ -2428,7 +2435,7 @@ function Restart-App {
     $script:LastMountConfirmedPid = ""
     Invoke-Adb @("logcat", "-c") | Out-Null
     Invoke-Su ": > '$LogPath' 2>/dev/null || true" | Out-Null
-    Invoke-Adb @("shell", "am", "start", "-n", "$AppId/.MainActivity") | Out-Null
+    Start-TestApp
     $confirmed = if ($ExpectMount) { Wait-AppMountConfirmed $Label } else { $true }
     if (-not $confirmed -and $script:AppLaunchSettleMilliseconds -gt 0) {
         Start-Sleep -Milliseconds $script:AppLaunchSettleMilliseconds
@@ -2510,7 +2517,7 @@ function Get-ScenarioTitle {
         37 { "nested mapping chain applies parent result to child rule" }
         38 { "download provider sandboxed_paths takeover topology markers" }
         39 { "download provider delegated write lands on requester mapping target" }
-        40 { "system uid fuse write attributed to originating service; app-initiated mediaprovider creation attributed to source app; system uid sandbox missing target has zero leak" }
+        40 { "shell fuse write keeps executor; mediaprovider creation keeps source app; shell does not use App sandbox rules" }
         41 { "sandbox root rebuilt with inherited group; mediaprovider write stays in sandbox with zero public leak" }
         42 { "file mutation, metadata and symlink semantics across sandbox, allow, mapping and prefix sibling" }
         43 { "storage root listing matches system view entry by entry; mediaprovider internal dirs hidden and no dot entries" }
@@ -2541,7 +2548,7 @@ function Invoke-OwnPrivateWriteCase {
         }
         Write-Output "own_private_write_retry scenario=$Scenario label=$Label attempt=$attempt"
         Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
-        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+        Start-TestApp -Wait
         Wait-Storage "scenario-$Scenario-$Label-own-private" | Out-Null
         Clear-Targets
         Clear-Results
@@ -3451,7 +3458,7 @@ function Recover-ScopedFuseStart {
     Invoke-Adb @("shell", "am", "force-stop", $AppId) | Out-Null
     # 重启后旧 PID 的挂载确认全部失效，与 Restart-App 同口径清空缓存。
     $script:LastMountConfirmedPid = ""
-    Invoke-Adb @("shell", "am", "start", "-W", "-n", "$AppId/.MainActivity") | Out-Null
+    Start-TestApp -Wait
     Wait-Storage "scenario-$Scenario-scoped-fuse-recovery" 30 | Out-Null
     Invoke-Su "sleep 1" | Out-Null
 }
@@ -3648,30 +3655,19 @@ function Invoke-DownloadOwnerAttributionScenario {
 }
 
 function Invoke-SystemUidAttributionScenario {
-    # 触发链（与 .sh 的 run_system_uid_attribution_scenario 一致）：shell（uid
-    # 2000）进程先存活足够久（pid 表事件化扫描入库）再在公共存储发起 FUSE
-    # mkdir → 引擎请求头携带 uid 与发起任务 id → 系统 uid 归因分支经 pid 表
-    # 反查发起进程 → 监视记录 identify_method=caller。
-    # 判定标记：
-    #   通过：file_monitor.log 出现 SrtUidAttrib 的 MKDIR 记录且
-    #         identify_method=caller、identify_reliability=high。
-    #   回归：记录 identify_method=unknown（归因链断裂）或无记录。
+    # shell 是执行者边界，记录保留原始 UID/PID、域与 native 名称。
     param([int]$Scenario)
     Write-Host "  - scenario-$Scenario/system-uid: cleanup attribution probe dir"
     Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
     Invoke-Su ": > '$FileMonitorLogPath' 2>/dev/null" | Out-Null
     # Java 初始化只证明当前进程可用；原生 FUSE 归因仍由后续监视记录断言验证。
     if (-not (Confirm-MediaProviderHookReady "scenario-$Scenario-uid-attribution")) { return $false }
-    # 三次尝试任一归因即通过（单槽接力在并发系统请求下存在互覆窗口）；
-    # 每次尝试用独立目录（已存在目录的 mkdir 会被记录去重跳过）。
+    # 每次尝试使用独立目录，避免已有目录的 mkdir 被记录去重跳过。
     $found = $false
     for ($attempt = 1; $attempt -le 3 -and -not $found; $attempt++) {
         $probeRel = "$UidAttribProbeRel/attempt$attempt"
         Write-Host "  - scenario-$Scenario/system-uid: attribution attempt $attempt/3"
-        # mkdir 前必须 exec（与 .sh 同款，2026-10-24 取证）：mksh 对 -c 脚本最后
-        # 一条命令 fork 子进程执行，子进程生命周期毫秒级，daemon 事件化扫描必然
-        # 错过（table_seen=false → identify_method=unknown）。exec 让 mkdir 在已
-        # 入表的同一进程内发起，与真实系统服务的归因语义一致。
+        # exec 保留预存活任务的 PID，并使原生名称变为 mkdir，便于核对执行者快照。
         $bg = Start-Process -FilePath "adb" -ArgumentList @("-s", $Serial, "shell", "sleep 4; exec mkdir -p '/storage/emulated/0/$probeRel'") -PassThru -WindowStyle Hidden
         $seen = $false
         for ($wait = 0; $wait -lt 14; $wait++) {
@@ -3683,7 +3679,7 @@ function Invoke-SystemUidAttributionScenario {
         if (-not $seen) { continue }
         for ($poll = 0; $poll -lt 6; $poll++) {
             Start-Sleep -Seconds 3
-            $record = Invoke-Su "grep -E 'MKDIR\|/storage/emulated/0/$probeRel\|' '$FileMonitorLogPath' 2>/dev/null | grep -E 'identify_method=caller\|identify_reliability=high' | head -1"
+            $record = Invoke-Su "grep -F '|MKDIR|/storage/emulated/0/$probeRel|' '$FileMonitorLogPath' 2>/dev/null | grep -E 'identify_method=executor\|identify_reliability=high' | grep -E '(^|\|)caller_uid=2000(\||$)' | grep -E '(^|\|)caller_pid=[1-9][0-9]*(\||$)' | grep -E '(^|\|)caller_start_time=[1-9][0-9]*(\||$)' | grep -F '|caller_context=u:r:shell:s0|' | grep -F '|caller_boundary=shell|' | grep -F '|native=mkdir' | grep -F '|ret=0|' | head -1"
             if ($record) { $found = $true; break }
         }
     }
@@ -3692,7 +3688,7 @@ function Invoke-SystemUidAttributionScenario {
         Invoke-Su "grep 'SrtUidAttrib' '$FileMonitorLogPath' 2>/dev/null | tail -3" | Write-Host
         return $false
     }
-    Write-Host "  - scenario-$Scenario/system-uid: system uid fuse write attributed to originating service"
+    Write-Host "  - scenario-$Scenario/system-uid: shell executor identity recorded"
     Invoke-Su "grep 'SrtUidAttrib' '$FileMonitorLogPath' 2>/dev/null | tail -2" | Write-Host
     Invoke-Su "rm -rf '$BackendRoot/$UidAttribRel'" | Out-Null
     $true
@@ -3726,47 +3722,50 @@ function Invoke-AppCallerMediaProviderAttributionScenario {
     $true
 }
 
-function Invoke-SystemUidSandboxMissingTargetScenario {
-    # 与 .sh 的 run_system_uid_sandbox_missing_target_scenario 一致：shell（uid 2000）
-    # 配置沙盒、真实与沙盒目标都预先删除，以 immediate / aged 两档交错写入，每轮都要求
-    # 真实目录零穿透、沙盒目录建出。mkdir 返回码不作判据（AOSP pf_mkdir 的 lstat 可能 ENOENT）。
+function Invoke-ShellExecutorBoundaryScenario {
+    # 与 Bash 一致：立即与延迟写入均保留 shell 的原生路径，不套用应用规则。
     param([int]$Scenario)
     $shellConfigBackup = Invoke-Su "test -f '$ShellConfig' && base64 '$ShellConfig' 2>/dev/null | tr -d '[:space:]'" | Select-Object -Last 1
     $json = "{`"users`":{`"0`":{`"enabled`":true,`"mapping_mode_only`":true,`"sandboxed_paths`":[`"$ShellSandboxRel`"]}}}"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-    Invoke-Su "printf '%s' '$encoded' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
-    Start-Sleep -Seconds 3
     $ok = $true
     $round = 0
-    foreach ($delay in @(4, 0, 4, 0)) {
-        $round++
-        Invoke-Su "rm -rf '$ShellSandboxRealDir' '$ShellSandboxBackendDir'" | Out-Null
-        Start-Sleep -Seconds 1
-        if ($delay -gt 0) {
-            Invoke-Adb @("shell", "sleep $delay; exec mkdir '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
-        } else {
-            Invoke-Adb @("shell", "exec mkdir '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
-        }
-        Start-Sleep -Seconds 2
-        $real = (Invoke-Su "test -d '$ShellSandboxRealDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
-        $sandbox = (Invoke-Su "test -d '$ShellSandboxBackendDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
-        Write-Host "  - scenario-$Scenario/system-uid-sandbox: round=$round delay=${delay}s real=$real sandbox=$sandbox"
-        if ($real -or -not $sandbox) {
-            if ($real) {
-                Write-Host "  - scenario-$Scenario/system-uid-sandbox: request path leaked to real storage"
+    try {
+        Invoke-Su "printf '%s' '$encoded' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
+        Start-Sleep -Seconds 3
+        foreach ($delay in @(4, 0, 4, 0)) {
+            $round++
+            # 经 FUSE 删除同一个名称，避免直删后端留下正目录项缓存。
+            Invoke-Adb @("shell", "rm -rf '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
+            if ($LASTEXITCODE -ne 0) { $ok = $false; break }
+            Invoke-Su "rm -rf '$ShellSandboxBackendDir'" | Out-Null
+            Start-Sleep -Seconds 1
+            if ($delay -gt 0) {
+                Invoke-Adb @("shell", "sleep $delay; exec mkdir '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
             } else {
-                Write-Host "  - scenario-$Scenario/system-uid-sandbox: sandbox directory not created"
+                Invoke-Adb @("shell", "exec mkdir '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
             }
-            Invoke-Su "grep -aE 'SrtShellSandbox' '$LogPath' 2>/dev/null | grep -av 'realpath mapped' | tail -6" | Write-Host
-            $ok = $false
-            break
+            $commandExit = $LASTEXITCODE
+            Start-Sleep -Seconds 2
+            $real = (Invoke-Su "test -d '$ShellSandboxRealDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+            $sandbox = (Invoke-Su "test -d '$ShellSandboxBackendDir'; echo exit=`$?" | Select-Object -Last 1) -eq "exit=0"
+            Write-Host "  - scenario-$Scenario/shell-executor: round=$round delay=${delay}s exit=$commandExit real=$real sandbox=$sandbox"
+            if ($commandExit -ne 0 -or -not $real -or $sandbox) {
+                Write-Host "  - scenario-$Scenario/shell-executor: unexpected directory state"
+                Invoke-Su "grep -aE 'SrtShellSandbox' '$LogPath' 2>/dev/null | grep -av 'realpath mapped' | tail -6" | Write-Host
+                $ok = $false
+                break
+            }
         }
-    }
-    Invoke-Su "rm -rf '$ShellSandboxRealDir' '$ShellSandboxBackendDir'" | Out-Null
-    if ($shellConfigBackup -and $shellConfigBackup -notmatch '^exit=') {
-        Invoke-Su "printf '%s' '$shellConfigBackup' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
-    } else {
-        Invoke-Su "rm -f '$ShellConfig'" | Out-Null
+    } finally {
+        Invoke-Adb @("shell", "rm -rf '/storage/emulated/0/$ShellSandboxRel'") | Out-Null
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+        Invoke-Su "rm -rf '$ShellSandboxRealDir' '$ShellSandboxBackendDir'" | Out-Null
+        if ($shellConfigBackup -and $shellConfigBackup -notmatch '^exit=') {
+            Invoke-Su "printf '%s' '$shellConfigBackup' | base64 -d > '$ShellConfig.tmp.$PID'; mv -f '$ShellConfig.tmp.$PID' '$ShellConfig'; chmod 644 '$ShellConfig'" | Out-Null
+        } else {
+            Invoke-Su "rm -f '$ShellConfig'" | Out-Null
+        }
     }
     $ok
 }
@@ -4295,6 +4294,43 @@ function Invoke-SandboxRootMetadataScenario {
     $ok
 }
 
+function Add-ScenarioFailure {
+    param($Scenario, [int]$FailuresBefore, [string]$ErrorMessage)
+    $script:Failures.Add("$Scenario exception: $ErrorMessage")
+    try {
+        Stop-AppAndWaitFuseCleanup "$Scenario/abort" | Out-Null
+    } catch {
+        $script:Failures.Add("$Scenario/abort-cleanup: $($_.Exception.Message)")
+    }
+    $isBasic = $Scenario -eq "basic"
+    if ($isBasic) { Write-Host "FAIL [basic]" } else { Write-Host "FAIL [scenario] id=$Scenario" }
+    $title = if ($isBasic) { "deterministic all + query smoke" } else { Get-ScenarioTitle $Scenario }
+    $script:Summary.Add([pscustomobject]@{
+        Scenario = $Scenario
+        Title = $title
+        Passed = $false
+        NewFailures = ($script:Failures.Count - $FailuresBefore)
+    }) | Out-Null
+    Write-Warning "场景 $Scenario 执行失败：$ErrorMessage"
+}
+
+function Invoke-ScenarioChecks {
+    param([int]$Scenario, [scriptblock[]]$Checks)
+    $ok = $true
+    foreach ($check in $Checks) {
+        try {
+            $result = & $check
+            if ($result -isnot [bool] -or -not $result) { $ok = $false }
+        } catch {
+            $script:Failures.Add("scenario-$Scenario subcheck exception: $($_.Exception.Message)")
+            Write-Warning "场景 $Scenario 子项失败：$($_.Exception.Message)"
+            $ok = $false
+        }
+        if ($script:FailFast -and -not $ok) { break }
+    }
+    $ok
+}
+
 function Invoke-Scenario {
     param([int]$Scenario)
     Write-Host "== scenario ${Scenario}: $(Get-ScenarioTitle $Scenario) =="
@@ -4337,11 +4373,7 @@ function Invoke-Scenario {
     # 未自行预置夹具的场景，清理后夹具根必须为空；有残留就当场停下，别让污染漂到后面的断言。
     if ($Scenario -notin @(9, 10, 20, 21, 22, 28, 31, 38)) {
         if (-not (Assert-FixtureRootsEmpty "scenario-$Scenario")) {
-            $script:Failures.Add("scenario-$Scenario/fixture-residue")
-            if ($script:FailFast) {
-                throw "[SRT_FAIL_FAST_ITEM] scenario-$Scenario/fixture-residue"
-            }
-            return $false
+            throw "scenario-$Scenario/fixture-residue"
         }
     }
     if ($Scenario -in @(38, 40)) {
@@ -4364,7 +4396,7 @@ function Invoke-Scenario {
         20 { Invoke-MountNamespaceAllowWildcardFallbackScenario $Scenario }
         21 { Invoke-MountNamespaceReadOnlyWildcardFallbackScenario $Scenario }
         22 { Invoke-MountNamespaceMappingReadOnlyScenario $Scenario }
-        23 { (Invoke-DisabledRedirectMonitorScenario $Scenario) -and (Invoke-MonitorCaptureFailOpenScenario $Scenario) }
+        23 { Invoke-ScenarioChecks $Scenario @({ Invoke-DisabledRedirectMonitorScenario $Scenario }, { Invoke-MonitorCaptureFailOpenScenario $Scenario }) }
         24 { Invoke-RegularMonitorScenario $Scenario }
         25 { Invoke-RegularMonitorScenario $Scenario }
         26 { Invoke-MediaStoreMonitorScenario $Scenario }
@@ -4381,9 +4413,9 @@ function Invoke-Scenario {
         37 { Invoke-NestedMappingChainScenario $Scenario }
         38 { Invoke-ProviderSandboxScenario $Scenario }
         39 { Invoke-DownloadOwnerAttributionScenario $Scenario }
-        40 { (Invoke-SystemUidAttributionScenario $Scenario) -and (Invoke-AppCallerMediaProviderAttributionScenario $Scenario) -and (Invoke-SystemUidSandboxMissingTargetScenario $Scenario) }
+        40 { Invoke-ScenarioChecks $Scenario @({ Invoke-SystemUidAttributionScenario $Scenario }, { Invoke-AppCallerMediaProviderAttributionScenario $Scenario }, { Invoke-ShellExecutorBoundaryScenario $Scenario }) }
         41 { Invoke-SandboxRootMetadataScenario $Scenario }
-        42 { (Invoke-FileMutationLifecycleScenario $Scenario) -and (Invoke-FileMutationMetadataScenario $Scenario) }
+        42 { Invoke-ScenarioChecks $Scenario @({ Invoke-FileMutationLifecycleScenario $Scenario }, { Invoke-FileMutationMetadataScenario $Scenario }) }
         43 { Invoke-StorageRootViewParityScenario $Scenario }
         44 { Invoke-MonitorCaptureRootViewScenario $Scenario }
         default { Invoke-StandardScenario $Scenario }
@@ -4451,25 +4483,22 @@ try {
     if (-not (Confirm-MediaProviderHookReady "initial")) { throw "初始 MediaProvider hook 恢复失败" }
 
     if (-not $SkipBasicAll) {
-        Invoke-BasicAll
+        $failuresBeforeBasic = $script:Failures.Count
+        try {
+            Invoke-BasicAll
+        } catch {
+            Add-ScenarioFailure "basic" $failuresBeforeBasic $_.Exception.Message
+        }
     }
 
-    $scenarios = Get-ScenarioList
+    $scenarios = if ($script:FailFast -and $script:Failures.Count -gt 0) { @() } else { Get-ScenarioList }
 
     foreach ($scenario in $scenarios) {
         $failuresBeforeScenario = $script:Failures.Count
         try {
             Invoke-Scenario $scenario
         } catch {
-            if (-not $_.Exception.Message.StartsWith("[SRT_FAIL_FAST_ITEM]")) { throw }
-            Stop-AppAndWaitFuseCleanup "scenario-$scenario/abort" | Out-Null
-            $script:Summary.Add([pscustomobject]@{
-                Scenario = $scenario
-                Title = (Get-ScenarioTitle $scenario)
-                Passed = $false
-                NewFailures = ($script:Failures.Count - $failuresBeforeScenario)
-            }) | Out-Null
-            Write-Warning "场景 $scenario 的单项失败，已按 SRT_FAIL_FAST 立即停止：$($_.Exception.Message)"
+            Add-ScenarioFailure $scenario $failuresBeforeScenario $_.Exception.Message
         }
         if ($script:FailFast -and $script:Failures.Count -gt $failuresBeforeScenario) {
             Write-Warning "场景 $scenario 失败，已按 SRT_FAIL_FAST 停止后续场景"

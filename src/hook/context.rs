@@ -1,101 +1,168 @@
 use crate::platform::paths::monotonic_ms;
+use crate::platform::proc_identity::RequestIdentity;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+/// 原请求任务的核验结果；终止边界不因包名回填而改变。
+pub fn set_request_identity(identity: Option<RequestIdentity>) {
+    CALLER_REQUEST_IDENTITY.with(|current| *current.borrow_mut() = identity);
+}
+
+pub fn current_request_identity() -> Option<RequestIdentity> {
+    CALLER_REQUEST_IDENTITY.with(|current| current.borrow().clone())
+}
+
+pub fn is_caller_attribution_stopped() -> bool {
+    CALLER_REQUEST_IDENTITY.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .is_some_and(RequestIdentity::is_terminal)
+    })
+}
 
 // 单次 MediaStore 插入涉及的目录层级有限，用作登记表容量上限
 const PROVIDER_PASSTHROUGH_VIRTUAL_DIR_MAX: usize = 16;
-
-/// 跨线程 binder 调用方证据（进程级）。
-///
-/// MediaProvider 的 binder 线程（`ContentProvider$Transport#insert`）与 FuseDaemon
-/// 的处理线程不是同一个线程：Java 侧捕获到的调用方 uid/pid 落在 `thread_local` 里，
-/// 而在 FUSE 线程上生成的记录读不到，于是退回本进程自己的 uid —— 真机实测
-/// `adb shell` 的 MediaStore insert 在记录里变成 `caller_uid=10217`（MP 自己）、
-/// 来源未知，用户看到的"谁创建了这个目录"就答不上来。
-///
-/// 因此额外保留一份进程级证据，**只用于记录归因**：
-/// - 仅在 uid 合法且不等于本进程 uid 时登记（自身的 I/O 不是"外部调用方"）；
-/// - 读取限 [`CROSS_THREAD_CALLER_WINDOW_MS`] 窗口，过期不再采信，避免把上一笔
-///   请求的调用方贴到随后无关的记录上；
-/// - 不参与任何重定向决策（决策仍只认 thread_local 的 `CALLER_UID`）。
 const CROSS_THREAD_CALLER_WINDOW_MS: i64 = 1_500;
-static CROSS_THREAD_CALLER_UID: AtomicI32 = AtomicI32::new(-1);
-static CROSS_THREAD_CALLER_PID: AtomicI32 = AtomicI32::new(-1);
-static CROSS_THREAD_CALLER_TS_MS: AtomicI64 = AtomicI64::new(-1);
+const CROSS_THREAD_CALLER_LIMIT: usize = 64;
 
-pub fn remember_cross_thread_caller(uid: i32, pid: i32) {
-    if uid < 0 {
-        return;
-    }
-    // SAFETY: getuid() 无参数、无副作用，只读进程真实 uid。
-    let self_uid = unsafe { libc::getuid() } as i32;
-    if uid == self_uid {
-        return;
-    }
-    CROSS_THREAD_CALLER_UID.store(uid, Ordering::Relaxed);
-    CROSS_THREAD_CALLER_PID.store(if pid > 0 { pid } else { -1 }, Ordering::Relaxed);
-    CROSS_THREAD_CALLER_TS_MS.store(monotonic_ms(), Ordering::Relaxed);
+#[derive(Clone)]
+struct CrossThreadCaller {
+    identity: RequestIdentity,
+    ambiguous: bool,
+    shared_user_ambiguous: bool,
+    at_ms: i64,
 }
 
-/// 取进程级调用方证据；未登记或已过期返回 `None`。
-pub fn cross_thread_caller_in_window() -> Option<(i32, i32)> {
-    let ts = CROSS_THREAD_CALLER_TS_MS.load(Ordering::Relaxed);
-    if ts < 0 {
-        return None;
+static CROSS_THREAD_CALLERS: Mutex<VecDeque<CrossThreadCaller>> = Mutex::new(VecDeque::new());
+
+pub fn remember_cross_thread_caller(identity: &RequestIdentity) {
+    if identity.uid < 0
+        || identity.pid <= 0
+        || identity.start_time == 0
+        || identity.is_terminal()
+        || identity.package.is_empty() && identity.shared_user_id.is_empty()
+    {
+        return;
     }
-    let uid = CROSS_THREAD_CALLER_UID.load(Ordering::Relaxed);
-    if uid < 0 {
-        return None;
-    }
+    let mut callers = CROSS_THREAD_CALLERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // 锁内取时，避免迟到写者把较新的条目当作未来时间清掉。
     let now = monotonic_ms();
-    if now < ts || now - ts > CROSS_THREAD_CALLER_WINDOW_MS {
-        return None;
+    callers.retain(|caller| {
+        (0..=CROSS_THREAD_CALLER_WINDOW_MS).contains(&now.saturating_sub(caller.at_ms))
+            && !(caller.identity.uid == identity.uid
+                && caller.identity.pid == identity.pid
+                && caller.identity.start_time != identity.start_time)
+    });
+    if let Some(caller) = callers
+        .iter_mut()
+        .find(|caller| caller.identity.uid == identity.uid && caller.identity.pid == identity.pid)
+    {
+        if !caller.identity.same_task(identity) {
+            caller.identity.invalidate();
+        }
+        if caller.identity.package != identity.package {
+            caller.identity.package.clear();
+            caller.ambiguous = true;
+        }
+        if !caller.identity.is_terminal() && !identity.shared_user_id.is_empty() {
+            if caller.identity.shared_user_id.is_empty() {
+                caller.identity.shared_user_id = identity.shared_user_id.clone();
+            } else if caller.identity.shared_user_id != identity.shared_user_id {
+                caller.identity.shared_user_id.clear();
+                caller.shared_user_ambiguous = true;
+            }
+        }
+        caller.at_ms = now;
+        return;
     }
-    Some((uid, CROSS_THREAD_CALLER_PID.load(Ordering::Relaxed)))
+    while callers.len() >= CROSS_THREAD_CALLER_LIMIT {
+        callers.pop_front();
+    }
+    callers.push_back(CrossThreadCaller {
+        identity: identity.clone(),
+        ambiguous: false,
+        shared_user_ambiguous: false,
+        at_ms: now,
+    });
 }
 
-/// 记录用调用方 uid，返回 `(uid, 是否来自跨线程证据)`。
-///
-/// 与 [`get_effective_caller_uid_for_monitor`] 的区别：后者供归因**线索**使用，
-/// 保持原有语义不变；本函数只在"记录会归到本进程自己"时追加跨线程证据，避免
-/// 把外部调用方误当成自身 I/O。
-pub fn record_caller_uid() -> (i32, bool) {
-    // SAFETY: getuid() 无参数、无副作用，只读进程真实 uid。
-    let self_uid = unsafe { libc::getuid() } as i32;
-    // 直接证据按优先级取：监视槽（binder/fuse 给出的请求方）→ CALLER_UID（决策上下文，
-    // 会被 FUSE 请求头填成本进程 uid）→ 当前线程 fsuid。
+fn cross_thread_caller(uid: i32, pid: i32) -> Option<CrossThreadCaller> {
+    if uid < 0 || pid <= 0 {
+        return None;
+    }
+    let callers = CROSS_THREAD_CALLERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let now = monotonic_ms();
+    callers
+        .iter()
+        .find(|caller| {
+            caller.identity.uid == uid
+                && caller.identity.pid == pid
+                && (caller.identity.is_terminal()
+                    || (!caller.ambiguous && !caller.identity.package.is_empty())
+                    || (!caller.shared_user_ambiguous
+                        && !caller.identity.shared_user_id.is_empty()))
+                && (0..=CROSS_THREAD_CALLER_WINDOW_MS).contains(&now.saturating_sub(caller.at_ms))
+        })
+        .cloned()
+}
+
+fn record_caller_evidence() -> (i32, Option<CrossThreadCaller>) {
     let direct = monitor_caller_uid_in_window()
         .or_else(|| {
-            let uid = CALLER_UID.with(|cell| cell.get());
+            let uid = get_current_caller_uid();
             (uid >= 0).then_some(uid)
         })
         .unwrap_or_else(fsuid_from_proc_status);
-    if direct != self_uid {
-        return (direct, false);
+    let pid = get_effective_caller_pid_for_monitor();
+    if is_current_caller_scope_active() {
+        return (direct, None);
     }
-    // 归因会落到本进程自己（MediaProvider 代写）：这才是"外部调用方可能是谁"的
-    // 唯一场景，用进程级证据补上。自身 I/O 没有外部调用方，保持原值。
-    if let Some((external_uid, _)) = cross_thread_caller_in_window() {
-        return (external_uid, true);
+    if let Some(caller) = cross_thread_caller(direct, pid) {
+        return (direct, Some(caller));
     }
-    (direct, false)
+    // SAFETY: getuid 无参数，只读取进程的真实 UID。
+    if direct != unsafe { libc::getuid() as i32 } {
+        return (direct, None);
+    }
+    let fuse_age = get_fuse_caller_uid_age_ms();
+    if (0..=CROSS_THREAD_CALLER_WINDOW_MS).contains(&fuse_age) {
+        let fuse_uid = get_fuse_caller_uid();
+        let fuse_pid = get_fuse_caller_pid();
+        if let Some(caller) = cross_thread_caller(fuse_uid, fuse_pid) {
+            return (fuse_uid, Some(caller));
+        }
+    }
+    (direct, None)
 }
 
-/// 记录用调用方 pid：线程局部证据优先，缺失时（且本次 uid 来自跨线程证据）
-/// 回退到同一份跨线程证据里的 pid。
-pub fn record_caller_pid(cross_thread: bool) -> i32 {
-    let pid = get_effective_caller_pid_for_monitor();
-    if pid > 0 {
-        return pid;
+/// 当前请求作用域优先；跨线程证据一次捕获包名、共享组与任务代次。
+pub fn record_caller_identity_with_evidence() -> (i32, i32, Option<RequestIdentity>) {
+    if let Some(identity) = current_request_identity()
+        && identity.is_terminal()
+    {
+        return (identity.uid, identity.pid, None);
     }
-    if cross_thread && let Some((_, external_pid)) = cross_thread_caller_in_window() {
-        return external_pid;
+    let (uid, cross_thread) = record_caller_evidence();
+    match cross_thread {
+        Some(caller) => (
+            caller.identity.uid,
+            caller.identity.pid,
+            Some(caller.identity),
+        ),
+        None => (uid, get_effective_caller_pid_for_monitor(), None),
     }
-    -1
 }
 
 thread_local! {
+    static CALLER_REQUEST_IDENTITY: RefCell<Option<RequestIdentity>> = const { RefCell::new(None) };
     static CALLER_PACKAGE: RefCell<String> = const { RefCell::new(String::new()) };
+    static CALLER_SHARED_USER_ID: RefCell<String> = const { RefCell::new(String::new()) };
     static CALLER_UID: Cell<i32> = const { Cell::new(-1) };
     static CALLER_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static CALLER_FROM_EXTERNAL_SIGNAL: Cell<bool> = const { Cell::new(false) };
@@ -103,7 +170,7 @@ thread_local! {
     // FuseDaemon 在 create/mkdir 之后用原始路径回查 attr 时没有外部调用方信号，
     // 只有这条归属可用；查询回退必须接受它，否则映射重定向后的应答会 ENOENT。
     static CALLER_FROM_MAPPING_REQUEST_OWNER: Cell<bool> = const { Cell::new(false) };
-    static CALLER_SCOPE_STACK: RefCell<Vec<(String, i32)>> = const { RefCell::new(Vec::new()) };
+    static CALLER_SCOPE_STACK: RefCell<Vec<CallerSnapshot>> = const { RefCell::new(Vec::new()) };
     static FUSE_CALLER_UID: Cell<i32> = const { Cell::new(-1) };
     static FUSE_CALLER_UID_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static FUSE_CALLER_PID: Cell<i32> = const { Cell::new(-1) };
@@ -119,6 +186,7 @@ thread_local! {
     static BINDER_SAVED_CALLER_UID: Cell<i32> = const { Cell::new(-1) };
     static BINDER_SAVED_CALLER_UID_TS_MS: Cell<i64> = const { Cell::new(-1) };
     static BINDER_SAVED_CALLER_PACKAGE: RefCell<String> = const { RefCell::new(String::new()) };
+    static BINDER_IDENTITY_STACK: RefCell<Vec<(i64, BinderIdentity)>> = const { RefCell::new(Vec::new()) };
     static BINDER_IDENTITY_CLEARED: Cell<bool> = const { Cell::new(false) };
     static REENTRY_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PROVIDER_PASSTHROUGH_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -199,17 +267,32 @@ pub fn is_path_owner_inference_disabled() -> bool {
 }
 
 pub fn set_current_caller_package(name: &str) {
+    if is_caller_attribution_stopped() {
+        return;
+    }
     CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = name.to_string());
+    CALLER_SHARED_USER_ID.with(|name| name.borrow_mut().clear());
     CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
     CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
     CALLER_FROM_MAPPING_REQUEST_OWNER.with(|cell| cell.set(false));
 }
 
 pub fn get_current_caller_package() -> String {
+    if is_caller_attribution_stopped() {
+        return String::new();
+    }
     CALLER_PACKAGE.with(|pkg| pkg.borrow().clone())
 }
 
+pub fn get_current_caller_shared_user_id() -> String {
+    CALLER_SHARED_USER_ID.with(|name| name.borrow().clone())
+}
+
 pub fn set_current_caller_uid(uid: i32) {
+    if is_caller_attribution_stopped() {
+        return;
+    }
+    CALLER_SHARED_USER_ID.with(|name| name.borrow_mut().clear());
     CALLER_UID.with(|cell| cell.set(uid));
     CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
     CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
@@ -217,6 +300,11 @@ pub fn set_current_caller_uid(uid: i32) {
 }
 
 pub fn get_current_caller_uid() -> i32 {
+    if let Some(identity) = current_request_identity()
+        && identity.is_terminal()
+    {
+        return identity.uid;
+    }
     CALLER_UID.with(|cell| cell.get())
 }
 
@@ -259,7 +347,7 @@ pub fn monitor_caller_uid_in_window() -> Option<i32> {
     })
 }
 
-/// 从 /proc/self/status 的 `Uid:` 行读取当前线程 fsuid（该行四列依次为
+/// 从 /proc/thread-self/status 的 `Uid:` 行读取当前线程 fsuid（该行四列依次为
 /// 真实/有效/保存/文件系统 uid，fsuid 为第 4 列）。
 ///
 /// **为什么不用 setfsuid(-1) 惯用法**：MediaProvider 等应用进程运行在 zygote
@@ -267,10 +355,10 @@ pub fn monitor_caller_uid_in_window() -> Option<i32> {
 /// 杀死进程（2026-10-30 真机实测，MP 崩溃循环、存储 volume 不可用）。
 /// **为什么不找 `FsUid:` 行**：status 没有 FsUid 字段（2026-10-30 duchamp
 /// 实测仅 `Uid:` 行），fsuid 是 `Uid:` 行的第 4 列。
-/// 改用 raw `SYS_openat` 直读 /proc/self/status：不经 PLT，不会被自身 hook
+/// 改用 raw `SYS_openat` 直读 /proc/thread-self/status：不经 PLT，不会被自身 hook
 /// 拦截产生递归记录。
 fn fsuid_from_proc_status() -> i32 {
-    const STATUS_PATH: &[u8] = b"/proc/self/status\0";
+    const STATUS_PATH: &[u8] = b"/proc/thread-self/status\0";
     const READ_BUF_LEN: usize = 4096;
     // 失败只告警一次：定位用，避免刷屏。
     static FSUID_DIAG_WARNED: std::sync::atomic::AtomicBool =
@@ -289,7 +377,7 @@ fn fsuid_from_proc_status() -> i32 {
         if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             let errno = crate::platform::errno::last();
             log::warn!(
-                "monitor fsuid /proc/self/status open failed errno={errno} {}",
+                "monitor fsuid /proc/thread-self/status open failed errno={errno} {}",
                 crate::platform::errno::text(errno)
             );
         }
@@ -304,7 +392,7 @@ fn fsuid_from_proc_status() -> i32 {
     }
     if read_n <= 0 {
         if !FSUID_DIAG_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            log::warn!("monitor fsuid /proc/self/status read failed n={read_n}");
+            log::warn!("monitor fsuid /proc/thread-self/status read failed n={read_n}");
         }
         return -1;
     }
@@ -353,7 +441,9 @@ pub fn get_current_caller_age_ms() -> i64 {
 }
 
 pub fn clear_current_caller() {
+    set_request_identity(None);
     CALLER_PACKAGE.with(|pkg| pkg.borrow_mut().clear());
+    CALLER_SHARED_USER_ID.with(|name| name.borrow_mut().clear());
     CALLER_UID.with(|cell| cell.set(-1));
     CALLER_TS_MS.with(|cell| cell.set(-1));
     CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
@@ -361,7 +451,14 @@ pub fn clear_current_caller() {
 }
 
 pub fn set_current_caller_from_external_signal(package_name: &str, uid: i32) {
-    CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = package_name.to_string());
+    CALLER_PACKAGE.with(|pkg| {
+        *pkg.borrow_mut() = if is_caller_attribution_stopped() {
+            String::new()
+        } else {
+            package_name.to_string()
+        }
+    });
+    CALLER_SHARED_USER_ID.with(|name| name.borrow_mut().clear());
     CALLER_UID.with(|cell| cell.set(uid));
     CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
     CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(true));
@@ -377,7 +474,11 @@ pub fn is_current_caller_from_external_signal() -> bool {
 /// 「本次调用的路径属于某应用的映射请求侧」。查询回退两条都接受，写路径决策
 /// 仍按原有 external 语义区分。
 pub fn set_current_caller_from_mapping_request_owner(package_name: &str, uid: i32) {
+    if is_caller_attribution_stopped() {
+        return;
+    }
     CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = package_name.to_string());
+    CALLER_SHARED_USER_ID.with(|name| name.borrow_mut().clear());
     CALLER_UID.with(|cell| cell.set(uid));
     CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
     CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
@@ -388,33 +489,131 @@ pub fn is_current_caller_from_mapping_request_owner() -> bool {
     CALLER_FROM_MAPPING_REQUEST_OWNER.with(|cell| cell.get())
 }
 
-pub fn push_current_caller_scope(package_name: &str, uid: i32) {
-    let previous_package = get_current_caller_package();
-    let previous_uid = get_current_caller_uid();
-    CALLER_SCOPE_STACK.with(|stack| {
-        stack.borrow_mut().push((previous_package, previous_uid));
+#[derive(Clone)]
+pub struct BinderIdentity {
+    request_identity: Option<RequestIdentity>,
+    uid: i32,
+    at_ms: i64,
+    package: String,
+    cleared: bool,
+}
+
+pub fn binder_identity_snapshot() -> BinderIdentity {
+    BinderIdentity {
+        request_identity: current_request_identity(),
+        uid: BINDER_SAVED_CALLER_UID.with(Cell::get),
+        at_ms: BINDER_SAVED_CALLER_UID_TS_MS.with(Cell::get),
+        package: get_binder_saved_caller_package(),
+        cleared: is_binder_identity_cleared(),
+    }
+}
+
+impl BinderIdentity {
+    fn restore(self) {
+        set_request_identity(self.request_identity);
+        BINDER_SAVED_CALLER_UID.with(|cell| cell.set(self.uid));
+        BINDER_SAVED_CALLER_UID_TS_MS.with(|cell| cell.set(self.at_ms));
+        BINDER_SAVED_CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = self.package);
+        set_binder_identity_cleared(self.cleared);
+    }
+}
+
+pub fn remember_binder_identity(token: i64, previous: BinderIdentity) {
+    BINDER_IDENTITY_STACK.with(|stack| stack.borrow_mut().push((token, previous)));
+}
+
+pub fn restore_binder_identity(token: i64) {
+    let previous = BINDER_IDENTITY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let index = stack
+            .iter()
+            .rposition(|(saved_token, _)| *saved_token == token)?;
+        let (_, previous) = stack.remove(index);
+        stack.truncate(index);
+        Some(previous)
     });
-    CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = package_name.to_string());
-    CALLER_UID.with(|cell| cell.set(uid));
-    CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
-    CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
+    if let Some(previous) = previous {
+        previous.restore();
+    }
+}
+
+struct CallerSnapshot {
+    request_identity: Option<RequestIdentity>,
+    caller: (String, i32, i64, bool, bool),
+    shared_user_id: String,
+    fuse: (i32, i32, i64),
+    monitor: (i32, i64, i32, i64),
+    binder: BinderIdentity,
+    binder_stack: Vec<(i64, BinderIdentity)>,
+}
+
+pub fn push_current_caller_scope(package_name: &str, uid: i32) {
+    let identity = current_request_identity();
+    push_current_caller_scope_with_shared_user(package_name, uid, "");
+    set_request_identity(identity);
+}
+
+pub fn push_current_caller_scope_with_shared_user(
+    package_name: &str,
+    uid: i32,
+    shared_user_id: &str,
+) {
+    let previous = CallerSnapshot {
+        request_identity: current_request_identity(),
+        caller: (
+            get_current_caller_package(),
+            get_current_caller_uid(),
+            CALLER_TS_MS.with(Cell::get),
+            is_current_caller_from_external_signal(),
+            is_current_caller_from_mapping_request_owner(),
+        ),
+        shared_user_id: get_current_caller_shared_user_id(),
+        fuse: (
+            get_fuse_caller_uid(),
+            get_fuse_caller_pid(),
+            FUSE_CALLER_UID_TS_MS.with(Cell::get),
+        ),
+        monitor: (
+            MONITOR_CALLER_UID.with(Cell::get),
+            MONITOR_CALLER_UID_TS_MS.with(Cell::get),
+            MONITOR_CALLER_PID.with(Cell::get),
+            MONITOR_CALLER_PID_TS_MS.with(Cell::get),
+        ),
+        binder: binder_identity_snapshot(),
+        binder_stack: BINDER_IDENTITY_STACK.with(|stack| stack.borrow().clone()),
+    };
+    CALLER_SCOPE_STACK.with(|stack| stack.borrow_mut().push(previous));
+    set_request_identity(None);
+    clear_fuse_caller_uid();
+    set_monitor_caller_uid(-1);
+    set_monitor_caller_pid(-1);
+    clear_binder_saved_caller_uid();
+    set_binder_identity_cleared(false);
+    BINDER_IDENTITY_STACK.with(|stack| stack.borrow_mut().clear());
+    set_current_caller_from_external_signal(package_name, uid);
+    CALLER_SHARED_USER_ID.with(|name| *name.borrow_mut() = shared_user_id.to_owned());
     CALLER_FROM_MAPPING_REQUEST_OWNER.with(|cell| cell.set(false));
 }
 
 pub fn pop_current_caller_scope() {
-    let previous = CALLER_SCOPE_STACK.with(|stack| stack.borrow_mut().pop());
-    if let Some((package_name, uid)) = previous {
-        CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = package_name);
-        CALLER_UID.with(|cell| cell.set(uid));
-        if uid >= 0 {
-            CALLER_TS_MS.with(|cell| cell.set(monotonic_ms()));
-        } else {
-            CALLER_TS_MS.with(|cell| cell.set(-1));
-        }
-        CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(false));
-        CALLER_FROM_MAPPING_REQUEST_OWNER.with(|cell| cell.set(false));
-    } else {
-        clear_current_caller();
+    if let Some(previous) = CALLER_SCOPE_STACK.with(|stack| stack.borrow_mut().pop()) {
+        set_request_identity(previous.request_identity);
+        // 恢复原时间戳，嵌套请求不能延长外层证据的有效期。
+        CALLER_PACKAGE.with(|pkg| *pkg.borrow_mut() = previous.caller.0);
+        CALLER_SHARED_USER_ID.with(|name| *name.borrow_mut() = previous.shared_user_id);
+        CALLER_UID.with(|cell| cell.set(previous.caller.1));
+        CALLER_TS_MS.with(|cell| cell.set(previous.caller.2));
+        CALLER_FROM_EXTERNAL_SIGNAL.with(|cell| cell.set(previous.caller.3));
+        CALLER_FROM_MAPPING_REQUEST_OWNER.with(|cell| cell.set(previous.caller.4));
+        FUSE_CALLER_UID.with(|cell| cell.set(previous.fuse.0));
+        FUSE_CALLER_PID.with(|cell| cell.set(previous.fuse.1));
+        FUSE_CALLER_UID_TS_MS.with(|cell| cell.set(previous.fuse.2));
+        MONITOR_CALLER_UID.with(|cell| cell.set(previous.monitor.0));
+        MONITOR_CALLER_UID_TS_MS.with(|cell| cell.set(previous.monitor.1));
+        MONITOR_CALLER_PID.with(|cell| cell.set(previous.monitor.2));
+        MONITOR_CALLER_PID_TS_MS.with(|cell| cell.set(previous.monitor.3));
+        previous.binder.restore();
+        BINDER_IDENTITY_STACK.with(|stack| *stack.borrow_mut() = previous.binder_stack);
     }
 }
 
@@ -493,64 +692,6 @@ pub fn clear_fuse_caller_uid() {
     FUSE_CALLER_UID.with(|cell| cell.set(-1));
     FUSE_CALLER_UID_TS_MS.with(|cell| cell.set(-1));
     FUSE_CALLER_PID.with(|cell| cell.set(-1));
-}
-
-/// 系统 uid FUSE 请求的跨线程接力槽。
-///
-/// MediaProvider 侧读 /dev/fuse 的线程（libappfuse 桥）与处理请求、执行后端
-/// mkdir/open 的线程可能分离：thread-local 的 FUSE 请求头信号无法跨线程传递
-/// （2026-10-24 真机：系统服务开机创建 MIUI/Mirror 时 fuse_uid=-1）。读线程
-/// 捕获到系统 uid（<10000）的请求头时写入本槽，处理线程在归因落空时按时间
-/// 窗口取用。只对系统 uid 入槽：应用 uid 的请求已有 binder 与路径台账归因，
-/// 全局单槽在应用 IO 并发下会串味，收益不抵风险。
-///
-/// 取用资格按产品边界收窄：仅公共路径的写形态操作（经
-/// caller::update_caller_for_mutation 标记）允许取槽——MP 的高频读操作与
-/// 私有路径写会把待归因的公共路径写请求的槽内容提前消费掉（2026-10-24
-/// 真机：mkdir 槽内容被并发 stat 秒抢，监视记录全部 unknown）。
-struct SystemFuseRequestSlot {
-    uid: i32,
-    pid: i32,
-    at_ms: i64,
-}
-
-static SYSTEM_FUSE_REQUEST: std::sync::Mutex<SystemFuseRequestSlot> =
-    std::sync::Mutex::new(SystemFuseRequestSlot {
-        uid: -1,
-        pid: -1,
-        at_ms: -1,
-    });
-
-pub fn set_system_fuse_request(uid: i32, pid: i32) {
-    if uid < 0 || pid <= 0 {
-        return;
-    }
-    let mut slot = SYSTEM_FUSE_REQUEST
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    slot.uid = uid;
-    slot.pid = pid;
-    slot.at_ms = monotonic_ms();
-}
-
-/// 取窗口内的系统 uid FUSE 请求；取用即清，避免同一次请求被重复消费。
-pub fn take_recent_system_fuse_request(max_age_ms: i64) -> Option<(i32, i32)> {
-    let mut slot = SYSTEM_FUSE_REQUEST
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    if slot.uid < 0 || slot.pid <= 0 {
-        return None;
-    }
-    let now = monotonic_ms();
-    let age = now.saturating_sub(slot.at_ms);
-    let (uid, pid) = (slot.uid, slot.pid);
-    slot.uid = -1;
-    slot.pid = -1;
-    slot.at_ms = -1;
-    if age >= 0 && age <= max_age_ms {
-        return Some((uid, pid));
-    }
-    None
 }
 
 // 在 clearCallingIdentity 之前调用，保存真实调用方 UID

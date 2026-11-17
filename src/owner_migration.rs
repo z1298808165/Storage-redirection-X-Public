@@ -187,7 +187,7 @@ fn migrate_category_root(category_root: &str, user_id: i32, stats: &mut Migratio
         if stats.budget_exhausted {
             return;
         }
-        let app_id = policy::get_uid_for_package(&package_name);
+        let app_id = policy::get_app_id_for_package(&package_name);
         if app_id < ANDROID_APP_UID_START {
             stats.unknown_uid_packages = stats.unknown_uid_packages.saturating_add(1);
             continue;

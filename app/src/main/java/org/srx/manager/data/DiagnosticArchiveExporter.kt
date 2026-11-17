@@ -192,8 +192,8 @@ internal class DiagnosticArchiveExporter(
     val command =
         "mkdir -p ${shellQuote(LogsDir)} && " +
             "ts=\$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || toybox date '+%Y-%m-%d %H:%M:%S' 2>/dev/null); " +
-            "printf '%s|%s|%s|OPEN|%s|ret=0|errno=0|identify_method=caller|identify_reliability=high|op=provider_open|op_filter=provider_open:write|source=%s|export_kind=%s\\n' " +
-            "\"\${ts:-unknown}\" ${shellQuote(packageName)} ${shellQuote(packageName)} ${shellQuote(path)} ${shellQuote(source)} ${shellQuote(exportKind)} >> ${shellQuote(FileMonitorLogPath)}; " +
+            "printf '%s|%s|%s|OPEN|%s|field_encoding=percent|ret=0|errno=0|identify_method=caller|identify_reliability=high|op=provider_open|op_filter=provider_open:write|source=%s|export_kind=%s\\n' " +
+            "\"\${ts:-unknown}\" ${shellQuote(packageName)} ${shellQuote(packageName)} ${shellQuote(encodeMonitorLogField(path))} ${shellQuote(source)} ${shellQuote(exportKind)} >> ${shellQuote(FileMonitorLogPath)}; " +
             "chmod 666 ${shellQuote(FileMonitorLogPath)} 2>/dev/null || true"
     runCatching { shell.exec(command, timeoutMs = 10_000L) }
   }

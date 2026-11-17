@@ -1051,7 +1051,10 @@ pub unsafe extern "C" fn hooked_setxattr(
                     dirfd: AT_FDCWD,
                     pathname,
                     log_flags: flags,
-                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    extra_tail: Some(format!(
+                        "name={}",
+                        crate::platform::log_fields::encode(&c_str_to_string(name))
+                    )),
                     redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
@@ -1111,7 +1114,10 @@ pub unsafe extern "C" fn hooked_lsetxattr(
                     dirfd: AT_FDCWD,
                     pathname,
                     log_flags: flags,
-                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    extra_tail: Some(format!(
+                        "name={}",
+                        crate::platform::log_fields::encode(&c_str_to_string(name))
+                    )),
                     redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
@@ -1160,7 +1166,10 @@ pub unsafe extern "C" fn hooked_removexattr(pathname: *const c_char, name: *cons
                     dirfd: AT_FDCWD,
                     pathname,
                     log_flags: 0,
-                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    extra_tail: Some(format!(
+                        "name={}",
+                        crate::platform::log_fields::encode(&c_str_to_string(name))
+                    )),
                     redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {
@@ -1207,7 +1216,10 @@ pub unsafe extern "C" fn hooked_lremovexattr(
                     dirfd: AT_FDCWD,
                     pathname,
                     log_flags: 0,
-                    extra_tail: Some(format!("name={}", c_str_to_string(name))),
+                    extra_tail: Some(format!(
+                        "name={}",
+                        crate::platform::log_fields::encode(&c_str_to_string(name))
+                    )),
                     redirect_mutation: hub.is_redirect_via_hook(),
                 },
                 |call_path| {

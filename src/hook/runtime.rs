@@ -326,7 +326,11 @@ pub fn fix_mapped_private_alias_access(hub: &InterceptHub, path: &str, flags: i3
     } else {
         private_owner.clone()
     };
-    let owner_uid = policy::get_fresh_uid_for_package(&effective_package);
+    let user_id = paths::extract_user_id_from_storage_path(path);
+    if user_id < 0 {
+        return;
+    }
+    let owner_uid = policy::get_fresh_uid_for_package_in_user(&effective_package, user_id);
     if owner_uid < ANDROID_APP_UID_START
         || !SettingsHub::instance().should_redirect(&effective_package, owner_uid)
     {
@@ -423,7 +427,7 @@ fn fix_system_writer_android_private_owner_inner(path: &str, include_path: bool,
         return;
     }
 
-    let owner_uid = resolve_private_owner_uid(&owner_package);
+    let owner_uid = resolve_private_owner_uid(&owner_package, user_id);
     if owner_uid < ANDROID_APP_UID_START || platform::user_id_from_uid(owner_uid) != user_id {
         return;
     }
@@ -490,8 +494,8 @@ fn android_private_owner_package(normalized_path: &str) -> Option<String> {
     }
 }
 
-fn resolve_private_owner_uid(package_name: &str) -> i32 {
-    policy::get_fresh_uid_for_package(package_name)
+fn resolve_private_owner_uid(package_name: &str, user_id: i32) -> i32 {
+    policy::get_fresh_uid_for_package_in_user(package_name, user_id)
 }
 
 fn is_private_owner_fix_allowed_for_current_caller(owner_package: &str, owner_uid: i32) -> bool {
@@ -922,7 +926,11 @@ fn package_matches_owner(package_name: &str, owner: &RedirectDirOwner) -> bool {
         return package_name == owner.package_name;
     }
 
-    if policy::get_fresh_uid_for_package(package_name) == owner.uid {
+    if policy::get_fresh_uid_for_package_in_user(
+        package_name,
+        platform::user_id_from_uid(owner.uid),
+    ) == owner.uid
+    {
         return true;
     }
 

@@ -1,8 +1,77 @@
 #![allow(dead_code)]
 
+#[cfg(unix)]
+#[path = "../../../src/daemon_identity_query.rs"]
+pub mod daemon_identity_query;
+
 use std::collections::HashMap;
 
+pub mod caller_context {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/hook/context.rs"
+    ));
+}
+
+pub mod shared_uid_policy {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/redirect/policy.rs"
+    ));
+}
+
+pub mod redirect {
+    pub use crate::shared_uid_policy as policy;
+}
+
+pub mod monitor {
+    pub fn remember_public_path_caller_hint_with_op_filter(
+        _path: &str,
+        _package: &str,
+        _uid: i32,
+        _source: &'static str,
+        _confidence: &'static str,
+        _filter: &str,
+        _correlation: &str,
+    ) -> String {
+        String::new()
+    }
+}
+pub mod log_identity {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/log_daemon/identity.rs"
+    ));
+}
+
 pub mod platform {
+    pub mod log_fields {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/log_fields.rs"
+        ));
+    }
+    pub mod proc_identity {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/proc_identity.rs"
+        ));
+    }
+    pub use proc_identity::process_start_time_ticks;
+    pub mod module_paths {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/platform/module_paths.rs"
+        ));
+    }
+    pub mod errno {
+        pub fn last() -> i32 {
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+        }
+        pub fn text(code: i32) -> String {
+            std::io::Error::from_raw_os_error(code).to_string()
+        }
+    }
     pub mod packages {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -100,6 +169,13 @@ pub mod hyos_request {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/lifecycle/hyos_request.rs"
+    ));
+}
+
+pub mod mount_timing {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/lifecycle/mount_timing.rs"
     ));
 }
 

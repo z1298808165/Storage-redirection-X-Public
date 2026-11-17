@@ -42,11 +42,28 @@
 | 情况 | 显示 |
 |------|------|
 | `identify_method=caller` / `provider_open` / `provider_mkdir` 等直接信号 | 具体调用方应用名，详情行给出识别方式 |
-| `identify_method=caller_pid` | 记录带 `caller_pid`（内核 FUSE 头里的请求方 tid），由 root 侧按 pid 反解出真实包名。适用于 root 文件管理器 helper 一类"进程名不是包名"的写入：识别结果就是它所属的应用，原始进程名保留在详情行的 `native=` 字段 |
-| `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行给出"代写进程 <包名>"；若详情行带 `caller_uid` / `caller_pid`，说明请求方身份是已知的，只是它不是应用（如 shell 二进制），可据此继续定位 |
+| `identify_method=caller_uid` | 请求 UID 唯一对应一个有效包时补全包名；共享 UID 含多个包时不按成员顺序选择 |
+| `identify_method=caller_pid` | daemon 按原请求任务的凭据、启动时间和包 UID 核验来源；普通应用派生的 shell/native 子进程可以通过进程组关联到应用，命令行参数不作为包身份依据 |
+| `identify_method=executor` | root、shell 或已知 su/特权域停止向发起应用追溯；保留执行者名称及 `caller_uid`、`caller_pid`、`caller_start_time`、`caller_context`、`caller_boundary`，不按旧路径提示补成应用 |
+| `identify_method=shared_uid` | 无法区分具体成员时显示 PackageManager 的真实共享用户标签，可靠性为 `fallback`；组名仅供监视，不参与应用配置或重定向来源选择 |
+| `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行保留代写进程与已有请求字段；任务不可核验时带 `caller_boundary=unverified`，不按 UID 补成应用 |
 | 文件系统观察类记录（inotify 侧） | 显示"文件系统观察"，观察器与实际落盘进程分开列出 |
 
+原请求任务的 UID 快照优先于应用 fsuid：任一 UID 为 root 时停止向应用追溯；任一 UID 为 shell，或 SELinux 域为 `shell`、`su`、`magisk`、`ksu`、`kernelsu` 时按对应执行者边界处理。代码不按 Shizuku、Sui 或 rish 的产品名称分类；这类工具的结果取决于任务实际 UID 与 SELinux 域。普通非特权域变化不会触发特权边界；任务不可核验时标为 `unverified`。停止追溯不删除请求记录，也不改变自有 FUSE 按挂载命名空间选择重定向规则的行为。
+
+身份查询按内核发送方凭据限制目标：root 与已核验的系统代写者可跨 UID 查询，普通进程只能查询自身 UID 的任务。查询与监视、统计记录共用发送方配额；查询通道忙或超时保持未解析，不等待其它线程的查询完成，也不借旧路径提示补成应用身份。
+
+原生 Binder 调用方查询只读取当前线程已有的 `IPCThreadState`；尚未建立时继续使用已有请求信号或保持未解析，不在文件 hook 内创建 Binder 状态。
+
+日志派生的公共路径提示只接收成功、具体包名、UID 一致且可信度为 `high` 的请求。Provider 在操作前登记的路径提示用于延续路由，不代表操作成功。共享组标签与执行者边界不作为应用包名登记。管理 App 与 WebUI 的日志详情保留原任务 UID、PID/TID、启动时钟、SELinux 域与边界，组名和执行者不会请求应用图标或打开应用配置页。不同请求身份的记录分别保留；请求与文件系统观察仍可按关联 ID 配对。
+
+新监视记录带 `field_encoding=percent`，字段内的 `%`、`|`、回车和换行分别编码为 `%25`、`%7C`、`%0D`、`%0A`。管理 App 与 WebUI 在分字段后解码，没有该标记的旧记录保留百分号字面值。重复字段或 `record_integrity=ambiguous` 表示记录存在冲突，界面显示“结果未知：日志字段冲突”，不把它显示为成功或补成应用身份。创建成功与写入失败分别保留，关联 ID 也不能覆盖不同请求身份或结果。
+
+原生执行者名称保留 UTF-8 与标点，进程列、调用方列和任务字段使用同一套转义。daemon 补写旧记录身份时会升级字段编码，同时保留旧百分号的字面含义。请求去重区分原任务身份，不同 PID、启动时钟、域或执行者边界的记录分别保留。
+
 "未知来源"表示这次写入确实无法归因到具体应用：典型来源是经 MediaProvider 中转、调用方信号已经失效的写入（系统后台创建的目录），以及 root 文件管理器绕过 FUSE 直接落盘的写入。它不是"没有记录"，路径、进程与结果仍然完整，可据此对照 `running.log` 与 `file_monitor.log` 定位。
+
+Provider 请求作用域保留框架校验过的调用包名以及 UID/PID；共享 UID 的不同包不会被 UID 查询结果覆盖，未命中自身只读规则时也不借用另一成员的规则。异步目录提示保留原任务快照，仅在宿主内部调用时恢复，并重新核验任务代次与凭据；冲突或失效的提示不补造应用身份。作用域覆盖实际目录操作，嵌套退出恢复外层身份。下载代写按当前下载行的 `notificationpackage` 与完整 UID 校验包名和用户；同一路径存在不同归属的行时保持未知，仅在原路径没有下载行时查询伴随文件别名。跨线程记录保留原请求的完整任务快照，不用于重定向判定。
 
 ## MediaStore 写入返回 null（`createMedia returned null`）
 

@@ -110,7 +110,27 @@ fn main() {
             fields.join("\t")
         };
         match platform::packages::query(&request).and_then(|reply| {
-            platform::packages::parse_uids(&reply)?;
+            let mut fields = request.split('\t');
+            match fields.next() {
+                Some("S") => {
+                    platform::packages::parse_shared_user_id(&reply)?;
+                }
+                Some("A") => {
+                    let user = fields
+                        .next()
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .ok_or_else(|| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, "package user")
+                        })?;
+                    platform::packages::parse_app_inventory(&reply, user)?;
+                }
+                Some("T") => {
+                    platform::packages::parse_users(&reply)?;
+                }
+                _ => {
+                    platform::packages::parse_uids(&reply)?;
+                }
+            }
             Ok(reply)
         }) {
             Ok(reply) => print!("{reply}"),

@@ -309,7 +309,7 @@ fn eof_timeout_and_broken_peer_are_failures() {
     assert!(!companion_socket::configure(-1, 1));
 }
 
-fn exchange(status: &[u8]) -> bool {
+fn exchange_with_delay(status: &[u8], budget_ms: Option<i32>, delay: std::time::Duration) -> bool {
     let (client, server) = sockets();
     let status = status.to_vec();
     let payload = hyos_request::encode("com.example.app", "com.example.app:remote").unwrap();
@@ -326,6 +326,14 @@ fn exchange(status: &[u8]) -> bool {
             std::time::Duration::from_secs(1)
         ));
         assert_eq!(received, payload);
+        if let Some(budget_ms) = budget_ms {
+            assert!(companion_socket::send(
+                server.as_raw_fd(),
+                &(-budget_ms).to_ne_bytes(),
+                None
+            ));
+        }
+        std::thread::sleep(delay);
         if !status.is_empty() {
             assert!(companion_socket::send(server.as_raw_fd(), &status, None));
         }
@@ -333,6 +341,10 @@ fn exchange(status: &[u8]) -> bool {
     let result = hyos_request::specialize(client.into_raw_fd(), &payload);
     thread.join().unwrap();
     result
+}
+
+fn exchange(status: &[u8]) -> bool {
+    exchange_with_delay(status, None, std::time::Duration::ZERO)
 }
 
 #[test]
@@ -343,4 +355,40 @@ fn specialization_requires_complete_success_status() {
     assert!(!exchange(&2i32.to_ne_bytes()));
     assert!(!exchange(&[1]));
     assert!(!exchange(&[]));
+    assert!(!exchange(&i32::MIN.to_ne_bytes()));
+    let repeated_budget = [
+        (-10i32).to_ne_bytes(),
+        (-10i32).to_ne_bytes(),
+        1i32.to_ne_bytes(),
+    ]
+    .concat();
+    assert!(!exchange(&repeated_budget));
+}
+
+#[test]
+fn specialization_waits_for_the_mount_budget_after_the_initial_reply() {
+    assert!(exchange_with_delay(
+        &1i32.to_ne_bytes(),
+        Some(7000),
+        std::time::Duration::from_millis(5200)
+    ));
+}
+
+#[test]
+fn specialization_rejects_failed_short_and_expired_mount_replies() {
+    assert!(!exchange_with_delay(
+        &0i32.to_ne_bytes(),
+        Some(1000),
+        std::time::Duration::ZERO
+    ));
+    assert!(!exchange_with_delay(
+        &[1],
+        Some(1000),
+        std::time::Duration::ZERO
+    ));
+    assert!(!exchange_with_delay(
+        &[],
+        Some(50),
+        std::time::Duration::from_millis(100)
+    ));
 }

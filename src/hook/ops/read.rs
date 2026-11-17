@@ -297,9 +297,6 @@ unsafe fn parse_fuse_header_after_read(_fd: c_int, buf: *mut c_void, result: isi
     context::set_fuse_caller_uid(header.uid as i32);
     if header.pid > 0 && header.pid <= i32::MAX as u32 {
         context::set_fuse_caller_pid(header.pid as i32);
-        if (header.uid as i32) < crate::redirect::writer::ANDROID_APP_UID_START {
-            context::set_system_fuse_request(header.uid as i32, header.pid as i32);
-        }
     }
 }
 
@@ -361,11 +358,6 @@ pub unsafe extern "C" fn hooked_read(fd: c_int, buf: *mut c_void, count: usize) 
     context::set_fuse_caller_uid(header.uid as i32);
     if header.pid > 0 && header.pid <= i32::MAX as u32 {
         context::set_fuse_caller_pid(header.pid as i32);
-        // 系统 uid 的请求头同步写入跨线程接力槽：MediaProvider 读线程与请求
-        // 处理线程可能分离，thread-local 信号传不过去（见 context.rs 槽注释）。
-        if (header.uid as i32) < crate::redirect::writer::ANDROID_APP_UID_START {
-            context::set_system_fuse_request(header.uid as i32, header.pid as i32);
-        }
     }
 
     result

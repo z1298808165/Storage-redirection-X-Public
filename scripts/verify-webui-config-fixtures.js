@@ -52,7 +52,12 @@ const sandbox = {
     addEventListener: () => {},
     querySelector: () => null,
     querySelectorAll: () => [],
-    createElement: () => ({ textContent: "", innerHTML: "" }),
+    createElement: () => ({
+      textContent: "",
+      get innerHTML() {
+        return this.textContent.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      },
+    }),
     documentElement: { setAttribute: () => {} },
   },
 };
@@ -211,6 +216,242 @@ assertDeepEqual(
 
 const createOpenEntry = webui.parseLogLine(
   `2026-07-12 12:34:56|com.example|com.example|OPEN|/storage/emulated/0/Download/a.txt|ret=8|errno=0|op=openat2|op_filter=openat2:create|flags=0x40`,
+);
+const identityBase = "2026-11-16 12:34:01|com.android.providers.media.module|";
+for (const name of ["复制+worker", "worker!", "a|ret=0\r\n%7C"]) {
+  const encoded = name
+    .replace(/%/g, "%25")
+    .replace(/\|/g, "%7C")
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A");
+  const entry = webui.parseLogLine(
+    `2026-11-16 00:00:00|${encoded}|${encoded}|OPEN|/storage/emulated/0/Download/test|field_encoding=percent|ret=-1|errno=13|event_role=request|op=open:write|identify_method=executor|caller_boundary=root|caller_uid=0|native=${encoded}`,
+  );
+  assertDeepEqual(entry.processPkg, name, "executor-process-round-trip");
+  assertDeepEqual(entry.callerPkg, name, "executor-caller-round-trip");
+  assertDeepEqual(entry.extras.native, name, "executor-native-round-trip");
+  assertDeepEqual(entry.hasApplicationIdentity, false, "executor-is-not-an-app");
+  assertDeepEqual(entry.status, "error", "executor-name-cannot-change-result");
+}
+for (const name of ["普通文件.txt", "file|ret=0|caller_uid=0", "%7C%0A%25", "first\r\nsecond"]) {
+  const path = "/storage/emulated/0/Download/" + name;
+  const encoded = path
+    .replace(/%/g, "%25")
+    .replace(/\|/g, "%7C")
+    .replace(/\r/g, "%0D")
+    .replace(/\n/g, "%0A");
+  const entry = webui.parseLogLine(
+    identityBase +
+      "com.example.app|OPEN|" +
+      encoded +
+      "|field_encoding=percent|ret=-1|errno=13|identify_method=caller|caller_uid=10123|op=open|from=" +
+      encoded,
+  );
+  assertDeepEqual(entry.path, path, "encoded-filename-round-trip");
+  assertDeepEqual(entry.fromPath, path, "encoded-source-round-trip");
+  assertDeepEqual(entry.status, "error", "filename-cannot-change-result");
+  assertDeepEqual(entry.extras.caller_uid, "10123", "filename-cannot-change-caller");
+}
+const legacyPercent = webui.parseLogLine(
+  identityBase + "com.example.app|OPEN|/storage/emulated/0/Download/%7C|ret=0",
+);
+assertDeepEqual(legacyPercent.path.endsWith("/%7C"), true, "legacy-percent-remains-literal");
+for (const fields of [
+  "ret=-1|ret=0",
+  "ret=0|ret=-1",
+  "ret=0|caller_uid=0|caller_uid=10123",
+  "ret=0|record_integrity=ambiguous",
+]) {
+  const entry = webui.parseLogLine(
+    identityBase + "com.example.app|OPEN|/storage/emulated/0/Download/file|" + fields,
+  );
+  assertDeepEqual(entry.status, "error", "ambiguous-record-never-claims-success");
+  assertDeepEqual(entry.statusText, "结果未知：日志字段冲突", "ambiguous-record-explained");
+  assertDeepEqual(entry.hasApplicationIdentity, false, "ambiguous-record-has-no-app-identity");
+}
+const identityTail =
+  "|OPEN|/storage/emulated/0/Download/identity.txt|ret=3|errno=0|event_role=request|op=open|op_filter=open:write|";
+const identityEntry = (caller, fields) =>
+  webui.parseLogLine(identityBase + caller + identityTail + fields);
+const appIdentity = identityEntry(
+  "com.example.app",
+  "identify_method=caller|identify_reliability=high|caller_uid=10123|caller_pid=42|caller_start_time=55",
+);
+const originalIcon = sandbox.window.Api.getAppIconSrc;
+const mappingSuccess =
+  "2026-11-16 12:34:00|com.android.providers.media.module|com.example.app|OPEN|/storage/emulated/0/Download/target|ret=3|errno=0|event_role=request|identify_method=caller|identify_reliability=high|op=open|op_filter=open:write|source=path_mapping|from=/storage/emulated/0/Download/source|caller_uid=10123|caller_pid=42|caller_start_time=55";
+for (const fields of [
+  "su|caller_uid=0|caller_boundary=root|identify_method=executor",
+  "com.other.app|caller_uid=10124|identify_method=caller",
+  "com.example.app|caller_uid=10123|identify_method=caller",
+]) {
+  const [caller, ...extra] = fields.split("|");
+  const failure =
+    `2026-11-16 12:34:01|com.android.providers.media.module|${caller}|OPEN|/storage/emulated/0/Download/target|ret=-1|errno=13|event_role=request|identify_reliability=high|op=open|op_filter=open:write|from=/storage/emulated/0/Download/source|caller_pid=43|caller_start_time=56|` +
+    extra.join("|");
+  for (const lines of [
+    [mappingSuccess, failure],
+    [failure, mappingSuccess],
+  ]) {
+    const entries = webui.parseMonitorLogEntries(lines.join("\n"), { hydratePackages: false });
+    assertDeepEqual(entries.length, 2, "mapped-success-retains-independent-failure");
+    assertDeepEqual(
+      entries.filter((entry) => entry.status === "error").length,
+      1,
+      "failure-retained",
+    );
+  }
+}
+const iconRequests = [];
+sandbox.window.Api.getAppIconSrc = (pkg) => {
+  iconRequests.push(pkg);
+  return "";
+};
+for (const [caller, fields] of [
+  [
+    "android.uid.system",
+    "identify_method=shared_uid|identify_reliability=fallback|caller_uid=1000",
+  ],
+  [
+    "com.example.executor",
+    "identify_method=executor|identify_reliability=high|caller_uid=10123|caller_pid=43|caller_start_time=56|caller_boundary=privileged|caller_context=u:r:ksu:s0|native=com.example.executor",
+  ],
+  [
+    "-",
+    "identify_method=unknown|identify_reliability=none|caller_uid=10123|caller_boundary=unverified",
+  ],
+]) {
+  const entry = identityEntry(caller, fields);
+  const html = webui.renderLogCard(entry);
+  assertDeepEqual(entry.hasApplicationIdentity, false, "non-app-identity");
+  assertDeepEqual(html.includes('data-pkg="'), false, "non-app-config-disabled");
+  assertDeepEqual(html.includes("请求 UID："), true, "non-app-raw-uid-detail");
+  for (const records of [
+    [entry, appIdentity],
+    [appIdentity, entry],
+  ]) {
+    assertDeepEqual(webui.coalesceLogEntries(records).length, 2, "distinct-identity-records-kept");
+  }
+}
+assertDeepEqual(iconRequests, [], "non-app-does-not-request-app-icons");
+const executorDetails = webui.renderLogCard(
+  identityEntry(
+    "su",
+    "identify_method=executor|caller_uid=0|caller_pid=43|caller_start_time=56|caller_boundary=root|caller_context=u:r:su:s0|native=su",
+  ),
+);
+for (const detail of [
+  "请求 UID：0",
+  "请求 PID/TID：43",
+  "任务启动时钟：56",
+  "SELinux 域：u:r:su:s0",
+  "归因边界：root",
+  "原生执行者：su",
+]) {
+  assertDeepEqual(executorDetails.includes(detail), true, "executor-detail-" + detail);
+}
+assertDeepEqual(
+  webui.renderLogCard(appIdentity).includes('data-pkg="com.example.app"'),
+  true,
+  "app-config-enabled",
+);
+assertDeepEqual(iconRequests, ["com.example.app"], "app-icon-request-kept");
+sandbox.window.Api.getAppIconSrc = originalIcon;
+for (const fields of ["caller_pid=43", "caller_start_time=56", "caller_uid=110123"]) {
+  const replacement = identityEntry(
+    "com.example.app",
+    "identify_method=caller|identify_reliability=high|" +
+      ["caller_uid=10123", "caller_pid=42", "caller_start_time=55"]
+        .map((value) => (value.startsWith(fields.split("=")[0] + "=") ? fields : value))
+        .join("|"),
+  );
+  assertDeepEqual(
+    webui.coalesceLogEntries([appIdentity, replacement]).length,
+    2,
+    "distinct-task-" + fields,
+  );
+}
+assertDeepEqual(
+  webui.coalesceLogEntries([appIdentity, appIdentity]).length,
+  1,
+  "same-request-still-coalesces",
+);
+for (const field of ["native=changed-native", "caller_context=u:r:another_app:s0"]) {
+  const changed = identityEntry(
+    "com.example.app",
+    "identify_method=caller|identify_reliability=high|caller_uid=10123|caller_pid=42|caller_start_time=55|" +
+      field,
+  );
+  assertDeepEqual(
+    webui.coalesceLogEntries([appIdentity, changed]).length,
+    2,
+    "changed-task-evidence-kept",
+  );
+}
+const correlatedRequest = identityEntry(
+  "com.example.app",
+  "identify_method=caller|identify_reliability=high|correlation_id=identity-correlation",
+);
+const correlatedObservation = webui.parseLogLine(
+  identityBase +
+    "com.android.providers.media.module" +
+    identityTail.replace("event_role=request", "event_role=observation") +
+    "identify_method=daemon_inotify|correlation_id=identity-correlation",
+);
+for (const [caller, fields] of [
+  ["com.example.app", "identify_method=caller|identify_reliability=high"],
+  ["com.example.app", "identify_method=caller|caller_uid=10123|caller_pid=43"],
+  ["su", "identify_method=executor|caller_uid=0|caller_boundary=root"],
+]) {
+  const failedRequest = webui.parseLogLine(
+    identityBase +
+      caller +
+      identityTail.replace("ret=3|errno=0", "ret=-1|errno=13") +
+      fields +
+      "|correlation_id=identity-correlation",
+  );
+  for (const records of [
+    [correlatedRequest, failedRequest],
+    [failedRequest, correlatedRequest],
+  ]) {
+    const entries = webui.coalesceLogEntries(records);
+    assertDeepEqual(entries.length, 2, "correlation-retains-distinct-failure");
+    assertDeepEqual(
+      entries.filter((entry) => entry.status === "error").length,
+      1,
+      "correlated-error-kept",
+    );
+  }
+}
+const legacyCreate =
+  "2026-11-16 12:34:01|com.example.app|com.example.app|CREATE|/storage/emulated/0/Download/a.txt|ret=0|errno=0|event_role=request|op=fuse_create|identify_method=fuse_redirect|identify_reliability=high|source=fuse_redirect|backend=/data/media/0/Download/a.txt";
+const legacyFailedWrite = legacyCreate
+  .replace("op=fuse_create", "op=write")
+  .replace("ret=0|errno=0", "ret=-1|errno=30");
+for (const lines of [
+  [legacyCreate, legacyFailedWrite],
+  [legacyFailedWrite, legacyCreate],
+]) {
+  const entries = webui.parseMonitorLogEntries(lines.join("\n"), { hydratePackages: false });
+  assertDeepEqual(entries.length, 2, "failed-write-not-combined-with-create");
+  assertDeepEqual(
+    entries.filter((entry) => entry.status === "error").length,
+    1,
+    "write-error-kept",
+  );
+}
+for (const records of [
+  [correlatedRequest, correlatedObservation],
+  [correlatedObservation, correlatedRequest],
+]) {
+  const merged = webui.coalesceLogEntries(records);
+  assertDeepEqual(merged.length, 1, "correlated-observation-merge-kept");
+  assertDeepEqual(merged[0].observationCount, 1, "correlated-observation-count");
+}
+assertDeepEqual(
+  webui.coalesceLogEntries([correlatedObservation, correlatedRequest, correlatedRequest]).length,
+  1,
+  "correlated-request-after-observation-deduplicates",
 );
 assertDeepEqual(createOpenEntry.operationLabel, `openat2`, `log-operation-keeps-raw-type`);
 assertDeepEqual(createOpenEntry.operationIntent, `create`, `log-operation-exposes-intent`);

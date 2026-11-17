@@ -1,5 +1,6 @@
 use super::stats::InterceptHub;
 use crate::monitor::{AuditTrail, OpKind};
+use crate::platform::log_fields::encode;
 use crate::platform::{self, paths};
 use crate::redirect::policy;
 use libc::{AT_REMOVEDIR, O_APPEND, O_CREAT, O_PATH, O_RDWR, O_TMPFILE, O_TRUNC, O_WRONLY};
@@ -132,16 +133,8 @@ fn record_open_result_with_extra(
         record.is_mapping,
         record_existed_before,
     );
-    // 请求行补 caller_uid：daemon 日志线程据此为写入类 open 登记 path hint，
-    // 让纯映射路径的 request/观察记录也能走 10 秒窗口去重。CALLER_UID 未设置
-    // 时回退 fsuid（FuseDaemon 按请求 setfsuid，见
-    // context::get_effective_caller_uid_for_monitor），未配置应用经原生 FUSE
-    // 路径的写入也能归因。
-    let (caller_uid, cross_thread) = hub.record_caller_uid();
-    extra.push_str(&format!("|caller_uid={caller_uid}"));
-    if cross_thread {
-        extra.push_str("|caller_evidence=cross_thread");
-    }
+    // record_operation_with_caller 统一补 caller_uid / caller_pid，供 daemon 登记
+    // 写入路径线索与追踪未配置应用经原生 FUSE 的请求。
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
     record_operation_with_caller(
@@ -170,9 +163,9 @@ fn build_open_result_extra(
     );
     if !original_pathname.is_empty() && original_pathname != pathname {
         extra.push_str("|from=");
-        extra.push_str(original_pathname);
+        extra.push_str(&encode(original_pathname));
         extra.push_str("|backend=");
-        extra.push_str(pathname);
+        extra.push_str(&encode(pathname));
         extra.push_str("|source=");
         extra.push_str(redirect_source_name(pathname, is_mapping));
     }
@@ -266,12 +259,15 @@ fn record_media_store_pending_commit_if_needed(
     let mut extra = if record.flags >= 0 {
         format!(
             "op={}|op_filter=open:create|flags=0x{:x}|from={}|source=media_store_pending_commit",
-            record.op_name, record.flags, record.old_pathname
+            record.op_name,
+            record.flags,
+            encode(record.old_pathname)
         )
     } else {
         format!(
             "op={}|op_filter=open:create|from={}|source=media_store_pending_commit",
-            record.op_name, record.old_pathname
+            record.op_name,
+            encode(record.old_pathname)
         )
     };
     append_extra_tail(&mut extra, extra_tail);
@@ -426,8 +422,8 @@ pub fn record_mkdir_result_from(
     if !original_pathname.is_empty() && original_pathname != pathname {
         let extra_tail = format!(
             "from={}|backend={}|source={}",
-            original_pathname,
-            pathname,
+            encode(original_pathname),
+            encode(pathname),
             redirect_source_name(pathname, false)
         );
         record_mkdir_result_with_extra(hub, op_name, pathname, result, error_no, Some(&extra_tail));
@@ -514,7 +510,8 @@ pub fn record_rename_result_with_display_paths(
     {
         Some(format!(
             "display_from={}|display_to={}",
-            display_old_pathname, display_new_pathname
+            encode(display_old_pathname),
+            encode(display_new_pathname)
         ))
     } else {
         None
@@ -564,10 +561,12 @@ fn record_rename_result_with_extra(
     let mut extra = if record.flags >= 0 {
         format!(
             "op={}|flags=0x{:x}|from={}",
-            record.op_name, record.flags, record.old_pathname
+            record.op_name,
+            record.flags,
+            encode(record.old_pathname)
         )
     } else {
-        format!("op={}|from={}", record.op_name, record.old_pathname)
+        format!("op={}|from={}", record.op_name, encode(record.old_pathname))
     };
     append_extra_tail(&mut extra, extra_tail);
     let caller_package = hub.get_current_caller_package();
@@ -603,7 +602,7 @@ pub fn record_unlink_result_from(
     flags: i32,
 ) {
     if !original_pathname.is_empty() && original_pathname != pathname {
-        let extra_tail = format!("from={}", original_pathname);
+        let extra_tail = format!("from={}", encode(original_pathname));
         record_unlink_result_with_extra(
             hub,
             op_name,
@@ -739,23 +738,7 @@ fn append_extra_tail(extra: &mut String, extra_tail: Option<&str>) {
     }
 }
 
-/// 附带一个 `key=value` 片段；首次调用时基于 `base` 惰性构造。
-fn append_extra_kv(owned: &mut Option<String>, base: &str, kv: &str) {
-    let buffer = owned.get_or_insert_with(|| {
-        let mut value = String::with_capacity(base.len() + 48);
-        value.push_str(base);
-        value
-    });
-    buffer.push_str(kv);
-}
-
-/// 记录监视事件，并保证 extra 携带请求方 uid / pid。
-///
-/// FUSE 内核请求头里的 uid 与 pid 是这次操作真实的发起者，也是归因链唯一不需要
-/// 猜测的证据。open 路径早已把它们写进 extra，但 mkdir / rename / unlink 等
-/// mutation 路径此前漏写——真机上 MediaProvider 代建 `Download/update` 的 mkdir
-/// 记录因此只有 `identify_method=unknown`，任何后续反查（uid 表、daemon pid 表、
-/// cmdline）都拿不到输入。这里统一补齐：已有该字段时不重复追加。
+/// 按同一次捕获的 UID/PID 与任务快照记录结果；附加路径不提供身份字段。
 fn record_operation_with_caller(
     hub: &InterceptHub,
     kind: OpKind,
@@ -765,36 +748,23 @@ fn record_operation_with_caller(
     error_no: i32,
     extra: &str,
 ) {
-    let mut owned: Option<String> = None;
-    let (caller_uid, cross_thread) = hub.record_caller_uid();
-    if !extra.contains("caller_uid=") {
-        append_extra_kv(&mut owned, extra, &format!("|caller_uid={caller_uid}"));
-        if cross_thread {
-            // 标记证据来源：daemon 侧据此按 uid（而不是按 pid 的 cmdline）归因，
-            // 并把置信度降为 medium —— 它是"同一进程内、1.5 秒窗口"的桥接，
-            // 不是内核请求头那样的权威证据。
-            append_extra_kv(&mut owned, extra, "|caller_evidence=cross_thread");
-        }
-    }
-    if !extra.contains("caller_pid=") {
-        // 请求方 pid 来自内核 FUSE 头（tid）。MP 域读不到 root / 特权进程的
-        // /proc，本进程内无法反查，但把它写进记录后 daemon（root）可以——
-        // 这是「helper 进程写盘也能说清是哪个应用」的唯一稳定证据。
-        let caller_pid = hub.record_caller_pid(cross_thread);
-        if caller_pid > 0 {
-            append_extra_kv(&mut owned, extra, &format!("|caller_pid={caller_pid}"));
-        }
-    }
+    let (uid, pid, captured) = hub.record_caller_identity_with_evidence();
+    let caller_package = captured
+        .as_ref()
+        .map(|identity| identity.package.as_str())
+        .filter(|_| {
+            caller_package.is_empty() || policy::is_attribution_intermediate_package(caller_package)
+        })
+        .unwrap_or(caller_package);
     AuditTrail::instance().record_operation_result(
         kind,
         caller_package,
         pathname,
-        result,
-        error_no,
-        owned.as_deref().unwrap_or(extra),
+        (result, error_no),
+        extra,
+        (uid, pid, captured.as_ref()),
     );
 }
-
 fn redirect_source_name(pathname: &str, is_mapping: bool) -> &'static str {
     if is_mapping {
         return "path_mapping";
@@ -810,7 +780,8 @@ fn read_only_extra_tail(record_path: &str, read_only_path: &str) -> String {
     if !read_only_path.is_empty() && read_only_path != record_path {
         format!(
             "read_only_path={}|{}",
-            read_only_path, READ_ONLY_DENY_REASON
+            encode(read_only_path),
+            READ_ONLY_DENY_REASON
         )
     } else {
         READ_ONLY_DENY_REASON.to_string()

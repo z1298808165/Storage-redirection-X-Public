@@ -8,8 +8,9 @@ use crate::hook::{
     should_allow_public_mapping_target_access, should_hide_cursor_storage_path_for_caller,
 };
 use crate::zygisk::jni::{
-    call_object_method_a, call_static_object_method_a, delete_local_ref, get_method_id,
-    get_object_class, get_static_method_id, new_global_ref, new_jstring_utf8, register_natives,
+    call_object_method_a, call_static_boolean_method_a, call_static_object_method_a,
+    delete_local_ref, get_method_id, get_object_class, get_static_method_id, new_global_ref,
+    new_jstring_utf8, register_natives,
 };
 use jni_sys::{
     _jobject, JNIEnv, JNINativeMethod, jboolean, jclass, jobject, jobjectArray, jstring, jvalue,
@@ -21,6 +22,8 @@ static HOOKER_CLASS_GLOBAL: AtomicPtr<_jobject> = AtomicPtr::new(std::ptr::null_
 static LSPLANT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static FILE_SYSTEM_DIRECTORY_REWRITE_METHOD: AtomicPtr<c_void> =
     AtomicPtr::new(std::ptr::null_mut());
+static FILE_SYSTEM_DIRECTORY_SCOPE_METHOD: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static FILE_SYSTEM_DIRECTORY_EXIT_METHOD: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 const HIDDEN_ROW_SENTINEL: &str = "\u{1F}SRX_HIDDEN_ROW";
 
 const DO_HOOK_NAME: &[u8] = b"doHook\0";
@@ -71,11 +74,10 @@ const ALLOW_PUBLIC_MAPPING_TARGET_NAME: &[u8] = b"allowsPublicMappingTarget\0";
 const ALLOW_PUBLIC_MAPPING_TARGET_SIG: &[u8] = b"(Ljava/lang/String;I)Z\0";
 const ALLOW_OWN_ANDROID_PRIVATE_PATH_NAME: &[u8] = b"allowsOwnAndroidPrivatePath\0";
 const ALLOW_OWN_ANDROID_PRIVATE_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)Z\0";
-const CAPTURE_BINDER_CALLER_NAME: &[u8] = b"captureBinderCaller\0";
-const CAPTURE_BINDER_CALLER_SIG: &[u8] = b"(II)V\0";
-const ENTER_CALLER_SCOPE_NAME: &[u8] = b"enterCallerScope\0";
-const EXIT_CALLER_SCOPE_NAME: &[u8] = b"exitCallerScope\0";
-const ENTER_CALLER_SCOPE_SIG: &[u8] = b"(II)V\0";
+const ENTER_CALLER_SCOPE_NAME: &[u8] = b"nativeEnterCallerScope\0";
+const EXIT_CALLER_SCOPE_NAME: &[u8] = b"nativeExitCallerScope\0";
+const ENTER_CALLER_SCOPE_SIG: &[u8] =
+    b"(IILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;\0";
 const EXIT_CALLER_SCOPE_SIG: &[u8] = b"()V\0";
 const ENTER_PROVIDER_PASSTHROUGH_NAME: &[u8] = b"enterProviderPassthrough\0";
 const EXIT_PROVIDER_PASSTHROUGH_NAME: &[u8] = b"exitProviderPassthrough\0";
@@ -214,11 +216,6 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             fnPtr: allows_own_android_private_path as *mut _,
         },
         JNINativeMethod {
-            name: CAPTURE_BINDER_CALLER_NAME.as_ptr() as *mut _,
-            signature: CAPTURE_BINDER_CALLER_SIG.as_ptr() as *mut _,
-            fnPtr: capture_binder_caller as *mut _,
-        },
-        JNINativeMethod {
             name: ENTER_CALLER_SCOPE_NAME.as_ptr() as *mut _,
             signature: ENTER_CALLER_SCOPE_SIG.as_ptr() as *mut _,
             fnPtr: enter_caller_scope as *mut _,
@@ -321,7 +318,14 @@ unsafe extern "C" fn do_hook_file_system_create_directory(
         "rewriteFileSystemNativeDirectory",
         "(Ljava/io/File;)Ljava/io/File;",
     );
-    if rewrite_method.is_null() {
+    let enter_method = get_static_method_id(
+        env,
+        hooker_class(),
+        "enterFileSystemNativeDirectoryCallerScope",
+        "(Ljava/io/File;)Z",
+    );
+    let exit_method = get_static_method_id(env, hooker_class(), "exitCallerScope", "()V");
+    if rewrite_method.is_null() || enter_method.is_null() || exit_method.is_null() {
         return jni_sys::JNI_FALSE;
     }
     let target_function = lsplant::get_native_function(env, target);
@@ -329,6 +333,8 @@ unsafe extern "C" fn do_hook_file_system_create_directory(
         return jni_sys::JNI_FALSE;
     }
 
+    FILE_SYSTEM_DIRECTORY_SCOPE_METHOD.store(enter_method.cast(), Ordering::Release);
+    FILE_SYSTEM_DIRECTORY_EXIT_METHOD.store(exit_method.cast(), Ordering::Release);
     FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.store(rewrite_method.cast(), Ordering::Release);
     if lsplant::install_native_function_hook(
         target_function,
@@ -358,11 +364,23 @@ unsafe extern "C" fn hooked_file_system_create_directory(
     // LSPlant 返回的是该方法注册前的 JNI 函数地址，因此参数和返回值 ABI 与此类型一致。
     let original: OriginalFn = unsafe { std::mem::transmute(original_ptr) };
     let rewrite_method = FILE_SYSTEM_DIRECTORY_REWRITE_METHOD.load(Ordering::Acquire);
-    if rewrite_method.is_null() || source_file.is_null() {
+    let enter_method = FILE_SYSTEM_DIRECTORY_SCOPE_METHOD.load(Ordering::Acquire);
+    let exit_method = FILE_SYSTEM_DIRECTORY_EXIT_METHOD.load(Ordering::Acquire);
+    if rewrite_method.is_null()
+        || enter_method.is_null()
+        || exit_method.is_null()
+        || source_file.is_null()
+    {
         // SAFETY: original 的 JNI ABI 已在上方按 createDirectory0(File) 的固定签名校验。
         return unsafe { original(env, thiz, source_file) };
     }
 
+    let entered_scope = call_static_boolean_method_a(
+        env,
+        hooker_class(),
+        enter_method.cast(),
+        &[jvalue { l: source_file }],
+    );
     let rewritten = call_static_object_method_a(
         env,
         hooker_class(),
@@ -377,6 +395,28 @@ unsafe extern "C" fn hooked_file_system_create_directory(
     // SAFETY: call_file 是当前 JNI 调用的 File 参数或 Java 回调返回的同类型本地引用，
     // original 保持 createDirectory0(File) 的原始 JNI ABI。
     let result = unsafe { original(env, thiz, call_file) };
+    if entered_scope {
+        // 清理作用域时暂存原 native 异常，不能把 mkdir 的失败替换成清理结果。
+        // SAFETY: env 是原 JNI 调用的有效环境，方法 ID 在安装时验证并保持全局类引用。
+        unsafe {
+            let table = *env;
+            let exception = ((*table).v1_1.ExceptionOccurred)(env);
+            if !exception.is_null() {
+                ((*table).v1_1.ExceptionClear)(env);
+            }
+            ((*table).v1_1.CallStaticVoidMethodA)(
+                env,
+                hooker_class(),
+                exit_method.cast(),
+                std::ptr::null(),
+            );
+            crate::zygisk::jni::clear_pending_exception(env);
+            if !exception.is_null() {
+                ((*table).v1_1.Throw)(env, exception);
+                delete_local_ref(env, exception);
+            }
+        }
+    }
     if !rewritten.is_null() && rewritten != source_file {
         delete_local_ref(env, rewritten);
     }
@@ -935,22 +975,24 @@ unsafe extern "C" fn allows_own_android_private_path(
     }
 }
 
-unsafe extern "C" fn capture_binder_caller(
-    _env: *mut JNIEnv,
-    _class: jclass,
-    caller_uid: jni_sys::jint,
-    caller_pid: jni_sys::jint,
-) {
-    crate::hook::capture_java_binder_caller(caller_uid, caller_pid);
-}
-
 unsafe extern "C" fn enter_caller_scope(
-    _env: *mut JNIEnv,
+    env: *mut JNIEnv,
     _class: jclass,
     caller_uid: jni_sys::jint,
     caller_pid: jni_sys::jint,
-) {
-    crate::hook::enter_java_caller_scope(caller_uid, caller_pid);
+    caller_package: jstring,
+    captured_identity: jstring,
+) -> jstring {
+    let package = if caller_package.is_null() {
+        String::new()
+    } else {
+        crate::zygisk::jni::get_jstring_utf8(env, caller_package)
+    };
+    let captured = (!captured_identity.is_null())
+        .then(|| crate::zygisk::jni::get_jstring_utf8(env, captured_identity));
+    let identity =
+        crate::hook::enter_java_caller_scope(caller_uid, caller_pid, &package, captured.as_deref());
+    new_jstring_utf8(env, &serde_json::to_string(&identity).unwrap_or_default())
 }
 
 unsafe extern "C" fn exit_caller_scope(_env: *mut JNIEnv, _class: jclass) {

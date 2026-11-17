@@ -1,6 +1,7 @@
 package org.srx.hook;
 
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
@@ -14,6 +15,9 @@ import java.io.File;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** system_server 内的包身份查询端；仅接受 root 请求，缓存随 PM 快照变化失效。 */
+/** system_server 内的包身份查询端；仅接受 root 请求，包查询缓存随 PM 快照变化失效。 */
 public final class PackageQuery {
   private static final int MAX_REPLY = 4 * 1024 * 1024;
   private static final AtomicBoolean STARTED = new AtomicBoolean();
@@ -95,6 +99,8 @@ public final class PackageQuery {
 
   // CACHE 只由查询线程读写；广播线程仅递增 EVENTS，不持有查询或 PM 的锁。
   private static String cachedQuery(String request, Object pm) throws Exception {
+    // 用户增删不保证推进 PM 代次或触发包广播，全用户清单必须实时查询。
+    if ("T".equals(request) || "L".equals(request)) return queryPackageManager(request, pm);
     Object before = generation(pm);
     long events = EVENTS.get();
     if (before == null) {
@@ -108,15 +114,17 @@ public final class PackageQuery {
     if (reply != null && sameGeneration(before, generation(pm)) && EVENTS.get() == events)
       return reply;
     reply = queryPackageManager(request, pm);
+    int replyBytes = reply.getBytes(StandardCharsets.UTF_8).length;
     if (sameGeneration(before, generation(pm))
         && EVENTS.get() == events
-        && reply.length() <= MAX_REPLY - 3) {
-      if (CACHE.size() >= 1024 || cachedBytes + reply.length() > MAX_REPLY) {
+        && replyBytes <= MAX_REPLY - 3) {
+      if (CACHE.size() >= 1024 || cachedBytes + replyBytes > MAX_REPLY - 3) {
         CACHE.clear();
         cachedBytes = 0;
       }
       String previous = CACHE.put(request, reply);
-      cachedBytes += reply.length() - (previous == null ? 0 : previous.length());
+      cachedBytes +=
+          replyBytes - (previous == null ? 0 : previous.getBytes(StandardCharsets.UTF_8).length);
     }
     return reply;
   }
@@ -247,6 +255,57 @@ public final class PackageQuery {
     }
   }
 
+  private static Object systemPackageManager() throws Exception {
+    Class<?> activityThread = Class.forName("android.app.ActivityThread");
+    Object thread = null;
+    try {
+      Method current = activityThread.getDeclaredMethod("currentActivityThread");
+      current.setAccessible(true);
+      thread = current.invoke(null);
+    } catch (NoSuchMethodException ignored) {
+    }
+    if (thread == null) {
+      Method systemMain = activityThread.getDeclaredMethod("systemMain");
+      systemMain.setAccessible(true);
+      thread = systemMain.invoke(null);
+    }
+    Method getSystemContext = activityThread.getDeclaredMethod("getSystemContext");
+    getSystemContext.setAccessible(true);
+    Object context = getSystemContext.invoke(thread);
+    return context.getClass().getMethod("getPackageManager").invoke(context);
+  }
+
+  private static String applicationLabel(ApplicationInfo app, Object packageManager) {
+    try {
+      Class<?> api = Class.forName("android.content.pm.PackageManager");
+      Object label = app.getClass().getMethod("loadLabel", api).invoke(app, packageManager);
+      if (label != null && label.toString().length() > 0) return label.toString();
+    } catch (Exception ignored) {
+    }
+    return app.packageName;
+  }
+
+  private static String encodeField(String value) {
+    byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+    StringBuilder encoded = new StringBuilder(bytes.length);
+    final char[] hex = "0123456789ABCDEF".toCharArray();
+    for (byte raw : bytes) {
+      int valueByte = raw & 0xff;
+      if ((valueByte >= 'a' && valueByte <= 'z')
+          || (valueByte >= 'A' && valueByte <= 'Z')
+          || (valueByte >= '0' && valueByte <= '9')
+          || valueByte == '.'
+          || valueByte == '_'
+          || valueByte == '-'
+          || valueByte == '~') {
+        encoded.append((char) valueByte);
+      } else {
+        encoded.append('%').append(hex[valueByte >>> 4]).append(hex[valueByte & 0xf]);
+      }
+    }
+    return encoded.toString();
+  }
+
   private static String query(String request) throws Exception {
     Object pm = service("package", "android.content.pm.IPackageManager$Stub");
     return cachedQuery(request, pm);
@@ -262,7 +321,57 @@ public final class PackageQuery {
       }
       int uid = (Integer) packageCall(pm, "getPackageUid", fields[2], user);
       if (uid >= 0) rows.add(fields[2] + ":" + uid);
-    } else if (fields.length == 2 && fields[0].equals("U")) {
+    } else if (fields.length == 2 && fields[0].equals("A")) {
+      int user = nonnegative(fields[1]);
+      Object slice = packageCall(pm, "getInstalledApplications", null, user);
+      List<?> apps = (List<?>) slice.getClass().getMethod("getList").invoke(slice);
+      ArrayList<ApplicationInfo> sorted = new ArrayList<>();
+      for (Object entry : apps) sorted.add((ApplicationInfo) entry);
+      Collections.sort(
+          sorted,
+          new Comparator<ApplicationInfo>() {
+            @Override
+            public int compare(ApplicationInfo first, ApplicationInfo second) {
+              return first.packageName.compareTo(second.packageName);
+            }
+          });
+      Object packageManager = null;
+      try {
+        packageManager = systemPackageManager();
+      } catch (Exception ignored) {
+      }
+      StringBuilder result = new StringBuilder();
+      for (ApplicationInfo app : sorted) {
+        if (app.packageName == null || app.packageName.length() == 0) continue;
+        if (app.uid < 0 || app.uid / 100000 != user)
+          throw new IllegalStateException("PackageManager returned mismatched user UID");
+        boolean isSystem =
+            (app.flags & ApplicationInfo.FLAG_SYSTEM) != 0
+                || (app.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
+        result
+            .append(user)
+            .append('\t')
+            .append(app.uid)
+            .append('\t')
+            .append(isSystem ? '1' : '0')
+            .append('\t')
+            .append(app.packageName)
+            .append('\t')
+            .append(encodeField(applicationLabel(app, packageManager)))
+            .append('\t')
+            .append(encodeField(app.sourceDir == null ? "" : app.sourceDir))
+            .append('\n');
+      }
+      return result.toString();
+    } else if (fields.length == 1 && fields[0].equals("T")) {
+      Object manager = service("user", "android.os.IUserManager$Stub");
+      TreeSet<Integer> ids = new TreeSet<>();
+      for (Object user : users(manager)) ids.add(user.getClass().getField("id").getInt(user));
+      StringBuilder result = new StringBuilder();
+      for (Integer id : ids) result.append(id).append('\n');
+      if (result.length() == 0) throw new IllegalStateException("empty user inventory");
+      return result.toString();
+    } else if (fields.length == 2 && (fields[0].equals("U") || fields[0].equals("S"))) {
       int uid = nonnegative(fields[1]);
       String[] packages =
           (String[])
@@ -272,6 +381,22 @@ public final class PackageQuery {
                   "getPackagesForUid",
                   new Class<?>[] {int.class},
                   uid);
+      if (fields[0].equals("S")) {
+        if (packages == null || packages.length < 2) return "";
+        String sharedUserId = "";
+        for (String name : packages) {
+          PackageInfo info = (PackageInfo) packageCall(pm, "getPackageInfo", name, uid / 100000);
+          if (info == null
+              || info.applicationInfo == null
+              || info.applicationInfo.uid != uid
+              || !name.equals(info.packageName)
+              || info.sharedUserId == null
+              || !info.sharedUserId.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) return "";
+          if (!sharedUserId.isEmpty() && !sharedUserId.equals(info.sharedUserId)) return "";
+          sharedUserId = info.sharedUserId;
+        }
+        return sharedUserId + "\n";
+      }
       if (packages != null) for (String name : packages) rows.add(name + ":" + uid);
     } else if (fields.length == 1 && fields[0].equals("L")) {
       Object users = service("user", "android.os.IUserManager$Stub");
