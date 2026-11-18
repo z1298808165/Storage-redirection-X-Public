@@ -65,6 +65,32 @@
 
 Provider 请求作用域保留框架校验过的调用包名以及 UID/PID；共享 UID 的不同包不会被 UID 查询结果覆盖，未命中自身只读规则时也不借用另一成员的规则。异步目录提示保留原任务快照，仅在宿主内部调用时恢复，并重新核验任务代次与凭据；冲突或失效的提示不补造应用身份。作用域覆盖实际目录操作，嵌套退出恢复外层身份。下载代写按当前下载行的 `notificationpackage` 与完整 UID 校验包名和用户；同一路径存在不同归属的行时保持未知，仅在原路径没有下载行时查询伴随文件别名。跨线程记录保留原请求的完整任务快照，不用于重定向判定。
 
+## 应用列表刷新失败 / 应用名为空（包清单查询）
+
+WebUI 与 App 的应用列表、日志页里的应用名都来自同一份 system_server 包清单（`srx_daemon package-query A <user>`）。这条链有两处独立缺陷，都会表现为"列表空、应用名退化成包名、日志页中间进程显示未知来源"：
+
+1. **通道会解码 `%XX`**：WebUI 取 stdout 的通道把整段输出当 URL 解码一次（KernelSU/APatch 用 `loadUrl("javascript:…")` 回传结果），清单里每一处 `%2F`、`%E7%B3%BB` 这类转义在到达 JS 之前就被还原成裸字节，percent 编码协议随之失效，解析整份拒绝。因此 WebUI 侧改用 `package-query A <user> --b64`（base64url，不含 `%`），真实 shell 调用方仍取纯文本。现场判据：拿到的文本是 `0\t1000\t1\tandroid\tAndroid 系统\t/system/…`（制表符还在、转义已消失）就是它。
+2. **期限与成本脱钩**：界面清单要枚举该用户全部应用并逐个解析标签，成本随应用数线性增长（实测旗舰机 467 个应用的冷查询 1.9 秒，且间隔 70 秒后重现），而旧实现给整条连接设的是 2 秒绝对期限，慢就等于失败。现在 `A`/`T` 用 15 秒预算，身份反查类（`P`/`U`/`S`/`L`）仍是 2 秒。
+
+| 现象 | 判据 |
+|------|------|
+| 列表空白，提示"刷新应用列表失败" | `[RsWarn] package query failed request=A <user> error=... euid=... budget_ms=...`——优先看 `logs/running.log`；它经 daemon 私有通道落盘，通道拥塞时会退到 logcat |
+| 日志页应用名退化成包名，中间进程显示"未知来源" | 同一根因：应用名由这份清单填充，清单失败后只剩包名，系统代写进程按身份未知渲染 |
+| `error=package query deadline` / `error=package connect` | 该机枚举或连接越过期限；按下面命令实测耗时 |
+| `error=... Operation not permitted euid=<非 0>` | 调用方不是 root，与模块无关 |
+
+手工复现（冷启动后第一次才有代表性）：
+
+```sh
+MOD=/data/adb/modules/storage.redirect.x
+time $MOD/bin/srx_daemon package-query A 0 | wc -l          # 纯文本：App 与模块脚本用这个
+$MOD/bin/srx_daemon package-query A 0 --b64 | wc -c         # WebUI 用的承载形式（base64url）
+```
+
+连续几次都是秒级而不是毫秒级，说明 system_server 侧没有复用缓存。实测间隔几十秒后的下一次查询就是冷查询（duchamp 上紧邻两次 69 ms，间隔 70 秒后 1014 ms），所以用户每刷新一次都要付一次冷枚举的代价。日志包里若出现 `SrxPackageQuery: package lookup failed`，按堆栈看服务端异常；没有这一行说明请求根本没到服务端，问题在客户端连接（socket 缺失、SELinux、调用方非 root）。
+
+同一通道还要读 `file_monitor.log` 一类的文本文件（`cat`），那里的 `%XX` 同样会被解码。当前只在路径本身含 `|` 时影响字段划分（`%7C` 被还原成裸 `|`），显示内容不受影响；这是与上面同一类问题的残留，修的时候按同样思路（换承载形式，或让写侧不再依赖 percent 编码）。
+
 ## MediaStore 写入返回 null（`createMedia returned null`）
 
 应用侧 `MediaStore.insert()` 返回 null / 抛 `FileNotFoundException` 时，**先分清两种完全不同的成因**，否则会把环境竞态当成数据面缺陷：
