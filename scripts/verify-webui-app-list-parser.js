@@ -14,6 +14,11 @@ const sandbox = {
   clearTimeout: () => {},
   localStorage: { getItem: () => null, setItem: () => {} },
   window: {},
+  // 浏览器给 WebView 的 base64 与 UTF-8 能力；vm 上下文里没有，按宿主实现补齐。
+  atob: (value) => Buffer.from(String(value), "base64").toString("binary"),
+  btoa: (value) => Buffer.from(String(value), "binary").toString("base64"),
+  TextEncoder,
+  TextDecoder,
 };
 sandbox.window.window = sandbox.window;
 sandbox.globalThis = sandbox;
@@ -80,6 +85,15 @@ assertEqual(
   parse("10\t10123\t0\tcom.example.work\tWork\trelative.apk", "10"),
   null,
   "relative-apk-path-rejected",
+);
+
+// issue 20 现场：WebUI 取 stdout 的通道会把 `%XX` 还原成裸字节（`%2F` → `/`、中文标签
+// 直接变成 UTF-8）。这种已被解码的清单区分不出分隔符与内容，必须整份拒绝——所以真实
+// 链路改走 `--b64`。这里把这个前提钉住，避免有人日后把 base64 层当成多余装饰删掉。
+assertEqual(
+  parse("0\t1000\t1\tandroid\tAndroid 系统\t/system/framework/framework-res.apk", "0"),
+  null,
+  "url-decoded-inventory-rejected",
 );
 
 async function verifyInstalledAppsUsePerUserPackageManagerResults() {

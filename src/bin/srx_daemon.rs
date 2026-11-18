@@ -98,18 +98,38 @@ mod runtime_stats;
 mod system_fuse_view;
 
 #[cfg(target_os = "android")]
+/// 按请求用途选查询期限。
+///
+/// `A`（某用户的应用清单）与 `T`（用户清单）是界面路径：一次 `A` 要枚举该用户全部
+/// 应用并在 `system_server` 内逐个解析标签，成本随应用数线性增长，冷查询在旗舰机上
+/// 已接近两秒。`P`/`U`/`S`/`L` 是挂载与决策热路径的身份反查，只回几行，继续用短期限。
+fn package_query_budget(request: &str) -> std::time::Duration {
+    match request.split('\t').next() {
+        Some("A") | Some("T") => platform::packages::INVENTORY_QUERY_BUDGET,
+        _ => platform::packages::INLINE_QUERY_BUDGET,
+    }
+}
+
+#[cfg(target_os = "android")]
 fn main() {
     let mut args = std::env::args();
     let _ = args.next();
     let command = args.next();
     if command.as_deref() == Some("package-query") {
-        let fields: Vec<String> = args.collect();
+        let mut fields: Vec<String> = args.collect();
+        // WebUI 的文本通道会把输出当 URL 解码一次，清单必须走 base64url 才能保真；
+        // 真实 shell 调用方（管理 App、模块脚本）继续用纯文本，协议本身不变。
+        let encode_base64 = fields.last().is_some_and(|value| value == "--b64");
+        if encode_base64 {
+            fields.pop();
+        }
         let request = if fields.is_empty() {
             "L".to_owned()
         } else {
             fields.join("\t")
         };
-        match platform::packages::query(&request).and_then(|reply| {
+        let budget = package_query_budget(&request);
+        match platform::packages::query_with_budget(&request, budget).and_then(|reply| {
             let mut fields = request.split('\t');
             match fields.next() {
                 Some("S") => {
@@ -133,8 +153,26 @@ fn main() {
             }
             Ok(reply)
         }) {
-            Ok(reply) => print!("{reply}"),
+            Ok(reply) => {
+                if encode_base64 {
+                    print!("{}", platform::packages::encode_base64(reply.as_bytes()));
+                } else {
+                    print!("{reply}");
+                }
+            }
             Err(error) => {
+                // 这条路径此前只写 stderr：WebUI 把它变成一句通用提示，日志包里一个字
+                // 都留不下，失败只能靠猜。命令行进程平时不初始化日志，这里显式接上既有
+                // 通道（root 侧发往 daemon 私有 socket → running.log）。
+                logging::Logger::init(Some("srx_daemon"));
+                // SAFETY: geteuid 不读写调用方内存。
+                let euid = unsafe { libc::geteuid() };
+                log::warn!(
+                    "package query failed request={} error={} euid={euid} budget_ms={}",
+                    request.replace('\t', " "),
+                    error,
+                    budget.as_millis()
+                );
                 eprintln!("package query failed: {error}");
                 std::process::exit(1);
             }

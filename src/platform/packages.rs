@@ -1,8 +1,24 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::time::Duration;
 
 /// `system_server` 包查询服务的 Unix-domain socket 路径。
 pub const SOCKET_PATH: &str = "/data/adb/modules/storage.redirect.x/tmp/package_query/socket";
+/// 热路径查询的绝对期限上限。
+///
+/// 身份反查（`uid_for_package` / `packages_for_uid` / `shared_user_id_for_uid`）与
+/// 进程扫描都落在挂载、决策的关键路径上，请求本身只回几行，慢就等于链路坏了，
+/// 必须尽快失败。
+pub const INLINE_QUERY_BUDGET: Duration = Duration::from_secs(2);
+/// 界面清单查询（`A` / `T`）的绝对期限上限。
+///
+/// 这份请求要枚举该用户的全部应用并在 `system_server` 内逐个解析标签，成本随设备
+/// 应用数线性增长：实测旗舰机 467 个应用的冷查询就要 1886 ms，中端 OEM 机上应用
+/// 更多必然越线。期限若与成本脱钩，「慢」就会被翻译成「失败」，界面拿不到清单，
+/// 连带所有应用名与进程身份都解析不出来。
+// quality-allow(lint-suppression): 只有 daemon 的 package-query 入口按用途选期限，lib 目标不直接使用此上限。
+#[allow(dead_code)]
+pub const INVENTORY_QUERY_BUDGET: Duration = Duration::from_secs(15);
 /// 一条查询回复允许的最大字节数。
 pub const MAX_REPLY: usize = 4 * 1024 * 1024;
 /// 按完整 Android UID 索引的包名集合；共享 UID 保留全部包名。
@@ -150,6 +166,42 @@ pub fn parse_users(content: &str) -> io::Result<Vec<i32>> {
     Ok(users)
 }
 
+/// base64url 字母表：不含 `+`、`/`，因此不会被任何 URL/form 解码改动。
+const BASE64URL_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// 把清单回复编码成 base64url，供 WebUI 这类文本通道使用。
+///
+/// WebUI 取 stdout 的通道会把整段输出当成 URL 解码一次（KernelSU/APatch 用
+/// `loadUrl("javascript:…")` 回传结果）：清单里每一处 `%XX` 转义（含 `%2F` 的路径、
+/// `%E7%B3%BB` 这类非 ASCII 标签）都会在到达 JS 之前被还原成裸字节，percent 编码
+/// 协议因此不成立，解析必然拒绝整份清单（见 2026-11-18 issue 20 的现场取证）。
+/// base64url 只含字母数字与 `-`/`_`，会被解码的通道和不解码的通道都能原样送达。
+// quality-allow(lint-suppression): 只有 daemon 的 package-query 入口输出该承载形式，lib 目标不直接调用。
+#[allow(dead_code)]
+pub fn encode_base64(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0] as u32;
+        let second = chunk.get(1).copied().unwrap_or(0) as u32;
+        let third = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (first << 16) | (second << 8) | third;
+        encoded.push(BASE64URL_ALPHABET[(triple >> 18) as usize & 0x3f] as char);
+        encoded.push(BASE64URL_ALPHABET[(triple >> 12) as usize & 0x3f] as char);
+        encoded.push(if chunk.len() > 1 {
+            BASE64URL_ALPHABET[(triple >> 6) as usize & 0x3f] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            BASE64URL_ALPHABET[triple as usize & 0x3f] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 /// 解析 `package:uid` 行；保留多用户与共享 UID，任一畸形行都会拒绝整份结果。
 pub fn parse_uids(content: &str) -> io::Result<PackageUids> {
     let mut packages = PackageUids::new();
@@ -244,15 +296,25 @@ pub fn parse_shared_user_id(reply: &str) -> io::Result<Option<String>> {
     Ok(Some(value.to_owned()))
 }
 
-/// 通过独立连接查询 `system_server`；仅 root 可用，单次连接受两秒绝对期限约束。
+/// 通过独立连接查询 `system_server`，使用热路径的 [`INLINE_QUERY_BUDGET`]。
 ///
 /// 回复只在 UID 为 1000 且 SELinux 域为 `system_server` 时接受；每次调用新建连接，
 /// 不跨 fork 保存连接或查询结果。
 #[cfg(unix)]
 pub fn query(request: &str) -> io::Result<String> {
+    query_with_budget(request, INLINE_QUERY_BUDGET)
+}
+
+/// 通过独立连接查询 `system_server`；仅 root 可用，`budget` 覆盖连接、发送与收包。
+///
+/// 调用方按用途选上限：身份反查类走 [`query`]（[`INLINE_QUERY_BUDGET`]），界面
+/// 清单类走 [`INVENTORY_QUERY_BUDGET`]。期限是绝对期限而不是空闲期限，因此它必须
+/// 大于该请求在目标设备上的实际耗时上限，否则「慢」会被当成「链路坏了」。
+#[cfg(unix)]
+pub fn query_with_budget(request: &str, budget: Duration) -> io::Result<String> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     if request.is_empty()
         || request.len() >= 512
         || request
@@ -265,7 +327,7 @@ pub fn query(request: &str) -> io::Result<String> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(io::Error::from_raw_os_error(libc::EPERM));
     }
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + budget;
     let mut stream = connect(deadline)?;
     // SAFETY: ucred 仅含整数，可零初始化为 getsockopt 的输出缓冲。
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };

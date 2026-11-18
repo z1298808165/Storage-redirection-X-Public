@@ -1,6 +1,27 @@
 use native_config_fixtures::platform::packages::{
-    MAX_REPLY, decode_reply, parse_app_inventory, parse_uids, parse_users,
+    MAX_REPLY, decode_reply, encode_base64, parse_app_inventory, parse_uids, parse_users,
 };
+
+#[test]
+fn inventory_base64_payload_keeps_percent_fields_and_tabs_verbatim() {
+    // WebUI 的文本通道会把 `%XX` 当 URL 转义解码一次；清单靠 percent 编码保真，
+    // 因此发给它的回复必须先编码成只含字母数字与 `-`/`_` 的形式（issue 20）。
+    let payload = "0\t1000\t1\tandroid\tAndroid%20%E7%B3%BB%E7%BB%9F\t%2Fsystem%2Fframework%2Fframework-res.apk\n";
+    let encoded = encode_base64(payload.as_bytes());
+    assert!(!encoded.contains('%'));
+    assert!(!encoded.contains('\t'));
+    assert!(!encoded.contains('+'));
+    assert!(!encoded.contains('/'));
+    assert_eq!(
+        encoded,
+        "MAkxMDAwCTEJYW5kcm9pZAlBbmRyb2lkJTIwJUU3JUIzJUJCJUU3JUJCJTlGCSUyRnN5c3RlbSUyRmZyYW1ld29yayUyRmZyYW1ld29yay1yZXMuYXBrCg=="
+    );
+    // 不足三字节的尾部必须补 `=`，否则 WebView 的 atob 会抛 InvalidCharacterError。
+    assert_eq!(encode_base64(b"ab"), "YWI=");
+    assert_eq!(encode_base64(b"a"), "YQ==");
+    assert_eq!(encode_base64(b""), "");
+    assert_eq!(encode_base64(&[0xfb, 0xff]), "-_8=");
+}
 
 #[test]
 fn app_inventory_keeps_user_metadata_and_decodes_labels_and_paths() {

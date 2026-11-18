@@ -514,6 +514,26 @@ function isSafeUserId(userId) {
   return /^[0-9]+$/.test(String(userId || ""));
 }
 
+/**
+ * 解码 `package-query … --b64` 的 base64url 回复。
+ *
+ * WebUI 取 stdout 的通道会把整段输出当 URL 解码一次（KernelSU/APatch 用
+ * `loadUrl("javascript:…")` 回传结果），清单里的 `%XX` 转义（路径的 `%2F`、中文标签的
+ * `%E7%B3%BB`）会在到达这里之前就被还原，percent 编码协议随之失效、整份清单被拒绝。
+ * base64url 只含字母数字与 `-`/`_`，解码与不解码的桥接实现都能原样送达。
+ */
+function decodePackageQueryBase64(value) {
+  const text = String(value || "")
+    .replace(/\s+/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  if (!text) return "";
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
 function parsePackageUsers(content) {
   const users = String(content || "")
     .split(/\r?\n/)
@@ -599,6 +619,11 @@ function utf8ToBase64(value) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
+}
+
+/** 与 daemon 的 `--b64` 保持同一字母表（base64url），供浏览器 mock 复用。 */
+function utf8ToBase64Url(value) {
+  return utf8ToBase64(value).replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 function sanitizeFileName(value, fallback) {
@@ -1925,7 +1950,10 @@ const Api = {
   /** 获取已安装应用列表（用户应用与系统应用） */
   async getInstalledApps(userId) {
     const safeUser = isSafeUserId(userId) ? String(userId) : "0";
-    const output = await this.exec(shellQuote(SRX_DAEMON) + " package-query A " + safeUser);
+    const encoded = await this.exec(
+      shellQuote(SRX_DAEMON) + " package-query A " + safeUser + " --b64",
+    );
+    const output = decodePackageQueryBase64(encoded);
     const apps = parseSystemServerAppList(output, safeUser);
     if (!apps) throw new Error("Invalid PackageManager app inventory");
     apps.forEach((app) => {
@@ -2479,9 +2507,14 @@ const Api = {
   async _mockExec(cmd) {
     if (cmd.includes("package-query T")) return "0\n10\n";
     if (cmd.includes("package-query A 10"))
-      return "10\t1010123\t0\tcom.example.work\tWork%20App\t%2Fdata%2Fapp%2Fwork%2Fbase.apk\n";
+      return utf8ToBase64Url(
+        "10\t1010123\t0\tcom.example.work\tWork%20App\t%2Fdata%2Fapp%2Fwork%2Fbase.apk\n",
+      );
     if (cmd.includes("package-query A 0"))
-      return "0\t10123\t0\tcom.tencent.mm\tWeChat\t%2Fdata%2Fapp%2Fwechat%2Fbase.apk\n0\t1000\t1\tcom.android.settings\tSettings\t%2Fsystem%2Fpriv-app%2FSettings%2Fbase.apk\n";
+      return utf8ToBase64Url(
+        "0\t10123\t0\tcom.tencent.mm\tWeChat\t%2Fdata%2Fapp%2Fwechat%2Fbase.apk\n" +
+          "0\t1000\t1\tcom.android.settings\tSettings\t%2Fsystem%2Fpriv-app%2FSettings%2Fbase.apk\n",
+      );
     if (cmd.includes(FILE_MONITOR_LOG) && (cmd.includes(": >") || cmd.includes('echo "" >'))) {
       this._mockStore.fileMonitorLogCleared = true;
       return "";
