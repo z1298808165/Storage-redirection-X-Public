@@ -12,7 +12,7 @@
 - 推送前必须运行 `git status --short --branch`，确认当前分支、工作区状态、待推送提交和远端跟踪关系。
 - 推送前必须运行必要验证；本地在 WSL 中运行 Cargo/Gradle 构建与测试，在 Windows PowerShell 中直接运行 ADB 设备套件。本仓库主模块构建命令是 `cargo build --target aarch64-linux-android --release --locked`。无法运行时，必须在最终说明中写明原因。
 - 推送前必须检查 `.github/workflows/*.yml`，确认本次推送触发的是 CI Build 还是 Release workflow。
-- 推送前必须运行 `git log --oneline origin/main..HEAD`，确认待推送提交标题符合中文提交规范。
+- 推送前必须运行 `git log --oneline origin/SRX-R..HEAD`，确认待推送提交标题符合中文提交规范。
 - 不要重写已经推送到远端的历史，除非用户明确批准 force push。
 - 不要回滚他人或用户已有改动；遇到不相关的未提交改动时，只处理本次任务涉及的文件。
 
@@ -61,7 +61,7 @@
 当需要发布新版本时：
 
 1. 更新 `Cargo.toml` 中的 `version` 字段
-2. 合并 PR 到 main
+2. 合并 PR 到 `SRX-R` 分支
 3. 在 `SRX-R` 分支可达提交上打 tag：
    ```bash
    git tag v2.0.0
@@ -71,6 +71,10 @@
    - 构建模块
    - 生成距上一个 Release 的变更日志；其中“修复了什么问题”“增加了什么功能”“新功能怎么使用”“注意事项”按需结合上一正式版到当前 tag 的代码差异，以及这段期间的 CI 更新日志补充；只有实质性用户可见新功能（例如新增设置项、配置项或操作入口）才写“增加了什么功能”和“新功能怎么使用”，没有对应内容时可以省略相应标题，不要硬凑空内容。
    - 创建 GitHub Release 并上传模块 ZIP
+
+## PR 合并方式
+
+维护者以 **Merge commit**（GitHub「Create a merge commit」）合并 PR。请保持分支历史不变：不要对已推送的 PR 分支执行 force push 或 rebase，否则合并节点无法作为可追溯的基线。
 
 ## 分支命名规范
 
@@ -90,4 +94,4 @@
 文档：更新本地构建说明
 ```
 
-本地 hook 会在提交和推送时检查标题格式、明显的职责混合、Rust 内联测试白名单、增量代码残留及与 Commit tree 绑定的 AI 审核凭据。请启用 `git config core.hooksPath .githooks`，不要使用 `--no-verify` 绕过检查。
+提交前必须自行核对标题格式、明显的职责混合、Rust 内联测试白名单、增量代码残留及与 Commit tree 绑定的 AI 审核凭据，并在提交正文保留相应审核记录；不要使用 `--no-verify` 绕过检查。

@@ -44,9 +44,9 @@ Commit 正文必须使用以下结构，按改动实际需要保留章节；至�
 
 ## Git 门禁
 
-- `pre-commit` 检查 Rust 内联测试白名单、增量代码残留和当前暂存 tree 的 AI 审核凭据。
-- `commit-msg` 校验提交规范，并写入与提交 tree 绑定的 `AI-Review-*` trailers。
-- `pre-push` 逐个检查待推送 Commit 的标题、代码质量、审核 trailers 和最终 Rust 内联测试白名单。
+- 提交前检查：Rust 内联测试白名单、增量代码残留和当前暂存 tree 的 AI 审核凭据。
+- 提交信息校验：核对提交规范，并与提交 tree 绑定写入 `AI-Review-*` trailers。
+- 推送前检查：逐个核对待推送 Commit 的标题、代码质量、审核 trailers 和最终 Rust 内联测试白名单。
 - 纯空提交没有代码差异，可以跳过 AI 代码审核；任何包含文件改动的 Commit 都不能跳过。
 
 `quality-allow(<rule>): <具体原因>` 只用于静态规则的确切误报，必须紧邻对应代码。它不能豁免 AI 语义审核，也不能作为保留无用代码、测试残留或未完成实现的理由。
@@ -60,7 +60,7 @@ Commit 正文必须使用以下结构，按改动实际需要保留章节；至�
   `pwsh`、`bash`、`sh`、`rustup`、`cp`、`export` 开头的行；
 - Gradle 任务续行：形如 `:module:taskName \` 的行；
 - 变量赋值：形如 `$Serial = "<值>"` 的行；
-- `.ps1`、`.sh`、`.py`、`.yml`、`.properties` 与 `.githooks/` 中形如 `#[...]` 的 Rust 属性——它是
+- `.ps1`、`.sh`、`.py`、`.yml`、`.properties` 与钩子脚本中形如 `#[...]` 的 Rust 属性——它是
   夹具里的属性文本，不是注释；
 - 既有排除项：Markdown 表格行、代码路径、全大写技术标识、`SPDX-License-Identifier`、URL，以及
   `NAME=value command` 形式的环境变量前缀。

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "reviewer": "Codex AI Agent",
+  "reviewer": "AI Agent",
   "baseCommit": "<git rev-parse HEAD>",
   "tree": "<git write-tree>",
   "files": ["path/to/staged-file"],

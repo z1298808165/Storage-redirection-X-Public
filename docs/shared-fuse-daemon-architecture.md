@@ -426,7 +426,7 @@ CI 测试流为共享宿主增加**轻量时间点快照**：每个 Android job 
 FuseDaemon 一致：**每次路径解析都向本会话重新确认**。零点值下每个中间路径组件也要重新确认，所以
 一次 `stat()` 在视图里是 3~4 次 LOOKUP 往返。
 
-这不是"感觉"，真机量过（2311DRK48C / A16；用 `nsenter -t <应用pid> -m` 在同一命名空间里跑
+这不是"感觉"，真机量过（A16；用 `nsenter -t <应用pid> -m` 在同一命名空间里跑
 `ls -l`/`ls -ld`，统计 `running.log` 里的 `LOOKUP name`）：
 
 | 探针 | `ENTRY_TTL=ZERO` | `ENTRY_TTL=1s` | 差异 |

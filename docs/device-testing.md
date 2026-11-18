@@ -293,9 +293,9 @@ Android 17（API 37.0）有三处执行环境差异：
 | 41 | 沙盒根（重定向根 `Android/data/<包名>/sdcard`）在应用重启时由模块重建：属主必须是应用、**组不得是应用自己的 uid**，只能取父目录的组（setgid 继承）或 `media_rw`(1023)/`ext_data_rw`(1078)；other 位不得可写，mode 只允许 `02770`/`02771`。随后应用自己写一个文件、再由 MediaProvider 代写一条 `Documents/SrtSandboxRootProbe`，两者都必须落在沙盒内，真实公共路径不得出现该目录或文件（2026-11-09 真机：沙盒根 gid 被写成应用 uid，系统代写 EACCES 后回退到真实公共路径，公共存储凭空长出 `Documents/ringtone/...`）。 |
 | 42 | 在沙盒、真实路径放行、映射和前缀相邻路径验证文件与目录变更、打开描述符、权限及链接边界，并检查物理落点与零穿透。 |
 | 43 | 存储视图根的条目集合必须与系统视图逐项一致：根级不出现 MediaProvider 内部目录（`.transforms`、`.picker_transcoded`）与模块探针残留，readdir 不返回 `.`/`..`，名字级的对照点目录仍可见，深层同名目录仍可见；配置变更触发 reconcile 后内容保持不变。 |
-| 44 | 监视接管链路：应用没有任何配置、只开文件监视，冷启动停在系统视图；改「另一个应用」的规则触发 reconcile 后它被接入模块视图，此时根条目集合仍须与系统视图逐项一致（无内部目录、无点条目、单层挂载）。 |
+| 44 | 监视接管链路：应用没有任何配置、只开文件监视，冷启动停在系统视图；改「另一个应用」的规则触发 reconcile 后它被接入模块视图，此时根条目集合仍须与系统视图逐项一致（无内部目录、无点条目、单层挂载）。接管后还会在应用私有树里造一次覆盖挂载（源目录 bind 到 `/data/media/<user>/Android/data/<包名>/files/SrtOverlayBacked`，等价系统把下载暂存目录 bind 到 `.siexternal`），该目录经可见路径 `/storage/emulated/<user>/...` 的模块视图必须与 init 侧 `/data/media/<user>` 的视图逐项一致。 |
 
-场景 44 复刻「没开重定向的应用在别人改规则后突然看见内部目录」的现场。它与场景 43 互补而不是重复：43 的应用**有配置**（通配放行整根），启动即被模块会话接管；44 的应用**没有任何配置**，应用侧只在 `should_redirect` 时为真才发挂载请求，因此冷启动一定停在系统视图，接管发生在 daemon 因**别的应用**规则变化而做全量 reconcile 的那一刻——这正是 MT 的现象链。断言先用 `st_dev` 锁定基线（必须仍等于系统视图，否则说明上一轮会话没清干净、断言会失去意义），再用一份与目标应用无关的配置（`com.srx.test.monitor.trigger.json`）触发 reconcile，随后复用 43 的逐项一致性断言；结束时删除触发器配置。
+场景 44 复刻「没开重定向的应用在别人改规则后突然看见内部目录」的现场。它与场景 43 互补而不是重复：43 的应用**有配置**（通配放行整根），启动即被模块会话接管；44 的应用**没有任何配置**，应用侧只在 `should_redirect` 时为真才发挂载请求，因此冷启动一定停在系统视图，接管发生在 daemon 因**别的应用**规则变化而做全量 reconcile 的那一刻——这正是 MT 的现象链。断言先用 `st_dev` 锁定基线（必须仍等于系统视图，否则说明上一轮会话没清干净、断言会失去意义），再用一份与目标应用无关的配置（`com.srx.test.monitor.trigger.json`）触发 reconcile，随后复用 43 的逐项一致性断言；结束时删除触发器配置。接管后追加一条覆盖挂载断言：在应用私有树里把源目录 bind 到 `/data/media/<user>/Android/data/<包名>/files/SrtOverlayBacked`（形状等价 HyperOS 每次下载把 `/data/apk-tmp/<pkg>/download` bind 到 `/data/media/<user>/Android/data/<pkg>/files/.siexternal`），要求经可见路径 `/storage/emulated/<user>/...` 读到的模块视图与 init 侧 `/data/media/<user>` 的视图逐项一致。bind 必须**建在 `/data/media/<user>` 写法上**：覆盖挂载表按该写法登记挂载点，建在 `/storage/emulated/<user>` 上只会遮蔽那个 FUSE 挂载自己的视图，f2fs 侧与覆盖表都看不到，断言就退化成验证不了改写。bind 还必须**在接入之后**才建——宿主会话的数据面是 `/data/media/<user>` 的非递归 bind 锚点，建会话那一刻定型，事后新增的覆盖挂载只能靠后端路径改写补偿；这条断言就是该补偿链的回归护栏（2026-11-17 真机：改写用的查询串丢了 `<user>` 段，覆盖表恒不命中，商店校验读不到刚下载的包，安装不发起）。
 
 场景 43 用「通配放行整根」（`allowed_real_paths=["*"]`）让视图根由模块 FUSE 接管，同时根目录枚举逐条落到真实后端——只有走真实后端枚举，根级隐藏判据才会被触发（`.transforms` 泄漏的现场路径）。断言先用 `/storage/emulated/0` 的 `st_dev` 确认应用确实被模块会话接管（未接管时两侧天然一致，断言会空转），再要求视图根 `/storage/emulated` 上**只有一层**挂载（接入按「替换而非叠加」实现，叠加与基线不一致且让上层归属不可判定），然后逐项比对应用命名空间与系统视图的 `ls -a` 结果；`.SrtRootDotVisible` 是反向对照，防止把根级过滤写成「藏掉所有点条目」。视图根上提后用户根在视图里是 `<user>` 这一级，根级判据必须按归一后的存储相对路径判空，否则整条隐藏会被跳过（2026-11-14 回归）。配置变更触发 reconcile 后会再断言一次，保证内容与挂载层数都不随重挂变化。
 
@@ -449,7 +449,7 @@ adb -s $Serial shell am start-foreground-service -n me.fakerqu.test.storageredir
 - 每次运行（完整回归、窄场景、单场景）各自创建一个独立的时间戳目录，同一天的多次运行互不覆盖；
 - `run-android-test-flow.sh` 在启动时创建目录并通过 `SRT_ARTIFACT_DIR` 环境变量注入子脚本，场景脚本与诊断脚本共用同一目录；直接运行 `run-storage-redirect-scenarios.sh` 或 `run-storage-redirect-scenarios.ps1` 时由脚本自行创建；
 - CI 的 `Upload test-flow artifacts` 步骤按 `temp/test-flow/**` 收集上传；
-- 不得向仓库根目录或脚本当前目录新增产物落盘点（规范见 `AGENTS.md`「测试流产物落盘」）；`temp/` 已被 git 忽略，无需提交。
+- 不得向仓库根目录或脚本当前目录新增产物落盘点（产物一律写入 `temp/test-flow/<时间戳>/`，`temp/` 已被 git 忽略，无需提交）。
 
 设备侧结果文件可能出现在以下位置，场景脚本会自动查找：
 
