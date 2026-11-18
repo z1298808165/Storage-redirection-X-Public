@@ -146,6 +146,10 @@ struct FuseState {
 struct InodeBackendCacheEntry {
     owner_uid: u32,
     backend: Arc<BackendPath>,
+    /// 解析时覆盖表的代次。覆盖挂载可能在会话运行中途出现或消失，代次不一致时这条
+    /// 缓存按陈旧处理、就地重解析——否则首次解析落在 1 秒快照窗口内会把「bind 遮蔽前
+    /// 的后端」钉死到 inode 生命周期结束（2026-11-17 A16 偶发视图不一致即此）。
+    overlay_generation: u64,
 }
 
 /// 条目上限：`ls -lR` 一万条目的遍历会把 inode 全部带进来，每条目两段路径字符串
@@ -695,6 +699,7 @@ impl FuseRedirectFs {
             InodeBackendCacheEntry {
                 owner_uid: policy.uid as u32,
                 backend,
+                overlay_generation: backend_overlay::snapshot_generation(),
             },
         );
     }
@@ -731,11 +736,15 @@ impl FuseRedirectFs {
         ino: INodeNo,
     ) -> Result<Arc<BackendPath>, Errno> {
         let rel = self.path_for_ino(ino).ok_or(Errno::ENOENT)?;
+        // 代次在取 state 锁之前读取（`snapshot_generation` 会短暂持有快照锁，避免与
+        // state 锁形成反向嵌套）；它最多滞后一次快照刷新，陈旧时只多做一次解析。
+        let overlay_generation = backend_overlay::snapshot_generation();
         {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             if let Some(entry) = state.inode_backends.get(&ino.0)
                 && entry.owner_uid == policy.uid as u32
                 && entry.backend.rel == rel
+                && entry.overlay_generation == overlay_generation
             {
                 let count = INODE_BACKEND_CACHE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
                 if count == 1 || count.is_multiple_of(8192) {
@@ -826,7 +835,9 @@ impl FuseRedirectFs {
         // HyperOS 下载 bind 在任务入队瞬间创建，快照 TTL 可能刚好错过；新建入口
         // 强制重读 init mountinfo，避免首次 CREATE 与 bind 创建竞态时落到被遮蔽的
         // 真实目录（真机 2026-10-19：商店增量下载校验 error=3 的直接成因）。
-        if let Some(resolved) = backend_overlay::overlay_backend_path_fresh(&backend.path) {
+        if let Some(resolved) =
+            backend_overlay::overlay_backend_path_fresh(&backend.path, policy.user_id)
+        {
             backend.path = resolved;
         }
         if backend.is_read_only {

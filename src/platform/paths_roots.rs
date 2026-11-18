@@ -83,19 +83,6 @@ pub fn data_media_user_root_for_current_ns(user_id: i32) -> String {
     }
 }
 
-/// 把锚点形态的路径转回 /data/media 形式，供覆盖挂载感知解析
-/// （backend_overlay 查询的是 init 命名空间里以 /data/media 形式登记的覆盖层）。
-/// 非 /data/media 形式的路径（real_root 的 MP 视图等）原样返回。
-pub fn media_real_form_of(path: &str) -> String {
-    if let Some(anchor) = MEDIA_REAL_ANCHOR_ROOT.get()
-        && let Some(rest) = path.strip_prefix(anchor.as_str())
-        && (rest.is_empty() || rest.starts_with('/'))
-    {
-        return format!("/data/media{rest}");
-    }
-    path.to_string()
-}
-
 /// 返回同一用户共享存储的所有系统路径别名。
 ///
 /// 挂载创建和挂载状态校验必须使用完全一致的别名集合，否则状态文件中的

@@ -757,7 +757,7 @@ impl RedirectPolicy {
             fix_mapped_dir_metadata(&redirect_root_string, config.uid);
             // 本次初始化新建的私有树重定向根按原生语义补 chmod：create_directory
             // 的 mkdir(0755) 受 daemon umask 与 setgid 继承影响，会落下 2750 这类
-            // 非原生形态（2026-10-21 duchamp 实测）；既有目录仍交 fix_mapped 的
+            // 非原生形态（2026-10-21 实测）；既有目录仍交 fix_mapped 的
             // keep-existing 守卫保留。
             if !existed_redirect_root
                 && let Some(user_id) =
@@ -1624,17 +1624,15 @@ impl RedirectPolicy {
 
     pub(super) fn real_backend_for_storage_rel(&self, rel: &str) -> PathBuf {
         if rel.is_empty() {
-            return backend_overlay::overlay_backend_path(&self.real_root)
+            return backend_overlay::overlay_backend_path(&self.real_root, self.user_id)
                 .unwrap_or_else(|| self.real_root.clone());
         }
         let joined = self.real_backend_root_for_storage_rel(rel).join(rel);
         // 覆盖挂载感知：HyperOS 等系统会在 init 命名空间把下载暂存目录 bind 到
-        // `/data/media/...` 子树（如应用商店 `.siexternal`），应用命名空间里的
-        // scoped 会话按普通路径解析会落到被遮蔽的真实目录，与宿主/MP 读侧分裂。
-        // 命中覆盖挂载时改写到物理源路径，未命中保持原路径（CI 断言不受影响）。
-        // 宿主进程内路径可能已是 f2fs 直连锚点形态，查询前转回 /data/media 形式。
-        let overlay_query = paths::media_real_form_of(&joined.to_string_lossy());
-        backend_overlay::overlay_backend_path(Path::new(&overlay_query)).unwrap_or(joined)
+        // `/data/media/...` 子树（如应用商店 `.siexternal`）。后端根可能是 f2fs 锚点
+        // 形态（宿主会话），`overlay_backend_path` 内部按 user 换算成 `/data/media/<user>`
+        // 再查覆盖表；未命中时保持原路径（CI 断言不受影响）。
+        backend_overlay::overlay_backend_path(&joined, self.user_id).unwrap_or(joined)
     }
 
     // 按相对路径选择真实后端根：应用自有私有目录走 private_real_root 直连 f2fs，
@@ -1755,13 +1753,13 @@ impl RedirectPolicy {
 
     pub(super) fn redirect_backend_for_storage_rel(&self, rel: &str) -> PathBuf {
         if rel.is_empty() {
-            return backend_overlay::overlay_backend_path(&self.redirect_root)
+            return backend_overlay::overlay_backend_path(&self.redirect_root, self.user_id)
                 .unwrap_or_else(|| self.redirect_root.clone());
         }
         let joined = self.redirect_root.join(rel);
         // 与 real 后端同口径：重定向根同样落在 `/data/media/...` 物理树上，
         // 需要经过同一套覆盖挂载感知解析（见 real_backend_for_storage_rel 注释）。
-        backend_overlay::overlay_backend_path(&joined).unwrap_or(joined)
+        backend_overlay::overlay_backend_path(&joined, self.user_id).unwrap_or(joined)
     }
 
     /// 折叠视图对重定向根自身的再进入：`<redirect_view_rel>/<rest>` → `<rest>`。
@@ -2080,7 +2078,7 @@ impl RedirectPolicy {
         // - `/data/media/<user>`：daemon/scoped 会话的直连根；
         // - `tmp/real_storage/<user>`：存储根结构锚点；
         // - `real_media_anchor/<user>`：宿主会话的 f2fs 锚点（`real_root` 本体）。
-        // 真机 2026-11-01 duchamp 实证：宿主会话经锚点创建公共文件后 uid=0 gid=1023
+        // 真机 2026-11-01 实证：宿主会话经锚点创建公共文件后 uid=0 gid=1023
         // mode=600，应用 stat 得 EACCES、createNewFile 报 EEXIST（场景 5→6 连跑）。
         //
         // 三族根与请求无关，构造期已算好（`shared_public_roots`），判定里不再拼接。

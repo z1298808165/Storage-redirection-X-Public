@@ -57,7 +57,7 @@ const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
 ///
 /// **检测必须直读 f2fs 真实路径**：毒化往往由绕过 MediaProvider 视图的写入造成（外部
 /// 直写、MP 侧处理路径等），此时 MP 的 fuse 节点缓存仍持有陈旧尺寸，按 backend_path
-/// 判定会把毒化误读成健康（duchamp 18:00 实测）。删除则双管齐下：先经 MediaProvider
+/// 判定会把毒化误读成健康（真机 18:00 实测）。删除则双管齐下：先经 MediaProvider
 /// 视图 unlink（让 MP 在自己的节点簿记里显式失效该名称，供管理器等经 MP FUSE 的读取方
 /// 保持一致），再删 f2fs 真实文件兜底（保证毒化数据消失）——与人工删除 shm 的治愈路径
 /// 一致。对任何消费方都无损：文件内容本就是无效垃圾，SQLite 下次打开会从 `-wal`
@@ -624,7 +624,13 @@ impl Filesystem for FuseRedirectFs {
         };
         self.perf
             .record_dir_scan(scan_ns, lock_wait_ns, retries, entry_count);
-        reply.opened(FileHandle(fh), FopenFlags::FOPEN_CACHE_DIR);
+        // 不向内核宣告 FOPEN_CACHE_DIR：目录内容会在会话运行中途变化，而内核级目录缓存
+        // 没有失效通道。init 侧事后新建覆盖挂载（HyperOS 下载 `.siexternal` 就是这种）时，
+        // 早先缓存下来的「bind 出现前的空目录」会让覆盖改写再也回不到视图里——2026-11-18
+        // CI 场景 44 实测：改写已命中（`overlay query kind=hit`），应用视图 10 秒仍为空。
+        // 用户态仍有 `dir_candidate_cache`（2 秒 TTL + 源签名）承担同一职责，且它随覆盖表
+        // 一起失效，语义正确。
+        reply.opened(FileHandle(fh), FopenFlags::empty());
     }
 
     fn readdir(
