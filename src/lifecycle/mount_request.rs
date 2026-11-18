@@ -8,7 +8,7 @@
 //! - 应用 specialize 时整个进程切到 `u:r:untrusted_app:s0`，此后对这条继承来的 socket
 //!   做 `read` 会被 SELinux 直接拒绝。
 //!
-//! 真机实证（2026-11-09，2311DRK48C / A16）dmesg 审计原文，逐行摘录：
+//! 真机实证（2026-11-09，A16）dmesg 审计原文，逐行摘录：
 //!
 //! - 请求行：`avc: denied { read } for comm="one:gpu_process" path="socket:[207528]" dev="sockfs"`
 //! - 上下文：`scontext=u:r:untrusted_app:s0:c18,c257,c512,c768 tcontext=u:r:zygote:s0`

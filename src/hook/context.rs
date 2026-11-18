@@ -353,7 +353,7 @@ pub fn monitor_caller_uid_in_window() -> Option<i32> {
 /// **为什么不用 setfsuid(-1) 惯用法**：MediaProvider 等应用进程运行在 zygote
 /// seccomp 沙箱内，`setfsuid`（arm64 syscall 151）不在白名单，调用即 SIGSYS
 /// 杀死进程（2026-10-30 真机实测，MP 崩溃循环、存储 volume 不可用）。
-/// **为什么不找 `FsUid:` 行**：status 没有 FsUid 字段（2026-10-30 duchamp
+/// **为什么不找 `FsUid:` 行**：status 没有 FsUid 字段（2026-10-30 真机
 /// 实测仅 `Uid:` 行），fsuid 是 `Uid:` 行的第 4 列。
 /// 改用 raw `SYS_openat` 直读 /proc/thread-self/status：不经 PLT，不会被自身 hook
 /// 拦截产生递归记录。

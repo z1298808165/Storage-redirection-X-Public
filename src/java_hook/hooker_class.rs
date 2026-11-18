@@ -599,7 +599,7 @@ unsafe extern "C" fn resolve_open_path(
     // native 返回交给 Java 侧 resolveOpenPathSafe 兜底；但若返回前或后续
     // 回调里再有任何 JNI 调用（如同一次 open 处理第二个候选路径时的
     // FindClass），ART 的 AssertNoPendingException 会直接 abort 宿主进程
-    // （2026-10-29 ishtar：media.module 因此反复 SIGABRT）。就地清理并按
+    // （2026-10-29 真机：media.module 因此反复 SIGABRT）。就地清理并按
     // 未命中返回。
     if crate::zygisk::jni::clear_pending_exception(env) {
         return std::ptr::null_mut();

@@ -84,7 +84,7 @@ function Is-ChineseLanguagePath {
         return $false
     }
 
-    return $Path -match '^(src/|app/|java_src/|native/|tools/|assets/zygisk_module/|scripts/|\.githooks/|\.github/(?:scripts|tests|workflows)/|tests/storage-redirect-test/|docs/)' -or
+    return $Path -match '^(src/|app/|java_src/|native/|tools/|assets/zygisk_module/|scripts/|\.github/(?:scripts|tests|workflows)/|tests/storage-redirect-test/|docs/)' -or
         $Path -match '^(?:AGENTS|CLAUDE|CONTRIBUTING|README)\.md$' -or
         $Path -eq ".github/pull_request_template.md" -or
         $Path -eq "build.rs" -or
@@ -128,8 +128,7 @@ function Get-HumanReadableText {
         return $matches[1].Trim()
     }
 
-    if (($Path -match '(?i)\.(?:ps1|psm1|psd1|sh|bash|py|yml|yaml|properties)$' -or
-        $Path -match '^\.githooks/') -and
+    if (($Path -match '(?i)\.(?:ps1|psm1|psd1|sh|bash|py|yml|yaml|properties)$') -and
         $trimmed -match '^#(?![!\[])(.*)$') {
         return $matches[1].Trim()
     }

@@ -103,7 +103,7 @@ pub(super) fn create_metadata(
             gid: MEDIA_RW_GID,
             // 公共后端的属主被改写成 media_rw，mode 必须同步派生（owner 位镜像到
             // group、清 others）：保留调用方原始 0600 会让应用连自己刚写的文件都读
-            // 不到（真机 2026-11-01 duchamp：场景 5 写入后 1023:1023 0600，场景 6
+            // 不到（真机 2026-11-01：场景 5 写入后 1023:1023 0600，场景 6
             // 同路径 stat 得 EACCES、createNewFile 报 EEXIST）。目录固定 02770。
             mode: adjust_metadata_mode(mode, true, false, is_dir),
             rewrite_owner: true,
@@ -210,7 +210,7 @@ pub(super) fn adjust_metadata_mode(
         // 模块在这条路径上扮演的就是「系统视图」，所以必须产出同一口径：否则会话里
         // 由模块建出来的 `-wal`/`-shm` 会是应用 umask 077 的 0600，等目录改由 MP
         // 服务时 MP 用自身身份（附加组 media_rw/ext_data_rw、`CapEff: 0`）打不开，
-        // 应用侧就是 SQLITE_CANTOPEN（真机 2026-11-04 duchamp：XRadiant 打不开自己的
+        // 应用侧就是 SQLITE_CANTOPEN（真机 2026-11-04：XRadiant 打不开自己的
         // -wal，主库被 WAL 回滚成 4096B）。
         //
         // 注意这里只在**新建**时决定落盘权限，不回头修改任何已存在文件；历史遗留的
@@ -224,7 +224,7 @@ pub(super) fn adjust_metadata_mode(
     }
     // 公共后端的文件统一做 owner→group 位镜像并清 others：新建时属主被改写为
     // media_rw(1023)，若保留调用方原始 mode（应用常见 0600），应用自己就再也读不到
-    // 自己刚写的文件——真机 2026-11-01 duchamp 实证：场景 5 放行路径写入后文件为
+    // 自己刚写的文件——真机 2026-11-01 实证：场景 5 放行路径写入后文件为
     // `1023:1023 0600`，紧接着场景 6 写同名时 `stat` 得 EACCES、`createNewFile`
     // 报 EEXIST（内核认为条目存在但打不开）。原生 MP FUSE 同样不透传请求 mode，
     // 而是按 media_rw 可管理的语义派生（同一 app 显式 0600 创建录制文件，原生结果

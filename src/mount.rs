@@ -46,14 +46,14 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x0000_0004;
 ///   MP 视图。绑过去的自有私有目录里应用写的文件按调用方 umask 落 mode（SQLite 边车即
 ///   `0600`），绕过 MP 的 `(mode & ~0777) | 0664` 口径，MP 用自身身份（附加组
 ///   media_rw/ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方拿到
-///   `SQLITE_CANTOPEN`（真机 2026-11-12 duchamp：`Android/media/<pkg>` 是 f2fs 直连 bind，
+///   `SQLITE_CANTOPEN`（真机 2026-11-12：`Android/media/<pkg>` 是 f2fs 直连 bind，
 ///   两只 `-wal`/`-shm` 为 0600，管理器一次冷启 16 条）。
 /// - 应用命名空间里的 `/mnt/user/<user>/emulated`：**本模块自己就覆盖它**（视图根上提之后
 ///   别名族与存储根都换成模块 FUSE）。克隆到的是自己的会话，root 请求无对应策略 → ENOENT；
 ///   即便绑上也只是「模块层对模块层」，两条路径仍各持一套页缓存。
 ///
 /// 而 **init 命名空间**（`/proc/1/ns/mnt`）里模块从不挂载，那里的 `/mnt/user/<user>/emulated`
-/// 恒为 MediaProvider 的 FUSE 视图。真机 2026-11-12 duchamp 实证（同一时刻、同一目录）：
+/// 恒为 MediaProvider 的 FUSE 视图。真机 2026-11-12 实证（同一时刻、同一目录）：
 ///
 /// ```text
 /// 应用命名空间 /mnt/user/0/emulated/...  -> dev 0:142（本模块 FUSE）
@@ -80,12 +80,12 @@ impl SystemViewClone {
     ///   **不是** MP 视图。绑过去的自有私有目录里，应用写的文件按调用方 umask 落 mode
     ///   （SQLite 边车即 `0600`），绕过 MP 的 `(mode & ~0777) | 0664` 口径，MP 以自身身份
     ///   （附加组 media_rw/ext_data_rw、`CapEff: 0`）打不开 → 跨进程读同一份库的一方拿到
-    ///   `SQLITE_CANTOPEN`（真机 2026-11-12 duchamp：管理器一次冷启 16 条）。
+    ///   `SQLITE_CANTOPEN`（真机 2026-11-12：管理器一次冷启 16 条）。
     /// - 应用命名空间里的 `/mnt/user/<user>/emulated`：**本模块自己覆盖它**（视图根上提后
     ///   别名族与存储根都换成模块 FUSE），克隆到的是自己的会话。
     ///
     /// init 命名空间（`/proc/1/ns/mnt`）里模块从不挂载，`/mnt/user/<user>/emulated` 恒为
-    /// MediaProvider 的 FUSE 视图。真机 2026-11-12 duchamp 同一目录实测：应用命名空间
+    /// MediaProvider 的 FUSE 视图。真机 2026-11-12 同一目录实测：应用命名空间
     /// `dev 0:142`（本模块），init 命名空间 `dev 0:131`（MediaProvider）。
     ///
     /// # 为什么要子进程 + `SCM_RIGHTS`

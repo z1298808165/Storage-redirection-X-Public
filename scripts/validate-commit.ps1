@@ -69,7 +69,7 @@ if ($paths.Count -gt 0 -and $message -notmatch '(?m)^(?:变更|用户影响)[：
     throw "包含文件改动的 Commit 必须由 AI Agent 在正文中写入 变更： 或 用户影响：，供 CI/Release 更新日志直接使用。"
 }
 
-# 更新日志字段精简门禁（AGENTS.md 第 4 条的强制校验）：更新日志生成器按行解析字段，
+# 更新日志字段精简门禁（提交信息规范的强制校验）：更新日志生成器按行解析字段，
 # 会把字段行之后的普通正文行并入该字段、也会原样保留字段值里的字面 \n 转义——
 # 这两类写法会让文件路径、代码符号和验证过程整段泄漏进用户更新日志，必须在提交时拦下。
 $changelogFieldCaps = @{
@@ -146,7 +146,7 @@ if (-not $match.Success -and $title -notmatch $releasePattern) {
     throw @"
 Commit 标题无效：$title
 格式：类型(可选范围) + 中文全角冒号 + 中文描述
-允许的类型值见 AGENTS.md 和 CONTRIBUTING.md。
+允许的类型值见 CONTRIBUTING.md。
 "@
 }
 
@@ -158,7 +158,7 @@ if ($match.Success) {
 
     $pathKinds = @($paths | Where-Object { $_ } | ForEach-Object { Get-PathKind -Path $_ } | Sort-Object -Unique)
     if ($pathKinds.Count -gt 1 -and $pathKinds -contains "docs") {
-        # AGENTS.md 提交信息规范允许「配套文档只有在无法独立理解或会导致提交不可用时
+        # 提交信息规范允许「配套文档只有在无法独立理解或会导致提交不可用时
         # 才可与实现同交，并应在提交正文说明原因」。校验必须与规范一致：混装本身不是
         # 拒绝理由，缺「原因说明」才是。原因由提交正文的「文档同交：」字段承载，值须是
         # 具体原因；该字段应放在其它更新日志字段之前，避免被字段续行规则并入。
@@ -171,7 +171,7 @@ if ($match.Success) {
             }
         }
         if ([string]::IsNullOrWhiteSpace($coCommitReason)) {
-            throw "文档与非文档改动同交时，正文必须写「文档同交：<原因>」说明为什么配套文档无法独立成笔（见 AGENTS.md 提交信息规范）；否则请按目的拆分。"
+            throw "文档与非文档改动同交时，正文必须写「文档同交：<原因>」说明为什么配套文档无法独立成笔（见 CONTRIBUTING.md 提交信息规范）；否则请按目的拆分。"
         }
         if ($coCommitReason.Length -lt 6) {
             throw "「文档同交：」的原因必须是具体说明，不能是占位词。"

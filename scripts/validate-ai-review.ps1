@@ -149,7 +149,7 @@ if ($PSCmdlet.ParameterSetName -eq "Commit") {
     if ($reviewTree -ne $tree) {
         throw "Commit $Commit 审核时对应 tree $reviewTree，但实际包含 tree $tree。"
     }
-    if ($reviewer -notmatch '(?i)\b(Codex|Claude(?: Code)?|GitHub Copilot|Cursor|GPT(?:-[0-9.]+)?|Gemini|AI Agent)\b' -or
+    if ([string]::IsNullOrWhiteSpace($reviewer) -or $reviewer.Trim().Length -lt 2 -or
         $reportHash -notmatch '^[0-9a-f]{64}$' -or $summary.Length -lt 12) {
         throw "Commit $Commit 包含无效的 AI 审核 trailers。"
     }

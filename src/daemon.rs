@@ -392,7 +392,7 @@ struct ReconcileCursor {
     /// 续跑轮复用的计划批次。
     ///
     /// 批次上限为 1 的周期要经历多轮 200ms 续跑；若续跑每轮都全量扫 /proc
-    /// 并重建全部计划，一个 N 计划的周期就是 N 次全量枚举（ishtar 实测：
+    /// 并重建全部计划，一个 N 计划的周期就是 N 次全量枚举（真机实测：
     /// 每 30s 周期 10~15 轮 × 全量扫描，rchar ~39MB/burst，scudo 滞留
     /// 112MB，RSS 162MB）。缓存随周期收口清空；签名不匹配（模式/配置/
     /// 触发范围变化）或宿主换代时重建。
@@ -1066,7 +1066,7 @@ fn start_file_monitor_thread() -> Option<Arc<FileMonitorSync>> {
                 // 被挂载应用此前不存在的监视根由 1 秒级缺失重试补齐，目录内新子树
                 // 由 IN_CREATE 事件动态扩展。此前挂载生效即强制全量重建，每次应用
                 // 冷启动都把 9862~24909 个目录的监视树整棵重走，真机实测产生
-                // 30~60 秒 100% 单核阵发（ishtar/duchamp 双机复现）。
+                // 30~60 秒 100% 单核阵发（两台真机复现）。
                 let pending_packages = thread_sync.take_pending_packages();
                 match pending_packages {
                     Some(packages) if !packages.is_empty() => {
@@ -1286,7 +1286,7 @@ fn reconcile_running_apps(
         config_fingerprint: SettingsHub::instance().config_fingerprint(),
     };
     // 批次上限为 1 的周期要走多轮 200ms 续跑；若续跑每轮都全量扫 /proc 重建
-    // 全部计划，一个 N 计划的周期就是 N 次全量枚举（ishtar 实测：每 30s 周期
+    // 全部计划，一个 N 计划的周期就是 N 次全量枚举（真机实测：每 30s 周期
     // 10~15 轮 × 全量扫描，rchar ~39MB/burst，scudo 滞留 112MB）。除首轮外的
     // 续跑轮直接复用同签名的计划批次；MediaProvider 自愈、全量预登记与逐计划
     // 策略登记都在重建路径执行且自带幂等门禁，续跑轮一并跳过。周期内新出现的
@@ -1875,7 +1875,7 @@ impl ScannedProcess {
 ///
 /// 早期实现把「进程集合有变化」当成全量扫描的触发条件：繁忙设备上 kworker 与
 /// 短命进程几乎每 500ms 都在增减，于是每轮都对全部约 1000 个进程重读 cmdline 与
-/// status、两遍逐进程 task readdir 并重写整张表（duchamp 实测 srx-syspid 稳态约
+/// status、两遍逐进程 task readdir 并重写整张表（真机实测 srx-syspid 稳态约
 /// 11% 单核）。现在按进程缓存身份，只有**系统进程名册**变化才立即重建；与表内容
 /// 无关的增减（内核线程、应用进程、启动即退出的进程）只付一次 /proc readdir。
 struct SystemPidScanner {

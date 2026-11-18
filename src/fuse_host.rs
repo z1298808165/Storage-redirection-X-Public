@@ -440,7 +440,7 @@ pub struct HostAttach {
 /// 退避越推越深。
 ///
 /// 探测不能只 `stat` 挂载点本身：根 dentry 的属性缓存在连接死亡后仍然有效，僵死的
-/// 宿主会因此被误判存活（真机实证：duchamp 2026-10-22 13:22，MediaProvider 重启后宿主
+/// 宿主会因此被误判存活（真机实证：2026-10-22 13:22，MediaProvider 重启后宿主
 /// media 视图连接死亡，`endpoint=alive` 误判使 attach 反复 ENOTCONN，直到宿主进程
 /// 自己退出才恢复）。这里改为 lookup 一个**必然不存在**的探测名——该操作无法走任何
 /// 缓存，必须由宿主 FUSE 连接真实应答：连接健康时返回 ENOENT，连接僵死时返回
@@ -454,7 +454,7 @@ fn host_endpoint_alive(view: &HostSessionView) -> bool {
     };
 
     // 宿主 FUSE 路径绝不能在 daemon 本体内探测：连接僵死时这次 lookup 会把调用者自己
-    // 卡进不可中断的 dentry 查找（真机实证 duchamp：daemon 停在 d_alloc_parallel →
+    // 卡进不可中断的 dentry 查找（真机实证：daemon 停在 d_alloc_parallel →
     // newfstatat → KernelSU sucompat 的 D 态，随后整机被迫重启）。子进程是一次性的，
     // 父进程保持可响应，仍能按会话状态自愈。
     crate::logging::prepare_for_fork();
@@ -1064,7 +1064,7 @@ fn is_f2fs_direct_backend_alias(alias_root: &str, user_id: i32) -> bool {
 ///   `/storage/emulated/legacy`）去重跳过；
 /// - **f2fs 直连后端别名不覆盖**：见 [`is_f2fs_direct_backend_alias`]；
 /// - **别名目标 bind 前先私有化**：别名与主目标同处系统共享传播组，附着事件会沿
-///   传播组外播到未配置应用的命名空间（2026-10-29 duchamp 实测），必须先切断；
+///   传播组外播到未配置应用的命名空间（2026-10-29 实测），必须先切断；
 /// - 别名上残留的本模块死层先摘除（与主目标同一套 [`clear_dead_srx_layers_at_target`]）；
 /// - 单个别名失败只告警不回滚：主目标已成功，别名失败不能让整个接入作废。
 fn attach_host_view_to_storage_aliases(target_root: &str, user_id: i32, view: &HostSessionView) {
@@ -1124,7 +1124,7 @@ fn attach_host_view_to_storage_aliases(target_root: &str, user_id: i32, view: &H
             continue;
         }
         // 传播隔离：别名目标与主目标同处系统共享传播组，bind 事件会沿传播组外播到
-        // 未配置应用的命名空间（duchamp 实测见主目标 4.5 注释）。bind 之后再私有化
+        // 未配置应用的命名空间（真机实测见主目标 4.5 注释）。bind 之后再私有化
         // 救不回已外播的拷贝，必须先私有化目标；仅当别名当前是挂载点才需要（普通
         // 目录形态无外播路径）。私有化失败时跳过该别名：宁缺勿滥，决不往共享目标
         // 上叠加视图。

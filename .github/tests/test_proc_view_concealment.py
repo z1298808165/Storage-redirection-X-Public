@@ -514,7 +514,7 @@ class SystemViewCloneTest(unittest.TestCase):
         #
         # 回退源必须是**系统视图**：不得退回 `/mnt/pass_through/...` 这类 f2fs 直连后端——
         # 那样自有私有目录里的 SQLite 边车会按调用方 umask 落 0600，MP 用自身身份打不开，
-        # 跨进程读同一份库的一方即 `SQLITE_CANTOPEN`（真机 2026-11-12 duchamp 实测）。
+        # 跨进程读同一份库的一方即 `SQLITE_CANTOPEN`（真机 2026-11-12 实测）。
         self.assertNotIn('format!("/mnt/pass_through/', body)
         self.assertLess(
             body.index("system_view_clone.borrow_mut().take()"),

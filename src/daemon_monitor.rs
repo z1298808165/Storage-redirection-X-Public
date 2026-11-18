@@ -57,7 +57,7 @@ const MAX_PUBLIC_OWNER_REPAIR_DIRS: usize = 32768;
 ///
 /// 漂移的根因只有一个：inotify 队列溢出会丢弃 `IN_IGNORED`/`IN_DELETE` 事件，
 /// `watch_nodes` 里对应条目从此无人删除；内核复用 wd 后新目录的节点又推进同一个
-/// Vec，条目逐代堆积（ishtar 实测：繁忙设备 1.5 小时积到每 wd 平均 ~12 个节点，
+/// Vec，条目逐代堆积（真机实测：繁忙设备 1.5 小时积到每 wd 平均 ~12 个节点，
 /// 监视树内存 121MB，而全新树只需 15MB）。
 ///
 /// 也就是说「溢出」本身就是漂移的充分条件，而它也是**一个可观测的事件**。因此对账
@@ -179,7 +179,7 @@ type WatcherInternTable = std::sync::Mutex<
 /// watcher 集合驻留表：同一棵子树内所有目录的 watcher 集合与根完全一致，
 /// 按集合内容驻留后全树每个不同的根只存一份 Arc。直接 Arc::make_mut 做合并
 /// 会因「子树共享着同一份 Arc」在每次合并时深拷贝整个集合，25036 个目录各自
-/// 持有 ~20 项的副本（ishtar 实测 30MB），驻留才是正确的共享方式。
+/// 持有 ~20 项的副本（真机实测 30MB），驻留才是正确的共享方式。
 fn intern_watchers(set: Vec<WatchWatcher>) -> std::sync::Arc<Vec<WatchWatcher>> {
     static INTERN: std::sync::OnceLock<WatcherInternTable> = std::sync::OnceLock::new();
     let mut table = INTERN
@@ -218,7 +218,7 @@ fn intern_shared(value: &str) -> std::sync::Arc<str> {
 ///
 /// 同一物理目录（同一 wd）会被多个应用的监视根各自展开：模板配置让若干应用
 /// 共享 Download/DCIM 等公共目录，旧结构按 (包,目录) 各建一个节点并各自克隆
-/// 一份目录路径串，节点与字符串按共享包数成倍膨胀（ishtar 实测 ~6.6 倍，
+/// 一份目录路径串，节点与字符串按共享包数成倍膨胀（真机实测 ~6.6 倍，
 /// 监视树内存 121MB）。合并后每目录一个节点，包级信息收进 watchers。
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct WatchWatcher {
@@ -239,7 +239,7 @@ struct WatchNode {
     backend_dir: String,
     display_dir: String,
     /// 共享的 watcher 集合：同一棵子树内所有目录的 watcher 集合与根完全一致，
-    /// Arc 共享让子节点继承退化为指针拷贝（ishtar 实测：25036 个目录若各自
+    /// Arc 共享让子节点继承退化为指针拷贝（真机实测：25036 个目录若各自
     /// 克隆 ~20 项 watcher 列表要 30MB，共享后整棵树每根只存一份）。
     watchers: std::sync::Arc<Vec<WatchWatcher>>,
 }

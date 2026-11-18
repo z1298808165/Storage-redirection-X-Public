@@ -1,7 +1,7 @@
 {
   "note": "被接管应用视角下的 /proc/self/mountinfo 痕迹登记表（基线采集，真机实测）。leak_* 是上限，只允许减少；parity_* 是下限，只允许增加。痕迹回升或出现新类别即失败——这是隐藏能力唯一的机械门禁，不靠人工复查。每次重新采集基线都必须同步调整这里的数值。",
   "capture": {
-    "device": "duchamp (2311DRK48C)",
+    "device": "真机（A16 / SDK 36）",
     "android_release": "16",
     "sdk": 36,
     "module_version": "v2.2.1-ci.1（源原生化 + 屏障不落地 + 锚点临时化 + 选项对齐）",

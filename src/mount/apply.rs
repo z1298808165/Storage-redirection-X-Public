@@ -649,7 +649,7 @@ impl MountPlanner {
             // CapEff=0）：owner-only 入口在系统视图里连属主自己都打不开（原生同样
             // 打不开，这是 MP 的既有语义）。这里在把目录交回共享视图**之前**把组位
             // 归一到「属主位的镜像」并复核，否则「拿回系统视图即打不开」，应用侧就是
-            // PRAGMA journal_mode 阶段的 SQLITE_CANTOPEN（真机 2026-11-12 duchamp）。
+            // PRAGMA journal_mode 阶段的 SQLITE_CANTOPEN（真机 2026-11-12）。
             // 位置必须在幂等判据之前：已经恢复过的目录会走 `continue`，那恰好是最需要
             // 归一的已落地场景。
             if is_media {
@@ -716,7 +716,7 @@ impl MountPlanner {
             // 恢复只用 root 身份：目标挂载点在应用视图里，但它的可解析性由
             // `/storage/emulated` 层（MediaProvider 的 FUSE）决定。MP 对**注册过的
             // uid/pid** 才放行，对模块 fork 出的子进程（无论 root 还是降权到应用
-            // uid）在就绪窗口内一律拒绝——真机 2026-11-04 duchamp 实测：同一时刻
+            // uid）在就绪窗口内一律拒绝——真机 2026-11-04 实测：同一时刻
             // root 逐级可达而应用 uid 整片 EACCES，且降权子进程拿到的是更严的
             // EACCES 而非 ENOENT。因此「降权取句柄」救不了这个场景，恢复的成败
             // 只取决于 MP 视图是否已就绪（root 侧 `root_view` 链），见重试闭环。
@@ -735,7 +735,7 @@ impl MountPlanner {
                     crate::mount::own_private_pending::note_success(&self.package_name);
                 }
                 // **不做属主归一**：原生 MediaProvider FUSE 下文件的属主是创建者
-                // 应用 uid（duchamp A16 原生对照实证：9 月20 日微信经原生 FUSE 创建
+                // 应用 uid（A16 原生对照实证：9 月20 日微信经原生 FUSE 创建
                 // 的 `Android/media/com.tencent.mm` 属主为微信 uid，组 media_rw），
                 // 访问放行由 MP 权限层（media 子树共享，见 MP hook 放行）与宿主
                 // 数据面的 root 身份保证，不依赖 DAC 属主。此前的整树 chown 到
@@ -873,7 +873,7 @@ impl MountPlanner {
     /// `open(io_path, flags)`，直通只是把这个自开的 fd 交给内核，内核不会改用调用方
     /// 凭据重开），而它的附加组只有 media_rw(1023)/ext_data_rw(1078)、`CapEff: 0`。
     /// 于是**组位就是可服务性**：`0660` 能开，owner-only 一律 EACCES——而且连属主自己
-    /// 也打不开，因为这次 `open()` 是 MP 代发的。真机 2026-11-12 duchamp 实证：root 经
+    /// 也打不开，因为这次 `open()` 是 MP 代发的。真机 2026-11-12 实证：root 经
     /// MP 视图读 0600 的 `-wal`/`-shm` 得 EACCES，管理器侧就是
     /// `SQLITE_CANTOPEN (code 14) while compiling: PRAGMA journal_mode`（一次冷启 16 条）。
     ///
@@ -1845,7 +1845,7 @@ fn is_sqlite_entry_name(name_lower: &str) -> bool {
 /// `same_mount_identity` 只比 dev+ino：锚点是 `source` 的 bind，两者本来就是同一个
 /// superblock 的根 dentry，所以 MediaProvider 重启、`vold` 重新拉起用户视图（minor
 /// 换代）之后这个判据依然成立——但锚点实际绑在上一代连接上，访问会 ENOTCONN 或
-/// 直接 ENOENT（真机 2026-11-03 duchamp：`bind mount failed src=.../tmp/system_view/0/0/
+/// 直接 ENOENT（真机 2026-11-03：`bind mount failed src=.../tmp/system_view/0/0/
 /// Android/media/<pkg> errno=2`，紧接着 `own private restore failed`，自有私有目录
 /// 退回直连层，随后主库被 WAL 回滚成 4096B）。
 ///

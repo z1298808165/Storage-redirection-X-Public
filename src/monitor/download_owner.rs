@@ -277,7 +277,7 @@ unsafe fn find_class(env: *mut JNIEnv, name: &str) -> Option<jclass> {
     // 必须先清理再判空：调用失败（返回 null）时异常必定 pending，
     // 短路写法 `is_null() || clear_exception` 会在失败时跳过清理，
     // 残留的 pending 异常会让后续 JNI 调用 abort 整个宿主进程
-    // （2026-10-29 ishtar：media.module 因此反复 SIGABRT）。
+    // （2026-10-29 真机：media.module 因此反复 SIGABRT）。
     let threw = clear_exception(env);
     if class.is_null() || threw {
         return None;

@@ -453,7 +453,7 @@ pub fn should_force_userspace_for_private_owner_sqlite_path(path: &str) -> bool 
 ///
 /// 其余情况（健康但 owner-only、不可判定）一律保持直通：MP 的 FuseDaemon 用自己的
 /// 身份打开下层文件，owner-only 入口它必然 EACCES，硬拉回用户态等于把 EACCES 透传
-/// 给应用（真机 2026-11-04 duchamp：XRadiant.db-wal/-shm 变 0600 后 SQLITE_CANTOPEN）。
+/// 给应用（真机 2026-11-04：XRadiant.db-wal/-shm 变 0600 后 SQLITE_CANTOPEN）。
 pub fn prepare_private_owner_sqlite_sidecar(path: &str) -> bool {
     let Some((normalized_path, owner_package, user_id)) = resolve_private_owner_sqlite_path(path)
     else {
@@ -558,7 +558,7 @@ fn is_poisoned_sqlite_shm_size(size: libc::off_t) -> bool {
 /// 尺寸判定走 `O_PATH`+`fstat`：`O_PATH` 不需要读权限，owner-only 0600 的 `-shm`
 /// 也能拿到大小。此前这里用 `O_RDWR` 打开，MP 身份对 owner-only 入口必然 errno=13，
 /// 于是整条 MP 侧毒化自愈链在「应用自建 owner-only 边车」的形态下静默失效
-/// （真机 2026-11-04 duchamp：`prepare sqlite shm backend open failed errno=13`）。
+/// （真机 2026-11-04：`prepare sqlite shm backend open failed errno=13`）。
 fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
     let Some(size) = backend_file_size(backend_path) else {
         // ENOENT：全新配置目录，`-shm` 尚未由 MediaProvider 的 O_CREAT 创建，没有

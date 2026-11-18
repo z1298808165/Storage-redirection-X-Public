@@ -10,7 +10,7 @@
 // - 其余依赖（module_mount_source / module_paths::normalize_mount_targets / clear_previous_mounts
 //   内部的 umount 链路 / log / last_errno）用最小桩顶替。
 //
-// 被测修复点（来自主代理对 src 的修改）：
+// 被测修复点（来自本地对 src 的修改）：
 //   1. live_mounts_at / capture_explicit_mount_identity / classify_mount 改用 normalize_syntax（保留存储别名、
 //      大小写敏感），不再把 /data/media 折叠成 /storage/emulated；
 //   2. encode 写 schema=3 且与 decode 逐字段往返一致，decode 拒绝旧 schema；

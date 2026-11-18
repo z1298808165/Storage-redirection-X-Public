@@ -4,7 +4,7 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
-# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：temp/test-flow/<启动时间戳>/。
+# 测试流产物统一落盘目录（仓库规范「临时文件管理」）：temp/test-flow/<启动时间戳>/。
 # 本脚本先建目录并注入 SRT_ARTIFACT_DIR，后续场景脚本与诊断脚本共用同一目录，
 # 同一天多轮测试互不覆盖；CI 的 artifact 上传按 temp/test-flow/ 整目录收集。
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

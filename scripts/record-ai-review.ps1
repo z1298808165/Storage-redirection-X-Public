@@ -85,8 +85,8 @@ if ([int](Get-RequiredProperty -Object $report -Name "schema") -ne 1) {
     throw "AI 审核报告 schema 必须为 1。"
 }
 $reviewer = [string](Get-RequiredProperty -Object $report -Name "reviewer")
-if ($reviewer -notmatch '(?i)\b(Codex|Claude(?: Code)?|GitHub Copilot|Cursor|GPT(?:-[0-9.]+)?|Gemini|AI Agent)\b') {
-    throw "reviewer 必须标识一个 AI Agent。"
+if ([string]::IsNullOrWhiteSpace($reviewer) -or $reviewer.Trim().Length -lt 2) {
+    throw "reviewer 必须填写实际使用的审核者名称。"
 }
 $verdict = [string](Get-RequiredProperty -Object $report -Name "verdict")
 if ($verdict -ne "pass") {

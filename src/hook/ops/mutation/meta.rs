@@ -588,7 +588,7 @@ fn confirm_private_owner_sqlite_ftruncate(
     // 毒化 `-shm`（被截到 (0, 32KiB)）的处置由宿主 FUSE 侧的删除式自愈负责
     // （fuse_redirect::callbacks 的 heal_poisoned_sqlite_shm_backend）：此处若
     // 直接 unlink 后端文件会绕过 libfuse_jni 的节点簿记，留下指向已消失文件
-    // 的幽灵节点，导致应用后续 O_CREAT 全部失败（duchamp 18:11 实测）。
+    // 的幽灵节点，导致应用后续 O_CREAT 全部失败（真机 18:11 实测）。
 
     let Ok(c_path) = CString::new(backend_path.as_str()) else {
         return None;
