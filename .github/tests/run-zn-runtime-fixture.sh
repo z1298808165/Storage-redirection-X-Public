@@ -98,8 +98,30 @@ run_case() {
     echo "FAIL [zn_$name] expected_exit=$expected actual_exit=$result evidence=$evidence" >&2
     "$module/bin/srx_daemon" package-query P 0 "$package" >&2 || true
     grep -F "$package:" "$module/config/system_writer_uids.list" >&2 || true
+    dump_case_evidence "zn_$name"
     failed=$((failed + 1))
   fi
+}
+
+# 用例失败时的现场证据：只看 exit 码分不清「配置还没生效」「模块拒绝」还是「降权后
+# 权限不足」。这里一次打出当前配置、目标目录属性、监视台账末尾与模块的 warn 日志，
+# 让下一次偶发能直接定位（2026-11-17 A16 zn_monitor_only 的 EACCES 就缺这些）。
+dump_case_evidence() {
+  label="$1"
+  echo "--- evidence: $label ---" >&2
+  echo "[global.json]" >&2
+  cat "$module/config/global.json" 2>/dev/null >&2 || true
+  echo "[app.json]" >&2
+  if [ -f "$config" ]; then cat "$config" >&2 || true; else echo '<absent>' >&2; fi
+  echo "[source_dir]" >&2
+  ls -la "$source_dir" 2>/dev/null >&2 || true
+  echo "[target_dir]" >&2
+  ls -la "$target_dir" 2>/dev/null >&2 || true
+  echo "[file_monitor.log tail]" >&2
+  tail -n 15 "$module/logs/file_monitor.log" 2>/dev/null >&2 || true
+  echo "[module warn log tail]" >&2
+  logcat -d -v brief -s StorageRedirect:* 2>/dev/null | tail -n 25 >&2 || true
+  echo "--- evidence end: $label ---" >&2
 }
 run_case passthrough 0 private "$app" '' ''
 if [ -f "$module/config/system_writer_uids.list" ]; then
@@ -167,7 +189,7 @@ for attempt in 1 2 3; do
     grep -Fq '|native=zn-runtime-fixture'; then recorded=1; break; fi
   sleep 1
 done
-if [ "$recorded" -eq 1 ]; then echo 'PASS [zn_monitor_record] privileged executor identity recorded'; passed=$((passed + 1)); else echo 'FAIL [zn_monitor_record] privileged executor record missing' >&2; failed=$((failed + 1)); fi
+if [ "$recorded" -eq 1 ]; then echo 'PASS [zn_monitor_record] privileged executor identity recorded'; passed=$((passed + 1)); else echo 'FAIL [zn_monitor_record] privileged executor record missing' >&2; dump_case_evidence zn_monitor_record; failed=$((failed + 1)); fi
 # 运行时开关会触发 daemon 拆除视图，放在其它用例之后避免异步清理污染重载判据。
 printf '%s\n' '{"file_monitor_enabled":false,"verbose_logging_enabled":true}' > "$module/config/global.json"
 printf '{"users":{"0":{"enabled":true,"mapping_mode_only":true,"path_mappings":{"Download/%s":"Download/%s"}}}}\n' "$source_name" "$target_name" > "$config"

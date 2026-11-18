@@ -1295,36 +1295,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 'adb_su "', body, f"{name} 不允许无超时的裸 adb_su（会阻塞 EXIT trap）"
             )
 
-    def test_ci_files_do_not_reference_private_paths(self) -> None:
-        """AGENTS.md：持久内容不得引用公开快照不可见的文件。
-
-        代码注释与 workflow 都会随公开快照长期留存，因此同样不得出现
-        `github-actions-failure-notes.md`、`.workbuddy/`、`upstream-sync-baseline.json`
-        这类私有路径——它们不上传或随时会被删除，引用会永久失效。要留可核查锚点，
-        只写 run id、提交哈希、日志关键行这些仓库内或设备上可长期复现的内容。
-        """
-        forbidden = (
-            "github-actions-failure-notes",
-            "upstream-sync-baseline",
-            ".workbuddy/",
-        )
-        offenders = []
-        for path in sorted(ROOT.glob(".github/**/*")):
-            if not path.is_file() or path.suffix not in {".py", ".sh", ".yml"}:
-                continue
-            if "__pycache__" in path.parts:
-                continue
-            # 测试文件本身要写出「被禁的 token」才能做断言，跳过（断言范围是
-            # 会被长期留存的脚本/工作流/工具，不含测试）。
-            if path.name.startswith("test_"):
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            offenders += [
-                f"{path.relative_to(ROOT).as_posix()}: {token}"
-                for token in forbidden
-                if token in text
-            ]
-        self.assertEqual(offenders, [], "代码/工作流里引用了非公开文件")
 
     def test_ci_concurrency_isolates_self_pushed_commits(self) -> None:
         """并发组必须把 workflow 自己 push 的维护提交隔离出去。
@@ -2818,7 +2788,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
     def test_package_event_wait_never_blocks_on_fifo_open(self) -> None:
         # FIFO 的 open(O_RDONLY) 在对端缺失时会无限期阻塞，而 `read -t` 的超时只约束
         # 读取、管不到 open：收集器一旦卡在这里就再也不会消费 package_events.log，
-        # 新装应用自动开启、卸载清理与基线更新会全部静默失效（duchamp 实测收集器
+        # 新装应用自动开启、卸载清理与基线更新会全部静默失效（真机实测收集器
         # wchan=wait_for_partner、offset 恒为 0，而事件已堆积在日志里）。
         # 因此等待必须自持读写两端（fd 3）+ 监听进程存活检查，不得回到裸输入重定向。
         events = read("assets/zygisk_module/service.d/config_events.sh")

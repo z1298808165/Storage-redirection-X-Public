@@ -8,7 +8,7 @@ trap 'echo "::warning file=run-storage-redirect-scenarios.sh,line=${BASH_LINENO[
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
-# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：
+# 测试流产物统一落盘目录（仓库规范「临时文件管理」）：
 # temp/test-flow/<启动时间戳>/，结果文件与诊断文件一律写到这里，不得散落在
 # 仓库根目录或脚本 CWD。同一天多轮测试互不覆盖；上游编排器
 # （run-android-test-flow.sh / verify-test-flow.ps1）会通过 SRT_ARTIFACT_DIR
@@ -388,7 +388,7 @@ backup_device_execution_state() {
 }
 
 prepare_device_execution_state() {
-  # 全部按「尽力而为」处理：唤醒只是环境准备，不是被测行为。真机实测（2311DRK48C / A16）
+  # 全部按「尽力而为」处理：唤醒只是环境准备，不是被测行为。真机实测（A16）
   # 上 shell 域没有 INJECT_EVENTS，`input keyevent` 直接抛 SecurityException，而脚本是
   # `set -euo pipefail`——一条唤醒失败会把整轮场景带走，现场只剩一行 Java 栈。
   adb shell input keyevent WAKEUP >/dev/null 2>&1 || true
@@ -2333,7 +2333,7 @@ check_file_missing() {
   # 「不应存在」必须在**真实后端**上判定，不能走 /storage/emulated 可见路径：
   # 该路径由宿主 FUSE 会话承接，而无归属信号的系统 uid（root/shell）读请求在映射
   # 命中时会被按映射目标应答——于是「请求路径不应有文件」被 FUSE 视图答成「有」，
-  # 断言恒失败，而真实落点其实只在映射目标（真机 2026-11-01 duchamp 实测：
+  # 断言恒失败，而真实落点其实只在映射目标（真机 2026-11-01 实测：
   # 场景 29 hot-request / 场景 35 mapped-mediastore-source 物理文件只在映射目标）。
   # PowerShell 运行器的 Test-PathMissing 一直走 Convert-ToBackendPath，两个运行器
   # 口径必须一致，否则同一份实现会出现「一边过一边挂」。
@@ -2378,7 +2378,7 @@ check_own_private_real_landing() {
 # 为什么要单独断言：恢复源错层时目录内容仍落在同一份后端，"文件写进去了 / 沙盒没有残留"
 # 这类判定**全部照过**——数据不分叉，分叉的是**服务方**与因此失效的 mode 归一。真实伤害是
 # 应用在该目录新建的 SQLite 边车按自身 umask 落 `0600`，MP 用自身身份（附加组 media_rw /
-# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（duchamp
+# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（真机
 # 2026-11-12：恢复源误取 `/mnt/pass_through/...`，管理器一次冷启 16 条）。
 #
 # 判据自校准、不写死设备号：可见目录的超级块设备号 vs init 命名空间同一路径（模块从不挂载
@@ -2916,7 +2916,7 @@ run_app_caller_media_provider_attribution_scenario() {
   # 回归背景（issue #2，2026-11-03）：ColorOS 上该链路的 caller scope 捕获存在
   # 缺口，记录退化为 unknown/none；无点原生身份（如 mtio）此前在显示层还会被
   # 丢弃回退为提供器标签。引擎侧补强（caller_uid 反查）与显示层补强已落地，
-  # 本场景在宿主（HyperOS/duchamp）上固化「归因成功」形态，防止链路回归。
+  # 本场景在宿主（HyperOS）上固化「归因成功」形态，防止链路回归。
   # 判定标记：
   #   通过：file_monitor.log 出现 |<提供器进程>|$APP_ID|OPEN|（提供器进程兼容
   #         com.android / com.google.android 两种 media.module 变体）
@@ -4185,7 +4185,7 @@ check_health() {
 
 # 设备级坏态的第一响应取证：先把现场固化，再谈单个场景的断言。
 #
-# 2026-11-01 duchamp 上出现过一次「所有应用 uid 访问 /storage/emulated/0/Download 都是
+# 2026-11-01 真机上出现过一次「所有应用 uid 访问 /storage/emulated/0/Download 都是
 # EACCES、shell/root 正常」的坏态：删掉测试应用配置（模块完全不介入）仍失败，只能靠重启
 # MediaProvider 或重启设备恢复，成因至今未定位。它污染了当时全部复现结论，所以下一次必须
 # **先抓 MediaProvider 侧与全局 mountinfo，再动任何其它变量**——一旦先重启、先改配置、
@@ -5120,7 +5120,7 @@ check_sandbox_root_metadata() {
 
 # 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透。
 #
-# 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
+# 回归背景（2026-11-09 真机）：王者荣耀的沙盒根被模块建成
 # `2770 应用uid:应用uid`，系统代写进程（MediaProvider，附加组
 # media_rw/ext_data_rw）既非属主也不在组、other 位为 0，穿越直接 EACCES；
 # 重定向目标不可达后写入回退到真实公共路径，公共存储里凭空长出
@@ -5192,6 +5192,97 @@ storage_root_view_snapshot() {
 # 当前测试应用主进程 pid（无进程时为空）。场景 43 的断言与等待共用同一取法。
 app_process_pid() {
   adb_su "pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'" | tr -d '[:space:]'
+}
+
+# 覆盖挂载下的视图一致性：把源目录 bind 到应用私有树里，模块视图必须与系统视图逐项一致。
+#
+# 夹具形状对应 HyperOS 每次下载做的系统 bind（`/data/apk-tmp/<pkg>/download` 盖到
+# `Android/data/<pkg>/files/.siexternal`），只是把观测点换成任意子目录——覆盖改写的判据
+# 是「init 侧在该路径上有覆盖挂载」，与目录名无关。
+#
+# bind 必须在**接入之后**建：宿主会话的数据面是 f2fs 锚点，锚点是 `/data/media/<user>`
+# 的**非递归** bind，在建会话那一刻定型；init 侧事后新增的 bind 只能靠 `backend_overlay`
+# 的路径改写补偿。把 bind 放在断言前，验的才是这条补偿链，而不是「会话建立时恰好看见」。
+# 真机 2026-11-17 的商店故障正是这条链失效：改写的查询串丢了 `<user>` 段，覆盖表恒不
+# 命中，模块视图退回 bind 遮蔽前的陈旧目录，商店校验读不到刚下载的包。
+assert_overlay_backed_view_parity() {
+  local label="$1"
+  local pid sys_list app_list
+  # bind 必须建在 init 侧的 `/data/media/<user>` 写法上：覆盖挂载表按该写法登记挂载点
+  # （HyperOS 也是把 `/data/apk-tmp/<pkg>/download` 挂到
+  # `/data/media/<user>/Android/data/<pkg>/files/.siexternal`）。建在
+  # `/storage/emulated/<user>` 上只会遮蔽那个 FUSE 挂载自己的视图，f2fs 侧与覆盖表都
+  # 看不到，断言会退化成「验证不了改写」。
+  local mount_dir="${BACKEND_ROOT}/Android/data/${APP_ID}/files/SrtOverlayBacked"
+  local source_dir="${BACKEND_ROOT}/Android/data/${APP_ID}/files/SrtOverlaySource"
+  local view_dir="${REAL_ROOT}/Android/data/${APP_ID}/files/SrtOverlayBacked"
+  # 同一父目录下的普通兄弟目录（不经 bind），用来区分「整棵子树都读不到」与「只有覆盖
+  # 目标读不到」：前者说明该子树的后端根不是这里，后者说明是覆盖改写的枚举过滤问题。
+  local view_source_dir="${REAL_ROOT}/Android/data/${APP_ID}/files/SrtOverlaySource"
+  local view_parent_dir="${REAL_ROOT}/Android/data/${APP_ID}/files"
+  local marker="srt_overlay_backed_marker"
+  pid="$(app_process_pid)"
+  if [ -z "$pid" ]; then
+    echo "FAIL [overlay_view] label=${label} reason=app_not_running" >&2
+    return 1
+  fi
+  # 上一轮异常退出可能留下 bind：先拆再建，避免 EBUSY 让夹具准备失败。挂载与拆除都显式
+  # 进 init 命名空间，保证与系统侧一致（不依赖 su 是否复用同一个 mount namespace）。
+  adb_su "nsenter -t 1 -m -- umount '${mount_dir}' 2>/dev/null; rm -rf '${mount_dir}' '${source_dir}'" >/dev/null
+  # 建 bind 之前先读一次空目录：这一步把该 inode 的后端解析钉成「bind 遮蔽前的旧值」，
+  # 也就把「解析缓存有没有跟着覆盖表失效」纳入断言。2026-11-17 A16 的偶发失败正是这条：
+  # 首次解析落在覆盖表 1 秒快照窗口内，缓存把旧后端钉死，后面读多少次都回不到 bind 内容。
+  adb_su "nsenter -t 1 -m -- mkdir -p '${mount_dir}' '${source_dir}'" >/dev/null
+  adb_su "nsenter -t ${pid} -m -- ls -a '${view_dir}' >/dev/null 2>&1" || true
+  if ! adb_su "nsenter -t 1 -m -- sh -c ': > \"${source_dir}/${marker}\" && echo payload > \"${source_dir}/srt_overlay_backed_second\" && mount --bind \"${source_dir}\" \"${mount_dir}\"'" >/dev/null; then
+    echo "FAIL [overlay_view] label=${label} reason=fixture_setup_failed mount=${mount_dir}" >&2
+    return 1
+  fi
+  # 系统视图（真值）：init 命名空间里 `/data/media/<user>` 侧的同一目录，bind 已生效。
+  # 走 f2fs 直连而不是 `/storage/emulated/<user>`，避免 MP FUSE 的 dentry 缓存让刚建立的
+  # bind 在系统侧暂时不可见，把缓存抖动误报成缺陷。
+  #
+  # 比较前剔除 `.`/`..`：模块 readdir 按设计不返回点条目（场景 43 已单独守卫），系统侧
+  # `ls -a` 必然多这两项，原样比较只会得到「必然不一致」的假失败。
+  sys_list="$(adb_su "nsenter -t 1 -m -- ls -a '${mount_dir}' 2>/dev/null | grep -vx '\.' | grep -vx '\.\.' | sort" || true)"
+  # 应用视图：进应用命名空间，经模块会话读同一目录的**可见路径**（/storage/emulated/<user>）。
+  # 收敛窗口必须覆盖两级缓存之和：覆盖表快照 TTL 1 秒（SNAPSHOT_TTL）+ 目录候选缓存 TTL
+  # 2 秒（DIR_CANDIDATE_CACHE_TTL），再留出 adb 往返。窗口比这个和小，断言就会比产品
+  # 自己的收敛上限还紧——2026-11-18 CI 的偶发正是如此：改写已在 t+2s 命中，标记条目
+  # 在 t+3s 才出现在应用视图，而 10×300ms 的窗口刚好用尽。只放宽窗口，最终逐项比较不放宽。
+  local attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    app_list="$(adb_su "nsenter -t ${pid} -m -- ls -a '${view_dir}' 2>/dev/null | sort" || true)"
+    if printf '%s\n' "$app_list" | grep -qxF -- "$marker"; then
+      break
+    fi
+    sleep_ms 500
+    attempt=$((attempt + 1))
+  done
+  local rc=0
+  if ! printf '%s\n' "$sys_list" | grep -qxF -- "$marker"; then
+    echo "FAIL [overlay_view] label=${label} reason=system_view_missing_overlay_content pid=${pid} detail=$(adb_su "nsenter -t 1 -m -- ls -ld '${mount_dir}' 2>&1" | tr '\n' ' ' || true)" >&2
+    rc=1
+  elif ! printf '%s\n' "$app_list" | grep -qxF -- "$marker"; then
+    # 应用侧读空既可能是「目录不存在/不可读」，也可能是「读到了 bind 遮蔽前的空目录」，
+    # 判据完全不同：把 ls 的 stderr 一并打出来，别让 2>/dev/null 把 errno 吞掉。
+    # mountinfo 段用来区分「覆盖表没命中该挂载点」与「命中了但换算出的源路径不对」：
+    # 前者说明覆盖表的登记形态与路径不符，后者看 root 字段与设备号即可判定。
+    # src_probe 直接回答「改写目标在应用命名空间里读不读得到」：读不到说明改写命中了、
+    # 但物理源路径从会话所在的命名空间不可达（读侧只能回退到空目录）。
+    echo "FAIL [overlay_view] label=${label} reason=module_view_missing_overlay_content pid=${pid} detail=$(adb_su "nsenter -t ${pid} -m -- ls -ld '${view_dir}' 2>&1" | tr '\n' ' ' || true) mountinfo=$(adb_su "grep -F '${mount_dir}' /proc/1/mountinfo 2>/dev/null | head -1" | tr '\n' ' ' || true) src_probe=$(adb_su "nsenter -t ${pid} -m -- ls -a '${source_dir}' 2>&1" | tr '\n' ' ' || true) view_src_probe=$(adb_su "nsenter -t ${pid} -m -- ls -a '${view_source_dir}' 2>&1" | tr '\n' ' ' || true) view_parent_probe=$(adb_su "nsenter -t ${pid} -m -- ls -a '${view_parent_dir}' 2>&1" | tr '\n' ' ' || true) overlay_log=$(adb_su "grep -h 'overlay' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -4" | tr '\n' '|' || true) data_mounts=$(adb_su "grep -E ' /data( |/media)' /proc/1/mountinfo 2>/dev/null | head -4" | tr '\n' '|' || true)" >&2
+    diff <(printf '%s\n' "$sys_list") <(printf '%s\n' "$app_list") | sed 's/^/  overlay_view_diff: /' >&2
+    rc=1
+  elif [ "$app_list" != "$sys_list" ]; then
+    echo "FAIL [overlay_view] label=${label} reason=overlay_listing_mismatch pid=${pid}" >&2
+    diff <(printf '%s\n' "$sys_list") <(printf '%s\n' "$app_list") | sed 's/^/  overlay_view_diff: /' >&2
+    rc=1
+  fi
+  adb_su "nsenter -t 1 -m -- umount '${mount_dir}' 2>/dev/null; rm -rf '${mount_dir}' '${source_dir}'" >/dev/null
+  if [ "$rc" -eq 0 ]; then
+    echo "overlay_view_parity_ok label=${label} pid=${pid} entries=$(printf '%s\n' "$app_list" | grep -c .)"
+  fi
+  return "$rc"
 }
 
 assert_storage_root_view_parity() {
@@ -5362,6 +5453,12 @@ run_monitor_capture_root_view_scenario() {
   # 同样是写应用配置 + 触碰 global.json，现场链路就是这么走到全量的。
   write_global_config "$(test_global_config auto 1)"
   if ! assert_storage_root_view_parity "${label}-captured"; then
+    clear_monitor_trigger_config
+    return 1
+  fi
+  # 覆盖挂载链路：商店每次下载都会把暂存目录 bind 到应用私有树，模块视图必须跟着 bind 走
+  # （宿主会话读的是 f2fs 锚点，补偿只在 backend_overlay 里，见该函数注释）。
+  if ! assert_overlay_backed_view_parity "${label}-overlay"; then
     clear_monitor_trigger_config
     return 1
   fi
@@ -5791,7 +5888,17 @@ export ADB_ROOT_MODE
 
 wait_boot_completed
 acquire_device_run_lock
-adb shell sh -s -- "$APP_ID" < "$(dirname "${BASH_SOURCE[0]}")/grant-storage-test-permissions.sh"
+# 授权必须落在 root 上下文：CI 的模拟器能 `adb root`，shell 已是 uid 0；零售 ROM 的真机
+# shell 是 uid 2000，直接调用会因缺 GRANT_RUNTIME_PERMISSIONS 报 SecurityException
+# （2026-11-18 真机 duchamp 实测，脚本在此处直接以 255 退出）。两条路径都用同脚本，
+# 非 root 环境先推到设备再经 adb_su 执行，行为与 CI 一致。
+grant_script="$(dirname "${BASH_SOURCE[0]}")/grant-storage-test-permissions.sh"
+if [ "$(adb shell id -u 2>/dev/null | tr -d '\r')" = "0" ]; then
+  adb shell sh -s -- "$APP_ID" < "$grant_script"
+else
+  adb push "$grant_script" /data/local/tmp/srx-grant-perms.sh >/dev/null
+  adb_su "sh /data/local/tmp/srx-grant-perms.sh $APP_ID"
+fi
 backup_global_config
 backup_app_config
 backup_cross_app_config
@@ -5850,7 +5957,7 @@ export -f run_any_path_mapping_scenario
 export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 export -f sandbox_root_form check_sandbox_root_metadata check_private_tree_native_metadata run_sandbox_root_metadata_scenario
-export -f storage_root_view_snapshot app_process_pid assert_storage_root_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
+export -f storage_root_view_snapshot app_process_pid assert_storage_root_view_parity assert_overlay_backed_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
 export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
 export -f run_download_owner_attribution_scenario
 export -f run_system_uid_attribution_scenario run_shell_executor_boundary_scenario backup_shell_config restore_shell_config cleanup_frozen_daemon

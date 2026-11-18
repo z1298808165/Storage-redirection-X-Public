@@ -34,7 +34,7 @@ $ResultDir = "/sdcard/Android/data/$AppId/files/test_case_result"
 $InternalResultDir = "/data/data/$AppId/files/test_case_result"
 $RealRoot = "/storage/emulated/0"
 
-# 测试流产物统一落盘目录（AGENTS.md「临时文件管理」规范）：temp/test-flow/<启动时间戳>/。
+# 测试流产物统一落盘目录（仓库规范「临时文件管理」）：temp/test-flow/<启动时间戳>/。
 # 诊断文件一律写到这里，不得散落在仓库根目录；同一天多轮测试互不覆盖。
 if ($env:SRT_ARTIFACT_DIR) {
     $script:ArtifactDir = $env:SRT_ARTIFACT_DIR
@@ -1199,7 +1199,7 @@ function Get-SuValue {
 # 为什么必须单独断言：恢复源错层时目录内容仍落在同一份后端，"文件写进去了/沙盒没有残留"
 # 这类断言**全部照过**——数据不分叉，分叉的是**服务方**与因此失效的 mode 归一。真实伤害是：
 # 应用在该目录新建的 SQLite 边车按自身 umask 落 `0600`，MP 用自身身份（附加组 media_rw /
-# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（duchamp
+# ext_data_rw、`CapEff: 0`）打不开，跨进程读同一份库的一方 `SQLITE_CANTOPEN`（真机
 # 2026-11-12：恢复源误取 `/mnt/pass_through/...`，管理器一次冷启 16 条）。
 #
 # 判据自校准，不写死设备号：
@@ -4143,6 +4143,93 @@ function Assert-StorageRootViewParity {
     return $true
 }
 
+# 覆盖挂载下的视图一致性：把源目录 bind 到应用私有树里，模块视图必须与系统视图逐项一致。
+#
+# 夹具形状对应 HyperOS 每次下载做的系统 bind（`/data/apk-tmp/<pkg>/download` 盖到
+# `Android/data/<pkg>/files/.siexternal`），判定依据是「init 侧在该路径上有覆盖挂载」，
+# 与目录名无关。bind 必须在**接入之后**建：宿主会话的数据面是 f2fs 锚点，锚点是
+# `/data/media/<user>` 的非递归 bind，在建会话那一刻定型；init 侧事后新增的 bind 只能
+# 靠 `backend_overlay` 的路径改写补偿。真机 2026-11-17 的商店故障正是这条链失效：
+# 改写的查询串丢了 `<user>` 段，覆盖表恒不命中，视图退回 bind 遮蔽前的陈旧目录。
+function Assert-OverlayBackedViewParity {
+    param([string]$Label)
+
+    $appPid = ((Invoke-Su "pidof '$AppId' 2>/dev/null | awk '{print `$1}'") -join "").Trim()
+    if ([string]::IsNullOrWhiteSpace($appPid)) {
+        $script:Failures.Add("$Label app not running for overlay view parity")
+        return $false
+    }
+    # bind 必须建在 init 侧的 `/data/media/<user>` 写法上：覆盖挂载表按该写法登记挂载点
+    # （HyperOS 也是把 `/data/apk-tmp/<pkg>/download` 挂到
+    # `/data/media/<user>/Android/data/<pkg>/files/.siexternal`）。建在
+    # `/storage/emulated/<user>` 上只会遮蔽那个 FUSE 挂载自己的视图，f2fs 侧与覆盖表都
+    # 看不到，断言会退化成「验证不了改写」。
+    $mountDir = "$BackendRoot/Android/data/$AppId/files/SrtOverlayBacked"
+    $viewDir = "$RealRoot/Android/data/$AppId/files/SrtOverlayBacked"
+    # 同父目录的普通兄弟目录（不经 bind）与父目录本身，用于区分「整棵子树读不到」与
+    # 「只有覆盖目标读不到」。
+    $viewSourceDir = "$RealRoot/Android/data/$AppId/files/SrtOverlaySource"
+    $viewParentDir = "$RealRoot/Android/data/$AppId/files"
+    $sourceDir = "$BackendRoot/Android/data/$AppId/files/SrtOverlaySource"
+    $marker = "srt_overlay_backed_marker"
+    # 上一轮异常退出可能留下 bind：先拆再建。挂载与拆除都显式进 init 命名空间，
+    # 保证与系统侧一致（不依赖 su 是否复用同一个 mount namespace）。
+    Invoke-Su "nsenter -t 1 -m -- umount '$mountDir' 2>/dev/null; rm -rf '$mountDir' '$sourceDir'" | Out-Null
+    # 建 bind 之前先读一次空目录：这一步把该 inode 的后端解析钉成「bind 遮蔽前的旧值」，
+    # 也就把「解析缓存有没有跟着覆盖表失效」纳入断言。2026-11-17 A16 的偶发失败正是这条：
+    # 首次解析落在覆盖表 1 秒快照窗口内，缓存把旧后端钉死，后面读多少次都回不到 bind 内容。
+    Invoke-Su "nsenter -t 1 -m -- mkdir -p '$mountDir' '$sourceDir'" | Out-Null
+    Invoke-Su "nsenter -t $appPid -m -- ls -a '$viewDir' >/dev/null 2>&1" | Out-Null
+    Invoke-Su "nsenter -t 1 -m -- sh -c ': > `"$sourceDir/$marker`" && echo payload > `"$sourceDir/srt_overlay_backed_second`" && mount --bind `"$sourceDir`" `"$mountDir`"'" | Out-Null
+    # 系统视图（真值）：init 命名空间里 `/data/media/<user>` 侧的同一目录，bind 已生效。
+    # 走 f2fs 直连而不是 `/storage/emulated/<user>`，避免 MP FUSE 的 dentry 缓存让刚建立的
+    # bind 在系统侧暂时不可见，把缓存抖动误报成缺陷。
+    #
+    # 比较前剔除 `.`/`..`：模块 readdir 按设计不返回点条目（场景 43 已单独守卫），系统侧
+    # `ls -a` 必然多这两项，原样比较只会得到「必然不一致」的假失败。
+    $sysList = @(Invoke-Su "nsenter -t 1 -m -- ls -a '$mountDir' 2>/dev/null | grep -vx '\.' | grep -vx '\.\.' | sort" | Where-Object { $_ -ne "" })
+    # 覆盖挂载表有 1 秒快照 TTL：bind 刚建立时首次读可能仍按旧快照解析（ENOENT）。
+    # 这是有界的最终一致窗口，只在这里重试到快照刷新，不能放宽最终断言。
+    $appList = @()
+    # 窗口覆盖两级缓存之和：覆盖表快照 TTL 1 秒 + 目录候选缓存 TTL 2 秒，再留 adb 往返。
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $appList = @(Invoke-Su "nsenter -t $appPid -m -- ls -a '$viewDir' 2>/dev/null | sort" | Where-Object { $_ -ne "" })
+        if ($appList -contains $marker) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    $ok = $true
+    if (-not ($sysList -contains $marker)) {
+        $sysDetail = ((Invoke-Su "nsenter -t 1 -m -- ls -ld '$mountDir' 2>&1") -join " ").Trim()
+        $script:Failures.Add("$Label system view missing overlay content sys=[$($sysList -join ',')] detail=$sysDetail")
+        $ok = $false
+    }
+    elseif (-not ($appList -contains $marker)) {
+        # 应用侧读空既可能是「目录不存在/不可读」，也可能是「读到 bind 遮蔽前的空目录」，
+        # 判据完全不同：把 ls 的 stderr 一并带出来，别让重定向把 errno 吞掉。
+        $appDetail = ((Invoke-Su "nsenter -t $appPid -m -- ls -ld '$viewDir' 2>&1") -join " ").Trim()
+        # mountinfo 段用来区分「覆盖表没命中该挂载点」与「命中了但换算出的源路径不对」。
+        $mountInfo = ((Invoke-Su "grep -F '$mountDir' /proc/1/mountinfo 2>/dev/null | head -1") -join " ").Trim()
+        # src_probe 直接回答「改写目标在应用命名空间里读不读得到」。
+        $srcProbe = ((Invoke-Su "nsenter -t $appPid -m -- ls -a '$sourceDir' 2>&1") -join " ").Trim()
+        # 同父目录的普通兄弟目录与父目录本身：区分「整棵子树读不到」与「只有覆盖目标读不到」。
+        $viewSourceProbe = ((Invoke-Su "nsenter -t $appPid -m -- ls -a '$viewSourceDir' 2>&1") -join " ").Trim()
+        $viewParentProbe = ((Invoke-Su "nsenter -t $appPid -m -- ls -a '$viewParentDir' 2>&1") -join " ").Trim()
+        # 覆盖表变化日志（全文 grep，不靠 running.log 尾部，避免被启动日志挤掉）。
+        $overlayLog = ((Invoke-Su "grep -h 'overlay' /data/adb/modules/storage.redirect.x/logs/running.log* 2>/dev/null | tail -4") -join " | ").Trim()
+        $script:Failures.Add("$Label module view missing overlay content app=[$($appList -join ',')] sys=[$($sysList -join ',')] detail=$appDetail mountinfo=$mountInfo src_probe=$srcProbe view_src_probe=$viewSourceProbe view_parent_probe=$viewParentProbe overlay_log=$overlayLog")
+        $ok = $false
+    }
+    elseif (($appList -join "`n") -ne ($sysList -join "`n")) {
+        $script:Failures.Add("$Label overlay listing mismatch app=[$($appList -join ',')] sys=[$($sysList -join ',')]")
+        $ok = $false
+    }
+    Invoke-Su "nsenter -t 1 -m -- umount '$mountDir' 2>/dev/null; rm -rf '$mountDir' '$sourceDir'" | Out-Null
+    if ($ok) {
+        Write-Host "  overlay_view_parity_ok label=$Label pid=$appPid entries=$($appList.Count)"
+    }
+    return $ok
+}
+
 # 停用配置（配置文件存在但 enabled=false）在监视开启时不得被接入模块视图：
 # resolve_profile 返回 Some(disabled) → MountOperation::Disable，monitor-only 只在完全
 # 无配置时成立。断言应用仍停在系统视图、根列表里没有 MediaProvider 内部目录——将来若把
@@ -4242,6 +4329,10 @@ function Invoke-MonitorCaptureRootViewScenario {
     # 同样是写应用配置 + 触碰 global.json。
     Write-GlobalConfig (Get-TestGlobalConfig 'auto' $true)
     $ok = Assert-StorageRootViewParity "$label-captured"
+    if ($ok) {
+        # 覆盖挂载链路：商店每次下载都会把暂存目录 bind 到应用私有树，视图必须跟着 bind 走。
+        $ok = Assert-OverlayBackedViewParity "$label-overlay"
+    }
     Clear-MonitorTriggerConfig
     Invoke-Su "rm -rf '$RealRoot/.SrtRootDotVisible' '$fixture'" | Out-Null
     return $ok
@@ -4249,7 +4340,7 @@ function Invoke-MonitorCaptureRootViewScenario {
 
 # 场景 41：模块自建沙盒根的原生元数据 + 媒体代写零穿透（与 .sh 同契约）。
 #
-# 回归背景（2026-11-09 真机 duchamp）：王者荣耀的沙盒根被模块建成
+# 回归背景（2026-11-09 真机）：王者荣耀的沙盒根被模块建成
 # `2770 应用uid:应用uid`，系统代写进程既非属主也不在组、other 位为 0，穿越直接
 # EACCES；重定向目标不可达后写入回退到真实公共路径，公共存储里凭空长出
 # `Documents/ringtone/gamefree/jly*/a`。本场景把「删掉沙盒根 → 应用重启 → 模块重建」

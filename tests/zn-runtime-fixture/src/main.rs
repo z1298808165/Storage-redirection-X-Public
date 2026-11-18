@@ -177,6 +177,14 @@ fn main() {
                     0o600,
                 );
                 if fd < 0 {
+                    // 只打 errno 无法区分「模块 FUSE 拒绝」与「降权后权限不足」：
+                    // 把目标路径一起带出来（2026-11-17 A16 zn_monitor_only 偶发 EACCES
+                    // 时就缺这一条，只能靠猜）。
+                    let mut line = Vec::with_capacity(path.as_bytes().len() + 16);
+                    line.extend_from_slice(b"zn fixture open target=");
+                    line.extend_from_slice(path.as_bytes());
+                    line.push(b'\n');
+                    libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len());
                     libc::perror(c"zn fixture open".as_ptr());
                     libc::_exit(122);
                 }
