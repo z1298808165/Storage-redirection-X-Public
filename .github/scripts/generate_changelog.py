@@ -32,7 +32,7 @@ BODY_FIELD_PATTERN = re.compile(r"^(变更|用户影响|范围|限制|验证)[�
 # 它们不是普通正文，不能并进上一个字段（否则会被「验证」吞掉，日志里永远看不到）。
 CREDIT_FIELD_PATTERN = re.compile(r"^(致谢|思路来源|贡献者|上游来源|上游作者)[：:]\s*(.*)$")
 # 说明性元数据字段：既不进更新日志，也不能并进上一个更新日志字段。
-# `文档同交：` 用来声明「本笔的配套文档无法独立成笔」的原因（见 AGENTS.md 提交信息规范），
+# `文档同交：` 用来声明「本笔的配套文档无法独立成笔」的原因（见 CONTRIBUTING.md 提交信息规范），
 # 与 validate-commit.ps1 的同名判据对应。
 STANDALONE_META_FIELD_PATTERN = re.compile(r"^文档同交[：:]")
 CREDIT_PEOPLE_LABELS = ("贡献者", "上游作者")
@@ -213,8 +213,6 @@ def change_components(path: str) -> set[str]:
     if path.startswith("assets/zygisk_module/webroot/"):
         return {"module"}
     if path.startswith((".github/", "docs/", "scripts/")) or path in {
-        "AGENTS.md",
-        "CLAUDE.md",
         "CONTRIBUTING.md",
         "README.md",
     }:
