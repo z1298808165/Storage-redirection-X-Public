@@ -160,11 +160,16 @@ fn build_lsplant_bridge(target_arch: &str) {
     if let Some(modules_json) = write_libcxx_modules_json(&libcxx_prefix, &build_dir) {
         let before = build_dir.join("srx_before_project.cmake");
         let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
+        // 合成 std 模块时编译命令带 -nostdinc++，libc++ 的 __config 等头必须由这里显式给出；
+        // CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES 正是 CMake 为构建 std 模块准备的包含目录。
+        let cxx_include = libcxx_prefix.join("prefab/modules/cxx/include");
         let script = format!(
             "set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
 set(CMAKE_CXX_STDLIB_MODULES_JSON \"{}\")
+set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES \"{}\")
 ",
-            cmake_path(&modules_json)
+            cmake_path(&modules_json),
+            cmake_path(&cxx_include)
         );
         std::fs::write(&before, script)
             .unwrap_or_else(|err| panic!("write {} failed: {err}", before.display()));
@@ -445,7 +450,7 @@ fn lsplant_cmake_stamp(
 ) -> String {
     format!(
         // args_rev 变更（新增/修改 configure 参数）时同步自增，强制旧缓存目录重建。
-        "args_rev=4
+        "args_rev=5
 toolchain={}
 abi={}
 libcxx_prefix={}
