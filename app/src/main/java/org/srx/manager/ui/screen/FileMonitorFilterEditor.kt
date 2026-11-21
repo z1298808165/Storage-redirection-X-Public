@@ -47,9 +47,9 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Add
-import top.yukonga.miuix.kmp.icon.extended.Delete
-import top.yukonga.miuix.kmp.icon.extended.Ok
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Delete
+import top.yukonga.miuix.kmp.icon.glass.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 // 文件监视过滤规则的编辑入口。
@@ -240,7 +240,7 @@ internal fun FileMonitorFilterDialog(
   }
 }
 
-private enum class MonitorFilterType(val label: String, val description: String) {
+internal enum class MonitorFilterType(val label: String, val description: String) {
   Path("路径", "排除目录及其子路径，支持 * 和 ? 通配。"),
   Operation("操作", "按操作名或模式过滤，支持 *、? 和意图后缀，例如 open*、open*:read。"),
   Intent("意图", "按访问目的过滤，不受 open、openat 等具体操作名影响。"),
@@ -251,12 +251,12 @@ private data class MonitorFilterRemoval(val type: MonitorFilterType, val value: 
     get() = if (type == MonitorFilterType.Intent) monitorIntentLabel(value) else value
 }
 
-private val MonitorIntents = listOf("read", "write", "create")
+internal val MonitorIntents = listOf("read", "write", "create")
 
-private fun sortMonitorFilterValues(values: List<String>): List<String> =
+internal fun sortMonitorFilterValues(values: List<String>): List<String> =
     values.sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
 
-private fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
+internal fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
   val intents = mutableListOf<String>()
   val operations = mutableListOf<String>()
   values.forEach { value ->
@@ -365,13 +365,13 @@ private fun MonitorFilterTabs(
   }
 }
 
-private data class MonitorFilterPathValidation(
+internal data class MonitorFilterPathValidation(
     val value: String,
     val valid: Boolean,
     val message: String,
 )
 
-private fun validateMonitorFilterPathInput(raw: String): MonitorFilterPathValidation {
+internal fun validateMonitorFilterPathInput(raw: String): MonitorFilterPathValidation {
   val text = raw.trim()
   if (text.isBlank()) return MonitorFilterPathValidation("", false, "路径不能为空")
   val normalized = SrxConfigNormalizer.sanitizeMonitorFilterPath(text, allowLegacyAbsolute = false)
@@ -428,7 +428,7 @@ private fun MonitorFilterEditor(
           singleLine = true,
       )
       RoundIconAction(
-          icon = MiuixIcons.Add,
+          icon = MiuixIcons.Glass.Add,
           contentDescription = "添加规则",
           onClick = onAdd,
           size = 36.dp,
@@ -490,7 +490,7 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
         overflow = TextOverflow.Ellipsis,
     )
     RoundIconAction(
-        MiuixIcons.Delete,
+        MiuixIcons.Glass.Delete,
         "删除规则",
         { onRemove(value) },
         danger = true,
@@ -546,7 +546,7 @@ private fun MonitorIntentEditor(selected: List<String>, onToggle: (String) -> Un
           )
         }
         Icon(
-            imageVector = if (active) MiuixIcons.Ok else MiuixIcons.Add,
+            imageVector = if (active) MiuixIcons.Glass.Ok else MiuixIcons.Glass.Add,
             contentDescription = if (active) "已添加" else "添加",
             tint = MiuixTheme.colorScheme.primary,
             modifier = Modifier.size(18.dp),

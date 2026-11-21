@@ -32,14 +32,18 @@ import org.srx.manager.data.ConfigTemplate
 import org.srx.manager.data.SrxConfigNormalizer
 import org.srx.manager.data.UserProfile
 import org.srx.manager.subtleFieldLabelColor
+import org.srx.manager.ui.theme.SrxRowMetrics
+import org.srx.manager.ui.theme.isSrxThemeCoui
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Close
-import top.yukonga.miuix.kmp.icon.extended.Delete
-import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.icon.glass.Close
+import top.yukonga.miuix.kmp.icon.glass.Delete
+import top.yukonga.miuix.kmp.icon.glass.LockOutline
+import top.yukonga.miuix.kmp.icon.glass.Tune
+import top.yukonga.miuix.kmp.icon.glass.Update
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
@@ -58,7 +62,7 @@ internal fun TemplateManageRow(
       horizontalArrangement = Arrangement.spacedBy(10.dp),
   ) {
     Icon(
-        MiuixIcons.Tune,
+        MiuixIcons.Glass.Tune,
         contentDescription = null,
         tint = MiuixTheme.colorScheme.primary,
         modifier = Modifier.size(19.dp),
@@ -78,7 +82,7 @@ internal fun TemplateManageRow(
       )
     }
     RoundIconAction(
-        MiuixIcons.Delete,
+        MiuixIcons.Glass.Delete,
         "删除模板",
         onDelete,
         danger = true,
@@ -114,7 +118,14 @@ internal fun TemplateEditorDialog(
 
   CenteredDialog(
       show = true,
-      modifier = Modifier.heightIn(max = 720.dp),
+      // 之前写死 720dp：比手机屏幕还高，弹窗底部被裁掉，底部的取消/保存看起来
+      // 就成了"高度不对"。改为按屏幕高度取上限。
+      modifier =
+          Modifier.heightIn(
+              max =
+                  (androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp * 0.88f)
+                      .dp
+          ),
       maxWidth = 680.dp,
       outsideMargin = DpSize(16.dp, 16.dp),
       insideMargin = DpSize.Zero,
@@ -133,7 +144,7 @@ internal fun TemplateEditorDialog(
             fontWeight = FontWeight.Black,
         )
         RoundIconAction(
-            MiuixIcons.Close,
+            MiuixIcons.Glass.Close,
             "关闭",
             onDismiss,
             size = 36.dp,
@@ -141,32 +152,47 @@ internal fun TemplateEditorDialog(
         )
       }
       LazyColumn(
-          modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp).overScrollVertical(),
+          // weight(1f)：列表吃掉剩余空间，底部按钮永远固定可见，不再被内容挤到屏幕外。
+          modifier = Modifier.fillMaxWidth().weight(1f).overScrollVertical(),
           contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-          verticalArrangement = Arrangement.spacedBy(14.dp),
+          verticalArrangement = Arrangement.spacedBy(SrxRowMetrics.groupSpacing()),
       ) {
         item {
-          TextField(
-              value = name,
-              onValueChange = { name = it.take(48) },
-              label = "模板名称",
-              colors = TextFieldDefaults.textFieldColors(labelColor = subtleFieldLabelColor()),
-              useLabelAsPlaceholder = true,
-              singleLine = true,
-              modifier = Modifier.fillMaxWidth(),
-          )
+          if (isSrxThemeCoui()) {
+            // COUI 下用官方输入框：圆角矩形底 + 行内标签，和弹窗里的白卡同语言。
+            // 之前用 Miuix 的填充输入框，在这套配色里就是一块突兀的灰条。
+            io.github.suqi8.coui.kmp.basic.TextField(
+                value = androidx.compose.ui.text.input.TextFieldValue(name),
+                onValueChange = { name = it.text.take(48) },
+                label = "模板名称",
+                useLabelAsPlaceholder = true,
+                singleLine = true,
+                backgroundMode = io.github.suqi8.coui.kmp.basic.TextFieldMode.Rectangle,
+                modifier = Modifier.fillMaxWidth(),
+            )
+          } else {
+            TextField(
+                value = name,
+                onValueChange = { name = it.take(48) },
+                label = "模板名称",
+                colors = TextFieldDefaults.textFieldColors(labelColor = subtleFieldLabelColor()),
+                useLabelAsPlaceholder = true,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+          }
         }
         item {
-          GlassCard(alpha = 0.52f, shadowAlpha = 0.14f) {
+          GlassCard() {
             CompactSwitchRow(
                 title = "启用重定向",
-                summary = "应用该模板后是否启用存储重定向X",
+                icon = MiuixIcons.Glass.Update,
                 checked = profile.enabled,
                 onCheckedChange = { checked -> updateProfile { it.copy(enabled = checked) } },
             )
             CompactSwitchRow(
                 title = "仅映射模式",
-                summary = "仅应用显式路径映射；未命中映射时保持原路径",
+                icon = MiuixIcons.Glass.Tune,
                 checked = profile.mappingModeOnly,
                 onCheckedChange = { checked ->
                   updateProfile { it.copy(mappingModeOnly = checked) }
@@ -174,7 +200,7 @@ internal fun TemplateEditorDialog(
             )
             CompactSwitchRow(
                 title = "只读模式",
-                summary = "禁止写入指定真实目录；namespace 会退化通配规则，FUSE 数据面可精确匹配",
+                icon = MiuixIcons.Glass.LockOutline,
                 checked = readOnlyEditorEnabled || profile.readOnlyPaths.isNotEmpty(),
                 onCheckedChange = { checked ->
                   readOnlyEditorEnabled = checked

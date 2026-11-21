@@ -3,18 +3,15 @@ package org.srx.manager.ui.screen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -34,11 +31,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.srx.manager.CenteredDialog
-import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
-import org.srx.manager.PageHeader
 import org.srx.manager.RoundIconAction
 import org.srx.manager.SectionTitle
+import org.srx.manager.SettingGroup
+import org.srx.manager.SrxProgressiveListPage
 import org.srx.manager.data.AppConfig
 import org.srx.manager.data.ConfigDir
 import org.srx.manager.data.ConfigTemplate
@@ -47,14 +44,19 @@ import org.srx.manager.data.UiPreferences
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.srxSuccessColor
 import org.srx.manager.ui.AppUiState
+import org.srx.manager.ui.theme.SrxRowMetrics
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Download
-import top.yukonga.miuix.kmp.icon.extended.File
-import top.yukonga.miuix.kmp.icon.extended.Import
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Download
+import top.yukonga.miuix.kmp.icon.glass.File
+import top.yukonga.miuix.kmp.icon.glass.Import
+import top.yukonga.miuix.kmp.icon.glass.ListView
+import top.yukonga.miuix.kmp.icon.glass.SettingsOutline
+import top.yukonga.miuix.kmp.icon.glass.Tune
+import top.yukonga.miuix.kmp.icon.glass.Update
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
 private fun BackupActionButton(
@@ -138,109 +140,116 @@ internal fun SettingsScreen(
           name = "新配置模板",
           config = AppConfig(users = mapOf(state.selectedUser to DisabledDefaultProfile)),
       )
-  LazyColumn(
-      modifier = Modifier.fillMaxSize().overScrollVertical(),
-      contentPadding =
-          PaddingValues(
-              top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 18.dp,
-              bottom = bottomPadding + 28.dp,
-              start = 16.dp,
-              end = 16.dp,
-          ),
-      verticalArrangement = Arrangement.spacedBy(14.dp),
+  SrxProgressiveListPage(
+      title = "设置",
+      bottomPadding = bottomPadding,
+      verticalArrangement = Arrangement.spacedBy(SrxRowMetrics.groupSpacing()),
+      actions = {
+        RoundIconAction(
+            icon = MiuixIcons.Glass.File,
+            contentDescription = "导出日志包",
+            onClick = onDiagnosticExport,
+        )
+      },
   ) {
     item {
-      PageHeader(
-          title = "设置",
-          actions = {
-            RoundIconAction(
-                icon = MiuixIcons.File,
-                contentDescription = "导出日志包",
-                onClick = onDiagnosticExport,
-                size = 36.dp,
-                iconSize = 17.dp,
-            )
-          },
-      )
-    }
-    item {
       SectionTitle("模块设置")
-      GlassCard(alpha = 0.58f) {
-        CompactSwitchRow(
-            title = "文件监视",
-            summary = "记录已启用应用和系统代写进程的文件创建操作",
-            checked = global.fileMonitorEnabled,
-            onCheckedChange = { onGlobal(global.copy(fileMonitorEnabled = it)) },
-        )
-        CompactSwitchRow(
-            title = "Fuse Fixer",
-            summary = "SRX 内置 Fuse Fixer 兼容保护，修正 MediaProvider 的 FUSE 可访问性判定与 passthrough 行为",
-            checked = global.fuseFixEnabled,
-            onCheckedChange = { onGlobal(global.copy(fuseFixEnabled = it)) },
-        )
-        CompactSwitchRow(
-            title = "详细日志",
-            summary = "开启后 FUSE 逐操作与诊断采集全量高频记录，持续写盘并显著增加 CPU/内存开销；" + "仅建议复现问题抓日志时临时开启，日常保持关闭",
-            checked = global.verboseLoggingEnabled,
-            onCheckedChange = { onGlobal(global.copy(verboseLoggingEnabled = it)) },
-        )
-        CompactSwitchRow(
-            title = "新应用自动重定向",
-            summary = "收到系统新安装事件后，自动写入默认配置",
-            checked = global.autoEnableRedirectForNewApps,
-            onCheckedChange = ::updateAutoEnable,
-            showDivider = !global.autoEnableRedirectForNewApps,
-        )
-        if (global.autoEnableRedirectForNewApps) {
-          AutoRedirectTemplateStatusRow(
-              template = autoTemplate,
-              templateId = global.autoEnableNewAppsTemplateId,
-              fallbackNoticeId = state.autoTemplateFallbackNoticeId,
-              onClick = ::openAutoTemplatePicker,
+      SettingGroup() {
+        item {
+          CompactSwitchRow(
+              title = "文件监视",
+              icon = MiuixIcons.Glass.ListView,
+              checked = global.fileMonitorEnabled,
+              onCheckedChange = { onGlobal(global.copy(fileMonitorEnabled = it)) },
           )
         }
-        CompactSwitchRow(
-            title = "配置操作即时保存",
-            summary = "开启后应用配置页的每次操作都会立即写入模块配置",
-            checked = global.appConfigAutoSave,
-            onCheckedChange = { onGlobal(global.copy(appConfigAutoSave = it)) },
-            showDivider = false,
-        )
+        item {
+          CompactSwitchRow(
+              title = "Fuse Fixer",
+              icon = MiuixIcons.Glass.Tune,
+              checked = global.fuseFixEnabled,
+              onCheckedChange = { onGlobal(global.copy(fuseFixEnabled = it)) },
+          )
+        }
+        item {
+          CompactSwitchRow(
+              title = "详细日志",
+              icon = MiuixIcons.Glass.File,
+              checked = global.verboseLoggingEnabled,
+              onCheckedChange = { onGlobal(global.copy(verboseLoggingEnabled = it)) },
+          )
+        }
+        item {
+          CompactSwitchRow(
+              title = "新应用自动重定向",
+              icon = MiuixIcons.Glass.Add,
+              checked = global.autoEnableRedirectForNewApps,
+              onCheckedChange = ::updateAutoEnable,
+              showDivider = !global.autoEnableRedirectForNewApps,
+          )
+        }
+        // 行数保持恒定，显隐在行内判断：分组的 item 增删不可靠（关闭开关后行不消失）。
+        item {
+          if (global.autoEnableRedirectForNewApps) {
+            AutoRedirectTemplateStatusRow(
+                template = autoTemplate,
+                templateId = global.autoEnableNewAppsTemplateId,
+                fallbackNoticeId = state.autoTemplateFallbackNoticeId,
+                onClick = ::openAutoTemplatePicker,
+            )
+          }
+        }
+        item {
+          CompactSwitchRow(
+              title = "配置操作即时保存",
+              icon = MiuixIcons.Glass.Update,
+              checked = global.appConfigAutoSave,
+              onCheckedChange = { onGlobal(global.copy(appConfigAutoSave = it)) },
+              showDivider = false,
+          )
+        }
       }
     }
     item {
       SectionTitle("外观")
-      GlassCard(alpha = 0.58f) {
-        SettingSelectRow(
-            title = "主题与外观",
-            summary = "主题模式、色彩、液态玻璃与界面缩放",
-            value = themeModeLabel(prefs.themeMode),
-            onClick = onOpenTheme,
-            showDivider = false,
-        )
+      SettingGroup() {
+        item {
+          SettingSelectRow(
+              title = "主题与外观",
+              leading = { SettingsRowIcon(MiuixIcons.Glass.SettingsOutline) },
+              value = themeModeLabel(prefs.themeMode),
+              onClick = onOpenTheme,
+              showDivider = false,
+          )
+        }
       }
     }
     item {
       SectionTitle("配置模板")
-      GlassCard(insideMargin = PaddingValues(0.dp), alpha = 0.58f) {
-        ConfigGroupHeader(
-            "模板库",
-            addLabel = "添加配置模板",
-            onAdd = { editingTemplate = newTemplateDraft() },
-        )
+      SettingGroup(insideMargin = PaddingValues(0.dp)) {
+        item {
+          ConfigGroupHeader(
+              "模板库",
+              addLabel = "添加配置模板",
+              onAdd = { editingTemplate = newTemplateDraft() },
+          )
+        }
         if (state.templates.isEmpty()) {
-          EmptyConfigHint("还没有配置模板，可从应用配置页保存当前配置为模板")
+          item { EmptyConfigHint("还没有配置模板，可从应用配置页保存当前配置为模板") }
         } else {
-          LazyColumn(
-              modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
-          ) {
-            itemsIndexed(state.templates, key = { _, template -> template.id }) { index, template ->
-              TemplateManageRow(
-                  template = template,
-                  onEdit = { editingTemplate = template },
-                  onDelete = { deleteTemplate = template },
-              )
-              if (index != state.templates.lastIndex) ConfigDivider()
+          item {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+            ) {
+              itemsIndexed(state.templates, key = { _, template -> template.id }) { index, template
+                ->
+                TemplateManageRow(
+                    template = template,
+                    onEdit = { editingTemplate = template },
+                    onDelete = { deleteTemplate = template },
+                )
+                if (index != state.templates.lastIndex) ConfigDivider()
+              }
             }
           }
         }
@@ -248,58 +257,68 @@ internal fun SettingsScreen(
     }
     item {
       SectionTitle("权限")
-      GlassCard(insideMargin = PaddingValues(16.dp), alpha = 0.58f) {
-        Text(
-            text = if (state.rootGranted) "root 权限已授予" else "未获得 root 权限",
-            color =
-                if (state.rootGranted) MiuixTheme.colorScheme.primary
-                else MiuixTheme.colorScheme.error,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "路径补全优先使用 root 读取目录；模块状态、配置读写、日志读取和备份还原等管理操作也依赖 root 执行。",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 13.sp,
-            lineHeight = 18.sp,
-        )
+      SettingGroup(insideMargin = PaddingValues(16.dp)) {
+        // 非行内容也必须进 item{}：分组只渲染 item 里的内容，
+        // 直接写在这里会落到卡片之外（表现为"文本在卡片下方"）。
+        item {
+          Column {
+            Text(
+                text = if (state.rootGranted) "root 权限已授予" else "未获得 root 权限",
+                color =
+                    if (state.rootGranted) MiuixTheme.colorScheme.primary
+                    else MiuixTheme.colorScheme.error,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "路径补全优先使用 root 读取目录；模块状态、配置读写、日志读取和备份还原等管理操作也依赖 root 执行。",
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+          }
+        }
       }
     }
     item {
       SectionTitle("备份还原")
-      GlassCard(insideMargin = PaddingValues(12.dp), alpha = 0.58f) {
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-          BackupActionButton(
-              text = "备份",
-              icon = MiuixIcons.Download,
-              tint = MiuixTheme.colorScheme.primary,
-              onClick = onBackupExport,
-              modifier = Modifier.weight(1f),
-          )
-          BackupActionButton(
-              text = "还原",
-              icon = MiuixIcons.Import,
-              tint = srxSuccessColor(),
-              onClick = onBackupImport,
-              modifier = Modifier.weight(1f),
-          )
+      SettingGroup(insideMargin = PaddingValues(12.dp)) {
+        item {
+          Column {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+              BackupActionButton(
+                  text = "备份",
+                  icon = MiuixIcons.Glass.Download,
+                  tint = MiuixTheme.colorScheme.primary,
+                  onClick = onBackupExport,
+                  modifier = Modifier.weight(1f),
+              )
+              BackupActionButton(
+                  text = "还原",
+                  icon = MiuixIcons.Glass.Import,
+                  tint = srxSuccessColor(),
+                  onClick = onBackupImport,
+                  modifier = Modifier.weight(1f),
+              )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "备份会导出一个可传播的单文件，包含全局设置、所有应用配置、配置模板、文件监视过滤、外观偏好和检查更新设置；还原前会校验格式、模块标识和配置字段。",
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text("配置文件路径", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "$ConfigDir/",
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 11.sp,
+                lineHeight = 14.sp,
+            )
+          }
         }
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "备份会导出一个可传播的单文件，包含全局设置、所有应用配置、配置模板、文件监视过滤、外观偏好和检查更新设置；还原前会校验格式、模块标识和配置字段。",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-        )
-        Spacer(Modifier.height(12.dp))
-        Text("配置文件路径", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "$ConfigDir/",
-            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            fontSize = 11.sp,
-            lineHeight = 14.sp,
-        )
       }
     }
   }

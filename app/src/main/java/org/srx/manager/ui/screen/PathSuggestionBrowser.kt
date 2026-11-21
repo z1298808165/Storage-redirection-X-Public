@@ -190,7 +190,7 @@ private fun PathBrowserIcon(isDirectory: Boolean) {
 }
 
 @Composable
-private fun rememberStorageBrowserState(
+internal fun rememberStorageBrowserState(
     userId: String,
     value: String,
     onListDirectories: (String, String, (List<String>) -> Unit) -> Unit,
@@ -215,7 +215,7 @@ internal data class PathBrowserInput(
     val query: String,
 )
 
-private data class PathBrowserState(
+internal data class PathBrowserState(
     val suggestions: List<PathSuggestion>,
     val loading: Boolean,
 )
@@ -358,7 +358,7 @@ internal fun normalizeEditablePathTextFieldValue(
   return TextFieldValue(normalized, selection = value.selection.clampToText(normalized.length))
 }
 
-private fun applyPathPrefix(current: String, suggestion: String): String =
+internal fun applyPathPrefix(current: String, suggestion: String): String =
     if (hasAllowRulePrefix(current)) "!$suggestion" else suggestion
 
 internal fun pathTextFieldValue(text: String, cursor: Int = text.length): TextFieldValue =

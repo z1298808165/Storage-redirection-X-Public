@@ -22,6 +22,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.srx.manager.CenteredDialog
@@ -29,13 +30,15 @@ import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
 import org.srx.manager.RoundIconAction
 import org.srx.manager.subtleFieldLabelColor
+import org.srx.manager.ui.theme.SrxRowMetrics
 import org.srx.manager.ui.theme.isSrxDarkTheme
+import org.srx.manager.ui.theme.isSrxThemeCoui
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Add
-import top.yukonga.miuix.kmp.icon.extended.Close
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Close
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
@@ -192,7 +195,7 @@ internal fun PathEditorCard(
 ) {
   var showDialog by remember { mutableStateOf(false) }
   var editingValue by remember { mutableStateOf<String?>(null) }
-  GlassCard(insideMargin = PaddingValues(0.dp), alpha = 0.52f, shadowAlpha = 0.14f) {
+  GlassCard(insideMargin = PaddingValues(0.dp), shadowAlpha = 0.14f) {
     ConfigGroupHeader(title = title, addLabel = addLabel, onAdd = { showDialog = true })
     if (values.isEmpty()) {
       EmptyConfigHint(emptyHint)
@@ -243,7 +246,7 @@ internal fun MappingEditorCard(
 ) {
   var showDialog by remember { mutableStateOf(false) }
   var editingMapping by remember { mutableStateOf<Pair<String, String>?>(null) }
-  GlassCard(insideMargin = PaddingValues(0.dp), alpha = 0.52f, shadowAlpha = 0.14f) {
+  GlassCard(insideMargin = PaddingValues(0.dp), shadowAlpha = 0.14f) {
     ConfigGroupHeader(title = "路径映射", addLabel = "添加路径映射", onAdd = { showDialog = true })
     Text(
         "请求路径和目标路径都按应用视角填写，可使用相对路径或绝对路径；请求路径不能直接使用应用私有目录根路径，目标路径可以使用内部路径根目录。未命中的公共路径仍进入应用沙盒。",
@@ -309,21 +312,25 @@ internal fun ConfigGroupHeader(
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
-    RoundIconAction(
-        icon = MiuixIcons.Add,
+    // 与列表图标同一形状（圆角方块），之前这里的加号是圆形，和行内图标不统一。
+    RowIconAction(
+        icon = MiuixIcons.Glass.Add,
         contentDescription = addLabel,
         onClick = onAdd,
-        size = 36.dp,
-        iconSize = 17.dp,
     )
   }
   ConfigDivider()
 }
 
 @Composable
-internal fun ConfigDivider() {
+internal fun ConfigDivider(startInset: Dp = 0.dp, endInset: Dp = 0.dp) {
+  // COUI 的分隔线从图标右缘起画（Eta CouiIconDivider），Miuix 沿用调用方给的缩进。
+  val effectiveStart =
+      if (isSrxThemeCoui()) startInset + SrxRowMetrics.iconSize() + SrxRowMetrics.itemSpacing()
+      else startInset
   Box(
       Modifier.fillMaxWidth()
+          .padding(start = effectiveStart, end = endInset)
           .height(1.dp)
           .background(
               MiuixTheme.colorScheme.onSurface.copy(
@@ -374,7 +381,7 @@ private fun RuleRow(
         lineHeight = 16.sp,
     )
     RoundIconAction(
-        MiuixIcons.Close,
+        MiuixIcons.Glass.Close,
         "删除",
         { onRemove(value) },
         danger = true,
@@ -424,7 +431,7 @@ private fun MappingRow(
         lineHeight = 16.sp,
     )
     RoundIconAction(
-        MiuixIcons.Close,
+        MiuixIcons.Glass.Close,
         "删除",
         { onRemove(request) },
         danger = true,

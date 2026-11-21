@@ -27,7 +27,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -55,6 +54,8 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.ChevronForward
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 // 概览页的展示组件与确认对话框。
@@ -100,10 +101,7 @@ internal fun ModuleStatusCard(
   val useBackdrop = isSrxBackdropEffectEnabled()
   Card(
       modifier =
-          Modifier.fillMaxWidth()
-              .heightIn(min = 348.dp)
-              .glassPanel(shape, shadowAlpha = 0.1f, surfaceAlpha = 0.72f),
-      cornerRadius = 34.dp,
+          Modifier.fillMaxWidth().heightIn(min = 348.dp).glassPanel(shape, shadowAlpha = 0.1f),
       insideMargin = PaddingValues(horizontal = 24.dp, vertical = 30.dp),
       colors =
           CardDefaults.defaultColors(
@@ -469,46 +467,41 @@ internal fun FeatureChip(label: String, enabled: Boolean, modifier: Modifier) {
 }
 
 @Composable
-internal fun ActionRow(title: String, summary: String, icon: ImageVector, onClick: () -> Unit) {
-  Row(
-      modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(12.dp),
-  ) {
-    GlassIcon(icon)
-    Column(Modifier.weight(1f)) {
-      Text(title, fontWeight = FontWeight.SemiBold)
-      Text(summary, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 12.sp)
+internal fun ActionRow(
+    title: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    showDivider: Boolean = true,
+) {
+  Column(Modifier.fillMaxWidth()) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      SettingsRowIcon(icon)
+      Text(
+          title,
+          modifier = Modifier.weight(1f),
+          fontSize = 16.sp,
+          lineHeight = 20.sp,
+          fontWeight = FontWeight.Bold,
+          maxLines = 1,
+          overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+      )
+      Icon(
+          imageVector = MiuixIcons.Glass.ChevronForward,
+          contentDescription = null,
+          tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          modifier = Modifier.size(18.dp),
+      )
     }
-  }
-}
-
-@Composable
-internal fun GlassIcon(icon: ImageVector, modifier: Modifier = Modifier) {
-  val shape = RoundedCornerShape(17.dp)
-  val accent = MiuixTheme.colorScheme.primary
-  Box(
-      modifier =
-          modifier
-              .size(44.dp)
-              .glassPanel(shape, shadowAlpha = 0.05f)
-              .clip(shape)
-              .background(
-                  Brush.linearGradient(
-                      listOf(
-                          accent.copy(alpha = if (isSrxDarkTheme()) 0.22f else 0.18f),
-                          srxSuccessColor().copy(alpha = if (isSrxDarkTheme()) 0.16f else 0.12f),
-                          glassSurfaceColor(if (isSrxDarkTheme()) 0.4f else 0.72f),
-                      ),
-                  ),
-              ),
-      contentAlignment = Alignment.Center,
-  ) {
-    Icon(
-        icon,
-        contentDescription = null,
-        tint = MiuixTheme.colorScheme.primary,
-        modifier = Modifier.size(24.dp),
-    )
+    if (showDivider) {
+      ConfigDivider(startInset = RowTextInset, endInset = 16.dp)
+    }
   }
 }
