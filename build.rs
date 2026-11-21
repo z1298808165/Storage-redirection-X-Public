@@ -145,6 +145,11 @@ fn build_lsplant_bridge(target_arch: &str) {
         // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
         .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
+    // CMake 3.30+ 会自己合成一份 std 模块（@cmake_cxx_std@synth），源取自「编译器默认
+    // stdlib」——在 26.04 镜像上是宿主 GCC 15 的 bits/std.cc，配 -nostdinc++ 必然失败。
+    // LSPlant 用的是 prefab 里 libc++ 提供的 std.cppm（_prefab_cxx_std23_OFF），
+    // 这里显式关掉 CMake 的自动合成，避免它去碰宿主头文件。
+    configure.arg("-DCMAKE_CXX_MODULE_STD=OFF");
     if let Some(scan_deps) = ndk_clang_scan_deps(&ndk) {
         configure.arg(format!(
             "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
