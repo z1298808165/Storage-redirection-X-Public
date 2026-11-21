@@ -102,7 +102,9 @@ fn build_lsplant_bridge(target_arch: &str) {
     // CMakeCache.txt 会粘住 toolchain 与编译器路径，-D 覆盖不了缓存里的旧值：
     // cargo build 缓存跨 NDK 版本/构件前缀复用时（CI 的 actions/cache 或本地换 NDK），
     // 旧缓存会把 configure 带向已不存在的旧 NDK 路径。用参数指纹戳识别并整目录重建。
-    let config_stamp = lsplant_cmake_stamp(&toolchain_file, abi, &libcxx_prefix);
+    let scan_deps = ndk_clang_scan_deps(&ndk);
+    let config_stamp =
+        lsplant_cmake_stamp(&toolchain_file, abi, &libcxx_prefix, scan_deps.as_deref());
     let stamp_path = build_dir.join(".srx-cmake-config-stamp");
     if build_dir.exists() {
         let stale = std::fs::read_to_string(&stamp_path)
@@ -143,6 +145,12 @@ fn build_lsplant_bridge(target_arch: &str) {
         // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
         .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
+    if let Some(scan_deps) = ndk_clang_scan_deps(&ndk) {
+        configure.arg(format!(
+            "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
+            scan_deps.display()
+        ));
+    }
     // 显式覆盖空值，避免复用 CMake 缓存时残留已撤下的编译启动器。
     for name in ["CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER"] {
         configure.arg(format!("-D{name}={}", env::var(name).unwrap_or_default()));
@@ -206,6 +214,28 @@ fn host_tag() -> &'static str {
     } else {
         "linux-x86_64"
     }
+}
+
+// CMake 在启用 C++23 std 模块（LSPlant 的 `import std;`）时要调用 clang-scan-deps。
+// 它默认取「宿主」的同版本扫描器（/usr/bin/clang-scan-deps-NN），这带来两个坑：
+// 宿主镜像没有该版本时直接 127 not found；有该版本时又会去扫宿主的 stdlib 头
+// （GCC 15 的 bits/std.cc），配 -nostdinc++ 必然找不到 bits/stdc++.h。
+// 统一改用 NDK 自带的扫描器：它与 NDK clang++ 来自同一个包，头文件搜索路径一致。
+fn ndk_clang_scan_deps(ndk: &Path) -> Option<PathBuf> {
+    let prebuilt = ndk.join("toolchains").join("llvm").join("prebuilt");
+    let exe = if cfg!(windows) {
+        "clang-scan-deps.exe"
+    } else {
+        "clang-scan-deps"
+    };
+    let entries = std::fs::read_dir(prebuilt).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("bin").join(exe);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn cmake_android_abi(target_arch: &str) -> Option<&'static str> {
@@ -346,12 +376,24 @@ fn download_libcxx_aar(dest: &Path) -> Result<(), String> {
 }
 
 // LSPlant cmake 构建目录的参数指纹：toolchain、ABI、cxx 包前缀任一变化都视为缓存过期。
-fn lsplant_cmake_stamp(toolchain: &Path, abi: &str, libcxx_prefix: &Path) -> String {
+fn lsplant_cmake_stamp(
+    toolchain: &Path,
+    abi: &str,
+    libcxx_prefix: &Path,
+    scan_deps: Option<&Path>,
+) -> String {
     format!(
-        "toolchain={}\nabi={}\nlibcxx_prefix={}\n",
+        "toolchain={}
+abi={}
+libcxx_prefix={}
+scan_deps={}
+",
         toolchain.display(),
         abi,
-        libcxx_prefix.display()
+        libcxx_prefix.display(),
+        scan_deps
+            .map(|path| path.display().to_string())
+            .unwrap_or_default()
     )
 }
 
