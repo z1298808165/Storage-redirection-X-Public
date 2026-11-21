@@ -151,26 +151,26 @@ fn build_lsplant_bridge(target_arch: &str) {
     // -nostdinc++，必然报 bits/stdc++.h 缺失（CI 冷构建实测）。
     // 这里显式声明 libc++：NDK 不带 libc++.modules.json，CMake 便不会自建 std 模块，
     // `import std` 由 prefab 的 std.cppm（_prefab_cxx_std23_OFF）提供。
-    configure.arg("-DCMAKE_CXX_STANDARD_LIBRARY=libc++");
-    // -D 只在缓存初始化阶段生效，而 android.toolchain.cmake 会在 project() 之后
-    // 重新 set() 这个普通变量，把 -D 覆盖掉（预览分支 CI 四次冷构建实测仍是宿主
-    // GCC 15 的 std）。CMAKE_PROJECT_INCLUDE 在 project() 返回后执行，能真正压住。
-    let project_include = build_dir.join("srx_project_include.cmake");
-    std::fs::write(
-        &project_include,
-        "set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
-set(CMAKE_CXX_MODULE_STD OFF)
+    // CMake 的 `import std` 支持（prefab cxx 包声明消费方可 import std）会建一个内部工具
+    // 目标，从「编译器配套的标准库」取 std 模块源。26.04 镜像上那是宿主 GCC 15 的
+    // bits/std.cc，扫描命令又带 -nostdinc++，冷构建必失败（预览分支多轮实测）。
+    // 正解是把 std 模块源直接指向 libcxx AAR 自带的 libc++ 模块：写一份
+    // libc++.modules.json，并在 toolchain 之前（PROJECT_INCLUDE_BEFORE）声明 libc++。
+    // 之前的 -D 与 PROJECT_INCLUDE 都无效：前者被 toolchain 覆盖，后者执行得太晚。
+    if let Some(modules_json) = write_libcxx_modules_json(&libcxx_prefix, &build_dir) {
+        let before = build_dir.join("srx_before_project.cmake");
+        let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
+        let script = format!(
+            "set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
+set(CMAKE_CXX_STDLIB_MODULES_JSON \"{}\")
 ",
-    )
-    .unwrap_or_else(|err| panic!("write {} failed: {err}", project_include.display()));
-    configure.arg(format!(
-        "-DCMAKE_PROJECT_INCLUDE={}",
-        project_include.display()
-    ));
-    if let Some(scan_deps) = ndk_clang_scan_deps(&ndk) {
+            cmake_path(&modules_json)
+        );
+        std::fs::write(&before, script)
+            .unwrap_or_else(|err| panic!("write {} failed: {err}", before.display()));
         configure.arg(format!(
-            "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
-            scan_deps.display()
+            "-DCMAKE_PROJECT_INCLUDE_BEFORE={}",
+            cmake_path(&before)
         ));
     }
     // 显式覆盖空值，避免复用 CMake 缓存时残留已撤下的编译启动器。
@@ -236,6 +236,45 @@ fn host_tag() -> &'static str {
     } else {
         "linux-x86_64"
     }
+}
+
+// libc++ 的 std 模块描述文件（Clang-CXX-CXXImportStd.cmake 认这个 schema v1）：
+// 让 CMake 直接用 AAR 里随包分发的 std.cppm / std.compat.cppm，而不是去宿主找
+// libstdc++ 的 bits/std.cc。找不到模块源码时返回 None，退回原有行为。
+fn write_libcxx_modules_json(libcxx_prefix: &Path, build_dir: &Path) -> Option<PathBuf> {
+    let modules_dir = libcxx_prefix.join("prefab/modules/cxx/include/std-modules");
+    let std_cppm = modules_dir.join("std.cppm");
+    let std_compat_cppm = modules_dir.join("std.compat.cppm");
+    if !std_cppm.is_file() {
+        return None;
+    }
+    let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
+    let modules = if std_compat_cppm.is_file() {
+        format!(
+            "{{ \"name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }},
+    {{ \"name\": \"std.compat\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
+            cmake_path(&std_cppm),
+            cmake_path(&std_compat_cppm)
+        )
+    } else {
+        format!(
+            "{{ \"name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
+            cmake_path(&std_cppm)
+        )
+    };
+    let json = format!(
+        "{{
+  \"version\": 1,
+  \"revision\": 0,
+  \"modules\": [
+    {modules}
+  ]
+}}
+"
+    );
+    let path = build_dir.join("libc++.modules.json");
+    std::fs::write(&path, json).ok()?;
+    Some(path)
 }
 
 // CMake 在启用 C++23 std 模块（LSPlant 的 `import std;`）时要调用 clang-scan-deps。
@@ -406,7 +445,7 @@ fn lsplant_cmake_stamp(
 ) -> String {
     format!(
         // args_rev 变更（新增/修改 configure 参数）时同步自增，强制旧缓存目录重建。
-        "args_rev=3
+        "args_rev=4
 toolchain={}
 abi={}
 libcxx_prefix={}
