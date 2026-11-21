@@ -177,7 +177,11 @@ jobs:
       - prepare
       - init-ci-release
     if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
-    runs-on: ubuntu-26.04
+    # 该 job 需要编译 C++（LSPlant 的 import std）。GitHub 的 26.04 镜像
+    # 换上了宿主 GCC 15：它自带 bits/std.cc，CMake 会把它当成 std 模块源去扫，
+    # 而 NDK clang 加 -nostdinc++ 后找不到 bits/stdc++.h，构建直接失败。
+    # 固定到 24.04 镜像规避宿主 stdlib 干扰。
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -365,7 +369,11 @@ jobs:
       - prepare
       - init-ci-release
     if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
-    runs-on: ubuntu-26.04
+    # 该 job 需要编译 C++（LSPlant 的 import std）。GitHub 的 26.04 镜像
+    # 换上了宿主 GCC 15：它自带 bits/std.cc，CMake 会把它当成 std 模块源去扫，
+    # 而 NDK clang 加 -nostdinc++ 后找不到 bits/stdc++.h，构建直接失败。
+    # 固定到 24.04 镜像规避宿主 stdlib 干扰。
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -475,7 +483,11 @@ jobs:
       - quality
       - prepare
     if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success'
-    runs-on: ubuntu-26.04
+    # 该 job 需要编译 C++（LSPlant 的 import std）。GitHub 的 26.04 镜像
+    # 换上了宿主 GCC 15：它自带 bits/std.cc，CMake 会把它当成 std 模块源去扫，
+    # 而 NDK clang 加 -nostdinc++ 后找不到 bits/stdc++.h，构建直接失败。
+    # 固定到 24.04 镜像规避宿主 stdlib 干扰。
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
