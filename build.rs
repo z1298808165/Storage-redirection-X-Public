@@ -157,27 +157,22 @@ fn build_lsplant_bridge(target_arch: &str) {
     // 正解是把 std 模块源直接指向 libcxx AAR 自带的 libc++ 模块：写一份
     // libc++.modules.json，并在 toolchain 之前（PROJECT_INCLUDE_BEFORE）声明 libc++。
     // 之前的 -D 与 PROJECT_INCLUDE 都无效：前者被 toolchain 覆盖，后者执行得太晚。
-    if let Some(modules_json) = write_libcxx_modules_json(&libcxx_prefix, &build_dir) {
-        let before = build_dir.join("srx_before_project.cmake");
-        let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
-        // 合成 std 模块时编译命令带 -nostdinc++，libc++ 的 __config 等头必须由这里显式给出；
-        // CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES 正是 CMake 为构建 std 模块准备的包含目录。
-        let cxx_include = libcxx_prefix.join("prefab/modules/cxx/include");
-        let script = format!(
-            "set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
-set(CMAKE_CXX_STDLIB_MODULES_JSON \"{}\")
-set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES \"{}\")
-",
-            cmake_path(&modules_json),
-            cmake_path(&cxx_include)
-        );
-        std::fs::write(&before, script)
-            .unwrap_or_else(|err| panic!("write {} failed: {err}", before.display()));
-        configure.arg(format!(
-            "-DCMAKE_PROJECT_INCLUDE_BEFORE={}",
-            cmake_path(&before)
-        ));
-    }
+    // prefab 的 cxx::cxx 已经把自带的 std 模块目标（_prefab_cxx_std23_*，源为 AAR 里的
+    // std.cppm）链进了消费方；CMake 若再按「编译器 stdlib」合成一份 std 模块，两份 provider
+    // 就会撞车（Disagreement of the location of the 'std' module），而且那份源在 26.04 上是
+    // 宿主 GCC 15 的 bits/std.cc，配 -nostdinc++ 根本编不过。
+    // CMAKE_CXX_MODULE_STD 初始化所有目标的 CXX_MODULE_STD 属性，必须在 toolchain 之前设。
+    let before = build_dir.join("srx_before_project.cmake");
+    let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
+    let script = "set(CMAKE_CXX_MODULE_STD OFF)
+set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
+";
+    std::fs::write(&before, script)
+        .unwrap_or_else(|err| panic!("write {} failed: {err}", before.display()));
+    configure.arg(format!(
+        "-DCMAKE_PROJECT_INCLUDE_BEFORE={}",
+        cmake_path(&before)
+    ));
     // 显式覆盖空值，避免复用 CMake 缓存时残留已撤下的编译启动器。
     for name in ["CMAKE_C_COMPILER_LAUNCHER", "CMAKE_CXX_COMPILER_LAUNCHER"] {
         configure.arg(format!("-D{name}={}", env::var(name).unwrap_or_default()));
@@ -241,45 +236,6 @@ fn host_tag() -> &'static str {
     } else {
         "linux-x86_64"
     }
-}
-
-// libc++ 的 std 模块描述文件（Clang-CXX-CXXImportStd.cmake 认这个 schema v1）：
-// 让 CMake 直接用 AAR 里随包分发的 std.cppm / std.compat.cppm，而不是去宿主找
-// libstdc++ 的 bits/std.cc。找不到模块源码时返回 None，退回原有行为。
-fn write_libcxx_modules_json(libcxx_prefix: &Path, build_dir: &Path) -> Option<PathBuf> {
-    let modules_dir = libcxx_prefix.join("prefab/modules/cxx/include/std-modules");
-    let std_cppm = modules_dir.join("std.cppm");
-    let std_compat_cppm = modules_dir.join("std.compat.cppm");
-    if !std_cppm.is_file() {
-        return None;
-    }
-    let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
-    let modules = if std_compat_cppm.is_file() {
-        format!(
-            "{{ \"logical-name\": \"std\", \"source-path\": \"{}\", \"is-stdlib\": true }},
-    {{ \"logical-name\": \"std.compat\", \"source-path\": \"{}\", \"is-stdlib\": true }}",
-            cmake_path(&std_cppm),
-            cmake_path(&std_compat_cppm)
-        )
-    } else {
-        format!(
-            "{{ \"logical-name\": \"std\", \"source-path\": \"{}\", \"is-stdlib\": true }}",
-            cmake_path(&std_cppm)
-        )
-    };
-    let json = format!(
-        "{{
-  \"version\": 1,
-  \"revision\": 0,
-  \"modules\": [
-    {modules}
-  ]
-}}
-"
-    );
-    let path = build_dir.join("libc++.modules.json");
-    std::fs::write(&path, json).ok()?;
-    Some(path)
 }
 
 // CMake 在启用 C++23 std 模块（LSPlant 的 `import std;`）时要调用 clang-scan-deps。
@@ -450,7 +406,7 @@ fn lsplant_cmake_stamp(
 ) -> String {
     format!(
         // args_rev 变更（新增/修改 configure 参数）时同步自增，强制旧缓存目录重建。
-        "args_rev=5
+        "args_rev=6
 toolchain={}
 abi={}
 libcxx_prefix={}
