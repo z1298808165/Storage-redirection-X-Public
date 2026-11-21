@@ -152,6 +152,21 @@ fn build_lsplant_bridge(target_arch: &str) {
     // 这里显式声明 libc++：NDK 不带 libc++.modules.json，CMake 便不会自建 std 模块，
     // `import std` 由 prefab 的 std.cppm（_prefab_cxx_std23_OFF）提供。
     configure.arg("-DCMAKE_CXX_STANDARD_LIBRARY=libc++");
+    // -D 只在缓存初始化阶段生效，而 android.toolchain.cmake 会在 project() 之后
+    // 重新 set() 这个普通变量，把 -D 覆盖掉（预览分支 CI 四次冷构建实测仍是宿主
+    // GCC 15 的 std）。CMAKE_PROJECT_INCLUDE 在 project() 返回后执行，能真正压住。
+    let project_include = build_dir.join("srx_project_include.cmake");
+    std::fs::write(
+        &project_include,
+        "set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
+set(CMAKE_CXX_MODULE_STD OFF)
+",
+    )
+    .unwrap_or_else(|err| panic!("write {} failed: {err}", project_include.display()));
+    configure.arg(format!(
+        "-DCMAKE_PROJECT_INCLUDE={}",
+        project_include.display()
+    ));
     if let Some(scan_deps) = ndk_clang_scan_deps(&ndk) {
         configure.arg(format!(
             "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
@@ -391,7 +406,7 @@ fn lsplant_cmake_stamp(
 ) -> String {
     format!(
         // args_rev 变更（新增/修改 configure 参数）时同步自增，强制旧缓存目录重建。
-        "args_rev=2
+        "args_rev=3
 toolchain={}
 abi={}
 libcxx_prefix={}
