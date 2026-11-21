@@ -178,6 +178,25 @@ set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
         configure.arg(format!("-D{name}={}", env::var(name).unwrap_or_default()));
     }
     run_command(&mut configure, "configure LSPlant");
+    // 临时诊断：把 CMake 现场的实际判定打出来（验证完即删）。
+    {
+        let cache = build_dir.join("CMakeCache.txt");
+        if let Ok(text) = std::fs::read_to_string(&cache) {
+            for line in text.lines() {
+                if line.starts_with("CMAKE_CXX_STANDARD_LIBRARY:")
+                    || line.starts_with("CMAKE_CXX_MODULE_STD:")
+                    || line.starts_with("CMAKE_CXX_STDLIB_MODULES_JSON:")
+                {
+                    println!("cargo:warning=srx-diag cache: {line}");
+                }
+            }
+        }
+        let ninja = build_dir.join("build.ninja");
+        if let Ok(text) = std::fs::read_to_string(&ninja) {
+            let synth = text.matches("cmake_cxx_std").count();
+            println!("cargo:warning=srx-diag synth_hits={synth}");
+        }
+    }
     // 只在 configure 完整成功后落戳，失败遗留的半配置目录下次会被识别为过期重建。
     std::fs::write(&stamp_path, &config_stamp)
         .unwrap_or_else(|err| panic!("write {} failed: {err}", stamp_path.display()));
