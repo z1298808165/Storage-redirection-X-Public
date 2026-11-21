@@ -162,6 +162,7 @@ fn build_lsplant_bridge(target_arch: &str) {
     // 就会撞车（Disagreement of the location of the 'std' module），而且那份源在 26.04 上是
     // 宿主 GCC 15 的 bits/std.cc，配 -nostdinc++ 根本编不过。
     // CMAKE_CXX_MODULE_STD 初始化所有目标的 CXX_MODULE_STD 属性，必须在 toolchain 之前设。
+    // prefab 的 cxx::cxx 已经把自带的 std 模块链进消费方；这里只压住 CMake 自建的那份。
     let before = build_dir.join("srx_before_project.cmake");
     let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
     let script = "set(CMAKE_CXX_MODULE_STD OFF)
@@ -188,6 +189,33 @@ set(CMAKE_CXX_STANDARD_LIBRARY \"libc++\")
                     || line.starts_with("CMAKE_CXX_STDLIB_MODULES_JSON:")
                 {
                     println!("cargo:warning=srx-diag cache: {line}");
+                }
+            }
+        }
+        if let Ok(out) = std::process::Command::new("cmake")
+            .arg("--version")
+            .output()
+        {
+            println!(
+                "cargo:warning=srx-diag cmake={}",
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+        }
+        println!(
+            "cargo:warning=srx-diag before_exists={} before_path={}",
+            before.exists(),
+            before.display()
+        );
+        let log_yaml = build_dir.join("CMakeFiles/CMakeConfigureLog.yaml");
+        if let Ok(text) = std::fs::read_to_string(&log_yaml) {
+            for line in text.lines() {
+                let l = line.trim();
+                if l.contains("modules.json") || l.contains("STDLIB") || l.contains("stdlib") {
+                    println!("cargo:warning=srx-diag cfglog: {l}");
                 }
             }
         }
