@@ -251,14 +251,14 @@ fn write_libcxx_modules_json(libcxx_prefix: &Path, build_dir: &Path) -> Option<P
     let cmake_path = |path: &Path| path.display().to_string().replace('\\', "/");
     let modules = if std_compat_cppm.is_file() {
         format!(
-            "{{ \"name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }},
-    {{ \"name\": \"std.compat\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
+            "{{ \"logical-name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }},
+    {{ \"logical-name\": \"std.compat\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
             cmake_path(&std_cppm),
             cmake_path(&std_compat_cppm)
         )
     } else {
         format!(
-            "{{ \"name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
+            "{{ \"logical-name\": \"std\", \"is_stdlib\": true, \"sources\": [{{ \"path\": \"{}\", \"type\": \"module\" }}] }}",
             cmake_path(&std_cppm)
         )
     };
