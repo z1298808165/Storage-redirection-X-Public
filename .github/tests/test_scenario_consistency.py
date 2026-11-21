@@ -980,6 +980,46 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn("--json isDraft", release)
         self.assertIn("storage-redirect-x-manager-v${VERSION}.apk", release)
 
+    def test_ci_preview_channel_keeps_release_chain_untouched(self) -> None:
+        # 预览通道（preview 分支）要跑真实设备矩阵，但不能碰正式发布链路：
+        # 不建草稿 Release、不上传资产、不写 update.json，产物只进 Actions artifact。
+        # 这条守卫盯的就是「漏排除一处」——它是静默的，只有用例能拦住。
+        ci = read(".github/workflows/ci.yml")
+        parsed = yaml.safe_load(ci)
+        triggers = parsed[True]
+        self.assertEqual(list(triggers["push"]["branches"]), ["SRX-R", "preview"])
+        self.assertEqual(list(triggers["pull_request"]["branches"]), ["SRX-R"])
+
+        # 发布链路三处必须排除 preview。
+        for job in ("init-ci-release", "create-ci-release", "update-manifest"):
+            self.assertIn(
+                "github.ref_name != 'preview'",
+                parsed["jobs"][job]["if"],
+                job,
+            )
+        # module / app 放宽到预览分支也要构建（否则没有产物可下载）。
+        for job in ("module", "app"):
+            self.assertIn(
+                "github.ref_name == 'preview'",
+                parsed["jobs"][job]["if"],
+                job,
+            )
+        # 草稿上传步骤与「清理废弃草稿」（唯一会删 Release 的地方）同样排除。
+        self.assertIn("github.ref_name != 'preview'", section(ci, "  module:", "  app:"))
+        self.assertIn("github.ref_name != 'preview'", section(ci, "  app:", "  test-flow-build:"))
+        self.assertIn(
+            "github.ref_name != 'preview'",
+            section(ci, "  cleanup-build-artifacts:", "  update-manifest:"),
+        )
+        # 预览产物以 artifact 形式保留，命名固定，便于下载与核对。
+        self.assertIn("preview-module-v${{ env.VERSION }}", ci)
+        self.assertIn("preview-manager-v${{ env.VERSION }}", ci)
+
+        # 正式发布仍只由 tag 触发，预览通道不得绕过它。
+        release = read(".github/workflows/release.yml")
+        release_parsed = yaml.safe_load(release)
+        self.assertEqual(list(release_parsed[True]["push"]["tags"]), ["v*"])
+
     def test_ci_test_flow_step_timeout_follows_scenario_scope(self) -> None:
         # 模拟器异常时编排脚本可能停在场景脚本之前的准备阶段，脚本内看门狗覆盖
         # 不到；写死的 job 级 45/50 分钟又比 40 场景的看门狗（75 分钟）还小，

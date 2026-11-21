@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [SRX-R]
   push:
-    branches: [SRX-R]
+    branches: [SRX-R, preview]
   # 手动触发：只跑指定场景做单点回归（例如 scenarios=29），
   # 不必为收窄范围而临时改写 workflow 或伪造提交信息。
   workflow_dispatch:
@@ -142,7 +142,7 @@ jobs:
     needs:
       - quality
       - prepare
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true' && github.ref_name != 'preview'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
@@ -176,7 +176,7 @@ jobs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -321,7 +321,7 @@ jobs:
           test -f "build/assets/storage.redirect.x-v${VERSION}.zip"
 
       - name: Upload module to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && github.ref_name != 'preview'
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}
@@ -350,12 +350,21 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
+      - name: Upload preview module artifact
+        if: github.ref_name == 'preview'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: preview-module-v${{ env.VERSION }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/assets/storage.redirect.x-v${{ env.VERSION }}.zip
+
   app:
     needs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && (needs.prepare.outputs.publish_ci == 'true' || github.ref_name == 'preview')
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -423,7 +432,7 @@ jobs:
           cp "$APK" "build/app/storage-redirect-x-manager-v${VERSION}.apk"
 
       - name: Upload manager APK to draft CI release
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && github.ref_name != 'preview'
         env:
           GH_TOKEN: ${{ github.token }}
           CI_TAG: ci-build-${{ github.run_id }}
@@ -450,6 +459,15 @@ jobs:
             "build/app/storage-redirect-x-manager-v${VERSION}.apk" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+      - name: Upload preview manager artifact
+        if: github.ref_name == 'preview'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: preview-manager-v${{ env.VERSION }}
+          if-no-files-found: error
+          retention-days: 14
+          path: build/app/storage-redirect-x-manager-v${{ env.VERSION }}.apk
 
   test-flow-build:
     name: Build test-flow runtime
@@ -796,7 +814,7 @@ jobs:
           fi
 
   create-ci-release:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true' && github.ref_name != 'preview'
     needs:
       - prepare
       - init-ci-release
@@ -889,7 +907,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: 清理废弃的 CI 草稿
-        if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI')
+        if: env.PUBLISH_CI == 'true' && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && github.ref_name != 'preview'
         env:
           GH_TOKEN: ${{ github.token }}
           # 本轮发布环节是否成功。只有成功时才允许按「已被本轮取代」立即清理：
@@ -943,7 +961,7 @@ jobs:
           done
 
   update-manifest:
-    if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && needs.prepare.outputs.publish_ci == 'true' && github.ref_name != 'preview'
     needs:
       - prepare
       - create-ci-release
