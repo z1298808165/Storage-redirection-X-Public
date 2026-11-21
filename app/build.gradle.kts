@@ -335,7 +335,7 @@ android {
 
   defaultConfig {
     applicationId = "org.srx.manager"
-    minSdk = 31
+    minSdk = 33
     targetSdk = appTargetSdk
     versionCode = appVersionCode
     versionName = appVersionName
@@ -418,6 +418,14 @@ dependencies {
   implementation(libs.miuix.icons)
   implementation(libs.miuix.nav)
   implementation(libs.miuix.blur)
+  implementation(libs.miuix.glass)
+  implementation(libs.miuix.material)
+  implementation(libs.miuix.glass.icons)
+  implementation(libs.coui.ui)
+  implementation(libs.coui.icons)
+  implementation(libs.coui.blur)
+  implementation(libs.coui.nav)
+  implementation(libs.coui.preference)
   implementation(libs.kyant.backdrop)
   implementation(libs.markwon.core)
   implementation(libs.appiconloader)
