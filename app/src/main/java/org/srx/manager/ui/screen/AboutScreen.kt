@@ -1,14 +1,8 @@
 package org.srx.manager.ui.screen
 
-import android.os.Build
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -23,74 +17,71 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import org.srx.manager.BackPageHeader
 import org.srx.manager.GlassCard
+import org.srx.manager.RoundIconAction
+import org.srx.manager.srxRememberListState
 import org.srx.manager.ui.effect.BgEffectBackground
-import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
-import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.Back
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
 internal fun AboutScreen(onBack: () -> Unit) {
   val uriHandler = LocalUriHandler.current
-  val dynamicBackground =
-      isSrxBlurEffectEnabled() &&
-          isRuntimeShaderSupported() &&
-          Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
+  val effectBackground =
+      isRuntimeShaderSupported() &&
+          android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM
+  val listState = srxRememberListState("about")
+  val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+  val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   BgEffectBackground(
-      dynamicBackground = dynamicBackground,
+      dynamicBackground = effectBackground,
       modifier = Modifier.fillMaxSize(),
-      bgModifier = Modifier.aboutFlowingBackground(),
       isFullSize = true,
-      effectBackground = dynamicBackground,
+      effectBackground = effectBackground,
   ) {
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize().overScrollVertical(),
         contentPadding =
             PaddingValues(
-                top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 18.dp,
-                bottom =
-                    WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 56.dp,
+                top = topInset + 72.dp,
+                bottom = bottomInset + 56.dp,
                 start = 16.dp,
                 end = 16.dp,
             ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      item {
-        BackPageHeader(
-            title = "关于",
-            onBack = onBack,
-        )
-      }
       item { AboutTitle("开源协议引用") }
       items(LicenseItems) { item -> LicenseCard(item, uriHandler::openUri) }
+    }
+    Box(
+        modifier =
+            Modifier.align(Alignment.TopStart).padding(start = 16.dp, top = topInset + 12.dp),
+    ) {
+      RoundIconAction(MiuixIcons.Glass.Back, "返回", onBack)
     }
   }
 }
 
-private data class LicenseItem(
+internal data class LicenseItem(
     val group: String,
     val name: String,
     val license: String,
     val url: String,
 )
 
-private val LicenseItems =
+internal val LicenseItems =
     listOf(
         LicenseItem(
             "模块核心",
@@ -171,6 +162,7 @@ private val LicenseItems =
             "https://github.com/androidx/androidx",
         ),
         LicenseItem("APP / UI", "Miuix", "Apache 2.0", "https://github.com/compose-miuix-ui/miuix"),
+        LicenseItem("APP / UI", "COUI", "Apache 2.0", "https://github.com/suqi8/coui"),
         LicenseItem(
             "APP / UI",
             "AndroidLiquidGlass / Backdrop",
@@ -207,9 +199,7 @@ private val LicenseItems =
 private fun LicenseCard(item: LicenseItem, onOpen: (String) -> Unit) {
   GlassCard(
       modifier = Modifier.fillMaxWidth().heightIn(min = 68.dp).clickable { onOpen(item.url) },
-      cornerRadius = 20.dp,
       insideMargin = PaddingValues(horizontal = 16.dp, vertical = 11.dp),
-      alpha = 0.62f,
   ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -258,118 +248,4 @@ private fun AboutTitle(text: String) {
       fontSize = 13.sp,
       fontWeight = FontWeight.Bold,
   )
-}
-
-@Composable
-private fun Modifier.aboutFlowingBackground(): Modifier {
-  val dark = isSrxDarkTheme()
-  val transition = rememberInfiniteTransition(label = "AboutFlow")
-  val flow by
-      transition.animateFloat(
-          initialValue = 0f,
-          targetValue = 1f,
-          animationSpec =
-              infiniteRepeatable(
-                  animation = tween(durationMillis = 8800, easing = LinearEasing),
-                  repeatMode = RepeatMode.Reverse,
-              ),
-          label = "AboutFlowShift",
-      )
-  val drift by
-      transition.animateFloat(
-          initialValue = 1f,
-          targetValue = 0f,
-          animationSpec =
-              infiniteRepeatable(
-                  animation = tween(durationMillis = 13200, easing = LinearEasing),
-                  repeatMode = RepeatMode.Reverse,
-              ),
-          label = "AboutFlowDrift",
-      )
-  return drawBehind {
-    val w = size.width.coerceAtLeast(1f)
-    val h = size.height.coerceAtLeast(1f)
-    drawRect(
-        brush =
-            if (dark) {
-              Brush.linearGradient(
-                  listOf(Color(0xFF08101C), Color(0xFF1C1730), Color(0xFF112C28)),
-                  start = Offset.Zero,
-                  end = Offset(w, h),
-              )
-            } else {
-              Brush.linearGradient(
-                  listOf(
-                      Color(0xFFFCFBFF),
-                      Color(0xFFEFF8FF),
-                      Color(0xFFFFF4FB),
-                      Color(0xFFEFFFF8),
-                  ),
-                  start = Offset.Zero,
-                  end = Offset(w, h),
-              )
-            },
-    )
-    drawRect(
-        brush =
-            Brush.radialGradient(
-                listOf(
-                    if (dark) Color(0x883A84FF) else Color(0x88A9D6FF),
-                    if (dark) Color(0x443A84FF) else Color(0x50BFD6FF),
-                    Color.Transparent,
-                ),
-                center = Offset(w * (0.12f + 0.46f * flow), h * (0.16f + 0.18f * drift)),
-                radius = w * 0.72f,
-            ),
-    )
-    drawRect(
-        brush =
-            Brush.radialGradient(
-                listOf(
-                    if (dark) Color(0x77D75BC3) else Color(0x72F3B6EA),
-                    if (dark) Color(0x33D75BC3) else Color(0x3DF7D9F0),
-                    Color.Transparent,
-                ),
-                center = Offset(w * (0.78f - 0.36f * drift), h * (0.14f + 0.38f * flow)),
-                radius = w * 0.64f,
-            ),
-    )
-    drawRect(
-        brush =
-            Brush.radialGradient(
-                listOf(
-                    if (dark) Color(0x6630C5A5) else Color(0x86CFF6E7),
-                    if (dark) Color(0x3330C5A5) else Color(0x4EEBFFF6),
-                    Color.Transparent,
-                ),
-                center = Offset(w * (0.86f - 0.3f * flow), h * (0.78f - 0.28f * drift)),
-                radius = w * 0.7f,
-            ),
-    )
-    drawRect(
-        brush =
-            Brush.radialGradient(
-                listOf(
-                    if (dark) Color(0x42DF8E3E) else Color(0x5CFFCE7D),
-                    Color.Transparent,
-                ),
-                center = Offset(w * (0.28f + 0.36f * drift), h * (0.9f - 0.42f * flow)),
-                radius = w * 0.52f,
-            ),
-    )
-    drawRect(
-        brush =
-            Brush.linearGradient(
-                listOf(
-                    Color.Transparent,
-                    if (dark) Color(0x2C89B4FF) else Color.White.copy(alpha = 0.58f),
-                    Color.Transparent,
-                    if (dark) Color(0x24FF6CBE) else Color(0x40FF74C2),
-                    Color.Transparent,
-                ),
-                start = Offset(w * (1f - flow), h * 0.08f),
-                end = Offset(w * flow, h * 0.95f),
-            ),
-    )
-  }
 }
