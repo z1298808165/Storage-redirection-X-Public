@@ -38,7 +38,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - **🧩 配置模板** —— 保存、复用、批量应用一整份应用配置，配置修改热重载。
 - **💾 备份还原** —— 导出 `.srxbak.zip` 单文件备份，管理 App 与 WebUI 互通互还原。
 - **🆕 新装应用自动重定向** —— 安装新应用后按模板自动完成配置。
-- **🖥 双端管理界面** —— 原生管理 App（MIUIX 风格界面）与模块内置 WebUI。
+- **🖥 双端管理界面** —— 原生管理 App 与模块内置 WebUI；App 界面风格可在 **Miuix / COUI** 之间切换。
 
 ## 🧭 两种工作模式
 
@@ -597,6 +597,7 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 - [Zygisk](https://github.com/topjohnwu/Magisk) 与 [Zygisk Next](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk 注入环境
 - [LSPlant](https://github.com/LSPosed/LSPlant)：Java 层 hook 框架
 - [Miuix](https://github.com/compose-miuix-ui/miuix)：管理 App 使用的 MIUIX 风格 Compose 组件库
+- [COUI](https://github.com/suqi8/coui)：管理 App 的 COUI 风格 Compose 组件库（主题风格可选 Miuix / COUI）
 - [libfuse](https://github.com/libfuse/libfuse)：共享宿主 FUSE 会话实现的基础
 - [Fuse-Proxy](https://github.com/huniangitb/Fuse-Proxy)：共享宿主 FUSE 会话设计的参考实现
 
