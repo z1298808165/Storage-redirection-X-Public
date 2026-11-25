@@ -46,6 +46,8 @@ pub mod paths_safety;
 pub mod proc_direct;
 #[path = "platform/proc_identity.rs"]
 pub mod proc_identity;
+#[path = "platform/sqlite_sidecar.rs"]
+pub mod sqlite_sidecar;
 #[path = "platform/uid.rs"]
 pub mod uid;
 #[path = "platform/unique_fd.rs"]

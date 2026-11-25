@@ -468,6 +468,16 @@ pub fn prepare_private_owner_sqlite_sidecar(path: &str) -> bool {
         return false;
     };
 
+    // 边车名字必须始终可解析：`-wal`/`-journal`/`-shm` 缺失时先补 0 字节同名文件。
+    // 不依赖 WAL：rollback journal 模式的库没有 `-shm`/`-wal`，但它同样会因为
+    // 「后端被绕过视图删除 → MP 记成不可创建」而卡在 `-journal` 的 O_CREAT 上。
+    //
+    // 覆盖前提（有意为之）：本函数只在 `should_force_private_owner_sqlite_for_owner`
+    // 命中时被调用，也就是「跨属主/共享库」这一子集。模块自己制造的名字缺失只发生在
+    // `-shm` 毒化自愈上，而它同样只针对该子集，所以覆盖面与风险面一致。若将来有别的
+    // 路径也开始在后端删除边车，必须把补位提到这个闸门之前。
+    ensure_empty_sqlite_sidecar(&backend_path);
+
     if is_sqlite_shm_sidecar_path(&normalized_path)
         && prepare_sqlite_shm_backend(&normalized_path, &backend_path)
     {
@@ -561,11 +571,16 @@ fn is_poisoned_sqlite_shm_size(size: libc::off_t) -> bool {
 /// （真机 2026-11-04：`prepare sqlite shm backend open failed errno=13`）。
 fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
     let Some(size) = backend_file_size(backend_path) else {
-        // ENOENT：全新配置目录，`-shm` 尚未由 MediaProvider 的 O_CREAT 创建，没有
-        // 毒化可言（issue #2 日志里 216 条 warn 全是它，把真信号盖掉了）。其它错误
-        // 同样不判毒化：判不了就不动它，由调用方按「MP 能否打开」决定是否进用户态。
+        // ENOENT：可能只是全新配置目录（边车尚未创建），也可能是 MediaProvider 把
+        // 这个名字记成了不可创建——后端被绕过视图删除后，同名 `O_CREAT` 会一直返回
+        // ENOENT（2026-11-25 真机复现）。此时 `media_provider_can_open_backend` 里
+        // 「ENOENT 说明尚未创建、MP 能建出来」的假设不再成立：调用方会保持直通，应用
+        // 却永远建不出边车。所以这里补一个 0 字节同名文件：名字立刻可解析，SQLite
+        // 随后按需初始化 wal-index / journal。
+        let ensured = ensure_empty_sqlite_sidecar(backend_path);
         log::debug!(
-            "prepare sqlite shm backend absent or unreadable, skip poison check storage={} backend={}",
+            "prepare sqlite shm backend absent or unreadable ensured={} storage={} backend={}",
+            ensured,
             storage_path,
             backend_path
         );
@@ -595,6 +610,19 @@ fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
     // （真机实测 3 字节全零），或满尺寸但 wal-index 与 `-wal` 头 salt 失配。就地
     // 扩回尺寸不能恢复 SQLite 的共享内存头，必须先让 MediaProvider 失效视图节点，
     // 再删除真实后端文件，下一次 O_CREAT 才会拿到新 inode。
+    // 同一时刻只允许一个自愈在跑：MP 的 FUSE 是多线程的，两次并发 open 可能各自走到
+    // 「先删后补」，后到的那个会把先到者刚补出的 0 字节文件再删掉，反而制造名字缺失。
+    // `try_lock` 抢不到就跳过本轮——文件仍处于毒化态，下一次 open 会再判一次。
+    static HEAL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_heal_guard) = HEAL_GUARD.try_lock() else {
+        return false;
+    };
+
+    // 删除前记录身份：补空文件时尽量还原，避免应用侧因 owner 变化被 DAC 拒绝。
+    let attrs = std::fs::metadata(backend_path).ok().map(|metadata| {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.uid(), metadata.gid(), metadata.mode())
+    });
     let removed_storage = unlink_path(storage_path);
     let removed_backend = if std::fs::metadata(backend_path).is_ok() {
         unlink_path(backend_path)
@@ -602,10 +630,17 @@ fn prepare_sqlite_shm_backend(storage_path: &str, backend_path: &str) -> bool {
         false
     };
     if removed_storage || removed_backend {
+        // 与 `fuse_redirect::callbacks::heal_poisoned_sqlite_shm_backend` 同一不变量：
+        // 删除毒化内容后立刻补 0 字节同名文件（SQLite 合法初生态），让名称始终可解析。
+        // 否则 MediaProvider 会把这个名字记成不可创建，后续同名 `O_CREAT` 恒 ENOENT。
+        let placeholder = attrs.is_some_and(|(uid, gid, mode)| {
+            recreate_empty_sqlite_shm(backend_path, uid, gid, mode)
+        });
         log::info!(
-            "heal sqlite shm backend removed storage={} backend={} size={} path={} backend_path={}",
+            "heal sqlite shm backend removed storage={} backend={} placeholder={} size={} path={} backend_path={}",
             removed_storage,
             removed_backend,
+            placeholder,
             size,
             storage_path,
             backend_path
@@ -643,58 +678,12 @@ fn backend_file_size(backend_path: &str) -> Option<libc::off_t> {
     (size >= 0).then_some(size)
 }
 
-/// 由 `-shm` 边车路径推出同级 `-wal` 路径：后缀按小写不敏感识别，替换为小写
-/// `-wal`，库名主干保持原样。
-fn sqlite_sidecar_wal_path(shm_path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let file_name = shm_path.file_name()?.to_str()?;
-    let lower = file_name.to_ascii_lowercase();
-    let stem_len = lower.len().checked_sub("-shm".len())?;
-    if stem_len == 0 || !lower.ends_with("-shm") {
-        return None;
-    }
-    let mut wal_path = shm_path.to_path_buf();
-    wal_path.set_file_name(std::ffi::OsString::from(format!(
-        "{}-wal",
-        &file_name[..stem_len]
-    )));
-    Some(wal_path)
-}
-
-/// 读取文件前 `len` 字节；文件不足 `len` 字节或不可读时返回 `None`。
-fn read_file_prefix(path: &std::path::Path, len: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut buf = vec![0u8; len];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
-}
-
-/// 满尺寸 `-shm` 的内容级毒化判定：wal-index 头与同级 `-wal` 文件头 salt 失配。
+/// 满尺寸 `-shm` 的内容级毒化判定。
 ///
-/// SQLite 恢复 wal-index 时按 `memcpy` 原样拷贝 `-wal` 文件头（大端字节模式）的
-/// 8 字节 salt 到 wal-index 头偏移 32..40，不做字节序转换，因此毒化判定用原始
-/// 字节比对即可。两者失配说明 wal-index 停留在旧一代 WAL 或来自分裂视图。
-/// `-shm` 头未初始化（isInit≠1）或 `-wal` 头缺失/魔数非法时 SQLite 自己会重建，
-/// 一律不判定为毒化，保持保守。与 `fuse_redirect::callbacks` 的同名判定保持
-/// 同一逻辑（该模块不依赖 hook 模块，无法共享实现）。
+/// 实现收敛在 [`crate::platform::sqlite_sidecar::wal_index_stale`]（daemon 与 hook
+/// 共用同一份判定，含「两次快照 + 身份稳定」的换代复核），避免两侧再各写一份而分叉。
 fn sqlite_shm_wal_index_stale(real_shm_path: &std::path::Path) -> bool {
-    let Some(wal_path) = sqlite_sidecar_wal_path(real_shm_path) else {
-        return false;
-    };
-    let Some(shm) = read_file_prefix(real_shm_path, 48) else {
-        return false;
-    };
-    if shm[12] != 1 {
-        return false;
-    }
-    let Some(wal) = read_file_prefix(&wal_path, 32) else {
-        return false;
-    };
-    let wal_magic = u32::from_be_bytes([wal[0], wal[1], wal[2], wal[3]]);
-    if wal_magic != 0x377f_0682 && wal_magic != 0x377f_0683 {
-        return false;
-    }
-    shm[32..40] != wal[16..24]
+    crate::platform::sqlite_sidecar::wal_index_stale(real_shm_path)
 }
 
 fn unlink_path(path: &str) -> bool {
@@ -703,6 +692,74 @@ fn unlink_path(path: &str) -> bool {
     };
     // SAFETY: c_path 以 NUL 结尾，并在系统调用期间保持有效。
     unsafe { libc::syscall(libc::SYS_unlinkat, libc::AT_FDCWD, c_path.as_ptr(), 0) == 0 }
+}
+
+/// 删除毒化 `-shm` 后补一个空的同名文件（0 字节 = SQLite 合法初生态）。
+///
+/// 目的不是恢复内容，而是保住名字：MediaProvider 对「后端被绕过视图删除」的名称会记成
+/// 不可创建，同名 `O_CREAT` 恒 `ENOENT`（2026-11-25 真机复现：后端 `rm` 后同名创建失败、
+/// 同目录新名字成功，重启 MP 才恢复）。0 字节边车由 SQLite 首次打开时按 `-wal` 初始化，
+/// 与原先「删掉等应用重建」语义等价，但不留幽灵负节点。
+///
+/// MP 进程没有 `CAP_CHOWN`，还原属主可能失败；此时保留 MP 自建的文件本身是可接受的
+/// （本 ROM 上 MP 代写的 `Android/media` 文件正常就是 MP 属主，应用经 MP FUSE 仍可打开）。
+fn recreate_empty_sqlite_shm(path: &str, uid: u32, gid: u32, mode: u32) -> bool {
+    let Ok(c_path) = CString::new(path) else {
+        return false;
+    };
+    // SAFETY: c_path 以 NUL 结尾且在调用期间保持有效；O_EXCL 不覆盖并发创建的同名文件，
+    // O_NOFOLLOW 避免被符号链接带偏。
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            (mode & 0o777) as libc::mode_t,
+        )
+    };
+    if fd < 0 {
+        // EEXIST：应用或另一个 heal 已经补上，名字在场即达到目的。
+        return current_errno() == libc::EEXIST;
+    }
+    // SAFETY: fd 是上方 open 得到的合法描述符，本函数独占，随后只关闭一次。
+    unsafe {
+        libc::fchown(fd, uid, gid);
+        libc::fchmod(fd, (mode & 0o7777) as libc::mode_t);
+        libc::close(fd);
+    }
+    true
+}
+
+/// 缺失的 SQLite 边车（`-wal` / `-journal` / `-shm`）补一个 0 字节同名文件。
+///
+/// 0 字节对这三种边车都是合法初生态：`-wal` 是空日志、`-journal` 表示没有热日志、
+/// `-shm` 是未初始化的 wal-index。`.db` 不在其列——空库与空边车语义完全不同，绝不补。
+///
+/// 触发条件要求同级 `.db` 存在：只有「库在、边车不在」才说明这是被删掉的边车，而不是
+/// 一个尚未建库的全新目录。属主保持 MediaProvider 自建口径（0660/media_rw）；MP 视图
+/// 不做 DAC 判定，模块视图也不启用 `default_permissions`，两边都能正常打开。
+fn ensure_empty_sqlite_sidecar(backend_path: &str) -> bool {
+    let path = std::path::Path::new(backend_path);
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = ["-shm", "-wal", "-journal"]
+        .iter()
+        .find_map(|suffix| lower.strip_suffix(suffix))
+        .filter(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            stem.ends_with(".db") || stem.ends_with(".sqlite") || stem.ends_with(".sqlite3")
+        })
+    else {
+        return false;
+    };
+    // 主干必须是真实存在的库文件：只有「库在、边车不在」才是被删掉的边车。
+    let db_name = &name[..stem.len()];
+    if !path.with_file_name(db_name).is_file() {
+        return false;
+    }
+    // u32::MAX 落到 fchown 即 -1：不改属主，只落文件与权限位。
+    recreate_empty_sqlite_shm(backend_path, u32::MAX, u32::MAX, 0o660)
 }
 
 fn fd_size(fd: libc::c_int) -> libc::off_t {

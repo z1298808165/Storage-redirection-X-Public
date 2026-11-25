@@ -270,7 +270,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         heal = section(
             callbacks,
             "fn heal_poisoned_sqlite_shm_backend(",
-            "fn sqlite_sidecar_wal_path(",
+            "fn recreate_empty_sqlite_shm(",
         )
         # 视图侧删除不得在回调里直接 unlinkat（那条路径等不起停摆的连接）；f2fs 直删
         # 兜底保留，它是毒化数据消失的最终保证。

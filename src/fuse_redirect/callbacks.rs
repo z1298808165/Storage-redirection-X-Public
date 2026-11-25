@@ -47,7 +47,14 @@ use std::time::{Instant, SystemTime};
 /// 取值；本模块被 bin 经 `#[path]` 独立重编译且不包含 hook 模块，因此这里本地定义。
 const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
 
-/// 处置被毒化的自有 media sqlite `-shm` 边车：删除后返回是否已删除。
+/// 处置被毒化的自有 media sqlite `-shm` 边车：删除并重建空文件后返回是否已处置。
+///
+/// 不变量（2026-11-25 真机实证）：**`-shm` 的名字必须始终可解析**。MediaProvider 只在
+/// 自己处理 unlink 时才会让该名称失效；一旦后端文件被绕过视图删掉，MP 会把这个名字记成
+/// 「不可创建」——同名 `O_CREAT` 恒 `ENOENT`，同目录换个新名字立刻成功，只有重启 MP 才
+/// 恢复（幽灵负节点）。因此删除毒化内容之后必须立即补一个 0 字节同名文件：0 字节是
+/// SQLite 认可的合法初生态（会按同级 `-wal` 重建 wal-index），名字不消失，幽灵节点就
+/// 无从产生。补文件失败时宁可回退到旧的「只剩缺失」形态，也不能留下一个属主不明的文件。
 ///
 /// `-shm` 的合法尺寸只有 0 与 ≥32KiB 两种；落在两者之间（真机实测：支付宝内
 /// XRadiant 的 `XRadiant.db-shm` 变成 3 字节全零）即为毒化态——应用侧的 WAL 能力
@@ -69,6 +76,15 @@ const SQLITE_SHM_MIN_SIZE_BYTES: u64 = 32 * 1024;
 /// 旧检查点（跨应用共享库掉登录），随后的写入覆写 WAL 造成不可逆数据丢失。此类
 /// 毒化按 [`sqlite_shm_wal_index_stale`] 内容级判定，删除同样无损。
 fn heal_poisoned_sqlite_shm_backend(user_id: i32, rel: &str, package_name: &str) -> bool {
+    // 同一时刻只允许一个自愈在跑：两次并发 LOOKUP 可能各自走到「先删后补」，后到的
+    // 那个会把先到者刚补出的 0 字节文件再删掉，反而制造出名字缺失。串行化后，
+    // 后来者看到的已是 0 字节合法态，直接返回。`try_lock` 不阻塞 FUSE worker：
+    // 抢不到就跳过本轮，下一次 LOOKUP 自然会重试。
+    static HEAL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Ok(_heal_guard) = HEAL_GUARD.try_lock() else {
+        return false;
+    };
+
     // f2fs 真实路径直读：/data/media/<user>/<rel> 与 rel 的目录结构一一对应。
     let real_path =
         std::path::PathBuf::from(paths::data_media_user_root_for_current_ns(user_id)).join(rel);
@@ -78,6 +94,10 @@ fn heal_poisoned_sqlite_shm_backend(user_id: i32, rel: &str, package_name: &str)
     if !metadata.is_file() {
         return false;
     }
+    // 删除前先记住身份：补空文件时必须还原属主与权限位，否则应用侧会被 DAC 挡在门外
+    // （补一个 root 属主的 `-shm` 等于把毒化换成 EACCES，仍然打不开库）。
+    use std::os::unix::fs::MetadataExt as _;
+    let (owner_uid, owner_gid, owner_mode) = (metadata.uid(), metadata.gid(), metadata.mode());
     let size = metadata.len();
     if size == 0 {
         return false;
@@ -111,8 +131,28 @@ fn heal_poisoned_sqlite_shm_backend(user_id: i32, rel: &str, package_name: &str)
     }
 
     if removed_real || removed_view {
+        // 删除后立刻补 0 字节同名文件：SQLite 视其为合法初生态并按 `-wal` 重建
+        // wal-index，同时该名称在 MediaProvider 眼里始终存在，不会留下幽灵负节点。
+        let placeholder = recreate_empty_sqlite_shm(&real_path, owner_uid, owner_gid, owner_mode);
+        if !placeholder {
+            // 补位失败意味着名字已经缺失，调用方不能再按「已处置」处理：返回 false 让它
+            // 走原有失败路径（open 如实回 ENOENT），而不是伪造成功。这里升为 warn，
+            // 因为它是幽灵节点的前置条件，必须能被现场发现。
+            log::warn!(
+                "fuse sqlite shm poisoned placeholder failed real={} view_state={} size={} stale_wal_index={} owner={}:{} pkg={} rel={}",
+                removed_real,
+                view.as_str(),
+                size,
+                stale_wal_index,
+                owner_uid,
+                owner_gid,
+                package_name,
+                rel
+            );
+            return false;
+        }
         log::info!(
-            "fuse sqlite shm poisoned backend removed real={} view={} view_state={} size={} stale_wal_index={} pkg={} rel={}",
+            "fuse sqlite shm poisoned backend removed real={} view={} view_state={} size={} stale_wal_index={} placeholder=true pkg={} rel={}",
             removed_real,
             removed_view,
             view.as_str(),
@@ -146,57 +186,49 @@ fn heal_poisoned_sqlite_shm_backend(user_id: i32, rel: &str, package_name: &str)
     false
 }
 
-/// 由 `-shm` 边车路径推出同级 `-wal` 路径：后缀按小写不敏感识别，替换为小写
-/// `-wal`，库名主干保持原样。
-fn sqlite_sidecar_wal_path(shm_path: &Path) -> Option<std::path::PathBuf> {
-    let file_name = shm_path.file_name()?.to_str()?;
-    let lower = file_name.to_ascii_lowercase();
-    let stem_len = lower.len().checked_sub("-shm".len())?;
-    if stem_len == 0 || !lower.ends_with("-shm") {
-        return None;
-    }
-    let mut wal_path = shm_path.to_path_buf();
-    wal_path.set_file_name(std::ffi::OsString::from(format!(
-        "{}-wal",
-        &file_name[..stem_len]
-    )));
-    Some(wal_path)
-}
-
-/// 读取文件前 `len` 字节；文件不足 `len` 字节或不可读时返回 `None`。
-fn read_file_prefix(path: &Path, len: usize) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut file = File::open(path).ok()?;
-    let mut buf = vec![0u8; len];
-    file.read_exact(&mut buf).ok()?;
-    Some(buf)
-}
-
-/// 满尺寸 `-shm` 的内容级毒化判定：wal-index 头与同级 `-wal` 文件头 salt 失配。
+/// 删除毒化 `-shm` 后补一个空的同名文件（0 字节 = SQLite 合法初生态）。
 ///
-/// SQLite 恢复 wal-index 时按 `memcpy` 原样拷贝 `-wal` 文件头（大端字节模式）的
-/// 8 字节 salt 到 wal-index 头偏移 32..40，不做字节序转换，因此毒化判定用原始
-/// 字节比对即可。两者失配说明 wal-index 停留在旧一代 WAL 或来自分裂视图。
-/// `-shm` 头未初始化（isInit≠1）或 `-wal` 头缺失/魔数非法时 SQLite 自己会重建，
-/// 一律不判定为毒化，保持保守。
+/// 目的不是恢复内容，而是**保住名字**：MediaProvider 对「后端被绕过视图删除」的名称会
+/// 记成不可创建，同名 `O_CREAT` 恒 `ENOENT`（2026-11-25 真机 19:01 复现：后端 `rm` 后
+/// 同名创建失败、同目录新名字成功，重启 MP 才恢复）。0 字节边车由 SQLite 首次打开时
+/// 自行按 `-wal` 初始化，因此补空文件与原「删掉等应用重建」语义等价，但不触发该状态。
+///
+/// 返回是否补成功。属主或权限还原失败时把刚建出的文件删掉：宁可维持旧的「名称缺失」
+/// 形态，也不留下一个应用打不开的错误属主文件。
+fn recreate_empty_sqlite_shm(path: &Path, uid: u32, gid: u32, mode: u32) -> bool {
+    let Ok(c_path) = cstring_path(path) else {
+        return false;
+    };
+    // SAFETY: c_path 以 NUL 结尾且在调用期间保持有效；O_EXCL 保证不覆盖并发创建者刚建
+    // 出的同名文件，O_NOFOLLOW 避免被符号链接带偏。
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            (mode & 0o777) as libc::mode_t,
+        )
+    };
+    if fd < 0 {
+        // EEXIST：应用或另一个 worker 已经补上了同名文件，名字在场即达到目的。
+        return last_errno() == libc::EEXIST;
+    }
+    // SAFETY: fd 是上方 open 得到的合法描述符，本函数独占，随后只关闭一次。
+    let restored = unsafe { libc::fchown(fd, uid, gid) } == 0
+        && unsafe { libc::fchmod(fd, (mode & 0o7777) as libc::mode_t) } == 0;
+    // SAFETY: 同上，fd 由本函数创建并独占。
+    unsafe { libc::close(fd) };
+    if !restored {
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
+    true
+}
+
+/// 满尺寸 `-shm` 的内容级毒化判定（wal-index 头与同级 `-wal` 头 salt 失配）。
+///
+/// 判定细节与「两次快照、身份稳定」的复核规则见 [`crate::platform::sqlite_sidecar::wal_index_stale`]。
 fn sqlite_shm_wal_index_stale(real_shm_path: &Path) -> bool {
-    let Some(wal_path) = sqlite_sidecar_wal_path(real_shm_path) else {
-        return false;
-    };
-    let Some(shm) = read_file_prefix(real_shm_path, 48) else {
-        return false;
-    };
-    if shm[12] != 1 {
-        return false;
-    }
-    let Some(wal) = read_file_prefix(&wal_path, 32) else {
-        return false;
-    };
-    let wal_magic = u32::from_be_bytes([wal[0], wal[1], wal[2], wal[3]]);
-    if wal_magic != 0x377f_0682 && wal_magic != 0x377f_0683 {
-        return false;
-    }
-    shm[32..40] != wal[16..24]
+    crate::platform::sqlite_sidecar::wal_index_stale(real_shm_path)
 }
 
 /// backend 单次 pwrite 短写后被循环补写观测到的累计次数。
@@ -315,8 +347,9 @@ impl Filesystem for FuseRedirectFs {
         match Self::child_rel(&parent_rel, name) {
             Ok(rel) => {
                 let policy = self.policy_for_read_request(req, Some(parent), Some(&rel));
-                // 毒化 shm 在解析阶段就地处置：删除后本次 LOOKUP 自然落到 ENOENT
-                // 负缓存，应用随后的 O_CREAT 打开会重建全新 inode（自愈入口）。
+                // 毒化 shm 在解析阶段就地处置：删除毒化内容后立即补 0 字节同名文件，
+                // 因此本次 LOOKUP 能正常解析到该空边车（不再落 ENOENT 负缓存），应用
+                // 随后的 O_CREAT 打开会直接命中它并由 SQLite 初始化 wal-index。
                 if policy.should_heal_media_sqlite_shm_rel(&rel) {
                     heal_poisoned_sqlite_shm_backend(policy.user_id, &rel, &policy.package_name);
                 }
@@ -768,8 +801,9 @@ impl Filesystem for FuseRedirectFs {
             return;
         }
         // 毒化 shm 自愈兜底：内核 dcache 命中时 open 不会先走 lookup，这里补一处
-        // 同样的处置——删除后端文件并让本次 open 返回 ENOENT，应用随后的 O_CREAT
-        // 重开会重建全新 inode。只读打开不处置（不因读请求删文件）。
+        // 同样的处置。处置成功后仍让本次 open 返回 ENOENT：一来与既有行为一致，
+        // 二来强制应用重开一次，重开时命中的是刚补出的 0 字节同名文件。
+        // 只读打开不处置（不因读请求删文件）。
         if open_flags_write(flags.0)
             && policy.should_heal_media_sqlite_shm_rel(&backend.rel)
             && heal_poisoned_sqlite_shm_backend(policy.user_id, &backend.rel, &policy.package_name)
