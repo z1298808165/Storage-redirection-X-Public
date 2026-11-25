@@ -8,7 +8,7 @@
 //! 本模块把归属判据落盘，供挂载清理与恢复流程在动手之前先校验：
 //!
 //! - `mount_id`：内核分配的挂载 ID。同路径重挂会产生新的 ID，可精确区分新旧会话；
-//! - `source`：挂载源（`MountOption::FSName`）。本模块的挂载源带固定前缀；
+//! - `dev` + `mount_id`：超级块和具体挂载层的联合身份；原生化后的 `source` 不能区分系统层；
 //! - `ns_dev` / `ns_ino`：目标进程 mount namespace 的 nsfs 身份。命名空间被替换（应用重启）
 //!   时挂载会随旧命名空间一起销毁，据此可以判定"无需摘除"而不是"摘除失败"；
 //! - `target_start_time`：目标进程 starttime，避免 PID 复用后把新进程的挂载当成自己的；
@@ -23,7 +23,6 @@
 //! 里是盲的。把账本内核放进 lib/bin 共用的模块后，两条路径写的是同一份格式、同一套归属判据。
 //! 只与恢复决策有关的部分（判定结果、清理、枚举）留在 bin 侧的 `mount_identity`。
 
-use crate::fuse_redirect::config::NATIVE_FUSE_SOURCE;
 use crate::platform::module_paths;
 use crate::platform::mountinfo;
 use crate::platform::paths;
@@ -65,20 +64,78 @@ pub struct NamespaceIdentity {
 /// 一条挂载记录在挂载表中的实时状态。
 ///
 /// `root` 是挂载点在**源文件系统内的路径**。bind 挂载会原样继承底层文件系统的挂载源
-/// （真机上模块自己的 bind 源是 MediaProvider FUSE 的 `/dev/fuse`），此时 `source` 无法
-/// 用于归属判定，只能靠 `root` 里的沙箱路径区分本模块与系统挂载，因此必须一并读出。
+/// （系统存储 bind 的源也是 `/dev/fuse`），此时 `source` 无法区分归属。
+/// `root` 与用户路径共同约束系统视图识别；模块层仍以账本身份或宿主超级块确认。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveMount {
     pub mount_id: u64,
     /// 父挂载 ID：同挂载点叠放时即下面一层的挂载 ID，用于栈顶判定。
     pub parent_mount_id: u64,
-    /// 超级块设备号（`major:minor`）。同一宿主/会话的所有层共享它（bind 继承），
-    /// 系统 MediaProvider 的 FUSE 是另一个值——挂载源原生化之后，它是唯一能区分
-    /// "我们的层"与"系统的层"的内核事实。
+    /// 超级块设备号（`major:minor`）。同一宿主/会话的 bind 层共享它，
+    /// 用于区分模块宿主与系统 MediaProvider 会话；具体挂载层仍需核对挂载 ID。
     pub dev: String,
     pub source: String,
     pub fs_type: String,
     pub root: String,
+}
+
+/// 从 init 命名空间读取指定用户的系统共享存储根；模块会话不能作为系统身份凭据。
+pub fn system_storage_view_anchor(user_id: i32) -> Option<LiveMount> {
+    let anchor = topmost_live_mount(1, &format!("/mnt/user/{user_id}/emulated"))?;
+    if anchor.root != "/"
+        || anchor.fs_type != "fuse"
+        || anchor.source != "/dev/fuse"
+        || anchor.dev.is_empty()
+        || crate::fuse_host::current_host_dev().as_deref() == Some(anchor.dev.as_str())
+    {
+        return None;
+    }
+    Some(anchor)
+}
+
+/// 只认可同用户、同超级块、同树内根的系统视图；路径形态或源名称相同不足以授权恢复。
+pub fn is_system_storage_view(
+    target: &str,
+    live: &LiveMount,
+    user_id: i32,
+    anchor: Option<&LiveMount>,
+) -> bool {
+    let Some(anchor) = anchor else {
+        return false;
+    };
+    if live.dev != anchor.dev
+        || live.dev.is_empty()
+        || live.fs_type != "fuse"
+        || live.source != "/dev/fuse"
+        || anchor.root != "/"
+        || anchor.fs_type != "fuse"
+        || anchor.source != "/dev/fuse"
+    {
+        return false;
+    }
+    let target = paths::normalize_syntax(target);
+    let user_suffix = format!("/{user_id}");
+    paths::storage_alias_roots_for_user(user_id)
+        .into_iter()
+        .filter(|root| !root.starts_with("/data/media/"))
+        .any(|root| {
+            if let Some(lifted) = root.strip_suffix(&user_suffix)
+                && lifted.ends_with("/emulated")
+                && target == lifted
+            {
+                return live.root == "/";
+            }
+            let suffix = if target == root {
+                ""
+            } else if let Some(suffix) = target.strip_prefix(root.as_str())
+                && suffix.starts_with('/')
+            {
+                suffix
+            } else {
+                return false;
+            };
+            live.root == format!("/{user_id}{suffix}")
+        })
 }
 
 /// 落盘的挂载身份。
@@ -166,7 +223,7 @@ pub fn namespace_identity(pid: i32) -> Option<NamespaceIdentity> {
     })
 }
 
-/// 读取指定命名空间内挂载点上的全部挂载记录，保持 mountinfo 原始文件序。
+/// 读取可达父树下指定挂载点的全部叠层，保持 mountinfo 原始文件序。
 ///
 /// 直接读 `/proc/<pid>/mountinfo` 即可获得目标命名空间的视图，不需要切换调用方自身的
 /// 命名空间，也不会修改任何目录元数据。`pid <= 0` 表示读取调用方自身所在的命名空间，
@@ -176,23 +233,40 @@ pub fn namespace_identity(pid: i32) -> Option<NamespaceIdentity> {
 /// 形态）与既有 /proc/mounts 约定都依赖「后挂的层在文件里靠后」；按挂载 ID 排序会
 /// 破坏该约定（detached tree 搬运的层 ID 与挂载顺序倒挂，真机 2026-10-15）。
 pub fn live_mounts_at(pid: i32, mount_point: &str) -> Vec<LiveMount> {
+    try_live_mounts_at(pid, mount_point).unwrap_or_default()
+}
+
+/// 保留观测错误；摘除和替换不能把读表失败当成目标没有挂载。
+pub fn try_live_mounts_at(pid: i32, mount_point: &str) -> std::io::Result<Vec<LiveMount>> {
     let path = if pid > 0 {
         format!("/proc/{pid}/mountinfo")
     } else {
         "/proc/self/mountinfo".to_string()
     };
-    let Ok(content) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
+    let content = fs::read_to_string(path)?;
     // 语法层匹配：保留存储别名，不把 /data/media 折叠成 /storage/emulated，
     // 且大小写敏感。否则不同挂载别名会被归一化到同一字符串，使缺失的主入口
     // 误匹配到后端的 /data/media 挂载。见模块级文档中的场景 29 说明。
     let normalized = paths::normalize_syntax(mount_point);
-    content
+    let entries = content
         .lines()
-        .filter_map(|line| {
-            let entry = mountinfo::parse_entry(line)?;
+        .filter_map(mountinfo::parse_entry)
+        .collect::<Vec<_>>();
+    let parent = (normalized != "/")
+        .then(|| normalized.rsplit_once('/'))
+        .flatten()
+        .and_then(|(parent, _)| {
+            mountinfo::visible_mount_at(&entries, if parent.is_empty() { "/" } else { parent })
+        });
+    Ok(entries
+        .iter()
+        .filter_map(|entry| {
             if paths::normalize_syntax(&mountinfo::unescape_field(entry.target)) != normalized {
+                return None;
+            }
+            if parent.is_some_and(|parent| {
+                !mountinfo::mount_is_descendant(&entries, entry.mount_id, parent.mount_id)
+            }) {
                 return None;
             }
             Some(LiveMount {
@@ -204,7 +278,7 @@ pub fn live_mounts_at(pid: i32, mount_point: &str) -> Vec<LiveMount> {
                 root: mountinfo::unescape_field(entry.root),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// 挂载点上最顶层的一条记录（按父挂载链判定叠放顺序）。
@@ -213,58 +287,41 @@ pub fn live_mounts_at(pid: i32, mount_point: &str) -> Vec<LiveMount> {
 /// 选取会把栈底层（如屏障 tmpfs）当成栈顶。叠层顺序只能按 `parent_mount_id`
 /// 父链判定，详见 [`mountinfo::topmost_by_stack`]。
 pub fn topmost_live_mount(pid: i32, mount_point: &str) -> Option<LiveMount> {
-    let mounts = live_mounts_at(pid, mount_point);
-    mountinfo::topmost_by_stack(
+    try_topmost_live_mount(pid, mount_point).ok().flatten()
+}
+
+/// 保留读表失败与成功读取后无挂载的区别，供恢复和清理授权使用。
+pub fn try_topmost_live_mount(pid: i32, mount_point: &str) -> std::io::Result<Option<LiveMount>> {
+    let mounts = try_live_mounts_at(pid, mount_point)?;
+    Ok(mountinfo::topmost_by_stack(
         &mounts,
         |mount: &LiveMount| mount.mount_id,
         |mount: &LiveMount| mount.parent_mount_id,
     )
-    .cloned()
+    .cloned())
 }
 
-/// 收集本模块已知的 FUSE 超级块设备号（账本里登记过的 + 持久历史 + 当前宿主会话）。
+/// 收集当前宿主与同次开机内历代宿主的 FUSE 超级块设备号。
 ///
-/// 挂载源原生化之后，挂载表里不再有任何模块标识，"这一层是不是我们的"只能靠超级块身份。
-/// 判断依据是**我们自己登记过的东西**：每一个成功挂载轮次都会把 `dev` 写进账本
-/// （见 [`MountIdentity::dev`]），主机宿主会话的 `dev` 则在快照里。系统 MediaProvider 的
-/// FUSE 超级块不在其中，因此这个集合天然把"我们的层"和"系统的层"分开。
-///
-/// 也包含**已失效会话**的 dev：应用进程还活着、宿主换代时，旧层仍在它的命名空间里，
-/// 清理流程必须先能认出它才能摘掉（认不出就会一直 ENOTCONN）。
-///
-/// 因此除了活账本，还要并上 [`remember_module_fuse_devs`] 落盘的持久历史：账本是按
-/// 命名空间覆盖写的，宿主换代后同一批 pid 的新一轮挂载会用**新 dev** 重写账本，
-/// 旧 dev 只剩挂载表里的那一层还带着——只读账本必然认不出它（2026-11-02 真机：
-/// 宿主换代后每轮都 `unmount skipped foreign ... dev=<旧会话> ledger_devs=0`
-/// → `cleanup incomplete` → 死层永远叠在栈底）。
+/// 只由宿主发布记录身份；普通挂载账本也包含系统 FUSE 的私有目录 bind，不能据此推导
+/// 整个超级块的归属。历史跨宿主换代保留，跨开机失效，避免设备号复用后误摘系统层。
 pub fn known_module_fuse_devs() -> std::collections::HashSet<String> {
     let mut devs = std::collections::HashSet::new();
-    if let Ok(entries) = fs::read_dir(ledger_dir()) {
-        for entry in entries.flatten() {
-            let Ok(content) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            // 复用 decode 而不是再写一遍文本解析：账本格式只在一处定义，两处各写一份
-            // 必然在字段顺序调整时漂移。schema 不匹配（旧版本账本）直接跳过。
-            let Some(ledger) = decode(&content) else {
-                continue;
-            };
-            for mount in ledger.mounts {
-                // 只收 FUSE 超级块：`alias bind` 这类层继承的是后端真实文件系统（`/data`
-                // 的 f2fs）超级块，收进来会让同盘的任何系统 bind 挂载都被判成本模块所有。
-                if !mount.dev.is_empty() && mount.source == NATIVE_FUSE_SOURCE {
-                    devs.insert(mount.dev);
-                }
-            }
-        }
+    if let (Ok(content), Ok(boot_id)) = (
+        fs::read_to_string(known_devs_path()),
+        fs::read_to_string("/proc/sys/kernel/random/boot_id"),
+    ) {
+        devs.extend(known_devs_for_boot(&content, &boot_id));
     }
-    if let Ok(content) = fs::read_to_string(known_devs_path()) {
-        for line in content.lines() {
-            let dev = line.trim();
-            if !dev.is_empty() {
-                devs.insert(dev.to_string());
+    // 历史连接彻底释放后设备号可在同次开机复用，不能认领 init 中现存的系统 FUSE。
+    if let Ok(content) = fs::read_to_string("/proc/1/mountinfo") {
+        for entry in content.lines().filter_map(mountinfo::parse_entry) {
+            if entry.fs_type == "fuse" && entry.source == "/dev/fuse" {
+                devs.remove(entry.dev);
             }
         }
+    } else {
+        devs.clear();
     }
     if let Some(dev) = crate::fuse_host::current_host_dev() {
         devs.insert(dev);
@@ -274,19 +331,15 @@ pub fn known_module_fuse_devs() -> std::collections::HashSet<String> {
 
 /// 持久记录"这一代会话的超级块属于本模块"，跨进程/跨宿主换代保留。
 ///
-/// 只写 `major:minor` 文本，不含任何路径或进程信息；同一 dev 幂等，超出
+/// 写入启动身份与 `major:minor`，不含路径或进程信息；同一 dev 幂等，超出
 /// [`KNOWN_DEVS_LIMIT`] 时按先进先出淘汰最老的记录——保护的是"刚换代、旧层还挂在
 /// 活着的应用命名空间里"这个窗口，不需要无限历史。
 pub fn remember_module_fuse_devs<'a>(devs: impl IntoIterator<Item = &'a str>) {
+    let Ok(boot_id) = fs::read_to_string("/proc/sys/kernel/random/boot_id") else {
+        return;
+    };
     let mut lines: Vec<String> = fs::read_to_string(known_devs_path())
-        .map(|content| {
-            content
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
+        .map(|content| known_devs_for_boot(&content, &boot_id))
         .unwrap_or_default();
     let mut changed = false;
     for dev in devs {
@@ -307,7 +360,7 @@ pub fn remember_module_fuse_devs<'a>(devs: impl IntoIterator<Item = &'a str>) {
         return;
     }
     let path = known_devs_path();
-    let mut content = lines.join("\n");
+    let mut content = format!("boot_id={}\n{}", boot_id.trim(), lines.join("\n"));
     content.push('\n');
     let temp = format!("{}.tmp", path.display());
     if fs::write(&temp, content.as_bytes()).is_ok() && fs::rename(&temp, &path).is_err() {
@@ -315,7 +368,22 @@ pub fn remember_module_fuse_devs<'a>(devs: impl IntoIterator<Item = &'a str>) {
     }
 }
 
-/// 持久 dev 历史文件路径（与账本目录同级，避免被 [`known_module_fuse_devs`] 当账本解析）。
+// 超级块设备号会跨开机复用；无启动身份的旧历史不能授权摘挂载。
+fn known_devs_for_boot(content: &str, boot_id: &str) -> Vec<String> {
+    let mut lines = content.lines();
+    if boot_id.trim().is_empty()
+        || lines.next() != Some(format!("boot_id={}", boot_id.trim()).as_str())
+    {
+        return Vec::new();
+    }
+    lines
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 同次开机内的宿主设备号历史，与逐进程身份账本分开存储。
 fn known_devs_path() -> PathBuf {
     PathBuf::from(module_paths::MOUNT_STATE_DIR).join("known_devs")
 }
@@ -442,9 +510,7 @@ pub fn remove(package_name: &str, pid: i32) -> bool {
 
 /// 原子写入账本。
 ///
-/// 与挂载状态文件采用同一套写入纪律：先写临时文件并 `fsync`，再 `rename` 覆盖。
-/// 这样崩溃或断电只会留下临时文件，正式账本始终是上一轮的完整内容，不会因为读到半截
-/// 文件而丢失归属判据。
+/// 先写临时文件，再 `rename` 覆盖，避免并发读取看到半截内容；不保证断电持久性。
 pub fn save(ledger: &MountLedger) -> bool {
     let dir = ledger_dir();
     if fs::create_dir_all(&dir).is_err() {
@@ -463,19 +529,6 @@ pub fn save(ledger: &MountLedger) -> bool {
         log::warn!("mount identity rename failed path={}", path);
         return false;
     }
-    // 账本会被同名命名空间的下一轮挂载整体覆盖，落盘的同时把这批 dev 写进持久历史，
-    // 宿主换代后旧层才还能被认成本模块的。
-    // 只登记**FUSE 超级块**的 dev：私有目录 alias bind 之类的层继承的是后端真实文件系统
-    // 的超级块（`/data` 的 f2fs），把它当"本模块的层"会让任何同盘 bind 挂载（系统自己的
-    // `/data/media` 视图等）都被判成本模块所有，从而被误摘。挂载源原生化之后，我们的层
-    // 一律是 `/dev/fuse`，这一条就是"只认自己的超级块"的最窄判据。
-    remember_module_fuse_devs(
-        ledger
-            .mounts
-            .iter()
-            .filter(|mount| mount.source == NATIVE_FUSE_SOURCE)
-            .map(|mount| mount.dev.as_str()),
-    );
     true
 }
 
@@ -497,21 +550,11 @@ pub fn capture_explicit_mount_identity(pid: i32, mount_point: &str) -> Option<Mo
     })
 }
 
-/// 按本次挂载的目标集合登记账本。
+/// 在已完成挂载的目标命名空间内登记栈顶身份，并补入当前宿主已接入的存储别名。
 ///
-/// 两条挂载路径共用同一套登记纪律，避免"哪条路径挂了账本"成为口径差异：
-///
-/// - 必须在挂载真正生效之后调用，且调用方已经处于目标命名空间（`pid` 传 0 读自身）；
-/// - 读不到任何归属明确的挂载时**不写旧记录**，只保留进程与命名空间身份：宁可让账本暂时
-///   没有挂载明细（后续摘除只受挂载源约束），也不要留下与实际挂载不匹配的 `mount_id`——
-///   那会让下一轮恢复把本模块自己的挂载误判成"已被新会话接管"而拒绝清理。
-///
-/// `log_tag` 标识调用方（`daemon` / `companion`），保留在日志里便于区分是哪条路径写的。
-///
-/// 不返回结果：账本落盘失败**不影响本次挂载已生效的事实**，调用方也不得据此改变挂载结论；
-/// 但失败会让后续恢复与 `doctor` 退化成「按挂载源判定」的弱归属，所以必须留痕。告警收敛
-/// 在本函数内（带 `path` 标签），两条挂载路径不可能再各自漏掉一份——此前 `daemon` 侧丢弃
-/// 返回值静默失败、`companion` 侧另写一条告警，同一件事两种口径。
+/// `target_pid` 提供进程实例与用户身份，挂载事实始终从调用方自身命名空间读取。
+/// 没有读到挂载时清空旧明细，不能沿用过期身份；落盘失败记录带 `log_tag` 的告警，
+/// 不改变已生效挂载，但后续健康检查不能将缺失账本视为当前状态。
 pub fn record_mount_identity(
     log_tag: &str,
     package_name: &str,
@@ -528,8 +571,25 @@ pub fn record_mount_identity(
     };
     let target_start_time =
         crate::platform::process_start_time_ticks(target_pid).unwrap_or_default();
+    let mut identity_targets = targets.to_vec();
+    if let Some(uid) = crate::platform::proc_identity::read_proc_uid(target_pid)
+        && let Some(dev) = crate::fuse_host::current_host_dev()
+    {
+        let user_id = crate::platform::user_id_from_uid(uid);
+        for target in targets {
+            if topmost_live_mount(0, target).is_some_and(|live| live.dev == dev) {
+                identity_targets.extend(
+                    crate::fuse_host::host_storage_alias_roots(target, user_id)
+                        .into_iter()
+                        .filter(|alias| {
+                            topmost_live_mount(0, alias).is_some_and(|live| live.dev == dev)
+                        }),
+                );
+            }
+        }
+    }
     let mut mounts = Vec::new();
-    for target in module_paths::normalize_mount_targets(targets) {
+    for target in module_paths::normalize_mount_targets(&identity_targets) {
         // 显式目标是调用方本次挂载创建（或确认沿用）的路径，直接按 topmost 事实登记，
         // 不走归属谓词（见 capture_explicit_mount_identity 的文档）。
         if let Some(identity) = capture_explicit_mount_identity(0, &target) {

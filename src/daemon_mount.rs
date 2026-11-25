@@ -130,6 +130,7 @@ pub fn has_healthy_mount_state(request: &MountRequest) -> bool {
         MountStateCheck::StateMissing
             | MountStateCheck::FuseChildDead
             | MountStateCheck::TargetsMissing
+            | MountStateCheck::OwnershipChanged
             | MountStateCheck::BackendUnresponsive
     )
 }
@@ -211,6 +212,8 @@ enum MountStateCheck {
     FuseChildDead,
     /// 状态记录的挂载目标已不在应用 namespace。
     TargetsMissing,
+    /// 进程、命名空间或已登记入口的栈顶身份发生变化。
+    OwnershipChanged,
     /// 后端挂载点探测为断连。
     BackendUnresponsive,
     /// 状态健康但记录的配置指纹与当前不一致。
@@ -292,6 +295,12 @@ fn has_mount_state_internal(request: &MountRequest, check_mount_targets: bool) -
     if check_mount_targets {
         if !targets.is_empty() && !mount_targets_present(request.pid, &targets, request) {
             return MountStateCheck::TargetsMissing;
+        }
+        if !targets.is_empty()
+            && !mount_identity::load(&request.package_name, request.pid)
+                .is_some_and(|ledger| mount_identity::recorded_mounts_current(&ledger))
+        {
+            return MountStateCheck::OwnershipChanged;
         }
         if !backend_mount_targets_responsive(request) {
             return MountStateCheck::BackendUnresponsive;
@@ -435,21 +444,110 @@ pub fn supervise_mount_request(
     let poisoned = ledger.is_poisoned();
     let mut actions = Vec::new();
     let mut worst_health = EndpointHealth::Healthy;
+    let user_id = crate::platform::user_id_from_uid(request.uid);
+    let system_view = mount_identity::system_storage_view_anchor(user_id);
+    let host_dev = crate::fuse_host::current_host_dev();
 
     for mount in &ledger.mounts {
-        let live = mount_identity::topmost_live_mount(request.pid, &mount.mount_point);
+        let visible = match mount_identity::try_visible_mount_at(request.pid, &mount.mount_point) {
+            Ok(visible) => visible,
+            Err(error) => {
+                log::warn!(
+                    "daemon mount observation failed pid={} target={} err={}",
+                    request.pid,
+                    mount.mount_point,
+                    error
+                );
+                actions.push(RecoveryAction::SkipSuperseded);
+                continue;
+            }
+        };
+        let visible_is_target = visible.as_ref().is_some_and(|(point, _)| {
+            paths::normalize_syntax(point) == paths::normalize_syntax(&mount.mount_point)
+        });
+        let system_replacement = visible.as_ref().is_some_and(|(_, live)| {
+            mount_identity::is_system_storage_view(
+                &mount.mount_point,
+                live,
+                user_id,
+                system_view.as_ref(),
+            )
+        });
+        // 部分接入失败时账本可能仍指向旧层；已验证的当前宿主根允许下一轮继续收敛。
+        let host_replacement = visible_is_target
+            && visible.as_ref().is_some_and(|(point, live)| {
+                host_dev.as_deref() == Some(live.dev.as_str())
+                    && live.fs_type == "fuse"
+                    && live.source == "/dev/fuse"
+                    && live.root == "/"
+                    && crate::fuse_host::host_storage_alias_roots("/storage/emulated", user_id)
+                        .contains(point)
+            });
+        // 缺失目标会露出 init 或当前 SRX 宿主的原父挂载；其它祖先仍按未知接管阻止重注入。
+        let inherited_backing = !visible_is_target
+            && !system_replacement
+            && visible.as_ref().is_some_and(|(point, live)| {
+                let target = paths::normalize_syntax(&mount.mount_point);
+                let suffix = target
+                    .strip_prefix(point)
+                    .unwrap_or("")
+                    .trim_start_matches('/');
+                mount_identity::topmost_live_mount(1, point).is_some_and(|init| {
+                    // Android 为每个用户 bind 同一 tmpfs 的 /user/<id> 到 /storage。
+                    let backing_root = if point == "/storage"
+                        && init.fs_type == "tmpfs"
+                        && suffix.split('/').next() == Some("emulated")
+                        && init
+                            .root
+                            .strip_prefix("/user/")
+                            .is_some_and(|id| id.parse::<u32>().is_ok())
+                    {
+                        format!("/user/{user_id}")
+                    } else {
+                        init.root
+                    };
+                    // live.root 已换算到目标路径，父挂载也要补上同一后缀再比较。
+                    let init_root = if suffix.is_empty() {
+                        backing_root
+                    } else {
+                        format!("{}/{suffix}", backing_root.trim_end_matches('/'))
+                    };
+                    live.dev == init.dev
+                        && live.fs_type == init.fs_type
+                        && live.source == init.source
+                        && live.root == init_root
+                }) || (host_dev.as_deref() == Some(live.dev.as_str())
+                    && live.fs_type == "fuse"
+                    && live.source == "/dev/fuse"
+                    && live.root == format!("/{suffix}"))
+            });
+        let verdict_live = visible
+            .as_ref()
+            .map(|(_, live)| live)
+            .filter(|_| !inherited_backing);
         let verdict = mount_identity::classify_mount(
             &ledger,
             &mount.mount_point,
-            live.as_ref(),
+            verdict_live,
             current_namespace,
             target_is_current,
         );
-        let health = fuse_supervisor::probe_endpoint(request.pid, &mount.mount_point);
+        // 归属已变时只按身份决策，避免访问其它服务的端点而阻塞监督循环。
+        let health = if matches!(
+            verdict,
+            MountVerdict::Superseded(_) | MountVerdict::StaleNamespace
+        ) {
+            EndpointHealth::Unprobed(0)
+        } else {
+            fuse_supervisor::probe_endpoint(request.pid, &mount.mount_point)
+        };
         if health.is_dead_connection() {
             worst_health = health;
         }
-        actions.push(fuse_supervisor::plan_recovery(&verdict, health, poisoned));
+        let known_storage_view = matches!(&verdict, MountVerdict::Superseded(_))
+            && (system_replacement || host_replacement);
+        let action = fuse_supervisor::plan_recovery(&verdict, health, poisoned, known_storage_view);
+        actions.push(action);
     }
 
     if actions.is_empty() {
@@ -480,6 +578,7 @@ pub fn supervise_mount_request(
             &verdict,
             EndpointHealth::Missing,
             poisoned,
+            false,
         ));
     }
 
@@ -740,6 +839,9 @@ pub fn execute_mount_request(request: &MountRequest) -> bool {
     );
     if is_success {
         remember_successful_mount(request);
+        if request.operation == MountOperation::Reload {
+            maybe_probe_passthrough(request);
+        }
     }
     let total_ms = monotonic_ms().saturating_sub(started_ms);
     if total_ms >= DAEMON_MOUNT_SLOW_MS || !is_success {
@@ -961,11 +1063,13 @@ fn handle_child_process(request: &MountRequest, plan: &MountForkPlan, sock: c_in
                 request.pid,
                 request.package_name
             );
-            let _ = send_mount_result(sock, -1);
-            // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
-            unsafe { close(sock) };
-            return false;
         }
+    }
+    if request.operation == MountOperation::Reload && !cleanup.is_cleared() {
+        let _ = send_mount_result(sock, -1);
+        // SAFETY: sock 来自本进程已连接的 socketpair，且此处是唯一关闭路径。
+        unsafe { close(sock) };
+        return false;
     }
     clear_previous_allowed_real_backend_mounts(request);
 
@@ -1327,8 +1431,11 @@ fn preattach_shared_host(
     // 叠层，但仍要按宿主挂载记账——否则状态文件里没有这条目标，下一轮清理会漏摘，
     // 挂载层没有任何归属判据。判据必须是「当前会话」：旧代际的层已经失效，仍需重新挂。
     let view = crate::fuse_host::HostSessionView::from(host.as_ref());
-    if crate::fuse_session::storage_view_top_dev(&attach_root).as_deref() == Some(view.dev.as_str())
-    {
+    if crate::fuse_host::host_storage_aliases_current(
+        &attach_root,
+        crate::platform::user_id_from_uid(request.uid),
+        &view.dev,
+    ) {
         log::info!(
             "daemon shared host preattach skipped, current host layer already serving pid={} pkg={} target={}",
             request.pid,
@@ -1489,7 +1596,6 @@ fn try_bind_to_fuse_host(
     // move_mount 完成即传播已发生：事件通知宿主摘除 /data/media/0 副本（挂载表
     // 卫生；数据面已由 f2fs 直连锚点解耦）。fire-and-forget，不阻塞接入。
     crate::fuse_host_control::notify_host_unpropagate();
-    maybe_probe_passthrough(request, attached.host_pid, mount_root);
     Some(FuseMountState {
         target: attached.target,
         child: 0,
@@ -1498,33 +1604,10 @@ fn try_bind_to_fuse_host(
     })
 }
 
-/// 探针文件名（视图根与后端根同名对射）。
-const PASSTHROUGH_PROBE_REL: &str = ".srx_passthrough_probe";
-
-/// 共享宿主挂载后的端到端 passthrough 探针。
-///
-/// 背景：部分 OEM 内核（实测 ColorOS）的 FUSE passthrough backing 实现有缺陷，
-/// 应用 open 返回 EIO，而失败发生在内核处理 open 回包的阶段——宿主对它完全
-/// 不可见，没有任何日志痕迹。因此无法被动发现，只能在挂载后主动踩一次：
-///
-/// 1. daemon 在后端根写入探针文件（重定向应用=沙盒根，未配置应用=真实存储根）；
-/// 2. 探针线程 `setfsuid(应用 uid)` 后经 `/proc/<应用 pid>/root/...` 打开视图内
-///    的探针文件——该 open 穿过应用命名空间里的 FUSE 挂载，以应用自己的 uid 和
-///    策略走完整条内核路径（包括 passthrough 绑定），与应用真实行为完全同构；
-/// 3. open/read 得 EIO → 判定内核缺陷：持久化设备级状态并终止宿主，由 reconcile
-///    重建成 passthrough 关闭的新宿主（宿主换代是既有恢复通路，应用短暂重挂）；
-///    成功 → 记 ok，本 boot 后续宿主直接开启；其它 errno（EACCES/ENOENT，
-///    多为 SELinux 或文件可见性时序）→ 不判定，保持开启并留痕。
-///
-/// **探针必须以 root（不 setfsuid）执行**：视图 attr 按 FUSE 请求 uid 动态改写，
-/// 且内核按 inode 缓存 DAC 判定结果——setfsuid(应用 uid) 的 open 会被其它 uid
-/// 视角缓存的 attr 卡成 EACCES（真机实测），既测不出 ok 也测不出 EIO。root 凭
-/// CAP_DAC_OVERRIDE 绕过 DAC 与缓存语义；而 passthrough backing 绑定发生在内核
-/// FUSE open 路径，与调用者 uid 无关，root 探测对内核缺陷完全等效。
-///
-/// 状态绑定 boot_id：每次重启重新探测，内核 OTA 修复后设备自动恢复开启。
-/// 探测在独立线程执行，绝不阻塞 daemon 挂载主循环（FUSE open 理论上可能阻塞）。
-fn maybe_probe_passthrough(request: &MountRequest, host_pid: i32, mount_root: &str) {
+/// 以 root 在宿主原挂载上只读探测内核 open 回包，不在公共视图创建、覆盖或删除文件。
+/// 系统标记不可用时保持 unknown；只有确认宿主 inode 后的 open/read EIO 才触发降级。
+fn maybe_probe_passthrough(request: &MountRequest) {
+    static PROBING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // 逃生口存在时不探测（用户已显式关闭，无降级意义）。
     if crate::config::is_fuse_passthrough_disabled() {
         return;
@@ -1536,110 +1619,80 @@ fn maybe_probe_passthrough(request: &MountRequest, host_pid: i32, mount_root: &s
     if request.pid <= 0 || request.uid < 10_000 {
         return;
     }
-    // 探针后端根：重定向应用=沙盒根（视图根直接对射），未配置应用=真实存储根。
-    let backend_root = if request.redirect_target.starts_with("/data/media/") {
-        request.redirect_target.trim_end_matches('/').to_string()
-    } else {
-        "/data/media/0".to_string()
+    let Some(host) = crate::fuse_host::get_fuse_host() else {
+        return;
     };
+    if PROBING.swap(true, Ordering::Relaxed) {
+        return;
+    }
     let app_pid = request.pid;
     let app_uid = request.uid;
-    let mount_root = mount_root.to_string();
+    let user_id = crate::platform::user_id_from_uid(app_uid);
+    let host_pid = host.child_pid;
+    let host_start = host.child_start_time_ticks;
+    let host_dev = host.dev.clone();
+    let probe_view = format!(
+        "/proc/{host_pid}/root{}/{user_id}/Android/data/.nomedia",
+        host.mount_point
+    );
     let package_name = request.package_name.clone();
     let spawn_result = std::thread::Builder::new()
         .name("srx-pt-probe".into())
         .spawn(move || {
-            run_passthrough_probe(
-                app_pid,
-                app_uid,
-                host_pid,
-                &mount_root,
-                &backend_root,
-                &package_name,
-            );
+            match read_passthrough_probe(&probe_view, &host_dev) {
+                Ok(ok) => {
+                    crate::config::write_fuse_passthrough_probe_state(ok);
+                    if ok {
+                        log::info!(
+                            "passthrough probe ok pkg={package_name} uid={app_uid} pid={app_pid}"
+                        );
+                    } else {
+                        log::warn!("passthrough probe EIO pkg={package_name} host={host_pid}");
+                        crate::fuse_terminate::terminate_fuse_process(host_pid, Some(host_start));
+                    }
+                }
+                Err(error) => {
+                    log::warn!("passthrough probe inconclusive path={probe_view} err={error}");
+                }
+            }
+            PROBING.store(false, Ordering::Relaxed);
         });
     if let Err(error) = spawn_result {
+        PROBING.store(false, Ordering::Relaxed);
         log::warn!("passthrough probe spawn failed err={}", error);
     }
 }
 
-fn run_passthrough_probe(
-    app_pid: i32,
-    app_uid: i32,
-    host_pid: i32,
-    mount_root: &str,
-    backend_root: &str,
-    package_name: &str,
-) {
-    use std::io::Read;
+fn read_passthrough_probe(path: &str, host_dev: &str) -> std::io::Result<bool> {
+    use std::io::Error;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-    let probe_backend = format!(
-        "{}/{}",
-        backend_root.trim_end_matches('/'),
-        PASSTHROUGH_PROBE_REL
-    );
-    // 历史残留自愈：上次探测若在删除前被中断（进程被杀、系统重启），探针文件
-    // 会遗留在存储根。先清一次旧残留再写入本次探针，保证异常路径不累积垃圾。
-    let _ = std::fs::remove_file(&probe_backend);
-    if let Err(error) = std::fs::write(&probe_backend, b"srx1") {
-        log::warn!(
-            "passthrough probe file create failed pkg={} path={} err={}",
-            package_name,
-            probe_backend,
-            error
-        );
-        return;
+    let inode = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = inode.metadata()?;
+    let dev = metadata.dev();
+    if !metadata.is_file() || format!("{}:{}", libc::major(dev), libc::minor(dev)) != host_dev {
+        return Err(Error::from_raw_os_error(libc::EXDEV));
     }
-    // 探针文件落盘后立即可经 FUSE 视图 open（按路径解析，不依赖 readdir 缓存）。
-    // 经应用命名空间（/proc/<pid>/root）解析视图根，保证 FUSE 挂载栈顶就是本模块
-    // 会话；open 以 root 执行（见函数级注释：setfsuid 方案被内核 DAC 缓存证伪）。
-    let probe_view = format!(
-        "/proc/{}/root{}/{}",
-        app_pid,
-        mount_root.trim_end_matches('/'),
-        PASSTHROUGH_PROBE_REL
-    );
-    let open_result = std::fs::File::open(&probe_view).and_then(|mut file| {
-        let mut buffer = [0u8; 4];
-        file.read_exact(&mut buffer)
-    });
-    let _ = std::fs::remove_file(&probe_backend);
-    match open_result {
-        Ok(()) => {
-            crate::config::write_fuse_passthrough_probe_state(true);
-            log::info!(
-                "passthrough probe ok pkg={} uid={} pid={}",
-                package_name,
-                app_uid,
-                app_pid
-            );
-        }
-        Err(error) if error.raw_os_error() == Some(libc::EIO) => {
-            crate::config::write_fuse_passthrough_probe_state(false);
-            log::warn!(
-                "passthrough probe EIO pkg={} uid={} pid={} host={} — kernel passthrough broken, demoting device and rebuilding host",
-                package_name,
-                app_uid,
-                app_pid,
-                host_pid
-            );
-            // 重建宿主：新会话 init 读到 broken 即关闭 passthrough。宿主换代与
-            // 应用重挂走既有的 health-check/invalidate 恢复通路。
-            crate::fuse_terminate::terminate_fuse_process(host_pid, None);
-        }
-        Err(error) => {
-            // 探针自身不可执行（SELinux/时序）：不判定，保持开启（与旧行为一致）。
-            log::warn!(
-                "passthrough probe inconclusive pkg={} uid={} pid={} path={} err={}",
-                package_name,
-                app_uid,
-                app_pid,
-                probe_view,
-                error
-            );
-        }
+    // 按已核对的 inode 重开；路径替换或卸载不能把其它文件系统的结果算作本宿主的判定。
+    let pinned = format!("/proc/self/fd/{}", inode.as_raw_fd());
+    probe_verified_inode(std::fs::File::open(pinned))
+}
+
+fn probe_verified_inode(reopened: std::io::Result<impl std::io::Read>) -> std::io::Result<bool> {
+    match reopened.and_then(|mut file| file.read(&mut [0])) {
+        Ok(_) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(false),
+        Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/native-unit/passthrough_probe.rs"]
+mod passthrough_probe_tests;
 
 fn set_mount_namespace(ns_path: Option<&CStr>) -> bool {
     // 路径在 fork 之前就已经转换好，这里只做 open/setns，避免子进程再次堆分配。
@@ -1711,16 +1764,18 @@ impl ClearOutcome {
 /// MediaProvider 的 FUSE）或本模块的新会话接管。这里先按账本校验归属再摘除，只有确认
 /// 目标上没有本模块的挂载层时才返回 [`ClearOutcome::Cleared`]。
 ///
-/// 状态文件删除失败只记告警、不影响结论：挂载层已经确认清除，残留的状态文件只会让下一轮
-/// 多做一次已幂等的归属校验，不会造成叠加。
+/// 状态文件删除失败仍返回未确认，保留账本供下一轮校验，不能继续注入。
 fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearOutcome {
     let state_path = plan.state_path.as_str();
     let fuse_children = read_fuse_children(state_path);
     let mut targets = read_mount_targets(state_path);
     // 短路场景可能没有 state 文件，但历史版本已经写过 mount_identity；
     // 仅依赖 state 会让这些挂载层永久漏清理，之后每轮 supervise 都可能继续叠挂。
-    // 先把账本登记的目标加入候选，实际摘除仍由 mount_id/source 归属校验保护。
-    let ledger = mount_identity::load(&request.package_name, request.pid);
+    // 先把账本登记的目标加入候选，实际摘除仍由 mount_id/dev 归属校验保护。
+    let ledger = mount_identity::load(&request.package_name, request.pid).filter(|ledger| {
+        ledger.target_is_current()
+            && mount_identity::namespace_identity(0) == Some(ledger.namespace)
+    });
     if let Some(ledger) = ledger.as_ref() {
         targets.extend(ledger.mounts.iter().map(|mount| mount.mount_point.clone()));
     }
@@ -1743,8 +1798,11 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
         // 残留都可能在目标上留下本模块的层，而这些层没有记录，后续清理不会再被
         // 加入候选。这里按模块挂载来源做一次兜底识别与摘除，只处理判定为本应用
         // 重定向的层；仍有无法摘除的层时保守返回 Unverified，不进入挂载。
-        let leftovers =
-            crate::module_mount_source::app_redirect_mounts_in(0, &request.package_name);
+        let Some(leftovers) =
+            crate::module_mount_source::app_redirect_mounts_in(0, &request.package_name)
+        else {
+            return ClearOutcome::Unverified;
+        };
         let mut leftover_cleared = true;
         for mount in leftovers.iter().rev() {
             let Ok(c_target) = CString::new(mount.mount_point.as_str()) else {
@@ -1782,7 +1840,11 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
         {
             let _ = mount_identity::remove(&request.package_name, request.pid);
         }
-        return if state_removed && leftover_cleared {
+        // 摘掉栈顶可能露出旧层；本轮未确认清空时停止注入，留给下一轮继续核验。
+        let no_leftovers =
+            crate::module_mount_source::app_redirect_mounts_in(0, &request.package_name)
+                .is_some_and(|mounts| mounts.is_empty());
+        return if state_removed && leftover_cleared && no_leftovers {
             ClearOutcome::Cleared
         } else {
             ClearOutcome::Unverified
@@ -1805,16 +1867,8 @@ fn clear_previous_mounts(request: &MountRequest, plan: &MountForkPlan) -> ClearO
             );
             continue;
         }
-        // path_mappings 形态切换时旧 ledger 可能只登记上一层 mount_id；若继续用
-        // superseded 保护，会把新层误判为“更新的其它会话”而拒绝摘除，旧根与新映射
-        // 叠加后应用同时命中请求路径和目标。此时按当前挂载形态重新判定归属，清理
-        // 所有模块层；系统自有 app-private FUSE 层仍由形态判定保留。
-        let cleanup_ledger = request
-            .path_mappings
-            .is_empty()
-            .then_some(ledger.as_ref())
-            .flatten();
-        if !clear_mount_target_stack_verified(target, cleanup_ledger) {
+        // 映射切换也保留精确身份，系统 FUSE 上的私有 bind 不能仅靠超级块辨认。
+        if !clear_mount_target_stack_verified(target, ledger.as_ref(), request.uid) {
             outcome = ClearOutcome::Unverified;
         }
     }
@@ -2007,25 +2061,21 @@ fn clear_mount_target_stack(target: &str) -> bool {
 /// 目标（`/data/media` 下可能残留系统 MediaProvider 的 FUSE 子挂载，必须摘掉才能重新
 /// 绑定可用后端），本函数只用于状态文件里记录的、本模块自己挂上去的目标。
 ///
-/// 归属判据由 [`mount_identity::is_module_redirect_mount`] 给出，它同时看挂载源与 `root`：
-/// 只按挂载源判断是不够的——bind 会继承底层文件系统的源，真机上本模块每一层的 source 都是
-/// MediaProvider FUSE 的 `/dev/fuse`，因此**每一层都会被误判成外部挂载而拒绝摘除**，重挂
-/// 只能在旧层之上叠加（真机表现为同一路径 4 层、应用读到被压在最上面的沙箱层）。
-///
-/// 覆盖范围必须限于本模块自己挂的目标，不能扩到 `/data/media` 后端目标：那里的层虽然可能
-/// 也带沙箱 `root`，但摘除后要按 MediaProvider 语义重建，属 [`clear_mount_target_stack`] 的
-/// 职责。这里的 `target` 全部来自状态文件的 `target=` 记录，即本模块挂过的路径。
-///
-/// 返回 true 表示该目标上已确认没有本模块的挂载层。
-fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>) -> bool {
+/// 精确账本身份或已知模块 FUSE 超级块才允许摘除；系统视图保留给接入事务备份后替换。
+/// 未知层返回 false，调用方必须停止注入。挂载 ID 只用于相等比较，不表示挂载时间。
+fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>, uid: i32) -> bool {
     let mut passes = 0usize;
     let normalized_target = paths::normalize_syntax(target);
-    // 已知会话 dev 只需算一次：清理循环每一层都要判归属，逐层重读账本目录会在
-    // 多应用批次里退化成 O(层数 x 账本数) 的磁盘读。
+    // 一轮清理复用同份会话历史，避免每摘一层都重读文件。
     let known_devs = crate::mount_ledger::known_module_fuse_devs();
+    let user_id = crate::platform::user_id_from_uid(uid);
+    let system_view = mount_identity::system_storage_view_anchor(user_id);
 
     loop {
-        let Some(live) = mount_identity::topmost_live_mount(0, target) else {
+        let Ok(live) = mount_identity::try_topmost_live_mount(0, target) else {
+            return false;
+        };
+        let Some(live) = live else {
             if passes > 1 {
                 log::info!(
                     "daemon unmount stack cleared target={} passes={}",
@@ -2035,83 +2085,26 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
             }
             return true;
         };
-        if let Some(ledger) = ledger {
-            // 账本成员判定优先于形态启发式：本模块登记过的 mount_id 一定是自己的层。
-            // private-dir alias bind 的 root 形态与系统挂载完全同形（都止于
-            // Android/{data,media,obb}/<pkg>），只靠 is_module_redirect_mount 会把它
-            // 误判成系统挂载而拒绝摘除，cleanup 永不完整、重挂循环不停。
-            let recorded_ids: Vec<u64> = ledger
-                .mounts
-                .iter()
-                .filter(|mount| mount.mount_point == normalized_target)
-                .map(|mount| mount.mount_id)
-                .collect();
-            if let Some(max_recorded) = recorded_ids.iter().max() {
-                if recorded_ids.contains(&live.mount_id) {
-                    // 账本在册：本模块的层，直接进入摘除。
-                } else if live.mount_id > *max_recorded {
-                    // 比账本记录更新：本模块的新会话已经接管这个挂载点，摘掉它会把
-                    // 正在服务的挂载打掉。
-                    log::warn!(
-                        "daemon unmount skipped superseded mount target={} mount_id={} recorded={} ledger_generation={}",
-                        target,
-                        live.mount_id,
-                        max_recorded,
-                        ledger.generation
-                    );
-                    return false;
-                }
-                // 比账本记录更旧且不在册：落到下方形态判定（可能是系统挂载）。
-            }
+        let recorded = |layer: &mount_identity::LiveMount| {
+            ledger.is_some_and(|ledger| {
+                ledger.mounts.iter().any(|mount| {
+                    mount.mount_point == normalized_target
+                        && mount.mount_id == layer.mount_id
+                        && mount.dev == layer.dev
+                })
+            })
+        };
+        let system_layer =
+            mount_identity::is_system_storage_view(target, &live, user_id, system_view.as_ref());
+        if system_layer && !recorded(&live) {
+            // 系统栈顶交给宿主接入事务备份后替换，清理阶段不提前破坏回滚基线。
+            return true;
         }
-        // 模块自己的 fail-closed 屏障（companion 在接入前挂的 tmpfs）：source=none、
-        // root=/、fs=tmpfs。存储子路径上不存在其它裸 tmpfs 形态，与系统挂载无重叠。
-        // 它必须随 cleanup 一并摘除：留在原地会让 disable 后的应用永远看到空只读目录。
-        let is_module_barrier = live.fs_type == "tmpfs" && live.root == "/";
-        // 超级块归属：源原生化成 `/dev/fuse` 之后，`source`/`root` 形态对本模块的层与系统
-        // MediaProvider 的层完全同形，`is_module_redirect_mount` 的四条判据全部落空。账本
-        // 里记录了每层落盘时的 `dev`，同 dev 即"出自本实例的会话"，这是唯一还能用的内核事实。
-        //
-        // 不能只认**本 pid 账本**里的 dev：共享宿主会话的层由 companion 在应用命名空间里挂，
-        // 账本可能还没落盘、或已被上一轮 generation 重写而不含这一层；宿主换代后旧层也会
-        // 残留在活着的应用命名空间里。因此以「本账本登记的 dev ∪ 全模块已知会话 dev」判定，
-        // 后者包含当前宿主会话与历史会话（见 `known_module_fuse_devs`）。
-        //
-        // 没有这一条时真机现象（2026-11-02）：daemon 把本模块自己的层判成 foreign → 跳过摘除
-        // → `cleanup incomplete` → 重挂请求仍回 `completed`，但运行中应用的挂载栈一层未换，
-        // 表现为**改配置不生效、必须杀进程**。
-        // 只有 FUSE 超级块才谈得上"同 dev 即同会话"：私有目录 alias bind 之类的层继承
-        // 后端 f2fs 的超级块，dev 相同并不能说明它出自本模块（系统自己的同盘 bind 也是这个
-        // dev），按 dev 认领会误摘系统挂载。
+        // 系统超级块已从历史集合排除；其上的私有目录 bind 必须逐个匹配账本身份。
         let is_owned_by_dev = !live.dev.is_empty()
             && live.fs_type.starts_with("fuse")
-            && (known_devs.contains(&live.dev)
-                || ledger
-                    .is_some_and(|ledger| ledger.mounts.iter().any(|mount| mount.dev == live.dev)));
-        if !is_module_barrier
-            && !is_owned_by_dev
-            && !mount_identity::is_module_redirect_mount(
-                &live.source,
-                &live.root,
-                target,
-                ledger.map_or("", |ledger| ledger.package_name.as_str()),
-            )
-        {
-            // 系统自己的应用专属 FUSE 视图（root 恰止于 Android/{data,media,obb}/<pkg>）：
-            // 必须保持原样。它出现在本模块目标上只可能有两种情况——系统视图先于本模块
-            // 挂载存在，或本模块的 alias bind 已在上一轮摘除后露出了系统视图。两者都不
-            // 属于"本模块残留"，把目标视为已清空（其余低层若确有本模块残留，也已被系统
-            // 视图覆盖，摘除要等系统视图消失）。此前这里返回 false，会让 cleanup 永不
-            // 完整、detach 账本持续累积、reload 被 poisoned 拒绝，形成重挂循环。
-            if crate::module_mount_source::root_is_app_private_directory(&live.root) {
-                log::debug!(
-                    "daemon unmount keep system app-private view target={} mount_id={} root={}",
-                    target,
-                    live.mount_id,
-                    live.root
-                );
-                return true;
-            }
+            && known_devs.contains(&live.dev);
+        if !recorded(&live) && !is_owned_by_dev && !live.source.starts_with("srx_fuse") {
             log::warn!(
                 "daemon unmount skipped foreign mount target={} mount_id={} source={} root={} fs={} dev={} ledger_devs={}",
                 target,
@@ -2123,27 +2116,6 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
                 ledger.map_or(0, |ledger| ledger.mounts.len())
             );
             return false;
-        }
-        if let Some(ledger) = ledger {
-            // 只拦「比账本记录更新的一层」：那说明本模块的新会话已经接管这个挂载点，
-            // 摘掉它会把正在服务的挂载打掉。比记录更旧的层是本模块上一轮留下的残留，
-            // 必须一并摘净——否则每轮只能摘掉最上面一层，重挂又会补上一层，栈高永不下降。
-            let recorded_mount_id = ledger
-                .mounts
-                .iter()
-                .filter(|mount| mount.mount_point == normalized_target)
-                .map(|mount| mount.mount_id)
-                .max();
-            if recorded_mount_id.is_some_and(|recorded| live.mount_id > recorded) {
-                log::warn!(
-                    "daemon unmount skipped superseded mount target={} mount_id={} recorded={} ledger_generation={}",
-                    target,
-                    live.mount_id,
-                    recorded_mount_id.unwrap_or_default(),
-                    ledger.generation
-                );
-                return false;
-            }
         }
         if passes >= MAX_UNMOUNT_PASSES_HARD_LIMIT {
             log::warn!(
@@ -2185,7 +2157,9 @@ fn clear_mount_target_stack_verified(target: &str, ledger: Option<&MountLedger>)
 
         let errno = last_errno();
         if errno == libc::EINVAL || errno == libc::ENOENT {
-            return true;
+            // 路径错误不证明已清空；并发替换或观测失败仍必须阻止后续注入。
+            return mount_identity::try_topmost_live_mount(0, target)
+                .is_ok_and(|live| live.is_none());
         }
 
         log::warn!(

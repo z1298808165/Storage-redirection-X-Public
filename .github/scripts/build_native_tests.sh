@@ -30,3 +30,11 @@ for name, source in artifacts.items():
     shutil.copyfile(source, output / name)
 (output / "artifacts.jsonl").unlink()
 PY
+
+case "$target" in
+  aarch64-linux-android) fixture_cc=aarch64-linux-android29-clang ;;
+  x86_64-linux-android) fixture_cc=x86_64-linux-android29-clang ;;
+  *) echo "Unsupported fixture target: $target" >&2; exit 1 ;;
+esac
+"$fixture_cc" -std=c11 -Wall -Wextra -Werror -O2 \
+  .github/tests/storage-view-fixture.c -o "$output/storage-view-fixture"

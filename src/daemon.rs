@@ -1310,7 +1310,11 @@ fn reconcile_running_apps(
     drop(cached);
     if !cache_hit {
         let config_snapshot = SettingsHub::instance().get_daemon_reconcile_config_snapshot();
-        for proc in list_app_processes() {
+        let Ok(processes) = list_app_processes() else {
+            // 查询失败不代表没有运行中的应用；保留待办，不能空耗本轮恢复周期。
+            return (false, true);
+        };
+        for proc in processes {
             // /proc 目录项本身按 pid 唯一，pid 足以去重，无需再拼接包名分配字符串。
             if !seen.insert(proc.pid) {
                 continue;
@@ -2244,6 +2248,7 @@ fn register_policy_for_pid_token(token: &str, config_version: u64) {
         return;
     };
     let proc = match list_app_processes()
+        .unwrap_or_default()
         .into_iter()
         .find(|proc| proc.pid == pid && proc.package_name == package_name)
     {
@@ -2313,7 +2318,7 @@ struct AppProcess {
     is_uninterruptible: bool,
 }
 
-fn list_app_processes() -> Vec<AppProcess> {
+fn list_app_processes() -> io::Result<Vec<AppProcess>> {
     let mut processes = Vec::new();
     let registered = crate::mount_intent::registered_processes();
     let package_uids = match platform::packages::read_uids() {
@@ -2323,12 +2328,10 @@ fn list_app_processes() -> Vec<AppProcess> {
                 "package query unavailable during process scan error={}",
                 error
             );
-            return processes;
+            return Err(error);
         }
     };
-    let Ok(entries) = std_fs::read_dir("/proc") else {
-        return processes;
-    };
+    let entries = std_fs::read_dir("/proc")?;
 
     for entry in entries.flatten() {
         let file_name = entry.file_name();
@@ -2393,7 +2396,7 @@ fn list_app_processes() -> Vec<AppProcess> {
         });
     }
 
-    processes
+    Ok(processes)
 }
 
 fn read_process_package(pid: i32) -> Option<String> {

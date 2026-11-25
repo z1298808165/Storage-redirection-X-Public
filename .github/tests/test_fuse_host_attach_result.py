@@ -46,7 +46,12 @@ class HostAttachResultTest(unittest.TestCase):
                 "alias_is_symbolic_duplicate",
                 "storage_user_id_from_view_root",
                 "detach_all_layers_at_target",
+                "host_storage_alias_roots",
+                "rollback_host_view",
+                "host_view_current",
             )
+        ).replace("std::fs::symlink_metadata", "alias_metadata").replace(
+            "std::fs::metadata(target_root)", "probe_metadata(target_root)"
         )
         # 接入按「替换而非叠加」实现后，摘层上限是注入函数的一部分依赖。
         consts = extract_const(source, "MAX_VIEW_LAYERS")
@@ -64,6 +69,13 @@ class HostAttachResultTest(unittest.TestCase):
             .replace("// __PRODUCTION_FUNCTIONS__", functions)
             .replace("// __PRODUCTION_DISPATCH__", dispatch.group(0))
         )
+        parent = extract_fn(source, "attach_app_to_host")
+        timeout = parent.index("None => {") + len("None => ")
+        depth, end = 1, timeout + 1
+        while depth:
+            depth += (parent[end] == "{") - (parent[end] == "}")
+            end += 1
+        harness = harness.replace("// __PRODUCTION_TIMEOUT__", parent[timeout:end])
         temp_root = ROOT / "temp"
         temp_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(

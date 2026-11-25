@@ -313,6 +313,23 @@ APP 将消息和元数据中的控制字符转义为 `\uXXXX`，避免诊断内�
 
 场景脚本会同时检查测试 APP 视角和 root 视角的物理落点或拒绝结果；文件监控场景还会检查 `/data/adb/modules/storage.redirect.x/logs/file_monitor.log` 中的成功或失败记录。默认情况下，非文件监控场景会关闭 `file_monitor_enabled`，文件监控场景会显式开启它。
 
+## 存储视图恢复专项回归
+
+在支持 root ADB 或 KernelSU `su 0` 的模拟器上，使用 `build_native_tests.sh` 生成的 `storage-view-fixture`。该夹具只修改测试应用命名空间中的存储入口和别名。运行时保留应用 PID 和命名空间，通过正常的周期检查观察恢复；无需强制重挂或重启 MediaProvider。
+
+```powershell
+python .github/tests/run-storage-view-recovery.py --serial emulator-5554 --fixture build/test-flow/native/storage-view-fixture --output temp/storage-view-recovery # 保存各入口的观测和回执
+```
+
+| 模式 | 故障与对照 | 通过条件 |
+|------|------------|----------|
+| 默认共享 FUSE | 系统视图先就绪时分别在 0、5、30 秒后启用规则。已接入时依次覆盖、替换、移除挂载，并单独覆盖主入口或用户别名。 | 恢复后栈高为一、可达挂载与账本一致，读写落到沙盒。原先返回 `EACCES` 的别名仍拒绝访问，未知挂载保持原样。 |
+| `--namespace-bind` | 从新应用进程的健康基线分别构造父入口覆盖、子 bind 丢失、重复覆盖和未知父树。 | 逐个入口用 `fdinfo.mnt_id` 确认可达层，并核对账本、实际文件和既有文件的元数据。挂载表中仍有被父入口遮住的旧记录不能证明恢复。 |
+
+`--user <id>` 选择已安装测试应用的用户。共享 FUSE 模式还可指定 `--isolation-user <other-id>`，核对另一用户的进程、挂载和账本在故障期间保持稳定，且文件仍写入该用户自己的沙盒。
+
+每个用户的解锁和存储就绪预算为 900 秒，存储授权与 AppOps 校验预算为 180 秒。启动测试服务后先记录同一进程的挂载，再验证基线写入；恢复观察预算默认 360 秒。输出目录保留原始 mountinfo、账本、应用结果和文件落点。单次写入成功只能证明该次 I/O 成功，不能替代挂载恢复证据。
+
 ## 手动运行用例
 
 最小配置表示为测试 APP 开启完整隔离：

@@ -502,7 +502,9 @@ class SystemViewCloneTest(unittest.TestCase):
         # 源原生化后 source/root 形态不再可辨，归属必须回到账本的超级块身份。
         daemon = read_source("daemon_mount.rs")
         self.assertIn("is_owned_by_dev", daemon)
-        self.assertIn("mount.dev == live.dev", daemon)
+        self.assertIn("mount.dev == layer.dev", daemon)
+        self.assertIn("mount.mount_id == layer.mount_id", daemon)
+        self.assertIn("system_storage_view_anchor(user_id)", daemon)
 
     def test_anchor_prefers_clone_over_live_bind(self) -> None:
         start = self.apply.index("fn create_transient_system_view_anchor(")

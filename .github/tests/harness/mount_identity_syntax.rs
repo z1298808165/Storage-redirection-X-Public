@@ -1,24 +1,6 @@
-// 挂载身份账本语法边界 harness 模板（由 Python 注入真实函数后 rustc 独立编译运行）。
-//
-// 与 should_passthrough_provider_allowed_parent_mkdir.rs 同一思路：这里不直接包含被测函数的实现，
-// 而是从 src 用大括号计数抽出真实 fn 注入到下方占位符，从而编译并执行源码里实际的函数，
-// 而不是一份抄写副本（抄写副本无法证明原函数有没有被改坏）。
-//
-// 桩只暴露被抽取函数用到的签名/全局状态，绝不复制"匹配实现"：
-// - `__harness_fs::read_to_string` 返回 Python 在内存里设定的固定 mountinfo，代替真实 /proc 读取；
-// - `platform::mountinfo` 与 `platform::paths::normalize_syntax` 是**真实**抽取的函数；
-// - 其余依赖（module_mount_source / module_paths::normalize_mount_targets / clear_previous_mounts
-//   内部的 umount 链路 / log / last_errno）用最小桩顶替。
-//
-// 被测修复点（来自本地对 src 的修改）：
-//   1. live_mounts_at / capture_explicit_mount_identity / classify_mount 改用 normalize_syntax（保留存储别名、
-//      大小写敏感），不再把 /data/media 折叠成 /storage/emulated；
-//   2. encode 写 schema=3 且与 decode 逐字段往返一致，decode 拒绝旧 schema；
-//   3. clear_previous_mounts 改为按"已降序的目标列表"正向遍历（不再 .rev()）。
-//
-// 反向验证：Python 在内存里把抽取函数里的 `paths::normalize_syntax` 替换成别名折叠桩
-// `__alias_fold`，重新编译运行——此时"只有后端挂载时主入口不可命中"等用例应从通过变失败，
-// 证明 harness 真在验证别名保留行为，而非空壳。
+// 挂载身份边界 harness；Python 抽取生产函数，桩只替换外部观测与清理动作。
+// 验证存储别名保留、身份格式往返、旧进程拒绝清理、清理顺序与父树可达性。
+// 故障变体分别去掉别名保留与可达父链校验，验证边界用例确实能检出回归。
 
 #![allow(dead_code, unused_imports, unused_variables, unused_macros)]
 
@@ -85,10 +67,13 @@ mod module_mount_source {
         source.starts_with("srx_fuse")
     }
 
-    // 空账本分支的兜底清理会把这里的返回值当"命名空间内仍存在的模块层"逐条摘除；
-    // 本 harness 的用例只验证账本目标与顺序，返回空表示没有可兜底识别的残留。
-    pub fn app_redirect_mounts_in(_pid: i32, _package_name: &str) -> Vec<ModuleMount> {
-        Vec::new()
+    // 每次只暴露可达栈顶；摘除后下一层才会出现。
+    pub fn app_redirect_mounts_in(_pid: i32, _package_name: &str) -> Option<Vec<ModuleMount>> {
+        if crate::UNRECORDED_READ_FAILED.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+        let remaining = crate::UNRECORDED_LAYERS.load(std::sync::atomic::Ordering::Relaxed);
+        Some(if remaining == 0 { Vec::new() } else {
+            vec![ModuleMount { mount_id: remaining as u64, source: "srx_fuse".into(), mount_point: "/storage/emulated/0".into(), is_sandbox_root: true }]
+        })
     }
 }
 
@@ -97,8 +82,9 @@ mod module_mount_source {
 // "热重载保留重定向根"的判定由 reload_keep_redirect_root harness 单独执行真实实现，
 // 这里让保留分支恒不触发，避免两处判据互相掩盖。
 mod mount_identity {
+    pub fn namespace_identity(_: i32) -> Option<crate::NamespaceIdentity> { Some(crate::NamespaceIdentity { dev: 1, ino: 1 }) }
     pub fn load(_pkg: &str, _pid: i32) -> Option<crate::MountLedger> {
-        None
+        crate::CLEANUP_LEDGER.lock().unwrap().clone()
     }
 
     pub fn topmost_live_mount(_pid: i32, _target: &str) -> Option<crate::LiveMount> {
@@ -138,6 +124,10 @@ mod log {
 static MOUNTINFO: Mutex<String> = Mutex::new(String::new());
 static CLEARED_TARGETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static READ_TARGETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static CLEANUP_LEDGER: Mutex<Option<MountLedger>> = Mutex::new(None);
+static TARGET_CURRENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static UNRECORDED_LAYERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static UNRECORDED_READ_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // ---- 类型（数据定义副本，非匹配实现） ----
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +166,7 @@ pub struct MountLedger {
 }
 
 impl MountLedger {
+    pub fn target_is_current(&self) -> bool { TARGET_CURRENT.load(std::sync::atomic::Ordering::Relaxed) }
     pub fn new(
         package_name: &str,
         target_pid: i32,
@@ -269,7 +260,7 @@ fn read_mount_targets(_state_path: &str) -> Vec<String> {
     READ_TARGETS.lock().unwrap().clone()
 }
 
-fn clear_mount_target_stack_verified(target: &str, _ledger: Option<&MountLedger>) -> bool {
+fn clear_mount_target_stack_verified(target: &str, _ledger: Option<&MountLedger>, _uid: i32) -> bool {
     // 只记录被要求清理的目标及其顺序，不真正 umount。
     CLEARED_TARGETS.lock().unwrap().push(target.to_string());
     true
@@ -298,6 +289,7 @@ mod libc {
 }
 
 unsafe fn umount2(_target: *const std::ffi::c_char, _flags: i32) -> i32 {
+    let _ = UNRECORDED_LAYERS.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |count| count.checked_sub(1));
     0
 }
 
@@ -578,7 +570,7 @@ fn main() {
         path_mappings: Vec::new(),
     };
     let plan = MountForkPlan {
-        state_path: "/x".to_string(),
+        state_path: std::env::var("SRX_TEST_STATE_PATH").expect("需要隔离的状态文件路径"),
         overlay_targets: Vec::new(),
         scoped_fuse_roots: Vec::new(),
     };
@@ -598,6 +590,86 @@ fn main() {
     } else {
         println!("PASS cleanup_order: 正向遍历保持降序（最深优先）");
     }
+
+    READ_TARGETS.lock().unwrap().clear();
+    for (current, same_namespace) in [(false, true), (true, false), (true, true)] {
+        let mut recorded = ledger_main_record.clone();
+        if !same_namespace { recorded.namespace.ino = 2; }
+        *CLEANUP_LEDGER.lock().unwrap() = Some(recorded);
+        TARGET_CURRENT.store(current, std::sync::atomic::Ordering::Relaxed);
+        CLEARED_TARGETS.lock().unwrap().clear();
+        clear_previous_mounts(&request, &plan);
+        assert_eq!(!CLEARED_TARGETS.lock().unwrap().is_empty(), current && same_namespace, "旧进程或旧 namespace 的账本不能授权清理");
+    }
+    *CLEANUP_LEDGER.lock().unwrap() = None;
+    UNRECORDED_LAYERS.store(2, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(clear_previous_mounts(&request, &plan), ClearOutcome::Unverified, "摘掉可达层后新露出的残留不能被误报为已清空");
+    assert_eq!(UNRECORDED_LAYERS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(clear_previous_mounts(&request, &plan), ClearOutcome::Cleared);
+    assert_eq!(UNRECORDED_LAYERS.load(std::sync::atomic::Ordering::Relaxed), 0);
+    UNRECORDED_LAYERS.store(1, std::sync::atomic::Ordering::Relaxed);
+    UNRECORDED_READ_FAILED.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(clear_previous_mounts(&request, &plan), ClearOutcome::Unverified, "读表失败不能授权清理或注入");
+    assert_eq!(UNRECORDED_LAYERS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    UNRECORDED_READ_FAILED.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(clear_previous_mounts(&request, &plan), ClearOutcome::Cleared);
+
+    // 父入口的新系统层会遮住旧树的子挂载，但 mountinfo 仍保留旧子挂载的记录。
+    set_mountinfo(
+        "1 0 254:1 / / rw - ext4 rootfs rw\n\
+         10 1 0:84 / /storage/emulated rw - fuse /dev/fuse rw\n\
+         11 10 254:1 /media/0/Android/data/test/sdcard /storage/emulated/0 rw - ext4 rootfs rw\n\
+         12 10 0:85 / /storage/emulated rw - fuse /dev/fuse rw\n",
+    );
+    assert!(topmost_live_mount(0, "/storage/emulated/0").is_none(), "被祖先覆盖的子挂载不能证明当前视图有效");
+    let (covering_point, covering) = try_visible_mount_at(0, "/storage/emulated/0").unwrap().unwrap();
+    assert_eq!(covering_point, "/storage/emulated");
+    assert_eq!((covering.mount_id, covering.dev.as_str(), covering.root.as_str()), (12, "0:85", "/0"));
+    assert_eq!(live_mounts_at(0, "/storage/emulated").len(), 2, "同路径叠层仍须全部保留供清理");
+
+    // 未知父树与可见的新子层都按实际父链解析，不能重新认领旧树的子挂载。
+    set_mountinfo(
+        "1 0 254:1 / / rw - ext4 rootfs rw\n\
+         10 1 0:84 / /storage/emulated rw - fuse /dev/fuse rw\n\
+         11 10 254:1 /sandbox /storage/emulated/0 rw - ext4 rootfs rw\n\
+         12 10 0:85 / /storage/emulated rw - tmpfs foreign rw\n\
+         3 12 0:86 /live /storage/emulated/0 rw - fuse /dev/fuse rw\n",
+    );
+    assert_eq!(topmost_live_mount(0, "/storage/emulated/0").unwrap().mount_id, 3);
+    assert_eq!(live_mounts_at(0, "/storage/emulated/0").len(), 1);
+    let (covering_point, covering) = try_visible_mount_at(0, "/storage/emulated/1/Download").unwrap().unwrap();
+    assert_eq!(covering_point, "/storage/emulated");
+    assert_eq!((covering.mount_id, covering.fs_type.as_str(), covering.root.as_str()), (12, "tmpfs", "/1/Download"));
+
+    let entries = "1 0 254:1 / / rw - ext4 rootfs rw\n\
+        7 1 0:7 / /storage rw - tmpfs storage rw\n\
+        8 7 0:8 / /storage/emulated rw - fuse /dev/fuse rw\n\
+        9 8 0:9 / /storage/emulated/0 rw - ext4 rootfs rw\n\
+        2 7 0:2 / /storage rw - tmpfs cover rw\n\
+        3 2 0:3 / /storage/with\\040space rw - tmpfs escaped rw\n"
+        .lines().filter_map(platform::mountinfo::parse_entry).collect::<Vec<_>>();
+    for (path, expected) in [
+        ("/", Some(1)),
+        ("/storage/emulated/0/Download", Some(2)),
+        ("/storage/with space/file", Some(3)),
+        ("/storage/with spaces/file", Some(2)),
+        ("/storages/emulated/0", Some(1)),
+        ("storage/emulated/0", None),
+        ("", None),
+    ] {
+        assert_eq!(platform::mountinfo::visible_mount_at(&entries, path).map(|entry| entry.mount_id), expected, "可达挂载路径边界: {path}");
+    }
+    assert!(platform::mountinfo::mount_is_descendant(&entries, 3, 1));
+    assert!(!platform::mountinfo::mount_is_descendant(&entries, 99, 1));
+    assert!(!platform::mountinfo::mount_is_descendant(&entries, 1, 99));
+    let cycle = "4 5 0:4 / /a rw - tmpfs a rw\n5 4 0:5 / /b rw - tmpfs b rw"
+        .lines().filter_map(platform::mountinfo::parse_entry).collect::<Vec<_>>();
+    assert!(!platform::mountinfo::mount_is_descendant(&cycle, 4, 1), "环形父链必须有界退出");
+    set_mountinfo("8 7 0:8 / / rw - tmpfs lower rw\n3 8 0:3 / / rw - tmpfs upper rw\n");
+    assert_eq!(live_mounts_at(0, "/").len(), 2);
+    let (visible_point, visible) = try_visible_mount_at(0, "/child").unwrap().unwrap();
+    assert_eq!(visible_point, "/");
+    assert_eq!(visible.root, "/child");
 
     if failures.is_empty() {
         println!("ALL MOUNT IDENTITY SYNTAX CASES PASSED");

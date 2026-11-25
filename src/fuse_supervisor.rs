@@ -1,8 +1,7 @@
 //! 共享 FUSE daemon 的服务监督与死连接恢复策略。
 //!
-//! 现有结构里每个应用各自 fork 一个 FUSE 服务进程，daemon 只能靠 `/proc` + starttime
-//! 判活，服务异常退出后由周期 reconcile 兜底。本模块把"健康检查"与"恢复决策"从
-//! reconcile 主循环里拆出来，给出三条明确契约：
+//! 共享宿主由 daemon 监测进程身份，应用视图由账本和 mountinfo 复核，异常由 reconcile 恢复。
+//! 本模块把"健康检查"与"恢复决策"从 reconcile 主循环里拆出来，给出三条明确契约：
 //!
 //! 1. **端点健康**：只有真正访问目标命名空间内的挂载点，才能区分"挂载记录还在"与
 //!    "连接已断"。`/proc/<pid>/mountinfo` 里存在记录不代表可用——FUSE 服务退出后记录会
@@ -160,17 +159,19 @@ impl RecoveryAction {
 ///
 /// `poisoned` 由账本的摘除失败轮次决定。收敛优先级高于其它判定：即使端点此刻看起来健康，
 /// 只要上一次摘除没有被确认清空，就说明同路径上可能还压着一层死挂载，此时注入只会叠得
-/// 更高，因此必须先拒绝注入。
+/// 更高，因此必须先拒绝注入。`known_storage_view` 仅授权已验证的同用户系统视图或当前宿主根。
 pub fn plan_recovery(
     verdict: &MountVerdict,
     health: EndpointHealth,
     poisoned: bool,
+    known_storage_view: bool,
 ) -> RecoveryAction {
     if poisoned {
         return RecoveryAction::RefusePoisoned;
     }
     match verdict {
         MountVerdict::StaleNamespace => RecoveryAction::DropStale,
+        MountVerdict::Superseded(_) if known_storage_view => RecoveryAction::DetachThenReinject,
         MountVerdict::Superseded(_) => RecoveryAction::SkipSuperseded,
         MountVerdict::Detached => RecoveryAction::ReinjectOnly,
         // 归属确认是本模块的挂载层：无论端点此刻是否断连都先摘除。

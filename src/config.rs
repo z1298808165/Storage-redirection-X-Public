@@ -94,9 +94,9 @@ pub fn should_capture_unconfigured_app(package_name: &str, uid: i32, enabled: bo
 
 /// 内核 FUSE passthrough 是否被逃生口关闭（`.fuse_passthrough_disabled` 标记文件）。
 ///
-/// 默认（无标记）**自动开启**，设备兼容性由每次重启后的端到端探针判定
-/// （见 daemon 侧 passthrough probe）：探针发现内核缺陷（open/read EIO）则
-/// 设备级降级为关闭并重建宿主会话。标记文件是紧急排障通道，不是配置开关。
+/// 默认（无标记）**自动开启**。daemon 在首次共享宿主挂载后只读探测请求用户的既有标记；
+/// 仅核对宿主设备后的重开或读取 EIO 会触发设备级降级并重建宿主会话。标记文件是紧急排障通道，
+/// 不是配置开关。
 pub fn is_fuse_passthrough_disabled() -> bool {
     std::path::Path::new(module_paths::FUSE_PASSTHROUGH_DISABLE_FILE).exists()
 }

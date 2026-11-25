@@ -29,16 +29,19 @@ elif name == "dumpsys":
     print("    requested permissions:")
     for permission in state["declared"]:
         print("    android.permission." + permission)
-    print("    runtime permissions:")
+    print("    User " + str(state["user"]) + ":")
+    print("      runtime permissions:")
     for permission in state["granted"]:
         print("      android.permission." + permission + ": granted=true")
 elif name == "pm":
+    assert args[:3] == ["grant", "--user", str(state["user"])], args
     permission = args[-1].removeprefix("android.permission.")
     if permission == state.get("fail_grant"):
         sys.exit(23)
     state["granted"].append(permission)
 elif name == "cmd":
     assert args[0] == "appops", args
+    assert args[2:4] == ["--user", str(state["user"])], args
     if args[1] == "set":
         scope = "uid" if "--uid" in args else "package"
         state["operations"][scope + "/" + args[-2]] = args[-1]
@@ -58,18 +61,18 @@ path.write_text(json.dumps(state))
 
 @unittest.skipUnless(SH and os.name == "posix", "需要 POSIX shell 执行设备命令替身")
 class StoragePermissionTests(unittest.TestCase):
-    def run_helper(self, sdk=37, declared=PERMISSIONS, **overrides):
+    def run_helper(self, sdk=37, declared=PERMISSIONS, user=0, **overrides):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_path = root / "state.json"
-            state = dict(sdk=sdk, declared=declared, granted=[], operations={}, **overrides)
+            state = dict(sdk=sdk, declared=declared, user=user, granted=[], operations={}, **overrides)
             state_path.write_text(json.dumps(state), encoding="utf-8")
             for command in ("getprop", "dumpsys", "pm", "cmd"):
                 executable = root / command
                 executable.write_text(f"#!{sys.executable}\n" + STUB, encoding="utf-8")
                 executable.chmod(0o755)
             result = subprocess.run(
-                [SH, str(HELPER), "test.storage"],
+                [SH, str(HELPER), "test.storage", str(user)],
                 env=dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"], SRT_PERMISSION_STATE=str(state_path)),
                 text=True, capture_output=True, timeout=20,
             )
@@ -111,6 +114,12 @@ class StoragePermissionTests(unittest.TestCase):
         self.assertEqual(23, result.returncode)
         self.assertFalse(state["operations"])
         self.assertNotIn("测试存储权限已就绪", result.stdout)
+
+    def test_secondary_user_grants_are_scoped(self):
+        result, state = self.run_helper(user=11)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(set(PERMISSIONS), set(state["granted"]))
+        self.assertIn("user=11", result.stdout)
 
     def test_denied_uid_mode_is_not_hidden_by_allowed_package_mode(self):
         result, _ = self.run_helper(deny_readback="WRITE_MEDIA_IMAGES")

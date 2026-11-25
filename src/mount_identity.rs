@@ -8,6 +8,7 @@
 //!
 //! 本模块通过 glob 再导出共享内核，因此 `mount_identity::load` 这类既有调用路径保持不变。
 
+use crate::platform::mountinfo;
 use crate::platform::paths;
 use std::fs;
 
@@ -47,7 +48,7 @@ pub enum MountVerdict {
     Owned(LiveMount),
     /// 目标路径上已没有挂载：无需摘除，可以直接重新注入。
     Detached,
-    /// 同路径被其它身份接管（新会话或其它组件）：不得摘除，交由接管者负责。
+    /// 同路径已由其它身份服务；监督层仅对验证过的系统存储视图授权恢复。
     Superseded(LiveMount),
     /// 目标进程或命名空间已经失效：挂载随命名空间销毁，记录应清理。
     StaleNamespace,
@@ -62,9 +63,9 @@ pub enum MountVerdict {
 /// 2. 命名空间 inode 变化 → 同样视为旧命名空间已销毁；
 /// 3. 账本里没有该挂载点的记录，或目标路径上没有挂载 → [`MountVerdict::Detached`]，
 ///    直接重新注入；
-/// 4. 最顶层挂载的 ID 与挂载源都匹配记录 → [`MountVerdict::Owned`]，摘除它再重新注入；
+/// 4. 最顶层挂载的 ID 与 dev 都匹配记录 → [`MountVerdict::Owned`]，摘除它再重新注入；
 /// 5. 其余情况（同路径上有别的挂载，或本模块的新会话已经接管）→
-///    [`MountVerdict::Superseded`]，不摘除。
+///    [`MountVerdict::Superseded`]，由监督层继续校验是否为可恢复的系统视图。
 pub fn classify_mount(
     ledger: &MountLedger,
     mount_point: &str,
@@ -96,6 +97,67 @@ pub fn classify_mount(
         return MountVerdict::Owned(live.clone());
     }
     MountVerdict::Superseded(live.clone())
+}
+
+/// 读取路径实际所属的可达挂载，返回挂载记录本身的路径及换算到目标路径的树内根。
+///
+/// 父挂载覆盖后旧子挂载仍留在 mountinfo 中；恢复授权必须观察新父树，而不是把旧子记录
+/// 当成健康挂载或把路径当成空白，否则会漏恢复或遮住未知接管者。返回值包含实际挂载路径，
+/// 并将树内根换算到查询路径；没有可达挂载时返回 `Ok(None)`，读取或换算失败保留为 `Err`。
+pub fn try_visible_mount_at(
+    pid: i32,
+    mount_point: &str,
+) -> std::io::Result<Option<(String, LiveMount)>> {
+    let normalized = paths::normalize_syntax(mount_point);
+    let path = if pid > 0 {
+        format!("/proc/{pid}/mountinfo")
+    } else {
+        "/proc/self/mountinfo".to_string()
+    };
+    let content = fs::read_to_string(path)?;
+    let entries = content
+        .lines()
+        .filter_map(mountinfo::parse_entry)
+        .collect::<Vec<_>>();
+    let Some(entry) = mountinfo::visible_mount_at(&entries, &normalized) else {
+        return Ok(None);
+    };
+    let target = mountinfo::unescape_field(entry.target);
+    let suffix = normalized
+        .strip_prefix(target.trim_end_matches('/'))
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidData))?
+        .trim_start_matches('/');
+    let root = mountinfo::unescape_field(entry.root);
+    let root = if suffix.is_empty() {
+        root
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), suffix)
+    };
+    Ok(Some((
+        paths::normalize_syntax(&target),
+        LiveMount {
+            mount_id: entry.mount_id,
+            parent_mount_id: entry.parent_mount_id,
+            dev: entry.dev.to_string(),
+            source: mountinfo::unescape_field(entry.source),
+            fs_type: entry.fs_type.to_string(),
+            root,
+        },
+    )))
+}
+
+/// 状态文件不能证明当前栈顶仍归本模块；逐个校验账本中实际接入过的入口。
+pub fn recorded_mounts_current(ledger: &MountLedger) -> bool {
+    if !ledger.target_is_current()
+        || namespace_identity(ledger.target_pid) != Some(ledger.namespace)
+    {
+        return false;
+    }
+    !ledger.mounts.is_empty()
+        && ledger.mounts.iter().all(|mount| {
+            topmost_live_mount(ledger.target_pid, &mount.mount_point)
+                .is_some_and(|live| live.mount_id == mount.mount_id && live.dev == mount.dev)
+        })
 }
 
 /// 删除账本；文件已不存在也视为成功。

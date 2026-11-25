@@ -1,6 +1,6 @@
 use libc::{
-    EEXIST, EINTR, POLLIN, S_IFDIR, c_int, c_void, chown, mkdir, mode_t, poll, pollfd, read, stat,
-    write,
+    EEXIST, EINTR, POLLIN, S_IFDIR, S_IFMT, c_int, c_void, chown, mkdir, mode_t, poll, pollfd,
+    read, stat, write,
 };
 use std::ffi::CString;
 use std::time::{Duration, Instant};
@@ -120,7 +120,7 @@ pub fn is_directory(path: &str) -> bool {
         return false;
     }
     let st = unsafe { st.assume_init() };
-    (st.st_mode & S_IFDIR) != 0
+    st.st_mode & S_IFMT == S_IFDIR
 }
 
 // uid >= 0 时同步设置 owner，否则沿用默认

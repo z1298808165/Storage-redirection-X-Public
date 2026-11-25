@@ -2,6 +2,10 @@
 set -eu
 
 app="${1:?缺少测试应用包名}"
+user="${2:-0}"
+case "$user" in
+  *[!0-9]*|'') echo "无效测试用户：$user" >&2; exit 1 ;;
+esac
 case "$app" in
   *[!a-zA-Z0-9_.]*|'') echo "无效测试应用包名：$app" >&2; exit 1 ;;
 esac
@@ -27,14 +31,17 @@ granted=""
 for permission in $permissions; do
   # 仅授予 APK 已声明的权限，系统特权权限不通过 pm grant 强行补入。
   if printf '%s\n' "$requested" | grep -Eq "^[[:space:]]+android[.]permission[.]$permission$"; then
-    pm grant --user 0 "$app" "android.permission.$permission"
+    pm grant --user "$user" "$app" "android.permission.$permission"
     granted="$granted $permission"
     if [ "$permission" = ACCESS_MEDIA_LOCATION ]; then
       operations="$operations ACCESS_MEDIA_LOCATION"
     fi
   fi
 done
-effective="$(dumpsys package "$app")"
+effective="$(dumpsys package "$app" | awk -v user="$user" '
+  /^[[:space:]]*User [0-9]+:/ { active = ($2 == user ":") }
+  active { print }
+')"
 for permission in $granted; do
   if ! printf '%s\n' "$effective" | grep -Fq "android.permission.$permission: granted=true"; then
     echo "测试权限未生效：android.permission.$permission" >&2
@@ -42,13 +49,13 @@ for permission in $granted; do
   fi
 done
 for operation in $operations; do
-  cmd appops set --uid "$app" "$operation" allow
-  cmd appops set "$app" "$operation" allow
-  effective="$(cmd appops get "$app" "$operation")"
+  cmd appops set --user "$user" --uid "$app" "$operation" allow
+  cmd appops set --user "$user" "$app" "$operation" allow
+  effective="$(cmd appops get --user "$user" "$app" "$operation")"
   if ! printf '%s\n' "$effective" | grep -Eq ': allow([;[:space:]]|$)' ||
     printf '%s\n' "$effective" | grep -Eq ': (ignore|deny|errored)([;[:space:]]|$)'; then
     echo "测试 AppOps 未生效：$operation $effective" >&2
     exit 1
   fi
 done
-printf '测试存储权限已就绪 package=%s sdk=%s\n' "$app" "$sdk"
+printf '测试存储权限已就绪 package=%s user=%s sdk=%s\n' "$app" "$user" "$sdk"

@@ -208,7 +208,7 @@ fn conclude_mount_readiness(
     }
 
     let observed_started_ms = monotonic_ms();
-    let mounts = app_redirect_mounts_in(0, package_name);
+    let mounts = app_redirect_mounts_in(0, package_name).unwrap_or_default();
     let mount_count = mounts.len();
     // 就绪证据分三条，全部与模块标识无关：
     // 1. 仅映射模式：本就不建立存储根重定向；

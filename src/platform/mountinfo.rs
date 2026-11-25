@@ -1,4 +1,4 @@
-//! `/proc/<pid>/mountinfo` 单行解析。
+//! `/proc/<pid>/mountinfo` 解析与挂载树可达性判定。
 //!
 //! 挂载清理、挂载规划与 scoped FUSE 会话收尾都要按挂载点判断"这条挂载记录是什么"，
 //! 此前各模块各写了一遍单行解析。这里提供共享的最小解析：字段保持借用，由调用方决定
@@ -93,6 +93,61 @@ where
         top = Some(entry);
     }
     top
+}
+
+/// 查找父链中的挂载身份，遇到缺失或环形链时有界退出。
+pub fn mount_is_descendant(entries: &[MountInfoEntry<'_>], mut id: u64, ancestor: u64) -> bool {
+    for _ in 0..entries.len() {
+        let Some(entry) = entries.iter().find(|entry| entry.mount_id == id) else {
+            return false;
+        };
+        if id == ancestor {
+            return true;
+        }
+        id = entry.parent_mount_id;
+    }
+    false
+}
+
+/// 按可达父树解析绝对路径所属挂载，不解析符号链接；被祖先覆盖的子记录不算可见。
+pub fn visible_mount_at<'a>(
+    entries: &'a [MountInfoEntry<'a>],
+    target: &str,
+) -> Option<&'a MountInfoEntry<'a>> {
+    if !target.starts_with('/') {
+        return None;
+    }
+    let mut prefixes = std::collections::BTreeMap::<usize, Vec<_>>::new();
+    for entry in entries {
+        let path = unescape_field(entry.target);
+        if target == path
+            || path == "/"
+            || target
+                .strip_prefix(path.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            prefixes.entry(path.len()).or_default().push(entry);
+        }
+    }
+    let mut visible: Option<&MountInfoEntry<'_>> = None;
+    for group in prefixes.into_values() {
+        let branch = group
+            .into_iter()
+            .filter(|entry| {
+                visible.is_none_or(|parent| {
+                    mount_is_descendant(entries, entry.mount_id, parent.mount_id)
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(entry) = topmost_by_stack(
+            &branch,
+            |entry| entry.mount_id,
+            |entry| entry.parent_mount_id,
+        ) {
+            visible = Some(*entry);
+        }
+    }
+    visible
 }
 
 /// 展开 `mountinfo` 字段里的八进制转义（空格、换行、反斜杠等）。

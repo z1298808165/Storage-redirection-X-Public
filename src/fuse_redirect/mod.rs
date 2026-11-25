@@ -138,13 +138,14 @@ struct FuseState {
     dir_candidate_cache_max_capacity: usize,
 }
 
-/// inode 后端缓存条目：属主 uid + 解析结果。
+/// inode 后端缓存条目：解析该路径时的属主 UID、策略指纹与结果。
 ///
-/// 复用条件是**请求策略与登记时的属主一致**：跨进程 fd fstat（GETATTR 以他人
-/// 身份到达）的视图差异必须保留原语义，不能拿属主的后端顶替。
+/// 跨 UID 的 GETATTR 和同 UID 的策略热更新都必须重新路由，不能复用旧视图的后端。
 #[derive(Clone)]
 struct InodeBackendCacheEntry {
     owner_uid: u32,
+    policy_fingerprint: u64,
+    inode_rel: String,
     backend: Arc<BackendPath>,
     /// 解析时覆盖表的代次。覆盖挂载可能在会话运行中途出现或消失，代次不一致时这条
     /// 缓存按陈旧处理、就地重解析——否则首次解析落在 1 秒快照窗口内会把「bind 遮蔽前
@@ -683,13 +684,17 @@ impl FuseRedirectFs {
         INodeNo(ino)
     }
 
-    /// 登记本 inode 最近一次解析出的后端（`reply_entry_for_rel` 在 lookup 锁内调用）。
+    /// 用解析前的覆盖表代次登记后端，避免在 inode 锁内刷新挂载快照。
     fn remember_backend_for_inode_locked(
         state: &mut FuseState,
         ino: INodeNo,
         policy: &RedirectPolicy,
         backend: Arc<BackendPath>,
+        overlay_generation: u64,
     ) {
+        let Some(inode_rel) = state.paths_by_inode.get(&ino.0).cloned() else {
+            return;
+        };
         if ino.0 == ROOT_INO || state.inode_backends.len() >= INODE_BACKEND_CACHE_CAP {
             // 超限整体清空：条目只是加速件，清空后下一轮 lookup 自然重建。
             state.inode_backends.clear();
@@ -698,8 +703,10 @@ impl FuseRedirectFs {
             ino.0,
             InodeBackendCacheEntry {
                 owner_uid: policy.uid as u32,
+                policy_fingerprint: policy.fingerprint,
+                inode_rel,
                 backend,
-                overlay_generation: backend_overlay::snapshot_generation(),
+                overlay_generation,
             },
         );
     }
@@ -726,10 +733,7 @@ impl FuseRedirectFs {
         state.paths_by_inode.get(&ino.0).cloned()
     }
 
-    /// 按已解析后端回答 inode 元数据类请求。命中条件：登记属主与请求策略一致
-    /// 且 `paths_by_inode` 的 rel 未变（rename/unlink 会改写或移除该表，命中前
-    /// 必然先比对），否则退回完整路由并更新缓存。rel 比对让陈旧条目只会造成
-    /// 重复解析，永远不会给出错误后端。
+    /// 按已解析后端回答 inode 元数据类请求；缓存身份变化时重新路由并更新仍对应的 inode。
     fn backend_for_ino(
         &self,
         policy: &RedirectPolicy,
@@ -743,7 +747,8 @@ impl FuseRedirectFs {
             let state = self.state.read().unwrap_or_else(|err| err.into_inner());
             if let Some(entry) = state.inode_backends.get(&ino.0)
                 && entry.owner_uid == policy.uid as u32
-                && entry.backend.rel == rel
+                && entry.policy_fingerprint == policy.fingerprint
+                && entry.inode_rel == rel
                 && entry.overlay_generation == overlay_generation
             {
                 let count = INODE_BACKEND_CACHE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -761,10 +766,25 @@ impl FuseRedirectFs {
                 return Ok(Arc::clone(&entry.backend));
             }
         }
-        policy
+        let backend = policy
             .backend_for_relative(&rel, OperationKind::Read)
             .map(Arc::new)
-            .ok_or(Errno::ENOENT)
+            .ok_or(Errno::ENOENT)?;
+        let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
+        if state
+            .paths_by_inode
+            .get(&ino.0)
+            .is_some_and(|current| current == &rel)
+        {
+            Self::remember_backend_for_inode_locked(
+                &mut state,
+                ino,
+                policy,
+                Arc::clone(&backend),
+                overlay_generation,
+            );
+        }
+        Ok(backend)
     }
 
     fn backend_for_relative(
@@ -945,6 +965,8 @@ impl FuseRedirectFs {
         reply: ReplyEntry,
     ) {
         // lookup 是系统读取者路径反解的主入口：MP 对重定向树的路径访问先经此建立 dentry。
+        // 先取代次再解析；解析期间若覆盖表变化，缓存将在下一次访问时失效。
+        let overlay_generation = backend_overlay::snapshot_generation();
         let Some((policy, backend)) =
             self.backend_for_relative_with_system_reader(uid, policy, rel)
         else {
@@ -960,7 +982,13 @@ impl FuseRedirectFs {
             let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
             let ino = Self::ino_for_path_locked(&mut state, rel);
             Self::remember_policy_for_inode_locked(&mut state, ino, rel, policy);
-            Self::remember_backend_for_inode_locked(&mut state, ino, policy, Arc::clone(&backend));
+            Self::remember_backend_for_inode_locked(
+                &mut state,
+                ino,
+                policy,
+                Arc::clone(&backend),
+                overlay_generation,
+            );
             Self::add_lookup_locked(&mut state, ino);
             ino
         };
@@ -1261,3 +1289,7 @@ impl FuseRedirectFs {
 #[cfg(test)]
 #[path = "../../tests/native-unit/fuse_staging.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/native-unit/fuse_inode_cache.rs"]
+mod inode_cache_tests;

@@ -28,6 +28,22 @@ fn failed_staging_preserves_a_competing_destination() {
     assert!(staged.publish(&destination).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), b"replacement");
     assert!(!staging_directory.exists());
+
+    let public = directory.join("public");
+    std::fs::create_dir(&public).unwrap();
+    let identity = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&public).unwrap());
+    let staged = StagedEntry::new(&public).unwrap();
+    let owned = staged.path().to_owned();
+    let staging_directory = owned.parent().unwrap().to_owned();
+    std::fs::create_dir(&owned).unwrap();
+    assert!(owned.is_dir());
+    assert!(staged.publish(&public).is_err());
+    assert!(!owned.exists() && !staging_directory.exists());
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&public).unwrap()),
+        identity
+    );
+    assert_eq!(std::fs::read_dir(public).unwrap().count(), 0);
     std::fs::remove_dir_all(directory).unwrap();
 }
 

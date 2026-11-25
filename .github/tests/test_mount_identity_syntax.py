@@ -102,6 +102,10 @@ class MountIdentitySyntaxTest(unittest.TestCase):
             + extract_fn(mountinfo_src, "unescape_field")
             + "\n"
             + extract_fn(mountinfo_src, "topmost_by_stack")
+            + "\n"
+            + extract_fn(mountinfo_src, "mount_is_descendant")
+            + "\n"
+            + extract_fn(mountinfo_src, "visible_mount_at")
         )
         paths_fns = extract_fn(paths_src, "normalize_syntax") + "\n" + extract_fn(
             paths_src, "collapse_redundant_slashes"
@@ -109,7 +113,10 @@ class MountIdentitySyntaxTest(unittest.TestCase):
         all_fns = "\n".join(
             [
                 extract_fn(mount_ledger_src, "live_mounts_at"),
+                extract_fn(mount_ledger_src, "try_live_mounts_at"),
                 extract_fn(mount_ledger_src, "topmost_live_mount"),
+                extract_fn(mount_ledger_src, "try_topmost_live_mount"),
+                extract_fn(mount_identity_src, "try_visible_mount_at"),
                 extract_fn(mount_ledger_src, "capture_explicit_mount_identity"),
                 extract_fn(mount_ledger_src, "encode"),
                 extract_fn(mount_ledger_src, "decode"),
@@ -125,6 +132,7 @@ class MountIdentitySyntaxTest(unittest.TestCase):
         harness_src = harness_src.replace("log::warn!", "warn!").replace("log::info!", "info!")
 
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            test_env = os.environ | {"SRX_TEST_STATE_PATH": os.path.join(tmp, "mount.state")}
             harness_path = os.path.join(tmp, "harness.rs")
             Path(harness_path).write_text(harness_src, encoding="utf-8")
             bin_path = os.path.join(tmp, "mount_identity_syntax")
@@ -137,7 +145,7 @@ class MountIdentitySyntaxTest(unittest.TestCase):
                 self.fail(
                     "harness 编译失败:\n" + compile_proc.stdout + compile_proc.stderr
                 )
-            run_proc = subprocess.run([bin_path], capture_output=True, text=True)
+            run_proc = subprocess.run([bin_path], capture_output=True, text=True, env=test_env)
             print(run_proc.stdout)
             if run_proc.stderr:
                 print(run_proc.stderr)
@@ -156,30 +164,30 @@ class MountIdentitySyntaxTest(unittest.TestCase):
                 raise AssertionError("抽取的函数不含 normalize_syntax，无法做反向验证")
             mutated_all = all_fns.replace("paths::normalize_syntax(", "__alias_fold(")
             self.assertNotEqual(mutated_all, all_fns)
-            mutated_src = build_harness(template, mountinfo_fns, paths_fns, mutated_all)
-            mutated_src = mutated_src.replace("log::warn!", "warn!").replace(
-                "log::info!", "info!"
+            # 去掉可达父树校验后，旧子挂载会重新被误认成当前视图。
+            hidden_child = mountinfo_fns.replace(
+                "mount_is_descendant(entries, entry.mount_id, parent.mount_id)", "true"
             )
-            mutated_path = os.path.join(tmp, "harness_mutated.rs")
-            Path(mutated_path).write_text(mutated_src, encoding="utf-8")
-            mutated_bin = os.path.join(tmp, "mount_identity_syntax_mutated")
-            mut_compile = subprocess.run(
-                [rustc, "--edition=2024", mutated_path, "-O", "-o", mutated_bin],
-                capture_output=True,
-                text=True,
-            )
-            if mut_compile.returncode != 0:
-                self.fail(
-                    "反向验证 harness 编译失败:\n" + mut_compile.stdout + mut_compile.stderr
-                )
-            mut_run = subprocess.run([mutated_bin], capture_output=True, text=True)
-            print(mut_run.stdout)
-            self.assertNotEqual(
-                mut_run.returncode,
-                0,
-                "反向验证失败：回退成别名折叠后边界用例仍全部通过，"
-                "说明 harness 没有真正验证原函数",
-            )
+            self.assertNotEqual(hidden_child, mountinfo_fns)
+            for name, parser, functions in (
+                ("alias_fold", mountinfo_fns, mutated_all),
+                ("hidden_child", hidden_child, all_fns),
+            ):
+                with self.subTest(mutant=name):
+                    mutated_src = build_harness(template, parser, paths_fns, functions)
+                    mutated_src = mutated_src.replace("log::warn!", "warn!").replace(
+                        "log::info!", "info!"
+                    )
+                    mutated_path = Path(tmp) / f"{name}.rs"
+                    mutated_path.write_text(mutated_src, encoding="utf-8")
+                    mutated_bin = Path(tmp) / name
+                    mut_compile = subprocess.run(
+                        [rustc, "--edition=2024", str(mutated_path), "-O", "-o", str(mutated_bin)],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(mut_compile.returncode, 0, mut_compile.stdout + mut_compile.stderr)
+                    mut_run = subprocess.run([str(mutated_bin)], capture_output=True, text=True, env=test_env)
+                    self.assertNotEqual(mut_run.returncode, 0, f"故障变体未被检出: {name}")
 
 
 if __name__ == "__main__":

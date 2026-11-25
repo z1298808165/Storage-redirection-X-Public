@@ -60,6 +60,9 @@ fn write_state(
     config_version: u64,
     state: &str,
 ) {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     if package_name.is_empty() || pid <= 0 || uid < 0 {
         return;
     }
@@ -84,7 +87,18 @@ fn write_state(
         backend.as_str(),
         config_version
     );
-    if fs::write(&temp, content).is_ok() && fs::rename(&temp, &path).is_ok() {
+    // 可信读取拒绝可写记录；显式收紧新文件和遗留临时文件，不依赖写入进程的 umask。
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temp)
+        .and_then(|mut file| {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.write_all(content.as_bytes())
+        });
+    if written.is_ok() && fs::rename(&temp, &path).is_ok() {
         log::debug!(
             "mount intent state={} pkg={} pid={} backend={}",
             state,
