@@ -192,6 +192,12 @@ adb shell "su -c 'rm -f /storage/emulated/0/Android/media/<pkg>/<dir>/<db>.db-sh
 # 或让应用在系统视图里重建会话（干净关闭后重开），新边车由 MP 以 0664 创建
 ```
 
+**只走视图路径，不要从后端删。** `rm /data/media/.../<db>.db-shm` 绕过 MediaProvider 的节点
+簿记，会把这个名字记成「不可创建」：之后同名 `O_CREAT` 恒 `ENOENT`，同目录换个新名字立刻成功，
+只有重启 MediaProvider 才恢复（2026-11-25 真机复现）。模块的两处 `-shm` 自愈已改为
+「删除后立即补 0 字节同名文件」，并会在主库存在时把缺失的 `-wal`/`-journal`/`-shm` 一并补位
+（`.db` 不补），因此不再产生该状态；手工处置同样请只走视图路径。
+
 `own private view mount point unavailable ... root_dir= android_dir=` 与 `own private view
 snapshot ...`：恢复在冷启动首轮挂载时失败了。这不是权限问题——快照里如果
 `mounts=[...]` 已经列出 `/storage/emulated` 与 `/storage/emulated/0` 的 FUSE 挂载，
