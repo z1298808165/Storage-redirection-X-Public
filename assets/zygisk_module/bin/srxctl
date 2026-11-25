@@ -154,9 +154,8 @@ signal_media_provider_hot_reload() {
 }
 
 hot_reload_completed_count() {
-  provider_pid="$1"
-  grep -F "media provider hot reload completed" "$RUNNING_LOG_FILE" 2>/dev/null \
-    | grep -F "pid=$provider_pid" 2>/dev/null | wc -l
+  grep -F "media provider hot reload completed request=$1 " "$RUNNING_LOG_FILE" 2>/dev/null \
+    | awk -v pid="pid=$2" '$NF == pid { n++ } END { print n+0 }'
 }
 
 running_app_remount_completed_count() {
@@ -174,10 +173,10 @@ wait_for_media_provider_hot_reload() {
   i=0
   while [ "$i" -lt "$attempts" ]; do
     ack=$(cat "$HOT_RELOAD_ACK_FILE" 2>/dev/null || true)
-    if printf '%s\n' "$ack" | grep -Fq "stage=hot_reload_ok request=$request_id pid=$provider_pid boot_id=$boot_id"; then
+    if [ -n "$boot_id" ] && [ "$ack" = "stage=hot_reload_ok request=$request_id pid=$provider_pid boot_id=$boot_id" ]; then
       return 0
     fi
-    current_count=$(hot_reload_completed_count "$provider_pid")
+    current_count=$(hot_reload_completed_count "$request_id" "$provider_pid")
     if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
       return 0
     fi
@@ -210,6 +209,7 @@ request_running_app_remount() {
     current_count=$(running_app_remount_completed_count "$request_id")
     if [ "$current_count" -gt "$before_count" ] 2>/dev/null; then
       log_ctl "running app remount completed request=$request_id"
+      printf 'running app remount completed request=%s\n' "$request_id"
       return 0
     fi
     usleep 100000 2>/dev/null || sleep 0.1
@@ -223,9 +223,10 @@ request_running_app_remount() {
 media_provider_hook_ready() {
   pid="$1"
   boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
-  [ -n "$pid" ] && [ -n "$boot_id" ] || return 1
-  install_state=$(cat "$LOGS_DIR/.media_hook_install_state" 2>/dev/null)
-  printf '%s\n' "$install_state" | grep -Fq "stage=init_ok pid=$pid boot_id=$boot_id "
+  process_start_ticks=$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $20}')
+  [ -n "$pid" ] && [ -n "$boot_id" ] && [ -n "$process_start_ticks" ] || return 1
+  install_state=$(cat "$LOGS_DIR/.media_hook_install_state.$pid" 2>/dev/null || cat "$LOGS_DIR/.media_hook_install_state" 2>/dev/null)
+  printf '%s\n' "$install_state" | grep -Fq "stage=init_ok pid=$pid boot_id=$boot_id start_ticks=$process_start_ticks "
 }
 
 wait_for_media_provider_hook_ready() {
@@ -266,7 +267,7 @@ restart_media_provider() {
     remount_fail_reason hot-reload-request-failed
     return 1
   }
-  before_count=$(hot_reload_completed_count "$provider_pid")
+  before_count=$(hot_reload_completed_count "$request_id" "$provider_pid")
   if ! signal_media_provider_hot_reload "$provider_pid"; then
     log_ctl "media provider hot reload signal failed pid=$provider_pid"
     remount_fail_reason hot-reload-signal-failed

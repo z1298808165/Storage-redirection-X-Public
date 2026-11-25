@@ -101,6 +101,21 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
 
     let methods = [
         JNINativeMethod {
+            name: c"isVerifiedMediaFd".as_ptr() as *mut _,
+            signature: c"(Ljava/lang/String;I)Z".as_ptr() as *mut _,
+            fnPtr: is_verified_media_fd as *mut _,
+        },
+        JNINativeMethod {
+            name: c"pushScannedFile".as_ptr() as *mut _,
+            signature: c"(Ljava/lang/String;I)V".as_ptr() as *mut _,
+            fnPtr: push_scanned_file as *mut _,
+        },
+        JNINativeMethod {
+            name: c"popScannedFile".as_ptr() as *mut _,
+            signature: c"()V".as_ptr() as *mut _,
+            fnPtr: pop_scanned_file as *mut _,
+        },
+        JNINativeMethod {
             name: DO_HOOK_NAME.as_ptr() as *mut _,
             signature: DO_HOOK_SIG.as_ptr() as *mut _,
             fnPtr: do_hook as *mut _,
@@ -999,14 +1014,55 @@ unsafe extern "C" fn exit_caller_scope(_env: *mut JNIEnv, _class: jclass) {
     crate::hook::exit_java_caller_scope();
 }
 
+unsafe extern "C" fn is_verified_media_fd(
+    env: *mut JNIEnv,
+    _class: jclass,
+    path: jstring,
+    fd: jni_sys::jint,
+) -> jboolean {
+    if fd < 0 || path.is_null() || env.is_null() {
+        return jni_sys::JNI_FALSE;
+    }
+    let expected = crate::zygisk::jni::get_jstring_utf8(env, path);
+    let Ok(link) = std::ffi::CString::new(format!("/proc/self/fd/{fd}")) else {
+        return jni_sys::JNI_FALSE;
+    };
+    let mut bytes = [0_u8; libc::PATH_MAX as usize + 1];
+    // 调用方可见的 readlink 结果可能将私有描述符改写为公共名称。
+    // SAFETY: link 在调用期间持有以 NUL 结尾的路径，bytes 可写且传入长度等于缓冲区容量。
+    let size = unsafe {
+        libc::syscall(
+            libc::SYS_readlinkat,
+            libc::AT_FDCWD,
+            link.as_ptr(),
+            bytes.as_mut_ptr(),
+            bytes.len(),
+        )
+    };
+    (size > 0
+        && size as usize == expected.len()
+        && bytes.get(..size as usize) == Some(expected.as_bytes())) as jboolean
+}
+
+unsafe extern "C" fn push_scanned_file(
+    env: *mut JNIEnv,
+    _class: jclass,
+    logical: jstring,
+    fd: jni_sys::jint,
+) {
+    crate::hook::push_scanned_file(crate::zygisk::jni::get_jstring_utf8(env, logical), fd);
+}
+
+unsafe extern "C" fn pop_scanned_file(_env: *mut JNIEnv, _class: jclass) {
+    crate::hook::pop_scanned_file();
+}
+
 unsafe extern "C" fn enter_provider_passthrough(_env: *mut JNIEnv, _class: jclass) {
     crate::hook::enter_provider_passthrough();
 }
 
 unsafe extern "C" fn exit_provider_passthrough(_env: *mut JNIEnv, _class: jclass) {
-    for (source, target) in crate::hook::exit_provider_passthrough() {
-        crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
-    }
+    crate::hook::exit_provider_passthrough();
 }
 
 unsafe extern "C" fn enter_provider_virtual_scope(_env: *mut JNIEnv, _class: jclass) {
@@ -1014,9 +1070,7 @@ unsafe extern "C" fn enter_provider_virtual_scope(_env: *mut JNIEnv, _class: jcl
 }
 
 unsafe extern "C" fn exit_provider_virtual_scope(_env: *mut JNIEnv, _class: jclass) {
-    for (source, target) in crate::hook::exit_provider_virtual_scope() {
-        crate::hook::cleanup_provider_redirect_source_directory(&source, &target);
-    }
+    crate::hook::exit_provider_virtual_scope();
 }
 
 unsafe extern "C" fn is_debug_logging_enabled(

@@ -35,11 +35,15 @@ class HookRegistrationTest(unittest.TestCase):
                 "should_hook_caller_module", "is_runtime_generated_or_java_artifact",
                 "is_java_artifact_module", "is_hook_sensitive_render_module",
                 "should_hook_system_writer_caller_module", "should_use_bridge_caller_filter",
+                "is_ignorable_refresh_failure", "is_module_parse_refresh_failure",
+                "is_deleted_jit_memfd_module",
             )
         )
         caller_filter += "\n" + next(
             line for line in source.splitlines() if line.startswith("const ZYGISK_MODULE_BASENAME:")
         )
+        for name in ("SQLITE_MODULE_BASENAME", "JIT_CACHE_MEMFD_PREFIX"):
+            caller_filter += "\n" + next(line for line in source.splitlines() if line.startswith(f"const {name}:"))
         start = source.index("const UNSTABLE_CALLER_MODULE_BASENAMES:")
         caller_filter += "\n" + source[start:source.index("];", start) + 2]
         harness = r'''
@@ -50,12 +54,14 @@ pub(crate) use log_message as warn;
 pub(crate) use log_message as error;
 mod srx_hook {
     pub type HookStub = u64;
-    pub struct RefreshError { pub module_path: String, pub errno: i32 }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SrxHookErrno { ReadElf, Format, SetProt, InvalidArg }
+    pub struct RefreshError { pub module_path: String, pub errno: SrxHookErrno }
     pub struct HookError {
         pub status: i32, pub stub: Option<HookStub>, pub errors: Vec<RefreshError>,
     }
     pub struct HookBatchError {
-        pub status: i32, pub stubs: Vec<HookStub>, pub errors: Vec<RefreshError>,
+        pub status: SrxHookErrno, pub stubs: Vec<HookStub>, pub errors: Vec<RefreshError>,
     }
     pub struct ClearReport {
         pub revision: u64, pub removed_slots: usize, pub remaining_slots: usize,
@@ -88,7 +94,7 @@ impl InterceptHub {
 // __BATCH__
 // __CALLER_FILTER__
 fn module_errors() -> Vec<srx_hook::RefreshError> {
-    vec![srx_hook::RefreshError { module_path: "libtest.so".into(), errno: 1 }]
+    vec![srx_hook::RefreshError { module_path: "libtest.so".into(), errno: srx_hook::SrxHookErrno::Format }]
 }
 fn main() {
     use srx_hook::*;
@@ -128,11 +134,27 @@ fn main() {
     })), None);
     assert_eq!(take_checked_hook_batch_stubs(Ok(vec![7, 9]), "test", "pkg"), Some(vec![7, 9]));
     assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
-        status: 1, stubs: vec![7, 9], errors: module_errors(),
-    }), "test", "pkg"), Some(vec![7, 9]));
+        status: SrxHookErrno::Format, stubs: vec![7, 9], errors: module_errors(),
+    }), "system-writer", "pkg"), Some(vec![7, 9]));
     assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
-        status: 1, stubs: vec![], errors: module_errors(),
+        status: SrxHookErrno::Format, stubs: vec![], errors: module_errors(),
     }), "test", "pkg"), None);
+    // 已提交 stub 不代表错误可忽略，非解析错误和缺失错误明细都必须拒绝。
+    for status in [SrxHookErrno::SetProt, SrxHookErrno::InvalidArg] {
+        assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
+            status, stubs: vec![7, 9], errors: module_errors(),
+        }), "system-writer", "pkg"), None);
+    }
+    assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
+        status: SrxHookErrno::Format, stubs: vec![7, 9], errors: vec![],
+    }), "system-writer", "pkg"), None);
+    assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
+        status: SrxHookErrno::Format, stubs: vec![7, 9], errors: module_errors(),
+    }), "full", "pkg"), None);
+    assert_eq!(take_checked_hook_batch_stubs(Err(HookBatchError {
+        status: SrxHookErrno::SetProt, stubs: vec![7, 9],
+        errors: vec![RefreshError { module_path: "/memfd:jit-cache (deleted)".into(), errno: SrxHookErrno::SetProt }],
+    }), "app-write", "pkg"), Some(vec![7, 9]));
     for result in [
         Ok(ClearReport::default()),
         Ok(ClearReport { remaining_slots: 1, ..Default::default() }),

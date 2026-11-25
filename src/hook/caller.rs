@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 const BINDER_SAVED_CALLER_HARD_LIMIT_MS: i64 = 30_000;
 const FUSE_CALLER_WINDOW_MS: i64 = 1_500;
+static BINDER_SYMBOLS: OnceLock<CallerBinderSymbols> = OnceLock::new();
 
 // 请求作用域内保留框架捕获的身份，底层文件操作不能用进程名或 UID 候选覆盖它。
 pub fn update_caller_package_for_current_thread(hub: &InterceptHub) {
@@ -142,7 +143,10 @@ fn resolve_java_caller_package(caller_uid: i32, caller_pid: i32) -> Option<Strin
 }
 
 fn resolve_caller_uid_by_binder() -> i32 {
-    let caller_uid = get_caller_binder_symbols().calling_uid().unwrap_or(-1);
+    let caller_uid = BINDER_SYMBOLS
+        .get()
+        .and_then(CallerBinderSymbols::calling_uid)
+        .unwrap_or(-1);
     let self_uid = unsafe { getuid() } as i32;
     if caller_uid == self_uid {
         return -1;
@@ -152,7 +156,10 @@ fn resolve_caller_uid_by_binder() -> i32 {
 }
 
 fn resolve_caller_pid_by_binder() -> i32 {
-    let caller_pid = get_caller_binder_symbols().calling_pid().unwrap_or(-1);
+    let caller_pid = BINDER_SYMBOLS
+        .get()
+        .and_then(CallerBinderSymbols::calling_pid)
+        .unwrap_or(-1);
     if caller_pid <= 0 || caller_pid == unsafe { getpid() } as i32 {
         return -1;
     }
@@ -188,9 +195,9 @@ impl CallerBinderSymbols {
     }
 }
 
-fn get_caller_binder_symbols() -> &'static CallerBinderSymbols {
-    static SYMBOLS: OnceLock<CallerBinderSymbols> = OnceLock::new();
-    SYMBOLS.get_or_init(|| {
+pub(super) fn initialize_binder_symbols() {
+    // 加载线程持有链接器锁时可能重入 open，因此钩子读取 Binder 符号时不能等待初始化完成。
+    BINDER_SYMBOLS.get_or_init(|| {
         let mut symbols = CallerBinderSymbols::default();
 
         unsafe {
@@ -216,7 +223,7 @@ fn get_caller_binder_symbols() -> &'static CallerBinderSymbols {
         }
 
         symbols
-    })
+    });
 }
 
 unsafe fn load_symbol<T>(handle: *mut c_void, name: &str) -> Option<T> {

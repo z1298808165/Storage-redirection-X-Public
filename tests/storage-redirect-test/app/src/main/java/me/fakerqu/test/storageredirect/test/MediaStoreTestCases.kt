@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.provider.MediaStore
 import android.util.Size
 import java.io.File
@@ -318,10 +319,11 @@ class MediaStoreTestCases(
           } catch (e: FileNotFoundException) {
             providerMessage = e.message.orEmpty()
           }
+          val outcome =
+              providerMessage?.let { "collection URI delegated to provider ($it)" }
+                  ?: "collection URI open delegated without remapping"
           testCase.pass(
-              message =
-                  providerMessage?.let { "collection URI delegated to provider ($it)" }
-                      ?: "collection URI open delegated without remapping",
+              message = "$outcome caller_uid=${Process.myUid()} caller_pid=${Process.myPid()}"
           )
         } finally {
           source.close()
@@ -559,6 +561,54 @@ class MediaStoreTestCases(
                           "actualSize" to readBack.size.toString(),
                       ),
           )
+        }
+        args.length?.let { expectedSize ->
+          val size = MediaStore.MediaColumns.SIZE
+          val pending = MediaStore.MediaColumns.IS_PENDING
+          val id = MediaStore.MediaColumns._ID
+          val published = mapOf(size to expectedSize, pending to 0L, id to ContentUris.parseId(uri))
+          val projections =
+              listOf(arrayOf(size, pending), arrayOf(pending, size), arrayOf(id, size, pending))
+          for (columns in projections) {
+            context.contentResolver.query(uri, columns, null, null, null).use { row ->
+              val values =
+                  row?.takeIf { it.moveToFirst() }
+                      ?.let { cursor ->
+                        cursor.columnNames.indices.map {
+                          if (cursor.isNull(it)) null else cursor.getLong(it)
+                        }
+                      }
+              val expectedValues = columns.map(published::getValue)
+              if (
+                  row == null ||
+                      !row.columnNames.contentEquals(columns) ||
+                      row.count != 1 ||
+                      values != expectedValues
+              ) {
+                return@measure testCase.fail(
+                    message = "published row metadata mismatch",
+                    metadata =
+                        uriMetadata(uri) +
+                            mapOf(
+                                "projection" to columns.joinToString(),
+                                "columns" to row?.columnNames?.joinToString().orEmpty(),
+                                "rows" to row?.count.toString(),
+                                "expected" to expectedValues.toString(),
+                                "actual" to values.toString(),
+                            ),
+                )
+              }
+            }
+          }
+          val columns = arrayOf(size, pending)
+          context.contentResolver.query(uri, columns, "_id = ?", arrayOf("-1"), null).use { empty ->
+            if (empty == null || empty.count != 0 || !empty.columnNames.contentEquals(columns)) {
+              return@measure testCase.fail(
+                  message = "empty item cursor changed shape",
+                  metadata = uriMetadata(uri),
+              )
+            }
+          }
         }
         testCase.pass(
             message = if (expected != null) "read matched expected payload" else "read completed",

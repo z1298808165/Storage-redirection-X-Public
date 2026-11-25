@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from test_mount_metadata_scope import function_body
+from test_mount_identity_syntax import extract_fn
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,11 +36,15 @@ class MediaPendingLifecycleTest(unittest.TestCase):
             "private static void rememberRedirectedMediaTarget(",
             "private static void commitRedirectedPendingFile(",
             "private static ContentValues findContentValues(",
-            "private static boolean isPendingFileOf(",
+            "static boolean isPendingFileOf(",
             "private static java.io.File findPendingMediaFile(",
             "private static java.io.File publicMediaParentForSandbox(",
             "private static CallerIdentity currentCallerIdentity()",
             "private static String callerResourceKey(Object resource)",
+            "private static String patchPendingMediaUpdatePath(",
+            "private static String mediaStoreRelativePath(",
+            "private static void replaceActualArg(",
+            "private static int findMutationUriIndex(",
         ]
         methods = []
         for signature in signatures:
@@ -60,6 +65,8 @@ public class PendingFixture {
     CallerIdentity(int uid, String packageName) { this.uid=uid; this.packageName=packageName; }
   }
   static class ContentValues extends HashMap<String,Object> {
+    ContentValues() {}
+    ContentValues(ContentValues other) { super(other); }
     String getAsString(String k) { return (String)get(k); }
     Integer getAsInteger(String k) { return (Integer)get(k); }
   }
@@ -85,10 +92,11 @@ public class PendingFixture {
     ArrayDeque<CallerIdentity> stack=CALLER_IDENTITIES.get();
     stack.pop(); if(stack.isEmpty()) CALLER_IDENTITIES.remove();
   }
-  static int findMutationUriIndex(Object[] args) {
-    for(int i=0;i<args.length;i++) if(args[i] instanceof android.net.Uri) return i;
-    return -1;
+  static class MediaStore {
+    static class MediaColumns { static final String DATA="_data", RELATIVE_PATH="relative_path"; }
   }
+  static class MediaFileBuildContext { MediaFileBuildContext(String path) {} }
+  static final ThreadLocal<MediaFileBuildContext> MEDIA_FILE_BUILD_CONTEXT = new ThreadLocal<>();
   static void check(boolean value) {
     if(!value) throw new AssertionError("check failed at line "+Thread.currentThread().getStackTrace()[2].getLineNumber());
   }
@@ -98,6 +106,32 @@ public class PendingFixture {
     android.net.Uri uri=new android.net.Uri("content://media/external/file/1");
     enterCallerScope(10123,"test.owner");
     String resourceKey=callerResourceKey(uri);
+    ContentValues publish=new ContentValues();
+    publish.put("is_pending",0); publish.put("_size",34);
+    Object[] actual={uri,publish}, raw={new Object(),uri,publish};
+    String registered="/storage/emulated/0/Documents/probe.txt";
+    check("no_uri".equals(patchPendingMediaUpdatePath(raw,new Object[]{publish})));
+    check("no_target".equals(patchPendingMediaUpdatePath(raw,actual)));
+    REDIRECTED_MEDIA_TARGETS.put(resourceKey,registered);
+    check("no_values".equals(patchPendingMediaUpdatePath(raw,new Object[]{uri})));
+    for (Integer state : new Integer[]{null, 1}) {
+      ContentValues metadata = new ContentValues();
+      metadata.put("_size", 27);
+      if (state != null) metadata.put("is_pending", state);
+      Object[] request = {new Object(), uri, metadata};
+      check("not_publish".equals(patchPendingMediaUpdatePath(request, new Object[]{uri,metadata})));
+      check(request[2] == metadata && !metadata.containsKey("_data"));
+      check(MEDIA_FILE_BUILD_CONTEXT.get() == null);
+      check(registered.equals(REDIRECTED_MEDIA_TARGETS.get(resourceKey)));
+    }
+    enterCallerScope(10123,"test.other");
+    check("no_target".equals(patchPendingMediaUpdatePath(raw,actual)) && raw[2]==publish);
+    exitCallerScope();
+    check("patched".equals(patchPendingMediaUpdatePath(raw,actual)) && raw[2]==actual[1]);
+    ContentValues patched=(ContentValues)raw[2];
+    check(publish.size()==2 && patched.size()==4 && registered.equals(patched.get("_data")));
+    check("Documents/".equals(patched.get("relative_path")) && patched.get("_size").equals(34));
+    REDIRECTED_MEDIA_TARGETS.remove(resourceKey);
     ContentValues insert=new ContentValues();
     insert.put("relative_path","Pictures/"); insert.put("_display_name","photo.jpg");
     mapping=target.toString();
@@ -298,15 +332,30 @@ public class PublicFallbackFixture {
 
 
 class MediaDirectoryScopeTest(unittest.TestCase):
-    def test_column_redirect_registers_existing_scoped_cleanup(self):
+    def test_column_redirect_exposes_ready_sandbox_before_provider_queries(self):
         source = (ROOT / "java_src/org/srx/hook/Hooker.java").read_text(encoding="utf-8")
         body = function_body(source, "public Object providerMediaFileColumnCallback(")
-        self.assertIn("rememberProviderRedirectSourceDirectory(publicParent.getPath(), directParent.getPath())", body)
-        self.assertLess(body.index("finally"), body.index("rememberProviderRedirectSourceDirectory"))
-        native = (ROOT / "src/hook/ops/mutation/dir.rs").read_text(encoding="utf-8")
-        cleanup = function_body(native, "pub(crate) fn cleanup_provider_redirect_source_directory(")
-        self.assertIn("is_public_default_sandbox_redirect", cleanup)
-        self.assertIn("libc::rmdir", function_body(native, "fn cleanup_empty_redirect_source_dir("))
+        self.assertIn("new File(publicPath).getParent()", body)
+        self.assertIn("new File(directPath).getParent()", body)
+        self.assertNotIn(".getParentFile()", body)
+        registration = body.index("rememberProviderRedirectSourceDirectory(publicParent, directParent)")
+        self.assertLess(body.index("new File(directParent).isDirectory()"), registration)
+        self.assertLess(registration, body.index("MEDIA_FILE_BUILD_CONTEXT.set"))
+
+    def test_nested_directory_queries_expire_without_touching_public_storage(self):
+        context = (ROOT / "src/hook/context.rs").read_text(encoding="utf8")
+        methods = ("enter_provider_passthrough", "exit_provider_passthrough", "is_provider_passthrough_active",
+                   "enter_provider_virtual_scope", "exit_provider_virtual_scope", "is_provider_virtual_scope_active",
+                   "clear_provider_virtual_dirs_if_idle", "remember_provider_passthrough_virtual_dir",
+                   "provider_passthrough_virtual_dir_target")
+        fixture = (ROOT / ".github/tests/harness/provider_directory_scope.rs").read_text(encoding="utf8")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "scope.rs"
+            binary = root / ("scope.exe" if os.name == "nt" else "scope")
+            source.write_text(fixture + "\n" + "\n".join(extract_fn(context, name) for name in methods), encoding="utf8")
+            subprocess.run(["rustc", "--edition=2024", source, "-o", binary], check=True, timeout=60)
+            subprocess.run([binary], cwd=root, check=True, timeout=30)
 
 
 class FuseBackingLifetimeTest(unittest.TestCase):

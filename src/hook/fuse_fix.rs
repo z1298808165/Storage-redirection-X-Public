@@ -41,6 +41,7 @@ static TARGET_ENABLED: AtomicBool = AtomicBool::new(false);
 static TARGET_PACKAGE: RwLock<String> = RwLock::new(String::new());
 static COMPARE_PATCH_LOCK: Mutex<()> = Mutex::new(());
 static RETRY_COUNT: AtomicU32 = AtomicU32::new(0);
+static LONG_TAIL_RETRY_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
 const MAX_RETRY_COUNT: u32 = 16;
 // 重试预算耗尽后的长尾重试间隔：fuse_jni 由 FuseDaemonThread 按需 dlopen，
 // 加载时机不受 MP 流量控制（2026-10-30 A17 模拟器实测：首批 open 耗尽 16 次，
@@ -80,6 +81,13 @@ pub fn retry_if_target_enabled() {
         return;
     }
     install_target_if_enabled();
+}
+
+/// 成功加载库是新的安装机会，不受此前「库尚未出现」的退避预算限制。
+pub(crate) fn retry_after_late_load() {
+    RETRY_COUNT.store(0, Ordering::Relaxed);
+    LONG_TAIL_RETRY_MS.store(i64::MIN / 2, Ordering::Relaxed);
+    retry_if_target_enabled();
 }
 
 pub fn refresh_runtime_config() {
@@ -223,7 +231,6 @@ fn install_target_if_enabled() {
     if RETRY_COUNT.load(Ordering::Relaxed) >= MAX_RETRY_COUNT {
         // 预算耗尽后降频长尾重试：fuse_jni 映射完成后（FuseDaemon 启动）的
         // 下一次触发即装上零宽修复；成功后由 installed 状态短路。
-        static LONG_TAIL_RETRY_MS: AtomicI64 = AtomicI64::new(i64::MIN / 2);
         let now_ms = crate::platform::paths::monotonic_ms();
         let last_ms = LONG_TAIL_RETRY_MS.load(Ordering::Relaxed);
         if now_ms.saturating_sub(last_ms) < LONG_TAIL_RETRY_INTERVAL_MS {

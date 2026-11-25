@@ -25,10 +25,11 @@ const READY_STAGE: &str = "init_ok";
 pub(super) struct MediaHookState {
     pub(super) stage: String,
     pub(super) pid: i32,
+    pub(super) start_ticks: Option<u64>,
     pub(super) boot_id: String,
 }
 
-/// 解析 `stage=... pid=... boot_id=... boot_completed=...` 形式的单行记录。
+/// 解析 `stage=... pid=... start_ticks=... boot_id=...` 形式的单行记录。
 fn parse_install_state(text: &str) -> Option<MediaHookState> {
     let line = text.lines().next()?.trim();
     if line.is_empty() {
@@ -36,6 +37,7 @@ fn parse_install_state(text: &str) -> Option<MediaHookState> {
     }
     let mut stage = None;
     let mut pid = None;
+    let mut start_ticks = None;
     let mut boot_id = None;
     for field in line.split_whitespace() {
         let Some((key, value)) = field.split_once('=') else {
@@ -44,6 +46,7 @@ fn parse_install_state(text: &str) -> Option<MediaHookState> {
         match key {
             "stage" => stage = Some(value.to_string()),
             "pid" => pid = value.parse::<i32>().ok(),
+            "start_ticks" => start_ticks = value.parse::<u64>().ok(),
             "boot_id" => boot_id = Some(value.to_string()),
             _ => {}
         }
@@ -51,19 +54,23 @@ fn parse_install_state(text: &str) -> Option<MediaHookState> {
     Some(MediaHookState {
         stage: stage?,
         pid: pid?,
+        start_ticks,
         boot_id: boot_id.unwrap_or_default(),
     })
 }
 
-fn read_install_state() -> Option<MediaHookState> {
-    let text = fs::read_to_string(module_paths::MEDIA_HOOK_INSTALL_STATE_FILE).ok()?;
+fn read_install_state(pid: i32) -> Option<MediaHookState> {
+    let path = module_paths::MEDIA_HOOK_INSTALL_STATE_FILE;
+    let text = fs::read_to_string(format!("{path}.{pid}"))
+        .or_else(|_| fs::read_to_string(path))
+        .ok()?;
     parse_install_state(&text)
 }
 
 /// 判断记录是否证明「当前这个 MediaProvider 进程」的 hook 已就绪。
 ///
-/// 记录文件在 `logs/` 下跨重启保留，而 pid 会跨 boot 复用，因此必须同时比对
-/// boot id；boot id 缺失或为 unknown 时按不可信处理，不据此认定已就绪。
+/// 记录文件在 `logs/` 下跨重启保留；必须同时比对 boot id 和 PID 启动时钟，才能排除
+/// 跨 boot 或同一 boot 内的 PID 复用。任一身份字段缺失时都不认定为已就绪。
 pub(super) fn is_hook_ready_for(
     state: Option<&MediaHookState>,
     media_pid: i32,
@@ -79,6 +86,9 @@ pub(super) fn is_hook_ready_for(
         return false;
     }
     state.boot_id == current_boot_id
+        && state.start_ticks.is_some_and(|start_ticks| {
+            crate::platform::process_start_time_ticks(media_pid) == Some(start_ticks)
+        })
 }
 
 /// 上一次已登记的跳过原因，用于「仅在判定结果变化时输出」。
@@ -168,11 +178,10 @@ pub(super) fn heal_if_needed(
     }
 
     let current_boot_id = crate::platform::read_boot_id();
-    let state = read_install_state();
     let stale: Vec<i32> = media_processes
         .iter()
         .map(|(pid, _)| *pid)
-        .filter(|pid| !is_hook_ready_for(state.as_ref(), *pid, &current_boot_id))
+        .filter(|pid| !is_hook_ready_for(read_install_state(*pid).as_ref(), *pid, &current_boot_id))
         .collect();
     if stale.is_empty() {
         log_skip_once(
@@ -193,6 +202,7 @@ pub(super) fn heal_if_needed(
     }
     LAST_SKIP_REASON.store(SKIP_NONE, Ordering::Relaxed);
 
+    let state = read_install_state(stale[0]);
     log::warn!(
         "media hook self-heal: restart MediaProvider pids={:?} stage={} record_pid={} record_boot={}",
         stale,

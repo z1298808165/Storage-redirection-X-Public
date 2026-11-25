@@ -66,7 +66,9 @@ pub(super) fn resolve_system_writer_context(
 
     let has_enabled_apps = config.has_effective_enabled_redirect_apps_for_user(app_uid);
 
-    if context.has_merged_writer_mappings || has_enabled_apps {
+    // 配置变更后 MediaProvider 进程可能继续运行。
+    // 热启用后的文件查询与 Java 写入需要采用相同的调用方规则。
+    if context.is_media_provider || context.has_merged_writer_mappings || has_enabled_apps {
         *should_redirect = true;
         *is_system_writer_hook_redirect = true;
     } else {
@@ -87,6 +89,8 @@ pub(super) fn resolve_system_writer_context(
         );
     } else if has_enabled_apps {
         log::info!("writer map-mode on: effective enabled apps exist, caller default redirect");
+    } else if context.is_media_provider {
+        log::info!("writer hooks ready for future media caller profiles");
     } else {
         log::info!("writer map-mode skip: no enabled apps, fallback monitor/bypass");
     }
@@ -141,12 +145,11 @@ pub(super) fn should_install_java_hook_for_writer(context: &SystemWriterContext)
 /// 往往发生在测试流清空 logcat 之前，安装结果事后在两边都取不到。落盘后即可区分
 /// 「hook 从未安装」与「已安装但未触发」这两种需要相反修复的情况。
 ///
-/// 记录进程号，用于把该结果与排查时实际在跑的 MediaProvider 对应起来：
-/// MediaProvider 在一次开机内可能重启多次，每次 specialize 都会覆盖本文件，
-/// 缺少进程号时无法判断读到的结果属于哪个进程。
+/// 按 PID 分别保留状态，避免另一用户的 Provider 覆盖当前进程的就绪凭据；
+/// 无后缀文件仅保留最新记录供诊断和旧版读取者使用。
 ///
-/// 同时记录 boot id。本文件位于跨重启保留的 `logs/` 下，而进程号会跨 boot 复用，
-/// 因此仅凭进程号可能把上一次开机的残留记录误判为本次开机的结果。
+/// 同时记录 boot id 和进程启动时钟。本文件位于跨重启保留的 `logs/` 下，PID 会在
+/// 同一次开机内复用；两者共同区分当前进程实例与遗留记录。
 pub(super) fn record_media_hook_install_state(stage: &str) {
     let path = module_paths::MEDIA_HOOK_INSTALL_STATE_FILE;
     if let Some(parent) = std::path::Path::new(path).parent() {
@@ -160,14 +163,18 @@ pub(super) fn record_media_hook_install_state(stage: &str) {
     } else {
         boot_id
     };
-    let record =
-        format!("stage={stage} pid={pid} boot_id={boot_id} boot_completed={boot_completed}\n");
-    let _ = std::fs::write(path, record.as_bytes());
-    if let Ok(c_path) = CString::new(path) {
-        // SAFETY: c_path 由 CString 持有且在本作用域内存活，保证是以 NUL 结尾的
-        // 合法 C 字符串指针；chmod 只按该路径调整权限位，不写入内存。
-        unsafe {
-            libc::chmod(c_path.as_ptr(), 0o644);
+    let start_ticks = platform::process_start_time_ticks(pid as i32)
+        .map_or_else(|| "unknown".to_string(), |ticks| ticks.to_string());
+    let record = format!(
+        "stage={stage} pid={pid} boot_id={boot_id} start_ticks={start_ticks} boot_completed={boot_completed}\n"
+    );
+    for path in [format!("{path}.{pid}"), path.to_string()] {
+        let _ = std::fs::write(&path, record.as_bytes());
+        if let Ok(c_path) = CString::new(path) {
+            // SAFETY: CString 在调用期间有效，chmod 只调整该记录文件的权限。
+            unsafe {
+                libc::chmod(c_path.as_ptr(), 0o644);
+            }
         }
     }
 }

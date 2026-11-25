@@ -17,6 +17,8 @@ RUNTIME_DISABLE_FILE="$MODDIR/.runtime_disabled"
 
 mkdir -p "$LOGS_DIR"
 chmod 755 "$LOGS_DIR"
+# 每进程的 hook 凭据只服务当前开机，避免跨开机积累旧 PID 文件。
+rm -f "$LOGS_DIR"/.media_hook_install_state.[0-9]*
 touch "$PACKAGE_EVENT_LOG_FILE"
 chmod 666 "$PACKAGE_EVENT_LOG_FILE" 2>/dev/null
 touch "$RECENT_SOURCE_HINT_FILE" "$RECENT_PATH_CALLER_HINT_FILE"

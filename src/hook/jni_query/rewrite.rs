@@ -1701,11 +1701,19 @@ fn legacy_row_action(
     if !allow_missing {
         let rewritten_exists = storage_path_exists_for_caller(changed, caller_uid);
         let mapping_view = is_mapping_view_rewrite(path_text, changed, caller_uid);
-        if !rewritten_exists && (!mapping_view || !is_media_store_pending_path(path_text)) {
+        if should_hide_missing_rewritten_row(path_text, rewritten_exists, mapping_view) {
             return Some(String::new());
         }
     }
     Some(changed.to_string())
+}
+
+fn should_hide_missing_rewritten_row(
+    path_text: &str,
+    rewritten_exists: bool,
+    mapping_view: bool,
+) -> bool {
+    !rewritten_exists && !mapping_view && !is_media_store_pending_path(path_text)
 }
 
 /// Java `storagePathExistsForCaller` 的等价实现：先看路径本身，再看它经重定向后的落点。
@@ -1739,3 +1747,7 @@ fn is_mapping_view_rewrite(original: &str, rewritten: &str, caller_uid: i32) -> 
     ));
     !left.is_empty() && left == right
 }
+
+#[cfg(test)]
+#[path = "../../../tests/native-unit/cursor_item_visibility.rs"]
+mod cursor_item_visibility;

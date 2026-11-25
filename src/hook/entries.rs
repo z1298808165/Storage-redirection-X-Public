@@ -49,7 +49,10 @@ const PROFILE_READ_RUNTIME: HookProfileSet =
 const PROFILE_BINDER_WRITER: HookProfileSet =
     HookProfileSet::from_profile(HookProfile::SystemWriter).with(HookProfile::SystemWriterBootLite);
 const PROFILE_LATE_LOAD_REFRESH: HookProfileSet =
-    HookProfileSet::from_profile(HookProfile::AppWrite).with(HookProfile::FuseFix);
+    HookProfileSet::from_profile(HookProfile::AppWrite)
+        .with(HookProfile::FuseFix)
+        .with(HookProfile::SystemWriter)
+        .with(HookProfile::SystemWriterBootLite);
 
 pub struct HookEntry {
     pub symbol: &'static str,

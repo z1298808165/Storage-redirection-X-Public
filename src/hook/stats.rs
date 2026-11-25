@@ -379,6 +379,7 @@ impl InterceptHub {
         }
 
         log::info!("hook install start");
+        super::caller::initialize_binder_symbols();
         let errno = srx_hook::init(srx_hook::HookMode::Automatic, false);
         if !errno.is_ok() {
             log::warn!("srx_hook init failed err={:?}", errno);
@@ -423,9 +424,6 @@ impl InterceptHub {
             selected_hook_count
         );
 
-        let mut hook_list: Vec<&'static str> = Vec::new();
-        let mut optional_missing: Vec<&'static str> = Vec::new();
-        let mut required_failed: Vec<&'static str> = Vec::new();
         let caller_allow_filter = if should_use_bridge_caller_filter(profile_name) {
             system_writer_hook_caller_allow_filter
         } else {
@@ -452,9 +450,7 @@ impl InterceptHub {
             &self.get_package_name(),
         );
         match stubs {
-            Some(stubs) if stubs.len() == selected_entries.len() => {
-                hook_list.extend(selected_entries.iter().map(|entry| entry.symbol));
-            }
+            Some(stubs) if stubs.len() == selected_entries.len() => {}
             Some(stubs) => {
                 log::error!(
                     "hook batch stub count mismatch profile={} pkg={} expected={} actual={}",
@@ -466,101 +462,39 @@ impl InterceptHub {
                 return self.cleanup_after_install_failure("hook_batch_stub_count");
             }
             None => {
-                for entry in &selected_entries {
-                    if entry.is_optional {
-                        optional_missing.push(entry.symbol);
-                        log::warn!(
-                            "optional hook unavailable sym={} profile={} pkg={}",
-                            entry.symbol,
-                            profile_name,
-                            self.get_package_name()
-                        );
-                    } else {
-                        required_failed.push(entry.symbol);
-                        log::warn!(
-                            "hook register failed sym={} required=true profile={} pkg={}",
-                            entry.symbol,
-                            profile_name,
-                            self.get_package_name()
-                        );
-                    }
-                }
+                log::warn!(
+                    "hook batch rejected profile={} pkg={} selected_count={} optional_count={}",
+                    profile_name,
+                    self.get_package_name(),
+                    selected_hook_count,
+                    selected_entries
+                        .iter()
+                        .filter(|entry| entry.is_optional)
+                        .count()
+                );
+                return self.cleanup_after_install_failure("hook_batch_registration");
             }
         }
 
-        if !required_failed.is_empty() {
-            log::warn!(
-                "required hooks failed profile={} pkg={} failed_count={} failed=[{}] registered_count={} selected_count={}",
-                profile_name,
-                self.get_package_name(),
-                required_failed.len(),
-                required_failed.join(", "),
-                hook_list.len(),
-                selected_hook_count
-            );
-            return self.cleanup_after_install_failure("required_hook_registration");
-        }
-
-        let hook_list_text = hook_list.join(", ");
+        let hook_list_text = selected_entries
+            .iter()
+            .map(|entry| entry.symbol)
+            .collect::<Vec<_>>()
+            .join(", ");
         log::info!(
-            "hook registered profile={} count={} optional_missing_count={} list={}",
+            "hook registered profile={} count={} list={}",
             profile_name,
-            hook_list.len(),
-            optional_missing.len(),
+            selected_hook_count,
             hook_list_text
         );
-        if !optional_missing.is_empty() {
-            log::warn!(
-                "optional hooks unavailable profile={} pkg={} missing=[{}]",
-                profile_name,
-                self.get_package_name(),
-                optional_missing.join(", ")
-            );
-        }
 
-        log::info!(
-            "hook refresh start profile={} pkg={} registered_count={}",
-            profile_name,
-            self.get_package_name(),
-            hook_list.len()
-        );
-        let (refresh_errno, refresh_errors) = srx_hook::refresh();
-        for (index, err) in refresh_errors.iter().enumerate() {
-            log::warn!(
-                "module resolve failed index={} total={} path={} err={:?} profile={} pkg={}",
-                index + 1,
-                refresh_errors.len(),
-                err.module_path,
-                err.errno,
-                profile_name,
-                self.get_package_name()
-            );
-        }
-        if !refresh_errno.is_ok() {
-            if is_ignorable_refresh_failure(refresh_errno, &refresh_errors, profile_name) {
-                log::warn!(
-                    "hook refresh degraded err={:?} errors_count={} profile={} pkg={}, keep hooks with ignored module failures",
-                    refresh_errno,
-                    refresh_errors.len(),
-                    profile_name,
-                    self.get_package_name()
-                );
-                self.is_hooks_installed.store(true, Ordering::Relaxed);
-                log::info!("hook install done (degraded)");
-                return true;
-            }
-            log::warn!(
-                "hook refresh failed err={:?} errors_count={} profile={} pkg={}",
-                refresh_errno,
-                refresh_errors.len(),
-                profile_name,
-                self.get_package_name()
-            );
-            return self.cleanup_after_install_failure("hook_refresh");
-        }
-
+        // Automatic 批次已应用并启动加载监视，不再同步执行第二次全量刷新。
         self.is_hooks_installed.store(true, Ordering::Relaxed);
-        log::info!("hook install done");
+        log::info!(
+            "hook install done profile={} pkg={}",
+            profile_name,
+            self.get_package_name()
+        );
         true
     }
 
@@ -754,7 +688,9 @@ fn take_checked_hook_batch_stubs(
                     detail.errno
                 );
             }
-            (!error.stubs.is_empty()).then_some(error.stubs)
+            (!error.stubs.is_empty()
+                && is_ignorable_refresh_failure(error.status, &error.errors, profile_name))
+            .then_some(error.stubs)
         }
     }
 }

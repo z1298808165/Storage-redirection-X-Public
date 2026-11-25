@@ -302,7 +302,7 @@ fn find_embedded_elf(entry_suffix: &str) -> Option<EmbeddedElf> {
         let Some(_addr_range) = parts.next() else {
             continue;
         };
-        let Some(_perms) = parts.next() else {
+        let Some(perms) = parts.next() else {
             continue;
         };
         let Some(_offset_str) = parts.next() else {
@@ -317,19 +317,21 @@ fn find_embedded_elf(entry_suffix: &str) -> Option<EmbeddedElf> {
         let Some(path) = parts.next() else {
             continue;
         };
-        if !path.ends_with(".apk") || apk_paths.iter().any(|known| known == path) {
+        // 原生入口必须已有可执行映射；资源和 dex 映射不能提供 load bias，避免读取整份 APK。
+        if !perms.contains('x')
+            || !path.ends_with(".apk")
+            || apk_paths.iter().any(|known| known == path)
+        {
             continue;
         }
         apk_paths.push(path.to_string());
     }
     if apk_paths.is_empty() {
-        // 一次性诊断（2026-10-30 A17 排查）：进程 maps 里没有任何 .apk 结尾的
-        // 路径条目，embedded 通道无从下手；正常设备上 MediaProvider 进程至少
-        // 会映射自身 APK（dex/vdex/art 条目）。
+        // 没有 APK 可执行段时原生库尚未加载，后续晚加载事件可再次定位。
         static EMPTY_DIAG: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         if !EMPTY_DIAG.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            log::warn!("elf embedded lookup: no .apk path in self maps suffix={entry_suffix}");
+            log::warn!("elf embedded lookup: no executable .apk mapping suffix={entry_suffix}");
         }
     }
 
@@ -455,14 +457,17 @@ fn find_zip_stored_elf(apk_path: &str, file: &[u8], entry_suffix: &str) -> Optio
                 .checked_add(local_extra_len)?;
             let data_size = uncompressed_size.min(compressed_size);
             let data_end = data_offset.checked_add(data_size)?;
-            let image = file.get(data_offset..data_end)?.to_vec();
-            if image.len() >= 4 && image[..4] == [0x7f, b'E', b'L', b'F'] {
+            let image = file.get(data_offset..data_end)?;
+            // 同名条目可能来自未加载的 ABI；只返回已有可执行映射的原生入口。
+            if image.starts_with(b"\x7fELF")
+                && find_embedded_elf_load_bias(apk_path, data_offset, data_size).is_some()
+            {
                 return Some(EmbeddedElf {
                     apk_path: apk_path.to_string(),
                     entry_name: name.to_string(),
                     data_offset,
                     data_size,
-                    image,
+                    image: image.to_vec(),
                 });
             }
         }

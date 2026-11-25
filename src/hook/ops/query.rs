@@ -48,6 +48,13 @@ fn should_bypass_system_writer_query(hub: &InterceptHub, op_name: &str) -> bool 
     true
 }
 
+unsafe fn scanned_file_fd(path: *const c_char) -> Option<c_int> {
+    if path.is_null() || !context::has_scanned_file() {
+        return None;
+    }
+    context::scanned_file_fd(&c_str_to_string(path))
+}
+
 unsafe fn call_query_with_writer_fallback<F>(
     hub: &InterceptHub,
     dirfd: c_int,
@@ -259,6 +266,12 @@ unsafe fn provider_passthrough_virtual_dir_standin_path(
     // pending 文件，而此时公共父目录仅以虚拟形式存在；其它普通子文件仍应
     // 返回真实查询结果，避免把 .nomedia 等不存在的文件误报为存在。
     let effective_path = crate::hook::provider_passthrough_virtual_query_dir(&path_text)?;
+    if effective_path != path_text && paths::media_store_pending_display_path(&path_text).is_some()
+    {
+        // 待发布文件必须按文件本身探测，父目录存在不能证明文件存在。
+        let backing = crate::hook::provider_passthrough_virtual_query_target(&path_text)?;
+        return CString::new(backing).ok();
+    }
     if effective_path != path_text {
         log::debug!(
             "virtual dir standin parent match path={} parent={}",
@@ -346,6 +359,9 @@ unsafe fn call_statx_syscall(
 }
 
 pub unsafe extern "C" fn hooked_stat(pathname: *const c_char, statbuf: *mut libc::stat) -> c_int {
+    if let Some(fd) = scanned_file_fd(pathname) {
+        return libc::fstat(fd, statbuf);
+    }
     let self_ptr = hooked_stat as *mut c_void;
     runtime::with_hook_guard(
         || {
@@ -402,6 +418,9 @@ pub unsafe extern "C" fn hooked_stat(pathname: *const c_char, statbuf: *mut libc
 }
 
 pub unsafe extern "C" fn hooked_lstat(pathname: *const c_char, statbuf: *mut libc::stat) -> c_int {
+    if let Some(fd) = scanned_file_fd(pathname) {
+        return libc::fstat(fd, statbuf);
+    }
     let self_ptr = hooked_lstat as *mut c_void;
     runtime::with_hook_guard(
         || {
@@ -463,6 +482,9 @@ pub unsafe extern "C" fn hooked_fstatat(
     statbuf: *mut libc::stat,
     flags: c_int,
 ) -> c_int {
+    if let Some(fd) = scanned_file_fd(pathname) {
+        return libc::fstat(fd, statbuf);
+    }
     let self_ptr = hooked_fstatat as *mut c_void;
     runtime::with_hook_guard(
         || {
@@ -655,6 +677,9 @@ pub unsafe extern "C" fn hooked_statx(
     mask: c_uint,
     statxbuf: *mut libc::statx,
 ) -> c_int {
+    if let Some(fd) = scanned_file_fd(pathname) {
+        return call_statx_syscall(fd, c"".as_ptr(), libc::AT_EMPTY_PATH, mask, statxbuf);
+    }
     let self_ptr = hooked_statx as *mut c_void;
     runtime::with_hook_guard(
         || {

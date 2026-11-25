@@ -74,12 +74,15 @@ public class Hooker {
   private static final HashSet<String> HOOKED_FILE_SYSTEM_ACCESS_METHODS = new HashSet<>();
   private static final HashSet<String> HOOKED_MEDIA_FILE_UTILS_METHODS = new HashSet<>();
   private static final HashSet<Method> HOOKED_MEDIA_FILE_COLUMN_METHODS = new HashSet<>();
+  private static final HashSet<ClassLoader> SCANNER_LOADERS = new HashSet<>();
+  private static volatile MediaScanFiles mediaScanFiles;
   private static final HashSet<Class<?>> MEDIA_FILE_COLUMN_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_CLASSES_LOGGED = new HashSet<>();
   private static final HashSet<String> MEDIA_FILE_UTILS_REJECTED_LOGGED = new HashSet<>();
   private static final HashSet<String> HOOKED_ACTIVITY_THREAD_METHODS = new HashSet<>();
   private static final ThreadLocal<MediaFileBuildContext> MEDIA_FILE_BUILD_CONTEXT =
       new ThreadLocal<>();
+  private static final ThreadLocal<Boolean> LOGICAL_MEDIA_FILE_COLUMNS = new ThreadLocal<>();
   private static volatile boolean QUERY_HOOK_PENDING = true;
   private static int QUERY_LOG_COUNT;
   private static int QUERY_NULL_EMPTY_LOG_COUNT;
@@ -159,6 +162,7 @@ public class Hooker {
   private static final ThreadLocal<Integer> PROVIDER_INTERNAL_DEPTH = new ThreadLocal<>();
   private static final ThreadLocal<Boolean> DIRECTORY_REDIRECT_ACTIVE = new ThreadLocal<>();
   private static final ThreadLocal<Integer> MEDIA_PROVIDER_CALLER_UID = new ThreadLocal<>();
+  private static final ThreadLocal<Boolean> MEDIA_BULK_ITEM = new ThreadLocal<>();
   private static final ThreadLocal<String> MEDIA_PROVIDER_MUTATION_METHOD = new ThreadLocal<>();
   public Method backup;
   private Member target;
@@ -168,6 +172,12 @@ public class Hooker {
   private native boolean doHookFileSystemCreateDirectory(Member target);
 
   private native boolean doUnhook(Member target);
+
+  static native boolean isVerifiedMediaFd(String physical, int fd);
+
+  private static native void pushScannedFile(String path, int fd);
+
+  private static native void popScannedFile();
 
   public Object callback(Object[] args) throws Throwable {
     if (isInsideProviderInternalCall()) {
@@ -220,11 +230,11 @@ public class Hooker {
     enterProviderCallerScope(args, callerUid, callerPid);
     try {
       Object[] actualArgs = unwrapArgs(args);
-      logOpenArgs(this, actualArgs, callerUid, callerPid);
       if (!isMediaProviderHookerOrReceiver(this, args) && !hasMediaStoreUriArg(actualArgs)) {
         return callBackupPassthrough(args);
       }
       boolean redirectEnabled = isRedirectEnabledForCallerUid(callerUid);
+      logOpenArgs(this, actualArgs, callerUid, callerPid, redirectEnabled);
       if (!redirectEnabled) {
         // 未开启重定向的调用方必须保持 MediaProvider 原始 URI/FD 语义。
         // 这里若继续尝试映射文件，可能把未配置应用的原图读取带入其它调用方
@@ -296,6 +306,7 @@ public class Hooker {
     // 首次 mutation 是拿到该 ClassLoader 并补装 FileUtils hook 的最后稳定入口。
     android.content.ContentProvider provider = providerReceiver(args);
     if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+      bindMediaScanProvider(provider);
       tryInstallMediaFileColumnHooks(provider.getClass());
       tryInstallMediaFileUtilsHooks(provider.getClass().getClassLoader());
     }
@@ -306,12 +317,19 @@ public class Hooker {
     tryInstallMediaProviderFromActivityThread();
     tryInstallMediaFileUtilsHooksForKnownLoaders();
     tryInstallMediaFileUtilsHooks(Thread.currentThread().getContextClassLoader());
-    if (isInsideProviderInternalCall()) {
+    Integer batchUid = MEDIA_PROVIDER_CALLER_UID.get();
+    boolean batchItem =
+        batchUid != null
+            && "bulkInsert".equals(MEDIA_PROVIDER_MUTATION_METHOD.get())
+            && "insert".equals(mutationMethod);
+    if (isInsideProviderInternalCall() && !batchItem) {
+      if ("insert".equals(mutationMethod) && Boolean.TRUE.equals(MEDIA_BULK_ITEM.get()))
+        return callBackup(args);
       return isInsertLikeMutation(mutationMethod)
           ? callBackupWithProviderPassthrough(args)
           : callBackup(args);
     }
-    int callerUid = android.os.Binder.getCallingUid();
+    int callerUid = batchItem ? batchUid.intValue() : android.os.Binder.getCallingUid();
     int callerPid = android.os.Binder.getCallingPid();
     enterProviderCallerScope(args, callerUid, callerPid);
     try {
@@ -328,12 +346,16 @@ public class Hooker {
               : new MutationPatchResult(false, false);
       // 仅对已启用重定向的调用方补回 pending 目标。MediaProvider、截图服务等
       // 系统调用方可能复用相同 URI；若无条件套用旧登记，会把普通写入改到其它应用的沙箱。
-      if ("update".equals(mutationMethod) && redirectEnabled) {
-        patchPendingMediaUpdatePath(args, actualArgs);
+      String pendingPath = null;
+      if ("update".equals(mutationMethod)) {
+        pendingPath = redirectEnabled ? patchPendingMediaUpdatePath(args, actualArgs) : "disabled";
       }
-      logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny);
+      logMutationArgs(this, actualArgs, callerUid, callerPid, patch.patchedAny, pendingPath);
       Integer previousUid = MEDIA_PROVIDER_CALLER_UID.get();
       String previousMethod = MEDIA_PROVIDER_MUTATION_METHOD.get();
+      if (batchItem) MEDIA_BULK_ITEM.set(true);
+      int uriIndex = findMutationUriIndex(actualArgs);
+      android.net.Uri item = uriIndex >= 0 ? (android.net.Uri) actualArgs[uriIndex] : null;
       MEDIA_PROVIDER_CALLER_UID.set(Integer.valueOf(callerUid));
       MEDIA_PROVIDER_MUTATION_METHOD.set(mutationMethod);
       enterProviderVirtualScope();
@@ -368,12 +390,24 @@ public class Hooker {
             // 提交搬运需要先消费 URI -> 沙箱目标登记；完成直写清理会删除该登记。
             commitRedirectedPendingFile(actualArgs, result, mutationMethod);
             finishDirectMediaWriteAfterUpdate(actualArgs, result, mutationMethod);
+            if ("update".equals(mutationMethod)
+                && item != null
+                && isSingleItemMediaUri(item)
+                && result instanceof Number
+                && ((Number) result).intValue() == 1) {
+              ContentValues published = findContentValues(actualArgs);
+              if (published != null
+                  && Integer.valueOf(0).equals(published.getAsInteger("is_pending"))
+                  && mediaScanFiles != null)
+                mediaScanFiles.finishPublication(item, packageNameForUid(callerUid));
+            }
           }
           probeInsertedMediaRow(provider, result, mutationMethod);
           logMutationResult(this, result);
           return result;
         } finally {
           exitProviderInternalCall();
+          if (batchItem) MEDIA_BULK_ITEM.remove();
           if (previousMethod == null) MEDIA_PROVIDER_MUTATION_METHOD.remove();
           else MEDIA_PROVIDER_MUTATION_METHOD.set(previousMethod);
           if (previousUid == null) MEDIA_PROVIDER_CALLER_UID.remove();
@@ -471,7 +505,8 @@ public class Hooker {
 
   /** MediaProvider 先通过 File.getParentFile 计算目录，再调用 mkdirs；父目录必须在此处完成重定向。 */
   public Object providerFileParentCallback(Object[] args) throws Throwable {
-    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())) return callBackup(args);
+    if (Boolean.TRUE.equals(DIRECTORY_REDIRECT_ACTIVE.get())
+        || Boolean.TRUE.equals(LOGICAL_MEDIA_FILE_COLUMNS.get())) return callBackup(args);
     if (!isInsertLikeMutation(MEDIA_PROVIDER_MUTATION_METHOD.get())) return callBackup(args);
     File receiver = directoryReceiver(args);
     if (receiver == null) return callBackup(args);
@@ -512,6 +547,7 @@ public class Hooker {
   public Object providerMediaFileUtilsCallback(Object[] args) throws Throwable {
     Method method = target instanceof Method ? (Method) target : null;
     String methodName = method == null ? null : method.getName();
+    if (Boolean.TRUE.equals(LOGICAL_MEDIA_FILE_COLUMNS.get())) return callBackup(args);
     if ("computeValuesFromData".equals(methodName) || "computeDataFromValues".equals(methodName)) {
       Object result;
       try {
@@ -539,39 +575,15 @@ public class Hooker {
       if (callerUid < ANDROID_APP_UID_START) return callBackup(args);
       String directParentPath =
           resolveMediaStoreDirectPathForValues(publicParent.getPath(), callerUid);
-      Object[] patchedArgs = args;
-      boolean patched = false;
-      if (directParentPath != null && !directParentPath.equals(publicParent.getPath())) {
-        patchedArgs = replaceFileArgument(patchedArgs, parentIndex, new File(directParentPath));
-        patched = true;
-      }
-      int relativeIndex = parentIndex + 1;
-      int displayNameIndex = parentIndex + 2;
-      String publicPath = null;
-      if (relativeIndex < actualArgs.length
-          && actualArgs[relativeIndex] instanceof String
-          && displayNameIndex < actualArgs.length
-          && actualArgs[displayNameIndex] instanceof String) {
-        String relativePath = (String) actualArgs[relativeIndex];
-        String displayName = (String) actualArgs[displayNameIndex];
-        String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
-        String directFilePath = resolveMediaStoreDirectPathForValues(probePath, callerUid);
-        String directRelativePath = physicalRelativePath(directFilePath, callerUid);
-        publicPath = probePath;
-        if (directRelativePath != null
-            && !trimRelativePathSlash(directRelativePath)
-                .equals(trimRelativePathSlash(relativePath))) {
-          patchedArgs = replaceArgument(patchedArgs, relativeIndex, directRelativePath);
-          patched = true;
-        }
-      }
-      if (!patched) return callBackup(args);
+      if (directParentPath == null || directParentPath.equals(publicParent.getPath()))
+        return callBackup(args);
+
+      // FileUtils 后续参数是 MIME 类型、文件名或扩展名，不是目录路径；只重写父目录。
+      Object[] patchedArgs = replaceFileArgument(args, parentIndex, new File(directParentPath));
       Object result = callBackup(patchedArgs);
       if (!(result instanceof File)) return result;
       File directFile = (File) result;
-      if (publicPath == null) {
-        publicPath = publicParent.getPath() + File.separator + directFile.getName();
-      }
+      String publicPath = new File(publicParent, directFile.getName()).getPath();
       MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
       logInfo(
           "media direct FileUtils method="
@@ -653,6 +665,18 @@ public class Hooker {
     String displayName = firstString(values, MediaStore.MediaColumns.DISPLAY_NAME, "display_name");
     String publicPath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
     String directPath = resolveMediaStoreDirectPathForValues(publicPath, callerUid);
+    if (isSrxSandboxFallbackPath(directPath, callerUid)) {
+      // 保留平台选定的待发布文件名或解决重名后的文件名。
+      // 调用方作用域内的原生文件操作仍使用私有后端路径。
+      Boolean previous = LOGICAL_MEDIA_FILE_COLUMNS.get();
+      LOGICAL_MEDIA_FILE_COLUMNS.set(Boolean.TRUE);
+      try {
+        return callBackup(args);
+      } finally {
+        if (previous == null) LOGICAL_MEDIA_FILE_COLUMNS.remove();
+        else LOGICAL_MEDIA_FILE_COLUMNS.set(previous);
+      }
+    }
     String directRelativePath = physicalRelativePath(directPath, callerUid);
     if (directRelativePath == null
         || trimRelativePathSlash(directRelativePath).equals(trimRelativePathSlash(relativePath))) {
@@ -685,6 +709,11 @@ public class Hooker {
     Object originalPrimary = values.get("primary_directory");
     boolean hadSecondary = values.containsKey("secondary_directory");
     Object originalSecondary = values.get("secondary_directory");
+    String publicParent = new File(publicPath).getParent();
+    String directParent = new File(directPath).getParent();
+    if (publicParent != null && directParent != null && new File(directParent).isDirectory()) {
+      rememberProviderRedirectSourceDirectory(publicParent, directParent);
+    }
     values.put(MediaStore.MediaColumns.RELATIVE_PATH, directRelativePath);
     patchDirectoryColumns(values, directRelativePath);
     MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
@@ -696,13 +725,6 @@ public class Hooker {
           values, MediaStore.MediaColumns.RELATIVE_PATH, hadRelative, originalRelative);
       restoreContentValue(values, "primary_directory", hadPrimary, originalPrimary);
       restoreContentValue(values, "secondary_directory", hadSecondary, originalSecondary);
-      // AOT 的目录创建可能绕过 Java mkdir 回调；列路径重定向同样登记作用域收尾。
-      // 原生入口只接受公共路径到默认沙箱的同后缀映射，并且只删除空目录。
-      File publicParent = new File(publicPath).getParentFile();
-      File directParent = new File(directPath).getParentFile();
-      if (publicParent != null && directParent != null) {
-        rememberProviderRedirectSourceDirectory(publicParent.getPath(), directParent.getPath());
-      }
       logInfo(
           "media direct file columns method="
               + methodName
@@ -861,6 +883,9 @@ public class Hooker {
   public Object attachInfoCallback(Object[] args) throws Throwable {
     Object result = callBackup(args);
     android.content.ContentProvider provider = providerReceiver(args);
+    if (provider != null && isMediaProviderClass(provider.getClass().getName())) {
+      bindMediaScanProvider(provider);
+    }
     Class<?> clazz =
         provider != null
             ? provider.getClass()
@@ -1082,7 +1107,7 @@ public class Hooker {
     }
   }
 
-  private static Object fieldValue(Object target, String name) {
+  static Object fieldValue(Object target, String name) {
     if (target == null || name == null) return null;
     for (Class<?> c = target.getClass(); c != null; c = c.getSuperclass()) {
       try {
@@ -1127,6 +1152,10 @@ public class Hooker {
 
   private static synchronized void tryInstallMediaFileColumnHooks(Class<?> clazz) {
     if (clazz == null) return;
+    if (isMediaProviderClass(clazz.getName())) {
+      installBindingWriter(clazz.getClassLoader());
+      installMediaScanner(clazz.getClassLoader());
+    }
     try {
       boolean firstClassObservation = MEDIA_FILE_COLUMN_CLASSES_LOGGED.add(clazz);
       if (firstClassObservation) {
@@ -1173,6 +1202,214 @@ public class Hooker {
     } catch (Throwable t) {
       logWarn("java hook media file columns installer failed " + clazz, t);
     }
+  }
+
+  private static synchronized void bindMediaScanProvider(android.content.ContentProvider provider) {
+    if (mediaScanFiles == null && provider.getContext() != null) {
+      mediaScanFiles = new MediaScanFiles(provider);
+    }
+  }
+
+  private static final HashSet<ClassLoader> BINDING_LOADERS = new HashSet<>();
+
+  private static void installBindingWriter(ClassLoader loader) {
+    if (BINDING_LOADERS.contains(loader)) return;
+    try {
+      Class<?> builder =
+          Class.forName("com.android.providers.media.util.SQLiteQueryBuilder", false, loader);
+      Method insert =
+          builder.getDeclaredMethod(
+              "insert", android.database.sqlite.SQLiteDatabase.class, ContentValues.class);
+      Class<?> helper = Class.forName("com.android.providers.media.DatabaseHelper", false, loader);
+      Method update =
+          builder.getDeclaredMethod(
+              "update",
+              android.database.sqlite.SQLiteDatabase.class,
+              ContentValues.class,
+              String.class,
+              String[].class);
+      Method upgrade =
+          helper.getDeclaredMethod(
+              "onUpgrade", android.database.sqlite.SQLiteDatabase.class, int.class, int.class);
+      if (installMediaMethod(upgrade, "bindingSchemaCallback")
+          && installMediaMethod(update, "bindingMoveCallback")
+          && installMediaMethod(insert, "bindingInsertCallback")) {
+        BINDING_LOADERS.add(loader);
+        logInfo("private media binding writer ready");
+      }
+    } catch (ReflectiveOperationException error) {
+      if (BINDING_LOADERS.isEmpty()) logWarn("media binding writer unavailable", error);
+    }
+  }
+
+  public Object bindingSchemaCallback(Object[] args) throws Throwable {
+    Object[] slots = args.length == 1 && args[0] instanceof Object[] ? (Object[]) args[0] : args;
+    return MediaBindings.upgrade(
+        (android.database.sqlite.SQLiteDatabase) slots[1], () -> callBackup(args));
+  }
+
+  public Object bindingMoveCallback(Object[] args) throws Throwable {
+    Integer uid = MEDIA_PROVIDER_CALLER_UID.get();
+    if (uid == null
+        || !"update".equals(MEDIA_PROVIDER_MUTATION_METHOD.get())
+        || !isRedirectEnabledForCallerUid(uid)) return callBackup(args);
+    Object[] slots = args.length == 1 && args[0] instanceof Object[] ? (Object[]) args[0] : args;
+    ContentValues values = (ContentValues) slots[2];
+    String next = values.getAsString("_data");
+    if (next == null || !"files".equals(fieldValue(slots[0], "mTables"))) return callBackup(args);
+    MediaScanFiles files = mediaScanFiles;
+    android.database.sqlite.SQLiteDatabase db = (android.database.sqlite.SQLiteDatabase) slots[1];
+    String owner = packageNameForUid(uid);
+    String privatePath = MediaScanFiles.backing(next, owner, uid / ANDROID_USER_ID_OFFSET);
+    if (files == null
+        || !files.bindings.path.equals(db.getPath())
+        || privatePath == null
+        || !privatePath.equals(resolveMediaStoreDirectPathForValues(next, uid)))
+      return callBackup(args);
+    if (!db.inTransaction()) throw new IllegalStateException("移动私有媒体文件需要条目所在的事务");
+    String version = files.bindings.uuid();
+    files.bindings.ready(db, version);
+    return MediaBindings.move(db, owner, next, () -> callBackup(args));
+  }
+
+  public Object bindingInsertCallback(Object[] args) throws Throwable {
+    Integer uid = MEDIA_PROVIDER_CALLER_UID.get();
+    String method = MEDIA_PROVIDER_MUTATION_METHOD.get();
+    Object[] slots = args.length == 1 && args[0] instanceof Object[] ? (Object[]) args[0] : args;
+    if (slots.length != 3) throw new IllegalStateException("媒体写入回调的参数不符合预期");
+    android.database.sqlite.SQLiteDatabase db = (android.database.sqlite.SQLiteDatabase) slots[1];
+    ContentValues values = (ContentValues) slots[2];
+    String logical = values.getAsString("_data");
+    String owner = values.getAsString("owner_package_name");
+    boolean eligible = uid != null && ("insert".equals(method) || "bulkInsert".equals(method));
+    boolean enabled = eligible && isRedirectEnabledForCallerUid(uid);
+    String table = (String) fieldValue(slots[0], "mTables");
+    if (!enabled
+        || !"files".equals(table)
+        || logical == null
+        || owner == null
+        || !owner.equals(packageNameForUid(uid))
+        || !"external_primary".equals(values.getAsString("volume_name"))) return callBackup(args);
+    File file = new File(logical);
+    String display = values.getAsString("_display_name");
+    String published =
+        isPendingFileOf(file.getName(), display)
+            ? new File(file.getParent(), display).getPath()
+            : logical;
+    String expected = MediaScanFiles.backing(published, owner, uid / ANDROID_USER_ID_OFFSET);
+    String actual = resolveMediaStoreDirectPathForValues(published, uid);
+    if (expected == null || !expected.equals(actual)) return callBackup(args);
+    MediaScanFiles files = mediaScanFiles;
+    if (files == null || !db.inTransaction() || !files.bindings.path.equals(db.getPath()))
+      throw new IllegalStateException("插入私有媒体条目需要对应外部数据库的事务");
+    MediaBindings bindings = files.bindings;
+    String uuid = bindings.uuid();
+    bindings.ready(db, uuid);
+    return bindings.insert(db, uuid, owner, logical, () -> callBackup(args));
+  }
+
+  private static void installMediaScanner(ClassLoader loader) {
+    if (!SCANNER_LOADERS.add(loader)) return;
+    try {
+      Class<?> scanner =
+          Class.forName("com.android.providers.media.scan.ModernMediaScanner", false, loader);
+      installScannerMethod(scanner.getDeclaredMethod("scanFile", File.class, int.class));
+      Class<?> scan = Class.forName(scanner.getName() + "$Scan", false, loader);
+      installScannerMethod(
+          scan.getDeclaredMethod(
+              "addUnknownIdsAndGetMediaTypeCount", android.os.Bundle.class, long[].class));
+      installScannerMethod(
+          scan.getDeclaredMethod(
+              "visitFile",
+              java.nio.file.Path.class,
+              java.nio.file.attribute.BasicFileAttributes.class));
+    } catch (ReflectiveOperationException error) {
+      logWarn("media scanner hook unavailable", error);
+    }
+  }
+
+  private static void installScannerMethod(Method method) throws ReflectiveOperationException {
+    installMediaMethod(method, "mediaScanCallback");
+  }
+
+  private static final HashSet<Method> MEDIA_INTERNAL_METHODS = new HashSet<>();
+
+  private static boolean installMediaMethod(Method method, String name)
+      throws ReflectiveOperationException {
+    if (MEDIA_INTERNAL_METHODS.contains(method)) return true;
+    Method callback = Hooker.class.getDeclaredMethod(name, Object[].class);
+    method.setAccessible(true);
+    callback.setAccessible(true);
+    Hooker hooker = new Hooker();
+    Method backup = hooker.doHook(method, callback);
+    if (backup == null) {
+      logWarn("media hook rejected " + method, null);
+      return false;
+    }
+    backup.setAccessible(true);
+    hooker.backup = backup;
+    hooker.target = method;
+    MEDIA_INTERNAL_METHODS.add(method);
+    HOOKS.add(hooker);
+    return true;
+  }
+
+  public Object mediaScanCallback(Object[] args) throws Throwable {
+    MediaScanFiles files = mediaScanFiles;
+    if (files == null) return callBackup(args);
+    Object[] slots = args.length == 1 && args[0] instanceof Object[] ? (Object[]) args[0] : args;
+    if (slots.length != 3) return callBackup(args);
+    boolean directoryEntry =
+        slots[1] instanceof java.nio.file.Path
+            && slots[2] instanceof java.nio.file.attribute.BasicFileAttributes
+            && ((java.nio.file.attribute.BasicFileAttributes) slots[2]).isRegularFile();
+    if (slots[1] instanceof File || directoryEntry) {
+      String logical = directoryEntry ? slots[1].toString() : ((File) slots[1]).getPath();
+      ParcelFileDescriptor scanned;
+      enterProviderInternalCall();
+      try {
+        scanned = files.open(logical);
+      } catch (MediaScanFiles.Unavailable unavailable) {
+        if (directoryEntry) return java.nio.file.FileVisitResult.CONTINUE;
+        scanned = null;
+      } finally {
+        exitProviderInternalCall();
+      }
+      try (ParcelFileDescriptor fd = scanned) {
+        if (fd == null) return callBackup(args);
+        if (directoryEntry) {
+          java.nio.file.Path pinned = java.nio.file.Paths.get("/proc/self/fd/" + fd.getFd());
+          args =
+              replaceArgument(
+                  slots,
+                  2,
+                  java.nio.file.Files.readAttributes(
+                      pinned, java.nio.file.attribute.BasicFileAttributes.class));
+        }
+        pushScannedFile(logical, fd.getFd());
+        try {
+          return callBackup(args);
+        } finally {
+          popScannedFile();
+        }
+      }
+    }
+    if (slots[1] instanceof android.os.Bundle && slots[2] instanceof long[]) {
+      Object uri = fieldValue(slots[0], "mFilesUri");
+      if (uri instanceof android.net.Uri) {
+        long[] included;
+        enterProviderInternalCall();
+        try {
+          included =
+              files.includePrivateFiles(
+                  (android.net.Uri) uri, (android.os.Bundle) slots[1], (long[]) slots[2]);
+        } finally {
+          exitProviderInternalCall();
+        }
+        if (included != slots[2]) return callBackup(replaceArgument(slots, 2, included));
+      }
+    }
+    return callBackup(args);
   }
 
   private static synchronized void installMutationFallback(Class<?> clazz) {
@@ -3243,6 +3480,17 @@ public class Hooker {
         relativePath = relativeSource.getAsString("relative_path");
       }
     }
+    if (insertLike
+        && dataKey == null
+        && !directWriteRequested
+        && Integer.valueOf(1).equals(values.getAsInteger("is_pending"))) {
+      String name = firstString(relativeSource, "_display_name", "display_name");
+      String logicalPath = buildMediaStoreProbePath(relativePath, name, callerUid);
+      if (logicalPath != null && mediaStoreValueLandsInSandbox(logicalPath, callerUid)) {
+        rememberMediaStoreMutationPathHint(logicalPath, relativeSource, callerUid);
+        return new ContentValuesPatch(relativeSource, requestedCollection, false);
+      }
+    }
     if (relativePath != null && relativePath.length() > 0) {
       String displayName = firstString(relativeSource, "_display_name", "display_name");
       String probePath = buildMediaStoreProbePath(relativePath, displayName, callerUid);
@@ -3298,17 +3546,18 @@ public class Hooker {
    * update(is_pending=0) 的 ContentValues 通常不带 _data；补回 insert 时登记的公共目标， 防止 MediaProvider 的
    * ensureFileColumns 再次校验原始 Android/data 私有路径。
    */
-  private static void patchPendingMediaUpdatePath(Object[] rawArgs, Object[] actualArgs) {
+  private static String patchPendingMediaUpdatePath(Object[] rawArgs, Object[] actualArgs) {
     try {
       int uriIndex = findMutationUriIndex(actualArgs);
-      if (uriIndex < 0 || !(actualArgs[uriIndex] instanceof android.net.Uri)) return;
+      if (uriIndex < 0) return "no_uri";
       String publicPath;
       synchronized (REDIRECTED_MEDIA_TARGETS) {
         publicPath = REDIRECTED_MEDIA_TARGETS.get(callerResourceKey(actualArgs[uriIndex]));
       }
-      if (publicPath == null || publicPath.length() == 0) return;
+      if (publicPath == null || publicPath.length() == 0) return "no_target";
       ContentValues original = findContentValues(actualArgs);
-      if (original == null) return;
+      if (original == null) return "no_values";
+      if (!Integer.valueOf(0).equals(original.getAsInteger("is_pending"))) return "not_publish";
       ContentValues patched = new ContentValues(original);
       patched.put(MediaStore.MediaColumns.DATA, publicPath);
       String relativePath = mediaStoreRelativePath(publicPath);
@@ -3323,7 +3572,10 @@ public class Hooker {
       if (valuesIndex >= 0) replaceActualArg(rawArgs, actualArgs, valuesIndex, patched);
       MEDIA_FILE_BUILD_CONTEXT.set(new MediaFileBuildContext(publicPath));
       logInfo("media pending update path patched to=" + publicPath);
-    } catch (Throwable ignored) {
+      return "patched";
+    } catch (Throwable error) {
+      logWarn("media pending update patch failed", error);
+      return "error";
     }
   }
 
@@ -3902,6 +4154,7 @@ public class Hooker {
           && normalizeStorageDisplayPath(probePath, callerUid)
               .equals(normalizeStorageDisplayPath(sandboxPath, callerUid))) return;
       if (packageNameForUid(callerUid).isEmpty()) return;
+      String resourceKey = callerResourceKey(result);
       synchronized (REDIRECTED_MEDIA_TARGETS) {
         // 逐条淘汰最旧记录，不整表清空：批量导入时后到的写入不应清掉尚未提交的改名记录。
         while (REDIRECTED_MEDIA_TARGETS.size() >= REDIRECTED_MEDIA_TARGET_LIMIT) {
@@ -3910,9 +4163,15 @@ public class Hooker {
           oldest.next();
           oldest.remove();
         }
-        REDIRECTED_MEDIA_TARGETS.put(callerResourceKey(result), sandboxPath);
+        REDIRECTED_MEDIA_TARGETS.put(resourceKey, sandboxPath);
       }
-      logInfo("media redirect target uri=" + result + " sandbox=" + sandboxPath);
+      logInfo(
+          "media redirect target uri="
+              + result
+              + " sandbox="
+              + sandboxPath
+              + " key="
+              + resourceKey);
     } catch (Throwable ignored) {
     }
   }
@@ -4019,7 +4278,7 @@ public class Hooker {
   }
 
   /** 判断 {@code fileName} 是否为 {@code displayName} 的 {@code .pending-<id>-<名称>} 中间态。 */
-  private static boolean isPendingFileOf(String fileName, String displayName) {
+  static boolean isPendingFileOf(String fileName, String displayName) {
     if (fileName == null || displayName == null || displayName.length() == 0) return false;
     if (!fileName.startsWith(".pending-")) return false;
     int idStart = ".pending-".length();
@@ -4860,7 +5119,8 @@ public class Hooker {
     }
   }
 
-  private static void logOpenArgs(Hooker hooker, Object[] args, int callerUid, int callerPid) {
+  private static void logOpenArgs(
+      Hooker hooker, Object[] args, int callerUid, int callerPid, boolean redirectEnabled) {
     if (!shouldLog()) return;
     if (OPEN_LOG_COUNT >= 96) return;
     OPEN_LOG_COUNT++;
@@ -4877,6 +5137,8 @@ public class Hooker {
               + callerUid
               + " caller_pid="
               + callerPid
+              + " redirect_enabled="
+              + redirectEnabled
               + " args="
               + describeQueryArgs(args));
     } catch (Throwable ignored) {
@@ -4987,7 +5249,12 @@ public class Hooker {
   }
 
   private static void logMutationArgs(
-      Hooker hooker, Object[] args, int callerUid, int callerPid, boolean patched) {
+      Hooker hooker,
+      Object[] args,
+      int callerUid,
+      int callerPid,
+      boolean patched,
+      String pendingPath) {
     if (!shouldLog()) return;
     if (callerUid == android.os.Process.myUid()) return;
     if (MUTATION_LOG_COUNT >= 96) return;
@@ -4997,6 +5264,13 @@ public class Hooker {
           hooker != null && hooker.target instanceof Method
               ? describeMethod((Method) hooker.target)
               : "unknown";
+      int uriIndex = pendingPath == null ? -1 : findMutationUriIndex(args);
+      String decision =
+          pendingPath == null
+              ? ""
+              : " pending_path="
+                  + pendingPath
+                  + (uriIndex < 0 ? "" : " key=" + callerResourceKey(args[uriIndex]));
       android.util.Log.i(
           "SRX",
           "java media mutation target="
@@ -5007,6 +5281,7 @@ public class Hooker {
               + callerPid
               + " patched="
               + patched
+              + decision
               + " args="
               + describeQueryArgs(args));
     } catch (Throwable ignored) {
@@ -5161,6 +5436,9 @@ public class Hooker {
 
   private static final class ProjectionPatch {
     static final ProjectionPatch NONE = new ProjectionPatch(null);
+    private static final Pattern FILE_ITEM_PATH =
+        Pattern.compile("/[^/]+/(?:file|downloads|(?:images|audio|video)/media)/[0-9]+");
+    private static final Pattern COLUMN_NAME = Pattern.compile("[A-Za-z_][A-Za-z_0-9]*");
     final String[] visibleColumns;
 
     private ProjectionPatch(String[] visibleColumns) {
@@ -5172,24 +5450,33 @@ public class Hooker {
         if (actualArgs == null || actualArgs.length < 2 || !(actualArgs[1] instanceof String[]))
           return NONE;
         String[] projection = (String[]) actualArgs[1];
-        if (projection == null
-            || projection.length == 0
+        if (projection.length == 0
             || hasPathColumn(projection)
-            || !hasIdColumn(projection)) {
+            || (!hasIdColumn(projection) && !isFileItemMetadata(actualArgs[0], projection))) {
           return NONE;
         }
         String[] patched = Arrays.copyOf(projection, projection.length + 1);
         patched[projection.length] = "_data";
-        actualArgs[1] = patched;
-        if (rawArgs != null && rawArgs.length == 1 && rawArgs[0] instanceof Object[]) {
-          ((Object[]) rawArgs[0])[1] = patched;
-        } else if (rawArgs != null && rawArgs.length > 2) {
-          rawArgs[2] = patched;
-        }
+        replaceActualArg(rawArgs, actualArgs, 1, patched);
         return new ProjectionPatch(projection);
       } catch (Throwable ignored) {
         return NONE;
       }
+    }
+
+    private static boolean isFileItemMetadata(Object target, String[] columns) {
+      if (!(target instanceof android.net.Uri)) return false;
+      android.net.Uri uri = (android.net.Uri) target;
+      String path = uri.getEncodedPath();
+      if (!"media".equals(uri.getAuthority())
+          || path == null
+          || !FILE_ITEM_PATH.matcher(path).matches()) {
+        return false;
+      }
+      for (String column : columns) {
+        if (column == null || !COLUMN_NAME.matcher(column).matches()) return false;
+      }
+      return true;
     }
 
     private static boolean hasPathColumn(String[] columns) {
@@ -5852,9 +6139,19 @@ public class Hooker {
       int idColumn = findIdColumn(base);
       int relativePathColumn = findRelativePathColumn(base);
       int bucketIdColumn = findColumnIgnoreCase(base, "bucket_id");
-      int count = safeCount(base);
+      int count;
+      try {
+        count = base.getCount();
+      } catch (RuntimeException failure) {
+        if (visibleColumns == null) return base;
+        base.close();
+        throw failure;
+      }
       logCursor("wrap", base, pathColumn, count, count, callerUid);
-      if (count <= 0) return base;
+      if (count <= 0) {
+        if (visibleColumns == null) return base;
+        return new FilteringCursor(base, new int[0], null, -1, null, -1, null, -1, visibleColumns);
+      }
       // issue #7：TIM 冷启动选图空屏 3-4 秒——需要把「一次 MediaStore 查询的逐行
       // 过滤总耗时」直接记进日志，与 native 侧 filter_path 的单行均值互相印证。
       // 慢查询（>200ms）必然落一条；快查询按 1/64 采样，避免热路径日志噪声。
@@ -5886,7 +6183,8 @@ public class Hooker {
             // 同一次调用里完成，行循环不再逐行跨 JNI 多次。
             String rewritten =
                 path == null ? null : cursorRowAction(path, callerUid, allowMissingMappedTarget);
-            if (rewritten != null && rewritten.length() == 0) {
+            if ((path == null && visibleColumns != null)
+                || (rewritten != null && rewritten.length() == 0)) {
               logFilter("filter", id, callerUid);
               continue;
             }
@@ -5960,7 +6258,11 @@ public class Hooker {
           }
           visibleRows.add(row);
         }
-      } catch (Throwable ignored) {
+      } catch (Throwable failure) {
+        if (visibleColumns != null) {
+          base.close();
+          throw failure;
+        }
         return base;
       } finally {
         try {
@@ -6124,14 +6426,6 @@ public class Hooker {
       }
     }
 
-    private static int safeCount(Cursor cursor) {
-      try {
-        return cursor.getCount();
-      } catch (Throwable ignored) {
-        return -1;
-      }
-    }
-
     private static int safeColumnCount(Cursor cursor) {
       try {
         return cursor.getColumnCount();
@@ -6167,7 +6461,7 @@ public class Hooker {
 
     private static Cursor wrapOpaqueAggregateIfHidden(
         Cursor base, int callerUid, int count, String[] visibleColumns) {
-      if (!isAnyPublicMediaRootHidden(callerUid)) return base;
+      if (visibleColumns == null && !isAnyPublicMediaRootHidden(callerUid)) return base;
       logFilter("filter_opaque_all", -1, callerUid);
       return new FilteringCursor(
           base,
@@ -6346,7 +6640,7 @@ public class Hooker {
         if (!allowMissingMappedTarget) {
           boolean rewrittenExists = storagePathExistsForCaller(rewritten, callerUid);
           boolean mappingViewRewrite = isMappingViewRewrite(path, rewritten, callerUid);
-          if (!rewrittenExists && (!mappingViewRewrite || !isMediaStorePendingPath(path))) {
+          if (!rewrittenExists && !mappingViewRewrite && !isMediaStorePendingPath(path)) {
             return "";
           }
         }

@@ -117,14 +117,22 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         signal = function_body(query, "fn has_process_mapped_dir_signal_for_query_fallback(")
         self.assertIn("crate::hook::process_mapped_dir_target(value)", signal)
 
+    def test_pending_file_probe_uses_backing_file_without_hiding_directories(self) -> None:
+        query = read("src/hook/ops/query.rs")
+        body = function_body(query, "unsafe fn provider_passthrough_virtual_dir_standin_path(")
+        pending_check = "paths::media_store_pending_display_path(&path_text).is_some()"
+        backing = "provider_passthrough_virtual_query_target(&path_text)"
+        self.assertIn(pending_check, body)
+        self.assertIn(backing, body)
+        self.assertLess(body.index(pending_check), body.index("let is_data_media_input"))
+        self.assertIn("if effective_path != path_text", body)
+
     def test_mapping_redirect_registers_process_scoped_dir(self) -> None:
         dir_rs = read("src/hook/ops/mutation/dir.rs")
         body = function_body(dir_rs, "fn handle_mkdir_like<F>(")
-        self.assertIn("crate::hook::remember_process_mapped_dir(", body)
-        # 只在映射重定向后登记：普通沙箱重定向的源目录通常已在真实存储落地
-        register_index = body.index("crate::hook::remember_process_mapped_dir(")
-        guard = body[:register_index]
-        self.assertIn("if redirect_result.is_mapping {", guard)
+        self.assertIn("mkdir_redirect_target(hub, source, &redirect_result, call_original)", body)
+        mapping = function_body(dir_rs, "fn mkdir_redirect_target<F>(")
+        self.assertIn("crate::hook::remember_process_mapped_dir(source, target)", mapping)
 
     def test_realpath_fallback_also_consults_configured_mappings(self) -> None:
         # MediaProvider 的 FuseDaemon 把下层写直接打到映射目标上，不经过 hook，
@@ -148,25 +156,15 @@ class MappedDirQueryFallbackTest(unittest.TestCase):
         # 再补映射目标」当成修复（真机场景 39），代价是 Download 下凭空多出一个空目录，
         # 也直接违背这条产品不变量（2026-11-05 issue #2 复核）。
         dir_source = read("src/hook/ops/mutation/dir.rs")
-        body = function_body(dir_source, "fn handle_mapping_mkdir<F>(")
+        body = function_body(dir_source, "fn mkdir_redirect_target<F>(")
         self.assertNotIn(
             "create_backend_dir(&request_backend)",
             body,
             "映射 mkdir 不得在真实存储创建请求路径",
         )
-        self.assertIn("create_backend_dir(&target_backend)", body)
-        # 映射目标仍是这次 mkdir 唯一的真实产物，它失败时必须把 errno 交回调用方。
-        self.assertIn("result = target_result;", body)
-        # 调用方随后的 isDirectory/realpath 由进程内登记表承接。
-        self.assertIn("remember_process_mapped_dir(source_path, &redirect.new_path)", body)
-        # 映射分支要提前收口，不能继续走「只 mkdir 映射目标」的统一收尾
-        outer = function_body(dir_source, "fn handle_mkdir_like<F>(")
-        self.assertIn("if redirect_result.is_mapping {", outer)
-        self.assertLess(
-            outer.index("if redirect_result.is_mapping {"),
-            outer.index("let result = if redirect_result.is_redirect() {"),
-            "映射分支必须在通用重定向收尾之前",
-        )
+        self.assertIn("storage_backend_dir(target)", body)
+        self.assertIn("create_backend_dir(&backend)", body)
+        self.assertNotIn("call_original(pathname)", body)
 
     def test_mapping_mount_point_never_creates_request_path(self) -> None:
         # 挂载点侧同一条不变量：请求路径缺失时按「本次映射未应用」返回，交给共享宿主

@@ -114,6 +114,49 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
             self.assertIn("2 passed; 0 failed", result.stdout)
 
     @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
+    def test_hook_readers_do_not_wait_for_binder_symbol_initialization(self) -> None:
+        from test_mount_metadata_scope import function_body
+
+        source = read("src/hook/caller.rs")
+        installer = function_body(read("src/hook/stats.rs"), "pub fn install(&self) -> bool")
+        self.assertLess(installer.index("initialize_binder_symbols()"), installer.index("srx_hook::init("))
+        declarations = "\n".join(
+            signature + function_body(source, signature)
+            for signature in ("fn resolve_caller_uid_by_binder() -> i32", "fn resolve_caller_pid_by_binder() -> i32")
+        )
+        harness = '''use std::sync::{OnceLock, mpsc, Barrier, Arc};
+use std::time::Duration;
+struct CallerBinderSymbols;
+impl CallerBinderSymbols {
+    fn calling_uid(&self) -> Option<i32> { Some(10042) }
+    fn calling_pid(&self) -> Option<i32> { Some(42) }
+}
+static BINDER_SYMBOLS: OnceLock<CallerBinderSymbols> = OnceLock::new();
+unsafe fn getuid() -> u32 { 1000 }
+unsafe fn getpid() -> i32 { 1 }
+''' + declarations + '''
+fn main() {
+    let gate = Arc::new(Barrier::new(2));
+    let hold = Arc::clone(&gate);
+    let (entered, ready) = mpsc::channel();
+    let init = std::thread::spawn(move || BINDER_SYMBOLS.get_or_init(|| {
+        entered.send(()).unwrap(); hold.wait(); CallerBinderSymbols
+    }));
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!((resolve_caller_uid_by_binder(), resolve_caller_pid_by_binder()), (-1, -1));
+    gate.wait(); init.join().unwrap();
+    assert_eq!((resolve_caller_uid_by_binder(), resolve_caller_pid_by_binder()), (10042, 42));
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            rust = Path(directory) / "main.rs"
+            binary = rust.with_name("binder.exe" if os.name == "nt" else "binder")
+            rust.write_text(harness, encoding="utf-8")
+            compilation = subprocess.run(["rustc", "--edition=2024", str(rust), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(0, compilation.returncode, compilation.stderr)
+            subprocess.run([str(binary)], check=True, timeout=5)
+
+    @unittest.skipUnless(shutil.which("rustc"), "需要 rustc")
     def test_download_companion_fallback_requires_an_absent_exact_row(self) -> None:
         source = read("src/monitor/download_owner.rs")
         implementation = "\n".join(extract_fn(source, name) for name in (
@@ -497,7 +540,7 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         self.assertIn("snapshot.running_packages.is_none()", resolver)
         self.assertNotIn('read_dir("/proc")', resolver)
 
-    def test_provider_directory_reports_existing_target_and_cleans_empty_source(self) -> None:
+    def test_provider_directory_registration_only_affects_queries(self) -> None:
         java = read("java_src/org/srx/hook/Hooker.java")
         jni = read("src/java_hook/hooker_class.rs")
         directory = read("src/hook/ops/mutation/dir.rs")
@@ -521,12 +564,12 @@ class CallerAttributionBoundariesTest(unittest.TestCase):
         )
         self.assertIn("enterProviderVirtualScope()", mutation)
         self.assertIn("exitProviderVirtualScope()", mutation)
-        self.assertIn("for (source, target) in crate::hook::exit_provider_passthrough()", jni)
-        self.assertIn("for (source, target) in crate::hook::exit_provider_virtual_scope()", jni)
+        for scope in ("passthrough", "virtual_scope"):
+            name = f"exit_provider_{scope}"
+            self.assertEqual(extract_fn(jni, name).split("{", 1)[1].strip(), f"crate::hook::{name}();\n}}")
         self.assertIn("remember_provider_redirect_source_directory", jni)
-        self.assertIn("cleanup_provider_redirect_source_directory", jni)
         self.assertIn("is_public_default_sandbox_redirect(source_path, target_path)", directory)
-        self.assertIn("libc::rmdir(c_path.as_ptr())", directory)
+        self.assertNotIn("cleanup_empty_redirect_source_dir", extract_fn(directory, "handle_mkdir_like<F>"))
 
     def test_disabled_provider_open_does_not_enter_mapped_file_branch(self) -> None:
         java = read("java_src/org/srx/hook/Hooker.java")

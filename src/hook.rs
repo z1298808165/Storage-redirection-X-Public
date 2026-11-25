@@ -34,6 +34,7 @@ pub(crate) use context::{
     push_current_caller_scope, remember_process_mapped_dir,
     remember_provider_passthrough_virtual_dir,
 };
+pub(crate) use context::{pop_scanned_file, push_scanned_file};
 pub(crate) use jni_query::{
     cursor_row_action, is_redirect_enabled_for_caller_uid, path_exists_for_cursor_row,
     resolve_download_media_placeholder_path_for_caller, resolve_media_store_direct_path_for_caller,
@@ -45,9 +46,7 @@ pub(crate) use media_fuse::{
     record_read_only_fuse_operation, should_allow_own_android_private_path_access,
     should_allow_public_mapping_target_access,
 };
-pub(crate) use ops::mutation::{
-    cleanup_provider_redirect_source_directory, remember_provider_redirect_source_directory,
-};
+pub(crate) use ops::mutation::remember_provider_redirect_source_directory;
 pub use stats::InterceptHub;
 
 pub(crate) fn refresh_runtime_config_from_settings() {

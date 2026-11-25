@@ -695,6 +695,16 @@ fn resolve_open_redirect_path(
     is_system_writer: bool,
     flags: c_int,
 ) -> RedirectDecision {
+    if is_system_writer
+        && !monitor::has_write_intent_flags(flags)
+        && let Some(fd) = super::super::context::scanned_file_fd(from_path)
+    {
+        return RedirectDecision {
+            action: RedirectAction::Redirect,
+            new_path: format!("/proc/self/fd/{fd}"),
+            is_mapping: false,
+        };
+    }
     if should_check_monitor_only_read_only_guard(
         hub.is_monitor_only(),
         is_system_writer,

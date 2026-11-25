@@ -7,6 +7,7 @@
 use crate::platform::proc_identity::RequestIdentity;
 use std::ffi::CString;
 use std::mem;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -19,32 +20,22 @@ pub(crate) const QUERY_PREFIX: &str = "Q\t";
 pub(crate) const REPLY_PREFIX: &str = "R\t";
 /// 与 daemon 共享的抽象套接字名（日志通道）。
 const DAEMON_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
-/// 本进程询问用的抽象套接字名前缀。
-const QUERY_SOCKET_PREFIX: &[u8] = b"storage.redirect.x.q.";
 /// 单次询问的等待上限。
 ///
 /// daemon 核验任务并按需查询 PM；等待受绝对截止点约束，这个上限用于
 /// 防止 daemon 卡住时把 FUSE 请求线程一起拖死。超时按「未解析」处理，与快照未命中
 /// 同一条回退路径。
 const QUERY_TIMEOUT_MS: i32 = 60;
-/// 询问通道的客户端状态。daemon 未启动时 `fd` 为 -1，之后每次询问重试连接。
+#[derive(Default)]
 struct QueryClient {
-    fd: i32,
-    reply_addr: Option<(libc::sockaddr_un, libc::socklen_t)>,
+    fd: Option<OwnedFd>,
+    owner_pid: u32,
 }
-
-// SAFETY: fd 是普通文件描述符，套接字读写都由调用方串行化（见下方 Mutex）。
-unsafe impl Send for QueryClient {}
 
 static CLIENT: OnceLock<Mutex<QueryClient>> = OnceLock::new();
 
 fn client() -> &'static Mutex<QueryClient> {
-    CLIENT.get_or_init(|| {
-        Mutex::new(QueryClient {
-            fd: -1,
-            reply_addr: None,
-        })
-    })
+    CLIENT.get_or_init(Mutex::default)
 }
 
 /// 构造抽象命名空间地址。
@@ -67,15 +58,20 @@ fn abstract_addr(name: &[u8]) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
 
 impl QueryClient {
     /// 懒建立询问套接字。失败返回 false，下次再试。
-    fn ensure_ready(&mut self) -> bool {
-        if self.fd >= 0 {
-            return true;
+    fn socket(&mut self) -> Option<i32> {
+        let owner = std::process::id();
+        if self.owner_pid == owner
+            && let Some(fd) = &self.fd
+        {
+            return Some(fd.as_raw_fd());
         }
         // SAFETY: socket 不接收借用指针，成功时返回自有描述符。
         let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
-            return false;
+            return None;
         }
+        // SAFETY: socket 已返回有效的新描述符，由此客户端接管所有权。
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
         let passcred: libc::c_int = 1;
         // SAFETY: 选项值与长度匹配；仅接受内核标记为 root 的 daemon 回包。
         if unsafe {
@@ -88,27 +84,13 @@ impl QueryClient {
             )
         } != 0
         {
-            // SAFETY: fd 刚由 socket 创建，失败路径尚未转移所有权。
-            unsafe { libc::close(fd) };
-            return false;
+            return None;
         }
-        // 回包地址按进程唯一：多个进程同时询问时互不覆盖。
-        let mut name = QUERY_SOCKET_PREFIX.to_vec();
-        name.extend_from_slice(std::process::id().to_string().as_bytes());
-        let Some((addr, addr_len)) = abstract_addr(&name) else {
-            // SAFETY: fd 由当前代码持有，尚未交给其它任何所有权。
-            unsafe { libc::close(fd) };
-            return false;
-        };
-        // SAFETY: addr 已初始化，addr_len 只覆盖已初始化的地址字节。
-        if unsafe { libc::bind(fd, &addr as *const _ as *const libc::sockaddr, addr_len) } != 0 {
-            // SAFETY: 同上，bind 失败后 fd 仍由当前代码持有。
-            unsafe { libc::close(fd) };
-            return false;
-        }
-        self.fd = fd;
-        self.reply_addr = Some((addr, addr_len));
-        true
+        // 启用 SO_PASSCRED 的未命名数据报套接字在发送时由内核自动绑定。
+        // 并发请求通过各自的内核地址接收回复。
+        self.owner_pid = owner;
+        self.fd = Some(socket);
+        Some(fd)
     }
 }
 
@@ -120,11 +102,12 @@ pub(crate) fn query_process_identity(pid: i32, uid: i32) -> Option<RequestIdenti
     if pid <= 0 {
         return None;
     }
-    // 并发请求不能在锁外排队累加等待预算；忙时保留未解析身份。
     let mut guard = match client().try_lock() {
         Ok(guard) => guard,
         Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return None,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return QueryClient::default().round_trip(pid, uid);
+        }
     };
     // pid/uid 快照不能辨别同 uid 的 pid 复用，且调用域可能无权读取 /proc starttime。
     // 每次由 daemon 实时核验当前任务身份，避免把旧 shared-UID 进程的包名当成当前身份。
@@ -132,13 +115,13 @@ pub(crate) fn query_process_identity(pid: i32, uid: i32) -> Option<RequestIdenti
 }
 
 impl QueryClient {
-    fn drain_replies(&self, deadline: std::time::Instant) {
+    fn drain_replies(fd: i32, deadline: std::time::Instant) {
         let mut buffer = [0u8; 2048];
         while std::time::Instant::now() < deadline {
             // SAFETY: buffer 是可写区间，MSG_DONTWAIT 保证不会阻塞查询线程。
             let result = unsafe {
                 libc::recv(
-                    self.fd,
+                    fd,
                     buffer.as_mut_ptr() as *mut _,
                     buffer.len(),
                     libc::MSG_DONTWAIT,
@@ -151,14 +134,12 @@ impl QueryClient {
     }
 
     fn round_trip(&mut self, pid: i32, uid: i32) -> Option<RequestIdentity> {
-        if !self.ensure_ready() {
-            return None;
-        }
+        let fd = self.socket()?;
         let (daemon_addr, daemon_len) = abstract_addr(DAEMON_SOCKET_NAME)?;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(QUERY_TIMEOUT_MS as u64);
         // 清理迟到回包也计入查询预算，持续输入不能延长 hook 线程的等待。
-        self.drain_replies(deadline);
+        Self::drain_replies(fd, deadline);
         if std::time::Instant::now() >= deadline {
             return None;
         }
@@ -171,7 +152,7 @@ impl QueryClient {
         // SAFETY: payload 在调用期间有效，daemon_addr 由抽象命名空间地址构造。
         let sent = unsafe {
             libc::sendto(
-                self.fd,
+                fd,
                 bytes.as_ptr() as *const _,
                 bytes.len(),
                 libc::MSG_DONTWAIT,
@@ -181,10 +162,7 @@ impl QueryClient {
         };
         if sent < 0 {
             // 发送失败通常是 daemon 尚未绑定套接字：丢掉 fd，下次重建。
-            // SAFETY: fd 由本结构体独占持有。
-            unsafe { libc::close(self.fd) };
-            self.fd = -1;
-            self.reply_addr = None;
+            self.fd = None;
             return None;
         }
         loop {
@@ -194,7 +172,7 @@ impl QueryClient {
             }
             let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
             let mut poll_fd = libc::pollfd {
-                fd: self.fd,
+                fd,
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -208,7 +186,7 @@ impl QueryClient {
             }
             let mut buffer = [0u8; 2048];
             // SAFETY: buffer 有 buffer.len() 字节可写，fd 由本结构体持有。
-            let Some(size) = recv_from_root(self.fd, &mut buffer) else {
+            let Some(size) = recv_from_root(fd, &mut buffer) else {
                 continue;
             };
             let Ok(text) = std::str::from_utf8(&buffer[..size]) else {

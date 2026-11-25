@@ -1,22 +1,50 @@
 use super::*;
 use crate::platform::proc_identity::{AttributionBoundary, RequestIdentity};
 
+#[cfg(target_os = "linux")]
+static DAEMON_TEST: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "linux")]
 #[test]
-fn concurrent_query_does_not_wait_for_another_clients_deadline() {
-    use std::time::{Duration, Instant};
+fn concurrent_query_gets_its_own_verified_reply() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    use std::time::Duration;
+    let _daemon = DAEMON_TEST.lock().unwrap();
+    let address = SocketAddr::from_abstract_name(DAEMON_SOCKET_NAME).unwrap();
+    let daemon = UnixDatagram::bind_addr(&address).unwrap();
+    daemon
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     let guard = client().lock().unwrap_or_else(|error| error.into_inner());
-    let (send, receive) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let started = Instant::now();
-        let result = query_process_identity(std::process::id() as i32, 10123);
-        send.send((result, started.elapsed())).unwrap();
-    });
-    let completed = receive.recv_timeout(Duration::from_millis(200));
+    let pid = std::process::id() as i32;
+    let worker = std::thread::spawn(move || query_process_identity(pid, 10123));
+    let mut packet = [0; 256];
+    let (size, peer) = daemon.recv_from(&mut packet).unwrap();
+    let text = std::str::from_utf8(&packet[..size]).unwrap();
+    let nonce = text
+        .strip_prefix(&format!("Q\t{pid}\t10123\t"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let identity = RequestIdentity {
+        pid,
+        uid: 10123,
+        start_time: 123,
+        package: "com.example.owner".into(),
+        ..Default::default()
+    };
+    daemon
+        .send_to_addr(reply(&identity, nonce).as_bytes(), &peer)
+        .unwrap();
+    let received = worker.join().unwrap();
     drop(guard);
-    worker.join().unwrap();
-    let (result, elapsed) = completed.expect("concurrent query waited for the shared client lock");
-    assert!(result.is_none());
-    assert!(elapsed < Duration::from_millis(200));
+    // SAFETY: geteuid 仅读取当前测试进程的有效 UID。
+    if unsafe { libc::geteuid() } == 0 {
+        assert_eq!(received, Some(identity));
+    } else {
+        assert!(received.is_none());
+    }
 }
 
 #[test]
@@ -39,16 +67,15 @@ fn late_reply_cleanup_respects_the_query_deadline() {
 
     let (sender, receiver) = UnixDatagram::pair().unwrap();
     receiver.set_nonblocking(true).unwrap();
-    let client = QueryClient {
-        fd: receiver.as_raw_fd(),
-        reply_addr: None,
-    };
     sender.send(b"late").unwrap();
-    client.drain_replies(Instant::now());
+    QueryClient::drain_replies(receiver.as_raw_fd(), Instant::now());
     let mut buffer = [0; 8];
     assert_eq!(receiver.recv(&mut buffer).unwrap(), 4);
     sender.send(b"late").unwrap();
-    client.drain_replies(Instant::now() + Duration::from_secs(1));
+    QueryClient::drain_replies(
+        receiver.as_raw_fd(),
+        Instant::now() + Duration::from_secs(1),
+    );
     assert_eq!(
         receiver.recv(&mut buffer).unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -94,6 +121,7 @@ fn full_daemon_queue_does_not_block_the_query_before_its_deadline() {
     use std::os::unix::net::{SocketAddr, UnixDatagram};
     use std::time::{Duration, Instant};
 
+    let _daemon = DAEMON_TEST.lock().unwrap();
     let address = SocketAddr::from_abstract_name(DAEMON_SOCKET_NAME).unwrap();
     let receiver = UnixDatagram::bind_addr(&address).unwrap();
     let filler = UnixDatagram::unbound().unwrap();
@@ -113,16 +141,9 @@ fn full_daemon_queue_does_not_block_the_query_before_its_deadline() {
     }
     let (send, receive) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let mut client = QueryClient {
-            fd: -1,
-            reply_addr: None,
-        };
+        let mut client = QueryClient::default();
         let started = Instant::now();
         let result = client.round_trip(std::process::id() as i32, 10123);
-        if client.fd >= 0 {
-            // SAFETY: 此测试客户端独占 fd，查询已经结束。
-            unsafe { libc::close(client.fd) };
-        }
         send.send((result, started.elapsed())).unwrap();
     });
     let completed = receive.recv_timeout(Duration::from_millis(300));

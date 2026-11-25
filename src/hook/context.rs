@@ -4,6 +4,29 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+thread_local! {
+    static SCANNED_FILE: RefCell<Vec<(String, i32)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn push_scanned_file(logical: String, fd: i32) {
+    SCANNED_FILE.with_borrow_mut(|files| files.push((logical, fd)));
+}
+
+pub(crate) fn pop_scanned_file() {
+    SCANNED_FILE.with_borrow_mut(|files| files.pop());
+}
+
+pub(crate) fn has_scanned_file() -> bool {
+    SCANNED_FILE.with_borrow(|files| !files.is_empty())
+}
+
+pub(crate) fn scanned_file_fd(path: &str) -> Option<i32> {
+    SCANNED_FILE.with_borrow(|files| {
+        let (logical, fd) = files.last()?;
+        (logical == path).then_some(*fd)
+    })
+}
+
 /// 原请求任务的核验结果；终止边界不因包名回填而改变。
 pub fn set_request_identity(identity: Option<RequestIdentity>) {
     CALLER_REQUEST_IDENTITY.with(|current| *current.borrow_mut() = identity);
@@ -737,21 +760,19 @@ pub fn enter_provider_passthrough() {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
 }
 
-pub fn exit_provider_passthrough() -> Vec<(String, String)> {
+pub fn exit_provider_passthrough() {
     PROVIDER_PASSTHROUGH_DEPTH.with(|depth| {
         let current = depth.get();
         if current <= 1 {
             depth.set(0);
-            let virtual_dirs = take_provider_virtual_dirs_if_idle();
+            clear_provider_virtual_dirs_if_idle();
             if !is_current_caller_scope_active() {
                 clear_current_caller();
                 clear_binder_saved_caller_uid();
                 set_binder_identity_cleared(false);
             }
-            virtual_dirs
         } else {
             depth.set(current - 1);
-            Vec::new()
         }
     })
 }
@@ -764,28 +785,21 @@ pub fn enter_provider_virtual_scope() {
     PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
 }
 
-pub fn exit_provider_virtual_scope() -> Vec<(String, String)> {
+pub fn exit_provider_virtual_scope() {
     PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| {
-        let current = depth.get();
-        if current <= 1 {
-            depth.set(0);
-            take_provider_virtual_dirs_if_idle()
-        } else {
-            depth.set(current - 1);
-            Vec::new()
-        }
-    })
+        depth.set(depth.get().saturating_sub(1));
+    });
+    clear_provider_virtual_dirs_if_idle();
 }
 
 pub fn is_provider_virtual_scope_active() -> bool {
     PROVIDER_VIRTUAL_SCOPE_DEPTH.with(|depth| depth.get() > 0)
 }
 
-fn take_provider_virtual_dirs_if_idle() -> Vec<(String, String)> {
-    if is_provider_passthrough_active() || is_provider_virtual_scope_active() {
-        return Vec::new();
+fn clear_provider_virtual_dirs_if_idle() {
+    if !is_provider_passthrough_active() && !is_provider_virtual_scope_active() {
+        PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| dirs.borrow_mut().clear());
     }
-    PROVIDER_PASSTHROUGH_VIRTUAL_DIRS.with(|dirs| std::mem::take(&mut *dirs.borrow_mut()))
 }
 
 // 登记键统一折算到 /storage/emulated 路径空间：mkdir 的判定路径可能是 /data/media 形式，
@@ -796,7 +810,10 @@ fn virtual_dir_key(path: &str) -> String {
 
 // 记录一个「未在公共目录落地、实际重定向到沙箱」的目录，供同一直通窗口内的查询使用
 pub fn remember_provider_passthrough_virtual_dir(public_path: &str, sandbox_path: &str) {
-    if public_path.is_empty() || sandbox_path.is_empty() {
+    if public_path.is_empty()
+        || sandbox_path.is_empty()
+        || (!is_provider_passthrough_active() && !is_provider_virtual_scope_active())
+    {
         return;
     }
     let key = virtual_dir_key(public_path);
