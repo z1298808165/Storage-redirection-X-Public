@@ -1,17 +1,11 @@
 package org.srx.manager.ui.screen
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,18 +16,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.shadow.Shadow
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import org.srx.manager.capsuleContainerColor
-import org.srx.manager.capsuleSelectedColor
 import org.srx.manager.data.UiColorSpec
 import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiThemeMode
-import org.srx.manager.srxPrimaryColor
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
-import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 internal val AccentColorOptions =
@@ -90,127 +78,13 @@ internal fun ThemeModeSelector(
     onMode: (UiThemeMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-  val items =
-      listOf(
-          UiThemeMode.System to "跟随系统",
-          UiThemeMode.Light to "浅色",
-          UiThemeMode.Dark to "深色",
-      )
-  val containerShape = RoundedCornerShape(18.dp)
-  val itemShape = RoundedCornerShape(14.dp)
-  Row(
-      modifier =
-          modifier
-              .clip(containerShape)
-              .background(capsuleContainerColor(), containerShape)
-              .padding(4.dp),
-      horizontalArrangement = Arrangement.spacedBy(4.dp),
-  ) {
-    items.forEach { (itemMode, label) ->
-      val selected = itemMode == mode
-      Box(
-          modifier =
-              Modifier.weight(1f)
-                  .then(
-                      if (selected) {
-                        Modifier.dropShadow(
-                            itemShape,
-                            Shadow(
-                                radius = 10.dp,
-                                color = MiuixTheme.colorScheme.primary,
-                                alpha = if (isSrxDarkTheme()) 0.12f else 0.09f,
-                            ),
-                        )
-                      } else {
-                        Modifier
-                      },
-                  )
-                  .clip(itemShape)
-                  .background(
-                      if (selected) capsuleSelectedColor() else Color.Transparent,
-                      itemShape,
-                  )
-                  .clickable { onMode(itemMode) }
-                  .padding(vertical = 9.dp),
-          contentAlignment = Alignment.Center,
-      ) {
-        Text(
-            text = label,
-            color = if (selected) srxPrimaryColor() else MiuixTheme.colorScheme.onSurface,
-            fontWeight = if (selected) FontWeight.Black else FontWeight.SemiBold,
-            fontSize = 12.sp,
-            maxLines = 1,
-        )
-      }
-    }
-  }
-}
-
-@Composable
-private fun AccentColorSwatch(
-    color: Int,
-    selected: Boolean,
-    label: String,
-    onClick: () -> Unit,
-) {
-  val tint = if (color == 0) MiuixTheme.colorScheme.primary else Color(color)
-  Box(
-      modifier =
-          Modifier.size(40.dp)
-              .clip(CircleShape)
-              .border(
-                  width = if (selected) 2.dp else 1.dp,
-                  color =
-                      if (selected) MiuixTheme.colorScheme.primary
-                      else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.08f),
-                  shape = CircleShape,
-              )
-              .clickable(onClick = onClick)
-              .padding(5.dp),
-      contentAlignment = Alignment.Center,
-  ) {
-    if (color == 0) {
-      Canvas(modifier = Modifier.matchParentSize().clip(CircleShape)) {
-        val colors =
-            listOf(
-                Color(0xFF1677D2),
-                Color(0xFF16845B),
-                Color(0xFFC23D42),
-                Color(0xFF9C6411),
-            )
-        colors.forEachIndexed { index, sectionColor ->
-          drawArc(
-              color = sectionColor,
-              startAngle = index * 90f - 90f,
-              sweepAngle = 90f,
-              useCenter = true,
-          )
-        }
-      }
-    } else {
-      Box(Modifier.matchParentSize().clip(CircleShape).background(tint))
-    }
-    if (selected) {
-      Canvas(modifier = Modifier.size(14.dp)) {
-        val markColor = Color.White
-        val stroke = 2.dp.toPx()
-        drawLine(
-            color = markColor,
-            start = Offset(size.width * 0.14f, size.height * 0.52f),
-            end = Offset(size.width * 0.42f, size.height * 0.78f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = markColor,
-            start = Offset(size.width * 0.42f, size.height * 0.78f),
-            end = Offset(size.width * 0.88f, size.height * 0.2f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-      }
-    }
-  }
+  val modes = listOf(UiThemeMode.System, UiThemeMode.Light, UiThemeMode.Dark)
+  SrxSegmentedControl(
+      labels = listOf("跟随系统", "浅色", "深色"),
+      selectedIndex = modes.indexOf(mode).coerceAtLeast(0),
+      onSelect = { onMode(modes[it]) },
+      modifier = modifier,
+  )
 }
 
 @Composable

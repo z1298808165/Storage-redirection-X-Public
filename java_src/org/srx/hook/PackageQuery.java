@@ -341,6 +341,9 @@ public final class PackageQuery {
       } catch (Exception ignored) {
       }
       StringBuilder result = new StringBuilder();
+      // 清单协议版本：管理器按首行判定列数，避免「只升级一侧」时整份清单被判空。
+      // v2 = 7 列（含 icon）。
+      result.append("#srx-inventory\t2").append('\n');
       for (ApplicationInfo app : sorted) {
         if (app.packageName == null || app.packageName.length() == 0) continue;
         if (app.uid < 0 || app.uid / 100000 != user)
@@ -360,6 +363,8 @@ public final class PackageQuery {
             .append(encodeField(applicationLabel(app, packageManager)))
             .append('\t')
             .append(encodeField(app.sourceDir == null ? "" : app.sourceDir))
+            .append('\t')
+            .append(app.icon)
             .append('\n');
       }
       return result.toString();

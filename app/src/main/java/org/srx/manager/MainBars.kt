@@ -13,14 +13,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -39,15 +37,17 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Close
-import top.yukonga.miuix.kmp.icon.extended.Ok
-import top.yukonga.miuix.kmp.icon.extended.SelectAll
-import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.icon.glass.Close
+import top.yukonga.miuix.kmp.icon.glass.Ok
+import top.yukonga.miuix.kmp.icon.glass.SelectAll
+import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
 internal fun BottomNavigation(
     page: Page,
+    // 手势滑动过程中底栏高亮要立刻跟随，不能等 pager 停稳（settledPage 太晚）。
+    barSelectedIndex: Int = page.ordinal,
     onPageChange: (Page) -> Unit,
     enabled: Boolean,
     prefs: UiPreferences,
@@ -67,7 +67,7 @@ internal fun BottomNavigation(
                       onClick = {},
                   )
                   .padding(bottom = 12.dp + bottomInset),
-          selectedIndex = Page.entries.indexOf(page),
+          selectedIndex = barSelectedIndex,
           onSelected = { if (enabled) onPageChange(Page.entries[it]) },
           backdrop = backdrop,
           kyantBackdrop = kyantBackdrop,
@@ -105,8 +105,11 @@ internal fun BottomNavigation(
       NavigationBar(
           modifier = Modifier.fillMaxWidth(),
           color =
-              if (blurBackdrop != null && prefs.blurEffect) Color.Transparent
-              else MiuixTheme.colorScheme.surface,
+              if (blurBackdrop != null && prefs.blurEffect) {
+                androidx.compose.ui.graphics.Color.Transparent
+              } else {
+                MiuixTheme.colorScheme.surface
+              },
       ) {
         Page.entries.forEach { item ->
           NavigationBarItem(
@@ -137,13 +140,11 @@ internal fun AppBatchActionBar(
     kyantBackdrop: KyantBackdrop?,
 ) {
   var showTemplates by remember { mutableStateOf(false) }
-  var selectedIndex by remember { mutableIntStateOf(0) }
   val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
   val itemAlpha = if (enabled) 1f else 0.52f
 
-  fun runAction(index: Int, action: () -> Unit) {
+  fun runAction(action: () -> Unit) {
     if (!enabled) return
-    selectedIndex = index
     action()
   }
 
@@ -158,8 +159,9 @@ internal fun AppBatchActionBar(
                       onClick = {},
                   )
                   .padding(bottom = 12.dp + bottomInset),
-          selectedIndex = selectedIndex,
-          onSelected = { selectedIndex = it },
+          selectedIndex = 0,
+          onSelected = {},
+          showSelectionIndicator = false,
           backdrop = backdrop,
           kyantBackdrop = kyantBackdrop,
           tabsCount = 4,
@@ -168,10 +170,14 @@ internal fun AppBatchActionBar(
           enableDrag = false,
       ) {
         FloatingBottomBarItem(
-            onClick = { selectedIndex = 0 },
+            onClick = {},
             modifier = Modifier.defaultMinSize(minWidth = 76.dp).alpha(itemAlpha),
         ) {
-          Icon(MiuixIcons.Ok, contentDescription = null, tint = MiuixTheme.colorScheme.onSurface)
+          Icon(
+              MiuixIcons.Glass.Ok,
+              contentDescription = null,
+              tint = MiuixTheme.colorScheme.onSurface,
+          )
           Text(
               text = "\u5df2\u9009$selectedCount",
               fontSize = 11.sp,
@@ -183,10 +189,14 @@ internal fun AppBatchActionBar(
           )
         }
         FloatingBottomBarItem(
-            onClick = { runAction(1) { showTemplates = true } },
+            onClick = { runAction { showTemplates = true } },
             modifier = Modifier.defaultMinSize(minWidth = 76.dp).alpha(itemAlpha),
         ) {
-          Icon(MiuixIcons.Tune, contentDescription = null, tint = MiuixTheme.colorScheme.onSurface)
+          Icon(
+              MiuixIcons.Glass.Tune,
+              contentDescription = null,
+              tint = MiuixTheme.colorScheme.onSurface,
+          )
           Text(
               "\u6a21\u677f",
               fontSize = 11.sp,
@@ -197,11 +207,11 @@ internal fun AppBatchActionBar(
           )
         }
         FloatingBottomBarItem(
-            onClick = { runAction(2, onSelectAll) },
+            onClick = { runAction(onSelectAll) },
             modifier = Modifier.defaultMinSize(minWidth = 76.dp).alpha(itemAlpha),
         ) {
           Icon(
-              MiuixIcons.SelectAll,
+              MiuixIcons.Glass.SelectAll,
               contentDescription = null,
               tint = MiuixTheme.colorScheme.onSurface,
           )
@@ -215,10 +225,14 @@ internal fun AppBatchActionBar(
           )
         }
         FloatingBottomBarItem(
-            onClick = { runAction(3, onCancel) },
+            onClick = { runAction(onCancel) },
             modifier = Modifier.defaultMinSize(minWidth = 76.dp).alpha(itemAlpha),
         ) {
-          Icon(MiuixIcons.Close, contentDescription = null, tint = MiuixTheme.colorScheme.error)
+          Icon(
+              MiuixIcons.Glass.Close,
+              contentDescription = null,
+              tint = MiuixTheme.colorScheme.error,
+          )
           Text(
               "\u53d6\u6d88",
               fontSize = 11.sp,
@@ -235,35 +249,38 @@ internal fun AppBatchActionBar(
       NavigationBar(
           modifier = Modifier.fillMaxWidth().alpha(itemAlpha),
           color =
-              if (blurBackdrop != null && prefs.blurEffect) Color.Transparent
-              else MiuixTheme.colorScheme.surface,
+              if (blurBackdrop != null && prefs.blurEffect) {
+                androidx.compose.ui.graphics.Color.Transparent
+              } else {
+                MiuixTheme.colorScheme.surface
+              },
       ) {
         NavigationBarItem(
-            selected = selectedIndex == 0,
-            onClick = { selectedIndex = 0 },
-            icon = MiuixIcons.Ok,
-            label = "\u5df2\u9009$selectedCount",
+            selected = false,
+            onClick = {},
+            icon = MiuixIcons.Glass.Ok,
+            label = "已选$selectedCount",
             modifier = Modifier.weight(1f),
         )
         NavigationBarItem(
-            selected = selectedIndex == 1,
-            onClick = { runAction(1) { showTemplates = true } },
-            icon = MiuixIcons.Tune,
-            label = "\u6a21\u677f",
+            selected = false,
+            onClick = { runAction { showTemplates = true } },
+            icon = MiuixIcons.Glass.Tune,
+            label = "模板",
             modifier = Modifier.weight(1f),
         )
         NavigationBarItem(
-            selected = selectedIndex == 2,
-            onClick = { runAction(2, onSelectAll) },
-            icon = MiuixIcons.SelectAll,
-            label = "\u5168\u9009",
+            selected = false,
+            onClick = { runAction(onSelectAll) },
+            icon = MiuixIcons.Glass.SelectAll,
+            label = "全选",
             modifier = Modifier.weight(1f),
         )
         NavigationBarItem(
-            selected = selectedIndex == 3,
-            onClick = { runAction(3, onCancel) },
-            icon = MiuixIcons.Close,
-            label = "\u53d6\u6d88",
+            selected = false,
+            onClick = { runAction(onCancel) },
+            icon = MiuixIcons.Glass.Close,
+            label = "取消",
             modifier = Modifier.weight(1f),
         )
       }

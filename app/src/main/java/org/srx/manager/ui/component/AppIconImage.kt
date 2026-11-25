@@ -27,6 +27,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import org.srx.manager.ui.AppIconCache
+import org.srx.manager.ui.theme.LocalSrxColorScheme
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -70,13 +71,13 @@ fun AppIconImage(
                       shape,
                       Shadow(
                           radius = 10.dp,
-                          color = if (dark) Color.Black else MiuixTheme.colorScheme.primary,
+                          color = if (dark) Color.Black else LocalSrxColorScheme.current.primary,
                           alpha = if (dark) 0.14f else 0.08f,
                       ),
                   )
                   .clip(shape)
                   .background(
-                      MiuixTheme.colorScheme.surfaceContainerHigh.copy(
+                      LocalSrxColorScheme.current.surfaceContainerHigh.copy(
                           alpha = if (dark) 0.46f else 0.62f
                       )
                   )
@@ -99,7 +100,7 @@ private fun PlaceholderIcon(label: String, modifier: Modifier) {
                   shape,
                   Shadow(
                       radius = 10.dp,
-                      color = if (dark) Color.Black else MiuixTheme.colorScheme.primary,
+                      color = if (dark) Color.Black else LocalSrxColorScheme.current.primary,
                       alpha = if (dark) 0.14f else 0.08f,
                   ),
               )
@@ -107,9 +108,9 @@ private fun PlaceholderIcon(label: String, modifier: Modifier) {
               .background(
                   Brush.linearGradient(
                       listOf(
-                          MiuixTheme.colorScheme.primary,
-                          MiuixTheme.colorScheme.primary.copy(alpha = 0.72f),
-                          MiuixTheme.colorScheme.error.copy(alpha = 0.72f),
+                          LocalSrxColorScheme.current.primary,
+                          LocalSrxColorScheme.current.primary.copy(alpha = 0.72f),
+                          LocalSrxColorScheme.current.error.copy(alpha = 0.72f),
                       ),
                   ),
               ),

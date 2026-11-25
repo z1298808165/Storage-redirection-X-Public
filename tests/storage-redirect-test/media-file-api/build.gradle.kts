@@ -4,7 +4,13 @@ plugins { alias(libs.plugins.android.library) }
 
 android {
   namespace = "me.fakerqu.mediafileapi"
-  compileSdk { version = release(37) }
+  // Miuix 0.9.5 的 AAR 要求 compileSdk 37.2，与主 App 的 srx.compileSdkMinor 对齐。
+  compileSdk {
+    version =
+        release(37) {
+          minorApiLevel = providers.gradleProperty("srx.compileSdkMinor").orNull?.toIntOrNull() ?: 2
+        }
+  }
 
   defaultConfig {
     minSdk = 31

@@ -7,7 +7,13 @@ plugins {
 
 android {
   namespace = "me.fakerqu.test.storageredirect"
-  compileSdk { version = release(37) }
+  // Miuix 0.9.5 的 AAR 要求 compileSdk 37.2，与主 App 的 srx.compileSdkMinor 对齐。
+  compileSdk {
+    version =
+        release(37) {
+          minorApiLevel = providers.gradleProperty("srx.compileSdkMinor").orNull?.toIntOrNull() ?: 2
+        }
+  }
 
   defaultConfig {
     applicationId = "me.fakerqu.test.storageredirect"
@@ -48,8 +54,4 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
 }
 
-tasks.withType<Test>().configureEach {
-  failOnNoDiscoveredTests = false
-  // Linux 测试 JVM 的文件名编码由 locale 决定，夹具包含中文路径。
-  if (System.getProperty("os.name") == "Linux") environment("LC_ALL", "C.UTF-8")
-}
+tasks.withType<Test>().configureEach { failOnNoDiscoveredTests = false }

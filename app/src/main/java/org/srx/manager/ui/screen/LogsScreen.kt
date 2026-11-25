@@ -12,15 +12,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.sizeIn
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -49,30 +45,27 @@ import org.srx.manager.CenteredDialog
 import org.srx.manager.EmptyText
 import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
-import org.srx.manager.MinTouchTargetSize
-import org.srx.manager.PageHeader
 import org.srx.manager.RoundIconAction
+import org.srx.manager.SrxProgressivePage
 import org.srx.manager.data.FileMonitorFilters
 import org.srx.manager.data.InstalledApp
 import org.srx.manager.data.LogEntry
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.root.isSafePackageName
-import org.srx.manager.srxSuccessColor
 import org.srx.manager.ui.AppUiState
 import org.srx.manager.ui.component.AppIconImage
 import org.srx.manager.ui.component.SrxSearchField
+import org.srx.manager.ui.theme.isSrxDarkTheme
 import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Delete
-import top.yukonga.miuix.kmp.icon.extended.ExpandMore
-import top.yukonga.miuix.kmp.icon.extended.File
-import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.icon.glass.Delete
+import top.yukonga.miuix.kmp.icon.glass.ExpandMore
+import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 @Composable
 internal fun LogsScreen(
@@ -137,112 +130,111 @@ internal fun LogsScreen(
       }
   val pullToRefreshState = rememberPullToRefreshState()
   val refreshTexts = listOf("下拉刷新", "释放刷新", "正在刷新", "刷新完成")
-  Column(
-      modifier =
-          Modifier.fillMaxSize()
-              .padding(
-                  top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 18.dp,
-                  start = 16.dp,
-                  end = 16.dp,
-              ),
-  ) {
-    PageHeader(
-        title = "文件监视",
-        actions = {
-          RoundIconAction(
-              MiuixIcons.Tune,
-              "文件监视过滤",
-              { showFilters = true },
-              size = 36.dp,
-              iconSize = 17.dp,
-          )
-          RoundIconAction(MiuixIcons.Delete, "清空文件监视记录", { confirmClear = true }, danger = true)
-        },
-    )
-    Spacer(Modifier.height(14.dp))
-    SrxSearchField(query, { query = it }, "搜索应用名、包名或路径")
-    Spacer(Modifier.height(10.dp))
-    Text(
-        text = if (query.isBlank()) "共 ${logs.size} 条" else "匹配 ${filtered.size} / ${logs.size} 条",
-        modifier = Modifier.fillMaxWidth(),
-        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-        fontSize = 11.sp,
-        textAlign = TextAlign.End,
-    )
-    Spacer(Modifier.height(12.dp))
-    PullToRefresh(
-        isRefreshing = state.logsRefreshing,
-        pullToRefreshState = pullToRefreshState,
-        onRefresh = onRefresh,
-        refreshTexts = refreshTexts,
-        modifier = Modifier.fillMaxWidth().weight(1f),
-    ) {
-      LazyColumn(
-          state = listState,
-          modifier = Modifier.fillMaxSize().overScrollVertical(),
-          contentPadding = PaddingValues(bottom = bottomPadding + 28.dp),
-          verticalArrangement = Arrangement.spacedBy(12.dp),
-          overscrollEffect = null,
+  SrxProgressivePage(
+      title = "文件监视",
+      actions = {
+        RoundIconAction(
+            MiuixIcons.Glass.Tune,
+            "文件监视过滤",
+            { showFilters = true },
+            size = 36.dp,
+            iconSize = 17.dp,
+        )
+        RoundIconAction(
+            MiuixIcons.Glass.Delete,
+            "清空文件监视记录",
+            { confirmClear = true },
+            danger = true,
+        )
+      },
+  ) { pageModifier, innerPadding, scrollModifiers ->
+    Column(modifier = pageModifier.padding(horizontal = 16.dp)) {
+      Spacer(Modifier.height(innerPadding.calculateTopPadding() + 14.dp))
+      SrxSearchField(query, { query = it }, "搜索应用名、包名或路径")
+      Spacer(Modifier.height(10.dp))
+      Text(
+          text =
+              if (query.isBlank()) "共 ${logs.size} 条" else "匹配 ${filtered.size} / ${logs.size} 条",
+          modifier = Modifier.fillMaxWidth(),
+          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          fontSize = 11.sp,
+          textAlign = TextAlign.End,
+      )
+      Spacer(Modifier.height(12.dp))
+      PullToRefresh(
+          isRefreshing = state.logsRefreshing,
+          pullToRefreshState = pullToRefreshState,
+          onRefresh = onRefresh,
+          refreshTexts = refreshTexts,
+          modifier = Modifier.fillMaxWidth().weight(1f),
       ) {
-        if (filtered.isEmpty()) {
-          item { EmptyText(if (query.isBlank()) "暂无文件操作记录" else "没有匹配的日志") }
-        } else {
-          itemsIndexed(
-              filtered,
-              // key 不能包含列表下标：日志是最新在前，新增一条会让其后所有条目的下标
-              // 位移，等价于全部 key 变化，导致整列表重建、item 内的展开状态丢失、
-              // 复用失效。这里用内容指纹加「同内容第几次出现」的序号，既保证唯一，
-              // 又不受插入位置影响。
-              key = { _, entry -> logEntryKeys[entry] ?: entry.contentKey() },
-              contentType = { _, entry -> if (entry.ok) "success" else "error" },
-          ) { _, entry ->
-            val app =
-                if (entry.isModuleWebUiExport || !entry.hasApplicationIdentity) null
-                else
-                    appsByPackage[entry.packageName]
-                        ?: appsByPackage[entry.callerPackage]
-                        ?: appsByPackage[entry.watchPackage]
-            LogCard(
-                entry = entry,
-                app = app,
-                showFullTime = showFullTime,
-                onToggleTime = { showFullTime = !showFullTime },
-                onOpenApp = onOpenApp,
-            )
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().then(scrollModifiers),
+            contentPadding = PaddingValues(bottom = bottomPadding + 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            overscrollEffect = null,
+        ) {
+          if (filtered.isEmpty()) {
+            item { EmptyText(if (query.isBlank()) "暂无文件操作记录" else "没有匹配的日志") }
+          } else {
+            itemsIndexed(
+                filtered,
+                // key 不能包含列表下标：日志是最新在前，新增一条会让其后所有条目的下标
+                // 位移，等价于全部 key 变化，导致整列表重建、item 内的展开状态丢失、
+                // 复用失效。这里用内容指纹加「同内容第几次出现」的序号，既保证唯一，
+                // 又不受插入位置影响。
+                key = { _, entry -> logEntryKeys[entry] ?: entry.contentKey() },
+                contentType = { _, entry -> if (entry.ok) "success" else "error" },
+            ) { _, entry ->
+              val app =
+                  if (entry.isModuleWebUiExport) null
+                  else
+                      appsByPackage[entry.packageName]
+                          ?: appsByPackage[entry.callerPackage]
+                          ?: appsByPackage[entry.watchPackage]
+              LogCard(
+                  entry = entry,
+                  app = app,
+                  showFullTime = showFullTime,
+                  onToggleTime = { showFullTime = !showFullTime },
+                  onOpenApp = onOpenApp,
+              )
+            }
           }
         }
       }
     }
-  }
-  CenteredDialog(
-      title = "清空文件监视记录",
-      summary = "确认清空当前文件监视记录？此操作会清空模块日志文件。",
-      show = confirmClear,
-      onDismiss = { confirmClear = false },
-  ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-      GlassTextButton("取消", { confirmClear = false }, modifier = Modifier.weight(1f))
-      GlassTextButton(
-          "清空",
-          {
-            confirmClear = false
-            onClear()
-          },
-          modifier = Modifier.weight(1f),
-          danger = true,
-      )
+    CenteredDialog(
+        title = "清空文件监视记录",
+        summary = "确认清空当前文件监视记录？此操作会清空模块日志文件。",
+        show = confirmClear,
+        onDismiss = { confirmClear = false },
+    ) {
+      Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        GlassTextButton("取消", { confirmClear = false }, modifier = Modifier.weight(1f))
+        GlassTextButton(
+            "清空",
+            {
+              confirmClear = false
+              onClear()
+            },
+            modifier = Modifier.weight(1f),
+            danger = true,
+        )
+      }
     }
+    FileMonitorFilterDialog(
+        show = showFilters,
+        filters = state.fileMonitorFilters,
+        autoSave = state.dashboard.globalConfig.appConfigAutoSave,
+        onDismiss = { showFilters = false },
+        onSave = { filters, silent ->
+          if (!silent) showFilters = false
+          onSaveFilters(filters, silent)
+        },
+    )
   }
-  FileMonitorFilterDialog(
-      show = showFilters,
-      filters = state.fileMonitorFilters,
-      autoSave = state.dashboard.globalConfig.appConfigAutoSave,
-      onDismiss = { showFilters = false },
-      onSave = { filters, silent ->
-        if (!silent) showFilters = false
-        onSaveFilters(filters, silent)
-      },
-  )
 }
 
 @Composable
@@ -274,7 +266,6 @@ private fun LogCard(
   val openTarget =
       if (
           entry.isModuleWebUiExport ||
-              !entry.hasApplicationIdentity ||
               (isFilesystemObservation && !hasAttributedCaller) ||
               isMediaProviderFallback
       ) {
@@ -294,16 +285,20 @@ private fun LogCard(
           (!entry.ok && entry.errorText.isNotBlank())
   GlassCard(
       modifier = Modifier,
-      insideMargin = PaddingValues(horizontal = 15.dp, vertical = 15.dp),
-      cornerRadius = 22.dp,
-      alpha = 0.58f,
+      // 横向 16dp 与其他卡片一致；纵向 8dp。首行只有 34dp 图标 + 单行标题，
+      // 卡片自身的上下留白 + 图标比文字高出的部分会叠成一条空白带，
+      // 所以这里比常规卡片再紧一档。
+      insideMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
       shadowAlpha = 0f,
   ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
       Row(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          // 右侧三件套（操作类型 / 时间 / 展开）统一 10dp 间距：之前用 8dp，
+          // 但展开按钮外层是 48dp 触控框、视觉圆只有 24dp，左右各 12dp 的空白
+          // 全算进了间距，于是"时间↔展开"看起来比"类型↔时间"宽一倍多。
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
       ) {
         LogAppIdentityAction(
             app = openTarget,
@@ -407,6 +402,8 @@ private fun LogAppIdentityAction(
     AppIconImage(
         appInfo = app?.appInfo,
         label = displayName,
+        // 这里刻意比配置页的行（SrxRowMetrics.iconSize，Miuix 30dp）大一号：
+        // 日志卡片首行是"图标 + 单行应用名"，图标稍大才能撑住这一行的视觉重量。
         modifier = Modifier.size(34.dp),
     )
     Text(
@@ -420,8 +417,7 @@ private fun LogAppIdentityAction(
   }
 }
 
-private fun LogEntry.toInstalledAppOrNull(displayName: String): InstalledApp? {
-  if (!hasApplicationIdentity) return null
+internal fun LogEntry.toInstalledAppOrNull(displayName: String): InstalledApp? {
   val targetPackage = packageName.takeIf(::isSafePackageName) ?: return null
   return InstalledApp(
       packageName = targetPackage,
@@ -433,7 +429,7 @@ private fun LogEntry.toInstalledAppOrNull(displayName: String): InstalledApp? {
   )
 }
 
-private fun formatLogEntryTime(entry: LogEntry, showFullTime: Boolean): String {
+internal fun formatLogEntryTime(entry: LogEntry, showFullTime: Boolean): String {
   if (!showFullTime) return entry.timeText.ifBlank { "--:--" }
   val timestamp = entry.timestamp.replace('T', ' ')
   return when {
@@ -443,7 +439,7 @@ private fun formatLogEntryTime(entry: LogEntry, showFullTime: Boolean): String {
   }
 }
 
-private fun logEntryPrimaryPath(entry: LogEntry): String {
+internal fun logEntryPrimaryPath(entry: LogEntry): String {
   val backend = entry.backendPath
   if (
       backend.isNotBlank() &&
@@ -454,7 +450,7 @@ private fun logEntryPrimaryPath(entry: LogEntry): String {
   return entry.path.ifBlank { entry.landingPath }
 }
 
-private fun logEntryRequestPath(entry: LogEntry): String =
+internal fun logEntryRequestPath(entry: LogEntry): String =
     entry.fromPath.ifBlank {
       if (entry.backendPath.isNotBlank()) entry.landingPath.ifBlank { entry.path } else ""
     }
@@ -483,7 +479,7 @@ private fun LogTimeText(
   )
 }
 
-private fun isAttributedFilesystemObservation(entry: LogEntry): Boolean =
+internal fun isAttributedFilesystemObservation(entry: LogEntry): Boolean =
     entry.eventRole == "observation" &&
         (entry.source == "path_mapping" && entry.identifyMethod == "daemon_inotify" ||
             entry.identifyMethod in
@@ -497,7 +493,7 @@ private fun isAttributedFilesystemObservation(entry: LogEntry): Boolean =
         entry.packageName.isSinglePackageName() &&
         !entry.packageName.isIntermediateLogPackage()
 
-private fun logEntrySummary(entry: LogEntry): String {
+internal fun logEntrySummary(entry: LogEntry): String {
   if (entry.isModuleWebUiExport) return "存储重定向X · ${entry.action.ifBlank { "模块导出" }}"
   val parts = mutableListOf<String>()
   if (entry.operationIntent.isNotBlank()) parts += monitorIntentLabel(entry.operationIntent)
@@ -507,9 +503,6 @@ private fun logEntrySummary(entry: LogEntry): String {
   val method = logIdentifyMethodText(entry.identifyMethod)
   val hasAttributedCaller = isAttributedFilesystemObservation(entry)
   when {
-    entry.identifyMethod == "shared_uid" -> parts += "共享 UID 组 ${entry.packageName}"
-    entry.identifyMethod == "executor" || entry.callerBoundary.isNotBlank() ->
-        parts += "执行者 ${entry.nativeIdentity.ifBlank { entry.callerPackage }}"
     hasAttributedCaller -> {
       val subject =
           if (entry.identifyMethod in setOf("provider_open", "provider_mkdir", "saf_provider"))
@@ -560,10 +553,6 @@ private fun logEntrySummary(entry: LogEntry): String {
     method.isNotBlank() -> parts += method
   }
   val reliability = logReliabilityText(entry.identifyReliability)
-  entry.callerUid?.let { parts += "UID $it" }
-  entry.callerPid?.let { parts += "PID/TID $it" }
-  if (entry.callerContext.isNotBlank()) parts += "SELinux ${entry.callerContext}"
-  if (entry.callerBoundary.isNotBlank()) parts += "追溯边界 ${entry.callerBoundary}"
   if (reliability.isNotBlank()) parts += "可靠性 $reliability"
   if (entry.observationCount > 0) {
     val observer = entry.observerPackage.takeIf { it.isNotBlank() }
@@ -577,13 +566,13 @@ private fun logEntrySummary(entry: LogEntry): String {
   return parts.joinToString(" · ")
 }
 
-private fun String.parenthesized(): String = if (isBlank()) "" else "（$this）"
+internal fun String.parenthesized(): String = if (isBlank()) "" else "（$this）"
 
-private fun String.isSinglePackageName(): Boolean =
+internal fun String.isSinglePackageName(): Boolean =
     all { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' } && contains('.')
 
 /** 日志条目的内容指纹，用于 LazyColumn 的稳定 key，不含列表位置信息。 */
-private fun LogEntry.contentKey(): String =
+internal fun LogEntry.contentKey(): String =
     "$timestamp|$processPackage|$callerPackage|$packageName|$eventRole|$correlationId|$observationCount|$operation|$path|$ok"
 
 private fun String.isIntermediateLogPackage(): Boolean =
@@ -598,7 +587,7 @@ private fun String.isIntermediateLogPackage(): Boolean =
         contains("photopicker") ||
         contains("mediapicker")
 
-private fun logIdentifyMethodText(method: String): String =
+internal fun logIdentifyMethodText(method: String): String =
     when (method) {
       "caller" -> "直接调用方"
       "recent_caller" -> "近期调用方"
@@ -625,7 +614,7 @@ private fun logIdentifyMethodText(method: String): String =
       else -> method
     }
 
-private fun logReliabilityText(reliability: String): String =
+internal fun logReliabilityText(reliability: String): String =
     when (reliability) {
       "high" -> "高"
       "medium" -> "中"
@@ -638,26 +627,10 @@ private fun logReliabilityText(reliability: String): String =
 private fun PathExpandButton(expanded: Boolean, enabled: Boolean, onClick: () -> Unit) {
   Box(
       modifier =
-          // 展开按钮视觉上只有 24dp 且在日志卡片里密集排布，把命中区域撑到无障碍基线
-          // 尺寸以降低误触，内层图标视觉不变。
-          Modifier.sizeIn(minWidth = MinTouchTargetSize, minHeight = MinTouchTargetSize),
-      contentAlignment = Alignment.Center,
-  ) {
-    PathExpandButtonSurface(expanded = expanded, enabled = enabled, onClick = onClick)
-  }
-}
-
-@Composable
-private fun PathExpandButtonSurface(expanded: Boolean, enabled: Boolean, onClick: () -> Unit) {
-  Box(
-      modifier =
-          Modifier.size(24.dp)
-              .clip(CircleShape)
-              .background(
-                  if (enabled && isSrxLiquidGlassEnabled()) glassSurfaceColor(0.5f)
-                  else Color.Transparent,
-                  CircleShape,
-              )
+          // 触控区不再用 48dp 外框：那会让这枚按钮比视觉圆宽一倍，右侧三件套的间距
+          // 全被撑歪，而且圆点离卡片右边缘还有 12dp 空白，和下方路径文本对不齐。
+          // 这里宽度收到与视觉圆一致的 24dp，高度留 32dp 兼顾纵向命中。
+          Modifier.size(width = 24.dp, height = 32.dp)
               .clickable(
                   enabled = enabled,
                   interactionSource = null,
@@ -666,8 +639,27 @@ private fun PathExpandButtonSurface(expanded: Boolean, enabled: Boolean, onClick
               ),
       contentAlignment = Alignment.Center,
   ) {
+    PathExpandButtonSurface(expanded = expanded, enabled = enabled)
+  }
+}
+
+@Composable
+private fun PathExpandButtonSurface(expanded: Boolean, enabled: Boolean) {
+  Box(
+      modifier =
+          Modifier.size(24.dp)
+              .clip(CircleShape)
+              .background(
+                  if (enabled && isSrxLiquidGlassEnabled()) glassSurfaceColor(0.5f)
+                  else Color.Transparent,
+                  CircleShape,
+              ),
+      contentAlignment = Alignment.Center,
+  ) {
     Icon(
-        imageVector = MiuixIcons.ExpandMore,
+        // 展开/收起是纵向动作，必须用上下箭头：之前用 ChevronForward 再旋转 180°，
+        // 视觉上就是"右箭头 / 左箭头"，与展开语义不符。
+        imageVector = MiuixIcons.Glass.ExpandMore,
         contentDescription = if (expanded) "收起详情" else "展开详情",
         tint =
             if (enabled) MiuixTheme.colorScheme.onSurface
@@ -684,13 +676,14 @@ private fun LogOperationBadge(
     ok: Boolean,
     onCopy: (String) -> Unit,
 ) {
-  val color = if (ok) srxSuccessColor() else MiuixTheme.colorScheme.error
+  // 成功态跟强调色走：日志卡片上每行都有一枚绿徽章，和整体色调不搭。
+  val color = if (ok) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.error
   val copyValue = filterOperation.ifBlank { operation }.ifBlank { "unknown" }
   Text(
       text = operation.ifBlank { "unknown" },
       modifier =
           Modifier.clip(RoundedCornerShape(7.dp))
-              .background(color.copy(alpha = 0.14f))
+              .background(color.copy(alpha = if (isSrxDarkTheme()) 0.14f else 0.2f))
               .clickable { onCopy(copyValue) }
               .padding(horizontal = 7.dp, vertical = 3.dp),
       color = color,
@@ -700,61 +693,4 @@ private fun LogOperationBadge(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
   )
-}
-
-@Composable
-internal fun LogRow(
-    entry: LogEntry,
-    showFullTime: Boolean,
-    onToggleTime: () -> Unit,
-) {
-  Row(
-      modifier = Modifier.fillMaxWidth().padding(14.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(10.dp),
-  ) {
-    Box(
-        Modifier.size(32.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                if (entry.ok) MiuixTheme.colorScheme.primary.copy(alpha = 0.14f)
-                else MiuixTheme.colorScheme.error.copy(alpha = 0.14f)
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-      Icon(
-          MiuixIcons.File,
-          contentDescription = null,
-          tint = if (entry.ok) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.error,
-          modifier = Modifier.size(18.dp),
-      )
-    }
-    Column(Modifier.weight(1f)) {
-      Text(
-          if (entry.isModuleWebUiExport) entry.label.ifBlank { "存储重定向X" }
-          else entry.packageName.ifBlank { "未知应用" },
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          fontWeight = FontWeight.SemiBold,
-      )
-      Text(
-          entry.action,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-          fontSize = 12.sp,
-      )
-      Text(
-          entry.path.ifBlank { "未解析到路径" },
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-          fontSize = 12.sp,
-      )
-    }
-    LogTimeText(
-        text = formatLogEntryTime(entry, showFullTime),
-        showFullTime = showFullTime,
-        onClick = onToggleTime,
-    )
-  }
 }

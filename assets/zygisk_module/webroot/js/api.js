@@ -547,12 +547,22 @@ function parseSystemServerAppList(content, expectedUser) {
   if (!isSafeUserId(userId)) return null;
   const apps = [];
   const packages = new Set();
+  // 首行可带协议版本：v2 = 7 列（含 icon）；没有首行 = 旧模块 6 列。
+  let expectedFields = 6;
+  let lineIndex = 0;
   for (const line of String(content || "").split(/\r?\n/)) {
     if (!line) continue;
+    if (lineIndex === 0 && line.startsWith("#srx-inventory\t")) {
+      if (line.slice("#srx-inventory\t".length) !== "2") return null;
+      expectedFields = 7;
+      lineIndex += 1;
+      continue;
+    }
+    lineIndex += 1;
     const fields = line.split("\t");
     const uid = Number(fields[1]);
     if (
-      fields.length !== 6 ||
+      fields.length !== expectedFields ||
       fields[0] !== userId ||
       !/^[0-9]+$/.test(fields[1]) ||
       !Number.isSafeInteger(uid) ||

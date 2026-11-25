@@ -54,16 +54,21 @@ import org.srx.manager.LocalSrxKyantBackdrop
 import org.srx.manager.themedSurfaceColor
 import org.srx.manager.ui.liquid.lens
 import org.srx.manager.ui.liquid.vibrancy
+import org.srx.manager.ui.theme.LocalSrxColorScheme
 import org.srx.manager.ui.theme.isSrxBlurEffectEnabled
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
+import org.srx.manager.ui.theme.isSrxThemeCoui
+import org.srx.manager.ui.theme.srxGlassSupported
+import org.srx.manager.ui.theme.srxLiquidActive
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
-import top.yukonga.miuix.kmp.blur.highlight.BloomStroke
-import top.yukonga.miuix.kmp.blur.highlight.Highlight
-import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
-import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.material.EdgeLightSource
+import top.yukonga.miuix.kmp.material.EdgePeak
+import top.yukonga.miuix.kmp.material.EdgeStroke
+import top.yukonga.miuix.kmp.material.drawEdgeStroke
+import top.yukonga.miuix.kmp.material.isRenderEffectSupported
 
 /**
  * 控件级液态玻璃表面。
@@ -81,7 +86,7 @@ internal fun Modifier.liquidGlassControl(
     chromaticAberration: Float = 0.28f,
     highlightAlpha: Float = 0.6f,
 ): Modifier {
-  val effectsSupported = isRenderEffectSupported()
+  val effectsSupported = srxGlassSupported()
   val liquid = isSrxLiquidGlassEnabled() && effectsSupported
   val blurEnabled = isSrxBlurEffectEnabled() && effectsSupported
   val backdrop = LocalSrxBackdrop.current
@@ -103,8 +108,10 @@ internal fun Modifier.liquidGlassControl(
             chromaticAberration = chromaticAberration,
         )
       },
-      highlight = { controlHighlight(dark, highlightAlpha) },
       onDrawSurface = { if (tint.isSpecified) drawRect(tint) },
+      onDrawFront = {
+        drawEdgeStroke(shape = shape, stroke = controlStroke(dark), alpha = highlightAlpha)
+      },
   )
 }
 
@@ -114,7 +121,7 @@ internal fun Modifier.liquidPressScale(
     interactionSource: InteractionSource,
     pressedScale: Float = 0.97f,
 ): Modifier {
-  val liquid = isSrxLiquidGlassEnabled() && isRenderEffectSupported()
+  val liquid = srxLiquidActive()
   val pressed by interactionSource.collectIsPressedAsState()
   val progress by
       animateFloatAsState(
@@ -142,10 +149,26 @@ internal fun LiquidSwitch(
     enabled: Boolean = true,
     interactionSource: MutableInteractionSource? = null,
 ) {
+  // 震动必须在开关本身上触发：只点行会走行回调，点滑块/轨道走的是这里。
+  val switchHaptics = LocalHapticFeedback.current
+  val toggleWithHaptic: (Boolean) -> Unit = { next ->
+    switchHaptics.performHapticFeedback(HapticFeedbackType.LongPress)
+    onCheckedChange(next)
+  }
+  if (isSrxThemeCoui()) {
+    // COUI 主题用 COUI 自己的开关形态：滑块更宽、轨道更扁，与 Miuix 的液态开关明显不同。
+    io.github.suqi8.coui.kmp.basic.Switch(
+        checked = checked,
+        onCheckedChange = toggleWithHaptic,
+        modifier = modifier,
+        enabled = enabled,
+    )
+    return
+  }
   if (!isSrxLiquidGlassEnabled()) {
     Switch(
         checked = checked,
-        onCheckedChange = onCheckedChange,
+        onCheckedChange = toggleWithHaptic,
         modifier = modifier,
         enabled = enabled,
     )
@@ -208,10 +231,10 @@ internal fun LiquidSwitch(
       animateColorAsState(
           targetValue =
               when {
-                checked && visualPressed -> MiuixTheme.colorScheme.primary.copy(alpha = 0.86f)
-                checked -> MiuixTheme.colorScheme.primary.copy(alpha = 0.72f)
-                visualPressed -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.5f)
-                else -> MiuixTheme.colorScheme.secondary.copy(alpha = 0.34f)
+                checked && visualPressed -> LocalSrxColorScheme.current.primary.copy(alpha = 0.86f)
+                checked -> LocalSrxColorScheme.current.primary.copy(alpha = 0.72f)
+                visualPressed -> LocalSrxColorScheme.current.secondary.copy(alpha = 0.5f)
+                else -> LocalSrxColorScheme.current.secondary.copy(alpha = 0.34f)
               },
           label = "liquidSwitchTrack",
       )
@@ -219,15 +242,16 @@ internal fun LiquidSwitch(
       animateColorAsState(
           targetValue =
               when {
-                checked && visualPressed -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.98f)
-                checked -> MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.92f)
-                visualPressed -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.94f)
-                else -> MiuixTheme.colorScheme.onSecondary.copy(alpha = 0.88f)
+                checked && visualPressed ->
+                    LocalSrxColorScheme.current.onPrimary.copy(alpha = 0.98f)
+                checked -> LocalSrxColorScheme.current.onPrimary.copy(alpha = 0.92f)
+                visualPressed -> LocalSrxColorScheme.current.onSecondary.copy(alpha = 0.94f)
+                else -> LocalSrxColorScheme.current.onSecondary.copy(alpha = 0.88f)
               },
           label = "liquidSwitchThumb",
       )
-  val accent = MiuixTheme.colorScheme.primary
-  val secondary = MiuixTheme.colorScheme.secondary
+  val accent = LocalSrxColorScheme.current.primary
+  val secondary = LocalSrxColorScheme.current.secondary
   val trackBackdrop = rememberKyantLayerBackdrop()
   val thumbBackdrop = rememberKyantCombinedBackdrop(backdrop, trackBackdrop)
   var switchAppeared by remember { mutableStateOf(false) }
@@ -427,11 +451,11 @@ private fun StaticLiquidSwitch(
           animationSpec = spring(dampingRatio = 0.72f, stiffness = 700f),
           label = "staticLiquidSwitchOffset",
       )
-  val primary = MiuixTheme.colorScheme.primary
+  val primary = LocalSrxColorScheme.current.primary
   val trackColor = if (checked) primary.copy(alpha = 0.78f) else themedSurfaceColor()
   val thumbColor =
-      if (checked) MiuixTheme.colorScheme.onPrimary.copy(alpha = 0.96f)
-      else MiuixTheme.colorScheme.surface.copy(alpha = 0.96f)
+      if (checked) LocalSrxColorScheme.current.onPrimary.copy(alpha = 0.96f)
+      else LocalSrxColorScheme.current.surface.copy(alpha = 0.96f)
   Box(
       modifier =
           modifier
@@ -471,7 +495,8 @@ private fun StaticLiquidSwitch(
         Modifier.offset(x = offset)
             .size(20.dp)
             .graphicsLayer {
-              shadowElevation = 4.dp.toPx() + 3.dp.toPx() * progress
+              // 顶栏/卡片已是浅色玻璃，滑块再带投影会显脏（用户反馈左上角发黑）。
+              shadowElevation = 0f
               shape = CircleShape
               clip = false
             }
@@ -486,13 +511,12 @@ private fun StaticLiquidSwitch(
   }
 }
 
-private fun controlHighlight(dark: Boolean, alpha: Float): Highlight =
-    Highlight(
+private fun controlStroke(dark: Boolean): EdgeStroke =
+    EdgeStroke(
         width = 1.dp,
-        alpha = alpha,
-        style =
-            BloomStroke(
-                color = Color.White.copy(alpha = if (dark) 0.1f else 0.16f),
-                innerBlurRadius = 1.5.dp,
-            ),
+        bevel = 1.5.dp,
+        color = Color.White.copy(alpha = if (dark) 0.1f else 0.16f),
+        primary = EdgeLightSource(0.5f, 0.5f, -0.5f, intensity = 0.4f),
+        secondary = EdgeLightSource(0.5f, 0.6f, -0.5f, intensity = 0.25f),
+        peak = EdgePeak.Axial,
     )

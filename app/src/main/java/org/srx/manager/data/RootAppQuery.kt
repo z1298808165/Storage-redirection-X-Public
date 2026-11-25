@@ -13,6 +13,8 @@ data class UserPackageList(
     val apkPaths: Map<String, String> = emptyMap(),
     val uids: Map<String, Int> = emptyMap(),
     val labels: Map<String, String> = emptyMap(),
+    /** 图标资源 ID；0 表示该包没有可用的图标资源。 */
+    val icons: Map<String, Int> = emptyMap(),
 ) {
   val isEmpty: Boolean
     get() = packageNames.isEmpty()
@@ -51,14 +53,34 @@ internal fun parseSystemServerAppList(text: String, expectedUser: String): UserP
   val paths = HashMap<String, String>()
   val uids = HashMap<String, Int>()
   val labels = HashMap<String, String>()
-  text.lineSequence().forEach { line ->
-    if (line.isEmpty()) return@forEach
+  val icons = HashMap<String, Int>()
+  // 首行可带协议版本（#srx-inventory<TAB>2）：v2 = 7 列（含 icon）；没有首行 = 旧模块 6 列。
+  // 按版本定列数，而不是靠「列数猜」，避免只升级一侧时整份清单被判空。
+  var expectedFields = 6
+  text.lineSequence().forEachIndexed { index, rawLine ->
+    if (rawLine.isEmpty()) return@forEachIndexed
+    if (index == 0 && rawLine.startsWith("#srx-inventory\t")) {
+      expectedFields =
+          when (rawLine.substringAfter('\t')) {
+            "2" -> 7
+            else -> return UserPackageList.Empty
+          }
+      return@forEachIndexed
+    }
+    val line = rawLine
     val fields = line.split('\t')
-    if (fields.size != 6 || fields[0] != expectedUser) return UserPackageList.Empty
+    if (fields.size != expectedFields || fields[0] != expectedUser) return UserPackageList.Empty
     if (fields[1].isEmpty() || fields[1].any { it !in '0'..'9' }) return UserPackageList.Empty
     val uid = fields[1].toIntOrNull() ?: return UserPackageList.Empty
     if (uid / 100000 != expectedUser.toIntOrNull()) return UserPackageList.Empty
     if (fields[2] != "0" && fields[2] != "1") return UserPackageList.Empty
+    val icon =
+        if (expectedFields == 7) {
+          if (fields[6].isEmpty() || fields[6].any { it !in '0'..'9' }) return UserPackageList.Empty
+          fields[6].toIntOrNull() ?: return UserPackageList.Empty
+        } else {
+          0
+        }
     val packageName = fields[3]
     if (!isSafePackageName(packageName) || !packages.add(packageName)) return UserPackageList.Empty
     uids[packageName] = uid
@@ -67,10 +89,11 @@ internal fun parseSystemServerAppList(text: String, expectedUser: String): UserP
     if (label.isEmpty() || (apkPath.isNotEmpty() && !apkPath.startsWith('/')))
         return UserPackageList.Empty
     labels[packageName] = label
+    icons[packageName] = icon
     if (fields[2] == "1") systems.add(packageName)
     if (apkPath.isNotEmpty()) paths[packageName] = apkPath
   }
-  return UserPackageList(packages.toList(), systems, paths, uids, labels)
+  return UserPackageList(packages.toList(), systems, paths, uids, labels, icons)
 }
 
 private fun decodePackageField(value: String): String? {

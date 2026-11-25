@@ -44,16 +44,25 @@ enum class UiColorSpec {
   Spec2025,
 }
 
+enum class UiThemeStyle {
+  Miuix,
+  Coui,
+}
+
 data class UiPreferences(
     val floatingBottomBar: Boolean = true,
     val liquidGlass: Boolean = true,
     val blurEffect: Boolean = true,
     val dynamicColor: Boolean = false,
-    val accentColor: Int = 0,
+    // 默认强调色取 Eta 的蓝（0xFF3482FF），与参考项目一致；0 仍表示"跟随系统取色"。
+    val accentColor: Int = 0xFF3482FF.toInt(),
     val colorStyle: UiColorStyle = UiColorStyle.TonalSpot,
     val colorSpec: UiColorSpec = UiColorSpec.Spec2025,
     val themeMode: UiThemeMode = UiThemeMode.System,
+    val themeStyle: UiThemeStyle = UiThemeStyle.Miuix,
     val predictiveBack: Boolean = false,
+    val swipeBackGesture: Boolean = true,
+    val pageSwipeGesture: Boolean = true,
     val pageScale: Float = 1.0f,
     val autoCheckUpdates: Boolean = true,
     val updateChannel: UpdateChannel = UpdateChannel.Stable,
@@ -83,7 +92,10 @@ class PreferencesRepository(private val context: Context) {
   private val colorStyleKey = stringPreferencesKey("color_style")
   private val colorSpecKey = stringPreferencesKey("color_spec")
   private val themeModeKey = stringPreferencesKey("theme_mode")
+  private val themeStyleKey = stringPreferencesKey("theme_style")
   private val predictiveBackKey = booleanPreferencesKey("predictive_back")
+  private val swipeBackGestureKey = booleanPreferencesKey("swipe_back_gesture")
+  private val pageSwipeGestureKey = booleanPreferencesKey("page_swipe_gesture")
   private val pageScaleKey = floatPreferencesKey("page_scale")
   private val autoCheckUpdatesKey = booleanPreferencesKey("auto_check_updates")
   private val updateChannelKey = stringPreferencesKey("update_channel")
@@ -96,7 +108,7 @@ class PreferencesRepository(private val context: Context) {
             blurEffect =
                 prefs[blurEffectKey] ?: ((prefs[legacyLiquidGlassBlurKey] ?: 0.7f) > 0.01f),
             dynamicColor = prefs[dynamicColorKey] ?: false,
-            accentColor = prefs[accentColorKey] ?: 0,
+            accentColor = prefs[accentColorKey] ?: 0xFF3482FF.toInt(),
             colorStyle =
                 prefs[colorStyleKey]?.let { runCatching { UiColorStyle.valueOf(it) }.getOrNull() }
                     ?: UiColorStyle.TonalSpot,
@@ -106,7 +118,12 @@ class PreferencesRepository(private val context: Context) {
             themeMode =
                 prefs[themeModeKey]?.let { runCatching { UiThemeMode.valueOf(it) }.getOrNull() }
                     ?: UiThemeMode.System,
+            themeStyle =
+                prefs[themeStyleKey]?.let { runCatching { UiThemeStyle.valueOf(it) }.getOrNull() }
+                    ?: UiThemeStyle.Miuix,
             predictiveBack = predictiveBackCompatPref(),
+            swipeBackGesture = prefs[swipeBackGestureKey] ?: true,
+            pageSwipeGesture = prefs[pageSwipeGestureKey] ?: true,
             pageScale = normalizePageScale(prefs[pageScaleKey]),
             autoCheckUpdates = prefs[autoCheckUpdatesKey] ?: true,
             updateChannel =
@@ -148,9 +165,21 @@ class PreferencesRepository(private val context: Context) {
     context.dataStore.edit { it[themeModeKey] = mode.name }
   }
 
+  suspend fun setThemeStyle(style: UiThemeStyle) {
+    context.dataStore.edit { it[themeStyleKey] = style.name }
+  }
+
   suspend fun setPredictiveBack(enabled: Boolean, persistCompatPref: Boolean = true) {
     if (persistCompatPref) setPredictiveBackCompatPref(enabled)
     context.dataStore.edit { it[predictiveBackKey] = enabled }
+  }
+
+  suspend fun setSwipeBackGesture(enabled: Boolean) {
+    context.dataStore.edit { it[swipeBackGestureKey] = enabled }
+  }
+
+  suspend fun setPageSwipeGesture(enabled: Boolean) {
+    context.dataStore.edit { it[pageSwipeGestureKey] = enabled }
   }
 
   suspend fun setPageScale(scale: Float) {
@@ -169,6 +198,8 @@ class PreferencesRepository(private val context: Context) {
     val prefs = uiPreferences.first()
     return BackupUiPreferences(
         predictiveBack = prefs.predictiveBack,
+        swipeBackGesture = prefs.swipeBackGesture,
+        pageSwipeGesture = prefs.pageSwipeGesture,
         floatingBottomBar = prefs.floatingBottomBar,
         liquidGlass = prefs.liquidGlass,
         blurEffect = prefs.blurEffect,
@@ -177,6 +208,7 @@ class PreferencesRepository(private val context: Context) {
         colorStyle = prefs.colorStyle,
         colorSpec = prefs.colorSpec,
         themeMode = prefs.themeMode,
+        themeStyle = prefs.themeStyle,
         pageScale = prefs.pageScale,
         autoCheckUpdates = prefs.autoCheckUpdates,
         updateChannel = prefs.updateChannel,
@@ -186,6 +218,8 @@ class PreferencesRepository(private val context: Context) {
   suspend fun restoreBackupUiPreferences(preferences: BackupUiPreferences) {
     preferences.predictiveBack?.let { setPredictiveBack(it) }
     context.dataStore.edit {
+      preferences.swipeBackGesture?.let { value -> it[swipeBackGestureKey] = value }
+      preferences.pageSwipeGesture?.let { value -> it[pageSwipeGestureKey] = value }
       preferences.floatingBottomBar?.let { value -> it[floatingBottomBarKey] = value }
       preferences.liquidGlass?.let { value -> it[liquidGlassKey] = value }
       preferences.blurEffect?.let { value -> it[blurEffectKey] = value }
@@ -194,6 +228,7 @@ class PreferencesRepository(private val context: Context) {
       preferences.colorStyle?.let { value -> it[colorStyleKey] = value.name }
       preferences.colorSpec?.let { value -> it[colorSpecKey] = value.name }
       preferences.themeMode?.let { value -> it[themeModeKey] = value.name }
+      preferences.themeStyle?.let { value -> it[themeStyleKey] = value.name }
       preferences.pageScale?.let { value -> it[pageScaleKey] = normalizePageScale(value) }
       preferences.autoCheckUpdates?.let { value -> it[autoCheckUpdatesKey] = value }
       preferences.updateChannel?.let { value -> it[updateChannelKey] = value.name }

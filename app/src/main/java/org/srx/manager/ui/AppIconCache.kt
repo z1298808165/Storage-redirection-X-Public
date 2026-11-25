@@ -49,8 +49,19 @@ object AppIconCache {
               loaders.getOrPut(size) { AppIconLoader(size, false, context.applicationContext) }
           // 图标可能来自按 APK 路径解析的包信息（分身用户独有的应用），
           // 解析失败时返回 null 让 UI 回落占位图，而不是把异常抛进组合协程。
+          // 清单里的 ApplicationInfo 是本地拼装的（不来自 PackageManager），个别 ROM 上
+          // 图标资源解析会返回 null；此时按包名回落一次系统图标，避免整列表只剩占位图。
           val bitmap =
               runCatching { loader.loadIcon(info.withCurrentUserUid()) }.getOrNull()
+                  ?: runCatching {
+                        context.packageManager.getApplicationIcon(info.packageName)
+                        loader.loadIcon(
+                            context.packageManager
+                                .getApplicationInfo(info.packageName, 0)
+                                .withCurrentUserUid()
+                        )
+                      }
+                      .getOrNull()
                   ?: return@withContext null
           val prepared =
               runCatching { bitmap.copy(Bitmap.Config.HARDWARE, false)?.also { bitmap.recycle() } }

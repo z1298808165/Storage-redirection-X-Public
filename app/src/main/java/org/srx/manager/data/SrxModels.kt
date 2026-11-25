@@ -218,6 +218,8 @@ data class BackupData(
 @Serializable
 data class BackupUiPreferences(
     @SerialName("predictive_back") val predictiveBack: Boolean? = null,
+    @SerialName("swipe_back_gesture") val swipeBackGesture: Boolean? = null,
+    @SerialName("page_swipe_gesture") val pageSwipeGesture: Boolean? = null,
     @SerialName("floating_bottom_bar") val floatingBottomBar: Boolean? = null,
     @SerialName("liquid_glass") val liquidGlass: Boolean? = null,
     @SerialName("blur_effect") val blurEffect: Boolean? = null,
@@ -226,6 +228,7 @@ data class BackupUiPreferences(
     @SerialName("color_style") val colorStyle: UiColorStyle? = null,
     @SerialName("color_spec") val colorSpec: UiColorSpec? = null,
     @SerialName("theme_mode") val themeMode: UiThemeMode? = null,
+    @SerialName("theme_style") val themeStyle: UiThemeStyle? = null,
     @SerialName("page_scale") val pageScale: Float? = null,
     @SerialName("auto_check_updates") val autoCheckUpdates: Boolean? = null,
     @SerialName("update_channel") val updateChannel: UpdateChannel? = null,

@@ -9,7 +9,8 @@ navigationevent = "1.1.2"
 datastore = "1.2.0"
 kotlinx-coroutines = "1.11.0"
 kotlinx-serialization-json = "1.11.0"
-miuix = "0.9.4"
+miuix = "0.9.5-rc01"
+coui = "2.0.0"
 appiconloader = "1.5.0"
 hiddenapibypass = "6.1"
 junit = "4.13.2"
@@ -50,6 +51,14 @@ miuix-ui = { module = "top.yukonga.miuix.kmp:miuix-ui-android", version.ref = "m
 miuix-icons = { module = "top.yukonga.miuix.kmp:miuix-icons-android", version.ref = "miuix" }
 miuix-nav = { module = "top.yukonga.miuix.kmp:miuix-nav-android", version.ref = "miuix" }
 miuix-blur = { module = "top.yukonga.miuix.kmp:miuix-blur-android", version.ref = "miuix" }
+miuix-glass = { module = "top.yukonga.miuix.kmp:miuix-glass-android", version.ref = "miuix" }
+miuix-material = { module = "top.yukonga.miuix.kmp:miuix-material-android", version.ref = "miuix" }
+miuix-glass-icons = { module = "top.yukonga.miuix.kmp:miuix-glass-icons-android", version.ref = "miuix" }
+coui-ui = { module = "io.github.suqi8.coui.kmp:coui-ui-android", version.ref = "coui" }
+coui-icons = { module = "io.github.suqi8.coui.kmp:coui-icons-android", version.ref = "coui" }
+coui-blur = { module = "io.github.suqi8.coui.kmp:coui-blur-android", version.ref = "coui" }
+coui-nav = { module = "io.github.suqi8.coui.kmp:coui-nav-android", version.ref = "coui" }
+coui-preference = { module = "io.github.suqi8.coui.kmp:coui-preference-android", version.ref = "coui" }
 appiconloader = { module = "me.zhanghai.android.appiconloader:appiconloader", version.ref = "appiconloader" }
 hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 junit = { module = "junit:junit", version.ref = "junit" }

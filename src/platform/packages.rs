@@ -35,6 +35,8 @@ pub struct PackageApp {
     pub package_name: String,
     pub label: String,
     pub apk_path: String,
+    /// 图标资源 ID（`ApplicationInfo.icon`），供管理端直接构造图标信息，不再逐包查询。
+    pub icon: i32,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -110,9 +112,23 @@ pub fn parse_app_inventory(content: &str, expected_user: i32) -> io::Result<Vec<
     }
     let mut apps = Vec::new();
     let mut packages = HashSet::new();
-    for line in content.lines() {
+    // 首行可带协议版本：v2 = 7 列（含 icon）；没有首行 = 旧模块 6 列。
+    // 按版本定列数，避免只升级一侧时把整份清单判空。
+    let mut expected_fields = 6usize;
+    let mut lines = content.lines().peekable();
+    if let Some(version) = lines
+        .peek()
+        .and_then(|first| first.strip_prefix("#srx-inventory\t"))
+    {
+        expected_fields = match version {
+            "2" => 7,
+            _ => return Err(invalid("package inventory version")),
+        };
+        lines.next();
+    }
+    for line in lines {
         let fields: Vec<_> = line.split('\t').collect();
-        if fields.len() != 6 {
+        if fields.len() != expected_fields {
             return Err(invalid("package app row"));
         }
         let user_id = decimal(fields[0], "package user")?;
@@ -125,6 +141,12 @@ pub fn parse_app_inventory(content: &str, expected_user: i32) -> io::Result<Vec<
         let package_name = fields[3];
         let label = decode_field(fields[4])?;
         let apk_path = decode_field(fields[5])?;
+        // icon 只在 v2（7 列）里存在；旧模块的 6 列清单没有这一项，按 0 处理。
+        let icon = if expected_fields == 7 {
+            decimal(fields[6], "package icon")?
+        } else {
+            0
+        };
         if user_id != expected_user
             || uid < 0
             || uid / 100_000 != expected_user
@@ -142,6 +164,7 @@ pub fn parse_app_inventory(content: &str, expected_user: i32) -> io::Result<Vec<
             package_name: package_name.to_owned(),
             label,
             apk_path,
+            icon,
         });
     }
     Ok(apps)

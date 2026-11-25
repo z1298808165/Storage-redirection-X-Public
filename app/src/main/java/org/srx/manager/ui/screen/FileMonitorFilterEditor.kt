@@ -40,6 +40,8 @@ import org.srx.manager.data.SrxConfigNormalizer
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.srxSuccessColor
 import org.srx.manager.subtleFieldLabelColor
+import org.srx.manager.ui.component.ShatterRow
+import org.srx.manager.ui.theme.SrxShapes
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Badge
 import top.yukonga.miuix.kmp.basic.Icon
@@ -47,9 +49,9 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Add
-import top.yukonga.miuix.kmp.icon.extended.Delete
-import top.yukonga.miuix.kmp.icon.extended.Ok
+import top.yukonga.miuix.kmp.icon.glass.Add
+import top.yukonga.miuix.kmp.icon.glass.Delete
+import top.yukonga.miuix.kmp.icon.glass.Ok
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 // 文件监视过滤规则的编辑入口。
@@ -75,6 +77,8 @@ internal fun FileMonitorFilterDialog(
   var pathValidation by remember(show) { mutableStateOf<MonitorFilterPathValidation?>(null) }
   var operationInput by remember(show) { mutableStateOf("") }
   var pendingRemoval by remember(show) { mutableStateOf<MonitorFilterRemoval?>(null) }
+  // 删除先播「破碎」动画，动画结束（或被打断）才真正落数据，和应用配置页的删除手感一致。
+  var shatteringRemoval by remember(show) { mutableStateOf<MonitorFilterRemoval?>(null) }
   fun saveDraft(
       nextPaths: List<String> = paths,
       nextOperationRules: List<String> = operationRules,
@@ -88,6 +92,27 @@ internal fun FileMonitorFilterDialog(
         silent,
     )
   }
+  fun applyRemoval(removal: MonitorFilterRemoval) {
+    when (removal.type) {
+      MonitorFilterType.Path -> {
+        val next = paths - removal.value
+        paths = next
+        if (autoSave) saveDraft(nextPaths = next)
+      }
+      MonitorFilterType.Operation -> {
+        val next = operationRules - removal.value
+        operationRules = next
+        if (autoSave) saveDraft(nextOperationRules = next)
+      }
+      MonitorFilterType.Intent -> {
+        val next = operationRules - "*:${removal.value}"
+        operationRules = next
+        if (autoSave) saveDraft(nextOperationRules = next)
+      }
+    }
+    shatteringRemoval = null
+  }
+  val shatteringKey = shatteringRemoval?.value
   CenteredDialog(
       show = show,
       onDismiss = onDismiss,
@@ -157,6 +182,9 @@ internal fun FileMonitorFilterDialog(
               onRemove = { pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Path, it) },
               validationText = if (pathInput.isBlank()) "" else pathValidation?.message.orEmpty(),
               validationError = pathValidation?.valid == false,
+              shatteringKey =
+                  shatteringKey?.takeIf { shatteringRemoval?.type == MonitorFilterType.Path },
+              onShatterFinished = { shatteringRemoval?.let(::applyRemoval) },
           )
       MonitorFilterType.Operation ->
           MonitorFilterEditor(
@@ -174,10 +202,16 @@ internal fun FileMonitorFilterDialog(
                 }
               },
               onRemove = { pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Operation, it) },
+              shatteringKey =
+                  shatteringKey?.takeIf { shatteringRemoval?.type == MonitorFilterType.Operation },
+              onShatterFinished = { shatteringRemoval?.let(::applyRemoval) },
           )
       MonitorFilterType.Intent ->
           MonitorIntentEditor(
               selected = intents,
+              shatteringKey =
+                  shatteringKey?.takeIf { shatteringRemoval?.type == MonitorFilterType.Intent },
+              onShatterFinished = { shatteringRemoval?.let(::applyRemoval) },
               onToggle = { intent ->
                 if (intent in intents) {
                   pendingRemoval = MonitorFilterRemoval(MonitorFilterType.Intent, intent)
@@ -213,23 +247,8 @@ internal fun FileMonitorFilterDialog(
         GlassTextButton(
             "删除",
             {
-              when (removal.type) {
-                MonitorFilterType.Path -> {
-                  val nextPaths = paths - removal.value
-                  paths = nextPaths
-                  if (autoSave) saveDraft(nextPaths = nextPaths)
-                }
-                MonitorFilterType.Operation -> {
-                  val nextRules = operationRules - removal.value
-                  operationRules = nextRules
-                  if (autoSave) saveDraft(nextOperationRules = nextRules)
-                }
-                MonitorFilterType.Intent -> {
-                  val nextRules = operationRules - "*:${removal.value}"
-                  operationRules = nextRules
-                  if (autoSave) saveDraft(nextOperationRules = nextRules)
-                }
-              }
+              // 交给 ShatterRow 播完动画再改数据：直接删会让行在动画开始前就消失。
+              shatteringRemoval = removal
               pendingRemoval = null
             },
             modifier = Modifier.weight(1f),
@@ -240,7 +259,7 @@ internal fun FileMonitorFilterDialog(
   }
 }
 
-private enum class MonitorFilterType(val label: String, val description: String) {
+internal enum class MonitorFilterType(val label: String, val description: String) {
   Path("路径", "排除目录及其子路径，支持 * 和 ? 通配。"),
   Operation("操作", "按操作名或模式过滤，支持 *、? 和意图后缀，例如 open*、open*:read。"),
   Intent("意图", "按访问目的过滤，不受 open、openat 等具体操作名影响。"),
@@ -251,12 +270,12 @@ private data class MonitorFilterRemoval(val type: MonitorFilterType, val value: 
     get() = if (type == MonitorFilterType.Intent) monitorIntentLabel(value) else value
 }
 
-private val MonitorIntents = listOf("read", "write", "create")
+internal val MonitorIntents = listOf("read", "write", "create")
 
-private fun sortMonitorFilterValues(values: List<String>): List<String> =
+internal fun sortMonitorFilterValues(values: List<String>): List<String> =
     values.sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
 
-private fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
+internal fun splitMonitorOperationRules(values: List<String>): Pair<List<String>, List<String>> {
   val intents = mutableListOf<String>()
   val operations = mutableListOf<String>()
   values.forEach { value ->
@@ -280,7 +299,7 @@ private fun MonitorFilterTabs(
     counts: Map<MonitorFilterType, Int>,
     onSelect: (MonitorFilterType) -> Unit,
 ) {
-  val outerShape = RoundedCornerShape(15.dp)
+  val outerShape = RoundedCornerShape(SrxShapes.inner)
   val dark = isSrxDarkTheme()
   Row(
       modifier =
@@ -297,7 +316,7 @@ private fun MonitorFilterTabs(
   ) {
     MonitorFilterType.entries.forEach { type ->
       val active = type == selected
-      val itemShape = RoundedCornerShape(11.dp)
+      val itemShape = RoundedCornerShape(SrxShapes.field)
       Row(
           modifier =
               Modifier.weight(1f)
@@ -365,13 +384,13 @@ private fun MonitorFilterTabs(
   }
 }
 
-private data class MonitorFilterPathValidation(
+internal data class MonitorFilterPathValidation(
     val value: String,
     val valid: Boolean,
     val message: String,
 )
 
-private fun validateMonitorFilterPathInput(raw: String): MonitorFilterPathValidation {
+internal fun validateMonitorFilterPathInput(raw: String): MonitorFilterPathValidation {
   val text = raw.trim()
   if (text.isBlank()) return MonitorFilterPathValidation("", false, "路径不能为空")
   val normalized = SrxConfigNormalizer.sanitizeMonitorFilterPath(text, allowLegacyAbsolute = false)
@@ -411,6 +430,8 @@ private fun MonitorFilterEditor(
     onRemove: (String) -> Unit,
     validationText: String = "",
     validationError: Boolean = false,
+    shatteringKey: String? = null,
+    onShatterFinished: () -> Unit = {},
 ) {
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Row(
@@ -428,7 +449,7 @@ private fun MonitorFilterEditor(
           singleLine = true,
       )
       RoundIconAction(
-          icon = MiuixIcons.Add,
+          icon = MiuixIcons.Glass.Add,
           contentDescription = "添加规则",
           onClick = onAdd,
           size = 36.dp,
@@ -463,7 +484,11 @@ private fun MonitorFilterEditor(
           )
         }
       } else {
-        items(values, key = { it }) { item -> MonitorFilterChipRow(item, onRemove) }
+        items(values, key = { it }) { item ->
+          ShatterRow(shattering = shatteringKey == item, onFinished = onShatterFinished) {
+            MonitorFilterChipRow(item, onRemove)
+          }
+        }
       }
     }
   }
@@ -475,8 +500,8 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
       modifier =
           Modifier.fillMaxWidth()
               .height(42.dp)
-              .clip(RoundedCornerShape(14.dp))
-              .background(glassSurfaceColor(0.58f), RoundedCornerShape(14.dp))
+              .clip(RoundedCornerShape(SrxShapes.field))
+              .background(glassSurfaceColor(0.58f), RoundedCornerShape(SrxShapes.field))
               .padding(horizontal = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -490,7 +515,7 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
         overflow = TextOverflow.Ellipsis,
     )
     RoundIconAction(
-        MiuixIcons.Delete,
+        MiuixIcons.Glass.Delete,
         "删除规则",
         { onRemove(value) },
         danger = true,
@@ -501,56 +526,64 @@ private fun MonitorFilterChipRow(value: String, onRemove: (String) -> Unit) {
 }
 
 @Composable
-private fun MonitorIntentEditor(selected: List<String>, onToggle: (String) -> Unit) {
+private fun MonitorIntentEditor(
+    selected: List<String>,
+    onToggle: (String) -> Unit,
+    shatteringKey: String? = null,
+    onShatterFinished: () -> Unit = {},
+) {
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
     MonitorIntents.forEach { intent ->
       val active = intent in selected
       val shape = RoundedCornerShape(14.dp)
-      Row(
-          modifier =
-              Modifier.fillMaxWidth()
-                  .height(54.dp)
-                  .clip(shape)
-                  .background(
-                      if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.11f)
-                      else glassSurfaceColor(0.58f),
-                      shape,
-                  )
-                  .border(
-                      1.dp,
-                      if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.32f)
-                      else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.07f),
-                      shape,
-                  )
-                  .clickable { onToggle(intent) }
-                  .padding(horizontal = 12.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-          Text(
-              monitorIntentLabel(intent),
-              color =
-                  if (active) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurface,
-              fontWeight = FontWeight.Black,
-              fontSize = 13.sp,
-          )
-          Text(
-              when (intent) {
-                "read" -> "仅读取现有内容"
-                "write" -> "写入或追加内容"
-                else -> "新建、覆盖或临时文件"
-              },
-              color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-              fontSize = 11.sp,
+      ShatterRow(shattering = shatteringKey == intent, onFinished = onShatterFinished) {
+        Row(
+            modifier =
+                Modifier.fillMaxWidth()
+                    .height(54.dp)
+                    .clip(shape)
+                    .background(
+                        if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.11f)
+                        else glassSurfaceColor(0.58f),
+                        shape,
+                    )
+                    .border(
+                        1.dp,
+                        if (active) MiuixTheme.colorScheme.primary.copy(alpha = 0.32f)
+                        else MiuixTheme.colorScheme.onSurface.copy(alpha = 0.07f),
+                        shape,
+                    )
+                    .clickable { onToggle(intent) }
+                    .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                monitorIntentLabel(intent),
+                color =
+                    if (active) MiuixTheme.colorScheme.primary
+                    else MiuixTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Black,
+                fontSize = 13.sp,
+            )
+            Text(
+                when (intent) {
+                  "read" -> "仅读取现有内容"
+                  "write" -> "写入或追加内容"
+                  else -> "新建、覆盖或临时文件"
+                },
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 11.sp,
+            )
+          }
+          Icon(
+              imageVector = if (active) MiuixIcons.Glass.Ok else MiuixIcons.Glass.Add,
+              contentDescription = if (active) "已添加" else "添加",
+              tint = MiuixTheme.colorScheme.primary,
+              modifier = Modifier.size(18.dp),
           )
         }
-        Icon(
-            imageVector = if (active) MiuixIcons.Ok else MiuixIcons.Add,
-            contentDescription = if (active) "已添加" else "添加",
-            tint = MiuixTheme.colorScheme.primary,
-            modifier = Modifier.size(18.dp),
-        )
       }
     }
   }

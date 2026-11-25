@@ -8,9 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
@@ -20,9 +18,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,30 +31,46 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
-import org.srx.manager.BackPageHeader
 import org.srx.manager.CenteredDialog
-import org.srx.manager.GlassCard
 import org.srx.manager.GlassTextButton
 import org.srx.manager.SectionTitle
+import org.srx.manager.SettingGroup
+import org.srx.manager.SrxProgressiveListPage
 import org.srx.manager.appMeshBackground
 import org.srx.manager.data.UiColorSpec
 import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UiThemeMode
+import org.srx.manager.data.UiThemeStyle
+import org.srx.manager.srxRememberListState
 import org.srx.manager.subtleFieldLabelColor
-import org.srx.manager.themedSurfaceColor
+import org.srx.manager.ui.theme.LocalSrxColorScheme
+import org.srx.manager.ui.theme.SrxRowMetrics
+import org.srx.manager.ui.theme.isSrxThemeCoui
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SliderDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextFieldDefaults
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.AddWindow
+import top.yukonga.miuix.kmp.icon.glass.Back
+import top.yukonga.miuix.kmp.icon.glass.ChevronForward
+import top.yukonga.miuix.kmp.icon.glass.File
+import top.yukonga.miuix.kmp.icon.glass.GridView
+import top.yukonga.miuix.kmp.icon.glass.Import
+import top.yukonga.miuix.kmp.icon.glass.Info
+import top.yukonga.miuix.kmp.icon.glass.ListView
+import top.yukonga.miuix.kmp.icon.glass.Refresh
+import top.yukonga.miuix.kmp.icon.glass.SettingsOutline
+import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 
 private const val PageScaleMinPercent = 80
 private const val PageScaleMaxPercent = 110
@@ -73,84 +87,117 @@ internal fun ThemeSettingsScreen(
     onColorStyle: (UiColorStyle) -> Unit,
     onColorSpec: (UiColorSpec) -> Unit,
     onThemeMode: (UiThemeMode) -> Unit,
+    onThemeStyle: (UiThemeStyle) -> Unit,
     onPredictiveBack: (Boolean) -> Unit,
+    onSwipeBack: (Boolean) -> Unit,
+    onPageSwipe: (Boolean) -> Unit,
     onPageScale: (Float) -> Unit,
 ) {
-  var showAccentColorPicker by remember { mutableStateOf(false) }
-  var showColorStylePicker by remember { mutableStateOf(false) }
-  var showColorSpecPicker by remember { mutableStateOf(false) }
   var showPageScaleEditor by remember { mutableStateOf(false) }
 
-  Box(modifier = Modifier.fillMaxSize().appMeshBackground()) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().overScrollVertical(),
-        contentPadding =
-            PaddingValues(
-                top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 18.dp,
-                bottom =
-                    WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 28.dp,
-                start = 16.dp,
-                end = 16.dp,
-            ),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-      item { BackPageHeader(title = "主题与外观", onBack = onBack) }
-      item { ThemePreview(modifier = Modifier.fillMaxWidth()) }
-      item {
-        SectionTitle("主题模式")
-        ThemeModeSelector(
-            mode = prefs.themeMode,
-            onMode = onThemeMode,
-            modifier = Modifier.fillMaxWidth(),
-        )
+  // 这里的 LazyColumn 内容 lambda 不是 @Composable，取不了 CompositionLocal，
+  // 所以先在可组合作用域里算好，下面只用布尔值。
+  val couiStyle = isSrxThemeCoui()
+  val listState = srxRememberListState("theme")
+  val bottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+  SrxProgressiveListPage(
+      title = "主题与外观",
+      onBack = onBack,
+      listState = listState,
+      bottomPadding = bottomPadding,
+      topSpacing = 18.dp,
+      verticalArrangement = Arrangement.spacedBy(SrxRowMetrics.groupSpacing()),
+  ) {
+    item { ThemePreview(prefs = prefs, modifier = Modifier.fillMaxWidth()) }
+    item {
+      SectionTitle("主题模式")
+      ThemeModeSelector(
+          mode = prefs.themeMode,
+          onMode = onThemeMode,
+          modifier = Modifier.fillMaxWidth(),
+      )
+    }
+    item {
+      SectionTitle("主题风格")
+      SettingGroup() {
+        item {
+          SettingMenuRow(
+              title = "主题风格",
+              leading = { SettingsRowIcon(MiuixIcons.Glass.SettingsOutline) },
+              value = themeStyleLabel(prefs.themeStyle),
+              options = ThemeStyleSelectOptions,
+              selected = prefs.themeStyle,
+              onSelect = onThemeStyle,
+          )
+        }
       }
+    }
+    // COUI 下整节颜色设置都不显示：动态取色对 COUI 无效，强调色也由 COUI 原生色板接管。
+    if (!couiStyle) {
       item {
         SectionTitle("颜色")
-        GlassCard(alpha = 0.58f) {
-          CompactSwitchRow(
-              title = "动态取色",
-              summary = "跟随系统壁纸生成界面配色，关闭后使用固定主题色",
-              checked = prefs.dynamicColor,
-              onCheckedChange = onDynamicColor,
-              showDivider = prefs.dynamicColor,
-          )
-          if (prefs.dynamicColor) {
-            SettingSelectRow(
-                title = "强调色",
-                summary = "选择系统取色，或指定应用主题色",
-                value = accentColorLabel(prefs.accentColor),
-                onClick = { showAccentColorPicker = true },
-                showDivider = prefs.accentColor != 0,
+        SettingGroup() {
+          item {
+            CompactSwitchRow(
+                title = "动态取色",
+                icon = MiuixIcons.Glass.Refresh,
+                checked = prefs.dynamicColor,
+                onCheckedChange = onDynamicColor,
+                showDivider = prefs.dynamicColor,
             )
           }
+          if (prefs.dynamicColor) {
+            item {
+              SettingMenuRow(
+                  title = "强调色",
+                  leading = { SettingsRowIcon(MiuixIcons.Glass.Tune) },
+                  value = accentColorLabel(prefs.accentColor),
+                  options = AccentColorOptions,
+                  selected = prefs.accentColor,
+                  onSelect = onAccentColor,
+                  showDivider = prefs.accentColor != 0,
+              )
+            }
+          }
           if (prefs.dynamicColor && prefs.accentColor != 0) {
-            SettingSelectRow(
-                title = "色彩风格",
-                summary = "选择主题色板的明度与饱和度倾向",
-                value = colorStyleLabel(prefs.colorStyle),
-                onClick = { showColorStylePicker = true },
-            )
-            SettingSelectRow(
-                title = "色彩标准",
-                summary = "选择主题色生成算法版本",
-                value = colorSpecLabel(prefs.colorSpec),
-                onClick = { showColorSpecPicker = true },
-                showDivider = false,
-            )
+            item {
+              SettingMenuRow(
+                  title = "色彩风格",
+                  leading = { SettingsRowIcon(MiuixIcons.Glass.GridView) },
+                  value = colorStyleLabel(prefs.colorStyle),
+                  options = ColorStyleOptions,
+                  selected = prefs.colorStyle,
+                  onSelect = onColorStyle,
+              )
+            }
+            item {
+              SettingMenuRow(
+                  title = "色彩标准",
+                  leading = { SettingsRowIcon(MiuixIcons.Glass.ListView) },
+                  value = colorSpecLabel(prefs.colorSpec),
+                  options = ColorSpecOptions,
+                  selected = prefs.colorSpec,
+                  onSelect = onColorSpec,
+              )
+            }
           }
         }
       }
-      item {
-        SectionTitle("显示")
-        GlassCard(alpha = 0.58f) {
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+    }
+    item {
+      SectionTitle("显示")
+      SettingGroup() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+          item {
             CompactSwitchRow(
                 title = "预测性返回手势",
-                summary = "返回二级页面时显示上级页面预览",
+                icon = MiuixIcons.Glass.Back,
                 checked = prefs.predictiveBack,
                 onCheckedChange = onPredictiveBack,
             )
           }
+        }
+        item {
           PageScaleControl(
               scale = prefs.pageScale,
               onOpenEditor = { showPageScaleEditor = true },
@@ -158,24 +205,55 @@ internal fun ThemeSettingsScreen(
           )
         }
       }
-      item {
-        SectionTitle("视觉效果")
-        GlassCard(alpha = 0.58f) {
+    }
+    item {
+      SectionTitle("手势")
+      SettingGroup() {
+        item {
+          CompactSwitchRow(
+              title = "横移返回手势",
+              icon = MiuixIcons.Glass.ChevronForward,
+              checked = prefs.swipeBackGesture,
+              onCheckedChange = onSwipeBack,
+          )
+        }
+        item {
+          CompactSwitchRow(
+              title = "页面切换手势",
+              icon = MiuixIcons.Glass.AddWindow,
+              checked = prefs.pageSwipeGesture,
+              onCheckedChange = onPageSwipe,
+              showDivider = false,
+          )
+        }
+      }
+    }
+    item {
+      SectionTitle("视觉效果")
+      SettingGroup() {
+        item {
           CompactSwitchRow(
               title = "悬浮底栏",
-              summary = "让底部导航悬浮于页面内容之上",
+              icon = MiuixIcons.Glass.Import,
               checked = prefs.floatingBottomBar,
               onCheckedChange = onFloating,
           )
-          CompactSwitchRow(
-              title = "液态玻璃",
-              summary = "控制玻璃高光、边缘折射与底栏跟随形变，不会自动开启模糊",
-              checked = prefs.liquidGlass,
-              onCheckedChange = onLiquid,
-          )
+        }
+        // COUI 主题的底栏与卡片不使用液态玻璃，这个开关在该主题下没有意义，直接隐藏。
+        if (!isSrxThemeCoui()) {
+          item {
+            CompactSwitchRow(
+                title = "液态玻璃",
+                icon = MiuixIcons.Glass.Info,
+                checked = prefs.liquidGlass,
+                onCheckedChange = onLiquid,
+            )
+          }
+        }
+        item {
           CompactSwitchRow(
               title = "材质模糊",
-              summary = "模糊卡片、弹窗和底栏后的页面内容；关闭后改用高不透明度材质",
+              icon = MiuixIcons.Glass.File,
               checked = prefs.blurEffect,
               onCheckedChange = onBlurEffect,
               showDivider = false,
@@ -184,40 +262,6 @@ internal fun ThemeSettingsScreen(
       }
     }
   }
-  SettingOptionDialog(
-      show = showAccentColorPicker,
-      title = "强调色",
-      options = AccentColorOptions,
-      selected = prefs.accentColor,
-      onDismiss = { showAccentColorPicker = false },
-      leading = { color, selected -> AccentColorPenIcon(color, selected) },
-      onSelect = {
-        onAccentColor(it)
-        showAccentColorPicker = false
-      },
-  )
-  SettingOptionDialog(
-      show = showColorStylePicker,
-      title = "色彩风格",
-      options = ColorStyleOptions,
-      selected = prefs.colorStyle,
-      onDismiss = { showColorStylePicker = false },
-      onSelect = {
-        onColorStyle(it)
-        showColorStylePicker = false
-      },
-  )
-  SettingOptionDialog(
-      show = showColorSpecPicker,
-      title = "色彩标准",
-      options = ColorSpecOptions,
-      selected = prefs.colorSpec,
-      onDismiss = { showColorSpecPicker = false },
-      onSelect = {
-        onColorSpec(it)
-        showColorSpecPicker = false
-      },
-  )
   PageScaleDialog(
       show = showPageScaleEditor,
       scale = prefs.pageScale,
@@ -231,13 +275,17 @@ internal fun ThemeSettingsScreen(
 
 @SuppressLint("ConfigurationScreenWidthHeight")
 @Composable
-private fun ThemePreview(modifier: Modifier = Modifier) {
-  val colors = MiuixTheme.colorScheme
+internal fun ThemePreview(prefs: UiPreferences, modifier: Modifier = Modifier) {
+  // 预览卡在两个主题下共用，必须读统一色板：COUI 分支里没有 MiuixTheme，
+  // 读 MiuixTheme 会回落到库默认蓝，预览色就和实际主题不一致（用户看到的"预览不对"）。
+  val colors = LocalSrxColorScheme.current
   val configuration = LocalConfiguration.current
   val screenRatio =
       configuration.screenWidthDp.toFloat() / configuration.screenHeightDp.coerceAtLeast(1)
   val frameShape = RoundedCornerShape(20.dp)
   val rowShape = RoundedCornerShape(12.dp)
+  val glassSurface = colors.surface.copy(alpha = if (prefs.blurEffect) 0.58f else 0.92f)
+  val hairline = colors.onSurface.copy(alpha = 0.08f)
   Box(modifier = modifier, contentAlignment = Alignment.Center) {
     Box(
         modifier =
@@ -248,79 +296,95 @@ private fun ThemePreview(modifier: Modifier = Modifier) {
                 .appMeshBackground()
                 .border(1.dp, colors.onSurface.copy(alpha = 0.12f), frameShape),
     ) {
-      Column(
-          modifier =
-              Modifier.fillMaxSize()
-                  .padding(start = 16.dp, top = 24.dp, end = 16.dp, bottom = 54.dp),
-      ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().height(22.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-          Box(
-              Modifier.fillMaxWidth(0.42f)
-                  .height(7.dp)
-                  .clip(RoundedCornerShape(2.dp))
-                  .background(colors.onSurface),
-          )
-          Box(
-              Modifier.fillMaxWidth(0.24f)
-                  .height(5.dp)
-                  .clip(RoundedCornerShape(2.dp))
-                  .background(colors.onSurface.copy(alpha = 0.34f)),
-          )
-        }
-        Spacer(Modifier.height(12.dp))
-        Box(
-            Modifier.fillMaxWidth()
-                .weight(1.2f)
-                .clip(RoundedCornerShape(16.dp))
-                .background(colors.primary.copy(alpha = 0.88f)),
-        )
-        Spacer(Modifier.height(12.dp))
+      Column(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
+            modifier =
+                Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-          repeat(3) {
+          Box(modifier = Modifier.fillMaxWidth().height(24.dp)) {
             Box(
-                Modifier.fillMaxWidth()
-                    .weight(1f)
-                    .clip(rowShape)
-                    .background(themedSurfaceColor())
-                    .border(1.dp, colors.onSurface.copy(alpha = 0.07f), rowShape),
+                Modifier.align(Alignment.BottomStart)
+                    .width(48.dp)
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(colors.onSurface),
+            )
+            Box(
+                Modifier.align(Alignment.TopEnd)
+                    .width(20.dp)
+                    .height(5.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(colors.onSurface.copy(alpha = 0.34f)),
             )
           }
-        }
-      }
-      Row(
-          modifier =
-              Modifier.align(Alignment.BottomCenter)
-                  .fillMaxWidth()
-                  .padding(horizontal = 16.dp, vertical = 12.dp)
-                  .height(36.dp)
-                  .clip(RoundedCornerShape(14.dp))
-                  .background(themedSurfaceColor())
-                  .border(
-                      1.dp,
-                      colors.onSurface.copy(alpha = 0.08f),
-                      RoundedCornerShape(14.dp),
-                  )
-                  .padding(horizontal = 12.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically,
-      ) {
-        repeat(4) { index ->
           Box(
-              Modifier.size(12.dp)
-                  .clip(RoundedCornerShape(5.dp))
-                  .background(
-                      if (index == 0) colors.primary
-                      else colors.onSurfaceVariantSummary.copy(alpha = 0.42f)
-                  ),
+              Modifier.fillMaxWidth()
+                  .weight(1.2f)
+                  .clip(RoundedCornerShape(16.dp))
+                  .background(colors.primary.copy(alpha = 0.88f)),
           )
+          Column(
+              modifier = Modifier.fillMaxWidth().weight(1f),
+              verticalArrangement = Arrangement.spacedBy(7.dp),
+          ) {
+            repeat(3) {
+              Box(
+                  Modifier.fillMaxWidth()
+                      .weight(1f)
+                      .clip(rowShape)
+                      .background(glassSurface)
+                      .border(1.dp, hairline, rowShape),
+              )
+            }
+          }
         }
+        BottomBarMock(prefs = prefs, glassSurface = glassSurface, hairline = hairline)
+      }
+    }
+  }
+}
+
+/** 底栏预览：悬浮态是留边距的胶囊，贴底态是全宽导航栏，与 [BottomNavigation] 的两条分支对应。 */
+@Composable
+private fun BottomBarMock(prefs: UiPreferences, glassSurface: Color, hairline: Color) {
+  val colors = MiuixTheme.colorScheme
+  val floating = prefs.floatingBottomBar
+  val shape =
+      if (floating) {
+        RoundedCornerShape(16.dp)
+      } else {
+        RoundedCornerShape(0.dp)
+      }
+  Box(
+      modifier = Modifier.fillMaxWidth().padding(bottom = if (floating) 8.dp else 0.dp),
+      contentAlignment = Alignment.Center,
+  ) {
+    Row(
+        modifier =
+            (if (floating) Modifier.fillMaxWidth(0.82f) else Modifier.fillMaxWidth())
+                .height(if (floating) 34.dp else 32.dp)
+                .clip(shape)
+                .background(glassSurface)
+                .border(1.dp, hairline, shape)
+                .padding(horizontal = if (floating) 12.dp else 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement =
+            if (floating) Arrangement.spacedBy(14.dp, Alignment.CenterHorizontally)
+            else Arrangement.SpaceEvenly,
+    ) {
+      repeat(4) { index ->
+        Box(
+            Modifier.size(if (floating) 8.dp else 9.dp)
+                .clip(CircleShape)
+                .background(
+                    if (index == 0) {
+                      colors.primary
+                    } else {
+                      colors.onSurfaceVariantSummary.copy(alpha = 0.42f)
+                    }
+                ),
+        )
       }
     }
   }
@@ -388,6 +452,16 @@ internal fun themeModeLabel(mode: UiThemeMode): String =
       UiThemeMode.System -> "跟随系统"
     }
 
+private val ThemeStyleSelectOptions =
+    listOf(
+        // 与 Eta 一致：只显示风格名，不带括号里的系统名。
+        UiThemeStyle.Miuix to "Miuix",
+        UiThemeStyle.Coui to "COUI",
+    )
+
+private fun themeStyleLabel(style: UiThemeStyle): String =
+    ThemeStyleSelectOptions.firstOrNull { it.first == style }?.second ?: "Miuix"
+
 private fun pageScalePercent(scale: Float): Int =
     (scale.coerceIn(PageScaleMinPercent / 100f, PageScaleMaxPercent / 100f) * 100).roundToInt()
 
@@ -404,10 +478,12 @@ private fun PageScaleDialog(
   val parsed = input.toIntOrNull()
   val clamped = parsed?.coerceIn(PageScaleMinPercent, PageScaleMaxPercent)
   val isInvalid = input.isNotBlank() && parsed == null
+  // 统一走 CenteredDialog：底部对齐、离开底边，且带 imePadding —— 输入框聚焦时
+  // 整块被输入法顶起（OverlayDialog 是居中弹窗，做不到这个观感）。
   CenteredDialog(
+      show = show,
       title = "界面缩放",
       summary = "降低比例可以缓解 DPI 或字体放大后的文本截断；范围 80% - 110%。",
-      show = show,
       onDismiss = onDismiss,
   ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

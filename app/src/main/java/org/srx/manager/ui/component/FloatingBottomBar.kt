@@ -21,7 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.computedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -63,13 +63,15 @@ import com.kyant.backdrop.shadow.Shadow as KyantShadow
 import kotlin.math.abs
 import kotlin.math.sign
 import kotlinx.coroutines.launch
-import org.srx.manager.themedSurfaceColor
+import org.srx.manager.ui.coui.couiPanelSurface
 import org.srx.manager.ui.theme.isSrxDarkTheme
+import org.srx.manager.ui.theme.isSrxThemeCoui
+import org.srx.manager.ui.theme.srxAccentColor
+import org.srx.manager.ui.theme.srxGlassSupported
+import org.srx.manager.ui.theme.srxSurfaceColor
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
-import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
-import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 val LocalFloatingBottomBarTabScale = staticCompositionLocalOf { { 1f } }
 
@@ -113,23 +115,22 @@ fun FloatingBottomBar(
     isBlurEnabled: Boolean = true,
     isLiquidGlassEnabled: Boolean = true,
     enableDrag: Boolean = true,
+    /** 批量操作栏这类「一次性的动作条」不是 tab 栏，不该有停留的选中胶囊。 */
+    showSelectionIndicator: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
   val isDark = isSrxDarkTheme()
-  val effectsSupported = isRenderEffectSupported()
-  val liquid = isLiquidGlassEnabled && effectsSupported && kyantBackdrop != null
+  val effectsSupported = srxGlassSupported()
+  // COUI 底栏是实心面板胶囊（不带折射/玻璃），Miuix 才是液态玻璃浮条。
+  val couiStyle = isSrxThemeCoui()
+  val liquid = !couiStyle && isLiquidGlassEnabled && effectsSupported && kyantBackdrop != null
   val blurEnabled = isBlurEnabled && effectsSupported
   val pillShape = CircleShape
-  val accent = MiuixTheme.colorScheme.primary
-  val surface = MiuixTheme.colorScheme.surfaceContainer
-  val solidSurface = themedSurfaceColor()
-  val container =
-      when {
-        liquid && blurEnabled -> surface.copy(alpha = 0.4f)
-        liquid -> solidSurface.copy(alpha = if (isDark) 0.86f else 0.9f)
-        blurEnabled -> surface.copy(alpha = if (isDark) 0.82f else 0.88f)
-        else -> solidSurface
-      }
+  // 强调色 / 表面色统一走 SrxThemeTokens，不再按主题分支取两套色。
+  val accent = srxAccentColor()
+  // 底栏与卡片取同一个表面色：之前用 surfaceContainer 再叠 0.82~0.9 的 alpha，
+  // 既比卡片暖、又半透明透出页面渐变，看起来就是"底栏被染色了"。
+  val container = if (couiStyle) couiPanelSurface() else srxSurfaceColor()
   val tabsBackdrop = rememberKyantLayerBackdrop()
   val density = LocalDensity.current
   val barHeight = 64.dp
@@ -145,7 +146,7 @@ fun FloatingBottomBar(
   val rubberBandPx = with(density) { 4.dp.toPx() }
   val panelOffset by
       remember(rubberBandPx) {
-        derivedStateOf {
+        computedStateOf {
           if (totalWidthPx == 0f) 0f
           else {
             val fraction = (offsetAnimation.value / totalWidthPx).fastCoerceIn(-1f, 1f)
@@ -269,7 +270,6 @@ fun FloatingBottomBar(
                       backdrop = backdrop,
                       shape = { pillShape },
                       effects = { if (blurEnabled) blur(4.dp.toPx(), 4.dp.toPx()) },
-                      highlight = null,
                       onDrawSurface = { drawRect(container) },
                   )
                 } else {
@@ -314,7 +314,8 @@ fun FloatingBottomBar(
       }
     }
 
-    if (tabWidthPx > 0f) {
+    // 动作条（批量操作栏）没有「当前 tab」的概念，不画会停留在某个按钮上的选中胶囊。
+    if (showSelectionIndicator && tabWidthPx > 0f) {
       val tabWidth = with(density) { tabWidthPx.toDp() }
       if (liquid) {
         Box(

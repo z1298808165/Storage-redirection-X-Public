@@ -41,6 +41,26 @@ fn app_inventory_keeps_user_metadata_and_decodes_labels_and_paths() {
 }
 
 #[test]
+fn app_inventory_reads_versioned_seven_column_format() {
+    // v2：首行协议版本 + 末列 icon。旧版无首行按 6 列解析，icon 缺省 0。
+    let v2 = concat!(
+        "#srx-inventory\t2\n",
+        "10\t1010123\t1\tcom.example.system\tSys\t%2Fsystem%2Fapp.apk\t2130903040\n",
+    );
+    let apps = parse_app_inventory(v2, 10).unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0].icon, 2_130_903_040);
+
+    let legacy = "10\t1010456\t0\tcom.example.user\tUser\t%2Fdata%2Fapp.apk\n";
+    let apps = parse_app_inventory(legacy, 10).unwrap();
+    assert_eq!(apps[0].icon, 0);
+
+    // 未知版本必须报错，而不是按 6 列蒙混过关。
+    let unknown = "#srx-inventory\t9\n";
+    assert!(parse_app_inventory(unknown, 10).is_err());
+}
+
+#[test]
 fn app_inventory_rejects_wrong_user_duplicate_packages_and_bad_fields() {
     for invalid in [
         (

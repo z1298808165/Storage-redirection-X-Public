@@ -292,7 +292,12 @@ class SrxRepository(
     return withContext(Dispatchers.IO) {
       cached.map { app ->
         val info =
-            loadArchiveAppInfo(packages.apkPaths[app.packageName], packages.uids[app.packageName])
+            inventoryAppInfo(
+                app.packageName,
+                packages.uids[app.packageName],
+                packages.apkPaths[app.packageName],
+                packages.icons[app.packageName],
+            )
         app.copy(
             label = packages.labels[app.packageName] ?: app.label,
             appInfo = info,
@@ -502,9 +507,11 @@ class SrxRepository(
                           async {
                             chunk.map { pkg ->
                               val info =
-                                  loadArchiveAppInfo(
-                                      userPackages.apkPaths[pkg],
+                                  inventoryAppInfo(
+                                      pkg,
                                       userPackages.uids[pkg],
+                                      userPackages.apkPaths[pkg],
+                                      userPackages.icons[pkg],
                                   )
                               InstalledApp(
                                   packageName = pkg,
@@ -533,6 +540,28 @@ class SrxRepository(
       }
 
   /** 按 APK 路径读取图标信息；用户归属、标签和系统标记来自 system_server 清单。 */
+  /**
+   * 用 system_server 清单里的字段直接拼出图标所需的 `ApplicationInfo`。
+   *
+   * 包名、uid、APK 路径、图标资源 ID 都由 `package-query` 一次给全，这里只做拼装： 不查 PackageManager、不解析
+   * APK，列表规模再大也只是一次内存写入。 APK 路径缺失（已卸载但仍留配置）时返回 null，UI 回落占位图。
+   */
+  private fun inventoryAppInfo(
+      packageName: String,
+      uid: Int?,
+      apkPath: String?,
+      icon: Int?,
+  ): ApplicationInfo? {
+    if (apkPath.isNullOrBlank() || !apkPath.startsWith('/')) return null
+    return ApplicationInfo().apply {
+      this.packageName = packageName
+      sourceDir = apkPath
+      publicSourceDir = apkPath
+      this.icon = icon ?: 0
+      uid?.let { this.uid = it }
+    }
+  }
+
   private fun loadArchiveAppInfo(apkPath: String?, uid: Int?): ApplicationInfo? {
     if (apkPath.isNullOrBlank() || !apkPath.startsWith("/")) return null
     val info =

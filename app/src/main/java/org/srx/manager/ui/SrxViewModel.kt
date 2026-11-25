@@ -42,6 +42,7 @@ import org.srx.manager.data.UiColorSpec
 import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UiThemeMode
+import org.srx.manager.data.UiThemeStyle
 import org.srx.manager.data.UpdateChannel
 import org.srx.manager.data.UpdateChecker
 import org.srx.manager.data.UserProfile
@@ -673,9 +674,21 @@ class SrxViewModel(
     viewModelScope.launch { prefs.setThemeMode(mode) }
   }
 
+  fun setThemeStyle(style: UiThemeStyle) {
+    viewModelScope.launch { prefs.setThemeStyle(style) }
+  }
+
   fun setPredictiveBack(enabled: Boolean) {
     prefs.setPredictiveBackCompatPref(enabled)
     viewModelScope.launch { prefs.setPredictiveBack(enabled, persistCompatPref = false) }
+  }
+
+  fun setSwipeBackGesture(enabled: Boolean) {
+    viewModelScope.launch { prefs.setSwipeBackGesture(enabled) }
+  }
+
+  fun setPageSwipeGesture(enabled: Boolean) {
+    viewModelScope.launch { prefs.setPageSwipeGesture(enabled) }
   }
 
   fun setPageScale(scale: Float) {

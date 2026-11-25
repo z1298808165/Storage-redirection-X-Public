@@ -58,6 +58,20 @@ class RootAppQueryTest {
   }
 
   @Test
+  fun parsesVersionedSevenColumnInventory() {
+    // v2 清单：首行协议版本 + 每行末尾 icon 资源 ID。旧模块（无首行、6 列）也要继续可用。
+    val text =
+        "#srx-inventory\t2\n" +
+            "10\t1010123\t1\tcom.example.system\tSystem%20App\t%2Fsystem%2Fapp.apk\t2130903040\n" +
+            "10\t1010456\t0\tcom.example.user\tUser\t%2Fdata%2Fapp.apk\t2130903041\n"
+    val apps = parseSystemServerAppList(text, "10")
+    assertEquals(listOf("com.example.system", "com.example.user"), apps.packageNames)
+    assertEquals(2130903040, apps.icons["com.example.system"])
+    assertEquals(2130903041, apps.icons["com.example.user"])
+    assertEquals(setOf("com.example.system"), apps.systemPackages)
+  }
+
+  @Test
   fun rejectsUnsafeUserAndMixedUserOrMalformedRows() = runBlocking {
     val shell = CapturingShell()
     assertEquals(UserPackageList.Empty, RootAppQuery(shell).listUserPackages("0;rm"))

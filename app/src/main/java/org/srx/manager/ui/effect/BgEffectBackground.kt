@@ -2,6 +2,7 @@ package org.srx.manager.ui.effect
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Spacer
@@ -16,27 +17,27 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.floor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import org.srx.manager.ui.theme.LocalSrxColorScheme
 import org.srx.manager.ui.theme.isSrxDarkTheme
-import top.yukonga.miuix.kmp.blur.isRuntimeShaderSupported
-import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.material.isRuntimeShaderSupported
 
 @Composable
 fun BgEffectBackground(
     dynamicBackground: Boolean,
     modifier: Modifier = Modifier,
-    bgModifier: Modifier = Modifier,
     isFullSize: Boolean = false,
     effectBackground: Boolean = true,
     alpha: () -> Float = { 1f },
     content: @Composable BoxScope.() -> Unit,
 ) {
   if (!isRuntimeShaderSupported()) {
-    Box(modifier = modifier.then(bgModifier), content = content)
+    // 无 runtime shader 的机型只保留 surface 底色，与 KernelSU manager 的行为一致
+    Box(modifier = modifier.background(LocalSrxColorScheme.current.surface), content = content)
     return
   }
 
   Box(modifier = modifier) {
-    val surface = MiuixTheme.colorScheme.surface
+    val surface = LocalSrxColorScheme.current.surface
     val deviceType = if (shouldShowSplitPane()) DeviceType.Pad else DeviceType.Phone
     val isDarkTheme = isSrxDarkTheme()
     val painter = remember { BgEffectPainter() }
@@ -61,7 +62,6 @@ fun BgEffectBackground(
     Spacer(
         modifier =
             Modifier.fillMaxSize()
-                .then(bgModifier)
                 .bgEffectDraw(
                     painter = painter,
                     preset = preset,

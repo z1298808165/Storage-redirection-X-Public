@@ -27,7 +27,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -47,14 +46,16 @@ import org.srx.manager.data.StorageBackendStatus
 import org.srx.manager.glassPanel
 import org.srx.manager.glassSurfaceColor
 import org.srx.manager.isSrxBackdropEffectEnabled
-import org.srx.manager.srxSuccessColor
 import org.srx.manager.srxWarningColor
 import org.srx.manager.ui.component.liquidGlassControl
+import org.srx.manager.ui.theme.SrxShapes
 import org.srx.manager.ui.theme.isSrxDarkTheme
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.ChevronForward
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 // 概览页的展示组件与确认对话框。
@@ -65,7 +66,9 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 internal fun moduleStatusUi(status: ModuleStatus): StatusUi =
     when (status) {
-      ModuleStatus.Enabled -> StatusUi("模块已激活", srxSuccessColor())
+      // 状态徽章统一走强调色：绿色在深色页面上过于跳脱；
+      // 未激活/未安装仍用错误色，因为那是需要处理的异常态。
+      ModuleStatus.Enabled -> StatusUi("模块已激活", MiuixTheme.colorScheme.primary)
       ModuleStatus.Disabled ->
           StatusUi("模块已停止", MiuixTheme.colorScheme.onSurfaceVariantSummary, 0.12f)
       ModuleStatus.RebootRequired -> StatusUi("需要重启", srxWarningColor())
@@ -96,14 +99,11 @@ internal fun ModuleStatusCard(
   val colors = MiuixTheme.colorScheme
   val statusUi = moduleStatusUi(status)
   val canToggle = status == ModuleStatus.Enabled || status == ModuleStatus.Disabled
-  val shape = RoundedCornerShape(34.dp)
+  val shape = RoundedCornerShape(SrxShapes.card)
   val useBackdrop = isSrxBackdropEffectEnabled()
   Card(
       modifier =
-          Modifier.fillMaxWidth()
-              .heightIn(min = 348.dp)
-              .glassPanel(shape, shadowAlpha = 0.1f, surfaceAlpha = 0.72f),
-      cornerRadius = 34.dp,
+          Modifier.fillMaxWidth().heightIn(min = 348.dp).glassPanel(shape, shadowAlpha = 0.1f),
       insideMargin = PaddingValues(horizontal = 24.dp, vertical = 30.dp),
       colors =
           CardDefaults.defaultColors(
@@ -118,7 +118,7 @@ internal fun ModuleStatusCard(
       Image(
           painter = painterResource(R.drawable.srx_logo_vector),
           contentDescription = null,
-          modifier = Modifier.size(72.dp).clip(RoundedCornerShape(18.dp)),
+          modifier = Modifier.size(72.dp).clip(RoundedCornerShape(SrxShapes.inner)),
           contentScale = ContentScale.Fit,
       )
       Text(
@@ -201,7 +201,14 @@ internal fun ModuleStatusPill(
                   indication = null,
                   onClick = onClick,
               )
-              .background(statusUi.color.copy(alpha = statusUi.backgroundAlpha), CircleShape)
+              .background(
+                  statusUi.color.copy(
+                      alpha =
+                          if (isSrxDarkTheme()) statusUi.backgroundAlpha
+                          else (statusUi.backgroundAlpha * 1.8f).coerceAtMost(0.3f)
+                  ),
+                  CircleShape,
+              )
               .padding(horizontal = 14.dp, vertical = 5.dp),
       color = statusUi.color,
       fontSize = 13.sp,
@@ -441,7 +448,10 @@ internal fun MetricBox(
 
 @Composable
 internal fun FeatureChip(label: String, enabled: Boolean, modifier: Modifier) {
-  val color = if (enabled) srxSuccessColor() else MiuixTheme.colorScheme.onSurfaceVariantSummary
+  // 开关类小徽章：开启用强调色，关闭保持中性灰（不再用绿色，和整体色调统一）。
+  val color =
+      if (enabled) MiuixTheme.colorScheme.primary
+      else MiuixTheme.colorScheme.onSurfaceVariantSummary
   Row(
       modifier =
           modifier
@@ -469,46 +479,41 @@ internal fun FeatureChip(label: String, enabled: Boolean, modifier: Modifier) {
 }
 
 @Composable
-internal fun ActionRow(title: String, summary: String, icon: ImageVector, onClick: () -> Unit) {
-  Row(
-      modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp),
-      verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(12.dp),
-  ) {
-    GlassIcon(icon)
-    Column(Modifier.weight(1f)) {
-      Text(title, fontWeight = FontWeight.SemiBold)
-      Text(summary, color = MiuixTheme.colorScheme.onSurfaceVariantSummary, fontSize = 12.sp)
+internal fun ActionRow(
+    title: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+    showDivider: Boolean = true,
+) {
+  Column(Modifier.fillMaxWidth()) {
+    Row(
+        modifier =
+            Modifier.fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      SettingsRowIcon(icon)
+      Text(
+          title,
+          modifier = Modifier.weight(1f),
+          fontSize = 16.sp,
+          lineHeight = 20.sp,
+          fontWeight = FontWeight.Bold,
+          maxLines = 1,
+          overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+      )
+      Icon(
+          imageVector = MiuixIcons.Glass.ChevronForward,
+          contentDescription = null,
+          tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+          modifier = Modifier.size(18.dp),
+      )
     }
-  }
-}
-
-@Composable
-internal fun GlassIcon(icon: ImageVector, modifier: Modifier = Modifier) {
-  val shape = RoundedCornerShape(17.dp)
-  val accent = MiuixTheme.colorScheme.primary
-  Box(
-      modifier =
-          modifier
-              .size(44.dp)
-              .glassPanel(shape, shadowAlpha = 0.05f)
-              .clip(shape)
-              .background(
-                  Brush.linearGradient(
-                      listOf(
-                          accent.copy(alpha = if (isSrxDarkTheme()) 0.22f else 0.18f),
-                          srxSuccessColor().copy(alpha = if (isSrxDarkTheme()) 0.16f else 0.12f),
-                          glassSurfaceColor(if (isSrxDarkTheme()) 0.4f else 0.72f),
-                      ),
-                  ),
-              ),
-      contentAlignment = Alignment.Center,
-  ) {
-    Icon(
-        icon,
-        contentDescription = null,
-        tint = MiuixTheme.colorScheme.primary,
-        modifier = Modifier.size(24.dp),
-    )
+    if (showDivider) {
+      ConfigDivider(startInset = RowTextInset, endInset = 16.dp)
+    }
   }
 }

@@ -274,8 +274,8 @@ public class ApplicationInfo {
   public static final int FLAG_SYSTEM=1, FLAG_UPDATED_SYSTEM_APP=128;
   public String packageName;
   public String sourceDir;
-  public int uid, flags;
-  public ApplicationInfo(String name, int value) { packageName=name; uid=value; sourceDir="/data/app/"+name+"/base.apk"; flags=name.endsWith("sibling") ? 1 : 0; }
+  public int uid, flags, icon;
+  public ApplicationInfo(String name, int value) { packageName=name; uid=value; sourceDir="/data/app/"+name+"/base.apk"; flags=name.endsWith("sibling") ? 1 : 0; icon=1234; }
   public CharSequence loadLabel(PackageManager pm) { return "Label "+packageName; }
 }
 """,
@@ -367,8 +367,9 @@ public class QueryFixture {
     groupFault = 0;
     String appList = query("A\\t10");
     if (!appList.equals(
-        "10\\t1010123\\t0\\tcom.example.app\\tLabel%20com.example.app\\t%2Fdata%2Fapp%2Fcom.example.app%2Fbase.apk\\n" +
-        "10\\t1010123\\t1\\tcom.example.sibling\\tLabel%20com.example.sibling\\t%2Fdata%2Fapp%2Fcom.example.sibling%2Fbase.apk\\n"))
+        "#srx-inventory\\t2\\n" +
+        "10\\t1010123\\t0\\tcom.example.app\\tLabel%20com.example.app\\t%2Fdata%2Fapp%2Fcom.example.app%2Fbase.apk\\t1234\\n" +
+        "10\\t1010123\\t1\\tcom.example.sibling\\tLabel%20com.example.sibling\\t%2Fdata%2Fapp%2Fcom.example.sibling%2Fbase.apk\\t1234\\n"))
       throw new AssertionError("application inventory: " + appList);
     mismatchedUserUid=true;
     try {{ query("A\\t10"); throw new AssertionError("mismatched user UID accepted"); }}
