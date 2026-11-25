@@ -58,6 +58,7 @@ fn build_lsplant_bridge(target_arch: &str) {
     println!("cargo:rerun-if-env-changed=ANDROID_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_SDK_ROOT");
     println!("cargo:rerun-if-env-changed=SRX_LIBCXX_PREFIX");
+    println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=CMAKE_C_COMPILER_LAUNCHER");
     println!("cargo:rerun-if-env-changed=CMAKE_CXX_COMPILER_LAUNCHER");
 
@@ -89,8 +90,11 @@ fn build_lsplant_bridge(target_arch: &str) {
             panic!("libcxx AAR provisioning failed: {err}");
         }
     };
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    // 两个 ABI 可共享解包的 AAR，各自在 Cargo 输出目录生成供 CMake 读取的清单。
+    let libcxx_modules_manifest = out_dir.join("srx-libcxx.modules.json");
+    write_cxx_modules_manifest(&libcxx_prefix, &libcxx_modules_manifest)
+        .unwrap_or_else(|err| panic!("无法准备 libcxx CMake 模块清单：{err}"));
     let build_dir = out_dir.join("lsplant_cmake").join(abi);
     let install_dir = out_dir.join("lsplant_install").join(abi);
     let profile = "Release";
@@ -102,18 +106,10 @@ fn build_lsplant_bridge(target_arch: &str) {
     // CMakeCache.txt 会粘住 toolchain 与编译器路径，-D 覆盖不了缓存里的旧值：
     // cargo build 缓存跨 NDK 版本/构件前缀复用时（CI 的 actions/cache 或本地换 NDK），
     // 旧缓存会把 configure 带向已不存在的旧 NDK 路径。用参数指纹戳识别并整目录重建。
-    let config_stamp = lsplant_cmake_stamp(&toolchain_file, abi, &libcxx_prefix);
-    let stamp_path = build_dir.join(".srx-cmake-config-stamp");
-    if build_dir.exists() {
-        let stale = std::fs::read_to_string(&stamp_path)
-            .map(|content| content != config_stamp)
-            .unwrap_or(true);
-        if stale {
-            let _ = std::fs::remove_dir_all(&build_dir);
-        }
-    }
-    std::fs::create_dir_all(&build_dir)
-        .unwrap_or_else(|err| panic!("create {} failed: {err}", build_dir.display()));
+    let cmake_version = cmake_version();
+    let config_stamp = lsplant_cmake_stamp(&toolchain_file, abi, &libcxx_prefix, &cmake_version);
+    let stamp_path = prepare_lsplant_build_dir(&build_dir, &config_stamp)
+        .unwrap_or_else(|err| panic!("无法准备 CMake 构建目录 {}: {err}", build_dir.display()));
 
     let mut configure = Command::new("cmake");
     configure
@@ -140,6 +136,10 @@ fn build_lsplant_bridge(target_arch: &str) {
         .arg("-DDEX_BUILDER_BUILD_SHARED=OFF")
         .arg("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
         .arg(format!("-DCMAKE_PREFIX_PATH={}", libcxx_prefix.display()))
+        .arg(format!(
+            "-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
+            libcxx_modules_manifest.display()
+        ))
         // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
         .arg("-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH");
@@ -345,15 +345,50 @@ fn download_libcxx_aar(dest: &Path) -> Result<(), String> {
     std::fs::rename(&partial, dest).map_err(|e| format!("落位 {} 失败: {e}", dest.display()))
 }
 
-// LSPlant cmake 构建目录的参数指纹：toolchain、ABI、cxx 包前缀任一变化都视为缓存过期。
-fn lsplant_cmake_stamp(toolchain: &Path, abi: &str, libcxx_prefix: &Path) -> String {
+// LSPlant cmake 构建目录的参数指纹：toolchain、ABI、cxx 包或 CMake 版本变化均使缓存过期。
+fn lsplant_cmake_stamp(
+    toolchain: &Path,
+    abi: &str,
+    libcxx_prefix: &Path,
+    cmake_version: &str,
+) -> String {
     format!(
-        "toolchain={}\nabi={}\nlibcxx_prefix={}\n",
+        "toolchain={}\nabi={}\nlibcxx_prefix={}\ncmake_version={}\n",
         toolchain.display(),
         abi,
-        libcxx_prefix.display()
+        libcxx_prefix.display(),
+        cmake_version
     )
 }
+
+fn prepare_lsplant_build_dir(dir: &Path, stamp: &str) -> std::io::Result<PathBuf> {
+    let path = dir.join(".srx-cmake-config-stamp");
+    if dir.exists() && !std::fs::read_to_string(&path).is_ok_and(|cached| cached == stamp) {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+    Ok(path)
+}
+
+fn cmake_version() -> String {
+    let output = Command::new("cmake")
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|error| panic!("无法运行 cmake --version：{error}"));
+    if !output.status.success() {
+        panic!("cmake --version 退出状态异常：{}", output.status);
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .filter(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| panic!("cmake --version 未输出版本"))
+        .to_string()
+}
+
+#[cfg(test)]
+#[path = "tests/build-script/cmake_cache.rs"]
+mod tests;
 
 fn verify_file_sha256(path: &Path) -> Result<String, String> {
     let path_text = path.display().to_string();
@@ -438,7 +473,7 @@ fn extract_libcxx_aar(aar: &Path, dest: &Path) -> Result<(), String> {
 }
 
 // AGP prefab 为该包生成的 cxxConfig.cmake 等价物：定义 cxx::cxx 并暴露捆绑的
-// libc++ 头文件，真正的 std 模块注册由 AAR 自带的 prefab/cmake-config.cmake 完成。
+// libc++ 头文件。CMake 4.5 的 std 模块清单由 build.rs 单独生成。
 fn cxx_config_shim_content() -> &'static str {
     r#"# 由 build.rs 生成：直接 CMake 消费 org.lsposed.libcxx AAR（不经 AGP prefab）。
 get_filename_component(_srx_cxx_aar_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
@@ -459,6 +494,57 @@ fn ensure_cxx_config_shim(prefix: &Path) -> Result<(), String> {
         .map_err(|e| format!("创建 {} 失败: {e}", shim_dir.display()))?;
     std::fs::write(&shim, cxx_config_shim_content())
         .map_err(|e| format!("写入 {} 失败: {e}", shim.display()))
+}
+
+fn write_cxx_modules_manifest(prefix: &Path, manifest: &Path) -> Result<(), String> {
+    let include = prefix.join("prefab/modules/cxx/include");
+    let sources = [
+        include.join("std-modules/std.cppm"),
+        include.join("std-modules/std.compat.cppm"),
+    ];
+    for source in &sources {
+        if !source.is_file() {
+            return Err(format!("libc++ AAR 缺少 std 模块源: {}", source.display()));
+        }
+    }
+    let content = cxx_modules_manifest_content(&include);
+    if std::fs::read_to_string(manifest).ok().as_deref() != Some(content.as_str()) {
+        std::fs::write(manifest, content)
+            .map_err(|e| format!("写入 {} 失败: {e}", manifest.display()))?;
+    }
+    Ok(())
+}
+
+fn cxx_modules_manifest_content(include: &Path) -> String {
+    let quote = |path: &Path| format!("\"{}\"", json_escape(&path.display().to_string()));
+    let std_source = include.join("std-modules/std.cppm");
+    let compat_source = include.join("std-modules/std.compat.cppm");
+    format!(
+        "{{\n  \"version\": 1,\n  \"revision\": 1,\n  \"modules\": [\n    {{\n      \"logical-name\": \"std\",\n      \"source-path\": {},\n      \"is-std-library\": true,\n      \"local-arguments\": {{\n        \"system-include-directories\": [{}]\n      }}\n    }},\n    {{\n      \"logical-name\": \"std.compat\",\n      \"source-path\": {},\n      \"is-std-library\": true,\n      \"local-arguments\": {{\n        \"system-include-directories\": [{}]\n      }}\n    }}\n  ]\n}}\n",
+        quote(&std_source),
+        quote(include),
+        quote(&compat_source),
+        quote(include),
+    )
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write;
+                write!(escaped, "\\u{:04x}", character as u32).unwrap();
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn run_command(command: &mut Command, label: &str) {

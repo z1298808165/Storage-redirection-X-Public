@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
+if(NOT CMAKE_VERSION STREQUAL "4.5.1")
+    message(FATAL_ERROR "SRX 需要 CMake 4.5.1，当前为 ${CMAKE_VERSION}。安装说明见 docs/build-environment.md。")
+endif()
 project(srx_lsplant_bridge)
 
 set(CMAKE_CXX_STANDARD 23)

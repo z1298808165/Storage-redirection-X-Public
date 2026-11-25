@@ -53,9 +53,17 @@ runs:
     - name: 安装原生构建工具
       shell: bash
       run: |
-        if ! command -v cmake >/dev/null || ! command -v ninja >/dev/null || ! command -v ccache >/dev/null; then
+        version=4.5.1
+        package="cmake-$version-linux-x86_64"
+        cd "$RUNNER_TEMP"
+        curl --fail --location --retry 3 --output "$package.tar.gz" \
+          "https://github.com/Kitware/CMake/releases/download/v$version/$package.tar.gz"
+        echo "83b71181fb62b4fe8f26067a9321448572e7a43bd04ff6c7f54a24c33698f16d  $package.tar.gz" | sha256sum --check
+        tar -xzf "$package.tar.gz"
+        echo "$RUNNER_TEMP/$package/bin" >> "$GITHUB_PATH"
+        if ! command -v ninja >/dev/null || ! command -v ccache >/dev/null; then
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build ccache
+          sudo apt-get install -y ninja-build ccache
         fi
 
     - name: 配置编译缓存

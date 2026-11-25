@@ -87,12 +87,12 @@ function Invoke-Git {
 }
 
 if ($Ref -eq ":") {
-    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", ":(glob)src/**/*.rs")
+    $files = Invoke-Git -Arguments @("ls-files", "--cached", "--", "build.rs", ":(glob)src/**/*.rs")
 } else {
     $files = Invoke-Git -Arguments @("ls-tree", "-r", "--name-only", $Ref) |
         Where-Object {
-            $_.StartsWith("src/", [StringComparison]::Ordinal) -and
-            $_.EndsWith(".rs", [StringComparison]::OrdinalIgnoreCase)
+            $_ -ceq "build.rs" -or ($_.StartsWith("src/", [StringComparison]::Ordinal) -and
+                $_.EndsWith(".rs", [StringComparison]::OrdinalIgnoreCase))
         }
 }
 

@@ -75,6 +75,13 @@ class CiBuildCacheTests(unittest.TestCase):
                 self.assertTrue(any("sdkmanager" in s.get("run", "") for s in steps[restore_index:index]))
                 self.assertNotIn("always()", step["if"])
 
+    def test_native_build_uses_the_pinned_cmake(self):
+        steps = action_steps("setup-native-cache")
+        install = next(s["run"] for s in steps if "Kitware/CMake/releases" in s.get("run", ""))
+        self.assertIn("version=4.5.1\n", install)
+        self.assertLess(install.index("sha256sum --check"), install.index("tar -xzf"))
+        self.assertIn('echo "$RUNNER_TEMP/$package/bin" >> "$GITHUB_PATH"', install)
+
     def test_emulator_cache_uses_verified_latest_stable_revisions(self):
         steps = action_steps("setup-android-emulator")
         resolve = next(i for i, s in enumerate(steps) if s.get("id") == "revisions")

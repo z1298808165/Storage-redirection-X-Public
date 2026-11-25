@@ -8,7 +8,7 @@
 |------|----------|------|
 | Rust | 见 `rust-toolchain.toml` | WSL 构建使用仓库固定的 nightly（edition 2024） |
 | Android NDK | r30+ | WSL 中用于交叉编译和 LSPlant C++ 构建 |
-| CMake | 3.28+ | WSL 中 LSPlant C++ 模块构建依赖（Ninja 生成器） |
+| CMake | 4.5.1 | WSL 中 LSPlant C++ 模块构建依赖（Ninja 生成器） |
 | Ninja | 1.10+ | WSL 中的 CMake 生成器 |
 | JDK | 21 | WSL 中编译 Hooker.java、运行 Gradle |
 | Android SDK build-tools | 31+ | WSL 中提供 d8，将 class 转为 dex |
@@ -22,6 +22,9 @@ LSPlant 上游迁移到 C++ 标准库模块（`import std;`）后，构建需要
 `org.lsposed.libcxx:libcxx` AAR 提供 `cxx` CMake 包与 std 模块源。
 `build.rs` 会在首次构建时自动下载（URL 与 sha256 钉死在 `build.rs` 常量里）
 到 `~/.cache/srx/libcxx-<版本>/` 并解包，无需手工准备。
+CI 从 Kitware 下载 CMake 4.5.1，校验 SHA-256 后解压到 `$RUNNER_TEMP`；版本、归档名与校验值见[原生构建环境配置](../.github/actions/setup-native-cache/action.yml)。本地 WSL 可将同一归档解压到 `~/.local/opt/`，并按下文设置 `PATH`。运行 `cmake --version` 可核对实际使用的版本。
+
+`build.rs` 在当前目标的 Cargo 输出目录生成 `std` 和 `std.compat` 的模块清单。两个模块都使用 AAR 自带的源码和头文件；切换 CMake 版本时会重建 LSPlant 的配置缓存。
 
 注意：
 
@@ -65,7 +68,7 @@ export ANDROID_HOME="/path/to/android-sdk"  # Android SDK 安装目录
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/30.0.16248370"
 export JAVA_HOME="/path/to/jdk-21"  # JDK 21 安装目录
-export PATH="$ANDROID_HOME/cmake/4.1.2/bin:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"  # 追加 CMake 与 NDK 工具链
+export PATH="$HOME/.local/opt/cmake-4.5.1-linux-x86_64/bin:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"  # 追加 CMake 与 NDK 工具链
 ```
 
 将环境变量加入 WSL shell profile，重新打开 WSL shell 后生效。
