@@ -8,6 +8,18 @@ trap 'echo "::warning file=run-storage-redirect-scenarios.sh,line=${BASH_LINENO[
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
+# Python 只接收宿主文件路径；设备参数仍沿用 adb 的原始拼写。
+host_python() (
+  unset MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+  "$SRT_HOST_PYTHON" "$@"
+)
+SRT_HOST_PYTHON=python3
+if command -v cygpath >/dev/null 2>&1 && ! python3 -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+  SRT_HOST_PYTHON=python
+fi
+export SRT_HOST_PYTHON
+export -f host_python
+
 # 测试流产物统一落盘目录（仓库规范「临时文件管理」）：
 # temp/test-flow/<启动时间戳>/，结果文件与诊断文件一律写到这里，不得散落在
 # 仓库根目录或脚本 CWD。同一天多轮测试互不覆盖；上游编排器
@@ -20,6 +32,8 @@ if [ -z "$SRT_ARTIFACT_DIR" ]; then
 fi
 mkdir -p "$SRT_ARTIFACT_DIR"
 export SRT_ARTIFACT_DIR
+SRT_CREATED_MEDIA_RESULTS="$(mktemp "$SRT_ARTIFACT_DIR/created-media.XXXXXXXX")" || exit 1
+export SRT_CREATED_MEDIA_RESULTS
 
 # 监视 fail-open 探测会冻结 daemon（SIGSTOP）；任何异常退出都必须 CONT 恢复，
 # 否则后续场景在冻结 daemon 上全灭。run_scenario 在 `bash -c` 子 shell 里执行，
@@ -165,6 +179,9 @@ DL_OWNER_MAPPED_BACKEND_FILE="${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}/${DL_OWNER_
 # 转发，不依赖模拟器外部网络）；显式设置时优先使用该外源。
 SRT_DOWNLOAD_URL="${SRT_DOWNLOAD_URL:-}"
 SRT_DOWNLOAD_NETWORK_HELPER="$(base64 < "$(dirname "${BASH_SOURCE[0]}")/prepare-download-test-network.sh" | tr -d '\n')"
+export SRT_MEDIA_PROVIDER_PID_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/media-provider-pid.sh"
+SRT_TEST_APP_PID_COMMAND="$(cat "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/test-app-pid.sh")"
+export SRT_TEST_APP_PID_COMMAND
 # 场景 40：系统 uid 的 FUSE 写入按发起服务归因夹具。shell（uid 2000）延迟
 # mkdir 制造确定的系统 uid FUSE 请求，断言监视记录按发起进程归因（此前
 # 该类请求只能记录 unknown 或误归组内成员）。
@@ -248,7 +265,7 @@ detect_adb_root_mode() {
 }
 
 test_app_uid() {
-  adb shell "cmd package list packages -U '$APP_ID' 2>/dev/null | sed -n 's/.* uid://p' | head -1" | tr -d '\r'
+  adb shell "cmd package list packages --user 0 -U '$APP_ID' 2>/dev/null | sed -n 's/.* uid://p' | head -1" | tr -d '\r'
 }
 
 fix_private_backend_permissions() {
@@ -293,10 +310,44 @@ fix_own_private_fixture_permissions() {
   adb_su "app_uid='$uid'; for root in '${BACKEND_ROOT}/Android/data/${APP_ID}' '${BACKEND_ROOT}/Android/media/${APP_ID}' '${BACKEND_ROOT}/Android/obb/${APP_ID}' '${BACKEND_OWN_PRIVATE_DATA_ROOT}' '${BACKEND_OWN_PRIVATE_MEDIA_ROOT}' '${BACKEND_OWN_PRIVATE_OBB_ROOT}' '${OWN_PRIVATE_DATA_ROOT}' '${OWN_PRIVATE_MEDIA_ROOT}' '${OWN_PRIVATE_OBB_ROOT}' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/DCIM' '${PRIVATE_ROOT}/Documents'; do [ -e \"\$root\" ] || continue; chown -R \"\$app_uid\" \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
+initialize_public_fixture_paths() {
+  local relative root paths downloads files manifest_dir
+  local -a names filenames
+  manifest_dir="$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")"
+  PUBLIC_FIXTURE_CHECK="$(cat "$manifest_dir/check-public-fixtures.sh")" || return 1
+  [ -n "$PUBLIC_FIXTURE_CHECK" ] || return 1
+  export PUBLIC_FIXTURE_CHECK
+  mapfile -t names < "$manifest_dir/public-fixture-directories.txt" || return 1
+  mapfile -t filenames < "$manifest_dir/public-fixture-files.txt" || return 1
+  [ "${#names[@]}" -gt 0 ] && [ "${#filenames[@]}" -gt 0 ] || return 1
+  for root in "$REAL_ROOT" "$BACKEND_ROOT"; do
+    paths="" downloads=""
+    for relative in "${names[@]}"; do
+      relative="${relative%$'\r'}"
+      [[ $relative =~ ^((Download|Documents|Pictures|DCIM)/)?[.]?[A-Za-z][A-Za-z0-9_-]+$ ]] || { echo 'Invalid public fixture directory list' >&2; return 1; }
+      paths+=" '$root/$relative'"
+      if [[ "$relative" == Download/* ]]; then downloads+=" '$root/$relative'"; fi
+    done
+    files=""
+    for relative in "${filenames[@]}"; do
+      relative="${relative%$'\r'}"
+      [[ $relative =~ ^(Download|DCIM)/([A-Za-z][A-Za-z0-9_-]+/)?srt_[A-Za-z0-9_-]+[.](bin|jpg|part|txt)$ ]] || return 1
+      files+=" '$root/$relative'"
+    done
+    # 固定文件也可能属于用户；仅把目录加入后续的递归夹具清理。
+    adb_su "ls -A '$root' >/dev/null || exit 1; set -- fixture_collision $paths $files; $PUBLIC_FIXTURE_CHECK" || return 1
+    if [ "$root" = "$REAL_ROOT" ]; then
+      export VISIBLE_FIXTURE_PATHS="$paths" VISIBLE_DOWNLOAD_FIXTURE_PATHS="$downloads"
+    else
+      export BACKEND_FIXTURE_PATHS="$paths" BACKEND_DOWNLOAD_FIXTURE_PATHS="$downloads"
+    fi
+  done
+}
+
 fix_shared_fixture_permissions() {
   # 公共夹具由 root shell 创建；应用的 emulated-storage 视图要求这些条目归 media_rw。
   # 首次 lookup 前统一属主和权限，否则应用侧会把夹具看成 ENOENT。
-  adb_su "for root in '${BACKEND_ROOT}/Download'/Srt* '${BACKEND_ROOT}/Pictures'/Srt* '${BACKEND_ROOT}/DCIM'/Srt* '${BACKEND_ROOT}/Documents'/Srt* '${BACKEND_ROOT}/Movies'/Srt* '${BACKEND_ROOT}/Music'/Srt* '${BACKEND_ROOT}/Download/Test' '${BACKEND_ROOT}/.xldownload' '${BACKEND_ROOT}/.xlDownload' '${BACKEND_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}'; do [ -e \"\$root\" ] || continue; chown -R 1023:1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
+  adb_su "for root in $BACKEND_FIXTURE_PATHS; do [ -e \"\$root\" ] || continue; chown -R 1023:1023 \"\$root\" 2>/dev/null || true; find \"\$root\" -type d -exec chmod 2771 {} + 2>/dev/null || true; find \"\$root\" -type f -exec chmod 0664 {} + 2>/dev/null || true; done" >/dev/null
 }
 
 adb_root() {
@@ -346,24 +397,21 @@ adb_write_file() {
   local content="$2"
   echo "TRACE adb_write_file path=[$path] caller=${FUNCNAME[1]:-top}@${BASH_LINENO[0]:-0} provider_config=[${PROVIDER_CONFIG:-unset}]" >&2
   local encoded
-  encoded="$(printf '%s' "$content" | base64 | tr -d '\n')"
-  # 必须原子落盘：truncate-then-write 的写入窗口会让 daemon 的 reload 撞上半截内容，
-  # 应用配置被误判无效后整个场景保持未配置态（EROFS/ENOENT，应用重启救不回——共享宿主
-  # 策略与进程无关），直到下一次配置重写才恢复（真机全量跑 scenario-12 的 EROFS 即此机理）。
-  # 同目录 tmp + rename 原子替换，指纹只会看到完整的新文件或完整的旧文件。
-  # tmp 名不带 .json 后缀，避免进入指纹的 app 配置枚举。
-  adb_root "printf '%s' '$encoded' | base64 -d > '$path.tmp.$$'; mv -f '$path.tmp.$$' '$path'"
+  encoded="$(printf '%s' "$content" | base64)" || return 1
+  write_encoded_config "$path" "${encoded//$'\n'/}"
 }
 
 wait_boot_completed() {
   local deadline=$((SECONDS + ${ADB_BOOT_TIMEOUT_SECONDS:-300}))
+  local device_state
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if [ "$(adb get-state 2>/dev/null || true)" = "device" ] &&
+    device_state="$(timeout 10s adb get-state 2>&1 | tr -d '\r' || true)"
+    if [ "$device_state" = device ] &&
       [ "$(timeout 10s adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)" = "1" ]; then
       return 0
     fi
-    if adb devices 2>/dev/null | grep -q $'\toffline$'; then
-      adb reconnect offline >/dev/null 2>&1 || true
+    if [[ "$device_state" == *offline* && -n "${ANDROID_SERIAL:-}" ]]; then
+      timeout 5s adb -s "$ANDROID_SERIAL" reconnect >/dev/null 2>&1 || true
     else
       adb start-server >/dev/null 2>&1 || true
     fi
@@ -733,7 +781,10 @@ prepare_backend_core_targets() {
 }
 
 prepare_any_path_targets() {
-  adb_su "rm -rf '${BACKEND_PRIVATE_ROOT}/Download/SrtAnyPublicToPrivate' '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt' '/data/data/${APP_ID}/files/srt_any_absolute_alias.txt' '/data/data/${APP_ID}/cache/srt_any_user_id_alias.txt' '/data/user/0/${APP_ID}/code_cache/srt_any_legacy_alias.txt' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache/srt_any_user_id_alias.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy_alias.txt'; mkdir -p '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; chmod -R 777 '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}' 2>/dev/null || true" >/dev/null
+  adb_su "rm -rf '${BACKEND_PRIVATE_ROOT}/Download/SrtAnyPublicToPrivate' '${ANY_RELATIVE_PUBLIC_TARGET}' '${ANY_ABSOLUTE_PUBLIC_TARGET}' '${ANY_PUBLIC_TO_PRIVATE_REQUEST}' '${ANY_MEDIA_REQUEST}' '${ANY_MEDIA_TARGET}' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${NESTED_MAPPING_TARGET_ROOT}' '${ANY_RELATIVE_REQUEST}/srt_any_relative.txt' '${ANY_ABSOLUTE_USER_REQUEST}/srt_any_absolute.txt' '${ANY_USER_ID_REQUEST}/srt_any_user_id.txt' '${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt' '${ANY_USER_PRIVATE_TARGET}/srt_any_public_private.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy.txt' '/data/data/${APP_ID}/files/srt_any_absolute_alias.txt' '/data/data/${APP_ID}/cache/srt_any_user_id_alias.txt' '/data/user/0/${APP_ID}/code_cache/srt_any_legacy_alias.txt' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache/srt_any_user_id_alias.txt' '${ANY_LEGACY_PRIVATE_TARGET}/srt_any_legacy_alias.txt'" >/dev/null
+  local prepare_directories
+  prepare_directories="$(cat "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/prepare-any-path-directories.sh")" || return 1
+  adb_su "set -- '${BACKEND_ROOT}/Download/SrtAnyRelativePublic' '${BACKEND_ROOT}/Download/SrtAnyAbsolutePublic' '${BACKEND_ROOT}/Download/SrtAnyMediaTarget' '${NESTED_MAPPING_REQUEST_ROOT}' '${NESTED_MAPPING_STAGE_ROOT}' '${BACKEND_ROOT}/Download/SrtNestedMappingQQ' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${ANY_ABSOLUTE_USER_REQUEST}' '${ANY_USER_ID_REQUEST}' '${ANY_LEGACY_DATA_REQUEST}' '${ANY_USER_PRIVATE_TARGET}'; $prepare_directories"
 }
 
 # 直删后端之后的显式视图失效。
@@ -769,15 +820,13 @@ invalidate_visible_view() {
 
 # 把后端刚被直删/重建的夹具目录逐个映射成可见路径做显式失效。
 #
-# 名字按 `Srt*` 通配从后端动态枚举，与 clean_targets 的删除口径同源，不维护第二份
-# 手写清单（清单漏项正是跨场景残留的历史来源）；`Download/Test` 与 `.xldownload`/
-# `.xlDownload` 不在通配范围内，但同样会被后端直删直建，所以显式补上。
+# 前置检查、清理和缓存失效共用同一份夹具路径清单。
 # 枚举失败直接返回：失效是补强动作，不能因为它把清理本身变成失败；两层一致性由
 # assert_fixture_roots_empty 负责判定。
 invalidate_backend_fixture_view() {
   local label="$1" backend_path listing="" rel
   local -a visible_paths=()
-  listing="$(adb_su "for d in '${BACKEND_ROOT}/Download' '${BACKEND_ROOT}/Pictures' '${BACKEND_ROOT}/DCIM' '${BACKEND_ROOT}/Documents' '${BACKEND_ROOT}/Movies' '${BACKEND_ROOT}/Music'; do for p in \"\$d\"/Srt*; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done; done; for p in '${BACKEND_ROOT}/SrtRuleSandbox' '${BACKEND_ROOT}/DCIM/SrtRuleSibling' '${BACKEND_ROOT}/Download/Test' '${BACKEND_ROOT}/.xldownload' '${BACKEND_ROOT}/.xlDownload'; do [ -d \"\$p\" ] && printf '%s\\n' \"\$p\"; done" 2>/dev/null || true)"
+  listing="$(adb_su "for p in $BACKEND_FIXTURE_PATHS; do if [ -d \"\$p\" ]; then printf '%s\\n' \"\$p\"; fi; done" 2>/dev/null || true)"
   while IFS= read -r backend_path; do
     if [ -z "$backend_path" ]; then
       continue
@@ -808,13 +857,8 @@ clean_targets() {
   #   场景 7 起每次清理都报 EDOM、共 14 次，场景 5/6 写入可见 SrtProbe 的探针
   #   （mtime 15:23，早于场景 20 的 15:31）一路存活，被 `file_unexpected` 判失败。
   adb_su "rm -f '${REAL_ROOT}/Download/SrtProbe/$TEST_FILE' '${REAL_ROOT}/Download/Test/$TEST_FILE' || echo 'cleanup_tolerated reason=probe_fuse_edom note=单文件删除被模块 FUSE 以 EDOM 拒绝，改由下面的目录级删除覆盖' >&2" >/dev/null
-  # 目录级删除按 `Srt*` 通配动态枚举，不能靠维护一份手写清单：清单漏一个目录，那个目录里的
-  # 文件就会跨场景残留，最后在离现场很远的「不应存在」断言上爆掉（场景 29 的
-  # `fixture_residue .../SrtQqAliasMapped/srt_qq_alias_existing.bin` 就是清单漏项所致）。
-  # 枚举口径与场景前置断言 `assert_fixture_roots_empty` 保持一致，两者互为印证。
-  adb_su "for d in '${REAL_ROOT}/Download'/Srt*; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done 2>/dev/null; rm -rf '${REAL_ROOT}/Download/Test' 2>/dev/null || true" >/dev/null
-  # 仍保留显式列出的既有目录：通配只在目录名以 Srt 开头时才命中，历史目录名若不含该前缀
-  # 需要靠这里兜住。
+  # 可见层先失效，再清理物理层，以保留跨场景的缓存失效验证。
+  adb_su "for d in $VISIBLE_DOWNLOAD_FIXTURE_PATHS; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done 2>/dev/null || true" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" >/dev/null
   # Any-path 夹具也必须先从可见路径删除：后续 local REAL_ROOT 切到后端后，动态
   # 函数会清理另一份目录树；漏掉这里会让 profileInstalled 等文件跨场景残留。
@@ -833,10 +877,8 @@ clean_targets() {
 
   sleep_ms $SRT_SERVICE_CASE_SETTLE_MS
   clean_results
-  # 后端侧也要按通配扫一遍：这里的目录清单同样是手工维护的，漏项会让残留避开清理
-  # （可见路径已被扫过，但后端那一份是独立的目录树）。两条路径都要动态枚举才能保证不漏。
-  adb_su "for d in '${REAL_ROOT}/Download'/Srt* '${REAL_ROOT}/Pictures'/Srt* '${REAL_ROOT}/DCIM'/Srt* '${REAL_ROOT}/Documents'/Srt* '${REAL_ROOT}/Movies'/Srt* '${REAL_ROOT}/Music'/Srt*; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done 2>/dev/null || true" >/dev/null
-  adb_su "rm -rf '${MEDIASTORE_ROUTING_PROBE_ROOT}' '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}'" >/dev/null
+  adb_su "for d in $BACKEND_FIXTURE_PATHS; do [ -d \"\$d\" ] && rm -rf \"\$d\"; done 2>/dev/null || true" >/dev/null
+  adb_su "rm -rf '${MEDIASTORE_ROUTING_PROBE_ROOT}' '${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}' '$BACKEND_PRIVATE_ROOT/Documents/SrtMediaExistingProbe'" >/dev/null
   adb_su "rm -rf '${BACKEND_RULE_SANDBOX_ROOT}' '${PRIVATE_RULE_SANDBOX_ROOT}' '${BACKEND_RULE_SIBLING_ROOT}' '${PRIVATE_RULE_SIBLING_ROOT}'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtProbe' '${REAL_ROOT}/Download/SrtOther' '${REAL_ROOT}/Download/SrtOtherMapped' '${REAL_ROOT}/Download/SrtMapOnlyMapped' '${REAL_ROOT}/Download/SrtReadOnly' '${REAL_ROOT}/Download/SrtMapRO' '${REAL_ROOT}/Download/SrtAllow' '${REAL_ROOT}/Pictures/SrtLocked' '${REAL_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_PRIVATE_ROOT}/Download/SrtProbe' '${BACKEND_PRIVATE_ROOT}/Download/SrtOther' '${BACKEND_PRIVATE_ROOT}/Download/SrtOtherMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapOnlyMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtAllow' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtReadOnlyMedia'; find '${REAL_ROOT}/Download/Test' '${BACKEND_PRIVATE_ROOT}/Download/Test' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${BACKEND_PRIVATE_ROOT}/.xldownload' '${BACKEND_PRIVATE_ROOT}/.xlDownload' -maxdepth 1 -name '$TEST_FILE' -delete 2>/dev/null || true" >/dev/null
   adb_su "rm -f '${REAL_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${REAL_ROOT}/Download/Test/$HOT_AFTER_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_BEFORE_FILE' '${BACKEND_PRIVATE_ROOT}/Download/Test/$HOT_AFTER_FILE' 2>/dev/null || true" >/dev/null
@@ -856,7 +898,7 @@ clean_targets() {
   adb_su "mkdir -p '${REAL_ROOT}/Download/SrtMountNsAllow/TeamAlpha/Deep' '${REAL_ROOT}/Download/SrtMountNsAllow/Qa/Deep' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsAllow/TeamAlpha/Deep' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsAllow/Qa/Deep'; chmod -R 777 '${REAL_ROOT}/Download/SrtMountNsAllow' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsAllow' 2>/dev/null || true" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'; mkdir -p '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked/Writable' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked/Writable' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'; chmod -R 777 '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram' 2>/dev/null || true" >/dev/null
   prepare_backend_core_targets
-  prepare_any_path_targets
+  prepare_any_path_targets || return 1
   # 嵌套映射准备会删除私有父目录，随后再创建自有目录测试数据。
   # 系统 FUSE 可能拒绝 shell 清理可见自有目录，但不一定就是 FUSE 所致：可见路径删除失败时
   # 如实记录，交由真实后端的严格清理覆盖（不声称一定是 FUSE）。
@@ -904,11 +946,8 @@ clean_targets() {
 assert_fixture_roots_empty() {
   local label="$1"
   local residue rc=0
-  # 夹具目录会随场景演进增长，因此按 Srt* 通配动态枚举，不写死清单。
-  # 仅扫描原有 Download/Srt* 与 Download/Test 范围，不扩大枚举、不新增删除：避免误伤
-  # 未知预置夹具。扫描失败（adb 中断、find 权限错误）必须传播，不能吞成成功；移除
-  # -maxdepth 限制与 head 管道后，任何层级的残留与 find 错误都不再被掩盖。
-  residue="$(adb_su_timeout 45 "for d in '${REAL_ROOT}/Download'/Srt* '${REAL_ROOT}/Download/Test'; do if [ -d \"\$d\" ]; then find \"\$d\" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done")" || rc=$?
+  # 仅检查本轮开始时确认不存在的 Download 夹具。
+  residue="$(adb_su_timeout 45 "set -- scan $VISIBLE_DOWNLOAD_FIXTURE_PATHS; $PUBLIC_FIXTURE_CHECK")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "fixture_scan_failed label=${label}" >&2
     return 1
@@ -918,7 +957,7 @@ assert_fixture_roots_empty() {
     printf '%s\n' "$residue" | sed 's/^/  residue: /' >&2
     return 1
   fi
-  residue="$(adb_su_timeout 45 "for d in '${BACKEND_ROOT}/Download'/Srt* '${BACKEND_ROOT}/Download/Test'; do if [ -d \"\$d\" ]; then find \"\$d\" -type f -printf '%p size=%s owner=%u:%g mtime=%T@\n' || exit 1; fi; done")" || rc=$?
+  residue="$(adb_su_timeout 45 "set -- scan $BACKEND_DOWNLOAD_FIXTURE_PATHS; $PUBLIC_FIXTURE_CHECK")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "fixture_scan_failed label=${label} layer=backend" >&2
     return 1
@@ -935,105 +974,26 @@ clean_results() {
   adb_su "rm -rf '$RESULT_DIR' '$INTERNAL_RESULT_DIR' '$BACKEND_RESULT_DIR' '$SANDBOX_RESULT_DIR'; find '$BACKEND_ROOT/Android/data/$APP_ID' '/data/data/$APP_ID' -path '*/files/test_case_result' -type d -prune -exec rm -rf {} + 2>/dev/null || true" >/dev/null
 }
 
-backup_global_config() {
-  global_config_backup_ready=0
-  if adb_su "test -f '$GLOBAL_CONFIG'" >/dev/null 2>&1; then
-    original_global_config_exists=1
-    original_global_config_b64="$(adb_su "base64 '$GLOBAL_CONFIG' 2>/dev/null | tr -d '\n'")"
-  else
-    original_global_config_exists=0
-    original_global_config_b64=""
-  fi
-  global_config_backup_ready=1
+read_config_backup() {
+  local path="$1" snapshot
+  snapshot="$(adb_su "if [ -L '$path' ]; then exit 1; elif [ -f '$path' ]; then printf 'file:' && base64 < '$path'; elif [ ! -e '$path' ]; then echo absent; else exit 1; fi")" || return 1
+  snapshot="${snapshot//$'\n'/}"
+  [[ "$snapshot" == absent || "$snapshot" =~ ^file:[A-Za-z0-9+/]*={0,2}$ ]] || return 1
+  printf '%s' "$snapshot"
 }
 
-restore_global_config() {
-  if [ "${global_config_backup_ready:-0}" -ne 1 ]; then
-    return 0
-  fi
-  if [ "${original_global_config_exists:-0}" -eq 1 ] && [ -n "${original_global_config_b64:-}" ]; then
-    adb_root "printf '%s' '$original_global_config_b64' | base64 -d > '$GLOBAL_CONFIG'" >/dev/null || return 1
-    adb_su "chmod 644 '$GLOBAL_CONFIG'" >/dev/null
-  else
-    adb_su "rm -f '$GLOBAL_CONFIG'" >/dev/null
-  fi
+write_encoded_config() {
+  local path="$1" encoded="$2"
+  # 临时文件不以 .json 结尾；解码与权限设置成功后才让 daemon 看到新配置。
+  adb_su "tmp=\$(mktemp '$path.XXXXXX') || exit 1; trap 'rm -f \"\$tmp\"' EXIT; printf '%s' '$encoded' | base64 -d > \"\$tmp\" && chmod 644 \"\$tmp\" && mv -f \"\$tmp\" '$path'"
 }
 
-backup_app_config() {
-  app_config_backup_ready=0
-  if adb_su "test -f '$CONFIG'" >/dev/null 2>&1; then
-    original_app_config_exists=1
-    original_app_config_b64="$(adb_su "base64 '$CONFIG' 2>/dev/null | tr -d '\n'")"
+restore_config_backup() {
+  local path="$1" snapshot="$2"
+  if [[ "$snapshot" == absent ]]; then
+    adb_su "rm -f '$path'" >/dev/null
   else
-    original_app_config_exists=0
-    original_app_config_b64=""
-  fi
-  app_config_backup_ready=1
-}
-
-restore_app_config() {
-  if [ "${app_config_backup_ready:-0}" -ne 1 ]; then
-    return 0
-  fi
-  if [ "${original_app_config_exists:-0}" -eq 1 ] && [ -n "${original_app_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
-    adb_root "printf '%s' '$original_app_config_b64' | base64 -d > '$CONFIG'" >/dev/null || return 1
-    adb_su "chmod 644 '$CONFIG'" >/dev/null
-  else
-    adb_su "rm -f '$CONFIG'" >/dev/null
-  fi
-}
-
-backup_provider_config() {
-  # 场景 38 会写入下载提供器专属配置并在结束时删除它（clear_provider_sandbox_config）。
-  # 没有备份的话，真机上一份真实存在的下载提供器规则会在跑完测试后被永久删掉——
-  # 真机实测：一轮全量测试后 56 份应用配置变 55 份，缺的正是这一份。
-  provider_config_backup_ready=0
-  if adb_su "test -f '$PROVIDER_CONFIG'" >/dev/null 2>&1; then
-    original_provider_config_exists=1
-    original_provider_config_b64="$(adb_su "base64 '$PROVIDER_CONFIG' 2>/dev/null | tr -d '[:space:]'")"
-  else
-    original_provider_config_exists=0
-    original_provider_config_b64=""
-  fi
-  provider_config_backup_ready=1
-}
-
-restore_provider_config() {
-  if [ "${provider_config_backup_ready:-0}" -ne 1 ]; then
-    return 0
-  fi
-  if [ "${original_provider_config_exists:-0}" -eq 1 ] && [ -n "${original_provider_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
-    adb_root "printf '%s' '$original_provider_config_b64' | base64 -d > '$PROVIDER_CONFIG'" >/dev/null || return 1
-    adb_su "chmod 644 '$PROVIDER_CONFIG'" >/dev/null
-  else
-    adb_su "rm -f '$PROVIDER_CONFIG'" >/dev/null
-  fi
-}
-
-backup_cross_app_config() {
-  cross_app_config_backup_ready=0
-  if adb_su "test -f '$READ_ONLY_OWNER_CONFIG'" >/dev/null 2>&1; then
-    original_cross_app_config_exists=1
-    original_cross_app_config_b64="$(adb_su "base64 '$READ_ONLY_OWNER_CONFIG' 2>/dev/null | tr -d '[:space:]'")"
-  else
-    original_cross_app_config_exists=0
-    original_cross_app_config_b64=""
-  fi
-  cross_app_config_backup_ready=1
-}
-
-restore_cross_app_config() {
-  if [ "${cross_app_config_backup_ready:-0}" -ne 1 ]; then
-    return 0
-  fi
-  if [ "${original_cross_app_config_exists:-0}" -eq 1 ] && [ -n "${original_cross_app_config_b64:-}" ]; then
-    adb_su "mkdir -p /data/adb/modules/storage.redirect.x/config/apps" >/dev/null || return 1
-    adb_root "printf '%s' '$original_cross_app_config_b64' | base64 -d > '$READ_ONLY_OWNER_CONFIG'" >/dev/null || return 1
-    adb_su "chmod 644 '$READ_ONLY_OWNER_CONFIG'" >/dev/null
-  else
-    clear_cross_app_read_only_config
+    write_encoded_config "$path" "${snapshot#file:}" >/dev/null
   fi
 }
 
@@ -1140,51 +1100,20 @@ remove_test_target_artifacts() {
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMountNsAllow' '${REAL_ROOT}/Download/SrtMountNsReadOnly' '${REAL_ROOT}/Download/SrtMountNsMapParent' '${REAL_ROOT}/Download/SrtMountNsMapRW' '${REAL_ROOT}/Download/SrtMountNsMapRO' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsAllow' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsReadOnly' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapParent' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapRW' '${BACKEND_PRIVATE_ROOT}/Download/SrtMountNsMapRO'" >/dev/null
   adb_su "rm -rf '${REAL_ROOT}/Download/SrtMonitor' '${REAL_ROOT}/Download/SrtMonitorMap' '${REAL_ROOT}/Download/SrtMonitorMapped' '${REAL_ROOT}/Download/SrtMonitorLocked' '${REAL_ROOT}/Pictures/SrtRelativeData' '${REAL_ROOT}/Pictures/Nnngram' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitor' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMap' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorMapped' '${BACKEND_PRIVATE_ROOT}/Download/SrtMonitorLocked' '${BACKEND_PRIVATE_ROOT}/Pictures/SrtRelativeData' '${BACKEND_PRIVATE_ROOT}/Pictures/Nnngram'" >/dev/null
   # 场景 44 的 reconcile 触发器：残留会在后续场景的配置指纹里多算一份"别的应用"。
-  clear_monitor_trigger_config
+  adb_su "rm -rf '$PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT' '$BACKEND_PRIVATE_ROOT/Documents/SrtMediaExistingProbe'" || return 1
+  clear_monitor_trigger_config || return 1
+  adb_su "rm -rf $VISIBLE_FIXTURE_PATHS; rm -rf $BACKEND_FIXTURE_PATHS || exit 1; set -- fixture_residue $VISIBLE_FIXTURE_PATHS $BACKEND_FIXTURE_PATHS; $PUBLIC_FIXTURE_CHECK"
 }
 
-remove_mediastore_rows_by_pattern() {
-  local collection="$1"
-  local name_regex="$2"
-  local path_regex="$3"
-
-  adb_su "content query --uri '$collection' --projection _id:_display_name:_data:relative_path 2>/dev/null || true" |
-    while IFS= read -r row; do
-      [[ "$row" =~ _id=([0-9]+) ]] || continue
-      local id="${BASH_REMATCH[1]}"
-      [[ "$row" =~ $name_regex ]] || continue
-      [[ "$row" =~ $path_regex ]] || continue
-      adb shell content delete --uri "$collection/$id" >/dev/null 2>&1 || true
-    done
+read_only_media_rows() {
+  host_python "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/media-fixture-rows.py" "$1" "${ANDROID_SERIAL:-}"
 }
 
-remove_random_mediastore_rows() {
-  local app_regex="${APP_ID//./\\.}"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_image_[0-9]+( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/|_data=.*/Pictures/|_data=.*/Android/data/${app_regex}/sdcard/Pictures/"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_own_private_mediastore( \([0-9]+\))?\.jpg(,|$)' "_data=.*/Android/media/${app_regex}/Tencent/QQfile_recv/"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_fuse_dcim_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=DCIM/SrtFuseQQ/|_data=.*/DCIM/SrtFuseQQ/|_data=.*/Android/data/${app_regex}/sdcard/DCIM/SrtFuseQQ/"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=srt_read_only_media( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/SrtReadOnlyMedia/|_data=.*/Pictures/SrtReadOnlyMedia/|_data=.*/Android/data/${app_regex}/sdcard/Pictures/SrtReadOnlyMedia/"
-  # 夹具根目录会在 `file` 表留下目录行（无扩展名），与图片行名字不同、上面匹配不到；
-  # 复用设备上残留会让场景 28 的图片查询 `rowCount=1` 命中目录行并判定 row-not-found
-  # （2026-11-12 A17 复用模拟器实测 `_id=1027`）。
-  remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=SrtReadOnlyMedia( \([0-9]+\))?(,|$)' "_data=.*/Pictures/SrtReadOnlyMedia(,|$)"
-  remove_mediastore_rows_by_pattern "content://media/external/video/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_video_[0-9]+( \([0-9]+\))?\.mp4(,|$)' "relative_path=Movies/|_data=.*/Movies/|_data=.*/Android/data/${app_regex}/sdcard/Movies/"
-  remove_mediastore_rows_by_pattern "content://media/external/audio/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_audio_[0-9]+( \([0-9]+\))?\.mp3(,|$)' "relative_path=Music/|_data=.*/Music/|_data=.*/Android/data/${app_regex}/sdcard/Music/"
-  remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_file_[0-9]+( \([0-9]+\))?\.txt(,|$)' "relative_path=Documents/|_data=.*/Documents/|_data=.*/Android/data/${app_regex}/sdcard/Documents/"
-  remove_mediastore_rows_by_pattern "content://media/external/downloads" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?(srt_download_[0-9]+( \([0-9]+\))?\.bin|srt_ci_probe( \([0-9]+\))?\.part|srt_qmark_a( \([0-9]+\))?\.txt|srt_qmark_ab( \([0-9]+\))?\.txt|srt_qmark_file_a( \([0-9]+\))?\.txt|srt_mountns_star_media( \([0-9]+\))?\.bin|srt_mountns_qmark_media( \([0-9]+\))?\.bin|srt_fuse_star_media( \([0-9]+\))?\.bin|srt_fuse_star_miss_media( \([0-9]+\))?\.bin|srt_fuse_qmark_media( \([0-9]+\))?\.bin|srt_fuse_qmark_miss_media( \([0-9]+\))?\.bin)(,|$)' "relative_path=Download/|_data=.*/Download/|_data=.*/Android/data/${app_regex}/sdcard/Download/"
-  remove_mediastore_rows_by_pattern "content://media/external/downloads" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_monitor_[A-Za-z0-9_.-]+( \([0-9]+\))?\.bin(,|$)' "relative_path=Download/SrtMonitor|relative_path=Download/SrtMonitorMap|relative_path=Download/SrtMonitorMapped|relative_path=Download/SrtMonitorLocked|_data=.*/Download/SrtMonitor|_data=.*/Android/data/${app_regex}/sdcard/Download/SrtMonitor"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_monitor_[A-Za-z0-9_.-]+( \([0-9]+\))?\.jpg(,|$)' "relative_path=Pictures/SrtRelativeData|_data=.*/Pictures/SrtRelativeData|_data=.*/Android/data/${app_regex}/sdcard/Pictures/SrtRelativeData|relative_path=Pictures/Nnngram|_data=.*/Pictures/Nnngram|_data=.*/Android/data/${app_regex}/sdcard/Pictures/Nnngram"
+remove_created_mediastore_rows() {
+  host_python "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/media-fixture-rows.py" clean "${ANDROID_SERIAL:-}" "$SRT_CREATED_MEDIA_RESULTS"
 }
 
-remove_random_physical_media_files() {
-  adb_su "find '$BACKEND_ROOT/Pictures' '$BACKEND_PRIVATE_ROOT/Pictures' -maxdepth 1 -type f \( -name 'srt_image_[0-9]*.jpg' -o -name '.pending-*srt_image_[0-9]*.jpg' -o -name '.trashed-*srt_image_[0-9]*.jpg' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/DCIM/SrtFuseQQ' '$BACKEND_PRIVATE_ROOT/DCIM/SrtFuseQQ' -type f \( -name 'srt_fuse_dcim_media*.jpg' -o -name '.pending-*srt_fuse_dcim_media*.jpg' -o -name '.trashed-*srt_fuse_dcim_media*.jpg' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "rm -rf '$BACKEND_ROOT/Pictures/SrtReadOnlyMedia' '$BACKEND_PRIVATE_ROOT/Pictures/SrtReadOnlyMedia' 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/Movies' '$BACKEND_PRIVATE_ROOT/Movies' -maxdepth 1 -type f \( -name 'srt_video_[0-9]*.mp4' -o -name '.pending-*srt_video_[0-9]*.mp4' -o -name '.trashed-*srt_video_[0-9]*.mp4' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/Music' '$BACKEND_PRIVATE_ROOT/Music' -maxdepth 1 -type f \( -name 'srt_audio_[0-9]*.mp3' -o -name '.pending-*srt_audio_[0-9]*.mp3' -o -name '.trashed-*srt_audio_[0-9]*.mp3' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/Documents' '$BACKEND_PRIVATE_ROOT/Documents' -maxdepth 1 -type f \( -name 'srt_file_[0-9]*.txt' -o -name '.pending-*srt_file_[0-9]*.txt' -o -name '.trashed-*srt_file_[0-9]*.txt' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/Download' '$BACKEND_PRIVATE_ROOT/Download' -maxdepth 1 -type f \( -name 'srt_download_[0-9]*.bin' -o -name '.pending-*srt_download_[0-9]*.bin' -o -name '.trashed-*srt_download_[0-9]*.bin' -o -name 'srt_ci_probe*.part' -o -name '.pending-*srt_ci_probe*.part' -o -name '.trashed-*srt_ci_probe*.part' -o -name 'srt_qmark*.txt' -o -name '.pending-*srt_qmark*.txt' -o -name '.trashed-*srt_qmark*.txt' -o -name 'srt_mountns_*_media.bin' -o -name '.pending-*srt_mountns_*_media.bin' -o -name '.trashed-*srt_mountns_*_media.bin' -o -name 'srt_fuse_*_media.bin' -o -name '.pending-*srt_fuse_*_media.bin' -o -name '.trashed-*srt_fuse_*_media.bin' \) -delete 2>/dev/null || true" >/dev/null
-  adb_su "find '$BACKEND_ROOT/Download/SrtMonitor' '$BACKEND_ROOT/Download/SrtMonitorMap' '$BACKEND_ROOT/Download/SrtMonitorMapped' '$BACKEND_ROOT/Download/SrtMonitorLocked' '$BACKEND_ROOT/Pictures/SrtRelativeData' '$BACKEND_ROOT/Pictures/Nnngram' '$BACKEND_PRIVATE_ROOT/Download/SrtMonitor' '$BACKEND_PRIVATE_ROOT/Download/SrtMonitorMap' '$BACKEND_PRIVATE_ROOT/Download/SrtMonitorMapped' '$BACKEND_PRIVATE_ROOT/Download/SrtMonitorLocked' '$BACKEND_PRIVATE_ROOT/Pictures/SrtRelativeData' '$BACKEND_PRIVATE_ROOT/Pictures/Nnngram' -type f \( -name 'srt_monitor_*.bin' -o -name 'srt_monitor_*.jpg' -o -name '.pending-*srt_monitor_*' -o -name '.trashed-*srt_monitor_*' \) -delete 2>/dev/null || true" >/dev/null
+remove_test_result_directories() {
   adb_su "rm -rf '$BACKEND_RESULT_DIR' '$BACKEND_ROOT/Android/data/$APP_ID/files/srt_file_tests' '$INTERNAL_RESULT_DIR' '/data/data/$APP_ID/files/srt_file_tests' '$SANDBOX_RESULT_DIR' '$BACKEND_PRIVATE_ROOT/Android/data/$APP_ID/files/srt_file_tests' 2>/dev/null || true" >/dev/null
 }
 
@@ -1331,9 +1260,21 @@ cleanup_test_artifacts() {
     status=1
   fi
   local step
-  for step in restore_cross_app_config restore_provider_config restore_app_config restore_global_config \
-    clean_results remove_test_target_artifacts clear_alias_mediastore_fixture \
-    remove_random_mediastore_rows remove_random_physical_media_files restart_media_provider restore_device_execution_state; do
+  for step in clean_results remove_test_target_artifacts \
+    remove_created_mediastore_rows remove_test_result_directories; do
+    if ! "$step"; then
+      echo "FAIL [cleanup] step=${step}" >&2
+      status=1
+    fi
+  done
+  local path
+  for path in "$READ_ONLY_OWNER_CONFIG" "$PROVIDER_CONFIG" "$CONFIG" "$GLOBAL_CONFIG"; do
+    if ! restore_config_backup "$path" "${config_backups[$path]}"; then
+      echo "FAIL [cleanup] step=config path=$path" >&2
+      status=1
+    fi
+  done
+  for step in restart_media_provider restore_device_execution_state; do
     if ! "$step"; then
       echo "FAIL [cleanup] step=${step}" >&2
       status=1
@@ -1411,7 +1352,9 @@ wait_app_mount_confirmed() {
   local timeout_seconds=$(((SRT_MOUNT_CONFIRM_TIMEOUT_MS + 999) / 1000))
   local host_timeout_seconds=$((timeout_seconds + 15))
   local output
-  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'); [ -z \"\$pid\" ] && pid=\$(for q in /proc/[0-9]*; do c=\$(cat \"\$q/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${q#/proc/}\";; esac; done | sort -n | tail -1); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; companion=\"perf companion mount pkg=$APP_ID pid=\$pid .* ok=true\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$companion)\"; then echo confirmed_pid=\$pid; exit 0; fi; if grep -Eq \"(\$confirmed|\$daemon|\$companion)\" '$LOG_PATH' 2>/dev/null; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
+  if output="$(adb_su_timeout "$host_timeout_seconds" "deadline=\$((\$(date +%s) + $timeout_seconds)); pid=''; while [ \$(date +%s) -le \$deadline ]; do pid=\$(package='$APP_ID'
+$SRT_TEST_APP_PID_COMMAND
+); [ -n \"\$pid\" ] && break; sleep 0.1; done; if [ -z \"\$pid\" ]; then echo pid_not_found; exit 2; fi; confirmed=\"app mount confirmed pid=\$pid([[:space:]]|$)\"; daemon=\"daemon mount pkg=$APP_ID pid=\$pid op=Reload ok=true\"; companion=\"perf companion mount pkg=$APP_ID pid=\$pid .* ok=true\"; while [ \$(date +%s) -le \$deadline ]; do if logcat -d -t 300 -s StorageRedirect:V SRX:V 2>/dev/null | grep -Eq \"(\$confirmed|\$daemon|\$companion)\"; then echo confirmed_pid=\$pid; exit 0; fi; if grep -Eq \"(\$confirmed|\$daemon|\$companion)\" '$LOG_PATH' 2>/dev/null; then echo confirmed_pid=\$pid; exit 0; fi; sleep 0.1; done; echo pid=\$pid; exit 1")"; then
     local confirmed_pid
     confirmed_pid="$(grep -E '^confirmed_pid=' <<<"$output" | tail -1 | cut -d= -f2)"
     if [ -n "$confirmed_pid" ] && app_mountinfo_has_expected_paths "$label" "$confirmed_pid"; then
@@ -1668,7 +1611,7 @@ wait_storage_ready() {
   local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if adb shell "sm list-volumes all 2>/dev/null | grep -q 'emulated;0 mounted' && test -d '$REAL_ROOT' && ls -ld '$REAL_ROOT' >/dev/null 2>&1" >/dev/null 2>&1; then
+    if timeout 10s adb shell "sm list-volumes all 2>/dev/null | grep -q 'emulated;0 mounted' && ls -A '$REAL_ROOT' >/dev/null 2>&1" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -1679,80 +1622,77 @@ wait_storage_ready() {
   return 1
 }
 
-# 等待场景目标目录在被测应用自身的挂载视图内可见。
-#
-# 为什么需要这一步：上面的 `wait_storage_ready` 只验证 root 侧（`sm list-volumes` 与真实
-# 路径的 `test -d`），而被测应用的挂载视图与 root 是隔离的（沙箱绑定叠加 FUSE 视图）。
-# 脚本用 root 预置的 `Download/Srt*` 目录可能在应用侧尚未出现，随后的写入或读取就会
-# 立刻拿到 ENOENT。实测 Android 13 x86_64 上连续四次完整矩阵分别失败于场景 25/4/14/9，
-# 形态同属这一类 —— 都是「root 可见但应用尚不可见」的时序窗口。
-#
-# 探测手段是进应用进程的 mount namespace 后 `ls`，取到的正是应用实际会走的视图，
-# 而不是 adb 自己的视图（后者无法证明应用可访问，这一点在本项目已多次踩过）。
-# 拿不到已确认的 pid、或设备没有 `nsenter` 时优雅降级为不等待；等待超时也只输出诊断、
-# 不判定场景失败，避免把「无法探测」或「探测偏慢」变成新的失败模式。
+# 只对依赖预置目录的场景检查应用视图；首操作冷启动用例由其业务断言验证。
 wait_scenario_app_view() {
-  local scenario="$1"
-  local label="scenario-${scenario}"
-  local pid="${LAST_MOUNT_CONFIRMED_PID:-}"
-  local timeout_seconds="${SRT_APP_VIEW_TIMEOUT_SECONDS:-15}"
-  local path deadline
-
-  # 场景 38/40 不使用测试应用（见 step 3 跳过逻辑）；场景 41 自己在删掉沙盒根后重建，
-  # 预置的 `Download/Srt*` 目录已随沙盒根一起消失，探针注定超时并写熔断标记——都会
-  # 误伤本轮剩余场景，因此直接跳过应用视图探针。
+  local scenario="$1" label="scenario-$1" path
   case "$scenario" in
-    38|40|41)
-      return 0
-      ;;
+    3|4|5|6|7|8|14|15) path="$(logical_dir "$scenario")" ;;
+    9) path="$READ_ONLY_ROOT" ;;
+    *) return 0 ;;
   esac
-
-  # 探针熔断：首次 15s 超时后写标记文件，同一轮里其余场景直接跳过。
-  # CI 实测 API 34 模拟器上该探针恒不可用（37 场景里 34 次打满超时、场景本体
-  # 照常通过），不熔断时每场景白烧 15s，整条 A14 矩阵多跑约 9.5 分钟。
-  if [ -f "app-view-probe-broken.flag" ]; then
-    # quality-allow(chinese-language): 该行输出的是 CI 日志检索用的英文标记，必须保持英文原样。
-    echo "app_view_probe_skipped label=${label} reason=probe-circuit-broken"
-    return 0
-  fi
-  if [ -z "$pid" ]; then
-    # quality-allow(chinese-language): 该行输出的是 CI 日志检索用的英文标记，必须保持英文原样。
-    echo "app_view_probe_skipped label=${label} reason=no-confirmed-pid"
-    return 0
-  fi
-  if [ -z "$(adb_su 'command -v nsenter 2>/dev/null' 2>/dev/null || true)" ]; then
-    # quality-allow(chinese-language): 该行输出的是 CI 日志检索用的英文标记，必须保持英文原样。
-    echo "app_view_probe_skipped label=${label} reason=no-nsenter"
+  if fresh_app_enabled_for_label "$label"; then
+    echo "app_view_probe_skipped label=$label reason=fresh-app-per-case"
     return 0
   fi
 
-  # 只看该场景的逻辑目录：它已按场景分派（含 sandbox 规则场景与最长前缀场景），
-  # 且正常情况下首次探测即命中，因此不引入额外耗时；只有真的尚未可见才会等待。
-  path="$(logical_dir "$scenario")"
-  [ -n "$path" ] || return 0
-  deadline=$((SECONDS + timeout_seconds))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if [ -n "$(adb_su "ls -ld '/proc/${pid}/root${path}' 2>/dev/null" 2>/dev/null || true)" ]; then
-      return 0
+  local deadline=$((SECONDS + ${SRT_APP_VIEW_TIMEOUT_SECONDS:-15}))
+  local pid current marker result remaining mode reason=startup rc
+  local output_file="$SRT_ARTIFACT_DIR/$label-ready-stat-result.txt"
+  while (( SECONDS < deadline )); do
+    pid="$(app_pid)" || return 1
+    if [[ -z "$pid" || "$pid" != "${LAST_MOUNT_CONFIRMED_PID:-}" ]]; then
+      remaining=$((deadline - SECONDS))
+      if (( remaining <= 0 )) || ! SRT_MOUNT_CONFIRM_TIMEOUT_MS=$((remaining * 1000)) wait_app_mount_confirmed "$label" 1; then
+        reason=mount-unconfirmed
+        break
+      fi
+      pid="$LAST_MOUNT_CONFIRMED_PID"
     fi
-    sleep 1
+    remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || break
+    marker="$(adb_su 'mktemp /data/local/tmp/srx-ready.XXXXXXXX')" || return 1
+    [[ "$marker" =~ ^/data/local/tmp/srx-ready\.[[:alnum:]]+$ ]] || return 1
+    rc=0
+    timeout "$remaining" adb shell am start-foreground-service -n "$APP_ID/.TestService" -a "$ACTION" \
+      --es test_case file_stat --es file_path "$path" --es result_token "$marker" >/dev/null || rc=$?
+    remaining=$((deadline - SECONDS))
+    result=""
+    if (( rc == 0 && remaining > 0 )); then
+      if ! result="$(wait_service_result "$remaining" "$marker" file_stat)"; then
+        result=""
+        reason=result-unavailable
+      fi
+    else
+      reason="service-start-or-timeout-$rc"
+    fi
+    adb_su "rm -f '$marker'" || return 1
+    current="$(app_pid)" || return 1
+    if [[ "$current" != "$pid" ]]; then
+      reason=process-changed
+      continue
+    fi
+    printf '%s\n' "$result" > "$output_file" || return 1
+    if [[ "$result" == 'PASS [file_stat] '*" path=$path, "* && "$result" =~ ', mode='([0-9]+)', ' ]]; then
+      mode="${BASH_REMATCH[1]}"
+      if (( (10#$mode & 0170000) == 0040000 )); then
+        echo "app_view_ready label=$label pid=$pid path=$path mode=$mode"
+        return 0
+      fi
+      reason=not-directory
+      break
+    elif [[ "$result" == 'FAIL [file_stat] '*ENOENT* ]]; then
+      reason=ENOENT
+      sleep_ms "$SRT_RESULT_POLL_MS"
+    else
+      if [[ -n "$result" ]]; then reason="${result%%$'\n'*}"; fi
+      break
+    fi
   done
-
-  # quality-allow(chinese-language): 该行输出的是 CI 日志检索用的英文标记，必须保持英文原样。
-  echo "app_view_not_ready label=${label} path=${path} pid=${pid}"
-  # 首次超时做一次性诊断：目标 pid 有效性、mount namespace 标识、nsenter 与
-  # /proc/<pid>/root 两条探针的实际退出码与错误输出，供根因定位；随后写熔断
-  # 标记，本轮剩余场景不再重试。
-  # 根因（CI run 39123157208 A14 诊断实锤）：API 34 模拟器的 /system/bin/nsenter
-  # 没有正确吃到 -t 参数，报 /proc/0/ns/mnt（target 落到默认 0）——探针失败与应用
-  # 视图无关。改用 /proc/<pid>/root/<path> 直查目标进程根视图，语义等价且无
-  # setns 与参数解析问题。
-  # quality-allow(chinese-language): 输出为日志检索用的 ASCII 标记，中文说明见上一行注释。
-  adb_su "echo app_view_diag_pid=${pid}; echo app_view_diag_ns=\$(readlink /proc/${pid}/ns/mnt 2>&1); echo app_view_diag_nsenter=\$(command -v nsenter 2>&1); nsenter -t ${pid} -m -- ls -ld '${path}' 2>&1; echo app_view_diag_nsenter_rc=\$?; echo app_view_diag_rootprobe=\$(ls -ld '/proc/${pid}/root${path}' 2>&1); echo app_view_diag_rootprobe_rc=\$?" || true
-  : > "app-view-probe-broken.flag"
-  echo "app_view_probe_circuit_broken（本轮剩余场景跳过应用视图探针）"
-  print_storage_state "${label}-app-view-timeout"
-  return 0
+  echo "app_view_not_ready label=$label pid=${pid:-missing} path=$path reason=$reason" >&2
+  if [[ -n "${pid:-}" ]]; then
+    adb_su "nsenter -t $pid -m -- ls -ld '$path' 2>&1; echo app_view_diag_nsenter_rc=\$?; ls -ld '/proc/$pid/root$path' 2>&1; echo app_view_diag_rootprobe_rc=\$?" >&2 || true
+  fi
+  return 1
 }
 
 request_android13_storage_mount() {
@@ -1902,9 +1842,7 @@ wait_media_provider_ready() {
 }
 
 media_provider_pid() {
-  adb_su "for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof \"\$package\" 2>/dev/null || true; done; ps -A -o PID,NAME,ARGS 2>/dev/null | awk '\$0 ~ /providers\\.media|android\\.process\\.media/ {print \$1}'" |
-    tr -d '\r' |
-    awk 'NF && pid == "" { pid = $1 } END { if (pid != "") print pid }'
+  adb shell sh < "$SRT_MEDIA_PROVIDER_PID_SCRIPT" | tr -d '\r'
 }
 
 # MediaProvider 就绪缓存：wait_media_provider_ready 在 API<37 要顺序探测 10 个
@@ -1937,12 +1875,13 @@ wait_media_provider_hook_ready() {
   local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    local pid boot_id install_state hook_lines
+    local pid boot_id current_start_ticks install_state hook_lines
     pid="$(media_provider_pid)"
     if [ -n "$pid" ]; then
       boot_id="$(adb shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r')"
-      install_state="$(adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true" | tr -d '\r')"
-      if [ -n "$boot_id" ] && grep -Fq "stage=init_ok pid=${pid} boot_id=${boot_id} " <<<"$install_state"; then
+      current_start_ticks="$(adb_su "sed 's/^.*) //' /proc/${pid}/stat 2>/dev/null | awk '{print \$20}'" | tr -d '\r')"
+      install_state="$(adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state.${pid} 2>/dev/null || cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true" | tr -d '\r')"
+      if [ -n "$boot_id" ] && [ -n "$current_start_ticks" ] && grep -Fq "stage=init_ok pid=${pid} boot_id=${boot_id} start_ticks=${current_start_ticks} " <<<"$install_state"; then
         echo "media_provider_hook_ready label=${label} pid=${pid} source=install-state"
         return 0
       fi
@@ -1985,7 +1924,7 @@ restart_media_provider_with_hook_ready() {
   for attempt in 1 2; do
     adb logcat -c >/dev/null 2>&1 || true
     restart_media_provider
-    wait_storage_ready "${label}-storage-attempt-${attempt}" 30 >/dev/null || return 1
+    wait_storage_ready "${label}-storage-attempt-${attempt}" 45 >/dev/null || return 1
     wait_media_provider_ready "${label}-provider-attempt-${attempt}" 60 >/dev/null || return 1
     if wait_media_provider_hook_ready "${label}-attempt-${attempt}" 20; then
       return 0
@@ -2110,6 +2049,9 @@ run_service_case() {
     timeout_seconds="$(service_case_timeout_seconds "$test_case")"
     if wait_service_result "$timeout_seconds" "$freshness_marker" "$test_case" >"$output_file"; then
       adb_su "rm -f '$freshness_marker'" >/dev/null
+      case "$test_case" in
+        all|mediastore_create_*) cat "$output_file" >> "$SRT_CREATED_MEDIA_RESULTS" || return 1 ;;
+      esac
       cat "$output_file" >>"${SRT_ARTIFACT_DIR}/scenario-${scenario}-result.txt" || return 1
       sed -E 's/^(PASS|FAIL) (\[[^]]*\]) /OBSERVED \2 app_status=\1 /' "$output_file" || return 1
       if [ -z "$pass_pattern" ]; then
@@ -2313,42 +2255,41 @@ find_written_file() {
   adb_su "for dir in '${REAL_ROOT}/Download' '${REAL_ROOT}/Pictures' '${REAL_ROOT}/.xldownload' '${REAL_ROOT}/.xlDownload' '${PRIVATE_ROOT}/Download' '${PRIVATE_ROOT}/Pictures' '${PRIVATE_ROOT}/.xldownload' '${PRIVATE_ROOT}/.xlDownload'; do find \"\$dir\" -maxdepth 5 \\( -name '$TEST_FILE' -o -name '$HOT_BEFORE_FILE' -o -name '$HOT_AFTER_FILE' -o -name '$READ_ONLY_FILE' -o -name '$ALLOW_KEEP_FILE' -o -name '$ALLOW_PART_FILE' \\) -print 2>/dev/null || true; done | sort"
 }
 
+backend_storage_path() {
+  case "$1" in
+    "$REAL_ROOT" | "$REAL_ROOT"/*) printf '%s\n' "$BACKEND_ROOT${1#"$REAL_ROOT"}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 check_file_exists() {
   local label="$1"
   local path="$2"
-  if adb_su "test -f '$path'"; then
-    echo "file_exists label=${label} path=${path}"
+  local backend_path status
+  backend_path="$(backend_storage_path "$path")"
+  if adb_su "test -f '$backend_path' || { LC_ALL=C stat -L -c '%F %n' '$backend_path' >&2; exit 1; }"; then
+    echo "file_exists label=${label} path=${path} backend=${backend_path}"
     return 0
+  else
+    status=$?
   fi
-  echo "file_missing label=${label} path=${path}"
+  echo "regular_file_check_failed label=${label} path=${path} backend=${backend_path} exit=${status}"
   # 文件不在预期位置时，列出父目录内容：多数落点问题的关键信息是文件究竟落在了
   # 哪里、或是否以中间态命名（例如 MediaStore 的 .pending- 前缀）残留。
-  adb_su "ls -la \"\$(dirname '$path')\" 2>/dev/null || true" || true
-  return 1
+  adb_su "ls -la \"\$(dirname '$backend_path')\" 2>/dev/null || true" || true
+  return "$status"
 }
 
 check_file_missing() {
   local label="$1"
   local path="$2"
-  # 「不应存在」必须在**真实后端**上判定，不能走 /storage/emulated 可见路径：
-  # 该路径由宿主 FUSE 会话承接，而无归属信号的系统 uid（root/shell）读请求在映射
-  # 命中时会被按映射目标应答——于是「请求路径不应有文件」被 FUSE 视图答成「有」，
-  # 断言恒失败，而真实落点其实只在映射目标（真机 2026-11-01 实测：
-  # 场景 29 hot-request / 场景 35 mapped-mediastore-source 物理文件只在映射目标）。
-  # PowerShell 运行器的 Test-PathMissing 一直走 Convert-ToBackendPath，两个运行器
-  # 口径必须一致，否则同一份实现会出现「一边过一边挂」。
-  local backend_path="$path"
-  if [ "${path#"$REAL_ROOT"/}" != "$path" ]; then
-    backend_path="${BACKEND_ROOT}/${path#"$REAL_ROOT"/}"
-  elif [ "$path" = "$REAL_ROOT" ]; then
-    backend_path="$BACKEND_ROOT"
-  fi
-  if adb_su "test ! -e '$backend_path' && test ! -L '$backend_path'"; then
+  local backend_path
+  backend_path="$(backend_storage_path "$path")"
+  if adb_su "set -- unexpected_path '$backend_path'; ${PUBLIC_FIXTURE_CHECK:?}"; then
     echo "file_absent label=${label} path=${path} backend=${backend_path}"
     return 0
   fi
-  echo "file_unexpected label=${label} path=${path} backend=${backend_path}"
-  adb_su "ls -ld '$backend_path' 2>/dev/null || true" || true
+  echo "absence_check_failed label=${label} path=${path} backend=${backend_path}"
   return 1
 }
 # 自有包名私有目录的真实落点随 Android 版本不同：app-specific 存储在部分版本是独立卷
@@ -2388,7 +2329,7 @@ check_own_private_real_landing() {
 require_own_private_system_view_identity() {
   local label="$1" visible_path="$2" created_file="$3"
   local app_pid app_dev system_dev backend_dev mode perm
-  app_pid="$(adb shell pidof "$APP_ID" 2>/dev/null | tr -d '\r' | awk '{print $NF}')"
+  app_pid="$(app_pid)"
   if [ -z "$app_pid" ]; then
     echo "own_private_view_identity_failed label=${label} reason=app-process-missing" >&2
     return 1
@@ -2487,7 +2428,7 @@ run_provider_sandbox_scenario() {
   # scoped 会话后原生写入穿透真实存储。
   # 判定标记（拓扑无关，两种服务方式都算通过）：
   #   通过 A（mount 拓扑）：`perf companion mount pkg=... ok=true`（挂载流程成功）
-  #   通过 B（per-caller hook 拓扑）：`hook refresh start profile=system-writer pkg=下载提供器`
+  #   通过 B（per-caller hook 拓扑）：`hook install done profile=system-writer pkg=下载提供器`
   #     —— 下载提供器纳入 system-writer 后，冷启动即装 full writer hook 集
   #     （stat/realpath/mkdir 等），pre 阶段直接走 `writer skip companion mount`，
   #     不再发挂载请求，原生写入的沙盒重定向由进程内 per-caller hook 兜底。
@@ -2506,7 +2447,7 @@ run_provider_sandbox_scenario() {
   while [ "$attempt" -le 4 ]; do
     sleep 5
     if adb_su "grep -Eq 'perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true' '$LOG_PATH'" ||
-      adb_su "grep -Eq 'hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ' '$LOG_PATH'"; then
+      adb_su "grep -Eq 'hook install done profile=system-writer pkg=${PROVIDER_PACKAGE}([[:space:]]|$)' '$LOG_PATH'"; then
       assertions_ok=1
       break
     fi
@@ -2525,12 +2466,27 @@ run_provider_sandbox_scenario() {
     return 1
   fi
   echo "step 5/7 内: 提供器沙盒策略标记确认"
-  adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}|hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ' '$LOG_PATH' 2>/dev/null | tail -3" || true
+  adb_su "grep -hE 'perf companion mount pkg=${PROVIDER_PACKAGE}|hook install done profile=system-writer pkg=${PROVIDER_PACKAGE}([[:space:]]|$)' '$LOG_PATH' 2>/dev/null | tail -3" || true
   return 0
 }
 
 set_download_test_network() {
   adb_su_timeout 60 "printf %s '$SRT_DOWNLOAD_NETWORK_HELPER' | base64 -d | sh -s -- '$1'"
+}
+
+wait_download_provider_ready() {
+  local attempt=1 reply
+  while [ "$attempt" -le 6 ]; do
+    if reply=$(adb_su_timeout 12 "content query --uri content://downloads/my_downloads --projection _id --where _id=-1" 2>&1) && [ "$reply" = 'No result found.' ]; then
+      echo "download_provider_ready attempt=$attempt"
+      return 0
+    fi
+    echo "download_provider_not_ready attempt=$attempt reply=$reply" >&2
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  echo "下载提供器在 84 秒内未能响应 content query" >&2
+  return 1
 }
 
 run_download_owner_attribution_scenario() {
@@ -2548,26 +2504,19 @@ run_download_owner_attribution_scenario() {
   #   重启。与场景 38 同款前置：force-stop 后 root query 冷启动提供器并等待
   #   进程就绪，保证下载发生在新鲜的 FUSE 视图上。
   echo "step 5/7 内: 冷启动下载提供器（刷新 FUSE 视图）"
-  adb_su "am force-stop '${PROVIDER_PACKAGE}'; sleep 2; content query --uri content://downloads/my_downloads --projection _id >/dev/null 2>&1 || true" >/dev/null
-  local provider_wait=1
-  while [ "$provider_wait" -le 8 ]; do
-    sleep 2
-    if adb_su "pidof '${PROVIDER_PACKAGE}' >/dev/null 2>&1"; then
-      break
-    fi
-    provider_wait=$((provider_wait + 1))
-  done
-  sleep 3
+  adb_su "am force-stop '${PROVIDER_PACKAGE}'" >/dev/null
+  sleep 2
+  wait_download_provider_ready || return 1
   # 取数源：模拟器对多数外部 CDN 不可达（下载会暂停等待网络），用 runner 侧
-  # 本地 HTTP 服务 + 模拟器内建路由 10.0.2.2 直达宿主（不依赖 adb reverse，
-  # 规避 reverse 时序风险与 localhost 目标的特殊语义）。真机不依赖本地服务：
+  # 本地 HTTP 服务和模拟器路由。API 37+ 使用动态 adb reverse 回环端口，较旧版本
+  # 通过 10.0.2.2 访问宿主。真机不依赖本地服务：
   # reverse 形态在部分宿主上不稳定（服务端零请求、引擎报 590），回退为不传
   # url，由测试 APK 使用内置的外部默认取数源；显式设置了 SRT_DOWNLOAD_URL
   # 时仍优先使用（真机/本地复现可自行指定）。http 目标要求发起入队应用允许
   # 明文流量（AOSP DownloadThread 对 cleartext 拒绝抛 STATUS_BAD_REQUEST=400，
   # R6 五版本矩阵 A14/15/16 一致复现），测试 APK 清单已声明
   # usesCleartextTraffic。
-  local dl_port=18089
+  local dl_port=""
   local dl_url="$SRT_DOWNLOAD_URL"
   local dl_server_pid=""
   local dl_server_log=""
@@ -2585,22 +2534,31 @@ run_download_owner_attribution_scenario() {
   fi
   if [ -z "$dl_url" ] && [ "$device_is_emulator" -eq 1 ]; then
     dl_dir="$(mktemp -d /tmp/srt-dl-server.XXXXXX)"
-    echo "srt-download-probe" > "$dl_dir/srt_download.bin"
-    dl_server_log="$dl_dir/http-server.log"
+    printf '%s\n' "srt-download-probe:${dl_dir##*/}" > "$dl_dir/srt_download.bin"
+    dl_server_log="$SRT_ARTIFACT_DIR/scenario-$scenario-http.log"
+    local server_script
+    server_script="$(cd "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")" && pwd)/download-fixture-server.py" || return 1
+    if command -v cygpath >/dev/null 2>&1; then server_script=$(cygpath -aw "$server_script") || return 1; fi
     # 使用 exec 让后台 PID 指向服务进程，便于清理监听进程。
-    (cd "$dl_dir" && exec python3 -m http.server "$dl_port" --bind 0.0.0.0 </dev/null >"$dl_server_log" 2>&1) &
+    (cd "$dl_dir" && exec "$SRT_HOST_PYTHON" "$server_script") </dev/null >"$dl_dir/port" 2>"$dl_server_log" &
     dl_server_pid=$!
     # EXIT 在函数局部变量失效后执行，因此清理句柄存入全局变量。
     SRT_DL_SERVER_PID="$dl_server_pid"
     SRT_DL_TMP_DIR="$dl_dir"
-    sleep 1
-    if ! kill -0 "$dl_server_pid" 2>/dev/null; then
+    local attempt
+    for attempt in {1..100}; do
+      if [ -s "$dl_dir/port" ] && IFS= read -r dl_port < "$dl_dir/port"; then break; fi
+      kill -0 "$dl_server_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    dl_port=${dl_port%$'\r'}
+    if ! [[ $dl_port =~ ^[1-9][0-9]{0,4}$ ]] || (( dl_port > 65535 )); then
       echo "下载探测服务启动失败" >&2
       return 1
     fi
     # API 37+ 模拟器通过 adb reverse 使用回环地址；旧版模拟器使用 10.0.2.2。
     if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null; then
-      if ! timeout 15 adb reverse "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1; then
+      if ! timeout 15 adb reverse --no-rebind "tcp:$dl_port" "tcp:$dl_port" >/dev/null 2>&1; then
         echo "无法建立下载探测 adb reverse 映射" >&2
         return 1
       fi
@@ -2692,6 +2650,7 @@ run_download_owner_attribution_scenario() {
     # 下载器内部状态（status/reason 之外的 mRetries/mError 等）：区分「网络判定
     # 中断」与「响应处理失败」需要下载器侧细节（2026-10-25 CI A14：服务端 200
     # 已到达但 status=4 WAITING_FOR_NETWORK，矛盾需内部状态裁决）。
+    timeout 15 adb shell dumpsys jobscheduler com.android.providers.downloads > "$SRT_ARTIFACT_DIR/scenario-$scenario-download-jobs.txt" || true
     echo "---- dumpsys downloads（失败诊断） ----" >&2
     adb shell dumpsys downloads 2>/dev/null | grep -aE "DOWNLOAD|status|reason|mRetries|num_failed|uri|title|_id=" | head -40 || true
     echo "---- dumpsys connectivity（默认网络能力与验证状态） ----" >&2
@@ -2706,7 +2665,7 @@ run_download_owner_attribution_scenario() {
     # running.log 会按大小轮转成 running.log.1（本地实测 514 行 : 17709 行），
     # 单个场景内一旦轮转，早先的 hook 安装记录就落到 .1 里。上一轮 CI 的
     # `---hook_registered---` 全空正是这么来的——不是 hook 没装，是搜错了文件。
-    adb_su "{ echo global_config=; cat '$GLOBAL_CONFIG' 2>/dev/null; echo; echo debug_lines=\$(cat '$LOG_DIR'/running.log* 2>/dev/null | grep -ac 'RsDebug' || echo 0); echo warn_lines=\$(cat '$LOG_DIR'/running.log* 2>/dev/null | grep -ac 'RsWarn' || echo 0); echo ---hook_registered---; grep -aE 'hook registered profile|optional hooks unavailable|hook refresh start' '$LOG_DIR'/running.log* 2>/dev/null | tail -8; echo ---media_hook_state---; ls -la '$LOG_DIR'/.media_hook_install_state 2>/dev/null || echo state_absent; cat '$LOG_DIR'/.media_hook_install_state 2>/dev/null; }" >&2 || true
+    adb_su "{ echo global_config=; cat '$GLOBAL_CONFIG' 2>/dev/null; echo; echo debug_lines=\$(cat '$LOG_DIR'/running.log* 2>/dev/null | grep -ac 'RsDebug' || echo 0); echo warn_lines=\$(cat '$LOG_DIR'/running.log* 2>/dev/null | grep -ac 'RsWarn' || echo 0); echo ---hook_registered---; grep -aE 'hook registered profile|optional hooks unavailable|hook install done' '$LOG_DIR'/running.log* 2>/dev/null | tail -8; echo ---media_hook_state---; ls -la '$LOG_DIR'/.media_hook_install_state 2>/dev/null || echo state_absent; cat '$LOG_DIR'/.media_hook_install_state 2>/dev/null; }" >&2 || true
     # 进程注入状态：run 40291854472 的 CI 里本场景只留下 1 条 req map，没有任何
     # mkdir/redirect 决策记录，而本地同一操作有 writer: caller map、query fallback、
     # realpath mapped 一串。两种原因在日志上完全同形——进程压根没加载模块，或日志被
@@ -2758,7 +2717,11 @@ run_download_owner_attribution_scenario() {
     timeout 15 adb shell "dumpsys package com.android.providers.downloads 2>/dev/null | grep -aiE 'WRITE_EXTERNAL|READ_EXTERNAL|legacy|installed=true' | head -10" >&2 || true
   fi
   if [ -n "$dl_server_pid" ]; then
+    local expected_digest
+    expected_digest=$(sha256sum "$dl_dir/srt_download.bin") || return 1
+    expected_digest=${expected_digest%% *}
     kill "$dl_server_pid" 2>/dev/null || true
+    wait "$dl_server_pid" 2>/dev/null || true
     SRT_DL_SERVER_PID=""
     rm -rf "$dl_dir" 2>/dev/null || true
     SRT_DL_TMP_DIR=""
@@ -2775,6 +2738,14 @@ run_download_owner_attribution_scenario() {
     echo "download owner attribution: file missing in mapped target ${DL_OWNER_MAPPED_REL}" >&2
     adb_su "ls -la '${BACKEND_ROOT}/${DL_OWNER_REQUEST_REL}' '${BACKEND_ROOT}/${DL_OWNER_MAPPED_REL}'" || true
     return 1
+  fi
+  if [ -n "${expected_digest:-}" ]; then
+    local digest
+    digest=$(adb_su "sha256sum '$DL_OWNER_MAPPED_BACKEND_FILE'" | tr -d '\r') || return 1
+    if [ "${digest%% *}" != "$expected_digest" ]; then
+      echo "下载映射目标内容不符 expected=$expected_digest actual=${digest%% *}" >&2
+      return 1
+    fi
   fi
   if adb_su "test -e '$DL_OWNER_REQUEST_BACKEND_FILE'"; then
     echo "download owner attribution: request path leaked to real storage" >&2
@@ -2885,24 +2856,18 @@ run_shell_executor_boundary_scenario() {
   done
   adb shell "rm -rf '/storage/emulated/0/${SHELL_SANDBOX_REL}'" >/dev/null 2>&1 || status=1
   adb_su "rm -rf '${SHELL_SANDBOX_REAL_DIR}' '${SHELL_SANDBOX_BACKEND_DIR}'" >/dev/null 2>&1 || true
-  restore_shell_config
+  restore_shell_config || status=1
   return "$status"
 }
 
 backup_shell_config() {
-  # 真机上 shell 可能本就有用户配置，场景结束必须原样还原（同场景 38 的教训）。
-  if adb_su "test -f '$SHELL_CONFIG'" >/dev/null 2>&1; then
-    original_shell_config_b64="$(adb_su "base64 '$SHELL_CONFIG' 2>/dev/null | tr -d '[:space:]'")"
-  else
-    original_shell_config_b64=""
-  fi
+  original_shell_config="$(read_config_backup "$SHELL_CONFIG")"
 }
 
 restore_shell_config() {
-  if [ -n "${original_shell_config_b64:-}" ]; then
-    adb_root "printf '%s' '$original_shell_config_b64' | base64 -d > '$SHELL_CONFIG.tmp.$$'; mv -f '$SHELL_CONFIG.tmp.$$' '$SHELL_CONFIG'; chmod 644 '$SHELL_CONFIG'" >/dev/null 2>&1 || true
-  else
-    adb_su "rm -f '$SHELL_CONFIG'" >/dev/null 2>&1 || true
+  if [ -n "${original_shell_config:-}" ]; then
+    restore_config_backup "$SHELL_CONFIG" "$original_shell_config" || return 1
+    original_shell_config=""
   fi
 }
 
@@ -2955,7 +2920,6 @@ run_app_caller_media_provider_attribution_scenario() {
   fi
   echo "step 5/7 内: 应用发起 MP 中转创建归因确认"
   adb_su "grep -F -- '$file_name' '$FILE_MONITOR_LOG_PATH' 2>/dev/null | grep -E -- '${mp_proc_re}${APP_ID}\|' | tail -2" || true
-  adb_su "rm -f '${BACKEND_ROOT}/Download/$file_name' '${BACKEND_ROOT}/Download/'.pending-*-$file_name" >/dev/null
   return 0
 }
 
@@ -3058,8 +3022,7 @@ prepare_read_only_media_image() {
   local backend_dir="$BACKEND_ROOT/Pictures/SrtReadOnlyMedia"
   local backend_path="$backend_dir/$READ_ONLY_IMAGE_FILE"
   local logical_path="$READ_ONLY_MEDIA_ROOT/$READ_ONLY_IMAGE_FILE"
-  remove_mediastore_rows_by_pattern "content://media/external/images/media" '_display_name=srt_read_only_media( \([0-9]+\))?\.jpg(,|$)' 'relative_path=Pictures/SrtReadOnlyMedia/|_data=.*/Pictures/SrtReadOnlyMedia/'
-  remove_mediastore_rows_by_pattern "content://media/external/file" '_display_name=SrtReadOnlyMedia( \([0-9]+\))?(,|$)' '_data=.*/Pictures/SrtReadOnlyMedia(,|$)'
+  read_only_media_rows clean || return 1
   adb_su "mkdir -p '$backend_dir'; rm -f '$BACKEND_PRIVATE_ROOT/Pictures/SrtReadOnlyMedia/$READ_ONLY_IMAGE_FILE'; printf '%s' '$READ_ONLY_IMAGE_B64' | base64 -d > '$backend_path'; chmod -R 777 '$backend_dir' 2>/dev/null || true" >/dev/null
   adb shell content insert --uri content://media/external/images/media --bind _data:s:"$logical_path" --bind _display_name:s:"$READ_ONLY_IMAGE_FILE" --bind mime_type:s:image/jpeg >/dev/null 2>&1 || true
   adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d "file://${logical_path}" >/dev/null 2>&1 || true
@@ -3634,9 +3597,18 @@ run_file_monitor_mediastore_success_case() {
   file_name="$(monitor_file_name "$scenario" "$label")"
 
   prepare_file_monitor_assertion "$scenario" "$label" || return 1
-  run_mediastore_download_create_case "$scenario" "$label" "$file_name" "$relative_path" &&
-    check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" &&
-    { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
+  run_mediastore_download_create_case "$scenario" "$label" "$file_name" "$relative_path" || return 1
+  check_file_exists "scenario-${scenario}-${label}-expected" "$expected_path/$file_name" || {
+    local status=$? uri args
+    uri=$(sed -nE 's#^PASS \[mediastore_create_download\] .* uri=(content://media/external/(file|downloads)/[0-9]+),.*#\1#p' "$SRT_ARTIFACT_DIR/scenario-$scenario-$label-result.txt")
+    printf -v args " '%s'" "${APP_ID//\'/\'\\\'\'}" "$file_name" "$relative_path" "${expected_path#"$REAL_ROOT"/}" "$uri"
+    { echo "placement_exit=$status provider_pid=$(media_provider_pid)"; adb_su_timeout 25 "set --$args
+$(cat "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/capture-monitor-placement.sh")"; } > "$SRT_ARTIFACT_DIR/scenario-$scenario-$label-placement.txt" 2>&1 || :
+    # Android 17 仅保留步骤日志；输出本次失败的落点取证。
+    cat "$SRT_ARTIFACT_DIR/scenario-$scenario-$label-placement.txt" >&2 || :
+    return "$status"
+  }
+  { [ -z "$private_path" ] || check_file_missing "scenario-${scenario}-${label}-private" "$private_path/$file_name"; } &&
     { [ "$require_monitor_record" != "1" ] || expect_file_monitor_success_record "$scenario" "$label" "$file_name"; } &&
     { [ "$require_monitor_record" = "1" ] || echo "monitor_success_record_skipped scenario=${scenario} label=${label} file=${file_name} reason=${monitor_skip_reason}"; }
 }
@@ -3840,18 +3812,8 @@ app_view_dev_differs() {
 }
 
 app_pid() {
-  # 同包的旧进程可能在 force-stop 后短暂残留，跨行取最高 PID 对应刚启动的主进程。
-  local pid
-  pid="$(adb shell "pidof '$APP_ID' 2>/dev/null | awk '{for (i=1; i<=NF; i++) if (\$i+0 > max) max=\$i} END {if (max != \"\") print max}'" |
-    tr -d '\r' | awk 'NF {print; exit}')"
-  if [ -n "$pid" ]; then
-    printf '%s\n' "$pid"
-    return 0
-  fi
-  # Android 17 上应用进程名仍受 comm 的 15 字符限制，长包名会被截断，pidof 无法再
-  # 按完整包名匹配；这里退回遍历 /proc 的完整命令行首参，避免误判为进程不存在。
-  adb shell "for p in /proc/[0-9]*; do c=\$(cat \"\$p/cmdline\" 2>/dev/null | tr '\\0' '\\n' | head -1); case \"\$c\" in '$APP_ID'|'$APP_ID':*) echo \"\${p#/proc/}\";; esac; done" |
-    tr -d '\r' | sort -n | tail -1
+  adb_su "package='$APP_ID'
+$SRT_TEST_APP_PID_COMMAND"
 }
 
 wait_app_process_stopped() {
@@ -4133,7 +4095,7 @@ run_backend_endpoint_recovery_scenario() {
 }
 
 run_quick_media_provider_restart_recovery_scenario() {
-  local scenario="$1" initial_pid current_media_pid initial_media_pid
+  local scenario="$1" initial_pid current_media_pid initial_media_pid receipt remount_exit=0
 
   ensure_media_provider_hook_ready "scenario-${scenario}-before" || return 1
   if [ -z "$(app_pid)" ]; then
@@ -4151,8 +4113,11 @@ run_quick_media_provider_restart_recovery_scenario() {
     return 1
   fi
 
-  adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl remount-running" || return 1
-  adb_su "grep -F 'running app remount completed request=' '$LOG_PATH' | tail -1 | grep -F 'request=' >/dev/null" || {
+  receipt=$(adb_su "/data/adb/modules/storage.redirect.x/bin/srxctl remount-running") || remount_exit=$?
+  printf '  - remount-running exit=%s %s\n' "$remount_exit" "$receipt"
+  [ "$remount_exit" -eq 0 ] || return 1
+  [[ "$receipt" =~ ^"running app remount completed request="[0-9]+-[0-9]+$ ]] &&
+    adb_su "grep -F '$receipt applied=' '$LOG_PATH'" || {
     echo "quick_restart_remount_completion_missing scenario=${scenario}" >&2
     return 1
   }
@@ -4209,7 +4174,7 @@ check_health() {
 #
 # 与 `srxctl diagnostic-archive` 的分工：那份是面向用户的完整支持包（打包日志、配置、
 # 每个进程的完整 status/fd/task 快照，体积与时延都大，由用户按需触发）；这里要的是
-# **失败瞬间、几十秒内、只读**的定向取证，能挂在场景失败路径上自动执行。两者取的交集
+# **失败瞬间、几十秒内、不修改存储状态**的定向取证，能挂在场景失败路径上自动执行。两者取的交集
 # 只是 mountinfo，其余各自服务不同读者。
 capture_storage_bad_state_snapshot() {
   local label="$1"
@@ -4217,6 +4182,9 @@ capture_storage_bad_state_snapshot() {
   : >"$out" || return 1
   {
     echo "=== device storage bad state snapshot label=${label} ==="
+    echo "--- MediaProvider 原生线程栈 ---"
+    adb_su "for pkg in com.google.android.providers.media.module com.android.providers.media.module com.android.providers.media; do for pid in \$(pidof \"\$pkg\" 2>/dev/null); do echo \"pkg=\$pkg pid=\$pid\"; timeout 6 debuggerd -b \"\$pid\" 2>&1 || true; done; done" 2>&1 | tr -d '\r' || true
+    echo
     echo "--- shell 与 root 的基线访问 ---"
     echo "shell_probe=$(adb shell "ls ${REAL_ROOT}/Download >/dev/null 2>&1 && echo ok || echo denied" 2>/dev/null | tr -d '\r' || true)"
     echo "root_probe=$(adb_su "ls ${REAL_ROOT}/Download >/dev/null 2>&1 && echo ok || echo denied" 2>/dev/null | tr -d '\r' || true)"
@@ -4289,7 +4257,7 @@ capture_read_only_diagnostics() {
   echo "---visible_and_backend_labels---"
   adb_su "for path in '${READ_ONLY_MEDIA_ROOT}' '${READ_ONLY_ROOT}' '${BACKEND_ROOT}/Pictures/SrtReadOnlyMedia' '${BACKEND_ROOT}/Download/SrtReadOnly'; do ls -ladZ \"\$path\" 2>&1 || true; done"
   echo "---app_mount_entries---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'SrtReadOnly|SrtMountNsReadOnly|storage.redirect' /proc/\$pid/mountinfo 2>/dev/null || echo no_matching_mount_entry; else echo app_not_running; fi"
+  adb_su "pid='$(app_pid)'; echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'SrtReadOnly|SrtMountNsReadOnly|storage.redirect' /proc/\$pid/mountinfo 2>/dev/null || echo no_matching_mount_entry; else echo app_not_running; fi"
   echo "---scoped_fuse_plan---"
   adb_su "grep -aE 'scoped roots|scoped fuse|fuse session|backend_effective' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -30 || true"
   echo "---avc_denials---"
@@ -4310,7 +4278,7 @@ capture_own_private_diagnostics() {
   echo "---mount_identity---"
   adb_su "for path in '${REAL_ROOT}/Android/data' '${REAL_ROOT}/Android/obb' '${REAL_ROOT}/Android/media' '${BACKEND_ROOT}/Android/data'; do printf '%s dev=' \"\$path\"; stat -c '%D' \"\$path\" 2>&1 || true; grep -aF \" \$path \" /proc/self/mountinfo 2>/dev/null | head -3 || true; done"
   echo "---app_mount_entries---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'Android/(data|media|obb)|/storage/emulated/0 ' /proc/\$pid/mountinfo 2>/dev/null | tail -40 || echo no_matching_mount_entry; else echo app_not_running; fi"
+  adb_su "pid='$(app_pid)'; echo app_pid=\$pid; if [ -n \"\$pid\" ]; then grep -aE 'Android/(data|media|obb)|/storage/emulated/0 ' /proc/\$pid/mountinfo 2>/dev/null | tail -40 || echo no_matching_mount_entry; else echo app_not_running; fi"
   # 映射落点与挂载可达性。场景 35 的失败形态是「写入返回成功、后端没有文件」，
   # 而上面的采集只到包名根目录这一层：既看不到映射目标子目录里的真实内容，
   # 也看不到承载私有映射的那层父挂载。这里补三件事——
@@ -4323,7 +4291,7 @@ capture_own_private_diagnostics() {
   echo "---path_mapping_targets---"
   adb_su "for path in '${ANY_LEGACY_DATA_REQUEST}' '/data/user/0/${APP_ID}/code_cache' '/data/user/0/${APP_ID}/cache' '/data/user/0/${APP_ID}/files' '${ANY_LEGACY_PRIVATE_TARGET}' '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' '${BACKEND_ROOT}/Android/data/${APP_ID}/cache'; do printf '%s ' \"\$path\"; stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; ls -la \"\$path\" 2>&1 | head -12; echo; done"
   echo "---app_mountinfo_full---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/mountinfo 2>/dev/null; else echo app_not_running; fi"
+  adb_su "pid='$(app_pid)'; echo app_pid=\$pid; if [ -n \"\$pid\" ]; then cat /proc/\$pid/mountinfo 2>/dev/null; else echo app_not_running; fi"
   # 应用命名空间内的真实视图与一次性写探针。
   #
   # 必须用 `nsenter -m` 而不是 `/proc/<pid>/root`：后者只保证起点是目标进程的根，
@@ -4335,9 +4303,9 @@ capture_own_private_diagnostics() {
   #       直接区分「bind 已生效」与「bind 尚未落到这条路径」。
   #   (2) 从应用视图写一个探针文件，再回到 root 命名空间看它落在后端还是下层目录。
   echo "---app_namespace_view---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then for path in '/data/data/${APP_ID}/code_cache' '/data/data/${APP_ID}/cache' '/data/data/${APP_ID}/files' '/storage/emulated/0/Android/media/${APP_ID}/cache'; do printf 'NSENTER %s ' \"\$path\"; nsenter -t \"\$pid\" -m -- stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; nsenter -t \"\$pid\" -m -- ls -la \"\$path\" 2>&1 | head -8; echo; done; else echo app_not_running; fi"
+  adb_su "pid='$(app_pid)'; echo app_pid=\$pid; if [ -n \"\$pid\" ]; then for path in '/data/data/${APP_ID}/code_cache' '/data/data/${APP_ID}/cache' '/data/data/${APP_ID}/files' '/storage/emulated/0/Android/media/${APP_ID}/cache'; do printf 'NSENTER %s ' \"\$path\"; nsenter -t \"\$pid\" -m -- stat -c 'dev=%D ino=%i uid=%u gid=%g mode=%a' \"\$path\" 2>&1 || true; nsenter -t \"\$pid\" -m -- ls -la \"\$path\" 2>&1 | head -8; echo; done; else echo app_not_running; fi"
   echo "---app_view_write_probe---"
-  adb_su "pid=\$(pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'); echo app_pid=\$pid; if [ -n \"\$pid\" ]; then if nsenter -t \"\$pid\" -m -- sh -c 'printf probe > /data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null; then echo probe_written; else echo probe_write_failed; fi; nsenter -t \"\$pid\" -m -- stat -c 'probe dev=%D ino=%i uid=%u gid=%g size=%s' '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>&1 || true; echo '--- backend media cache after probe ---'; ls -la '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' 2>&1 | head -8; echo '--- underlying code_cache after probe ---'; ls -la '/data/user/0/${APP_ID}/code_cache' 2>&1 | head -8; nsenter -t \"\$pid\" -m -- rm -f '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null || true; else echo app_not_running; fi"
+  adb_su "pid='$(app_pid)'; echo app_pid=\$pid; if [ -n \"\$pid\" ]; then if nsenter -t \"\$pid\" -m -- sh -c 'printf probe > /data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null; then echo probe_written; else echo probe_write_failed; fi; nsenter -t \"\$pid\" -m -- stat -c 'probe dev=%D ino=%i uid=%u gid=%g size=%s' '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>&1 || true; echo '--- backend media cache after probe ---'; ls -la '${BACKEND_ROOT}/Android/media/${APP_ID}/cache' 2>&1 | head -8; echo '--- underlying code_cache after probe ---'; ls -la '/data/user/0/${APP_ID}/code_cache' 2>&1 | head -8; nsenter -t \"\$pid\" -m -- rm -f '/data/data/${APP_ID}/code_cache/srt_diag_probe.txt' 2>/dev/null || true; else echo app_not_running; fi"
   echo "---daemon_own_private_log---"
   adb_su "grep -aE 'own private|scoped fuse|anchor|backend_effective|companion mount' /data/adb/modules/storage.redirect.x/logs/running.log 2>/dev/null | tail -60 || true"
   echo
@@ -4659,6 +4627,20 @@ run_file_mutation_metadata_scenario() {
   done
 }
 
+check_published_media_read() {
+  local scenario="$1" label="$2" path="$3" uri scan payload='storage-redirect-test:FILE:initial'
+  uri=$(sed -nE 's#^PASS \[mediastore_create_file\] .* uri=(content://media/[^/,[:space:]]+/file/[0-9]+),.*#\1#p' "$SRT_ARTIFACT_DIR/scenario-$scenario-$label-result.txt") || return 1
+  if [ -z "$uri" ]; then
+    echo "scenario-$scenario/$label missing created file URI" >&2
+    return 1
+  fi
+  run_service_case "$scenario" "$label-readback" mediastore_read_file '^PASS \[mediastore_read_file\]' --es media_uri "$uri" --es expected_payload "$payload" --es length "${#payload}" || return 1
+  scan=$(timeout 60 adb shell content call --user 0 --uri content://media --method scan_file --arg "$path") || return 1
+  printf '%s\n' "$scan" > "$SRT_ARTIFACT_DIR/scenario-$scenario-$label-scan.txt"
+  [[ "$scan" == *'android.intent.extra.STREAM='* && "$scan" != *'android.intent.extra.STREAM=null'* ]] || return 1
+  run_service_case "$scenario" "$label-after-scan" mediastore_read_file '^PASS \[mediastore_read_file\]' --es media_uri "$uri" --es expected_payload "$payload" --es length "${#payload}"
+}
+
 run_standard_scenario() {
   local scenario="$1"
   echo "step 5/7: 从应用进程写入文件"
@@ -4676,6 +4658,7 @@ run_standard_scenario() {
   if [ "$scenario" = "2" ]; then
     local media_file="srt_mediastore_sandbox_only.txt"
     ensure_media_provider_hook_ready "scenario-${scenario}-before-mediastore" || return 1
+    check_file_missing "scenario-${scenario}-mediastore-public-parent-before" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe" || return 1
     # run_service_case 完成后立即采集 MediaProvider hook 状态（无论成功失败均采集），
     # 此时 logcat buffer 仍包含本次 insert 的 SRX 回调日志。
     # capture_scenario2_mediastore_hook_diag 写入独立 artifact，不影响断言链。
@@ -4684,10 +4667,26 @@ run_standard_scenario() {
       return 1
     }
     capture_scenario2_mediastore_hook_diag
-    check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
-      check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" &&
-      check_file_missing "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe" &&
-      check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || return 1
+    local placement_status=0
+    check_file_exists "scenario-${scenario}-mediastore-sandbox-file" "${PRIVATE_MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" || placement_status=1
+    check_file_missing "scenario-${scenario}-mediastore-public-file" "${MEDIASTORE_ROUTING_PROBE_ROOT}/${media_file}" || placement_status=1
+    check_file_missing "scenario-${scenario}-mediastore-public-parent" "${BACKEND_ROOT}/Documents/SrtMediaRoutingProbe" || placement_status=1
+    check_public_directory_owner "scenario-${scenario}-android" "${BACKEND_ROOT}/Android" || placement_status=1
+    check_published_media_read "$scenario" mediastore-sandbox-only "$REAL_ROOT/Documents/SrtMediaRoutingProbe/$media_file" || placement_status=1
+    local existing_relative="Documents/SrtMediaExistingProbe"
+    local public_parent="$BACKEND_ROOT/$existing_relative" identity preserved_file="srt_mediastore_preserved_parent.txt"
+    identity=$(adb_su "mkdir '$public_parent' && stat -c '%d:%i:%f:%u:%g' '$public_parent'") || return 1
+    [[ $identity =~ ^[0-9]+:[0-9]+:[0-9a-fA-F]+:[0-9]+:[0-9]+$ ]] || return 1
+    run_service_case "$scenario" "mediastore-existing-parent" "mediastore_create_file" '^PASS \[mediastore_create_file\]' --es file_name "$preserved_file" --es relative_path "$existing_relative" || return 1
+    check_file_exists "scenario-${scenario}-mediastore-existing-parent-sandbox-file" "$PRIVATE_ROOT/$existing_relative/$preserved_file" || return 1
+    adb_su "test \"\$(stat -c '%d:%i:%f:%u:%g' '$public_parent')\" = '$identity' && children=\$(ls -A '$public_parent') && test -z \"\$children\"" || {
+      echo "scenario-${scenario}/mediastore-existing-parent changed or populated: $public_parent" >&2
+      return 1
+    }
+    adb_su "set -C; printf fixture > '$public_parent/$preserved_file'" || return 1
+    check_published_media_read "$scenario" mediastore-existing-parent "$REAL_ROOT/$existing_relative" || placement_status=1
+    adb_su "test \"\$(stat -c '%d:%i:%f:%u:%g' '$public_parent')\" = '$identity' && test \"\$(stat -c %s '$public_parent/$preserved_file')\" = 7 && test \"\$(cat '$public_parent/$preserved_file')\" = fixture && rm '$public_parent/$preserved_file'" || return 1
+    return "$placement_status"
   fi
   if [ "$scenario" = "5" ]; then
     check_public_directory_owner "scenario-${scenario}-download" "${BACKEND_ROOT}/Download" || return 1
@@ -4809,7 +4808,9 @@ run_any_path_mapping_scenario() {
   local legacy_file="${ANY_LEGACY_DATA_REQUEST}/srt_any_legacy.txt"
   local public_private_file="${ANY_PUBLIC_TO_PRIVATE_REQUEST}/srt_any_public_private.txt"
 
-  run_write_case "$scenario" "relative-android-data-to-public" "$relative_file" "$PAYLOAD" &&
+  check_file_missing "scenario-${scenario}-public-private-dir-before" "$ANY_PUBLIC_TO_PRIVATE_REQUEST" &&
+    check_file_missing "scenario-${scenario}-media-request-dir-before" "$ANY_MEDIA_REQUEST" &&
+    run_write_case "$scenario" "relative-android-data-to-public" "$relative_file" "$PAYLOAD" &&
     check_file_exists "scenario-${scenario}-relative-public" "${ANY_RELATIVE_PUBLIC_TARGET}/srt_any_relative.txt" &&
     check_file_missing "scenario-${scenario}-relative-source" "${BACKEND_ROOT}/Android/data/${APP_ID}/srt_any_relative/srt_any_relative.txt" &&
     run_write_case "$scenario" "absolute-data-user-to-public" "$absolute_file" "$PAYLOAD" &&
@@ -4836,21 +4837,11 @@ run_any_path_mapping_scenario() {
     check_file_missing "scenario-${scenario}-public-private-shadow" "${BACKEND_PRIVATE_ROOT}/Download/SrtAnyPublicToPrivate/srt_any_public_private.txt" &&
     run_mediastore_download_create_case "$scenario" "mapped-mediastore-target" "$ANY_MEDIA_FILE" "Download/SrtAnyMediaRequest" &&
     check_file_exists "scenario-${scenario}-mapped-mediastore-target" "${ANY_MEDIA_TARGET}/${ANY_MEDIA_FILE}" &&
-    check_file_missing "scenario-${scenario}-mapped-mediastore-source" "${ANY_MEDIA_REQUEST}/${ANY_MEDIA_FILE}"
+    check_file_missing "scenario-${scenario}-mapped-mediastore-source" "${ANY_MEDIA_REQUEST}/${ANY_MEDIA_FILE}" &&
+    check_file_missing "scenario-${scenario}-public-private-dir-after" "$ANY_PUBLIC_TO_PRIVATE_REQUEST" &&
+    check_file_missing "scenario-${scenario}-media-request-dir-after" "$ANY_MEDIA_REQUEST"
 }
 
-clear_alias_mediastore_fixture() {
-  # 与 PowerShell 一致，仅清理固定测试文件在请求、公共别名、目标三个目录的索引。
-  #
-  # 这里**不删物理文件**：用例（mediastore_create_then_file_overwrite）自己就会
-  # 按路径 delete 索引后再 insert 重建，并在写入前清理，删除物理文件既不必要，
-  # 还会让「目标目录里到底有没有文件」这一失败判据失去观测对象——场景 36
-  # 在 Android 13 上的失败取证正是靠物理文件的实际内容定位的。
-  local escaped_app="${APP_ID//./\\.}"
-  remove_mediastore_rows_by_pattern "content://media/external/file" \
-    '_display_name=(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_qq_alias_existing\.bin(,|$)' \
-    "_data=/storage/emulated/0/(Android/data/${escaped_app}/Tencent/QQfile_recv|Download/QQ|Download/SrtQqAliasMapped)/(\.pending-[0-9]+-|\.trashed-[0-9]+-)?srt_qq_alias_existing\.bin(,|$)"
-}
 
 run_qq_alias_mapped_existing_file_scenario() {
   # 与场景 34/35 同源的平台限制：请求路径落在应用自有的 Android/data/<包名>/… 下，
@@ -4879,7 +4870,6 @@ run_qq_alias_mapped_existing_file_scenario() {
     return 0
   fi
 
-  clear_alias_mediastore_fixture
   local request="${QQ_ALIAS_REQUEST_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
   local target="${QQ_ALIAS_MAPPED_ROOT}/${QQ_ALIAS_MAPPED_FILE}"
   run_service_case "$1" "qq-alias-mediastore-overwrite" "mediastore_create_then_file_overwrite" '^PASS \[mediastore_create_then_file_overwrite\]' --es file_path "$request" --es target_file_path "$target" --es payload append --es expected_payload seedseed &&
@@ -4913,14 +4903,15 @@ run_nested_mapping_chain_scenario() {
 }
 
 run_mediastore_open_typed_collection_scenario() {
-  local scenario="$1"
+  local scenario="$1" media_pid evidence="$SRT_ARTIFACT_DIR/scenario-$1-provider.log"
   wait_media_provider_ready "scenario-${scenario}-typed-collection" 60 || return 1
   ensure_media_provider_hook_ready "scenario-${scenario}-typed-collection" || return 1
   run_service_case "$scenario" "typed-collection" "mediastore_open_typed_collection" '^PASS \[mediastore_open_typed_collection\]' || return 1
-  if ! adb shell logcat -d -s SRX:V 2>/dev/null | grep -q "java open delegate reason=collection_uri_passthrough"; then
-    echo "typed_collection_passthrough_log_missing scenario=${scenario}" >&2
-    return 1
-  fi
+  media_pid="$(media_provider_pid)"
+  [[ "$media_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  adb logcat -d -v threadtime --pid "$media_pid" -s SRX:V > "$evidence" || return 1
+  host_python "$(dirname "$SRT_MEDIA_PROVIDER_PID_SCRIPT")/verify-collection-delegation.py" \
+    "$SRT_ARTIFACT_DIR/scenario-$scenario-typed-collection-result.txt" "$evidence" "$media_pid"
 }
 
 # 仅映射模式自有目录属主漂移契约（2026-10-21 起契约反转）：
@@ -5186,13 +5177,9 @@ run_sandbox_root_metadata_scenario() {
 # 因此先用 `/storage/emulated/0` 的 st_dev 区分：模块会话是独立 FUSE 超级块。
 storage_root_view_snapshot() {
   local pid="$1"
-  adb_su "nsenter -t ${pid} -m -- ls -a '${REAL_ROOT}' 2>/dev/null | sort" || true
+  adb_su "nsenter -t ${pid} -m -- ls -a '${REAL_ROOT}'"
 }
 
-# 当前测试应用主进程 pid（无进程时为空）。场景 43 的断言与等待共用同一取法。
-app_process_pid() {
-  adb_su "pidof '$APP_ID' 2>/dev/null | awk '{print \$1}'" | tr -d '[:space:]'
-}
 
 # 覆盖挂载下的视图一致性：把源目录 bind 到应用私有树里，模块视图必须与系统视图逐项一致。
 #
@@ -5221,7 +5208,7 @@ assert_overlay_backed_view_parity() {
   local view_source_dir="${REAL_ROOT}/Android/data/${APP_ID}/files/SrtOverlaySource"
   local view_parent_dir="${REAL_ROOT}/Android/data/${APP_ID}/files"
   local marker="srt_overlay_backed_marker"
-  pid="$(app_process_pid)"
+  pid="$(app_pid)"
   if [ -z "$pid" ]; then
     echo "FAIL [overlay_view] label=${label} reason=app_not_running" >&2
     return 1
@@ -5293,7 +5280,7 @@ assert_storage_root_view_parity() {
   # 应用侧接管是异步的：等这个进程的视图根切成模块会话（st_dev 与系统视图不同），
   # 不按日志等。等不到就是缺陷本身——未接管时两侧条目天然一致，断言会空转。
   while :; do
-    pid="$(app_process_pid)"
+    pid="$(app_pid)"
     sys_dev="$(adb shell "stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '\r' | tr -d '[:space:]')"
     if [ -n "$pid" ] && [ -n "$sys_dev" ]; then
       app_dev="$(adb_su "nsenter -t ${pid} -m -- stat -c %d '${REAL_ROOT}' 2>/dev/null" | tr -d '[:space:]')"
@@ -5308,9 +5295,8 @@ assert_storage_root_view_parity() {
     fi
     sleep 1
   done
-  app_list="$(storage_root_view_snapshot "$pid")"
-  sys_list="$(adb shell "ls -a '${REAL_ROOT}' 2>/dev/null | sort" | tr -d '\r')"
-  if [ -z "$app_list" ] || [ -z "$sys_list" ]; then
+  if ! app_list="$(storage_root_view_snapshot "$pid")" || ! sys_list="$(adb shell "ls -a '${REAL_ROOT}'")" ||
+     [ -z "$app_list" ] || [ -z "$sys_list" ]; then
     echo "FAIL [root_view] label=${label} reason=listing_unavailable pid=${pid}" >&2
     return 1
   fi
@@ -5339,6 +5325,8 @@ assert_storage_root_view_parity() {
     echo "FAIL [root_view] label=${label} reason=control_dot_entry_missing pid=${pid}" >&2
     return 1
   fi
+  app_list="$(LC_ALL=C sort <<<"$app_list")"
+  sys_list="$(tr -d '\r' <<<"$sys_list" | LC_ALL=C sort)"
   if [ "$app_list" != "$sys_list" ]; then
     echo "FAIL [root_view] label=${label} reason=root_listing_mismatch pid=${pid}" >&2
     diff <(printf '%s\n' "$sys_list") <(printf '%s\n' "$app_list") | sed 's/^/  root_view_diff: /' >&2
@@ -5365,7 +5353,7 @@ assert_disabled_profile_not_captured() {
   local pid sys_dev app_dev list name
   local deadline=$((SECONDS + 15))
   while :; do
-    pid="$(app_process_pid)"
+    pid="$(app_pid)"
     if [ -n "$pid" ]; then
       break
     fi
@@ -5385,7 +5373,10 @@ assert_disabled_profile_not_captured() {
     echo "FAIL [root_view] label=${label} reason=disabled_profile_attached pid=${pid} app_dev=${app_dev} sys_dev=${sys_dev}" >&2
     return 1
   fi
-  list="$(storage_root_view_snapshot "$pid")"
+  if ! list="$(storage_root_view_snapshot "$pid")" || [ -z "$list" ]; then
+    echo "FAIL [root_view] label=${label} reason=listing_unavailable pid=${pid}" >&2
+    return 1
+  fi
   for name in .transforms .picker_transcoded .srx_passthrough_probe; do
     if printf '%s\n' "$list" | grep -qxF -- "$name"; then
       echo "FAIL [root_view] label=${label} reason=root_hidden_name_leaked name=${name} pid=${pid}" >&2
@@ -5425,7 +5416,7 @@ run_monitor_capture_root_view_scenario() {
   local scenario="$1"
   local label="scenario-${scenario}"
   local pid sys_dev app_dev
-  pid="$(app_process_pid)"
+  pid="$(app_pid)"
   if [ -z "$pid" ]; then
     echo "FAIL [root_view] label=${label} reason=app_not_running" >&2
     return 1
@@ -5578,7 +5569,7 @@ run_scenario() {
   wait_storage_ready "scenario-${scenario}"
   # root 侧就绪后还要等应用侧视图跟上：两者是隔离的挂载视图，
   # 只验 root 会让随后的写入/读取撞上「预置路径在应用侧尚未出现」的窗口。
-  wait_scenario_app_view "$scenario"
+  wait_scenario_app_view "$scenario" || return 1
   clean_results
   case "$scenario" in
     6)
@@ -5865,7 +5856,7 @@ finish_test_run() {
   # 即使 CI 跳过产物清理，也必须释放本次持有的锁。
   if [ "$device_run_lock_held" -eq 1 ]; then
     set_download_test_network restore || status=1
-    if [ "$global_config_backup_ready" -eq 1 ] && [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
+    if [ "$config_backups_ready" -eq 1 ] && [ "${SRT_SKIP_FINAL_CLEANUP:-0}" != "1" ]; then
       cleanup_test_artifacts || status=1
     fi
     release_device_run_lock || status=1
@@ -5874,9 +5865,8 @@ finish_test_run() {
 }
 
 cleanup_done=0
-global_config_backup_ready=0
-app_config_backup_ready=0
-cross_app_config_backup_ready=0
+config_backups_ready=0
+declare -A config_backups
 device_execution_state_backup_ready=0
 trap finish_test_run EXIT
 
@@ -5888,6 +5878,9 @@ export ADB_ROOT_MODE
 
 wait_boot_completed
 acquire_device_run_lock
+wait_storage_ready "fixture-preflight" 90
+initialize_public_fixture_paths
+read_only_media_rows check
 # 授权必须落在 root 上下文：CI 的模拟器能 `adb root`，shell 已是 uid 0；零售 ROM 的真机
 # shell 是 uid 2000，直接调用会因缺 GRANT_RUNTIME_PERMISSIONS 报 SecurityException
 # （2026-11-18 真机 duchamp 实测，脚本在此处直接以 255 退出）。两条路径都用同脚本，
@@ -5899,11 +5892,11 @@ else
   adb push "$grant_script" /data/local/tmp/srx-grant-perms.sh >/dev/null
   adb_su "sh /data/local/tmp/srx-grant-perms.sh $APP_ID"
 fi
-backup_global_config
-backup_app_config
-backup_cross_app_config
-backup_provider_config
+for path in "$GLOBAL_CONFIG" "$CONFIG" "$READ_ONLY_OWNER_CONFIG" "$PROVIDER_CONFIG"; do
+  config_backups["$path"]="$(read_config_backup "$path")" || { echo "读取配置备份失败：$path" >&2; exit 1; }
+done
 backup_device_execution_state
+config_backups_ready=1
 prepare_device_execution_state
 fix_private_backend_permissions || true
 echo "场景脚本 preflight：restart_media_provider" >&2
@@ -5934,6 +5927,7 @@ export MONITOR_TRIGGER_CONFIG MONITOR_TRIGGER_PAYLOAD_A MONITOR_TRIGGER_PAYLOAD_
 export PROVIDER_PACKAGE PROVIDER_CONFIG PROVIDER_PROBE_REL PROVIDER_REAL_DIR PROVIDER_BACKEND_DIR
 export DL_OWNER_REQUEST_REL DL_OWNER_MAPPED_REL DL_OWNER_PROBE_FILE DL_OWNER_REQUEST_FILE DL_OWNER_REQUEST_BACKEND_FILE DL_OWNER_MAPPED_BACKEND_FILE SRT_DOWNLOAD_URL SRT_DOWNLOAD_NETWORK_HELPER
 export -f set_download_test_network
+export -f wait_download_provider_ready
 export -f run_file_mutation_lifecycle_scenario
 export -f run_file_link_control
 export -f run_file_mutation_metadata_scenario
@@ -5951,25 +5945,26 @@ export -f fix_shared_fixture_permissions
 export -f fresh_app_enabled_for_label
 export -f app_view_namespace_refresh_allowed
 export -f run_quick_media_provider_restart_recovery_scenario
+export -f check_published_media_read
 export -f prepare_owner_drift_fixture run_owner_drift_own_dir_scenario
 export -f run_own_private_directories_scenario run_own_private_write_case require_own_private_system_view_identity
 export -f run_any_path_mapping_scenario
-export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario
+export -f read_only_media_rows run_qq_alias_mapped_existing_file_scenario
 export -f run_nested_mapping_chain_scenario
 export -f sandbox_root_form check_sandbox_root_metadata check_private_tree_native_metadata run_sandbox_root_metadata_scenario
-export -f storage_root_view_snapshot app_process_pid assert_storage_root_view_parity assert_overlay_backed_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
-export -f run_provider_sandbox_scenario clear_provider_sandbox_config backup_provider_config restore_provider_config
+export -f storage_root_view_snapshot assert_storage_root_view_parity assert_overlay_backed_view_parity prepare_root_view_parity_fixtures run_storage_root_view_parity_scenario run_monitor_capture_root_view_scenario write_monitor_trigger_config clear_monitor_trigger_config assert_disabled_profile_not_captured
+export -f run_provider_sandbox_scenario clear_provider_sandbox_config
 export -f run_download_owner_attribution_scenario
-export -f run_system_uid_attribution_scenario run_shell_executor_boundary_scenario backup_shell_config restore_shell_config cleanup_frozen_daemon
+export -f run_system_uid_attribution_scenario run_shell_executor_boundary_scenario backup_shell_config restore_shell_config read_config_backup restore_config_backup write_encoded_config cleanup_frozen_daemon
 export -f run_app_caller_media_provider_attribution_scenario
 # 视图失效在 clean_targets / 夹具预置里被 `bash -c` 子 shell 调用，必须导出。
 export -f invalidate_visible_view invalidate_backend_fixture_view
 # 设备级坏态取证由失败分支在独立子 shell 里调用，同样必须导出。
 export -f capture_storage_bad_state_snapshot
+export -f backend_storage_path
 
 failure_artifacts_captured=0
 storage_snapshot_captured=0
-rm -f app-view-probe-broken.flag
 for scenario in "${scenarios[@]}"; do
   echo "::group::scenario ${scenario}: $(scenario_title "$scenario")"
   # 这里**不加** `--foreground`：它会让 timeout 不建独立进程组、只终止直接子进程，

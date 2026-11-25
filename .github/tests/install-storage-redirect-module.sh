@@ -4,6 +4,7 @@ set -eu
 # CI 的 A15-A17 统一由 KernelSU-AVD 注入 KernelSU LKM。
 # KernelSU 不带 Zygisk，须先安装 Zygisk Next，再安装 SRX；两者在同一次重启生效。
 
+export ANDROID_SERIAL="${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}"
 export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
@@ -26,6 +27,7 @@ ZYGISK_NEXT_URL="${ZYGISK_NEXT_URL:-https://github.com/LSPosed/ZygiskNext/releas
 KSUAVD_DIR="${RUNNER_TEMP:-/tmp}/ksuAVD"
 rm -rf "$KSUAVD_DIR"
 mkdir -p "$KSUAVD_DIR"
+if command -v cygpath >/dev/null 2>&1; then KSUAVD_DIR=$(cygpath -am "$KSUAVD_DIR"); fi
 cp .github/vendor/ksuAVD/ksuAVD.sh "$KSUAVD_DIR/ksuAVD.sh"
 chmod +x "$KSUAVD_DIR/ksuAVD.sh"
 
@@ -83,8 +85,8 @@ wait_for_boot() {
     if [ "$boot_completed" = "1" ]; then
       return 0
     fi
-    if adb devices | grep -q 'offline'; then
-      adb kill-server >/dev/null 2>&1 || true
+    if [[ "$(timeout 5s adb -s "$ANDROID_SERIAL" get-state 2>&1 || true)" == *offline* ]]; then
+      timeout 5s adb -s "$ANDROID_SERIAL" reconnect >/dev/null 2>&1 || true
     fi
     sleep 2
   done
@@ -100,13 +102,13 @@ wait_for_boot() {
 
 wait_for_emulator_shutdown() {
   local timeout_seconds="${1:-60}"
-  local deadline=$((SECONDS + timeout_seconds))
+  local deadline=$((SECONDS + timeout_seconds)) devices
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if ! adb devices | grep -q '^emulator-'; then
+    if devices=$(timeout 5s adb devices) && ! awk -v serial="$ANDROID_SERIAL" '$1 == serial { found=1 } END { exit !found }' <<< "$devices"; then
       return 0
     fi
-    adb emu kill >/dev/null 2>&1 || true
+    timeout 5s adb -s "$ANDROID_SERIAL" emu kill >/dev/null 2>&1 || true
     sleep 2
   done
 
@@ -125,9 +127,12 @@ start_emulator() {
   EMULATOR_LOG="${RUNNER_TEMP:-/tmp}/ksu-rooted-emulator.log"
 
   if [ -n "${PATCHED_RAMDISK:-}" ] && [ -f "$PATCHED_RAMDISK" ]; then
-    ramdisk_args=(-ramdisk "$PATCHED_RAMDISK")
+    local ramdisk_path="$PATCHED_RAMDISK"
+    if command -v cygpath >/dev/null 2>&1; then ramdisk_path=$(cygpath -am "$ramdisk_path"); fi
+    ramdisk_args=(-ramdisk "$ramdisk_path")
   fi
 
+  timeout 15s adb start-server || return 1
   nohup "$ANDROID_HOME/emulator/emulator" -port "$emulator_port" -avd "$avd_name" "${ramdisk_args[@]}" -no-window -gpu "$gpu_mode" -no-snapshot-load -no-snapshot-save -noaudio -no-boot-anim >"$EMULATOR_LOG" 2>&1 &
   # 供 wait_for_boot 检查本次启动的进程是否存活。
   EMULATOR_PID=$!
@@ -141,7 +146,7 @@ start_emulator() {
 start_emulator_and_boot() {
   local attempt rc
   for attempt in 1 2; do
-    start_emulator
+    start_emulator || return 1
     rc=0
     wait_for_boot 300 || rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -152,7 +157,6 @@ start_emulator_and_boot() {
     fi
     echo "模拟器启动后立即退出，重试一次（第 ${attempt}/2 次）。"
     wait_for_emulator_shutdown 30 || true
-    adb kill-server >/dev/null 2>&1 || true
   done
   return 1
 }
@@ -166,6 +170,11 @@ wait_for_reboot() {
     return 1
   fi
 
+  # 非空校验不能证明写入已落盘；重启前提交模块和配置数据。
+  if ! adb_root 'sync'; then
+    echo "重启前落盘失败，拒绝继续重启。" >&2
+    return 1
+  fi
   adb reboot >/dev/null 2>&1 || true
   deadline=$((SECONDS + timeout_seconds))
   while [ "$SECONDS" -lt "$deadline" ]; do
@@ -176,7 +185,6 @@ wait_for_reboot() {
       fi
       echo "重启期间模拟器进程退出，重新启动已打补丁的 AVD。" >&2
       wait_for_emulator_shutdown 30 || true
-      adb kill-server >/dev/null 2>&1 || true
       if ! start_emulator_and_boot; then
         return 1
       fi
@@ -277,7 +285,6 @@ wait_for_root_shell() {
       fi
       echo "等待 KernelSU root shell 时模拟器退出，重新启动已打补丁的 AVD。" >&2
       wait_for_emulator_shutdown 30 || true
-      adb kill-server >/dev/null 2>&1 || true
       if ! start_emulator_and_boot; then
         return 1
       fi
@@ -333,7 +340,6 @@ run_ksuavd_patch() {
     fi
     echo "KernelSU-AVD patch attempt $attempt failed or timed out."
     adb devices -l || true
-    adb kill-server >/dev/null 2>&1 || true
     if [ "$attempt" -lt "$attempts" ]; then
       wait_for_boot 180 || true
     fi
@@ -475,9 +481,7 @@ verify_zygisk_injection_chain() {
 }
 
 media_provider_pid() {
-  adb_su 'for package in com.android.providers.media.module com.google.android.providers.media.module com.android.providers.media android.process.media; do pidof "$package" 2>/dev/null || true; done' |
-    tr -d '\r' |
-    awk 'NF { print $1; exit }'
+  adb shell sh < "$(dirname "${BASH_SOURCE[0]}")/media-provider-pid.sh" | tr -d '\r'
 }
 
 restart_media_provider_process() {
@@ -492,15 +496,16 @@ restart_media_provider_process() {
 wait_media_provider_hook_ready() {
   local label="$1"
   local timeout_seconds="${2:-60}"
-  local deadline pid boot_id install_state
+  local deadline pid boot_id current_start_ticks install_state
   deadline=$((SECONDS + timeout_seconds))
   while [ "$SECONDS" -lt "$deadline" ]; do
     adb shell content query --uri content://media/external_primary/file --projection _id --where '_id=-1' >/dev/null 2>&1 || true
     pid="$(media_provider_pid)"
     if [ -n "$pid" ]; then
       boot_id="$(adb shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r' || true)"
-      install_state="$(adb_su 'cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true' | tr -d '\r')"
-      if [ -n "$boot_id" ] && grep -Fq "stage=init_ok pid=${pid} boot_id=${boot_id} " <<<"$install_state"; then
+      current_start_ticks="$(adb_su "sed 's/^.*) //' /proc/${pid}/stat 2>/dev/null | awk '{print \$20}'" | tr -d '\r')"
+      install_state="$(adb_su "cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state.${pid} 2>/dev/null || cat /data/adb/modules/storage.redirect.x/logs/.media_hook_install_state 2>/dev/null || true" | tr -d '\r')"
+      if [ -n "$boot_id" ] && [ -n "$current_start_ticks" ] && grep -Fq "stage=init_ok pid=${pid} boot_id=${boot_id} start_ticks=${current_start_ticks} " <<<"$install_state"; then
         echo "media_provider_hook_ready label=${label} pid=${pid} boot_id=${boot_id}"
         return 0
       fi
@@ -621,7 +626,7 @@ if ! run_ksuavd_patch; then
   exit 1
 fi
 
-AVD_DIR="${HOME}/.android/avd/${AVD_NAME:-test}.avd"
+AVD_DIR="${ANDROID_AVD_HOME:-${HOME}/.android/avd}/${AVD_NAME:-test}.avd"
 PATCHED_RAMDISK="$RAMDISK"
 if [ -d "$AVD_DIR" ] && [ -f "$PATCHED_RAMDISK" ]; then
   echo "Copying KernelSU patched ramdisk into $AVD_DIR"
@@ -629,7 +634,6 @@ if [ -d "$AVD_DIR" ] && [ -f "$PATCHED_RAMDISK" ]; then
 fi
 
 wait_for_emulator_shutdown 90
-adb kill-server >/dev/null 2>&1 || true
 if ! start_emulator_and_boot; then
   echo "模拟器启动后未能完成开机（日志见上方 emulator log tail），按失败处理。" >&2
   exit 1

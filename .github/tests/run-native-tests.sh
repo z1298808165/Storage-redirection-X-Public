@@ -4,6 +4,8 @@ set -euo pipefail
 artifacts="${1:?missing native artifacts directory}"
 abi="${2:?missing module ABI}"
 case "$abi" in arm64-v8a|x86_64) ;; *) echo "Unsupported ABI: $abi" >&2; exit 1 ;; esac
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*"
+if command -v cygpath >/dev/null 2>&1; then artifacts=$(cygpath -am "$artifacts"); fi
 remote="$(adb shell mktemp -d /data/local/tmp/srx-native-tests.XXXXXX | tr -d '\r')"
 [[ "$remote" =~ ^/data/local/tmp/srx-native-tests\.[A-Za-z0-9]+$ ]]
 cleanup() {

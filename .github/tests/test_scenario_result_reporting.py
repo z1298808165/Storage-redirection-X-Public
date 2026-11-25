@@ -33,6 +33,7 @@ param([string]$ArtifactDir)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
 $script:ArtifactDir = $ArtifactDir
+$script:CreatedMediaResults = Join-Path $ArtifactDir "created-media"
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:ServiceCaseSettleMilliseconds = 0
 $script:FailFast = $env:SRX_REPORT_FAULT -eq 'fail-fast'
@@ -91,6 +92,43 @@ def run_service_cases(combinations, bases, function, extension):
 
 
 class ScenarioResultReportingTest(unittest.TestCase):
+    @unittest.skipUnless(BASH, "需要 Bash 验证故障现场采集")
+    def test_storage_snapshot_retains_native_stack_failures_and_continues(self):
+        source = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
+        function = source[source.index("capture_storage_bad_state_snapshot() {"):source.index("print_diagnostics() {")]
+        for stack_exit in (0, 124):
+            with self.subTest(stack_exit=stack_exit), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                script = r'''
+set -euo pipefail
+SRT_ARTIFACT_DIR=$1
+REAL_ROOT=/storage/emulated/0
+BACKEND_ROOT=/data/media/0
+PRIVATE_ROOT=/private
+RESULT_DIR=/results
+INTERNAL_RESULT_DIR=/internal
+BACKEND_RESULT_DIR=/backend
+SANDBOX_RESULT_DIR=/sandbox
+APP_ID=test.app
+adb() { echo adb_probe; }
+adb_su() {
+  if [[ $1 == *'debuggerd -b'* ]]; then
+    echo "native_stack exit=$SRX_STACK_EXIT"
+    return "$SRX_STACK_EXIT"
+  fi
+  echo root_probe
+}
+''' + function + '\ncapture_storage_bad_state_snapshot probe\n'
+                path = base / "snapshot.sh"
+                path.write_text(script, encoding="utf-8", newline="\n")
+                result = subprocess.run([BASH, str(path), str(base)], text=True, capture_output=True, timeout=15,
+                                        env={**os.environ, "SRX_STACK_EXIT": str(stack_exit)})
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                snapshot = (base / "storage-bad-state-probe.txt").read_text()
+                self.assertIn(f"native_stack exit={stack_exit}", snapshot)
+                self.assertIn("--- 模块进程 ---\nroot_probe", snapshot)
+                self.assertIn("device_storage_bad_state_snapshot label=probe", result.stdout)
+
     @unittest.skipUnless(PWSH, "需要 PowerShell 验证重定向输出编码")
     def test_entrypoints_override_non_utf8_console_encoding(self):
         for relative, end in (
@@ -208,14 +246,132 @@ function Invoke-Adb { $script:Attempt++; $global:LASTEXITCODE=if ($script:Attemp
                                             env={**os.environ, "SRX_RESTORE_FAULT": str(failure), "SRX_PREVIOUS": previous})
                     self.assertEqual(failure == 0, result.returncode == 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(BASH and PWSH and os.name != "nt", "需要 POSIX 文件系统校验两个测试器的配置恢复")
+    def test_config_backup_restores_bytes_after_fixture_cleanup(self):
+        scripts = ROOT / ".github/tests"
+        bash = (scripts / "run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
+        ps = (scripts / "run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8-sig")
+        bash_helpers = bash[bash.index("read_config_backup() {"):bash.index("supports_fuse_backend_scenarios() {")]
+        ps_helpers = ps[ps.index("function Get-ConfigBackup {"):ps.index("function Backup-DeviceExecutionState {")]
+        bash_driver = """set -eu
+adb_su() { bash -c "$1"; }
+""" + bash_helpers + """
+saved=$(read_config_backup "$1")
+printf '%s' modified > "$1"
+rm "$1"
+restore_config_backup "$1" "$saved"
+"""
+        ps_driver = """param([string]$config)
+$ErrorActionPreference='Stop'
+function Invoke-Su([string]$cmd) { & bash -c $cmd }
+""" + ps_helpers + """
+$saved = Get-ConfigBackup $config
+[IO.File]::WriteAllText($config, 'modified')
+[IO.File]::Delete($config)
+Restore-ConfigBackup $config $saved
+"""
+        payload = bytes(range(256)) + b"\r\n\n"
+        for executable, ext, body, options in ((BASH, "sh", bash_driver, []), (PWSH, "ps1", ps_driver, ["-NoProfile", "-File"])):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                driver = base / ("case." + ext)
+                driver.write_text(body, encoding="utf-8")
+                for initial in (None, b"", payload):
+                    with self.subTest(runner=ext, size=None if initial is None else len(initial)):
+                        path = base / "config.json"
+                        if initial is not None:
+                            path.write_bytes(initial)
+                        run = subprocess.run([executable, *options, str(driver), str(path)], text=True, capture_output=True, timeout=15)
+                        self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+                        self.assertEqual(initial, path.read_bytes() if path.exists() else None)
+                # 备份无法读取时，中止后续写入；空输出不能解释为原文件不存在。
+                fake = base / "base64"
+                fake.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+                fake.chmod(0o755)
+                run = subprocess.run([executable, *options, str(driver), str(path)], env={**os.environ, "PATH": str(base) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=15)
+                self.assertNotEqual(0, run.returncode)
+                self.assertEqual(payload, path.read_bytes())
+
+    @unittest.skipUnless(BASH and PWSH and os.name != "nt", "需要 POSIX 文件系统校验配置写入失败后的状态")
+    def test_config_write_keeps_previous_file_on_failure(self):
+        scripts = ROOT / ".github/tests"
+        bash = (scripts / "run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
+        ps = (scripts / "run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8-sig")
+        def function(source, signature):
+            start = source.index(signature)
+            return source[start:source.index("\n}", start) + 2]
+
+        sh_case = "\n".join(("set -eu", 'adb_su() { sh -c "$1"; }',
+                             function(bash, "write_encoded_config() {"), function(bash, "adb_write_file() {"),
+                             'adb_write_file "$1" "$2"'))
+        ps_case = "\n".join(("param([string]$Path,[string]$Json)", "$ErrorActionPreference='Stop'",
+                             "function Invoke-Su([string]$cmd) { & sh -c $cmd }",
+                             function(ps, "function Write-EncodedConfig {"), function(ps, "function Write-DeviceConfig {"),
+                             "Write-DeviceConfig $Json $Path"))
+        payload = '{"users":{"0":{"enabled":true}}}'
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for command, condition in (("base64", ' && [ "$1" = -d ]'), ("chmod", ""), ("mv", "")):
+                stub = base / command
+                stub.write_text(f'#!/bin/sh\nif [ "$FAULT" = {command} ]{condition}; then printf partial; exit 17; fi\n'
+                                f'exec "{shutil.which(command)}" "$@"\n', encoding="utf-8")
+                stub.chmod(0o755)
+            for name, args, source in (("case.sh", [BASH], sh_case), ("case.ps1", [PWSH, "-NoProfile", "-File"], ps_case)):
+                driver = base / name
+                driver.write_text(source, encoding="utf-8")
+                path = base / "app.json"
+                for fault in ("", "base64", "chmod", "mv"):
+                    with self.subTest(runner=name, fault=fault):
+                        path.write_bytes(b"before")
+                        old_inode = path.stat().st_ino
+                        env = {**os.environ, "PATH": str(base) + os.pathsep + os.environ["PATH"], "FAULT": fault}
+                        result = subprocess.run([*args, str(driver), str(path), payload], env=env,
+                                                text=True, capture_output=True, timeout=15)
+                        self.assertEqual(not fault, result.returncode == 0, result.stdout + result.stderr)
+                        self.assertEqual(b"before" if fault else payload.encode(), path.read_bytes())
+                        if fault:
+                            self.assertEqual(old_inode, path.stat().st_ino)
+                        else:
+                            self.assertEqual(0o644, path.stat().st_mode & 0o777)
+                        self.assertFalse(list(base.glob("app.json.*")))
+
+    @unittest.skipUnless(PWSH, "需要 PowerShell 校验公共目录夹具的身份")
+    def test_existing_public_parent_requires_successful_mkdir_and_stat(self):
+        flow = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8-sig")
+        case = flow[flow.index("function Invoke-StandardScenario {"):]
+        setup = case[case.index("            $identity = "):case.index("            $preservedFile =")]
+        script = r"""
+$ErrorActionPreference='Stop'
+$publicParent='/fixture'
+function Invoke-Su([string]$command) {
+    if ($command -ne "mkdir '/fixture' && stat -c '%d:%i:%f:%u:%g' '/fixture'") { throw 'unexpected write' }
+    $global:LASTEXITCODE=$script:exitStatus
+    $script:stat
+}
+foreach ($exitStatus in 0,1) {
+    foreach ($stat in @('', 'broken', '42:5:41fd:0:0')) {
+        $accepted=$true
+        try {
+""" + setup + """
+        } catch { $accepted=$false }
+        if ($accepted -ne ($exitStatus -eq 0 -and $stat -eq '42:5:41fd:0:0')) { throw "bad fixture $exitStatus [$stat]" }
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "case.ps1"
+            path.write_text(script, encoding="utf-8")
+            run = subprocess.run([PWSH, "-NoProfile", "-File", str(path)], text=True, capture_output=True, timeout=15)
+            self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+
     @unittest.skipUnless(BASH, "需要 Bash 验证清理错误传播")
     def test_bash_cleanup_reports_each_failure_and_continues(self):
         source = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
         cleanup = source[source.index("cleanup_test_artifacts() {"):source.index("latest_result() {")]
         finish = source[source.index("finish_test_run() {"):source.index("cleanup_done=0")]
-        steps = ("adb", "restore_cross_app_config", "restore_provider_config", "restore_app_config", "restore_global_config",
-                 "clean_results", "remove_test_target_artifacts", "clear_alias_mediastore_fixture", "remove_random_mediastore_rows",
-                 "remove_random_physical_media_files", "restart_media_provider", "restore_device_execution_state")
+        steps = ("adb", "clean_results", "remove_test_target_artifacts",
+                 "remove_created_mediastore_rows", "remove_test_result_directories", "cross_config", "provider_config",
+                 "app_config", "global_config", "restart_media_provider", "restore_device_execution_state")
         for failure, entry in itertools.product(("none", *steps), ("normal", "exit-trap")):
             with self.subTest(failure=failure, entry=entry), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
@@ -227,7 +383,10 @@ cleanup_frozen_daemon() { :; }
 set_download_test_network() { :; }
 release_device_run_lock() { echo unlock >> "$SRX_CLEANUP_TRACE"; }
 device_run_lock_held=1
-global_config_backup_ready=1
+config_backups_ready=1
+READ_ONLY_OWNER_CONFIG=cross_config PROVIDER_CONFIG=provider_config CONFIG=app_config GLOBAL_CONFIG=global_config
+declare -A config_backups=([cross_config]=absent [provider_config]=absent [app_config]=absent [global_config]=absent)
+restore_config_backup() { "$1"; }
 '''
                 if entry == "normal":
                     script += 'status=0\ncleanup_test_artifacts || status=1\nexit "$status"\n'
@@ -245,9 +404,9 @@ global_config_backup_ready=1
     def test_powershell_cleanup_reports_exit_codes_and_exceptions(self):
         source = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
         cleanup = source[source.index("function Invoke-TestArtifactCleanup {"):source.index("function Restart-App {")]
-        steps = ("Invoke-Adb", "Restore-CrossAppConfig", "Restore-AppConfig", "Restore-GlobalConfig", "Clear-Results", "Invoke-Su",
-                 "Remove-TestTargetArtifacts", "Clear-AliasMediaStoreFixture", "Remove-RandomMediaStoreRows",
-                 "Remove-RandomPhysicalMediaFiles", "Restart-MediaProvider", "Restore-DeviceExecutionState")
+        steps = ("Invoke-Adb", "Clear-Results", "Invoke-Su", "Remove-TestTargetArtifacts",
+                 "Remove-CreatedMediaStoreRows", "Remove-TestResultDirectories", "cross_config", "provider_config",
+                 "app_config", "global_config", "Restart-MediaProvider", "Restore-DeviceExecutionState")
         combinations = list(itertools.product(("none", *steps), ("exit", "throw")))
         stubs = '\n'.join(f'''function {step} {{
     Add-Content -LiteralPath $env:SRX_CLEANUP_TRACE -Value '{step}'
@@ -260,7 +419,13 @@ global_config_backup_ready=1
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $script:CleanupDone=$false
-$script:GlobalConfigBackupReady=$true
+$script:ConfigBackupsReady=$true
+$ReadOnlyOwnerConfig='cross_config'
+$ProviderConfig='provider_config'
+$Config='app_config'
+$GlobalConfig='global_config'
+$script:ConfigBackups=@{}
+function Restore-ConfigBackup($path,$snapshot) { & $path }
 $script:ExitCode=0
 $script:Failures=[Collections.Generic.List[string]]::new()
 ''' + stubs + '\n' + cleanup
@@ -295,14 +460,25 @@ $script:Failures=[Collections.Generic.List[string]]::new()
             if runner == "pwsh" and not PWSH:
                 continue
             source = (ROOT / f".github/tests/run-storage-redirect-scenarios.{'sh' if runner == 'bash' else 'ps1'}").read_text(encoding="utf-8")
-            start, end = (("check_file_missing() {", "check_own_private_real_landing() {") if runner == "bash" else
+            start, end = (("backend_storage_path() {", "check_own_private_real_landing() {") if runner == "bash" else
                           ("function Test-PathMissing {", "function Convert-ToBackendPath {"))
             function = source[source.index(start):source.index(end)]
-            for kind in ("missing", "file", "directory", "symlink", "dangling", "loop"):
+            helper = (ROOT / ".github/tests/check-public-fixtures.sh").read_text(encoding="utf-8")
+            for kind in ("missing", "file", "directory", "symlink", "dangling", "loop", "inaccessible"):
                 with self.subTest(runner=runner, kind=kind), tempfile.TemporaryDirectory() as directory:
                     base = Path(directory)
                     target = base / "entry"
-                    if kind == "file":
+                    credentials = {}
+                    if kind == "inaccessible":
+                        base.chmod(0o755)
+                        parent = base / "protected"
+                        parent.mkdir()
+                        target = parent / "entry"
+                        target.touch()
+                        parent.chmod(0)
+                        if os.geteuid() == 0:
+                            credentials = dict(user=65534, group=65534, extra_groups=[])
+                    elif kind == "file":
                         target.write_text("leak")
                     elif kind == "directory":
                         target.mkdir()
@@ -313,18 +489,126 @@ $script:Failures=[Collections.Generic.List[string]]::new()
                     if runner == "bash":
                         script = 'REAL_ROOT=/logical\nBACKEND_ROOT=$1\nadb_su() { bash -c "$1"; }\n' + function + '\ncheck_file_missing probe /logical/entry\n'
                         path = base / "missing.sh"
-                        command = [BASH, str(path), str(base)]
+                        command = [BASH, str(path), str(target.parent)]
                     else:
                         script = '''
 param([string]$BasePath)
+$script:PublicFixtureCheck = $env:PUBLIC_FIXTURE_CHECK
 function Convert-ToBackendPath { param($Path) "$BasePath/entry" }
 function Test-Su { param($Command) & bash -c $Command; $LASTEXITCODE -eq 0 }
 ''' + function + '\nif (-not (Test-PathMissing /logical/entry)) { exit 1 }\n'
                         path = base / "missing.ps1"
-                        command = [PWSH, "-NoProfile", "-File", str(path), str(base)]
+                        command = [PWSH, "-NoProfile", "-File", str(path), str(target.parent)]
                     path.write_text(script, encoding="utf-8", newline="\n")
-                    result = subprocess.run(command, text=True, capture_output=True, timeout=15)
+                    try:
+                        result = subprocess.run(command, text=True, capture_output=True, timeout=15,
+                                                env=dict(os.environ, PUBLIC_FIXTURE_CHECK=helper), **credentials)
+                    finally:
+                        if kind == "inaccessible":
+                            target.parent.chmod(0o755)
                     self.assertEqual(kind == "missing", result.returncode == 0, result.stdout + result.stderr)
+                    if kind == "inaccessible":
+                        self.assertIn("Permission denied", result.stderr)
+                        self.assertTrue(target.is_file())
+
+    @unittest.skipUnless(BASH and os.name != "nt", "需要 POSIX 目录验证物理落点")
+    def test_file_placement_checks_the_backend_not_the_visible_alias(self):
+        source = (ROOT / ".github/tests/run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
+        functions = source[source.index("backend_storage_path() {"):source.index("check_own_private_real_landing() {")]
+        script = '''
+set -eu
+REAL_ROOT=$PWD/0
+BACKEND_ROOT=$PWD/backend
+adb_su() { bash -c "$1"; }
+''' + functions + '''
+mkdir "$REAL_ROOT" "$BACKEND_ROOT" "${REAL_ROOT}1"
+touch "$REAL_ROOT/visible" "$BACKEND_ROOT/mapped" "${REAL_ROOT}1/other-user"
+if check_file_exists visible-only "$REAL_ROOT/visible"; then exit 10; fi
+check_file_missing visible-only "$REAL_ROOT/visible"
+check_file_exists backend-only "$REAL_ROOT/mapped"
+if check_file_missing backend-only "$REAL_ROOT/mapped"; then exit 11; fi
+check_file_exists physical "$BACKEND_ROOT/mapped"
+check_file_exists other-user "${REAL_ROOT}1/other-user"
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            helper = (ROOT / ".github/tests/check-public-fixtures.sh").read_text(encoding="utf-8")
+            result = subprocess.run([BASH, "-c", script], cwd=directory, capture_output=True, text=True,
+                                    timeout=10, env=dict(os.environ, PUBLIC_FIXTURE_CHECK=helper))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    @unittest.skipUnless(BASH and PWSH and os.name != "nt", "需要两种运行器验证媒体落点取证")
+    def test_monitor_placement_capture_keeps_the_original_verdict(self):
+        scripts = ROOT / ".github/tests"
+        bash = (scripts / "run-storage-redirect-scenarios.sh").read_text(encoding="utf-8")
+        pwsh = (scripts / "run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
+        bash_case = bash[bash.index("run_file_monitor_mediastore_success_case() {"):bash.index("run_file_monitor_mediastore_image_success_case() {")]
+        ps_case = pwsh[pwsh.index("function Invoke-FileMonitorMediaStoreSuccessCase {"):pwsh.index("function Invoke-FileMonitorMediaStoreImageSuccessCase {")]
+        bash_stub = '''
+REAL_ROOT=/storage/emulated/0
+APP_ID=test.app
+monitor_file_name() { echo fixture.bin; }
+prepare_file_monitor_assertion() { :; }
+run_mediastore_download_create_case() { :; }
+check_file_exists() { return "$PLACEMENT_EXIT"; }
+expect_file_monitor_success_record() { :; }
+media_provider_pid() { echo 321; }
+adb_su_timeout() { bash -c "$DEVICE_STUB"$'\\n'"$2"; }
+'''
+        ps_stub = '''
+$ErrorActionPreference='Stop'
+$script:ArtifactDir=$env:SRT_ARTIFACT_DIR
+$script:SuCommand='su -c'
+$RealRoot='/storage/emulated/0'
+$AppId='test.app'
+function New-MonitorFileName { 'fixture.bin' }
+function Prepare-FileMonitorAssertion { $true }
+function Invoke-MediaStoreDownloadCreateCase { @{ Ok=$true; Text=(Get-Content -Raw "$script:ArtifactDir/scenario-27-mapped-result.txt") } }
+function Require-File { $global:LASTEXITCODE=[int]$env:PLACEMENT_EXIT; $global:LASTEXITCODE -eq 0 }
+function Wait-FileMonitorLogLine { $true }
+function Get-MediaProviderPid { '321' }
+function Invoke-AdbWithTimeout($Arguments, $TimeoutSeconds) {
+    if ($Arguments[0] -ne 'shell' -or $TimeoutSeconds -ne 25) { throw 'unexpected capture' }
+    $output = & bash -c ('su() { bash -c "$DEVICE_STUB"$''\\n''"$2"; }; ' + $Arguments[1])
+    @{ ExitCode=$LASTEXITCODE; Output=($output -join "`n") }
+}
+'''
+        device = '''
+pidof() { echo 123; }
+ls() { echo "entries:$2/.pending-123-fixture.bin"; }
+content() { echo "query:$*"; }
+grep() { echo "monitor:$3"; }
+logcat() { printf '%s\\n' 'publish fixture.bin' 'unrelated-message'; }
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            shutil.copyfile(scripts / "capture-monitor-placement.sh", base / "capture-monitor-placement.sh")
+            (base / "case.sh").write_text(bash_stub + bash_case + '\nrun_file_monitor_mediastore_success_case 27 mapped Download/From "$REAL_ROOT/Download/To"\n', encoding="utf-8")
+            (base / "case.ps1").write_text(ps_stub + ps_case + '\nif (-not (Invoke-FileMonitorMediaStoreSuccessCase 27 mapped Download/From "$RealRoot/Download/To")) { exit 1 }\n', encoding="utf-8")
+            for runner, args in (("bash", [BASH, "case.sh"]), ("pwsh", [PWSH, "-NoProfile", "-File", "case.ps1"])):
+                for collection, status in (("file/12", 0), ("file/12", 1), ("downloads/12", 37), ("file/12;false", 1)):
+                    with self.subTest(runner=runner, collection=collection, status=status):
+                        uri = "content://media/external/" + collection
+                        (base / "scenario-27-mapped-result.txt").write_text(f"PASS [mediastore_create_download] create succeeded uri={uri}, fileName=fixture.bin\n", encoding="utf-8")
+                        capture = base / "scenario-27-mapped-placement.txt"
+                        capture.unlink(missing_ok=True)
+                        env = {**os.environ, "SRT_ARTIFACT_DIR": directory, "SRT_MEDIA_PROVIDER_PID_SCRIPT": str(base / "media-provider-pid.sh"), "DEVICE_STUB": device, "PLACEMENT_EXIT": str(status)}
+                        result = subprocess.run(args, cwd=base, env=env, capture_output=True, text=True, timeout=15)
+                        self.assertEqual(status == 0, result.returncode == 0, result.stdout + result.stderr)
+                        self.assertEqual(bool(status), capture.exists(), result.stdout + result.stderr)
+                        if status:
+                            evidence = capture.read_text(encoding="utf-8")
+                            if runner == "bash":
+                                self.assertIn(evidence.rstrip(), result.stderr)
+                            self.assertIn(f"placement_exit={status} provider_pid=321", evidence)
+                            self.assertEqual(";" not in collection, f"--uri {uri} --projection" in evidence)
+                            self.assertNotIn(";false", evidence)
+                            for path in ("Download/From", "Download/To"):
+                                for parent in ("/data/media/0", "/data/media/0/Android/data/test.app/sdcard"):
+                                    self.assertIn(f"entries:{parent}/{path}/.pending-123-fixture.bin", evidence)
+                            self.assertIn("caller_pid=123", evidence)
+                            self.assertIn("monitor:fixture.bin", evidence)
+                            self.assertIn("publish fixture.bin", evidence)
+                            self.assertNotIn("unrelated-message", evidence)
 
     def test_missing_daemon_fails_the_failopen_check(self):
         for runner in ("bash", "pwsh"):
@@ -623,6 +907,7 @@ function Invoke-ServiceCase {
         bash_stubs = r"""
 set -euo pipefail
 SRT_ARTIFACT_DIR=$1
+SRT_CREATED_MEDIA_RESULTS=$1/created-media
 SRT_SERVICE_CASE_SETTLE_MS=0
 APP_ID=test.app
 ACTION=test.action

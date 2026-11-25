@@ -3,6 +3,14 @@ set -eu
 
 state=/data/local/tmp/srx-test-flow.lock/download-network
 
+default_network_validated() {
+  networks=$(dumpsys connectivity) || return 1
+  default_id=$(printf '%s\n' "$networks" | sed -n 's/^Active default network: \([0-9][0-9]*\)\r*$/\1/p')
+  [ -n "$default_id" ] || return 1
+  printf '%s\n' "$networks" | grep -F "  NetworkAgentInfo{network{$default_id}" |
+    grep -Eq 'Capabilities: ([^] ]*&)?VALIDATED(&|[][:space:]])'
+}
+
 reconnect_network() {
   if [ "$mobile_data" = 1 ]; then
     svc data disable
@@ -34,10 +42,14 @@ reconnect_network() {
 case "${1:-}" in
   prepare)
     [ "$(getprop ro.kernel.qemu)" = 1 ] || exit 0
-    [ "$(getprop ro.build.version.sdk)" -ge 37 ] || exit 0
+    [ "$(getprop ro.build.version.sdk)" -ge 35 ] || exit 0
     if [ -e "$state" ]; then
       echo "download network backup already exists" >&2
       exit 1
+    fi
+    if default_network_validated; then
+      echo "download_network_validated"
+      exit 0
     fi
     portal_mode=$(settings get global captive_portal_mode)
     mobile_data=$(settings get global mobile_data)
@@ -47,7 +59,7 @@ case "${1:-}" in
     settings put global captive_portal_mode 0
     reconnect_network
     for attempt in $(seq 1 30); do
-      if dumpsys connectivity | grep '^  NetworkAgentInfo' | grep -Eq 'Capabilities: ([^]]*&)?VALIDATED(&|[[:space:]])'; then
+      if default_network_validated; then
         echo "download_network_validated"
         exit 0
       fi

@@ -57,7 +57,7 @@ if ! wait_for_media_provider; then
   echo 'FAIL [zn_media_provider_ready] provider query unavailable' >&2
   exit 1
 fi
-uid="$(cmd package list packages -U "$app" | sed -n 's/.* uid://p')"
+uid="$(cmd package list packages --user 0 -U "$app" | sed -n 's/.* uid://p')"
 case "$uid" in ''|*[!0-9]*) echo 'ZN fixture: test application UID unavailable' >&2; exit 1 ;; esac
 test ! -e "$module/.runtime_disabled"
 scratch="$(mktemp -d /data/local/tmp/srx-zn-runtime.XXXXXX)"
@@ -110,17 +110,23 @@ dump_case_evidence() {
   label="$1"
   echo "--- evidence: $label ---" >&2
   echo "[global.json]" >&2
-  cat "$module/config/global.json" 2>/dev/null >&2 || true
+  cat "$module/config/global.json" >&2 2>/dev/null || true
   echo "[app.json]" >&2
-  if [ -f "$config" ]; then cat "$config" >&2 || true; else echo '<absent>' >&2; fi
+  if [ -n "${config:-}" ] && [ -f "$config" ]; then cat "$config" >&2 || true; else echo '<absent>' >&2; fi
   echo "[source_dir]" >&2
-  ls -la "$source_dir" 2>/dev/null >&2 || true
+  ls -la "${source_dir:-}" >&2 2>/dev/null || true
   echo "[target_dir]" >&2
-  ls -la "$target_dir" 2>/dev/null >&2 || true
+  ls -la "${target_dir:-}" >&2 2>/dev/null || true
   echo "[file_monitor.log tail]" >&2
-  tail -n 15 "$module/logs/file_monitor.log" 2>/dev/null >&2 || true
+  tail -n 15 "$module/logs/file_monitor.log" >&2 2>/dev/null || true
   echo "[module warn log tail]" >&2
   logcat -d -v brief -s StorageRedirect:* 2>/dev/null | tail -n 25 >&2 || true
+  echo "[storage mount labels]" >&2
+  timeout 5 ls -ldZ /storage/emulated /storage/emulated/0 /storage/emulated/0/Download "$source_dir" >&2 || true
+  echo "[daemon log tail]" >&2
+  tail -n 160 "$module/logs/running.log" >&2 || true
+  echo "[SELinux denials]" >&2
+  dmesg | grep 'avc:.*denied' | tail -n 20 >&2 || true
   echo "--- evidence end: $label ---" >&2
 }
 run_case passthrough 0 private "$app" '' ''
@@ -170,7 +176,10 @@ cat "$scratch/reload.log"
 if [ "$ready" -eq 1 ] && [ "$reload_result" -eq 0 ] && [ "$(cat "$target_dir/Reloaded/reload.txt" 2>/dev/null)" = srx-zn-fixture ] && [ ! -e "$target_dir/reload.txt" ]; then
   echo 'PASS [zn_reload] running native process received updated mapping'; passed=$((passed + 1))
 else
-  echo "FAIL [zn_reload] ready=$ready exit=$reload_result" >&2; failed=$((failed + 1))
+  echo "FAIL [zn_reload] ready=$ready exit=$reload_result" >&2
+  cat "$config" >&2 || true
+  find "$source_dir" "$target_dir" "$sandbox_dir" -type f -exec ls -ln {} \; >&2 2>/dev/null || true
+  failed=$((failed + 1))
 fi
 rm -f "$config"
 printf '%s\n' '{"file_monitor_enabled":true,"verbose_logging_enabled":true}' > "$module/config/global.json"

@@ -48,4 +48,8 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
 }
 
-tasks.withType<Test>().configureEach { failOnNoDiscoveredTests = false }
+tasks.withType<Test>().configureEach {
+  failOnNoDiscoveredTests = false
+  // Linux 测试 JVM 的文件名编码由 locale 决定，夹具包含中文路径。
+  if (System.getProperty("os.name") == "Linux") environment("LC_ALL", "C.UTF-8")
+}

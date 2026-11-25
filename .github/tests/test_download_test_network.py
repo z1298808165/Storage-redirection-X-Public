@@ -75,6 +75,9 @@ class DownloadTestNetworkTest(unittest.TestCase):
                         if data["disconnect_pending"][transport] == 0:
                             data["connections"][transport] = False
                             del data["disconnect_pending"][transport]
+                print("Active default network:", data.get("default_id", 100))
+                if data.get("other_validated"):
+                    print("  NetworkAgentInfo{network{101} nc{[ Transports: VPN Capabilities: INTERNET&VALIDATED ]}}")
                 capability = "VALIDATED" if data["validated"] else "PARTIAL_CONNECTIVITY"
                 for transport, connected in data["connections"].items():
                     if connected:
@@ -160,6 +163,22 @@ class DownloadTestNetworkTest(unittest.TestCase):
         self.assertEqual(self.invoke("restore").returncode, 0)
         self.assertNotIn("captive_portal_mode", self.network["settings"])
 
+    def test_verified_default_network_needs_no_changes(self) -> None:
+        for sdk in ("35", "36", "37"):
+            with self.subTest(sdk=sdk):
+                self.network.update(sdk=sdk, validated=True, calls=[])
+                self.assertEqual(self.invoke("prepare").returncode, 0)
+                self.assertFalse(self.state.exists())
+                self.assertFalse(any(c[0] in ("settings", "svc") for c in self.network["calls"]))
+
+    def test_validated_secondary_network_does_not_mask_default(self) -> None:
+        for sdk in ("35", "36", "37"):
+            with self.subTest(sdk=sdk):
+                self.network.update(sdk=sdk, other_validated=True, validated=False)
+                self.assertEqual(self.invoke("prepare").returncode, 0)
+                self.assertTrue(self.state.exists())
+                self.assertEqual(self.invoke("restore").returncode, 0)
+
     def test_existing_backup_is_not_overwritten(self) -> None:
         self.assertEqual(self.invoke("prepare").returncode, 0)
         original = self.state.read_bytes()
@@ -169,7 +188,7 @@ class DownloadTestNetworkTest(unittest.TestCase):
         self.assertEqual(self.invoke("restore").returncode, 0)
 
     def test_physical_devices_and_older_emulators_are_untouched(self) -> None:
-        for qemu, sdk in (("0", "37"), ("1", "36")):
+        for qemu, sdk in (("0", "37"), ("1", "34")):
             with self.subTest(qemu=qemu, sdk=sdk):
                 self.network.update(qemu=qemu, sdk=sdk, calls=[])
                 self.assertEqual(self.invoke("prepare").returncode, 0)

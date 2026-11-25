@@ -744,7 +744,7 @@ jobs:
         run: echo "仅验证 Fuse 探针：跳过 Android ${{ matrix.android.version }} 测试分片"
 
       - name: Upload test-flow artifacts
-        if: always() && matrix.android.version != 17 && hashFiles('temp/test-flow/**/scenario-*-result.txt', 'temp/test-flow/**/scenario-2-mediastore-hook-diag.txt', 'temp/test-flow/**/test-flow-preflight.txt', 'temp/test-flow/**/test-flow-app-mountinfo.txt', 'temp/test-flow/**/test-flow-fuse-sample.txt', 'temp/test-flow/**/test-flow-logcat.txt', 'temp/test-flow/**/test-flow-module-state.txt', 'temp/test-flow/**/test-flow-backend-diagnostic.txt', 'temp/test-flow/**/test-flow-monitor-state.txt', 'temp/test-flow/**/media-health.txt') != ''
+        if: always() && matrix.android.version != 17 && hashFiles('temp/test-flow/**/scenario-*-result.txt', 'temp/test-flow/**/scenario-*-placement.txt', 'temp/test-flow/**/scenario-2-mediastore-hook-diag.txt', 'temp/test-flow/**/test-flow-preflight.txt', 'temp/test-flow/**/test-flow-app-mountinfo.txt', 'temp/test-flow/**/test-flow-fuse-sample.txt', 'temp/test-flow/**/test-flow-logcat.txt', 'temp/test-flow/**/test-flow-module-state.txt', 'temp/test-flow/**/test-flow-backend-diagnostic.txt', 'temp/test-flow/**/test-flow-monitor-state.txt', 'temp/test-flow/**/media-health.txt', 'temp/test-flow/**/storage-bad-state-*.txt') != ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: test-flow-android${{ matrix.android.version }}-artifacts
@@ -752,6 +752,7 @@ jobs:
           retention-days: 14
           path: |
             temp/test-flow/**/scenario-*-result.txt
+            temp/test-flow/**/scenario-*-placement.txt
             temp/test-flow/**/scenario-2-mediastore-hook-diag.txt
             temp/test-flow/**/test-flow-preflight.txt
             temp/test-flow/**/test-flow-app-mountinfo.txt
@@ -761,6 +762,7 @@ jobs:
             temp/test-flow/**/test-flow-backend-diagnostic.txt
             temp/test-flow/**/test-flow-monitor-state.txt
             temp/test-flow/**/media-health.txt
+            temp/test-flow/**/storage-bad-state-*.txt
 
       - name: Upload shared FUSE snapshots
         if: always() && hashFiles('temp/test-flow/**/test-flow-shared-fuse-before.txt', 'temp/test-flow/**/test-flow-shared-fuse-after.txt') != ''

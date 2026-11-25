@@ -8,6 +8,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+host_file() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -am "$1"; else printf '%s\n' "$1"; fi
+}
 APPS_DIR="$SCRIPT_DIR/Apps"
 ADB_REMOTE_TMP="/data/local/tmp/ksuAVD"
 
@@ -244,7 +247,7 @@ run_install_apps() {
         if [ -f "$apk" ]; then
             FOUND=1
             echo "[*] Installing $(basename "$apk")..."
-            "$ADB_BIN" install -r "$apk"
+            "$ADB_BIN" install -r "$(host_file "$apk")"
         fi
     done
     if [ "$FOUND" -eq 0 ]; then
@@ -374,14 +377,14 @@ echo "[*] Initializing workspace on AVD: $ADB_REMOTE_TMP"
 "$ADB_BIN" shell "rm -rf $ADB_REMOTE_TMP && mkdir -p $ADB_REMOTE_TMP"
 
 echo "[*] Pushing KernelSU APK to AVD..."
-"$ADB_BIN" push "$KSU_APK_PATH" "$ADB_REMOTE_TMP/KernelSU.apk"
+"$ADB_BIN" push "$(host_file "$KSU_APK_PATH")" "$ADB_REMOTE_TMP/KernelSU.apk"
 
 echo "[*] Pushing ksuAVD.sh script to AVD..."
-"$ADB_BIN" push "$SCRIPT_DIR/ksuAVD.sh" "$ADB_REMOTE_TMP/ksuAVD.sh"
+"$ADB_BIN" push "$(host_file "$SCRIPT_DIR/ksuAVD.sh")" "$ADB_REMOTE_TMP/ksuAVD.sh"
 "$ADB_BIN" shell "chmod 755 $ADB_REMOTE_TMP/ksuAVD.sh"
 
 echo "[*] Pushing ramdisk.img to AVD..."
-"$ADB_BIN" push "$TARGET_RAMDISK" "$ADB_REMOTE_TMP/ramdisk.img"
+"$ADB_BIN" push "$(host_file "$TARGET_RAMDISK")" "$ADB_REMOTE_TMP/ramdisk.img"
 
 echo ""
 echo "=============================================================================="
@@ -411,10 +414,10 @@ else
 fi
 
 echo "[*] Pulling patched ramdisk from AVD..."
-"$ADB_BIN" pull "$ADB_REMOTE_TMP/ramdiskpatched4AVD.img" "$TARGET_RAMDISK"
+"$ADB_BIN" pull "$ADB_REMOTE_TMP/ramdiskpatched4AVD.img" "$(host_file "$TARGET_RAMDISK")"
 
 echo "[*] Installing KernelSU Manager app on AVD..."
-"$ADB_BIN" install -r "$KSU_APK_PATH"
+"$ADB_BIN" install -r "$(host_file "$KSU_APK_PATH")"
 
 if [ "$DEBUG_MODE" -eq 0 ]; then
     echo "[*] Cleaning up temporary files on AVD..."

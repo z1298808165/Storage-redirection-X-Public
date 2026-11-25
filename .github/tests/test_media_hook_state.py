@@ -13,6 +13,27 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MediaHookStateTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bash"), "需要 bash 执行嵌套 shell 查询")
+    def test_start_ticks_query_keeps_awk_field_out_of_the_callers_arguments(self) -> None:
+        for name in ("install-storage-redirect-module.sh", "run-storage-redirect-scenarios.sh"):
+            source = (ROOT / ".github/tests" / name).read_text(encoding="utf8")
+            query = next(line for line in source.splitlines() if 'current_start_ticks="$(adb_su' in line)
+            script = r'''
+set -eu
+pid=$$
+adb_su() { bash -c "$1"; }
+expected=$(awk '{print $22}' /proc/$pid/stat)
+read_ticks() {
+''' + query + r'''
+printf '%s' "$current_start_ticks"
+}
+actual=$(read_ticks label wrong-field)
+test "$actual" = "$expected"
+'''
+            with self.subTest(script=name):
+                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_process_records_survive_another_users_provider(self) -> None:
         rustc = shutil.which("rustc")
         self.assertIsNotNone(rustc)

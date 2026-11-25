@@ -211,17 +211,20 @@ class CiBuildCacheTests(unittest.TestCase):
         stubs = """
 adb() {
   case "$*" in
+    'start-server') printf '%s %s\n' "$ANDROID_SERIAL" "$ADB_LOCAL_TRANSPORT_MAX_PORT" > "$RUNNER_TEMP/server";;
     'shell getprop sys.boot_completed') echo 1;;
     'shell getconf PAGE_SIZE') echo "$MOCK_PAGE_SIZE";;
-    'emu kill') echo cleaned > "$RUNNER_TEMP/cleanup";;
+    '-s emulator-5554 shell sync') echo sync >> "$RUNNER_TEMP/cleanup"; return "$MOCK_SYNC_EXIT";;
+    'emu kill') echo cleaned >> "$RUNNER_TEMP/cleanup";;
   esac
 }
 timeout() { shift; "$@"; }
 sleep() { :; }
 bash() { echo scenarios; return "$MOCK_SCENARIO_EXIT"; }
 """
-        for page_size, scenario_exit, boot_timeout, expected in (
-            ("4096", "0", "30", 0), ("4096", "7", "30", 7), ("16384", "0", "30", 1), ("4096", "0", "0", 1),
+        for page_size, scenario_exit, boot_timeout, sync_exit, expected in (
+            ("4096", "0", "30", "0", 0), ("4096", "0", "30", "1", 1),
+            ("4096", "7", "30", "0", 7), ("16384", "0", "30", "0", 1), ("4096", "0", "0", "0", 1),
         ):
             with self.subTest(page_size=page_size, scenario_exit=scenario_exit, boot_timeout=boot_timeout), tempfile.TemporaryDirectory() as directory:
                 emulator = Path(directory) / "emulator/emulator"
@@ -233,11 +236,14 @@ bash() { echo scenarios; return "$MOCK_SCENARIO_EXIT"; }
                     env=dict(os.environ, ANDROID_HOME=directory, RUNNER_TEMP=directory, AVD_NAME="test",
                              BOOT_TIMEOUT=boot_timeout, EMULATOR_PORT="5554", EMULATOR_OPTIONS="-no-window",
                              DISABLE_HW_ACCEL="false", DISABLE_ANIMATIONS="true", MOCK_PAGE_SIZE=page_size,
-                             MOCK_SCENARIO_EXIT=scenario_exit), capture_output=True, text=True, timeout=10,
+                             MOCK_SCENARIO_EXIT=scenario_exit, MOCK_SYNC_EXIT=sync_exit,
+                             ADB_LOCAL_TRANSPORT_MAX_PORT="5554"), capture_output=True, text=True, timeout=10,
                 )
                 self.assertEqual(expected, result.returncode, result.stderr)
                 self.assertEqual(page_size == "4096" and boot_timeout != "0", "scenarios" in result.stdout)
-                self.assertTrue((Path(directory) / "cleanup").exists())
+                self.assertEqual("emulator-5554 5555", (Path(directory) / "server").read_text().strip())
+                synced = page_size == "4096" and boot_timeout != "0" and scenario_exit == "0"
+                self.assertEqual((["sync"] if synced else []) + ["cleaned"], (Path(directory) / "cleanup").read_text().splitlines())
 
     @unittest.skipUnless(BASH and shutil.which("python3"), "Bash and python3 are required")
     def test_release_archive_validation_and_corrupt_cache_recovery(self):

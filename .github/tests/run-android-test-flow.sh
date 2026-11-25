@@ -376,7 +376,7 @@ if ! run_setup_phase "native 单元与 ZN 回调测试" bash .github/tests/run-n
   capture_preflight_diagnostics || true
   exit 1
 fi
-export SRT_SKIP_FINAL_CLEANUP=1
+export SRT_SKIP_FINAL_CLEANUP="${SRT_SKIP_FINAL_CLEANUP:-0}"
 export SRT_FAIL_FAST="${SRT_FAIL_FAST:-1}"
 export SRT_SCENARIO_TIMEOUT_SECONDS="${SRT_SCENARIO_TIMEOUT_SECONDS:-300}"
 # 场景取景（本地/手动回退解析）：CI 已由 prepare 的 outputs 把范围解析成

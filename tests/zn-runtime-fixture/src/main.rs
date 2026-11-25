@@ -186,6 +186,16 @@ fn main() {
                     line.push(b'\n');
                     libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), line.len());
                     libc::perror(c"zn fixture open".as_ptr());
+                    for file in [
+                        "/proc/self/status",
+                        "/proc/self/mountinfo",
+                        "/proc/self/attr/current",
+                    ] {
+                        if let Ok(contents) = std::fs::read_to_string(file) {
+                            let record = format!("zn fixture {file}\n{contents}\n");
+                            libc::write(libc::STDERR_FILENO, record.as_ptr().cast(), record.len());
+                        }
+                    }
                     libc::_exit(122);
                 }
                 let written = libc::write(fd, b"srx-zn-fixture\n".as_ptr().cast(), 15);

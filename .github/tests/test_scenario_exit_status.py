@@ -195,6 +195,13 @@ $ShellSandboxRel='Download/probe'
 $ShellSandboxRealDir='/real'
 $ShellSandboxBackendDir='/sandbox'
 $LogPath='/log'
+function Get-ConfigBackup { 'absent' }
+function Restore-ConfigBackup {}
+function Write-DeviceConfig([string]$Json, [string]$Path) {
+    $user = ($Json | ConvertFrom-Json).users.'0'
+    if ($Path -cne $ShellConfig -or !$user.enabled -or !$user.mapping_mode_only -or
+        ($user.sandboxed_paths -join ',') -cne $ShellSandboxRel) { throw 'unexpected shell profile' }
+}
 function Start-Sleep {}
 function Invoke-Adb {
     param($Arguments)
@@ -307,6 +314,37 @@ function Invoke-Su {}
                 self.assertIn(f"SCENARIO_COUNT={0 if fails and fail_fast else 42}", result.stdout)
                 self.assertIn(f"SUMMARY_COUNT={1 if fails else 0}", result.stdout)
                 self.assertEqual(1, result.stdout.splitlines().count("FAIL [basic]" if fails else "PASS [basic]"))
+
+    @unittest.skipUnless(PWSH, "requires PowerShell")
+    def test_device_root_command_requires_successful_uid_zero_probe(self):
+        source = (ROOT / ".github/tests/run-storage-redirect-scenarios.ps1").read_text(encoding="utf-8")
+        function = source[source.index("function Get-DeviceSuCommand {") : source.index("function Invoke-Su {")]
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$Serial = 'test-device'
+function Invoke-AdbWithTimeout($Arguments, $TimeoutSeconds) {
+    if ($Arguments[0] -ne 'shell' -or $TimeoutSeconds -le 0) { throw 'invalid probe' }
+    switch ($Arguments[1]) {
+        "su -c 'id -u'" { return $first }
+        "su 0 sh -c 'id -u'" { return $second }
+        default { throw 'unexpected probe' }
+    }
+}
+$first = @{ ExitCode = 0; Output = '0' }
+$second = @{ ExitCode = 1; Output = '' }
+if ((Get-DeviceSuCommand) -ne 'su -c') { throw 'primary' }
+$second = $first
+foreach ($first in @(@{ ExitCode = 0; Output = '2000' }, @{ ExitCode = 1; Output = '0' })) {
+    if ((Get-DeviceSuCommand) -ne 'su 0 sh -c') { throw 'fallback' }
+}
+$second = @{ ExitCode = 1; Output = 'denied' }
+try { Get-DeviceSuCommand; throw 'accepted invalid root' }
+catch { if ($_.Exception.Message -notlike '*No usable root shell on test-device*') { throw } }
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "root-probe.ps1"
+            path.write_text(function + script, encoding="utf-8")
+            subprocess.run([PWSH, "-NoProfile", "-File", str(path)], check=True, timeout=30)
 
     @unittest.skipUnless(PWSH, "需要 PowerShell 验证应用启动期限")
     def test_powershell_app_launch_is_bounded_and_preserves_wait_mode(self):
@@ -456,6 +494,56 @@ adb_su() {
             result = subprocess.run([BASH, "-e", "-c", script + "\n".join(lines) + "\necho 完成"], text=True, encoding="utf-8", capture_output=True, timeout=10)
             self.assertEqual(backend_status, result.returncode, result.stderr)
             self.assertEqual(backend_status == 0, "完成" in result.stdout)
+
+    @unittest.skipUnless(PWSH, "需要 PowerShell 验证禁用配置的目录读取")
+    def test_disabled_profile_requires_an_observed_directory_listing(self):
+        for host, suffix in (("bash", "sh"), ("pwsh", "ps1")):
+            source = (ROOT / ".github/tests" / f"run-storage-redirect-scenarios.{suffix}").read_text()
+            def section(start, end):
+                return source[source.index(start):source.index(end, source.index(start))]
+            if host == "bash":
+                body = section("storage_root_view_snapshot() {", "\n}") + "\n}\n"
+                body += section("assert_disabled_profile_not_captured() {", "\nprepare_root_view_parity_fixtures()")
+                body += '''
+REAL_ROOT=/storage/emulated/0
+app_pid() { echo 123; }
+adb() { echo 42; }
+adb_su() {
+    case "$1" in *"stat -c"*) echo 42;; *"ls -a"*)
+        case "$CASE" in failed) return 1;; partial) echo Download; return 1;; empty) return 0;; hidden) printf '%s\\n' . .. Download .transforms;; ok) printf '%s\\n' . .. Download;; esac;;
+        *) return 2;;
+    esac
+}
+assert_disabled_profile_not_captured scenario-23
+'''
+                command = [host, "-c", body]
+            else:
+                body = section("function Assert-DisabledProfileNotCaptured {", "\nfunction Invoke-StorageRootViewParityScenario")
+                body += '''
+$RealRoot='/storage/emulated/0'
+$script:Failures=[Collections.Generic.List[string]]::new()
+function Get-AppPid { '123' }
+function Invoke-Adb { $global:LASTEXITCODE=0; '42' }
+function Invoke-Su([string]$cmd) {
+    $global:LASTEXITCODE=0
+    if($cmd.Contains('stat -c')){'42';return}
+    if(!$cmd.Contains('ls -a')){throw $cmd}
+    if($env:CASE -eq 'empty'){return}
+    if($env:CASE -eq 'partial'){'Download';$global:LASTEXITCODE=1;return}
+    if($env:CASE -eq 'failed'){$global:LASTEXITCODE=1;return}
+    '.', '..', 'Download'
+    if($env:CASE -eq 'hidden'){'.transforms'}
+}
+$ok=Assert-DisabledProfileNotCaptured scenario-23
+$script:Failures
+if(!$ok){exit 1}
+'''
+                command = [host, "-NoProfile", "-Command", body]
+            for case in ("ok", "hidden", "failed", "partial", "empty"):
+                p = subprocess.run(command, env=dict(os.environ, CASE=case), text=True, capture_output=True, timeout=10)
+                with self.subTest(host=host, case=case):
+                    self.assertEqual(0 if case == "ok" else 1, p.returncode, (p.stdout, p.stderr))
+                    self.assertEqual(case == "ok", "disabled_profile_view_ok" in p.stdout)
 
     def test_first_failure_preserves_artifacts_and_stops(self):
         loop = FLOW[FLOW.index("failure_artifacts_captured=0\n") : FLOW.index('if [ "${SRT_SKIP_FINAL_CLEANUP', FLOW.index("failure_artifacts_captured=0\n"))]

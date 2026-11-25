@@ -346,7 +346,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             adb.write_text(
                 "#!/bin/sh\n"
                 "case \"$*\" in\n"
-                "  reboot) kill -TERM \"$EMULATOR_PID\" 2>/dev/null || true ;;\n"
+                "  reboot) printf 'reboot\\n' >> \"$MOCK_REBOOT_EVENTS\"; kill -TERM \"$EMULATOR_PID\" 2>/dev/null || true ;;\n"
                 "  'shell cat /proc/sys/kernel/random/boot_id') cat \"$MOCK_BOOT_ID\" ;;\n"
                 "  'shell getprop sys.boot_completed') printf '1\\n' ;;\n"
                 "  'kill-server') : ;;\n"
@@ -356,8 +356,9 @@ class ScenarioConsistencyTest(unittest.TestCase):
             )
             adb.chmod(0o755)
             harness = (
-                f"export PATH={root}:$PATH MOCK_BOOT_ID={boot_id}\n"
+                f"export PATH={root}:$PATH MOCK_BOOT_ID={boot_id} MOCK_REBOOT_EVENTS={root / 'reboot-events'}\n"
                 "export CURRENT_BOOT=old\n"
+                "adb_root() { [ \"$*\" = sync ] && printf 'sync\\n' >> \"$MOCK_REBOOT_EVENTS\"; }\n"
                 "sleep() { command sleep 0.01; }\n"
                 "wait_for_emulator_shutdown() { wait \"$EMULATOR_PID\" 2>/dev/null || true; }\n"
                 "start_emulator_and_boot() {\n"
@@ -379,6 +380,36 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("重新启动已打补丁的 AVD", result.stderr)
             self.assertIn("boot_id=new", result.stdout)
+            self.assertEqual(["sync", "reboot"], (root / "reboot-events").read_text().splitlines())
+
+    @unittest.skipUnless(shutil.which("bash"), "需要 Bash 验证重启前落盘失败")
+    def test_ksu_reboot_stops_when_sync_fails(self) -> None:
+        source = read(".github/tests/install-storage-redirect-module.sh")
+        reboot = section(source, "wait_for_reboot() {", "# 先固定可用的 su 形式")
+        harness = (
+            "EMULATOR_PID=''\n"
+            "adb_root() { echo sync_failed >&2; return 1; }\n"
+            + reboot + "\nwait_for_reboot 1\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adb = Path(directory) / "adb"
+            events = Path(directory) / "reboot-events"
+            adb.write_text(
+                "#!/bin/sh\ncase \"$*\" in\n"
+                "  'shell cat /proc/sys/kernel/random/boot_id') printf 'old\\n' ;;\n"
+                "  *) printf '%s\\n' \"$*\" >> \"$MOCK_REBOOT_EVENTS\"; exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            adb.chmod(0o755)
+            result = subprocess.run(
+                [shutil.which("bash"), "-eu", "-c", f"export PATH={directory}:$PATH MOCK_REBOOT_EVENTS={events}\n" + harness],
+                text=True, capture_output=True, timeout=5,
+            )
+            self.assertFalse(events.exists(), "落盘失败后不得发起重启或继续轮询")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("sync_failed", result.stderr)
+        self.assertIn("重启前落盘失败", result.stderr)
 
     def test_module_verify_skips_wait_when_post_fs_data_missed(self) -> None:
         script = read(".github/tests/install-storage-redirect-module.sh")
@@ -558,26 +589,24 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # root shell 创建的公共目录必须保留 media_rw 属主，应用的 emulated-storage 视图才能遍历。
         bash_fix = section(self.bash, "fix_shared_fixture_permissions() {", "adb_root() {")
         self.assertIn("chown -R 1023:1023", bash_fix)
-        self.assertIn("BACKEND_ROOT}/Download'/Srt*", bash_fix)
+        self.assertIn("$BACKEND_FIXTURE_PATHS", bash_fix)
         bash_targets = self.bash.split("clean_targets() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("fix_shared_fixture_permissions", bash_targets)
         ps_fix = section(self.powershell, "function Fix-SharedFixturePermissions", "function Assert-FixtureRootsEmpty")
         self.assertIn("chown -R 1023:1023", ps_fix)
-        self.assertIn("'$BackendRoot/Download'/Srt*", ps_fix)
-        self.assertIn("'$RealRoot/Download'/Srt*", ps_fix)
-        self.assertIn("'$RealRoot/SrtRuleSandbox'", ps_fix)
-        self.assertIn("'$RealRoot/DCIM/SrtRuleSibling'", ps_fix)
+        self.assertIn("$script:PublicFixturePaths[$BackendRoot]", ps_fix)
+        self.assertIn("$script:PublicFixturePaths[$RealRoot]", ps_fix)
         ps_targets = section(self.powershell, "function Clear-Targets", "function Remove-TestTargetArtifacts")
         self.assertIn("Fix-SharedFixturePermissions", ps_targets)
         self.assertIn("Fix-SharedFixturePermissions", self.powershell[self.powershell.index("function Invoke-Scenario"):])
 
     def test_backend_view_invalidation_covers_rule_fixture_aliases(self) -> None:
         bash_invalidation = section(self.bash, "invalidate_backend_fixture_view() {", "clean_targets() {")
-        self.assertIn("${BACKEND_ROOT}/SrtRuleSandbox", bash_invalidation)
-        self.assertIn("${BACKEND_ROOT}/DCIM/SrtRuleSibling", bash_invalidation)
-        ps_fix = section(self.powershell, "function Fix-SharedFixturePermissions", "function Assert-FixtureRootsEmpty")
-        self.assertIn("'$RealRoot/SrtRuleSandbox'", ps_fix)
-        self.assertIn("'$RealRoot/DCIM/SrtRuleSibling'", ps_fix)
+        self.assertIn("$BACKEND_FIXTURE_PATHS", bash_invalidation)
+        self.assertIn("$script:PublicFixturePaths[$RealRoot]", self.powershell)
+        fixtures = read(".github/tests/public-fixture-directories.txt").splitlines()
+        self.assertIn("SrtRuleSandbox", fixtures)
+        self.assertIn("DCIM/SrtRuleSibling", fixtures)
 
     def test_fixture_operations_bypass_app_visible_view(self) -> None:
         # /storage/emulated/0 是应用视图，刚应用的只读/映射配置会覆盖夹具父目录，root shell
@@ -717,15 +746,11 @@ class ScenarioConsistencyTest(unittest.TestCase):
             targets.update(re.findall(r"'" + re.escape(prefix) + r"/([A-Za-z0-9_./-]+)'", group))
         return targets
 
-    def test_alias_fixture_cleanup_covers_all_aliases(self) -> None:
-        ps = section(self.powershell, "function Clear-AliasMediaStoreFixture", "function Invoke-NestedMappingChainScenario")
-        for token in ("$QqAliasRequestRoot", "$RealRoot/Download/QQ", "$QqAliasMappedRoot", "Remove-MediaStoreRowsByPattern"):
-            self.assertIn(token, ps)
-        self.assertLess(ps.index("    Clear-AliasMediaStoreFixture"), ps.index("Invoke-ServiceCase"))
-        bash = section(self.bash, "clear_alias_mediastore_fixture() {", "run_nested_mapping_chain_scenario() {")
-        for token in ("Tencent/QQfile_recv", "Download/QQ", "Download/SrtQqAliasMapped", "srt_qq_alias_existing"):
-            self.assertIn(token, bash)
-        self.assertIn("export -f clear_alias_mediastore_fixture remove_mediastore_rows_by_pattern run_qq_alias_mapped_existing_file_scenario", self.bash)
+    def test_alias_fixture_cleanup_uses_the_created_row(self) -> None:
+        for source in (self.bash, self.powershell):
+            self.assertNotRegex(source, r"(?:content delete|content query).*srt_qq_alias_existing")
+        fixtures = read(".github/tests/public-fixture-files.txt").splitlines()
+        self.assertIn("Download/QQ/srt_qq_alias_existing.bin", fixtures)
 
     def test_bash_case_patterns_use_posix_single_backslash(self) -> None:
         # 单引号不会折叠反斜杠，`\\[` 会原样传给 grep；ubuntu-latest 的 GNU grep 3.11 按
@@ -767,13 +792,13 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(ps_start.index("Enter-DeviceRunLock"),
                         ps_start.index("Grant-TestAppStoragePermissions"))
         self.assertLess(ps_start.index("Grant-TestAppStoragePermissions"),
-                        ps_start.index("Backup-GlobalConfig"))
+                        ps_start.index("Get-ConfigBackup"))
         self.assertIn("try { Invoke-TestArtifactCleanup } finally { Exit-DeviceRunLock }", ps_start)
         bash_start = self.bash[self.bash.index("trap finish_test_run EXIT") :]
         self.assertLess(bash_start.index("acquire_device_run_lock"),
                         bash_start.index("/grant-storage-test-permissions.sh"))
         self.assertLess(bash_start.index("/grant-storage-test-permissions.sh"),
-                        bash_start.index("backup_global_config"))
+                        bash_start.index("read_config_backup"))
         finish = section(self.bash, "finish_test_run() {", "cleanup_done=0")
         self.assertIn('if [ "$device_run_lock_held" -eq 1 ]', finish)
         self.assertLess(finish.index("cleanup_test_artifacts"), finish.index("release_device_run_lock"))
@@ -1318,7 +1343,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 两种运行器在 API 37+ 模拟器上通过 adb reverse 使用回环地址；真机保留内置 URL。
         script = read(".github/tests/run-storage-redirect-scenarios.sh")
         powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
-        self.assertIn('adb reverse "tcp:$dl_port" "tcp:$dl_port"', script)
+        self.assertIn('adb reverse --no-rebind "tcp:$dl_port" "tcp:$dl_port"', script)
+        self.assertIn('"reverse", "--no-rebind", "tcp:$dlPort", "tcp:$dlPort"', powershell)
         self.assertIn('dl_url="http://127.0.0.1:$dl_port/srt_download.bin"', script)
         self.assertIn('if [ "${dl_api:-0}" -ge 37 ] 2>/dev/null', script)
         self.assertIn('if (-not $dlUrl -and $isEmulator)', powershell)
@@ -1392,13 +1418,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn("$DL_OWNER_PROBE_NAME", script)
 
     def test_provider_sandbox_accepts_both_governance_topologies(self) -> None:
-        # 场景 38 断言「下载提供器自身的原生写入被模块接管」。提供器被纳入
-        # system-writer 后（场景 39 需要它在自己进程内解析映射请求路径），pre 阶段
-        # 直接走 `writer skip companion mount`，不再发挂载请求，于是只认
-        # `perf companion mount ... ok=true` 的判据会把修好 39 的改动判成 38 回归
-        # （2026-10-26 本地实证：单跑场景 38 稳定 EXIT=1，日志里只有
-        # `hook refresh start profile=system-writer pkg=com.android.providers.downloads`）。
-        # 因此判据必须是拓扑无关的：mount 拓扑或 per-caller hook 拓扑命中其一即通过。
+        # system-writer 在进程内接管而不请求 companion 挂载；场景 38 接受任一拓扑，
+        # 但 hook 路径必须以安装完成为准，开始安装的日志不足以证明接管成功。
         script = read(".github/tests/run-storage-redirect-scenarios.sh")
         body = section(
             script, "run_provider_sandbox_scenario() {", "\nrun_download_owner_attribution_scenario()"
@@ -1407,14 +1428,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "perf companion mount pkg=${PROVIDER_PACKAGE} pid=[0-9]+ .*ok=true", body
         )
         self.assertIn(
-            "hook refresh start profile=system-writer pkg=${PROVIDER_PACKAGE} ", body
+            "hook install done profile=system-writer pkg=${PROVIDER_PACKAGE}([[:space:]]|$)", body
         )
         # 两条判据必须落在同一个 if 里（`||` 串联），否则等于只有一条生效。
         lines = body.splitlines()
         hook_index = [
             index
             for index, line in enumerate(lines)
-            if "hook refresh start profile=system-writer" in line and "adb_su" in line
+            if "hook install done profile=system-writer" in line and "adb_su" in line
         ]
         self.assertTrue(hook_index, "缺少 system-writer hook 判据")
         # `||` 写在上一条 stderr 检查行的行尾，因此看前一行的结尾。
@@ -1434,11 +1455,27 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "\nfunction Invoke-DownloadOwnerAttributionScenario",
         )
         self.assertIn("perf companion mount pkg=$ProviderPackage", ps_body)
-        self.assertIn("hook refresh start profile=system-writer pkg=$ProviderPackage", ps_body)
+        self.assertIn("hook install done profile=system-writer pkg=$ProviderPackage([[:space:]]|$)", ps_body)
         self.assertIn("if ($mountOk -or $hookOk)", ps_body)
         self.assertIn("sandbox=0", ps_body)
         self.assertIn("policy_registration_failed", ps_body)
         self.assertIn("fuse redirect mount start pkg=$ProviderPackage", ps_body)
+
+    @unittest.skipUnless(os.name == "posix", "需要 grep 执行设备日志判据")
+    def test_provider_hook_marker_requires_completed_install(self) -> None:
+        package = "com.android.providers.downloads"
+        for script, variable in ((self.bash, "${PROVIDER_PACKAGE}"), (self.powershell, "$ProviderPackage")):
+            pattern = re.search(r"grep -Eq '(hook install done [^']+)'", script).group(1)
+            pattern = pattern.replace(variable, package)
+            for message, matches in (
+                (f"hook install done profile=system-writer pkg={package}", True),
+                (f"hook install done profile=system-writer pkg={package} extra=1", True),
+                (f"hook install done profile=system-writer pkg={package}.other", False),
+                (f"hook refresh start profile=system-writer pkg={package}", False),
+            ):
+                with self.subTest(script=variable, message=message):
+                    result = subprocess.run(["grep", "-Eq", pattern], input=message + "\n", text=True)
+                    self.assertEqual(result.returncode, 0 if matches else 1)
 
     def test_scenario_40_runs_all_attribution_checks_in_both_runners(self) -> None:
         bash_runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
@@ -2189,6 +2226,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "test-flow-shared-fuse-before.txt",
             "test-flow-shared-fuse-after.txt",
             "media-health.txt",
+            "storage-bad-state-*.txt",
         }
         for workflow in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
             source = read(workflow)
@@ -2201,6 +2239,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
             build = section(source, "      - name: Build x86_64 module zip and test app", "      - name: Upload")
             test_flow = section(source, "  test-flow:", "  test-flow-required:")
             artifact = test_flow[test_flow.index("          path: |") :]
+            upload = section(test_flow, "      - name: Upload test-flow artifacts", "      - name: Upload shared FUSE snapshots")
+            self.assertIn("'temp/test-flow/**/storage-bad-state-*.txt'", upload)
+            self.assertIn("'temp/test-flow/**/scenario-*-placement.txt'", upload)
+            self.assertIn("            temp/test-flow/**/scenario-*-placement.txt\n", upload)
 
             self.assertIn("components: clippy", rust_toolchain)
             self.assertIn(
@@ -2308,7 +2350,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertLess(recovery.index("wait_storage_ready"), recovery.index("adb reboot"))
         startup = self.bash[self.bash.index("wait_boot_completed\nacquire_device_run_lock\n") :]
         self.assertIn("ensure_initial_storage_ready", startup)
-        self.assertLess(startup.index("backup_global_config"), startup.index("ensure_initial_storage_ready"))
+        self.assertLess(startup.index("read_config_backup"), startup.index("ensure_initial_storage_ready"))
 
     def test_windows_test_flow_keeps_python_command_as_object(self) -> None:
         script = read("scripts/verify-test-flow.ps1")
@@ -2370,8 +2412,8 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertNotIn("contentResolver.delete", all_case)
         self.assertNotIn("createdMedia", all_case)
         self.assertIn("cleanupBootstrapDirs(bootstrapDirs)", all_case)
-        self.assertIn("Remove-RandomMediaStoreRows", self.powershell)
-        self.assertIn("remove_random_mediastore_rows", self.bash)
+        self.assertIn("Remove-CreatedMediaStoreRows", self.powershell)
+        self.assertIn("remove_created_mediastore_rows", self.bash)
 
     def test_device_flow_prevents_and_restores_background_freezing(self) -> None:
         for source in (self.powershell, self.bash):
@@ -2385,7 +2427,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn('",${APP_ID},"', self.bash)
         self.assertIn("original_app_inactive", self.bash)
 
-        ps_start = self.powershell[self.powershell.index("try {\n    Grant-TestAppStoragePermissions") :]
+        ps_start = self.powershell.split("\nEnter-DeviceRunLock\n", 1)[1]
         self.assertLess(
             ps_start.index("Backup-DeviceExecutionState"),
             ps_start.index("Prepare-DeviceExecutionState"),
@@ -2481,10 +2523,14 @@ class ScenarioConsistencyTest(unittest.TestCase):
             self.assertIn("storage.redirect.x/zygisk|libsrx_core", source)
         self.assertNotIn("skip_media_provider_restart", bash_wait)
         self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", bash_wait)
+        self.assertIn("start_ticks=${current_start_ticks}", bash_wait)
         self.assertNotIn("skip_media_provider_restart", ps_wait)
         self.assertIn("stage=init_ok pid=$mediaPid boot_id=$bootId", ps_wait)
+        self.assertIn("start_ticks=$currentStartTicks", ps_wait)
         self.assertIn("for attempt in 1 2", bash_wait)
         self.assertIn("$attempt -le 2", ps_wait)
+        self.assertIn('wait_storage_ready "${label}-storage-attempt-${attempt}" 45', bash_wait)
+        self.assertIn('Wait-Storage "$Label-storage-attempt-$attempt" 45', ps_wait)
         self.assertIn("restart_media_provider_with_hook_ready", bash_scenario)
         self.assertIn("Restart-MediaProviderWithHookReady", ps_scenario)
         self.assertLess(
@@ -2615,14 +2661,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
             app_pid = source.index("initial_pid", before_case) if "initial_pid" in source else source.index("initialPid", before_case)
             self.assertGreater(app_pid, before_case)
 
-    def test_mount_confirmation_ignores_stale_same_package_pid(self) -> None:
-        bash_wait = section(self.bash, "wait_app_mount_confirmed()", "scenario_from_label()")
-        ps_wait = section(self.powershell, "function Wait-AppMountConfirmed", "function Wait-MediaProviderReady")
-        self.assertIn("for (i=1; i<=NF; i++)", bash_wait)
-        self.assertIn("END {if (max !=", bash_wait)
-        self.assertIn("for (i=1; i<=NF; i++)", ps_wait)
-        self.assertIn("END {if (max !=", ps_wait)
-
     def test_auto_fuse_parent_mount_covers_nested_mapping(self) -> None:
         mount_paths = section(
             self.bash,
@@ -2736,6 +2774,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", wait)
         self.assertNotIn("media_provider_hook_check_skipped", wait)
         self.assertIn("stage=init_ok pid=${pid} boot_id=${boot_id}", wait)
+        self.assertIn("start_ticks=${current_start_ticks}", wait)
         self.assertIn('wait_media_provider_hook_ready "module-boot" 60', recovery)
         self.assertIn('wait_media_provider_hook_ready "module-restart" 60', recovery)
         self.assertIn("wait_for_reboot 420", recovery)
@@ -2883,8 +2922,31 @@ class ScenarioConsistencyTest(unittest.TestCase):
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")
         boot = section(flow, "wait_boot_completed()", "backup_device_execution_state()")
         self.assertIn("adb get-state", boot)
-        self.assertIn("adb reconnect offline", boot)
+        self.assertIn('adb -s "$ANDROID_SERIAL" reconnect', boot)
+        self.assertNotIn("adb reconnect offline", boot)
         self.assertIn("timeout 10s adb shell getprop sys.boot_completed", boot)
+
+    def test_fixture_preflight_waits_for_a_readable_volume(self) -> None:
+        shell = read(".github/tests/run-storage-redirect-scenarios.sh")
+        powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
+        wait = section(shell, "wait_storage_ready() {", "wait_scenario_app_view() {")
+        self.assertIn('wait_storage_ready "fixture-preflight" 90\ninitialize_public_fixture_paths', shell)
+        ps_start = powershell[powershell.index("$script:ExitCode = 0"):]
+        self.assertLess(ps_start.index('Wait-Storage "fixture-preflight"'), ps_start.index("Initialize-PublicFixturePaths"))
+        with tempfile.TemporaryDirectory() as directory:
+            driver = '''REAL_ROOT=/storage/emulated/0
+sleep() { :; }
+timeout() {
+    [[ "$*" == *"ls -A '$REAL_ROOT'"* ]] || return 2
+    if [ ! -e mounted ]; then touch mounted; return 1; fi
+    echo ready > received
+}
+print_storage_state() { :; }
+'''
+            run = subprocess.run(["bash", "-c", driver + wait + "\nwait_storage_ready preflight 1"],
+                                 cwd=directory, capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, run.returncode, run.stderr)
+            self.assertTrue((Path(directory) / "received").exists())
 
     def test_bash_root_timeout_wraps_the_adb_executable_not_shell_function(self) -> None:
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")
@@ -2895,7 +2957,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("adb_su_timeout()", root)
         self.assertIn('adb_su_timeout 30 ": > \'$LOG_PATH\' 2>/dev/null || true"', start)
         self.assertNotRegex(flow, r"timeout(?: --foreground)? [0-9]+s? adb_su(?:\s|$)")
-        self.assertIn("cat \\\"\\$q/cmdline\\\" 2>/dev/null", flow)
+        self.assertIn('adb_su_timeout "$host_timeout_seconds"', section(flow, "wait_app_mount_confirmed()", "scenario_from_label()"))
         self.assertIn('adb_su_timeout "$host_timeout_seconds"', section(flow, "wait_service_result()", "scenario_from_label()"))
         self.assertIn('adb_su_timeout "$host_timeout_seconds"', section(flow, "wait_config_applied()", "service_case_timeout_seconds()"))
 
@@ -3003,7 +3065,7 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
         self.assertIn("optional_storage_alias_absent path=", storage)
 
-    def test_media_provider_readiness_rejects_query_errors_and_uses_ps_fallback(self) -> None:
+    def test_media_provider_readiness_rejects_query_errors_and_uses_registered_provider(self) -> None:
         flow = read(".github/tests/run-storage-redirect-scenarios.sh")
         query = section(flow, "media_provider_query_ready()", "wait_media_provider_ready()")
         self.assertIn('timeout 15s adb shell content query', query)
@@ -3020,7 +3082,10 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "timeout --kill-after=30s 180s bash -c 'capture_test_flow_artifacts'", flow
         )
         pid = section(flow, "media_provider_pid()", "wait_media_provider_hook_ready()")
-        self.assertIn("ps -A -o PID,NAME,ARGS", pid)
+        self.assertIn('adb shell sh < "$SRT_MEDIA_PROVIDER_PID_SCRIPT"', pid)
+        self.assertIn('media-provider-pid.sh', flow)
+        self.assertIn('media-provider-pid.sh', self.powershell)
+        self.assertIn('media-provider-pid.sh', read(".github/tests/install-storage-redirect-module.sh"))
 
     def test_bash_prepares_mapping_source_on_real_backend(self) -> None:
         prepare = section(
@@ -3504,9 +3569,12 @@ class ScenarioConsistencyTest(unittest.TestCase):
         """
         helper = section(self.bash, "assert_fixture_roots_empty() {", "\nclean_results() {")
         # find 的失败必须传播（`|| exit 1`），并且输出字段供残留对照；不得用 -maxdepth 收窄。
-        self.assertIn("-type f -printf", helper)
-        self.assertIn("|| exit 1", helper)
-        self.assertNotIn("-maxdepth 2", helper)
+        check = read(".github/tests/check-public-fixtures.sh")
+        self.assertIn("-type f -printf", check)
+        self.assertIn("|| exit 1", check)
+        self.assertNotIn("-maxdepth 2", check)
+        self.assertIn("set -- scan $VISIBLE_DOWNLOAD_FIXTURE_PATHS; $PUBLIC_FIXTURE_CHECK", helper)
+        self.assertIn("set -- scan $BACKEND_DOWNLOAD_FIXTURE_PATHS; $PUBLIC_FIXTURE_CHECK", helper)
         self.assertIn("fixture_scan_failed", helper)
         self.assertIn("fixture_residue label=", helper)
         runner = section(self.bash, "run_scenario() {", "\n# 与 PowerShell 共用设备端锁")
@@ -3521,49 +3589,26 @@ class ScenarioConsistencyTest(unittest.TestCase):
         ps = section(self.powershell, "function Assert-FixtureRootsEmpty", "function Clear-Targets")
         self.assertIn("fixture_residue label=", ps)
         # 与 SH 同口径：带输出字段的 find，且失败必须传播。
-        self.assertIn("-type f -printf", ps)
-        self.assertIn("|| exit 1", ps)
-        self.assertNotIn("-maxdepth 2", ps)
+        self.assertIn("set -- scan $($script:DownloadFixturePaths[$RealRoot]); $script:PublicFixtureCheck", ps)
+        self.assertIn("set -- scan $($script:DownloadFixturePaths[$BackendRoot]); $script:PublicFixtureCheck", ps)
         self.assertIn("fixture_scan_failed", ps)
         ps_runner = section(self.powershell, "function Invoke-Scenario {", "\n    $scenarioOk = switch")
         self.assertIn('Assert-FixtureRootsEmpty "scenario-$Scenario"', ps_runner)
         self.assertIn("-notin @(9, 10, 20, 21, 22, 28, 31, 38)", ps_runner)
 
-    def test_fixture_cleanup_sweeps_directories_by_prefix(self) -> None:
-        """夹具清理必须按 `Srt*` 通配动态枚举目录，不能只依赖手写清单。
-
-        手写清单一定会漏：场景 29 的前置断言就抓到过
-        `fixture_residue .../SrtQqAliasMapped/srt_qq_alias_existing.bin`——该目录只被定义为变量、
-        从未进入清理清单，于是场景 36 写入的文件残留到下一轮，把场景 29 卡在入口。
-        枚举口径要与场景前置断言一致（同一个 `Srt*` 通配），否则清理与断言会各说各话。
-        """
-        # bash：可见路径与后端路径各要有一条通配清扫。两条都写作 `${REAL_ROOT}/...`（该变量在
-        # 函数中途被切到后端根），所以只能按「相对切换点的位置」区分：可见那条必须在切换之前，
-        # 后端那条必须在切换之后。
-        clean = section(self.bash, "clean_targets() {", "\n}\n")
-        switch = clean.index('local REAL_ROOT="${BACKEND_ROOT}"')
-        sweeps = [index for index in range(len(clean)) if clean.startswith("'/Srt*", index)]
-        self.assertGreaterEqual(len(sweeps), 2, "可见路径与后端路径都要有 Srt* 通配清扫")
-        self.assertTrue(
-            any(index < switch for index in sweeps), "可见路径缺少 Srt* 通配清扫"
-        )
-        self.assertTrue(
-            any(index > switch for index in sweeps), "后端路径缺少 Srt* 通配清扫"
-        )
-        # 通配清扫必须在后端 mkdir 之前：清扫会把目录删掉，mkdir 负责重建。
-        self.assertLess(
-            sweeps[0], clean.index("mkdir -p '${REAL_ROOT}/Download/SrtProbe'")
-        )
-
-        # PowerShell：同样的两条。
-        clear = section(self.powershell, "function Clear-Targets {", "\nfunction Remove-TestTargetArtifacts")
-        self.assertIn("'$RealRoot/Download'/Srt*", clear)
-        self.assertIn("'$BackendRoot/Download'/Srt*", clear)
-        self.assertLess(
-            clear.index("/Srt*"), clear.index("mkdir -p '$BackendRoot/Download/SrtProbe'")
-        )
-        remove = section(self.powershell, "function Remove-TestTargetArtifacts", "\nfunction ")
-        self.assertIn("'$BackendRoot/Download'/Srt*", remove)
+    def test_public_fixture_manifest_covers_the_numbered_runners(self) -> None:
+        fixtures = set(read(".github/tests/public-fixture-directories.txt").splitlines())
+        for path in fixtures:
+            self.assertRegex(path, r"^(?:(?:Download|Documents|Pictures|DCIM)/)?[.]?[a-zA-Z][a-zA-Z0-9_-]+$")
+        for source in (self.bash, self.powershell):
+            literal_roots = set(re.findall(r"(?:Download|DCIM|Pictures|Documents)/(?:Srt[a-zA-Z0-9]+)(?=[/'\",} ])", source))
+            literal_roots.discard("Download/SrtMutation")
+            self.assertFalse(literal_roots - fixtures, literal_roots - fixtures)
+        self.assertTrue({"Download/SrtMutation" + name for name in ("Sandbox", "Allowed", "Request", "RequestSibling", "Mapped")} <= fixtures)
+        self.assertTrue({"Download/Test", "Pictures/Nnngram", ".xlDownload", ".xldownload", ".SrtRootDotVisible"} <= fixtures)
+        for runner, guard, backup in ((self.bash, "initialize_public_fixture_paths", "config_backups_ready=1"),
+                                      (self.powershell, "Initialize-PublicFixturePaths", "$script:ConfigBackupsReady = $true")):
+            self.assertLess(runner.rindex(guard), runner.rindex(backup))
 
     def test_scenario_scripts_do_not_match_volatile_diagnostic_log_fields(self) -> None:
         """测试脚本只允许依赖稳定的对外日志串，不得匹配诊断字段。
@@ -3875,13 +3920,54 @@ class ScenarioConsistencyTest(unittest.TestCase):
         """
         script = read(".github/tests/run-storage-redirect-scenarios.sh")
         line = next(
-            (item for item in script.splitlines() if "http.server" in item),
+            (item for item in script.splitlines() if '"$server_script")' in item and 'exec ' in item),
             None,
         )
         self.assertIsNotNone(line, "下载取数服务的启动行已被移除，请同步本守卫")
-        self.assertIn("exec python3 -m http.server", line)
+        self.assertIn('exec "$SRT_HOST_PYTHON" "$server_script"', line)
         self.assertIn("</dev/null", line)
-        self.assertNotIn("&& python3 -m http.server", line)
+
+    def test_download_owner_waits_until_provider_query_succeeds(self) -> None:
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        powershell = read(".github/tests/run-storage-redirect-scenarios.ps1")
+        shell_wait = section(script, "wait_download_provider_ready() {", "run_download_owner_attribution_scenario() {")
+        ps_wait = section(powershell, "function Wait-DownloadProviderReady {", "# 两种运行器共用设备端原子目录锁")
+        self.assertIn('adb_su_timeout 12 "content query --uri content://downloads/my_downloads', shell_wait)
+        self.assertIn('"$attempt" -le 6', shell_wait)
+        self.assertIn('Invoke-AdbWithTimeout', ps_wait)
+        self.assertIn('content query --uri content://downloads/my_downloads', ps_wait)
+        self.assertIn('$attempt -le 6', ps_wait)
+        download_shell = section(script, "run_download_owner_attribution_scenario() {", "run_system_uid_attribution_scenario() {")
+        download_ps = section(powershell, "function Invoke-DownloadOwnerAttributionScenario {", "function Invoke-SystemUidAttributionScenario")
+        self.assertIn("wait_download_provider_ready || return 1", download_shell)
+        self.assertIn("export -f wait_download_provider_ready", script)
+        self.assertIn("if (-not (Wait-DownloadProviderReady)) { return $false }", download_ps)
+        self.assertNotIn("pidof '${PROVIDER_PACKAGE}'", download_shell)
+        self.assertNotIn("pidof '$ProviderPackage'", download_ps)
+
+    def test_download_provider_requires_a_valid_cursor_reply(self) -> None:
+        script = read(".github/tests/run-storage-redirect-scenarios.sh")
+        helper = section(script, "wait_download_provider_ready() {", "run_download_owner_attribution_scenario() {")
+        driver = '''sleep() { :; }
+adb_su_timeout() {
+    if [ "$1" != 12 ] || [[ "$2" != *"--where _id=-1" ]]; then return 2; fi
+    case "$MODE" in
+        good) echo 'No result found.' ;;
+        bad) echo 'Error while accessing provider:downloads' >&2 ;;
+        recover) if [ -e "$MARKER" ]; then echo 'No result found.'; else touch "$MARKER"; return 124; fi ;;
+    esac
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            for mode, success, attempts in [("good", True, 0), ("bad", False, 6), ("recover", True, 1)]:
+                with self.subTest(mode=mode):
+                    run = subprocess.run(
+                        ["bash", "-c", driver + helper + "\nwait_download_provider_ready"],
+                        cwd=temp, env=dict(os.environ, MODE=mode, MARKER="first-attempt"),
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(success, run.returncode == 0, run.stderr)
+                    self.assertEqual(attempts, run.stderr.count("download_provider_not_ready"))
 
     def test_emulator_is_killed_only_on_watchdog_timeout(self) -> None:
         """正常失败路径不得提前杀模拟器。

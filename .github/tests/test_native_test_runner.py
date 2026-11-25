@@ -31,6 +31,15 @@ for name in (("srx_core", "srx_daemon") if sys.argv[1] == "test" else ("zn-runti
                       "target": {"name": name}, "profile": {"test": sys.argv[1] == "test"}}))
 ''')
                 cargo.chmod(0o755)
+                compiler = root / "x86_64-linux-android29-clang"
+                compiler.write_text('''#!/usr/bin/env python3
+import sys
+from pathlib import Path
+assert ".github/tests/storage-view-fixture.c" in sys.argv
+assert "-Werror" in sys.argv
+Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture")
+''')
+                compiler.chmod(0o755)
                 result = subprocess.run(
                     [BASH, ".github/scripts/build_native_tests.sh", "x86_64-linux-android", str(output)],
                     cwd=ROOT, capture_output=True, text=True, timeout=15,
@@ -41,6 +50,7 @@ for name in (("srx_core", "srx_daemon") if sys.argv[1] == "test" else ("zn-runti
                 if missing:
                     self.assertEqual(b"stale", (output / "srx_daemon-tests").read_bytes())
                 else:
+                    self.assertEqual(b"fixture", (output / "storage-view-fixture").read_bytes())
                     for name in ("srx_core", "srx_daemon", "zn-runtime-fixture"):
                         target = name if name == "zn-runtime-fixture" else name + "-tests"
                         self.assertEqual(name.encode(), (output / target).read_bytes())
