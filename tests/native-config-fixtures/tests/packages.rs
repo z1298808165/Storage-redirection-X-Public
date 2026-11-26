@@ -79,13 +79,15 @@ fn app_inventory_keeps_negative_icon_resource_ids() {
     assert_eq!(apps[1].icon, 2_130_903_040);
 
     // 边界：i32::MIN 是可表示的最小资源 ID；再小一就必须拒绝（溢出而非静默截断）。
-    let min_row = "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483648\n";
+    let min_row =
+        "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483648\n";
     assert_eq!(
         parse_app_inventory(min_row, 0).unwrap()[0].icon,
         i32::MIN,
         "i32::MIN 应保真"
     );
-    let underflow = "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483649\n";
+    let underflow =
+        "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483649\n";
     assert!(
         parse_app_inventory(underflow, 0).is_err(),
         "超出 i32 范围的资源 ID 必须拒绝"
