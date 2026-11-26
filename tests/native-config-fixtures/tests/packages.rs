@@ -61,6 +61,52 @@ fn app_inventory_reads_versioned_seven_column_format() {
 }
 
 #[test]
+fn app_inventory_keeps_negative_icon_resource_ids() {
+    // 资源包 ID 高位为 1 时 `ApplicationInfo.icon` 作为有符号 int 是负数，
+    // 例如 B 站（资源包 ID 0x90）的启动器图标 `0x900E0000` 即 `-1878130688`。
+    // 这是**有效**资源 ID：归零会把它换成系统默认图标，属功能回退。
+    // 因此负数必须保真，且不得因单个负值使整份清单被拒（真机 566 行清单曾整体作废）。
+    let v2 = concat!(
+        "#srx-inventory\t2\n",
+        "0\t10393\t0\tcom.padi.pilipili\tPILIPILI\t%2Fdata%2Fapp%2Fbili%2Fbase.apk\t-1878130688\n",
+        "0\t10400\t1\tcom.example.system\tSys\t%2Fsystem%2Fapp.apk\t2130903040\n",
+    );
+    let apps = parse_app_inventory(v2, 0).unwrap();
+    assert_eq!(apps.len(), 2);
+    assert_eq!(apps[0].icon, -1_878_130_688);
+    assert_eq!(apps[0].label, "PILIPILI");
+    assert_eq!(apps[0].apk_path, "/data/app/bili/base.apk");
+    assert_eq!(apps[1].icon, 2_130_903_040);
+
+    // 边界：i32::MIN 是可表示的最小资源 ID；再小一就必须拒绝（溢出而非静默截断）。
+    let min_row = "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483648\n";
+    assert_eq!(
+        parse_app_inventory(min_row, 0).unwrap()[0].icon,
+        i32::MIN,
+        "i32::MIN 应保真"
+    );
+    let underflow = "#srx-inventory\t2\n0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483649\n";
+    assert!(
+        parse_app_inventory(underflow, 0).is_err(),
+        "超出 i32 范围的资源 ID 必须拒绝"
+    );
+}
+
+#[test]
+fn app_inventory_still_rejects_malformed_icon_fields() {
+    // 放宽符号位不等于放弃校验：icon 的形态由我方生成，畸形即协议违约，必须暴露。
+    for icon in ["", "-", "--1", "1-", "abc", "1.5", " 1", "0x90", "+1"] {
+        let row = format!(
+            "#srx-inventory\t2\n10\t1010123\t0\tcom.example.app\tExample\t%2Fdata%2Fapp.apk\t{icon}\n"
+        );
+        assert!(
+            parse_app_inventory(&row, 10).is_err(),
+            "malformed icon accepted: {icon:?}"
+        );
+    }
+}
+
+#[test]
 fn app_inventory_rejects_wrong_user_duplicate_packages_and_bad_fields() {
     for invalid in [
         (

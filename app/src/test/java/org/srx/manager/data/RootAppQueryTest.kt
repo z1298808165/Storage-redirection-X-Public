@@ -72,6 +72,44 @@ class RootAppQueryTest {
   }
 
   @Test
+  fun keepsNegativeIconResourceIds() {
+    // 资源包 ID 高位为 1 时 `ApplicationInfo.icon` 作为有符号 int 是负数，
+    // 例如 B 站（资源包 ID 0x90）的启动器图标 0x900E0000 即 -1878130688。
+    // 这是有效资源 ID，归零会换成系统默认图标；同时它绝不能拉垮整份清单。
+    val text =
+        "#srx-inventory\t2\n" +
+            "0\t10393\t0\tcom.padi.pilipili\tPILIPILI\t%2Fdata%2Fapp%2Fbili%2Fbase.apk\t-1878130688\n"
+    val apps = parseSystemServerAppList(text, "0")
+    assertEquals(listOf("com.padi.pilipili"), apps.packageNames)
+    assertEquals(-1878130688, apps.icons["com.padi.pilipili"])
+    assertEquals("PILIPILI", apps.labels["com.padi.pilipili"])
+
+    // 边界：i32::MIN 保真；超出 Int 范围必须拒绝，不能静默截断。
+    val minRow =
+        "#srx-inventory\t2\n" +
+            "0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483648\n"
+    assertEquals(Int.MIN_VALUE, parseSystemServerAppList(minRow, "0").icons["com.example.min"])
+    val underflow =
+        "#srx-inventory\t2\n" +
+            "0\t10393\t0\tcom.example.min\tMin\t%2Fdata%2Fapp.apk\t-2147483649\n"
+    assertEquals(UserPackageList.Empty, parseSystemServerAppList(underflow, "0"))
+  }
+
+  @Test
+  fun rejectsMalformedIconFields() {
+    // 放宽符号位不等于放弃校验：畸形 icon 仍应使整份清单被判空。
+    for (icon in listOf("", "-", "--1", "1-", "abc", "1.5", " 1", "0x90", "+1")) {
+      val text =
+          "#srx-inventory\t2\n" + "0\t10393\t0\tcom.example.app\tApp\t%2Fdata%2Fapp.apk\t$icon\n"
+      assertEquals(
+          "malformed icon accepted: $icon",
+          UserPackageList.Empty,
+          parseSystemServerAppList(text, "0"),
+      )
+    }
+  }
+
+  @Test
   fun rejectsUnsafeUserAndMixedUserOrMalformedRows() = runBlocking {
     val shell = CapturingShell()
     assertEquals(UserPackageList.Empty, RootAppQuery(shell).listUserPackages("0;rm"))

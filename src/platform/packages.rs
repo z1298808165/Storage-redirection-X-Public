@@ -60,6 +60,23 @@ fn decimal(value: &str, field: &str) -> io::Result<i32> {
     value.parse::<i32>().map_err(|_| invalid(field))
 }
 
+/// 解析 `ApplicationInfo.icon` 这类资源 ID：允许前导 `-`，其余必须是十进制数字。
+///
+/// 资源包 ID 的高位可以为 1（例如资源包 ID `0x90` 的 `0x900E0000`），该值作为有符号
+/// `int` 呈现就是负数。它是**有效**资源 ID，归零会把它换成系统默认图标，
+/// 因此这里必须按带符号整数解析，不能复用只接受非负数的 [`decimal`]。
+///
+/// 形态校验不放松：空串、单独的 `-`、多余符号或非十进制字符仍然整份拒绝。
+// quality-allow(lint-suppression): 仅 daemon 的包清单解析流程使用此资源 ID 解析器。
+#[allow(dead_code)]
+fn signed_resource_id(value: &str, field: &str) -> io::Result<i32> {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid(field));
+    }
+    value.parse::<i32>().map_err(|_| invalid(field))
+}
+
 // quality-allow(lint-suppression): 转义解码器只由 daemon 的 PackageManager 清单解析流程调用。
 #[allow(dead_code)]
 fn decode_field(value: &str) -> io::Result<String> {
@@ -142,8 +159,9 @@ pub fn parse_app_inventory(content: &str, expected_user: i32) -> io::Result<Vec<
         let label = decode_field(fields[4])?;
         let apk_path = decode_field(fields[5])?;
         // icon 只在 v2（7 列）里存在；旧模块的 6 列清单没有这一项，按 0 处理。
+        // 资源 ID 允许为负（资源包 ID 高位为 1），因此用带符号解析。
         let icon = if expected_fields == 7 {
-            decimal(fields[6], "package icon")?
+            signed_resource_id(fields[6], "package icon")?
         } else {
             0
         };

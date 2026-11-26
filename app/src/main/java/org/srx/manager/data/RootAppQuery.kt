@@ -76,8 +76,10 @@ internal fun parseSystemServerAppList(text: String, expectedUser: String): UserP
     if (fields[2] != "0" && fields[2] != "1") return UserPackageList.Empty
     val icon =
         if (expectedFields == 7) {
-          if (fields[6].isEmpty() || fields[6].any { it !in '0'..'9' }) return UserPackageList.Empty
-          fields[6].toIntOrNull() ?: return UserPackageList.Empty
+          // 资源包 ID 高位可为 1（例如资源包 ID 0x90 的 0x900E0000），作为有符号 int 是负数。
+          // 这是有效资源 ID，归零会换成系统默认图标，因此允许前导 `-`；
+          // 空串、单独 `-`、多余符号或非十进制字符仍判为协议违约。
+          parseIconResourceId(fields[6]) ?: return UserPackageList.Empty
         } else {
           0
         }
@@ -94,6 +96,20 @@ internal fun parseSystemServerAppList(text: String, expectedUser: String): UserP
     if (apkPath.isNotEmpty()) paths[packageName] = apkPath
   }
   return UserPackageList(packages.toList(), systems, paths, uids, labels, icons)
+}
+
+/**
+ * 解析清单末列的图标资源 ID。
+ *
+ * 允许前导 `-`：Android 资源包 ID 的高位可以为 1，`ApplicationInfo.icon` 作为有符号 `int` 便呈现为负数（例如资源包 ID `0x90` 的
+ * `0x900E0000` 即 `-1878130688`）。该值是**有效** 资源 ID，按 0 处理会让应用退回系统默认图标，属功能回退。
+ *
+ * 形态校验不放松：空串、单独的 `-`、多余符号、非十进制字符或超出 `Int` 范围一律返回 `null`， 由调用方拒绝整份清单。
+ */
+private fun parseIconResourceId(value: String): Int? {
+  val digits = value.removePrefix("-")
+  if (digits.isEmpty() || digits.any { it !in '0'..'9' }) return null
+  return value.toIntOrNull()
 }
 
 private fun decodePackageField(value: String): String? {
