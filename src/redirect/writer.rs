@@ -39,6 +39,17 @@ pub fn reverse_map_caller_path(path: &str, caller_package: &str, caller_uid: i32
     })
 }
 
+/// 判断路径是否落在该调用方的映射请求范围内；不拷贝映射表，适合热路径调用。
+pub fn is_path_in_caller_mapping_request_for_caller(
+    path: &str,
+    caller_package: &str,
+    caller_uid: i32,
+) -> bool {
+    with_caller_mappings(caller_package, caller_uid, |mappings| {
+        is_path_in_caller_mapping_request(path, mappings)
+    })
+}
+
 pub fn get_caller_mappings(caller_package: &str, caller_uid: i32) -> Vec<PathMapping> {
     with_caller_mappings(caller_package, caller_uid, |mappings| mappings.to_vec())
 }

@@ -247,6 +247,22 @@ impl RuntimeFlow {
             || is_monitor_bridge
             || self.is_file_monitor_ui;
         if self.is_file_monitor_ui {
+            // 选择器只注入最小 Java hook：从 activity 取发起方，把带路径的
+            // provider_open 记录投给 daemon。不挂视图、不装 PLT hook、不加载配置
+            // （本分支在配置加载之前），避免重演「给系统进程挂视图导致 SAF 空白」。
+            if policy::is_saf_picker_package(&self.package_name) {
+                let hooked = java_hook::is_available() && java_hook::init_documents_ui(self.env);
+                log::warn!(
+                    "saf picker hook pkg={} uid={} hooked={}",
+                    self.package_name,
+                    self.app_uid,
+                    hooked
+                );
+                self.should_skip_post_work = true;
+                self.close_module_dir_fd();
+                self.log_specialize_exit("saf_picker", 0, is_system_writer, &perf_stages);
+                return;
+            }
             self.should_skip_post_work = true;
             self.close_module_dir_fd();
             self.request_dlclose();
@@ -554,6 +570,35 @@ impl RuntimeFlow {
             log::info!("writer skip companion mount (per-caller hook)");
             self.log_specialize_exit(
                 "writer_hook",
+                config.get_app_count(),
+                is_system_writer,
+                &perf_stages,
+            );
+            return;
+        }
+
+        // 只监视、零规则、非系统写者的进程没有任何重定向能力：给它挂模块视图只会
+        // 换上一份对 /storage/emulated 根节点 stat 失败的副本，导致
+        // ExternalStorageProvider 把每个文件判成受限、SAF 目录静默返回 0 行。
+        // 系统写者（下载提供器）是 SAF 桥，不能一起停掉。
+        if is_monitor_only
+            && !is_system_writer
+            && allowed_real_paths.is_empty()
+            && excluded_real_paths.is_empty()
+            && sandboxed_paths.is_empty()
+            && read_only_paths.is_empty()
+            && path_mappings.is_empty()
+        {
+            log::info!(
+                "monitor-only skip companion mount pkg={} (no rules, keep system view)",
+                self.package_name
+            );
+            self.should_skip_post_work = true;
+            // monitor-only 的桥进程可能为读 writer 配置打开过模块目录 fd；本分支
+            // 直接返回，按其它 bypass 的做法一并关掉（未打开时该调用是空操作）。
+            self.close_module_dir_fd();
+            self.log_specialize_exit(
+                "monitor_no_rules",
                 config.get_app_count(),
                 is_system_writer,
                 &perf_stages,

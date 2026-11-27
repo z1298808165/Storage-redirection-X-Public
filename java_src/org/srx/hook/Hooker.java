@@ -970,6 +970,350 @@ public class Hooker {
     return depth != null && depth.intValue() > 0;
   }
 
+  // SAF 保存的发起方：选择器进程里 Activity 的 launchedFromUid 就是发起应用。
+  // 只保留两个 hook：onCreate 取发起方、saveDocument 取文件名；其余候选入口
+  // （createDocument/insert/call/DocumentsAccess/finishPicking）在 A17 上实测
+  // 全部零触发，已删除。
+  private static volatile int safLaunchedFromUid = -1;
+  private static volatile String safLaunchedFromPackage = "";
+  // setResult 与 finish 可能对同一次保存各触发一次：按 activity 实例去重。
+  private static volatile java.lang.ref.WeakReference<Object> safLastEmittedActivity =
+      new java.lang.ref.WeakReference<>(null);
+  private static final java.util.concurrent.atomic.AtomicBoolean SAF_SAVEDOC_HOOKED =
+      new java.util.concurrent.atomic.AtomicBoolean(false);
+  private static final java.util.concurrent.atomic.AtomicBoolean SAF_OPENREC_HOOKED =
+      new java.util.concurrent.atomic.AtomicBoolean(false);
+
+  // 注入入口：所有异常自吞，失败不影响选择器本身。
+  public static boolean installDocumentsUiHook() {
+    boolean activityHook = false;
+    try {
+      activityHook = installSafPickerOnCreateHook();
+    } catch (Throwable t) {
+      logWarn("java hook saf picker activity failed", t);
+    }
+    boolean resultHook = false;
+    try {
+      resultHook = installSafPickerSetResultHook();
+    } catch (Throwable t) {
+      logWarn("java hook saf picker set result failed", t);
+    }
+    boolean finishHook = false;
+    try {
+      finishHook = installSafPickerFinishHook();
+    } catch (Throwable t) {
+      logWarn("java hook saf picker finish failed", t);
+    }
+    logInfo(
+        "java hook documents ui activity="
+            + activityHook
+            + " result="
+            + resultHook
+            + " finish="
+            + finishHook);
+    return activityHook || resultHook || finishHook;
+  }
+
+  // 定制 ROM（MIUI/HyperOS 等）可能在自己的 Activity 子类里覆写 setResult 且不调
+  // super，基类的 setResult hook 因此收不到；finish 是保存流程收尾的必经点，
+  // 结果 uri 仍留在 Activity.mResultData 里，这里作为兜底。
+  private static boolean installSafPickerFinishHook() throws Throwable {
+    Class<?> activity = Class.forName("android.app.Activity");
+    Method callback = Hooker.class.getDeclaredMethod("safPickerFinishCallback", Object[].class);
+    callback.setAccessible(true);
+    for (Method method : activity.getDeclaredMethods()) {
+      if (!"finish".equals(method.getName()) || method.getParameterCount() != 0) continue;
+      Hooker hooker = new Hooker();
+      Method backup = hooker.doHook(method, callback);
+      if (backup == null) continue;
+      backup.setAccessible(true);
+      hooker.backup = backup;
+      hooker.target = method;
+      HOOKS.add(hooker);
+      return true;
+    }
+    return false;
+  }
+
+  public Object safPickerFinishCallback(Object[] args) throws Throwable {
+    try {
+      Object activity = args != null && args.length > 0 ? args[0] : null;
+      if (activity != null
+          && activity.getClass().getName().contains("documentsui")
+          && safLastEmittedActivity.get() != activity) {
+        emitSafResultFromActivity(activity, safActivityResultData(activity));
+      }
+    } catch (Throwable t) {
+      logWarn("java hook saf picker finish failed", t);
+    }
+    return callBackup(args);
+  }
+
+  // Activity.mResultData 是私有字段；同进程反射读取不受 hidden API 限制影响，
+  // 读不到时返回 null（此时只能依赖 setResult hook）。
+  private static android.content.Intent safActivityResultData(Object activity) {
+    try {
+      java.lang.reflect.Field field = android.app.Activity.class.getDeclaredField("mResultData");
+      field.setAccessible(true);
+      Object value = field.get(activity);
+      return value instanceof android.content.Intent ? (android.content.Intent) value : null;
+    } catch (Throwable t) {
+      logWarn("saf read mResultData failed", t);
+      return null;
+    }
+  }
+
+  // setResult 与 finish 共用的收尾：解析 uri、归因、写记录、标记去重。
+  private static void emitSafResultFromActivity(Object activity, android.content.Intent data) {
+    if (data == null) return;
+    int uid = safLaunchedFromUid;
+    String pkg = safLaunchedFromPackage;
+    if (uid < ANDROID_APP_UID_START && safResolveLauncher(activity)) {
+      uid = safLaunchedFromUid;
+      pkg = safLaunchedFromPackage;
+    }
+    android.net.Uri uri = data.getData();
+    if (uri == null && data.getClipData() != null && data.getClipData().getItemCount() > 0) {
+      uri = data.getClipData().getItemAt(0).getUri();
+    }
+    if (uri == null) return;
+    String path =
+        uid < ANDROID_APP_UID_START ? null : safVolumePath(uri, uid / ANDROID_USER_ID_OFFSET);
+    if (path == null) {
+      // DownloadsProvider 的 documentId 是数字 id，路径要按 MediaStore 反查。
+      try {
+        Object resolver = activity.getClass().getMethod("getContentResolver").invoke(activity);
+        if (resolver instanceof android.content.ContentResolver) {
+          path = safPathFromUri((android.content.ContentResolver) resolver, uri);
+        }
+      } catch (Throwable ignored) {
+        // 解析失败按未命中处理
+      }
+    }
+    if (path == null) return;
+    safLastEmittedActivity = new java.lang.ref.WeakReference<>(activity);
+    emitSafProviderRecord(path, uid, pkg, safProcessName(activity));
+    logInfo("saf set result path=" + path + " uid=" + uid + " pkg=" + pkg);
+  }
+
+  // 选择器把结果 uri 交给调用方时，uri 与 launchedFromUid 属于同一会话：
+  // 这是唯一不需要时间窗口的严格关联点。
+  private static boolean installSafPickerSetResultHook() throws Throwable {
+    Class<?> activity = Class.forName("android.app.Activity");
+    Method callback = Hooker.class.getDeclaredMethod("safPickerSetResultCallback", Object[].class);
+    callback.setAccessible(true);
+    for (Method method : activity.getDeclaredMethods()) {
+      if (!"setResult".equals(method.getName()) || method.getParameterCount() != 2) continue;
+      Class<?>[] types = method.getParameterTypes();
+      if (types[0] != int.class || !types[1].getName().equals("android.content.Intent")) continue;
+      Hooker hooker = new Hooker();
+      Method backup = hooker.doHook(method, callback);
+      if (backup == null) continue;
+      backup.setAccessible(true);
+      hooker.backup = backup;
+      hooker.target = method;
+      HOOKS.add(hooker);
+      return true;
+    }
+    return false;
+  }
+
+  public Object safPickerSetResultCallback(Object[] args) throws Throwable {
+    try {
+      Object[] actual = unwrapArgs(args);
+      Object activity = args != null && args.length > 0 ? args[0] : null;
+      if (activity != null && activity.getClass().getName().contains("documentsui")) {
+        android.content.Intent data =
+            actual.length >= 2 && actual[1] instanceof android.content.Intent
+                ? (android.content.Intent) actual[1]
+                : null;
+        // 解析、归因、去重、写记录都在同一个收尾函数里，finish 兜底复用同一逻辑。
+        emitSafResultFromActivity(activity, data);
+      }
+    } catch (Throwable t) {
+      logWarn("java hook saf picker set result failed", t);
+    }
+    return callBackup(args);
+  }
+
+  private static boolean installSafPickerOnCreateHook() throws Throwable {
+    Class<?> activity = Class.forName("android.app.Activity");
+    Method callback = Hooker.class.getDeclaredMethod("safPickerOnCreateCallback", Object[].class);
+    callback.setAccessible(true);
+    for (Method method : activity.getDeclaredMethods()) {
+      if (!"onCreate".equals(method.getName()) || method.getParameterCount() != 1) continue;
+      Hooker hooker = new Hooker();
+      Method backup = hooker.doHook(method, callback);
+      if (backup == null) continue;
+      backup.setAccessible(true);
+      hooker.backup = backup;
+      hooker.target = method;
+      HOOKS.add(hooker);
+      return true;
+    }
+    return false;
+  }
+
+  // 解析发起方：A17 用 getLaunchedFromUid/Package；A16 上这两个返回 -1/null，
+  // 但 getCallingPackage / getReferrer 有值，uid 再用 PackageManager 反查。
+  private static boolean safResolveLauncher(Object activity) {
+    if (activity == null) return false;
+    try {
+      Class<?> type = activity.getClass();
+      int uid = -1;
+      String pkg = null;
+      try {
+        Object value = type.getMethod("getLaunchedFromUid").invoke(activity);
+        if (value instanceof Integer) uid = (Integer) value;
+        Object name = type.getMethod("getLaunchedFromPackage").invoke(activity);
+        if (name instanceof String) pkg = (String) name;
+      } catch (Throwable ignored) {
+        // 部分版本这两个 getter 不可用
+      }
+      if (uid < ANDROID_APP_UID_START || pkg == null || pkg.isEmpty()) {
+        String calling = null;
+        try {
+          Object value = type.getMethod("getCallingPackage").invoke(activity);
+          if (value instanceof String) calling = (String) value;
+        } catch (Throwable ignored) {
+          // 同上
+        }
+        if (calling == null || calling.isEmpty()) {
+          try {
+            Object referrer = type.getMethod("getReferrer").invoke(activity);
+            if (referrer instanceof android.net.Uri) {
+              String host = ((android.net.Uri) referrer).getHost();
+              if (host != null && !host.isEmpty()) calling = host;
+            }
+          } catch (Throwable ignored) {
+            // 同上
+          }
+        }
+        if (calling != null && !calling.isEmpty()) {
+          pkg = calling;
+          try {
+            Object manager = type.getMethod("getPackageManager").invoke(activity);
+            if (manager instanceof android.content.pm.PackageManager) {
+              uid =
+                  ((android.content.pm.PackageManager) manager).getApplicationInfo(calling, 0).uid;
+            }
+          } catch (Throwable ignored) {
+            // 查不到 uid 时保留 -1，记录层会拒绝写入
+          }
+        }
+      }
+      if (uid >= ANDROID_APP_UID_START && pkg != null && !pkg.isEmpty()) {
+        safLaunchedFromUid = uid;
+        safLaunchedFromPackage = pkg;
+        logInfo("saf picker resolved uid=" + uid + " pkg=" + pkg);
+        return true;
+      }
+    } catch (Throwable t) {
+      logWarn("saf picker resolve failed", t);
+    }
+    return false;
+  }
+
+  public Object safPickerOnCreateCallback(Object[] args) throws Throwable {
+    try {
+      Object activity = args != null && args.length > 0 ? args[0] : null;
+      if (activity != null && activity.getClass().getName().contains("documentsui")) {
+        Class<?> type = activity.getClass();
+        safResolveLauncher(activity);
+        // PickActivity 在 specialize 之后才加载，只能在这里补装保存回调。
+      }
+    } catch (Throwable t) {
+      logWarn("java hook saf picker identity failed", t);
+    }
+    return callBackup(args);
+  }
+
+  // 通过 logd 发一条 provider_open 记录：daemon 收到后按同一格式落盘。
+  // 记录第二列是「落盘进程」，必须按实际包名写：AOSP 与 Google 版选择器的包名不同。
+  private static String safProcessName(Object activity) {
+    try {
+      Object name = activity.getClass().getMethod("getPackageName").invoke(activity);
+      if (name instanceof String && !((String) name).isEmpty()) return (String) name;
+    } catch (Throwable ignored) {
+      // 取不到时退回 Google 版包名（A15/A16/A17 的默认实现）
+    }
+    return "com.google.android.documentsui";
+  }
+
+  private static void emitSafProviderRecord(String path, int uid, String pkg, String process) {
+    try {
+      String timestamp =
+          new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+              .format(new java.util.Date());
+      String line =
+          timestamp
+              + "|"
+              + process
+              + "|"
+              + pkg
+              + "|OPEN|"
+              + path
+              + "|field_encoding=percent|ret=0|errno=0|identify_method=saf_provider"
+              + "|identify_reliability=high|event_role=request|op=provider_open"
+              + "|op_filter=provider_open:create|source=saf_provider"
+              // 一次保存会同时产生 MP 的 create/write 两条记录，它们先落盘、本条后到。
+              // 用这个标记 + 自身时间戳声明「本次保存的时间窗」，UI 据此折叠前置记录。
+              + "|save_group=1|caller_uid="
+              + uid;
+      emitMonitorRecord(line);
+    } catch (Throwable t) {
+      logWarn("saf provider record failed", t);
+    }
+  }
+
+  // 用 fd 反查真实路径：对任何 DocumentsProvider 都成立，不依赖表结构。
+  // picker 进程没有沙箱视图，openFileDescriptor 走系统 FUSE，拿到的是公共路径。
+  private static String safPathFromUri(
+      android.content.ContentResolver resolver, android.net.Uri uri) {
+    if (resolver == null || uri == null) return null;
+    android.os.ParcelFileDescriptor descriptor = null;
+    try {
+      descriptor = resolver.openFileDescriptor(uri, "r");
+      if (descriptor == null) return null;
+      String link = android.system.Os.readlink("/proc/self/fd/" + descriptor.getFd());
+      if (link != null && link.startsWith("/storage/")) return link;
+      return null;
+    } catch (Throwable t) {
+      // 路径反查失败会让这条保存没有记录，必须留痕（详细日志开启时可见）。
+      logWarn("saf path from uri failed", t);
+      return null;
+    } finally {
+      if (descriptor != null) {
+        try {
+          descriptor.close();
+        } catch (Throwable ignored) {
+          // 关闭失败不影响结果
+        }
+      }
+    }
+  }
+
+  // document uri 的 documentId：primary:Download → /storage/emulated/0/Download。
+  private static String safVolumePath(android.net.Uri documentUri, int userId) {
+    try {
+      String id = android.provider.DocumentsContract.getDocumentId(documentUri);
+      if (id == null) return null;
+      int colon = id.indexOf(':');
+      if (colon <= 0 || !"primary".equals(id.substring(0, colon))) return null;
+      String relative = id.substring(colon + 1);
+      // 多用户（工作资料 / 访客）的存储根是 /storage/emulated/<userId>，
+      // 不能写死 0：userId 由发起方 uid 推出（uid / 100000）。
+      String base = "/storage/emulated/" + userId;
+      if (!relative.isEmpty()) base = base + "/" + relative;
+      return base;
+    } catch (Throwable t) {
+      return null;
+    }
+  }
+
+  // 选择器创建文档时写一条 provider_open 记录：路径来自父 DocumentInfo，
+  // 发起方来自 launchedFromUid，两者都是确定的。
+
   // 注入入口：直接查找已知 Provider 类并 hook，同时保留 attachInfo 兜底。
   public static boolean installMediaProviderHook() {
     try {
@@ -2254,6 +2598,8 @@ public class Hooker {
 
   private static native void recordProviderOpenPath(
       String path, int callerUid, int callerPid, String callerPackage);
+
+  private static native void emitMonitorRecord(String line);
 
   private static native void recordProviderDirectoryPath(
       String path, int callerUid, int callerPid, String callerPackage);

@@ -1882,7 +1882,7 @@ impl RedirectPolicy {
         let source = self.monitor_source_for_backend(backend);
         log::info!(
             target: FILE_MONITOR_LOG_TAG,
-            "{}|{}|{}|CREATE|{}|field_encoding=percent|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=request|op={}|source={}|backend={}{}",
+            "{}|{}|{}|CREATE|{}|field_encoding=percent|ret=0|errno=0|identify_method={}|identify_reliability={}|event_role=request|op={}|source={}|backend={}|action={}{}",
             build_monitor_timestamp(),
             crate::platform::log_fields::encode(caller.map(|identity| identity.native.as_str()).unwrap_or(caller_pkg)),
             crate::platform::log_fields::encode(caller_pkg),
@@ -1892,6 +1892,12 @@ impl RedirectPolicy {
             operation,
             source,
             crate::platform::log_fields::encode(&backend_path),
+            // monitor-only 只旁路不改后端，其余情况后端路径已被改写。
+            if self.is_monitor_only {
+                "passthrough"
+            } else {
+                "redirect"
+            },
             caller.map(RequesterIdentity::log_fields).unwrap_or_default()
         );
     }

@@ -242,7 +242,6 @@ impl AuditTrail {
         else {
             return;
         };
-
         // MediaProvider 可能在 Java 回调返回后才执行 native open。此提示不依赖文件监视，
         // 可跨越该边界传递调用方。
         log::debug!(
@@ -385,6 +384,8 @@ impl AuditTrail {
         ) else {
             return false;
         };
+        // 文件选择器只是代写方：真正的发起方由选择器的 saveDocument 报到 daemon，
+        // 这里按文件名换回发起方，记录里的来源才是用户能认的那一个。
         let op_filter = normalize_provider_open_op_filter(op_filter);
         if SettingsHub::instance().should_filter_monitor_record(&normalized, op_filter) {
             return false;
@@ -1297,9 +1298,56 @@ fn resolve_caller_info_for_path(
         return identity;
     }
     // 请求身份不明也不能借用另一请求的路径历史；代写进程无请求上下文时才需回查。
-    if crate::hook::is_current_caller_scope_active()
-        || caller_identity.task.is_some()
-        || (caller_uid >= 0 && !policy::is_shared_uid_process(caller_uid))
+    // MediaProvider 的 native open 跑在它自己的工作线程上，跨线程窗口里匹配到的
+    // 只可能是代写进程自己：这条 task 证明不了发起方，不能据此封死后面的路径
+    // hint。SAF 保存在 provider 转发给 MP 之前已按目标路径写入 hint。
+    // 自指判据要求 uid 与本条记录的 caller 相同，且包名缺失或就是本进程：
+    // 普通应用自写时 task.package 是自己、与 state.package_name 不同，不命中。
+    // 共享 UID 任务代表一组应用，即使 uid 相同、包名为空也不能当成本进程自写：
+    // 它必须走下面的 shared_user_fallback，否则会借到别的成员的历史路径。
+    let task_is_writer_self = caller_identity.task.is_some_and(|task| {
+        task.shared_user_id.is_empty()
+            && task.uid == caller_uid
+            && (task.package.is_empty()
+                || task.package == state.package_name
+                || policy::is_system_writer_package(&task.package))
+    });
+    // MediaProvider 作为代写进程时，它自己的 uid/进程名证明不了发起方；SAF 保存
+    // 在 provider 转发给它之前已按目标路径写入 hint，优先采用。查不到时仍走下面
+    // 的原有回退，行为与改动前一致。
+    if policy::is_media_provider_package(&state.package_name) {
+        let user_id = paths::extract_user_id_from_storage_path(normalized_path);
+        let hint = source_hint::infer_recent_path_caller_identity(normalized_path, user_id);
+        log::debug!(
+            "writer hint lookup path={} user_id={} cached={} hit={:?}",
+            normalized_path,
+            user_id,
+            hint_file::read_path_hint_file().len(),
+            hint.as_ref().map(|hint| hint.package_name.as_str())
+        );
+        if let Some(saf_identity) = hint {
+            return SourceIdentity::new(
+                saf_identity.package_name,
+                saf_identity.source,
+                saf_identity.confidence,
+            );
+        }
+    }
+    log::debug!(
+        "writer-self check pkg={} caller_uid={} task_uid={} task_pkg={} self={}",
+        state.package_name,
+        caller_uid,
+        caller_identity.task.map(|task| task.uid).unwrap_or(-1),
+        caller_identity
+            .task
+            .map(|task| task.package.as_str())
+            .unwrap_or(""),
+        task_is_writer_self,
+    );
+    if !task_is_writer_self
+        && (crate::hook::is_current_caller_scope_active()
+            || caller_identity.task.is_some()
+            || (caller_uid >= 0 && !policy::is_shared_uid_process(caller_uid)))
     {
         return shared_user_fallback(identity, caller_identity.shared_user_id);
     }

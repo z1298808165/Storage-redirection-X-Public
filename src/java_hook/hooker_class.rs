@@ -62,6 +62,8 @@ const RECORD_QUERY_ACCESS_PATH_NAME: &[u8] = b"recordQueryAccessPath\0";
 const RECORD_QUERY_ACCESS_PATH_SIG: &[u8] = b"(Ljava/lang/String;I)V\0";
 const RECORD_PROVIDER_OPEN_PATH_NAME: &[u8] = b"recordProviderOpenPath\0";
 const RECORD_PROVIDER_OPEN_PATH_SIG: &[u8] = b"(Ljava/lang/String;IILjava/lang/String;)V\0";
+const EMIT_MONITOR_RECORD_NAME: &[u8] = b"emitMonitorRecord\0";
+const EMIT_MONITOR_RECORD_SIG: &[u8] = b"(Ljava/lang/String;)V\0";
 const RECORD_PROVIDER_DIRECTORY_PATH_NAME: &[u8] = b"recordProviderDirectoryPath\0";
 const RECORD_PROVIDER_DIRECTORY_PATH_SIG: &[u8] = b"(Ljava/lang/String;IILjava/lang/String;)V\0";
 const RECORD_PROVIDER_OPEN_SUCCESS_NAME: &[u8] = b"recordProviderOpenSuccess\0";
@@ -204,6 +206,11 @@ pub fn init(env: *mut JNIEnv, hooker_class: jclass) -> bool {
             name: RECORD_PROVIDER_OPEN_PATH_NAME.as_ptr() as *mut _,
             signature: RECORD_PROVIDER_OPEN_PATH_SIG.as_ptr() as *mut _,
             fnPtr: record_provider_open_path as *mut _,
+        },
+        JNINativeMethod {
+            name: EMIT_MONITOR_RECORD_NAME.as_ptr() as *mut _,
+            signature: EMIT_MONITOR_RECORD_SIG.as_ptr() as *mut _,
+            fnPtr: emit_monitor_record as *mut _,
         },
         JNINativeMethod {
             name: RECORD_PROVIDER_DIRECTORY_PATH_NAME.as_ptr() as *mut _,
@@ -856,6 +863,14 @@ unsafe extern "C" fn record_provider_open_path(
         caller_pid,
         &package_text,
     );
+}
+
+unsafe extern "C" fn emit_monitor_record(env: *mut JNIEnv, _class: jclass, line: jstring) {
+    if env.is_null() || line.is_null() {
+        return;
+    }
+    let text = crate::zygisk::jni::get_jstring_utf8(env, line);
+    crate::daemon_identity_query::send_monitor_record(&text);
 }
 
 unsafe extern "C" fn record_provider_directory_path(

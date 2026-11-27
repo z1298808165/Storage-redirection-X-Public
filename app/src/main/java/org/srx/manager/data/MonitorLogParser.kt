@@ -58,6 +58,7 @@ private fun parseMonitorLogLine(
   val correlationId = extras["correlation_id"].orEmpty()
   val observerPackage = extras["observer_package"].orEmpty()
   val source = extras["source"].orEmpty()
+  val decision = extras["action"].orEmpty()
   val filterOperation = extras["op_filter"] ?: extras["op"] ?: parts.getOrNull(3).orEmpty()
   val operationIntent = monitorOperationIntent(filterOperation)
   val landingPath = normalizeMonitorLogPath(parts.getOrNull(4).orEmpty())
@@ -133,6 +134,7 @@ private fun parseMonitorLogLine(
       resultGroup = resultGroup,
       filterOperation = filterOperation,
       operationIntent = operationIntent,
+      decision = decision,
       isModuleWebUiExport = isModuleExport,
   )
 }
@@ -298,13 +300,38 @@ private fun formatMonitorLogOperationBadge(op: String): String {
   return value.monitorOperationBaseName()
 }
 
-private fun monitorOperationIntent(operation: String): String =
-    Regex(":(read|write|create)$", RegexOption.IGNORE_CASE)
-        .find(operation.trim())
-        ?.groupValues
-        ?.get(1)
-        ?.lowercase()
-        .orEmpty()
+private fun monitorOperationIntent(operation: String): String {
+  val trimmed = operation.trim()
+  Regex(":(read|write|create|delete|rename)$", RegexOption.IGNORE_CASE)
+      .find(trimmed)
+      ?.groupValues
+      ?.get(1)
+      ?.lowercase()
+      ?.let {
+        return it
+      }
+  // 只有 op、没有 op_filter 的记录（remove/rename/mkdir）按操作名兜底归类，
+  // 否则这些记录在「意图」过滤里永远落空。
+  return when (trimmed.lowercase()) {
+    "remove",
+    "unlink",
+    "unlinkat",
+    "rmdir",
+    "delete" -> "delete"
+    "rename",
+    "renameat",
+    "move" -> "rename"
+    "mkdir",
+    "mkdirat" -> "create"
+    // FUSE 层的创建操作，op_filter 里没有 :create 后缀，只能按名字归类。
+    "create",
+    "fuse_create",
+    "fuse_monitor_create",
+    "mknod",
+    "mknodat" -> "create"
+    else -> ""
+  }
+}
 
 private fun describeMonitorFailure(ret: Int?, extras: Map<String, String>): String {
   if (ret != null && ret >= 0) return ""
@@ -532,7 +559,15 @@ private fun mergeUncorrelatedRequestObservation(
   val observationMethods =
       if (isFuseRequest) setOf("daemon_inotify")
       else setOf("media_provider_fallback", "daemon_inotify")
-  if (observation.identifyMethod !in observationMethods) return null
+  // 系统代写链路里，MP 的 open/create/write 也是 request 角色，不满足上面的
+  // observation 条件；它们与 saf_provider 请求同秒同路径时，属于同一次保存的
+  // 落盘阶段，折叠进发起方那条，避免 UI 上出现「来源是 MP」的并列记录。
+  val isIntermediateWriterRequest =
+      isProviderRequest &&
+          request.identifyMethod == "saf_provider" &&
+          observation.eventRole == "request" &&
+          observation.processPackage.isIntermediateMonitorPackage()
+  if (!isIntermediateWriterRequest && observation.identifyMethod !in observationMethods) return null
   if (request.timestamp.take(19) != observation.timestamp.take(19)) return null
   if (
       request.coalescePathIdentity().normalizedStoragePathForCoalesce().trimEnd('/') !=
@@ -721,11 +756,26 @@ private fun compileMonitorFilters(filters: FileMonitorFilters): CompiledMonitorF
             },
     )
 
+private fun String.isIntermediateMonitorPackage(): Boolean =
+    this == "com.google.android.providers.media.module" ||
+        this == "com.android.providers.media.module" ||
+        this == "com.android.providers.media" ||
+        this == "com.android.providers.downloads" ||
+        this == "com.android.externalstorage" ||
+        this == "com.android.mtp" ||
+        contains("documentsui")
+
 private fun LogEntry.matchesMonitorFilters(filters: CompiledMonitorFilters): Boolean {
   val operation = filterOperation.ifBlank { operation }.trim().lowercase()
+  // 意图规则写成 *:read / *:delete 这类通配：remove、rename 的操作名里不带
+  // :delete/:rename，只按操作名匹配会让这些规则永远不命中，这里额外用
+  // operationIntent（已按操作名兜底归类）再判一次。
+  val intent = operationIntent.trim().lowercase()
   val operationMatched =
       operation.isNotBlank() &&
-          filters.operations.any { pattern -> wildcardMatches(pattern, operation) }
+          filters.operations.any { pattern ->
+            wildcardMatches(pattern, operation) || (intent.isNotBlank() && pattern == "*:$intent")
+          }
   if (operationMatched) return true
 
   val paths = listOf(path, landingPath, fromPath, backendPath)

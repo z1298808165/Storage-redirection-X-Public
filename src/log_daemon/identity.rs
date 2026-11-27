@@ -88,6 +88,16 @@ pub(super) fn monitor_sender_is_trusted(message: &str, sender: Option<(u32, i32)
     if caller_uid == Some(uid) {
         return true;
     }
+    // SAF 保存记录：发送方是文件选择器、caller 是它上报的发起应用，两者必然
+    // 不同进程；label 来自选择器的 launchedFromUid，比发送方身份更可信。
+    if monitor_field(message, "identify_method") == Some("saf_provider")
+        && crate::platform::proc_identity::read_proc_identity_for_request(pid, uid as i32)
+            .is_some_and(|identity| {
+                crate::redirect::policy::is_saf_picker_package(&identity.package)
+            })
+    {
+        return true;
+    }
     crate::platform::proc_identity::read_proc_identity_for_request(pid, uid as i32)
         .is_some_and(|identity| identity.is_system_writer())
 }
@@ -122,6 +132,9 @@ pub(super) fn enrich_monitor_record_identity(message: &str) -> Option<String> {
     // 请求发生时的终止边界不能被稍后的凭据变化或进程退出撤销。
     if monitor_field(message, "caller_boundary").is_some_and(|value| !value.is_empty())
         || monitor_field(message, "identify_method") == Some("shared_uid")
+        // saf_provider 的 label 直接来自选择器的 launchedFromUid，没有 pid 可查；
+        // 再按 caller_uid/pid 重解析只会把它冲成 unknown。
+        || monitor_field(message, "identify_method") == Some("saf_provider")
     {
         return None;
     }

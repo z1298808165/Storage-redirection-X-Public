@@ -695,6 +695,10 @@ class SrxViewModel(
     viewModelScope.launch { prefs.setPageScale(scale) }
   }
 
+  fun setLogsGroupedByApp(enabled: Boolean) {
+    viewModelScope.launch { prefs.setLogsGroupedByApp(enabled) }
+  }
+
   fun setAutoCheckUpdates(enabled: Boolean) {
     viewModelScope.launch { prefs.setAutoCheckUpdates(enabled) }
   }

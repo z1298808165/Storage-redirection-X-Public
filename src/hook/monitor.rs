@@ -7,7 +7,7 @@ use libc::{AT_REMOVEDIR, O_APPEND, O_CREAT, O_PATH, O_RDWR, O_TMPFILE, O_TRUNC, 
 
 const ANDROID_APP_UID_START: i32 = 10_000;
 const SHOULD_MONITOR_LOG_DIR_CREATE: bool = true;
-const READ_ONLY_DENY_REASON: &str = "deny_reason=read_only_rule";
+const READ_ONLY_DENY_REASON: &str = "deny_reason=read_only_rule|action=deny|rule=read_only";
 
 pub(super) struct OpenResultRecord<'a> {
     pub(super) op_name: &'a str,
@@ -125,6 +125,8 @@ fn record_open_result_with_extra(
 
     remember_private_path_caller_hint_for_monitor(hub, record_path);
 
+    let caller_package = hub.get_current_caller_package();
+    let caller_uid = hub.get_current_caller_uid();
     let mut extra = build_open_result_extra(
         record.op_name,
         record.flags,
@@ -132,11 +134,11 @@ fn record_open_result_with_extra(
         record_original_path,
         record.is_mapping,
         record_existed_before,
+        (&caller_package, caller_uid),
     );
     // record_operation_with_caller 统一补 caller_uid / caller_pid，供 daemon 登记
     // 写入路径线索与追踪未配置应用经原生 FUSE 的请求。
     append_extra_tail(&mut extra, extra_tail);
-    let caller_package = hub.get_current_caller_package();
     record_operation_with_caller(
         hub,
         OpKind::Open,
@@ -155,7 +157,9 @@ fn build_open_result_extra(
     original_pathname: &str,
     is_mapping: bool,
     existed_before: bool,
+    caller: (&str, i32),
 ) -> String {
+    let (caller_package, caller_uid) = caller;
     let operation_filter_name = open_operation_filter_name(op_name, flags, existed_before);
     let mut extra = format!(
         "op={}|op_filter={}|flags=0x{:x}",
@@ -168,6 +172,29 @@ fn build_open_result_extra(
         extra.push_str(&encode(pathname));
         extra.push_str("|source=");
         extra.push_str(redirect_source_name(pathname, is_mapping));
+        // 路径被改写 = 这次操作走了重定向；命中显式映射时 source 已标明来源。
+        extra.push_str("|action=redirect");
+    } else {
+        // 三级判定，避免把「路径本来就不在规则范围」误报成规则失效：
+        //   passthrough = 这个应用没有任何规则
+        //   allow       = 有规则，但这次路径不在规则范围（正常放行）
+        //   rule_miss   = 路径落在规则范围里，却没被重定向（真正的异常）
+        let has_app_rules = caller_uid >= 10_000
+            // 系统写者与归因中间层不走应用规则，判断它们只会制造噪音。
+            && !crate::redirect::policy::is_system_writer_package(caller_package)
+            && !crate::redirect::policy::is_attribution_intermediate_package(caller_package)
+            && !crate::redirect::writer::caller_has_no_path_rules(caller_package, caller_uid);
+        if !has_app_rules {
+            extra.push_str("|action=passthrough");
+        } else if crate::redirect::writer::is_path_in_caller_mapping_request_for_caller(
+            pathname,
+            caller_package,
+            caller_uid,
+        ) {
+            extra.push_str("|action=rule_miss");
+        } else {
+            extra.push_str("|action=allow");
+        }
     }
     extra
 }
@@ -408,7 +435,16 @@ pub fn record_mkdir_result(
     result: i32,
     error_no: i32,
 ) {
-    record_mkdir_result_with_extra(hub, op_name, pathname, result, error_no, None);
+    // 没有 original 路径 = 没有发生改写；仍要写 action，否则这条记录在
+    // 「是否走了规则」的筛选里是盲区。
+    record_mkdir_result_with_extra(
+        hub,
+        op_name,
+        pathname,
+        result,
+        error_no,
+        Some("action=passthrough"),
+    );
 }
 
 pub fn record_mkdir_result_from(
@@ -421,14 +457,21 @@ pub fn record_mkdir_result_from(
 ) {
     if !original_pathname.is_empty() && original_pathname != pathname {
         let extra_tail = format!(
-            "from={}|backend={}|source={}",
+            "from={}|backend={}|source={}|action=redirect",
             encode(original_pathname),
             encode(pathname),
             redirect_source_name(pathname, false)
         );
         record_mkdir_result_with_extra(hub, op_name, pathname, result, error_no, Some(&extra_tail));
     } else {
-        record_mkdir_result_with_extra(hub, op_name, pathname, result, error_no, None);
+        record_mkdir_result_with_extra(
+            hub,
+            op_name,
+            pathname,
+            result,
+            error_no,
+            Some("action=passthrough"),
+        );
     }
 }
 
@@ -569,6 +612,9 @@ fn record_rename_result_with_extra(
         format!("op={}|from={}", record.op_name, encode(record.old_pathname))
     };
     append_extra_tail(&mut extra, extra_tail);
+    // 这里不写 action：rename 的 from= 是「旧路径」，属于语义必需字段，
+    // 无法像 open/mkdir/unlink 那样用「有没有 from」判断路径是否被改写。
+    // 要判定 rename 的走向需要引擎回传决策，当前不引入。
     let caller_package = hub.get_current_caller_package();
     record_operation_with_caller(
         hub,
@@ -589,7 +635,16 @@ pub fn record_unlink_result(
     error_no: i32,
     flags: i32,
 ) {
-    record_unlink_result_with_extra(hub, op_name, pathname, result, error_no, flags, None);
+    // 同 mkdir：无 original 路径也要标 action，避免这类记录在筛选里成为盲区。
+    record_unlink_result_with_extra(
+        hub,
+        op_name,
+        pathname,
+        result,
+        error_no,
+        flags,
+        Some("action=passthrough"),
+    );
 }
 
 pub fn record_unlink_result_from(
@@ -602,7 +657,7 @@ pub fn record_unlink_result_from(
     flags: i32,
 ) {
     if !original_pathname.is_empty() && original_pathname != pathname {
-        let extra_tail = format!("from={}", encode(original_pathname));
+        let extra_tail = format!("from={}|action=redirect", encode(original_pathname));
         record_unlink_result_with_extra(
             hub,
             op_name,
@@ -613,7 +668,15 @@ pub fn record_unlink_result_from(
             Some(&extra_tail),
         );
     } else {
-        record_unlink_result_with_extra(hub, op_name, pathname, result, error_no, flags, None);
+        record_unlink_result_with_extra(
+            hub,
+            op_name,
+            pathname,
+            result,
+            error_no,
+            flags,
+            Some("action=passthrough"),
+        );
     }
 }
 
@@ -696,6 +759,16 @@ pub fn record_path_operation_result(
     {
         extra.push('|');
         extra.push_str(tail);
+    }
+    // 这条通用路径承接 remove/rename 等没有专用构造函数的操作：调用方可能不传
+    // extra_tail，此时记录在「是否走了规则」的筛选里是盲区，按已有字段兜底：
+    // 带 from=/backend= 说明路径被改写，应记 redirect，其余记 passthrough。
+    if !extra_tail.is_some_and(|tail| tail.contains("action=")) {
+        if extra.contains("|from=") || extra.contains("|backend=") {
+            extra.push_str("|action=redirect");
+        } else {
+            extra.push_str("|action=passthrough");
+        }
     }
     let caller_package = hub.get_current_caller_package();
     record_operation_with_caller(

@@ -819,6 +819,8 @@ private fun SrxManagerApp(
                     },
                 listState = logsListState,
                 bottomPadding = padding.calculateBottomPadding(),
+                groupedByApp = prefs.logsGroupedByApp,
+                onToggleGrouped = { viewModel.setLogsGroupedByApp(!prefs.logsGroupedByApp) },
                 onRefresh = viewModel::refreshLogs,
                 onClear = viewModel::clearLogs,
                 onOpenApp = { app ->

@@ -66,6 +66,8 @@ data class UiPreferences(
     val pageScale: Float = 1.0f,
     val autoCheckUpdates: Boolean = true,
     val updateChannel: UpdateChannel = UpdateChannel.Stable,
+    /** 文件监视页按应用聚合展示；false 为逐条明细。 */
+    val logsGroupedByApp: Boolean = false,
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -99,6 +101,7 @@ class PreferencesRepository(private val context: Context) {
   private val pageScaleKey = floatPreferencesKey("page_scale")
   private val autoCheckUpdatesKey = booleanPreferencesKey("auto_check_updates")
   private val updateChannelKey = stringPreferencesKey("update_channel")
+  private val logsGroupedByAppKey = booleanPreferencesKey("logs_grouped_by_app")
 
   val uiPreferences: Flow<UiPreferences> =
       context.dataStore.data.map { prefs ->
@@ -130,8 +133,13 @@ class PreferencesRepository(private val context: Context) {
                 prefs[updateChannelKey]?.let {
                   runCatching { UpdateChannel.valueOf(it) }.getOrNull()
                 } ?: UpdateChannel.Stable,
+            logsGroupedByApp = prefs[logsGroupedByAppKey] ?: false,
         )
       }
+
+  suspend fun setLogsGroupedByApp(enabled: Boolean) {
+    context.dataStore.edit { it[logsGroupedByAppKey] = enabled }
+  }
 
   suspend fun setFloatingBottomBar(enabled: Boolean) {
     context.dataStore.edit { it[floatingBottomBarKey] = enabled }

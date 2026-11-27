@@ -270,7 +270,7 @@ private data class MonitorFilterRemoval(val type: MonitorFilterType, val value: 
     get() = if (type == MonitorFilterType.Intent) monitorIntentLabel(value) else value
 }
 
-internal val MonitorIntents = listOf("read", "write", "create")
+internal val MonitorIntents = listOf("read", "write", "create", "delete", "rename")
 
 internal fun sortMonitorFilterValues(values: List<String>): List<String> =
     values.sortedWith(compareBy<String> { it.lowercase() }.thenBy { it })
@@ -279,7 +279,8 @@ internal fun splitMonitorOperationRules(values: List<String>): Pair<List<String>
   val intents = mutableListOf<String>()
   val operations = mutableListOf<String>()
   values.forEach { value ->
-    val match = Regex("^\\*:(read|write|create)$", RegexOption.IGNORE_CASE).matchEntire(value)
+    val match =
+        Regex("^\\*:(read|write|create|delete|rename)$", RegexOption.IGNORE_CASE).matchEntire(value)
     if (match == null) operations += value else intents += match.groupValues[1].lowercase()
   }
   return operations to intents.distinct()
@@ -290,6 +291,8 @@ internal fun monitorIntentLabel(intent: String): String =
       "read" -> "读取意图"
       "write" -> "写入意图"
       "create" -> "创建意图"
+      "delete" -> "删除意图"
+      "rename" -> "重命名意图"
       else -> intent
     }
 

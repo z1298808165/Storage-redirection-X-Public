@@ -162,6 +162,8 @@ data class LogEntry(
     val resultGroup: String = "",
     val filterOperation: String = "",
     val operationIntent: String = "",
+    /** 本次操作的决策结果：redirect / passthrough / deny / rule_miss（旧记录为空）。 */
+    val decision: String = "",
     val isModuleWebUiExport: Boolean = false,
 ) {
   val hasApplicationIdentity: Boolean

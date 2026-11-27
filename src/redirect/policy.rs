@@ -188,6 +188,18 @@ pub fn is_file_monitor_ui_package(package_name: &str) -> bool {
         || normalized.ends_with(".myfiles")
 }
 
+/// 需要注入以取得 SAF 保存发起方的文件选择器。
+///
+/// 发起应用只出现在选择器的 `launchedFromUid` 里；provider 与 MediaProvider
+/// 侧能看到的最多只是选择器自己。这里只放行 AOSP 与 Google 两个已知实现，
+/// 其余 UI 进程继续走 daemon-only bypass。
+pub fn is_saf_picker_package(package_name: &str) -> bool {
+    matches!(
+        package_name,
+        "com.google.android.documentsui" | "com.android.documentsui"
+    )
+}
+
 pub fn get_system_writer_name(_package_name: &str) -> &'static str {
     "MediaProvider"
 }

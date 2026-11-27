@@ -40,6 +40,7 @@ fun SrxSearchField(
     onQueryChange: (String) -> Unit,
     label: String,
     modifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
   val colors = MiuixTheme.colorScheme
   // COUI 下跟着卡片色走：原来取 surface（页面底），浅色时是一块灰、深色时是一块更黑的灰，
@@ -92,6 +93,9 @@ fun SrxSearchField(
               Text(text = label, color = colors.onSurfaceVariantSummary, fontSize = 14.sp)
             }
             inner()
+          }
+          if (trailing != null) {
+            Box(modifier = Modifier.padding(end = 6.dp)) { trailing() }
           }
           AnimatedVisibility(
               visible = query.isNotEmpty(),

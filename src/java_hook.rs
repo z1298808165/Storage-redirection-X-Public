@@ -19,6 +19,7 @@ const HOOKER_DEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/Hooker.dex")
 const PACKAGE_EVENT_RECEIVER_DEX: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/PackageEventReceiver.dex"));
 static MEDIA_PROVIDER_HOOK_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static DOCUMENTS_UI_HOOK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 pub fn is_available() -> bool {
     !HOOKER_DEX.is_empty()
@@ -79,6 +80,18 @@ pub fn init_once(env: *mut JNIEnv) -> bool {
         return false;
     }
     MEDIA_PROVIDER_HOOK_INITIALIZED.store(true, Ordering::Release);
+    true
+}
+
+// SAF 文件选择器：只取发起方与 createDocument 路径，不参与重定向。
+pub fn init_documents_ui(env: *mut JNIEnv) -> bool {
+    if DOCUMENTS_UI_HOOK_INITIALIZED.load(Ordering::Acquire) {
+        return true;
+    }
+    if !init(env, "installDocumentsUiHook", "documents ui") {
+        return false;
+    }
+    DOCUMENTS_UI_HOOK_INITIALIZED.store(true, Ordering::Release);
     true
 }
 

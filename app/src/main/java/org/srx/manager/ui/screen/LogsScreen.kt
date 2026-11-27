@@ -19,11 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,8 +64,12 @@ import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.glass.ChevronForward
+import top.yukonga.miuix.kmp.icon.glass.Close
 import top.yukonga.miuix.kmp.icon.glass.Delete
 import top.yukonga.miuix.kmp.icon.glass.ExpandMore
+import top.yukonga.miuix.kmp.icon.glass.GridView
+import top.yukonga.miuix.kmp.icon.glass.ListView
 import top.yukonga.miuix.kmp.icon.glass.Tune
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -74,6 +80,8 @@ internal fun LogsScreen(
     apps: List<InstalledApp>,
     listState: LazyListState,
     bottomPadding: Dp,
+    groupedByApp: Boolean,
+    onToggleGrouped: () -> Unit,
     onRefresh: () -> Unit,
     onClear: () -> Unit,
     onOpenApp: (InstalledApp) -> Unit,
@@ -114,6 +122,26 @@ internal fun LogsScreen(
                   .any { value -> value.lowercase().contains(q) }
             }
       }
+  // 按应用聚合视图：以实际落盘进程优先，其次调用方，保证同一应用的记录落在一组。
+  // 聚合视图的主搜索只按应用名/包名过滤分组；路径搜索放在详情弹窗里。
+  val appLogGroups =
+      remember(filtered, appsByPackage, query) {
+        val q = query.trim().lowercase()
+        filtered
+            .groupBy { it.processPackage.ifBlank { it.callerPackage.ifBlank { it.packageName } } }
+            .map { (pkg, entries) -> AppLogGroup(pkg, entries) }
+            .filter { group ->
+              q.isBlank() ||
+                  group.packageName.lowercase().contains(q) ||
+                  (appsByPackage[group.packageName]?.label.orEmpty().lowercase().contains(q))
+            }
+            .sortedByDescending { group -> group.entries.firstOrNull()?.timestamp.orEmpty() }
+      }
+  var detailGroup by remember { mutableStateOf<AppLogGroup?>(null) }
+  var detailQuery by remember { mutableStateOf("") }
+  // 只在页面首次出现时回到顶部。停留期间的自动刷新绝不能滚回去——用户可能正
+  // 在看下面的记录，滚回顶部等于把阅读位置抢走。下拉刷新本身就发生在顶部，无需处理。
+  LaunchedEffect(Unit) { listState.scrollToItem(0) }
   // 同一批日志里可能存在内容完全相同的条目，按出现次数补一个序号使 key 唯一。
   // 该序号只取决于条目自身内容，插入新日志不会改变已有条目的 key。
   val logEntryKeys =
@@ -150,7 +178,20 @@ internal fun LogsScreen(
   ) { pageModifier, innerPadding, scrollModifiers ->
     Column(modifier = pageModifier.padding(horizontal = 16.dp)) {
       Spacer(Modifier.height(innerPadding.calculateTopPadding() + 14.dp))
-      SrxSearchField(query, { query = it }, "搜索应用名、包名或路径")
+      SrxSearchField(
+          query,
+          { query = it },
+          if (groupedByApp) "搜索应用名或包名" else "搜索应用名、包名或路径",
+          trailing = {
+            RoundIconAction(
+                icon = if (groupedByApp) MiuixIcons.Glass.GridView else MiuixIcons.Glass.ListView,
+                contentDescription = if (groupedByApp) "切换到明细视图" else "切换到按应用视图",
+                onClick = onToggleGrouped,
+                size = 34.dp,
+                iconSize = 16.dp,
+            )
+          },
+      )
       Spacer(Modifier.height(10.dp))
       Text(
           text =
@@ -177,6 +218,17 @@ internal fun LogsScreen(
         ) {
           if (filtered.isEmpty()) {
             item { EmptyText(if (query.isBlank()) "暂无文件操作记录" else "没有匹配的日志") }
+          } else if (groupedByApp) {
+            items(appLogGroups, key = { it.packageName }) { group ->
+              GroupedAppCard(
+                  group = group,
+                  appsByPackage = appsByPackage,
+                  onOpen = {
+                    detailQuery = ""
+                    detailGroup = group
+                  },
+              )
+            }
           } else {
             itemsIndexed(
                 filtered,
@@ -224,6 +276,16 @@ internal fun LogsScreen(
         )
       }
     }
+    AppLogsDialog(
+        group = detailGroup,
+        appsByPackage = appsByPackage,
+        query = detailQuery,
+        onQueryChange = { detailQuery = it },
+        showFullTime = showFullTime,
+        onToggleTime = { showFullTime = !showFullTime },
+        onOpenApp = onOpenApp,
+        onDismiss = { detailGroup = null },
+    )
     FileMonitorFilterDialog(
         show = showFilters,
         filters = state.fileMonitorFilters,
@@ -497,6 +559,13 @@ internal fun logEntrySummary(entry: LogEntry): String {
   if (entry.isModuleWebUiExport) return "存储重定向X · ${entry.action.ifBlank { "模块导出" }}"
   val parts = mutableListOf<String>()
   if (entry.operationIntent.isNotBlank()) parts += monitorIntentLabel(entry.operationIntent)
+  // passthrough 是大多数，不显示以免淹没真正走了规则的记录。
+  when (entry.decision) {
+    "redirect" -> parts += "已重定向"
+    "deny" -> parts += "已拦截"
+    "rule_miss" -> parts += "规则未命中"
+    else -> Unit
+  }
   val process = entry.processPackage.takeIf { it.isNotBlank() && it != "-" }
   val caller = entry.callerPackage.takeIf { it.isNotBlank() && it != "-" }
   val watch = entry.watchPackage.takeIf { it.isNotBlank() && it != "-" }
@@ -552,6 +621,8 @@ internal fun logEntrySummary(entry: LogEntry): String {
     process != null -> parts += "进程 $process" + method.parenthesized()
     method.isNotBlank() -> parts += method
   }
+  val decision = logDecisionText(entry.decision)
+  if (decision.isNotBlank()) parts += decision
   val reliability = logReliabilityText(entry.identifyReliability)
   if (reliability.isNotBlank()) parts += "可靠性 $reliability"
   if (entry.observationCount > 0) {
@@ -565,6 +636,16 @@ internal fun logEntrySummary(entry: LogEntry): String {
   }
   return parts.joinToString(" · ")
 }
+
+internal fun logDecisionText(decision: String): String =
+    when (decision) {
+      "redirect" -> "已按规则重定向"
+      "allow" -> "命中放行规则"
+      "deny" -> "被规则拦截（只读）"
+      "rule_miss" -> "路径在规则范围内但未重定向"
+      "passthrough" -> "未配置规则"
+      else -> ""
+    }
 
 internal fun String.parenthesized(): String = if (isBlank()) "" else "（$this）"
 
@@ -693,4 +774,144 @@ private fun LogOperationBadge(
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
   )
+}
+
+/** 聚合视图里的一个应用分组。 */
+internal data class AppLogGroup(val packageName: String, val entries: List<LogEntry>) {
+  val latestTimestamp: String
+    get() = entries.firstOrNull()?.timestamp.orEmpty()
+}
+
+/** 聚合视图里的应用卡片：图标 + 应用名 + 包名 + 记录数与最近时间，点击打开详情弹窗。 */
+@Composable
+private fun GroupedAppCard(
+    group: AppLogGroup,
+    appsByPackage: Map<String, InstalledApp>,
+    onOpen: () -> Unit,
+) {
+  val app = appsByPackage[group.packageName]
+  val label = app?.label ?: group.packageName.ifBlank { "未知应用" }
+  val latest = group.latestTimestamp
+  GlassCard(insideMargin = PaddingValues(horizontal = 16.dp, vertical = 12.dp)) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onOpen() },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      AppIconImage(appInfo = app?.appInfo, label = label, modifier = Modifier.size(40.dp))
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text(
+            text = label,
+            color = MiuixTheme.colorScheme.onSurface,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = group.packageName,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text =
+                "${group.entries.size} 条记录" +
+                    (if (latest.isNotBlank()) " · 最近 ${latest.takeLast(8)}" else ""),
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 11.sp,
+        )
+      }
+      Icon(
+          imageVector = MiuixIcons.Glass.ChevronForward,
+          contentDescription = null,
+          modifier = Modifier.size(16.dp),
+          tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+      )
+    }
+  }
+}
+
+/** 某个应用的记录详情：固定高度，避免记录条数不同导致弹窗高度跳变。 */
+@Composable
+private fun AppLogsDialog(
+    group: AppLogGroup?,
+    appsByPackage: Map<String, InstalledApp>,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    showFullTime: Boolean,
+    onToggleTime: () -> Unit,
+    onOpenApp: (InstalledApp) -> Unit,
+    onDismiss: () -> Unit,
+) {
+  if (group == null) return
+  val app = appsByPackage[group.packageName]
+  val label = app?.label ?: group.packageName.ifBlank { "未知应用" }
+  val q = query.trim().lowercase()
+  val entries =
+      remember(group, q) {
+        if (q.isBlank()) group.entries
+        else
+            group.entries.filter { entry ->
+              listOf(entry.path, entry.landingPath, entry.fromPath, entry.backendPath).any {
+                it.lowercase().contains(q)
+              }
+            }
+      }
+  CenteredDialog(show = true, onDismiss = onDismiss) {
+    Column(
+        modifier = Modifier.fillMaxWidth().height(560.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        AppIconImage(appInfo = app?.appInfo, label = label, modifier = Modifier.size(32.dp))
+        Column(modifier = Modifier.weight(1f)) {
+          Text(
+              text = label,
+              color = MiuixTheme.colorScheme.onSurface,
+              fontSize = 15.sp,
+              fontWeight = FontWeight.Medium,
+              maxLines = 1,
+          )
+          Text(
+              text = "${group.entries.size} 条记录",
+              color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+              fontSize = 11.sp,
+          )
+        }
+        RoundIconAction(
+            icon = MiuixIcons.Glass.Close,
+            contentDescription = "关闭",
+            onClick = onDismiss,
+            size = 32.dp,
+            iconSize = 15.dp,
+        )
+      }
+      SrxSearchField(query, onQueryChange, "搜索路径")
+      LazyColumn(
+          modifier = Modifier.fillMaxSize(),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+          contentPadding = PaddingValues(bottom = 8.dp),
+      ) {
+        if (entries.isEmpty()) {
+          item { EmptyText("没有匹配的记录") }
+        } else {
+          items(entries, key = { entry -> entry.contentKey() + entry.timestamp }) { entry ->
+            LogCard(
+                entry = entry,
+                app = app,
+                showFullTime = showFullTime,
+                onToggleTime = onToggleTime,
+                onOpenApp = onOpenApp,
+            )
+          }
+        }
+      }
+    }
+  }
 }

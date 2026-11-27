@@ -18,6 +18,7 @@ pub(crate) const QUERY_PREFIX: &str = "Q\t";
 
 /// 回包前缀：`R\t<pid>\t<uid>\t<nonce>\t<JSON 身份快照>`。
 pub(crate) const REPLY_PREFIX: &str = "R\t";
+
 /// 与 daemon 共享的抽象套接字名（日志通道）。
 const DAEMON_SOCKET_NAME: &[u8] = b"storage.redirect.x.logd";
 /// 单次询问的等待上限。
@@ -331,6 +332,35 @@ pub(crate) fn answer_query(packet: &str, sender: Option<(u32, i32)>) -> Option<S
     note_identity_demand();
     let payload = serde_json::to_string(&identity).ok()?;
     Some(format!("{REPLY_PREFIX}{pid}\t{uid}\t{nonce}\t{payload}"))
+}
+
+/// 把一条监视记录交给 daemon：选择器对模块目录无写权限，只能投递。
+pub(crate) fn send_monitor_record(line: &str) {
+    if line.is_empty() {
+        return;
+    }
+    let Ok(payload) = CString::new(format!("I	FileMonitorOp	{line}")) else {
+        return;
+    };
+    let mut guard = client().lock().unwrap_or_else(|error| error.into_inner());
+    let Some(fd) = guard.socket() else {
+        return;
+    };
+    let Some((daemon_addr, daemon_len)) = abstract_addr(DAEMON_SOCKET_NAME) else {
+        return;
+    };
+    let bytes = payload.as_bytes();
+    // SAFETY: payload 在调用期间有效，daemon_addr 由抽象命名空间地址构造。
+    let _ = unsafe {
+        libc::sendto(
+            fd,
+            bytes.as_ptr() as *const _,
+            bytes.len(),
+            libc::MSG_DONTWAIT,
+            &daemon_addr as *const _ as *const libc::sockaddr,
+            daemon_len,
+        )
+    };
 }
 
 #[cfg(test)]
