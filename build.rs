@@ -137,8 +137,10 @@ fn build_lsplant_bridge(target_arch: &str) {
         .arg("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
         .arg(format!("-DCMAKE_PREFIX_PATH={}", libcxx_prefix.display()))
         .arg(format!(
+            // CMake 会把该 -D 值里的路径再按转义序列解析一次，Windows 反斜杠会直接
+            // 报 Invalid character escape '\D'；CMake 在 Windows 同样接受正斜杠。
             "-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
-            libcxx_modules_manifest.display()
+            libcxx_modules_manifest.to_string_lossy().replace('\\', "/")
         ))
         // NDK 工具链默认 CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY，会把 find_package
         // 限制在 sysroot 内；cxx 包在宿主侧，按 NDK 工具链注释建议显式放开为 BOTH。
