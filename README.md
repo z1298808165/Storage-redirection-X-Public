@@ -110,6 +110,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 | [构建环境](docs/build-environment.md) | 本地开发环境搭建 |
 | [模块打包](docs/module-packaging.md) | 刷入包内容与结构 |
 | [存储后端架构](docs/storage-backend.md) | FUSE 优先后端选择、共享宿主维护边界与失效判别 |
+| [文件监视记录字段](docs/monitor-record-fields.md) | `file_monitor.log` 字段表、`action` 取值与意图归类 |
 | [共享宿主 FUSE 架构设计](docs/shared-fuse-daemon-architecture.md) | 共享 FUSE 会话的设计、失效窗口分析与落地边界 |
 | [上游 Hook 依赖说明](docs/upstream-hook-dependencies.md) | native hook 能力的上游依赖 |
 

@@ -48,6 +48,7 @@
 | `identify_method=shared_uid` | 无法区分具体成员时显示 PackageManager 的真实共享用户标签，可靠性为 `fallback`；组名仅供监视，不参与应用配置或重定向来源选择 |
 | `identify_method=unknown` 或 `identify_reliability=none`，且落盘方是系统代写进程 | 应用名显示"未知来源"，详情行保留代写进程与已有请求字段；任务不可核验时带 `caller_boundary=unverified`，不按 UID 补成应用 |
 | 文件系统观察类记录（inotify 侧） | 显示"文件系统观察"，观察器与实际落盘进程分开列出 |
+| `identify_method=saf_provider` | 通过系统文件选择器保存的文件：调用方是选择器的发起应用（A17 取 `getLaunchedFromUid`，A16/A15 回退到 `getCallingPackage`/`getReferrer` + PackageManager 反查），可靠性为 `high` |
 
 原请求任务的 UID 快照优先于应用 fsuid：任一 UID 为 root 时停止向应用追溯；任一 UID 为 shell，或 SELinux 域为 `shell`、`su`、`magisk`、`ksu`、`kernelsu` 时按对应执行者边界处理。代码不按 Shizuku、Sui 或 rish 的产品名称分类；这类工具的结果取决于任务实际 UID 与 SELinux 域。普通非特权域变化不会触发特权边界；任务不可核验时标为 `unverified`。停止追溯不删除请求记录，也不改变自有 FUSE 按挂载命名空间选择重定向规则的行为。
 
@@ -56,6 +57,10 @@
 原生 Binder 调用方查询只读取当前线程已有的 `IPCThreadState`；尚未建立时继续使用已有请求信号或保持未解析，不在文件 hook 内创建 Binder 状态。
 
 日志派生的公共路径提示只接收成功、具体包名、UID 一致且可信度为 `high` 的请求。Provider 在操作前登记的路径提示用于延续路由，不代表操作成功。共享组标签与执行者边界不作为应用包名登记。管理 App 与 WebUI 的日志详情保留原任务 UID、PID/TID、启动时钟、SELinux 域与边界，组名和执行者不会请求应用图标或打开应用配置页。不同请求身份的记录分别保留；请求与文件系统观察仍可按关联 ID 配对。
+
+## 判断操作有没有走重定向
+
+`open` / `mkdir` / `unlink` 记录末尾带 `action=`：`redirect`（走了重定向，`from=`/`backend=` 给出原路径与实际路径）、`passthrough`（该应用没配规则）、`allow`（有规则但路径不在范围）、`rule_miss`（路径在映射范围内却没被重定向）、`deny`（被只读规则拦下，带 `rule=read_only`）。字段定义见 [monitor-record-fields](monitor-record-fields.md)。
 
 新监视记录带 `field_encoding=percent`，字段内的 `%`、`|`、回车和换行分别编码为 `%25`、`%7C`、`%0D`、`%0A`。管理 App 与 WebUI 在分字段后解码，没有该标记的旧记录保留百分号字面值。重复字段或 `record_integrity=ambiguous` 表示记录存在冲突，界面显示“结果未知：日志字段冲突”，不把它显示为成功或补成应用身份。创建成功与写入失败分别保留，关联 ID 也不能覆盖不同请求身份或结果。
 

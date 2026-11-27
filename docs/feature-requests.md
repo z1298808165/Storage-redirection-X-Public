@@ -26,5 +26,5 @@
 | 编号 | 功能建议 | 建议者 | 来源 | 提出日期 | 状态 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
 | FR-001 | 应用列表添加刷新按钮 | [yqk100](https://github.com/yqk100) | [Issue #1](https://github.com/z1298808165/Storage-redirection-X-Public/issues/1) | 2026-10-24 | 已实现 | 2.2.0-ci.1，commit `6bed6761`（应用列表标题栏新增常驻刷新按钮）；建议者评论中顺带反馈的「新装应用自动开启存储定向失效」同版一并修复；Issue #1 已关闭（2026-10-26） |
-| FR-002 | 监视记录页查看时自动刷新并回到顶部最新 | [Oosl](https://github.com/Oosl) | [Issue #2 评论](https://github.com/z1298808165/Storage-redirection-X-Public/issues/2#issuecomment-6487944785) | 2026-10-29 | 暂缓 | 先集中解决存储稳定性问题（Issue #2 停摆链），收尾后统一评估（2026-10-29） |
-| FR-003 | 监视记录按应用合并折叠展示 | [Oosl](https://github.com/Oosl) | [Issue #2 评论](https://github.com/z1298808165/Storage-redirection-X-Public/issues/2#issuecomment-6487944785) | 2026-10-29 | 暂缓 | 同 FR-002：随监视页改进一并评估（2026-10-29） |
+| FR-002 | 监视记录页查看时自动刷新并回到顶部最新 | [Oosl](https://github.com/Oosl) | [Issue #2 评论](https://github.com/z1298808165/Storage-redirection-X-Public/issues/2#issuecomment-6487944785) | 2026-10-29 | 已实施 | 进入页面时回到顶部；停留期间的自动刷新不动滚动位置（2026-11-28） |
+| FR-003 | 监视记录按应用合并折叠展示 | [Oosl](https://github.com/Oosl) | [Issue #2 评论](https://github.com/z1298808165/Storage-redirection-X-Public/issues/2#issuecomment-6487944785) | 2026-10-29 | 已实施 | 「明细 / 按应用」视图切换，选择持久化在 UiPreferences.logsGroupedByApp（2026-11-28） |

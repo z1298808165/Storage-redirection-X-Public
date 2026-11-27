@@ -338,6 +338,24 @@ python .github/tests/run-storage-view-recovery.py --serial emulator-5554 --fixtu
 
 每个用户的解锁和存储就绪预算为 900 秒，存储授权与 AppOps 校验预算为 180 秒。启动测试服务后先记录同一进程的挂载，再验证基线写入；恢复观察预算默认 360 秒。输出目录保留原始 mountinfo、账本、应用结果和文件落点。单次写入成功只能证明该次 I/O 成功，不能替代挂载恢复证据。
 
+## 无法自动化的用例：SAF 保存来源
+
+系统文件选择器的保存动作必须人工确认，没有可编程入口，所以「保存的文件是否被正确
+归因到发起应用」不进自动场景，按下面步骤人工验证：
+
+1. 打开管理器 → 设置 → 备份 → 选择目录 → 点 `SAVE`；
+2. 用 adb 读最近三条来源记录：
+
+```text
+adb -s <serial> shell "su -c 'grep -a identify_method=saf_provider /data/adb/modules/storage.redirect.x/logs/file_monitor.log | tail -3'"
+```
+
+期望：`identify_method=saf_provider`，第三列是发起应用包名（不是
+`com.google.android.documentsui`、不是 `-`），`caller_uid` 为该应用 UID。
+
+不要用 `input tap` 驱动选择器：坐标依赖分辨率，且 `uiautomator` 会抢焦点导致点击
+偶发失效。
+
 ## 手动运行用例
 
 最小配置表示为测试 APP 开启完整隔离：

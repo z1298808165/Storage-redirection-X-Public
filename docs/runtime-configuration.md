@@ -345,6 +345,25 @@ logcat 窗口按“行数上限”而不是固定分钟计算，因此不是“�
 
 繁忙设备在相同行数内覆盖的时间可能只有几十秒，安静设备则可能覆盖数小时。上述分层窗口避免直接导出全部 main/system 缓冲区导致日志包过大、内容过杂，同时优先保留复现时间点、崩溃和 SRX 相关上下文。日志包还包含模块日志及轮转历史、`module.prop`、`stats`、关键配置、设备/进程状态和 dmesg tail；配置迁移应使用 `.srxbak.zip` 备份。
 
+## 文件监视过滤
+
+`config/file_monitor_filters.json` 控制哪些记录不写进 `file_monitor.log`，两个维度：
+`excluded_operations`（按操作名或意图）和 `excluded_paths`（按路径，语法同下标排除规则）。
+
+操作名支持通配与意图后缀：
+
+| 写法 | 效果 |
+|---|---|
+| `open*` | 所有 open 系操作 |
+| `*:read` | 意图为读取的所有操作 |
+| `*:write` / `*:create` | 写入 / 创建 |
+| `*:delete` | 删除（`remove`、`unlink`、`rmdir`） |
+| `*:rename` | 重命名 |
+
+意图取值与记录的 `op_filter` 后缀一致；没有 `op_filter` 的记录（如 `op=remove`）按
+操作名兜底归类，同样能被对应意图规则命中。各字段的含义见
+[监视记录字段](monitor-record-fields.md)。
+
 ## 排除规则
 
 路径过滤支持排除语法，用于在放行规则中排除特定子路径或文件。
