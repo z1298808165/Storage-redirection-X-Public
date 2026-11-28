@@ -176,7 +176,7 @@ pub(super) enum BackendKind {
     Redirect,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum OperationKind {
     Read,
     Write,
@@ -1766,7 +1766,16 @@ impl RedirectPolicy {
     ///
     /// 入参/出参都是全存储相对路径（含 mount_rel 前缀）。重定向根视图形态为空
     /// （直通/监视会话）时不折叠。
+    ///
+    /// 仅映射模式不折叠：该模式下重定向根只承担沙盒与外来私有目录的隐藏后端，从不
+    /// 承担根视图，应用视图里的 `Android/data/<pkg>/sdcard` 就是自有私有目录的真实
+    /// 落点。折叠会把它解析到 `<rest>`，而仅映射分支对 `<rest>` 一律判 Real——私有子
+    /// 目录于是成了真实存储根的第二入口，配合读口径删除即可越权删改（2026-11-27 公开
+    /// issue #21 真机复现：私有 sdcard 列出 `/data/media/0` 顶层并删除 root:media_rw 目录）。
     fn strip_redirect_view_prefix(&self, full_rel: &str) -> Option<String> {
+        if self.is_mapping_mode_only {
+            return None;
+        }
         let prefix = self.redirect_view_rel.as_str();
         if prefix.is_empty() {
             return None;

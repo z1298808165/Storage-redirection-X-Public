@@ -400,7 +400,7 @@ impl Filesystem for FuseRedirectFs {
             policy = owner_policy;
         }
         match self
-            .backend_for_ino(&policy, ino)
+            .backend_for_ino(&policy, ino, OperationKind::Read)
             .and_then(|backend| self.visible_attr_for_backend(&policy, ino, &backend))
         {
             Ok(attr) => reply.attr(&ATTR_TTL, &attr),
@@ -424,12 +424,15 @@ impl Filesystem for FuseRedirectFs {
     fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
         let _perf = self.perf.observe(&self.perf.metadata_calls);
         let policy = self.policy_for_read_request(req, Some(ino), None);
-        match self.backend_for_ino(&policy, ino).and_then(|backend| {
-            let _slow = super::slow_probe::SlowFsGuard::start("readlink_backend", &backend.path);
-            std::fs::read_link(&backend.path)
-                .map(|path| path.as_os_str().as_bytes().to_vec())
-                .map_err(errno_from_io)
-        }) {
+        match self
+            .backend_for_ino(&policy, ino, OperationKind::Read)
+            .and_then(|backend| {
+                let _slow =
+                    super::slow_probe::SlowFsGuard::start("readlink_backend", &backend.path);
+                std::fs::read_link(&backend.path)
+                    .map(|path| path.as_os_str().as_bytes().to_vec())
+                    .map_err(errno_from_io)
+            }) {
             Ok(bytes) => reply.data(&bytes),
             Err(errno) => reply.error(errno),
         }
@@ -767,7 +770,14 @@ impl Filesystem for FuseRedirectFs {
         {
             policy = owner_policy;
         }
-        let backend = match self.backend_for_ino(&policy, ino) {
+        // 写入/创建类 open 必须按 Write 解析：Real 直写门控挂在 `OperationKind` 上，
+        // 传 Read 会把「读得到的路径」直接开放成可写通道（2026-11-27 issue #21）。
+        let operation = if is_mutation {
+            OperationKind::Write
+        } else {
+            OperationKind::Read
+        };
+        let backend = match self.backend_for_ino(&policy, ino, operation) {
             Ok(backend) => backend,
             Err(errno) => {
                 Self::log_unexpected_open_errno(&policy, "", errno);
@@ -1260,40 +1270,41 @@ impl Filesystem for FuseRedirectFs {
 
     fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         let policy = self.policy_for_fd_stat_or_request(req, ino);
-        let outcome = self.with_backend_for_xattr(&policy, ino, "getxattr", |c_path| {
-            let c_name = match std::ffi::CString::new(name.as_bytes()) {
-                Ok(value) => value,
-                Err(_) => return Err(Errno::EINVAL),
-            };
-            // SAFETY: c_path/c_name 在调用期间存活且以 NUL 结尾；首查长度，空缓冲合法。
-            let needed = unsafe {
-                libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
-            };
-            if needed < 0 {
-                return Err(errno_from_code(last_errno()));
-            }
-            if size == 0 {
-                return Ok(XattrOutcome::Size(needed as u32));
-            }
-            if (needed as u64) > size as u64 {
-                return Err(Errno::ERANGE);
-            }
-            let mut buffer = vec![0u8; needed as usize];
-            // SAFETY: buffer 长度即上面查得的 needed，lgetxattr 只写入 buffer 范围内。
-            let written = unsafe {
-                libc::lgetxattr(
-                    c_path.as_ptr(),
-                    c_name.as_ptr(),
-                    buffer.as_mut_ptr() as *mut libc::c_void,
-                    buffer.len(),
-                )
-            };
-            if written < 0 {
-                return Err(errno_from_code(last_errno()));
-            }
-            buffer.truncate(written as usize);
-            Ok(XattrOutcome::Data(buffer))
-        });
+        let outcome =
+            self.with_backend_for_xattr(&policy, ino, OperationKind::Read, "getxattr", |c_path| {
+                let c_name = match std::ffi::CString::new(name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(_) => return Err(Errno::EINVAL),
+                };
+                // SAFETY: c_path/c_name 在调用期间存活且以 NUL 结尾；首查长度，空缓冲合法。
+                let needed = unsafe {
+                    libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0)
+                };
+                if needed < 0 {
+                    return Err(errno_from_code(last_errno()));
+                }
+                if size == 0 {
+                    return Ok(XattrOutcome::Size(needed as u32));
+                }
+                if (needed as u64) > size as u64 {
+                    return Err(Errno::ERANGE);
+                }
+                let mut buffer = vec![0u8; needed as usize];
+                // SAFETY: buffer 长度即上面查得的 needed，lgetxattr 只写入 buffer 范围内。
+                let written = unsafe {
+                    libc::lgetxattr(
+                        c_path.as_ptr(),
+                        c_name.as_ptr(),
+                        buffer.as_mut_ptr() as *mut libc::c_void,
+                        buffer.len(),
+                    )
+                };
+                if written < 0 {
+                    return Err(errno_from_code(last_errno()));
+                }
+                buffer.truncate(written as usize);
+                Ok(XattrOutcome::Data(buffer))
+            });
         match outcome {
             Ok(XattrOutcome::Size(value)) => reply.size(value),
             Ok(XattrOutcome::Data(bytes)) => reply.data(&bytes),
@@ -1317,27 +1328,28 @@ impl Filesystem for FuseRedirectFs {
             return;
         }
         let policy = self.policy_for_fd_stat_or_request(req, ino);
-        let outcome = self.with_backend_for_xattr(&policy, ino, "setxattr", |c_path| {
-            let c_name = match std::ffi::CString::new(name.as_bytes()) {
-                Ok(value) => value,
-                Err(_) => return Err(Errno::EINVAL),
-            };
-            // SAFETY: c_path/c_name 存活且以 NUL 结尾；value 为调用方传入的只读缓冲。
-            let ret = unsafe {
-                libc::lsetxattr(
-                    c_path.as_ptr(),
-                    c_name.as_ptr(),
-                    value.as_ptr() as *const libc::c_void,
-                    value.len(),
-                    flags,
-                )
-            };
-            if ret == 0 {
-                Ok(XattrOutcome::Data(Vec::new()))
-            } else {
-                Err(errno_from_code(last_errno()))
-            }
-        });
+        let outcome =
+            self.with_backend_for_xattr(&policy, ino, OperationKind::Write, "setxattr", |c_path| {
+                let c_name = match std::ffi::CString::new(name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(_) => return Err(Errno::EINVAL),
+                };
+                // SAFETY: c_path/c_name 存活且以 NUL 结尾；value 为调用方传入的只读缓冲。
+                let ret = unsafe {
+                    libc::lsetxattr(
+                        c_path.as_ptr(),
+                        c_name.as_ptr(),
+                        value.as_ptr() as *const libc::c_void,
+                        value.len(),
+                        flags,
+                    )
+                };
+                if ret == 0 {
+                    Ok(XattrOutcome::Data(Vec::new()))
+                } else {
+                    Err(errno_from_code(last_errno()))
+                }
+            });
         match outcome {
             Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
@@ -1346,33 +1358,34 @@ impl Filesystem for FuseRedirectFs {
 
     fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         let policy = self.policy_for_fd_stat_or_request(req, ino);
-        let outcome = self.with_backend_for_xattr(&policy, ino, "listxattr", |c_path| {
-            // SAFETY: c_path 存活且以 NUL 结尾；首查长度，空缓冲合法。
-            let needed = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
-            if needed < 0 {
-                return Err(errno_from_code(last_errno()));
-            }
-            if size == 0 {
-                return Ok(XattrOutcome::Size(needed as u32));
-            }
-            if (needed as u64) > size as u64 {
-                return Err(Errno::ERANGE);
-            }
-            let mut buffer = vec![0u8; needed as usize];
-            // SAFETY: buffer 长度即上面查得的 needed，llistxattr 只写入 buffer 范围内。
-            let written = unsafe {
-                libc::llistxattr(
-                    c_path.as_ptr(),
-                    buffer.as_mut_ptr() as *mut libc::c_char,
-                    buffer.len(),
-                )
-            };
-            if written < 0 {
-                return Err(errno_from_code(last_errno()));
-            }
-            buffer.truncate(written as usize);
-            Ok(XattrOutcome::Data(buffer))
-        });
+        let outcome =
+            self.with_backend_for_xattr(&policy, ino, OperationKind::Read, "listxattr", |c_path| {
+                // SAFETY: c_path 存活且以 NUL 结尾；首查长度，空缓冲合法。
+                let needed = unsafe { libc::llistxattr(c_path.as_ptr(), std::ptr::null_mut(), 0) };
+                if needed < 0 {
+                    return Err(errno_from_code(last_errno()));
+                }
+                if size == 0 {
+                    return Ok(XattrOutcome::Size(needed as u32));
+                }
+                if (needed as u64) > size as u64 {
+                    return Err(Errno::ERANGE);
+                }
+                let mut buffer = vec![0u8; needed as usize];
+                // SAFETY: buffer 长度即上面查得的 needed，llistxattr 只写入 buffer 范围内。
+                let written = unsafe {
+                    libc::llistxattr(
+                        c_path.as_ptr(),
+                        buffer.as_mut_ptr() as *mut libc::c_char,
+                        buffer.len(),
+                    )
+                };
+                if written < 0 {
+                    return Err(errno_from_code(last_errno()));
+                }
+                buffer.truncate(written as usize);
+                Ok(XattrOutcome::Data(buffer))
+            });
         match outcome {
             Ok(XattrOutcome::Size(value)) => reply.size(value),
             Ok(XattrOutcome::Data(bytes)) => reply.data(&bytes),
@@ -1382,19 +1395,25 @@ impl Filesystem for FuseRedirectFs {
 
     fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let policy = self.policy_for_fd_stat_or_request(req, ino);
-        let outcome = self.with_backend_for_xattr(&policy, ino, "removexattr", |c_path| {
-            let c_name = match std::ffi::CString::new(name.as_bytes()) {
-                Ok(value) => value,
-                Err(_) => return Err(Errno::EINVAL),
-            };
-            // SAFETY: c_path/c_name 存活且以 NUL 结尾，lremovexattr 只读取。
-            let ret = unsafe { libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr()) };
-            if ret == 0 {
-                Ok(XattrOutcome::Data(Vec::new()))
-            } else {
-                Err(errno_from_code(last_errno()))
-            }
-        });
+        let outcome = self.with_backend_for_xattr(
+            &policy,
+            ino,
+            OperationKind::Write,
+            "removexattr",
+            |c_path| {
+                let c_name = match std::ffi::CString::new(name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(_) => return Err(Errno::EINVAL),
+                };
+                // SAFETY: c_path/c_name 存活且以 NUL 结尾，lremovexattr 只读取。
+                let ret = unsafe { libc::lremovexattr(c_path.as_ptr(), c_name.as_ptr()) };
+                if ret == 0 {
+                    Ok(XattrOutcome::Data(Vec::new()))
+                } else {
+                    Err(errno_from_code(last_errno()))
+                }
+            },
+        );
         match outcome {
             Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
@@ -1919,16 +1938,20 @@ impl Filesystem for FuseRedirectFs {
         } else {
             None
         };
-        let backend = match self.backend_for_ino(&policy, ino).or_else(|errno| {
-            if errno.code() == libc::ENOENT {
-                open_file
-                    .as_ref()
-                    .map(|file| Arc::clone(&file.backend))
-                    .ok_or(errno)
-            } else {
-                Err(errno)
-            }
-        }) {
+        // setattr 全是变更语义（chmod/chown/truncate/utimens），按 Write 解析以让 Real
+        // 直写门控生效：以 Read 解析会让「读得到的真实路径」获得改属性能力。
+        let backend = match self
+            .backend_for_ino(&policy, ino, OperationKind::Write)
+            .or_else(|errno| {
+                if errno.code() == libc::ENOENT {
+                    open_file
+                        .as_ref()
+                        .map(|file| Arc::clone(&file.backend))
+                        .ok_or(errno)
+                } else {
+                    Err(errno)
+                }
+            }) {
             Ok(backend) => backend,
             Err(errno) => {
                 let rel = self.path_for_ino(ino);
@@ -2039,11 +2062,29 @@ impl Filesystem for FuseRedirectFs {
         {
             policy = owner_policy;
         }
-        let backend = match self.backend_for_ino(&policy, ino) {
+        // W_OK 探测与真正的写入同一口径：按 Write 解析，让 Real 直写门控参与判定。
+        let operation = if mask.contains(AccessFlags::W_OK) {
+            OperationKind::Write
+        } else {
+            OperationKind::Read
+        };
+        let backend = match self.backend_for_ino(&policy, ino, operation) {
             Ok(backend) => backend,
             Err(errno) => {
                 let rel = self.path_for_ino(ino);
                 self.log_reply_error("access", req.uid(), rel.as_deref(), errno);
+                // 写口径被门控拒绝、但读口径可达：原生对「存在但不可写」返回 EACCES。
+                // 直接回 ENOENT 会让 `access(W_OK)` 的调用方把文件当成不存在（先删后建
+                // 的临时文件流程会误判成「没有旧文件可覆盖」）。
+                if operation == OperationKind::Write
+                    && errno.code() == libc::ENOENT
+                    && self
+                        .backend_for_ino(&policy, ino, OperationKind::Read)
+                        .is_ok()
+                {
+                    reply.error(Errno::EACCES);
+                    return;
+                }
                 reply.error(errno);
                 return;
             }
@@ -2121,7 +2162,7 @@ impl Filesystem for FuseRedirectFs {
                 return;
             }
         }
-        let backend = match self.backend_for_ino(&policy, ino) {
+        let backend = match self.backend_for_ino(&policy, ino, OperationKind::Read) {
             Ok(backend) => backend,
             Err(errno) => {
                 reply.error(errno);

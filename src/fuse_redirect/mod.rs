@@ -146,6 +146,10 @@ struct InodeBackendCacheEntry {
     owner_uid: u32,
     policy_fingerprint: u64,
     inode_rel: String,
+    /// 解析口径：同一 inode 的读与写可能有不同后端（Real 直写门控、只读规则），
+    /// 命中必须连同口径一起比对，否则读解析的结果会被写操作复用（2026-11-27
+    /// 公开 issue #21 的越权删除就是「读口径解析、写操作执行」）。
+    operation: OperationKind,
     backend: Arc<BackendPath>,
     /// 解析时覆盖表的代次。覆盖挂载可能在会话运行中途出现或消失，代次不一致时这条
     /// 缓存按陈旧处理、就地重解析——否则首次解析落在 1 秒快照窗口内会把「bind 遮蔽前
@@ -689,6 +693,7 @@ impl FuseRedirectFs {
         state: &mut FuseState,
         ino: INodeNo,
         policy: &RedirectPolicy,
+        operation: OperationKind,
         backend: Arc<BackendPath>,
         overlay_generation: u64,
     ) {
@@ -705,6 +710,7 @@ impl FuseRedirectFs {
                 owner_uid: policy.uid as u32,
                 policy_fingerprint: policy.fingerprint,
                 inode_rel,
+                operation,
                 backend,
                 overlay_generation,
             },
@@ -734,10 +740,18 @@ impl FuseRedirectFs {
     }
 
     /// 按已解析后端回答 inode 元数据类请求；缓存身份变化时重新路由并更新仍对应的 inode。
+    ///
+    /// `operation` 决定写门控是否生效：Real 直写门控只在 `OperationKind::Write` 下拦截
+    /// （见 `RedirectPolicy::resolve_relative`），变更类回调必须传 Write——传 Read 会
+    /// 让「读得到的路径」直接获得写/删能力，宿主又以 uid 0 执行底层操作，内核权限一并
+    /// 被绕过（2026-11-27 公开 issue #21：unlink/rmdir 删掉存储根 root:media_rw 目录）。
+    /// 缓存条目连同解析口径登记与比对（见 [`InodeBackendCacheEntry::operation`]）：同一
+    /// inode 的读与写可能落到不同后端，读解析的结果不得被写操作复用。
     fn backend_for_ino(
         &self,
         policy: &RedirectPolicy,
         ino: INodeNo,
+        operation: OperationKind,
     ) -> Result<Arc<BackendPath>, Errno> {
         let rel = self.path_for_ino(ino).ok_or(Errno::ENOENT)?;
         // 代次在取 state 锁之前读取（`snapshot_generation` 会短暂持有快照锁，避免与
@@ -749,6 +763,7 @@ impl FuseRedirectFs {
                 && entry.owner_uid == policy.uid as u32
                 && entry.policy_fingerprint == policy.fingerprint
                 && entry.inode_rel == rel
+                && entry.operation == operation
                 && entry.overlay_generation == overlay_generation
             {
                 let count = INODE_BACKEND_CACHE_HITS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -767,7 +782,7 @@ impl FuseRedirectFs {
             }
         }
         let backend = policy
-            .backend_for_relative(&rel, OperationKind::Read)
+            .backend_for_relative(&rel, operation)
             .map(Arc::new)
             .ok_or(Errno::ENOENT)?;
         let mut state = self.state.write().unwrap_or_else(|err| err.into_inner());
@@ -780,6 +795,7 @@ impl FuseRedirectFs {
                 &mut state,
                 ino,
                 policy,
+                operation,
                 Arc::clone(&backend),
                 overlay_generation,
             );
@@ -804,13 +820,16 @@ impl FuseRedirectFs {
         &self,
         policy: &RedirectPolicy,
         ino: INodeNo,
+        operation: OperationKind,
         op: &'static str,
         action: impl FnOnce(&std::ffi::CString) -> Result<callbacks::XattrOutcome, Errno>,
     ) -> Result<callbacks::XattrOutcome, Errno> {
-        let backend = self.backend_for_ino(policy, ino).inspect_err(|&errno| {
-            let rel = self.path_for_ino(ino);
-            self.log_reply_error(op, policy.uid as u32, rel.as_deref(), errno);
-        })?;
+        let backend = self
+            .backend_for_ino(policy, ino, operation)
+            .inspect_err(|&errno| {
+                let rel = self.path_for_ino(ino);
+                self.log_reply_error(op, policy.uid as u32, rel.as_deref(), errno);
+            })?;
         let c_path = metadata::cstring_path(&backend.path)?;
         action(&c_path)
     }
@@ -986,6 +1005,7 @@ impl FuseRedirectFs {
                 &mut state,
                 ino,
                 policy,
+                OperationKind::Read,
                 Arc::clone(&backend),
                 overlay_generation,
             );
@@ -1250,7 +1270,7 @@ impl FuseRedirectFs {
                 return;
             }
         };
-        let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Read) else {
+        let Some(backend) = policy.backend_for_relative(&rel, OperationKind::Write) else {
             reply.error(Errno::ENOENT);
             return;
         };

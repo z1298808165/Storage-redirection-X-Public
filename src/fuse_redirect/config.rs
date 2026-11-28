@@ -2887,11 +2887,7 @@ fn send_ready_result(sock: Option<libc::c_int>, result: i32) {
 /// 与 [`mount_request_has_policy_rules`] 不同，无路径规则的全隔离请求不算显式规则。
 pub fn mount_request_has_explicit_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
     (request.is_monitor_only() && request.is_file_monitor_enabled())
-        || !request.allowed_real_paths().is_empty()
-        || !request.excluded_real_paths().is_empty()
-        || !request.path_mappings().is_empty()
-        || !request.sandboxed_paths().is_empty()
-        || !request.read_only_paths().is_empty()
+        || has_effective_path_rules(request)
 }
 
 /// 请求是否需要重定向策略或已启用的监视专用视图。
@@ -2900,9 +2896,21 @@ pub fn mount_request_has_explicit_rules<R: MountRequestFields + ?Sized>(request:
 pub fn mount_request_has_policy_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
     (request.is_monitor_only() && request.is_file_monitor_enabled())
         || (!request.is_monitor_only() && !request.is_mapping_mode_only())
-        || !request.allowed_real_paths().is_empty()
-        || !request.excluded_real_paths().is_empty()
-        || !request.path_mappings().is_empty()
+        || has_effective_path_rules(request)
+}
+
+/// 本请求会被路由真正消费的路径规则。
+///
+/// `allowed_real_paths`/`excluded_real_paths` 只由完整隔离的 fallback 判定读取，
+/// 仅映射模式的决策分支（`RedirectPolicy::backend_decision`）不读这两组索引。残留它们
+/// 既不会改变仅映射模式的应用行为，又会把应用拉进模块 FUSE 视图——宿主视图接管私有
+/// `sdcard` 子目录后，折叠与读口径删除都会变成真实存储根的越权通道（2026-11-27 公开
+/// issue #21）。因此仅映射请求只按映射、沙盒与只读三类规则判定。
+fn has_effective_path_rules<R: MountRequestFields + ?Sized>(request: &R) -> bool {
+    let isolation_only_rules =
+        !request.allowed_real_paths().is_empty() || !request.excluded_real_paths().is_empty();
+    (!request.path_mappings().is_empty()
         || !request.sandboxed_paths().is_empty()
-        || !request.read_only_paths().is_empty()
+        || !request.read_only_paths().is_empty())
+        || (!request.is_mapping_mode_only() && isolation_only_rules)
 }
