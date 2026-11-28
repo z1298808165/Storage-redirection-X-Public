@@ -122,13 +122,13 @@ internal fun LogsScreen(
                   .any { value -> value.lowercase().contains(q) }
             }
       }
-  // 按应用聚合视图：以实际落盘进程优先，其次调用方，保证同一应用的记录落在一组。
+  // 按应用聚合视图：分组键必须是应用包名，不能拿落盘进程名当键（见 aggregateGroupPackage）。
   // 聚合视图的主搜索只按应用名/包名过滤分组；路径搜索放在详情弹窗里。
   val appLogGroups =
       remember(filtered, appsByPackage, query) {
         val q = query.trim().lowercase()
         filtered
-            .groupBy { it.processPackage.ifBlank { it.callerPackage.ifBlank { it.packageName } } }
+            .groupBy { entry -> entry.aggregateGroupPackage(appsByPackage) }
             .map { (pkg, entries) -> AppLogGroup(pkg, entries) }
             .filter { group ->
               q.isBlank() ||
@@ -142,20 +142,10 @@ internal fun LogsScreen(
   // 只在页面首次出现时回到顶部。停留期间的自动刷新绝不能滚回去——用户可能正
   // 在看下面的记录，滚回顶部等于把阅读位置抢走。下拉刷新本身就发生在顶部，无需处理。
   LaunchedEffect(Unit) { listState.scrollToItem(0) }
-  // 同一批日志里可能存在内容完全相同的条目，按出现次数补一个序号使 key 唯一。
-  // 该序号只取决于条目自身内容，插入新日志不会改变已有条目的 key。
-  val logEntryKeys =
-      remember(filtered) {
-        val seen = HashMap<String, Int>()
-        val keys = HashMap<LogEntry, String>(filtered.size)
-        for (entry in filtered) {
-          val base = entry.contentKey()
-          val ordinal = seen.getOrDefault(base, 0)
-          seen[base] = ordinal + 1
-          keys.putIfAbsent(entry, if (ordinal == 0) base else "$base#$ordinal")
-        }
-        keys
-      }
+  // 同一批日志里可能存在「内容指纹相同」的条目（同一秒内同一应用对同一路径开两个 fd，
+  // 占位符之外只有 callerPid 不同），按出现次数补一个序号使 key 唯一。该序号只取决于条目
+  // 自身内容与相对顺序，插入新日志不会改变已有条目的 key。
+  val logEntryKeys = remember(filtered) { buildLogEntryKeys(filtered) }
   val pullToRefreshState = rememberPullToRefreshState()
   val refreshTexts = listOf("下拉刷新", "释放刷新", "正在刷新", "刷新完成")
   SrxProgressivePage(
@@ -234,9 +224,9 @@ internal fun LogsScreen(
                 filtered,
                 // key 不能包含列表下标：日志是最新在前，新增一条会让其后所有条目的下标
                 // 位移，等价于全部 key 变化，导致整列表重建、item 内的展开状态丢失、
-                // 复用失效。这里用内容指纹加「同内容第几次出现」的序号，既保证唯一，
+                // 复用失效。这里按位置取「内容指纹 + 同内容第几次出现」的序号，既保证唯一，
                 // 又不受插入位置影响。
-                key = { _, entry -> logEntryKeys[entry] ?: entry.contentKey() },
+                key = { index, _ -> logEntryKeys[index] },
                 contentType = { _, entry -> if (entry.ok) "success" else "error" },
             ) { _, entry ->
               val app =
@@ -656,6 +646,37 @@ internal fun String.isSinglePackageName(): Boolean =
 internal fun LogEntry.contentKey(): String =
     "$timestamp|$processPackage|$callerPackage|$packageName|$eventRole|$correlationId|$observationCount|$operation|$path|$ok"
 
+/**
+ * 按位置为一批条目生成 LazyColumn 的 key：内容指纹 + 「同内容第几次出现」的序号。
+ * - 指纹不含 callerPid：同一秒内同一应用对同一路径开两个 fd，两条记录的指纹完全相同。
+ * - 只靠指纹会让两个 item 撞 key，LazyColumn 抛 IllegalArgumentException 把应用带崩。
+ * - 序号取自同一批列表内的相对顺序，因此插入新日志不会改动已有条目的 key。
+ */
+internal fun buildLogEntryKeys(entries: List<LogEntry>): List<String> {
+  val seen = HashMap<String, Int>(entries.size)
+  return entries.map { entry ->
+    val base = entry.contentKey()
+    val ordinal = seen.getOrDefault(base, 0)
+    seen[base] = ordinal + 1
+    if (ordinal == 0) base else "$base#$ordinal"
+  }
+}
+
+/**
+ * 聚合视图的分组键：必须是应用包名，不能是落盘进程名。
+ * - 落盘进程常是 `包名:子进程`（如 IDM 的 `…:DownloadService`），进程名不是包名。
+ * - 拿进程名当键会让 `appsByPackage` 查不到应用：卡片只能显示进程名、没有图标。
+ * - 同一应用的主进程与子进程记录也会裂成两组。
+ * - 这里与明细卡片的身份解析同序（显示包名 → 调用方 → 监视包名），再补「落盘进程去 `:子进程`」。
+ * - 都查不到时退回记录自己的显示包名，「未知来源」这类非应用身份仍能成组、不与他组合并。
+ */
+internal fun LogEntry.aggregateGroupPackage(appsByPackage: Map<String, InstalledApp>): String {
+  val candidates =
+      listOf(packageName, callerPackage, watchPackage, processPackage.substringBefore(':'))
+  return candidates.firstOrNull { it.isNotBlank() && it != "-" && appsByPackage.containsKey(it) }
+      ?: packageName.ifBlank { processPackage.substringBefore(':') }
+}
+
 private fun String.isIntermediateLogPackage(): Boolean =
     this == "com.google.android.providers.media.module" ||
         this == "com.android.providers.media.module" ||
@@ -859,6 +880,9 @@ private fun AppLogsDialog(
               }
             }
       }
+  // 弹窗里的记录同样可能出现内容指纹相同的条目（同秒同路径两个 fd），key 必须按位置补
+  // 序号，否则 LazyColumn 会因 key 重复抛 IllegalArgumentException 把整个应用带崩。
+  val entryKeys = remember(entries) { buildLogEntryKeys(entries) }
   CenteredDialog(show = true, onDismiss = onDismiss) {
     Column(
         modifier = Modifier.fillMaxWidth().height(560.dp),
@@ -901,7 +925,7 @@ private fun AppLogsDialog(
         if (entries.isEmpty()) {
           item { EmptyText("没有匹配的记录") }
         } else {
-          items(entries, key = { entry -> entry.contentKey() + entry.timestamp }) { entry ->
+          itemsIndexed(entries, key = { index, _ -> entryKeys[index] }) { _, entry ->
             LogCard(
                 entry = entry,
                 app = app,
