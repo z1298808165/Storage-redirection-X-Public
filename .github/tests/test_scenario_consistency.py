@@ -990,7 +990,20 @@ class ScenarioConsistencyTest(unittest.TestCase):
         # 此时 `gh release edit --draft=false` 是幂等的。
         release = section(ci, "  create-ci-release:", "  cleanup-build-artifacts:")
         self.assertNotIn("--json isDraft", release)
-        self.assertIn("storage-redirect-x-manager-v${VERSION}.apk", release)
+        # App 与模块各用自己的版本变量，资产名必须跟着各自版本走；混用会让发布环节
+        # 去校验一个根本不存在的文件名（此前正是 app 用 VERSION 拼 tag 出过这类问题）。
+        self.assertIn("storage-redirect-x-manager-v${APP_VERSION}.apk", release)
+        self.assertIn("storage.redirect.x-v${MODULE_VERSION}.zip", release)
+
+        # app job 的 VERSION 必须是 App 自己的版本，否则 APK 的 versionName 会退回模块 semver。
+        app_job = section(ci, "  app:", "  test-flow-build:")
+        self.assertIn("VERSION: ${{ needs.prepare.outputs.app_version }}", app_job)
+        self.assertIn("storage-redirect-x-manager-v${VERSION}.apk", app_job)
+
+        # 正式发布的 app job：Gradle 读 App 版本，Release tag 必须用发布版本，不能共用 VERSION。
+        release_ci = section(read(".github/workflows/release.yml"), "  app:", "  test-flow-build:")
+        self.assertIn("RELEASE_VERSION: ${{ needs.prepare.outputs.version }}", release_ci)
+        self.assertNotIn('"v${VERSION}"', release_ci)
 
     def test_ci_test_flow_step_timeout_follows_scenario_scope(self) -> None:
         # 模拟器异常时编排脚本可能停在场景脚本之前的准备阶段，脚本内看门狗覆盖
