@@ -5,8 +5,8 @@
 
 - 顶层 ``version``：检测版本，等价于「第几次发布」。旧客户端只读这个字段，所以它必须
   **每次发布都严格递增**，且不低于两个组件版本。
-- ``app.version`` / ``module.version``：App 与模块各自的版本线，互不相干（App 走自己的
-  semver，模块跟 Cargo.toml）。本次没有重编的组件沿用上一版清单里记录的值，不需要额外
+- ``app.version`` / ``module.version``：App 与模块各自的版本线，互不相干（App 走 UTC
+  日期时间 ``yyyyMMddHHmmss``，模块跟 Cargo.toml）。本次没有重编的组件沿用上一版清单里记录的值，不需要额外
   的状态文件。
 - ``downloadUrl`` / ``moduleUrl``：兼容字段，分别是 ``app.url`` / ``module.url`` 的镜像，
   只描述本次发布自带的构件；本次没有该构件时留空。

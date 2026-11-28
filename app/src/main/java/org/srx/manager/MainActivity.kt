@@ -1177,28 +1177,17 @@ private fun SrxManagerApp(
             }
           }
 
+          // 弹窗内容按组件渲染，两种主题共用同一份实现，不再按主题分叉。
           state.pendingUpdate?.let { update ->
-            if (prefs.themeStyle == UiThemeStyle.Coui) {
-              UpdateFoundDialog(
-                  update = update,
-                  onDismiss = viewModel::clearPendingUpdate,
-                  onOpen = {
-                    val opened = openExternalUrl(context, update.release.htmlUrl)
-                    if (!opened) toast = "未找到可用浏览器"
-                    viewModel.clearPendingUpdate()
-                  },
-              )
-            } else {
-              UpdateFoundDialog(
-                  update = update,
-                  onDismiss = viewModel::clearPendingUpdate,
-                  onOpen = {
-                    val opened = openExternalUrl(context, update.release.htmlUrl)
-                    if (!opened) toast = "未找到可用浏览器"
-                    viewModel.clearPendingUpdate()
-                  },
-              )
-            }
+            UpdateFoundDialog(
+                update = update,
+                onDismiss = viewModel::clearPendingUpdate,
+                onOpen = {
+                  val opened = openExternalUrl(context, update.release.htmlUrl)
+                  if (!opened) toast = "未找到可用浏览器"
+                  viewModel.clearPendingUpdate()
+                },
+            )
           }
         }
       }

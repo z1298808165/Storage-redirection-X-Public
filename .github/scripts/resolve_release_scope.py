@@ -28,9 +28,13 @@ APP_FILES = {
     "settings.gradle.kts",
     "gradle.properties",
     "gradle/libs.versions.toml",
+    # Gradle wrapper 与签名配置样例只影响 App 构建。
+    "gradlew",
+    "gradlew.bat",
+    "keystore.properties.example",
 }
 # 只影响模块 zip 的路径（webroot 已随 WebUI 移除）。
-MODULE_PREFIXES = ("src/", "native/", "vendor/", "java_src/", "assets/zygisk_module/")
+MODULE_PREFIXES = ("src/", "native/", "vendor/", "java_src/", "assets/zygisk_module/", ".cargo/")
 MODULE_FILES = {
     "Cargo.toml",
     "Cargo.lock",
@@ -38,7 +42,15 @@ MODULE_FILES = {
     "rust-toolchain.toml",
 }
 # 发布流程与文档：不改变任何构件，不需要构建。
-OTHER_PREFIXES = (".github/", "docs/", "scripts/", "tests/", "temp/", ".workbuddy/")
+OTHER_PREFIXES = (
+    ".github/",
+    ".githooks/",
+    "docs/",
+    "scripts/",
+    "tests/",
+    "temp/",
+    ".workbuddy/",
+)
 OTHER_FILES = {
     "README.md",
     "AGENTS.md",
@@ -48,6 +60,11 @@ OTHER_FILES = {
     "LICENSE",
     # 首页 logo 只被 README 引用，不进模块 zip。
     "assets/logo.png",
+    ".editorconfig",
+    ".gitattributes",
+    ".gitignore",
+    "github-actions-failure-notes.md",
+    "upstream-sync-baseline.json",
 }
 IGNORED_FILES = {"update.json"}
 

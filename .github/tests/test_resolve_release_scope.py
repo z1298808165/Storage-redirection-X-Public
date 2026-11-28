@@ -78,6 +78,14 @@ class TrailerTest(unittest.TestCase):
         )
         self.assertEqual("none", RESOLVE.resolve_scope(["README.md", "assets/logo.png"]))
 
+    def test_root_tooling_files_do_not_trigger_a_build(self) -> None:
+        self.assertEqual("none", RESOLVE.resolve_scope([".gitignore", ".githooks/pre-commit"]))
+        self.assertEqual("none", RESOLVE.resolve_scope(["upstream-sync-baseline.json"]))
+
+    def test_gradle_wrapper_belongs_to_app_and_cargo_config_to_module(self) -> None:
+        self.assertEqual("app", RESOLVE.resolve_scope(["gradlew", "keystore.properties.example"]))
+        self.assertEqual("module", RESOLVE.resolve_scope([".cargo/config.toml"]))
+
     def test_zero_before_sha_falls_back_to_single_commit(self) -> None:
         self.assertTrue(RESOLVE.is_zero_ref("0" * 40))
         self.assertFalse(RESOLVE.is_zero_ref("86f078f3aaaa"))
