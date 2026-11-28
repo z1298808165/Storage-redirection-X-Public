@@ -305,6 +305,8 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.app_version }}
       APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+      # Release tag 用发布版本（模块 semver），App 版本只喂 Gradle，两者不能共用 VERSION。
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.app_version_code }}
       SRX_RELEASE_BRANCH: ${{ needs.prepare.outputs.release_branch }}
     steps:
@@ -371,16 +373,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if [ "$(gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
+            if [ "$(gh release view "v${RELEASE_VERSION}" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)" = "true" ]; then
               break
             fi
             if [ "$attempt" -eq 10 ]; then
-              gh release view "v${VERSION}" --repo "$GITHUB_REPOSITORY" || true
+              gh release view "v${RELEASE_VERSION}" --repo "$GITHUB_REPOSITORY" || true
               exit 1
             fi
             sleep 2
           done
-          gh release upload "v${VERSION}" \
+          gh release upload "v${RELEASE_VERSION}" \
             "build/app/storage-redirect-x-manager-v${APP_VERSION}.apk" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber

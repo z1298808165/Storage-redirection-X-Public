@@ -146,6 +146,15 @@ class UpdateManifestTest(unittest.TestCase):
                 previous_entry(),
             )
 
+    def test_v2_entry_missing_module_does_not_carry_detection_version(self) -> None:
+        # 条目带了组件字段却缺模块侧：说明当时没有模块信息，不能把检测版本当模块版本沿用。
+        previous = previous_entry()
+        previous.pop("module")
+        entry = UPDATE_MANIFEST.build_entry(make_args(app_version="20261128081516"), previous)
+
+        self.assertEqual("20261128081516", entry["app"]["version"])
+        self.assertEqual("", entry["module"]["version"])
+
     def test_same_tag_rerun_rewrites_the_same_entry(self) -> None:
         # 同一轮 CI 重跑：检测版本与 tag 都不变，属于幂等重写而不是新一轮发布。
         entry = UPDATE_MANIFEST.build_entry(

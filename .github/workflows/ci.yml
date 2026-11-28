@@ -446,7 +446,7 @@ jobs:
               gh release create "$CI_TAG" \
                 --repo "$GITHUB_REPOSITORY" \
                 --target "$GITHUB_SHA" \
-                --title "CI Build $VERSION" \
+                --title "CI Build ${{ needs.prepare.outputs.version }}" \
                 --notes "构建与测试进行中。" \
                 --draft \
                 --prerelease \

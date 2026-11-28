@@ -111,7 +111,9 @@ def previous_component_version(previous: dict | None, component: str) -> str:
         recorded = str(nested.get("version", "")).strip()
         if recorded:
             return recorded
-    if previous.get("schema", 1) < SCHEMA_VERSION:
+    # 条目本身不带 schema 字段：只有完全没有任何组件字段的 v1 条目，才把顶层检测版本
+    # 当作当时的组件版本；带了组件字段却缺这一侧，说明当时没有该组件的信息，不能顶替。
+    if previous.get("app") is None and previous.get("module") is None:
         return str(previous.get("version", "")).strip()
     return ""
 
@@ -138,9 +140,23 @@ def sanitize_release_notes(markdown: str) -> str:
     return normalized
 
 
+def _is_legacy_entry(previous: dict | None) -> bool:
+    """上一版是否为「两个组件共用检测版本」的旧格式（或根本没有上一版）。"""
+    if not isinstance(previous, dict):
+        return True
+    return previous.get("app") is None and previous.get("module") is None
+
+
 def build_entry(args: argparse.Namespace, previous: dict | None) -> dict:
-    app_version = args.app_version or previous_component_version(previous, "app") or args.version
-    module_version = args.module_version or previous_component_version(previous, "module") or args.version
+    app_version = (args.app_version or "").strip() or previous_component_version(previous, "app")
+    module_version = (args.module_version or "").strip() or previous_component_version(previous, "module")
+    # 首次发布（或上一版是 v1 条目）没有组件版本可沿用：两个组件都等于检测版本。
+    # 上一版已经是 schema 2 却缺某一侧时，说明当时没有该组件的信息，宁可留空也不要
+    # 拿检测版本顶替——客户端会把空版本当作「本次没有该组件」。
+    if not app_version and _is_legacy_entry(previous):
+        app_version = args.version
+    if not module_version and _is_legacy_entry(previous):
+        module_version = args.version
     # 检测版本是旧客户端唯一的判定依据：既要严格递增（否则老客户端看不到这次发布），
     # 也必须保持 X.Y.Z 形态——旧客户端用 semver 正则解析它，解析不出来等于永远没有更新。
     if version_key(args.version) is None:
