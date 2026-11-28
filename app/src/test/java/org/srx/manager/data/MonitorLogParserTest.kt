@@ -1247,7 +1247,7 @@ class MonitorLogParserTest {
   }
 
   @Test
-  fun keepsEachPickerRecordWhenTwoSavesHappenCloseTogether() {
+  fun keepsBothPickerRecordsForRapidRepeatedSaves() {
     // 用户连点两次保存、或两个应用往同一路径各存一份时，两条 saf_provider 记录的时间差
     // 同样落在 3 秒窗口内。锚点只能当折叠目标、不能互相折叠，否则日志里少一次独立保存
     // 的证据（两条记录按请求者身份区分，所以不会被更早的按 key 合并吃掉）。
