@@ -1207,6 +1207,74 @@ class MonitorLogParserTest {
   }
 
   @Test
+  fun foldsOneSaveBurstIntoThePickerRecord() {
+    // 真机实测一次 SAF 保存会留下四条：MP 的 create/write、picker 的 provider_open、
+    // 以及模块自己的 FUSE 观察。它们的操作名与调用方都不同，按 key 配对永远配不上，
+    // 这里断言按「同一路径 + 时间差不超过 3 秒」折叠成一条，且条数记在 observationCount 上。
+    val raw =
+        listOf(
+            "2026-11-28 00:08:06|com.android.providers.media.module|com.android.externalstorage|OPEN|" +
+                "/storage/emulated/0/Download/第三方下载/backup.srxbak.zip|field_encoding=percent|" +
+                "ret=197|errno=0|identify_method=caller|identify_reliability=high|event_role=request|" +
+                "op=open|op_filter=open:create|flags=0x200c2|action=passthrough",
+            "2026-11-28 00:08:06|com.google.android.documentsui|org.srx.manager|OPEN|" +
+                "/storage/emulated/0/Download/第三方下载/backup.srxbak.zip|field_encoding=percent|" +
+                "ret=0|errno=0|identify_method=saf_provider|identify_reliability=high|" +
+                "event_role=request|op=provider_open|op_filter=provider_open:create|" +
+                "source=saf_provider|save_group=1|caller_uid=10357",
+            "2026-11-28 00:08:08|com.android.providers.media.module|com.android.externalstorage|OPEN|" +
+                "/storage/emulated/0/Download/第三方下载/backup.srxbak.zip|field_encoding=percent|" +
+                "ret=197|errno=0|identify_method=caller|identify_reliability=high|event_role=request|" +
+                "op=open|op_filter=open:write|flags=0x20002|action=passthrough",
+            "2026-11-28 00:08:06|org.srx.manager|org.srx.manager|OPEN|" +
+                "/storage/emulated/0/Download/第三方下载/backup.srxbak.zip|field_encoding=percent|" +
+                "ret=0|errno=0|identify_method=provider_open|identify_reliability=high|" +
+                "event_role=observation|op=open:write|source=read_only_path|mask=0x8",
+        )
+    val entries = parseMonitorLogEntries(raw.joinToString("\n"))
+
+    assertEquals(1, entries.size)
+    val entry = entries.single()
+    assertEquals("com.google.android.documentsui", entry.processPackage)
+    assertEquals("org.srx.manager", entry.callerPackage)
+    assertEquals("saf_provider", entry.identifyMethod)
+    // 更早的「请求 + 观察」合并会先吃掉一到两条，折叠计数不一定等于原始行数；
+    // 这里只断言确实有多次落盘被并进来，UI 上的效果是「一条记录 + 已关联 N 条」。
+    assertTrue(
+        "expected folded count >= 2, got ${entry.observationCount}",
+        entry.observationCount >= 2,
+    )
+  }
+
+  @Test
+  fun keepsEachPickerRecordWhenTwoSavesHappenCloseTogether() {
+    // 用户连点两次保存、或两个应用往同一路径各存一份时，两条 saf_provider 记录的时间差
+    // 同样落在 3 秒窗口内。锚点只能当折叠目标、不能互相折叠，否则日志里少一次独立保存
+    // 的证据（两条记录按请求者身份区分，所以不会被更早的按 key 合并吃掉）。
+    val path = "/storage/emulated/0/Download/第三方下载/backup.srxbak.zip"
+    val raw =
+        listOf(
+            "2026-11-28 00:08:06|com.google.android.documentsui|org.srx.manager|OPEN|$path|" +
+                "field_encoding=percent|ret=0|errno=0|identify_method=saf_provider|" +
+                "identify_reliability=high|event_role=request|op=provider_open|" +
+                "op_filter=provider_open:create|source=saf_provider|save_group=1|caller_uid=10357",
+            "2026-11-28 00:08:08|com.google.android.documentsui|com.example.browser|OPEN|$path|" +
+                "field_encoding=percent|ret=0|errno=0|identify_method=saf_provider|" +
+                "identify_reliability=high|event_role=request|op=provider_open|" +
+                "op_filter=provider_open:create|source=saf_provider|save_group=2|caller_uid=10400",
+        )
+    val entries = parseMonitorLogEntries(raw.joinToString("\n"))
+
+    assertEquals(2, entries.size)
+    assertTrue(entries.all { it.identifyMethod == "saf_provider" })
+    // 列表按时间倒序展示，这里只断言两条请求者身份都在、且各自独立。
+    assertEquals(
+        setOf("org.srx.manager", "com.example.browser"),
+        entries.map { it.callerPackage }.toSet(),
+    )
+  }
+
+  @Test
   fun keepsPrivateAndAnonymousRequests() {
     val raw =
         listOf(

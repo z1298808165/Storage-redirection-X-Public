@@ -420,7 +420,7 @@ private fun List<LogEntry>.coalesceMonitorLogEntries(): List<LogEntry> {
       ordered[existingIndex] = best
     }
   }
-  return ordered
+  return coalesceSaveBursts(ordered)
 }
 
 private fun mergeFuseCreateWriteDuplicate(
@@ -528,6 +528,74 @@ private fun mergeCorrelatedObservation(
       observerPackage = observation.observerPackage.ifBlank { request.observerPackage },
       observationCount = request.observationCount + maxOf(1, observation.observationCount),
   )
+}
+
+/**
+ * 一次「保存」在记录里会留下多条：文件选择器的 provider_open（发起方）、MediaProvider 的 open/create 与 open/write（真正落盘）、以及模块自己的
+ * FUSE 观察。它们的 coalesceKey 天然不同（操作名与调用方身份都不一样），两两合并永远配不上，UI 上就是四条并列。
+ *
+ * 这里以 saf_provider 记录为锚点，按「同一路径 + 时间差不超过 3 秒」把它前后出现的其它记录折叠进来： 不依赖遍历顺序，也不依赖 key 是否相等。
+ * 锚点自身不再参与折叠（两次独立保存必须各留一条），代价只是同一路径的多次落盘会并进最近的那条锚点。
+ */
+private fun coalesceSaveBursts(entries: List<LogEntry>): List<LogEntry> {
+  if (entries.size < 2) return entries
+  val anchorsByPath =
+      entries
+          .withIndex()
+          // 没有路径身份的记录（`coalesceKey()` 同样按空串跳过）不能当锚点：它们会全部落进
+          // 同一个空串分组，把彼此无关的记录折进一条。
+          .filter {
+            it.value.identifyMethod == "saf_provider" && it.value.saveBurstPath().isNotEmpty()
+          }
+          .groupBy { it.value.saveBurstPath() }
+  if (anchorsByPath.isEmpty()) return entries
+
+  val foldedCount = HashMap<Int, Int>()
+  val keptIndices = ArrayList<Int>(entries.size)
+  entries.forEachIndexed { index, entry ->
+    // 锚点只作折叠目标：两条锚点互折会把「用户连点两次保存」并成一条，日志就少了一次
+    // 独立动作的证据。
+    if (entry.identifyMethod == "saf_provider") {
+      keptIndices += index
+      return@forEachIndexed
+    }
+    // 写大文件时 MP 的 create 与 write 可能跨秒，所以按「同路径 + 时间差不超过 3 秒」
+    // 找锚点，而不是要求同一秒；时间戳解析不出来的记录不参与折叠（否则会被当成同一秒）。
+    val anchor =
+        anchorsByPath[entry.saveBurstPath()]?.firstOrNull { candidate ->
+          val anchorSeconds = candidate.value.saveBurstSeconds()
+          val entrySeconds = entry.saveBurstSeconds()
+          candidate.index != index &&
+              anchorSeconds != null &&
+              entrySeconds != null &&
+              kotlin.math.abs(anchorSeconds - entrySeconds) <= 3
+        }
+    if (anchor != null) {
+      // 被折叠的条目在更早阶段可能已经并过一次，计数要跟着带走，不能一律记 1。
+      foldedCount.merge(anchor.index, maxOf(1, entry.observationCount), Int::plus)
+    } else {
+      keptIndices += index
+    }
+  }
+  if (foldedCount.isEmpty()) return entries
+  return keptIndices.map { index ->
+    val extra = foldedCount[index] ?: 0
+    if (extra > 0) {
+      entries[index].copy(observationCount = entries[index].observationCount + extra)
+    } else {
+      entries[index]
+    }
+  }
+}
+
+private fun LogEntry.saveBurstPath(): String =
+    coalescePathIdentity().normalizedStoragePathForCoalesce().trimEnd('/')
+
+/** 记录时间戳的 epoch 秒；解析失败返回 null（该条不参与时间差折叠，避免被当成同一秒）。 */
+private fun LogEntry.saveBurstSeconds(): Long? {
+  val text = timestamp.take(19).replace(' ', 'T')
+  return runCatching { java.time.LocalDateTime.parse(text).toEpochSecond(java.time.ZoneOffset.UTC) }
+      .getOrNull()
 }
 
 private fun mergeUncorrelatedRequestObservation(
