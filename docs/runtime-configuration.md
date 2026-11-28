@@ -47,6 +47,7 @@
 ```
 
 - `mapping_mode_only=true`：不再把整个 `/storage/emulated/<user>/` fallback 重定向到应用沙盒，只应用 `path_mappings` 中显式配置的映射；未命中映射的路径保持原样。
+- 该模式下只有 `path_mappings`、`sandboxed_paths` 与 `read_only_paths` 参与路由；`allowed_real_paths`、`excluded_real_paths` 是完整隔离 fallback 用的字段，在仅映射模式下不生效。从完整隔离切到仅映射后残留这两组值不会让应用接入模块视图（此前会接入，且私有 `Android/data/<pkg>/sdcard` 子目录被折叠成真实存储根视图；见公开仓库 issue #21）。
 - `mapping_mode_only=false`、字段缺失、字段为空或不是 bool：保持旧行为，即 `enabled=true` 时继续执行完整隔离重定向，并在其上叠加 `path_mappings`。
 - 该模式同样覆盖 `com.android.providers.media.module` 等系统代写进程的按调用方重定向逻辑，适合只希望媒体服务代写特定映射目录、不希望整包路径被隔离的场景。
 
