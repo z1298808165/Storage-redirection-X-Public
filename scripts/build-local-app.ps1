@@ -94,122 +94,21 @@ function Invoke-WslGradle {
     )
 }
 
-function Get-CargoPackageVersion {
-    $cargoToml = Join-Path $RepoRoot "Cargo.toml"
-    $line = Get-Content -LiteralPath $cargoToml | Where-Object { $_ -match '^\s*version\s*=\s*"([^"]+)"' } | Select-Object -First 1
-    if (-not $line -or $line -notmatch '^\s*version\s*=\s*"([^"]+)"') {
-        Fail "无法从 Cargo.toml 读取软件包版本"
-    }
-
-    return $Matches[1]
+# App 版本走日期时间线（yyyyMMddHHmm），与模块的 semver（2.3.2）分处两个命名空间，
+# 用户一眼就能分出哪个是 App、哪个是模块。versionCode 用「自 2020-01-01 起的分钟数」，
+# 既单调递增又落在 int32 内（Android 的 versionCode 上限约 21 亿）。
+function Get-AppTimestampVersion {
+    return (Get-Date).ToString("yyyyMMddHHmm")
 }
 
-function Invoke-GitText {
-    param(
-        [string[]]$Arguments,
-        [switch]$AllowFailure
-    )
-
-    $output = & git @Arguments 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        if ($AllowFailure) {
-            return $null
-        }
-        Fail "Git 命令执行失败：git $($Arguments -join ' ')"
+function Get-AppTimestampVersionCode {
+    param([string]$VersionName)
+    if ($VersionName -notmatch '^\d{12}(\d{2})?$') {
+        Fail "App 版本号必须是 yyyyMMddHHmm 形式的日期时间，当前值：$VersionName"
     }
-
-    return ($output -join "`n").Trim()
-}
-
-function Test-WorktreeDirty {
-    $status = Invoke-GitText -Arguments @("status", "--porcelain") -AllowFailure
-    return -not [string]::IsNullOrWhiteSpace($status)
-}
-
-function Get-PublishedManifestBuildCount {
-    param([string]$BaseVersion)
-
-    $manifestPath = Join-Path $RepoRoot "update.json"
-    if (-not (Test-Path -LiteralPath $manifestPath)) {
-        return $null
-    }
-
-    try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    } catch {
-        return $null
-    }
-
-    $version = $manifest.beta.version
-    if ([string]::IsNullOrWhiteSpace($version)) {
-        return $null
-    }
-    $pattern = "^" + [regex]::Escape($BaseVersion) + "-ci\.(\d+)$"
-    if ($version -match $pattern) {
-        return [int]$Matches[1]
-    }
-
-    return $null
-}
-
-function Get-BuildCountBaseline {
-    param([string]$BaseVersion)
-
-    if (-not (Test-Path -LiteralPath $BuildVersionBaselinePath)) {
-        return $null
-    }
-
-    try {
-        $baseline = Get-Content -LiteralPath $BuildVersionBaselinePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($null -eq $baseline.buildCounts) {
-            return $null
-        }
-        $property = $baseline.buildCounts.PSObject.Properties[$BaseVersion]
-        if ($null -eq $property) {
-            return $null
-        }
-        return [int]$property.Value
-    } catch {
-        return $null
-    }
-}
-
-function Resolve-LocalVersion {
-    param([string]$BaseVersion)
-
-    $parts = $BaseVersion.Split(".")
-    if ($parts.Count -ne 3) {
-        Fail "Cargo.toml 版本必须采用 MAJOR.MINOR.PATCH 格式，当前为：$BaseVersion"
-    }
-
-    $major = [int]$parts[0]
-    $minor = [int]$parts[1]
-    $patch = [int]$parts[2]
-    $baseCode = ($major * 1000000) + ($minor * 10000) + ($patch * 100)
-
-    # 序号按构建次数递增，与提交数量无关：以基线与已发布清单中记录的最高 N 为准加 1。
-    # 工作区干净说明当前提交对应的构建已经产出，直接复用记录中的最高序号，
-    # 避免仅重新打包就推进版本；有未提交改动时才算作新构建。
-    $highest = 0
-    foreach ($recorded in @(
-        (Get-BuildCountBaseline -BaseVersion $BaseVersion),
-        (Get-PublishedManifestBuildCount -BaseVersion $BaseVersion)
-    )) {
-        if ($null -ne $recorded -and $recorded -gt $highest) {
-            $highest = $recorded
-        }
-    }
-
-    if (-not (Test-WorktreeDirty) -and $highest -gt 0) {
-        $buildCount = $highest
-    } else {
-        $buildCount = $highest + 1
-    }
-    $resolvedVersionCode = $baseCode - 100 + [Math]::Min($buildCount, 99)
-    return @{
-        Version = "$BaseVersion-ci.$buildCount"
-        VersionCode = $resolvedVersionCode
-    }
+    $text = $VersionName.Substring(0, 12)
+    $builtAt = [datetime]::ParseExact($text, "yyyyMMddHHmm", $null)
+    return [int][math]::Floor(($builtAt - [datetime]::new(2020, 1, 1, 0, 0, 0)).TotalMinutes)
 }
 
 function Assert-UnderPath {
@@ -305,13 +204,11 @@ Push-Location $RepoRoot
 try {
     if (-not $NoAdb) { Initialize-AdbEnvironment }
 
-    $baseVersion = Get-CargoPackageVersion
-    $resolved = Resolve-LocalVersion -BaseVersion $baseVersion
     if ([string]::IsNullOrWhiteSpace($Version)) {
-        $Version = $resolved.Version
+        $Version = Get-AppTimestampVersion
     }
     if ($VersionCode -le 0) {
-        $VersionCode = $resolved.VersionCode
+        $VersionCode = Get-AppTimestampVersionCode -VersionName $Version
     }
 
     $outputRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $OutputDir))

@@ -82,6 +82,15 @@ internal fun UpdateScreen(
       SettingGroup(insideMargin = PaddingValues(16.dp)) {
         item {
           Column {
+            // App 与模块是两条独立的更新线：两个版本都要显示，用户才知道自己缺的是哪一个。
+            Text(
+                text = "当前 App 版本 ${BuildConfig.VERSION_NAME}",
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
             Text(
                 text = "当前模块版本 ${moduleVersion.ifBlank { "--" }}",
                 color = MiuixTheme.colorScheme.onSurfaceVariantSummary,

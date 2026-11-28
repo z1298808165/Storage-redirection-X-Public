@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -23,7 +25,6 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -31,26 +32,35 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.noties.markwon.Markwon
 import org.srx.manager.CenteredDialog
 import org.srx.manager.GlassTextButton
-import org.srx.manager.data.ReleaseUpdate
+import org.srx.manager.data.ComponentUpdate
+import org.srx.manager.data.ReleaseNoteComponent
+import org.srx.manager.data.ReleaseNoteSection
+import org.srx.manager.data.UpdateAvailability
 import org.srx.manager.data.UpdateChannel
 import org.srx.manager.data.parseReleaseNoteSections
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
+/**
+ * 更新弹窗：一次检查只产出一个 [UpdateAvailability]，所以这里天然只有一个弹窗。
+ *
+ * 只列出「确实有新版本」的组件（另一组件直接不显示），底部只有一个主按钮跳到发布资产页 —— App 与模块同时更新时两个构件在同一页，不需要两个链接。
+ */
 @Composable
 internal fun UpdateFoundDialog(
-    update: ReleaseUpdate,
-    currentVersion: String,
+    update: UpdateAvailability,
     onDismiss: () -> Unit,
     onOpen: () -> Unit,
 ) {
-  val noteSections = remember(update.releaseNotes) { parseReleaseNoteSections(update.releaseNotes) }
+  val noteSections =
+      remember(update.release.releaseNotes) {
+        visibleNoteSections(update, parseReleaseNoteSections(update.release.releaseNotes))
+      }
   val notesMaxHeight =
       (LocalConfiguration.current.screenHeightDp.dp * 0.42f).coerceIn(180.dp, 360.dp)
   CenteredDialog(show = true, onDismiss = onDismiss) {
     Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Text(
@@ -61,23 +71,25 @@ internal fun UpdateFoundDialog(
           lineHeight = 21.sp,
       )
       Text(
-          "当前模块版本 ${currentVersion.ifBlank { "--" }}，有新版本可用。",
+          updateScopeSummary(update),
           modifier = Modifier.fillMaxWidth(),
           color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
           fontSize = 14.sp,
-          lineHeight = 23.sp,
-          textAlign = TextAlign.Center,
+          lineHeight = 21.sp,
       )
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        update.appUpdate?.let { UpdateComponentRow("App", it) }
+        update.moduleUpdate?.let { UpdateComponentRow("模块", it) }
+      }
       FlowRow(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
           verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        UpdateMetaBadge(updateChannelBadge(update))
-        val versionName = update.versionName.ifBlank { update.tagName }
-        if (versionName.isNotBlank()) {
-          UpdateMetaBadge(versionName)
-        }
+        UpdateMetaBadge(
+            if (update.release.channel == UpdateChannel.Beta || update.release.prerelease) "测试版"
+            else "正式版"
+        )
       }
       if (noteSections.isNotEmpty()) {
         Box(
@@ -106,10 +118,73 @@ internal fun UpdateFoundDialog(
           modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
           horizontalArrangement = Arrangement.spacedBy(12.dp),
       ) {
-        GlassTextButton("取消", onDismiss, modifier = Modifier.weight(1f))
-        GlassTextButton("打开", onOpen, modifier = Modifier.weight(1f), primary = true)
+        GlassTextButton("稍后", onDismiss, modifier = Modifier.weight(1f))
+        GlassTextButton("查看更新", onOpen, modifier = Modifier.weight(1f), primary = true)
       }
     }
+  }
+}
+
+/** 只保留本次有变化的组件的段落：「其它更新」不属于任何组件，始终显示。 */
+internal fun visibleNoteSections(
+    update: UpdateAvailability,
+    sections: List<ReleaseNoteSection>,
+): List<ReleaseNoteSection> =
+    sections.filter { section ->
+      when (section.component) {
+        ReleaseNoteComponent.App -> update.appUpdate != null
+        ReleaseNoteComponent.Module -> update.moduleUpdate != null
+        ReleaseNoteComponent.Other -> true
+      }
+    }
+
+internal fun updateScopeSummary(update: UpdateAvailability): String =
+    when {
+      update.appUpdate != null && update.moduleUpdate != null -> "App 与模块都有新版本。"
+      update.appUpdate != null -> "本次仅 App 更新。"
+      update.moduleUpdate != null -> "本次仅模块更新。"
+      else -> "已是最新版本。"
+    }
+
+@Composable
+private fun UpdateComponentRow(name: String, update: ComponentUpdate) {
+  Row(
+      modifier = Modifier.fillMaxWidth(),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    Text(
+        text = name,
+        modifier = Modifier.width(40.dp),
+        color = MiuixTheme.colorScheme.onSurface,
+        fontSize = 14.sp,
+        lineHeight = 18.sp,
+        fontWeight = FontWeight.Black,
+    )
+    Text(
+        text = update.fromVersion,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+    Text(
+        text = "→",
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+    )
+    Text(
+        text = update.toVersion,
+        color = MiuixTheme.colorScheme.primary,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+    Spacer(Modifier.weight(1f))
   }
 }
 
@@ -152,6 +227,3 @@ private fun UpdateMetaBadge(text: String, modifier: Modifier = Modifier) {
       overflow = TextOverflow.Ellipsis,
   )
 }
-
-private fun updateChannelBadge(update: ReleaseUpdate): String =
-    if (update.channel == UpdateChannel.Beta || update.prerelease) "测试版" else "正式版"

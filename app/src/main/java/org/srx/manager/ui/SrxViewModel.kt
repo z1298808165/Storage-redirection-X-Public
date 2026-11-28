@@ -33,9 +33,9 @@ import org.srx.manager.data.DiagnosticExportResult
 import org.srx.manager.data.FileMonitorFilters
 import org.srx.manager.data.GlobalConfig
 import org.srx.manager.data.InstalledApp
+import org.srx.manager.data.InstalledVersions
 import org.srx.manager.data.LogEntry
 import org.srx.manager.data.PreferencesRepository
-import org.srx.manager.data.ReleaseUpdate
 import org.srx.manager.data.SrxConfigNormalizer
 import org.srx.manager.data.SrxRepository
 import org.srx.manager.data.UiColorSpec
@@ -43,6 +43,7 @@ import org.srx.manager.data.UiColorStyle
 import org.srx.manager.data.UiPreferences
 import org.srx.manager.data.UiThemeMode
 import org.srx.manager.data.UiThemeStyle
+import org.srx.manager.data.UpdateAvailability
 import org.srx.manager.data.UpdateChannel
 import org.srx.manager.data.UpdateChecker
 import org.srx.manager.data.UserProfile
@@ -74,7 +75,7 @@ data class AppUiState(
     val logApps: List<InstalledApp> = emptyList(),
     val fileMonitorFilters: FileMonitorFilters = FileMonitorFilters(),
     val updateCheckRunning: Boolean = false,
-    val pendingUpdate: ReleaseUpdate? = null,
+    val pendingUpdate: UpdateAvailability? = null,
     val snackbar: String? = null,
 )
 
@@ -710,17 +711,19 @@ class SrxViewModel(
   fun checkForUpdates(manual: Boolean) {
     if (_state.value.updateCheckRunning) return
     viewModelScope.launch {
-      val moduleVersion = _state.value.dashboard.version.trim()
-      if (moduleVersion.isBlank()) {
-        if (manual) showMessage("尚未读取模块版本")
-        return@launch
-      }
+      // App 与模块各自判定：模块版本读不到（未安装、尚未读取）只影响模块那一半，
+      // 不能让整次检查直接失败——App 侧的更新与模块是否就绪无关。
+      val installed =
+          InstalledVersions(
+              app = BuildConfig.VERSION_NAME,
+              module = _state.value.dashboard.version.trim(),
+          )
       _state.value = _state.value.copy(updateCheckRunning = true)
       runCatching {
             updateChecker.check(
                 manifestUrl = BuildConfig.UPDATE_MANIFEST_URL,
                 repository = BuildConfig.RELEASE_REPOSITORY,
-                currentVersionName = moduleVersion,
+                installed = installed,
                 channel = uiPreferences.value.updateChannel,
             )
           }

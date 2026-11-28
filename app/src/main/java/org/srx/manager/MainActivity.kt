@@ -1178,14 +1178,12 @@ private fun SrxManagerApp(
           }
 
           state.pendingUpdate?.let { update ->
-            val currentModuleVersion = state.dashboard.version.ifBlank { "--" }
             if (prefs.themeStyle == UiThemeStyle.Coui) {
               UpdateFoundDialog(
                   update = update,
-                  currentVersion = currentModuleVersion,
                   onDismiss = viewModel::clearPendingUpdate,
                   onOpen = {
-                    val opened = openExternalUrl(context, update.htmlUrl)
+                    val opened = openExternalUrl(context, update.release.htmlUrl)
                     if (!opened) toast = "未找到可用浏览器"
                     viewModel.clearPendingUpdate()
                   },
@@ -1193,10 +1191,9 @@ private fun SrxManagerApp(
             } else {
               UpdateFoundDialog(
                   update = update,
-                  currentVersion = currentModuleVersion,
                   onDismiss = viewModel::clearPendingUpdate,
                   onOpen = {
-                    val opened = openExternalUrl(context, update.htmlUrl)
+                    val opened = openExternalUrl(context, update.release.htmlUrl)
                     if (!opened) toast = "未找到可用浏览器"
                     viewModel.clearPendingUpdate()
                   },

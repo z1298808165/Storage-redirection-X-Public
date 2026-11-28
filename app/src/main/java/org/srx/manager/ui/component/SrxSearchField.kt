@@ -24,6 +24,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.srx.manager.LocalSrxInsideDialog
+import org.srx.manager.capsuleContainerColor
 import org.srx.manager.themedSurfaceColor
 import org.srx.manager.ui.coui.couiCardFill
 import org.srx.manager.ui.theme.isSrxLiquidGlassEnabled
@@ -43,9 +45,21 @@ fun SrxSearchField(
     trailing: (@Composable () -> Unit)? = null,
 ) {
   val colors = MiuixTheme.colorScheme
-  // COUI 下跟着卡片色走：原来取 surface（页面底），浅色时是一块灰、深色时是一块更黑的灰，
-  // 和它两侧的白色卡片不是同一个底色。
-  val backgroundColor = if (isSrxThemeCoui()) couiCardFill() else themedSurfaceColor()
+  // 胶囊底色分三种来源，实底的两档同时决定要不要走液态玻璃（见下方的 solidBackground）：
+  // - COUI：跟着卡片色走。原来取 surface（页面底），浅色时是一块灰、深色时是一块更黑的灰，
+  //   和它两侧的白色卡片不是同一个底色。
+  // - 弹窗内：不能用液态玻璃——玻璃采样的是弹窗背后的页面，叠在弹窗面板上会糊成一块半透明
+  //   磨砂（用户反馈"弹窗里的搜索框有模糊透明效果"）。实底也不能取页面表面色：Miuix 弹窗面板
+  //   取的就是 surface，浅色下两者同色，胶囊会消失，所以改用中性胶囊色。
+  // - 页面内：主题表面色 + 液态玻璃，保持原有观感。
+  val insideDialog = LocalSrxInsideDialog.current
+  val solidBackground = isSrxThemeCoui() || insideDialog
+  val fillColor =
+      when {
+        isSrxThemeCoui() -> couiCardFill()
+        insideDialog -> capsuleContainerColor()
+        else -> themedSurfaceColor()
+      }
   BasicTextField(
       value = query,
       onValueChange = onQueryChange,
@@ -62,17 +76,15 @@ fun SrxSearchField(
           modifier
               .fillMaxWidth()
               .heightIn(min = 50.dp)
-              // COUI 走纯实色胶囊：液态玻璃那层是按 Miuix 的折射材质设计的，
+              // COUI 与弹窗内都走实色胶囊：液态玻璃那层是按 Miuix 的折射材质设计的，
               // 在 COUI 下给不透明 tint 会渲染成一块死白，给半透明又会透出页面底发灰。
               .then(
-                  if (isSrxThemeCoui()) Modifier.background(backgroundColor, CircleShape)
+                  if (solidBackground) Modifier.background(fillColor, CircleShape)
                   else
                       Modifier.liquidGlassControl(
                           shape = CircleShape,
                           tint =
-                              backgroundColor.copy(
-                                  alpha = if (isSrxLiquidGlassEnabled()) 0.6f else 1f
-                              ),
+                              fillColor.copy(alpha = if (isSrxLiquidGlassEnabled()) 0.6f else 1f),
                           refractionHeight = 11.dp,
                           refractionAmount = 12.dp,
                       )

@@ -1,6 +1,9 @@
 @file:Suppress("UnstableApiUsage")
 
 import java.io.File
+import java.time.Duration
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Properties
 import org.gradle.api.file.DuplicatesStrategy
 import org.gradle.api.tasks.Sync
@@ -113,7 +116,24 @@ fun ciVersionCode(baseVersion: String, buildCount: Int): Int {
   return baseVersionCode(baseVersion) - 100 + buildCount.coerceAtMost(99)
 }
 
+/**
+ * App 版本走日期时间线（`yyyyMMddHHmm`），与模块的 semver（`2.3.2`）一眼分得开： 两者落在不同命名空间，用户看到 202611281259 就知道是 App、看到
+ * 2.3.2 就知道是模块。
+ */
+private val appTimestampVersionPattern = Regex("""^\d{12}(\d{2})?$""")
+
+/** 日期时间线版本名推导 versionCode：自 2020-01-01 起的分钟数，单调递增且落在 int32 内。 */
+fun appTimestampVersionCode(versionName: String): Int {
+  val text = versionName.take(12)
+  val formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmm")
+  val builtAt =
+      runCatching { LocalDateTime.parse(text, formatter) }.getOrNull()
+          ?: throw GradleException("App 版本号必须是 yyyyMMddHHmm 形式的日期时间，当前值：$versionName")
+  return Duration.between(LocalDateTime.of(2020, 1, 1, 0, 0), builtAt).toMinutes().toInt()
+}
+
 fun versionCodeFrom(versionName: String): Int {
+  if (appTimestampVersionPattern.matches(versionName)) return appTimestampVersionCode(versionName)
   val baseVersion = versionName.substringBefore('-')
   val ciBuild = Regex("""-ci\.(\d+)$""").find(versionName)?.groupValues?.get(1)?.toIntOrNull()
   return if (ciBuild != null) ciVersionCode(baseVersion, ciBuild) else baseVersionCode(baseVersion)
