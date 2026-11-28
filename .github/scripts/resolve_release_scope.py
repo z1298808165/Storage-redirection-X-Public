@@ -42,29 +42,14 @@ MODULE_FILES = {
     "rust-toolchain.toml",
 }
 # 发布流程与文档：不改变任何构件，不需要构建。
-OTHER_PREFIXES = (
-    ".github/",
-    ".githooks/",
-    "docs/",
-    "scripts/",
-    "tests/",
-    "temp/",
-    ".workbuddy/",
-)
+OTHER_PREFIXES = (".github/", ".githooks/", "docs/", "scripts/", "tests/", "temp/")
 OTHER_FILES = {
     "README.md",
-    "AGENTS.md",
-    "CLAUDE.md",
     "CONTRIBUTING.md",
     "COPYING",
     "LICENSE",
     # 首页 logo 只被 README 引用，不进模块 zip。
     "assets/logo.png",
-    ".editorconfig",
-    ".gitattributes",
-    ".gitignore",
-    "github-actions-failure-notes.md",
-    "upstream-sync-baseline.json",
 }
 IGNORED_FILES = {"update.json"}
 
@@ -78,6 +63,13 @@ def change_component(path: str) -> str:
     if path in MODULE_FILES or path.startswith(MODULE_PREFIXES):
         return "module"
     if path in OTHER_FILES or path.startswith(OTHER_PREFIXES):
+        return "other"
+    # 隐藏的目录或文件（编辑器配置、仓库钩子、本地工作目录）不参与构建。
+    # 用通配规则而不是逐个列名字：这类目录经常增删，列名字会让新目录落进 both。
+    if any(part.startswith(".") for part in path.split("/")):
+        return "other"
+    # 仓库根目录的说明文档与状态清单同样不产出构件（扩展名判据，同样不列具体文件名）。
+    if "/" not in path and (path.endswith(".md") or path.endswith(".json")):
         return "other"
     # 判不出来就按「两边都可能受影响」处理。
     return "unknown"

@@ -61,7 +61,7 @@ CI 用 `.github/scripts/resolve_release_scope.py` 与基线 ref 做 `git diff --
 |---|---|---|
 | `app/`、`gradle/`、根 `build.gradle.kts` 等 | App | 只编 APK，不编模块、不跑场景 |
 | `src/`、`native/`、`vendor/`、`java_src/`、`assets/zygisk_module/`、`.cargo/`、`Cargo.*` | 模块 | 只编模块 zip 并跑场景矩阵 |
-| `.github/`、`.githooks/`、`docs/`、`scripts/`、`tests/`、`.workbuddy/`、README、`.gitignore` 等 | 其它 | 只跑质量检查，不建发布 |
+| `.github/`、`.githooks/`、`docs/`、`scripts/`、`tests/`、README、隐藏工具目录等 | 其它 | 只跑质量检查，不建发布 |
 | 判不出来的路径 | both | 两侧都跑（宁可多花几分钟，也不发与改动不一致的构件） |
 
 需要人工覆盖时，在提交正文写 `Release-Scope: app|module|both|none`，优先级高于路径推断；取值非法会被 `scripts/validate-commit.ps1` 在提交时拒绝。发布资产也只挂实际构建的一侧，弹窗与 `update.json` 都按同一份范围写入。

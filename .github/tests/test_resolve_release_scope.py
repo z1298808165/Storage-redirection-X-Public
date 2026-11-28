@@ -74,13 +74,13 @@ class TrailerTest(unittest.TestCase):
 
     def test_docs_and_memory_only_change_does_not_build(self) -> None:
         self.assertEqual(
-            "none", RESOLVE.resolve_scope(["docs/build-process.md", ".workbuddy/memory/2026-11-28.md"])
+            "none", RESOLVE.resolve_scope(["docs/build-process.md", ".vscode/settings.json"])
         )
         self.assertEqual("none", RESOLVE.resolve_scope(["README.md", "assets/logo.png"]))
 
     def test_root_tooling_files_do_not_trigger_a_build(self) -> None:
         self.assertEqual("none", RESOLVE.resolve_scope([".gitignore", ".githooks/pre-commit"]))
-        self.assertEqual("none", RESOLVE.resolve_scope(["upstream-sync-baseline.json"]))
+        self.assertEqual("none", RESOLVE.resolve_scope(["state.json", "NOTES.md"]))
 
     def test_gradle_wrapper_belongs_to_app_and_cargo_config_to_module(self) -> None:
         self.assertEqual("app", RESOLVE.resolve_scope(["gradlew", "keystore.properties.example"]))
