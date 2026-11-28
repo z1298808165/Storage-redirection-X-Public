@@ -53,6 +53,19 @@ Kotlin、R8 和 Lint 可能需要数分钟；缓存命中后通常会显著缩�
 该基线仅由 CI 在成功发布构建资产后更新；它只作用于模块版本与检测版本，App 版本另走日期时间线（见下方「App 版本」），
 `-SkipBuild` 也不会仅因复用现有产物而推进版本。
 
+### 发布范围
+
+CI 用 `.github/scripts/resolve_release_scope.py` 与基线 ref 做 `git diff --name-only`，决定这一轮到底要编哪一侧：
+
+| 改动路径 | 归属 | CI 行为 |
+|---|---|---|
+| `app/`、`gradle/`、根 `build.gradle.kts` 等 | App | 只编 APK，不编模块、不跑场景 |
+| `src/`、`native/`、`vendor/`、`java_src/`、`assets/zygisk_module/`、`Cargo.*` | 模块 | 只编模块 zip 并跑场景矩阵 |
+| `.github/`、`docs/`、`scripts/`、`tests/`、`.workbuddy/`、README 等 | 其它 | 只跑质量检查，不建发布 |
+| 判不出来的路径 | both | 两侧都跑（宁可多花几分钟，也不发与改动不一致的构件） |
+
+需要人工覆盖时，在提交正文写 `Release-Scope: app|module|both|none`，优先级高于路径推断；取值非法会被 `scripts/validate-commit.ps1` 在提交时拒绝。发布资产也只挂实际构建的一侧，弹窗与 `update.json` 都按同一份范围写入。
+
 ### 集成测试流构建
 
 测试流 APP 已集成在本仓库 `tests/storage-redirect-test/`，Gradle 模块名为 `:storageRedirectTestApp` 和 `:storageRedirectTestMediaFileApi`。在 WSL 中运行管理 App 与测试 APP 单元测试，并构建测试 APK：
