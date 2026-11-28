@@ -25,8 +25,8 @@
 
 概览页“生效次数”累计重定向运行时成功启用的次数：普通应用的 companion mount 成功启用一次计一次，daemon 为尚无 mount state 的进程首次补建重定向运行时计一次，系统写入进程的重定向 hook 成功启用一次计一次。已有 mount state 的配置重载不重复计数。它不统计每次文件访问或路径改写，也不受详细日志和文件监视开关影响。`stats` 使用带 schema 的独立格式保存精确值，存放在 `/data/adb/storage.redirect.x/stats`（模块目录之外的持久路径，模块升级不会触碰该目录）。概览页仅按 `K`、`M`、`B`、`T` 等国际短单位缩写显示，点击计数可查看精确值，长按并确认后可清零重新统计。累计计数不会因模块升级归零，刷入后延迟重启期间由旧 daemon 继续累加的次数也不会丢失；只有首次安装或用户主动清零才会从 0 开始。旧版混合口径的纯数字统计不会并入新版计数。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成配置。卸载应用时其配置会被置回 disabled 并保留文件（不丢用户自定义规则），同时留伴生标记；重装触发的安装事件会先据此把配置恢复为 enabled 再走自动开启，因此卸载重装的应用能自动恢复开启，用户手工关闭的配置不受影响。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
-- `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时，新安装应用默认只开启重定向，不附加允许路径、沙盒路径或映射规则。若模板文件被外部修改导致该 ID 不再可用，运行脚本会先按仅开启重定向生成新应用配置；APP 和 WebUI 进入设置页时会清空失效引用，并在自动配置模板状态行提示已回退。缺失、格式错误或不可读时，默认值为空字符串。
-- `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
+- `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时，新安装应用默认只开启重定向，不附加允许路径、沙盒路径或映射规则。若模板文件被外部修改导致该 ID 不再可用，运行脚本会先按仅开启重定向生成新应用配置；管理 App 进入设置页时会清空失效引用，并在自动配置模板状态行提示已回退。缺失、格式错误或不可读时，默认值为空字符串。
+- `app_config_auto_save`：控制管理 App 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
 
 ## 仅映射模式
 
@@ -96,7 +96,7 @@
    但只在真有人查表时才付。
 3. **溢出触发**：周期对账类工作（inotify 死条目剪枝、配置指纹复查）都存在「漏事件」风险，
    而**漏事件这件事本身是可观测的**（`IN_Q_OVERFLOW`）。把对账挂到溢出事件上，稳态就变成 0。
-4. **把「文件被写了」变成事件**：WebUI 的运行开关（`.runtime_disabled`）是纯文件通道、没有
+4. **把「文件被写了」变成事件**：管理 App 的运行时开关（`.runtime_disabled`）是纯文件通道、没有
    IPC，daemon 因此额外监听**模块目录**这一个 inotify watch（不递归，`logs/`、`tmp/` 内部的
    写入不会触发它）。开关被改写即时生效，主循环不再需要任何固定节拍去「看一眼开关」。
 
@@ -198,7 +198,7 @@
   路径才是 `global.json`）。只监听 `wcmdn` 时两半都收不到：`m` 的文件名过不了 `*".json"`
   过滤，`y` 根本不上报——结果是「配置确实写进去了，但开关毫无反应」。A17 实测：掩码
   `wcmdn` 下 rename 只吐出 `m <dir> stage.txt`；扩到 `wcmdny` 才有 `y <dir> renamed.json`，
-  开关从「40 秒无反应」变成 2 秒内生效。WebUI 的 `restoreConfigSnapshot` 正是
+  开关从「40 秒无反应」变成 2 秒内生效。管理端的配置还原正是
   `mv "$stage/global.json" "$config/global.json"`。**不加 `e`（ATTRIB）**：`chmod`/`touch`
   只改元数据，不代表配置内容变化，为本不存在的变更跑一次完整 sync 不划算。
 - **两个一次性快照采集器必须后台执行**：`media_state` 快照里的 `dumpsys meminfo` /
@@ -264,7 +264,7 @@
 
 ## 只读模式
 
-`read_only_paths` 用于把目录保持可读但禁止写入。管理 App 和 WebUI 会把它做成独立的“只读模式”开关和路径区域；手动编辑 JSON 时也可以直接写字段：
+`read_only_paths` 用于把目录保持可读但禁止写入。管理 App 会把它做成独立的“只读模式”开关和路径区域；手动编辑 JSON 时也可以直接写字段：
 
 ```json
 {
@@ -288,7 +288,7 @@
 
 ## 路径校验与映射规则
 
-管理 App、WebUI 和 native 运行时都会对路径规则做兜底校验。手动编辑 JSON 时也应遵守以下规则：
+管理 App 与 native 运行时都会对路径规则做兜底校验。手动编辑 JSON 时也应遵守以下规则：
 
 - `allowed_real_paths`、`sandboxed_paths` 和 `read_only_paths` 继续使用相对共享存储路径，例如 `Download/MyApp`；只有 `path_mappings` 支持绝对 namespace 路径。
 - `path_mappings` 的请求路径和目标路径支持相对共享存储路径，也支持以 `/` 开头的绝对路径；绝对路径会在应用自己的 mount namespace 中生效，可用于 `/data/user/<用户>/<包名>/...`、`/data/data/<包名>/...` 等应用私有目录。
@@ -307,7 +307,7 @@
 
 ## 备份格式
 
-WebUI 和管理 App 的设置页都会导出 `.srxbak.zip` 备份包。该文件是通用 ZIP 格式，内部固定包含 `backup.json`：
+管理 App 的设置页会导出 `.srxbak.zip` 备份包。该文件是通用 ZIP 格式，内部固定包含 `backup.json`：
 
 ```text
 storage-redirect-x-backup-YYYYMMDD-HHMMSS.srxbak.zip

@@ -94,21 +94,19 @@ function Invoke-WslGradle {
     )
 }
 
-# App 版本走日期时间线（yyyyMMddHHmm），与模块的 semver（2.3.2）分处两个命名空间，
-# 用户一眼就能分出哪个是 App、哪个是模块。versionCode 用「自 2020-01-01 起的分钟数」，
-# 既单调递增又落在 int32 内（Android 的 versionCode 上限约 21 亿）。
+# App 版本使用提交/构建 UTC 时间到秒（yyyyMMddHHmmss），模块继续使用 semver。
+# UTC 消除机器时区差异，秒精度避免同一分钟内重复构建同一个 App 版本。
 function Get-AppTimestampVersion {
-    return (Get-Date).ToString("yyyyMMddHHmm")
+    return [datetime]::UtcNow.ToString("yyyyMMddHHmmss", [Globalization.CultureInfo]::InvariantCulture)
 }
 
 function Get-AppTimestampVersionCode {
     param([string]$VersionName)
-    if ($VersionName -notmatch '^\d{12}(\d{2})?$') {
-        Fail "App 版本号必须是 yyyyMMddHHmm 形式的日期时间，当前值：$VersionName"
+    if ($VersionName -notmatch '^\d{14}$') {
+        Fail "App 版本号必须是 yyyyMMddHHmmss 形式的 UTC 日期时间，当前值：$VersionName"
     }
-    $text = $VersionName.Substring(0, 12)
-    $builtAt = [datetime]::ParseExact($text, "yyyyMMddHHmm", $null)
-    return [int][math]::Floor(($builtAt - [datetime]::new(2020, 1, 1, 0, 0, 0)).TotalMinutes)
+    $builtAt = [datetime]::ParseExact($VersionName, "yyyyMMddHHmmss", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+    return [int][math]::Floor(($builtAt - [datetime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)).TotalSeconds)
 }
 
 function Assert-UnderPath {

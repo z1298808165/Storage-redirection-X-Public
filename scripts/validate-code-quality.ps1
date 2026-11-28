@@ -71,7 +71,7 @@ foreach ($line in $lines) {
 function Is-CodePath {
     param([string]$Path)
 
-    return $Path -match '^(src/|app/src/main/|java_src/|tools/|assets/zygisk_module/webroot/|scripts/|\.github/scripts/|\.github/tests/)' -or
+    return $Path -match '^(src/|app/src/main/|java_src/|tools/|scripts/|\.github/scripts/|\.github/tests/)' -or
         $Path -eq "build.rs"
 }
 
@@ -228,7 +228,7 @@ for ($index = 0; $index -lt $additions.Count; $index++) {
     if ($item.File -match '^(?:app/src/main|java_src)/.*\.(?:kt|java)$' -and $text -match '@(?:org\.junit\.)?Test\b') {
         Add-Violation -Index $index -Rule "test-residue" -Message "生产源码目录中不得新增测试注解。"
     }
-    if ($item.File -match '^(?:app/src/main|assets/zygisk_module/webroot)/.*\.(?:js|ts|tsx)$' -and
+    if ($item.File -match '^app/src/main/.*\.(?:js|ts|tsx)$' -and
         $text -match '^\s*(?:describe|it|test)\s*\(') {
         Add-Violation -Index $index -Rule "test-residue" -Message "生产源码目录中不得新增内联测试块。"
     }

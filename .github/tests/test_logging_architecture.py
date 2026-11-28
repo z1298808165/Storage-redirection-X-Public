@@ -7,18 +7,14 @@ from pathlib import Path
 
 from test_caller_attribution_boundaries import extract_fn
 
-
 ROOT = Path(__file__).resolve().parents[2]
-
 
 def section(source: str, start: str, end: str) -> str:
     """截取从 `start` 到其后首个 `end` 之间的片段，用于把断言限定在单个函数/循环内。"""
     return source[source.index(start) : source.index(end, source.index(start))]
 
-
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
-
 
 def read_fuse_redirect_core() -> str:
     """读取 `src/fuse_redirect` 的 mod.rs 与 callbacks.rs（mod.rs 在前）。
@@ -32,7 +28,6 @@ def read_fuse_redirect_core() -> str:
         (base / name).read_text(encoding="utf-8") for name in ("mod.rs", "callbacks.rs")
     )
 
-
 def read_daemon_mount_module() -> str:
     """读取 `src/daemon_mount*.rs` 的全部内容。
 
@@ -41,7 +36,6 @@ def read_daemon_mount_module() -> str:
     """
     files = sorted((ROOT / "src").glob("daemon_mount*.rs"))
     return "".join(path.read_text(encoding="utf-8") for path in files)
-
 
 def read_paths_module() -> str:
     """读取 `src/platform/paths*.rs` 的全部内容。
@@ -52,7 +46,6 @@ def read_paths_module() -> str:
     platform_dir = ROOT / "src" / "platform"
     files = sorted(platform_dir.glob("paths*.rs"))
     return "\n".join(path.read_text(encoding="utf-8") for path in files)
-
 
 class LoggingArchitectureTest(unittest.TestCase):
     def test_redirected_mapping_fuse_requests_are_logged_before_inotify_observation(self) -> None:
@@ -76,12 +69,6 @@ class LoggingArchitectureTest(unittest.TestCase):
         self.assertIn('"create"', callbacks)
 
     def test_monitor_ui_coalesces_exact_backend_and_keeps_mapping_owner(self) -> None:
-        webui = read("assets/zygisk_module/webroot/js/app.js")
-        self.assertIn("entry?.backendPath || entry?.landingPath", webui)
-        self.assertIn('entry?.extras?.source === "path_mapping"', webui)
-        self.assertIn('entry?.extras?.source === "read_only_path"', webui)
-        self.assertIn('source === "path_mapping" && identifyMethod === "daemon_inotify"', webui)
-        self.assertIn("mergeFuseCreateWriteDuplicate", webui)
         screen = read("app/src/main/java/org/srx/manager/ui/screen/LogsScreen.kt")
         self.assertIn('entry.source == "path_mapping" && entry.identifyMethod == "daemon_inotify"', screen)
 
@@ -200,11 +187,9 @@ fn main() {{
 
     def test_legacy_exporters_use_the_same_bounded_windows(self) -> None:
         # App 端 legacy 内嵌导出已删除（最低兼容模块 v1.2.55，脚本入口由模块自带）；
-        # 不变量改为：WebUI 内嵌导出器与模块诊断脚本必须使用同一组有界采集窗口，
         # 保证不同导出面产出的诊断包可相互对照。
         for path in (
             "assets/zygisk_module/service.d/diagnostic_archive.sh",
-            "assets/zygisk_module/webroot/js/api.js",
         ):
             source = read(path)
             self.assertIn("-t 10000", source)
@@ -465,7 +450,6 @@ fn main() {{
 
         for path in (
             "app/src/main/java/org/srx/manager/data/RootFileStore.kt",
-            "assets/zygisk_module/webroot/js/api.js",
         ):
             source = read(path)
             self.assertIn("rc=2", source)
@@ -509,7 +493,7 @@ fn main() {{
         只监听 `wcmdn` 时两半都收不到：m 的文件名对不上 `.json` 过滤，y 压根不上报，
         于是「保存了配置但开关不生效」。A17 实测：掩码 wcmdn 下 rename 只吐
         `m <dir> stage.txt`；扩到 wcmdny 才有 `y <dir> renamed.json`，开关从
-        「40 秒无反应」变成 2 秒内生效。WebUI 的 restoreConfigSnapshot 正是
+        「40 秒无反应」变成 2 秒内生效。管理端的配置还原正是
         `mv "$stage/global.json" "$config/global.json"` 落盘。
 
         不加 `e`（IN_ATTRIB）：chmod/touch 只改元数据，不代表配置内容变化。
@@ -797,7 +781,6 @@ fn main() {{
 
     def test_module_update_keeps_existing_runtime_stats(self) -> None:
         customize = read("assets/zygisk_module/customize.sh")
-        api = read("assets/zygisk_module/webroot/js/api.js")
         daemon = read("src/log_daemon.rs")
         srxctl = read("assets/zygisk_module/bin/srxctl")
         post_fs = read("assets/zygisk_module/post-fs-data.sh")
@@ -827,10 +810,6 @@ fn main() {{
         self.assertNotIn('"$MODDIR/.stats.tmp"', srxctl)
         self.assertNotIn('"$MODDIR/.stats.reset.ok"', srxctl)
 
-        # WebUI 必须从持久目录读取
-        self.assertIn('"/data/adb/storage.redirect.x/stats"', api)
-        self.assertNotIn('MODULE_DIR + "/stats"', api)
-
         # customize.sh 升级时做一次性迁移，不再做 backup/restore
         self.assertIn("migrate_stats_to_persistent_dir", customize)
         migrate_call = customize.index("\nmigrate_stats_to_persistent_dir\n")
@@ -843,31 +822,6 @@ fn main() {{
         self.assertIn("safe_remove_known_path", uninstall)
         self.assertIn("safe_remove_known_path /data/adb/storage.redirect.x", uninstall)
         self.assertIn("/data/adb/storage.redirect.x)", uninstall)
-
-    def test_webui_reads_all_rotated_logs_and_renders_in_batches(self) -> None:
-        app = read("assets/zygisk_module/webroot/js/app.js")
-        api = read("assets/zygisk_module/webroot/js/api.js")
-        self.assertIn("Api.readFileWithBackups(FILE_MONITOR_LOG)", app)
-        self.assertNotIn("Api.readFile(FILE_MONITOR_LOG)", app)
-        self.assertIn('for f in "$base".*', api)
-        self.assertIn('sort -rn', api)
-        self.assertIn('case "$suffix" in', api)
-        self.assertIn("appendNextLogBatch", app)
-        self.assertIn("logRenderLimit: 80", app)
-        tail = api[api.index("async readFileTail") : api.index("async writeFile", api.index("async readFileTail"))]
-        self.assertNotIn("this.readFile(path)", tail)
-        bridge = api[api.index("const finish =") : api.index("// 3. Fallback")]
-        self.assertEqual(2, bridge.count(".catch((error) => finish("))
-        self.assertIn("finish(1, \"\", fallbackError?.message", bridge)
-
-    def test_bulk_webui_config_writes_use_one_staged_manifest(self) -> None:
-        api = read("assets/zygisk_module/webroot/js/api.js")
-        bulk = api[api.index("async writeAppConfigs") : api.index("async deleteAppConfig")]
-        restore = api[api.index("async restoreConfigSnapshot") : api.index("async stopModule")]
-        self.assertIn("this.writeStagedFiles(stage, files)", bulk)
-        self.assertNotIn("this.writeRawFile(", bulk)
-        self.assertIn("this.writeStagedFiles(stage, files)", restore)
-        self.assertNotIn("this.writeRawFile(", restore)
 
     def test_native_hot_paths_keep_bounded_cache_and_polling(self) -> None:
         fuse = read_fuse_redirect_core()
@@ -1019,7 +973,6 @@ fn main() {{
         monitor = read("src/monitor.rs")
         events = read("src/daemon_monitor/events.rs")
         app_ui = read("app/src/main/java/org/srx/manager/ui/screen/LogsScreen.kt")
-        web_ui = read("assets/zygisk_module/webroot/js/app.js")
 
         self.assertIn("infer_public_path_package_name", source_hint)
         self.assertNotIn("public_path_package_alias_paths", source_hint)
@@ -1034,16 +987,11 @@ fn main() {{
         self.assertIn('identify_reliability: "high"', events)
         self.assertIn('"public_path_package" => Some("public_path_package")', read("src/monitor/hint_file.rs"))
         self.assertIn('"public_path_package" -> "隐藏路径中的应用包名"', app_ui)
-        self.assertIn('public_path_package: "隐藏路径中的应用包名"', web_ui)
-        self.assertIn("isAttributedFilesystemObservation", web_ui)
-
-
 
     def test_monitor_clear_waits_for_daemon_ack_and_archive_scans_backups(self) -> None:
         paths = read("src/platform/module_paths.rs")
         daemon = read("src/log_daemon.rs")
         ctl = read("assets/zygisk_module/bin/srxctl")
-        webui = read("assets/zygisk_module/webroot/js/app.js")
         archive = read("assets/zygisk_module/service.d/diagnostic_archive.sh")
 
         self.assertIn("MONITOR_CLEAR_ACK_FILE", paths)
@@ -1054,9 +1002,6 @@ fn main() {{
         self.assertIn('control "clear-monitor:$request_id"', ctl)
         self.assertIn('= "$request_id"', ctl)
         self.assertIn('control clear-monitor; then', ctl)
-        self.assertIn("logLoadGeneration", webui)
-        self.assertIn('State.logLoadGeneration += 1', webui)
-        self.assertIn('await loadLogs({ afterClear: true })', webui)
         self.assertIn('for monitor_log in "$LOGS_DIR/file_monitor.log" "$LOGS_DIR"/file_monitor.log.[0-9]*; do', archive)
 
     def test_daemon_monitor_module_uses_a_stable_rustfmt_path(self) -> None:
@@ -1067,7 +1012,6 @@ fn main() {{
         self.assertNotIn("mod monitor {", daemon)
         self.assertIn('#[path = "../../monitor/hint_file.rs"]', monitor)
         self.assertIn('#[path = "../../monitor/source_hint.rs"]', monitor)
-
 
 if __name__ == "__main__":
     unittest.main()

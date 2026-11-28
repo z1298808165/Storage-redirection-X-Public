@@ -5440,7 +5440,7 @@ run_monitor_capture_root_view_scenario() {
     return 1
   fi
   # 触发「全量」reconcile：只写某个应用的配置走的是增量路径（计划被过滤到那个包，
-  # 目标应用不在里面就是 planned=0），全量必须由全局配置变化触发——WebUI 保存规则时
+  # 目标应用不在里面就是 planned=0），全量必须由全局配置变化触发——管理端保存规则时
   # 同样是写应用配置 + 触碰 global.json，现场链路就是这么走到全量的。
   write_global_config "$(test_global_config auto 1)"
   if ! assert_storage_root_view_parity "${label}-captured"; then

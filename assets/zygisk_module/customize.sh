@@ -310,16 +310,6 @@ chmod 666 "$MODPATH/logs/.package_event_receiver_ready"
 chmod 666 "$MODPATH/logs/media_provider_state.log"
 chmod 666 "$MODPATH/logs/app_status.log"
 
-# 配置 WebUI
-if [ -d "$MODPATH/webroot" ]; then
-  ui_print "-- webui dir detected"
-  chmod 755 "$MODPATH/webroot"
-  find "$MODPATH/webroot" -type d -exec chmod 755 {} \; 2>/dev/null
-  find "$MODPATH/webroot" -type f -exec chmod 644 {} \; 2>/dev/null
-  if command -v chcon >/dev/null 2>&1; then
-    chcon -R u:object_r:shell_data_file:s0 "$MODPATH/webroot" 2>/dev/null
-  fi
-fi
 print_progress 100 "install done"
 ui_print "-- config=$MODPATH/config"
 ui_print "-- logs=$MODPATH/logs"

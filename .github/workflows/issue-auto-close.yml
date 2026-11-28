@@ -42,7 +42,7 @@ jobs:
                   --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
                   --add-label "⛔ 回归" || true
                 gh issue comment "$num" -R "$repo" \
-                  --body "已摘除 \`✅ Fixed\` 并标记为 \`⛔ 回归\`，退出自动关闭倒计时。请补充：模块版本（请在 App 或 WebUI 中查看）、Android 版本、场景与日志，维护者会跟进。"
+                  --body "已摘除 \`✅ Fixed\` 并标记为 \`⛔ 回归\`，退出自动关闭倒计时。请补充：模块版本（请在管理 App 中查看）、Android 版本、场景与日志，维护者会跟进。"
               fi
               ;;
             /reopen*)
@@ -53,7 +53,7 @@ jobs:
                   --remove-label "✅ Fixed" --remove-label "⏳ 等待信息" \
                   --add-label "⛔ 回归" || true
                 gh issue comment "$num" -R "$repo" \
-                  --body "已重新打开并标记为 \`⛔ 回归\`。请补充：模块版本（请在 App 或 WebUI 中查看）、Android 版本、场景与日志，维护者会跟进。"
+                  --body "已重新打开并标记为 \`⛔ 回归\`。请补充：模块版本（请在管理 App 中查看）、Android 版本、场景与日志，维护者会跟进。"
               fi
               ;;
           esac

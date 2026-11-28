@@ -158,11 +158,21 @@ def build_entry(args: argparse.Namespace, previous: dict | None) -> dict:
                 "检测版本不得低于同一版本空间内的组件版本。"
             )
     previous_detected = str((previous or {}).get("version", "")).strip() if isinstance(previous, dict) else ""
-    if previous_detected and compare_versions(args.version, previous_detected) <= 0:
-        raise SystemExit(
-            f"检测版本 {args.version} 没有超过上一版 {previous_detected}："
-            "旧客户端只比检测版本，不递增就等于这次发布不会被任何旧客户端发现。"
-        )
+    previous_tag = str((previous or {}).get("tag", "")).strip() if isinstance(previous, dict) else ""
+    if previous_detected:
+        comparison = compare_versions(args.version, previous_detected)
+        if comparison < 0:
+            raise SystemExit(
+                f"检测版本 {args.version} 低于上一版 {previous_detected}："
+                "检测版本一旦回退，装过新版的客户端就再也收不到后续更新。"
+            )
+        # 同一轮 CI 重跑会算出同一个检测版本与同一个 tag：这是幂等重写，不是新一轮发布。
+        if comparison == 0 and previous_tag and previous_tag != args.tag:
+            raise SystemExit(
+                f"检测版本 {args.version} 与上一版 {previous_detected} 相同但 tag 不同"
+                f"（{previous_tag} → {args.tag}）：旧客户端只比检测版本，"
+                "第二次发布不会被任何旧客户端发现。"
+            )
 
     apk_url = asset_url(args.repository, args.tag, args.apk_asset) if args.apk_asset else ""
     module_url = asset_url(args.repository, args.tag, args.module_asset) if args.module_asset else ""

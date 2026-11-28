@@ -49,7 +49,7 @@
   的容错规则处理。媒体库晚加载会重置 read 与零宽补丁的退避，合并窗口内补装；排队失败时同步重试。
   APK 内嵌库按条目的可执行映射选择，跳过资源 APK、未加载的 ABI 和同名未映射候选。
 - 接入失败受按应用分桶的预算约束（连续 3 次后 60s 退避窗口，窗口过后放行一次探测、成功即清零；
-  「没试」类判定不计入）；设备级 `unavailable` 需要 ≥2 个不同应用的失败（`schema=3` 能力快照，含 `state`、`reason`、`device_fail_count`、`last_failed_scope` 等），单应用失败不会锁出整机。设备级锁出后按 `retry_at_ms` 退避自愈（30s 起倍增封顶 10 分钟，无需重启），任意成功都会清零回 FUSE；daemon 启动会重置快照。管理端、WebUI 与诊断归档只读取 `state` 与 `reason`。
+  「没试」类判定不计入）；设备级 `unavailable` 需要 ≥2 个不同应用的失败（`schema=3` 能力快照，含 `state`、`reason`、`device_fail_count`、`last_failed_scope` 等），单应用失败不会锁出整机。设备级锁出后按 `retry_at_ms` 退避自愈（30s 起倍增封顶 10 分钟，无需重启），任意成功都会清零回 FUSE；daemon 启动会重置快照。管理端与诊断归档只读取 `state` 与 `reason`。
 
 ## MediaStore 发布与扫描
 

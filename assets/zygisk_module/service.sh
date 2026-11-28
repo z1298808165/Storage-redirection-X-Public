@@ -92,18 +92,6 @@ daemon_process_matches() {
 # 退出即时感知），见 src/daemon_watchdog.rs；本脚本不再运行周期性 pidof 轮询。
 
 
-# 配置 WebUI
-WEBROOT_DIR="$MODDIR/webroot"
-if [ -d "$WEBROOT_DIR" ]; then
-  chmod 755 "$WEBROOT_DIR"
-  find "$WEBROOT_DIR" -type d -exec chmod 755 {} \; 2>/dev/null
-  find "$WEBROOT_DIR" -type f -exec chmod 644 {} \; 2>/dev/null
-  if command -v chcon >/dev/null 2>&1; then
-    chcon -R u:object_r:shell_data_file:s0 "$WEBROOT_DIR" 2>/dev/null
-  fi
-  log -p i -t Boot "webui ready"
-fi
-
 start_srx_daemon
 
 SERVICE_DIR="$MODDIR/service.d"

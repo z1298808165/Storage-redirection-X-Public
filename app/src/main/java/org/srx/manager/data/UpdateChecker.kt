@@ -185,7 +185,7 @@ internal constructor(
     return target.compareTo(installed)
   }
 
-  private fun String.isDateTimeVersion(): Boolean = length >= 8 && all { it.isDigit() }
+  private fun String.isDateTimeVersion(): Boolean = length == 14 && all { it.isDigit() }
 
   private fun ManifestEntry.matches(channel: UpdateChannel): Boolean =
       when (channel) {

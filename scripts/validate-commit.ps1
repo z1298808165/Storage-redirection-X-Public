@@ -81,7 +81,7 @@ $changelogFieldCaps = @{
 $activeChangelogField = $null
 foreach ($rawLine in ($message -split "`r?`n")) {
     $line = $rawLine.Trim()
-    if ($line -match '^(AI-Review-|Signed-off-by:|Co-authored-by:)') {
+    if ($line -match '^(AI-Review-|Signed-off-by:|Co-authored-by:|Release-Scope[：:])') {
         continue
     }
     # 致谢类字段里的链接必须写成 Markdown 链接：`名称（URL）` 依赖 GitHub 自动链接，
@@ -130,6 +130,18 @@ foreach ($rawLine in ($message -split "`r?`n")) {
     }
     if ($activeChangelogField) {
         throw "提交正文的 ${activeChangelogField}： 字段必须单行；其后的普通正文行会被更新日志生成器并入该字段。技术细节请写入 验证： 字段之后的续行（不会进入更新日志）。"
+    }
+}
+# 发布范围标记由 resolve_release_scope.py 读取；脚本对拼错的取值会静默忽略并回落到
+# 路径推断（等于白写），所以在提交时就把非法值拦下来。
+foreach ($rawLine in ($message -split "`r?`n")) {
+    $scopeMatch = [regex]::Match($rawLine.Trim(), '^Release-Scope[：:]\s*(.*)$')
+    if (-not $scopeMatch.Success) {
+        continue
+    }
+    $scopeValue = $scopeMatch.Groups[1].Value.Trim()
+    if ($scopeValue -notin @("app", "module", "both", "none")) {
+        throw "Release-Scope 的取值必须是 app、module、both 或 none；当前为：$scopeValue"
     }
 }
 if ([string]::IsNullOrWhiteSpace($title)) {

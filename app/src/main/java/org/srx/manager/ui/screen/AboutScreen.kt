@@ -119,7 +119,7 @@ internal val LicenseItems =
             "https://github.com/huniangitb/Fuse-Proxy",
         ),
         LicenseItem(
-            "Root / WebUI",
+            "Root / KernelSU",
             "KernelSU",
             "GPL 3.0 / GPL 2.0",
             "https://github.com/tiann/KernelSU",

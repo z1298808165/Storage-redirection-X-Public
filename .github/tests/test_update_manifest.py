@@ -146,6 +146,23 @@ class UpdateManifestTest(unittest.TestCase):
                 previous_entry(),
             )
 
+    def test_same_tag_rerun_rewrites_the_same_entry(self) -> None:
+        # 同一轮 CI 重跑：检测版本与 tag 都不变，属于幂等重写而不是新一轮发布。
+        entry = UPDATE_MANIFEST.build_entry(
+            make_args(version="2.3.2-ci.7", tag="ci-build-0"),
+            previous_entry(),
+        )
+
+        self.assertEqual("2.3.2-ci.7", entry["version"])
+        self.assertEqual("ci-build-0", entry["tag"])
+
+    def test_same_version_with_new_tag_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            UPDATE_MANIFEST.build_entry(
+                make_args(version="2.3.2-ci.7", tag="ci-build-1"),
+                previous_entry(),
+            )
+
     def test_components_run_on_independent_version_lines(self) -> None:
         entry = UPDATE_MANIFEST.build_entry(
             make_args(

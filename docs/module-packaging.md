@@ -6,7 +6,7 @@
 
 CI Build 和正式 Release 都产出单个刷入包：
 
-- `storage.redirect.x-v<version>.zip`：日常使用和问题定位共用。默认文件监控和概览页轻量运行时生效计数通过 `srx_daemon` 私有通道直接写入文件，不启动常驻 `logcat`；需要排查问题时，在管理 App 或模块 WebUI 的设置页“模块设置”中打开“详细日志”，模块会启用 native/Java running 日志和 media/app 状态采集，关闭后立即停止这些详细记录。
+- `storage.redirect.x-v<version>.zip`：日常使用和问题定位共用。默认文件监控和概览页轻量运行时生效计数通过 `srx_daemon` 私有通道直接写入文件，不启动常驻 `logcat`；需要排查问题时，在管理 App 的设置页“模块设置”中打开“详细日志”，模块会启用 native/Java running 日志和 media/app 状态采集，关闭后立即停止这些详细记录。
 
 ## 目录结构
 
@@ -50,7 +50,7 @@ module.zip
 ## 打包注意事项
 
 - **zip 内路径必须使用正斜杠 `/`**。Windows 的 `Compress-Archive` 或 `ZipFile.CreateFromDirectory` 会使用反斜杠 `\`，Android recovery/KernelSU 无法识别。需要使用 `ZipArchive.CreateEntry` 手动指定正斜杠路径。
-- **安装关键文本条目保持不压缩**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对压缩文本条目的兼容性不稳定，可能把脚本解成 0 字节。因此 `*.sh`、`*.prop`、`*.rule`、`zn_modules.txt`、`META-INF/*` 和 `bin/srxctl` 在 Linux/macOS 使用 Store，在 PowerShell 使用 `CompressionLevel.NoCompression`；体积较大的 native 二进制、WebUI 和其它资源使用 Deflate 压缩。
+- **安装关键文本条目保持不压缩**。模块安装器会在设备侧再次解压 zip，部分 Magisk/rootAVD x86_64 环境对压缩文本条目的兼容性不稳定，可能把脚本解成 0 字节。因此 `*.sh`、`*.prop`、`*.rule`、`zn_modules.txt`、`META-INF/*` 和 `bin/srxctl` 在 Linux/macOS 使用 Store，在 PowerShell 使用 `CompressionLevel.NoCompression`；体积较大的 native 二进制和其它资源使用 Deflate 压缩。
 - **shell 脚本必须使用 Unix 换行符 (LF)**。Windows 编辑器可能保存为 CRLF，导致 `\r` 被 shell 解释为命令的一部分而报错。
 - **shell 脚本不能有 UTF-8 BOM**。BOM (`EF BB BF`) 会导致 shebang 行无法识别。
 - **不要包含 `config/`、`logs/`、`tmp/` 目录**。这些是运行时生成的，由 manager app 管理。

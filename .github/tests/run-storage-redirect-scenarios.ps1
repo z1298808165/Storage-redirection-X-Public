@@ -4349,7 +4349,7 @@ function Invoke-MonitorCaptureRootViewScenario {
     Write-Host "  monitor_capture_baseline label=$label pid=$appPid dev=$sysDev"
 
     # 触发「全量」reconcile：只写某个应用的配置走的是增量路径（计划被过滤到那个包，
-    # 目标应用不在里面就什么也不做），全量必须由全局配置变化触发——WebUI 保存规则时
+    # 目标应用不在里面就什么也不做），全量必须由全局配置变化触发——管理端保存规则时
     # 同样是写应用配置 + 触碰 global.json。
     Write-GlobalConfig (Get-TestGlobalConfig 'auto' $true)
     $ok = Assert-StorageRootViewParity "$label-captured"

@@ -80,9 +80,6 @@ jobs:
       - name: Run fast repository tests
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
-          node scripts/verify-webui-structure.js
-          node scripts/verify-webui-config-fixtures.js
-          node scripts/verify-webui-app-list-parser.js
           cargo test -p native-config-fixtures --locked
           python -m unittest discover -s .github/tests -p "test_*.py" -v
 
@@ -105,6 +102,11 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       version_code: ${{ steps.version.outputs.version_code }}
+      app_version: ${{ steps.version.outputs.app_version }}
+      app_version_code: ${{ steps.version.outputs.app_version_code }}
+      release_scope: ${{ steps.release-scope.outputs.scope }}
+      app_changed: ${{ steps.release-scope.outputs.app_changed }}
+      module_changed: ${{ steps.release-scope.outputs.module_changed }}
       scenarios: ${{ steps.scope.outputs.scenarios }}
       publish_ci: ${{ steps.scope.outputs.publish_ci }}
       test_flow_timeout_minutes: ${{ steps.scope.outputs.test_flow_timeout_minutes }}
@@ -118,7 +120,18 @@ jobs:
       - name: Prepare CI version
         id: version
         run: |
-          python .github/scripts/validate_ci_transition.py --format github >> "$GITHUB_OUTPUT"
+          python .github/scripts/validate_ci_transition.py --format github --commit "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release scope
+        id: release-scope
+        env:
+          RELEASE_SCOPE_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          python .github/scripts/resolve_release_scope.py \
+            --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" \
+            --head "$GITHUB_SHA" \
+            --message "$RELEASE_SCOPE_MESSAGE" \
+            --format github >> "$GITHUB_OUTPUT"
 
       # 统一确定测试流范围与验证模式：dispatch inputs 或提交信息里的
       # 「单场景 29」/「单场景 29,34」都能收窄范围。解析上移到这里，下游
@@ -142,7 +155,7 @@ jobs:
     needs:
       - quality
       - prepare
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true' && needs.prepare.outputs.release_scope != 'none'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
@@ -176,20 +189,18 @@ jobs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true' && needs.prepare.outputs.module_changed == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      MODULE_VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Verify WebUI config fixtures
-        run: node scripts/verify-webui-config-fixtures.js
 
       - name: Setup Java (JDK 21)
         uses: actions/setup-java@v5
@@ -298,8 +309,6 @@ jobs:
           test -f "build/storage.redirect.x-v${VERSION}/LICENSE"
           test -f "build/storage.redirect.x-v${VERSION}/COPYING"
           test -f "build/storage.redirect.x-v${VERSION}/zygisk/arm64-v8a.so"
-          test -f "build/storage.redirect.x-v${VERSION}/webroot/index.html"
-          grep -q '^webui=1$' "build/storage.redirect.x-v${VERSION}/module.prop"
           grep -q 'GPL-3.0-or-later' "build/storage.redirect.x-v${VERSION}/LICENSE"
           grep -q 'GNU GENERAL PUBLIC LICENSE' "build/storage.redirect.x-v${VERSION}/COPYING"
           test -f "build/storage.redirect.x-v${VERSION}/service.d/debug_collectors.sh"
@@ -355,12 +364,12 @@ jobs:
       - quality
       - prepare
       - init-ci-release
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && (needs.init-ci-release.result == 'success' || needs.init-ci-release.result == 'skipped') && needs.prepare.outputs.publish_ci == 'true' && needs.prepare.outputs.app_changed == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-      VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      VERSION: ${{ needs.prepare.outputs.app_version }}
+      VERSION_CODE: ${{ needs.prepare.outputs.app_version_code }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -456,12 +465,14 @@ jobs:
     needs:
       - quality
       - prepare
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.prepare.outputs.module_changed == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       VERSION_CODE: ${{ needs.prepare.outputs.version_code }}
+      APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+      APP_VERSION_CODE: ${{ needs.prepare.outputs.app_version_code }}
       TARGET_TRIPLE: x86_64-linux-android
       MODULE_ABI: x86_64
     steps:
@@ -572,7 +583,7 @@ jobs:
       - quality
       - prepare
       - test-flow-build
-    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.test-flow-build.result == 'success'
+    if: always() && needs.quality.result == 'success' && needs.prepare.result == 'success' && needs.prepare.outputs.module_changed == 'true' && needs.test-flow-build.result == 'success'
     runs-on: ubuntu-26.04
     # job 级预算由 prepare 按场景数自适应产出（步骤预算 + 15 分钟作业开销，上限
     # 360 分钟＝GitHub job 上限）。不再写死 45/50：场景数增加时预算自动跟上，
@@ -792,13 +803,17 @@ jobs:
             echo "quality result: ${{ needs.quality.result }}" >&2
             exit 1
           fi
+          if [ "${{ needs.prepare.outputs.module_changed }}" != "true" ]; then
+            echo "module scope not changed; test-flow intentionally skipped"
+            exit 0
+          fi
           if [ "${{ needs.test-flow.result }}" != "success" ]; then
             echo "test-flow matrix result: ${{ needs.test-flow.result }}" >&2
             exit 1
           fi
 
   create-ci-release:
-    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.outputs.publish_ci == 'true'
+    if: always() && github.event_name == 'push' && !contains(github.event.head_commit.message, '仅验证CI') && needs.prepare.result == 'success' && (needs.module.result == 'success' || needs.module.result == 'skipped') && (needs.app.result == 'success' || needs.app.result == 'skipped') && needs.test-flow-required.result == 'success' && needs.prepare.outputs.publish_ci == 'true' && needs.prepare.outputs.release_scope != 'none'
     needs:
       - prepare
       - init-ci-release
@@ -811,6 +826,10 @@ jobs:
       ci_tag: ${{ steps.release.outputs.ci_tag }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+      MODULE_VERSION: ${{ needs.prepare.outputs.version }}
+      APP_CHANGED: ${{ needs.prepare.outputs.app_changed }}
+      MODULE_CHANGED: ${{ needs.prepare.outputs.module_changed }}
       CI_TAG: ci-build-${{ github.run_id }}
     steps:
       - name: Checkout repository
@@ -829,14 +848,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 不校验 isDraft：完整重跑时上一轮可能已把草稿发布出去，此时资产仍在、
-          # 直接再走一次发布是幂等的；真正要保证的是模块 zip 与 APK 都在。
           gh release view "$CI_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[].name' > release-assets.txt
-          grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
-          grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
+          if [ "$MODULE_CHANGED" = "true" ]; then
+            grep -Fx "storage.redirect.x-v${MODULE_VERSION}.zip" release-assets.txt
+          fi
+          if [ "$APP_CHANGED" = "true" ]; then
+            grep -Fx "storage-redirect-x-manager-v${APP_VERSION}.apk" release-assets.txt
+          fi
 
       - name: Publish CI build release
         id: release
@@ -862,8 +883,12 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --json assets \
             --jq '.assets[].name' > release-assets.txt
-          grep -Fx "storage.redirect.x-v${VERSION}.zip" release-assets.txt
-          grep -Fx "storage-redirect-x-manager-v${VERSION}.apk" release-assets.txt
+          if [ "$MODULE_CHANGED" = "true" ]; then
+            grep -Fx "storage.redirect.x-v${MODULE_VERSION}.zip" release-assets.txt
+          fi
+          if [ "$APP_CHANGED" = "true" ]; then
+            grep -Fx "storage-redirect-x-manager-v${APP_VERSION}.apk" release-assets.txt
+          fi
 
   cleanup-build-artifacts:
     needs:
@@ -953,6 +978,10 @@ jobs:
     timeout-minutes: 15
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+      MODULE_VERSION: ${{ needs.prepare.outputs.version }}
+      APP_CHANGED: ${{ needs.prepare.outputs.app_changed }}
+      MODULE_CHANGED: ${{ needs.prepare.outputs.module_changed }}
       CI_TAG: ${{ needs.create-ci-release.outputs.ci_tag }}
     steps:
       - name: Checkout repository
@@ -970,14 +999,28 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --json body \
             --jq '.body' > temp/build-release-notes.md
+          APP_ASSET=""
+          MODULE_ASSET=""
+          APP_COMPONENT_VERSION=""
+          MODULE_COMPONENT_VERSION=""
+          if [ "$APP_CHANGED" = "true" ]; then
+            APP_ASSET="storage-redirect-x-manager-v${APP_VERSION}.apk"
+            APP_COMPONENT_VERSION="$APP_VERSION"
+          fi
+          if [ "$MODULE_CHANGED" = "true" ]; then
+            MODULE_ASSET="storage.redirect.x-v${MODULE_VERSION}.zip"
+            MODULE_COMPONENT_VERSION="$MODULE_VERSION"
+          fi
           python .github/scripts/update_manifest.py \
             --channel beta \
             --repository "$GITHUB_REPOSITORY" \
             --version "$VERSION" \
             --tag "$CI_TAG" \
             --title "CI Build $VERSION" \
-            --apk-asset "storage-redirect-x-manager-v${VERSION}.apk" \
-            --module-asset "storage.redirect.x-v${VERSION}.zip" \
+            --apk-asset "$APP_ASSET" \
+            --module-asset "$MODULE_ASSET" \
+            --app-version "$APP_COMPONENT_VERSION" \
+            --module-version "$MODULE_COMPONENT_VERSION" \
             --release-notes-file temp/build-release-notes.md
           python .github/scripts/resolve_build_version.py --record-version "$VERSION"
 

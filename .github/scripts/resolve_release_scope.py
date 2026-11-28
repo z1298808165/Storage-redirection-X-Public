@@ -38,8 +38,17 @@ MODULE_FILES = {
     "rust-toolchain.toml",
 }
 # 发布流程与文档：不改变任何构件，不需要构建。
-OTHER_PREFIXES = (".github/", "docs/", "scripts/", "tests/", "temp/")
-OTHER_FILES = {"README.md", "AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", "COPYING", "LICENSE"}
+OTHER_PREFIXES = (".github/", "docs/", "scripts/", "tests/", "temp/", ".workbuddy/")
+OTHER_FILES = {
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "COPYING",
+    "LICENSE",
+    # 首页 logo 只被 README 引用，不进模块 zip。
+    "assets/logo.png",
+}
 IGNORED_FILES = {"update.json"}
 
 
@@ -83,8 +92,13 @@ def parse_trailer(message: str) -> str | None:
     return None
 
 
+def is_zero_ref(ref: str) -> bool:
+    """GitHub 在新建分支的首次 push 上给 ``before`` 的是全零 SHA。"""
+    return bool(ref) and set(ref) == {"0"}
+
+
 def changed_paths(base: str, head: str) -> list[str]:
-    if base:
+    if base and not is_zero_ref(base):
         args = ["diff", "--name-only", f"{base}..{head}"]
     else:
         # 没有基线（首次运行）时只能看单个提交，宁可判成 both。
@@ -92,6 +106,8 @@ def changed_paths(base: str, head: str) -> list[str]:
     result = subprocess.run(
         ["git", *args], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
+    if result.returncode != 0:
+        return ["__scope_resolution_failed__"]
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 

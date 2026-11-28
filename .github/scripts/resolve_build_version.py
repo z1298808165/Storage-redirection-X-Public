@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import re
 import subprocess
@@ -151,6 +152,24 @@ def resolve_build_count(current_version: str, include_dirty: bool) -> int:
     return highest + 1
 
 
+def app_timestamp_version(commit: str = "HEAD") -> str:
+    raw = run_git(["show", "-s", "--format=%cI", commit], check=False)
+    try:
+        timestamp = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit(f"Unable to read commit timestamp for App version: {raw}") from exc
+    return timestamp.astimezone(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
+def app_timestamp_version_code(version: str) -> int:
+    try:
+        timestamp = dt.datetime.strptime(version, "%Y%m%d%H%M%S").replace(tzinfo=dt.timezone.utc)
+    except ValueError as exc:
+        raise SystemExit(f"App version must use yyyyMMddHHmmss, got: {version}") from exc
+    epoch = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    return int((timestamp - epoch).total_seconds())
+
+
 def version_code(base_version: str, build_count: int, release: bool) -> int:
     major, minor, patch = validate_base_version(base_version)
     base_code = major * 1_000_000 + minor * 10_000 + patch * 100
@@ -166,8 +185,20 @@ def main() -> None:
     parser.add_argument("--include-dirty", action="store_true", help="count local uncommitted changes as the next build")
     parser.add_argument("--release", action="store_true", help="resolve release version without ci suffix")
     parser.add_argument("--record-version", help="record a resolved MAJOR.MINOR.PATCH-ci.N as the next build baseline")
+    parser.add_argument("--app-version", action="store_true", help="resolve the UTC timestamp App version for a commit")
+    parser.add_argument("--commit", default="HEAD", help="commit ref used by --app-version")
     parser.add_argument("--format", choices=("json", "github"), default="json")
     args = parser.parse_args()
+
+    if args.app_version:
+        version = app_timestamp_version(args.commit)
+        data = {"app_version": version, "app_version_code": app_timestamp_version_code(version)}
+        if args.format == "github":
+            for key, value in data.items():
+                print(f"{key}={value}")
+        else:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
 
     if args.record_version:
         base_version, build_count = parse_ci_version(args.record_version)

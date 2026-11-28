@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -68,6 +69,7 @@ def transition_errors(base_version: str, stable_version: str | None, build_count
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=("json", "github"), default="json")
+    parser.add_argument("--commit", default="HEAD", help="提交 ref，用于生成稳定的 App 时间版本")
     args = parser.parse_args()
 
     message = resolve_build_version.run_git(["log", "-1", "--pretty=%B"], check=False)
@@ -90,11 +92,14 @@ def main() -> None:
 
     resolved_version = f"{base_version}-ci.{build_count}"
     resolved_code = resolve_build_version.version_code(base_version, build_count, release=False)
+    app_version = resolve_build_version.app_timestamp_version(args.commit)
     data = {
         "base_version": base_version,
         "build_count": build_count,
         "version": resolved_version,
         "version_code": resolved_code,
+        "app_version": app_version,
+        "app_version_code": resolve_build_version.app_timestamp_version_code(app_version),
     }
     if args.format == "github":
         for key, value in data.items():

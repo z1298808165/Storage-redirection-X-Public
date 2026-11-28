@@ -1,6 +1,7 @@
 <!-- quality-allow(chinese-language): 头部为居中排版 HTML 块，结构性标签与徽章为机器元素。 -->
 <div align="center">
-  <img src="assets/zygisk_module/webroot/logo.png" width="128" alt="Storage Redirect X"/>
+  <!-- quality-allow(chinese-language): alt 为产品名，图片标签为机器元素。 -->
+  <img src="assets/logo.png" width="128" alt="Storage Redirect X"/>
   <!-- quality-allow(chinese-language): Storage Redirect X 为产品名，标题保留原名。 -->
   <h1>Storage Redirect X</h1>
   <p><b>一套面向 Android 的存储重定向方案 —— 让应用的存储访问回到它该在的地方。</b></p>
@@ -36,9 +37,9 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - **⚙️ 双存储后端** —— FUSE 优先：能力可用时整棵存储视图根由共享宿主 FUSE 接管，映射、通配、沙盒与只读全部在策略层逐请求判定；能力不可用或该应用接入失败时回落 mount namespace。
 - **📝 文件监视** —— 记录应用与系统代写链路的文件操作、发起应用与最终落点，支持按应用与操作过滤。
 - **🧩 配置模板** —— 保存、复用、批量应用一整份应用配置，配置修改热重载。
-- **💾 备份还原** —— 导出 `.srxbak.zip` 单文件备份，管理 App 与 WebUI 互通互还原。
+- **💾 备份还原** —— 导出 `.srxbak.zip` 单文件备份，随时还原。
 - **🆕 新装应用自动重定向** —— 安装新应用后按模板自动完成配置。
-- **🖥 双端管理界面** —— 原生管理 App 与模块内置 WebUI；App 界面风格可在 **Miuix / COUI** 之间切换。
+- **🖥 管理界面** —— 原生管理 App 提供全部配置入口；界面风格可在 **Miuix / COUI** 之间切换。
 
 ## 🧭 两种工作模式
 
@@ -70,7 +71,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 1. 前往 [Releases](https://github.com/z1298808165/Storage-redirection-X-Public/releases) 下载模块 zip。
 2. 确认 Zygisk 环境就绪后，在 Magisk / KernelSU 管理器中刷入模块，重启设备。
-3. 打开模块 WebUI 或安装管理 App，为需要的应用配置重定向。
+3. 安装管理 App，为需要的应用配置重定向。
 
 **CI 测试版**
 
@@ -94,7 +95,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 }
 ```
 
-这份最小配置会让应用进入完整隔离模式：除明确放行或映射的路径外，其余 `/storage/emulated/<用户>/` 下的访问都会进入应用沙盒。也可以在管理 App / WebUI 中直接勾选启用，无需手写配置。
+这份最小配置会让应用进入完整隔离模式：除明确放行或映射的路径外，其余 `/storage/emulated/<用户>/` 下的访问都会进入应用沙盒。也可以在管理 App 中直接勾选启用，无需手写配置。
 
 修改配置后推荐在模块操作里执行「重载重定向」，或通过管理应用保存配置触发热重载。
 
@@ -238,7 +239,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 - `verbose_logging_enabled`：启用详细日志；打开后立即输出普通 Rust/Java 日志并启动 `running.log`、`media_provider_state.log`、`app_status.log` 等诊断采集，关闭后立即停止这些记录。文件监视记录和概览页的轻量运行时生效计数不受该开关影响。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_redirect_for_new_apps`：通过 Zygisk 在 `system_server` 注册系统包事件接收器；收到新的第三方用户应用安装事件并完成 PackageManager 校验后，自动为该应用生成仅开启重定向的默认配置。卸载应用时其配置会被置回 disabled 并保留文件（不丢用户自定义规则），同时留伴生标记；重装触发的安装事件会先据此把配置恢复为 enabled 再走自动开启，因此卸载重装的应用能自动恢复开启，用户手工关闭的配置不受影响。模块会维护 `/data/adb/modules/storage.redirect.x/config/auto_new_apps_baseline` 作为基线，避免升级、重启或重复事件把旧应用误判为新应用。缺失、格式错误或不可读时，默认值为 `false`。
 - `auto_enable_new_apps_template_id`：新应用自动重定向启用时使用的配置模板 ID。为空时使用仅开启重定向的默认配置。
-- `app_config_auto_save`：控制 WebUI 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
+- `app_config_auto_save`：控制管理 App 应用配置页是否在每次配置操作结束后自动保存。缺失、格式错误或不可读时，默认值为 `false`，即仍需点击保存按钮。
 
 #### 应用配置 `apps/<包名>.json`
 
@@ -343,7 +344,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 - 推荐：在模块操作里执行 `重载重定向`，或通过管理应用保存配置。
 - 备选：手动停止目标应用、重启相关媒体服务进程，或直接重启设备。
-- 只修改 `/data/adb/modules/storage.redirect.x/config/apps/*.json` 通常不需要刷入模块；WebUI 和管理 App 保存配置或批量应用模板后会触发配置热重载，但已运行进程可能仍需要重启后才完全使用新配置。
+- 只修改 `/data/adb/modules/storage.redirect.x/config/apps/*.json` 通常不需要刷入模块；管理 App 保存配置或批量应用模板后会触发配置热重载，但已运行进程可能仍需要重启后才完全使用新配置。
 
 </details>
 
@@ -437,7 +438,7 @@ Storage Redirect X 是一个 Zygisk 模块，负责文件系统重定向、Media
 
 #### 只读模式 `read_only_paths`
 
-`read_only_paths` 用来把某些真实目录保持可读但禁止写入。管理 App 和 WebUI 会把它做成独立的"只读模式"开关和路径区域；打开后只读路径写入 `read_only_paths`，不会混入"允许路径"列表展示。
+`read_only_paths` 用来把某些真实目录保持可读但禁止写入。管理 App 会把它做成独立的“只读模式”开关和路径区域；打开后只读路径写入 `read_only_paths`，不会混入“允许路径”列表展示。
 
 ```json
 {
@@ -498,15 +499,15 @@ SRX 内置 FUSE 兼容保护由 `global.json` 中的 `fuse_fix_enabled` 控制�
 使用入口：
 
 - 应用配置页：点击右上角"配置模板"按钮，可以把当前应用配置保存为一个命名模板，也可以选择已有模板覆盖当前应用配置。
-- 应用列表页：长按应用进入多选模式；管理 App 会用底部批量操作栏临时替代底部导航，WebUI 会在底部导航上方显示批量操作栏。选择多个应用后点击"应用模板"，选择已有模板并确认后会批量覆盖这些应用的配置。
+- 应用列表页：长按应用进入多选模式；管理 App 会用底部批量操作栏临时替代底部导航。选择多个应用后点击"应用模板"，选择已有模板并确认后会批量覆盖这些应用的配置。
 - 设置页：在"配置模板"区域可以查看已添加的模板、直接添加空模板、重命名模板或删除模板。
-- 应用列表页标题栏右上角的刷新按钮：管理 App 与 WebUI 都提供该入口，点击后重新读取安装列表与应用配置，并把列表滚回顶部；长列表中不必再回拉到顶部下拉刷新。刷新进行中按钮置灰，避免连点重复发起查询。
+- 应用列表页标题栏右上角的刷新按钮：管理 App 提供该入口，点击后重新读取安装列表与应用配置，并把列表滚回顶部；长列表中不必再回拉到顶部下拉刷新。刷新进行中按钮置灰，避免连点重复发起。
 
-批量应用模板会先写入临时暂存目录，再一次性提交到对应的 `apps/<包名>.json` 并触发一次配置热重载，避免大量应用逐个写入时重复触发热重载。执行期间 WebUI 和管理 App 会显示等待动画并阻止其它操作；WebUI 还会显示批量写入进度。模板覆盖的是应用配置本身，不会合并到旧配置；覆盖后如目标应用已经在运行，仍建议重启目标应用或相关媒体进程，确保进程完全使用新配置。
+批量应用模板会先写入临时暂存目录，再一次性提交到对应的 `apps/<包名>.json` 并触发一次配置热重载，避免大量应用逐个写入时重复触发热重载。执行期间管理 App 会显示等待动画并阻止其它操作。模板覆盖的是应用配置本身，不会合并到旧配置；覆盖后如目标应用已经在运行，仍建议重启目标应用或相关媒体进程，确保进程完全使用新配置。
 
-#### WebUI 与管理应用备份还原
+#### 管理应用备份还原
 
-设置页的"备份还原"区域可以导出一个 `.srxbak.zip` 单文件备份。备份包是通用 ZIP 格式，内部固定包含 `backup.json`，内容覆盖 `global.json`、`templates.json` 和所有 `apps/*.json` 应用配置；管理 App 导出的备份还会包含预测性返回手势这类本地 UI 偏好。WebUI 和管理 App 使用同一套备份格式，导出的备份可以相互还原。备份文件带有模块标识、格式版本和完整性校验，还原时会先校验文件格式、模块 id、配置字段和校验值，避免把其它模块或损坏文件误写入配置目录。旧版 `.srxbak.json` 备份仍可导入。
+设置页的"备份还原"区域可以导出一个 `.srxbak.zip` 单文件备份。备份包是通用 ZIP 格式，内部固定包含 `backup.json`，内容覆盖 `global.json`、`templates.json` 和所有 `apps/*.json` 应用配置；管理 App 导出的备份还会包含预测性返回手势这类本地 UI 偏好。备份文件带有模块标识、格式版本和完整性校验，还原时会先校验文件格式、模块 id、配置字段和校验值，避免把其它模块或损坏文件误写入配置目录。旧版 `.srxbak.json` 备份仍可导入。
 
 使用建议：
 
@@ -606,4 +607,4 @@ su -c 'touch /data/adb/modules/storage.redirect.x/disable && reboot'
 
 本仓库是基于 [Storage-redirection-X-Public](https://github.com/Kindness-Kismet/Storage-redirection-X-Public) 的修改版本。除单独标注的第三方组件或文件外，SRX Core 源码按 `GPL-3.0-or-later` 发布，详见 [LICENSE](LICENSE) 和 GPL 正文 [COPYING](COPYING)。
 
-分发修改版或二进制构建时，必须按 `GPL-3.0-or-later` 提供对应源码并保留同等协议义务。模块刷入包会包含 `LICENSE` 和 `COPYING`，管理 App 和 WebUI 的"关于与开源协议"页面也会列出上游来源和协议。
+分发修改版或二进制构建时，必须按 `GPL-3.0-or-later` 提供对应源码并保留同等协议义务。模块刷入包会包含 `LICENSE` 和 `COPYING`，管理 App 的"关于与开源协议"页面也会列出上游来源和协议。

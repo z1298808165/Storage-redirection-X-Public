@@ -43,7 +43,7 @@ build_module_dir() {
   chmod 755 "$module_dir/bin/srx_daemon"
   [[ -f "$module_dir/bin/srxctl" ]] && chmod 755 "$module_dir/bin/srxctl"
 
-  printf 'id=storage.redirect.x\nname=Storage Redirect X\nversion=v%s\nversionCode=%s\nauthor=Kindness-Kismet\ndescription=Storage Redirect X Core Module\nwebui=1\n' \
+  printf 'id=storage.redirect.x\nname=Storage Redirect X\nversion=v%s\nversionCode=%s\nauthor=Kindness-Kismet\ndescription=Storage Redirect X Core Module\n' \
     "$VERSION" "$VERSION_CODE" > "$module_dir/module.prop"
 
   (

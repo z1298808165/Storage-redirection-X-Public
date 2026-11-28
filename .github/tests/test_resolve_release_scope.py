@@ -72,6 +72,16 @@ class TrailerTest(unittest.TestCase):
     def test_missing_trailer(self) -> None:
         self.assertIsNone(RESOLVE.parse_trailer("修复：只改文档\n"))
 
+    def test_docs_and_memory_only_change_does_not_build(self) -> None:
+        self.assertEqual(
+            "none", RESOLVE.resolve_scope(["docs/build-process.md", ".workbuddy/memory/2026-11-28.md"])
+        )
+        self.assertEqual("none", RESOLVE.resolve_scope(["README.md", "assets/logo.png"]))
+
+    def test_zero_before_sha_falls_back_to_single_commit(self) -> None:
+        self.assertTrue(RESOLVE.is_zero_ref("0" * 40))
+        self.assertFalse(RESOLVE.is_zero_ref("86f078f3aaaa"))
+
     def test_scope_outputs_map_to_booleans(self) -> None:
         self.assertEqual(
             {"scope": "both", "app_changed": "true", "module_changed": "true"},

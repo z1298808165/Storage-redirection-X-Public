@@ -326,8 +326,7 @@ function Build-ModuleZip {
         "version=v$ModuleVersion",
         "versionCode=$ModuleVersionCode",
         "author=Kindness-Kismet",
-        "description=Storage Redirect X Core Module",
-        "webui=1"
+        "description=Storage Redirect X Core Module"
     ) -join "`n"
     Write-Utf8LfFile -Path (Join-Path $PackageDir "module.prop") -Content ($moduleProp + "`n")
 
@@ -383,7 +382,7 @@ function Test-ModuleZip {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
         $names = @($zip.Entries | ForEach-Object { $_.FullName })
-        foreach ($required in @("LICENSE", "COPYING", "module.prop", "customize.sh", "zn_modules.txt", "zygisk/arm64-v8a.so", "bin/srx_daemon", "webroot/index.html")) {
+        foreach ($required in @("LICENSE", "COPYING", "module.prop", "customize.sh", "zn_modules.txt", "zygisk/arm64-v8a.so", "bin/srx_daemon")) {
             if ($names -notcontains $required) {
                 Fail "Zip 文件缺失必需的条目: $required"
             }
@@ -451,18 +450,6 @@ function Test-ModuleZip {
 
             if ($text.IndexOf([char]13) -ge 0) {
                 Fail "Zip 条目包含 CR 换行符: $entryName"
-            }
-            if ($entryName -eq "module.prop") {
-                $hasWebUi = $false
-                foreach ($propLine in $text.Split([char]10)) {
-                    if ($propLine.Trim() -eq "webui=1") {
-                        $hasWebUi = $true
-                        break
-                    }
-                }
-                if (-not $hasWebUi) {
-                    Fail "module.prop 缺失 webui=1"
-                }
             }
         }
     } finally {

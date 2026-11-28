@@ -79,7 +79,7 @@ data class AppUiState(
     val snackbar: String? = null,
 )
 
-// 与 WebUI 的 DASHBOARD_REFRESH_THROTTLE_MS 取值一致，保证两端刷新节奏相同。
+// 概览刷新节流间隔；切换页面与回到前台都走这一处，避免连续动作反复发起 root 调用。
 private const val DashboardCountsThrottleMs = 1200L
 
 /**
@@ -203,8 +203,7 @@ class SrxViewModel(
   /**
    * 刷新概览页的统计计数。
    *
-   * 该刷新会 dump 全部应用配置并解析，[force] 为 false 时按最小间隔节流：切换页面与 每次回到前台都会触发，若不节流则连续动作会反复发起 root 调用。间隔与 WebUI
-   * 的 DASHBOARD_REFRESH_THROTTLE_MS 保持一致，避免两端行为不同。
+   * 该刷新会 dump 全部应用配置并解析，[force] 为 false 时按最小间隔节流：切换页面与 每次回到前台都会触发，若不节流则连续动作会反复发起 root 调用。
    */
   fun refreshDashboardCounts(force: Boolean = false) {
     if (!_state.value.rootGranted || dashboardCountsJob?.isActive == true) return

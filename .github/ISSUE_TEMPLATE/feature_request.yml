@@ -18,7 +18,7 @@ body:
     id: proposal
     attributes:
       label: 期望的功能或方案
-      description: 描述希望实现的功能；如有理想的交互方式（管理 App / WebUI、入口位置、配置方式）请一并说明。
+      description: 描述希望实现的功能；如有理想的交互方式（管理 App 中的入口位置、配置方式）请一并说明。
       placeholder: |
         例如：希望支持在配置模板中直接包含路径映射规则，并在应用列表多选后一键应用。
     validations:

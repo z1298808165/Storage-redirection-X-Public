@@ -14,7 +14,7 @@ cargo build --target aarch64-linux-android --release --locked
 
 产物位于 `target/aarch64-linux-android/release/libsrx_core.so`。
 
-模块二进制不再区分 debug/release 两套日志能力。`FileMonitorOp`、native 详细日志和概览页轻量运行时生效计数通过 `srx_daemon` 私有 datagram 通道落盘，避免默认常驻 `logcat` 以及普通日志反复经过 Android `logd`。运行时生效计数始终启用；需要普通 Rust/Java 调试日志和诊断快照时，在管理 App 或模块 WebUI 的设置页“模块设置”中打开“详细日志”，详细模式仅保留 Java/崩溃上下文所需的一条合并 `logcat` 管道。
+模块二进制不再区分 debug/release 两套日志能力。`FileMonitorOp`、native 详细日志和概览页轻量运行时生效计数通过 `srx_daemon` 私有 datagram 通道落盘，避免默认常驻 `logcat` 以及普通日志反复经过 Android `logd`。运行时生效计数始终启用；需要普通 Rust/Java 调试日志和诊断快照时，在管理 App 的设置页“模块设置”中打开“详细日志”，详细模式仅保留 Java/崩溃上下文所需的一条合并 `logcat` 管道。
 
 ### 管理 App release 构建与签名
 
@@ -128,7 +128,7 @@ py .github\scripts\resolve_build_version.py --include-dirty --format json
 
 管理 App 的“检查更新”不再直接请求 GitHub Releases API，而是读取仓库分支上的静态 `update.json`，避免未认证 GitHub API 的每出口 IP 频率限制导致 `HTTP 403`。
 
-CI 与 Release 发布完成后会从对应 GitHub Release 回读最终 Markdown 正文，移除 `提交列表` 和完整变更对比，再写入 `update.json` 的 `releaseNotes` 字段。管理 App 与 WebUI 使用同一份正文，并按 `模块更新`、`App 更新`、`其它更新` 分区展示；旧清单没有该字段时仍可正常检查更新，只是不显示更新日志。
+CI 与 Release 发布完成后会从对应 GitHub Release 回读最终 Markdown 正文，移除 `提交列表` 和完整变更对比，再写入 `update.json` 的 `releaseNotes` 字段。管理 App 使用同一份正文，并按 `模块更新`、`App 更新`、`其它更新` 分区展示；旧清单没有该字段时仍可正常检查更新，只是不显示更新日志。
 
 默认清单地址由构建时的仓库和分支生成：
 

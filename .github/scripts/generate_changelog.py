@@ -210,8 +210,6 @@ def commit_changed_files(commit: CommitInfo) -> list[str]:
 def change_components(path: str) -> set[str]:
     if path.startswith("app/"):
         return {"app"}
-    if path.startswith("assets/zygisk_module/webroot/"):
-        return {"module"}
     if path.startswith((".github/", "docs/", "scripts/")) or path in {
         "CONTRIBUTING.md",
         "README.md",
@@ -287,7 +285,7 @@ def section_for_commit(commit: CommitInfo, mode: str) -> str | None:
 
 def collect_analysis(mode: str, files: list[str], commits: list[CommitInfo]) -> dict[str, dict[str, list[dict[str, object]]]]:
     file_set = set(files)
-    # 只收模块与 App（WebUI 随模块目录计）：CI、测试流与文档调整对使用者
+    # 只收模块与 App：CI、测试流与文档调整对使用者
     # 没有可感知变化，两类日志都不收录（2.2.0-ci.1 之前 CI 日志里混有大量
     # 「其它更新」，实测占了三分之一篇幅）。
     analysis = {

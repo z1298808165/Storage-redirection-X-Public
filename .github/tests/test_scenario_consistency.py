@@ -10,13 +10,10 @@ import unittest
 import yaml
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
-
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
-
 
 def read_fuse_host_module() -> str:
     """读取 `src/fuse_host*.rs` 的合并内容（主文件在前，控制通道模块在后）。
@@ -30,7 +27,6 @@ def read_fuse_host_module() -> str:
     ]
     return "".join(path.read_text(encoding="utf-8") for path in ordered)
 
-
 def read_daemon_mount_module() -> str:
     """读取 `src/daemon_mount*.rs` 的合并内容（主文件在前，诊断与回收模块在后）。
 
@@ -43,7 +39,6 @@ def read_daemon_mount_module() -> str:
     ]
     return "".join(path.read_text(encoding="utf-8") for path in ordered)
 
-
 def read_paths_module() -> str:
     """读取 `src/platform/paths*.rs` 的全部内容。
 
@@ -54,10 +49,8 @@ def read_paths_module() -> str:
     files = sorted(platform_dir.glob("paths*.rs"))
     return "\n".join(path.read_text(encoding="utf-8") for path in files)
 
-
 def section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
-
 
 def bash_path(path: Path) -> str:
     """把路径转成子进程 `bash` 认得的相对形式。
@@ -71,17 +64,14 @@ def bash_path(path: Path) -> str:
     except ValueError:
         return Path(path).resolve().as_posix()
 
-
 def load_workflow(path: str) -> dict:
     return yaml.safe_load(read(path))["jobs"]
-
 
 def android17_matrix_entry(jobs: dict) -> dict:
     for entry in jobs["test-flow"]["strategy"]["matrix"]["android"]:
         if entry.get("version") == 17:
             return entry
     raise AssertionError("test-flow 矩阵中未包含 Android 17 条目")
-
 
 def _assert_android17_unified(jobs: dict, label: str) -> dict:
     """校验 Android 17 已并入统一矩阵（无独立 job），且 17 特有参数与统一门禁都正确。
@@ -136,7 +126,6 @@ def _assert_android17_unified(jobs: dict, label: str) -> dict:
         raise AssertionError(f"{label}: 门禁不应再单列 test-flow-android17")
     return entry
 
-
 def _const_product(source: str, name: str) -> int:
     """读取 `const NAME: T = <算式>;` 的数值结果，支持整数字面量与 `a * b` 形式。"""
     expression = re.search(
@@ -149,13 +138,11 @@ def _const_product(source: str, name: str) -> int:
             product *= int(factor)
     return product
 
-
 def powershell_case_values(label: str) -> list[str]:
     condition = re.search(r"@\(([^)]+)\)", label)
     if condition:
         return [value.strip() for value in condition.group(1).split(",")]
     return [value.strip() for value in re.split(r"[,|]", label) if value.strip()]
-
 
 class ScenarioConsistencyTest(unittest.TestCase):
     @classmethod
@@ -1320,7 +1307,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
                 'adb_su "', body, f"{name} 不允许无超时的裸 adb_su（会阻塞 EXIT trap）"
             )
 
-
     def test_ci_concurrency_isolates_self_pushed_commits(self) -> None:
         """并发组必须把 workflow 自己 push 的维护提交隔离出去。
 
@@ -1371,7 +1357,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "function Ensure-MonitorCollector",
         )
         self.assertIn("$sdk -le 34 -or $sdk -ge 37", restart)
-
 
     def test_download_scenario_cleans_before_mount_restart(self) -> None:
         # 场景 39 的探测目录清理必须排在应用重启**之前**：应用重启会触发一轮挂载，
@@ -1720,7 +1705,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
             "/// 把 daemon 自身的 mount namespace",
         )
         self.assertNotIn("record_registered_policy(", namespace_only)
-
 
     def test_write_parent_walk_stops_when_repair_disabled(self) -> None:
         # 写打开的父链治理此前对每一级都 fstatat + 可能的 chmod/chown，即使父目录已存在；
@@ -2699,7 +2683,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
         module_paths = read("src/platform/module_paths.rs")
         log_daemon = read("src/log_daemon.rs")
         srxctl = read("assets/zygisk_module/bin/srxctl")
-        webui = read("assets/zygisk_module/webroot/js/api.js")
         self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_REQUEST_FILE", source)
         # 回执文件由 daemon 代写：MP 域对模块目录无写权限，MP 侧只发 HotReload 标签。
         self.assertIn("MEDIA_PROVIDER_HOT_RELOAD_ACK_FILE", module_paths)
@@ -2712,9 +2695,6 @@ class ScenarioConsistencyTest(unittest.TestCase):
         self.assertIn("hot_reload_completed_count", srxctl)
         self.assertIn('boot_id=$boot_id"', srxctl)
         self.assertIn("stage=hot_reload_ok", srxctl)
-        self.assertIn('withSrxCtlFallback("remount-running", "exit 1")', webui)
-        self.assertNotIn("restartMediaProviderHotReloadFallbackCommand", webui)
-        self.assertNotIn('kill -9 "$pid"', webui)
         self.assertEqual(2, srxctl.count('hot_reload_completed_count "$request_id" "$provider_pid"'))
         self.assertIn("start_hot_reload_after_specialize", java_hook)
         init_section = section(java_hook, "fn init(", "pub fn start_hot_reload_after_specialize")
@@ -2723,25 +2703,18 @@ class ScenarioConsistencyTest(unittest.TestCase):
 
     def test_hot_reload_has_no_manual_app_restart_notice(self) -> None:
         srxctl = read("assets/zygisk_module/bin/srxctl")
-        web_api = read("assets/zygisk_module/webroot/js/api.js")
-        web_app = read("assets/zygisk_module/webroot/js/app.js")
         controller = read("app/src/main/java/org/srx/manager/data/RootModuleController.kt")
         dashboard = read("app/src/main/java/org/srx/manager/ui/screen/DashboardScreen.kt")
-        for source in (srxctl, web_api, web_app, controller, dashboard):
+        for source in (srxctl, controller, dashboard):
             self.assertNotIn("srx_restart_running_app", source)
             self.assertNotIn("MediaProviderRestartNotice", source)
-        self.assertNotIn("showMediaProviderRestartNotice", web_app)
         self.assertIn("重新挂载运行中应用", dashboard)
 
     def test_remount_ui_reports_completion_and_serializes_requests(self) -> None:
         view_model = read("app/src/main/java/org/srx/manager/ui/SrxViewModel.kt")
-        web_app = read("assets/zygisk_module/webroot/js/app.js")
         self.assertIn("private val remountMutex = Mutex()", view_model)
         self.assertIn("正在重新挂载运行中应用（等待完成）", view_model)
         self.assertIn("finally {", section(view_model, "fun restartMediaProvider()", "fun refreshLogs()"))
-        self.assertIn("mediaProviderReloadRunning: false", web_app)
-        self.assertIn("if (State.mediaProviderReloadRunning) return;", web_app)
-        self.assertIn("State.mediaProviderReloadRunning = false", section(web_app, "async function restartMediaProviderWithLoading()", "// ═══ Logs"))
 
     def test_running_app_remount_is_requested_after_provider_hot_reload(self) -> None:
         srxctl = read("assets/zygisk_module/bin/srxctl")
@@ -4043,7 +4016,6 @@ adb_su_timeout() {
             ack,
         )
         self.assertNotIn("if remaining_ms < HOST_POLICY_ACK_TIMEOUT_MS {", ack)
-
 
 if __name__ == "__main__":
     unittest.main()

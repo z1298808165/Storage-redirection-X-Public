@@ -117,19 +117,18 @@ fun ciVersionCode(baseVersion: String, buildCount: Int): Int {
 }
 
 /**
- * App 版本走日期时间线（`yyyyMMddHHmm`），与模块的 semver（`2.3.2`）一眼分得开： 两者落在不同命名空间，用户看到 202611281259 就知道是 App、看到
+ * App 版本走 UTC 日期时间线（`yyyyMMddHHmmss`），与模块的 semver（`2.3.2`）一眼分得开： 用户看到 20261128125930 就知道是 App、看到
  * 2.3.2 就知道是模块。
  */
-private val appTimestampVersionPattern = Regex("""^\d{12}(\d{2})?$""")
+private val appTimestampVersionPattern = Regex("""^\d{14}$""")
 
-/** 日期时间线版本名推导 versionCode：自 2020-01-01 起的分钟数，单调递增且落在 int32 内。 */
+/** 日期时间线版本码按 UTC 秒计算，既避免同一分钟重复，也能在 int32 范围内持续数十年。 */
 fun appTimestampVersionCode(versionName: String): Int {
-  val text = versionName.take(12)
-  val formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmm")
+  val formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
   val builtAt =
-      runCatching { LocalDateTime.parse(text, formatter) }.getOrNull()
-          ?: throw GradleException("App 版本号必须是 yyyyMMddHHmm 形式的日期时间，当前值：$versionName")
-  return Duration.between(LocalDateTime.of(2020, 1, 1, 0, 0), builtAt).toMinutes().toInt()
+      runCatching { LocalDateTime.parse(versionName, formatter) }.getOrNull()
+          ?: throw GradleException("App 版本号必须是 yyyyMMddHHmmss 形式的日期时间，当前值：$versionName")
+  return Duration.between(LocalDateTime.of(2020, 1, 1, 0, 0), builtAt).seconds.toInt()
 }
 
 fun versionCodeFrom(versionName: String): Int {
